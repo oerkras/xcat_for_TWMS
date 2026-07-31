@@ -1,0 +1,20 @@
+---
+description: 本仓产品身份——新枫之谷经典版（TWMS），非枫星
+alwaysApply: true
+---
+
+# 产品身份（经典版 / TWMS）
+
+- **本仓** `xcat_for_TWMS` 只面向《新枫之谷：经典版》（TW · beanfun / Gamania Galaxy / `Maplestory_Classic.exe`）。
+- **不是**《枫星》、不是 MapleStory Worlds（`msw.exe`）、不是 `xcat_for_fengxing` 产品线。
+- 旁路仓 `xcat_for_fengxing` **仅作工程对照**（日志/布局/注入模式等可复用设计）；不得把本仓说成枫星项目，也不得把枫星协议/启动参数/偏移硬套进经典版。
+
+## 表述约定
+
+| 正确 | 错误 |
+|------|------|
+| 经典版 / TWMS / MSC | 「这个枫星项目」「本仓是枫星」 |
+| 对照枫星仓 / 从对照仓移植模式 | 「移植到枫星」「为枫星改」 |
+| `Maplestory_Classic.exe`、Galaxy 换票 | 默认当成 `msw.exe`、枫星 `/sid:` 语义 |
+
+文档、注释、UI 文案、交付总结里提到对照仓时，必须同时标明：**产品 = 经典版；枫星 = 对照来源**。

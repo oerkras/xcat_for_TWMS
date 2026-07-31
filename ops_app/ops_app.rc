@@ -1,0 +1,3 @@
+#include "resource.h"
+
+IDI_OPS_APP_ICON ICON "resources\\ops_app_icon.ico"

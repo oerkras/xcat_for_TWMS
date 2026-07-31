@@ -1,0 +1,82 @@
+# --- Build / CMake outputs ---
+/bin/
+/bin_ops/
+/build/
+/build_xcat_for_TWMS/
+**/CMakeCache.txt
+**/CMakeFiles/
+**/cmake_install.cmake
+**/Makefile
+**/compile_commands.json
+**/*.vcxproj
+**/*.vcxproj.filters
+**/*.sln
+!**/CMakeLists.txt
+
+# Nested build trees (keep NuGet package trees under third_party)
+/launcher/build/
+/xcat_app/build/
+/ops_app/build/
+/injector/build/
+/common/build/
+/sound_cli/build/
+
+# --- RE dumps & restored dumps (multi-GB) ---
+/Dumps/
+/DumpRestoredData/
+
+# --- Release packages & local runtime ---
+/artifacts/
+/user_log_uploads/
+/publish_site/downloads/
+/publish_site/update/*.zip
+
+# Runtime / WebView profile data under output dirs
+**/webview_profile/
+**/XCat_data/
+**/XCat_datastate/
+**/xcat_imgui.ini
+
+# --- Compilers / MSVC intermediates ---
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.ipdb
+*.iobj
+*.sbr
+*.bsc
+*.pch
+*.gch
+*.ncb
+*.aps
+*.tmp
+*.temp
+
+# --- Logs ---
+*.log
+*.jsonl
+
+# --- IDE / OS ---
+.vs/
+.idea/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- Secrets / local env ---
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.p12
+credentials.json
