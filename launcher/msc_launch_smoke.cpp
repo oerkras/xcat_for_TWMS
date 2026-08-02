@@ -8,6 +8,7 @@
 
 #include "msc_launch.h"
 #include "ott_ticket_fetch.h"
+#include "http_beanfun_login.h"
 
 #include <iostream>
 #include <string>
@@ -89,6 +90,47 @@ int LocalSmoke() {
         ++failed;
     } else {
         std::cout << "[OK] ExtractOttToken\n";
+    }
+
+    // HTTP OTT 形态 / Galaxy result JSON / 脱敏
+    if (!HttpIsTicketOtt(L"OTT:944:Login:Ab12_xy")) {
+        std::cerr << "[FAIL] HttpIsTicketOtt 应接受合法票\n";
+        ++failed;
+    } else if (HttpIsTicketOtt(L"OTT:944:Login:bad'quote")) {
+        std::cerr << "[FAIL] HttpIsTicketOtt 应拒引号\n";
+        ++failed;
+    } else if (HttpIsTicketOtt(L"OTT:944:Session:xxx")) {
+        std::cerr << "[FAIL] HttpIsTicketOtt 应拒非 Login\n";
+        ++failed;
+    } else {
+        std::cout << "[OK] HttpIsTicketOtt\n";
+    }
+
+    const std::string galaxyJson =
+        R"({"RCode":1,"Results":{"Ott":"OTT:944:Login:TicketTok01","Redirect":"https://maplestoryclassic.beanfun.com/Main"}})";
+    const auto parsed = HttpParseGalaxyResultOtt(galaxyJson);
+    if (parsed != L"OTT:944:Login:TicketTok01") {
+        std::cerr << "[FAIL] HttpParseGalaxyResultOtt\n";
+        ++failed;
+    } else {
+        std::cout << "[OK] HttpParseGalaxyResultOtt\n";
+    }
+    if (HttpParseGalaxyResultOtt(R"({"RCode":0,"Message":"no"})").size()) {
+        std::cerr << "[FAIL] 空 JSON 不应解析出 OTT\n";
+        ++failed;
+    } else {
+        std::cout << "[OK] HttpParseGalaxyResultOtt 空体\n";
+    }
+
+    const auto red = HttpRedactOtt(L"OTT:944:Login:TicketTok01");
+    if (red.find(L"TicketTok01") != std::wstring::npos) {
+        std::cerr << "[FAIL] HttpRedactOtt 泄漏完整 token\n";
+        ++failed;
+    } else if (red.find(L"OTT:944:Login:") == std::wstring::npos) {
+        std::cerr << "[FAIL] HttpRedactOtt 应保留前缀\n";
+        ++failed;
+    } else {
+        std::wcout << L"[OK] HttpRedactOtt " << red << L"\n";
     }
 
     const std::wstring ngm = FindNgmPath();

@@ -1,17 +1,26 @@
-// TWMS Classic — data-plane invuln v2.3.
+// TWMS Classic — data-plane invuln v2.6.3 (remount 2026-08-03).
 //
-// Invuln: User+0x298 (m_tHitPeriodRemain) — SetDamaged early-out. Refresh ~100ms.
-// Anti-blink: User+0x2A8 (_layerStateCounter) pin to opaque phase. Refresh ~16ms.
-// SecondaryStat Invincible fields are dual-written but do NOT gate SetDamaged.
-// Hotkey F10 (game-foreground only) / env XCAT_INVULN=1. F9 = panel minimize.
-// FindAll only when binding lost (throttled); reuse while LocalUserStillAlive.
+// Hit gate: User+0x298 i-frame (~100ms worker top-up).
+// Anti-blink hybrid: MainPump frame tick (before+after SendWill) + worker 8ms backup.
+// Soft +0x228/+0x22C DISABLED. Optional layout probe: XCAT_INVULN_PROBE=1 (default off).
+// Rebind 400ms + 1.5s ACCEPT grace; LU drop keeps SecondaryStat.
+// No hotkey — panel / [core] invuln / XCAT_INVULN=1 only.
+// Docs: docs/features/invuln/模块设计.md
+// Remount 2026-08-03: dump MD5 B87DB932…; UserLocal=ac2e48cc…; field offs UNCHANGED
+// (hit 0x298 / layer 0x2A8 / CurPos 0x240 / soft 0x228|0x22C); Unity FindAll via il2cpp_bind.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "invuln.h"
 
 #include "../../ipc/payload_control.h"
+#include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
+#include "../../runtime/main_thread_pump.h"
+#include "../../runtime/managed_main.h"
+#include "../ports/world_port.h"
+#include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_shape.h"
 
 #include <Psapi.h>
 #include <atomic>
@@ -20,10 +29,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
-#include <timeapi.h>
 #include <vector>
 
-#pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Psapi.lib")
 
@@ -32,81 +39,68 @@ namespace features {
 namespace invuln {
 namespace {
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E413A0;
-constexpr uint32_t kRvaCompGetTransform = 0x4E496A0;
-constexpr uint32_t kRvaCompGetGo = 0x4E49780;
-constexpr uint32_t kRvaObjGetName = 0x4E566E0;
+using x::runtime::il2cpp::ArrayAt;
+using x::runtime::il2cpp::ArrayLen;
+using x::runtime::il2cpp::ReadPtr;
 
-constexpr char kWorldManagerClass[] =
-    "a480358a12395b670df55f0b0ac5c5d89f6ba74b93fae115e43b4007e546a7a";
-constexpr char kLocalUserClass[] =
-    "c3f0cabae2a31347606a13c963e006f3d92084a7c7e957b1abf08adcddf59f9";
+// True UserLocal → il2cpp_shape::ResolveUserLocalKlass（hash ac2e48cc… + Teleport@0x3C8）
 
-constexpr size_t kOffWmSecondaryStat = 0xF0;
+constexpr size_t kOffWmSecondaryStat = 0xF0;  // type e9c12ac2… SecondaryStat (unchanged)
 constexpr size_t kOffNInv = 0xEC;
 constexpr size_t kOffRInv = 0xF0;
 constexpr size_t kOffTInv = 0xF4;
 constexpr size_t kOffNDojang = 0x2C4;
 constexpr size_t kOffRDojang = 0x2C8;
 constexpr size_t kOffTDojang = 0x2CC;
-// TW IDA: SetDamaged reads/writes [rsi+298h] as m_tHitPeriodRemain (cms was 0x280).
+// User (a03443…): m_tHitPeriodRemain / _layerStateCounter — dump.cs.restored 2026-08-03 OK.
+// Soft tick-gate +0x228/+0x22C exist but float consumers remain — do not write.
 constexpr size_t kOffHitPeriodRemain = 0x298;
-// User.Update blink: while hitPeriod>0, ++_layerStateCounter; color dimmed when (n&3)<2.
 constexpr size_t kOffLayerStateCounter = 0x2A8;
-// Keep (counter&3) >= 2 → full opaque (IDA opaque cmp resolves to 2).
 constexpr uint32_t kLayerCounterOpaque = 2;
-// Same LocalUser layout as fly (vis / CurPos) — used only for StillAlive probes.
-constexpr size_t kOffVisPos = 0x64;
-constexpr size_t kOffLogicalPos = 0x240;
+constexpr size_t kOffVisPos = 0x64;       // fad8… MonoBehaviour Vector2
+constexpr size_t kOffLogicalPos = 0x240;  // User.CurPos
 constexpr float kMinPosAbs = 1.0f;
-// UnityEngine.Object.m_CachedPtr after Il2CppObject header (klass+monitor).
 constexpr size_t kOffCachedPtr = 0x10;
 
 constexpr int kNInv = 1;
 constexpr int kRInv = 1010;
 constexpr int kNDojang = 1;
 constexpr int kRDojang = 1010;
-// Keep i-frame gate latched; game decrements each frame — top up infrequently.
 constexpr int kHitPeriodKeep = 5000;
-constexpr DWORD kHitPeriodRefreshMs = 100;
-// Anti-blink: pin layer counter ~once per frame (not 1ms spam).
-constexpr DWORD kAntiBlinkMs = 16;
-// FindAll throttle when unbound / after map teardown (never while StillAlive).
-constexpr DWORD kRebindMs = 3000;
-constexpr DWORD kIdleSleepMs = 16;
+constexpr DWORD kGateRefreshMs = 100;
+// Hybrid anti-blink: frame tick is primary; worker backup covers Update races.
+constexpr DWORD kAntiBlinkBackupMs = 8;
+// Channel-hop / map-load windows often lack MyUser for ~1s; 3s rebind left long gaps.
+constexpr DWORD kRebindMs = 400;
+// After ACCEPT, spawn pos may be (0,0) briefly — keep bind so hit gate can arm.
+constexpr DWORD kBindGraceMs = 1500;
+constexpr DWORD kWorkerSleepOnMs = 8;
+constexpr DWORD kWorkerSleepOffMs = 16;
+constexpr DWORD kProbeMs = 1000;
+constexpr DWORD kPumpRetryMs = 2000;
+// CMS-named TW candidates (read-only; never write)
+constexpr size_t kOffSoftTickA = 0x228;  // TimeEndBoomerangStep / float alias?
+constexpr size_t kOffSoftTickB = 0x22C;  // TimeEndDojangBamboo
+constexpr size_t kOffCurPosY = 0x244;
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
-using FnDomainGet = void* (*)();
-using FnDomainAssemblies = void* (*)(void* domain, size_t* size);
-using FnAsmImage = void* (*)(void* assembly);
-using FnClassFromName = void* (*)(void* image, const char* ns, const char* name);
-using FnClassGetType = void* (*)(void* klass);
-using FnTypeGetObject = void* (*)(void* type);
-using FnCompTf = void* (*)(void* comp, void* methodInfo);
 using FnCompGo = void* (*)(void* comp, void* methodInfo);
 using FnObjName = void* (*)(void* go, void* methodInfo);
 
 HMODULE gGA = nullptr;
 FnFindAll gFindAll = nullptr;
-FnDomainGet gDomainGet = nullptr;
-FnDomainAssemblies gDomainAssemblies = nullptr;
-FnAsmImage gAsmImage = nullptr;
-FnClassFromName gClassFromName = nullptr;
-FnClassGetType gClassGetType = nullptr;
-FnTypeGetObject gTypeGetObject = nullptr;
-FnCompTf gCompTf = nullptr;
 FnCompGo gCompGo = nullptr;
 FnObjName gObjName = nullptr;
 
-void* gWmType = nullptr;
 void* gLuType = nullptr;
 void* gLocalUser = nullptr;
+DWORD gLuBoundTick = 0;  // GetTickCount at MyUser ACCEPT (grace for spawn pos)
 std::vector<void*> gSecondaryStats;  // all WM SS pointers
 
 std::atomic<bool> gDesired{false};
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
-bool gF10Down = false;
+std::atomic<bool> gFrameBlink{false};
 HANDLE gLog = INVALID_HANDLE_VALUE;
 HANDLE gLogTemp = INVALID_HANDLE_VALUE;
 DWORD gTickCount = 0;
@@ -170,14 +164,12 @@ void OpenLogs() {
     if (gLog != INVALID_HANDLE_VALUE) return;
     const std::wstring dir = ModuleDir() + L"\\logs";
     CreateDirectoryW(dir.c_str(), nullptr);
-    const std::wstring path = dir + L"\\invuln.log";
-    gLog = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                       FILE_ATTRIBUTE_NORMAL, nullptr);
+    gLog = x::runtime::OpenRotatingDbgLog(dir, L"invuln.log");
     wchar_t tmp[MAX_PATH]{};
     if (GetTempPathW(MAX_PATH, tmp)) {
-        std::wstring t = std::wstring(tmp) + L"xcat_invuln.log";
-        gLogTemp = CreateFileW(t.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        std::wstring t(tmp);
+        while (!t.empty() && t.back() == L'\\') t.pop_back();
+        gLogTemp = x::runtime::OpenRotatingDbgLog(t, L"xcat_invuln.log");
     }
 }
 
@@ -215,31 +207,11 @@ uint32_t ReadU32(void* obj, size_t off) {
     }
 }
 
-void* ReadPtr(void* obj, size_t off) {
-    if (!obj) return nullptr;
-    __try {
-        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(obj) + off);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-}
-
-uintptr_t ArrayLen(void* arr) {
-    if (!arr) return 0;
-    __try {
-        return *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + 0x18);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-void* ArrayAt(void* arr, uintptr_t i) {
-    if (!arr) return nullptr;
-    __try {
-        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20 + i * sizeof(void*));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
+float ReadF32(void* obj, size_t off) {
+    const uint32_t bits = ReadU32(obj, off);
+    float f = 0.f;
+    memcpy(&f, &bits, sizeof(f));
+    return f;
 }
 
 bool ReadIl2CppString(void* str, char* out, size_t outCap) {
@@ -280,56 +252,20 @@ bool GetGoName(void* comp, char* out, size_t outCap) {
 }
 
 void* FindClassTypeObject(const char* className) {
-    if (!gDomainGet || !gDomainAssemblies || !gAsmImage || !gClassFromName || !gClassGetType ||
-        !gTypeGetObject || !className)
-        return nullptr;
-    __try {
-        void* domain = gDomainGet();
-        if (!domain) return nullptr;
-        size_t n = 0;
-        void** asms = reinterpret_cast<void**>(gDomainAssemblies(domain, &n));
-        if (!asms || n == 0) return nullptr;
-        for (size_t i = 0; i < n; ++i) {
-            void* img = gAsmImage(asms[i]);
-            if (!img) continue;
-            void* klass = gClassFromName(img, "", className);
-            if (!klass) continue;
-            void* type = gClassGetType(klass);
-            if (!type) continue;
-            void* typeObj = gTypeGetObject(type);
-            if (typeObj) {
-                Log("FindClassType ok class=%s", className);
-                return typeObj;
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-    Log("FindClassType miss class=%s", className);
-    return nullptr;
+    return x::runtime::il2cpp::FindClassTypeObject(className);
 }
 
 bool BindApis() {
-    gGA = GetModuleHandleW(L"GameAssembly.dll");
-    if (!gGA) {
+    if (!x::runtime::il2cpp::Ensure()) {
         Log("BindApis: no GameAssembly");
         return false;
     }
-    gFindAll = AtRva<FnFindAll>(kRvaFindObjectsOfTypeAll);
-    gCompTf = AtRva<FnCompTf>(kRvaCompGetTransform);
-    gCompGo = AtRva<FnCompGo>(kRvaCompGetGo);
-    gObjName = AtRva<FnObjName>(kRvaObjGetName);
-    gDomainGet = reinterpret_cast<FnDomainGet>(GetProcAddress(gGA, "il2cpp_domain_get"));
-    gDomainAssemblies =
-        reinterpret_cast<FnDomainAssemblies>(GetProcAddress(gGA, "il2cpp_domain_get_assemblies"));
-    gAsmImage = reinterpret_cast<FnAsmImage>(GetProcAddress(gGA, "il2cpp_assembly_get_image"));
-    gClassFromName =
-        reinterpret_cast<FnClassFromName>(GetProcAddress(gGA, "il2cpp_class_from_name"));
-    gClassGetType = reinterpret_cast<FnClassGetType>(GetProcAddress(gGA, "il2cpp_class_get_type"));
-    gTypeGetObject =
-        reinterpret_cast<FnTypeGetObject>(GetProcAddress(gGA, "il2cpp_type_get_object"));
-    if (!gFindAll || !gDomainGet || !gDomainAssemblies || !gAsmImage || !gClassFromName ||
-        !gClassGetType || !gTypeGetObject) {
+    const auto& e = x::runtime::il2cpp::Get();
+    gGA = e.ga;
+    gFindAll = e.findAll;
+    gCompGo = e.compGo;
+    gObjName = e.objName;
+    if (!gFindAll) {
         Log("BindApis: missing il2cpp export / RVA");
         return false;
     }
@@ -364,26 +300,15 @@ void WriteSsFields(void* ss, bool on) {
 }
 
 bool TryResolveWorldManagers() {
-    if (!gWmType) gWmType = FindClassTypeObject(kWorldManagerClass);
-    if (!gWmType || !gFindAll) return false;
-
-    void* arr = nullptr;
-    __try {
-        arr = gFindAll(gWmType, nullptr);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("WM FindAll SEH");
-        return false;
-    }
-    const uintptr_t n = ArrayLen(arr);
+    if (x::runtime::managed_main::IsLoginFrozen()) return false;
+    void* wm = x::features::ports::world::GetWorldManager();
+    if (!wm) return false;
+    void* ss = ReadPtr(wm, kOffWmSecondaryStat);
     gSecondaryStats.clear();
-    for (uintptr_t i = 0; i < n && i < 16; ++i) {
-        void* wm = ArrayAt(arr, i);
-        if (!wm) continue;
-        void* ss = ReadPtr(wm, kOffWmSecondaryStat);
-        Log("WM[%llu]=%p ss@F0=%p", (unsigned long long)i, wm, ss);
-        if (ss) gSecondaryStats.push_back(ss);
+    if (ss) {
+        gSecondaryStats.push_back(ss);
+        Log("WM via world_port wm=%p ss@F0=%p", wm, ss);
     }
-    Log("WM Resolve count=%llu ssN=%zu", (unsigned long long)n, gSecondaryStats.size());
     return !gSecondaryStats.empty();
 }
 
@@ -411,16 +336,21 @@ bool SecondaryStatsAlive() {
     return true;
 }
 
+bool InBindGrace() {
+    if (!gLuBoundTick) return false;
+    return (GetTickCount() - gLuBoundTick) < kBindGraceMs;
+}
+
 bool LocalUserStillAlive() {
     if (!gLocalUser) return false;
     __try {
         if (!*reinterpret_cast<void**>(gLocalUser)) return false;
         const intptr_t cached =
             *reinterpret_cast<intptr_t*>(reinterpret_cast<uint8_t*>(gLocalUser) + kOffCachedPtr);
-        if (cached == 0) return false;
-        char name[96]{};
-        if (!GetGoName(gLocalUser, name, sizeof(name))) return false;
-        if (_stricmp(name, "MyUser") != 0) return false;
+        // Do NOT call GetGoName here — it is managed/GC and this runs on a worker.
+        // Name was verified at bind time; pos/cachedPtr catch teardown shells.
+        // Spawn settle: allow brief (0,0)/cached=0 window after MyUser ACCEPT.
+        if (cached == 0 && !InBindGrace()) return false;
         const float visX =
             *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(gLocalUser) + kOffVisPos);
         const float visY =
@@ -429,92 +359,175 @@ bool LocalUserStillAlive() {
             *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(gLocalUser) + kOffLogicalPos);
         const float logY =
             *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(gLocalUser) + kOffLogicalPos + 4);
-        // Map teardown often leaves a readable shell at (0,0); reject like fly.
-        if (!PosLooksAliveXY(visX, visY) && !PosLooksAliveXY(logX, logY)) return false;
+        if (!PosLooksAliveXY(visX, visY) && !PosLooksAliveXY(logX, logY)) {
+            if (InBindGrace()) return true;
+            return false;
+        }
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
 }
 
-void DropStaleBindings(const char* why) {
-    if (gLocalUser || !gSecondaryStats.empty())
-        Log("drop bindings (%s) lu=%p ssN=%zu", why, gLocalUser, gSecondaryStats.size());
+void ClearLocalUser(const char* why) {
+    if (gLocalUser) Log("drop LocalUser (%s) lu=%p", why, gLocalUser);
     gLocalUser = nullptr;
+    gLuBoundTick = 0;
+}
+
+void ClearSecondaryStats(const char* why) {
+    if (!gSecondaryStats.empty())
+        Log("drop SS (%s) ssN=%zu", why, gSecondaryStats.size());
     gSecondaryStats.clear();
 }
 
 bool TryResolveLocalUser() {
-    if (!gLuType) gLuType = FindClassTypeObject(kLocalUserClass);
+    if (x::runtime::managed_main::IsLoginFrozen()) return false;
+    if (!gLuType) {
+        gLuType = x::runtime::il2cpp::ClassTypeObject(
+            x::runtime::il2cpp_shape::ResolveUserLocalKlass());
+    }
     if (!gLuType || !gFindAll) return false;
 
-    void* arr = nullptr;
-    __try {
-        arr = gFindAll(gLuType, nullptr);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log("LocalUser FindAll SEH");
-        return false;
-    }
-    const uintptr_t n = ArrayLen(arr);
-    Log("LocalUser FindAll count=%llu", (unsigned long long)n);
-    void* best = nullptr;
-    for (uintptr_t i = 0; i < n && i < 64; ++i) {
-        void* obj = ArrayAt(arr, i);
-        if (!obj) continue;
-        char name[96]{};
-        GetGoName(obj, name, sizeof(name));
-        Log("LocalUser[%llu]=%p name=\"%s\" hit298=%d", (unsigned long long)i, obj, name,
-            ReadI32(obj, kOffHitPeriodRemain));
-        if (name[0] && _stricmp(name, "MyUser") == 0) {
-            best = obj;
-            break;
-        }
-    }
-    // No first-object fallback — wrong actor writes are worse than waiting.
-    gLocalUser = best;
-    if (!gLocalUser) {
-        Log("LocalUser REJECT (no MyUser)");
-        return false;
-    }
-    Log("LocalUser ACCEPT lu=%p hit298=%d", gLocalUser, ReadI32(gLocalUser, kOffHitPeriodRemain));
-    return true;
-}
-
-void ApplyHitPeriodAndSs(bool on) {
-    if (on) {
-        if (!LocalUserStillAlive()) {
-            DropStaleBindings("dead before hit write");
+    struct Ctx {
+        bool ok = false;
+    } ctx;
+    auto job = [](void* user) {
+        auto* c = reinterpret_cast<Ctx*>(user);
+        void* arr = nullptr;
+        __try {
+            arr = gFindAll(gLuType, nullptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Log("LocalUser FindAll SEH");
+            c->ok = false;
             return;
         }
-        if (!SecondaryStatsAlive()) {
-            // SS is non-gating; drop stale list but still latch hit period.
-            gSecondaryStats.clear();
+        const uintptr_t n = ArrayLen(arr);
+        Log("LocalUser FindAll count=%llu", (unsigned long long)n);
+        void* best = nullptr;
+        for (uintptr_t i = 0; i < n && i < 64; ++i) {
+            void* obj = ArrayAt(arr, i);
+            if (!obj) continue;
+            char name[96]{};
+            GetGoName(obj, name, sizeof(name));
+            Log("LocalUser[%llu]=%p name=\"%s\" hit298=%d", (unsigned long long)i, obj, name,
+                ReadI32(obj, kOffHitPeriodRemain));
+            if (name[0] && _stricmp(name, "MyUser") == 0) {
+                best = obj;
+                break;
+            }
         }
-    } else {
-        // Clear only live objects — never write into freed shells.
-        if (!LocalUserStillAlive()) gLocalUser = nullptr;
-        if (!SecondaryStatsAlive()) gSecondaryStats.clear();
+        gLocalUser = best;
+        if (!gLocalUser) {
+            gLuBoundTick = 0;
+            Log("LocalUser REJECT (no MyUser)");
+            c->ok = false;
+            return;
+        }
+        gLuBoundTick = GetTickCount();
+        Log("LocalUser ACCEPT lu=%p hit298=%d grace=%ums", gLocalUser,
+            ReadI32(gLocalUser, kOffHitPeriodRemain), (unsigned)kBindGraceMs);
+        x::runtime::managed_main::SetLoginFreeze(false);
+        c->ok = true;
+    };
+    if (!x::runtime::managed_main::Call(+job, &ctx, 2500)) {
+        Log("LocalUser Resolve: main pump fail");
+        return false;
     }
+    return ctx.ok;
+}
+
+void ApplySsOnly(bool on) {
+    if (on && !SecondaryStatsAlive()) gSecondaryStats.clear();
+    if (!on && !SecondaryStatsAlive()) gSecondaryStats.clear();
     for (void* ss : gSecondaryStats) WriteSsFields(ss, on);
+}
+
+void ApplyHitGate(bool on) {
     if (!gLocalUser) return;
     WriteI32(gLocalUser, kOffHitPeriodRemain, on ? kHitPeriodKeep : 0);
 }
 
 void ApplyAntiBlink() {
-    if (!LocalUserStillAlive()) {
-        DropStaleBindings("dead before anti-blink");
-        return;
-    }
+    if (!gLocalUser) return;
+    // Lightweight: no StillAlive / FindAll — safe for main-thread frame tick.
     WriteU32(gLocalUser, kOffLayerStateCounter, kLayerCounterOpaque);
 }
 
+// MainPump sticky tick (after SendWill/Update). Data-plane only.
+void AntiBlinkFrameTick(void*) {
+    if (!gDesired.load(std::memory_order_relaxed)) return;
+    ApplyAntiBlink();
+}
+
+bool TryArmFrameBlink(const char* why) {
+    if (!x::runtime::main_thread::Ensure()) {
+        gFrameBlink.store(false);
+        return false;
+    }
+    x::runtime::main_thread::SetFrameTick(&AntiBlinkFrameTick, nullptr);
+    gFrameBlink.store(true);
+    Log("anti-blink frame-tick armed (%s)", why ? why : "?");
+    return true;
+}
+
+void DisarmFrameBlink() {
+    x::runtime::main_thread::SetFrameTick(nullptr, nullptr);
+    gFrameBlink.store(false);
+}
+
+bool ProbeEnabled() {
+    char buf[16]{};
+    if (GetEnvironmentVariableA("XCAT_INVULN_PROBE", buf, sizeof(buf)) == 0) return false;
+    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
+}
+
+// Read-only: interpret +0x228/+0x22C as both int tick and float; compare CurPos@+0x240.
+void ProbeSoftSlots(const char* tag) {
+    if (!gLocalUser || !LocalUserStillAlive()) return;
+    static float sLastCx = 0.f, sLastCy = 0.f;
+    static bool sHaveLast = false;
+
+    const int i228 = ReadI32(gLocalUser, kOffSoftTickA);
+    const int i22c = ReadI32(gLocalUser, kOffSoftTickB);
+    const float f228 = ReadF32(gLocalUser, kOffSoftTickA);
+    const float f22c = ReadF32(gLocalUser, kOffSoftTickB);
+    const float cx = ReadF32(gLocalUser, kOffLogicalPos);
+    const float cy = ReadF32(gLocalUser, kOffCurPosY);
+    const float vx = ReadF32(gLocalUser, kOffVisPos);
+    const float vy = ReadF32(gLocalUser, kOffVisPos + 4);
+    const int hit = ReadI32(gLocalUser, kOffHitPeriodRemain);
+    const uint32_t layer = ReadU32(gLocalUser, kOffLayerStateCounter);
+
+    const char* motion = "idle";
+    if (sHaveLast) {
+        const float dx = cx - sLastCx;
+        const float dy = cy - sLastCy;
+        if (dx * dx + dy * dy > 1.0f) motion = "move";
+    }
+    sLastCx = cx;
+    sLastCy = cy;
+    sHaveLast = true;
+
+    Log("probe[%s] %s 228 i=%d f=%.6g | 22c i=%d f=%.6g | cur240=(%.2f,%.2f) vis64=(%.2f,%.2f) "
+        "hit298=%d layer2A8=%u",
+        tag, motion, i228, (double)f228, i22c, (double)f22c, (double)cx, (double)cy, (double)vx,
+        (double)vy, hit, layer);
+}
+
 void ApplyInvuln(bool on) {
-    ApplyHitPeriodAndSs(on);
+    // LU teardown must not wipe SecondaryStat — SS is independent and still useful mid-hop.
+    if (gLocalUser && !LocalUserStillAlive()) {
+        ClearLocalUser(on ? "dead before invuln write" : "dead on disable");
+    }
+    ApplySsOnly(on);
+    if (!gLocalUser) return;
+    ApplyHitGate(on);
     if (on) ApplyAntiBlink();
 }
 
 void LogReadback(const char* tag) {
-    Log("%s lu=%p hit298=%d layer2A8=%u ssN=%zu desired=%d alive=%d", tag, gLocalUser,
+    Log("%s lu=%p gate=hit hit298=%d layer2A8=%u ssN=%zu desired=%d alive=%d", tag, gLocalUser,
         gLocalUser ? ReadI32(gLocalUser, kOffHitPeriodRemain) : -1,
         gLocalUser ? ReadU32(gLocalUser, kOffLayerStateCounter) : 0u, gSecondaryStats.size(),
         gDesired.load() ? 1 : 0, LocalUserStillAlive() ? 1 : 0);
@@ -534,60 +547,46 @@ bool EnvWantsOn() {
     return false;
 }
 
-// FindAll only when unbound / dead. While StillAlive, reuse — same discipline as fly.
+void WarnIfSoftEnvRequested() {
+    char buf[32]{};
+    if (GetEnvironmentVariableA("XCAT_INVULN_GATE", buf, sizeof(buf)) == 0) return;
+    if (_stricmp(buf, "soft") == 0 || _stricmp(buf, "228") == 0) {
+        Log("XCAT_INVULN_GATE=%s ignored — soft +0x228 writes vanish avatar; using hit gate", buf);
+    }
+}
+
+// FindAll only when unbound / dead. While StillAlive, reuse the cached binding.
 void EnsureBindings() {
     if (!SecondaryStatsAlive()) {
-        gSecondaryStats.clear();
+        ClearSecondaryStats("ensure");
         TryResolveWorldManagers();
     }
     if (!LocalUserStillAlive()) {
-        gLocalUser = nullptr;
+        ClearLocalUser("ensure");
         TryResolveLocalUser();
     }
 }
 
-bool GameWindowFocused() {
-    const HWND fg = GetForegroundWindow();
-    if (!fg) return false;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(fg, &pid);
-    return pid == GetCurrentProcessId();
-}
-
-void PollF10() {
-    // Process-wide GetAsyncKeyState — without foreground gate, F10 in other apps toggles.
-    if (!GameWindowFocused()) {
-        gF10Down = false;
-        return;
-    }
-    const bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-    if (down && !gF10Down) {
-        const bool next = !gDesired.load();
-        Log("F10 toggle desired=%d", next ? 1 : 0);
-        Beep(next ? 1000 : 600, 80);
-        EnsureBindings();
-        x::ipc::PayloadControl_PublishInvuln(next);
-        LogReadback(next ? "after_on" : "after_off");
-    }
-    gF10Down = down;
-}
-
 DWORD WINAPI InvulnThread(LPVOID) {
-    timeBeginPeriod(1);
     Beep(740, 80);
-    Log("Invuln worker v2.3 start (StillAlive reuse; FindAll only when unbound; F10 fg)");
+    WarnIfSoftEnvRequested();
+    Log("Invuln worker v2.6.3 start (hit=+0x298; anti-blink=frame+backup8ms; rebind=%ums grace=%ums; "
+        "probe228 %s)",
+        (unsigned)kRebindMs, (unsigned)kBindGraceMs, ProbeEnabled() ? "on" : "off");
 
     for (int i = 0; i < 200 && !GetModuleHandleW(L"GameAssembly.dll") && !gWorkerStop.load(); ++i)
         Sleep(50);
     if (gWorkerStop.load()) {
-        timeEndPeriod(1);
+        DisarmFrameBlink();
         return 0;
     }
     if (!BindApis()) {
         Beep(400, 300);
-        timeEndPeriod(1);
+        DisarmFrameBlink();
         return 1;
     }
+
+    TryArmFrameBlink("boot");
 
     if (EnvWantsOn()) {
         gDesired.store(true);
@@ -596,15 +595,17 @@ DWORD WINAPI InvulnThread(LPVOID) {
 
     Sleep(1500);
     EnsureBindings();
+    if (ProbeEnabled() && gLocalUser) ProbeSoftSlots("boot");
 
-    DWORD lastHit = 0;
+    DWORD lastGate = 0;
     DWORD lastBlink = 0;
     DWORD lastRebind = 0;
     DWORD lastPoll = 0;
+    DWORD lastProbe = 0;
+    DWORD lastPumpTry = 0;
     DWORD lastHb = GetTickCount();
 
     while (!gWorkerStop.load()) {
-        PollF10();
         const DWORD now = GetTickCount();
         const bool on = gDesired.load();
 
@@ -613,43 +614,57 @@ DWORD WINAPI InvulnThread(LPVOID) {
             x::ipc::PayloadControl_Poll();
         }
 
+        if (on && !gFrameBlink.load() && now - lastPumpTry >= kPumpRetryMs) {
+            lastPumpTry = now;
+            TryArmFrameBlink("retry");
+        }
+
         if (on) {
             const bool luOk = LocalUserStillAlive();
             const bool ssOk = SecondaryStatsAlive();
             if (!luOk || !ssOk) {
-                if (!luOk) gLocalUser = nullptr;
-                if (!ssOk) gSecondaryStats.clear();
-                // Throttle FindAll — fly warns worker FindAll can freeze Unity main loop.
+                if (!luOk && gLocalUser) ClearLocalUser("stillAlive false");
+                if (!ssOk) ClearSecondaryStats("ss dead");
                 if (now - lastRebind >= kRebindMs) {
                     lastRebind = now;
-                    if (!ssOk) TryResolveWorldManagers();
+                    if (!SecondaryStatsAlive()) TryResolveWorldManagers();
                     if (!LocalUserStillAlive()) TryResolveLocalUser();
                 }
             }
-            if (now - lastHit >= kHitPeriodRefreshMs) {
-                lastHit = now;
-                ApplyHitPeriodAndSs(true);
+            if (now - lastGate >= kGateRefreshMs) {
+                lastGate = now;
+                ApplyInvuln(true);
             }
-            if (now - lastBlink >= kAntiBlinkMs) {
+            // Always backup-pin while on (covers Update racing past a single frame tick).
+            if (now - lastBlink >= kAntiBlinkBackupMs) {
                 lastBlink = now;
                 ApplyAntiBlink();
-                if ((++gTickCount % 300) == 0) LogReadback("refresh");
+            }
+            if ((++gTickCount % 200) == 0) LogReadback("refresh");
+        }
+
+        // C: read-only layout probe (no FindAll — reuse existing LocalUser bind)
+        if (ProbeEnabled() && now - lastProbe >= kProbeMs) {
+            lastProbe = now;
+            if (gLocalUser && LocalUserStillAlive()) {
+                ProbeSoftSlots(on ? "on" : "off");
+            } else if (gLocalUser) {
+                ClearLocalUser("probe stillAlive false");
             }
         }
 
         if (now - lastHb >= 5000) {
             lastHb = now;
-            Log("heartbeat n=%lu desired=%d lu=%p hit298=%d layer=%u ssN=%zu alive=%d", gTickCount,
-                on ? 1 : 0, gLocalUser,
+            Log("heartbeat n=%lu desired=%d gate=hit blink=%s+8ms lu=%p hit298=%d alive=%d", gTickCount,
+                on ? 1 : 0, gFrameBlink.load() ? "frame" : "worker", gLocalUser,
                 gLocalUser ? ReadI32(gLocalUser, kOffHitPeriodRemain) : -1,
-                gLocalUser ? ReadU32(gLocalUser, kOffLayerStateCounter) : 0u, gSecondaryStats.size(),
                 LocalUserStillAlive() ? 1 : 0);
         }
-        Sleep(kIdleSleepMs);
+        Sleep(on ? kWorkerSleepOnMs : kWorkerSleepOffMs);
     }
     if (gLocalUser && !gDesired.load()) ApplyInvuln(false);
+    DisarmFrameBlink();
     Log("Invuln worker stop");
-    timeEndPeriod(1);
     return 0;
 }
 
@@ -676,6 +691,7 @@ void StartWorker() {
 
 void StopWorker() {
     gWorkerStop.store(true);
+    DisarmFrameBlink();
     HANDLE th = gWorkerThread.exchange(nullptr);
     if (th) CloseHandle(th);
 }
@@ -690,7 +706,6 @@ void SetDesired(bool on) {
 
 bool IsDesired() { return gDesired.load(); }
 bool IsEnabled() { return gDesired.load() && LocalUserStillAlive(); }
-void Toggle() { SetDesired(!IsDesired()); }
 
 }  // namespace invuln
 }  // namespace features

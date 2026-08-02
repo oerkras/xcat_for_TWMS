@@ -92,7 +92,7 @@ std::vector<std::wstring> SplitCommandLineArgs(const std::wstring& cmdLine);
 ClassicPassArgs ParseClassicPassArgs(const std::wstring& cmdLine);
 bool CmdMatchesGalaxyTicket(const std::wstring& cmdLine, const GalaxyTicket& ticket);
 
-std::wstring FindNgmPath();
+std::wstring FindNgmPath();  // 多路径：进程 / ngm:// / 固定目录 / 注册表 / 经典版旁路
 bool         IsNgmProcessRunning();
 bool         EnsureNgmRunning();
 

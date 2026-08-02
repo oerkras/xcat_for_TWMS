@@ -28,11 +28,49 @@
 namespace xcat::app {
 namespace {
 
+bool IsUpdateConnectivityFailure(const std::string& message) {
+    // WinHTTP 连不上更新服（12029 等）属于环境未就绪，不应按「换包失败」弹危险级。
+    if (message.find("12029") != std::string::npos) return true;
+    if (message.find("12007") != std::string::npos) return true;  // name not resolved
+    if (message.find("12002") != std::string::npos) return true;  // timeout
+    if (message.find("更新检查请求失败") != std::string::npos) return true;
+    if (message.find("下载请求失败") != std::string::npos) return true;
+    if (message.find("WinHttpSendRequest") != std::string::npos) return true;
+    if (message.find("WinHttpConnect") != std::string::npos) return true;
+    return false;
+}
+
+// 上屏/气泡用：细节进本地日志，避免把更新口域名/WinHTTP 原文暴露给终端用户。
+bool MessageExposesEndpoint(const std::string& message) {
+    if (message.find("http://") != std::string::npos) return true;
+    if (message.find("https://") != std::string::npos) return true;
+    if (message.find("://") != std::string::npos) return true;
+    if (message.find("xcat.work") != std::string::npos) return true;
+    if (message.find("127.0.0.1") != std::string::npos) return true;
+    if (message.find("localhost") != std::string::npos) return true;
+    if (message.find("WinHttp") != std::string::npos) return true;
+    return false;
+}
+
+std::string SanitizePublicUpdateFailure(const std::string& raw) {
+    if (raw.empty()) return "更新失败";
+    if (IsUpdateConnectivityFailure(raw)) return "无法连接内置更新口";
+    if (MessageExposesEndpoint(raw)) return "更新失败（详情见本地日志）";
+    return raw;
+}
+
 void NotifyUpdateFail(const char* title, const char* body) {
     if (!body || !body[0]) return;
     xcat::log::Warn("Update", "%s: %s", title ? title : "update-fail", body);
     notify::PushLocal(/*Danger*/ 3, "update-fail", title && title[0] ? title : "更新失败", body,
                       7000);
+}
+
+void NotifyUpdateSoftFail(const char* title, const char* body) {
+    if (!body || !body[0]) return;
+    xcat::log::Warn("Update", "%s: %s", title ? title : "update-soft", body);
+    notify::PushLocal(/*Warning*/ 2, "update-unreachable",
+                      title && title[0] ? title : "更新服务未就绪", body, 5000);
 }
 
 struct ParsedUrl {
@@ -380,8 +418,15 @@ void SetPhaseUiLocked(UpdatePhase phase, std::string message) {
 
 void SetSnapshot(UpdatePhase phase, std::string message) {
     std::string failBody;
+    bool softFail = false;
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (phase == UpdatePhase::Failed) {
+            softFail = IsUpdateConnectivityFailure(message);
+            message = SanitizePublicUpdateFailure(message);
+            // 失败态不把 manifest 地址留在可被 UI 读到的快照里。
+            g_state.snapshot.manifestUrl.clear();
+        }
         SetPhaseUiLocked(phase, std::move(message));
         if (phase == UpdatePhase::Failed) {
             g_state.autoInstallAfterDownload = false;
@@ -389,8 +434,14 @@ void SetSnapshot(UpdatePhase phase, std::string message) {
         }
     }
     // 进程内失败：启动器还在，直接气泡通知（PS 换包失败走 update_failed.notify）。
+    // 连不上本地/远端更新服：只警告，不按危险「更新失败」打扰。
     if (!failBody.empty()) {
-        NotifyUpdateFail("更新失败", failBody.c_str());
+        if (softFail) {
+            NotifyUpdateSoftFail("更新服务未就绪",
+                                 "无法连接内置更新口。请确认运维台已启动且更新服务绿灯。");
+        } else {
+            NotifyUpdateFail("更新失败", failBody.c_str());
+        }
     }
 }
 
@@ -729,9 +780,17 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "  }\r\n";
     ps += "  return $true\r\n";
     ps += "}\r\n";
-    // TWMS：无 Nexon Worlds 栈；保留空函数兼容脚本内旧调用点。
+    // TWMS：清经典版游戏与 NGM 启动器，避免注入态占用 XCat_data\xcat.dll / 目录锁。
+    ps += "function Stop-XCatClassicStack($graceSec, $forceSec, $throwOnFail=$true) {\r\n";
+    ps += "  Write-XCatLog ('Stop-XCatClassicStack begin grace=' + $graceSec + ' force=' + $forceSec)\r\n";
+    ps += "  Wait-XCatProcessGone 'Maplestory_Classic' $graceSec $forceSec $throwOnFail | Out-Null\r\n";
+    ps += "  Wait-XCatProcessGone 'NGM64' $graceSec $forceSec $false | Out-Null\r\n";
+    ps += "  Wait-XCatProcessGone 'NGM' $graceSec $forceSec $false | Out-Null\r\n";
+    ps += "  Write-XCatLog 'Stop-XCatClassicStack done'\r\n";
+    ps += "}\r\n";
+    // 兼容旧脚本调用名。
     ps += "function Stop-XCatNexonStack($graceSec, $forceSec, $throwOnFail=$true) {\r\n";
-    ps += "  Write-XCatLog 'Stop-XCatNexonStack noop (TWMS)'\r\n";
+    ps += "  Stop-XCatClassicStack $graceSec $forceSec $throwOnFail\r\n";
     ps += "}\r\n";
     // 清目录：只去掉 ReadOnly（勿把目录 Attributes 设成 Normal），再重试删除。
     ps += "function Clear-XCatAttrs($path) {\r\n";
@@ -929,8 +988,15 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "try {\r\n";
     ps += "Write-XCatLog ('begin zip=' + $zipPath + ' oldDest=' + $oldDest)\r\n";
     ps += "while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }\r\n";
-    // TWMS：仅确认启动器已退出，不强制清游戏进程。
-    ps += "Wait-XCatProcessGone 'xcat' 0 8 $false\r\n";
+    // 装前再清一轮：游戏注入会锁 xcat.dll；NGM 偶发占目录。
+    ps += "Stop-XCatClassicStack 0 12\r\n";
+    ps += "Wait-XCatProcessGone 'xcat' 0 8\r\n";
+    ps += "if (@(Get-Process -Name 'Maplestory_Classic' -ErrorAction SilentlyContinue).Count -gt 0) {\r\n";
+    ps += "  Write-XCatLog 'WARN residual Maplestory_Classic before swap; extra stop + settle 5s'\r\n";
+    ps += "  Stop-XCatClassicStack 3 10 $false\r\n";
+    ps += "  Start-Sleep -Seconds 5\r\n";
+    ps += "  Stop-XCatClassicStack 0 8 $false\r\n";
+    ps += "}\r\n";
     ps += "Write-XCatLog 'pre-update process recheck ok'\r\n";
     ps += "New-Item -ItemType Directory -Path $work -Force | Out-Null\r\n";
     ps += "Add-Type -AssemblyName System.IO.Compression.FileSystem\r\n";
@@ -1152,10 +1218,12 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "$installCommitted=$true\r\n";
     ps += "Write-XCatLog 'install committed (exe verified)'\r\n";
     ps += "try { Update-XCatDesktopShortcut $finalDest $oldDest } catch { Write-XCatLog ('desktop shortcut failed: ' + ($_ | Out-String)) }\r\n";
-    // 安装过程中 NGS/残留可能又拉起 msw/NGM；拉起前清一轮 + 固定冷却 10s，再短确认。
+    // 拉起前再清游戏/NGM，避免旧会话立刻回锁新目录。
+    ps += "Stop-XCatClassicStack 5 10 $false\r\n";
     ps += "Wait-XCatProcessGone 'xcat' 0 5 $false\r\n";
-    ps += "Write-XCatLog 'pre-relaunch process settle 10s'\r\n";
-    ps += "Start-Sleep -Seconds 10\r\n";
+    ps += "Write-XCatLog 'pre-relaunch process settle 5s'\r\n";
+    ps += "Start-Sleep -Seconds 5\r\n";
+    ps += "Stop-XCatClassicStack 0 8 $false\r\n";
     ps += "Wait-XCatProcessGone 'xcat' 0 3 $false\r\n";
     // 只写启动器冷启标记；新启动器在完整冷启成功前保留该标记，失败重试仍强制清栈。
     ps += "$coldFlagDir=Join-Path $finalDest 'XCat_data\\state'\r\n";
@@ -1256,7 +1324,7 @@ std::string ResolveDownloadUrl(const std::string& manifestUrl, const Manifest& m
 void CheckWorker(std::string serviceUrl) {
     const std::string manifestUrl = UpdateManifestUrlFromServiceUrl(serviceUrl);
     if (manifestUrl.empty()) {
-        SetSnapshot(UpdatePhase::Failed, "请先填写上报/更新服务器地址");
+        SetSnapshot(UpdatePhase::Failed, "更新服务地址无效");
         return;
     }
     xcat::log::Info("Update", "check begin manifest=%s", manifestUrl.c_str());
@@ -1594,7 +1662,7 @@ void UpdateForcePollTick(const std::string& serviceUrl, const std::string& paylo
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
         if (g_state.forcePollInFlight ||
-            (g_state.lastForcePollMs != 0 && now - g_state.lastForcePollMs < 30000)) {
+            (g_state.lastForcePollMs != 0 && now - g_state.lastForcePollMs < 60000)) {
             return;
         }
         g_state.lastForcePollMs = now;
@@ -1619,9 +1687,29 @@ void InstallWorker(std::string installDir) {
         return;
     }
 
-    // TWMS：本轮不强制清游戏进程；换包脚本会等本进程退出后改目录。
-    SetInstallStatus("等待启动器退出并释放目录…", -1.f);
-    Sleep(1500);
+    SetInstallStatus("正在结束游戏与相关进程…", -1.f);
+    // 对齐枫星：装前硬清会锁 DLL/目录的进程。经典版目标是 Maplestory_Classic；
+    // NGM/NGM64 尽力清（Galaxy 启动链），不作为硬失败门禁。
+    const unsigned classicKilled = xcat::KillProcessesByExeName(L"Maplestory_Classic.exe");
+    const unsigned ngm64Killed = xcat::KillProcessesByExeName(L"NGM64.exe");
+    const unsigned ngmKilled = xcat::KillProcessesByExeName(L"NGM.exe");
+    xcat::log::Info("Update", "pre-install kill Classic=%u NGM64=%u NGM=%u", classicKilled,
+                    ngm64Killed, ngmKilled);
+    if (!xcat::WaitUntilNoProcessByName(L"Maplestory_Classic.exe", 20000)) {
+        SetInstallStatus("正在重试结束 Maplestory_Classic.exe…", -1.f);
+        xcat::log::Warn("Update", "Maplestory_Classic residual; retry kill");
+        (void)xcat::KillProcessesByExeName(L"Maplestory_Classic.exe");
+        if (!xcat::WaitUntilNoProcessByName(L"Maplestory_Classic.exe", 15000)) {
+            SetSnapshot(UpdatePhase::Failed,
+                        "Maplestory_Classic.exe 未能退出，已中止自动更新安装");
+            return;
+        }
+    }
+    (void)xcat::WaitUntilNoProcessByName(L"NGM64.exe", 8000);
+    (void)xcat::WaitUntilNoProcessByName(L"NGM.exe", 8000);
+
+    SetInstallStatus("进程已退出，等待目录释放…", -1.f);
+    Sleep(3000);
 
     SetInstallStatus("正在启动安装脚本并重启…", -1.f);
     std::string err;

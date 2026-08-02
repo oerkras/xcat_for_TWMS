@@ -77,9 +77,10 @@ if errorlevel 1 (
 )
 
 echo [package-release] Building %PRODUCT_NAME% (%CONFIG%)...
-cmake --build "%BUILD_DIR%" --config "%CONFIG%" --target xcat
+cmake --build "%BUILD_DIR%" --config "%CONFIG%" --target xcat xcat_probe
 if errorlevel 1 (
     echo !C_RED!FAILED: compile/link error.!C_RESET!
+    echo !C_YELLOW!HINT: If LNK1104, close bin\xcat.exe ^(and anything locking bin\XCat_data\xcat.dll^) then retry.!C_RESET!
     copy /Y "%VERSION_BACKUP%" "%VERSION_FILE%" >nul
     del "%VERSION_BACKUP%" >nul 2>&1
     exit /b 1
@@ -94,18 +95,21 @@ if errorlevel 1 (
     exit /b 1
 )
 
-del "%VERSION_BACKUP%" >nul 2>&1
-
 echo [package-release] Publishing to publish_site...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PUBLISH_SITE_SCRIPT%"
 if errorlevel 1 (
-    echo !C_YELLOW!WARN: publish_site sync failed; zip is still in artifacts\release.!C_RESET!
+    echo !C_RED!FAILED: publish_site sync failed; zip is in artifacts\release.!C_RESET!
+    echo !C_YELLOW!HINT: version backup kept. Prefer retry publish only ^(avoids rebuild^):!C_RESET!
+    echo !C_YELLOW!      powershell -NoProfile -ExecutionPolicy Bypass -File "%PUBLISH_SITE_SCRIPT%"!C_RESET!
+    echo !C_YELLOW!      Re-running this bat is version-safe: it restores the pre-bump header then bumps once.!C_RESET!
     exit /b 1
 )
+
+del "%VERSION_BACKUP%" >nul 2>&1
 
 echo.
 echo !C_GREEN!OK: %PRODUCT_NAME% packaged and published.!C_RESET!
 echo        Update API:   scripts\start-twms-update-server.ps1
-echo        Manifest:     http://127.0.0.1:18789/twms/update/latest.json
-echo        Web downloads: publish_site\start-server.ps1 (:52080)
+echo        Manifest:     http://xcat.work:18789/twms/update/latest.json
+echo        Web downloads: http://xcat.work:52080/  ^(publish_site\start-server.ps1^)
 exit /b 0

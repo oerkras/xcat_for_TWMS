@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -210,6 +211,18 @@ std::string RedirectLegacyServiceUrl(const std::string& url) {
     };
     rewritePort(":18787", ":18789");
     rewritePort(":18788", ":18789");
+    // 开发期本机地址 → 公网域名（对齐枫星 xcat.work 默认）
+    auto rewriteHost = [&](const char* from, const char* to) {
+        size_t pos = 0;
+        const std::string f = from;
+        const std::string t = to;
+        while ((pos = out.find(f, pos)) != std::string::npos) {
+            out.replace(pos, f.size(), t);
+            pos += t.size();
+        }
+    };
+    rewriteHost("://127.0.0.1:", "://xcat.work:");
+    rewriteHost("://localhost:", "://xcat.work:");
     while (out.size() > 8 && out.back() == '/') out.pop_back();
     return out;
 }
@@ -369,6 +382,83 @@ void AddRotatedLogsIfPresent(std::vector<LogBlob>& logs, const std::string& name
     for (size_t i = 1; i <= cap; ++i) {
         const std::string suffix = "." + std::to_string(i);
         AddLogIfPresent(logs, name + suffix, source + suffix, path + suffix);
+    }
+}
+
+/** 解析 `combat.log` / `x.jsonl.12` → 基名；非日志文件返回空。 */
+std::string ParseRotatedLogBaseName(const std::string& leaf) {
+    if (leaf.empty() || leaf[0] == '.') return {};
+    auto ends_with_ci = [](std::string_view s, std::string_view suf) {
+        if (s.size() < suf.size()) return false;
+        for (size_t i = 0; i < suf.size(); ++i) {
+            const unsigned char a = static_cast<unsigned char>(s[s.size() - suf.size() + i]);
+            const unsigned char b = static_cast<unsigned char>(suf[i]);
+            if (std::tolower(a) != std::tolower(b)) return false;
+        }
+        return true;
+    };
+    if (ends_with_ci(leaf, ".log") || ends_with_ci(leaf, ".jsonl")) return leaf;
+
+    // name.ext.N
+    const size_t lastDot = leaf.rfind('.');
+    if (lastDot == std::string::npos || lastDot == 0 || lastDot + 1 >= leaf.size()) return {};
+    for (size_t i = lastDot + 1; i < leaf.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(leaf[i]))) return {};
+    }
+    const std::string base = leaf.substr(0, lastDot);
+    if (ends_with_ci(base, ".log") || ends_with_ci(base, ".jsonl")) return base;
+    return {};
+}
+
+/**
+ * 扫 XCat_data/logs 下全部频道、全部现存卷（combat.log / combat.log.24 …）。
+ * 已收录的精确文件名跳过；白名单已收的基名整族跳过；prev/ 另走专收。
+ * maxBackups：轮转序号上限（.N 的 N）；当前卷（无序号）始终收。
+ */
+void AddFeatureChannelLogs(std::vector<LogBlob>& logs, const char* payloadBinDir,
+                           size_t maxBackups) {
+    if (!payloadBinDir || !payloadBinDir[0]) return;
+    namespace fs = std::filesystem;
+    const std::string logsDirUtf8 = xcat::JoinBinPath(payloadBinDir, "logs");
+    std::error_code ec;
+    const fs::path logsDir(xcat::Utf8ToWide(logsDirUtf8));
+    if (!fs::is_directory(logsDir, ec)) return;
+
+    std::unordered_set<std::string> already;
+    already.reserve(logs.size() * 2 + 32);
+    std::unordered_set<std::string> alreadyBases;
+    for (const LogBlob& b : logs) {
+        if (b.name.empty()) continue;
+        already.insert(b.name);
+        const std::string base = ParseRotatedLogBaseName(b.name);
+        if (!base.empty()) alreadyBases.insert(base);
+    }
+
+    const size_t cap = maxBackups > kMaxLogBackups ? kMaxLogBackups : maxBackups;
+
+    for (fs::directory_iterator it(logsDir, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec) || ec) continue;
+        const std::string leaf = xcat::WideToUtf8(it->path().filename().wstring());
+        const std::string base = ParseRotatedLogBaseName(leaf);
+        if (base.empty()) continue;
+        if (alreadyBases.count(base)) continue;  // 白名单已收该频道（含其轮转）
+        if (already.count(leaf)) continue;
+
+        // leaf == base → 当前卷；leaf == base.N → 序号 N
+        if (leaf.size() > base.size() + 1 && leaf[base.size()] == '.') {
+            unsigned long idx = 0;
+            try {
+                idx = std::stoul(leaf.substr(base.size() + 1));
+            } catch (...) {
+                continue;
+            }
+            if (idx == 0 || idx > cap) continue;
+        }
+
+        AddLogIfPresent(logs, leaf, "XCat_data/logs/" + leaf,
+                        xcat::WideToUtf8(it->path().wstring()));
+        already.insert(leaf);
     }
 }
 
@@ -745,6 +835,9 @@ CollectedLogs CollectLogs(const LogUploadRequest& req) {
         }
     }
 
+    // 功能频道日志：combat / foothold / petloot / invuln / auto_enter …（白名单未列的一律扫入）。
+    AddFeatureChannelLogs(out.logs, req.payloadBinDir.c_str(), backups);
+
     // 上一版本遗留日志：更新器删旧目录前拷入 XCat_data\logs\prev（旧目录已不存在）。
     {
         namespace fs = std::filesystem;
@@ -1044,6 +1137,21 @@ std::string ExtractJsonString(const std::string& json, const char* key) {
 
 void SetSnapshot(LogUploadPhase phase, std::string message, std::string uploadId = {},
                  uint32_t httpStatus = 0) {
+    if (phase == LogUploadPhase::Failed) {
+        // 上屏脱敏：WinHTTP/URL 原文只留本地日志。
+        const bool leak = message.find("http://") != std::string::npos ||
+                          message.find("https://") != std::string::npos ||
+                          message.find("://") != std::string::npos ||
+                          message.find("xcat.work") != std::string::npos ||
+                          message.find("127.0.0.1") != std::string::npos ||
+                          message.find("localhost") != std::string::npos ||
+                          message.find("WinHttp") != std::string::npos;
+        if (leak || message.empty()) {
+            message = httpStatus != 0
+                          ? (std::string("上传失败 HTTP ") + std::to_string(httpStatus))
+                          : "上传失败（详情见本地日志）";
+        }
+    }
     std::lock_guard<std::mutex> lk(g_state.mtx);
     g_state.snapshot.phase = phase;
     g_state.snapshot.message = std::move(message);
@@ -1189,13 +1297,14 @@ bool UploadViaSession(const ParsedUrl& url, const LogUploadRequest& req,
 void UploadWorker(LogUploadRequest req) {
     req.note = NormalizeUploadNote(req.note);
     if (!LogUploadConfigured(req)) {
-        SetSnapshot(LogUploadPhase::Failed, "日志上报未配置地址");
+        SetSnapshot(LogUploadPhase::Failed, "上报服务未就绪");
         return;
     }
 
     ParsedUrl url{};
     if (!ParseUrl(req.url, url)) {
-        SetSnapshot(LogUploadPhase::Failed, "日志上报地址格式错误");
+        xcat::log::Warn("LogUpload", "parse url failed url=%s", req.url.c_str());
+        SetSnapshot(LogUploadPhase::Failed, "上报服务配置无效");
         return;
     }
 
@@ -1240,6 +1349,7 @@ void UploadWorker(LogUploadRequest req) {
         const std::string body = BuildUploadJson(req, logs);
         const HttpResult resp = PostJson(url, body);
         if (!resp.err.empty()) {
+            xcat::log::Warn("LogUpload", "legacy upload failed err=%s", resp.err.c_str());
             SetSnapshot(LogUploadPhase::Failed, resp.err, {}, resp.status);
             return;
         }

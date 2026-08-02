@@ -12,7 +12,6 @@
 
 #include "xcat_imgui_theme.h"
 #include "xcat_log.h"
-#include "xcat_version.h"
 
 #include "imgui.h"
 
@@ -72,16 +71,36 @@ inline void DrawTopBarThemeToggle(const std::string& prefsBinDir, float titleH) 
 }
 
 
+inline const char* RuntimeSceneStateLabel(int sceneState) {
+    // 与 ports::world::SceneState 对齐。
+    switch (sceneState) {
+        case 0:
+            return "無";
+        case 1:
+            return "切圖";
+        case 2:
+            return "登入";
+        case 3:
+            return "地圖";
+        case 4:
+            return "商城";
+        case 5:
+            return "自由";
+        default:
+            return "?";
+    }
+}
+
 inline void DrawLauncherLedStrip(const RuntimeLeds& leds, float width, float height) {
     const bool values[5] = {leds.ipc, leds.gameContext, leds.localPlayer, leds.mapOk,
                             leds.quizCache};
     const char* labels[5] = {"IPC", "GameContext", "LocalPlayer", "Map", "Cache"};
     const char* tips[5] = {
-        "IPC / WebView：会话就绪（注入后改为 payload IPC）",
-        "GameContext：检测到 Maplestory_Classic.exe",
-        "LocalPlayer：待注入后点亮",
-        "Map：待注入后点亮",
-        "Cache：测谎缓存位置（待接入）",
+        "IPC：WebView 就绪，或注入后 payload 心跳",
+        "GameContext：检测到 Maplestory_Classic.exe，或 WM/GameAssembly 可读",
+        "LocalPlayer：MyUser / LocalCharacterStat 可读",
+        "Map：WM 玩法就绪（IsPlayReady）+ 街道·图名",
+        "Cache：测谎类型已 Resolve（UIAntiMacroUtil + TextCaptcha/NonFinite）",
     };
 
     ImGui::InvisibleButton("##launcher_led_strip", ImVec2(width, height));
@@ -129,8 +148,31 @@ inline void DrawLauncherLedStrip(const RuntimeLeds& leds, float width, float hei
                 nearest = i;
             }
         }
-        ImGui::SetTooltip("%s\n%s：%s", tips[nearest], labels[nearest],
-                          values[nearest] ? "亮" : "灭");
+        if (nearest == 3) {
+            const char* wm = leds.wmAlive ? "就緒" : "待綁";
+            const char* scene = RuntimeSceneStateLabel(leds.sceneState);
+            if (leds.mapOk || leds.playReady) {
+                if (leds.mapId > 0 && leds.currentMapName[0])
+                    ImGui::SetTooltip("%s\nMap：亮\nWM:%s %s\n%s\nmapId=%d", tips[nearest], wm,
+                                      scene, leds.currentMapName, leds.mapId);
+                else if (leds.currentMapName[0])
+                    ImGui::SetTooltip("%s\nMap：亮\nWM:%s %s\n%s", tips[nearest], wm, scene,
+                                      leds.currentMapName);
+                else if (leds.mapId > 0)
+                    ImGui::SetTooltip("%s\nMap：亮\nWM:%s %s\nmapId=%d", tips[nearest], wm, scene,
+                                      leds.mapId);
+                else
+                    ImGui::SetTooltip("%s\nMap：亮\nWM:%s %s", tips[nearest], wm, scene);
+            } else {
+                ImGui::SetTooltip("%s\nMap：灭\nWM:%s %s", tips[nearest], wm, scene);
+            }
+        } else if (nearest == 4) {
+            ImGui::SetTooltip("%s\nCache：%s", tips[nearest],
+                              leds.quizCache ? "测谎 TypeResolve 就绪" : "测谎类型未解析");
+        } else {
+            ImGui::SetTooltip("%s\n%s：%s", tips[nearest], labels[nearest],
+                              values[nearest] ? "亮" : "灭");
+        }
     }
 }
 
@@ -140,7 +182,7 @@ inline void DrawLauncherTopBar(AppWindow& app, const RuntimeLeds& leds,
     const float iconBtnW = AppDpi_Px(26.f);
     const float btnGap = AppDpi_Px(2.f);
     const float pad = Gap();
-    const float brandW = AppDpi_Px(56.f);
+    const float brandW = AppDpi_Px(48.f);
     const float themeBtnW = TopBarThemeToggleWidth(titleH);
     const float leftChromeW = brandW + themeBtnW + btnGap;
     constexpr const char* kEventsLabel = "历史事件";
@@ -176,10 +218,8 @@ inline void DrawLauncherTopBar(AppWindow& app, const RuntimeLeds& leds,
         dl->AddLine(ImVec2(origin.x, origin.y + titleH),
                     ImVec2(origin.x + fullW, origin.y + titleH),
                     ImGui::ColorConvertFloat4ToU32(p.titleBarLineBottom));
-        char brand[64]{};
-        snprintf(brand, sizeof(brand), "XCat %s", xcat::kXcatVersionString);
         dl->AddText(ImVec2(origin.x + pad, origin.y + AppDpi_Px(6.f)),
-                    ImGui::ColorConvertFloat4ToU32(p.brandText), brand);
+                    ImGui::ColorConvertFloat4ToU32(p.brandText), "XCat");
     }
 
     ImGui::SetCursorScreenPos(origin);

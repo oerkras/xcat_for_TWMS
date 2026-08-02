@@ -257,7 +257,9 @@ std::wstring ExtractOttToken(const std::wstring& urlOrOtt) {
         size_t i = pos;
         std::wstring out;
         while (i < urlOrOtt.size() && urlOrOtt[i] != L'?' && urlOrOtt[i] != L'&' &&
-               urlOrOtt[i] != L'#' && urlOrOtt[i] != L' ') {
+               urlOrOtt[i] != L'#' && urlOrOtt[i] != L' ' && urlOrOtt[i] != L'"' &&
+               urlOrOtt[i] != L'\'' && urlOrOtt[i] != L')' && urlOrOtt[i] != L'<' &&
+               urlOrOtt[i] != L'>' && urlOrOtt[i] != L';') {
             out.push_back(urlOrOtt[i++]);
         }
         return trimTrail(out);

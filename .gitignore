@@ -12,6 +12,11 @@
 **/*.vcxproj.filters
 **/*.sln
 !**/CMakeLists.txt
+# Kernel research tool (WDK msbuild); keep checked in.
+!/tools/krw/**/*.vcxproj
+!/tools/krw/**/*.vcxproj.filters
+!/tools/krw/**/*.sln
+!/tools/krw/**/*.inf
 
 # Nested build trees (keep NuGet package trees under third_party)
 /launcher/build/
@@ -24,18 +29,29 @@
 # --- RE dumps & restored dumps (multi-GB) ---
 /Dumps/
 /DumpRestoredData/
+/OLD DUMP DATA/
+
+# Local driver/signing toolkits (not product source)
+/DriverTools/
 
 # --- Release packages & local runtime ---
 /artifacts/
 /user_log_uploads/
 /publish_site/downloads/
 /publish_site/update/*.zip
+/tools/bin/
+**/__pycache__/
+*.pyc
 
 # Runtime / WebView profile data under output dirs
 **/webview_profile/
 **/XCat_data/
 **/XCat_datastate/
 **/xcat_imgui.ini
+
+# tools/krw intermediates
+/tools/krw/**/obj/
+/bin/krw/
 
 # --- Compilers / MSVC intermediates ---
 *.obj
@@ -80,3 +96,4 @@ Desktop.ini
 *.pfx
 *.p12
 credentials.json
+xcat_app/anti_bot_ai/llm_secrets.h

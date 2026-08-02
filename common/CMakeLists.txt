@@ -3,8 +3,22 @@ add_library(xcat_common STATIC
     xcat_log.cpp
     xcat_config_ini.cpp
     xcat_payload_control.cpp
+    xcat_payload_status.cpp
+    xcat_anchor_lamps.cpp
+    xcat_multiskill_select.cpp
+    xcat_timed_keys.cpp
+    xcat_pet_loot.cpp
+    xcat_buffs.cpp
+    xcat_worlds_cache.cpp
+    xcat_world_names.cpp
+    xcat_map_names.cpp
+    xcat_item_catalog.cpp
+    xcat_sellbag.cpp
+    xcat_auto_supply.cpp
+    xcat_skill_names.cpp
     xcat_sound.cpp
     xcat_sound_presets.cpp
+    xcat_payload_notify.cpp
 )
 
 target_include_directories(xcat_common PUBLIC

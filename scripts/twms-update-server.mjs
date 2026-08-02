@@ -1,25 +1,29 @@
 #!/usr/bin/env node
 /**
- * XCat TWMS update API (范围 B)：健康检查 + /update/* 分发。
- * 日志上传先 stub（501）；运维台 / Caddy 仍属范围 C。
+ * XCat TWMS update API：健康检查 + /update/* 分发 + 日志上传 + 运维 admin。
+ * 网页下载站为 publish_site Python :52080（非本进程）。
  *
- * 默认：http://127.0.0.1:18789/twms
+ * 绑定默认：http://0.0.0.0:18789/twms
+ * 客户端默认：http://xcat.work:18789/twms
  *   GET  /twms/health
  *   GET  /twms/ready
  *   GET  /twms/update/latest.json
- *   GET  /twms/update/force.json   (无文件 → 404)
+ *   GET  /twms/update/force.json   (无 force-update.json → 404)
  *   GET  /twms/update/<zip>
+ *   POST /twms/v1/logs/sessions · PUT …/files/:name · POST …/commit
+ *   POST /twms/v1/logs            (legacy JSON)
  *   POST /twms/admin/shutdown      (loopback)
  *   GET  /twms/admin/stats         (loopback)
- *   *   /twms/v1/logs*             → 501 stub
+ *   GET  /twms/admin/clients       (loopback；按 X-XCat-* 头追踪)
  */
 import http from "node:http";
 import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createLogUpload } from "./twms-log-upload.mjs";
 
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
@@ -48,6 +52,18 @@ const accessLogPath = path.resolve(
 const basePath = normalizeBasePath(
   args.get("base-path") || process.env.XCAT_TWMS_BASE_PATH || "/twms",
 );
+const rawOut = args.get("out") || path.join(repoRoot, "user_log_uploads");
+const outRoot = path.resolve(
+  /(?:^|[\\/])artifacts[\\/]+user_log_uploads$/i.test(path.normalize(rawOut))
+    ? path.join(repoRoot, "user_log_uploads")
+    : rawOut,
+);
+const acceptProfiles = String(
+  args.get("accept-profile") || process.env.XCAT_ACCEPT_PROFILES || "twms",
+)
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 
 const startedAt = Date.now();
 let shuttingDown = false;
@@ -220,6 +236,18 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
+const logUpload = createLogUpload({
+  outRoot,
+  acceptProfiles,
+  sendJson,
+  logInfo,
+  logWarn,
+  logError,
+  getShuttingDown: () => shuttingDown,
+  noteError,
+  clientIp,
+});
+
 function classifyRoute(routedPath) {
   if (routedPath === "/health") return "health";
   if (routedPath === "/ready" || routedPath === "/healthz") return "ready";
@@ -381,7 +409,8 @@ function healthPayload() {
     profile: basePath ? basePath.slice(1) : "root",
     uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
     shuttingDown,
-    uploads: { stub: true },
+    uploads: logUpload.uploadHealthSlice(),
+    limits: logUpload.uploadLimitsSlice(),
     requests: {
       total: stats.requestsTotal,
       lastAt: stats.lastRequestAt || null,
@@ -404,6 +433,15 @@ async function readyCheck() {
     checks.releaseRoot = "ok";
   } catch (err) {
     checks.releaseRoot = err.message || String(err);
+  }
+  try {
+    await logUpload.ensureDirs();
+    const probe = path.join(logUpload.outRoot, `.ready-${process.pid}`);
+    await fs.writeFile(probe, "ok\n");
+    await fs.unlink(probe);
+    checks.outRoot = "ok";
+  } catch (err) {
+    checks.outRoot = err.message || String(err);
   }
   const ok = Object.values(checks).every((v) => v === "ok");
   return { ok, checks, shuttingDown };
@@ -487,11 +525,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (routedPath === "/v1/logs" || routedPath.startsWith("/v1/logs/")) {
-      sendJson(res, 501, {
-        ok: false,
-        error: "log upload not implemented yet (TWMS scope B stub)",
-        path: routedPath,
-      });
+      await logUpload.handleLogRoutes(req, res, routedPath);
       return;
     }
     sendJson(res, 404, { ok: false, error: "not found" });
@@ -525,13 +559,16 @@ process.on("SIGTERM", () => {
 
 await fs.mkdir(releaseRoot, { recursive: true });
 await fs.mkdir(path.dirname(accessLogPath), { recursive: true });
+await logUpload.ensureDirs();
 
 server.listen(port, host, () => {
   logInfo(`xcat twms update server v${SERVER_VERSION} listening on http://${host}:${port}`);
   logInfo(`base path: ${basePath || "/"}`);
   logInfo(`updates: ${releaseRoot}`);
+  logInfo(`uploads: ${logUpload.outRoot} (devices -> ${logUpload.deviceBucketRoot})`);
+  logInfo(`accept profiles: ${acceptProfiles.join(",") || "(any)"}`);
   logInfo(`access log: ${accessLogPath}`);
-  logInfo(`client default: http://127.0.0.1:${port}${basePath}`);
+  logInfo(`client default: http://xcat.work:${port}${basePath}`);
   logInfo(`admin: POST ${basePath}/admin/shutdown (loopback only)`);
 });
 

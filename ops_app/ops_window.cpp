@@ -219,6 +219,8 @@ void OpsWindow_LoadFonts(OpsWindow& app) {
         "%s\\Fonts\\simhei.ttf",
         "%s\\Fonts\\simsun.ttc",
         "%s\\Fonts\\mingliu.ttc",
+        "%s\\Fonts\\msjh.ttc",
+        "%s\\Fonts\\msjhbd.ttc",
     };
     const ImWchar* ranges = xcat::ui::CjkGuiGlyphRanges(io.Fonts);
     bool loaded = false;
@@ -232,6 +234,7 @@ void OpsWindow_LoadFonts(OpsWindow& app) {
         }
     }
     if (!loaded) io.Fonts->AddFontDefault(&cfg);
+    else (void)xcat::ui::MergeUiSymbolFallbackFont(io.Fonts, fontSize);
 
     ImGui_ImplDX11_InvalidateDeviceObjects();
     ImGui_ImplDX11_CreateDeviceObjects();
@@ -264,12 +267,12 @@ bool OpsWindow_Create(OpsWindow& app, HINSTANCE inst, int designW, int designH) 
         inst, MAKEINTRESOURCEW(IDI_OPS_APP_ICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"XCatOpsWindow";
+    wc.lpszClassName = L"XCatTwmsOpsWindow";
     RegisterClassExW(&wc);
 
     // Create at design size first; real DPI is known only after HWND exists.
     app.hwnd = CreateWindowExW(
-        WS_EX_APPWINDOW, wc.lpszClassName, L"XCat TWMS Ops",
+        WS_EX_APPWINDOW, wc.lpszClassName, L"XCat TWMS Ops (:18789)",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, designW, designH,
         nullptr, nullptr, inst, nullptr);
     if (!app.hwnd) return false;

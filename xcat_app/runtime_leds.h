@@ -4,17 +4,24 @@
 
 namespace xcat::app {
 
-// 对齐枫星 5 灯语义；Classic 注入前：部分灯由 WebView/进程探测点亮，其余为设计占位
+// 对齐枫星 5 灯语义。
+// 注入前：IPC≈WebView 就绪，GameContext≈进程在；注入后：以后三者以 PayloadStatus SHM 为准。
 struct RuntimeLeds {
-    bool ipc = false;          // ① IPC / WebView 会话就绪
-    bool gameContext = false;  // ② 游戏进程 / GameContext
-    bool localPlayer = false;  // ③ LocalPlayer（待注入）
-    bool mapOk = false;        // ④ Map（待注入）
-    bool quizCache = false;    // ⑤ 测谎缓存位置（待接入）
+    bool ipc = false;          // ① WebView 就绪 或 payload ipcHandshake
+    bool gameContext = false;  // ② 游戏进程 或 payload gameContextOk
+    bool localPlayer = false;  // ③ MyUser / LocalCharacterStat
+    bool mapOk = false;        // ④ 显式 playReady（IsPlayReady）
+    bool quizCache = false;    // ⑤ 测谎 TypeResolve（UIAntiMacroUtil + 两类 UI）
     unsigned long gamePid = 0;
     uint64_t webReadyTickMs = 0;  // WebView 首次就绪时刻（状态条计时）
+    int mapId = 0;
+    char currentMapName[128]{};  // 街道名·地图名（UTF-8）
+    bool playReady = false;
+    bool wmAlive = false;
+    int sceneState = -1;  // ports::world::SceneState
 };
 
-RuntimeLeds QueryRuntimeLeds();
+// prefsBinDir：XCat_data 路径；空则只做注入前探测。
+RuntimeLeds QueryRuntimeLeds(const char* prefsBinDir = nullptr);
 
 }  // namespace xcat::app

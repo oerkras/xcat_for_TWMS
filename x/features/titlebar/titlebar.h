@@ -1,9 +1,11 @@
 #pragma once
-// titlebar — Win32 标题栏显示角色 vitals + 金/经每分钟收益（Classic TWMS）
+// titlebar — Win32 标题栏显示角色 vitals + 金/经/物值每分钟收益（Classic TWMS）
 //
 // 数据真源：DumpRestoredData B / runtime dump
-//   UIStatusBar(af621d…) +0x218 BasicStat* · +0x220 CharacterStat*
-//   CharacterStat(fae1aa…) level/job/hp/mp/exp/money …
+//   WorldManager → CharacterData(+0xE0).CharacterStat(+0x10) / BasicStat(+0xE8)
+//   LocalUser 仅接受 GameObject 名 MyUser（或 WM.MyUser@+0x28）；禁止 FindAll first-hit
+//   UIStatusBar 仅作 CharacterStat* 对齐校验
+//   职业名：Classic 静态繁中表；物值：ItemSlots 增量 × ItemDataManager 卖价
 // 标题写入：SendMessageTimeoutW(SMTO_ABORTIFHUNG)，禁止裸 SetWindowTextW。
 
 #include <Windows.h>

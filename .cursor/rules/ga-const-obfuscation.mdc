@@ -1,0 +1,75 @@
+---
+description: GameAssembly 混淆比较常量的解法：必须实读种子验算，不可默认当 0
+alwaysApply: true
+---
+
+# GameAssembly 常量混淆 · 解法与陷阱
+
+逆 `GameAssembly.dll`（经典版 / TWMS）时，比较常量被拆成「立即数 + 运行时种子」，静态直读会得出无意义的巨大常量。识别模式：
+
+```asm
+mov  ecx, 36D6F4AEh              ; IMM
+add  ecx, cs:dword_7FFB1D384250  ; 种子（运行时填充的全局）
+cmp  ecx, eax                    ; 实际语义：cmp 0, eax
+```
+
+| 形式 | 解法 |
+|---|---|
+| `add reg32, seed` | `(IMM + seed) mod 2^32` |
+| `xor reg32, seed` | `IMM ^ seed` |
+| `add reg8, imm8` + 种子**字节** | `(IMM + seedByte) mod 256` |
+
+字节宽变体专门用来**写 bool 字段**，别当成算术：
+
+```asm
+movzx eax, cs:byte_7FFB1D38291C   ; 种子字节 0x6C
+add   al, 94h                      ; 0x6C + 0x94 = 0x100 → al = 0
+mov   [r15+488h], al               ; 净效果：字段 = false
+```
+
+## 陷阱：解出值常见是 0，但**绝不保证**
+
+解出值等于该处语义上真正要比的数。布尔比较尤其要当心——`cmp` 之前常先用 `shl reg, 1/2` 或 `add reg, reg` 把 bool 预缩放，常量随之变成 2 或 4。**把这种 `shl` 当噪声、按 0 读，会让判定方向整体反掉**：
+
+```asm
+call <predicate>                  ; al = bool
+xor  al, 1                        ; al = !bool
+movzx eax, al
+shl  eax, 2                       ; eax = (!bool) * 4
+mov  ecx, 0DE61A47Bh
+xor  ecx, cs:dword_7FFB1D3846B4   ; 种子 0xDE61A47F → 解出 4，不是 0
+cmp  eax, ecx                     ; 净效果：predicate == false 时相等
+```
+
+另一类常见非零值是 **−1**（`0xFFFFFFFF`），配 `setnle` / `cmovle` 实现「索引 >= 0 即有效」式判断——按 0 读会变成「> 0」，把 `0` 这个合法值判反。
+
+## 必须
+
+- 每处常量都用 `get_int`（`ty: u32le`）实读种子并手工验算，把算式留在证据里。看到 `shl` / `add reg,reg` 缩放时**必须**算，不得沿用「反正是 0」。
+- 用**运行时 dump** 的 IDB：`Dumps/runtime/GameAssembly.dll.i64`（imagebase `0x7ffb16b40000`）。种子在进程初始化时才写入。
+- 种子聚在 `0x7FFB1D384xxx` 一带的种子表，可一次 `get_int` 批量读完，省往返。
+
+## 禁止
+
+- 未实读种子就把「该常量 = 0」写进结论、文档或代码。
+- 在**磁盘原始文件**（非运行时 dump）的 IDB 上套用：种子未初始化时读出 0，会把真实常量误判成 IMM，方向整体反掉。
+
+## 配套：`sbb` 布尔惯用法
+
+解混淆后 `cmp` 常紧跟这一对，作用是把 CF 转成分支布尔，别误读成算术：
+
+```asm
+cmp  ecx, eax        ; ecx = 0（解混淆后）
+mov  cl, 1
+sbb  cl, 0FFh        ; CF=0 → cl=2 ; CF=1 → cl=1
+test cl, 1           ; 净效果：eax != 0 时 jnz 成立
+```
+
+## 已验样本
+
+24 个（32 位 22 个 + 字节 2 个）：
+
+- 32 位：19 个解出 0；**1 个解出 4**（`shl eax,2` 缩放的布尔比较）；**1 个解出 −1**（`sub_7FFB17D7CDD0` 里 `setnle` 配 −1 实现 `>= 0`）；**1 个解出 5000**（`UserLocal` Slot 14 里的 5000 ms 时间窗）。
+- 字节：2 个，分别写出 `false`（`0x6C+0x94`）与 `true`（`0xFB+0x06`），均为 `UserLocal` 字段 `0x488` 的写入点。
+
+取自 `UserLocal.OnSkill`（RVA `0x10662B0`）、门函数 `sub_7FFB17BA41A0`（RVA `0x10641A0`）、`sub_7FFB17BB1A50`（RVA `0x1071A50`）、`sub_7FFB17D7CDD0`（RVA `0x123CDD0`）、`UserLocal` Slot 14（RVA `0x1010620`）与 `UserLocal.SetDamaged`（RVA `0x1029260`）。非零率 3/22，一律按「逐处实算」执行，不得升格为免验事实。

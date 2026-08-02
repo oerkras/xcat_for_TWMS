@@ -76,6 +76,11 @@ inline bool OptionCheckbox(const char* label, bool* value) {
     return ImGui::Checkbox(label, value);
 }
 
+inline bool OptionRadioButton(const char* label, int* value, int vButton) {
+    OptionFrameStyleGuard style;
+    return ImGui::RadioButton(label, value, vButton);
+}
+
 inline void SectionHeader(const char* label) {
     const ImVec2 start = ImGui::GetCursorScreenPos();
     const float h = ImGui::GetTextLineHeight();

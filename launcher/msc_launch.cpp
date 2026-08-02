@@ -138,6 +138,193 @@ bool FileExists(const std::wstring& path) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+std::wstring QueryImagePathByPid(DWORD pid) {
+    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!proc) return {};
+    wchar_t path[MAX_PATH]{};
+    DWORD sz = MAX_PATH;
+    std::wstring out;
+    if (QueryFullProcessImageNameW(proc, 0, path, &sz) && path[0]) out = path;
+    CloseHandle(proc);
+    return out;
+}
+
+std::wstring QueryImagePathByExeName(const wchar_t* exeName) {
+    for (DWORD pid : CollectPidsByExeName(exeName)) {
+        std::wstring p = QueryImagePathByPid(pid);
+        if (!p.empty() && FileExists(p)) return p;
+    }
+    return {};
+}
+
+// 从协议命令行 `"C:\...\NGM64.exe" "%1"` 抽出可执行路径
+std::wstring ExtractQuotedExe(const std::wstring& v) {
+    if (v.empty()) return {};
+    size_t start = 0;
+    if (v[0] == L'"') {
+        const auto q = v.find(L'"', 1);
+        if (q == std::wstring::npos || q <= 1) return {};
+        return v.substr(1, q - 1);
+    }
+    while (start < v.size() && (v[start] == L' ' || v[start] == L'\t')) ++start;
+    const auto sp = v.find_first_of(L" \t", start);
+    return sp == std::wstring::npos ? v.substr(start) : v.substr(start, sp - start);
+}
+
+std::wstring FindNgmFromProtocol() {
+    auto tryKey = [](HKEY root, const wchar_t* sub) -> std::wstring {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(root, sub, 0, KEY_READ, &key) != ERROR_SUCCESS) return {};
+        wchar_t regBuf[1024]{};
+        DWORD typ = 0;
+        DWORD cb = sizeof(regBuf);
+        const LONG st =
+            RegQueryValueExW(key, nullptr, nullptr, &typ, reinterpret_cast<LPBYTE>(regBuf), &cb);
+        RegCloseKey(key);
+        if (st != ERROR_SUCCESS || (typ != REG_SZ && typ != REG_EXPAND_SZ)) return {};
+        std::wstring path = ExtractQuotedExe(regBuf);
+        if (typ == REG_EXPAND_SZ) {
+            const std::wstring exp = ExpandEnv(path.c_str());
+            if (!exp.empty()) path = exp;
+        }
+        return (!path.empty() && FileExists(path)) ? path : std::wstring{};
+    };
+
+    // 对照仓优先 HKCR；再兜 HKLM Classes（部分精简镜像）
+    if (std::wstring p = tryKey(HKEY_CLASSES_ROOT, L"ngm\\Shell\\Open\\Command"); !p.empty())
+        return p;
+    if (std::wstring p =
+            tryKey(HKEY_LOCAL_MACHINE, L"Software\\Classes\\ngm\\Shell\\Open\\Command");
+        !p.empty())
+        return p;
+    return {};
+}
+
+std::wstring FindNgmFromInstallRegistry() {
+    static const wchar_t* kRegSubKeys[] = {
+        L"SOFTWARE\\Nexon\\NGM",
+        L"SOFTWARE\\WOW6432Node\\Nexon\\NGM",
+        L"SOFTWARE\\Nexon\\NGM64",
+        L"SOFTWARE\\WOW6432Node\\Nexon\\NGM64",
+        nullptr,
+    };
+    static const HKEY kHives[] = {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    static const wchar_t* kValueNames[] = {L"Path", L"InstallPath", L"ExePath", nullptr};
+
+    for (HKEY hive : kHives) {
+        for (int ki = 0; kRegSubKeys[ki]; ++ki) {
+            HKEY hKey = nullptr;
+            if (RegOpenKeyExW(hive, kRegSubKeys[ki], 0, KEY_READ, &hKey) != ERROR_SUCCESS) continue;
+            for (int vi = 0; kValueNames[vi]; ++vi) {
+                wchar_t val[MAX_PATH]{};
+                DWORD sz = sizeof(val);
+                if (RegQueryValueExW(hKey, kValueNames[vi], nullptr, nullptr,
+                                     reinterpret_cast<LPBYTE>(val), &sz) != ERROR_SUCCESS ||
+                    !val[0])
+                    continue;
+                std::wstring path = val;
+                if (path.size() > 4 && _wcsicmp(path.c_str() + path.size() - 4, L".exe") == 0) {
+                    if (FileExists(path)) {
+                        RegCloseKey(hKey);
+                        return path;
+                    }
+                } else {
+                    if (!path.empty() && path.back() != L'\\') path += L'\\';
+                    const std::wstring ngm64 = path + L"NGM64.exe";
+                    if (FileExists(ngm64)) {
+                        RegCloseKey(hKey);
+                        return ngm64;
+                    }
+                    const std::wstring ngm = path + L"NGM.exe";
+                    if (FileExists(ngm)) {
+                        RegCloseKey(hKey);
+                        return ngm;
+                    }
+                }
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    return {};
+}
+
+// 经典版游戏本体候选（仅用于反推旁路 NGM，不替代 NGM deep-link 拉起）
+std::wstring FindClassicExePath() {
+    if (std::wstring p = QueryImagePathByExeName(L"Maplestory_Classic.exe"); !p.empty()) return p;
+
+    static const wchar_t* kCandidates[] = {
+        L"%LOCALAPPDATA%\\Nexon\\MapleStory Classic\\Maplestory_Classic.exe",
+        L"%ProgramFiles%\\Nexon\\MapleStory Classic\\Maplestory_Classic.exe",
+        L"%ProgramFiles(x86)%\\Nexon\\MapleStory Classic\\Maplestory_Classic.exe",
+        L"C:\\Nexon\\MapleStory Classic\\Maplestory_Classic.exe",
+        L"C:\\nexon\\MapleStory Classic\\Maplestory_Classic.exe",
+        L"C:\\Nexon\\maplestory_classic\\Maplestory_Classic.exe",
+        L"C:\\Games\\maplestory_classic\\Maplestory_Classic.exe",
+        nullptr,
+    };
+    for (const wchar_t* tmpl : kCandidates) {
+        const std::wstring p = ExpandEnv(tmpl);
+        if (!p.empty() && FileExists(p)) return p;
+    }
+
+    static const wchar_t* kRegSubKeys[] = {
+        L"SOFTWARE\\Nexon\\MapleStory Classic",
+        L"SOFTWARE\\WOW6432Node\\Nexon\\MapleStory Classic",
+        L"SOFTWARE\\Nexon\\maplestory_classic",
+        L"SOFTWARE\\WOW6432Node\\Nexon\\maplestory_classic",
+        nullptr,
+    };
+    static const HKEY kHives[] = {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    static const wchar_t* kValueNames[] = {L"InstallPath", L"ExePath", L"Path", nullptr};
+    for (HKEY hive : kHives) {
+        for (int ki = 0; kRegSubKeys[ki]; ++ki) {
+            HKEY hKey = nullptr;
+            if (RegOpenKeyExW(hive, kRegSubKeys[ki], 0, KEY_READ, &hKey) != ERROR_SUCCESS) continue;
+            for (int vi = 0; kValueNames[vi]; ++vi) {
+                wchar_t val[MAX_PATH]{};
+                DWORD sz = sizeof(val);
+                if (RegQueryValueExW(hKey, kValueNames[vi], nullptr, nullptr,
+                                     reinterpret_cast<LPBYTE>(val), &sz) != ERROR_SUCCESS ||
+                    !val[0])
+                    continue;
+                std::wstring path = val;
+                if (path.size() > 4 && _wcsicmp(path.c_str() + path.size() - 4, L".exe") == 0) {
+                    if (FileExists(path)) {
+                        RegCloseKey(hKey);
+                        return path;
+                    }
+                } else {
+                    if (!path.empty() && path.back() != L'\\') path += L'\\';
+                    path += L"Maplestory_Classic.exe";
+                    if (FileExists(path)) {
+                        RegCloseKey(hKey);
+                        return path;
+                    }
+                }
+            }
+            RegCloseKey(hKey);
+        }
+    }
+    return {};
+}
+
+// …\GameDir\Maplestory_Classic.exe → …\NGM\NGM64.exe（对照仓 msw→NGM 旁路，经典版同布局）
+std::wstring FindNgmBesideClassicInstall() {
+    const std::wstring classic = FindClassicExePath();
+    if (classic.empty()) return {};
+    const size_t slash = classic.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return {};
+    const std::wstring gameDir = classic.substr(0, slash);
+    const size_t parentSlash = gameDir.find_last_of(L"\\/");
+    if (parentSlash == std::wstring::npos) return {};
+    const std::wstring nexonRoot = gameDir.substr(0, parentSlash);
+    const std::wstring ngm64 = nexonRoot + L"\\NGM\\NGM64.exe";
+    if (FileExists(ngm64)) return ngm64;
+    const std::wstring ngm = nexonRoot + L"\\NGM\\NGM.exe";
+    if (FileExists(ngm)) return ngm;
+    return {};
+}
+
 // 等新 PID，且 cmdline 四元组匹配 ticket（对标 WaitForMswWithAuth）
 DWORD WaitForClassicWithTicket(const wchar_t* exeName, const std::unordered_set<DWORD>& before,
                                const GalaxyTicket& ticket, int timeoutSec,
@@ -313,40 +500,37 @@ std::wstring GetProcessCommandLineW(DWORD pid) {
 }
 
 std::wstring FindNgmPath() {
+    // 1) 已在跑的 NGM：直接用其映像路径（对照仓同序）
+    if (std::wstring p = QueryImagePathByExeName(L"NGM64.exe"); !p.empty()) return p;
+    if (std::wstring p = QueryImagePathByExeName(L"NGM.exe"); !p.empty()) return p;
+
+    // 2) ngm:// 协议注册
+    if (std::wstring p = FindNgmFromProtocol(); !p.empty()) return p;
+
+    // 3) 固定/环境变量候选（含对照仓 C:\Nexon\NGM）
     static const wchar_t* kCandidates[] = {
         L"C:\\ProgramData\\Nexon\\NGM\\NGM64.exe",
         L"C:\\ProgramData\\Nexon\\NGM\\NGM.exe",
         L"%ProgramFiles(x86)%\\Nexon\\NGM\\NGM.exe",
         L"%ProgramFiles%\\Nexon\\NGM\\NGM.exe",
         L"%LOCALAPPDATA%\\Nexon\\NGM\\NGM.exe",
+        L"C:\\Nexon\\NGM\\NGM64.exe",
+        L"C:\\Nexon\\NGM\\NGM.exe",
+        L"C:\\nexon\\NGM\\NGM64.exe",
+        L"C:\\nexon\\NGM\\NGM.exe",
+        nullptr,
     };
-    for (const wchar_t* c : kCandidates) {
-        std::wstring p = (wcschr(c, L'%') ? ExpandEnv(c) : std::wstring(c));
+    for (const wchar_t* tmpl : kCandidates) {
+        const std::wstring p = ExpandEnv(tmpl);
         if (!p.empty() && FileExists(p)) return p;
     }
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Classes\\ngm\\Shell\\Open\\Command", 0,
-                      KEY_READ, &key) == ERROR_SUCCESS) {
-        wchar_t regBuf[1024]{};
-        DWORD typ = 0;
-        DWORD cb = sizeof(regBuf);
-        if (RegQueryValueExW(key, nullptr, nullptr, &typ, reinterpret_cast<LPBYTE>(regBuf), &cb) ==
-                ERROR_SUCCESS &&
-            (typ == REG_SZ || typ == REG_EXPAND_SZ)) {
-            std::wstring v = regBuf;
-            if (!v.empty() && v.front() == L'"') {
-                const auto q = v.find(L'"', 1);
-                if (q != std::wstring::npos) {
-                    const std::wstring path = v.substr(1, q - 1);
-                    if (FileExists(path)) {
-                        RegCloseKey(key);
-                        return path;
-                    }
-                }
-            }
-        }
-        RegCloseKey(key);
-    }
+
+    // 4) 安装注册表 Path / InstallPath / ExePath
+    if (std::wstring p = FindNgmFromInstallRegistry(); !p.empty()) return p;
+
+    // 5) 从经典版安装目录旁路反推（对照仓从 msw 反推 → 本仓从 Maplestory_Classic）
+    if (std::wstring p = FindNgmBesideClassicInstall(); !p.empty()) return p;
+
     return {};
 }
 
@@ -389,7 +573,9 @@ Result Run(const Options& opts, ProgressCallback cb) {
     const std::wstring ngm = FindNgmPath();
     if (ngm.empty()) {
         r.finalStage = Stage::Failed;
-        r.errorMessage = "未找到 NGM（期望 C:\\ProgramData\\Nexon\\NGM\\NGM64.exe 或 ngm:// 注册）";
+        r.errorMessage =
+            "未找到 NGM（已搜：运行中进程 / ngm:// 协议 / ProgramData·ProgramFiles·Nexon 目录 / "
+            "安装注册表 / 经典版旁路）。请确认 Nexon NGM 已安装。";
         Emit(cb, Stage::Failed, r.errorMessage);
         return r;
     }

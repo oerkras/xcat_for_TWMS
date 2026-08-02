@@ -4,10 +4,13 @@
 #include <Windows.h>
 
 #include "app_chrome.h"
+#include "lie_ai_pump.h"
+
 #include "app_notify.h"
 #include "app_sound.h"
 #include "app_theme.h"
 #include "app_window.h"
+#include "hangup_schedule.h"
 #include "launch_panel.h"
 #include "single_instance.h"
 #include "update_client.h"
@@ -15,6 +18,7 @@
 #include "msc_webview_login.h"
 #include "process_util.h"
 #include "xcat_log.h"
+#include "xcat_payload_control.h"
 #include "xcat_version.h"
 
 #include <objbase.h>
@@ -57,6 +61,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
                     xcat::kXcatVersionString, logOpts.filePath.c_str());
 
     const std::string prefsBin = binDir + "XCat_data";
+    // 飞行武装不持久化：每次启动 launcher 清会话态（mode/CD 仍在 user.ini）。
+    xcat::ClearFlyArmedSession(prefsBin.c_str());
     xcat::app::AppTheme_Load(prefsBin.c_str());
     xcat::app::LoadAutoReceiveUpdates(prefsBin);
     xcat::app::notify::LoadNotifyPrefs(prefsBin);
@@ -65,14 +71,15 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     xcat::app::sound::Init();
 
     AppWindow app{};
-    // ImGui 全占客户区；WebView 静默隐藏，不占布局高度
+    // ImGui 全占客户区；高度对齐对照仓枫星 kLauncherOnlyDesignH（WebView 静默不占布局）。
     if (!AppWindow_Create(app, hi, xcat::app::kLauncherOnlyDesignW,
-                          xcat::app::kLauncherOnlyDesignH * 0.62f)) {
+                          xcat::app::kLauncherOnlyDesignH)) {
         xcat::log::Error("App", "AppWindow_Create failed");
         CoUninitialize();
         xcat::app::ReleaseXcatSingleInstance();
         return 2;
     }
+    app.launchTickMs = GetTickCount64();
 
     AppWindow_CreateSilentWebHost(app);
 
@@ -101,6 +108,16 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         xcat::log::Error("App", "msc::weblogin::Init failed");
         ui.status = "WebView 登录模块初始化失败";
         ui.pendingAutoLaunch = false;
+    } else if (!msc::weblogin::IsRuntimeInstalled()) {
+        if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::WebViewOnly) {
+            ui.status = "缺少 WebView2 Runtime：请按提示下载安装，完成后重启本程序";
+            ui.pendingAutoLaunch = false;
+            xcat::log::Warn("App", "WebView2 Runtime missing (WebViewOnly)");
+        } else {
+            ui.status = "无 WebView2 Runtime：将走 HTTP 取票（遇验证码需改策略或装 Runtime）";
+            xcat::log::Info("App", "WebView2 Runtime missing; HTTP auth strategy available");
+        }
+        msc::weblogin::OnResize();
     } else {
         msc::weblogin::OnResize();
         xcat::log::Info("App", "WebView login session silent (hidden)");
@@ -124,6 +141,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
                         ui.status.find("进行中") != std::string::npos) {
                         ui.status = msc::weblogin::IsBusy() ? "正在登录/换票中…" : "空闲";
                     }
+                } else if (msg.message == msc::weblogin::kMsgStartWebViewLogin) {
+                    msc::weblogin::OnStartWebViewLoginEx(msg.wParam);
                 }
             }
             TranslateMessage(&msg);
@@ -134,6 +153,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
 
         xcat::app::AppTheme_PumpPending();
         xcat::app::LaunchPanel_TryAutoLaunchWhenReady(ui);
+        xcat::app::hangup_schedule::Tick(ui, app.exiting);
+        xcat::app::LieAiPump_Tick(prefsBin);
 
         if (xcat::app::PollGracefulExit(app, ui)) break;
 
@@ -162,6 +183,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     }
 
     msc::weblogin::Shutdown();
+    xcat::app::LieAiPump_Shutdown();
     AppWindow_Destroy(app);
     xcat::app::notify::Reset();
     xcat::app::sound::Shutdown();

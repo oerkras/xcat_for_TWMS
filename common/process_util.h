@@ -23,8 +23,14 @@ bool MoveFileExUtf8(const std::string& from, const std::string& to, DWORD flags)
 bool CopyFileUtf8(const std::string& from, const std::string& to, bool failIfExists);
 errno_t FopenUtf8(FILE** file, const std::string& path, const wchar_t* mode);
 
+// 按进程名找第一个匹配 PID（0=未找到）；用于挂机时段探测游戏是否在跑。
+DWORD FindProcessIdByName(std::wstring_view exeName);
+
 // 按进程名结束全部匹配实例（用于「退出 XCat 和游戏」）
 unsigned KillProcessesByExeName(std::wstring_view exeName);
+
+// 轮询直到进程表无 exeName；超时返回 false。短超时可给 UI 线程用。
+bool WaitUntilNoProcessByName(std::wstring_view exeName, DWORD timeoutMs);
 
 bool IsProcessAlive(DWORD pid);
 

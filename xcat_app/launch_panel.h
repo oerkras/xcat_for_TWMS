@@ -4,6 +4,8 @@
 
 #include <string>
 
+#include "workspace_tabs.h"
+
 struct AppWindow;
 
 namespace xcat::app {
@@ -14,13 +16,13 @@ struct LaunchUiState {
     std::string logTail;
     std::string prefsBinDir;
     DWORD lastLogRefreshMs = 0;
-    int activeTab = 0;
+    int activeTab = static_cast<int>(WorkspaceTab::Home);
     bool pendingAutoLaunch = false;  // 启动时有有效账号串则就绪后自动一键
 };
 
 void LaunchPanel_LoadAccount(LaunchUiState& ui);
 void LaunchPanel_SaveAccount(LaunchUiState& ui);
-void LaunchPanel_FormatAccountForUi(LaunchUiState& ui);  // ---- 处分行，便于换行显示
+void LaunchPanel_FormatAccountForUi(LaunchUiState& ui);  // 连续 '-' 处分行，便于换行显示
 void LaunchPanel_AppendLog(LaunchUiState& ui, const std::wstring& line);
 void LaunchPanel_OnWebLog(const std::wstring& line);
 bool LaunchPanel_AccountLooksValid(const LaunchUiState& ui, std::wstring* errOut = nullptr);

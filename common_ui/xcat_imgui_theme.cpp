@@ -25,7 +25,7 @@
 namespace xcat::ui {
 namespace {
 
-ThemePreference g_pref = ThemePreference::Dark;
+ThemePreference g_pref = ThemePreference::Light;
 UiPalette g_palette{};
 std::string g_lastSaveError;
 
@@ -371,21 +371,21 @@ const char* UiTheme_LastSaveError() { return g_lastSaveError.c_str(); }
 bool UiTheme_Load(const char* binDir) {
     g_lastSaveError.clear();
     if (!binDir || !binDir[0]) {
-        g_pref = ThemePreference::Dark;
-        xcat::log::Info("UiTheme", "load skip: empty binDir → dark");
+        g_pref = ThemePreference::Light;
+        xcat::log::Info("UiTheme", "load skip: empty binDir → light");
         return true;
     }
     xcat::IniStore ini{};
     const std::string path = UiTheme_IniPath(binDir);
     if (!xcat::LoadIniFile(path.c_str(), ini)) {
-        g_pref = ThemePreference::Dark;
-        xcat::log::Info("UiTheme", "load miss path=%s → dark", path.c_str());
+        g_pref = ThemePreference::Light;
+        xcat::log::Info("UiTheme", "load miss path=%s → light", path.c_str());
         return true;
     }
     std::string value;
     if (!xcat::IniGetString(ini, "ui", "theme", value) || value.empty()) {
-        g_pref = ThemePreference::Dark;
-        xcat::log::Info("UiTheme", "load no [ui].theme path=%s → dark", path.c_str());
+        g_pref = ThemePreference::Light;
+        xcat::log::Info("UiTheme", "load no [ui].theme path=%s → light", path.c_str());
         return true;
     }
     g_pref = UiTheme_ParsePreference(value);

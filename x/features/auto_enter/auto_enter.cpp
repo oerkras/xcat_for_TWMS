@@ -1,13 +1,25 @@
 // TWMS Classic — auto enter (world → least channel → character).
 //
-// Calls official UI methods on the Unity main thread via MethodInfo swap of
-// Canvas.SendWillRenderCanvases (no E9 / no GA .text patch).
+// FindAll / TypeObject / UI clicks ONLY on Unity main thread via main_thread_pump.
+// Worker-thread FindAll caused "Fatal error in GC / Collecting from unknown thread".
+// Prefer SceneLogin singleton (+0xC0/C8/D0) over FindObjectsOfTypeAll.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "auto_enter.h"
 
 #include "../../ipc/payload_control.h"
+#include "../../runtime/bin_dir.h"
+#include "../../runtime/dbg_log_file.h"
+#include "../../runtime/main_thread_pump.h"
+#include "../../runtime/managed_main.h"
+#include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_method.h"
+#include "../ccu/ccu.h"
+#include "../ports/world_port.h"
+
+#include "../../../common/xcat_world_names.h"
+#include "../../../common/xcat_worlds_cache.h"
 #include "../../runtime/log.h"
 
 #include <Psapi.h>
@@ -26,23 +38,33 @@ namespace features {
 namespace auto_enter {
 namespace {
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E413A0;
-constexpr uint32_t kRvaSendWillRenderCanvases = 0x523C830;
+using x::runtime::il2cpp::ArrayAt;
+using x::runtime::il2cpp::ArrayLen;
+using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaOnClickWorldItem = 0xA9ACA0;
-constexpr uint32_t kRvaSelectChannel = 0xA93B40;
-constexpr uint32_t kRvaEnterChannel = 0xA94180;
-constexpr uint32_t kRvaSelectCharacter = 0xA80000;
-constexpr uint32_t kRvaOnClickButtonSelect = 0xA81440;
-constexpr uint32_t kRvaGetAvatarCount = 0xA8BC50;
-constexpr uint32_t kRvaIsSlotEnable = 0xA876B0;
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E3FA20;  // remapped 2026-08-03
+constexpr uint32_t kRvaSceneLoginGet = 0xBFECB0;  // remounted 2026-08-03 SceneLogin.get_Instance
+constexpr uint32_t kRvaOnClickWorldItem = 0xA99E10;  // remounted 2026-08-03
+constexpr uint32_t kRvaSelectChannel = 0xA92CB0;  // remounted 2026-08-03 SelectChannel（勿用 0xA932F0=EnterChannel）
+constexpr uint32_t kRvaOnClickGoWorld = 0xA96130;  // remounted 2026-08-03；仅此进频；勿再调 Trigger
+constexpr uint32_t kRvaSelectCharacter = 0xA7F170;  // remounted 2026-08-03
+constexpr uint32_t kRvaOnClickButtonSelect = 0xA805B0;  // remounted 2026-08-03
+constexpr uint32_t kRvaGetAvatarCount = 0xA8ADC0;  // remounted 2026-08-03
+constexpr uint32_t kRvaIsSlotEnable = 0xA86820;  // remounted 2026-08-03
 
+constexpr char kClassSceneLogin[] =
+    "c30b8b382878b8b79a97fc52c5f46c21aec217449e91717e6fad3b601d5d994";
 constexpr char kClassUiLoginWorld[] =
-    "d77914da56b5e08caf0f9d5c5f01400d3239d1936044f62b51c89fba85563e5";
+    "bc2d8dd5edb59edb8044a2679de7c3c39dc8a2f96d17ac09dfd1f18236fe0c8";
 constexpr char kClassUiLoginCharacter[] =
-    "fe8f1a75891cefc067b2a016b38e58975e2dcb6551f371ab1fe6958aa76f93c";
-constexpr char kClassUiLoginChannel[] = "UILoginChannel";
+    "a7ac3c1c96ab938c4231e9add9f2afbf798ed528222dc4164d65a3c432934bf";
+// DumpRestoredData / CMS：UILoginChannel；运行时哈希名
+constexpr char kClassUiLoginChannel[] =
+    "d1be53f8a11d2b72aa518225bd35495d9df43e7ab24b1a58dcf20dcd93bc60b";
 
+constexpr size_t kOffSlChannelUi = 0xC0;
+constexpr size_t kOffSlWorldUi = 0xC8;
+constexpr size_t kOffSlCharUi = 0xD0;
 constexpr size_t kOffWorldItems = 0x50;
 constexpr size_t kOffWorldId = 0x10;
 constexpr size_t kOffWorldName = 0x18;
@@ -51,8 +73,14 @@ constexpr size_t kOffChUserNo = 0x18;
 constexpr size_t kOffChChannelId = 0x1D;
 constexpr size_t kOffChAdult = 0x1E;
 constexpr size_t kOffChCapacity = 0x20;
+// IDA OnClickButtonGoWorld / SelectChannel leaf: WorldItem @+0x78, selectedChannelId @+0x80.
 constexpr size_t kOffChannelSelectedWorld = 0x78;
-constexpr size_t kOffCharAvatarList = 0x170;
+constexpr size_t kOffChannelSelectedId = 0x80;
+constexpr size_t kOffCharAvatarList = 0x170;  // TW List<AvatarData>（CMS 同字段在 +0x178）
+constexpr size_t kOffCharSlotCount = 0x1A8;   // TW SlotCount backing field
+// 选中槽 index（IDA 2026-08-03 复核：get/set_SelectedIndex @ RVA A7D140/A7D150 读写 this+0x168；
+// SelectCharacter 入口仍 cmp [this+168h], index；AvatarList@+0x170 / SlotCount@+0x1A8 未变）。
+constexpr size_t kOffCharSelectedIndex = 0x168;
 constexpr size_t kOffListItems = 0x10;
 constexpr size_t kOffListSize = 0x18;
 constexpr size_t kOffArrLen = 0x18;
@@ -60,25 +88,43 @@ constexpr size_t kOffArrData = 0x20;
 
 constexpr DWORD kTickMs = 80;
 constexpr DWORD kJobWaitMs = 4000;
-constexpr DWORD kPhaseTimeoutMs = 45000;
+constexpr DWORD kPhaseTimeoutMs = 60000;
 constexpr DWORD kLogThrottleMs = 3000;
+constexpr DWORD kAfterWorldClickMs = 600;
+constexpr DWORD kAfterSelectChannelMs = 250;
+// 进频只点 Go 一次；自动重发会叠 SelectWorld 掉线（已实锤）。
+constexpr DWORD kPumpFailBackoffMs = 800;
+constexpr DWORD kLeftChannelHoldMs = 1200;
+// 选角：avatars 刚变 1 时立刻 Select+Click 会假 ok 不进图（BIN 15:25/15:36 实锤）。
+constexpr DWORD kCharReadySettleMs = 700;
+constexpr DWORD kAfterSelectCharMs = 400;
+constexpr DWORD kCharConfirmRetryMs = 1500;
+constexpr int kMaxCharConfirmAttempts = 4;
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
-using FnDomainGet = void* (*)();
-using FnDomainAssemblies = void* (*)(void* domain, size_t* size);
-using FnAsmImage = void* (*)(void* assembly);
-using FnClassFromName = void* (*)(void* image, const char* ns, const char* name);
-using FnClassGetType = void* (*)(void* klass);
-using FnTypeGetObject = void* (*)(void* type);
+using FnSceneLoginGet = void* (*)(const void* methodInfo);
 using FnClassGetMethods = void* (*)(void* klass, void** iter);
-using FnSendWill = void (*)(const void* methodInfo);
 using FnClickWorld = void (*)(void* self, int index, const void* methodInfo);
 using FnSelectChannel = void (*)(void* self, int channelId, const void* methodInfo);
-using FnEnterChannel = void (*)(void* self, int channelId, const void* methodInfo);
+using FnGoWorld = void (*)(void* self, const void* methodInfo);
 using FnSelectChar = void (*)(void* self, int index, bool first, const void* methodInfo);
 using FnClickSelect = void (*)(void* self, const void* methodInfo);
 using FnGetAvatarCount = int (*)(void* self, const void* methodInfo);
 using FnIsSlotEnable = bool (*)(void* self, int index, const void* methodInfo);
+
+// Snapshot filled only on Unity main thread (no FindAll/GC from worker).
+struct UiSnap {
+    void* sceneLogin = nullptr;
+    void* worldUi = nullptr;
+    void* channelUi = nullptr;
+    void* charUi = nullptr;
+    void* selectedWorld = nullptr;
+    int selectedChannelId = 0;
+    int worldItemCount = 0;
+    int avatarCount = 0;
+    int charSelectedIndex = -1;  // UILoginCharacter+0x168；未知/未绑定时 -1
+    bool typesOk = false;
+};
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -90,9 +136,13 @@ enum class Phase : uint8_t {
     WaitWorldList,
     PickWorld,
     WaitChannelUi,
-    PickChannel,
+    PickChannel,       // SelectChannel only
+    WaitChannelArmed,  // 等 UI+0x80 写上目标频道后再 Go
     WaitCharSelect,
-    PickChar,
+    PickChar,          // SelectCharacter only
+    WaitCharArmed,     // 等选中态生效再点确认
+    ConfirmChar,       // OnClickButtonSelect
+    WaitLeaveChar,     // 校验离开选角；失败则有限次重确认
     Done,
     Failed,
 };
@@ -100,19 +150,15 @@ enum class Phase : uint8_t {
 enum class JobKind : uint8_t {
     None = 0,
     ClickWorld,
-    EnterChannel,
-    SelectChar,
+    SelectChannel,
+    GoWorld,  // OnClickButtonGoWorld only（禁止 Trigger / 禁止自动重发）
+    SelectCharIndex,   // SelectCharacter(index) only
+    ConfirmCharClick,  // OnClickButtonSelect only
 };
 
 HMODULE gGA = nullptr;
 uintptr_t gGaBase = 0;
 FnFindAll gFindAll = nullptr;
-FnDomainGet gDomainGet = nullptr;
-FnDomainAssemblies gDomainAssemblies = nullptr;
-FnAsmImage gAsmImage = nullptr;
-FnClassFromName gClassFromName = nullptr;
-FnClassGetType gClassGetType = nullptr;
-FnTypeGetObject gTypeGetObject = nullptr;
 FnClassGetMethods gClassGetMethods = nullptr;
 
 void* gTypeWorld = nullptr;
@@ -121,12 +167,9 @@ void* gTypeChar = nullptr;
 void* gKlassWorld = nullptr;
 void* gKlassChannel = nullptr;
 void* gKlassChar = nullptr;
-void* gKlassCanvas = nullptr;
+void* gKlassSceneLogin = nullptr;
 
-MethodInfoHead* gMiSendWill = nullptr;
-FnSendWill gOrigSendWill = nullptr;
-std::atomic<bool> gPumpInstalled{false};
-std::atomic<bool> gInPump{false};
+UiSnap gSnap{};
 
 std::atomic<bool> gDesired{false};
 std::atomic<int32_t> gWorldId{0};
@@ -144,6 +187,19 @@ void* gPickedWorld = nullptr;
 int gPickedWorldIndex = -1;
 int gPickedChannelId = -1;
 DWORD gLastLogMs = 0;
+DWORD gWorldClickedAt = 0;
+DWORD gChannelSelectedAt = 0;
+DWORD gEnterAttemptAt = 0;
+DWORD gLeftChannelAt = 0;
+DWORD gCharReadyAt = 0;
+DWORD gCharSelectedAt = 0;
+DWORD gCharConfirmAt = 0;
+DWORD gPumpFailUntil = 0;
+int gEnterAttempts = 0;
+int gCharConfirmAttempts = 0;
+int gPickCharIndex = -1;
+char gWorldsFp[512]{};
+DWORD gLastWorldsScanMs = 0;
 
 JobKind gJobKind = JobKind::None;
 void* gJobUi = nullptr;
@@ -222,9 +278,7 @@ void OpenLogs() {
     if (gLog != INVALID_HANDLE_VALUE) return;
     const std::wstring dir = ModuleDir() + L"\\logs";
     CreateDirectoryW(dir.c_str(), nullptr);
-    const std::wstring path = dir + L"\\auto_enter.log";
-    gLog = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                       FILE_ATTRIBUTE_NORMAL, nullptr);
+    gLog = x::runtime::OpenRotatingDbgLog(dir, L"auto_enter.log");
 }
 
 void EnsureCs() {
@@ -271,15 +325,6 @@ uint8_t ReadU8(void* obj, size_t off) {
     }
 }
 
-void* ReadPtr(void* obj, size_t off) {
-    if (!obj) return nullptr;
-    __try {
-        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(obj) + off);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-}
-
 bool ReadIl2CppStringUtf8(void* str, char* out, size_t outCap) {
     if (!str || !out || outCap < 2) return false;
     __try {
@@ -316,52 +361,13 @@ void* ListAt(void* list, int index) {
     }
 }
 
-uintptr_t ArrayLen(void* arr) {
-    if (!arr) return 0;
-    __try {
-        return *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + kOffArrLen);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-void* ArrayAt(void* arr, uintptr_t i) {
-    if (!arr) return nullptr;
-    __try {
-        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + kOffArrData + i * sizeof(void*));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-}
-
 void* FindClass(const char* ns, const char* name) {
-    if (!gDomainGet || !gDomainAssemblies || !gAsmImage || !gClassFromName || !name) return nullptr;
-    __try {
-        void* domain = gDomainGet();
-        if (!domain) return nullptr;
-        size_t n = 0;
-        void** asms = reinterpret_cast<void**>(gDomainAssemblies(domain, &n));
-        if (!asms || n == 0) return nullptr;
-        for (size_t i = 0; i < n; ++i) {
-            void* image = gAsmImage(asms[i]);
-            if (!image) continue;
-            void* klass = gClassFromName(image, ns ? ns : "", name);
-            if (klass) return klass;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    return nullptr;
+    return x::runtime::il2cpp::FindClass(ns, name);
 }
 
 void* TypeObjectFromKlass(void* klass) {
-    if (!klass || !gClassGetType || !gTypeGetObject) return nullptr;
-    __try {
-        void* type = gClassGetType(klass);
-        if (!type) return nullptr;
-        return gTypeGetObject(type);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
+    // ResolveTypes runs inside main-thread job — must not nest pump.
+    return x::runtime::il2cpp::ClassTypeObjectOnMain(klass);
 }
 
 void* FindFirstOfType(void* typeObj) {
@@ -406,78 +412,250 @@ MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
     return nullptr;
 }
 
-bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
-    if (!mi || !hook || !outOrig) return false;
-    void* orig = nullptr;
+MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
+    if (!klass || !name) return nullptr;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetMethodFromName) return nullptr;
+    MethodInfoHead* mi = nullptr;
     __try {
-        orig = mi->methodPointer;
+        mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        mi = nullptr;
     }
-    if (!orig || orig == hook) return false;
-    DWORD old = 0;
-    if (!VirtualProtect(mi, sizeof(MethodInfoHead), PAGE_READWRITE, &old)) return false;
-    bool ok = false;
-    __try {
-        mi->methodPointer = hook;
-        if (mi->virtualMethodPointer == orig) mi->virtualMethodPointer = hook;
-        *outOrig = orig;
-        ok = true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ok = false;
-    }
-    VirtualProtect(mi, sizeof(MethodInfoHead), old, &old);
-    return ok;
+    return (mi && mi->methodPointer) ? mi : nullptr;
 }
 
-void RestoreMethodInfo(MethodInfoHead* mi, void* orig) {
-    if (!mi || !orig) return;
-    DWORD old = 0;
-    if (!VirtualProtect(mi, sizeof(MethodInfoHead), PAGE_READWRITE, &old)) return;
-    __try {
-        void* cur = mi->methodPointer;
-        mi->methodPointer = orig;
-        if (mi->virtualMethodPointer == cur) mi->virtualMethodPointer = orig;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+// RVA + kind；可选明文名（dump 残留 OnClick*）。kind 不唯一时仍可靠 RVA 校验形。
+MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
+                          const x::runtime::il2cpp_method::MethodShape& shape,
+                          const char* nameHint = nullptr) {
+    if (nameHint) {
+        if (MethodInfoHead* byName = FindMethodByName(klass, nameHint, shape.arity)) return byName;
     }
-    VirtualProtect(mi, sizeof(MethodInfoHead), old, &old);
+    if (!klass) return FindMethodByRva(klass, rva);
+    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
+    if (mr.method) {
+        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
+            LogThrottled("ResolveMi kind hit rva=0x%X name=%s", rva, nameHint ? nameHint : "-");
+        }
+        return reinterpret_cast<MethodInfoHead*>(mr.method);
+    }
+    return FindMethodByRva(klass, rva);
+}
+
+template <typename Fn>
+Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
+    if (mi && mi->methodPointer) return reinterpret_cast<Fn>(mi->methodPointer);
+    return AtRva<Fn>(rva);
 }
 
 bool ResolveTypes() {
+    if (!gKlassSceneLogin) {
+        gKlassSceneLogin = FindClass("", kClassSceneLogin);
+        if (!gKlassSceneLogin) gKlassSceneLogin = FindClass("", "SceneLogin");
+    }
     if (!gKlassWorld) gKlassWorld = FindClass("", kClassUiLoginWorld);
-    if (!gKlassChannel) gKlassChannel = FindClass("", kClassUiLoginChannel);
+    if (!gKlassChannel) {
+        gKlassChannel = FindClass("", kClassUiLoginChannel);
+        if (!gKlassChannel) gKlassChannel = FindClass("", "UILoginChannel");  // restored fallback
+    }
     if (!gKlassChar) gKlassChar = FindClass("", kClassUiLoginCharacter);
+    // TypeGetObject allocates — only call on Unity main thread.
     if (!gTypeWorld && gKlassWorld) gTypeWorld = TypeObjectFromKlass(gKlassWorld);
     if (!gTypeChannel && gKlassChannel) gTypeChannel = TypeObjectFromKlass(gKlassChannel);
     if (!gTypeChar && gKlassChar) gTypeChar = TypeObjectFromKlass(gKlassChar);
-    return gTypeWorld && gTypeChannel && gTypeChar;
+    // SceneLogin path does not require TypeObjects; FindAll fallback does.
+    if (gKlassSceneLogin) return true;
+    if (!(gTypeWorld && gTypeChannel && gTypeChar)) {
+        LogThrottled("ResolveTypes sl=%p world=%p ch=%p char=%p typeW=%p typeC=%p typeCh=%p",
+                     gKlassSceneLogin, gKlassWorld, gKlassChannel, gKlassChar, gTypeWorld,
+                     gTypeChannel, gTypeChar);
+        return false;
+    }
+    return true;
 }
 
 bool BindApis() {
-    gGA = GetModuleHandleW(L"GameAssembly.dll");
-    if (!gGA) {
+    if (!x::runtime::il2cpp::Ensure()) {
         Log("BindApis: no GameAssembly");
         return false;
     }
-    gGaBase = reinterpret_cast<uintptr_t>(gGA);
-    gFindAll = AtRva<FnFindAll>(kRvaFindObjectsOfTypeAll);
-    gDomainGet = reinterpret_cast<FnDomainGet>(GetProcAddress(gGA, "il2cpp_domain_get"));
-    gDomainAssemblies =
-        reinterpret_cast<FnDomainAssemblies>(GetProcAddress(gGA, "il2cpp_domain_get_assemblies"));
-    gAsmImage = reinterpret_cast<FnAsmImage>(GetProcAddress(gGA, "il2cpp_assembly_get_image"));
-    gClassFromName =
-        reinterpret_cast<FnClassFromName>(GetProcAddress(gGA, "il2cpp_class_from_name"));
-    gClassGetType = reinterpret_cast<FnClassGetType>(GetProcAddress(gGA, "il2cpp_class_get_type"));
-    gTypeGetObject =
-        reinterpret_cast<FnTypeGetObject>(GetProcAddress(gGA, "il2cpp_type_get_object"));
-    gClassGetMethods =
-        reinterpret_cast<FnClassGetMethods>(GetProcAddress(gGA, "il2cpp_class_get_methods"));
-    if (!gFindAll || !gDomainGet || !gDomainAssemblies || !gAsmImage || !gClassFromName ||
-        !gClassGetType || !gTypeGetObject || !gClassGetMethods) {
+    const auto& e = x::runtime::il2cpp::Get();
+    gGA = e.ga;
+    gGaBase = x::runtime::il2cpp::GaBase();
+    gFindAll = e.findAll;
+    gClassGetMethods = e.classGetMethods;
+    if (!gFindAll || !gClassGetMethods) {
         Log("BindApis: missing export/RVA");
         return false;
     }
     Log("BindApis ok GA=%p", gGA);
+    return true;
+}
+
+void CacheWorldItemsFromUi(void* worldUi) {
+    if (!worldUi) return;
+    void* items = ReadPtr(worldUi, kOffWorldItems);
+    const int n = ListSize(items);
+    if (n <= 0) return;
+
+    xcat::WorldsCacheEntry entries[xcat::kWorldsCacheMax]{};
+    uint32_t count = 0;
+    char fp[512]{};
+    size_t fpUsed = 0;
+    for (int i = 0; i < n && count < xcat::kWorldsCacheMax; ++i) {
+        void* w = ListAt(items, i);
+        if (!w) continue;
+        const int32_t id = ReadI32(w, kOffWorldId);
+        char nameRaw[xcat::kWorldsCacheNameCap]{};
+        (void)ReadIl2CppStringUtf8(ReadPtr(w, kOffWorldName), nameRaw, sizeof(nameRaw));
+        const xcat::WorldNamesPack& wn = xcat::GetSharedWorldNames(x::runtime::GetBinDir());
+        const std::string pretty = xcat::WorldNamePreferDisplay(wn, nameRaw);
+        entries[count].worldId = id;
+        strncpy_s(entries[count].name, pretty.c_str(), _TRUNCATE);
+        ++count;
+
+        if (fpUsed + 48 < sizeof(fp)) {
+            const int wrote = snprintf(fp + fpUsed, sizeof(fp) - fpUsed, "%d:%s/%s;", id,
+                                      nameRaw[0] ? nameRaw : "-", pretty.empty() ? "-" : pretty.c_str());
+            if (wrote > 0) fpUsed += (size_t)wrote;
+        }
+    }
+    if (count == 0) return;
+    if (gWorldsFp[0] && strcmp(gWorldsFp, fp) == 0) return;
+
+    if (!xcat::WriteWorldsCache(x::runtime::GetBinDir(), entries, count)) {
+        LogThrottled("WorldsCache write fail");
+        return;
+    }
+    strncpy_s(gWorldsFp, fp, _TRUNCATE);
+    Log("WorldsCache saved count=%u fp=%s", count, fp);
+}
+
+int AvatarCountOnMain(void* charUi) {
+    if (!charUi) return 0;
+    // 1) List<AvatarData> @+0x170
+    const int listN = ListSize(ReadPtr(charUi, kOffCharAvatarList));
+    if (listN > 0) return listN;
+    // 2) SlotCount @+0x1A8（列表尚未填完时也能用）
+    const int slotN = ReadI32(charUi, kOffCharSlotCount);
+    if (slotN > 0 && slotN <= 32) return slotN;
+    // 3) 托管 GetAvatarCount（仅主线程，失败忽略）
+    // int() 在 Char 上不唯一 → kind 只验；优先明文名。
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    constexpr MethodShape kAv{0, TypeKind::I32, true, false, {}};
+    auto* mi = ResolveMi(gKlassChar, kRvaGetAvatarCount, kAv, "GetAvatarCount");
+    auto fn = FnFromMi<FnGetAvatarCount>(mi, kRvaGetAvatarCount);
+    if (fn) {
+        __try {
+            const int n = fn(charUi, mi);
+            if (n > 0 && n <= 32) return n;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return 0;
+}
+
+bool SlotEnabledOnMain(void* charUi, int index) {
+    // bool(int) 在 Char 上唯一。
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    constexpr MethodShape kSlot{1, TypeKind::Bool, true, false, {TypeKind::I32}};
+    auto* mi = ResolveMi(gKlassChar, kRvaIsSlotEnable, kSlot, "IsSlotEnable");
+    auto fn = FnFromMi<FnIsSlotEnable>(mi, kRvaIsSlotEnable);
+    if (!fn) return true;
+    __try {
+        return fn(charUi, index, mi);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+
+void ProbeOnMain(void*) {
+    UiSnap snap{};
+    if (!gGA && !BindApis()) {
+        gSnap = snap;
+        return;
+    }
+    snap.typesOk = ResolveTypes();
+
+    // static 返回 SceneLogin* 的 () 唯一。
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    constexpr MethodShape kGet{0, TypeKind::Ptr, true, false, {}};
+    auto* miGet = ResolveMi(gKlassSceneLogin, kRvaSceneLoginGet, kGet, "get_Instance");
+    auto getSl = FnFromMi<FnSceneLoginGet>(miGet, kRvaSceneLoginGet);
+    void* sl = nullptr;
+    if (getSl) {
+        __try {
+            sl = getSl(miGet);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            sl = nullptr;
+        }
+    }
+    snap.sceneLogin = sl;
+    if (sl) {
+        snap.channelUi = ReadPtr(sl, kOffSlChannelUi);
+        snap.worldUi = ReadPtr(sl, kOffSlWorldUi);
+        snap.charUi = ReadPtr(sl, kOffSlCharUi);
+    }
+
+    // FindAll 很重：有 SceneLogin 时少扫；但选角等待期必须能兜到 UILoginCharacter。
+    const bool light = (gPhase == Phase::WaitChannelArmed);
+    const bool needChar = (gPhase == Phase::WaitCharSelect || gPhase == Phase::PickChar ||
+                           gPhase == Phase::WaitCharArmed || gPhase == Phase::ConfirmChar ||
+                           gPhase == Phase::WaitLeaveChar);
+    if (!light || !sl) {
+        if (!snap.worldUi && gTypeWorld) snap.worldUi = FindFirstOfType(gTypeWorld);
+        if (!snap.channelUi && gTypeChannel) snap.channelUi = FindFirstOfType(gTypeChannel);
+        if (!snap.charUi && gTypeChar) snap.charUi = FindFirstOfType(gTypeChar);
+    } else if (needChar && !snap.charUi && gTypeChar) {
+        snap.charUi = FindFirstOfType(gTypeChar);
+    }
+    if (needChar && !snap.charUi && gTypeChar) {
+        snap.charUi = FindFirstOfType(gTypeChar);
+    }
+
+    if (snap.channelUi) {
+        snap.selectedWorld = ReadPtr(snap.channelUi, kOffChannelSelectedWorld);
+        snap.selectedChannelId = ReadI32(snap.channelUi, kOffChannelSelectedId);
+    }
+    if (snap.worldUi && !light) {
+        snap.worldItemCount = ListSize(ReadPtr(snap.worldUi, kOffWorldItems));
+        const DWORD now = GetTickCount();
+        if (now - gLastWorldsScanMs >= 1000) {
+            gLastWorldsScanMs = now;
+            CacheWorldItemsFromUi(snap.worldUi);
+        }
+    } else if (snap.worldUi) {
+        snap.worldItemCount = ListSize(ReadPtr(snap.worldUi, kOffWorldItems));
+    }
+    if (snap.charUi) {
+        snap.avatarCount = AvatarCountOnMain(snap.charUi);
+        // 选中槽必须在主线程读；worker 直读托管堆有 GC 竞态。
+        const int sel = ReadI32(snap.charUi, kOffCharSelectedIndex);
+        snap.charSelectedIndex =
+            (sel >= 0 && sel < 32) ? sel : -1;
+    }
+
+    gSnap = snap;
+}
+
+bool RefreshSnap() {
+    const DWORD now = GetTickCount();
+    if (gPumpFailUntil && now < gPumpFailUntil) {
+        LogThrottled("waiting main pump… (backoff)");
+        return false;
+    }
+    // 选角等待给更长超时；失败后退避，避免 80ms 狂塞队列拖死泵。
+    const DWORD waitMs = (gPhase == Phase::WaitCharSelect) ? 3000 : 1500;
+    if (!x::runtime::main_thread::InvokeAndWait(&ProbeOnMain, nullptr, waitMs)) {
+        gPumpFailUntil = GetTickCount() + kPumpFailBackoffMs;
+        LogThrottled("waiting main pump…");
+        return false;
+    }
+    gPumpFailUntil = 0;
     return true;
 }
 
@@ -487,40 +665,74 @@ void RunJobOnMain() {
     const JobKind kind = gJobKind;
     void* ui = gJobUi;
     const int a = gJobA;
+    const int b = gJobB;
     LeaveCriticalSection(&gJobCs);
 
     bool ok = false;
     __try {
+        using x::runtime::il2cpp_method::MethodShape;
+        using x::runtime::il2cpp_method::TypeKind;
         switch (kind) {
         case JobKind::ClickWorld: {
-            auto* mi = FindMethodByRva(gKlassWorld, kRvaOnClickWorldItem);
-            auto fn = AtRva<FnClickWorld>(kRvaOnClickWorldItem);
+            // void(int) 在 World 上唯一。
+            constexpr MethodShape kClick{1, TypeKind::Void, true, false, {TypeKind::I32}};
+            auto* mi = ResolveMi(gKlassWorld, kRvaOnClickWorldItem, kClick, "OnClickWorldItem");
+            auto fn = FnFromMi<FnClickWorld>(mi, kRvaOnClickWorldItem);
             if (ui && fn) {
                 fn(ui, a, mi);
                 ok = true;
             }
             break;
         }
-        case JobKind::EnterChannel: {
-            auto* miSel = FindMethodByRva(gKlassChannel, kRvaSelectChannel);
-            auto* miEnt = FindMethodByRva(gKlassChannel, kRvaEnterChannel);
-            auto fnSel = AtRva<FnSelectChannel>(kRvaSelectChannel);
-            auto fnEnt = AtRva<FnEnterChannel>(kRvaEnterChannel);
-            if (ui && fnSel && fnEnt) {
+        case JobKind::SelectChannel: {
+            // void(int) 在 Channel 上不唯一（含 EnterChannel）→ RVA 主路径 + kind 验形。
+            constexpr MethodShape kSel{1, TypeKind::Void, true, false, {TypeKind::I32}};
+            auto* miSel = ResolveMi(gKlassChannel, kRvaSelectChannel, kSel, "SelectChannel");
+            auto fnSel = FnFromMi<FnSelectChannel>(miSel, kRvaSelectChannel);
+            if (ui && fnSel) {
                 fnSel(ui, a, miSel);
-                fnEnt(ui, a, miEnt);
+                const int got = ReadI32(ui, kOffChannelSelectedId);
+                ok = (got == a);
+                if (!ok) Log("SelectChannel write miss want=%d got=%d", a, got);
+            }
+            break;
+        }
+        case JobKind::GoWorld: {
+            // 只点 OnClickButtonGoWorld。禁止 TriggerEnterChannel/SendSelectWorld(0xA96D20)：
+            // Go 内部已发 SelectWorld；再发一次 = 重复进频包 → 服端断线。
+            (void)b;
+            constexpr MethodShape kGo{0, TypeKind::Void, true, false, {}};
+            auto* miGo = ResolveMi(gKlassChannel, kRvaOnClickGoWorld, kGo, "OnClickButtonGoWorld");
+            auto fnGo = FnFromMi<FnGoWorld>(miGo, kRvaOnClickGoWorld);
+            if (ui && fnGo) {
+                const int armed = ReadI32(ui, kOffChannelSelectedId);
+                Log("GoWorld armedCh=%d (single click, no Trigger)", armed);
+                fnGo(ui, miGo);
                 ok = true;
             }
             break;
         }
-        case JobKind::SelectChar: {
-            auto* miSel = FindMethodByRva(gKlassChar, kRvaSelectCharacter);
-            auto* miClick = FindMethodByRva(gKlassChar, kRvaOnClickButtonSelect);
-            auto fnSel = AtRva<FnSelectChar>(kRvaSelectCharacter);
-            auto fnClick = AtRva<FnClickSelect>(kRvaOnClickButtonSelect);
-            if (ui && fnSel && fnClick) {
-                // Second arg defaults to false in dump; confirm is OnClickButtonSelect.
+        case JobKind::SelectCharIndex: {
+            // void(int,bool) 在 Char 上唯一。
+            constexpr MethodShape kSel{2, TypeKind::Void, true, false, {TypeKind::I32, TypeKind::Bool}};
+            auto* miSel = ResolveMi(gKlassChar, kRvaSelectCharacter, kSel, "SelectCharacter");
+            auto fnSel = FnFromMi<FnSelectChar>(miSel, kRvaSelectCharacter);
+            if (ui && fnSel) {
+                if (!SlotEnabledOnMain(ui, a)) {
+                    Log("SelectCharIndex slot disabled index=%d", a);
+                    break;
+                }
                 fnSel(ui, a, false, miSel);
+                ok = true;
+            }
+            break;
+        }
+        case JobKind::ConfirmCharClick: {
+            constexpr MethodShape kClick{0, TypeKind::Void, true, false, {}};
+            auto* miClick =
+                ResolveMi(gKlassChar, kRvaOnClickButtonSelect, kClick, "OnClickButtonSelect");
+            auto fnClick = FnFromMi<FnClickSelect>(miClick, kRvaOnClickButtonSelect);
+            if (ui && fnClick) {
                 fnClick(ui, miClick);
                 ok = true;
             }
@@ -539,73 +751,38 @@ void RunJobOnMain() {
     gJobPending.store(false);
 }
 
-void HookSendWill(const void* methodInfo) {
-    if (!gInPump.exchange(true)) {
-        if (gJobPending.load() && !gJobDone.load()) RunJobOnMain();
-        gInPump.store(false);
-    }
-    if (gOrigSendWill) gOrigSendWill(methodInfo);
-}
+void AeMainJob(void*) { RunJobOnMain(); }
 
-bool InstallPump() {
-    if (gPumpInstalled.load()) return true;
-    if (!gKlassCanvas) gKlassCanvas = FindClass("UnityEngine", "Canvas");
-    if (!gKlassCanvas) {
-        Log("InstallPump: Canvas klass miss");
-        return false;
-    }
-    gMiSendWill = FindMethodByRva(gKlassCanvas, kRvaSendWillRenderCanvases);
-    if (!gMiSendWill) {
-        Log("InstallPump: SendWillRenderCanvases MI miss");
-        return false;
-    }
-    void* orig = nullptr;
-    if (!PatchMethodInfo(gMiSendWill, reinterpret_cast<void*>(&HookSendWill), &orig)) {
-        Log("InstallPump: patch fail");
-        return false;
-    }
-    gOrigSendWill = reinterpret_cast<FnSendWill>(orig);
-    gPumpInstalled.store(true);
-    Log("InstallPump ok MI=%p orig=%p", (void*)gMiSendWill, orig);
-    return true;
-}
-
-void UninstallPump() {
-    if (!gPumpInstalled.exchange(false)) return;
-    if (gMiSendWill && gOrigSendWill) RestoreMethodInfo(gMiSendWill, reinterpret_cast<void*>(gOrigSendWill));
-    gMiSendWill = nullptr;
-    gOrigSendWill = nullptr;
-    Log("UninstallPump");
-}
-
-bool EnqueueJobAndWait(JobKind kind, void* ui, int a) {
-    if (!InstallPump()) return false;
+bool EnqueueJobAndWait(JobKind kind, void* ui, int a, int b = 0) {
     EnsureCs();
     EnterCriticalSection(&gJobCs);
     gJobKind = kind;
     gJobUi = ui;
     gJobA = a;
-    gJobB = 0;
+    gJobB = b;
     gJobDone.store(false);
     gJobOk.store(false);
     gJobPending.store(true);
     LeaveCriticalSection(&gJobCs);
 
-    const DWORD start = GetTickCount();
-    while (!gJobDone.load()) {
-        if (GetTickCount() - start > kJobWaitMs) {
-            Log("Job timeout kind=%u", (unsigned)kind);
-            gJobPending.store(false);
-            return false;
-        }
-        Sleep(5);
+    if (!x::runtime::main_thread::InvokeAndWait(&AeMainJob, nullptr, kJobWaitMs)) {
+        Log("EnqueueJob: pump fail/timeout kind=%u", (unsigned)kind);
+        gJobPending.store(false);
+        gPumpFailUntil = GetTickCount() + kPumpFailBackoffMs;
+        return false;
     }
+    Log("Job kind=%u ok=%d direct=%d", (unsigned)kind, gJobOk.load() ? 1 : 0,
+        x::runtime::main_thread::IsDirectMode() ? 1 : 0);
     return gJobOk.load();
 }
 
 void SetPhase(Phase p) {
     gPhase = p;
     gPhaseSince = GetTickCount();
+    // Done / Failed 都解冻：否则卡在选角/等 UI 时全端口 FindAll 永久死锁。
+    if (p == Phase::Done || p == Phase::Failed) {
+        x::runtime::managed_main::SetLoginFreeze(false);
+    }
 }
 
 bool PhaseTimedOut() { return GetTickCount() - gPhaseSince > kPhaseTimeoutMs; }
@@ -616,7 +793,9 @@ bool WorldMatches(void* world, int32_t wantId, const char* wantName) {
     if (!wantName || !wantName[0]) return false;
     char name[128]{};
     if (!ReadIl2CppStringUtf8(ReadPtr(world, kOffWorldName), name, sizeof(name))) return false;
-    return _stricmp(name, wantName) == 0;
+    if (_stricmp(name, wantName) == 0) return true;
+    const xcat::WorldNamesPack& wn = xcat::GetSharedWorldNames(x::runtime::GetBinDir());
+    return xcat::WorldNameEquals(wn, name, wantName);
 }
 
 int PickLeastChannelId(void* worldItem) {
@@ -624,52 +803,166 @@ int PickLeastChannelId(void* worldItem) {
     const int n = ListSize(list);
     int bestId = -1;
     int bestUsers = INT_MAX;
-    for (int i = 0; i < n; ++i) {
-        void* ch = ListAt(list, i);
-        if (!ch) continue;
-        if (ReadU8(ch, kOffChAdult) != 0) continue;
-        const int users = ReadI32(ch, kOffChUserNo);
-        const int cap = ReadI32(ch, kOffChCapacity);
-        if (cap > 0 && users >= cap) continue;
-        const int id = (int)ReadU8(ch, kOffChChannelId);
-        if (users < bestUsers || (users == bestUsers && (bestId < 0 || id < bestId))) {
-            bestUsers = users;
-            bestId = id;
+    // 审计：首屏 1..20 的人数快照（-1=表里没有该 id）。
+    int u20[21];
+    char flag20[21];  // ' '=eligible, 'A'=adult, 'F'=full, '?'=missing/bad
+    for (int id = 1; id <= 20; ++id) {
+        u20[id] = -1;
+        flag20[id] = '?';
+    }
+    // CCU：全表合法频道人数之和（与选最少人过滤略不同：满员也计入在线）。
+    // 同时喂每频填表，供进图后 channel_hop 优先未满。
+    {
+        long long ccuSum = 0;
+        int ccuN = 0;
+        x::features::ccu::ChannelFillRow fillRows[64]{};
+        int fillN = 0;
+        for (int i = 0; i < n; ++i) {
+            void* ch = ListAt(list, i);
+            if (!ch) continue;
+            const int id = (int)ReadU8(ch, kOffChChannelId);
+            const int users = ReadI32(ch, kOffChUserNo);
+            const int cap = ReadI32(ch, kOffChCapacity);
+            const int adult = (int)ReadU8(ch, kOffChAdult);
+            if (id >= 1 && id <= 20) {
+                u20[id] = users;
+                if (adult != 0)
+                    flag20[id] = 'A';
+                else if (users < 0)
+                    flag20[id] = '?';
+                else if (cap > 0 && users >= cap)
+                    flag20[id] = 'F';
+                else
+                    flag20[id] = ' ';
+            }
+            if (id >= 1 && id <= 64 && fillN < 64) {
+                fillRows[fillN].channelId = static_cast<uint8_t>(id);
+                fillRows[fillN].users = static_cast<int16_t>(users > 32767 ? 32767 : users);
+                fillRows[fillN].cap = static_cast<int16_t>(cap > 32767 ? 32767 : cap);
+                fillRows[fillN].adult = adult != 0 ? 1 : 0;
+                ++fillN;
+            }
+            if (id < 1 || id > 64) continue;
+            if (adult != 0) continue;
+            if (users < 0) continue;
+            ccuSum += users;
+            ++ccuN;
+        }
+        if (ccuN > 0) {
+            x::features::ccu::NotifyWorldChannelSnapshot(ccuSum, ccuN, "auto_enter");
+        }
+        if (fillN > 0) {
+            x::features::ccu::NotifyChannelFillTable(fillRows, fillN, "auto_enter");
         }
     }
-    return bestId;
+    // 两行打全 1..20；后缀 A=成人 F=满员；无后缀=可入选；?=表里没有。
+    {
+        char line[320];
+        int pos = snprintf(line, sizeof(line), "  ch1-10:");
+        for (int id = 1; id <= 10 && pos > 0 && (size_t)pos + 28 < sizeof(line); ++id) {
+            if (u20[id] < 0)
+                pos += snprintf(line + pos, sizeof(line) - (size_t)pos, " %d=?", id);
+            else if (flag20[id] == ' ')
+                pos += snprintf(line + pos, sizeof(line) - (size_t)pos, " %d=%d", id, u20[id]);
+            else
+                pos += snprintf(line + pos, sizeof(line) - (size_t)pos, " %d=%d%c", id, u20[id],
+                                flag20[id]);
+        }
+        Log("%s", line);
+        pos = snprintf(line, sizeof(line), "  ch11-20:");
+        for (int id = 11; id <= 20 && pos > 0 && (size_t)pos + 28 < sizeof(line); ++id) {
+            if (u20[id] < 0)
+                pos += snprintf(line + pos, sizeof(line) - (size_t)pos, " %d=?", id);
+            else if (flag20[id] == ' ')
+                pos += snprintf(line + pos, sizeof(line) - (size_t)pos, " %d=%d", id, u20[id]);
+            else
+                pos += snprintf(line + pos, sizeof(line) - (size_t)pos, " %d=%d%c", id, u20[id],
+                                flag20[id]);
+        }
+        Log("%s", line);
+    }
+    // 前三少（仅 pass0 可入选：非成人、未满员、1..20）。
+    {
+        int topId[3] = {-1, -1, -1};
+        int topUsers[3] = {INT_MAX, INT_MAX, INT_MAX};
+        for (int id = 1; id <= 20; ++id) {
+            if (flag20[id] != ' ' || u20[id] < 0) continue;
+            const int users = u20[id];
+            for (int slot = 0; slot < 3; ++slot) {
+                if (users < topUsers[slot] ||
+                    (users == topUsers[slot] && (topId[slot] < 0 || id < topId[slot]))) {
+                    for (int k = 2; k > slot; --k) {
+                        topUsers[k] = topUsers[k - 1];
+                        topId[k] = topId[k - 1];
+                    }
+                    topUsers[slot] = users;
+                    topId[slot] = id;
+                    break;
+                }
+            }
+        }
+        Log("  top3 least: %d=%d  %d=%d  %d=%d", topId[0],
+            topId[0] >= 0 ? topUsers[0] : -1, topId[1], topId[1] >= 0 ? topUsers[1] : -1, topId[2],
+            topId[2] >= 0 ? topUsers[2] : -1);
+    }
+    // 先在 1..20 里找最少人（对齐首屏可见频道）；没有再扫全表。
+    for (int pass = 0; pass < 2; ++pass) {
+        bestId = -1;
+        bestUsers = INT_MAX;
+        for (int i = 0; i < n; ++i) {
+            void* ch = ListAt(list, i);
+            if (!ch) continue;
+            const int id = (int)ReadU8(ch, kOffChChannelId);
+            const int users = ReadI32(ch, kOffChUserNo);
+            const int cap = ReadI32(ch, kOffChCapacity);
+            const int adult = (int)ReadU8(ch, kOffChAdult);
+            if (id < 1 || id > 64) continue;
+            if (pass == 0 && id > 20) continue;
+            if (adult != 0) continue;
+            if (cap > 0 && users >= cap) continue;
+            if (users < 0) continue;
+            if (users < bestUsers || (users == bestUsers && (bestId < 0 || id < bestId))) {
+                bestUsers = users;
+                bestId = id;
+            }
+        }
+        if (bestId >= 0) {
+            Log("PickLeast → id=%d users=%d of %d channels (pass=%d)", bestId, bestUsers, n, pass);
+            return bestId;
+        }
+    }
+    Log("PickLeast → none of %d channels", n);
+    return -1;
 }
 
 int AvatarCount(void* charUi) {
-    if (!charUi) return 0;
-    auto fn = AtRva<FnGetAvatarCount>(kRvaGetAvatarCount);
-    auto* mi = FindMethodByRva(gKlassChar, kRvaGetAvatarCount);
-    if (fn) {
-        __try {
-            return fn(charUi, mi);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
+    // Prefer last main-thread snap; do not call managed GetAvatarCount from worker.
+    if (charUi && charUi == gSnap.charUi) return gSnap.avatarCount;
     return ListSize(ReadPtr(charUi, kOffCharAvatarList));
 }
 
-bool SlotEnabled(void* charUi, int index) {
-    auto fn = AtRva<FnIsSlotEnable>(kRvaIsSlotEnable);
-    auto* mi = FindMethodByRva(gKlassChar, kRvaIsSlotEnable);
-    if (!fn) return true;
-    __try {
-        return fn(charUi, index, mi);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return true;
-    }
+bool StillOnTargetChannelUi(int32_t wantId, const char* wantName) {
+    return gSnap.channelUi && gSnap.selectedWorld && WorldMatches(gSnap.selectedWorld, wantId, wantName);
 }
 
 void ResetRuntime() {
     gPickedWorld = nullptr;
     gPickedWorldIndex = -1;
     gPickedChannelId = -1;
+    gWorldClickedAt = 0;
+    gChannelSelectedAt = 0;
+    gEnterAttemptAt = 0;
+    gLeftChannelAt = 0;
+    gCharReadyAt = 0;
+    gCharSelectedAt = 0;
+    gCharConfirmAt = 0;
+    gPumpFailUntil = 0;
+    gEnterAttempts = 0;
+    gCharConfirmAttempts = 0;
+    gPickCharIndex = -1;
     gJobPending.store(false);
     gJobDone.store(true);
+    gSnap = {};
 }
 
 void Tick() {
@@ -678,6 +971,13 @@ void Tick() {
             Log("desired off → Idle");
             SetPhase(Phase::Idle);
             ResetRuntime();
+        }
+        // Still probe occasionally to refresh worlds cache while on login UI.
+        static DWORD sLastIdleProbe = 0;
+        const DWORD now = GetTickCount();
+        if (now - sLastIdleProbe > 1000) {
+            sLastIdleProbe = now;
+            (void)RefreshSnap();
         }
         return;
     }
@@ -690,12 +990,9 @@ void Tick() {
     }
     if (gPhase == Phase::Done || gPhase == Phase::Failed) return;
 
-    if (!ResolveTypes()) {
-        LogThrottled("waiting class types…");
-        return;
-    }
-    if (!InstallPump()) {
-        LogThrottled("waiting canvas pump…");
+    if (!RefreshSnap()) return;
+    if (!gSnap.typesOk && !gSnap.sceneLogin && !gSnap.worldUi && !gSnap.channelUi) {
+        LogThrottled("waiting SceneLogin / class types…");
         return;
     }
 
@@ -715,13 +1012,23 @@ void Tick() {
             LogThrottled("need worldId or worldName in panel");
             return;
         }
-        void* worldUi = FindFirstOfType(gTypeWorld);
+        // 已在频道页（手动点过分区）：直接续跑选频道。
+        {
+            void* chUi = gSnap.channelUi;
+            void* sel = gSnap.selectedWorld;
+            if (chUi && sel && WorldMatches(sel, wantId, wantName)) {
+                gPickedWorld = sel;
+                Log("resume from channel UI worldId=%d", ReadI32(sel, kOffWorldId));
+                SetPhase(Phase::PickChannel);
+                break;
+            }
+        }
+        void* worldUi = gSnap.worldUi;
         if (!worldUi) {
-            LogThrottled("waiting UILoginWorld…");
+            LogThrottled("waiting UILoginWorld… (sl=%p)", gSnap.sceneLogin);
             return;
         }
-        void* items = ReadPtr(worldUi, kOffWorldItems);
-        if (ListSize(items) <= 0) {
+        if (gSnap.worldItemCount <= 0) {
             LogThrottled("waiting WorldItems…");
             return;
         }
@@ -729,7 +1036,7 @@ void Tick() {
         break;
     }
     case Phase::PickWorld: {
-        void* worldUi = FindFirstOfType(gTypeWorld);
+        void* worldUi = gSnap.worldUi;
         void* items = worldUi ? ReadPtr(worldUi, kOffWorldItems) : nullptr;
         const int n = ListSize(items);
         int idx = -1;
@@ -753,23 +1060,40 @@ void Tick() {
         }
         gPickedWorld = world;
         gPickedWorldIndex = idx;
+        gWorldClickedAt = GetTickCount();
         SetPhase(Phase::WaitChannelUi);
         break;
     }
     case Phase::WaitChannelUi: {
-        void* chUi = FindFirstOfType(gTypeChannel);
-        void* sel = chUi ? ReadPtr(chUi, kOffChannelSelectedWorld) : nullptr;
+        void* chUi = gSnap.channelUi;
+        void* sel = gSnap.selectedWorld;
         if (!chUi || !sel) {
             LogThrottled("waiting UILoginChannel+WorldItem…");
             return;
         }
-        // Prefer the world object the channel UI holds after SetWorldItem.
+        // 必须等 SetWorldItem 把目标分区写进频道页，避免点完分区立刻误用旧 WorldItem。
+        if (!WorldMatches(sel, wantId, wantName)) {
+            LogThrottled("channel UI world mismatch (want=%d got=%d) — wait SetWorldItem", wantId,
+                         ReadI32(sel, kOffWorldId));
+            return;
+        }
+        if (gWorldClickedAt && GetTickCount() - gWorldClickedAt < kAfterWorldClickMs) {
+            return;
+        }
+        const int chN = ListSize(ReadPtr(sel, kOffWorldChannels));
+        if (chN <= 0) {
+            LogThrottled("waiting channel list on WorldItem…");
+            return;
+        }
         gPickedWorld = sel;
+        Log("WaitChannelUi ready worldId=%d channels=%d", ReadI32(sel, kOffWorldId), chN);
         SetPhase(Phase::PickChannel);
         break;
     }
     case Phase::PickChannel: {
-        void* chUi = FindFirstOfType(gTypeChannel);
+        void* chUi = gSnap.channelUi;
+        void* sel = gSnap.selectedWorld;
+        if (sel && WorldMatches(sel, wantId, wantName)) gPickedWorld = sel;
         if (!chUi || !gPickedWorld) {
             SetPhase(Phase::WaitChannelUi);
             return;
@@ -780,27 +1104,92 @@ void Tick() {
             SetPhase(Phase::Failed);
             return;
         }
-        Log("PickChannel id=%d (least users)", chId);
-        if (!EnqueueJobAndWait(JobKind::EnterChannel, chUi, chId)) {
+        Log("PickChannel Select id=%d", chId);
+        if (!EnqueueJobAndWait(JobKind::SelectChannel, chUi, chId)) {
             SetPhase(Phase::Failed);
             return;
         }
         gPickedChannelId = chId;
+        gChannelSelectedAt = GetTickCount();
+        gEnterAttempts = 0;
+        SetPhase(Phase::WaitChannelArmed);
+        break;
+    }
+    case Phase::WaitChannelArmed: {
+        void* chUi = gSnap.channelUi;
+        if (!chUi || !StillOnTargetChannelUi(wantId, wantName)) {
+            LogThrottled("WaitChannelArmed: channel UI gone early — wait char");
+            gLeftChannelAt = GetTickCount();
+            SetPhase(Phase::WaitCharSelect);
+            return;
+        }
+        const int armed = gSnap.selectedChannelId;
+        if (armed != gPickedChannelId) {
+            LogThrottled("waiting channel armed want=%d got=%d", gPickedChannelId, armed);
+            if (gChannelSelectedAt && GetTickCount() - gChannelSelectedAt > 2000) {
+                Log("re-SelectChannel id=%d", gPickedChannelId);
+                (void)EnqueueJobAndWait(JobKind::SelectChannel, chUi, gPickedChannelId);
+                gChannelSelectedAt = GetTickCount();
+            }
+            return;
+        }
+        if (gChannelSelectedAt && GetTickCount() - gChannelSelectedAt < kAfterSelectChannelMs) {
+            return;
+        }
+        const int worldIdLog =
+            gPickedWorld ? ReadI32(gPickedWorld, kOffWorldId) : (wantId > 0 ? wantId : 0);
+        Log("GoWorld id=%d worldId=%d (Select armed)", gPickedChannelId, worldIdLog);
+        if (!EnqueueJobAndWait(JobKind::GoWorld, chUi, gPickedChannelId)) {
+            SetPhase(Phase::Failed);
+            return;
+        }
+        gEnterAttemptAt = GetTickCount();
+        gEnterAttempts = 1;
+        gLeftChannelAt = 0;
         SetPhase(Phase::WaitCharSelect);
         break;
     }
     case Phase::WaitCharSelect: {
-        void* charUi = FindFirstOfType(gTypeChar);
-        const int count = AvatarCount(charUi);
-        if (!charUi || count <= 0) {
-            LogThrottled("waiting UILoginCharacter avatars…");
+        // 选角页已出来时，SceneLogin 往往仍挂着 channelUi 指针——不能当成「还在频道页」。
+        if (gSnap.charUi) {
+            const int count = gSnap.avatarCount;
+            LogThrottled("char UI present avatars=%d chLinger=%p sl=%p", count, gSnap.channelUi,
+                         gSnap.sceneLogin);
+            if (count <= 0) {
+                gCharReadyAt = 0;
+                return;
+            }
+            if (!gCharReadyAt) {
+                gCharReadyAt = GetTickCount();
+                Log("char UI ready avatars=%d — settle %ums before Select", count,
+                    (unsigned)kCharReadySettleMs);
+            }
+            if (GetTickCount() - gCharReadyAt < kCharReadySettleMs) return;
+            Log("char UI settled avatars=%d (ignore lingering channel ptr)", count);
+            SetPhase(Phase::PickChar);
+            break;
+        }
+        // 尚无选角 UI：若频道指针还在，只等不重发。
+        if (StillOnTargetChannelUi(wantId, wantName)) {
+            gLeftChannelAt = 0;
+            gCharReadyAt = 0;
+            LogThrottled("waiting leave channel UI… (goSent=%d armed=%d, no auto-retry)",
+                         gEnterAttempts, gSnap.selectedChannelId);
             return;
         }
-        SetPhase(Phase::PickChar);
-        break;
+
+        if (!gLeftChannelAt) gLeftChannelAt = GetTickCount();
+        if (GetTickCount() - gLeftChannelAt < kLeftChannelHoldMs) {
+            LogThrottled("left channel UI, settling…");
+            return;
+        }
+
+        LogThrottled("waiting UILoginCharacter… (char=null sl=%p ch=%p)", gSnap.sceneLogin,
+                     gSnap.channelUi);
+        return;
     }
     case Phase::PickChar: {
-        void* charUi = FindFirstOfType(gTypeChar);
+        void* charUi = gSnap.charUi;
         if (!charUi) {
             SetPhase(Phase::WaitCharSelect);
             return;
@@ -808,25 +1197,101 @@ void Tick() {
         uint32_t slot = gCharSlot.load();
         if (slot < 1) slot = 1;
         const int index = (int)slot - 1;
-        const int count = AvatarCount(charUi);
+        const int count = gSnap.avatarCount > 0 ? gSnap.avatarCount : AvatarCount(charUi);
+        if (count <= 0) {
+            LogThrottled("PickChar: avatars still 0");
+            gCharReadyAt = 0;
+            SetPhase(Phase::WaitCharSelect);
+            return;
+        }
         if (index < 0 || index >= count) {
             Log("char slot %u out of range (count=%d)", slot, count);
             SetPhase(Phase::Failed);
             return;
         }
-        if (!SlotEnabled(charUi, index)) {
-            Log("char slot %u disabled", slot);
+        gPickCharIndex = index;
+
+        // 游戏进选角页常已默认选中第一个 / 上次角色；再 Select 同 index = 视觉「选两次」。
+        // charSelectedIndex 来自主线程快照；未知 (-1) 时保守走 Select。
+        const int curSel = gSnap.charSelectedIndex;
+        if (curSel == index) {
+            Log("PickChar already selected index=%d slot=%u (skip Select, confirm only)", index,
+                slot);
+            gCharSelectedAt = GetTickCount();
+            SetPhase(Phase::ConfirmChar);
+            break;
+        }
+
+        Log("PickChar Select index=%d slot=%u count=%d (wasSelected=%d)", index, slot, count,
+            curSel);
+        if (!EnqueueJobAndWait(JobKind::SelectCharIndex, charUi, index)) {
             SetPhase(Phase::Failed);
             return;
         }
-        Log("PickChar slot=%u index=%d", slot, index);
-        if (!EnqueueJobAndWait(JobKind::SelectChar, charUi, index)) {
-            SetPhase(Phase::Failed);
-            return;
-        }
-        SetPhase(Phase::Done);
-        Log("Done — latched until autoEnter off");
+        gCharSelectedAt = GetTickCount();
+        SetPhase(Phase::WaitCharArmed);
         break;
+    }
+    case Phase::WaitCharArmed: {
+        if (!gSnap.charUi) {
+            // 选完人后 UI 已拆——可能已点进；转等待离开/进图。
+            SetPhase(Phase::WaitLeaveChar);
+            break;
+        }
+        if (GetTickCount() - gCharSelectedAt < kAfterSelectCharMs) return;
+        SetPhase(Phase::ConfirmChar);
+        break;
+    }
+    case Phase::ConfirmChar: {
+        void* charUi = gSnap.charUi;
+        if (!charUi) {
+            SetPhase(Phase::WaitLeaveChar);
+            break;
+        }
+        Log("ConfirmChar click attempt=%d index=%d", gCharConfirmAttempts + 1, gPickCharIndex);
+        if (!EnqueueJobAndWait(JobKind::ConfirmCharClick, charUi, gPickCharIndex)) {
+            SetPhase(Phase::Failed);
+            return;
+        }
+        ++gCharConfirmAttempts;
+        gCharConfirmAt = GetTickCount();
+        SetPhase(Phase::WaitLeaveChar);
+        break;
+    }
+    case Phase::WaitLeaveChar: {
+        // 真进图 / 选角 UI 消失才算 Done；假 ok 会一直停在 charUi。
+        if (!gSnap.charUi) {
+            Log("left char UI after confirm — Done");
+            SetPhase(Phase::Done);
+            Log("Done — latched until autoEnter off");
+            break;
+        }
+        if (x::features::ports::world::IsPlayReady()) {
+            Log("play ready while char UI linger — Done");
+            SetPhase(Phase::Done);
+            Log("Done — latched until autoEnter off");
+            break;
+        }
+        if (gCharConfirmAttempts >= kMaxCharConfirmAttempts) {
+            Log("ConfirmChar exhausted attempts=%d — Failed (still on char UI)",
+                gCharConfirmAttempts);
+            SetPhase(Phase::Failed);
+            return;
+        }
+        if (gCharConfirmAt && GetTickCount() - gCharConfirmAt >= kCharConfirmRetryMs) {
+            Log("still on char UI — retry ConfirmChar (%d/%d)", gCharConfirmAttempts + 1,
+                kMaxCharConfirmAttempts);
+            // 已在选角页：优先只重确认；仅当选中槽不对/未知才回 PickChar 重选。
+            const int curSel = gSnap.charSelectedIndex;
+            if (gSnap.charUi && curSel == gPickCharIndex) {
+                SetPhase(Phase::ConfirmChar);
+            } else {
+                SetPhase(Phase::PickChar);
+            }
+            break;
+        }
+        LogThrottled("waiting leave char UI… (confirm=%d)", gCharConfirmAttempts);
+        return;
     }
     default:
         break;
@@ -835,10 +1300,12 @@ void Tick() {
 
 DWORD WINAPI WorkerProc(LPVOID) {
     OpenLogs();
-    Log("worker start");
+    Log("worker start (main-thread probe only; no worker FindAll)");
     while (!gWorkerStop.load()) {
         x::ipc::PayloadControl_Poll();
-        if (gGA || BindApis()) Tick();
+        if (gGA || BindApis()) {
+            Tick();
+        }
         Sleep(kTickMs);
     }
     Log("worker stop");
@@ -856,7 +1323,6 @@ void Init() {
 
 void Shutdown() {
     StopWorker();
-    UninstallPump();
     if (gLog != INVALID_HANDLE_VALUE) {
         CloseHandle(gLog);
         gLog = INVALID_HANDLE_VALUE;
@@ -875,7 +1341,6 @@ void StopWorker() {
     gWorkerStop.store(true);
     gDesired.store(false);
     // Signal only under loader lock — do not join.
-    UninstallPump();
 }
 
 void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSlot) {
@@ -888,10 +1353,12 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
     CopyWorldNameLocked(worldName);
     gDesired.store(on);
     if (on && !was) {
+        x::runtime::managed_main::SetLoginFreeze(true);
         SetPhase(Phase::Idle);
         ResetRuntime();
     }
     if (!on && was) {
+        x::runtime::managed_main::SetLoginFreeze(false);
         SetPhase(Phase::Idle);
         ResetRuntime();
     }

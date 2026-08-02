@@ -9,10 +9,16 @@ $Script = Join-Path $Root "scripts\twms-update-server.mjs"
 
 Write-Host "XCat TWMS update API"
 Write-Host "  root: $Root"
-Write-Host "  url:  http://127.0.0.1:$Port/twms"
-Write-Host "  manifest: http://127.0.0.1:$Port/twms/update/latest.json"
+Write-Host "  bind: http://${HostBind}:$Port/twms"
+Write-Host "  client default: http://xcat.work:$Port/twms"
+Write-Host "  manifest: http://xcat.work:$Port/twms/update/latest.json"
+Write-Host "  local probe: http://127.0.0.1:$Port/twms/health"
 Write-Host "Stop: Ctrl+C or scripts\stop-twms-update-server.ps1"
 Write-Host ""
 
 Set-Location $Root
-node $Script --host $HostBind --port $Port --base-path /twms
+node $Script --host $HostBind --port $Port --base-path /twms `
+  --release-root artifacts\release `
+  --out user_log_uploads `
+  --accept-profile twms `
+  --access-log artifacts\ops_logs\twms_access.jsonl

@@ -22,11 +22,9 @@ namespace {
 
 struct LogUploadUiState {
     bool loaded = false;
-    char url[512]{};
     char note[kMaxUploadNoteUtf8Bytes + 1]{};
-    LogUploadMode mode = LogUploadMode::Light;
+    LogUploadMode mode = LogUploadMode::Full;
     std::string exeBinDir;
-    std::string defaultUrl;
     std::string clearedNoteForUploadId;
 };
 
@@ -36,17 +34,6 @@ std::string ExeBinDirUtf8() {
     wchar_t path[MAX_PATH]{};
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     return xcat::WideToUtf8(xcat::ParentDirWithSlash(path));
-}
-
-void SetTextBuf(char* buf, size_t cap, const std::string& text) {
-    if (!buf || cap == 0) return;
-    if (text.size() >= cap) {
-        memcpy(buf, text.data(), cap - 1);
-        buf[cap - 1] = '\0';
-    } else {
-        memcpy(buf, text.data(), text.size());
-        buf[text.size()] = '\0';
-    }
 }
 
 int LogUploadNoteCallback(ImGuiInputTextCallbackData* data) {
@@ -64,7 +51,8 @@ int LogUploadNoteCallback(ImGuiInputTextCallbackData* data) {
 
 void PersistLogUploadUiPrefs() {
     LogUploadPrefs prefs{};
-    prefs.url = g_ui.url;
+    // 上报/更新口写死内置默认，面板不再暴露可编辑域名。
+    prefs.url = kDefaultUpdateServiceUrl;
     prefs.mode = g_ui.mode;
     SaveLogUploadPrefs(g_ui.exeBinDir, prefs);
 }
@@ -73,23 +61,25 @@ void EnsureLogUploadUiLoaded(const std::string& prefsBinDir) {
     if (g_ui.loaded) return;
     g_ui.loaded = true;
     g_ui.exeBinDir = ExeBinDirUtf8();
-    g_ui.defaultUrl = kDefaultUpdateServiceUrl;
 
     LogUploadPrefs defaults{};
     defaults.url = kDefaultUpdateServiceUrl;
-    defaults.mode = LogUploadMode::Light;
+    defaults.mode = LogUploadMode::Full;
     const LogUploadPrefs prefs = LoadLogUploadPrefs(g_ui.exeBinDir, defaults);
-    SetTextBuf(g_ui.url, sizeof(g_ui.url), prefs.url.empty() ? g_ui.defaultUrl : prefs.url);
-    g_ui.mode = prefs.mode;
+    g_ui.mode = LogUploadMode::Full;
+    if (prefs.mode != LogUploadMode::Full) {
+        PersistLogUploadUiPrefs();
+    }
     (void)prefsBinDir;
 }
 
 LogUploadRequest MakeLogUploadRequest(const std::string& prefsBinDir) {
     EnsureLogUploadUiLoaded(prefsBinDir);
     LogUploadRequest req{};
-    req.url = g_ui.url;
+    req.url = kDefaultUpdateServiceUrl;
     req.note = NormalizeUploadNote(g_ui.note);
-    req.mode = g_ui.mode;
+    // 排障固定全量：各频道磁盘现存卷全部上传。
+    req.mode = LogUploadMode::Full;
     req.profileId = "twms";
     req.exeBinDir = g_ui.exeBinDir;
     req.payloadBinDir = prefsBinDir.empty()
@@ -115,11 +105,6 @@ void DrawLogUploadPanel(const std::string& prefsBinDir) {
 
     if (uploading) ImGui::BeginDisabled();
     ImGui::SetNextItemWidth(-1.f);
-    ImGui::InputTextWithHint("##log_upload_url", "上报服务根（如 http://127.0.0.1:18789/twms）",
-                             g_ui.url, sizeof(g_ui.url));
-    if (ImGui::IsItemDeactivatedAfterEdit()) PersistLogUploadUiPrefs();
-
-    ImGui::SetNextItemWidth(-1.f);
     ImGui::InputTextWithHint("##log_upload_note", "备注（可选，说明 BUG 原因）", g_ui.note,
                              sizeof(g_ui.note), ImGuiInputTextFlags_CallbackEdit,
                              LogUploadNoteCallback);
@@ -131,20 +116,9 @@ void DrawLogUploadPanel(const std::string& prefsBinDir) {
         ImGui::SetItemTooltip("%s", tip);
     }
 
-    {
-        const char* modeItems[] = {"轻量上传", "全量上传"};
-        int modeIdx = g_ui.mode == LogUploadMode::Full ? 1 : 0;
-        ImGui::SetNextItemWidth(-1.f);
-        if (ImGui::Combo("##log_upload_mode", &modeIdx, modeItems, 2)) {
-            g_ui.mode = modeIdx == 1 ? LogUploadMode::Full : LogUploadMode::Light;
-            PersistLogUploadUiPrefs();
-            sound::UiClick();
-        }
-        ImGui::SetItemTooltip(
-            "轻量：最近约 20 卷日志。\n"
-            "全量：最多 360 卷。\n"
-            "含 app/launcher/inject/payload 等；有测谎包则附带。");
-    }
+    ImGui::TextDisabled(
+        "全量上传：launcher / inject / x.jsonl + XCat_data/logs 全部功能日志"
+        "（含轮转卷，最多 360）。");
     if (uploading) ImGui::EndDisabled();
 
     const LogUploadRequest req = MakeLogUploadRequest(prefsBinDir);
@@ -157,11 +131,11 @@ void DrawLogUploadPanel(const std::string& prefsBinDir) {
     if (!configured || uploading) ImGui::EndDisabled();
 
     if (!configured) {
-        ImGui::TextDisabled("未配置上报地址（默认 %s）", kDefaultUpdateServiceUrl);
+        ImGui::TextDisabled("上报服务未就绪");
     } else if (!snap.message.empty()) {
         ImGui::TextWrapped("%s", snap.message.c_str());
     } else {
-        ImGui::TextDisabled("仅上传日志文件；默认上报到本机 ops 服务 /twms。");
+        ImGui::TextDisabled("仅上传日志文件到内置运维口（不展示地址）。");
     }
 
     const std::vector<LogUploadHistoryEntry> history = GetLogUploadHistory();

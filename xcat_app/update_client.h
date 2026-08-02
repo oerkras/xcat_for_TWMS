@@ -44,7 +44,7 @@ bool           AutoReceiveUpdatesEnabled();  // 恒 true；保留供调用方语
 bool           SetAutoReceiveUpdatesEnabled(const std::string& payloadBinDir, bool enabled);
 bool           StartUpdateCheck(const std::string& serviceUrl);  // 检查→有更新则自动下载
 bool           StartUpdateDownload();  // 仅下载；下载完成后由 UI 自动安装并重启
-// 每 30 秒检查一次运维端发布的强制更新标记；仅对低于目标 build 的客户端生效。
+// 每 60 秒检查一次运维端发布的强制更新标记；仅对低于目标 build 的客户端生效。
 void           UpdateForcePollTick(const std::string& serviceUrl, const std::string& payloadBinDir);
 // 原子：若自动安装已就绪则切入 Installing 并后台装包。
 bool           TryStartAutoInstall(const std::string& installDir);
@@ -60,7 +60,7 @@ bool           ClearPostUpdateColdStartRequest(const std::string& payloadBinDir)
 // 删文件并提示（一次性）。
 bool           ConsumeUpdateFailedNotify(const std::string& payloadBinDir);
 
-// TWMS Node 更新 API 默认基址（范围 B）；静态发布站仍在 :52080。
-inline constexpr const char* kDefaultUpdateServiceUrl = "http://127.0.0.1:18789/twms";
+// TWMS 更新/上报默认基址（对齐枫星：公网域名 xcat.work；本机运维仍绑 0.0.0.0:18789）。
+inline constexpr const char* kDefaultUpdateServiceUrl = "http://xcat.work:18789/twms";
 
 }  // namespace xcat::app

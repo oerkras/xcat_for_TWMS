@@ -21,6 +21,7 @@ struct AppWindow {
     ULONGLONG launchTickMs = 0;   // GetTickCount64() at startup
     char  runTimeText[32]{};      // "运行 HH:MM:SS"（每帧刷新）
     std::atomic<bool> hotkeyF7{false};  // F7 全局热键置位（WndProc 收 WM_HOTKEY → main 循环消费切换超级赶路）
+    std::atomic<bool> hotkeyF10{false}; // F10 随机换频（与挂机卡按钮同路径）
     int titleBarHeightPx = 32;
     int captionButtonsWidthPx = 80;
     HWND webHost = nullptr;  // 静默 WebView2 宿主（隐藏，不占 ImGui 布局）

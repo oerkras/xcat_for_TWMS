@@ -1,8 +1,8 @@
 # 客户端 Hack 标志 → 服端逻辑推断（Classic TWMS）
 
-> **状态**：dump 符号级推断（方法体为空；无 IDA 正文）  
-> **证据源**：`Dumps/cms_cw/dump.cs`（语义名）；TW `runtime/out` 哈希类需 Rosetta 对齐  
-> **日期**：2026-07-30  
+> **状态**：dump 符号 + TW IDA xref/常量解码 + BIN 探针（攻包窗详文 2026-08-01）  
+> **证据源**：`Dumps/cms_cw/dump.cs`（语义名）；TW `runtime/out` / `GameAssembly.dll.i64`；`x.jsonl` tag=`SecAttack`  
+> **日期**：2026-07-30（§3.3 攻包窗于 2026-08-01 扩链至专文）  
 > **目的**：澄清 `m_bFloatHackCheckNeed` / `m_bABHackCheckNeed` / `ClientHacksType` **能**反推什么、**不能**当成玩家飞天校验器
 
 ---
@@ -115,14 +115,40 @@ F6 飞天踢线请对齐 MovePath 基线 + [`../kick_sniff/断线错误码.md`](
 | 20 | AttackPacketCountCheck | 攻包频率（见下） |
 | 21 | MobSpeedHack | 怪加速（回到 §2） |
 
-### 3.3 `SecurityClient` 旁证（实锤）
+### 3.3 `SecurityClient` 攻包窗 / type20（摘要 · 详文另册）
+
+> **完整挖空 + BIN + `IsAttackPacket` 白名单**：见 [`攻包计数窗与type20.md`](攻包计数窗与type20.md)（2026-08-01）。
 
 `Msc.Security.SecurityClient`：
 
-- `CollectAttackPacket` / `CollectAttackSkill`
+- `CollectAttackPacket` / `CollectAttackSkill` / `IsAttackPacket`
 - 窗长 `TERM_MS = 60000`，`CHECK_COUNT = 2000`
-- `SendAttackPacketCountCheck` → 对应 type **20**
-- `SendMobSpeedHackDetectCheck` → type **21**
+- `SendAttackPacketCountCheck` → **type 20**；`SendMobSpeedHackDetectCheck` → **type 21**
+- 攻包白名单（CMS）：`UserMelee/Shoot/Magic/BodyAttack` = **50–53**，`SummonedSkill` = **191**
+- 每帧：`a480_Update` → 安全 tick → 同时跑 type20/21 检查
+
+**TW IDA（2026-08-03 重锚 · imagebase `0x7FFB74A20000`）**：
+
+| 符号 | VA / RVA |
+|---|---|
+| `SecurityClient_CollectAttackPacket` | `0x7FFB78664C10` / `0x3C44C10` |
+| `SecurityClient_IsAttackPacket` | `0x7FFB786650E0` / `0x3C450E0` |
+| `SecurityClient_CollectAttackSkill` | `0x7FFB78665270` / `0x3C45270` |
+| `SecurityClient` 类哈希 | `d9ef28f1…ce4cb7f`（旧 `ba499947…` 作废） |
+| `LiveValueManager.GetInt_Def` | 见 LiveValue 挖空（随 GA 重基） |
+| `LiveValue.GetInt`（static） | 同上 |
+
+详文：[`攻包计数窗与type20.md`](攻包计数窗与type20.md)。
+
+- `TERM_MS`/`CHECK_COUNT` 元数据仍为 **60000 / 2000**；函数体 CFF，靠反汇编解码。
+- BIN：`security_attack_port` tag=`SecAttack` 已采到 `peakKey≥1`；布局须 `Dictionary.freeCount@+0x28`（勿读 `+0x2C`=`version`）。
+- `GetInt_Def` xref **未见** 键 **430 / 557 / 558**；进图探针常全 **-999999**（与 type20 硬窗脱钩）。
+
+| LiveValueInt | 键 | 语义 |
+|---|---|---|
+| `UserSkillUseRequestCountCheck` | **430** | 技能发包计数检查（阈值=服端表） |
+| `PacketAttack1SecLimit` | **557** | 攻包 1s 上限（阈值=服端表） |
+| `PacketAttack500msLimit` | **558** | 攻包 500ms 上限（阈值=服端表） |
 
 ### 3.4 反推服端逻辑（举报链）
 
@@ -134,7 +160,8 @@ F6 飞天踢线请对齐 MovePath 基线 + [`../kick_sniff/断线错误码.md`](
     → （细节：弱推断；dump 无处置表）
 ```
 
-这是 **「处理客户端自证」**，不是在包内重放 `Δpos ≈ v·dt`。
+这是 **「处理客户端自证」**，不是在包内重放 `Δpos ≈ v·dt`。  
+（角色侧：客户端 `MovePath_Flush` 同样**不**做 `Δpos≈v·dt`；该式是对服端 UserMove 校验的推断，见 [`../protocol/移动协议.md`](../protocol/移动协议.md) §4。）
 
 ---
 
@@ -174,4 +201,5 @@ F6 飞天踢线请对齐 MovePath 基线 + [`../kick_sniff/断线错误码.md`](
 | `Dumps/cms_cw/dump.cs` | `VecCtrlMob` ~66021；`ClientHacksType` ~1084573；`SecurityClient` ~1130883 |
 | `DumpRestoredData/dump.cs.restored` | 同字段 Rosetta 名（方法仍空） |
 | [`MscSecurity能力面.md`](MscSecurity能力面.md) | RawInput / 反宏产品面 |
+| [`攻包计数窗与type20.md`](攻包计数窗与type20.md) | SecurityClient 攻包窗 / type20 专文（IDA+BIN） |
 | [`GRAP与枫星对齐.md`](GRAP与枫星对齐.md) | 内核 AC 边界；与本文「逻辑举报」分层 |

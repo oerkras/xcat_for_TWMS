@@ -7,6 +7,7 @@
 
 #include "process_util.h"
 #include "xcat_config_ini.h"
+#include "xcat_payload_notify.h"
 
 #include "imgui.h"
 
@@ -15,10 +16,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -30,8 +33,6 @@ constexpr size_t kMaxNotifications = 5;
 constexpr uint32_t kRepeatSuppressMs = 30000;
 constexpr uint32_t kNotifySoundThrottleMs = 800;
 constexpr float kNotifyBubbleScale = 1.15f;
-// 与枫星 payload dismiss 同约定：ttl 用此值表示按 key 撤销。
-constexpr uint32_t kDismissTtlMs = 0xFFFFFFFEu;
 
 enum class Kind : uint32_t {
     Info = 0,
@@ -83,7 +84,13 @@ std::vector<QueuedNotification> g_pending;
 std::mutex g_externalMtx;
 std::vector<QueuedNotification> g_external;
 uint32_t g_lastNotifySoundMs = 0;
+uint32_t g_lastPayloadNotifySeq = 0;
+uint32_t g_lastPayloadNotifyEpoch = 0;
+bool g_notifyBacklogSkipped = false;
 std::atomic<bool> g_notifySoundMuted{true};
+// 用户点击关闭后短抑制：同 key 在窗内不因 payload 刷新立刻弹回；到期后可再亮。
+constexpr uint32_t kUserDismissSuppressMs = 10000;
+std::unordered_map<std::string, uint32_t> g_userDismissUntil;
 
 bool WriteNotifySoundMuted(const std::string& prefsBinDir, bool muted) {
     if (prefsBinDir.empty()) return false;
@@ -101,9 +108,33 @@ bool WriteNotifySoundMuted(const std::string& prefsBinDir, bool muted) {
     });
 }
 
+bool IsPayloadOwnedAlarmKey(const std::string& key) {
+    // 测谎进行中/测试报警：专用 Alarm 由 payload 周期播放，面板只负责气泡，避免双进程叠播。
+    return key == "auto-lie-detected" || key == "auto-lie-alarm-test";
+}
+
 bool IsUnmutableCriticalAlarmKey(const std::string& key) {
-    return key == "auto-lie-detected" || key == "auto-lie-alarm-test" ||
-           key == "restriction-suspicious-debuff";
+    return IsPayloadOwnedAlarmKey(key) || key == "restriction-suspicious-debuff";
+}
+
+bool IsUserDismissSuppressed(const std::string& key, uint32_t now) {
+    const auto it = g_userDismissUntil.find(key);
+    if (it == g_userDismissUntil.end()) return false;
+    if (static_cast<int>(now - it->second) >= 0) {
+        g_userDismissUntil.erase(it);
+        return false;
+    }
+    return true;
+}
+
+void MarkUserDismissed(const std::string& key, uint32_t now) {
+    if (key.empty()) return;
+    g_userDismissUntil[key] = now + kUserDismissSuppressMs;
+}
+
+void ClearUserDismiss(const std::string& key) {
+    if (key.empty()) return;
+    g_userDismissUntil.erase(key);
 }
 
 uint32_t NowMs() { return GetTickCount(); }
@@ -170,6 +201,8 @@ void PlayNotifySound(uint32_t now, const std::string& key) {
         !IsUnmutableCriticalAlarmKey(key)) {
         return;
     }
+    // payload 已周期播 Alarm：面板侧跳过，只保留 restriction 等面板专责音。
+    if (IsPayloadOwnedAlarmKey(key)) return;
     if (g_lastNotifySoundMs != 0 &&
         static_cast<int>(now - g_lastNotifySoundMs) < static_cast<int>(kNotifySoundThrottleMs)) {
         return;
@@ -177,8 +210,6 @@ void PlayNotifySound(uint32_t now, const std::string& key) {
     g_lastNotifySoundMs = now;
     if (key == "restriction-suspicious-debuff")
         sound::RestrictionAlarm();
-    else if (IsUnmutableCriticalAlarmKey(key))
-        sound::Alarm();
     else
         sound::Notify();
 }
@@ -196,12 +227,16 @@ void EnqueueNotification(const QueuedNotification& queued) {
     PruneExpiredNotifications(now);
 
     const std::string& key = queued.key.empty() ? queued.title : queued.key;
-    if (queued.ttlMs == kDismissTtlMs) {
+    if (queued.ttlMs == xcat::kPayloadNotifyDismissTtlMs) {
         g_items.erase(std::remove_if(g_items.begin(), g_items.end(),
                                      [&key](const NotifyItem& item) { return item.key == key; }),
                       g_items.end());
+        ClearUserDismiss(key);
         return;
     }
+    // 用户刚点掉：短抑制内不因同 key 刷新立刻弹回（替代把整段卡死在 WasRecentlyShown 30s）。
+    if (IsUserDismissSuppressed(key, now)) return;
+
     const uint32_t ttlMs = queued.ttlMs ? queued.ttlMs : kDefaultTtlMs;
     for (size_t i = 0; i < g_items.size(); ++i) {
         auto& item = g_items[i];
@@ -227,7 +262,11 @@ void EnqueueNotification(const QueuedNotification& queued) {
         }
     }
 
-    if (WasRecentlyShown(queued.kind, key, queued.title, queued.body, now)) return;
+    // 持续刷新的测谎关键气泡：不走 30s 签名去重（否则点关后长时间无法再亮）。
+    if (!IsPayloadOwnedAlarmKey(key) &&
+        WasRecentlyShown(queued.kind, key, queued.title, queued.body, now)) {
+        return;
+    }
 
     NotifyItem item{};
     item.kind = queued.kind;
@@ -242,6 +281,42 @@ void EnqueueNotification(const QueuedNotification& queued) {
     PlayNotifySound(now, item.key);
     g_items.insert(g_items.begin(), std::move(item));
     if (g_items.size() > kMaxNotifications) g_items.resize(kMaxNotifications);
+}
+
+void DrainPayloadNotifyIpc(const std::string& binDir) {
+    if (binDir.empty()) return;
+    xcat::PayloadNotifyEvent batch[16]{};
+    const size_t n =
+        xcat::DrainPayloadNotify(binDir.c_str(), &g_lastPayloadNotifySeq, batch, 16);
+    for (size_t i = 0; i < n; ++i) {
+        QueuedNotification queued{};
+        const unsigned int k = batch[i].kind > static_cast<uint32_t>(Kind::Danger)
+                                   ? static_cast<unsigned int>(Kind::Info)
+                                   : batch[i].kind;
+        queued.kind = static_cast<Kind>(k);
+        queued.key = batch[i].key;
+        queued.title = batch[i].title;
+        queued.body = batch[i].body;
+        queued.ttlMs = batch[i].ttlMs ? batch[i].ttlMs : kDefaultTtlMs;
+        g_pending.emplace_back(std::move(queued));
+    }
+}
+
+void SyncAndSkipNotifyBacklog(const std::string& binDir) {
+    if (binDir.empty()) return;
+    uint32_t epoch = 0;
+    if (xcat::PeekPayloadNotifyEpoch(binDir.c_str(), &epoch)) {
+        if (epoch != g_lastPayloadNotifyEpoch) {
+            g_lastPayloadNotifyEpoch = epoch;
+            g_lastPayloadNotifySeq = 0;
+            g_notifyBacklogSkipped = false;
+        }
+    }
+    // 首次接通：跳过历史积压，只收之后新事件（对照仓同策略）。
+    if (!g_notifyBacklogSkipped) {
+        xcat::SkipPayloadNotifyBacklog(binDir.c_str(), &g_lastPayloadNotifySeq);
+        g_notifyBacklogSkipped = true;
+    }
 }
 
 void DrainPending() {
@@ -357,6 +432,14 @@ void DrawOne(ImDrawList* dl, const NotifyItem& item, const NotifyLayout& layout,
     }
 }
 
+void DismissItemByKey(const std::string& key) {
+    if (key.empty()) return;
+    g_items.erase(std::remove_if(g_items.begin(), g_items.end(),
+                                 [&key](const NotifyItem& item) { return item.key == key; }),
+                  g_items.end());
+    MarkUserDismissed(key, NowMs());
+}
+
 }  // namespace
 
 void LoadNotifyPrefs(const std::string& prefsBinDir) {
@@ -431,10 +514,16 @@ void Reset() {
         g_external.clear();
     }
     g_lastNotifySoundMs = 0;
+    g_lastPayloadNotifySeq = 0;
+    g_lastPayloadNotifyEpoch = 0;
+    g_notifyBacklogSkipped = false;
+    g_userDismissUntil.clear();
 }
 
 void Poll(const std::string& prefsBinDir) {
     if (!prefsBinDir.empty()) eventlog::SetStoragePath(prefsBinDir);
+    SyncAndSkipNotifyBacklog(prefsBinDir);
+    DrainPayloadNotifyIpc(prefsBinDir);
     DrainExternal();
     DrainPending();
 }
@@ -473,6 +562,9 @@ void Draw(float dpiScale) {
 
     const int n = std::min<int>(static_cast<int>(g_items.size()), 3);
     float y = topSafe;
+    std::vector<std::string> clickedKeys;
+    clickedKeys.reserve(static_cast<size_t>(n));
+
     for (int i = 0; i < n; ++i) {
         const NotifyItem& item = g_items[static_cast<size_t>(i)];
         const float alpha = NotifyAlpha(item, now);
@@ -484,8 +576,38 @@ void Draw(float dpiScale) {
         const float inT = EaseOutCubic(std::min(age / 220.f, 1.f));
         const float drawY = y - (1.f - inT) * 18.f * s;
         DrawOne(dl, item, layout, drawY, alpha, s, font, fontSize);
+
+        // 透明命中窗：TTL 自动消失之外，点击气泡也可关掉。
+        char wndId[64]{};
+        snprintf(wndId, sizeof(wndId), "##xcat_notify_hit_%d", i);
+        ImGui::SetNextWindowPos(ImVec2(layout.x, drawY), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(layout.w, layout.h), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.f);
+        const ImGuiWindowFlags flags =
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+            ImGuiWindowFlags_NoBackground;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+        if (ImGui::Begin(wndId, nullptr, flags)) {
+            ImGui::InvisibleButton("##dismiss", ImVec2(layout.w, layout.h));
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::SetTooltip("点击关闭");
+            }
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                clickedKeys.push_back(item.key);
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+
         y += layout.h + stackGap;
     }
+
+    for (const std::string& key : clickedKeys) DismissItemByKey(key);
 }
 
 }  // namespace xcat::app::notify

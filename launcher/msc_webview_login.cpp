@@ -6,6 +6,7 @@
 #endif
 #include <Windows.h>
 #include <ShlObj.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 
 #include <wrl.h>
@@ -16,10 +17,12 @@
 #include "msc_launch.h"
 #include "ott_ticket_fetch.h"
 #include "msc_webview_login.h"
+#include "http_beanfun_login.h"
 #include "inject_after_launch.h"
 
 #include <atomic>
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iterator>
 #include <mutex>
@@ -70,6 +73,8 @@ struct AccountCred {
 struct AppState {
     HWND hwnd = nullptr;
     HWND webHost = nullptr;
+    HWND interactiveHost = nullptr;  // 验证码时弹出的顶层登录窗
+    bool webViewInteractive = false;
     HWND editLog = nullptr;
     HWND editAccount = nullptr;
     HWND btnOne = nullptr;
@@ -86,7 +91,13 @@ struct AppState {
     bool closing = false;
 
     bool webReady = false;
+    bool runtimeMissing = false;
+    bool runtimePromptShown = false;
+    AuthStrategy authStrategy = AuthStrategy::HttpFirst;
+    CaptchaUiMode captchaUi = CaptchaUiMode::PopupOnCaptcha;
     std::atomic_bool busy{false};
+    std::atomic_bool pendingWebViewFallback{false};  // HttpFirst：等 WebView 就绪再回退
+    std::atomic_bool pendingFallbackInteractive{false};  // 仅验证码/双验才弹登录窗
     std::atomic_bool ottConsumed{false};
     std::atomic_bool cookieCleared{false};
     std::atomic_bool providerClicked{false};
@@ -114,6 +125,16 @@ struct AppState {
 
 AppState g;
 
+constexpr wchar_t kInteractiveWndClass[] = L"XCatBeanfunLoginHost";
+constexpr wchar_t kClassicMainUrl[] = L"https://maplestoryclassic.beanfun.com/Main";
+
+LRESULT CALLBACK InteractiveWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+void SetWebViewInteractive(bool visible);
+void ResizeWebView();
+void OpenClassicMainInBrowser();
+
+void QueueLog(const std::wstring& line);
+
 std::wstring WidenUtf8(const std::string& s) {
     if (s.empty()) return {};
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -139,27 +160,99 @@ std::wstring ExeDir() {
     return path;
 }
 
-std::wstring ConfigDir() {
+// WebView 用户数据必须落本机盘；映射盘/UNC 上 Chromium 会挂死或拒启动。
+std::wstring LocalRuntimeDir() {
     wchar_t* base = nullptr;
     std::wstring dir;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base)) && base) {
         dir = std::wstring(base) + L"\\xcat_msc";
         CoTaskMemFree(base);
     } else {
-        dir = ExeDir();
+        wchar_t tmp[MAX_PATH]{};
+        const DWORD n = GetTempPathW(MAX_PATH, tmp);
+        if (n > 0 && n < MAX_PATH) {
+            dir = std::wstring(tmp) + L"xcat_msc";
+        } else {
+            dir = ExeDir() + L"\\xcat_msc_local";
+        }
     }
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
 }
 
+// 账号放程序根目录（与 xcat.exe 同级），便于 Z: 映射盘宿主/虚拟机共用一份。
 std::wstring AccountConfigPath() {
-    return ConfigDir() + L"\\account.txt";
+    return ExeDir() + L"\\account.txt";
+}
+
+std::wstring AuthStrategyPath() {
+    return ExeDir() + L"\\auth_strategy.txt";
+}
+
+std::wstring CaptchaUiPath() {
+    return ExeDir() + L"\\captcha_ui.txt";
+}
+
+AuthStrategy LoadAuthStrategyFromDisk() {
+    std::ifstream f(NarrowUtf8(AuthStrategyPath()), std::ios::binary);
+    if (!f) return AuthStrategy::HttpFirst;
+    std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    while (!raw.empty() && (raw.back() == '\r' || raw.back() == '\n' || raw.back() == ' '))
+        raw.pop_back();
+    for (char& c : raw) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    if (raw == "http_only" || raw == "httponly" || raw == "1") return AuthStrategy::HttpOnly;
+    if (raw == "webview_only" || raw == "webview" || raw == "2") return AuthStrategy::WebViewOnly;
+    return AuthStrategy::HttpFirst;
+}
+
+void SaveAuthStrategyToDisk(AuthStrategy s) {
+    const char* v = "http_first";
+    if (s == AuthStrategy::HttpOnly) v = "http_only";
+    if (s == AuthStrategy::WebViewOnly) v = "webview_only";
+    std::ofstream f(NarrowUtf8(AuthStrategyPath()), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << v;
+}
+
+CaptchaUiMode LoadCaptchaUiFromDisk() {
+    std::ifstream f(NarrowUtf8(CaptchaUiPath()), std::ios::binary);
+    if (!f) return CaptchaUiMode::PopupOnCaptcha;
+    std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    while (!raw.empty() && (raw.back() == '\r' || raw.back() == '\n' || raw.back() == ' '))
+        raw.pop_back();
+    for (char& c : raw) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    if (raw == "browser_only" || raw == "browser" || raw == "1") return CaptchaUiMode::BrowserOnly;
+    if (raw == "silent" || raw == "silent_fallback" || raw == "2")
+        return CaptchaUiMode::SilentFallback;
+    return CaptchaUiMode::PopupOnCaptcha;
+}
+
+void SaveCaptchaUiToDisk(CaptchaUiMode m) {
+    const char* v = "popup_on_captcha";
+    if (m == CaptchaUiMode::BrowserOnly) v = "browser_only";
+    if (m == CaptchaUiMode::SilentFallback) v = "silent";
+    std::ofstream f(NarrowUtf8(CaptchaUiPath()), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << v;
+}
+
+std::wstring LegacyAccountConfigPath() {
+    return LocalRuntimeDir() + L"\\account.txt";
 }
 
 std::wstring ProfileDir() {
-    const std::wstring dir = ConfigDir() + L"\\webview_profile";
+    const std::wstring dir = LocalRuntimeDir() + L"\\webview_profile";
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
+}
+
+bool IsPathOnRemoteDrive(const std::wstring& path) {
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\') return true;
+    if (path.size() >= 2 && path[1] == L':') {
+        const wchar_t root[] = {path[0], L':', L'\\', L'\0'};
+        return GetDriveTypeW(root) == DRIVE_REMOTE;
+    }
+    return false;
 }
 
 void SaveAccountConfig(const std::wstring& line) {
@@ -172,8 +265,7 @@ void SaveAccountConfig(const std::wstring& line) {
     f.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
 }
 
-std::wstring LoadAccountConfig() {
-    const std::wstring path = AccountConfigPath();
+std::wstring ReadAccountFile(const std::wstring& path) {
     std::ifstream f(NarrowUtf8(path), std::ios::binary);
     if (!f) return {};
     std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -183,6 +275,18 @@ std::wstring LoadAccountConfig() {
     }
     while (!raw.empty() && (raw.back() == '\r' || raw.back() == '\n' || raw.back() == ' ')) raw.pop_back();
     return WidenUtf8(raw);
+}
+
+std::wstring LoadAccountConfig() {
+    std::wstring line = ReadAccountFile(AccountConfigPath());
+    if (!line.empty()) return line;
+    // 一次性从旧 AppData 路径迁移，避免开发机换路径后丢账号。
+    line = ReadAccountFile(LegacyAccountConfigPath());
+    if (!line.empty()) {
+        SaveAccountConfig(line);
+        QueueLog(L"[OK] 已从旧路径迁移账号到程序目录：" + AccountConfigPath());
+    }
+    return line;
 }
 
 std::string Base64Encode(const std::string& in) {
@@ -204,7 +308,8 @@ std::string Base64Encode(const std::string& in) {
     return out;
 }
 
-// 账号串：user----pass----…（只取前两段；也支持 user:pass / user|pass）
+// 账号串：user-pass-… / user----pass----…（连续任意个 '-' 都当分隔；只取前两段）
+// 也支持 user:pass / user|pass / user\tpass
 bool ParseAccountLine(const std::wstring& raw, AccountCred& out, std::wstring& err) {
     std::wstring s = raw;
     // 允许多行粘贴/软换行：去掉所有换行再解析
@@ -215,21 +320,20 @@ bool ParseAccountLine(const std::wstring& raw, AccountCred& out, std::wstring& e
     while (start < s.size() && (s[start] == L' ' || s[start] == L'\t')) ++start;
     s = s.substr(start);
     if (s.empty()) {
-        err = L"请先粘贴账号信息（邮箱----密码----…）";
+        err = L"请先粘贴账号信息（邮箱-密码-…，横线个数不限）";
         return false;
     }
 
+    // 按连续 '-' 分段（1 个或多个都算分隔），跳过空段
     std::vector<std::wstring> parts;
-    const std::wstring delim = L"----";
-    size_t pos = 0;
-    while (true) {
-        size_t p = s.find(delim, pos);
-        if (p == std::wstring::npos) {
-            parts.push_back(s.substr(pos));
-            break;
-        }
-        parts.push_back(s.substr(pos, p - pos));
-        pos = p + delim.size();
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t j = i;
+        while (j < s.size() && s[j] != L'-') ++j;
+        if (j > i) parts.push_back(s.substr(i, j - i));
+        if (j >= s.size()) break;
+        while (j < s.size() && s[j] == L'-') ++j;
+        i = j;
     }
 
     if (parts.size() >= 2 && !parts[0].empty() && !parts[1].empty()) {
@@ -238,7 +342,7 @@ bool ParseAccountLine(const std::wstring& raw, AccountCred& out, std::wstring& e
         return true;
     }
 
-    // 兜底：email:pass / email|pass / email\tpass / email pass
+    // 兜底：email:pass / email|pass / email\tpass
     for (wchar_t sep : {L'|', L'\t', L':'}) {
         size_t p = s.find(sep);
         if (p != std::wstring::npos && p > 0 && p + 1 < s.size()) {
@@ -247,7 +351,7 @@ bool ParseAccountLine(const std::wstring& raw, AccountCred& out, std::wstring& e
             return true;
         }
     }
-    err = L"无法解析账号串。格式：邮箱----密码----其它…（只使用前两项）";
+    err = L"无法解析账号串。格式：邮箱-密码-其它…（横线个数不限，只使用前两项）";
     return false;
 }
 
@@ -315,7 +419,7 @@ void FlushLogsToUi() {
     }
 }
 
-void SetBusy(bool busy) {
+void SetBusy(bool busy, bool armWebViewTimers = true) {
     g.busy = busy;
     if (g.btnOne) EnableWindow(g.btnOne, busy ? FALSE : TRUE);
     if (g.editAccount) EnableWindow(g.editAccount, busy ? FALSE : TRUE);
@@ -323,34 +427,51 @@ void SetBusy(bool busy) {
         SetWindowTextW(g.status, busy ? L"状态：自动登录 / 换票中…"
                                       : L"状态：空闲（粘贴账号串后点一键启动）");
     }
-    if (g.hwnd) {
-        if (busy) {
-            SetTimer(g.hwnd, kBusyTimerId, kBusyTimeoutMs, nullptr);
-            SetTimer(g.hwnd, kAutoLoginTimerId, kAutoLoginIntervalMs, nullptr);
-        } else {
-            KillTimer(g.hwnd, kBusyTimerId);
-            KillTimer(g.hwnd, kAutoLoginTimerId);
-        }
+    if (!g.hwnd) return;
+    if (!busy) {
+        KillTimer(g.hwnd, kBusyTimerId);
+        KillTimer(g.hwnd, kAutoLoginTimerId);
+        KillTimer(g.hwnd, kHttpFallbackWaitTimerId);
+        KillTimer(g.hwnd, kHttpBusyTimerId);
+        g.pendingWebViewFallback = false;
+        if (g.webViewInteractive) SetWebViewInteractive(false);
+        return;
+    }
+    // HTTP 路径：不要开 OTT 超时 / 自动填表定时器（会误伤长耗时 NGM+注入）；改开 5 分钟看门狗
+    if (armWebViewTimers) {
+        SetTimer(g.hwnd, kBusyTimerId, kBusyTimeoutMs, nullptr);
+        SetTimer(g.hwnd, kAutoLoginTimerId, kAutoLoginIntervalMs, nullptr);
+        KillTimer(g.hwnd, kHttpFallbackWaitTimerId);
+        KillTimer(g.hwnd, kHttpBusyTimerId);
+    } else {
+        KillTimer(g.hwnd, kBusyTimerId);
+        KillTimer(g.hwnd, kAutoLoginTimerId);
+        SetTimer(g.hwnd, kHttpBusyTimerId, kHttpBusyTimeoutMs, nullptr);
     }
 }
 
-void LaunchWithOtt(std::wstring ottOrUrl) {
-    QueueLog(L"[…] 换票中…");
-    msc::launcher::TicketFetchOptions fo;
-    fo.ott = std::move(ottOrUrl);
-    auto fr = msc::launcher::FetchGalaxyTicketFromOtt(fo);
-    if (!fr.ok) {
-        QueueLog(L"[FAIL] 换票失败 http=" + std::to_wstring(fr.httpStatus) + L" api=" +
-                 std::to_wstring(fr.apiCode) + L" " + WidenUtf8(fr.message));
-        PostMessageW(g.hwnd, WM_APP + 2, 0, 0);
-        return;
-    }
-    QueueLog(L"[OK] 换票成功 uid=" + fr.ticket.userObjectId + L" gid=" + fr.ticket.gid +
-             L" galaxyId=" + fr.ticket.galaxyGameId);
+void AbortPendingWebViewFallback(const wchar_t* reason) {
+    if (!g.pendingWebViewFallback.exchange(false)) return;
+    if (g.hwnd) KillTimer(g.hwnd, kHttpFallbackWaitTimerId);
+    QueueLog(reason ? reason : L"[FAIL] WebView 回退等待已取消");
+    PostMessageW(g.hwnd, kMsgIdle, 0, 0);
+}
 
+void TryStartPendingWebViewFallback() {
+    if (!g.pendingWebViewFallback.load()) return;
+    if (!g.webReady || !g.webview) return;
+    g.pendingWebViewFallback = false;
+    if (g.hwnd) KillTimer(g.hwnd, kHttpFallbackWaitTimerId);
+    const WPARAM showUi = g.pendingFallbackInteractive.exchange(false) ? 1 : 0;
+    QueueLog(showUi ? L"[…] WebView 已就绪，弹出登录窗回退…"
+                    : L"[…] WebView 已就绪，静默回退自动登录…");
+    PostMessageW(g.hwnd, kMsgStartWebViewLogin, showUi, 0);
+}
+
+void LaunchWithTicket(msc::launcher::GalaxyTicket ticket) {
     QueueLog(L"[…] NGM 拉起并验票…");
     msc::launcher::Options opt;
-    opt.ticket = std::move(fr.ticket);
+    opt.ticket = std::move(ticket);
     auto rr = msc::launcher::Run(opt, [](const msc::launcher::Progress& p) {
         QueueLog(L"  " + WidenUtf8(p.message));
     });
@@ -374,6 +495,22 @@ void LaunchWithOtt(std::wstring ottOrUrl) {
     PostMessageW(g.hwnd, WM_APP + 2, 0, 0);
 }
 
+void LaunchWithOtt(std::wstring ottOrUrl) {
+    QueueLog(L"[…] 换票中…");
+    msc::launcher::TicketFetchOptions fo;
+    fo.ott = std::move(ottOrUrl);
+    auto fr = msc::launcher::FetchGalaxyTicketFromOtt(fo);
+    if (!fr.ok) {
+        QueueLog(L"[FAIL] 换票失败 http=" + std::to_wstring(fr.httpStatus) + L" api=" +
+                 std::to_wstring(fr.apiCode) + L" " + WidenUtf8(fr.message));
+        PostMessageW(g.hwnd, WM_APP + 2, 0, 0);
+        return;
+    }
+    QueueLog(L"[OK] 换票成功 uid=" + fr.ticket.userObjectId + L" gid=" + fr.ticket.gid +
+             L" galaxyId=" + fr.ticket.galaxyGameId);
+    LaunchWithTicket(std::move(fr.ticket));
+}
+
 bool IsOttCallbackUrl(const std::wstring& url) {
     if (url.find(L"maplestoryclassic.beanfun.com") == std::wstring::npos) return false;
     return url.find(L"OTT=") != std::wstring::npos || url.find(L"OTT:") != std::wstring::npos;
@@ -385,6 +522,7 @@ bool TryHandleCallbackUrl(const std::wstring& url) {
 
     QueueLog(L"[OK] 捕获到登录回跳，开始一键换票启动");
     QueueLog(L"  URL=" + RedactUrlForLog(url));
+    if (g.webViewInteractive) SetWebViewInteractive(false);
     std::thread(LaunchWithOtt, url).detach();
     return true;
 }
@@ -942,26 +1080,208 @@ void OnNavigated(const std::wstring& url, const wchar_t* phase) {
     if (g.busy && !g.ottConsumed) RunAutoLoginScript();
 }
 
+void OpenClassicMainInBrowser() {
+    const HINSTANCE hr =
+        ShellExecuteW(nullptr, L"open", kClassicMainUrl, nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(hr) <= 32) {
+        QueueLog(L"[FAIL] 无法打开浏览器，请手动访问 " + std::wstring(kClassicMainUrl));
+    } else {
+        QueueLog(L"[提示] 已打开官网，请在浏览器完成验证码/登录后回到本程序再点一键");
+    }
+}
+
+LRESULT CALLBACK InteractiveWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_SIZE:
+            ResizeWebView();
+            return 0;
+        case WM_CLOSE:
+            QueueLog(std::wstring(kNeedWebVerifyTag) +
+                     L" 已关闭登录窗。若仍需过验证码：请用浏览器打开官网登录一次后再点一键。");
+            SetWebViewInteractive(false);
+            SetBusy(false);
+            return 0;
+        case WM_DESTROY:
+            return 0;
+        default:
+            return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+}
+
+bool EnsureInteractiveHost() {
+    if (g.interactiveHost && IsWindow(g.interactiveHost)) return true;
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{sizeof(wc)};
+        wc.lpfnWndProc = InteractiveWndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        wc.lpszClassName = kInteractiveWndClass;
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            QueueLog(L"[FAIL] 注册登录窗类失败");
+            return false;
+        }
+        registered = true;
+    }
+    g.interactiveHost = CreateWindowExW(
+        WS_EX_APPWINDOW, kInteractiveWndClass,
+        L"XCat — beanfun 登录（请完成验证码后等待自动继续）",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 980, 720, nullptr, nullptr,
+        GetModuleHandleW(nullptr), nullptr);
+    if (!g.interactiveHost) {
+        QueueLog(L"[FAIL] 创建登录窗失败");
+        return false;
+    }
+    return true;
+}
+
+void SetWebViewInteractive(bool visible) {
+    if (!g.controller) {
+        g.webViewInteractive = false;
+        return;
+    }
+    if (visible) {
+        if (!EnsureInteractiveHost()) return;
+        g.controller->put_ParentWindow(g.interactiveHost);
+        g.controller->put_IsVisible(TRUE);
+        g.webViewInteractive = true;
+        ResizeWebView();
+        ShowWindow(g.interactiveHost, SW_SHOW);
+        SetForegroundWindow(g.interactiveHost);
+        QueueLog(std::wstring(kNeedWebVerifyTag) +
+                 L" 已弹出登录窗：请在页面完成验证码/二次验证；成功后会自动换票开游戏。"
+                 L"也可自行用浏览器打开官网登录一次。");
+    } else {
+        if (g.interactiveHost && IsWindow(g.interactiveHost)) {
+            ShowWindow(g.interactiveHost, SW_HIDE);
+        }
+        if (g.webHost) {
+            g.controller->put_ParentWindow(g.webHost);
+        }
+        g.controller->put_IsVisible(FALSE);
+        g.webViewInteractive = false;
+        ResizeWebView();
+    }
+}
+
 void ResizeWebView() {
-    if (!g.controller || !g.webHost) return;
+    if (!g.controller) return;
+    HWND parent = (g.webViewInteractive && g.interactiveHost && IsWindow(g.interactiveHost))
+                      ? g.interactiveHost
+                      : g.webHost;
+    if (!parent) return;
     RECT rc{};
-    GetClientRect(g.webHost, &rc);
+    GetClientRect(parent, &rc);
     g.controller->put_Bounds(rc);
 }
 
+// Evergreen Bootstrapper（官方跳转，自动选架构）
+constexpr wchar_t kWebView2BootstrapperUrl[] =
+    L"https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
+bool IsRuntimeInstalled() {
+    LPWSTR version = nullptr;
+    const HRESULT hr = GetAvailableCoreWebView2BrowserVersionString(nullptr, &version);
+    const bool ok = SUCCEEDED(hr) && version && version[0] != L'\0';
+    if (version) CoTaskMemFree(version);
+    return ok;
+}
+
+bool PromptRuntimeInstall(HWND owner) {
+    g.runtimeMissing = true;
+    g.runtimePromptShown = true;
+    QueueLog(L"[!] 未检测到 Edge WebView2 Runtime；换票/一键登录不可用，需安装后重启本程序");
+    const HWND parent = owner ? owner : g.hwnd;
+    const int choice = MessageBoxW(
+        parent,
+        L"未检测到 Microsoft Edge WebView2 Runtime。\n\n"
+        L"经典版一键登录/换票依赖该组件。\n"
+        L"点击「是」打开官方安装包下载；安装完成后请关闭并重新打开本程序。\n\n"
+        L"点击「否」稍后再装（届时可在启动页再次提示）。",
+        L"XCat — 缺少 WebView2 Runtime",
+        MB_YESNO | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND);
+    if (choice != IDYES) {
+        QueueLog(L"[!] 已取消打开下载；安装 Runtime 并重启前，换票不可用");
+        return false;
+    }
+    const HINSTANCE shellHr =
+        ShellExecuteW(nullptr, L"open", kWebView2BootstrapperUrl, nullptr, nullptr, SW_SHOWNORMAL);
+    const auto code = reinterpret_cast<INT_PTR>(shellHr);
+    if (code <= 32) {
+        QueueLog(L"[FAIL] 打开 WebView2 下载失败 code=" + std::to_wstring(code) +
+                 L"；请手动访问 https://developer.microsoft.com/microsoft-edge/webview2/");
+        MessageBoxW(parent,
+                    L"无法自动打开下载链接。\n\n"
+                    L"请浏览器打开：\n"
+                    L"https://developer.microsoft.com/microsoft-edge/webview2/\n"
+                    L"下载 Evergreen Runtime 安装，完成后重启本程序。",
+                    L"XCat — 下载失败", MB_OK | MB_ICONERROR | MB_TOPMOST);
+        return false;
+    }
+    QueueLog(L"[…] 已打开 WebView2 Runtime 安装包下载；安装完成后请重启本程序");
+    MessageBoxW(parent,
+                L"已打开官方下载。\n\n"
+                L"请运行安装程序完成安装，然后关闭本程序并重新打开。",
+                L"XCat — 请安装后重启", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
+    return true;
+}
+
+void OfferRuntimeInstallOnce(HWND owner) {
+    if (g.runtimePromptShown) return;
+    PromptRuntimeInstall(owner);
+}
+
 void InitWebView() {
+    if (!IsRuntimeInstalled()) {
+        g.runtimeMissing = true;
+        QueueLog(L"[提示] 本机无 WebView2 Runtime，跳过 WebView 环境创建");
+        if (g.authStrategy == AuthStrategy::WebViewOnly) {
+            OfferRuntimeInstallOnce(g.hwnd);
+        } else {
+            QueueLog(L"[提示] 当前策略可用 HTTP 登录；仅「仅WebView」才强制需要 Runtime");
+        }
+        return;
+    }
+    {
+        LPWSTR version = nullptr;
+        if (SUCCEEDED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &version)) && version) {
+            QueueLog(std::wstring(L"WebView2 Runtime：") + version);
+            CoTaskMemFree(version);
+        }
+    }
+
     const std::wstring profile = ProfileDir();
+    const std::wstring exeDir = ExeDir();
+    const bool remoteExe = IsPathOnRemoteDrive(exeDir);
     QueueLog(L"WebView 用户目录：" + profile);
+    if (remoteExe) {
+        QueueLog(L"[提示] 程序在映射/网络盘上：" + exeDir +
+                 L"；账号用程序目录，WebView 配置强制写本机，并加沙箱兼容参数");
+    }
 
     auto options = Make<CoreWebView2EnvironmentOptions>();
     options->put_EnableTrackingPrevention(FALSE);
+    // 宿主在映射盘时 Chromium 默认沙箱常起不来；用户数据已在本机，放宽沙箱即可。
+    if (remoteExe) {
+        options->put_AdditionalBrowserArguments(L"--no-sandbox --disable-gpu-sandbox");
+    }
 
     CreateCoreWebView2EnvironmentWithOptions(
         nullptr, profile.c_str(), options.Get(),
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
                 if (FAILED(hr) || !env) {
-                    QueueLog(L"[FAIL] WebView2 环境创建失败。请安装 Edge WebView2 Runtime。");
+                    wchar_t buf[96]{};
+                    swprintf_s(buf, L"0x%08X", static_cast<unsigned>(hr));
+                    QueueLog(std::wstring(L"[FAIL] WebView2 环境创建失败 hr=") + buf +
+                             L"。HTTP 登录仍可用；若要用 WebView 请安装 Runtime 后重启。");
+                    g.runtimeMissing = true;
+                    if (g.authStrategy == AuthStrategy::WebViewOnly) {
+                        OfferRuntimeInstallOnce(g.hwnd);
+                    }
+                    AbortPendingWebViewFallback(
+                        L"[FAIL] WebView 环境创建失败，无法回退；HTTP 失败已结束");
                     return S_OK;
                 }
                 g.env = env;
@@ -985,6 +1305,8 @@ void InitWebView() {
                         [](HRESULT hr2, ICoreWebView2Controller* controller) -> HRESULT {
                             if (FAILED(hr2) || !controller) {
                                 QueueLog(L"[FAIL] WebView2 控制器创建失败");
+                                AbortPendingWebViewFallback(
+                                    L"[FAIL] WebView 控制器创建失败，无法回退；HTTP 失败已结束");
                                 return S_OK;
                             }
                             g.controller = controller;
@@ -1095,8 +1417,9 @@ void InitWebView() {
                             }
 
                             g.webReady = true;
-                            QueueLog(L"[OK] WebView2 就绪。粘贴「邮箱----密码----…」后点一键启动；"
+                            QueueLog(L"[OK] WebView2 就绪。粘贴「邮箱-密码-…」（横线个数不限）后点一键启动；"
                                      L"将自动点 gamania(HK) 并填入账密。");
+                            TryStartPendingWebViewFallback();
                             return S_OK;
                         })
                         .Get());
@@ -1105,21 +1428,7 @@ void InitWebView() {
             .Get());
 }
 
-void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
-    err.clear();
-    if (g.busy) {
-        err = L"正在登录中";
-        return;
-    }
-    if (!g.webReady || !g.webview) {
-        err = L"WebView2 尚未就绪，请稍等几秒";
-        return;
-    }
-
-    AccountCred cred;
-    if (!ParseAccountLine(accountLine, cred, err)) return;
-    g.cred = std::move(cred);
-    SaveAccountConfig(accountLine);
+void BeginWebViewLoginFlow() {
     g.lastAutoLoginStatus.clear();
     g.lastWaitLogTick = 0;
     g.cookieCleared = false;
@@ -1136,12 +1445,111 @@ void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
         std::lock_guard<std::mutex> lock(g.frameMu);
         g.frames.clear();
     }
-
-    SetBusy(true);
     g.ottConsumed = false;
-    QueueLog(L"[…] 一键启动：账号=" + g.cred.user +
+    QueueLog(L"[…] WebView 一键：账号=" + g.cred.user +
              L" ，登录方式=gamania(HK)；将自动关 Cookie、勾选记住帐号、只提交一次");
-    g.webview->Navigate(kGalaxyLoginUrl);
+    if (g.webview) g.webview->Navigate(kGalaxyLoginUrl);
+}
+
+void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
+    err.clear();
+    if (g.busy) {
+        err = L"正在登录中";
+        return;
+    }
+
+    AccountCred cred;
+    if (!ParseAccountLine(accountLine, cred, err)) return;
+    g.cred = std::move(cred);
+    SaveAccountConfig(accountLine);
+
+    const AuthStrategy strat = g.authStrategy;
+    if (strat == AuthStrategy::WebViewOnly) {
+        if (!g.webReady || !g.webview) {
+            err = g.runtimeMissing ? L"未安装 WebView2 Runtime，请安装后重启本程序"
+                                   : L"WebView2 尚未就绪，请稍等几秒";
+            return;
+        }
+        SetBusy(true, /*armWebViewTimers=*/true);
+        BeginWebViewLoginFlow();
+        return;
+    }
+
+    // HTTP 优先 / 仅 HTTP：不要求 WebView ready；勿开 WebView OTT/填表定时器
+    SetBusy(true, /*armWebViewTimers=*/false);
+    g.ottConsumed = false;
+    g.pendingWebViewFallback = false;
+    QueueLog(std::wstring(kHttpBusyTag) + L" HTTP 登录换票中…");
+    QueueLog(std::wstring(L"[…] HTTP 登录换票：账号=") + g.cred.user + L" 策略=" +
+             (strat == AuthStrategy::HttpOnly ? L"仅HTTP" : L"HTTP优先") + L" 验证码UI=" +
+             WidenUtf8(CaptchaUiModeLabel(g.captchaUi)));
+
+    const AccountCred credCopy = g.cred;
+    const AuthStrategy stratCopy = strat;
+    const CaptchaUiMode captchaCopy = g.captchaUi;
+    std::thread([credCopy, stratCopy, captchaCopy]() {
+        auto lr = msc::launcher::HttpBeanfunLoginToOtt(
+            credCopy.user, credCopy.pass,
+            [](const std::wstring& line) { QueueLog(line); });
+        if (lr.ok && lr.ticketFilled) {
+            QueueLog(std::wstring(kHttpTicketOkTag) + L" HTTP 换票成功，正在开游戏…");
+            QueueLog(L"[OK] HTTP 换票成功 uid=" + lr.ticket.userObjectId + L" gid=" +
+                     lr.ticket.gid);
+            LaunchWithTicket(std::move(lr.ticket));
+            return;
+        }
+
+        QueueLog(L"[FAIL] HTTP 登录失败 [" +
+                 WidenUtf8(msc::launcher::HttpLoginErrorName(lr.error)) + L"] " +
+                 WidenUtf8(lr.message));
+
+        const bool needWebVerify =
+            lr.error == msc::launcher::HttpLoginError::CaptchaRequired ||
+            lr.error == msc::launcher::HttpLoginError::DualVerifyRequired;
+
+        if (needWebVerify) {
+            QueueLog(std::wstring(kNeedWebVerifyTag) +
+                     L" 请自行到网页完成验证码/二次验证后，再回来点「一键启动」。"
+                     L"官网：" +
+                     std::wstring(kClassicMainUrl));
+        }
+
+        // 验证码 UI 策略：弹窗 / 仅浏览器 / 全静默
+        const bool wantPopup =
+            needWebVerify && captchaCopy == CaptchaUiMode::PopupOnCaptcha;
+        const bool wantBrowser =
+            needWebVerify && (captchaCopy == CaptchaUiMode::BrowserOnly ||
+                              (captchaCopy == CaptchaUiMode::PopupOnCaptcha &&
+                               (stratCopy == AuthStrategy::HttpOnly || !IsRuntimeInstalled())));
+
+        if (stratCopy != AuthStrategy::HttpFirst || !IsRuntimeInstalled()) {
+            if (stratCopy == AuthStrategy::HttpFirst && !IsRuntimeInstalled() && needWebVerify) {
+                QueueLog(L"[提示] 无 WebView2 Runtime，无法弹出登录窗回退");
+            }
+            if (wantBrowser) OpenClassicMainInBrowser();
+            PostMessageW(g.hwnd, kMsgIdle, 0, 0);
+            return;
+        }
+
+        // HttpFirst + Runtime：回退 WebView
+        if (wantBrowser) OpenClassicMainInBrowser();
+        const WPARAM showUi = wantPopup ? 1 : 0;
+        g.pendingFallbackInteractive = wantPopup;
+        if (g.webReady && g.webview) {
+            QueueLog(wantPopup ? L"[…] HTTP 失败，回退 WebView（弹出登录窗过验证码）…"
+                               : L"[…] HTTP 失败，回退 WebView 静默自动登录…");
+            PostMessageW(g.hwnd, kMsgStartWebViewLogin, showUi, 0);
+            return;
+        }
+
+        g.pendingWebViewFallback = true;
+        QueueLog(L"[…] HTTP 失败，等待 WebView2 就绪后回退（最多 " +
+                 std::to_wstring(kHttpFallbackWaitMs / 1000) + L"s）…");
+        if (g.hwnd) {
+            SetTimer(g.hwnd, kHttpFallbackWaitTimerId, kHttpFallbackWaitMs, nullptr);
+        }
+        TryStartPendingWebViewFallback();
+    }).detach();
 }
 
 
@@ -1156,16 +1564,67 @@ bool Init(HWND msgHwnd, HWND webHostHwnd, LogCallback onLog) {
     g.btnOne = nullptr;
     g.status = nullptr;
     g.closing = false;
+    g.authStrategy = LoadAuthStrategyFromDisk();
+    g.captchaUi = LoadCaptchaUiFromDisk();
     if (!g.browserExitEvent) g.browserExitEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g.logFilePath = ExeDir() + L"\\launcher.log";
-    QueueLog(L"经典版 WebView 登录会话已嵌入 xcat_app（静默，不显示网页）。日志：" + g.logFilePath);
+    QueueLog(L"经典版登录会话已嵌入 xcat_app。日志：" + g.logFilePath);
     QueueLog(L"账号配置：" + AccountConfigPath());
+    QueueLog(std::wstring(L"取票策略：") + WidenUtf8(AuthStrategyLabel(g.authStrategy)) +
+             L"（bin/auth_strategy.txt）");
+    QueueLog(std::wstring(L"验证码UI：") + WidenUtf8(CaptchaUiModeLabel(g.captchaUi)) +
+             L"（bin/captcha_ui.txt）");
     InitWebView();
     return true;
 }
 
 bool IsReady() { return g.webReady && g.webview; }
 bool IsBusy() { return g.busy.load(); }
+
+bool CanStartOneClick() {
+    if (g.authStrategy == AuthStrategy::WebViewOnly) return IsReady();
+    return true;  // HTTP 路径不依赖 WebView
+}
+
+AuthStrategy GetAuthStrategy() { return g.authStrategy; }
+
+void SetAuthStrategy(AuthStrategy s) {
+    g.authStrategy = s;
+    SaveAuthStrategyToDisk(s);
+    QueueLog(std::wstring(L"[OK] 取票策略已切换为 ") + WidenUtf8(AuthStrategyLabel(s)));
+}
+
+const char* AuthStrategyLabel(AuthStrategy s) {
+    switch (s) {
+        case AuthStrategy::HttpOnly:
+            return "仅HTTP";
+        case AuthStrategy::WebViewOnly:
+            return "仅WebView";
+        case AuthStrategy::HttpFirst:
+        default:
+            return "HTTP优先";
+    }
+}
+
+CaptchaUiMode GetCaptchaUiMode() { return g.captchaUi; }
+
+void SetCaptchaUiMode(CaptchaUiMode m) {
+    g.captchaUi = m;
+    SaveCaptchaUiToDisk(m);
+    QueueLog(std::wstring(L"[OK] 验证码UI已切换为 ") + WidenUtf8(CaptchaUiModeLabel(m)));
+}
+
+const char* CaptchaUiModeLabel(CaptchaUiMode m) {
+    switch (m) {
+        case CaptchaUiMode::BrowserOnly:
+            return "仅浏览器";
+        case CaptchaUiMode::SilentFallback:
+            return "静默回退";
+        case CaptchaUiMode::PopupOnCaptcha:
+        default:
+            return "验证码弹窗";
+    }
+}
 
 bool StartOneClick(const std::wstring& accountLine, std::wstring& err) {
     StartOneClickWithLine(accountLine, err);
@@ -1177,9 +1636,47 @@ bool TryParseAccountLine(const std::wstring& accountLine, std::wstring& err) {
     return ParseAccountLine(accountLine, cred, err);
 }
 
+void OnStartWebViewLogin() { OnStartWebViewLoginEx(0); }
+
+void OnStartWebViewLoginEx(WPARAM showInteractive) {
+    g.pendingWebViewFallback = false;
+    if (g.hwnd) KillTimer(g.hwnd, kHttpFallbackWaitTimerId);
+    if (!g.webReady || !g.webview) {
+        QueueLog(L"[FAIL] WebView 回退失败：环境未就绪");
+        if (showInteractive) {
+            QueueLog(std::wstring(kNeedWebVerifyTag) +
+                     L" 已打开浏览器：请自行完成验证码登录后，再回来点一键启动。");
+            OpenClassicMainInBrowser();
+        }
+        SetBusy(false);
+        return;
+    }
+    SetBusy(true, /*armWebViewTimers=*/true);
+    if (showInteractive) {
+        SetWebViewInteractive(true);
+    } else {
+        SetWebViewInteractive(false);
+    }
+    BeginWebViewLoginFlow();
+}
+
 void OnTimer(UINT_PTR id) {
+    if (id == kHttpFallbackWaitTimerId) {
+        AbortPendingWebViewFallback(
+            L"[FAIL] 等待 WebView2 就绪超时，无法回退；请稍后重试或改「仅WebView」");
+        return;
+    }
+    if (id == kHttpBusyTimerId && g.busy) {
+        QueueLog(std::wstring(kHttpTimeoutTag) +
+                 L" HTTP 换票超时（约5分钟）。请检查网络/账号，或改「仅WebView」后重试。");
+        QueueLog(L"[FAIL] HTTP 登录失败 [Timeout] 换票超时");
+        SetBusy(false);
+        return;
+    }
     if (id == kBusyTimerId && g.busy) {
-        QueueLog(L"[FAIL] 超时：未捕获到 OTT 回跳。请看网页是否卡在验证码/二次验证。");
+        QueueLog(std::wstring(kNeedWebVerifyTag) +
+                 L" 登录超时：页面可能卡在验证码/二次验证。请在登录窗完成验证，"
+                 L"或用浏览器打开官网登录一次后再点一键。");
         SetBusy(false);
     } else if (id == kAutoLoginTimerId && g.busy) {
         RunAutoLoginScript();
@@ -1197,6 +1694,13 @@ void Shutdown() {
     FlushLogsToUi();
     KillTimer(g.hwnd, kBusyTimerId);
     KillTimer(g.hwnd, kAutoLoginTimerId);
+    KillTimer(g.hwnd, kHttpFallbackWaitTimerId);
+    KillTimer(g.hwnd, kHttpBusyTimerId);
+    if (g.webViewInteractive) SetWebViewInteractive(false);
+    if (g.interactiveHost && IsWindow(g.interactiveHost)) {
+        DestroyWindow(g.interactiveHost);
+        g.interactiveHost = nullptr;
+    }
     if (g.controller) { g.controller->Close(); g.controller = nullptr; }
     g.webview = nullptr;
     if (g.browserExitEvent) {

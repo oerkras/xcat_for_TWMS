@@ -45,7 +45,8 @@ def main():
 
     httpd = ThreadingHTTPServer((args.host, args.port), PublishHandler)
     print(f"Serving {root} on http://{args.host}:{args.port}/", flush=True)
-    print("Local URL: http://127.0.0.1:52080/", flush=True)
+    print(f"Public URL: http://xcat.work:{args.port}/", flush=True)
+    print(f"Local URL: http://127.0.0.1:{args.port}/", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     httpd.serve_forever()
 

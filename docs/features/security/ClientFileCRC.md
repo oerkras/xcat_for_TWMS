@@ -138,4 +138,5 @@ Maplestory_Classic_Data/il2cpp_data/Metadata/global-metadata.dat
 
 1. 改 `GameAssembly.dll` / 主程序 / 关键插件 / grap 文件 → 可能触发 CRC 失败（登录码 150），与「会不会被 GRAP 扫到」是不同问题。  
 2. 清单含 `.bak`：磁盘上若保留官方备份文件，也会被纳入校验集合。  
-3. 业务功能（飞天、移动协议等）不依赖绕过本机制；本笔记只定界 **Msc.Security 文件面在校什么**。
+3. 业务功能（飞天、移动协议等）不依赖绕过本机制；本笔记只定界 **Msc.Security 文件面在校什么**。  
+4. **NGS 解禁依赖**：清单含 `…/grap/NGService.exe`。为写 GA 而 patch NGS 时，默认只改 `ProgramData\Nexon\NGS\NGService.exe`，**保持游戏树副本干净**即可避开对本 path 的伪装；若必须改游戏树该文件，需单 path `_answer` 改写（见 [`NGS补丁与CRC.md`](NGS补丁与CRC.md)）。同行仅一份 `NGS.EXE.CRC`，不要扩成全 grap CRC 表。

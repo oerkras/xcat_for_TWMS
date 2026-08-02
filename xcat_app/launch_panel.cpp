@@ -4,6 +4,7 @@
 #include "app_notify.h"
 #include "app_sound.h"
 #include "app_window.h"
+#include "hangup_schedule.h"
 #include "imgui_shell.h"
 #include "runtime_leds.h"
 #include "status_bar.h"
@@ -59,9 +60,12 @@ void SoftWrapAccountBuffer(char* buf, size_t cap) {
     size_t i = 0;
     size_t col = 0;
     while (i < s.size()) {
-        if (i + 4 <= s.size() && s.compare(i, 4, "----") == 0) {
-            out += "----\n";
-            i += 4;
+        // 连续 '-' 视为分隔：原样写出后换行，便于阅读（解析时会剥掉换行）
+        if (s[i] == '-') {
+            while (i < s.size() && s[i] == '-') {
+                out.push_back(s[i++]);
+            }
+            out.push_back('\n');
             col = 0;
             continue;
         }
@@ -100,16 +104,51 @@ void MaybeLaunchFeedbackFromLog(const std::wstring& line) {
         notify::PushLocal(/*Success*/ 1, "launch-ok", "启动成功", "一键登录并注入完成。", 4200);
         return;
     }
+    if (line.find(msc::weblogin::kHttpBusyTag) != std::wstring::npos) {
+        if (gLogUi) gLogUi->status = "HTTP 登录换票中…";
+        return;
+    }
+    if (line.find(msc::weblogin::kHttpTicketOkTag) != std::wstring::npos) {
+        if (gLogUi) gLogUi->status = "HTTP 换票成功，正在开游戏…";
+        return;
+    }
+    if (line.find(msc::weblogin::kHttpTimeoutTag) != std::wstring::npos) {
+        if (gLogUi) gLogUi->status = "HTTP 换票超时（约5分钟），请重试或检查网络";
+        sound::UiError();
+        notify::PushLocal(/*Warning*/ 2, "launch-http-timeout", "HTTP 换票超时",
+                          "约5分钟仍未完成换票，请检查网络后重试。", 7000);
+        return;
+    }
+    // 验证码 / 二次验证：状态栏 + 通知，引导自行网页登录一次
+    if (line.find(msc::weblogin::kNeedWebVerifyTag) != std::wstring::npos ||
+        line.find(L"[CaptchaRequired]") != std::wstring::npos ||
+        line.find(L"[DualVerifyRequired]") != std::wstring::npos) {
+        if (gLogUi) {
+            gLogUi->status =
+                "需要网页验证：请在浏览器或弹出的登录窗完成验证码后，再点一键启动";
+        }
+        notify::PushLocal(
+            /*Warning*/ 2, "launch-captcha", "需要网页验证",
+            "HTTP 遇验证码/二次验证。请在浏览器或弹出的登录窗完成登录后，再点「一键启动」。"
+            "官网：maplestoryclassic.beanfun.com",
+            9000);
+        sound::UiError();
+        return;
+    }
     if (line.find(L"[FAIL] 换票失败") != std::wstring::npos ||
         line.find(L"[FAIL] 启动失败") != std::wstring::npos ||
-        line.find(L"[FAIL] 注入未完成") != std::wstring::npos) {
+        line.find(L"[FAIL] 注入未完成") != std::wstring::npos ||
+        line.find(L"[FAIL] HTTP 登录失败") != std::wstring::npos) {
         sound::LaunchFail();
+        if (gLogUi && line.find(L"[FAIL] HTTP 登录失败") != std::wstring::npos) {
+            gLogUi->status = "HTTP 登录失败（详见日志）；遇验证码请先网页登录一次";
+        }
         notify::PushLocal(/*Danger*/ 3, "launch-fail", "启动失败",
                           xcat::WideToUtf8(line).c_str(), 6500);
     }
 }
 
-void DrawKillButton(AppWindow& app) {
+void DrawKillButton(AppWindow& app, LaunchUiState& ui) {
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.5f));
     if (app.exiting) {
@@ -125,10 +164,17 @@ void DrawKillButton(AppWindow& app) {
         ImGui::SetItemTooltip("客户端正在检查/下载/安装更新，完成后窗口会自动关闭或恢复。");
         return;
     }
+
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float rowW = ImGui::GetContentRegionAvail().x;
+    const float usable = (std::max)(2.f, rowW - gap);
+    const float exitW = (std::max)(1.f, usable * 0.80f);
+    const float relaunchW = (std::max)(1.f, usable - exitW);
+
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.42f, 0.14f, 0.16f, 1.f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.18f, 0.22f, 1.f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.72f, 0.22f, 0.26f, 1.f));
-    if (ImGui::Button("退出 XCat 和游戏", ImVec2(-1.f, 0.f))) {
+    if (ImGui::Button("退出XCAT和游戏", ImVec2(exitW, 0.f))) {
         app.exiting = true;
         app.exitStartedTick = GetTickCount64();
         xcat::log::Info("App", "graceful exit: requested");
@@ -136,8 +182,27 @@ void DrawKillButton(AppWindow& app) {
     }
     ImGui::PopStyleColor(3);
     ImGui::SetItemTooltip(
-        "关闭 XCat，并结束 Maplestory_Classic.exe。\n"
+        "结束 Maplestory_Classic.exe 并关闭本程序。\n"
         "标题栏 × 只关启动器窗口，不杀游戏。");
+
+    ImGui::SameLine(0.f, gap);
+
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.38f, 0.58f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.48f, 0.72f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.14f, 0.32f, 0.50f, 1.f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.97f, 1.f, 1.f));
+    if (ImGui::Button("重启游戏", ImVec2(relaunchW, 0.f))) {
+        if (hangup_schedule::RequestManualCleanRelaunch(ui)) {
+            sound::UiClick();
+            xcat::log::Info("App", "manual clean relaunch requested");
+        } else {
+            sound::UiError();
+        }
+    }
+    ImGui::PopStyleColor(4);
+    ImGui::SetItemTooltip(
+        "结束 Maplestory_Classic.exe，等退净后自动一键冷启。\n"
+        "本程序保持运行；非挂机时段不可用。");
 }
 
 void FinishGracefulExit(AppWindow& app, LaunchUiState& /*ui*/, const char* reason) {
@@ -203,6 +268,12 @@ bool LaunchPanel_AccountLooksValid(const LaunchUiState& ui, std::wstring* errOut
 }
 
 bool LaunchPanel_StartOneClick(LaunchUiState& ui) {
+    if (!hangup_schedule::AllowsLaunch(ui.prefsBinDir)) {
+        ui.status = "挂机时段：当前为非挂机小时，已跳过启动";
+        xcat::log::Info("App", "one-click blocked: hangup schedule off-hour");
+        LaunchPanel_AppendLog(ui, L"[Hangup] 非挂机时段，跳过启动");
+        return false;
+    }
     LaunchPanel_SaveAccount(ui);
     std::wstring parseErr;
     if (!LaunchPanel_AccountLooksValid(ui, &parseErr)) {
@@ -213,8 +284,13 @@ bool LaunchPanel_StartOneClick(LaunchUiState& ui) {
         notify::PushLocal(/*Warning*/ 2, "launch-account", "账号无效", ui.status.c_str(), 4500);
         return false;
     }
-    if (!msc::weblogin::IsReady()) {
-        ui.status = "WebView2 尚未就绪，请稍等几秒再点";
+    if (!msc::weblogin::CanStartOneClick()) {
+        if (!msc::weblogin::IsRuntimeInstalled()) {
+            ui.status = "缺少 WebView2 Runtime：请安装后重启本程序";
+            msc::weblogin::PromptRuntimeInstall(nullptr);
+        } else {
+            ui.status = "WebView2 尚未就绪，请稍等几秒再点";
+        }
         sound::UiError();
         return false;
     }
@@ -236,7 +312,21 @@ bool LaunchPanel_StartOneClick(LaunchUiState& ui) {
 
 void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui) {
     if (!ui.pendingAutoLaunch) return;
-    if (!msc::weblogin::IsReady()) return;
+    if (!msc::weblogin::CanStartOneClick()) return;
+    // WebViewOnly 仍等环境就绪；HTTP 策略可立即启动
+    if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::WebViewOnly &&
+        !msc::weblogin::IsReady()) {
+        return;
+    }
+
+    if (!hangup_schedule::AllowsLaunch(ui.prefsBinDir)) {
+        ui.pendingAutoLaunch = false;
+        ui.status = "非挂机时段，已跳过冷启自动启动（时段到后由挂机调度拉起）";
+        xcat::log::Info("App", "auto-launch skipped: hangup schedule off-hour");
+        LaunchPanel_AppendLog(ui, L"[Hangup] 非挂机时段，跳过冷启自动启动");
+        return;
+    }
+
     ui.pendingAutoLaunch = false;
 
     std::wstring parseErr;
@@ -285,18 +375,30 @@ void DrawMainShell(AppWindow& app, LaunchUiState& ui) {
 
     if (PollGracefulExit(app, ui)) return;
 
-    const RuntimeLeds leds = QueryRuntimeLeds();
+    const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
     PollMilestoneSounds(leds);
     notify::Poll(ui.prefsBinDir);
+
+    if (app.hotkeyF10.exchange(false)) {
+        std::string err;
+        if (TriggerManualRejoin(ui.prefsBinDir, /*requireInjected=*/true, &err)) {
+            notify::PushLocal(/*Info*/ 0, "manual-rejoin", "随机换频已触发",
+                              "F10：已下发换频命令。", 3500);
+        } else {
+            notify::PushLocal(/*Warning*/ 2, "manual-rejoin-fail", "随机换频失败",
+                              err.empty() ? "未注入或写盘失败" : err.c_str(), 4200);
+        }
+    }
 
     ui::LauncherFrame frame(0.f);
     if (!frame.visible) return;
 
     ui::DrawLauncherTopBar(app, leds, ui.prefsBinDir);
-    DrawLauncherStatusBar(ui, leds);
+    DrawLauncherStatusBar(ui, leds, app.launchTickMs);
 
     constexpr int kTabCount = static_cast<int>(WorkspaceTab::Count);
-    if (ui.activeTab < 0 || ui.activeTab >= kTabCount) ui.activeTab = 0;
+    if (ui.activeTab < 0 || ui.activeTab >= kTabCount)
+        ui.activeTab = static_cast<int>(WorkspaceTab::Home);
     ui.activeTab = ui::DrawWorkspaceTabStrip(ui.activeTab, kWorkspaceTabLabels, kTabCount);
     ui::DrawWorkspaceContentSeparator();
 
@@ -305,7 +407,7 @@ void DrawMainShell(AppWindow& app, LaunchUiState& ui) {
     DrawWorkspaceTabContent(app, ui, ui.activeTab);
     ImGui::EndChild();
 
-    DrawKillButton(app);
+    DrawKillButton(app, ui);
     notify::Draw(app.dpiScale);
     eventlog::DrawWindow(app.dpiScale);
 }

@@ -1,27 +1,27 @@
 #pragma once
-#include <Windows.h>
+// fly — Classic TWMS 鼠标飞
+// 策略：flyMode 0=点击飞(A) / 1=跟随飞(B)；F6/面板武装。
+// A/B：fill+Doing hop，flyHopCdMs 控间隔，不钉台。
 
-namespace x {
-namespace features {
-namespace fly {
+namespace x::features::fly {
 
 void Init();
 void Shutdown();
-// Spawns / stops the 60Hz worker. Safe to call from DllMain: StartWorker only creates a
-// thread, StopWorker only signals it (never joins — that would deadlock the loader).
 void StartWorker();
 void StopWorker();
-void SetDesired(bool on);
-bool IsDesired();
-bool IsEnabled();
-float GetSpeed();
-void SetSpeed(float v);
-void TickRealtime();
-bool PollFlyHotkey();
-void ToggleFly();
-void ForceRebind();
-void PreferCameraBind();
 
-}  // namespace fly
-}  // namespace features
-}  // namespace x
+bool IsArmed();
+void SetArmed(bool on);
+
+// 外部暂停（补给/测谎等）：不改 armed 开关，仅抑制 hop；解除后恢复。
+void SetExternalPause(bool on);
+bool IsExternallyPaused();
+
+// 0=点击飞(A) 1=跟随飞(B)
+void SetMode(unsigned mode);
+unsigned GetMode();
+
+void SetHopCdMs(unsigned ms);
+unsigned GetHopCdMs();
+
+}  // namespace x::features::fly

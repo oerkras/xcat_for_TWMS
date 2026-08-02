@@ -137,27 +137,46 @@ std::wstring ExeDir() {
     return path;
 }
 
-std::wstring ConfigDir() {
+std::wstring LocalRuntimeDir() {
     wchar_t* base = nullptr;
     std::wstring dir;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base)) && base) {
         dir = std::wstring(base) + L"\\xcat_msc";
         CoTaskMemFree(base);
     } else {
-        dir = ExeDir();
+        wchar_t tmp[MAX_PATH]{};
+        const DWORD n = GetTempPathW(MAX_PATH, tmp);
+        if (n > 0 && n < MAX_PATH) {
+            dir = std::wstring(tmp) + L"xcat_msc";
+        } else {
+            dir = ExeDir() + L"\\xcat_msc_local";
+        }
     }
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
 }
 
 std::wstring AccountConfigPath() {
-    return ConfigDir() + L"\\account.txt";
+    return ExeDir() + L"\\account.txt";
+}
+
+std::wstring LegacyAccountConfigPath() {
+    return LocalRuntimeDir() + L"\\account.txt";
 }
 
 std::wstring ProfileDir() {
-    const std::wstring dir = ConfigDir() + L"\\webview_profile";
+    const std::wstring dir = LocalRuntimeDir() + L"\\webview_profile";
     CreateDirectoryW(dir.c_str(), nullptr);
     return dir;
+}
+
+bool IsPathOnRemoteDrive(const std::wstring& path) {
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\') return true;
+    if (path.size() >= 2 && path[1] == L':') {
+        const wchar_t root[] = {path[0], L':', L'\\', L'\0'};
+        return GetDriveTypeW(root) == DRIVE_REMOTE;
+    }
+    return false;
 }
 
 void SaveAccountConfig(const std::wstring& line) {
@@ -170,8 +189,7 @@ void SaveAccountConfig(const std::wstring& line) {
     f.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
 }
 
-std::wstring LoadAccountConfig() {
-    const std::wstring path = AccountConfigPath();
+std::wstring ReadAccountFile(const std::wstring& path) {
     std::ifstream f(NarrowUtf8(path), std::ios::binary);
     if (!f) return {};
     std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -181,6 +199,14 @@ std::wstring LoadAccountConfig() {
     }
     while (!raw.empty() && (raw.back() == '\r' || raw.back() == '\n' || raw.back() == ' ')) raw.pop_back();
     return WidenUtf8(raw);
+}
+
+std::wstring LoadAccountConfig() {
+    std::wstring line = ReadAccountFile(AccountConfigPath());
+    if (!line.empty()) return line;
+    line = ReadAccountFile(LegacyAccountConfigPath());
+    if (!line.empty()) SaveAccountConfig(line);
+    return line;
 }
 
 std::string Base64Encode(const std::string& in) {
@@ -202,29 +228,30 @@ std::string Base64Encode(const std::string& in) {
     return out;
 }
 
-// 账号串：user----pass----…（只取前两段；也支持 user:pass / user|pass）
+// 账号串：user-pass-… / user----pass----…（连续任意个 '-' 都当分隔；只取前两段）
+// 也支持 user:pass / user|pass / user\tpass
 bool ParseAccountLine(const std::wstring& raw, AccountCred& out, std::wstring& err) {
     std::wstring s = raw;
-    while (!s.empty() && (s.back() == L'\r' || s.back() == L'\n' || s.back() == L' ')) s.pop_back();
+    s.erase(std::remove(s.begin(), s.end(), L'\r'), s.end());
+    s.erase(std::remove(s.begin(), s.end(), L'\n'), s.end());
+    while (!s.empty() && (s.back() == L' ' || s.back() == L'\t')) s.pop_back();
     size_t start = 0;
-    while (start < s.size() && s[start] == L' ') ++start;
+    while (start < s.size() && (s[start] == L' ' || s[start] == L'\t')) ++start;
     s = s.substr(start);
     if (s.empty()) {
-        err = L"请先粘贴账号信息（邮箱----密码----…）";
+        err = L"请先粘贴账号信息（邮箱-密码-…，横线个数不限）";
         return false;
     }
 
     std::vector<std::wstring> parts;
-    const std::wstring delim = L"----";
-    size_t pos = 0;
-    while (true) {
-        size_t p = s.find(delim, pos);
-        if (p == std::wstring::npos) {
-            parts.push_back(s.substr(pos));
-            break;
-        }
-        parts.push_back(s.substr(pos, p - pos));
-        pos = p + delim.size();
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t j = i;
+        while (j < s.size() && s[j] != L'-') ++j;
+        if (j > i) parts.push_back(s.substr(i, j - i));
+        if (j >= s.size()) break;
+        while (j < s.size() && s[j] == L'-') ++j;
+        i = j;
     }
 
     if (parts.size() >= 2 && !parts[0].empty() && !parts[1].empty()) {
@@ -233,7 +260,6 @@ bool ParseAccountLine(const std::wstring& raw, AccountCred& out, std::wstring& e
         return true;
     }
 
-    // 兜底：email:pass / email|pass / email\tpass / email pass
     for (wchar_t sep : {L'|', L'\t', L':'}) {
         size_t p = s.find(sep);
         if (p != std::wstring::npos && p > 0 && p + 1 < s.size()) {
@@ -242,7 +268,7 @@ bool ParseAccountLine(const std::wstring& raw, AccountCred& out, std::wstring& e
             return true;
         }
     }
-    err = L"无法解析账号串。格式：邮箱----密码----其它…（只使用前两项）";
+    err = L"无法解析账号串。格式：邮箱-密码-其它…（横线个数不限，只使用前两项）";
     return false;
 }
 
@@ -938,17 +964,29 @@ void ResizeWebView() {
 
 void InitWebView() {
     const std::wstring profile = ProfileDir();
+    const std::wstring exeDir = ExeDir();
+    const bool remoteExe = IsPathOnRemoteDrive(exeDir);
     QueueLog(L"WebView 用户目录：" + profile);
+    if (remoteExe) {
+        QueueLog(L"[提示] 程序在映射/网络盘上：" + exeDir +
+                 L"；账号用程序目录，WebView 配置强制写本机，并加沙箱兼容参数");
+    }
 
     auto options = Make<CoreWebView2EnvironmentOptions>();
     options->put_EnableTrackingPrevention(FALSE);
+    if (remoteExe) {
+        options->put_AdditionalBrowserArguments(L"--no-sandbox --disable-gpu-sandbox");
+    }
 
     CreateCoreWebView2EnvironmentWithOptions(
         nullptr, profile.c_str(), options.Get(),
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
                 if (FAILED(hr) || !env) {
-                    QueueLog(L"[FAIL] WebView2 环境创建失败。请安装 Edge WebView2 Runtime。");
+                    wchar_t buf[96]{};
+                    swprintf_s(buf, L"0x%08X", static_cast<unsigned>(hr));
+                    QueueLog(std::wstring(L"[FAIL] WebView2 环境创建失败 hr=") + buf +
+                             L"。请安装 Edge WebView2 Runtime（Evergreen）。");
                     return S_OK;
                 }
                 g.env = env;

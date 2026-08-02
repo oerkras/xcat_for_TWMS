@@ -105,6 +105,26 @@ errno_t FopenUtf8(FILE** file, const std::string& path, const wchar_t* mode) {
     return *file ? 0 : errno;
 }
 
+DWORD FindProcessIdByName(std::wstring_view exeName) {
+    if (exeName.empty()) return 0;
+    const std::wstring target(exeName);
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+
+    PROCESSENTRY32W pe{sizeof(pe)};
+    DWORD pid = 0;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, target.c_str()) != 0) continue;
+            if (pe.th32ProcessID == GetCurrentProcessId()) continue;
+            pid = pe.th32ProcessID;
+            break;
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return pid;
+}
+
 unsigned KillProcessesByExeName(std::wstring_view exeName) {
     if (exeName.empty()) return 0;
     const std::wstring target(exeName);
@@ -128,6 +148,16 @@ unsigned KillProcessesByExeName(std::wstring_view exeName) {
     }
     CloseHandle(snap);
     return killed;
+}
+
+bool WaitUntilNoProcessByName(std::wstring_view exeName, DWORD timeoutMs) {
+    if (exeName.empty()) return true;
+    const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>(timeoutMs);
+    for (;;) {
+        if (FindProcessIdByName(exeName) == 0) return true;
+        if (GetTickCount64() >= deadline) return FindProcessIdByName(exeName) == 0;
+        Sleep(200);
+    }
 }
 
 bool IsProcessAlive(DWORD pid) {

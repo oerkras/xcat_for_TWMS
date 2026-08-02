@@ -7,6 +7,8 @@ set(WV2_LIB_DIR "${WV2_ROOT}/build/native/x64")
 add_library(msc_launch STATIC
   msc_launch.cpp
   ott_ticket_fetch.cpp
+  http_client.cpp
+  http_beanfun_login.cpp
   msc_webview_login.cpp
 )
 target_include_directories(msc_launch PUBLIC
@@ -60,6 +62,9 @@ target_link_libraries(msc_launch_smoke PRIVATE msc_launch)
 target_compile_definitions(msc_launch_smoke PRIVATE UNICODE _UNICODE)
 if (MSVC)
   target_compile_options(msc_launch_smoke PRIVATE /utf-8)
+  set_property(TARGET msc_launch_smoke PROPERTY
+      MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+  )
 endif()
 set_target_properties(msc_launch_smoke PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin

@@ -1,0 +1,6 @@
+<Project>
+  <!-- Local research driver: do not require Spectre-mitigated CRT packs. -->
+  <PropertyGroup>
+    <SpectreMitigation>false</SpectreMitigation>
+  </PropertyGroup>
+</Project>

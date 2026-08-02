@@ -44,6 +44,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 namespace {
 
 constexpr int kHotkeyToggleGui = 1;
+constexpr int kHotkeyManualRejoin = 2;
 
 void ApplyTopmostZOrder(AppWindow& app) {
     if (!app.hwnd) return;
@@ -315,6 +316,9 @@ bool AppWindow_Create(AppWindow& app, HINSTANCE inst, float designW, float desig
     if (!RegisterHotKey(app.hwnd, kHotkeyToggleGui, MOD_NOREPEAT, VK_F9)) {
         xcat::log::Warn("App", "RegisterHotKey F9 失败（可能已被占用），最小化热键不可用");
     }
+    if (!RegisterHotKey(app.hwnd, kHotkeyManualRejoin, MOD_NOREPEAT, VK_F10)) {
+        xcat::log::Warn("App", "RegisterHotKey F10 失败（可能已被占用），随机换频热键不可用");
+    }
 
     app.dpiScale = ImGui_ImplWin32_GetDpiScaleForHwnd(app.hwnd);
     const int scaledW = static_cast<int>(designW * app.dpiScale + 0.5f);
@@ -375,7 +379,10 @@ void AppWindow_CreateSilentWebHost(AppWindow& app) {
 }
 
 void AppWindow_Destroy(AppWindow& app) {
-    if (app.hwnd) UnregisterHotKey(app.hwnd, kHotkeyToggleGui);
+    if (app.hwnd) {
+        UnregisterHotKey(app.hwnd, kHotkeyToggleGui);
+        UnregisterHotKey(app.hwnd, kHotkeyManualRejoin);
+    }
 
     if (app.webHost && IsWindow(app.webHost)) {
         DestroyWindow(app.webHost);
@@ -586,10 +593,14 @@ LRESULT AppWindow_WndProc(AppWindow& app, HWND hwnd, UINT msg, WPARAM wParam, LP
             AppWindow_ToggleMinimized(app);
             return 0;
         }
+        if (wParam == kHotkeyManualRejoin) {
+            app.hotkeyF10.store(true);
+            return 0;
+        }
         break;
 
     case WM_CLOSE:
-        // 对齐 Artale：标题栏关闭只关 GUI，不杀 msw（杀游戏走「退出 XCat 和游戏」按钮）。
+        // 对齐 Artale：标题栏关闭只关 GUI，不杀游戏（杀游戏走底部「杀死游戏并退出」）。
         app.running = false;
         return 0;
 

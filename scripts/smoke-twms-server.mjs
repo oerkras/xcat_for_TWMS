@@ -88,9 +88,68 @@ await check("GET /update/force.json (404 ok)", async () => {
   assert(r.status === 404 || r.status === 200, `status=${r.status}`);
 });
 
-await check("POST /v1/logs stub 501", async () => {
-  const r = await request("POST", "/v1/logs", "{}");
-  assert(r.status === 501, `status=${r.status}`);
+await check("session-v2 upload", async () => {
+  const created = await request("POST", "/v1/logs/sessions", "{}");
+  assert(created.status === 200, `create status=${created.status} body=${created.body.slice(0, 200)}`);
+  const cj = JSON.parse(created.body);
+  assert(cj.sessionId, "missing sessionId");
+
+  const putBody = "hello-twms-log\n";
+  const put = await new Promise((resolve, reject) => {
+    const u = new URL(base + `/v1/logs/sessions/${cj.sessionId}/files/smoke.log`);
+    const req = http.request(
+      {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port,
+        path: u.pathname,
+        method: "PUT",
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-length": Buffer.byteLength(putBody),
+          "x-xcat-source": "smoke",
+        },
+        timeout: 5000,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () =>
+          resolve({
+            status: res.statusCode,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
+        );
+      },
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.write(putBody);
+    req.end();
+  });
+  assert(put.status === 200, `put status=${put.status} body=${put.body.slice(0, 200)}`);
+
+  const commitBody = JSON.stringify({
+    version: 2,
+    profile: "twms",
+    clientId: "smoke",
+    machine: "smoke-pc",
+    deviceId: "deadbeef-0000-0000-0000-000000000001",
+    appVersion: "smoke",
+    note: "smoke upload",
+    uploadMode: "light",
+  });
+  const committed = await request(
+    "POST",
+    `/v1/logs/sessions/${cj.sessionId}/commit`,
+    commitBody,
+  );
+  assert(
+    committed.status === 200,
+    `commit status=${committed.status} body=${committed.body.slice(0, 200)}`,
+  );
+  const mj = JSON.parse(committed.body);
+  assert(mj.uploadId, "missing uploadId");
 });
 
 await check("GET /admin/clients", async () => {

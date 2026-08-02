@@ -16,7 +16,8 @@ struct Options {
     DWORD pid = 0;
     std::wstring dllPath;      // 空：旁路 bin/XCat_data/xcat.dll
     int waitGameAssemblySec = 120;
-    int settleMs = 2000;       // GameAssembly 出现后再等一会再注入
+    // 仅缓冲：GA 出现 ≠ 托管就绪。真正的冷启门闩在 xcat.dll Bootstrap（等 MainPump）。
+    int settleMs = 3000;
 };
 
 struct Result {

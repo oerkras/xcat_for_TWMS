@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-// 打包 xcat_for_twms 发布目录与 zip（范围 A：启动器 + 空状态目录 + 换包钩子）。
+// 打包 xcat_for_twms 发布目录与 zip：
+// 启动器 + 注入载荷 DLL + 离线 dataservice/赶路 seed + 空状态目录 + 换包钩子。
 //
 // 用法：
 //   node scripts/package-release.mjs [--name xcat_for_twms_MMdd_版本号_build号]
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -58,6 +59,40 @@ function copyRequired(srcRel, dstRel) {
   cpSync(src, dst);
 }
 
+/** 与 xcat POST_BUILD 对齐：dumps → 发布包 XCat_data（dataservice / skill_catalog / travel seed）。 */
+function copyOfflineDataservice() {
+  const tsvSrc = join(repo, "dumps", "offline_tables", "tsv");
+  if (!existsSync(tsvSrc)) die("缺少 dumps/offline_tables/tsv");
+  const tsvFiles = readdirSync(tsvSrc).filter((n) => n.toLowerCase().endsWith(".tsv"));
+  if (tsvFiles.length === 0) die("dumps/offline_tables/tsv 下没有 .tsv");
+
+  const dsDst = join(outDir, "XCat_data", "dataservice");
+  mkdirSync(dsDst, { recursive: true });
+  for (const name of tsvFiles) {
+    cpSync(join(tsvSrc, name), join(dsDst, name));
+  }
+  copyRequired("dumps/offline_tables/SOURCE.md", "XCat_data/dataservice/SOURCE.md");
+
+  copyRequired(
+    "dumps/offline_tables/tsv/skill_catalog_full.tsv",
+    "XCat_data/skill_catalog/skill_catalog_full.tsv",
+  );
+
+  const travelSeeds = [
+    "travel_graph.seed.tsv",
+    "travel_catalog.tsv",
+    "travel_harbor.tsv",
+    "travel_script_portal.tsv",
+  ];
+  for (const name of travelSeeds) {
+    copyRequired(`dumps/twms_routes/${name}`, `XCat_data/state/${name}`);
+  }
+
+  console.log(
+    `[package-release] offline data: dataservice=${tsvFiles.length} tsv + skill_catalog + ${travelSeeds.length} travel seeds`,
+  );
+}
+
 const args = parseArgs(process.argv.slice(2));
 const versionInfo = readVersionInfo();
 const name = args.name || stampName(versionInfo);
@@ -74,9 +109,15 @@ const exeSrc = join(repo, "bin", "xcat.exe");
 if (!existsSync(exeSrc)) die("缺少 bin/xcat.exe，请先构建 Release");
 cpSync(exeSrc, join(outDir, "xcat.exe"));
 
+const dllSrc = join(repo, "bin", "XCat_data", "xcat.dll");
+if (!existsSync(dllSrc)) die("缺少 bin/XCat_data/xcat.dll，请先构建 xcat_probe");
+mkdirSync(join(outDir, "XCat_data"), { recursive: true });
+cpSync(dllSrc, join(outDir, "XCat_data", "xcat.dll"));
+
 mkdirSync(join(outDir, "logs"), { recursive: true });
 mkdirSync(join(outDir, "XCat_data", "state"), { recursive: true });
 mkdirSync(join(outDir, "XCat_data", "update"), { recursive: true });
+copyOfflineDataservice();
 copyRequired("packaging/update/pre_apply.ps1", "XCat_data/update/pre_apply.ps1");
 copyRequired("packaging/update/post_apply.ps1", "XCat_data/update/post_apply.ps1");
 
@@ -87,8 +128,10 @@ writeFileSync(
 ## 使用
 1. 解压到任意目录
 2. 双击运行 xcat.exe
-3. 本机更新检查默认：http://127.0.0.1:18789/twms/update/latest.json
-   （网页下载站仍可用：http://127.0.0.1:52080/）
+3. 客户端更新检查默认：http://xcat.work:18789/twms/update/latest.json
+   （网页下载站：http://xcat.work:52080/；本机探活可用 127.0.0.1）
+
+内含：xcat.exe、XCat_data\\xcat.dll、离线 dataservice / 赶路 seed。
 
 构建时间：${new Date().toISOString().replace("T", " ").slice(0, 19)}
 `,

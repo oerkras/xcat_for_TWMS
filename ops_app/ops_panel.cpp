@@ -349,6 +349,8 @@ bool StartTwmsLocked(OpsState& st, std::string& err) {
         L"scripts\\twms-update-server.mjs "
         L"--host 0.0.0.0 --port 18789 --base-path /twms "
         L"--release-root artifacts\\release "
+        L"--out user_log_uploads "
+        L"--accept-profile twms "
         L"--access-log artifacts\\ops_logs\\twms_access.jsonl";
 
     if (!st.twms.Start(st.nodePath, args, st.repoRoot, logPath, err)) return false;
@@ -687,14 +689,25 @@ void OpsState_Tick(OpsState& st) {
             const std::string up = FindJsonNumber(h.body, "uptimeSec");
             st.twmsUptimeText = up == "?" ? "" : ("uptime " + up + "s");
             const size_t upPos = h.body.find("\"uploads\"");
-            auto nested = [&](const char* key) {
-                return FindJsonNumber(h.body, key, upPos == std::string::npos ? 0 : upPos);
-            };
-            const std::string bytes = nested("bytesReceived");
-            st.twmsStatsText = "upload ok=" + nested("ok") + " reject=" + nested("rejected") +
-                                 " fail=" + nested("failed") + " inflight=" + nested("inFlight") +
-                                 " bytes=" +
-                                 (bytes == "?" ? "?" : FormatBytes(_strtoui64(bytes.c_str(), nullptr, 10)));
+            const bool uploadStub =
+                upPos != std::string::npos &&
+                (h.body.find("\"stub\":true", upPos) != std::string::npos ||
+                 h.body.find("\"stub\": true", upPos) != std::string::npos);
+            if (uploadStub) {
+                st.twmsStatsText = "日志上传：未启用（API stub 501）";
+            } else if (upPos != std::string::npos) {
+                auto nested = [&](const char* key) {
+                    return FindJsonNumber(h.body, key, upPos);
+                };
+                const std::string bytes = nested("bytesReceived");
+                st.twmsStatsText = "upload ok=" + nested("ok") + " reject=" + nested("rejected") +
+                                   " fail=" + nested("failed") + " inflight=" + nested("inFlight") +
+                                   " bytes=" +
+                                   (bytes == "?" ? "?"
+                                                 : FormatBytes(_strtoui64(bytes.c_str(), nullptr, 10)));
+            } else {
+                st.twmsStatsText.clear();
+            }
             const size_t reqPos = h.body.find("\"requests\"");
             auto reqNum = [&](const char* key) {
                 return FindJsonNumber(h.body, key, reqPos == std::string::npos ? 0 : reqPos);
@@ -935,7 +948,7 @@ void DrawClientsPanel(OpsState& st) {
 
     ImGui::TextUnformatted("当前连接");
     ImGui::SameLine();
-    ImGui::TextDisabled("  近 %ds 有请求视为在线（客户端约 30s 轮询 force.json）", st.clientsActiveSec);
+    ImGui::TextDisabled("  近 %ds 有请求视为在线（客户端约 60s 轮询 force.json）", st.clientsActiveSec);
     ImGui::SameLine();
     ImGui::Checkbox("自动刷新", &st.clientsAutoRefresh);
     ImGui::SameLine();
@@ -1048,11 +1061,13 @@ void OpsPanel_Draw(OpsState& st) {
     // ── Header ──
     ImGui::TextUnformatted("XCat TWMS 运维控制台");
     ImGui::SameLine();
-    ImGui::TextDisabled("  台服经典版");
+    ImGui::TextDisabled("  台服经典版 · 本仓 bin_ops");
     if (!st.diskFreeText.empty()) {
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(st.diskFreeText.c_str()).x - 24.f);
         ImGui::TextDisabled("%s", st.diskFreeText.c_str());
     }
+    ImGui::TextColored(ImVec4(1.f, 0.72f, 0.25f, 1.f),
+                       "关闭本窗口会停止 API(:18789) 与发布站(:52080)；请勿与枫星 ops 混用。");
 
     {
         static const char* kThemeLabels[] = {"暗夜", "白天"};
@@ -1138,14 +1153,18 @@ void OpsPanel_Draw(OpsState& st) {
             ImGui::SameLine();
             if (ImGui::Button("日志索引##a")) {
                 const std::wstring catalog = JoinPath(st.repoRoot, L"user_log_uploads\\catalog.jsonl");
+                const std::wstring devices = JoinPath(st.repoRoot, L"user_log_uploads\\devices");
                 if (GetFileAttributesW(catalog.c_str()) != INVALID_FILE_ATTRIBUTES) {
                     OpenFolder(catalog);
+                } else if (GetFileAttributesW(devices.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    OpenFolder(devices);
                 } else {
                     OpenFolder(JoinPath(st.repoRoot, L"user_log_uploads"));
                 }
             }
             ImGui::SameLine();
-            if (ImGui::Button("复制 Health##a")) CopyText("http://127.0.0.1:18789/twms/health");
+            if (ImGui::Button("复制 Health##a")) CopyText("http://xcat.work:18789/twms/health");
+            ImGui::TextDisabled("客户端更新口：http://xcat.work:18789/twms");
         }
 
         ImGui::TableNextColumn();
@@ -1157,7 +1176,7 @@ void OpsPanel_Draw(OpsState& st) {
                 ImGui::TextUnformatted("已停止");
             }
             ImGui::TextDisabled("%s", st.publishProbeText.c_str());
-            ImGui::TextDisabled("http://127.0.0.1:52080/");
+            ImGui::TextDisabled("http://xcat.work:52080/");
             if (st.latestClientBuildId > 0) {
                 ImGui::TextDisabled("最新客户端 v%s  build %u", st.latestClientVersionText.c_str(),
                                     st.latestClientBuildId);
@@ -1187,7 +1206,7 @@ void OpsPanel_Draw(OpsState& st) {
             ImGui::SameLine();
             if (ImGui::Button("下载目录##p")) OpenFolder(JoinPath(st.repoRoot, L"publish_site\\downloads"));
             ImGui::SameLine();
-            if (ImGui::Button("复制 URL##p")) CopyText("http://127.0.0.1:52080/");
+            if (ImGui::Button("复制 URL##p")) CopyText("http://xcat.work:52080/");
         }
 
         ImGui::EndTable();

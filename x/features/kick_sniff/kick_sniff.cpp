@@ -7,7 +7,11 @@
 #endif
 #include "kick_sniff.h"
 
+#include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
+#include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_method.h"
+#include "../../runtime/il2cpp_shape.h"
 
 #include <Windows.h>
 #include <TlHelp32.h>
@@ -26,38 +30,59 @@ namespace features {
 namespace kick_sniff {
 namespace {
 
-// TW SessionTcpLayer (= CMS NetworkManager), restored dump TypeDef 13772.
-constexpr char kSessionTcpLayerClass[] =
-    "d418de852f7af74b3618f37ea237eba34d0d7b7dfb53c8b0a4461bef3964232";
-// TW Session (= CMS Framework.Network.Session), TypeDef 13797.
-constexpr char kSessionClass[] =
-    "cd7c86a41e028c570b85b628371d78d55a230ae6e0f4784a1a0eeaaecb7f47e";
+using x::runtime::il2cpp::LooksLikeHeapPtr;
+using x::runtime::il2cpp::ReadPtr;
 
-// SessionTcpLayer fields (TW dump.cs TypeDef 13772 = CMS NetworkManager):
-//   Session* @0x10, SessionState enum @0x18, Queue<InPacket> @0x28, … (+HashSet@0x48 vs CMS)
+// TW NetworkManager facade (df34ff16… TypeDef 13772 : Singleton<>) → Session* @0x10
+// Session (f0ee06b6… TypeDef 13797) 承载 Socket/seq/SendPacket；CALL_EDGE 挂 Session klass。
+// 旧 CMS Session 哈希 cd7c86a4… 已并入 Session 类，不再单独 FindClass。
+
+// NetworkManager facade fields:
+//   Session* @0x10, SessionState @0x18, Queue<InPacket> @0x28, HashSet@0x48
 constexpr size_t kOffNmSession = 0x10;       // Session*
 constexpr size_t kOffNmSessionState = 0x18;  // SessionState (int enum)
 constexpr size_t kOffNmPacketQueue = 0x28;   // Queue<InPacket>*
 
-// Session (= TW cd7c86a4… TypeDef 13797). TW inserts an extra object @0x50 vs CMS:
+// Session instance fields（TW +0x50 相对 CMS 多一格）:
 //   CMS: List@0x50 SessionState@0x58
 //   TW:  object@0x50 List@0x58 SessionState@0x60
 constexpr size_t kOffSessionPendingError = 0x40;  // int _pendingErrorCode
 constexpr size_t kOffSessionState = 0x60;         // SessionState backing field (TW)
 constexpr size_t kOffSessionRecvList = 0x58;      // List<InPacket>* (TW)
 constexpr size_t kOffSessionClosed = 0x20;        // bool _isClosed
+constexpr size_t kOffSessionSeqSend = 0x18;       // uint _seqSend — monotonic outbound counter
 
-// TW dump.cs RVAs — call-edge targets (CMS semantic names). MethodInfo swap only (no .text).
-constexpr uintptr_t kRvaNmCloseSession = 0x1CB8550;   // NetworkManager.CloseSession
-constexpr uintptr_t kRvaNmDisconnect = 0x1CB9200;     // NetworkManager.Disconnect
-constexpr uintptr_t kRvaSessionClose = 0x1CB8E40;     // Session.Close
-constexpr uintptr_t kRvaSessionSetState = 0x1CC7A50;  // Session.set_SessionState
-constexpr uintptr_t kRvaSessionOnDisc = 0x1CC9270;    // Session.OnDisconnect
-constexpr uintptr_t kRvaSessionCloseSock = 0x1CC7F10; // Session.CloseSocket
-// a480 local-disconnect fork (IDA 2026-07-31): distinguish DC7E70 vs Update→a480.
-constexpr uintptr_t kRvaA480TryLocalDisc = 0xDC7E70;   // a480_TryLocalDisconnect_c596
-constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDD46B8; // Update: call a480_DoLocalNetworkDisconnect
-constexpr uintptr_t kRvaA480DoLocalDisc = 0xDDC320;    // a480_DoLocalNetworkDisconnect (ref)
+// OutPacket (= TW f217b5… TypeDef 13775). Same layout as CMS and as InPacket: the id sits at
+// +0x20 in all three, so the outbound probe reads it exactly like the inbound ring does.
+constexpr size_t kOffOutPacketId = 0x20;  // ushort _packetId
+
+// TW dump.cs RVAs — call-edge targets（方法在 Session / f0ee06b6… 上）。
+// CloseSession=旧 CloseSocket；Disconnect=旧 Close；另挂 OnDisconnect / set_SessionState。
+constexpr uintptr_t kRvaNmCloseSession = 0x1CC66E0;  // remapped 2026-08-03
+constexpr uintptr_t kRvaNmDisconnect = 0x1CB7610;    // remapped 2026-08-03
+constexpr uintptr_t kRvaSessionSetState = 0x1CC6220;  // remapped 2026-08-03: set_SessionState (+0x60)
+constexpr uintptr_t kRvaSessionOnDisc = 0x1CC7A40;  // remapped 2026-08-03: void() writes SessionState@+0x60
+
+// Outbound funnel (2026-08-03)：Session.SendPacket(OutPacket)→bool（P0b 钉死 RVA 0x1CB98B0）。
+// ABI：rcx=Session* / rdx=OutPacket*；VEH 读 +0x20 PacketId / Buffer。Wire 内才 EncodeForSend。
+constexpr uintptr_t kRvaSessionSend = 0x1CB98B0;  // Session.SendPacket
+// 方法哈希（Session 上 void() 极多，kind 不唯一；哈希漂 RVA 时仍可活）
+constexpr char kHashCloseSession[] =
+    "ed805641b32bfe379c082d2f3cc596bc095cb4548b64adee7968f28b6792749";
+constexpr char kHashDisconnect[] =
+    "cbff51ff6c9b2eee095ec61bebfd23f2bc56630e5b0976edda68927b13a7b37";
+constexpr char kHashOnDisconnect[] =
+    "f05a4b7899da9c2081e9bab041fbff9e2c2dfb37e15fb266132b231e1532da3";
+constexpr char kHashSetSessionState[] =
+    "dad3bfd81e6a3a2ef96f935e92ac6eade6d8ff60560fa7ca12e212b4707e187";
+constexpr char kHashSendPacket[] =
+    "bcd0d90687418e2b3ff0faf5b96a9bb4028720a4eb37b78b74b873ce1dd891f";
+constexpr char kOutPacketClass[] =
+    "aeb7167893ac51cbc0cf730326f2361e6e8b797eeb940786711185ef0fd658c";
+// a480 local-disconnect fork（WM ab85c0a9…）：Try 置 +0x298，Update 再调 DoLocal。
+constexpr uintptr_t kRvaA480TryLocalDisc = 0xDC6780;  // remapped 2026-08-03: writes +0x298 (was 0xDC7E70)
+constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDD2FC8;  // remapped 2026-08-03: Update call DoLocal
+constexpr uintptr_t kRvaA480DoLocalDisc = 0xDDAC30;  // remapped 2026-08-03 (was 0xDDC320)
 constexpr size_t kOffA480ForceDiscFlag = 0x298;        // bool force-local-disconnect
 constexpr size_t kOffA480DiscTimer = 0x29C;            // float throttle
 constexpr int kCallEdgeCap = 48;
@@ -66,6 +91,36 @@ constexpr int kStackFrames = 16;
 // InPacket.PacketId @ +0x20 (ushort); Packet.Buffer @ +0x10 (byte[]*).
 constexpr size_t kOffInPacketId = 0x20;
 constexpr size_t kOffPacketBuffer = 0x10;
+// Rest of the abstract Packet base, for reading an outbound payload: int Offset @0x18 is how many
+// bytes are written so far, and the body starts at DataPos (4-byte header + 2-byte id).
+constexpr size_t kOffPacketOffset = 0x18;
+constexpr size_t kIl2cppArrayData = 0x20;  // first element of a managed byte[]
+constexpr int kPacketDataPos = 6;
+
+// Names for the handful of opcodes we actually reason about, so a send.log trace reads without a
+// lookup table on the side. Values are CMS ClientPacket and have matched the wire every time we
+// have checked one (47 UserMove, 52 UserMagicAttack).
+const char* OpName(int op) {
+    switch (op) {
+        case 23: return "AliveAck";
+        case 43: return "TransferField";
+        case 47: return "UserMove";
+        case 50: return "MeleeAttack";
+        case 51: return "ShootAttack";
+        case 52: return "MagicAttack";
+        case 53: return "BodyAttack";
+        case 64: return "SelectNpc";
+        case 113: return "PortalScript";
+        case 114: return "PortalTeleport";
+        case 155: return "EnterTownPortal";
+        case 183: return "PetDropPickUp";
+        case 205: return "MobMove";
+        case 207: return "MobDropPickUp";
+        case 220: return "DropPickUp";
+        case 223: return "ReactorHit";
+        default: return nullptr;
+    }
+}
 
 // SessionState (CMS): Disconnecting=0, Disconnected=1, Connecting=2, Connected=3
 constexpr int kStateDisconnecting = 0;
@@ -84,6 +139,7 @@ std::atomic<HANDLE> gThread{nullptr};
 std::atomic<int> gLastErr{-1};
 std::atomic<int> gLastState{-1};
 std::atomic<bool> gSawDisconnect{false};
+std::atomic<uint32_t> gDisconnectSeq{0};
 void* gNmCached = nullptr;
 
 struct RingEntry {
@@ -100,17 +156,8 @@ int gRingNext = 0;
 void* gScanPrev[kScanPtrCap]{};
 int gScanPrevN = 0;
 
-using FnDomainGet = void* (*)();
-using FnDomainAssemblies = void* (*)(void* domain, size_t* size);
-using FnAsmImage = void* (*)(void* assembly);
-using FnClassFromName = void* (*)(void* image, const char* ns, const char* name);
-using FnClassGetType = void* (*)(void* klass);
-using FnTypeGetObject = void* (*)(void* type);
-using FnFindAll = void* (*)(void* type, const void* method);
-using FnObjGetClass = void* (*)(void* obj);
 using FnClassStaticData = void* (*)(void* klass);
 using FnClassParent = void* (*)(void* klass);
-using FnRuntimeClassInit = void (*)(void* klass);
 using FnClassGetMethods = void* (*)(void* klass, void** iter);
 
 // Minimal MethodInfo head (Unity IL2CPP): methodPointer + virtualMethodPointer.
@@ -122,16 +169,12 @@ struct MethodInfoHead {
 using FnVoidThis = void(__fastcall*)(void* self, const void* method);
 using FnSetState = void(__fastcall*)(void* self, int state, const void* method);
 
-FnDomainGet gDomainGet = nullptr;
-FnDomainAssemblies gDomainAssemblies = nullptr;
-FnAsmImage gAsmImage = nullptr;
-FnClassFromName gClassFromName = nullptr;
 FnClassStaticData gClassStaticData = nullptr;
 FnClassParent gClassParent = nullptr;
-FnRuntimeClassInit gRuntimeClassInit = nullptr;
 FnClassGetMethods gClassGetMethods = nullptr;
-void* gStlKlass = nullptr;
-void* gSessionKlass = nullptr;
+void* gFacadeKlass = nullptr;  // NetworkManager Singleton 壳
+void* gSessionKlass = nullptr;  // Session（CALL_EDGE MethodInfo）
+void* gStlKlass = nullptr;      // alias: 解析实例时用 facade（历史名 SessionTcpLayer）
 uintptr_t gGaBase = 0;
 
 std::atomic<int> gCallEdgeDumps{0};
@@ -162,6 +205,23 @@ std::atomic<uintptr_t> gStateWatchAddr{0};
 std::atomic<void*> gStateWatchSession{nullptr};
 
 constexpr int kDrWriteSlot = 2;
+// DR3 doubles as the outbound probe when the call-edge set is off (the common case).
+constexpr int kDrSendSlot = 3;
+
+// Which DR slots this module actually claimed this run. Tracking ownership lets the outbound
+// probe take DR3 alone and leave the rest of the register file alone when call-edge HWBP is off.
+bool gOwnSlot[4]{};
+std::atomic<bool> gSendProbe{false};
+std::atomic<uint32_t> gSendHits{0};
+std::atomic<uint32_t> gSendUnreadable{0};
+
+// Body capture for a short list of opcodes. Strictly quota'd.
+constexpr int kDumpOpMax = 8;
+constexpr int kDumpQuotaDefault = 24;
+constexpr int kDumpBodyBytes = 64;
+int gDumpOp[kDumpOpMax]{};
+std::atomic<int> gDumpLeft[kDumpOpMax]{};
+int gDumpOpN = 0;
 
 struct HookSlot {
     const char* name;
@@ -170,26 +230,28 @@ struct HookSlot {
     void* klass;  // filled at install
     MethodInfoHead* mi;
     void* orig;
+    const char* methodHash;   // dump 方法名哈希；void() 不唯一时的主防漂
+    const char* plainName;    // 偶发可读名
+    int arity;
 };
+
 // Forward decls for hooks (defined after LogCallEdge).
 void __fastcall HookNmCloseSession(void* self, const void* method);
 void __fastcall HookNmDisconnect(void* self, const void* method);
-void __fastcall HookSessionClose(void* self, const void* method);
-void __fastcall HookSessionOnDisc(void* self, const void* method);
-void __fastcall HookSessionCloseSock(void* self, const void* method);
-void __fastcall HookSessionSetState(void* self, int state, const void* method);
+void __fastcall HookNmOnDisc(void* self, const void* method);
+void __fastcall HookNmSetState(void* self, int state, const void* method);
 
+// Session 已并入 NetworkManager（f0ee06b6…）：只挂 Session klass。
+// 旧 Session.Close / CloseSocket 与 Nm.Disconnect / CloseSession 同 RVA，不再重复安装。
 HookSlot gHooks[] = {
-    {"Nm.CloseSession", kRvaNmCloseSession, reinterpret_cast<void*>(&HookNmCloseSession), nullptr, nullptr,
-     nullptr},
-    {"Nm.Disconnect", kRvaNmDisconnect, reinterpret_cast<void*>(&HookNmDisconnect), nullptr, nullptr, nullptr},
-    {"Session.Close", kRvaSessionClose, reinterpret_cast<void*>(&HookSessionClose), nullptr, nullptr, nullptr},
-    {"Session.OnDisconnect", kRvaSessionOnDisc, reinterpret_cast<void*>(&HookSessionOnDisc), nullptr, nullptr,
-     nullptr},
-    {"Session.CloseSocket", kRvaSessionCloseSock, reinterpret_cast<void*>(&HookSessionCloseSock), nullptr,
-     nullptr, nullptr},
-    {"Session.set_SessionState", kRvaSessionSetState, reinterpret_cast<void*>(&HookSessionSetState), nullptr,
-     nullptr, nullptr},
+    {"Nm.CloseSession", kRvaNmCloseSession, reinterpret_cast<void*>(&HookNmCloseSession), nullptr,
+     nullptr, nullptr, kHashCloseSession, "CloseSession", 0},
+    {"Nm.Disconnect", kRvaNmDisconnect, reinterpret_cast<void*>(&HookNmDisconnect), nullptr, nullptr,
+     nullptr, kHashDisconnect, "Disconnect", 0},
+    {"Nm.OnDisconnect", kRvaSessionOnDisc, reinterpret_cast<void*>(&HookNmOnDisc), nullptr, nullptr,
+     nullptr, kHashOnDisconnect, "OnDisconnect", 0},
+    {"Nm.set_SessionState", kRvaSessionSetState, reinterpret_cast<void*>(&HookNmSetState), nullptr,
+     nullptr, nullptr, kHashSetSessionState, "set_SessionState", 1},
 };
 
 void WriteAll(HANDLE h, const char* buf, int n) {
@@ -250,9 +312,105 @@ void OpenLog() {
         if (DirExists(logs)) dir = logs;
     }
     if (dir.empty()) return;
-    const std::wstring full = dir + L"\\kick.log";
-    gLog = CreateFileW(full.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                       FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Was CREATE_ALWAYS with no backup: every relaunch wiped the previous drop's evidence,
+    // which is exactly why the 08-19 disconnect could not be reconstructed.
+    gLog = x::runtime::OpenRotatingDbgLog(dir, L"kick.log");
+}
+
+HANDLE gSendLog = INVALID_HANDLE_VALUE;
+CRITICAL_SECTION gSendLock;
+bool gSendLockReady = false;
+
+void OpenSendLog() {
+    if (gSendLog != INVALID_HANDLE_VALUE) return;
+    std::wstring dir = DirExists(kLogDirDev) ? kLogDirDev : ModuleDir();
+    if (!DirExists(kLogDirDev) && !dir.empty()) {
+        const std::wstring logs = dir + L"\\logs";
+        CreateDirectoryW(logs.c_str(), nullptr);
+        if (DirExists(logs)) dir = logs;
+    }
+    if (dir.empty()) return;
+    // Its own file, since one packet per line would bury kick.log. Previously appended forever
+    // to keep the trace next to the drop that followed it, but that grew without bound and
+    // mixed every session together; a generation per run keeps both properties.
+    gSendLog = x::runtime::OpenRotatingDbgLog(dir, L"send.log");
+    if (gSendLog == INVALID_HANDLE_VALUE) return;
+    if (!gSendLockReady) {
+        InitializeCriticalSection(&gSendLock);
+        gSendLockReady = true;
+    }
+}
+
+// Runs inside the VEH on every outbound packet, so it never flushes — several game threads
+// can reach Session.Send, hence the lock; the worker forces the flush every couple of seconds.
+void SendLog(const char* fmt, ...) {
+    if (gSendLog == INVALID_HANDLE_VALUE || !gSendLockReady) return;
+    char body[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int bn = vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    if (bn < 0) return;
+    if (bn >= (int)sizeof(body)) bn = (int)sizeof(body) - 1;
+    body[bn] = '\0';
+
+    char buf[320];
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    const int n = snprintf(buf, sizeof(buf), "%02u:%02u:%02u.%03u %s\n", st.wHour, st.wMinute,
+                           st.wSecond, st.wMilliseconds, body);
+    if (n <= 0) return;
+    EnterCriticalSection(&gSendLock);
+    DWORD w = 0;
+    WriteFile(gSendLog, buf, (DWORD)n, &w, nullptr);
+    LeaveCriticalSection(&gSendLock);
+}
+
+void FlushSendLog() {
+    if (gSendLog == INVALID_HANDLE_VALUE || !gSendLockReady) return;
+    EnterCriticalSection(&gSendLock);
+    FlushFileBuffers(gSendLog);
+    LeaveCriticalSection(&gSendLock);
+}
+
+// Reads the payload at the Session.Send entry, i.e. before EncodeForSend runs, so the bytes
+// should still be plaintext — the inbound ring's heads are ciphertext, which is what a capture
+// taken too late would look like. Everything here runs inside the VEH: no allocation, no locks
+// beyond SendLog's own, and every dereference behind SEH.
+void DumpSendBody(const uint8_t* pkt, int op) {
+    if (!pkt) return;
+    int idx = -1;
+    for (int i = 0; i < gDumpOpN; ++i) {
+        if (gDumpOp[i] == op) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx < 0) return;
+    int left = gDumpLeft[idx].load();
+    while (left > 0 && !gDumpLeft[idx].compare_exchange_weak(left, left - 1)) {
+    }
+    if (left <= 0) return;
+
+    char hex[3 * kDumpBodyBytes + 8];
+    int hn = 0;
+    int total = -1;
+    __try {
+        const auto* buf = *reinterpret_cast<const uint8_t* const*>(pkt + kOffPacketBuffer);
+        total = *reinterpret_cast<const int*>(pkt + kOffPacketOffset);
+        if (buf && total > kPacketDataPos) {
+            const uint8_t* d = buf + kIl2cppArrayData + kPacketDataPos;
+            int n = total - kPacketDataPos;
+            if (n > kDumpBodyBytes) n = kDumpBodyBytes;
+            for (int i = 0; i < n && hn + 4 < (int)sizeof(hex); ++i) {
+                hn += snprintf(hex + hn, sizeof(hex) - hn, "%02X ", d[i]);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        hn = 0;
+    }
+    hex[hn > 0 ? hn : 0] = '\0';
+    SendLog("op=%d BODY off=%d [%d left] %s", op, total, left - 1, hex);
 }
 
 const char* StateName(int s) {
@@ -432,21 +590,6 @@ bool LooksLikeKickRelatedOp(int op) {
     }
 }
 
-bool LooksLikeHeapPtr(void* p) {
-    const uintptr_t u = reinterpret_cast<uintptr_t>(p);
-    // User-mode heap on Win64; reject small integers mistaken for pointers (e.g. 0x8).
-    return u >= 0x10000 && u < 0x00007FFFFFFFFFFFULL;
-}
-
-void* ReadPtr(void* obj, size_t off) {
-    if (!obj) return nullptr;
-    __try {
-        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(obj) + off);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-}
-
 int ReadI32(void* obj, size_t off) {
     if (!obj) return -1;
     __try {
@@ -484,23 +627,9 @@ uint16_t ReadU16(void* obj, size_t off) {
 }
 
 void* FindClass(const char* name) {
-    if (!gDomainGet || !gDomainAssemblies || !gAsmImage || !gClassFromName || !name) return nullptr;
-    __try {
-        void* domain = gDomainGet();
-        if (!domain) return nullptr;
-        size_t n = 0;
-        void** asms = reinterpret_cast<void**>(gDomainAssemblies(domain, &n));
-        if (!asms || n == 0) return nullptr;
-        for (size_t i = 0; i < n; ++i) {
-            void* image = gAsmImage(asms[i]);
-            if (!image) continue;
-            void* klass = gClassFromName(image, "", name);
-            if (!klass) klass = gClassFromName(image, "Framework.Network", name);
-            if (klass) return klass;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    return nullptr;
+    void* k = x::runtime::il2cpp::FindClass("", name);
+    if (!k) k = x::runtime::il2cpp::FindClass("Framework.Network", name);
+    return k;
 }
 
 // Singleton<T> holds Lazy<T> _instance as first static field. Lazy.value layouts vary;
@@ -539,66 +668,51 @@ bool ObjKlassIs(void* obj, void* expectKlass) {
     return k == expectKlass;
 }
 
-bool LooksLikeSessionTcpLayer(void* cand) {
+bool LooksLikeNetworkManagerFacade(void* cand) {
     if (!cand || !LooksLikeHeapPtr(cand)) return false;
-    if (gStlKlass && !ObjKlassIs(cand, gStlKlass)) return false;
+    if (gFacadeKlass && !ObjKlassIs(cand, gFacadeKlass)) return false;
     void* sess = ReadPtr(cand, kOffNmSession);
     const int st = ReadI32(cand, kOffNmSessionState);
-    // Must have a plausible Session* OR a sane Connected/Connecting state with null session
-    // during handshake — never accept small-integer "pointers" like 0x8.
-    if (sess && !LooksLikeHeapPtr(sess)) return false;
+    // +0x18 是 SessionState（0..3）；勿与 Session.seq@+0x18 混淆。
     if (st < 0 || st > 3) return false;
-    // Prefer instances that actually hold a Session (in-game).
+    if (sess && !LooksLikeHeapPtr(sess)) return false;
     if (LooksLikeHeapPtr(sess)) return true;
-    // Allow Connecting with null session; reject Disconnecting/Disconnected without session
-    // as sole acceptance criterion (that was how we cached garbage).
     return st == kStateConnecting || st == kStateConnected;
 }
 
 void* ResolveSessionTcpLayer() {
     if (gNmCached) {
-        if (LooksLikeSessionTcpLayer(gNmCached)) return gNmCached;
+        if (LooksLikeNetworkManagerFacade(gNmCached)) return gNmCached;
         gNmCached = nullptr;
     }
-    if (!gStlKlass) gStlKlass = FindClass(kSessionTcpLayerClass);
-    if (!gStlKlass) gStlKlass = FindClass("SessionTcpLayer");
-    if (!gStlKlass) return nullptr;
+    if (!gFacadeKlass) gFacadeKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerFacadeKlass();
+    if (!gFacadeKlass) return nullptr;
+    gStlKlass = gFacadeKlass;  // 兼容旧日志字段名
 
-    if (gRuntimeClassInit) {
-        __try {
-            gRuntimeClassInit(gStlKlass);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
+    // NEVER il2cpp_runtime_class_init on this worker — allocates → GC fatal
+    // "Collecting from unknown thread". Game cctor already ran once Session exists;
+    // if statics empty, poll again later.
 
     // Prefer parent Singleton<> statics (Lazy<T> _instance @ first slot).
-    void* staticsKlass = gStlKlass;
+    void* staticsKlass = gFacadeKlass;
     if (gClassParent) {
         void* parent = nullptr;
         __try {
-            parent = gClassParent(gStlKlass);
+            parent = gClassParent(gFacadeKlass);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
-        if (parent) {
-            if (gRuntimeClassInit) {
-                __try {
-                    gRuntimeClassInit(parent);
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                }
-            }
-            staticsKlass = parent;
-        }
+        if (parent) staticsKlass = parent;
     }
     void* statics = KlassStaticFields(staticsKlass);
-    if (!statics) statics = KlassStaticFields(gStlKlass);
+    if (!statics) statics = KlassStaticFields(gFacadeKlass);
     if (!statics) return nullptr;
 
     void* best = nullptr;
-    for (size_t s = 0; s < 4; ++s) {
+    for (size_t s = 0; s < 8; ++s) {
         void* lazy = ReadPtr(statics, s * sizeof(void*));
         void* cand = TryLazyValue(lazy);
         if (!cand) cand = lazy;
-        if (!LooksLikeSessionTcpLayer(cand)) continue;
+        if (!LooksLikeNetworkManagerFacade(cand)) continue;
         void* sess = ReadPtr(cand, kOffNmSession);
         const int st = ReadI32(cand, kOffNmSessionState);
         if (LooksLikeHeapPtr(sess) && st == kStateConnected) {
@@ -920,11 +1034,24 @@ bool AddrInModule(void* p, HMODULE mod) {
     return a >= base && a < base + nt->OptionalHeader.SizeOfImage;
 }
 
-DWORD64 BuildDr7Mixed() {
+// Local-enable bit plus the R/W+LEN nibble belonging to one slot.
+DWORD64 SlotDr7Mask(int i) { return (1ull << (2 * i)) | (0xFull << (16 + 4 * i)); }
+
+DWORD64 OwnedDr7Mask() {
+    DWORD64 m = 0;
+    for (int i = 0; i < 4; ++i)
+        if (gOwnSlot[i]) m |= SlotDr7Mask(i);
+    return m;
+}
+
+DWORD64 BuildDr7Owned() {
     // Dr0/1/3: local enable + execute(00) + len1(00)
     // Dr2: local enable + write(01) + len4(11) when watch armed
-    DWORD64 dr7 = (1ull << 0) | (1ull << 2) | (1ull << 6);
-    if (gStateWatchAddr.load() != 0) {
+    DWORD64 dr7 = 0;
+    if (gOwnSlot[0]) dr7 |= (1ull << 0);
+    if (gOwnSlot[1]) dr7 |= (1ull << 2);
+    if (gOwnSlot[3]) dr7 |= (1ull << 6);
+    if (gOwnSlot[kDrWriteSlot] && gStateWatchAddr.load() != 0) {
         dr7 |= (1ull << 4);           // local enable Dr2
         dr7 |= (1ull << 24);          // R/W = write
         dr7 |= (3ull << 26);          // LEN = 4 bytes (SessionState int)
@@ -934,18 +1061,25 @@ DWORD64 BuildDr7Mixed() {
 
 void FillHwbpContext(CONTEXT* ctx, bool enable) {
     if (!ctx) return;
+    // Read-modify-write: every slot we did not claim keeps whatever another feature put there.
+    const DWORD64 mask = OwnedDr7Mask();
     if (enable) {
-        ctx->Dr0 = gHwbpAddr[0];
-        ctx->Dr1 = gHwbpAddr[1];
-        ctx->Dr2 = gStateWatchAddr.load();
-        ctx->Dr3 = gHwbpAddr[3];
-        gHwbpAddr[kDrWriteSlot] = ctx->Dr2;
+        if (gOwnSlot[0]) ctx->Dr0 = gHwbpAddr[0];
+        if (gOwnSlot[1]) ctx->Dr1 = gHwbpAddr[1];
+        if (gOwnSlot[kDrWriteSlot]) {
+            ctx->Dr2 = gStateWatchAddr.load();
+            gHwbpAddr[kDrWriteSlot] = ctx->Dr2;
+        }
+        if (gOwnSlot[3]) ctx->Dr3 = gHwbpAddr[3];
         ctx->Dr6 = 0;
-        ctx->Dr7 = BuildDr7Mixed();
+        ctx->Dr7 = (ctx->Dr7 & ~mask) | BuildDr7Owned();
     } else {
-        ctx->Dr0 = ctx->Dr1 = ctx->Dr2 = ctx->Dr3 = 0;
+        if (gOwnSlot[0]) ctx->Dr0 = 0;
+        if (gOwnSlot[1]) ctx->Dr1 = 0;
+        if (gOwnSlot[kDrWriteSlot]) ctx->Dr2 = 0;
+        if (gOwnSlot[3]) ctx->Dr3 = 0;
         ctx->Dr6 = 0;
-        ctx->Dr7 = 0;
+        ctx->Dr7 &= ~mask;
     }
 }
 
@@ -1021,8 +1155,10 @@ LONG CALLBACK CallEdgeVeh(EXCEPTION_POINTERS* ep) {
     const DWORD64 dr6 = ctx->Dr6;
 
     // Prefer Dr6 bits: write BP never has Rip == watched data address.
+    // Only slots we claimed this run.
     int hit = -1;
     for (int i = 0; i < 4; ++i) {
+        if (!gOwnSlot[i]) continue;
         if ((dr6 & (1ull << i)) && (gHwbpAddr[i] || (i == kDrWriteSlot && gStateWatchAddr.load()))) {
             hit = i;
             break;
@@ -1030,7 +1166,7 @@ LONG CALLBACK CallEdgeVeh(EXCEPTION_POINTERS* ep) {
     }
     if (hit < 0) {
         for (int i = 0; i < 4; ++i) {
-            if (i == kDrWriteSlot) continue;
+            if (!gOwnSlot[i] || i == kDrWriteSlot) continue;
             if (gHwbpAddr[i] && rip == gHwbpAddr[i]) {
                 hit = i;
                 break;
@@ -1038,6 +1174,30 @@ LONG CALLBACK CallEdgeVeh(EXCEPTION_POINTERS* ep) {
         }
     }
     if (hit < 0) return EXCEPTION_CONTINUE_SEARCH;
+
+    if (hit == kDrSendSlot && gSendProbe.load()) {
+        // Entry of Session.Send(OutPacket): rcx = Session*, rdx = OutPacket*. The id alone is
+        // enough to tell a UserMove apart from anything the client volunteers by itself, and a
+        // line per packet stays readable at the client's natural rate.
+        int op = -1;
+        __try {
+            auto* pkt = reinterpret_cast<const uint8_t*>(ctx->Rdx);
+            if (pkt) op = *reinterpret_cast<const uint16_t*>(pkt + kOffOutPacketId);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            op = -1;
+        }
+        if (op < 0) gSendUnreadable.fetch_add(1);
+        gSendHits.fetch_add(1);
+        if (op >= 0 && gDumpOpN) DumpSendBody(reinterpret_cast<const uint8_t*>(ctx->Rdx), op);
+        if (const char* nm = OpName(op)) {
+            SendLog("op=%d %s", op, nm);
+        } else {
+            SendLog("op=%d", op);
+        }
+        ctx->Dr6 = 0;
+        ctx->EFlags |= 0x10000;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
 
     int extra = -1;
     void* selfOverride = nullptr;
@@ -1088,6 +1248,14 @@ void InstallHwbpCallEdge() {
         Log("CALL_EDGE_HWBP skip: ga base 0");
         return;
     }
+    // Off by default: FillHwbpContext rewrites Dr0..Dr7 wholesale every 2s; keep call-edge DR
+    // probes opt-in so other modules can share the register file. Session polling (STATE /
+    // pendingError / RING) is unaffected.
+    char env[8]{};
+    if (!(GetEnvironmentVariableA("KICK_HWBP", env, sizeof(env)) > 0 && env[0] == '1')) {
+        Log("CALL_EDGE_HWBP skip: set KICK_HWBP=1 to enable call-edge DR probes");
+        return;
+    }
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCWSTR>(&InstallHwbpCallEdge), &gSelfMod);
 
@@ -1095,6 +1263,7 @@ void InstallHwbpCallEdge() {
     gHwbpAddr[1] = gGaBase + gHwbpTargets[1].rva;
     gHwbpAddr[kDrWriteSlot] = gStateWatchAddr.load();
     gHwbpAddr[3] = gGaBase + gHwbpTargets[3].rva;
+    for (int i = 0; i < 4; ++i) gOwnSlot[i] = true;
     Log("CALL_EDGE_HWBP arm[0] %s ga+0x%llX -> %p", gHwbpTargets[0].name,
         (unsigned long long)gHwbpTargets[0].rva, (void*)gHwbpAddr[0]);
     Log("CALL_EDGE_HWBP arm[1] %s ga+0x%llX -> %p", gHwbpTargets[1].name,
@@ -1117,16 +1286,118 @@ void InstallHwbpCallEdge() {
     Log("CALL_EDGE_HWBP installed threads=%d veh=%p (DR exec+write, no .text)", n, gVehHandle);
 }
 
+// Outbound capture. Independent of the call-edge set: that one needs all four slots and is
+// opt-in (KICK_HWBP=1); this one takes DR3 alone when KICK_SEND=1 (default off for production).
+void InstallSendProbe();
+MethodInfoHead* ResolveSendPacketMi(void* sessionKlass);
+MethodInfoHead* ResolveSessionMi(void* klass, uintptr_t rva, int arity, const char* plain,
+                                 const char* hash);
+
+void InstallSendProbe() {
+    if (gSendProbe.load()) return;
+    if (!gGaBase) {
+        Log("SEND_PROBE skip: ga base 0");
+        return;
+    }
+    // Default off: DR + VEH + send.log are diagnostic only; Session poll / 守护 disconnectSeq 不依赖。
+    char env[8]{};
+    if (!(GetEnvironmentVariableA("KICK_SEND", env, sizeof(env)) > 0 && env[0] == '1')) {
+        Log("SEND_PROBE skip: set KICK_SEND=1 to arm SendPacket DR → send.log");
+        return;
+    }
+    if (gOwnSlot[kDrSendSlot]) {
+        Log("SEND_PROBE skip: DR%d already holds %s (KICK_HWBP=1)", kDrSendSlot,
+            gHwbpTargets[kDrSendSlot].name);
+        return;
+    }
+    OpenSendLog();
+    if (gSendLog == INVALID_HANDLE_VALUE) {
+        Log("SEND_PROBE skip: send.log open failed err=%lu", GetLastError());
+        return;
+    }
+
+    // 207 is MobMove (decoded 08-02: mobId, per-mob seq, start xy, then 14-byte elements) and the
+    // 50-53 block is the attack family. Both are default targets because the open question is
+    // what an attack reports about our position while UserMove is withheld. KICK_SEND_DUMP takes a
+    // comma list to retarget, or "0" to capture nothing.
+    char dumpEnv[64]{};
+    if (GetEnvironmentVariableA("KICK_SEND_DUMP", dumpEnv, sizeof(dumpEnv)) == 0) {
+        strcpy_s(dumpEnv, "207,50,51,52,53");
+    }
+    if (dumpEnv[0] != '0' || dumpEnv[1] != '\0') {
+        for (const char* s = dumpEnv; *s && gDumpOpN < kDumpOpMax;) {
+            while (*s == ' ' || *s == ',') ++s;
+            if (!*s) break;
+            const int v = atoi(s);
+            if (v > 0) {
+                gDumpOp[gDumpOpN] = v;
+                gDumpLeft[gDumpOpN].store(kDumpQuotaDefault);
+                ++gDumpOpN;
+            }
+            while (*s && *s != ',') ++s;
+        }
+    }
+    if (gDumpOpN) {
+        char list[64];
+        int ln = 0;
+        for (int i = 0; i < gDumpOpN && ln + 8 < (int)sizeof(list); ++i) {
+            ln += snprintf(list + ln, sizeof(list) - ln, i ? ",%d" : "%d", gDumpOp[i]);
+        }
+        Log("SEND_PROBE body dump ops=%s quota=%d each (KICK_SEND_DUMP=0 disables)", list,
+            kDumpQuotaDefault);
+    }
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&InstallSendProbe), &gSelfMod);
+
+    // 优先 MethodInfo（hash / OutPacket kind）；失败再退 ga+RVA。
+    if (!gSessionKlass) gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
+    MethodInfoHead* sendMi = gSessionKlass ? ResolveSendPacketMi(gSessionKlass) : nullptr;
+    void* sendFn = nullptr;
+    if (sendMi) {
+        __try {
+            sendFn = sendMi->virtualMethodPointer ? sendMi->virtualMethodPointer : sendMi->methodPointer;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            sendFn = nullptr;
+        }
+    }
+    gHwbpAddr[kDrSendSlot] = sendFn ? reinterpret_cast<uintptr_t>(sendFn) : (gGaBase + kRvaSessionSend);
+    gOwnSlot[kDrSendSlot] = true;
+    gSendProbe.store(true);
+
+    if (!gVehHandle) {
+        gVehHandle = AddVectoredExceptionHandler(1, CallEdgeVeh);
+        if (!gVehHandle) {
+            Log("SEND_PROBE FAIL AddVectoredExceptionHandler err=%lu", GetLastError());
+            gOwnSlot[kDrSendSlot] = false;
+            gHwbpAddr[kDrSendSlot] = 0;
+            gSendProbe.store(false);
+            return;
+        }
+    }
+
+    const int n = ApplyHwbpAllThreads(true);
+    gHwbpInstalled.store(true);
+    Log("SEND_PROBE armed DR%d NM.SendPacket ga+0x%llX -> %p threads=%d (outbound -> send.log)",
+        kDrSendSlot, (unsigned long long)kRvaSessionSend, (void*)gHwbpAddr[kDrSendSlot], n);
+    SendLog("---- send probe armed pid=%lu ga+0x%llX ----", GetCurrentProcessId(),
+            (unsigned long long)kRvaSessionSend);
+}
+
 void UninstallHwbpCallEdge() {
     if (!gHwbpInstalled.exchange(false)) return;
     gStateWatchAddr.store(0);
     gStateWatchSession.store(nullptr);
+    gSendProbe.store(false);
     ApplyHwbpAllThreads(false);
     if (gVehHandle) {
         RemoveVectoredExceptionHandler(gVehHandle);
         gVehHandle = nullptr;
     }
-    for (int i = 0; i < 4; ++i) gHwbpAddr[i] = 0;
+    for (int i = 0; i < 4; ++i) {
+        gHwbpAddr[i] = 0;
+        gOwnSlot[i] = false;  // after the disarm pass — that pass reads ownership
+    }
+    FlushSendLog();
     Log("CALL_EDGE_HWBP uninstalled");
 }
 
@@ -1154,6 +1425,88 @@ MethodInfoHead* FindMethodByRva(void* klass, uintptr_t rva) {
         if (mp == target || vp == target) return mi;
     }
     return nullptr;
+}
+
+MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
+    if (!klass || !name) return nullptr;
+    const auto& e = x::runtime::il2cpp::Get();
+    MethodInfoHead* mi = nullptr;
+    if (e.classGetMethodFromName) {
+        __try {
+            mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            mi = nullptr;
+        }
+    }
+    if (mi && mi->methodPointer) return mi;
+    if (!e.classGetMethods || !e.methodGetName) return nullptr;
+    void* iter = nullptr;
+    __try {
+        for (;;) {
+            void* raw = e.classGetMethods(klass, &iter);
+            if (!raw) break;
+            const char* nm = e.methodGetName(raw);
+            if (nm && strcmp(nm, name) == 0) {
+                mi = reinterpret_cast<MethodInfoHead*>(raw);
+                if (mi && mi->methodPointer) return mi;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return nullptr;
+}
+
+MethodInfoHead* ResolveSessionMi(void* klass, uintptr_t rva, int arity, const char* plain,
+                                 const char* hash) {
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    if (plain) {
+        if (MethodInfoHead* mi = FindMethodByName(klass, plain, arity)) return mi;
+    }
+    if (hash) {
+        if (MethodInfoHead* mi = FindMethodByName(klass, hash, arity)) return mi;
+    }
+    MethodShape shape{};
+    shape.arity = arity;
+    shape.ret = TypeKind::Void;
+    shape.unique = true;
+    shape.walkParents = false;
+    if (arity == 1) shape.param[0] = TypeKind::Any;  // SessionState enum ≠ 纯 I32
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodCached(klass, static_cast<uint32_t>(rva), shape);
+    if (mr.method) {
+        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
+            Log("CALL_EDGE ResolveMi kind hit rva=0x%llX plain=%s", (unsigned long long)rva,
+                plain ? plain : "-");
+        }
+        return reinterpret_cast<MethodInfoHead*>(mr.method);
+    }
+    return FindMethodByRva(klass, rva);
+}
+
+MethodInfoHead* ResolveSendPacketMi(void* sessionKlass) {
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    if (MethodInfoHead* mi = FindMethodByName(sessionKlass, "SendPacket", 1)) return mi;
+    if (MethodInfoHead* mi = FindMethodByName(sessionKlass, kHashSendPacket, 1)) return mi;
+    void* outKlass = x::runtime::il2cpp::FindClass("", "OutPacket");
+    if (!outKlass) outKlass = x::runtime::il2cpp::FindClass("", kOutPacketClass);
+    MethodShape kSend{};
+    kSend.arity = 1;
+    kSend.ret = TypeKind::Bool;
+    kSend.unique = true;
+    kSend.walkParents = true;
+    kSend.param[0] = TypeKind::Ptr;
+    if (outKlass) kSend.paramKlass[0] = outKlass;
+    const auto mr = x::runtime::il2cpp_method::FindMethodCached(
+        sessionKlass, static_cast<uint32_t>(kRvaSessionSend), kSend);
+    if (mr.method) {
+        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
+            Log("SEND_PROBE SendPacket MethodInfo via kind");
+        }
+        return reinterpret_cast<MethodInfoHead*>(mr.method);
+    }
+    return FindMethodByRva(sessionKlass, kRvaSessionSend);
 }
 
 bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
@@ -1195,30 +1548,31 @@ void RestoreMethodInfo(MethodInfoHead* mi, void* orig) {
 
 void InstallCallEdgeHooks() {
     if (gCallEdgeInstalled.load()) return;
+    // Default off: MethodInfo swap is kick attribution only; 守护用 Session 轮询 disconnectSeq。
+    char env[8]{};
+    if (!(GetEnvironmentVariableA("KICK_CALL_EDGE", env, sizeof(env)) > 0 && env[0] == '1')) {
+        Log("CALL_EDGE skip: set KICK_CALL_EDGE=1 to enable MethodInfo swap (via=MI)");
+        return;
+    }
     if (!gClassGetMethods) {
         Log("CALL_EDGE skip: il2cpp_class_get_methods missing");
         return;
     }
-    if (!gStlKlass) gStlKlass = FindClass(kSessionTcpLayerClass);
-    if (!gSessionKlass) gSessionKlass = FindClass(kSessionClass);
-    if (gRuntimeClassInit) {
-        if (gStlKlass) gRuntimeClassInit(gStlKlass);
-        if (gSessionKlass) gRuntimeClassInit(gSessionKlass);
-    }
-    Log("CALL_EDGE install SessionTcpLayer=%p Session=%p (MethodInfo swap, no .text)", gStlKlass,
-        gSessionKlass);
+    if (!gSessionKlass) gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
+    // No RuntimeClassInit here (worker thread). MethodInfo walk/patch is data-plane;
+    // class_init from worker caused user GC fatal (upload 6ee38d / CALL_EDGE 6/6 then die).
+    Log("CALL_EDGE install Session=%p (MethodInfo swap, no .text)", gSessionKlass);
 
     int ok = 0;
     for (HookSlot& h : gHooks) {
-        const bool nm = (h.rva == kRvaNmCloseSession || h.rva == kRvaNmDisconnect);
-        h.klass = nm ? gStlKlass : gSessionKlass;
+        h.klass = gSessionKlass;
         if (!h.klass) {
             Log("CALL_EDGE FAIL %s — klass null", h.name);
             continue;
         }
-        h.mi = FindMethodByRva(h.klass, h.rva);
+        h.mi = ResolveSessionMi(h.klass, h.rva, h.arity, h.plainName, h.methodHash);
         if (!h.mi) {
-            Log("CALL_EDGE FAIL %s — MethodInfo RVA 0x%llX not found", h.name,
+            Log("CALL_EDGE FAIL %s — MethodInfo RVA 0x%llX / hash miss", h.name,
                 (unsigned long long)h.rva);
             continue;
         }
@@ -1255,22 +1609,14 @@ void __fastcall HookNmDisconnect(void* self, const void* method) {
     LogCallEdge("Nm.Disconnect", self, false, false, -1, "MI");
     if (gHooks[1].orig) OrigAsVoid(gHooks[1])(self, method);
 }
-void __fastcall HookSessionClose(void* self, const void* method) {
-    LogCallEdge("Session.Close", self, true, false, -1, "MI");
+void __fastcall HookNmOnDisc(void* self, const void* method) {
+    LogCallEdge("Nm.OnDisconnect", self, true, false, -1, "MI");
     if (gHooks[2].orig) OrigAsVoid(gHooks[2])(self, method);
 }
-void __fastcall HookSessionOnDisc(void* self, const void* method) {
-    LogCallEdge("Session.OnDisconnect", self, true, false, -1, "MI");
-    if (gHooks[3].orig) OrigAsVoid(gHooks[3])(self, method);
-}
-void __fastcall HookSessionCloseSock(void* self, const void* method) {
-    LogCallEdge("Session.CloseSocket", self, true, false, -1, "MI");
-    if (gHooks[4].orig) OrigAsVoid(gHooks[4])(self, method);
-}
-void __fastcall HookSessionSetState(void* self, int state, const void* method) {
+void __fastcall HookNmSetState(void* self, int state, const void* method) {
     if (state == kStateDisconnecting || state == kStateDisconnected)
-        LogCallEdge("Session.set_SessionState", self, true, false, state, "MI");
-    auto* orig = reinterpret_cast<FnSetState>(gHooks[5].orig);
+        LogCallEdge("Nm.set_SessionState", self, true, false, state, "MI");
+    auto* orig = reinterpret_cast<FnSetState>(gHooks[3].orig);
     if (orig) orig(self, state, method);
 }
 
@@ -1348,6 +1694,11 @@ void OnStateChange(int prev, int now, int err) {
         err, hack ? " hackHint=" : "", hack ? hack : "");
     if (now == kStateDisconnected || now == kStateDisconnecting) {
         gSawDisconnect.store(true);
+        gDisconnectSeq.fetch_add(1, std::memory_order_relaxed);
+        // Mark the drop inside the outbound trace too, so the last packets we sent before it
+        // can be read off without cross-referencing timestamps against kick.log.
+        SendLog("==== STATE %s(%d) pendingError=%d ====", StateName(now), now, err);
+        FlushSendLog();
         Snapshot("disconnect");
     }
 }
@@ -1367,36 +1718,35 @@ DWORD WINAPI Worker(LPVOID) {
         return 0;
     }
     gGaBase = reinterpret_cast<uintptr_t>(ga);
-    gDomainGet = reinterpret_cast<FnDomainGet>(GetProcAddress(ga, "il2cpp_domain_get"));
-    gDomainAssemblies =
-        reinterpret_cast<FnDomainAssemblies>(GetProcAddress(ga, "il2cpp_domain_get_assemblies"));
-    gAsmImage = reinterpret_cast<FnAsmImage>(GetProcAddress(ga, "il2cpp_assembly_get_image"));
-    gClassFromName =
-        reinterpret_cast<FnClassFromName>(GetProcAddress(ga, "il2cpp_class_from_name"));
-    gClassStaticData =
-        reinterpret_cast<FnClassStaticData>(GetProcAddress(ga, "il2cpp_class_get_static_field_data"));
-    gClassParent = reinterpret_cast<FnClassParent>(GetProcAddress(ga, "il2cpp_class_get_parent"));
-    gRuntimeClassInit =
-        reinterpret_cast<FnRuntimeClassInit>(GetProcAddress(ga, "il2cpp_runtime_class_init"));
-    gClassGetMethods =
-        reinterpret_cast<FnClassGetMethods>(GetProcAddress(ga, "il2cpp_class_get_methods"));
-    if (!gDomainGet || !gDomainAssemblies || !gAsmImage || !gClassFromName) {
-        Log("il2cpp exports missing — kick_sniff cannot resolve Session");
+    if (!x::runtime::il2cpp::Ensure()) {
+        Log("il2cpp_bind Ensure failed — kick_sniff idle");
         while (!gStop.load()) Sleep(200);
         Log("kick_sniff worker stop");
         return 1;
     }
+    const auto& e = x::runtime::il2cpp::Get();
+    ga = e.ga;
+    gGaBase = x::runtime::il2cpp::GaBase();
+    gClassStaticData = e.classStaticData;
+    gClassParent = e.classParent;
+    gClassGetMethods = e.classGetMethods;
     if (!gClassStaticData) Log("warn: il2cpp_class_get_static_field_data missing — probing klass offsets");
 
-    gStlKlass = FindClass(kSessionTcpLayerClass);
-    gSessionKlass = FindClass(kSessionClass);
-    Log("SessionTcpLayer klass=%p Session klass=%p ga=%p ringCap=%d", gStlKlass, gSessionKlass,
+    gFacadeKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerFacadeKlass();
+    gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
+    gStlKlass = gFacadeKlass;
+    // Facade=Singleton 壳；Session=方法宿主。实例解析走 facade → Session*@0x10。
+    Log("NetworkManager facade=%p Session=%p ga=%p ringCap=%d", gFacadeKlass, gSessionKlass,
         (void*)gGaBase, kRingCap);
     InstallCallEdgeHooks();
     InstallHwbpCallEdge();
+    InstallSendProbe();  // after the call-edge set, so it only claims DR3 if that one passed
 
     DWORD lastHb = GetTickCount();
     DWORD lastHwbp = GetTickCount();
+    DWORD lastSend = GetTickCount();
+    uint32_t lastSendHits = 0;
+    uint32_t lastSeqSend = 0;
     while (!gStop.load()) {
         void* nm = ResolveSessionTcpLayer();
         if (nm) {
@@ -1429,11 +1779,28 @@ DWORD WINAPI Worker(LPVOID) {
             lastHwbp = now;
             ApplyHwbpAllThreads(true);  // refresh DR on new threads
         }
+        if (gSendProbe.load() && now - lastSend >= 2000) {
+            const uint32_t hits = gSendHits.load();
+            // _seqSend feeds EncodeSeqBase, so it is a cipher seed rather than a packet count:
+            // it moves by a different amount every send. Only "did it move at all" is readable,
+            // and that is enough to notice packets leaving by a path DR3 never sees.
+            void* nmNow = gNmCached;
+            void* sessNow = nmNow ? ReadPtr(nmNow, kOffNmSession) : nullptr;
+            if (sessNow && !LooksLikeHeapPtr(sessNow)) sessNow = nullptr;
+            const uint32_t seq = sessNow ? (uint32_t)ReadI32(sessNow, kOffSessionSeqSend) : 0;
+            SendLog("-- %.1f/s hits=%u seqRaw=%u seqMoved=%d unreadable=%u --",
+                    (hits - lastSendHits) * 1000.0 / (now - lastSend), hits - lastSendHits, seq,
+                    seq != lastSeqSend ? 1 : 0, gSendUnreadable.load());
+            FlushSendLog();
+            lastSend = now;
+            lastSendHits = hits;
+            lastSeqSend = seq;
+        }
         if (now - lastHb >= 10000) {
             lastHb = now;
-            Log("heartbeat nm=%p state=%d err=%d sawDisc=%d ring=%d hwbp=%d", gNmCached,
+            Log("heartbeat nm=%p state=%d err=%d sawDisc=%d ring=%d hwbp=%d send=%u", gNmCached,
                 gLastState.load(), gLastErr.load(), gSawDisconnect.load() ? 1 : 0, gRingCount,
-                gHwbpInstalled.load() ? 1 : 0);
+                gHwbpInstalled.load() ? 1 : 0, gSendHits.load());
         }
         // 50→25ms when connected: catch short-lived InPackets before dispatch drains them.
         Sleep(lastState == kStateConnected ? 25 : 50);
@@ -1484,6 +1851,7 @@ void DumpNow(const char* why) {
 int LastPendingErrorCode() { return gLastErr.load(); }
 int LastSessionState() { return gLastState.load(); }
 bool SawDisconnect() { return gSawDisconnect.load(); }
+uint32_t DisconnectSeq() { return gDisconnectSeq.load(std::memory_order_relaxed); }
 
 }  // namespace kick_sniff
 }  // namespace features

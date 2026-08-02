@@ -21,8 +21,8 @@
 
 | 文档 | 主题 |
 |------|------|
-| [`protocol/移动协议.md`](protocol/移动协议.md) | MovePath API、S→C opcode（`0x00D9` 等）、C→S Flush、飞天关系 |
-| [`protocol/MoveElem字段.md`](protocol/MoveElem字段.md) | MoveElem / MovePathType / MovePathRect 布局；Encode wire 待采 |
+| [`protocol/移动协议.md`](protocol/移动协议.md) | MovePath API、S→C opcode（`0x00D9` 等）、C→S Flush |
+| [`protocol/MoveElem字段.md`](protocol/MoveElem字段.md) | MoveElem 布局；`xy/v/ma/fh/attr`；`MoveActionType` rawAction 表；Encode wire 待采 |
 
 工作草稿仍在 `Dumps/opcode_move_notes.md`、`Dumps/move_elem_notes.md`（以本目录正式文档为准）。
 
@@ -32,10 +32,51 @@
 
 | 文档 | 主题 |
 |------|------|
-| [`fly/模块设计.md`](fly/模块设计.md) | F6 鼠标飞（数据面；**无** Flush E9）→ 已挂入 `xcat.dll`；面板 `[core] fly` |
-| [`invuln/模块设计.md`](invuln/模块设计.md) | 无敌：`LocalUser+0x298` 硬直门 + 去闪；面板 `[core] invuln`；**无** inline |
+| [`invuln/模块设计.md`](invuln/模块设计.md) | 无敌 ✅ v2.6.3：`+0x298` hit 门 + 帧钉/`8ms` 去闪；重绑 `400ms` + 绑宽限 `1.5s`；面板 `[core] invuln`；**无** inline / **无**热键（F10=换频） |
 | [`kick_sniff/断线错误码.md`](kick_sniff/断线错误码.md) | Session `_pendingErrorCode` / 断线边沿；**TW≠CMS 偏移**；`kick.log` |
-| [`titlebar/模块设计.md`](titlebar/模块设计.md) | Win32 标题栏 vitals + 金/经每分；锚点 `UIStatusBar→CharacterStat`（DumpRestoredData） |
+| [`titlebar/模块设计.md`](titlebar/模块设计.md) | Win32 标题栏 vitals + 金/经/物值每分 + 职业繁中名；锚点 `WM→CharacterData→CharacterStat`（共享 `player_vitals`）+ 背包卖价（DumpRestoredData） |
+| [`world_manager/字段全表.md`](world_manager/字段全表.md) | `WorldManager` TW 字段全表 + CharacterData/Field/MapData 一跳；对 CMS 漂移标注 |
+| [`world_manager/SceneState与Field.md`](world_manager/SceneState与Field.md) | 进图门控 `SceneState` + `Field`/`SceneMap` 字段拆解；与现行 MyUser 门控对照 |
+| [`autopot/模块设计.md`](autopot/模块设计.md) | 自动喝药：阈值策略 + `SendStatChangeItemUseRequest`；面板 `[core] hpPotion/mpPotion`（✅ 已挂入；实机待验） |
+| [`simple_combat/模块设计.md`](simple_combat/模块设计.md) | 自动打怪状态机重设计：站桩出刀 + 可选贴怪瞬移互斥；默认关瞬移/智能间隔 |
+| [`attack_speed/模块设计.md`](attack_speed/模块设计.md) | **攻击加速** ✅ BIN 结案：清忙锁 + `SS+1BC=140`；频率=面板间隔；**不做** layer mid-cut |
+| [`attack_rpc/模块设计.md`](attack_rpc/模块设计.md) | 结算层出刀实验 🔍；目标全屏多怪；默认关 |
+| [`attack_rpc/P0a_本地出刀与OnMelee误区.md`](attack_rpc/P0a_本地出刀与OnMelee误区.md) | 否决直调 `OnMeleeAttack`（UserRemote）；`SetAttackAction` `0xFD39C0` |
+| [`attack_rpc/P0b_出站Encode与Send锚点.md`](attack_rpc/P0b_出站Encode与Send锚点.md) | OutPacket/NM.Send 新 RVA；复用 security/attack_speed/sellbag 研究 |
+| [`attack_rpc/P0c_攻包BODY布局.md`](attack_rpc/P0c_攻包BODY布局.md) | 现网 TryDoing* Encode 序；命中环；`Network_SendOutPacket@0x1CB7CE0` |
+| [`attack_rpc/P1_探针port.md`](attack_rpc/P1_探针port.md) | 攻包伪造探针；默认关；`ATTACK_RPC=1` |
+| [`attack_speed/P0a_出刀忙锁与Prepare链.md`](attack_speed/P0a_出刀忙锁与Prepare链.md) | `SetAttackAction` → busy → Prepare → Slot14 解锁；排除 hitstun/AntiRepeat |
+| [`attack_speed/P0b_双速系统与字段表.md`](attack_speed/P0b_双速系统与字段表.md) | ActionSpeed vs 武器档/Booster；Forced→`+80`；CTS 7/11 表 |
+| [`attack_speed/P0c_TemporaryStat生命周期.md`](attack_speed/P0c_TemporaryStat生命周期.md) | Decode/Reset/CheckByTime；Speed 客户端不自清 |
+| [`teleport/模块设计.md`](teleport/模块设计.md) | 瞬移 port：仅 fill+Doing；点飞不钉台 |
+| [`fly/模块设计.md`](fly/模块设计.md) | F6 飞：A 点击 hop / B 跟随 hop（吸附/pin 已退役） |
+| [`travel/模块设计.md`](travel/模块设计.md) | **超级赶路** ✅：同盘 seed BFS + 瞬移贴门进门；世界地图 Spot 预检 Notice；无码头/跨盘自动 |
+| [`worldmap_marker_travel/模块设计.md`](worldmap_marker_travel/模块设计.md) | **世界地图 Spot 双击赶路** ✅：`UpdateView`/`OnPointerDown` 换桩 → YesNo/Notice → `RequestGoto`；字段偏移与 BIN |
+| [`teleport/P0a_瞬移CALL锚点.md`](teleport/P0a_瞬移CALL锚点.md) | TW IDA 钉死 Register/Doing/Attr RVA、原生调用链、旁路 vs 原生、BIN 纪要；§1.1 视觉层同步链锚点（13 个 RVA + 字段偏移） |
+| [`teleport/P0b_引擎实现原理.md`](teleport/P0b_引擎实现原理.md) | **位移真源**：`SetImpactNext` 的 fmax/fmin 饱和合并语义、完整消费链（`ApplyImpact 0x11A4E60` / `LeaveFoothold 0x11AF5C0`）、「踏板偷换才是位移主因」及三个证伪实验；`MovePathType` 全表 / `MoveElem`·`MovePath`·`VecCtrl` 布局；14 组偏移核对零偏差；文档时间线纠偏 |
+| [`teleport/P0c_视觉层同步链.md`](teleport/P0c_视觉层同步链.md) | **皮跟谁走**：`VecCtrl.GetPos()` = `round(lerp(Ap, Apl, alpha))`、`Apl` 由 `BeginUpdateActive` 每帧滚动、Slot 16 写 TRS 的三道门控与整数脏检查；实证 `Pos@0x64` 不参与视觉；「改坐标皮出错」逐症状机制对照 |
+| [`mob_pool/活怪n与刷怪槽M.md`](mob_pool/活怪n与刷怪槽M.md) | **n**=MobPool 活怪 / **M**=LifeList 刷怪槽；实现 +「为何 n≪M」官方引擎说明；BIN 自洽判据 |
+| [`pet_feed/模块设计.md`](pet_feed/模块设计.md) | **只自动召唤**（喂食交官方）；`[core] petSummon` → `SendActivatePetRequest`（🚧 P0c✅ 待实机） |
+| [`pet_feed/P0a_锚点复核.md`](pet_feed/P0a_锚点复核.md) | **2026-08-03 remount**：`m_apPet@0x2B0`、Activate `0xC56910`、新类哈希 |
+| [`timed_keys/模块设计.md`](timed_keys/模块设计.md) | 定时按键：7 槽周期脉冲；对照枫星 `timed_keys`，经典版走 `InputManager.KeyDownTouch/Up`（✅ 已挂入；实机待验） |
+| [`buffs/模块设计.md`](buffs/模块设计.md) | BUFF 管理器：技能-only 续航；对照枫星 `buffs`，经典版走 `AffectedSkillEntry` + `DoActiveSkillPrepare`（✅ 已挂入；实机待验） |
+| [`buffs/P0a_锚点复核.md`](buffs/P0a_锚点复核.md) | TW IDB 钉死：在身列表 `+0x330`、Prepare/GetSkill/GetSkillLevel RVA |
+| [`multi_skill/模块设计.md`](multi_skill/模块设计.md) | 技能多发：勾选清单 gap 串发；对照枫星 `multi_skill_port`，经典版走 `DoActiveSkillPrepare`（✅ 已挂入；实机待验） |
+| [`auto_enter/模块设计.md`](auto_enter/模块设计.md) | 自动进游戏：分区→最少人频道→选角；单次 Go、禁 Trigger；选角 settle/假 Done 修复（✅ BIN 实锤） |
+| [`auto_enter/选角与SelectedIndex锚点.md`](auto_enter/选角与SelectedIndex锚点.md) | TW IDA 钉死：`UILoginCharacter+0x168` SelectedIndex；可跳过 Select 的依据 |
+| [`auto_enter/RVA重锚_20260803.md`](auto_enter/RVA重锚_20260803.md) | 2026-08-03 客户端更新：登录 UI 类哈希 + 方法 RVA 全表重锚 |
+| [`ccu/模块设计.md`](ccu/模块设计.md) | 分区 CCU：只认 auto_enter 选频喂数一次 → SHM → 底栏（✅；无被动 Probe） |
+| [`channel_hop/模块设计.md`](channel_hop/模块设计.md) | 随机换频：挂机卡/F10 → `manualRejoinSeq` → **直调** `SendTransfer@0xBB5200`（无菜单；✅ 挂入；08-03 锚点已同步） |
+| [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：UserPool 同图人数 → 停手/停飞 → 持续有人则 `channel_hop`（✅ 挂入；实机待验） |
+| [`pet_feed/P0b_只读探针.md`](pet_feed/P0b_只读探针.md) | `ReadState` + `petfeed.log`；字段只读，未发包 |
+| [`pet_feed/P0c_自动召唤.md`](pet_feed/P0c_自动召唤.md) | `TryActivatePet` + `[core] petSummon`；喂食交官方 |
+| [`pet_loot/模块设计.md`](pet_loot/模块设计.md) | **拾物**：脚下 `TryPickUpDrop` + 宠扩盒吸物；共用黑名单 `[pet_loot]`（🚧 已挂入；实机待验） |
+| [`pet_loot/P0a_锚点复核.md`](pet_loot/P0a_锚点复核.md) | TW IDA 钉死：DropPool/Pet 拾取 RVA、技能位、`_rcPet@0x100` |
+| [`auto_lie/模块设计.md`](auto_lie/模块设计.md) | 自动测谎：TextCaptcha+LLM / NonFinite / 測謊機 `2190000` / 契约·status（✅ 挂入；离线基建 BIN 已过） |
+| [`auto_lie/基建与离线验收.md`](auto_lie/基建与离线验收.md) | 离线基建验收：就绪灯、本地/LLM 夹具泵（真 PNG）、报警·烟测、BIN 清单 |
+| [`auto_lie/P0a_锚点复核.md`](auto_lie/P0a_锚点复核.md) | **测谎数据源**：UIAntiMacro* Prefab、jpegData/path、WM+0x1D0、`IsOpenAntiMacro@0x936780` |
+| [`auto_supply/模块设计.md`](auto_supply/模块设计.md) | **自动回城卖/补给**：就近寻店卖装 + 可选补货；UI 对齐枫星；Charge stub；整趟实机待验 |
+| [`auto_supply/P2_货架寻店.md`](auto_supply/P2_货架寻店.md) | 按货架/物品码全局寻店：**不做**（无 SetShopDlg Commodity 全表；产品语义为就近能卖） |
 
 ---
 
@@ -45,8 +86,13 @@
 |------|------|
 | [`security/ClientFileCRC.md`](security/ClientFileCRC.md) | 登录阶段客户端文件 CRC：**安装树完整性校验**，非 AppData 外挂扫描；附 154 条实抓清单 |
 | [`security/MscSecurity能力面.md`](security/MscSecurity能力面.md) | RawInput 反宏、窗口子类化、DriveType SSD IOCTL、MultiClient 单实例；与 BlackCat 边界 |
-| [`security/GRAP与枫星对齐.md`](security/GRAP与枫星对齐.md) | 同 MD5 套件；LoadLibrary 弱；**禁止 INLINE HOOK**；勿扩成「无 AC」 |
+| [`security/GRAP与枫星对齐.md`](security/GRAP与枫星对齐.md) | 同 MD5 套件；LoadLibrary 弱；**默认禁止 INLINE HOOK**；§4.1 NGS 单文件有条件例外 |
+| [`security/MemoryCrc派发与节奏.md`](security/MemoryCrc派发与节奏.md) | MemoryCrc RpmScan / vptr+8 / Init·Iter；**证伪**旧 DRBG→Virt30 链；周期派发未决 |
+| [`security/NGS补丁与CRC.md`](security/NGS补丁与CRC.md) | 同行单文件 `NGS.EXE.CRC`；ProgramData `NGService` patch 门禁；GA 写探针顺序 |
+| [`security/GA文本探针.md`](security/GA文本探针.md) | 2026-08-01：进程内 GA `.text` 填充探针 **PASS**；边界与开关；≠ 业务 E9 |
+| [`security/KRW驱动.md`](security/KRW驱动.md) | 本仓自研 `tools/krw`（IOCTL R/W）；对照 RW_Driver 不入库；**非** AC bypass |
 | [`security/客户端Hack标志与服端推断.md`](security/客户端Hack标志与服端推断.md) | Float/AB（**VecCtrlMob**）+ `ClientHacksType` → 服端举报链；**≠** 玩家飞天校验 |
+| [`security/攻包计数窗与type20.md`](security/攻包计数窗与type20.md) | SecurityClient **60s/2000** 攻包窗；`IsAttackPacket` 白名单；type20/21；BIN `SecAttack` |
 
 原始数据：`Dumps/client_file_crc_paths.{json,tsv}` · 采证 DLL：`Dumps/runtime/out_bin/ClientFileCrcTrace.dll`
 
@@ -60,9 +106,30 @@
 | `launcher/msc_launch.{h,cpp}` | NGM 启动骨架 |
 | `launcher/msc_webview_login.*` | WebView 一键换票会话（链进 `xcat.exe`） |
 | `Dumps/` | dump.cs / opcode / Msc.Security 笔记 |
-| `x/features/fly/` | F6 feature；主产物 `bin/XCat_data/xcat.dll` |
-| `x/features/invuln/` | 无敌（硬直门 + 去闪）；见 [`invuln/模块设计.md`](invuln/模块设计.md) |
+| `x/features/invuln/` | 无敌 ✅ v2.6.3（hit `+0x298` + 帧钉/`8ms`；重绑 400ms + grace 1.5s）；见 [`invuln/模块设计.md`](invuln/模块设计.md) |
+| `x/features/attack_accel/` | 攻击加速 ✅ BIN：清忙锁 + `SS+1BC=140`；见 [`attack_speed/模块设计.md`](attack_speed/模块设计.md) |
+| `x/runtime/main_thread_pump.*` | Unity 主线程泵；`SetFrameTick`（invuln 去闪） |
 | `x/ipc/payload_control.*` | 面板 ↔ payload：`user.ini [core]` |
 | `x/features/kick_sniff/` | 断线 / pendingError 轮询；见 [`kick_sniff/断线错误码.md`](kick_sniff/断线错误码.md) |
-| `x/features/titlebar/` | 标题栏 vitals + 收益；见 [`titlebar/模块设计.md`](titlebar/模块设计.md) |
+| `x/features/titlebar/` | 标题栏：`titlebar.cpp` 编排 + `titlebar_game` 读 + `titlebar_win` 写；见 [`titlebar/模块设计.md`](titlebar/模块设计.md) |
+| `x/features/autopot/` | 自动喝药；见 [`autopot/模块设计.md`](autopot/模块设计.md) |
+| `x/ui/player_vitals.*` | 共享 HP/MP 读数（WM→CS 单真源）+ 可信闩锁 |
+| `x/features/ports/mob_pool_port.*` | 活怪 n + 刷怪槽 M；见 [`mob_pool/活怪n与刷怪槽M.md`](mob_pool/活怪n与刷怪槽M.md) |
+| `x/features/ports/player_combat_port.*` | LocalUser 战斗坐标 |
+| `x/features/ports/attack_input_port.*` | 普攻键脉冲（InjectKeyHold） |
+| `x/features/mob_scan/` | 扫怪 worker → `logs/mobscan.log`（`n=/M=`）；同上 |
+| `x/features/simple_combat/` | 状态机打怪 → `[core] simpleCombat` · F5 · `logs/combat.log` · 默认关贴怪瞬移 |
+| `x/features/ports/teleport_port.*` | 瞬移 fill+Doing；见 [`teleport/模块设计.md`](teleport/模块设计.md) |
+| `x/features/fly/` | 鼠标飞 A/B/C；见 [`fly/模块设计.md`](fly/模块设计.md) |
+| `x/features/travel/` + `ports/travel_port.*` + `worldmap_marker_travel/` | 同盘赶路 + Spot 入口；见 [`travel/模块设计.md`](travel/模块设计.md) · [`worldmap_marker_travel/模块设计.md`](worldmap_marker_travel/模块设计.md) |
+| `x/features/pet_feed/` + `ports/pet_port.*` | P0b 宠物只读探针 → `logs/petfeed.log` |
+| `x/features/pet_loot/` + `ports/drop_pool_port.*` | 宠物吸物 → `user.ini [pet_loot]` · `logs/petloot.log` |
+| `x/features/timed_keys/` + `ports/input_port.*` | 定时按键 → `user.ini [timed_keys]`；见 [`timed_keys/模块设计.md`](timed_keys/模块设计.md) |
+| `x/features/buffs/` + `ports/skill_port.*` | BUFF 续航 → `user.ini [buffs]` + runtime SHM；见 [`buffs/模块设计.md`](buffs/模块设计.md) |
+| `x/features/multi_skill/` + `ports/multi_skill_port.*` + `skill_port.*` | 技能多发 → `[core] multiSkill*` + `multiskill_select.tsv`；见 [`multi_skill/模块设计.md`](multi_skill/模块设计.md) |
+| `x/features/auto_enter/` | 自动进游戏；见 [`auto_enter/模块设计.md`](auto_enter/模块设计.md)、[`选角与SelectedIndex锚点.md`](auto_enter/选角与SelectedIndex锚点.md) |
+| `x/features/ccu/` | 分区 CCU（auto_enter 喂数）→ SHM → 底栏；见 [`ccu/模块设计.md`](ccu/模块设计.md) |
+| `x/features/channel_hop/` | 随机换频 → `[core] manualRejoinSeq`；见 [`channel_hop/模块设计.md`](channel_hop/模块设计.md) |
+| `x/features/encounter/` | 遇人策略 → `[core] autoRelogin*`；见 [`encounter/模块设计.md`](encounter/模块设计.md) |
+| `x/features/auto_supply/` + `ports/shop_port.*` | 自动回城卖/补给 → `[auto_supply]`；见 [`auto_supply/模块设计.md`](auto_supply/模块设计.md) |
 | `DumpRestoredData/` | dump.cs 符号恢复分档（titlebar 偏移锚点） |
