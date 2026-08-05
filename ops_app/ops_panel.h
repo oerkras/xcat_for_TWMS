@@ -63,13 +63,19 @@ struct OpsState {
     std::vector<std::string> logLines;
     std::string logPathUtf8;
     std::string logEmptyHint;
+    char logFilter[64]{};
+    bool logErrorsOnly = false;
 
     // Connected clients (from /twms/admin/clients)
     struct ConnectedClient {
         std::string ip;
         std::string geo;
+        std::string geoStatus;
         std::string machine;
+        std::string deviceId;
         std::string device;
+        std::string mac;
+        std::string token;
         std::string appVersion;
         std::string lastKind;
         std::string lastSeenAt;
@@ -79,6 +85,15 @@ struct OpsState {
         int sameIpOnline = 1;
         int knownOnIp = 0;
         bool identified = false;
+        bool banned = false;
+        bool allowed = false;
+        std::string lastDenyAt;
+        std::string lastDenyReason;
+        std::string lastDenyMatch;
+        std::string lastAllowAt;
+        std::string gate;  // probe_ok|lease|denied|policy_deny|lease_expired|no_allow|unknown
+        int leaseRemainSec = 0;
+        int leaseTtlHours = 64;
     };
     std::vector<ConnectedClient> clients;
     std::string clientsError;
@@ -88,6 +103,62 @@ struct OpsState {
     int clientsActiveSec = 90;
     bool clientsAutoRefresh = true;
     ULONGLONG lastClientsFetchMs = 0;
+    char clientsFilter[96]{};       // 文本：IP/机名/MAC/TOKEN…
+    char clientsGateFilter[24]{};   // 门禁 chip：probe_ok|lease|…|__stale__（与文本筛选 AND）
+    bool forceOpenIpAlerts = false;
+    bool clientsSortIdleFirst = true;  // 空闲少的排前（刚探活的在上）
+
+    struct AccessDenyHit {
+        std::string at;
+        std::string ip;
+        std::string machine;
+        std::string deviceId;
+        std::string mac;
+        std::string token;
+        std::string reason;
+        std::string match;
+        std::string mode;
+    };
+    std::vector<AccessDenyHit> recentDenies;
+
+    struct IpMultiDeviceAlert {
+        std::string ip;
+        std::string geo;
+        int deviceCount = 0;
+        std::string summary;  // 简要机名/Id 列表
+    };
+    std::vector<IpMultiDeviceAlert> ipAlerts;
+    int ipAlertCount = 0;
+
+    // Device access policy (from /twms/admin/bans|access)
+    struct BannedDevice {
+        std::string key;
+        std::string machine;
+        std::string deviceId;
+        std::string mac;
+        std::string token;
+        std::string device;
+        std::string reason;
+        std::string bannedAt;
+    };
+    std::vector<BannedDevice> bans;
+    std::vector<BannedDevice> allows;
+    std::string bansError;
+    int bansCount = 0;
+    int allowsCount = 0;
+    // deny=黑名单（默认）；allow=仅白名单
+    std::string accessMode = "deny";
+    ULONGLONG lastBansFetchMs = 0;
+    char banMachineInput[96]{};
+    char banDeviceIdInput[80]{};
+    char banMacInput[40]{};
+    char banPassInput[56]{};
+    char banReasonInput[160]{};
+    char allowMachineInput[96]{};
+    char allowDeviceIdInput[80]{};
+    char allowMacInput[40]{};
+    char allowPassInput[56]{};
+    char allowReasonInput[160]{};
 
     ULONGLONG lastProbeMs = 0;
     ULONGLONG lastDiskMs = 0;
@@ -117,5 +188,6 @@ void Ops_RequestRestartTwms(OpsState& st);
 void Ops_RequestRestartPublish(OpsState& st);
 void Ops_RequestSyncPublish(OpsState& st);
 void Ops_RequestForceClientUpdate(OpsState& st);
+void Ops_RequestClearForceClientUpdate(OpsState& st);
 
 }  // namespace xcat::ops
