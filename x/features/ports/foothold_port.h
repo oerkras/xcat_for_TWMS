@@ -1,10 +1,8 @@
 #pragma once
 // foothold_port — Classic TWMS MapData foothold / ladder-rope 只读枚举
 //
-// 真源（TW dump ≡ CMS 偏移）：
-//   WM._currentMapData@0x88
-//   MapData._footholdMap@0xE0  Dictionary<uint,StaticFoothold>
-//   MapData.LadderRopes@0x108  List<LadderOrRope>
+// 真源（TW dump；runtime SSOT = il2cpp_mapdata hash→field）：
+//   WM._currentMapData / MapData._footholdMap / MapData.LadderRopes
 // 禁止 INLINE HOOK；不做寻路，只采几何。
 // Snapshot ~100KB：Collect 写入堆缓存；勿在 worker 栈上声明 Snapshot。
 
@@ -62,6 +60,13 @@ bool CollectToCache(SnapshotMeta* meta = nullptr);
 // 轻量：只读缓存摘要（可栈）。
 bool GetCachedMeta(SnapshotMeta* out);
 
+// 当前图 FH 缓存是否可用：meta.ok ∧ mapId 对齐 ∧ footholdN>0。
+// 换图瞬间旧缓存 mapId 未对齐时返回 false（调用方可 CollectToCache 刷新）。
+bool IsCacheReadyForMap(int32_t mapId);
+
+// 从堆缓存按 id 拷一条几何（可栈）；未命中返回 false。
+bool TryGetCachedFh(uint32_t id, FootholdLite* out);
+
 // 实时读玩家 CurFootHold.ID（不改缓存）。
 uint32_t PeekCurFhId();
 
@@ -71,7 +76,8 @@ void* ResolveFhObject(uint32_t id);
 // 从堆缓存拷出完整几何（调用方勿放栈；寻路用堆/静态缓冲）。
 bool GetCached(Snapshot& out);
 
-// 详情只写 logs/foothold.log；runtime LogI 仅一行摘要。
+// 默认 foothold.log 只写摘要；逐条 fh/lr 需 XCAT_FH_DUMP=1（或 idMismatch 自动展开）。
+// runtime LogI 始终一行摘要。
 void DumpCachedLog();
 
 }  // namespace x::features::ports::foothold

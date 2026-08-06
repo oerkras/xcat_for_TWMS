@@ -17,6 +17,8 @@
 #include "../features/autopot/autopot.h"
 #include "../features/invuln/invuln.h"
 #include "../features/attack_accel/attack_accel.h"
+#include "../features/final_attack_force/final_attack_force.h"
+#include "../features/skill_max_level/skill_max_level.h"
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/mob_scan/mob_scan.h"
 #include "../features/pet_feed/pet_feed.h"
@@ -27,9 +29,12 @@
 #include "../features/simple_combat/simple_combat.h"
 #include "../features/auto_lie/auto_lie.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
+#include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/ga_text_probe/ga_text_probe.h"
 #include "../features/channel_hop/channel_hop.h"
 #include "../features/encounter/encounter.h"
+#include "../features/player_hide/player_hide.h"
+#include "../features/frame_lock/frame_lock.h"
 #include "../features/fly/fly.h"
 #include "../features/timed_keys/timed_keys.h"
 #include "../features/titlebar/titlebar.h"
@@ -48,6 +53,8 @@
 #include "../runtime/il2cpp_bind.h"
 #include "../runtime/log.h"
 #include "../runtime/main_thread_pump.h"
+#include "../runtime/managed_main.h"
+#include "../features/ports/world_port.h"
 
 #include "xcat_sound.h"
 
@@ -73,6 +80,13 @@ constexpr DWORD kPreEnsureNativeMinMs = 15000;
 constexpr DWORD kUnityWndPollMs = 400;
 // DllMain 内短等 Bootstrap 离开 Ensure（不可 join）。
 constexpr DWORD kDetachProbeIdleMs = 500;
+// 证据 5e3768：MI 已装但 SendWill 未跳就开 worker → pump idle / process-dead。
+// age 上限必须 ≥ 持续窗口，否则低帧会饿死门闩（review）。
+constexpr DWORD kPumpAliveMinMs = 2000;
+constexpr DWORD kPumpTickAgeMaxMs = 3000;  // ≥ kPumpAliveMinMs
+constexpr uint32_t kPumpAliveMinTicks = 10;
+constexpr DWORD kPumpAlivePollMs = 200;
+constexpr DWORD kPlayReadyPollMs = 400;
 
 struct ManagedProbeGuard {
     ManagedProbeGuard() { gInManagedProbe.store(true, std::memory_order_release); }
@@ -104,9 +118,12 @@ bool AbortRequested() { return gBootstrapStop.load(std::memory_order_acquire); }
 
 void StopAllFeatureWorkers() {
     x::features::encounter::StopWorker();
+    x::features::player_hide::StopWorker();
+    x::features::frame_lock::StopWorker();
     x::features::channel_hop::StopWorker();
     x::features::ga_text_probe::StopWorker();
     x::features::drop_alert_bypass::StopWorker();
+    x::features::auction_town_bypass::StopWorker();
     x::features::auto_lie::StopWorker();
     xcat::sound::CancelPlayback();
     x::features::fly::StopWorker();
@@ -127,37 +144,31 @@ void StopAllFeatureWorkers() {
     x::ipc::PayloadStatus_Stop();
     x::features::ccu::StopWorker();
     x::features::auto_enter::StopWorker();
+    x::features::skill_max_level::StopWorker();
+    x::features::final_attack_force::StopWorker();
     x::features::attack_accel::StopWorker();
     x::features::invuln::StopWorker();
     x::features::kick_sniff::StopWorker();
 }
 
 // 每步可打断：DETACH 置 stop 后尽快 StopAll，避免半开 workers。
-bool StartAllFeatureWorkers() {
-    if (AbortRequested()) return false;
-
-    x::runtime::LogI("Bootstrap",
-                     "MainPump ready — start workers (invuln + attack_accel + kick_sniff + "
-                     "auto_enter + titlebar + mob_scan + autopot + pet_feed + pet_loot + "
-                     "timed_keys + buffs + multi_skill + travel + sellbag + attack_rpc + "
-                     "auto_supply + simple_combat + fly + auto_lie + drop_alert + "
-                     "ga_text_probe + channel_hop + encounter + ccu + payload_status)");
-
-#define XCAT_BOOT_STEP(stmt)       \
-    do {                           \
-        if (AbortRequested()) {    \
+#define XCAT_BOOT_STEP(stmt)         \
+    do {                             \
+        if (AbortRequested()) {      \
             StopAllFeatureWorkers(); \
-            return false;          \
-        }                          \
-        stmt;                      \
+            return false;            \
+        }                            \
+        stmt;                        \
     } while (0)
 
+// 登录期：只开过图/会话必需，避免 login-freeze 下齐开 FindClass 重活（5e3768/review）。
+bool StartLoginPathWorkers() {
+    if (AbortRequested()) return false;
+    x::runtime::LogI("Bootstrap",
+                     "MainPump alive — start LOGIN workers (kick_sniff + auto_enter + ccu + "
+                     "payload_status + titlebar)");
     XCAT_BOOT_STEP(x::features::kick_sniff::Init());
     XCAT_BOOT_STEP(x::features::kick_sniff::StartWorker());
-    XCAT_BOOT_STEP(x::features::invuln::Init());
-    XCAT_BOOT_STEP(x::features::invuln::StartWorker());
-    XCAT_BOOT_STEP(x::features::attack_accel::Init());
-    XCAT_BOOT_STEP(x::features::attack_accel::StartWorker());
     XCAT_BOOT_STEP(x::features::auto_enter::Init());
     XCAT_BOOT_STEP(x::features::auto_enter::StartWorker());
     XCAT_BOOT_STEP(x::features::ccu::Init());
@@ -165,6 +176,26 @@ bool StartAllFeatureWorkers() {
     XCAT_BOOT_STEP(x::ipc::PayloadStatus_Start());
     XCAT_BOOT_STEP(x::features::titlebar::Init());
     XCAT_BOOT_STEP(x::features::titlebar::StartWorker());
+    if (AbortRequested()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    return true;
+}
+
+// 进图后：其余 FindClass / 玩法 workers。
+bool StartPlayPathWorkers() {
+    if (AbortRequested()) return false;
+    x::runtime::LogI("Bootstrap",
+                     "play-ready — start PLAY workers (invuln + combat + loot + …)");
+    XCAT_BOOT_STEP(x::features::invuln::Init());
+    XCAT_BOOT_STEP(x::features::invuln::StartWorker());
+    XCAT_BOOT_STEP(x::features::attack_accel::Init());
+    XCAT_BOOT_STEP(x::features::attack_accel::StartWorker());
+    XCAT_BOOT_STEP(x::features::final_attack_force::Init());
+    XCAT_BOOT_STEP(x::features::final_attack_force::StartWorker());
+    XCAT_BOOT_STEP(x::features::skill_max_level::Init());
+    XCAT_BOOT_STEP(x::features::skill_max_level::StartWorker());
     XCAT_BOOT_STEP(x::features::mob_scan::Init());
     XCAT_BOOT_STEP(x::features::mob_scan::StartWorker());
     XCAT_BOOT_STEP(x::features::autopot::Init());
@@ -199,19 +230,105 @@ bool StartAllFeatureWorkers() {
     XCAT_BOOT_STEP(x::features::auto_lie::StartWorker());
     XCAT_BOOT_STEP(x::features::drop_alert_bypass::Init());
     XCAT_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
+    XCAT_BOOT_STEP(x::features::auction_town_bypass::Init());
+    XCAT_BOOT_STEP(x::features::auction_town_bypass::StartWorker());
     XCAT_BOOT_STEP(x::features::ga_text_probe::Init());
     XCAT_BOOT_STEP(x::features::ga_text_probe::StartWorker());
     XCAT_BOOT_STEP(x::features::channel_hop::Init());
     XCAT_BOOT_STEP(x::features::channel_hop::StartWorker());
     XCAT_BOOT_STEP(x::features::encounter::Init());
     XCAT_BOOT_STEP(x::features::encounter::StartWorker());
-#undef XCAT_BOOT_STEP
-
+    XCAT_BOOT_STEP(x::features::player_hide::Init());
+    XCAT_BOOT_STEP(x::features::player_hide::StartWorker());
+    XCAT_BOOT_STEP(x::features::frame_lock::Init());
+    XCAT_BOOT_STEP(x::features::frame_lock::StartWorker());
     if (AbortRequested()) {
         StopAllFeatureWorkers();
         return false;
     }
     return true;
+}
+
+#undef XCAT_BOOT_STEP
+
+// 自首次见到真实 tick 起墙钟满 minMs，且当前仍在跳动、累计 ticks 够 —— 不要求无间隙连续 streak。
+bool WaitPumpTicking() {
+    const uint32_t tick0 = x::runtime::main_thread::RealTickCount();
+    DWORD firstTickWall = 0;
+    DWORD lastLog = 0;
+    x::runtime::LogI("Bootstrap",
+                     "wait MainPump real ticks (≥%ums wall + %u ticks, age≤%ums) before login workers",
+                     static_cast<unsigned>(kPumpAliveMinMs),
+                     static_cast<unsigned>(kPumpAliveMinTicks),
+                     static_cast<unsigned>(kPumpTickAgeMaxMs));
+    while (!AbortRequested()) {
+        if (!x::runtime::main_thread::IsInstalled()) return false;
+        // 补挂 SceneLogin（Canvas 已装但过图停跳时的心跳兜底）。
+        {
+            ManagedProbeGuard probe;
+            if (AbortRequested()) return false;
+            (void)x::runtime::main_thread::Ensure();
+        }
+        const uint32_t ticks = x::runtime::main_thread::RealTickCount() - tick0;
+        const bool live = x::runtime::main_thread::IsPumpTicking(kPumpTickAgeMaxMs);
+        const DWORD now = GetTickCount();
+        if (ticks > 0 && firstTickWall == 0) firstTickWall = now;
+        if (live && firstTickWall != 0 && ticks >= kPumpAliveMinTicks &&
+            (now - firstTickWall) >= kPumpAliveMinMs) {
+            x::runtime::LogI("Bootstrap",
+                             "MainPump alive (wall=%ums, ticks=%u) — login workers next",
+                             static_cast<unsigned>(now - firstTickWall),
+                             static_cast<unsigned>(ticks));
+            return true;
+        }
+        if (lastLog == 0 || now - lastLog >= kColdStartLogMs) {
+            lastLog = now;
+            const DWORD age = x::runtime::main_thread::LastRealTickAgeMs();
+            x::runtime::LogI("Bootstrap", "MainPump tick wait… ticks=%u ageMs=%u live=%d",
+                             static_cast<unsigned>(ticks),
+                             age == 0xFFFFFFFFu ? 0u : static_cast<unsigned>(age), live ? 1 : 0);
+        }
+        Sleep(kPumpAlivePollMs);
+    }
+    return false;
+}
+
+// 进图后再开玩法 workers。IsPlayReady 经泵；冻屏期间失败则继续等。
+bool WaitPlayReadyForWorkers() {
+    DWORD lastLog = 0;
+    x::runtime::LogI("Bootstrap",
+                     "wait play-ready (map+WM) before PLAY workers (login-freeze safe)");
+    while (!AbortRequested()) {
+        if (x::features::ports::world::IsPlayReady()) {
+            x::runtime::LogI("Bootstrap", "play-ready ok — freeze=%d",
+                             x::runtime::managed_main::IsLoginFrozen() ? 1 : 0);
+            return true;
+        }
+        const DWORD now = GetTickCount();
+        if (lastLog == 0 || now - lastLog >= kColdStartLogMs) {
+            lastLog = now;
+            x::runtime::LogI("Bootstrap",
+                             "play-ready wait… freeze=%d pumpLive=%d scene=%d",
+                             x::runtime::managed_main::IsLoginFrozen() ? 1 : 0,
+                             x::runtime::main_thread::IsPumpTicking(kPumpTickAgeMaxMs) ? 1 : 0,
+                             static_cast<int>(x::features::ports::world::GetSceneState()));
+        }
+        Sleep(kPlayReadyPollMs);
+    }
+    return false;
+}
+
+bool BootFeatureWorkersTwoPhase() {
+    if (!StartLoginPathWorkers()) return false;
+    if (!WaitPlayReadyForWorkers()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    if (AbortRequested()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    return StartPlayPathWorkers();
 }
 
 bool WaitNativeGameAssembly() {
@@ -232,6 +349,7 @@ bool WaitNativeBeforeFindClass() {
     const DWORD start = GetTickCount();
     DWORD lastLog = 0;
     bool sawUnity = false;
+    bool snappedTopLeft = false;
     x::runtime::LogI("Bootstrap",
                      "native settle ≥%us + UnityWndClass before FindClass (no timeout bypass)",
                      static_cast<unsigned>(kPreEnsureNativeMinMs / 1000u));
@@ -239,7 +357,16 @@ bool WaitNativeBeforeFindClass() {
         const DWORD now = GetTickCount();
         const DWORD elapsed = now - start;
         HWND unity = x::features::titlebar::win::FindUnityWndClass();
-        if (unity) sawUnity = true;
+        if (unity) {
+            sawUnity = true;
+            if (!snappedTopLeft) {
+                snappedTopLeft = x::features::titlebar::win::PositionGameTopLeft(unity);
+                if (snappedTopLeft) {
+                    x::runtime::LogI("Bootstrap", "game window snapped top-left hwnd=%p",
+                                     (void*)unity);
+                }
+            }
+        }
         if (elapsed >= kPreEnsureNativeMinMs && unity) {
             x::runtime::LogI("Bootstrap",
                              "native settle done (%us, UnityWndClass=%p) — begin MainPump poll",
@@ -259,8 +386,8 @@ bool WaitNativeBeforeFindClass() {
 DWORD WINAPI BootstrapThread(LPVOID) {
     gPhase.store(static_cast<int>(Phase::Waiting), std::memory_order_release);
     x::runtime::LogI("Bootstrap",
-                     "cold-start gate: GA exports → native settle → MainPump "
-                     "(no FindClass until UnityWndClass+settle; abort on detach)");
+                     "cold-start gate: GA → settle → MainPump MI → real ticks → "
+                     "LOGIN workers → play-ready → PLAY workers (abort on detach)");
 
     if (!WaitNativeGameAssembly()) {
         x::runtime::LogI("Bootstrap", "cold-start aborted before GA (detach)");
@@ -297,13 +424,18 @@ DWORD WINAPI BootstrapThread(LPVOID) {
         }
         if (AbortRequested()) break;
         if (installed) {
+            if (!WaitPumpTicking()) {
+                x::runtime::LogI("Bootstrap", "cold-start aborted waiting pump ticks (detach)");
+                break;
+            }
+            if (AbortRequested()) break;
             int expect = static_cast<int>(Phase::Waiting);
             if (!gPhase.compare_exchange_strong(expect, static_cast<int>(Phase::Starting),
                                                 std::memory_order_acq_rel)) {
                 x::runtime::LogI("Bootstrap", "cold-start aborted (phase=%d)", expect);
                 return 0;
             }
-            const bool ok = StartAllFeatureWorkers();
+            const bool ok = BootFeatureWorkersTwoPhase();
             if (!ok || AbortRequested()) {
                 // DETACH 可能已 StopAll；再 sweep 一次幂等收尾。
                 StopAllFeatureWorkers();
@@ -319,7 +451,7 @@ DWORD WINAPI BootstrapThread(LPVOID) {
                 x::runtime::LogI("Bootstrap", "worker start lost race to detach");
                 return 0;
             }
-            x::runtime::LogI("Bootstrap", "cold-start complete — workers running");
+            x::runtime::LogI("Bootstrap", "cold-start complete — login+play workers running");
             return 0;
         }
         const DWORD now = GetTickCount();

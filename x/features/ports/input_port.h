@@ -1,7 +1,7 @@
 #pragma once
 // Classic TWMS input port — UserLocal.OnKey (main-thread pump).
-// KeyDownTouch CFF 实机 SEH；现行真源 OnKey@0x10198C0，MethodInfo=null。
-// 禁止 SendInput。
+// KeyDownTouch CFF 实机 SEH；现行真源 OnKey@0x10181E0。
+// 调用传 MethodInfo=null；MI 仅用于 FnFromMi / MISS 灯。禁止 SendInput。
 
 #include <Windows.h>
 #include <cstdint>

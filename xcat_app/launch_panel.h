@@ -17,7 +17,9 @@ struct LaunchUiState {
     std::string prefsBinDir;
     DWORD lastLogRefreshMs = 0;
     int activeTab = static_cast<int>(WorkspaceTab::Home);
-    bool pendingAutoLaunch = false;  // 启动时有有效账号串则就绪后自动一键
+    bool pendingAutoLaunch = false;  // 冷启/切模式后：AttachWatch 自动监视；GAMA PASS 自动换票启动
+    // 到点前禁止自动/手动启动：切启动模式/取票策略、或 GAMA PASS 冷启准备窗（0=不延迟）
+    DWORD autoLaunchNotBeforeMs = 0;
 };
 
 void LaunchPanel_LoadAccount(LaunchUiState& ui);
@@ -26,7 +28,13 @@ void LaunchPanel_FormatAccountForUi(LaunchUiState& ui);  // 连续 '-' 处分行
 void LaunchPanel_AppendLog(LaunchUiState& ui, const std::wstring& line);
 void LaunchPanel_OnWebLog(const std::wstring& line);
 bool LaunchPanel_AccountLooksValid(const LaunchUiState& ui, std::wstring* errOut = nullptr);
-bool LaunchPanel_StartOneClick(LaunchUiState& ui);
+// 切启动策略后的防误触准备窗（默认 7s）；阻塞自动拉起与一键启动。
+void LaunchPanel_ArmStrategyPrep(LaunchUiState& ui, DWORD ms = 7000);
+// 剩余秒数；到期则清零。0 = 可启动。
+unsigned LaunchPanel_StrategyPrepLeftSec(LaunchUiState& ui);
+// 取消冷启/切模式留下的自动启动（准备窗一并清掉）。返回是否确实取消了待办。
+bool LaunchPanel_CancelPendingAutoLaunch(LaunchUiState& ui);
+bool LaunchPanel_StartOneClick(LaunchUiState& ui, bool honorStrategyPrep = true);
 void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui);
 void DrawMainShell(AppWindow& app, LaunchUiState& ui);
 

@@ -1,6 +1,6 @@
 # attack_rpc P0c · 攻包 BODY 布局（现网 IDA Encode 序）
 
-> **状态**：✅ 现网静态结案（Melee 50 头+命中环；Normal 落空对照）· 多怪环已见循环 · BIN 实机复核 NOT RUN  
+> **状态**：✅ 现网静态结案 · **实机 hex 修正已写入 §9** · 掉血验收仍待勾选  
 > **产品**：经典版 TWMS · **不是**枫星  
 > **IDB**：`Dumps/runtime/GameAssembly.dll.i64` · imagebase **`0x7FFB74A20000`**  
 > **真源**：`UserLocal_TryDoingMeleeAttack` / `TryDoingNormalAttack` 内 `OutPacket.Encode*` 调用序（种子已 `get_int`/`ida_bytes` 解混淆）  
@@ -10,7 +10,7 @@
 
 ## 0. 结论先行
 
-1. **不要用旧 `send.log` 当字段真源**（旧探针/旧客户端）。字段序以现网 Encode 为准。  
+1. **字段序以现网 Encode 为准**；**wire 字节以现网 `send.log` op=50 为准**（二者有张力时听 hex，见 §9）。  
 2. `Create(ClientPacket)` 常量已解混淆：  
    | 函数 | RVA | opcode |
    |---|---:|---:|
@@ -18,9 +18,9 @@
    | `UserLocal_TryDoingMeleeAttack` | `0x10B0EE0` | **50** |
    | `UserLocal_TryDoingShootAttack` | `0x1048F80` | **51** |
    | `UserLocal_TryDoingMagicAttack` | `0x1082020` | **52** |
-3. 发包：`Network_SendOutPacket` **`0x1CB7CE0`** → 内部 `HashSet.Contains` 后调 `NetworkManager_SendPacket@0x1CB98B0`。  
+3. 发包：官方门 `Network_SendOutPacket@0x1CB7CE0` → 内部 `HashSet` 后 `Session.SendPacket@0x1CB98B0`。P1 探针**走 SendOutPacket**（2026-08-03：直调 Session.Send → 第 3 次后 ~109ms 踢）。  
 4. `flags` 低 4 位 | **`mobCount<<4`**：命中 `0x11` = count=1 + 低位 1；落空 `0x01` = count=0。  
-5. 命中环按 `List<AttackInfo>` 迭代；单怪 damages 循环 `AttackCount` 次 `Encode4`。
+5. 命中环按 `List<AttackInfo>` 迭代；**wire 上 damages 前是 `u16`（非 Encode1 AttackCount）**——见 §9。
 
 ---
 
@@ -33,7 +33,7 @@
 | `UserLocal_TryDoingShootAttack` | `0x1048F80` | `0x7FFB75A68F80` |
 | `UserLocal_TryDoingMagicAttack` | `0x1082020` | `0x7FFB75AA2020` |
 | `OutPacket_Create` | `0x1CB7BB0` | （P0b） |
-| `OutPacket_EncodeVector2` | `0x1CC5090` | `BitConverter.GetBytes`×2 + `BlockCopy` |
+| `OutPacket_EncodeVector2` | `0x1CC5090` | `BitConverter.GetBytes`×2 + `BlockCopy`（线上各 2B＝i16） |
 | `Network_SendOutPacket` | `0x1CB7CE0` | → `NM.SendPacket` |
 | `User_SetAttackAction` | `0xFD39C0` | 两路径均先调 |
 
@@ -55,39 +55,33 @@ Create 位点 `0x10B60FB`；随后 Encode（`rdi/rbx` = OutPacket*）：
 | 6 | `Encode2_ushort` | **action \| (left<<15)** 打包 |
 | 7 | `Encode1_byte` | `UserLocal+0x158` |
 | 8 | `Encode1_byte` | 动作/武器相关字节 |
-| 9 | `Encode4_int` | 时间戳/密钥（`tOrKey`） |
+| 9 | `Encode4_int` | 时间戳/密钥（`tOrKey`）← **实机 = GetUpdateTime 钟** |
 
-头长至此后：**19 字节**（与旧 BIN 头长相合，但中间字段语义以本表为准，勿再抄旧「pad5」解读）。
+头长至此后：**19 字节**。
 
 `TryDoingNormalAttack` 落空路径同构，但：  
-- #2/#5 等用种子常量写出（`0xA7^0xA6→1`，`0xBE+0x42→0`，skill 相关两枚 `Encode4` 解出 **0**）；  
-- 无命中环；结尾用两次 `Encode2_short` 写 **玩家 XY**（float→int），再 `SendOutPacket`。  
+- skill 两枚 `Encode4` 解出 **0**；  
+- 无命中环；结尾两次 `Encode2_short` 写玩家 XY。  
 BODY≈23 → `DataPos off≈29`。
 
 ---
 
-## 3. 命中环（每只怪 · `AttackInfo`）
-
-条件：`mobIndex < mobCount`。元素 = `List.get_Item` → `AttackInfo*`（`r12`）。
+## 3. 命中环（每只怪 · `AttackInfo`）— IDA 视角
 
 | # | API | 源 | CMS 对照 |
 |---:|---|---|---|
-| 1 | `Encode4_int` | `Mob*+0x134` | Mob oid（非 `AttackInfo.MobID` 槽；从 `AttackInfo.Mob` 间接） |
+| 1 | `Encode4_int` | `Mob*+0x134` | Mob oid |
 | 2 | `Encode1_byte` | `AttackInfo+0x20` | `HitAction` |
 | 3 | `Encode1_byte` | `+0x24` 与 bool 打包 | `ForeAction` + 谓词位 |
 | 4 | `Encode1_byte` | `AttackInfo+0x28` | `FrameIdx` |
 | 5 | `Encode1_byte` | Mob 朝向/状态打包 | （wire 独有） |
-| 6 | `EncodeVector2` | Mob 位置 vtable | ≈ `PositionHit` 一侧 |
-| 7 | `EncodeVector2` | `Mob+0x6C` | 第二点（hit/旧坐标） |
-| 8 | `Encode1_byte` | `AttackInfo+0x30` | `AttackCount` |
+| 6 | `EncodeVector2` | Mob 位置 | wire＝i16×2 |
+| 7 | `EncodeVector2` | `Mob+0x6C` | 第二点 |
+| 8 | `Encode1_byte` | `AttackInfo+0x30` | `AttackCount`（**IDA**；wire 见 §9） |
 | 9 | `Encode4_int` ×N | `Damages[i]` | `Damages[]` |
-| 10 | `Encode4_uint` | `UserLocal_GetFieldID` | 场 ID |
+| 10 | `Encode4_uint` | `UserLocal_GetFieldID` | 场 ID（真包常 **0**） |
 
-环后还有：玩家 `EncodeVector2`、若干 `Encode1` / 可选 `Encode2_short`，再 `Network_SendOutPacket`。
-
-**单怪 × `AttackCount=1` 粗算**：4+1+1+1+1+8+8+1+4+4 = **33 B/怪**（≠ 旧 BIN「+26」假设——以本表为准）。
-
-多怪：同一环 `inc` 后跳回 `List.get_Item`（`0x10B63B0` 一带），**静态已见循环**，无需再猜「+26×N」。
+环后：玩家 XY，再 `Network_SendOutPacket`。多怪环已见静态循环。
 
 ---
 
@@ -96,23 +90,20 @@ BODY≈23 → `DataPos off≈29`。
 | | Magic `0x1082020` | Shoot `0x1048F80` |
 |---|---|---|
 | Create | **52** | **51** |
-| 相对 Melee | 头里多一枚 `Encode4`（技能附属/keydown 类） | 头里多 `Encode4` + 两枚 `Encode2`（子弹起点 XY） |
+| 相对 Melee | 头里多一枚 `Encode4` | 头里多 `Encode4` + 两枚 `Encode2` |
 | Send | 同 `Network_SendOutPacket` | 同 |
-
-细字段命名留 P0c+ / 实机 BIN 对齐。
 
 ---
 
 ## 5. 常量解混淆样例（Normal 落空头）
 
-种子均在 `0x7FFB7B264xxx`（运行时填充；**必须实读**，勿抄本文瞬时值当永久常量）：
+种子均在 `0x7FFB7B264xxx`（运行时填充；**必须实读**）：
 
 | 写法 | 本轮实算 |
 |---|---|
 | `movzx ecx, word_…264154; add ecx, 0FFFF91A7h` | → **50** |
 | `byte_…26413C ^ 0xA6` | → **1** |
-| `0x92E53601 + dword_…264138` | → **0**（skillId） |
-| `0xBE6938C8 ^ dword_…264134` | → **0** |
+| skill 相关两枚 | → **0** |
 | `byte_…264130 + 0x42` | → **0** |
 
 ---
@@ -121,9 +112,8 @@ BODY≈23 → `DataPos off≈29`。
 
 | 做法 | 评估 |
 |---|---|
-| 调官方 `TryDoingMeleeAttack` 下游「已组好 List 后的 Encode 段」 | 最稳，但仍可能撞 `SetAttackAction` |
-| 自建 `OutPacket.Create(50)` + 按 §2–3 Encode + `Network_SendOutPacket` | 对齐同行「跳门」；**禁止**旁路到 Session.Send |
-| 多怪 | 重复 §3 环，改 `flags` 高 nibble = count |
+| 自建 `Create(50)` + §9 wire Encode + `Session.SendPacket` | P1 现用；与 shop 同 Send |
+| 多怪 | 重复命中环，`flags` 高 nibble = count |
 
 ---
 
@@ -131,15 +121,49 @@ BODY≈23 → `DataPos off≈29`。
 
 | 路径 | 说明 |
 |---|---|
-| 本文 | Encode 序真源 |
-| `Dumps/runtime/P0C_ATTACK_BODY_20260803.tsv` | 机器表 |
-| IDA 命名 | 上表函数 / `OutPacket_EncodeVector2` / `Network_SendOutPacket` |
+| 本文 | Encode 序 + 实机修正 |
+| `Dumps/runtime/send.log*` | op=50 真包 hex |
 
 ---
 
 ## 8. NOT RUN
 
-- 现网 `kick_sniff@NM.SendPacket` 实机 BIN 与本文逐字节对齐  
+- 单怪掉血 / 无即踢（需实验 TAB 勾选实机）  
 - Shoot/Magic 头字段逐项命名  
-- `EncodeVector2` 两处坐标语义（当前 vs hit）最终定名  
-- `ForeAction` 打包位精确掩码  
+- `ForeAction` 打包位精确掩码（wire 多数 `0x80`/`0x81`）
+
+---
+
+## 9. 实机修正（send.log op=50 · 2026-08-03）
+
+> **冲突仲裁**：IDA §3 写 `Encode1(AttackCount)` + `Encode4×N`；**现网 kick_sniff BODY 为 `u16` + `dmg i32` + `field u32`**。P1 伪造跟 hex。
+
+### 9.1 单怪命中（off=55）样例
+
+```text
+01 11 | skill0×2 | bool0 | action u16 | 01 05 | tOrKey u32
+| oid | 06 | 80/81 | frame | 01 | xy1 | xy2 | A5 01/47 01 | dmg | field0 | player xy
+```
+
+| 字段 | 真包观察 |
+|---|---|
+| portal | 恒 `01`（不是 `03`） |
+| flags | 命中 `11`；落空 `01` |
+| action | `05`..`10`；左向可带 `0x8000` |
+| +0x158 / weap | `01` / `05` |
+| tOrKey | 量级 **GetUpdateTime**（如 `0x6CBA`），非 `GetTickCount` |
+| ForeAction | 多数 `80`/`81`，**不是 0** |
+| Frame | 多数 `00` |
+| 两 XY 后 | **`u16`**：`A5 01` / `47 01` |
+| fieldId | 恒 `0`（勿塞 mapId） |
+| 落空 | off≈29，无命中环 |
+
+### 9.2 对旧注释的作废
+
+| 旧说法 | 处置 |
+|---|---|
+| portal=`0x03` | ❌ 真包 `0x01` |
+| ForeAction 多数 0 | ❌ 真包 `0x80`/`0x81` |
+| `Encode1 AttackCount` 上线 | ⚠️ IDA 有；**wire 用 u16**，P1 跟 wire |
+| FieldID=`GetMapId()` | ❌ 真包 0 |
+| tOrKey=`GetTickCount` | ❌ 改 `GetUpdateTime` |

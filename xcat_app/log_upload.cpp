@@ -5,8 +5,15 @@
 #include "xcat_log.h"
 #include "xcat_version.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <Windows.h>
 #include <bcrypt.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <shlobj.h>
 #include <winhttp.h>
 
 #include <algorithm>
@@ -14,11 +21,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
 #include <filesystem>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -824,15 +833,20 @@ CollectedLogs CollectLogs(const LogUploadRequest& req) {
     AddRotatedLogsIfPresent(out.logs, "overlay_host.log", "XCat_data/state/overlay_host.log",
                             xcat::log::paths::TextLog(overlayJsonl), backups);
 
-    // 更新器脚本日志在 %TEMP%，不随旧安装目录删除——诊断「更新后拉不起游戏」的关键证据。
+    // 更新器脚本日志 / 失败通知在 %TEMP%（及 state），不随旧安装目录删除——热更失败采证关键。
     {
         wchar_t tempDir[MAX_PATH]{};
         const DWORD n = GetTempPathW(MAX_PATH, tempDir);
         if (n > 0 && n < MAX_PATH) {
-            const std::string applyLog =
-                xcat::WideToUtf8(std::wstring(tempDir) + L"xcat_update_apply.log");
-            AddLogIfPresent(out.logs, "update_apply.log", "TEMP/xcat_update_apply.log", applyLog);
+            const std::wstring tempRoot(tempDir);
+            AddLogIfPresent(out.logs, "update_apply.log", "TEMP/xcat_update_apply.log",
+                            xcat::WideToUtf8(tempRoot + L"xcat_update_apply.log"));
+            AddLogIfPresent(out.logs, "update_failed.notify", "TEMP/xcat_update_failed.notify",
+                            xcat::WideToUtf8(tempRoot + L"xcat_update_failed.notify"));
         }
+        AddLogIfPresent(out.logs, "update_failed_state.notify",
+                        "XCat_data/state/update_failed.notify",
+                        xcat::JoinBinPath(req.payloadBinDir.c_str(), "state\\update_failed.notify"));
     }
 
     // 功能频道日志：combat / foothold / petloot / invuln / auto_enter …（白名单未列的一律扫入）。
@@ -866,6 +880,56 @@ std::string MachineName() {
     DWORD len = sizeof(buf);
     if (!GetComputerNameA(buf, &len) || len == 0) return {};
     return std::string(buf, len);
+}
+
+std::vector<std::string> CollectLocalMacs() {
+    std::vector<std::string> out;
+    ULONG size = 0;
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    DWORD rc = GetAdaptersAddresses(AF_UNSPEC, flags, nullptr, nullptr, &size);
+    if (rc != ERROR_BUFFER_OVERFLOW || size == 0) return out;
+
+    std::vector<unsigned char> buf(size);
+    auto* addrs = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+    rc = GetAdaptersAddresses(AF_UNSPEC, flags, nullptr, addrs, &size);
+    if (rc != ERROR_SUCCESS) return out;
+
+    auto looksVirtual = [](const wchar_t* desc, const wchar_t* friendly) {
+        auto has = [](const wchar_t* s, const wchar_t* needle) {
+            if (!s || !needle) return false;
+            std::wstring hay(s);
+            for (auto& c : hay) c = static_cast<wchar_t>(towlower(c));
+            std::wstring n(needle);
+            return hay.find(n) != std::wstring::npos;
+        };
+        return has(desc, L"virtual") || has(desc, L"vmware") || has(desc, L"hyper-v") ||
+               has(desc, L"virtualbox") || has(desc, L"vpn") || has(desc, L"tap-") ||
+               has(desc, L"loopback") || has(friendly, L"virtual") || has(friendly, L"vpn");
+    };
+
+    for (auto* a = addrs; a; a = a->Next) {
+        if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        if (a->OperStatus != IfOperStatusUp && a->OperStatus != IfOperStatusDormant) continue;
+        if (a->PhysicalAddressLength != 6) continue;
+        if (looksVirtual(a->Description, a->FriendlyName)) continue;
+        char mac[24]{};
+        std::snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", a->PhysicalAddress[0],
+                      a->PhysicalAddress[1], a->PhysicalAddress[2], a->PhysicalAddress[3],
+                      a->PhysicalAddress[4], a->PhysicalAddress[5]);
+        // 全 0 / 全 f 丢弃
+        if (std::strcmp(mac, "00:00:00:00:00:00") == 0 ||
+            std::strcmp(mac, "ff:ff:ff:ff:ff:ff") == 0) {
+            continue;
+        }
+        if (std::find(out.begin(), out.end(), mac) != out.end()) continue;
+        // 有线/无线优先：插到前面
+        const bool preferred = a->IfType == IF_TYPE_ETHERNET_CSMACD ||
+                               a->IfType == IF_TYPE_IEEE80211;
+        if (preferred) out.insert(out.begin(), mac);
+        else out.push_back(mac);
+        if (out.size() >= 8) break;
+    }
+    return out;
 }
 
 bool IsValidDeviceId(const std::string& id) {
@@ -910,35 +974,223 @@ std::string NewDeviceId() {
     return buf;
 }
 
-std::string EnsureDeviceId(const char* payloadBinDir) {
-    if (!payloadBinDir || !payloadBinDir[0]) return NewDeviceId();
-    if (!EnsureStateDir(payloadBinDir)) return NewDeviceId();
+// 与门禁粘性同目录（无 XCat 字样）。按安装路径分文件，避免同机多目录互抢；
+// 另保留 legacy id.dat 作迁移兜底（清目录后同路径重装靠 id_<hash>）。
+std::string DeviceIdMachineDir() {
+    PWSTR base = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, nullptr, &base)) ||
+        !base) {
+        return {};
+    }
+    std::wstring w = base;
+    CoTaskMemFree(base);
+    if (!w.empty() && w.back() != L'\\' && w.back() != L'/') w.push_back(L'\\');
+    w += L"{E4B7C2A9-1F8D-4E3A-9C6B-7A2D5F1E0C8B}";
+    return xcat::WideToUtf8(w);
+}
 
+std::string NormalizeInstallKey(const char* payloadBinDir) {
+    if (!payloadBinDir || !payloadBinDir[0]) return {};
+    std::error_code ec;
+    const std::wstring wide = xcat::Utf8ToWide(payloadBinDir);
+    std::filesystem::path p(wide);
+    std::filesystem::path abs = std::filesystem::weakly_canonical(p, ec);
+    if (ec || abs.empty()) abs = std::filesystem::absolute(p, ec);
+    if (ec) abs = p;
+    std::string s = xcat::WideToUtf8(abs.wstring());
+    for (char& c : s) {
+        if (c == '/') c = '\\';
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    while (!s.empty() && (s.back() == '\\' || s.back() == '/')) s.pop_back();
+    return s;
+}
+
+uint32_t HashInstallKey(const std::string& key) {
+    // FNV-1a 32-bit：短、稳定，仅用于文件名分片。
+    uint32_t h = 2166136261u;
+    for (unsigned char c : key) {
+        h ^= c;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+std::string DeviceIdMachinePathLegacy() {
+    const std::string dir = DeviceIdMachineDir();
+    if (dir.empty()) return {};
+    return dir + "\\id.dat";
+}
+
+std::string DeviceIdMachinePathForInstall(const char* payloadBinDir) {
+    const std::string dir = DeviceIdMachineDir();
+    if (dir.empty()) return {};
+    const std::string key = NormalizeInstallKey(payloadBinDir);
+    if (key.empty()) return DeviceIdMachinePathLegacy();
+    char name[32]{};
+    std::snprintf(name, sizeof(name), "\\id_%08x.dat", HashInstallKey(key));
+    return dir + name;
+}
+
+bool ReadDeviceIdFile(const std::string& path, std::string& out) {
+    out.clear();
+    if (path.empty()) return false;
+    const DWORD attr = GetFileAttributesA(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+    char buf[80]{};
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return false;
+    std::string id(buf, n);
+    while (!id.empty() && (id.back() == '\n' || id.back() == '\r' || id.back() == ' ' ||
+                           id.back() == '\t' || id.back() == '\0')) {
+        id.pop_back();
+    }
+    size_t start = 0;
+    while (start < id.size() &&
+           (id[start] == ' ' || id[start] == '\t' || id[start] == '\r' || id[start] == '\n')) {
+        ++start;
+    }
+    if (start) id.erase(0, start);
+    if (!IsValidDeviceId(id)) return false;
+    out = std::move(id);
+    return true;
+}
+
+bool WriteDeviceIdFile(const std::string& path, const std::string& id) {
+    if (path.empty() || !IsValidDeviceId(id)) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(xcat::Utf8ToWide(path)).parent_path(),
+                                        ec);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+    const std::string body = id + "\n";
+    const size_t n = fwrite(body.data(), 1, body.size(), f);
+    fclose(f);
+    return n == body.size();
+}
+
+bool PersistDeviceIdToUserIni(const char* payloadBinDir, const std::string& id) {
+    if (!payloadBinDir || !payloadBinDir[0] || !IsValidDeviceId(id)) return false;
     const std::string path = xcat::UserConfigIniPath(payloadBinDir);
+    return xcat::UpdateIniFile(path.c_str(), [&](xcat::IniStore& store) {
+        xcat::IniSetU32(store, "meta", "version",
+                       static_cast<uint32_t>(xcat::kUserConfigIniVersion));
+        uint32_t version = 0;
+        if (!xcat::IniGetU32(store, "log_upload", "version", version) || version == 0) {
+            xcat::IniSetU32(store, "log_upload", "version", kLogUploadIniVersion);
+        }
+        xcat::IniSetString(store, "log_upload", "deviceId", id.c_str());
+    });
+}
+
+bool PersistDeviceIdMirrors(const char* payloadBinDir, const std::string& id) {
+    bool any = false;
+    const std::string scoped = DeviceIdMachinePathForInstall(payloadBinDir);
+    if (WriteDeviceIdFile(scoped, id)) any = true;
+    // legacy：仅作「无路径/旧版」兜底，不作为多目录共享真源。
+    if (payloadBinDir && payloadBinDir[0]) {
+        (void)WriteDeviceIdFile(DeviceIdMachinePathLegacy(), id);
+    }
+    return any;
+}
+
+bool ReadDeviceIdMirror(const char* payloadBinDir, std::string& out) {
+    out.clear();
+    if (ReadDeviceIdFile(DeviceIdMachinePathForInstall(payloadBinDir), out)) return true;
+    // 迁移：旧版单文件 id.dat → 读到后由调用方写回路径分片。
+    return ReadDeviceIdFile(DeviceIdMachinePathLegacy(), out);
+}
+
+std::string EnsureDeviceId(const char* payloadBinDir) {
+    // 整段加锁：进程缓存 + 双写原子，避免两线程首调各 mint 一次。
+    static std::mutex mtx;
+    static std::unordered_map<std::string, std::string> sessionCache;
+    std::lock_guard<std::mutex> lk(mtx);
+
+    const std::string cacheKey =
+        (payloadBinDir && payloadBinDir[0]) ? std::string(payloadBinDir) : std::string("{}");
+    {
+        const auto it = sessionCache.find(cacheKey);
+        if (it != sessionCache.end() && IsValidDeviceId(it->second)) return it->second;
+    }
+
+    auto remember = [&](std::string id) -> std::string {
+        if (!IsValidDeviceId(id)) id = NewDeviceId();
+        sessionCache[cacheKey] = id;
+        return id;
+    };
+
+    std::string mirrorId;
+    const bool haveMirror = ReadDeviceIdMirror(payloadBinDir, mirrorId);
+
+    if (!payloadBinDir || !payloadBinDir[0]) {
+        if (haveMirror) return remember(std::move(mirrorId));
+        const std::string id = NewDeviceId();
+        (void)WriteDeviceIdFile(DeviceIdMachinePathLegacy(), id);
+        return remember(id);
+    }
+
+    if (!EnsureStateDir(payloadBinDir)) {
+        if (haveMirror) {
+            (void)PersistDeviceIdMirrors(payloadBinDir, mirrorId);
+            return remember(std::move(mirrorId));
+        }
+        const std::string id = NewDeviceId();
+        (void)PersistDeviceIdMirrors(payloadBinDir, id);
+        xcat::log::Warn("LogUpload", "state dir unavailable; deviceId machine-only");
+        return remember(id);
+    }
+
+    const std::string iniPath = xcat::UserConfigIniPath(payloadBinDir);
     xcat::IniStore ini{};
-    if (xcat::LoadIniFile(path.c_str(), ini)) {
+    const bool iniLoaded = xcat::LoadIniFile(iniPath.c_str(), ini);
+    const bool iniExists =
+        GetFileAttributesA(iniPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+
+    if (iniLoaded) {
         std::string id;
         if (xcat::IniGetString(ini, "log_upload", "deviceId", id) && IsValidDeviceId(id)) {
-            return id;
+            (void)PersistDeviceIdMirrors(payloadBinDir, id);
+            return remember(std::move(id));
         }
-    } else if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        // 文件在但读失败：不要新建 deviceId 盖盘。
-        return NewDeviceId();
+    }
+
+    if (haveMirror) {
+        if (!iniExists || iniLoaded) {
+            if (!PersistDeviceIdToUserIni(payloadBinDir, mirrorId)) {
+                xcat::log::Warn("LogUpload", "heal user.ini deviceId failed path=%s",
+                                iniPath.c_str());
+            }
+        } else {
+            xcat::log::Warn("LogUpload",
+                            "user.ini unreadable; reusing machine deviceId (not rewriting ini)");
+        }
+        // 旧 id.dat 迁到路径分片，避免继续被其他安装目录覆盖。
+        (void)PersistDeviceIdMirrors(payloadBinDir, mirrorId);
+        return remember(std::move(mirrorId));
+    }
+
+    if (iniExists && !iniLoaded) {
+        const std::string id = NewDeviceId();
+        if (!PersistDeviceIdMirrors(payloadBinDir, id)) {
+            xcat::log::Warn("LogUpload", "persist machine deviceId failed while ini unreadable");
+        }
+        xcat::log::Warn("LogUpload",
+                        "user.ini unreadable and no machine mirror; session-stable deviceId issued");
+        return remember(id);
     }
 
     const std::string id = NewDeviceId();
-    if (!xcat::UpdateIniFile(path.c_str(), [&](xcat::IniStore& store) {
-            xcat::IniSetU32(store, "meta", "version",
-                           static_cast<uint32_t>(xcat::kUserConfigIniVersion));
-            uint32_t version = 0;
-            if (!xcat::IniGetU32(store, "log_upload", "version", version) || version == 0) {
-                xcat::IniSetU32(store, "log_upload", "version", kLogUploadIniVersion);
-            }
-            xcat::IniSetString(store, "log_upload", "deviceId", id.c_str());
-        })) {
-        xcat::log::Warn("LogUpload", "persist deviceId failed path=%s", path.c_str());
+    if (!PersistDeviceIdToUserIni(payloadBinDir, id)) {
+        xcat::log::Warn("LogUpload", "persist deviceId failed path=%s", iniPath.c_str());
     }
-    return id;
+    if (!PersistDeviceIdMirrors(payloadBinDir, id)) {
+        xcat::log::Warn("LogUpload", "persist machine deviceId failed");
+    }
+    return remember(id);
 }
 
 std::string ClientId(const std::string& machine, const std::string& deviceId) {
@@ -1374,13 +1626,63 @@ ClientHostIdentity ResolveClientHostIdentityImpl(const std::string& payloadBinDi
     ClientHostIdentity out;
     out.machine = MachineName();
     out.deviceId = EnsureDeviceId(payloadBinDir.c_str());
+    out.macs = CollectLocalMacs();
     return out;
 }
 
 }  // namespace
 
 ClientHostIdentity ResolveClientHostIdentity(const std::string& payloadBinDir) {
-    return ResolveClientHostIdentityImpl(payloadBinDir);
+    ClientHostIdentity out = ResolveClientHostIdentityImpl(payloadBinDir);
+    out.token = LoadOpsToken(payloadBinDir);
+    return out;
+}
+
+std::string NormalizeOpsToken(std::string_view raw) {
+    std::string s;
+    s.reserve(raw.size());
+    for (unsigned char c : raw) {
+        if (c < 0x20 || c == 0x7f) continue;
+        if (c == ' ' || c == '\t') continue;
+        // ASCII 大小写归一，与服务端 tok: 匹配一致。
+        if (c >= 'A' && c <= 'Z') c = static_cast<unsigned char>(c - 'A' + 'a');
+        s.push_back(static_cast<char>(c));
+        if (s.size() >= kOpsTokenMaxChars) break;
+    }
+    return s;
+}
+
+std::string LoadOpsToken(const std::string& payloadBinDir) {
+    if (payloadBinDir.empty()) return {};
+    xcat::IniStore ini{};
+    const std::string path = xcat::UserConfigIniPath(payloadBinDir.c_str());
+    if (!xcat::LoadIniFile(path.c_str(), ini)) return {};
+    std::string value;
+    if (!xcat::IniGetString(ini, "update", "token", value)) return {};
+    return NormalizeOpsToken(value);
+}
+
+bool SaveOpsToken(const std::string& payloadBinDir, std::string_view raw) {
+    if (payloadBinDir.empty()) return false;
+    const std::string normalized = NormalizeOpsToken(raw);
+    const std::string path = xcat::UserConfigIniPath(payloadBinDir.c_str());
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(xcat::Utf8ToWide(path)).parent_path(),
+                                        ec);
+    return xcat::UpdateIniFile(path.c_str(), [&](xcat::IniStore& ini) {
+        xcat::IniSetU32(ini, "meta", "version", static_cast<uint32_t>(xcat::kUserConfigIniVersion));
+        xcat::IniSetU32(ini, "update", "version", 1u);
+        xcat::IniSetU64(ini, "update", "writeTickMs", GetTickCount64());
+        auto eraseKey = [&](const char* section, const char* key) {
+            auto it = ini.find(section);
+            if (it != ini.end()) it->second.erase(key);
+        };
+        if (normalized.empty()) {
+            eraseKey("update", "token");
+        } else {
+            xcat::IniSetString(ini, "update", "token", normalized.c_str());
+        }
+    });
 }
 
 std::string NormalizeUploadNote(std::string_view raw) {

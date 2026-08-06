@@ -42,6 +42,10 @@ int GetSkillId();              // 恒为 0
 bool TryFireNormal(FireResult* out = nullptr);
 bool TryFireMelee(FireResult* out = nullptr);  // 兼容旧名 → TryFireNormal
 
+// 实验直调（仅 attack_rpc TAB / ATTACK_RPC）：Create(50) 手搓 BODY。
+// 多发普攻不得调用——2026-08-04 BIN 证实踢号；多发 NA 只走 OnFuncKey。
+bool TryFireNormalDirect(FireResult* out = nullptr);
+
 // 间隔门控；enabled 时调 TryFireNormal。
 void Tick();
 

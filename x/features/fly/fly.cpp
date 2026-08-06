@@ -1,12 +1,14 @@
 // Classic TWMS — mouse fly.
 // Mode A: LMB edge → hop (fill+Doing).
 // Mode B: armed → hop toward cursor on self-CD (follow).
+// 防漂：Unity Camera/Transform 无游戏哈希 → FindMethodResolved(明文→RVA/kind)；日志 methods hits=4/4。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "fly.h"
 
 #include "../ports/teleport_port.h"
+#include "../ports/action_gate.h"
 #include "../ports/world_port.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/bin_dir.h"
@@ -34,10 +36,10 @@ namespace {
 //（Unity 枚举：Left=0 Right=1 Mono=2）。三参包装在 IDA 内硬编码 eye=2。
 // 正确孪生：ScreenToWorldPoint_…824 @ 0x4DDD5F0。
 // get_position 走包装 @0x4E62790（Injected 桩不转发参数）。
-constexpr uint32_t kRvaCamGetMain = 0x4DDDAC0;         // Camera$$get_main
-constexpr uint32_t kRvaCamScreenToWorld = 0x4DDD5F0;  // Camera$$ScreenToWorldPoint(Vector3) 三参
-constexpr uint32_t kRvaCompGetTransform = 0x4E47D20;  // Component$$get_transform
-constexpr uint32_t kRvaTfGetPos = 0x4E62790;          // Transform$$get_position
+constexpr uint32_t kRvaCamGetMain = 0x4DE8FF0;         // remounted 2026-08-04 Camera.get_main
+constexpr uint32_t kRvaCamScreenToWorld = 0x4DE8B20;  // remounted 2026-08-04 Camera.ScreenToWorldPoint(Vector3)
+constexpr uint32_t kRvaCompGetTransform = 0x4E53250;  // remounted 2026-08-04 Component.get_transform
+constexpr uint32_t kRvaTfGetPos = 0x4E6DCC0;          // remounted 2026-08-04 Transform.get_position
 
 constexpr DWORD kWorkerSleepMs = 1;
 constexpr DWORD kDefaultHopCdMs = 16;
@@ -102,6 +104,7 @@ void ClearFollowTrack() {
 }
 
 // 换图 / 重新进 PlayReady：丢掉旧图落点与屏点门控，并清瞬移自冷，立刻允许首跳。
+// 假到位由 teleport IsPhysicsReady / RelPos 收态挡住；此处不拉长 F6 起飞手感。
 void NoteMapLandGate(DWORD now) {
     const bool play = ports::world::IsPlayReady();
     const int mapId = play ? ports::world::GetMapId() : -1;
@@ -131,35 +134,20 @@ T AtRva(uint32_t rva) {
     return reinterpret_cast<T>(reinterpret_cast<uint8_t*>(gGA) + rva);
 }
 
-MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
-    if (!klass || !name) return nullptr;
-    const auto& e = x::runtime::il2cpp::Get();
-    MethodInfoHead* mi = nullptr;
-    if (e.classGetMethodFromName) {
-        __try {
-            mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            mi = nullptr;
-        }
+// Unity 无游戏侧哈希名：FindMethodResolved = 明文 → RVA/kind（ScreenToWorldPoint 必须 arity=1）。
+MethodInfoHead* ResolveUnityMi(void* klass, uint32_t rva, const char* plain,
+                               const x::runtime::il2cpp_method::MethodShape& shape,
+                               x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
+    if (!klass) return nullptr;
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, nullptr);
+    if (outPath) *outPath = mr.path;
+    if (mr.method && mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
+        x::runtime::LogI("Fly", "ResolveUnityMi kind hit rva=0x%X plain=%s", rva,
+                         plain ? plain : "-");
     }
-    if (mi && mi->methodPointer) return mi;
-    return nullptr;
-}
-
-MethodInfoHead* ResolveUnityMi(void* klass, uint32_t rva, const char* plain, int arity,
-                               const x::runtime::il2cpp_method::MethodShape& shape) {
-    // Unity：RVA 优先（get_position 包装 vs Injected 同名同 arity）；名/kind 作 remount 兜底。
-    if (klass) {
-        const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-        if (mr.method) {
-            if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-                x::runtime::LogI("Fly", "ResolveMi kind hit rva=0x%X plain=%s", rva, plain);
-            }
-            return reinterpret_cast<MethodInfoHead*>(mr.method);
-        }
-    }
-    if (MethodInfoHead* mi = FindMethodByName(klass, plain, arity)) return mi;
-    return nullptr;
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
 }
 
 template <typename Fn>
@@ -174,29 +162,32 @@ bool BindCameraApis() {
     if (!gGA) return false;
 
     // Unity 明文名稳定；ScreenToWorldPoint 必须 arity=1（三参包装），避开四参眼位重载。
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::ResolvePath;
+    using x::runtime::il2cpp_method::TypeKind;
+    ResolvePath pMain{}, pStw{}, pTf{}, pPos{};
     if (x::runtime::il2cpp::Ensure()) {
-        using x::runtime::il2cpp_method::MethodShape;
-        using x::runtime::il2cpp_method::TypeKind;
         void* camKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Camera");
         void* compKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Component");
         void* tfKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Transform");
         if (camKlass) {
             constexpr MethodShape kMain{0, TypeKind::Ptr, true, true, {}};
             if (!gMiCamMain)
-                gMiCamMain = ResolveUnityMi(camKlass, kRvaCamGetMain, "get_main", 0, kMain);
+                gMiCamMain =
+                    ResolveUnityMi(camKlass, kRvaCamGetMain, "get_main", kMain, &pMain);
             constexpr MethodShape kStw{1, TypeKind::Any, true, true, {TypeKind::Any}};
             if (!gMiScreenToWorld)
                 gMiScreenToWorld = ResolveUnityMi(camKlass, kRvaCamScreenToWorld,
-                                                  "ScreenToWorldPoint", 1, kStw);
+                                                  "ScreenToWorldPoint", kStw, &pStw);
         }
         if (compKlass && !gMiCompTf) {
             constexpr MethodShape kTf{0, TypeKind::Ptr, true, true, {}};
             gMiCompTf =
-                ResolveUnityMi(compKlass, kRvaCompGetTransform, "get_transform", 0, kTf);
+                ResolveUnityMi(compKlass, kRvaCompGetTransform, "get_transform", kTf, &pTf);
         }
         if (tfKlass && !gMiGetPos) {
             constexpr MethodShape kPos{0, TypeKind::Any, true, true, {}};
-            gMiGetPos = ResolveUnityMi(tfKlass, kRvaTfGetPos, "get_position", 0, kPos);
+            gMiGetPos = ResolveUnityMi(tfKlass, kRvaTfGetPos, "get_position", kPos, &pPos);
         }
     }
 
@@ -205,6 +196,34 @@ bool BindCameraApis() {
     gCompTf = FnFromMi<FnCompTf>(gMiCompTf, kRvaCompGetTransform);
     gGetPos = FnFromMi<FnGetPos>(gMiGetPos, kRvaTfGetPos);
     gCamBound = gCamMain && gScreenToWorld && gCompTf && gGetPos;
+
+    static bool sMethodHitsLogged = false;
+    if (!sMethodHitsLogged && (gMiCamMain || gMiScreenToWorld || gMiCompTf || gMiGetPos)) {
+        sMethodHitsLogged = true;
+        // 已缓存的 MI 不会再解析 → 用「本次 path」+「已有 MI」合并计分。
+        const ResolvePath paths[4] = {pMain, pStw, pTf, pPos};
+        const MethodInfoHead* mis[4] = {gMiCamMain, gMiScreenToWorld, gMiCompTf, gMiGetPos};
+        int hits = 0;
+        int plain = 0, rva = 0, kind = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (!mis[i]) continue;
+            ++hits;
+            if (paths[i] == ResolvePath::Plain) ++plain;
+            else if (paths[i] == ResolvePath::Rva) ++rva;
+            else if (paths[i] == ResolvePath::Kind) ++kind;
+            else if (paths[i] == ResolvePath::Miss) {
+                // 复用旧 MI：视为已命中，路径未知 → 计 plain 侧（Unity 主路径）
+                ++plain;
+            }
+        }
+        const char* pathLabel = "fallback";
+        if (hits == 4 && plain == 4) pathLabel = "plain";
+        else if (hits == 4 && rva == 4) pathLabel = "rva";
+        else if (hits) pathLabel = "meta-partial";
+        x::runtime::LogI("Fly", "methods path=%s hits=%d/4 plain=%d rva=%d kind=%d", pathLabel,
+                         hits, plain, rva, kind);
+    }
+
     if (!gCamBound) {
         x::runtime::LogW("Fly", "camera bind fail main=%p stw=%p tf=%p pos=%p", gCamMain,
                          gScreenToWorld, gCompTf, gGetPos);
@@ -429,14 +448,14 @@ void PollF6() {
         gLmbWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         const unsigned mode = gMode.load(std::memory_order_acquire);
         x::runtime::LogI("Fly", "F6 %s mode=%u(%s)", next ? "ARMED" : "OFF", mode, ModeName(mode));
-        Beep(next ? 880 : 440, 80);
     }
     gF6WasDown = down;
 }
 
 void PollLmbHop() {
     if (!gArmed.load(std::memory_order_acquire) ||
-        gExternalPause.load(std::memory_order_acquire)) {
+        gExternalPause.load(std::memory_order_acquire) ||
+        x::features::ports::action_gate::IsSkillCastBusy()) {
         gLmbWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         return;
     }
@@ -470,6 +489,7 @@ void PollLmbHop() {
 void PollFollowMouse() {
     if (!gArmed.load(std::memory_order_acquire)) return;
     if (gExternalPause.load(std::memory_order_acquire)) return;
+    if (x::features::ports::action_gate::IsSkillCastBusy()) return;
     if (!GameWindowFocused()) return;
     if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) return;
     if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) return;

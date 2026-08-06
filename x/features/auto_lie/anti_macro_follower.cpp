@@ -43,8 +43,13 @@ void Log(const char* fmt, ...) {
     x::runtime::LogI("AutoLieMouse", "%s", buf);
 }
 
-void ApplyWorldPause(bool on) {
-    x::features::simple_combat::SetExternalPause(on);
+// AutoLie 硬闸唯一写口：quiz / following / UI 任一成立即置位，避免 Abort 误清。
+void RefreshAutoLieHardPause() {
+    const bool on =
+        gQuizPaused.load(std::memory_order_acquire) || gFollowing.load(std::memory_order_acquire) ||
+        gUiVisible.load(std::memory_order_acquire);
+    x::features::simple_combat::SetHardPause(x::features::simple_combat::HardPauseHolder::AutoLie,
+                                             on);
 }
 
 void ReleaseCursor() {
@@ -76,6 +81,7 @@ void Abort(const char* reason) {
     gFollowing.store(false);
     gFocusLost.store(false);
     ClearPlan();
+    RefreshAutoLieHardPause();
 }
 
 bool MoveToScreen(const POINT& pt) {
@@ -136,21 +142,21 @@ void SetEnabled(bool enabled) {
     gEnabled.store(enabled);
     if (!enabled) {
         Abort("disabled");
-        if (!gQuizPaused.load()) ApplyWorldPause(false);
+        // Abort 已 Refresh；quiz 仍持有则硬闸保留
     }
 }
 
 void SetQuizWorldPaused(bool paused) {
-    gQuizPaused.store(paused);
-    ApplyWorldPause(paused || gFollowing.load() || gUiVisible.load());
+    gQuizPaused.store(paused, std::memory_order_release);
+    RefreshAutoLieHardPause();
 }
 
 void Stop() { Abort("stop"); }
 
 void Shutdown() {
+    gQuizPaused.store(false, std::memory_order_release);
+    gUiVisible.store(false, std::memory_order_release);
     Abort("shutdown");
-    ApplyWorldPause(false);
-    gQuizPaused.store(false);
 }
 
 bool IsFollowing() { return gFollowing.load(); }
@@ -160,24 +166,31 @@ void Tick(DWORD now) {
     if (!gEnabled.load()) {
         gUiVisible.store(false);
         if (gFollowing.load() || gClipActive) Abort("disabled-tick");
+        else RefreshAutoLieHardPause();
         return;
     }
-    if (!anti_macro_port::Ensure()) return;
+    if (!anti_macro_port::Ensure()) {
+        // 解析瞬败：不改 flags，按上次 quiz|following|ui 重钉，防漏闸。
+        RefreshAutoLieHardPause();
+        return;
+    }
 
     const bool open = anti_macro_port::IsNonFiniteOpen();
     gUiVisible.store(open);
     if (!open) {
         if (gFollowing.load() || gClipActive || gPlanInstance) {
             Abort("ui-closed");
-            if (!gQuizPaused.load()) ApplyWorldPause(false);
+        } else {
+            RefreshAutoLieHardPause();
         }
         return;
     }
 
+    // UI 已开：先按 ui 置硬闸，再取实例（inst 空也不漏拍）。
+    RefreshAutoLieHardPause();
+
     void* inst = anti_macro_port::GetNonFinite();
     if (!inst) return;
-
-    ApplyWorldPause(true);
 
     if (!anti_macro_port::IsGameForeground()) {
         // 失焦：释放 ClipCursor，保留计划，回前台后继续（勿整段 Abort 丢计划）
@@ -187,6 +200,7 @@ void Tick(DWORD now) {
         }
         ReleaseCursor();
         gFollowing.store(false);
+        RefreshAutoLieHardPause();
         return;
     }
     if (gFocusLost.exchange(false)) Log("focus restored");
@@ -209,6 +223,7 @@ void Tick(DWORD now) {
 
     if (!gFollowing.load()) {
         gFollowing.store(true);
+        RefreshAutoLieHardPause();
         Log("follow start frame=%d plan=%zu samples=%d", frame, gScreenPlan.size(), samples);
     }
 

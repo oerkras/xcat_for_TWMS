@@ -9,6 +9,8 @@ inline constexpr DWORD kHpCooldownMs = 250;
 inline constexpr DWORD kMpCooldownMs = 250;
 inline constexpr DWORD kPotEffectDelayMs = 450;
 inline constexpr DWORD kEmptyPotBackoffMs = 8000;
+// 未绑 / soft 拒 / 包内无药：短退避，避免每 100ms 打主线程 FKM+扫栏。
+inline constexpr DWORD kBindMissBackoffMs = 3000;
 inline constexpr int kFailStreakLimit = 3;
 inline constexpr DWORD kHealStuckBackoffMs = 15000;
 inline constexpr int kHpThresholdPct = 50;

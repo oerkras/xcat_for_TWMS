@@ -1,6 +1,7 @@
 #pragma once
-// Classic TWMS — method kind resolve (arity + return + optional param types). NOT .text scan.
-// RVA fast path; on miss / failed kind check, unique MethodShape match within klass(+parents).
+// Classic TWMS — method resolve SSOT（防漂）。
+// 顺序：hash 名 → 明文名 → RVA(+kind 校验) → kind 唯一匹配；RVA 仅 fallback。
+// NOT .text scan.
 
 #include <cstdint>
 
@@ -29,7 +30,13 @@ struct MethodShape {
     void* paramKlass[4]{};
 };
 
-enum class ResolvePath : uint8_t { Miss = 0, Rva = 1, Kind = 2 };
+enum class ResolvePath : uint8_t {
+    Miss = 0,
+    Rva = 1,
+    Kind = 2,
+    Hash = 3,
+    Plain = 4,
+};
 
 struct ResolveResult {
     void* method = nullptr;  // MethodInfo*
@@ -42,9 +49,16 @@ void* FindMethodByRva(void* klass, uint32_t rva, bool walkParents = true);
 // Unique arity+return(+param) match (optional).
 void* FindMethodByKind(void* klass, const MethodShape& shape);
 
+// Name / hash：classGetMethodFromName，失败再扫 methods（可 walkParents）。
+void* FindMethodByName(void* klass, const char* name, int arity, bool walkParents = true);
+
 // RVA first; if found and kind matches (or exports missing), keep.
 // Else kind fallback when unique.
 ResolveResult FindMethodCached(void* klass, uint32_t rva, const MethodShape& shape);
+
+// 完整防漂：hash → plain → FindMethodCached(rva/kind)。
+ResolveResult FindMethodResolved(void* klass, uint32_t rvaFallback, const MethodShape& shape,
+                                 const char* plainName, const char* hashName);
 
 const char* PathName(ResolvePath p);
 

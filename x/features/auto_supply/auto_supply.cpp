@@ -77,6 +77,8 @@ int gCloseShopAttempts = 0;
 DWORD gScrollAttemptAt = 0;
 int gScrollTries = 0;
 bool gTriedScroll = false;
+bool gScrollPendingLand = false;  // 已成功用卷，等换图后再结束用卷阶段
+char gScrollMapAtUse[64]{};       // 用卷时地图；换图后视为落地
 bool gPreferDirect = false;
 bool gPausedCombat = false;
 bool gPausedFly = false;
@@ -236,7 +238,7 @@ void Enter(Phase p, const char* msg) {
 }
 
 void PauseSystems() {
-    simple_combat::SetExternalPause(true);
+    simple_combat::SetHardPause(simple_combat::HardPauseHolder::AutoSupply, true);
     gPausedCombat = true;
     fly::SetExternalPause(true);
     gPausedFly = true;
@@ -244,7 +246,7 @@ void PauseSystems() {
 
 void ResumeSystems() {
     if (gPausedCombat) {
-        simple_combat::SetExternalPause(false);
+        simple_combat::SetHardPause(simple_combat::HardPauseHolder::AutoSupply, false);
         gPausedCombat = false;
     }
     if (gPausedFly) {
@@ -299,7 +301,7 @@ void FailTrip(const char* why) {
 // 对照枫星 TownGotoWait：只对硬失败收尾；AlreadyThere 是陈旧终态/同图提示，不能当行程失败。
 bool TravelFailIsHard(travel::FailKind k) {
     return k == travel::FailKind::Unreachable || k == travel::FailKind::FakeFireStop ||
-           k == travel::FailKind::BadTarget;
+           k == travel::FailKind::BadTarget || k == travel::FailKind::FireStuck;
 }
 
 bool EquipTriggerMet(int& used, int& cap) {
@@ -327,6 +329,64 @@ bool MapMatchesTarget(const char* target) {
     return false;
 }
 
+bool FillCurrentMapName(char* out, size_t outSz) {
+    if (!out || outSz < 2) return false;
+    out[0] = 0;
+    const int id = ports::travel::CurrentMapId();
+    if (id > 0) {
+        snprintf(out, outSz, "%d", id);
+        return true;
+    }
+    const std::string key = ports::travel::CurrentMapKey();
+    if (!key.empty()) {
+        strncpy_s(out, outSz, key.c_str(), _TRUNCATE);
+        return true;
+    }
+    return false;
+}
+
+bool ResolveShopTarget(char* msg, size_t msgSz);
+
+// 回城卷落地后：若 cur→店 比 farm→店 更远（或不可达），就地重寻店；本趟不再用卷。
+void ReplanAfterScrollLand(const char* curMap) {
+    gTriedScroll = true;
+    gScrollPendingLand = false;
+    gPreferDirect = true;
+    if (!curMap || !curMap[0] || !gShopMap[0]) return;
+
+    const int hopsCur = travel::PathHopCount(curMap, gShopMap);
+    const int hopsFarm =
+        gLastFarmMap[0] ? travel::PathHopCount(gLastFarmMap, gShopMap) : -1;
+    runtime::LogI("AutoSupply", "scroll land cur=%s shop=%s cur→shop=%d farm→shop=%d", curMap,
+                  gShopMap, hopsCur, hopsFarm);
+
+    // 已到店图：上层 Tick 会进 OpeningShop
+    if (MapMatchesTarget(gShopMap)) return;
+
+    const bool worseThanFarm =
+        hopsCur < 0 || (hopsFarm >= 0 && hopsCur > hopsFarm);
+    if (!worseThanFarm) return;
+    if (gCfg.shopMapName[0]) {
+        runtime::LogW("AutoSupply", "scroll land worse but shopMap locked=%s → direct walk",
+                      gShopMap);
+        return;
+    }
+
+    char oldShop[64]{};
+    strncpy_s(oldShop, gShopMap, _TRUNCATE);
+    char msg[96]{};
+    if (!ResolveShopTarget(msg, sizeof(msg)) || !gShopMap[0]) {
+        strncpy_s(gShopMap, oldShop, _TRUNCATE);
+        runtime::LogW("AutoSupply", "scroll land replan fail, keep shop=%s", gShopMap);
+        return;
+    }
+    if (_stricmp(oldShop, gShopMap) != 0) {
+        runtime::LogW("AutoSupply", "scroll land replan %s → %s (%s)", oldShop, gShopMap,
+                      msg[0] ? msg : "");
+        Publish(notify::NotificationKind::Info, "auto-supply-replan", "回城后改就近店", gShopMap);
+    }
+}
+
 void RememberFarmMapInternal(bool allowTownOverwrite) {
     const int id = ports::travel::CurrentMapId();
     char buf[64]{};
@@ -345,12 +405,8 @@ void RememberFarmMapInternal(bool allowTownOverwrite) {
 }
 
 bool PredictTownOutdoor(const char* farmMap, char* out, size_t outSz) {
-    if (!farmMap || !farmMap[0] || !out || outSz < 10) return false;
-    const int id = atoi(farmMap);
-    if (id < 100000000) return false;
-    const int town = (id / 1000000) * 1000000;
-    snprintf(out, outSz, "%d", town);
-    return true;
+    // 经典版回家卷=最近主城：委托学习图 hop（勿用前缀截断冒充）。
+    return travel::PredictReturnScrollTownOutdoor(farmMap, out, outSz);
 }
 
 bool ShouldPreferDirectShop(const char* farmMap, const char* shopMap) {
@@ -360,9 +416,12 @@ bool ShouldPreferDirectShop(const char* farmMap, const char* shopMap) {
     if (!PredictTownOutdoor(farmMap, town, sizeof(town))) return false;
     const int hopsFarmShop = travel::PathHopCount(farmMap, shopMap);
     const int hopsTownShop = travel::PathHopCount(town, shopMap);
-    if (hopsFarmShop < 0 || hopsTownShop < 0) return false;
-    runtime::LogI("AutoSupply", "scroll-vs-direct farm→shop=%d town→shop=%d → %s", hopsFarmShop,
-                  hopsTownShop, hopsFarmShop < hopsTownShop ? "direct" : "scroll");
+    if (hopsFarmShop < 0) return false;  // 直达不可达 → 仍尝试回城卷
+    if (hopsTownShop < 0) return false;  // 估价不全 → 保守用卷
+    runtime::LogI("AutoSupply",
+                  "scroll-vs-direct farm=%s shop=%s town=%s farm→shop=%d town→shop=%d → %s",
+                  farmMap, shopMap, town, hopsFarmShop, hopsTownShop,
+                  hopsFarmShop < hopsTownShop ? "direct" : "scroll");
     return hopsFarmShop < hopsTownShop;
 }
 
@@ -392,6 +451,42 @@ bool ResolveShopTarget(char* msg, size_t msgSz) {
 int ParseItemCode(const char* code) {
     if (!code || !code[0]) return 0;
     return atoi(code);
+}
+
+// 回家卷軸：主码 2030000 + 同名备用 2030059（离线 item_catalog）。
+bool TryUseReturnScroll(consumable::FindResult& outFr, int& outUsedId) {
+    outFr = {};
+    outUsedId = 0;
+    const char* codes[] = {
+        xcat::kAutoSupplyDefaultReturnScrollCode,
+        xcat::kAutoSupplyAltReturnScrollCode,
+    };
+    bool anyValid = false;
+    for (const char* code : codes) {
+        const int id = ParseItemCode(code);
+        if (id <= 0) {
+            runtime::LogW("AutoSupply", "用回城卷 bad_code raw=%s", code ? code : "(null)");
+            continue;
+        }
+        anyValid = true;
+        consumable::FindResult fr{};
+        if (consumable::FindAndUseByItemId(id, fr)) {
+            outFr = fr;
+            outUsedId = id;
+            runtime::LogI("AutoSupply", "用回城卷 ok id=%d pos=%d qty=%d", id, fr.pos, fr.qty);
+            return true;
+        }
+        // FindAndUseByItemId 已打 not_found / use_fail / list_miss；这里补 AutoSupply 层摘要
+        runtime::LogW("AutoSupply", "用回城卷 fail id=%d → try next", id);
+    }
+    if (!anyValid) {
+        runtime::LogW("AutoSupply", "用回城卷 fail bad_code (no valid id)");
+    } else {
+        runtime::LogW("AutoSupply", "用回城卷 fail tried=%s,%s → walk",
+                      xcat::kAutoSupplyDefaultReturnScrollCode,
+                      xcat::kAutoSupplyAltReturnScrollCode);
+    }
+    return false;
 }
 
 int CountConsume(int itemId) {
@@ -673,6 +768,8 @@ void TickPause(DWORD now) {
     gTriedScroll = false;
     gScrollTries = 0;
     gScrollAttemptAt = 0;
+    gScrollPendingLand = false;
+    gScrollMapAtUse[0] = 0;
     gPreferDirect = ShouldPreferDirectShop(gLastFarmMap, gShopMap);
     if (MapMatchesTarget(gShopMap)) {
         // 已在店图：冷却主要用于停战斗瞬移；对话不依赖 Doing
@@ -704,25 +801,62 @@ void TickGoingTown(DWORD now) {
 
     if (!TripTravelReady(now)) return;
 
-    if (!gPreferDirect) {
-        if (!gTriedScroll && gScrollTries < kMaxScrollTries && !travel::IsActive()) {
-            if (!gScrollAttemptAt || now - gScrollAttemptAt >= kScrollWaitMs) {
-                const int scrollId = ParseItemCode(xcat::kAutoSupplyDefaultReturnScrollCode);
-                consumable::FindResult fr{};
-                if (scrollId > 0 && consumable::FindAndUseByItemId(scrollId, fr)) {
-                    gScrollAttemptAt = now;
-                    ++gScrollTries;
-                    SetMsg("已用回城卷…");
-                    return;
+    if (!gPreferDirect && !gTriedScroll) {
+        // 已成功用卷：等离开用卷前地图（或离开挂机图），落地后结束用卷并重估店。
+        if (gScrollPendingLand) {
+            char cur[64]{};
+            const bool haveCur = FillCurrentMapName(cur, sizeof(cur));
+            const bool leftUseMap =
+                haveCur && gScrollMapAtUse[0] && _stricmp(cur, gScrollMapAtUse) != 0;
+            // BIN 122ea3：用卷返回时 CurrentMap 已是落点，若误记 atUse=落点则 leftUseMap
+            // 恒假；用「已离开挂机图」兜底，才能触发 replan、避免再耗一张卷。
+            const bool leftFarm =
+                haveCur && gLastFarmMap[0] && _stricmp(cur, gLastFarmMap) != 0;
+            if (leftUseMap || leftFarm) {
+                runtime::LogI("AutoSupply", "scroll landed atUse=%s farm=%s cur=%s",
+                              gScrollMapAtUse[0] ? gScrollMapAtUse : "-",
+                              gLastFarmMap[0] ? gLastFarmMap : "-", cur);
+                ReplanAfterScrollLand(cur);
+            } else if (now - gScrollAttemptAt >= kScrollWaitMs) {
+                // 仍停在用卷前/挂机图：这次用卷未生效。
+                runtime::LogW("AutoSupply", "scroll no map change after %ums tries=%d/%d cur=%s",
+                              (unsigned)kScrollWaitMs, gScrollTries, kMaxScrollTries,
+                              haveCur ? cur : "?");
+                gScrollPendingLand = false;
+                gScrollMapAtUse[0] = 0;
+                if (gScrollTries >= kMaxScrollTries) {
+                    gTriedScroll = true;
+                    gPreferDirect = true;
                 }
-                gTriedScroll = true;
             } else {
+                SetMsg("已用回城卷，等待换图…");
                 return;
             }
-        } else if (gScrollAttemptAt && now - gScrollAttemptAt < kScrollWaitMs) {
-            return;
-        } else {
+        }
+
+        if (!gTriedScroll && !gScrollPendingLand && !travel::IsActive()) {
+            // 必须在发包前记下地图：BIN 122ea3 里 ok 日志前 Fly 已到 102000000。
+            char before[64]{};
+            FillCurrentMapName(before, sizeof(before));
+            consumable::FindResult fr{};
+            int usedId = 0;
+            if (TryUseReturnScroll(fr, usedId)) {
+                gScrollAttemptAt = now;
+                ++gScrollTries;
+                gScrollPendingLand = true;
+                strncpy_s(gScrollMapAtUse, before, _TRUNCATE);
+                char cur[64]{};
+                if (FillCurrentMapName(cur, sizeof(cur)) && before[0] &&
+                    _stricmp(cur, before) != 0) {
+                    runtime::LogI("AutoSupply", "scroll landed immediate %s → %s", before, cur);
+                    ReplanAfterScrollLand(cur);
+                } else {
+                    SetMsg("已用回城卷…");
+                }
+                return;
+            }
             gTriedScroll = true;
+            gPreferDirect = true;
         }
     } else {
         gTriedScroll = true;
@@ -858,12 +992,27 @@ void TickBuyingReal(DWORD now) {
 
     if (gBuyStep == BuyStep::Charge) {
         gLastBuyAttempt = now;
-        if (gCfg.rechargeStarsEnabled) {
-            int charged = 0, skipMeso = 0, skipOther = 0;
-            std::string err;
-            (void)shop::RechargeShurikensInOpenShop(charged, skipMeso, skipOther, err);
-            SetMsg(err == "NOT_IMPL" ? "飞镖充值未实现，跳过" : "飞镖充值处理完毕");
+        if (!gCfg.rechargeStarsEnabled) {
+            gBuyStep = BuyStep::PlanRefills;
+            return;
         }
+        int charged = 0, skipMeso = 0, skipOther = 0;
+        std::string err;
+        (void)shop::RechargeShurikensInOpenShop(charged, skipMeso, skipOther, err);
+        if (err == "SHOP_BUSY" || err == "LIST_STALE") {
+            SetMsg("飞镖充值等待店务…");
+            return;
+        }
+        if (charged > 0) {
+            SetMsg("飞镖充值已发包，继续…");
+            return;  // 下一拍再扫：忙清后充下一格 / 确认已满
+        }
+        if (skipMeso > 0)
+            SetMsg("飞镖充值金币不足，跳过");
+        else if (err == "NO_SHOP" || err == "UNBOUND" || err == "NO_RPC" || err == "MAIN_TIMEOUT")
+            SetMsg("飞镖充值失败，跳过");
+        else
+            SetMsg("飞镖充值处理完毕");
         gBuyStep = BuyStep::PlanRefills;
         return;
     }
@@ -1063,6 +1212,8 @@ void TickManualCmds() {
 }
 
 // 对照枫星：注入瞬间对齐磁盘 manualSeq，只忽略「加载前已存在」的旧命令。
+// 注意：绝不能在「用户已经点过按钮之后」的首次 HotRead 里用当前磁盘 seq 做 bootstrap，
+// 否则会把第一下写成的 seq 当成旧命令吞掉（BIN：第一次点「立即一趟」无效）。
 void BootstrapManualSeq(uint32_t seqOnDisk, const char* via) {
     if (gManualSeqBootstrapped) return;
     gManualSeqBootstrapped = true;
@@ -1100,8 +1251,9 @@ void HotReadConfig() {
     gDesired.store(on, std::memory_order_release);
     gEquipTrigger = gCfg.sellFreeSlotsAtOrBelow;
 
-    // Init 若读配置失败会落到这里：只吞「此刻已在磁盘」的旧 seq
-    if (!gManualSeqBootstrapped) BootstrapManualSeq(gCfg.manualSeq, "reload");
+    // Init 已保证 bootstrapped。若仍未就绪：只能按 0 对齐，禁止用「当前磁盘 seq」收养，
+    // 否则会把用户第一下刚写入的 manualTrip 当成 pre-inject 旧命令吞掉。
+    if (!gManualSeqBootstrapped) BootstrapManualSeq(0, "reload-guard");
 
     if (gCfg.manualSeq != gHandledManualSeq) {
         gHandledManualSeq = gCfg.manualSeq;
@@ -1194,6 +1346,10 @@ void Init() {
             const bool on = (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0);
             gDesired.store(on, std::memory_order_release);
             BootstrapManualSeq(boot.manualSeq, "init");
+        } else {
+            // 尚无 [auto_supply] 时也必须先对齐：否则首次 HotRead 会用用户第一下的 seq 做
+            // bootstrap，把「立即回城卖装一趟」吞成无效。
+            BootstrapManualSeq(0, "init-empty");
         }
     }
     SyncStatus();

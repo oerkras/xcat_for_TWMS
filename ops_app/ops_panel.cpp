@@ -393,6 +393,15 @@ bool StartTwmsLocked(OpsState& st, std::string& err) {
     const std::wstring logPath = OpsLogTwms(st.repoRoot);
     RotateLogIfHuge(logPath);
 
+    // 对齐对照仓（枫星）：启动前放行入站端口，避免防火墙开档后外网摸不到。
+    {
+        const std::wstring fwScript = JoinPath(st.repoRoot, L"publish_site\\ensure-firewall.ps1");
+        if (GetFileAttributesW(fwScript.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            std::string fwErr;
+            RunPowerShellFile(fwScript, L"", st.repoRoot, 20000, fwErr);
+        }
+    }
+
     const std::wstring args =
         L"scripts\\twms-update-server.mjs "
         L"--host 0.0.0.0 --port 18789 --base-path /twms "
@@ -438,6 +447,18 @@ bool StartPublishOnly(OpsState& st, std::string& err) {
     const std::wstring stopScript = JoinPath(st.repoRoot, L"publish_site\\stop-server.ps1");
     if (GetFileAttributesW(stopScript.c_str()) != INVALID_FILE_ATTRIBUTES) {
         RunPowerShellFile(stopScript, L"", st.repoRoot, 15000, err);
+    }
+    if (st.shuttingDown.load()) {
+        err = "正在退出";
+        return false;
+    }
+
+    {
+        const std::wstring fwScript = JoinPath(st.repoRoot, L"publish_site\\ensure-firewall.ps1");
+        if (GetFileAttributesW(fwScript.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            std::string fwErr;
+            RunPowerShellFile(fwScript, L"", st.repoRoot, 20000, fwErr);
+        }
     }
     if (st.shuttingDown.load()) {
         err = "正在退出";

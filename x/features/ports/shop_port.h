@@ -1,10 +1,12 @@
 #pragma once
-// Classic TWMS shop_port — NPC 商店就绪 / 扫背包 / UI 买卖。
-// 对照枫星 shop_port 语义；实现为 Il2Cpp（非 Lua）。
-// 卖出：UIShopDialog.SendSellRequestPacket @0x54B700（2026-08-03；旧 0x54C080）
+// Classic TWMS shop_port — UIShopDialog ready + TalkToNpc + UI 买卖 / 飞镖充值。
+// 字段防漂移：hash / 明文 → field_get_offset；dump 常量仅 fallback（见 EnsureShopFieldOffsets）。
+// 卖出：UIShopDialog.SendSellRequestPacket @0x54DC40（2026-08-04）
 //   Create(67)+Encode1(1)+Encode2(pos)+Encode4(itemId)+Encode2(qty)
-// 买入：UIShopDialog.SendBuyRequestPacket @0x54AAE0（2026-08-03；旧 0x54B4E0）
+// 买入：UIShopDialog.SendBuyRequestPacket @0x54CFF0（2026-08-04）
 //   Create(67)+Encode1(0)+Encode2(buyIdx)+Encode4(itemId)+Encode2(qty)
+// 飞镖：UIShopDialog.SendRechargeRequestPacket @0x54E1B0（2026-08-04）
+//   Create(67)+Encode1(2)+Encode2(pos)；选中卖栏 _sellSelectedIndex
 // 禁止 Session.Send 旁路 HashSet（会本地踢线）。
 
 #include <string>
@@ -62,7 +64,7 @@ bool QueryItemPresent(int invType, int itemId, bool& outPresent, int& outCount);
 // 背包占用：used=非空槽数，cap=List._size（含空槽；实机作容量候选）。
 bool QueryBagUsage(bool equipBag, int& outUsed, int& outCap);
 
-// CharacterStat.Money 为 long；失败返回 -1。
+// CharacterStat.Money / 背包 ItemSlots：SSOT = x::ui::player（hash→field_get_offset）。
 int64_t QueryMeso();
 
 // 离线商店种子（dataservice/grocery_shop_npc.tsv）+ travel hops 就近开店。
@@ -75,8 +77,9 @@ bool ResolveShopNpcForSupply(const char* preferredItemCode, std::string& outNpcI
                               std::string& outShopId, std::string& outMapName, int& outMapId,
                               const char* excludeMapName = nullptr);
 
-// 飞镖 Charge：经典版 UIShopDialog 充值入口尚未钉死（CF 平坦化）；调用返回 true 且
-// outCharged=0、outErr 含 NOT_IMPL，行程可跳过继续补货。
+// 飞镖 Charge：开店后扫消耗栏卖栏投影，对 207xxxx 且 Quantity<MaxSlotCount、UintPrice>0
+// 的飞镖写卖栏选中并调 SendRechargeRequestPacket。每次最多充 1 格；SHOP_BUSY/LIST_STALE
+// 时 outErr 对应码、调用方应重试；无候选时 outCharged=0 且返回 true。
 bool RechargeShurikensInOpenShop(int& outCharged, int& outSkippedNoMeso, int& outSkippedOther,
                                  std::string& outErr);
 

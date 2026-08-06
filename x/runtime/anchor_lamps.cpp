@@ -16,6 +16,13 @@ namespace {
 
 constexpr size_t kSlots = xcat::kAnchorLampMax;
 
+// 固定展示顺序：shape → 泵 → feature。Publish 时一律预挂灰灯，避免「未 Set 就不出现」。
+const char* const kOrder[] = {"WM",         "UL",         "NM",         "FAC",
+                              "SA",         "Pump",       "FlyCam",     "TravelSend",
+                              "TravelPos",  "ShopUnity",  "AttackFK",   "ChanHop",
+                              "DropAlert",  "InputOnKey", "WorldMap",   "Consumable",
+                              "Teleport",   "PetAct",     "PetRect",    "DropFields"};
+
 struct Slot {
     char id[xcat::kAnchorLampIdLen]{};
     char detail[xcat::kAnchorLampDetailLen]{};
@@ -57,6 +64,16 @@ void SetLocked(const char* id, AnchorLampCode code, const char* detail) {
     CopyTrunc(s->detail, sizeof(s->detail), detail ? detail : "");
 }
 
+void EnsureRosterLocked() {
+    for (const char* id : kOrder) {
+        Slot* s = FindOrAlloc(id);
+        // 仅给新槽写 pending；已 Set 的绿/黄/红/明细不动。
+        if (s && s->code == AnchorLampCode::Unknown && !s->detail[0]) {
+            CopyTrunc(s->detail, sizeof(s->detail), "pending");
+        }
+    }
+}
+
 AnchorLampCode PathToCode(x::runtime::il2cpp_shape::ResolvePath p) {
     using RP = x::runtime::il2cpp_shape::ResolvePath;
     switch (p) {
@@ -96,12 +113,9 @@ void Publish(const char* binDir) {
     xcat::AnchorLampsSetDefaults(st);
     {
         std::lock_guard<std::mutex> lock(gMu);
+        // 先占位整表灰灯，再采样/合并 feature Set —— 未绑定也能在 ImGui 看见名字。
+        EnsureRosterLocked();
         SampleCoreLocked();
-        // 固定展示顺序：shape → 泵 → feature（其余按登记序）
-        static const char* kOrder[] = {"WM",         "UL",         "NM",         "FAC",
-                                       "SA",         "Pump",       "FlyCam",     "TravelSend",
-                                       "ShopUnity",  "AttackFK",   "ChanHop",    "DropAlert",
-                                       "InputOnKey", "WorldMap"};
         for (const char* id : kOrder) {
             for (size_t i = 0; i < kSlots && st.count < xcat::kAnchorLampMax; ++i) {
                 if (!gSlots[i].used || _stricmp(gSlots[i].id, id) != 0) continue;

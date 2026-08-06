@@ -8,7 +8,7 @@ namespace xcat {
 // 经典版宠物吸物：user.ini [pet_loot]。对照枫星 autopickup.fullMapEnabled 语义。
 // 正式吸物只走宠扩盒（Pet.TryPickUpDrop → ByPet → Pet.Send）。角色全图假位姿已移除。
 constexpr uint32_t kPetLootMagic = 0x5843504Cu;  // 'XCPL'
-constexpr uint32_t kPetLootVersion = 1u;
+constexpr uint32_t kPetLootVersion = 2u;  // v2：+charVac（人物直吸）
 constexpr int kPetLootMaxSkipRules = 64;
 constexpr int kPetLootNameKeyLen = 64;
 
@@ -21,10 +21,12 @@ constexpr uint32_t kPetLootFilterCash = 1u << 5;
 constexpr uint32_t kPetLootFilterDefault =
     kPetLootFilterMeso | kPetLootFilterEquip | kPetLootFilterConsume | kPetLootFilterEtc;
 
+// 默认调度 200ms × 1（可改；打怪同开时勿长期压到 50 / 高 burst）
 constexpr uint32_t kPetLootIntervalDefaultMs = 200u;
+constexpr uint32_t kPetLootCharVacIntervalMs = kPetLootIntervalDefaultMs;  // 语义别名
 constexpr uint32_t kPetLootIntervalMinMs = 50u;
 constexpr uint32_t kPetLootIntervalMaxMs = 2000u;
-// 每 Tick 连调 TryPickUpDrop 次数（ByPet 同拍多物常被 Send 盖戳挡，连调可加吞吐）
+// 每 Tick 连调官方吸物次数（1–5）
 constexpr uint32_t kPetLootBurstDefault = 1u;
 constexpr uint32_t kPetLootBurstMin = 1u;
 constexpr uint32_t kPetLootBurstMax = 5u;
@@ -34,9 +36,14 @@ constexpr float kPetLootVacuumHDefault = 200.f;
 constexpr float kPetLootMapVacuumW = 3200.f;
 constexpr float kPetLootMapVacuumH = 2400.f;
 constexpr float kPetLootVacuumMax = 4000.f;
-// 角色脚边拾取范围（半宽/半高，世界单位）
+// 角色脚边拾取范围（半宽/半高，世界单位）；全盒默认 200×160
 constexpr float kPetLootFootHalfWDefault = 100.f;
 constexpr float kPetLootFootHalfHDefault = 80.f;
+constexpr float kPetLootFootHalfMax = 2000.f;
+// 人物直吸：半宽/半高；全盒默认 1500×1500（Normalize 钉死）
+constexpr float kPetLootCharHalfWDefault = 750.f;
+constexpr float kPetLootCharHalfHDefault = 750.f;
+constexpr float kPetLootCharHalfMax = 2000.f;
 // 与官方 Pet 金币例外占位一致（CMS MesoDummyItemIdForPetExceptionList）
 constexpr int kPetLootMesoSkipId = 2147483647;
 
@@ -58,6 +65,9 @@ struct PetLootConfig {
     float vacuumH = kPetLootVacuumHDefault;
     float footHalfW = kPetLootFootHalfWDefault;
     float footHalfH = kPetLootFootHalfHDefault;
+    uint32_t charVacEnabled = 0;  // 人物直吸（与宠吸/脚边互斥）
+    float charHalfW = kPetLootCharHalfWDefault;
+    float charHalfH = kPetLootCharHalfHDefault;
     uint32_t filterFlags = kPetLootFilterDefault;
     uint32_t skipFilterEnabled = 1;
     uint32_t skipRuleCount = 0;
@@ -70,6 +80,8 @@ void PetLootNormalize(PetLootConfig& cfg);
 uint32_t PetLootClampIntervalMs(uint32_t ms);
 uint32_t PetLootClampBurstPerTick(uint32_t n);
 void PetLootEffectiveVacuum(const PetLootConfig& cfg, float& outW, float& outH);
+// 人物直吸半盒：Normalize 已钉 1500×1500 全盒（半宽高 750）
+void PetLootEffectiveCharHalf(const PetLootConfig& cfg, float& outHalfW, float& outHalfH);
 
 bool ReadPetLoot(const char* binDir, PetLootConfig& out);
 bool WritePetLoot(const char* binDir, const PetLootConfig& cfg);

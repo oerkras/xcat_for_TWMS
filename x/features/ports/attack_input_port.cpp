@@ -16,6 +16,7 @@
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
+#include "../../runtime/mono_clock.h"
 #include "../../runtime/anchor_lamps.h"
 #include "../../../common/xcat_payload_control.h"
 
@@ -31,14 +32,15 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
+// 本模块所有「经过了多久」的判断一律走 NowMs()：GetTickCount 的 15.625ms 步进会把
+// 出刀门控量化到该步长的整数倍（interval=50 实跑 62.5）。NowMs 与其同轴、分辨率 1ms。
+using x::runtime::NowMs;
+
 constexpr DWORD kDefaultIntervalMs = xcat::kSimpleCombatAttackIntervalDefaultMs;
 // 智能间隔：在面板 config 附近抖动，不再锁死 480–560。
 constexpr DWORD kSmartJitterMs = 40;
 // 动作占用（禁 TP）：只挡前摇，不当做出刀地板。
 constexpr DWORD kAttackAnimBusyMs = 220;
-// 松键占用上限；实际 hold = min(此值, 面板间隔)，避免长 hold 锁死短间隔。
-constexpr DWORD kAttackHoldCapMs = 100;
-constexpr DWORD kAttackHoldFloorMs = 5;
 constexpr float kFaceDeadzone = 8.f;
 // 已面向正确半场时，|dx| 未过此值不重 SetInput，减轻怪贴身穿过时的左右抽风。
 constexpr float kFaceStickyPx = 28.f;
@@ -47,27 +49,110 @@ constexpr DWORD kFireJobWaitMs = 800;
 constexpr DWORD kFaceJobWaitMs = 400;
 constexpr DWORD kFkmRebindMs = 3000;
 
-constexpr uint32_t kRvaOnFuncKey = 0x107A200;  // remapped 2026-08-03
-constexpr uint32_t kRvaGetKeyByFunc = 0x164A610;  // remapped 2026-08-03
-constexpr uint32_t kRvaGetDataByKeyCode = 0x1649680;  // remapped 2026-08-03
-constexpr uint32_t kRvaFuncKeyCtor = 0x1641AE0;  // remapped 2026-08-03: .ctor(FuncType,int)
+constexpr uint32_t kRvaOnFuncKey = 0x1082250;  // remounted 2026-08-04
+constexpr uint32_t kRvaGetKeyByFunc = 0x16504C0;  // remounted 2026-08-04
+constexpr uint32_t kRvaGetDataByKeyCode = 0x164F7C0;  // remounted 2026-08-04
+constexpr uint32_t kRvaFuncKeyCtor = 0x1647B90;  // remounted 2026-08-04: .ctor(FuncType,int)
 // 写 InputX/Y + 内联 OnResolveMoveAction（朝向）；见 docs/features/protocol/MoveElem字段.md
-constexpr uint32_t kRvaVecCtrlSetInput = 0x11B30B0;  // remapped 2026-08-03
+constexpr uint32_t kRvaVecCtrlSetInput = 0x11BC430;  // remounted 2026-08-04
 
-// 方法哈希（dump.cs · remount 2026-08-03）
+// 方法哈希（dump.cs · remount 2026-08-04）
 constexpr char kHashOnFuncKey[] =
-    "eb70dd6a52329f9f7cffa938d48f1c529af67d1705bba4507ade9d5f58eabbe";
+    "f8cfa503e0f539e6dbb051a648d375a8b7847d067db4a7043e61ed7d49b423f";
 constexpr char kHashGetKeyByFunc[] =
-    "a5cfdfe2e66f31a23f4629f8a51e540b2e92b98f6448704913554379928bde3";
+    "ca441497121e760f75345e9aa8575485252c9f2d1e372b00a215d5851ce057f";
 constexpr char kHashGetDataByKeyCode[] =
-    "b9ef9353368915003e2e2a0a7251d3c63e34eb4f444dd7101d9d4302dd77d06";
+    "a0d3bb0e07878aa585d5c5b47fb2836f7759427a165955082d2e7bf87af7a46";
 constexpr char kHashVecCtrlSetInput[] =
-    "cd3026f1c8768933331397d44f57e08f944b7877150aa6a984373691848aafc";
+    "c3a073db5fb471d6ca353165df8b58dec04bf778804ee0e77505ab5f8d61fb9";
 constexpr char kVecCtrlClass[] =
-    "d5ce57ae29519b9d8ea3e23c7f00e3995b1c02048eb8093dff28802f6cb9598";
+    "ef24024acbe225bcc90ca332f3e00aff5800daa32a769057d2e830eeac776bb";
+constexpr char kActorBaseClass[] =
+    "ddef6db860cfa2bea6dca39e201bf3065a897797f86009fb4d6104830143d94";
+// FKM remounted 2026-08-04 (owns GetKeyByFunc / GetDataByKeyCode).
+constexpr char kFkmClass[] =
+    "c18b40c5d905e6ddbc8c9e4cfc486aff2d1e47d038a192d5aa77e999ea233d7";
+constexpr char kFuncKeyClass[] =
+    "c5f306e5860ab75f344a5ad42c89868b10dd30405e7e07ca0ce540ddbb792c8";
 
-constexpr size_t kOffVecCtrl = 0x50;
-constexpr size_t kOffVcMoveAction = 0x84;
+// Actor.VecCtrl / VecCtrl.MoveAction / FuncKey.type|value：hash → field_get_offset
+constexpr char kHashUserVecCtrl[] =
+    "<dc76f5c9e250bc9a327a219b39e16c345cdabf7b01ad5c60b568045069c9120>k__BackingField";
+constexpr char kHashVcMoveAction[] =
+    "afdef055a699e27cb4575fce73d95752cd4571320e9c13b0c0322e96a023c3a";
+constexpr char kHashFkType[] =
+    "c457db52bc5102a0fe56359124142c8a914dfc6083b9130be075fada445b22a";
+constexpr char kHashFkValue[] =
+    "f76a3ef9dbb055eb9d2ad8533e3a498dfff3ba28773d12b37132ca043ba9bfc";
+
+constexpr size_t kFbVecCtrl = 0x50;
+constexpr size_t kFbVcMoveAction = 0x84;
+constexpr size_t kFbFkType = 0x10;
+constexpr size_t kFbFkValue = 0x14;
+size_t gOffVecCtrl = kFbVecCtrl;
+size_t gOffVcMoveAction = kFbVcMoveAction;
+size_t gOffFkType = kFbFkType;
+size_t gOffFkValue = kFbFkValue;
+#define kOffVecCtrl (gOffVecCtrl)
+#define kOffVcMoveAction (gOffVcMoveAction)
+#define kOffFkType (gOffFkType)
+#define kOffFkValue (gOffFkValue)
+bool gAttackFieldTried = false;
+
+bool AttackFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out, size_t lo,
+                       size_t hi) {
+    *out = fb;
+    if (!klass || !hash || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    for (void* k = klass; k;) {
+        void* field = nullptr;
+        __try {
+            field = e.classGetFieldFromName(k, hash);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            field = nullptr;
+        }
+        if (field) {
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (off >= lo && off < hi) {
+                *out = off;
+                return true;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return false;
+}
+
+void EnsureAttackFieldOff() {
+    if (gAttackFieldTried) return;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    gAttackFieldTried = true;
+    void* actor = x::runtime::il2cpp::FindClass("", kActorBaseClass);
+    if (!actor) actor = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+    void* vc = x::runtime::il2cpp::FindClass("", kVecCtrlClass);
+    void* fk = x::runtime::il2cpp::FindClass("", kFuncKeyClass);
+    int hits = 0;
+    if (AttackFieldOffHit(actor, kHashUserVecCtrl, kFbVecCtrl, &gOffVecCtrl, 0x40, 0x100)) ++hits;
+    if (AttackFieldOffHit(vc, kHashVcMoveAction, kFbVcMoveAction, &gOffVcMoveAction, 0x40, 0x100))
+        ++hits;
+    if (AttackFieldOffHit(fk, kHashFkType, kFbFkType, &gOffFkType, 0x10, 0x40)) ++hits;
+    if (AttackFieldOffHit(fk, kHashFkValue, kFbFkValue, &gOffFkValue, 0x10, 0x40)) ++hits;
+    x::runtime::LogI("Attack",
+                     "attack slots path=%s hits=%d/4 vc=0x%zX move=0x%zX fkT=0x%zX fkV=0x%zX",
+                     hits == 4 ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffVecCtrl,
+                     gOffVcMoveAction, gOffFkType, gOffFkValue);
+}
 
 constexpr int32_t kKeyInputDown = 0;
 constexpr int32_t kKeyInputUp = 1;
@@ -76,16 +161,6 @@ constexpr int32_t kFuncTypeBasicAction = 5;
 constexpr int32_t kFkmBasicActionAttack = 52;
 // 默认攻击槽：Win32 'A' → InputSystem.Key.A = 15（见 input_port VkToUnityKey）。
 constexpr WORD kDefaultAttackVk = static_cast<WORD>('A');
-
-// FKM remounted 2026-08-03 (owns GetKeyByFunc@0x164A610 / GetDataByKeyCode@0x1649680).
-// Old af052bb0…be266af gone from dump; FuncKey class hash unchanged.
-constexpr char kFkmClass[] =
-    "b01adf8a23294118cf3e20b9e5ee6cd4e8b28568a920d5713689e7a6be33f97";
-constexpr char kFuncKeyClass[] =
-    "bd3a79401c7d64bce45aac35ca0daf6e2dc938d1ffc0b396e137fde02b8c4cf";
-
-constexpr size_t kOffFkType = 0x10;
-constexpr size_t kOffFkValue = 0x14;
 
 using FnOnFuncKey = void (*)(void* self, int32_t inputType, void* funcKey, uint32_t scan,
                              const void* methodInfo);
@@ -106,6 +181,7 @@ struct MethodInfoHead {
 std::atomic<WORD> gAttackVk{kDefaultAttackVk};
 std::atomic<DWORD> gConfigIntervalMs{kDefaultIntervalMs};
 std::atomic<DWORD> gEffectiveIntervalMs{kDefaultIntervalMs};
+std::atomic<DWORD> gAttackHoldMs{xcat::kAttackHoldDefaultMs};
 std::atomic<bool> gSmartInterval{false};
 std::atomic<DWORD> gLastFireMs{0};
 std::atomic<int> gAnimBusyOverrideMs{-1};  // <0 = kAttackAnimBusyMs
@@ -141,7 +217,6 @@ std::atomic<DWORD> gUpDueMs{0};
 // simple_combat / multi_skill 双 worker 都会 Init；第二次不得重置间隔/计数。
 std::atomic<bool> gInited{false};
 
-HANDLE gLog = INVALID_HANDLE_VALUE;
 
 template <typename T>
 T AtRva(uint32_t rva) {
@@ -197,23 +272,15 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
 
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
-                          const char* plainName = nullptr, const char* hashName = nullptr) {
-    if (plainName) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plainName, shape.arity)) return mi;
-    }
-    if (hashName) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hashName, shape.arity)) return mi;
-    }
+                          const char* plainName, const char* hashName,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
     if (!klass) return nullptr;
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            x::runtime::LogI("Attack", "ResolveMi kind hit rva=0x%X plain=%s", rva,
-                             plainName ? plainName : "-");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
-    }
-    return FindMethodByRva(klass, rva);
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plainName, hashName);
+    if (outPath) *outPath = mr.path;
+    if (mr.method) return reinterpret_cast<MethodInfoHead*>(mr.method);
+    return nullptr;
 }
 
 template <typename Fn>
@@ -224,52 +291,68 @@ Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
 
 void EnsureMethodInfos() {
     using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::ResolvePath;
     using x::runtime::il2cpp_method::TypeKind;
+    EnsureAttackFieldOff();
     if (!gFkmKlass) gFkmKlass = x::runtime::il2cpp::FindClass("", kFkmClass);
     void* ulKlass = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
     void* fkKlass = x::runtime::il2cpp::FindClass("", kFuncKeyClass);
     void* vcKlass = x::runtime::il2cpp::FindClass("", kVecCtrlClass);
 
-    if (ulKlass && !gMiOnFuncKey) {
-        // void(inputType, FuncKey, scan) — UL 上唯一
+    int hashHits = 0;
+    auto fill = [&](MethodInfoHead*& slot, void* klass, uint32_t rva, const MethodShape& shape,
+                    const char* plain, const char* hash) {
+        if (slot || !klass) return;
+        ResolvePath path = ResolvePath::Miss;
+        slot = ResolveMi(klass, rva, shape, plain, hash, &path);
+        if (slot && path == ResolvePath::Hash) ++hashHits;
+    };
+
+    if (ulKlass) {
         constexpr MethodShape kFk{3,
                                   TypeKind::Void,
                                   true,
                                   true,
                                   {TypeKind::I32, TypeKind::Ptr, TypeKind::U32}};
-        gMiOnFuncKey =
-            ResolveMi(ulKlass, kRvaOnFuncKey, kFk, "OnFuncKey", kHashOnFuncKey);
+        fill(gMiOnFuncKey, ulKlass, kRvaOnFuncKey, kFk, "OnFuncKey", kHashOnFuncKey);
     }
     if (gFkmKlass) {
-        if (!gMiGetKeyByFunc) {
-            constexpr MethodShape kGet{2, TypeKind::I32, true, true, {TypeKind::Any, TypeKind::I32}};
-            gMiGetKeyByFunc = ResolveMi(gFkmKlass, kRvaGetKeyByFunc, kGet, "GetKeyByFunc",
-                                        kHashGetKeyByFunc);
-        }
-        if (!gMiGetDataByKeyCode) {
-            constexpr MethodShape kData{1, TypeKind::Ptr, true, true, {TypeKind::Any}};
-            gMiGetDataByKeyCode = ResolveMi(gFkmKlass, kRvaGetDataByKeyCode, kData,
-                                            "GetDataByKeyCode", kHashGetDataByKeyCode);
-        }
+        constexpr MethodShape kGet{2, TypeKind::I32, true, true, {TypeKind::Any, TypeKind::I32}};
+        fill(gMiGetKeyByFunc, gFkmKlass, kRvaGetKeyByFunc, kGet, "GetKeyByFunc",
+             kHashGetKeyByFunc);
+        constexpr MethodShape kData{1, TypeKind::Ptr, true, true, {TypeKind::Any}};
+        fill(gMiGetDataByKeyCode, gFkmKlass, kRvaGetDataByKeyCode, kData, "GetDataByKeyCode",
+             kHashGetDataByKeyCode);
     }
-    if (fkKlass && !gMiFuncKeyCtor) {
+    if (fkKlass) {
         constexpr MethodShape kCtor{2, TypeKind::Void, true, false, {TypeKind::Any, TypeKind::I32}};
-        gMiFuncKeyCtor = ResolveMi(fkKlass, kRvaFuncKeyCtor, kCtor, ".ctor", nullptr);
+        fill(gMiFuncKeyCtor, fkKlass, kRvaFuncKeyCtor, kCtor, ".ctor", nullptr);
     }
-    if (vcKlass && !gMiSetInput) {
-        // void(int,int) 全局不唯一 → 哈希主
+    if (vcKlass) {
         constexpr MethodShape kIn{2, TypeKind::Void, false, true, {TypeKind::I32, TypeKind::I32}};
-        gMiSetInput =
-            ResolveMi(vcKlass, kRvaVecCtrlSetInput, kIn, "SetInput", kHashVecCtrlSetInput);
+        fill(gMiSetInput, vcKlass, kRvaVecCtrlSetInput, kIn, "SetInput", kHashVecCtrlSetInput);
+    }
+
+    static bool sLogged = false;
+    const int hits = (gMiOnFuncKey ? 1 : 0) + (gMiGetKeyByFunc ? 1 : 0) +
+                     (gMiGetDataByKeyCode ? 1 : 0) + (gMiFuncKeyCtor ? 1 : 0) +
+                     (gMiSetInput ? 1 : 0);
+    if (!sLogged && hits > 0) {
+        sLogged = true;
+        // ctor 无 dump 哈希名（.ctor），hash 满分按 4/4 计（不含 ctor）
+        x::runtime::LogI("Attack",
+                         "methods path=%s hits=%d/5 hash=%d onFk=%d getKey=%d getData=%d ctor=%d "
+                         "setIn=%d",
+                         hashHits >= 4 ? "meta" : (hashHits ? "meta-partial" : "rva/kind"), hits,
+                         hashHits, gMiOnFuncKey ? 1 : 0, gMiGetKeyByFunc ? 1 : 0,
+                         gMiGetDataByKeyCode ? 1 : 0, gMiFuncKeyCtor ? 1 : 0, gMiSetInput ? 1 : 0);
     }
 }
 
 void OpenLog() {
-    if (gLog != INVALID_HANDLE_VALUE) return;
     char dir[MAX_PATH]{};
     snprintf(dir, sizeof(dir), "%slogs", x::runtime::GetBinDir());
     CreateDirectoryA(dir, nullptr);
-    gLog = x::runtime::OpenRotatingDbgLogA(dir, "combat.log");
 }
 
 void LogLine(const char* fmt, ...) {
@@ -290,10 +373,9 @@ void LogLine(const char* fmt, ...) {
     if (n < 0) return;
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
     OpenLog();
-    if (gLog != INVALID_HANDLE_VALUE) {
-        DWORD w = 0;
-        WriteFile(gLog, buf, (DWORD)n, &w, nullptr);
-    }
+    char dir[MAX_PATH]{};
+    snprintf(dir, sizeof(dir), "%slogs", x::runtime::GetBinDir());
+    (void)x::runtime::AppendDbgLogA(dir, "combat.log", buf, (DWORD)n);
     x::runtime::LogI("Attack", "%s", body);
 }
 
@@ -305,12 +387,12 @@ DWORD ClampAttackIntervalMs(DWORD ms) {
     return ms;
 }
 
-// 松键时长跟面板间隔走：interval≤5 → hold=5；interval≥100 → hold=100。
+// 松键时长 = 调试 TAB 的独立参数，再按面板间隔封顶：hold ≥ interval 会让 pendingUp
+// 一直挡住 SoftBlocked，把下一刀锁死。攻击加速开启时走 pulse 路径（hold=0），此值不参与。
 DWORD AttackHoldMs() {
     const DWORD interval = ClampAttackIntervalMs(gEffectiveIntervalMs.load(std::memory_order_relaxed));
-    if (interval <= kAttackHoldFloorMs) return kAttackHoldFloorMs;
-    if (interval < kAttackHoldCapMs) return interval;
-    return kAttackHoldCapMs;
+    const DWORD hold = xcat::ClampAttackHoldMs(gAttackHoldMs.load(std::memory_order_relaxed));
+    return hold < interval ? hold : interval;
 }
 
 DWORD RandomSmartIntervalMs(DWORD config) {
@@ -407,7 +489,7 @@ void* TryResolveFkmSingleton() {
     const auto& e = x::runtime::il2cpp::Get();
     if (e.runtimeClassInit) {
         __try {
-            e.runtimeClassInit(gFkmKlass);
+            x::runtime::il2cpp::RuntimeClassInit(gFkmKlass);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
@@ -422,7 +504,7 @@ void* TryResolveFkmSingleton() {
         if (parent) {
             if (e.runtimeClassInit) {
                 __try {
-                    e.runtimeClassInit(parent);
+                    x::runtime::il2cpp::RuntimeClassInit(parent);
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
                 }
             }
@@ -446,7 +528,7 @@ void* TryResolveFkmSingleton() {
 }
 
 bool EnsureFkmOnMain() {
-    const DWORD now = GetTickCount();
+    const DWORD now = NowMs();
     if (gFkm && LooksLikeHeapPtr(gFkm) && ReadPtr(gFkm, 0) && now - gLastFkmRebind < kFkmRebindMs)
         return true;
     gLastFkmRebind = now;
@@ -514,7 +596,7 @@ bool ReadFkFields(void* fk, int32_t* outType, int32_t* outValue) {
 }
 
 bool EnsureAttackFkOnMain() {
-    const DWORD now = GetTickCount();
+    const DWORD now = NowMs();
     // 短窗复用已 pin 的键位；到期重读 A，换绑技能即时生效。
     if (gAttackFk && LooksLikeHeapPtr(gAttackFk) && gLastFkResolveMs &&
         now - gLastFkResolveMs < kFkmRebindMs) {
@@ -609,11 +691,7 @@ bool EnsureAttackFkOnMain() {
             LogLine("FuncKey alloc miss klass=%p objectNew=%p", klass, e.objectNew);
             return false;
         }
-        __try {
-            fk = e.objectNew(klass);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            fk = nullptr;
-        }
+        fk = x::runtime::il2cpp::AllocObject(klass);
         if (!fk) return false;
         auto ctor = FnFromMi<FnFuncKeyCtor>(gMiFuncKeyCtor, kRvaFuncKeyCtor);
         if (!ctor) return false;
@@ -649,6 +727,7 @@ struct FireJob {
 };
 
 void FireJobOnMain(void* user) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("attack.FireJob");
     auto* job = reinterpret_cast<FireJob*>(user);
     ports::player_combat::CombatCtx ctx{};
     if (!ports::player_combat::QueryCombatCtx(ctx) || !LooksLikeHeapPtr(ctx.localUser)) {
@@ -682,7 +761,8 @@ void FireJobOnMain(void* user) {
 bool InvokeFire(bool isUp) {
     FireJob job{};
     job.isUp = isUp;
-    if (!x::runtime::main_thread::InvokeAndWait(&FireJobOnMain, &job, kFireJobWaitMs)) {
+    if (!x::runtime::main_thread::InvokeAndWait(&FireJobOnMain, &job, kFireJobWaitMs,
+                                               x::runtime::main_thread::JobPrio::High)) {
         LogLine("OnFuncKey pump timeout up=%d", isUp ? 1 : 0);
         return false;
     }
@@ -690,6 +770,7 @@ bool InvokeFire(bool isUp) {
 }
 
 // 同一次主线程泵：Down 紧接 Up，消 pending 跨 tick（攻击加速路径）。
+// 同帧连打探针已关停（实测服端 lastHitted 仍钉 30ms，N>1 不增伤）。
 struct FirePulseJob {
     bool downOk = false;
     bool upOk = false;
@@ -697,6 +778,7 @@ struct FirePulseJob {
 };
 
 void FirePulseOnMain(void* user) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("attack.FirePulse");
     auto* job = reinterpret_cast<FirePulseJob*>(user);
     ports::player_combat::CombatCtx ctx{};
     if (!ports::player_combat::QueryCombatCtx(ctx) || !LooksLikeHeapPtr(ctx.localUser)) {
@@ -729,11 +811,11 @@ void FirePulseOnMain(void* user) {
 
 bool InvokeFirePulse() {
     FirePulseJob job{};
-    if (!x::runtime::main_thread::InvokeAndWait(&FirePulseOnMain, &job, kFireJobWaitMs)) {
+    if (!x::runtime::main_thread::InvokeAndWait(&FirePulseOnMain, &job, kFireJobWaitMs,
+                                               x::runtime::main_thread::JobPrio::High)) {
         LogLine("OnFuncKey pulse pump timeout");
         return false;
     }
-    // Down 成功但 Up 失败：补一次 Up，避免粘键；仍计失败。
     if (job.downOk && !job.upOk) {
         (void)InvokeFire(true);
         LogLine("OnFuncKey pulse Up miss → ForceUp err=%s", job.err ? job.err : "?");
@@ -758,9 +840,12 @@ void Init() {
     bool expected = false;
     if (!gInited.compare_exchange_strong(expected, true)) return;
 
+    // 首次锚定要自旋至多一个系统 tick；放在 worker 线程 Init 里，别落到 Unity 主线程泵上。
+    x::runtime::WarmUpClock();
     gAttackVk.store(kDefaultAttackVk);
     gConfigIntervalMs.store(kDefaultIntervalMs);
     gEffectiveIntervalMs.store(kDefaultIntervalMs);
+    gAttackHoldMs.store(xcat::kAttackHoldDefaultMs);
     gSmartInterval.store(false);
     gLastFireMs.store(0);
     gFireOk.store(0);
@@ -778,17 +863,13 @@ void Init() {
     RefreshEffectiveInterval(true, true);
     LogLine(
         "attack_input_port ready path=OnFuncKey(A-slot→fallback 5/52) face=SetInput(±1,0) "
-        "hold=min(%ums,interval) animBusy=%ums",
-        (unsigned)kAttackHoldCapMs, (unsigned)kAttackAnimBusyMs);
+        "hold=min(%ums,interval) animBusy=%ums clock=NowMs(1ms)",
+        (unsigned)gAttackHoldMs.load(), (unsigned)kAttackAnimBusyMs);
 }
 
 void Shutdown() {
     ForceRelease();
     ClearAttackFk();
-    if (gLog != INVALID_HANDLE_VALUE) {
-        CloseHandle(gLog);
-        gLog = INVALID_HANDLE_VALUE;
-    }
     gInited.store(false);
 }
 
@@ -809,6 +890,16 @@ void SetIntervalMs(DWORD ms) {
 }
 
 DWORD GetIntervalMs() { return gEffectiveIntervalMs.load(); }
+
+void SetAttackHoldMs(DWORD ms) {
+    const DWORD clamped = xcat::ClampAttackHoldMs(ms);
+    const DWORD prev = gAttackHoldMs.exchange(clamped, std::memory_order_relaxed);
+    if (prev == clamped) return;
+    LogLine("hold set %ums -> %ums (实际取 min(hold,interval)；加速开时走 pulse 不参与)",
+            (unsigned)prev, (unsigned)clamped);
+}
+
+DWORD GetAttackHoldMs() { return gAttackHoldMs.load(std::memory_order_relaxed); }
 
 void SetSmartInterval(bool on) {
     const bool prev = gSmartInterval.exchange(on, std::memory_order_relaxed);
@@ -867,9 +958,10 @@ void FaceSetInputJobFn(void* p) {
     }
 
     __try {
-        // 只瞬时 Resolve 朝向；禁止随后 SetInput(0,0)（BIN：掐刀/态乱）。
-        // 下一帧 KeyPad 锁存为 0 时会自然盖回，站桩出刀足够。
+        // 瞬时 ±1 只为 OnResolve 改朝向 bit；同帧立刻 SetInput(0,0) 释放走路锁存。
+        // 08-04 换包后不能再赌「下一帧 KeyPad 会盖回」——BIN：出完刀 InputX 粘住 → 走不动。
         fn(vc, job->inputX, 0, gMiSetInput);
+        fn(vc, 0, 0, gMiSetInput);
         job->ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         snprintf(job->fail, sizeof(job->fail), "seh");
@@ -899,7 +991,8 @@ bool ApplyFaceNow() {
 
     FaceJob job{};
     job.inputX = want;
-    if (!runtime::main_thread::InvokeAndWait(&FaceSetInputJobFn, &job, kFaceJobWaitMs)) {
+    if (!runtime::main_thread::InvokeAndWait(&FaceSetInputJobFn, &job, kFaceJobWaitMs,
+                                            runtime::main_thread::JobPrio::High)) {
         x::runtime::LogWThrottled(51, 3000, "Attack", "face SetInput timeout dx=%.0f", dx);
         return false;
     }
@@ -928,7 +1021,7 @@ DWORD EffectiveAnimBusyMs() {
 bool MotionBusy() {
     const DWORD last = gLastFireMs.load();
     if (!last) return false;
-    const DWORD now = GetTickCount();
+    const DWORD now = NowMs();
     // 仅挡动作前摇，允许面板间隔 < animBusy 时继续出刀。
     if ((now - last) < EffectiveAnimBusyMs()) return true;
     if (gPendingUp.load(std::memory_order_acquire)) return true;
@@ -941,30 +1034,30 @@ void SetAnimBusyOverrideMs(int ms) {
 
 void SetImmediateUp(bool on) {
     const bool prev = gImmediateUp.exchange(on, std::memory_order_relaxed);
-    if (on && !prev) {
-        // 切入立刻松键：清掉未完成的 async Up，避免粘键。
+    if (prev == on) return;
+    if (on) {
+        // 切到 pulse：清掉可能挂着的异步 Up，避免粘键。
         if (gPendingUp.exchange(false, std::memory_order_acq_rel)) {
             (void)InvokeFire(true);
         }
-        static bool sLogged = false;
-        if (!sLogged) {
-            sLogged = true;
-            LogLine("immediate Up on (attack accel: Down+Up same pump, no pending)");
-        }
-    } else if (!on && prev) {
-        LogLine("immediate Up off (restore hold async Up)");
+        LogLine("immediate Up on (attack accel: Down+Up same pump, no pending)");
+    } else {
+        LogLine("immediate Up off (restore async hold)");
     }
 }
 
 bool CanFirePrimary() {
     if (gFireSuppressed.load(std::memory_order_acquire)) return false;
-    const DWORD now = GetTickCount();
+    // 泵拥堵作为软门的一部分：让战斗循环走 pace_wait 软路径，而不是把背压跳刀
+    // 误判成 OnFuncKey 硬失败（TryFirePrimary 里同样有此闸做直调兜底）。
+    if (x::runtime::main_thread::IsCongested()) return false;
+    const DWORD now = NowMs();
     FlushPendingUp(now);
     return !SoftBlocked(now);
 }
 
 bool TryFirePrimary() {
-    const DWORD now = GetTickCount();
+    const DWORD now = NowMs();
     MaybeLogRate(now);
     FlushPendingUp(now);
 
@@ -978,6 +1071,14 @@ bool TryFirePrimary() {
     // 软拒绝不计 fail——加速 5ms 时 Recover→Firing 同 tick 空点会刷出假 fail≈两成。
     if (SoftBlocked(now)) {
         gFireSoft.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    // 主线程泵拥堵：软跳过本刀，不建 job、不阻塞——proactive backpressure，断开
+    // 「灌爆→job timeout→重试→更灌」的死循环（该死循环也是泵侧 GC 压力的放大器）。
+    if (x::runtime::main_thread::IsCongested()) {
+        gFireSoft.fetch_add(1, std::memory_order_relaxed);
+        x::runtime::LogWThrottled(52, 3000, "Attack", "pump congested — skip fire (backpressure)");
         return false;
     }
 
@@ -1000,7 +1101,7 @@ bool TryFirePrimary() {
         }
         const DWORD hold = AttackHoldMs();
         gPendingUp.store(true, std::memory_order_release);
-        gUpDueMs.store(GetTickCount() + hold, std::memory_order_relaxed);
+        gUpDueMs.store(NowMs() + hold, std::memory_order_relaxed);
     }
 
     gLastFireMs.store(now, std::memory_order_relaxed);
@@ -1028,7 +1129,7 @@ bool TryFirePrimary() {
     return true;
 }
 
-void TickReleases() { FlushPendingUp(GetTickCount()); }
+void TickReleases() { FlushPendingUp(NowMs()); }
 
 void SetFireSuppressed(bool on) {
     const bool was = gFireSuppressed.exchange(on, std::memory_order_acq_rel);
@@ -1039,10 +1140,10 @@ bool IsFireSuppressed() { return gFireSuppressed.load(std::memory_order_acquire)
 
 bool WaitFireIdle(DWORD timeoutMs, DWORD settleAfterFireMs) {
     ForceRelease();
-    const DWORD t0 = GetTickCount();
+    const DWORD t0 = NowMs();
     for (;;) {
-        FlushPendingUp(GetTickCount());
-        const DWORD now = GetTickCount();
+        FlushPendingUp(NowMs());
+        const DWORD now = NowMs();
         const DWORD last = gLastFireMs.load(std::memory_order_relaxed);
         const bool pending = gPendingUp.load(std::memory_order_acquire);
         const bool recent = last && settleAfterFireMs && (now - last) < settleAfterFireMs;
@@ -1056,8 +1157,30 @@ void ForceRelease() {
     // 朝向已不持 L/R；仍清一次，避免旧路径残留键。
     ports::input::ForceReleaseVk(VK_LEFT);
     ports::input::ForceReleaseVk(VK_RIGHT);
+    // 关 F5 / ExternalPause：强制清 VecCtrl 走路锁存（InputX 粘住 → 走不动）。
+    if (runtime::main_thread::Ensure()) {
+        FaceJob job{};
+        job.inputX = 0;
+        if (runtime::main_thread::InvokeAndWait(&FaceSetInputJobFn, &job, kFaceJobWaitMs,
+                                               runtime::main_thread::JobPrio::High) &&
+            job.ok) {
+            gLastFaceSign.store(0, std::memory_order_relaxed);
+            gFaceDx.store(0.f, std::memory_order_relaxed);
+        }
+    }
     if (!gPendingUp.exchange(false, std::memory_order_acq_rel)) return;
     (void)InvokeFire(true);
+}
+
+void ClearWalkLatchMainThread() {
+    (void)x::runtime::main_thread::AssertOnPumpThread("attack.ClearWalkLatch");
+    FaceJob job{};
+    job.inputX = 0;
+    FaceSetInputJobFn(&job);
+    if (job.ok) {
+        gLastFaceSign.store(0, std::memory_order_relaxed);
+        gFaceDx.store(0.f, std::memory_order_relaxed);
+    }
 }
 
 }  // namespace x::features::ports::attack

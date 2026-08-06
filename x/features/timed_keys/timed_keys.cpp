@@ -1,13 +1,12 @@
-// Classic TWMS timed_keys — slot queue + KeyDownTouch pulse (fengxing logic port).
+// Classic TWMS timed_keys — slot queue + UserLocal.OnKey pulse（对照仓状态机；偏移本仓）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "timed_keys.h"
 
-#include "../ports/attack_input_port.h"
+#include "../ports/action_gate.h"
 #include "../ports/input_port.h"
 #include "../ports/world_port.h"
-#include "../simple_combat/simple_combat.h"
 #include "../../ipc/payload_timed_keys.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
@@ -32,8 +31,12 @@ constexpr uint32_t kMaxConsecutiveFails = 8u;
 constexpr DWORD kQueueSpacingMs = 150u;
 constexpr DWORD kQueueSnapshotEveryMs = 10000u;
 constexpr DWORD kWorkerSleepMs = 20u;
-// 发键前后短暂停战斗（对齐 buffs 800ms）：避免与 Melee/瞬移抢动作。
-constexpr DWORD kCombatHoldAfterKeyMs = 800u;
+// 发键前后短暂停战斗（对齐 buffs 1000ms）：走 ports::action_gate。
+constexpr DWORD kCombatHoldAfterKeyMs = 1000u;
+constexpr DWORD kCombatHoldSettleTimeoutMs = 80u;
+constexpr DWORD kCombatHoldSettleAfterFireMs = 32u;
+// 进图/PlayReady 刚落地：推迟插键，避免与 combat arm / 落地 fill 叠脱同步。
+constexpr DWORD kLandingFireQuietMs = 800u;
 
 struct SlotRuntime {
     uint32_t intervalMs = 0;
@@ -53,6 +56,7 @@ bool g_wasLanded = false;
 size_t g_rrStart = 0;
 DWORD g_nextFireAt = 0;
 DWORD g_nextSnapshotAt = 0;
+DWORD g_landingQuietUntil = 0;
 SRWLOCK g_lock = SRWLOCK_INIT;
 
 struct QueuedSlot {
@@ -76,32 +80,7 @@ struct DueSlot {
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
 
-bool gCombatHeldForKey = false;
-DWORD gCombatHoldUntil = 0;
-
-void HoldCombatForTimedKey(DWORD now) {
-    // 会话内只 Acquire 一次；续期只推后 until，避免深度泄漏。
-    if (!gCombatHeldForKey) {
-        simple_combat::AcquireExternalPause();
-        gCombatHeldForKey = true;
-    }
-    gCombatHoldUntil = now + kCombatHoldAfterKeyMs;
-}
-
-void ReleaseCombatHoldIfDue(DWORD now) {
-    if (!gCombatHeldForKey) return;
-    if (static_cast<int>(now - gCombatHoldUntil) < 0) return;
-    simple_combat::ReleaseExternalPause();
-    gCombatHeldForKey = false;
-    gCombatHoldUntil = 0;
-}
-
-void ReleaseCombatHoldNow() {
-    if (!gCombatHeldForKey) return;
-    simple_combat::ReleaseExternalPause();
-    gCombatHeldForKey = false;
-    gCombatHoldUntil = 0;
-}
+ports::action_gate::Hold gCombatHold{};
 
 struct ExclusiveLock {
     explicit ExclusiveLock(SRWLOCK& lock) : lockRef(lock) { AcquireSRWLockExclusive(&lockRef); }
@@ -160,6 +139,10 @@ bool EnqueueSlotLocked(size_t index, DWORD now, const char* reason) {
 void QueueLandingImmediateLocked(DWORD now, const char* reason) {
     if (!g_active) return;
     int queued = 0;
+    // 进图后先安静再发：队列可入，但 g_nextFireAt / landingQuiet 挡住立刻 fire。
+    const DWORD fireAt = now + kLandingFireQuietMs;
+    if (g_nextFireAt == 0 || static_cast<int>(fireAt - g_nextFireAt) > 0) g_nextFireAt = fireAt;
+    g_landingQuietUntil = fireAt;
     for (size_t i = 0; i < xcat::kTimedKeySlotCount; ++i) {
         auto& slot = g_slots[i];
         if (!slot.enabled || slot.queued || slot.halted) continue;
@@ -171,7 +154,9 @@ void QueueLandingImmediateLocked(DWORD now, const char* reason) {
         slot.nextTick = now + NextDelayMs(slot.intervalMs);
         ++queued;
     }
-    if (queued > 0) runtime::LogI("TimedKeys", "%s → queued %d slot(s)", reason, queued);
+    if (queued > 0)
+        runtime::LogI("TimedKeys", "%s → queued %d slot(s) quiet=%ums", reason, queued,
+                      static_cast<unsigned>(kLandingFireQuietMs));
 }
 
 bool DequeueReadyLocked(DWORD now, DueSlot& due) {
@@ -362,7 +347,7 @@ const char* LandBlockName(LandBlock b) {
 void TickOnce(DWORD now) {
     ports::input::TickReleases(now);
     x::ipc::PayloadTimedKeys_Poll();
-    ReleaseCombatHoldIfDue(now);
+    gCombatHold.ReleaseIfDue(now);
 
     x::ui::player::Vitals landVit{};
     const LandBlock block = EvalPlayLanded(now, &landVit);
@@ -389,6 +374,7 @@ void TickOnce(DWORD now) {
         ExclusiveLock lock(g_lock);
         if (!landed) {
             g_wasLanded = false;
+            g_landingQuietUntil = 0;
         } else if (!g_wasLanded) {
             g_wasLanded = true;
             QueueLandingImmediateLocked(now, "play path landed");
@@ -415,17 +401,95 @@ void TickOnce(DWORD now) {
         return;
     }
 
-    // 先估 hold，再停战；InjectKeyHold 失败也保留短 pause，避免立刻被普攻打断。
+    // 换图 arm / Settling（现行 settle=0 时几乎不进）挡插键；贴怪 MoveTo 不挡——
+    // 由 BeginAct→ExternalPause 停刀后再发。BUFF DoActive busy 进行中也不插键。
+    // 定时键自身 Hold 不抬 busy，故直接 IsSkillCastBusy() 即外来施法窗。
+    const bool landingQuiet =
+        g_landingQuietUntil && static_cast<int>(now - g_landingQuietUntil) < 0;
+    const bool teleportBlocked = ports::action_gate::IsTeleportBlocked();
+    const bool foreignBusy = ports::action_gate::IsSkillCastBusy();
+    if (teleportBlocked || landingQuiet || foreignBusy) {
+        ExclusiveLock lock(g_lock);
+        auto& slot = g_slots[due.index];
+        const char* why = foreignBusy
+                              ? "buff_casting"
+                              : (teleportBlocked ? "teleport_transit" : "landing_quiet");
+        if (slot.enabled && slot.vk == due.vk && !slot.halted && !slot.queued &&
+            g_queueCount < xcat::kTimedKeySlotCount) {
+            const size_t pos = (g_queueHead + g_queueCount) % xcat::kTimedKeySlotCount;
+            g_queue[pos] = QueuedSlot{due.index, due.vk, due.intervalMs, true};
+            ++g_queueCount;
+            slot.queued = true;
+            // 不改 nextTick（入队时已排好周期）；只推迟本拍再试。
+            g_nextFireAt = now + 50u;
+            runtime::LogWThrottled(224, 2000, "TimedKeys",
+                                   "defer '%s' reason=%s depth=%u",
+                                   xcat::TimedKeySlotLabel(due.index), why,
+                                   static_cast<unsigned>(g_queueCount));
+        } else {
+            // 无法再入队：把 nextTick 拉近，避免 enable 首发丢到整周期（可 420s）。
+            if (slot.enabled && slot.vk == due.vk && !slot.halted) {
+                const DWORD retryAt = now + 200u;
+                if (slot.nextTick == 0 || static_cast<int>(slot.nextTick - retryAt) > 0)
+                    slot.nextTick = retryAt;
+            }
+            g_nextFireAt = now + 50u;
+            runtime::LogWThrottled(225, 2000, "TimedKeys",
+                                   "defer drop '%s' reason=%s queued=%d depth=%u retryIn=200ms",
+                                   xcat::TimedKeySlotLabel(due.index), why,
+                                   slot.queued ? 1 : 0,
+                                   static_cast<unsigned>(g_queueCount));
+        }
+        FlushPersistNeeded(now);
+        return;
+    }
+
+    // 先停战再发键；仅成功续事后 Hold。失败立刻放闸——
+    // BIN 同类：失败也续 Hold，而首轮 retry=500ms → Hold 被永远推后，进图不打怪。
+    // lockTeleport=false：只停刀，不禁 fill+Doing（键位不等于 DoActive 锁移动）。
     const DWORD holdMs = HoldMsForSlot();
-    HoldCombatForTimedKey(now);
-    (void)ports::attack::WaitFireIdle(80, 32);
-    HoldCombatForTimedKey(GetTickCount());  // settle 后重算 until
+    using ports::action_gate::Block;
+    const Block gate = ports::action_gate::BeginAct(
+        gCombatHold, now, kCombatHoldAfterKeyMs, kCombatHoldSettleTimeoutMs,
+        kCombatHoldSettleAfterFireMs, /*lockTeleport=*/false);
+    if (gate == Block::TeleportTransit) {
+        ExclusiveLock lock(g_lock);
+        auto& slot = g_slots[due.index];
+        if (slot.enabled && slot.vk == due.vk && !slot.halted && !slot.queued &&
+            g_queueCount < xcat::kTimedKeySlotCount) {
+            const size_t pos = (g_queueHead + g_queueCount) % xcat::kTimedKeySlotCount;
+            g_queue[pos] = QueuedSlot{due.index, due.vk, due.intervalMs, true};
+            ++g_queueCount;
+            slot.queued = true;
+            g_nextFireAt = now + 50u;
+            runtime::LogWThrottled(226, 2000, "TimedKeys",
+                                   "defer '%s' reason=teleport_transit_after_hold depth=%u",
+                                   xcat::TimedKeySlotLabel(due.index),
+                                   static_cast<unsigned>(g_queueCount));
+        } else {
+            if (slot.enabled && slot.vk == due.vk && !slot.halted) {
+                const DWORD retryAt = now + 200u;
+                if (slot.nextTick == 0 || static_cast<int>(slot.nextTick - retryAt) > 0)
+                    slot.nextTick = retryAt;
+            }
+            g_nextFireAt = now + 50u;
+            runtime::LogWThrottled(227, 2000, "TimedKeys",
+                                   "defer drop '%s' reason=teleport_transit_after_hold "
+                                   "retryIn=200ms",
+                                   xcat::TimedKeySlotLabel(due.index));
+        }
+        FlushPersistNeeded(now);
+        return;
+    }
     const WORD vk = static_cast<WORD>(due.vk & 0xFFFFu);
     const bool fired = vk && ports::input::InjectKeyHold(vk, holdMs);
     if (fired) {
+        gCombatHold.Arm(GetTickCount(), kCombatHoldAfterKeyMs, /*lockTeleport=*/false);
         runtime::LogI("TimedKeys", "fire '%s' VK=0x%02X hold=%ums OK",
                       xcat::TimedKeySlotLabel(due.index), static_cast<unsigned>(vk),
                       static_cast<unsigned>(holdMs));
+    } else {
+        gCombatHold.ReleaseNow();
     }
     {
         ExclusiveLock lock(g_lock);
@@ -482,12 +546,13 @@ void Init() {
     InitSlotDefaults();
     ports::input::Init();
     x::ui::player::Init();
-    runtime::LogI("TimedKeys", "init (KeyDownTouch pulse; hold combat ~hold+250ms per fire)");
+    runtime::LogI("TimedKeys",
+                  "init (UserLocal.OnKey pulse; combat hold 1000ms pause-only, no teleport lock)");
 }
 
 void Shutdown() {
     StopWorker();
-    ReleaseCombatHoldNow();
+    gCombatHold.ReleaseNow();
     uint32_t keys[xcat::kTimedKeySlotCount]{};
     {
         ExclusiveLock lock(g_lock);
@@ -507,7 +572,7 @@ void StartWorker() {
 
 void StopWorker() {
     gWorkerStop.store(true);
-    ReleaseCombatHoldNow();
+    gCombatHold.ReleaseNow();
 }
 
 void ApplyConfig(const xcat::TimedKeysConfig& cfg) {

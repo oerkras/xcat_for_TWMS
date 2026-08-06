@@ -17,7 +17,8 @@
 | 卖选中下标 | `_sellSelectedIndex` @ `+0x1AC` | P0a / shop_port |
 | 忙标记 | `_hasShopRequestSent` @ **`+0x1B4`** | 买/卖发包后写 1；未清则 `SHOP_BUSY` |
 | 买列表 | `List<Item>` @ **`+0x178`** / **`+0x180`** | 按买侧 UITab 二选一：`[dlg+rdx*8+178h]`；产品侧两表都扫 |
-| Item DTO | `ItemId@+0x10` `Position@+0x14` `Price@+0x28` `MaxSlotCount@+0x38` | dump TDI 435 |
+| Item DTO | `ItemId`/`Price`/… 明文 meta；fallback `@+0x10…` | dump TDI 435 |
+| 字段防漂 | `EnsureShopFieldOffsets`（hash/明文→offset） | 日志 `Shop field offsets path=` |
 
 ## 买入包形（UI 路径编码；产品禁止手组旁路）
 
@@ -44,4 +45,4 @@ NetworkManager.Send        // UI 内发；禁止 Session.Send 旁路 HashSet
 - 与卖出相同：手组 67 + Session.Send 会本地踢线；只走 UI 方法。  
 - 买栏与卖栏（`+0x198`）分离；补药只查买栏。  
 - 部分 NPC 需菜单点「商店」后才有 `UIShopDialog`（见 P0b）。  
-- 飞镖 Charge 非本 P0 范围。
+- 飞镖 Charge 见 **P0d**。

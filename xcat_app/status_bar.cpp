@@ -1,12 +1,16 @@
 #include "status_bar.h"
 
 #include "app_dpi.h"
+#include "app_sound.h"
 #include "app_theme.h"
+#include "attach_inject.h"
 #include "hangup_schedule.h"
 #include "imgui_shell.h"
+#include "launch_panel.h"
 #include "update_client.h"
 
 #include "msc_webview_login.h"
+#include "xcat_log.h"
 #include "xcat_payload_status.h"
 #include "xcat_version.h"
 
@@ -130,14 +134,22 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         ImGui::PushTextWrapPos(0.f);
 
         const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const bool busy = msc::weblogin::IsBusy();
+        const bool busy = msc::weblogin::IsBusy() || attach_inject::IsInjectBusy();
         const UpdateSnapshot snap = GetUpdateSnapshot();
-        const bool canStart = !busy && leds.ipc;
+        const bool attachMode =
+            attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode());
+        const unsigned strategyPrepLeft = LaunchPanel_StrategyPrepLeftSec(ui);
+        const bool autoPending = ui.pendingAutoLaunch;
+        const bool canStart =
+            attachMode
+                ? (!busy &&
+                   (attach_inject::IsWatching() || strategyPrepLeft == 0 || autoPending))
+                : (!busy && (strategyPrepLeft == 0 || autoPending));
 
-        // —— 1/4 服名 + 版本 ——
+        // —— 1/4 产品 + 版本（脱敏：不写服名/游戏名）——
         BeginStatusRow(origin, rowH, 0);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("新楓之谷：經典版");
+        ImGui::TextUnformatted("XCat");
         ImGui::SameLine(0.f, ui::Gap());
         ImGui::TextDisabled("%s", xcat::kXcatVersionString);
         if (snap.latestBuildId > 0) {
@@ -170,11 +182,48 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         }
         ImGui::SameLine(0.f, ui::Gap());
         if (!canStart) ImGui::BeginDisabled();
-        if (ImGui::SmallButton("启动")) {
-            LaunchPanel_StartOneClick(ui);
+        const char* startLabel =
+            autoPending ? "取消"
+                        : (attachMode ? (attach_inject::IsWatching() ? "监视中" : "监视")
+                                      : "启动");
+        if (ImGui::SmallButton(startLabel)) {
+            if (autoPending) {
+                sound::UiClick();
+                LaunchPanel_CancelPendingAutoLaunch(ui);
+                ui.status = attachMode ? "已取消自动监视 — 需要时再点「监视」"
+                                       : "已取消自动换票 — 需要时再点「启动」";
+                xcat::log::Info("App", "user cancelled pending auto-launch (status bar)");
+            } else if (attachMode) {
+                if (!attach_inject::IsWatching()) {
+                    if (attach_inject::StartWatch()) {
+                        ui.pendingAutoLaunch = false;
+                        ui.autoLaunchNotBeforeMs = 0;
+                        ui.status = "监视中：等待游戏进程…";
+                        hangup_schedule::NoteLaunchStarted(0);
+                    }
+                }
+            } else {
+                if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto) {
+                    msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+                } else if (msc::weblogin::GetAuthStrategy() ==
+                           msc::weblogin::AuthStrategy::GamaPassAuto) {
+                    msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
+                }
+                LaunchPanel_StartOneClick(ui);
+            }
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("一键登录 / 换票 / 开游戏 / Classic 注入");
+            if (autoPending) {
+                ImGui::SetTooltip("取消即将开始的自动%s",
+                                  attachMode ? "监视" : "换票/启动");
+            } else if (strategyPrepLeft > 0 &&
+                       !(attachMode && attach_inject::IsWatching())) {
+                ImGui::SetTooltip("启动策略刚改过：约 %u 秒后可启动（防误触）",
+                                  strategyPrepLeft);
+            } else {
+                ImGui::SetTooltip(attachMode ? "手动开游戏后自动检测并注入"
+                                             : "一键换票 / 开游戏 / Classic 注入");
+            }
         }
         if (!canStart) ImGui::EndDisabled();
 

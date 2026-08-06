@@ -80,10 +80,10 @@ std::string FormatNum(long long value) {
 std::string FormatCompactAbs(double value) {
     const double absolute = std::fabs(value);
     if (absolute < 10000.0) return FormatNum(static_cast<long long>(absolute + 0.5));
-    const char* unit = "萬";
+    const char* unit = "万";
     double scaled = absolute / 10000.0;
     if (absolute >= 100000000.0) {
-        unit = "億";
+        unit = "亿";
         scaled = absolute / 100000000.0;
     }
     char buffer[48]{};
@@ -290,8 +290,30 @@ void Tick(DWORD now) {
         gOrigTitle = title;
         gSavedTitle = true;
     }
+    // 防 splash→主窗重建后再次居中；有窗后只尝试一次（成败都停），避免晚还原窗口被突然回贴。
+    static bool sTriedSnapTopLeft = false;
+    if (!sTriedSnapTopLeft) {
+        sTriedSnapTopLeft = true;
+        if (win::PositionGameTopLeft(gHwnd)) {
+            x::runtime::LogI("Titlebar", "game window snapped top-left hwnd=%p", (void*)gHwnd);
+        }
+    }
 
     const bool worldAlive = ports::world::IsAlive();
+    const bool playReady = ports::world::IsPlayReady();
+
+    // 未进图：只维持 WM 场景门控，禁止 LocalUser/IDM FindAll（即便 login-freeze 被误清）。
+    if (!playReady) {
+        if (gHaveValidVitals || gRateActive) OnLeavePlay("not_play_ready");
+        else x::runtime::LogWThrottled(kResolveMissLogSlot, kResolveMissLogMs, "Titlebar",
+                                       "not play ready (scene/WM)");
+        if (!worldAlive || now - gLastRebind >= kRebindMissMs) {
+            gLastRebind = now;
+            (void)ports::world::Rebind(!worldAlive);
+        }
+        return;
+    }
+
     if (gHaveValidVitals && worldAlive) {
         if (now - gLastRebind >= kRebindOkMs) {
             gLastRebind = now;
@@ -310,12 +332,6 @@ void Tick(DWORD now) {
     if (gHavePendingTitle && gLastTitleWriteTick &&
         now - gLastTitleWriteTick >= kTitleWriteMinMs) {
         FlushTitleIfDue(now, gPendingTitle, true);
-    }
-    if (!ports::world::IsPlayReady()) {
-        if (gHaveValidVitals || gRateActive) OnLeavePlay("not_play_ready");
-        else x::runtime::LogWThrottled(kResolveMissLogSlot, kResolveMissLogMs, "Titlebar",
-                                       "not play ready (scene/WM)");
-        return;
     }
     game::Vitals vitals{};
     if (!game::ReadVitals(vitals)) {
@@ -337,9 +353,8 @@ DWORD WINAPI TitlebarThread(LPVOID) {
     if (gWorkerStop.load()) { timeEndPeriod(1); return 0; }
     if (!game::BindApis()) { timeEndPeriod(1); return 1; }
     Sleep(2000);
+    // 登录期只绑 WM（bypassFreeze 主线程 FindAll）；LocalUser/IDM 等 play-ready。
     (void)ports::world::GetWorldManager();
-    game::TryResolveLocalUser();
-    game::TryResolveItemDataManager();
     while (!gWorkerStop.load()) {
         Tick(GetTickCount());
         Sleep(kIdleSleepMs);

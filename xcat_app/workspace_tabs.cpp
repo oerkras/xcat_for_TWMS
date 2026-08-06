@@ -5,12 +5,15 @@
 #include "app_sound.h"
 #include "app_theme.h"
 #include "app_window.h"
+#include "attach_inject.h"
 #include "hangup_schedule.h"
 #include "imgui_shell.h"
 #include "launch_panel.h"
 #include "lie_ai_pump.h"
+#include "log_upload.h"
 #include "log_upload_ui.h"
 #include "runtime_leds.h"
+#include "tdr_tune.h"
 #include "update_client.h"
 
 #include "msc_webview_login.h"
@@ -203,7 +206,7 @@ void DrawUpdateControl() {
             ImGui::SetTooltip("更新进行中，请等待当前流程完成。");
         } else {
             ImGui::SetTooltip("检查内置更新口；有新版本则自动下载安装。\n"
-                              "安装前会结束 Maplestory_Classic / NGM，无需再确认。");
+                              "安装前会结束游戏与启动链相关进程，无需再确认。");
         }
     }
 
@@ -238,90 +241,275 @@ void DrawUpdateControl() {
 
 void DrawLaunchTab(LaunchUiState& ui) {
     {
-        xcat::ui::CardGuard card("##tab_launch_account", "账号 / 一键启动");
-        // 设计宽仅 380：必须显式 wrap，否则长说明会把 ContentSize.x 撑出窗口。
+        xcat::ui::CardGuard card("##tab_launch_account", "启动 / 注入");
         const float wrapX = ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x;
-        ImGui::PushTextWrapPos(wrapX);
-        ImGui::TextUnformatted(
-            "粘贴账号串（邮箱-密码-…，横线个数不限；只取前两项；按横线自动换行）");
-        ImGui::PopTextWrapPos();
-
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::InputTextMultiline("##account", ui.accountLine, sizeof(ui.accountLine),
-                                      ImVec2(-1, ui::BtnH() * 3.6f),
-                                      ImGuiInputTextFlags_AllowTabInput)) {
-            // 粘贴后若仍是单行超长串，松手时再格式化一次
-        }
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            LaunchPanel_FormatAccountForUi(ui);
-        }
-
-        // 窄窗一行：保存 + 一键启动（检查更新在调试 TAB，对齐枫星）。
         const float gap = ImGui::GetStyle().ItemSpacing.x;
         const float rowW = ImGui::GetContentRegionAvail().x;
         const float halfW = (std::max)(1.f, (rowW - gap) * 0.5f);
         const float btnH = ui::BtnH();
 
-        if (ImGui::Button("保存账号", ImVec2(halfW, btnH))) {
-            LaunchPanel_SaveAccount(ui);
-            ui.status = "已保存到程序目录 account.txt";
-        }
-        ImGui::SameLine(0.f, gap);
-        const bool busy = msc::weblogin::IsBusy();
-        if (busy) ImGui::BeginDisabled();
-        if (ImGui::Button("一键启动游戏", ImVec2(halfW, btnH))) {
-            LaunchPanel_StartOneClick(ui);
-        }
-        if (busy) ImGui::EndDisabled();
-
-        ImGui::TextUnformatted("取票策略");
+        ImGui::TextUnformatted("启动模式");
         {
-            int strat = static_cast<int>(msc::weblogin::GetAuthStrategy());
-            const char* items[] = {"HTTP优先（推荐）", "仅HTTP", "仅WebView"};
+            const auto cur = attach_inject::GetLaunchMode();
+            int modeIdx = 0;
+            if (cur == attach_inject::LaunchMode::OneClickLogin) modeIdx = 1;
+            else if (cur == attach_inject::LaunchMode::GamaPassAuto) modeIdx = 2;
+            const char* items[] = {"手动启动并注入（推荐）", "gamania (HK)", "GAMA PASS自动登录"};
             ImGui::SetNextItemWidth(-1.f);
-            if (ImGui::Combo("##auth_strategy", &strat, items, 3)) {
-                msc::weblogin::SetAuthStrategy(static_cast<msc::weblogin::AuthStrategy>(strat));
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip(
-                    "HTTP优先：无 WebView2 的虚拟机可直接换票；遇验证码且本机有 Runtime 则回退 WebView。\n"
-                    "仅HTTP：绝不弹 WebView（虚拟机推荐）。\n"
-                    "仅WebView：旧行为，需安装 WebView2 Runtime。\n"
-                    "写入程序目录 auth_strategy.txt");
-            }
-        }
-
-        ImGui::TextUnformatted("验证码UI");
-        {
-            int mode = static_cast<int>(msc::weblogin::GetCaptchaUiMode());
-            const char* items[] = {"验证码弹窗（默认）", "仅浏览器", "静默回退"};
-            ImGui::SetNextItemWidth(-1.f);
-            if (ImGui::Combo("##captcha_ui", &mode, items, 3)) {
-                msc::weblogin::SetCaptchaUiMode(static_cast<msc::weblogin::CaptchaUiMode>(mode));
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip(
-                    "验证码弹窗：HTTP 遇验证码时弹出可交互登录窗（无 Runtime 则开浏览器）。\n"
-                    "仅浏览器：永不弹登录窗，只开官网浏览器。\n"
-                    "静默回退：不弹窗、不开浏览器；HTTP优先仍可静默 WebView。\n"
-                    "写入程序目录 captcha_ui.txt");
-            }
-        }
-
-        if (msc::weblogin::IsReady()) {
-            ImGui::TextDisabled("WebView 就绪（回退/仅WebView 可用）");
-        } else if (!msc::weblogin::IsRuntimeInstalled()) {
-            if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::WebViewOnly) {
-                ImGui::TextColored(ImVec4(1.f, 0.55f, 0.2f, 1.f),
-                                   "缺少 WebView2 Runtime（仅WebView 策略需要）");
-                if (ImGui::Button("下载安装 WebView2", ImVec2(0.f, ui::BtnH()))) {
-                    msc::weblogin::PromptRuntimeInstall(nullptr);
+            if (ImGui::Combo("##launch_mode", &modeIdx, items, 3)) {
+                LaunchPanel_ArmStrategyPrep(ui, 7000);
+                if (modeIdx == 0) {
+                    attach_inject::SetLaunchMode(attach_inject::LaunchMode::AttachWatch);
+                    ui.pendingAutoLaunch = true;
+                    ui.status = "已切换：手动启动并注入 — 约 7 秒后自动开始监视";
+                } else if (modeIdx == 1) {
+                    if (attach_inject::IsWatching()) attach_inject::StopWatch();
+                    attach_inject::SetLaunchMode(attach_inject::LaunchMode::OneClickLogin);
+                    if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
+                        msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
+                    }
+                    ui.pendingAutoLaunch = false;
+                    ui.status = "已切换：gamania (HK) — 约 7 秒后可点启动（防误触）";
+                } else {
+                    if (attach_inject::IsWatching()) attach_inject::StopWatch();
+                    attach_inject::SetLaunchMode(attach_inject::LaunchMode::GamaPassAuto);
+                    msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+                    // 无人值守闭环：切到本模式后约 7s 自动换票（与冷启一致）。
+                    // 准备窗内仍可点一次「取消自动换票」打断。
+                    ui.pendingAutoLaunch = true;
+                    ui.status = "已切换：GAMA PASS自动登录 — 约 7 秒后自动换票（可再点取消）";
                 }
-            } else {
-                ImGui::TextDisabled("无 WebView2 Runtime · HTTP 取票可用");
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "手动启动并注入：自行拉起游戏客户端后注入。\n"
+                    "gamania (HK)：账密走 HTTP 换票 → 官方启动链 → 注入。\n"
+                    "GAMA PASS自动登录：优先 Chrome++/Chrome 点选换票（无需账密）；"
+                    "只用 Edge 请先卸 Google Chrome。"
+                    "切模式/冷启约 7 秒自动换票；准备中再点一次可取消。"
+                    "挂机时段到点、守护干净重拉也会自动一键。\n"
+                    "写入 XCat_data/state/launch_mode.txt 与程序目录 launch_mode.txt");
+            }
+        }
+
+        const auto launchMode = attach_inject::GetLaunchMode();
+        const bool attachMode = attach_inject::IsAttachWatchMode(launchMode);
+        const bool httpOneClick = (launchMode == attach_inject::LaunchMode::OneClickLogin);
+        const bool gamaPassMode = (launchMode == attach_inject::LaunchMode::GamaPassAuto);
+        const unsigned strategyPrepLeft = LaunchPanel_StrategyPrepLeftSec(ui);
+
+        if (attachMode) {
+            ImGui::TextDisabled("取票：本模式不换票（请手动开游戏后监视注入）");
+        } else if (httpOneClick) {
+            if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
+                msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
+            }
+            ImGui::TextDisabled("取票：HTTP（账密换票）");
+            ImGui::TextUnformatted("验证码UI");
+            {
+                int mode =
+                    (msc::weblogin::GetCaptchaUiMode() == msc::weblogin::CaptchaUiMode::NoBrowser)
+                        ? 1
+                        : 0;
+                const char* items[] = {"开浏览器（默认）", "不开浏览器"};
+                ImGui::SetNextItemWidth(-1.f);
+                if (ImGui::Combo("##captcha_ui", &mode, items, 2)) {
+                    msc::weblogin::SetCaptchaUiMode(
+                        mode == 1 ? msc::weblogin::CaptchaUiMode::NoBrowser
+                                  : msc::weblogin::CaptchaUiMode::OpenBrowser);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "遇验证码/二次验证时：\n"
+                        "开浏览器：自动打开官网；\n"
+                        "不开浏览器：仅提示，自行处理。\n"
+                        "写入程序目录 captcha_ui.txt");
+                }
             }
         } else {
-            ImGui::TextDisabled("WebView 初始化中…（HTTP 策略可先开）");
+            if (msc::weblogin::GetAuthStrategy() != msc::weblogin::AuthStrategy::GamaPassAuto) {
+                msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+            }
+            ImGui::TextDisabled("取票：GAMA PASS自动登录（仅浏览器会话，不使用账密）");
+        }
+
+        if (attachMode) {
+            ImGui::PushTextWrapPos(wrapX);
+            ImGui::TextUnformatted(
+                "启动 XCat 后会自动开始监视；请用官方启动器/客户端打开游戏，发现进程后自动注入。");
+            ImGui::PopTextWrapPos();
+
+            const bool watching = attach_inject::IsWatching();
+            const bool injBusy = attach_inject::IsInjectBusy();
+            const bool autoPending = ui.pendingAutoLaunch;
+            // 自动待办中允许点一次取消；无待办时准备窗仍防误触。
+            const bool prepBlocksStart =
+                strategyPrepLeft > 0 && !watching && !autoPending;
+            if (watching) {
+                if (injBusy) ImGui::BeginDisabled();
+                if (ImGui::Button("停止监视", ImVec2(halfW, btnH))) {
+                    sound::UiClick();
+                    attach_inject::StopWatch();
+                    ui.status = "已停止监视";
+                }
+                if (injBusy) ImGui::EndDisabled();
+            } else {
+                if (injBusy || prepBlocksStart) ImGui::BeginDisabled();
+                const char* watchLabel = autoPending ? "取消自动监视" : "开始监视";
+                if (ImGui::Button(watchLabel, ImVec2(halfW, btnH))) {
+                    sound::UiClick();
+                    if (autoPending) {
+                        LaunchPanel_CancelPendingAutoLaunch(ui);
+                        ui.status = "已取消自动监视 — 需要时再点「开始监视」";
+                        xcat::log::Info("App", "user cancelled pending auto-watch");
+                    } else if (attach_inject::StartWatch()) {
+                        ui.pendingAutoLaunch = false;
+                        ui.autoLaunchNotBeforeMs = 0;
+                        ui.status = "监视中：等待游戏进程…";
+                        hangup_schedule::NoteLaunchStarted(0);
+                    } else {
+                        ui.status = "无法启动监视";
+                        sound::UiError();
+                    }
+                }
+                if (injBusy || prepBlocksStart) ImGui::EndDisabled();
+            }
+            ImGui::SameLine(0.f, gap);
+            if (injBusy) ImGui::BeginDisabled();
+            if (ImGui::Button("立即注入", ImVec2(halfW, btnH))) {
+                sound::UiClick();
+                std::wstring err;
+                if (!attach_inject::InjectNow(&err)) {
+                    ui.status = err.empty() ? "立即注入失败" : xcat::WideToUtf8(err);
+                    sound::UiError();
+                } else {
+                    ui.status = "已开始立即注入…";
+                    hangup_schedule::NoteLaunchStarted(0);
+                }
+            }
+            if (injBusy) ImGui::EndDisabled();
+
+            if (autoPending && strategyPrepLeft > 0) {
+                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                                   "准备中：%u 秒后自动监视（再点可取消）", strategyPrepLeft);
+            } else if (prepBlocksStart) {
+                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                                   "准备中：%u 秒后可开始监视（防误触）", strategyPrepLeft);
+            }
+
+            ImGui::TextDisabled("%s", attach_inject::StatusBrief().c_str());
+        } else if (httpOneClick) {
+            ImGui::PushTextWrapPos(wrapX);
+            ImGui::TextUnformatted(
+                "粘贴账号串（邮箱-密码-…，横线个数不限；只取前两项）。HTTP 换票成功后自动开游戏并注入。");
+            ImGui::PopTextWrapPos();
+
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputTextMultiline("##account", ui.accountLine, sizeof(ui.accountLine),
+                                          ImVec2(-1, btnH * 3.6f),
+                                      ImGuiInputTextFlags_AllowTabInput)) {
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            LaunchPanel_FormatAccountForUi(ui);
+        }
+
+            if (ImGui::Button("保存账号", ImVec2(halfW, btnH))) {
+                sound::UiClick();
+            LaunchPanel_SaveAccount(ui);
+                ui.status = "已保存到程序目录 account.txt";
+        }
+            ImGui::SameLine(0.f, gap);
+        const bool busy = msc::weblogin::IsBusy();
+            const bool startBlocked = busy || strategyPrepLeft > 0;
+            if (startBlocked) ImGui::BeginDisabled();
+            if (ImGui::Button("一键启动游戏", ImVec2(halfW, btnH))) {
+            LaunchPanel_StartOneClick(ui);
+        }
+            if (startBlocked) ImGui::EndDisabled();
+            if (strategyPrepLeft > 0) {
+                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                                   "准备中：%u 秒后可启动（防误触）", strategyPrepLeft);
+            }
+
+            ImGui::TextDisabled("HTTP 换票：遇验证码可按策略打开官网浏览器");
+        } else if (gamaPassMode) {
+            ImGui::PushTextWrapPos(wrapX);
+            ImGui::TextUnformatted(
+                "无需填写账号密码。"
+                "优先使用 Chrome++ / Google Chrome，其次才是 Edge。"
+                "只用 Edge 的用户请先卸载 Google Chrome，否则会绑到空的 Chrome 会话。"
+                "请在将使用的浏览器里登录 GAMA PASS（accounts 选号页勾选记住）；"
+                "一键前若该浏览器日常窗口已开且冲突，请先关掉（不会自动结束进程）。"
+                "本程序自动点选账号/昵称换票，不会改写登录数据、不会调用 refresh。"
+                "切换到本模式或冷启（已是本模式）约 7 秒后自动换票并启动游戏；"
+                "准备中可再点一次「取消自动换票」打断，之后需手动启动。"
+                "挂机到点 / 守护干净重拉也会自动一键（无人值守）。");
+            ImGui::PopTextWrapPos();
+
+            {
+                int nickSlot = msc::weblogin::GetGamaPassNickSlot();
+                const bool busy = msc::weblogin::IsBusy();
+                ImGui::Spacing();
+                const ImVec2 boxPad = ImGui::GetStyle().FramePadding;
+                const float boxH = btnH * 2.15f + boxPad.y * 2.f;
+                ImGui::PushStyleColor(ImGuiCol_ChildBg,
+                                     ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+                ImGui::BeginChild("##gp_nick_box", ImVec2(-1.f, boxH),
+                                  ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+                ImGui::TextUnformatted("游戏昵称槽");
+                ImGui::SameLine();
+                ImGui::TextDisabled("（多昵称时选第几个 · 1 起）");
+                if (busy) ImGui::BeginDisabled();
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                                   ImVec2(boxPad.x * 1.6f, boxPad.y * 1.35f));
+                ImGui::SetNextItemWidth(-1.f);
+                if (ImGui::InputInt("##gp_nick_slot", &nickSlot, 1, 1)) {
+                    if (nickSlot < 1) nickSlot = 1;
+                    if (nickSlot > 16) nickSlot = 16;
+                    msc::weblogin::SetGamaPassNickSlot(nickSlot);
+                    ui.status = "GAMA PASS 昵称槽已设为 " + std::to_string(nickSlot) +
+                                "（SelectGameAccount 第 N 个可选项，跳过「建立暱稱」）";
+                }
+                ImGui::PopStyleVar();
+                if (busy) ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip(
+                        "游戏昵称选择页（SelectGameAccount）的序号，从 1 起。\n"
+                        "有多个昵称时填 1 / 2 / …；超过列表长度则取最后一个。\n"
+                        "换票进行中不可改（本轮已锁定）。\n"
+                        "写入程序目录 gamapass_nick_slot.txt");
+                }
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+                ImGui::Spacing();
+            }
+
+            const bool busy = msc::weblogin::IsBusy();
+            const bool autoPending = ui.pendingAutoLaunch;
+            if (busy) ImGui::BeginDisabled();
+            const char* gpLabel =
+                autoPending ? "取消自动换票" : "GAMA PASS 启动游戏";
+            if (ImGui::Button(gpLabel, ImVec2(-1.f, btnH))) {
+                if (autoPending) {
+                    sound::UiClick();
+                    LaunchPanel_CancelPendingAutoLaunch(ui);
+                    ui.status = "已取消自动换票 — 需要时再点「GAMA PASS 启动游戏」";
+                    xcat::log::Info("App", "user cancelled pending GamaPass auto-launch");
+                } else {
+                    msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+                    LaunchPanel_StartOneClick(ui);
+                }
+            }
+            if (busy) ImGui::EndDisabled();
+            if (autoPending && strategyPrepLeft > 0) {
+                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                                   "准备中：%u 秒后自动换票（再点可取消）", strategyPrepLeft);
+            } else if (autoPending) {
+                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                                   "即将自动换票…（再点可取消）");
+            }
+
+            ImGui::TextDisabled("GAMA PASS：默认浏览器 CDP 点选");
         }
 
         const UpdateSnapshot snap = GetUpdateSnapshot();
@@ -349,7 +537,9 @@ void DrawLaunchTab(LaunchUiState& ui) {
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_launch_log", "登录日志", /*fillRemaining=*/true);
-        ImGui::TextUnformatted(msc::weblogin::IsBusy() ? "进行中…" : "最近输出");
+        ImGui::TextUnformatted(msc::weblogin::IsBusy() || attach_inject::IsInjectBusy()
+                                   ? "进行中…"
+                                   : "最近输出");
         ImGui::BeginChild("##log_scroll", ImVec2(0, 0), ImGuiChildFlags_Borders);
         ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
         ImGui::TextUnformatted(ui.logTail.empty() ? "(暂无日志)" : ui.logTail.c_str());
@@ -361,6 +551,14 @@ void DrawLaunchTab(LaunchUiState& ui) {
 
 // LiveStep UI 状态：首页落盘与「实验」TAB 共用，避免两处 static 互相覆盖。
 static bool gUiCombatLiveStep = false;
+// 跳过 Prepare / 砍动画倒计时：首页落盘；控件在实验 TAB 独立卡片。
+static bool gUiAttackAccelSkipPrepare = false;  // 与 PayloadControl 默认一致
+static bool gUiAttackAccelCutLayer = false;
+static bool gUiAttackAccelBooster = false;
+// 打怪 TICK：首页落盘；控件在调试 TAB。
+static int gUiCombatTickMs = (int)xcat::kSimpleCombatTickDefaultMs;
+// 出刀按键 hold：控件在调试 TAB，与 TICK 同卡片共用一次读盘。
+static int gUiAttackHoldMs = (int)xcat::kAttackHoldDefaultMs;
 // attack_rpc：仅实验 TAB；与 payload core 同步。
 static bool gUiAttackRpc = false;
 static int gUiAttackRpcMobs = (int)xcat::kAttackRpcMobsDefault;
@@ -369,13 +567,15 @@ static int gUiAttackRpcDamage = (int)xcat::kAttackRpcDamageDefault;
 
 void DrawHomeTab(LaunchUiState& ui) {
     // 首页卡片顺序：挂机 → 拾物 → 攻击加速 → 打怪设置 → 卖背包（低内存守护在调试 TAB）
-    static bool autoEnter = false;
+    static bool autoEnter = true;  // 默认开：1 雪吉拉 / 槽1
     static int charSlot = 1;
     static int worldId = xcat::kDefaultWorldId;
     static char worldName[64]{"雪吉拉"};
     static bool autoLie = false;
     static bool invincible = true;  // 与 PayloadControl 默认一致
     static bool attackAccel = false;
+    static bool finalAttackForce = false;
+    static bool skillMaxLevel = false;
     static bool fly = false;
     static bool hpPotion = true;
     static bool mpPotion = true;
@@ -386,11 +586,19 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool autoCombat = false;
     static bool smartInterval = false;
     static int attackMs = (int)xcat::kSimpleCombatAttackIntervalDefaultMs;
-    static int tickMs = (int)xcat::kSimpleCombatTickDefaultMs;
     static int clusterWeight = 0;  // 0/1：群怪优先（沿用 clusterWeight 落盘）
     static int teleportMinDx = 220;
     static int teleportStandOff = (int)xcat::kCombatTeleportStandOffDefault;
     static int teleportCooldownMs = (int)xcat::kCombatTeleportCooldownDefaultMs;
+    static int mobScanIntervalMs = (int)xcat::kMobScanIntervalDefaultMs;
+    static int crossLayerFillGateMs = (int)xcat::kCombatCrossLayerFillGateDefaultMs;
+    static int fillBudgetPx = (int)xcat::kCombatFillBudgetPxDefault;
+    static int oneshotMaxHp = (int)xcat::kCombatOneshotMaxHpDefault;
+    static int oneshotMinBumps = (int)xcat::kCombatOneshotMinBumpsDefault;
+    static int oneshotMinFires = (int)xcat::kCombatOneshotMinFiresDefault;
+    static int oneshotMinLagMs = (int)xcat::kCombatOneshotMinLagMsDefault;
+    static int oneshotFoxFillGapMs = (int)xcat::kCombatOneshotFoxFillGapDefaultMs;
+    static int pumpCongestion = (int)xcat::kPumpCongestionDefault;
     static bool autoSell = false;
     static int sellEquipTrigger = 0;
     static bool refillHp = false;
@@ -425,6 +633,11 @@ void DrawHomeTab(LaunchUiState& ui) {
                 autoLie = disk.autoLie != 0;
                 invincible = disk.invuln != 0;
                 attackAccel = disk.attackAccel != 0;
+                finalAttackForce = disk.finalAttackForce != 0;
+                skillMaxLevel = disk.skillMaxLevel != 0;
+                gUiAttackAccelCutLayer = disk.attackAccelCutLayer != 0;
+                gUiAttackAccelSkipPrepare = disk.attackAccelSkipPrepare != 0;
+                gUiAttackAccelBooster = disk.attackAccelBooster != 0;
                 fly = disk.fly != 0;
                 autoEnter = disk.autoEnter != 0;
                 hpPotion = disk.hpPotion != 0;
@@ -437,7 +650,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                     disk.simpleCombatAttackIntervalMs
                         ? disk.simpleCombatAttackIntervalMs
                         : xcat::kSimpleCombatAttackIntervalDefaultMs);
-                tickMs = (int)xcat::ClampSimpleCombatTickMs(
+                gUiCombatTickMs = (int)xcat::ClampSimpleCombatTickMs(
                     disk.simpleCombatTickMs ? disk.simpleCombatTickMs
                                            : xcat::kSimpleCombatTickDefaultMs);
                 clusterWeight = disk.clusterWeight != 0 ? 1 : 0;
@@ -461,6 +674,24 @@ void DrawHomeTab(LaunchUiState& ui) {
                 teleportCooldownMs = (int)xcat::ClampCombatTeleportCooldownMs(
                     disk.simpleCombatTeleportCooldownMs ? disk.simpleCombatTeleportCooldownMs
                                                           : xcat::kCombatTeleportCooldownDefaultMs);
+                mobScanIntervalMs = (int)xcat::ClampMobScanIntervalMs(
+                    disk.mobScanIntervalMs ? disk.mobScanIntervalMs
+                                           : xcat::kMobScanIntervalDefaultMs);
+                // 0=关门控，合法；勿用 ? : 把 0 洗成默认。
+                crossLayerFillGateMs =
+                    (int)xcat::ClampCombatCrossLayerFillGateMs(disk.simpleCombatCrossLayerFillGateMs);
+                fillBudgetPx = (int)xcat::ClampCombatFillBudgetPx(disk.simpleCombatFillBudgetPx);
+                oneshotMaxHp = (int)xcat::ClampCombatOneshotMaxHp(disk.simpleCombatOneshotMaxHp);
+                oneshotMinBumps =
+                    (int)xcat::ClampCombatOneshotMinBumps(disk.simpleCombatOneshotMinBumps);
+                oneshotMinFires = (int)xcat::ClampCombatOneshotMinFires(
+                    disk.simpleCombatOneshotMinFires ? disk.simpleCombatOneshotMinFires
+                                                     : xcat::kCombatOneshotMinFiresDefault);
+                oneshotMinLagMs =
+                    (int)xcat::ClampCombatOneshotMinLagMs(disk.simpleCombatOneshotMinLagMs);
+                oneshotFoxFillGapMs =
+                    (int)xcat::ClampCombatOneshotFoxFillGapMs(disk.simpleCombatOneshotFoxFillGapMs);
+                pumpCongestion = (int)xcat::ClampPumpCongestion(disk.pumpCongestionThreshold);
                 hpThresholdPct = (int)(disk.hpThresholdPct ? disk.hpThresholdPct : 50u);
                 mpThresholdPct = (int)(disk.mpThresholdPct ? disk.mpThresholdPct : 30u);
                 charSlot = (int)(disk.charSlot ? disk.charSlot : 1u);
@@ -520,6 +751,12 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.autoLie = autoLie ? 1u : 0u;
         c.invuln = invincible ? 1u : 0u;
         c.attackAccel = attackAccel ? 1u : 0u;
+        c.finalAttackForce = finalAttackForce ? 1u : 0u;
+        c.skillMaxLevel = skillMaxLevel ? 1u : 0u;
+        c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
+        c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
+        c.attackAccelBooster = gUiAttackAccelBooster ? 1u : 0u;
+        c.attackSameFrameBurst = xcat::kAttackSameFrameBurstDefault;
         c.fly = fly ? 1u : 0u;
         // 策略入口已隐藏：始终跟随飞；间隔只在调试 TAB 改，这里不覆盖 flyHopCdMs
         c.flyMode = xcat::kFlyModeFollow;
@@ -532,8 +769,8 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.simpleCombatSmartInterval = smartInterval ? 1u : 0u;
         c.simpleCombatAttackIntervalMs =
             xcat::ClampSimpleCombatAttackIntervalMs(static_cast<uint32_t>(attackMs));
-        c.simpleCombatTickMs =
-            xcat::ClampSimpleCombatTickMs(static_cast<uint32_t>(tickMs < 0 ? 0 : tickMs));
+        c.simpleCombatTickMs = xcat::ClampSimpleCombatTickMs(
+            static_cast<uint32_t>(gUiCombatTickMs < 0 ? 0 : gUiCombatTickMs));
         c.clusterWeight = clusterWeight ? 1u : 0u;
         c.simpleCombatTeleport = 1u;  // 面板无入口，始终开
         c.simpleCombatLiveStep = gUiCombatLiveStep ? 1u : 0u;
@@ -550,6 +787,24 @@ void DrawHomeTab(LaunchUiState& ui) {
             static_cast<uint32_t>(teleportStandOff < 0 ? 0 : teleportStandOff));
         c.simpleCombatTeleportCooldownMs = xcat::ClampCombatTeleportCooldownMs(
             static_cast<uint32_t>(teleportCooldownMs < 0 ? 0 : teleportCooldownMs));
+        c.mobScanIntervalMs = xcat::ClampMobScanIntervalMs(
+            static_cast<uint32_t>(mobScanIntervalMs < 0 ? 0 : mobScanIntervalMs));
+        c.simpleCombatCrossLayerFillGateMs = xcat::ClampCombatCrossLayerFillGateMs(
+            static_cast<uint32_t>(crossLayerFillGateMs < 0 ? 0 : crossLayerFillGateMs));
+        c.simpleCombatFillBudgetPx =
+            xcat::ClampCombatFillBudgetPx(static_cast<uint32_t>(fillBudgetPx < 0 ? 0 : fillBudgetPx));
+        c.simpleCombatOneshotMaxHp = xcat::ClampCombatOneshotMaxHp(
+            static_cast<uint32_t>(oneshotMaxHp < 0 ? 0 : oneshotMaxHp));
+        c.simpleCombatOneshotMinBumps = xcat::ClampCombatOneshotMinBumps(
+            static_cast<uint32_t>(oneshotMinBumps < 0 ? 0 : oneshotMinBumps));
+        c.simpleCombatOneshotMinFires = xcat::ClampCombatOneshotMinFires(
+            static_cast<uint32_t>(oneshotMinFires < 0 ? 0 : oneshotMinFires));
+        c.simpleCombatOneshotMinLagMs = xcat::ClampCombatOneshotMinLagMs(
+            static_cast<uint32_t>(oneshotMinLagMs < 0 ? 0 : oneshotMinLagMs));
+        c.simpleCombatOneshotFoxFillGapMs = xcat::ClampCombatOneshotFoxFillGapMs(
+            static_cast<uint32_t>(oneshotFoxFillGapMs < 0 ? 0 : oneshotFoxFillGapMs));
+        c.pumpCongestionThreshold = xcat::ClampPumpCongestion(
+            static_cast<uint32_t>(pumpCongestion < 0 ? 0 : pumpCongestion));
         c.hpThresholdPct = hpThresholdPct < 1 ? 1u : (hpThresholdPct > 99 ? 99u : (uint32_t)hpThresholdPct);
         c.mpThresholdPct = mpThresholdPct < 1 ? 1u : (mpThresholdPct > 99 ? 99u : (uint32_t)mpThresholdPct);
         c.charSlot = charSlot < 1 ? 1u : (uint32_t)charSlot;
@@ -567,12 +822,13 @@ void DrawHomeTab(LaunchUiState& ui) {
             xcat::log::Ok("App",
                           "已下发 core：测谎=%d 无敌=%d 自动进=%d 加血=%d@%d 加蓝=%d@%d 召宠=%d "
                           "有粮才召=%d 打怪=%d 间隔=%d 贴怪瞬移=1 LiveStep=%d 分区=%d 槽=%d 守护=%d "
-                          "瞬移CD=%d",
+                          "瞬移CD=%d 读怪=%d 终极一击=%d 技能满级=%d 加速=%d",
                           autoLie ? 1 : 0, invincible ? 1 : 0, autoEnter ? 1 : 0,
                           hpPotion ? 1 : 0, hpThresholdPct, mpPotion ? 1 : 0, mpThresholdPct,
                           petSummon ? 1 : 0, petSummonRequireFood ? 1 : 0, autoCombat ? 1 : 0,
                           attackMs, gUiCombatLiveStep ? 1 : 0, worldId, charSlot,
-                          watchdog ? 1 : 0, teleportCooldownMs);
+                          watchdog ? 1 : 0, teleportCooldownMs, mobScanIntervalMs,
+                          finalAttackForce ? 1 : 0, skillMaxLevel ? 1 : 0, attackAccel ? 1 : 0);
         } else {
             xcat::log::Warn("App", "写入 user.ini [core] 失败");
         }
@@ -631,22 +887,49 @@ void DrawHomeTab(LaunchUiState& ui) {
         // 一行：自动进 + 分区下拉 + 角色槽（流程说明进 tooltip，避免 380 宽溢出）。
         if (xcat::ui::OptionCheckbox("自动进游戏", &autoEnter)) persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-            ImGui::SetTooltip("分区 → 最少人频道 → 选角");
+            ImGui::SetTooltip("分区 → 随机未满频道 → 选角");
         }
         {
             static uint64_t worldsTick = 0;
+            static bool worldsFromSeed = false;
             static xcat::WorldsCacheEntry worlds[xcat::kWorldsCacheMax]{};
             static uint32_t worldsCount = 0;
             if (!ui.prefsBinDir.empty()) {
                 uint64_t tick = 0;
                 uint32_t n = 0;
                 xcat::WorldsCacheEntry tmp[xcat::kWorldsCacheMax]{};
-                if (xcat::ReadWorldsCache(ui.prefsBinDir.c_str(), tmp, xcat::kWorldsCacheMax, &n,
-                                          &tick)) {
-                    if (tick != worldsTick) {
+                const bool cacheOk = xcat::ReadWorldsCache(ui.prefsBinDir.c_str(), tmp,
+                                                          xcat::kWorldsCacheMax, &n, &tick);
+                if (cacheOk && n > 0) {
+                    if (tick != worldsTick || worldsFromSeed) {
                         worldsTick = tick;
+                        worldsFromSeed = false;
                         worldsCount = n;
                         memcpy(worlds, tmp, sizeof(tmp));
+                    }
+                } else if (worldsCount == 0 || worldsFromSeed) {
+                    // 登录扫入前：用 world_names.tsv 预填。
+                    // 只放 _Center1/2——TSV 有 1..17，经典版登录页通常只有这两格，全放易选飞。
+                    const xcat::WorldNamesPack& wn =
+                        xcat::GetSharedWorldNames(ui.prefsBinDir.c_str());
+                    xcat::WorldNameCenterEntry seedAll[xcat::kWorldsCacheMax]{};
+                    const uint32_t snAll =
+                        xcat::WorldNamesListCenters(wn, seedAll, xcat::kWorldsCacheMax);
+                    xcat::WorldNameCenterEntry seed[xcat::kWorldsCacheMax]{};
+                    uint32_t sn = 0;
+                    for (uint32_t i = 0; i < snAll && sn < xcat::kWorldsCacheMax; ++i) {
+                        if (seedAll[i].worldId != 1 && seedAll[i].worldId != 2) continue;
+                        seed[sn++] = seedAll[i];
+                    }
+                    if (sn > 0 && (!worldsFromSeed || sn != worldsCount)) {
+                        worldsFromSeed = true;
+                        worldsTick = 0;
+                        worldsCount = sn;
+                        memset(worlds, 0, sizeof(worlds));
+                        for (uint32_t i = 0; i < sn; ++i) {
+                            worlds[i].worldId = seed[i].worldId;
+                            strncpy_s(worlds[i].name, seed[i].displayName, _TRUNCATE);
+                        }
                     }
                 }
                 if (worldName[0] == '_') {
@@ -704,10 +987,14 @@ void DrawHomeTab(LaunchUiState& ui) {
                     }
                     ImGui::EndCombo();
                 }
+                if (worldsFromSeed && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip(
+                        "预制预填（默认分区）；进登录世界列表后换成实际扫入分区");
+                }
             } else {
                 ImGui::TextDisabled("未扫入");
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                    ImGui::SetTooltip("进登录世界列表后自动扫入分区");
+                    ImGui::SetTooltip("无分区缓存，且 dataservice/world_names.tsv 也不可用");
                 }
             }
 
@@ -722,7 +1009,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
         }
         if (xcat::ui::OptionCheckbox("自动测谎", &autoLie)) persistCore();
-        ImGui::SameLine();
+                ImGui::SameLine();
         {
             static std::string liePhase;
             static std::string lieErr;
@@ -788,7 +1075,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 ImGui::TextDisabled("待命");
             }
             if (liePending >= 0) {
-                ImGui::SameLine();
+        ImGui::SameLine();
                 ImGui::TextDisabled("泵%d/答%d", liePending, lieAnswered < 0 ? 0 : lieAnswered);
             }
             if (lieEncodePng >= 0 || lieDirsOk >= 0 || lieQuizOk >= 0) {
@@ -853,6 +1140,78 @@ void DrawHomeTab(LaunchUiState& ui) {
                 static_cast<uint32_t>(teleportCooldownMs < 0 ? 0 : teleportCooldownMs));
             persistCore();
         }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "贴怪瞬移最小间隔（%u–%u ms），按你机器/网络自行评估。\n"
+                "调太低（接近 %u）瞬移+出刀会灌爆游戏主线程、拉高 GC 频率，\n"
+                "有概率触发游戏「GC」致命弹窗卡死；偏保守更稳。",
+                (unsigned)xcat::kCombatTeleportCooldownMinMs,
+                (unsigned)xcat::kCombatTeleportCooldownMaxMs,
+                (unsigned)xcat::kCombatTeleportCooldownMinMs);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::TextDisabled("ms");
+        ImGui::SameLine(0.f, ui::Gap() * 1.2f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("跨层门控");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+        if (ImGui::DragInt("##tp_cross_gate", &crossLayerFillGateMs, 1,
+                           (int)xcat::kCombatCrossLayerFillGateMinMs,
+                           (int)xcat::kCombatCrossLayerFillGateMaxMs)) {
+            crossLayerFillGateMs = (int)xcat::ClampCombatCrossLayerFillGateMs(
+                static_cast<uint32_t>(crossLayerFillGateMs < 0 ? 0 : crossLayerFillGateMs));
+            persistCore();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "跨层贴稳后额外等待（%u–%u ms），与「瞬移冷却」独立。\n"
+                "切段中间跳不武装。0=关闭。偏大则追怪像爬楼梯；偏小跨层连跳更猛。",
+                (unsigned)xcat::kCombatCrossLayerFillGateMinMs,
+                (unsigned)xcat::kCombatCrossLayerFillGateMaxMs);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::TextDisabled("ms");
+        ImGui::SameLine(0.f, ui::Gap() * 1.2f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("位移预算");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(80.f));
+        if (ImGui::DragInt("##tp_dist_budget", &fillBudgetPx, 50, (int)xcat::kCombatFillBudgetPxMin,
+                           (int)xcat::kCombatFillBudgetPxMax)) {
+            fillBudgetPx = (int)xcat::ClampCombatFillBudgetPx(
+                static_cast<uint32_t>(fillBudgetPx < 0 ? 0 : fillBudgetPx));
+            persistCore();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("10 秒内瞬移总位移上限（0–%u px）。0=关闭（默认）。\n"
+                              "超额则留在原地等额度回来，不弃怪。\n"
+                              "怀疑被服端按移动速率判定时才开；调小会明显拖慢追怪。",
+                              (unsigned)xcat::kCombatFillBudgetPxMax);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::TextDisabled("px/10s");
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("怪物读取速度");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+        if (ImGui::DragInt("##mob_scan_ms", &mobScanIntervalMs, 1,
+                           (int)xcat::kMobScanIntervalMinMs,
+                           (int)xcat::kMobScanIntervalMaxMs)) {
+            mobScanIntervalMs = (int)xcat::ClampMobScanIntervalMs(
+                static_cast<uint32_t>(mobScanIntervalMs < 0 ? 0 : mobScanIntervalMs));
+            persistCore();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "打怪开启时刷新怪物列表的周期（%u–%u ms，默认 %u）。\n"
+                "数值越小越快看见新刷怪/尸体消失，抢怪更灵敏；过低更吃 CPU。\n"
+                "未开打怪时仍用较慢闲置扫描，不受此值影响。",
+                (unsigned)xcat::kMobScanIntervalMinMs,
+                (unsigned)xcat::kMobScanIntervalMaxMs,
+                (unsigned)xcat::kMobScanIntervalDefaultMs);
+        }
         ImGui::SameLine(0.f, ui::Gap() * 0.45f);
         ImGui::TextDisabled("ms");
 
@@ -885,10 +1244,16 @@ void DrawHomeTab(LaunchUiState& ui) {
             const hangup_schedule::Snapshot snap = hangup_schedule::GetSnapshot();
             if (xcat::ui::OptionCheckbox("守护模式", &watchdog)) persistCore();
             ImGui::SetItemTooltip(
-                "与挂机时段正交。开启后：已注入且自动打怪开启时，\n"
-                "经验停滞 / 游戏崩溃 → 干净重拉\n"
-                "（杀 Classic→等退出→冷却→一键冷启）。\n"
-                "需 payload 发布 playerExp（Status v3）。");
+                "与挂机时段正交。开启后：已注入时，\n"
+                "经验停滞 / 进程退出 / 假死 / 踢线 / 长期未进图 → 干净重拉\n"
+                "（杀 Classic→等退出→settle→一键冷启）。\n"
+                "\n"
+                "「无经验」秒数（N）用途：\n"
+                "· 进图后：经验/状态停滞约 N 秒（+确认）重拉\n"
+                "· 冷启未进图最坏约 4×N + 确认 才重拉：\n"
+                "  主门 2×N（进程起来后）+ 次门 N（已握手）\n"
+                "  + 未进图计时 N + 确认 1 拍\n"
+                "· 踢线：进图武装后等待 5 秒再干净重拉（绕过冷却；可看踢出画面）");
             ImGui::SameLine();
             ImGui::TextDisabled("无经验");
             ImGui::SameLine();
@@ -900,6 +1265,14 @@ void DrawHomeTab(LaunchUiState& ui) {
                 noExpSec = static_cast<int>(
                     xcat::ClampWatchdogNoExpSec(static_cast<uint32_t>(noExpSec)));
                 persistCore();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "N=无经验秒（当前 %d）。\n"
+                    "进图后停滞门槛 ≈ N；\n"
+                    "从未进图最坏 ≈ 4×N + 确认（默认 N=%u → 约 %u 秒量级）。",
+                    noExpSec, xcat::kWatchdogNoExpSecDefault,
+                    xcat::kWatchdogNoExpSecDefault * 4u);
             }
             ImGui::SameLine();
             ImGui::TextDisabled("秒");
@@ -926,8 +1299,8 @@ void DrawHomeTab(LaunchUiState& ui) {
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_home_pickup", "拾物");
-        // 0=关 1=脚下 2=宠吸（原近图 3200×2400；单选互斥）
-        enum : int { kLootOff = 0, kLootFoot = 1, kLootPet = 2 };
+        // 0=关 1=脚下 2=宠吸（3200×2400）3=人物直吸（官方 Send，不靠宠；单选互斥）
+        enum : int { kLootOff = 0, kLootFoot = 1, kLootPet = 2, kLootChar = 3 };
         static bool petLootLoaded = false;
         static int lootMode = kLootOff;
         static bool pickupBlacklist = false;
@@ -937,9 +1310,10 @@ void DrawHomeTab(LaunchUiState& ui) {
         static uint64_t petLootTick = 0;
         static bool petLootSaveFailed = false;
 
-        auto modeFromFlags = [](bool pet, bool foot, bool mapVac) -> int {
-            // 旧「宠物吸物 / 近图」均视为宠吸；与脚边冲突时宠优先
+        auto modeFromFlags = [](bool pet, bool foot, bool mapVac, bool charVac) -> int {
+            // 宠吸 > 人物直吸 > 脚边（与 PetLootNormalize 一致）
             if (pet || mapVac) return kLootPet;
+            if (charVac) return kLootChar;
             if (foot) return kLootFoot;
             return kLootOff;
         };
@@ -972,10 +1346,12 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (ui.prefsBinDir.empty()) return;
             const bool footLoot = (lootMode == kLootFoot);
             const bool petLoot = (lootMode == kLootPet);
+            const bool charLoot = (lootMode == kLootChar);
             xcat::PetLootConfig cfg{};
             (void)xcat::ReadPetLoot(ui.prefsBinDir.c_str(), cfg);
             cfg.enabled = petLoot ? 1u : 0u;
             cfg.footEnabled = footLoot ? 1u : 0u;
+            cfg.charVacEnabled = charLoot ? 1u : 0u;
             // 宠吸固定近图真空；关宠时清 mapVacuum，避免旧 ini 残留误导
             cfg.mapVacuumEnabled = petLoot ? 1u : 0u;
             cfg.intervalMs = xcat::PetLootClampIntervalMs(
@@ -991,9 +1367,10 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (xcat::WritePetLoot(ui.prefsBinDir.c_str(), cfg)) {
                 petLootTick = cfg.writeTickMs;
                 xcat::log::Ok("App",
-                              "已下发 pet_loot：脚边=%d 宠吸=%d 间隔=%ums 连吸=%u 黑名单=%d rules=%u",
-                              footLoot ? 1 : 0, petLoot ? 1 : 0, cfg.intervalMs, cfg.burstPerTick,
-                              pickupBlacklist ? 1 : 0, cfg.skipRuleCount);
+                              "已下发 pet_loot：脚边=%d 宠吸=%d 人物=%d 间隔=%ums 连吸=%u 黑名单=%d "
+                              "rules=%u",
+                              footLoot ? 1 : 0, petLoot ? 1 : 0, charLoot ? 1 : 0, cfg.intervalMs,
+                              cfg.burstPerTick, pickupBlacklist ? 1 : 0, cfg.skipRuleCount);
             } else {
                 petLootSaveFailed = true;
                 xcat::log::Warn("App", "写入 user.ini [pet_loot] 失败");
@@ -1006,10 +1383,13 @@ void DrawHomeTab(LaunchUiState& ui) {
             unsigned kind = 0;
             if (next == kLootFoot) {
                 kind = 2;
-                body = "已切换为脚下拾取（与宠吸互斥）。";
+                body = "已切换为脚下拾取（与宠吸/人物直吸互斥）。";
             } else if (next == kLootPet) {
                 kind = 2;
                 body = "已切换为宠吸（3200×2400 .rdata 真空）。";
+            } else if (next == kLootChar) {
+                kind = 2;
+                body = "已切换为人物直吸（官方送包，1500×1500，不靠宠物）。";
             }
             notify::PushLocal(kind, "petloot-mode", "拾物模式", body, 4200);
         };
@@ -1022,8 +1402,11 @@ void DrawHomeTab(LaunchUiState& ui) {
                     const bool diskPet = disk.enabled != 0;
                     const bool diskFoot = disk.footEnabled != 0;
                     const bool diskMap = disk.mapVacuumEnabled != 0;
-                    const bool conflict = (diskPet || diskMap) && diskFoot;
-                    lootMode = modeFromFlags(diskPet, diskFoot, diskMap);
+                    const bool diskChar = disk.charVacEnabled != 0;
+                    const int activeModes =
+                        (diskPet || diskMap ? 1 : 0) + (diskChar ? 1 : 0) + (diskFoot ? 1 : 0);
+                    const bool conflict = activeModes > 1;
+                    lootMode = modeFromFlags(diskPet, diskFoot, diskMap, diskChar);
                     lootIntervalMs = static_cast<int>(
                         xcat::PetLootClampIntervalMs(disk.intervalMs));
                     lootBurstPerTick = static_cast<int>(
@@ -1054,7 +1437,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                     if (conflict || (diskPet && !diskMap) || (diskMap && !diskPet)) {
                         if (conflict && wasLoaded) {
                             notify::PushLocal(/*Warning*/ 2, "petloot-mutex-disk", "拾物互斥",
-                                             "配置里脚边与宠吸冲突，已保留宠吸并关闭脚边。", 5000);
+                                             "配置里多种拾物模式冲突，已按优先级保留一种。", 5000);
                         }
                         persistPetLoot();
                     }
@@ -1072,6 +1455,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (xcat::ui::OptionRadioButton("脚下拾取", &lootMode, kLootFoot)) changed = true;
             ImGui::SameLine();
             if (xcat::ui::OptionRadioButton("宠吸", &lootMode, kLootPet)) changed = true;
+            ImGui::SameLine();
+            if (xcat::ui::OptionRadioButton("人物直吸", &lootMode, kLootChar)) changed = true;
             if (changed) {
                 notifyLootMode(prevMode, lootMode);
                 persistPetLoot();
@@ -1088,7 +1473,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                 persistPetLoot();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "脚边 / 宠吸共用 Tick 间隔（%u–%u ms，默认 %u）。",
+                    "脚边 / 宠吸 / 人物直吸共用 Tick 间隔（%u–%u ms，默认 %u）。\n"
+                    "打怪同开时建议 ≥200；过短易抢主线程泵。",
                     (unsigned)xcat::kPetLootIntervalMinMs,
                     (unsigned)xcat::kPetLootIntervalMaxMs,
                     (unsigned)xcat::kPetLootIntervalDefaultMs);
@@ -1106,7 +1492,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                 persistPetLoot();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "每拍连调官方吸物次数（%u–%u，默认 %u）。越大同秒吸越多，发包更密。",
+                    "每拍连调官方吸物次数（%u–%u，默认 %u）。\n"
+                    "越大同秒吸越多，发包更密，打怪同开时尖峰更高。",
                     (unsigned)xcat::kPetLootBurstMin, (unsigned)xcat::kPetLootBurstMax,
                     (unsigned)xcat::kPetLootBurstDefault);
             }
@@ -1116,7 +1503,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (xcat::ui::OptionCheckbox("启用拾取黑名单", &pickupBlacklist)) persistPetLoot();
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputTextWithHint("##bl",
-                                     "itemId/关键词（逗号分隔；金币填 2147483647；脚边+宠共用）",
+                                     "itemId/关键词（逗号分隔；金币填 2147483647；脚边+宠+人物共用）",
                                      blacklistKw, sizeof(blacklistKw))) {
             // debounce on deactivate / checkbox
         }
@@ -1134,7 +1521,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 "开启后自动跳过动作等待（清忙锁）并抬动作攻速。\n"
                 "与是否开「自动打怪」无关——走路/落地也会生效。\n"
                 "出刀频率看右侧间隔；过短易空砍/踢号。\n"
-                "进图落地约 1.5s 内暂停写入，降低脱同步。");
+                "进图落地约 0.4s 内暂停写入，降低脱同步。");
         }
         ImGui::SameLine(0.f, ui::Gap());
         ImGui::AlignTextToFramePadding();
@@ -1157,29 +1544,34 @@ void DrawHomeTab(LaunchUiState& ui) {
     }
     CardGap();
     {
-        xcat::ui::CardGuard card("##tab_home_combat", "打怪设置");
-
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("TICK值");
-        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
-        if (ImGui::DragInt("##combat_tick_ms", &tickMs, 1, (int)xcat::kSimpleCombatTickMinMs,
-                           (int)xcat::kSimpleCombatTickMaxMs))
-            persistCore();
+        xcat::ui::CardGuard card("##tab_home_final_attack", "终极一击");
+        if (xcat::ui::OptionCheckbox("普攻必出终极一击", &finalAttackForce)) persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "打怪状态机心跳（%u–%u ms，默认 %u）。\n"
-                "与是否开攻击加速无关；越短出刀机会越多。\n"
-                "下限 %u ms；过短更吃 CPU/主线程。",
-                (unsigned)xcat::kSimpleCombatTickMinMs, (unsigned)xcat::kSimpleCombatTickMaxMs,
-                (unsigned)xcat::kSimpleCombatTickDefaultMs, (unsigned)xcat::kSimpleCombatTickMinMs);
+                "已学终极攻击（如狂战士終極之劍/斧）：Prop→100，并强制注册出刀。\n"
+                "数据面改 SkillLevelData / FinalAttack 结构体，不改 GameAssembly 代码。\n"
+                "需已学习对应武器的终极技能；关掉后会尽量还原原 Prop。\n"
+                "服端若校验伤害/技能，以服为准。");
         }
-        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
-        ImGui::TextUnformatted("ms");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::TextDisabled("全局心跳 · 非仅加速");
+        ImGui::TextDisabled("狂战士劍/斧 · Prop100 + 强制注册出刀");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_home_skill_max", "技能满级");
+        if (xcat::ui::OptionCheckbox("已学技能按满级生效", &skillMaxLevel)) persistCore();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "A：SkillRecord/Ex 已学技能（≥1）等级写成满级。\n"
+                "B：Hook GetSkillLevel 作 fallback（抗同步打回）。\n"
+                "日志 SkillMax src=dict|hook|dict+hook。\n"
+                "关掉还原字典原等级并卸钩；服端结算以服为准。");
+        }
+        ImGui::TextDisabled("dict + GetSkillLevel hook · src 见日志");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_home_combat", "打怪设置");
 
-        ImGui::Spacing();
         if (xcat::ui::OptionCheckbox("智能间隔", &smartInterval)) persistCore();
         ImGui::SameLine();
         ImGui::TextDisabled("在攻击间隔附近 ±40ms 抖动");
@@ -1216,6 +1608,211 @@ void DrawHomeTab(LaunchUiState& ui) {
                     "关：只按距离/hop 选最近可打怪\n"
                     "仍保持同层优先，不会为了群怪先跨层");
             }
+        }
+
+        ImGui::Spacing();
+        {
+            // 用户面：开关 + 一键档位；四参藏进「细调」
+            bool oneshotOn = oneshotMaxHp > 0;
+            if (xcat::ui::OptionCheckbox("脆皮早切", &oneshotOn)) {
+                if (oneshotOn) {
+                    if (oneshotMaxHp <= 0)
+                        oneshotMaxHp = (int)xcat::kCombatOneshotMaxHpWhenOn;
+                    if (oneshotMinBumps < (int)xcat::kCombatOneshotMinBumpsMin)
+                        oneshotMinBumps = (int)xcat::kCombatOneshotMinBumpsDefault;
+                    if (oneshotMinFires < (int)xcat::kCombatOneshotMinFiresMin)
+                        oneshotMinFires = (int)xcat::kCombatOneshotMinFiresDefault;
+                } else {
+                    oneshotMaxHp = 0;
+                }
+                persistCore();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("开加速时：小怪打中就换，不等尸体消失");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "适合练级图小怪（表血大约几十～一百出头）。\n"
+                    "开着攻击加速时更有用：命中后提前切下一只，少站着干等。\n"
+                    "关掉则等怪真正死掉再换（更稳、稍慢）。");
+            }
+
+            ImGui::BeginDisabled(!oneshotOn);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("换怪节奏");
+            ImGui::SameLine(0.f, ui::Gap());
+            auto applyOneshotPreset = [&](int maxHp, int fires, int bumps, int lagMs,
+                                          int foxGapMs) {
+                oneshotMaxHp = (int)xcat::ClampCombatOneshotMaxHp((uint32_t)maxHp);
+                oneshotMinFires =
+                    (int)xcat::ClampCombatOneshotMinFires((uint32_t)(fires < 0 ? 0 : fires));
+                oneshotMinBumps =
+                    (int)xcat::ClampCombatOneshotMinBumps((uint32_t)(bumps < 0 ? 0 : bumps));
+                oneshotMinLagMs =
+                    (int)xcat::ClampCombatOneshotMinLagMs((uint32_t)(lagMs < 0 ? 0 : lagMs));
+                oneshotFoxFillGapMs = (int)xcat::ClampCombatOneshotFoxFillGapMs(
+                    static_cast<uint32_t>(foxGapMs < 0 ? 0 : foxGapMs));
+                persistCore();
+            };
+            if (ImGui::SmallButton("稳妥"))
+                applyOneshotPreset(80, 4, 2, 80, (int)xcat::kCombatOneshotFoxFillGapDefaultMs);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("少漏杀：只早切很脆的怪，多打两下再换。");
+            }
+            ImGui::SameLine(0.f, ui::Gap() * 0.5f);
+            if (ImGui::SmallButton("推荐"))
+                applyOneshotPreset((int)xcat::kCombatOneshotMaxHpWhenOn,
+                                   (int)xcat::kCombatOneshotMinFiresDefault,
+                                   (int)xcat::kCombatOneshotMinBumpsDefault,
+                                   (int)xcat::kCombatOneshotMinLagMsDefault,
+                                   (int)xcat::kCombatOneshotFoxFillGapDefaultMs);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("默认平衡：命中确认后再换。");
+            }
+            ImGui::SameLine(0.f, ui::Gap() * 0.5f);
+            if (ImGui::SmallButton("更快"))
+                applyOneshotPreset(200, 2, 1, 20, (int)xcat::kCombatOneshotFoxFillGapDefaultMs);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("更激进：仍等至少一次命中回写。");
+            }
+            ImGui::SameLine(0.f, ui::Gap() * 0.5f);
+            if (ImGui::SmallButton("射后不管"))
+                applyOneshotPreset(200, 1, 0, 0, (int)xcat::kCombatOneshotFoxFillGapDefaultMs);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "出刀发出即换下一只；默认再等 %ums 才允许下一次贴怪瞬移\n"
+                    "（防一刀一传送把频率打爆 / GC）。间隔可在细调里改，0=关闸高风险。",
+                    (unsigned)xcat::kCombatOneshotFoxFillGapDefaultMs);
+            }
+
+            if (ImGui::TreeNode("细调（一般点上面三档即可）")) {
+                ImGui::TextWrapped(
+                    "只影响「看起来很小、打一下就死」的怪。"
+                    "数值越大越保守（更晚换怪）；越小越快（可能漏杀）。");
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("只早切表血≤");
+                ImGui::SameLine(0.f, ui::Gap());
+                ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+                if (ImGui::DragInt("##oneshot_maxhp", &oneshotMaxHp, 1, 1,
+                                   (int)xcat::kCombatOneshotMaxHpMax)) {
+                    oneshotMaxHp = (int)xcat::ClampCombatOneshotMaxHp(
+                        static_cast<uint32_t>(oneshotMaxHp < 1 ? 1 : oneshotMaxHp));
+                    persistCore();
+                }
+                ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+                ImGui::TextDisabled("的怪");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip(
+                        "对照怪物表最大血量，不是血条百分比。\n"
+                        "练级小怪常见几十～一百；超过此值的怪不会早切。\n"
+                        "默认启用时 %u（盖住常见 80 血档）。",
+                        (unsigned)xcat::kCombatOneshotMaxHpWhenOn);
+                }
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("至少打");
+                ImGui::SameLine(0.f, ui::Gap());
+                ImGui::SetNextItemWidth(AppDpi_Px(48.f));
+                if (ImGui::DragInt("##oneshot_fires", &oneshotMinFires, 1,
+                                   (int)xcat::kCombatOneshotMinFiresMin,
+                                   (int)xcat::kCombatOneshotMinFiresMax)) {
+                    oneshotMinFires = (int)xcat::ClampCombatOneshotMinFires(
+                        static_cast<uint32_t>(oneshotMinFires < 0 ? 0 : oneshotMinFires));
+                    persistCore();
+                }
+                ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+                ImGui::TextDisabled("下再换");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip(
+                        "对同一只怪至少挥几刀才允许提前换目标。\n"
+                        "默认 %u；改成 2 更快，偶发空挥时更容易切太早。",
+                        (unsigned)xcat::kCombatOneshotMinFiresDefault);
+                }
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("至少命中");
+                ImGui::SameLine(0.f, ui::Gap());
+                ImGui::SetNextItemWidth(AppDpi_Px(48.f));
+                if (ImGui::DragInt("##oneshot_bumps", &oneshotMinBumps, 1,
+                                   (int)xcat::kCombatOneshotMinBumpsMin,
+                                   (int)xcat::kCombatOneshotMinBumpsMax)) {
+                    oneshotMinBumps = (int)xcat::ClampCombatOneshotMinBumps(
+                        static_cast<uint32_t>(oneshotMinBumps < 0 ? 0 : oneshotMinBumps));
+                    persistCore();
+                }
+                ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+                ImGui::TextDisabled("次再换");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip(
+                        "要看到「打中了」至少几次才换。\n"
+                        "0 = 射后不管（出刀发出就走，不等命中）。\n"
+                        "默认 %u。",
+                        (unsigned)xcat::kCombatOneshotMinBumpsDefault);
+                }
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("命中后再等");
+                ImGui::SameLine(0.f, ui::Gap());
+                ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+                if (ImGui::DragInt("##oneshot_lag", &oneshotMinLagMs, 1,
+                                   (int)xcat::kCombatOneshotMinLagMsMin,
+                                   (int)xcat::kCombatOneshotMinLagMsMax)) {
+                    oneshotMinLagMs = (int)xcat::ClampCombatOneshotMinLagMs(
+                        static_cast<uint32_t>(oneshotMinLagMs < 0 ? 0 : oneshotMinLagMs));
+                    persistCore();
+                }
+                ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+                ImGui::TextDisabled("毫秒");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip(
+                        "第一次打中后，再稍等这么久才切下一只（给伤害结算留空）。\n"
+                        "默认 %u ms；射后不管档此值通常为 0。",
+                        (unsigned)xcat::kCombatOneshotMinLagMsDefault);
+                }
+
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("早切禁瞬移");
+                ImGui::SameLine(0.f, ui::Gap());
+                ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+                if (ImGui::DragInt("##oneshot_fox_gap", &oneshotFoxFillGapMs, 1,
+                                   (int)xcat::kCombatOneshotFoxFillGapMinMs,
+                                   (int)xcat::kCombatOneshotFoxFillGapMaxMs)) {
+                    oneshotFoxFillGapMs = (int)xcat::ClampCombatOneshotFoxFillGapMs(
+                        static_cast<uint32_t>(oneshotFoxFillGapMs < 0 ? 0 : oneshotFoxFillGapMs));
+                    persistCore();
+                }
+                ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+                ImGui::TextDisabled("毫秒");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip(
+                        "任何提前切怪（秒杀/预测够死/累计伤害/射后不管）后，这么久内禁止贴怪瞬移。\n"
+                        "默认 %u（已改为不限制）；>0 可防「一刀一 fill」灌爆主线程触发 GC 弹窗。\n"
+                        "体感换怪慢时先看这一项是否仍是旧存档的 280。",
+                        (unsigned)xcat::kCombatOneshotFoxFillGapDefaultMs);
+                }
+                ImGui::TreePop();
+            }
+            ImGui::EndDisabled();
+        }
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("拥堵让路阈值");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+        if (ImGui::DragInt("##pump_congestion", &pumpCongestion, 1,
+                           (int)xcat::kPumpCongestionMin, (int)xcat::kPumpCongestionMax)) {
+            pumpCongestion = (int)xcat::ClampPumpCongestion(
+                static_cast<uint32_t>(pumpCongestion < 0 ? 0 : pumpCongestion));
+            persistCore();
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextDisabled("格");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "游戏主线程排队任务达到这么多格时，出刀/瞬移先让一拍（背压，防灌爆触发 GC 弹窗）。\n"
+                "队列共 %u 格，默认 %u。调小=更早让路更保守；调大=更少让路；\n"
+                "0=关闭背压（高风险，恢复旧行为）。",
+                (unsigned)xcat::kPumpCongestionMax, (unsigned)xcat::kPumpCongestionDefault);
         }
 
         static bool pickupPriority = false;
@@ -1681,7 +2278,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
             ImGui::SetTooltip(
                 "卖装开店后扫描消耗栏手里剑，对可充值的飞镖执行充值（Charge）\n"
-                "经典版 Charge 入口尚未钉死时会跳过并打日志\n"
+                "Charge 入口尚未钉死时会跳过并打日志\n"
                 "需勾选「自动卖」或点「立即回城卖装一趟」才会进店");
         }
 
@@ -1762,7 +2359,7 @@ void DrawHangupScheduleTab(LaunchUiState& ui) {
     };
 
     if (ui.prefsBinDir.empty()) {
-        xcat::ui::CardGuard card("##tab_hangup", "挂机时段");
+    xcat::ui::CardGuard card("##tab_hangup", "挂机时段");
         ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [core] 挂机时段。");
         return;
     }
@@ -1788,18 +2385,18 @@ void DrawHangupScheduleTab(LaunchUiState& ui) {
         }
         ImGui::SetItemTooltip(
             "与守护模式独立。关闭时完全忽略下方小时表（不按时段杀/启）。\n"
-            "开启后：未勾选小时会结束 Maplestory_Classic.exe；\n"
+            "开启后：未勾选小时会结束游戏进程；\n"
             "勾选小时会自动一键启动并注入（无人值守）。本机本地时间。");
-        ImGui::SameLine();
+    ImGui::SameLine();
         ImGui::TextDisabled("%s", hangup_schedule::UiModeLabel(snap.mode));
 
         if (!enabled) ImGui::BeginDisabled();
-        if (ImGui::SmallButton("全选")) {
+    if (ImGui::SmallButton("全选")) {
             mask = xcat::kHangupScheduleMaskAll;
             s_saveFailed = !saveCore();
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("清空")) {
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("清空")) {
             mask = 0;
             s_saveFailed = !saveCore();
         }
@@ -1810,42 +2407,42 @@ void DrawHangupScheduleTab(LaunchUiState& ui) {
             ImGui::TextDisabled("勾选即挂机；清空全部即全天关机");
         } else {
             ImGui::TextDisabled("总开关关闭时下方小时表不生效");
-        }
+    }
 
-        if (!enabled) ImGui::BeginDisabled();
+    if (!enabled) ImGui::BeginDisabled();
         const int curHour = hangup_schedule::CurrentLocalHour();
-        if (ImGui::BeginTable("##hangup_hours", 2,
-                              ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
-                                  ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_PadOuterX |
-                                  ImGuiTableFlags_ScrollY,
+    if (ImGui::BeginTable("##hangup_hours", 2,
+                          ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_PadOuterX |
+                              ImGuiTableFlags_ScrollY,
                               ImVec2(0, AppDpi_Px(200.f)))) {
-            ImGui::TableSetupColumn("时段", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("时段", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("启用", ImGuiTableColumnFlags_WidthFixed,
                                     ImGui::GetFontSize() * 3.2f);
-            ImGui::TableHeadersRow();
-            for (int hour = 0; hour < 24; ++hour) {
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                char label[32]{};
-                snprintf(label, sizeof(label), "%d:00 - %d:59", hour, hour);
+        ImGui::TableHeadersRow();
+        for (int hour = 0; hour < 24; ++hour) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            char label[32]{};
+            snprintf(label, sizeof(label), "%d:00 - %d:59", hour, hour);
                 if (hour == curHour)
-                    ImGui::Text("%s（当前）", label);
-                else
-                    ImGui::TextUnformatted(label);
-                ImGui::TableNextColumn();
+                ImGui::Text("%s（当前）", label);
+            else
+                ImGui::TextUnformatted(label);
+            ImGui::TableNextColumn();
                 bool on = (mask & (1u << hour)) != 0;
-                ImGui::PushID(hour);
+            ImGui::PushID(hour);
                 if (ImGui::Checkbox("##h", &on)) {
                     if (on) mask |= (1u << hour);
                     else mask &= ~(1u << hour);
                     mask = hangup_schedule::ClampScheduleMask(mask);
                     s_saveFailed = !saveCore();
                 }
-                ImGui::PopID();
-            }
-            ImGui::EndTable();
+            ImGui::PopID();
         }
-        if (!enabled) ImGui::EndDisabled();
+        ImGui::EndTable();
+    }
+    if (!enabled) ImGui::EndDisabled();
     }
 
     if (s_saveFailed) {
@@ -1858,6 +2455,7 @@ void DrawMultiSkillTab(LaunchUiState& ui) {
 
     static bool master = false;
     static bool safeSerial = true;
+    static bool sendUseRequest = false;
     static int gapMs = static_cast<int>(xcat::kMultiSkillGapDefaultMs);
     static char search[64]{};
     static std::vector<std::string> selected;
@@ -1876,6 +2474,7 @@ void DrawMultiSkillTab(LaunchUiState& ui) {
         }
         master = c.multiSkill != 0;
         safeSerial = c.multiSkillSafeStagger != 0;
+        sendUseRequest = c.multiSkillSendUseRequest != 0;
         gapMs = static_cast<int>(xcat::ClampMultiSkillGapMs(c.multiSkillGapMs));
         s_uiWriteTick = c.writeTickMs;
         selected.clear();
@@ -1891,6 +2490,7 @@ void DrawMultiSkillTab(LaunchUiState& ui) {
         (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
         c.multiSkill = master ? 1u : 0u;
         c.multiSkillSafeStagger = safeSerial ? 1u : 0u;
+        c.multiSkillSendUseRequest = sendUseRequest ? 1u : 0u;
         c.multiSkillGapMs = xcat::ClampMultiSkillGapMs(static_cast<uint32_t>(gapMs));
         c.writeTickMs = GetTickCount64();
         if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
@@ -1952,7 +2552,15 @@ void DrawMultiSkillTab(LaunchUiState& ui) {
     ImGui::TextDisabled(master ? "已开" : "已关");
     if (xcat::ui::OptionCheckbox("安全串发", &safeSerial)) changed = true;
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-        ImGui::SetTooltip("开：攻击技间隔地板≥120ms；关：使用 gapMs（仍 clamp 40–500）");
+        ImGui::SetTooltip("开：攻击技间隔地板≥120ms；关：使用 gapMs（仍 clamp 1–500）");
+    }
+    if (xcat::ui::OptionCheckbox("技能发包直发", &sendUseRequest)) changed = true;
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::SetTooltip(
+            "可选（默认关）：\n"
+            "· 技能 → 优先 UserLocal.SendSkillUseRequest（失败回退 DoActiveSkill）\n"
+            "· 普通攻击 → 始终 OnFuncKey 正路组包（不接 Create(50) 手搓，避免踢号）\n"
+            "BUFF 页不受此开关影响。");
     }
     ImGui::SetNextItemWidth(AppDpi_Px(120.f));
     if (ImGui::DragInt("串发间隔 ms", &gapMs, 1, static_cast<int>(xcat::kMultiSkillGapMinMs),
@@ -2027,17 +2635,17 @@ void DrawMultiSkillTab(LaunchUiState& ui) {
         } else {
             xcat::BuffSkillDisplayLabel(code, name, label, sizeof(label), ui.prefsBinDir.c_str());
         }
-        Row r;
+            Row r;
         r.code = xcat::IsNormalAttackCode(code) ? xcat::kNormalAttackCode : code;
         r.name = label[0] ? label : (name && name[0] ? name : code);
         r.level = level;
-        rows.push_back(std::move(r));
+            rows.push_back(std::move(r));
     };
     // 普攻固定置顶（非 SkillRecord；走 attack_input_port）。
     pushDisplayRow(xcat::kNormalAttackCode, xcat::kNormalAttackDisplayName, 0);
     for (const auto& e : learned) {
         pushDisplayRow(e.code, e.name, e.level);
-    }
+        }
     for (const std::string& code : selected) {
         pushDisplayRow(code.c_str(), code.c_str(), 0);
     }
@@ -2095,8 +2703,9 @@ void DrawMultiSkillTab(LaunchUiState& ui) {
     if (changed) {
         s_saveFailed = !saveCore();
         if (!s_saveFailed) {
-            xcat::log::Ok("App", "已下发 multiSkill=%d gap=%d safe=%d sel=%d", master ? 1 : 0, gapMs,
-                         safeSerial ? 1 : 0, static_cast<int>(selected.size()));
+            xcat::log::Ok("App", "已下发 multiSkill=%d gap=%d safe=%d sendUse=%d sel=%d",
+                          master ? 1 : 0, gapMs, safeSerial ? 1 : 0, sendUseRequest ? 1 : 0,
+                          static_cast<int>(selected.size()));
         }
     }
     if (s_saveFailed) {
@@ -2110,12 +2719,20 @@ void DrawReloginTab(LaunchUiState& ui) {
     static bool detect = false;
     static bool stopCombat = true;
     static bool channelHop = true;
+    static bool hideOthers = false;
     static std::string s_loadedBin;
     static uint64_t s_lastTick = 0;
     static bool s_saveFailed = false;
 
     auto loadUi = [&]() {
-        if (ui.prefsBinDir.empty()) return;
+        if (ui.prefsBinDir.empty()) {
+            detect = false;
+            stopCombat = true;
+            channelHop = true;
+            hideOthers = false;
+            s_lastTick = 0;
+            return;
+        }
         xcat::PayloadControl c{};
         if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) {
             xcat::PayloadControlSetDefaults(c);
@@ -2123,6 +2740,7 @@ void DrawReloginTab(LaunchUiState& ui) {
         detect = c.autoRelogin != 0;
         stopCombat = c.autoReloginStopCombat != 0;
         channelHop = c.autoReloginReconnect != 0;
+        hideOthers = c.hideOtherPlayers != 0;
         s_lastTick = c.writeTickMs;
     };
 
@@ -2133,17 +2751,28 @@ void DrawReloginTab(LaunchUiState& ui) {
         c.autoRelogin = detect ? 1u : 0u;
         c.autoReloginStopCombat = stopCombat ? 1u : 0u;
         c.autoReloginReconnect = channelHop ? 1u : 0u;
+        c.hideOtherPlayers = hideOthers ? 1u : 0u;
         c.writeTickMs = GetTickCount64();
         if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
         s_lastTick = c.writeTickMs;
         return true;
     };
 
+    // 保存失败时回滚到磁盘，避免 ImGui 已翻转、DLL/ini 仍旧值（界面关实际开）。
+    auto trySaveOrRevert = [&]() {
+        if (saveUi()) {
+            s_saveFailed = false;
+            return;
+        }
+        s_saveFailed = true;
+        loadUi();
+    };
+
     if (s_loadedBin != ui.prefsBinDir) {
         s_loadedBin = ui.prefsBinDir;
         loadUi();
         s_saveFailed = false;
-    } else if (!ui.prefsBinDir.empty() && !ImGui::IsAnyItemActive()) {
+    } else if (!ui.prefsBinDir.empty() && !ImGui::IsAnyItemActive() && !s_saveFailed) {
         xcat::PayloadControl disk{};
         if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk) &&
             disk.writeTickMs != s_lastTick) {
@@ -2152,16 +2781,17 @@ void DrawReloginTab(LaunchUiState& ui) {
     }
 
     xcat::ui::CardGuard card("##tab_relogin", "有人来时怎么办");
-    if (xcat::ui::OptionCheckbox("检测同图玩家", &detect)) {
-        s_saveFailed = !saveUi();
-    }
+    if (xcat::ui::OptionCheckbox("检测同图玩家", &detect)) trySaveOrRevert();
     ImGui::Separator();
     ImGui::TextUnformatted("处理流程");
-    if (xcat::ui::OptionCheckbox("先停手", &stopCombat)) s_saveFailed = !saveUi();
-    if (xcat::ui::OptionCheckbox("一直有人就换频", &channelHop)) s_saveFailed = !saveUi();
+    if (xcat::ui::OptionCheckbox("先停手", &stopCombat)) trySaveOrRevert();
+    if (xcat::ui::OptionCheckbox("一直有人就换频", &channelHop)) trySaveOrRevert();
+    ImGui::Separator();
+    if (xcat::ui::OptionCheckbox("隐藏同图其他玩家", &hideOthers)) trySaveOrRevert();
+    ImGui::TextDisabled("藏皮/伤字(DamageSkin)/技能特效；自己可见；不影响遇人人数检测。");
     ImGui::TextDisabled("同图 UserPool 远程人数；换频走直调发包（无菜单）。");
     if (s_saveFailed) {
-        ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存遇人策略失败");
+        ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存遇人策略失败（已恢复为磁盘值）");
     }
 }
 
@@ -2245,7 +2875,7 @@ void DrawTimedKeysTab(LaunchUiState& ui) {
         ImGui::SetTooltip(
             "循环按下 7/8/9/0/-/=/Z；勾选后立即触发一次，之后按各键自身间隔重复。\n"
             "多键同时到期时约 150ms 依次触发；间隔 1~3600 秒，含 ±0.5s 抖动。\n"
-            "经典版走 InputManager.KeyDownTouch（非 SendInput）。");
+            "按键走 InputManager.KeyDownTouch（非 SendInput）。");
     }
     ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.5f));
 
@@ -2494,8 +3124,8 @@ void DrawBuffsTab(LaunchUiState& ui) {
                     // CD>0 优先显示剩余冷却；否则可放 / -
                     char cd[24]{};
                     if (skill.remainCooldownSec > 0.01f) {
-                        formatSec(skill.remainCooldownSec, cd, sizeof(cd));
-                        ImGui::TextUnformatted(cd);
+                    formatSec(skill.remainCooldownSec, cd, sizeof(cd));
+                    ImGui::TextUnformatted(cd);
                     } else if (skill.canCast || skill.learned) {
                         ImGui::TextUnformatted("可放");
                     } else {
@@ -2775,6 +3405,9 @@ void DrawTravelTab(LaunchUiState& ui) {
 void DrawBetaTab(LaunchUiState& ui) {
     DesignBanner();
     static bool dropInCombat = true;
+    static bool auctionTownBypass = false;
+    static bool frameLock = false;
+    static int frameLockFps = (int)xcat::kFrameLockFpsDefault;
     static bool skipDialog = false;
     static bool autoAccept = true;
     static bool autoFirst = false;
@@ -2786,6 +3419,10 @@ void DrawBetaTab(LaunchUiState& ui) {
         if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
             if (!dropLoaded || disk.writeTickMs != dropSeenTick) {
                 dropInCombat = disk.dropAlertBypass != 0;
+                auctionTownBypass = disk.auctionTownBypass != 0;
+                frameLock = disk.frameLock != 0;
+                frameLockFps = (int)xcat::ClampFrameLockFps(
+                    disk.frameLockFps ? disk.frameLockFps : xcat::kFrameLockFpsDefault);
                 gUiCombatLiveStep = disk.simpleCombatLiveStep != 0;
                 gUiAttackRpc = disk.attackRpc != 0;
                 gUiAttackRpcMobs = (int)xcat::ClampAttackRpcMobs(
@@ -2811,12 +3448,20 @@ void DrawBetaTab(LaunchUiState& ui) {
         xcat::PayloadControl c{};
         (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
         c.dropAlertBypass = dropInCombat ? 1u : 0u;
+        c.auctionTownBypass = auctionTownBypass ? 1u : 0u;
+        c.frameLock = frameLock ? 1u : 0u;
+        c.frameLockFps = xcat::ClampFrameLockFps(
+            static_cast<uint32_t>(frameLockFps < 0 ? 0 : frameLockFps));
+        frameLockFps = (int)c.frameLockFps;
         c.writeTickMs = GetTickCount64();
         if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
             dropSeenTick = c.writeTickMs;
-            xcat::log::Ok("App", "已下发 core：战斗中可丢物=%d", dropInCombat ? 1 : 0);
+            xcat::log::Ok("App",
+                          "已下发 core：战斗中可丢物=%d 野外可开拍卖=%d 引擎帧率锁=%d fps=%u",
+                          dropInCombat ? 1 : 0, auctionTownBypass ? 1 : 0, frameLock ? 1 : 0,
+                          c.frameLockFps);
         } else {
-            xcat::log::Warn("App", "写入 user.ini [core] dropAlertBypass 失败");
+            xcat::log::Warn("App", "写入 user.ini [core] drop/auction/frameLock 失败");
         }
     };
 
@@ -2845,24 +3490,265 @@ void DrawBetaTab(LaunchUiState& ui) {
         }
     };
 
+    {
     xcat::ui::CardGuard card("##tab_beta", "实验功能");
-    if (xcat::ui::OptionCheckbox("战斗中可丢物", &dropInCombat)) persistDrop();
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip(
-            "清 LocalUser 警戒时间戳：战斗中可丢物，并抑制客户端警戒\n"
-            "（打怪后警戒很快解除属预期）。仅客户端；服务端 Drop 权威不变。默认开。");
-    }
+        if (xcat::ui::OptionCheckbox("战斗中可丢物", &dropInCombat)) persistDrop();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "清 LocalUser 警戒时间戳：战斗中可丢物，并抑制客户端警戒\n"
+                "（打怪后警戒很快解除属预期）。仅客户端；服务端 Drop 权威不变。默认开。");
+        }
+        if (xcat::ui::OptionCheckbox("野外可开拍卖（仅客户端）", &auctionTownBypass))
+            persistDrop();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+            "静默绕过：开启后点游戏状态栏拍卖按钮，野外也会发迁移包(0x002E)\n"
+            "机制：零.text，维持 MapDataInfo.IsTown=1 并清 Option&0x10\n"
+            "仅客户端门控。服端常拒/断线(含 GlobalMarketTerminated)；\n"
+            "若开着「守护模式」会把断线当踢线→5秒干净重拉（像被杀死）。\n"
+            "挂机/守护期间建议关。默认关。\n"
+            "开启期间其它读 IsTown/该 Option 位的逻辑也会受影响。");
+        }
+        ImGui::Separator();
+        if (xcat::ui::OptionCheckbox("引擎帧率锁", &frameLock)) persistDrop();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "锁 Unity 主循环目标帧率（Application.targetFrameRate），并关闭引擎 vSync。\n"
+                "不修改显示器硬件刷新率。用于高低配显示器对齐打怪节奏。\n"
+                "预设 120 / 240 / 360 / 480；也可自定义（%u~%u）。默认关。\n"
+                "关闭时还原引擎 vSync=1（游戏无公开 getter，按经典版常见默认）。",
+                xcat::kFrameLockFpsMin, xcat::kFrameLockFpsMax);
+        }
+        ImGui::BeginDisabled(!frameLock);
+        {
+            auto presetBtn = [&](int fps) {
+                char lab[32];
+                std::snprintf(lab, sizeof(lab), "%d##fl_pre_%d", fps, fps);
+                const bool sel = frameLockFps == fps;
+                if (sel)
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                                         ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                if (ImGui::Button(lab, ImVec2(48.f, 0))) {
+                    frameLockFps = fps;
+                    persistDrop();
+                }
+                if (sel) ImGui::PopStyleColor();
+            };
+            ImGui::TextUnformatted("预设");
+            ImGui::SameLine();
+            presetBtn(120);
+            ImGui::SameLine();
+            presetBtn(240);
+            ImGui::SameLine();
+            presetBtn(360);
+            ImGui::SameLine();
+            presetBtn(480);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("点选即下发；开启态约 200ms 内由载荷重刷。");
+            }
+        }
+        ImGui::SetNextItemWidth(120.f);
+        if (ImGui::DragInt("自定义##frameLockFps", &frameLockFps, 1.f,
+                           (int)xcat::kFrameLockFpsMin, (int)xcat::kFrameLockFpsMax, "%d fps")) {
+            frameLockFps = (int)xcat::ClampFrameLockFps(
+                static_cast<uint32_t>(frameLockFps < 0 ? 0 : frameLockFps));
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) persistDrop();
+        ImGui::EndDisabled();
+        {
+            int rb = -1;
+            bool rbFresh = false;
+            if (!ui.prefsBinDir.empty()) {
+                xcat::PayloadStatus st{};
+                if (xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) &&
+                    xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000)) {
+                    rb = st.frameLockReadback;
+                    rbFresh = true;
+                }
+            }
+            if (!rbFresh) {
+                ImGui::TextDisabled("引擎读回：等待注入心跳…（非显示器 Hz）");
+            } else if (rb < 0) {
+                ImGui::TextDisabled("引擎读回：尚未采到（目标 %d）", frameLockFps);
+            } else {
+                const int drift = rb > frameLockFps ? (rb - frameLockFps) : (frameLockFps - rb);
+                if (frameLock && drift > 1) {
+                    ImGui::TextColored(ImVec4(1.f, 0.75f, 0.2f, 1.f),
+                                       "引擎读回：%d（目标 %d，偏差较大）", rb, frameLockFps);
+                } else {
+                    ImGui::TextDisabled("引擎读回：%d（目标 %d）", rb, frameLockFps);
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "读回 = Application.get_targetFrameRate（SHM PayloadStatus v7）。\n"
+                    "与目标差 >1 时常见于驱动/OS 覆盖；改的不是显示器硬件刷新率。");
+            }
+        }
+        ImGui::BeginDisabled();
+        skipDialog = false;
     xcat::ui::OptionCheckbox("快速跳过对话", &skipDialog);
-    if (skipDialog) {
-        ImGui::Indent(ui::Gap() * 1.2f);
-        xcat::ui::OptionCheckbox("自动接取/Yes", &autoAccept);
-        xcat::ui::OptionCheckbox("自动选列表第一项", &autoFirst);
-        ImGui::Unindent(ui::Gap() * 1.2f);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("当前未开发，暂不可用。");
+        }
+        ImGui::EndDisabled();
+        (void)autoAccept;
+        (void)autoFirst;
     }
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("打怪实验");
+    CardGap();
     {
+        xcat::ui::CardGuard card("##tab_beta_skip_prepare", "跳过 Prepare");
+        static bool skipPrepLoaded = false;
+        static uint64_t skipPrepSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!skipPrepLoaded || disk.writeTickMs != skipPrepSeen) {
+                    gUiAttackAccelSkipPrepare = disk.attackAccelSkipPrepare != 0;
+                    skipPrepSeen = disk.writeTickMs;
+                    skipPrepLoaded = true;
+                }
+            } else if (!skipPrepLoaded) {
+                skipPrepLoaded = true;
+            }
+        } else if (!skipPrepLoaded) {
+            skipPrepLoaded = true;
+        }
+
+        auto persistSkipPrep = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                skipPrepSeen = c.writeTickMs;
+                dropSeenTick = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：attackAccelSkipPrepare=%d（实验）",
+                              gUiAttackAccelSkipPrepare ? 1 : 0);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] attackAccelSkipPrepare 失败");
+            }
+        };
+
+        if (xcat::ui::OptionCheckbox("跳过 Prepare", &gUiAttackAccelSkipPrepare))
+            persistSkipPrep();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "实验项（默认关）：钉 LocalUser 虚表槽，拦住攻击类 PrepareActionLayer，\n"
+                "出刀仍写忙锁，但不建攻击动作层（无抬手）；跳过时清忙锁并回 Idle。\n"
+                "Idle(action=6) 永远透传；进图/换图落地约 1s 内不武装。\n"
+                "勾选从关→开也会重开落地窗。与下方「砍动画倒计时」互斥（开跳过则不砍层）。\n"
+                "不改攻击加速的清忙锁/攻速；关勾选即透传原 Prepare。\n"
+                "禁止 GA .text；防漂移装钩（哈希/RVA/扫槽）。");
+        }
+        ImGui::TextDisabled("Idle 透传；落地后才跳过攻击 Prepare");
+    }
+
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_beta_cut_layer", "砍动画倒计时");
+        static bool cutLayerLoaded = false;
+        static uint64_t cutLayerSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!cutLayerLoaded || disk.writeTickMs != cutLayerSeen) {
+                    gUiAttackAccelCutLayer = disk.attackAccelCutLayer != 0;
+                    cutLayerSeen = disk.writeTickMs;
+                    cutLayerLoaded = true;
+                }
+            } else if (!cutLayerLoaded) {
+                cutLayerLoaded = true;
+            }
+        } else if (!cutLayerLoaded) {
+            cutLayerLoaded = true;
+        }
+
+        auto persistCutLayer = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                cutLayerSeen = c.writeTickMs;
+                dropSeenTick = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：attackAccelCutLayer=%d（实验）",
+                              gUiAttackAccelCutLayer ? 1 : 0);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] attackAccelCutLayer 失败");
+            }
+        };
+
+        if (xcat::ui::OptionCheckbox("砍动画倒计时", &gUiAttackAccelCutLayer))
+            persistCutLayer();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "实验项（默认关）：周期把动作层 layer+0x14 倒计时置 0，\n"
+                "逼动画帧尽快推进，减轻连挥堆叠（偏视觉）。\n"
+                "不改攻击加速的清忙锁/攻速逻辑。\n"
+                "可能空砍/皮抽；可单独开，不依赖攻击加速「启用」。\n"
+                "会连带催快待机呼吸——更想「无动画」请用上方「跳过 Prepare」。\n"
+                "与「跳过 Prepare」互斥（开跳过则不砍层）。");
+        }
+        ImGui::TextDisabled("默认关；与「跳过 Prepare」勿同时开");
+    }
+
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_beta_booster", "攻速槽 nBooster_");
+        static bool boosterLoaded = false;
+        static uint64_t boosterSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!boosterLoaded || disk.writeTickMs != boosterSeen) {
+                    gUiAttackAccelBooster = disk.attackAccelBooster != 0;
+                    boosterSeen = disk.writeTickMs;
+                    boosterLoaded = true;
+                }
+            } else if (!boosterLoaded) {
+                boosterLoaded = true;
+            }
+        } else if (!boosterLoaded) {
+            boosterLoaded = true;
+        }
+
+        auto persistBooster = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.attackAccelBooster = gUiAttackAccelBooster ? 1u : 0u;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                boosterSeen = c.writeTickMs;
+                dropSeenTick = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：attackAccelBooster=%d（实验）",
+                              gUiAttackAccelBooster ? 1 : 0);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] attackAccelBooster 失败");
+            }
+        };
+
+        if (xcat::ui::OptionCheckbox("攻速槽 nBooster_", &gUiAttackAccelBooster))
+            persistBooster();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "实验项（默认关）：写 SecondaryStat.nBooster_=-8，把攻速 degree 夹到最快的 2，\n"
+                "攻击延迟 ×0.75；到期时间按游戏钟每拍续 60s，关勾选时原值奉还。\n"
+                "与「启用」（清忙锁）完全独立，就是为了能分别开来做对照：\n"
+                "实测「启用」开着时本项净收益为 0 —— 忙锁一清，引擎那道延迟闸就没了。\n"
+                "它真正的用法是**替掉**「启用」：只开本项，不碰动作忙锁，约慢 5ms 但更干净。\n"
+                "注意 -8 超出合法 booster 值域（正常只有 -1/-2），存在被识别的风险。");
+        }
+        ImGui::TextDisabled("对照用：与「启用」分开开关，可单独开");
+    }
+
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_beta_combat_exp", "打怪实验");
         // 贴怪瞬移产品常开；LiveStep 仍默认关。
         if (xcat::ui::OptionCheckbox("LiveStep 跟位", &gUiCombatLiveStep)) {
             if (ui.prefsBinDir.empty()) {
@@ -2897,13 +3783,13 @@ void DrawBetaTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
                 "实验项：伪造普通攻击出站包（事件），不是伪造伤害数字\n"
-                "opcode=50 skillId=0；服端会重算伤害，包内 dmg 只是线占位\n"
-                "测时请关掉挂机/SimpleCombat，否则 BIN 里的 op=50 分不清来源\n"
-                "成功标志：x.jsonl 出现 AttackRpc + forge BODY hex=01 ...\n"
+                "opcode=50；先 SetAttackAction+Collect，再 SendOutPacket\n"
+                "成功标志：x.jsonl AttackRpc + SetAttackAction + forge BODY + normal ok\n"
+                "单次勾选满 2 次 ok 自动关（防延后踢）；间隔建议 ≥800ms\n"
                 "也可设环境变量 ATTACK_RPC=1");
         }
         if (gUiAttackRpc) {
-            ImGui::Indent(ui::Gap() * 1.2f);
+        ImGui::Indent(ui::Gap() * 1.2f);
             if (ImGui::DragInt("##arpc_mobs", &gUiAttackRpcMobs, 1,
                                (int)xcat::kAttackRpcMobsMin, (int)xcat::kAttackRpcMobsMax)) {
                 persistAttackRpc();
@@ -2926,32 +3812,98 @@ void DrawBetaTab(LaunchUiState& ui) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                 ImGui::SetTooltip("写入包内 Encode4 占位；正式服通常重算，改这个不会改实际伤害");
             }
-            ImGui::Unindent(ui::Gap() * 1.2f);
+        ImGui::Unindent(ui::Gap() * 1.2f);
+    }
+    }
+
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_beta_tdr", "TDR黑屏缓解");
+        static tdr::Snapshot snap{};
+        static bool snapLoaded = false;
+        static std::string lastMsg;
+        if (!snapLoaded) {
+            snap = tdr::Read();
+            snapLoaded = true;
+        }
+
+        if (snap.readable) {
+            ImGui::Text("TdrDelay：%u 秒%s", snap.delaySec,
+                        snap.delayPresent ? "" : "（系统默认）");
+            ImGui::Text("TdrDdiDelay：%u 秒%s", snap.ddiSec,
+                        snap.ddiPresent ? "" : "（系统默认）");
+        } else {
+            ImGui::TextColored(ImVec4(1.f, 0.55f, 0.35f, 1.f), "读取失败：%s",
+                               snap.err.empty() ? "未知" : snap.err.c_str());
+        }
+        ImGui::TextDisabled(
+            "缓解 GPU 超时误杀（DEVICE_REMOVED）；改完须重启虚拟机/本机才生效。不治根。");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "写 HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers\n"
+                "TdrDelay / TdrDdiDelay（推荐 8 秒；系统默认 Delay≈2 / Ddi≈5）。\n"
+                "与攻击加速/游戏 core 无关；勿关 TDR（TdrLevel=0）。\n"
+                "需管理员（XCat 已提权）。改完必须重启才生效。");
+        }
+
+        const float halfW = (ImGui::GetContentRegionAvail().x - ui::Gap()) * 0.5f;
+        const float btnH = ui::BtnH();
+        if (ImGui::Button("设为 8 秒##tdr_apply", ImVec2(halfW, btnH))) {
+            std::string err;
+            if (tdr::ApplyRecommended(tdr::kRecommendedDelaySec, &err)) {
+                snap = tdr::Read();
+                lastMsg = "已写入 8 秒——请重启虚拟机后再生效";
+                xcat::log::Ok("App", "TDR：已写 TdrDelay/TdrDdiDelay=%u（须重启）",
+                              tdr::kRecommendedDelaySec);
+                notify::PushLocal(1, "tdr", "TDR 已写入",
+                                  "请重启虚拟机后再生效（缓解显示超时误杀）");
+            } else {
+                lastMsg = "写入失败：" + (err.empty() ? std::string("未知") : err);
+                xcat::log::Warn("App", "TDR 写入失败：%s", err.c_str());
+                notify::PushLocal(2, "tdr", "TDR 写入失败", err.c_str());
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("恢复默认##tdr_restore", ImVec2(halfW, btnH))) {
+            std::string err;
+            if (tdr::RestoreDefaults(&err)) {
+                snap = tdr::Read();
+                lastMsg = "已删自定义键——请重启虚拟机后恢复系统默认";
+                xcat::log::Ok("App", "TDR：已删除 TdrDelay/TdrDdiDelay（须重启）");
+                notify::PushLocal(1, "tdr", "TDR 已恢复默认", "请重启虚拟机后再生效");
+            } else {
+                lastMsg = "恢复失败：" + (err.empty() ? std::string("未知") : err);
+                xcat::log::Warn("App", "TDR 恢复失败：%s", err.c_str());
+                notify::PushLocal(2, "tdr", "TDR 恢复失败", err.c_str());
+            }
+        }
+        if (ImGui::Button("刷新读数##tdr_refresh", ImVec2(-1.f, btnH))) {
+            snap = tdr::Read();
+            lastMsg.clear();
+        }
+        if (!lastMsg.empty()) {
+            ImGui::TextWrapped("%s", lastMsg.c_str());
         }
     }
 
-    ImGui::Separator();
-    ImGui::TextUnformatted("经典版专项（预留）");
-    ImGui::TextDisabled("阴阳师灵力等 MSW 专属项不迁入 Classic");
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_beta_classic", "专项（预留）");
+    ImGui::TextDisabled("跨产品专属项不迁入本渠道");
+    }
 }
 
 void DrawDebugTab(LaunchUiState& ui) {
     DesignBanner();
     {
         xcat::ui::CardGuard card("##tab_dbg_status", "运行状态");
-        ImGui::Text("产品：%s", xcat::kXcatProductName);
+        ImGui::TextUnformatted("产品：XCat");
         ImGui::Text("版本：%s (build %u)", xcat::kXcatVersionString, xcat::kXcatBuildId);
+        ImGui::Text("启动模式：%s",
+                    attach_inject::LaunchModeLabel(attach_inject::GetLaunchMode()));
         ImGui::Text("取票策略：%s", msc::weblogin::AuthStrategyLabel(msc::weblogin::GetAuthStrategy()));
         ImGui::Text("验证码UI：%s", msc::weblogin::CaptchaUiModeLabel(msc::weblogin::GetCaptchaUiMode()));
-        ImGui::Text("WebView：%s",
-                    msc::weblogin::IsReady()
-                        ? "就绪"
-                        : (!msc::weblogin::IsRuntimeInstalled() ? "缺少 Runtime" : "未就绪"));
-        if (!msc::weblogin::IsRuntimeInstalled() &&
-            msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::WebViewOnly &&
-            ImGui::Button("下载安装 WebView2 Runtime", ImVec2(0.f, 0.f))) {
-            msc::weblogin::PromptRuntimeInstall(nullptr);
-        }
+        ImGui::TextDisabled("换票：GAMA PASS CDP / HTTP Beanfun（无 WebView2）");
         ImGui::Text("换票会话：%s", msc::weblogin::IsBusy() ? "忙碌" : "空闲");
         ImGui::TextDisabled("顶栏 5 灯：IPC / GameContext / LocalPlayer / Map / Cache");
         ImGui::TextDisabled("注入后由 PayloadStatus SHM 点亮 LP/Map；Cache=测谎 TypeResolve");
@@ -2959,8 +3911,278 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
+        xcat::ui::CardGuard card("##tab_dbg_maint", "日志 / 更新");
+        ImGui::TextWrapped("启动器 JSONL：bin/logs/launcher.jsonl");
+        ImGui::TextWrapped("注入 JSONL：bin/logs/inject.jsonl");
+        ImGui::TextWrapped("载荷 JSONL：bin/XCat_data/logs/x.jsonl");
+        ImGui::TextWrapped("换票文本：bin/launcher.log");
+        ImGui::TextWrapped("账号：仅 bin/account.txt（与 xcat.exe 同级；不写 LocalAppData）");
+        if (ImGui::Button("清空面板日志", ImVec2(AppDpi_Px(140.f), 0.f))) ui.logTail.clear();
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.6f));
+        ImGui::Separator();
+        ImGui::TextUnformatted("上报日志到 ops 服务");
+        DrawLogUploadPanel(ui.prefsBinDir);
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.6f));
+        ImGui::Separator();
+        DrawUpdateControl();
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_token", "TOKEN");
+        static char passBuf[64]{};
+        static bool passLoaded = false;
+        static std::string passLoadedFor;
+        if (!ui.prefsBinDir.empty() && (!passLoaded || passLoadedFor != ui.prefsBinDir)) {
+            const std::string cur = xcat::app::LoadOpsToken(ui.prefsBinDir);
+            std::snprintf(passBuf, sizeof(passBuf), "%s", cur.c_str());
+            passLoaded = true;
+            passLoadedFor = ui.prefsBinDir;
+        }
+        ImGui::SetNextItemWidth(AppDpi_Px(220.f));
+        ImGui::InputTextWithHint("##ops_token", "TOKEN", passBuf, sizeof(passBuf),
+                                 ImGuiInputTextFlags_Password);
+        const bool passCommit = ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SameLine();
+        if (ImGui::Button("保存##ops_token") || passCommit) {
+            if (ui.prefsBinDir.empty()) {
+                notify::PushLocal(/*Warn*/ 2, "ops-token", "无法保存", "未定位数据目录", 3500);
+            } else if (xcat::app::SaveOpsToken(ui.prefsBinDir, passBuf)) {
+                const std::string norm = xcat::app::NormalizeOpsToken(passBuf);
+                std::snprintf(passBuf, sizeof(passBuf), "%s", norm.c_str());
+                notify::PushLocal(/*Ok*/ 1, "ops-token", "已保存", "", 2500);
+            } else {
+                notify::PushLocal(/*Danger*/ 3, "ops-token", "保存失败", "", 3500);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("清空##ops_token_clr")) {
+            passBuf[0] = '\0';
+            if (ui.prefsBinDir.empty()) {
+                notify::PushLocal(/*Warn*/ 2, "ops-token", "无法清空", "未定位数据目录", 3500);
+            } else if (xcat::app::SaveOpsToken(ui.prefsBinDir, "")) {
+                notify::PushLocal(/*Ok*/ 1, "ops-token", "已清空", "", 2500);
+            } else {
+                notify::PushLocal(/*Danger*/ 3, "ops-token", "清空失败", "", 3500);
+            }
+        }
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_combat_tick", "打怪节奏");
+        static bool tickDbgLoaded = false;
+        static uint64_t tickDbgSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!tickDbgLoaded || disk.writeTickMs != tickDbgSeen) {
+                    gUiCombatTickMs = (int)xcat::ClampSimpleCombatTickMs(
+                        disk.simpleCombatTickMs ? disk.simpleCombatTickMs
+                                               : xcat::kSimpleCombatTickDefaultMs);
+                    gUiAttackHoldMs = (int)xcat::ClampAttackHoldMs(
+                        disk.simpleCombatAttackHoldMs ? disk.simpleCombatAttackHoldMs
+                                                      : xcat::kAttackHoldDefaultMs);
+                    tickDbgSeen = disk.writeTickMs;
+                    tickDbgLoaded = true;
+                }
+            } else if (!tickDbgLoaded) {
+                tickDbgLoaded = true;
+            }
+        } else if (!tickDbgLoaded) {
+            tickDbgLoaded = true;
+        }
+
+        auto persistTiming = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.simpleCombatTickMs = xcat::ClampSimpleCombatTickMs(
+                static_cast<uint32_t>(gUiCombatTickMs < 0 ? 0 : gUiCombatTickMs));
+            gUiCombatTickMs = (int)c.simpleCombatTickMs;
+            c.simpleCombatAttackHoldMs = xcat::ClampAttackHoldMs(
+                static_cast<uint32_t>(gUiAttackHoldMs < 0 ? 0 : gUiAttackHoldMs));
+            gUiAttackHoldMs = (int)c.simpleCombatAttackHoldMs;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                tickDbgSeen = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：simpleCombatTickMs=%u hold=%u（调试）",
+                              c.simpleCombatTickMs, c.simpleCombatAttackHoldMs);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] 打怪节奏参数失败");
+            }
+        };
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("TICK值");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+        if (ImGui::DragInt("##dbg_combat_tick_ms", &gUiCombatTickMs, 1,
+                           (int)xcat::kSimpleCombatTickMinMs, (int)xcat::kSimpleCombatTickMaxMs))
+            persistTiming();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "打怪状态机心跳（%u–%u ms，默认 %u）。\n"
+                "与是否开攻击加速无关；越短出刀机会越多。\n"
+                "下限 %u ms；过短更吃 CPU/主线程。",
+                (unsigned)xcat::kSimpleCombatTickMinMs, (unsigned)xcat::kSimpleCombatTickMaxMs,
+                (unsigned)xcat::kSimpleCombatTickDefaultMs, (unsigned)xcat::kSimpleCombatTickMinMs);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextUnformatted("ms");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::TextDisabled("全局心跳 · 非仅加速");
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("按键hold");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+        if (ImGui::DragInt("##dbg_attack_hold_ms", &gUiAttackHoldMs, 1,
+                           (int)xcat::kAttackHoldMinMs, (int)xcat::kAttackHoldMaxMs))
+            persistTiming();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "出刀按键按下到松开的时长（%u–%u ms，默认 %u）。\n"
+                "实际取 min(此值, 出刀间隔)：hold ≥ 间隔会把下一刀锁死。\n"
+                "注意：开着「攻击加速」时走 Down+Up 同泵的 pulse 路径，hold=0，此项不参与；\n"
+                "只有关掉加速、走异步松键时才有效。\n"
+                "调太小可能个别刀不被引擎识别（看日志 whiff 是否变多）。",
+                (unsigned)xcat::kAttackHoldMinMs, (unsigned)xcat::kAttackHoldMaxMs,
+                (unsigned)xcat::kAttackHoldDefaultMs);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextUnformatted("ms");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::TextDisabled("加速开启时不参与");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_pump_drain", "主线程泵 Drain");
+        static int pumpDrainBudget = (int)xcat::kPumpDrainBudgetDefault;
+        static bool drainDbgLoaded = false;
+        static uint64_t drainDbgSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!drainDbgLoaded || disk.writeTickMs != drainDbgSeen) {
+                    pumpDrainBudget = (int)xcat::ClampPumpDrainBudget(
+                        disk.pumpDrainBudget ? disk.pumpDrainBudget
+                                             : xcat::kPumpDrainBudgetDefault);
+                    drainDbgSeen = disk.writeTickMs;
+                    drainDbgLoaded = true;
+                }
+            } else if (!drainDbgLoaded) {
+                drainDbgLoaded = true;
+            }
+        } else if (!drainDbgLoaded) {
+            drainDbgLoaded = true;
+        }
+
+        auto persistDrain = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.pumpDrainBudget = xcat::ClampPumpDrainBudget(
+                static_cast<uint32_t>(pumpDrainBudget < 0 ? 0 : pumpDrainBudget));
+            pumpDrainBudget = (int)c.pumpDrainBudget;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                drainDbgSeen = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：pumpDrainBudget=%u（调试）",
+                              c.pumpDrainBudget);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] pumpDrainBudget 失败");
+            }
+        };
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("每 tick Drain");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+        if (ImGui::DragInt("##dbg_pump_drain", &pumpDrainBudget, 1,
+                           (int)xcat::kPumpDrainBudgetMin, (int)xcat::kPumpDrainBudgetMax)) {
+            pumpDrainBudget = (int)xcat::ClampPumpDrainBudget(
+                static_cast<uint32_t>(pumpDrainBudget < 0 ? 0 : pumpDrainBudget));
+            persistDrain();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "主线程泵每个宿主 tick 最多执行多少个排队 job（%u–%u，默认 %u=抽干整队）。\n"
+                "队列共 %u 格。调小=单帧更轻、易 defer/跳刀；调大=吞吐更高、单帧可能更尖。\n"
+                "与首页「拥堵让路阈值」无关：那是背压，这项是每 tick 清队上限。",
+                (unsigned)xcat::kPumpDrainBudgetMin, (unsigned)xcat::kPumpDrainBudgetMax,
+                (unsigned)xcat::kPumpDrainBudgetDefault, (unsigned)xcat::kPumpDrainBudgetMax);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextDisabled("格 · 默认抽干");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_tp_hop", "贴怪 hop");
+        static int teleportMaxHop = (int)xcat::kCombatTeleportMaxHopDefault;
+        static bool hopDbgLoaded = false;
+        static uint64_t hopDbgSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!hopDbgLoaded || disk.writeTickMs != hopDbgSeen) {
+                    teleportMaxHop = (int)xcat::ClampCombatTeleportMaxHop(
+                        disk.simpleCombatTeleportMaxHop ? disk.simpleCombatTeleportMaxHop
+                                                       : xcat::kCombatTeleportMaxHopDefault);
+                    hopDbgSeen = disk.writeTickMs;
+                    hopDbgLoaded = true;
+                }
+            } else if (!hopDbgLoaded) {
+                hopDbgLoaded = true;
+            }
+        } else if (!hopDbgLoaded) {
+            hopDbgLoaded = true;
+        }
+
+        auto persistHop = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.simpleCombatTeleportMaxHop = xcat::ClampCombatTeleportMaxHop(
+                static_cast<uint32_t>(teleportMaxHop < 0 ? 0 : teleportMaxHop));
+            teleportMaxHop = (int)c.simpleCombatTeleportMaxHop;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                hopDbgSeen = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：simpleCombatTeleportMaxHop=%u（调试）",
+                              c.simpleCombatTeleportMaxHop);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] simpleCombatTeleportMaxHop 失败");
+            }
+        };
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("单次上限");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(64.f));
+        if (ImGui::DragInt("##dbg_tp_max_hop", &teleportMaxHop, 1,
+                           (int)xcat::kCombatTeleportMaxHopMin,
+                           (int)xcat::kCombatTeleportMaxHopMax)) {
+            teleportMaxHop = (int)xcat::ClampCombatTeleportMaxHop(
+                static_cast<uint32_t>(teleportMaxHop < 0 ? 0 : teleportMaxHop));
+            persistHop();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "贴怪单次瞬移最大距离（%u–%u px，默认 %u）。\n"
+                "更远会分段贴近；过大易软断（lean_local_or_soft）。",
+                (unsigned)xcat::kCombatTeleportMaxHopMin, (unsigned)xcat::kCombatTeleportMaxHopMax,
+                (unsigned)xcat::kCombatTeleportMaxHopDefault);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextUnformatted("px");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::TextDisabled("建议 350–550 · 默认 %u（盖中→顶层）",
+                            (unsigned)xcat::kCombatTeleportMaxHopDefault);
+    }
+    CardGap();
+    {
         xcat::ui::CardGuard card("##tab_dbg_miss", "锚点 MISS 灯");
-        ImGui::TextDisabled("绿=OK · 黄=降级(shape/部分MI) · 红=MISS · 灰=未上报/未注入");
+        ImGui::TextDisabled("绿=OK · 黄=降级(shape/部分MI) · 红=MISS · 灰=pending(已占位未决)");
+        ImGui::TextDisabled("注入后整表先灰后变色；某灯一直灰=对应 feature 尚未上报/卡在绑定前");
         xcat::AnchorLampsStatus lamps{};
         const bool have = !ui.prefsBinDir.empty() &&
                           xcat::ReadAnchorLamps(ui.prefsBinDir.c_str(), lamps) &&
@@ -3287,29 +4509,12 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
-        xcat::ui::CardGuard card("##tab_dbg_maint", "日志 / 更新");
-        ImGui::TextWrapped("启动器 JSONL：bin/logs/launcher.jsonl");
-        ImGui::TextWrapped("注入 JSONL：bin/logs/inject.jsonl");
-        ImGui::TextWrapped("载荷 JSONL：bin/XCat_data/logs/x.jsonl");
-        ImGui::TextWrapped("换票文本：bin/launcher.log（WebView 兼容）");
-        ImGui::TextWrapped("账号：bin/account.txt（与 xcat.exe 同级）");
-        if (ImGui::Button("清空面板日志", ImVec2(AppDpi_Px(140.f), 0.f))) ui.logTail.clear();
-        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.6f));
-        ImGui::Separator();
-        ImGui::TextUnformatted("上报日志到 ops 服务");
-        DrawLogUploadPanel(ui.prefsBinDir);
-        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.6f));
-        ImGui::Separator();
-        DrawUpdateControl();
-    }
-    CardGap();
-    {
         xcat::ui::CardGuard card("##tab_dbg_about", "关于");
         ImGui::TextWrapped(
-            "目标服：新楓之谷：經典版（TW beanfun / Gamania Galaxy）。\n"
-            "换票：同进程 WebView2（静默后台，不占 ImGui 区域）。\n"
-            "UI：对齐 xcat_for_fengxing 工作区 Tab + CardGuard。\n"
-            "功能页按模块接入；挂机时段已接 launcher 调度（杀/启 Classic）。");
+            "目标渠道：TW（换票 / 官方启动链）。\n"
+            "换票：同进程 GAMA PASS CDP / HTTP Beanfun。\n"
+            "UI：工作区 Tab + CardGuard。\n"
+            "功能页按模块接入；挂机时段已接 launcher 调度（杀/启游戏）。");
     }
 }
 

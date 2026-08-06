@@ -19,6 +19,12 @@ struct PortalInfo {
     float       y = 0.f;
     int         pt = 0;
     int         toMapId = 0;
+    // 触发区（FindMovePortal 几何）；由 PortalRect 或 H/VImpact 推导
+    bool  rectValid = false;
+    float rectL = 0.f;
+    float rectT = 0.f;
+    float rectR = 0.f;
+    float rectB = 0.f;
 };
 
 enum class FireMode {
@@ -30,6 +36,9 @@ enum class FireMode {
 };
 
 bool EnsureBound();
+
+// 急切绑定 Unity Transform.set_position 等（MISS 灯 TravelPos）。
+void Init();
 
 std::string CurrentMapKey();
 int CurrentMapId();

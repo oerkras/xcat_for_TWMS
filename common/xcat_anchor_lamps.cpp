@@ -10,7 +10,7 @@ namespace xcat {
 namespace {
 
 constexpr uint32_t kShmMagic = 0x58434153u;  // 'XCAS'
-constexpr uint32_t kShmVersion = 1u;
+constexpr uint32_t kShmVersion = 2u;
 
 struct AnchorLampsShared {
     uint32_t magic = kShmMagic;

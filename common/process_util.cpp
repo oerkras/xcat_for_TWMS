@@ -150,6 +150,18 @@ unsigned KillProcessesByExeName(std::wstring_view exeName) {
     return killed;
 }
 
+unsigned KillClassicGameWithRetry(unsigned maxRounds, DWORD gapMs) {
+    if (maxRounds == 0) maxRounds = 1;
+    unsigned total = 0;
+    for (unsigned round = 0; round < maxRounds; ++round) {
+        total += KillProcessesByExeName(L"Maplestory_Classic.exe");
+        const DWORD waitMs = gapMs + 500u;
+        if (WaitUntilNoProcessByName(L"Maplestory_Classic.exe", waitMs)) break;
+        if (round + 1 < maxRounds && gapMs > 0) Sleep(gapMs);
+    }
+    return total;
+}
+
 bool WaitUntilNoProcessByName(std::wstring_view exeName, DWORD timeoutMs) {
     if (exeName.empty()) return true;
     const ULONGLONG deadline = GetTickCount64() + static_cast<ULONGLONG>(timeoutMs);

@@ -4,6 +4,7 @@
 #endif
 #include "mob_scan.h"
 
+#include "../../../common/xcat_payload_control.h"
 #include "../ports/foothold_port.h"
 #include "../ports/foothold_path.h"
 #include "../ports/mob_pool_port.h"
@@ -26,15 +27,16 @@ namespace features {
 namespace mob_scan {
 namespace {
 
-// BIN：攻击加速下缓存 360ms 会拖尸体空砍；打怪开启时压到 50ms 对齐同行瞬切。
+// BIN：攻击加速下缓存 360ms 会拖尸体空砍；打怪开启时用面板周期（默认 50）对齐同行瞬切。
 constexpr DWORD kScanIntervalIdleMs = 360;
-constexpr DWORD kScanIntervalCombatMs = 50;
 constexpr DWORD kIdleSleepMs = 15;
 constexpr DWORD kForceLogMs = 5000;
+constexpr DWORD kCountLogMs = 500;  // count 变：短摘要写盘上限
 constexpr DWORD kMissLogMs = 15000;
 
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
+std::atomic<uint32_t> gCombatIntervalMs{xcat::kMobScanIntervalDefaultMs};
 HANDLE gLog = INVALID_HANDLE_VALUE;
 
 void WriteLogHandle(HANDLE h, const char* buf, int n) {
@@ -65,6 +67,27 @@ void OpenLog() {
     gLog = x::runtime::OpenRotatingDbgLog(dir, L"mobscan.log");
 }
 
+// 高频扫描摘要只写 mobscan.log；低频事件才 LogI→x.jsonl。
+void LogToFile(const char* fmt, ...) {
+    char body[1200];
+    va_list ap;
+    va_start(ap, fmt);
+    int bn = vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    if (bn < 0) return;
+    if (bn >= (int)sizeof(body)) bn = (int)sizeof(body) - 1;
+    body[bn] = '\0';
+
+    char buf[1400];
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    int n = snprintf(buf, sizeof(buf), "%02u:%02u:%02u.%03u %s\n", st.wHour, st.wMinute,
+                     st.wSecond, st.wMilliseconds, body);
+    if (n < 0) return;
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    WriteLogHandle(gLog, buf, n);
+}
+
 void LogLine(const char* fmt, ...) {
     char body[1200];
     va_list ap;
@@ -91,15 +114,17 @@ DWORD WINAPI Worker(LPVOID) {
     timeBeginPeriod(1);
     OpenLog();
     LogLine("mob_scan worker start idle=%ums combat=%ums", (unsigned)kScanIntervalIdleMs,
-            (unsigned)kScanIntervalCombatMs);
+            (unsigned)gCombatIntervalMs.load(std::memory_order_acquire));
 
     DWORD lastScan = 0;
     DWORD lastForceLog = 0;
+    DWORD lastCountLog = 0;
     DWORD lastMissLog = 0;
     int lastCount = -1;
     int lastSlots = -999;
     int lastFhMapId = -1;
     bool lastCombat = false;
+    DWORD lastCombatInterval = 0;
 
     while (!gWorkerStop.load(std::memory_order_acquire)) {
         const DWORD now = GetTickCount();
@@ -124,12 +149,15 @@ DWORD WINAPI Worker(LPVOID) {
         }
 
         const bool combatOn = simple_combat::IsEnabled();
-        const DWORD interval = combatOn ? kScanIntervalCombatMs : kScanIntervalIdleMs;
-        if (combatOn != lastCombat) {
+        const DWORD combatInterval = static_cast<DWORD>(
+            xcat::ClampMobScanIntervalMs(gCombatIntervalMs.load(std::memory_order_acquire)));
+        const DWORD interval = combatOn ? combatInterval : kScanIntervalIdleMs;
+        if (combatOn != lastCombat || (combatOn && combatInterval != lastCombatInterval)) {
             lastCombat = combatOn;
+            lastCombatInterval = combatInterval;
             LogLine("mobscan pace %s interval=%ums", combatOn ? "combat" : "idle",
                     (unsigned)interval);
-            lastScan = 0;  // 立刻扫一帧，避免切模式空窗
+            lastScan = 0;  // 立刻扫一帧，避免切模式/改速空窗
         }
         if (lastScan && now - lastScan < interval) {
             Sleep(kIdleSleepMs);
@@ -163,29 +191,47 @@ DWORD WINAPI Worker(LPVOID) {
             continue;
         }
 
+        // 日志与扫描解耦：count 变 → 短摘要（仅文件，≥kCountLogMs）；
+        // 每 kForceLogMs → 带样例（文件+x.jsonl）。
         const bool countChanged = snap.count != lastCount || snap.spawnSlots != lastSlots;
         const bool force = !lastForceLog || (now - lastForceLog >= kForceLogMs);
-        if (!countChanged && !force) continue;
+        const bool countLog =
+            countChanged && (!lastCountLog || now - lastCountLog >= kCountLogMs);
+        if (!countLog && !force) {
+            if (countChanged) {
+                lastCount = snap.count;
+                lastSlots = snap.spawnSlots;
+            }
+            continue;
+        }
 
         lastCount = snap.count;
         lastSlots = snap.spawnSlots;
-        lastForceLog = now;
-
-        char sample[512]{};
-        int sn = 0;
-        const int show = snap.count < 5 ? snap.count : 5;
-        for (int i = 0; i < show; ++i) {
-            const auto& m = snap.mobs[i];
-            const int left = (int)sizeof(sample) - sn;
-            if (left < 48) break;
-            sn += snprintf(sample + sn, (size_t)left, " [%d id=%d tpl=%d hp=%d%% (%.0f,%.0f)]", i,
-                           m.id, m.templateId, m.hpPct, m.x, m.y);
-        }
-
         const int fk = ports::world::GetMapSceneKey();
-        LogLine("mobscan n=%d/M=%d map=%d lifeMob=%d lifeAll=%d raw=%d trunc=%d mapKey=%d%s",
-                snap.count, snap.spawnSlots, snap.mapId, snap.lifeMob, snap.lifeAll, snap.rawDict,
-                snap.truncated ? 1 : 0, fk, sample);
+
+        if (force) {
+            lastForceLog = now;
+            lastCountLog = now;
+            char sample[512]{};
+            int sn = 0;
+            const int show = snap.count < 5 ? snap.count : 5;
+            for (int i = 0; i < show; ++i) {
+                const auto& m = snap.mobs[i];
+                const int left = (int)sizeof(sample) - sn;
+                if (left < 48) break;
+                sn += snprintf(sample + sn, (size_t)left,
+                               " [%d id=%d tpl=%d hp=%d%% (%.0f,%.0f)]", i, m.id, m.templateId,
+                               m.hpPct, m.x, m.y);
+            }
+            LogLine("mobscan n=%d/M=%d map=%d lifeMob=%d lifeAll=%d raw=%d trunc=%d mapKey=%d%s",
+                    snap.count, snap.spawnSlots, snap.mapId, snap.lifeMob, snap.lifeAll,
+                    snap.rawDict, snap.truncated ? 1 : 0, fk, sample);
+        } else {
+            lastCountLog = now;
+            LogToFile("mobscan n=%d/M=%d map=%d lifeMob=%d lifeAll=%d raw=%d trunc=%d mapKey=%d",
+                      snap.count, snap.spawnSlots, snap.mapId, snap.lifeMob, snap.lifeAll,
+                      snap.rawDict, snap.truncated ? 1 : 0, fk);
+        }
     }
 
     LogLine("mob_scan worker stop");
@@ -224,6 +270,16 @@ void StopWorker() {
     HANDLE th = gWorkerThread.exchange(nullptr, std::memory_order_acq_rel);
     // DllMain detach: never join (loader lock). Just signal.
     if (th) CloseHandle(th);
+}
+
+void SetCombatIntervalMs(uint32_t ms) {
+    const uint32_t v = xcat::ClampMobScanIntervalMs(ms ? ms : xcat::kMobScanIntervalDefaultMs);
+    const uint32_t prev = gCombatIntervalMs.exchange(v, std::memory_order_acq_rel);
+    if (prev != v) LogLine("SetCombatIntervalMs %u (prev=%u)", (unsigned)v, (unsigned)prev);
+}
+
+uint32_t GetCombatIntervalMs() {
+    return gCombatIntervalMs.load(std::memory_order_acquire);
 }
 
 }  // namespace mob_scan

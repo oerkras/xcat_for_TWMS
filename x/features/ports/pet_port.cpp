@@ -1,4 +1,4 @@
-// pet_port ?Classic TWMS pet read-state + activate (P0c).
+// pet_port — Classic TWMS pet read-state + activate (P0c).
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -6,13 +6,16 @@
 
 #include "world_port.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
+#include "../../runtime/main_thread_pump.h"
 #include "../../runtime/managed_main.h"
+#include "../../runtime/anchor_lamps.h"
+#include "../../ui/player_vitals.h"
 
 #include <Psapi.h>
-#include <atomic>
 #include <cstring>
 
 #pragma comment(lib, "Psapi.lib")
@@ -25,36 +28,79 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E3FA20;  // remapped 2026-08-03
-constexpr uint32_t kRvaCompGetGo = 0x4E47E00;  // remapped 2026-08-03
-constexpr uint32_t kRvaObjGetName = 0x4E54D60;  // remapped 2026-08-03
-constexpr uint32_t kRvaSendWillRenderCanvases = 0x5239AB0;  // remapped 2026-08-03
-constexpr uint32_t kRvaSendActivatePetRequest = 0xC56910;  // remapped 2026-08-03
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04
+constexpr uint32_t kRvaCompGetGo = 0x4E53330;              // remounted 2026-08-04
+constexpr uint32_t kRvaObjGetName = 0x4E60290;             // remounted 2026-08-04
+constexpr uint32_t kRvaSendActivatePetRequest = 0xC5A960;  // remounted 2026-08-04
 constexpr char kHashSendActivatePet[] =
-    "bda41ac00e6e562f7370087756222c00497dcb55dd3fb99c4d9f96c436649a9";
+    "b2c39570b0512792466530313a22b91bb9929131024081d578d55bb1778aa00";
 
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 constexpr char kCashItemManagerClass[] =
-    "edfa536aa4e0251d8e7ae705fd533c40eb0a4a55ae0a8d596e09f711d527f11";
+    "da9619a468e583349c55afeb25a23df1e101d6b8d1e8f4c222ce18f7ec8f878";
+constexpr char kUserClass[] =
+    "d9ad004bbff1a41ca96697c8e44ed3175dae9846fb772898fd54ec65040348b";  // TDI:1560
 
-constexpr size_t kOffWmMyUser = 0x28;
-constexpr size_t kOffWmCharacterData = 0xE0;
-constexpr size_t kOffCdItemSlots = 0x40;
-constexpr size_t kOffApPet = 0x2B0;  // TW User.m_apPet 2026-08-03
-constexpr size_t kOffPetRepleteness = 0xBC;
-constexpr size_t kOffItemId = 0x10;
-constexpr size_t kOffBundleNumber = 0x28;
-constexpr size_t kOffSlotRepleteness = 0x38;
-constexpr size_t kOffDateDead = 0x40;  // DateTime?ticks + kind?
-constexpr size_t kOffRemainLife = 0x48;
-constexpr size_t kOffActiveState = 0x4E;
-// .NET DateTime?? 62 bit = ticks???? dateDead ? 2078/2079?????????
+// dump fallback；运行时 hash + field_get_offset 优先
+constexpr size_t kFbWmMyUser = 0x28;
+constexpr size_t kFbApPet = 0x2B0;
+constexpr size_t kFbLogicalPos = 0x240;
+constexpr size_t kFbVisPos = 0x64;
+constexpr char kHashFldWmMyUser[] =
+    "<d4428e1b7aab1a1fca5b6951009bf64f2c5cfb39f9a183f582fed4ff3a1aaaa>k__BackingField";
+constexpr char kHashFldApPet[] =
+    "a3e632d00632a74fdc95dc470f10e1a8979e81b032d7d8eac27dfeb6a13074c";
+constexpr char kHashFldCurPos[] =
+    "b992bfa57dd45d484f39e25a6290a95d76e19fc1059423bff8fb0c9507dbda7";
+constexpr char kHashFldFieldPos[] =
+    "c9d7ef4393802ebe9fdf9ebe7eaf7245d5cef3eeaa2a8d052fb4ad4883e34dc";
+constexpr char kVecCtrlOwnerClass[] =
+    "ddef6db860cfa2bea6dca39e201bf3065a897797f86009fb4d6104830143d94";
+
+struct PetFieldOff {
+    size_t wmMyUser = kFbWmMyUser;
+    size_t apPet = kFbApPet;
+    size_t logicalPos = kFbLogicalPos;
+    size_t visPos = kFbVisPos;
+    bool tried = false;
+    const char* path = "fallback";
+};
+PetFieldOff gOff{};
+
+#define kOffWmMyUser (gOff.wmMyUser)
+#define kOffApPet (gOff.apPet)
+#define kOffLogicalPos (gOff.logicalPos)
+#define kOffVisPos (gOff.visPos)
+
+// 背包列表：SSOT = player_vitals（ItemSlots hash）；本文件不再钉 CD 偏移。
+// Pet / ItemSlotPet：hash → field_get_offset
+constexpr char kPetClass[] =
+    "f5be2907a4e45eab8f0728f4335609468c882e48c120846124031faddb9b9f2";
+constexpr char kItemSlotPetClass[] =
+    "c4f17c2d5bd81b5d8e01da93b92b81b91ea9237ecaa08791d6be71784fe6d41";
+constexpr char kHashPetRepleteness[] =
+    "cdd2e2ec01a3de26f3f2146ca483c5e23abef3110d60b6712108078bd2d717d";
+constexpr char kHashSlotRepleteness[] =
+    "cf0c3076077ad451da3c44894bcaeed751a8127ead64c82d09fb5e8007fc830";
+constexpr char kHashDateDead[] =
+    "ca1ab0f8f44b56398566e7d287c7e67fd423775448fcfb0b5173d29686803e1";
+constexpr char kHashRemainLife[] =
+    "c71dc99cf198b0e7287e04be21a34864d6be4051106ab969fb79b472624aca4";
+constexpr char kHashActiveState[] =
+    "a6be7648d376879ba30ca97a67f4c803d34746e2c906510d188f7cc4dc6bc48";
+constexpr size_t kFbPetRepleteness = 0xBC, kFbSlotRepleteness = 0x38, kFbDateDead = 0x40;
+constexpr size_t kFbRemainLife = 0x48, kFbActiveState = 0x4E;
+size_t gOffPetRepleteness = kFbPetRepleteness, gOffSlotRepleteness = kFbSlotRepleteness;
+size_t gOffDateDead = kFbDateDead, gOffRemainLife = kFbRemainLife, gOffActiveState = kFbActiveState;
+#define kOffPetRepleteness (gOffPetRepleteness)
+#define kOffSlotRepleteness (gOffSlotRepleteness)
+#define kOffDateDead (gOffDateDead)
+#define kOffRemainLife (gOffRemainLife)
+#define kOffActiveState (gOffActiveState)
+// .NET DateTime：低 62 bit = ticks；永久宠 dateDead 常落在 2078/2079。
 constexpr int64_t kDateTimeTicksMask = 0x3FFFFFFFFFFFFFFFLL;
-// ~? 2070????????/??????????????????/??
 constexpr int64_t kPetPermanentTicksFloor = 653000000000000000LL;
 constexpr size_t kOffCachedPtr = 0x10;
-constexpr size_t kOffVisPos = 0x64;
-constexpr size_t kOffLogicalPos = 0x240;
 
 constexpr int kItemTypeConsume = 2;
 constexpr int kItemTypeCash = 5;
@@ -75,7 +121,6 @@ using FnClassParent = void* (*)(void* klass);
 using FnRuntimeClassInit = void (*)(void* klass);
 using FnCompGo = void* (*)(void* comp, void* methodInfo);
 using FnObjName = void* (*)(void* go, void* methodInfo);
-using FnSendWill = void (*)(const void* methodInfo);
 using FnActivatePet = void (*)(void* self, int nPos, const void* methodInfo);
 
 struct MethodInfoHead {
@@ -96,24 +141,10 @@ void* gLuType = nullptr;
 void* gLocalUser = nullptr;
 void* gCashMgrKlass = nullptr;
 void* gCashMgr = nullptr;
-void* gKlassCanvas = nullptr;
-MethodInfoHead* gMiSendWill = nullptr;
 MethodInfoHead* gMiActivate = nullptr;
-FnSendWill gOrigSendWill = nullptr;
-std::atomic<bool> gPumpInstalled{false};
-std::atomic<bool> gInPump{false};
 
 DWORD gLastLuRebind = 0;
 DWORD gLastCashRebind = 0;
-
-std::atomic<bool> gJobPending{false};
-std::atomic<bool> gJobDone{false};
-std::atomic<bool> gJobOk{false};
-std::atomic<uint32_t> gJobSerial{0};  // timeout 后晚到的泵不得再发包
-int gJobPos = 0;
-uint32_t gJobArmedSerial = 0;  // 与 gJobPos 同受 gJobCs 保护
-CRITICAL_SECTION gJobCs{};
-bool gJobCsInit = false;
 
 template <typename T>
 T AtRva(uint32_t rva) {
@@ -158,12 +189,12 @@ uint16_t ReadU16(void* obj, size_t off) {
 
 int ListSize(void* list) {
     if (!list) return 0;
-    return ReadI32(list, 0x18);
+    return ReadI32(list, x::runtime::il2cpp_container::OffListSize());
 }
 
 void* ListAt(void* list, int i) {
     if (!list || i < 0) return nullptr;
-    void* items = ReadPtr(list, 0x10);
+    void* items = ReadPtr(list, x::runtime::il2cpp_container::OffListItems());
     if (!items) return nullptr;
     return ArrayAt(items, (uintptr_t)i);
 }
@@ -217,18 +248,96 @@ void* FindClassTypeObject(const char* className) {
     return x::runtime::il2cpp::FindClassTypeObject(className);
 }
 
-MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
-    if (!klass || !gClassGetMethods || !gGA) return nullptr;
-    const uintptr_t want = reinterpret_cast<uintptr_t>(gGA) + rva;
-    void* iter = nullptr;
+bool FieldOffOrFb(void* klass, const char* fieldHash, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !fieldHash) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    void* field = nullptr;
     __try {
-        for (;;) {
-            void* miRaw = gClassGetMethods(klass, &iter);
-            if (!miRaw) break;
-            auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
-            if (reinterpret_cast<uintptr_t>(mi->methodPointer) == want) return mi;
-        }
+        field = e.classGetFieldFromName(klass, fieldHash);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!field) return false;
+    size_t off = 0;
+    __try {
+        off = e.fieldGetOffset(field);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (off < 0x10 || off >= 0x1000) return false;
+    *out = off;
+    return true;
+}
+
+void EnsureFieldOffsets() {
+    if (gOff.tried) return;
+    gOff.tried = true;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return;
+
+    void* userKlass = FindClass("", kUserClass);
+    void* vcoKlass = FindClass("", kVecCtrlOwnerClass);
+    void* wmKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+    void* petKlass = FindClass("", kPetClass);
+    void* slotKlass = FindClass("", kItemSlotPetClass);
+    int hits = 0;
+    if (FieldOffOrFb(wmKlass, kHashFldWmMyUser, kFbWmMyUser, &gOff.wmMyUser)) ++hits;
+    if (FieldOffOrFb(userKlass, kHashFldApPet, kFbApPet, &gOff.apPet)) ++hits;
+    if (FieldOffOrFb(userKlass, kHashFldCurPos, kFbLogicalPos, &gOff.logicalPos)) ++hits;
+    if (FieldOffOrFb(vcoKlass, kHashFldFieldPos, kFbVisPos, &gOff.visPos)) ++hits;
+    if (FieldOffOrFb(petKlass, kHashPetRepleteness, kFbPetRepleteness, &gOffPetRepleteness)) ++hits;
+    if (FieldOffOrFb(slotKlass, kHashSlotRepleteness, kFbSlotRepleteness, &gOffSlotRepleteness))
+        ++hits;
+    if (FieldOffOrFb(slotKlass, kHashDateDead, kFbDateDead, &gOffDateDead)) ++hits;
+    if (FieldOffOrFb(slotKlass, kHashRemainLife, kFbRemainLife, &gOffRemainLife)) ++hits;
+    if (FieldOffOrFb(slotKlass, kHashActiveState, kFbActiveState, &gOffActiveState)) ++hits;
+    constexpr int kExpect = 9;
+    gOff.path = hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback");
+    x::runtime::LogI("PetPort",
+                     "field offsets path=%s hits=%d/%d apPet=0x%zx slotFull=0x%zx dead=0x%zx",
+                     gOff.path, hits, kExpect, gOff.apPet, gOffSlotRepleteness, gOffDateDead);
+}
+
+MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
+    if (!klass || !rva) return nullptr;
+    const auto& ex = x::runtime::il2cpp::Get();
+    if (!ex.classGetMethods) return nullptr;
+    HMODULE ga = gGA ? gGA : ex.ga;
+    if (!ga) return nullptr;
+    void* target = reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(ga) + rva);
+    void* cur = klass;
+    for (int depth = 0; cur && depth < 8; ++depth) {
+        void* iter = nullptr;
+        __try {
+            for (;;) {
+                void* miRaw = ex.classGetMethods(cur, &iter);
+                if (!miRaw) break;
+                auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
+                void* mp = nullptr;
+                void* vp = nullptr;
+                __try {
+                    mp = mi->methodPointer;
+                    vp = mi->virtualMethodPointer;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    continue;
+                }
+                if (mp == target || vp == target) return mi;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+        if (!ex.classParent) break;
+        void* parent = nullptr;
+        __try {
+            parent = ex.classParent(cur);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            parent = nullptr;
+        }
+        if (!parent || parent == cur) break;
+        cur = parent;
     }
     return nullptr;
 }
@@ -238,13 +347,16 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
     const auto& e = x::runtime::il2cpp::Get();
     MethodInfoHead* mi = nullptr;
     if (e.classGetMethodFromName) {
-        __try {
-            mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            mi = nullptr;
+        const int tryArgc[] = {argc, -1};
+        for (int ac : tryArgc) {
+            __try {
+                mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, ac));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                mi = nullptr;
+            }
+            if (mi && mi->methodPointer) return mi;
         }
     }
-    if (mi && mi->methodPointer) return mi;
     if (!e.classGetMethods || !e.methodGetName) return nullptr;
     void* iter = nullptr;
     __try {
@@ -264,46 +376,42 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
 
 MethodInfoHead* ResolveActivateMi(void* klass) {
     using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::ResolvePath;
     using x::runtime::il2cpp_method::TypeKind;
-    if (MethodInfoHead* mi =
-            FindMethodByName(klass, "SendActivatePetRequest", 1))
-        return mi;
-    if (MethodInfoHead* mi = FindMethodByName(klass, kHashSendActivatePet, 1)) return mi;
-    // void(int) 同形 x3 → kind 只验；哈希优先。
-    constexpr MethodShape kAct{1, TypeKind::Void, true, false, {TypeKind::I32}};
-    const auto mr =
-        x::runtime::il2cpp_method::FindMethodCached(klass, kRvaSendActivatePetRequest, kAct);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            x::runtime::LogI("PetPort", "Activate MethodInfo via kind");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
+    if (!klass) return nullptr;
+    // hash → plain → RVA/kind；void(int) 同形 → unique=false。
+    constexpr MethodShape kAct{1, TypeKind::Void, false, false, {TypeKind::I32}};
+    const auto mr = x::runtime::il2cpp_method::FindMethodResolved(
+        klass, kRvaSendActivatePetRequest, kAct, "SendActivatePetRequest", kHashSendActivatePet);
+    static bool sLogged = false;
+    if (!sLogged) {
+        sLogged = true;
+        x::runtime::LogI("PetPort", "methods path=%s hits=%d/1",
+                         mr.path == ResolvePath::Hash ? "meta"
+                         : (mr.path != ResolvePath::Miss ? "meta-partial" : "fallback"),
+                         mr.path == ResolvePath::Hash ? 1 : 0);
     }
-    return FindMethodByRva(klass, kRvaSendActivatePetRequest);
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
 }
 
-bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
-    if (!mi || !hook || !outOrig) return false;
-    DWORD old = 0;
-    if (!VirtualProtect(mi, sizeof(MethodInfoHead), PAGE_READWRITE, &old)) return false;
-    *outOrig = mi->methodPointer;
-    mi->methodPointer = hook;
-    if (mi->virtualMethodPointer) mi->virtualMethodPointer = hook;
-    VirtualProtect(mi, sizeof(MethodInfoHead), old, &old);
-    return true;
-}
-
-void RestoreMethodInfo(MethodInfoHead* mi, void* orig) {
-    if (!mi || !orig) return;
-    DWORD old = 0;
-    if (!VirtualProtect(mi, sizeof(MethodInfoHead), PAGE_READWRITE, &old)) return;
-    mi->methodPointer = orig;
-    if (mi->virtualMethodPointer) mi->virtualMethodPointer = orig;
-    VirtualProtect(mi, sizeof(MethodInfoHead), old, &old);
+void ReportPetActLamp() {
+    if (gMiActivate && gMiActivate->methodPointer) {
+        x::runtime::anchor_lamps::Set("PetAct", x::runtime::anchor_lamps::AnchorLampCode::Ok,
+                                     "Activate MI");
+    } else if (gCashMgrKlass) {
+        x::runtime::anchor_lamps::Set("PetAct", x::runtime::anchor_lamps::AnchorLampCode::Degraded,
+                                     "RVA fallback");
+    } else {
+        x::runtime::anchor_lamps::Set("PetAct", x::runtime::anchor_lamps::AnchorLampCode::Unknown,
+                                     "pending");
+    }
 }
 
 bool BindApis() {
-    if (gGA && gFindAll && gCompGo && gObjName && gClassGetMethods) return true;
+    if (gGA && gFindAll && gCompGo && gObjName && gClassGetMethods) {
+        EnsureFieldOffsets();
+        return true;
+    }
     if (!x::runtime::il2cpp::Ensure()) return false;
     const auto& e = x::runtime::il2cpp::Get();
     gGA = e.ga;
@@ -314,13 +422,11 @@ bool BindApis() {
     gClassStaticData = e.classStaticData;
     gClassParent = e.classParent;
     gRuntimeClassInit = e.runtimeClassInit;
-    return gFindAll && gCompGo && gObjName && gClassGetMethods;
-}
-
-void EnsureCs() {
-    if (gJobCsInit) return;
-    InitializeCriticalSection(&gJobCs);
-    gJobCsInit = true;
+    if (gFindAll && gCompGo && gObjName && gClassGetMethods) {
+        EnsureFieldOffsets();
+        return true;
+    }
+    return false;
 }
 
 bool LocalUserStillAlive() {
@@ -455,12 +561,7 @@ bool ResolveCashItemManager(DWORD now) {
     if (!gCashMgrKlass) gCashMgrKlass = FindClass("", kCashItemManagerClass);
     if (!gCashMgrKlass) return false;
 
-    if (gRuntimeClassInit) {
-        __try {
-            gRuntimeClassInit(gCashMgrKlass);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
+    if (gRuntimeClassInit) x::runtime::il2cpp::RuntimeClassInit(gCashMgrKlass);
 
     void* staticsKlass = gCashMgrKlass;
     if (gClassParent) {
@@ -470,12 +571,7 @@ bool ResolveCashItemManager(DWORD now) {
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
         if (parent) {
-            if (gRuntimeClassInit) {
-                __try {
-                    gRuntimeClassInit(parent);
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                }
-            }
+            if (gRuntimeClassInit) x::runtime::il2cpp::RuntimeClassInit(parent);
             staticsKlass = parent;
         }
     }
@@ -495,21 +591,19 @@ bool ResolveCashItemManager(DWORD now) {
     if (gCashMgr) {
         x::runtime::LogI("PetPort", "CashItemManager bind %p", gCashMgr);
         if (!gMiActivate) gMiActivate = ResolveActivateMi(gCashMgrKlass);
+        if (gMiActivate) {
+            x::runtime::LogI("PetPort", "Activate MI bind ok mi=%p rva=0x%X", gMiActivate,
+                             kRvaSendActivatePetRequest);
+        } else {
+            x::runtime::LogW("PetPort", "Activate MI miss — will use RVA 0x%X",
+                             kRvaSendActivatePetRequest);
+        }
+        ReportPetActLamp();
     }
     return gCashMgr != nullptr;
 }
 
-void* GetSlotList(int itemType) {
-    void* wm = world::GetWorldManager();
-    if (!wm) return nullptr;
-    void* cd = ReadPtr(wm, kOffWmCharacterData);
-    if (!LooksLikeHeapPtr(cd)) return nullptr;
-    void* slotsArr = ReadPtr(cd, kOffCdItemSlots);
-    if (!LooksLikeHeapPtr(slotsArr)) return nullptr;
-    const uintptr_t n = ArrayLen(slotsArr);
-    if (n <= (uintptr_t)itemType) return nullptr;
-    return ArrayAt(slotsArr, (uintptr_t)itemType);
-}
+void* GetSlotList(int itemType) { return x::ui::player::GetItemSlotList(itemType); }
 
 bool IsPetItemId(int id) { return id >= kPetIdMin && id < kPetIdMax; }
 bool IsFoodItemId(int id) { return id >= kFoodIdMin && id <= kFoodIdMax; }
@@ -540,7 +634,7 @@ bool IsPetSlotDead(void* item) {
 
 int ItemQty(void* item) {
     if (!item) return 0;
-    const int n = (int)ReadU16(item, kOffBundleNumber);
+    const int n = (int)ReadU16(item, x::ui::player::OffSlotBundleNumber());
     if (n > 0) return n;
     return 1;
 }
@@ -557,7 +651,7 @@ void ScanFood(PetCareState& out) {
     for (int i = 0; i < n; ++i) {
         void* item = ListAt(list, i);
         if (!item) continue;
-        const int id = ReadI32(item, kOffItemId);
+        const int id = ReadI32(item, x::ui::player::OffSlotItemId());
         if (!IsFoodItemId(id)) continue;
         const int qty = ItemQty(item);
         if (qty <= 0) continue;
@@ -597,7 +691,7 @@ void ScanCashPets(PetCareState& out) {
     for (int i = 0; i < n; ++i) {
         void* item = ListAt(list, i);
         if (!item) continue;
-        const int id = ReadI32(item, kOffItemId);
+        const int id = ReadI32(item, x::ui::player::OffSlotItemId());
         if (!IsPetItemId(id)) continue;
         ++cashPets;
         const int remain = ReadI32(item, kOffRemainLife);
@@ -662,127 +756,49 @@ void ReadFieldPets(PetCareState& out) {
     if (minFull >= 0) out.minRepleteness = minFull;
 }
 
-void RunActivateOnMain() {
-    EnsureCs();
-    EnterCriticalSection(&gJobCs);
-    const int pos = gJobPos;
-    const uint32_t serial = gJobArmedSerial;
-    const bool armed = gJobPending.load(std::memory_order_relaxed) && serial != 0;
-    LeaveCriticalSection(&gJobCs);
-    if (!armed || pos <= 0) return;
-
+struct ActivateJob {
+    int pos = 0;
     bool ok = false;
+};
+
+void ActivateJobOnMain(void* user) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("pet.Activate");
+    auto* job = reinterpret_cast<ActivateJob*>(user);
+    if (!job || job->pos <= 0) return;
+    job->ok = false;
     __try {
         const DWORD now = GetTickCount();
         if (!ResolveCashItemManager(now) || !gCashMgr) {
             x::runtime::LogW("PetPort", "Activate: no CashItemManager");
-        } else {
-            if (!gMiActivate && gCashMgrKlass)
-                gMiActivate = ResolveActivateMi(gCashMgrKlass);
-            auto fn = (gMiActivate && gMiActivate->methodPointer)
-                          ? reinterpret_cast<FnActivatePet>(gMiActivate->methodPointer)
-                          : AtRva<FnActivatePet>(kRvaSendActivatePetRequest);
-            if (fn) {
-                fn(gCashMgr, pos, gMiActivate);
-                ok = true;
-            }
+            return;
         }
+        if (!gMiActivate && gCashMgrKlass) gMiActivate = ResolveActivateMi(gCashMgrKlass);
+        if (gMiActivate) ReportPetActLamp();
+        auto fn = (gMiActivate && gMiActivate->methodPointer)
+                      ? reinterpret_cast<FnActivatePet>(gMiActivate->methodPointer)
+                      : AtRva<FnActivatePet>(kRvaSendActivatePetRequest);
+        if (!fn) {
+            ReportPetActLamp();
+            return;
+        }
+        fn(gCashMgr, job->pos, gMiActivate);
+        job->ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ok = false;
-        x::runtime::LogW("PetPort", "Activate SEH pos=%d", pos);
+        job->ok = false;
+        x::runtime::LogW("PetPort", "Activate SEH pos=%d", job->pos);
     }
-
-    EnterCriticalSection(&gJobCs);
-    // timeout 已作废本 serial 则丢弃结果，禁止晚到发包被视为成功/再次触发
-    if (gJobArmedSerial == serial && gJobPending.load(std::memory_order_relaxed)) {
-        gJobOk.store(ok, std::memory_order_relaxed);
-        gJobDone.store(true, std::memory_order_release);
-        gJobPending.store(false, std::memory_order_relaxed);
-        gJobArmedSerial = 0;
-    }
-    LeaveCriticalSection(&gJobCs);
-}
-
-void HookSendWill(const void* methodInfo) {
-    if (!gInPump.exchange(true)) {
-        if (gJobPending.load() && !gJobDone.load()) RunActivateOnMain();
-        gInPump.store(false);
-    }
-    if (gOrigSendWill) gOrigSendWill(methodInfo);
-}
-
-bool InstallPump() {
-    if (gPumpInstalled.load()) return true;
-    if (!BindApis()) return false;
-    if (!gKlassCanvas) gKlassCanvas = FindClass("UnityEngine", "Canvas");
-    if (!gKlassCanvas) {
-        x::runtime::LogW("PetPort", "Canvas klass miss");
-        return false;
-    }
-    gMiSendWill = FindMethodByRva(gKlassCanvas, kRvaSendWillRenderCanvases);
-    if (!gMiSendWill) {
-        auto getName = x::runtime::il2cpp::Get().methodGetName;
-        void* iter = nullptr;
-        __try {
-            for (;;) {
-                void* miRaw = gClassGetMethods(gKlassCanvas, &iter);
-                if (!miRaw) break;
-                if (!getName) break;
-                const char* nm = getName(miRaw);
-                if (nm && strcmp(nm, "SendWillRenderCanvases") == 0) {
-                    gMiSendWill = reinterpret_cast<MethodInfoHead*>(miRaw);
-                    break;
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            gMiSendWill = nullptr;
-        }
-    }
-    if (!gMiSendWill) {
-        x::runtime::LogW("PetPort", "SendWill MI miss");
-        return false;
-    }
-    if (gMiSendWill->methodPointer == reinterpret_cast<void*>(&HookSendWill)) {
-        gPumpInstalled.store(true);
-        return true;
-    }
-    void* orig = nullptr;
-    if (!PatchMethodInfo(gMiSendWill, reinterpret_cast<void*>(&HookSendWill), &orig)) {
-        x::runtime::LogW("PetPort", "SendWill patch fail");
-        return false;
-    }
-    gOrigSendWill = reinterpret_cast<FnSendWill>(orig);
-    gPumpInstalled.store(true);
-    x::runtime::LogI("PetPort", "main-thread pump installed MI=%p orig=%p", (void*)gMiSendWill,
-                     orig);
-    return true;
-}
-
-void UninstallPump() {
-    if (!gPumpInstalled.exchange(false)) return;
-    if (gMiSendWill && gOrigSendWill &&
-        gMiSendWill->methodPointer == reinterpret_cast<void*>(&HookSendWill)) {
-        RestoreMethodInfo(gMiSendWill, (void*)gOrigSendWill);
-    }
-    gMiSendWill = nullptr;
-    gOrigSendWill = nullptr;
 }
 
 }  // namespace
 
 void Init() {
-    EnsureCs();
     gLocalUser = nullptr;
     gCashMgr = nullptr;
     gLastLuRebind = gLastCashRebind = 0;
-    gJobPending.store(false);
-    gJobDone.store(true);
-    gJobArmedSerial = 0;
     x::runtime::LogI("PetPort", "pet_port ready (P0c summon)");
 }
 
 void Shutdown() {
-    UninstallPump();
     gLocalUser = nullptr;
     gCashMgr = nullptr;
 }
@@ -810,35 +826,15 @@ bool ReadState(PetCareState& out) {
 
 bool TryActivatePet(int nPos) {
     if (nPos <= 0) return false;
-    if (!InstallPump()) return false;
-    EnsureCs();
-    const uint32_t serial = gJobSerial.fetch_add(1, std::memory_order_relaxed) + 1;
-    EnterCriticalSection(&gJobCs);
-    gJobPos = nPos;
-    gJobArmedSerial = serial;
-    gJobDone.store(false, std::memory_order_relaxed);
-    gJobOk.store(false, std::memory_order_relaxed);
-    gJobPending.store(true, std::memory_order_release);
-    LeaveCriticalSection(&gJobCs);
-
-    const DWORD start = GetTickCount();
-    while (!gJobDone.load(std::memory_order_acquire)) {
-        if (GetTickCount() - start > kJobWaitMs) {
-            EnterCriticalSection(&gJobCs);
-            if (gJobArmedSerial == serial) {
-                gJobPending.store(false, std::memory_order_relaxed);
-                gJobArmedSerial = 0;
-                gJobDone.store(true, std::memory_order_release);
-            }
-            LeaveCriticalSection(&gJobCs);
-            x::runtime::LogW("PetPort", "Activate timeout pos=%d serial=%u", nPos, serial);
-            return false;
-        }
-        Sleep(5);
+    if (!BindApis()) return false;
+    ActivateJob job{};
+    job.pos = nPos;
+    if (!x::runtime::main_thread::InvokeAndWait(&ActivateJobOnMain, &job, kJobWaitMs)) {
+        x::runtime::LogW("PetPort", "Activate pump fail pos=%d", nPos);
+        return false;
     }
-    const bool ok = gJobOk.load(std::memory_order_relaxed);
-    x::runtime::LogI("PetPort", "Activate %s pos=%d", ok ? "ok" : "fail", nPos);
-    return ok;
+    x::runtime::LogI("PetPort", "Activate %s pos=%d", job.ok ? "ok" : "fail", nPos);
+    return job.ok;
 }
 
 bool TryFeed() { return false; }

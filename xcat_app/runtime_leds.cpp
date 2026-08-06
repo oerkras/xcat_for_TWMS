@@ -1,7 +1,5 @@
 #include "runtime_leds.h"
 
-#include "msc_webview_login.h"
-
 #include "xcat_payload_status.h"
 
 #include <TlHelp32.h>
@@ -59,22 +57,13 @@ RuntimeLeds CachedOrEmpty(unsigned long gamePid, uint64_t now, uint64_t webReady
 }  // namespace
 
 RuntimeLeds QueryRuntimeLeds(const char* prefsBinDir) {
-    static uint64_t s_webReadyTick = 0;
     RuntimeLeds out{};
     const uint64_t now = GetTickCount64();
 
-    const bool webReady = msc::weblogin::IsReady();
-    if (webReady) {
-        if (!s_webReadyTick) s_webReadyTick = now;
-        out.webReadyTickMs = s_webReadyTick;
-    } else {
-        s_webReadyTick = 0;
-        out.webReadyTickMs = 0;
-    }
-
+    out.webReadyTickMs = 0;
     out.gamePid = FindClassicGamePid();
-    // 注入前基线：WebView / 进程探测
-    out.ipc = webReady;
+    // 注入前基线：仅进程探测（IPC 等注入后 payload 心跳）
+    out.ipc = false;
     out.gameContext = out.gamePid != 0;
 
     if (!prefsBinDir || !prefsBinDir[0] || !out.gamePid) {
@@ -88,8 +77,6 @@ RuntimeLeds QueryRuntimeLeds(const char* prefsBinDir) {
         RuntimeLeds grace = CachedOrEmpty(out.gamePid, now, out.webReadyTickMs);
         // 缓存命中时保留 LP/Map/Cache；否则退回注入前基线
         if (grace.localPlayer || grace.mapOk || grace.quizCache || grace.ipc) {
-            // 进程仍在时保留 GC；IPC 仍可与 WebView OR
-            grace.ipc = grace.ipc || webReady;
             grace.gameContext = grace.gameContext || (out.gamePid != 0);
             grace.gamePid = out.gamePid;
             grace.webReadyTickMs = out.webReadyTickMs;
@@ -98,8 +85,8 @@ RuntimeLeds QueryRuntimeLeds(const char* prefsBinDir) {
         return out;
     }
 
-    // 注入后：以 payload 心跳为准（IPC/GC 与注入前探测 OR，避免闪灭）
-    out.ipc = webReady || ps.ipcHandshake != 0;
+    // 注入后：以 payload 心跳为准（IPC/GC 与进程探测 OR，避免闪灭）
+    out.ipc = ps.ipcHandshake != 0;
     out.gameContext = (out.gamePid != 0) || ps.gameContextOk != 0;
     out.localPlayer = ps.localPlayerOk != 0;
     out.mapId = ps.mapId == 0xFFFFFFFFu ? 0 : static_cast<int>(ps.mapId);

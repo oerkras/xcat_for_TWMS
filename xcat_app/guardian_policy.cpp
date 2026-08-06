@@ -8,6 +8,8 @@ namespace {
 
 constexpr const char* kReasonProcessDead = "游戏进程已退出";
 constexpr const char* kReasonStatusStale = "payload 心跳/状态停滞";
+constexpr const char* kReasonPayloadHung = "游戏假死(payload 心跳停滞)";
+constexpr const char* kReasonPrePlayableStuck = "长期未进图(选角/加载超时)";
 constexpr const char* kReasonExpStale = "EXP 停滞";
 constexpr const char* kReasonRecoveryRetry = "守护恢复重试";
 constexpr const char* kReasonRecoveryTimeout = "守护恢复超时";
@@ -209,11 +211,21 @@ Decision Evaluate(const RuntimeState& state, const Input& input) {
                 static_cast<uint32_t>((state.backoffUntilTick - input.now + 999u) / 1000u);
             return finish();
         }
+        // 冷启宽限内进程仍在：只延长等待，禁止「恢复重试」再杀一遍。
+        if (input.progressGrace && input.processAlive) {
+            decision.gate = Gate::Backoff;
+            decision.backoffSec = 0;
+            return finish();
+        }
         RequestRestart(decision, input, kReasonRecoveryRetry, 0);
         return finish();
     }
 
     if (state.mode == Mode::Recovering && (!input.injected || input.gamePid == 0)) {
+        if (input.progressGrace) {
+            decision.gate = Gate::Recovering;
+            return finish();
+        }
         EnterBackoff(decision, input);
         return finish();
     }
@@ -247,7 +259,11 @@ Decision Evaluate(const RuntimeState& state, const Input& input) {
             EnterBackoff(decision, input);
             return finish();
         }
-        if (decision.next.haveStatus) {
+        // haveStatus：曾进图后 Status 掉线
+        // payloadHeartbeatStale：整进程假死（含从未进图）
+        // prePlayableStuck：心跳仍活但长期卡选角/加载（一键归属、冷启已结束）
+        if (decision.next.haveStatus || input.payloadHeartbeatStale ||
+            input.prePlayableStuck) {
             if (!decision.next.statusLostTick) decision.next.statusLostTick = input.now;
             decision.staleSec =
                 static_cast<uint32_t>((input.now - decision.next.statusLostTick) / 1000u);
@@ -257,7 +273,10 @@ Decision Evaluate(const RuntimeState& state, const Input& input) {
                     decision.warnStatusConfirm = true;
                     return finish();
                 }
-                RequestRestart(decision, input, kReasonStatusStale, decision.staleSec);
+                const char* reason = input.payloadHeartbeatStale ? kReasonPayloadHung
+                                     : input.prePlayableStuck    ? kReasonPrePlayableStuck
+                                                                : kReasonStatusStale;
+                RequestRestart(decision, input, reason, decision.staleSec);
             }
         } else {
             decision.next.statusLostTick = 0;

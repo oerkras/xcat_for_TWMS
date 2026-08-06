@@ -20,6 +20,11 @@ WORD GetAttackVk();
 void SetIntervalMs(DWORD ms);
 DWORD GetIntervalMs();
 
+// 出刀按键 hold（调试 TAB，默认 5ms）。实际 hold = min(此值, 面板间隔)。
+// 攻击加速开启时走 Down+Up 同泵的 pulse 路径（hold=0），此值不参与。
+void SetAttackHoldMs(DWORD ms);
+DWORD GetAttackHoldMs();
+
 void SetSmartInterval(bool on);
 bool GetSmartInterval();
 
@@ -52,5 +57,9 @@ void SetImmediateUp(bool on);
 
 void TickReleases();
 void ForceRelease();
+
+// 必须已在主线程泵上（禁止再 Invoke）。SetInput(0,0) 清走路锁存。
+// fill+Doing / Settling 自愈用；ForceRelease 会再包一层 Invoke。
+void ClearWalkLatchMainThread();
 
 }  // namespace x::features::ports::attack

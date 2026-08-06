@@ -4,9 +4,12 @@
 #endif
 #include "skill_port.h"
 
+#include "player_combat_port.h"
 #include "world_port.h"
+#include "../../ui/player_vitals.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/log.h"
@@ -20,6 +23,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #pragma comment(lib, "Psapi.lib")
 
@@ -29,62 +36,99 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E3FA20;  // remapped 2026-08-03
-constexpr uint32_t kRvaCompGetGo = 0x4E47E00;  // remapped 2026-08-03
-constexpr uint32_t kRvaObjGetName = 0x4E54D60;  // remapped 2026-08-03
-constexpr uint32_t kRvaGetSkillLevel = 0x1063850;  // remapped 2026-08-03
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04
+constexpr uint32_t kRvaCompGetGo = 0x4E53330;              // remounted 2026-08-04
+constexpr uint32_t kRvaObjGetName = 0x4E60290;             // remounted 2026-08-04
+constexpr uint32_t kRvaGetSkillLevel = 0x106B600;  // remounted 2026-08-04
 // 公开总入口 DoActiveSkill(int skillId, uint scanCode=0) —— 经典版对标枫星 UseOnClientImmediate。
-constexpr uint32_t kRvaDoActiveSkill = 0x1064E60;  // remapped 2026-08-03
-constexpr uint32_t kRvaDoActiveSkillPrepare = 0x10A72A0;  // remapped 2026-08-03
-constexpr uint32_t kRvaSendSkillUseRequest = 0x10BBDF0;  // remapped 2026-08-03
-// SkillInfo.GetSkill(int) —— TW idx4 N/1 紧随 GetSkillRoot；短函数 dict 查找。
-constexpr uint32_t kRvaSkillInfoGetSkill = 0x142A590;  // remapped 2026-08-03
-// SecondaryStat.GetRemainTime(int nSkillID, int tCur) —— 返回剩余（与 tXxx_ 同时钟）。
-constexpr uint32_t kRvaSecondaryStatGetRemainTime = 0xD61DF0;  // remapped 2026-08-03
+constexpr uint32_t kRvaDoActiveSkill = 0x106CD90;  // remounted 2026-08-04
+constexpr uint32_t kRvaDoActiveSkillPrepare = 0x10AED40;  // remounted 2026-08-04
+constexpr uint32_t kRvaSendSkillUseRequest = 0x10C3720;  // remounted 2026-08-04
+// SkillInfo.GetSkill(int) → SkillEntry（TDI 2164 @0x1575210；勿用 ItemDataManager 的 0x1432D20）
+constexpr uint32_t kRvaSkillInfoGetSkill = 0x1575210;  // remounted 2026-08-04 dump.C
+// SecondaryStat.GetRemainTime(int nSkillID, int tCur) —— 返回剩余 ms（tCur 必须是游戏钟）。
+constexpr uint32_t kRvaSecondaryStatGetRemainTime = 0xD65FA0;  // remounted 2026-08-04
+// WorldManager.get_GetUpdateTime() —— (int)(_updateTime * 1000)；tXxx_/CoolTimeOver 同此钟。
+constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDC2010;  // remounted 2026-08-04
+// CharacterData.GetSkillCoolTimeOver / IsExist —— IDA：`[this+0x70]` + Dict.TryGetValue。
+// 禁止手扫 entries 容量：BIN 会命中残留脏槽（over≈GetTickCount 量级）。
+constexpr uint32_t kRvaGetSkillCoolTimeOver = 0x12E5250;  // remounted 2026-08-04
+constexpr uint32_t kRvaIsExistSkillCoolTimeOver = 0x12E47D0;  // remounted 2026-08-04
 
 // 方法哈希（dump 名；RVA 漂时优先）
 constexpr char kHashGetSkillLevel[] =
-    "e5d854e8495ca42d2032aaa642b8ddaa4a66e88b261284548997340c40e76c3";
+    "edc26b11d81b1fa077ad2675981f80527a412dcfacfd3874470fe2876a5eb7c";
 constexpr char kHashDoActiveSkill[] =
-    "c4f5e18dc5e7302ea23d1490a19438f79b84f05f69084d05a430000fd6d9e61";
+    "d8fbdebfe3db75de9a448342f05b81e42efa3f25d5a00930c0519cd1c80809f";
 constexpr char kHashDoActiveSkillPrepare[] =
-    "a9204e71caccc9e2150afb63f98a01b6f354d874bf830e9569420b77ede53d4";
+    "c0606a16d05a8cf23c449c8e73b5742c003cf6041457203af4b4b1add3fbc0e";
+// SendSkillUseRequest(SkillEntry,int,uint,int,int[],int) —— dump.cs.restored 命名。
+constexpr char kHashSendSkillUseRequest[] =
+    "d331acf2445e8a84be5580b262fec79891885ef5dd5224480cdcd1b63de479b";
 constexpr char kHashSkillInfoGetSkill[] =
-    "de1e41ea2ec63589ab84c6fcbe9c5f37f84d8fa6c4bd849aedf42eab3188abd";
+    "aae48fa794e09e28c38655cfdc1c25c659feb865b111f819c652b0e79752901";
 constexpr char kHashGetRemainTime[] =
-    "e452dc76015d1c5631801d953e30c9e61407f49176a90ace243654f6b5073cb";
-// UserLocal：il2cpp_shape::ResolveUserLocalKlass（hash ac2e48cc… + Teleport@0x3C8）
-// SkillInfo：4×Dict + List 形；旧 b4dbdfd3… 已失效。
+    "e61ce72a722fbe4a38bc7176a03e7daf561901ae2e5053d296102492737f291";
+constexpr char kHashGetUpdateTime[] =
+    "daede1ec570c57a49d953412f4931dda2853981582ce7138d075e2787d705a9";
+constexpr char kHashGetSkillCoolTimeOver[] =
+    "d2bbaaa6e79dbdcb1e38f50767a8edf5b047172ed456ff010f7421d09c3e924";
+constexpr char kHashIsExistSkillCoolTimeOver[] =
+    "f2c36f21309ce713eec277ba39fd0ce61680a52aa15a891f75f5655939d6527";
+// UserLocal：il2cpp_shape::ResolveUserLocalKlass
+// SkillInfo（TDI 2164；勿与 ItemDataManager/eff831ff 混淆）
 constexpr char kSkillInfoClass[] =
-    "cd80f688c990f0dd0aafd2b78602618c46a424e5b4c34d18172867f24c782ec";
-// WM+0xF0 SecondaryStat（字段全表）；勿与 WM+0xB8 嵌套 struct 混淆。
+    "ae17de41342124689edc0477bf698ae141513ac959fd9d452e9bf87e1e3458c";
+// SkillEntry（TDI 2149）
+constexpr char kSkillEntryClass[] =
+    "f690543f60fcc48d33bb5d582110326773dfbd9cc3f36d15df418db36258346";
+// WM+0xF0 SecondaryStat
 constexpr char kSecondaryStatClass[] =
-    "e9c12ac2dac840eb205b1c8885835869a346ee08ba105bc3eeb41dcbca8e9d1";
+    "b66e6c1639331514fade7a757dd74e7e70d7d903c49252b516d09778ecc46d6";
+// CharacterData（WM+0xE0）
+constexpr char kCharacterDataClass[] =
+    "e410fb711868f2306f8a6368e8330e0e76e59c504fcdcce6952ceec81952e38";
 
-constexpr size_t kOffWmMyUser = 0x28;
-constexpr size_t kOffWmCharacterData = 0xE0;
-constexpr size_t kOffWmSecondaryStat = 0xF0;
-constexpr size_t kOffAffectedList = 0x330;
-constexpr size_t kOffSkillRecord = 0x50;
-constexpr size_t kOffSkillRecordEx = 0x58;
-constexpr size_t kOffSkillCooltime = 0x68;
-constexpr size_t kOffSkillInfoDict = 0x10;  // SkillInfo._dictionarySkill
-constexpr size_t kOffSkillId = 0x10;
-constexpr size_t kOffSkillName = 0x18;
-constexpr size_t kOffAffSkillId = 0x10;
-constexpr size_t kOffAffStartTime = 0x14;
+// CharacterData / SkillRecord / Cooltime / SecondaryStat / MyUser → x::ui::player（hash 防漂）。
+// UserLocal 在身 / Prepare / Pos：EnsureSkillFieldOffsets（明文/hash → field_get_offset）。
+constexpr size_t kFbAffectedList = 0x330;
+constexpr size_t kFbPreparingSkillId = 0x398;  // valuetype.SkillID@+0
+constexpr size_t kFbAffSkillId = 0x10;         // User.AffectedSkillEntry.nSkillID
+constexpr size_t kFbAffStartTime = 0x14;       // tStart
+constexpr size_t kFbVisPos = 0x64;             // FieldActorBase.Pos
+constexpr size_t kFbLogicalPos = 0x240;        // LocalUser.CurPos
+constexpr size_t kFbSkillInfoDict = 0x10;      // SkillInfo 主技能字典
+constexpr size_t kFbSkillId = 0x10;            // SkillEntry
+constexpr size_t kFbSkillName = 0x18;
+constexpr char kFldAffectedList[] = "_listAffectedSkillEntry";
+constexpr char kHashPreparingSkill[] =
+    "a5df568c2eb567fde0f4054ce3a87e01703615e8bd4002cad536cc70761cb45";
+constexpr char kFldAffSkillId[] = "nSkillID";
+constexpr char kFldAffStartTime[] = "tStart";
+// 与 drop_pool 同 hash（运行时 meta；dump 或已还原明文 Pos/CurPos）
+constexpr char kHashFldVisPos[] =
+    "c9d7ef4393802ebe9fdf9ebe7eaf7245d5cef3eeaa2a8d052fb4ad4883e34dc";
+constexpr char kHashFldLogicalPos[] =
+    "b992bfa57dd45d484f39e25a6290a95d76e19fc1059423bff8fb0c9507dbda7";
+constexpr char kFldVisPosPlain[] = "Pos";
+constexpr char kFldLogicalPosPlain[] = "CurPos";
+constexpr char kHashSkillInfoDict[] =
+    "d39be0129cddd9081771dae0631094f66af62977cb3de521e1a423fb30bfcd7";
+constexpr char kHashSkillEntryId[] =
+    "dd351efcd7ac5b7b1c63a6fcb4a9dc6f0daf88b0cd8a659b0463b8211b5cf2b";
+constexpr char kHashSkillEntryName[] =
+    "fbd8e637d4173281d88014df32b936040478d6d5398a648c6c4f0f396721afd";
 constexpr size_t kOffCachedPtr = 0x10;
-constexpr size_t kOffVisPos = 0x64;
-constexpr size_t kOffLogicalPos = 0x240;
 
-// Dictionary IL2CPP：buckets@0x10 / entries@0x18 / count@0x20 / freeCount@0x28 / version@0x2C
-// （ForEach* 以 entries 扫描为主；DictIntIntCount 的 free 仅作 hint）
-constexpr size_t kOffDictEntries = 0x18;
-constexpr size_t kOffDictCount = 0x20;
-constexpr size_t kOffDictFreeCount = 0x28;
-// int,int 紧凑 0x10；部分 IL2CPP 对齐成 0x18（value@0x10）。
-constexpr size_t kEntrySizeIntIntTight = 0x10;
-constexpr size_t kEntrySizeIntPtr = 0x18;
+// Dictionary Entry / Il2CppArray → il2cpp_container SSOT（valuetype 槽按 K/V 择优）
+#define kEntrySizeIntIntTight (x::runtime::il2cpp_container::DictEntryStrideIntIntTight())
+#define kEntrySizeIntPtr (x::runtime::il2cpp_container::DictEntryStrideIntPtr())
+#define kOffArrLen (x::runtime::il2cpp_container::OffArrayMaxLength())
+#define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
+#define kValOffTight (x::runtime::il2cpp_container::OffDictEntryValueIntTight())
+#define kValOffAlign (x::runtime::il2cpp_container::OffDictEntryValueIntAlign())
+#define kOffEntryKey (x::runtime::il2cpp_container::OffDictEntryKey())
+#define kOffEntryHash (x::runtime::il2cpp_container::OffDictEntryHash())
 
 constexpr DWORD kRebindMs = 3000;
 constexpr DWORD kJobWaitMs = 2000;
@@ -101,7 +145,13 @@ using FnGetSkill = void* (*)(void* self, int skillId, const void* methodInfo);
 using FnDoActiveSkill = bool (*)(void* self, int skillId, uint32_t scanCode, const void* methodInfo);
 using FnPrepare = bool (*)(void* self, void* skill, int level, uint32_t scanCode,
                            const void* methodInfo);
+// bool SendSkillUseRequest(SkillEntry, int pPet, uint pt=0, int nSLV=-1, int[] weapons, int charge=0)
+using FnSendSkillUse = bool (*)(void* self, void* skillEntry, int pPet, uint32_t pt, int nSlv,
+                                void* weaponItemIds, int chargeSkillId, const void* methodInfo);
 using FnGetRemainTime = int (*)(void* self, int skillId, int tCur, const void* methodInfo);
+using FnGetUpdateTime = int (*)(const void* methodInfo);
+using FnGetSkillCoolTimeOver = int (*)(void* self, int skillId, const void* methodInfo);
+using FnIsExistSkillCoolTimeOver = bool (*)(void* self, int skillId, const void* methodInfo);
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -119,7 +169,11 @@ FnGetSkillLevel gGetSkillLevel = nullptr;
 FnGetSkill gGetSkill = nullptr;
 FnDoActiveSkill gDoActiveSkill = nullptr;
 FnPrepare gPrepare = nullptr;
+FnSendSkillUse gSendSkillUse = nullptr;
 FnGetRemainTime gGetRemainTime = nullptr;
+FnGetUpdateTime gGetUpdateTime = nullptr;
+FnGetSkillCoolTimeOver gGetSkillCoolTimeOver = nullptr;
+FnIsExistSkillCoolTimeOver gIsExistSkillCoolTimeOver = nullptr;
 
 void* gLuType = nullptr;
 void* gLocalUser = nullptr;
@@ -127,21 +181,53 @@ void* gSkillInfoKlass = nullptr;
 void* gSkillInfo = nullptr;
 void* gLocalUserKlass = nullptr;
 void* gSecondaryStatKlass = nullptr;
+void* gWorldManagerKlass = nullptr;
+void* gCharacterDataKlass = nullptr;
 MethodInfoHead* gMiGetSkillLevel = nullptr;
 MethodInfoHead* gMiGetSkill = nullptr;
 MethodInfoHead* gMiDoActiveSkill = nullptr;
 MethodInfoHead* gMiPrepare = nullptr;
+MethodInfoHead* gMiSendSkillUse = nullptr;
 MethodInfoHead* gMiGetRemainTime = nullptr;
+MethodInfoHead* gMiGetUpdateTime = nullptr;
+MethodInfoHead* gMiGetSkillCoolTimeOver = nullptr;
+MethodInfoHead* gMiIsExistSkillCoolTimeOver = nullptr;
 
 DWORD gLastLuRebind = 0;
 DWORD gLastSiRebind = 0;
 DWORD gLastDictDiagMs = 0;
 DWORD gLastAffDiagMs = 0;
 DWORD gLastRemainDiagMs = 0;
+DWORD gLastCdDiagMs = 0;
 std::atomic<bool> gBound{false};
+
+// CoolTimeOver 对 1001/1002 等会返回脏绝对时刻 → corrupt→0；
+// 施放成功后用表内冷却做本地倒数（GetTickCount），与有效 Over 取 max。
+std::mutex gLocalCdMu;
+std::unordered_map<int, DWORD> gLocalCdEndTick;  // skillId → 到期 GetTickCount
+std::unordered_map<int, float> gTableCdSec;      // skillId → 表内总 CD 秒
+bool gTableCdTried = false;
+
+float TableCooltimeSec(int skillId);
+void NoteLocalCooldownAfterCast(int skillId);
+float LocalCooldownRemainSec(int skillId);
+
+size_t gOffAffectedList = kFbAffectedList;
+size_t gOffPreparingSkillId = kFbPreparingSkillId;
+size_t gOffAffSkillId = kFbAffSkillId;
+size_t gOffAffStartTime = kFbAffStartTime;
+size_t gOffVisPos = kFbVisPos;
+size_t gOffLogicalPos = kFbLogicalPos;
+size_t gOffSkillInfoDict = kFbSkillInfoDict;
+size_t gOffSkillId = kFbSkillId;
+size_t gOffSkillName = kFbSkillName;
+bool gSkillFieldOffTried = false;
+
+void EnsureSkillFieldOffsets();
 
 struct CastJob {
     int skillId = 0;
+    bool preferSendUse = false;  // 可选：先试 SendSkillUseRequest
     bool ok = false;
     bool notReady = false;
     char reason[48]{};
@@ -274,15 +360,17 @@ bool ReadIl2CppString(void* strObj, char* out, int outSz) {
 
 int ListSize(void* list) {
     if (!list) return 0;
-    return ReadI32(list, 0x18);
+    return ReadI32(list, x::runtime::il2cpp_container::OffListSize());
 }
 
-void* ListItems(void* list) { return ReadPtr(list, 0x10); }
+void* ListItems(void* list) {
+    return ReadPtr(list, x::runtime::il2cpp_container::OffListItems());
+}
 
 void* ArrayAtPtr(void* arr, int i) {
     if (!arr || i < 0) return nullptr;
     __try {
-        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20 +
+        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + kOffArrData +
                                          static_cast<size_t>(i) * sizeof(void*));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
@@ -303,9 +391,16 @@ bool ResolveApi() {
     gGetSkillLevel = x::runtime::il2cpp::AtRva<FnGetSkillLevel>(kRvaGetSkillLevel);
     gDoActiveSkill = x::runtime::il2cpp::AtRva<FnDoActiveSkill>(kRvaDoActiveSkill);
     gPrepare = x::runtime::il2cpp::AtRva<FnPrepare>(kRvaDoActiveSkillPrepare);
+    gSendSkillUse = x::runtime::il2cpp::AtRva<FnSendSkillUse>(kRvaSendSkillUseRequest);
     gGetSkill = x::runtime::il2cpp::AtRva<FnGetSkill>(kRvaSkillInfoGetSkill);
     gGetRemainTime =
         x::runtime::il2cpp::AtRva<FnGetRemainTime>(kRvaSecondaryStatGetRemainTime);
+    gGetUpdateTime =
+        x::runtime::il2cpp::AtRva<FnGetUpdateTime>(kRvaWorldManagerGetUpdateTime);
+    gGetSkillCoolTimeOver =
+        x::runtime::il2cpp::AtRva<FnGetSkillCoolTimeOver>(kRvaGetSkillCoolTimeOver);
+    gIsExistSkillCoolTimeOver =
+        x::runtime::il2cpp::AtRva<FnIsExistSkillCoolTimeOver>(kRvaIsExistSkillCoolTimeOver);
     return gFindAll && gGetSkillLevel && gDoActiveSkill && gPrepare && gGetSkill;
 }
 
@@ -318,17 +413,16 @@ bool LocalUserStillAlive() {
         if (!cached) return false;
         // 换图后旧 GO 仍可能叫 MyUser；以 WM.MyUser 为准强制失效。
         if (world::EnsureBound()) {
-            void* wm = world::PeekWorldManager();
-            void* mu = wm ? ReadPtr(wm, kOffWmMyUser) : nullptr;
+            void* mu = x::ui::player::LocalMyUser();
             if (LooksLikeHeapPtr(mu) && mu != gLocalUser) return false;
         }
         char name[64]{};
         if (!GetGoName(gLocalUser, name, sizeof(name))) return false;
         if (_stricmp(name, "MyUser") != 0) return false;
-        const float vx = ReadF32(gLocalUser, kOffVisPos);
-        const float vy = ReadF32(gLocalUser, kOffVisPos + 4);
-        const float lx = ReadF32(gLocalUser, kOffLogicalPos);
-        const float ly = ReadF32(gLocalUser, kOffLogicalPos + 4);
+        const float vx = ReadF32(gLocalUser, gOffVisPos);
+        const float vy = ReadF32(gLocalUser, gOffVisPos + 4);
+        const float lx = ReadF32(gLocalUser, gOffLogicalPos);
+        const float ly = ReadF32(gLocalUser, gOffLogicalPos + 4);
         if (fabsf(vx) < kMinPosAbs && fabsf(vy) < kMinPosAbs && fabsf(lx) < kMinPosAbs &&
             fabsf(ly) < kMinPosAbs)
             return false;
@@ -343,18 +437,16 @@ bool TryResolveLocalUser(DWORD now) {
 
     bool forceRebind = false;
     if (gLocalUser) {
-        void* wm = world::PeekWorldManager();
-        void* mu = wm ? ReadPtr(wm, kOffWmMyUser) : nullptr;
+        void* mu = x::ui::player::LocalMyUser();
         if (LooksLikeHeapPtr(mu) && mu != gLocalUser) forceRebind = true;
     }
     gLocalUser = nullptr;
     if (!forceRebind && gLastLuRebind && now - gLastLuRebind < kRebindMs) return false;
     gLastLuRebind = now;
 
-    // 优先 WM.MyUser（与 drop/combat/travel 同真源）。
+    // 优先 WM.MyUser（与 drop/combat/travel / vitals 同真源）。
     if (world::EnsureBound()) {
-        void* wm = world::GetWorldManager();
-        void* mu = wm ? ReadPtr(wm, kOffWmMyUser) : nullptr;
+        void* mu = x::ui::player::LocalMyUser();
         if (LooksLikeHeapPtr(mu) && IsMyUserGo(mu)) {
             gLocalUser = mu;
             runtime::LogI("SkillPort", "LocalUser ACCEPT wm.MyUser=%p", gLocalUser);
@@ -375,7 +467,7 @@ bool TryResolveLocalUser(DWORD now) {
         return false;
     }
     if (!arr) return false;
-    const int n = ReadI32(arr, 0x18);
+    const int n = ReadI32(arr, kOffArrLen);
     void* best = nullptr;
     for (int i = 0; i < n && i < 64; ++i) {
         void* cand = ArrayAtPtr(arr, i);
@@ -391,11 +483,12 @@ bool TryResolveLocalUser(DWORD now) {
 bool LooksLikeSkillInfo(void* cand) {
     if (!LooksLikeHeapPtr(cand)) return false;
     if (gSkillInfoKlass && !ObjKlassIs(cand, gSkillInfoKlass)) return false;
-    // SkillInfo._dictionarySkill @+0x10
-    return LooksLikeHeapPtr(ReadPtr(cand, kOffSkillInfoDict));
+    // SkillInfo 主技能字典（meta；fb@+0x10）
+    return LooksLikeHeapPtr(ReadPtr(cand, gOffSkillInfoDict));
 }
 
 void* ResolveSkillInfoSingleton(DWORD now) {
+    EnsureSkillFieldOffsets();
     if (LooksLikeSkillInfo(gSkillInfo)) return gSkillInfo;
     if (now - gLastSiRebind < kRebindMs) return gSkillInfo;
     gLastSiRebind = now;
@@ -459,16 +552,145 @@ void* ResolveSkillInfoSingleton(DWORD now) {
     return nullptr;
 }
 
-void* CharacterData() {
-    void* wm = world::GetWorldManager();
-    if (!wm) return nullptr;
-    return ReadPtr(wm, kOffWmCharacterData);
+void* CharacterData() { return x::ui::player::LocalCharacterData(); }
+
+bool PlausibleUserOff(size_t off) { return off >= 0x10 && off < 0x1000; }
+
+size_t FieldOffWalk(void* klass, const char* name) {
+    if (!klass || !name || !x::runtime::il2cpp::Ensure()) return 0;
+    const auto& e = x::runtime::il2cpp::Get();
+    for (void* k = klass; k;) {
+        if (e.classGetFieldFromName && e.fieldGetOffset) {
+            void* field = nullptr;
+            __try {
+                field = e.classGetFieldFromName(k, name);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                field = nullptr;
+            }
+            if (field) {
+                size_t off = 0;
+                __try {
+                    off = e.fieldGetOffset(field);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    off = 0;
+                }
+                if (PlausibleUserOff(off)) return off;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return 0;
+}
+
+void* FindAffectedEntryKlass(void* ulKlass) {
+    if (!ulKlass) return nullptr;
+    HMODULE ga = x::runtime::il2cpp::GameAssembly();
+    if (!ga) return nullptr;
+    using FnClassGetNestedTypes = void* (*)(void* klass, void** iter);
+    auto nested = reinterpret_cast<FnClassGetNestedTypes>(
+        GetProcAddress(ga, "il2cpp_class_get_nested_types"));
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!nested || !e.classGetFieldFromName) return nullptr;
+    for (void* k = ulKlass; k;) {
+        void* iter = nullptr;
+        __try {
+            for (;;) {
+                void* nk = nested(k, &iter);
+                if (!nk) break;
+                void* fId = nullptr;
+                void* fStart = nullptr;
+                __try {
+                    fId = e.classGetFieldFromName(nk, kFldAffSkillId);
+                    fStart = e.classGetFieldFromName(nk, kFldAffStartTime);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    fId = nullptr;
+                    fStart = nullptr;
+                }
+                if (fId && fStart) return nk;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return nullptr;
+}
+
+void EnsureSkillFieldOffsets() {
+    if (gSkillFieldOffTried) return;
+    gSkillFieldOffTried = true;
+    if (!x::runtime::il2cpp::Ensure()) {
+        runtime::LogW("SkillPort", "field off: bind miss — dump fallback");
+        return;
+    }
+    x::runtime::il2cpp_container::Ensure();
+    void* ul = gLocalUserKlass;
+    if (!ul) ul = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+    if (ul) gLocalUserKlass = ul;
+
+    int hits = 0;
+    constexpr int kExpect = 9;
+    auto apply = [&](size_t got, size_t fb, size_t* out) {
+        if (got) {
+            *out = got;
+            ++hits;
+        } else {
+            *out = fb;
+        }
+    };
+    auto resolve2 = [&](void* k, const char* a, const char* b, size_t fb, size_t* out) {
+        size_t got = FieldOffWalk(k, a);
+        if (!got && b) got = FieldOffWalk(k, b);
+        apply(got, fb, out);
+    };
+
+    if (ul) {
+        apply(FieldOffWalk(ul, kFldAffectedList), kFbAffectedList, &gOffAffectedList);
+        apply(FieldOffWalk(ul, kHashPreparingSkill), kFbPreparingSkillId, &gOffPreparingSkillId);
+        resolve2(ul, kHashFldVisPos, kFldVisPosPlain, kFbVisPos, &gOffVisPos);
+        resolve2(ul, kHashFldLogicalPos, kFldLogicalPosPlain, kFbLogicalPos, &gOffLogicalPos);
+
+        void* affKlass = FindAffectedEntryKlass(ul);
+        if (affKlass) {
+            apply(FieldOffWalk(affKlass, kFldAffSkillId), kFbAffSkillId, &gOffAffSkillId);
+            apply(FieldOffWalk(affKlass, kFldAffStartTime), kFbAffStartTime, &gOffAffStartTime);
+        }
+    } else {
+        runtime::LogW("SkillPort", "field off: UserLocal klass miss — user fb only");
+    }
+
+    if (!gSkillInfoKlass) gSkillInfoKlass = FindClass(kSkillInfoClass);
+    if (gSkillInfoKlass) {
+        apply(FieldOffWalk(gSkillInfoKlass, kHashSkillInfoDict), kFbSkillInfoDict, &gOffSkillInfoDict);
+    }
+    void* seKlass = FindClass(kSkillEntryClass);
+    if (seKlass) {
+        apply(FieldOffWalk(seKlass, kHashSkillEntryId), kFbSkillId, &gOffSkillId);
+        apply(FieldOffWalk(seKlass, kHashSkillEntryName), kFbSkillName, &gOffSkillName);
+    }
+
+    runtime::LogI(
+        "SkillPort",
+        "field off hits=%d/%d aff=0x%zX prep=0x%zX pos=0x%zX cur=0x%zX siDict=0x%zX "
+        "seId=0x%zX seName=0x%zX",
+        hits, kExpect, gOffAffectedList, gOffPreparingSkillId, gOffVisPos, gOffLogicalPos,
+        gOffSkillInfoDict, gOffSkillId, gOffSkillName);
 }
 
 int DictIntIntCount(void* dict) {
     if (!dict) return 0;
-    const int count = ReadI32(dict, kOffDictCount);
-    const int freeCount = ReadI32(dict, kOffDictFreeCount);
+    x::runtime::il2cpp_container::RefineFromDictInstance(dict);
+    const int count = ReadI32(dict, x::runtime::il2cpp_container::OffDictCount());
+    const int freeCount = ReadI32(dict, x::runtime::il2cpp_container::OffDictFreeCount());
     int n = count - freeCount;
     if (n < 0) n = count;
     return n;
@@ -486,11 +708,12 @@ int ScoreIntIntLayout(void* entries, int len, size_t stride, size_t valOff) {
     if (!entries || len <= 0 || stride < 16) return 0;
     const int n = len < 4096 ? len : 4096;
     for (int i = 0; i < n; ++i) {
-        uint8_t* e = reinterpret_cast<uint8_t*>(entries) + 0x20 + static_cast<size_t>(i) * stride;
+        uint8_t* e = x::runtime::il2cpp_container::DictEntryAt(entries, i, stride);
+        if (!e) continue;
         __try {
-            const int hash = *reinterpret_cast<int*>(e + 0);
+            const int hash = *reinterpret_cast<int*>(e + kOffEntryHash);
             if (hash < 0) continue;
-            const int key = *reinterpret_cast<int*>(e + 8);
+            const int key = *reinterpret_cast<int*>(e + kOffEntryKey);
             const int val = *reinterpret_cast<int*>(e + valOff);
             if (LooksLikePlayerSkillId(key) && LooksLikeSkillLevel(val)) ++score;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -499,26 +722,28 @@ int ScoreIntIntLayout(void* entries, int len, size_t stride, size_t valOff) {
     return score;
 }
 
-// Walk Dictionary<int,int>；自动在 0x10(value@12) / 0x18(value@16) 间择优。
+// Walk Dictionary<int,int>；自动在 tight(value@12) / align(value@16) 间择优。
 template <typename Fn>
 void ForEachDictIntInt(void* dict, Fn&& fn) {
     if (!dict) return;
-    void* entries = ReadPtr(dict, kOffDictEntries);
+    x::runtime::il2cpp_container::RefineFromDictInstance(dict);
+    void* entries = ReadPtr(dict, x::runtime::il2cpp_container::OffDictEntries());
     if (!entries) return;
-    const int len = ReadI32(entries, 0x18);
+    const int len = ReadI32(entries, kOffArrLen);
     if (len <= 0) return;
 
-    const int scoreTight = ScoreIntIntLayout(entries, len, kEntrySizeIntIntTight, 12);
-    const int scoreAlign = ScoreIntIntLayout(entries, len, kEntrySizeIntPtr, 16);
+    const int scoreTight = ScoreIntIntLayout(entries, len, kEntrySizeIntIntTight, kValOffTight);
+    const int scoreAlign = ScoreIntIntLayout(entries, len, kEntrySizeIntPtr, kValOffAlign);
     const size_t stride = (scoreAlign > scoreTight) ? kEntrySizeIntPtr : kEntrySizeIntIntTight;
-    const size_t valOff = (stride == kEntrySizeIntPtr) ? 16u : 12u;
+    const size_t valOff = (stride == kEntrySizeIntPtr) ? kValOffAlign : kValOffTight;
 
     for (int i = 0; i < len && i < 4096; ++i) {
-        uint8_t* e = reinterpret_cast<uint8_t*>(entries) + 0x20 + static_cast<size_t>(i) * stride;
+        uint8_t* e = x::runtime::il2cpp_container::DictEntryAt(entries, i, stride);
+        if (!e) continue;
         __try {
-            const int hash = *reinterpret_cast<int*>(e + 0);
+            const int hash = *reinterpret_cast<int*>(e + kOffEntryHash);
             if (hash < 0) continue;
-            const int key = *reinterpret_cast<int*>(e + 8);
+            const int key = *reinterpret_cast<int*>(e + kOffEntryKey);
             const int val = *reinterpret_cast<int*>(e + valOff);
             if (key <= 0) continue;
             fn(key, val);
@@ -601,22 +826,14 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
 
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
-                          const char* plain, const char* hash) {
-    if (plain) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plain, shape.arity)) return mi;
-    }
-    if (hash) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hash, shape.arity)) return mi;
-    }
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            x::runtime::LogI("Skill", "ResolveMi kind hit rva=0x%X plain=%s", rva,
-                             plain ? plain : "-");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
-    }
-    return FindMethodByRva(klass, rva);
+                          const char* plain, const char* hash,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
+    if (!klass) return nullptr;
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, hash);
+    if (outPath) *outPath = mr.path;
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
 }
 
 template <typename Fn>
@@ -630,39 +847,71 @@ void EnsureMethodInfos() {
     if (!gSkillInfoKlass) gSkillInfoKlass = FindClass(kSkillInfoClass);
     if (!gSecondaryStatKlass) gSecondaryStatKlass = FindClass(kSecondaryStatClass);
     using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::ResolvePath;
     using x::runtime::il2cpp_method::TypeKind;
+
+    int hashHits = 0;
+    auto fill = [&](MethodInfoHead*& slot, void* klass, uint32_t rva, const MethodShape& shape,
+                    const char* plain, const char* hash) {
+        if (slot || !klass) return;
+        ResolvePath path = ResolvePath::Miss;
+        slot = ResolveMi(klass, rva, shape, plain, hash, &path);
+        if (slot && path == ResolvePath::Hash) ++hashHits;
+    };
+
     if (gLocalUserKlass) {
-        if (!gMiGetSkillLevel) {
-            // int(int) 不唯一 → 哈希主；kind 验形。
-            constexpr MethodShape kLv{1, TypeKind::I32, true, true, {TypeKind::I32}};
-            gMiGetSkillLevel = ResolveMi(gLocalUserKlass, kRvaGetSkillLevel, kLv, "GetSkillLevel",
-                                         kHashGetSkillLevel);
-        }
-        if (!gMiDoActiveSkill) {
-            // bool(int,uint) 唯一。
-            constexpr MethodShape kDo{
-                2, TypeKind::Bool, true, true, {TypeKind::I32, TypeKind::U32}};
-            gMiDoActiveSkill = ResolveMi(gLocalUserKlass, kRvaDoActiveSkill, kDo, "DoActiveSkill",
-                                         kHashDoActiveSkill);
-        }
-        if (!gMiPrepare) {
-            // bool(SkillEntry?,int,uint) — 哈希主。
-            constexpr MethodShape kPrep{
-                3, TypeKind::Bool, true, true, {TypeKind::Ptr, TypeKind::I32, TypeKind::U32}};
-            gMiPrepare = ResolveMi(gLocalUserKlass, kRvaDoActiveSkillPrepare, kPrep,
-                                   "DoActiveSkillPrepare", kHashDoActiveSkillPrepare);
+        constexpr MethodShape kLv{1, TypeKind::I32, true, true, {TypeKind::I32}};
+        fill(gMiGetSkillLevel, gLocalUserKlass, kRvaGetSkillLevel, kLv, "GetSkillLevel",
+             kHashGetSkillLevel);
+        constexpr MethodShape kDo{2, TypeKind::Bool, true, true, {TypeKind::I32, TypeKind::U32}};
+        fill(gMiDoActiveSkill, gLocalUserKlass, kRvaDoActiveSkill, kDo, "DoActiveSkill",
+             kHashDoActiveSkill);
+        constexpr MethodShape kPrep{
+            3, TypeKind::Bool, true, true, {TypeKind::Ptr, TypeKind::I32, TypeKind::U32}};
+        fill(gMiPrepare, gLocalUserKlass, kRvaDoActiveSkillPrepare, kPrep, "DoActiveSkillPrepare",
+             kHashDoActiveSkillPrepare);
+        constexpr MethodShape kSend{6,
+                                    TypeKind::Bool,
+                                    true,
+                                    true,
+                                    {TypeKind::Ptr, TypeKind::I32, TypeKind::U32, TypeKind::I32}};
+        fill(gMiSendSkillUse, gLocalUserKlass, kRvaSendSkillUseRequest, kSend,
+             "SendSkillUseRequest", kHashSendSkillUseRequest);
+        if (!gMiSendSkillUse)
+            gMiSendSkillUse = FindMethodByRva(gLocalUserKlass, kRvaSendSkillUseRequest);
+        if (gMiSendSkillUse && gMiSendSkillUse->methodPointer) {
+            gSendSkillUse = reinterpret_cast<FnSendSkillUse>(gMiSendSkillUse->methodPointer);
         }
     }
-    if (gSkillInfoKlass && !gMiGetSkill) {
+    {
         constexpr MethodShape kGet{1, TypeKind::Ptr, true, false, {TypeKind::I32}};
-        gMiGetSkill = ResolveMi(gSkillInfoKlass, kRvaSkillInfoGetSkill, kGet, "GetSkill",
-                                kHashSkillInfoGetSkill);
+        fill(gMiGetSkill, gSkillInfoKlass, kRvaSkillInfoGetSkill, kGet, "GetSkill",
+             kHashSkillInfoGetSkill);
     }
-    if (gSecondaryStatKlass && !gMiGetRemainTime) {
-        // int(int,int) 唯一。
+    {
         constexpr MethodShape kRem{2, TypeKind::I32, true, false, {TypeKind::I32, TypeKind::I32}};
-        gMiGetRemainTime = ResolveMi(gSecondaryStatKlass, kRvaSecondaryStatGetRemainTime, kRem,
-                                     "GetRemainTime", kHashGetRemainTime);
+        fill(gMiGetRemainTime, gSecondaryStatKlass, kRvaSecondaryStatGetRemainTime, kRem,
+             "GetRemainTime", kHashGetRemainTime);
+    }
+    if (!gWorldManagerKlass)
+        gWorldManagerKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+    {
+        constexpr MethodShape kGut{0, TypeKind::I32, false, false};
+        fill(gMiGetUpdateTime, gWorldManagerKlass, kRvaWorldManagerGetUpdateTime, kGut,
+             "GetUpdateTime", kHashGetUpdateTime);
+    }
+    if (!gCharacterDataKlass) gCharacterDataKlass = FindClass(kCharacterDataClass);
+    if (!gCharacterDataKlass) {
+        void* cd = CharacterData();
+        if (LooksLikeHeapPtr(cd)) gCharacterDataKlass = ReadPtr(cd, 0);
+    }
+    if (gCharacterDataKlass) {
+        constexpr MethodShape kOver{1, TypeKind::I32, true, false, {TypeKind::I32}};
+        fill(gMiGetSkillCoolTimeOver, gCharacterDataKlass, kRvaGetSkillCoolTimeOver, kOver,
+             "GetSkillCoolTimeOver", kHashGetSkillCoolTimeOver);
+        constexpr MethodShape kEx{1, TypeKind::Bool, true, false, {TypeKind::I32}};
+        fill(gMiIsExistSkillCoolTimeOver, gCharacterDataKlass, kRvaIsExistSkillCoolTimeOver, kEx,
+             "IsExistSkillCoolTimeOver", kHashIsExistSkillCoolTimeOver);
     }
     // 函数指针与 MI 对齐（防只更 RVA 常量）。
     if (gMiGetSkillLevel) gGetSkillLevel = FnFromMi<FnGetSkillLevel>(gMiGetSkillLevel, kRvaGetSkillLevel);
@@ -671,6 +920,31 @@ void EnsureMethodInfos() {
     if (gMiGetSkill) gGetSkill = FnFromMi<FnGetSkill>(gMiGetSkill, kRvaSkillInfoGetSkill);
     if (gMiGetRemainTime)
         gGetRemainTime = FnFromMi<FnGetRemainTime>(gMiGetRemainTime, kRvaSecondaryStatGetRemainTime);
+    if (gMiGetUpdateTime)
+        gGetUpdateTime = FnFromMi<FnGetUpdateTime>(gMiGetUpdateTime, kRvaWorldManagerGetUpdateTime);
+    if (gMiGetSkillCoolTimeOver)
+        gGetSkillCoolTimeOver =
+            FnFromMi<FnGetSkillCoolTimeOver>(gMiGetSkillCoolTimeOver, kRvaGetSkillCoolTimeOver);
+    if (gMiIsExistSkillCoolTimeOver)
+        gIsExistSkillCoolTimeOver = FnFromMi<FnIsExistSkillCoolTimeOver>(
+            gMiIsExistSkillCoolTimeOver, kRvaIsExistSkillCoolTimeOver);
+
+    static bool sLogged = false;
+    const int hits = (gMiGetSkillLevel ? 1 : 0) + (gMiDoActiveSkill ? 1 : 0) + (gMiPrepare ? 1 : 0) +
+                     (gMiSendSkillUse ? 1 : 0) + (gMiGetSkill ? 1 : 0) + (gMiGetRemainTime ? 1 : 0) +
+                     (gMiGetUpdateTime ? 1 : 0) + (gMiGetSkillCoolTimeOver ? 1 : 0) +
+                     (gMiIsExistSkillCoolTimeOver ? 1 : 0);
+    if (!sLogged && hits > 0) {
+        sLogged = true;
+        x::runtime::LogI("Skill",
+                         "methods path=%s hits=%d/9 hash=%d lv=%d do=%d prep=%d send=%d get=%d "
+                         "remain=%d upd=%d cool=%d exist=%d",
+                         hashHits >= 8 ? "meta" : (hashHits ? "meta-partial" : "rva/kind"), hits,
+                         hashHits, gMiGetSkillLevel ? 1 : 0, gMiDoActiveSkill ? 1 : 0,
+                         gMiPrepare ? 1 : 0, gMiSendSkillUse ? 1 : 0, gMiGetSkill ? 1 : 0,
+                         gMiGetRemainTime ? 1 : 0, gMiGetUpdateTime ? 1 : 0,
+                         gMiGetSkillCoolTimeOver ? 1 : 0, gMiIsExistSkillCoolTimeOver ? 1 : 0);
+    }
 }
 
 void SetJobReason(CastJob* job, const char* why) {
@@ -678,50 +952,135 @@ void SetJobReason(CastJob* job, const char* why) {
     strncpy_s(job->reason, why ? why : "fail", _TRUNCATE);
 }
 
-// tXxx_ = 绝对到期时刻（与 invuln 写入 GetTickCount()+时长 同语义），不是剩余秒。
-// 旧逻辑把脏扫到的小数当成秒 → UI 出现 167s/146s（截图：游戏图标 1/22）。
+// 游戏逻辑钟：WorldManager.GetUpdateTime = (int)(_updateTime * 1000)。
+// tXxx_ / SkillCoolTimeOver / GetRemainTime(tCur) 均用此钟；禁止用 GetTickCount 当 tCur。
+int GameUpdateTimeMsImpl() {
+    EnsureMethodInfos();
+    if (gGetUpdateTime) {
+        int t = 0;
+        __try {
+            t = gGetUpdateTime(gMiGetUpdateTime);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            t = 0;
+        }
+        if (t > 0) return t;
+    }
+    if (!gWorldManagerKlass)
+        gWorldManagerKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+    void* sf = KlassStaticFields(gWorldManagerKlass);
+    if (!sf) return 0;
+    float sec = 0.f;
+    __try {
+        sec = *reinterpret_cast<float*>(sf);  // static _updateTime @0x0
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    if (!(sec > 0.f) || !(sec < 2.0e6f)) return 0;
+    const double ms = static_cast<double>(sec) * 1000.0;
+    if (ms <= 0.0 || ms >= 2.0e9) return 0;
+    return static_cast<int>(ms);
+}
+
+bool DictTryGetInt(void* dict, int key, int* outVal) {
+    if (!dict || !outVal || key <= 0) return false;
+    bool hit = false;
+    ForEachDictIntInt(dict, [&](int k, int v) {
+        if (!hit && k == key) {
+            *outVal = v;
+            hit = true;
+        }
+    });
+    return hit;
+}
+
+// CoolTimeOver 的 value 是绝对到期 ms（大整数），不能用「像技能等级」打分。
+// 仅扫 dict.count（非 entries.max_length），避免容量槽残留脏 key/value。
+bool DictTryGetIntSkillKey(void* dict, int key, int* outVal) {
+    if (!dict || !outVal || key <= 0) return false;
+    x::runtime::il2cpp_container::RefineFromDictInstance(dict);
+    void* entries = ReadPtr(dict, x::runtime::il2cpp_container::OffDictEntries());
+    if (!entries) return false;
+    const int capacity = ReadI32(entries, kOffArrLen);
+    if (capacity <= 0) return false;
+    // 扫容量但只认 hashCode>=0 的活槽；脏槽常见 hash=-1。API 优先，本路径仅兜底。
+    const size_t strides[] = {kEntrySizeIntIntTight, kEntrySizeIntPtr};
+    const size_t valOffs[] = {kValOffTight, kValOffAlign};
+    for (int pass = 0; pass < 2; ++pass) {
+        const size_t stride = strides[pass];
+        const size_t valOff = valOffs[pass];
+        const int n = capacity < 4096 ? capacity : 4096;
+        for (int i = 0; i < n; ++i) {
+            uint8_t* e = x::runtime::il2cpp_container::DictEntryAt(entries, i, stride);
+            if (!e) continue;
+            __try {
+                if (*reinterpret_cast<int*>(e + kOffEntryHash) < 0) continue;
+                if (*reinterpret_cast<int*>(e + kOffEntryKey) != key) continue;
+                *outVal = *reinterpret_cast<int*>(e + valOff);
+                return true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    }
+    return false;
+}
+
+// 官方 CharacterData.GetSkillCoolTimeOver（TryGetValue）。exist=false → 不在 CD。
+bool CoolTimeOverFromApi(void* cd, int skillId, int* outOver, bool* outExist) {
+    if (outExist) *outExist = false;
+    if (outOver) *outOver = 0;
+    if (!cd || skillId <= 0) return false;
+    EnsureMethodInfos();
+    if (!gGetSkillCoolTimeOver || !gMiGetSkillCoolTimeOver) return false;
+    __try {
+        if (gIsExistSkillCoolTimeOver && gMiIsExistSkillCoolTimeOver) {
+            const bool exist =
+                gIsExistSkillCoolTimeOver(cd, skillId, gMiIsExistSkillCoolTimeOver);
+            if (outExist) *outExist = exist;
+            if (!exist) return true;  // API 可用且明确不在 CD
+        }
+        const int over = gGetSkillCoolTimeOver(cd, skillId, gMiGetSkillCoolTimeOver);
+        if (outOver) *outOver = over;
+        if (outExist && over > 0) *outExist = true;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// tXxx_ = 绝对到期（GetUpdateTime 钟 ms）。剩余 = (t - tCur)/1000。
+// 旧逻辑用 GetTickCount 当 tCur → rem 为负，再把 raw 当「剩余 ms」→ UI 冻在 124s。
 float RemainFromSecondaryStat(int skillId) {
-    void* wm = world::GetWorldManager();
-    if (!wm || skillId <= 0) return 0.f;
-    void* ss = ReadPtr(wm, kOffWmSecondaryStat);
+    if (skillId <= 0) return 0.f;
+    void* ss = x::ui::player::LocalSecondaryStat();
     if (!LooksLikeHeapPtr(ss)) return 0.f;
     if (!gSecondaryStatKlass) gSecondaryStatKlass = FindClass(kSecondaryStatClass);
     if (gSecondaryStatKlass && !ObjKlassIs(ss, gSecondaryStatKlass)) return 0.f;
 
     constexpr float kMaxBuffRemainSec = 600.f;
     constexpr int kMaxRemainMs = 600000;
-    const int tCur = static_cast<int>(GetTickCount());
+    const int tCur = GameUpdateTimeMsImpl();
+    if (tCur <= 0) return 0.f;
 
-    auto remFromRaw = [&](int raw) -> float {
-        if (raw <= 0) return 0.f;
-        // 优先：绝对到期 − 当前（ms）
-        const int remMs = raw - tCur;
+    auto remFromExpire = [&](int expire) -> float {
+        if (expire <= 0) return 0.f;
+        const int remMs = expire - tCur;
         if (remMs > 0 && remMs <= kMaxRemainMs) return static_cast<float>(remMs) / 1000.f;
-        // GetRemainTime 偶发直接返回剩余 ms
-        if (raw > static_cast<int>(kMaxBuffRemainSec) && raw <= kMaxRemainMs)
-            return static_cast<float>(raw) / 1000.f;
-        // 禁止把 raw∈(0,600] 当剩余秒（脏命中根因）
         return 0.f;
     };
 
     float best = 0.f;
     float fromApi = 0.f;
+    int apiRaw = 0;
     if (gGetRemainTime) {
         EnsureMethodInfos();
-        int apiRaw = 0;
         __try {
             apiRaw = gGetRemainTime(ss, skillId, tCur, gMiGetRemainTime);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             apiRaw = 0;
         }
-        fromApi = remFromRaw(apiRaw);
-        // API 已返回「剩余 ms/秒」：apiRaw 本身可能已是 remMs（非绝对时间）
-        if (fromApi <= 0.f && apiRaw > 0 && apiRaw <= kMaxRemainMs) {
-            if (apiRaw <= static_cast<int>(kMaxBuffRemainSec))
-                fromApi = static_cast<float>(apiRaw);  // 剩余秒
-            else
-                fromApi = static_cast<float>(apiRaw) / 1000.f;
-        }
+        // GetRemainTime 在正确 tCur 下返回剩余 ms（非绝对时刻）。
+        if (apiRaw > 0 && apiRaw <= kMaxRemainMs)
+            fromApi = static_cast<float>(apiRaw) / 1000.f;
         if (fromApi > best) best = fromApi;
     }
 
@@ -735,7 +1094,7 @@ float RemainFromSecondaryStat(int skillId) {
             const int r = ReadI32(ss, off);
             if (r != skillId) continue;
             const int t = ReadI32(ss, off + 4);
-            const float sec = remFromRaw(t);
+            const float sec = remFromExpire(t);
             if (sec <= 0.f) continue;
             if (sec > fromScan) {
                 fromScan = sec;
@@ -746,85 +1105,320 @@ float RemainFromSecondaryStat(int skillId) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     if (fromScan > best) best = fromScan;
+    if (best > kMaxBuffRemainSec) best = kMaxBuffRemainSec;
 
     const DWORD now = GetTickCount();
     if (best > 0.01f && now - gLastRemainDiagMs >= 8000) {
         gLastRemainDiagMs = now;
         runtime::LogW("SkillPort",
-                      "remain id=%d best=%.1f api=%.1f scan=%.1f t=%d off=0x%X tCur=%d", skillId,
-                      best, fromApi, fromScan, hitT, hitOff, tCur);
+                      "remain id=%d best=%.1f api=%.1f scan=%.1f t=%d off=0x%X tCur=%d apiRaw=%d",
+                      skillId, best, fromApi, fromScan, hitT, hitOff, tCur, apiRaw);
     }
     return best;
 }
 
-float CooltimeRemainSec(int skillId) {
-    void* cd = CharacterData();
-    if (!cd || skillId <= 0) return 0.f;
-    void* dict = ReadPtr(cd, kOffSkillCooltime);
-    if (!dict) return 0.f;
-    void* entries = ReadPtr(dict, kOffDictEntries);
-    if (!entries) return 0.f;
-    const int len = ReadI32(entries, 0x18);
-    if (len <= 0) return 0.f;
-    // Dictionary<int,ushort>：先按「合理 CD 值」给布局打分，避免读到错位 ushort。
-    struct Cand {
-        size_t stride;
-        size_t valOff;
-        bool asU16;
-    };
-    const Cand cands[] = {
-        {kEntrySizeIntIntTight, 12u, true},
-        {kEntrySizeIntPtr, 16u, true},
-        {kEntrySizeIntIntTight, 12u, false},
-        {kEntrySizeIntPtr, 16u, false},
-    };
-    auto readVal = [&](const Cand& c, uint8_t* e) -> int {
-        if (c.asU16) return static_cast<int>(*reinterpret_cast<uint16_t*>(e + c.valOff));
-        return *reinterpret_cast<int*>(e + c.valOff);
-    };
-    auto saneCd = [](int v) -> bool { return v > 0 && v <= 600; };  // 秒；技能 CD 很少 >10 分钟
-    int bestScore = -1;
-    size_t bestIdx = 0;
-    for (size_t ci = 0; ci < sizeof(cands) / sizeof(cands[0]); ++ci) {
-        const Cand& c = cands[ci];
-        int score = 0;
-        for (int i = 0; i < len && i < 256; ++i) {
-            uint8_t* e =
-                reinterpret_cast<uint8_t*>(entries) + 0x20 + static_cast<size_t>(i) * c.stride;
-            __try {
-                if (*reinterpret_cast<int*>(e + 0) < 0) continue;
-                const int key = *reinterpret_cast<int*>(e + 8);
-                if (!LooksLikePlayerSkillId(key)) continue;
-                if (saneCd(readVal(c, e))) ++score;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
+// 从 skill_names.tsv Desc 解析「再使用冷卻時間：N分鐘/秒」等；失败再回落已知新手技。
+void EnsureTableCooltime() {
+    if (gTableCdTried) return;
+    gTableCdTried = true;
+
+    // 表未就绪时仍可先用新手技硬表（经典版 1001/1002）。
+    gTableCdSec[1001] = 120.f;
+    gTableCdSec[1002] = 60.f;
+
+    const char* bin = x::runtime::GetBinDir();
+    if (!bin || !bin[0]) return;
+    std::string path = bin;
+    if (path.back() != '\\' && path.back() != '/') path += '\\';
+    path += "dataservice\\skill_names.tsv";
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        runtime::LogW("SkillPort", "table cd: open fail %s", path.c_str());
+        return;
+    }
+    std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (raw.size() >= 3 && static_cast<unsigned char>(raw[0]) == 0xEF &&
+        static_cast<unsigned char>(raw[1]) == 0xBB && static_cast<unsigned char>(raw[2]) == 0xBF)
+        raw.erase(0, 3);
+
+    auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
+    int parsed = 0;
+    size_t lineStart = 0;
+    while (lineStart <= raw.size()) {
+        size_t lineEnd = raw.find('\n', lineStart);
+        if (lineEnd == std::string::npos) lineEnd = raw.size();
+        std::string line = raw.substr(lineStart, lineEnd - lineStart);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lineStart = lineEnd + 1;
+        if (line.empty() || line[0] == '#') {
+            if (lineEnd >= raw.size()) break;
+            continue;
+        }
+        const size_t t1 = line.find('\t');
+        if (t1 == std::string::npos) continue;
+        const size_t t2 = line.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        const std::string code = line.substr(0, t1);
+        const std::string desc = line.substr(t2 + 1);
+        if (code.empty() || !isDigit(code[0])) continue;
+        int skillId = 0;
+        for (char c : code) {
+            if (!isDigit(c)) {
+                skillId = 0;
+                break;
+            }
+            skillId = skillId * 10 + (c - '0');
+            if (skillId > 2000000000) {
+                skillId = 0;
+                break;
             }
         }
-        if (score > bestScore) {
-            bestScore = score;
-            bestIdx = ci;
+        if (skillId <= 0) continue;
+
+        // 找「…冷卻時間 / 等待時間」后的数字+单位（UTF-8；工程 /utf-8）。
+        const char* keys[] = {"再使用冷卻時間", "在使用等待時間", "使用等待時間", "冷卻時間"};
+        size_t hit = std::string::npos;
+        for (const char* k : keys) {
+            hit = desc.find(k);
+            if (hit != std::string::npos) break;
         }
-    }
-    const Cand& c = cands[bestIdx];
-    for (int i = 0; i < len && i < 4096; ++i) {
-        uint8_t* e =
-            reinterpret_cast<uint8_t*>(entries) + 0x20 + static_cast<size_t>(i) * c.stride;
-        __try {
-            if (*reinterpret_cast<int*>(e + 0) < 0) continue;
-            if (*reinterpret_cast<int*>(e + 8) != skillId) continue;
-            const int v = readVal(c, e);
-            if (v <= 0) return 0.f;
-            float sec = static_cast<float>(v);
-            if (v > 600 && v <= 600000) sec = static_cast<float>(v) / 1000.f;
-            if (sec <= 0.f || sec > 7200.f) return 0.f;
-            return sec;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (hit == std::string::npos) continue;
+        size_t i = hit;
+        while (i < desc.size() && !isDigit(desc[i])) ++i;
+        if (i >= desc.size()) continue;
+        int num = 0;
+        while (i < desc.size() && isDigit(desc[i])) {
+            num = num * 10 + (desc[i] - '0');
+            ++i;
+            if (num > 100000) break;
         }
+        if (num <= 0 || num > 100000) continue;
+        while (i < desc.size() && (desc[i] == ' ' || desc[i] == '\t')) ++i;
+        float mul = 1.f;
+        if (desc.compare(i, strlen("小時"), "小時") == 0 ||
+            desc.compare(i, strlen("小时"), "小时") == 0)
+            mul = 3600.f;
+        else if (desc.compare(i, strlen("分鐘"), "分鐘") == 0 ||
+                 desc.compare(i, strlen("分钟"), "分钟") == 0)
+            mul = 60.f;
+        else if (desc.compare(i, strlen("秒"), "秒") == 0)
+            mul = 1.f;
+        else
+            continue;
+        const float sec = static_cast<float>(num) * mul;
+        if (sec < 0.5f || sec > 7200.f * 4.f) continue;
+        gTableCdSec[skillId] = sec;
+        ++parsed;
+        if (lineEnd >= raw.size()) break;
     }
-    return 0.f;
+    runtime::LogI("SkillPort", "table cd loaded n=%d (+hard 1001/1002)", parsed);
 }
 
-void CastJobFn(void* user) {
-    auto* job = reinterpret_cast<CastJob*>(user);
+float TableCooltimeSec(int skillId) {
+    if (skillId <= 0) return 0.f;
+    EnsureTableCooltime();
+    const auto it = gTableCdSec.find(skillId);
+    return it == gTableCdSec.end() ? 0.f : it->second;
+}
+
+void NoteLocalCooldownAfterCast(int skillId) {
+    const float dur = TableCooltimeSec(skillId);
+    if (dur < 0.5f) return;
+    const DWORD now = GetTickCount();
+    const DWORD end = now + static_cast<DWORD>(dur * 1000.f + 0.5f);
+    {
+        std::lock_guard<std::mutex> lock(gLocalCdMu);
+        gLocalCdEndTick[skillId] = end;
+    }
+    runtime::LogI("SkillPort", "local cd confirm id=%d dur=%.0fs endTick=%u", skillId, dur, end);
+}
+
+float LocalCooldownRemainSec(int skillId) {
+    if (skillId <= 0) return 0.f;
+    const DWORD now = GetTickCount();
+    DWORD end = 0;
+    {
+        std::lock_guard<std::mutex> lock(gLocalCdMu);
+        const auto it = gLocalCdEndTick.find(skillId);
+        if (it == gLocalCdEndTick.end()) return 0.f;
+        end = it->second;
+        if (static_cast<int>(end - now) <= 0) {
+            gLocalCdEndTick.erase(it);
+            return 0.f;
+        }
+    }
+    return static_cast<float>(end - now) / 1000.f;
+}
+
+float CooltimeRemainSec(int skillId) {
+    void* cd = CharacterData();
+    if (!cd || skillId <= 0) return LocalCooldownRemainSec(skillId);
+    const int tCur = GameUpdateTimeMsImpl();
+    const DWORD now = GetTickCount();
+    const int tick = static_cast<int>(now);
+    float fromGame = 0.f;
+    const char* gameTag = nullptr;
+
+    auto remFromOver = [&](int over, const char* tag) -> float {
+        if (over <= 0) return 0.f;
+        // 优先游戏钟；若 rem 离谱且 over 贴近 GetTickCount，改用 tick 钟。
+        int remMs = (tCur > 0) ? (over - tCur) : 0;
+        const char* clock = "update";
+        if (!(remMs > 0 && remMs <= 7200000)) {
+            const int remTick = over - tick;
+            if (remTick > 0 && remTick <= 7200000) {
+                remMs = remTick;
+                clock = "tick";
+            } else if (remMs <= 0 && tCur > 0) {
+                if (now - gLastCdDiagMs >= 8000) {
+                    gLastCdDiagMs = now;
+                    runtime::LogW("SkillPort",
+                                  "cd id=%d over=%d tCur=%d remMs=%d (%s expired→0)", skillId,
+                                  over, tCur, remMs, tag);
+                }
+                return 0.f;
+            } else {
+                if (now - gLastCdDiagMs >= 8000) {
+                    gLastCdDiagMs = now;
+                    runtime::LogW("SkillPort",
+                                  "cd id=%d over=%d tCur=%d tick=%d remMs=%d (%s corrupt→0)",
+                                  skillId, over, tCur, tick, remMs, tag);
+                }
+                return 0.f;
+            }
+        }
+        const float sec = static_cast<float>(remMs) / 1000.f;
+        if (now - gLastCdDiagMs >= 8000) {
+            gLastCdDiagMs = now;
+            runtime::LogW("SkillPort", "cd id=%d over=%d rem=%.1f (%s/%s)", skillId, over, sec,
+                          tag, clock);
+        }
+        return sec;
+    };
+
+    // 1) 官方 GetSkillCoolTimeOver / IsExist（Dict.TryGetValue，不扫脏槽）。
+    {
+        int over = 0;
+        bool exist = false;
+        if (CoolTimeOverFromApi(cd, skillId, &over, &exist)) {
+            if (exist) {
+                fromGame = remFromOver(over, "CoolTimeOverApi");
+                if (fromGame > 0.01f) gameTag = "CoolTimeOverApi";
+            }
+        } else {
+            // 2) 手扫 Over 字典（仅 API 未绑定时；count 约束见 DictTryGetIntSkillKey）。
+            void* overDict = ReadPtr(cd, x::ui::player::OffSkillCoolTimeOver());
+            if (overDict && tCur > 0) {
+                int overScan = 0;
+                if (DictTryGetIntSkillKey(overDict, skillId, &overScan) && overScan > 0) {
+                    fromGame = remFromOver(overScan, "CoolTimeOverScan");
+                    if (fromGame > 0.01f) gameTag = "CoolTimeOverScan";
+                }
+            } else if (overDict && tCur <= 0 && now - gLastCdDiagMs >= 8000) {
+                gLastCdDiagMs = now;
+                runtime::LogW("SkillPort", "cd id=%d tCur=0 skip CoolTimeOver→ushort", skillId);
+            }
+
+            // 3) SkillCooltime ushort：仅 Over 路径全不可用时兜底。
+            if (fromGame <= 0.01f) {
+                void* dict = ReadPtr(cd, x::ui::player::OffSkillCooltime());
+                if (dict) {
+                    x::runtime::il2cpp_container::RefineFromDictInstance(dict);
+                    void* entries = ReadPtr(dict, x::runtime::il2cpp_container::OffDictEntries());
+                    if (entries) {
+                        const int capacity = ReadI32(entries, kOffArrLen);
+                        if (capacity > 0) {
+                            struct Cand {
+                                size_t stride;
+                                size_t valOff;
+                                bool asU16;
+                            };
+                            const Cand cands[] = {
+                                {kEntrySizeIntIntTight, kValOffTight, true},
+                                {kEntrySizeIntPtr, kValOffAlign, true},
+                                {kEntrySizeIntIntTight, kValOffTight, false},
+                                {kEntrySizeIntPtr, kValOffAlign, false},
+                            };
+                            auto readVal = [&](const Cand& c, uint8_t* e) -> int {
+                                if (c.asU16)
+                                    return static_cast<int>(*reinterpret_cast<uint16_t*>(e + c.valOff));
+                                return *reinterpret_cast<int*>(e + c.valOff);
+                            };
+                            auto saneCd = [](int v) -> bool { return v > 0 && v <= 600; };
+                            int bestScore = -1;
+                            size_t bestIdx = 0;
+                            for (size_t ci = 0; ci < sizeof(cands) / sizeof(cands[0]); ++ci) {
+                                const Cand& c = cands[ci];
+                                int score = 0;
+                                for (int i = 0; i < capacity && i < 256; ++i) {
+                                    uint8_t* e =
+                                        x::runtime::il2cpp_container::DictEntryAt(entries, i, c.stride);
+                                    if (!e) continue;
+                                    __try {
+                                        if (*reinterpret_cast<int*>(e + kOffEntryHash) < 0) continue;
+                                        const int key = *reinterpret_cast<int*>(e + kOffEntryKey);
+                                        if (!LooksLikePlayerSkillId(key)) continue;
+                                        if (saneCd(readVal(c, e))) ++score;
+                                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                                    }
+                                }
+                                if (score > bestScore) {
+                                    bestScore = score;
+                                    bestIdx = ci;
+                                }
+                            }
+                            const Cand& c = cands[bestIdx];
+                            for (int i = 0; i < capacity && i < 4096; ++i) {
+                                uint8_t* e =
+                                    x::runtime::il2cpp_container::DictEntryAt(entries, i, c.stride);
+                                if (!e) continue;
+                                __try {
+                                    if (*reinterpret_cast<int*>(e + kOffEntryHash) < 0) continue;
+                                    if (*reinterpret_cast<int*>(e + kOffEntryKey) != skillId) continue;
+                                    const int v = readVal(c, e);
+                                    if (v <= 0) break;
+                                    float sec = static_cast<float>(v);
+                                    if (v > 600 && v <= 600000) sec = static_cast<float>(v) / 1000.f;
+                                    if (sec > 0.f && sec <= 7200.f) {
+                                        fromGame = sec;
+                                        gameTag = "SkillCooltime ushort fallback";
+                                        if (now - gLastCdDiagMs >= 8000) {
+                                            gLastCdDiagMs = now;
+                                            runtime::LogW("SkillPort",
+                                                          "cd id=%d rem=%.1f (SkillCooltime ushort "
+                                                          "fallback)",
+                                                          skillId, sec);
+                                        }
+                                    }
+                                    break;
+                                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 官方 exist=false / corrupt→0 时，用本地施放记点兜底（1001=120s / 1002=60s 等）。
+    const float fromLocal = LocalCooldownRemainSec(skillId);
+    float best = fromGame;
+    const char* bestTag = gameTag ? gameTag : "game0";
+    if (fromLocal > best + 0.01f) {
+        best = fromLocal;
+        bestTag = "localCast";
+    }
+    if (best > 0.01f && now - gLastCdDiagMs >= 8000) {
+        gLastCdDiagMs = now;
+        runtime::LogW("SkillPort", "cd id=%d rem=%.1f game=%.1f local=%.1f (%s)", skillId, best,
+                      fromGame, fromLocal, bestTag);
+    }
+    return best;
+}
+
+void CastJobFnBody(CastJob* job) {
     if (!job) return;
     job->ok = false;
     job->notReady = false;
@@ -834,6 +1428,41 @@ void CastJobFn(void* user) {
         return;
     }
     EnsureMethodInfos();
+
+    // 可选直发：SendSkillUseRequest(SkillEntry, pPet=0, pt=0, nSLV=level| -1, weapons=null, charge=0)
+    // 失败不中断 —— 继续走下方 DoActive 原路径，避免可选开关搞挂施放。
+    if (job->preferSendUse && gSendSkillUse) {
+        void* si = ResolveSkillInfoSingleton(GetTickCount());
+        void* entry = nullptr;
+        int level = 0;
+        if (LooksLikeHeapPtr(si) && gGetSkill && gGetSkillLevel) {
+            __try {
+                level = gGetSkillLevel(gLocalUser, job->skillId, gMiGetSkillLevel);
+                entry = gGetSkill(si, job->skillId, gMiGetSkill);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                entry = nullptr;
+                level = 0;
+            }
+        }
+        if (LooksLikeHeapPtr(entry)) {
+            const int nSlv = level > 0 ? level : -1;
+            bool sendOk = false;
+            __try {
+                sendOk = gSendSkillUse(gLocalUser, entry, /*pPet=*/0, /*pt=*/0u, nSlv,
+                                       /*weapons=*/nullptr, /*charge=*/0, gMiSendSkillUse);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                SetJobReason(job, "seh_send_use");
+                // fall through to DoActive
+                sendOk = false;
+            }
+            if (sendOk) {
+                job->ok = true;
+                SetJobReason(job, gMiSendSkillUse ? "ok_send_use" : "ok_send_use_mi0");
+                return;
+            }
+            // 保留 send 失败痕迹后再走 DoActive（reason 会被覆盖）。
+        }
+    }
 
     // 主路径：DoActiveSkill(skillId) —— 对标枫星 UseOnClientImmediate 的公开总入口。
     // 内部按技能类型分发 Melee/Shoot/Magic/Prepare/StatChange，再走到 SendSkillUseRequest。
@@ -847,6 +1476,15 @@ void CastJobFn(void* user) {
     if (ok) {
         job->ok = true;
         SetJobReason(job, gMiDoActiveSkill ? "ok_do_active" : "ok_do_active_mi0");
+        return;
+    }
+
+    // DoActive 拒施：常见已有 BUFF / CD / 状态不允许。新手技 1001/1002 等
+    // SkillInfo.GetSkill 常空，Prepare 回退会误报 no_entry 并触发 buffs 指数退避。
+    float remain = 0.f;
+    if (IsSkillActive(job->skillId, &remain)) {
+        job->ok = true;  // 视为已在身上，上层走 verify/assumed
+        SetJobReason(job, "already_active");
         return;
     }
 
@@ -887,7 +1525,9 @@ void CastJobFn(void* user) {
         return;
     }
     if (!LooksLikeHeapPtr(entry)) {
-        SetJobReason(job, "no_entry");
+        // DoActive 已 false 且无 entry：软拒绝，勿当硬 fail（避免 no_entry 退避风暴）。
+        SetJobReason(job, "do_false_no_entry");
+        job->notReady = true;
         return;
     }
     __try {
@@ -905,18 +1545,35 @@ void CastJobFn(void* user) {
     }
 }
 
+// 只读视觉探针包在 SEH 体外，避免 C2712（__try 与 C++ 析构冲突）。
+void CastJobFn(void* user) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("skill.Cast");
+    auto* job = reinterpret_cast<CastJob*>(user);
+    if (!job) return;
+    player_combat::VisualSnap pre{};
+    const bool preOk = player_combat::QueryVisualSnap(pre);
+    char note[96]{};
+    std::snprintf(note, sizeof(note), "skill=%d", job->skillId);
+    player_combat::LogDoActiveVisProbe("pre", note, nullptr);
+    CastJobFnBody(job);
+    std::snprintf(note, sizeof(note), "skill=%d ok=%d nr=%d reason=%s", job->skillId,
+                  job->ok ? 1 : 0, job->notReady ? 1 : 0,
+                  job->reason[0] ? job->reason : "-");
+    player_combat::LogDoActiveVisProbe("post", note, preOk && pre.ok ? &pre : nullptr);
+}
+
 }  // namespace
 
 void Init() {
     gBound = ResolveApi();
     EnsureMethodInfos();
     runtime::LogI("SkillPort",
-                  "init bound=%d DoActive=0x%X Prepare=0x%X getSkill=0x%X getLv=0x%X "
-                  "miDo=%p miP=%p miLv=%p miGet=%p (SendSkillUse=0x%X reserved)",
+                  "init bound=%d DoActive=0x%X Prepare=0x%X SendUse=0x%X getSkill=0x%X getLv=0x%X "
+                  "miDo=%p miP=%p miSend=%p miLv=%p miGet=%p",
                   gBound.load() ? 1 : 0, kRvaDoActiveSkill, kRvaDoActiveSkillPrepare,
-                  kRvaSkillInfoGetSkill, kRvaGetSkillLevel, (void*)gMiDoActiveSkill,
-                  (void*)gMiPrepare, (void*)gMiGetSkillLevel, (void*)gMiGetSkill,
-                  kRvaSendSkillUseRequest);
+                  kRvaSendSkillUseRequest, kRvaSkillInfoGetSkill, kRvaGetSkillLevel,
+                  (void*)gMiDoActiveSkill, (void*)gMiPrepare, (void*)gMiSendSkillUse,
+                  (void*)gMiGetSkillLevel, (void*)gMiGetSkill);
 }
 
 void Shutdown() {
@@ -926,8 +1583,21 @@ void Shutdown() {
     gMiGetSkill = nullptr;
     gMiDoActiveSkill = nullptr;
     gMiPrepare = nullptr;
+    gMiSendSkillUse = nullptr;
     gMiGetRemainTime = nullptr;
+    gMiGetUpdateTime = nullptr;
+    gMiGetSkillCoolTimeOver = nullptr;
+    gMiIsExistSkillCoolTimeOver = nullptr;
     gGetRemainTime = nullptr;
+    gGetUpdateTime = nullptr;
+    gGetSkillCoolTimeOver = nullptr;
+    gIsExistSkillCoolTimeOver = nullptr;
+    gCharacterDataKlass = nullptr;
+    gWorldManagerKlass = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gLocalCdMu);
+        gLocalCdEndTick.clear();
+    }
     gBound = false;
 }
 
@@ -936,6 +1606,7 @@ bool EnsureBound() {
     if (!ResolveApi()) return false;
     const bool lu = TryResolveLocalUser(now);
     const bool wm = world::EnsureBound();
+    if (lu || wm) EnsureSkillFieldOffsets();
     (void)ResolveSkillInfoSingleton(now);
     gBound = lu;
     return lu && wm;
@@ -946,31 +1617,31 @@ bool Ready() { return gBound && LocalUserStillAlive(); }
 int ListActiveSkills(ActiveSkill* out, int cap) {
     if (!out || cap <= 0) return 0;
     if (!EnsureBound() || !gLocalUser) return 0;
-    void* list = ReadPtr(gLocalUser, kOffAffectedList);
+    void* list = ReadPtr(gLocalUser, gOffAffectedList);
+    if (list) x::runtime::il2cpp_container::RefineFromListInstance(list);
     const int n = ListSize(list);
     void* items = ListItems(list);
     int w = 0;
-    const int arrLen = items ? ReadI32(items, 0x18) : 0;
+    const int arrLen = items ? ReadI32(items, kOffArrLen) : 0;
     int lim = n;
     if (lim < 0) lim = 0;
     if (arrLen > 0 && lim > arrLen) lim = arrLen;
     for (int i = 0; i < lim && i < 256 && w < cap; ++i) {
         void* e = ArrayAtPtr(items, i);
         if (!LooksLikeHeapPtr(e)) continue;
-        const int id = ReadI32(e, kOffAffSkillId);
+        const int id = ReadI32(e, gOffAffSkillId);
         if (id <= 0) continue;
         out[w].skillId = id;
-        out[w].startTime = ReadI32(e, kOffAffStartTime);
+        out[w].startTime = ReadI32(e, gOffAffStartTime);
         ++w;
     }
     if (w == 0) {
         const DWORD now = GetTickCount();
         if (now - gLastAffDiagMs >= 10000) {
             gLastAffDiagMs = now;
-            void* ss = nullptr;
-            if (void* wm = world::GetWorldManager()) ss = ReadPtr(wm, kOffWmSecondaryStat);
+            void* ss = x::ui::player::LocalSecondaryStat();
             void* e0 = (n > 0) ? ArrayAtPtr(items, 0) : nullptr;
-            const int id0 = LooksLikeHeapPtr(e0) ? ReadI32(e0, kOffAffSkillId) : 0;
+            const int id0 = LooksLikeHeapPtr(e0) ? ReadI32(e0, gOffAffSkillId) : 0;
             runtime::LogW("SkillPort",
                           "aff empty list=%p size=%d items=%p arrLen=%d lu=%p ss=%p e0=%p id0=%d",
                           list, n, items, arrLen, gLocalUser, ss, e0, id0);
@@ -997,6 +1668,21 @@ bool IsSkillActive(int skillId, float* outRemainSec) {
         return true;
     }
     return false;
+}
+
+bool IsPreparingSkill(int* outSkillId) {
+    if (outSkillId) *outSkillId = 0;
+    if (!EnsureBound() || !LooksLikeHeapPtr(gLocalUser)) return false;
+    int sid = 0;
+    __try {
+        sid = ReadI32(gLocalUser, gOffPreparingSkillId);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    // 与 CMS IsPreparingSkill 同形：SkillID==0 表示未在 Prepare/警戒施法态。
+    if (sid == 0) return false;
+    if (outSkillId) *outSkillId = sid;
+    return true;
 }
 
 int GetSkillLevel(int skillId) {
@@ -1059,7 +1745,7 @@ bool ResolveSkillName(int skillId, char* out, int outSz) {
         strncpy_s(out, static_cast<size_t>(outSz), idBuf, _TRUNCATE);
         return false;
     }
-    void* nameObj = ReadPtr(entry, kOffSkillName);
+    void* nameObj = ReadPtr(entry, gOffSkillName);
     if (ReadIl2CppString(nameObj, out, outSz) && out[0] && std::strcmp(out, idBuf) != 0) {
         return true;
     }
@@ -1098,15 +1784,16 @@ int ListLearnedSkills(SkillInfoLite* out, int cap) {
         s.active = isActive(key);
         s.remainBuffSec = s.active ? RemainFromSecondaryStat(key) : 0.f;
         s.remainCooldownSec = CooltimeRemainSec(key);
-        s.cooldownSec = s.remainCooldownSec;
+        const float tableCd = TableCooltimeSec(key);
+        s.cooldownSec = tableCd > 0.01f ? tableCd : s.remainCooldownSec;
         snprintf(s.code, sizeof(s.code), "%d", key);
         ResolveSkillName(key, s.name, sizeof(s.name));
         ++w;
     };
 
     int w = 0;
-    void* skillRec = ReadPtr(cd, kOffSkillRecord);
-    void* skillRecEx = ReadPtr(cd, kOffSkillRecordEx);
+    void* skillRec = ReadPtr(cd, x::ui::player::OffSkillRecord());
+    void* skillRecEx = ReadPtr(cd, x::ui::player::OffSkillRecordEx());
     ForEachDictIntInt(skillRec, [&](int key, int val) { pushLearned(key, val, w); });
     ForEachDictIntInt(skillRecEx, [&](int key, int val) { pushLearned(key, val, w); });
 
@@ -1134,7 +1821,8 @@ int ListLearnedSkills(SkillInfoLite* out, int cap) {
         s.active = true;
         s.remainBuffSec = RemainFromSecondaryStat(id);
         s.remainCooldownSec = CooltimeRemainSec(id);
-        s.cooldownSec = s.remainCooldownSec;
+        const float tableCd = TableCooltimeSec(id);
+        s.cooldownSec = tableCd > 0.01f ? tableCd : s.remainCooldownSec;
         snprintf(s.code, sizeof(s.code), "%d", id);
         ResolveSkillName(id, s.name, sizeof(s.name));
         ++w;
@@ -1143,9 +1831,16 @@ int ListLearnedSkills(SkillInfoLite* out, int cap) {
 }
 
 float GetSkillCooldownRemainSec(int skillId) {
-    if (skillId <= 0 || !EnsureBound()) return 0.f;
+    if (skillId <= 0 || !EnsureBound()) return LocalCooldownRemainSec(skillId);
     return CooltimeRemainSec(skillId);
 }
+
+float GetSkillCooldownDurationSec(int skillId) {
+    if (skillId <= 0) return 0.f;
+    return TableCooltimeSec(skillId);
+}
+
+int GetGameUpdateTimeMs() { return GameUpdateTimeMsImpl(); }
 
 bool CastSkill(int skillId, bool* notReady, char* outReason, int reasonSz) {
     auto setReason = [&](const char* r) {
@@ -1172,7 +1867,44 @@ bool CastSkill(int skillId, bool* notReady, char* outReason, int reasonSz) {
     }
     CastJob job{};
     job.skillId = skillId;
-    if (!runtime::main_thread::InvokeAndWait(&CastJobFn, &job, kJobWaitMs)) {
+    if (!runtime::main_thread::InvokeAndWait(&CastJobFn, &job, kJobWaitMs,
+                                            runtime::main_thread::JobPrio::High)) {
+        if (notReady) *notReady = true;
+        setReason("invoke_timeout");
+        return false;
+    }
+    if (notReady) *notReady = job.notReady && !job.ok;
+    setReason(job.reason[0] ? job.reason : (job.ok ? "ok" : "fail"));
+    // 不在此处 NoteLocalCooldown：DoActive 假 ok 会种出假 CD；由 ConfirmLocalCooldown（verify ok）记。
+    return job.ok;
+}
+
+bool CastSkillPreferSendUse(int skillId, bool* notReady, char* outReason, int reasonSz) {
+    auto setReason = [&](const char* r) {
+        if (outReason && reasonSz > 0) strncpy_s(outReason, reasonSz, r ? r : "", _TRUNCATE);
+    };
+    if (notReady) *notReady = false;
+    if (skillId <= 0) {
+        setReason("bad_id");
+        return false;
+    }
+    if (!EnsureBound() || !LocalUserStillAlive()) {
+        if (notReady) *notReady = true;
+        setReason("no_lu");
+        return false;
+    }
+    (void)ResolveSkillInfoSingleton(GetTickCount());
+    EnsureMethodInfos();
+    if (!runtime::main_thread::Ensure()) {
+        if (notReady) *notReady = true;
+        setReason("pump_fail");
+        return false;
+    }
+    CastJob job{};
+    job.skillId = skillId;
+    job.preferSendUse = true;
+    if (!runtime::main_thread::InvokeAndWait(&CastJobFn, &job, kJobWaitMs,
+                                            runtime::main_thread::JobPrio::High)) {
         if (notReady) *notReady = true;
         setReason("invoke_timeout");
         return false;
@@ -1180,6 +1912,11 @@ bool CastSkill(int skillId, bool* notReady, char* outReason, int reasonSz) {
     if (notReady) *notReady = job.notReady && !job.ok;
     setReason(job.reason[0] ? job.reason : (job.ok ? "ok" : "fail"));
     return job.ok;
+}
+
+void ConfirmLocalCooldown(int skillId) {
+    if (skillId <= 0) return;
+    NoteLocalCooldownAfterCast(skillId);
 }
 
 }  // namespace x::features::ports::skill

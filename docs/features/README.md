@@ -11,8 +11,9 @@
 
 | 文档 | 主题 |
 |------|------|
+| [`ops/GAMA_PASS与注入闭环.md`](ops/GAMA_PASS与注入闭环.md) | **GAMA PASS 无人值守** + Classic `LoadLibraryW` 注入 + 守护/挂机闭环（✅ build 56 实机） |
 | [`ops/启动系统实现.md`](ops/启动系统实现.md) | Galaxy 换票、NGM deep-link、启动骨架（对照枫星注入器启动文档） |
-| [`ops/架构总览.md`](ops/架构总览.md) | TWMS 分层 DAG；`xcat_app` 内嵌 WebView 换票 |
+| [`ops/架构总览.md`](ops/架构总览.md) | TWMS 分层 DAG；`xcat_app` 内嵌 WebView / GamaPass 换票 |
 | [`ops/日志系统.md`](ops/日志系统.md) | 统一 `xcat_log`：launcher / inject / payload JSONL + GUI callback |
 
 ---
@@ -37,7 +38,7 @@
 | [`titlebar/模块设计.md`](titlebar/模块设计.md) | Win32 标题栏 vitals + 金/经/物值每分 + 职业繁中名；锚点 `WM→CharacterData→CharacterStat`（共享 `player_vitals`）+ 背包卖价（DumpRestoredData） |
 | [`world_manager/字段全表.md`](world_manager/字段全表.md) | `WorldManager` TW 字段全表 + CharacterData/Field/MapData 一跳；对 CMS 漂移标注 |
 | [`world_manager/SceneState与Field.md`](world_manager/SceneState与Field.md) | 进图门控 `SceneState` + `Field`/`SceneMap` 字段拆解；与现行 MyUser 门控对照 |
-| [`autopot/模块设计.md`](autopot/模块设计.md) | 自动喝药：阈值策略 + `SendStatChangeItemUseRequest`；面板 `[core] hpPotion/mpPotion`（✅ 已挂入；实机待验） |
+| [`autopot/模块设计.md`](autopot/模块设计.md) | 自动喝药：阈值策略 + `SendStatChangeItemUseRequest`（药水）；回家卷见 auto_supply `PortalScroll`；面板 `[core] hpPotion/mpPotion`（✅ 已挂入；实机待验） |
 | [`simple_combat/模块设计.md`](simple_combat/模块设计.md) | 自动打怪状态机重设计：站桩出刀 + 可选贴怪瞬移互斥；默认关瞬移/智能间隔 |
 | [`attack_speed/模块设计.md`](attack_speed/模块设计.md) | **攻击加速** ✅ BIN 结案：清忙锁 + `SS+1BC=140`；频率=面板间隔；**不做** layer mid-cut |
 | [`attack_rpc/模块设计.md`](attack_rpc/模块设计.md) | 结算层出刀实验 🔍；目标全屏多怪；默认关 |
@@ -48,9 +49,10 @@
 | [`attack_speed/P0a_出刀忙锁与Prepare链.md`](attack_speed/P0a_出刀忙锁与Prepare链.md) | `SetAttackAction` → busy → Prepare → Slot14 解锁；排除 hitstun/AntiRepeat |
 | [`attack_speed/P0b_双速系统与字段表.md`](attack_speed/P0b_双速系统与字段表.md) | ActionSpeed vs 武器档/Booster；Forced→`+80`；CTS 7/11 表 |
 | [`attack_speed/P0c_TemporaryStat生命周期.md`](attack_speed/P0c_TemporaryStat生命周期.md) | Decode/Reset/CheckByTime；Speed 客户端不自清 |
-| [`teleport/模块设计.md`](teleport/模块设计.md) | 瞬移 port：仅 fill+Doing；点飞不钉台 |
+| [`teleport/模块设计.md`](teleport/模块设计.md) | 瞬移 port：仅 fill+Doing（`fill_slim`）；点飞不钉台 |
+| [`teleport/P0d_fill_slim软重载结案.md`](teleport/P0d_fill_slim软重载结案.md) | **挂机飞出图 / Field 软重载** ✅：Doing 后抢收态 → Ap→0；瘦身后置只 `Apl←Ap`（BIN `101030400`） |
 | [`fly/模块设计.md`](fly/模块设计.md) | F6 飞：A 点击 hop / B 跟随 hop（吸附/pin 已退役） |
-| [`travel/模块设计.md`](travel/模块设计.md) | **超级赶路** ✅：同盘 seed BFS + 瞬移贴门进门；世界地图 Spot 预检 Notice；无码头/跨盘自动 |
+| [`travel/模块设计.md`](travel/模块设计.md) | **超级赶路** ✅：同盘 seed BFS + Snap 钉台贴门（`snap=1`，禁悬空）；世界地图 Spot 预检 Notice；无码头/跨盘自动 |
 | [`worldmap_marker_travel/模块设计.md`](worldmap_marker_travel/模块设计.md) | **世界地图 Spot 双击赶路** ✅：`UpdateView`/`OnPointerDown` 换桩 → YesNo/Notice → `RequestGoto`；字段偏移与 BIN |
 | [`teleport/P0a_瞬移CALL锚点.md`](teleport/P0a_瞬移CALL锚点.md) | TW IDA 钉死 Register/Doing/Attr RVA、原生调用链、旁路 vs 原生、BIN 纪要；§1.1 视觉层同步链锚点（13 个 RVA + 字段偏移） |
 | [`teleport/P0b_引擎实现原理.md`](teleport/P0b_引擎实现原理.md) | **位移真源**：`SetImpactNext` 的 fmax/fmin 饱和合并语义、完整消费链（`ApplyImpact 0x11A4E60` / `LeaveFoothold 0x11AF5C0`）、「踏板偷换才是位移主因」及三个证伪实验；`MovePathType` 全表 / `MoveElem`·`MovePath`·`VecCtrl` 布局；14 组偏移核对零偏差；文档时间线纠偏 |
@@ -75,8 +77,10 @@
 | [`auto_lie/模块设计.md`](auto_lie/模块设计.md) | 自动测谎：TextCaptcha+LLM / NonFinite / 測謊機 `2190000` / 契约·status（✅ 挂入；离线基建 BIN 已过） |
 | [`auto_lie/基建与离线验收.md`](auto_lie/基建与离线验收.md) | 离线基建验收：就绪灯、本地/LLM 夹具泵（真 PNG）、报警·烟测、BIN 清单 |
 | [`auto_lie/P0a_锚点复核.md`](auto_lie/P0a_锚点复核.md) | **测谎数据源**：UIAntiMacro* Prefab、jpegData/path、WM+0x1D0、`IsOpenAntiMacro@0x936780` |
-| [`auto_supply/模块设计.md`](auto_supply/模块设计.md) | **自动回城卖/补给**：就近寻店卖装 + 可选补货；UI 对齐枫星；Charge stub；整趟实机待验 |
+| [`auto_supply/模块设计.md`](auto_supply/模块设计.md) | **自动回城卖/补给**：就近寻店卖装 + 去店用卷 `SendPortalScrollUseRequest`（2030000/2030059）+ 可选补货；Charge/回程用卷待验 |
 | [`auto_supply/P2_货架寻店.md`](auto_supply/P2_货架寻店.md) | 按货架/物品码全局寻店：**不做**（无 SetShopDlg Commodity 全表；产品语义为就近能卖） |
+| [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认关；服端断线+守护会干净重拉 |
+| [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ 数据面清 `LocalUser+0x114`；抑制客户端警戒；默认开 |
 
 ---
 
@@ -119,7 +123,7 @@
 | `x/features/ports/attack_input_port.*` | 普攻键脉冲（InjectKeyHold） |
 | `x/features/mob_scan/` | 扫怪 worker → `logs/mobscan.log`（`n=/M=`）；同上 |
 | `x/features/simple_combat/` | 状态机打怪 → `[core] simpleCombat` · F5 · `logs/combat.log` · 默认关贴怪瞬移 |
-| `x/features/ports/teleport_port.*` | 瞬移 fill+Doing；见 [`teleport/模块设计.md`](teleport/模块设计.md) |
+| `x/features/ports/teleport_port.*` | 瞬移 fill+Doing（`fill_slim`）；见 [`teleport/模块设计.md`](teleport/模块设计.md) · [`P0d`](teleport/P0d_fill_slim软重载结案.md) |
 | `x/features/fly/` | 鼠标飞 A/B/C；见 [`fly/模块设计.md`](fly/模块设计.md) |
 | `x/features/travel/` + `ports/travel_port.*` + `worldmap_marker_travel/` | 同盘赶路 + Spot 入口；见 [`travel/模块设计.md`](travel/模块设计.md) · [`worldmap_marker_travel/模块设计.md`](worldmap_marker_travel/模块设计.md) |
 | `x/features/pet_feed/` + `ports/pet_port.*` | P0b 宠物只读探针 → `logs/petfeed.log` |
@@ -131,5 +135,7 @@
 | `x/features/ccu/` | 分区 CCU（auto_enter 喂数）→ SHM → 底栏；见 [`ccu/模块设计.md`](ccu/模块设计.md) |
 | `x/features/channel_hop/` | 随机换频 → `[core] manualRejoinSeq`；见 [`channel_hop/模块设计.md`](channel_hop/模块设计.md) |
 | `x/features/encounter/` | 遇人策略 → `[core] autoRelogin*`；见 [`encounter/模块设计.md`](encounter/模块设计.md) |
-| `x/features/auto_supply/` + `ports/shop_port.*` | 自动回城卖/补给 → `[auto_supply]`；见 [`auto_supply/模块设计.md`](auto_supply/模块设计.md) |
+| `x/features/auto_supply/` + `ports/shop_port.*` + `ports/consumable_port.*` | 自动回城卖/补给 → `[auto_supply]`；去店用卷 `PortalScroll`；见 [`auto_supply/模块设计.md`](auto_supply/模块设计.md) |
+| `x/features/auction_town_bypass/` | 野外开拍卖 → `[core] auctionTownBypass`；见 [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) |
+| `x/features/drop_alert_bypass/` | 战斗中可丢物 → `[core] dropAlertBypass`；见 [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) |
 | `DumpRestoredData/` | dump.cs 符号恢复分档（titlebar 偏移锚点） |

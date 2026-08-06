@@ -3,6 +3,7 @@
 #include "app_font.h"
 #include "app_theme.h"
 #include "resource.h"
+#include "update_client.h"
 
 #include "../common/xcat_log.h"
 #include "../common/process_util.h"
@@ -363,30 +364,10 @@ void AppWindow_Show(AppWindow& app) {
     ApplyTopmostZOrder(app);
 }
 
-void AppWindow_CreateSilentWebHost(AppWindow& app) {
-    if (!app.hwnd || app.webHost) return;
-    // 不占 UI：子窗隐藏；给 WebView2 一个很小的离屏客户区即可跑 JS/导航
-    app.webHost = CreateWindowExW(
-        0, L"STATIC", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN, -32000, -32000, 8, 8,
-        app.hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-    if (!app.webHost) {
-        xcat::log::Error("App", "CreateWindow silent webHost failed err=%lu",
-                         static_cast<unsigned long>(GetLastError()));
-        return;
-    }
-    ShowWindow(app.webHost, SW_HIDE);
-    xcat::log::Info("App", "WebView host created (silent / hidden)");
-}
-
 void AppWindow_Destroy(AppWindow& app) {
     if (app.hwnd) {
         UnregisterHotKey(app.hwnd, kHotkeyToggleGui);
         UnregisterHotKey(app.hwnd, kHotkeyManualRejoin);
-    }
-
-    if (app.webHost && IsWindow(app.webHost)) {
-        DestroyWindow(app.webHost);
-        app.webHost = nullptr;
     }
 
     xcat::ui::UiTheme_DestroyGrainTextureDX11();
@@ -599,14 +580,35 @@ LRESULT AppWindow_WndProc(AppWindow& app, HWND hwnd, UINT msg, WPARAM wParam, LP
         }
         break;
 
-    case WM_CLOSE:
-        // 对齐 Artale：标题栏关闭只关 GUI，不杀游戏（杀游戏走底部「杀死游戏并退出」）。
+    case WM_CLOSE: {
+        // 对齐 Artale：普通关窗默认只关 GUI、不杀游戏。
+        // 例外：本会话 AccessDeny / 门禁 pending / 本机粘性拒绝 → 一并杀经典版，防注入留存。
+        std::string prefsBin;
+        {
+            wchar_t mod[MAX_PATH]{};
+            if (GetModuleFileNameW(nullptr, mod, MAX_PATH) > 0) {
+                prefsBin = xcat::WideToUtf8(xcat::ParentDirWithSlash(mod)) + "XCat_data";
+            }
+        }
+        if (xcat::app::ShouldKillGameOnLauncherClose(prefsBin)) {
+            xcat::log::Warn("App", "WM_CLOSE access-gate → stop game");
+            xcat::app::StopGameForAccessGateExit();
+        }
         app.running = false;
         return 0;
+    }
 
     case WM_XCAT_GRACEFUL_EXIT_DONE:
         app.pendingExitAfterSound.store(true);
         return 0;
+
+    case WM_XCAT_ACCESS_GATE: {
+        // 工作线程 PostMessage：主线程弹窗后硬退，避免在 ImGui 帧内/worker 里 MessageBox。
+        const int code =
+            xcat::app::HandleAccessGateUiMessage(static_cast<unsigned long long>(wParam));
+        ExitProcess(static_cast<UINT>(code > 0 ? code : 2));
+        return 0;
+    }
 
     case WM_DESTROY:
         app.running = false;

@@ -132,6 +132,7 @@ writeFileSync(
    （网页下载站：http://xcat.work:52080/；本机探活可用 127.0.0.1）
 
 内含：xcat.exe、XCat_data\\xcat.dll、离线 dataservice / 赶路 seed。
+换票：GAMA PASS（浏览器 CDP）或 gamania (HK) HTTP，无需 WebView2 Runtime。
 
 构建时间：${new Date().toISOString().replace("T", " ").slice(0, 19)}
 `,

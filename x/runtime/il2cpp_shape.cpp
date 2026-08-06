@@ -27,14 +27,14 @@ constexpr int kTypeGenericInst = 0x15;
 constexpr int kTypeObject = 0x1c;
 constexpr int kTypeSzArray = 0x1d;
 
-// remounted 2026-08-03 hashes
+// remounted 2026-08-04 hashes（旧 08-03 全 miss；交叉：WM+0x28→UL，FAC+0x10→NM）
 constexpr char kHashWorldManager[] =
-    "ab85c0a92566c06894823c0ea737161a6102c41812458909864735c34f99947";
+    "af1529816d3e158e2939f3c03b4fe68c04930802ea39c8d6567d1fb4865b742";
 constexpr char kHashUserLocal[] =
-    "ac2e48ccb42621aeda0a94cfdaa2212c4be9ce58a3efa9661804a372cef3e1d";
+    "d344a8e976a30de427223e36a7cf5447b64fa0a92c37e51ea3899629d7c69fd";
 // Session class (methods); facade singleton is kHashNetworkManagerFacade.
 constexpr char kHashNetworkManager[] =
-    "f0ee06b64ad95c59b95ca923b6db62ce451a5c512b3ef47e7c3814caca41909";
+    "b7c1f7127579884c9322a45b49e48641be2e38cd1a8cfc8ac607d465605f691";
 
 // WorldManager dump TypeDef 1387: MyUser@0x28, Field@0x58, CharacterData@0xE0, SecondaryStat@0xF0
 constexpr FieldShape kWmFields[] = {
@@ -89,13 +89,13 @@ constexpr ClassShape kNmShape = {
     false,
 };
 
-// NetworkManager facade TypeDef 13772 df34ff16… : Singleton<> —
-// Session*@0x10, SessionState@0x18, Queue@0x28, HashSet@0x48
+// NetworkManager facade TypeDef 13772 : Singleton<> —
+// Session*@0x10, state obj@0x18, Queue@0x28, HashSet@0x48
 constexpr char kHashNetworkManagerFacade[] =
-    "df34ff1607aed888a5ef73901db838f28b74b9a50225d93d984f56b4a513624";
+    "c053d2244d81b74fac600f73756c09bc5779a404476774abca9c2e97e7123ee";
 constexpr FieldShape kNmFacadeFields[] = {
     {0x10, FieldKind::Ptr},
-    {0x18, FieldKind::I32},
+    {0x18, FieldKind::Ptr},  // state object（非裸 I32；08-04 dump）
     {0x28, FieldKind::Ptr},
     {0x48, FieldKind::Ptr},
 };
@@ -109,9 +109,9 @@ constexpr ClassShape kNmFacadeShape = {
     false,
 };
 
-// SecurityClient attack window — static class TypeDef 15147 (was ba499947… → d9ef28f1…)
+// SecurityClient attack window — static class TypeDef 15147
 constexpr char kHashSecAttack[] =
-    "d9ef28f16e8be00eacfa1d3189c0aaa048cfa998bc6efde64fb0c983ce4cb7f";
+    "e439d99256c51f2492933cff8c1e84159b5d5b3720e5b5a9ea5549740eee2bd";
 constexpr FieldShape kSaFields[] = {
     {0x0, FieldKind::Ptr},   // Dictionary<ushort,int>
     {0x8, FieldKind::Ptr},   // Dictionary<int,int>
@@ -127,21 +127,45 @@ constexpr ClassShape kSaShape = {
     true,  // staticFields
 };
 
+// SceneLogin TypeDef 1168：GO@0xA0 + 登录 UI 槽@0xC0/C8/D0 + handles List@0xF8 + bool@0x100
+constexpr char kHashSceneLogin[] =
+    "b07d82aa980240a976735d96673a9c7d4003e8183cba75917ee99b59b251394";
+constexpr FieldShape kSlFields[] = {
+    {0xA0, FieldKind::Ptr},
+    {0xC0, FieldKind::Ptr},
+    {0xC8, FieldKind::Ptr},
+    {0xD0, FieldKind::Ptr},
+    {0xF8, FieldKind::Ptr},
+    {0x100, FieldKind::Bool},
+};
+constexpr ClassShape kSlShape = {
+    kSlFields,
+    sizeof(kSlFields) / sizeof(kSlFields[0]),
+    nullptr,
+    0x110,
+    true,
+    true,
+    false,
+};
+
 void* gCacheWm = nullptr;
 void* gCacheUl = nullptr;
 void* gCacheNm = nullptr;
 void* gCacheNmFacade = nullptr;
 void* gCacheSa = nullptr;
+void* gCacheSl = nullptr;
 ResolvePath gPathWm = ResolvePath::Miss;
 ResolvePath gPathUl = ResolvePath::Miss;
 ResolvePath gPathNm = ResolvePath::Miss;
 ResolvePath gPathNmFacade = ResolvePath::Miss;
 ResolvePath gPathSa = ResolvePath::Miss;
+ResolvePath gPathSl = ResolvePath::Miss;
 ResolvePath gLoggedWm = ResolvePath::Miss;
 ResolvePath gLoggedUl = ResolvePath::Miss;
 ResolvePath gLoggedNm = ResolvePath::Miss;
 ResolvePath gLoggedNmFacade = ResolvePath::Miss;
 ResolvePath gLoggedSa = ResolvePath::Miss;
+ResolvePath gLoggedSl = ResolvePath::Miss;
 bool gSelfCheckLogged = false;
 
 // CorLib FIELD_ATTRIBUTE_STATIC
@@ -418,6 +442,19 @@ void* ResolveSecAttackKlass() {
     return gCacheSa;
 }
 
+void* ResolveSceneLoginKlass() {
+    if (gCacheSl) return gCacheSl;
+    const ResolveResult r = FindClassCached(kHashSceneLogin, kSlShape);
+    gCacheSl = r.klass;
+    gPathSl = r.path;
+    if (!gCacheSl) {
+        // Plain restored name (rare dumps); not cached as hash path.
+        gCacheSl = il2::FindClass("", "SceneLogin");
+        if (gCacheSl) gPathSl = ResolvePath::Hash;
+    }
+    return gCacheSl;
+}
+
 void LogResolveSelfCheck() {
     if (!il2::Ensure()) return;
     static bool sExportsWarned = false;
@@ -430,9 +467,10 @@ void LogResolveSelfCheck() {
     (void)ResolveNetworkManagerKlass();
     (void)ResolveNetworkManagerFacadeKlass();
     (void)ResolveSecAttackKlass();
+    (void)ResolveSceneLoginKlass();
     const bool changed = !gSelfCheckLogged || gLoggedWm != gPathWm || gLoggedUl != gPathUl ||
                          gLoggedNm != gPathNm || gLoggedNmFacade != gPathNmFacade ||
-                         gLoggedSa != gPathSa;
+                         gLoggedSa != gPathSa || gLoggedSl != gPathSl;
     if (!changed) return;
     gSelfCheckLogged = true;
     gLoggedWm = gPathWm;
@@ -440,8 +478,10 @@ void LogResolveSelfCheck() {
     gLoggedNm = gPathNm;
     gLoggedNmFacade = gPathNmFacade;
     gLoggedSa = gPathSa;
-    x::runtime::LogI("shape", "WM=%s UL=%s NM=%s FAC=%s SA=%s", PathName(gPathWm), PathName(gPathUl),
-                     PathName(gPathNm), PathName(gPathNmFacade), PathName(gPathSa));
+    gLoggedSl = gPathSl;
+    x::runtime::LogI("shape", "WM=%s UL=%s NM=%s FAC=%s SA=%s SL=%s", PathName(gPathWm),
+                     PathName(gPathUl), PathName(gPathNm), PathName(gPathNmFacade), PathName(gPathSa),
+                     PathName(gPathSl));
 }
 
 RolePaths GetCachedPaths() {
@@ -451,6 +491,7 @@ RolePaths GetCachedPaths() {
     p.nm = gPathNm;
     p.fac = gPathNmFacade;
     p.sa = gPathSa;
+    p.sl = gPathSl;
     return p;
 }
 

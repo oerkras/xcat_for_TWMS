@@ -4,13 +4,18 @@
 #endif
 #include "consumable_port.h"
 
+#include "input_port.h"
 #include "world_port.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
+#include "../../runtime/anchor_lamps.h"
+#include "../../runtime/mono_clock.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 namespace x::features::ports::consumable {
@@ -21,25 +26,77 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr size_t kOffWmCharacterData = 0xE0;
-constexpr size_t kOffCdItemSlots = 0x40;
-constexpr size_t kOffItemId = 0x10;
-constexpr size_t kOffBundleNumber = 0x28;
 constexpr int kItemTypeConsume = 2;
 constexpr DWORD kJobWaitMs = 1500;
+constexpr DWORD kUseMiRetryMs = 3000;
+constexpr DWORD kFkmRebindMs = 3000;
 
-// UISlotItem.SendStatChangeItemUseRequest — hashed names; TypeDefIndex still 488.
-// Remount 2026-08-03: class/method rehashed; RVA 0x5E4940 → 0x5E3F90.
-// Evidence: dump.cs static Send* declaration order + public/private matches CMS
-// (Lottery → StatChange → AntiMacro…); FuncKey caller passes (nPOS, Value@+0x14) + null MI.
-// Resolve: name → method-hash → RVA+kind(void,int,int) 校验（同类同形 ~11，kind 不唯一兜底）。
+// FuncKeyMappedManager · remounted 2026-08-04（与 attack_input_port 钉值一致）
+constexpr uint32_t kRvaGetDataByKeyCode = 0x164F7C0;
+constexpr char kHashGetDataByKeyCode[] =
+    "a0d3bb0e07878aa585d5c5b47fb2836f7759427a165955082d2e7bf87af7a46";
+constexpr char kFkmClass[] =
+    "c18b40c5d905e6ddbc8c9e4cfc486aff2d1e47d038a192d5aa77e999ea233d7";
+constexpr int32_t kFuncTypeItem = 2;  // FuncType.Item
+constexpr char kFuncKeyClass[] =
+    "c5f306e5860ab75f344a5ad42c89868b10dd30405e7e07ca0ce540ddbb792c8";
+constexpr char kHashFkType[] =
+    "c457db52bc5102a0fe56359124142c8a914dfc6083b9130be075fada445b22a";
+constexpr char kHashFkValue[] =
+    "f76a3ef9dbb055eb9d2ad8533e3a498dfff3ba28773d12b37132ca043ba9bfc";
+constexpr size_t kFbFkType = 0x10;
+constexpr size_t kFbFkValue = 0x14;
+size_t gOffFkType = kFbFkType;
+size_t gOffFkValue = kFbFkValue;
+bool gFkFieldTried = false;
+
+// --- 字段防漂移（dump.cs / restored · 2026-08-04）---
+constexpr char kHashWorldManager[] =
+    "af1529816d3e158e2939f3c03b4fe68c04930802ea39c8d6567d1fb4865b742";
+constexpr char kHashCharacterData[] =
+    "e410fb711868f2306f8a6368e8330e0e76e59c504fcdcce6952ceec81952e38";
+constexpr char kHashItemSlotBase[] =
+    "d677d787964c20a275bf2143129afd80fd71e4a18260f8fcbebfbe8bb1151ab";
+constexpr char kHashItemSlotBundle[] =
+    "b8365f343c3dd01e0845d83e5d4c458c1f93caff44816729fc70c764ce782f1";
+constexpr char kHashWmCharacterData[] =
+    "b57ace627893d12b66c4fe3b71ba9ab74056636018d089be72d9c93bab9f5a1";
+constexpr char kHashCdItemSlots[] =
+    "e756936a01b4cb1ab54a49b063b06337b0f0666ee05ead8415f35a8e278b760";
+constexpr char kHashItemId[] =
+    "fc997879055f32f0e76539d0bd9e5dc694a2eeeb9bcc40f5c19bc494b98991d";
+constexpr char kHashBundleNumber[] =
+    "a558ec2b3a69c9460f8b88b7ba68f5b7fa1c9c74cd1021dcb57f4157c003a94";
+
+constexpr size_t kFbWmCharacterData = 0xE0;
+constexpr size_t kFbCdItemSlots = 0x40;
+constexpr size_t kFbItemId = 0x10;
+constexpr size_t kFbBundleNumber = 0x28;
+
+size_t gOffWmCharacterData = kFbWmCharacterData;
+size_t gOffCdItemSlots = kFbCdItemSlots;
+size_t gOffItemId = kFbItemId;
+size_t gOffBundleNumber = kFbBundleNumber;
+std::atomic<bool> gFieldOffResolved{false};
+char gFieldOffPath[64]{};
+
+// UISlotItem.SendStatChangeItemUseRequest — 药水等属性道具；hashed；TypeDefIndex 488。
+// Remount 2026-08-04: class/method rehashed；RVA 0x5E3F90 → 0x5E59C0。
+// Evidence: dump.cs static Send* 声明序对齐 CMS（Lottery → StatChange → AntiMacro → PortalScroll…）。
+// Resolve: name → method-hash → RVA+kind(void,int,int)。
 constexpr char kUiSlotItemClassHash[] =
-    "ea99a706b02d8a8a14c68a9721a6a47ee59ec1dcf854806221b8db66078fd6c";
+    "f42ca5cd675abf647c3df1ee2220efa531d4e4752e56af881a49983a5f0a087";
 constexpr char kUseReqMethodHash[] =
-    "f4c76544a7279af68ef016af56f05d746a74c18d023529bf9059753d31c05a9";
-constexpr uint32_t kRvaSendStatChangeItemUseRequest = 0x5E3F90;
+    "bf5cbfce5e5ea0f126f42ea07bdc274a2130f0b3fd970c566d2b5671d548bc6";
+constexpr uint32_t kRvaSendStatChangeItemUseRequest = 0x5E59C0;
 
-using FnUseRequest = void (*)(int nPos, int pPet, const void* methodInfo);
+// UISlotItem.SendPortalScrollUseRequest — 回家/城镇卷（2030xxx）；CMS private static (nPOS,nItemID)。
+// TW dump 同簇第 10 项（AntiMacro 后、MobSummon 前）；script.json Address 0x5E8610。
+constexpr char kPortalScrollMethodHash[] =
+    "c0ae1896d7dabf1a14d759926da23d0e9a750c609313437605a2808347a6030";
+constexpr uint32_t kRvaSendPortalScrollUseRequest = 0x5E8610;
+
+using FnUseRequest = void (*)(int nPos, int itemId, const void* methodInfo);
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -49,6 +106,17 @@ struct MethodInfoHead {
 void* gKlassSlotItem = nullptr;
 MethodInfoHead* gMiUseReq = nullptr;
 FnUseRequest gFnUseReq = nullptr;
+MethodInfoHead* gMiPortalScroll = nullptr;
+FnUseRequest gFnPortalScroll = nullptr;
+
+using FnGetDataByKeyCode = void* (*)(void* self, int32_t key, const void* methodInfo);
+
+void* gFkm = nullptr;
+void* gFkmKlass = nullptr;
+MethodInfoHead* gMiGetDataByKeyCode = nullptr;
+DWORD gLastFkmRebind = 0;
+DWORD gLastBindMissLogHp = 0;
+DWORD gLastBindMissLogMp = 0;
 
 struct UseJobCtx {
     int pos = 0;
@@ -115,6 +183,279 @@ int MpRank(int id) {
     return -1;
 }
 
+// --- FKM PageDown/PageUp bind (align attack_input_port remount 2026-08-04) ---
+void* TryLazyValue(void* lazy) {
+    if (!lazy || !LooksLikeHeapPtr(lazy)) return nullptr;
+    const size_t tryOffs[] = {0x10, 0x18, 0x20, 0x28, 0x08};
+    for (size_t off : tryOffs) {
+        void* v = ReadPtr(lazy, off);
+        if (LooksLikeHeapPtr(v)) return v;
+    }
+    return nullptr;
+}
+
+void* KlassStaticFields(void* klass) {
+    if (!klass) return nullptr;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (e.classStaticData) {
+        __try {
+            void* p = e.classStaticData(klass);
+            if (p) return p;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    const size_t tryOffs[] = {0xB8, 0xB0, 0xC0, 0x5C, 0x90, 0xA8, 0xD0};
+    for (size_t off : tryOffs) {
+        void* p = ReadPtr(klass, off);
+        if (LooksLikeHeapPtr(p)) return p;
+    }
+    return nullptr;
+}
+
+void* TryResolveFkmSingleton() {
+    if (!gFkmKlass) gFkmKlass = x::runtime::il2cpp::FindClass("", kFkmClass);
+    if (!gFkmKlass) return nullptr;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (e.runtimeClassInit) {
+        __try {
+            x::runtime::il2cpp::RuntimeClassInit(gFkmKlass);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    void* staticsKlass = gFkmKlass;
+    if (e.classParent) {
+        void* parent = nullptr;
+        __try {
+            parent = e.classParent(gFkmKlass);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            parent = nullptr;
+        }
+        if (parent) {
+            if (e.runtimeClassInit) {
+                __try {
+                    x::runtime::il2cpp::RuntimeClassInit(parent);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
+            }
+            staticsKlass = parent;
+        }
+    }
+    void* statics = KlassStaticFields(staticsKlass);
+    if (!statics) statics = KlassStaticFields(gFkmKlass);
+    if (!statics) return nullptr;
+    for (size_t s = 0; s < 6; ++s) {
+        void* lazy = ReadPtr(statics, s * sizeof(void*));
+        void* cand = TryLazyValue(lazy);
+        if (!cand) cand = lazy;
+        if (!LooksLikeHeapPtr(cand)) continue;
+        if (ReadPtr(cand, 0) == gFkmKlass) return cand;
+        if (!gFkm) return cand;
+    }
+    return nullptr;
+}
+
+bool EnsureFkmOnMain() {
+    const DWORD now = x::runtime::NowMs();
+    if (gFkm && LooksLikeHeapPtr(gFkm) && ReadPtr(gFkm, 0) && now - gLastFkmRebind < kFkmRebindMs)
+        return true;
+    gLastFkmRebind = now;
+    gFkm = TryResolveFkmSingleton();
+    return gFkm != nullptr;
+}
+
+void EnsureGetDataByKeyCodeMi() {
+    if (gMiGetDataByKeyCode) return;
+    if (!gFkmKlass) gFkmKlass = x::runtime::il2cpp::FindClass("", kFkmClass);
+    if (!gFkmKlass) return;
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    constexpr MethodShape kData{1, TypeKind::Ptr, true, true, {TypeKind::Any}};
+    const auto mr = x::runtime::il2cpp_method::FindMethodResolved(
+        gFkmKlass, kRvaGetDataByKeyCode, kData, "GetDataByKeyCode", kHashGetDataByKeyCode);
+    if (mr.method) gMiGetDataByKeyCode = reinterpret_cast<MethodInfoHead*>(mr.method);
+}
+
+bool ReadFkFields(void* fk, int32_t* outType, int32_t* outValue) {
+    if (!fk || !LooksLikeHeapPtr(fk) || !outType || !outValue) return false;
+    int32_t t = 0, v = 0;
+    __try {
+        t = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(fk) + gOffFkType);
+        v = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(fk) + gOffFkValue);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    *outType = t;
+    *outValue = v;
+    return true;
+}
+
+bool SoftTrustBound(bool wantHp, int itemId) {
+    if (itemId <= 0) return false;
+    // 对齐枫星 soft-trust：红路径拒纯蓝，蓝路径拒纯红；双效药两边都过。
+    if (wantHp) return HpRank(itemId) >= 0;
+    return MpRank(itemId) >= 0;
+}
+
+bool FkFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out, size_t lo, size_t hi) {
+    *out = fb;
+    if (!klass || !hash || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    for (void* k = klass; k;) {
+        void* field = nullptr;
+        __try {
+            field = e.classGetFieldFromName(k, hash);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            field = nullptr;
+        }
+        if (field) {
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (off >= lo && off < hi) {
+                *out = off;
+                return true;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return false;
+}
+
+void EnsureFkFieldOff() {
+    if (gFkFieldTried) return;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    gFkFieldTried = true;
+    void* fk = x::runtime::il2cpp::FindClass("", kFuncKeyClass);
+    int hits = 0;
+    if (FkFieldOffHit(fk, kHashFkType, kFbFkType, &gOffFkType, 0x10, 0x40)) ++hits;
+    if (FkFieldOffHit(fk, kHashFkValue, kFbFkValue, &gOffFkValue, 0x10, 0x40)) ++hits;
+    x::runtime::LogI("Consumable", "FuncKey slots path=%s hits=%d/2 fkT=0x%zX fkV=0x%zX",
+                     hits == 2 ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffFkType,
+                     gOffFkValue);
+}
+
+void LogBindMissThrottled(const char* why, bool wantHp, int type, int value) {
+    const DWORD now = x::runtime::NowMs();
+    DWORD& slot = wantHp ? gLastBindMissLogHp : gLastBindMissLogMp;
+    if (slot && static_cast<int>(now - slot) < 10000) return;
+    slot = now;
+    x::runtime::LogW("Consumable", "bound pot miss key=%s why=%s type=%d value=%d",
+                     wantHp ? "PageDown" : "PageUp", why, type, value);
+}
+
+bool PlausibleOff(size_t off) { return off >= 0x10 && off < 0x1000; }
+
+size_t FieldOffsetByHash(void* klass, const char* nameHash) {
+    if (!klass || !nameHash || !x::runtime::il2cpp::Ensure()) return 0;
+    const auto& e = x::runtime::il2cpp::Get();
+    for (void* k = klass; k;) {
+        if (e.classGetFieldFromName && e.fieldGetOffset) {
+            void* field = nullptr;
+            __try {
+                field = e.classGetFieldFromName(k, nameHash);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                field = nullptr;
+            }
+            if (field) {
+                size_t off = 0;
+                __try {
+                    off = e.fieldGetOffset(field);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    off = 0;
+                }
+                if (PlausibleOff(off)) return off;
+            }
+        }
+        if (e.classGetFields && e.fieldGetName && e.fieldGetOffset) {
+            void* iter = nullptr;
+            __try {
+                for (;;) {
+                    void* field = e.classGetFields(k, &iter);
+                    if (!field) break;
+                    const char* nm = nullptr;
+                    __try {
+                        nm = e.fieldGetName(field);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        nm = nullptr;
+                    }
+                    if (!nm || std::strcmp(nm, nameHash) != 0) continue;
+                    size_t off = 0;
+                    __try {
+                        off = e.fieldGetOffset(field);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        off = 0;
+                    }
+                    if (PlausibleOff(off)) return off;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return 0;
+}
+
+size_t PickOff(size_t resolved, size_t hint, bool* usedHash) {
+    if (resolved) {
+        if (usedHash) *usedHash = true;
+        return resolved;
+    }
+    return hint;
+}
+
+void EnsureFieldOffsets() {
+    if (gFieldOffResolved.load(std::memory_order_acquire)) return;
+    if (!x::runtime::il2cpp::Ensure()) return;
+
+    void* wm = x::runtime::il2cpp::FindClass("", kHashWorldManager);
+    void* cd = x::runtime::il2cpp::FindClass("", kHashCharacterData);
+    void* slot = x::runtime::il2cpp::FindClass("", kHashItemSlotBase);
+    void* bundle = x::runtime::il2cpp::FindClass("", kHashItemSlotBundle);
+    if (!wm && !cd && !slot && !bundle) return;
+
+    bool wmH = false, cdH = false, idH = false, qtyH = false;
+    if (wm) {
+        gOffWmCharacterData =
+            PickOff(FieldOffsetByHash(wm, kHashWmCharacterData), kFbWmCharacterData, &wmH);
+    }
+    if (cd) {
+        gOffCdItemSlots =
+            PickOff(FieldOffsetByHash(cd, kHashCdItemSlots), kFbCdItemSlots, &cdH);
+    }
+    if (slot) {
+        gOffItemId = PickOff(FieldOffsetByHash(slot, kHashItemId), kFbItemId, &idH);
+    }
+    // nNumber 在 Bundle 上；找不到则沿父类 ItemSlotBase 再试一次
+    if (bundle || slot) {
+        size_t q = 0;
+        if (bundle) q = FieldOffsetByHash(bundle, kHashBundleNumber);
+        if (!q && slot) q = FieldOffsetByHash(slot, kHashBundleNumber);
+        gOffBundleNumber = PickOff(q, kFbBundleNumber, &qtyH);
+    }
+
+    snprintf(gFieldOffPath, sizeof(gFieldOffPath), "wm=%s cd=%s id=%s qty=%s",
+             wmH ? "hash" : "hint", cdH ? "hash" : "hint", idH ? "hash" : "hint",
+             qtyH ? "hash" : "hint");
+    gFieldOffResolved.store(true, std::memory_order_release);
+    x::runtime::LogI("Consumable", "field off cd=0x%zX slots=0x%zX id=0x%zX qty=0x%zX path=%s",
+                     gOffWmCharacterData, gOffCdItemSlots, gOffItemId, gOffBundleNumber,
+                     gFieldOffPath);
+}
+
 int32_t ReadI32(void* obj, size_t off) {
     if (!obj) return 0;
     __try {
@@ -135,29 +476,30 @@ uint16_t ReadU16(void* obj, size_t off) {
 
 int ListSize(void* list) {
     if (!list) return 0;
-    return ReadI32(list, 0x18);
+    return ReadI32(list, x::runtime::il2cpp_container::OffListSize());
 }
 
 void* ListAt(void* list, int i) {
     if (!list || i < 0) return nullptr;
-    void* items = ReadPtr(list, 0x10);
+    void* items = ReadPtr(list, x::runtime::il2cpp_container::OffListItems());
     if (!items) return nullptr;
     return ArrayAt(items, (uintptr_t)i);
 }
 
 int ItemQty(void* item) {
     if (!item) return 0;
-    const int n = (int)ReadU16(item, kOffBundleNumber);
+    const int n = (int)ReadU16(item, gOffBundleNumber);
     if (n > 0) return n;
     return 1;
 }
 
 void* GetConsumeList() {
+    EnsureFieldOffsets();
     void* wm = world::GetWorldManager();
     if (!wm) return nullptr;
-    void* cd = ReadPtr(wm, kOffWmCharacterData);
+    void* cd = ReadPtr(wm, gOffWmCharacterData);
     if (!LooksLikeHeapPtr(cd)) return nullptr;
-    void* slotsArr = ReadPtr(cd, kOffCdItemSlots);
+    void* slotsArr = ReadPtr(cd, gOffCdItemSlots);
     if (!LooksLikeHeapPtr(slotsArr)) return nullptr;
     const uintptr_t n = ArrayLen(slotsArr);
     if (n <= (uintptr_t)kItemTypeConsume) return nullptr;
@@ -174,11 +516,50 @@ int QtyOfItemId(int itemId) {
     for (int i = 0; i < n && i < 256; ++i) {
         void* item = ListAt(list, i);
         if (!item) continue;
-        if (ReadI32(item, kOffItemId) != itemId) continue;
+        if (ReadI32(item, gOffItemId) != itemId) continue;
         found = true;
         total += ItemQty(item);
     }
     return found ? total : -1;
+}
+
+MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
+    if (!klass || !rva) return nullptr;
+    const auto& ex = x::runtime::il2cpp::Get();
+    if (!ex.classGetMethods || !x::runtime::il2cpp::GaBase()) return nullptr;
+    void* target = x::runtime::il2cpp::AtRva<void*>(rva);
+    void* cur = klass;
+    for (int depth = 0; cur && depth < 8; ++depth) {
+        void* iter = nullptr;
+        __try {
+            for (;;) {
+                void* miRaw = ex.classGetMethods(cur, &iter);
+                if (!miRaw) break;
+                auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
+                void* mp = nullptr;
+                void* vp = nullptr;
+                __try {
+                    mp = mi->methodPointer;
+                    vp = mi->virtualMethodPointer;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    continue;
+                }
+                if (mp == target || vp == target) return mi;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+        if (!ex.classParent) break;
+        void* parent = nullptr;
+        __try {
+            parent = ex.classParent(cur);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            parent = nullptr;
+        }
+        if (!parent || parent == cur) break;
+        cur = parent;
+    }
+    return nullptr;
 }
 
 MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
@@ -186,95 +567,201 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
     const auto& e = x::runtime::il2cpp::Get();
     MethodInfoHead* mi = nullptr;
     if (e.classGetMethodFromName) {
-        __try {
-            mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            mi = nullptr;
+        const int tryArgc[] = {argc, -1};
+        for (int ac : tryArgc) {
+            __try {
+                mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, ac));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                mi = nullptr;
+            }
+            if (mi && mi->methodPointer) return mi;
         }
     }
-    if (mi && mi->methodPointer) return mi;
     if (!e.classGetMethods || !e.methodGetName) return nullptr;
-    void* iter = nullptr;
-    __try {
-        for (;;) {
-            void* raw = e.classGetMethods(klass, &iter);
-            if (!raw) break;
-            const char* nm = e.methodGetName(raw);
-            if (nm && strcmp(nm, name) == 0) {
-                mi = reinterpret_cast<MethodInfoHead*>(raw);
-                if (mi && mi->methodPointer) return mi;
+    void* cur = klass;
+    for (int depth = 0; cur && depth < 8; ++depth) {
+        void* iter = nullptr;
+        __try {
+            for (;;) {
+                void* raw = e.classGetMethods(cur, &iter);
+                if (!raw) break;
+                const char* nm = e.methodGetName(raw);
+                if (nm && strcmp(nm, name) == 0) {
+                    mi = reinterpret_cast<MethodInfoHead*>(raw);
+                    if (mi && mi->methodPointer) return mi;
+                }
             }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (!e.classParent) break;
+        void* parent = nullptr;
+        __try {
+            parent = e.classParent(cur);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            parent = nullptr;
+        }
+        if (!parent || parent == cur) break;
+        cur = parent;
     }
     return nullptr;
 }
+
+MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
+                          const x::runtime::il2cpp_method::MethodShape& shape,
+                          const char* plainName, const char* hashName,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
+    if (!klass) return nullptr;
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plainName, hashName);
+    if (outPath) *outPath = mr.path;
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
+}
+
+bool gLoggedUseReqRvaMiss = false;
+bool gLoggedPortalRvaMiss = false;
+DWORD gLastUseMiRetryMs = 0;
+DWORD gLastPortalMiRetryMs = 0;
 
 bool ResolveUseMethod() {
     if (gMiUseReq && gMiUseReq->methodPointer) {
         gFnUseReq = reinterpret_cast<FnUseRequest>(gMiUseReq->methodPointer);
         return true;
     }
-    if (gFnUseReq) return true;
+    if (gFnUseReq && gMiUseReq) return true;
     if (!x::runtime::il2cpp::Ensure()) return false;
 
+    // 已有 RVA-only：仍允许升级到 MI，但节流，避免每次吃药全量扫方法表。
+    const bool hadRvaOnly = (gFnUseReq != nullptr);
+    if (hadRvaOnly) {
+        const DWORD now = GetTickCount();
+        if (gLastUseMiRetryMs && now - gLastUseMiRetryMs < kUseMiRetryMs) return true;
+        gLastUseMiRetryMs = now;
+    }
+
     if (!gKlassSlotItem) {
-        gKlassSlotItem = x::runtime::il2cpp::FindClass("", "UISlotItem");
+        // 混淆盘无 UISlotItem 明文；哈希优先。
+        gKlassSlotItem = x::runtime::il2cpp::FindClass("", kUiSlotItemClassHash);
         if (!gKlassSlotItem)
-            gKlassSlotItem = x::runtime::il2cpp::FindClass("", kUiSlotItemClassHash);
-    }
-    if (!gKlassSlotItem) {
-        // Last resort: direct RVA call without MethodInfo (static path often tolerates null MI).
-        gFnUseReq = x::runtime::il2cpp::AtRva<FnUseRequest>(kRvaSendStatChangeItemUseRequest);
-        if (gFnUseReq) {
-            x::runtime::LogW("Consumable",
-                             "UISlotItem klass miss — UseRequest via RVA 0x%X (null MI)",
-                             kRvaSendStatChangeItemUseRequest);
-            return true;
-        }
-        x::runtime::LogW("Consumable", "UISlotItem klass miss");
-        return false;
+            gKlassSlotItem = x::runtime::il2cpp::FindClass("", "UISlotItem");
     }
 
-    // 1) 明文 / 方法哈希（哈希漂 RVA 时仍可活）
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    // UISlotItem 上 void(int,int) 同形很多 → unique=false，靠 RVA/哈希钉死。
+    constexpr MethodShape kUse{2, TypeKind::Void, false, false, {TypeKind::I32, TypeKind::I32}};
+    MethodInfoHead* mi = nullptr;
     const char* via = nullptr;
-    MethodInfoHead* mi = FindMethodByName(gKlassSlotItem, "SendStatChangeItemUseRequest", 2);
-    if (mi) via = "name";
-    if (!mi) {
-        mi = FindMethodByName(gKlassSlotItem, kUseReqMethodHash, 2);
-        if (mi) via = "hash";
-    }
-
-    // 2) RVA + kind 校验。UISlotItem 上 public/private static void(int,int) 很多（~11），
-    //    kind  alone 不唯一 → 与 GetSkillLevel 同策略：RVA 主路径，kind 只验形。
-    if (!mi) {
-        using x::runtime::il2cpp_method::MethodShape;
+    if (gKlassSlotItem) {
         using x::runtime::il2cpp_method::ResolvePath;
-        using x::runtime::il2cpp_method::TypeKind;
-        constexpr MethodShape kUse{2, TypeKind::Void, true, false, {TypeKind::I32, TypeKind::I32}};
-        const auto mr = x::runtime::il2cpp_method::FindMethodCached(
-            gKlassSlotItem, kRvaSendStatChangeItemUseRequest, kUse);
-        mi = reinterpret_cast<MethodInfoHead*>(mr.method);
-        if (mi) {
-            via = (mr.path == ResolvePath::Kind) ? "kind" : "rva";
+        ResolvePath pUse = ResolvePath::Miss;
+        mi = ResolveMi(gKlassSlotItem, kRvaSendStatChangeItemUseRequest, kUse,
+                       "SendStatChangeItemUseRequest", kUseReqMethodHash, &pUse);
+        static bool sMethodHitsLogged = false;
+        if (!sMethodHitsLogged) {
+            sMethodHitsLogged = true;
+            x::runtime::LogI("Consumable", "methods path=%s hits=%d/1",
+                             pUse == ResolvePath::Hash ? "meta"
+                             : (pUse != ResolvePath::Miss ? "meta-partial" : "fallback"),
+                             pUse == ResolvePath::Hash ? 1 : 0);
         }
+        if (mi) via = "ResolveMi";
     }
 
     if (mi && mi->methodPointer) {
         gMiUseReq = mi;
         gFnUseReq = reinterpret_cast<FnUseRequest>(mi->methodPointer);
-        x::runtime::LogI("Consumable", "UseRequest MI=%p fn=%p via %s", (void*)mi, mi->methodPointer,
-                         via ? via : "?");
+        x::runtime::LogI("Consumable", "UseRequest MI=%p fn=%p via %s%s", (void*)mi,
+                         mi->methodPointer, via ? via : "?",
+                         hadRvaOnly ? " (upgraded from RVA)" : "");
+        x::runtime::anchor_lamps::Set("Consumable", x::runtime::anchor_lamps::AnchorLampCode::Ok,
+                                     via ? via : "MI");
         return true;
     }
 
-    gFnUseReq = x::runtime::il2cpp::AtRva<FnUseRequest>(kRvaSendStatChangeItemUseRequest);
+    // Last resort: 官方 FuncKey 站点传 null MI；裸 RVA 仅作换版过渡。
+    // 已有 RVA fn 时只静默重试 MI 升级，禁止每次吃药刷 MI miss。
+    if (!gFnUseReq) {
+        gFnUseReq = x::runtime::il2cpp::AtRva<FnUseRequest>(kRvaSendStatChangeItemUseRequest);
+    }
     if (gFnUseReq) {
-        x::runtime::LogW("Consumable", "UseRequest MI miss — calling RVA 0x%X with null MI",
-                         kRvaSendStatChangeItemUseRequest);
+        if (!gLoggedUseReqRvaMiss) {
+            x::runtime::LogW("Consumable",
+                             "UseRequest MI miss — RVA 0x%X null-MI fallback (klass=%p)",
+                             kRvaSendStatChangeItemUseRequest, gKlassSlotItem);
+            gLoggedUseReqRvaMiss = true;
+        }
+        x::runtime::anchor_lamps::Set("Consumable",
+                                     x::runtime::anchor_lamps::AnchorLampCode::Degraded, "RVA nullMI");
         return true;
     }
     x::runtime::LogW("Consumable", "SendStatChangeItemUseRequest resolve fail");
+    x::runtime::anchor_lamps::Set("Consumable", x::runtime::anchor_lamps::AnchorLampCode::Miss,
+                                 "MISS");
+    return false;
+}
+
+bool EnsureSlotItemKlass() {
+    if (gKlassSlotItem) return true;
+    if (!x::runtime::il2cpp::Ensure()) return false;
+    gKlassSlotItem = x::runtime::il2cpp::FindClass("", kUiSlotItemClassHash);
+    if (!gKlassSlotItem) gKlassSlotItem = x::runtime::il2cpp::FindClass("", "UISlotItem");
+    return gKlassSlotItem != nullptr;
+}
+
+bool ResolvePortalScrollMethod() {
+    if (gMiPortalScroll && gMiPortalScroll->methodPointer) {
+        gFnPortalScroll = reinterpret_cast<FnUseRequest>(gMiPortalScroll->methodPointer);
+        return true;
+    }
+    if (gFnPortalScroll && gMiPortalScroll) return true;
+    if (!x::runtime::il2cpp::Ensure()) return false;
+
+    const bool hadRvaOnly = (gFnPortalScroll != nullptr);
+    if (hadRvaOnly) {
+        const DWORD now = GetTickCount();
+        if (gLastPortalMiRetryMs && now - gLastPortalMiRetryMs < kUseMiRetryMs) return true;
+        gLastPortalMiRetryMs = now;
+    }
+
+    if (!EnsureSlotItemKlass()) return false;
+
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::ResolvePath;
+    using x::runtime::il2cpp_method::TypeKind;
+    constexpr MethodShape kUse{2, TypeKind::Void, false, false, {TypeKind::I32, TypeKind::I32}};
+    ResolvePath pPath = ResolvePath::Miss;
+    MethodInfoHead* mi =
+        ResolveMi(gKlassSlotItem, kRvaSendPortalScrollUseRequest, kUse, "SendPortalScrollUseRequest",
+                  kPortalScrollMethodHash, &pPath);
+    static bool sPortalHitsLogged = false;
+    if (!sPortalHitsLogged) {
+        sPortalHitsLogged = true;
+        x::runtime::LogI("Consumable", "PortalScroll methods path=%s hits=%d/1",
+                         pPath == ResolvePath::Hash ? "meta"
+                         : (pPath != ResolvePath::Miss ? "meta-partial" : "fallback"),
+                         pPath == ResolvePath::Hash ? 1 : 0);
+    }
+    if (mi && mi->methodPointer) {
+        gMiPortalScroll = mi;
+        gFnPortalScroll = reinterpret_cast<FnUseRequest>(mi->methodPointer);
+        x::runtime::LogI("Consumable", "PortalScroll MI=%p fn=%p via ResolveMi%s", (void*)mi,
+                         mi->methodPointer, hadRvaOnly ? " (upgraded from RVA)" : "");
+        return true;
+    }
+    if (!gFnPortalScroll) {
+        gFnPortalScroll = x::runtime::il2cpp::AtRva<FnUseRequest>(kRvaSendPortalScrollUseRequest);
+    }
+    if (gFnPortalScroll) {
+        if (!gLoggedPortalRvaMiss) {
+            x::runtime::LogW("Consumable",
+                             "PortalScroll MI miss — RVA 0x%X null-MI fallback (klass=%p)",
+                             kRvaSendPortalScrollUseRequest, gKlassSlotItem);
+            gLoggedPortalRvaMiss = true;
+        }
+        return true;
+    }
+    x::runtime::LogW("Consumable", "SendPortalScrollUseRequest resolve fail");
     return false;
 }
 
@@ -328,7 +815,7 @@ bool FindPotionOnMain(PotionKind kind, FindResult& out) {
     for (int i = 0; i < n; ++i) {
         void* item = ListAt(list, i);
         if (!item) continue;
-        const int id = ReadI32(item, kOffItemId);
+        const int id = ReadI32(item, gOffItemId);
         const int rank = (kind == PotionKind::Hp) ? HpRank(id) : MpRank(id);
         if (rank < 0) continue;
         const int qty = ItemQty(item);
@@ -432,7 +919,7 @@ bool FindItemIdOnMain(int itemId, FindResult& out) {
     for (int i = 0; i < n; ++i) {
         void* item = ListAt(list, i);
         if (!item) continue;
-        if (ReadI32(item, kOffItemId) != itemId) continue;
+        if (ReadI32(item, gOffItemId) != itemId) continue;
         const int qty = ItemQty(item);
         if (qty <= 0) continue;
         const int pos = oneBased ? i : (i + 1);
@@ -447,8 +934,58 @@ bool FindItemIdOnMain(int itemId, FindResult& out) {
     return false;
 }
 
-struct FindUseIdJobCtx {
-    int itemId = 0;
+// MUST only run on Unity main. PageDown=HP / PageUp=MP → FuncType.Item → consume slot.
+bool ResolveBoundPotionOnMain(bool wantHp, FindResult& out) {
+    out = {};
+    auto fail = [&](const char* why, int type, int value, int itemId = 0) {
+        out = {};
+        out.missWhy = why;
+        out.itemId = itemId;
+        LogBindMissThrottled(why, wantHp, type, value);
+        return false;
+    };
+    EnsureFkFieldOff();
+    if (!EnsureFkmOnMain()) return fail("no_fkm", -1, 0);
+    EnsureGetDataByKeyCodeMi();
+    auto getData = [&]() -> FnGetDataByKeyCode {
+        if (gMiGetDataByKeyCode && gMiGetDataByKeyCode->methodPointer)
+            return reinterpret_cast<FnGetDataByKeyCode>(gMiGetDataByKeyCode->methodPointer);
+        return x::runtime::il2cpp::AtRva<FnGetDataByKeyCode>(kRvaGetDataByKeyCode);
+    }();
+    if (!getData) return fail("no_getdata", -1, 0);
+    const int32_t unityKey = input::VkToUnityKey(wantHp ? VK_NEXT : VK_PRIOR);
+    if (unityKey <= 0) return fail("bad_vk", -1, 0);
+    void* fk = nullptr;
+    __try {
+        fk = getData(gFkm, unityKey, gMiGetDataByKeyCode);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        fk = nullptr;
+        return fail("getdata_seh", -1, 0);
+    }
+    if (!fk || !LooksLikeHeapPtr(fk)) return fail("empty_bind", 0, 0);
+    int32_t type = 0, value = 0;
+    if (!ReadFkFields(fk, &type, &value)) return fail("fk_read", -1, 0);
+    if (type != kFuncTypeItem) return fail("not_item", type, value, value);
+    if (!SoftTrustBound(wantHp, value)) return fail("soft_reject", type, value, value);
+    if (!FindItemIdOnMain(value, out) || !out.ok) return fail("not_in_bag", type, value, value);
+    out.missWhy = nullptr;
+    return true;
+}
+
+struct BoundResolveJobCtx {
+    bool wantHp = true;
+    FindResult* out = nullptr;
+    bool ok = false;
+};
+
+void BoundResolveJobOnMain(void* user) {
+    auto* ctx = reinterpret_cast<BoundResolveJobCtx*>(user);
+    if (!ctx || !ctx->out) return;
+    ctx->ok = ResolveBoundPotionOnMain(ctx->wantHp, *ctx->out);
+}
+
+struct FindUseBoundJobCtx {
+    bool wantHp = true;
     FindResult fr{};
     int qtyBefore = -1;
     int qtyAfter = -1;
@@ -456,10 +993,10 @@ struct FindUseIdJobCtx {
     bool used = false;
 };
 
-void FindUseIdJobOnMain(void* user) {
-    auto* ctx = reinterpret_cast<FindUseIdJobCtx*>(user);
+void FindUseBoundJobOnMain(void* user) {
+    auto* ctx = reinterpret_cast<FindUseBoundJobCtx*>(user);
     if (!ctx) return;
-    if (!FindItemIdOnMain(ctx->itemId, ctx->fr) || !ctx->fr.ok) return;
+    if (!ResolveBoundPotionOnMain(ctx->wantHp, ctx->fr) || !ctx->fr.ok) return;
     ctx->found = true;
     ctx->qtyBefore = QtyOfItemId(ctx->fr.itemId);
     if (!ResolveUseMethod() || !gFnUseReq) return;
@@ -469,7 +1006,56 @@ void FindUseIdJobOnMain(void* user) {
         ctx->qtyAfter = QtyOfItemId(ctx->fr.itemId);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ctx->used = false;
-        x::runtime::LogW("Consumable", "UseById SEH pos=%d id=%d", ctx->fr.pos, ctx->itemId);
+        x::runtime::LogW("Consumable", "FindUseBound SEH pos=%d id=%d", ctx->fr.pos, ctx->fr.itemId);
+    }
+}
+
+struct FindUseIdJobCtx {
+    int itemId = 0;
+    FindResult fr{};
+    int qtyBefore = -1;
+    int qtyAfter = -1;
+    bool found = false;
+    bool used = false;
+    bool resolveMiss = false;
+    bool seh = false;
+    bool listMiss = false;  // GetConsumeList / size 异常
+};
+
+void FindUseIdJobOnMain(void* user) {
+    auto* ctx = reinterpret_cast<FindUseIdJobCtx*>(user);
+    if (!ctx) return;
+    if (!world::EnsureBound()) {
+        ctx->listMiss = true;
+        return;
+    }
+    void* list = GetConsumeList();
+    if (!list) {
+        ctx->listMiss = true;
+        return;
+    }
+    const int n = ListSize(list);
+    if (n <= 0 || n > 256) {
+        ctx->listMiss = true;
+        return;
+    }
+    if (!FindItemIdOnMain(ctx->itemId, ctx->fr) || !ctx->fr.ok) return;
+    ctx->found = true;
+    ctx->qtyBefore = QtyOfItemId(ctx->fr.itemId);
+    // 回家/城镇卷必须走 PortalScroll；StatChange 只服务药水，会 no-op 且不扣数量。
+    if (!ResolvePortalScrollMethod() || !gFnPortalScroll) {
+        ctx->resolveMiss = true;
+        return;
+    }
+    __try {
+        // 与 FuncKey / UseJobOnMain 一致：第三参传 null MI。
+        gFnPortalScroll(ctx->fr.pos, ctx->fr.itemId, nullptr);
+        ctx->used = true;
+        ctx->qtyAfter = QtyOfItemId(ctx->fr.itemId);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ctx->used = false;
+        ctx->seh = true;
+        x::runtime::LogW("Consumable", "PortalScroll SEH pos=%d id=%d", ctx->fr.pos, ctx->itemId);
     }
 }
 
@@ -478,14 +1064,48 @@ void FindUseIdJobOnMain(void* user) {
 void Init() {
     gMiUseReq = nullptr;
     gFnUseReq = nullptr;
+    gMiPortalScroll = nullptr;
+    gFnPortalScroll = nullptr;
     gKlassSlotItem = nullptr;
+    gFkm = nullptr;
+    gFkmKlass = nullptr;
+    gMiGetDataByKeyCode = nullptr;
+    gLastFkmRebind = 0;
+    gLastBindMissLogHp = 0;
+    gLastBindMissLogMp = 0;
+    gFkFieldTried = false;
+    gOffFkType = kFbFkType;
+    gOffFkValue = kFbFkValue;
+    gLoggedUseReqRvaMiss = false;
+    gLoggedPortalRvaMiss = false;
+    gLastUseMiRetryMs = 0;
+    gLastPortalMiRetryMs = 0;
+    gFieldOffResolved.store(false, std::memory_order_release);
+    gOffWmCharacterData = kFbWmCharacterData;
+    gOffCdItemSlots = kFbCdItemSlots;
+    gOffItemId = kFbItemId;
+    gOffBundleNumber = kFbBundleNumber;
+    EnsureFieldOffsets();
     x::runtime::LogI("Consumable",
-                     "consumable_port ready (shared MainPump; no worker managed reads)");
+                     "consumable_port ready (shared MainPump; field anti-drift + UseRequest/"
+                     "PortalScroll + PageDown/PageUp bind)");
+    // 急切绑定：启动即解析 UseRequest / PortalScroll（不必等第一次用药/用卷）
+    (void)ResolveUseMethod();
+    (void)ResolvePortalScrollMethod();
 }
 
 void Shutdown() {
     gMiUseReq = nullptr;
     gFnUseReq = nullptr;
+    gMiPortalScroll = nullptr;
+    gFnPortalScroll = nullptr;
+    gFkm = nullptr;
+    gFkmKlass = nullptr;
+    gMiGetDataByKeyCode = nullptr;
+    gLoggedUseReqRvaMiss = false;
+    gLoggedPortalRvaMiss = false;
+    gLastUseMiRetryMs = 0;
+    gLastPortalMiRetryMs = 0;
 }
 
 bool FindPotion(PotionKind kind, FindResult& out) {
@@ -565,9 +1185,93 @@ bool FindAndUsePotion(PotionKind kind, FindResult& out) {
     return false;
 }
 
+bool ResolveBoundPotion(bool wantHp, FindResult& out) {
+    out = {};
+    BoundResolveJobCtx ctx{};
+    ctx.wantHp = wantHp;
+    ctx.out = &out;
+    if (!x::runtime::main_thread::InvokeAndWait(&BoundResolveJobOnMain, &ctx, kJobWaitMs)) {
+        out.missWhy = "pump";
+        x::runtime::LogW("Consumable", "ResolveBoundPotion pump fail/timeout key=%s",
+                         wantHp ? "PageDown" : "PageUp");
+        return false;
+    }
+    return ctx.ok;
+}
+
+bool FindAndUseBoundPotion(bool wantHp, FindResult& out) {
+    out = {};
+    FindUseBoundJobCtx ctx{};
+    ctx.wantHp = wantHp;
+    if (!x::runtime::main_thread::InvokeAndWait(&FindUseBoundJobOnMain, &ctx, kJobWaitMs)) {
+        out.missWhy = "pump";
+        x::runtime::LogW("Consumable", "FindAndUseBound pump fail/timeout key=%s",
+                         wantHp ? "PageDown" : "PageUp");
+        return false;
+    }
+    out = ctx.fr;
+    if (!ctx.found || !ctx.fr.ok) return false;
+    if (!ctx.used) return false;
+
+    if (ctx.qtyBefore >= 0 && ctx.qtyAfter >= 0 && ctx.qtyAfter < ctx.qtyBefore) {
+        x::runtime::LogI("Consumable", "UseRequest(bound) ok pos=%d id=%d qty %d→%d key=%s",
+                         ctx.fr.pos, ctx.fr.itemId, ctx.qtyBefore, ctx.qtyAfter,
+                         wantHp ? "PageDown" : "PageUp");
+        return true;
+    }
+    Sleep(220);
+    QtyJobCtx q{};
+    q.itemId = ctx.fr.itemId;
+    if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
+        ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
+        x::runtime::LogI("Consumable",
+                         "UseRequest(bound) ok pos=%d id=%d qty %d→%d (delayed) key=%s", ctx.fr.pos,
+                         ctx.fr.itemId, ctx.qtyBefore, q.qty, wantHp ? "PageDown" : "PageUp");
+        return true;
+    }
+
+    int alt = -1;
+    if (ctx.fr.listIndex >= 0) {
+        if (ctx.fr.pos == ctx.fr.listIndex + 1)
+            alt = ctx.fr.listIndex;
+        else if (ctx.fr.pos == ctx.fr.listIndex)
+            alt = ctx.fr.listIndex + 1;
+    }
+    if (alt < 0 || alt == ctx.fr.pos) {
+        x::runtime::LogW("Consumable", "UseRequest(bound) empty id=%d pos=%d qtyBefore=%d after=%d",
+                         ctx.fr.itemId, ctx.fr.pos, ctx.qtyBefore, q.qty);
+        return false;
+    }
+    x::runtime::LogW("Consumable", "UseRequest(bound) empty id=%d pos=%d; retry altPos=%d",
+                     ctx.fr.itemId, ctx.fr.pos, alt);
+    UseOnlyJobCtx retry{};
+    retry.fr = ctx.fr;
+    retry.fr.pos = alt;
+    if (!x::runtime::main_thread::InvokeAndWait(&UseOnlyJobOnMain, &retry, kJobWaitMs) ||
+        !retry.ok) {
+        return false;
+    }
+    Sleep(220);
+    q = {};
+    q.itemId = ctx.fr.itemId;
+    if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
+        ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
+        out.pos = alt;
+        x::runtime::LogI("Consumable", "UseRequest(bound) ok altPos=%d id=%d qty %d→%d", alt,
+                         ctx.fr.itemId, ctx.qtyBefore, q.qty);
+        return true;
+    }
+    x::runtime::LogW("Consumable", "UseRequest(bound) empty after altPos=%d id=%d qty=%d", alt,
+                     ctx.fr.itemId, q.qty);
+    return false;
+}
+
 bool FindAndUseByItemId(int itemId, FindResult& out) {
     out = {};
-    if (itemId <= 0) return false;
+    if (itemId <= 0) {
+        x::runtime::LogW("Consumable", "FindAndUseById bad_code id=%d", itemId);
+        return false;
+    }
     FindUseIdJobCtx ctx{};
     ctx.itemId = itemId;
     if (!x::runtime::main_thread::InvokeAndWait(&FindUseIdJobOnMain, &ctx, kJobWaitMs)) {
@@ -575,9 +1279,32 @@ bool FindAndUseByItemId(int itemId, FindResult& out) {
         return false;
     }
     out = ctx.fr;
-    if (!ctx.found || !ctx.fr.ok || !ctx.used) return false;
+    if (ctx.listMiss) {
+        x::runtime::LogW("Consumable", "FindAndUseById list_miss id=%d (consume list unbound/empty)",
+                         itemId);
+        return false;
+    }
+    if (!ctx.found || !ctx.fr.ok) {
+        x::runtime::LogW("Consumable", "FindAndUseById not_found id=%d", itemId);
+        return false;
+    }
+    if (!ctx.used) {
+        if (ctx.resolveMiss) {
+            x::runtime::LogW("Consumable",
+                             "FindAndUseById use_fail id=%d pos=%d qty=%d (PortalScroll unresolved)",
+                             itemId, ctx.fr.pos, ctx.fr.qty);
+        } else if (ctx.seh) {
+            x::runtime::LogW("Consumable",
+                             "FindAndUseById use_fail id=%d pos=%d qty=%d (PortalScroll SEH)", itemId,
+                             ctx.fr.pos, ctx.fr.qty);
+        } else {
+            x::runtime::LogW("Consumable", "FindAndUseById use_fail id=%d pos=%d qty=%d", itemId,
+                             ctx.fr.pos, ctx.fr.qty);
+        }
+        return false;
+    }
     if (ctx.qtyBefore >= 0 && ctx.qtyAfter >= 0 && ctx.qtyAfter < ctx.qtyBefore) {
-        x::runtime::LogI("Consumable", "UseById ok pos=%d id=%d qty %d→%d", ctx.fr.pos, itemId,
+        x::runtime::LogI("Consumable", "PortalScroll ok pos=%d id=%d qty %d→%d", ctx.fr.pos, itemId,
                          ctx.qtyBefore, ctx.qtyAfter);
         return true;
     }
@@ -586,13 +1313,15 @@ bool FindAndUseByItemId(int itemId, FindResult& out) {
     q.itemId = itemId;
     if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
         ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
-        x::runtime::LogI("Consumable", "UseById ok pos=%d id=%d qty %d→%d (delayed)", ctx.fr.pos,
+        x::runtime::LogI("Consumable", "PortalScroll ok pos=%d id=%d qty %d→%d (delayed)", ctx.fr.pos,
                          itemId, ctx.qtyBefore, q.qty);
         return true;
     }
-    x::runtime::LogW("Consumable", "UseById fired id=%d pos=%d qtyBefore=%d after=%d (maybe empty)",
-                     itemId, ctx.fr.pos, ctx.qtyBefore, q.qty);
-    return true;
+    // 已发包但数量未降：对回城卷视为失败（勿冒充 ok 让 AutoSupply 干等后改走路）
+    x::runtime::LogW("Consumable",
+                     "PortalScroll no_consume id=%d pos=%d qtyBefore=%d after=%d → fail", itemId,
+                     ctx.fr.pos, ctx.qtyBefore, q.qty);
+    return false;
 }
 
 bool UseStatChangeItem(const FindResult& fr) {
@@ -638,7 +1367,7 @@ bool UseStatChangeItem(int nPos) {
                     if (pos != c->pos) continue;
                     c->fr.pos = pos;
                     c->fr.listIndex = i;
-                    c->fr.itemId = ReadI32(item, kOffItemId);
+                    c->fr.itemId = ReadI32(item, gOffItemId);
                     c->fr.qty = ItemQty(item);
                     c->fr.ok = c->fr.itemId > 0;
                     c->ok = c->fr.ok;

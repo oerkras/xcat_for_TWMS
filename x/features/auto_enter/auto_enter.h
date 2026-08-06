@@ -6,7 +6,7 @@ namespace x {
 namespace features {
 namespace auto_enter {
 
-// Login auto-enter: world (panel) → least-populous channel → char slot → confirm.
+// Login auto-enter: world (panel) → random non-full channel → char slot → confirm.
 // UI-semantic calls only; shared main_thread_pump (no GA .text).
 void Init();
 void Shutdown();

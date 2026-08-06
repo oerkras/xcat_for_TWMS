@@ -1,6 +1,7 @@
 # --- Build / CMake outputs ---
 /bin/
 /bin_ops/
+/bin_ops_staging/
 /build/
 /build_xcat_for_TWMS/
 **/CMakeCache.txt
@@ -39,11 +40,13 @@
 /user_log_uploads/
 /publish_site/downloads/
 /publish_site/update/*.zip
+# Stray release zips if publish ever copies into repo root (cwd) instead of publish_site/downloads
+/xcat_for_twms_*.zip
 /tools/bin/
 **/__pycache__/
 *.pyc
 
-# Runtime / WebView profile data under output dirs
+# Runtime data under output dirs
 **/webview_profile/
 **/XCat_data/
 **/XCat_datastate/
@@ -51,7 +54,11 @@
 
 # tools/krw intermediates
 /tools/krw/**/obj/
+/tools/krw/**/obj_*/
 /bin/krw/
+
+# Local backups / scratch
+/ops_app/_replay_backup/
 
 # --- Compilers / MSVC intermediates ---
 *.obj
@@ -97,3 +104,5 @@ Desktop.ini
 *.p12
 credentials.json
 xcat_app/anti_bot_ai/llm_secrets.h
+
+bin_ops_staging/

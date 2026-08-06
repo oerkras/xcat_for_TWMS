@@ -5,10 +5,14 @@
 namespace x::features::ports::multi_skill {
 
 // Classic TWMS 技能多发端口。
-// 对照枫星 multi_skill_port 语义；技能走 skill_port::CastSkill，普攻走 attack::TryFirePrimary。
+// 对照枫星 multi_skill_port 语义；技能默认走 skill_port::CastSkill，
+// 可选 SendSkillUseRequest / 普攻攻包直发；默认普攻走 attack::TryFirePrimary。
 // 首版不做连招扩族 / 职业 DPS 优化。
 
 void SetConfig(bool enabled, uint32_t gapMs, bool safeStagger);
+// 可选：技能 SendSkillUseRequest + 普攻 Create(50) 直发（默认关；失败回退原路径）。
+void SetSendUseRequest(bool on);
+bool GetSendUseRequest();
 bool IsEnabled();
 bool GetSafeStagger();
 uint32_t GetGapMs();
@@ -26,7 +30,7 @@ bool CancelPendingBurstForRetarget();
 // out 可空；成功写入 ok / busy / no_select / disabled。
 bool TryCast(char* out, int outSz);
 
-// worker 每帧调用：到期项走 skill_port::CastSkill。
+// worker 每帧调用：到期项走 skill_port::CastSkill（或可选 SendUse）。
 void Tick();
 
 void Init();

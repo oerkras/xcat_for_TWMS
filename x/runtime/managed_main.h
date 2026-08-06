@@ -2,7 +2,9 @@
 // Run GC-allocating IL2CPP helpers on Unity main thread only.
 // Worker-thread FindAll / TypeGetObject → "Fatal error in GC / Collecting from unknown thread".
 //
-// Login freeze (default ON): FindAll/TypeGetObject no-op until cleared after in-map bind.
+// Login freeze (default ON at process start): FindAll/TypeGetObject no-op until
+// cleared after in-map bind (titlebar vitals / invuln / drop_pool).
+// Do NOT clear from auto_enter Done — that races lobby FindAll before play-ready.
 // world_port 场景解析必须 bypassFreeze，否则 Titlebar/端口永远解不了冻（死锁）。
 // Auto-enter probe runs FindAll directly inside its own main-thread job (bypass freeze).
 

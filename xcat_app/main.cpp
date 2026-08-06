@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
+#include <shellapi.h>
 
 #include "app_chrome.h"
 #include "lie_ai_pump.h"
@@ -10,6 +11,7 @@
 #include "app_sound.h"
 #include "app_theme.h"
 #include "app_window.h"
+#include "attach_inject.h"
 #include "hangup_schedule.h"
 #include "launch_panel.h"
 #include "single_instance.h"
@@ -27,6 +29,16 @@
 
 namespace {
 
+bool IsProcessElevated() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const BOOL ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size);
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated != 0;
+}
 
 std::string ExeDirUtf8() {
     wchar_t path[MAX_PATH]{};
@@ -37,6 +49,49 @@ std::string ExeDirUtf8() {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
+    // 须在单实例锁之前：未提权进程若先占锁，UAC 重开的管理员实例会起不来。
+    // 模式对照仓枫星 xcat_app（清单 requireAdministrator + runas 兜底）。
+    if (!IsProcessElevated()) {
+        wchar_t exePath[MAX_PATH]{};
+        if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH) || !exePath[0]) {
+            MessageBoxW(nullptr, L"请用管理员模式启动", L"XCat TWMS",
+                        MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+            return 1;
+        }
+        std::wstring params;
+        for (int i = 1; i < __argc; ++i) {
+            if (i > 1) params.push_back(L' ');
+            const std::wstring a = __wargv[i] ? __wargv[i] : L"";
+            const bool needQuote = a.find_first_of(L" \t\"") != std::wstring::npos;
+            if (needQuote) {
+                params.push_back(L'"');
+                for (wchar_t ch : a) {
+                    if (ch == L'"') params += L"\\\"";
+                    else params.push_back(ch);
+                }
+                params.push_back(L'"');
+            } else {
+                params += a;
+            }
+        }
+        SHELLEXECUTEINFOW sei{};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"runas";
+        sei.lpFile = exePath;
+        sei.lpParameters = params.empty() ? nullptr : params.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+        if (ShellExecuteExW(&sei)) {
+            if (sei.hProcess) CloseHandle(sei.hProcess);
+            return 0;  // 提权子进程已拉起
+        }
+        MessageBoxW(nullptr,
+                    L"需要管理员权限才能稳定注入与启动。\n"
+                    L"请在 UAC 对话框点「是」，或右键 xcat.exe「以管理员身份运行」。",
+                    L"XCat TWMS", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+        return 1;
+    }
+
     if (!xcat::app::AcquireXcatSingleInstance(3000)) {
         MessageBoxW(nullptr, L"XCat 已在运行。", L"XCat TWMS", MB_OK | MB_ICONINFORMATION);
         return 1;
@@ -63,6 +118,29 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     const std::string prefsBin = binDir + "XCat_data";
     // 飞行武装不持久化：每次启动 launcher 清会话态（mode/CD 仍在 user.ini）。
     xcat::ClearFlyArmedSession(prefsBin.c_str());
+    // 被封粘性：进 UI 前先探活——解禁后必须能清粘性；服不可达才继续本地拦。
+    if (xcat::app::EnforceStickyDeviceAccessOnStartup(xcat::app::kDefaultUpdateServiceUrl,
+                                                      prefsBin)) {
+        const auto kind = xcat::app::ConsumeAccessGateExitRequest();
+        xcat::log::Warn("App", "exiting at startup: gate/2 code=%d",
+                        xcat::app::AccessGateExitCode(kind));
+        xcat::log::Shutdown();
+        CoUninitialize();
+        xcat::app::ReleaseXcatSingleInstance();
+        return xcat::app::AccessGateExitCode(kind) ? xcat::app::AccessGateExitCode(kind) : 2;
+    }
+    // 在线租约：无有效租约则同步探运维 access；掐网且租约失效则无法启动。
+    if (xcat::app::EnforceOnlineLeaseGateOnStartup(xcat::app::kDefaultUpdateServiceUrl, prefsBin)) {
+        const auto kind = xcat::app::ConsumeAccessGateExitRequest();
+        const int code = xcat::app::AccessGateExitCode(kind);
+        xcat::log::Warn("App", "exiting at startup: gate/%d code=%d",
+                        kind == xcat::app::AccessGateExitKind::AccessDeny ? 2 : 3,
+                        code ? code : 3);
+        xcat::log::Shutdown();
+        CoUninitialize();
+        xcat::app::ReleaseXcatSingleInstance();
+        return code ? code : 3;
+    }
     xcat::app::AppTheme_Load(prefsBin.c_str());
     xcat::app::LoadAutoReceiveUpdates(prefsBin);
     xcat::app::notify::LoadNotifyPrefs(prefsBin);
@@ -71,7 +149,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     xcat::app::sound::Init();
 
     AppWindow app{};
-    // ImGui 全占客户区；高度对齐对照仓枫星 kLauncherOnlyDesignH（WebView 静默不占布局）。
+    // ImGui 全占客户区；高度对齐对照仓枫星 kLauncherOnlyDesignH。
     if (!AppWindow_Create(app, hi, xcat::app::kLauncherOnlyDesignW,
                           xcat::app::kLauncherOnlyDesignH)) {
         xcat::log::Error("App", "AppWindow_Create failed");
@@ -79,48 +157,45 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         xcat::app::ReleaseXcatSingleInstance();
         return 2;
     }
+    xcat::app::SetAccessGateUiHwnd(app.hwnd);
     app.launchTickMs = GetTickCount64();
-
-    AppWindow_CreateSilentWebHost(app);
 
     xcat::app::AppTheme_Commit(app.hwnd);
 
     xcat::app::LaunchUiState ui{};
     ui.prefsBinDir = prefsBin;
     xcat::app::LaunchPanel_LoadAccount(ui);
-    if (xcat::app::LaunchPanel_AccountLooksValid(ui, nullptr)) {
-        ui.pendingAutoLaunch = true;
-        ui.status = "已加载账号，WebView 就绪后将自动启动…";
-        xcat::log::Info("App", "pending auto-launch (saved account valid)");
-    } else {
-        ui.pendingAutoLaunch = false;
-        if (ui.accountLine[0]) {
-            ui.status = "账号串无法识别，请修正后再启动（不会自动开游戏）";
-            xcat::log::Warn("App", "saved account invalid, auto-launch disabled");
-        } else {
-            ui.status = "未填写账号串，等待手动粘贴后启动";
-            xcat::log::Info("App", "no account, auto-launch disabled");
+
+    // attach_inject 日志进启动面板；启动模式落盘到 XCat_data/state（更新保留）。
+    xcat::app::attach_inject::Init(&xcat::app::LaunchPanel_OnWebLog, prefsBin);
+
+    // 冷启：手动模式自动开监视；GAMA PASS 自动换票；gamania (HK) 等用户点。
+    ui.pendingAutoLaunch = true;
+    if (xcat::app::attach_inject::IsAttachWatchMode(
+            xcat::app::attach_inject::GetLaunchMode())) {
+        ui.status = "启动模式：手动启动并注入 — 就绪后自动开始监视";
+        xcat::log::Info("App", "pending auto-watch (AttachWatch)");
+    } else if (xcat::app::attach_inject::GetLaunchMode() ==
+               xcat::app::attach_inject::LaunchMode::OneClickLogin) {
+        if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
+            // weblogin 尚未 Init；稍后 Init 会读盘。此处只设状态。
         }
+        ui.pendingAutoLaunch = false;
+        ui.status = "启动模式：gamania (HK) — 粘贴账密后点启动";
+        xcat::log::Info("App", "pending manual gamania(HK) one-click (no auto)");
+    } else {
+        msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+        xcat::app::LaunchPanel_ArmStrategyPrep(ui, 7000);
+        ui.status = "GAMA PASS：约 7 秒后自动换票（可先改成「手动启动并注入」）";
+        xcat::log::Info("App", "pending auto GamaPass launch (defer 7s)");
     }
 
-    if (!app.webHost ||
-        !msc::weblogin::Init(app.hwnd, app.webHost, &xcat::app::LaunchPanel_OnWebLog)) {
+    if (!msc::weblogin::Init(app.hwnd, &xcat::app::LaunchPanel_OnWebLog)) {
         xcat::log::Error("App", "msc::weblogin::Init failed");
-        ui.status = "WebView 登录模块初始化失败";
+        ui.status = "登录会话初始化失败";
         ui.pendingAutoLaunch = false;
-    } else if (!msc::weblogin::IsRuntimeInstalled()) {
-        if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::WebViewOnly) {
-            ui.status = "缺少 WebView2 Runtime：请按提示下载安装，完成后重启本程序";
-            ui.pendingAutoLaunch = false;
-            xcat::log::Warn("App", "WebView2 Runtime missing (WebViewOnly)");
-        } else {
-            ui.status = "无 WebView2 Runtime：将走 HTTP 取票（遇验证码需改策略或装 Runtime）";
-            xcat::log::Info("App", "WebView2 Runtime missing; HTTP auth strategy available");
-        }
-        msc::weblogin::OnResize();
     } else {
-        msc::weblogin::OnResize();
-        xcat::log::Info("App", "WebView login session silent (hidden)");
+        xcat::log::Info("App", "login session ready (GamaPass CDP / HTTP; no WebView2)");
     }
 
     float clearColor[4]{};
@@ -141,8 +216,6 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
                         ui.status.find("进行中") != std::string::npos) {
                         ui.status = msc::weblogin::IsBusy() ? "正在登录/换票中…" : "空闲";
                     }
-                } else if (msg.message == msc::weblogin::kMsgStartWebViewLogin) {
-                    msc::weblogin::OnStartWebViewLoginEx(msg.wParam);
                 }
             }
             TranslateMessage(&msg);
@@ -165,16 +238,31 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
             xcat::log::Info("App", "exiting for update apply");
             ExitProcess(0);
         }
+        if (const auto kind = xcat::app::ConsumeAccessGateExitRequest();
+            kind != xcat::app::AccessGateExitKind::None) {
+            const int code = xcat::app::AccessGateExitCode(kind);
+            xcat::log::Warn("App", "exiting: gate/%d code=%d",
+                            kind == xcat::app::AccessGateExitKind::AccessDeny ? 2 : 3, code);
+            ExitProcess(static_cast<UINT>(code));
+        }
         xcat::app::UpdateForcePollTick(xcat::app::kDefaultUpdateServiceUrl, prefsBin);
 
         if (AppWindow_IsMinimized(app)) {
-            Sleep(16);
+            Sleep(50);
             continue;
         }
 
+        const ULONGLONG frameStart = GetTickCount64();
         AppWindow_BeginFrame(app, clearColor);
         xcat::app::DrawMainShell(app, ui);
         AppWindow_EndFrame(app);
+
+        // 仅限启动器 ImGui：Present(1) 在遮挡时常立刻返回，软限约 30FPS，不碰游戏/payload。
+        constexpr ULONGLONG kUiFrameBudgetMs = 33;
+        const ULONGLONG elapsed = GetTickCount64() - frameStart;
+        if (elapsed < kUiFrameBudgetMs) {
+            Sleep(static_cast<DWORD>(kUiFrameBudgetMs - elapsed));
+        }
 
         if (!shown) {
             AppWindow_Show(app);
@@ -183,6 +271,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     }
 
     msc::weblogin::Shutdown();
+    xcat::app::attach_inject::Shutdown();
     xcat::app::LieAiPump_Shutdown();
     AppWindow_Destroy(app);
     xcat::app::notify::Reset();

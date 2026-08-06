@@ -11,9 +11,11 @@ add_executable(xcat WIN32
     log_upload_ui.cpp
     log_tail.cpp
     launch_panel.cpp
+    attach_inject.cpp
     hangup_schedule.cpp
     guardian_policy.cpp
     workspace_tabs.cpp
+    tdr_tune.cpp
     runtime_leds.cpp
     status_bar.cpp
     single_instance.cpp
@@ -50,6 +52,7 @@ target_link_libraries(xcat PRIVATE
     advapi32
     winhttp
     bcrypt
+    iphlpapi
 )
 
 add_dependencies(xcat xcat_probe)
@@ -67,6 +70,9 @@ if(MSVC)
     set_property(TARGET xcat PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
+    # 内嵌应用清单 requireAdministrator：双击 xcat.exe 即弹 UAC 以管理员运行。
+    # 注入 / OpenProcess 等高权限操作需要管理员；模式对照仓枫星 xcat_app。
+    target_link_options(xcat PRIVATE "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
 endif()
 
 set_target_properties(xcat PROPERTIES

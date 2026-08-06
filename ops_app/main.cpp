@@ -49,6 +49,8 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     xcat::ops::OpsState_Init(state);
 
     const float clear[4] = {0.04f, 0.045f, 0.06f, 1.f};
+    // 运维台 UI 不需要高刷：Present(1) 在最小化/遮挡时常立刻返回，会空转吃满 GPU。
+    constexpr ULONGLONG kOpsFrameBudgetMs = 33;  // ~30 FPS 上限
     while (window.running) {
         MSG msg{};
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -58,10 +60,21 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         }
         if (!window.running) break;
 
+        if (OpsWindow_IsMinimized(window)) {
+            Sleep(50);
+            continue;
+        }
+
+        const ULONGLONG frameStart = GetTickCount64();
         xcat::ops::OpsState_Tick(state);
         OpsWindow_BeginFrame(window, clear);
         xcat::ops::OpsPanel_Draw(state);
         OpsWindow_EndFrame(window);
+
+        const ULONGLONG elapsed = GetTickCount64() - frameStart;
+        if (elapsed < kOpsFrameBudgetMs) {
+            Sleep(static_cast<DWORD>(kOpsFrameBudgetMs - elapsed));
+        }
     }
 
     xcat::ops::OpsState_Shutdown(state);

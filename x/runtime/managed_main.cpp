@@ -22,6 +22,7 @@ struct FindAllCtx {
 };
 
 void FindAllJob(void* user) {
+    (void)main_thread::AssertOnPumpThread("managed_main.FindAll");
     auto* c = reinterpret_cast<FindAllCtx*>(user);
     if (!c || !c->fn || !c->typeObj) return;
     __try {
@@ -38,6 +39,7 @@ struct TypeObjCtx {
 };
 
 void TypeObjJob(void* user) {
+    (void)main_thread::AssertOnPumpThread("managed_main.TypeGetObject");
     auto* c = reinterpret_cast<TypeObjCtx*>(user);
     if (!c || !c->fn || !c->type) return;
     __try {

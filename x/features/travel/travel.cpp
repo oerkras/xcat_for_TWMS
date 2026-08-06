@@ -10,6 +10,7 @@
 #include "../ports/world_port.h"
 #include "../invuln/invuln.h"
 #include "../notify/notify.h"
+#include "../simple_combat/simple_combat.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
 
@@ -19,6 +20,7 @@
 #include <timeapi.h>
 
 #include <atomic>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -44,6 +46,7 @@ constexpr DWORD kUniqueBridgeLateGraceMs = 10000;
 constexpr int kFakeFireSoftConfirm = 2;          // 未满：只重试，不标死
 constexpr int kFakeFireFuseConfirm = 3;          // 满：停赶路
 constexpr int kFakeFireUniqueBridgeConfirm = 3;  // 唯一桥永不标死，满则停
+constexpr DWORD kTransientFireFuseMs = 8000;     // TELEPORT_FAIL 等瞬态空转超时 → FireStuck+Notify
 static_assert(kFakeFireSoftConfirm < kFakeFireFuseConfirm, "soft < fuse");
 
 std::atomic<bool> gWorkerStop{false};
@@ -74,6 +77,14 @@ struct FakeFireStreak {
     int count = 0;
 };
 FakeFireStreak gFakeFire;
+
+// 开火未成功（瞬态）：同图同门同错误持续过久则停 + 历史事件 Notify
+struct TransientFireStreak {
+    std::string key;
+    DWORD firstMs = 0;
+    int count = 0;
+};
+TransientFireStreak gTransientFire;
 
 struct LateWait {
     bool active = false;
@@ -142,6 +153,18 @@ void NotifyTravelOutcome(FailKind kind, const std::string& src, const std::strin
         snprintf(body, sizeof(body), "进门多次未换图，已停止（%s）",
                  src.empty() ? "?" : src.c_str());
         break;
+    case FailKind::FireStuck:
+        key = "travel.fire_stuck";
+        nk = NotificationKind::Danger;
+        snprintf(body, sizeof(body), "贴门失败已停止：%s @ %s → %s",
+                 (raw && raw[0]) ? raw : "?", src.empty() ? "?" : src.c_str(),
+                 dst.empty() ? "?" : dst.c_str());
+        break;
+    case FailKind::CombatOn:
+        key = "travel.combat_on";
+        nk = NotificationKind::Warning;
+        snprintf(body, sizeof(body), "请先关闭 F5 自动打怪再赶路");
+        break;
     default:
         return;
     }
@@ -164,6 +187,7 @@ std::string CmdPath() { return Join(x::runtime::GetBinDir(), "state\\travel_cmd.
 void SaveGraph() { (void)gGraph.Save(GraphPath()); }
 
 void ClearFakeFire() { gFakeFire = FakeFireStreak{}; }
+void ClearTransientFire() { gTransientFire = TransientFireStreak{}; }
 void ClearLateWait() { gUniqueLate = LateWait{}; }
 
 void SetIdle(const char* msg, FailKind fail = FailKind::None) {
@@ -182,6 +206,7 @@ void SetIdle(const char* msg, FailKind fail = FailKind::None) {
     gArriveReadyAt = 0;
     gPendingGoto.clear();
     ClearFakeFire();
+    ClearTransientFire();
     ClearLateWait();
     ReleaseInvulnForTravel();
     gFailKind = fail;
@@ -203,6 +228,12 @@ bool PlayReadyStable(DWORD now) {
 }
 
 bool StartGotoResolved(const std::string& src, const std::string& dst, const std::string& rawArg) {
+    if (simple_combat::IsFarmingActive()) {
+        SetIdle("combat_on", FailKind::CombatOn);
+        x::runtime::LogW("Travel", "goto blocked: F5 farming still active dst=%s", dst.c_str());
+        NotifyTravelOutcome(FailKind::CombatOn, src, dst);
+        return false;
+    }
     if (src.empty()) {
         gPendingGoto = rawArg.empty() ? dst : rawArg;
         gLastMsg = "no_map_wait";
@@ -236,6 +267,7 @@ bool StartGotoResolved(const std::string& src, const std::string& dst, const std
     gMode = Mode::Goto;
     ++gFireEpoch;
     ClearFakeFire();
+    ClearTransientFire();
     ClearLateWait();
     gFailKind = FailKind::None;
     gExpectMap.clear();
@@ -382,7 +414,55 @@ bool IsTransientFireFail(const std::string& res) {
     return res == "TELEPORT_FAIL" || res == "TELEPORT_UNBOUND" || res == "MAIN_TIMEOUT" ||
            res == "NO_CHECKMOVE" || res == "NO_LOCALUSER" || res == "KEY_FAIL" ||
            res == "EXCEPTION" || res == "NOT_PLAY_READY" || res == "TELEPORT_COOLDOWN" ||
-           res == "NOT_STOOD";
+           res == "NOT_STOOD" || res == "OUT_OF_RECT";
+}
+
+// 可累计 FireStuck 熔断的硬贴门失败（冷却/未就绪只重试，不熔断，防误停）。
+bool IsFusableTransientFireFail(const std::string& res) {
+    return res == "TELEPORT_FAIL" || res == "TELEPORT_UNBOUND" || res == "MAIN_TIMEOUT" ||
+           res == "NO_CHECKMOVE" || res == "NO_LOCALUSER" || res == "KEY_FAIL" ||
+           res == "EXCEPTION" || res == "NOT_STOOD" || res == "OUT_OF_RECT";
+}
+
+// 返回 true=已停赶路并 Notify；false=继续重试。
+bool NoteTransientFireFail(DWORD now, const std::string& curMap, const std::string& portalName,
+                           const std::string& fireResult) {
+    // 冷却 / 未就绪：清 streak，只打节流 log，不进 8s 熔断
+    if (!IsFusableTransientFireFail(fireResult)) {
+        ClearTransientFire();
+        if (now - gHopStartedMs > 1500) {
+            gHopStartedMs = now;
+            x::runtime::LogW("Travel", "fire transient %s: %s (no fuse)", portalName.c_str(),
+                             fireResult.c_str());
+        }
+        return false;
+    }
+    const std::string key = curMap + "|" + portalName + "|" + fireResult;
+    if (gTransientFire.key != key) {
+        gTransientFire.key = key;
+        gTransientFire.firstMs = now;
+        gTransientFire.count = 1;
+    } else {
+        ++gTransientFire.count;
+    }
+    const DWORD elapsed = now - gTransientFire.firstMs;
+    if (elapsed < kTransientFireFuseMs) {
+        if (now - gHopStartedMs > 1500) {
+            gHopStartedMs = now;
+            x::runtime::LogW("Travel", "fire transient %s: %s (%ums/%ums n=%d)",
+                             portalName.c_str(), fireResult.c_str(), elapsed,
+                             kTransientFireFuseMs, gTransientFire.count);
+        }
+        return false;
+    }
+    char detail[128]{};
+    snprintf(detail, sizeof(detail), "%s %s", portalName.c_str(), fireResult.c_str());
+    x::runtime::LogW("Travel", "fire_stuck stop map=%s portal=%s res=%s elapsed=%ums n=%d",
+                     curMap.c_str(), portalName.c_str(), fireResult.c_str(), elapsed,
+                     gTransientFire.count);
+    SetIdle("fire_stuck", FailKind::FireStuck);
+    NotifyTravelOutcome(FailKind::FireStuck, curMap, gTarget, detail);
+    return true;
 }
 
 // 返回 true=已停赶路；false=清 pending 后由 Tick 重试/改路。
@@ -632,6 +712,7 @@ void OnMapEnterConfirmed(const std::string& cur, DWORD now) {
         SaveGraph();
     }
     ClearFakeFire();
+    ClearTransientFire();
     ClearLateWait();
     gExpectMap.clear();
     gFiredPortal.clear();
@@ -664,6 +745,15 @@ void OnMapEnterConfirmed(const std::string& cur, DWORD now) {
 }
 
 void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
+    // F5 真正在打怪时不赶路（HardPause 如 AutoSupply 开趟不算；中途再开 F5 立刻停）
+    if (simple_combat::IsFarmingActive()) {
+        const std::string cur = ports::travel::CurrentMapKey();
+        SetIdle("combat_on", FailKind::CombatOn);
+        x::runtime::LogW("Travel", "stop: F5 farming active during goto @%s -> %s",
+                         cur.c_str(), gTarget.c_str());
+        NotifyTravelOutcome(FailKind::CombatOn, cur, gTarget);
+        return;
+    }
     // 硬门禁：换图 scene!=play —— 不准开火；若正在 midhop/arrive settle，卸图期间把时钟后推
     if (!ports::world::IsInMapScene() || !ports::world::IsPlayReady()) {
         NotePlayReadyGate(now, false);
@@ -691,10 +781,13 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
             return;
         }
         if (static_cast<int>(now - gUniqueLate.untilMs) >= 0) {
+            // 先拷贝再 SetIdle（Idle 会 ClearLateWait，否则 log/notify 变成 from=?）
+            const std::string lateFrom = gUniqueLate.fromMap;
+            const std::string lateName = gUniqueLate.hintName;
             SetIdle("fake_fire_stop", FailKind::FakeFireStop);
             x::runtime::LogW("Travel", "uniqueBridge late-wait timeout from=%s name=%s",
-                             gUniqueLate.fromMap.c_str(), gUniqueLate.hintName.c_str());
-            NotifyTravelOutcome(FailKind::FakeFireStop, gUniqueLate.fromMap, gTarget);
+                             lateFrom.c_str(), lateName.c_str());
+            NotifyTravelOutcome(FailKind::FakeFireStop, lateFrom, gTarget);
             return;
         }
         gLastMsg = "unique_bridge_late_wait";
@@ -792,13 +885,10 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
     if (!firedOk) {
         gLastMsg = fireResult;
         if (IsTransientFireFail(fireResult)) {
-            if (now - gHopStartedMs > 1500) {
-                gHopStartedMs = now;
-                x::runtime::LogW("Travel", "fire transient %s: %s", liveName.c_str(),
-                                 fireResult.c_str());
-            }
+            (void)NoteTransientFireFail(now, cur, liveName, fireResult);
             return;
         }
+        ClearTransientFire();
         // 门禁用等：按假火软确认路径处理一次
         if (fireResult == "PORTAL_DISABLED" || fireResult == "NO_PORTAL" ||
             fireResult == "FH0_FORBID") {
@@ -816,6 +906,7 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
         return;
     }
 
+    ClearTransientFire();
     gPendingFrom = cur;
     gPendingSeedId = hopPortalId;
     gPendingName = hint;
@@ -864,6 +955,7 @@ void Init() {
     if (!kEnabled) return;
     gWorkerStop.store(false);
     x::runtime::LogI("Travel", "feature init (classic same-plate goto)");
+    ports::travel::Init();
 }
 
 void Shutdown() {
@@ -934,6 +1026,69 @@ int PathHopCount(const char* srcMap, const char* dstMap) {
     if (a == b) return 0;
     std::lock_guard<std::mutex> lock(gMu);
     return gGraph.PathDistance(a, b);
+}
+
+namespace {
+
+bool PrefixTownOutdoor(const char* fromMap, char* out, size_t outSz) {
+    if (!fromMap || !fromMap[0] || !out || outSz < 10) return false;
+    const int id = atoi(fromMap);
+    if (id < 100000000) return false;
+    const int town = (id / 1000000) * 1000000;
+    snprintf(out, outSz, "%d", town);
+    return true;
+}
+
+bool IsOutdoorTownMapId(int mapId) {
+    return mapId >= 100000000 && (mapId % 1000000) == 0;
+}
+
+}  // namespace
+
+bool PredictReturnScrollTownOutdoor(const char* fromMap, char* out, size_t outSz) {
+    if (!out || outSz < 10 || !fromMap || !fromMap[0]) return false;
+    out[0] = '\0';
+
+    char prefix[16]{};
+    const bool havePrefix = PrefixTownOutdoor(fromMap, prefix, sizeof(prefix));
+
+    EnsureGraphLoaded();
+    std::vector<std::string> maps;
+    {
+        std::lock_guard<std::mutex> lock(gMu);
+        gGraph.ListMaps(maps);
+    }
+
+    int bestHops = INT_MAX;
+    std::string bestMap;
+    auto consider = [&](const char* cand) {
+        if (!cand || !cand[0]) return;
+        const int id = atoi(cand);
+        if (!IsOutdoorTownMapId(id)) return;
+        const int hops = PathHopCount(fromMap, cand);
+        if (hops < 0) return;
+        if (hops < bestHops) {
+            bestHops = hops;
+            bestMap = cand;
+        }
+    };
+
+    for (const auto& m : maps) consider(m.c_str());
+    if (havePrefix) consider(prefix);
+
+    if (!bestMap.empty()) {
+        strncpy_s(out, outSz, bestMap.c_str(), _TRUNCATE);
+        x::runtime::LogI("Travel", "predictScrollTown from=%s -> %s hops=%d (prefix=%s)", fromMap,
+                         out, bestHops, havePrefix ? prefix : "-");
+        return true;
+    }
+    if (havePrefix) {
+        strncpy_s(out, outSz, prefix, _TRUNCATE);
+        x::runtime::LogW("Travel", "predictScrollTown from=%s fallback prefix=%s (no hop town)",
+                         fromMap, out);
+        return true;
+    }
+    return false;
 }
 
 }  // namespace x::features::travel

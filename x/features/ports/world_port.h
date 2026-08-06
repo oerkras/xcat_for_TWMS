@@ -42,6 +42,11 @@ void* GetMapScene();
 int GetMapSceneKey();
 // MapData.Id（WM._currentMapData@+0x88 → Id@+0x10）；0=未知 / 非图内。
 int GetMapId();
+// WM._characterId @+0x98；0=未进角/未知。用于 DamageInfo.CharacterId 比对。
 uint32_t GetCharacterId();
+void* GetCharacterData();   // 转发 player::LocalCharacterData（防漂）
+void* GetCharacterStat();   // 转发 player::LocalCharacterStat
+int64_t ReadMoney();        // 转发 player::ReadMoney；失败 -1
+void* GetItemSlotList(int invType);  // 转发 player::GetItemSlotList
 
 }  // namespace x::features::ports::world

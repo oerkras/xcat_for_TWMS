@@ -14,13 +14,13 @@ enum class LogUploadPhase {
     Failed,
 };
 
-// 全量：与 payload 轮转 maxBackups 对齐（360）。轻量仅作可选瘦身（约 20 卷）。
+// 轻量：各频道最近约 10 卷（含功能日志）；全量：最多 360 卷。
 enum class LogUploadMode {
     Light = 0,
     Full = 1,
 };
 
-constexpr size_t kLogUploadBackupsLight = 20;
+constexpr size_t kLogUploadBackupsLight = 10;
 constexpr size_t kLogUploadBackupsFull = 360;
 
 inline constexpr const char* LogUploadModeLabel(LogUploadMode mode) {
@@ -38,8 +38,8 @@ struct LogUploadRequest {
     std::string payloadBinDir;
     // 可选备注：客户反馈 BUG 原因；空串合法，服务端写入 catalog.note（device 前）。
     std::string note;
-    // 排障默认全量：扫齐各频道现存全部卷。
-    LogUploadMode mode = LogUploadMode::Full;
+    // 默认轻量；排障可选全量扫齐各频道现存卷。
+    LogUploadMode mode = LogUploadMode::Light;
 };
 
 // 备注上限：Unicode 码点（与 scripts/log-upload-server.mjs sanitizeUploadNote 对齐）。
@@ -55,7 +55,7 @@ std::string NormalizeUploadNote(std::string_view raw);
 // 加载时会把历史 /artale、/chuangshi、/fengxing 服务根与本机 127.0.0.1/localhost 自动重写为 /twms + xcat.work。
 struct LogUploadPrefs {
     std::string url;
-    LogUploadMode mode = LogUploadMode::Full;
+    LogUploadMode mode = LogUploadMode::Light;
 };
 
 struct LogUploadSnapshot {
@@ -76,12 +76,24 @@ struct LogUploadHistoryEntry {
 LogUploadPrefs LoadLogUploadPrefs(const std::string& exeBinDir, const LogUploadPrefs& defaults);
 void           SaveLogUploadPrefs(const std::string& exeBinDir, const LogUploadPrefs& prefs);
 
-// 本机稳定身份：计算机名 + user.ini deviceId（同机多 VM 靠 deviceId 区分）。
+// 本机稳定身份：计算机名 + deviceId + 本机网卡 MAC（探活/封禁/白名单）。
+// deviceId：优先 user.ini；ProgramData 按安装路径分片镜像（抗清目录、多目录不互抢）；
+// 整段加锁 + 进程内缓存，防并发首调双 mint / 读失败乱跳。
+// TOKEN：调试 TAB 字段，随探活头 X-XCat-Token 上报（对外不说明用途）。
 struct ClientHostIdentity {
     std::string machine;
     std::string deviceId;
+    // 规范化小写冒号分隔，如 aa:bb:cc:dd:ee:ff；主网卡在前。
+    std::vector<std::string> macs;
+    std::string token;
 };
 ClientHostIdentity ResolveClientHostIdentity(const std::string& payloadBinDir);
+
+// 调试 TAB TOKEN：持久化到 user.ini [update] token（换包白名单保留）；空=清除。
+constexpr size_t kOpsTokenMaxChars = 48;
+std::string      NormalizeOpsToken(std::string_view raw);
+std::string      LoadOpsToken(const std::string& payloadBinDir);
+bool             SaveOpsToken(const std::string& payloadBinDir, std::string_view raw);
 
 bool                              LogUploadConfigured(const LogUploadRequest& req);
 bool                              LogUploadBusy();

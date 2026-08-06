@@ -6,9 +6,12 @@
 
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_mapdata.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
+#include "../../runtime/main_thread_pump.h"
 #include "../../runtime/managed_main.h"
+#include "../../ui/player_vitals.h"
 
 #include <Windows.h>
 
@@ -21,17 +24,94 @@ namespace {
 
 namespace il2 = x::runtime::il2cpp;
 
-// WM klass：il2cpp_shape::ResolveWorldManagerKlass（hash ab85c0a9… + shape 兜底）
+// WM klass：il2cpp_shape::ResolveWorldManagerKlass（hash af152981… + shape 兜底）
+// SceneState / Field / CharacterId / FieldKey：hash → field_get_offset
+// CharacterData / CharacterStat：SSOT = x::ui::player
+constexpr char kWorldManagerClass[] =
+    "af1529816d3e158e2939f3c03b4fe68c04930802ea39c8d6567d1fb4865b742";
+constexpr char kFieldClass[] =
+    "cfec8c2698a50442d8c39915b0ace84807a884ba8f42a4d45bdcd80c3d675d0";
+constexpr char kHashWmSceneState[] =
+    "d26c89da7c7b0b6cc91998e1c9f3c4d791ae04b1a293529ac4b0cb08810fc92";
+constexpr char kHashWmField[] =
+    "a1466fc5ed9eeb49778c306ae741bfe859e433ccc633df746db2bbf5b36d22d";
+constexpr char kHashWmCharacterId[] =
+    "<b22c0eb9efe2be1d842a589108889cca3ac4bb5bcdf1fb94cef55dcec6a48bb>k__BackingField";
+constexpr char kHashFieldKey[] =
+    "<c2521cc6ecfd1d5ca939178fc977a2eab4eaf08c7a72f669d21c8faba6e99c8>k__BackingField";
 
-constexpr size_t kOffWmSceneState = 0x34;
-constexpr size_t kOffWmField = 0x58;
-constexpr size_t kOffWmMapData = 0x88;
-constexpr size_t kOffWmCharacterId = 0x98;
-constexpr size_t kOffWmCharacterData = 0xE0;
+constexpr size_t kFbWmSceneState = 0x34;
+constexpr size_t kFbWmField = 0x58;
+constexpr size_t kFbWmCharacterId = 0x98;
+constexpr size_t kFbFieldKey = 0x98;
+size_t gOffWmSceneState = kFbWmSceneState;
+size_t gOffWmField = kFbWmField;
+size_t gOffWmCharacterId = kFbWmCharacterId;
+size_t gOffFieldKey = kFbFieldKey;
+#define kOffWmSceneState (gOffWmSceneState)
+#define kOffWmField (gOffWmField)
+#define kOffWmCharacterId (gOffWmCharacterId)
+#define kOffFieldKey (gOffFieldKey)
+#define kOffWmMapData (x::runtime::il2cpp_mapdata::OffWmMapData())
+#define kOffMapDataId (x::runtime::il2cpp_mapdata::OffMapId())
+#define kOffWmCharacterData (x::ui::player::OffWmCharacterData())
+#define kOffCdCharacterStat (x::ui::player::OffCdCharacterStat())
+bool gWmFieldTried = false;
 
-constexpr size_t kOffFieldKey = 0x98;
-constexpr size_t kOffMapDataId = 0x10;
-constexpr size_t kOffCdCharacterStat = 0x10;
+bool PlausibleWmOff(size_t off) { return off >= 0x20 && off < 0x200; }
+
+bool WmFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !hash || !il2::Ensure()) return false;
+    const auto& e = il2::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    for (void* k = klass; k;) {
+        void* field = nullptr;
+        __try {
+            field = e.classGetFieldFromName(k, hash);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            field = nullptr;
+        }
+        if (field) {
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (PlausibleWmOff(off)) {
+                *out = off;
+                return true;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return false;
+}
+
+void EnsureWmFieldOff() {
+    if (gWmFieldTried) return;
+    if (!il2::Ensure()) return;
+    gWmFieldTried = true;
+    void* wm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+    if (!wm) wm = il2::FindClass("", kWorldManagerClass);
+    void* field = il2::FindClass("", kFieldClass);
+    int hits = 0;
+    if (WmFieldOffHit(wm, kHashWmSceneState, kFbWmSceneState, &gOffWmSceneState)) ++hits;
+    if (WmFieldOffHit(wm, kHashWmField, kFbWmField, &gOffWmField)) ++hits;
+    if (WmFieldOffHit(wm, kHashWmCharacterId, kFbWmCharacterId, &gOffWmCharacterId)) ++hits;
+    if (WmFieldOffHit(field, kHashFieldKey, kFbFieldKey, &gOffFieldKey)) ++hits;
+    x::runtime::LogI("WorldPort",
+                     "wm/field slots path=%s hits=%d/4 scene=0x%zX field=0x%zX charId=0x%zX "
+                     "fkey=0x%zX",
+                     hits == 4 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+                     gOffWmSceneState, gOffWmField, gOffWmCharacterId, gOffFieldKey);
+}
 
 constexpr DWORD kWmRebindMs = 3000;
 
@@ -92,6 +172,7 @@ bool ResolveWorldManager(bool force) {
 
     gLastWmBindMs = now;
     if (!il2::Ensure()) return false;
+    EnsureWmFieldOff();
     x::runtime::il2cpp_shape::LogResolveSelfCheck();
     // login-freeze 默认开：场景 SSOT 必须 bypass，否则 Titlebar 永远解不了冻 → 全端口死锁。
     if (!gWmTypeObj) {
@@ -218,6 +299,8 @@ void Invalidate() {
     gWorldManager = nullptr;
     gLastWmBindMs = 0;
     PublishWmLive(false);
+    // Explicit leave-map: do not wait for the next IsPlayReady poll.
+    x::runtime::main_thread::SetPumpPhase(x::runtime::main_thread::PumpPhase::Bootstrap);
 }
 
 SceneState GetSceneState() {
@@ -227,7 +310,13 @@ SceneState GetSceneState() {
 
 bool IsInMapScene() {
     void* wm = GetWorldManager();
-    if (!il2::LooksLikeHeapPtr(wm)) return false;
+    if (!il2::LooksLikeHeapPtr(wm)) {
+        // No WM → cannot be play-ready; drop pump phase without waiting for IsPlayReady.
+        if (x::runtime::main_thread::GetPumpPhase() == x::runtime::main_thread::PumpPhase::InMap) {
+            x::runtime::main_thread::SetPumpPhase(x::runtime::main_thread::PumpPhase::Bootstrap);
+        }
+        return false;
+    }
 
     const SceneState st = ReadSceneStateRaw(wm);
     void* mapScene = il2::ReadPtr(wm, kOffWmField);
@@ -244,10 +333,22 @@ bool IsInMapScene() {
     }
 
     MaybeLogScene(st, inMap);
+    // Soft sync on leave (InterStage / CashShop / migrate): Bootstrap immediately.
+    // Enter InMap only via IsPlayReady (needs IsAlive).
+    if (!inMap &&
+        x::runtime::main_thread::GetPumpPhase() == x::runtime::main_thread::PumpPhase::InMap) {
+        x::runtime::main_thread::SetPumpPhase(x::runtime::main_thread::PumpPhase::Bootstrap);
+    }
     return inMap;
 }
 
-bool IsPlayReady() { return IsInMapScene() && IsAlive(); }
+bool IsPlayReady() {
+    const bool ready = IsInMapScene() && IsAlive();
+    // Phase: InMap drains on WM.FixedUpdate/Update once MI patched; else Bootstrap hooks.
+    x::runtime::main_thread::SetPumpPhase(ready ? x::runtime::main_thread::PumpPhase::InMap
+                                                : x::runtime::main_thread::PumpPhase::Bootstrap);
+    return ready;
+}
 
 void* GetMapScene() {
     void* wm = GetWorldManager();
@@ -276,5 +377,17 @@ uint32_t GetCharacterId() {
     if (!il2::LooksLikeHeapPtr(wm)) return 0;
     return ReadU32(wm, kOffWmCharacterId);
 }
+
+}  // namespace x::features::ports::world
+
+// Character 链防漂 API：实现放在 TU 尾，避免 world_port↔player_vitals 头文件环依赖。
+#include "../../ui/player_vitals.h"
+
+namespace x::features::ports::world {
+
+void* GetCharacterData() { return x::ui::player::LocalCharacterData(); }
+void* GetCharacterStat() { return x::ui::player::LocalCharacterStat(); }
+int64_t ReadMoney() { return x::ui::player::ReadMoney(); }
+void* GetItemSlotList(int invType) { return x::ui::player::GetItemSlotList(invType); }
 
 }  // namespace x::features::ports::world

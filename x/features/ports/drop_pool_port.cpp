@@ -1,15 +1,19 @@
-// drop_pool_port �?Classic TWMS DropPool + pet vacuum pickup.
+// drop_pool_port — Classic TWMS DropPool + pet vacuum pickup.
+// 防漂移：方法 hash→FindMethodResolved；字段 hash→field_get_offset（dump 常量仅 fallback）；
+// 矩形包：ByPet RIP → GA 特征扫 → 末级 RVA。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "drop_pool_port.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_shape.h"
 
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
 #include "../../runtime/main_thread_pump.h"
+#include "../../runtime/anchor_lamps.h"
 #include "pet_port.h"
 #include "world_port.h"
 
@@ -17,7 +21,10 @@
 #include <Psapi.h>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <unordered_map>
 #include <unordered_set>
 
 #pragma comment(lib, "Psapi.lib")
@@ -30,74 +37,190 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E3FA20;  // remapped 2026-08-03
-constexpr uint32_t kRvaPetTryPickUpDrop = 0xF96240;  // remapped 2026-08-03
-constexpr uint32_t kRvaDropTryPickUpDrop = 0xF508D0;  // remapped 2026-08-03  // DropPool.TryPickUpDrop(in Vector2)
-constexpr uint32_t kRvaDropTryPickUpDropByPet = 0xF528E0;  // remapped 2026-08-03 · IDA xref from Pet.TryPickUpDrop
-constexpr uint32_t kRvaPetGetUpgradePetSkill = 0xF55F40;  // remapped 2026-08-03
-constexpr uint32_t kRvaPetGetItemSlot = 0xF54B60;  // remapped 2026-08-03 · ByPet 内 call；→ ItemSlotPet
-constexpr uint32_t kRvaPetIsInExceptionList = 0xF4AC20;  // remapped 2026-08-03
-constexpr uint32_t kRvaPetSendDropPickUp = 0xF54F90;  // remapped 2026-08-03   // Pet.SendDropPickUpRequest
-constexpr uint32_t kRvaPoolSendDropPickUp = 0xF51F70;  // remapped 2026-08-03  // DropPool.SendDropPickUpRequest
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04
+constexpr uint32_t kRvaPetTryPickUpDrop = 0xF9CBE0;  // remounted 2026-08-04 TDI:1516
+constexpr uint32_t kRvaDropTryPickUpDrop = 0xF577A0;  // remounted 2026-08-04 DropPool.TryPickUpDrop(in Vector2)
+constexpr uint32_t kRvaDropTryPickUpDropByPet = 0xF59980;  // remounted 2026-08-04
+constexpr uint32_t kRvaPetGetUpgradePetSkill = 0xF5CF10;  // remounted 2026-08-04
+constexpr uint32_t kRvaPetGetItemSlot = 0xF5BD50;  // remounted 2026-08-04 · ByPet → ItemSlotPet
+constexpr uint32_t kRvaPetIsInExceptionList = 0xF51C20;  // remounted 2026-08-04
+constexpr uint32_t kRvaPetSendDropPickUp = 0xF5C090;  // remounted 2026-08-04 Pet.SendDropPickUpRequest
+constexpr uint32_t kRvaPoolSendDropPickUp = 0xF590A0;  // remounted 2026-08-04 DropPool.SendDropPickUpRequest
 // ByPet Contains 真源（.rdata，非 CollisionCheck / _rcPet）：
 //   int32 offX,offY @ +0 ; float w,h @ +0x10
 //   rect = (petPos - (offX,offY), w, h)；原生 (25,10)+(50,60)
-//   IDA：ByPet@0xF528E0 → psubd/movsd xref；旧 0x5574990
-constexpr uint32_t kRvaByPetRectPack = 0x55736B0;  // remapped 2026-08-03
+//   IDA：ByPet → psubd xmm9,[rip+disp] / movsd xmm0,[rip+disp]；旧死钉仅作末级兜底
+constexpr uint32_t kRvaByPetRectPackFallback = 0x557ED00;  // remounted 2026-08-04 · IDA find_bytes native (25,10)+(50,60)
+constexpr int32_t kNativeRectOffX = 25;
+constexpr int32_t kNativeRectOffY = 10;
+constexpr float kNativeRectW = 50.f;
+constexpr float kNativeRectH = 60.f;
+// ByPet 函数体扫描上限（当前 size≈0x2143）
+constexpr size_t kByPetScanMax = 0x2800;
 
 constexpr char kHashPetTryPickUp[] =
-    "f4696b4f56aec53585d7854084fb52af688919097505ea393df9f2204f48251";
+    "f24e9cd0874acea961504474282a551711d6797f9b22bb595468d74a95885c3";  // remounted 2026-08-04
 constexpr char kHashDropTryPickUp[] =
-    "d12a250ed4fe660f55f2f9f691e3a55a3bf795136f39fb13349e21cd8c6b9ce";
+    "df00a117f843ded64ccc8443c177d7ede09d3fe2efdec0260700eea9858168e";  // remounted 2026-08-04
 constexpr char kHashDropTryPickUpByPet[] =
-    "bba8465246ffc18f2695ae66e462f0a46c8a072bf0980412ff2eee9e15eccbc";
+    "d35e3dcedf8df3b4c57b46f557f769653dddba9a85d9c764773f554bf8ae1d2";  // remounted 2026-08-04
 constexpr char kHashPetGetUpgradeSkill[] =
-    "da504f6019c1828761e5254b9dece007bd7e1746f2c9292cb9f326caf2e588b";
-// Pet.GetItemSlot：IDA 名 …$$d7bfb7329cc79f1e4bf50183fe6f410674dfb80b6721b7d63db2c2455d7aaf2
+    "e27cde9140d1b82b53975c9c85b2385b63fa9d43912cab884a1913ec1717a98";  // remounted 2026-08-04
 constexpr char kHashPetGetItemSlot[] =
-    "d7bfb7329cc79f1e4bf50183fe6f410674dfb80b6721b7d63db2c2455d7aaf2";
+    "c0448424c55226a5bb403bf64f0a6cddcc16373ee8fb6ae7e11e12d21cfbbdd";  // remounted 2026-08-04
 constexpr char kHashPetIsInException[] =
-    "f20a58d0e5ca03c3fe0fcc6d3c4f7855e2ebb4b282d4b99f0cde459ec46515f";
+    "d39f0c29def09640e33bc9f114f0ab23d89626de4f0c912789d6b3c5a82aab6";  // remounted 2026-08-04
 constexpr char kHashPetSendDropPickUp[] =
-    "d779339ccf7d143bdeb7f07f5c0046414106886f8acaf427ae63c6dfbee3f71";
+    "aab231bfbd428b7d413fffb692d9c822a8d1777ced30d3ffa092037acc99cd8";  // remounted 2026-08-04
 constexpr char kHashPoolSendDropPickUp[] =
-    "d8757aa736a4495cea79af070f614d069f8dabb40f099fa92b6706cae51abf5";
+    "eea3137fe2ffd1fca187f087878e64e7975cb831be9e108c3e27a263c939d01";  // remounted 2026-08-04
 
 constexpr char kDropPoolClass[] =
-    "c4424063dbd2cca808b166c49a26ca6db164c394978e11ee28e30fdf7c7184a";
+    "df1d3ac49f3798f510fcdc32187c08ebc9a7361c9c46bfc91e91bdc090098f6";  // remounted 2026-08-04 TDI:1489
+constexpr char kDropClass[] =
+    "dd446a8d5623496cf7209d76a21b7351ccd149511261ab23789716f6c42a25b";  // remounted 2026-08-04 TDI:1488
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 constexpr char kCollisionCheckClass[] =
-    "be8cdb1b8f248e5aee9d45202597c55f2f09596da765a1bae30c334b6bcec1a";  // remounted 2026-08-03 (was e431509c…)
+    "d3fd874923d972c6a25d1157accdf45c643c56f56300167dc1986b3857e63f1";  // remounted 2026-08-04 TDI:2446
 constexpr char kPetClass[] =
-    "ce17438d8a1e0a4be3b7a36b24c864280c664caf0a91505de70e167307d5258";
+    "f5be2907a4e45eab8f0728f4335609468c882e48c120846124031faddb9b9f2";  // remounted 2026-08-04 TDI:1516
+constexpr char kUserClass[] =
+    "d9ad004bbff1a41ca96697c8e44ed3175dae9846fb772898fd54ec65040348b";  // TDI:1560 User（m_apPet/CurPos）
+constexpr char kVecCtrlOwnerClass[] =
+    "ddef6db860cfa2bea6dca39e201bf3065a897797f86009fb4d6104830143d94";  // TDI:1586
+constexpr char kVecCtrlClass[] =
+    "ef24024acbe225bcc90ca332f3e00aff5800daa32a769057d2e830eeac776bb";
+constexpr char kItemSlotPetClass[] =
+    "c4f17c2d5bd81b5d8e01da93b92b81b91ea9237ecaa08791d6be71784fe6d41";  // GetItemSlot 返回类型
 
-constexpr size_t kOffApPet = 0x2B0;  // TW User.m_apPet 2026-08-03
-constexpr size_t kOffWmMyUser = 0x28;
-constexpr size_t kOffPoolDict = 0x20;  // TW DropPool._mapDrop OK
-constexpr size_t kOffPetRc = 0x100;  // TW Pet._rcPet OK
-constexpr size_t kOffPetExceptionList = 0x90;  // TW Pet.ExceptionList OK
-constexpr size_t kOffVecCtrl = 0x50;       // VecCtrlOwner.VecCtrl
-constexpr size_t kOffFieldPos = 0x64;      // FieldActorBase.Pos — 非脚边真源（见 teleport/P0c）
-constexpr size_t kOffCurPos = 0x240;       // TW LocalUser.CurPos（CMS User@0x228 +0x18）
-constexpr size_t kOffVcApX = 0x98;         // VecCtrl.AbsPos.X (double)
-constexpr size_t kOffVcApY = 0xA0;         // VecCtrl.AbsPos.Y (double)
-// Pet 位姿：仍可用 Field Pos，失败再 CurPos（宠与 User 布局不同）
-constexpr size_t kOffVisPos = kOffFieldPos;
-constexpr size_t kOffLogicalPos = kOffCurPos;
-constexpr size_t kOffDropId = 0x30;
-constexpr size_t kOffDropOwnType = 0x3C;
-// TW dump（restored.B）相对 CMS：0x40 起多了 4 字节，IsMoney/Info 后移
-// CMS: IsMoney@0x40 Info@0x44 | TW: int@0x40 IsMoney@0x44 Info@0x48
-constexpr size_t kOffDropIsMoney = 0x44;
-constexpr size_t kOffDropInfo = 0x48;
-constexpr size_t kOffDropPt1 = 0x20;  // Drop.Pt1 = System.Drawing.Point (int x, int y)；TW Drop=f9a2bf4d… OK
-constexpr size_t kOffDropEndPara = 0x7C;  // Drop.EndParabolicMotion
-constexpr size_t kOffDropLastTry = 0x80;  // Drop.LastTryPickUp
-// ByPet 成功 Send 后会盖戳；冷却阈值对照 DropPool.PickUpInterval=3000
-constexpr size_t kOffDropPickStamp = 0x88;
-// ItemSlotPet.usPetSkill（CMS/TW 同为 +0x3C）；ByPet 先 GetItemSlot(pet) 再读技能
-constexpr size_t kOffItemSlotPetSkill = 0x3C;
-constexpr size_t kOffCollisionRcPet = 0x20;  // static fields blob +0x20
+// —— 字段防漂移：hash + field_get_offset；下列常量仅 dump 验证 fallback ——
+constexpr size_t kFbApPet = 0x2B0;
+constexpr size_t kFbWmMyUser = 0x28;
+constexpr size_t kFbPoolDict = 0x20;
+constexpr size_t kFbPetRc = 0x100;
+constexpr size_t kFbPetExceptionList = 0x90;
+constexpr size_t kFbVecCtrl = 0x50;
+constexpr size_t kFbFieldPos = 0x64;
+constexpr size_t kFbCurPos = 0x240;
+constexpr size_t kFbVcAp = 0x98;  // AbsPos 结构起点；Y = Ap+8
+constexpr size_t kFbDropId = 0x30;
+constexpr size_t kFbDropOwnType = 0x3C;
+constexpr size_t kFbDropIsMoney = 0x44;
+constexpr size_t kFbDropInfo = 0x48;
+constexpr size_t kFbDropPt1 = 0x20;
+constexpr size_t kFbDropEndPara = 0x7C;
+constexpr size_t kFbDropLastTry = 0x80;
+constexpr size_t kFbDropPickStamp = 0x88;
+// 玩家拾取路径判定用的 Point，与 Pt1@0x20 是两个字段；矩形比的是这一个
+constexpr size_t kFbDropPickPt = 0x98;
+// bool；为假时官方 TryPickUpDrop 当场跳过该 drop
+constexpr size_t kFbDropPickable = 0x2D;
+constexpr size_t kFbItemSlotPetSkill = 0x3C;
+constexpr size_t kFbCollisionRcPet = 0x20;
+
+constexpr char kHashFldApPet[] =
+    "a3e632d00632a74fdc95dc470f10e1a8979e81b032d7d8eac27dfeb6a13074c";
+constexpr char kHashFldWmMyUser[] =
+    "<d4428e1b7aab1a1fca5b6951009bf64f2c5cfb39f9a183f582fed4ff3a1aaaa>k__BackingField";
+constexpr char kHashFldPoolDict[] =
+    "fa870d8be90902bc881d81a7d003003cedffcbba92c479fc7b2f412582ddd88";
+constexpr char kHashFldPetRc[] =
+    "b52942f13506a404e63adcbb691b18b83b018dc46e85839a087e258bcd779ed";
+constexpr char kHashFldPetExceptionList[] =
+    "<e21440b3c9381389626492e5abd6292ba5e69c0d4e6f1ecce9d9271e2362d2d>k__BackingField";
+constexpr char kHashFldVecCtrl[] =
+    "<dc76f5c9e250bc9a327a219b39e16c345cdabf7b01ad5c60b568045069c9120>k__BackingField";
+constexpr char kHashFldFieldPos[] =
+    "c9d7ef4393802ebe9fdf9ebe7eaf7245d5cef3eeaa2a8d052fb4ad4883e34dc";
+constexpr char kHashFldCurPos[] =
+    "b992bfa57dd45d484f39e25a6290a95d76e19fc1059423bff8fb0c9507dbda7";
+constexpr char kHashFldVcAp[] =
+    "a860e652f11e3e8846eaf4dfb600e319058d3e0e9e79b3fd7a3447344d98bb9";
+constexpr char kHashFldDropId[] =
+    "daf6f448278b4d3b55bb8659d0d7365e6042f4a48698cc1fa557ce07fea730b";
+constexpr char kHashFldDropOwnType[] =
+    "c73669eb0e012ae019bc68add30859fbbbe210f7d18a70531f4f2c382b0f3ba";
+constexpr char kHashFldDropIsMoney[] =
+    "fd049595d314299092a27f1badbe391f9b7b589796248e477e7222bfc239c82";
+constexpr char kHashFldDropInfo[] =
+    "b3fb2cdb7b8cd29d3b3434fa036896474c538157be4136b8f3785c3a7d11b59";
+constexpr char kHashFldDropPt1[] =
+    "ccb092d6cb34c721bf3cd97e9d2f507d72268c19c29f8ea62fa2251c54e3a52";
+constexpr char kHashFldDropEndPara[] =
+    "f24df618f174e6dc1fcdf95ad2c60cead3e9002a61e5147f5103322002388ab";
+constexpr char kHashFldDropLastTry[] =
+    "a9bab9bfe52ac5490bb531f3d487edfa07e875c79e0dda49259b7fbfeafc3d4";
+constexpr char kHashFldDropPickStamp[] =
+    "ce6afe24880a469702ae21754a35d197b2be1e9bc4579a8e081897305dfef8a";
+constexpr char kHashFldDropPickPt[] =
+    "d9c68b5a938ad0e129555d05eadd3b7233e509c4b5a25bdf1fa293d149e0cd7";
+constexpr char kHashFldDropPickable[] =
+    "f1c9f606a81ae2e3fbaf577b76f613c4708cdd4f1ad9da802629166f0e7068c";
+constexpr char kHashFldItemSlotPetSkill[] =
+    "b5152b3fc54dadf094c0a249f01aa05b19b414fa5ce677bc1ea95bd3de61dcb";
+constexpr char kHashFldCollisionRcPet[] =
+    "dd70a7dc701ed6e72881415640ce93ed04cb5a23abcd5e9fc65a3df966ca048";
+
+struct DropFieldOff {
+    size_t apPet = kFbApPet;
+    size_t wmMyUser = kFbWmMyUser;
+    size_t poolDict = kFbPoolDict;
+    size_t petRc = kFbPetRc;
+    size_t petExceptionList = kFbPetExceptionList;
+    size_t vecCtrl = kFbVecCtrl;
+    size_t fieldPos = kFbFieldPos;
+    size_t curPos = kFbCurPos;
+    size_t vcAp = kFbVcAp;
+    size_t dropId = kFbDropId;
+    size_t dropOwnType = kFbDropOwnType;
+    size_t dropIsMoney = kFbDropIsMoney;
+    size_t dropInfo = kFbDropInfo;
+    size_t dropPt1 = kFbDropPt1;
+    size_t dropEndPara = kFbDropEndPara;
+    size_t dropLastTry = kFbDropLastTry;
+    size_t dropPickStamp = kFbDropPickStamp;
+    size_t dropPickPt = kFbDropPickPt;
+    size_t dropPickable = kFbDropPickable;
+    size_t itemSlotPetSkill = kFbItemSlotPetSkill;
+    size_t collisionRcPet = kFbCollisionRcPet;
+    // 只在全解析后锁定；否则下拍重试，别让一次早期抖动把整局钉在死钉上
+    bool tried = false;
+    // 写路径门禁：写决策依赖的 Drop 字段 + 宠 ExceptionList 必须都由元数据解析。
+    // 本 port 会写 EndPara/LastTry/PickStamp/OwnType，错址写是踩托管堆，比「本拍不吸」严重得多。
+    bool writeSafe = false;
+    DWORD nextTry = 0;
+    int loggedHits = -1;
+    const char* path = "fallback";
+    int hits = 0;
+};
+DropFieldOff gOff{};
+
+// 写托管 Drop 字段是否安全（字段偏移全部来自元数据）
+bool DropWritesAllowed() { return gOff.writeSafe; }
+
+// 热路径仍用旧名；EnsureFieldOffsets 后指向 meta/fallback。
+#define kOffApPet (gOff.apPet)
+#define kOffWmMyUser (gOff.wmMyUser)
+#define kOffPoolDict (gOff.poolDict)
+#define kOffPetRc (gOff.petRc)
+#define kOffPetExceptionList (gOff.petExceptionList)
+#define kOffVecCtrl (gOff.vecCtrl)
+#define kOffFieldPos (gOff.fieldPos)
+#define kOffCurPos (gOff.curPos)
+#define kOffVcApX (gOff.vcAp)
+#define kOffVcApY (gOff.vcAp + 8)
+#define kOffDropId (gOff.dropId)
+#define kOffDropOwnType (gOff.dropOwnType)
+#define kOffDropIsMoney (gOff.dropIsMoney)
+#define kOffDropInfo (gOff.dropInfo)
+#define kOffDropPt1 (gOff.dropPt1)
+#define kOffDropEndPara (gOff.dropEndPara)
+#define kOffDropLastTry (gOff.dropLastTry)
+#define kOffDropPickStamp (gOff.dropPickStamp)
+#define kOffDropPickPt (gOff.dropPickPt)
+#define kOffDropPickable (gOff.dropPickable)
+#define kOffItemSlotPetSkill (gOff.itemSlotPetSkill)
+#define kOffCollisionRcPet (gOff.collisionRcPet)
 
 // DropOwnType（CMS）：User=0 Party=1 No=2 ExplosiveNoOwn=3 UserOwnMoney=4
 constexpr int kDropOwnNo = 2;
@@ -106,15 +229,99 @@ constexpr int kEndParaReady = 3;
 // 黑名单挡 ByPet：必须 !=3；禁止写 0（会重置抛物线飞落）
 constexpr int kEndParaSkipHold = 4;
 constexpr int kLastTrySkipStamp = 0x7FFFFFFF;
-constexpr size_t kOffDictEntries = 0x18;
-constexpr size_t kOffDictCount = 0x20;
-constexpr size_t kOffDictFreeCount = 0x28;
-constexpr size_t kEntrySize = 0x18;
-constexpr size_t kOffEntryHash = 0x0;
-constexpr size_t kOffEntryValue = 0x10;
 
-constexpr size_t kOffListItems = 0x10;
-constexpr size_t kOffListSize = 0x18;
+// 人物直吸（不靠宠）：复刻官方 DropPool.TryPickUpDrop（RVA 0xF577A0）的门禁语义，然后直接调
+// 它自己的 DropPool.SendDropPickUpRequest（RVA 0xF590A0）。控制面与宠吸同构（清闸/退避盖戳/
+// 黑名单盖戳/拒收即 AddStall/拍末还原），只是中心从宠坐标换成角色坐标、送包走人物入口。
+// 官方那条链逐指令实读所得：
+//   ① [drop+0x2D] 必须为真                       ② EndPara(0x7C) == 3
+//      （IMM 0x328634BB + seed@0x7FFB8A2C92A8=0xCD79CB48 → 3）
+//   ③ now - PickStamp(0x88) >= 3000（有符号）——宠吸同款拍前清闸后由官方 Send 再盖
+//   ④ 归属链交由服务端裁决 + 退避兜底
+//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用配置半盒枚举（默认全盒 1500×1500）
+//      —— 送包坐标仍是角色位；过大盒会多打拒收，靠 pending/AddStall 与 burst=1 兜底
+//   通过后 Point(角色 Maple 坐标) → Send(pt, Id, 0)
+//      （第 4 参 IMM 0x353E87DA + seed@…92B4=0xCAC17826 → 0，无需伪造 CRC）
+
+
+// 退避黑名单（队头堵塞解药）：
+// ByPet 一次调用只提交一件（实机 sendTouch 恒为 1）。某栏（如「其他」）满时服端拒收，
+// drop 留在池里；我们每拍清闸又把它放回队头 → 每拍都撞同一件，金币/装备一起吸不到。
+// 处置：提交后池未掉 → 把该 dropId 指数退避，期间盖 LastTry=INT_MAX 让 ByPet 早退，
+// 下一拍自然轮到别的掉落；到期自动解封（用户整理背包后仍能重吸），换池即全清。
+constexpr DWORD kStallBaseMs = 3000;
+constexpr DWORD kStallMaxMs = 300000;
+constexpr size_t kStallCap = 2048;
+
+struct StallEntry {
+    DWORD until = 0;
+    int strikes = 0;  // 连续被拒次数 → 退避时长翻倍
+};
+std::unordered_map<int, StallEntry> gStall;
+void* gStallPool = nullptr;
+// Drop.Id 不唯一（偏移漂移）时自动停用：宁可退回原行为，也不能把全盒挡死
+bool gStallOff = false;
+// 人物直吸：送包当帧池常未掉，立刻 AddStall 会误伤真吸。记下 id，下一拍仍在池再登记。
+int gCharPendingStallId = 0;
+
+bool StallExpired(const StallEntry& e, DWORD now) {
+    return static_cast<int32_t>(now - e.until) >= 0;
+}
+
+// 超量时只淘汰「已过期」条目（丢的仅是 strikes 记账），生效中的 hold 一律保留。
+// 若连生效条目都超过上限才整表清空——那已是异常量级。
+void PruneStall(DWORD now) {
+    if (gStall.size() <= kStallCap) return;
+    for (auto it = gStall.begin(); it != gStall.end();) {
+        if (StallExpired(it->second, now))
+            it = gStall.erase(it);
+        else
+            ++it;
+    }
+    if (gStall.size() > kStallCap) gStall.clear();
+}
+
+// 换图/换池后 dropId 会复用，旧退避必须失效。
+// 只认「换到另一个非空池」；池临时解析不到时保留退避，免得每次抖动都重新学一遍。
+void ResetStallIfPoolChanged(void* pool) {
+    if (!pool || pool == gStallPool) return;
+    gStallPool = pool;
+    gStall.clear();
+    gCharPendingStallId = 0;
+}
+
+bool StallActive(int dropId, DWORD now) {
+    if (gStall.empty() || dropId == 0) return false;
+    auto it = gStall.find(dropId);
+    return it != gStall.end() && !StallExpired(it->second, now);
+}
+
+void AddStall(int dropId, DWORD now) {
+    if (gStallOff || dropId == 0) return;
+    StallEntry& e = gStall[dropId];
+    if (e.strikes < 30) ++e.strikes;
+    DWORD ms = kStallBaseMs;
+    for (int i = 1; i < e.strikes && ms < kStallMaxMs; ++i) ms <<= 1;
+    if (ms > kStallMaxMs) ms = kStallMaxMs;
+    e.until = now + ms;
+}
+
+int StallActiveCount(DWORD now) {
+    int n = 0;
+    for (const auto& kv : gStall)
+        if (!StallExpired(kv.second, now)) ++n;
+    return n;
+}
+// BCL Dictionary / List → x::runtime::il2cpp_container（meta；常量仅 fallback）
+#define kOffDictEntries (x::runtime::il2cpp_container::OffDictEntries())
+#define kOffDictCount (x::runtime::il2cpp_container::OffDictCount())
+#define kOffDictFreeCount (x::runtime::il2cpp_container::OffDictFreeCount())
+#define kEntrySize (x::runtime::il2cpp_container::DictEntryStrideIntPtr())
+#define kOffEntryHash (x::runtime::il2cpp_container::OffDictEntryHash())
+#define kOffEntryValue (x::runtime::il2cpp_container::OffDictEntryValuePtr())
+
+#define kOffListItems (x::runtime::il2cpp_container::OffListItems())
+#define kOffListSize (x::runtime::il2cpp_container::OffListSize())
 
 constexpr DWORD kRebindMs = 3000;
 constexpr DWORD kJobWaitMs = 1500;
@@ -167,6 +374,9 @@ MethodInfoHead* gMiPetSend = nullptr;
 MethodInfoHead* gMiPoolSend = nullptr;
 void* gOrigPetSend = nullptr;
 void* gOrigPoolSend = nullptr;
+// ByPet .rdata 矩形包：xref/特征定位缓存（拍内 patch 前必须已 resolve）
+uint8_t* gByPetRectPack = nullptr;
+const char* gByPetRectVia = nullptr;
 std::atomic<uint32_t> gPetSendHits{0};
 std::atomic<uint32_t> gPoolSendHits{0};
 std::atomic<bool> gSendProbeInstalled{false};
@@ -190,10 +400,21 @@ struct FootJob {
     bool done = false;
 };
 
+struct CharVacJob {
+    float halfW = 750.f;
+    float halfH = 750.f;
+    int maxSend = 1;
+    SkipIds skip{};
+    CharVacResult result{};
+    bool done = false;
+};
+
 std::atomic<bool> gJobPending{false};
 VacJob gJob{};
 std::atomic<bool> gFootPending{false};
 FootJob gFoot{};
+CharVacJob gCharVac{};
+std::atomic<uint32_t> gCharSentTotal{0};
 
 template <typename T>
 T AtRva(uint32_t rva) {
@@ -270,12 +491,176 @@ bool ReadDropPt(void* drop, float& x, float& y) {
     return true;
 }
 
+// 官方玩家拾取矩形比的是 PickPt@0x98（Point，Maple Y-down），不是 Pt1@0x20。
+// 极早期（刚生成、还在抛物线上）可能仍是 (0,0)：回落 Pt1，宁可用旧点也别把整件漏掉。
+bool ReadDropPickPt(void* drop, float& x, float& y) {
+    x = y = 0.f;
+    if (!drop) return false;
+    const int px = ReadI32(drop, kOffDropPickPt);
+    const int py = ReadI32(drop, kOffDropPickPt + 4);
+    if (px != 0 || py != 0) {
+        x = static_cast<float>(px);
+        y = static_cast<float>(py);
+        return true;
+    }
+    return ReadDropPt(drop, x, y);
+}
+
 void* FindClass(const char* name) {
     return x::runtime::il2cpp::FindClass("", name);
 }
 
 void* FindClassTypeObject(const char* className) {
     return x::runtime::il2cpp::FindClassTypeObject(className);
+}
+
+bool PlausibleInstanceOff(size_t off) {
+    return off >= 0x10 && off < 0x1000;
+}
+
+bool PlausibleStaticOff(size_t off) {
+    return off < 0x400;
+}
+
+bool FieldOffOrFb(void* klass, const char* fieldHash, size_t fb, size_t* out, bool staticOk) {
+    *out = fb;
+    if (!klass || !fieldHash) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    void* field = nullptr;
+    __try {
+        field = e.classGetFieldFromName(klass, fieldHash);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!field) return false;
+    size_t off = 0;
+    __try {
+        off = e.fieldGetOffset(field);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (staticOk) {
+        if (!PlausibleStaticOff(off)) return false;
+    } else if (!PlausibleInstanceOff(off)) {
+        return false;
+    }
+    *out = off;
+    return true;
+}
+
+constexpr int kFieldExpect = 21;
+constexpr DWORD kFieldRetryMs = 3000;
+
+// 人物直吸门禁字段（Pt1 / Pickable / Id / EndPara）是否来自元数据。
+// 盒选读 Pt1、送包用角色坐标；PickPt 仅脚边路径使用，不纳入本门禁。
+bool gCharGatesMeta = false;
+
+void ReportFieldLamp() {
+    char detail[48]{};
+    snprintf(detail, sizeof(detail), "%s %d/%d w=%d", gOff.path, gOff.hits, kFieldExpect,
+             gOff.writeSafe ? 1 : 0);
+    using x::runtime::anchor_lamps::AnchorLampCode;
+    const AnchorLampCode code = gOff.hits == kFieldExpect
+                                    ? AnchorLampCode::Ok
+                                    : (gOff.hits ? AnchorLampCode::Degraded : AnchorLampCode::Miss);
+    x::runtime::anchor_lamps::Set("DropFields", code, detail);
+}
+
+// 未解析满就每 kFieldRetryMs 重试一次；日志只在 hits 变化时打，避免重试刷屏。
+void EnsureFieldOffsets() {
+    if (gOff.tried) return;
+    const DWORD now = GetTickCount();
+    if (gOff.nextTry && static_cast<int32_t>(now - gOff.nextTry) < 0) return;
+    gOff.nextTry = now + kFieldRetryMs;
+    if (!x::runtime::il2cpp::Ensure()) {
+        if (gOff.loggedHits != -2) {
+            gOff.loggedHits = -2;
+            x::runtime::LogW("DropPort", "field offsets: bind miss — 写路径关闭，待重试");
+        }
+        ReportFieldLamp();
+        return;
+    }
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) {
+        if (gOff.loggedHits != -3) {
+            gOff.loggedHits = -3;
+            x::runtime::LogW("DropPort", "field offsets: exports miss — 写路径关闭，待重试");
+        }
+        ReportFieldLamp();
+        return;
+    }
+
+    void* dropKlass = FindClass(kDropClass);
+    void* poolKlass = FindClass(kDropPoolClass);
+    void* petKlass = FindClass(kPetClass);
+    void* userKlass = FindClass(kUserClass);
+    void* vcoKlass = FindClass(kVecCtrlOwnerClass);
+    void* vcKlass = FindClass(kVecCtrlClass);
+    void* slotKlass = FindClass(kItemSlotPetClass);
+    void* colKlass = FindClass(kCollisionCheckClass);
+    void* wmKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+
+    int hits = 0;
+    auto hit = [&](bool ok) {
+        if (ok) ++hits;
+        return ok;
+    };
+
+    hit(FieldOffOrFb(userKlass, kHashFldApPet, kFbApPet, &gOff.apPet, false));
+    hit(FieldOffOrFb(wmKlass, kHashFldWmMyUser, kFbWmMyUser, &gOff.wmMyUser, false));
+    hit(FieldOffOrFb(poolKlass, kHashFldPoolDict, kFbPoolDict, &gOff.poolDict, false));
+    hit(FieldOffOrFb(petKlass, kHashFldPetRc, kFbPetRc, &gOff.petRc, false));
+    const bool okExcList = hit(FieldOffOrFb(petKlass, kHashFldPetExceptionList, kFbPetExceptionList,
+                                            &gOff.petExceptionList, false));
+    hit(FieldOffOrFb(vcoKlass, kHashFldVecCtrl, kFbVecCtrl, &gOff.vecCtrl, false));
+    hit(FieldOffOrFb(vcoKlass, kHashFldFieldPos, kFbFieldPos, &gOff.fieldPos, false));
+    hit(FieldOffOrFb(userKlass, kHashFldCurPos, kFbCurPos, &gOff.curPos, false));
+    hit(FieldOffOrFb(vcKlass, kHashFldVcAp, kFbVcAp, &gOff.vcAp, false));
+    const bool okId = hit(FieldOffOrFb(dropKlass, kHashFldDropId, kFbDropId, &gOff.dropId, false));
+    const bool okOwn =
+        hit(FieldOffOrFb(dropKlass, kHashFldDropOwnType, kFbDropOwnType, &gOff.dropOwnType, false));
+    hit(FieldOffOrFb(dropKlass, kHashFldDropIsMoney, kFbDropIsMoney, &gOff.dropIsMoney, false));
+    hit(FieldOffOrFb(dropKlass, kHashFldDropInfo, kFbDropInfo, &gOff.dropInfo, false));
+    const bool okPt1 =
+        hit(FieldOffOrFb(dropKlass, kHashFldDropPt1, kFbDropPt1, &gOff.dropPt1, false));
+    const bool okEnd =
+        hit(FieldOffOrFb(dropKlass, kHashFldDropEndPara, kFbDropEndPara, &gOff.dropEndPara, false));
+    const bool okLast =
+        hit(FieldOffOrFb(dropKlass, kHashFldDropLastTry, kFbDropLastTry, &gOff.dropLastTry, false));
+    const bool okStamp = hit(
+        FieldOffOrFb(dropKlass, kHashFldDropPickStamp, kFbDropPickStamp, &gOff.dropPickStamp, false));
+    const bool okPickPt =
+        hit(FieldOffOrFb(dropKlass, kHashFldDropPickPt, kFbDropPickPt, &gOff.dropPickPt, false));
+    (void)okPickPt;  // 脚边路径用；人物直吸 meta 不依赖
+    const bool okPickable = hit(
+        FieldOffOrFb(dropKlass, kHashFldDropPickable, kFbDropPickable, &gOff.dropPickable, false));
+    gCharGatesMeta = okPt1 && okPickable && okId && okEnd;
+    hit(FieldOffOrFb(slotKlass, kHashFldItemSlotPetSkill, kFbItemSlotPetSkill, &gOff.itemSlotPetSkill,
+                     false));
+    hit(FieldOffOrFb(colKlass, kHashFldCollisionRcPet, kFbCollisionRcPet, &gOff.collisionRcPet, true));
+
+    gOff.hits = hits;
+    // Pt1 定位写哪些 drop、Id 是退避键，与 4 个写目标同等关键
+    gOff.writeSafe = okPt1 && okId && okOwn && okEnd && okLast && okStamp && okExcList;
+    gOff.path = hits == kFieldExpect ? "meta" : (hits ? "meta-partial" : "fallback");
+    gOff.tried = hits == kFieldExpect;
+    ReportFieldLamp();
+    if (gOff.loggedHits == hits) return;
+    gOff.loggedHits = hits;
+    const char* fmt =
+        "field offsets path=%s hits=%d/%d write=%d apPet=0x%zx poolDict=0x%zx pt1=0x%zx "
+        "endPara=0x%zx vecCtrl=0x%zx vcAp=0x%zx curPos=0x%zx wmMy=0x%zx";
+    if (gOff.tried) {
+        x::runtime::LogI("DropPort", fmt, gOff.path, hits, kFieldExpect, gOff.writeSafe ? 1 : 0,
+                         gOff.apPet, gOff.poolDict, gOff.dropPt1, gOff.dropEndPara, gOff.vecCtrl,
+                         gOff.vcAp, gOff.curPos, gOff.wmMyUser);
+    } else {
+        // 未满：死钉可能已随客户端更新失效，写托管字段一律停手，等重试
+        x::runtime::LogW("DropPort", fmt, gOff.path, hits, kFieldExpect, gOff.writeSafe ? 1 : 0,
+                         gOff.apPet, gOff.poolDict, gOff.dropPt1, gOff.dropEndPara, gOff.vecCtrl,
+                         gOff.vcAp, gOff.curPos, gOff.wmMyUser);
+    }
 }
 
 MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
@@ -294,45 +679,12 @@ MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
     return nullptr;
 }
 
-MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
-    if (!klass || !name) return nullptr;
-    const auto& e = x::runtime::il2cpp::Get();
-    MethodInfoHead* mi = nullptr;
-    if (e.classGetMethodFromName) {
-        __try {
-            mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            mi = nullptr;
-        }
-    }
-    if (mi && mi->methodPointer) return mi;
-    if (!e.classGetMethods || !e.methodGetName) return nullptr;
-    void* iter = nullptr;
-    __try {
-        for (;;) {
-            void* raw = e.classGetMethods(klass, &iter);
-            if (!raw) break;
-            const char* nm = e.methodGetName(raw);
-            if (nm && strcmp(nm, name) == 0) {
-                mi = reinterpret_cast<MethodInfoHead*>(raw);
-                if (mi && mi->methodPointer) return mi;
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    return nullptr;
-}
-
+// 走全仓 SSOT：hash → 明文 → RVA/kind，每档都过形状校验（旧的本地名字扫描不校验形状，已退役）
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
                           const char* plain, const char* hash) {
-    if (plain) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plain, shape.arity)) return mi;
-    }
-    if (hash) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hash, shape.arity)) return mi;
-    }
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
+    if (!klass) return nullptr;
+    const auto mr = x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, hash);
     if (mr.method) {
         if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
             x::runtime::LogI("DropPort", "ResolveMi kind hit rva=0x%X plain=%s", rva,
@@ -438,6 +790,25 @@ int ReadPoolDropCount(void* pool) {
     return live >= 0 ? live : count;
 }
 
+bool DropIdInPool(void* pool, int dropId) {
+    if (!pool || dropId == 0) return false;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return false;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return false;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return false;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        if (ReadI32(drop, kOffDropId) == dropId) return true;
+    }
+    return false;
+}
+
 void* KlassStaticFields(void* klass) {
     if (!klass) return nullptr;
     if (gClassStaticData) {
@@ -456,7 +827,10 @@ void* KlassStaticFields(void* klass) {
 }
 
 bool BindIl2Cpp() {
-    if (gGA) return true;
+    if (gGA) {
+        EnsureFieldOffsets();
+        return true;
+    }
     if (!x::runtime::il2cpp::Ensure()) return false;
     const auto& e = x::runtime::il2cpp::Get();
     gGA = e.ga;
@@ -467,6 +841,7 @@ bool BindIl2Cpp() {
     gRuntimeClassInit = e.runtimeClassInit;
     gCompGo = e.compGo;
     gObjName = e.objName;
+    if (gGA) EnsureFieldOffsets();
     return gGA != nullptr;
 }
 
@@ -660,12 +1035,7 @@ void* ResolveDropPool(DWORD now) {
         return nullptr;
     }
 
-    if (gRuntimeClassInit) {
-        __try {
-            gRuntimeClassInit(gDropPoolKlass);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
+    if (gRuntimeClassInit) x::runtime::il2cpp::RuntimeClassInit(gDropPoolKlass);
 
     void* staticsKlass = gDropPoolKlass;
     if (gClassParent) {
@@ -675,12 +1045,7 @@ void* ResolveDropPool(DWORD now) {
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
         if (parent) {
-            if (gRuntimeClassInit) {
-                __try {
-                    gRuntimeClassInit(parent);
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                }
-            }
+            if (gRuntimeClassInit) x::runtime::il2cpp::RuntimeClassInit(parent);
             staticsKlass = parent;
         }
     }
@@ -743,12 +1108,33 @@ void* ResolveDropPool(DWORD now) {
     return nullptr;
 }
 
+// Unity VecCtrl.Ap → Maple/Drop.Pt1 空间。
+// BIN（0.1.17 upload b894df）：X 对齐，Y 恒近似取反（petY≈−dropY，56/56 翻 Y 后进盒）。
+// Ap/Pos 为 Unity Y-up；Drop.Pt1 / CurPos 为枫谷 Y-down。
+void ApToMaplePos(double ax, double ay, float& x, float& y) {
+    x = static_cast<float>(ax);
+    y = static_cast<float>(-ay);
+}
+
+// Pet : VecCtrlOwner — 门控/近距用 Maple 空间对齐 Drop.Pt1。
+// 禁止优先 Pos@0x64；禁止读 CurPos@0x240（User 专属，Pet 无此字段）。
 void ReadPetPos(void* pet, float& x, float& y) {
-    x = ReadF32(pet, kOffVisPos);
-    y = ReadF32(pet, kOffVisPos + 4);
-    if (std::fabs(x) >= kMinPosAbs || std::fabs(y) >= kMinPosAbs) return;
-    x = ReadF32(pet, kOffLogicalPos);
-    y = ReadF32(pet, kOffLogicalPos + 4);
+    x = y = 0.f;
+    if (!pet) return;
+    void* vc = ReadPtr(pet, kOffVecCtrl);
+    if (LooksLikeHeapPtr(vc)) {
+        const double ax = ReadF64(vc, kOffVcApX);
+        const double ay = ReadF64(vc, kOffVcApY);
+        if (std::fabs(ax) >= kMinPosAbs || std::fabs(ay) >= kMinPosAbs) {
+            ApToMaplePos(ax, ay, x, y);
+            return;
+        }
+    }
+    // Pos@0x64 同属 Unity Vector2，兜底同样翻 Y
+    const float ux = ReadF32(pet, kOffFieldPos);
+    const float uy = ReadF32(pet, kOffFieldPos + 4);
+    x = ux;
+    y = -uy;
 }
 
 Rect4 ReadRect(void* base, size_t off) {
@@ -820,12 +1206,7 @@ Rect4 ReadCollisionRcPet() {
     Rect4 empty{};
     if (!gCollisionKlass) gCollisionKlass = FindClass(kCollisionCheckClass);
     if (!gCollisionKlass) return empty;
-    if (gRuntimeClassInit) {
-        __try {
-            gRuntimeClassInit(gCollisionKlass);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
+    if (gRuntimeClassInit) x::runtime::il2cpp::RuntimeClassInit(gCollisionKlass);
     void* statics = KlassStaticFields(gCollisionKlass);
     if (!LooksLikeHeapPtr(statics)) return empty;
     return ReadRect(statics, kOffCollisionRcPet);
@@ -842,10 +1223,214 @@ struct ByPetRectBackup {
     uint8_t* base = nullptr;
 };
 
+bool ReadRectPackFields(const uint8_t* p, int32_t& offX, int32_t& offY, float& w, float& h) {
+    if (!p) return false;
+    __try {
+        offX = *reinterpret_cast<const int32_t*>(p + 0);
+        offY = *reinterpret_cast<const int32_t*>(p + 4);
+        w = *reinterpret_cast<const float*>(p + 0x10);
+        h = *reinterpret_cast<const float*>(p + 0x14);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool LooksLikeNativeRectPack(const uint8_t* p) {
+    int32_t ox = 0, oy = 0;
+    float w = 0.f, h = 0.f;
+    if (!ReadRectPackFields(p, ox, oy, w, h)) return false;
+    return ox == kNativeRectOffX && oy == kNativeRectOffY && w == kNativeRectW && h == kNativeRectH;
+}
+
+bool LooksLikeRectPackCandidate(const uint8_t* p) {
+    // 原生包，或合理真空尺寸（避免误咬随机 .rdata）
+    if (LooksLikeNativeRectPack(p)) return true;
+    int32_t ox = 0, oy = 0;
+    float w = 0.f, h = 0.f;
+    if (!ReadRectPackFields(p, ox, oy, w, h)) return false;
+    if (!(w >= 1.f && w <= 20000.f && h >= 1.f && h <= 20000.f)) return false;
+    // off 通常 ≈ 半宽/半高（原生 25/10；扩盒后 W/2,H/2）
+    const int32_t halfW = static_cast<int32_t>(w * 0.5f);
+    const int32_t halfH = static_cast<int32_t>(h * 0.5f);
+    return (ox == halfW || ox == kNativeRectOffX) && (oy == halfH || oy == kNativeRectOffY);
+}
+
+bool PtrInGaImage(const void* p) {
+    if (!gGA || !p) return false;
+    MODULEINFO mi{};
+    if (!GetModuleInformation(GetCurrentProcess(), gGA, &mi, sizeof(mi))) return false;
+    const auto b = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll);
+    const auto a = reinterpret_cast<uintptr_t>(p);
+    return a >= b && a + 0x18 <= b + mi.SizeOfImage;
+}
+
+// x64 RIP-relative：ModRM.mod=00 && r/m=101 → [rip+disp32]；目标 = modrm+5+disp
+uint8_t* TryRipRelTarget(const uint8_t* modrm) {
+    if (!modrm || (modrm[0] & 0xC7) != 0x05) return nullptr;
+    int32_t disp = 0;
+    __try {
+        disp = *reinterpret_cast<const int32_t*>(modrm + 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+    auto* tgt = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(modrm) + 5u +
+                                          static_cast<intptr_t>(disp));
+    if (!PtrInGaImage(tgt)) return nullptr;
+    return tgt;
+}
+
+uint8_t* ScanFnForRectPack(const uint8_t* fn, size_t maxScan) {
+    if (!fn || !maxScan) return nullptr;
+    uint8_t* nativeHit = nullptr;
+    uint8_t* softHit = nullptr;
+    int softHits = 0;
+    __try {
+        for (size_t i = 0; i + 5 < maxScan; ++i) {
+            uint8_t* tgt = TryRipRelTarget(fn + i);
+            if (!tgt) continue;
+            if (LooksLikeNativeRectPack(tgt)) {
+                nativeHit = tgt;
+                break;
+            }
+            if (LooksLikeRectPackCandidate(tgt)) {
+                if (!softHit || softHit == tgt) {
+                    softHit = tgt;
+                    if (softHits == 0) softHits = 1;
+                } else {
+                    softHits = 2;  // 多候选 → 不用软命中
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nativeHit ? nativeHit : (softHits == 1 ? softHit : nullptr);
+    }
+    if (nativeHit) return nativeHit;
+    return softHits == 1 ? softHit : nullptr;
+}
+
+uint8_t* ScanGaImageForNativeRectPack() {
+    if (!gGA) return nullptr;
+    MODULEINFO mi{};
+    if (!GetModuleInformation(GetCurrentProcess(), gGA, &mi, sizeof(mi))) return nullptr;
+    auto* base = reinterpret_cast<uint8_t*>(mi.lpBaseOfDll);
+    const size_t size = mi.SizeOfImage;
+    if (!base || size < 0x20) return nullptr;
+    static const uint8_t kPat[] = {
+        0x19, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x48, 0x42, 0x00, 0x00, 0x70, 0x42};
+    uint8_t* hit = nullptr;
+    int hits = 0;
+    uint8_t* p = base;
+    const uint8_t* end = base + size;
+    while (p < end) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0) break;
+        auto* reg = reinterpret_cast<uint8_t*>(mbi.BaseAddress);
+        const size_t regSize = mbi.RegionSize;
+        const uint8_t* next = reg + regSize;
+        const bool readable =
+            mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)) != 0 &&
+            (mbi.Protect & PAGE_GUARD) == 0;
+        if (readable && regSize >= sizeof(kPat)) {
+            const size_t lim = regSize - sizeof(kPat) + 1;
+            __try {
+                for (size_t i = 0; i < lim; ++i) {
+                    if (memcmp(reg + i, kPat, sizeof(kPat)) != 0) continue;
+                    // 只认落在本模块映像内的命中
+                    if (reg + i < base || reg + i >= end) continue;
+                    ++hits;
+                    hit = reg + i;
+                    if (hits > 1) return nullptr;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        p = const_cast<uint8_t*>(next > p ? next : p + 0x1000);
+    }
+    return hits == 1 ? hit : nullptr;
+}
+
+void ReportPetRectLamp() {
+    if (gByPetRectPack) {
+        char detail[48]{};
+        snprintf(detail, sizeof(detail), "%s", gByPetRectVia ? gByPetRectVia : "ok");
+        x::runtime::anchor_lamps::Set("PetRect", x::runtime::anchor_lamps::AnchorLampCode::Ok,
+                                     detail);
+    } else {
+        x::runtime::anchor_lamps::Set("PetRect", x::runtime::anchor_lamps::AnchorLampCode::Miss,
+                                     "MISS");
+    }
+}
+
+uint8_t* ResolveByPetRectPack(bool force = false) {
+    if (gByPetRectPack && !force) return gByPetRectPack;
+    gByPetRectPack = nullptr;
+    gByPetRectVia = nullptr;
+    if (!BindIl2Cpp()) {
+        ReportPetRectLamp();
+        return nullptr;
+    }
+
+    // 1) ByPet 方法体 RIP 相对寻址（换版 RVA 漂时靠 MI/哈希拿 fn）
+    if (!gDropPoolKlass) gDropPoolKlass = FindClass(kDropPoolClass);
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    // TryPickUpDropByPet：TypeSignature viiiii → arity≈3；哈希/RVA 钉死
+    constexpr MethodShape kByPet{3, TypeKind::Void, false, false,
+                                 {TypeKind::Any, TypeKind::Any, TypeKind::Any}};
+    MethodInfoHead* miByPet = nullptr;
+    if (gDropPoolKlass) {
+        miByPet = ResolveMi(gDropPoolKlass, kRvaDropTryPickUpDropByPet, kByPet,
+                            "TryPickUpDropByPet", kHashDropTryPickUpByPet);
+    }
+    const uint8_t* fn = nullptr;
+    if (miByPet && miByPet->methodPointer)
+        fn = reinterpret_cast<const uint8_t*>(miByPet->methodPointer);
+    if (!fn) fn = AtRva<const uint8_t*>(kRvaDropTryPickUpDropByPet);
+    if (fn) {
+        if (uint8_t* hit = ScanFnForRectPack(fn, kByPetScanMax)) {
+            gByPetRectPack = hit;
+            gByPetRectVia = "ByPet xref";
+        }
+    }
+
+    // 2) GA 映像唯一原生特征
+    if (!gByPetRectPack) {
+        if (uint8_t* hit = ScanGaImageForNativeRectPack()) {
+            gByPetRectPack = hit;
+            gByPetRectVia = "pattern";
+        }
+    }
+
+    // 3) 末级：本版死钉 RVA
+    if (!gByPetRectPack) {
+        uint8_t* fb = AtRva<uint8_t*>(kRvaByPetRectPackFallback);
+        if (fb && LooksLikeRectPackCandidate(fb)) {
+            gByPetRectPack = fb;
+            gByPetRectVia = "RVA fallback";
+        }
+    }
+
+    if (gByPetRectPack) {
+        const uintptr_t rva =
+            reinterpret_cast<uintptr_t>(gByPetRectPack) - reinterpret_cast<uintptr_t>(gGA);
+        x::runtime::LogI("DropPort", "ByPetRectPack bind ok via=%s ptr=%p rva=0x%llX",
+                         gByPetRectVia ? gByPetRectVia : "?", gByPetRectPack,
+                         (unsigned long long)rva);
+    } else {
+        x::runtime::LogW("DropPort", "ByPetRectPack resolve MISS (xref/pattern/RVA)");
+    }
+    ReportPetRectLamp();
+    return gByPetRectPack;
+}
+
 bool PatchByPetRectPack(float vacuumW, float vacuumH, ByPetRectBackup& bak) {
     bak = {};
     if (!gGA || vacuumW < 1.f || vacuumH < 1.f) return false;
-    bak.base = AtRva<uint8_t*>(kRvaByPetRectPack);
+    bak.base = ResolveByPetRectPack(false);
     if (!bak.base) return false;
     __try {
         bak.offX = *reinterpret_cast<int32_t*>(bak.base + 0);
@@ -887,9 +1472,47 @@ void RestoreByPetRectPack(ByPetRectBackup& bak) {
 // - 黑名单 drop 一律不碰（否则每拍清 LastTry + 写 EndPara=3 → ByPet 空吸动画「打转」）
 bool DropMatchesSkip(void* drop, const SkipIds& skip);
 
+// 只清一件：人物直吸每拍只送 1 件，全盒 Clear 上百次写会占死 MainPump，打怪/瞬移饿死。
+// EndPara：
+// - 默认只解除 SkipHold(4)→Ready(3)（人物直吸）：抛物中强行写 3 会重播落地动画
+// - forceEndParaReady=true（宠吸 ByPet）：!=3 写成 3，否则 ByPet 直接跳过；禁写 0
+bool ClearPickupGatesOne(void* drop, bool forceEndParaReady = false) {
+    if (!LooksLikeHeapPtr(drop) || !DropWritesAllowed()) return false;
+    bool touched = false;
+    const int own = ReadI32(drop, kOffDropOwnType);
+    const int last = ReadI32(drop, kOffDropLastTry);
+    const int endp = ReadI32(drop, kOffDropEndPara);
+    const int stamp = ReadI32(drop, kOffDropPickStamp);
+    if (endp != kEndParaReady) {
+        const bool promote =
+            endp == kEndParaSkipHold || (forceEndParaReady && endp != 0);  // 0=禁写（重置抛物）
+        if (promote) {
+            WriteI32(drop, kOffDropEndPara, kEndParaReady);
+            touched = true;
+        }
+    }
+    if (stamp != 0) {
+        WriteI32(drop, kOffDropPickStamp, 0);
+        touched = true;
+    }
+    // 退避戳 INT_MAX 留给 StampStalled，别在这里清掉
+    if (last != 0 && last != kLastTrySkipStamp) {
+        WriteI32(drop, kOffDropLastTry, 0);
+        touched = true;
+    }
+    if (own < 0 || own > 4) {
+        WriteI32(drop, kOffDropOwnType, kDropOwnNo);
+        touched = true;
+    }
+    return touched;
+}
+
+// 盒内有限清闸：宠吸走官方 TryPickUpDrop，无法预知「下一件」；全盒写会占死 MainPump。
+// maxClear>0 时最多清这么多件（建议 ≈8，对齐 ByPet 一拍吞吐）；<=0 表示不限制。
+// 黑名单/退避 LastTry=INT_MAX 不碰；不可捡的跳过。写路径复用 ClearPickupGatesOne。
 int ClearPickupGatesNear(void* pool, float cx, float cy, float halfW, float halfH,
                          int* outSampleOwn, int* outSampleLast, int* outSampleEnd,
-                         const SkipIds* skip) {
+                         const SkipIds* skip, int maxClear = 0) {
     if (outSampleOwn) *outSampleOwn = -1;
     if (outSampleLast) *outSampleLast = 0;
     if (outSampleEnd) *outSampleEnd = 0;
@@ -905,7 +1528,8 @@ int ClearPickupGatesNear(void* pool, float cx, float cy, float halfW, float half
     int cleared = 0;
     bool sampled = false;
     for (uintptr_t i = 0; i < arrLen; ++i) {
-        uint8_t* entry = reinterpret_cast<uint8_t*>(entries) + 0x20 + i * kEntrySize;
+        if (maxClear > 0 && cleared >= maxClear) break;
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
         const int hash = ReadI32(entry, kOffEntryHash);
         if (hash < 0) continue;
         void* drop = ReadPtr(entry, kOffEntryValue);
@@ -914,38 +1538,16 @@ int ClearPickupGatesNear(void* pool, float cx, float cy, float halfW, float half
         if (!ReadDropPt(drop, px, py)) continue;
         if (std::fabs(px - cx) > halfW || std::fabs(py - cy) > halfH) continue;
         if (skip && !skip->empty() && DropMatchesSkip(drop, *skip)) continue;
+        if (ReadU8(drop, kOffDropPickable) == 0) continue;
+        if (ReadI32(drop, kOffDropLastTry) == kLastTrySkipStamp) continue;
 
-        const int own = ReadI32(drop, kOffDropOwnType);
-        const int last = ReadI32(drop, kOffDropLastTry);
-        const int endp = ReadI32(drop, kOffDropEndPara);
-        const int stamp = ReadI32(drop, kOffDropPickStamp);
         if (!sampled) {
             sampled = true;
-            if (outSampleOwn) *outSampleOwn = own;
-            if (outSampleLast) *outSampleLast = last;
-            if (outSampleEnd) *outSampleEnd = endp;
+            if (outSampleOwn) *outSampleOwn = ReadI32(drop, kOffDropOwnType);
+            if (outSampleLast) *outSampleLast = ReadI32(drop, kOffDropLastTry);
+            if (outSampleEnd) *outSampleEnd = ReadI32(drop, kOffDropEndPara);
         }
-        bool touched = false;
-        // ByPet：EndPara != 3 → 直接跳过该 drop（日志常见 sampleEndPara=1）
-        if (endp != kEndParaReady) {
-            WriteI32(drop, kOffDropEndPara, kEndParaReady);
-            touched = true;
-        }
-        if (stamp != 0) {
-            WriteI32(drop, kOffDropPickStamp, 0);
-            touched = true;
-        }
-        // 空成功会盖 LastTry 冷却；只在非 0 时清，避免无意义写
-        if (last != 0) {
-            WriteI32(drop, kOffDropLastTry, 0);
-            touched = true;
-        }
-        // TW 实机 OwnType 常读到异常大数（非 0–4 枚举），ByPet 会直接跳过；写成 No=任何人可捡
-        if (own < 0 || own > 4) {
-            WriteI32(drop, kOffDropOwnType, kDropOwnNo);
-            touched = true;
-        }
-        if (touched) ++cleared;
+        if (ClearPickupGatesOne(drop, /*forceEndParaReady=*/true)) ++cleared;
     }
     return cleared;
 }
@@ -972,7 +1574,7 @@ int CountDropsNear(void* pool, float cx, float cy, float halfW, float halfH, int
     int sampleMoneyFlag = -1;
     int sampleInfo = 0;
     for (uintptr_t i = 0; i < arrLen; ++i) {
-        uint8_t* entry = reinterpret_cast<uint8_t*>(entries) + 0x20 + i * kEntrySize;
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
         const int hash = ReadI32(entry, kOffEntryHash);
         if (hash < 0) continue;
         void* drop = ReadPtr(entry, kOffEntryValue);
@@ -1010,9 +1612,11 @@ int CountDropsNear(void* pool, float cx, float cy, float halfW, float halfH, int
 }
 
 // 拍前 ClearPickupGates 已清 LastTry/PickStamp；拍后非 0 = ByPet 本拍碰过（多为 Send）
+// outStallIds/outStallN：本拍被 ByPet 盖戳但池未掉的 dropId（交给退避黑名单登记）
 int CountPostSendTouchesNear(void* pool, float cx, float cy, float halfW, float halfH,
-                             int* outTouchMoney) {
+                             int* outTouchMoney, int* outStallIds, int stallCap, int* outStallN) {
     if (outTouchMoney) *outTouchMoney = 0;
+    if (outStallN) *outStallN = 0;
     if (!pool) return 0;
     void* dict = ReadPtr(pool, kOffPoolDict);
     if (!LooksLikeHeapPtr(dict)) return 0;
@@ -1024,7 +1628,7 @@ int CountPostSendTouchesNear(void* pool, float cx, float cy, float halfW, float 
 
     int touch = 0, touchMoney = 0;
     for (uintptr_t i = 0; i < arrLen; ++i) {
-        uint8_t* entry = reinterpret_cast<uint8_t*>(entries) + 0x20 + i * kEntrySize;
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
         if (ReadI32(entry, kOffEntryHash) < 0) continue;
         void* drop = ReadPtr(entry, kOffEntryValue);
         if (!LooksLikeHeapPtr(drop)) continue;
@@ -1034,8 +1638,13 @@ int CountPostSendTouchesNear(void* pool, float cx, float cy, float halfW, float 
         const int last = ReadI32(drop, kOffDropLastTry);
         const int stamp = ReadI32(drop, kOffDropPickStamp);
         if (last == 0 && stamp == 0) continue;
+        if (last == kLastTrySkipStamp) continue;  // 我们自己的黑名单/退避戳，不是 ByPet 提交
         ++touch;
         if (ReadU8(drop, kOffDropIsMoney) != 0) ++touchMoney;
+        if (outStallIds && outStallN && *outStallN < stallCap) {
+            const int did = ReadI32(drop, kOffDropId);
+            if (did != 0) outStallIds[(*outStallN)++] = did;
+        }
     }
     if (outTouchMoney) *outTouchMoney = touchMoney;
     return touch;
@@ -1043,6 +1652,8 @@ int CountPostSendTouchesNear(void* pool, float cx, float cy, float halfW, float 
 
 bool EnsureExceptionIds(void* pet, const SkipIds& skip) {
     if (!pet || skip.empty()) return true;
+    // 偏移没解析满时别往「可能不是 ExceptionList」的指针里追加 id（返回 false → 下次仍会重试）
+    if (!DropWritesAllowed()) return false;
     void* list = ReadPtr(pet, kOffPetExceptionList);
     if (!LooksLikeHeapPtr(list)) return false;
     void* items = ReadPtr(list, kOffListItems);
@@ -1098,6 +1709,10 @@ bool EnsureExceptionIdsIfNeeded(void* pet, const SkipIds& skip) {
 
 int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float halfH,
                           const SkipIds& skip, int* outNear, int* outWant, int* outTotal);
+int StampStalledDropsNear(void* pool, float cx, float cy, float halfW, float halfH, DWORD now,
+                          const SkipIds* skip);
+int RestoreStalledStampsNear(void* pool, float cx, float cy, float halfW, float halfH, DWORD now,
+                             const SkipIds* skip);
 
 void RunVacuumOnMain() {
     VacuumResult& r = gJob.result;
@@ -1110,6 +1725,8 @@ void RunVacuumOnMain() {
         return;
     }
     void* pool = ResolveDropPool(now);
+    ResetStallIfPoolChanged(pool);
+    PruneStall(now);
 
     void* pet = FirstActivePet();
     if (!pet) {
@@ -1136,10 +1753,24 @@ void RunVacuumOnMain() {
                                     &totalEnum, &r.nearMoney, &r.nearItem, &r.sampleIsMoney,
                                     &r.sampleInfo);
         if (r.dropCount <= 0 && totalEnum > 0) r.dropCount = totalEnum;
+        // 轻清闸：ByPet 一拍摸不了上百件；限额清候选，避免 3200 盒 gates=100+ 占泵
+        constexpr int kPetVacGateClearBudget = 8;
         r.gatesCleared =
             ClearPickupGatesNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f,
                                  &r.sampleOwnType, &r.sampleLastTry, &r.sampleEndPara,
-                                 gJob.skip.empty() ? nullptr : &gJob.skip);
+                                 gJob.skip.empty() ? nullptr : &gJob.skip, kPetVacGateClearBudget);
+        // 退避黑名单：挡住服端刚拒收的那件，避免它霸占 ByPet 队头把整盒堵死（拍末恢复）
+        const int stallActiveBefore = StallActiveCount(now);
+        r.stallStamped =
+            StampStalledDropsNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f, now,
+                                  gJob.skip.empty() ? nullptr : &gJob.skip);
+        // 不变量：Drop.Id 唯一 → 盒内被盖住的件数不可能超过生效退避条目数。
+        // 超了说明 Id 偏移漂移读到了非唯一字段，会把整盒挡死 → 自动停用（本拍仍照常还原）。
+        if (r.stallStamped > stallActiveBefore) {
+            gStallOff = true;
+            x::runtime::LogW("droppool", "stall off: Drop.Id not unique (stamped=%d > held=%d)",
+                             r.stallStamped, stallActiveBefore);
+        }
         // 黑名单：脚边同款盖 LastTry=INT_MAX（ExceptionList 容量/官方门控不可靠；宽词截断曾漏 紅寶殼）
         if (gJob.skip.size() > 0) {
             int nearIgn = 0, wantIgn = 0, totalIgn = 0;
@@ -1213,12 +1844,26 @@ void RunVacuumOnMain() {
 
     // 仅在「调用成功且本拍池未同步下降」时轻扫盖戳，避免成功吸收再多走一趟
     if (ok && pool && r.nearCount > 0 && r.dropsDelta >= 0 && !poolFell) {
+        int stallIds[16] = {};
+        int stallN = 0;
         r.sendTouch =
             CountPostSendTouchesNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f,
-                                     &r.sendTouchMoney);
+                                     &r.sendTouchMoney, stallIds, 16, &stallN);
         const bool probeSend = r.petSendDelta > 0 || r.poolSendDelta > 0;
         if (r.sendTouch > 0 || probeSend) r.sentButPoolSame = 1;
+        // 提交了但池没掉 → 多为该栏已满被服端拒收：登记退避，下一拍轮到别的掉落
+        for (int i = 0; i < stallN; ++i) AddStall(stallIds[i], nowTick);
     }
+
+    // 拍末必须把退避盖戳还原（含 seh / no_rect_patch 路径），否则切到脚边拾取时这些道具捡不起来
+    if (pool && r.stallStamped > 0) {
+        r.stallRestored =
+            RestoreStalledStampsNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f, now,
+                                     gJob.skip.empty() ? nullptr : &gJob.skip);
+    }
+    // 停用后才清表：清早了 RestoreStalledStampsNear 就找不到该还原谁，会把戳留在池里
+    if (gStallOff && !gStall.empty()) gStall.clear();
+    r.stallHeld = StallActiveCount(nowTick);
 
     r.called = ok;
     r.ok = ok;
@@ -1240,7 +1885,10 @@ void RunVacuumOnMain() {
     }
 }
 
-void VacJobThunk(void*) { RunVacuumOnMain(); }
+void VacJobThunk(void*) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("drop.Vacuum");
+    RunVacuumOnMain();
+}
 
 bool SkipHas(const SkipIds& skip, int id) { return skip.contains(id); }
 
@@ -1256,27 +1904,64 @@ bool ReadUserPos(float& x, float& y) {
     x = y = 0.f;
     if (!gLocalUser) return false;
 
-    // 脚边 TryPickUpDrop 与 Drop.Pt1 同属身体/逻辑空间。
-    // 禁止优先读 FieldActorBase.Pos@0x64（镜头/镜像会漂，贴脸仍 near=0 / ok_far）。
-    // 顺序：CurPos@0x240 → VecCtrl.Ap → Pos@0x64 兜底。
-    x = ReadF32(gLocalUser, kOffCurPos);
-    y = ReadF32(gLocalUser, kOffCurPos + 4);
-    if (std::fabs(x) >= kMinPosAbs || std::fabs(y) >= kMinPosAbs) return true;
-
+    // 脚边 pos / 黑名单盖戳须对齐 Drop.Pt1（Maple Y-down）。
+    // Ap：Unity Y-up → 翻 Y；CurPos@0x240 已是 Maple 空间，不翻。
     void* vc = ReadPtr(gLocalUser, kOffVecCtrl);
     if (LooksLikeHeapPtr(vc)) {
         const double ax = ReadF64(vc, kOffVcApX);
         const double ay = ReadF64(vc, kOffVcApY);
         if (std::fabs(ax) >= kMinPosAbs || std::fabs(ay) >= kMinPosAbs) {
-            x = static_cast<float>(ax);
-            y = static_cast<float>(ay);
+            ApToMaplePos(ax, ay, x, y);
             return true;
         }
     }
 
-    x = ReadF32(gLocalUser, kOffFieldPos);
-    y = ReadF32(gLocalUser, kOffFieldPos + 4);
+    x = ReadF32(gLocalUser, kOffCurPos);
+    y = ReadF32(gLocalUser, kOffCurPos + 4);
+    if (std::fabs(x) >= kMinPosAbs || std::fabs(y) >= kMinPosAbs) return true;
+
+    const float ux = ReadF32(gLocalUser, kOffFieldPos);
+    const float uy = ReadF32(gLocalUser, kOffFieldPos + 4);
+    x = ux;
+    y = -uy;
     return std::fabs(x) >= kMinPosAbs || std::fabs(y) >= kMinPosAbs;
+}
+
+// 池内距 (cx,cy) 最近的 Drop.Pt1（不限真空盒；probe 诊断用）
+bool SampleNearestDropPt(void* pool, float cx, float cy, float& outX, float& outY, float& outDist) {
+    outX = outY = 0.f;
+    outDist = -1.f;
+    if (!pool) return false;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return false;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return false;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return false;
+
+    bool found = false;
+    float bestD2 = 0.f;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float px = 0.f, py = 0.f;
+        if (!ReadDropPt(drop, px, py)) continue;
+        const float dx = px - cx;
+        const float dy = py - cy;
+        const float d2 = dx * dx + dy * dy;
+        if (!found || d2 < bestD2) {
+            found = true;
+            bestD2 = d2;
+            outX = px;
+            outY = py;
+        }
+    }
+    if (!found) return false;
+    outDist = std::sqrt(bestD2);
+    return true;
 }
 
 // 黑名单：LastTry=INT_MAX + EndPara=SkipHold(!=3) → ByPet 早退，避免空吸打转
@@ -1295,8 +1980,9 @@ int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float hal
     if (arrLen == 0 || arrLen > 8192) return 0;
 
     int total = 0, nearN = 0, want = 0, stamped = 0;
+    const bool writesOk = DropWritesAllowed();
     for (uintptr_t i = 0; i < arrLen; ++i) {
-        uint8_t* entry = reinterpret_cast<uint8_t*>(entries) + 0x20 + i * kEntrySize;
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
         const int hash = ReadI32(entry, kOffEntryHash);
         if (hash < 0) continue;
         void* drop = ReadPtr(entry, kOffEntryValue);
@@ -1309,6 +1995,7 @@ int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float hal
         if (std::fabs(dx) > halfW || std::fabs(dy) > halfH) continue;
         ++nearN;
         if (DropMatchesSkip(drop, skip)) {
+            if (!writesOk) continue;
             const int last = ReadI32(drop, kOffDropLastTry);
             const int endp = ReadI32(drop, kOffDropEndPara);
             bool touched = false;
@@ -1330,6 +2017,79 @@ int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float hal
     if (outWant) *outWant = want;
     if (outTotal) *outTotal = total;
     return stamped;
+}
+
+// 退避黑名单：盖 LastTry=INT_MAX（拍末还原）。不动 EndPara，避免拍内 3↔4 重播落地。
+// 拍内对称（与 .rdata 矩形包同范式）：这里盖、拍末 RestoreStalledStampsNear 恢复。
+// 绝不跨拍留戳——否则用户切到脚边拾取后，这些他想要的道具会一直捡不起来。
+int StampStalledDropsNear(void* pool, float cx, float cy, float halfW, float halfH, DWORD now,
+                          const SkipIds* skip) {
+    if (!pool || gStallOff || gStall.empty() || !DropWritesAllowed()) return 0;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return 0;
+
+    int stamped = 0;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float px = 0.f, py = 0.f;
+        if (!ReadDropPt(drop, px, py)) continue;
+        if (std::fabs(px - cx) > halfW || std::fabs(py - cy) > halfH) continue;
+        if (!StallActive(ReadI32(drop, kOffDropId), now)) continue;
+        // 用户黑名单的戳由 StampSkippedDropsNear 长期负责，别掺和进拍内恢复
+        if (skip && !skip->empty() && DropMatchesSkip(drop, *skip)) continue;
+
+        bool touched = false;
+        if (ReadI32(drop, kOffDropLastTry) != kLastTrySkipStamp) {
+            WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
+            touched = true;
+        }
+        // 只盖 LastTry：勿动 EndPara。拍内 3→4→还原 3 会反复触发落地动画
+        // （人物直吸已因此去掉 Stamp；宠吸退避同理只挡 ByPet 队头）。
+        if (touched) ++stamped;
+    }
+    return stamped;
+}
+
+// 拍末恢复退避盖戳：重新枚举字典（不跨托管调用持裸 drop 指针），把本拍写下的
+// LastTry=INT_MAX 还原成 0。不再动 EndPara（避免 4↔3 重播落地动画）。
+// 故意不加 DropWritesAllowed 门禁：只写「读回来正好是 INT_MAX」的 drop，且盖戳侧已被门禁挡住
+// （没盖就没得还原）。若这里也加门禁，写权限在拍内翻假就会把戳永久留在池里。
+int RestoreStalledStampsNear(void* pool, float cx, float cy, float halfW, float halfH, DWORD now,
+                             const SkipIds* skip) {
+    if (!pool || gStall.empty()) return 0;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return 0;
+
+    int restored = 0;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float px = 0.f, py = 0.f;
+        if (!ReadDropPt(drop, px, py)) continue;
+        if (std::fabs(px - cx) > halfW || std::fabs(py - cy) > halfH) continue;
+        if (!StallActive(ReadI32(drop, kOffDropId), now)) continue;
+        if (skip && !skip->empty() && DropMatchesSkip(drop, *skip)) continue;
+        if (ReadI32(drop, kOffDropLastTry) != kLastTrySkipStamp) continue;
+
+        WriteI32(drop, kOffDropLastTry, 0);
+        ++restored;
+    }
+    return restored;
 }
 
 void RunFootOnMain() {
@@ -1373,7 +2133,9 @@ void RunFootOnMain() {
                                      kHashDropTryPickUp);
     }
     auto fn = FnFromMi<FnDropTryPickUp>(gMiFootTryPickUp, kRvaDropTryPickUpDrop);
-    float pos[2] = {ux, uy};
+    // 官方入口收的是 Unity 空间（Y-up）：函数内把矩形和 PickPt 都按 −Y 比，送包时再 Point(x, −y)。
+    // ReadUserPos 给的是 Maple（Y-down），所以这里必须翻 Y，否则盒子落在 −y 侧，脚边永远空吸。
+    float pos[2] = {ux, -uy};
     const uint32_t petHits0 = gPetSendHits.load(std::memory_order_relaxed);
     const uint32_t poolHits0 = gPoolSendHits.load(std::memory_order_relaxed);
     bool ok = false;
@@ -1423,12 +2185,214 @@ void RunFootOnMain() {
     }
 }
 
-void FootJobThunk(void*) { RunFootOnMain(); }
+void FootJobThunk(void*) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("drop.Foot");
+    RunFootOnMain();
+}
+
+void RunCharVacOnMain() {
+    CharVacResult& r = gCharVac.result;
+    r = {};
+    r.why = "fail";
+
+    const DWORD now = GetTickCount();
+    if (!ResolveLocalUser(now)) {
+        r.why = "no_lu";
+        return;
+    }
+    void* pool = ResolveDropPool(now);
+    if (!pool) {
+        r.why = "no_pool";
+        return;
+    }
+    EnsureSendProbe();
+    // 读 Pt1/Pickable/Id/EndPara 错址会乱选包；写路径另受 DropWritesAllowed 门禁
+    if (!gCharGatesMeta) {
+        r.why = "no_meta";
+        return;
+    }
+
+    float ux = 0.f, uy = 0.f;
+    if (!ReadUserPos(ux, uy)) {
+        r.why = "no_pos";
+        return;
+    }
+    r.userX = ux;
+    r.userY = uy;
+
+    // 走原始 Send，别把自己的包记进 poolSendHits 探针
+    auto fn = gOrigPoolSend ? reinterpret_cast<FnPoolSend>(gOrigPoolSend)
+                            : FnFromMi<FnPoolSend>(gMiPoolSend, kRvaPoolSendDropPickUp);
+    if (!fn) {
+        r.why = "no_fn";
+        return;
+    }
+
+    // —— 以下控制面与 RunVacuumOnMain 同构，中心从宠坐标换成角色坐标 ——
+    ResetStallIfPoolChanged(pool);
+    PruneStall(now);
+
+    // 上一拍送了、池可能尚未同步：若 drop 仍在 → 确认拒收并 AddStall；已不在 → 真吸，不误伤
+    if (gCharPendingStallId != 0) {
+        const int pending = gCharPendingStallId;
+        gCharPendingStallId = 0;
+        if (!gStallOff && DropIdInPool(pool, pending)) {
+            AddStall(pending, now);
+            r.sentButPoolSame = 1;
+        }
+    }
+
+    const float halfW = gCharVac.halfW;
+    const float halfH = gCharVac.halfH;
+    const SkipIds* skip = gCharVac.skip.empty() ? nullptr : &gCharVac.skip;
+
+    r.dropCount = ReadPoolDropCount(pool);
+    int totalEnum = 0;
+    r.nearCount =
+        CountDropsNear(pool, ux, uy, halfW, halfH, &totalEnum, nullptr, nullptr, nullptr, nullptr);
+    if (r.dropCount <= 0 && totalEnum > 0) r.dropCount = totalEnum;
+
+    // 不调全盒 ClearPickupGatesNear：1500 盒 near≈100+ 时每拍上百次写会占死 MainPump，
+    // 打怪/瞬移/攻击加速同泵排队 → 日志见 fires 归零 + drain budget deferred。
+    r.gatesCleared = 0;
+
+    // 人物直吸自己选 id 再 Send：软件 StallActive / DropMatchesSkip 已够。
+    // 禁止照搬宠吸的 Stamp+Restore（盒内数十件每拍 EndPara 3↔4 → 反复落地动画，
+    // 与宠吸早期「清闸回写 EndPara=3 打转」同一类）。
+    r.stallStamped = 0;
+    r.skipStamped = 0;
+
+    // 送包坐标 = 角色真实 Maple 位置（官方人物拾取链同款）
+    int32_t pt[2] = {static_cast<int32_t>(ux), static_cast<int32_t>(uy)};
+    bool seh = false;
+
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    void* entries = LooksLikeHeapPtr(dict) ? ReadPtr(dict, kOffDictEntries) : nullptr;
+    const int count = dict ? ReadI32(dict, kOffDictCount) : 0;
+    const uintptr_t arrLen =
+        (LooksLikeHeapPtr(entries) && count >= 0 && count <= 4096) ? ArrayLen(entries) : 0;
+
+    // 一调一件。抛物未落地(EndPara!=3)的 drop 一律不写字段——065ed0 实证：先 Clear 再判
+    // EndPara 会在盒内扫过多件并清 LastTry/PickStamp，落地动画循环重播（gates 常 2~12）。
+    // 只对已 Ready 的那一件清冷却后 Send；不动 EndPara/OwnType（禁写 0 / 禁无谓回写）。
+    for (uintptr_t i = 0; i < arrLen && r.sent < 1; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+
+        float px = 0.f, py = 0.f;
+        if (!ReadDropPt(drop, px, py)) continue;
+        if (std::fabs(px - ux) > halfW || std::fabs(py - uy) > halfH) continue;
+
+        if (ReadU8(drop, kOffDropPickable) == 0) {
+            ++r.gateBlocked;
+            continue;
+        }
+        if (skip && DropMatchesSkip(drop, *skip)) continue;
+
+        const int id = ReadI32(drop, kOffDropId);
+        if (id == 0) continue;
+        if (StallActive(id, now) || id == gCharPendingStallId) continue;
+        if (ReadI32(drop, kOffDropLastTry) == kLastTrySkipStamp) continue;
+        if (ReadI32(drop, kOffDropEndPara) != kEndParaReady) continue;
+
+        // 仅清冷却戳，便于官方 Send 过 PickStamp 窗；绝不碰 EndPara
+        if (DropWritesAllowed()) {
+            bool touched = false;
+            const int last = ReadI32(drop, kOffDropLastTry);
+            const int stamp = ReadI32(drop, kOffDropPickStamp);
+            if (stamp != 0) {
+                WriteI32(drop, kOffDropPickStamp, 0);
+                touched = true;
+            }
+            if (last != 0 && last != kLastTrySkipStamp) {
+                WriteI32(drop, kOffDropLastTry, 0);
+                touched = true;
+            }
+            if (touched) ++r.gatesCleared;
+        }
+        ++r.nearWant;
+
+        __try {
+            fn(pool, pt, id, 0u, nullptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            seh = true;
+        }
+        if (seh) break;
+        ++r.sent;
+        r.sentDropId = id;
+    }
+
+    gCharSentTotal.fetch_add(static_cast<uint32_t>(r.sent), std::memory_order_relaxed);
+    r.sentTotal = gCharSentTotal.load(std::memory_order_relaxed);
+    r.dropCountAfter = ReadPoolDropCount(pool);
+    r.dropsDelta = r.dropCountAfter - r.dropCount;
+
+    static int s_prevAfter = -1;
+    static int s_prevNear = 0;
+    static int s_prevSent = 0;
+    static DWORD s_prevTick = 0;
+    static bool s_prevOk = false;
+    const DWORD nowTick = GetTickCount();
+    const bool recentPrev = s_prevOk && s_prevTick != 0 && (nowTick - s_prevTick) <= 3000u;
+    const bool poolFell =
+        recentPrev && s_prevAfter > 0 && r.dropCount < s_prevAfter && (s_prevNear > 0 || s_prevSent > 0);
+    r.poolFellSinceLast = poolFell;
+
+    // 人物 Send 通常不写 LastTry。池未掉 → 只对「本拍送出的 id」pending/AddStall。
+    // 禁止 CountPostSendTouchesNear 整盒登记：盒内残留 LastTry 会把无关物全打进退避
+    // （065ed0：sendTouch=90 而 gates=1），与动画/吸物抖动无关但也是脏负载。
+    if (!seh && r.sent > 0 && r.nearCount > 0 && r.dropsDelta >= 0 && !poolFell) {
+        if (r.sentDropId != 0) {
+            if (!StallActive(r.sentDropId, nowTick)) gCharPendingStallId = r.sentDropId;
+        }
+    } else if (!seh && r.sent > 0 && (r.dropsDelta < 0 || poolFell)) {
+        gCharPendingStallId = 0;
+    }
+
+    // 人物直吸不盖/不还原 EndPara 戳（见上）；stallHeld 仍反映软件退避表
+    if (gStallOff && !gStall.empty()) gStall.clear();
+    r.stallRestored = 0;
+    r.stallHeld = StallActiveCount(nowTick);
+
+    r.called = true;
+    r.ok = !seh;
+    if (seh) {
+        r.why = "seh";
+    } else if (r.dropsDelta < 0 || poolFell) {
+        r.why = "ok_absorbed";
+    } else if (r.sent > 0) {
+        r.why = r.sentButPoolSame ? "ok" : "ok_sent";
+    } else if (r.stallHeld > 0) {
+        r.why = "ok_hold";
+    } else if (r.nearCount == 0) {
+        r.why = r.dropCount > 0 ? "ok_far" : "ok_empty";
+    } else if (r.gateBlocked > 0 && r.nearWant == 0) {
+        r.why = "ok_gate";
+    } else {
+        r.why = "ok";
+    }
+
+    if (!seh) {
+        s_prevAfter = r.dropCountAfter;
+        s_prevNear = r.nearCount;
+        s_prevSent = r.sent;
+        s_prevTick = nowTick;
+        s_prevOk = true;
+    }
+}
+
+void CharVacJobThunk(void*) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("drop.CharVac");
+    RunCharVacOnMain();
+}
 
 }  // namespace
 
 void Init() {
     BindIl2Cpp();
+    (void)ResolveByPetRectPack(false);
     x::runtime::LogI("DropPort", "init pet_loot port (formal=pet vacuum; foot optional)");
 }
 
@@ -1474,8 +2438,14 @@ bool CollectProbe(ProbeSnapshot& out, float nearHalfW, float nearHalfH) {
     if (pool && pet) {
         out.nearCount =
             CountDropsNear(pool, out.petX, out.petY, nearHalfW, nearHalfH, &out.dropCount);
+        out.hasSampleDrop = SampleNearestDropPt(pool, out.petX, out.petY, out.sampleDropX,
+                                               out.sampleDropY, out.sampleDropDist);
     } else if (pool) {
         CountDropsNear(pool, 0.f, 0.f, 1e9f, 1e9f, &out.dropCount);
+        // 无宠时以原点采样，仅给 drops 对照；dist 无意义
+        out.hasSampleDrop =
+            SampleNearestDropPt(pool, 0.f, 0.f, out.sampleDropX, out.sampleDropY, out.sampleDropDist);
+        if (out.hasSampleDrop) out.sampleDropDist = -1.f;
     }
     out.ok = true;
     return true;
@@ -1503,7 +2473,8 @@ bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumRe
         out.why = "no_pump";
         return false;
     }
-    if (!x::runtime::main_thread::InvokeAndWait(&VacJobThunk, nullptr, kJobWaitMs)) {
+    if (!x::runtime::main_thread::InvokeAndWait(&VacJobThunk, nullptr, kJobWaitMs,
+                                               x::runtime::main_thread::JobPrio::Low)) {
         out.why = "timeout";
         return false;
     }
@@ -1533,11 +2504,45 @@ bool TryFootPickup(float halfW, float halfH, const SkipIds* skipIds, FootResult&
         out.why = "no_pump";
         return false;
     }
-    if (!x::runtime::main_thread::InvokeAndWait(&FootJobThunk, nullptr, kJobWaitMs)) {
+    if (!x::runtime::main_thread::InvokeAndWait(&FootJobThunk, nullptr, kJobWaitMs,
+                                               x::runtime::main_thread::JobPrio::Low)) {
         out.why = "timeout";
         return false;
     }
     out = gFoot.result;
+    return out.ok;
+}
+
+bool TryCharVacuum(float halfW, float halfH, int maxSend, const SkipIds* skipIds,
+                   CharVacResult& out) {
+    out = {};
+    if (!EnsureBound()) {
+        out.why = "unbound";
+        return false;
+    }
+    if (!(halfW > 1.f) || !(halfH > 1.f)) {
+        out.why = "bad_box";
+        return false;
+    }
+
+    gCharVac.halfW = halfW;
+    gCharVac.halfH = halfH;
+    gCharVac.maxSend = maxSend > 0 ? maxSend : 1;
+    gCharVac.skip = {};
+    if (skipIds) gCharVac.skip = *skipIds;
+    gCharVac.result = {};
+    gCharVac.done = false;
+
+    if (!x::runtime::main_thread::Ensure()) {
+        out.why = "no_pump";
+        return false;
+    }
+    if (!x::runtime::main_thread::InvokeAndWait(&CharVacJobThunk, nullptr, kJobWaitMs,
+                                               x::runtime::main_thread::JobPrio::Low)) {
+        out.why = "timeout";
+        return false;
+    }
+    out = gCharVac.result;
     return out.ok;
 }
 

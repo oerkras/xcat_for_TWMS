@@ -1,4 +1,4 @@
-// TWMS Classic — auto enter (world → least channel → character).
+// TWMS Classic ? auto enter (world ? random open channel ? character).
 //
 // FindAll / TypeObject / UI clicks ONLY on Unity main thread via main_thread_pump.
 // Worker-thread FindAll caused "Fatal error in GC / Collecting from unknown thread".
@@ -14,8 +14,10 @@
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/managed_main.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../ccu/ccu.h"
+#include "../kick_sniff/kick_sniff.h"
 #include "../ports/world_port.h"
 
 #include "../../../common/xcat_world_names.h"
@@ -24,7 +26,6 @@
 
 #include <Psapi.h>
 #include <atomic>
-#include <climits>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -42,49 +43,115 @@ using x::runtime::il2cpp::ArrayAt;
 using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E3FA20;  // remapped 2026-08-03
-constexpr uint32_t kRvaSceneLoginGet = 0xBFECB0;  // remounted 2026-08-03 SceneLogin.get_Instance
-constexpr uint32_t kRvaOnClickWorldItem = 0xA99E10;  // remounted 2026-08-03
-constexpr uint32_t kRvaSelectChannel = 0xA92CB0;  // remounted 2026-08-03 SelectChannel（勿用 0xA932F0=EnterChannel）
-constexpr uint32_t kRvaOnClickGoWorld = 0xA96130;  // remounted 2026-08-03；仅此进频；勿再调 Trigger
-constexpr uint32_t kRvaSelectCharacter = 0xA7F170;  // remounted 2026-08-03
-constexpr uint32_t kRvaOnClickButtonSelect = 0xA805B0;  // remounted 2026-08-03
-constexpr uint32_t kRvaGetAvatarCount = 0xA8ADC0;  // remounted 2026-08-03
-constexpr uint32_t kRvaIsSlotEnable = 0xA86820;  // remounted 2026-08-03
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04
+constexpr uint32_t kRvaSceneLoginGet = 0xC023E0;  // remounted 2026-08-04 SceneLogin.get_Instance
+constexpr uint32_t kRvaOnClickWorldItem = 0xA9C3C0;  // remounted 2026-08-04?World ?? public void(int)?
+constexpr uint32_t kRvaSelectChannel = 0xA95220;  // remounted 2026-08-04?IDA mov [this+80h]??? 0xA958E0=EnterChannel
+constexpr uint32_t kRvaOnClickGoWorld = 0xA986C0;  // remounted 2026-08-04????????? Trigger
+constexpr uint32_t kRvaSelectCharacter = 0xA816C0;  // remounted 2026-08-04 unique void(int,bool)
+constexpr uint32_t kRvaOnClickButtonSelect = 0xA82A40;  // remounted 2026-08-04 readable leftover
+constexpr uint32_t kRvaGetAvatarCount = 0xA8D520;  // remounted 2026-08-04 public int()??+????
+constexpr uint32_t kRvaIsSlotEnable = 0xA890A0;  // remounted 2026-08-04 unique bool(int)
 
 constexpr char kClassSceneLogin[] =
-    "c30b8b382878b8b79a97fc52c5f46c21aec217449e91717e6fad3b601d5d994";
+    "b07d82aa980240a976735d96673a9c7d4003e8183cba75917ee99b59b251394";
 constexpr char kClassUiLoginWorld[] =
-    "bc2d8dd5edb59edb8044a2679de7c3c39dc8a2f96d17ac09dfd1f18236fe0c8";
+    "dc429bec2a14af8b9d37bed4aa8989061e55603d8c422c1b57bda174435fdac";
 constexpr char kClassUiLoginCharacter[] =
-    "a7ac3c1c96ab938c4231e9add9f2afbf798ed528222dc4164d65a3c432934bf";
-// DumpRestoredData / CMS：UILoginChannel；运行时哈希名
+    "af0dc7b56e333f2f7f17278afb1a2a3dd5edc683c75d92da2ed1f2dd93342fb";
+// DumpRestoredData / CMS?UILoginChannel???????
 constexpr char kClassUiLoginChannel[] =
-    "d1be53f8a11d2b72aa518225bd35495d9df43e7ab24b1a58dcf20dcd93bc60b";
+    "aa07754efe26c294a1a8a214d4d42a7b762402c0e9b31307cc37b5614ed17de";
 
-constexpr size_t kOffSlChannelUi = 0xC0;
-constexpr size_t kOffSlWorldUi = 0xC8;
-constexpr size_t kOffSlCharUi = 0xD0;
-constexpr size_t kOffWorldItems = 0x50;
-constexpr size_t kOffWorldId = 0x10;
-constexpr size_t kOffWorldName = 0x18;
-constexpr size_t kOffWorldChannels = 0x38;
-constexpr size_t kOffChUserNo = 0x18;
-constexpr size_t kOffChChannelId = 0x1D;
-constexpr size_t kOffChAdult = 0x1E;
-constexpr size_t kOffChCapacity = 0x20;
-// IDA OnClickButtonGoWorld / SelectChannel leaf: WorldItem @+0x78, selectedChannelId @+0x80.
-constexpr size_t kOffChannelSelectedWorld = 0x78;
-constexpr size_t kOffChannelSelectedId = 0x80;
-constexpr size_t kOffCharAvatarList = 0x170;  // TW List<AvatarData>（CMS 同字段在 +0x178）
-constexpr size_t kOffCharSlotCount = 0x1A8;   // TW SlotCount backing field
-// 选中槽 index（IDA 2026-08-03 复核：get/set_SelectedIndex @ RVA A7D140/A7D150 读写 this+0x168；
-// SelectCharacter 入口仍 cmp [this+168h], index；AvatarList@+0x170 / SlotCount@+0x1A8 未变）。
-constexpr size_t kOffCharSelectedIndex = 0x168;
-constexpr size_t kOffListItems = 0x10;
-constexpr size_t kOffListSize = 0x18;
-constexpr size_t kOffArrLen = 0x18;
-constexpr size_t kOffArrData = 0x20;
+constexpr size_t kFbSlChannelUi = 0xC0;
+constexpr size_t kFbSlWorldUi = 0xC8;
+constexpr size_t kFbSlCharUi = 0xD0;
+constexpr char kHashSlChannelUi[] =
+    "<de35ce179c14263090f008bbef52d66e73cad460b9491cc6d2b663aa1f7b089>k__BackingField";
+constexpr char kHashSlWorldUi[] =
+    "<dc7192b11d42773190e93d01219929843be9ffc146158589536fb019fc073e1>k__BackingField";
+constexpr char kHashSlCharUi[] =
+    "<bd4120a769e5a052a4329531cf13343bd562403d36ab777572901b789d75913>k__BackingField";
+// WorldItems / WorldChannels / AvatarList + remaining login slots: hash -> field_get_offset
+constexpr char kHashWorldItems[] =
+    "<cd5899bd3e129752d9813a30068ee82c59a836902e3cddf71f66b3a9420199b>k__BackingField";
+constexpr char kHashWorldChannels[] =
+    "d65216da08e2a17ea2b7a63f5e1be21777f869cc4229687c0e7b846aaad70ec";
+constexpr char kHashCharAvatarList[] =
+    "c461cdab48594f623699ef8274fde17f0ed5004cce5eb1d26519a56befe51b6";
+constexpr char kHashCharSelectedIndex[] =
+    "<e6fb2f0488aa4be6427a5230be16d252560296aea924ca9ea14585968c93ae7>k__BackingField";
+constexpr char kHashCharSlotCount[] =
+    "<bfc52980347e6e705fc9b5a31754910dc516d77ee6bd41be716199c9b82072d>k__BackingField";
+constexpr char kHashChannelSelectedWorld[] =
+    "ef5a5efe3aadea7313638881f4833be49fc590472e11b256ab5b22d3ad1a823";
+constexpr char kHashChannelSelectedId[] =
+    "e5f015ff7e2a62d66acce6137a964dfe06e5c2f48f51bc5b1102fd6c6fbfe03";
+constexpr char kHashWorldId[] =
+    "ad893160e54b8a3bc83d96176b39b53afbf55f79c3a53c9eeb7b484dedbcba4";
+constexpr char kHashWorldName[] =
+    "b1227a1742b12ed94045723ca56296e015fdd01424d40c0657dab53544ab90c";
+constexpr char kHashChUserNo[] =
+    "fab3229bc60d5652f6720def848c0b85b2ff48f59d4f0fe5e582e66c701835b";
+constexpr char kHashChChannelId[] =
+    "d71a44ba670718985a03ab43c8230b939e3c261443de38aa4719c9c6bedd3c9";
+constexpr char kHashChAdult[] =
+    "edff495bd02ea5ea8a071d127a1becb5014dffc0fa420db4adf4d7ac9804f9f";
+constexpr char kHashChCapacity[] =
+    "dfdc894b10630d7053ab5e1bf25dd15fd6317dc292f8c554bfdbdec4641098c";
+
+// 方法哈希（dump.cs · remount 2026-08-04）
+constexpr char kHashSceneLoginGet[] =
+    "b755142b4cdd02b1b3cdbd1c2660036774ffec2dc8994f963704e5ecd93ea0a";
+constexpr char kHashOnClickWorldItem[] =
+    "bb3772c3b08ed3dd4c9aa93fe9baefcc005a1b6df56459b6ad7b3ff8b1b366f";
+constexpr char kHashSelectChannel[] =
+    "cac856417c8f1ecaa84c8b0fa6549dd76b04838889e1229de782d90b929044b";
+constexpr char kHashSelectCharacter[] =
+    "b7048f57f700b0928119a4136b2057fee4f3000d9a512cfa2f70a1f010ba989";
+constexpr char kHashGetAvatarCount[] =
+    "d4cd8ccfd892919ca2aeb9e4453d2a2c6064ddf1fa83b7070004b26b29af1dc";
+constexpr char kHashIsSlotEnable[] =
+    "f9d8583dfd1e7d7972d04f7bc166bb8e2f29bd769523534815935941cc958d0";
+constexpr char kClassWorldItem[] =
+    "dad083f766364819ddbbce6ea7b3481df44cceffc4e29b628fb66b0df93e39f";
+constexpr char kClassChannelEntry[] =
+    "ffc2ff3c252e9a397cb0aa052a482ffd59feeb350f57a7e3135636fe9db25a9";
+constexpr size_t kFbWorldItems = 0x50;
+constexpr size_t kFbWorldChannels = 0x38;
+constexpr size_t kFbCharAvatarList = 0x170;
+constexpr size_t kFbCharSelectedIndex = 0x168;
+constexpr size_t kFbCharSlotCount = 0x1A8;
+constexpr size_t kFbChannelSelectedWorld = 0x78;
+constexpr size_t kFbChannelSelectedId = 0x80;
+constexpr size_t kFbWorldId = 0x10;
+constexpr size_t kFbWorldName = 0x18;
+constexpr size_t kFbChUserNo = 0x18;
+constexpr size_t kFbChChannelId = 0x1D;
+constexpr size_t kFbChAdult = 0x1E;
+constexpr size_t kFbChCapacity = 0x20;
+size_t gOffSlChannelUi = kFbSlChannelUi;
+size_t gOffSlWorldUi = kFbSlWorldUi;
+size_t gOffSlCharUi = kFbSlCharUi;
+size_t gOffWorldItems = kFbWorldItems;
+size_t gOffWorldChannels = kFbWorldChannels;
+size_t gOffCharAvatarList = kFbCharAvatarList;
+size_t gOffCharSelectedIndex = kFbCharSelectedIndex;
+size_t gOffCharSlotCount = kFbCharSlotCount;
+size_t gOffChannelSelectedWorld = kFbChannelSelectedWorld;
+size_t gOffChannelSelectedId = kFbChannelSelectedId;
+size_t gOffWorldId = kFbWorldId;
+size_t gOffWorldName = kFbWorldName;
+size_t gOffChUserNo = kFbChUserNo;
+size_t gOffChChannelId = kFbChChannelId;
+size_t gOffChAdult = kFbChAdult;
+size_t gOffChCapacity = kFbChCapacity;
+bool gHolderFieldTried = false;
+
+#define kOffListItems (x::runtime::il2cpp_container::OffListItems())
+#define kOffListSize (x::runtime::il2cpp_container::OffListSize())
+#define kOffArrLen (x::runtime::il2cpp_container::OffArrayMaxLength())
+#define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
 
 constexpr DWORD kTickMs = 80;
 constexpr DWORD kJobWaitMs = 4000;
@@ -92,14 +159,26 @@ constexpr DWORD kPhaseTimeoutMs = 60000;
 constexpr DWORD kLogThrottleMs = 3000;
 constexpr DWORD kAfterWorldClickMs = 600;
 constexpr DWORD kAfterSelectChannelMs = 250;
-// 进频只点 Go 一次；自动重发会叠 SelectWorld 掉线（已实锤）。
-constexpr DWORD kPumpFailBackoffMs = 800;
+// ???? Go ????????? SelectWorld ????????
+constexpr DWORD kPumpFailBackoffMs = 1500;
 constexpr DWORD kLeftChannelHoldMs = 1200;
-// 选角：avatars 刚变 1 时立刻 Select+Click 会假 ok 不进图（BIN 15:25/15:36 实锤）。
+// 选角页 avatars 抖动时先 settle 再 Select+Click（BIN 证据）。
 constexpr DWORD kCharReadySettleMs = 700;
 constexpr DWORD kAfterSelectCharMs = 400;
 constexpr DWORD kCharConfirmRetryMs = 1500;
 constexpr int kMaxCharConfirmAttempts = 4;
+constexpr int kMaxSelectCharAttempts = 8;
+// Idle 扫 WorldsCache / 活跃期写缓存的最小间隔（主线程 FindAll 高压期勿密扫）。
+constexpr DWORD kIdleProbeMinMs = 4000;
+constexpr DWORD kActiveProbeMinMs = 500;  // 有 UI 后的活跃探频下限
+constexpr DWORD kWaitWorldProbeMinMs = 1500;  // 等选区时更稀
+constexpr DWORD kWorldsCacheScanMinMs = 2500;
+constexpr DWORD kProbePumpTickMaxAgeMs = 2000;
+// SessionState Connected=3；连上后先让游戏自己灌选区 UI，勿抢泵（BIN be7fff）。
+constexpr int kSessionConnected = 3;
+constexpr DWORD kAfterConnectedSettleMs = 3000;
+constexpr DWORD kPumpFailBackoffLoadMs = 4000;  // WaitWorldList 超时用更长退避
+constexpr DWORD kWaitWorldProbeWaitMs = 400;    // 加载窗短等，勿 1.5s 占坑
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
 using FnSceneLoginGet = void* (*)(const void* methodInfo);
@@ -122,7 +201,7 @@ struct UiSnap {
     int selectedChannelId = 0;
     int worldItemCount = 0;
     int avatarCount = 0;
-    int charSelectedIndex = -1;  // UILoginCharacter+0x168；未知/未绑定时 -1
+    int charSelectedIndex = -1;  // UILoginCharacter+0x168???/???? -1
     bool typesOk = false;
 };
 
@@ -137,12 +216,12 @@ enum class Phase : uint8_t {
     PickWorld,
     WaitChannelUi,
     PickChannel,       // SelectChannel only
-    WaitChannelArmed,  // 等 UI+0x80 写上目标频道后再 Go
+    WaitChannelArmed,  // ? UI+0x80 ???????? Go
     WaitCharSelect,
     PickChar,          // SelectCharacter only
-    WaitCharArmed,     // 等选中态生效再点确认
+    WaitCharArmed,     // ??????????
     ConfirmChar,       // OnClickButtonSelect
-    WaitLeaveChar,     // 校验离开选角；失败则有限次重确认
+    WaitLeaveChar,     // ????????????????
     Done,
     Failed,
 };
@@ -151,7 +230,7 @@ enum class JobKind : uint8_t {
     None = 0,
     ClickWorld,
     SelectChannel,
-    GoWorld,  // OnClickButtonGoWorld only（禁止 Trigger / 禁止自动重发）
+    GoWorld,  // OnClickButtonGoWorld only??? Trigger / ???????
     SelectCharIndex,   // SelectCharacter(index) only
     ConfirmCharClick,  // OnClickButtonSelect only
 };
@@ -197,9 +276,19 @@ DWORD gCharConfirmAt = 0;
 DWORD gPumpFailUntil = 0;
 int gEnterAttempts = 0;
 int gCharConfirmAttempts = 0;
+int gSelectCharAttempts = 0;
 int gPickCharIndex = -1;
 char gWorldsFp[512]{};
 DWORD gLastWorldsScanMs = 0;
+DWORD gLastActiveProbeMs = 0;
+DWORD gConnectedSinceMs = 0;
+xcat::WorldsCacheEntry gPendingWorlds[xcat::kWorldsCacheMax]{};
+uint32_t gPendingWorldsCount = 0;
+char gPendingWorldsFp[512]{};
+bool gPendingWorldsDirty = false;
+// ProbeOnMain 模式：由 RefreshSnap 在排队前写入（主线程读）。
+enum class ProbeMode : int { Active = 0, IdleCache = 1 };
+ProbeMode gProbeMode = ProbeMode::Active;
 
 JobKind gJobKind = JobKind::None;
 void* gJobUi = nullptr;
@@ -340,6 +429,70 @@ bool ReadIl2CppStringUtf8(void* str, char* out, size_t outCap) {
     }
 }
 
+
+bool PlausibleHolderOff(size_t off) { return off >= 0x10 && off < 0x400; }
+
+bool FieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !hash || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    void* field = nullptr;
+    __try {
+        field = e.classGetFieldFromName(klass, hash);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        field = nullptr;
+    }
+    if (!field) return false;
+    size_t off = 0;
+    __try {
+        off = e.fieldGetOffset(field);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!PlausibleHolderOff(off)) return false;
+    *out = off;
+    return true;
+}
+
+void EnsureHolderFieldOff() {
+    if (gHolderFieldTried) return;
+    gHolderFieldTried = true;
+    void* scene = x::runtime::il2cpp::FindClass("", kClassSceneLogin);
+    void* worldUi = x::runtime::il2cpp::FindClass("", kClassUiLoginWorld);
+    void* worldItem = x::runtime::il2cpp::FindClass("", kClassWorldItem);
+    void* charUi = x::runtime::il2cpp::FindClass("", kClassUiLoginCharacter);
+    void* channelUi = x::runtime::il2cpp::FindClass("", kClassUiLoginChannel);
+    void* chEntry = x::runtime::il2cpp::FindClass("", kClassChannelEntry);
+    int hits = 0;
+    if (FieldOffHit(scene, kHashSlChannelUi, kFbSlChannelUi, &gOffSlChannelUi)) ++hits;
+    if (FieldOffHit(scene, kHashSlWorldUi, kFbSlWorldUi, &gOffSlWorldUi)) ++hits;
+    if (FieldOffHit(scene, kHashSlCharUi, kFbSlCharUi, &gOffSlCharUi)) ++hits;
+    if (FieldOffHit(worldUi, kHashWorldItems, kFbWorldItems, &gOffWorldItems)) ++hits;
+    if (FieldOffHit(worldItem, kHashWorldChannels, kFbWorldChannels, &gOffWorldChannels)) ++hits;
+    if (FieldOffHit(worldItem, kHashWorldId, kFbWorldId, &gOffWorldId)) ++hits;
+    if (FieldOffHit(worldItem, kHashWorldName, kFbWorldName, &gOffWorldName)) ++hits;
+    if (FieldOffHit(charUi, kHashCharAvatarList, kFbCharAvatarList, &gOffCharAvatarList)) ++hits;
+    if (FieldOffHit(charUi, kHashCharSelectedIndex, kFbCharSelectedIndex, &gOffCharSelectedIndex))
+        ++hits;
+    if (FieldOffHit(charUi, kHashCharSlotCount, kFbCharSlotCount, &gOffCharSlotCount)) ++hits;
+    if (FieldOffHit(channelUi, kHashChannelSelectedWorld, kFbChannelSelectedWorld,
+                    &gOffChannelSelectedWorld))
+        ++hits;
+    if (FieldOffHit(channelUi, kHashChannelSelectedId, kFbChannelSelectedId,
+                    &gOffChannelSelectedId))
+        ++hits;
+    if (FieldOffHit(chEntry, kHashChUserNo, kFbChUserNo, &gOffChUserNo)) ++hits;
+    if (FieldOffHit(chEntry, kHashChChannelId, kFbChChannelId, &gOffChChannelId)) ++hits;
+    if (FieldOffHit(chEntry, kHashChAdult, kFbChAdult, &gOffChAdult)) ++hits;
+    if (FieldOffHit(chEntry, kHashChCapacity, kFbChCapacity, &gOffChCapacity)) ++hits;
+    constexpr int kExpect = 16;
+    Log("login slots path=%s hits=%d/%d SL={c=0x%zX w=0x%zX ch=0x%zX} Avatar=0x%zX ChSel=0x%zX",
+        hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits, kExpect,
+        gOffSlChannelUi, gOffSlWorldUi, gOffSlCharUi, gOffCharAvatarList, gOffChannelSelectedId);
+}
+
+
 int ListSize(void* list) {
     if (!list) return 0;
     return ReadI32(list, kOffListSize);
@@ -366,7 +519,7 @@ void* FindClass(const char* ns, const char* name) {
 }
 
 void* TypeObjectFromKlass(void* klass) {
-    // ResolveTypes runs inside main-thread job — must not nest pump.
+    // ResolveTypes runs inside main-thread job ? must not nest pump.
     return x::runtime::il2cpp::ClassTypeObjectOnMain(klass);
 }
 
@@ -425,23 +578,56 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
     return (mi && mi->methodPointer) ? mi : nullptr;
 }
 
-// RVA + kind；可选明文名（dump 残留 OnClick*）。kind 不唯一时仍可靠 RVA 校验形。
+// hash → 明文 → RVA/kind；dump OnClick* 无 hash 时走明文/kind。
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
-                          const char* nameHint = nullptr) {
-    if (nameHint) {
-        if (MethodInfoHead* byName = FindMethodByName(klass, nameHint, shape.arity)) return byName;
-    }
-    if (!klass) return FindMethodByRva(klass, rva);
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            LogThrottled("ResolveMi kind hit rva=0x%X name=%s", rva, nameHint ? nameHint : "-");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
-    }
-    return FindMethodByRva(klass, rva);
+                          const char* nameHint = nullptr, const char* hashName = nullptr,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
+    if (!klass) return nullptr;
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, nameHint, hashName);
+    if (outPath) *outPath = mr.path;
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
 }
+
+void LogMethodHitsOnce() {
+    static bool sLogged = false;
+    if (sLogged) return;
+    if (!gKlassSceneLogin || !gKlassWorld || !gKlassChannel || !gKlassChar) return;
+    sLogged = true;
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::ResolvePath;
+    using x::runtime::il2cpp_method::TypeKind;
+    int hits = 0;
+    ResolvePath p{};
+    constexpr MethodShape kGet{0, TypeKind::Ptr, true, false, {}};
+    if (ResolveMi(gKlassSceneLogin, kRvaSceneLoginGet, kGet, "get_Instance", kHashSceneLoginGet, &p) &&
+        p != ResolvePath::Miss)
+        ++hits;
+    constexpr MethodShape kClick{1, TypeKind::Void, true, false, {TypeKind::I32}};
+    if (ResolveMi(gKlassWorld, kRvaOnClickWorldItem, kClick, "OnClickWorldItem",
+                  kHashOnClickWorldItem, &p) &&
+        p != ResolvePath::Miss)
+        ++hits;
+    constexpr MethodShape kSelCh{1, TypeKind::Void, true, false, {TypeKind::I32}};
+    if (ResolveMi(gKlassChannel, kRvaSelectChannel, kSelCh, "SelectChannel", kHashSelectChannel,
+                  &p) &&
+        p != ResolvePath::Miss)
+        ++hits;
+    constexpr MethodShape kSelChar{1, TypeKind::Void, true, false, {TypeKind::I32}};
+    if (ResolveMi(gKlassChar, kRvaSelectCharacter, kSelChar, "SelectCharacter",
+                  kHashSelectCharacter, &p) &&
+        p != ResolvePath::Miss)
+        ++hits;
+    constexpr MethodShape kSlot{1, TypeKind::Bool, true, false, {TypeKind::I32}};
+    if (ResolveMi(gKlassChar, kRvaIsSlotEnable, kSlot, "IsSlotEnable", kHashIsSlotEnable, &p) &&
+        p != ResolvePath::Miss)
+        ++hits;
+    Log("methods path=%s hits=%d/5", hits == 5 ? "meta" : (hits ? "meta-partial" : "fallback"),
+        hits);
+}
+
 
 template <typename Fn>
 Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
@@ -460,19 +646,21 @@ bool ResolveTypes() {
         if (!gKlassChannel) gKlassChannel = FindClass("", "UILoginChannel");  // restored fallback
     }
     if (!gKlassChar) gKlassChar = FindClass("", kClassUiLoginCharacter);
-    // TypeGetObject allocates — only call on Unity main thread.
-    if (!gTypeWorld && gKlassWorld) gTypeWorld = TypeObjectFromKlass(gKlassWorld);
-    if (!gTypeChannel && gKlassChannel) gTypeChannel = TypeObjectFromKlass(gKlassChannel);
-    if (!gTypeChar && gKlassChar) gTypeChar = TypeObjectFromKlass(gKlassChar);
+    // TypeGetObject 分配：推迟到真正要 FindAll 时（EnsureFindAllTypes）。
     // SceneLogin path does not require TypeObjects; FindAll fallback does.
     if (gKlassSceneLogin) return true;
-    if (!(gTypeWorld && gTypeChannel && gTypeChar)) {
-        LogThrottled("ResolveTypes sl=%p world=%p ch=%p char=%p typeW=%p typeC=%p typeCh=%p",
-                     gKlassSceneLogin, gKlassWorld, gKlassChannel, gKlassChar, gTypeWorld,
-                     gTypeChannel, gTypeChar);
+    if (!(gKlassWorld && gKlassChannel && gKlassChar)) {
+        LogThrottled("ResolveTypes sl=%p world=%p ch=%p char=%p", gKlassSceneLogin, gKlassWorld,
+                     gKlassChannel, gKlassChar);
         return false;
     }
     return true;
+}
+
+void EnsureFindAllTypes() {
+    if (!gTypeWorld && gKlassWorld) gTypeWorld = TypeObjectFromKlass(gKlassWorld);
+    if (!gTypeChannel && gKlassChannel) gTypeChannel = TypeObjectFromKlass(gKlassChannel);
+    if (!gTypeChar && gKlassChar) gTypeChar = TypeObjectFromKlass(gKlassChar);
 }
 
 bool BindApis() {
@@ -494,11 +682,13 @@ bool BindApis() {
 }
 
 void CacheWorldItemsFromUi(void* worldUi) {
+    EnsureHolderFieldOff();
     if (!worldUi) return;
-    void* items = ReadPtr(worldUi, kOffWorldItems);
+    void* items = ReadPtr(worldUi, gOffWorldItems);
     const int n = ListSize(items);
     if (n <= 0) return;
 
+    // 主线程只采 id/名；写 user.ini 放到 worker，避免盘 IO 堵帧。
     xcat::WorldsCacheEntry entries[xcat::kWorldsCacheMax]{};
     uint32_t count = 0;
     char fp[512]{};
@@ -506,24 +696,44 @@ void CacheWorldItemsFromUi(void* worldUi) {
     for (int i = 0; i < n && count < xcat::kWorldsCacheMax; ++i) {
         void* w = ListAt(items, i);
         if (!w) continue;
-        const int32_t id = ReadI32(w, kOffWorldId);
+        const int32_t id = ReadI32(w, gOffWorldId);
         char nameRaw[xcat::kWorldsCacheNameCap]{};
-        (void)ReadIl2CppStringUtf8(ReadPtr(w, kOffWorldName), nameRaw, sizeof(nameRaw));
-        const xcat::WorldNamesPack& wn = xcat::GetSharedWorldNames(x::runtime::GetBinDir());
-        const std::string pretty = xcat::WorldNamePreferDisplay(wn, nameRaw);
+        (void)ReadIl2CppStringUtf8(ReadPtr(w, gOffWorldName), nameRaw, sizeof(nameRaw));
         entries[count].worldId = id;
-        strncpy_s(entries[count].name, pretty.c_str(), _TRUNCATE);
+        strncpy_s(entries[count].name, nameRaw, _TRUNCATE);
         ++count;
 
         if (fpUsed + 48 < sizeof(fp)) {
-            const int wrote = snprintf(fp + fpUsed, sizeof(fp) - fpUsed, "%d:%s/%s;", id,
-                                      nameRaw[0] ? nameRaw : "-", pretty.empty() ? "-" : pretty.c_str());
+            const int wrote =
+                snprintf(fp + fpUsed, sizeof(fp) - fpUsed, "%d:%s;", id, nameRaw[0] ? nameRaw : "-");
             if (wrote > 0) fpUsed += (size_t)wrote;
         }
     }
     if (count == 0) return;
     if (gWorldsFp[0] && strcmp(gWorldsFp, fp) == 0) return;
+    if (gPendingWorldsDirty && gPendingWorldsFp[0] && strcmp(gPendingWorldsFp, fp) == 0) return;
 
+    for (uint32_t i = 0; i < count; ++i) gPendingWorlds[i] = entries[i];
+    gPendingWorldsCount = count;
+    strncpy_s(gPendingWorldsFp, fp, _TRUNCATE);
+    gPendingWorldsDirty = true;
+}
+
+void FlushPendingWorldsCache() {
+    if (!gPendingWorldsDirty) return;
+    xcat::WorldsCacheEntry entries[xcat::kWorldsCacheMax]{};
+    const uint32_t count = gPendingWorldsCount;
+    char fp[512]{};
+    for (uint32_t i = 0; i < count && i < xcat::kWorldsCacheMax; ++i) {
+        entries[i] = gPendingWorlds[i];
+        const xcat::WorldNamesPack& wn = xcat::GetSharedWorldNames(x::runtime::GetBinDir());
+        const std::string pretty = xcat::WorldNamePreferDisplay(wn, entries[i].name);
+        if (!pretty.empty()) strncpy_s(entries[i].name, pretty.c_str(), _TRUNCATE);
+    }
+    strncpy_s(fp, gPendingWorldsFp, _TRUNCATE);
+    gPendingWorldsDirty = false;
+    if (count == 0) return;
+    if (gWorldsFp[0] && strcmp(gWorldsFp, fp) == 0) return;
     if (!xcat::WriteWorldsCache(x::runtime::GetBinDir(), entries, count)) {
         LogThrottled("WorldsCache write fail");
         return;
@@ -533,28 +743,11 @@ void CacheWorldItemsFromUi(void* worldUi) {
 }
 
 int AvatarCountOnMain(void* charUi) {
+    EnsureHolderFieldOff();
     if (!charUi) return 0;
-    // 1) List<AvatarData> @+0x170
-    const int listN = ListSize(ReadPtr(charUi, kOffCharAvatarList));
-    if (listN > 0) return listN;
-    // 2) SlotCount @+0x1A8（列表尚未填完时也能用）
-    const int slotN = ReadI32(charUi, kOffCharSlotCount);
-    if (slotN > 0 && slotN <= 32) return slotN;
-    // 3) 托管 GetAvatarCount（仅主线程，失败忽略）
-    // int() 在 Char 上不唯一 → kind 只验；优先明文名。
-    using x::runtime::il2cpp_method::MethodShape;
-    using x::runtime::il2cpp_method::TypeKind;
-    constexpr MethodShape kAv{0, TypeKind::I32, true, false, {}};
-    auto* mi = ResolveMi(gKlassChar, kRvaGetAvatarCount, kAv, "GetAvatarCount");
-    auto fn = FnFromMi<FnGetAvatarCount>(mi, kRvaGetAvatarCount);
-    if (fn) {
-        __try {
-            const int n = fn(charUi, mi);
-            if (n > 0 && n <= 32) return n;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
-    return 0;
+    // 只认 AvatarList@+0x170 实有角色数。
+    // SlotCount@+0x1A8 = 解锁槽位数（非角色数）；列表未灌时误用 → IsSlotEnable 必假。
+    return ListSize(ReadPtr(charUi, gOffCharAvatarList));
 }
 
 bool SlotEnabledOnMain(void* charUi, int index) {
@@ -562,7 +755,7 @@ bool SlotEnabledOnMain(void* charUi, int index) {
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
     constexpr MethodShape kSlot{1, TypeKind::Bool, true, false, {TypeKind::I32}};
-    auto* mi = ResolveMi(gKlassChar, kRvaIsSlotEnable, kSlot, "IsSlotEnable");
+    auto* mi = ResolveMi(gKlassChar, kRvaIsSlotEnable, kSlot, "IsSlotEnable", kHashIsSlotEnable);
     auto fn = FnFromMi<FnIsSlotEnable>(mi, kRvaIsSlotEnable);
     if (!fn) return true;
     __try {
@@ -573,18 +766,22 @@ bool SlotEnabledOnMain(void* charUi, int index) {
 }
 
 void ProbeOnMain(void*) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("auto_enter.Probe");
+    const ProbeMode mode = gProbeMode;
     UiSnap snap{};
     if (!gGA && !BindApis()) {
         gSnap = snap;
         return;
     }
     snap.typesOk = ResolveTypes();
+    EnsureHolderFieldOff();
+    LogMethodHitsOnce();
 
     // static 返回 SceneLogin* 的 () 唯一。
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
     constexpr MethodShape kGet{0, TypeKind::Ptr, true, false, {}};
-    auto* miGet = ResolveMi(gKlassSceneLogin, kRvaSceneLoginGet, kGet, "get_Instance");
+    auto* miGet = ResolveMi(gKlassSceneLogin, kRvaSceneLoginGet, kGet, "get_Instance", kHashSceneLoginGet);
     auto getSl = FnFromMi<FnSceneLoginGet>(miGet, kRvaSceneLoginGet);
     void* sl = nullptr;
     if (getSl) {
@@ -596,63 +793,105 @@ void ProbeOnMain(void*) {
     }
     snap.sceneLogin = sl;
     if (sl) {
-        snap.channelUi = ReadPtr(sl, kOffSlChannelUi);
-        snap.worldUi = ReadPtr(sl, kOffSlWorldUi);
-        snap.charUi = ReadPtr(sl, kOffSlCharUi);
+        snap.channelUi = ReadPtr(sl, gOffSlChannelUi);
+        snap.worldUi = ReadPtr(sl, gOffSlWorldUi);
+        snap.charUi = ReadPtr(sl, gOffSlCharUi);
     }
 
-    // FindAll 很重：有 SceneLogin 时少扫；但选角等待期必须能兜到 UILoginCharacter。
-    const bool light = (gPhase == Phase::WaitChannelArmed);
     const bool needChar = (gPhase == Phase::WaitCharSelect || gPhase == Phase::PickChar ||
                            gPhase == Phase::WaitCharArmed || gPhase == Phase::ConfirmChar ||
                            gPhase == Phase::WaitLeaveChar);
-    if (!light || !sl) {
-        if (!snap.worldUi && gTypeWorld) snap.worldUi = FindFirstOfType(gTypeWorld);
-        if (!snap.channelUi && gTypeChannel) snap.channelUi = FindFirstOfType(gTypeChannel);
-        if (!snap.charUi && gTypeChar) snap.charUi = FindFirstOfType(gTypeChar);
-    } else if (needChar && !snap.charUi && gTypeChar) {
-        snap.charUi = FindFirstOfType(gTypeChar);
-    }
-    if (needChar && !snap.charUi && gTypeChar) {
-        snap.charUi = FindFirstOfType(gTypeChar);
+    // FindAll 登录早期极重（BIN 8d294e：sl=null 时三件套 → 18:35:08 job timeout → pump idle）。
+    // IdleCache：禁 FindAll。无 SceneLogin：只等实例，绝不 FindAll。
+    // 有 SL：选角过渡可兜底 Char；World/Channel 仅 phase 饿 ≥8s 且泵健康时补洞。
+    if (mode == ProbeMode::IdleCache) {
+        // 只扫选区缓存：禁止任何 FindAll。
+    } else if (!sl) {
+        // 等 SceneLogin.get_Instance；Connecting/灌表窗口禁止 FindAll。
+    } else {
+        EnsureFindAllTypes();
+        if (needChar && !snap.charUi && gTypeChar) {
+            snap.charUi = FindFirstOfType(gTypeChar);
+        }
+        const bool starved = (GetTickCount() - gPhaseSince) >= 8000;
+        if (starved && x::runtime::main_thread::IsPumpTicking(1500)) {
+            const bool needWorld =
+                (gPhase == Phase::WaitWorldList || gPhase == Phase::PickWorld);
+            const bool needChannel =
+                (gPhase == Phase::WaitChannelUi || gPhase == Phase::PickChannel ||
+                 gPhase == Phase::WaitChannelArmed);
+            if (needWorld && !snap.worldUi && gTypeWorld) {
+                snap.worldUi = FindFirstOfType(gTypeWorld);
+            }
+            if (needChannel && !snap.channelUi && gTypeChannel) {
+                snap.channelUi = FindFirstOfType(gTypeChannel);
+            }
+        }
     }
 
     if (snap.channelUi) {
-        snap.selectedWorld = ReadPtr(snap.channelUi, kOffChannelSelectedWorld);
-        snap.selectedChannelId = ReadI32(snap.channelUi, kOffChannelSelectedId);
+        snap.selectedWorld = ReadPtr(snap.channelUi, gOffChannelSelectedWorld);
+        snap.selectedChannelId = ReadI32(snap.channelUi, gOffChannelSelectedId);
     }
-    if (snap.worldUi && !light) {
-        snap.worldItemCount = ListSize(ReadPtr(snap.worldUi, kOffWorldItems));
+    if (snap.worldUi) {
+        EnsureHolderFieldOff();
+        snap.worldItemCount = ListSize(ReadPtr(snap.worldUi, gOffWorldItems));
         const DWORD now = GetTickCount();
-        if (now - gLastWorldsScanMs >= 1000) {
+        if (now - gLastWorldsScanMs >= kWorldsCacheScanMinMs) {
             gLastWorldsScanMs = now;
             CacheWorldItemsFromUi(snap.worldUi);
         }
-    } else if (snap.worldUi) {
-        snap.worldItemCount = ListSize(ReadPtr(snap.worldUi, kOffWorldItems));
     }
-    if (snap.charUi) {
+    if (snap.charUi && mode != ProbeMode::IdleCache) {
         snap.avatarCount = AvatarCountOnMain(snap.charUi);
-        // 选中槽必须在主线程读；worker 直读托管堆有 GC 竞态。
-        const int sel = ReadI32(snap.charUi, kOffCharSelectedIndex);
-        snap.charSelectedIndex =
-            (sel >= 0 && sel < 32) ? sel : -1;
+        const int sel = ReadI32(snap.charUi, gOffCharSelectedIndex);
+        snap.charSelectedIndex = (sel >= 0 && sel < 32) ? sel : -1;
     }
 
     gSnap = snap;
 }
 
-bool RefreshSnap() {
-    const DWORD now = GetTickCount();
-    if (gPumpFailUntil && now < gPumpFailUntil) {
-        LogThrottled("waiting main pump… (backoff)");
+bool LoginNetReadyForWorldProbe() {
+    const int st = kick_sniff::LastSessionState();
+    if (st != kSessionConnected) {
+        gConnectedSinceMs = 0;
         return false;
     }
-    // 选角等待给更长超时；失败后退避，避免 80ms 狂塞队列拖死泵。
-    const DWORD waitMs = (gPhase == Phase::WaitCharSelect) ? 3000 : 1500;
+    const DWORD now = GetTickCount();
+    if (!gConnectedSinceMs) gConnectedSinceMs = now;
+    return (now - gConnectedSinceMs) >= kAfterConnectedSettleMs;
+}
+
+bool RefreshSnap(bool idleCache = false) {
+    const DWORD now = GetTickCount();
+    if (gPumpFailUntil && now < gPumpFailUntil) {
+        LogThrottled("waiting main pump? (backoff)");
+        return false;
+    }
+    // 泵未在跳 / 队列拥堵：宁可不探，避免压死帧再 job timeout 死循环。
+    if (!x::runtime::main_thread::IsPumpTicking(kProbePumpTickMaxAgeMs)) {
+        gPumpFailUntil = now + kPumpFailBackoffLoadMs;
+        LogThrottled("waiting main pump? (idle)");
+        return false;
+    }
+    if (x::runtime::main_thread::IsCongested()) {
+        LogThrottled("pump congested — skip probe");
+        return false;
+    }
+    gProbeMode = idleCache ? ProbeMode::IdleCache : ProbeMode::Active;
+    const bool waitWorld =
+        !idleCache && (gPhase == Phase::WaitWorldList || gPhase == Phase::PickWorld) &&
+        !gSnap.worldUi;
+    DWORD waitMs = 1500;
+    if (idleCache) waitMs = 500;
+    else if (gPhase == Phase::WaitCharSelect) waitMs = 3000;
+    else if (waitWorld) waitMs = kWaitWorldProbeWaitMs;
     if (!x::runtime::main_thread::InvokeAndWait(&ProbeOnMain, nullptr, waitMs)) {
-        gPumpFailUntil = GetTickCount() + kPumpFailBackoffMs;
-        LogThrottled("waiting main pump…");
+        // 选区加载窗超时：加长退避，别每 1.5s 再灌（BIN be7fff 32→41）。
+        const DWORD back =
+            waitWorld ? kPumpFailBackoffLoadMs : kPumpFailBackoffMs;
+        gPumpFailUntil = GetTickCount() + back;
+        LogThrottled("waiting main pump?");
         return false;
     }
     gPumpFailUntil = 0;
@@ -674,9 +913,9 @@ void RunJobOnMain() {
         using x::runtime::il2cpp_method::TypeKind;
         switch (kind) {
         case JobKind::ClickWorld: {
-            // void(int) 在 World 上唯一。
+            // void(int) ? World ????
             constexpr MethodShape kClick{1, TypeKind::Void, true, false, {TypeKind::I32}};
-            auto* mi = ResolveMi(gKlassWorld, kRvaOnClickWorldItem, kClick, "OnClickWorldItem");
+            auto* mi = ResolveMi(gKlassWorld, kRvaOnClickWorldItem, kClick, "OnClickWorldItem", kHashOnClickWorldItem);
             auto fn = FnFromMi<FnClickWorld>(mi, kRvaOnClickWorldItem);
             if (ui && fn) {
                 fn(ui, a, mi);
@@ -685,27 +924,27 @@ void RunJobOnMain() {
             break;
         }
         case JobKind::SelectChannel: {
-            // void(int) 在 Channel 上不唯一（含 EnterChannel）→ RVA 主路径 + kind 验形。
+            // void(int) ? Channel ?????? EnterChannel?? RVA ??? + kind ???
             constexpr MethodShape kSel{1, TypeKind::Void, true, false, {TypeKind::I32}};
-            auto* miSel = ResolveMi(gKlassChannel, kRvaSelectChannel, kSel, "SelectChannel");
+            auto* miSel = ResolveMi(gKlassChannel, kRvaSelectChannel, kSel, "SelectChannel", kHashSelectChannel);
             auto fnSel = FnFromMi<FnSelectChannel>(miSel, kRvaSelectChannel);
             if (ui && fnSel) {
                 fnSel(ui, a, miSel);
-                const int got = ReadI32(ui, kOffChannelSelectedId);
+                const int got = ReadI32(ui, gOffChannelSelectedId);
                 ok = (got == a);
                 if (!ok) Log("SelectChannel write miss want=%d got=%d", a, got);
             }
             break;
         }
         case JobKind::GoWorld: {
-            // 只点 OnClickButtonGoWorld。禁止 TriggerEnterChannel/SendSelectWorld(0xA96D20)：
-            // Go 内部已发 SelectWorld；再发一次 = 重复进频包 → 服端断线。
+            // ?? OnClickButtonGoWorld??? TriggerEnterChannel/SendSelectWorld(0xA96D20)?
+            // Go ???? SelectWorld????? = ????? ? ?????
             (void)b;
             constexpr MethodShape kGo{0, TypeKind::Void, true, false, {}};
             auto* miGo = ResolveMi(gKlassChannel, kRvaOnClickGoWorld, kGo, "OnClickButtonGoWorld");
             auto fnGo = FnFromMi<FnGoWorld>(miGo, kRvaOnClickGoWorld);
             if (ui && fnGo) {
-                const int armed = ReadI32(ui, kOffChannelSelectedId);
+                const int armed = ReadI32(ui, gOffChannelSelectedId);
                 Log("GoWorld armedCh=%d (single click, no Trigger)", armed);
                 fnGo(ui, miGo);
                 ok = true;
@@ -713,13 +952,16 @@ void RunJobOnMain() {
             break;
         }
         case JobKind::SelectCharIndex: {
-            // void(int,bool) 在 Char 上唯一。
+            // void(int,bool) ? Char ????
             constexpr MethodShape kSel{2, TypeKind::Void, true, false, {TypeKind::I32, TypeKind::Bool}};
-            auto* miSel = ResolveMi(gKlassChar, kRvaSelectCharacter, kSel, "SelectCharacter");
+            auto* miSel = ResolveMi(gKlassChar, kRvaSelectCharacter, kSel, "SelectCharacter", kHashSelectCharacter);
             auto fnSel = FnFromMi<FnSelectChar>(miSel, kRvaSelectCharacter);
             if (ui && fnSel) {
                 if (!SlotEnabledOnMain(ui, a)) {
-                    Log("SelectCharIndex slot disabled index=%d", a);
+                    const int listN = ListSize(ReadPtr(ui, gOffCharAvatarList));
+                    const int slotN = ReadI32(ui, gOffCharSlotCount);
+                    Log("SelectCharIndex slot disabled index=%d list=%d slotCount=%d", a, listN,
+                        slotN);
                     break;
                 }
                 fnSel(ui, a, false, miSel);
@@ -751,7 +993,10 @@ void RunJobOnMain() {
     gJobPending.store(false);
 }
 
-void AeMainJob(void*) { RunJobOnMain(); }
+void AeMainJob(void*) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("auto_enter.Main");
+    RunJobOnMain();
+}
 
 bool EnqueueJobAndWait(JobKind kind, void* ui, int a, int b = 0) {
     EnsureCs();
@@ -779,39 +1024,51 @@ bool EnqueueJobAndWait(JobKind kind, void* ui, int a, int b = 0) {
 void SetPhase(Phase p) {
     gPhase = p;
     gPhaseSince = GetTickCount();
-    // Done / Failed 都解冻：否则卡在选角/等 UI 时全端口 FindAll 永久死锁。
-    if (p == Phase::Done || p == Phase::Failed) {
-        x::runtime::managed_main::SetLoginFreeze(false);
-    }
+    // 注意：Done/Failed 时不要 SetLoginFreeze(false)。
+    // 选角刚结束、尚未 play-ready 时解冻，会放开 titlebar/ports 的 lobby FindAll；
+    // 解冻交给 titlebar 读到 vitals / invuln bind / drop_pool（进图后）。
 }
 
 bool PhaseTimedOut() { return GetTickCount() - gPhaseSince > kPhaseTimeoutMs; }
 
 bool WorldMatches(void* world, int32_t wantId, const char* wantName) {
     if (!world) return false;
-    if (wantId != 0) return ReadI32(world, kOffWorldId) == wantId;
+    if (wantId != 0) return ReadI32(world, gOffWorldId) == wantId;
     if (!wantName || !wantName[0]) return false;
     char name[128]{};
-    if (!ReadIl2CppStringUtf8(ReadPtr(world, kOffWorldName), name, sizeof(name))) return false;
+    if (!ReadIl2CppStringUtf8(ReadPtr(world, gOffWorldName), name, sizeof(name))) return false;
     if (_stricmp(name, wantName) == 0) return true;
     const xcat::WorldNamesPack& wn = xcat::GetSharedWorldNames(x::runtime::GetBinDir());
     return xcat::WorldNameEquals(wn, name, wantName);
 }
 
-int PickLeastChannelId(void* worldItem) {
-    void* list = ReadPtr(worldItem, kOffWorldChannels);
+// ??????? PID/QPC????????????
+uint32_t ChannelPickSeed(int poolN) {
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
+    uint32_t s = GetTickCount();
+    s ^= GetCurrentProcessId() * 2654435761u;
+    s ^= static_cast<uint32_t>(qpc.LowPart);
+    s ^= static_cast<uint32_t>(qpc.HighPart) * 97u;
+    s ^= static_cast<uint32_t>(poolN) * 0x9E3779B9u;
+    return s ? s : 0xA5A5A5A5u;
+}
+
+// ?? + ????????? id 1..64 ????????? 1..20??
+// ?????????????????????????????
+int PickOpenChannelId(void* worldItem) {
+    EnsureHolderFieldOff();
+    void* list = ReadPtr(worldItem, gOffWorldChannels);
     const int n = ListSize(list);
-    int bestId = -1;
-    int bestUsers = INT_MAX;
-    // 审计：首屏 1..20 的人数快照（-1=表里没有该 id）。
+    // ????? 1..20 ??????-1=????? id??
     int u20[21];
     char flag20[21];  // ' '=eligible, 'A'=adult, 'F'=full, '?'=missing/bad
     for (int id = 1; id <= 20; ++id) {
         u20[id] = -1;
         flag20[id] = '?';
     }
-    // CCU：全表合法频道人数之和（与选最少人过滤略不同：满员也计入在线）。
-    // 同时喂每频填表，供进图后 channel_hop 优先未满。
+    // CCU?????????????????????
+    // ???????????? channel_hop ?????
     {
         long long ccuSum = 0;
         int ccuN = 0;
@@ -820,10 +1077,10 @@ int PickLeastChannelId(void* worldItem) {
         for (int i = 0; i < n; ++i) {
             void* ch = ListAt(list, i);
             if (!ch) continue;
-            const int id = (int)ReadU8(ch, kOffChChannelId);
-            const int users = ReadI32(ch, kOffChUserNo);
-            const int cap = ReadI32(ch, kOffChCapacity);
-            const int adult = (int)ReadU8(ch, kOffChAdult);
+            const int id = (int)ReadU8(ch, gOffChChannelId);
+            const int users = ReadI32(ch, gOffChUserNo);
+            const int cap = ReadI32(ch, gOffChCapacity);
+            const int adult = (int)ReadU8(ch, gOffChAdult);
             if (id >= 1 && id <= 20) {
                 u20[id] = users;
                 if (adult != 0)
@@ -855,7 +1112,7 @@ int PickLeastChannelId(void* worldItem) {
             x::features::ccu::NotifyChannelFillTable(fillRows, fillN, "auto_enter");
         }
     }
-    // 两行打全 1..20；后缀 A=成人 F=满员；无后缀=可入选；?=表里没有。
+    // ???? 1..20??? A=?? F=??????=?????=?????
     {
         char line[320];
         int pos = snprintf(line, sizeof(line), "  ch1-10:");
@@ -881,64 +1138,40 @@ int PickLeastChannelId(void* worldItem) {
         }
         Log("%s", line);
     }
-    // 前三少（仅 pass0 可入选：非成人、未满员、1..20）。
-    {
-        int topId[3] = {-1, -1, -1};
-        int topUsers[3] = {INT_MAX, INT_MAX, INT_MAX};
-        for (int id = 1; id <= 20; ++id) {
-            if (flag20[id] != ' ' || u20[id] < 0) continue;
-            const int users = u20[id];
-            for (int slot = 0; slot < 3; ++slot) {
-                if (users < topUsers[slot] ||
-                    (users == topUsers[slot] && (topId[slot] < 0 || id < topId[slot]))) {
-                    for (int k = 2; k > slot; --k) {
-                        topUsers[k] = topUsers[k - 1];
-                        topId[k] = topId[k - 1];
-                    }
-                    topUsers[slot] = users;
-                    topId[slot] = id;
-                    break;
-                }
-            }
-        }
-        Log("  top3 least: %d=%d  %d=%d  %d=%d", topId[0],
-            topId[0] >= 0 ? topUsers[0] : -1, topId[1], topId[1] >= 0 ? topUsers[1] : -1, topId[2],
-            topId[2] >= 0 ? topUsers[2] : -1);
+    int candId[64];
+    int candUsers[64];
+    int candN = 0;
+    for (int i = 0; i < n && candN < 64; ++i) {
+        void* ch = ListAt(list, i);
+        if (!ch) continue;
+        const int id = (int)ReadU8(ch, gOffChChannelId);
+        const int users = ReadI32(ch, gOffChUserNo);
+        const int cap = ReadI32(ch, gOffChCapacity);
+        const int adult = (int)ReadU8(ch, gOffChAdult);
+        if (id < 1 || id > 64) continue;
+        if (adult != 0) continue;
+        if (cap > 0 && users >= cap) continue;
+        if (users < 0) continue;
+        candId[candN] = id;
+        candUsers[candN] = users;
+        ++candN;
     }
-    // 先在 1..20 里找最少人（对齐首屏可见频道）；没有再扫全表。
-    for (int pass = 0; pass < 2; ++pass) {
-        bestId = -1;
-        bestUsers = INT_MAX;
-        for (int i = 0; i < n; ++i) {
-            void* ch = ListAt(list, i);
-            if (!ch) continue;
-            const int id = (int)ReadU8(ch, kOffChChannelId);
-            const int users = ReadI32(ch, kOffChUserNo);
-            const int cap = ReadI32(ch, kOffChCapacity);
-            const int adult = (int)ReadU8(ch, kOffChAdult);
-            if (id < 1 || id > 64) continue;
-            if (pass == 0 && id > 20) continue;
-            if (adult != 0) continue;
-            if (cap > 0 && users >= cap) continue;
-            if (users < 0) continue;
-            if (users < bestUsers || (users == bestUsers && (bestId < 0 || id < bestId))) {
-                bestUsers = users;
-                bestId = id;
-            }
-        }
-        if (bestId >= 0) {
-            Log("PickLeast → id=%d users=%d of %d channels (pass=%d)", bestId, bestUsers, n, pass);
-            return bestId;
-        }
+    if (candN <= 0) {
+        Log("PickOpen ? none of %d channels", n);
+        return -1;
     }
-    Log("PickLeast → none of %d channels", n);
-    return -1;
+    const uint32_t seed = ChannelPickSeed(candN);
+    const int pick = static_cast<int>(seed % static_cast<uint32_t>(candN));
+    Log("PickOpen ? id=%d users=%d pool=%d/%d (seed=0x%08X)", candId[pick], candUsers[pick],
+        pick + 1, candN, seed);
+    return candId[pick];
 }
 
 int AvatarCount(void* charUi) {
+    EnsureHolderFieldOff();
     // Prefer last main-thread snap; do not call managed GetAvatarCount from worker.
     if (charUi && charUi == gSnap.charUi) return gSnap.avatarCount;
-    return ListSize(ReadPtr(charUi, kOffCharAvatarList));
+    return ListSize(ReadPtr(charUi, gOffCharAvatarList));
 }
 
 bool StillOnTargetChannelUi(int32_t wantId, const char* wantName) {
@@ -959,7 +1192,10 @@ void ResetRuntime() {
     gPumpFailUntil = 0;
     gEnterAttempts = 0;
     gCharConfirmAttempts = 0;
+    gSelectCharAttempts = 0;
     gPickCharIndex = -1;
+    gLastActiveProbeMs = 0;
+    gConnectedSinceMs = 0;
     gJobPending.store(false);
     gJobDone.store(true);
     gSnap = {};
@@ -968,16 +1204,21 @@ void ResetRuntime() {
 void Tick() {
     if (!gDesired.load()) {
         if (gPhase != Phase::Idle) {
-            Log("desired off → Idle");
+            Log("desired off ? Idle");
             SetPhase(Phase::Idle);
             ResetRuntime();
         }
         // Still probe occasionally to refresh worlds cache while on login UI.
+        // 须 Connected+settle；Connecting 窗口禁探（BIN be7fff）。
         static DWORD sLastIdleProbe = 0;
         const DWORD now = GetTickCount();
-        if (now - sLastIdleProbe > 1000) {
+        if (!LoginNetReadyForWorldProbe()) {
+            LogThrottled("idle: wait Connected+settle before WorldsCache probe");
+            return;
+        }
+        if (now - sLastIdleProbe > kIdleProbeMinMs) {
             sLastIdleProbe = now;
-            (void)RefreshSnap();
+            if (RefreshSnap(/*idleCache=*/true)) FlushPendingWorldsCache();
         }
         return;
     }
@@ -990,14 +1231,38 @@ void Tick() {
     }
     if (gPhase == Phase::Done || gPhase == Phase::Failed) return;
 
+    // Connecting / 刚连上选区灌表：完全不探，把主线程留给游戏（BIN be7fff）。
+    if (gPhase == Phase::WaitWorldList && !gSnap.worldUi) {
+        if (!LoginNetReadyForWorldProbe()) {
+            LogThrottled("waiting Connected+settle before world probe (st=%d)",
+                         kick_sniff::LastSessionState());
+            return;
+        }
+        if (!x::runtime::main_thread::IsPumpTicking(kProbePumpTickMaxAgeMs)) {
+            LogThrottled("waiting main pump? (pre-world, no queue)");
+            return;
+        }
+    }
+
+    // 等 SceneLogin / 选区 UI：降频探。
+    const DWORD nowTick = GetTickCount();
+    const bool waitingLoginUi =
+        (gPhase == Phase::WaitWorldList && (!gSnap.sceneLogin || !gSnap.worldUi));
+    const DWORD probeMin = waitingLoginUi ? kWaitWorldProbeMinMs : kActiveProbeMinMs;
+    if (waitingLoginUi && gLastActiveProbeMs && (nowTick - gLastActiveProbeMs) < probeMin) {
+        return;
+    }
+
     if (!RefreshSnap()) return;
+    gLastActiveProbeMs = GetTickCount();
+    FlushPendingWorldsCache();
     if (!gSnap.typesOk && !gSnap.sceneLogin && !gSnap.worldUi && !gSnap.channelUi) {
-        LogThrottled("waiting SceneLogin / class types…");
+        LogThrottled("waiting SceneLogin / class types?");
         return;
     }
 
     if (PhaseTimedOut()) {
-        Log("phase timeout → Failed (phase=%u)", (unsigned)gPhase);
+        Log("phase timeout ? Failed (phase=%u)", (unsigned)gPhase);
         SetPhase(Phase::Failed);
         return;
     }
@@ -1012,24 +1277,24 @@ void Tick() {
             LogThrottled("need worldId or worldName in panel");
             return;
         }
-        // 已在频道页（手动点过分区）：直接续跑选频道。
+        // ??????????????????????
         {
             void* chUi = gSnap.channelUi;
             void* sel = gSnap.selectedWorld;
             if (chUi && sel && WorldMatches(sel, wantId, wantName)) {
                 gPickedWorld = sel;
-                Log("resume from channel UI worldId=%d", ReadI32(sel, kOffWorldId));
+                Log("resume from channel UI worldId=%d", ReadI32(sel, gOffWorldId));
                 SetPhase(Phase::PickChannel);
                 break;
             }
         }
         void* worldUi = gSnap.worldUi;
         if (!worldUi) {
-            LogThrottled("waiting UILoginWorld… (sl=%p)", gSnap.sceneLogin);
+            LogThrottled("waiting UILoginWorld? (sl=%p)", gSnap.sceneLogin);
             return;
         }
         if (gSnap.worldItemCount <= 0) {
-            LogThrottled("waiting WorldItems…");
+            LogThrottled("waiting WorldItems?");
             return;
         }
         SetPhase(Phase::PickWorld);
@@ -1037,7 +1302,7 @@ void Tick() {
     }
     case Phase::PickWorld: {
         void* worldUi = gSnap.worldUi;
-        void* items = worldUi ? ReadPtr(worldUi, kOffWorldItems) : nullptr;
+        void* items = worldUi ? ReadPtr(worldUi, gOffWorldItems) : nullptr;
         const int n = ListSize(items);
         int idx = -1;
         void* world = nullptr;
@@ -1053,7 +1318,7 @@ void Tick() {
             LogThrottled("world not found id=%d name=%s count=%d", wantId, wantName, n);
             return;
         }
-        Log("PickWorld index=%d id=%d", idx, ReadI32(world, kOffWorldId));
+        Log("PickWorld index=%d id=%d", idx, ReadI32(world, gOffWorldId));
         if (!EnqueueJobAndWait(JobKind::ClickWorld, worldUi, idx)) {
             SetPhase(Phase::Failed);
             return;
@@ -1068,25 +1333,25 @@ void Tick() {
         void* chUi = gSnap.channelUi;
         void* sel = gSnap.selectedWorld;
         if (!chUi || !sel) {
-            LogThrottled("waiting UILoginChannel+WorldItem…");
+            LogThrottled("waiting UILoginChannel+WorldItem?");
             return;
         }
-        // 必须等 SetWorldItem 把目标分区写进频道页，避免点完分区立刻误用旧 WorldItem。
+        // ??? SetWorldItem ?????????????????????? WorldItem?
         if (!WorldMatches(sel, wantId, wantName)) {
-            LogThrottled("channel UI world mismatch (want=%d got=%d) — wait SetWorldItem", wantId,
-                         ReadI32(sel, kOffWorldId));
+            LogThrottled("channel UI world mismatch (want=%d got=%d) ? wait SetWorldItem", wantId,
+                         ReadI32(sel, gOffWorldId));
             return;
         }
         if (gWorldClickedAt && GetTickCount() - gWorldClickedAt < kAfterWorldClickMs) {
             return;
         }
-        const int chN = ListSize(ReadPtr(sel, kOffWorldChannels));
+        const int chN = ListSize(ReadPtr(sel, gOffWorldChannels));
         if (chN <= 0) {
-            LogThrottled("waiting channel list on WorldItem…");
+            LogThrottled("waiting channel list on WorldItem?");
             return;
         }
         gPickedWorld = sel;
-        Log("WaitChannelUi ready worldId=%d channels=%d", ReadI32(sel, kOffWorldId), chN);
+        Log("WaitChannelUi ready worldId=%d channels=%d", ReadI32(sel, gOffWorldId), chN);
         SetPhase(Phase::PickChannel);
         break;
     }
@@ -1098,7 +1363,7 @@ void Tick() {
             SetPhase(Phase::WaitChannelUi);
             return;
         }
-        const int chId = PickLeastChannelId(gPickedWorld);
+        const int chId = PickOpenChannelId(gPickedWorld);
         if (chId < 0) {
             Log("no eligible channel");
             SetPhase(Phase::Failed);
@@ -1118,7 +1383,7 @@ void Tick() {
     case Phase::WaitChannelArmed: {
         void* chUi = gSnap.channelUi;
         if (!chUi || !StillOnTargetChannelUi(wantId, wantName)) {
-            LogThrottled("WaitChannelArmed: channel UI gone early — wait char");
+            LogThrottled("WaitChannelArmed: channel UI gone early ? wait char");
             gLeftChannelAt = GetTickCount();
             SetPhase(Phase::WaitCharSelect);
             return;
@@ -1137,7 +1402,7 @@ void Tick() {
             return;
         }
         const int worldIdLog =
-            gPickedWorld ? ReadI32(gPickedWorld, kOffWorldId) : (wantId > 0 ? wantId : 0);
+            gPickedWorld ? ReadI32(gPickedWorld, gOffWorldId) : (wantId > 0 ? wantId : 0);
         Log("GoWorld id=%d worldId=%d (Select armed)", gPickedChannelId, worldIdLog);
         if (!EnqueueJobAndWait(JobKind::GoWorld, chUi, gPickedChannelId)) {
             SetPhase(Phase::Failed);
@@ -1150,7 +1415,7 @@ void Tick() {
         break;
     }
     case Phase::WaitCharSelect: {
-        // 选角页已出来时，SceneLogin 往往仍挂着 channelUi 指针——不能当成「还在频道页」。
+        // ????????SceneLogin ????? channelUi ????????????????
         if (gSnap.charUi) {
             const int count = gSnap.avatarCount;
             LogThrottled("char UI present avatars=%d chLinger=%p sl=%p", count, gSnap.channelUi,
@@ -1161,7 +1426,7 @@ void Tick() {
             }
             if (!gCharReadyAt) {
                 gCharReadyAt = GetTickCount();
-                Log("char UI ready avatars=%d — settle %ums before Select", count,
+                Log("char UI ready avatars=%d ? settle %ums before Select", count,
                     (unsigned)kCharReadySettleMs);
             }
             if (GetTickCount() - gCharReadyAt < kCharReadySettleMs) return;
@@ -1169,22 +1434,22 @@ void Tick() {
             SetPhase(Phase::PickChar);
             break;
         }
-        // 尚无选角 UI：若频道指针还在，只等不重发。
+        // ???? UI???????????????
         if (StillOnTargetChannelUi(wantId, wantName)) {
             gLeftChannelAt = 0;
             gCharReadyAt = 0;
-            LogThrottled("waiting leave channel UI… (goSent=%d armed=%d, no auto-retry)",
+            LogThrottled("waiting leave channel UI? (goSent=%d armed=%d, no auto-retry)",
                          gEnterAttempts, gSnap.selectedChannelId);
             return;
         }
 
         if (!gLeftChannelAt) gLeftChannelAt = GetTickCount();
         if (GetTickCount() - gLeftChannelAt < kLeftChannelHoldMs) {
-            LogThrottled("left channel UI, settling…");
+            LogThrottled("left channel UI, settling?");
             return;
         }
 
-        LogThrottled("waiting UILoginCharacter… (char=null sl=%p ch=%p)", gSnap.sceneLogin,
+        LogThrottled("waiting UILoginCharacter? (char=null sl=%p ch=%p)", gSnap.sceneLogin,
                      gSnap.channelUi);
         return;
     }
@@ -1211,8 +1476,8 @@ void Tick() {
         }
         gPickCharIndex = index;
 
-        // 游戏进选角页常已默认选中第一个 / 上次角色；再 Select 同 index = 视觉「选两次」。
-        // charSelectedIndex 来自主线程快照；未知 (-1) 时保守走 Select。
+        // ??????????????? / ?????? Select ? index = ????????
+        // charSelectedIndex ?????????? (-1) ???? Select?
         const int curSel = gSnap.charSelectedIndex;
         if (curSel == index) {
             Log("PickChar already selected index=%d slot=%u (skip Select, confirm only)", index,
@@ -1225,16 +1490,26 @@ void Tick() {
         Log("PickChar Select index=%d slot=%u count=%d (wasSelected=%d)", index, slot, count,
             curSel);
         if (!EnqueueJobAndWait(JobKind::SelectCharIndex, charUi, index)) {
-            SetPhase(Phase::Failed);
+            ++gSelectCharAttempts;
+            if (gSelectCharAttempts >= kMaxSelectCharAttempts) {
+                Log("SelectChar failed %d times — give up", gSelectCharAttempts);
+                SetPhase(Phase::Failed);
+                return;
+            }
+            Log("SelectChar soft-fail %d/%d — re-settle", gSelectCharAttempts,
+                kMaxSelectCharAttempts);
+            gCharReadyAt = 0;
+            SetPhase(Phase::WaitCharSelect);
             return;
         }
+        gSelectCharAttempts = 0;
         gCharSelectedAt = GetTickCount();
         SetPhase(Phase::WaitCharArmed);
         break;
     }
     case Phase::WaitCharArmed: {
         if (!gSnap.charUi) {
-            // 选完人后 UI 已拆——可能已点进；转等待离开/进图。
+            // ???? UI ???????????????/???
             SetPhase(Phase::WaitLeaveChar);
             break;
         }
@@ -1259,29 +1534,29 @@ void Tick() {
         break;
     }
     case Phase::WaitLeaveChar: {
-        // 真进图 / 选角 UI 消失才算 Done；假 ok 会一直停在 charUi。
+        // ??? / ?? UI ???? Done?? ok ????? charUi?
         if (!gSnap.charUi) {
-            Log("left char UI after confirm — Done");
+            Log("left char UI after confirm ? Done");
             SetPhase(Phase::Done);
-            Log("Done — latched until autoEnter off");
+            Log("Done ? latched until autoEnter off");
             break;
         }
         if (x::features::ports::world::IsPlayReady()) {
-            Log("play ready while char UI linger — Done");
+            Log("play ready while char UI linger ? Done");
             SetPhase(Phase::Done);
-            Log("Done — latched until autoEnter off");
+            Log("Done ? latched until autoEnter off");
             break;
         }
         if (gCharConfirmAttempts >= kMaxCharConfirmAttempts) {
-            Log("ConfirmChar exhausted attempts=%d — Failed (still on char UI)",
+            Log("ConfirmChar exhausted attempts=%d ? Failed (still on char UI)",
                 gCharConfirmAttempts);
             SetPhase(Phase::Failed);
             return;
         }
         if (gCharConfirmAt && GetTickCount() - gCharConfirmAt >= kCharConfirmRetryMs) {
-            Log("still on char UI — retry ConfirmChar (%d/%d)", gCharConfirmAttempts + 1,
+            Log("still on char UI ? retry ConfirmChar (%d/%d)", gCharConfirmAttempts + 1,
                 kMaxCharConfirmAttempts);
-            // 已在选角页：优先只重确认；仅当选中槽不对/未知才回 PickChar 重选。
+            // ????????????????????/???? PickChar ???
             const int curSel = gSnap.charSelectedIndex;
             if (gSnap.charUi && curSel == gPickCharIndex) {
                 SetPhase(Phase::ConfirmChar);
@@ -1290,7 +1565,7 @@ void Tick() {
             }
             break;
         }
-        LogThrottled("waiting leave char UI… (confirm=%d)", gCharConfirmAttempts);
+        LogThrottled("waiting leave char UI? (confirm=%d)", gCharConfirmAttempts);
         return;
     }
     default:
@@ -1340,7 +1615,7 @@ void StartWorker() {
 void StopWorker() {
     gWorkerStop.store(true);
     gDesired.store(false);
-    // Signal only under loader lock — do not join.
+    // Signal only under loader lock ? do not join.
 }
 
 void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSlot) {
@@ -1353,12 +1628,16 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
     CopyWorldNameLocked(worldName);
     gDesired.store(on);
     if (on && !was) {
+        // 开自动进：强制冻住 lobby FindAll（与进程默认 freeze=1 对齐，防中途被解冻）。
         x::runtime::managed_main::SetLoginFreeze(true);
         SetPhase(Phase::Idle);
         ResetRuntime();
     }
     if (!on && was) {
-        x::runtime::managed_main::SetLoginFreeze(false);
+        // 关自动进：仅已进图才解冻；大厅保持冻结，避免 titlebar/ports 抢跑 FindAll。
+        if (ports::world::IsPlayReady()) {
+            x::runtime::managed_main::SetLoginFreeze(false);
+        }
         SetPhase(Phase::Idle);
         ResetRuntime();
     }

@@ -26,8 +26,8 @@ constexpr DWORD kTickMs = 200;
 constexpr DWORD kCheckIntervalMs = 1000;
 constexpr DWORD kConfirmMs = 4000;
 constexpr DWORD kFirstLandGraceMs = 5000;
-// BIN：旧 8s << channel_hop 成功冷却 30s → 宽限一过就狂 RequestHop
-constexpr DWORD kPostHopGraceMs = 32000;
+// BIN：宽限须 ≥ channel_hop 成功冷却，否则宽限一过就狂 RequestHop
+constexpr DWORD kPostHopGraceMs = 22000;  // 对齐成功冷却 20s + 余量
 constexpr DWORD kHopDeferLogMs = 4000;
 constexpr uint32_t kHopSeqBase = 0xE1000000u;
 
@@ -74,13 +74,14 @@ bool IsTownMapIdHeuristic(int mapId) {
 
 void PauseExposure(int other) {
     if (gPaused) {
-        // 热保持：测谎可能清过 pause，有人期间再钉一次.
+        // 热保持：有人期间每拍再钉 Encounter 位（位掩码下测谎清不掉本模块位，仍防漏闸）。
         if (gStopCombat.load() && !auto_lie::IsBusy())
-            simple_combat::SetExternalPause(true);
+            simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, true);
         return;
     }
     gPaused = true;
-    if (gStopCombat.load()) simple_combat::SetExternalPause(true);
+    if (gStopCombat.load())
+        simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, true);
 
     char body[96]{};
     snprintf(body, sizeof(body), "同图其他玩家 %d 人，已执行遇人策略。", other);
@@ -94,7 +95,8 @@ void ResumeExposure() {
         Log("resume deferred (auto_lie busy)");
         return;
     }
-    if (gStopCombat.load()) simple_combat::SetExternalPause(false);
+    if (gStopCombat.load())
+        simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, false);
     gPaused = false;
     Notify(notify::NotificationKind::Info, "encounter-restored", "遇人后已恢复",
            "同图已无其他玩家，挂机策略已恢复。");
@@ -103,7 +105,8 @@ void ResumeExposure() {
 
 void ReleaseIfDisabled() {
     if (gPaused && !gEnabled.load()) {
-        if (!auto_lie::IsBusy()) simple_combat::SetExternalPause(false);
+        if (!auto_lie::IsBusy())
+            simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, false);
         gPaused = false;
     }
 }
@@ -240,7 +243,7 @@ void Tick(DWORD now) {
 
     if (GetStateLocal() == State::Hopping) {
         if (channel_hop::HasPending()) return;
-        // 与 channel_hop 冷却对齐（成功 30s / 失败 3s）；失败也至少吃满 PostHopGrace
+        // 与 channel_hop 冷却对齐（成功 15s / 失败 3s）；失败也至少吃满 PostHopGrace
         const DWORD cd = channel_hop::CooldownRemainingMs();
         if (cd > 0) {
             const DWORD until = now + cd;

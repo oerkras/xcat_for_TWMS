@@ -187,7 +187,8 @@ IL2CPP `Dictionary`：`entries@0x18` / `count@0x20` / **`freeCount@0x28`** / **`
 | 把 `freeCount` 读成 `+0x2C`（实为 `_version`） | 出刀后 `cnt=1` 仍 `ok=0`/`sum=0`（`count-version<0` 提前退出） |
 | 用 `GetTickCount - detectTime` 当窗龄 | detectTime 是游戏 `tCur`，窗龄会假爆炸 |
 
-已修：`freeCount@+0x28`，以 entries 扫描为主（对齐 `drop_pool` / `skill_port`）；日志带 `ver=`；`windowAgeMs` 固定 -1。
+已修：`freeCount@+0x28`，以 entries 扫描为主（对齐 `drop_pool` / `skill_port`）；日志带 `ver=`；`windowAgeMs` 固定 -1。  
+运行时 SSOT：`x::runtime::il2cpp_container`（`security_attack_port` / `drop_pool` / `foothold` / `skill_port` 共用）。
 
 ### 6.2 BIN 采证（2026-08-01）
 

@@ -25,18 +25,26 @@ constexpr int kTypeGenericInst = 0x15;
 
 struct MethodInfoHead {
     void* methodPointer;
+    void* virtualMethodPointer;
 };
 
 bool LooksLikeHeapPtr(void* p) { return il2::LooksLikeHeapPtr(p); }
 
-uint32_t MethodRva(const MethodInfoHead* mi) {
-    if (!mi || !mi->methodPointer) return 0;
+uint32_t PtrToRva(void* p) {
+    if (!p) return 0;
     const uintptr_t base = il2::GaBase();
     if (!base) return 0;
-    const auto a = reinterpret_cast<uintptr_t>(mi->methodPointer);
+    const auto a = reinterpret_cast<uintptr_t>(p);
     if (a < base) return 0;
     const uint64_t d = static_cast<uint64_t>(a - base);
     return d > 0x7FFFFFFFull ? 0u : static_cast<uint32_t>(d);
+}
+
+uint32_t MethodRva(const MethodInfoHead* mi) {
+    if (!mi) return 0;
+    if (const uint32_t r = PtrToRva(mi->methodPointer)) return r;
+    // 部分虚方法 methodPointer 为 stub，真身在 virtualMethodPointer
+    return PtrToRva(mi->virtualMethodPointer);
 }
 
 bool TypeKindMatches(int te, TypeKind want) {
@@ -147,9 +155,71 @@ const char* PathName(ResolvePath p) {
             return "rva";
         case ResolvePath::Kind:
             return "kind";
+        case ResolvePath::Hash:
+            return "hash";
+        case ResolvePath::Plain:
+            return "plain";
         default:
             return "MISS";
     }
+}
+
+void* FindMethodByName(void* klass, const char* name, int arity, bool walkParents) {
+    if (!klass || !name || !name[0] || !il2::Ensure()) return nullptr;
+    const auto& e = il2::Get();
+    if (e.classGetMethodFromName) {
+        void* mi = nullptr;
+        __try {
+            mi = e.classGetMethodFromName(klass, name, arity);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            mi = nullptr;
+        }
+        if (mi) {
+            auto* head = reinterpret_cast<MethodInfoHead*>(mi);
+            if (head->methodPointer || head->virtualMethodPointer) return mi;
+        }
+    }
+    if (!e.classGetMethods || !e.methodGetName) return nullptr;
+    void* cur = klass;
+    for (int depth = 0; depth < 8 && LooksLikeHeapPtr(cur); ++depth) {
+        void* iter = nullptr;
+        __try {
+            for (;;) {
+                void* raw = e.classGetMethods(cur, &iter);
+                if (!raw) break;
+                const char* nm = nullptr;
+                __try {
+                    nm = e.methodGetName(raw);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    nm = nullptr;
+                }
+                if (!nm || std::strcmp(nm, name) != 0) continue;
+                if (e.methodGetParamCount) {
+                    uint32_t n = 0;
+                    __try {
+                        n = e.methodGetParamCount(raw);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        continue;
+                    }
+                    if (static_cast<int>(n) != arity) continue;
+                }
+                auto* head = reinterpret_cast<MethodInfoHead*>(raw);
+                if (head->methodPointer || head->virtualMethodPointer) return raw;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+        if (!walkParents || !e.classParent) break;
+        void* parent = nullptr;
+        __try {
+            parent = e.classParent(cur);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            parent = nullptr;
+        }
+        if (!LooksLikeHeapPtr(parent) || parent == cur) break;
+        cur = parent;
+    }
+    return nullptr;
 }
 
 void* FindMethodByRva(void* klass, uint32_t rva, bool walkParents) {
@@ -242,6 +312,31 @@ ResolveResult FindMethodCached(void* klass, uint32_t rva, const MethodShape& sha
         r.path = ResolvePath::Rva;
     }
     return r;
+}
+
+ResolveResult FindMethodResolved(void* klass, uint32_t rvaFallback, const MethodShape& shape,
+                                 const char* plainName, const char* hashName) {
+    ResolveResult r{};
+    if (!klass) return r;
+    if (hashName && hashName[0]) {
+        if (void* mi = FindMethodByName(klass, hashName, shape.arity, shape.walkParents)) {
+            if (!MethodExportsReady() || KindMatches(mi, shape)) {
+                r.method = mi;
+                r.path = ResolvePath::Hash;
+                return r;
+            }
+        }
+    }
+    if (plainName && plainName[0]) {
+        if (void* mi = FindMethodByName(klass, plainName, shape.arity, shape.walkParents)) {
+            if (!MethodExportsReady() || KindMatches(mi, shape)) {
+                r.method = mi;
+                r.path = ResolvePath::Plain;
+                return r;
+            }
+        }
+    }
+    return FindMethodCached(klass, rvaFallback, shape);
 }
 
 }  // namespace x::runtime::il2cpp_method

@@ -8,12 +8,16 @@
 #include "../auto_lie/auto_lie.h"
 #include "../ccu/ccu.h"
 #include "../encounter/encounter.h"
+#include "../invuln/invuln.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../notify/notify.h"
+#include "../ports/attack_input_port.h"
 #include "../ports/player_combat_port.h"
+#include "../ports/teleport_port.h"
 #include "../ports/world_port.h"
 #include "../simple_combat/simple_combat.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
@@ -34,60 +38,100 @@ using x::runtime::il2cpp::AtRva;
 using x::runtime::il2cpp::FindClass;
 using x::runtime::il2cpp::ReadPtr;
 
-// Field.SendTransferChannelRequest(int) — TW dump.cs.restored
-constexpr uint32_t kRvaSendTransferChannelRequest = 0xBB5200;  // remapped 2026-08-03
-// User 短 IsAlertMode — CanPerformAction callee；读 LocalUser+0x114
-constexpr uint32_t kRvaIsAlertMode = 0x12405C0;  // fixed 2026-08-03 (was wrongly 0x1242770/+0xC8)
+// Field.SendTransferChannelRequest(int) — remount 2026-08-04 dump.cs
+constexpr uint32_t kRvaSendTransferChannelRequest = 0xBB7FB0;
+// UserBase 短 IsAlertMode — CanPerformAction callee；读 LocalUser+0x114
+constexpr uint32_t kRvaIsAlertMode = 0x124A3C0;
 // WorldManager.CanSendExclRequest — SendTransfer 发包前门控（BIN：未过则无 op=44）
-constexpr uint32_t kRvaCanSendExclRequest = 0xDD7C10;  // IDA 2026-08-03
-constexpr int kExclTypeTransferChannel = 500;          // SendTransfer 传入的 type（常量解混淆）
+constexpr uint32_t kRvaCanSendExclRequest = 0xDDCBC0;
+constexpr int kExclTypeTransferChannel = 500;  // SendTransfer 传入的 type（常量解混淆）
 
 constexpr char kFieldClass[] =
-    "f64c0f047e0d8cbf609bae658274d559e23bf0fef696f7f14bce93dbf6c3d2a";
-// User 父类（短 IsAlertMode 宿主；非 UserLocal）
+    "cfec8c2698a50442d8c39915b0ace84807a884ba8f42a4d45bdcd80c3d675d0";
+// UserBase（短 IsAlertMode 宿主；非 UserLocal）
 constexpr char kUserAlertClass[] =
-    "fb641b6ed2c6220bf18c3f3c2f8a20b4f3e53702c3307c50c75c85dd2a2ef06";
+    "b36db157c954de56d1658f10eb3edcbce83710b40064dc5840287ccad9a80fa";
 constexpr char kHashSendTransfer[] =
-    "c8432537e031443dc368d993b71c89d250d37178fda202b0e5e9f33484e38a7";
+    "b8cb4b24669fa29b6da4cbe21ec25ca7473b3deb096679132a287d8a92a029c";
 constexpr char kHashIsAlertMode[] =
-    "f74b63202db3140d4b5918a8fd68733266491ef9287abfb0125260b485a10f0";
+    "c61ba92227f1dc80c43bb5d5d044d27c15236883570aa6ba095d7a670b7b54e";
 constexpr char kHashCanSendExcl[] =
-    "b11b7f0d3ee12d95d993fca92ec1dcab807326397b5167cb7792d06380960ab";
+    "e546a1af1c2fb600b616960508d7df92ca7bfc7da8511bd8f45632d453aad5f";
 
-// WorldManager TW fields (docs/features/world_manager/字段全表.md)
+// WorldManager 字段 Hint（docs + 08-04 dump 复核）；运行时 field_hash 覆盖
 // SendTransferChannelRequest(int nIdx)：0-based；游戏 UI「ch.N」= nIdx+1。
 // BIN：WM+0x68 换频后常卡死；+0x6C 更跟真实频；成功后再用 gKnownChannelIdx。
-constexpr size_t kOffWmChannelId = 0x68;     // _channelID（0-based；可能陈旧）
-constexpr size_t kOffWmChannelAlt = 0x6C;    // TW 旁邻 int（BIN：换频后常追上目标）
-constexpr size_t kOffWmAdultChannel = 0x78;  // List<bool> _adultChannel → Count = 频道数
-// excl（字段全表 + IDA CanSendExcl）：+0x98 是 CharacterId，勿当 excl
-constexpr size_t kOffWmExclA0 = 0xA0;
-constexpr size_t kOffWmExclA4 = 0xA4;
-constexpr size_t kOffWmExclFlagA8 = 0xA8;  // CanSendExcl: movzx/mov [rdi+0A8h]
-constexpr size_t kOffWmExclFlagA9 = 0xA9;
-constexpr size_t kOffWmExclAC = 0xAC;
-constexpr size_t kOffListItems = 0x10;  // IL2CPP List._items
-constexpr size_t kOffListSize = 0x18;   // IL2CPP List._size
-constexpr size_t kOffArrData = 0x20;    // Il2CppArray vector
+constexpr size_t kOffWmChannelIdHint = 0x68;
+constexpr size_t kOffWmChannelAltHint = 0x6C;
+constexpr size_t kOffWmAdultChannelHint = 0x78;
+constexpr size_t kOffWmExclA0Hint = 0xA0;
+constexpr size_t kOffWmExclA4Hint = 0xA4;
+constexpr size_t kOffWmExclFlagA8Hint = 0xA8;  // CanSendExcl: [rdi+0A8h]
+constexpr size_t kOffWmExclFlagA9Hint = 0xA9;
+constexpr size_t kOffWmExclACHint = 0xAC;
+#define kOffListItems (x::runtime::il2cpp_container::OffListItems())
+#define kOffListSize (x::runtime::il2cpp_container::OffListSize())
+#define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
+
+// WM 字段哈希（08-04 dump；backing 用内嵌 hash，strstr 匹配）
+constexpr char kHashWmChannelId[] =
+    "a1f904d69236da5bd2c936e9cd7052907c1a6f4ca3c6bd446b7af273f94f3ed";
+constexpr char kHashWmChannelAlt[] =
+    "d9a8aec4377761f3035ac035bc858403e4131c966dc720dc910ab0ceffb7cd2";
+constexpr char kHashWmAdultChannel[] =
+    "d09efe66a5566f0fcd26b13f6dabf47dfbd1700ac8d16599e9cf14fe392105f";
+constexpr char kHashWmExclA0[] =
+    "e1c5a266d63003232ffd3c6dc11de89cf4a415ca9bbb52db54bef978347ce1c";
+constexpr char kHashWmExclA4[] =
+    "e432e4a3ae751964cc6439119a23741ca3aa5872fad686d84cfc1e712e8c459";
+constexpr char kHashWmExclA8[] =
+    "ca56834aba44b013b888a4cd5fabf8ba8de430af2a483b5f852c65ed1b374a0";
+constexpr char kHashWmExclA9[] =
+    "d53b5f31b4f52c02b6772c83381eabd398093c0b115470c0a0d33c811e902aa";
+constexpr char kHashWmExclAC[] =
+    "b63f1f48785907d2c27d440d14a3be36cd1f712f95c35375d1c8e032985d77a";
+
+size_t gOffWmChannelId = kOffWmChannelIdHint;
+size_t gOffWmChannelAlt = kOffWmChannelAltHint;
+size_t gOffWmAdultChannel = kOffWmAdultChannelHint;
+size_t gOffWmExclA0 = kOffWmExclA0Hint;
+size_t gOffWmExclA4 = kOffWmExclA4Hint;
+size_t gOffWmExclFlagA8 = kOffWmExclFlagA8Hint;
+size_t gOffWmExclFlagA9 = kOffWmExclFlagA9Hint;
+size_t gOffWmExclAC = kOffWmExclACHint;
+std::atomic<bool> gFieldOffResolved{false};
+char gFieldOffPath[48]{};
+
 constexpr int kAdultFlagCap = 128;
 
 // KickSniff SessionState：Disconnecting=0 Disconnected=1 Connecting=2 Connected=3
 constexpr int kSessDisconnecting = 0;
 constexpr int kSessDisconnected = 1;
+constexpr int kSessConnecting = 2;
 
 constexpr DWORD kTickMs = 80;
 constexpr DWORD kJobWaitMs = 2500;
 constexpr DWORD kWaitMigrateMs = 12000;
 constexpr DWORD kWaitAlertMs = 20000;       // 警戒解除最长等待
 constexpr DWORD kWaitExclMs = 20000;        // excl 独占解除最长等待
+constexpr DWORD kPreFireSettleMs = 6500;    // BIN 0.1.39：3s 停手干净仍踢；F5 战中换频再放宽
+constexpr DWORD kPostAlertGraceMs = 1500;   // 脱战后额外稍等（与 PreFire 取较晚者）
+constexpr DWORD kFireIdleTimeoutMs = 2000;  // WaitFireIdle 上限（排空在途攻击键）
+constexpr DWORD kFireIdleSettleMs = 400;    // 末次开火后再静默
+constexpr DWORD kTeleportForceCdMs = 6500;  // 与 settle 对齐：禁新瞬移，等旧 tp 态散掉
 constexpr DWORD kAlertSampleMs = 200;
 constexpr DWORD kExclSampleMs = 200;
 constexpr DWORD kLandGraceMs = 4000;        // 进图后门控宽限，避免加载瞬间误发挂起 seq
-constexpr DWORD kCooldownAfterOkMs = 30000;  // BIN：成功后再 hop ~20s 曾硬断；成功后加长冷却
+constexpr DWORD kCooldownAfterOkMs = 20000;  // BIN：成功后 ~9s 内连点曾脏会话硬断；15s 不够，拉到 20s
 constexpr DWORD kCooldownAfterFailMs = 3000;
+constexpr DWORD kPostHopQuietMs = 4000;    // 结算后暂缓恢复战斗（BIN：settle 后立刻 resume → 会话层仍在撕；无敌已不在 hop 中关闭）
 constexpr DWORD kSettleReadyMs = 1500;     // 未离图时的最短观察
 constexpr DWORD kStayConfirmMs = 1200;     // 从未离图且仍原频 → 才判拒绝
 constexpr DWORD kPostLandGraceMs = 2500;   // 离图再落地后：等频道号追上
+constexpr DWORD kDisconnectingGraceMs = 3000;  // Disconnecting 短闪不立刻 Fail
+constexpr DWORD kNoPacketBackoffMs = 1000;     // A8 未置位后同目标退避
+constexpr DWORD kWaitNoPacketMs = 15000;       // 同目标 no-packet 总窗，防空转
+constexpr int kNoPacketMaxStreak = 8;          // 同目标连续 A8=0 次数上限
 constexpr int kChannelCountFallbackMax = 128;  // Classic 可达 ~60 频；原 40 会误杀
 constexpr int kMaxFireAttempts = 3;            // 含首次；满人/未进则换其它频重试
 
@@ -113,6 +157,7 @@ std::atomic<unsigned> gState{static_cast<unsigned>(State::Idle)};
 
 DWORD gPhaseAt = 0;
 DWORD gCooldownUntil = 0;
+DWORD gResumeAt = 0;  // 结算后延迟 Resume；0=无需/已恢复
 int gTargetChannel = -1;
 int gFromChannel = -1;
 int gChannelCount = 0;
@@ -124,15 +169,24 @@ DWORD gLandedAt = 0;       // 离图后再进 PlayReady 的时刻；0=本轮未�
 bool gSawLeavePlay = false;  // 发包后是否见过 !IsPlayReady（黑屏/InterStage）
 bool gWasPlayReady = true;
 int gKnownChannelIdx = -1;  // 上次成功换频后的 0-based 索引；跨 job 保留
-bool gCombatPaused = false;   // 本模块暂停了 simple_combat
+bool gInvulnHeld = false;     // 本模块临时关了 Invuln（仅 BeginActive 后）
+bool gInvulnWasOn = false;    // 关之前的 desired，Finish 时还原
+std::atomic<bool> gCombatPaused{false};  // ChannelHop 硬闸；Request/Tick 跨线程
+std::atomic<bool> gEarlyHoldFromRequest{false};  // Request 边沿已停刀，尚未 BeginActive
 bool gAlertNotified = false;
 DWORD gAlertSampleAt = 0;
 bool gAlertCached = false;
+std::atomic<DWORD> gFireReadyAt{0};  // Confirming：到此时才允许 FireTransfer（Request 可预武装）
 bool gExclNotified = false;
 DWORD gExclSampleAt = 0;
 bool gExclCachedOk = true;
 DWORD gPlayReadySince = 0;  // Idle 挂起时进图起点；0=未就绪
 bool gWatchDisconnect = false;  // Waiting：盯 KickSniff 硬断（Connecting 是正常迁频）
+DWORD gDisconnectingSince = 0;  // Disconnecting 起算；0=未处于该态
+bool gSawConnecting = false;    // Waiting 内见过 Connecting（真迁频）
+bool gExclArmed = false;        // 本轮发包后 A8 已置位（包大概率出去了）
+DWORD gNoPacketSince = 0;       // 同目标首次 A8=0；0=尚未 no-packet
+int gNoPacketStreak = 0;        // 同目标连续 A8=0 次数
 int gLastRaw68 = -999;          // ReadInfo 前进检测；Login/Init 清
 int gLastRaw6c = -999;
 uint8_t gAdultFlag[kAdultFlagCap]{};  // WM List<bool> 快照；1=成人频
@@ -188,25 +242,37 @@ MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
     const auto& ex = x::runtime::il2cpp::Get();
     if (!ex.classGetMethods || !x::runtime::il2cpp::GaBase()) return nullptr;
     void* target = AtRva<void*>(rva);
-    void* iter = nullptr;
-    for (;;) {
-        void* miRaw = nullptr;
-        __try {
-            miRaw = ex.classGetMethods(klass, &iter);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return nullptr;
+    void* cur = klass;
+    for (int depth = 0; cur && depth < 8; ++depth) {
+        void* iter = nullptr;
+        for (;;) {
+            void* miRaw = nullptr;
+            __try {
+                miRaw = ex.classGetMethods(cur, &iter);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return nullptr;
+            }
+            if (!miRaw) break;
+            auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
+            void* mp = nullptr;
+            void* vp = nullptr;
+            __try {
+                mp = mi->methodPointer;
+                vp = mi->virtualMethodPointer;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                continue;
+            }
+            if (mp == target || vp == target) return mi;
         }
-        if (!miRaw) break;
-        auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
-        void* mp = nullptr;
-        void* vp = nullptr;
+        if (!ex.classParent) break;
+        void* parent = nullptr;
         __try {
-            mp = mi->methodPointer;
-            vp = mi->virtualMethodPointer;
+            parent = ex.classParent(cur);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            continue;
+            parent = nullptr;
         }
-        if (mp == target || vp == target) return mi;
+        if (!parent || parent == cur) break;
+        cur = parent;
     }
     return nullptr;
 }
@@ -214,30 +280,34 @@ MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
 MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
     if (!klass || !name) return nullptr;
     const auto& e = x::runtime::il2cpp::Get();
-    MethodInfoHead* mi = nullptr;
-    if (e.classGetMethodFromName) {
-        __try {
-            mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            mi = nullptr;
-        }
-    }
-    if (mi && mi->methodPointer) return mi;
-    if (!e.classGetMethods || !e.methodGetName) return nullptr;
     void* cur = klass;
     for (int depth = 0; cur && depth < 8; ++depth) {
-        void* iter = nullptr;
-        __try {
-            for (;;) {
-                void* raw = e.classGetMethods(cur, &iter);
-                if (!raw) break;
-                const char* nm = e.methodGetName(raw);
-                if (nm && strcmp(nm, name) == 0) {
-                    mi = reinterpret_cast<MethodInfoHead*>(raw);
-                    if (mi && mi->methodPointer) return mi;
+        MethodInfoHead* mi = nullptr;
+        if (e.classGetMethodFromName) {
+            const int tryArgc[] = {argc, -1};
+            for (int ac : tryArgc) {
+                __try {
+                    mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(cur, name, ac));
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    mi = nullptr;
                 }
+                if (mi && mi->methodPointer) return mi;
             }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+        if (e.classGetMethods && e.methodGetName) {
+            void* iter = nullptr;
+            __try {
+                for (;;) {
+                    void* raw = e.classGetMethods(cur, &iter);
+                    if (!raw) break;
+                    const char* nm = e.methodGetName(raw);
+                    if (nm && strcmp(nm, name) == 0) {
+                        mi = reinterpret_cast<MethodInfoHead*>(raw);
+                        if (mi && mi->methodPointer) return mi;
+                    }
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
         }
         if (!e.classParent) break;
         void* parent = nullptr;
@@ -252,24 +322,132 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
     return nullptr;
 }
 
+uint32_t MiRva(MethodInfoHead* mi) {
+    if (!mi || !mi->methodPointer) return 0;
+    const uintptr_t base = x::runtime::il2cpp::GaBase();
+    if (!base) return 0;
+    const auto a = reinterpret_cast<uintptr_t>(mi->methodPointer);
+    if (a < base) return 0;
+    const uint64_t d = static_cast<uint64_t>(a - base);
+    return d > 0x7FFFFFFFull ? 0u : static_cast<uint32_t>(d);
+}
+
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
-                          const char* plain, const char* hash) {
-    if (plain) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plain, shape.arity)) return mi;
-    }
-    if (hash) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hash, shape.arity)) return mi;
-    }
+                          const char* plain, const char* hash,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
     if (!klass) return nullptr;
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            Log("ResolveMi kind hit rva=0x%X plain=%s", rva, plain ? plain : "-");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
+    const auto mr = x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, hash);
+    if (outPath) *outPath = mr.path;
+    if (!mr.method) return nullptr;
+    auto* mi = reinterpret_cast<MethodInfoHead*>(mr.method);
+    if (!mi->methodPointer) return nullptr;
+    const uint32_t got = MiRva(mi);
+    if (rva && got && got != rva) {
+        Log("ResolveMi reject path=%d wantRva=0x%X got=0x%X plain=%s", (int)mr.path, rva, got,
+            plain ? plain : "-");
+        if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
+        return nullptr;
     }
-    return FindMethodByRva(klass, rva);
+    return mi;
+}
+
+size_t FieldOffsetByHash(void* klass, const char* nameHash) {
+    if (!klass || !nameHash || !x::runtime::il2cpp::Ensure()) return 0;
+    const auto& e = x::runtime::il2cpp::Get();
+    for (void* k = klass; k; ) {
+        if (e.classGetFieldFromName && e.fieldGetOffset) {
+            void* field = nullptr;
+            __try {
+                field = e.classGetFieldFromName(k, nameHash);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                field = nullptr;
+            }
+            if (field) {
+                size_t off = 0;
+                __try {
+                    off = e.fieldGetOffset(field);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    off = 0;
+                }
+                if (off) return off;
+            }
+        }
+        if (e.classGetFields && e.fieldGetName && e.fieldGetOffset) {
+            void* iter = nullptr;
+            __try {
+                for (;;) {
+                    void* field = e.classGetFields(k, &iter);
+                    if (!field) break;
+                    const char* nm = nullptr;
+                    __try {
+                        nm = e.fieldGetName(field);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        nm = nullptr;
+                    }
+                    if (!nm) continue;
+                    if (strcmp(nm, nameHash) != 0 && !strstr(nm, nameHash)) continue;
+                    size_t off = 0;
+                    __try {
+                        off = e.fieldGetOffset(field);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        off = 0;
+                    }
+                    if (off) return off;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return 0;
+}
+
+size_t PickOff(size_t resolved, size_t hint, bool* usedHash) {
+    if (resolved) {
+        if (usedHash) *usedHash = true;
+        return resolved;
+    }
+    return hint;
+}
+
+void EnsureFieldOffsets() {
+    if (gFieldOffResolved.load(std::memory_order_acquire)) return;
+    void* wmKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+    if (!wmKlass || !x::runtime::il2cpp::Ensure()) return;
+
+    bool chId = false, chAlt = false, adult = false;
+    bool eA0 = false, eA4 = false, eA8 = false, eA9 = false, eAC = false;
+    gOffWmChannelId =
+        PickOff(FieldOffsetByHash(wmKlass, kHashWmChannelId), kOffWmChannelIdHint, &chId);
+    gOffWmChannelAlt =
+        PickOff(FieldOffsetByHash(wmKlass, kHashWmChannelAlt), kOffWmChannelAltHint, &chAlt);
+    gOffWmAdultChannel =
+        PickOff(FieldOffsetByHash(wmKlass, kHashWmAdultChannel), kOffWmAdultChannelHint, &adult);
+    gOffWmExclA0 = PickOff(FieldOffsetByHash(wmKlass, kHashWmExclA0), kOffWmExclA0Hint, &eA0);
+    gOffWmExclA4 = PickOff(FieldOffsetByHash(wmKlass, kHashWmExclA4), kOffWmExclA4Hint, &eA4);
+    gOffWmExclFlagA8 =
+        PickOff(FieldOffsetByHash(wmKlass, kHashWmExclA8), kOffWmExclFlagA8Hint, &eA8);
+    gOffWmExclFlagA9 =
+        PickOff(FieldOffsetByHash(wmKlass, kHashWmExclA9), kOffWmExclFlagA9Hint, &eA9);
+    gOffWmExclAC = PickOff(FieldOffsetByHash(wmKlass, kHashWmExclAC), kOffWmExclACHint, &eAC);
+
+    const int hits = (chId ? 1 : 0) + (chAlt ? 1 : 0) + (adult ? 1 : 0) + (eA0 ? 1 : 0) +
+                     (eA4 ? 1 : 0) + (eA8 ? 1 : 0) + (eA9 ? 1 : 0) + (eAC ? 1 : 0);
+    const bool chOk = chId && chAlt;
+    const bool exclOk = eA0 && eA4 && eA8 && eA9 && eAC;
+    snprintf(gFieldOffPath, sizeof(gFieldOffPath), "%s hits=%d/8 ch=%s adult=%s excl=%s",
+             hits == 8 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+             chOk ? "hash" : "hint", adult ? "hash" : "hint", exclOk ? "hash" : "hint");
+    gFieldOffResolved.store(true, std::memory_order_release);
+    Log("WM field off path=%s ch=0x%zX/0x%zX adult=0x%zX exclA8=0x%zX", gFieldOffPath,
+        gOffWmChannelId, gOffWmChannelAlt, gOffWmAdultChannel, gOffWmExclFlagA8);
 }
 
 template <typename Fn>
@@ -281,6 +459,7 @@ Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
 void EnsureMethodInfos() {
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
+    EnsureFieldOffsets();
     if (!gKlassField) {
         gKlassField = FindClass("", kFieldClass);
         if (!gKlassField) gKlassField = FindClass("", "Field");
@@ -290,23 +469,40 @@ void EnsureMethodInfos() {
     void* userAlert = FindClass("", kUserAlertClass);
     if (!userAlert) userAlert = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
 
+    using x::runtime::il2cpp_method::ResolvePath;
+    int methodHashHits = 0;
+    auto noteHash = [&](ResolvePath path) {
+        if (path == ResolvePath::Hash) ++methodHashHits;
+    };
+    ResolvePath pTr = ResolvePath::Miss, pAl = ResolvePath::Miss, pEx = ResolvePath::Miss;
+
     if (gKlassField && !gMiSendTransfer) {
         constexpr MethodShape kTr{1, TypeKind::Void, true, true, {TypeKind::I32}};
         gMiSendTransfer = ResolveMi(gKlassField, kRvaSendTransferChannelRequest, kTr,
-                                    "SendTransferChannelRequest", kHashSendTransfer);
+                                    "SendTransferChannelRequest", kHashSendTransfer, &pTr);
+        noteHash(pTr);
     }
     if (userAlert && !gMiIsAlertMode) {
-        // bool() 不唯一 → 哈希主；walkParents 覆盖 UserLocal→User
+        // bool() 不唯一 → 哈希主；walkParents 覆盖 UserLocal→UserBase
         constexpr MethodShape kAl{0, TypeKind::Bool, false, true, {}};
         gMiIsAlertMode =
-            ResolveMi(userAlert, kRvaIsAlertMode, kAl, "IsAlertMode", kHashIsAlertMode);
+            ResolveMi(userAlert, kRvaIsAlertMode, kAl, "IsAlertMode", kHashIsAlertMode, &pAl);
+        noteHash(pAl);
     }
     if (wmKlass && !gMiCanSendExcl) {
         constexpr MethodShape kEx{2, TypeKind::Bool, true, true, {TypeKind::I32, TypeKind::Any}};
         gMiCanSendExcl = ResolveMi(wmKlass, kRvaCanSendExclRequest, kEx, "CanSendExclRequest",
-                                   kHashCanSendExcl);
+                                   kHashCanSendExcl, &pEx);
+        noteHash(pEx);
     }
     const int n = (gMiSendTransfer ? 1 : 0) + (gMiIsAlertMode ? 1 : 0) + (gMiCanSendExcl ? 1 : 0);
+    static bool sMethodHitsLogged = false;
+    if (!sMethodHitsLogged && n > 0) {
+        sMethodHitsLogged = true;
+        Log("methods path=%s hits=%d/3",
+            methodHashHits == 3 ? "meta" : (methodHashHits ? "meta-partial" : "fallback"),
+            methodHashHits);
+    }
     char detail[48]{};
     snprintf(detail, sizeof(detail), "mi %d/3", n);
     x::runtime::anchor_lamps::Set(
@@ -341,11 +537,11 @@ uint8_t ReadU8(void* base, size_t off) {
 
 void SnapshotExcl(void* wm, JobCtx* job) {
     if (!wm || !job) return;
-    job->exclA0 = ReadI32(wm, kOffWmExclA0);
-    job->exclA4 = ReadI32(wm, kOffWmExclA4);
-    job->exclFlagA8 = ReadU8(wm, kOffWmExclFlagA8);
-    job->exclFlagA9 = ReadU8(wm, kOffWmExclFlagA9);
-    job->exclAC = ReadI32(wm, kOffWmExclAC);
+    job->exclA0 = ReadI32(wm, gOffWmExclA0);
+    job->exclA4 = ReadI32(wm, gOffWmExclA4);
+    job->exclFlagA8 = ReadU8(wm, gOffWmExclFlagA8);
+    job->exclFlagA9 = ReadU8(wm, gOffWmExclFlagA9);
+    job->exclAC = ReadI32(wm, gOffWmExclAC);
 }
 
 int ReadListCount(void* listObj) {
@@ -358,7 +554,7 @@ void SnapshotAdultFlags(void* wm, int count) {
     gAdultFlagN = 0;
     memset(gAdultFlag, 0, sizeof(gAdultFlag));
     if (!wm || count <= 0) return;
-    void* adult = ReadPtr(wm, kOffWmAdultChannel);
+    void* adult = ReadPtr(wm, gOffWmAdultChannel);
     if (!adult) return;
     const int n = ReadListCount(adult);
     void* items = ReadPtr(adult, kOffListItems);
@@ -383,7 +579,7 @@ bool IsAdultIdx(int idx) {
 }
 
 void ResolveChannelCount(void* wm, JobCtx* job) {
-    void* adult = ReadPtr(wm, kOffWmAdultChannel);
+    void* adult = ReadPtr(wm, gOffWmAdultChannel);
     const int fromList = ReadListCount(adult);
     const auto ccu = ccu::GetCcuStatus();
     const int fromCcu = ccu.worldChannelCount;
@@ -416,6 +612,7 @@ void ResolveChannelCount(void* wm, JobCtx* job) {
 }
 
 void JobFn(void* user) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("channel_hop.Job");
     auto* job = reinterpret_cast<JobCtx*>(user);
     if (!job) return;
     job->ok = false;
@@ -438,8 +635,8 @@ void JobFn(void* user) {
                      job->adultCount, job->ccuCount);
             return;
         }
-        job->channelRaw68 = ReadI32(wm, kOffWmChannelId);
-        job->channelRaw6c = ReadI32(wm, kOffWmChannelAlt);
+        job->channelRaw68 = ReadI32(wm, gOffWmChannelId);
+        job->channelRaw6c = ReadI32(wm, gOffWmChannelAlt);
         const int count = job->channelCount;
         auto inRange = [count](int v) { return v >= 0 && v < count; };
 
@@ -586,7 +783,7 @@ void JobFn(void* user) {
             strncpy_s(job->err, "SendTransfer SEH", _TRUNCATE);
             return;
         }
-        if (wm) job->exclFlagA8After = ReadU8(wm, kOffWmExclFlagA8);
+        if (wm) job->exclFlagA8After = ReadU8(wm, gOffWmExclFlagA8);
         job->ok = true;
         break;
     }
@@ -682,29 +879,56 @@ void ClearAttemptState() {
     gAlertNotified = false;
     gAlertSampleAt = 0;
     gAlertCached = false;
+    gFireReadyAt.store(0, std::memory_order_release);
     gExclNotified = false;
     gExclSampleAt = 0;
     gExclCachedOk = true;
     gWatchDisconnect = false;
+    gDisconnectingSince = 0;
+    gSawConnecting = false;
+    gExclArmed = false;
+    gNoPacketSince = 0;
+    gNoPacketStreak = 0;
 }
 
-void PauseCombatForHop() {
-    if (gCombatPaused) return;
-    simple_combat::SetExternalPause(true);
-    gCombatPaused = true;
-    Log("combat pause for hop");
+// BIN seq=8：A8 已武装仍 Connected→Disconnected。停刀/压键后再 settle 发包（不再关无敌）。
+// 硬闸用位掩码：每拍可重钉 ChannelHop 位，不被 lie/encounter/supply 的 false 互踩清掉。
+// 出刀抑制由 simple_combat::RefreshExternalPauseEffective 随硬闸同步，勿再盲调 SetFireSuppressed。
+// holdInvuln 保留形参兼容调用方；换频不再关无敌（BIN 0.1.40：关无敌用户感知失效，停刀已够）。
+void PauseCombatForHop(bool holdInvuln) {
+    (void)holdInvuln;
+    // 始终重钉：即使已 paused，也防其它模块误清位后漏闸。
+    simple_combat::SetHardPause(simple_combat::HardPauseHolder::ChannelHop, true);
+    if (!gCombatPaused.exchange(true, std::memory_order_acq_rel)) {
+        Log("combat pause for hop");
+    }
+    // F5 战中刚停就换频：强制瞬移自冷，避免 settle 内仍有 tp 态叠 Transfer。
+    ports::teleport::ForceNativeCooldownMs(kTeleportForceCdMs);
 }
 
 void ResumeCombatAfterHop() {
-    if (!gCombatPaused) return;
-    gCombatPaused = false;
-    // BIN：遇人仍有人时 ChannelHop Fail/OK 的 resume 会清掉 encounter pause → 继续打怪刷警戒
-    if (encounter::HoldsCombatPause()) {
-        Log("combat resume skipped (encounter holding pause)");
+    // 历史路径可能关过无敌；若仍持有则还原（新路径不再 hold）。
+    if (gInvulnHeld) {
+        gInvulnHeld = false;
+        if (gInvulnWasOn) {
+            invuln::SetDesired(true);
+            Log("invuln restored after hop");
+        }
+        gInvulnWasOn = false;
+    }
+    if (!gCombatPaused.load(std::memory_order_acquire)) {
+        // 仍清本模块位，避免 Init 异常路径留下脏位。
+        simple_combat::SetHardPause(simple_combat::HardPauseHolder::ChannelHop, false);
         return;
     }
-    simple_combat::SetExternalPause(false);
-    Log("combat resume after hop");
+    gCombatPaused.store(false, std::memory_order_release);
+    // 只清 ChannelHop 位；遇人/测谎/补给持有的硬闸不受影响（不再用单 bool 互踩）。
+    simple_combat::SetHardPause(simple_combat::HardPauseHolder::ChannelHop, false);
+    if (encounter::HoldsCombatPause()) {
+        Log("combat ChannelHop bit cleared (encounter still holding pause)");
+    } else {
+        Log("combat resume after hop");
+    }
 }
 
 bool SampleAlert(DWORD now) {
@@ -760,11 +984,21 @@ void MaybeNotifyExcl(DWORD now) {
 
 // End active job; never wipe a newer pending seq queued while we were busy.
 void FinishActive(DWORD cooldownMs, DWORD now) {
-    ResumeCombatAfterHop();
     gActiveSeq.store(0);
     ClearAttemptState();
     SetState(State::Idle);
     if (cooldownMs > 0) gCooldownUntil = now + cooldownMs;
+    // BIN 11:02：settle 后立刻 resume，~0.5s Session 层重建，~9s 硬断被踢。
+    // 静默期内保持停刀/压键，再恢复（无敌不再由 hop hold）。
+    gResumeAt = now + kPostHopQuietMs;
+    Log("post-hop quiet %ums cooldownMs=%u (hold combat/fire)",
+        static_cast<unsigned>(kPostHopQuietMs), static_cast<unsigned>(cooldownMs));
+}
+
+void TickPostHopResume(DWORD now) {
+    if (gResumeAt == 0 || now < gResumeAt) return;
+    gResumeAt = 0;
+    ResumeCombatAfterHop();
 }
 
 void Fail(const char* why) {
@@ -808,9 +1042,9 @@ void SettleOk(const char* how, int curIdx, DWORD now) {
     FinishActive(kCooldownAfterOkMs, now);
 }
 
-bool TryRetryOtherChannel(const char* why, int stayChannel, DWORD now) {
+bool TryRetryOtherChannel(const char* why, int stayChannel, DWORD now, bool markRejected) {
     MarkTried(gTargetChannel);
-    ccu::MarkChannelRejected(gTargetChannel);
+    if (markRejected) ccu::MarkChannelRejected(gTargetChannel);
     if (gFireAttempt >= kMaxFireAttempts) {
         char body[128]{};
         snprintf(body, sizeof(body), "%s（已试 %d 次）", why ? why : "换频失败", gFireAttempt);
@@ -824,9 +1058,9 @@ bool TryRetryOtherChannel(const char* why, int stayChannel, DWORD now) {
         return false;
     }
     Log("retry seq=%u attempt=%d/%d stayIdx=%d stayCh=%d failedTargetIdx=%d nextIdx=%d nextCh=%d "
-        "why=%s",
+        "markReject=%d why=%s",
         gActiveSeq.load(), gFireAttempt + 1, kMaxFireAttempts, stay, DispCh(stay), gTargetChannel,
-        next, DispCh(next), why ? why : "?");
+        next, DispCh(next), markRejected ? 1 : 0, why ? why : "?");
     char body[96]{};
     snprintf(body, sizeof(body), "ch.%d 进不去，改试 ch.%d（%d/%d）", DispCh(gTargetChannel),
              DispCh(next), gFireAttempt + 1, kMaxFireAttempts);
@@ -836,15 +1070,20 @@ bool TryRetryOtherChannel(const char* why, int stayChannel, DWORD now) {
     gLandedAt = 0;
     gSawLeavePlay = false;
     gWasPlayReady = true;
+    gExclArmed = false;
+    gSawConnecting = false;
+    gDisconnectingSince = 0;
+    gNoPacketSince = 0;
+    gNoPacketStreak = 0;
     gPhaseAt = now;
     SetState(State::Confirming);
     return true;
 }
 
 void SucceedQueued() {
-    Log("transfer fired seq=%u fromIdx=%d fromCh=%d toIdx=%d toCh=%d attempt=%d/%d (no UI)",
+    Log("transfer fired seq=%u fromIdx=%d fromCh=%d toIdx=%d toCh=%d attempt=%d/%d exclArmed=%d (no UI)",
         gActiveSeq.load(), gFromChannel, DispCh(gFromChannel), gTargetChannel,
-        DispCh(gTargetChannel), gFireAttempt, kMaxFireAttempts);
+        DispCh(gTargetChannel), gFireAttempt, kMaxFireAttempts, gExclArmed ? 1 : 0);
     // 重试中不刷「已触发」；最终 settle ok / Fail 再通知。
     if (gFireAttempt <= 1) {
         char body[96]{};
@@ -855,6 +1094,8 @@ void SucceedQueued() {
     gLandedAt = 0;
     gSawLeavePlay = false;
     gWasPlayReady = ports::world::IsPlayReady();
+    gSawConnecting = false;
+    gDisconnectingSince = 0;
     // 正常迁频：Connected→Connecting→Connected；硬断：→Disconnected（BIN seq=18）
     gWatchDisconnect = true;
     SetState(State::Waiting);
@@ -874,6 +1115,7 @@ void UpdatePlayReadyClock(DWORD now) {
 const char* DeferReason() {
     if (!ports::world::IsPlayReady() || gPlayReadySince == 0) return "未进图";
     const DWORD now = GetTickCount();
+    if (gResumeAt != 0 && now < gResumeAt) return "换频静默";
     if (now - gPlayReadySince < kLandGraceMs) return "进图冷却";
     const auto ss = ports::world::GetSceneState();
     if (ss == ports::world::SceneState::CashShop) return "商城中";
@@ -902,12 +1144,21 @@ void BeginActive(uint32_t seq, DWORD now) {
     // Consume only this seq; keep a newer pending that raced in after Idle check.
     uint32_t expected = seq;
     (void)gPendingSeq.compare_exchange_strong(expected, 0);
+    gResumeAt = 0;  // 取消未到期的延迟 resume；Pause 会续持闸
+    // Request 预武装的 settle 截止；ClearAttemptState 会清零，先取出。
+    const DWORD armedReady = gFireReadyAt.load(std::memory_order_acquire);
+    gEarlyHoldFromRequest.store(false, std::memory_order_release);
     ClearAttemptState();
-    PauseCombatForHop();
+    PauseCombatForHop(/*holdInvuln=*/true);
+    // settle 从 Request 起算；defer 过久已到期则从 now 重新武装满窗。
+    DWORD ready = armedReady;
+    if (ready == 0 || ready <= now) ready = now + kPreFireSettleMs;
+    gFireReadyAt.store(ready, std::memory_order_release);
     gPhaseAt = now;
     gLastDeferNotifySeq = 0;
     SetState(State::Selecting);
-    Log("begin seq=%u (direct SendTransfer, no menu)", seq);
+    Log("begin seq=%u (direct SendTransfer, no menu) preFireSettle=%ums readyIn=%ums", seq,
+        static_cast<unsigned>(kPreFireSettleMs), static_cast<unsigned>(ready - now));
 }
 
 void TickSelecting(DWORD now) {
@@ -947,10 +1198,37 @@ void TickConfirming(DWORD now) {
         return;
     }
     if (gAlertNotified) {
-        // 刚脱战：给 excl 门控单独 20s，勿与警戒共用倒计时
+        // 刚脱战：重设 phase，并推迟 fireReady（BIN seq=7）
         gPhaseAt = now;
+        const DWORD ready = now + kPostAlertGraceMs;
+        const DWORD cur = gFireReadyAt.load(std::memory_order_acquire);
+        if (ready > cur) gFireReadyAt.store(ready, std::memory_order_release);
+        Log("post-alert grace %ums seq=%u", static_cast<unsigned>(kPostAlertGraceMs),
+            gActiveSeq.load());
     }
     gAlertNotified = false;
+    {
+        const DWORD readyAt = gFireReadyAt.load(std::memory_order_acquire);
+        if (readyAt != 0 && now < readyAt) return;
+        gFireReadyAt.store(0, std::memory_order_release);
+    }
+
+    // 瞬移自冷未清：再推迟，避免 tp 刚落地立刻 Transfer（BIN：停火后仍踢）
+    {
+        const DWORD tpRem = ports::teleport::NativeCooldownRemainingMs();
+        if (tpRem > 0) {
+            const DWORD ready = now + tpRem;
+            const DWORD cur = gFireReadyAt.load(std::memory_order_acquire);
+            if (ready > cur) gFireReadyAt.store(ready, std::memory_order_release);
+            static DWORD s_tpDeferLog = 0;
+            if (!s_tpDeferLog || now - s_tpDeferLog > 1000) {
+                s_tpDeferLog = now;
+                Log("defer transfer tpCdRem=%ums seq=%u", static_cast<unsigned>(tpRem),
+                    gActiveSeq.load());
+            }
+            return;
+        }
+    }
 
     // BIN：CanSendExcl(500)==0 则无 op=44。等独占清，不烧 attempt。
     if (SampleExclBusy(now)) {
@@ -961,6 +1239,9 @@ void TickConfirming(DWORD now) {
         return;
     }
     gExclNotified = false;
+
+    // 再收一次在途攻击键；settle 跟墙钟对齐，防末火刚过就叠 Transfer
+    (void)ports::attack::WaitFireIdle(kFireIdleTimeoutMs, kFireIdleSettleMs);
 
     JobCtx fire{};
     fire.kind = JobCtx::Kind::FireTransfer;
@@ -977,17 +1258,44 @@ void TickConfirming(DWORD now) {
             return;
         }
         if (!TryRetryOtherChannel(fire.err[0] ? fire.err : "SendTransfer 失败", gFromChannel,
-                                  GetTickCount())) {
+                                  GetTickCount(), /*markRejected=*/false)) {
             // Fail already
         }
         return;
     }
-    Log("transfer fired seq=%u targetIdx=%d targetCh=%d attempt=%d A8=%u→%u A0=%d A4=%d AC=%d",
+    Log("transfer fired seq=%u targetIdx=%d targetCh=%d attempt=%d A8=%u→%u A0=%d A4=%d AC=%d "
+        "quietMs=%u",
         gActiveSeq.load(), gTargetChannel, DispCh(gTargetChannel), gFireAttempt, fire.exclFlagA8,
-        fire.exclFlagA8After, fire.exclA0, fire.exclA4, fire.exclAC);
-    if (fire.exclFlagA8 == 0 && fire.exclFlagA8After == 0) {
-        Log("warn excl A8 still 0 after SendTransfer — other early-gate may block op=44");
+        fire.exclFlagA8After, fire.exclA0, fire.exclA4, fire.exclAC,
+        static_cast<unsigned>(now - gPhaseAt));
+    // BIN：A8 未置位 ≈ 包未进独占/未真正发出。勿进 Waiting，勿 MarkRejected（假满人）。
+    if (fire.exclFlagA8After == 0) {
+        if (gNoPacketSince == 0) gNoPacketSince = now;
+        ++gNoPacketStreak;
+        const DWORD elapsed = now - gNoPacketSince;
+        const bool giveUp =
+            gNoPacketStreak >= kNoPacketMaxStreak || elapsed >= kWaitNoPacketMs;
+        Log("no-packet A8 still 0 after SendTransfer streak=%d elapsed=%ums giveUp=%d — %s",
+            gNoPacketStreak, static_cast<unsigned>(elapsed), giveUp ? 1 : 0,
+            giveUp ? "retry other / fail, no reject" : "soft wait, no reject");
+        if (giveUp) {
+            // 本发射计入 attempt（不回滚），换频但不 MarkRejected
+            if (!TryRetryOtherChannel("A8 未置位（疑似未发包）", gFromChannel, now,
+                                      /*markRejected=*/false)) {
+                // Fail already
+            }
+            return;
+        }
+        --gFireAttempt;
+        gPhaseAt = now;
+        gFireReadyAt.store(now + kNoPacketBackoffMs, std::memory_order_release);
+        gExclCachedOk = false;
+        gExclSampleAt = 0;
+        return;
     }
+    gNoPacketSince = 0;
+    gNoPacketStreak = 0;
+    gExclArmed = true;
     MarkTried(gTargetChannel);
     SucceedQueued();
 }
@@ -996,14 +1304,31 @@ void TickWaiting(DWORD now) {
     const bool play = ports::world::IsPlayReady();
     const auto ss = ports::world::GetSceneState();
 
-    // BIN seq=18：transfer 后 Connected→Disconnected（非 Connecting）；勿挂死到进程被杀。
+    // BIN：正常迁频 Connected→Connecting→Connected；硬断 →Disconnected。
+    // Disconnecting 短闪不立刻 Fail（防误杀）；持久 Disconnecting 或 Disconnected 才 Fail。
     if (gWatchDisconnect) {
         const int sess = kick_sniff::LastSessionState();
-        if (sess == kSessDisconnected || sess == kSessDisconnecting) {
+        if (sess == kSessConnecting) {
+            if (!gSawConnecting) {
+                gSawConnecting = true;
+                Log("sess Connecting (migrate) seq=%u", gActiveSeq.load());
+            }
+            gDisconnectingSince = 0;
+        } else if (sess == kSessDisconnected) {
             char why[96]{};
             snprintf(why, sizeof(why), "会话已断开 sess=%d（换频未完成）", sess);
             Fail(why);
             return;
+        } else if (sess == kSessDisconnecting) {
+            if (gDisconnectingSince == 0) gDisconnectingSince = now;
+            if (now - gDisconnectingSince >= kDisconnectingGraceMs) {
+                char why[96]{};
+                snprintf(why, sizeof(why), "会话断开中超时 sess=%d（换频未完成）", sess);
+                Fail(why);
+                return;
+            }
+        } else {
+            gDisconnectingSince = 0;
         }
         if (ss == ports::world::SceneState::Login) {
             Fail("回到登录（换频断线）");
@@ -1042,8 +1367,8 @@ void TickWaiting(DWORD now) {
         if (now - gPhaseAt > kWaitMigrateMs) Fail("换频后无 WorldManager");
         return;
     }
-    const int cur68 = ReadI32(wm, kOffWmChannelId);
-    const int cur6c = ReadI32(wm, kOffWmChannelAlt);
+    const int cur68 = ReadI32(wm, gOffWmChannelId);
+    const int cur6c = ReadI32(wm, gOffWmChannelAlt);
     // 结算优先 6c（BIN：换频后常追上目标；68 常滞后）
     int cur = cur68;
     if (gTargetChannel >= 0 && cur6c == gTargetChannel) {
@@ -1079,9 +1404,36 @@ void TickWaiting(DWORD now) {
     }
 
     // 从未离图：+0x68 常陈旧，不能依赖 cur==from。
-    // 若仍警戒 → 视为警戒拒收：回 Confirming 同目标再发（不换频、不烧满人逻辑）。
+    // 若仍警戒 → 未真正发出时可回 Confirming 同目标再发；
+    // 已 A8 武装 / 见过 Connecting：迁频可能已在路上，绝回 Confirming 重发（BIN 0.1.40 首发成功仍二次换频）。
     if (SampleAlert(now)) {
         MaybeNotifyAlert(now);
+        if (gExclArmed || gSawConnecting) {
+            static DWORD s_alertHoldLog = 0;
+            if (!s_alertHoldLog || now - s_alertHoldLog > 1500) {
+                s_alertHoldLog = now;
+                Log("waiting alert hold (no re-fire) seq=%u target=%d armed=%d sawConn=%d",
+                    gActiveSeq.load(), gTargetChannel, gExclArmed ? 1 : 0, gSawConnecting ? 1 : 0);
+            }
+            if (cur >= 0 && gFromChannel >= 0 && cur != gFromChannel) {
+                SettleOk("alert_hold_channel_changed", cur, now);
+                return;
+            }
+            // 已见迁频握手：频道号可能滞后，宽限后按目标软成功，避免 timeout→换频道重发
+            if (gSawConnecting && now - gPhaseAt >= kPostLandGraceMs) {
+                SettleOk("migrate_seen_channel_lag", gTargetChannel >= 0 ? gTargetChannel : cur, now);
+                return;
+            }
+            if (now - gPhaseAt > kWaitAlertMs) {
+                if (gSawConnecting) {
+                    SettleOk("migrate_seen_alert_timeout", gTargetChannel >= 0 ? gTargetChannel : cur,
+                             now);
+                } else {
+                    Fail("警戒中换频未确认落地");
+                }
+            }
+            return;
+        }
         Log("waiting re-fire after alert reject seq=%u target=%d attempt=%d", gActiveSeq.load(),
             gTargetChannel, gFireAttempt);
         if (now - gPhaseAt > kWaitAlertMs) {
@@ -1095,16 +1447,44 @@ void TickWaiting(DWORD now) {
         gSawLeavePlay = false;
         gWasPlayReady = true;
         gWatchDisconnect = false;
+        gExclArmed = false;
+        gSawConnecting = false;
+        gDisconnectingSince = 0;
+        gFireReadyAt.store(now + kPostAlertGraceMs, std::memory_order_release);
         gPhaseAt = now;  // 重新起算警戒等待
         SetState(State::Confirming);
         return;
     }
 
     if (now - gPhaseAt < kSettleReadyMs + kStayConfirmMs) return;
+    // 已见 Connecting：软迁频常不离图，频道号滞后时勿换目标重发（BIN 0.1.40 二次换频）
+    if (gSawConnecting) {
+        SettleOk("migrate_seen_no_leave", gTargetChannel >= 0 ? gTargetChannel : cur, now);
+        return;
+    }
+    // A8 已武装：软迁频可能不闪 Connecting；频道已变则成功，否则拉长等到 migrate 窗再 Fail。
+    // 绝换目标重发（review：armed+漏采 Connecting 仍 retry → 二次换频）。
+    if (gExclArmed) {
+        if (cur >= 0 && gFromChannel >= 0 && cur != gFromChannel) {
+            SettleOk("armed_channel_changed", cur, now);
+            return;
+        }
+        static DWORD s_armedWaitLog = 0;
+        if (!s_armedWaitLog || now - s_armedWaitLog > 1500) {
+            s_armedWaitLog = now;
+            Log("waiting armed settle (no retry) seq=%u target=%d raw68=%d raw6c=%d from=%d",
+                gActiveSeq.load(), gTargetChannel, cur68, cur6c, gFromChannel);
+        }
+        if (now - gPhaseAt > kWaitMigrateMs) {
+            Fail("换频未确认落地（已发包未迁频）");
+        }
+        return;
+    }
+    // 未见发包：可换目标，不污染 prefer
     char why[96]{};
-    snprintf(why, sizeof(why), "未离图判拒收 raw68=%d raw6c=%d fromIdx=%d targetIdx=%d", cur68,
-             cur6c, gFromChannel, gTargetChannel);
-    (void)TryRetryOtherChannel(why, gFromChannel, now);
+    snprintf(why, sizeof(why), "未离图（未确认发包） raw68=%d raw6c=%d fromIdx=%d targetIdx=%d",
+             cur68, cur6c, gFromChannel, gTargetChannel);
+    (void)TryRetryOtherChannel(why, gFromChannel, now, /*markRejected=*/false);
 }
 
 }  // namespace
@@ -1116,13 +1496,24 @@ void Init() {
     gActiveSeq.store(0);
     gLastDeferNotifySeq = 0;
     gPlayReadySince = 0;
-    gCombatPaused = false;
+    gCombatPaused.store(false, std::memory_order_release);
+    gEarlyHoldFromRequest.store(false, std::memory_order_release);
+    gInvulnHeld = false;
+    gInvulnWasOn = false;
+    simple_combat::SetHardPause(simple_combat::HardPauseHolder::ChannelHop, false);
     gKnownChannelIdx = -1;
     gLastRaw68 = -999;
     gLastRaw6c = -999;
     gAdultFlagN = 0;
     gCooldownUntil = 0;
+    gResumeAt = 0;
     gWatchDisconnect = false;
+    gDisconnectingSince = 0;
+    gSawConnecting = false;
+    gExclArmed = false;
+    gNoPacketSince = 0;
+    gNoPacketStreak = 0;
+    gFireReadyAt.store(0, std::memory_order_release);
     Log("Init (direct transfer, no UIChannelShift/GameMenu)");
 }
 
@@ -1130,13 +1521,20 @@ void Shutdown() { StopWorker(); }
 
 void RequestManualRejoin(uint32_t seq) {
     if (seq == 0) return;
+    // BIN 0.1.37：request→BeginActive 可隔数十 ms，其间仍 fire/MoveTo。边沿立刻硬闸停刀。
+    // 无敌留到 BeginActive，避免 defer（测谎/进图）久等无无敌。
+    PauseCombatForHop(/*holdInvuln=*/false);
+    gEarlyHoldFromRequest.store(true, std::memory_order_release);
     if (GetStateLocal() != State::Idle) {
-        Log("busy queue seq=%u state=%u", seq, gState.load());
+        Log("busy queue seq=%u state=%u (early pause held)", seq, gState.load());
         gPendingSeq.store(seq);
         return;
     }
+    // settle 从点击起算（BeginActive 会保留未到期的 armedReady）
+    gFireReadyAt.store(GetTickCount() + kPreFireSettleMs, std::memory_order_release);
     gPendingSeq.store(seq);
-    Log("request seq=%u", seq);
+    Log("request seq=%u (early combat pause, settle=%ums)", seq,
+        static_cast<unsigned>(kPreFireSettleMs));
 }
 
 State GetState() { return GetStateLocal(); }
@@ -1167,6 +1565,14 @@ DWORD CooldownRemainingMs() {
 
 void Tick(DWORD now) {
     UpdatePlayReadyClock(now);
+    TickPostHopResume(now);
+
+    // 持闸整段（活跃换频 / 换后静默 / Request 边沿）每拍重钉，防其它模块误清位后重新出刀。
+    if (gCombatPaused.load(std::memory_order_acquire) || gResumeAt != 0 ||
+        GetStateLocal() != State::Idle) {
+        simple_combat::SetHardPause(simple_combat::HardPauseHolder::ChannelHop, true);
+        gCombatPaused.store(true, std::memory_order_release);
+    }
 
     // 登录场景清 known，避免跨角色/重登串缓存
     {
@@ -1185,12 +1591,28 @@ void Tick(DWORD now) {
 
     if (GetStateLocal() == State::Idle) {
         const uint32_t seq = gPendingSeq.load();
-        if (seq == 0) return;
-        if (const char* defer = DeferReason()) {
+        if (seq == 0) {
+            // fall through to switch (Idle no-op)
+        } else if (const char* defer = DeferReason()) {
             MaybeNotifyDefer(seq, defer, now);
-            return;
+            // BIN：成功后冷却/静默内连点勿挂起自动续 hop（易脏会话被踢）
+            if (std::strcmp(defer, "冷却中") == 0 || std::strcmp(defer, "换频静默") == 0) {
+                uint32_t expect = seq;
+                if (gPendingSeq.compare_exchange_strong(expect, 0)) {
+                    Log("drop pending seq=%u during %s (re-click after cool)", seq, defer);
+                    // Request 边沿停手但未 Begin：非静默持闸期则放行，勿提前拆掉 post-hop quiet。
+                    if (gEarlyHoldFromRequest.exchange(false, std::memory_order_acq_rel) &&
+                        gResumeAt == 0) {
+                        gFireReadyAt.store(0, std::memory_order_release);
+                        ResumeCombatAfterHop();
+                    } else {
+                        gEarlyHoldFromRequest.store(false, std::memory_order_release);
+                    }
+                }
+            }
+        } else {
+            BeginActive(seq, now);
         }
-        BeginActive(seq, now);
     }
 
     switch (GetStateLocal()) {

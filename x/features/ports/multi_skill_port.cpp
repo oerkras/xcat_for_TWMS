@@ -25,6 +25,7 @@ namespace {
 std::atomic<bool> g_enabled{false};
 std::atomic<uint32_t> g_gapMs{xcat::kMultiSkillGapDefaultMs};
 std::atomic<bool> g_safeStagger{true};
+std::atomic<bool> g_sendUseRequest{false};
 
 std::atomic<uint32_t> g_lastScheduled{0};
 std::atomic<uint32_t> g_lastSkip{0};
@@ -142,6 +143,9 @@ void SetConfig(bool enabled, uint32_t gapMs, bool safeStagger) {
     g_gapMs = xcat::ClampMultiSkillGapMs(gapMs);
     g_safeStagger = safeStagger;
 }
+
+void SetSendUseRequest(bool on) { g_sendUseRequest = on; }
+bool GetSendUseRequest() { return g_sendUseRequest.load(); }
 
 bool IsEnabled() { return g_enabled.load(); }
 bool GetSafeStagger() { return g_safeStagger.load(); }
@@ -318,9 +322,12 @@ void Tick() {
 
     for (const PendingCast& pc : due) {
         if (pc.skillId == kPendingNormalAttack) {
+            // 普攻只走 OnFuncKey 正路组包（与攻击加速同路径）。
+            // 不接 attack_rpc Create(50) 手搓 BODY：2026-08-04 BIN 半秒连发即断线。
+            // 「技能发包直发」仅作用于技能 SendSkillUseRequest，不影响 NA。
             const bool ok = ports::attack::TryFirePrimary();
             if (ok) {
-                runtime::LogI("MultiSkill", "cast NormalAttack ok=1");
+                runtime::LogI("MultiSkill", "cast NormalAttack ok=1 path=OnFuncKey");
                 continue;
             }
             // 间隔 / pendingUp：短延期重入队，并平移后续 due，避免技能抢先于重试普攻。
@@ -351,9 +358,13 @@ void Tick() {
         }
         bool notReady = false;
         char reason[32]{};
-        const bool ok = ports::skill::CastSkill(pc.skillId, &notReady, reason, sizeof(reason));
-        runtime::LogI("MultiSkill", "cast id=%d ok=%d notReady=%d reason=%s", pc.skillId,
-                      ok ? 1 : 0, notReady ? 1 : 0, reason[0] ? reason : "-");
+        const bool ok =
+            g_sendUseRequest.load()
+                ? ports::skill::CastSkillPreferSendUse(pc.skillId, &notReady, reason, sizeof(reason))
+                : ports::skill::CastSkill(pc.skillId, &notReady, reason, sizeof(reason));
+        runtime::LogI("MultiSkill", "cast id=%d ok=%d notReady=%d reason=%s sendUse=%d", pc.skillId,
+                      ok ? 1 : 0, notReady ? 1 : 0, reason[0] ? reason : "-",
+                      g_sendUseRequest.load() ? 1 : 0);
     }
 
     if (!IsBurstBusy()) g_burstBusyUntil = 0;

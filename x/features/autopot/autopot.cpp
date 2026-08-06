@@ -9,6 +9,7 @@
 #include "../../runtime/log.h"
 #include "../../ui/player_vitals.h"
 #include "../ports/consumable_port.h"
+#include "../ports/input_port.h"
 #include "../ports/world_port.h"
 
 #include <atomic>
@@ -31,6 +32,8 @@ DWORD gLastHpPot = 0;
 DWORD gLastMpPot = 0;
 DWORD gHpBackoffUntil = 0;
 DWORD gMpBackoffUntil = 0;
+DWORD gHpBindMissUntil = 0;  // 未绑/soft拒/空袋：紧急也不可破
+DWORD gMpBindMissUntil = 0;
 DWORD gHpHealStuckUntil = 0;
 DWORD gMpHealStuckUntil = 0;
 DWORD gHpVerifyAt = 0;
@@ -51,6 +54,7 @@ std::atomic<HANDLE> gWorkerThread{nullptr};
 void ResetHpRuntime() {
     gLastHpPot = 0;
     gHpBackoffUntil = 0;
+    gHpBindMissUntil = 0;
     gHpHealStuckUntil = 0;
     gHpVerifyAt = 0;
     gHpBeforePot = -1;
@@ -60,10 +64,17 @@ void ResetHpRuntime() {
 void ResetMpRuntime() {
     gLastMpPot = 0;
     gMpBackoffUntil = 0;
+    gMpBindMissUntil = 0;
     gMpHealStuckUntil = 0;
     gMpVerifyAt = 0;
     gMpBeforePot = -1;
     gMpFailStreak = 0;
+}
+
+// UseRequest 连续无效时，危急下脉冲 PageDown/PageUp（对齐枫星 FirePotionKeyFallback）。
+void FirePotionKeyFallback(bool wantHp) {
+    if (!ports::input::Ready()) return;
+    ports::input::InjectKeyHold(wantHp ? VK_NEXT : VK_PRIOR, 80);
 }
 
 void VerifyPot(DWORD& verifyAt, int& before, int& streak, DWORD& backoffUntil, DWORD& healStuckUntil,
@@ -78,6 +89,16 @@ void VerifyPot(DWORD& verifyAt, int& before, int& streak, DWORD& backoffUntil, D
                              "%s pot ineffective (%s=%d<=%d), soft-backoff %us heal-stuck %us", tag,
                              tag, cur, before, config::kEmptyPotBackoffMs / 1000,
                              config::kHealStuckBackoffMs / 1000);
+            // 读数失效/死亡期不脉冲，避免空烧绑定栏（对称门控）。
+            const bool likelyDesync = (cur <= 1);
+            const bool dead = (gStats.hpPct == 0);
+            if (!likelyDesync && !dead) {
+                if (std::strcmp(tag, "hp") == 0 && cur < config::kHpEmergencyPct) {
+                    FirePotionKeyFallback(true);
+                } else if (std::strcmp(tag, "mp") == 0 && cur < config::kMpEmergencyPct) {
+                    FirePotionKeyFallback(false);
+                }
+            }
             streak = 0;
         }
     } else {
@@ -212,6 +233,9 @@ void Tick(DWORD now) {
         allowMp =
             !gLastMpPot || static_cast<int>(now - gLastMpPot) >= (int)config::kMpCooldownMs;
     }
+    // 绑药 miss：紧急也不可破（没绑硬打主线程无意义）
+    if (gHpBindMissUntil && static_cast<int>(now - gHpBindMissUntil) < 0) allowHp = false;
+    if (gMpBindMissUntil && static_cast<int>(now - gMpBindMissUntil) < 0) allowMp = false;
 
     if (hpPct >= hpTh) {
         gHpHealStuckUntil = 0;
@@ -229,7 +253,7 @@ void Tick(DWORD now) {
     // Prefer HP when both needed (保命优先); mage-first omitted in MVP.
     if (tryHp) {
         ports::consumable::FindResult fr{};
-        if (ports::consumable::FindAndUsePotion(ports::consumable::PotionKind::Hp, fr)) {
+        if (ports::consumable::FindAndUseBoundPotion(true, fr)) {
             gStats.hpPotionQty = fr.qty;
             gLastHpPot = now;
             gHpFailStreak = 0;
@@ -239,10 +263,24 @@ void Tick(DWORD now) {
                              fr.qty, hpPct);
         } else if (!fr.ok) {
             gStats.hpPotionQty = -1;
+            gHpBindMissUntil = now + config::kBindMissBackoffMs;
+            const char* why = fr.missWhy ? fr.missWhy : "unknown";
             static DWORD s_noHp = 0;
             if (!s_noHp || static_cast<int>(now - s_noHp) >= 10000) {
                 s_noHp = now;
-                x::runtime::LogW("AutoPot", "no HP potion in Consume tab");
+                if (std::strcmp(why, "soft_reject") == 0) {
+                    x::runtime::LogW("AutoPot", "PageDown HP bind soft-reject id=%d", fr.itemId);
+                } else if (std::strcmp(why, "not_in_bag") == 0) {
+                    x::runtime::LogW("AutoPot", "PageDown HP bind not in bag id=%d", fr.itemId);
+                } else if (std::strcmp(why, "not_item") == 0) {
+                    x::runtime::LogW("AutoPot", "PageDown key not Item (value=%d)", fr.itemId);
+                } else if (std::strcmp(why, "empty_bind") == 0 || std::strcmp(why, "no_fkm") == 0 ||
+                           std::strcmp(why, "bad_vk") == 0 || std::strcmp(why, "no_getdata") == 0) {
+                    x::runtime::LogW("AutoPot", "no PageDown HP bind (%s)", why);
+                } else {
+                    x::runtime::LogW("AutoPot", "PageDown HP resolve miss why=%s id=%d", why,
+                                     fr.itemId);
+                }
             }
         } else {
             gStats.hpPotionQty = fr.qty;
@@ -254,13 +292,14 @@ void Tick(DWORD now) {
                                  "hp use empty/fail streak → soft-backoff %us heal-stuck %us",
                                  config::kEmptyPotBackoffMs / 1000,
                                  config::kHealStuckBackoffMs / 1000);
+                if (hpEmergency && hpPct > 1) FirePotionKeyFallback(true);
                 gHpFailStreak = 0;
             }
         }
     }
     if (tryMp) {
         ports::consumable::FindResult fr{};
-        if (ports::consumable::FindAndUsePotion(ports::consumable::PotionKind::Mp, fr)) {
+        if (ports::consumable::FindAndUseBoundPotion(false, fr)) {
             gStats.mpPotionQty = fr.qty;
             gLastMpPot = now;
             gMpFailStreak = 0;
@@ -270,10 +309,24 @@ void Tick(DWORD now) {
                              fr.qty, mpPct);
         } else if (!fr.ok) {
             gStats.mpPotionQty = -1;
+            gMpBindMissUntil = now + config::kBindMissBackoffMs;
+            const char* why = fr.missWhy ? fr.missWhy : "unknown";
             static DWORD s_noMp = 0;
             if (!s_noMp || static_cast<int>(now - s_noMp) >= 10000) {
                 s_noMp = now;
-                x::runtime::LogW("AutoPot", "no MP potion in Consume tab");
+                if (std::strcmp(why, "soft_reject") == 0) {
+                    x::runtime::LogW("AutoPot", "PageUp MP bind soft-reject id=%d", fr.itemId);
+                } else if (std::strcmp(why, "not_in_bag") == 0) {
+                    x::runtime::LogW("AutoPot", "PageUp MP bind not in bag id=%d", fr.itemId);
+                } else if (std::strcmp(why, "not_item") == 0) {
+                    x::runtime::LogW("AutoPot", "PageUp key not Item (value=%d)", fr.itemId);
+                } else if (std::strcmp(why, "empty_bind") == 0 || std::strcmp(why, "no_fkm") == 0 ||
+                           std::strcmp(why, "bad_vk") == 0 || std::strcmp(why, "no_getdata") == 0) {
+                    x::runtime::LogW("AutoPot", "no PageUp MP bind (%s)", why);
+                } else {
+                    x::runtime::LogW("AutoPot", "PageUp MP resolve miss why=%s id=%d", why,
+                                     fr.itemId);
+                }
             }
         } else {
             gStats.mpPotionQty = fr.qty;
@@ -285,6 +338,7 @@ void Tick(DWORD now) {
                                  "mp use empty/fail streak → soft-backoff %us heal-stuck %us",
                                  config::kEmptyPotBackoffMs / 1000,
                                  config::kHealStuckBackoffMs / 1000);
+                if (mpEmergency && mpPct > 1) FirePotionKeyFallback(false);
                 gMpFailStreak = 0;
             }
         }
@@ -315,7 +369,7 @@ void Init() {
     gDualOneSince = 0;
     ports::consumable::Init();
     x::ui::player::Init();
-    x::runtime::LogI("Feature", "autopot ready (TWMS: CharacterData+UseRequest)");
+    x::runtime::LogI("Feature", "autopot ready (TWMS: PageDown/PageUp bind + UseRequest)");
 }
 
 void Shutdown() {

@@ -3,7 +3,8 @@
 // TWMS 载荷状态：Local\XCatPayloadStatus_<hash> SHM。
 // v1：仅 CCU；v2：顶栏 5 灯；v3：守护 exp；v4：playReady/wmAlive/sceneState + 人类可读图名；
 // v5：sellbag 一键卖状态（对照枫星字段名）；
-// v6：kick_sniff 断线边沿（守护干净重拉）。
+// v6：kick_sniff 断线边沿（守护干净重拉）；
+// v7：引擎帧率锁读回（frame_lock）。
 
 #include <Windows.h>
 
@@ -13,7 +14,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 6u;
+constexpr uint32_t kPayloadStatusVersion = 7u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -60,6 +61,11 @@ struct PayloadStatus {
     int32_t sessionState = -1;        // 0..3；-1=未知
     int32_t pendingErrorCode = -1;    // Session._pendingErrorCode；-1=未知
     uint32_t sawDisconnect = 0;       // sticky：本会话曾见断线边沿
+
+    // v7：引擎帧率锁（Application.get_targetFrameRate 读回；非显示器 Hz）
+    uint32_t frameLockOn = 0;         // 功能开关（desired）
+    uint32_t frameLockWant = 0;       // 目标 fps（clamp 后）
+    int32_t frameLockReadback = -1;   // 最近一次引擎读回；-1=尚未采到/失败
 };
 #pragma pack(pop)
 

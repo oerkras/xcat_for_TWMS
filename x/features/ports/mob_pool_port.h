@@ -2,10 +2,15 @@
 // mob_pool_port — Classic TWMS 活怪只读快照 + 刷怪槽 M
 //
 // 真源：Dumps/runtime/out/dump.cs（2026-08-03 remount）
-//   MobPool(d8a4e9e1…) / Mob(a6c2b431…) / MapData(bb2af058…＝WM+0x88 字段类型)
+//   MobPool(f4afa0ce…) / Mob(a803dc63…) / MapData(a08e1596…＝WM+0x88 字段类型)
 //   MapData.LifeList@+0x38 · MapLifeData.Type@+0x20 (1=Mob)
 //   WorldManager._currentMapData@+0x88
 // 禁止 INLINE HOOK；不调用游戏写接口。
+//
+// 绝对血：
+//   Mob 本体只有 HpPercentage@+0x240。
+//   包/UI 侧有绝对血（ShowMobHpTag → UIHpTag cur@+0xD4 max@+0xD8），但包路径为 E8 直调；
+//   不做 MI/trampoline 观察。ResolveAbsHp：可选 FindAll UIHpTag → 进程缓存 → hp%×表。
 
 #include <cstdint>
 
@@ -26,20 +31,90 @@ enum : int32_t {
     kMobCtrlActivePerm1 = 4,
 };
 
+enum class AbsHpSrc : uint8_t {
+    None = 0,
+    UiHpTag = 1,       // 当场读到 UIHpTag
+    UiHpTagCache = 2,  // 先前 UI FindAll 写入的进程缓存
+    PctEstimate = 3,   // hpPct × mob_stats.maxHP
+};
+
 struct MobLite {
     void* ptr = nullptr;
     int32_t id = 0;
     int32_t templateId = 0;
     int32_t hpPct = 0;
+    int32_t lastHitted = 0;  // Mob._lastHitted@0x208；AddDamageInfo 当帧写（早于 hpPct）
     int32_t deadType = 0;
     int32_t ctrl = 0;  // MobCtrlType; >0 = ours
     float x = 0.f;
     float y = 0.f;
     bool ready = false;
+    // ResolveAbsHp 填充（TryFillLive / Collect 可选）；src=None 表示未解析。
+    int64_t absHp = 0;
+    int64_t absMaxHp = 0;
+    AbsHpSrc absSrc = AbsHpSrc::None;
 };
+
+// 离线表 dataservice/mob_stats.tsv：templateId → maxHP。未知模板返回 0。
+int64_t LookupTemplateMaxHp(int32_t templateId);
+
+// UIHpTag（预制名）：包/UI 路径缓存的绝对血（非 Mob 本体）。
+// IDA：ShowMobHpTag 写 mobId@+0xC8 · cur@+0xD4 · max@+0xD8（CMS 同语义，TW 偏移 +8）。
+// 仅血条弹出/曾弹出时有效；FindAll 扫不到时 ok=false。
+struct UiHpTagSnap {
+    bool ok = false;
+    int scanned = 0;  // FindAll 返回个数
+    int valid = 0;    // mobId!=0 && maxHp>0
+    int32_t mobId = 0;
+    int32_t cachedHp = 0;
+    int32_t cachedMaxHp = 0;
+    void* tagPtr = nullptr;
+};
+// preferMobId!=0 时优先匹配该 id；否则取第一份有效 tag。成功时顺便刷新进程缓存。
+bool TryReadUiHpTag(int32_t preferMobId, UiHpTagSnap& out);
+
+struct AbsHp {
+    bool ok = false;
+    AbsHpSrc src = AbsHpSrc::None;
+    int64_t cur = 0;
+    int64_t max = 0;
+};
+
+// 按 mobId 取绝对血：UIHpTag → 进程缓存 → hp%×表 maxHP。
+// refreshUi=true 时先 FindAll 扫 UIHpTag（较贵，热路径宜节流）。
+bool ResolveAbsHp(int32_t mobId, int32_t templateId, int32_t hpPct, AbsHp& out,
+                  bool refreshUi = false);
+
+// 丢弃某 mob / 全表的绝对血缓存（死怪、换图）。
+void InvalidateAbsHpCache(int32_t mobId);
+void ClearAbsHpCache();
+
+// Mob._damageInfo@+0x1D8（CMS List<DamageInfo>）。只读；用于标定 Damage@+0x24。
+constexpr int kMaxDamageInfoProbe = 8;
+struct DamageInfoLite {
+    int32_t skillId = 0;
+    int32_t hitAction = 0;
+    int32_t damage = 0;      // CMS +0x24
+    int32_t attackIdx = 0;
+    int32_t moveType = 0;
+    uint32_t charId = 0;
+    float delayed = 0.f;
+    // 原始 int 扫描（防布局漂移）：offs 0x14/18/1C/24/2C/34
+    int32_t raw[6]{};
+};
+struct DamageInfoSnap {
+    bool ok = false;
+    int listSize = 0;
+    int count = 0;           // 实际填入条数（末尾最多 kMaxDamageInfoProbe）
+    int64_t sumDamage = 0;   // 全列表 Damage@+0x24 求和（截断前）
+    int32_t lastDamage = 0;  // 末条 Damage
+    DamageInfoLite items[kMaxDamageInfoProbe]{};
+};
+bool TryReadDamageInfoList(void* mob, DamageInfoSnap& out);
 
 // Short name for a MobCtrlType value, for logs.
 const char* CtrlName(int32_t ctrl);
+const char* AbsHpSrcName(AbsHpSrc src);
 
 struct Snapshot {
     bool ok = false;
@@ -62,6 +137,7 @@ bool Collect(Snapshot& out);
 
 // 锁怪热路径：直接读 mob 指针字段（不等 mobscan 缓存）。
 // 活着填 out 返回 true；尸体/空血/野指针返回 false。expectId!=0 时校验 id。
+// 绝对血：默认用缓存+%估计（不 FindAll）；需要新鲜 UI 时自行 ResolveAbsHp(..., refreshUi=true)。
 bool TryFillLive(void* mob, int32_t expectId, MobLite& out);
 
 // 最近一次成功快照（双缓冲只读）

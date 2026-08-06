@@ -8,8 +8,9 @@
 namespace xcat {
 
 constexpr uint32_t kAnchorLampsMagic = 0x5843414Cu;  // 'XCAL'
-constexpr uint32_t kAnchorLampsVersion = 1u;
-constexpr size_t kAnchorLampMax = 16;
+constexpr uint32_t kAnchorLampsVersion = 3u;
+// v3：20 槽已被固定 roster(19) + SkipPrep 占满，新灯（DropFields）无处可放 → 扩到 24
+constexpr size_t kAnchorLampMax = 24;
 constexpr size_t kAnchorLampIdLen = 20;
 constexpr size_t kAnchorLampDetailLen = 28;
 

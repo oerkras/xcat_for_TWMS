@@ -1,4 +1,5 @@
-// Classic TWMS shop_port — UIShopDialog ready + TalkToNpc + UI 买卖。
+// Classic TWMS shop_port — UIShopDialog ready + TalkToNpc + UI 买卖 / Charge。
+// 字段：EnsureShopFieldOffsets（hash/明文 → field_get_offset；dump 常量 fallback）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -8,12 +9,15 @@
 #include "world_port.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
+#include "../../runtime/il2cpp_network.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/il2cpp_prefab.h"
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
 #include "../../runtime/anchor_lamps.h"
+#include "../../ui/player_vitals.h"
 #include "../travel/travel.h"
 #include "xcat_item_catalog.h"
 
@@ -39,65 +43,73 @@ using x::runtime::il2cpp::ReadPtr;
 
 // UIShopDialog — Prefab TypeDef
 constexpr char kUiShopDialogClass[] =
-    "b22d9c09d3f22e06cc2223c664889c14b3536d0dc1cae5d4720b1d5ba784d8d";
+    "b2312c3b203601629556a3868adc8dbd3dc8b038465b5cfb38a1f009005c62d";
 constexpr char kPrefabShopDialog[] = "UIShopDialog";
-// NpcPool — remounted 2026-08-03（旧 b7508d58… 已不在 dump；形：List@10 Dict@18 List@20 List@28 Field@30 int@38）
+// NpcPool — remounted 2026-08-04（形：List@10 Dict@18 List@20 List@28 Field@30 int@38）
 constexpr char kNpcPoolClass[] =
-    "a7a52ebb1d1a06fb72807c849d52cd19734ad00e28b8d36a7d31c1fb3bd9f61";
+    "a0fb3b2e02ee40f841ea5cffd26aa575c8874f3b67fc5d8e546e7b0aba464da";
 // UIUtilDialogEx（脚本对话 / AskMenu）— Prefab TypeDefIndex 609
 constexpr char kUiUtilDialogExClass[] =
-    "f6aae16821215515c8a8a544c9190ebfe831448d8d38f05740f1499231da1ae";
+    "b4e453d257ff2accdaaa31a1c94e0117cfa8c1e72caca8a1d0fc748fffd6351";
 constexpr char kPrefabUtilDialogEx[] = "UIUtilDialogEx";
 constexpr char kFuncKeyClass[] =
-    "bd3a79401c7d64bce45aac35ca0daf6e2dc938d1ffc0b396e137fde02b8c4cf";
+    "c5f306e5860ab75f344a5ad42c89868b10dd30405e7e07ca0ce540ddbb792c8";
 
-constexpr uint32_t kRvaOutPacketCreate = 0x1CB7BB0;  // remapped 2026-08-03
-constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CC4040;  // remapped 2026-08-03
-constexpr uint32_t kRvaOutPacketEncode2Short = 0x1CC4370;  // remapped 2026-08-03
-constexpr uint32_t kRvaOutPacketEncode4Int = 0x1CC4480;  // remapped 2026-08-03
-constexpr uint32_t kRvaNmSend = 0x1CB98B0;  // remapped 2026-08-03
-constexpr uint32_t kRvaUserLocalTalkToNpc = 0x107E9A0;  // remapped 2026-08-03
-constexpr uint32_t kRvaOnFuncKey = 0x107A200;  // remapped 2026-08-03
-constexpr uint32_t kRvaFuncKeyCtor = 0x1641AE0;  // remapped 2026-08-03: .ctor(FuncType,int)
+constexpr uint32_t kRvaOutPacketCreate = 0x1CC22D0;  // remounted 2026-08-04
+constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CCE8B0;  // remounted 2026-08-04
+constexpr uint32_t kRvaOutPacketEncode2Short = 0x1CCEBD0;  // remounted 2026-08-04
+constexpr uint32_t kRvaOutPacketEncode4Int = 0x1CCECE0;  // remounted 2026-08-04
+constexpr uint32_t kRvaNmSend = 0x1CC3EE0;  // remounted 2026-08-04 Session.SendPacket
+constexpr uint32_t kRvaUserLocalTalkToNpc = 0x1086710;  // remounted 2026-08-04
+constexpr uint32_t kRvaOnFuncKey = 0x1082250;  // remounted 2026-08-04
+constexpr uint32_t kRvaFuncKeyCtor = 0x1647B90;  // remounted 2026-08-04: .ctor(FuncType,int)
 // UIUtilDialogEx：SetKeyFocus(int) 选菜单项 / OnClickBtOk（走脚本应答链，含 66）
-constexpr uint32_t kRvaUiDlgSelectMenu = 0x786020;  // remapped 2026-08-03 SetKeyFocus
-constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x78E780;  // remapped 2026-08-03 OnClickBtOk
+constexpr uint32_t kRvaUiDlgSelectMenu = 0x788060;  // remounted 2026-08-04 SetKeyFocus
+constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x790B60;  // remounted 2026-08-04 OnClickBtOk
 // UIShopDialog.SendSellRequestPacket(int) — 产品卖出入口（与手组包同源，含 UI 状态）
-constexpr uint32_t kRvaSendSellRequestPacket = 0x54B700;  // remapped 2026-08-03
+constexpr uint32_t kRvaSendSellRequestPacket = 0x54DC40;  // remounted 2026-08-04
 // UIShopDialog.SendBuyRequestPacket(int) — 产品买入入口（见 docs/.../P0c）
-constexpr uint32_t kRvaSendBuyRequestPacket = 0x54AAE0;  // remapped 2026-08-03
+constexpr uint32_t kRvaSendBuyRequestPacket = 0x54CFF0;  // remounted 2026-08-04
+// UIShopDialog.SendRechargeRequestPacket() — 飞镖充值（卖栏选中；见 docs/.../P0d）
+constexpr uint32_t kRvaSendRechargeRequestPacket = 0x54E1B0;  // remounted 2026-08-04
 // UIShopDialog.CmpSellItem — 对照背包刷新卖栏列表（开店后列表=可卖背包投影）
-constexpr uint32_t kRvaCmpSellItem = 0x54D6A0;  // remapped 2026-08-03
+constexpr uint32_t kRvaCmpSellItem = 0x54FA10;  // remounted 2026-08-04
 // UIShopDialog.SetRet — 离店/收口（CMS 同源；私有，走官方关店链）
-constexpr uint32_t kRvaShopSetRet = 0x5376A0;  // remapped 2026-08-03
+constexpr uint32_t kRvaShopSetRet = 0x539400;  // remounted 2026-08-04
 // UIDialog.Close — 基类虚函数 Slot:31；关 UI 实例
-constexpr uint32_t kRvaUiDialogClose = 0x116F830;  // remapped 2026-08-03 UIDialog.Close Slot:31
+constexpr uint32_t kRvaUiDialogClose = 0x1178420;  // remounted 2026-08-04 UIDialog.Close
 // 方法哈希（dump 可读名缺失时的防漂；void(int) 在 UIShopDialog 上不唯一）
 constexpr char kHashSendSell[] =
-    "b0a44be8c4bbd2a385facfe0ec6cb20e751012177bced08bafb90254d22b384";
+    "f126e2a03a03898c1dd84db1acb673e8750ae4056455931e634217d925e4fd6";
 constexpr char kHashSendBuy[] =
-    "aff86c0c4a220985149cc3d5d02afd88b5da89682f1386e2a554b7cd35a1081";
+    "d7f70e91d8ae71174205284f6c3e2d7e7c04a4caff02e81f8db8419e7809a39";
+// UIShopDialog.SendRechargeRequestPacket — dump 仅哈希名
+constexpr char kHashSendRecharge[] =
+    "c0afd9225d031398b1d8a4a22fa2d6c25460d34ff0d467e33b2f0268d904497";
 constexpr char kHashCmpSell[] =
-    "aa345f6c1d838a471d287f0b0837bac692ba7c89eb3b27f408f3aff8a2bc652";
+    "fa9559e81df3a2717caa959b5dd70e6356b2e068a549a16e86c49ccb533a7cb";
 constexpr char kHashSendPacket[] =
-    "bcd0d90687418e2b3ff0faf5b96a9bb4028720a4eb37b78b74b873ce1dd891f";
+    "a3e15e8fb1d9cacfe30bdb5b652ad6f7df5037a51e3a48cfede943d8fc2d59b";
 constexpr char kHashTalkToNpc[] =
-    "a3cfea1a1aedb69214dbab1263c0d84c212e9c14bbc8620b9b5f64cc5867420";
+    "b006dccd855c3b8343944c8ce6c19c11ec2b9a903fa2d6ee07b8b0d41815e1e";
 constexpr char kHashOnFuncKey[] =
-    "eb70dd6a52329f9f7cffa938d48f1c529af67d1705bba4507ade9d5f58eabbe";
+    "f8cfa503e0f539e6dbb051a648d375a8b7847d067db4a7043e61ed7d49b423f";
 constexpr char kHashUiTabOnClick[] =
-    "ef6e8a74325e1b8968f7d98baa3efc8c8886d658893d3cb9a04dd4c73714975";
+    "aa20f4416b548c0cf26ce58adb75723b4c6918fbdb0ddb64c3988dc70b2e5f5";
+// UIUtilDialogEx.SetKeyFocus(int) — dump 仅哈希名（无 SetKeyFocus 明文）
+constexpr char kHashSetKeyFocus[] =
+    "f15d9c06fae408bd77cf19010f2fed138eecc80bc67dc1fbfbe7ee8e5049d04";
 constexpr char kOutPacketClass[] =
-    "aeb7167893ac51cbc0cf730326f2361e6e8b797eeb940786711185ef0fd658c";
+    "f07686cc7a01760c9166b2cf7a72f4ac7c084f1ee39bd1c3bdc42c351e884bb";
 // Unity helpers（明文名稳定；无游戏侧哈希名）— 走 ResolveUnityMi，禁止裸 AtRva 主路径
 // Button.Press — 触发 onClick（Awake 里 buttonExit→SetRet）
-constexpr uint32_t kRvaButtonPress = 0x4FA8800;  // remapped 2026-08-03
+constexpr uint32_t kRvaButtonPress = 0x4FB3D30;  // remounted 2026-08-04
 // Component.get_gameObject / GameObject.SetActive / get_activeSelf — 残留 modal 强拆
-constexpr uint32_t kRvaGetGameObject = 0x4E47E00;  // remapped 2026-08-03
-constexpr uint32_t kRvaGoSetActive = 0x4E4D6A0;  // remapped 2026-08-03 · 勿与 set_active@4E4D5D0 混淆
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4E4D770;  // remapped 2026-08-03
+constexpr uint32_t kRvaGetGameObject = 0x4E53330;  // remounted 2026-08-04 Component.get_gameObject
+constexpr uint32_t kRvaGoSetActive = 0x4E58B00;  // remounted 2026-08-04 GameObject.set_active
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4E58CA0;  // remounted 2026-08-04 GameObject.get_activeSelf
 // UITab.OnClickTab(int) — 切换商店角色区「装备/消耗/其他」等 TAB，并触发 OnTabChanged
-constexpr uint32_t kRvaUiTabOnClickTab = 0xAC0800;  // remapped 2026-08-03
+constexpr uint32_t kRvaUiTabOnClickTab = 0xAC2DF0;  // remounted 2026-08-04
 constexpr int kClientUserShopRequest = 67;
 constexpr uint8_t kShopOpSell = 1;
 constexpr uint8_t kShopOpBuy = 0;
@@ -111,49 +123,169 @@ constexpr int kUiDlgTypeList = 4;
 
 // Session/NM 方法宿主（与 il2cpp_shape::kHashNetworkManager 同；EnsureBound 走 ResolveNetworkManagerKlass）
 constexpr char kSessionClass[] =
-    "f0ee06b64ad95c59b95ca923b6db62ce451a5c512b3ef47e7c3814caca41909";
+    "b7c1f7127579884c9322a45b49e48641be2e38cd1a8cfc8ac607d465605f691";  // remounted 2026-08-04 NM/Session
 
-constexpr size_t kOffWmCharacterData = 0xE0;
-constexpr size_t kOffWmBasicStat = 0xE8;
-constexpr size_t kOffCdItemSlots = 0x40;
-constexpr size_t kOffCdCharacterStat = 0x10;
-constexpr size_t kOffCsMoney = 0x58;  // CharacterStat.Money : long（2026-08-03）
-constexpr size_t kOffListItems = 0x10;
-constexpr size_t kOffListSize = 0x18;
-constexpr size_t kOffSlotItemId = 0x10;
-constexpr size_t kOffBundleNumber = 0x28;
-constexpr size_t kOffNpcPoolList = 0x10;  // NpcPool._npcList
-constexpr size_t kOffActorPos = 0x64;      // FieldActorBase Pos (Vector2)
-constexpr size_t kOffNpcObjectId = 0x78;
-constexpr size_t kOffNpcData = 0x80;     // Npc._npcData
-constexpr size_t kOffNpcDataId = 0x10;   // NpcData.Id (= template)
-constexpr size_t kOffUiDlgType = 0xA0;    // UIUtilDialogEx.Type
-constexpr size_t kOffUiDlgMenuTexts = 0xE0;  // List<string> 菜单文案
+// 背包 / Money：SSOT = x::ui::player（hash→field_get_offset）；禁止再钉 WM/CD/CS 偏移。
+#define kOffListItems (x::runtime::il2cpp_container::OffListItems())
+#define kOffListSize (x::runtime::il2cpp_container::OffListSize())
+#define kOffArrLen (x::runtime::il2cpp_container::OffArrayMaxLength())
+#define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
+constexpr size_t kFbNpcPoolList = 0x10;  // NpcPool._npcList
+constexpr char kHashNpcPoolList[] =
+    "cb38d7d67b28e3b2ffce49493ce5f882b5d87e5295b53c144f93a43093e6d47";
+size_t gOffNpcPoolList = kFbNpcPoolList;
+#define kOffNpcPoolList (gOffNpcPoolList)
+
+constexpr char kNpcClass[] =
+    "d506d3becc05874e0a1cb216b7dd6fb5ffb24c7513ba934ed7833a4725fa2a9";
+constexpr char kNpcDataClass[] =
+    "f3156504f8a32da53059dbf87e2d6f3fca0c8d667a62ee89e2f4d989faabee7";
+constexpr char kActorBaseClass[] =
+    "ddef6db860cfa2bea6dca39e201bf3065a897797f86009fb4d6104830143d94";
+constexpr char kPacketClass[] =
+    "fc6ae331019bd3c1e987ba71c4f75e3591b683aabc4278715ac9c79480cbdac";
+
+constexpr char kHashActorPos[] =
+    "c9d7ef4393802ebe9fdf9ebe7eaf7245d5cef3eeaa2a8d052fb4ad4883e34dc";
+constexpr char kHashNpcObjectId[] =
+    "<c845ba7fdf2f37de88ceb1a46e3f5215d673d2ddd703ff608e7489cbe2bea69>k__BackingField";
+constexpr char kHashNpcData[] =
+    "d243df733acb45de873cfceb37d37605406e01e71e0a0da81c9e4bc5d66d831";
+constexpr char kHashNpcDataId[] =
+    "ff834f2f80ec735bc83d16d45a8a065505b80c42f295c577b6ee1f0f022c6c6";
+constexpr char kHashUiDlgType[] =
+    "b3a24feaeedd4920e126b39b80a92937392b19125a75f33c99dce21b409dac2";
+constexpr char kHashUiDlgMenuTexts[] =
+    "<e38b733b5e6ab7f243016dc29720e2e387c8ec9537ea2234c7d566a0a8c173c>k__BackingField";
+constexpr char kHashPacketOffset[] =
+    "<f9bbb972b920d8265c641b982330d9a76a2a52c97dee9c9c8ed0a9030c1778c>k__BackingField";
+constexpr char kHashOutPacketId[] =
+    "a40d505bf94e3c9d0dbbc1dad4cfa27e37c562ef01c4fe5364e92e03c6f04af";
+
+constexpr size_t kFbActorPos = 0x64, kFbNpcObjectId = 0x78, kFbNpcData = 0x80;
+constexpr size_t kFbNpcDataId = 0x10, kFbUiDlgType = 0xA0, kFbUiDlgMenuTexts = 0xE0;
+constexpr size_t kFbOutPacketId = 0x20, kFbPacketOffset = 0x18;
+size_t gOffActorPos = kFbActorPos, gOffNpcObjectId = kFbNpcObjectId, gOffNpcData = kFbNpcData;
+size_t gOffNpcDataId = kFbNpcDataId, gOffUiDlgType = kFbUiDlgType;
+size_t gOffUiDlgMenuTexts = kFbUiDlgMenuTexts, gOffOutPacketId = kFbOutPacketId;
+size_t gOffPacketOffset = kFbPacketOffset;
+#define kOffActorPos (gOffActorPos)
+#define kOffNpcObjectId (gOffNpcObjectId)
+#define kOffNpcData (gOffNpcData)
+#define kOffNpcDataId (gOffNpcDataId)
+#define kOffUiDlgType (gOffUiDlgType)
+#define kOffUiDlgMenuTexts (gOffUiDlgMenuTexts)
+#define kOffOutPacketId (gOffOutPacketId)
+#define kOffPacketOffset (gOffPacketOffset)
 constexpr size_t kOffCachedPtr = 0x10;
-constexpr size_t kOffNmSession = 0x10;       // Facade → Session*
-constexpr size_t kOffNmSessionState = 0x18;  // Facade.SessionState（3=Connected）
-constexpr size_t kOffNmOpcodeHashSet = 0x48;
-constexpr size_t kOffSessionState = 0x60;    // Session.SessionState（TW；真连线态）
-constexpr size_t kOffOutPacketId = 0x20;
-constexpr size_t kOffPacketOffset = 0x18;
-// UIShopDialog（TW）：买/卖列表 / 选中下标 / 请求中标记
-constexpr size_t kOffBuyItemList0 = 0x178;  // 买栏候选 A（UITab 二选一）
-constexpr size_t kOffBuyItemList1 = 0x180;  // 买栏候选 B
-constexpr size_t kOffSellItemList = 0x198;
-constexpr size_t kOffBuySelectedIndex = 0x1A8;
-constexpr size_t kOffLastBuyIndex = 0x1B0;
-constexpr size_t kOffSellSelectedIndex = 0x1AC;
-constexpr size_t kOffLastSellIndex = 0x1B8;
-constexpr size_t kOffHasShopRequestSent = 0x1B4;
-constexpr size_t kOffShopItemId = 0x10;     // UIShopDialog.Item.ItemId
-constexpr size_t kOffShopItemPos = 0x14;    // UIShopDialog.Item.Position
-constexpr size_t kOffShopItemPrice = 0x28;  // UIShopDialog.Item.Price
-// UIShopDialog 两侧 UITab：0xC0 多为店侧模式；0xC8 多为角色背包区（装备/消耗/其他）
-constexpr size_t kOffShopUiTab0 = 0xC0;
-constexpr size_t kOffShopUiTab1 = 0xC8;
-constexpr size_t kOffShopButtonExit = 0xA8;  // UIShopDialog.buttonExit : UIButton
-constexpr size_t kOffUiTabCurrentIndex = 0x20;  // UITab.CurrentTabIndex
-constexpr size_t kOffUiTabItems = 0x28;         // UITab.Items
+#define kOffNmSession (x::runtime::il2cpp_network::OffNmSession())
+#define kOffNmSessionState (x::runtime::il2cpp_network::OffNmSessionState())
+#define kOffNmOpcodeHashSet (x::runtime::il2cpp_network::OffNmOpcodeHashSet())
+#define kOffSessionState (x::runtime::il2cpp_network::OffSessionState())
+
+// —— UIShopDialog / Item / UITab 字段防漂移：hash→field_get_offset；下列仅 dump fallback ——
+constexpr size_t kFbBuyItemList0 = 0x178;
+constexpr size_t kFbBuyItemList1 = 0x180;
+constexpr size_t kFbSellItemList = 0x198;
+constexpr size_t kFbBuySelectedIndex = 0x1A8;
+constexpr size_t kFbSellSelectedIndex = 0x1AC;
+constexpr size_t kFbLastBuyIndex = 0x1B0;
+constexpr size_t kFbHasShopRequestSent = 0x1B4;
+constexpr size_t kFbLastSellIndex = 0x1B8;
+constexpr size_t kFbShopUiTab0 = 0xC0;
+constexpr size_t kFbShopUiTab1 = 0xC8;
+constexpr size_t kFbShopButtonExit = 0xA8;
+constexpr size_t kFbShopItemId = 0x10;
+constexpr size_t kFbShopItemPos = 0x14;
+constexpr size_t kFbShopItemPrice = 0x28;
+constexpr size_t kFbShopItemUnitPrice = 0x30;
+constexpr size_t kFbShopItemMaxSlot = 0x38;
+constexpr size_t kFbShopItemQty = 0x40;
+constexpr size_t kFbUiTabCurrentIndex = 0x20;
+constexpr size_t kFbUiTabItems = 0x28;
+
+// UIShopDialog 私有字段哈希（dump.cs.restored.C TDI 434 · remount 2026-08-04）
+constexpr char kHashFldBuyList0[] =
+    "d884e932d66a71e35a2de8d3f4e10ec2c7e27572242427198d56e50c0520797";  // _buyItemList
+constexpr char kHashFldBuyList1[] =
+    "ce9eeff0583497e9f17466f01ce38cf2f2e0f87eda495b3b560853b96f0f007";  // _buyItemRecommendedList
+constexpr char kHashFldSellList[] =
+    "cbfa05e00f790af9be025f95574eaf1bb23e4b2d0e9237e47cf4443b60b6ec6";  // _sellItemList
+constexpr char kHashFldBuySelected[] =
+    "c9b6f403c88470fcc7f23a980b272f35d66987e642df60cf760793a8558cba6";  // _buySelectedIndex
+constexpr char kHashFldSellSelected[] =
+    "f20422063e6b3f56f7880fc5902fb166358753cbd56d999d26e30ffb624aabd";  // _sellSelectedIndex
+constexpr char kHashFldLastBuy[] =
+    "bf113bc651dd0165cd8c4f2445598a4aebd5fdf78678d00f31520aad54eae77";  // lastBuy / snapshot 痕迹
+constexpr char kHashFldHasRequest[] =
+    "f4b4246184d79e960db2186a8ab811812b12d21e0679fb945980f1f24f21f1f";  // _hasShopRequestSent
+constexpr char kHashFldLastSell[] =
+    "ad39fc781f4a2ccf5faf978ff5ba7d3630dd5a7e58f24713b290be7d94e97c6";  // _lastSellIndex
+constexpr char kHashFldUiTab0[] =
+    "ef65620858216c1fe64f8a659bc035aa0d3b2e6ac533485810eaa7edea618e0";
+constexpr char kHashFldUiTab1[] =
+    "e0482df6d58fa2642449223e9cabfdabae9ac90e49653cf4b08da0aad5f6403";
+constexpr char kHashFldButtonExit[] =
+    "cbfb0be7b7627bfa964f13929e8813b0f2b128a60027b876ebd87cdac15bb66";
+
+// Item DTO（TDI 435）公开字段仍为明文名
+constexpr char kFldItemId[] = "ItemId";
+constexpr char kFldItemPos[] = "Position";
+constexpr char kFldItemPrice[] = "Price";
+constexpr char kFldItemUnitPrice[] = "UintPrice";  // dump 拼写
+constexpr char kFldItemMaxSlot[] = "MaxSlotCount";
+constexpr char kFldItemQty[] = "Quantity";
+constexpr char kFldUiTabCurrent[] = "CurrentTabIndex";
+constexpr char kFldUiTabItems[] = "Items";
+
+struct ShopFieldOff {
+    size_t buyList0 = kFbBuyItemList0;
+    size_t buyList1 = kFbBuyItemList1;
+    size_t sellList = kFbSellItemList;
+    size_t buySelected = kFbBuySelectedIndex;
+    size_t sellSelected = kFbSellSelectedIndex;
+    size_t lastBuy = kFbLastBuyIndex;
+    size_t hasRequest = kFbHasShopRequestSent;
+    size_t lastSell = kFbLastSellIndex;
+    size_t uiTab0 = kFbShopUiTab0;
+    size_t uiTab1 = kFbShopUiTab1;
+    size_t buttonExit = kFbShopButtonExit;
+    size_t itemId = kFbShopItemId;
+    size_t itemPos = kFbShopItemPos;
+    size_t itemPrice = kFbShopItemPrice;
+    size_t itemUnitPrice = kFbShopItemUnitPrice;
+    size_t itemMaxSlot = kFbShopItemMaxSlot;
+    size_t itemQty = kFbShopItemQty;
+    size_t tabCurrent = kFbUiTabCurrentIndex;
+    size_t tabItems = kFbUiTabItems;
+    bool tried = false;
+    int hits = 0;
+    const char* path = "fallback";  // meta | meta-partial | fallback
+};
+ShopFieldOff gOff{};
+
+#define kOffBuyItemList0 (gOff.buyList0)
+#define kOffBuyItemList1 (gOff.buyList1)
+#define kOffSellItemList (gOff.sellList)
+#define kOffBuySelectedIndex (gOff.buySelected)
+#define kOffSellSelectedIndex (gOff.sellSelected)
+#define kOffLastBuyIndex (gOff.lastBuy)
+#define kOffHasShopRequestSent (gOff.hasRequest)
+#define kOffLastSellIndex (gOff.lastSell)
+#define kOffShopUiTab0 (gOff.uiTab0)
+#define kOffShopUiTab1 (gOff.uiTab1)
+#define kOffShopButtonExit (gOff.buttonExit)
+#define kOffShopItemId (gOff.itemId)
+#define kOffShopItemPos (gOff.itemPos)
+#define kOffShopItemPrice (gOff.itemPrice)
+#define kOffShopItemUnitPrice (gOff.itemUnitPrice)
+#define kOffShopItemMaxSlot (gOff.itemMaxSlot)
+#define kOffShopItemQty (gOff.itemQty)
+#define kOffUiTabCurrentIndex (gOff.tabCurrent)
+#define kOffUiTabItems (gOff.tabItems)
+
+constexpr int kShurikenIdMin = 2070000;
+constexpr int kShurikenIdMax = 2079999;
 constexpr int kSessionStateConnected = 3;
 
 constexpr int kInvTiEquip = 1;
@@ -182,6 +314,7 @@ using FnUiDlgSelectMenu = void (*)(void* self, int index, const void* method);
 using FnUiDlgOnClickOk = void (*)(void* self, const void* method);
 using FnSendSellPacket = void (*)(void* self, int nCount, const void* method);
 using FnSendBuyPacket = void (*)(void* self, int nCount, const void* method);
+using FnSendRechargePacket = void (*)(void* self, const void* method);
 using FnCmpSellItem = int (*)(void* self, const void* method);
 using FnShopSetRet = void (*)(void* self, const void* method);
 using FnUiDialogClose = void (*)(void* self, const void* method);
@@ -216,9 +349,12 @@ MethodInfoHead* gMiEncode4 = nullptr;
 MethodInfoHead* gMiSend = nullptr;
 MethodInfoHead* gMiSendSellPacket = nullptr;
 MethodInfoHead* gMiSendBuyPacket = nullptr;
+MethodInfoHead* gMiSendRechargePacket = nullptr;
 MethodInfoHead* gMiCmpSellItem = nullptr;
 MethodInfoHead* gMiShopSetRet = nullptr;
 MethodInfoHead* gMiUiDialogClose = nullptr;
+MethodInfoHead* gMiUiDlgOnClickOk = nullptr;
+MethodInfoHead* gMiUiDlgSelectMenu = nullptr;
 MethodInfoHead* gMiButtonPress = nullptr;
 MethodInfoHead* gMiGetGameObject = nullptr;
 MethodInfoHead* gMiGoSetActive = nullptr;
@@ -241,6 +377,165 @@ int32_t ReadI32(void* obj, size_t off) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
+}
+
+double ReadF64(void* obj, size_t off) {
+    if (!obj) return 0.0;
+    __try {
+        return *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(obj) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0.0;
+    }
+}
+
+bool PlausibleInstanceOff(size_t off) {
+    return off >= 0x10 && off < 0x1000;
+}
+
+bool FieldOffOrFb(void* klass, const char* fieldName, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !fieldName) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    void* field = nullptr;
+    __try {
+        field = e.classGetFieldFromName(klass, fieldName);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!field) return false;
+    size_t off = 0;
+    __try {
+        off = e.fieldGetOffset(field);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!PlausibleInstanceOff(off)) return false;
+    *out = off;
+    return true;
+}
+
+using FnClassGetNestedTypes = void* (*)(void* klass, void** iter);
+
+void* FindShopItemKlass(void* shopKlass) {
+    if (!shopKlass) return nullptr;
+    HMODULE ga = x::runtime::il2cpp::GameAssembly();
+    if (ga) {
+        auto nested = reinterpret_cast<FnClassGetNestedTypes>(
+            GetProcAddress(ga, "il2cpp_class_get_nested_types"));
+        const auto& e = x::runtime::il2cpp::Get();
+        if (nested && e.classGetFieldFromName) {
+            void* iter = nullptr;
+            __try {
+                for (;;) {
+                    void* nk = nested(shopKlass, &iter);
+                    if (!nk) break;
+                    void* fUnit = e.classGetFieldFromName(nk, kFldItemUnitPrice);
+                    void* fId = e.classGetFieldFromName(nk, kFldItemId);
+                    if (fUnit && fId) return nk;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    }
+    // 明文 Item + 独特 UintPrice 作鉴别（避免误绑其它 Item）
+    void* cand = x::runtime::il2cpp::FindClass("", "Item");
+    if (cand) {
+        const auto& e = x::runtime::il2cpp::Get();
+        if (e.classGetFieldFromName) {
+            void* fUnit = nullptr;
+            __try {
+                fUnit = e.classGetFieldFromName(cand, kFldItemUnitPrice);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                fUnit = nullptr;
+            }
+            if (fUnit) return cand;
+        }
+    }
+    return nullptr;
+}
+
+void EnsureShopFieldOffsets() {
+    if (gOff.tried) return;
+    gOff.tried = true;
+    if (!x::runtime::il2cpp::Ensure()) {
+        x::runtime::LogW("Shop", "field offsets: bind miss — dump fallbacks");
+        return;
+    }
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) {
+        x::runtime::LogW("Shop", "field offsets: exports miss — dump fallbacks");
+        return;
+    }
+
+    void* shopKlass = gShopDlgKlass;
+    if (!shopKlass) {
+        shopKlass =
+            x::runtime::il2cpp_prefab::FindClassCached(kUiShopDialogClass, kPrefabShopDialog).klass;
+        if (shopKlass) gShopDlgKlass = shopKlass;
+    }
+    void* tabKlass = x::runtime::il2cpp::FindClass("", "UITab");
+    void* itemKlass = FindShopItemKlass(shopKlass);
+
+    int hits = 0;
+    auto hit = [&](bool ok) {
+        if (ok) ++hits;
+    };
+
+    hit(FieldOffOrFb(shopKlass, kHashFldBuyList0, kFbBuyItemList0, &gOff.buyList0));
+    hit(FieldOffOrFb(shopKlass, kHashFldBuyList1, kFbBuyItemList1, &gOff.buyList1));
+    hit(FieldOffOrFb(shopKlass, kHashFldSellList, kFbSellItemList, &gOff.sellList));
+    hit(FieldOffOrFb(shopKlass, kHashFldBuySelected, kFbBuySelectedIndex, &gOff.buySelected));
+    hit(FieldOffOrFb(shopKlass, kHashFldSellSelected, kFbSellSelectedIndex, &gOff.sellSelected));
+    hit(FieldOffOrFb(shopKlass, kHashFldLastBuy, kFbLastBuyIndex, &gOff.lastBuy));
+    hit(FieldOffOrFb(shopKlass, kHashFldHasRequest, kFbHasShopRequestSent, &gOff.hasRequest));
+    hit(FieldOffOrFb(shopKlass, kHashFldLastSell, kFbLastSellIndex, &gOff.lastSell));
+    hit(FieldOffOrFb(shopKlass, kHashFldUiTab0, kFbShopUiTab0, &gOff.uiTab0));
+    hit(FieldOffOrFb(shopKlass, kHashFldUiTab1, kFbShopUiTab1, &gOff.uiTab1));
+    hit(FieldOffOrFb(shopKlass, kHashFldButtonExit, kFbShopButtonExit, &gOff.buttonExit));
+
+    hit(FieldOffOrFb(itemKlass, kFldItemId, kFbShopItemId, &gOff.itemId));
+    hit(FieldOffOrFb(itemKlass, kFldItemPos, kFbShopItemPos, &gOff.itemPos));
+    hit(FieldOffOrFb(itemKlass, kFldItemPrice, kFbShopItemPrice, &gOff.itemPrice));
+    hit(FieldOffOrFb(itemKlass, kFldItemUnitPrice, kFbShopItemUnitPrice, &gOff.itemUnitPrice));
+    hit(FieldOffOrFb(itemKlass, kFldItemMaxSlot, kFbShopItemMaxSlot, &gOff.itemMaxSlot));
+    hit(FieldOffOrFb(itemKlass, kFldItemQty, kFbShopItemQty, &gOff.itemQty));
+
+    hit(FieldOffOrFb(tabKlass, kFldUiTabCurrent, kFbUiTabCurrentIndex, &gOff.tabCurrent));
+    hit(FieldOffOrFb(tabKlass, kFldUiTabItems, kFbUiTabItems, &gOff.tabItems));
+
+    void* npcPoolKlass =
+        gNpcPoolKlass ? gNpcPoolKlass : x::runtime::il2cpp::FindClass("", kNpcPoolClass);
+    if (npcPoolKlass) gNpcPoolKlass = npcPoolKlass;
+    hit(FieldOffOrFb(npcPoolKlass, kHashNpcPoolList, kFbNpcPoolList, &gOffNpcPoolList));
+
+    void* npcKlass = x::runtime::il2cpp::FindClass("", kNpcClass);
+    void* npcDataKlass = x::runtime::il2cpp::FindClass("", kNpcDataClass);
+    void* actorKlass = x::runtime::il2cpp::FindClass("", kActorBaseClass);
+    if (!actorKlass) actorKlass = npcKlass;
+    void* uiDlgKlass = gUiDlgKlass
+                           ? gUiDlgKlass
+                           : x::runtime::il2cpp::FindClass("", kUiUtilDialogExClass);
+    void* pktKlass = x::runtime::il2cpp::FindClass("", kPacketClass);
+    if (!pktKlass) pktKlass = gOutPacketKlass;
+    hit(FieldOffOrFb(actorKlass, kHashActorPos, kFbActorPos, &gOffActorPos));
+    hit(FieldOffOrFb(npcKlass, kHashNpcObjectId, kFbNpcObjectId, &gOffNpcObjectId));
+    hit(FieldOffOrFb(npcKlass, kHashNpcData, kFbNpcData, &gOffNpcData));
+    hit(FieldOffOrFb(npcDataKlass, kHashNpcDataId, kFbNpcDataId, &gOffNpcDataId));
+    hit(FieldOffOrFb(uiDlgKlass, kHashUiDlgType, kFbUiDlgType, &gOffUiDlgType));
+    hit(FieldOffOrFb(uiDlgKlass, kHashUiDlgMenuTexts, kFbUiDlgMenuTexts, &gOffUiDlgMenuTexts));
+    hit(FieldOffOrFb(pktKlass, kHashOutPacketId, kFbOutPacketId, &gOffOutPacketId));
+    hit(FieldOffOrFb(pktKlass, kHashPacketOffset, kFbPacketOffset, &gOffPacketOffset));
+
+    constexpr int kExpect = 28;
+    gOff.hits = hits;
+    gOff.path = hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback");
+    x::runtime::LogI(
+        "Shop",
+        "field offsets path=%s hits=%d/%d sellList=0x%zx npcData=0x%zx dlgType=0x%zx "
+        "pktId=0x%zx itemKlass=%p",
+        gOff.path, hits, kExpect, gOff.sellList, gOffNpcData, gOffUiDlgType, gOffOutPacketId,
+        itemKlass);
 }
 
 void WriteI32(void* obj, size_t off, int32_t v) {
@@ -284,7 +579,7 @@ void* ListAt(void* list, int index) {
 
 int ItemQty(void* slot) {
     if (!LooksLikeHeapPtr(slot)) return 0;
-    const int16_t n = ReadI16(slot, kOffBundleNumber);
+    const int16_t n = ReadI16(slot, x::ui::player::OffSlotBundleNumber());
     return n > 0 ? static_cast<int>(n) : 1;
 }
 
@@ -345,10 +640,7 @@ void* ResolveSingleton(void* klass) {
     const auto& e = x::runtime::il2cpp::Get();
     auto classInit = [&](void* k) {
         if (!k || !e.runtimeClassInit) return;
-        __try {
-            e.runtimeClassInit(k);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
+        x::runtime::il2cpp::RuntimeClassInit(k);
     };
     auto staticsOf = [&](void* k) -> void* {
         if (!k || !e.classStaticData) return nullptr;
@@ -443,45 +735,35 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
     return nullptr;
 }
 
-// 明文名 → 方法哈希 → RVA+kind（paramKlass 可钉死 OutPacket 等）。
+// hash → plain → RVA/kind（FindMethodResolved SSOT）。
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
-                          const char* plainName = nullptr, const char* hashName = nullptr) {
-    if (plainName) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plainName, shape.arity)) return mi;
-    }
-    if (hashName) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hashName, shape.arity)) return mi;
-    }
-    if (!klass) return FindMethodByRva(klass, rva);
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            x::runtime::LogI("Shop", "ResolveMi kind hit rva=0x%X plain=%s", rva,
-                             plainName ? plainName : "-");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
-    }
-    return FindMethodByRva(klass, rva);
+                          const char* plainName = nullptr, const char* hashName = nullptr,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
+    if (!klass) return nullptr;
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plainName, hashName);
+    if (outPath) *outPath = mr.path;
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
 }
 
 bool ResolveApi();
 
-// Unity：RVA 优先（SetActive 与 set_active 同形）；明文名 remount 兜底。
-MethodInfoHead* ResolveUnityMi(void* klass, uint32_t rva, const char* plain, int arity,
-                               const x::runtime::il2cpp_method::MethodShape& shape) {
-    if (klass) {
-        const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-        if (mr.method) {
-            if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-                x::runtime::LogI("Shop", "ResolveUnityMi kind hit rva=0x%X plain=%s", rva,
-                                 plain ? plain : "-");
-            }
-            return reinterpret_cast<MethodInfoHead*>(mr.method);
-        }
+// Unity 无游戏哈希：FindMethodResolved = 明文 → RVA/kind（SetActive 靠 arity+RVA 避开 set_active）。
+MethodInfoHead* ResolveUnityMi(void* klass, uint32_t rva, const char* plain,
+                               const x::runtime::il2cpp_method::MethodShape& shape,
+                               x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
+    if (!klass) return nullptr;
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, nullptr);
+    if (outPath) *outPath = mr.path;
+    if (mr.method && mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
+        x::runtime::LogI("Shop", "ResolveUnityMi kind hit rva=0x%X plain=%s", rva,
+                         plain ? plain : "-");
     }
-    if (MethodInfoHead* mi = FindMethodByName(klass, plain, arity)) return mi;
-    return nullptr;
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
 }
 
 template <typename Fn>
@@ -502,25 +784,33 @@ bool BindUnityHelpers() {
     void* goKlass = x::runtime::il2cpp::FindClass("UnityEngine", "GameObject");
     if (btnKlass && !gMiButtonPress) {
         constexpr MethodShape kPress{0, TypeKind::Void, true, true, {}};
-        gMiButtonPress = ResolveUnityMi(btnKlass, kRvaButtonPress, "Press", 0, kPress);
+        gMiButtonPress = ResolveUnityMi(btnKlass, kRvaButtonPress, "Press", kPress);
     }
     if (compKlass && !gMiGetGameObject) {
         constexpr MethodShape kGo{0, TypeKind::Ptr, true, true, {}};
         gMiGetGameObject =
-            ResolveUnityMi(compKlass, kRvaGetGameObject, "get_gameObject", 0, kGo);
+            ResolveUnityMi(compKlass, kRvaGetGameObject, "get_gameObject", kGo);
     }
     if (goKlass) {
         // SetActive 与 set_active 同 void(bool)，unique kind 不可靠 → RVA+明文
         if (!gMiGoSetActive) {
             constexpr MethodShape kSet{1, TypeKind::Void, false, true, {TypeKind::Bool}};
             gMiGoSetActive =
-                ResolveUnityMi(goKlass, kRvaGoSetActive, "SetActive", 1, kSet);
+                ResolveUnityMi(goKlass, kRvaGoSetActive, "SetActive", kSet);
         }
         if (!gMiGoGetActiveSelf) {
             constexpr MethodShape kAct{0, TypeKind::Bool, true, true, {}};
             gMiGoGetActiveSelf =
-                ResolveUnityMi(goKlass, kRvaGoGetActiveSelf, "get_activeSelf", 0, kAct);
+                ResolveUnityMi(goKlass, kRvaGoGetActiveSelf, "get_activeSelf", kAct);
         }
+    }
+    static bool sUnityHitsLogged = false;
+    if (!sUnityHitsLogged && (gMiButtonPress || gMiGetGameObject || gMiGoSetActive || gMiGoGetActiveSelf)) {
+        sUnityHitsLogged = true;
+        const int hits = (gMiButtonPress ? 1 : 0) + (gMiGetGameObject ? 1 : 0) +
+                         (gMiGoSetActive ? 1 : 0) + (gMiGoGetActiveSelf ? 1 : 0);
+        x::runtime::LogI("Shop", "unity methods path=%s hits=%d/4",
+                         hits == 4 ? "plain" : (hits ? "meta-partial" : "fallback"), hits);
     }
     gUnityHelpersBound =
         gMiButtonPress && gMiGetGameObject && gMiGoSetActive && gMiGoGetActiveSelf;
@@ -580,8 +870,10 @@ bool ResolveApi() {
 bool Rebind(DWORD now) {
     if (now - gLastRebindMs < 1500 && gShopDlgKlass &&
         (gMiSendSellPacket || (gGA && AtRva<void*>(kRvaSendSellRequestPacket))) &&
-        (gMiSendBuyPacket || (gGA && AtRva<void*>(kRvaSendBuyRequestPacket))))
+        (gMiSendBuyPacket || (gGA && AtRva<void*>(kRvaSendBuyRequestPacket)))) {
+        EnsureShopFieldOffsets();
         return true;
+    }
     gLastRebindMs = now;
     if (!ResolveApi()) return false;
     BindUnityHelpers();
@@ -590,6 +882,7 @@ bool Rebind(DWORD now) {
         gShopDlgKlass =
             x::runtime::il2cpp_prefab::FindClassCached(kUiShopDialogClass, kPrefabShopDialog).klass;
     if (!gShopDlgType && gShopDlgKlass) gShopDlgType = ClassTypeObject(gShopDlgKlass);
+    EnsureShopFieldOffsets();
 
     if (!gFacadeKlass) gFacadeKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerFacadeKlass();
     if (!gSessionKlass) gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
@@ -616,10 +909,10 @@ bool Rebind(DWORD now) {
         }
         const int n = LooksLikeHeapPtr(arr)
                           ? static_cast<int>(*reinterpret_cast<uintptr_t*>(
-                                reinterpret_cast<uint8_t*>(arr) + 0x18))
+                                reinterpret_cast<uint8_t*>(arr) + kOffArrLen))
                           : 0;
         for (int i = 0; i < n && i < 8; ++i) {
-            void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20 +
+            void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + kOffArrData +
                                                 static_cast<size_t>(i) * sizeof(void*));
             if (!LooksLikeFacade(o)) continue;
             gNmFacade = o;
@@ -653,6 +946,14 @@ bool Rebind(DWORD now) {
                 ResolveMi(gOutPacketKlass, kRvaOutPacketEncode4Int, kEnc4, nullptr, nullptr);
         }
     }
+    using x::runtime::il2cpp_method::ResolvePath;
+    int methodHashHits = 0;
+    auto noteHash = [&](ResolvePath path) {
+        if (path == ResolvePath::Hash) ++methodHashHits;
+    };
+    ResolvePath pSend = ResolvePath::Miss, pSell = ResolvePath::Miss, pBuy = ResolvePath::Miss,
+                pCharge = ResolvePath::Miss, pCmp = ResolvePath::Miss, pMenu = ResolvePath::Miss;
+
     if (gNmKlass && !gMiSend) {
         // bool(OutPacket) — paramKlass 钉死，Session 上多个 bool(ptr) 可唯一。
         MethodShape kSend{};
@@ -662,23 +963,35 @@ bool Rebind(DWORD now) {
         kSend.walkParents = true;
         kSend.param[0] = TypeKind::Ptr;
         if (gOutPacketKlass) kSend.paramKlass[0] = gOutPacketKlass;
-        gMiSend = ResolveMi(gNmKlass, kRvaNmSend, kSend, "SendPacket", kHashSendPacket);
-        if (!gMiSend) gMiSend = ResolveMi(gNmKlass, kRvaNmSend, kSend, "Send", kHashSendPacket);
+        gMiSend = ResolveMi(gNmKlass, kRvaNmSend, kSend, "SendPacket", kHashSendPacket, &pSend);
+        if (!gMiSend)
+            gMiSend = ResolveMi(gNmKlass, kRvaNmSend, kSend, "Send", kHashSendPacket, &pSend);
+        noteHash(pSend);
     }
     if (gShopDlgKlass && !gMiSendSellPacket) {
         constexpr MethodShape kSell{1, TypeKind::Void, true, false, {TypeKind::I32}};
         gMiSendSellPacket = ResolveMi(gShopDlgKlass, kRvaSendSellRequestPacket, kSell,
-                                      "SendSellRequestPacket", kHashSendSell);
+                                      "SendSellRequestPacket", kHashSendSell, &pSell);
+        noteHash(pSell);
     }
     if (gShopDlgKlass && !gMiSendBuyPacket) {
         constexpr MethodShape kBuy{1, TypeKind::Void, true, false, {TypeKind::I32}};
         gMiSendBuyPacket = ResolveMi(gShopDlgKlass, kRvaSendBuyRequestPacket, kBuy,
-                                     "SendBuyRequestPacket", kHashSendBuy);
+                                     "SendBuyRequestPacket", kHashSendBuy, &pBuy);
+        noteHash(pBuy);
+    }
+    if (gShopDlgKlass && !gMiSendRechargePacket) {
+        constexpr MethodShape kCharge{0, TypeKind::Void, true, false, {}};
+        gMiSendRechargePacket =
+            ResolveMi(gShopDlgKlass, kRvaSendRechargeRequestPacket, kCharge,
+                      "SendRechargeRequestPacket", kHashSendRecharge, &pCharge);
+        noteHash(pCharge);
     }
     if (gShopDlgKlass && !gMiCmpSellItem) {
         constexpr MethodShape kCmp{0, TypeKind::I32, true, false, {}};
         gMiCmpSellItem =
-            ResolveMi(gShopDlgKlass, kRvaCmpSellItem, kCmp, "CmpSellItem", kHashCmpSell);
+            ResolveMi(gShopDlgKlass, kRvaCmpSellItem, kCmp, "CmpSellItem", kHashCmpSell, &pCmp);
+        noteHash(pCmp);
     }
     if (gShopDlgKlass && !gMiShopSetRet) {
         constexpr MethodShape kRet{0, TypeKind::Void, true, false, {}};
@@ -693,22 +1006,37 @@ bool Rebind(DWORD now) {
         kClose.walkParents = true;
         gMiUiDialogClose = ResolveMi(gShopDlgKlass, kRvaUiDialogClose, kClose, "Close", nullptr);
     }
+    if (!gUiDlgKlass)
+        gUiDlgKlass =
+            x::runtime::il2cpp_prefab::FindClassCached(kUiUtilDialogExClass, kPrefabUtilDialogEx)
+                .klass;
+    if (gUiDlgKlass && !gMiUiDlgOnClickOk) {
+        constexpr MethodShape kOk{0, TypeKind::Void, true, false, {}};
+        gMiUiDlgOnClickOk =
+            ResolveMi(gUiDlgKlass, kRvaUiDlgOnClickBtOk, kOk, "OnClickBtOk", nullptr);
+    }
+    if (gUiDlgKlass && !gMiUiDlgSelectMenu) {
+        // void(int) 不唯一 → 哈希主（dump 无 SetKeyFocus 明文）
+        constexpr MethodShape kMenu{1, TypeKind::Void, false, false, {TypeKind::I32}};
+        gMiUiDlgSelectMenu =
+            ResolveMi(gUiDlgKlass, kRvaUiDlgSelectMenu, kMenu, "SetKeyFocus", kHashSetKeyFocus,
+                      &pMenu);
+        noteHash(pMenu);
+    }
+    static bool sMethodHitsLogged = false;
+    if (!sMethodHitsLogged) {
+        sMethodHitsLogged = true;
+        x::runtime::LogI("Shop", "methods path=%s hits=%d/6",
+                         methodHashHits == 6 ? "meta"
+                                             : (methodHashHits ? "meta-partial" : "fallback"),
+                         methodHashHits);
+    }
     // 买/卖均走 UIShopDialog.*RequestPacket；手组包已证实会本地踢线。
     return gShopDlgKlass && (gMiSendSellPacket || AtRva<void*>(kRvaSendSellRequestPacket)) &&
            (gMiSendBuyPacket || AtRva<void*>(kRvaSendBuyRequestPacket));
 }
 
-void* GetBagList(int invType) {
-    void* wm = world::GetWorldManager();
-    if (!wm) return nullptr;
-    void* cd = ReadPtr(wm, kOffWmCharacterData);
-    if (!LooksLikeHeapPtr(cd)) return nullptr;
-    void* slotsArr = ReadPtr(cd, kOffCdItemSlots);
-    if (!LooksLikeHeapPtr(slotsArr)) return nullptr;
-    const uintptr_t n = ArrayLen(slotsArr);
-    if (static_cast<uintptr_t>(invType) >= n) return nullptr;
-    return ArrayAt(slotsArr, static_cast<uintptr_t>(invType));
-}
+void* GetBagList(int invType) { return x::ui::player::GetItemSlotList(invType); }
 
 struct ReadyJob {
     bool ready = false;
@@ -755,9 +1083,9 @@ void ReadyJobOnMain(void* user) {
     void* arr = gFindAll(gShopDlgType, nullptr);
     if (!LooksLikeHeapPtr(arr)) return;
     const int n = static_cast<int>(
-        *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + 0x18));
+        *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + kOffArrLen));
     for (int i = 0; i < n && i < 16; ++i) {
-        void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20 +
+        void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + kOffArrData +
                                             static_cast<size_t>(i) * sizeof(void*));
         if (!LooksLikeHeapPtr(o)) continue;
         if (!ShopDlgLooksOpen(o)) continue;
@@ -903,10 +1231,7 @@ void* ResolveNpcPoolOnMain() {
     const auto& e = x::runtime::il2cpp::Get();
     auto classInit = [&](void* k) {
         if (!k || !e.runtimeClassInit) return;
-        __try {
-            e.runtimeClassInit(k);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
+        x::runtime::il2cpp::RuntimeClassInit(k);
     };
     auto staticsOf = [&](void* k) -> void* {
         if (!k || !e.classStaticData) return nullptr;
@@ -1154,12 +1479,7 @@ void FuncKeyTalkJobOnMain(void* user) {
         job->err = "no FuncKey klass";
         return;
     }
-    void* fk = nullptr;
-    __try {
-        fk = e.objectNew(klass);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        fk = nullptr;
-    }
+    void* fk = x::runtime::il2cpp::AllocObject(klass);
     if (!LooksLikeHeapPtr(fk)) {
         job->err = "FuncKey alloc";
         return;
@@ -1252,11 +1572,11 @@ void ScriptMenuJobOnMain(void* user) {
     }
     const int n = LooksLikeHeapPtr(arr)
                       ? static_cast<int>(
-                            *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + 0x18))
+                            *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + kOffArrLen))
                       : 0;
     void* dlg = nullptr;
     for (int i = 0; i < n && i < 8; ++i) {
-        void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20 +
+        void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + kOffArrData +
                                             static_cast<size_t>(i) * sizeof(void*));
         if (!UnityAlive(o)) continue;
         dlg = o;
@@ -1267,24 +1587,22 @@ void ScriptMenuJobOnMain(void* user) {
         return;
     }
     job->dlgType = ReadI32(dlg, kOffUiDlgType);
-    auto clickOk = AtRva<FnUiDlgOnClickOk>(kRvaUiDlgOnClickBtOk);
-    auto selectMenu = AtRva<FnUiDlgSelectMenu>(kRvaUiDlgSelectMenu);
-    // 明文 OnClickBtOk 在 dump 残留；菜单 void(int) 不唯一 → RVA 主路径。
-    if (gUiDlgKlass) {
+    if (!gMiUiDlgOnClickOk || !gMiUiDlgSelectMenu) {
         using x::runtime::il2cpp_method::MethodShape;
         using x::runtime::il2cpp_method::TypeKind;
-        constexpr MethodShape kOk{0, TypeKind::Void, true, false, {}};
-        if (MethodInfoHead* miOk =
-                ResolveMi(gUiDlgKlass, kRvaUiDlgOnClickBtOk, kOk, "OnClickBtOk", nullptr)) {
-            if (miOk->methodPointer) clickOk = reinterpret_cast<FnUiDlgOnClickOk>(miOk->methodPointer);
+        if (gUiDlgKlass && !gMiUiDlgOnClickOk) {
+            constexpr MethodShape kOk{0, TypeKind::Void, true, false, {}};
+            gMiUiDlgOnClickOk =
+                ResolveMi(gUiDlgKlass, kRvaUiDlgOnClickBtOk, kOk, "OnClickBtOk", nullptr);
         }
-        constexpr MethodShape kMenu{1, TypeKind::Void, true, false, {TypeKind::I32}};
-        if (MethodInfoHead* miMenu =
-                ResolveMi(gUiDlgKlass, kRvaUiDlgSelectMenu, kMenu, "SetKeyFocus", nullptr)) {
-            if (miMenu->methodPointer)
-                selectMenu = reinterpret_cast<FnUiDlgSelectMenu>(miMenu->methodPointer);
+        if (gUiDlgKlass && !gMiUiDlgSelectMenu) {
+            constexpr MethodShape kMenu{1, TypeKind::Void, false, false, {TypeKind::I32}};
+            gMiUiDlgSelectMenu = ResolveMi(gUiDlgKlass, kRvaUiDlgSelectMenu, kMenu, "SetKeyFocus",
+                                           kHashSetKeyFocus);
         }
     }
+    auto clickOk = FnFromMi<FnUiDlgOnClickOk>(gMiUiDlgOnClickOk, kRvaUiDlgOnClickBtOk);
+    auto selectMenu = FnFromMi<FnUiDlgSelectMenu>(gMiUiDlgSelectMenu, kRvaUiDlgSelectMenu);
     if (!clickOk) {
         job->err = "no OnClickBtOk";
         return;
@@ -1317,8 +1635,8 @@ void ScriptMenuJobOnMain(void* user) {
         }
         job->picked = pick;
         __try {
-            if (selectMenu) selectMenu(dlg, pick, nullptr);
-            clickOk(dlg, nullptr);
+            if (selectMenu) selectMenu(dlg, pick, gMiUiDlgSelectMenu);
+            clickOk(dlg, gMiUiDlgOnClickOk);
             job->ok = true;
             job->err = "ok";
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1331,7 +1649,7 @@ void ScriptMenuJobOnMain(void* user) {
     // Say / YesNo：点确定推进（部分店会多段对话后才开店或出菜单）
     if (job->dlgType == kUiDlgTypeText || job->dlgType == kUiDlgTypeYesNo) {
         __try {
-            clickOk(dlg, nullptr);
+            clickOk(dlg, gMiUiDlgOnClickOk);
             job->ok = true;
             job->err = "ok-advance";
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1376,7 +1694,7 @@ void ScanJobOnMain(void* user) {
     for (int i = 0; i < n && job->count < job->maxItems; ++i) {
         void* slot = ListAt(list, i);
         if (!LooksLikeHeapPtr(slot)) continue;
-        const int itemId = ReadI32(slot, kOffSlotItemId);
+        const int itemId = ReadI32(slot, x::ui::player::OffSlotItemId());
         if (itemId <= 0) continue;
         const int qty = ItemQty(slot);
         if (qty <= 0) continue;
@@ -1596,6 +1914,142 @@ void SellJobOnMain(void* user) {
     }
 }
 
+struct ChargeJob {
+    int charged = 0;
+    int skipMeso = 0;
+    int skipOther = 0;
+    bool ok = false;
+    char err[96]{};
+};
+
+bool IsShurikenItemId(int itemId) {
+    return itemId >= kShurikenIdMin && itemId <= kShurikenIdMax;
+}
+
+int64_t ReadMesoNow() { return x::ui::player::ReadMoney(); }
+
+// 每次最多充 1 格飞镖：选赤字最大且金币够的卖栏行 → SendRechargeRequestPacket。
+void ChargeJobOnMain(void* user) {
+    auto* job = reinterpret_cast<ChargeJob*>(user);
+    if (!job) return;
+    job->ok = false;
+    job->charged = 0;
+    job->skipMeso = 0;
+    job->skipOther = 0;
+    job->err[0] = 0;
+    __try {
+        gLastRebindMs = 0;
+        if (!Rebind(GetTickCount())) {
+            strncpy_s(job->err, "UNBOUND", _TRUNCATE);
+            return;
+        }
+        ReadyJob ready{};
+        ReadyJobOnMain(&ready);
+        if (!ready.ready || !LooksLikeHeapPtr(gShopDlg)) {
+            strncpy_s(job->err, "NO_SHOP", _TRUNCATE);
+            return;
+        }
+        auto* sendPkt = reinterpret_cast<FnSendRechargePacket>(
+            gMiSendRechargePacket && gMiSendRechargePacket->methodPointer
+                ? gMiSendRechargePacket->methodPointer
+                : AtRva<void*>(kRvaSendRechargeRequestPacket));
+        auto* cmpSell = reinterpret_cast<FnCmpSellItem>(
+            gMiCmpSellItem && gMiCmpSellItem->methodPointer ? gMiCmpSellItem->methodPointer
+                                                           : AtRva<void*>(kRvaCmpSellItem));
+        if (!sendPkt) {
+            strncpy_s(job->err, "NO_RPC", _TRUNCATE);
+            return;
+        }
+        if ((ReadI32(gShopDlg, kOffHasShopRequestSent) & 0xFF) != 0) {
+            strncpy_s(job->err, "SHOP_BUSY", _TRUNCATE);
+            return;
+        }
+        bool tabSwitched = false;
+        (void)EnsureShopSellInvTab(gShopDlg, kInvTiConsume, &tabSwitched);
+        if (cmpSell) {
+            __try {
+                cmpSell(gShopDlg, gMiCmpSellItem);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+        void* list = ReadPtr(gShopDlg, kOffSellItemList);
+        const int listN = ListSize(list);
+        if (tabSwitched || listN <= 0) {
+            strncpy_s(job->err, "LIST_STALE", _TRUNCATE);
+            x::runtime::LogW("Shop", "charge LIST_STALE sellListN=%d switched=%d (retry)", listN,
+                             tabSwitched ? 1 : 0);
+            return;
+        }
+        if (listN > 512) {
+            strncpy_s(job->err, "LIST_BAD", _TRUNCATE);
+            return;
+        }
+        const int64_t meso = ReadMesoNow();
+        int bestIdx = -1;
+        int bestDeficit = 0;
+        int bestId = 0;
+        int bestPos = 0;
+        int bestMax = 0;
+        int bestQty = 0;
+        double bestUnit = 0.0;
+        for (int i = 0; i < listN; ++i) {
+            void* it = ListAt(list, i);
+            if (!LooksLikeHeapPtr(it)) continue;
+            const int itemId = ReadI32(it, kOffShopItemId);
+            if (!IsShurikenItemId(itemId)) continue;
+            const int maxSlot = ReadI32(it, kOffShopItemMaxSlot);
+            const int qty = ReadI32(it, kOffShopItemQty);
+            const double unit = ReadF64(it, kOffShopItemUnitPrice);
+            if (maxSlot <= 0 || qty >= maxSlot) {
+                ++job->skipOther;
+                continue;
+            }
+            if (!(unit > 0.0)) {
+                ++job->skipOther;
+                continue;
+            }
+            const int deficit = maxSlot - qty;
+            const int64_t cost = static_cast<int64_t>(unit * static_cast<double>(deficit) + 0.5);
+            if (meso >= 0 && cost > meso) {
+                ++job->skipMeso;
+                continue;
+            }
+            if (deficit > bestDeficit) {
+                bestDeficit = deficit;
+                bestIdx = i;
+                bestId = itemId;
+                bestPos = ReadI32(it, kOffShopItemPos);
+                bestMax = maxSlot;
+                bestQty = qty;
+                bestUnit = unit;
+            }
+        }
+        if (bestIdx < 0) {
+            job->ok = true;
+            if (job->skipMeso > 0)
+                strncpy_s(job->err, "NO_MESO", _TRUNCATE);
+            else
+                strncpy_s(job->err, "NONE", _TRUNCATE);
+            x::runtime::LogI("Shop", "charge none skipMeso=%d skipOther=%d listN=%d meso=%lld",
+                             job->skipMeso, job->skipOther, listN,
+                             static_cast<long long>(meso));
+            return;
+        }
+        WriteI32(gShopDlg, kOffSellSelectedIndex, bestIdx);
+        WriteI32(gShopDlg, kOffLastSellIndex, bestIdx);
+        sendPkt(gShopDlg, gMiSendRechargePacket);
+        job->charged = 1;
+        job->ok = true;
+        snprintf(job->err, sizeof(job->err), "FIRED via=ui");
+        x::runtime::LogI(
+            "Shop",
+            "charge FIRED via=ui id=%d pos=%d idx=%d qty=%d/%d unit=%.2f deficit=%d listN=%d",
+            bestId, bestPos, bestIdx, bestQty, bestMax, bestUnit, bestDeficit, listN);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        strncpy_s(job->err, "EXCEPTION", _TRUNCATE);
+    }
+}
+
 // 买栏：+0x178 / +0x180（UITab 二选一）。产品两侧都扫，命中即用该表下标。
 bool FindBuyListIndex(void* dlg, int itemId, int& outIndex, int& outPrice, int& outListN,
                       size_t& outListOff) {
@@ -1674,18 +2128,7 @@ void BuyJobOnMain(void* user) {
         }
         const int qty = job->count > 0 ? job->count : 1;
         if (price > 0) {
-            int64_t meso = -1;
-            void* wm = world::GetWorldManager();
-            void* cd = wm ? ReadPtr(wm, kOffWmCharacterData) : nullptr;
-            void* stat = LooksLikeHeapPtr(cd) ? ReadPtr(cd, kOffCdCharacterStat) : nullptr;
-            if (LooksLikeHeapPtr(stat)) {
-                __try {
-                    meso = *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(stat) +
-                                                       kOffCsMoney);
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                    meso = -1;
-                }
-            }
+            const int64_t meso = ReadMesoNow();
             if (meso >= 0 && (int64_t)price * (int64_t)qty > meso) {
                 strncpy_s(job->err, "NO_MESO", _TRUNCATE);
                 return;
@@ -1758,7 +2201,7 @@ void PresentJobOnMain(void* user) {
     for (int i = 0; i < n && i < 512; ++i) {
         void* slot = ListAt(list, i);
         if (!LooksLikeHeapPtr(slot)) continue;
-        if (ReadI32(slot, kOffSlotItemId) != job->itemId) continue;
+        if (ReadI32(slot, x::ui::player::OffSlotItemId()) != job->itemId) continue;
         found = true;
         total += ItemQty(slot);
     }
@@ -1774,17 +2217,7 @@ struct MesoJob {
 void MesoJobOnMain(void* user) {
     auto* job = reinterpret_cast<MesoJob*>(user);
     if (!job) return;
-    job->meso = -1;
-    void* wm = world::GetWorldManager();
-    if (!wm) return;
-    void* cd = ReadPtr(wm, kOffWmCharacterData);
-    void* stat = LooksLikeHeapPtr(cd) ? ReadPtr(cd, kOffCdCharacterStat) : nullptr;
-    if (!LooksLikeHeapPtr(stat)) return;
-    __try {
-        job->meso = *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(stat) + kOffCsMoney);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        job->meso = -1;
-    }
+    job->meso = x::ui::player::ReadMoney();
 }
 
 struct UsageJob {
@@ -1810,7 +2243,7 @@ void UsageJobOnMain(void* user) {
     for (int i = 0; i < n; ++i) {
         void* slot = ListAt(list, i);
         if (!LooksLikeHeapPtr(slot)) continue;
-        if (ReadI32(slot, kOffSlotItemId) > 0) ++used;
+        if (ReadI32(slot, x::ui::player::OffSlotItemId()) > 0) ++used;
     }
     job->used = used;
     job->ok = true;
@@ -2054,22 +2487,59 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
     if (gSeeds.empty()) return false;
 
     const std::string cur = CurrentMapForHops();
+    // 对照枫星 ShopTravelEffectiveHops：有回家卷时有效跳数 = min(直达, 最近主城→店)。
+    bool allowScrollVia = false;
+    char scrollTown[16]{};
+    if (!cur.empty() && cur != "?") {
+        bool present = false;
+        int qty = 0;
+        auto hasScroll = [&](int itemId) {
+            present = false;
+            qty = 0;
+            return QueryItemPresent(/*consume*/ 2, itemId, present, qty) && present && qty > 0;
+        };
+        if (hasScroll(2030000) || hasScroll(2030059)) {
+            if (features::travel::PredictReturnScrollTownOutdoor(cur.c_str(), scrollTown,
+                                                                sizeof(scrollTown))) {
+                allowScrollVia = true;
+            }
+        }
+    }
+
     int bestScore = INT_MAX;
     const GrocerySeed* best = nullptr;
+    int bestDirect = -1;
+    int bestVia = -1;
 
     for (const auto& s : gSeeds) {
         if (excludeMap && excludeMap[0] && MapEqualsLoose(s.mapId, excludeMap)) continue;
-        int hops = 0;
+        int direct = -1;
+        int via = -1;
         if (!cur.empty() && cur != "?") {
-            hops = features::travel::PathHopCount(cur.c_str(), s.mapId);
-            if (hops < 0) hops = 9999;  // unreachable → last resort
+            direct = features::travel::PathHopCount(cur.c_str(), s.mapId);
+            if (direct < 0) direct = -1;
         }
+        if (allowScrollVia && scrollTown[0]) {
+            via = features::travel::PathHopCount(scrollTown, s.mapId);
+            if (via < 0) via = -1;
+        }
+        int hops = -1;
+        if (direct >= 0 && via >= 0)
+            hops = direct < via ? direct : via;
+        else if (direct >= 0)
+            hops = direct;
+        else if (via >= 0)
+            hops = via;
+        else
+            hops = 9999;  // unreachable → last resort
         // hops 优先；同 hops 偏好 potion（杂货更常直接开店 / 菜单更短）
         const int score = hops * 10000 + ((s.tags & kTagPotion) ? 0 : 1000) +
                           ((s.tags & kTagSell) ? 0 : 10);
         if (score < bestScore) {
             bestScore = score;
             best = &s;
+            bestDirect = direct;
+            bestVia = via;
         }
     }
     if (!best) return false;
@@ -2078,8 +2548,10 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
     outMapName = best->mapId;
     outMapId = atoi(best->mapId);
     const int hopsLog = bestScore / 10000;
-    x::runtime::LogI("Shop", "ResolveShop nearest npc=%s map=%s hops=%d potion=%d", best->npcId,
-                     best->mapId, hopsLog == 9999 ? -1 : hopsLog,
+    x::runtime::LogI("Shop",
+                     "ResolveShop nearest npc=%s map=%s hops=%d direct=%d via=%s/%d potion=%d",
+                     best->npcId, best->mapId, hopsLog == 9999 ? -1 : hopsLog, bestDirect,
+                     allowScrollVia ? scrollTown : "-", bestVia,
                      (best->tags & kTagPotion) ? 1 : 0);
     return true;
 }
@@ -2103,9 +2575,18 @@ bool RechargeShurikensInOpenShop(int& outCharged, int& outSkippedNoMeso, int& ou
     outCharged = 0;
     outSkippedNoMeso = 0;
     outSkippedOther = 0;
-    outErr = "NOT_IMPL";
-    x::runtime::LogW("Shop", "RechargeShurikensInOpenShop NOT_IMPL (UIShop Charge CF-flat)");
-    return true;  // soft-skip for trip orchestration
+    outErr.clear();
+    ChargeJob job{};
+    if (!x::runtime::managed_main::Call(&ChargeJobOnMain, &job, kJobWaitMs)) {
+        outErr = "MAIN_TIMEOUT";
+        return false;
+    }
+    outCharged = job.charged;
+    outSkippedNoMeso = job.skipMeso;
+    outSkippedOther = job.skipOther;
+    outErr = job.err;
+    // SHOP_BUSY / LIST_STALE / NO_SHOP 等：ok=false，调用方重试或跳过
+    return job.ok || job.charged > 0;
 }
 
 }  // namespace x::features::ports::shop

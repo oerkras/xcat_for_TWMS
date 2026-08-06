@@ -199,16 +199,17 @@ void FieldActorBase::SyncTransform()
 | 写 `Ap` 但 `RelPos` 没跟着改 | 引擎下一帧 `AbsPos ← RelPos` 重算，把 `Ap` 拉回旧点 | **魂被拉回、皮留原地**（既有 BIN 已打穿） |
 | 写了 `Ap` 但 `IsUseAlternative`=true | Slot 16 首行就 return，TRS 一次都不写 | **魂到皮留原地** |
 
-### 7.1 本仓当前写法（fill+Doing · 2026-08-02）
+### 7.1 本仓当前写法（fill+Doing · `fill_slim` · 2026-08-05）
 
 `x/features/ports/teleport_port.cpp` **现役仅** `ApplyFillDoing`：
 
-1. 手填 `UserLocal.Teleport` + Mp XY +（可选）CurFh → `TryDoingTeleport` + ForcedFlush  
-2. 成功后 **`Apl ← Ap`**（P0c：皮插值起点对齐落点；**禁止**再写旧 Apl / SyncRel settle）  
-3. ~~`WritePhysicsPos` / ImpactBlink 写旧 Apl~~ **已拆除**
+1. 手填 `UserLocal.Teleport` + Mp XY +（可选）**Doing 前**种 CurFh/RelPos → `TryDoingTeleport` + ForcedFlush  
+2. 成功后 **仅** `Apl ← Ap`（Ap 近原点邻域则跳过；皮插值两端对齐）  
+3. ~~Doing 后重种 CurFh/RelPos / 硬写 Ap / `HealVisualToAp`~~ **已拆除**（与官方收态抢写 → 悬崖图 Ap→`(0,0)` 软重载；见 [`P0d`](P0d_fill_slim软重载结案.md)）  
+4. ~~`WritePhysicsPos` / ImpactBlink 写旧 Apl~~ **已拆除**
 
 > ImpactNext 旁路的「只写 Ap 不写 Apl」「主动把 Apl 钉成旧点」问题随旁路代码一并消失。  
-> 产品路径见 [`模块设计.md`](模块设计.md)。
+> 产品路径见 [`模块设计.md`](模块设计.md)；软重载结案见 P0d。
 
 ### 7.2 与既有 BIN 记录的对账
 

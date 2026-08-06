@@ -162,7 +162,8 @@ def main() -> None:
     seed_lines: list[str] = []
     script_lines: list[str] = []
     info_lines = [
-        "# map_id\treturnMap\tforcedReturn\tmapMark\ttown\tfieldLimit\tmobRate\tbgm\n"
+        "# map_id\treturnMap\tforcedReturn\tmapMark\ttown\tfieldLimit\tmobRate\tbgm"
+        "\tVRTop\tVRLeft\tVRBottom\tVRRight\n"
     ]
     life_lines = ["# map_id\tlife_idx\ttype\tid\tx\ty\n"]
 
@@ -189,7 +190,8 @@ def main() -> None:
 
         info_lines.append(
             f"{mid}\t{g('returnMap')}\t{g('forcedReturn')}\t{g('mapMark')}\t"
-            f"{g('town')}\t{g('fieldLimit')}\t{g('mobRate')}\t{g('bgm')}\n"
+            f"{g('town')}\t{g('fieldLimit')}\t{g('mobRate')}\t{g('bgm')}\t"
+            f"{g('VRTop')}\t{g('VRLeft')}\t{g('VRBottom')}\t{g('VRRight')}\n"
         )
 
         for li in sorted(life):

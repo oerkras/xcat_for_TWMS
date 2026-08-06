@@ -30,6 +30,8 @@ enum class FailKind : unsigned char {
     FakeFireStop = 2,
     BadTarget = 3,
     AlreadyThere = 4,
+    FireStuck = 5,  // 贴门瞬移/站稳等瞬态失败持续超时（如 TELEPORT_FAIL）
+    CombatOn = 6,   // F5 自动打怪开启时禁止赶路
 };
 
 struct Snapshot {
@@ -51,5 +53,11 @@ bool QuerySnapshot(Snapshot& out);
 
 // 学习图 hop 距离：同图 0；不可达 -1；否则最短门数。
 int PathHopCount(const char* srcMap, const char* dstMap);
+
+// 回家卷轴落点（经典版=智能回最近主城室外）：在学习图上对室外主城
+// （mapId % 1000000 == 0）取 PathHopCount 最小者；无可达时回退前缀截断
+// （101030102→101000000）。对照枫星 PredictReturnScrollTownOutdoor，但经典版
+// 不能只用前缀——10103 带实际最近常是勇士之村 102000000。
+bool PredictReturnScrollTownOutdoor(const char* fromMap, char* out, size_t outSz);
 
 }  // namespace x::features::travel

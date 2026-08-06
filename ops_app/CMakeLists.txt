@@ -22,7 +22,7 @@ target_sources(xcat_ops PRIVATE
 
 target_link_libraries(xcat_ops PRIVATE
     imgui_lib
-    xcat_common
+    xcat_util
     d3d11
     dxgi
     dwmapi

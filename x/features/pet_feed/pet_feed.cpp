@@ -5,10 +5,12 @@
 #include "pet_feed.h"
 
 #include "../ports/pet_port.h"
+#include "../ports/player_combat_port.h"
 #include "../ports/world_port.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
+#include "../../ui/player_vitals.h"
 
 #include <atomic>
 #include <cstdarg>
@@ -25,12 +27,18 @@ namespace pet_feed {
 namespace {
 
 constexpr DWORD kEmptyPollMs = 2500;
+constexpr DWORD kEmptyPollFastMs = 400;  // 进图后等宠窗：加快首召，赶在打怪武装前
 constexpr DWORD kHavePetPollMs = 10000;
 constexpr DWORD kIdleSleepMs = 80;
 constexpr DWORD kForceLogMs = 5000;
 constexpr DWORD kMissLogMs = 15000;
 constexpr DWORD kNotifyMs = 60000;
 constexpr DWORD kPendingMs = 5000;
+    // 与 simple_combat 协调：开召宠时打怪最多等这么久；超时放行以免卡死挂机。
+    // 预算从「打怪侧真正询问让路」起算；未落地/警戒 defer 会 PauseHoldBudget 清零。
+    constexpr DWORD kHoldCombatMaxMs = 20000;
+// UserBase 短 IsAlertMode：LocalUser+0x114 > 0（种子验算 = cmp field, 0）
+constexpr size_t kOffAlertAt = 0x114;
 
 std::atomic<bool> gDesired{false};
 std::atomic<bool> gRequireFood{true};  // 与 common 默认一致：有粮才召，防召出即饿
@@ -41,7 +49,15 @@ HANDLE gLog = INVALID_HANDLE_VALUE;
 DWORD gPendingUntil = 0;
 DWORD gLastNotifyFood = 0;
 DWORD gLastNotifyPet = 0;
+DWORD gLastNotifyAlert = 0;
+DWORD gLastNotifyLand = 0;
 DWORD gLastSummonAt = 0;
+
+// 供 simple_combat 只读：场上宠态 / 是否仍值得等召。
+std::atomic<int> gActivatedCount{-1};       // -1=尚未读到
+std::atomic<int> gCanSummonNow{0};          // 1=有可召宠且（粮条件满足）
+std::atomic<int> gPermanentSkip{0};         // 1=无宠/无粮等永久跳过
+std::atomic<DWORD> gHoldCombatSince{0};     // 开始要求打怪让路的 tick；0=未持门
 
 void WriteLogHandle(HANDLE h, const char* buf, int n) {
     if (h == INVALID_HANDLE_VALUE || n <= 0) return;
@@ -93,19 +109,86 @@ void LogLine(const char* fmt, ...) {
     x::runtime::LogI("PetFeed", "%s", body);
 }
 
+bool ReadAlertMode() {
+    void* lu = nullptr;
+    if (!ports::player_combat::QueryLocalUser(&lu) || !lu) return false;
+    int stamp = 0;
+    __try {
+        stamp = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(lu) + kOffAlertAt);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    // IsAlertMode @0x124A3C0：field > (seed+IMM)=0 → 非 0 即警戒
+    return stamp > 0;
+}
+
+void PublishHoldState(const ports::pet::PetCareState& st, DWORD now, bool got) {
+    if (!got || !st.hasLocalUser) return;
+    gActivatedCount.store(st.activatedCount, std::memory_order_relaxed);
+    const bool reqFood = gRequireFood.load(std::memory_order_relaxed);
+    const bool can =
+        st.activatedCount < 1 && st.summonPetPos > 0 && (!reqFood || st.hasFood);
+    gCanSummonNow.store(can ? 1 : 0, std::memory_order_relaxed);
+    const bool permanent =
+        st.activatedCount < 1 &&
+        (st.summonPetPos <= 0 || (reqFood && !st.hasFood));
+    gPermanentSkip.store(permanent ? 1 : 0, std::memory_order_relaxed);
+
+    if (!gDesired.load(std::memory_order_relaxed) || st.activatedCount >= 1 || permanent) {
+        gHoldCombatSince.store(0, std::memory_order_relaxed);
+    }
+    // 不在此处起算 hold 预算：须等 simple_combat 真正让路时再计（防 F5 关着/arm 窗空耗 20s）。
+    (void)now;
+}
+
+// 召唤侧 defer（未落地/警戒）：暂停预算，避免时钟空跑后打怪放行又抢开火。
+void PauseHoldBudget() { gHoldCombatSince.store(0, std::memory_order_relaxed); }
+
+void ClearHoldPublish() {
+    gActivatedCount.store(-1, std::memory_order_relaxed);
+    gCanSummonNow.store(0, std::memory_order_relaxed);
+    gPermanentSkip.store(0, std::memory_order_relaxed);
+    gHoldCombatSince.store(0, std::memory_order_relaxed);
+}
+
 void Tick(DWORD now) {
     if (!gDesired.load(std::memory_order_relaxed)) {
         gPendingUntil = 0;
+        ClearHoldPublish();
         return;
     }
-    if (!ports::world::IsPlayReady()) return;
+    if (!ports::world::IsPlayReady()) {
+        ClearHoldPublish();
+        return;
+    }
     if (!ports::pet::EnsureBound()) return;
 
     ports::pet::PetCareState st{};
     if (!ports::pet::ReadState(st) || !st.hasLocalUser) return;
+    PublishHoldState(st, now, true);
 
     if (st.activatedCount >= 1) {
         gPendingUntil = 0;
+        return;
+    }
+
+    // 落地闩未就绪：再等一会儿，避免进图瞬间接包被拒。
+    if (!x::ui::player::IsReadyLatched()) {
+        PauseHoldBudget();
+        if (!gLastNotifyLand || now - gLastNotifyLand >= 2000) {
+            gLastNotifyLand = now;
+            LogLine("summon wait: not_landed (readyLatch=0)");
+        }
+        return;
+    }
+
+    // 战斗警戒态：CanPerformAction 会弹「现在无法进行」；等警戒自然落再召。
+    if (ReadAlertMode()) {
+        PauseHoldBudget();
+        if (!gLastNotifyAlert || now - gLastNotifyAlert >= 2000) {
+            gLastNotifyAlert = now;
+            LogLine("summon wait: alert_mode (defer activate)");
+        }
         return;
     }
 
@@ -170,6 +253,7 @@ DWORD WINAPI Worker(LPVOID) {
         }
 
         if (!ports::world::IsPlayReady()) {
+            ClearHoldPublish();
             if (on && (!lastMissLog || now - lastMissLog >= kMissLogMs)) {
                 lastMissLog = now;
                 LogLine("petfeed wait: not_play_ready (scene=%d wmAlive=%d)",
@@ -191,8 +275,14 @@ DWORD WINAPI Worker(LPVOID) {
 
         ports::pet::PetCareState st{};
         const bool got = ports::pet::ReadState(st);
+        if (got) PublishHoldState(st, now, true);
+        const bool empty =
+            got && st.hasLocalUser && st.activatedCount == 0;
+        // 等宠窗内加快轮询，缩短「落地→召出」空窗，避免打怪抢先开火。
+        const bool fastEmpty =
+            empty && on && gCanSummonNow.load(std::memory_order_relaxed) != 0;
         const DWORD interval =
-            (got && st.hasLocalUser && st.activatedCount == 0) ? kEmptyPollMs : kHavePetPollMs;
+            empty ? (fastEmpty ? kEmptyPollFastMs : kEmptyPollMs) : kHavePetPollMs;
 
         if (lastScan && now - lastScan < interval) {
             Sleep(kIdleSleepMs);
@@ -264,9 +354,44 @@ void StopWorker() {
     }
 }
 
-void SetDesired(bool on) { gDesired.store(on, std::memory_order_relaxed); }
+void SetDesired(bool on) {
+    gDesired.store(on, std::memory_order_relaxed);
+    if (!on) ClearHoldPublish();
+}
 
 void SetRequireFood(bool on) { gRequireFood.store(on, std::memory_order_relaxed); }
+
+bool IsDesired() { return gDesired.load(std::memory_order_relaxed); }
+
+bool ShouldHoldCombatForSummon() {
+    if (!gDesired.load(std::memory_order_relaxed)) return false;
+    if (!ports::world::IsPlayReady()) return false;
+
+    const int act = gActivatedCount.load(std::memory_order_relaxed);
+    if (act >= 1) return false;
+    if (gPermanentSkip.load(std::memory_order_relaxed) != 0) return false;
+
+    // 尚未读到态：短暂让路；已确认可召：持续让路到召出/超时。
+    const bool shouldHold =
+        (act < 0) || (gCanSummonNow.load(std::memory_order_relaxed) != 0);
+    if (!shouldHold) return false;
+
+    // 预算仅在打怪侧真正询问让路时起算（F5 关着不空耗）。
+    const DWORD now = GetTickCount();
+    DWORD since = gHoldCombatSince.load(std::memory_order_relaxed);
+    if (since == 0) {
+        const DWORD start = now ? now : 1;
+        DWORD expected = 0;
+        if (gHoldCombatSince.compare_exchange_strong(expected, start,
+                                                    std::memory_order_relaxed)) {
+            since = start;
+        } else {
+            since = expected ? expected : start;
+        }
+    }
+    if (now - since >= kHoldCombatMaxMs) return false;
+    return true;
+}
 
 }  // namespace pet_feed
 }  // namespace features

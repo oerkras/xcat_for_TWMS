@@ -4,10 +4,10 @@
 #endif
 #include "buffs.h"
 
-#include "../ports/attack_input_port.h"
+#include "../ports/action_gate.h"
+#include "../ports/player_combat_port.h"
 #include "../ports/skill_port.h"
 #include "../ports/world_port.h"
-#include "../simple_combat/simple_combat.h"
 #include "../../ipc/payload_buffs.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
@@ -39,9 +39,8 @@ constexpr DWORD kWorkerSleepMs = 50;
 constexpr DWORD kProbeLogMs = 15000;
 constexpr DWORD kNotReadyLogThrottleMs = 2000;
 // 施法前后短暂停战斗：BIN（a20d2e）master 开后 DoActive 插在 Melee 风暴中 → 客户报卡住。
-// 对照枫星 HoldCombatForBuffCast；本仓用 AcquireExternalPause（可与 timed_keys 重叠）。
-// Hold 后 WaitFireIdle 再 Cast，堵住同拍 Firing / 主线程 Pulse 未完的缝。
-constexpr DWORD kCombatHoldAfterCastMs = 800;
+// Hold + WaitFireIdle 走 ports::action_gate（与 timed_keys 共享）。
+constexpr DWORD kCombatHoldAfterCastMs = 1000;
 constexpr DWORD kCombatHoldSettleTimeoutMs = 80;
 constexpr DWORD kCombatHoldSettleAfterFireMs = 32;
 
@@ -78,6 +77,7 @@ struct SlotRuntime {
 };
 
 SlotRuntime g_slots[xcat::kBuffSlotCount]{};
+
 bool g_active = false;
 std::mutex g_pendingMu;
 xcat::BuffsConfig g_pendingCfg{};
@@ -94,32 +94,7 @@ SRWLOCK g_runtimeLock = SRWLOCK_INIT;
 
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
-std::atomic<bool> gCastingBusy{false};
-bool gCombatHeldForBuff = false;
-DWORD gCombatHoldUntil = 0;
-
-void HoldCombatForBuffCast(DWORD now) {
-    if (!gCombatHeldForBuff) {
-        simple_combat::AcquireExternalPause();
-        gCombatHeldForBuff = true;
-    }
-    gCombatHoldUntil = now + kCombatHoldAfterCastMs;
-}
-
-void ReleaseCombatHoldIfDue(DWORD now) {
-    if (!gCombatHeldForBuff) return;
-    if (static_cast<int>(now - gCombatHoldUntil) < 0) return;
-    simple_combat::ReleaseExternalPause();
-    gCombatHeldForBuff = false;
-    gCombatHoldUntil = 0;
-}
-
-void ReleaseCombatHoldNow() {
-    if (!gCombatHeldForBuff) return;
-    simple_combat::ReleaseExternalPause();
-    gCombatHeldForBuff = false;
-    gCombatHoldUntil = 0;
-}
+ports::action_gate::Hold gCombatHold{};
 
 struct ExclusiveLock {
     explicit ExclusiveLock(SRWLOCK& lock) : lockRef(lock) { AcquireSRWLockExclusive(&lockRef); }
@@ -223,7 +198,8 @@ void BuildRuntimeSnapshot(bool heavy, DWORD now) {
             s.active = ports::skill::IsSkillActive(id, &remain);
             s.remainBuffSec = remain;
             s.remainCooldownSec = ports::skill::GetSkillCooldownRemainSec(id);
-            s.cooldownSec = s.remainCooldownSec;
+            const float tableCd = ports::skill::GetSkillCooldownDurationSec(id);
+            s.cooldownSec = tableCd > 0.01f ? tableCd : s.remainCooldownSec;
             snprintf(s.code, sizeof(s.code), "%d", id);
             ports::skill::ResolveSkillName(id, s.name, sizeof(s.name));
         }
@@ -305,9 +281,16 @@ bool SlotDue(const SlotRuntime& s, DWORD now, float remain) {
     if (s.state == SlotState::Retry && now < s.retryAt) return false;
     if (s.assumedActiveUntil && now < s.assumedActiveUntil) return false;
 
-    const bool active = EffectActive(s.skillId, nullptr);
+    // remain 由调用方 EffectActive 写入；掉了补在剩余仍充足时绝不补（含 aff 闪空）。
+    if (s.strategy == xcat::kBuffRenewByPresence && remain > kPresenceRenewRemainSec)
+        return false;
+
+    const bool active = remain > 0.01f || EffectActive(s.skillId, nullptr);
     const int level = ports::skill::GetSkillLevel(s.skillId);
     if (level <= 0) return false;
+
+    // CoolTimeOver 脏读时靠本地 CD；冷却中不因「掉了」狂补。
+    if (!s.forceOnce && ports::skill::GetSkillCooldownRemainSec(s.skillId) > 0.01f) return false;
 
     if (s.forceOnce) return true;
 
@@ -318,7 +301,8 @@ bool SlotDue(const SlotRuntime& s, DWORD now, float remain) {
         return now >= s.nextTick;
     case xcat::kBuffRenewByPresence:
     default:
-        if (!active) return true;
+        // Presence 闪空时仍守 nextTick（verify 写入），避免秒级重放。
+        if (!active) return !s.nextTick || now >= s.nextTick;
         return remain > 0.f && remain <= kPresenceRenewRemainSec;
     }
 }
@@ -343,44 +327,99 @@ void TickVerify(SlotRuntime& s, DWORD now) {
     if (EffectActive(s.skillId, &remain)) {
         s.state = SlotState::Idle;
         s.backoffMs = 0;
-        s.assumedActiveUntil = 0;
-        s.nextTick = now + s.intervalMs;
-        runtime::LogI("Buffs", "verify ok skill=%d remain=%.1f", s.skillId, remain);
+        // BIN：verify 后若清 assumed，Presence 在 AffectedList/SS 闪空时会立刻重放；
+        // DoActive 再 false → Prepare GetSkill(新手技 1001/1002) 常空 → 假 no_entry 风暴。
+        // 信任 remain，提前 kPresenceRenewRemainSec 再允许补。
+        DWORD trustMs = s.intervalMs;
+        if (remain > kPresenceRenewRemainSec) {
+            const DWORD fromRemain =
+                static_cast<DWORD>((remain - kPresenceRenewRemainSec) * 1000.f);
+            if (fromRemain > 0 && fromRemain < trustMs) trustMs = fromRemain;
+        }
+        s.assumedActiveUntil = now + trustMs;
+        s.nextTick = s.assumedActiveUntil;
+        // 效果确认在身后再记本地 CD；假 cast ok / verify soft 不种。
+        ports::skill::ConfirmLocalCooldown(s.skillId);
+        runtime::LogI("Buffs", "verify ok skill=%d remain=%.1f trust=%ums", s.skillId, remain,
+                      trustMs);
         return;
     }
     if (now < s.verifyDeadline) return;
     // 施放已 ok 且肉眼有图标，但 AffectedList/SS 偶发读不到：信任本轮，避免 reject 风暴。
+    // 故意不 ConfirmLocalCooldown——presence miss 时种 CD 会把假 ok 变成假冷却。
     s.state = SlotState::Idle;
     s.backoffMs = 0;
     s.assumedActiveUntil = now + s.intervalMs;
     s.nextTick = now + s.intervalMs;
-    runtime::LogW("Buffs", "verify soft skill=%d (cast ok, presence miss)", s.skillId);
+    runtime::LogW("Buffs", "verify soft skill=%d (cast ok, presence miss) trust=%ums", s.skillId,
+                  s.intervalMs);
 }
 
 bool TryCastSlot(size_t idx, DWORD now) {
     auto& s = g_slots[idx];
     if (now < g_nextCastAt) return false;
-    HoldCombatForBuffCast(now);
-    // 先停刀闸 + 松键，再短等近期出刀窗口结束，再上主线程 DoActive。
-    (void)ports::attack::WaitFireIdle(kCombatHoldSettleTimeoutMs, kCombatHoldSettleAfterFireMs);
-    gCastingBusy = true;
+    // 对侧 Hold（定时键等）占用中：不叠 DoActive。排除自身 Hold（depth 重叠时仍 defer）。
+    if (ports::action_gate::IsSkillCastBusyAsideFrom(&gCombatHold)) {
+        g_nextCastAt = now + 80;
+        runtime::LogWThrottled(311, 1500, "Buffs", "cast defer skill=%d reason=peer_hold",
+                               s.skillId);
+        return false;
+    }
+    // 与 fill+Doing / 贴怪收态互斥：途中不 DoActive（对齐 timed_keys）。
+    // SkillCastBusy depth 由 Hold::Arm/Release 管理（勿再手写 Set）。
+    using ports::action_gate::Block;
+    const Block gate = ports::action_gate::BeginAct(
+        gCombatHold, now, kCombatHoldAfterCastMs, kCombatHoldSettleTimeoutMs,
+        kCombatHoldSettleAfterFireMs);
+    if (gate == Block::TeleportTransit) {
+        g_nextCastAt = now + 80;
+        runtime::LogWThrottled(310, 1500, "Buffs", "cast defer skill=%d reason=teleport_transit",
+                               s.skillId);
+        return false;
+    }
     bool notReady = false;
     char reason[48]{};
     const bool ok = ports::skill::CastSkill(s.skillId, &notReady, reason, sizeof(reason));
-    gCastingBusy = false;
-    // 以施法返回时刻起算 Hold，避免 settle 吃掉事后窗口。
-    HoldCombatForBuffCast(GetTickCount());
+    {
+        char camNote[96]{};
+        std::snprintf(camNote, sizeof(camNote), "skill=%d ok=%d nr=%d reason=%s", s.skillId,
+                      ok ? 1 : 0, notReady ? 1 : 0, reason[0] ? reason : "-");
+        ports::player_combat::LogBuffCamProbe(camNote);
+    }
     if (ok) {
+        // 仅成功才续事后 Hold；失败若也续窗，not_ready 重试会把 Hold 钉死。
+        gCombatHold.Arm(GetTickCount(), kCombatHoldAfterCastMs);
         g_nextCastAt = GetTickCount() + kSafeGapMs;
         EnterVerify(s, GetTickCount());
         runtime::LogI("Buffs", "cast ok skill=%d slot=%zu reason=%s", s.skillId, idx + 1,
                       reason[0] ? reason : "ok");
         return true;
     }
-    // 失败也保持短暂停战，避免下一拍立刻 OnFuncKey 打断失败态
+    // BIN：守护重拉进图 SI 未就绪 → do_false_no_si/no_entry 连刷；续 Hold = 进图永不打怪。
+    gCombatHold.ReleaseNow();
     if (notReady) {
-        g_nextCastAt = GetTickCount() + 300;
-        EnterRetry(s, GetTickCount(), kNotReadyRetryMs);
+        DWORD retry = kNotReadyRetryMs;
+        // SI/entry 冷启动：拉长间隔，避免进图前几秒刷闸。
+        if (reason[0] && (strstr(reason, "no_si") || strstr(reason, "no_entry") ||
+                          strstr(reason, "no_lu") || strstr(reason, "pump"))) {
+            retry = 2500;
+        }
+        // 只钉本槽；全局仅短间隔，避免 1001 no_entry 饿死其它槽。
+        g_nextCastAt = GetTickCount() + kSafeGapMs;
+        s.forceOnce = 0;
+        // 主线程 DoActive 报 no_entry 时 worker 侧 SS 仍可能有 remain（钟停/闪空）。
+        float softRem = 0.f;
+        if (EffectActive(s.skillId, &softRem) && softRem > kPresenceRenewRemainSec) {
+            const DWORD trustMs =
+                static_cast<DWORD>((softRem - kPresenceRenewRemainSec) * 1000.f);
+            s.state = SlotState::Idle;
+            s.assumedActiveUntil = GetTickCount() + (trustMs > 0 ? trustMs : retry);
+            s.nextTick = s.assumedActiveUntil;
+            runtime::LogW("Buffs", "cast soft_active skill=%d remain=%.1f trust=%ums", s.skillId,
+                          softRem, trustMs > 0 ? trustMs : retry);
+        } else {
+            EnterRetry(s, GetTickCount(), retry);
+        }
         const char* why = reason[0] ? reason : "?";
         const bool reasonChanged = (strcmp(why, s.lastNotReadyReason) != 0);
         if (reasonChanged || GetTickCount() - s.lastNotReadyLogAt >= kNotReadyLogThrottleMs) {
@@ -405,7 +444,7 @@ bool TryCastSlot(size_t idx, DWORD now) {
 void TickOnce(DWORD now) {
     ApplyPendingConfig(now);
     ports::skill::EnsureBound();
-    ReleaseCombatHoldIfDue(now);
+    gCombatHold.ReleaseIfDue(now);
 
     if (g_heavyPending && now >= g_nextHeavyAt) {
         BuildRuntimeSnapshot(true, now);
@@ -490,7 +529,7 @@ void StopWorker() {
         // DllMain: never join under loader lock — just signal.
         CloseHandle(th);
     }
-    ReleaseCombatHoldNow();
+    gCombatHold.ReleaseNow();
 }
 
 void ApplyConfig(const xcat::BuffsConfig& cfg) {
@@ -500,7 +539,5 @@ void ApplyConfig(const xcat::BuffsConfig& cfg) {
 }
 
 bool IsMasterEnabled() { return g_active; }
-
-bool IsCastingBusy() { return gCastingBusy.load(); }
 
 }  // namespace x::features::buffs

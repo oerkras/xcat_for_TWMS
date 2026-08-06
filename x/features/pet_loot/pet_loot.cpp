@@ -8,10 +8,12 @@
 #include "../ports/pet_port.h"
 #include "../ports/world_port.h"
 #include "../auto_enter/auto_enter.h"
+#include "../simple_combat/simple_combat.h"
 #include "../../ipc/payload_pet_loot.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
+#include "../../runtime/main_thread_pump.h"
 #include "../../runtime/managed_main.h"
 
 #include "xcat_item_catalog.h"
@@ -33,12 +35,16 @@ namespace pet_loot {
 namespace {
 
 constexpr DWORD kIdleSleepMs = 40;
-constexpr DWORD kForceLogMs = 5000;     // probe / 空闲心跳
-constexpr DWORD kDetailLogMs = 4000;    // petmap 明细节流（聚合 absorb）
-constexpr DWORD kErrLogMs = 8000;       // seh / no_rect 等硬错
+constexpr DWORD kForceLogMs = 5000;      // probe：状态变化立即打；无变化最长间隔
+constexpr DWORD kProbeIdleMs = 30000;    // probe 稳态（drops=0 等）心跳
+constexpr DWORD kDetailLogMs = 8000;     // petmap 明细节流（聚合 absorb）
+constexpr DWORD kErrLogMs = 8000;        // seh / no_rect 等硬错
 constexpr DWORD kMissLogMs = 15000;
 constexpr DWORD kNoPetGateMs = 2000;
 constexpr DWORD kNoSkillLogMs = 8000;
+// 退避集合持续偏大 ≈ 服端在批量拒收 → 多为背包某栏已满
+constexpr DWORD kInvFullHintMs = 30000;
+constexpr int kInvFullHintStall = 16;
 // 名称关键词展开不设上限（0=全量）；「卷」~670、「色」~三千，固定 cap 会漏黑名单
 constexpr size_t kMaxIdsPerNameKey = 0;
 
@@ -47,16 +53,9 @@ ports::drop::SkipIds gSkipResolved{};
 bool gSkipDirty = true;
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
-HANDLE gLog = INVALID_HANDLE_VALUE;
 
 DWORD gNoPetSince = 0;
 DWORD gLastNoSkillLog = 0;
-
-void WriteLogHandle(HANDLE h, const char* buf, int n) {
-    if (h == INVALID_HANDLE_VALUE || n <= 0) return;
-    DWORD w = 0;
-    WriteFile(h, buf, (DWORD)n, &w, nullptr);
-}
 
 std::wstring ModuleDir() {
     HMODULE self = nullptr;
@@ -74,10 +73,8 @@ std::wstring ModuleDir() {
 }
 
 void OpenLog() {
-    if (gLog != INVALID_HANDLE_VALUE) return;
     const std::wstring dir = ModuleDir() + L"\\logs";
     CreateDirectoryW(dir.c_str(), nullptr);
-    gLog = x::runtime::OpenRotatingDbgLog(dir, L"petloot.log");
 }
 
 void LogLine(const char* fmt, ...) {
@@ -97,7 +94,8 @@ void LogLine(const char* fmt, ...) {
                      st.wSecond, st.wMilliseconds, body);
     if (n < 0) return;
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
-    WriteLogHandle(gLog, buf, n);
+    OpenLog();
+    (void)x::runtime::AppendDbgLog(ModuleDir() + L"\\logs\\petloot.log", buf, (DWORD)n);
     x::runtime::LogI("PetLoot", "%s", body);
 }
 
@@ -119,7 +117,8 @@ void LogLineOd(const char* fmt, ...) {
                      st.wSecond, st.wMilliseconds, body);
     if (n < 0) return;
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
-    WriteLogHandle(gLog, buf, n);
+    OpenLog();
+    (void)x::runtime::AppendDbgLog(ModuleDir() + L"\\logs\\petloot.log", buf, (DWORD)n);
     OutputDebugStringA(buf);
     x::runtime::LogI("PetLoot", "%s", body);
 }
@@ -130,6 +129,15 @@ void RebuildSkipIds() {
     gSkipResolved.clear();
     if (!gCfg.skipFilterEnabled) {
         gSkipDirty = false;
+        if (gCfg.skipRuleCount > 0) {
+            static DWORD s_lastOffLog = 0;
+            const DWORD now = GetTickCount();
+            if (!s_lastOffLog || now - s_lastOffLog >= 15000u) {
+                s_lastOffLog = now;
+                LogLine("skip resolve filter=off rules=%u (勾选「启用拾取黑名单」后才过滤)",
+                        gCfg.skipRuleCount);
+            }
+        }
         return;
     }
 
@@ -177,7 +185,7 @@ void RebuildSkipIds() {
 
     gSkipDirty = false;
     LogLine(
-        "skip resolve catalog=%d rules=%u → ids=%zu (itemId=%d exact=%d substr=%d miss=%d)",
+        "skip resolve filter=1 catalog=%d rules=%u → ids=%zu (itemId=%d exact=%d substr=%d miss=%d)",
         pack.loaded ? 1 : 0, gCfg.skipRuleCount, gSkipResolved.size(), fromId, fromExact, fromSub,
         missName);
 }
@@ -188,12 +196,85 @@ const ports::drop::SkipIds* CurrentSkipIds() {
 }
 
 void Tick(DWORD now) {
-    if (!gCfg.enabled && !gCfg.footEnabled) return;
+    if (!gCfg.enabled && !gCfg.footEnabled && !gCfg.charVacEnabled) return;
+
+    // 与自动打怪/瞬移共用 MainPump（drainBudget=2 + JobPrio）。泵拥堵时让路，否则吸物会把出刀饿死
+    // （upload 211841：interval=50 + 全盒清闸 → combat fires 连续 40s 归零）。
+    if (x::runtime::main_thread::IsCongested()) {
+        static DWORD sCongLog = 0;
+        if (!sCongLog || now - sCongLog > 2000) {
+            sCongLog = now;
+            LogLineOd("yield pump_congested q=%d (defer loot for combat)",
+                      x::runtime::main_thread::QueuedJobCount());
+        }
+        return;
+    }
+
+    // 挂机时分复用：仅换怪/贴怪落地脉冲窗吸；出刀链（Aim/Firing/Recover）硬让路。
+    if (!simple_combat::IsLootPulseActive()) {
+        static DWORD sFireLog = 0;
+        if (!sFireLog || now - sFireLog > 2000) {
+            sFireLog = now;
+            LogLineOd("yield combat_fire_window (loot pulse closed; defer for Aim/Fire)");
+        }
+        return;
+    }
 
     const ports::drop::SkipIds* skip = CurrentSkipIds();
 
+    // 人物直吸 = 宠吸控制面，主体换成角色；盒子为近身可达范围（非宠吸全图）；
+    // 官方 Send 不写 LastTry，拒收必须靠 sentDropId AddStall；burst 跟面板（1–5）。
+    if (gCfg.charVacEnabled && !gCfg.enabled) {
+        const uint32_t burst = xcat::PetLootClampBurstPerTick(gCfg.burstPerTick);
+        float charHW = 0.f, charHH = 0.f;
+        xcat::PetLootEffectiveCharHalf(gCfg, charHW, charHH);
+        ports::drop::CharVacResult cr{};
+        bool cok = false;
+        uint32_t calls = 0;
+        int sentAcc = 0;
+        int absorbedN = 0;
+        int sentSameAcc = 0;
+        for (uint32_t bi = 0; bi < burst; ++bi) {
+            ports::drop::CharVacResult one{};
+            cok = ports::drop::TryCharVacuum(charHW, charHH, /*maxSend=*/1, skip, one);
+            ++calls;
+            cr = one;
+            sentAcc += one.sent;
+            if (one.why && std::strcmp(one.why, "ok_absorbed") == 0) ++absorbedN;
+            if (one.sentButPoolSame) ++sentSameAcc;
+            if (!cok && one.why &&
+                (std::strcmp(one.why, "seh") == 0 || std::strcmp(one.why, "no_lu") == 0 ||
+                 std::strcmp(one.why, "no_pool") == 0 || std::strcmp(one.why, "no_fn") == 0 ||
+                 std::strcmp(one.why, "no_meta") == 0))
+                break;
+            if (one.why && std::strcmp(one.why, "ok_empty") == 0) break;
+            if (one.nearCount == 0 && !(one.why && std::strcmp(one.why, "ok_absorbed") == 0))
+                break;
+            // 送了池没掉：已 AddStall，勿同拍连打下一件
+            if (one.sent > 0 && one.sentButPoolSame) break;
+            if (one.sent > 0 && one.why && std::strcmp(one.why, "ok_absorbed") != 0) break;
+        }
+
+        static DWORD s_lastChar = 0;
+        const bool force = !s_lastChar || (now - s_lastChar >= kDetailLogMs);
+        if (force || sentAcc > 0 || sentSameAcc > 0 ||
+            (cr.why && std::strcmp(cr.why, "seh") == 0)) {
+            s_lastChar = now;
+            LogLine("mode=charvac pos=(%.1f,%.1f) box=%.0fx%.0f drops=%d→%d Δ=%d fell=%d near=%d "
+                    "want=%d sent=%d calls=%u/%u absorb=%d gates=%d skipStamp=%d "
+                    "stall=%d/%d/%d sendTouch=%d same=%d total=%u called=%d why=%s skipN=%d",
+                    cr.userX, cr.userY, charHW * 2.f, charHH * 2.f, cr.dropCount,
+                    cr.dropCountAfter, cr.dropsDelta, cr.poolFellSinceLast ? 1 : 0, cr.nearCount,
+                    cr.nearWant, sentAcc, calls, burst, absorbedN, cr.gatesCleared, cr.skipStamped,
+                    cr.stallHeld, cr.stallStamped, cr.stallRestored, cr.sendTouch, sentSameAcc,
+                    cr.sentTotal, cr.called ? 1 : 0, cr.why ? cr.why : "?",
+                    skip ? (int)skip->size() : 0);
+        }
+        (void)cok;
+    }
+
     // 正式吸物走宠扩盒时不并行脚边：脚边空成功会刷 LastTry，把宠吸锁死
-    if (gCfg.footEnabled && !gCfg.enabled) {
+    if (gCfg.footEnabled && !gCfg.enabled && !gCfg.charVacEnabled) {
         ports::drop::FootResult fr{};
         const bool fok =
             ports::drop::TryFootPickup(gCfg.footHalfW, gCfg.footHalfH, skip, fr);
@@ -287,8 +368,8 @@ void Tick(DWORD now) {
         vr.why && (std::strcmp(vr.why, "seh") == 0 || std::strcmp(vr.why, "no_rect_patch") == 0);
     const bool errDue = hardErr && (!s_lastErr || now - s_lastErr >= kErrLogMs);
     const bool detailDue = !s_lastDetail || (now - s_lastDetail >= kDetailLogMs);
-    const bool hasSignal =
-        s_absorbAcc > 0 || s_nearMax > 0 || s_sentSameAcc > 0 || hardErr;
+    // nearMax  alone 不算信号：站在吸不动的堆上会每间隔刷一行。
+    const bool hasSignal = s_absorbAcc > 0 || s_sentSameAcc > 0 || hardErr;
 
     if (errDue) {
         s_lastErr = now;
@@ -297,14 +378,15 @@ void Tick(DWORD now) {
             "mode=petmap pets=%d skill=0x%X skillSlot=0x%X box=%.0fx%.0f mapVac=%d burst=%u/%u "
             "absorbed=%d drops=%d→%d Δ=%d fell=%d near=%d money=%d item=%d "
             "sampMoney=%d sampInfo=%d sendTouch=%d touchMoney=%d sentSame=%d "
-            "gates=%d skipStamp=%d own=%d lastTry=%d endPara=%d "
+            "gates=%d skipStamp=%d stall=%d/%d/%d own=%d lastTry=%d endPara=%d "
             "called=%d why=%s petSendΔ=%u poolSendΔ=%u skipN=%d",
             pst.activatedCount, (unsigned)vr.petSkill, (unsigned)vr.petSkillSlot, vacW, vacH,
             gCfg.mapVacuumEnabled ? 1 : 0, calls, burst, absorbedN, vr.dropCount, vr.dropCountAfter,
             vr.dropsDelta, vr.poolFellSinceLast ? 1 : 0, vr.nearCount, vr.nearMoney, vr.nearItem,
             vr.sampleIsMoney, vr.sampleInfo, vr.sendTouch, vr.sendTouchMoney, vr.sentButPoolSame,
-            vr.gatesCleared, vr.skipStamped, vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara,
-            vr.called ? 1 : 0, vr.why ? vr.why : "?", vr.petSendDelta, vr.poolSendDelta,
+            vr.gatesCleared, vr.skipStamped, vr.stallHeld, vr.stallStamped, vr.stallRestored,
+            vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara, vr.called ? 1 : 0,
+            vr.why ? vr.why : "?", vr.petSendDelta, vr.poolSendDelta,
             skip ? (int)skip->size() : 0);
         s_absorbAcc = 0;
         s_tickAcc = 0;
@@ -318,20 +400,31 @@ void Tick(DWORD now) {
             "sentSame=%d touchMax=%d itemWhileMoney=%d "
             "drops=%d→%d Δ=%d fell=%d near=%d money=%d item=%d "
             "sampMoney=%d sampInfo=%d sendTouch=%d touchMoney=%d "
-            "gates=%d skipStamp=%d own=%d lastTry=%d endPara=%d "
+            "gates=%d skipStamp=%d stall=%d/%d/%d own=%d lastTry=%d endPara=%d "
             "called=%d why=%s petSendΔ=%u poolSendΔ=%u skipN=%d",
             pst.activatedCount, (unsigned)vr.petSkill, (unsigned)vr.petSkillSlot, vacW, vacH,
             gCfg.mapVacuumEnabled ? 1 : 0, calls, burst, s_absorbAcc, s_tickAcc, s_nearMax,
             s_moneyMax, s_itemMax, s_sentSameAcc, s_sendTouchMax, s_sentItemWhileMoney, vr.dropCount,
             vr.dropCountAfter, vr.dropsDelta, vr.poolFellSinceLast ? 1 : 0, vr.nearCount,
             vr.nearMoney, vr.nearItem, vr.sampleIsMoney, vr.sampleInfo, vr.sendTouch,
-            vr.sendTouchMoney, vr.gatesCleared, vr.skipStamped, vr.sampleOwnType, vr.sampleLastTry,
-            vr.sampleEndPara, vr.called ? 1 : 0, vr.why ? vr.why : "?", vr.petSendDelta,
-            vr.poolSendDelta, skip ? (int)skip->size() : 0);
+            vr.sendTouchMoney, vr.gatesCleared, vr.skipStamped, vr.stallHeld, vr.stallStamped,
+            vr.stallRestored, vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara,
+            vr.called ? 1 : 0, vr.why ? vr.why : "?", vr.petSendDelta, vr.poolSendDelta,
+            skip ? (int)skip->size() : 0);
         s_absorbAcc = 0;
         s_tickAcc = 0;
         s_nearMax = s_moneyMax = s_itemMax = 0;
         s_sentSameAcc = s_sendTouchMax = s_sentItemWhileMoney = 0;
+    }
+
+    // 大量掉落被服端持续拒收：宠吸已跳过它们继续吸别的，但用户看到的是「吸不动」，给一条人话提示
+    static DWORD s_lastInvHint = 0;
+    if (vr.stallHeld >= kInvFullHintStall &&
+        (!s_lastInvHint || now - s_lastInvHint >= kInvFullHintMs)) {
+        s_lastInvHint = now;
+        LogLine("mode=petmap hint=inv_full_suspect stall=%d near=%d money=%d item=%d "
+                "(服端持续拒收，多为背包某栏已满；已跳过塞不进的道具继续吸其余)",
+                vr.stallHeld, vr.nearCount, vr.nearMoney, vr.nearItem);
     }
     (void)ok;
 }
@@ -354,7 +447,8 @@ DWORD WINAPI Worker(LPVOID) {
         x::ipc::PayloadPetLoot_Poll();
 
         const uint32_t cfgSig = (gCfg.enabled ? 1u : 0u) | (gCfg.footEnabled ? 2u : 0u) |
-                                (gCfg.mapVacuumEnabled ? 4u : 0u) | (gCfg.skipRuleCount << 8) |
+                                (gCfg.mapVacuumEnabled ? 4u : 0u) |
+                                (gCfg.charVacEnabled ? 8u : 0u) | (gCfg.skipRuleCount << 8) |
                                 (gCfg.skipFilterEnabled ? 0x80000000u : 0);
         const uint32_t cfgSig2 = (gCfg.intervalMs & 0xFFFFu) | (gCfg.burstPerTick << 16);
         if (cfgSig != lastCfgSig || cfgSig2 != lastCfgSig2) {
@@ -362,24 +456,29 @@ DWORD WINAPI Worker(LPVOID) {
             lastCfgSig2 = cfgSig2;
             float vacW = 0.f, vacH = 0.f;
             xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
-            LogLineOd("config pet=%d foot=%d mapVac=%d interval=%u burst=%u box=%.0fx%.0f "
-                    "footBox=%.0fx%.0f filters=0x%X skip=%u",
-                    gCfg.enabled ? 1 : 0, gCfg.footEnabled ? 1 : 0, gCfg.mapVacuumEnabled ? 1 : 0,
-                    gCfg.intervalMs, gCfg.burstPerTick, vacW, vacH, gCfg.footHalfW * 2.f,
-                    gCfg.footHalfH * 2.f, gCfg.filterFlags, gCfg.skipRuleCount);
+            float charHW = 0.f, charHH = 0.f;
+            xcat::PetLootEffectiveCharHalf(gCfg, charHW, charHH);
+            LogLineOd("config pet=%d foot=%d charVac=%d mapVac=%d interval=%u burst=%u "
+                    "box=%.0fx%.0f footBox=%.0fx%.0f charBox=%.0fx%.0f filters=0x%X "
+                    "skipFilter=%d skipRules=%u",
+                    gCfg.enabled ? 1 : 0, gCfg.footEnabled ? 1 : 0, gCfg.charVacEnabled ? 1 : 0,
+                    gCfg.mapVacuumEnabled ? 1 : 0, gCfg.intervalMs, gCfg.burstPerTick, vacW, vacH,
+                    gCfg.footHalfW * 2.f, gCfg.footHalfH * 2.f, charHW * 2.f, charHH * 2.f,
+                    gCfg.filterFlags, gCfg.skipFilterEnabled ? 1 : 0, gCfg.skipRuleCount);
         }
 
-        // 脚边：DropPool+MyUser；宠吸：额外 pet_port
+        // 脚边 / 人物直吸：DropPool+MyUser；宠吸：额外 pet_port
         const bool wantFoot = gCfg.footEnabled != 0;
         const bool wantPet = gCfg.enabled != 0;
-        if (!wantFoot && !wantPet) {
+        const bool wantChar = gCfg.charVacEnabled != 0;
+        if (!wantFoot && !wantPet && !wantChar) {
             Sleep(kIdleSleepMs);
             continue;
         }
 
         const bool dropOk = ports::drop::EnsureBound();
         const bool petOk = !wantPet || ports::pet::EnsureBound();
-        const bool anyReady = dropOk && (wantFoot || (wantPet && petOk));
+        const bool anyReady = dropOk && (wantFoot || wantChar || (wantPet && petOk));
         if (!anyReady) {
             if (now - lastMiss >= kMissLogMs) {
                 lastMiss = now;
@@ -387,35 +486,73 @@ DWORD WINAPI Worker(LPVOID) {
                 const bool play = ports::world::IsPlayReady();
                 const int scene = static_cast<int>(ports::world::GetSceneState());
                 LogLine(
-                    "petloot wait: drop=%d pet=%d want(f=%d p=%d) freeze=%d play=%d "
+                    "petloot wait: drop=%d pet=%d want(f=%d p=%d c=%d) freeze=%d play=%d "
                     "scene=%d autoEnter=%d lu=%p pool=%p",
                     dropOk ? 1 : 0, petOk ? 1 : 0, wantFoot ? 1 : 0, wantPet ? 1 : 0,
-                    freeze ? 1 : 0, play ? 1 : 0, scene, auto_enter::IsDesired() ? 1 : 0,
+                    wantChar ? 1 : 0, freeze ? 1 : 0, play ? 1 : 0, scene,
+                    auto_enter::IsDesired() ? 1 : 0,
                     ports::drop::PeekLocalUser(), ports::drop::PeekDropPool());
             }
             Sleep(kIdleSleepMs);
             continue;
         }
 
-        // P0b-style probe heartbeat when pet vacuum enabled
-        if (gCfg.enabled && (!lastForceProbe || now - lastForceProbe >= kForceLogMs)) {
-            lastForceProbe = now;
+        // probe：状态变化立即打；无变化仅 kProbeIdleMs 心跳（避免 drops=0 每 5s 刷盘）。
+        if (gCfg.enabled) {
             float vacW = 0.f, vacH = 0.f;
             xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
             ports::drop::ProbeSnapshot snap{};
             if (ports::drop::CollectProbe(snap, vacW * 0.5f, vacH * 0.5f)) {
-                LogLine(
-                    "probe pet=%d skill=0x%X drops=%d near=%d petRc=(%.1f,%.1f,%.1f,%.1f) "
-                    "collRc=(%.1f,%.1f,%.1f,%.1f) pos=(%.1f,%.1f)",
-                    snap.hasPet ? 1 : 0, (unsigned)snap.petSkill, snap.dropCount, snap.nearCount,
-                    snap.petRc.x, snap.petRc.y, snap.petRc.w, snap.petRc.h, snap.collisionRcPet.x,
-                    snap.collisionRcPet.y, snap.collisionRcPet.w, snap.collisionRcPet.h, snap.petX,
-                    snap.petY);
+                static int s_prevPet = -1;
+                static unsigned s_prevSkill = 0;
+                static int s_prevDrops = -1;
+                static int s_prevNear = -1;
+                const bool changed = snap.hasPet != (s_prevPet == 1) ||
+                                     (unsigned)snap.petSkill != s_prevSkill ||
+                                     snap.dropCount != s_prevDrops || snap.nearCount != s_prevNear;
+                const bool due =
+                    !lastForceProbe ||
+                    (changed && now - lastForceProbe >= kForceLogMs) ||
+                    (!changed && now - lastForceProbe >= kProbeIdleMs);
+                if (due) {
+                    lastForceProbe = now;
+                    s_prevPet = snap.hasPet ? 1 : 0;
+                    s_prevSkill = (unsigned)snap.petSkill;
+                    s_prevDrops = snap.dropCount;
+                    s_prevNear = snap.nearCount;
+                    if (snap.hasSampleDrop && snap.sampleDropDist >= 0.f) {
+                        LogLine(
+                            "probe pet=%d skill=0x%X drops=%d near=%d "
+                            "petRc=(%.1f,%.1f,%.1f,%.1f) collRc=(%.1f,%.1f,%.1f,%.1f) "
+                            "pos=(%.1f,%.1f) drop=(%.1f,%.1f) d=%.1f",
+                            snap.hasPet ? 1 : 0, (unsigned)snap.petSkill, snap.dropCount,
+                            snap.nearCount, snap.petRc.x, snap.petRc.y, snap.petRc.w, snap.petRc.h,
+                            snap.collisionRcPet.x, snap.collisionRcPet.y, snap.collisionRcPet.w,
+                            snap.collisionRcPet.h, snap.petX, snap.petY, snap.sampleDropX,
+                            snap.sampleDropY, snap.sampleDropDist);
+                    } else {
+                        LogLine(
+                            "probe pet=%d skill=0x%X drops=%d near=%d "
+                            "petRc=(%.1f,%.1f,%.1f,%.1f) collRc=(%.1f,%.1f,%.1f,%.1f) "
+                            "pos=(%.1f,%.1f)",
+                            snap.hasPet ? 1 : 0, (unsigned)snap.petSkill, snap.dropCount,
+                            snap.nearCount, snap.petRc.x, snap.petRc.y, snap.petRc.w, snap.petRc.h,
+                            snap.collisionRcPet.x, snap.collisionRcPet.y, snap.collisionRcPet.w,
+                            snap.collisionRcPet.h, snap.petX, snap.petY);
+                    }
+                }
             }
         }
 
         const DWORD interval = xcat::PetLootClampIntervalMs(gCfg.intervalMs);
-        if (!lastTick || now - lastTick >= interval) {
+        // 脉冲边沿（Settling 武装 / 干等从关到开）：无视 interval 立刻吸一拍，吃满短落地窗。
+        static uint32_t sPulseGen = 0;
+        const uint32_t pulseGen = simple_combat::LootPulseGeneration();
+        const bool pulseEdge = pulseGen != sPulseGen;
+        if (pulseEdge) sPulseGen = pulseGen;
+        const bool due = !lastTick || (now - lastTick >= interval) ||
+                         (pulseEdge && simple_combat::IsLootPulseActive());
+        if (due) {
             lastTick = now;
             Tick(now);
         }

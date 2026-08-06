@@ -66,10 +66,14 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.version = kPayloadControlVersion;
     out.invuln = 1;  // 默认开；ini 显式 0 仍可关
     out.attackAccel = 0;
+    out.attackAccelCutLayer = 0;
+    out.attackAccelSkipPrepare = 0;  // 默认关
+    out.attackAccelBooster = 0;      // 默认关
+    out.attackSameFrameBurst = kAttackSameFrameBurstDefault;
     out.fly = 0;
     out.flyMode = kFlyModeDefault;
     out.flyHopCdMs = kFlyHopCdDefaultMs;
-    out.autoEnter = 0;
+    out.autoEnter = 1;  // 默认开（与面板图例一致：1 雪吉拉 / 槽1）
     out.charSlot = 1;
     out.worldId = kDefaultWorldId;
     CopyWorldName(out.worldName, sizeof(out.worldName), kDefaultWorldName);
@@ -82,16 +86,29 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.multiSkill = 0;
     out.multiSkillGapMs = kMultiSkillGapDefaultMs;
     out.multiSkillSafeStagger = 1;
+    out.multiSkillSendUseRequest = 0;
     out.simpleCombat = 0;
     out.simpleCombatSmartInterval = 0;
     out.simpleCombatAttackIntervalMs = kSimpleCombatAttackIntervalDefaultMs;
     out.simpleCombatTickMs = kSimpleCombatTickDefaultMs;
+    out.mobScanIntervalMs = kMobScanIntervalDefaultMs;
+    out.simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     out.clusterWeight = kClusterWeightDefault;
     out.simpleCombatTeleport = 1;
     out.simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     out.simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
     out.simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
+    out.simpleCombatCrossLayerFillGateMs = kCombatCrossLayerFillGateDefaultMs;
+    out.simpleCombatFillBudgetPx = kCombatFillBudgetPxDefault;
+    out.simpleCombatTeleportMaxHop = kCombatTeleportMaxHopDefault;
     out.simpleCombatLiveStep = 0;
+    out.simpleCombatOneshotMaxHp = kCombatOneshotMaxHpDefault;
+    out.simpleCombatOneshotMinBumps = kCombatOneshotMinBumpsDefault;
+    out.simpleCombatOneshotMinFires = kCombatOneshotMinFiresDefault;
+    out.simpleCombatOneshotMinLagMs = kCombatOneshotMinLagMsDefault;
+    out.simpleCombatOneshotFoxFillGapMs = kCombatOneshotFoxFillGapDefaultMs;
+    out.pumpCongestionThreshold = kPumpCongestionDefault;
+    out.pumpDrainBudget = kPumpDrainBudgetDefault;
     out.attackRpc = 0;
     out.attackRpcMobs = kAttackRpcMobsDefault;
     out.attackRpcIntervalMs = kAttackRpcIntervalDefaultMs;
@@ -110,7 +127,11 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.autoRelogin = 0;
     out.autoReloginStopCombat = 1;
     out.autoReloginReconnect = 1;
+    out.hideOtherPlayers = 0;
+    out.frameLock = 0;
+    out.frameLockFps = kFrameLockFpsDefault;
     out.dropAlertBypass = 1;
+    out.auctionTownBypass = 0;
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
     out.autoSellReturnFarmSeq = 0;
@@ -137,6 +158,15 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "attackAccel", b)) out.attackAccel = b ? 1u : 0u;
     // v30 兼容：旧「跳过动作等待」开着则视为攻击加速开
     if (IniGetBool(ini, "core", "attackAccelClearBusy", b) && b) out.attackAccel = 1u;
+    if (IniGetBool(ini, "core", "attackAccelCutLayer", b)) out.attackAccelCutLayer = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "attackAccelSkipPrepare", b))
+        out.attackAccelSkipPrepare = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "attackAccelBooster", b))
+        out.attackAccelBooster = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "finalAttackForce", b)) out.finalAttackForce = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "skillMaxLevel", b)) out.skillMaxLevel = b ? 1u : 0u;
+    // 同帧连打已关停：无视落盘值，强制 1。
+    out.attackSameFrameBurst = kAttackSameFrameBurstDefault;
     // fly 开关不读 ini（历史 key 忽略）；只读会话态 state/fly_armed。
     out.fly = ReadFlyArmedSession(binDir) ? 1u : 0u;
     if (IniGetU32(ini, "core", "flyMode", u)) out.flyMode = ClampFlyMode(u);
@@ -149,13 +179,19 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "multiSkill", b)) out.multiSkill = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "multiSkillSafeStagger", b))
         out.multiSkillSafeStagger = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "multiSkillSendUseRequest", b))
+        out.multiSkillSendUseRequest = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "simpleCombat", b)) out.simpleCombat = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "simpleCombatSmartInterval", b))
         out.simpleCombatSmartInterval = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "multiSkillGapMs", u))
         out.multiSkillGapMs = ClampMultiSkillGapMs(u);
-    if (IniGetU32(ini, "core", "simpleCombatAttackIntervalMs", u))
+    if (IniGetU32(ini, "core", "simpleCombatAttackIntervalMs", u)) {
+        // 旧默认 50 → 46（锁 3 帧）；显式调过其它值保留。
+        if (u == kSimpleCombatAttackIntervalLegacyDefaultMs)
+            u = kSimpleCombatAttackIntervalDefaultMs;
         out.simpleCombatAttackIntervalMs = ClampSimpleCombatAttackIntervalMs(u);
+    }
     out.simpleCombatAttackIntervalMs = EffectiveSimpleCombatAttackIntervalMs(
         out.simpleCombatAttackIntervalMs, out.attackAccel);
     if (IniGetU32(ini, "core", "simpleCombatTickMs", u))
@@ -163,6 +199,15 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     else
         out.simpleCombatTickMs = kSimpleCombatTickDefaultMs;
     out.simpleCombatTickMs = ClampSimpleCombatTickMs(out.simpleCombatTickMs);
+    if (IniGetU32(ini, "core", "mobScanIntervalMs", u))
+        out.mobScanIntervalMs = ClampMobScanIntervalMs(u);
+    else
+        out.mobScanIntervalMs = kMobScanIntervalDefaultMs;
+    out.mobScanIntervalMs = ClampMobScanIntervalMs(out.mobScanIntervalMs);
+    if (IniGetU32(ini, "core", "simpleCombatAttackHoldMs", u))
+        out.simpleCombatAttackHoldMs = ClampAttackHoldMs(u);
+    else
+        out.simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     if (IniGetU32(ini, "core", "clusterWeight", u)) out.clusterWeight = ClampClusterWeight(u);
     // 面板已撤开关：读盘亦强制开，避免旧 ini=0 让 DLL 站桩。
     out.simpleCombatTeleport = 1u;
@@ -192,7 +237,11 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.autoReloginStopCombat = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoReloginReconnect", b))
         out.autoReloginReconnect = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "hideOtherPlayers", b)) out.hideOtherPlayers = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "frameLock", b)) out.frameLock = b ? 1u : 0u;
+    if (IniGetU32(ini, "core", "frameLockFps", u)) out.frameLockFps = ClampFrameLockFps(u);
     if (IniGetBool(ini, "core", "dropAlertBypass", b)) out.dropAlertBypass = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "auctionTownBypass", b)) out.auctionTownBypass = b ? 1u : 0u;
     // core.autoSell* 已废弃：真源 [auto_supply]；此处强制清零，避免旧 key 干扰。
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
@@ -210,10 +259,42 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.launcherWatchdogCooldownSec = ClampWatchdogCooldownSec(u);
     if (IniGetU32(ini, "core", "simpleCombatTeleportMinDx", u))
         out.simpleCombatTeleportMinDx = ClampCombatTeleportMinDx(u);
-    if (IniGetU32(ini, "core", "simpleCombatTeleportStandOff", u))
+    if (IniGetU32(ini, "core", "simpleCombatTeleportStandOff", u)) {
+        // 旧默认 25 → 12；显式调过其它值保留。
+        if (u == kCombatTeleportStandOffLegacyDefault) u = kCombatTeleportStandOffDefault;
         out.simpleCombatTeleportStandOff = ClampCombatTeleportStandOff(u);
+    }
     if (IniGetU32(ini, "core", "simpleCombatTeleportCooldownMs", u))
         out.simpleCombatTeleportCooldownMs = ClampCombatTeleportCooldownMs(u);
+    if (IniGetU32(ini, "core", "simpleCombatCrossLayerFillGateMs", u))
+        out.simpleCombatCrossLayerFillGateMs = ClampCombatCrossLayerFillGateMs(u);
+    if (IniGetU32(ini, "core", "simpleCombatFillBudgetPx", u))
+        out.simpleCombatFillBudgetPx = ClampCombatFillBudgetPx(u);
+    if (IniGetU32(ini, "core", "simpleCombatTeleportMaxHop", u)) {
+        // 旧默认 400 / 520 → 550；显式调过其它值保留。
+        if (u == kCombatTeleportMaxHopLegacyDefault || u == kCombatTeleportMaxHopPrevDefault)
+            u = kCombatTeleportMaxHopDefault;
+        out.simpleCombatTeleportMaxHop = ClampCombatTeleportMaxHop(u);
+    }
+    if (IniGetU32(ini, "core", "simpleCombatOneshotMaxHp", u))
+        out.simpleCombatOneshotMaxHp = ClampCombatOneshotMaxHp(u);
+    if (IniGetU32(ini, "core", "simpleCombatOneshotMinBumps", u))
+        out.simpleCombatOneshotMinBumps = ClampCombatOneshotMinBumps(u);
+    if (IniGetU32(ini, "core", "simpleCombatOneshotMinFires", u))
+        out.simpleCombatOneshotMinFires = ClampCombatOneshotMinFires(u);
+    if (IniGetU32(ini, "core", "simpleCombatOneshotMinLagMs", u))
+        out.simpleCombatOneshotMinLagMs = ClampCombatOneshotMinLagMs(u);
+    if (IniGetU32(ini, "core", "simpleCombatOneshotFoxFillGapMs", u)) {
+        // 旧默认 280 → 0；用户显式调过其它值保留。
+        if (u == kCombatOneshotFoxFillGapLegacyDefaultMs) u = kCombatOneshotFoxFillGapDefaultMs;
+        out.simpleCombatOneshotFoxFillGapMs = ClampCombatOneshotFoxFillGapMs(u);
+    }
+    if (IniGetU32(ini, "core", "pumpCongestionThreshold", u))
+        out.pumpCongestionThreshold = ClampPumpCongestion(u);
+    if (IniGetU32(ini, "core", "pumpDrainBudget", u))
+        out.pumpDrainBudget = ClampPumpDrainBudget(u);
+    else
+        out.pumpDrainBudget = kPumpDrainBudgetDefault;
     if (IniGetU32(ini, "core", "charSlot", u) && u >= 1 && u <= 32) out.charSlot = u;
     if (IniGetU32(ini, "core", "hpThresholdPct", u) && u >= 1 && u <= 99) out.hpThresholdPct = u;
     if (IniGetU32(ini, "core", "mpThresholdPct", u) && u >= 1 && u <= 99) out.mpThresholdPct = u;
@@ -240,6 +321,12 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.version = kPayloadControlVersion;
     normalized.invuln = normalized.invuln ? 1u : 0u;
     normalized.attackAccel = normalized.attackAccel ? 1u : 0u;
+    normalized.attackAccelCutLayer = normalized.attackAccelCutLayer ? 1u : 0u;
+    normalized.attackAccelSkipPrepare = normalized.attackAccelSkipPrepare ? 1u : 0u;
+    normalized.attackAccelBooster = normalized.attackAccelBooster ? 1u : 0u;
+    normalized.finalAttackForce = normalized.finalAttackForce ? 1u : 0u;
+    normalized.skillMaxLevel = normalized.skillMaxLevel ? 1u : 0u;
+    normalized.attackSameFrameBurst = kAttackSameFrameBurstDefault;
     normalized.fly = normalized.fly ? 1u : 0u;
     normalized.flyMode = ClampFlyMode(normalized.flyMode);
     normalized.flyHopCdMs = ClampFlyHopCdMs(
@@ -251,14 +338,27 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.petSummonRequireFood = normalized.petSummonRequireFood ? 1u : 0u;
     normalized.multiSkill = normalized.multiSkill ? 1u : 0u;
     normalized.multiSkillSafeStagger = normalized.multiSkillSafeStagger ? 1u : 0u;
+    normalized.multiSkillSendUseRequest = normalized.multiSkillSendUseRequest ? 1u : 0u;
     normalized.multiSkillGapMs = ClampMultiSkillGapMs(normalized.multiSkillGapMs);
     normalized.simpleCombat = normalized.simpleCombat ? 1u : 0u;
     normalized.simpleCombatSmartInterval = normalized.simpleCombatSmartInterval ? 1u : 0u;
     normalized.simpleCombatAttackIntervalMs = EffectiveSimpleCombatAttackIntervalMs(
-        normalized.simpleCombatAttackIntervalMs, normalized.attackAccel);
+        normalized.simpleCombatAttackIntervalMs
+            ? (normalized.simpleCombatAttackIntervalMs ==
+                       kSimpleCombatAttackIntervalLegacyDefaultMs
+                   ? kSimpleCombatAttackIntervalDefaultMs
+                   : normalized.simpleCombatAttackIntervalMs)
+            : kSimpleCombatAttackIntervalDefaultMs,
+        normalized.attackAccel);
     normalized.simpleCombatTickMs = ClampSimpleCombatTickMs(
         normalized.simpleCombatTickMs ? normalized.simpleCombatTickMs
                                       : kSimpleCombatTickDefaultMs);
+    normalized.mobScanIntervalMs = ClampMobScanIntervalMs(
+        normalized.mobScanIntervalMs ? normalized.mobScanIntervalMs
+                                     : kMobScanIntervalDefaultMs);
+    normalized.simpleCombatAttackHoldMs = ClampAttackHoldMs(
+        normalized.simpleCombatAttackHoldMs ? normalized.simpleCombatAttackHoldMs
+                                            : kAttackHoldDefaultMs);
     normalized.clusterWeight = normalized.clusterWeight ? 1u : 0u;
     normalized.simpleCombatTeleport = 1u;
     normalized.simpleCombatLiveStep = normalized.simpleCombatLiveStep ? 1u : 0u;
@@ -273,6 +373,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.autoLie = normalized.autoLie ? 1u : 0u;
     normalized.autoLieDryRun = normalized.autoLieDryRun ? 1u : 0u;
     normalized.dropAlertBypass = normalized.dropAlertBypass ? 1u : 0u;
+    normalized.auctionTownBypass = normalized.auctionTownBypass ? 1u : 0u;
     normalized.autoSell = normalized.autoSell ? 1u : 0u;
     normalized.launcherHangupSchedule = normalized.launcherHangupSchedule ? 1u : 0u;
     normalized.launcherHangupScheduleMask =
@@ -290,14 +391,48 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         ClampCombatTeleportMinDx(normalized.simpleCombatTeleportMinDx
                                      ? normalized.simpleCombatTeleportMinDx
                                      : kCombatTeleportMinDxDefault);
-    normalized.simpleCombatTeleportStandOff =
-        ClampCombatTeleportStandOff(normalized.simpleCombatTeleportStandOff
-                                        ? normalized.simpleCombatTeleportStandOff
-                                        : kCombatTeleportStandOffDefault);
+    {
+        uint32_t off = normalized.simpleCombatTeleportStandOff;
+        if (!off || off == kCombatTeleportStandOffLegacyDefault)
+            off = kCombatTeleportStandOffDefault;
+        normalized.simpleCombatTeleportStandOff = ClampCombatTeleportStandOff(off);
+    }
     normalized.simpleCombatTeleportCooldownMs =
         ClampCombatTeleportCooldownMs(normalized.simpleCombatTeleportCooldownMs
                                          ? normalized.simpleCombatTeleportCooldownMs
                                          : kCombatTeleportCooldownDefaultMs);
+    // 0 合法（关门控）；勿把 0 当成缺省。
+    normalized.simpleCombatCrossLayerFillGateMs =
+        ClampCombatCrossLayerFillGateMs(normalized.simpleCombatCrossLayerFillGateMs);
+    normalized.simpleCombatFillBudgetPx =
+        ClampCombatFillBudgetPx(normalized.simpleCombatFillBudgetPx);
+    // 旧默认 400/520：抬到 550（=上限）。显式调过其它值保留。
+    {
+        uint32_t hop = normalized.simpleCombatTeleportMaxHop;
+        if (!hop || hop == kCombatTeleportMaxHopLegacyDefault ||
+            hop == kCombatTeleportMaxHopPrevDefault)
+            hop = kCombatTeleportMaxHopDefault;
+        normalized.simpleCombatTeleportMaxHop = ClampCombatTeleportMaxHop(hop);
+    }
+    // oneshotMaxHp 允许 0（关秒杀道）；缺省用默认，勿把 0 当成缺 key。
+    normalized.simpleCombatOneshotMaxHp =
+        ClampCombatOneshotMaxHp(normalized.simpleCombatOneshotMaxHp);
+    // bumps=0 合法（射后不管）；勿把 0 当成缺 key。
+    normalized.simpleCombatOneshotMinBumps =
+        ClampCombatOneshotMinBumps(normalized.simpleCombatOneshotMinBumps);
+    normalized.simpleCombatOneshotMinFires = ClampCombatOneshotMinFires(
+        normalized.simpleCombatOneshotMinFires ? normalized.simpleCombatOneshotMinFires
+                                              : kCombatOneshotMinFiresDefault);
+    normalized.simpleCombatOneshotMinLagMs =
+        ClampCombatOneshotMinLagMs(normalized.simpleCombatOneshotMinLagMs);
+    normalized.simpleCombatOneshotFoxFillGapMs =
+        ClampCombatOneshotFoxFillGapMs(normalized.simpleCombatOneshotFoxFillGapMs);
+    normalized.pumpCongestionThreshold = ClampPumpCongestion(normalized.pumpCongestionThreshold);
+    normalized.pumpDrainBudget = ClampPumpDrainBudget(
+        normalized.pumpDrainBudget ? normalized.pumpDrainBudget : kPumpDrainBudgetDefault);
+    normalized.frameLock = normalized.frameLock ? 1u : 0u;
+    normalized.frameLockFps = ClampFrameLockFps(
+        normalized.frameLockFps ? normalized.frameLockFps : kFrameLockFpsDefault);
     if (normalized.charSlot < 1) normalized.charSlot = 1;
     if (normalized.charSlot > 32) normalized.charSlot = 32;
     if (normalized.hpThresholdPct < 1) normalized.hpThresholdPct = 1;
@@ -313,6 +448,13 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "version", kPayloadControlCoreIniVersion);
         IniSetBool(ini, "core", "invuln", normalized.invuln != 0);
         IniSetBool(ini, "core", "attackAccel", normalized.attackAccel != 0);
+        IniSetBool(ini, "core", "attackAccelCutLayer", normalized.attackAccelCutLayer != 0);
+        IniSetBool(ini, "core", "attackAccelSkipPrepare",
+                   normalized.attackAccelSkipPrepare != 0);
+        IniSetBool(ini, "core", "attackAccelBooster", normalized.attackAccelBooster != 0);
+        IniSetBool(ini, "core", "finalAttackForce", normalized.finalAttackForce != 0);
+        IniSetBool(ini, "core", "skillMaxLevel", normalized.skillMaxLevel != 0);
+        IniSetU32(ini, "core", "attackSameFrameBurst", normalized.attackSameFrameBurst);
         // 策略可持久化；武装开关永不落盘（强制 false，清历史 key）。
         IniSetBool(ini, "core", "fly", false);
         IniSetU32(ini, "core", "flyMode", normalized.flyMode);
@@ -325,12 +467,16 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "multiSkill", normalized.multiSkill != 0);
         IniSetU32(ini, "core", "multiSkillGapMs", normalized.multiSkillGapMs);
         IniSetBool(ini, "core", "multiSkillSafeStagger", normalized.multiSkillSafeStagger != 0);
+        IniSetBool(ini, "core", "multiSkillSendUseRequest",
+                   normalized.multiSkillSendUseRequest != 0);
         IniSetBool(ini, "core", "simpleCombat", normalized.simpleCombat != 0);
         IniSetBool(ini, "core", "simpleCombatSmartInterval",
                    normalized.simpleCombatSmartInterval != 0);
         IniSetU32(ini, "core", "simpleCombatAttackIntervalMs",
                   normalized.simpleCombatAttackIntervalMs);
         IniSetU32(ini, "core", "simpleCombatTickMs", normalized.simpleCombatTickMs);
+        IniSetU32(ini, "core", "mobScanIntervalMs", normalized.mobScanIntervalMs);
+        IniSetU32(ini, "core", "simpleCombatAttackHoldMs", normalized.simpleCombatAttackHoldMs);
         IniSetU32(ini, "core", "clusterWeight", normalized.clusterWeight);
         IniSetBool(ini, "core", "simpleCombatTeleport", normalized.simpleCombatTeleport != 0);
         IniSetBool(ini, "core", "simpleCombatLiveStep", normalized.simpleCombatLiveStep != 0);
@@ -356,7 +502,11 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                    normalized.autoReloginStopCombat != 0);
         IniSetBool(ini, "core", "autoReloginReconnect",
                    normalized.autoReloginReconnect != 0);
+        IniSetBool(ini, "core", "hideOtherPlayers", normalized.hideOtherPlayers != 0);
+        IniSetBool(ini, "core", "frameLock", normalized.frameLock != 0);
+        IniSetU32(ini, "core", "frameLockFps", ClampFrameLockFps(normalized.frameLockFps));
         IniSetBool(ini, "core", "dropAlertBypass", normalized.dropAlertBypass != 0);
+        IniSetBool(ini, "core", "auctionTownBypass", normalized.auctionTownBypass != 0);
         // 剥离双轨：不再写 core.autoSell*，并清掉历史 key。
         IniEraseKeysWithPrefix(ini, "core", "autoSell");
         IniSetBool(ini, "core", "launcherHangupSchedule",
@@ -374,6 +524,25 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                   normalized.simpleCombatTeleportStandOff);
         IniSetU32(ini, "core", "simpleCombatTeleportCooldownMs",
                   normalized.simpleCombatTeleportCooldownMs);
+        IniSetU32(ini, "core", "simpleCombatCrossLayerFillGateMs",
+                  normalized.simpleCombatCrossLayerFillGateMs);
+        IniSetU32(ini, "core", "simpleCombatFillBudgetPx",
+                  normalized.simpleCombatFillBudgetPx);
+        IniSetU32(ini, "core", "simpleCombatTeleportMaxHop",
+                  normalized.simpleCombatTeleportMaxHop);
+        IniSetU32(ini, "core", "simpleCombatOneshotMaxHp",
+                  normalized.simpleCombatOneshotMaxHp);
+        IniSetU32(ini, "core", "simpleCombatOneshotMinBumps",
+                  normalized.simpleCombatOneshotMinBumps);
+        IniSetU32(ini, "core", "simpleCombatOneshotMinFires",
+                  normalized.simpleCombatOneshotMinFires);
+        IniSetU32(ini, "core", "simpleCombatOneshotMinLagMs",
+                  normalized.simpleCombatOneshotMinLagMs);
+        IniSetU32(ini, "core", "simpleCombatOneshotFoxFillGapMs",
+                  normalized.simpleCombatOneshotFoxFillGapMs);
+        IniSetU32(ini, "core", "pumpCongestionThreshold", normalized.pumpCongestionThreshold);
+        IniSetU32(ini, "core", "pumpDrainBudget",
+                  ClampPumpDrainBudget(normalized.pumpDrainBudget));
         IniSetU32(ini, "core", "hpThresholdPct", normalized.hpThresholdPct);
         IniSetU32(ini, "core", "mpThresholdPct", normalized.mpThresholdPct);
         IniSetU32(ini, "core", "charSlot", normalized.charSlot);

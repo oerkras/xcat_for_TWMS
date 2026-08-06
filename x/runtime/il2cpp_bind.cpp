@@ -4,6 +4,9 @@
 #endif
 #include "il2cpp_bind.h"
 
+#include "il2cpp_container.h"
+#include "log.h"
+#include "main_thread_pump.h"
 #include "managed_main.h"
 
 #include <atomic>
@@ -71,9 +74,13 @@ bool Ensure() {
         reinterpret_cast<FnClassGetFields>(GetProcAddress(ga, "il2cpp_class_get_fields"));
     e.fieldGetOffset =
         reinterpret_cast<FnFieldGetOffset>(GetProcAddress(ga, "il2cpp_field_get_offset"));
+    e.fieldGetName =
+        reinterpret_cast<FnFieldGetName>(GetProcAddress(ga, "il2cpp_field_get_name"));
     e.fieldGetType = reinterpret_cast<FnFieldGetType>(GetProcAddress(ga, "il2cpp_field_get_type"));
     e.fieldGetFlags =
         reinterpret_cast<FnFieldGetFlags>(GetProcAddress(ga, "il2cpp_field_get_flags"));
+    e.classGetFieldFromName = reinterpret_cast<FnClassGetFieldFromName>(
+        GetProcAddress(ga, "il2cpp_class_get_field_from_name"));
     e.typeGetType = reinterpret_cast<FnTypeGetType>(GetProcAddress(ga, "il2cpp_type_get_type"));
     e.classFromType =
         reinterpret_cast<FnClassFromType>(GetProcAddress(ga, "il2cpp_class_from_type"));
@@ -215,10 +222,63 @@ void* ReadPtr(void* base, size_t off) {
     }
 }
 
+bool ManagedAllocSafe() {
+    // On the pump thread the alloc runs on the registered Unity main thread.
+    // Off-pump it is only safe while the pump is proven alive (recent real
+    // tick): a frozen main thread means a worker alloc would collect from an
+    // unregistered thread → GC fatal. 2s window matches kPumpIdleFailMs.
+    return x::runtime::main_thread::IsOnPumpThread() ||
+           x::runtime::main_thread::IsPumpTicking(2000);
+}
+
+void* AllocObject(void* klass) {
+    if (!Ensure() || !klass || !gExp.objectNew) return nullptr;
+    if (!ManagedAllocSafe()) {
+        x::runtime::LogWThrottled(200, 3000, "Il2Cpp",
+                                  "skip objectNew off-pump (pump frozen) — avoid GC fatal");
+        return nullptr;
+    }
+    __try {
+        return gExp.objectNew(klass);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+void* NewString(const char* utf8) {
+    if (!Ensure() || !utf8 || !gExp.stringNew) return nullptr;
+    if (!ManagedAllocSafe()) {
+        x::runtime::LogWThrottled(201, 3000, "Il2Cpp",
+                                  "skip stringNew off-pump (pump frozen) — avoid GC fatal");
+        return nullptr;
+    }
+    __try {
+        return gExp.stringNew(utf8);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+bool RuntimeClassInit(void* klass) {
+    if (!Ensure() || !klass || !gExp.runtimeClassInit) return false;
+    if (!ManagedAllocSafe()) {
+        x::runtime::LogWThrottled(202, 3000, "Il2Cpp",
+                                  "skip runtimeClassInit off-pump (pump frozen) — avoid GC fatal");
+        return false;
+    }
+    __try {
+        gExp.runtimeClassInit(klass);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 uintptr_t ArrayLen(void* arr) {
     if (!arr) return 0;
     __try {
-        return *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + 0x18);
+        return *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) +
+                                             il2cpp_container::OffArrayMaxLength());
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
@@ -227,7 +287,8 @@ uintptr_t ArrayLen(void* arr) {
 void* ArrayAt(void* arr, uintptr_t i) {
     if (!arr) return nullptr;
     __try {
-        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + 0x20 + i * sizeof(void*));
+        return *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) +
+                                         il2cpp_container::OffArrayData() + i * sizeof(void*));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
     }

@@ -6,6 +6,7 @@
 #include "../ports/world_port.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
@@ -30,31 +31,61 @@ using x::runtime::il2cpp::ReadPtr;
 // HP/MP 真源在 x::ui::player（WM→CS）；LocalUser → il2cpp_shape::ResolveUserLocalKlass
 // ItemDataManager：08-03 后无明文名；以 dump 类哈希为准（dataTable@+0x18 / bundleMap@+0x38）。
 constexpr char kItemDataManagerClass[] =
-    "cd80f688c990f0dd0aafd2b78602618c46a424e5b4c34d18172867f24c782ec";
+    "eff831ff245fe0b660f0b6c5e016131cc0e4efb19e1fdf81772174dc4838a21";  // remounted 2026-08-04 ItemDataManager
+constexpr char kItemDataClass[] =
+    "aef689abc72bee1aa21eeaec98304465b11b314910702a0cdc4f78ee964ac2c";
+constexpr char kItemBundleClass[] =
+    "f2084400139319c91922b1e41c8aadb2fa8142e03370c3899686dd54d8792d3";
+constexpr char kItemInfoClass[] =
+    "e85010969aa8a2f9e4e2928b792c08f3e00ad1a2d76c6d1f0054a862c5b9f2f";
 
-constexpr size_t kOffLuName = 0x1B8;
-constexpr size_t kOffWmMyUser = 0x28;
-constexpr size_t kOffWmCharacterData = 0xE0;
-constexpr size_t kOffCdItemSlots = 0x40;
-constexpr size_t kOffListItems = 0x10;
-constexpr size_t kOffListSize = 0x18;
-constexpr size_t kOffSlotItemId = 0x10;       // ItemSlot 基类
-constexpr size_t kOffBundleNumber = 0x28;     // ItemSlotBundle(子类) ushort；基类无此字段
-constexpr size_t kOffIdmDataTable = 0x18;
-constexpr size_t kOffIdmBundleMap = 0x38;
-constexpr size_t kOffBundleSellPrice = 0x38;  // ItemBundle.nSellPrice
-constexpr size_t kOffItemDataInfo = 0x18;
-constexpr size_t kOffInfoPrice = 0x54;
-constexpr size_t kOffInfoNotSale = 0x68;
-constexpr size_t kOffDictBuckets = 0x10;
-constexpr size_t kOffDictEntries = 0x18;
-constexpr size_t kOffDictCount = 0x20;
-constexpr size_t kOffDictFreeCount = 0x2C;
-constexpr size_t kEntrySize = 0x18;
-constexpr size_t kOffEntryHash = 0x00;
-constexpr size_t kOffEntryNext = 0x04;
-constexpr size_t kOffEntryKey = 0x08;
-constexpr size_t kOffEntryValue = 0x10;
+// IDM / ItemData / Bundle / Info 价位：hash → field_get_offset（dump fallback）
+constexpr char kHashIdmDataTable[] =
+    "e61b745d225e422a2228dc716cfb3056904fb9d2ecb8ee0fdccde52b5366278";
+constexpr char kHashIdmBundleMap[] =
+    "a087bdaf8378e368da7ca2d5445049ec6768fb199f87e2ddd5460f784b59b18";
+constexpr char kHashBundleSellPrice[] =
+    "c1bf4de6d56889a53f7d09b4a4fa00a0319c8d4c353abbbaac17c334306596b";
+constexpr char kHashItemDataInfo[] =
+    "e1816d635f171a0029c9759ac09d72240735dd89dedb43dd5392a8bbed14559";
+constexpr char kHashInfoPrice[] =
+    "bf0c497e748c8cdb68097c7d5b6a322a93223e24e673d2ab38b6a3212fa44df";
+constexpr char kHashInfoNotSale[] =
+    "f53ec2d717e4310118ceb163b07c9e5a8c418ac52ba79df35e8adfe1fdebd05";
+
+constexpr size_t kFbIdmDataTable = 0x18;
+constexpr size_t kFbIdmBundleMap = 0x38;
+constexpr size_t kFbBundleSellPrice = 0x38;
+constexpr size_t kFbItemDataInfo = 0x18;
+constexpr size_t kFbInfoPrice = 0x54;
+constexpr size_t kFbInfoNotSale = 0x68;
+size_t gOffIdmDataTable = kFbIdmDataTable;
+size_t gOffIdmBundleMap = kFbIdmBundleMap;
+size_t gOffBundleSellPrice = kFbBundleSellPrice;
+size_t gOffItemDataInfo = kFbItemDataInfo;
+size_t gOffInfoPrice = kFbInfoPrice;
+size_t gOffInfoNotSale = kFbInfoNotSale;
+#define kOffIdmDataTable (gOffIdmDataTable)
+#define kOffIdmBundleMap (gOffIdmBundleMap)
+#define kOffBundleSellPrice (gOffBundleSellPrice)
+#define kOffItemDataInfo (gOffItemDataInfo)
+#define kOffInfoPrice (gOffInfoPrice)
+#define kOffInfoNotSale (gOffInfoNotSale)
+bool gPriceFieldTried = false;
+
+// WM.MyUser / CD.ItemSlots / Slot.ItemId|nNumber → x::ui::player（hash SSOT）
+#define kOffListItems (x::runtime::il2cpp_container::OffListItems())
+#define kOffListSize (x::runtime::il2cpp_container::OffListSize())
+#define kOffDictBuckets (x::runtime::il2cpp_container::OffDictBuckets())
+#define kOffDictEntries (x::runtime::il2cpp_container::OffDictEntries())
+#define kOffDictCount (x::runtime::il2cpp_container::OffDictCount())
+#define kOffDictFreeCount (x::runtime::il2cpp_container::OffDictFreeCount())
+#define kEntrySize (x::runtime::il2cpp_container::DictEntryStrideIntPtr())
+#define kOffEntryHash (x::runtime::il2cpp_container::OffDictEntryHash())
+#define kOffEntryNext (x::runtime::il2cpp_container::OffDictEntryNext())
+#define kOffEntryKey (x::runtime::il2cpp_container::OffDictEntryKey())
+#define kOffEntryValue (x::runtime::il2cpp_container::OffDictEntryValuePtr())
+#define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
 
 constexpr int kInvTiConsume = 2;
 constexpr int kInvTiInstall = 3;
@@ -120,10 +151,71 @@ int64_t ReadI64(void* object, size_t offset) {
     }
 }
 
+bool PlausiblePriceOff(size_t off) { return off >= 0x10 && off < 0x400; }
+
+bool PriceFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !hash || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    for (void* k = klass; k;) {
+        void* field = nullptr;
+        __try {
+            field = e.classGetFieldFromName(k, hash);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            field = nullptr;
+        }
+        if (field) {
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (PlausiblePriceOff(off)) {
+                *out = off;
+                return true;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return false;
+}
+
+void EnsurePriceFieldOff() {
+    if (gPriceFieldTried) return;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    gPriceFieldTried = true;
+    void* idm = x::runtime::il2cpp::FindClass("", kItemDataManagerClass);
+    void* data = x::runtime::il2cpp::FindClass("", kItemDataClass);
+    void* bundle = x::runtime::il2cpp::FindClass("", kItemBundleClass);
+    void* info = x::runtime::il2cpp::FindClass("", kItemInfoClass);
+    int hits = 0;
+    if (PriceFieldOffHit(idm, kHashIdmDataTable, kFbIdmDataTable, &gOffIdmDataTable)) ++hits;
+    if (PriceFieldOffHit(idm, kHashIdmBundleMap, kFbIdmBundleMap, &gOffIdmBundleMap)) ++hits;
+    if (PriceFieldOffHit(bundle, kHashBundleSellPrice, kFbBundleSellPrice, &gOffBundleSellPrice))
+        ++hits;
+    if (PriceFieldOffHit(data, kHashItemDataInfo, kFbItemDataInfo, &gOffItemDataInfo)) ++hits;
+    if (PriceFieldOffHit(info, kHashInfoPrice, kFbInfoPrice, &gOffInfoPrice)) ++hits;
+    if (PriceFieldOffHit(info, kHashInfoNotSale, kFbInfoNotSale, &gOffInfoNotSale)) ++hits;
+    x::runtime::LogI("Titlebar",
+                     "price fields path=%s hits=%d/6 dt=0x%zX bm=0x%zX sell=0x%zX info=0x%zX "
+                     "price=0x%zX ns=0x%zX",
+                     hits == 6 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+                     gOffIdmDataTable, gOffIdmBundleMap, gOffBundleSellPrice, gOffItemDataInfo,
+                     gOffInfoPrice, gOffInfoNotSale);
+}
+
 int ArrayI32At(void* array, uintptr_t index) {
     if (!array) return -1;
     __try {
-        return *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(array) + 0x20 + index * sizeof(int));
+        return *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(array) + kOffArrData +
+                                       index * sizeof(int));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return -1;
     }
@@ -200,8 +292,8 @@ void* DictGetIntPtr(void* dictionary, int key) {
             const int limit = count > freeCount ? count - freeCount + 8 : count + 8;
             for (int guard = 0; index >= 0 && guard < limit &&
                                 static_cast<uintptr_t>(index) < entryCount; ++guard) {
-                uint8_t* entry = reinterpret_cast<uint8_t*>(entries) + 0x20 +
-                                 static_cast<uintptr_t>(index) * kEntrySize;
+                uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, index, kEntrySize);
+                if (!entry) break;
                 if (ReadI32(entry, kOffEntryHash) == hashCode &&
                     ReadI32(entry, kOffEntryKey) == key) {
                     void* value = ReadPtr(entry, kOffEntryValue);
@@ -213,7 +305,9 @@ void* DictGetIntPtr(void* dictionary, int key) {
         }
     }
     for (uintptr_t index = 0; index < entryCount; ++index) {
-        uint8_t* entry = reinterpret_cast<uint8_t*>(entries) + 0x20 + index * kEntrySize;
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(
+            entries, static_cast<int>(index), kEntrySize);
+        if (!entry) continue;
         if (ReadI32(entry, kOffEntryHash) < 0 || ReadI32(entry, kOffEntryKey) != key) continue;
         void* value = ReadPtr(entry, kOffEntryValue);
         return LooksLikeHeapPtr(value) ? value : nullptr;
@@ -223,31 +317,26 @@ void* DictGetIntPtr(void* dictionary, int key) {
 
 bool SnapshotInventory(std::unordered_map<int, unsigned long long>& out) {
     out.clear();
-    void* worldManager = ports::world::GetWorldManager();
-    void* characterData = ReadPtr(worldManager, kOffWmCharacterData);
-    void* slotsArray = ReadPtr(characterData, kOffCdItemSlots);
-    const uintptr_t typeCount = ArrayLen(slotsArray);
-    if (!LooksLikeHeapPtr(worldManager) || !LooksLikeHeapPtr(characterData) ||
-        !LooksLikeHeapPtr(slotsArray) || typeCount == 0 || typeCount > 16) {
-        return false;
-    }
+    const size_t offItemId = x::ui::player::OffSlotItemId();
+    const size_t offBundleNum = x::ui::player::OffSlotBundleNumber();
+    bool any = false;
     for (const int type : {kInvTiConsume, kInvTiInstall, kInvTiEtc}) {
-        if (static_cast<uintptr_t>(type) >= typeCount) continue;
-        void* list = ArrayAt(slotsArray, static_cast<uintptr_t>(type));
+        void* list = x::ui::player::GetItemSlotList(type);
         void* items = ReadPtr(list, kOffListItems);
-        const int size = ReadI32(list, kOffListSize);
+        const int size = list ? ReadI32(list, kOffListSize) : 0;
         if (!LooksLikeHeapPtr(list) || !LooksLikeHeapPtr(items) || size <= 0 || size > 512) continue;
+        any = true;
         const int count = (std::min)(size, static_cast<int>(ArrayLen(items)));
         for (int index = 0; index < count; ++index) {
             void* slot = ArrayAt(items, static_cast<uintptr_t>(index));
-            const int itemId = ReadI32(slot, kOffSlotItemId);
+            const int itemId = ReadI32(slot, offItemId);
             if (!LooksLikeHeapPtr(slot) || itemId <= 0) continue;
-            // TI 2/3/4 槽位运行时多为 ItemSlotBundle；数量在子类 +0x28 ushort。
-            unsigned long long quantity = ReadU16(slot, kOffBundleNumber);
+            // TI 2/3/4 槽位运行时多为 ItemSlotBundle；数量在子类 nNumber ushort。
+            unsigned long long quantity = ReadU16(slot, offBundleNum);
             out[itemId] += quantity ? quantity : 1;
         }
     }
-    return true;
+    return any;
 }
 
 int LookupOfflineSellPrice(int itemId) {
@@ -259,6 +348,7 @@ int LookupOfflineSellPrice(int itemId) {
 
 int LookupSellPrice(int itemId) {
     if (itemId <= 0) return 0;
+    EnsurePriceFieldOff();
     const auto cached = gPriceCache.find(itemId);
     if (cached != gPriceCache.end()) return cached->second > 0 ? cached->second : 0;
     int price = 0;
@@ -295,6 +385,7 @@ bool BindApis() {
         x::runtime::LogW("Titlebar", "BindApis: missing export/RVA");
         return false;
     }
+    EnsurePriceFieldOff();
     x::runtime::LogI("Titlebar", "BindApis ok GA=%p FindAll=%p", exports.ga, gFindAll);
     return true;
 }
@@ -305,7 +396,7 @@ bool LocalUserLooksOk() {
     if (!LooksLikeHeapPtr(gLocalUser)) return false;
     void* wm = ports::world::PeekWorldManager();
     if (!LooksLikeHeapPtr(wm)) return false;
-    void* myUser = ReadPtr(wm, kOffWmMyUser);
+    void* myUser = ReadPtr(wm, x::ui::player::OffWmMyUser());
     // 换图中 MyUser 可能暂空：缓存一律视为失效，避免沿用旧指针。
     if (!LooksLikeHeapPtr(myUser)) return false;
     return gLocalUser == myUser;
@@ -330,7 +421,8 @@ bool TryResolveLocalUser() {
             return GetGoName(user, name, sizeof(name)) && _stricmp(name, "MyUser") == 0;
         };
         void* wm = ports::world::PeekWorldManager();
-        void* myUser = LooksLikeHeapPtr(wm) ? ReadPtr(wm, kOffWmMyUser) : nullptr;
+        void* myUser =
+            LooksLikeHeapPtr(wm) ? ReadPtr(wm, x::ui::player::OffWmMyUser()) : nullptr;
         // SSOT = WM.MyUser@+0x28。指针变了必须立刻换；换图空窗直接清缓存。
         if (LooksLikeHeapPtr(myUser)) {
             if (gLocalUser != myUser) {
@@ -361,6 +453,7 @@ bool TryResolveLocalUser() {
 }
 
 bool TryResolveItemDataManager() {
+    EnsurePriceFieldOff();
     if (LooksLikeHeapPtr(gItemDataManager)) return true;
     if (x::runtime::managed_main::IsLoginFrozen()) return false;
     if (!gIdmType) gIdmType = x::runtime::il2cpp::FindClassTypeObject(kItemDataManagerClass);

@@ -1,5 +1,8 @@
 #include "xcat_world_names.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -67,6 +70,21 @@ bool FileExists(const std::string& path) {
 std::string ResolveDataServiceDir(const char* payloadBinDir) {
     if (!payloadBinDir || !payloadBinDir[0]) return "dataservice\\";
     return JoinPath(payloadBinDir, "dataservice");
+}
+
+// _Center12 → 12；裸 _Center / 非数字后缀 → false。
+bool ParseCenterWorldId(const std::string& key, int32_t* outId) {
+    static constexpr char kPrefix[] = "_Center";
+    static constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+    if (!outId || key.size() <= kPrefixLen) return false;
+    if (key.compare(0, kPrefixLen, kPrefix) != 0) return false;
+    const char* p = key.c_str() + kPrefixLen;
+    if (!std::isdigit(static_cast<unsigned char>(*p))) return false;
+    char* end = nullptr;
+    const long v = std::strtol(p, &end, 10);
+    if (!end || *end != '\0' || v < 1 || v > 64) return false;
+    *outId = static_cast<int32_t>(v);
+    return true;
 }
 
 }  // namespace
@@ -137,6 +155,32 @@ bool WorldNameEquals(const WorldNamesPack& pack, const char* a, const char* b) {
     if (kb && kb[0] && _stricmp(kb, a) == 0) return true;
     if (ka && ka[0] && kb && kb[0] && _stricmp(ka, kb) == 0) return true;
     return false;
+}
+
+uint32_t WorldNamesListCenters(const WorldNamesPack& pack, WorldNameCenterEntry* out, uint32_t maxOut) {
+    if (!out || maxOut == 0 || !pack.loaded) return 0;
+    struct Row {
+        int32_t id = 0;
+        std::string name;
+    };
+    std::vector<Row> rows;
+    rows.reserve(pack.displayByKey.size());
+    for (const auto& kv : pack.displayByKey) {
+        int32_t id = 0;
+        if (!ParseCenterWorldId(kv.first, &id)) continue;
+        rows.push_back(Row{id, kv.second});
+    }
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.id < b.id; });
+    uint32_t n = 0;
+    for (const auto& r : rows) {
+        if (n > 0 && out[n - 1].worldId == r.id) continue;
+        if (n >= maxOut) break;
+        out[n].worldId = r.id;
+        out[n].displayName[0] = '\0';
+        strncpy_s(out[n].displayName, r.name.c_str(), _TRUNCATE);
+        ++n;
+    }
+    return n;
 }
 
 }  // namespace xcat

@@ -49,6 +49,10 @@ struct Input {
     bool scheduleActive = true;
     bool statusReady = false;
     bool progressGrace = false;
+    // 已武装且进程仍在，但 Status SHM 心跳停更（整进程假死常见）。
+    bool payloadHeartbeatStale = false;
+    // 一键/重拉归属、冷启已结束、进程在但从未 localPlayerOk（选角/加载卡死，心跳可仍活）。
+    bool prePlayableStuck = false;
     bool reloginHardFailed = false;
     bool freezeUnrecoverable = false;
     uint32_t hardFailCode = 0;

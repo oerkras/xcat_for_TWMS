@@ -10,7 +10,9 @@
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
+#include "../../runtime/il2cpp_network.h"
 #include "../../runtime/il2cpp_shape.h"
 
 #include <Windows.h>
@@ -37,65 +39,144 @@ using x::runtime::il2cpp::ReadPtr;
 // Session (f0ee06b6… TypeDef 13797) 承载 Socket/seq/SendPacket；CALL_EDGE 挂 Session klass。
 // 旧 CMS Session 哈希 cd7c86a4… 已并入 Session 类，不再单独 FindClass。
 
-// NetworkManager facade fields:
-//   Session* @0x10, SessionState @0x18, Queue<InPacket> @0x28, HashSet@0x48
-constexpr size_t kOffNmSession = 0x10;       // Session*
-constexpr size_t kOffNmSessionState = 0x18;  // SessionState (int enum)
-constexpr size_t kOffNmPacketQueue = 0x28;   // Queue<InPacket>*
+// NetworkManager facade + Session → il2cpp_network SSOT（勿抄 CMS RecvList/State）
+#define kOffNmSession (x::runtime::il2cpp_network::OffNmSession())
+#define kOffNmSessionState (x::runtime::il2cpp_network::OffNmSessionState())
+#define kOffNmPacketQueue (x::runtime::il2cpp_network::OffNmPacketQueue())
+#define kOffSessionPendingError (x::runtime::il2cpp_network::OffSessionPendingError())
+#define kOffSessionState (x::runtime::il2cpp_network::OffSessionState())
+#define kOffSessionRecvList (x::runtime::il2cpp_network::OffSessionRecvList())
+#define kOffSessionClosed (x::runtime::il2cpp_network::OffSessionClosed())
+#define kOffSessionSeqSend (x::runtime::il2cpp_network::OffSessionSeqSend())
 
-// Session instance fields（TW +0x50 相对 CMS 多一格）:
-//   CMS: List@0x50 SessionState@0x58
-//   TW:  object@0x50 List@0x58 SessionState@0x60
-constexpr size_t kOffSessionPendingError = 0x40;  // int _pendingErrorCode
-constexpr size_t kOffSessionState = 0x60;         // SessionState backing field (TW)
-constexpr size_t kOffSessionRecvList = 0x58;      // List<InPacket>* (TW)
-constexpr size_t kOffSessionClosed = 0x20;        // bool _isClosed
-constexpr size_t kOffSessionSeqSend = 0x18;       // uint _seqSend — monotonic outbound counter
-
-// OutPacket (= TW f217b5… TypeDef 13775). Same layout as CMS and as InPacket: the id sits at
-// +0x20 in all three, so the outbound probe reads it exactly like the inbound ring does.
-constexpr size_t kOffOutPacketId = 0x20;  // ushort _packetId
+// Packet / OutPacket fields：hash → field_get_offset（In/Out 同布局）
+constexpr char kPacketBaseClass[] =
+    "fc6ae331019bd3c1e987ba71c4f75e3591b683aabc4278715ac9c79480cbdac";
+constexpr char kHashPacketBuffer[] =
+    "<c096dd8ffc6b9c4dc1a6458417487a3a0d8fb33676030af7deb507639a12e2b>k__BackingField";
+constexpr char kHashPacketOffset[] =
+    "<f9bbb972b920d8265c641b982330d9a76a2a52c97dee9c9c8ed0a9030c1778c>k__BackingField";
+constexpr char kHashOutPacketId[] =
+    "a40d505bf94e3c9d0dbbc1dad4cfa27e37c562ef01c4fe5364e92e03c6f04af";
+constexpr size_t kFbOutPacketId = 0x20;
+constexpr size_t kFbPacketBuffer = 0x10;
+constexpr size_t kFbPacketOffset = 0x18;
+size_t gOffOutPacketId = kFbOutPacketId;
+size_t gOffPacketBuffer = kFbPacketBuffer;
+size_t gOffPacketOffset = kFbPacketOffset;
+#define kOffOutPacketId (gOffOutPacketId)
+#define kOffInPacketId (gOffOutPacketId)  // InPacket 同 ushort@0x20
+#define kOffPacketBuffer (gOffPacketBuffer)
+#define kOffPacketOffset (gOffPacketOffset)
+bool gPktFieldTried = false;
 
 // TW dump.cs RVAs — call-edge targets（方法在 Session / f0ee06b6… 上）。
 // CloseSession=旧 CloseSocket；Disconnect=旧 Close；另挂 OnDisconnect / set_SessionState。
-constexpr uintptr_t kRvaNmCloseSession = 0x1CC66E0;  // remapped 2026-08-03
-constexpr uintptr_t kRvaNmDisconnect = 0x1CB7610;    // remapped 2026-08-03
-constexpr uintptr_t kRvaSessionSetState = 0x1CC6220;  // remapped 2026-08-03: set_SessionState (+0x60)
-constexpr uintptr_t kRvaSessionOnDisc = 0x1CC7A40;  // remapped 2026-08-03: void() writes SessionState@+0x60
+constexpr uintptr_t kRvaNmCloseSession = 0x1CD0FC0;  // remounted 2026-08-04
+constexpr uintptr_t kRvaNmDisconnect = 0x1CC1E20;    // remounted 2026-08-04
+constexpr uintptr_t kRvaSessionSetState = 0x1CD0B40;  // remounted 2026-08-04: set_SessionState (+0x60)
+constexpr uintptr_t kRvaSessionOnDisc = 0x1CD2190;  // remounted 2026-08-04: void() writes SessionState@+0x60
 
-// Outbound funnel (2026-08-03)：Session.SendPacket(OutPacket)→bool（P0b 钉死 RVA 0x1CB98B0）。
+// Outbound funnel (2026-08-04)：Session.SendPacket(OutPacket)→bool（P0b 钉死 RVA 0x1CC3EE0）。
 // ABI：rcx=Session* / rdx=OutPacket*；VEH 读 +0x20 PacketId / Buffer。Wire 内才 EncodeForSend。
-constexpr uintptr_t kRvaSessionSend = 0x1CB98B0;  // Session.SendPacket
+constexpr uintptr_t kRvaSessionSend = 0x1CC3EE0;  // Session.SendPacket
 // 方法哈希（Session 上 void() 极多，kind 不唯一；哈希漂 RVA 时仍可活）
 constexpr char kHashCloseSession[] =
-    "ed805641b32bfe379c082d2f3cc596bc095cb4548b64adee7968f28b6792749";
+    "f2059e3d241219fa216801d3ea7106d6bfe3b31da45df104b020c38c59905d1";
 constexpr char kHashDisconnect[] =
-    "cbff51ff6c9b2eee095ec61bebfd23f2bc56630e5b0976edda68927b13a7b37";
+    "dbcbaf282bf74ef11e941ba61b4c77eb02a6318d8236291b42d15258c119480";
 constexpr char kHashOnDisconnect[] =
-    "f05a4b7899da9c2081e9bab041fbff9e2c2dfb37e15fb266132b231e1532da3";
+    "f459fc80bcb9c76f65b0cb7c2df1cfe5455043ae9ac6a31e4ed6a087e67ff02";
 constexpr char kHashSetSessionState[] =
-    "dad3bfd81e6a3a2ef96f935e92ac6eade6d8ff60560fa7ca12e212b4707e187";
+    "c75bb306d32f8a0d3d20a18220f320ca0f62ff4366e1474eb6ba2bbeca2ee68";
 constexpr char kHashSendPacket[] =
-    "bcd0d90687418e2b3ff0faf5b96a9bb4028720a4eb37b78b74b873ce1dd891f";
+    "a3e15e8fb1d9cacfe30bdb5b652ad6f7df5037a51e3a48cfede943d8fc2d59b";
 constexpr char kOutPacketClass[] =
-    "aeb7167893ac51cbc0cf730326f2361e6e8b797eeb940786711185ef0fd658c";
-// a480 local-disconnect fork（WM ab85c0a9…）：Try 置 +0x298，Update 再调 DoLocal。
-constexpr uintptr_t kRvaA480TryLocalDisc = 0xDC6780;  // remapped 2026-08-03: writes +0x298 (was 0xDC7E70)
-constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDD2FC8;  // remapped 2026-08-03: Update call DoLocal
-constexpr uintptr_t kRvaA480DoLocalDisc = 0xDDAC30;  // remapped 2026-08-03 (was 0xDDC320)
-constexpr size_t kOffA480ForceDiscFlag = 0x298;        // bool force-local-disconnect
-constexpr size_t kOffA480DiscTimer = 0x29C;            // float throttle
+    "f07686cc7a01760c9166b2cf7a72f4ac7c084f1ee39bd1c3bdc42c351e884bb";
+// a480 local-disconnect fork（WM af152981…）：Try 置 +0x298，Update 再调 DoLocal。
+constexpr uintptr_t kRvaA480TryLocalDisc = 0xDCB780;  // remounted 2026-08-04: writes +0x298
+constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDD8105;  // remounted 2026-08-04: Update call DoLocal
+constexpr uintptr_t kRvaA480DoLocalDisc = 0xDDFFA0;  // remounted 2026-08-04
+constexpr char kWorldManagerClass[] =
+    "af1529816d3e158e2939f3c03b4fe68c04930802ea39c8d6567d1fb4865b742";
+constexpr char kHashA480ForceDisc[] =
+    "cd1beb2fd8f950d0651fbdfe1fd27c8f65e04d58fc45b07c151fed6b13c34c7";
+constexpr char kHashA480DiscTimer[] =
+    "c87edc325b9a1c76ef2f902f79891cdd3aa87a84a314b56d6b3dd86fd00172d";
+constexpr size_t kFbA480ForceDiscFlag = 0x298;
+constexpr size_t kFbA480DiscTimer = 0x29C;
+size_t gOffA480ForceDiscFlag = kFbA480ForceDiscFlag;
+size_t gOffA480DiscTimer = kFbA480DiscTimer;
+#define kOffA480ForceDiscFlag (gOffA480ForceDiscFlag)
+#define kOffA480DiscTimer (gOffA480DiscTimer)
 constexpr int kCallEdgeCap = 48;
 constexpr int kStackFrames = 16;
 
-// InPacket.PacketId @ +0x20 (ushort); Packet.Buffer @ +0x10 (byte[]*).
-constexpr size_t kOffInPacketId = 0x20;
-constexpr size_t kOffPacketBuffer = 0x10;
-// Rest of the abstract Packet base, for reading an outbound payload: int Offset @0x18 is how many
-// bytes are written so far, and the body starts at DataPos (4-byte header + 2-byte id).
-constexpr size_t kOffPacketOffset = 0x18;
-constexpr size_t kIl2cppArrayData = 0x20;  // first element of a managed byte[]
+#define kIl2cppArrayData (x::runtime::il2cpp_container::OffArrayData())
+#define kIl2cppArrayLen (x::runtime::il2cpp_container::OffArrayMaxLength())
+
 constexpr int kPacketDataPos = 6;
+
+bool PlausiblePktOff(size_t off) { return off >= 0x10 && off < 0x400; }
+
+bool PktFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !hash || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    for (void* k = klass; k;) {
+        void* field = nullptr;
+        __try {
+            field = e.classGetFieldFromName(k, hash);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            field = nullptr;
+        }
+        if (field) {
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (PlausiblePktOff(off)) {
+                *out = off;
+                return true;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return false;
+}
+
+void EnsureKickFieldOff() {
+    if (gPktFieldTried) return;
+    gPktFieldTried = true;
+    void* outKlass = x::runtime::il2cpp::FindClass("", kOutPacketClass);
+    void* baseKlass = x::runtime::il2cpp::FindClass("", kPacketBaseClass);
+    void* wmKlass = x::runtime::il2cpp::FindClass("", kWorldManagerClass);
+    int hits = 0;
+    // PacketId on OutPacket; Buffer/Offset on Packet base (also walk from OutPacket)
+    if (PktFieldOffHit(outKlass, kHashOutPacketId, kFbOutPacketId, &gOffOutPacketId)) ++hits;
+    if (PktFieldOffHit(outKlass ? outKlass : baseKlass, kHashPacketBuffer, kFbPacketBuffer,
+                       &gOffPacketBuffer))
+        ++hits;
+    if (PktFieldOffHit(outKlass ? outKlass : baseKlass, kHashPacketOffset, kFbPacketOffset,
+                       &gOffPacketOffset))
+        ++hits;
+    if (PktFieldOffHit(wmKlass, kHashA480ForceDisc, kFbA480ForceDiscFlag, &gOffA480ForceDiscFlag))
+        ++hits;
+    if (PktFieldOffHit(wmKlass, kHashA480DiscTimer, kFbA480DiscTimer, &gOffA480DiscTimer)) ++hits;
+    x::runtime::LogI("KickSniff",
+                     "pkt/a480 fields path=%s hits=%d/5 id=0x%zX buf=0x%zX off=0x%zX a480=0x%zX",
+                     hits == 5 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+                     gOffOutPacketId, gOffPacketBuffer, gOffPacketOffset, gOffA480ForceDiscFlag);
+}
+
 
 // Names for the handful of opcodes we actually reason about, so a send.log trace reads without a
 // lookup table on the side. Values are CMS ClientPacket and have matched the wire every time we
@@ -254,35 +335,6 @@ HookSlot gHooks[] = {
      nullptr, nullptr, kHashSetSessionState, "set_SessionState", 1},
 };
 
-void WriteAll(HANDLE h, const char* buf, int n) {
-    if (h == INVALID_HANDLE_VALUE || n <= 0) return;
-    DWORD w = 0;
-    WriteFile(h, buf, (DWORD)n, &w, nullptr);
-    FlushFileBuffers(h);
-}
-
-void Log(const char* fmt, ...) {
-    char body[1900];
-    va_list ap;
-    va_start(ap, fmt);
-    int bn = vsnprintf(body, sizeof(body), fmt, ap);
-    va_end(ap);
-    if (bn < 0) return;
-    if (bn >= (int)sizeof(body)) bn = (int)sizeof(body) - 1;
-    body[bn] = '\0';
-
-    char buf[2048];
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    int n = snprintf(buf, sizeof(buf), "%02u:%02u:%02u.%03u %s\n", st.wHour, st.wMinute,
-                     st.wSecond, st.wMilliseconds, body);
-    if (n < 0) return;
-    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
-    WriteAll(gLog, buf, n);
-    OutputDebugStringA(buf);
-    x::runtime::LogI("KickSniff", "%s", body);
-}
-
 bool DirExists(const std::wstring& dir) {
     const DWORD a = GetFileAttributesW(dir.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -303,48 +355,66 @@ std::wstring ModuleDir() {
     return cut == std::wstring::npos ? std::wstring() : s.substr(0, cut);
 }
 
-void OpenLog() {
-    if (gLog != INVALID_HANDLE_VALUE) return;
+std::wstring ResolveLogDir() {
     std::wstring dir = DirExists(kLogDirDev) ? kLogDirDev : ModuleDir();
     if (!DirExists(kLogDirDev) && !dir.empty()) {
         const std::wstring logs = dir + L"\\logs";
         CreateDirectoryW(logs.c_str(), nullptr);
         if (DirExists(logs)) dir = logs;
     }
-    if (dir.empty()) return;
-    // Was CREATE_ALWAYS with no backup: every relaunch wiped the previous drop's evidence,
-    // which is exactly why the 08-19 disconnect could not be reconstructed.
-    gLog = x::runtime::OpenRotatingDbgLog(dir, L"kick.log");
+    return dir;
+}
+
+void Log(const char* fmt, ...) {
+    char body[1900];
+    va_list ap;
+    va_start(ap, fmt);
+    int bn = vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    if (bn < 0) return;
+    if (bn >= (int)sizeof(body)) bn = (int)sizeof(body) - 1;
+    body[bn] = '\0';
+
+    char buf[2048];
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    int n = snprintf(buf, sizeof(buf), "%02u:%02u:%02u.%03u %s\n", st.wHour, st.wMinute,
+                     st.wSecond, st.wMilliseconds, body);
+    if (n < 0) return;
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    const std::wstring dir = ResolveLogDir();
+    if (!dir.empty()) (void)x::runtime::AppendDbgLog(dir + L"\\kick.log", buf, (DWORD)n);
+    OutputDebugStringA(buf);
+    x::runtime::LogI("KickSniff", "%s", body);
+}
+
+void OpenLog() {
+    // kick.log 经 AppendDbgLog 写入；此处只确保目录存在。
+    (void)ResolveLogDir();
+    gLog = reinterpret_cast<HANDLE>(1);  // non-null sentinel so Init checks pass
 }
 
 HANDLE gSendLog = INVALID_HANDLE_VALUE;
 CRITICAL_SECTION gSendLock;
 bool gSendLockReady = false;
+std::wstring gSendLogPath;
 
 void OpenSendLog() {
-    if (gSendLog != INVALID_HANDLE_VALUE) return;
-    std::wstring dir = DirExists(kLogDirDev) ? kLogDirDev : ModuleDir();
-    if (!DirExists(kLogDirDev) && !dir.empty()) {
-        const std::wstring logs = dir + L"\\logs";
-        CreateDirectoryW(logs.c_str(), nullptr);
-        if (DirExists(logs)) dir = logs;
-    }
+    if (gSendLockReady && !gSendLogPath.empty()) return;
+    const std::wstring dir = ResolveLogDir();
     if (dir.empty()) return;
-    // Its own file, since one packet per line would bury kick.log. Previously appended forever
-    // to keep the trace next to the drop that followed it, but that grew without bound and
-    // mixed every session together; a generation per run keeps both properties.
-    gSendLog = x::runtime::OpenRotatingDbgLog(dir, L"send.log");
-    if (gSendLog == INVALID_HANDLE_VALUE) return;
+    gSendLogPath = dir + L"\\send.log";
     if (!gSendLockReady) {
         InitializeCriticalSection(&gSendLock);
         gSendLockReady = true;
     }
+    gSendLog = reinterpret_cast<HANDLE>(1);  // sentinel: path ready
 }
 
 // Runs inside the VEH on every outbound packet, so it never flushes — several game threads
 // can reach Session.Send, hence the lock; the worker forces the flush every couple of seconds.
 void SendLog(const char* fmt, ...) {
-    if (gSendLog == INVALID_HANDLE_VALUE || !gSendLockReady) return;
+    if (gSendLogPath.empty() || !gSendLockReady) return;
     char body[256];
     va_list ap;
     va_start(ap, fmt);
@@ -361,15 +431,14 @@ void SendLog(const char* fmt, ...) {
                            st.wSecond, st.wMilliseconds, body);
     if (n <= 0) return;
     EnterCriticalSection(&gSendLock);
-    DWORD w = 0;
-    WriteFile(gSendLog, buf, (DWORD)n, &w, nullptr);
+    (void)x::runtime::AppendDbgLog(gSendLogPath, buf, (DWORD)n);
     LeaveCriticalSection(&gSendLock);
 }
 
 void FlushSendLog() {
-    if (gSendLog == INVALID_HANDLE_VALUE || !gSendLockReady) return;
+    if (gSendLogPath.empty() || !gSendLockReady) return;
     EnterCriticalSection(&gSendLock);
-    FlushFileBuffers(gSendLog);
+    x::runtime::FlushDbgLog(gSendLogPath);
     LeaveCriticalSection(&gSendLock);
 }
 
@@ -756,11 +825,11 @@ void ObservePacket(void* pkt, char src, void** seen, int* seenN) {
     }
     const uint16_t op = ReadU16(pkt, kOffInPacketId);
     void* bufObj = ReadPtr(pkt, kOffPacketBuffer);
-    const int blen = bufObj ? ReadI32(bufObj, 0x18) : -1;
+    const int blen = bufObj ? ReadI32(bufObj, x::runtime::il2cpp_container::OffArrayMaxLength()) : -1;
     uint8_t head[4] = {0, 0, 0, 0};
     if (bufObj && blen >= 4) {
         __try {
-            auto* d = reinterpret_cast<uint8_t*>(bufObj) + 0x20;
+            auto* d = reinterpret_cast<uint8_t*>(bufObj) + kIl2cppArrayData;
             head[0] = d[0];
             head[1] = d[1];
             head[2] = d[2];
@@ -774,30 +843,31 @@ void ObservePacket(void* pkt, char src, void** seen, int* seenN) {
 
 void SampleList(void* list, char src, void** seen, int* seenN) {
     if (!LooksLikeHeapPtr(list) || !seen || !seenN) return;
-    void* items = ReadPtr(list, 0x10);
-    const int size = ReadI32(list, 0x18);
+    void* items = ReadPtr(list, x::runtime::il2cpp_container::OffListItems());
+    const int size = ReadI32(list, x::runtime::il2cpp_container::OffListSize());
     if (!items || size <= 0) return;
     const int start = size > 16 ? size - 16 : 0;
     for (int i = start; i < size; ++i) {
-        void* pkt = ReadPtr(items, 0x20 + (size_t)i * sizeof(void*));
+        void* pkt = ReadPtr(items, kIl2cppArrayData + (size_t)i * sizeof(void*));
         ObservePacket(pkt, src, seen, seenN);
     }
 }
 
 void SampleQueue(void* queue, char src, void** seen, int* seenN) {
     if (!LooksLikeHeapPtr(queue) || !seen || !seenN) return;
-    // System.Collections.Generic.Queue<T>: _array@0x10, _head@0x18, _size@0x20 (typical)
-    void* arr = ReadPtr(queue, 0x10);
-    const int head = ReadI32(queue, 0x18);
-    const int qsize = ReadI32(queue, 0x20);
+    x::runtime::il2cpp_container::RefineFromQueueInstance(queue);
+    void* arr = ReadPtr(queue, x::runtime::il2cpp_container::OffQueueArray());
+    const int head = ReadI32(queue, x::runtime::il2cpp_container::OffQueueHead());
+    const int qsize = ReadI32(queue, x::runtime::il2cpp_container::OffQueueSize());
     if (!arr || qsize <= 0 || qsize > 512) return;
-    const int alen = ReadI32(arr, 0x18);  // array length
+    const int alen = ReadI32(arr, x::runtime::il2cpp_container::OffArrayMaxLength());
     if (alen <= 0 || alen > 4096) return;
     const int n = qsize < 16 ? qsize : 16;
     for (int i = 0; i < n; ++i) {
         const int idx = (head + (qsize - n) + i) % alen;
         if (idx < 0) continue;
-        void* pkt = ReadPtr(arr, 0x20 + (size_t)idx * sizeof(void*));
+        void* pkt = ReadPtr(arr, x::runtime::il2cpp_container::OffArrayData() +
+                                     (size_t)idx * sizeof(void*));
         ObservePacket(pkt, src, seen, seenN);
     }
 }
@@ -873,6 +943,23 @@ void DumpRingHistogram(DWORD now, int windowMs) {
 }
 
 void DumpRing(const char* why) {
+    // 全量 RING+hist 很贵：冷却内只记一行，避免 lost_session 抖动刷满 kick.log。
+    static DWORD s_lastFull = 0;
+    static char s_lastWhy[48]{};
+    constexpr DWORD kDumpRingCooldownMs = 15000;
+    const DWORD now = GetTickCount();
+    if (s_lastFull && now - s_lastFull < kDumpRingCooldownMs) {
+        Log("RING why=%s skipped (cooldown %ums since last=%s count=%d)", why ? why : "?",
+            (unsigned)(now - s_lastFull), s_lastWhy[0] ? s_lastWhy : "?", gRingCount);
+        return;
+    }
+    s_lastFull = now;
+    if (why && why[0]) {
+        strncpy_s(s_lastWhy, why, _TRUNCATE);
+    } else {
+        s_lastWhy[0] = '\0';
+    }
+
     Log("RING why=%s count=%d (newest last; src L=recvList Q=nmQueue)", why ? why : "?",
         gRingCount);
     if (gRingCount <= 0) {
@@ -880,7 +967,6 @@ void DumpRing(const char* why) {
         Log("  verdict=lean_local_or_missed (no kick-notice opcode in window)");
         return;
     }
-    const DWORD now = GetTickCount();
     DumpRingHistogram(now, 3000);
     int kickHits = 0;
     int shown = 0;
@@ -1289,9 +1375,11 @@ void InstallHwbpCallEdge() {
 // Outbound capture. Independent of the call-edge set: that one needs all four slots and is
 // opt-in (KICK_HWBP=1); this one takes DR3 alone when KICK_SEND=1 (default off for production).
 void InstallSendProbe();
-MethodInfoHead* ResolveSendPacketMi(void* sessionKlass);
+MethodInfoHead* ResolveSendPacketMi(void* sessionKlass,
+                                    x::runtime::il2cpp_method::ResolvePath* outPath = nullptr);
 MethodInfoHead* ResolveSessionMi(void* klass, uintptr_t rva, int arity, const char* plain,
-                                 const char* hash);
+                                 const char* hash,
+                                 x::runtime::il2cpp_method::ResolvePath* outPath = nullptr);
 
 void InstallSendProbe() {
     if (gSendProbe.load()) return;
@@ -1311,7 +1399,7 @@ void InstallSendProbe() {
         return;
     }
     OpenSendLog();
-    if (gSendLog == INVALID_HANDLE_VALUE) {
+    if (gSendLogPath.empty()) {
         Log("SEND_PROBE skip: send.log open failed err=%lu", GetLastError());
         return;
     }
@@ -1351,7 +1439,10 @@ void InstallSendProbe() {
 
     // 优先 MethodInfo（hash / OutPacket kind）；失败再退 ga+RVA。
     if (!gSessionKlass) gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
-    MethodInfoHead* sendMi = gSessionKlass ? ResolveSendPacketMi(gSessionKlass) : nullptr;
+    x::runtime::il2cpp_method::ResolvePath sendPath =
+        x::runtime::il2cpp_method::ResolvePath::Miss;
+    MethodInfoHead* sendMi =
+        gSessionKlass ? ResolveSendPacketMi(gSessionKlass, &sendPath) : nullptr;
     void* sendFn = nullptr;
     if (sendMi) {
         __try {
@@ -1363,6 +1454,8 @@ void InstallSendProbe() {
     gHwbpAddr[kDrSendSlot] = sendFn ? reinterpret_cast<uintptr_t>(sendFn) : (gGaBase + kRvaSessionSend);
     gOwnSlot[kDrSendSlot] = true;
     gSendProbe.store(true);
+    Log("SEND_PROBE SendPacket method path=%s mi=%d",
+        x::runtime::il2cpp_method::PathName(sendPath), sendMi ? 1 : 0);
 
     if (!gVehHandle) {
         gVehHandle = AddVectoredExceptionHandler(1, CallEdgeVeh);
@@ -1457,38 +1550,29 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
 }
 
 MethodInfoHead* ResolveSessionMi(void* klass, uintptr_t rva, int arity, const char* plain,
-                                 const char* hash) {
+                                 const char* hash,
+                                 x::runtime::il2cpp_method::ResolvePath* outPath) {
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
-    if (plain) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plain, arity)) return mi;
-    }
-    if (hash) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hash, arity)) return mi;
-    }
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
     MethodShape shape{};
     shape.arity = arity;
     shape.ret = TypeKind::Void;
     shape.unique = true;
     shape.walkParents = false;
     if (arity == 1) shape.param[0] = TypeKind::Any;  // SessionState enum ≠ 纯 I32
-    const auto mr =
-        x::runtime::il2cpp_method::FindMethodCached(klass, static_cast<uint32_t>(rva), shape);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            Log("CALL_EDGE ResolveMi kind hit rva=0x%llX plain=%s", (unsigned long long)rva,
-                plain ? plain : "-");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
-    }
+    const auto mr = x::runtime::il2cpp_method::FindMethodResolved(
+        klass, static_cast<uint32_t>(rva), shape, plain, hash);
+    if (outPath) *outPath = mr.path;
+    if (mr.method) return reinterpret_cast<MethodInfoHead*>(mr.method);
     return FindMethodByRva(klass, rva);
 }
 
-MethodInfoHead* ResolveSendPacketMi(void* sessionKlass) {
+MethodInfoHead* ResolveSendPacketMi(void* sessionKlass,
+                                    x::runtime::il2cpp_method::ResolvePath* outPath) {
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
-    if (MethodInfoHead* mi = FindMethodByName(sessionKlass, "SendPacket", 1)) return mi;
-    if (MethodInfoHead* mi = FindMethodByName(sessionKlass, kHashSendPacket, 1)) return mi;
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
     void* outKlass = x::runtime::il2cpp::FindClass("", "OutPacket");
     if (!outKlass) outKlass = x::runtime::il2cpp::FindClass("", kOutPacketClass);
     MethodShape kSend{};
@@ -1498,14 +1582,11 @@ MethodInfoHead* ResolveSendPacketMi(void* sessionKlass) {
     kSend.walkParents = true;
     kSend.param[0] = TypeKind::Ptr;
     if (outKlass) kSend.paramKlass[0] = outKlass;
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(
-        sessionKlass, static_cast<uint32_t>(kRvaSessionSend), kSend);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            Log("SEND_PROBE SendPacket MethodInfo via kind");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
-    }
+    const auto mr = x::runtime::il2cpp_method::FindMethodResolved(
+        sessionKlass, static_cast<uint32_t>(kRvaSessionSend), kSend, "SendPacket",
+        kHashSendPacket);
+    if (outPath) *outPath = mr.path;
+    if (mr.method) return reinterpret_cast<MethodInfoHead*>(mr.method);
     return FindMethodByRva(sessionKlass, kRvaSessionSend);
 }
 
@@ -1564,29 +1645,36 @@ void InstallCallEdgeHooks() {
     Log("CALL_EDGE install Session=%p (MethodInfo swap, no .text)", gSessionKlass);
 
     int ok = 0;
+    int hashHits = 0;
     for (HookSlot& h : gHooks) {
         h.klass = gSessionKlass;
         if (!h.klass) {
             Log("CALL_EDGE FAIL %s — klass null", h.name);
             continue;
         }
-        h.mi = ResolveSessionMi(h.klass, h.rva, h.arity, h.plainName, h.methodHash);
+        x::runtime::il2cpp_method::ResolvePath path =
+            x::runtime::il2cpp_method::ResolvePath::Miss;
+        h.mi = ResolveSessionMi(h.klass, h.rva, h.arity, h.plainName, h.methodHash, &path);
         if (!h.mi) {
             Log("CALL_EDGE FAIL %s — MethodInfo RVA 0x%llX / hash miss", h.name,
                 (unsigned long long)h.rva);
             continue;
         }
+        if (path == x::runtime::il2cpp_method::ResolvePath::Hash) ++hashHits;
         if (!PatchMethodInfo(h.mi, h.hook, &h.orig)) {
             Log("CALL_EDGE FAIL %s — patch MethodInfo %p", h.name, (void*)h.mi);
             h.mi = nullptr;
             continue;
         }
         ++ok;
-        Log("CALL_EDGE OK %s mi=%p orig=%p rva=0x%llX", h.name, (void*)h.mi, h.orig,
-            (unsigned long long)h.rva);
+        Log("CALL_EDGE OK %s mi=%p orig=%p rva=0x%llX path=%s", h.name, (void*)h.mi, h.orig,
+            (unsigned long long)h.rva, x::runtime::il2cpp_method::PathName(path));
     }
     gCallEdgeInstalled.store(ok > 0);
-    Log("CALL_EDGE installed %d/%d", ok, (int)(sizeof(gHooks) / sizeof(gHooks[0])));
+    const int total = (int)(sizeof(gHooks) / sizeof(gHooks[0]));
+    Log("CALL_EDGE methods path=%s hits=%d/%d hash=%d",
+        hashHits == total ? "meta" : (hashHits ? "meta-partial" : "rva/kind"), ok, total,
+        hashHits);
 }
 
 void UninstallCallEdgeHooks() {
@@ -1626,23 +1714,26 @@ void DumpRecvList(void* session, int maxN) {
         Log("  recvList=null");
         return;
     }
-    void* items = ReadPtr(list, 0x10);
-    const int size = ReadI32(list, 0x18);
+    void* items = ReadPtr(list, x::runtime::il2cpp_container::OffListItems());
+    const int size = ReadI32(list, x::runtime::il2cpp_container::OffListSize());
     Log("  recvList size=%d items=%p", size, items);
     if (!items || size <= 0) return;
     const int n = size < maxN ? size : maxN;
     for (int i = size - n; i < size; ++i) {
         if (i < 0) continue;
-        void* pkt = ReadPtr(items, 0x20 + (size_t)i * sizeof(void*));
+        void* pkt = ReadPtr(items, x::runtime::il2cpp_container::OffArrayData() +
+                                       (size_t)i * sizeof(void*));
         if (!pkt) continue;
         const uint16_t op = ReadU16(pkt, kOffInPacketId);
         const char* hint = CmsServerPacketHint(op);
         void* bufObj = ReadPtr(pkt, kOffPacketBuffer);
-        int blen = bufObj ? ReadI32(bufObj, 0x18) : -1;
+        int blen =
+            bufObj ? ReadI32(bufObj, x::runtime::il2cpp_container::OffArrayMaxLength()) : -1;
         unsigned b0 = 0, b1 = 0, b2 = 0, b3 = 0;
         if (bufObj && blen >= 4) {
             __try {
-                auto* d = reinterpret_cast<uint8_t*>(bufObj) + 0x20;
+                auto* d = reinterpret_cast<uint8_t*>(bufObj) +
+                          x::runtime::il2cpp_container::OffArrayData();
                 b0 = d[0];
                 b1 = d[1];
                 b2 = d[2];
@@ -1814,6 +1905,7 @@ DWORD WINAPI Worker(LPVOID) {
 }  // namespace
 
 void Init() {
+    EnsureKickFieldOff();
     OpenLog();
     Log("kick_sniff Init pid=%lu", GetCurrentProcessId());
 }

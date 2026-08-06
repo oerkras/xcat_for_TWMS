@@ -23,7 +23,7 @@ namespace {
 struct LogUploadUiState {
     bool loaded = false;
     char note[kMaxUploadNoteUtf8Bytes + 1]{};
-    LogUploadMode mode = LogUploadMode::Full;
+    LogUploadMode mode = LogUploadMode::Light;
     std::string exeBinDir;
     std::string clearedNoteForUploadId;
 };
@@ -64,12 +64,9 @@ void EnsureLogUploadUiLoaded(const std::string& prefsBinDir) {
 
     LogUploadPrefs defaults{};
     defaults.url = kDefaultUpdateServiceUrl;
-    defaults.mode = LogUploadMode::Full;
+    defaults.mode = LogUploadMode::Light;
     const LogUploadPrefs prefs = LoadLogUploadPrefs(g_ui.exeBinDir, defaults);
-    g_ui.mode = LogUploadMode::Full;
-    if (prefs.mode != LogUploadMode::Full) {
-        PersistLogUploadUiPrefs();
-    }
+    g_ui.mode = prefs.mode == LogUploadMode::Full ? LogUploadMode::Full : LogUploadMode::Light;
     (void)prefsBinDir;
 }
 
@@ -78,8 +75,7 @@ LogUploadRequest MakeLogUploadRequest(const std::string& prefsBinDir) {
     LogUploadRequest req{};
     req.url = kDefaultUpdateServiceUrl;
     req.note = NormalizeUploadNote(g_ui.note);
-    // 排障固定全量：各频道磁盘现存卷全部上传。
-    req.mode = LogUploadMode::Full;
+    req.mode = g_ui.mode;
     req.profileId = "twms";
     req.exeBinDir = g_ui.exeBinDir;
     req.payloadBinDir = prefsBinDir.empty()
@@ -116,9 +112,22 @@ void DrawLogUploadPanel(const std::string& prefsBinDir) {
         ImGui::SetItemTooltip("%s", tip);
     }
 
-    ImGui::TextDisabled(
-        "全量上传：launcher / inject / x.jsonl + XCat_data/logs 全部功能日志"
-        "（含轮转卷，最多 360）。");
+    {
+        const char* modeItems[] = {"轻量上传", "全量上传"};
+        int modeIdx = g_ui.mode == LogUploadMode::Full ? 1 : 0;
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::Combo("##log_upload_mode", &modeIdx, modeItems, 2)) {
+            g_ui.mode = modeIdx == 1 ? LogUploadMode::Full : LogUploadMode::Light;
+            PersistLogUploadUiPrefs();
+            sound::UiClick();
+        }
+        ImGui::SetItemTooltip(
+            "两种模式都含全部日志频道（launcher/inject/x.jsonl + combat/foothold 等）。\n"
+            "轻量：每频道最近 %zu 卷（默认，省流量）。\n"
+            "全量：每频道最多 %zu 卷（深排障）。\n"
+            "有测谎包则附带。",
+            kLogUploadBackupsLight, kLogUploadBackupsFull);
+    }
     if (uploading) ImGui::EndDisabled();
 
     const LogUploadRequest req = MakeLogUploadRequest(prefsBinDir);
@@ -135,7 +144,7 @@ void DrawLogUploadPanel(const std::string& prefsBinDir) {
     } else if (!snap.message.empty()) {
         ImGui::TextWrapped("%s", snap.message.c_str());
     } else {
-        ImGui::TextDisabled("仅上传日志文件到内置运维口（不展示地址）。");
+        ImGui::TextDisabled("默认轻量；深排障再切全量。");
     }
 
     const std::vector<LogUploadHistoryEntry> history = GetLogUploadHistory();

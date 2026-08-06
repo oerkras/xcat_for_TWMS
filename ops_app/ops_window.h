@@ -18,6 +18,7 @@ struct OpsWindow {
 bool OpsWindow_Create(OpsWindow& app, HINSTANCE inst, int designW, int designH);
 void OpsWindow_Destroy(OpsWindow& app);
 void OpsWindow_Show(OpsWindow& app);
+bool OpsWindow_IsMinimized(const OpsWindow& app);
 void OpsWindow_BeginFrame(OpsWindow& app, const float clearColor[4]);
 void OpsWindow_EndFrame(OpsWindow& app);
 void OpsWindow_HandleResize(OpsWindow& app, UINT width, UINT height);

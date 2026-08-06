@@ -1,6 +1,7 @@
 #include "anti_macro_port.h"
 
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_prefab.h"
 #include "../../runtime/log.h"
@@ -21,16 +22,16 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::GaBase;
 using x::runtime::il2cpp::ReadPtr;
 
-// Prefab 类哈希（与 payload_status Cache 灯一致）· remount 2026-08-03
+// Prefab 类哈希（与 payload_status Cache 灯一致）· remount 2026-08-04
 // Util 无 Prefab 属性（纯工具类）；Text/NonFinite 可走 Prefab 串兜底。
 constexpr const char* kUtilClass =
-    "cf3393383740b1f7566429bf39ecf713c129cbd325ecfcadad676d4eb4a147b";
+    "e351eb506860a803de820bdcaf4e7b0b3494331fe68cc31ae08516ad263dde9";
 constexpr const char* kNonFiniteClass =
-    "dd7ae5ff8c9cf70a5364a5bda92328a4cf46e9c1a6e2e86aa3c397f0223f891";
+    "f3adf8943673344f78ad3fe86d721079d5b831f67b79acddde74dd602148cb3";
 constexpr const char* kTextCaptchaClass =
-    "d9b7f7be8e623b396e528fe0106aee67628411b92042a05ce8ba380cf31703f";
+    "cc0afb7bfa4f5f73b0a53ff5f3a2178ec9f1cff97577f55a57b4a6ca2c1de48";
 constexpr const char* kTextCaptchaInfoClass =
-    "f8ff8f1277a5432327c24d0e2cb95e60e12f6b7ed483fb538b6c92f73e2b6b5";
+    "a991b81bac44215bfcdb624739de53567ab3ec07682c94462248d3609822712";
 constexpr const char* kPrefabNonFinite = "UIAntiMacroNonFinite";
 constexpr const char* kPrefabTextCaptcha = "UIAntiMacroTextCaptcha";
 
@@ -42,41 +43,156 @@ void* ResolveQuizKlass(const char* hashName, const char* prefabName) {
     return x::runtime::il2cpp::FindClass("", hashName);
 }
 
-constexpr uint32_t kRvaIsOpenAntiMacro = 0x9353F0;  // remapped 2026-08-03 Util.IsOpenAntiMacro
-constexpr uint32_t kRvaTextGet = 0x932030;  // remapped 2026-08-03 GetAntiMacro
-constexpr uint32_t kRvaTextIsInst = 0x9323E0;  // remapped 2026-08-03 IsInstantiated
-constexpr uint32_t kRvaTextOnOk = 0x934F10;  // remapped 2026-08-03 OnOk
-constexpr uint32_t kRvaNonGet = 0x925360;  // remapped 2026-08-03 GetAntiMacro
-constexpr uint32_t kRvaNonIsInst = 0x925750;  // remapped 2026-08-03 IsInstantiated
-constexpr uint32_t kRvaTryGetWinCursorPos = 0x9358E0;  // remapped 2026-08-03 Util.TryGetWinCursorPos
+constexpr uint32_t kRvaIsOpenAntiMacro = 0x937DC0;  // remounted 2026-08-04 Util.IsOpenAntiMacro
+constexpr uint32_t kRvaTextGet = 0x9348E0;  // remounted 2026-08-04 GetAntiMacro
+constexpr uint32_t kRvaTextIsInst = 0x934CD0;  // remounted 2026-08-04 IsInstantiated
+constexpr uint32_t kRvaTextOnOk = 0x937880;  // remounted 2026-08-04 OnOk
+constexpr uint32_t kRvaNonGet = 0x927D70;  // remounted 2026-08-04 GetAntiMacro
+constexpr uint32_t kRvaNonIsInst = 0x9280D0;  // remounted 2026-08-04 IsInstantiated
+constexpr uint32_t kRvaTryGetWinCursorPos = 0x938250;  // remounted 2026-08-04 Util.TryGetWinCursorPos
 
 // 方法哈希（dump.cs）— static bool()/void() 同形多，哈希主路径
 constexpr char kHashIsOpenAntiMacro[] =
-    "c05b9f6e84f11cbb916e5280e5281ee7bb0f417db89302ee624d801a8ff2433";
+    "e3aed57fed92a2ad544b7e6fdfeb9fc784cbd67d63211a684a94e8062531a17";
 constexpr char kHashTextGet[] =
-    "ce47918d4bf1cf69c14fee394aa3c5de903fef82e37ed93362859180028d103";
+    "b993c5c8c0af5e6010428c3d64feb67faf2276df2045a3f9274864b5378af84";
 constexpr char kHashTextIsInst[] =
-    "ef32617e0c405247269994305e17258821ef82bd6b88efcd5c67e4f7949a5c7";
+    "be27756509f9a9f7be2287d553659722b1e7f758ebd794da168c98ec64eebdd";
 constexpr char kHashTextOnOk[] =
-    "efdfe46ed7928a99199e8ba6bcc61c27dc76e7def8ccefbb3354c476b5bb635";
+    "bc37785da86a8f5e1f2345806dd47f8b8191a742dd85a724b08ace95b738159";
 constexpr char kHashNonGet[] =
-    "af38943e9e15318eb02a47fc3cfcaa3546f825c648a88948335412da2766641";
+    "e603b199ac03dbe6cf208246f6fc4576d556bddb9b35c9ab2b0c887f6474e49";
 constexpr char kHashNonIsInst[] =
-    "b0539adcfbdf043147dfa887e89615bd691d8368813507465210ac5bf970ad8";
+    "f064e76be05d41331d65326b42193db560a41b84bbc23e2cc8bac0fac7e5ecd";
 constexpr char kHashTryGetWinCursorPos[] =
-    "bea0d3701ecf71150f427b5493ac918025390a36ec9d518d8183cc9ca3d2611";
+    "e6b66f03f91068b5626d65a23d89448f3180b2e1634e9e2ea4d852718dd2b97";
 
-constexpr size_t kOffTextInputField = 0xB0;
-constexpr size_t kOffTextRawImage = 0xA0;
-constexpr size_t kOffNonRawImage = 0xA0;
-constexpr size_t kOffNonTick = 0xE0;
-constexpr size_t kOffNonRawPosList = 0xE8;
-constexpr size_t kOffNonMousePosList = 0xF0;
-constexpr size_t kOffInfoJpegData = 0x20;
-constexpr size_t kOffListItems = 0x10;
-constexpr size_t kOffListSize = 0x18;
-constexpr size_t kOffTickFrame = 0x10;
-constexpr size_t kOffByteArrayData = 0x20;
+// Quiz 字段：hash → field_get_offset（dump 常量仅 fallback）
+constexpr char kHashTextRawImage[] =
+    "a121cb3a14b5989088d9ef1b498aca4f5369fd28022bf182ec8af53e9408af8";
+constexpr char kHashTextInputField[] =
+    "f1005fc73bb81d9562b78ac0e433114e3590d971bdc9781993ad32d395fae11";
+constexpr char kHashNonRawImage[] =
+    "d8dcf31a6be0ac216a1c8faf6c9b3434e292c567473c1887a5b192a2d016973";
+constexpr char kHashNonTick[] =
+    "c45229324e7c23735c0d790b6d9ad3ab57f68cbb655d120491bedc6c4770004";
+constexpr char kHashNonRawPosList[] =
+    "bf40f6b839c0c1da24e41e88c192c1fb4bef6f340ac50d01eb016030df5fb60";  // List<Vector2>
+constexpr char kHashNonMousePosList[] =
+    "f98bfeb0bd5f9cb7c634ade6e8f56c825c0faa2c79e144ab3acc1743d78ab9d";  // List<Vector2Int>
+constexpr char kHashInfoJpegData[] =
+    "d03bca076a39e35fe8ee174cb064d43605145cb9ee7e6272806d968cb1cf0e3";
+constexpr char kHashTickFrame[] =
+    "dd3c035c763c41b354e1e0855b8a7c6483b09e9ecad02e0be31a46c289739d0";
+constexpr char kNonTickNestedName[] =
+    "f86f7eb0d67d899d69f8a5e30ed68c65f6dd335381f313108347031e8350713";
+
+constexpr size_t kFbTextRawImage = 0xA0;
+constexpr size_t kFbTextInputField = 0xB0;
+constexpr size_t kFbNonRawImage = 0xA0;
+constexpr size_t kFbNonTick = 0xE0;
+constexpr size_t kFbNonRawPosList = 0xE8;
+constexpr size_t kFbNonMousePosList = 0xF0;
+constexpr size_t kFbInfoJpegData = 0x20;
+constexpr size_t kFbTickFrame = 0x10;
+size_t gOffTextRawImage = kFbTextRawImage;
+size_t gOffTextInputField = kFbTextInputField;
+size_t gOffNonRawImage = kFbNonRawImage;
+size_t gOffNonTick = kFbNonTick;
+size_t gOffNonRawPosList = kFbNonRawPosList;
+size_t gOffNonMousePosList = kFbNonMousePosList;
+size_t gOffInfoJpegData = kFbInfoJpegData;
+size_t gOffTickFrame = kFbTickFrame;
+#define kOffTextRawImage (gOffTextRawImage)
+#define kOffTextInputField (gOffTextInputField)
+#define kOffNonRawImage (gOffNonRawImage)
+#define kOffNonTick (gOffNonTick)
+#define kOffInfoJpegData (gOffInfoJpegData)
+#define kOffTickFrame (gOffTickFrame)
+bool gQuizFieldOffTried = false;
+#define kOffListItems (x::runtime::il2cpp_container::OffListItems())
+#define kOffListSize (x::runtime::il2cpp_container::OffListSize())
+#define kOffByteArrayData (x::runtime::il2cpp_container::OffArrayData())
+
+bool FieldOffHit(void* klass, const char* hash, size_t fb, size_t* out, size_t minOff,
+                 size_t maxOff) {
+    *out = fb;
+    if (!klass || !hash || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    void* field = nullptr;
+    __try {
+        field = e.classGetFieldFromName(klass, hash);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        field = nullptr;
+    }
+    if (!field) return false;
+    size_t off = 0;
+    __try {
+        off = e.fieldGetOffset(field);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (off < minOff || off >= maxOff) return false;
+    *out = off;
+    return true;
+}
+
+using FnClassGetNestedTypes = void* (*)(void* klass, void** iter);
+
+void* FindNonTickKlass(void* nonKlass) {
+    if (!nonKlass) return nullptr;
+    HMODULE ga = x::runtime::il2cpp::GameAssembly();
+    if (ga) {
+        auto nested = reinterpret_cast<FnClassGetNestedTypes>(
+            GetProcAddress(ga, "il2cpp_class_get_nested_types"));
+        const auto& e = x::runtime::il2cpp::Get();
+        if (nested && e.classGetFieldFromName) {
+            void* iter = nullptr;
+            __try {
+                for (;;) {
+                    void* nk = nested(nonKlass, &iter);
+                    if (!nk) break;
+                    void* f = e.classGetFieldFromName(nk, kHashTickFrame);
+                    if (f) return nk;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    }
+    return x::runtime::il2cpp::FindClass("", kNonTickNestedName);
+}
+
+void EnsureQuizFieldOff() {
+    if (gQuizFieldOffTried) return;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    gQuizFieldOffTried = true;
+    void* text = ResolveQuizKlass(kTextCaptchaClass, kPrefabTextCaptcha);
+    void* non = ResolveQuizKlass(kNonFiniteClass, kPrefabNonFinite);
+    void* info = x::runtime::il2cpp::FindClass("", kTextCaptchaInfoClass);
+    void* tick = FindNonTickKlass(non);
+    int hits = 0;
+    if (FieldOffHit(text, kHashTextRawImage, kFbTextRawImage, &gOffTextRawImage, 0x80, 0x200))
+        ++hits;
+    if (FieldOffHit(text, kHashTextInputField, kFbTextInputField, &gOffTextInputField, 0x80, 0x200))
+        ++hits;
+    if (FieldOffHit(non, kHashNonRawImage, kFbNonRawImage, &gOffNonRawImage, 0x80, 0x200)) ++hits;
+    if (FieldOffHit(non, kHashNonTick, kFbNonTick, &gOffNonTick, 0x80, 0x200)) ++hits;
+    if (FieldOffHit(non, kHashNonRawPosList, kFbNonRawPosList, &gOffNonRawPosList, 0x80, 0x200))
+        ++hits;
+    if (FieldOffHit(non, kHashNonMousePosList, kFbNonMousePosList, &gOffNonMousePosList, 0x80,
+                    0x200))
+        ++hits;
+    if (FieldOffHit(info, kHashInfoJpegData, kFbInfoJpegData, &gOffInfoJpegData, 0x10, 0x80))
+        ++hits;
+    if (FieldOffHit(tick, kHashTickFrame, kFbTickFrame, &gOffTickFrame, 0x10, 0x40)) ++hits;
+    x::runtime::LogI("AutoLiePort",
+                     "quiz fields path=%s hits=%d/8 txtRaw=0x%zX in=0x%zX nonRaw=0x%zX tick=0x%zX "
+                     "rawPos=0x%zX mouse=0x%zX jpeg=0x%zX frame=0x%zX",
+                     hits == 8 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+                     gOffTextRawImage, gOffTextInputField, gOffNonRawImage, gOffNonTick,
+                     gOffNonRawPosList, gOffNonMousePosList, gOffInfoJpegData, gOffTickFrame);
+}
 
 using FnIsOpen = bool (*)(const void* methodInfo);
 using FnGetObj = void* (*)(const void* methodInfo);
@@ -177,21 +293,14 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
 
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
-                          const char* plainName, const char* hashName) {
-    if (plainName) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plainName, shape.arity)) return mi;
-    }
-    if (hashName) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hashName, shape.arity)) return mi;
-    }
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            Log("ResolveMi kind hit rva=0x%X plain=%s", rva, plainName ? plainName : "-");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
-    }
-    return FindMethodByRva(klass, rva);
+                          const char* plainName, const char* hashName,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
+    if (!klass) return nullptr;
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plainName, hashName);
+    if (outPath) *outPath = mr.path;
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
 }
 
 template <typename Fn>
@@ -202,43 +311,56 @@ Fn FnFromMi(void* mi, uint32_t rva) {
 
 void EnsureGameMethodInfos() {
     using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::ResolvePath;
     using x::runtime::il2cpp_method::TypeKind;
     void* util = x::runtime::il2cpp::FindClass("", kUtilClass);
     void* text = ResolveQuizKlass(kTextCaptchaClass, kPrefabTextCaptcha);
     void* non = ResolveQuizKlass(kNonFiniteClass, kPrefabNonFinite);
+
+    int hashHits = 0;
+    auto fill = [&](void*& slot, void* klass, uint32_t rva, const MethodShape& shape,
+                    const char* plain, const char* hash) {
+        if (slot || !klass) return;
+        ResolvePath path = ResolvePath::Miss;
+        slot = ResolveMi(klass, rva, shape, plain, hash, &path);
+        if (slot && path == ResolvePath::Hash) ++hashHits;
+    };
+
     if (util) {
-        // static bool() 不唯一 → 哈希主
         constexpr MethodShape kOpen{0, TypeKind::Bool, false, true, {}};
-        if (!gMiIsOpen)
-            gMiIsOpen = ResolveMi(util, kRvaIsOpenAntiMacro, kOpen, "IsOpenAntiMacro",
-                                  kHashIsOpenAntiMacro);
-        // bool(RectTransform, Vector2, out Vector2) — dump 上 RectTransform 首参约 2 处
+        fill(gMiIsOpen, util, kRvaIsOpenAntiMacro, kOpen, "IsOpenAntiMacro",
+             kHashIsOpenAntiMacro);
         constexpr MethodShape kCur{3, TypeKind::Bool, true, true,
                                    {TypeKind::Ptr, TypeKind::Any, TypeKind::Ptr}};
-        if (!gMiTryWinCursor)
-            gMiTryWinCursor = ResolveMi(util, kRvaTryGetWinCursorPos, kCur, "TryGetWinCursorPos",
-                                        kHashTryGetWinCursorPos);
+        fill(gMiTryWinCursor, util, kRvaTryGetWinCursorPos, kCur, "TryGetWinCursorPos",
+             kHashTryGetWinCursorPos);
     }
     if (text) {
         constexpr MethodShape kGet{0, TypeKind::Ptr, false, true, {}};
-        if (!gMiTextGet)
-            gMiTextGet = ResolveMi(text, kRvaTextGet, kGet, "GetAntiMacro", kHashTextGet);
+        fill(gMiTextGet, text, kRvaTextGet, kGet, "GetAntiMacro", kHashTextGet);
         constexpr MethodShape kInst{0, TypeKind::Bool, false, true, {}};
-        if (!gMiTextIsInst)
-            gMiTextIsInst =
-                ResolveMi(text, kRvaTextIsInst, kInst, "IsInstantiated", kHashTextIsInst);
+        fill(gMiTextIsInst, text, kRvaTextIsInst, kInst, "IsInstantiated", kHashTextIsInst);
         constexpr MethodShape kOk{0, TypeKind::Void, false, true, {}};
-        if (!gMiTextOnOk)
-            gMiTextOnOk = ResolveMi(text, kRvaTextOnOk, kOk, "OnOk", kHashTextOnOk);
+        fill(gMiTextOnOk, text, kRvaTextOnOk, kOk, "OnOk", kHashTextOnOk);
     }
     if (non) {
         constexpr MethodShape kGet{0, TypeKind::Ptr, false, true, {}};
-        if (!gMiNonGet)
-            gMiNonGet = ResolveMi(non, kRvaNonGet, kGet, "GetAntiMacro", kHashNonGet);
+        fill(gMiNonGet, non, kRvaNonGet, kGet, "GetAntiMacro", kHashNonGet);
         constexpr MethodShape kInst{0, TypeKind::Bool, false, true, {}};
-        if (!gMiNonIsInst)
-            gMiNonIsInst =
-                ResolveMi(non, kRvaNonIsInst, kInst, "IsInstantiated", kHashNonIsInst);
+        fill(gMiNonIsInst, non, kRvaNonIsInst, kInst, "IsInstantiated", kHashNonIsInst);
+    }
+
+    static bool sLogged = false;
+    const int hits = (gMiIsOpen ? 1 : 0) + (gMiTryWinCursor ? 1 : 0) + (gMiTextGet ? 1 : 0) +
+                     (gMiTextIsInst ? 1 : 0) + (gMiTextOnOk ? 1 : 0) + (gMiNonGet ? 1 : 0) +
+                     (gMiNonIsInst ? 1 : 0);
+    if (!sLogged && hits > 0) {
+        sLogged = true;
+        Log("methods path=%s hits=%d/7 hash=%d open=%d cursor=%d textGet=%d textInst=%d onOk=%d "
+            "nonGet=%d nonInst=%d",
+            hashHits == 7 ? "meta" : (hashHits ? "meta-partial" : "rva/kind"), hits, hashHits,
+            gMiIsOpen ? 1 : 0, gMiTryWinCursor ? 1 : 0, gMiTextGet ? 1 : 0, gMiTextIsInst ? 1 : 0,
+            gMiTextOnOk ? 1 : 0, gMiNonGet ? 1 : 0, gMiNonIsInst ? 1 : 0);
     }
 }
 
@@ -310,6 +432,7 @@ void* ListItems(void* list) {
 
 bool ReadJpegFromInfoObject(void* info, std::vector<uint8_t>& out) {
     if (!info) return false;
+    EnsureQuizFieldOff();
     void* jpeg = ReadPtr(info, kOffInfoJpegData);
     if (!CopyByteArray(jpeg, out)) return false;
     return DetectKind(out) == CaptchaImageKind::Jpeg || !out.empty();
@@ -393,6 +516,7 @@ struct MainCtx {
 };
 
 void MainJob(void* user) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("anti_macro.Main");
     auto* ctx = reinterpret_cast<MainCtx*>(user);
     if (!ctx) return;
     ResolveHelpers();
@@ -442,14 +566,7 @@ void MainJob(void* user) {
         if (!captcha) return;
         void* input = ReadPtr(captcha, kOffTextInputField);
         if (!input || !gMiSetText) return;
-        auto& e = x::runtime::il2cpp::Get();
-        if (!e.stringNew) return;
-        void* str = nullptr;
-        __try {
-            str = e.stringNew(ctx->answer.c_str());
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return;
-        }
+        void* str = x::runtime::il2cpp::NewString(ctx->answer.c_str());
         if (!str) return;
         auto setText = reinterpret_cast<FnSetText>(MethodPtr(gMiSetText));
         auto onOk = FnFromMi<FnVoidSelf>(gMiTextOnOk, kRvaTextOnOk);
@@ -516,6 +633,7 @@ bool Ensure() {
     if (!ResolveQuizKlass(kNonFiniteClass, kPrefabNonFinite)) return false;
     ResolveHelpers();
     EnsureGameMethodInfos();
+    EnsureQuizFieldOff();
     gReady = true;
     Log("ready util/text/nonfinite encodePng=%d open=%d textGet=%d cursor=%d",
         gMiEncodePng ? 1 : 0, gMiIsOpen ? 1 : 0, gMiTextGet ? 1 : 0, gMiTryWinCursor ? 1 : 0);
@@ -609,6 +727,7 @@ bool SubmitTextCaptchaAnswer(const std::string& answer) {
 
 int ReadNonFiniteTickFrame(void* instance) {
     if (!instance) return -1;
+    EnsureQuizFieldOff();
     void* tick = ReadPtr(instance, kOffNonTick);
     if (!tick) return -1;
     __try {
@@ -620,14 +739,16 @@ int ReadNonFiniteTickFrame(void* instance) {
 
 int ReadMouseSampleCount(void* instance) {
     if (!instance) return 0;
-    void* list = ReadPtr(instance, kOffNonMousePosList);
+    EnsureQuizFieldOff();
+    void* list = ReadPtr(instance, gOffNonMousePosList);
     return ListSize(list);
 }
 
 bool ReadRawPosList(void* instance, std::vector<Vec2>& out) {
     out.clear();
     if (!instance) return false;
-    void* list = ReadPtr(instance, kOffNonRawPosList);
+    EnsureQuizFieldOff();
+    void* list = ReadPtr(instance, gOffNonRawPosList);
     const int n = ListSize(list);
     void* items = ListItems(list);
     if (!items || n <= 0 || n > 2000) return false;

@@ -97,7 +97,7 @@ inline void DrawLauncherLedStrip(const RuntimeLeds& leds, float width, float hei
     const char* labels[5] = {"IPC", "GameContext", "LocalPlayer", "Map", "Cache"};
     const char* tips[5] = {
         "IPC：WebView 就绪，或注入后 payload 心跳",
-        "GameContext：检测到 Maplestory_Classic.exe，或 WM/GameAssembly 可读",
+        "GameContext：检测到游戏进程，或 WM/GameAssembly 可读",
         "LocalPlayer：MyUser / LocalCharacterStat 可读",
         "Map：WM 玩法就绪（IsPlayReady）+ 街道·图名",
         "Cache：测谎类型已 Resolve（UIAntiMacroUtil + TextCaptcha/NonFinite）",

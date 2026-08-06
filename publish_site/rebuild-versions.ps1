@@ -1,5 +1,12 @@
 $ErrorActionPreference = "Stop"
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $PSScriptRoot
+} else {
+    Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($Root)) {
+    throw "Cannot resolve publish_site root"
+}
 $Repo = Split-Path -Parent $Root
 $Downloads = Join-Path $Root "downloads"
 $LatestJsonPath = Join-Path $Repo "artifacts\release\latest.json"

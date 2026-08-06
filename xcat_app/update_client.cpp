@@ -1,9 +1,11 @@
 #include "update_client.h"
 
 #include "app_notify.h"
+#include "app_window.h"
 #include "log_upload.h"
 
 #include "../common/process_util.h"
+#include "../common/xcat_access_deny_sticky.h"
 #include "../common/xcat_config_ini.h"
 #include "../common/xcat_log.h"
 #include "../common/xcat_version.h"
@@ -11,6 +13,7 @@
 #include <Windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <winhttp.h>
 
 #include <algorithm>
@@ -73,6 +76,63 @@ void NotifyUpdateSoftFail(const char* title, const char* body) {
                       title && title[0] ? title : "更新服务未就绪", body, 5000);
 }
 
+void AppendUpdateApplyLogLine(const std::string& message) {
+    char tempDir[MAX_PATH]{};
+    const DWORD n = GetTempPathA(MAX_PATH, tempDir);
+    if (n == 0 || n >= MAX_PATH) return;
+    const std::string path = std::string(tempDir) + "xcat_update_apply.log";
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "ab") != 0 || !f) return;
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char stamp[64]{};
+    std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02uT%02u:%02u:%02u.%03u", st.wYear, st.wMonth,
+                  st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    std::fprintf(f, "%s %s\r\n", stamp, message.c_str());
+    fclose(f);
+}
+
+void ClearLocalUpdateFailedNotifyTemp() {
+    char tempDir[MAX_PATH]{};
+    const DWORD n = GetTempPathA(MAX_PATH, tempDir);
+    if (n == 0 || n >= MAX_PATH) return;
+    DeleteFileA((std::string(tempDir) + "xcat_update_failed.notify").c_str());
+}
+
+// 进程内失败（未起 PS / 下载校验失败）落 TEMP notify，供日志上传与下次启动 Consume。
+void WriteLocalUpdateFailedNotify(const std::string& summaryRaw) {
+    std::string summary = summaryRaw;
+    while (!summary.empty() &&
+           (summary.back() == '\r' || summary.back() == '\n' || summary.back() == ' ')) {
+        summary.pop_back();
+    }
+    if (summary.size() > 240) summary = summary.substr(0, 237) + "...";
+    if (summary.empty()) summary = "自动更新失败，请查看 %TEMP%\\xcat_update_apply.log";
+
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char stamp[64]{};
+    std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02uT%02u:%02u:%02u", st.wYear, st.wMonth,
+                  st.wDay, st.wHour, st.wMinute, st.wSecond);
+    const std::string text = std::string(stamp) + "\n" + summary +
+                             "\n日志: %TEMP%\\xcat_update_apply.log\n";
+
+    char tempDir[MAX_PATH]{};
+    const DWORD n = GetTempPathA(MAX_PATH, tempDir);
+    if (n == 0 || n >= MAX_PATH) return;
+    const std::string path = std::string(tempDir) + "xcat_update_failed.notify";
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) {
+        xcat::log::Warn("Update", "write update_failed.notify failed path=%s", path.c_str());
+        return;
+    }
+    fwrite(text.data(), 1, text.size(), f);
+    fclose(f);
+    AppendUpdateApplyLogLine(std::string("FAILED (launcher) ") + summary);
+    xcat::log::Warn("Update", "update_failed.notify written path=%s detail=%s", path.c_str(),
+                    summary.c_str());
+}
+
 struct ParsedUrl {
     std::wstring host;
     std::string hostText;
@@ -106,6 +166,8 @@ struct State {
     std::string downloadUrl;
     bool autoInstallAfterDownload = false;
     bool forcePollInFlight = false;
+    // Check / Force / 手动下载共用：防止双 DownloadWorker 互踩 zipPath。
+    bool downloadInFlight = false;
     ULONGLONG lastForcePollMs = 0;
     // 检查瞬间完成时也要让进度区多停几秒，避免用户点完按钮「什么都没发生」。
     ULONGLONG stickyProgressUiUntilMs = 0;
@@ -113,6 +175,10 @@ struct State {
 
 State g_state;
 std::atomic<bool> g_requestExitForUpdate{false};
+std::atomic<int> g_accessGateExitKind{0};  // AccessGateExitKind as int
+std::atomic<HWND> g_accessGateUiHwnd{nullptr};
+// 本会话曾收到 AccessDeny（含写粘性）：关窗也要杀游戏，避免只退启动器。
+std::atomic<bool> g_sessionAccessDeny{false};
 
 std::string Win32ErrorText(DWORD err) {
     char* raw = nullptr;
@@ -259,7 +325,8 @@ std::string UrlWithHost(const ParsedUrl& url, const std::string& host) {
 }
 
 HttpResult HttpGetTextOnce(const ParsedUrl& url, DWORD accessType, const char* mode,
-                           const wchar_t* extraHeaders) {
+                           const wchar_t* extraHeaders, int resolveMs = 8000, int connectMs = 8000,
+                           int sendMs = 15000, int receiveMs = 20000) {
     HttpResult result;
     HINTERNET ses = WinHttpOpen(L"XCat-Update/1.0", accessType,
                                 WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -267,7 +334,7 @@ HttpResult HttpGetTextOnce(const ParsedUrl& url, DWORD accessType, const char* m
         result.err = WinHttpFailure("WinHttpOpen", GetLastError(), mode);
         return result;
     }
-    WinHttpSetTimeouts(ses, 8000, 8000, 15000, 20000);
+    WinHttpSetTimeouts(ses, resolveMs, connectMs, sendMs, receiveMs);
     HINTERNET conn = WinHttpConnect(ses, url.host.c_str(), url.port, 0);
     HINTERNET req = conn ? WinHttpOpenRequest(conn, L"GET", url.path.c_str(), nullptr,
                                               WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
@@ -386,6 +453,16 @@ HttpResult HttpGetText(const std::string& urlText, const wchar_t* extraHeaders =
     return byIp;
 }
 
+// 启动门禁专用：只直连、短超时，避免代理/AliDNS 串行把冷启拖到几十秒。
+HttpResult HttpGetTextQuick(const std::string& urlText, const wchar_t* extraHeaders = nullptr) {
+    ParsedUrl url{};
+    if (!ParseUrl(urlText, url)) {
+        return HttpResult{0, {}, "更新地址格式错误"};
+    }
+    return HttpGetTextOnce(url, WINHTTP_ACCESS_TYPE_NO_PROXY, "quick-direct", extraHeaders, 2000,
+                           2000, 2500, 2500);
+}
+
 constexpr ULONGLONG kStickyProgressUiMs = 5000;
 
 // 调用方必须已持 g_state.mtx。进度条粘性 / 默认 progress 的唯一真源。
@@ -416,13 +493,17 @@ void SetPhaseUiLocked(UpdatePhase phase, std::string message) {
     ApplyStickyProgressUiLocked(phase);
 }
 
-void SetSnapshot(UpdatePhase phase, std::string message) {
-    std::string failBody;
+// persistFailNotify：仅换包相关硬失败（下载校验 / 装前杀进程 / 启动 PS）落 TEMP notify；
+// 检查更新类失败只上屏/气泡，避免「请先检查更新」之类污染下次启动 Consume。
+void SetSnapshot(UpdatePhase phase, std::string message, bool persistFailNotify = false) {
+    std::string failBodyPublic;
+    std::string failBodyRaw;
     bool softFail = false;
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
         if (phase == UpdatePhase::Failed) {
             softFail = IsUpdateConnectivityFailure(message);
+            if (persistFailNotify && !softFail) failBodyRaw = message;
             message = SanitizePublicUpdateFailure(message);
             // 失败态不把 manifest 地址留在可被 UI 读到的快照里。
             g_state.snapshot.manifestUrl.clear();
@@ -430,17 +511,19 @@ void SetSnapshot(UpdatePhase phase, std::string message) {
         SetPhaseUiLocked(phase, std::move(message));
         if (phase == UpdatePhase::Failed) {
             g_state.autoInstallAfterDownload = false;
-            failBody = g_state.snapshot.message;
+            failBodyPublic = g_state.snapshot.message;
         }
     }
     // 进程内失败：启动器还在，直接气泡通知（PS 换包失败走 update_failed.notify）。
     // 连不上本地/远端更新服：只警告，不按危险「更新失败」打扰。
-    if (!failBody.empty()) {
+    // notify/apply 写原文；气泡用脱敏文案。
+    if (!failBodyPublic.empty()) {
         if (softFail) {
             NotifyUpdateSoftFail("更新服务未就绪",
                                  "无法连接内置更新口。请确认运维台已启动且更新服务绿灯。");
         } else {
-            NotifyUpdateFail("更新失败", failBody.c_str());
+            if (!failBodyRaw.empty()) WriteLocalUpdateFailedNotify(failBodyRaw);
+            NotifyUpdateFail("更新失败", failBodyPublic.c_str());
         }
     }
 }
@@ -711,6 +794,16 @@ std::string UpdateForcePathFromServicePath(std::string path) {
     if (EndsWith(path, "/update/latest.json")) path.resize(path.size() - 19);
     else if (EndsWith(path, "/update")) return path + "/force.json";
     return path + "/update/force.json";
+}
+
+std::string UpdateAccessPathFromServicePath(std::string path) {
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
+    if (path.empty() || path == "/") return "/update/access.json";
+    if (EndsWith(path, "/v1/logs")) path.resize(path.size() - 8);
+    if (path.empty() || path == "/") return "/update/access.json";
+    if (EndsWith(path, "/update/latest.json")) path.resize(path.size() - 19);
+    else if (EndsWith(path, "/update")) return path + "/access.json";
+    return path + "/update/access.json";
 }
 
 bool WriteAutoReceiveUpdates(const std::string& payloadBinDir, bool enabled) {
@@ -1028,7 +1121,10 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "} else {\r\n";
     ps += "  Write-XCatLog 'pre_apply skipped (no XCat_data\\update\\pre_apply.ps1 in package)'\r\n";
     ps += "}\r\n";
-    // 全员 ≥build106 后：白名单保留 user.ini（含 [buffs]/[core]）+ buffs.lkg/control.lkg 兜底 + 多技能勾选；
+    // 全员 ≥build106 后：白名单保留
+    //   - 安装根：account.txt（账号串）+ auth_strategy/captcha_ui/launch_mode + xcat_imgui.ini
+    //   - state：user.ini（含 [buffs]/[core]/[update] token 等）+ buffs.lkg/control.lkg + 多技能勾选
+    //           + launch_mode.txt（启动模式，优先于安装根）
     // 其余 state（赶路学习图/测谎运行态/IPC .bin/冷启标记）仍丢弃，包内 travel_* 种子始终用新包。
     ps += "Write-XCatLog ('stage user prefs whitelist + prev logs; discard runtime state; dest=' + $finalDest)\r\n";
     // 换包会冲掉 logs；先快照到 TEMP，落新包后再写回 XCat_data\\logs\\prev。
@@ -1044,13 +1140,23 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "} catch { Write-XCatLog ('preserve prev logs failed: ' + ($_ | Out-String)); $prevLogsBak=$null }\r\n";
     // 用户偏好白名单：在 rename/in-place 清盘前拷到 TEMP（与日志同源，旧目录尚在）。
     // 单文件失败不整单作废：已 staged 的仍会还原。
+    // root_* = 安装根（与 xcat.exe 同级）；其余 = XCat_data/state
     ps += "$userPrefsBak=Join-Path $env:TEMP ('xcat_user_prefs_' + [guid]::NewGuid().ToString('N'))\r\n";
     ps += "$prefsCopied=0\r\n";
     ps += "try { New-Item -ItemType Directory -Path $userPrefsBak -Force | Out-Null } catch {\r\n";
     ps += "  Write-XCatLog ('stage user prefs mkdir failed: ' + ($_ | Out-String)); $userPrefsBak=$null\r\n";
     ps += "}\r\n";
     ps += "if ($userPrefsBak) {\r\n";
-    ps += "  foreach ($leaf in @('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg')) {\r\n";
+    ps += "  foreach ($leaf in @('account.txt','auth_strategy.txt','captcha_ui.txt','launch_mode.txt','gamapass_nick_slot.txt','xcat_imgui.ini')) {\r\n";
+    ps += "    $s=Join-Path $oldDest $leaf\r\n";
+    ps += "    if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
+    ps += "    try {\r\n";
+    ps += "      Copy-Item -LiteralPath $s -Destination (Join-Path $userPrefsBak ('root_' + $leaf)) -Force -ErrorAction Stop\r\n";
+    ps += "      $prefsCopied++\r\n";
+    ps += "      Write-XCatLog ('user pref staged (install root): ' + $leaf)\r\n";
+    ps += "    } catch { Write-XCatLog ('user pref stage failed (root): ' + $leaf + ' :: ' + $_.Exception.Message) }\r\n";
+    ps += "  }\r\n";
+    ps += "  foreach ($leaf in @('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt')) {\r\n";
     ps += "    $s=Join-Path $oldDest ('XCat_data\\state\\' + $leaf)\r\n";
     ps += "    if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "    try {\r\n";
@@ -1102,7 +1208,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "        if ($rel) { $keep[$rel.ToLowerInvariant()]=$true }\r\n";
     ps += "      }\r\n";
     ps += "    }\r\n";
-    ps += "    $criticalNames=@('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg')\r\n";
+    ps += "    $criticalNames=@('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt')\r\n";
     ps += "    Get-ChildItem -LiteralPath $dstState -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {\r\n";
     ps += "      $rel=$_.FullName.Substring($dstState.Length).TrimStart('\\')\r\n";
     ps += "      if (-not $rel) { return }\r\n";
@@ -1145,11 +1251,19 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "  Write-XCatLog 'in-place state replaced from package (prefs restore follows)'\r\n";
     ps += "}\r\n";
     // 还原白名单偏好：覆盖包默认/残留；并剥掉行程运行态 section，避免跨版本半截补给行程。
+    // 含安装根账号串 account.txt（rename-aside / in-place 清盘子项都会冲掉）。
     ps += "if ($userPrefsBak -and (Test-Path -LiteralPath $userPrefsBak)) {\r\n";
     ps += "  try {\r\n";
+    ps += "    foreach ($leaf in @('account.txt','auth_strategy.txt','captcha_ui.txt','launch_mode.txt','gamapass_nick_slot.txt','xcat_imgui.ini')) {\r\n";
+    ps += "      $s=Join-Path $userPrefsBak ('root_' + $leaf)\r\n";
+    ps += "      if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
+    ps += "      $d=Join-Path $finalDest $leaf\r\n";
+    ps += "      Copy-Item -LiteralPath $s -Destination $d -Force -ErrorAction Stop\r\n";
+    ps += "      Write-XCatLog ('user pref restored (install root): ' + $leaf)\r\n";
+    ps += "    }\r\n";
     ps += "    $dstState=Join-Path $finalDest 'XCat_data\\state'\r\n";
     ps += "    New-Item -ItemType Directory -Path $dstState -Force | Out-Null\r\n";
-    ps += "    foreach ($leaf in @('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg')) {\r\n";
+    ps += "    foreach ($leaf in @('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt')) {\r\n";
     ps += "      $s=Join-Path $userPrefsBak $leaf\r\n";
     ps += "      if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "      $d=Join-Path $dstState $leaf\r\n";
@@ -1292,19 +1406,71 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
         err = "写入更新脚本失败";
         return false;
     }
+
+    // 优先绝对路径：仅依赖 PATH 的 "powershell.exe" 在部分机器 ShellExecute 会 <=32（找不到/策略拦截）。
+    std::wstring psExe = L"powershell.exe";
+    {
+        wchar_t windir[MAX_PATH]{};
+        const UINT n = GetWindowsDirectoryW(windir, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            const std::wstring candidate =
+                std::wstring(windir) + L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+            if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                psExe = candidate;
+            }
+        }
+    }
+    if (psExe == L"powershell.exe") {
+        xcat::log::Warn("Update", "powershell.exe absolute path missing; falling back to PATH name");
+    }
+
     const std::wstring params = L"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
                                 scriptPath + L"\"";
     // lpDirectory=TEMP：勿继承 xcat 的安装目录 cwd（否则 rename aside 必败）。
     wchar_t tempDir[MAX_PATH]{};
     const DWORD tempLen = GetTempPathW(MAX_PATH, tempDir);
     const wchar_t* workDir = (tempLen > 0 && tempLen < MAX_PATH) ? tempDir : nullptr;
-    HINSTANCE r =
-        ShellExecuteW(nullptr, L"open", L"powershell.exe", params.c_str(), workDir, SW_HIDE);
-    if (reinterpret_cast<uintptr_t>(r) <= 32) {
-        err = "启动更新脚本失败";
-        return false;
+
+    const HINSTANCE se =
+        ShellExecuteW(nullptr, L"open", psExe.c_str(), params.c_str(), workDir, SW_HIDE);
+    const uintptr_t seCode = reinterpret_cast<uintptr_t>(se);
+    if (seCode > 32) {
+        xcat::log::Info("Update", "updater script launched via ShellExecute exe=%s",
+                        xcat::WideToUtf8(psExe).c_str());
+        return true;
     }
-    return true;
+    xcat::log::Warn("Update", "ShellExecute powershell failed code=%llu exe=%s script=%s",
+                    static_cast<unsigned long long>(seCode), xcat::WideToUtf8(psExe).c_str(),
+                    xcat::WideToUtf8(scriptPath).c_str());
+
+    // CreateProcess 兜底（不走 shell 关联；部分环境 open 动词被策略挡掉）。
+    std::wstring cmdLine = L"\"" + psExe + L"\" " + params;
+    std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
+    cmdBuf.push_back(L'\0');
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    SetLastError(0);
+    const BOOL cpOk =
+        CreateProcessW(psExe.c_str(), cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                       nullptr, workDir, &si, &pi);
+    if (cpOk) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        xcat::log::Info("Update", "updater script launched via CreateProcess exe=%s",
+                        xcat::WideToUtf8(psExe).c_str());
+        return true;
+    }
+    const DWORD gle = GetLastError();
+    char msg[192]{};
+    std::snprintf(msg, sizeof(msg),
+                  "启动更新脚本失败 (ShellExecute=%llu CreateProcess gle=%lu)",
+                  static_cast<unsigned long long>(seCode), static_cast<unsigned long>(gle));
+    err = msg;
+    xcat::log::Warn("Update", "%s exe=%s", msg, xcat::WideToUtf8(psExe).c_str());
+    return false;
 }
 
 void DownloadWorker();
@@ -1344,7 +1510,7 @@ void CheckWorker(std::string serviceUrl) {
         return;
     }
     Manifest manifest = ParseManifest(resp.body);
-    if (manifest.buildId == 0 || manifest.sha256.empty()) {
+    if (manifest.buildId == 0 || manifest.sha256.size() != 64) {
         SetSnapshot(UpdatePhase::Failed, "更新 manifest 无效");
         return;
     }
@@ -1390,6 +1556,34 @@ void CheckWorker(std::string serviceUrl) {
 }
 
 void DownloadWorker() {
+    bool skippedBusy = false;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (g_state.downloadInFlight) {
+            xcat::log::Warn("Update", "download skipped: another download in flight");
+            // 不改 phase（避免打断进行中的 Downloading），只补状态文案。
+            if (g_state.snapshot.phase == UpdatePhase::Downloading) {
+                g_state.snapshot.message = "已有下载进行中，请稍候…";
+            } else {
+                SetPhaseUiLocked(g_state.snapshot.phase, "已有下载进行中，请稍候…");
+            }
+            skippedBusy = true;
+        } else {
+            g_state.downloadInFlight = true;
+        }
+    }
+    if (skippedBusy) {
+        notify::PushLocal(/*Warning*/ 2, "update-download-busy", "更新下载",
+                          "已有下载进行中，请稍候", 3500);
+        return;
+    }
+    struct DownloadFlightGuard {
+        ~DownloadFlightGuard() {
+            std::lock_guard<std::mutex> lk(g_state.mtx);
+            g_state.downloadInFlight = false;
+        }
+    } flightGuard;
+
     Manifest manifest{};
     std::string downloadUrl;
     {
@@ -1416,7 +1610,7 @@ void DownloadWorker() {
     if (!DownloadFile(downloadUrl, zipPath, manifest.size, err)) {
         xcat::log::Warn("Update", "download failed url=%s err=%s", downloadUrl.c_str(),
                         err.c_str());
-        SetSnapshot(UpdatePhase::Failed, err);
+        SetSnapshot(UpdatePhase::Failed, err, /*persistFailNotify=*/true);
         return;
     }
     if (manifest.size > 0) {
@@ -1428,7 +1622,7 @@ void DownloadWorker() {
                      static_cast<unsigned long long>(manifest.size),
                      static_cast<unsigned long long>(ec ? 0 : actualSize));
             xcat::log::Warn("Update", "%s", msg);
-            SetSnapshot(UpdatePhase::Failed, msg);
+            SetSnapshot(UpdatePhase::Failed, msg, /*persistFailNotify=*/true);
             return;
         }
     }
@@ -1437,17 +1631,18 @@ void DownloadWorker() {
     if (!Sha256File(zipPath, digest, err)) {
         xcat::log::Warn("Update", "sha256 failed zip=%s err=%s", xcat::WideToUtf8(zipPath).c_str(),
                         err.c_str());
-        SetSnapshot(UpdatePhase::Failed, err);
+        SetSnapshot(UpdatePhase::Failed, err, /*persistFailNotify=*/true);
         return;
     }
     if (digest != manifest.sha256) {
         xcat::log::Warn("Update", "sha256 mismatch zip=%s expected=%s actual=%s",
                         xcat::WideToUtf8(zipPath).c_str(), manifest.sha256.c_str(),
                         digest.c_str());
-        SetSnapshot(UpdatePhase::Failed, "更新包 SHA-256 不匹配");
+        SetSnapshot(UpdatePhase::Failed, "更新包 SHA-256 不匹配", /*persistFailNotify=*/true);
         return;
     }
 
+    ClearLocalUpdateFailedNotifyTemp();
     std::lock_guard<std::mutex> lk(g_state.mtx);
     g_state.snapshot.zipPath = xcat::WideToUtf8(zipPath);
     SetPhaseUiLocked(UpdatePhase::ReadyToInstall,
@@ -1456,6 +1651,560 @@ void DownloadWorker() {
     xcat::log::Info("Update", "download ok zip=%s sha256=%s autoInstall=%d",
                     g_state.snapshot.zipPath.c_str(), digest.c_str(),
                     g_state.autoInstallAfterDownload ? 1 : 0);
+}
+
+std::string AccessDenyStickyPathLocal(const std::string& payloadBinDir) {
+    if (payloadBinDir.empty()) return {};
+    std::string path = payloadBinDir;
+    if (path.back() != '\\' && path.back() != '/') path.push_back('\\');
+    path += "state\\wc.cache";
+    return path;
+}
+
+// 安装目录外粘性：故意用不显眼路径，挡住「删文件夹 / 翻 ProgramData 找 XCat」的一般人。
+// 不是防逆向；懂的人照样能搜到写入点。
+std::string AccessDenyStickyPathMachine() {
+    PWSTR base = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, nullptr, &base)) ||
+        !base) {
+        return {};
+    }
+    std::wstring w = base;
+    CoTaskMemFree(base);
+    if (!w.empty() && w.back() != L'\\' && w.back() != L'/') w.push_back(L'\\');
+    // 看起来像普通组件缓存，避免 XCat / TWMS / access_deny 等关键词。
+    w += L"{E4B7C2A9-1F8D-4E3A-9C6B-7A2D5F1E0C8B}\\svc.dat";
+    return xcat::WideToUtf8(w);
+}
+
+std::vector<std::string> AccessDenyStickyWritePaths(const std::string& payloadBinDir) {
+    std::vector<std::string> paths;
+    const std::string machine = AccessDenyStickyPathMachine();
+    if (!machine.empty()) paths.push_back(machine);
+    const std::string local = AccessDenyStickyPathLocal(payloadBinDir);
+    if (!local.empty()) paths.push_back(local);
+    return paths;
+}
+
+std::vector<std::string> AccessDenyStickyReadPaths(const std::string& payloadBinDir) {
+    auto paths = AccessDenyStickyWritePaths(payloadBinDir);
+    // 兼容上一版明文目录（仅读/清，不再写入）
+    PWSTR base = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, nullptr, &base)) &&
+        base) {
+        std::wstring w = base;
+        CoTaskMemFree(base);
+        if (!w.empty() && w.back() != L'\\' && w.back() != L'/') w.push_back(L'\\');
+        w += L"XCatTWMS\\access_deny.json";
+        paths.push_back(xcat::WideToUtf8(w));
+    }
+    // 兼容安装目录内旧文件名
+    if (!payloadBinDir.empty()) {
+        std::string legacyLocal = payloadBinDir;
+        if (legacyLocal.back() != '\\' && legacyLocal.back() != '/') legacyLocal.push_back('\\');
+        legacyLocal += "state\\access_deny.json";
+        paths.push_back(legacyLocal);
+    }
+    return paths;
+}
+
+bool WriteOneAccessDenyStickyFile(const std::string& path, const std::string& body) {
+    if (path.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(xcat::Utf8ToWide(path)).parent_path(),
+                                        ec);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+    const size_t n = body.size();
+    const bool ok = fwrite(body.data(), 1, n, f) == n;
+    fclose(f);
+    return ok;
+}
+
+// 轻量混淆：挡住记事本直接看到 JSON；不是加密。魔数 WC1\\0 + 滚动异或。
+constexpr unsigned char kStickyXorKey[] = {0x5A, 0xC3, 0x19, 0xE7, 0x42, 0xB1, 0x6D, 0x8F};
+
+std::string ObfuscateStickyPayload(const std::string& plain) {
+    std::string out;
+    out.reserve(4 + plain.size());
+    out.push_back('W');
+    out.push_back('C');
+    out.push_back('1');
+    out.push_back('\0');
+    for (size_t i = 0; i < plain.size(); ++i) {
+        const unsigned char k = kStickyXorKey[i % (sizeof(kStickyXorKey))];
+        out.push_back(static_cast<char>(static_cast<unsigned char>(plain[i]) ^ k ^
+                                        static_cast<unsigned char>(i * 13u)));
+    }
+    return out;
+}
+
+bool TryDecodeStickyPayload(const std::string& raw, std::string& jsonOut) {
+    jsonOut.clear();
+    if (raw.size() >= 4 && raw[0] == 'W' && raw[1] == 'C' && raw[2] == '1' && raw[3] == '\0') {
+        jsonOut.resize(raw.size() - 4);
+        for (size_t i = 0; i < jsonOut.size(); ++i) {
+            const unsigned char k = kStickyXorKey[i % (sizeof(kStickyXorKey))];
+            jsonOut[i] = static_cast<char>(static_cast<unsigned char>(raw[i + 4]) ^ k ^
+                                           static_cast<unsigned char>(i * 13u));
+        }
+        return jsonOut.find("\"denied\"") != std::string::npos;
+    }
+    // 兼容旧明文
+    if (raw.find("\"denied\":true") != std::string::npos ||
+        raw.find("\"denied\": true") != std::string::npos) {
+        jsonOut = raw;
+        return true;
+    }
+    return false;
+}
+
+// 仅用于本地日志：短码，不把 ban/whitelist/WinHTTP URL 原文写进 jsonl。
+const char* GateReasonLogCode(const std::string& reason) {
+    if (reason.empty()) return "-";
+    if (reason.find("whitelist") != std::string::npos) return "w";
+    if (reason == "cached") return "c";
+    if (reason.find("ban") != std::string::npos) return "b";
+    return "o";
+}
+
+const char* GateModeLogCode(const std::string& mode) {
+    if (mode == "allow") return "a";
+    if (mode == "deny") return "d";
+    if (mode.empty()) return "-";
+    return "?";
+}
+
+const char* GateNetLogCode(const char* detail) {
+    if (!detail || !detail[0]) return "-";
+    const std::string d(detail);
+    if (d == "cfg miss" || d.find("missing") != std::string::npos) return "cfg";
+    if (d == "net miss") return "miss";
+    if (d.find("12002") != std::string::npos || d.find("timeout") != std::string::npos) return "to";
+    if (d.find("12007") != std::string::npos) return "dns";
+    if (d.find("12029") != std::string::npos) return "conn";
+    if (d.find("12152") != std::string::npos) return "http";
+    if (d.find("http://") != std::string::npos || d.find("https://") != std::string::npos ||
+        d.find("WinHttp") != std::string::npos || d.find("xcat.work") != std::string::npos)
+        return "net";
+    return "o";
+}
+
+bool WriteAccessDenySticky(const std::string& payloadBinDir, const std::string& reason,
+                           const std::string& mode, const std::string& key) {
+    auto esc = [](const std::string& s) {
+        std::string o;
+        o.reserve(s.size() + 8);
+        for (unsigned char c : s) {
+            if (c == '"' || c == '\\') {
+                o.push_back('\\');
+                o.push_back(static_cast<char>(c));
+            } else if (c < 0x20) {
+                char buf[8]{};
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                o += buf;
+            } else {
+                o.push_back(static_cast<char>(c));
+            }
+        }
+        return o;
+    };
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char at[32]{};
+    std::snprintf(at, sizeof(at), "%04u-%02u-%02u %02u:%02u:%02u", st.wYear, st.wMonth, st.wDay,
+                  st.wHour, st.wMinute, st.wSecond);
+    char body[768]{};
+    std::snprintf(body, sizeof(body),
+                  "{\"v\":1,\"denied\":true,\"reason\":\"%s\",\"mode\":\"%s\",\"key\":\"%s\","
+                  "\"at\":\"%s\"}\n",
+                  esc(reason).c_str(), esc(mode.empty() ? "deny" : mode).c_str(), esc(key).c_str(),
+                  at);
+    const std::string blob = ObfuscateStickyPayload(body);
+    bool any = false;
+    for (const auto& path : AccessDenyStickyWritePaths(payloadBinDir)) {
+        if (WriteOneAccessDenyStickyFile(path, blob)) {
+            any = true;
+            xcat::log::Warn("Update", "gate/cache write ok r=%s", GateReasonLogCode(reason));
+        } else {
+            xcat::log::Warn("Update", "gate/cache write failed");
+        }
+    }
+    return any;
+}
+
+bool ClearAccessDenySticky(const std::string& payloadBinDir) {
+    bool ok = true;
+    for (const auto& path : AccessDenyStickyReadPaths(payloadBinDir)) {
+        const DWORD attr = GetFileAttributesA(path.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        if (!DeleteFileA(path.c_str())) {
+            xcat::log::Warn("Update", "gate/cache delete failed gle=%lu",
+                            static_cast<unsigned long>(GetLastError()));
+            ok = false;
+        } else {
+            xcat::log::Info("Update", "gate/cache cleared");
+        }
+    }
+    return ok;
+}
+
+bool ReadAccessDenySticky(const std::string& payloadBinDir, std::string& reasonOut,
+                          std::string& modeOut) {
+    reasonOut.clear();
+    modeOut.clear();
+    for (const auto& path : AccessDenyStickyReadPaths(payloadBinDir)) {
+        const DWORD attr = GetFileAttributesA(path.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        FILE* f = nullptr;
+        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) continue;
+        char buf[2048]{};
+        const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (n == 0) continue;
+        const std::string raw(buf, n);
+        std::string body;
+        if (!TryDecodeStickyPayload(raw, body)) continue;
+        reasonOut = JsonString(body, "reason");
+        modeOut = JsonString(body, "mode");
+        if (reasonOut.empty()) reasonOut = "cached";
+        const bool legacyPath = path.find("XCatTWMS") != std::string::npos ||
+                                path.find("access_deny.json") != std::string::npos;
+        const bool legacyPlain = raw.size() < 4 || raw[0] != 'W' || raw[1] != 'C' || raw[2] != '1';
+        if (legacyPath || legacyPlain) {
+            const std::string key = JsonString(body, "key");
+            (void)WriteAccessDenySticky(payloadBinDir, reasonOut, modeOut, key);
+            if (legacyPath) DeleteFileA(path.c_str());
+        }
+        return true;
+    }
+    return false;
+}
+
+void RequestExitForDeviceAccessDeny(const std::string& reason, const std::string& mode,
+                                    bool fromSticky) {
+    // 工作线程只置位；有主窗则 PostMessage，否则留给启动路径 Consume 同步弹窗。
+    g_sessionAccessDeny.store(true, std::memory_order_release);
+    xcat::log::Warn("Update", "gate/2 m=%s s=%d r=%s", GateModeLogCode(mode), fromSticky ? 1 : 0,
+                    GateReasonLogCode(reason));
+    g_accessGateExitKind.store(static_cast<int>(AccessGateExitKind::AccessDeny),
+                               std::memory_order_release);
+    if (HWND hwnd = g_accessGateUiHwnd.load(std::memory_order_acquire)) {
+        PostMessageW(hwnd, ::WM_XCAT_ACCESS_GATE,
+                     static_cast<WPARAM>(AccessGateExitKind::AccessDeny), 0);
+    }
+}
+
+// —— 在线租约：成功探活放行后写入；掐运维服/断网超过窗口后无法继续启动或运行 ——
+constexpr uint64_t kOnlineLeaseTtlSec = 64ull * 3600ull;       // 64h（正式探活续约）
+constexpr uint64_t kBootstrapGraceTtlSec = 1ull * 3600ull;     // 首次宽限 1h
+
+uint64_t UnixTimeNowSec() {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u{};
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    // FILETIME: 100ns since 1601-01-01；Unix: seconds since 1970-01-01
+    constexpr uint64_t kEpochDiffSec = 11644473600ULL;
+    return (u.QuadPart / 10000000ULL) - kEpochDiffSec;
+}
+
+std::string OnlineLeasePathLocal(const std::string& payloadBinDir) {
+    if (payloadBinDir.empty()) return {};
+    std::string path = payloadBinDir;
+    if (path.back() != '\\' && path.back() != '/') path.push_back('\\');
+    path += "state\\ol.cache";
+    return path;
+}
+
+std::string OnlineLeasePathMachine() {
+    PWSTR base = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, nullptr, &base)) ||
+        !base) {
+        return {};
+    }
+    std::wstring w = base;
+    CoTaskMemFree(base);
+    if (!w.empty() && w.back() != L'\\' && w.back() != L'/') w.push_back(L'\\');
+    // 与粘性同目录，文件名故意平淡。
+    w += L"{E4B7C2A9-1F8D-4E3A-9C6B-7A2D5F1E0C8B}\\ol.dat";
+    return xcat::WideToUtf8(w);
+}
+
+std::vector<std::string> OnlineLeaseWritePaths(const std::string& payloadBinDir) {
+    std::vector<std::string> paths;
+    const std::string machine = OnlineLeasePathMachine();
+    if (!machine.empty()) paths.push_back(machine);
+    const std::string local = OnlineLeasePathLocal(payloadBinDir);
+    if (!local.empty()) paths.push_back(local);
+    return paths;
+}
+
+std::string ObfuscateLeasePayload(const std::string& plain) {
+    std::string out;
+    out.reserve(4 + plain.size());
+    out.push_back('O');
+    out.push_back('L');
+    out.push_back('1');
+    out.push_back('\0');
+    for (size_t i = 0; i < plain.size(); ++i) {
+        const unsigned char k = kStickyXorKey[i % (sizeof(kStickyXorKey))];
+        out.push_back(static_cast<char>(static_cast<unsigned char>(plain[i]) ^ k ^
+                                        static_cast<unsigned char>(i * 13u)));
+    }
+    return out;
+}
+
+bool TryDecodeLeasePayload(const std::string& raw, std::string& jsonOut) {
+    jsonOut.clear();
+    if (raw.size() >= 4 && raw[0] == 'O' && raw[1] == 'L' && raw[2] == '1' && raw[3] == '\0') {
+        jsonOut.resize(raw.size() - 4);
+        for (size_t i = 0; i < jsonOut.size(); ++i) {
+            const unsigned char k = kStickyXorKey[i % (sizeof(kStickyXorKey))];
+            jsonOut[i] = static_cast<char>(static_cast<unsigned char>(raw[i + 4]) ^ k ^
+                                           static_cast<unsigned char>(i * 13u));
+        }
+        return jsonOut.find("\"until\"") != std::string::npos;
+    }
+    return false;
+}
+
+bool WriteOnlineLeaseTtl(const std::string& payloadBinDir, uint64_t ttlSec, const char* kind) {
+    if (ttlSec == 0) ttlSec = kOnlineLeaseTtlSec;
+    const uint64_t until = UnixTimeNowSec() + ttlSec;
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char at[32]{};
+    std::snprintf(at, sizeof(at), "%04u-%02u-%02u %02u:%02u:%02u", st.wYear, st.wMonth, st.wDay,
+                  st.wHour, st.wMinute, st.wSecond);
+    char body[192]{};
+    std::snprintf(body, sizeof(body), "{\"v\":1,\"until\":%llu,\"at\":\"%s\"}\n",
+                  static_cast<unsigned long long>(until), at);
+    const std::string blob = ObfuscateLeasePayload(body);
+    bool any = false;
+    for (const auto& path : OnlineLeaseWritePaths(payloadBinDir)) {
+        if (WriteOneAccessDenyStickyFile(path, blob)) {
+            any = true;
+        } else {
+            xcat::log::Warn("Update", "gate/tok write failed path=%s", path.c_str());
+        }
+    }
+    if (any) {
+        xcat::log::Info("Update", "gate/tok renew k=%s until=%llu ttl=%llu",
+                        kind && kind[0] ? kind : "n",
+                        static_cast<unsigned long long>(until),
+                        static_cast<unsigned long long>(ttlSec));
+    }
+    return any;
+}
+
+bool WriteOnlineLease(const std::string& payloadBinDir) {
+    return WriteOnlineLeaseTtl(payloadBinDir, kOnlineLeaseTtlSec, "p");
+}
+
+// 首次宽限已用标记：故意与租约分文件，删 ol.* 不能再领第二次宽限。
+std::string BootstrapGraceUsedPathLocal(const std::string& payloadBinDir) {
+    if (payloadBinDir.empty()) return {};
+    std::string path = payloadBinDir;
+    if (path.back() != '\\' && path.back() != '/') path.push_back('\\');
+    path += "state\\bg.used";
+    return path;
+}
+
+std::string BootstrapGraceUsedPathMachine() {
+    PWSTR base = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DEFAULT, nullptr, &base)) ||
+        !base) {
+        return {};
+    }
+    std::wstring w = base;
+    CoTaskMemFree(base);
+    if (!w.empty() && w.back() != L'\\' && w.back() != L'/') w.push_back(L'\\');
+    w += L"{E4B7C2A9-1F8D-4E3A-9C6B-7A2D5F1E0C8B}\\bg.dat";
+    return xcat::WideToUtf8(w);
+}
+
+std::vector<std::string> BootstrapGraceUsedPaths(const std::string& payloadBinDir) {
+    std::vector<std::string> paths;
+    const std::string machine = BootstrapGraceUsedPathMachine();
+    if (!machine.empty()) paths.push_back(machine);
+    const std::string local = BootstrapGraceUsedPathLocal(payloadBinDir);
+    if (!local.empty()) paths.push_back(local);
+    return paths;
+}
+
+bool BootstrapGraceAlreadyUsed(const std::string& payloadBinDir) {
+    for (const auto& path : BootstrapGraceUsedPaths(payloadBinDir)) {
+        const DWORD attr = GetFileAttributesA(path.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) return true;
+    }
+    return false;
+}
+
+bool MarkBootstrapGraceUsed(const std::string& payloadBinDir) {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char at[32]{};
+    std::snprintf(at, sizeof(at), "%04u-%02u-%02u %02u:%02u:%02u", st.wYear, st.wMonth, st.wDay,
+                  st.wHour, st.wMinute, st.wSecond);
+    char body[96]{};
+    std::snprintf(body, sizeof(body), "{\"v\":1,\"grace\":true,\"at\":\"%s\"}\n", at);
+    const std::string blob = ObfuscateLeasePayload(body);  // 复用 OL1 外壳即可
+    bool any = false;
+    for (const auto& path : BootstrapGraceUsedPaths(payloadBinDir)) {
+        if (WriteOneAccessDenyStickyFile(path, blob)) any = true;
+    }
+    return any;
+}
+
+bool ClearOnlineLease(const std::string& payloadBinDir) {
+    bool ok = true;
+    for (const auto& path : OnlineLeaseWritePaths(payloadBinDir)) {
+        const DWORD attr = GetFileAttributesA(path.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        if (!DeleteFileA(path.c_str())) {
+            xcat::log::Warn("Update", "gate/tok delete failed gle=%lu",
+                            static_cast<unsigned long>(GetLastError()));
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+bool ReadOnlineLeaseUntil(const std::string& payloadBinDir, uint64_t& untilOut) {
+    // 双副本（ProgramData + 本地）可能一新一旧：取 max(until)，避免读到先出现的过期副本误踢。
+    untilOut = 0;
+    bool any = false;
+    for (const auto& path : OnlineLeaseWritePaths(payloadBinDir)) {
+        const DWORD attr = GetFileAttributesA(path.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) continue;
+        FILE* f = nullptr;
+        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) continue;
+        char buf[512]{};
+        const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (n == 0) continue;
+        std::string body;
+        if (!TryDecodeLeasePayload(std::string(buf, n), body)) continue;
+        const uint64_t until = JsonUint(body, "until");
+        if (until == 0) continue;
+        if (!any || until > untilOut) untilOut = until;
+        any = true;
+    }
+    return any;
+}
+
+bool OnlineLeaseValid(const std::string& payloadBinDir) {
+    uint64_t until = 0;
+    if (!ReadOnlineLeaseUntil(payloadBinDir, until)) return false;
+    return UnixTimeNowSec() < until;
+}
+
+void RequestExitForOnlineLeaseRequired(const char* detail) {
+    // 工作线程只置位；有主窗则 PostMessage，否则留给启动路径 Consume 同步弹窗。
+    xcat::log::Warn("Update", "gate/3 n=%s", GateNetLogCode(detail));
+    g_accessGateExitKind.store(static_cast<int>(AccessGateExitKind::OnlineLease),
+                               std::memory_order_release);
+    if (HWND hwnd = g_accessGateUiHwnd.load(std::memory_order_acquire)) {
+        PostMessageW(hwnd, ::WM_XCAT_ACCESS_GATE,
+                     static_cast<WPARAM>(AccessGateExitKind::OnlineLease), 0);
+    }
+}
+
+enum class AccessContactKind { Allowed, Denied, Unreachable };
+
+struct AccessContactResult {
+    AccessContactKind kind = AccessContactKind::Unreachable;
+    std::string reason;
+    std::string mode;
+    std::string key;
+    std::string detail;
+};
+
+std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id) {
+    auto sanitizeHdr = [](std::wstring s) {
+        for (wchar_t& ch : s) {
+            if (ch == L'\r' || ch == L'\n' || ch == L'\0') ch = L'_';
+        }
+        if (s.size() > 96) s.resize(96);
+        return s;
+    };
+    wchar_t identityHeaders[768]{};
+    char ver[64]{};
+    std::snprintf(ver, sizeof(ver), "%s build %u", xcat::kXcatVersionString, xcat::kXcatBuildId);
+    const std::wstring machineW = sanitizeHdr(xcat::Utf8ToWide(id.machine));
+    const std::wstring deviceW = sanitizeHdr(xcat::Utf8ToWide(id.deviceId));
+    const std::wstring verW = sanitizeHdr(xcat::Utf8ToWide(ver));
+    std::string macJoined;
+    for (size_t i = 0; i < id.macs.size(); ++i) {
+        if (i) macJoined += ',';
+        macJoined += id.macs[i];
+        if (macJoined.size() > 180) break;
+    }
+    const std::wstring macW = sanitizeHdr(xcat::Utf8ToWide(macJoined));
+    const std::wstring passW = sanitizeHdr(xcat::Utf8ToWide(id.token));
+    _snwprintf(identityHeaders, 768,
+               L"X-XCat-Machine: %s\r\nX-XCat-Device-Id: %s\r\nX-XCat-App-Version: %s\r\n"
+               L"X-XCat-Mac: %s\r\nX-XCat-Token: %s\r\n",
+               machineW.c_str(), deviceW.c_str(), verW.c_str(), macW.c_str(), passW.c_str());
+    return identityHeaders;
+}
+
+AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
+                                        const std::string& payloadBinDir, bool quick) {
+    AccessContactResult out;
+    ParsedUrl parsed{};
+    if (!ParseUrl(serviceUrl, parsed)) {
+        out.detail = "bad service url";
+        return out;
+    }
+    const std::string accessUrl =
+        parsed.origin + UpdateAccessPathFromServicePath(xcat::WideToUtf8(parsed.path));
+    const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
+    const std::wstring headers = BuildClientIdentityHeaders(id);
+    const HttpResult access =
+        quick ? HttpGetTextQuick(accessUrl, headers.c_str()) : HttpGetText(accessUrl, headers.c_str());
+    if (access.err.empty() && access.status == 200) {
+        const bool denied = access.body.find("\"allowed\":false") != std::string::npos ||
+                            access.body.find("\"allowed\": false") != std::string::npos;
+        const bool allowed = access.body.find("\"allowed\":true") != std::string::npos ||
+                             access.body.find("\"allowed\": true") != std::string::npos;
+        if (denied) {
+            out.kind = AccessContactKind::Denied;
+            out.reason = JsonString(access.body, "reason");
+            if (out.reason.empty()) out.reason = "ops ban";
+            out.mode = JsonString(access.body, "mode");
+            out.key = JsonString(access.body, "key");
+            out.detail = out.reason;
+            return out;
+        }
+        // 必须显式 allowed:true 才续约；裸 200 / 杂页面 / MitM 缺字段一律当不可达。
+        if (allowed) {
+            out.kind = AccessContactKind::Allowed;
+            return out;
+        }
+        out.detail = "access 200 without explicit allowed:true";
+        xcat::log::Warn("Update", "netchk ambiguous");
+        out.kind = AccessContactKind::Unreachable;
+        return out;
+    }
+    if (!access.err.empty()) {
+        out.detail = access.err;
+        xcat::log::Warn("Update", "netchk fail%s n=%s", quick ? " q" : "",
+                        GateNetLogCode(access.err.c_str()));
+    } else if (access.status != 404) {
+        char buf[64]{};
+        std::snprintf(buf, sizeof(buf), "http %lu", static_cast<unsigned long>(access.status));
+        out.detail = buf;
+        xcat::log::Warn("Update", "netchk fail%s status=%lu", quick ? " q" : "",
+                        static_cast<unsigned long>(access.status));
+    } else {
+        out.detail = "access endpoint missing (404)";
+        xcat::log::Warn("Update", "netchk fail%s status=404", quick ? " q" : "");
+    }
+    out.kind = AccessContactKind::Unreachable;
+    return out;
 }
 
 void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
@@ -1473,28 +2222,45 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
     const std::string forceUrl =
         parsed.origin + UpdateForcePathFromServicePath(xcat::WideToUtf8(parsed.path));
 
-    // 探活带上本机身份，运维端才能把同公网 IP / NAT 后的多台电脑拆开。
-    const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
-    auto sanitizeHdr = [](std::wstring s) {
-        for (wchar_t& ch : s) {
-            if (ch == L'\r' || ch == L'\n' || ch == L'\0') ch = L'_';
-        }
-        if (s.size() > 96) s.resize(96);
-        return s;
-    };
-    wchar_t identityHeaders[512]{};
+    // 运维访问策略：可达以远端为准；不可达则粘性拒绝优先，其次看在线租约。
     {
-        char ver[64]{};
-        std::snprintf(ver, sizeof(ver), "%s build %u", xcat::kXcatVersionString, xcat::kXcatBuildId);
-        const std::wstring machineW = sanitizeHdr(xcat::Utf8ToWide(id.machine));
-        const std::wstring deviceW = sanitizeHdr(xcat::Utf8ToWide(id.deviceId));
-        const std::wstring verW = sanitizeHdr(xcat::Utf8ToWide(ver));
-        _snwprintf(identityHeaders, 512,
-                   L"X-XCat-Machine: %s\r\nX-XCat-Device-Id: %s\r\nX-XCat-App-Version: %s\r\n",
-                   machineW.c_str(), deviceW.c_str(), verW.c_str());
+        const AccessContactResult ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
+        if (ac.kind == AccessContactKind::Denied) {
+            const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
+            xcat::log::Warn("Update", "gate/2 remote m=%s r=%s macs=%zu", GateModeLogCode(ac.mode),
+                            GateReasonLogCode(ac.reason), id.macs.size());
+            (void)WriteAccessDenySticky(payloadBinDir, ac.reason, ac.mode, ac.key);
+            (void)ClearOnlineLease(payloadBinDir);
+            RequestExitForDeviceAccessDeny(ac.reason, ac.mode, /*fromSticky=*/false);
+            finish();
+            return;
+        }
+        if (ac.kind == AccessContactKind::Allowed) {
+            g_sessionAccessDeny.store(false, std::memory_order_release);
+            (void)ClearAccessDenySticky(payloadBinDir);
+            (void)WriteOnlineLease(payloadBinDir);
+        } else {
+            std::string stickyReason;
+            std::string stickyMode;
+            if (ReadAccessDenySticky(payloadBinDir, stickyReason, stickyMode)) {
+                xcat::log::Warn("Update", "gate/2 cached m=%s r=%s", GateModeLogCode(stickyMode),
+                                GateReasonLogCode(stickyReason));
+                RequestExitForDeviceAccessDeny(stickyReason, stickyMode, /*fromSticky=*/true);
+                finish();
+                return;
+            }
+            if (!OnlineLeaseValid(payloadBinDir)) {
+                RequestExitForOnlineLeaseRequired(
+                    ac.detail.empty() ? "net miss" : ac.detail.c_str());
+                finish();
+                return;
+            }
+        }
     }
 
-    const HttpResult resp = HttpGetText(forceUrl, identityHeaders);
+    const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
+    const std::wstring identityHeaders = BuildClientIdentityHeaders(id);
+    const HttpResult resp = HttpGetText(forceUrl, identityHeaders.c_str());
     if (!resp.err.empty()) {
         xcat::log::Warn("Update", "force update poll failed url=%s err=%s", forceUrl.c_str(),
                         resp.err.c_str());
@@ -1658,14 +2424,28 @@ bool StartUpdateDownload() {
 void UpdateForcePollTick(const std::string& serviceUrl, const std::string& payloadBinDir) {
     if (serviceUrl.empty()) return;
 
+    constexpr ULONGLONG kForcePollIntervalMs = 15000;  // 封禁止血：约 15s 内命中（原 60s）
     const ULONGLONG now = GetTickCount64();
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
         if (g_state.forcePollInFlight ||
-            (g_state.lastForcePollMs != 0 && now - g_state.lastForcePollMs < 60000)) {
+            (g_state.lastForcePollMs != 0 &&
+             now - g_state.lastForcePollMs < kForcePollIntervalMs)) {
             return;
         }
         g_state.lastForcePollMs = now;
+        g_state.forcePollInFlight = true;
+    }
+    std::thread(ForcePollWorker, serviceUrl, payloadBinDir).detach();
+}
+
+// 忽略节流：启动有租约时立刻后台探活（deny→退；不可达不踢）。
+void ScheduleImmediateForcePoll(const std::string& serviceUrl, const std::string& payloadBinDir) {
+    if (serviceUrl.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (g_state.forcePollInFlight) return;
+        g_state.lastForcePollMs = GetTickCount64();
         g_state.forcePollInFlight = true;
     }
     std::thread(ForcePollWorker, serviceUrl, payloadBinDir).detach();
@@ -1696,12 +2476,13 @@ void InstallWorker(std::string installDir) {
     xcat::log::Info("Update", "pre-install kill Classic=%u NGM64=%u NGM=%u", classicKilled,
                     ngm64Killed, ngmKilled);
     if (!xcat::WaitUntilNoProcessByName(L"Maplestory_Classic.exe", 20000)) {
-        SetInstallStatus("正在重试结束 Maplestory_Classic.exe…", -1.f);
+        SetInstallStatus("正在重试结束游戏进程…", -1.f);
         xcat::log::Warn("Update", "Maplestory_Classic residual; retry kill");
         (void)xcat::KillProcessesByExeName(L"Maplestory_Classic.exe");
         if (!xcat::WaitUntilNoProcessByName(L"Maplestory_Classic.exe", 15000)) {
             SetSnapshot(UpdatePhase::Failed,
-                        "Maplestory_Classic.exe 未能退出，已中止自动更新安装");
+                        "游戏进程未能退出，已中止自动更新安装",
+                        /*persistFailNotify=*/true);
             return;
         }
     }
@@ -1714,9 +2495,10 @@ void InstallWorker(std::string installDir) {
     SetInstallStatus("正在启动安装脚本并重启…", -1.f);
     std::string err;
     if (!LaunchUpdaterScript(xcat::Utf8ToWide(zipUtf8), xcat::Utf8ToWide(installDir), err)) {
-        SetSnapshot(UpdatePhase::Failed, err);
+        SetSnapshot(UpdatePhase::Failed, err, /*persistFailNotify=*/true);
         return;
     }
+    ClearLocalUpdateFailedNotifyTemp();
     xcat::log::Info("Update", "apply update zip=%s", zipUtf8.c_str());
     SetInstallStatus("安装脚本已启动，正在退出以释放目录…", -1.f);
     g_requestExitForUpdate.store(true, std::memory_order_release);
@@ -1760,6 +2542,147 @@ bool ConsumeUpdateProcessExitRequest() {
     return g_requestExitForUpdate.exchange(false, std::memory_order_acq_rel);
 }
 
+void ShowAccessGatePopup(AccessGateExitKind kind) {
+    if (kind == AccessGateExitKind::None) return;
+    // 门禁硬退必须先杀经典版：MessageBox 阻塞期间游戏仍在跑，注入 DLL 可继续用。
+    // AccessDeny / OnlineLease 都杀——启动器已判定无授权，留下注入态等于白用。
+    {
+        const unsigned n = xcat::KillClassicGameWithRetry();
+        xcat::log::Warn("Update", "gate/%d stop Maplestory_Classic x%u",
+                        AccessGateExitCode(kind), n);
+    }
+    const wchar_t* text =
+        (kind == AccessGateExitKind::AccessDeny) ? L"网络错误 (2)" : L"网络错误 (3)";
+    HWND owner = g_accessGateUiHwnd.load(std::memory_order_acquire);
+    MessageBoxW(owner, text, L"XCat TWMS",
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
+}
+
+void SetAccessGateUiHwnd(void* hwnd) {
+    g_accessGateUiHwnd.store(reinterpret_cast<HWND>(hwnd), std::memory_order_release);
+}
+
+int HandleAccessGateUiMessage(unsigned long long wParam) {
+    AccessGateExitKind kind = AccessGateExitKind::None;
+    if (wParam == static_cast<unsigned long long>(AccessGateExitKind::AccessDeny)) {
+        kind = AccessGateExitKind::AccessDeny;
+    } else if (wParam == static_cast<unsigned long long>(AccessGateExitKind::OnlineLease)) {
+        kind = AccessGateExitKind::OnlineLease;
+    }
+    // 清 pending，避免主循环再 Consume 二次弹窗。
+    g_accessGateExitKind.store(0, std::memory_order_release);
+    ShowAccessGatePopup(kind);
+    return AccessGateExitCode(kind) ? AccessGateExitCode(kind) : 2;
+}
+
+AccessGateExitKind ConsumeAccessGateExitRequest() {
+    const int v = g_accessGateExitKind.exchange(0, std::memory_order_acq_rel);
+    AccessGateExitKind kind = AccessGateExitKind::None;
+    if (v == static_cast<int>(AccessGateExitKind::AccessDeny)) kind = AccessGateExitKind::AccessDeny;
+    else if (v == static_cast<int>(AccessGateExitKind::OnlineLease))
+        kind = AccessGateExitKind::OnlineLease;
+    if (kind == AccessGateExitKind::None) return kind;
+    // 启动（尚无主窗）或 PostMessage 未送达时的主线程兜底弹窗。
+    ShowAccessGatePopup(kind);
+    return kind;
+}
+
+bool EnforceStickyDeviceAccessOnStartup(const std::string& serviceUrl,
+                                        const std::string& payloadBinDir) {
+    std::string stickyReason;
+    std::string stickyMode;
+    if (!ReadAccessDenySticky(payloadBinDir, stickyReason, stickyMode)) return false;
+
+    // 旧逻辑：有粘性就直接 exit，解禁后永远探不到服、粘性清不掉。
+    // 现：先探活；allowed 清粘性；仍 deny 刷新粘性；不可达才沿用本地粘性拦。
+    if (!serviceUrl.empty()) {
+        xcat::log::Warn("Update", "startup gate/2 cached m=%s r=%s; netchk",
+                        GateModeLogCode(stickyMode), GateReasonLogCode(stickyReason));
+        AccessContactResult ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/true);
+        if (ac.kind == AccessContactKind::Unreachable) {
+            xcat::log::Warn("Update", "startup sticky netchk q miss; netchk full");
+            ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
+        }
+        if (ac.kind == AccessContactKind::Allowed) {
+            g_sessionAccessDeny.store(false, std::memory_order_release);
+            (void)ClearAccessDenySticky(payloadBinDir);
+            (void)WriteOnlineLease(payloadBinDir);
+            xcat::log::Info("Update", "startup sticky cleared by remote allow; gate/tok issued");
+            return false;
+        }
+        if (ac.kind == AccessContactKind::Denied) {
+            (void)WriteAccessDenySticky(payloadBinDir, ac.reason, ac.mode, ac.key);
+            (void)ClearOnlineLease(payloadBinDir);
+            RequestExitForDeviceAccessDeny(ac.reason, ac.mode, /*fromSticky=*/false);
+            return true;
+        }
+        xcat::log::Warn("Update", "startup sticky netchk miss n=%s; keep cache",
+                        GateNetLogCode(ac.detail.empty() ? nullptr : ac.detail.c_str()));
+    } else {
+        xcat::log::Warn("Update", "startup gate/2 cached m=%s r=%s (no service url)",
+                        GateModeLogCode(stickyMode), GateReasonLogCode(stickyReason));
+    }
+
+    RequestExitForDeviceAccessDeny(stickyReason, stickyMode, /*fromSticky=*/true);
+    return true;
+}
+
+bool EnforceOnlineLeaseGateOnStartup(const std::string& serviceUrl,
+                                     const std::string& payloadBinDir) {
+    if (serviceUrl.empty()) {
+        RequestExitForOnlineLeaseRequired("cfg miss");
+        return true;
+    }
+    if (OnlineLeaseValid(payloadBinDir)) {
+        uint64_t until = 0;
+        (void)ReadOnlineLeaseUntil(payloadBinDir, until);
+        xcat::log::Info("Update", "startup gate/tok ok until=%llu; bg netchk",
+                        static_cast<unsigned long long>(until));
+        ScheduleImmediateForcePoll(serviceUrl, payloadBinDir);
+        return false;
+    }
+
+    xcat::log::Warn("Update", "startup gate/tok miss; netchk q");
+    AccessContactResult ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/true);
+    // Quick 超时/瞬断时补一次完整探活，避免宽限用尽后被短超时误杀。
+    if (ac.kind == AccessContactKind::Unreachable) {
+        xcat::log::Warn("Update", "startup netchk q miss; netchk full");
+        ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
+    }
+    if (ac.kind == AccessContactKind::Denied) {
+        (void)WriteAccessDenySticky(payloadBinDir, ac.reason, ac.mode, ac.key);
+        (void)ClearOnlineLease(payloadBinDir);
+        RequestExitForDeviceAccessDeny(ac.reason, ac.mode, /*fromSticky=*/false);
+        return true;
+    }
+    if (ac.kind == AccessContactKind::Allowed) {
+        g_sessionAccessDeny.store(false, std::memory_order_release);
+        (void)ClearAccessDenySticky(payloadBinDir);
+        (void)WriteOnlineLease(payloadBinDir);
+        xcat::log::Info("Update", "startup netchk ok; gate/tok issued");
+        return false;
+    }
+
+    // 探活失败：仅首次给 1h 宽限。先写租约再打标，避免「标记成功、租约失败」白烧一次。
+    if (!BootstrapGraceAlreadyUsed(payloadBinDir)) {
+        if (!WriteOnlineLeaseTtl(payloadBinDir, kBootstrapGraceTtlSec, "g")) {
+            xcat::log::Warn("Update", "startup gate/g tok write failed");
+        } else {
+            if (!MarkBootstrapGraceUsed(payloadBinDir)) {
+                // 租约已发出；标记失败下次仍可能再领宽限——宁可重复一次，不可白烧后硬拒。
+                xcat::log::Warn("Update", "startup gate/g mark failed (lease issued)");
+            }
+            xcat::log::Warn("Update", "startup netchk fail; gate/g 1h n=%s",
+                            GateNetLogCode(ac.detail.empty() ? nullptr : ac.detail.c_str()));
+            ScheduleImmediateForcePoll(serviceUrl, payloadBinDir);
+            return false;
+        }
+    }
+
+    RequestExitForOnlineLeaseRequired(ac.detail.empty() ? "net miss" : ac.detail.c_str());
+    return true;
+}
+
 UpdateSnapshot GetUpdateSnapshot() {
     std::lock_guard<std::mutex> lk(g_state.mtx);
     return g_state.snapshot;
@@ -1798,50 +2721,76 @@ bool ClearPostUpdateColdStartRequest(const std::string& payloadBinDir) {
 }
 
 bool ConsumeUpdateFailedNotify(const std::string& payloadBinDir) {
-    auto readNotifyFile = [](const std::string& path, std::string& outBody) -> bool {
-        const DWORD attr = GetFileAttributesA(path.c_str());
-        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            return false;
-        }
+    auto readNotifyFile = [](const std::string& path, std::string& outBody,
+                             FILETIME* outWrite) -> bool {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &fad)) return false;
+        if ((fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
         FILE* f = nullptr;
         if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
         char buf[1536]{};
         const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
         fclose(f);
         outBody.assign(buf, n);
-        if (!DeleteFileA(path.c_str())) {
-            xcat::log::Warn("Update", "update_failed.notify delete failed path=%s gle=%lu",
-                            path.c_str(), static_cast<unsigned long>(GetLastError()));
-        }
+        if (outWrite) *outWrite = fad.ftLastWriteTime;
         return true;
     };
+    auto deleteNotifyFile = [](const std::string& path) {
+        if (path.empty()) return;
+        if (!DeleteFileA(path.c_str())) {
+            const DWORD gle = GetLastError();
+            if (gle != ERROR_FILE_NOT_FOUND) {
+                xcat::log::Warn("Update", "update_failed.notify delete failed path=%s gle=%lu",
+                                path.c_str(), static_cast<unsigned long>(gle));
+            }
+        }
+    };
 
-    std::string path;
-    std::string body;
-    bool found = false;
+    std::string statePath;
+    std::string stateBody;
+    FILETIME stateWrite{};
+    bool haveState = false;
     if (!payloadBinDir.empty()) {
-        path = payloadBinDir;
-        if (path.back() != '\\' && path.back() != '/') path.push_back('\\');
-        path += "state\\update_failed.notify";
-        found = readNotifyFile(path, body);
+        statePath = payloadBinDir;
+        if (statePath.back() != '\\' && statePath.back() != '/') statePath.push_back('\\');
+        statePath += "state\\update_failed.notify";
+        haveState = readNotifyFile(statePath, stateBody, &stateWrite);
     }
-    // state 缺失时读 TEMP 兜底（目录被清 / 旧包无 Consume 后手动开新包）。
+
     char tempDir[MAX_PATH]{};
     const DWORD tempLen = GetTempPathA(MAX_PATH, tempDir);
     std::string tempPath;
+    std::string tempBody;
+    FILETIME tempWrite{};
+    bool haveTemp = false;
     if (tempLen > 0 && tempLen < MAX_PATH) {
         tempPath.assign(tempDir);
         tempPath += "xcat_update_failed.notify";
-        std::string tempBody;
-        if (readNotifyFile(tempPath, tempBody)) {
-            if (!found) {
-                body.swap(tempBody);
-                path = tempPath;
-                found = true;
-            }
-        }
+        haveTemp = readNotifyFile(tempPath, tempBody, &tempWrite);
     }
-    if (!found) return false;
+    if (!haveState && !haveTemp) return false;
+
+    // state / TEMP 可能各自残留；按 mtime 取较新，避免旧 state 盖住 launcher 新写的 TEMP。
+    std::string path;
+    std::string body;
+    if (haveState && haveTemp) {
+        const LONG cmp = CompareFileTime(&stateWrite, &tempWrite);
+        if (cmp >= 0) {
+            path = statePath;
+            body.swap(stateBody);
+        } else {
+            path = tempPath;
+            body.swap(tempBody);
+        }
+    } else if (haveState) {
+        path = statePath;
+        body.swap(stateBody);
+    } else {
+        path = tempPath;
+        body.swap(tempBody);
+    }
+    deleteNotifyFile(statePath);
+    deleteNotifyFile(tempPath);
 
     // 去 UTF-8 BOM；格式：时间戳 / 摘要 / 日志提示。
     if (body.size() >= 3 && static_cast<unsigned char>(body[0]) == 0xEF &&
@@ -1890,6 +2839,17 @@ bool ConsumeUpdateFailedNotify(const std::string& payloadBinDir) {
     xcat::log::Warn("Update", "consumed update_failed.notify path=%s detail=%s", path.c_str(),
                     detail.c_str());
     return true;
+}
+
+void StopGameForAccessGateExit() {
+    const unsigned n = xcat::KillClassicGameWithRetry();
+    xcat::log::Warn("Update", "access-gate stop Maplestory_Classic x%u", n);
+}
+
+bool ShouldKillGameOnLauncherClose(const std::string& payloadBinDir) {
+    if (g_sessionAccessDeny.load(std::memory_order_acquire)) return true;
+    if (g_accessGateExitKind.load(std::memory_order_acquire) != 0) return true;
+    return xcat::AccessDenyStickyPresent(payloadBinDir.c_str());
 }
 
 }  // namespace xcat::app

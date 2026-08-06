@@ -45,6 +45,18 @@ struct Snapshot {
     const char* gate = "none";
     int localHour = 0;
     uint32_t mask = 0;
+    // 一键后尚未 localPlayerOk：顶栏显示「冷启中 Xs」（Xs=距硬顶剩余）。
+    bool coldStart = false;
+    // 主门 awaiting：Classic 起来后剩余至 2×noExp；次门 secondary：剩余至 noExp。
+    uint32_t coldStartGraceRemainSec = 0;
+    // awaiting 且 Classic 尚未起来：不倒计时（主门硬顶仅进程已起后生效）。
+    bool coldStartWaitingProcess = false;
+    // 干净重拉杀进程/settle 阶段（不含随后的一键冷启）。
+    bool cleanRelaunchKillSettle = false;
+    // 一键归属仍在、冷启已结束：顶栏可显示「未进图 a/b」。
+    bool launchOwnedPendingPlayable = false;
+    // 踢线后短等干净重拉剩余秒（0=无）。
+    uint32_t kickRelaunchRemainSec = 0;
 };
 
 uint32_t ClampScheduleMask(uint32_t mask);
@@ -67,6 +79,9 @@ void Reset();
 // IsCleanRelaunchInFlight：含 settle 后一键冷启未结束，供底部按钮禁用。
 bool RequestManualCleanRelaunch(LaunchUiState& ui);
 bool IsCleanRelaunchInFlight();
+
+// 一键/干净重拉刚启动：置 awaitingPlayable 状态位，直到 localPlayerOk（非定时硬编码）。
+void NoteLaunchStarted(uint32_t graceSec = 0);
 
 }  // namespace hangup_schedule
 }  // namespace xcat::app

@@ -4,16 +4,22 @@ add_library(xcat_probe SHARED
   xcat_probe.cpp
   ../runtime/bin_dir.cpp
   ../runtime/log.cpp
+  ../runtime/mono_clock.cpp
   ../runtime/il2cpp_bind.cpp
   ../runtime/il2cpp_shape.cpp
   ../runtime/il2cpp_method.cpp
   ../runtime/il2cpp_prefab.cpp
+  ../runtime/il2cpp_container.cpp
+  ../runtime/il2cpp_network.cpp
+  ../runtime/il2cpp_mapdata.cpp
   ../runtime/main_thread_pump.cpp
   ../runtime/managed_main.cpp
   ../runtime/anchor_lamps.cpp
   ../ui/player_vitals.cpp
   ../features/invuln/invuln.cpp
   ../features/attack_accel/attack_accel.cpp
+  ../features/final_attack_force/final_attack_force.cpp
+  ../features/skill_max_level/skill_max_level.cpp
   ../features/kick_sniff/kick_sniff.cpp
   ../features/auto_enter/auto_enter.cpp
   ../features/ccu/ccu.cpp
@@ -32,10 +38,12 @@ add_library(xcat_probe SHARED
   ../features/ports/security_attack_port.cpp
   ../features/ports/travel_port.cpp
   ../features/ports/player_combat_port.cpp
+  ../features/ports/action_gate.cpp
   ../features/ports/attack_input_port.cpp
   ../features/ports/teleport_port.cpp
   ../features/ports/foothold_port.cpp
   ../features/ports/foothold_path.cpp
+  ../features/ports/map_bounds_port.cpp
   ../features/ports/user_pool_port.cpp
   ../features/ports/shop_port.cpp
   ../features/ports/attack_rpc_port.cpp
@@ -55,9 +63,12 @@ add_library(xcat_probe SHARED
   ../features/simple_combat/simple_combat.cpp
   ../features/fly/fly.cpp
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
+  ../features/auction_town_bypass/auction_town_bypass.cpp
   ../features/ga_text_probe/ga_text_probe.cpp
   ../features/channel_hop/channel_hop.cpp
   ../features/encounter/encounter.cpp
+  ../features/player_hide/player_hide.cpp
+  ../features/frame_lock/frame_lock.cpp
   ../features/auto_lie/anti_macro_port.cpp
   ../features/auto_lie/anti_macro_follower.cpp
   ../features/auto_lie/auto_lie.cpp
@@ -73,6 +84,8 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/..
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/invuln
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/attack_accel
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/final_attack_force
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/skill_max_level
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/kick_sniff
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auto_enter
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/ccu
@@ -88,9 +101,12 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/simple_combat
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/fly
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/drop_alert_bypass
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/auction_town_bypass
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/ga_text_probe
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/channel_hop
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/encounter
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/player_hide
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/frame_lock
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auto_lie
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/notify
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/travel

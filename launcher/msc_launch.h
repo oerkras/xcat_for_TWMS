@@ -58,6 +58,13 @@ struct Options {
     std::wstring gameExeName = L"Maplestory_Classic.exe";
     int          waitGameSec = 90;
     bool         dryRunDeepLinkOnly = false;
+    // 策略 B：已有经典版则跳过 NGM、直接接管 PID 注入。
+    // 优先 cmdline 四元组匹配本票；否则接管任一存活实例（官网 CDP 常已先拉起且票可能不同）。
+    // 仅建议 GAMA PASS 等「浏览器可能已自启」路径打开；HTTP 冷启默认 false，避免误接管残留进程。
+    bool attachExistingClassic = false;
+    // 接管时的最大进程年龄（秒）：更老的实例按「上一局残留」处理，不接管（0=不限）。
+    // 换票登录刚完成时，本局客户端必然远新于此窗口。
+    int attachMaxAgeSec = 1800;
 };
 
 struct Progress {
@@ -94,7 +101,20 @@ bool CmdMatchesGalaxyTicket(const std::wstring& cmdLine, const GalaxyTicket& tic
 
 std::wstring FindNgmPath();  // 多路径：进程 / ngm:// / 固定目录 / 注册表 / 经典版旁路
 bool         IsNgmProcessRunning();
+// 仅认创建时间 ≥ notBefore 的 NGM（滤残留进程；notBefore 可为零=等同 IsNgmProcessRunning）
+bool         IsNgmProcessRunningCreatedAfter(const FILETIME& notBefore);
 bool         EnsureNgmRunning();
+
+// 查找可接管的经典版 PID。ticketMatched=true 表示 cmdline 与 ticket 四元组一致。
+// createdNotBefore 非空时：只认创建时间 ≥ *createdNotBefore 的进程（滤残留）。
+// outUnmatched：存活且通过年龄过滤、但 cmdline 未匹配本票的实例数；>1 说明无法判定
+// 哪个属于本次登录，调用方不应猜测接管（会串到别的账号）。
+unsigned long FindExistingClassicPid(const GalaxyTicket& ticket,
+                                     const wchar_t* exeName = L"Maplestory_Classic.exe",
+                                     std::wstring* outCmd = nullptr,
+                                     bool* ticketMatched = nullptr,
+                                     const FILETIME* createdNotBefore = nullptr,
+                                     int* outUnmatched = nullptr);
 
 Result Run(const Options& opts, ProgressCallback cb = nullptr);
 

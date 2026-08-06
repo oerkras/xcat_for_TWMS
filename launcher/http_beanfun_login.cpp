@@ -309,8 +309,7 @@ HttpLoginResult HttpBeanfunLoginToOtt(const std::wstring& user, const std::wstri
     }
     if (LooksCaptcha(r1.body) && msc::http::ContainsI(r1.body, "data-sitekey")) {
         return Fail(HttpLoginError::CaptchaRequired,
-                    "登录页要求验证码/reCAPTCHA：请用浏览器打开官网完成一次登录后再点一键，"
-                    "或改用「HTTP优先」并安装 WebView2 以弹出登录窗");
+                    "登录页要求验证码/reCAPTCHA：请用浏览器打开官网完成一次登录后再点一键");
     }
 
     Log(log, L"[http] POST 账密…");
@@ -335,8 +334,7 @@ HttpLoginResult HttpBeanfunLoginToOtt(const std::wstring& user, const std::wstri
 
     if (LooksDual(r2.body)) {
         return Fail(HttpLoginError::DualVerifyRequired,
-                    "需要双重验证：请用浏览器打开官网完成验证后再点一键，"
-                    "或改用「HTTP优先」+ WebView2 弹出登录窗手动完成");
+                    "需要双重验证：请用浏览器打开官网完成验证后再点一键");
     }
     if (LooksCaptcha(r2.body) &&
         (msc::http::ContainsI(r2.body, "驗證碼錯誤") || msc::http::ContainsI(r2.body, "请完成验证") ||

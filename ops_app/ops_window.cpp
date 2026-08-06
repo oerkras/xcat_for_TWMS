@@ -323,6 +323,10 @@ void OpsWindow_Show(OpsWindow& app) {
     UpdateWindow(app.hwnd);
 }
 
+bool OpsWindow_IsMinimized(const OpsWindow& app) {
+    return app.hwnd && IsIconic(app.hwnd);
+}
+
 void OpsWindow_BeginFrame(OpsWindow& app, const float clearColor[4]) {
     if (g_pendingThemeCommit) {
         g_pendingThemeCommit = false;

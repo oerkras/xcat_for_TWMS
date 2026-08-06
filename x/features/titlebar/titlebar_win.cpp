@@ -48,6 +48,31 @@ HWND FindUnityWndClass() {
     return ctx.unity;  // 不要 fallback：冷启 splash 大窗 ≠ Unity 就绪
 }
 
+bool PositionGameTopLeft(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    if (IsIconic(hwnd) || IsZoomed(hwnd)) return false;
+
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!mon || !GetMonitorInfoW(mon, &mi)) return false;
+
+    UINT dpi = 96;
+    if (const HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+        if (const auto fn = reinterpret_cast<GetDpiForWindowFn>(
+                GetProcAddress(user32, "GetDpiForWindow"))) {
+            const UINT got = fn(hwnd);
+            if (got > 0) dpi = got;
+        }
+    }
+    const int margin = static_cast<int>((12.f * static_cast<float>(dpi) / 96.f) + 0.5f);
+    const int x = mi.rcWork.left + margin;
+    const int y = mi.rcWork.top + margin;
+    return SetWindowPos(hwnd, nullptr, x, y, 0, 0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) != FALSE;
+}
+
 void SetTitleSafe(HWND hwnd, const wchar_t* text, UINT timeoutMs) {
     if (!hwnd || !IsWindow(hwnd) || !text) return;
     DWORD_PTR result = 0;

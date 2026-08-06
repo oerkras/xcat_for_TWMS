@@ -132,6 +132,8 @@ void SetConfig(bool enabled, uint32_t gapMs, bool safeStagger) {
     ports::multi_skill::SetConfig(enabled, gapMs, safeStagger);
 }
 
+void SetSendUseRequest(bool on) { ports::multi_skill::SetSendUseRequest(on); }
+
 bool IsEnabled() { return ports::multi_skill::IsEnabled(); }
 
 bool TryCast(char* out, int outSz) { return ports::multi_skill::TryCast(out, outSz); }

@@ -1,9 +1,11 @@
 // Classic TWMS — UserLocal.OnKey via shared main_thread_pump.
-// KeyDownTouch/Up CFF 实机 SEH → 改走 OnKey @0x10181E0（MI=null）。
+// KeyDownTouch/Up CFF 实机 SEH → 改走 OnKey @0x10181E0。
+// 官方站点常 xor MI；调用仍传 null。MI 解析只为 FnFromMi / MISS 灯。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "input_port.h"
+#include "player_combat_port.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_shape.h"
@@ -15,6 +17,7 @@
 
 #include <Psapi.h>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 #pragma comment(lib, "Psapi.lib")
@@ -27,20 +30,26 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaOnKey = 0x10181E0;  // remapped 2026-08-03 · UserLocal.(KeyInputType,Key)
-constexpr uint32_t kRvaIsFocusedInputField = 0x1663BE0;  // remapped 2026-08-03
+constexpr uint32_t kRvaOnKey = 0x101F6B0;  // remounted 2026-08-04 · UserLocal.(KeyInputType,Key)
+constexpr uint32_t kRvaIsFocusedInputField = 0x166A180;  // remounted 2026-08-04 · reads _focus@0x30
 constexpr int32_t kKeyInputDown = 0;
 constexpr int32_t kKeyInputUp = 1;
 
-// Game InputManager（非 UnityEngine）。旧哈希 a9487a00… 在 2026-08-03 dump 已不存在。
+// Game InputManager（非 UnityEngine）。08-03 c829ef06… 在 08-04 dump 已不存在。
 constexpr char kInputManagerClass[] =
-    "c829ef06e8b802f06e5832fb7d75ff5299842cfec9b6600d4381a22c5a7219d";
+    "ed910d2a0f7854cab3740bf212820b284c0ca06173f84c42a21c2a7bf5058c9";
+// remounted UserLocal class hash（与 il2cpp_shape::kHashUserLocal 同）
+constexpr char kUserLocalClass[] =
+    "d344a8e976a30de427223e36a7cf5447b64fa0a92c37e51ea3899629d7c69fd";  // remounted 2026-08-04 UL
 constexpr char kHashOnKey[] =
-    "df22d8fb6a481027c0a485d792f41d5c686ecf61662856f6994e18f8b19a309";
+    "f56ee57b4270be9567e8fc0efc15e4c38099d6db2ebf2cd066df7109efbaf48";
 constexpr char kHashIsFocused[] =
-    "cff33226e7716ffa85778a5ac60b94989da40969d23c8708d751798e7e1cc75";
+    "abda7a2b7e9232195eb54223c829b9932388cdebe1c9d628223eff022b03da1";
+// TargetUser 字段防漂移：hash → field_get_offset；dump 常量仅 fallback（08-04 仍 @0x20）
+constexpr char kHashTargetUser[] =
+    "<c5fa4ee490630c3ed756dd67f1cfdb1466ec8c100da69ae4521d889b7eaf3ab>k__BackingField";
+constexpr size_t kFbTargetUser = 0x20;
 
-constexpr size_t kOffTargetUser = 0x20;  // UserLocal backing field，仍 @0x20
 constexpr DWORD kRebindMs = 3000;
 constexpr DWORD kJobWaitMs = 1500;
 constexpr DWORD kSehCooldownMs = 5000;
@@ -64,6 +73,10 @@ FnClassStaticData gClassStaticData = nullptr;
 void* gImType = nullptr;
 void* gImKlass = nullptr;
 void* gInputManager = nullptr;
+
+size_t gOffTargetUser = kFbTargetUser;
+bool gTargetUserOffTried = false;
+const char* gTargetUserPath = "fallback";  // meta | fallback
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -102,18 +115,119 @@ T AtRva(uint32_t rva) {
     return reinterpret_cast<T>(reinterpret_cast<uint8_t*>(gGA) + rva);
 }
 
+bool PlausibleInstanceOff(size_t off) { return off >= 0x10 && off < 0x1000; }
+
+void EnsureTargetUserOffset() {
+    if (gTargetUserOffTried) return;
+    gTargetUserOffTried = true;
+    gOffTargetUser = kFbTargetUser;
+    gTargetUserPath = "fallback";
+
+    if (!x::runtime::il2cpp::Ensure()) {
+        x::runtime::LogW("InputPort", "TargetUser off: bind miss — fallback 0x%zX", kFbTargetUser);
+        return;
+    }
+    if (!gImKlass) gImKlass = x::runtime::il2cpp::FindClass("", kInputManagerClass);
+    if (!gImKlass) {
+        x::runtime::LogW("InputPort", "TargetUser off: IM klass miss — fallback 0x%zX", kFbTargetUser);
+        return;
+    }
+
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) {
+        x::runtime::LogW("InputPort", "TargetUser off: field exports miss — fallback 0x%zX",
+                         kFbTargetUser);
+        return;
+    }
+
+    void* field = nullptr;
+    __try {
+        field = e.classGetFieldFromName(gImKlass, kHashTargetUser);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        field = nullptr;
+    }
+    if (!field) {
+        x::runtime::LogW("InputPort", "TargetUser off: field hash miss — fallback 0x%zX",
+                         kFbTargetUser);
+        return;
+    }
+    size_t off = 0;
+    __try {
+        off = e.fieldGetOffset(field);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        off = 0;
+    }
+    if (!PlausibleInstanceOff(off)) {
+        x::runtime::LogW("InputPort", "TargetUser off: implausible 0x%zX — fallback 0x%zX", off,
+                         kFbTargetUser);
+        return;
+    }
+    gOffTargetUser = off;
+    gTargetUserPath = "meta";
+    x::runtime::LogI("InputPort", "TargetUser off path=%s 0x%zX (fb=0x%zX)", gTargetUserPath,
+                     gOffTargetUser, kFbTargetUser);
+}
+
+size_t OffTargetUser() {
+    EnsureTargetUserOffset();
+    return gOffTargetUser;
+}
+
+MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
+    // channel_hop 同形：同时认 methodPointer / virtualMethodPointer。
+    if (!klass || !rva || !gGA) return nullptr;
+    const auto& ex = x::runtime::il2cpp::Get();
+    if (!ex.classGetMethods) return nullptr;
+    void* target = AtRva<void*>(rva);
+    void* cur = klass;
+    for (int depth = 0; cur && depth < 8; ++depth) {
+        void* iter = nullptr;
+        __try {
+            for (;;) {
+                void* miRaw = ex.classGetMethods(cur, &iter);
+                if (!miRaw) break;
+                auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
+                void* mp = nullptr;
+                void* vp = nullptr;
+                __try {
+                    mp = mi->methodPointer;
+                    vp = mi->virtualMethodPointer;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    continue;
+                }
+                if (mp == target || vp == target) return mi;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+        if (!ex.classParent) break;
+        void* parent = nullptr;
+        __try {
+            parent = ex.classParent(cur);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            parent = nullptr;
+        }
+        if (!parent || parent == cur) break;
+        cur = parent;
+    }
+    return nullptr;
+}
+
 MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
     if (!klass || !name) return nullptr;
     const auto& e = x::runtime::il2cpp::Get();
     MethodInfoHead* mi = nullptr;
     if (e.classGetMethodFromName) {
-        __try {
-            mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            mi = nullptr;
+        const int tryArgc[] = {argc, -1};
+        for (int ac : tryArgc) {
+            __try {
+                mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, ac));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                mi = nullptr;
+            }
+            if (mi && mi->methodPointer) return mi;
         }
     }
-    if (mi && mi->methodPointer) return mi;
     if (!e.classGetMethods || !e.methodGetName) return nullptr;
     void* cur = klass;
     for (int depth = 0; cur && depth < 8; ++depth) {
@@ -145,15 +259,14 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
 
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
-                          const char* plain, const char* hash) {
-    if (plain) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plain, shape.arity)) return mi;
-    }
-    if (hash) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hash, shape.arity)) return mi;
-    }
+                          const char* plain, const char* hash,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
     if (!klass) return nullptr;
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
+    // SSOT：hash → plain → RVA/kind（OnKey 无明文，靠 hash）
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, hash);
+    if (outPath) *outPath = mr.path;
     if (mr.method) {
         if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
             x::runtime::LogI("InputPort", "ResolveMi kind hit rva=0x%X plain=%s", rva,
@@ -161,7 +274,8 @@ MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
         }
         return reinterpret_cast<MethodInfoHead*>(mr.method);
     }
-    return nullptr;
+    // 最后：mp/vp 双指针 RVA（不依赖 GaBase 算术）
+    return FindMethodByRva(klass, rva);
 }
 
 template <typename Fn>
@@ -172,23 +286,53 @@ Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
 
 void EnsureMethodInfos() {
     using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::ResolvePath;
     using x::runtime::il2cpp_method::TypeKind;
-    void* ul = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+    // dump: UserLocal$$df22d8fb… @0x10181E0 · TypeSignature viiii；UL 上同形约 9 个 → unique=false
+    void* ul = x::runtime::il2cpp::FindClass("", kUserLocalClass);
+    if (!ul) ul = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+    ResolvePath pOn = ResolvePath::Miss, pFo = ResolvePath::Miss;
     if (ul && !gMiOnKey) {
-        // void(KeyInputType,Key) — UL 上唯一-ish；哈希主
-        constexpr MethodShape kOn{2, TypeKind::Void, true, true, {TypeKind::Any, TypeKind::Any}};
-        gMiOnKey = ResolveMi(ul, kRvaOnKey, kOn, "OnKey", kHashOnKey);
+        constexpr MethodShape kOn{2, TypeKind::Void, false, true, {TypeKind::Any, TypeKind::Any}};
+        gMiOnKey = ResolveMi(ul, kRvaOnKey, kOn, nullptr, kHashOnKey, &pOn);
+        if (gMiOnKey) {
+            x::runtime::LogI("InputPort", "OnKey MI bind ok mi=%p rva=0x%X", gMiOnKey, kRvaOnKey);
+        }
     }
+    // 急切绑也要补 ImKlass：IsFocused MI 不依赖 singleton 实例，FindClass 即可。
+    if (!gImKlass) gImKlass = x::runtime::il2cpp::FindClass("", kInputManagerClass);
     if (gImKlass && !gMiIsFocused) {
         constexpr MethodShape kFo{0, TypeKind::Bool, false, true, {}};
-        gMiIsFocused =
-            ResolveMi(gImKlass, kRvaIsFocusedInputField, kFo, "IsFocusedInputField", kHashIsFocused);
+        gMiIsFocused = ResolveMi(gImKlass, kRvaIsFocusedInputField, kFo, "IsFocusedInputField",
+                                 kHashIsFocused, &pFo);
+        if (gMiIsFocused) {
+            x::runtime::LogI("InputPort", "IsFocused MI bind ok mi=%p rva=0x%X", gMiIsFocused,
+                             kRvaIsFocusedInputField);
+        }
     }
-    x::runtime::anchor_lamps::Set(
-        "InputOnKey",
-        gMiOnKey ? x::runtime::anchor_lamps::AnchorLampCode::Ok
-                 : x::runtime::anchor_lamps::AnchorLampCode::Degraded,
-        gMiOnKey ? "OnKey MI" : "RVA+pump");
+    static bool sMethodHitsLogged = false;
+    if (!sMethodHitsLogged && (gMiOnKey || gMiIsFocused)) {
+        sMethodHitsLogged = true;
+        int hits = 0;
+        if (gMiOnKey) ++hits;
+        if (gMiIsFocused) ++hits;
+        const bool meta = (gMiOnKey && pOn == ResolvePath::Hash) &&
+                          (gMiIsFocused && (pFo == ResolvePath::Hash || pFo == ResolvePath::Plain));
+        x::runtime::LogI("InputPort", "methods path=%s hits=%d/2",
+                         meta ? "meta" : (hits ? "meta-partial" : "fallback"), hits);
+    }
+    if (gMiOnKey) {
+        x::runtime::anchor_lamps::Set("InputOnKey", x::runtime::anchor_lamps::AnchorLampCode::Ok,
+                                     "OnKey MI");
+    } else if (ul) {
+        x::runtime::anchor_lamps::Set("InputOnKey",
+                                     x::runtime::anchor_lamps::AnchorLampCode::Degraded,
+                                     "RVA+pump");
+    } else {
+        // UL 未齐：先别橙
+        x::runtime::anchor_lamps::Set("InputOnKey",
+                                     x::runtime::anchor_lamps::AnchorLampCode::Unknown, "pending");
+    }
 }
 
 void EnsureCs() {
@@ -253,12 +397,7 @@ void* TryResolveSingleton() {
     if (!gImKlass) gImKlass = FindClass("", kInputManagerClass);
     if (!gImKlass) return nullptr;
 
-    if (gRuntimeClassInit) {
-        __try {
-            gRuntimeClassInit(gImKlass);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
+    if (gRuntimeClassInit) x::runtime::il2cpp::RuntimeClassInit(gImKlass);
 
     void* staticsKlass = gImKlass;
     if (gClassParent) {
@@ -268,12 +407,7 @@ void* TryResolveSingleton() {
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
         if (parent) {
-            if (gRuntimeClassInit) {
-                __try {
-                    gRuntimeClassInit(parent);
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                }
-            }
+            if (gRuntimeClassInit) x::runtime::il2cpp::RuntimeClassInit(parent);
             staticsKlass = parent;
         }
     }
@@ -282,13 +416,13 @@ void* TryResolveSingleton() {
     if (!statics) statics = KlassStaticFields(gImKlass);
     if (!statics) return nullptr;
 
+    // 只收带 targetUser 的候选；无 user 的实例留给 FindAll，避免 bind 后 Down 全 fail。
     for (size_t s = 0; s < 4; ++s) {
         void* lazy = ReadPtr(statics, s * sizeof(void*));
         void* cand = TryLazyValue(lazy);
         if (!cand) cand = lazy;
         if (!LooksLikeHeapPtr(cand)) continue;
-        if (LooksLikeHeapPtr(ReadPtr(cand, kOffTargetUser))) return cand;
-        if (!gInputManager) return cand;
+        if (LooksLikeHeapPtr(ReadPtr(cand, OffTargetUser()))) return cand;
     }
     return nullptr;
 }
@@ -303,22 +437,34 @@ void* TryResolveFindAll() {
         return nullptr;
     }
     const uintptr_t n = ArrayLen(arr);
-    void* best = nullptr;
     for (uintptr_t i = 0; i < n && i < 8; ++i) {
         void* im = ArrayAt(arr, i);
         if (!LooksLikeHeapPtr(im)) continue;
-        if (LooksLikeHeapPtr(ReadPtr(im, kOffTargetUser))) return im;
-        if (!best) best = im;
+        if (LooksLikeHeapPtr(ReadPtr(im, OffTargetUser()))) return im;
     }
-    return best;
+    return nullptr;
+}
+
+bool InputManagerHasTargetUser() {
+    if (!LooksLikeHeapPtr(gInputManager)) return false;
+    __try {
+        return LooksLikeHeapPtr(ReadPtr(gInputManager, OffTargetUser()));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 bool ResolveInputManager(DWORD now) {
     if (static_cast<int>(now - gSehCooldownUntil.load(std::memory_order_acquire)) < 0) {
         return false;
     }
-    if (gInputManager && LooksLikeHeapPtr(gInputManager)) return true;
-    if (gLastRebind && now - gLastRebind < kRebindMs) return gInputManager != nullptr;
+    // 缓存必须连 targetUser 一起有效；换图后 user 变 null 时立刻丢掉重绑。
+    if (InputManagerHasTargetUser()) return true;
+    if (gInputManager) {
+        gInputManager = nullptr;
+        gLastRebind = 0;
+    }
+    if (gLastRebind && now - gLastRebind < kRebindMs) return false;
     gLastRebind = now;
     if (!BindApis()) return false;
 
@@ -350,11 +496,9 @@ bool ResolveInputManager(DWORD now) {
                 for (uintptr_t i = 0; i < n && i < 8; ++i) {
                     void* im = ArrayAt(arr, i);
                     if (!LooksLikeHeapPtr(im)) continue;
-                    if (LooksLikeHeapPtr(ReadPtr(im, kOffTargetUser))) {
-                        pick = im;
-                        break;
-                    }
-                    if (!pick) pick = im;
+                    if (!LooksLikeHeapPtr(ReadPtr(im, OffTargetUser()))) continue;
+                    pick = im;
+                    break;
                 }
                 best = pick;
                 c->how = "FindAll";
@@ -368,10 +512,13 @@ bool ResolveInputManager(DWORD now) {
         return false;
     }
     if (gInputManager) {
+        EnsureTargetUserOffset();
         x::runtime::LogI("InputPort",
-                         "InputManager bind %p via %s targetUser=%d (KeyTouch MI=null)",
+                         "InputManager bind %p via %s targetUser=%d off=%s/0x%zX",
                          gInputManager, ctx.how,
-                         LooksLikeHeapPtr(ReadPtr(gInputManager, kOffTargetUser)) ? 1 : 0);
+                         LooksLikeHeapPtr(ReadPtr(gInputManager, OffTargetUser())) ? 1 : 0,
+                         gTargetUserPath, gOffTargetUser);
+        EnsureMethodInfos();
     }
     return ctx.ok;
 }
@@ -390,9 +537,7 @@ bool IsFocusedOnMain() {
     return focused;
 }
 
-bool HasTargetUser() {
-    return LooksLikeHeapPtr(ReadPtr(gInputManager, kOffTargetUser));
-}
+bool HasTargetUser() { return InputManagerHasTargetUser(); }
 
 void RunJobOnMain(void* /*user*/) {
     EnsureCs();
@@ -406,7 +551,7 @@ void RunJobOnMain(void* /*user*/) {
     bool focusedSkip = false;
     __try {
         EnsureMethodInfos();
-        void* lu = HasTargetUser() ? ReadPtr(gInputManager, kOffTargetUser) : nullptr;
+        void* lu = HasTargetUser() ? ReadPtr(gInputManager, OffTargetUser()) : nullptr;
         if (!gInputManager || !LooksLikeHeapPtr(lu) || key <= 0) {
             ok = false;
         } else if (kind == JobKind::Down || kind == JobKind::Up) {
@@ -418,7 +563,18 @@ void RunJobOnMain(void* /*user*/) {
                 if (fn) {
                     const int32_t inputType =
                         (kind == JobKind::Down) ? kKeyInputDown : kKeyInputUp;
-                    fn(lu, inputType, key, gMiOnKey);
+                    // e2a28 探针：仅 Down（Up 不进位移钉点）；pre 需 XCAT_PROBE_ONKEY=1
+                    player_combat::VisualSnap pre{};
+                    char note[48]{};
+                    if (kind == JobKind::Down) {
+                        (void)player_combat::QueryVisualSnap(pre);
+                        std::snprintf(note, sizeof(note), "key=%d", (int)key);
+                        player_combat::LogE2a28KeyProbe("pre", note, nullptr);
+                    }
+                    fn(lu, inputType, key, nullptr);
+                    if (kind == JobKind::Down) {
+                        player_combat::LogE2a28KeyProbe("post", note, pre.ok ? &pre : nullptr);
+                    }
                     ok = true;
                 }
             }
@@ -542,6 +698,9 @@ void Init() {
     EnsureCs();
     gInputManager = nullptr;
     gLastRebind = 0;
+    gOffTargetUser = kFbTargetUser;
+    gTargetUserOffTried = false;
+    gTargetUserPath = "fallback";
     gSubmitSeq.store(0);
     gDoneSeq.store(0);
     gJobOk.store(false);
@@ -550,13 +709,18 @@ void Init() {
     for (auto& s : gReleases) s = {};
     LeaveCriticalSection(&gRelCs);
     x::runtime::LogI("InputPort", "ready (UserLocal.OnKey via shared MainPump)");
+    // 急切绑定：启动即解析字段偏移 / OnKey MI / 上报灯（不必等第一次发键）
+    if (BindApis()) {
+        EnsureTargetUserOffset();
+        EnsureMethodInfos();
+    }
 }
 
 void Shutdown() { gInputManager = nullptr; }
 
 bool EnsureBound() { return ResolveInputManager(GetTickCount()); }
 
-bool Ready() { return gInputManager != nullptr && gGA != nullptr; }
+bool Ready() { return InputManagerHasTargetUser() && gGA != nullptr; }
 
 bool InjectKeyHold(WORD vk, DWORD holdMs) {
     const int32_t key = VkToUnityKey(vk);

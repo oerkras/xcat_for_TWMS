@@ -1,6 +1,7 @@
 #include "hangup_schedule.h"
 
 #include "app_notify.h"
+#include "attach_inject.h"
 #include "guardian_policy.h"
 #include "launch_panel.h"
 #include "update_client.h"
@@ -62,6 +63,15 @@ struct State {
     // Sticky session: survive crash so ProcessDead can fire (fengxing keeps ui.gamePid).
     DWORD trackedPid = 0;
     bool sessionArmed = false;
+    // 一键/干净重拉归属：进图前也要能 ProcessDead；配合冷启宽限（主门 2N / 次门 N）。
+    bool awaitingPlayable = false;
+    uint64_t coldProcessSeenTick = 0;
+    uint64_t coldHandshakeSeenTick = 0;
+    // 顶栏冷启文案（Tick 写入，GetSnapshot 读取）。
+    bool uiColdStart = false;
+    uint32_t uiColdGraceRemainSec = 0;
+    bool uiColdWaitingProcess = false;
+    bool uiLaunchOwnedPendingPlayable = false;
     // kick_sniff disconnectSeq baseline：武装后先对齐再边沿触发，避免历史断线误重拉。
     uint32_t lastConsumedDisconnectSeq = 0;
     uint32_t lastLoggedDisconnectSeq = 0;
@@ -116,6 +126,13 @@ void ClearRelaunchJob() { g.relaunch = RelaunchJob{}; }
 void ClearSessionTrack() {
     g.trackedPid = 0;
     g.sessionArmed = false;
+    g.awaitingPlayable = false;
+    g.coldProcessSeenTick = 0;
+    g.coldHandshakeSeenTick = 0;
+    g.uiColdStart = false;
+    g.uiColdGraceRemainSec = 0;
+    g.uiColdWaitingProcess = false;
+    g.uiLaunchOwnedPendingPlayable = false;
     g.lastConsumedDisconnectSeq = 0;
     g.lastLoggedDisconnectSeq = 0;
     g.haveDisconnectBaseline = false;
@@ -148,7 +165,9 @@ bool BeginCleanRelaunch(LaunchUiState& ui, uint64_t now, uint32_t cooldownSec,
         }
         return false;
     }
-    if (!msc::weblogin::CanStartOneClick()) {
+    const bool attachMode =
+        attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode());
+    if (!attachMode && !msc::weblogin::CanStartOneClick()) {
         if (g.lastCooldownBlockLogTick == 0 || now - g.lastCooldownBlockLogTick >= 5000u) {
             g.lastCooldownBlockLogTick = now;
             xcat::log::Warn("Watchdog", "restart suppressed: one-click not ready");
@@ -240,17 +259,36 @@ void PumpCleanRelaunch(LaunchUiState& ui, uint64_t now) {
 
         PushStatus(ui, g.relaunch.logLine[0] ? g.relaunch.logLine : "[Watchdog] 干净重拉",
                    g.relaunch.statusLine[0] ? g.relaunch.statusLine
-                                            : "守护模式：正在重新一键启动…");
+                                            : "守护模式：正在重新启动…");
         ClearRelaunchJob();
-        if (!LaunchPanel_StartOneClick(ui)) {
+        if (attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode())) {
+            if (!attach_inject::IsWatching()) {
+                (void)attach_inject::StartWatch();
+            }
+            ui.pendingAutoLaunch = false;
+            ui.autoLaunchNotBeforeMs = 0;
+            PushStatus(ui, "[Watchdog] 请手动重开游戏，将自动注入",
+                       "守护模式：请手动重开游戏（监视注入中）");
             g.launchBusy = false;
             g.runtime.restartInFlight = false;
-            xcat::log::Warn("Watchdog", "clean relaunch: StartOneClick failed");
-        } else {
-            g.launchBusy = true;
             g.mode = UiMode::Starting;
-            g.runtime.restartInFlight = true;
-            xcat::log::Info("Watchdog", "clean relaunch: one-click started");
+            xcat::log::Info("Watchdog", "clean relaunch: attach-watch waiting for manual launch");
+        } else {
+            if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto) {
+                msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+            } else if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
+                msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
+            }
+            if (!LaunchPanel_StartOneClick(ui, /*honorStrategyPrep=*/false)) {
+                g.launchBusy = false;
+                g.runtime.restartInFlight = false;
+                xcat::log::Warn("Watchdog", "clean relaunch: StartOneClick failed");
+            } else {
+                g.launchBusy = true;
+                g.mode = UiMode::Starting;
+                g.runtime.restartInFlight = true;
+                xcat::log::Info("Watchdog", "clean relaunch: one-click started");
+            }
         }
         break;
     }
@@ -269,11 +307,12 @@ void LogGateThrottled(uint64_t now, const char* gate, const xcat::PayloadControl
     g.lastGateLogTick = now;
     xcat::log::Info("Watchdog",
                     "gate=%s watchdog=%u hangup=%u noExp=%u combat=%u schedule=%s "
-                    "trackedPid=%lu armed=%u",
+                    "trackedPid=%lu armed=%u await=%u",
                     gate, cfg.launcherWatchdog, cfg.launcherHangupSchedule,
                     cfg.launcherWatchdogNoExpSec, cfg.simpleCombat,
                     g.scheduleActive ? "on" : "off",
-                    static_cast<unsigned long>(g.trackedPid), g.sessionArmed ? 1u : 0u);
+                    static_cast<unsigned long>(g.trackedPid), g.sessionArmed ? 1u : 0u,
+                    g.awaitingPlayable ? 1u : 0u);
 }
 
 }  // namespace
@@ -311,7 +350,7 @@ Snapshot GetSnapshot() {
         s.progressStaleSec =
             static_cast<uint32_t>((now - g.runtime.lastProgressTick) / 1000u);
     }
-    if (g.runtime.haveStatus && g.runtime.statusLostTick && now >= g.runtime.statusLostTick) {
+    if (g.runtime.statusLostTick && now >= g.runtime.statusLostTick) {
         s.statusStaleSec = static_cast<uint32_t>((now - g.runtime.statusLostTick) / 1000u);
     }
     if (g.runtime.mode == guardian_policy::Mode::Backoff && g.runtime.backoffUntilTick > now) {
@@ -323,6 +362,11 @@ Snapshot GetSnapshot() {
         s.recoveryElapsedSec =
             static_cast<uint32_t>((now - g.runtime.recoveryStartedTick) / 1000u);
     }
+    s.coldStart = g.uiColdStart;
+    s.coldStartGraceRemainSec = g.uiColdGraceRemainSec;
+    s.coldStartWaitingProcess = g.uiColdWaitingProcess;
+    s.launchOwnedPendingPlayable = g.uiLaunchOwnedPendingPlayable;
+    s.cleanRelaunchKillSettle = RelaunchInFlight();
     return s;
 }
 
@@ -351,7 +395,15 @@ std::string FormatWatchdogTimerText(const Snapshot& snap) {
     char buf[80]{};
     if (!snap.watchdogOn) return "守护关闭";
     if (!snap.scheduleActive) return "非挂机（已关机）";
-    if (snap.launchBusy && snap.mode == UiMode::Starting) return "正在干净重拉…";
+    if (snap.cleanRelaunchKillSettle ||
+        (snap.launchBusy && snap.mode == UiMode::Starting)) {
+        return "正在干净重拉…";
+    }
+    if (snap.coldStartWaitingProcess) return "冷启等待进程…";
+    if (snap.coldStart && snap.coldStartGraceRemainSec > 0) {
+        snprintf(buf, sizeof(buf), "冷启中 %us", snap.coldStartGraceRemainSec);
+        return buf;
+    }
     if (snap.watchdogMode == WatchdogUiMode::Backoff && snap.backoffRemainingSec > 0) {
         snprintf(buf, sizeof(buf), "等待 %us", snap.backoffRemainingSec);
         return buf;
@@ -362,6 +414,10 @@ std::string FormatWatchdogTimerText(const Snapshot& snap) {
     }
     const uint32_t elapsed = snap.statusStaleSec > 0 ? snap.statusStaleSec : snap.progressStaleSec;
     const uint32_t limit = snap.noExpLimitSec ? snap.noExpLimitSec : 180u;
+    if (snap.launchOwnedPendingPlayable) {
+        snprintf(buf, sizeof(buf), "未进图 %u/%u秒", elapsed, limit);
+        return buf;
+    }
     if (snap.combatHold) {
         const uint32_t holdLimit =
             snap.combatHoldHardLimitSec ? snap.combatHoldHardLimitSec : limit + 60u;
@@ -466,19 +522,50 @@ void Tick(LaunchUiState& ui, bool appExiting) {
                 ClearSessionTrack();
             }
         } else if (!ClassicPresent()) {
-            // If watchdog is on and session was armed, let ProcessDead own the relaunch
+            // If watchdog is on and session was armed/awaiting, let ProcessDead own the relaunch
             // (cleaner path). Hangup only cold-starts when no prior session.
-            const bool deferToWatchdog = watchdogOn && g.sessionArmed;
+            const bool deferToWatchdog =
+                watchdogOn && (g.sessionArmed || g.awaitingPlayable);
+            const bool attachMode =
+                attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode());
             if (!deferToWatchdog &&
                 !CooldownBlocks(now, g.lastStartTick, kHangupStartCooldownSec) &&
-                msc::weblogin::CanStartOneClick()) {
+                (attachMode || msc::weblogin::CanStartOneClick())) {
                 g.lastStartTick = now;
                 g.mode = UiMode::Starting;
-                xcat::log::Info("Hangup", "schedule on->start hour=%d mask=0x%06X", g.localHour,
-                                g.mask);
-                PushStatus(ui, "[Hangup] 挂机时段，自动启动并注入",
-                           "挂机时段：正在按时段拉起…");
-                if (LaunchPanel_StartOneClick(ui)) g.launchBusy = true;
+                if (attachMode) {
+                    xcat::log::Info("Hangup",
+                                    "schedule on->attach-watch hour=%d mask=0x%06X", g.localHour,
+                                    g.mask);
+                    PushStatus(ui, "[Hangup] 挂机时段：请手动开游戏（监视自动注入）",
+                               "挂机时段：监视中，请手动拉起游戏");
+                    if (!attach_inject::IsWatching()) {
+                        (void)attach_inject::StartWatch();
+                    }
+                    ui.pendingAutoLaunch = false;
+                    ui.autoLaunchNotBeforeMs = 0;
+                } else {
+                    if (attach_inject::GetLaunchMode() ==
+                        attach_inject::LaunchMode::GamaPassAuto) {
+                        msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+                        xcat::log::Info("Hangup", "schedule on->gamapass hour=%d mask=0x%06X",
+                                        g.localHour, g.mask);
+                        PushStatus(ui, "[Hangup] 挂机时段，GAMA PASS 自动启动并注入",
+                                   "挂机时段：正在按时段拉起…");
+                    } else {
+                        if (msc::weblogin::GetAuthStrategy() ==
+                            msc::weblogin::AuthStrategy::GamaPassAuto) {
+                            msc::weblogin::SetAuthStrategy(
+                                msc::weblogin::AuthStrategy::HttpFirst);
+                        }
+                        xcat::log::Info("Hangup", "schedule on->http-oneclick hour=%d mask=0x%06X",
+                                        g.localHour, g.mask);
+                        PushStatus(ui, "[Hangup] 挂机时段，gamania (HK) 自动启动并注入",
+                                   "挂机时段：正在按时段拉起…");
+                    }
+                    if (LaunchPanel_StartOneClick(ui, /*honorStrategyPrep=*/false))
+                        g.launchBusy = true;
+                }
             } else {
                 g.mode = UiMode::OnHour;
             }
@@ -525,22 +612,96 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     const bool playable = stFresh && st.localPlayerOk != 0;
 
     ArmSessionIfLive(livePid, handshakeOk);
-    // Crash: livePid==0 but sessionArmed → sticky gamePid + injected so ProcessDead fires.
-    const bool crashedArmed = !processAlive && g.sessionArmed && g.trackedPid != 0;
+
+    // 进图成功：结束冷启归属计时。
+    if (playable && processAlive) {
+        g.awaitingPlayable = false;
+        g.coldProcessSeenTick = 0;
+        g.coldHandshakeSeenTick = 0;
+    }
+
+    // 冷启宽限（对照 UI 文案）：主门 2×N（进程起来后）+ 次门 N（已握手）→ 之后才计未进图。
+    // 进程已退出时仍保持 launchOwned，好让 ProcessDead 能干净重拉（不再卡死在 status-not-ready）。
+    const uint32_t noExp = cfg.launcherWatchdogNoExpSec;
+    bool progressGrace = false;
+    bool payloadHeartbeatStale = false;
+    bool prePlayableStuck = false;
+    g.uiColdStart = false;
+    g.uiColdGraceRemainSec = 0;
+    g.uiColdWaitingProcess = false;
+    g.uiLaunchOwnedPendingPlayable = false;
+
+    if (g.awaitingPlayable && !playable) {
+        g.uiColdStart = true;
+        if (!processAlive) {
+            // 尚未见过本轮 Classic：等待拉起。已 track 后退出 → 交给 ProcessDead，不挡重启。
+            if (g.trackedPid == 0) {
+                progressGrace = true;
+                g.uiColdWaitingProcess = true;
+            }
+        } else {
+            if (!g.coldProcessSeenTick) g.coldProcessSeenTick = now;
+            const uint64_t mainCapMs = static_cast<uint64_t>(noExp) * 2u * 1000u;
+            const uint64_t sinceProc =
+                now >= g.coldProcessSeenTick ? now - g.coldProcessSeenTick : 0;
+            if (sinceProc < mainCapMs) {
+                progressGrace = true;
+                g.uiColdGraceRemainSec =
+                    static_cast<uint32_t>((mainCapMs - sinceProc + 999u) / 1000u);
+            } else if (handshakeOk) {
+                if (!g.coldHandshakeSeenTick) g.coldHandshakeSeenTick = now;
+                const uint64_t secCapMs = static_cast<uint64_t>(noExp) * 1000u;
+                const uint64_t sinceHs =
+                    now >= g.coldHandshakeSeenTick ? now - g.coldHandshakeSeenTick : 0;
+                if (sinceHs < secCapMs) {
+                    progressGrace = true;
+                    g.uiColdGraceRemainSec =
+                        static_cast<uint32_t>((secCapMs - sinceHs + 999u) / 1000u);
+                } else {
+                    prePlayableStuck = true;
+                    g.uiLaunchOwnedPendingPlayable = true;
+                }
+            } else if (!stFresh) {
+                payloadHeartbeatStale = true;
+                g.uiLaunchOwnedPendingPlayable = true;
+            } else {
+                prePlayableStuck = true;
+                g.uiLaunchOwnedPendingPlayable = true;
+            }
+        }
+    } else if (g.sessionArmed && processAlive && !playable) {
+        // 已进图武装过又掉可玩态，或冷启归属已清但仍未 localPlayerOk。
+        if (!stFresh) {
+            payloadHeartbeatStale = true;
+        } else if (!g.runtime.haveStatus) {
+            prePlayableStuck = true;
+            g.uiLaunchOwnedPendingPlayable = true;
+        }
+    }
+
+    // Crash / 退出：awaiting 或已武装 → sticky injected，Evaluate 走 ProcessDead。
+    const bool launchOwned = g.awaitingPlayable || g.sessionArmed;
+    const bool crashedArmed = !processAlive && launchOwned && g.trackedPid != 0;
+    const bool liveOwned =
+        processAlive &&
+        (handshakeOk ||
+         (launchOwned && g.trackedPid != 0 && livePid == g.trackedPid));
 
     guardian_policy::Input input{};
     input.now = now;
-    input.noExpSec = cfg.launcherWatchdogNoExpSec;
+    input.noExpSec = noExp;
     input.launchWorkerBusy = g.launchBusy || msc::weblogin::IsBusy() || RelaunchInFlight();
     input.gamePid =
         processAlive ? static_cast<uint32_t>(livePid)
                      : (crashedArmed ? static_cast<uint32_t>(g.trackedPid) : 0u);
     input.processAlive = processAlive;
-    input.injected =
-        (processAlive && handshakeOk) || crashedArmed;
+    input.injected = liveOwned || crashedArmed;
     input.combatEnabled = cfg.simpleCombat != 0;
     input.scheduleActive = scheduleActive;
     input.statusReady = playable;
+    input.progressGrace = progressGrace;
+    input.payloadHeartbeatStale = payloadHeartbeatStale;
+    input.prePlayableStuck = prePlayableStuck;
     input.playerExpValid = stFresh && st.playerExpValid != 0;
     input.playerExp = input.playerExpValid ? st.playerExp : 0;
     input.mapIdValid = stFresh && st.mapId != 0;
@@ -630,11 +791,10 @@ bool RequestManualCleanRelaunch(LaunchUiState& ui) {
         PushStatus(ui, nullptr, "正在启动/重拉中，请稍候再点");
         return false;
     }
-    if (!msc::weblogin::CanStartOneClick()) {
-        PushStatus(ui, nullptr,
-                   msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::WebViewOnly
-                       ? "WebView2 尚未就绪，无法重拉"
-                       : "当前无法启动（请检查策略/账号）");
+    const bool attachMode =
+        attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode());
+    if (!attachMode && !msc::weblogin::CanStartOneClick()) {
+        PushStatus(ui, nullptr, "当前无法启动（请检查 GAMA PASS 会话/环境）");
         return false;
     }
     if (!AllowsLaunch(ui.prefsBinDir)) {
@@ -650,6 +810,20 @@ bool RequestManualCleanRelaunch(LaunchUiState& ui) {
     g.runtime.restartInFlight = true;
     g.watchdogMode = WatchdogUiMode::Recovering;
     return true;
+}
+
+void NoteLaunchStarted(uint32_t /*graceSec*/) {
+    // 置 awaitingPlayable：进图前归属本轮一键；进程退出可 ProcessDead，未进图走冷启宽限。
+    g.awaitingPlayable = true;
+    g.coldProcessSeenTick = 0;
+    g.coldHandshakeSeenTick = 0;
+    g.lastStartTick = GetTickCount64();
+    if (g.mode == UiMode::Disabled || g.mode == UiMode::OffHour) {
+        // 非挂机调度触发时不改 mode；手动启动仍记时间戳即可。
+    } else {
+        g.mode = UiMode::Starting;
+    }
+    xcat::log::Info("Watchdog", "NoteLaunchStarted awaitingPlayable=1");
 }
 
 }  // namespace xcat::app::hangup_schedule

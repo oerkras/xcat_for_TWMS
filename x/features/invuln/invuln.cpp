@@ -1,9 +1,11 @@
-// TWMS Classic — data-plane invuln v2.6.3 (remount 2026-08-03).
+// TWMS Classic — data-plane invuln v2.6.4 (remount 2026-08-03).
 //
 // Hit gate: User+0x298 i-frame (~100ms worker top-up).
 // Anti-blink hybrid: MainPump frame tick (before+after SendWill) + worker 8ms backup.
 // Soft +0x228/+0x22C DISABLED. Optional layout probe: XCAT_INVULN_PROBE=1 (default off).
-// Rebind 400ms + 1.5s ACCEPT grace; LU drop keeps SecondaryStat.
+// Bind SSOT: WM.MyUser@+0x28 first (same as Drop/Skill/Combat); FindAll fallback.
+// Rebind: WM path every tick when unbound; FindAll 400ms / InterStage 80ms.
+// 1.5s ACCEPT grace; LU drop keeps SecondaryStat.
 // No hotkey — panel / [core] invuln / XCAT_INVULN=1 only.
 // Docs: docs/features/invuln/模块设计.md
 // Remount 2026-08-03: dump MD5 B87DB932…; UserLocal=ac2e48cc…; field offs UNCHANGED
@@ -18,7 +20,9 @@
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/managed_main.h"
+#include "../ports/skill_port.h"
 #include "../ports/world_port.h"
+#include "../../ui/player_vitals.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_shape.h"
 
@@ -41,24 +45,80 @@ namespace {
 
 using x::runtime::il2cpp::ArrayAt;
 using x::runtime::il2cpp::ArrayLen;
+using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 // True UserLocal → il2cpp_shape::ResolveUserLocalKlass（hash ac2e48cc… + Teleport@0x3C8）
 
-constexpr size_t kOffWmSecondaryStat = 0xF0;  // type e9c12ac2… SecondaryStat (unchanged)
-constexpr size_t kOffNInv = 0xEC;
-constexpr size_t kOffRInv = 0xF0;
-constexpr size_t kOffTInv = 0xF4;
-constexpr size_t kOffNDojang = 0x2C4;
-constexpr size_t kOffRDojang = 0x2C8;
-constexpr size_t kOffTDojang = 0x2CC;
-// User (a03443…): m_tHitPeriodRemain / _layerStateCounter — dump.cs.restored 2026-08-03 OK.
-// Soft tick-gate +0x228/+0x22C exist but float consumers remain — do not write.
-constexpr size_t kOffHitPeriodRemain = 0x298;
-constexpr size_t kOffLayerStateCounter = 0x2A8;
+// WM / SecondaryStat / User：hash → field_get_offset；MyUser/SS 指针优先走 player SSOT
+constexpr char kSecondaryStatClass[] =
+    "b66e6c1639331514fade7a757dd74e7e70d7d903c49252b516d09778ecc46d6";
+constexpr char kUserClass[] =
+    "d9ad004bbff1a41ca96697c8e44ed3175dae9846fb772898fd54ec65040348b";
+constexpr char kHashNInv[] =
+    "b53c25b3c150e1404c78ab2868d74cd710a7aef4e63e9648917e6bcfc50b12f";
+constexpr char kHashRInv[] =
+    "d155f481628fccd2ee0af5d983397507f031124765fe1647ffde6cda2d66314";
+constexpr char kHashTInv[] =
+    "e0e7510e170bd280ed7da3f18bdaa4e4a230c9d1343096d43f051b8d6211710";
+constexpr char kHashNDojang[] =
+    "c379f975468d8a305ea37e798f3529ecdeeee5eb89dd325271f6ea0e75f99e0";
+constexpr char kHashRDojang[] =
+    "f6c920856909dd50793e56e8edc7cab23cdb4da808e0c75ae33c1552e42478f";
+constexpr char kHashTDojang[] =
+    "c968475528a642858c25b66b35a6615f0570259d6d6c14b7db78ebecaec3816";
+constexpr char kHashHitPeriodRemain[] =
+    "a6b2ed619b844d0a346d09cb322cc0bd8b73e54e1ae91a216c19f144bd9e1d7";
+constexpr char kHashLayerStateCounter[] =
+    "ddd646a4dc04ccdcb9e6a985f58b66bbb60393c2b03fbe1799ee1ec3661621c";
+constexpr char kHashLogicalPos[] =
+    "b992bfa57dd45d484f39e25a6290a95d76e19fc1059423bff8fb0c9507dbda7";
+constexpr char kHashVisPos[] =
+    "c9d7ef4393802ebe9fdf9ebe7eaf7245d5cef3eeaa2a8d052fb4ad4883e34dc";
+constexpr char kHashSoftTickA[] =
+    "ad863b61e7367f57367e33eec3e48599f3a4f3c648bbba41af1ea2463eb8df0";
+constexpr char kHashSoftTickB[] =
+    "d122b7827d055e22bfce4f5478f3ddd8a982bbca24db0a9e15c8459def06bf4";
+
+constexpr size_t kFbNInv = 0xEC;
+constexpr size_t kFbRInv = 0xF0;
+constexpr size_t kFbTInv = 0xF4;
+constexpr size_t kFbNDojang = 0x2C4;
+constexpr size_t kFbRDojang = 0x2C8;
+constexpr size_t kFbTDojang = 0x2CC;
+constexpr size_t kFbHitPeriodRemain = 0x298;
+constexpr size_t kFbLayerStateCounter = 0x2A8;
+constexpr size_t kFbVisPos = 0x64;
+constexpr size_t kFbLogicalPos = 0x240;
+constexpr size_t kFbSoftTickA = 0x228;
+constexpr size_t kFbSoftTickB = 0x22C;
+
+size_t gOffNInv = kFbNInv;
+size_t gOffRInv = kFbRInv;
+size_t gOffTInv = kFbTInv;
+size_t gOffNDojang = kFbNDojang;
+size_t gOffRDojang = kFbRDojang;
+size_t gOffTDojang = kFbTDojang;
+size_t gOffHitPeriodRemain = kFbHitPeriodRemain;
+size_t gOffLayerStateCounter = kFbLayerStateCounter;
+size_t gOffVisPos = kFbVisPos;
+size_t gOffLogicalPos = kFbLogicalPos;
+size_t gOffSoftTickA = kFbSoftTickA;
+size_t gOffSoftTickB = kFbSoftTickB;
+bool gInvFieldTried = false;
+
+#define kOffWmMyUser (x::ui::player::OffWmMyUser())
+#define kOffNInv (gOffNInv)
+#define kOffRInv (gOffRInv)
+#define kOffTInv (gOffTInv)
+#define kOffNDojang (gOffNDojang)
+#define kOffRDojang (gOffRDojang)
+#define kOffTDojang (gOffTDojang)
+#define kOffHitPeriodRemain (gOffHitPeriodRemain)
+#define kOffLayerStateCounter (gOffLayerStateCounter)
+#define kOffVisPos (gOffVisPos)
+#define kOffLogicalPos (gOffLogicalPos)
 constexpr uint32_t kLayerCounterOpaque = 2;
-constexpr size_t kOffVisPos = 0x64;       // fad8… MonoBehaviour Vector2
-constexpr size_t kOffLogicalPos = 0x240;  // User.CurPos
 constexpr float kMinPosAbs = 1.0f;
 constexpr size_t kOffCachedPtr = 0x10;
 
@@ -70,8 +130,12 @@ constexpr int kHitPeriodKeep = 5000;
 constexpr DWORD kGateRefreshMs = 100;
 // Hybrid anti-blink: frame tick is primary; worker backup covers Update races.
 constexpr DWORD kAntiBlinkBackupMs = 8;
-// Channel-hop / map-load windows often lack MyUser for ~1s; 3s rebind left long gaps.
+// FindAll fallback throttle (steady). WM.MyUser path is unthrottled when unbound.
 constexpr DWORD kRebindMs = 400;
+// InterStage / unbound transit: faster FindAll retry (WM path still preferred).
+constexpr DWORD kRebindFastMs = 80;
+// FindAll 失败路径刷屏节流（重试仍按 kRebind*；日志 10s 一条）。
+constexpr DWORD kBindFailLogMs = 10000;
 // After ACCEPT, spawn pos may be (0,0) briefly — keep bind so hit gate can arm.
 constexpr DWORD kBindGraceMs = 1500;
 constexpr DWORD kWorkerSleepOnMs = 8;
@@ -79,9 +143,72 @@ constexpr DWORD kWorkerSleepOffMs = 16;
 constexpr DWORD kProbeMs = 1000;
 constexpr DWORD kPumpRetryMs = 2000;
 // CMS-named TW candidates (read-only; never write)
-constexpr size_t kOffSoftTickA = 0x228;  // TimeEndBoomerangStep / float alias?
-constexpr size_t kOffSoftTickB = 0x22C;  // TimeEndDojangBamboo
-constexpr size_t kOffCurPosY = 0x244;
+#define kOffSoftTickA (gOffSoftTickA)
+#define kOffSoftTickB (gOffSoftTickB)
+#define kOffCurPosY (gOffLogicalPos + 4)
+
+
+bool PlausibleInvOff(size_t off) { return off >= 0x10 && off < 0x800; }
+
+bool InvFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !hash || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    for (void* k = klass; k;) {
+        void* field = nullptr;
+        __try {
+            field = e.classGetFieldFromName(k, hash);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            field = nullptr;
+        }
+        if (field) {
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (PlausibleInvOff(off)) {
+                *out = off;
+                return true;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    return false;
+}
+
+void EnsureInvulnFieldOff() {
+    if (gInvFieldTried) return;
+    gInvFieldTried = true;
+    void* ss = x::runtime::il2cpp::FindClass("", kSecondaryStatClass);
+    void* user = x::runtime::il2cpp::FindClass("", kUserClass);
+    int hits = 0;
+    auto hit = [&](void* klass, const char* hash, size_t fb, size_t* slot) {
+        if (InvFieldOffHit(klass, hash, fb, slot)) ++hits;
+    };
+    hit(ss, kHashNInv, kFbNInv, &gOffNInv);
+    hit(ss, kHashRInv, kFbRInv, &gOffRInv);
+    hit(ss, kHashTInv, kFbTInv, &gOffTInv);
+    hit(ss, kHashNDojang, kFbNDojang, &gOffNDojang);
+    hit(ss, kHashRDojang, kFbRDojang, &gOffRDojang);
+    hit(ss, kHashTDojang, kFbTDojang, &gOffTDojang);
+    hit(user, kHashHitPeriodRemain, kFbHitPeriodRemain, &gOffHitPeriodRemain);
+    hit(user, kHashLayerStateCounter, kFbLayerStateCounter, &gOffLayerStateCounter);
+    hit(user, kHashLogicalPos, kFbLogicalPos, &gOffLogicalPos);
+    hit(user, kHashVisPos, kFbVisPos, &gOffVisPos);
+    hit(user, kHashSoftTickA, kFbSoftTickA, &gOffSoftTickA);
+    hit(user, kHashSoftTickB, kFbSoftTickB, &gOffSoftTickB);
+    x::runtime::LogI("Invuln", "fields path=%s hits=%d/12 nInv=0x%zX hit=0x%zX curPos=0x%zX",
+                     hits == 12 ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffNInv,
+                     gOffHitPeriodRemain, gOffLogicalPos);
+}
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
 using FnCompGo = void* (*)(void* comp, void* methodInfo);
@@ -273,13 +400,30 @@ bool BindApis() {
     return true;
 }
 
+// tInvincible_ / tDojangShield_ 是「游戏钟绝对到期」，判定见 SecondaryStat.CheckByTime
+// (RVA 0xD63990)：tCur - t > -100 即清除，tCur = WorldManager.GetUpdateTime()。
+// 旧实现用 GetTickCount（开机毫秒）与该钟差 1~2 个数量级，纯属侥幸没被判到期。
+// 本函数每 8~100ms 被调用，游戏钟按 1s 缓存，避免高频进 il2cpp。
+constexpr int kInvExpireAheadMs = 3600 * 1000;
+constexpr int kInvExpireFallback = 0x0FFFFFFF;  // ≈74h，游戏钟不可用时的保守远期值
+
 int ExpireOrRemainMs() {
+    static DWORD lastTryAt = 0;
+    static int cachedGameMs = 0;
     const DWORD now = GetTickCount();
-    const int expire = static_cast<int>(now + 3600u * 1000u);
-    return expire > 0 ? expire : 0x3FFFFFFF;
+    // 节流「尝试」而非「成功」：未绑定时若按成功节流，会以 8ms 频率反复进 il2cpp 解析。
+    if (!lastTryAt || now - lastTryAt >= 1000) {
+        lastTryAt = now ? now : 1;
+        const int t = x::features::ports::skill::GetGameUpdateTimeMs();
+        if (t > 0) cachedGameMs = t;
+    }
+    if (cachedGameMs <= 0) return kInvExpireFallback;
+    const long long expire = static_cast<long long>(cachedGameMs) + kInvExpireAheadMs;
+    return expire > kInvExpireFallback ? kInvExpireFallback : static_cast<int>(expire);
 }
 
 void WriteSsFields(void* ss, bool on) {
+    EnsureInvulnFieldOff();
     if (!ss) return;
     if (on) {
         const int t = ExpireOrRemainMs();
@@ -303,7 +447,7 @@ bool TryResolveWorldManagers() {
     if (x::runtime::managed_main::IsLoginFrozen()) return false;
     void* wm = x::features::ports::world::GetWorldManager();
     if (!wm) return false;
-    void* ss = ReadPtr(wm, kOffWmSecondaryStat);
+    void* ss = x::ui::player::LocalSecondaryStat();
     gSecondaryStats.clear();
     if (ss) {
         gSecondaryStats.push_back(ss);
@@ -381,7 +525,73 @@ void ClearSecondaryStats(const char* why) {
     gSecondaryStats.clear();
 }
 
-bool TryResolveLocalUser() {
+bool IsMyUserGo(void* user) {
+    char name[96]{};
+    return GetGoName(user, name, sizeof(name)) && _stricmp(name, "MyUser") == 0;
+}
+
+// Unity Component alive: klass + m_CachedPtr. Spawn may briefly have cached=0 in Field.
+bool UnityUserAlive(void* user, bool allowZeroCached) {
+    if (!LooksLikeHeapPtr(user)) return false;
+    __try {
+        if (!*reinterpret_cast<void**>(user)) return false;
+        const intptr_t cached =
+            *reinterpret_cast<intptr_t*>(reinterpret_cast<uint8_t*>(user) + kOffCachedPtr);
+        if (cached == 0 && !allowZeroCached) return false;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void* PeekWmMyUser() {
+    using x::features::ports::world::PeekWorldManager;
+    void* wm = PeekWorldManager();
+    if (!wm) return nullptr;
+    return ReadPtr(wm, kOffWmMyUser);
+}
+
+bool AcceptLocalUser(void* lu, const char* how) {
+    if (!lu) return false;
+    gLocalUser = lu;
+    gLuBoundTick = GetTickCount();
+    Log("LocalUser ACCEPT %s lu=%p hit298=%d grace=%ums", how, gLocalUser,
+        ReadI32(gLocalUser, kOffHitPeriodRemain), (unsigned)kBindGraceMs);
+    x::runtime::managed_main::SetLoginFreeze(false);
+    return true;
+}
+
+// Fast path: WM.MyUser SSOT (same as DropPort / SkillPort). No FindAll.
+bool TryBindWmMyUser() {
+    if (x::runtime::managed_main::IsLoginFrozen()) return false;
+    void* mu = PeekWmMyUser();
+    if (!LooksLikeHeapPtr(mu)) return false;
+
+    const bool field =
+        x::features::ports::world::GetSceneState() == x::features::ports::world::SceneState::Field;
+    if (!UnityUserAlive(mu, /*allowZeroCached=*/field)) return false;
+
+    // Field：WM 指针即权威，跳过 GetGoName/MainPump（换图空窗里 pump 排队会拖到 400ms+）。
+    if (field) {
+        return AcceptLocalUser(mu, "wm.MyUser");
+    }
+
+    // 非地图：校 GO 名，防登录壳误绑。
+    struct Ctx {
+        void* mu = nullptr;
+        bool ok = false;
+    } ctx;
+    ctx.mu = mu;
+    auto job = [](void* user) {
+        auto* c = reinterpret_cast<Ctx*>(user);
+        c->ok = IsMyUserGo(c->mu);
+    };
+    if (!x::runtime::managed_main::Call(+job, &ctx, 800)) return false;
+    if (!ctx.ok) return false;
+    return AcceptLocalUser(mu, "wm.MyUser");
+}
+
+bool TryResolveLocalUserFindAll() {
     if (x::runtime::managed_main::IsLoginFrozen()) return false;
     if (!gLuType) {
         gLuType = x::runtime::il2cpp::ClassTypeObject(
@@ -391,50 +601,80 @@ bool TryResolveLocalUser() {
 
     struct Ctx {
         bool ok = false;
+        bool logNoise = false;
     } ctx;
+    {
+        static DWORD s_lastNoise = 0;
+        const DWORD now = GetTickCount();
+        if (!s_lastNoise || now - s_lastNoise >= kBindFailLogMs) {
+            s_lastNoise = now;
+            ctx.logNoise = true;
+        }
+    }
     auto job = [](void* user) {
         auto* c = reinterpret_cast<Ctx*>(user);
         void* arr = nullptr;
         __try {
             arr = gFindAll(gLuType, nullptr);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            Log("LocalUser FindAll SEH");
+            if (c->logNoise) Log("LocalUser FindAll SEH");
             c->ok = false;
             return;
         }
         const uintptr_t n = ArrayLen(arr);
-        Log("LocalUser FindAll count=%llu", (unsigned long long)n);
+        if (c->logNoise) Log("LocalUser FindAll count=%llu", (unsigned long long)n);
         void* best = nullptr;
         for (uintptr_t i = 0; i < n && i < 64; ++i) {
             void* obj = ArrayAt(arr, i);
             if (!obj) continue;
             char name[96]{};
             GetGoName(obj, name, sizeof(name));
-            Log("LocalUser[%llu]=%p name=\"%s\" hit298=%d", (unsigned long long)i, obj, name,
-                ReadI32(obj, kOffHitPeriodRemain));
+            if (c->logNoise)
+                Log("LocalUser[%llu]=%p name=\"%s\" hit298=%d", (unsigned long long)i, obj, name,
+                    ReadI32(obj, kOffHitPeriodRemain));
             if (name[0] && _stricmp(name, "MyUser") == 0) {
                 best = obj;
                 break;
             }
         }
-        gLocalUser = best;
-        if (!gLocalUser) {
-            gLuBoundTick = 0;
-            Log("LocalUser REJECT (no MyUser)");
+        if (!best) {
+            if (c->logNoise) Log("LocalUser REJECT (no MyUser)");
             c->ok = false;
             return;
         }
-        gLuBoundTick = GetTickCount();
-        Log("LocalUser ACCEPT lu=%p hit298=%d grace=%ums", gLocalUser,
-            ReadI32(gLocalUser, kOffHitPeriodRemain), (unsigned)kBindGraceMs);
-        x::runtime::managed_main::SetLoginFreeze(false);
-        c->ok = true;
+        c->ok = AcceptLocalUser(best, "FindAll");
     };
     if (!x::runtime::managed_main::Call(+job, &ctx, 2500)) {
-        Log("LocalUser Resolve: main pump fail");
+        static DWORD s_lastPumpFail = 0;
+        const DWORD now = GetTickCount();
+        if (!s_lastPumpFail || now - s_lastPumpFail >= kBindFailLogMs) {
+            s_lastPumpFail = now;
+            Log("LocalUser Resolve: main pump fail");
+        }
         return false;
     }
     return ctx.ok;
+}
+
+bool TryResolveLocalUser() {
+    if (TryBindWmMyUser()) return true;
+    return TryResolveLocalUserFindAll();
+}
+
+// True when WM.MyUser drifted or cleared — old cache must not keep writing.
+bool WmMyUserDrifted() {
+    void* mu = PeekWmMyUser();
+    if (!gLocalUser) return false;
+    if (!LooksLikeHeapPtr(mu)) return true;  // mid-hop empty → drop cache
+    return mu != gLocalUser;
+}
+
+DWORD RebindIntervalMs() {
+    using x::features::ports::world::GetSceneState;
+    using x::features::ports::world::SceneState;
+    const SceneState sc = GetSceneState();
+    if (sc == SceneState::InterStage || sc == SceneState::None || !gLocalUser) return kRebindFastMs;
+    return kRebindMs;
 }
 
 void ApplySsOnly(bool on) {
@@ -561,6 +801,7 @@ void EnsureBindings() {
         ClearSecondaryStats("ensure");
         TryResolveWorldManagers();
     }
+    if (gLocalUser && WmMyUserDrifted()) ClearLocalUser("wm.MyUser drift");
     if (!LocalUserStillAlive()) {
         ClearLocalUser("ensure");
         TryResolveLocalUser();
@@ -570,9 +811,10 @@ void EnsureBindings() {
 DWORD WINAPI InvulnThread(LPVOID) {
     Beep(740, 80);
     WarnIfSoftEnvRequested();
-    Log("Invuln worker v2.6.3 start (hit=+0x298; anti-blink=frame+backup8ms; rebind=%ums grace=%ums; "
-        "probe228 %s)",
-        (unsigned)kRebindMs, (unsigned)kBindGraceMs, ProbeEnabled() ? "on" : "off");
+    Log("Invuln worker v2.6.4 start (hit=+0x298; anti-blink=frame+backup8ms; bind=wm.MyUser+FindAll; "
+        "rebind=%ums/%ums grace=%ums; probe228 %s)",
+        (unsigned)kRebindFastMs, (unsigned)kRebindMs, (unsigned)kBindGraceMs,
+        ProbeEnabled() ? "on" : "off");
 
     for (int i = 0; i < 200 && !GetModuleHandleW(L"GameAssembly.dll") && !gWorkerStop.load(); ++i)
         Sleep(50);
@@ -599,7 +841,7 @@ DWORD WINAPI InvulnThread(LPVOID) {
 
     DWORD lastGate = 0;
     DWORD lastBlink = 0;
-    DWORD lastRebind = 0;
+    DWORD lastFindAll = 0;
     DWORD lastPoll = 0;
     DWORD lastProbe = 0;
     DWORD lastPumpTry = 0;
@@ -620,15 +862,29 @@ DWORD WINAPI InvulnThread(LPVOID) {
         }
 
         if (on) {
+            // 换图：WM.MyUser 指针变了/清空 → 立刻丢旧绑，勿继续写死对象。
+            if (gLocalUser && WmMyUserDrifted()) ClearLocalUser("wm.MyUser drift");
+
             const bool luOk = LocalUserStillAlive();
             const bool ssOk = SecondaryStatsAlive();
             if (!luOk || !ssOk) {
                 if (!luOk && gLocalUser) ClearLocalUser("stillAlive false");
                 if (!ssOk) ClearSecondaryStats("ss dead");
-                if (now - lastRebind >= kRebindMs) {
-                    lastRebind = now;
-                    if (!SecondaryStatsAlive()) TryResolveWorldManagers();
-                    if (!LocalUserStillAlive()) TryResolveLocalUser();
+
+                if (!SecondaryStatsAlive()) TryResolveWorldManagers();
+
+                // WM.MyUser：无绑时每 tick 试（不限流）—— scene=3 后通常同窗可 ACCEPT。
+                if (!LocalUserStillAlive()) {
+                    if (TryBindWmMyUser()) {
+                        ApplyInvuln(true);
+                        lastGate = now;
+                    } else if (now - lastFindAll >= RebindIntervalMs()) {
+                        lastFindAll = now;
+                        if (TryResolveLocalUserFindAll()) {
+                            ApplyInvuln(true);
+                            lastGate = now;
+                        }
+                    }
                 }
             }
             if (now - lastGate >= kGateRefreshMs) {
@@ -671,6 +927,7 @@ DWORD WINAPI InvulnThread(LPVOID) {
 }  // namespace
 
 void Init() {
+    EnsureInvulnFieldOff();
     OpenLogs();
     Log("Invuln Init pid=%lu", GetCurrentProcessId());
 }

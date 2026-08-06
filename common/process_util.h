@@ -29,6 +29,9 @@ DWORD FindProcessIdByName(std::wstring_view exeName);
 // 按进程名结束全部匹配实例（用于「退出 XCat 和游戏」）
 unsigned KillProcessesByExeName(std::wstring_view exeName);
 
+// 结束经典版并短重试：门禁/关窗用，避免偶发 OpenProcess/杀不净漏网。
+unsigned KillClassicGameWithRetry(unsigned maxRounds = 3, DWORD gapMs = 250);
+
 // 轮询直到进程表无 exeName；超时返回 false。短超时可给 UI 线程用。
 bool WaitUntilNoProcessByName(std::wstring_view exeName, DWORD timeoutMs);
 

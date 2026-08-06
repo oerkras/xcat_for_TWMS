@@ -6,6 +6,8 @@
 #include <atomic>
 
 inline constexpr UINT WM_XCAT_GRACEFUL_EXIT_DONE = WM_USER + 0x7C41;
+// 门禁退出：工作线程 PostMessage → 主窗 WndProc 弹「网络错误 (2|3)」并 ExitProcess。
+inline constexpr UINT WM_XCAT_ACCESS_GATE = WM_USER + 0x7C42;
 
 struct AppWindow {
     HWND hwnd = nullptr;
@@ -24,11 +26,7 @@ struct AppWindow {
     std::atomic<bool> hotkeyF10{false}; // F10 随机换频（与挂机卡按钮同路径）
     int titleBarHeightPx = 32;
     int captionButtonsWidthPx = 80;
-    HWND webHost = nullptr;  // 静默 WebView2 宿主（隐藏，不占 ImGui 布局）
 };
-
-// 创建隐藏的 WebView2 父控件（不显示在 UI；验证码场景可另开调试显示）
-void AppWindow_CreateSilentWebHost(AppWindow& app);
 
 bool AppWindow_Create(AppWindow& app, HINSTANCE inst, float designW, float designH);
 void AppWindow_Destroy(AppWindow& app);

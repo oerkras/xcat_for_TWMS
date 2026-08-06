@@ -12,4 +12,9 @@ Write-Host "Manifest:   http://xcat.work:$Port/update/latest.json"
 Write-Host "Stop: press Ctrl+C or close this window"
 Write-Host ""
 
+$fw = Join-Path $Root "ensure-firewall.ps1"
+if (Test-Path $fw) {
+    try { & $fw } catch { Write-Warning "firewall ensure skipped: $($_.Exception.Message)" }
+}
+
 python "$Root\server.py" --host 0.0.0.0 --port $Port --root "$Root"

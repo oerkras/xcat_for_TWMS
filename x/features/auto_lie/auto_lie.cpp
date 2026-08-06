@@ -3,7 +3,6 @@
 #include "anti_macro_port.h"
 
 #include "../notify/notify.h"
-#include "../simple_combat/simple_combat.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
@@ -18,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -38,6 +38,9 @@ constexpr DWORD kStatusWriteMs = 1000;
 constexpr DWORD kInfraRefreshMs = 2000;
 constexpr DWORD kAlarmTestDurationMs = 12000;
 constexpr DWORD kMouseSmokeDurationMs = 3000;
+// lie_events 归档：防测谎截图只增不删把盘/Standby 顶满
+constexpr int kLieEventsMaxFiles = 40;
+constexpr ULONGLONG kLieEventsMaxBytes = 32ull * 1024ull * 1024ull;
 
 std::atomic<bool> gEnabled{false};
 std::atomic<bool> gDryRun{false};
@@ -121,6 +124,60 @@ std::string AnsDir() { return StateRoot() + "lie_ai\\ans"; }
 std::string EventsDir() { return StateRoot() + "lie_events"; }
 std::string StatusPath() { return StateRoot() + "lie_ai\\status.txt"; }
 
+void PruneLieEvents() {
+    const std::string dir = EventsDir();
+    if (dir.empty()) return;
+    WIN32_FIND_DATAA fd{};
+    const std::string pattern = dir + "\\*";
+    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+
+    struct Ent {
+        std::string path;
+        FILETIME ft{};
+        ULONGLONG bytes = 0;
+    };
+    std::vector<Ent> ents;
+    ULONGLONG total = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        const char* name = fd.cFileName;
+        if (!name || !name[0] || name[0] == '.') continue;
+        const size_t len = strlen(name);
+        const bool img = (len >= 4 && (_stricmp(name + len - 4, ".jpg") == 0 ||
+                                       _stricmp(name + len - 4, ".png") == 0));
+        if (!img) continue;
+        Ent e;
+        e.path = dir + "\\" + name;
+        e.ft = fd.ftLastWriteTime;
+        e.bytes = (static_cast<ULONGLONG>(fd.nFileSizeHigh) << 32) |
+                  static_cast<ULONGLONG>(fd.nFileSizeLow);
+        total += e.bytes;
+        ents.push_back(std::move(e));
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    if (ents.empty()) return;
+    if (static_cast<int>(ents.size()) <= kLieEventsMaxFiles && total <= kLieEventsMaxBytes) return;
+
+    std::sort(ents.begin(), ents.end(), [](const Ent& a, const Ent& b) {
+        return CompareFileTime(&a.ft, &b.ft) < 0;  // oldest first
+    });
+
+    size_t keepFrom = 0;
+    if (static_cast<int>(ents.size()) > kLieEventsMaxFiles)
+        keepFrom = ents.size() - static_cast<size_t>(kLieEventsMaxFiles);
+
+    ULONGLONG keptBytes = 0;
+    for (size_t i = keepFrom; i < ents.size(); ++i) keptBytes += ents[i].bytes;
+    while (keepFrom < ents.size() && keptBytes > kLieEventsMaxBytes) {
+        keptBytes -= ents[keepFrom].bytes;
+        ++keepFrom;
+    }
+
+    for (size_t i = 0; i < keepFrom; ++i) DeleteFileA(ents[i].path.c_str());
+}
+
 void ClearPending() {
     gPendingId.clear();
     gPendingDumpTick = 0;
@@ -134,9 +191,8 @@ void ClearPending() {
 }
 
 void SetWorldPause(bool on) {
-    if (gWorldPaused == on) return;
     gWorldPaused = on;
-    x::features::simple_combat::SetExternalPause(on);
+    // 只走 follower 聚合口（quiz|following|ui），勿直接 SetHardPause，避免 Abort 互踩。
     anti_macro_follower::SetQuizWorldPaused(on);
 }
 
@@ -402,6 +458,7 @@ bool DumpCaptchaReq(DWORD now, std::string& outId) {
         return false;
     }
     (void)WriteBytes(arch, image);
+    PruneLieEvents();
     const std::string probe =
         "kind=textcaptcha\n"
         "q=识别图中扭曲验证码文字，只输出答案本身\n"

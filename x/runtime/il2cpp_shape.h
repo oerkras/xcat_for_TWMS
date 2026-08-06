@@ -51,14 +51,16 @@ ResolveResult FindClassCached(const char* hashName, const ClassShape& shape);
 // Built-in roles (hashes + shapes from Dumps/runtime/out/dump.cs 2026-08-03).
 void* ResolveWorldManagerKlass();
 void* ResolveUserLocalKlass();
-// Session class (TypeDef 13797 f0ee06b6…) — SendPacket / Close / Disconnect MethodInfo 所在。
+// Session class (TypeDef 13797；08-04 hash b7c1f712…) — SendPacket / Close / Disconnect MethodInfo 所在。
 // 历史名 NetworkManager：合并后实为 Session；单例壳见 ResolveNetworkManagerFacadeKlass。
 void* ResolveNetworkManagerKlass();
-// NetworkManager 壳 (TypeDef 13772 df34ff16… : Singleton<>) — Lazy 实例；Session* @0x10。
+// NetworkManager 壳 (TypeDef 13772；08-04 hash c053d224… : Singleton<>) — Lazy 实例；Session* @0x10。
 void* ResolveNetworkManagerFacadeKlass();
 void* ResolveSecAttackKlass();  // SecurityClient attack-window static class
+// SceneLogin — MainPump Bootstrap / auto_enter（hash + field shape）
+void* ResolveSceneLoginKlass();
 
-// One-shot / path-change self-check log: shape WM=… UL=… NM=… FAC=… SA=…
+// One-shot / path-change self-check log: shape WM=… UL=… NM=… FAC=… SA=… SL=…
 void LogResolveSelfCheck();
 
 struct RolePaths {
@@ -67,6 +69,7 @@ struct RolePaths {
     ResolvePath nm = ResolvePath::Miss;
     ResolvePath fac = ResolvePath::Miss;
     ResolvePath sa = ResolvePath::Miss;
+    ResolvePath sl = ResolvePath::Miss;
 };
 
 // 当前缓存路径（未 Resolve 过则为 Miss）；不触发扫描。

@@ -1,7 +1,7 @@
 #pragma once
 // Classic TWMS 自动补给 — 对齐枫星行为（Il2Cpp 开店/买卖，离线杂货寻店）。
 // 开店：TalkToNpc(+模板优先) → UIUtilDialogEx 菜单点「商店」→ ShopReady。
-// 非目标：全量 Commodity 货架寻店；飞镖 Charge（暂 stub）。
+// 非目标：全量 Commodity 货架寻店。飞镖 Charge 走 shop_port UI 发包。
 
 #include <cstddef>
 #include <cstdint>

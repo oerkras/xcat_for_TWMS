@@ -5,6 +5,7 @@
 #include "security_attack_port.h"
 
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
 
@@ -30,20 +31,33 @@ int32_t ReadI32Local(void* obj, size_t off) {
 }
 
 // TW TypeDef 15147 — SecurityClient 攻包窗；resolve：il2cpp_shape::ResolveSecAttackKlass
-// （hash d9ef28f1… + static Dict@0/8 + I32@0x10；旧 ba499947… 已作废）
+// （hash e439d992… + static Dict@0/8 + I32@0x10；旧 ba499947… 已作废）
 
-constexpr size_t kOffPktDict = 0x0;
-constexpr size_t kOffSkillDict = 0x8;
-constexpr size_t kOffDetectTime = 0x10;
+constexpr char kHashPktDict[] =
+    "b76fb498ae817969b9c13c9067cc3659313bba7516615ede12014165625d25b";  // Dictionary<ushort,int>
+constexpr char kHashSkillDict[] =
+    "a02680a0130d03c2ed2b68d513dced8cc9d81b82998619c241bd6b3763abd15";  // Dictionary<int,int>
+constexpr char kHashDetectTime[] =
+    "c261db3ccb94785d0b2c8832e632626be162d5968ee5b4f54ef029b361bb0bf";
+constexpr size_t kFbPktDict = 0x0;
+constexpr size_t kFbSkillDict = 0x8;
+constexpr size_t kFbDetectTime = 0x10;
+size_t gOffPktDict = kFbPktDict;
+size_t gOffSkillDict = kFbSkillDict;
+size_t gOffDetectTime = kFbDetectTime;
+bool gFieldOffTried = false;
 
-// Dictionary`2 IL2CPP（与 drop_pool 一致；勿用 0x2C——那是 _version）
-// buckets@0x10 / entries@0x18 / count@0x20 / freeList@0x24 / freeCount@0x28 / version@0x2C
-constexpr size_t kOffDictEntries = 0x18;
-constexpr size_t kOffDictCount = 0x20;
-constexpr size_t kOffDictFreeCount = 0x28;
-constexpr size_t kOffDictVersion = 0x2C;  // 仅诊断
-constexpr size_t kEntryStrideTight = 0x10;  // hash+next+key+value(@12) — ushort/int、int/int
-constexpr size_t kEntryStrideAlign = 0x18;  // value@16
+// Dictionary`2 / Entry / Array → il2cpp_container SSOT（勿把 freeCount 读成 0x2C=_version）
+#define kOffDictEntries (x::runtime::il2cpp_container::OffDictEntries())
+#define kOffDictCount (x::runtime::il2cpp_container::OffDictCount())
+#define kOffDictFreeCount (x::runtime::il2cpp_container::OffDictFreeCount())
+#define kOffDictVersion (x::runtime::il2cpp_container::OffDictVersion())
+#define kEntryStrideTight (x::runtime::il2cpp_container::DictEntryStrideIntIntTight())
+#define kEntryStrideAlign (x::runtime::il2cpp_container::DictEntryStrideIntIntAlign())
+#define kOffArrLen (x::runtime::il2cpp_container::OffArrayMaxLength())
+#define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
+#define kValOffTight (x::runtime::il2cpp_container::OffDictEntryValueIntTight())
+#define kValOffAlign (x::runtime::il2cpp_container::OffDictEntryValueIntAlign())
 
 constexpr DWORD kRebindMs = 5000;
 
@@ -55,6 +69,44 @@ void* gKlass = nullptr;
 void* gStatic = nullptr;
 DWORD gLastBindMs = 0;
 std::atomic<bool> gReady{false};
+
+bool PlausibleStaticOff(size_t off) { return off < 0x40; }
+
+bool FieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !hash || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    void* field = nullptr;
+    __try {
+        field = e.classGetFieldFromName(klass, hash);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        field = nullptr;
+    }
+    if (!field) return false;
+    size_t off = 0;
+    __try {
+        off = e.fieldGetOffset(field);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!PlausibleStaticOff(off)) return false;
+    *out = off;
+    return true;
+}
+
+void EnsureStaticFieldOff() {
+    if (gFieldOffTried) return;
+    gFieldOffTried = true;
+    if (!gKlass) gKlass = x::runtime::il2cpp_shape::ResolveSecAttackKlass();
+    int hits = 0;
+    if (FieldOffHit(gKlass, kHashPktDict, kFbPktDict, &gOffPktDict)) ++hits;
+    if (FieldOffHit(gKlass, kHashSkillDict, kFbSkillDict, &gOffSkillDict)) ++hits;
+    if (FieldOffHit(gKlass, kHashDetectTime, kFbDetectTime, &gOffDetectTime)) ++hits;
+    runtime::LogI("SecAttack", "static fields path=%s hits=%d/3 pkt=0x%zX skill=0x%zX detect=0x%zX",
+                  hits == 3 ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffPktDict,
+                  gOffSkillDict, gOffDetectTime);
+}
 
 struct DictScan {
     bool headerOk = false;  // 读到合法 Dictionary 头（含空表）
@@ -99,6 +151,7 @@ void ScanEmpty(DictScan* out) {
 DictScan SumDictIntValues(void* dict) {
     DictScan out{};
     if (!LooksLikeHeapPtr(dict)) return out;
+    x::runtime::il2cpp_container::RefineFromDictInstance(dict);
 
     void* entries = nullptr;
     int count = 0;
@@ -127,7 +180,7 @@ DictScan SumDictIntValues(void* dict) {
 
     int len = 0;
     __try {
-        len = ReadI32Local(entries, 0x18);
+        len = ReadI32Local(entries, kOffArrLen);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return out;
     }
@@ -150,8 +203,8 @@ DictScan SumDictIntValues(void* dict) {
         int seen = 0;
         __try {
             for (int i = 0; i < len && i < 8192; ++i) {
-                uint8_t* e =
-                    reinterpret_cast<uint8_t*>(entries) + 0x20 + static_cast<size_t>(i) * stride;
+                uint8_t* e = x::runtime::il2cpp_container::DictEntryAt(entries, i, stride);
+                if (!e) continue;
                 const int hash = *reinterpret_cast<int*>(e + 0);
                 if (hash < 0) continue;
                 const int val = *reinterpret_cast<int*>(e + valOff);
@@ -178,8 +231,8 @@ DictScan SumDictIntValues(void* dict) {
         return true;
     };
 
-    if (tryStride(kEntryStrideTight, 12)) return out;
-    if (tryStride(kEntryStrideAlign, 16)) return out;
+    if (tryStride(kEntryStrideTight, kValOffTight)) return out;
+    if (tryStride(kEntryStrideAlign, kValOffAlign)) return out;
     // liveHint 可疑（例如曾误读 version）时仍可能扫成功；到这里才算布局未命中
     return out;
 }
@@ -206,6 +259,7 @@ bool Bind() {
     // Statics are readable once the game has touched SecurityClient.
     gStatic = KlassStaticFields(gKlass);
     const bool ok = gGA && gKlass && gStatic;
+    if (ok) EnsureStaticFieldOff();
     gReady.store(ok);
     return ok;
 }
@@ -247,9 +301,9 @@ bool ProbeWindow(WindowSnapshot* out) {
     void* skillDict = nullptr;
     int detectTime = 0;
     __try {
-        pktDict = ReadPtr(gStatic, kOffPktDict);
-        skillDict = ReadPtr(gStatic, kOffSkillDict);
-        detectTime = ReadI32Local(gStatic, kOffDetectTime);
+        pktDict = ReadPtr(gStatic, gOffPktDict);
+        skillDict = ReadPtr(gStatic, gOffSkillDict);
+        detectTime = ReadI32Local(gStatic, gOffDetectTime);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         runtime::LogW("SecAttack", "probe SEH reading static_fields");
         if (out) *out = snap;

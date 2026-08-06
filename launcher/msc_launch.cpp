@@ -325,6 +325,67 @@ std::wstring FindNgmBesideClassicInstall() {
     return {};
 }
 
+FILETIME ProcessCreationTime(DWORD pid) {
+    FILETIME zero{};
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return zero;
+    FILETIME create{}, exitT{}, kernel{}, user{};
+    if (!GetProcessTimes(h, &create, &exitT, &kernel, &user)) {
+        CloseHandle(h);
+        return zero;
+    }
+    CloseHandle(h);
+    return create;
+}
+
+bool FileTimeNewer(const FILETIME& a, const FILETIME& b) {
+    ULARGE_INTEGER ua{}, ub{};
+    ua.LowPart = a.dwLowDateTime;
+    ua.HighPart = a.dwHighDateTime;
+    ub.LowPart = b.dwLowDateTime;
+    ub.HighPart = b.dwHighDateTime;
+    return ua.QuadPart > ub.QuadPart;
+}
+
+bool FileTimeGeq(const FILETIME& a, const FILETIME& b) {
+    ULARGE_INTEGER ua{}, ub{};
+    ua.LowPart = a.dwLowDateTime;
+    ua.HighPart = a.dwHighDateTime;
+    ub.LowPart = b.dwLowDateTime;
+    ub.HighPart = b.dwHighDateTime;
+    return ua.QuadPart >= ub.QuadPart;
+}
+
+// 「不早于 sec 秒前」的 FILETIME；对标 gamapass_cdp 的 sessionNotBefore，同留 2s 时钟偏差。
+FILETIME FileTimeSecondsAgo(int sec) {
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    if (sec <= 0) return FILETIME{};
+    ULARGE_INTEGER uli{};
+    uli.LowPart = now.dwLowDateTime;
+    uli.HighPart = now.dwHighDateTime;
+    const ULONGLONG back = (static_cast<ULONGLONG>(sec) + 2ULL) * 10000000ULL;
+    uli.QuadPart = uli.QuadPart > back ? uli.QuadPart - back : 0ULL;
+    FILETIME out{};
+    out.dwLowDateTime = uli.LowPart;
+    out.dwHighDateTime = uli.HighPart;
+    return out;
+}
+
+bool CreationTimeOk(DWORD pid, const FILETIME* notBefore) {
+    if (!notBefore) return true;
+    ULARGE_INTEGER nb{};
+    nb.LowPart = notBefore->dwLowDateTime;
+    nb.HighPart = notBefore->dwHighDateTime;
+    if (nb.QuadPart == 0) return true;
+    const FILETIME ct = ProcessCreationTime(pid);
+    ULARGE_INTEGER uc{};
+    uc.LowPart = ct.dwLowDateTime;
+    uc.HighPart = ct.dwHighDateTime;
+    if (uc.QuadPart == 0) return false;  // 读不到创建时间则保守跳过
+    return FileTimeGeq(ct, *notBefore);
+}
+
 // 等新 PID，且 cmdline 四元组匹配 ticket（对标 WaitForMswWithAuth）
 DWORD WaitForClassicWithTicket(const wchar_t* exeName, const std::unordered_set<DWORD>& before,
                                const GalaxyTicket& ticket, int timeoutSec,
@@ -539,6 +600,16 @@ bool IsNgmProcessRunning() {
            !CollectPidsByExeName(L"NGM64.exe").empty();
 }
 
+bool IsNgmProcessRunningCreatedAfter(const FILETIME& notBefore) {
+    for (DWORD pid : CollectPidsByExeName(L"NGM64.exe")) {
+        if (PidAlive(pid) && CreationTimeOk(pid, &notBefore)) return true;
+    }
+    for (DWORD pid : CollectPidsByExeName(L"NGM.exe")) {
+        if (PidAlive(pid) && CreationTimeOk(pid, &notBefore)) return true;
+    }
+    return false;
+}
+
 bool EnsureNgmRunning() {
     if (IsNgmProcessRunning()) return true;
     const std::wstring ngm = FindNgmPath();
@@ -556,6 +627,53 @@ bool EnsureNgmRunning() {
     return true;
 }
 
+unsigned long FindExistingClassicPid(const GalaxyTicket& ticket, const wchar_t* exeName,
+                                     std::wstring* outCmd, bool* ticketMatched,
+                                     const FILETIME* createdNotBefore, int* outUnmatched) {
+    if (ticketMatched) *ticketMatched = false;
+    if (outCmd) outCmd->clear();
+    if (outUnmatched) *outUnmatched = 0;
+    if (!exeName || !*exeName) exeName = L"Maplestory_Classic.exe";
+
+    DWORD matchedPid = 0;
+    std::wstring matchedCmd;
+    DWORD anyPid = 0;
+    std::wstring anyCmd;
+    FILETIME anyCreate{};
+    int unmatched = 0;
+
+    for (DWORD pid : CollectPidsByExeName(exeName)) {
+        if (!PidAlive(pid)) continue;
+        if (!CreationTimeOk(pid, createdNotBefore)) continue;
+        const std::wstring cmd = GetProcessCommandLineW(pid);
+        if (TicketLooksUsable(ticket) && !cmd.empty() && CmdMatchesGalaxyTicket(cmd, ticket)) {
+            matchedPid = pid;
+            matchedCmd = cmd;
+            break;
+        }
+        ++unmatched;
+        const FILETIME ct = ProcessCreationTime(pid);
+        if (!anyPid || FileTimeNewer(ct, anyCreate)) {
+            anyPid = pid;
+            anyCmd = cmd;
+            anyCreate = ct;
+        }
+    }
+
+    if (outUnmatched) *outUnmatched = unmatched;
+    if (matchedPid) {
+        if (ticketMatched) *ticketMatched = true;
+        if (outCmd) *outCmd = matchedCmd;
+        return matchedPid;
+    }
+    if (anyPid) {
+        if (ticketMatched) *ticketMatched = false;
+        if (outCmd) *outCmd = anyCmd;
+        return anyPid;
+    }
+    return 0;
+}
+
 Result Run(const Options& opts, ProgressCallback cb) {
     Result r;
     Emit(cb, Stage::Init, "MSC NGM launch skeleton");
@@ -567,6 +685,40 @@ Result Run(const Options& opts, ProgressCallback cb) {
             "先走官网 OTT→GetOneTimeWebInfo，或客户端 UIGalaxyLoginWebView 登录后再填入。";
         Emit(cb, Stage::BlockedNeedsTicket, r.errorMessage);
         return r;
+    }
+
+    if (opts.attachExistingClassic) {
+        // 年龄窗：上一局残留的客户端不接管，否则会注入到别的账号而本票账号根本没拉起来。
+        const FILETIME cutoff = FileTimeSecondsAgo(opts.attachMaxAgeSec);
+        const FILETIME* cutoffPtr = opts.attachMaxAgeSec > 0 ? &cutoff : nullptr;
+
+        bool matched = false;
+        int unmatched = 0;
+        std::wstring cmd;
+        const DWORD existing = FindExistingClassicPid(opts.ticket, opts.gameExeName.c_str(), &cmd,
+                                                     &matched, cutoffPtr, &unmatched);
+        // 票匹配 → 确定是本次登录的实例，直接接管。
+        // 无匹配但只有一个候选 → 官网自启的常见情形，按既有策略接管。
+        // 无匹配且有多个候选 → 无从判定哪个属于本票，拒绝猜测，改走 NGM 正常拉起。
+        const bool ambiguous = !matched && unmatched > 1;
+        if (existing && !ambiguous) {
+            r.ok = true;
+            r.gamePid = existing;
+            r.cmdLineSummary = FormatCmdLineForLog(cmd);
+            r.finalStage = Stage::Done;
+            Emit(cb, Stage::Done,
+                 matched ? "接管已有经典版（cmdline 票匹配），跳过 NGM"
+                         : "接管已有经典版（cmdline 未匹配本票，可能为官网自启），跳过 NGM",
+                 existing);
+            return r;
+        }
+        if (ambiguous) {
+            Emit(cb, Stage::LaunchingGame,
+                 "发现 " + std::to_string(unmatched) +
+                     " 个经典版且无一匹配本票，不猜测接管（避免串到别的账号），改走 NGM 拉起");
+        } else {
+            Emit(cb, Stage::LaunchingGame, "未发现可接管的经典版（含年龄窗过滤），改走 NGM 拉起");
+        }
     }
 
     Emit(cb, Stage::FindingNgm, "定位 NGM64.exe");

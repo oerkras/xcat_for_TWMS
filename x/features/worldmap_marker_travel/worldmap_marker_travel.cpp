@@ -6,6 +6,8 @@
 //   - UpdateView 缓存 Spot 的 MapNo[0] + 地图名，双击时优先用图号 goto。
 //   - 确认：UIUtilDialog.YesNo + 原生 System.Action（对照枫星 TextConfirm）。
 //   - 瞬移石开的是 UIMapTransferDialog，不是 UIWorldMap → 无需石头/非石头门控。
+// 防漂移：Spot/MapListData/clickCount 字段走 hash + field_get_offset；dump 常量仅 fallback。
+// OnPointerDown 仍可能 abs 钉 RVA（BIN：纯 MI 收不到点击）——方法侧 ResolveMi 另有哈希/kind。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -15,6 +17,7 @@
 #include "../ports/travel_port.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/log.h"
 #include "../../runtime/anchor_lamps.h"
@@ -40,40 +43,59 @@ using x::runtime::il2cpp::ReadPtr;
 
 // UIWorldMapItem（Prefab 字段形：三 string@0x70/78/80 + mapId@0x88）
 constexpr char kItemClass[] =
-    "ace26d8d8dcc86fd0082d56c9abb6ccac4108d3892d83a82e700b9ef50de7a1";
-constexpr uint32_t kRvaUpdateView = 0x7E1230;  // remapped 2026-08-03
-constexpr uint32_t kRvaOnPointerDown = 0x7E3C10;  // remapped 2026-08-03
+    "ad787f7539c555758fcfa3f016618b57599c2d3325193a7330d4703b27b0e7a";
+constexpr uint32_t kRvaUpdateView = 0x7E4130;  // remapped 2026-08-04
+constexpr uint32_t kRvaOnPointerDown = 0x7E6980;  // remapped 2026-08-04
 
 // UIUtilDialog（非 Ex）：YesNo(string,Action,Action,…) / Notice(string,string,bool…)
 constexpr char kUtilDialogClass[] =
-    "d7a377d5087b2ea6eac18227d464cb82691fc08b8b0868e5058d730fca53f58";
-constexpr uint32_t kRvaYesNo = 0x7445A0;  // remapped 2026-08-03
-constexpr uint32_t kRvaNotice = 0x748510;  // remapped 2026-08-03
+    "a19ac73ab18613eb5ac5dff4069bb49bbba0f54afc09f03e68e37bf60620a9d";
+constexpr uint32_t kRvaYesNo = 0x746B30;  // remapped 2026-08-04
+constexpr uint32_t kRvaNotice = 0x74ACB0;  // remapped 2026-08-04
 
 constexpr char kHashUpdateView[] =
-    "b52158128620a4129cf6d98bc2ffbdbe562c1f3cc0bce6f02939e0b979ff666";
+    "a8fad7f2ed70099febb1d323fa669ef28cce665afc7891ed60d25b88ad6b1f6";
 constexpr char kHashYesNo[] =
-    "fa01b574a0f590c8dbbee52543fcbdaa8d3fcaa975d131c2ff4759dcabf2c05";
+    "bf834074b97070ec325df8cfe5d0b853e076124dcae9f57c7b0fab5c55a49ed";
 constexpr char kHashNotice[] =
-    "f4a508d0559f8ee2cbdb5c9b57b2d95cdf2db6210f13786890afa360156fda0";
+    "eaf272a2779e899e65839c1b95804192c24634ddf628a739da4fe3e6fc5fb7b";
 
-// UIWorldMapItem 字段（当前 GA：UpdateView 实机写回；cms dump 的 0x68/70/78 已偏移）
-//   UpdateView: [+0x70]=mapDesc(r9), [+0x78]=mapName(r8), [+0x80]=street(rdx), [+0x88]=arg_30(int)
-constexpr size_t kOffMapDesc = 0x70;
-constexpr size_t kOffMapName = 0x78;
-constexpr size_t kOffStreetName = 0x80;
-constexpr size_t kOffCachedMapId = 0x88;
+// dump 验证 fallback（remount 2026-08-04；UpdateView 写回 +0x70/78/80/88）
+constexpr size_t kFbMapDesc = 0x70;
+constexpr size_t kFbMapName = 0x78;
+constexpr size_t kFbStreetName = 0x80;
+constexpr size_t kFbCachedMapId = 0x88;
+constexpr size_t kFbMapNoList = 0x20;   // List<int> MapNo
+constexpr size_t kFbMapTitle = 0x28;    // string Title
+constexpr size_t kFbListItems = 0x10;   // List._items（BCL，通常不漂）
+constexpr size_t kFbListSize = 0x18;    // List._size
+constexpr size_t kFbArrayFirst = 0x20;  // Il2CppArray first element
+constexpr size_t kFbPointerClickCount = 0x178;
 
-// WorldMapData.MapListData
-constexpr size_t kOffMapNoList = 0x20;  // List<int> MapNo
-constexpr size_t kOffMapTitle = 0x28;   // string Title
-constexpr size_t kOffListItems = 0x10;
-constexpr size_t kOffListSize = 0x18;
-constexpr size_t kOffArrayFirst = 0x20;  // Il2CppArray first element
+// Spot 字段哈希（dump.cs TypeDefIndex 630）
+constexpr char kHashMapDesc[] =
+    "ff5aa6b9e1ba538938e4eccc001fd50133fd01746c9b5e6f23294390472235e";
+constexpr char kHashMapName[] =
+    "c0fda8aeaef5b552762aac94f62b86b4dd161080aa6412c93a7d5886f30f814";
+constexpr char kHashStreetName[] =
+    "b09a3133fd8c7df4686a400b824c7ccaafc2df5e7e28eb2017dfe71480c9ad1";
+constexpr char kHashCachedMapId[] =
+    "c54b695d6894278b0804079a21f4d81f18c2b7c6cabb583321d88bdf5c494a3";
 
-// 双击：优先读 PointerEventData.clickCount@+0x178（Unity 已按系统双击间隔计数）；
-// 自检窗口兜底用 GetDoubleClickTime()（常见 400~500ms），旧硬编码 200ms 过紧导致偶发「点了没反应」。
-constexpr size_t kOffPointerClickCount = 0x178;
+// MapListData 嵌套类 + 属性 backing 字段（TypeDefIndex 2183）
+constexpr char kMapListDataClass[] =
+    "c49d389d0ddc4fcaa210298cfcc11f5f6b823b73cd4176111c21a377dda3a78."
+    "d3094bad13b41c2584d94ed141964cb9c456b5858cd1d5cd7efc929a663519c";
+constexpr char kMapListDataClassSlash[] =
+    "c49d389d0ddc4fcaa210298cfcc11f5f6b823b73cd4176111c21a377dda3a78/"
+    "d3094bad13b41c2584d94ed141964cb9c456b5858cd1d5cd7efc929a663519c";
+constexpr char kMapListDataNested[] =
+    "d3094bad13b41c2584d94ed141964cb9c456b5858cd1d5cd7efc929a663519c";
+constexpr char kHashMapNoList[] =
+    "<d5f66233c6d6a062d486d16835f48b098614667386e61f54141e5632f8a1b87>k__BackingField";
+constexpr char kHashMapTitle[] =
+    "<af854d763e9f52b621719100be791eaf743a0c456964751328622d29649a37c>k__BackingField";
+constexpr char kHashClickCount[] = "<clickCount>k__BackingField";
 constexpr DWORD kDblClickMsMin = 400;
 constexpr DWORD kDblClickMsMax = 800;
 constexpr DWORD kConfirmReopenMs = 300;
@@ -88,9 +110,10 @@ struct MethodInfoHead {
     const void* nameOrHandle;
 };
 
+// UpdateView arity=8（不含 this/MethodInfo）：3×string + MapListData* + 2×int + Object** + Vector2*
 using FnUpdateView = void (*)(void* self, void* street, void* mapName, void* mapDesc,
-                              void* mapListData, int32_t mapId, int32_t* outPosType,
-                              void* outCurPos, const void* method);
+                              void* mapListData, int32_t mapId, int32_t extraInt, void** outObj,
+                              void* outVec2, const void* method);
 using FnOnPointerDown = void (*)(void* self, void* eventData, const void* method);
 
 struct SpotInfo {
@@ -117,6 +140,18 @@ FnUpdateView gOrigUpdate = nullptr;
 FnOnPointerDown gOrigDown = nullptr;
 DWORD gLastInstallTry = 0;
 
+// OnPointerDown 仅有 MethodInfo 数据 xref、无 E8 直调；但 BIN 显示 MI 换桩后点击仍不进 Hook。
+// 对原生入口做 abs jmp（14B），保证任意 invoker/MI 只要落到 RVA 就能进 Hook。
+constexpr size_t kDownSteal = 16;  // push rsi/rdi + sub rsp,58h + mov rsi,rcx + lea rax (完整指令)
+struct AbsHookState {
+    void* target = nullptr;
+    void* trampoline = nullptr;
+    uint8_t saved[32]{};
+    size_t stolen = 0;
+    bool active = false;
+};
+AbsHookState gDownAbs{};
+
 using FnFieldFromName = void* (*)(void* klass, const char* name);
 using FnFieldGetOffset = size_t (*)(void* field);
 FnFieldFromName gFieldFromName = nullptr;
@@ -125,6 +160,22 @@ size_t gOffMethodPtr = 0;
 size_t gOffInvokeImpl = 0;
 size_t gOffExtraArg = 0;
 size_t gOffMethodCode = 0;
+
+struct SpotFieldOff {
+    size_t mapDesc = kFbMapDesc;
+    size_t mapName = kFbMapName;
+    size_t streetName = kFbStreetName;
+    size_t cachedMapId = kFbCachedMapId;
+    size_t mapNoList = kFbMapNoList;
+    size_t mapTitle = kFbMapTitle;
+    size_t listItems = kFbListItems;
+    size_t listSize = kFbListSize;
+    size_t arrayFirst = kFbArrayFirst;
+    size_t pointerClickCount = kFbPointerClickCount;
+    bool tried = false;
+    const char* path = "fallback";  // meta | meta-partial | fallback
+};
+SpotFieldOff gSpotOff{};
 bool gDelegateOffOk = false;
 
 void* gYesAction = nullptr;
@@ -188,13 +239,13 @@ bool ReadIl2CppString(void* strObj, char* out, int outSz) {
 
 int FirstMapNo(void* mapListData) {
     if (!LooksLikeHeapPtr(mapListData)) return 0;
-    void* list = ReadPtr(mapListData, kOffMapNoList);
+    void* list = ReadPtr(mapListData, gSpotOff.mapNoList);
     if (!LooksLikeHeapPtr(list)) return 0;
-    const int size = ReadI32(list, kOffListSize);
+    const int size = ReadI32(list, gSpotOff.listSize);
     if (size <= 0 || size > 64) return 0;
-    void* items = ReadPtr(list, kOffListItems);
+    void* items = ReadPtr(list, gSpotOff.listItems);
     if (!LooksLikeHeapPtr(items)) return 0;
-    const int v = ReadI32(items, kOffArrayFirst);
+    const int v = ReadI32(items, gSpotOff.arrayFirst);
     return v > 0 ? v : 0;
 }
 
@@ -230,13 +281,13 @@ void PickLabel(void* mapNameStr, void* mapListData, void* self, char* out, int o
         return;
     }
     if (LooksLikeHeapPtr(mapListData)) {
-        if (ReadIl2CppString(ReadPtr(mapListData, kOffMapTitle), tmp, sizeof(tmp)) && tmp[0] &&
+        if (ReadIl2CppString(ReadPtr(mapListData, gSpotOff.mapTitle), tmp, sizeof(tmp)) && tmp[0] &&
             !LooksLikeMapDesc(tmp)) {
             strncpy_s(out, outSz, tmp, _TRUNCATE);
             return;
         }
     }
-    if (self && ReadIl2CppString(ReadPtr(self, kOffMapName), tmp, sizeof(tmp)) && tmp[0] &&
+    if (self && ReadIl2CppString(ReadPtr(self, gSpotOff.mapName), tmp, sizeof(tmp)) && tmp[0] &&
         !LooksLikeMapDesc(tmp)) {
         strncpy_s(out, outSz, tmp, _TRUNCATE);
         return;
@@ -245,7 +296,7 @@ void PickLabel(void* mapNameStr, void* mapListData, void* self, char* out, int o
         strncpy_s(out, outSz, tmp, _TRUNCATE);
         return;
     }
-    if (self && ReadIl2CppString(ReadPtr(self, kOffMapName), tmp, sizeof(tmp)) && tmp[0]) {
+    if (self && ReadIl2CppString(ReadPtr(self, gSpotOff.mapName), tmp, sizeof(tmp)) && tmp[0]) {
         strncpy_s(out, outSz, tmp, _TRUNCATE);
     }
 }
@@ -328,23 +379,14 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
 
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
-                          const char* plain, const char* hash) {
-    if (plain) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, plain, shape.arity)) return mi;
-    }
-    if (hash) {
-        if (MethodInfoHead* mi = FindMethodByName(klass, hash, shape.arity)) return mi;
-    }
+                          const char* plain, const char* hash,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
     if (!klass) return nullptr;
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, shape);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            x::runtime::LogI("WorldMapTravel", "ResolveMi kind hit rva=0x%X plain=%s", rva,
-                             plain ? plain : "-");
-        }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
-    }
-    return FindMethodByRva(klass, rva);
+    const auto mr =
+        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, hash);
+    if (outPath) *outPath = mr.path;
+    return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
 }
 
 bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
@@ -384,6 +426,56 @@ void RestoreMethodInfo(MethodInfoHead* mi, void* orig) {
     VirtualProtect(mi, sizeof(MethodInfoHead), old, &old);
 }
 
+void WriteAbsJmp(void* at, void* to) {
+    auto* p = reinterpret_cast<uint8_t*>(at);
+    // mov rax, imm64 ; jmp rax
+    p[0] = 0x48;
+    p[1] = 0xB8;
+    *reinterpret_cast<uint64_t*>(p + 2) = reinterpret_cast<uint64_t>(to);
+    p[10] = 0xFF;
+    p[11] = 0xE0;
+}
+
+bool InstallAbsHook(AbsHookState* st, void* target, void* hook, size_t steal) {
+    if (!st || !target || !hook || steal < 14 || steal > sizeof(st->saved)) return false;
+    if (st->active) return true;
+    void* tramp = VirtualAlloc(nullptr, steal + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return false;
+    memcpy(st->saved, target, steal);
+    memcpy(tramp, target, steal);
+    WriteAbsJmp(reinterpret_cast<uint8_t*>(tramp) + steal,
+                reinterpret_cast<uint8_t*>(target) + steal);
+    DWORD old = 0;
+    if (!VirtualProtect(target, steal, PAGE_EXECUTE_READWRITE, &old)) {
+        VirtualFree(tramp, 0, MEM_RELEASE);
+        return false;
+    }
+    WriteAbsJmp(target, hook);
+    for (size_t i = 14; i < steal; ++i) reinterpret_cast<uint8_t*>(target)[i] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), target, steal);
+    VirtualProtect(target, steal, old, &old);
+    st->target = target;
+    st->trampoline = tramp;
+    st->stolen = steal;
+    st->active = true;
+    return true;
+}
+
+void RemoveAbsHook(AbsHookState* st) {
+    if (!st || !st->active || !st->target) return;
+    DWORD old = 0;
+    if (VirtualProtect(st->target, st->stolen, PAGE_EXECUTE_READWRITE, &old)) {
+        memcpy(st->target, st->saved, st->stolen);
+        FlushInstructionCache(GetCurrentProcess(), st->target, st->stolen);
+        VirtualProtect(st->target, st->stolen, old, &old);
+    }
+    if (st->trampoline) VirtualFree(st->trampoline, 0, MEM_RELEASE);
+    st->trampoline = nullptr;
+    st->target = nullptr;
+    st->stolen = 0;
+    st->active = false;
+}
+
 void CallOrigDown(void* self, void* eventData, const void* method) {
     FnOnPointerDown orig = gOrigDown;
     if (!orig) return;
@@ -394,11 +486,12 @@ void CallOrigDown(void* self, void* eventData, const void* method) {
 }
 
 void CallOrigUpdate(void* self, void* street, void* mapName, void* mapDesc, void* mapListData,
-                    int32_t mapId, int32_t* outPosType, void* outCurPos, const void* method) {
+                    int32_t mapId, int32_t extraInt, void** outObj, void* outVec2,
+                    const void* method) {
     FnUpdateView orig = gOrigUpdate;
     if (!orig) return;
     __try {
-        orig(self, street, mapName, mapDesc, mapListData, mapId, outPosType, outCurPos, method);
+        orig(self, street, mapName, mapDesc, mapListData, mapId, extraInt, outObj, outVec2, method);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
 }
@@ -407,21 +500,32 @@ bool ShowTravelNotice(const char* msgUtf8);
 bool ShowTravelConfirm(const char* target, const char* label, int hops = -2);
 
 void Hook_UpdateView(void* self, void* street, void* mapName, void* mapDesc, void* mapListData,
-                     int32_t mapId, int32_t* outPosType, void* outCurPos, const void* method) {
+                     int32_t mapId, int32_t extraInt, void** outObj, void* outVec2,
+                     const void* method) {
     (void)street;
     (void)mapDesc;
-    // 先写回字段，再采证（0x78=名 / 0x70=简介 / 0x88=缓存图号）
-    CallOrigUpdate(self, street, mapName, mapDesc, mapListData, mapId, outPosType, outCurPos, method);
+    (void)extraInt;
+    CallOrigUpdate(self, street, mapName, mapDesc, mapListData, mapId, extraInt, outObj, outVec2,
+                   method);
 
     const int spotMap = PickMapId(mapId, mapListData, self);
     char label[160]{};
     PickLabel(mapName, mapListData, self, label, sizeof(label));
-    // 若仍无短名，保留 desc 供 FireGoto 用 map_names.keyByDesc 反查
     if (!label[0]) {
         if (!ReadIl2CppString(mapDesc, label, sizeof(label)))
-            (void)ReadIl2CppString(ReadPtr(self, kOffMapDesc), label, sizeof(label));
+            (void)ReadIl2CppString(ReadPtr(self, gSpotOff.mapDesc), label, sizeof(label));
     }
     CacheSpot(self, spotMap, label);
+
+    static DWORD s_lastUv = 0;
+    static uint32_t s_uvN = 0;
+    ++s_uvN;
+    const DWORD now = GetTickCount();
+    if (s_uvN <= 3 || now - s_lastUv >= 2000) {
+        s_lastUv = now;
+        x::runtime::LogI("WorldMapTravel", "UpdateView ok n=%u mapId=%d label=%s", s_uvN, spotMap,
+                         label[0] ? label : "-");
+    }
 }
 
 void FireGotoFromItem(void* self) {
@@ -444,7 +548,7 @@ void FireGotoFromItem(void* self) {
         if (fresh[0]) {
             if (!LooksLikeMapDesc(fresh) || !nameBuf[0]) strncpy_s(nameBuf, fresh, _TRUNCATE);
         } else if (!nameBuf[0]) {
-            (void)ReadIl2CppString(ReadPtr(self, kOffMapDesc), nameBuf, sizeof(nameBuf));
+            (void)ReadIl2CppString(ReadPtr(self, gSpotOff.mapDesc), nameBuf, sizeof(nameBuf));
         }
     }
     if (mapId > 0) snprintf(key, sizeof(key), "%d", mapId);
@@ -542,12 +646,7 @@ void ClearConfirm() {
 }
 
 void SafeRuntimeClassInit(void* klass) {
-    const auto& e = x::runtime::il2cpp::Get();
-    if (!e.runtimeClassInit || !klass) return;
-    __try {
-        e.runtimeClassInit(klass);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
+    x::runtime::il2cpp::RuntimeClassInit(klass);
 }
 
 void WritePtrField(void* obj, size_t off, void* v) {
@@ -558,8 +657,16 @@ void WritePtrField(void* obj, size_t off, void* v) {
     }
 }
 
-bool ResolveDelegateOffsets() {
-    if (gDelegateOffOk) return true;
+bool PlausibleInstanceOff(size_t off) {
+    return off >= 0x10 && off < 0x1000;
+}
+
+bool EnsureFieldExports() {
+    if (gFieldFromName && gFieldGetOffset) return true;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (e.classGetFieldFromName) gFieldFromName = e.classGetFieldFromName;
+    if (e.fieldGetOffset) gFieldGetOffset = e.fieldGetOffset;
+    if (gFieldFromName && gFieldGetOffset) return true;
     HMODULE ga = x::runtime::il2cpp::GameAssembly();
     if (!ga) return false;
     if (!gFieldFromName)
@@ -568,8 +675,88 @@ bool ResolveDelegateOffsets() {
     if (!gFieldGetOffset)
         gFieldGetOffset =
             reinterpret_cast<FnFieldGetOffset>(GetProcAddress(ga, "il2cpp_field_get_offset"));
+    return gFieldFromName && gFieldGetOffset;
+}
+
+// Returns true when metadata supplied a plausible offset (may equal fallback).
+bool FieldOffOrFb(void* klass, const char* fieldHash, size_t fb, size_t* out) {
+    *out = fb;
+    if (!klass || !fieldHash || !EnsureFieldExports()) return false;
+    void* field = nullptr;
+    __try {
+        field = gFieldFromName(klass, fieldHash);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!field) return false;
+    size_t off = 0;
+    __try {
+        off = gFieldGetOffset(field);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!PlausibleInstanceOff(off)) return false;
+    *out = off;
+    return true;
+}
+
+void* FindMapListDataKlass() {
+    void* k = FindClass("", kMapListDataClass);
+    if (!k) k = FindClass("", kMapListDataClassSlash);
+    if (!k) k = FindClass("", kMapListDataNested);
+    return k;
+}
+
+void EnsureSpotFieldOffsets(void* itemKlass) {
+    if (gSpotOff.tried) return;
+    gSpotOff.tried = true;
+
+    if (!EnsureFieldExports()) {
+        x::runtime::LogW("WorldMapTravel", "offsets path=fallback (field exports miss)");
+        return;
+    }
+
+    void* pedKlass = FindClass("UnityEngine.EventSystems", "PointerEventData");
+    void* mldKlass = FindMapListDataKlass();
+
+    int hits = 0;
+    const int want = 7;  // Spot×4 + MapList×2 + clickCount（BCL List 偏移不计入）
+    size_t oDesc = kFbMapDesc, oName = kFbMapName, oStreet = kFbStreetName, oId = kFbCachedMapId;
+    size_t oList = kFbMapNoList, oTitle = kFbMapTitle, oClick = kFbPointerClickCount;
+
+    if (FieldOffOrFb(itemKlass, kHashMapDesc, kFbMapDesc, &oDesc)) ++hits;
+    if (FieldOffOrFb(itemKlass, kHashMapName, kFbMapName, &oName)) ++hits;
+    if (FieldOffOrFb(itemKlass, kHashStreetName, kFbStreetName, &oStreet)) ++hits;
+    if (FieldOffOrFb(itemKlass, kHashCachedMapId, kFbCachedMapId, &oId)) ++hits;
+    if (FieldOffOrFb(mldKlass, kHashMapNoList, kFbMapNoList, &oList)) ++hits;
+    if (FieldOffOrFb(mldKlass, kHashMapTitle, kFbMapTitle, &oTitle)) ++hits;
+    if (FieldOffOrFb(pedKlass, kHashClickCount, kFbPointerClickCount, &oClick)) ++hits;
+
+    gSpotOff.mapDesc = oDesc;
+    gSpotOff.mapName = oName;
+    gSpotOff.streetName = oStreet;
+    gSpotOff.cachedMapId = oId;
+    gSpotOff.mapNoList = oList;
+    gSpotOff.mapTitle = oTitle;
+    gSpotOff.pointerClickCount = oClick;
+    gSpotOff.listItems = x::runtime::il2cpp_container::OffListItems();
+    gSpotOff.listSize = x::runtime::il2cpp_container::OffListSize();
+    gSpotOff.arrayFirst = x::runtime::il2cpp_container::OffArrayData();
+    gSpotOff.path = hits == want ? "meta" : (hits ? "meta-partial" : "fallback");
+
+    x::runtime::LogI(
+        "WorldMapTravel",
+        "offsets path=%s hits=%d/%d desc=0x%zx name=0x%zx street=0x%zx id=0x%zx "
+        "mapNo=0x%zx title=0x%zx click=0x%zx",
+        gSpotOff.path, hits, want, gSpotOff.mapDesc, gSpotOff.mapName, gSpotOff.streetName,
+        gSpotOff.cachedMapId, gSpotOff.mapNoList, gSpotOff.mapTitle, gSpotOff.pointerClickCount);
+}
+
+bool ResolveDelegateOffsets() {
+    if (gDelegateOffOk) return true;
+    if (!EnsureFieldExports()) return false;
     void* delKlass = FindClass("System", "Delegate");
-    if (!delKlass || !gFieldFromName || !gFieldGetOffset) return false;
+    if (!delKlass) return false;
     void* fMp = gFieldFromName(delKlass, "method_ptr");
     void* fInv = gFieldFromName(delKlass, "invoke_impl");
     void* fEx = gFieldFromName(delKlass, "extra_arg");
@@ -631,13 +818,9 @@ bool EnsureConfirmActions() {
     void* yes = gYesAction;
     void* no = gNoAction;
     void* ok = gOkAction;
-    __try {
-        if (!yes) yes = e.objectNew(gActionKlass);
-        if (!no) no = e.objectNew(gActionKlass);
-        if (!ok) ok = e.objectNew(gActionKlass);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    if (!yes) yes = x::runtime::il2cpp::AllocObject(gActionKlass);
+    if (!no) no = x::runtime::il2cpp::AllocObject(gActionKlass);
+    if (!ok) ok = x::runtime::il2cpp::AllocObject(gActionKlass);
     if (!yes || !no || !ok) return false;
     WireActionTargets(yes, reinterpret_cast<void*>(&OnConfirmYes));
     WireActionTargets(no, reinterpret_cast<void*>(&OnConfirmNo));
@@ -675,7 +858,17 @@ bool EnsureYesNoMi() {
     using x::runtime::il2cpp_method::TypeKind;
     // static YesNo(string,Action,Action,…) arity=8 — 同形可能多 → 哈希主
     constexpr MethodShape kYn{8, TypeKind::Ptr, false, false, {TypeKind::Ptr, TypeKind::Ptr}};
-    gMiYesNo = ResolveMi(gUtilDlgKlass, kRvaYesNo, kYn, "YesNo", kHashYesNo);
+    using x::runtime::il2cpp_method::ResolvePath;
+    ResolvePath pYn{};
+    gMiYesNo = ResolveMi(gUtilDlgKlass, kRvaYesNo, kYn, "YesNo", kHashYesNo, &pYn);
+    static bool sMethodHitsLogged = false;
+    if (!sMethodHitsLogged && gMiYesNo) {
+        sMethodHitsLogged = true;
+        int hits = (pYn != ResolvePath::Miss) ? 1 : 0;
+        // Notice / UpdateView 在各自 Ensure 时再计；此处先报 YesNo。
+        x::runtime::LogI("WorldMapTravel", "methods path=%s hits=%d/3 (YesNo; Notice+UV deferred)",
+                         hits ? "meta" : "fallback", hits);
+    }
     return gMiYesNo != nullptr;
 }
 
@@ -719,11 +912,10 @@ bool CallNoticeSeh(void* msg, void* sub, void* ok) {
 bool MakeIl2CppStrings(const char* msgUtf8, void** outMsg, void** outSnd) {
     *outMsg = nullptr;
     *outSnd = nullptr;
-    const auto& e = x::runtime::il2cpp::Get();
-    if (!e.stringNew || !msgUtf8) return false;
+    if (!msgUtf8) return false;
     __try {
-        *outMsg = e.stringNew(msgUtf8);
-        *outSnd = e.stringNew("");
+        *outMsg = x::runtime::il2cpp::NewString(msgUtf8);
+        *outSnd = x::runtime::il2cpp::NewString("");
         return *outMsg != nullptr;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *outMsg = nullptr;
@@ -825,7 +1017,7 @@ int ReadPointerClickCount(void* eventData) {
     if (!eventData || !LooksLikeHeapPtr(eventData)) return 0;
     int n = 0;
     __try {
-        n = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(eventData) + kOffPointerClickCount);
+        n = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(eventData) + gSpotOff.pointerClickCount);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         n = 0;
     }
@@ -858,16 +1050,18 @@ void Hook_OnPointerDown(void* self, void* eventData, const void* method) {
     const bool dbl = NoteClickAndIsDouble(self, eventData, &clickCount);
     CallOrigDown(self, eventData, method);
     if (dbl) {
+        x::runtime::LogI("WorldMapTravel", "Spot 双击判定 self=%p clickCount=%d", self, clickCount);
         FireGotoFromItem(self);
         return;
     }
-    // BIN 探针：证明挂钩在收点击（限频，避免刷屏）
     static DWORD s_lastProbe = 0;
+    static uint32_t s_clicks = 0;
+    ++s_clicks;
     const DWORD now = GetTickCount();
-    if (now - s_lastProbe >= kClickProbeLogMs) {
+    if (s_clicks <= 8 || now - s_lastProbe >= kClickProbeLogMs) {
         s_lastProbe = now;
-        x::runtime::LogI("WorldMapTravel", "Spot 单击 self=%p clickCount=%d winMs=%u（再点一次触发）",
-                         self, clickCount, DblClickWindowMs());
+        x::runtime::LogI("WorldMapTravel", "Spot 单击 self=%p clickCount=%d n=%u winMs=%u", self,
+                         clickCount, s_clicks, DblClickWindowMs());
     }
 }
 
@@ -883,30 +1077,31 @@ bool TryInstall() {
     if (!gItemKlass) return false;
 
     SafeRuntimeClassInit(gItemKlass);
+    EnsureSpotFieldOffsets(gItemKlass);
 
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
     if (!gMiUpdate) {
-        // UpdateView arity=8 — 哈希主
+        using x::runtime::il2cpp_method::ResolvePath;
         constexpr MethodShape kUv{8, TypeKind::Void, false, true, {TypeKind::Ptr, TypeKind::Ptr}};
+        ResolvePath pUv{};
         gMiUpdate =
-            ResolveMi(gItemKlass, kRvaUpdateView, kUv, "UpdateView", kHashUpdateView);
+            ResolveMi(gItemKlass, kRvaUpdateView, kUv, "UpdateView", kHashUpdateView, &pUv);
+        static bool sUvLogged = false;
+        if (!sUvLogged) {
+            sUvLogged = true;
+            x::runtime::LogI("WorldMapTravel", "UpdateView path=%s",
+                             pUv != ResolvePath::Miss ? "meta" : "fallback");
+        }
     }
-    if (!gMiDown) {
-        // Unity override 明文 OnPointerDown(PointerEventData)
-        constexpr MethodShape kDn{1, TypeKind::Void, true, true, {TypeKind::Ptr}};
-        gMiDown = ResolveMi(gItemKlass, kRvaOnPointerDown, kDn, "OnPointerDown", nullptr);
-    }
-    if (!gMiUpdate || !gMiDown) {
-        x::runtime::LogW("WorldMapTravel", "MethodInfo 未齐 update=%p down=%p klass=%p",
-                         (void*)gMiUpdate, (void*)gMiDown, gItemKlass);
+    if (!gMiUpdate) {
+        x::runtime::LogW("WorldMapTravel", "UpdateView MethodInfo 未找到 klass=%p", gItemKlass);
         x::runtime::anchor_lamps::Set("WorldMap", x::runtime::anchor_lamps::AnchorLampCode::Miss,
-                                     "MI miss");
+                                     "UV MI miss");
         return false;
     }
 
     void* origUv = nullptr;
-    void* origDown = nullptr;
     if (!PatchMethodInfo(gMiUpdate, reinterpret_cast<void*>(&Hook_UpdateView), &origUv)) {
         x::runtime::LogW("WorldMapTravel", "UpdateView MethodInfo 换桩失败");
         x::runtime::anchor_lamps::Set("WorldMap", x::runtime::anchor_lamps::AnchorLampCode::Miss,
@@ -914,27 +1109,47 @@ bool TryInstall() {
         return false;
     }
     gOrigUpdate = reinterpret_cast<FnUpdateView>(origUv);
-    if (!PatchMethodInfo(gMiDown, reinterpret_cast<void*>(&Hook_OnPointerDown), &origDown)) {
+
+    // OnPointerDown：原生 abs jmp（BIN：纯 MI 换桩收不到点击）
+    void* downNative = AtRva<void*>(kRvaOnPointerDown);
+    if (!InstallAbsHook(&gDownAbs, downNative, reinterpret_cast<void*>(&Hook_OnPointerDown),
+                        kDownSteal)) {
         RestoreMethodInfo(gMiUpdate, origUv);
         gOrigUpdate = nullptr;
-        x::runtime::LogW("WorldMapTravel", "OnPointerDown MethodInfo 换桩失败");
+        x::runtime::LogW("WorldMapTravel", "OnPointerDown abs hook 失败 target=%p", downNative);
         x::runtime::anchor_lamps::Set("WorldMap", x::runtime::anchor_lamps::AnchorLampCode::Miss,
-                                     "Down patch fail");
+                                     "Down abs fail");
         return false;
     }
-    gOrigDown = reinterpret_cast<FnOnPointerDown>(origDown);
+    gOrigDown = reinterpret_cast<FnOnPointerDown>(gDownAbs.trampoline);
+
+    // 顺带把 MI.methodPointer 也指到 Hook（双保险；CallOrig 走 trampoline）
+    if (!gMiDown) {
+        constexpr MethodShape kDn{1, TypeKind::Void, true, true, {TypeKind::Ptr}};
+        gMiDown = ResolveMi(gItemKlass, kRvaOnPointerDown, kDn, "OnPointerDown", nullptr);
+    }
+    if (gMiDown) {
+        void* ignore = nullptr;
+        (void)PatchMethodInfo(gMiDown, reinterpret_cast<void*>(&Hook_OnPointerDown), &ignore);
+    }
+
     gInstalled.store(true);
     x::runtime::LogI("WorldMapTravel",
-                     "init[经典版]：UIWorldMapItem UpdateView+OnPointerDown 已接管；"
-                     "双击 Spot → YesNo 确认 → RequestGoto（瞬移石走 MapTransferDialog，不互抢）");
+                     "init[经典版]：UpdateView(MI)+OnPointerDown(abs) 已接管；"
+                     "双击 Spot → YesNo → RequestGoto");
     x::runtime::anchor_lamps::Set("WorldMap", x::runtime::anchor_lamps::AnchorLampCode::Ok,
-                                 "UV+Down");
+                                 "UV+DownAbs");
     return true;
 }
 
 void Uninstall() {
     if (!gInstalled.exchange(false)) return;
-    if (gMiDown && gOrigDown) RestoreMethodInfo(gMiDown, reinterpret_cast<void*>(gOrigDown));
+    RemoveAbsHook(&gDownAbs);
+    if (gMiDown) {
+        // abs 已还原 .text；MI 指回原生 RVA
+        void* native = AtRva<void*>(kRvaOnPointerDown);
+        RestoreMethodInfo(gMiDown, native);
+    }
     if (gMiUpdate && gOrigUpdate) RestoreMethodInfo(gMiUpdate, reinterpret_cast<void*>(gOrigUpdate));
     gOrigDown = nullptr;
     gOrigUpdate = nullptr;

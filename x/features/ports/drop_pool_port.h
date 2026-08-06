@@ -41,6 +41,11 @@ struct ProbeSnapshot {
     Rect4 collisionRcPet{};
     float petX = 0.f;
     float petY = 0.f;
+    // 最近一件 Drop.Pt1（诊断 near=0：对照宠 Ap）
+    bool hasSampleDrop = false;
+    float sampleDropX = 0.f;
+    float sampleDropY = 0.f;
+    float sampleDropDist = -1.f;
 };
 
 struct VacuumResult {
@@ -62,9 +67,13 @@ struct VacuumResult {
     int sampleIsMoney = -1;  // -1 无样本 / 0 道具 / 1 金币（优先采金币）
     int sampleInfo = 0;      // Drop.Info（非金多为 itemId）
     // 拍后轻扫：ByPet 成功 Send 会盖 LastTry/PickStamp；池未掉 → 疑似服拒/满栏占坑
-    int sendTouch = 0;        // 盒内盖戳件数（拍前已清闸）
+    int sendTouch = 0;        // 盒内盖戳件数（拍前已清闸；排除自家退避/黑名单戳）
     int sendTouchMoney = 0;   // 其中 IsMoney
     int sentButPoolSame = 0;  // 有提交迹象且本拍池未掉
+    // 退避黑名单：ByPet 每拍只提交一件，被拒的那件会堵死队头（某栏满时最明显）
+    int stallStamped = 0;   // 本拍盖住的退避中件数
+    int stallRestored = 0;  // 拍末还原数；应等于 stallStamped，不等即有残留戳
+    int stallHeld = 0;      // 退避集合内仍生效的 dropId 数
     // 服端异步清池：同拍 Δ 常为 0；跨拍 dropCount < 上拍 after → 真吸
     bool poolFellSinceLast = false;
     uint16_t petSkill = 0;       // GetUpgradePetSkill()（= GetItemSlot→usPetSkill）
@@ -96,6 +105,33 @@ struct FootResult {
     uint32_t poolSendDelta = 0;
 };
 
+// 人物直吸 = 宠吸同一套控制面，主体换成角色（不靠宠、不改 ByPet 矩形包）。
+// 清闸 / 退避盖戳 / 黑名单盖戳 / 一调一件 / 拒收即 AddStall / 拍末还原 —— 与 RunVacuumOnMain 对齐。
+struct CharVacResult {
+    bool called = false;
+    bool ok = false;
+    const char* why = "idle";
+    int dropCount = 0;
+    int dropCountAfter = 0;
+    int dropsDelta = 0;
+    int nearCount = 0;
+    int nearWant = 0;
+    int sent = 0;             // 本拍送包数（对齐 ByPet：应为 0 或 1）
+    int sentDropId = 0;       // 本拍送出的 dropId（Send 不写 LastTry 时靠它做退避）
+    int gatesCleared = 0;
+    int skipStamped = 0;
+    int sendTouch = 0;
+    int sentButPoolSame = 0;
+    int stallStamped = 0;
+    int stallRestored = 0;
+    int stallHeld = 0;
+    int gateBlocked = 0;      // Pickable=false 等读侧挡下
+    bool poolFellSinceLast = false;
+    float userX = 0.f;
+    float userY = 0.f;
+    uint32_t sentTotal = 0;
+};
+
 // 黑名单 itemId 集合：宽词（「卷」「色」）可达数千，禁止固定上限截断。
 struct SkipIds {
     std::unordered_set<int> ids;
@@ -122,5 +158,10 @@ bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumRe
 
 // 主线程：盖黑名单 LastTryPickUp → DropPool.TryPickUpDrop(userPos)
 bool TryFootPickup(float halfW, float halfH, const SkipIds* skipIds, FootResult& out);
+
+// 主线程：枚举池 → 复刻门禁 → DropPool.SendDropPickUpRequest(角色真实位置, dropId, 0)
+// maxSend 建议 1（对齐 ByPet 一调一件）；吞吐靠外层 burst 连调，别在同一次 Invoke 里连发。
+bool TryCharVacuum(float halfW, float halfH, int maxSend, const SkipIds* skipIds,
+                   CharVacResult& out);
 
 }  // namespace x::features::ports::drop

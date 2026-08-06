@@ -34,7 +34,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Main target: bin\xcat.exe (silent WebView ticket inside).
+rem Main target: bin\xcat.exe (GamaPass CDP / HTTP ticket inside).
 rem POST_BUILD syncs dumps/offline_tables/tsv -> bin/XCat_data/dataservice (copy_if_different only).
 rem On LNK1104: close bin\xcat.exe yourself, then re-run. This script never kills processes.
 cmake --build "%BUILD_DIR%" --config %CONFIG% --target xcat_sound

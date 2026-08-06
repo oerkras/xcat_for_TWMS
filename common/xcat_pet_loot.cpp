@@ -16,8 +16,14 @@ bool EnsureStateDir(const char* binDir) {
 void ClampVacuum(PetLootConfig& cfg) {
     if (!(cfg.vacuumW > 1.f) || cfg.vacuumW > kPetLootVacuumMax) cfg.vacuumW = kPetLootVacuumWDefault;
     if (!(cfg.vacuumH > 1.f) || cfg.vacuumH > kPetLootVacuumMax) cfg.vacuumH = kPetLootVacuumHDefault;
-    if (!(cfg.footHalfW > 1.f) || cfg.footHalfW > 2000.f) cfg.footHalfW = kPetLootFootHalfWDefault;
-    if (!(cfg.footHalfH > 1.f) || cfg.footHalfH > 2000.f) cfg.footHalfH = kPetLootFootHalfHDefault;
+    if (!(cfg.footHalfW > 1.f) || cfg.footHalfW > kPetLootFootHalfMax)
+        cfg.footHalfW = kPetLootFootHalfWDefault;
+    if (!(cfg.footHalfH > 1.f) || cfg.footHalfH > kPetLootFootHalfMax)
+        cfg.footHalfH = kPetLootFootHalfHDefault;
+    if (!(cfg.charHalfW > 1.f) || cfg.charHalfW > kPetLootCharHalfMax)
+        cfg.charHalfW = kPetLootCharHalfWDefault;
+    if (!(cfg.charHalfH > 1.f) || cfg.charHalfH > kPetLootCharHalfMax)
+        cfg.charHalfH = kPetLootCharHalfHDefault;
 }
 
 bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTick) {
@@ -40,6 +46,9 @@ bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTi
     IniGetFloat(ini, "pet_loot", "vacuumH", out.vacuumH);
     IniGetFloat(ini, "pet_loot", "footHalfW", out.footHalfW);
     IniGetFloat(ini, "pet_loot", "footHalfH", out.footHalfH);
+    if (IniGetBool(ini, "pet_loot", "charVacEnabled", b)) out.charVacEnabled = b ? 1u : 0u;
+    IniGetFloat(ini, "pet_loot", "charHalfW", out.charHalfW);
+    IniGetFloat(ini, "pet_loot", "charHalfH", out.charHalfH);
     IniGetU32(ini, "pet_loot", "filterFlags", out.filterFlags);
     if (IniGetBool(ini, "pet_loot", "skipFilterEnabled", b)) out.skipFilterEnabled = b ? 1u : 0u;
     uint32_t skipCount = 0;
@@ -91,6 +100,9 @@ bool WritePetLootIni(const char* binDir, const PetLootConfig& cfg, uint64_t writ
         IniSetFloat(ini, "pet_loot", "vacuumH", cfg.vacuumH);
         IniSetFloat(ini, "pet_loot", "footHalfW", cfg.footHalfW);
         IniSetFloat(ini, "pet_loot", "footHalfH", cfg.footHalfH);
+        IniSetBool(ini, "pet_loot", "charVacEnabled", cfg.charVacEnabled != 0);
+        IniSetFloat(ini, "pet_loot", "charHalfW", cfg.charHalfW);
+        IniSetFloat(ini, "pet_loot", "charHalfH", cfg.charHalfH);
         IniSetU32(ini, "pet_loot", "filterFlags", cfg.filterFlags);
         IniSetBool(ini, "pet_loot", "skipFilterEnabled", cfg.skipFilterEnabled != 0);
         // 清理已删除的角色全图吸键（charDrop*）
@@ -134,12 +146,28 @@ void PetLootEffectiveVacuum(const PetLootConfig& cfg, float& outW, float& outH) 
     outH = cfg.vacuumH;
 }
 
+void PetLootEffectiveCharHalf(const PetLootConfig& cfg, float& outHalfW, float& outHalfH) {
+    outHalfW = cfg.charHalfW;
+    outHalfH = cfg.charHalfH;
+}
+
 void PetLootNormalize(PetLootConfig& cfg) {
     cfg.magic = kPetLootMagic;
     cfg.version = kPetLootVersion;
     cfg.enabled = cfg.enabled ? 1u : 0u;
     cfg.footEnabled = cfg.footEnabled ? 1u : 0u;
     cfg.mapVacuumEnabled = cfg.mapVacuumEnabled ? 1u : 0u;
+    cfg.charVacEnabled = cfg.charVacEnabled ? 1u : 0u;
+    // 三种吸物模式互斥：宠吸 > 人物直吸 > 脚边（宠吸开时脚边空成功会刷 LastTry 锁死宠吸）
+    if (cfg.enabled) {
+        cfg.charVacEnabled = 0;
+        cfg.footEnabled = 0;
+    } else if (cfg.charVacEnabled) {
+        cfg.footEnabled = 0;
+    }
+    // 人物直吸全盒钉死 1500×1500（冲掉旧 400×320 / 3200×2400）
+    cfg.charHalfW = kPetLootCharHalfWDefault;
+    cfg.charHalfH = kPetLootCharHalfHDefault;
     cfg.intervalMs = PetLootClampIntervalMs(cfg.intervalMs);
     cfg.burstPerTick = PetLootClampBurstPerTick(cfg.burstPerTick);
     ClampVacuum(cfg);
@@ -169,6 +197,8 @@ void PetLootSetDefaults(PetLootConfig& out) {
     out.vacuumH = kPetLootVacuumHDefault;
     out.footHalfW = kPetLootFootHalfWDefault;
     out.footHalfH = kPetLootFootHalfHDefault;
+    out.charHalfW = kPetLootCharHalfWDefault;
+    out.charHalfH = kPetLootCharHalfHDefault;
     out.filterFlags = kPetLootFilterDefault;
     out.skipFilterEnabled = 1;
 }

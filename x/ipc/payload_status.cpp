@@ -5,6 +5,7 @@
 #include "payload_status.h"
 
 #include "../features/ccu/ccu.h"
+#include "../features/frame_lock/frame_lock.h"
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/ports/travel_port.h"
 #include "../features/ports/world_port.h"
@@ -14,6 +15,7 @@
 #include "../runtime/il2cpp_bind.h"
 #include "../runtime/il2cpp_prefab.h"
 #include "../runtime/log.h"
+#include "../runtime/managed_main.h"
 #include "../runtime/anchor_lamps.h"
 
 #include "../../common/xcat_map_names.h"
@@ -30,13 +32,13 @@ namespace {
 
 constexpr DWORD kPublishIntervalMs = 500;
 
-// docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-03（与 anti_macro_port 对齐）
+// docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-04（与 anti_macro_port 对齐）
 constexpr char kAntiMacroUtilClass[] =
-    "cf3393383740b1f7566429bf39ecf713c129cbd325ecfcadad676d4eb4a147b";
+    "e351eb506860a803de820bdcaf4e7b0b3494331fe68cc31ae08516ad263dde9";
 constexpr char kAntiMacroNonFiniteClass[] =
-    "dd7ae5ff8c9cf70a5364a5bda92328a4cf46e9c1a6e2e86aa3c397f0223f891";
+    "f3adf8943673344f78ad3fe86d721079d5b831f67b79acddde74dd602148cb3";
 constexpr char kAntiMacroTextCaptchaClass[] =
-    "d9b7f7be8e623b396e528fe0106aee67628411b92042a05ce8ba380cf31703f";
+    "cc0afb7bfa4f5f73b0a53ff5f3a2178ec9f1cff97577f55a57b4a6ca2c1de48";
 constexpr char kPrefabNonFinite[] = "UIAntiMacroNonFinite";
 constexpr char kPrefabTextCaptcha[] = "UIAntiMacroTextCaptcha";
 
@@ -50,8 +52,10 @@ bool GameAssemblyPresent() {
 }
 
 // Cache 灯：Util 哈希 + Text/NonFinite（哈希优先、Prefab 兜底）就绪即 latch。
+// 证据 5e3768：login-freeze 期间 worker 上 FindClass → 与 fe04a3 同类 GC 风险。
 bool EnsureQuizTypesResolved() {
     if (gQuizTypesOk.load(std::memory_order_relaxed)) return true;
+    if (x::runtime::managed_main::IsLoginFrozen()) return false;
     if (!x::runtime::il2cpp::Ensure()) return false;
 
     void* util = x::runtime::il2cpp::FindClass("", kAntiMacroUtilClass);
@@ -146,6 +150,10 @@ void PayloadStatus_Publish() {
     st.sessionState = x::features::kick_sniff::LastSessionState();
     st.pendingErrorCode = x::features::kick_sniff::LastPendingErrorCode();
     st.sawDisconnect = x::features::kick_sniff::SawDisconnect() ? 1u : 0u;
+
+    st.frameLockOn = x::features::frame_lock::IsEnabled() ? 1u : 0u;
+    st.frameLockWant = x::features::frame_lock::TargetFps();
+    st.frameLockReadback = x::features::frame_lock::LastAppliedFps();
 
     st.writeTickMs = GetTickCount64();
     (void)xcat::WritePayloadStatus(binDir, st);

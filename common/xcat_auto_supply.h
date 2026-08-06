@@ -10,15 +10,16 @@ namespace xcat {
 // 对照枫星 auto_supply 配置契约；实现为 Il2Cpp 开店/买卖（非 Lua）。
 // 触发：装备栏达阈值 → 就近可卖店开店 → 先卖装/其他 → 可选补货（店内有则买、无则跳过）→ 回挂机图。
 // 寻店不关心货架内容；补给品类由用户自选（通常选挂机图附近店有的）。
-// 去店：优先回城卷 2030000，无卷则 travel；shopMapName 非空则覆盖自动寻店。
+// 去店：优先回家卷軸 2030000（同名备用 2030059），无卷则 travel；shopMapName 非空则覆盖自动寻店。
 // 飞镖 Charge 字段保留兼容；经典版执行侧暂 stub（UIShop Charge CF 平坦化未钉入口）。
 
 constexpr uint32_t kAutoSupplyMagic   = 0x50555341u;  // 'ASUP'
 constexpr uint32_t kAutoSupplyVersion = 6u;
 
-// 默认回城卷（마을 귀환）：游戏智能回最近主城。
-// 无回城卷时的默认回城道具；默认药水 CODE 仅作 UI/内置名兜底，不用于寻店选型。
+// 回家卷軸（智能回最近主城）。离线 catalog：2030000 / 2030059 同名「回家卷軸」。
+// 用卷时主码失败会再试备用码；补买仍买主码（杂货店货架常见 2030000）。
 constexpr const char* kAutoSupplyDefaultReturnScrollCode = "2030000";
+constexpr const char* kAutoSupplyAltReturnScrollCode     = "2030059";
 constexpr const char* kAutoSupplyDefaultPotionCode       = "2000000";
 
 // 可选补红/补蓝 UI 默认名（精确中文）与经典 CODE；红/蓝默认不勾选。

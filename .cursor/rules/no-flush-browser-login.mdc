@@ -1,0 +1,29 @@
+---
+description: 禁止清除/冲刷浏览器与 Gama Pass 登录态（TWMS）
+alwaysApply: true
+---
+
+# 禁止清除登录态（经典版 / TWMS）
+
+用户红线：**绝对不能清除、冲刷、轮换任何浏览器或 Gama Pass / beanfun / Gamania 登录态。**
+
+## 禁止
+
+- 调用 `/v1/refresh/token`（会轮换 refreshToken，冲掉浏览器免登录）
+- CDP / WebView：`Network.clearBrowserCookies`、`Storage.clearDataForOrigin`、清 Cookie/LS/IndexedDB
+- **自行添加或改写** OAuth `prompt`（含 `prompt=login→none`）：实机已证改写会进 `accounts.gamania.com/error`；Galaxy 自带的 `prompt=login` 必须原样放行
+- 失败后 soft-retry **再次 Navigate Galaxy 登录页**（易触发 IdP 重鉴权，体感=冲刷）
+- 把 `/login`、`/error`、oauth 半截页当成「可复用成功态」直接 Fail（应重新开 Galaxy）
+- 启动浏览器参数与业务层 **重复** 打开 Galaxy 登录入口（应 about:blank 启动 + 按需单次 Navigate，或复用已有**成功路径**标签）
+- 删除/覆写用户日常 Chrome/Edge/Chrome++ 的 User Data 里的 Cookies、Login Data、Local Storage（CDP 副本只允许 **源→副本** 单向同步，禁止写回日常目录）
+- 为「凑成功」主动登出、清会话、重置 profile
+
+## 允许
+
+- 只读附着已有浏览器会话、DOM 点选、从 URL/cmdline 收 OTT
+- 内存里 HTTP Client 的 jar（与浏览器无关）清空——不得波及磁盘浏览器 profile
+- 失败即停 + 人话说明；由用户在**当前**浏览器窗口自行登录后重试
+
+## 交付自检
+
+声称「不会清登录态」时，须能指出本轮 diff **没有**上述禁止项；若用户投诉被冲刷，先对 `launcher.log` 核对是否出现 soft-retry / refresh / clearCookies，再改代码。

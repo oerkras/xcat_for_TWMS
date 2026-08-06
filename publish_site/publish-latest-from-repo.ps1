@@ -3,7 +3,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+    $PSScriptRoot
+} else {
+    Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if ([string]::IsNullOrWhiteSpace($Root)) {
+    throw "Cannot resolve publish_site root"
+}
 if ([string]::IsNullOrWhiteSpace($Repo)) {
     $Repo = Split-Path -Parent $Root
 }

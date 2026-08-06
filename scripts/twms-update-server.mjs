@@ -9,12 +9,16 @@
  *   GET  /twms/ready
  *   GET  /twms/update/latest.json
  *   GET  /twms/update/force.json   (无 force-update.json → 404)
+ *   GET  /twms/update/access.json  (按 X-XCat-* 头查是否禁止使用)
  *   GET  /twms/update/<zip>
  *   POST /twms/v1/logs/sessions · PUT …/files/:name · POST …/commit
  *   POST /twms/v1/logs            (legacy JSON)
  *   POST /twms/admin/shutdown      (loopback)
  *   GET  /twms/admin/stats         (loopback)
  *   GET  /twms/admin/clients       (loopback；按 X-XCat-* 头追踪)
+ *   GET  /twms/admin/bans          (loopback；封禁清单，兼容)
+ *   POST /twms/admin/bans          (loopback；action=ban|unban|allow|unallow|setMode)
+ *   GET  /twms/admin/access        (loopback；mode+黑白名单)
  */
 import http from "node:http";
 import { createReadStream } from "node:fs";
@@ -22,8 +26,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLogUpload } from "./twms-log-upload.mjs";
+import { createDeviceAccess } from "./twms-device-access.mjs";
+import { createIpGeo } from "./twms-ip-geo.mjs";
 
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.4.3";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
@@ -82,6 +88,30 @@ const stats = {
 const activeClients = new Map();
 const kClientActiveDefaultSec = 90;
 const kClientPruneSec = 3600;
+/** 与客户端 OnlineLease TTL 对齐（秒→毫秒），运维台据此估算租约剩余。 */
+const kOnlineLeaseTtlMs = 64 * 3600 * 1000;
+/** @type {any[]} */
+const recentAccessDenies = [];
+const kRecentDenyMax = 40;
+/** ip → 见过的 deviceId（或 mac 兜底）集合，用于同 IP 多设备告警 */
+/** @type {Map<string, Set<string>>} */
+const devicesByIp = new Map();
+/** @type {Map<string, { machine: string, deviceId: string, mac: string, device: string }>} */
+const knownByDevice = new Map();
+
+const ipGeo = createIpGeo({
+  logWarn: (msg) => console.warn(`[geo] ${msg}`),
+  userAgent: "xcat-twms-ops/1.0",
+});
+ipGeo.bindClientLister(() => activeClients.values());
+
+const access = createDeviceAccess({
+  releaseRoot,
+  repoRoot,
+  logInfo,
+  logWarn,
+  ts,
+});
 
 function headerText(req, name) {
   const v = req?.headers?.[name];
@@ -90,17 +120,147 @@ function headerText(req, name) {
 }
 
 function clientIdentityFromReq(req) {
+  const macRaw = headerText(req, "x-xcat-mac");
+  const macs = access.parseMacList(macRaw);
+  const token = access.normalizeToken(headerText(req, "x-xcat-token") || "");
   return {
     machine: headerText(req, "x-xcat-machine").slice(0, 80),
     deviceId: headerText(req, "x-xcat-device-id").slice(0, 64),
     appVersion: headerText(req, "x-xcat-app-version").slice(0, 64),
+    macs,
+    mac: macs[0] ? access.formatMac(macs[0]) : "",
+    token,
   };
 }
 
-function touchClient({ ip, kind, pathName, status, ua, machine, deviceId, appVersion }) {
-  const identified = !!(machine || deviceId);
+async function readJsonBody(req, limit = 64 * 1024) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of req) {
+    total += chunk.length;
+    if (total > limit) {
+      const err = new Error("body too large");
+      err.status = 413;
+      throw err;
+    }
+    chunks.push(chunk);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const err = new Error("invalid json");
+    err.status = 400;
+    throw err;
+  }
+}
+
+function deviceFingerprint({ machine, deviceId, mac, macs }) {
+  const id = String(deviceId || "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 64);
+  if (id) return `id:${id}`;
+  const macList = Array.isArray(macs) ? macs : [];
+  const macHex = String(mac || macList[0] || "")
+    .toLowerCase()
+    .replace(/[^0-9a-f]/g, "");
+  if (macHex.length === 12) return `mac:${macHex}`;
+  const m = String(machine || "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 80);
+  if (m) return `host:${m}`;
+  return "";
+}
+
+function rememberDeviceOnIp(ip, identity) {
+  if (!ip || ipGeo.isLoopback(ip)) return;
+  const fp = deviceFingerprint(identity);
+  if (!fp) return;
+  let set = devicesByIp.get(ip);
+  if (!set) {
+    set = new Set();
+    devicesByIp.set(ip, set);
+  }
+  const wasNew = !set.has(fp);
+  set.add(fp);
+  knownByDevice.set(fp, {
+    machine: String(identity.machine || "").slice(0, 80),
+    deviceId: String(identity.deviceId || "").slice(0, 64),
+    mac: String(identity.mac || (identity.macs && identity.macs[0]) || "").slice(0, 32),
+    device: String(identity.device || "").slice(0, 96),
+  });
+  // 同公网 IP 冒出新 deviceId：告警（NAT 多机或泄露扩散）
+  if (wasNew && set.size >= 2) {
+    let geoHint = "";
+    for (const row of activeClients.values()) {
+      if (row.ip === ip && row.geo) {
+        geoHint = row.geo;
+        break;
+      }
+    }
+    logWarn(
+      `same-ip multi-device ip=${ip} devices=${set.size}${geoHint ? ` geo=${geoHint}` : ""} new=${fp} fps=${[...set].slice(0, 8).join(",")}`,
+    );
+  }
+}
+
+function listIpMultiDeviceAlerts() {
+  const out = [];
+  for (const [ip, set] of devicesByIp) {
+    if (!set || set.size < 2) continue;
+    if (ipGeo.isLoopback(ip)) continue;
+    const devices = [];
+    for (const fp of set) {
+      const known = knownByDevice.get(fp) || {};
+      devices.push({
+        fp,
+        machine: known.machine || "",
+        deviceId: known.deviceId || "",
+        mac: known.mac || "",
+        device: known.device || fp,
+      });
+    }
+    let geo = "";
+    let geoStatus = "";
+    for (const row of activeClients.values()) {
+      if (row.ip === ip) {
+        geo = ipGeo.displayGeo(row);
+        geoStatus = row.geoStatus || "";
+        break;
+      }
+    }
+    out.push({
+      ip,
+      geo,
+      geoStatus,
+      deviceCount: set.size,
+      devices: devices.slice(0, 16),
+    });
+  }
+  out.sort((a, b) => b.deviceCount - a.deviceCount || a.ip.localeCompare(b.ip));
+  return out;
+}
+
+function touchClient({
+  ip,
+  kind,
+  pathName,
+  status,
+  ua,
+  machine,
+  deviceId,
+  appVersion,
+  macs,
+  mac,
+  token,
+}) {
+  if (!ip || ip === "unknown") return;
+  const identified = !!(machine || deviceId || (macs && macs.length) || mac || token);
   const key = identified
-    ? `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || "na"}`
+    ? `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || (macs && macs[0]) || mac || token || "na"}`
     : `ip:${ip}`;
   const now = Date.now();
   let row = activeClients.get(key);
@@ -112,6 +272,9 @@ function touchClient({ ip, kind, pathName, status, ua, machine, deviceId, appVer
       deviceId: "",
       device: "",
       appVersion: "",
+      mac: "",
+      macs: [],
+      token: "",
       identified: false,
       firstSeenMs: now,
       lastSeenMs: now,
@@ -135,13 +298,154 @@ function touchClient({ ip, kind, pathName, status, ua, machine, deviceId, appVer
   if (machine) row.machine = machine;
   if (deviceId) row.deviceId = deviceId;
   if (appVersion) row.appVersion = appVersion;
-  row.identified = !!(row.machine || row.deviceId);
-  row.device = row.identified ? `${row.machine || "host"}_${(row.deviceId || "").slice(0, 8)}` : "";
+  if (token) row.token = access.normalizeToken(token);
+  if (Array.isArray(macs) && macs.length) {
+    row.macs = macs.slice(0, 8);
+    row.mac = mac || access.formatMac(macs[0]);
+  } else if (mac) {
+    row.mac = mac;
+  }
+  row.identified = !!(
+    row.machine ||
+    row.deviceId ||
+    (row.macs && row.macs.length) ||
+    row.mac ||
+    row.token
+  );
+  row.device = row.identified
+    ? `${row.machine || "host"}_${(row.deviceId || row.mac || row.token || "na").slice(0, 8)}`
+    : "";
+
+  if (row.identified) {
+    rememberDeviceOnIp(ip, {
+      machine: row.machine,
+      deviceId: row.deviceId,
+      mac: row.mac,
+      macs: row.macs,
+      device: row.device,
+    });
+  }
+
+  if (ipGeo.isPrivateOrLocalIp(ip)) {
+    ipGeo.markPrivate(row);
+  } else if (!row.geo || row.geoStatus === "error") {
+    ipGeo.scheduleGeoLookup(ip);
+  }
 
   // prune stale
   for (const [k, v] of activeClients) {
     if (now - v.lastSeenMs > kClientPruneSec * 1000) activeClients.delete(k);
   }
+}
+
+function noteAccessDeny({ ip, machine, deviceId, mac, macs, token, decision }) {
+  const now = Date.now();
+  const entry = {
+    at: ts(new Date(now)),
+    atMs: now,
+    ip: String(ip || "").slice(0, 64),
+    machine: String(machine || "").slice(0, 80),
+    deviceId: String(deviceId || "").slice(0, 64),
+    mac: String(mac || "").slice(0, 32),
+    token: String(token || "").slice(0, 48),
+    reason: String(decision?.reason || "").slice(0, 200),
+    match: String(decision?.match || "").slice(0, 40),
+    mode: String(decision?.mode || "").slice(0, 16),
+    key: String(decision?.key || "").slice(0, 96),
+  };
+  recentAccessDenies.unshift(entry);
+  if (recentAccessDenies.length > kRecentDenyMax) recentAccessDenies.length = kRecentDenyMax;
+
+  const identified = !!(machine || deviceId || (macs && macs.length) || token);
+  const clientKey = identified
+    ? `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || (macs && macs[0]) || mac || token || "na"}`
+    : `ip:${ip}`;
+  let row = activeClients.get(clientKey);
+  if (!row) {
+    touchClient({
+      ip,
+      kind: "update",
+      pathName: "/update/access.json",
+      status: 200,
+      machine,
+      deviceId,
+      macs,
+      mac,
+      token,
+    });
+    row = activeClients.get(clientKey);
+  }
+  if (row) {
+    row.lastDenyAt = entry.at;
+    row.lastDenyAtMs = now;
+    row.lastDenyReason = entry.reason;
+    row.lastDenyMatch = entry.match;
+    row.lastAccessAllowed = false;
+    row.lastAccessAtMs = now;
+  }
+  logWarn(
+    `access deny ip=${entry.ip} match=${entry.match} mode=${entry.mode} machine=${entry.machine || "-"} device=${entry.deviceId || "-"} token=${entry.token ? "yes" : "no"} reason=${entry.reason}`,
+  );
+}
+
+function noteAccessAllow({ ip, machine, deviceId, mac, macs, token }) {
+  const now = Date.now();
+  const identified = !!(machine || deviceId || (macs && macs.length) || mac || token);
+  const clientKey = identified
+    ? `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || (macs && macs[0]) || mac || token || "na"}`
+    : `ip:${ip}`;
+  let row = activeClients.get(clientKey);
+  if (!row) {
+    // touchClient 通常已在 finish 时创建；此处兜底，避免竞态丢 lastAllow。
+    touchClient({
+      ip,
+      kind: "update",
+      pathName: "/update/access.json",
+      status: 200,
+      machine,
+      deviceId,
+      macs,
+      mac,
+      token,
+    });
+    row = activeClients.get(clientKey);
+  }
+  if (!row) return;
+  row.lastAllowAt = ts(new Date(now));
+  row.lastAllowAtMs = now;
+  row.lastAccessAllowed = true;
+  row.lastAccessAtMs = now;
+}
+
+/** 运维台门禁/租约一眼状态（服务端估算，非客户端本地真相）。 */
+function gateViewForRow(row, now, activeSec, banned, allowed, accessMode) {
+  const lastAllowMs = row.lastAllowAtMs || 0;
+  const lastDenyMs = row.lastDenyAtMs || 0;
+  const lastAccessAtMs = row.lastAccessAtMs || 0;
+  const leaseRemainSec =
+    lastAllowMs > 0
+      ? Math.max(0, Math.floor((lastAllowMs + kOnlineLeaseTtlMs - now) / 1000))
+      : 0;
+  let gate = "unknown";
+  if (banned || (accessMode === "allow" && !allowed)) {
+    gate = "policy_deny";
+  } else if (lastDenyMs > 0 && lastDenyMs >= lastAllowMs) {
+    gate = "denied";
+  } else if (lastAllowMs > 0) {
+    const recentAllow =
+      row.lastAccessAllowed === true && now - lastAccessAtMs <= Math.max(activeSec, 120) * 1000;
+    if (recentAllow) gate = "probe_ok";
+    else if (leaseRemainSec > 0) gate = "lease";
+    else gate = "lease_expired";
+  } else {
+    gate = "no_allow";
+  }
+  return {
+    gate,
+    leaseRemainSec,
+    lastAllowAt: row.lastAllowAt || "",
+    leaseTtlHours: 64,
+  };
 }
 
 function listActiveClients(activeSec) {
@@ -150,28 +454,57 @@ function listActiveClients(activeSec) {
   const online = [...activeClients.values()].filter((r) => r.lastSeenMs >= cutoff);
   const byIp = new Map();
   for (const row of online) byIp.set(row.ip, (byIp.get(row.ip) || 0) + 1);
+  const accessMode = access.getMode();
   return online
-    .map((row) => ({
-      key: row.key,
-      ip: row.ip,
-      geo: row.geo || "",
-      geoStatus: row.geoStatus || "",
-      machine: row.identified ? row.machine || "" : "",
-      deviceId: row.identified ? row.deviceId || "" : "",
-      device: row.identified ? row.device || "" : "",
-      appVersion: row.appVersion || "",
-      identified: !!row.identified,
-      sameIpOnline: byIp.get(row.ip) || 1,
-      knownOnIp: byIp.get(row.ip) || 1,
-      lastKind: row.lastKind || "",
-      lastPath: row.lastPath || "",
-      lastStatus: row.lastStatus || 0,
-      hits: row.hits || 0,
-      ua: row.ua || "",
-      firstSeenAt: ts(new Date(row.firstSeenMs)),
-      lastSeenAt: ts(new Date(row.lastSeenMs)),
-      idleSec: Math.max(0, Math.floor((now - row.lastSeenMs) / 1000)),
-    }))
+    .map((row) => {
+      const banned = access.isBanned({
+        machine: row.machine,
+        deviceId: row.deviceId,
+        macs: row.macs,
+        token: row.token,
+      });
+      const allowed = access.isAllowed({
+        machine: row.machine,
+        deviceId: row.deviceId,
+        macs: row.macs,
+        token: row.token,
+      });
+      const gv = gateViewForRow(row, now, activeSec, banned, allowed, accessMode);
+      return {
+        key: row.key,
+        ip: row.ip,
+        geo: ipGeo.displayGeo(row),
+        geoStatus: row.geoStatus || "",
+        machine: row.identified ? row.machine || "" : "",
+        deviceId: row.identified ? row.deviceId || "" : "",
+        device: row.identified ? row.device || "" : "",
+        mac: row.identified ? row.mac || "" : "",
+        macs: row.identified ? row.macs || [] : [],
+        token: row.identified ? row.token || "" : "",
+        appVersion: row.appVersion || "",
+        identified: !!row.identified,
+        sameIpOnline: byIp.get(row.ip) || 1,
+        knownOnIp: devicesByIp.get(row.ip)?.size || 0,
+        lastKind: row.lastKind || "",
+        lastPath: row.lastPath || "",
+        lastStatus: row.lastStatus || 0,
+        hits: row.hits || 0,
+        ua: row.ua || "",
+        firstSeenAt: ts(new Date(row.firstSeenMs)),
+        lastSeenAt: ts(new Date(row.lastSeenMs)),
+        idleSec: Math.max(0, Math.floor((now - row.lastSeenMs) / 1000)),
+        banned,
+        allowed,
+        accessMode,
+        lastDenyAt: row.lastDenyAt || "",
+        lastDenyReason: row.lastDenyReason || "",
+        lastDenyMatch: row.lastDenyMatch || "",
+        lastAllowAt: gv.lastAllowAt,
+        gate: gv.gate,
+        leaseRemainSec: gv.leaseRemainSec,
+        leaseTtlHours: gv.leaseTtlHours,
+      };
+    })
     .sort((a, b) => a.idleSec - b.idleSec || a.ip.localeCompare(b.ip));
 }
 
@@ -268,7 +601,7 @@ function statusBucket(code) {
 function isQuietForcePoll(status, kind, routedPath) {
   if (kind !== "update") return false;
   if (status !== 200 && status !== 404) return false;
-  return routedPath === "/update/force.json";
+  return routedPath === "/update/force.json" || routedPath === "/update/access.json";
 }
 
 function appendAccessLog(entry) {
@@ -278,7 +611,22 @@ function appendAccessLog(entry) {
     .catch((err) => logWarn(`access log write failed: ${err.message || err}`));
 }
 
-function recordRequest({ method, pathName, routedPath, ip, status, ms, kind, ua, machine, deviceId, appVersion }) {
+function recordRequest({
+  method,
+  pathName,
+  routedPath,
+  ip,
+  status,
+  ms,
+  kind,
+  ua,
+  machine,
+  deviceId,
+  appVersion,
+  macs,
+  mac,
+  token,
+}) {
   stats.requestsTotal += 1;
   stats.lastRequestAt = ts();
   if (stats.byKind[kind] != null) stats.byKind[kind] += 1;
@@ -289,7 +637,7 @@ function recordRequest({ method, pathName, routedPath, ip, status, ms, kind, ua,
 
   if (isLoopback(ip) && (kind === "health" || kind === "ready" || kind === "admin")) return;
 
-  touchClient({ ip, kind, pathName, status, ua, machine, deviceId, appVersion });
+  touchClient({ ip, kind, pathName, status, ua, machine, deviceId, appVersion, macs, mac, token });
 
   if (isQuietForcePoll(status, kind, routedPath)) return;
 
@@ -304,6 +652,7 @@ function recordRequest({ method, pathName, routedPath, ip, status, ms, kind, ua,
     ms,
     machine: machine || undefined,
     deviceId: deviceId || undefined,
+    token: token || undefined,
   });
   const level = status >= 500 ? logError : status >= 400 ? logWarn : logInfo;
   level(`${ip} ${method} ${pathName} → ${status} ${ms}ms`);
@@ -322,6 +671,9 @@ function attachRequestRecorder(req, res, meta) {
       machine: id.machine,
       deviceId: id.deviceId,
       appVersion: id.appVersion,
+      macs: id.macs,
+      mac: id.mac,
+      token: id.token,
     });
   });
 }
@@ -362,6 +714,45 @@ async function sendFile(req, res, filePath, contentType, { cacheSeconds = 0 } = 
 async function handleUpdate(req, res, routedPath) {
   if (req.method !== "GET") {
     sendJson(res, 405, { ok: false, error: "method not allowed" });
+    return;
+  }
+  if (routedPath === "/update/access.json") {
+    const id = clientIdentityFromReq(req);
+    const decision = access.evaluate({
+      machine: id.machine,
+      deviceId: id.deviceId,
+      macs: id.macs,
+      token: id.token,
+    });
+    if (!decision.allowed) {
+      noteAccessDeny({
+        ip: clientIp(req),
+        machine: id.machine,
+        deviceId: id.deviceId,
+        mac: id.mac,
+        macs: id.macs,
+        token: id.token,
+        decision,
+      });
+    } else {
+      noteAccessAllow({
+        ip: clientIp(req),
+        machine: id.machine,
+        deviceId: id.deviceId,
+        mac: id.mac,
+        macs: id.macs,
+        token: id.token,
+      });
+    }
+    sendJson(res, 200, {
+      ok: true,
+      allowed: !!decision.allowed,
+      mode: decision.mode,
+      reason: decision.reason || "",
+      key: decision.key || "",
+      match: decision.match || "",
+      at: decision.at || "",
+    });
     return;
   }
   if (routedPath === "/update/latest.json") {
@@ -465,21 +856,118 @@ async function handleAdmin(req, res, routedPath) {
   }
   if (routedPath === "/admin/clients" && req.method === "GET") {
     let activeSec = kClientActiveDefaultSec;
+    let refreshGeo = false;
     try {
       const u = new URL(req.url || "/", "http://127.0.0.1");
       const n = Number(u.searchParams.get("activeSec") || kClientActiveDefaultSec);
       if (Number.isFinite(n) && n > 0) activeSec = Math.min(3600, Math.floor(n));
+      refreshGeo = u.searchParams.get("refreshGeo") === "1";
     } catch {
       /* keep default */
     }
     const clients = listActiveClients(activeSec);
+    if (refreshGeo) {
+      ipGeo.invalidateAllAndRefresh();
+    } else {
+      for (const c of clients) {
+        if (c.geoStatus === "pending" || (!c.geo && c.geoStatus !== "private")) {
+          ipGeo.scheduleGeoLookup(c.ip);
+        }
+      }
+    }
+    const snap = access.snapshot();
+    const ipAlerts = listIpMultiDeviceAlerts();
     sendJson(res, 200, {
       ok: true,
       activeSec,
       count: clients.length,
-      geoProvider: "none",
+      geoProvider: ipGeo.provider,
       tracked: activeClients.size,
+      accessMode: snap.mode,
+      banCount: snap.banCount,
+      allowCount: snap.allowCount,
+      recentDenies: recentAccessDenies.slice(0, 20),
+      ipMultiDeviceAlerts: ipAlerts,
+      ipMultiDeviceAlertCount: ipAlerts.length,
       clients,
+    });
+    return;
+  }
+  if ((routedPath === "/admin/bans" || routedPath === "/admin/access") && req.method === "GET") {
+    const snap = access.snapshot();
+    sendJson(res, 200, {
+      ok: true,
+      mode: snap.mode,
+      count: snap.banCount,
+      banCount: snap.banCount,
+      allowCount: snap.allowCount,
+      bans: snap.bans,
+      allows: snap.allows,
+      path: snap.path,
+    });
+    return;
+  }
+  if ((routedPath === "/admin/bans" || routedPath === "/admin/access") && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const action = String(body?.action || "ban").trim().toLowerCase();
+    const identity = {
+      machine: body?.machine,
+      deviceId: body?.deviceId,
+      mac: body?.mac,
+      token: body?.token,
+      key: body?.key,
+      reason: body?.reason,
+      by: body?.bannedBy || body?.allowedBy || body?.by || "ops",
+    };
+    if (action === "setmode" || action === "set_mode" || action === "mode") {
+      const next = await access.setMode(body?.mode);
+      logInfo(`device access mode -> ${next}`);
+      sendJson(res, 200, { ok: true, action: "setMode", mode: next, ...access.snapshot() });
+      return;
+    }
+    if (action === "ban") {
+      const row = access.ban(identity);
+      await access.persist();
+      logInfo(`device ban add key=${row.key}`);
+      sendJson(res, 200, { ok: true, action: "ban", ban: row, ...access.snapshot() });
+      return;
+    }
+    if (action === "unban") {
+      const existed = access.unban(identity);
+      await access.persist();
+      logInfo(`device ban remove key=${existed?.key || identity.key || ""} found=${!!existed}`);
+      sendJson(res, 200, {
+        ok: true,
+        action: "unban",
+        removed: !!existed,
+        ban: existed,
+        ...access.snapshot(),
+      });
+      return;
+    }
+    if (action === "allow") {
+      const row = access.allow(identity);
+      await access.persist();
+      logInfo(`device allow add key=${row.key}`);
+      sendJson(res, 200, { ok: true, action: "allow", allow: row, ...access.snapshot() });
+      return;
+    }
+    if (action === "unallow" || action === "deny-allow" || action === "revoke") {
+      const existed = access.unallow(identity);
+      await access.persist();
+      logInfo(`device allow remove key=${existed?.key || identity.key || ""} found=${!!existed}`);
+      sendJson(res, 200, {
+        ok: true,
+        action: "unallow",
+        removed: !!existed,
+        allow: existed,
+        ...access.snapshot(),
+      });
+      return;
+    }
+    sendJson(res, 400, {
+      ok: false,
+      error: "action must be ban|unban|allow|unallow|setMode",
     });
     return;
   }
@@ -520,12 +1008,38 @@ const server = http.createServer(async (req, res) => {
       await handleAdmin(req, res, routedPath);
       return;
     }
-    if (routedPath.startsWith("/update/")) {
-      await handleUpdate(req, res, routedPath);
+    if (routedPath === "/v1/logs" || routedPath.startsWith("/v1/logs/")) {
+      const id = clientIdentityFromReq(req);
+      const decision = access.evaluate({
+        machine: id.machine,
+        deviceId: id.deviceId,
+        macs: id.macs,
+        token: id.token,
+      });
+      if (!decision.allowed) {
+        noteAccessDeny({
+          ip,
+          machine: id.machine,
+          deviceId: id.deviceId,
+          mac: id.mac,
+          macs: id.macs,
+          token: id.token,
+          decision,
+        });
+        sendJson(res, 403, {
+          ok: false,
+          error: "device access denied",
+          reason: decision.reason || "denied",
+          mode: decision.mode,
+          key: decision.key || "",
+        });
+        return;
+      }
+      await logUpload.handleLogRoutes(req, res, routedPath);
       return;
     }
-    if (routedPath === "/v1/logs" || routedPath.startsWith("/v1/logs/")) {
-      await logUpload.handleLogRoutes(req, res, routedPath);
+    if (routedPath.startsWith("/update/")) {
+      await handleUpdate(req, res, routedPath);
       return;
     }
     sendJson(res, 404, { ok: false, error: "not found" });
@@ -560,6 +1074,7 @@ process.on("SIGTERM", () => {
 await fs.mkdir(releaseRoot, { recursive: true });
 await fs.mkdir(path.dirname(accessLogPath), { recursive: true });
 await logUpload.ensureDirs();
+await access.load();
 
 server.listen(port, host, () => {
   logInfo(`xcat twms update server v${SERVER_VERSION} listening on http://${host}:${port}`);
@@ -568,6 +1083,11 @@ server.listen(port, host, () => {
   logInfo(`uploads: ${logUpload.outRoot} (devices -> ${logUpload.deviceBucketRoot})`);
   logInfo(`accept profiles: ${acceptProfiles.join(",") || "(any)"}`);
   logInfo(`access log: ${accessLogPath}`);
+  logInfo(`ip geo: ${ipGeo.provider} (multi-source; cache v2)`);
+  const snap = access.snapshot();
+  logInfo(
+    `device access: mode=${snap.mode} bans=${snap.banCount} allows=${snap.allowCount} (${snap.path})`,
+  );
   logInfo(`client default: http://xcat.work:${port}${basePath}`);
   logInfo(`admin: POST ${basePath}/admin/shutdown (loopback only)`);
 });

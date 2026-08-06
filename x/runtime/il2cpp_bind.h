@@ -14,9 +14,9 @@
 namespace x::runtime::il2cpp {
 
 // UnityEngine.Object / Component — shared across ports (TW Classic dump).
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E3FA20;  // remapped 2026-08-03
-constexpr uint32_t kRvaCompGetGo = 0x4E47E00;  // remapped 2026-08-03
-constexpr uint32_t kRvaObjGetName = 0x4E54D60;  // remapped 2026-08-03
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04 Resources.FindObjectsOfTypeAll(Type)
+constexpr uint32_t kRvaCompGetGo = 0x4E53330;              // remounted 2026-08-04 Component.get_gameObject
+constexpr uint32_t kRvaObjGetName = 0x4E60290;             // remounted 2026-08-04 Object.get_name
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
 using FnCompGo = void* (*)(void* comp, void* methodInfo);
@@ -46,8 +46,10 @@ using FnGcWbarrierSetField = void (*)(void* obj, void** field, void* value);
 // Shape resolve (metadata) — soft exports; missing ⇒ hash-only path.
 using FnClassGetFields = void* (*)(void* klass, void** iter);
 using FnFieldGetOffset = size_t (*)(void* field);
+using FnFieldGetName = const char* (*)(void* field);
 using FnFieldGetType = void* (*)(void* field);
 using FnFieldGetFlags = int (*)(void* field);
+using FnClassGetFieldFromName = void* (*)(void* klass, const char* name);
 using FnTypeGetType = int (*)(const void* type);
 using FnClassFromType = void* (*)(const void* type);
 using FnTypeGetClassOrElement = void* (*)(const void* type);
@@ -97,8 +99,10 @@ struct Exports {
     FnGcWbarrierSetField gcWbarrierSetField = nullptr;
     FnClassGetFields classGetFields = nullptr;
     FnFieldGetOffset fieldGetOffset = nullptr;
+    FnFieldGetName fieldGetName = nullptr;
     FnFieldGetType fieldGetType = nullptr;
     FnFieldGetFlags fieldGetFlags = nullptr;
+    FnClassGetFieldFromName classGetFieldFromName = nullptr;
     FnTypeGetType typeGetType = nullptr;
     FnClassFromType classFromType = nullptr;
     FnTypeGetClassOrElement typeGetClassOrElement = nullptr;
@@ -164,5 +168,19 @@ bool LooksLikeHeapPtr(void* p);
 void* ReadPtr(void* base, size_t off);
 uintptr_t ArrayLen(void* arr);
 void* ArrayAt(void* arr, uintptr_t i);
+
+// GC-safe managed-heap guards. A managed allocation performed on a worker
+// thread while the Unity main thread is frozen (client hang / session lost
+// mid-load) aborts the whole process with "Fatal error in GC: Collecting from
+// unknown thread": the collecting thread is not registered with the runtime.
+// These wrappers refuse the allocation unless we are ON the pump thread, or the
+// pump is actively ticking (client alive) — then the game's own GC drives the
+// collection from a registered thread. During a freeze they no-op (null/false)
+// and callers simply retry once the pump resumes. ALWAYS use these instead of
+// calling Get().objectNew / stringNew / runtimeClassInit directly.
+bool ManagedAllocSafe();
+void* AllocObject(void* klass);          // guarded il2cpp_object_new
+void* NewString(const char* utf8);       // guarded il2cpp_string_new
+bool RuntimeClassInit(void* klass);      // guarded il2cpp_runtime_class_init
 
 }  // namespace x::runtime::il2cpp

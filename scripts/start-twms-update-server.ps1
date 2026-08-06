@@ -16,6 +16,11 @@ Write-Host "  local probe: http://127.0.0.1:$Port/twms/health"
 Write-Host "Stop: Ctrl+C or scripts\stop-twms-update-server.ps1"
 Write-Host ""
 
+$fw = Join-Path $Root "publish_site\ensure-firewall.ps1"
+if (Test-Path $fw) {
+    try { & $fw } catch { Write-Warning "firewall ensure skipped: $($_.Exception.Message)" }
+}
+
 Set-Location $Root
 node $Script --host $HostBind --port $Port --base-path /twms `
   --release-root artifacts\release `
