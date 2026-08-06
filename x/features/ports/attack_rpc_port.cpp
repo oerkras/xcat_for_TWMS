@@ -31,29 +31,58 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Session 方法宿主 → ResolveNetworkManagerKlass；单例壳 → ResolveNetworkManagerFacadeKlass
 constexpr char kOutPacketClass[] =
-    "f07686cc7a01760c9166b2cf7a72f4ac7c084f1ee39bd1c3bdc42c351e884bb";
+    "b2cb1e0adcf26c5021bc6b1880a32e838d1eb783e3880f4a70e70990079a04b";
+constexpr char kHashUserClass[] =
+    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";
+constexpr char kHashSecurityClient[] =
+    "cf990184167a3debe30b85ee608efab18ffc750676a5f79617009d0f56bec8d";
 
-// P0b / P0c RVAs — remounted 2026-08-04
-constexpr uint32_t kRvaOutPacketCreate = 0x1CC22D0;
-constexpr uint32_t kRvaEncode1Byte = 0x1CCE9E0;
-constexpr uint32_t kRvaEncode1Bool = 0x1CCEAC0;
-constexpr uint32_t kRvaEncode2Ushort = 0x1CCEC50;
-constexpr uint32_t kRvaEncode2Short = 0x1CCEBD0;
-constexpr uint32_t kRvaEncode4Int = 0x1CCECE0;
-constexpr uint32_t kRvaEncode4Uint = 0x1CCED60;
-constexpr uint32_t kRvaEncodeVector2 = 0x1CCF8B0;
+// P0b / P0c RVAs — remounted 2026-08-04；解析优先 hash/plain（见下方 kHash*）
+constexpr uint32_t kRvaOutPacketCreate = 0x1CC63D0;
+constexpr uint32_t kRvaEncode1Byte = 0x1CD2AE0;
+constexpr uint32_t kRvaEncode1Bool = 0x1CD2BC0;
+constexpr uint32_t kRvaEncode2Ushort = 0x1CD2D50;
+constexpr uint32_t kRvaEncode2Short = 0x1CD2CD0;
+constexpr uint32_t kRvaEncode4Int = 0x1CD2DE0;
+constexpr uint32_t kRvaEncode4Uint = 0x1CD2E60;
+constexpr uint32_t kRvaEncodeVector2 = 0x1CD39B0;
 // 官方门：Network_SendOutPacket（this=facade）
 //   → HashSet<ushort>.Contains(opcode@pkt+0x20) → Session.SendPacket（[facade+0x10]）
 // 2026-08-03 BIN：直调 Session.SendPacket 旁路 HashSet → 第 3 次 forge 后 ~109ms Disconnected
 // （与 sellbag「错包+Session.Send → 105ms」同型；KickSniff verdict=lean_local_or_soft）。
-constexpr uint32_t kRvaNmSendPacket = 0x1CC3EE0;  // SendOutPacket 内部落点；勿直调
-constexpr uint32_t kRvaSendOutPacket = 0x1CC23D0;  // remounted 2026-08-04；旧 0x1CB7CE0
-constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDC2010;  // remounted 2026-08-04 (int)(_updateTime*1000)
+constexpr uint32_t kRvaNmSendPacket = 0x1CC7FE0;  // remounted 2026-08-06 · Session.SendPacket
+constexpr uint32_t kRvaSendOutPacket = 0x1CC64D0;  // remounted 2026-08-06
+constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDC3D20;  // remounted 2026-08-06 get_GetUpdateTime
 // 延后踢对策：对齐 TryDoingNormalAttack 发包前最小本地态
-//   SetAttackAction(lu, action, aux, skill=null, 0) @0xFDAF10
-//   CollectAttackPacket(50) @0x3C500A0（Tap 旁路；SendOut 静态无直调）
-constexpr uint32_t kRvaSetAttackAction = 0xFDAF10;  // remounted 2026-08-04；旧 0xFD39C0
-constexpr uint32_t kRvaCollectAttackPacket = 0x3C500A0;  // remounted 2026-08-04；旧 0x3C44C10
+//   SetAttackAction(lu, action, aux, skill=null, 0) @0xFDCD80
+//   CollectAttackPacket(50) @0x3C54070（Tap 旁路；SendOut 静态无直调）
+constexpr uint32_t kRvaSetAttackAction = 0xFDCD80;  // remounted 2026-08-04；旧 0xFD39C0
+constexpr uint32_t kRvaCollectAttackPacket = 0x3C54070;  // remounted 2026-08-04；旧 0x3C44C10
+
+constexpr char kHashOutCreate[] =
+    "d5cef5f625ea2385cd9eaaf8b9a49342353732f8534da040cfa123e58f0ed27";
+constexpr char kHashEncode1Byte[] =
+    "e8c10cdad1bc8d76acb9eec60662b480fca2022b3f2e7c27220303c60151bde";
+constexpr char kHashEncode1Bool[] =
+    "e9dab7905d38fa77e77e87682f6e1b5ea8610234f29cf70c62c090597bd87c3";
+constexpr char kHashEncode2Ushort[] =
+    "f7190998e9e85f13d196eb32fd01836c30989dc882af38bed9a5edad6635109";
+constexpr char kHashEncode2Short[] =
+    "df78a86c45219f32ebf721c10bf250e452884e246cc51e93a9f214c9336077a";
+constexpr char kHashEncode4Int[] =
+    "aef28919a960e8ea6d3123e94e8645acd249c41141b5432517483ebb8b8e794";
+constexpr char kHashEncode4Uint[] =
+    "c0b0cc4dd5d8f33ca2d216e88d4eb65e318ce5002c0bf1b77704fb49a681df2";
+constexpr char kHashEncodeVector2[] =
+    "a1c03b7e4f519c7ecc5077a51cbc6b8fc1b5ace2a4c3a09135f093ef547edaa";
+constexpr char kHashSendOutPacket[] =
+    "daa9638dc3f216de3f2938f7e4fc03075fba765187bfd400bec5119e32f53c9";
+constexpr char kHashGetUpdateTime[] =
+    "fef21c96e8a274f3b1aa04ac1c45bd9c6c4364275902033cf3906e5ffb72bfd";  // get_GetUpdateTime
+constexpr char kHashSetAttackAction[] =
+    "c34710751a49f54b005e9b33044bd2b751e4babae00be95aa206196ee8fd890";
+constexpr char kHashCollectAttackPacket[] =
+    "ca3747b3c23c4547292001735f784296998b87743d2acb022a5ab7bdca851b3";
 // 探针安全：单次勾选最多成功发包；5 刀后再开第 6 刀仍 ~0.9s 踢 → 先收到 2。
 // 每段开启最多 2 刀；进程内累计再硬封顶（BIN：重开 UI 清零后第 6 刀 ~111ms 静默断线）。
 constexpr int kAutoStopAfterOk = 2;
@@ -127,6 +156,10 @@ MethodInfoHead* gMiE4 = nullptr;
 MethodInfoHead* gMiE4U = nullptr;
 MethodInfoHead* gMiEV2 = nullptr;
 MethodInfoHead* gMiSendOut = nullptr;
+MethodInfoHead* gMiSetAttackAction = nullptr;
+MethodInfoHead* gMiCollectAttackPacket = nullptr;
+FnSetAttackAction gSetAttackAction = nullptr;
+FnCollectAttackPacket gCollectAttackPacket = nullptr;
 
 std::atomic<bool> gEnabled{false};
 std::atomic<int> gMaxMobs{1};
@@ -294,17 +327,37 @@ uint8_t ReadU8(void* obj, size_t off) {
 
 MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva);  // 前向声明：GetGameUpdateTimeMs 用
 
+MethodInfoHead* ResolveMi(void* klass, uint32_t rva, const x::runtime::il2cpp_method::MethodShape& shape,
+                          const char* plain, const char* hash) {
+    if (!klass) return nullptr;
+    const auto mr = x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, hash);
+    if (mr.method) return reinterpret_cast<MethodInfoHead*>(mr.method);
+    return FindMethodByRva(klass, rva);
+}
+
+template <typename Fn>
+Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
+    if (mi && mi->methodPointer) return reinterpret_cast<Fn>(mi->methodPointer);
+    return AtRva<Fn>(rva);
+}
+
 int GetGameUpdateTimeMs() {
     // 与 skill_port 同钟：WorldManager.GetUpdateTime / static _updateTime*1000。
-    if (!gGetUpdateTime && gGA) {
-        gGetUpdateTime = AtRva<FnGetUpdateTime>(kRvaWorldManagerGetUpdateTime);
-    }
     if (!gWorldManagerKlass) {
         gWorldManagerKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
     }
     if (!gMiGetUpdateTime && gWorldManagerKlass) {
-        gMiGetUpdateTime = FindMethodByRva(gWorldManagerKlass, kRvaWorldManagerGetUpdateTime);
+        using namespace x::runtime::il2cpp_method;
+        constexpr MethodShape kUt{0, TypeKind::I32, true, true, {}};
+        gMiGetUpdateTime = ResolveMi(gWorldManagerKlass, kRvaWorldManagerGetUpdateTime, kUt,
+                                     "GetUpdateTime", kHashGetUpdateTime);
+        if (!gMiGetUpdateTime)
+            gMiGetUpdateTime =
+                ResolveMi(gWorldManagerKlass, kRvaWorldManagerGetUpdateTime, kUt,
+                          "get_GetUpdateTime", kHashGetUpdateTime);
     }
+    if (!gGetUpdateTime)
+        gGetUpdateTime = FnFromMi<FnGetUpdateTime>(gMiGetUpdateTime, kRvaWorldManagerGetUpdateTime);
     if (gGetUpdateTime) {
         int t = 0;
         __try {
@@ -351,24 +404,38 @@ FnSendOut ResolveSendOutFn() {
 // 失败只打日志，不阻断 forge（避免 SetAttackAction 参数漂导致探针哑火）。
 void TryLocalAttackPrereq(void* localUser, int32_t actionId) {
     if (!gGA) return;
-    if (LooksLikeHeapPtr(localUser)) {
-        auto* setAct = AtRva<FnSetAttackAction>(kRvaSetAttackAction);
-        if (setAct) {
-            bool ok = false;
-            __try {
-                // IDA 实锤：NormalAttack 位点 skill=null、第 5 参解混淆=0；
-                // action/aux 取自栈槽；探针用 Encode 同款 action 低字节 + aux=0。
-                ok = setAct(localUser, actionId, 0, nullptr, 0, nullptr);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                ok = false;
-            }
-            x::runtime::LogI("AttackRpc", "SetAttackAction action=%d ok=%d", actionId, ok ? 1 : 0);
-        }
+    if (!gSetAttackAction) {
+        void* userKlass = x::runtime::il2cpp::FindClass("", kHashUserClass);
+        using namespace x::runtime::il2cpp_method;
+        constexpr MethodShape kSa{4, TypeKind::Bool, true, true,
+                                  {TypeKind::I32, TypeKind::I32, TypeKind::Ptr, TypeKind::I32}};
+        gMiSetAttackAction =
+            ResolveMi(userKlass, kRvaSetAttackAction, kSa, "SetAttackAction", kHashSetAttackAction);
+        gSetAttackAction = FnFromMi<FnSetAttackAction>(gMiSetAttackAction, kRvaSetAttackAction);
     }
-    auto* collect = AtRva<FnCollectAttackPacket>(kRvaCollectAttackPacket);
-    if (collect) {
+    if (!gCollectAttackPacket) {
+        void* sc = x::runtime::il2cpp::FindClass("", kHashSecurityClient);
+        using namespace x::runtime::il2cpp_method;
+        constexpr MethodShape kCol{1, TypeKind::Void, true, false, {TypeKind::Any}};
+        gMiCollectAttackPacket = ResolveMi(sc, kRvaCollectAttackPacket, kCol, "CollectAttackPacket",
+                                           kHashCollectAttackPacket);
+        gCollectAttackPacket =
+            FnFromMi<FnCollectAttackPacket>(gMiCollectAttackPacket, kRvaCollectAttackPacket);
+    }
+    if (LooksLikeHeapPtr(localUser) && gSetAttackAction) {
+        bool ok = false;
         __try {
-            collect(static_cast<uint16_t>(kOpcodeNormalAttack), nullptr);
+            // IDA 实锤：NormalAttack 位点 skill=null、第 5 参解混淆=0；
+            // action/aux 取自栈槽；探针用 Encode 同款 action 低字节 + aux=0。
+            ok = gSetAttackAction(localUser, actionId, 0, nullptr, 0, gMiSetAttackAction);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ok = false;
+        }
+        x::runtime::LogI("AttackRpc", "SetAttackAction action=%d ok=%d", actionId, ok ? 1 : 0);
+    }
+    if (gCollectAttackPacket) {
+        __try {
+            gCollectAttackPacket(static_cast<uint16_t>(kOpcodeNormalAttack), gMiCollectAttackPacket);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
@@ -407,6 +474,8 @@ bool ResolveApi() {
 // Worker 调 Rebind 时必须走泵；已在主线程 job 内则直调（禁嵌套 InvokeAndWait）。
 void* SafeFindAll(void* typeObj) {
     if (!gFindAll || !typeObj) return nullptr;
+    // 卸图空窗禁扫（与 managed_main map-transit 同口径；直调 gFindAll 不经托管闸）。
+    if (!world::IsPlayReady()) return nullptr;
     if (x::runtime::main_thread::IsOnPumpThread()) {
         void* arr = nullptr;
         __try {
@@ -434,10 +503,14 @@ bool Rebind(DWORD now) {
     if (!gOutPacketKlass) gOutPacketKlass = FindClass(kOutPacketClass);
     if (!gOutPacketKlass) gOutPacketKlass = FindClass("OutPacket");
     if (!gWorldManagerKlass) gWorldManagerKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
-    if (!gGetUpdateTime) gGetUpdateTime = AtRva<FnGetUpdateTime>(kRvaWorldManagerGetUpdateTime);
     if (!gMiGetUpdateTime && gWorldManagerKlass) {
-        gMiGetUpdateTime = FindMethodByRva(gWorldManagerKlass, kRvaWorldManagerGetUpdateTime);
+        using namespace x::runtime::il2cpp_method;
+        constexpr MethodShape kUt{0, TypeKind::I32, true, true, {}};
+        gMiGetUpdateTime = ResolveMi(gWorldManagerKlass, kRvaWorldManagerGetUpdateTime, kUt,
+                                     "GetUpdateTime", kHashGetUpdateTime);
     }
+    if (!gGetUpdateTime)
+        gGetUpdateTime = FnFromMi<FnGetUpdateTime>(gMiGetUpdateTime, kRvaWorldManagerGetUpdateTime);
 
     if (gNm && !LooksLikeSession(gNm)) gNm = nullptr;
     if (gNmFacade && !LooksLikeFacade(gNmFacade)) gNmFacade = nullptr;
@@ -482,14 +555,34 @@ bool Rebind(DWORD now) {
     }
 
     if (gOutPacketKlass) {
-        if (!gMiCreate) gMiCreate = FindMethodByRva(gOutPacketKlass, kRvaOutPacketCreate);
-        if (!gMiE1) gMiE1 = FindMethodByRva(gOutPacketKlass, kRvaEncode1Byte);
-        if (!gMiE1Bool) gMiE1Bool = FindMethodByRva(gOutPacketKlass, kRvaEncode1Bool);
-        if (!gMiE2U) gMiE2U = FindMethodByRva(gOutPacketKlass, kRvaEncode2Ushort);
-        if (!gMiE2S) gMiE2S = FindMethodByRva(gOutPacketKlass, kRvaEncode2Short);
-        if (!gMiE4) gMiE4 = FindMethodByRva(gOutPacketKlass, kRvaEncode4Int);
-        if (!gMiE4U) gMiE4U = FindMethodByRva(gOutPacketKlass, kRvaEncode4Uint);
-        if (!gMiEV2) gMiEV2 = FindMethodByRva(gOutPacketKlass, kRvaEncodeVector2);
+        using namespace x::runtime::il2cpp_method;
+        constexpr MethodShape kCreate{1, TypeKind::Ptr, true, false, {TypeKind::Any}};
+        constexpr MethodShape kEnc{1, TypeKind::Void, true, false, {TypeKind::Any}};
+        constexpr MethodShape kEnc4{1, TypeKind::Void, true, false, {TypeKind::I32}};
+        constexpr MethodShape kEncV2{1, TypeKind::Void, true, false, {TypeKind::Any}};
+        if (!gMiCreate)
+            gMiCreate =
+                ResolveMi(gOutPacketKlass, kRvaOutPacketCreate, kCreate, "Create", kHashOutCreate);
+        if (!gMiE1)
+            gMiE1 =
+                ResolveMi(gOutPacketKlass, kRvaEncode1Byte, kEnc, "Encode1", kHashEncode1Byte);
+        if (!gMiE1Bool)
+            gMiE1Bool =
+                ResolveMi(gOutPacketKlass, kRvaEncode1Bool, kEnc, nullptr, kHashEncode1Bool);
+        if (!gMiE2U)
+            gMiE2U =
+                ResolveMi(gOutPacketKlass, kRvaEncode2Ushort, kEnc, nullptr, kHashEncode2Ushort);
+        if (!gMiE2S)
+            gMiE2S =
+                ResolveMi(gOutPacketKlass, kRvaEncode2Short, kEnc, nullptr, kHashEncode2Short);
+        if (!gMiE4)
+            gMiE4 = ResolveMi(gOutPacketKlass, kRvaEncode4Int, kEnc4, "Encode4", kHashEncode4Int);
+        if (!gMiE4U)
+            gMiE4U =
+                ResolveMi(gOutPacketKlass, kRvaEncode4Uint, kEnc, nullptr, kHashEncode4Uint);
+        if (!gMiEV2)
+            gMiEV2 = ResolveMi(gOutPacketKlass, kRvaEncodeVector2, kEncV2, "Encode",
+                               kHashEncodeVector2);
     }
     if (gFacadeKlass && !gMiSendOut) {
         // bool(OutPacket) on NetworkManager facade — HashSet 门后再 Session.SendPacket。
@@ -500,10 +593,8 @@ bool Rebind(DWORD now) {
         kSend.walkParents = true;
         kSend.param[0] = x::runtime::il2cpp_method::TypeKind::Ptr;
         if (gOutPacketKlass) kSend.paramKlass[0] = gOutPacketKlass;
-        const auto mr =
-            x::runtime::il2cpp_method::FindMethodCached(gFacadeKlass, kRvaSendOutPacket, kSend);
-        gMiSendOut = reinterpret_cast<MethodInfoHead*>(mr.method);
-        if (!gMiSendOut) gMiSendOut = FindMethodByRva(gFacadeKlass, kRvaSendOutPacket);
+        gMiSendOut =
+            ResolveMi(gFacadeKlass, kRvaSendOutPacket, kSend, "SendOutPacket", kHashSendOutPacket);
         if (gMiSendOut) {
             x::runtime::LogI("AttackRpc", "Network.SendOutPacket MethodInfo ok");
         } else {

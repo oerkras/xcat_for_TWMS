@@ -191,7 +191,10 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
                 sound::UiClick();
                 LaunchPanel_CancelPendingAutoLaunch(ui);
                 ui.status = attachMode ? "已取消自动监视 — 需要时再点「监视」"
-                                       : "已取消自动换票 — 需要时再点「启动」";
+                                       : (attach_inject::GetLaunchMode() ==
+                                                  attach_inject::LaunchMode::OneClickLogin
+                                              ? "已取消自动启动 — 需要时再点「启动」"
+                                              : "已取消自动换票 — 需要时再点「启动」");
                 xcat::log::Info("App", "user cancelled pending auto-launch (status bar)");
             } else if (attachMode) {
                 if (!attach_inject::IsWatching()) {

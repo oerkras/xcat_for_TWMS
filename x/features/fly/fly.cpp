@@ -1,15 +1,14 @@
-// Classic TWMS — mouse fly.
-// Mode A: LMB edge → hop (fill+Doing).
-// Mode B: armed → hop toward cursor on self-CD (follow).
-// 防漂：Unity Camera/Transform 无游戏哈希 → FindMethodResolved(明文→RVA/kind)；日志 methods hits=4/4。
+// Classic TWMS — mouse fly：Impact（Attr=2）+ 武装期 fh-ban。Coast / ApplyImpact 旁路已拆除。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "fly.h"
 
 #include "../ports/teleport_port.h"
+#include "../ports/fly_fh_ban.h"
 #include "../ports/action_gate.h"
 #include "../ports/world_port.h"
+#include "../invuln/invuln.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -35,14 +34,15 @@ namespace {
 // 2026-08-03 误把旧 0x4DDEF70 映到四参版 0x4DDD340，且 eye 误用 Mono=0
 //（Unity 枚举：Left=0 Right=1 Mono=2）。三参包装在 IDA 内硬编码 eye=2。
 // 正确孪生：ScreenToWorldPoint_…824 @ 0x4DDD5F0。
-// get_position 走包装 @0x4E62790（Injected 桩不转发参数）。
-constexpr uint32_t kRvaCamGetMain = 0x4DE8FF0;         // remounted 2026-08-04 Camera.get_main
-constexpr uint32_t kRvaCamScreenToWorld = 0x4DE8B20;  // remounted 2026-08-04 Camera.ScreenToWorldPoint(Vector3)
-constexpr uint32_t kRvaCompGetTransform = 0x4E53250;  // remounted 2026-08-04 Component.get_transform
-constexpr uint32_t kRvaTfGetPos = 0x4E6DCC0;          // remounted 2026-08-04 Transform.get_position
+// get_position 走包装（Injected 桩不转发参数）；STW 必须 arity=1 三参重载。
+constexpr uint32_t kRvaCamGetMain = 0x4DECFC0;         // remounted 2026-08-06 Camera.get_main
+constexpr uint32_t kRvaCamScreenToWorld = 0x4DECAF0;  // remounted 2026-08-06 Camera.ScreenToWorldPoint(Vector3)
+constexpr uint32_t kRvaCompGetTransform = 0x4E57220;  // remounted 2026-08-06 Component.get_transform
+constexpr uint32_t kRvaTfGetPos = 0x4E71C90;          // remounted 2026-08-06 Transform.get_position
 
-constexpr DWORD kWorkerSleepMs = 1;
-constexpr DWORD kDefaultHopCdMs = 16;
+// 1ms 空转会放大 F6 跟飞对主泵的压力；8ms 足够跟手且显著减负。
+constexpr DWORD kWorkerSleepMs = 8;
+constexpr DWORD kDefaultHopCdMs = 120;
 // 跟随飞：用客户区像素判「鼠标是否动了」。世界坐标死区会在相机跟随后把同一屏点
 // STW 漂进 12 内 → 误判静止并 hover 钉旧点，表现为抖动、不跟鼠标。
 constexpr float kScreenStillPx = 3.f;
@@ -80,7 +80,7 @@ std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
 std::atomic<bool> gArmed{false};
 std::atomic<bool> gExternalPause{false};
-std::atomic<unsigned> gMode{1};  // 0=A 1=B
+std::atomic<unsigned> gMode{0};  // 0=NockBack 1=SetImpactNext
 std::atomic<unsigned> gHopCdMs{kDefaultHopCdMs};
 
 bool gF6WasDown = false;
@@ -103,8 +103,7 @@ void ClearFollowTrack() {
     gHaveLastClient = false;
 }
 
-// 换图 / 重新进 PlayReady：丢掉旧图落点与屏点门控，并清瞬移自冷，立刻允许首跳。
-// 假到位由 teleport IsPhysicsReady / RelPos 收态挡住；此处不拉长 F6 起飞手感。
+// 换图 / 重新进 PlayReady：丢掉旧图落点与屏点门控，立刻允许首跳。
 void NoteMapLandGate(DWORD now) {
     const bool play = ports::world::IsPlayReady();
     const int mapId = play ? ports::world::GetMapId() : -1;
@@ -113,7 +112,6 @@ void NoteMapLandGate(DWORD now) {
     if (rose || mapChanged) {
         ClearFollowTrack();
         gLastHopMs = 0;
-        ports::teleport::ClearNativeSelfCd();
         x::runtime::LogI("Fly", "map land gate open why=%s map=%d", rose ? "play_ready" : "map_id",
                          mapId);
     }
@@ -127,7 +125,15 @@ void NoteMapLandGate(DWORD now) {
     (void)now;
 }
 
-const char* ModeName(unsigned mode) { return mode == 1u ? "follow" : "click"; }
+const char* ModeName(unsigned mode) {
+    return mode == 1u ? "impact_setnext" : "impact_nockback";
+}
+
+ports::teleport::ImpactRoute CurrentRoute() {
+    return gMode.load(std::memory_order_acquire) == 1u
+               ? ports::teleport::ImpactRoute::SetImpactNext
+               : ports::teleport::ImpactRoute::NockBack;
+}
 
 template <typename T>
 T AtRva(uint32_t rva) {
@@ -379,33 +385,105 @@ bool HopReady(DWORD now) {
     return !gLastHopMs || (now - gLastHopMs) >= cd;
 }
 
+// 跟飞：STW + Impact 同一主线程 job，避免每 hop 两次 InvokeAndWait 卡帧。
+struct FollowDriveJob {
+    float unitySx = 0.f;
+    float unitySy = 0.f;
+    unsigned impactMode = 1;  // 0=NockBack 1=SetImpactNext
+    float outX = 0.f;
+    float outY = 0.f;
+    bool stwOk = false;
+    bool hopOk = false;
+};
+
+void FollowDriveJobFn(void* user) {
+    auto* job = reinterpret_cast<FollowDriveJob*>(user);
+    if (!job) return;
+    job->stwOk = false;
+    job->hopOk = false;
+
+    StwJob stw{};
+    stw.unitySx = job->unitySx;
+    stw.unitySy = job->unitySy;
+    ScreenToWorldJobFn(&stw);
+    if (!stw.ok) return;
+    job->outX = stw.outX;
+    job->outY = stw.outY;
+    job->stwOk = true;
+
+    ports::teleport::ImpactTowardOpts opts{};
+    opts.quietLog = true;
+    opts.adaptive = false;
+    opts.leadSec = 0.f;
+    opts.maxSegPx = 320.f;
+    opts.minSegPx = 8.f;
+    opts.maxSpeed = 1600.f;
+    opts.speedScale = 4.f;
+    const auto route = job->impactMode == 1u ? ports::teleport::ImpactRoute::SetImpactNext
+                                             : ports::teleport::ImpactRoute::NockBack;
+    job->hopOk = ports::teleport::ImpactImpulseToward(job->outX, job->outY, route, opts);
+}
+
+bool ClientToUnityScreen(float* outSx, float* outSy) {
+    if (!outSx || !outSy) return false;
+    HWND hwnd = GameHwnd();
+    if (!hwnd) return false;
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) return false;
+    if (!ScreenToClient(hwnd, &cursor)) return false;
+    RECT rc{};
+    if (!GetClientRect(hwnd, &rc)) return false;
+    const int cw = rc.right - rc.left;
+    const int ch = rc.bottom - rc.top;
+    if (cw <= 0 || ch <= 0) return false;
+    *outSx = static_cast<float>(cursor.x) * gClickScale;
+    *outSy = static_cast<float>(ch - cursor.y) * gClickScale;
+    return true;
+}
+
 bool HopTo(float wx, float wy, const char* tag, bool quiet) {
     if (!std::isfinite(wx) || !std::isfinite(wy)) return false;
     if (!ports::world::IsPlayReady()) {
         x::runtime::LogW("Fly", "hop skip not_play_ready");
         return false;
     }
-    const DWORD cd = HopCdMs();
-    ports::teleport::SetNativeCooldownMs(cd);
-    if (!ports::teleport::TeleportNativeSkillCall(wx, wy, 0, false)) {
+    // 产品门禁：飞需无敌；不偷偷 SetDesired。
+    if (!x::features::invuln::IsEnabled()) {
         if (!quiet) {
-            x::runtime::LogW("Fly", "hop fail tag=%s to=(%.0f,%.0f) snap=0 fh=0",
-                             tag ? tag : "?", wx, wy);
+            x::runtime::LogW("Fly", "hop refuse invuln_off tag=%s", tag ? tag : "?");
         }
         return false;
     }
-    gLastHopMs = GetTickCount();
+    const DWORD now = GetTickCount();
+    const unsigned mode = gMode.load(std::memory_order_acquire);
+    const char* driveName = ModeName(mode);
+    ports::teleport::ImpactTowardOpts opts{};
+    opts.quietLog = quiet;
+    opts.adaptive = false;
+    opts.leadSec = 0.f;
+    opts.maxSegPx = 320.f;
+    opts.minSegPx = 8.f;
+    opts.maxSpeed = 1600.f;
+    opts.speedScale = 4.f;
+    if (!ports::teleport::ImpactImpulseToward(wx, wy, CurrentRoute(), opts)) {
+        if (!quiet) {
+            x::runtime::LogW("Fly", "hop fail tag=%s drive=%s to=(%.0f,%.0f)", tag ? tag : "?",
+                             driveName, wx, wy);
+        }
+        return false;
+    }
+    gLastHopMs = now;
     gLastHopWx = wx;
     gLastHopWy = wy;
     gHaveLastHop = true;
     if (!quiet) {
-        x::runtime::LogI("Fly", "hop ok tag=%s to=(%.0f,%.0f) snap=0 fh=0", tag ? tag : "?", wx,
-                         wy);
+        x::runtime::LogI("Fly", "hop ok tag=%s drive=%s to=(%.0f,%.0f)", tag ? tag : "?",
+                         driveName, wx, wy);
     } else {
-        const DWORD now = gLastHopMs;
         if (!gLastFollowLogMs || now - gLastFollowLogMs > 1000) {
             gLastFollowLogMs = now;
-            x::runtime::LogI("Fly", "hover hold to=(%.0f,%.0f) cd=%ums", wx, wy, cd);
+            x::runtime::LogI("Fly", "follow hold drive=%s to=(%.0f,%.0f) cd=%ums", driveName, wx,
+                             wy, HopCdMs());
         }
     }
     return true;
@@ -496,6 +574,8 @@ void PollFollowMouse() {
 
     const DWORD now = GetTickCount();
     if (!HopReady(now)) return;
+    // 主泵拥堵时宁可不跟这一拍，避免 job timeout 螺旋卡死。
+    if (runtime::main_thread::IsCongested()) return;
 
     long cx = 0, cy = 0;
     if (!ReadClientCursor(&cx, &cy)) return;
@@ -508,33 +588,58 @@ void PollFollowMouse() {
         return;
     }
 
-    float wx = 0.f, wy = 0.f;
-    if (!ScreenToWorld(&wx, &wy, /*verbose=*/false)) {
+    if (!ports::world::IsPlayReady()) return;
+    if (!x::features::invuln::IsEnabled()) return;
+    if (!runtime::main_thread::Ensure()) return;
+
+    float sx = 0.f, sy = 0.f;
+    if (!ClientToUnityScreen(&sx, &sy)) return;
+
+    FollowDriveJob job{};
+    job.unitySx = sx;
+    job.unitySy = sy;
+    job.impactMode = gMode.load(std::memory_order_acquire);
+    if (!runtime::main_thread::InvokeAndWait(&FollowDriveJobFn, &job, 800,
+                                            runtime::main_thread::JobPrio::High)) {
+        if (!gLastFollowLogMs || now - gLastFollowLogMs > 1000) {
+            gLastFollowLogMs = now;
+            x::runtime::LogW("Fly", "follow drive pump timeout");
+        }
+        return;
+    }
+    if (!job.stwOk) {
         if (!gLastFollowLogMs || now - gLastFollowLogMs > 1000) {
             gLastFollowLogMs = now;
             x::runtime::LogW("Fly", "follow ScreenToWorld fail");
         }
-        // STW 失败也不要 5ms 狂钉；等下次鼠标再动或软重钉窗口。
         if (gHaveLastHop && (now - gLastHopMs) >= kHoverRepinMs) {
             (void)HopTo(gLastHopWx, gLastHopWy, "Bh", /*quiet=*/true);
         }
         return;
     }
     NoteClientCursor(cx, cy);
-    (void)HopTo(wx, wy, "B", /*quiet=*/false);
+    if (!job.hopOk) return;
+    gLastHopMs = now;
+    gLastHopWx = job.outX;
+    gLastHopWy = job.outY;
+    gHaveLastHop = true;
+    if (!gLastFollowLogMs || now - gLastFollowLogMs > 1000) {
+        gLastFollowLogMs = now;
+        x::runtime::LogI("Fly", "follow hold drive=%s to=(%.0f,%.0f) cd=%ums",
+                         ModeName(job.impactMode), job.outX, job.outY, HopCdMs());
+    }
 }
 
 DWORD WINAPI Worker(LPVOID) {
-    x::runtime::LogI("Fly", "worker start Camera.STW scale=%.2f cd=%ums", gClickScale, HopCdMs());
+    x::runtime::LogI("Fly", "worker start Camera.STW scale=%.2f cd=%ums drive=impact fh-ban",
+                     gClickScale, HopCdMs());
     while (!gWorkerStop.load(std::memory_order_acquire)) {
         const DWORD now = GetTickCount();
         NoteMapLandGate(now);
         PollF6();
-        if (gMode.load(std::memory_order_acquire) == 1u) {
-            PollFollowMouse();
-        } else {
-            PollLmbHop();
-        }
+        // Impact 跟随；禁挂台由 F6 SetArmed 负责。
+        PollFollowMouse();
+        PollLmbHop();
         Sleep(kWorkerSleepMs);
     }
     x::runtime::LogI("Fly", "worker stop");
@@ -549,11 +654,11 @@ void Init() {
     unsigned cd = kDefaultHopCdMs;
     if (GetEnvironmentVariableA("FLY_FOLLOW_CD_MS", env, sizeof(env)) > 0) {
         const int v = atoi(env);
-        if (v >= 5 && v <= 2000) cd = static_cast<unsigned>(v);
+        if (v >= 40 && v <= 2000) cd = static_cast<unsigned>(v);
     }
     gHopCdMs.store(cd, std::memory_order_release);
     gArmed.store(false, std::memory_order_release);
-    gMode.store(1, std::memory_order_release);
+    gMode.store(0, std::memory_order_release);
     gWorkerStop.store(false, std::memory_order_release);
     gLastHopMs = 0;
     ClearFollowTrack();
@@ -570,10 +675,13 @@ void Init() {
             xcat::ClearFlyArmedSession(bin);
         }
     }
-    x::runtime::LogI("Fly", "init fly A/B (click/follow hop; arm session-only)");
+    x::runtime::LogI("Fly", "init drive=impact (teleport-fly DISABLED; coast removed)");
 }
 
-void Shutdown() { StopWorker(); }
+void Shutdown() {
+    StopWorker();
+    ports::fly_fh_ban::Shutdown();
+}
 
 void StartWorker() {
     if (gWorkerThread.load(std::memory_order_acquire)) return;
@@ -594,6 +702,7 @@ void StopWorker() {
         CloseHandle(th);
     }
     gArmed.store(false, std::memory_order_release);
+    ports::fly_fh_ban::SetArmedBan(false);
     ClearFollowTrack();
 }
 
@@ -612,8 +721,12 @@ void SetArmed(bool on) {
     if (prev == on) return;
     gLmbWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     ClearFollowTrack();
+    // 武装：禁挂台；ApplyImpact 放行（Impact 消费 → Attr=2）。
+    ports::fly_fh_ban::SetArmedBan(on);
     const unsigned mode = gMode.load(std::memory_order_acquire);
-    x::runtime::LogI("Fly", "panel/ipc %s mode=%u(%s)", on ? "ARMED" : "OFF", mode, ModeName(mode));
+    x::runtime::LogI("Fly", "panel/ipc %s drive=impact mode=%u(%s) fhBan=%d",
+                     on ? "ARMED" : "OFF", mode, ModeName(mode),
+                     ports::fly_fh_ban::IsBanActive() ? 1 : 0);
 }
 
 void SetMode(unsigned mode) {
@@ -628,7 +741,7 @@ void SetMode(unsigned mode) {
 unsigned GetMode() { return gMode.load(std::memory_order_acquire); }
 
 void SetHopCdMs(unsigned ms) {
-    if (ms < 5u) ms = 5u;
+    if (ms < 40u) ms = 40u;
     if (ms > 2000u) ms = 2000u;
     const unsigned prev = gHopCdMs.exchange(ms, std::memory_order_acq_rel);
     if (prev == ms) return;

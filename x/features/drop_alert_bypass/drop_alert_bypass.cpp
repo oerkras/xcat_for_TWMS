@@ -2,8 +2,8 @@
 //
 // Root cause (BIN): callers use direct `call CanPerformAction` (E8×8), so
 // MethodInfo swap never runs. Real drop gate calls thin IsAlertMode
-// (b36db157$$c61ba922 @0x124A3C0) which reads LocalUser+0x114 vs (0x41B001EF+global).
-// 2026-08-03 remount mis-pinned the sibling CFF method @0x1242770 (+0xC8) — fixed.
+// (UserBase$$IsAlertMode @0x124C230) which reads +0x114 vs (0x41B001EF+global).
+// 2026-08-06 remount: RVA +0x1E70；ACS hash 全换；shape 已 IDA 复核。
 // While enabled, data-plane clear +0x114 — drop opens AND client alert suppressed.
 // No GA .text patch; no HWBP slot.
 #ifndef WIN32_LEAN_AND_MEAN
@@ -27,23 +27,23 @@ namespace {
 
 using x::runtime::il2cpp::AtRva;
 
-// User 父类 b36db157…. 短 IsAlertMode（CanPerformAction 真 callee）
-// IDA 2026-08-04: cmp [rcx+114h], eax / setnle — 常量 0x41B001EF（旧 0x14859CC3）
-constexpr uint32_t kRvaIsAlertMode = 0x124A3C0;  // remounted 2026-08-04
+// UserBase 父类. 短 IsAlertMode（CanPerformAction 真 callee）
+// IDA 2026-08-06: mov eax,imm; add eax,[rip]; cmp [rcx+0x114],eax; setnle — shape 只认 op 形态
+constexpr uint32_t kRvaIsAlertMode = 0x124C230;  // remounted 2026-08-06 (+0x1E70)
 
 // Secondary: MethodInfo on DragManager.CanPerformAction (rarely hit; keep for MI callers)
 constexpr char kDragManagerClass[] =
-    "f3c1e2949898302937dc5a07f04d4ef3b80e35bbc80f60a9510eda368888253";
-constexpr uint32_t kRvaCanPerformAction = 0x4C38F0;  // remounted 2026-08-04
+    "ba465cb1604a35f2ddcdadef2886566cf002754c6835d5c19dd6103c4f54918";
+constexpr uint32_t kRvaCanPerformAction = 0x4C38F0;  // remounted 2026-08-06（RVA 未漂）
 constexpr char kUserAlertClass[] =
-    "b36db157c954de56d1658f10eb3edcbce83710b40064dc5840287ccad9a80fa";
+    "c99c0bcb0549788a98e73a02acc1cf7e5476d3f920f9a4f5f69a76490798a16";
 constexpr char kHashIsAlertMode[] =
-    "c61ba92227f1dc80c43bb5d5d044d27c15236883570aa6ba095d7a670b7b54e";
+    "be3a15053e494195afe88fe8bd86e598d6b62879c4d040d81a43e60441878f1";
 constexpr char kHashCanPerformAction[] =
-    "b4c6efa9c0cb728b5eba8f06154405752c6e39320cb2e688be57f39975d8fd5";
-// LocalUser alert stamp：hash → field_get_offset（dump fallback 0x114）
+    "cafb9d0be27704865bc1a01e2acd5896bfed4b15547331cf6c1f3c8043a72ae";
+// UserBase alert stamp：hash → field_get_offset（dump fallback 0x114）
 constexpr char kHashAlertAt[] =
-    "af55bdf7678948c178713fa3706164f9976891127d115b8ba7350a416511a71";
+    "c469c323e5afda2bab68c386c87ea8b571b3fd726ece08d92aa459848a6d351";
 constexpr size_t kFbAlertAt = 0x114;
 size_t gOffAlertAt = kFbAlertAt;
 #define kOffAlertAt (gOffAlertAt)
@@ -54,14 +54,12 @@ constexpr DWORD kTickMsOff = 500;
 constexpr DWORD kInstallRetryMs = 5000;
 constexpr DWORD kLogClearMs = 3000;
 
-// 短 IsAlertMode 机码指纹（防版本漂到 CFF 兄弟 / 字段改偏）
-//   B8 EF 01 B0 41          mov eax, 0x41B001EF
+// 短 IsAlertMode 机码结构指纹（防漂到 CFF 兄弟 / 字段改偏）
+//   B8 xx xx xx xx          mov eax, imm32（种子解混淆后语义常变，不钉死 IMM）
 //   03 05 xx xx xx xx       add eax, [rip+disp]
-//   39 81 14 01 00 00       cmp [rcx+0x114], eax
-//   0F 9F C0 C3             setnle al / ret
-constexpr uint8_t kAlertMovImm[] = {0xB8, 0xEF, 0x01, 0xB0, 0x41};
-constexpr uint8_t kAlertCmpOff114[] = {0x39, 0x81, 0x14, 0x01, 0x00, 0x00};
-constexpr size_t kAlertShapeScan = 24;
+//   39 81 dd dd dd dd       cmp [rcx+alertOff], eax  （alertOff 来自 field hash）
+//   0F 9F C0 / C3 …
+constexpr size_t kAlertShapeScan = 48;
 
 enum class AlertShape : uint8_t { Unknown = 0, Ok = 1, BadConst = 2, BadOff = 3, Unreadable = 4 };
 
@@ -76,7 +74,6 @@ struct MethodInfoHead {
 };
 
 using FnCanPerformAction = uint8_t (*)(void* self, uint8_t bCheckAlert, void* methodInfo);
-using FnIsAlertMode = uint8_t (*)(void* self, const void* methodInfo);
 
 std::atomic<bool> gDesired{true};
 std::atomic<bool> gInstalled{false};
@@ -249,6 +246,8 @@ const void* AlertModeFnPtr() {
     return AtRva<const void*>(kRvaIsAlertMode);
 }
 
+void EnsureAlertFieldOff();
+
 AlertShape ProbeAlertShape(const void* fn) {
     if (!fn) return AlertShape::Unreadable;
     uint8_t buf[kAlertShapeScan]{};
@@ -257,10 +256,22 @@ AlertShape ProbeAlertShape(const void* fn) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return AlertShape::Unreadable;
     }
-    if (memcmp(buf, kAlertMovImm, sizeof(kAlertMovImm)) != 0) return AlertShape::BadConst;
+    // 结构：mov eax,imm32 ; add eax,[rip+rel32] —— IMM 随种子漂，只认操作码形态
+    bool constOk = false;
+    for (size_t i = 0; i + 11 <= sizeof(buf); ++i) {
+        if (buf[i] == 0xB8 && buf[i + 5] == 0x03 && buf[i + 6] == 0x05) {
+            constOk = true;
+            break;
+        }
+    }
+    if (!constOk) return AlertShape::BadConst;
+
+    const uint32_t wantOff = static_cast<uint32_t>(gOffAlertAt ? gOffAlertAt : kFbAlertAt);
+    uint8_t wantCmp[6] = {0x39, 0x81, 0, 0, 0, 0};
+    memcpy(wantCmp + 2, &wantOff, 4);
     bool foundOff = false;
-    for (size_t i = 0; i + sizeof(kAlertCmpOff114) <= sizeof(buf); ++i) {
-        if (memcmp(buf + i, kAlertCmpOff114, sizeof(kAlertCmpOff114)) == 0) {
+    for (size_t i = 0; i + sizeof(wantCmp) <= sizeof(buf); ++i) {
+        if (memcmp(buf + i, wantCmp, sizeof(wantCmp)) == 0) {
             foundOff = true;
             break;
         }
@@ -269,18 +280,19 @@ AlertShape ProbeAlertShape(const void* fn) {
 }
 
 AlertShape RefreshAlertShape(bool forceLog) {
+    EnsureAlertFieldOff();
     const AlertShape s = ProbeAlertShape(AlertModeFnPtr());
     const AlertShape prev = gAlertShape.exchange(s);
     if (forceLog || s != prev || (!gShapeLogged.load() && s != AlertShape::Unknown)) {
         gShapeLogged.store(true);
         if (s == AlertShape::Ok) {
-            x::runtime::LogI("DropAlert", "shape OK thin IsAlertMode +0x114 (rva=0x%X)",
-                             kRvaIsAlertMode);
+            x::runtime::LogI("DropAlert", "shape OK IsAlertMode cmp[rcx+0x%zX] (rva=0x%X)",
+                             gOffAlertAt, kRvaIsAlertMode);
         } else {
             x::runtime::LogW("DropAlert",
-                             "shape FAIL code=%u — refuse field clear (expect mov 14859CC3 + "
-                             "cmp [rcx+0x114]) rva=0x%X",
-                             static_cast<unsigned>(s), kRvaIsAlertMode);
+                             "shape FAIL code=%u — refuse field clear (want mov+add eax,[rip] + "
+                             "cmp [rcx+0x%zX]) rva=0x%X",
+                             static_cast<unsigned>(s), gOffAlertAt, kRvaIsAlertMode);
         }
     }
     return s;
@@ -357,7 +369,7 @@ void ReportDropAlertLamp() {
     const AlertShape shape = RefreshAlertShape(false);
     if (shape == AlertShape::BadConst || shape == AlertShape::BadOff ||
         shape == AlertShape::Unreadable) {
-        const char* d = shape == AlertShape::BadOff     ? "MISS off!=114"
+        const char* d = shape == AlertShape::BadOff     ? "MISS off"
                         : shape == AlertShape::BadConst ? "MISS const"
                                                         : "MISS unreadable";
         x::runtime::anchor_lamps::Set("DropAlert", x::runtime::anchor_lamps::AnchorLampCode::Miss,
@@ -395,7 +407,9 @@ bool TryInstallMi() {
         if (!gKlass) gKlass = x::runtime::il2cpp::FindClass("", "DragManager");
     }
     if (!gKlass) return false;
-    x::runtime::il2cpp::RuntimeClassInit(gKlass);
+    // 禁 worker RuntimeClassInit（GC unknown thread）。游戏已用过 DragManager 则 cctor 已跑；
+    // 未初始化时 RuntimeClassInit 在泵外会被 ManagedAllocSafe 挡掉——MI 安装延后即可。
+    (void)x::runtime::il2cpp::RuntimeClassInit(gKlass);
     MethodInfoHead* mi = nullptr;
     x::runtime::il2cpp_method::ResolvePath canPath =
         x::runtime::il2cpp_method::ResolvePath::Miss;
@@ -442,7 +456,7 @@ void UninstallMi() {
 }
 
 // Primary path: expire LocalUser+0x114 so thin IsAlertMode returns false.
-// Shape gate: 机码不像「mov 14859CC3 + cmp [rcx+0x114]」则拒绝写字段（防漂）。
+// Shape gate: 机码不像「mov+add eax,[rip] + cmp [rcx+alertOff]」则拒绝写字段（防漂）。
 bool MaintainAlertField(DWORD now) {
     ports::player_combat::CombatCtx ctx{};
     if (!ports::player_combat::QueryCombatCtx(ctx) || !ctx.localUser) return false;
@@ -466,27 +480,18 @@ bool MaintainAlertField(DWORD now) {
         return false;
     }
 
-    bool still = false;
-    auto fn = FnFromMi<FnIsAlertMode>(gMiIsAlertMode, kRvaIsAlertMode);
-    if (fn) {
-        __try {
-            still = fn(ctx.localUser, gMiIsAlertMode) != 0;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            still = false;
-        }
-    }
-
+    // 禁 worker 直调 IsAlertMode（托管入口 → GC unknown thread）。字段清零即主路径；
+    // 读回校验留给游戏主线程自己的 IsAlertMode。
     gClearHits.fetch_add(1, std::memory_order_relaxed);
     if (!gLastClearLog || now - gLastClearLog >= kLogClearMs) {
         gLastClearLog = now;
         x::runtime::LogI("DropAlert",
-                         "field clear +0x114 was=%d stillAlert=%d miHits=%u clears=%u alertMi=%d "
-                         "shape=%u",
-                         before, still ? 1 : 0, gMiHits.load(), gClearHits.load(),
-                         gMiIsAlertMode ? 1 : 0, static_cast<unsigned>(shape));
+                         "field clear +0x114 was=%d miHits=%u clears=%u alertMi=%d shape=%u",
+                         before, gMiHits.load(), gClearHits.load(), gMiIsAlertMode ? 1 : 0,
+                         static_cast<unsigned>(shape));
         ReportDropAlertLamp();
     }
-    return !still || before != 0;
+    return true;
 }
 
 DWORD WINAPI Worker(LPVOID) {

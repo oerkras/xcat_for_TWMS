@@ -7,7 +7,8 @@
 //   - 确认：UIUtilDialog.YesNo + 原生 System.Action（对照枫星 TextConfirm）。
 //   - 瞬移石开的是 UIMapTransferDialog，不是 UIWorldMap → 无需石头/非石头门控。
 // 防漂移：Spot/MapListData/clickCount 字段走 hash + field_get_offset；dump 常量仅 fallback。
-// OnPointerDown 仍可能 abs 钉 RVA（BIN：纯 MI 收不到点击）——方法侧 ResolveMi 另有哈希/kind。
+// OnPointerDown 是 override：热路径 = ExecuteEvents 委托 method_ptr → 接口 VirtualInvokeData。
+// 红线：本模块禁止改 GameAssembly .text。只改 MI / Delegate.method_ptr / klass vtable（数据面）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -43,24 +44,27 @@ using x::runtime::il2cpp::ReadPtr;
 
 // UIWorldMapItem（Prefab 字段形：三 string@0x70/78/80 + mapId@0x88）
 constexpr char kItemClass[] =
-    "ad787f7539c555758fcfa3f016618b57599c2d3325193a7330d4703b27b0e7a";
-constexpr uint32_t kRvaUpdateView = 0x7E4130;  // remapped 2026-08-04
-constexpr uint32_t kRvaOnPointerDown = 0x7E6980;  // remapped 2026-08-04
+    "e4ac10a1ed9577949c01931561cf9c65321af77fd1356562771160781becce5";
+constexpr uint32_t kRvaUpdateView = 0x7E4150;  // remounted 2026-08-06
+constexpr uint32_t kRvaOnPointerDown = 0x7E69A0;  // remounted 2026-08-06
+// ExecuteEvents.Execute(IPointerDownHandler, BaseEventData) — script.json Address
+constexpr uint32_t kRvaExecutePointerDown = 0x528A500;  // remounted 2026-08-06
+constexpr size_t kFbSPointerDownHandler = 0x18;         // ExecuteEvents static field
 
 // UIUtilDialog（非 Ex）：YesNo(string,Action,Action,…) / Notice(string,string,bool…)
 constexpr char kUtilDialogClass[] =
-    "a19ac73ab18613eb5ac5dff4069bb49bbba0f54afc09f03e68e37bf60620a9d";
-constexpr uint32_t kRvaYesNo = 0x746B30;  // remapped 2026-08-04
-constexpr uint32_t kRvaNotice = 0x74ACB0;  // remapped 2026-08-04
+    "b91dd9a7ee32ddf1538501f7a23119b0ad38634f3237d3dd148e6e986d70c69";
+constexpr uint32_t kRvaYesNo = 0x746B50;  // remounted 2026-08-06
+constexpr uint32_t kRvaNotice = 0x74ACD0;  // remounted 2026-08-06
 
 constexpr char kHashUpdateView[] =
-    "a8fad7f2ed70099febb1d323fa669ef28cce665afc7891ed60d25b88ad6b1f6";
+    "d6a3eeccdda47a0d067153706d7c79f0fab97ec71e1dc9103a9a3b2c28112d6";
 constexpr char kHashYesNo[] =
-    "bf834074b97070ec325df8cfe5d0b853e076124dcae9f57c7b0fab5c55a49ed";
+    "e2171954053a45b70f57c4f9cc1c109bddd1e6622f8c1ee331eb67fc87ea660";
 constexpr char kHashNotice[] =
-    "eaf272a2779e899e65839c1b95804192c24634ddf628a739da4fe3e6fc5fb7b";
+    "d4feba69a33277661e80299a381f8c87cd32e4c3cd2562115927043a50a0b5b";
 
-// dump 验证 fallback（remount 2026-08-04；UpdateView 写回 +0x70/78/80/88）
+// dump 验证 fallback（remount 2026-08-06；UpdateView 写回 +0x70/78/80；mapId@0x88）
 constexpr size_t kFbMapDesc = 0x70;
 constexpr size_t kFbMapName = 0x78;
 constexpr size_t kFbStreetName = 0x80;
@@ -74,27 +78,27 @@ constexpr size_t kFbPointerClickCount = 0x178;
 
 // Spot 字段哈希（dump.cs TypeDefIndex 630）
 constexpr char kHashMapDesc[] =
-    "ff5aa6b9e1ba538938e4eccc001fd50133fd01746c9b5e6f23294390472235e";
+    "da15bd863a2d3e65472884e2163dbdc0485355b5979c1162afc54dc791bfad9";
 constexpr char kHashMapName[] =
-    "c0fda8aeaef5b552762aac94f62b86b4dd161080aa6412c93a7d5886f30f814";
+    "acdacc591b3698463d245b7b91b755ce40517569e77c8f2915697c95713aabd";
 constexpr char kHashStreetName[] =
-    "b09a3133fd8c7df4686a400b824c7ccaafc2df5e7e28eb2017dfe71480c9ad1";
+    "fb7db7199da7c2f4689ed7f922e46950ec476718a463b2dce4c24ec84a21cc5";
 constexpr char kHashCachedMapId[] =
-    "c54b695d6894278b0804079a21f4d81f18c2b7c6cabb583321d88bdf5c494a3";
+    "df24b2e1540cd0bd1de7ec5363bb20a604f3de4423b21d8d9de3f942b20647d";
 
 // MapListData 嵌套类 + 属性 backing 字段（TypeDefIndex 2183）
 constexpr char kMapListDataClass[] =
-    "c49d389d0ddc4fcaa210298cfcc11f5f6b823b73cd4176111c21a377dda3a78."
-    "d3094bad13b41c2584d94ed141964cb9c456b5858cd1d5cd7efc929a663519c";
+    "c59fb707f422534aca076a1e4dd8fe58806af7f5928b6338dc1aa6d9fa24ada."
+    "cc69e2b366b530163df7a1078338cfc42e26c2de471357abb17d9dc77f0d97d";
 constexpr char kMapListDataClassSlash[] =
-    "c49d389d0ddc4fcaa210298cfcc11f5f6b823b73cd4176111c21a377dda3a78/"
-    "d3094bad13b41c2584d94ed141964cb9c456b5858cd1d5cd7efc929a663519c";
+    "c59fb707f422534aca076a1e4dd8fe58806af7f5928b6338dc1aa6d9fa24ada/"
+    "cc69e2b366b530163df7a1078338cfc42e26c2de471357abb17d9dc77f0d97d";
 constexpr char kMapListDataNested[] =
-    "d3094bad13b41c2584d94ed141964cb9c456b5858cd1d5cd7efc929a663519c";
+    "cc69e2b366b530163df7a1078338cfc42e26c2de471357abb17d9dc77f0d97d";
 constexpr char kHashMapNoList[] =
-    "<d5f66233c6d6a062d486d16835f48b098614667386e61f54141e5632f8a1b87>k__BackingField";
+    "<cc09f5b9f969bab96aabd023c70bf3715c236ebcb5ff9d389ad7b38e792cd9a>k__BackingField";
 constexpr char kHashMapTitle[] =
-    "<af854d763e9f52b621719100be791eaf743a0c456964751328622d29649a37c>k__BackingField";
+    "<c406f5d64d921a9b952c3eec60538913ea6a3d1726190f4e21699f0a6357ed2>k__BackingField";
 constexpr char kHashClickCount[] = "<clickCount>k__BackingField";
 constexpr DWORD kDblClickMsMin = 400;
 constexpr DWORD kDblClickMsMax = 800;
@@ -115,6 +119,9 @@ using FnUpdateView = void (*)(void* self, void* street, void* mapName, void* map
                               void* mapListData, int32_t mapId, int32_t extraInt, void** outObj,
                               void* outVec2, const void* method);
 using FnOnPointerDown = void (*)(void* self, void* eventData, const void* method);
+using FnExecutePointerDown = void (*)(void* handler, void* eventData, const void* method);
+void Hook_OnPointerDown(void* self, void* eventData, const void* method);
+void Hook_ExecutePointerDown(void* handler, void* eventData, const void* method);
 
 struct SpotInfo {
     int mapId = 0;
@@ -138,19 +145,23 @@ MethodInfoHead* gMiYesNo = nullptr;
 MethodInfoHead* gMiNotice = nullptr;
 FnUpdateView gOrigUpdate = nullptr;
 FnOnPointerDown gOrigDown = nullptr;
+FnExecutePointerDown gOrigExecuteDown = nullptr;
 DWORD gLastInstallTry = 0;
 
-// OnPointerDown 仅有 MethodInfo 数据 xref、无 E8 直调；但 BIN 显示 MI 换桩后点击仍不进 Hook。
-// 对原生入口做 abs jmp（14B），保证任意 invoker/MI 只要落到 RVA 就能进 Hook。
-constexpr size_t kDownSteal = 16;  // push rsi/rdi + sub rsp,58h + mov rsi,rcx + lea rax (完整指令)
-struct AbsHookState {
-    void* target = nullptr;
-    void* trampoline = nullptr;
-    uint8_t saved[32]{};
-    size_t stolen = 0;
-    bool active = false;
-};
-AbsHookState gDownAbs{};
+// 数据面钩：vtable 槽 + ExecuteEvents 委托；禁止 abs/.text。
+constexpr size_t kVirtInvokeStride = 16;
+constexpr size_t kVtableScanLo = 0x80;
+constexpr size_t kVtableScanHi = 0xC00;
+constexpr int kDownSlotCap = 8;
+void** gDownSlots[kDownSlotCap]{};
+size_t gDownSlotOffs[kDownSlotCap]{};
+int gDownSlotCount = 0;
+void* gDownNativeOrig = nullptr;  // Spot OnPointerDown 原生（vtable CallOrig）
+MethodInfoHead* gMiExecuteDown = nullptr;
+void* gPointerDownDelegate = nullptr;
+void* gDelegateMpSaved = nullptr;
+void* gDelegateInvSaved = nullptr;
+char gDownPath[96]{};
 
 using FnFieldFromName = void* (*)(void* klass, const char* name);
 using FnFieldGetOffset = size_t (*)(void* field);
@@ -160,6 +171,11 @@ size_t gOffMethodPtr = 0;
 size_t gOffInvokeImpl = 0;
 size_t gOffExtraArg = 0;
 size_t gOffMethodCode = 0;
+bool gDelegateOffOk = false;
+
+void WritePtrField(void* obj, size_t off, void* v);
+bool ResolveDelegateOffsets();
+bool IsWorldMapSpotItem(void* obj);
 
 struct SpotFieldOff {
     size_t mapDesc = kFbMapDesc;
@@ -176,7 +192,6 @@ struct SpotFieldOff {
     const char* path = "fallback";  // meta | meta-partial | fallback
 };
 SpotFieldOff gSpotOff{};
-bool gDelegateOffOk = false;
 
 void* gYesAction = nullptr;
 void* gNoAction = nullptr;
@@ -392,8 +407,10 @@ MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
 bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
     if (!mi || !hook || !outOrig) return false;
     void* orig = nullptr;
+    void* vmp = nullptr;
     __try {
         orig = mi->methodPointer;
+        vmp = mi->virtualMethodPointer;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -403,7 +420,8 @@ bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
     bool ok = false;
     __try {
         mi->methodPointer = hook;
-        if (mi->virtualMethodPointer == orig) mi->virtualMethodPointer = hook;
+        // override / 接口派发常读 virtualMethodPointer；只要仍指向原生就一并换。
+        if (vmp == orig || vmp == nullptr) mi->virtualMethodPointer = hook;
         *outOrig = orig;
         ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -426,54 +444,144 @@ void RestoreMethodInfo(MethodInfoHead* mi, void* orig) {
     VirtualProtect(mi, sizeof(MethodInfoHead), old, &old);
 }
 
-void WriteAbsJmp(void* at, void* to) {
-    auto* p = reinterpret_cast<uint8_t*>(at);
-    // mov rax, imm64 ; jmp rax
-    p[0] = 0x48;
-    p[1] = 0xB8;
-    *reinterpret_cast<uint64_t*>(p + 2) = reinterpret_cast<uint64_t>(to);
-    p[10] = 0xFF;
-    p[11] = 0xE0;
-}
-
-bool InstallAbsHook(AbsHookState* st, void* target, void* hook, size_t steal) {
-    if (!st || !target || !hook || steal < 14 || steal > sizeof(st->saved)) return false;
-    if (st->active) return true;
-    void* tramp = VirtualAlloc(nullptr, steal + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) return false;
-    memcpy(st->saved, target, steal);
-    memcpy(tramp, target, steal);
-    WriteAbsJmp(reinterpret_cast<uint8_t*>(tramp) + steal,
-                reinterpret_cast<uint8_t*>(target) + steal);
-    DWORD old = 0;
-    if (!VirtualProtect(target, steal, PAGE_EXECUTE_READWRITE, &old)) {
-        VirtualFree(tramp, 0, MEM_RELEASE);
+bool PatchVtableMethodPtr(void** slot, void* hook, void** outOrig) {
+    if (!slot || !hook || !outOrig) return false;
+    void* orig = nullptr;
+    __try {
+        orig = *slot;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    WriteAbsJmp(target, hook);
-    for (size_t i = 14; i < steal; ++i) reinterpret_cast<uint8_t*>(target)[i] = 0x90;
-    FlushInstructionCache(GetCurrentProcess(), target, steal);
-    VirtualProtect(target, steal, old, &old);
-    st->target = target;
-    st->trampoline = tramp;
-    st->stolen = steal;
-    st->active = true;
-    return true;
+    if (!orig || orig == hook) {
+        if (orig == hook && gDownNativeOrig) {
+            *outOrig = gDownNativeOrig;
+            return true;
+        }
+        return false;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
+    bool ok = false;
+    __try {
+        *slot = hook;
+        *outOrig = orig;
+        ok = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    VirtualProtect(slot, sizeof(void*), old, &old);
+    return ok;
 }
 
-void RemoveAbsHook(AbsHookState* st) {
-    if (!st || !st->active || !st->target) return;
+void RestoreVtableMethodPtr(void** slot, void* orig) {
+    if (!slot || !orig) return;
     DWORD old = 0;
-    if (VirtualProtect(st->target, st->stolen, PAGE_EXECUTE_READWRITE, &old)) {
-        memcpy(st->target, st->saved, st->stolen);
-        FlushInstructionCache(GetCurrentProcess(), st->target, st->stolen);
-        VirtualProtect(st->target, st->stolen, old, &old);
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return;
+    __try {
+        *slot = orig;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
-    if (st->trampoline) VirtualFree(st->trampoline, 0, MEM_RELEASE);
-    st->trampoline = nullptr;
-    st->target = nullptr;
-    st->stolen = 0;
-    st->active = false;
+    VirtualProtect(slot, sizeof(void*), old, &old);
+}
+
+uint32_t PtrRva(void* p) {
+    HMODULE ga = GetModuleHandleW(L"GameAssembly.dll");
+    if (!ga || !p) return 0;
+    const auto a = reinterpret_cast<uintptr_t>(p);
+    const auto b = reinterpret_cast<uintptr_t>(ga);
+    if (a < b) return 0;
+    const auto d = a - b;
+    return d > 0x7FFFFFFFull ? 0 : static_cast<uint32_t>(d);
+}
+
+// 扫 VirtualInvokeData{methodPtr, MethodInfo*}；认 MI 对上 / ptr / RVA（含 adjustor 槽）。
+int FindDownVtableSlots(void* klass, MethodInfoHead* mi, void* wantPtr, uint32_t wantRva,
+                        void*** outSlots, size_t* outOffs, int cap, const char** outPath) {
+    if (!klass || !outSlots || !outOffs || cap <= 0) return 0;
+    int n = 0;
+    int bestScore = 0;
+    auto push = [&](size_t off, int score) {
+        void** slot = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(klass) + off);
+        for (int i = 0; i < n; ++i) {
+            if (outSlots[i] == slot) return;
+        }
+        if (n >= cap) return;
+        outSlots[n] = slot;
+        outOffs[n] = off;
+        ++n;
+        if (score > bestScore) bestScore = score;
+    };
+    for (size_t off = kVtableScanLo; off + kVirtInvokeStride <= kVtableScanHi; off += 8) {
+        void* p0 = nullptr;
+        void* p1 = nullptr;
+        __try {
+            p0 = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(klass) + off);
+            p1 = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(klass) + off + 8);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            continue;
+        }
+        const bool miHit = mi && p1 == mi;
+        const bool ptrHit = wantPtr && p0 == wantPtr;
+        const bool rvaHit = wantRva && PtrRva(p0) == wantRva;
+        if (!miHit && !ptrHit && !rvaHit) continue;
+        if (!LooksLikeHeapPtr(p1) && !miHit) continue;
+        if (miHit && (ptrHit || rvaHit))
+            push(off, 3);
+        else if (miHit)
+            push(off, 2);  // adjustor：methodPtr≠MI.mp，但仍是本方法槽
+        else
+            push(off, 1);
+    }
+    if (outPath) {
+        if (n == 0)
+            *outPath = "miss";
+        else if (bestScore >= 3)
+            *outPath = "scan-pair";
+        else if (bestScore >= 2)
+            *outPath = "scan-mi";
+        else
+            *outPath = "scan-ptr";
+    }
+    return n;
+}
+
+int FindDownVtableSlotsOnHierarchy(void* klass, MethodInfoHead* mi, void* wantPtr, uint32_t wantRva,
+                                   void*** outSlots, size_t* outOffs, int cap, const char** outPath) {
+    int n = 0;
+    const char* path = "miss";
+    const auto& e = x::runtime::il2cpp::Get();
+    void* cur = klass;
+    for (int depth = 0; cur && depth < 8; ++depth) {
+        const char* sub = "miss";
+        void** slots[kDownSlotCap]{};
+        size_t offs[kDownSlotCap]{};
+        const int got =
+            FindDownVtableSlots(cur, mi, wantPtr, wantRva, slots, offs, kDownSlotCap, &sub);
+        for (int i = 0; i < got && n < cap; ++i) {
+            bool dup = false;
+            for (int j = 0; j < n; ++j) {
+                if (outSlots[j] == slots[i]) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+            outSlots[n] = slots[i];
+            outOffs[n] = offs[i];
+            ++n;
+        }
+        if (n > 0 && strcmp(sub, "miss") != 0) path = sub;
+        if (!e.classParent) break;
+        void* parent = nullptr;
+        __try {
+            parent = e.classParent(cur);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            parent = nullptr;
+        }
+        cur = parent;
+    }
+    if (outPath) *outPath = n ? path : "miss";
+    return n;
 }
 
 void CallOrigDown(void* self, void* eventData, const void* method) {
@@ -483,6 +591,43 @@ void CallOrigDown(void* self, void* eventData, const void* method) {
         orig(self, eventData, method);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+void ClearDownHooks() {
+    void* itemHook = reinterpret_cast<void*>(&Hook_OnPointerDown);
+    for (int i = 0; i < gDownSlotCount; ++i) {
+        if (!gDownSlots[i] || !gDownNativeOrig) continue;
+        void* cur = nullptr;
+        __try {
+            cur = *gDownSlots[i];
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            cur = nullptr;
+        }
+        if (cur == itemHook) RestoreVtableMethodPtr(gDownSlots[i], gDownNativeOrig);
+        gDownSlots[i] = nullptr;
+        gDownSlotOffs[i] = 0;
+    }
+    gDownSlotCount = 0;
+
+    if (gPointerDownDelegate && ResolveDelegateOffsets()) {
+        if (gDelegateMpSaved) WritePtrField(gPointerDownDelegate, gOffMethodPtr, gDelegateMpSaved);
+        if (gDelegateInvSaved && gOffInvokeImpl)
+            WritePtrField(gPointerDownDelegate, gOffInvokeImpl, gDelegateInvSaved);
+    }
+    gPointerDownDelegate = nullptr;
+    gDelegateMpSaved = nullptr;
+    gDelegateInvSaved = nullptr;
+
+    if (gMiExecuteDown && gOrigExecuteDown)
+        RestoreMethodInfo(gMiExecuteDown, reinterpret_cast<void*>(gOrigExecuteDown));
+    gMiExecuteDown = nullptr;
+    gOrigExecuteDown = nullptr;
+
+    if (gMiDown && gDownNativeOrig) RestoreMethodInfo(gMiDown, gDownNativeOrig);
+    gMiDown = nullptr;
+    gOrigDown = nullptr;
+    gDownNativeOrig = nullptr;
+    gDownPath[0] = '\0';
 }
 
 void CallOrigUpdate(void* self, void* street, void* mapName, void* mapDesc, void* mapListData,
@@ -1045,7 +1190,32 @@ bool NoteClickAndIsDouble(void* self, void* eventData, int* outClickCount) {
     return false;
 }
 
+bool IsWorldMapSpotItem(void* obj) {
+    if (!obj || !gItemKlass) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.objectGetClass) return false;
+    void* k = nullptr;
+    __try {
+        k = e.objectGetClass(obj);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    for (int depth = 0; k && depth < 8; ++depth) {
+        if (k == gItemKlass) return true;
+        if (!e.classParent) break;
+        void* p = nullptr;
+        __try {
+            p = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            p = nullptr;
+        }
+        k = p;
+    }
+    return false;
+}
+
 void Hook_OnPointerDown(void* self, void* eventData, const void* method) {
+    // 仅 vtable 单路径时在此处理；ExecuteEvents 路径已在 Hook_ExecutePointerDown 处理。
     int clickCount = 0;
     const bool dbl = NoteClickAndIsDouble(self, eventData, &clickCount);
     CallOrigDown(self, eventData, method);
@@ -1063,6 +1233,174 @@ void Hook_OnPointerDown(void* self, void* eventData, const void* method) {
         x::runtime::LogI("WorldMapTravel", "Spot 单击 self=%p clickCount=%d n=%u winMs=%u", self,
                          clickCount, s_clicks, DblClickWindowMs());
     }
+}
+
+void Hook_ExecutePointerDown(void* handler, void* eventData, const void* method) {
+    const bool spot = IsWorldMapSpotItem(handler);
+    int clickCount = 0;
+    bool dbl = false;
+    if (spot) dbl = NoteClickAndIsDouble(handler, eventData, &clickCount);
+    FnExecutePointerDown orig = gOrigExecuteDown;
+    if (orig) {
+        __try {
+            orig(handler, eventData, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (!spot) return;
+    if (dbl) {
+        x::runtime::LogI("WorldMapTravel", "Spot 双击判定(ee) self=%p clickCount=%d", handler,
+                         clickCount);
+        FireGotoFromItem(handler);
+        return;
+    }
+    static DWORD s_lastProbe = 0;
+    static uint32_t s_clicks = 0;
+    ++s_clicks;
+    const DWORD now = GetTickCount();
+    if (s_clicks <= 8 || now - s_lastProbe >= kClickProbeLogMs) {
+        s_lastProbe = now;
+        x::runtime::LogI("WorldMapTravel", "Spot 单击(ee) self=%p clickCount=%d n=%u winMs=%u",
+                         handler, clickCount, s_clicks, DblClickWindowMs());
+    }
+}
+
+bool TryInstallExecuteEventsDown() {
+    void* eeKlass = FindClass("UnityEngine.EventSystems", "ExecuteEvents");
+    void* ipdKlass = FindClass("UnityEngine.EventSystems", "IPointerDownHandler");
+    if (!eeKlass || !ipdKlass) return false;
+    SafeRuntimeClassInit(eeKlass);
+
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    using x::runtime::il2cpp_method::ResolvePath;
+    MethodShape shape{};
+    shape.arity = 2;
+    shape.ret = TypeKind::Void;
+    shape.unique = true;
+    shape.walkParents = false;
+    shape.param[0] = TypeKind::Ptr;
+    shape.param[1] = TypeKind::Ptr;
+    shape.paramKlass[0] = ipdKlass;
+
+    ResolvePath path{};
+    gMiExecuteDown =
+        ResolveMi(eeKlass, kRvaExecutePointerDown, shape, "Execute", nullptr, &path);
+    if (!gMiExecuteDown || !gMiExecuteDown->methodPointer) {
+        gMiExecuteDown = nullptr;
+        return false;
+    }
+
+    void* hook = reinterpret_cast<void*>(&Hook_ExecutePointerDown);
+    void* miOrig = nullptr;
+    if (!PatchMethodInfo(gMiExecuteDown, hook, &miOrig)) {
+        gMiExecuteDown = nullptr;
+        return false;
+    }
+    gOrigExecuteDown = reinterpret_cast<FnExecutePointerDown>(miOrig);
+
+    // s_PointerDownHandler 委托在 cctor 时缓存了 method_ptr；只改 MI 不够。
+    if (ResolveDelegateOffsets()) {
+        const auto& e = x::runtime::il2cpp::Get();
+        size_t offDel = kFbSPointerDownHandler;
+        (void)FieldOffOrFb(eeKlass, "s_PointerDownHandler", kFbSPointerDownHandler, &offDel);
+        void* statics = nullptr;
+        if (e.classStaticData) {
+            __try {
+                statics = e.classStaticData(eeKlass);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                statics = nullptr;
+            }
+        }
+        if (statics && offDel) {
+            void* del = nullptr;
+            __try {
+                del = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(statics) + offDel);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                del = nullptr;
+            }
+            if (LooksLikeHeapPtr(del)) {
+                void* curMp = nullptr;
+                void* curInv = nullptr;
+                __try {
+                    curMp = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(del) + gOffMethodPtr);
+                    if (gOffInvokeImpl)
+                        curInv =
+                            *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(del) + gOffInvokeImpl);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    curMp = nullptr;
+                    curInv = nullptr;
+                }
+                gPointerDownDelegate = del;
+                gDelegateMpSaved = curMp;
+                gDelegateInvSaved = curInv;
+                WritePtrField(del, gOffMethodPtr, hook);
+                // invoke_impl 若仍指向旧原生 Execute，一并改到 Hook（部分 IL2CPP 走 invoke_impl）
+                if (gOffInvokeImpl && curInv &&
+                    (curInv == miOrig || PtrRva(curInv) == kRvaExecutePointerDown))
+                    WritePtrField(del, gOffInvokeImpl, hook);
+            }
+        }
+    }
+
+    x::runtime::LogI("WorldMapTravel", "ExecuteEvents.PointerDown MI+delegate path=%s del=%p",
+                     path != ResolvePath::Miss ? "meta" : "fallback", gPointerDownDelegate);
+    return true;
+}
+
+bool TryInstallItemVtableDown() {
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    using x::runtime::il2cpp_method::ResolvePath;
+    constexpr MethodShape kDn{1, TypeKind::Void, true, true, {TypeKind::Ptr}};
+    ResolvePath pDn{};
+    if (!gMiDown)
+        gMiDown = ResolveMi(gItemKlass, kRvaOnPointerDown, kDn, "OnPointerDown", nullptr, &pDn);
+
+    void* downNative = nullptr;
+    if (gMiDown) {
+        __try {
+            downNative = gMiDown->methodPointer;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            downNative = nullptr;
+        }
+    }
+    if (!downNative) downNative = AtRva<void*>(kRvaOnPointerDown);
+    if (!downNative) return false;
+
+    const char* slotPath = "miss";
+    void** slots[kDownSlotCap]{};
+    size_t offs[kDownSlotCap]{};
+    const int nSlots = FindDownVtableSlotsOnHierarchy(
+        gItemKlass, gMiDown, downNative, kRvaOnPointerDown, slots, offs, kDownSlotCap, &slotPath);
+
+    void* hook = reinterpret_cast<void*>(&Hook_OnPointerDown);
+    void* firstOrig = nullptr;
+    int patched = 0;
+    for (int i = 0; i < nSlots; ++i) {
+        void* orig = nullptr;
+        if (!PatchVtableMethodPtr(slots[i], hook, &orig)) continue;
+        if (!firstOrig) firstOrig = orig;
+        else if (orig != firstOrig) {
+            RestoreVtableMethodPtr(slots[i], orig);
+            continue;
+        }
+        gDownSlots[patched] = slots[i];
+        gDownSlotOffs[patched] = offs[i];
+        ++patched;
+    }
+    gDownSlotCount = patched;
+    if (gDownSlotCount <= 0) return false;
+
+    gDownNativeOrig = firstOrig ? firstOrig : downNative;
+    gOrigDown = reinterpret_cast<FnOnPointerDown>(gDownNativeOrig);
+    if (gMiDown) {
+        void* miOrig = nullptr;
+        (void)PatchMethodInfo(gMiDown, hook, &miOrig);
+    }
+    x::runtime::LogI("WorldMapTravel", "OnPointerDown vtable path=%s n=%d mi=%s", slotPath,
+                     gDownSlotCount, pDn != ResolvePath::Miss ? "meta" : "fallback");
+    return true;
 }
 
 bool TryInstall() {
@@ -1110,50 +1448,36 @@ bool TryInstall() {
     }
     gOrigUpdate = reinterpret_cast<FnUpdateView>(origUv);
 
-    // OnPointerDown：原生 abs jmp（BIN：纯 MI 换桩收不到点击）
-    void* downNative = AtRva<void*>(kRvaOnPointerDown);
-    if (!InstallAbsHook(&gDownAbs, downNative, reinterpret_cast<void*>(&Hook_OnPointerDown),
-                        kDownSteal)) {
+    // 只装一条热路径，避免 Execute→vtable 双触发双计数。
+    const bool eeOk = TryInstallExecuteEventsDown();
+    const bool vtOk = eeOk ? false : TryInstallItemVtableDown();
+    if (!eeOk && !vtOk) {
         RestoreMethodInfo(gMiUpdate, origUv);
         gOrigUpdate = nullptr;
-        x::runtime::LogW("WorldMapTravel", "OnPointerDown abs hook 失败 target=%p", downNative);
+        ClearDownHooks();
+        x::runtime::LogW("WorldMapTravel",
+                         "OnPointerDown 数据面钩失败（ExecuteEvents+vtable）；拒绝 abs/.text");
         x::runtime::anchor_lamps::Set("WorldMap", x::runtime::anchor_lamps::AnchorLampCode::Miss,
-                                     "Down abs fail");
+                                     "Down data miss");
         return false;
     }
-    gOrigDown = reinterpret_cast<FnOnPointerDown>(gDownAbs.trampoline);
 
-    // 顺带把 MI.methodPointer 也指到 Hook（双保险；CallOrig 走 trampoline）
-    if (!gMiDown) {
-        constexpr MethodShape kDn{1, TypeKind::Void, true, true, {TypeKind::Ptr}};
-        gMiDown = ResolveMi(gItemKlass, kRvaOnPointerDown, kDn, "OnPointerDown", nullptr);
-    }
-    if (gMiDown) {
-        void* ignore = nullptr;
-        (void)PatchMethodInfo(gMiDown, reinterpret_cast<void*>(&Hook_OnPointerDown), &ignore);
-    }
-
+    snprintf(gDownPath, sizeof(gDownPath), "ee=%d vt=%d", eeOk ? 1 : 0, vtOk ? 1 : 0);
     gInstalled.store(true);
     x::runtime::LogI("WorldMapTravel",
-                     "init[经典版]：UpdateView(MI)+OnPointerDown(abs) 已接管；"
-                     "双击 Spot → YesNo → RequestGoto");
+                     "init[经典版]：UpdateView(MI)+OnPointerDown(%s) 无.text；"
+                     "双击 Spot → YesNo → RequestGoto",
+                     gDownPath);
     x::runtime::anchor_lamps::Set("WorldMap", x::runtime::anchor_lamps::AnchorLampCode::Ok,
-                                 "UV+DownAbs");
+                                 gDownPath);
     return true;
 }
 
 void Uninstall() {
     if (!gInstalled.exchange(false)) return;
-    RemoveAbsHook(&gDownAbs);
-    if (gMiDown) {
-        // abs 已还原 .text；MI 指回原生 RVA
-        void* native = AtRva<void*>(kRvaOnPointerDown);
-        RestoreMethodInfo(gMiDown, native);
-    }
+    ClearDownHooks();
     if (gMiUpdate && gOrigUpdate) RestoreMethodInfo(gMiUpdate, reinterpret_cast<void*>(gOrigUpdate));
-    gOrigDown = nullptr;
     gOrigUpdate = nullptr;
-    gMiDown = nullptr;
     gMiUpdate = nullptr;
     {
         std::lock_guard<std::mutex> lock(gMu);
@@ -1169,6 +1493,25 @@ DWORD WINAPI Worker(LPVOID) {
             if (now - gLastInstallTry >= kInstallRetryMs) {
                 gLastInstallTry = now;
                 (void)TryInstall();
+            }
+        } else if (gDownSlotCount > 0 && gDownNativeOrig) {
+            // 类再 init / 别处重写虚表时重新钉回 Hook
+            void* hook = reinterpret_cast<void*>(&Hook_OnPointerDown);
+            for (int i = 0; i < gDownSlotCount; ++i) {
+                if (!gDownSlots[i]) continue;
+                void* cur = nullptr;
+                __try {
+                    cur = *gDownSlots[i];
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    cur = nullptr;
+                }
+                if (cur && cur != hook) {
+                    void* ignored = nullptr;
+                    if (PatchVtableMethodPtr(gDownSlots[i], hook, &ignored)) {
+                        x::runtime::LogI("WorldMapTravel", "OnPointerDown re-pin slot off=0x%zX",
+                                         gDownSlotOffs[i]);
+                    }
+                }
             }
         }
         Sleep(200);

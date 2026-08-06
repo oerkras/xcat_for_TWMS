@@ -25,13 +25,13 @@ using x::runtime::il2cpp::ReadPtr;
 // Prefab 类哈希（与 payload_status Cache 灯一致）· remount 2026-08-04
 // Util 无 Prefab 属性（纯工具类）；Text/NonFinite 可走 Prefab 串兜底。
 constexpr const char* kUtilClass =
-    "e351eb506860a803de820bdcaf4e7b0b3494331fe68cc31ae08516ad263dde9";
+    "ec3b217aea4af2d5989a2428d24c7dd36a7bcaef541c9c40fa4c5eb46d1c0aa";
 constexpr const char* kNonFiniteClass =
-    "f3adf8943673344f78ad3fe86d721079d5b831f67b79acddde74dd602148cb3";
+    "c102f2dcae27c38fdf35899451cc71c06a9d55efb9aaee885b3127c09b30e42";
 constexpr const char* kTextCaptchaClass =
-    "cc0afb7bfa4f5f73b0a53ff5f3a2178ec9f1cff97577f55a57b4a6ca2c1de48";
+    "fe6f28a2457d4914b37d8735f0bed623b33bc35d00af4a5c577418ffd436b1c";
 constexpr const char* kTextCaptchaInfoClass =
-    "a991b81bac44215bfcdb624739de53567ab3ec07682c94462248d3609822712";
+    "ea26363915361ad5bb38fc8e26cb80b69af622a810c2100332e412ca792040b";
 constexpr const char* kPrefabNonFinite = "UIAntiMacroNonFinite";
 constexpr const char* kPrefabTextCaptcha = "UIAntiMacroTextCaptcha";
 
@@ -43,49 +43,49 @@ void* ResolveQuizKlass(const char* hashName, const char* prefabName) {
     return x::runtime::il2cpp::FindClass("", hashName);
 }
 
-constexpr uint32_t kRvaIsOpenAntiMacro = 0x937DC0;  // remounted 2026-08-04 Util.IsOpenAntiMacro
-constexpr uint32_t kRvaTextGet = 0x9348E0;  // remounted 2026-08-04 GetAntiMacro
-constexpr uint32_t kRvaTextIsInst = 0x934CD0;  // remounted 2026-08-04 IsInstantiated
-constexpr uint32_t kRvaTextOnOk = 0x937880;  // remounted 2026-08-04 OnOk
-constexpr uint32_t kRvaNonGet = 0x927D70;  // remounted 2026-08-04 GetAntiMacro
-constexpr uint32_t kRvaNonIsInst = 0x9280D0;  // remounted 2026-08-04 IsInstantiated
-constexpr uint32_t kRvaTryGetWinCursorPos = 0x938250;  // remounted 2026-08-04 Util.TryGetWinCursorPos
+constexpr uint32_t kRvaIsOpenAntiMacro = 0x937E00;  // remounted 2026-08-04 Util.IsOpenAntiMacro
+constexpr uint32_t kRvaTextGet = 0x934920;  // remounted 2026-08-04 GetAntiMacro
+constexpr uint32_t kRvaTextIsInst = 0x934D10;  // remounted 2026-08-04 IsInstantiated
+constexpr uint32_t kRvaTextOnOk = 0x9378C0;  // remounted 2026-08-04 OnOk
+constexpr uint32_t kRvaNonGet = 0x927DB0;  // remounted 2026-08-04 GetAntiMacro
+constexpr uint32_t kRvaNonIsInst = 0x928110;  // remounted 2026-08-04 IsInstantiated
+constexpr uint32_t kRvaTryGetWinCursorPos = 0x938290;  // remounted 2026-08-04 Util.TryGetWinCursorPos
 
 // 方法哈希（dump.cs）— static bool()/void() 同形多，哈希主路径
 constexpr char kHashIsOpenAntiMacro[] =
-    "e3aed57fed92a2ad544b7e6fdfeb9fc784cbd67d63211a684a94e8062531a17";
+    "c902c3aee0cd190d1c0817b48f75f871b6d8bb6957bcc899d7748851a61d2ba";
 constexpr char kHashTextGet[] =
-    "b993c5c8c0af5e6010428c3d64feb67faf2276df2045a3f9274864b5378af84";
+    "d687a5691943a91180a147112414f2c75a33efaeece4f5133702840b3816748";
 constexpr char kHashTextIsInst[] =
-    "be27756509f9a9f7be2287d553659722b1e7f758ebd794da168c98ec64eebdd";
+    "a8af1b81967cb3b4cacdb1233b02ddbe9aadc8dccf101190483baccc48f6553";
 constexpr char kHashTextOnOk[] =
-    "bc37785da86a8f5e1f2345806dd47f8b8191a742dd85a724b08ace95b738159";
+    "abd99c92633b6f9b1806336f4ac0305b15a65910977ea6597f09da1f3eb9836";
 constexpr char kHashNonGet[] =
-    "e603b199ac03dbe6cf208246f6fc4576d556bddb9b35c9ab2b0c887f6474e49";
+    "ba5e6786ccf2f82fa288006796af373ff40ae8ee33545f3b0049fd77ab9b015";
 constexpr char kHashNonIsInst[] =
-    "f064e76be05d41331d65326b42193db560a41b84bbc23e2cc8bac0fac7e5ecd";
+    "a9592c9ed66c631c5d8ff5373b7a7cb983abb45766575222d23f9f1d51d0205";
 constexpr char kHashTryGetWinCursorPos[] =
-    "e6b66f03f91068b5626d65a23d89448f3180b2e1634e9e2ea4d852718dd2b97";
+    "eae4d921e42f8b37b6d334fa8ad82a05fb26c47fa4bd34795aaf865ace27b79";
 
 // Quiz 字段：hash → field_get_offset（dump 常量仅 fallback）
 constexpr char kHashTextRawImage[] =
-    "a121cb3a14b5989088d9ef1b498aca4f5369fd28022bf182ec8af53e9408af8";
+    "f7cca706a82942451055bacbbff2a9fd6686523c29b0ccc549acd056819e7b1";
 constexpr char kHashTextInputField[] =
-    "f1005fc73bb81d9562b78ac0e433114e3590d971bdc9781993ad32d395fae11";
+    "e3c776557ef677d5d075fa5c00d1a76d2e6e5aec0c274f3a2e17186302f6d33";
 constexpr char kHashNonRawImage[] =
-    "d8dcf31a6be0ac216a1c8faf6c9b3434e292c567473c1887a5b192a2d016973";
+    "c1dce0e2279557f203ea993ab5c2ec59adabcfb4b6fcb72b5629674d765fde9";
 constexpr char kHashNonTick[] =
-    "c45229324e7c23735c0d790b6d9ad3ab57f68cbb655d120491bedc6c4770004";
+    "bbbd3dd792ce7fecb2f329d0b82c0a059f8be592d1640ebe7be0c061c706e97";
 constexpr char kHashNonRawPosList[] =
-    "bf40f6b839c0c1da24e41e88c192c1fb4bef6f340ac50d01eb016030df5fb60";  // List<Vector2>
+    "d04c64957129da50394b71468bb35f3c55bc0af45486222f6676183adb9ccc7";  // List<Vector2>
 constexpr char kHashNonMousePosList[] =
-    "f98bfeb0bd5f9cb7c634ade6e8f56c825c0faa2c79e144ab3acc1743d78ab9d";  // List<Vector2Int>
+    "a3cdf17266d326410afb418df59ecbd326b4ab692168f314ee03694d4064933";  // List<Vector2Int>
 constexpr char kHashInfoJpegData[] =
-    "d03bca076a39e35fe8ee174cb064d43605145cb9ee7e6272806d968cb1cf0e3";
+    "f6c574d29d885e52644d264341a94ef8b28c31a85140a6ea5bd8b3b1d99a0b4";
 constexpr char kHashTickFrame[] =
-    "dd3c035c763c41b354e1e0855b8a7c6483b09e9ecad02e0be31a46c289739d0";
+    "b3b8ddeca1cf2136ce487d0f0af015b91a96d47c16bdf51427bb82a4a3b5561";
 constexpr char kNonTickNestedName[] =
-    "f86f7eb0d67d899d69f8a5e30ed68c65f6dd335381f313108347031e8350713";
+    "a8b6a1fb5d8b65034eae86de20e237c6a824e741a674297d0f1d003f998382f";
 
 constexpr size_t kFbTextRawImage = 0xA0;
 constexpr size_t kFbTextInputField = 0xB0;

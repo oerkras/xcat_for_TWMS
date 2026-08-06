@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 55u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 57u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -18,17 +18,32 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 55u;
 // v53: finalAttackForce — StartTick 改游戏钟 + 待发刷新 + Equipped 读武器 + 再调 Doing
 // v54: skillMaxLevel — 已学技能 SkillRecord 等级按 GetMaxLevel 生效
 // v55: pumpDrainBudget — 主线程泵每 tick Drain 上限（调试 TAB）
+// v56: mobScanIntervalMs 默认 50→20；读盘迁旧默认 + 换怪按需刷新
+// v57: 位移试推 A/B oneshot；ini=moveProbe*（旧 impact* 读盘兜底、写盘擦除）
+constexpr int32_t kImpactImpulseDirDefault = 1;
+constexpr uint32_t kImpactImpulseVxDefault = 400u;
+constexpr uint32_t kImpactImpulseVyDefault = 200u;
+constexpr uint32_t kImpactImpulseVxMax = 5000u;
+constexpr uint32_t kImpactImpulseVyMax = 5000u;
+// P0 近距 hop：有符号 Δx（px）；验收档 80/120/160
+constexpr int32_t kImpactHopDeltaXDefault = 120;
+constexpr int32_t kImpactHopDeltaXMin = -400;
+constexpr int32_t kImpactHopDeltaXMax = 400;
 constexpr uint32_t kFrameLockFpsDefault = 120u;
 constexpr uint32_t kFrameLockFpsMin = 15u;
 // 软顶：仅防离谱输入；480 只是 UI 预设之一，不是业务上限。
 constexpr uint32_t kFrameLockFpsMax = 10000u;
-// flyMode: 0=点击飞(A) 1=跟随飞(B)
-constexpr uint32_t kFlyModeClick = 0u;
-constexpr uint32_t kFlyModeFollow = 1u;
-constexpr uint32_t kFlyModeDefault = kFlyModeFollow;
-// 每一飞自冷却（点击飞/跟随飞共用）
-constexpr uint32_t kFlyHopCdDefaultMs = 16u;
-constexpr uint32_t kFlyHopCdMinMs = 5u;
+// flyMode: 0=Impact·NockBack  1=Impact·SetImpactNext（fill+Doing 瞬移飞已禁用）
+constexpr uint32_t kFlyModeImpactNockBack = 0u;
+constexpr uint32_t kFlyModeImpactSetNext = 1u;
+constexpr uint32_t kFlyModeDefault = kFlyModeImpactNockBack;
+// 兼容旧名（语义已变：不再是点击/跟随）
+constexpr uint32_t kFlyModeClick = kFlyModeImpactNockBack;
+constexpr uint32_t kFlyModeFollow = kFlyModeImpactSetNext;
+// 每一飞自冷却（两条 Impact 路线共用）；默认 400；下限 1 仅供压测跟手
+constexpr uint32_t kFlyHopCdDefaultMs = 120u;
+// 过低 CD 会 STW+Impact 双排队打满 Unity 主线程（卡顿/MainPump timeout）。
+constexpr uint32_t kFlyHopCdMinMs = 40u;
 constexpr uint32_t kFlyHopCdMaxMs = 2000u;
 // hangup hour mask: bit0=00:00 .. bit23=23:00 (local time).
 constexpr uint32_t kHangupScheduleMaskAll = 0x00FFFFFFu;
@@ -65,7 +80,9 @@ constexpr uint32_t kSimpleCombatTickDefaultMs = 16u;
 constexpr uint32_t kSimpleCombatTickMinMs = 1u;
 constexpr uint32_t kSimpleCombatTickMaxMs = 100u;
 // 打怪开时 mob_scan 刷新周期；越小越快看见新怪/尸体，CPU 更高。闲置仍用 worker 内固定 360ms。
-constexpr uint32_t kMobScanIntervalDefaultMs = 50u;
+// 默认 20：对齐 Sleep 地板与抢怪体验；旧默认 50 读盘时迁到 20（显式其它值保留）。
+constexpr uint32_t kMobScanIntervalDefaultMs = 20u;
+constexpr uint32_t kMobScanIntervalLegacyDefaultMs = 50u;
 constexpr uint32_t kMobScanIntervalMinMs = 1u;
 constexpr uint32_t kMobScanIntervalMaxMs = 500u;
 // 与全局 Min 对齐；加速不另抬间隔。
@@ -92,7 +109,7 @@ constexpr uint32_t kCombatTeleportMinDxDefault = 220u;
 constexpr uint32_t kCombatTeleportMinDxMin = 160u;
 constexpr uint32_t kCombatTeleportMinDxMax = 2000u;
 // ???? ? ?????BIN standOff=90 > fireReach ?????????????????
-// 贴怪站位偏移；默认压到下限，最大化贴身 hitbox 覆盖。
+// 出刀站距（人↔怪心水平目标距离）；默认压到下限，命中带≈站距×1.55。
 constexpr uint32_t kCombatTeleportStandOffDefault = 12u;
 constexpr uint32_t kCombatTeleportStandOffMin = 12u;
 // 旧默认 25（再早 BIN 试过 40）；显式调过非 25 的保留。
@@ -103,7 +120,7 @@ constexpr uint32_t kCombatTeleportStandOffMax = 200u;
 constexpr uint32_t kCombatTeleportCooldownDefaultMs = 200u;
 constexpr uint32_t kCombatTeleportCooldownMinMs = 5u;
 constexpr uint32_t kCombatTeleportCooldownMaxMs = 8000u;
-// 跨层 fill 后额外互斥（与「瞬移冷却」独立）；0=关。首页面板可调。
+// 跨层 fill 后额外互斥（与贴怪节流独立）；0=关。首页面板可调。
 constexpr uint32_t kCombatCrossLayerFillGateDefaultMs = 280u;
 constexpr uint32_t kCombatCrossLayerFillGateMinMs = 0u;
 constexpr uint32_t kCombatCrossLayerFillGateMaxMs = 2000u;
@@ -172,9 +189,9 @@ struct PayloadControl {
     // v23: 飞行武装（面板勾选 / F6）；策略由 flyMode 决定；不钉台。
     // 开关为会话态（state/fly_armed），不写入 user.ini；重启 launcher/注入后归零。
     uint32_t fly = 0;
-    // v24: 0=点击飞(A) 1=跟随飞(B)；（旧值 2=吸附飞已退役，读入时 Clamp 回默认）
+    // v24: 0=Impact NockBack 1=Impact SetImpactNext（瞬移飞已禁用；旧点击/跟随语义废）
     uint32_t flyMode = kFlyModeDefault;
-    // v25: 每一飞间隔 ms（A/B 共用自冷却；C 不使用）
+    // v25: 每一飞间隔 ms（两条 Impact 路线共用自冷却）
     uint32_t flyHopCdMs = kFlyHopCdDefaultMs;
     uint32_t autoEnter = 1;   // 默认开：分区→最少人频道→选角（图例：雪吉拉 / 槽1）
     uint32_t charSlot = 1;    // 1-based 角色槽
@@ -196,13 +213,17 @@ struct PayloadControl {
     uint32_t simpleCombatAttackIntervalMs = kSimpleCombatAttackIntervalDefaultMs;
     // v39: 打怪状态机 Tick 间隔（首页「TICK值」）；默认 16，下限 5
     uint32_t simpleCombatTickMs = kSimpleCombatTickDefaultMs;
-    // v51: 打怪开时 MobPool 扫描周期（首页「怪物读取速度」）；默认 50
+    // v51: 打怪开时 MobPool 扫描周期（首页「怪物读取速度」）；默认 20
     uint32_t mobScanIntervalMs = kMobScanIntervalDefaultMs;
     // v40: 出刀按键 hold（调试 TAB）；默认 5，实际取 min(此值, 间隔)
     uint32_t simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     uint32_t clusterWeight = kClusterWeightDefault;  // 0=最近优先；非0=群怪优先
-    // 贴怪瞬移：产品默认开；面板无开关，始终下发开。
-    uint32_t simpleCombatTeleport = 1;
+    // fill+Doing 已废：强制关。位移统一 Impact（F5）/ 拟人。
+    uint32_t simpleCombatTeleport = 0;
+    // 空中贴怪（ini: simpleCombatAirApproach；旧键 ImpactApproach 读盘兜底）。
+    uint32_t simpleCombatImpactApproach = 1;
+    // 拟人位移：同层走路贴近后 A 键出刀；与空中贴怪互斥（空中开时恒 0）。
+    uint32_t simpleCombatHumanWalk = 0;
     uint32_t simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     uint32_t simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
     uint32_t simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
@@ -248,6 +269,19 @@ struct PayloadControl {
     uint32_t teleportKickStressFine10Seq = 0;
     // v26: 原地短跳（排除距离）
     uint32_t teleportKickStressLocalSeq = 0;
+    // v57: 位移试推 A/B（面板 bump seq）；ini=moveProbe*（旧 impact* 读盘兜底）
+    uint32_t impactNockBackTestSeq = 0;
+    uint32_t impactSetNextTestSeq = 0;
+    int32_t impactImpulseDir = kImpactImpulseDirDefault;  // ±1；其它值=跟朝向
+    uint32_t impactImpulseVx = kImpactImpulseVxDefault;
+    uint32_t impactImpulseVy = kImpactImpulseVyDefault;
+    // v58: 短推试推；ini=moveHop*（旧 impactHop* 读盘兜底）；force=1 旁路无敌
+    uint32_t impactHopTestSeq = 0;
+    int32_t impactHopDeltaX = kImpactHopDeltaXDefault;
+    uint32_t impactHopForce = 0;
+    // 调试采证：inline hook MovePath.Flush，dump C→S UserMove 的 MoveElem。默认关，
+    // 仅测试时经「调试」TAB 开启（本仓禁止常驻 inline hook）。见 movepath_flush_probe。
+    uint32_t movepathFlushProbe = 0;
     // v20: ????????? UX????? UserPool + channel_hop?? Reload?
     uint32_t autoRelogin = 0;             // ??????
     uint32_t autoReloginStopCombat = 1;   // ???
@@ -437,7 +471,7 @@ inline uint32_t ClampPumpDrainBudget(uint32_t v) {
 }
 
 inline uint32_t ClampFlyMode(uint32_t v) {
-    if (v > kFlyModeFollow) return kFlyModeDefault;
+    if (v > kFlyModeImpactSetNext) return kFlyModeDefault;
     return v;
 }
 
@@ -451,6 +485,22 @@ inline uint32_t ClampFlyHopCdMs(uint32_t v) {
     if (v < kFlyHopCdMinMs) return kFlyHopCdMinMs;
     if (v > kFlyHopCdMaxMs) return kFlyHopCdMaxMs;
     return v;
+}
+
+inline uint32_t ClampImpactImpulseSpeed(uint32_t v) {
+    if (v > kImpactImpulseVxMax) return kImpactImpulseVxMax;
+    return v;
+}
+
+inline int32_t ClampImpactImpulseDir(int32_t d) {
+    if (d == 1 || d == -1) return d;
+    return 0;  // 0=跟朝向
+}
+
+inline int32_t ClampImpactHopDeltaX(int32_t dx) {
+    if (dx < kImpactHopDeltaXMin) return kImpactHopDeltaXMin;
+    if (dx > kImpactHopDeltaXMax) return kImpactHopDeltaXMax;
+    return dx;
 }
 
 void PayloadControlSetDefaults(PayloadControl& out);

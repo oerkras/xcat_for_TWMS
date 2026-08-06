@@ -31,19 +31,38 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 // —— AvatarRoot SetActive ——
-constexpr size_t kFbAvatarRoot = 0x80;
+constexpr size_t kFbAvatarRoot = 0x80;  // UserBase/MsAvatar GameObject（未漂；meta 名已哈希）
 constexpr char kFldAvatarRoot[] = "_avatarRoot";
-constexpr uint32_t kRvaGoSetActive = 0x4E58B00;  // remount 2026-08-04
+// TW 字段哈希（meta 查不到明文 _avatarRoot 时用）
+constexpr char kHashAvatarRootField[] =
+    "e4b6b4386df519caa3bf9fc13fed749d6bc8ffc7457bbbb6b116975d4e74f85";
+constexpr uint32_t kRvaGoSetActive = 0x4E5CBA0;  // remount 2026-08-06（旧 0x4E58B00）
 
-// —— 远程伤字 / 技能特效（dump remount 2026-08-04）——
-constexpr uint32_t kRvaShowSkillEffect = 0xFE81B0;         // LocalUser
-constexpr uint32_t kRvaShowSkillAffected = 0xFED6B0;       // LocalUser
-constexpr uint32_t kRvaShowSkillPrepare = 0xFEDA90;        // LocalUser
-constexpr uint32_t kRvaShowSkillSpecialEffect = 0xFEDF20;  // LocalUser
-// Mob Slot14 damage-process tick（仅 MethodInfo 引用，无 code xref）
-constexpr uint32_t kRvaMobDamageTick = 0xF0A520;
-constexpr size_t kFbMobDamageInfoList = 0x1D8;             // Mob._damageInfo List<DamageInfo>
-constexpr size_t kOffDamageInfoCharacterId = 0x14;         // DamageInfo.CharacterId
+// —— 远程伤字 / 技能特效（dump remount 2026-08-06 · imagebase 0x7ff848c80000）——
+// 游戏逻辑区相对 2026-08-04 统一 +0x1E70；Unity SetActive 另计。
+constexpr uint32_t kRvaShowSkillEffect = 0xFEA020;         // User（旧 0xFE81B0）
+constexpr uint32_t kRvaShowSkillAffected = 0xFEF520;       // User（旧 0xFED6B0）
+constexpr uint32_t kRvaShowSkillPrepare = 0xFEF900;        // User（旧 0xFEDA90）
+constexpr uint32_t kRvaShowSkillSpecialEffect = 0xFEFD90;  // User（旧 0xFEDF20）
+// Mob Slot14 damage-process tick（仅 MethodInfo 引用；调用 OnHit@0xF22540 / ShowDamage@0xF0B290）
+constexpr uint32_t kRvaMobDamageTick = 0xF0C390;           // 旧 0xF0A520
+constexpr char kHashShowSkillEffect[] =
+    "e76a01aca99523014c16dfd9a421f9d337b70310e35a126cebdb0cb74fd9fce";
+constexpr char kHashShowSkillAffected[] =
+    "bb03f034e098420abf4e46c4879aec577d35b4eb262c29580c90036ad68e20c";
+constexpr char kHashShowSkillPrepare[] =
+    "ac17f7d7d39fe680fda75cf01e6aad3fa94f85d94c07777955c66b79efb08cc";
+constexpr char kHashShowSkillSpecialEffect[] =
+    "e1c2bb8db4f8cedff5bbfe98a5522866e5cad9cf25b1a68fe7f30fb3de5933d";
+constexpr char kHashMobDamageTick[] =
+    "b75cb90b14ff9d659097a8e47ed86b0e1b0c974a039d98229e2d69e051faa11";
+// CMS LocalUser ≡ TW User（TypeDef 1560）
+constexpr char kHashUserClass[] =
+    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";
+// dump 明文类名仍为 Mob（TypeDef 1507）；hash 查找作兜底（旧 a803dc63… 已废）
+constexpr char kHashMobClass[] = "Mob";
+constexpr size_t kFbMobDamageInfoList = 0x1D8;             // Mob._damageInfo List<DamageInfo>（未漂）
+constexpr size_t kOffDamageInfoCharacterId = 0x14;         // DamageInfo.CharacterId（未漂）
 
 constexpr int kMaxUsers = 128;
 constexpr int kMaxDamageInfos = 256;
@@ -189,21 +208,25 @@ void EnsureAvatarRootOffset() {
     }
 
     size_t off = 0;
+    const char* names[] = {kFldAvatarRoot, kHashAvatarRootField};
     for (void* k = ub; k; ) {
-        void* field = nullptr;
-        __try {
-            field = e.classGetFieldFromName(k, kFldAvatarRoot);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            field = nullptr;
-        }
-        if (field) {
+        for (const char* nm : names) {
+            void* field = nullptr;
             __try {
-                off = e.fieldGetOffset(field);
+                field = e.classGetFieldFromName(k, nm);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
-                off = 0;
+                field = nullptr;
             }
-            if (off) break;
+            if (field) {
+                __try {
+                    off = e.fieldGetOffset(field);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    off = 0;
+                }
+                if (off) break;
+            }
         }
+        if (off) break;
         if (!e.classParent) break;
         void* parent = nullptr;
         __try {
@@ -384,26 +407,61 @@ void UninstallFxHooks() {
     x::runtime::LogI("PlayerHide", "fx hooks uninstalled");
 }
 
+MethodInfoHead* ResolveFxMi(void* klass, uint32_t rva, const x::runtime::il2cpp_method::MethodShape& shape,
+                            const char* plain, const char* hash) {
+    if (!klass) return nullptr;
+    const auto mr = x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, hash);
+    if (mr.method) return reinterpret_cast<MethodInfoHead*>(mr.method);
+    return FindMiByRva(klass, rva);
+}
+
 bool InstallFxHooks() {
     if (gFxInstalled.load(std::memory_order_relaxed)) return true;
     if (!x::runtime::il2cpp::Ensure()) return false;
 
-    void* luKlass = x::runtime::il2cpp::FindClass("", "LocalUser");
-    if (!luKlass) luKlass = x::runtime::il2cpp::FindClass("Msc.Game.Object", "LocalUser");
+    void* userKlass = x::runtime::il2cpp::FindClass("", kHashUserClass);
+    if (!userKlass) userKlass = x::runtime::il2cpp::FindClass("", "User");
+    if (!userKlass) userKlass = x::runtime::il2cpp::FindClass("", "LocalUser");
+    if (!userKlass) userKlass = x::runtime::il2cpp::FindClass("Msc.Game.Object", "LocalUser");
     void* mobKlass = x::runtime::il2cpp::FindClass("", "Mob");
+    if (!mobKlass) mobKlass = x::runtime::il2cpp::FindClass("", kHashMobClass);
     if (!mobKlass) mobKlass = x::runtime::il2cpp::FindClass("Msc.Game.Object", "Mob");
 
-    if (!luKlass || !mobKlass) {
-        x::runtime::LogWThrottled(75, 10000, "PlayerHide", "fx klass miss lu=%p mob=%p", luKlass,
-                                  mobKlass);
+    if (!userKlass || !mobKlass) {
+        x::runtime::LogWThrottled(75, 10000, "PlayerHide", "fx klass miss user=%p mob=%p",
+                                  userKlass, mobKlass);
         return false;
     }
 
-    gMiSkillEffect = FindMiByRva(luKlass, kRvaShowSkillEffect);
-    gMiSkillAffected = FindMiByRva(luKlass, kRvaShowSkillAffected);
-    gMiSkillPrepare = FindMiByRva(luKlass, kRvaShowSkillPrepare);
-    gMiSkillSpecial = FindMiByRva(luKlass, kRvaShowSkillSpecialEffect);
-    gMiMobDamageTick = FindMiByRva(mobKlass, kRvaMobDamageTick);
+    using namespace x::runtime::il2cpp_method;
+    // ShowSkill*：param[] 最多 4；arity 用全量，param 仅作弱过滤
+    MethodShape kSk5{};
+    kSk5.arity = 5;
+    kSk5.ret = TypeKind::Void;
+    kSk5.unique = false;
+    kSk5.walkParents = true;
+    kSk5.param[0] = TypeKind::Ptr;
+    kSk5.param[1] = TypeKind::I32;
+    kSk5.param[2] = TypeKind::I32;
+    kSk5.param[3] = TypeKind::Any;
+    constexpr MethodShape kSk2{2, TypeKind::Void, false, true, {TypeKind::Ptr, TypeKind::I32}};
+    constexpr MethodShape kSkPrep{4, TypeKind::Void, false, true, {TypeKind::Ptr, TypeKind::I32,
+                                                                  TypeKind::Any, TypeKind::Any}};
+    constexpr MethodShape kSkSpec{3, TypeKind::Void, false, true, {TypeKind::Ptr, TypeKind::I32,
+                                                                  TypeKind::Ptr}};
+    constexpr MethodShape kTick{0, TypeKind::Void, false, true, {}};
+
+    gMiSkillEffect =
+        ResolveFxMi(userKlass, kRvaShowSkillEffect, kSk5, "ShowSkillEffect", kHashShowSkillEffect);
+    gMiSkillAffected = ResolveFxMi(userKlass, kRvaShowSkillAffected, kSk2, "ShowSkillAffected",
+                                   kHashShowSkillAffected);
+    gMiSkillPrepare = ResolveFxMi(userKlass, kRvaShowSkillPrepare, kSkPrep, "ShowSkillPrepare",
+                                  kHashShowSkillPrepare);
+    gMiSkillSpecial =
+        ResolveFxMi(userKlass, kRvaShowSkillSpecialEffect, kSkSpec, "ShowSkillSpecialEffect",
+                    kHashShowSkillSpecialEffect);
+    gMiMobDamageTick =
+        ResolveFxMi(mobKlass, kRvaMobDamageTick, kTick, nullptr, kHashMobDamageTick);
 
     int hits = 0;
     void* orig = nullptr;

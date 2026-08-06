@@ -28,18 +28,17 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04
-constexpr uint32_t kRvaCompGetGo = 0x4E53330;              // remounted 2026-08-04
-constexpr uint32_t kRvaObjGetName = 0x4E60290;             // remounted 2026-08-04
-constexpr uint32_t kRvaSendActivatePetRequest = 0xC5A960;  // remounted 2026-08-04
+// Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
+// Remount 2026-08-06：ACS hash 全换；字段 off 未漂；ActivatePet 按 CIM 方法序 + restore_method_map
+constexpr uint32_t kRvaSendActivatePetRequest = 0xC5BBC0;  // remounted 2026-08-06
 constexpr char kHashSendActivatePet[] =
-    "b2c39570b0512792466530313a22b91bb9929131024081d578d55bb1778aa00";
+    "e73cc648efca40e586c9ff7951cfc166f8f192709b937061cec11dfe6c290de";
 
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 constexpr char kCashItemManagerClass[] =
-    "da9619a468e583349c55afeb25a23df1e101d6b8d1e8f4c222ce18f7ec8f878";
+    "e99dd2136072e6348b5c6059d9527202d86597bc7b36557354ca54b1d68e132";
 constexpr char kUserClass[] =
-    "d9ad004bbff1a41ca96697c8e44ed3175dae9846fb772898fd54ec65040348b";  // TDI:1560
+    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";  // TDI:1560
 
 // dump fallback；运行时 hash + field_get_offset 优先
 constexpr size_t kFbWmMyUser = 0x28;
@@ -47,15 +46,15 @@ constexpr size_t kFbApPet = 0x2B0;
 constexpr size_t kFbLogicalPos = 0x240;
 constexpr size_t kFbVisPos = 0x64;
 constexpr char kHashFldWmMyUser[] =
-    "<d4428e1b7aab1a1fca5b6951009bf64f2c5cfb39f9a183f582fed4ff3a1aaaa>k__BackingField";
+    "<ef4652eaf850c6fcba53fee8385959f223111ee46e00417bb435eebc026d15e>k__BackingField";  // WM.MyUser@0x28
 constexpr char kHashFldApPet[] =
-    "a3e632d00632a74fdc95dc470f10e1a8979e81b032d7d8eac27dfeb6a13074c";
+    "b093d698bf1ad623c0b88a522673c36b6b8aa11110ccdcb5e36472da2e50906";
 constexpr char kHashFldCurPos[] =
-    "b992bfa57dd45d484f39e25a6290a95d76e19fc1059423bff8fb0c9507dbda7";
+    "c4adef19821f3737cd477a7840968c11697f4afd8eb8696cafb37d1c297b926";
 constexpr char kHashFldFieldPos[] =
-    "c9d7ef4393802ebe9fdf9ebe7eaf7245d5cef3eeaa2a8d052fb4ad4883e34dc";
+    "cc96f38a9acbe6b4e8005a2d56a7846324bc67690c2059661962502f74b928a";
 constexpr char kVecCtrlOwnerClass[] =
-    "ddef6db860cfa2bea6dca39e201bf3065a897797f86009fb4d6104830143d94";
+    "edc85ce203606bdb549e5fb94458b1d2d11ce78034d24d41e39a54c0288d38e";
 
 struct PetFieldOff {
     size_t wmMyUser = kFbWmMyUser;
@@ -75,19 +74,19 @@ PetFieldOff gOff{};
 // 背包列表：SSOT = player_vitals（ItemSlots hash）；本文件不再钉 CD 偏移。
 // Pet / ItemSlotPet：hash → field_get_offset
 constexpr char kPetClass[] =
-    "f5be2907a4e45eab8f0728f4335609468c882e48c120846124031faddb9b9f2";
+    "f170c222994b5b5fa20c2a3c92fa28d6d8f6812c6955b27c6141300e37a575d";
 constexpr char kItemSlotPetClass[] =
-    "c4f17c2d5bd81b5d8e01da93b92b81b91ea9237ecaa08791d6be71784fe6d41";
+    "bb1b627de814571bee19f0047969130afb63cd6cb00856136624230a9fbc30e";
 constexpr char kHashPetRepleteness[] =
-    "cdd2e2ec01a3de26f3f2146ca483c5e23abef3110d60b6712108078bd2d717d";
+    "ec966dc7b24ee41f71bab8fb2294b2704e6335a2ba12c109b24137d30928ed0";
 constexpr char kHashSlotRepleteness[] =
-    "cf0c3076077ad451da3c44894bcaeed751a8127ead64c82d09fb5e8007fc830";
+    "d4dcca99551f882d5d0b328d9d1933b46abb3acef38c97bf7e8194da6baffad";
 constexpr char kHashDateDead[] =
-    "ca1ab0f8f44b56398566e7d287c7e67fd423775448fcfb0b5173d29686803e1";
+    "a177e89ba94ebd8cb7cc68cc5bab7ad44232d5082ee1b64f06f2791d2f93af6";
 constexpr char kHashRemainLife[] =
-    "c71dc99cf198b0e7287e04be21a34864d6be4051106ab969fb79b472624aca4";
+    "bac64c404aff7f9a9817d7446805207bcdf31b62a140b574551dd7fc0ddb8f8";
 constexpr char kHashActiveState[] =
-    "a6be7648d376879ba30ca97a67f4c803d34746e2c906510d188f7cc4dc6bc48";
+    "aad86688099cf1f408b3ff6869fb3a6a83e485731402c014b5f8697eb2de562";
 constexpr size_t kFbPetRepleteness = 0xBC, kFbSlotRepleteness = 0x38, kFbDateDead = 0x40;
 constexpr size_t kFbRemainLife = 0x48, kFbActiveState = 0x4E;
 size_t gOffPetRepleteness = kFbPetRepleteness, gOffSlotRepleteness = kFbSlotRepleteness;
@@ -221,25 +220,6 @@ bool ReadIl2CppString(void* str, char* out, size_t outCap) {
     }
 }
 
-bool GetGoName(void* comp, char* out, size_t outCap) {
-    out[0] = 0;
-    if (!comp || !gCompGo || !gObjName) return false;
-    void* go = nullptr;
-    __try {
-        go = gCompGo(comp, nullptr);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-    if (!go) return false;
-    void* nameObj = nullptr;
-    __try {
-        nameObj = gObjName(go, nullptr);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-    return ReadIl2CppString(nameObj, out, outCap);
-}
-
 void* FindClass(const char* ns, const char* name) {
     return x::runtime::il2cpp::FindClass(ns, name);
 }
@@ -253,33 +233,47 @@ bool FieldOffOrFb(void* klass, const char* fieldHash, size_t fb, size_t* out) {
     if (!klass || !fieldHash) return false;
     const auto& e = x::runtime::il2cpp::Get();
     if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
-    void* field = nullptr;
-    __try {
-        field = e.classGetFieldFromName(klass, fieldHash);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+    for (void* k = klass; k;) {
+        void* field = nullptr;
+        __try {
+            field = e.classGetFieldFromName(k, fieldHash);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            field = nullptr;
+        }
+        if (field) {
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (off >= 0x10 && off < 0x1000) {
+                *out = off;
+                return true;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
     }
-    if (!field) return false;
-    size_t off = 0;
-    __try {
-        off = e.fieldGetOffset(field);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-    if (off < 0x10 || off >= 0x1000) return false;
-    *out = off;
-    return true;
+    return false;
 }
 
 void EnsureFieldOffsets() {
-    if (gOff.tried) return;
-    gOff.tried = true;
+    constexpr int kExpect = 9;
+    static int sLastHits = -1;
+    if (gOff.tried && sLastHits >= kExpect) return;
     if (!x::runtime::il2cpp::Ensure()) return;
     const auto& e = x::runtime::il2cpp::Get();
     if (!e.classGetFieldFromName || !e.fieldGetOffset) return;
 
     void* userKlass = FindClass("", kUserClass);
+    if (!userKlass) userKlass = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
     void* vcoKlass = FindClass("", kVecCtrlOwnerClass);
+    if (!vcoKlass) vcoKlass = userKlass;
     void* wmKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
     void* petKlass = FindClass("", kPetClass);
     void* slotKlass = FindClass("", kItemSlotPetClass);
@@ -294,11 +288,14 @@ void EnsureFieldOffsets() {
     if (FieldOffOrFb(slotKlass, kHashDateDead, kFbDateDead, &gOffDateDead)) ++hits;
     if (FieldOffOrFb(slotKlass, kHashRemainLife, kFbRemainLife, &gOffRemainLife)) ++hits;
     if (FieldOffOrFb(slotKlass, kHashActiveState, kFbActiveState, &gOffActiveState)) ++hits;
-    constexpr int kExpect = 9;
+    gOff.tried = true;
     gOff.path = hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback");
-    x::runtime::LogI("PetPort",
-                     "field offsets path=%s hits=%d/%d apPet=0x%zx slotFull=0x%zx dead=0x%zx",
-                     gOff.path, hits, kExpect, gOff.apPet, gOffSlotRepleteness, gOffDateDead);
+    if (hits != sLastHits) {
+        sLastHits = hits;
+        x::runtime::LogI("PetPort",
+                         "field offsets path=%s hits=%d/%d apPet=0x%zx slotFull=0x%zx dead=0x%zx",
+                         gOff.path, hits, kExpect, gOff.apPet, gOffSlotRepleteness, gOffDateDead);
+    }
 }
 
 MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
@@ -429,19 +426,20 @@ bool BindApis() {
     return false;
 }
 
+bool UnityObjectAlive(void* obj) {
+    if (!LooksLikeHeapPtr(obj)) return false;
+    if (!ReadPtr(obj, 0)) return false;
+    return ReadPtr(obj, kOffCachedPtr) != nullptr;
+}
+
 bool LocalUserStillAlive() {
-    if (!gLocalUser) return false;
+    // Worker-safe: raw reads only. GetGoName → GC "Collecting from unknown thread".
+    if (!gLocalUser || !UnityObjectAlive(gLocalUser)) return false;
+    void* wm = world::PeekWorldManager();
+    void* mu = wm ? ReadPtr(wm, kOffWmMyUser) : nullptr;
+    if (UnityObjectAlive(mu) && mu != gLocalUser) return false;
+    if (UnityObjectAlive(mu) && mu == gLocalUser) return true;
     __try {
-        if (!*reinterpret_cast<void**>(gLocalUser)) return false;
-        const intptr_t cached =
-            *reinterpret_cast<intptr_t*>(reinterpret_cast<uint8_t*>(gLocalUser) + kOffCachedPtr);
-        if (cached == 0) return false;
-        void* wm = world::PeekWorldManager();
-        void* mu = wm ? ReadPtr(wm, kOffWmMyUser) : nullptr;
-        if (LooksLikeHeapPtr(mu) && mu != gLocalUser) return false;
-        char name[96]{};
-        if (!GetGoName(gLocalUser, name, sizeof(name))) return false;
-        if (_stricmp(name, "MyUser") != 0) return false;
         const float visX =
             *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(gLocalUser) + kOffVisPos);
         const float visY =
@@ -474,14 +472,15 @@ bool TryResolveLocalUser(DWORD now) {
     void* wm = world::PeekWorldManager();
     if (!wm) wm = world::GetWorldManager();
     void* mu = wm ? ReadPtr(wm, kOffWmMyUser) : nullptr;
-    if (LooksLikeHeapPtr(mu)) {
-        char name[96]{};
-        if (GetGoName(mu, name, sizeof(name)) && _stricmp(name, "MyUser") == 0) {
-            gLocalUser = mu;
-            x::runtime::LogI("PetPort", "LocalUser ACCEPT wm.MyUser=%p", gLocalUser);
-            return true;
-        }
+    // 禁 GetGoName（worker）；WM.MyUser 指针权威。
+    if (UnityObjectAlive(mu)) {
+        gLocalUser = mu;
+        x::runtime::LogI("PetPort", "LocalUser ACCEPT wm.MyUser=%p", gLocalUser);
+        return true;
     }
+
+    // InterStage / 卸图：禁 FindAll（拖黑屏）；MyUser 空则等 PlayReady。
+    if (!world::IsPlayReady()) return false;
 
     if (!gLuType) {
         gLuType = x::runtime::il2cpp::ClassTypeObject(
@@ -499,13 +498,10 @@ bool TryResolveLocalUser(DWORD now) {
     void* best = nullptr;
     for (uintptr_t i = 0; i < n && i < 64; ++i) {
         void* obj = ArrayAt(arr, i);
-        if (!obj) continue;
-        char name[96]{};
-        GetGoName(obj, name, sizeof(name));
-        if (name[0] && _stricmp(name, "MyUser") == 0) {
-            best = obj;
-            break;
-        }
+        // FindAll 已按类型过滤；worker 上禁 GetGoName。
+        if (!UnityObjectAlive(obj)) continue;
+        best = obj;
+        break;
     }
     gLocalUser = best;
     if (gLocalUser) x::runtime::LogI("PetPort", "LocalUser ACCEPT lu=%p", gLocalUser);

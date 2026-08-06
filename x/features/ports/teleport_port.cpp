@@ -1,14 +1,8 @@
-// Classic TWMS — 唯一产品瞬移：手填 Teleport pending + TryDoingTeleport（fill+Doing）
-// 不含 ImpactNext / Attr=4 / SyncRel settle / Register 技能包。
-//
-// 只填 pending、只让引擎自己落点（逆自 GameAssembly 运行时 dump）：
-//   UserLocal+0x3C8 = { byte flag; float x@+4; float y@+8; int lastTime@+0xC }
-//   TryDoingTeleport（RVA 0x1026060）在 UserLocal Update 链（RVA 0x1016150）里每帧被调，
-//   flag 置位即把 (int)x,(int)y 交给 VecCtrl 落点体（RVA 0x11A8460）后清 flag。
-//   落点体全部行为：CurFh/LastFh 置 null；Ap/Apl ← (int)x,y；Ap.V/Apl.V 归零；
-//   （vc+0x80 置位时）MovePath_MakeMovePath 上报。不写 RelPos、不挂踏板。
-// 结论：踏板重挂是引擎 CollisionDetect 的职责。我方禁止在 Doing 前后补种 CurFh/RelPos
-// ——那会让下一帧 AbsPos←f(我方台, 我方弧长) 覆盖引擎结论，即 land_miss 的根因。
+// Classic TWMS — 位移端口：产品统一走 Impact（F5/F6）；fill+Doing 已失效。
+// Impact：NockBack / SetImpactNext / ImpactHop / ImpactImpulseToward（Attr=2）。
+// TeleportNativeSkillCall / TryDoingTeleport：入口硬拒，禁止再接入。
+// Doing 绑桩代码暂留（EnsureBound 仍解析 RVA，供诊断灯）；不得再当产品扳机。
+// IDB imagebase 见 Dumps/runtime/GameAssembly.dll。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -21,7 +15,9 @@
 #include "map_bounds_port.h"
 #include "player_combat_port.h"
 #include "world_port.h"
+#include "../invuln/invuln.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/log.h"
@@ -35,6 +31,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <thread>
 
 namespace x::features::ports::teleport {
 namespace {
@@ -42,67 +39,75 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaTryDoingTeleport = 0x1026060;  // remounted 2026-08-04
-constexpr uint32_t kRvaVecCtrlSetForcedFlush = 0x11A8700;  // remounted 2026-08-04
-constexpr uint32_t kRvaMovePathSetForcedFlush = 0x119F320;  // remounted 2026-08-04
+// remount 纠偏 2026-08-06：消费 pending 的 Doing = 0x1027ED0（旧邻域 0x1026060），
+// 不是 dump 误标名的 0x10AB400。
+constexpr uint32_t kRvaTryDoingTeleport = 0x1027ED0;
+constexpr uint32_t kRvaVecCtrlSetForcedFlush = 0x11AA570;  // → Mp+0x48 := 1（seed^6）
+constexpr uint32_t kRvaMovePathSetForcedFlush = 0x11A1190;  // Mp+0x48 := 1（seed+0x6C）
+// remount 2026-08-06：NockBack 内联写 impactNext；SetImpactNext CFA（IL2CPP xmm1/xmm2 ABI）
+constexpr uint32_t kRvaVecCtrlNockBack = 0x11BDE90;
+constexpr uint32_t kRvaVecCtrlSetImpactNext = 0x11AA5F0;
 constexpr char kHashTryDoingTeleport[] =
-    "e877dce51c9e10d99e95d90bc35c5fe1694870f4063b551ff71ca01c0cabf8b";
+    "af8e399020feab57b9618e03aa476b5fd41dab01d67a9c0184794a8fa823e74";
 constexpr char kHashVecCtrlSetForcedFlush[] =
-    "c9db3f0b899c94ef3c0e678fbab1708142e77ec86734b4a971a4fbe8ed8b806";
+    "b9b4ff83cc6c06dd35af3749d73ef5a7c65d38e9a5af52530893bae2780d4b0";
 constexpr char kHashMovePathSetForcedFlush[] =
-    "a453a7117248fc39bbdfe973b59ccf35203b4ca27f44234c1a3c5f4387d2200";
+    "bd22d20e9f838404e90eca003a298363f3811901d280ac6a687f35aac79f693";
 constexpr char kVecCtrlClass[] =
-    "ef24024acbe225bcc90ca332f3e00aff5800daa32a769057d2e830eeac776bb";
+    "e0eb55b82f10cb9eeb9424eb3aadf1450a014afa564bc55c3739b2909abfbbc";
 constexpr char kMovePathClass[] =
-    "e94d0baf8d17ca3e5ccea1f3065f762ec520bdaaf9106e8ef47ce7d3ce68297";
+    "bf8877c4b6040ee2bbcd43dece8fa422d433874b58900fd618aad4f5b0309e7";
 constexpr char kActorBaseClass[] =
-    "ddef6db860cfa2bea6dca39e201bf3065a897797f86009fb4d6104830143d94";
+    "edc85ce203606bdb549e5fb94458b1d2d11ce78034d24d41e39a54c0288d38e";
 constexpr char kFhClass[] =
-    "f7493895c6355227ba46ff22f0b3d491fac47e4c4ad2e735773a72878d9f860";
+    "efa6625ea3b04a69e7c5b850c9e7f5be45cc60edd0f20d9bd6cd400a4dcd51a";
 // True TW UserLocal = User subclass with Teleport@0x3C8（resolve: il2cpp_shape）
 
 // hash → field_get_offset（与 foothold / attack / player_combat 同源）
 constexpr char kHashUserVecCtrl[] =
-    "<dc76f5c9e250bc9a327a219b39e16c345cdabf7b01ad5c60b568045069c9120>k__BackingField";
+    "<acb8946a384ed398c4ad9268349397cf4f6e65cf136078ebc9aa26a949efd41>k__BackingField";
 constexpr char kHashVcCurFh[] =
-    "<b7b98b20290b6ec6221cc7a98ad9113018910968cd1f681f60fe20f109ef629>k__BackingField";
+    "<ee95e4ea9526a8d5a2c0e38ae6b59726f52587018d82072a2020dc6ac5a2398>k__BackingField";
 constexpr char kHashVcLastFh[] =
-    "<c97b850dd190245b9825d1e6892847b5ed3ecdd710e9bd1c08fc8202909be86>k__BackingField";
+    "<ea429355b0867d9d038619ab4f67f569951204a479856815af334e740450be2>k__BackingField";
 constexpr char kHashVcMovePath[] =
-    "<dfec47f2fe1c0e901374ce4c4aec6f184ddac664e70eddd01f13c87cc697dc2>k__BackingField";
+    "<f4ed2fef5fe256b1a408b40c57a5c59e4fff75169f423e0ecb1ccd062926bb0>k__BackingField";
 constexpr char kHashVcRelPos[] =
-    "b43a7d8d34af59258f63b62c55068f9d50d59aa86f239fd75d9c5f7d8f008e7";  // RelPos; V=+8
+    "f9386810e222adacdfbd2e9232322d7cfcd301fa19b7734975ad616d30dfc0c";  // RelPos; V=+8
 constexpr char kHashVcAp[] =
-    "a860e652f11e3e8846eaf4dfb600e319058d3e0e9e79b3fd7a3447344d98bb9";  // AbsPos; Y=+8
+    "e558fbd3da65bf13bea9360dfa61506af709ad89f925bc16b67e7e1cdb24107";  // AbsPos; Y=+8
 constexpr char kHashVcApl[] =
-    "ddcaef33563d49269da8f9db8391866dfc59ec057b8cca4ffa15a5b38f271b3";  // Apl; Y=+8
+    "b5eb27f6f80eeaea51f811969e3c5bc8a7b73b19741a8cb481b29a0082c958d";  // Apl; Y=+8
 constexpr char kHashVcMoveAction[] =
-    "afdef055a699e27cb4575fce73d95752cd4571320e9c13b0c0322e96a023c3a";
+    "fa93e903eebde8b6fd77060143b0b2f1293e84eeba873dae2034090150daad4";
 constexpr char kHashMpForcedFlush[] =
-    "e76fd0429b4190c5e8022e4e22b97dfea8c254efd7b8e83d8cf3b13780396b8";
+    "daff0d0fb89c860e58ea67292ca7d7353f50a0d671b9433ca1bb57b85fc1488";
 constexpr char kHashMpX[] =
-    "b4c1330413ec6a87812b47472c538a303af55e0eb72fa9ba50da034bda2d7a4";
+    "d99edd7ee4ef38e67d4d2e4868edde9a32596d6d3f968d070462878b120e0cf";
 constexpr char kHashMpY[] =
-    "ac214c6c09f7977df3ee20b103e35bd87fd5aa82591dace047981e8f136fd2c";
+    "d79f3c9cbc0755e62cb2034e7e8876a529873e107c2d6a69ff5e6720db86fa9";
 constexpr char kHashFhX1[] =
-    "<b4b17e3fe55cee84a1cc309d4c6f7cb8f6ba1132cb7b0e3fe2187515f112799>k__BackingField";
+    "<fb0267bbb0c9e644310fb7a85bb2de177d3efc8e9371567f0302ab754661f78>k__BackingField";
 constexpr char kHashFhY1[] =
-    "<aea9f00b3be599c5d92303bbcce95fefce71cdecb0030dc3e248807b37221e9>k__BackingField";
+    "<f116f299fc84de052c922811e44d60e7d144d24e0494716e98c6c8027a340c1>k__BackingField";
 constexpr char kHashFhX2[] =
-    "<be62b8cab6ec790bc8e45378aea447a5e777169435b71c8cdeaf971d16b69ab>k__BackingField";
+    "<f7e3a1cba4a600a510aa957c3ae5b7bee9fe6ac36d205bb6dc4a3c4b9563fdb>k__BackingField";
 constexpr char kHashFhY2[] =
-    "<e47137381c7954f12ba8667e57b0df9a37338ba57e2f98cd0a4725f2b6e1cb8>k__BackingField";
+    "<e5815a35031c0f19c85de13d144d3f905064d8edf6cf59601d743c1185aba4b>k__BackingField";
 // UserLocal.Teleport valuetype block（嵌套相对：IsValid+0 / ByPortal+1 / Pos+4 / ticks+0xC/+0x10）
 constexpr char kHashTeleport[] =
-    "f068fbf6557e1bea671fa19a5142e0053d1e93ab847738acfdf746c2e15189a";
+    "d3cfbaeeac1657b366daccedd1678e39163e53d47ef74f20cf2fceba1ca2750";
 
 constexpr size_t kFbVecCtrl = 0x50, kFbVcCurFh = 0x28, kFbVcLastFh = 0x30, kFbVcMovePath = 0x78;
+// P0b：LadderOrRope@0x40（无稳定 hash 时钉 fb；点飞预清不用它，飞穿层要卸）
+constexpr size_t kFbVcLadderOrRope = 0x40;
 constexpr size_t kFbVcRelPos = 0x88, kFbVcAp = 0x98, kFbVcApl = 0xB8, kFbVcMoveAction = 0x84;
 constexpr size_t kFbMpForcedFlush = 0x48, kFbMpX = 0x10, kFbMpY = 0x12;
 constexpr size_t kFbFhX1 = 0x14, kFbFhY1 = 0x18, kFbFhX2 = 0x1C, kFbFhY2 = 0x20;
 constexpr size_t kFbTeleport = 0x3C8;
 
 size_t gOffVecCtrl = kFbVecCtrl, gOffVcCurFh = kFbVcCurFh, gOffVcLastFh = kFbVcLastFh;
+size_t gOffVcLadderOrRope = kFbVcLadderOrRope;
 size_t gOffVcMovePath = kFbVcMovePath, gOffVcRelPos = kFbVcRelPos, gOffVcAp = kFbVcAp;
 size_t gOffVcApl = kFbVcApl, gOffVcMoveAction = kFbVcMoveAction;
 size_t gOffMpForcedFlush = kFbMpForcedFlush, gOffMpX = kFbMpX, gOffMpY = kFbMpY;
@@ -112,6 +117,7 @@ size_t gOffTeleport = kFbTeleport;
 #define kOffVecCtrl (gOffVecCtrl)
 #define kOffVcCurFh (gOffVcCurFh)
 #define kOffVcLastFh (gOffVcLastFh)
+#define kOffVcLadderOrRope (gOffVcLadderOrRope)
 #define kOffVcMovePath (gOffVcMovePath)
 #define kOffVcRpPos (gOffVcRelPos)
 #define kOffVcRpV (gOffVcRelPos + 8)
@@ -224,6 +230,10 @@ void MarkNativeOk(DWORD now) {
 
 using FnTryDoingTeleport = void (*)(void* self, const void* method);
 using FnSetForcedFlush = void (*)(void* self, const void* method);
+using FnNockBack = void (*)(void* self, int dir, int vx, int vy, const void* method);
+// IL2CPP Windows x64：this@rcx · vx@xmm1 · vy@xmm2 · MethodInfo@r9（非 MSVC 默认 xmm0/xmm1）
+using FnSetImpactNextThunk = void (*)(void* target, void* self, uint64_t vxBits, uint64_t vyBits,
+                                      void* method);
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -233,11 +243,39 @@ struct MethodInfoHead {
 FnTryDoingTeleport gDoing = nullptr;
 FnSetForcedFlush gSetFlush = nullptr;
 FnSetForcedFlush gMpSetFlush = nullptr;
+FnNockBack gNockBack = nullptr;
+void* gSetImpactNextRaw = nullptr;
+FnSetImpactNextThunk gSetImpactNextThunk = nullptr;
+void* gMiNockBack = nullptr;
+void* gMiSetImpactNext = nullptr;
 
 void* gGA = nullptr;
 void* gLocalUserKlass = nullptr;
 void* gMiDoing = nullptr;
 std::atomic<bool> gBound{false};
+
+FnSetImpactNextThunk EnsureSetImpactNextThunk() {
+    if (gSetImpactNextThunk) return gSetImpactNextThunk;
+    // rcx=target rdx=self r8=vxBits r9=vyBits [rsp+28h]=method
+    // → rcx=self xmm1=vx xmm2=vy r9=method ; jmp target
+    static const uint8_t kCode[] = {
+        0x48, 0x89, 0xC8,              // mov rax, rcx
+        0x48, 0x89, 0xD1,              // mov rcx, rdx
+        0x66, 0x49, 0x0F, 0x6E, 0xC8,  // movq xmm1, r8
+        0x66, 0x49, 0x0F, 0x6E, 0xD1,  // movq xmm2, r9
+        0x4C, 0x8B, 0x4C, 0x24, 0x28,  // mov r9, [rsp+28h]
+        0x48, 0x31, 0xD2,              // xor rdx, rdx
+        0x4D, 0x31, 0xC0,              // xor r8, r8
+        0x48, 0xFF, 0xE0,              // jmp rax
+    };
+    void* p = VirtualAlloc(nullptr, sizeof(kCode), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!p) return nullptr;
+    memcpy(p, kCode, sizeof(kCode));
+    DWORD old = 0;
+    VirtualProtect(p, sizeof(kCode), PAGE_EXECUTE_READ, &old);
+    gSetImpactNextThunk = reinterpret_cast<FnSetImpactNextThunk>(p);
+    return gSetImpactNextThunk;
+}
 
 template <typename T>
 T AtRva(uint32_t rva) {
@@ -306,6 +344,24 @@ int32_t ReadI32(void* obj, size_t off) {
     if (!obj) return 0;
     __try {
         return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+int16_t ReadI16(void* obj, size_t off) {
+    if (!obj) return 0;
+    __try {
+        return *reinterpret_cast<int16_t*>(reinterpret_cast<uint8_t*>(obj) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+uint8_t ReadU8(void* obj, size_t off) {
+    if (!obj) return 0;
+    __try {
+        return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(obj) + off);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
@@ -430,7 +486,8 @@ bool BindFns() {
     // void() 在 UL 上极多 → unique=false，靠哈希/RVA。
     if (gLocalUserKlass) {
         constexpr MethodShape kDoing{0, TypeKind::Void, false, true, {}};
-        auto* mi = resolveMi(gLocalUserKlass, kRvaTryDoingTeleport, kDoing, "TryDoingTeleport",
+        // 不传 plain「TryDoingTeleport」：dump C 误把该名贴到 0x10AB400，plain 会命中错桩。
+        auto* mi = resolveMi(gLocalUserKlass, kRvaTryDoingTeleport, kDoing, nullptr,
                              kHashTryDoingTeleport, &pathDoing);
         gMiDoing = mi;
         if (mi && mi->methodPointer)
@@ -458,17 +515,32 @@ bool BindFns() {
     if (!gSetFlush) gSetFlush = AtRva<FnSetForcedFlush>(kRvaVecCtrlSetForcedFlush);
     if (!gMpSetFlush) gMpSetFlush = AtRva<FnSetForcedFlush>(kRvaMovePathSetForcedFlush);
 
+    // 调试冲击：NockBack / SetImpactNext — 今日无可靠方法哈希，RVA 绑定
+    {
+        MethodInfoHead* miNb = findByRva(vcKlass, kRvaVecCtrlNockBack);
+        MethodInfoHead* miSi = findByRva(vcKlass, kRvaVecCtrlSetImpactNext);
+        gMiNockBack = miNb;
+        gMiSetImpactNext = miSi;
+        if (miNb && miNb->methodPointer)
+            gNockBack = reinterpret_cast<FnNockBack>(miNb->methodPointer);
+        if (miSi && miSi->methodPointer) gSetImpactNextRaw = miSi->methodPointer;
+    }
+    if (!gNockBack) gNockBack = AtRva<FnNockBack>(kRvaVecCtrlNockBack);
+    if (!gSetImpactNextRaw) gSetImpactNextRaw = AtRva<void*>(kRvaVecCtrlSetImpactNext);
+    (void)EnsureSetImpactNextThunk();
+
     EnsureTpFieldOff();
     const bool ok = gDoing != nullptr;
     gBound.store(ok, std::memory_order_release);
     if (ok) {
         const int n = (gMiDoing ? 1 : 0) + (miVc ? 1 : 0) + (miMp ? 1 : 0);
         x::runtime::LogI("Teleport",
-                         "methods path=%s hits=%d/3 hash=%d Doing@0x%X Flush@0x%X MpFlush@0x%X "
-                         "mi(doing=%d vc=%d mp=%d)",
+                         "methods path=%s hits=%d/3 hash=%d Doing@0x%X Flush@0x%X "
+                         "MpFlush@0x%X mi(doing=%d vc=%d mp=%d) NockBack@0x%X SetImpact@0x%X",
                          hashHits == 3 ? "meta" : (hashHits ? "meta-partial" : "rva/kind"), n,
                          hashHits, kRvaTryDoingTeleport, kRvaVecCtrlSetForcedFlush,
-                         kRvaMovePathSetForcedFlush, gMiDoing ? 1 : 0, miVc ? 1 : 0, miMp ? 1 : 0);
+                         kRvaMovePathSetForcedFlush, gMiDoing ? 1 : 0, miVc ? 1 : 0, miMp ? 1 : 0,
+                         kRvaVecCtrlNockBack, kRvaVecCtrlSetImpactNext);
         char detail[48]{};
         snprintf(detail, sizeof(detail), "mi %d/3", n);
         x::runtime::anchor_lamps::Set(
@@ -661,8 +733,8 @@ bool ApplyFillDoing(void* lu, void* vc, float tx, float ty, uint32_t fhId, const
         WriteI16(mp, kOffMpY, static_cast<int16_t>(static_cast<int>(std::lround(ty))));
     }
 
-    // 引擎原生瞬移体（VecCtrl RVA 0x11A8460，由 TryDoingTeleport 消费 pending 后调用）只做：
-    //   CurFh(vc+0x28)=null → LastFh(vc+0x40)=null → Ap/Apl ← (int)x,(int)y →
+    // 引擎原生瞬移体（VecCtrl RVA 0x11AA2D0，由 Doing@0x1027ED0 消费 pending 后调用）只做：
+    //   CurFh(vc+0x28)=null → LastFh(vc+0x30)=null → Ap/Apl ← (int)x,(int)y →
     //   Ap.V/Apl.V 归零 →（vc+0x80 置位时）MovePath_MakeMovePath 上报。
     // 它**不写 RelPos、不挂踏板**；踏板由下一物理帧 CollisionDetect 自行重挂。
     // 故这里不再预挂目标台：Doing 若被内部门禁提前挡回，预挂会留下「远台 + 人在原位」的脏
@@ -673,7 +745,7 @@ bool ApplyFillDoing(void* lu, void* vc, float tx, float ty, uint32_t fhId, const
             return false;
         }
     } else {
-        // 点飞悬空：卸掉可能残留的旧图台（只 detach，不会挪动角色），
+        // 点飞悬空（0.1.50～0.1.91）：卸旧图台 CurFh + LastFh（只 detach，不挪人）。
         // 否则下一帧 AbsPos←RelPos 闪回旧图坐标。
         WritePtr(vc, kOffVcCurFh, nullptr);
         WritePtr(vc, kOffVcLastFh, nullptr);
@@ -865,144 +937,20 @@ uint32_t NativeCooldownRemainingMs() {
 }
 
 bool TeleportNativeSkillCall() {
-    if (action_gate::IsTeleportForbidden()) {
-        x::runtime::LogWThrottled(77, 500, "Teleport", "native short reject skill_prepare_or_busy");
-        return false;
-    }
-    if (!world::IsInMapScene() || !world::IsPlayReady()) {
-        x::runtime::LogW("Teleport", "native short reject not_play_ready scene=%d",
-                         static_cast<int>(world::GetSceneState()));
-        return false;
-    }
-    {
-        char why[48]{};
-        if (!CheckPhysicsReadyUnlocked(/*requireFh=*/true, why, sizeof(why))) {
-            x::runtime::LogW("Teleport", "native short reject phys=%s", why[0] ? why : "?");
-            return false;
-        }
-    }
-    if (!BindFns() || !gDoing) {
-        x::runtime::LogW("Teleport", "native bind fail Doing=%p", gDoing);
-        return false;
-    }
-
-    const DWORD now = GetTickCount();
-    const DWORD cd = gNativeCdMs.load(std::memory_order_acquire);
-    if (gLastNativeMs && now - gLastNativeMs < cd) {
-        x::runtime::LogW("Teleport", "native self-cd remain=%ums", cd - (now - gLastNativeMs));
-        return false;
-    }
-
-    if (!runtime::main_thread::Ensure()) {
-        x::runtime::LogW("Teleport", "native main pump missing");
-        return false;
-    }
-
-    NativeJob job{};
-    job.overrideLand = false;
-    if (!runtime::main_thread::InvokeAndWait(&NativeTeleportJobFn, &job, kJobWaitMs,
-                                            runtime::main_thread::JobPrio::High)) {
-        x::runtime::LogW("Teleport", "native main-thread timeout");
-        return false;
-    }
-    if (!job.ok) {
-        x::runtime::LogW("Teleport", "native fail=%s", job.fail[0] ? job.fail : "?");
-        return false;
-    }
-    MarkNativeOk(now);
-    x::runtime::LogI("Teleport", "native ok tag=%s land=(%.0f,%.0f) fh=%u", job.fail, job.landX,
-                     job.landY, (unsigned)job.plantFhId);
-    return true;
+    // 产品已统一 Impact（F5/F6）；fill+Doing 失效。
+    x::runtime::LogWThrottled(91, 2000, "Teleport",
+                              "TeleportNativeSkillCall refused (fill+Doing retired; use Impact)");
+    return false;
 }
 
 bool TeleportNativeSkillCall(float landX, float landY, uint32_t plantFhId, bool snapStand) {
-    if (!std::isfinite(landX) || !std::isfinite(landY)) {
-        x::runtime::LogW("Teleport", "native land reject non-finite");
-        return false;
-    }
-    // 永远不使用原点邻域（0,0）作落点。
-    if (std::fabs(landX) < 8.f && std::fabs(landY) < 8.f) {
-        x::runtime::LogW("Teleport", "native land reject origin land=(%.0f,%.0f) fh=%u", landX,
-                         landY, (unsigned)plantFhId);
-        return false;
-    }
-    // 贴地路径禁 |x|<8（combat 分段曾落到 to=(0,y)，Ap 随后归零 / 画面掉出图外）。
-    // 点飞 snapStand=false 不卡，保留 F6 手感。
-    if (snapStand && std::fabs(landX) < 8.f) {
-        x::runtime::LogW("Teleport", "native land reject axis_x land=(%.0f,%.0f) fh=%u", landX,
-                         landY, (unsigned)plantFhId);
-        return false;
-    }
-    // 边界闸：贴地 + 已种 fh 用 margin=0（BIN 14:12：门在 FH AABB 底边 land.y==B，
-    // kLandMarginPx=24 内缩把合法 Snap 判成 out_of_bounds → 赶路 TELEPORT_FAIL 空转）。
-    // 无 fh 的贴地仍内缩，挡 combat 贴可视边飞出。
-    if (snapStand) {
-        const int margin =
-            plantFhId != 0 ? 0 : map_bounds::kLandMarginPx;
-        if (!map_bounds::PointInPlayBounds(landX, landY, /*mapId=*/0, margin)) {
-            x::runtime::LogW("Teleport",
-                             "native land reject out_of_bounds land=(%.0f,%.0f) fh=%u margin=%d",
-                             landX, landY, (unsigned)plantFhId, margin);
-            return false;
-        }
-    }
-    // BUFF Hold / 引擎 Prepare 警戒态：禁止 fill+Doing（视觉层与镜头散开）。
-    if (action_gate::IsTeleportForbidden()) {
-        x::runtime::LogWThrottled(77, 500, "Teleport", "native reject skill_prepare_or_busy");
-        return false;
-    }
-    // 硬门禁：换图 scene!=play 禁止瞬移
-    if (!world::IsInMapScene() || !world::IsPlayReady()) {
-        x::runtime::LogW("Teleport", "native reject not_play_ready scene=%d",
-                         static_cast<int>(world::GetSceneState()));
-        return false;
-    }
-    {
-        char why[48]{};
-        // F6 点飞 snapStand=false：不卡 FH 图，保持起飞手感。
-        if (!CheckPhysicsReadyUnlocked(/*requireFh=*/snapStand, why, sizeof(why))) {
-            x::runtime::LogW("Teleport", "native reject phys=%s", why[0] ? why : "?");
-            return false;
-        }
-    }
-    if (!BindFns() || !gDoing) {
-        x::runtime::LogW("Teleport", "native bind fail Doing=%p", gDoing);
-        return false;
-    }
-
-    const DWORD now = GetTickCount();
-    const DWORD cd = gNativeCdMs.load(std::memory_order_acquire);
-    if (gLastNativeMs && now - gLastNativeMs < cd) {
-        x::runtime::LogW("Teleport", "native self-cd remain=%ums", cd - (now - gLastNativeMs));
-        return false;
-    }
-
-    if (!runtime::main_thread::Ensure()) {
-        x::runtime::LogW("Teleport", "native main pump missing");
-        return false;
-    }
-
-    NativeJob job{};
-    job.overrideLand = true;
-    job.snapStand = snapStand;
-    job.landX = landX;
-    job.landY = landY;
-    job.plantFhId = plantFhId;
-    if (!runtime::main_thread::InvokeAndWait(&NativeTeleportJobFn, &job, kJobWaitMs,
-                                            runtime::main_thread::JobPrio::High)) {
-        x::runtime::LogW("Teleport", "native main-thread timeout");
-        return false;
-    }
-    if (!job.ok) {
-        x::runtime::LogW("Teleport", "native fail=%s land=(%.0f,%.0f) fh=%u snap=%d",
-                         job.fail[0] ? job.fail : "?", landX, landY, (unsigned)plantFhId,
-                         snapStand ? 1 : 0);
-        return false;
-    }
-    MarkNativeOk(now);
-    x::runtime::LogI("Teleport", "native ok tag=%s land=(%.0f,%.0f) fh=%u snap=%d", job.fail,
-                     job.landX, job.landY, (unsigned)job.plantFhId, snapStand ? 1 : 0);
-    return true;
+    (void)landX;
+    (void)landY;
+    (void)plantFhId;
+    (void)snapStand;
+    x::runtime::LogWThrottled(92, 2000, "Teleport",
+                              "TeleportNativeSkillCall(land) refused (fill+Doing retired; use Impact)");
+    return false;
 }
 
 bool IsPostTeleportQuiet(uint32_t quietMs) {
@@ -1070,6 +1018,561 @@ bool ClearMotionLatchMainThread() {
     if (!std::isfinite(rpV) || std::fabs(rpV) > 2500.0) WriteF64(vc, kOffVcRpV, 0.0);
     attack::ClearWalkLatchMainThread();
     return true;
+}
+
+namespace {
+
+// MoveElem / MovePath 只读采证（与 movepath_flush_probe 同源偏移）
+constexpr size_t kOffMpElemList = 0x30;
+constexpr size_t kOffMpElemLast = 0x38;
+constexpr size_t kOffElAttr = 0x10;
+constexpr size_t kOffElX = 0x12;
+constexpr size_t kOffElY = 0x14;
+constexpr size_t kOffElVx = 0x16;
+constexpr size_t kOffElVy = 0x18;
+constexpr size_t kOffElMoveAction = 0x1A;
+constexpr size_t kOffElFh = 0x1C;
+
+const char* MovePathAttrName(uint8_t a) {
+    switch (a) {
+        case 0: return "Normal";
+        case 1: return "Jump";
+        case 2: return "Impact";
+        case 3: return "Immediate";
+        case 4: return "Teleport";
+        case 5: return "HangOnBack";
+        case 6: return "FlashJump";
+        case 7: return "Assaulter";
+        case 8: return "Assassination";
+        case 9: return "Rush";
+        case 10: return "StatChange";
+        case 11: return "SitDown";
+        case 12: return "MobPowerKnockBack";
+        case 13: return "BackstepShot";
+        case 14: return "StartFalldown";
+        case 15: return "FallDown";
+        case 16: return "StartWings";
+        case 17: return "Wings";
+        case 18: return "VerticalJump";
+        case 19: return "CustomImpact";
+        case 20: return "CombatStep";
+        case 21: return "AranAdjust";
+        case 22: return "MobToss";
+        default: return "?";
+    }
+}
+
+void FormatOneElem(char* out, size_t outN, void* el) {
+    if (!out || outN == 0) return;
+    if (!LooksLikeHeapPtr(el)) {
+        snprintf(out, outN, "null");
+        return;
+    }
+    const uint8_t a = ReadU8(el, kOffElAttr);
+    snprintf(out, outN, "a=%u(%s) xy=(%d,%d) v=(%d,%d) ma=%u fh=%d", (unsigned)a,
+             MovePathAttrName(a), (int)ReadI16(el, kOffElX), (int)ReadI16(el, kOffElY),
+             (int)ReadI16(el, kOffElVx), (int)ReadI16(el, kOffElVy),
+             (unsigned)ReadU8(el, kOffElMoveAction), (int)ReadI16(el, kOffElFh));
+}
+
+// 冲击后 Attr 不会立刻写：跟帧采样 List 尾 + _elemLast + Ap 速度。
+void LogImpactAttrSnap(const char* tag, void* vc) {
+    if (!tag) tag = "?";
+    if (!LooksLikeHeapPtr(vc)) {
+        x::runtime::LogI("Teleport", "impact_test attr %s no_vc", tag);
+        return;
+    }
+    const double apx = ReadF64(vc, kOffVcApX);
+    const double apy = ReadF64(vc, kOffVcApY);
+    const double apvx = ReadF64(vc, kOffVcApVx);
+    const double apvy = ReadF64(vc, kOffVcApVy);
+    void* curFh = ReadPtr(vc, kOffVcCurFh);
+    void* mp = ReadPtr(vc, kOffVcMovePath);
+    if (!LooksLikeHeapPtr(mp)) {
+        x::runtime::LogI("Teleport",
+                         "impact_test attr %s ap=(%.1f,%.1f) v=(%.1f,%.1f) fh=%d no_mp", tag, apx,
+                         apy, apvx, apvy, LooksLikeHeapPtr(curFh) ? 1 : 0);
+        return;
+    }
+    x::runtime::il2cpp_container::Ensure();
+    void* list = ReadPtr(mp, kOffMpElemList);
+    void* arr = list ? ReadPtr(list, x::runtime::il2cpp_container::OffListItems()) : nullptr;
+    int32_t size = list ? ReadI32(list, x::runtime::il2cpp_container::OffListSize()) : 0;
+    if (size < 0) size = 0;
+    const size_t dataOff = x::runtime::il2cpp_container::OffArrayData();
+
+    char lastBuf[160];
+    FormatOneElem(lastBuf, sizeof(lastBuf), ReadPtr(mp, kOffMpElemLast));
+
+    // 只打尾部最多 4 段，避免刷屏；Attr 非 0 单独标出。
+    char tail[512];
+    int to = 0;
+    const int take = size > 4 ? 4 : size;
+    const int start = size - take;
+    uint32_t seenMask = 0;
+    for (int i = start; i < size && to < static_cast<int>(sizeof(tail)) - 120; ++i) {
+        void* el =
+            arr ? ReadPtr(arr, dataOff + static_cast<size_t>(i) * sizeof(void*)) : nullptr;
+        if (!LooksLikeHeapPtr(el)) continue;
+        const uint8_t a = ReadU8(el, kOffElAttr);
+        if (a < 32) seenMask |= (1u << a);
+        char one[96];
+        FormatOneElem(one, sizeof(one), el);
+        to += snprintf(tail + to, sizeof(tail) - static_cast<size_t>(to), "%s[%d]%s",
+                       to ? " | " : "", i, one);
+    }
+    if (to == 0) {
+        snprintf(tail, sizeof(tail), "(empty)");
+    }
+
+    char nonZero[96];
+    int nz = 0;
+    for (int a = 1; a < 32; ++a) {
+        if (seenMask & (1u << a)) {
+            nz += snprintf(nonZero + nz, sizeof(nonZero) - static_cast<size_t>(nz), "%s%d(%s)",
+                           nz ? "," : "", a, MovePathAttrName(static_cast<uint8_t>(a)));
+        }
+    }
+    if (nz == 0) snprintf(nonZero, sizeof(nonZero), "none");
+
+    x::runtime::LogI(
+        "Teleport",
+        "impact_test attr %s n=%d ap=(%.1f,%.1f) v=(%.1f,%.1f) fh=%d non0={%s} last={%s} "
+        "tail={%s}",
+        tag, (int)size, apx, apy, apvx, apvy, LooksLikeHeapPtr(curFh) ? 1 : 0, nonZero, lastBuf,
+        tail);
+}
+
+struct ImpactJob {
+    int mode = 0;  // 0=NockBack 1=SetImpactNext
+    int dir = 1;
+    int vx = 400;
+    int vy = 200;
+    double dvx = 400.0;
+    double dvy = 200.0;
+    bool sampleAttr = true;  // 调试探针跟采；飞控关闭以免刷屏
+    bool quietLog = false;
+    bool ok = false;
+    char why[48]{};
+};
+
+struct ImpactAttrSampleJob {
+    char tag[24]{};
+};
+
+void ImpactAttrSampleFn(void* p) {
+    auto* job = static_cast<ImpactAttrSampleJob*>(p);
+    if (!job) return;
+    EnsureTpFieldOff();
+    void* lu = nullptr;
+    if (!player_combat::QueryLocalUser(&lu) || !LooksLikeHeapPtr(lu)) {
+        x::runtime::LogI("Teleport", "impact_test attr %s no_local", job->tag);
+        return;
+    }
+    void* vc = ReadPtr(lu, kOffVecCtrl);
+    LogImpactAttrSnap(job->tag, vc);
+}
+
+bool CallNockBackSeh(void* vc, int dir, int vx, int vy) {
+    if (!gNockBack || !LooksLikeHeapPtr(vc)) return false;
+    __try {
+        gNockBack(vc, dir, vx, vy, gMiNockBack);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool CallSetImpactNextSeh(void* vc, double vx, double vy) {
+    auto* thunk = EnsureSetImpactNextThunk();
+    if (!thunk || !gSetImpactNextRaw || !LooksLikeHeapPtr(vc)) return false;
+    uint64_t vxBits = 0, vyBits = 0;
+    static_assert(sizeof(double) == sizeof(uint64_t), "double bits");
+    memcpy(&vxBits, &vx, sizeof(vxBits));
+    memcpy(&vyBits, &vy, sizeof(vyBits));
+    __try {
+        thunk(gSetImpactNextRaw, vc, vxBits, vyBits, gMiSetImpactNext);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void ImpactJobFn(void* p) {
+    auto* job = static_cast<ImpactJob*>(p);
+    if (!job) return;
+    if (!BindFns()) {
+        snprintf(job->why, sizeof(job->why), "bind");
+        return;
+    }
+    EnsureTpFieldOff();
+    if (!world::IsPlayReady()) {
+        snprintf(job->why, sizeof(job->why), "not_play_ready");
+        return;
+    }
+    void* lu = nullptr;
+    if (!player_combat::QueryLocalUser(&lu) || !LooksLikeHeapPtr(lu)) {
+        snprintf(job->why, sizeof(job->why), "no_local");
+        return;
+    }
+    void* vc = ReadPtr(lu, kOffVecCtrl);
+    if (!LooksLikeHeapPtr(vc)) {
+        snprintf(job->why, sizeof(job->why), "no_vc");
+        return;
+    }
+    if (job->sampleAttr) LogImpactAttrSnap("T0_pre", vc);
+    if (job->mode == 0) {
+        int dir = job->dir;
+        if (dir != 1 && dir != -1) {
+            // 未指定有效 dir：跟当前朝向推（faceLeft → -1）
+            int faceLeft = 0;
+            __try {
+                const int ma =
+                    *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(vc) + kOffVcMoveAction);
+                faceLeft = ma & 1;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                faceLeft = 0;
+            }
+            dir = faceLeft ? -1 : 1;
+        }
+        if (!CallNockBackSeh(vc, dir, job->vx, job->vy)) {
+            snprintf(job->why, sizeof(job->why), "nockback_seh");
+            return;
+        }
+        if (!job->quietLog) {
+            x::runtime::LogI("Teleport", "impact_test A NockBack dir=%d vx=%d vy=%d", dir, job->vx,
+                             job->vy);
+        }
+        if (job->sampleAttr) LogImpactAttrSnap("T0_postA", vc);
+        job->ok = true;
+        return;
+    }
+    if (!CallSetImpactNextSeh(vc, job->dvx, job->dvy)) {
+        snprintf(job->why, sizeof(job->why), "setimpact_seh");
+        return;
+    }
+    if (!job->quietLog) {
+        x::runtime::LogI("Teleport", "impact_test B SetImpactNext vx=%.1f vy=%.1f", job->dvx,
+                         job->dvy);
+    }
+    if (job->sampleAttr) LogImpactAttrSnap("T0_postB", vc);
+    job->ok = true;
+}
+
+void SampleImpactAttrDelayed(const char* tag) {
+    ImpactAttrSampleJob s{};
+    snprintf(s.tag, sizeof(s.tag), "%s", tag ? tag : "?");
+    if (!runtime::main_thread::InvokeAndWait(&ImpactAttrSampleFn, &s, 800,
+                                            runtime::main_thread::JobPrio::Normal)) {
+        x::runtime::LogW("Teleport", "impact_test attr %s pump_timeout", s.tag);
+    }
+}
+
+bool FireImpactJob(ImpactJob& job) {
+    // 已在泵线程（跟飞 STW+Impact 合并 job）：直接跑，禁止嵌套 InvokeAndWait 堵死帧。
+    if (runtime::main_thread::IsOnPumpThread()) {
+        ImpactJobFn(&job);
+    } else if (!runtime::main_thread::InvokeAndWait(&ImpactJobFn, &job, kJobWaitMs,
+                                                   runtime::main_thread::JobPrio::High)) {
+        x::runtime::LogW("Teleport", "impact_test pump timeout mode=%d", job.mode);
+        return false;
+    }
+    if (!job.ok) {
+        if (!job.quietLog) {
+            x::runtime::LogW("Teleport", "impact_test fail mode=%d why=%s", job.mode,
+                             job.why[0] ? job.why : "?");
+        }
+        return false;
+    }
+    // Attr 在 MakeMovePath 后续帧才出现：后台 T+50/150/400 跟采（不堵 ApplyControl）。
+    if (job.sampleAttr) {
+        const int mode = job.mode;
+        std::thread([mode]() {
+            Sleep(50);
+            SampleImpactAttrDelayed("T50");
+            Sleep(100);
+            SampleImpactAttrDelayed("T150");
+            Sleep(250);
+            SampleImpactAttrDelayed("T400");
+            x::runtime::LogI(
+                "Teleport",
+                "impact_test attr done mode=%d (expect Normal/Jump/Fall; not Teleport)", mode);
+        }).detach();
+    }
+    return true;
+}
+
+}  // namespace
+
+bool FireImpactNockBackTest(int dir, int vx, int vy) {
+    ImpactJob job{};
+    job.mode = 0;
+    job.dir = dir;
+    job.vx = vx;
+    job.vy = vy;
+    return FireImpactJob(job);
+}
+
+bool FireImpactSetNextTest(double vx, double vy) {
+    ImpactJob job{};
+    job.mode = 1;
+    job.dvx = vx;
+    job.dvy = vy;
+    return FireImpactJob(job);
+}
+
+namespace {
+// P0 标定锚点（平地 BIN）：vx=400,vy=200 → Δx≈100 px / ~400ms → |Δx|→vx ≈ |Δx|*4
+constexpr int kImpactHopVyDefault = 200;
+constexpr int kImpactHopVxMin = 80;
+constexpr int kImpactHopVxMax = 800;
+constexpr uint32_t kImpactHopCooldownMs = 400;
+constexpr int kImpactHopDxScale = 4;  // vx = |Δx| * scale
+
+std::atomic<DWORD> gLastImpactHopMs{0};
+
+int MapDeltaXToVx(int absDx) {
+    if (absDx < 0) absDx = -absDx;
+    int vx = absDx * kImpactHopDxScale;
+    if (vx < kImpactHopVxMin) vx = kImpactHopVxMin;
+    if (vx > kImpactHopVxMax) vx = kImpactHopVxMax;
+    return vx;
+}
+}  // namespace
+
+bool ImpactHopDeltaX(int deltaX, ImpactHopOpts opts) {
+    if (deltaX == 0) {
+        x::runtime::LogW("Teleport", "impact hop refuse dx=0");
+        return false;
+    }
+    const DWORD now = GetTickCount();
+    const DWORD last = gLastImpactHopMs.load(std::memory_order_acquire);
+    if (last != 0 && (now - last) < kImpactHopCooldownMs) {
+        x::runtime::LogW("Teleport", "impact hop refuse cooldown rem=%u",
+                         (unsigned)(kImpactHopCooldownMs - (now - last)));
+        return false;
+    }
+    if (!opts.force && !x::features::invuln::IsEnabled()) {
+        x::runtime::LogW("Teleport", "impact hop refuse invuln_off (use force for debug)");
+        return false;
+    }
+    const int dir = deltaX > 0 ? 1 : -1;
+    const int absDx = deltaX > 0 ? deltaX : -deltaX;
+    const int vx = MapDeltaXToVx(absDx);
+    const int vy = opts.vy > 0 ? opts.vy : kImpactHopVyDefault;
+    x::runtime::LogI("Teleport", "impact hop fire dx=%d vx=%d vy=%d force=%d invuln=%d", deltaX, vx,
+                     vy, opts.force ? 1 : 0, x::features::invuln::IsEnabled() ? 1 : 0);
+    if (!FireImpactNockBackTest(dir, vx, vy)) return false;
+    gLastImpactHopMs.store(now, std::memory_order_release);
+    return true;
+}
+
+namespace {
+
+bool ApplyImpactImpulseQuiet(ImpactRoute route, double vx, double vy) {
+    ImpactJob job{};
+    job.sampleAttr = false;
+    job.quietLog = true;
+    if (route == ImpactRoute::NockBack) {
+        job.mode = 0;
+        job.dir = vx >= 0.0 ? 1 : -1;
+        job.vx = static_cast<int>(std::lround(std::fabs(vx)));
+        job.vy = static_cast<int>(std::lround(vy));
+        if (job.vx < 1) job.vx = 1;
+    } else {
+        job.mode = 1;
+        job.dvx = vx;
+        job.dvy = vy;
+    }
+    return FireImpactJob(job);
+}
+
+double ClampImpactSpeed(double v, double vmax) {
+    const double lo = static_cast<double>(kImpactHopVxMin);
+    const double hi = vmax > lo ? vmax : static_cast<double>(kImpactHopVxMax);
+    const double a = std::fabs(v);
+    if (a < lo) {
+        return (v < 0.0 ? -1.0 : 1.0) * lo;
+    }
+    if (a > hi) {
+        return (v < 0.0 ? -1.0 : 1.0) * hi;
+    }
+    return v;
+}
+
+double Smoothstep01(double edge0, double edge1, double x) {
+    if (edge1 <= edge0) return x >= edge1 ? 1.0 : 0.0;
+    double t = (x - edge0) / (edge1 - edge0);
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    return t * t * (3.0 - 2.0 * t);
+}
+
+}  // namespace
+
+bool ImpactImpulseToward(float worldX, float worldY, ImpactRoute route, ImpactTowardOpts opts) {
+    if (!std::isfinite(worldX) || !std::isfinite(worldY)) return false;
+    if (!opts.force && !x::features::invuln::IsEnabled()) {
+        if (!opts.quietLog) {
+            x::runtime::LogW("Teleport", "impact toward refuse invuln_off");
+        }
+        return false;
+    }
+    if (!BindFns()) return false;
+    EnsureTpFieldOff();
+    void* lu = nullptr;
+    if (!player_combat::QueryLocalUser(&lu) || !LooksLikeHeapPtr(lu)) return false;
+    void* vc = ReadPtr(lu, kOffVecCtrl);
+    if (!LooksLikeHeapPtr(vc)) return false;
+    const double apX = ReadF64(vc, kOffVcApX);
+    const double apY = ReadF64(vc, kOffVcApY);
+    if (!std::isfinite(apX) || !std::isfinite(apY)) return false;
+
+    const double rawX = static_cast<double>(worldX);
+    const double rawY = static_cast<double>(worldY);
+    double aimX = rawX;
+    double aimY = rawY;
+    double errRaw = std::sqrt((rawX - apX) * (rawX - apX) + (rawY - apY) * (rawY - apY));
+    double drive = 1.0;
+
+    // 动态超前（飞路径当前关闭；opts.adaptive+leadSec 才启用）。
+    if (opts.adaptive && opts.leadSec > 0.f) {
+        static double sPrevRawX = 0.0;
+        static double sPrevRawY = 0.0;
+        static DWORD sPrevRawMs = 0;
+        const DWORD now = GetTickCount();
+        if (sPrevRawMs != 0 && now > sPrevRawMs) {
+            const double dt = static_cast<double>(now - sPrevRawMs) * 0.001;
+            if (dt > 0.001 && dt < 0.25) {
+                const double mx = (rawX - sPrevRawX) / dt;
+                const double my = (rawY - sPrevRawY) / dt;
+                const double tSpeed = std::sqrt(mx * mx + my * my);
+                const double leadK =
+                    Smoothstep01(70.0, 320.0, errRaw) * Smoothstep01(180.0, 1600.0, tSpeed);
+                double leadDist = tSpeed * static_cast<double>(opts.leadSec) * leadK;
+                const double leadCap = errRaw * 0.40;
+                if (leadDist > leadCap) leadDist = leadCap;
+                if (leadDist > 1.0 && tSpeed > 1e-3) {
+                    aimX = rawX + mx / tSpeed * leadDist;
+                    aimY = rawY + my / tSpeed * leadDist;
+                }
+            }
+        }
+        sPrevRawX = rawX;
+        sPrevRawY = rawY;
+        sPrevRawMs = now;
+    }
+
+    double dx = aimX - apX;
+    double dy = aimY - apY;
+    double len = std::sqrt(dx * dx + dy * dy);
+    if (len < static_cast<double>(opts.minSegPx)) return false;
+
+    double maxSeg = opts.maxSegPx > 0.f ? static_cast<double>(opts.maxSegPx) : 160.0;
+    double vmax =
+        opts.maxSpeed > 0.f ? static_cast<double>(opts.maxSpeed) : static_cast<double>(kImpactHopVxMax);
+    double scale = opts.speedScale > 0.f ? static_cast<double>(opts.speedScale)
+                                         : static_cast<double>(kImpactHopDxScale);
+
+    if (opts.adaptive) {
+        // 远距拉满天花板；近距软刹：少推一段，留余量给引擎滑行，防冲过再折返。
+        const double farSeg = maxSeg;
+        const double farV = vmax;
+        const double farScale = scale;
+        maxSeg = 80.0 + (farSeg - 80.0) * Smoothstep01(40.0, 700.0, errRaw);
+        vmax = 500.0 + (farV - 500.0) * Smoothstep01(40.0, 900.0, errRaw);
+        scale = 3.0 + (farScale - 3.0) * Smoothstep01(40.0, 650.0, errRaw);
+        // drive：近 0.32 / 远 0.78——故意不满推残差
+        drive = 0.32 + 0.46 * Smoothstep01(40.0, 520.0, errRaw);
+        if (maxSeg > farSeg) maxSeg = farSeg;
+        if (vmax > farV) vmax = farV;
+        if (scale > farScale) scale = farScale;
+    }
+
+    if (len > maxSeg && len > 1e-3) {
+        const double s = maxSeg / len;
+        dx *= s;
+        dy *= s;
+        len = maxSeg;
+    }
+    // P0 表：|Δ|→|v|≈|Δ|*scale；adaptive 再乘 drive 欠驱动
+    double speed = len * scale * drive;
+    if (speed < static_cast<double>(kImpactHopVxMin)) speed = static_cast<double>(kImpactHopVxMin);
+    if (speed > vmax) speed = vmax;
+    double vx = speed * (dx / len);
+    double vy = speed * (dy / len);
+    vx = ClampImpactSpeed(vx, vmax);
+    // vy 允许 0（纯水平）；非 0 时同样夹紧幅值
+    if (std::fabs(vy) > 1e-6) vy = ClampImpactSpeed(vy, vmax);
+    // 战斗空中：额外压 |vy|，避免 fh-ban 下竖直过冲甩出地图。
+    if (opts.maxAbsVy > 0.f) {
+        const double cap = static_cast<double>(opts.maxAbsVy);
+        if (vy > cap) vy = cap;
+        if (vy < -cap) vy = -cap;
+    }
+
+    auto logToward = [&]() {
+        x::runtime::LogI(
+            "Teleport",
+            "impact toward route=%u to=(%.0f,%.0f) ap=(%.0f,%.0f) v=(%.0f,%.0f) err=%.0f drive=%.2f "
+            "scale=%.1f",
+            static_cast<unsigned>(route), aimX, aimY, apX, apY, vx, vy, errRaw, drive, scale);
+    };
+    if (!opts.quietLog) {
+        logToward();
+    } else {
+        // 跟飞安静：~5Hz 抽样，避免每发打盘拖泵。
+        static DWORD sLastQuietTowardLogMs = 0;
+        const DWORD nowLog = GetTickCount();
+        if (!sLastQuietTowardLogMs || (nowLog - sLastQuietTowardLogMs) >= 200) {
+            sLastQuietTowardLogMs = nowLog;
+            logToward();
+        }
+    }
+    if (!ApplyImpactImpulseQuiet(route, vx, vy)) return false;
+    return true;
+}
+
+bool QueryFlightState(FlightState& out) {
+    out = FlightState{};
+    void* lu = nullptr;
+    if (!player_combat::QueryLocalUser(&lu) || !LooksLikeHeapPtr(lu)) return false;
+    void* vc = ReadPtr(lu, kOffVecCtrl);
+    if (!LooksLikeHeapPtr(vc)) return false;
+    const double x = ReadF64(vc, kOffVcApX);
+    const double y = ReadF64(vc, kOffVcApY);
+    const double vx = ReadF64(vc, kOffVcApVx);
+    const double vy = ReadF64(vc, kOffVcApVy);
+    if (!std::isfinite(x) || !std::isfinite(y)) return false;
+    out.x = static_cast<float>(x);
+    out.y = static_cast<float>(y);
+    out.vx = std::isfinite(vx) ? static_cast<float>(vx) : 0.f;
+    out.vy = std::isfinite(vy) ? static_cast<float>(vy) : 0.f;
+    out.onFh = LooksLikeHeapPtr(ReadPtr(vc, kOffVcCurFh));
+    out.ok = true;
+    return true;
+}
+
+bool ImpactSetVelocity(float vx, float vy, ImpactRoute route, ImpactVelOpts opts) {
+    if (!std::isfinite(vx) || !std::isfinite(vy)) return false;
+    if (!opts.force && !x::features::invuln::IsEnabled()) return false;
+    if (!BindFns()) return false;
+    EnsureTpFieldOff();
+    double cx = static_cast<double>(vx);
+    double cy = static_cast<double>(vy);
+    const double capX = opts.maxAbsVx > 0.f ? static_cast<double>(opts.maxAbsVx) : 900.0;
+    const double capY = opts.maxAbsVy > 0.f ? static_cast<double>(opts.maxAbsVy) : 420.0;
+    if (cx > capX) cx = capX;
+    if (cx < -capX) cx = -capX;
+    if (cy > capY) cy = capY;
+    if (cy < -capY) cy = -capY;
+    const double minAbs = opts.minAbs > 0.f ? static_cast<double>(opts.minAbs) : 0.0;
+    if (std::fabs(cx) < minAbs && std::fabs(cy) < minAbs) return false;
+    if (!opts.quietLog) {
+        x::runtime::LogI("Teleport", "impact vel route=%u v=(%.0f,%.0f)",
+                         static_cast<unsigned>(route), cx, cy);
+    }
+    return ApplyImpactImpulseQuiet(route, cx, cy);
 }
 
 }  // namespace x::features::ports::teleport

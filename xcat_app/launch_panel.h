@@ -17,7 +17,7 @@ struct LaunchUiState {
     std::string prefsBinDir;
     DWORD lastLogRefreshMs = 0;
     int activeTab = static_cast<int>(WorkspaceTab::Home);
-    bool pendingAutoLaunch = false;  // 冷启/切模式后：AttachWatch 自动监视；GAMA PASS 自动换票启动
+    bool pendingAutoLaunch = false;  // 冷启/切模式后自动：AttachWatch 监视；GAMA PASS / HK 换票启动
     // 到点前禁止自动/手动启动：切启动模式/取票策略、或 GAMA PASS 冷启准备窗（0=不延迟）
     DWORD autoLaunchNotBeforeMs = 0;
 };

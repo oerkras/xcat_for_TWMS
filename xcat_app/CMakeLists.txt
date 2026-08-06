@@ -50,6 +50,7 @@ target_link_libraries(xcat PRIVATE
     ole32
     imm32
     advapi32
+    comdlg32
     winhttp
     bcrypt
     iphlpapi

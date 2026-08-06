@@ -14,6 +14,9 @@ void Shutdown();
 void StartWorker();
 void StopWorker();
 
+// 磁盘 seed/学习图预载（不碰角色/地图托管对象）。LOGIN·MainPump 活后可调，削落地尖峰。
+void PreloadGraph();
+
 void RequestGoto(const char* target);
 void RequestStop();
 void RequestSave();

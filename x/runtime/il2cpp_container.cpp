@@ -83,7 +83,19 @@ std::atomic<bool> gListLiveRefined{false};
 std::atomic<bool> gQueueLiveRefined{false};
 std::atomic<bool> gStackLiveRefined{false};
 std::atomic<bool> gHashSetLiveRefined{false};
+std::atomic<int> gLiveMetaHits{0};
 char gPath[96]{};
+
+void RefreshPathFromLiveHits() {
+    const int live = gLiveMetaHits.load(std::memory_order_acquire);
+    constexpr int kExpect = 22;
+    // 开放泛型冷启动常 0；实例 refine 后逐步抬升。完整 22 少见（stack/hs 未必触达）。
+    if (live >= kExpect) {
+        snprintf(gPath, sizeof(gPath), "meta");
+    } else if (live > 0) {
+        snprintf(gPath, sizeof(gPath), "meta-partial");
+    }
+}
 
 bool PlausibleDictOff(size_t off) { return off >= 0x10 && off < 0x80; }
 bool PlausibleListOff(size_t off) { return off >= 0x10 && off < 0x40; }
@@ -180,6 +192,13 @@ void* KlassOf(void* obj) {
 
 }  // namespace
 
+// BCL 开放泛型：优先带 ns；部分镜像/时机下 class_from_name 只认空 ns。
+void* FindBclKlass(const char* name) {
+    void* k = x::runtime::il2cpp::FindClass(kNs, name);
+    if (!k) k = x::runtime::il2cpp::FindClass("", name);
+    return k;
+}
+
 void Ensure() {
     if (gTried.load(std::memory_order_acquire)) return;
     gTried.store(true, std::memory_order_release);
@@ -189,12 +208,14 @@ void Ensure() {
         return;
     }
 
+    // BCL 字段名明文（_buckets/_items…），不是游戏侧 hash；冷启动 FindClass 失败时靠
+    // RefineFrom*Instance 用实例 klass 补钉。fb 偏移仍是标准 .NET 布局兜底。
     int hits = 0;
-    void* dictKlass = x::runtime::il2cpp::FindClass(kNs, kDictName);
-    void* listKlass = x::runtime::il2cpp::FindClass(kNs, kListName);
-    void* queueKlass = x::runtime::il2cpp::FindClass(kNs, kQueueName);
-    void* stackKlass = x::runtime::il2cpp::FindClass(kNs, kStackName);
-    void* hsKlass = x::runtime::il2cpp::FindClass(kNs, kHashSetName);
+    void* dictKlass = FindBclKlass(kDictName);
+    void* listKlass = FindBclKlass(kListName);
+    void* queueKlass = FindBclKlass(kQueueName);
+    void* stackKlass = FindBclKlass(kStackName);
+    void* hsKlass = FindBclKlass(kHashSetName);
     ApplyDictKlass(dictKlass, &hits);
     ApplyListKlass(listKlass, &hits);
     ApplyQueueKlass(queueKlass, &hits);
@@ -202,16 +223,30 @@ void Ensure() {
     ApplyHashSetKlass(hsKlass, &hits);
 
     constexpr int kExpect = 22;  // 6+2+5+3+6
-    snprintf(gPath, sizeof(gPath), "%s",
-             hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"));
+    const int klassN = (dictKlass ? 1 : 0) + (listKlass ? 1 : 0) + (queueKlass ? 1 : 0) +
+                       (stackKlass ? 1 : 0) + (hsKlass ? 1 : 0);
+    if (hits == kExpect) {
+        snprintf(gPath, sizeof(gPath), "meta");
+        gLiveMetaHits.store(hits, std::memory_order_release);
+    } else if (hits > 0) {
+        snprintf(gPath, sizeof(gPath), "meta-partial");
+        gLiveMetaHits.store(hits, std::memory_order_release);
+    } else if (klassN > 0) {
+        // 开放泛型 Dictionary`2 等：klass 在、字段名对实例才有效 → 先用 .NET fb，等 Refine
+        snprintf(gPath, sizeof(gPath), "fb-open-generic");
+    } else {
+        snprintf(gPath, sizeof(gPath), "fallback");
+    }
     x::runtime::LogI(
         "Il2CppContainer",
-        "field off path=%s hits=%d/%d dict={ent=0x%zX free=0x%zX} list={items=0x%zX size=0x%zX} "
+        "field off path=%s hits=%d/%d klass={d=%d l=%d q=%d s=%d hs=%d} "
+        "dict={ent=0x%zX free=0x%zX} list={items=0x%zX size=0x%zX} "
         "queue={arr=0x%zX head=0x%zX size=0x%zX} stack={arr=0x%zX size=0x%zX} "
         "hs={slots=0x%zX cnt=0x%zX}",
-        gPath, hits, kExpect, gOffDictEntries, gOffDictFreeCount, gOffListItems, gOffListSize,
-        gOffQueueArray, gOffQueueHead, gOffQueueSize, gOffStackArray, gOffStackSize, gOffHsSlots,
-        gOffHsCount);
+        gPath, hits, kExpect, dictKlass ? 1 : 0, listKlass ? 1 : 0, queueKlass ? 1 : 0,
+        stackKlass ? 1 : 0, hsKlass ? 1 : 0, gOffDictEntries, gOffDictFreeCount, gOffListItems,
+        gOffListSize, gOffQueueArray, gOffQueueHead, gOffQueueSize, gOffStackArray, gOffStackSize,
+        gOffHsSlots, gOffHsCount);
 }
 
 void RefineFromDictInstance(void* dict) {
@@ -223,8 +258,11 @@ void RefineFromDictInstance(void* dict) {
     ApplyDictKlass(k, &hits);
     if (hits > 0) {
         gDictLiveRefined.store(true, std::memory_order_release);
-        x::runtime::LogI("Il2CppContainer", "refine dict hits=%d ent=0x%zX free=0x%zX klass=%p", hits,
-                         gOffDictEntries, gOffDictFreeCount, k);
+        gLiveMetaHits.fetch_add(hits, std::memory_order_acq_rel);
+        RefreshPathFromLiveHits();
+        x::runtime::LogI("Il2CppContainer",
+                         "refine dict hits=%d ent=0x%zX free=0x%zX klass=%p path=%s", hits,
+                         gOffDictEntries, gOffDictFreeCount, k, gPath);
     }
 }
 
@@ -237,8 +275,11 @@ void RefineFromListInstance(void* list) {
     ApplyListKlass(k, &hits);
     if (hits > 0) {
         gListLiveRefined.store(true, std::memory_order_release);
-        x::runtime::LogI("Il2CppContainer", "refine list hits=%d items=0x%zX size=0x%zX klass=%p",
-                         hits, gOffListItems, gOffListSize, k);
+        gLiveMetaHits.fetch_add(hits, std::memory_order_acq_rel);
+        RefreshPathFromLiveHits();
+        x::runtime::LogI("Il2CppContainer",
+                         "refine list hits=%d items=0x%zX size=0x%zX klass=%p path=%s", hits,
+                         gOffListItems, gOffListSize, k, gPath);
     }
 }
 
@@ -251,9 +292,11 @@ void RefineFromQueueInstance(void* queue) {
     ApplyQueueKlass(k, &hits);
     if (hits > 0) {
         gQueueLiveRefined.store(true, std::memory_order_release);
+        gLiveMetaHits.fetch_add(hits, std::memory_order_acq_rel);
+        RefreshPathFromLiveHits();
         x::runtime::LogI("Il2CppContainer",
-                         "refine queue hits=%d arr=0x%zX head=0x%zX size=0x%zX klass=%p", hits,
-                         gOffQueueArray, gOffQueueHead, gOffQueueSize, k);
+                         "refine queue hits=%d arr=0x%zX head=0x%zX size=0x%zX klass=%p path=%s",
+                         hits, gOffQueueArray, gOffQueueHead, gOffQueueSize, k, gPath);
     }
 }
 
@@ -266,8 +309,11 @@ void RefineFromStackInstance(void* stack) {
     ApplyStackKlass(k, &hits);
     if (hits > 0) {
         gStackLiveRefined.store(true, std::memory_order_release);
-        x::runtime::LogI("Il2CppContainer", "refine stack hits=%d arr=0x%zX size=0x%zX klass=%p",
-                         hits, gOffStackArray, gOffStackSize, k);
+        gLiveMetaHits.fetch_add(hits, std::memory_order_acq_rel);
+        RefreshPathFromLiveHits();
+        x::runtime::LogI("Il2CppContainer",
+                         "refine stack hits=%d arr=0x%zX size=0x%zX klass=%p path=%s", hits,
+                         gOffStackArray, gOffStackSize, k, gPath);
     }
 }
 
@@ -280,8 +326,11 @@ void RefineFromHashSetInstance(void* set) {
     ApplyHashSetKlass(k, &hits);
     if (hits > 0) {
         gHashSetLiveRefined.store(true, std::memory_order_release);
-        x::runtime::LogI("Il2CppContainer", "refine hashset hits=%d slots=0x%zX cnt=0x%zX klass=%p",
-                         hits, gOffHsSlots, gOffHsCount, k);
+        gLiveMetaHits.fetch_add(hits, std::memory_order_acq_rel);
+        RefreshPathFromLiveHits();
+        x::runtime::LogI("Il2CppContainer",
+                         "refine hashset hits=%d slots=0x%zX cnt=0x%zX klass=%p path=%s", hits,
+                         gOffHsSlots, gOffHsCount, k, gPath);
     }
 }
 

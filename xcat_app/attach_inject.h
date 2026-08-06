@@ -39,6 +39,11 @@ bool IsInjectBusy();
 // 对当前已运行的 Classic 立即注入一次（不依赖监视开关）。
 bool InjectNow(std::wstring* errOut = nullptr);
 
+// 调试：向当前 Classic 注入用户自选 DLL（异步；不改 lastHandledPid，不影响正式载荷监视）。
+// waitGameAssembly=true 时与正式注入相同：等 GameAssembly + 短 settle。
+bool InjectCustomDll(const std::wstring& dllPath, bool waitGameAssembly,
+                     std::wstring* errOut = nullptr);
+
 DWORD LastHandledPid();
 std::string StatusBrief();
 

@@ -1147,7 +1147,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "  Write-XCatLog ('stage user prefs mkdir failed: ' + ($_ | Out-String)); $userPrefsBak=$null\r\n";
     ps += "}\r\n";
     ps += "if ($userPrefsBak) {\r\n";
-    ps += "  foreach ($leaf in @('account.txt','auth_strategy.txt','captcha_ui.txt','launch_mode.txt','gamapass_nick_slot.txt','xcat_imgui.ini')) {\r\n";
+    ps += "  foreach ($leaf in @('account.txt','auth_strategy.txt','captcha_ui.txt','launch_mode.txt','gamapass_nick_slot.txt','gamapass_account_slot.txt','xcat_imgui.ini')) {\r\n";
     ps += "    $s=Join-Path $oldDest $leaf\r\n";
     ps += "    if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "    try {\r\n";
@@ -1254,7 +1254,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     // 含安装根账号串 account.txt（rename-aside / in-place 清盘子项都会冲掉）。
     ps += "if ($userPrefsBak -and (Test-Path -LiteralPath $userPrefsBak)) {\r\n";
     ps += "  try {\r\n";
-    ps += "    foreach ($leaf in @('account.txt','auth_strategy.txt','captcha_ui.txt','launch_mode.txt','gamapass_nick_slot.txt','xcat_imgui.ini')) {\r\n";
+    ps += "    foreach ($leaf in @('account.txt','auth_strategy.txt','captcha_ui.txt','launch_mode.txt','gamapass_nick_slot.txt','gamapass_account_slot.txt','xcat_imgui.ini')) {\r\n";
     ps += "      $s=Join-Path $userPrefsBak ('root_' + $leaf)\r\n";
     ps += "      if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "      $d=Join-Path $finalDest $leaf\r\n";

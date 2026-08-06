@@ -4,6 +4,7 @@
 #endif
 #include "pet_loot.h"
 
+#include "../ports/attack_input_port.h"
 #include "../ports/drop_pool_port.h"
 #include "../ports/pet_port.h"
 #include "../ports/world_port.h"
@@ -206,6 +207,16 @@ void Tick(DWORD now) {
             sCongLog = now;
             LogLineOd("yield pump_congested q=%d (defer loot for combat)",
                       x::runtime::main_thread::QueuedJobCount());
+        }
+        return;
+    }
+
+    // 拟人走路中硬让路（IsLootPulseActive 已含；日志单独标，便于 BIN）。
+    if (ports::attack::IsWalkHeld()) {
+        static DWORD sWalkLog = 0;
+        if (!sWalkLog || now - sWalkLog > 2000) {
+            sWalkLog = now;
+            LogLineOd("yield human_walk (defer loot while HoldWalk)");
         }
         return;
     }

@@ -1,17 +1,15 @@
 // TWMS Classic — attack_accel（攻击加速）
 //
 // 启用后周期：
-//   - LocalUser+0x118=-1（跳过动作等待；字段哈希 b4e36b7c… 防漂移）
+//   - LocalUser+0x118=-1（跳过动作等待；字段哈希 a55e80b9… 防漂移）
 //   - CutLayerDelays（砍动作层 delay）
 // 出刀频率由 simpleCombatAttackIntervalMs（面板「间隔」，默认 50，下限 1）控制。
 // 禁止 GA .text E9。
 //
 // 2026-08-04 撤销「Prepare 绝对攻速」写入：SecondaryStat+0x1BC/0x1C4 经 IDA 实证
-// 是 nSlow_/tSlow_（减速 debuff），不是攻速槽。Prepare(RVA 0xFDE830) 在
-// 0x7FFB84A5EAF3 处 `mov eax,[r14+1BCh]` + `cmovnz ebp,eax`，nSlow_ 非 0 即顶掉
-// GetSpeed()，把 140 烘进每一个动作层；且 tSlow_ 当时按 GetTickCount 写（应为
-// WorldManager.GetUpdateTime 游戏钟），CheckByTime 永不判到期 → 整局视觉层错乱。
-// 两个偏移现仅作只读诊断，用于确认本模块不再污染该字段。
+// 是 nSlow_/tSlow_（减速 debuff），不是攻速槽。Prepare 内仍 `mov eax,[r14+1BCh]`
+//（remount 2026-08-06：RVA 0xFE06A0 @ imagebase 0x7ff848c80000 → 0x7FF849C60963），
+// nSlow_ 非 0 即顶掉 GetSpeed()。两字段现仅作只读诊断。
 //
 // 2026-08-04 接入真攻速槽 nBooster_@0xBC（IDA 运行时 dump，imagebase 0x7FFB83A80000）：
 //   StatDetailAggregator.GetAttackSpeed(RVA 0xE78EB0) `mov rax,[rdi+8]`(=input.SecondaryStat)
@@ -37,9 +35,9 @@
 //   算单开 -8 约 68ms（×0.8）。要量它就必须能在 accel=0 时单独打开 —— 同一开关做不到，
 //   因为 attackAccel 还顺带下发 animBusyOverride=0 / immediateUp，会混进变量。
 //
-// 实验·跳过 Prepare：改 LocalUser 虚表槽（SetAttackAction @RVA 0xFDAF10 虚调 Prepare），
+// 实验·跳过 Prepare：改 LocalUser 虚表槽（SetAttackAction @RVA 0x10FA090 虚调 Prepare），
 // 不碰 GA .text。关开关时 hook 仍在，走 orig 透传。
-// remount 2026-08-04：Prepare RVA/哈希已对 dump.cs.runtime；字段偏移经 IDA+dump 复核。
+// remount 2026-08-06：Prepare/哈希/字段名哈希已对 dump.cs.restored.C + 运行时 IDB。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -98,15 +96,15 @@ constexpr DWORD kLogIdleMs = 30000;   // 稳态心跳
 constexpr DWORD kLandGraceMs = 400;
 constexpr DWORD kSkipPrepareLandGraceMs = 1000;
 
-// LocalUser(TDI:1560) 覆写 Prepare @ 0xFDE830；基类 User @ 0x1251E30
+// LocalUser(TDI:1560) 覆写 Prepare @ 0xFE06A0；基类 User @ 0x1253CA0
 // UserLocal(TDI:1577) : LocalUser — 无再覆写；虚表槽仍在实例 klass 上。
-// dump.cs Slot:32 · 哈希 e7e1a3b6…（默认参 action=6,speed=100,bool=false）· remount 2026-08-04
-constexpr uint32_t kRvaUserPrepare = 0xFDE830;
-constexpr uint32_t kRvaFbPrepare = 0x1251E30;
+// dump Slot:32 · 哈希 f71637b0…（默认参 action=6,speed=100,bool=false）· remount 2026-08-06
+constexpr uint32_t kRvaUserPrepare = 0xFE06A0;
+constexpr uint32_t kRvaFbPrepare = 0x1253CA0;
 constexpr char kHashPrepareActionLayer[] =
-    "e7e1a3b65a50e20dd79a2a9c50da9f84dd4b109213cd4dd9c18b6ab4156c349";
+    "f71637b0493ae259de6c988fe81a1f3f12ae34a470fa02f641acfd67289f14c";
 constexpr char kHashLocalUser[] =
-    "d9ad004bbff1a41ca96697c8e44ed3175dae9846fb772898fd54ec65040348b";
+    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";
 // 声明 Prepare 的类（= LocalUser）；虚表补丁仍打在最末级 UserLocal 上
 constexpr const char* kHashLocalUserDecl = kHashLocalUser;
 constexpr int kPrepareVtableSlot = 32;
@@ -117,24 +115,25 @@ constexpr size_t kVtableScanHi = 0xC00;
 constexpr DWORD kSkipPrepareInstallRetryMs = 2000;
 
 // 字段防漂移（Il2CppDumper 哈希名 → field_get_offset；失败回退 Hint）
+// remount 2026-08-06：类/字段哈希全换；偏移仍 0x118/0x120/0x128 / SS 0xBC/0xC0/0xC4/0x1BC/0x1C4
 constexpr char kHashSecondaryStat[] =
-    "b66e6c1639331514fade7a757dd74e7e70d7d903c49252b516d09778ecc46d6";
+    "fda0a837975e9b385db9604d6689232d1f1783dcfafa16403a92309b5604df3";
 constexpr char kHashSlow[] =
-    "aea6fd45d31598f1936c772d806a1bb83d166edcd16bd80747b4f092a4a0c61";
+    "d5bf793df45a8f8ea38a2f408c8c5edb7c2122b92b34916cc914dede9354408";
 constexpr char kHashSlowExpire[] =
-    "f9f6337974f65d92abf601516fa537c53456c6963d72ea782abcabd0df08949";
+    "cea518cf2cf239b37d86d7261b4ddeaadfb9595779b1caff529800831d86af7";
 constexpr char kHashBoost[] =
-    "edb890433d34daf1efb63896f22c31ae4a777e21a8f181c6e821f14e5e69a10";
+    "c7a681d25ac765845bc7ee482fe7bfe78338e70e65456d3ee4302481dc4abe8";
 constexpr char kHashBoostReason[] =
-    "e5bcb6dd51713bba4f713b8bfcc56029dab11c1fad119b854a7d87c235bcdf9";
+    "ed17ce43efc6ed6c54ca965ef7b462c9f3a9ce27b3f5dde626373366abff984";
 constexpr char kHashBoostExpire[] =
-    "eaa8842a44b8a90ca5fda2ab1579ec9cfa634a817e7697ec83fada533f60979";
+    "abec342a6ade99d50a338ccb55acb7199a39ba031ec4626cb5da74d84ceb9dc";
 constexpr char kHashActionBusy[] =
-    "b4e36b7c44c0cb3becd5a2a5db50ce5825d0b8c71552777fa1a82a2ca5a8c34";
+    "a55e80b967beb6b3a4ae5af0e93a1e09293c74f5fe852a6f014dc917b55d926";
 constexpr char kHashActionLayerA[] =
-    "af6dd6f6c5235a728464f7016187d51df2d43b906b10e7decae7e05530966ba";
+    "a8269a5fd552d9c18702bb17235ed49e9eb56e51b8f8967aea25944d48ee963";
 constexpr char kHashActionLayerB[] =
-    "e091ef23e01ee04968579fef353fadbf5a932d48c536b32caf9db717207e0d4";
+    "df44aea45566e5964a25045760965cbc2b54f42485f08b8fdc5752897abe6e8";
 
 using FnPrepareActionLayer = void (*)(void* self, int32_t action, int32_t speed, uint8_t flag,
                                       const void* methodInfo);

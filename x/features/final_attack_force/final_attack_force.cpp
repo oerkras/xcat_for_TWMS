@@ -18,6 +18,7 @@
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_shape.h"
+#include "../../runtime/anchor_lamps.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 #include "../../ui/player_vitals.h"
@@ -26,6 +27,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -56,26 +58,41 @@ constexpr size_t kFbCdEquipped = 0x28;   // CharacterData.Equipped[]
 constexpr size_t kFbCdEquipped2 = 0x30;  // CharacterData.Equipped2[]（现金）
 
 // GetLevelData(int level) → SkillLevelData*
-constexpr uint32_t kRvaGetLevelData = 0x1561BF0;
-// UserLocal.TryDoingFinalAttack（imagebase+0x10241E0）
-constexpr uint32_t kRvaTryDoingFinalAttack = 0x10241E0;
+constexpr uint32_t kRvaGetLevelData = 0x1564A30;
+// UserLocal.TryDoingFinalAttack — remount 2026-08-06
+// 警告：0x1026050 / a42678b6… 是 TryDoingFallDown，勿再绑。
+constexpr uint32_t kRvaTryDoingFinalAttack = 0x109DBA0;
 // ItemInfo.GetWeaponType(int) — 与 Doing 内比较同源（edx=MethodInfo 可为 null）
-constexpr uint32_t kRvaGetWeaponType = 0x1416040;
+constexpr uint32_t kRvaGetWeaponType = 0x1418B10;
 // CharacterData.GetItem(nTI, nPos)
-constexpr uint32_t kRvaCdGetItem = 0x12D7680;
+constexpr uint32_t kRvaCdGetItem = 0x12D9AF0;
 
 constexpr char kHashGetLevelData[] =
-    "d2ba78efd6b96cac9907a3db617fc6841da17270a8bb10532b1740e02090e91";
+    "f47191da3f08f5e8a7d4a64a286be8d40e43c4f3f66724aa962070342297d3e";
 constexpr char kHashSkillEntry[] =
-    "f690543f60fcc48d33bb5d582110326773dfbd9cc3f36d15df418db36258346";
+    "cf6d6169272f7c4a4dbb084cc7786a67fed9c03d7376babdcb5e5ecdde00eef";
 constexpr char kHashSkillLevelData[] =
-    "fc274e09a859fc6c31d9b0af1d884fdeda0bf5b19b27dc25e8341dd574034ea";
+    "f6b2dee44681627d86594e8da90980812d5ffc411c2f9cb20b03555deaace96";
 constexpr char kHashProp[] =
-    "ad8bef75d4d1132957a26c718047705223bf3f26a0791e68218eb789dae2731";
+    "c91691ae992a129aa72666b399b168db898130e774088e51c3f65ff33e376e8";
 constexpr char kHashLevelDataList[] =
-    "de9e4b2ad18594bc9db7356110fd9e688806b33ad127ba673e8d1a2a08aa5ef";
+    "aebdce14e3d6d5e71cf4c57d2ef33206875605936ef7f51deeb8fa3ad2db120";
 constexpr char kHashFinalAttackField[] =
-    "ca34ad2c6a2ac0f6dc359825e01e588c3a6d178dc7cf2d343a8a75763af6eef";
+    "bf036898924d1d22c058f3aea8978fd90ad0214d60234d57dd243b750472c62";
+constexpr char kHashCdEquipped[] =
+    "b6730f554734a2d4bf2d0bfb383efce2305fd749cc5d2d00773f538566c6777";
+constexpr char kHashCdEquipped2[] =
+    "bc5fe18e2648ed8fff901dd9541262015a345b2ef8c0ec0e4fec41b1d051b54";
+constexpr char kHashTryDoingFinalAttack[] =
+    "ab75154d87bf59e1cdecfd53266213dc2d2636dcc792c140eb13298dfcb5fb2";
+constexpr char kHashGetWeaponType[] =
+    "f47003eeea3d63c00dae53d67da83598202c55d335a9e17fce3bd2cc9979241";
+constexpr char kHashCdGetItem[] =
+    "e5874bc52cb0f4b4f2e775ab6ef9d96f1196568394d2bff24e04a1d6ad2bc20";
+constexpr char kHashItemInfo[] =
+    "ab2ffe60bb8f8973293a005d0dc011dce59d8ace10e251ffc4bf48faecb43a9";
+constexpr char kHashCharacterData[] =
+    "d5453e03707efd1001d8348a46ee270f8117468d2f1504fd0dadd0cc7c10468";
 
 // 经典版 Final Attack 技能表（狂战士剑/斧优先；同 prop 机制一并覆盖）
 constexpr int kFinalAttackIds[] = {
@@ -132,10 +149,18 @@ std::atomic<uint32_t> gForceRegHits{0};
 size_t gOffLevelDataList = kFbLevelDataList;
 size_t gOffProp = kFbProp;
 size_t gOffFinalAttack = kFbFinalAttack;
+size_t gOffCdEquipped = kFbCdEquipped;
+size_t gOffCdEquipped2 = kFbCdEquipped2;
 bool gFieldTried = false;
 
 FnGetLevelData gGetLevelData = nullptr;
 MethodInfoHead* gMiGetLevelData = nullptr;
+FnTryDoingFinalAttack gTryDoingFinalAttack = nullptr;
+MethodInfoHead* gMiTryDoingFinalAttack = nullptr;
+FnGetWeaponType gGetWeaponType = nullptr;
+MethodInfoHead* gMiGetWeaponType = nullptr;
+FnCdGetItem gCdGetItem = nullptr;
+MethodInfoHead* gMiCdGetItem = nullptr;
 void* gSkillEntryKlass = nullptr;
 std::atomic<uint32_t> gDidHits{0};
 std::atomic<uint32_t> gRefreshHits{0};
@@ -207,6 +232,7 @@ void EnsureFieldOffsets() {
     void* se = x::runtime::il2cpp::FindClass("", kHashSkillEntry);
     void* sld = x::runtime::il2cpp::FindClass("", kHashSkillLevelData);
     void* ul = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+    void* cd = x::runtime::il2cpp::FindClass("", kHashCharacterData);
     gSkillEntryKlass = se;
     if (se) {
         const size_t off = FieldOffsetByHash(se, kHashLevelDataList);
@@ -220,30 +246,95 @@ void EnsureFieldOffsets() {
         const size_t off = FieldOffsetByHash(ul, kHashFinalAttackField);
         if (off) gOffFinalAttack = off;
     }
-    x::runtime::LogI("FaForce", "offsets list=0x%zX prop=0x%zX fa=0x%zX se=%p sld=%p ul=%p",
-                     gOffLevelDataList, gOffProp, gOffFinalAttack, se, sld, ul);
+    if (cd) {
+        const size_t off = FieldOffsetByHash(cd, kHashCdEquipped);
+        if (off) gOffCdEquipped = off;
+        const size_t off2 = FieldOffsetByHash(cd, kHashCdEquipped2);
+        if (off2) gOffCdEquipped2 = off2;
+    }
+    x::runtime::LogI("FaForce",
+                     "offsets list=0x%zX prop=0x%zX fa=0x%zX eq=0x%zX eq2=0x%zX se=%p sld=%p ul=%p "
+                     "cd=%p",
+                     gOffLevelDataList, gOffProp, gOffFinalAttack, gOffCdEquipped, gOffCdEquipped2,
+                     se, sld, ul, cd);
 }
 
-void EnsureGetLevelData() {
-    if (gGetLevelData) return;
+void EnsureMethodApis() {
     EnsureFieldOffsets();
-    if (!gSkillEntryKlass && !(gSkillEntryKlass = x::runtime::il2cpp::FindClass("", kHashSkillEntry)))
-        return;
+    if (!gSkillEntryKlass)
+        gSkillEntryKlass = x::runtime::il2cpp::FindClass("", kHashSkillEntry);
 
-    x::runtime::il2cpp_method::MethodShape shape{};
-    shape.arity = 1;
-    shape.ret = x::runtime::il2cpp_method::TypeKind::Ptr;
-    shape.param[0] = x::runtime::il2cpp_method::TypeKind::I32;
-    auto mr = x::runtime::il2cpp_method::FindMethodResolved(
-        gSkillEntryKlass, kRvaGetLevelData, shape, "GetLevelData", kHashGetLevelData);
-    if (mr.method) {
-        gMiGetLevelData = reinterpret_cast<MethodInfoHead*>(mr.method);
-        if (gMiGetLevelData && gMiGetLevelData->methodPointer)
-            gGetLevelData = reinterpret_cast<FnGetLevelData>(gMiGetLevelData->methodPointer);
+    // GetLevelData 依赖 SkillEntry；其余 API 独立，禁止 SkillEntry miss 时整段早退。
+    if (!gGetLevelData && gSkillEntryKlass) {
+        x::runtime::il2cpp_method::MethodShape shape{};
+        shape.arity = 1;
+        shape.ret = x::runtime::il2cpp_method::TypeKind::Ptr;
+        shape.param[0] = x::runtime::il2cpp_method::TypeKind::I32;
+        auto mr = x::runtime::il2cpp_method::FindMethodResolved(
+            gSkillEntryKlass, kRvaGetLevelData, shape, "GetLevelData", kHashGetLevelData);
+        if (mr.method) {
+            gMiGetLevelData = reinterpret_cast<MethodInfoHead*>(mr.method);
+            if (gMiGetLevelData && gMiGetLevelData->methodPointer)
+                gGetLevelData = reinterpret_cast<FnGetLevelData>(gMiGetLevelData->methodPointer);
+        }
     }
     if (!gGetLevelData)
         gGetLevelData = x::runtime::il2cpp::AtRva<FnGetLevelData>(kRvaGetLevelData);
+
+    if (!gTryDoingFinalAttack) {
+        void* ul = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+        x::runtime::il2cpp_method::MethodShape shape{};
+        shape.arity = 0;
+        shape.ret = x::runtime::il2cpp_method::TypeKind::Void;
+        auto mr = x::runtime::il2cpp_method::FindMethodResolved(
+            ul, kRvaTryDoingFinalAttack, shape, "TryDoingFinalAttack", kHashTryDoingFinalAttack);
+        if (mr.method) {
+            gMiTryDoingFinalAttack = reinterpret_cast<MethodInfoHead*>(mr.method);
+            if (gMiTryDoingFinalAttack && gMiTryDoingFinalAttack->methodPointer)
+                gTryDoingFinalAttack =
+                    reinterpret_cast<FnTryDoingFinalAttack>(gMiTryDoingFinalAttack->methodPointer);
+        }
+        if (!gTryDoingFinalAttack)
+            gTryDoingFinalAttack =
+                x::runtime::il2cpp::AtRva<FnTryDoingFinalAttack>(kRvaTryDoingFinalAttack);
+    }
+
+    if (!gGetWeaponType) {
+        void* ii = x::runtime::il2cpp::FindClass("", kHashItemInfo);
+        x::runtime::il2cpp_method::MethodShape shape{};
+        shape.arity = 1;
+        shape.ret = x::runtime::il2cpp_method::TypeKind::I32;
+        shape.param[0] = x::runtime::il2cpp_method::TypeKind::I32;
+        auto mr = x::runtime::il2cpp_method::FindMethodResolved(
+            ii, kRvaGetWeaponType, shape, "GetWeaponType", kHashGetWeaponType);
+        if (mr.method) {
+            gMiGetWeaponType = reinterpret_cast<MethodInfoHead*>(mr.method);
+            if (gMiGetWeaponType && gMiGetWeaponType->methodPointer)
+                gGetWeaponType = reinterpret_cast<FnGetWeaponType>(gMiGetWeaponType->methodPointer);
+        }
+        if (!gGetWeaponType)
+            gGetWeaponType = x::runtime::il2cpp::AtRva<FnGetWeaponType>(kRvaGetWeaponType);
+    }
+
+    if (!gCdGetItem) {
+        void* cd = x::runtime::il2cpp::FindClass("", kHashCharacterData);
+        x::runtime::il2cpp_method::MethodShape shape{};
+        shape.arity = 2;
+        shape.ret = x::runtime::il2cpp_method::TypeKind::Ptr;
+        shape.param[0] = x::runtime::il2cpp_method::TypeKind::I32;
+        shape.param[1] = x::runtime::il2cpp_method::TypeKind::I32;
+        auto mr = x::runtime::il2cpp_method::FindMethodResolved(cd, kRvaCdGetItem, shape, "GetItem",
+                                                                kHashCdGetItem);
+        if (mr.method) {
+            gMiCdGetItem = reinterpret_cast<MethodInfoHead*>(mr.method);
+            if (gMiCdGetItem && gMiCdGetItem->methodPointer)
+                gCdGetItem = reinterpret_cast<FnCdGetItem>(gMiCdGetItem->methodPointer);
+        }
+        if (!gCdGetItem) gCdGetItem = x::runtime::il2cpp::AtRva<FnCdGetItem>(kRvaCdGetItem);
+    }
 }
+
+void EnsureGetLevelData() { EnsureMethodApis(); }
 
 int ReadI32(void* obj, size_t off) {
     if (!obj) return 0;
@@ -373,11 +464,12 @@ int WeaponTypeFromItemId(int itemId) {
 
 int CallGetWeaponType(int itemId) {
     if (itemId <= 0) return 0;
-    auto fn = x::runtime::il2cpp::AtRva<FnGetWeaponType>(kRvaGetWeaponType);
+    EnsureMethodApis();
+    auto fn = gGetWeaponType;
     if (!fn) return 0;
     int wt = 0;
     __try {
-        wt = fn(itemId, nullptr);
+        wt = fn(itemId, gMiGetWeaponType);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         wt = 0;
     }
@@ -457,11 +549,12 @@ int TryWeaponTypeFromSlot(void* slot, int* outItemId) {
 void* GetItemEquipSlot(int pos) {
     void* cd = x::ui::player::LocalCharacterData();
     if (!LooksLikeHeapPtr(cd)) return nullptr;
-    auto fn = x::runtime::il2cpp::AtRva<FnCdGetItem>(kRvaCdGetItem);
+    EnsureMethodApis();
+    auto fn = gCdGetItem;
     if (!fn) return nullptr;
     void* slot = nullptr;
     __try {
-        slot = fn(cd, kInvTiEquip, pos, nullptr);
+        slot = fn(cd, kInvTiEquip, pos, gMiCdGetItem);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         slot = nullptr;
     }
@@ -475,8 +568,9 @@ int ReadEquippedWeaponType(int* outItemId, int* outEquipSize) {
 
     void* cd = x::ui::player::LocalCharacterData();
     if (LooksLikeHeapPtr(cd)) {
-        void* eq = ReadPtr(cd, kFbCdEquipped);
-        void* eq2 = ReadPtr(cd, kFbCdEquipped2);
+        EnsureFieldOffsets();
+        void* eq = ReadPtr(cd, gOffCdEquipped);
+        void* eq2 = ReadPtr(cd, gOffCdEquipped2);
         for (void* arr : {eq, eq2}) {
             if (!LooksLikeHeapPtr(arr)) continue;
             const int wt = TryWeaponTypeFromSlot(ArrayAtPtr(arr, kBodyPartWeapon), outItemId);
@@ -579,10 +673,11 @@ struct ForceJob {
 
 void CallTryDoingFinalAttack(void* lu) {
     if (!LooksLikeHeapPtr(lu)) return;
-    auto fn = x::runtime::il2cpp::AtRva<FnTryDoingFinalAttack>(kRvaTryDoingFinalAttack);
+    EnsureMethodApis();
+    auto fn = gTryDoingFinalAttack;
     if (!fn) return;
     __try {
-        fn(lu, nullptr);
+        fn(lu, gMiTryDoingFinalAttack);
         gDidHits.fetch_add(1, std::memory_order_relaxed);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -698,16 +793,45 @@ int TickProp(bool forceOn) {
 }
 
 void TickForce() {
-    if (!x::features::ports::world::IsPlayReady()) return;
-    if (!x::features::ports::skill::EnsureBound()) return;
-    if (!x::runtime::main_thread::Ensure()) return;
-    if (x::runtime::main_thread::IsCongested()) return;
+    using Code = x::runtime::anchor_lamps::AnchorLampCode;
+    if (!x::features::ports::world::IsPlayReady()) {
+        x::runtime::anchor_lamps::Set("FaForce", Code::Unknown, "wait");
+        return;
+    }
+    if (!x::features::ports::skill::EnsureBound()) {
+        x::runtime::anchor_lamps::Set("FaForce", Code::Miss, "skill unbound");
+        return;
+    }
+    if (!x::runtime::main_thread::Ensure()) {
+        x::runtime::anchor_lamps::Set("FaForce", Code::Miss, "no pump");
+        return;
+    }
+    if (x::runtime::main_thread::IsCongested()) {
+        x::runtime::anchor_lamps::Set("FaForce", Code::Degraded, "busy");
+        return;
+    }
 
     ForceJob job{};
     if (!x::runtime::main_thread::InvokeAndWait(&ForceFaOnMain, &job, kForceJobWaitMs,
                                                x::runtime::main_thread::JobPrio::High)) {
+        x::runtime::anchor_lamps::Set("FaForce", Code::Degraded, "invoke");
         return;
     }
+
+    char d[xcat::kAnchorLampDetailLen]{};
+    if (job.err && job.err[0]) {
+        snprintf(d, sizeof(d), "%s", job.err);
+        x::runtime::anchor_lamps::Set("FaForce", Code::Miss, d);
+    } else if (job.did && job.wrote) {
+        snprintf(d, sizeof(d), "fa=%d w=%d", job.skillId, job.wrote);
+        x::runtime::anchor_lamps::Set("FaForce", Code::Ok, d);
+    } else if (job.did || job.wrote) {
+        snprintf(d, sizeof(d), "partial did=%d w=%d", job.did, job.wrote);
+        x::runtime::anchor_lamps::Set("FaForce", Code::Degraded, d);
+    } else {
+        x::runtime::anchor_lamps::Set("FaForce", Code::Unknown, "pending");
+    }
+
     static DWORD sLastLog = 0;
     const DWORD now = GetTickCount();
     if (now - sLastLog >= kLogMs) {
@@ -729,7 +853,12 @@ DWORD WINAPI Worker(LPVOID) {
     while (!gStop.load(std::memory_order_relaxed)) {
         const bool on = gDesired.load(std::memory_order_relaxed);
         const int changed = TickProp(on);
-        if (on) TickForce();
+        if (on) {
+            TickForce();
+        } else {
+            x::runtime::anchor_lamps::Set("FaForce",
+                                         x::runtime::anchor_lamps::AnchorLampCode::Unknown, "off");
+        }
         const DWORD now = GetTickCount();
         if (changed > 0 && now - lastLog >= kLogMs) {
             lastLog = now;
@@ -741,6 +870,8 @@ DWORD WINAPI Worker(LPVOID) {
         Sleep(on ? kTickMsOn : kTickMsOff);
     }
     TickProp(false);
+    x::runtime::anchor_lamps::Set("FaForce", x::runtime::anchor_lamps::AnchorLampCode::Unknown,
+                                 "off");
     x::runtime::LogI("FaForce", "worker stop");
     return 0;
 }

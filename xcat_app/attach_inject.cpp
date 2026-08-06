@@ -400,6 +400,72 @@ bool InjectNow(std::wstring* errOut) {
     return true;
 }
 
+bool InjectCustomDll(const std::wstring& dllPath, bool waitGameAssembly, std::wstring* errOut) {
+    if (dllPath.empty()) {
+        if (errOut) *errOut = L"请先选择 DLL 路径";
+        return false;
+    }
+    std::wstring abs;
+    if (!xcat::ResolveAbsolutePath(dllPath, abs) ||
+        GetFileAttributesW(abs.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        if (errOut) *errOut = L"DLL 不存在或路径无效";
+        Emit(L"[FAIL] 自定义注入：DLL 无效 " + dllPath);
+        return false;
+    }
+    const DWORD pid = xcat::FindProcessIdByName(kClassicExe);
+    if (!pid) {
+        if (errOut) *errOut = L"未找到游戏进程 Maplestory_Classic.exe";
+        Emit(L"[FAIL] 自定义注入：未找到游戏进程");
+        return false;
+    }
+    if (g.injectBusy.load(std::memory_order_acquire)) {
+        if (errOut) *errOut = L"注入进行中，请稍候";
+        return false;
+    }
+
+    Emit(L"[…] 自定义注入排队：PID=" + std::to_wstring(pid) + L" dll=" + abs +
+         (waitGameAssembly ? L"（等 GameAssembly）" : L"（不等 GameAssembly）"));
+    xcat::log::Info("Attach", "custom inject begin pid=%lu waitGA=%d dll=%s",
+                    static_cast<unsigned long>(pid), waitGameAssembly ? 1 : 0,
+                    NarrowUtf8(abs).c_str());
+
+    std::thread([pid, abs, waitGameAssembly] {
+        if (g.injectBusy.exchange(true)) {
+            Emit(L"[Attach] 自定义注入：与其它注入冲突，跳过");
+            return;
+        }
+        try {
+            xcat::twms_inject::Options iopt;
+            iopt.pid = pid;
+            iopt.dllPath = abs;
+            iopt.waitForGameAssembly = waitGameAssembly;
+            iopt.registerInjectLog = false;
+            iopt.settleMs = waitGameAssembly ? 1000 : 0;
+            auto ir = xcat::twms_inject::InjectIntoClassic(
+                iopt, [](const std::wstring& line) {
+                    Emit(line);
+                    xcat::log::Info("Attach", "%s", xcat::WideToUtf8(line).c_str());
+                });
+            // 故意不写 lastHandledPid：监视线程仍应对正式 xcat.dll 负责。
+            if (ir.ok) {
+                Emit(L"[OK] 自定义注入完成");
+                xcat::log::Ok("Attach", "custom inject ok pid=%lu msg=%s",
+                              static_cast<unsigned long>(pid), ir.message.c_str());
+            } else {
+                Emit(L"[FAIL] 自定义注入未完成：" + xcat::Utf8ToWide(ir.message));
+                xcat::log::Warn("Attach", "custom inject fail pid=%lu msg=%s",
+                                static_cast<unsigned long>(pid), ir.message.c_str());
+            }
+        } catch (...) {
+            Emit(L"[FAIL] 自定义注入异常");
+            xcat::log::Warn("Attach", "custom inject exception pid=%lu",
+                            static_cast<unsigned long>(pid));
+        }
+        g.injectBusy.store(false, std::memory_order_release);
+    }).detach();
+    return true;
+}
+
 DWORD LastHandledPid() { return g.lastHandledPid.load(std::memory_order_acquire); }
 
 std::string StatusBrief() {

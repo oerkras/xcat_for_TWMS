@@ -31,12 +31,13 @@
 | Combo | `LaunchMode` | 取票 | 冷启/切模式自动？ |
 |---|---|---|---|
 | 手动启动并注入 | `AttachWatch` | 不换票 | 约 7s 后自动 **监视** |
-| gamania (HK) | `OneClickLogin` | HTTP/WebView 账密 | **否**（手点「一键启动」；7s 防误触） |
 | GAMA PASS自动登录 | `GamaPassAuto` | CDP 点选 | 约 7s 后自动 **换票+开游戏+注入** |
+| gamania (HK) | `OneClickLogin` | HTTP/WebView 账密 | **否**（手点「一键启动」；7s 防误触） |
 
 落盘：`XCat_data/state/launch_mode.txt`（及安装根同步）。  
 策略：`auth_strategy.txt`（GamaPass 模式强制 `GamaPassAuto`）。  
-昵称槽：`gamapass_nick_slot.txt`（1-based；SelectGameAccount 跳过「建立暱稱」后的第 N 项；UI「昵称槽」）。
+昵称：`gamapass_nick_slot.txt`（客户面：第几个游戏昵称；1=第一个；跳过「建立暱稱」）。  
+账号：`gamapass_account_slot.txt`（客户面：登录第几个账号；1=第一个；Gama Pass 列表自上而下）。
 
 ### 2.1 自动启动与打断
 
@@ -59,13 +60,13 @@ StartOneClick
 → 探测默认浏览器（优先 Chrome++/Chrome，其次 Edge）
 → CDP 开 Galaxy 登录页
 → 单次点击 Gama Pass
-→ select-account：解析账号卡 + 一次中心坐标 MouseEvent('click')
-→ 昵称：按 **昵称槽**（1-based）勾选 radio/label + 单次「繼續」
+→ select-account：按 **登录账号序号**（1=第一个，自上而下）点第 N 张卡 + 一次中心坐标 MouseEvent('click')
+→ 昵称：按 **游戏昵称序号**（1=第一个）勾选 radio/label + 单次「繼續」
 → result 页拿 access_token / 等官网回跳
-→ 见 NGM 后可停在 Main?OTT（减官网超时弹窗）
+→ 见 NGM：立刻关登录用调试浏览器（票已在拉起链上；成功门禁仍等经典版 cmdline）
 → 经典版 cmdline 四元组匹配 → 接管；否则 NGM deep-link
 → InjectIntoClassic
-→ 关登录用调试浏览器
+→ （若浏览器仍在）收尾再关一次调试口
 ```
 
 要点：
@@ -73,7 +74,8 @@ StartOneClick
 | 项 | 约定 |
 |---|---|
 | 点击风暴 | GP / 选号 / 昵称均为 **单次**点击（防卡在 select-account） |
-| 昵称槽 | UI「昵称槽」→ `gamapass_nick_slot.txt`；CDP 跳过「建立暱稱」后取第 N 个；越界钳到末项并在日志带 `clamped`/`goodsN`；换票中 UI 禁用 |
+| 账号 | UI「登录账号」→ 第几个（1=第一个）；落盘 `gamapass_account_slot.txt`；CDP 单邮箱去重后自上而下取第 N 张（父节点 ≥2 邮箱不向上扩）；越界钳末项；换票中禁用 |
+| 昵称 | UI「游戏昵称」→ 第几个（1=第一个）；落盘 `gamapass_nick_slot.txt`；跳过「建立暱稱」后取第 N 个；越界钳末项；换票中禁用 |
 | HTTP 死路径 | `http_gamapass_login.*` 非主路径；`TrySubmitSelectGameAccount` 已跟 `GetGamaPassNickSlot`（radio/select 第 N 项；仅 `__doPostBack` 时退回第一项并打日志）；禁止 `prompt=login→none` 改写 |
 | WebView2 | **已拆除**；GamaPass / HK 均不依赖 |
 | Edge-only 用户 | 须先卸 Google Chrome，否则会绑到空 Chrome 会话 |
@@ -188,7 +190,7 @@ GA exports → native settle ≈15s + UnityWndClass
 
 | 路径 | 职责 |
 |---|---|
-| `launcher/gamapass_cdp_login.*` | CDP 点选状态机；`Get/SetGamaPassNickSlot` |
+| `launcher/gamapass_cdp_login.*` | CDP 点选状态机；`Get/SetGamaPassAccountSlot`、`Get/SetGamaPassNickSlot` |
 | `launcher/chromium_cdp.*` | 调试口 / Runtime.evaluate |
 | `launcher/msc_webview_login.*` | 一键会话编排 → 注入 |
 | `launcher/msc_launch.*` | NGM deep-link / 接管验票 |

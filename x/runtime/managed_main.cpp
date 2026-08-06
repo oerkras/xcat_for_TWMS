@@ -13,7 +13,10 @@ namespace {
 
 // Frozen until in-map: blocks lobby FindAll storms from invuln/titlebar/ports.
 std::atomic<int> gLoginFreeze{1};
+// !PlayReady（换图 InterStage 等）：禁托管重扫，防黑屏被 FindObjects 拖长。
+std::atomic<int> gMapTransitBlock{0};
 std::atomic<DWORD> gLastFreezeLogMs{0};
+std::atomic<DWORD> gLastTransitLogMs{0};
 
 struct FindAllCtx {
     FnFindAll fn = nullptr;
@@ -56,6 +59,13 @@ void FreezeLogOnce(const char* what) {
     x::runtime::LogI("ManagedMain", "login-freeze skip %s", what);
 }
 
+void TransitLogOnce(const char* what) {
+    const DWORD now = GetTickCount();
+    if (now - gLastTransitLogMs.load() < 5000) return;
+    gLastTransitLogMs.store(now);
+    x::runtime::LogI("ManagedMain", "map-transit skip %s", what);
+}
+
 }  // namespace
 
 void SetLoginFreeze(bool on) {
@@ -67,6 +77,15 @@ void SetLoginFreeze(bool on) {
 
 bool IsLoginFrozen() { return gLoginFreeze.load() != 0; }
 
+void SetMapTransitBlock(bool on) {
+    const int prev = gMapTransitBlock.exchange(on ? 1 : 0, std::memory_order_acq_rel);
+    if ((prev != 0) != on) {
+        x::runtime::LogI("ManagedMain", "map-transit-block=%d", on ? 1 : 0);
+    }
+}
+
+bool IsMapTransitBlocked() { return gMapTransitBlock.load(std::memory_order_acquire) != 0; }
+
 bool Call(JobFn fn, void* user, DWORD timeoutMs) {
     return main_thread::InvokeAndWait(fn, user, timeoutMs);
 }
@@ -75,6 +94,10 @@ void* FindAll(FnFindAll fn, void* typeObj, DWORD timeoutMs, bool bypassFreeze) {
     if (!fn || !typeObj) return nullptr;
     if (!bypassFreeze && IsLoginFrozen()) {
         FreezeLogOnce("FindAll");
+        return nullptr;
+    }
+    if (!bypassFreeze && IsMapTransitBlocked()) {
+        TransitLogOnce("FindAll");
         return nullptr;
     }
     FindAllCtx c{fn, typeObj, nullptr};
@@ -86,6 +109,10 @@ void* TypeGetObject(FnTypeGetObject fn, void* type, DWORD timeoutMs, bool bypass
     if (!fn || !type) return nullptr;
     if (!bypassFreeze && IsLoginFrozen()) {
         FreezeLogOnce("TypeGetObject");
+        return nullptr;
+    }
+    if (!bypassFreeze && IsMapTransitBlocked()) {
+        TransitLogOnce("TypeGetObject");
         return nullptr;
     }
     TypeObjCtx c{fn, type, nullptr};

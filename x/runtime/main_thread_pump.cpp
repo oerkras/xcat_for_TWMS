@@ -12,17 +12,18 @@
 #include "log.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 namespace x::runtime::main_thread {
 namespace {
 
 constexpr int kQueueCap = 8;
-// RVA = fast path only; resolve order: Unity name → FindMethodCached(RVA+kind) → RVA scan.
-constexpr uint32_t kRvaSendWillRenderCanvases = 0x5244FE0;  // remounted 2026-08-04
-constexpr uint32_t kRvaSceneLoginUpdate = 0xC02C50;         // remounted 2026-08-04
-constexpr uint32_t kRvaWorldManagerFixedUpdate = 0xDD3460;  // remounted 2026-08-04
-constexpr uint32_t kRvaWorldManagerUpdate = 0xDD7270;       // remounted 2026-08-04
+// RVA = 末级兜底；ResolvePumpMi：明文名 → unique void() kind → RVA（禁止 RVA-first）。
+constexpr uint32_t kRvaSendWillRenderCanvases = 0x5248FB0;  // remounted 2026-08-06 Canvas.SendWillRenderCanvases
+constexpr uint32_t kRvaSceneLoginUpdate = 0xC033D0;         // remounted 2026-08-06
+constexpr uint32_t kRvaWorldManagerFixedUpdate = 0xDD5400;  // remounted 2026-08-06
+constexpr uint32_t kRvaWorldManagerUpdate = 0xDD9380;       // remounted 2026-08-06
 
 // All pump hooks are parameterless void (instance or static).
 constexpr x::runtime::il2cpp_method::MethodShape kShapeVoid0{
@@ -73,10 +74,23 @@ std::atomic<DWORD> gLastHeartbeatMs{0};  // last Drain-host tick only
 std::atomic<uint32_t> gRealTickCount{0};  // install grace 不计入
 std::atomic<JobFn> gFrameTick{nullptr};
 std::atomic<void*> gFrameTickUser{nullptr};
+std::atomic<JobFn> gAuxFrameTick{nullptr};
+std::atomic<void*> gAuxFrameTickUser{nullptr};
+std::atomic<JobFn> gBinFrameTick{nullptr};
+std::atomic<void*> gBinFrameTickUser{nullptr};
+std::atomic<JobFn> gPrePhysicsFrameTick{nullptr};
+std::atomic<void*> gPrePhysicsFrameTickUser{nullptr};
+std::atomic<JobFn> gPostPhysicsFrameTick{nullptr};
+std::atomic<void*> gPostPhysicsFrameTickUser{nullptr};
+std::atomic<JobFn> gInputFrameTick{nullptr};
+std::atomic<void*> gInputFrameTickUser{nullptr};
+std::atomic<uint32_t> gInputTickRuns{0};
+std::atomic<uint8_t> gInputTickHost{0};  // 0=none 1=WM.FixedUpdate 2=SendWill fallback
 std::atomic<int> gPumpPhase{static_cast<int>(PumpPhase::Bootstrap)};
 std::atomic<DWORD> gLastBudgetLogMs{0};
 std::atomic<bool> gWmHostLogged{false};
 std::atomic<DWORD> gLastWmTickMs{0};  // any WM FixedUpdate/Update hook fire
+std::atomic<DWORD> gLastWmFuMs{0};    // WM.FixedUpdate only (input tick host liveness)
 std::atomic<DWORD> gLastFallbackLogMs{0};
 std::atomic<DWORD> gPumpTid{0};  // Unity pump thread; set on each hook entry
 std::atomic<int> gQueuedCount{0};  // parked-job depth; +1 enqueue, -1 dequeue/reclaim
@@ -230,20 +244,47 @@ MethodInfoHead* FindMiByRva(void* klass, uint32_t rva) {
     return nullptr;
 }
 
-// Anti-drift: Unity plaintext name → FindMethodCached(RVA+void()) → raw RVA walk.
-MethodInfoHead* ResolvePumpMi(void* klass, uint32_t rva, const char* nameHint) {
-    if (nameHint && klass) {
-        if (MethodInfoHead* byName = FindMiByName(klass, nameHint, kShapeVoid0.arity)) return byName;
-    }
+// Anti-drift: Unity/明文名 → unique void() kind → RVA 末级。
+// 故意不走 FindMethodCached（其 RVA-first 会在入口漂到同形 void() 时钩错函数）。
+// outVia：name|plain|kind|rva|MISS — 安装日志与换版诊断用。
+MethodInfoHead* ResolvePumpMi(void* klass, uint32_t rva, const char* nameHint, const char* slot,
+                              const char** outVia) {
+    if (outVia) *outVia = "MISS";
     if (!klass) return nullptr;
-    const auto mr = x::runtime::il2cpp_method::FindMethodCached(klass, rva, kShapeVoid0);
-    if (mr.method) {
-        if (mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-            FailLogThrottled("ResolvePumpMi kind-fallback (RVA drifted)");
+    if (nameHint && nameHint[0]) {
+        if (MethodInfoHead* byName = FindMiByName(klass, nameHint, kShapeVoid0.arity)) {
+            if (outVia) *outVia = "name";
+            return byName;
         }
-        return reinterpret_cast<MethodInfoHead*>(mr.method);
+        // 再走 SSOT：hash 无、plain=nameHint（与上面 FindMiByName 等价兜底 + kind 校验）
+        const auto mr =
+            x::runtime::il2cpp_method::FindMethodResolved(klass, 0, kShapeVoid0, nameHint, nullptr);
+        if (mr.method) {
+            if (outVia) *outVia = x::runtime::il2cpp_method::PathName(mr.path);
+            return reinterpret_cast<MethodInfoHead*>(mr.method);
+        }
     }
-    return FindMiByRva(klass, rva);
+    // 无可用名，或名未命中：仅当 void() 唯一时用 kind；否则才死钉 RVA。
+    if (void* byKind = x::runtime::il2cpp_method::FindMethodByKind(klass, kShapeVoid0)) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "ResolvePumpMi kind-fallback slot=%s (name miss)",
+                 slot ? slot : "?");
+        FailLogThrottled(buf);
+        if (outVia) *outVia = "kind";
+        return reinterpret_cast<MethodInfoHead*>(byKind);
+    }
+    if (rva) {
+        if (MethodInfoHead* byRva = FindMiByRva(klass, rva)) {
+            char buf[160];
+            snprintf(buf, sizeof(buf),
+                     "ResolvePumpMi RVA-fallback slot=%s rva=0x%X — remount: re-pin if hooks miss",
+                     slot ? slot : "?", rva);
+            FailLogThrottled(buf);
+            if (outVia) *outVia = "rva";
+            return byRva;
+        }
+    }
+    return nullptr;
 }
 
 void RunOne(QueuedJob& j) {
@@ -308,15 +349,22 @@ int DrainQueueBudget(int maxJobs) {
     return ran;
 }
 
-void RunFrameTick() {
-    JobFn fn = gFrameTick.load(std::memory_order_acquire);
+void RunOneFrameTick(JobFn fn, void* user, const char* tag) {
     if (!fn) return;
-    void* user = gFrameTickUser.load(std::memory_order_acquire);
     __try {
         fn(user);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        x::runtime::LogW("MainPump", "frame tick SEH");
+        x::runtime::LogW("MainPump", "%s frame tick SEH", tag ? tag : "frame");
     }
+}
+
+void RunFrameTick() {
+    RunOneFrameTick(gFrameTick.load(std::memory_order_acquire),
+                    gFrameTickUser.load(std::memory_order_acquire), "primary");
+    RunOneFrameTick(gAuxFrameTick.load(std::memory_order_acquire),
+                    gAuxFrameTickUser.load(std::memory_order_acquire), "aux");
+    RunOneFrameTick(gBinFrameTick.load(std::memory_order_acquire),
+                    gBinFrameTickUser.load(std::memory_order_acquire), "bin");
 }
 
 void NoteHeartbeat() {
@@ -353,6 +401,24 @@ void NoteWmHookFire() {
     gLastWmTickMs.store(GetTickCount(), std::memory_order_release);
 }
 
+// 输入补写槽的首选宿主是否还活着。注意不能复用 WmHostsDrain()：那个只要 WM.Update
+// 挂上就为真，而补写只在 WM.FixedUpdate 钩里跑 —— 那样会两头落空，补写彻底静默。
+bool FixedUpdateTickLive() {
+    if (!gMiWmFixedUpdate) return false;
+    const DWORD last = gLastWmFuMs.load(std::memory_order_acquire);
+    if (!last) return false;
+    return (GetTickCount() - last) <= kWmIdleFallbackMs;
+}
+
+// host: 1=WM.FixedUpdate（物理前，赶在 CalcWalk 之前）2=SendWill 渲染帧（保底）。
+void RunInputFrameTick(uint8_t host) {
+    JobFn fn = gInputFrameTick.load(std::memory_order_acquire);
+    if (!fn) return;
+    gInputTickHost.store(host, std::memory_order_relaxed);
+    gInputTickRuns.fetch_add(1, std::memory_order_relaxed);
+    RunOneFrameTick(fn, gInputFrameTickUser.load(std::memory_order_acquire), "input");
+}
+
 void DrainAfterOrig() {
     if (!gInPump.exchange(true)) {
         (void)DrainQueueBudget(gDrainBudget.load(std::memory_order_relaxed));
@@ -371,6 +437,8 @@ void HookSendWill(const void* methodInfo) {
     }
     // FrameTick stays on SendWill so invuln keeps a per-frame render-path tick in-map.
     RunFrameTick();
+    // 保底宿主：WM.FixedUpdate 没挂上 / 已 idle 时，输入补写改由渲染帧驱动。
+    if (!FixedUpdateTickLive()) RunInputFrameTick(2);
 }
 
 void HookSceneUpdate(void* self, const void* methodInfo) {
@@ -395,7 +463,22 @@ void HookWmTick(void* self, const void* methodInfo, void* origFn) {
 }
 
 void HookWmFixedUpdate(void* self, const void* methodInfo) {
-    HookWmTick(self, methodInfo, gOrigWmFixedUpdate);
+    NotePumpThread();
+    gLastWmFuMs.store(GetTickCount(), std::memory_order_release);
+    // 输入补写排在最前：设备状态要先就位，本帧后续读输入的逻辑才看得到。
+    RunInputFrameTick(1);
+    // 拟人走路：在 WM.FixedUpdate orig 之前粘住 SetInput，避免 SendWill 后写赶不上 CalcWalk。
+    RunOneFrameTick(gPrePhysicsFrameTick.load(std::memory_order_acquire),
+                    gPrePhysicsFrameTickUser.load(std::memory_order_acquire), "prephys");
+    auto orig = reinterpret_cast<FnUpdate>(gOrigWmFixedUpdate);
+    if (orig) orig(self, methodInfo);
+    RunOneFrameTick(gPostPhysicsFrameTick.load(std::memory_order_acquire),
+                    gPostPhysicsFrameTickUser.load(std::memory_order_acquire), "postphys");
+    NoteWmHookFire();
+    if (WmHostsDrain()) {
+        NoteHeartbeat();
+        DrainAfterOrig();
+    }
 }
 
 void HookWmUpdate(void* self, const void* methodInfo) {
@@ -450,22 +533,31 @@ bool InstallPump() {
 
     // 双挂：Canvas 过图可能停跳；SceneLogin.Update 在登录/加载期仍可能心跳。
     // Klass：Canvas 明文；SceneLogin / WM 走 shape（hash→field）。
-    // MI：ResolvePumpMi = Unity 名 → FindMethodCached(RVA+void0) → RVA。
+    // MI：ResolvePumpMi = 名 → unique void() kind → RVA 末级（禁止 RVA-first）。
+    const char* viaSend = "MISS";
+    const char* viaScene = "MISS";
+    const char* viaWmFu = "MISS";
+    const char* viaWmUp = "MISS";
     if (!gMiSendWill) {
         void* klassCanvas = FindClass("UnityEngine", "Canvas");
-        MethodInfoHead* miSend =
-            ResolvePumpMi(klassCanvas, kRvaSendWillRenderCanvases, "SendWillRenderCanvases");
+        MethodInfoHead* miSend = ResolvePumpMi(klassCanvas, kRvaSendWillRenderCanvases,
+                                               "SendWillRenderCanvases", "Canvas.SendWill", &viaSend);
         TryInstallSendWill(miSend);
+    } else {
+        viaSend = "kept";
     }
     if (!gMiSceneUpdate) {
         void* klassSl = x::runtime::il2cpp_shape::ResolveSceneLoginKlass();
-        MethodInfoHead* miUp = ResolvePumpMi(klassSl, kRvaSceneLoginUpdate, "Update");
+        MethodInfoHead* miUp =
+            ResolvePumpMi(klassSl, kRvaSceneLoginUpdate, "Update", "SceneLogin.Update", &viaScene);
         if (!klassSl) {
             FailLogThrottled("SceneLogin klass miss (hash/shape) — Canvas-only pump");
         } else if (!miUp) {
             FailLogThrottled("SceneLogin.Update MI miss — Canvas-only pump");
         }
         TryInstallSceneUpdate(miUp);
+    } else {
+        viaScene = "kept";
     }
 
     // WM InMap host — klass may appear after login; retry every Ensure.
@@ -473,17 +565,25 @@ bool InstallPump() {
         void* klassWm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
         if (klassWm) {
             if (!gMiWmFixedUpdate) {
-                MethodInfoHead* miFu =
-                    ResolvePumpMi(klassWm, kRvaWorldManagerFixedUpdate, "FixedUpdate");
+                MethodInfoHead* miFu = ResolvePumpMi(klassWm, kRvaWorldManagerFixedUpdate,
+                                                     "FixedUpdate", "WM.FixedUpdate", &viaWmFu);
                 if (!TryInstallWmFixedUpdate(miFu) && !gMiWmFixedUpdate) {
                     FailLogThrottled("WM.FixedUpdate MI miss — InMap keeps SendWill Drain");
                 }
+            } else {
+                viaWmFu = "kept";
             }
             if (!gMiWmUpdate) {
-                MethodInfoHead* miUp = ResolvePumpMi(klassWm, kRvaWorldManagerUpdate, "Update");
+                MethodInfoHead* miUp =
+                    ResolvePumpMi(klassWm, kRvaWorldManagerUpdate, "Update", "WM.Update", &viaWmUp);
                 (void)TryInstallWmUpdate(miUp);
+            } else {
+                viaWmUp = "kept";
             }
         }
+    } else {
+        viaWmFu = "kept";
+        viaWmUp = "kept";
     }
 
     if (!gMiSendWill && !gMiSceneUpdate) {
@@ -494,15 +594,15 @@ bool InstallPump() {
     const bool first = !gPumpInstalled.exchange(true);
     if (first) {
         x::runtime::LogI("MainPump",
-                         "installed sendWill=%d sceneUpdate=%d wmFU=%d wmUp=%d drainBudget=%d "
-                         "(queueCap=%d, wait real tick)",
-                         gMiSendWill ? 1 : 0, gMiSceneUpdate ? 1 : 0, gMiWmFixedUpdate ? 1 : 0,
-                         gMiWmUpdate ? 1 : 0, gDrainBudget.load(std::memory_order_relaxed),
-                         kQueueCap);
+                         "installed sendWill=%d(%s) sceneUpdate=%d(%s) wmFU=%d(%s) wmUp=%d(%s) "
+                         "drainBudget=%d (queueCap=%d, wait real tick)",
+                         gMiSendWill ? 1 : 0, viaSend, gMiSceneUpdate ? 1 : 0, viaScene,
+                         gMiWmFixedUpdate ? 1 : 0, viaWmFu, gMiWmUpdate ? 1 : 0, viaWmUp,
+                         gDrainBudget.load(std::memory_order_relaxed), kQueueCap);
     } else if (WmHostInstalled()) {
         if (!gWmHostLogged.exchange(true)) {
-            x::runtime::LogI("MainPump", "WM drain host ready fu=%d up=%d",
-                             gMiWmFixedUpdate ? 1 : 0, gMiWmUpdate ? 1 : 0);
+            x::runtime::LogI("MainPump", "WM drain host ready fu=%d(%s) up=%d(%s)",
+                             gMiWmFixedUpdate ? 1 : 0, viaWmFu, gMiWmUpdate ? 1 : 0, viaWmUp);
         }
     }
     return true;
@@ -571,6 +671,61 @@ void SetFrameTick(JobFn fn, void* user) {
     }
     gFrameTickUser.store(user, std::memory_order_release);
     gFrameTick.store(fn, std::memory_order_release);
+}
+
+void SetAuxFrameTick(JobFn fn, void* user) {
+    if (!fn) {
+        gAuxFrameTick.store(nullptr, std::memory_order_release);
+        gAuxFrameTickUser.store(nullptr, std::memory_order_release);
+        return;
+    }
+    gAuxFrameTickUser.store(user, std::memory_order_release);
+    gAuxFrameTick.store(fn, std::memory_order_release);
+}
+
+void SetBinFrameTick(JobFn fn, void* user) {
+    if (!fn) {
+        gBinFrameTick.store(nullptr, std::memory_order_release);
+        gBinFrameTickUser.store(nullptr, std::memory_order_release);
+        return;
+    }
+    gBinFrameTickUser.store(user, std::memory_order_release);
+    gBinFrameTick.store(fn, std::memory_order_release);
+}
+
+void SetPrePhysicsFrameTick(JobFn fn, void* user) {
+    if (!fn) {
+        gPrePhysicsFrameTick.store(nullptr, std::memory_order_release);
+        gPrePhysicsFrameTickUser.store(nullptr, std::memory_order_release);
+        return;
+    }
+    gPrePhysicsFrameTickUser.store(user, std::memory_order_release);
+    gPrePhysicsFrameTick.store(fn, std::memory_order_release);
+}
+
+void SetInputFrameTick(JobFn fn, void* user) {
+    if (!fn) {
+        gInputFrameTick.store(nullptr, std::memory_order_release);
+        gInputFrameTickUser.store(nullptr, std::memory_order_release);
+        gInputTickHost.store(0, std::memory_order_relaxed);
+        return;
+    }
+    gInputFrameTickUser.store(user, std::memory_order_release);
+    gInputFrameTick.store(fn, std::memory_order_release);
+}
+
+uint32_t InputFrameTickRuns() { return gInputTickRuns.load(std::memory_order_relaxed); }
+
+uint8_t InputFrameTickHost() { return gInputTickHost.load(std::memory_order_relaxed); }
+
+void SetPostPhysicsFrameTick(JobFn fn, void* user) {
+    if (!fn) {
+        gPostPhysicsFrameTick.store(nullptr, std::memory_order_release);
+        gPostPhysicsFrameTickUser.store(nullptr, std::memory_order_release);
+        return;
+    }
+    gPostPhysicsFrameTickUser.store(user, std::memory_order_release);
+    gPostPhysicsFrameTick.store(fn, std::memory_order_release);
 }
 
 bool IsDirectMode() {
@@ -691,6 +846,16 @@ bool InvokeAndWait(JobFn fn, void* user, DWORD timeoutMs, JobPrio prio) {
 void Shutdown() {
     gFrameTick.store(nullptr, std::memory_order_release);
     gFrameTickUser.store(nullptr, std::memory_order_release);
+    gAuxFrameTick.store(nullptr, std::memory_order_release);
+    gAuxFrameTickUser.store(nullptr, std::memory_order_release);
+    gBinFrameTick.store(nullptr, std::memory_order_release);
+    gBinFrameTickUser.store(nullptr, std::memory_order_release);
+    gPrePhysicsFrameTick.store(nullptr, std::memory_order_release);
+    gPrePhysicsFrameTickUser.store(nullptr, std::memory_order_release);
+    gPostPhysicsFrameTick.store(nullptr, std::memory_order_release);
+    gPostPhysicsFrameTickUser.store(nullptr, std::memory_order_release);
+    gInputFrameTick.store(nullptr, std::memory_order_release);
+    gInputFrameTickUser.store(nullptr, std::memory_order_release);
     EnsureCs();
     EnterCriticalSection(&gCs);
     for (int i = 0; i < kQueueCap; ++i) {

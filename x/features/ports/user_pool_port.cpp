@@ -24,12 +24,12 @@ using x::runtime::il2cpp::ReadPtr;
 // remount 2026-08-04 · TypeDef 1582 UserPool : Singleton<UserPool>
 // 旧 e0e036a9… 已不存在；字段布局未变（UL@0x10 List@0x18 Dict@0x20 Field@0x28）
 constexpr char kUserPoolClass[] =
-    "d46edf350791e7eb401f9c96c40345d919606ae12552a9600686a4ca601fe4b";
+    "e01645a22ba740fe9185be53122d5923055709c5f3e802dffd205481f46c919";
 // 字段防漂移：哈希名 → field_get_offset；失败回退 Hint
 constexpr char kHashRemoteDict[] =
-    "e11156bced2db9c0c7b8a3e98b911a5f131ac68568bf07de936fc70c115ea3c";
+    "ff9a29b0841ea8f77d819a41761349da9ff104fcbb59f42863678f2e7f89fd7";
 constexpr char kHashRemoteList[] =
-    "ce4af2e1bbf23fb1ec4b525fc871d8e7a08328324cfa3822d66d40975a5d261";
+    "ee80a8cfc6858e077bb65fc29043271b7f7fe9a799d39ad7c987a8cabdfe560";
 
 // GetRemoteUserCount CFA @ 0x1114BA0（旧 0x110E240）；采样优先读字段，避免调 CFA。
 constexpr size_t kOffUserLocalHint = 0x10;  // get_UserLocal → *(this+0x10)

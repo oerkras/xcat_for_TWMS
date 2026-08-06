@@ -7,6 +7,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <string>
 
 namespace xcat {
 namespace {
@@ -94,7 +96,9 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobScanIntervalMs = kMobScanIntervalDefaultMs;
     out.simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     out.clusterWeight = kClusterWeightDefault;
-    out.simpleCombatTeleport = 1;
+    out.simpleCombatTeleport = 0;
+    out.simpleCombatImpactApproach = 1;
+    out.simpleCombatHumanWalk = 0;  // 与 Impact 互斥；面板单选
     out.simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     out.simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
     out.simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
@@ -124,6 +128,14 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.teleportKickStressFineSeq = 0;
     out.teleportKickStressFine10Seq = 0;
     out.teleportKickStressLocalSeq = 0;
+    out.impactNockBackTestSeq = 0;
+    out.impactSetNextTestSeq = 0;
+    out.impactImpulseDir = kImpactImpulseDirDefault;
+    out.impactImpulseVx = kImpactImpulseVxDefault;
+    out.impactImpulseVy = kImpactImpulseVyDefault;
+    out.impactHopTestSeq = 0;
+    out.impactHopDeltaX = kImpactHopDeltaXDefault;
+    out.impactHopForce = 0;
     out.autoRelogin = 0;
     out.autoReloginStopCombat = 1;
     out.autoReloginReconnect = 1;
@@ -199,9 +211,11 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     else
         out.simpleCombatTickMs = kSimpleCombatTickDefaultMs;
     out.simpleCombatTickMs = ClampSimpleCombatTickMs(out.simpleCombatTickMs);
-    if (IniGetU32(ini, "core", "mobScanIntervalMs", u))
+    if (IniGetU32(ini, "core", "mobScanIntervalMs", u)) {
+        // 旧默认 50 → 20；显式调过其它值保留。
+        if (u == kMobScanIntervalLegacyDefaultMs) u = kMobScanIntervalDefaultMs;
         out.mobScanIntervalMs = ClampMobScanIntervalMs(u);
-    else
+    } else
         out.mobScanIntervalMs = kMobScanIntervalDefaultMs;
     out.mobScanIntervalMs = ClampMobScanIntervalMs(out.mobScanIntervalMs);
     if (IniGetU32(ini, "core", "simpleCombatAttackHoldMs", u))
@@ -209,8 +223,19 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     else
         out.simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     if (IniGetU32(ini, "core", "clusterWeight", u)) out.clusterWeight = ClampClusterWeight(u);
-    // 面板已撤开关：读盘亦强制开，避免旧 ini=0 让 DLL 站桩。
-    out.simpleCombatTeleport = 1u;
+    // fill+Doing 贴怪已禁用（封禁风险）：读盘亦强制关。
+    out.simpleCombatTeleport = 0u;
+    // 追怪位移：新键 simpleCombatAirApproach；旧键 simpleCombatImpactApproach 仅兜底。
+    if (IniGetBool(ini, "core", "simpleCombatAirApproach", b))
+        out.simpleCombatImpactApproach = b ? 1u : 0u;
+    else if (IniGetBool(ini, "core", "simpleCombatImpactApproach", b))
+        out.simpleCombatImpactApproach = b ? 1u : 0u;
+    else
+        out.simpleCombatImpactApproach = 1u;
+    if (IniGetBool(ini, "core", "simpleCombatHumanWalk", b))
+        out.simpleCombatHumanWalk = b ? 1u : 0u;
+    else
+        out.simpleCombatHumanWalk = 0u;  // 与空中贴怪默认互斥；Normalize 亦会压排他
     if (IniGetBool(ini, "core", "simpleCombatLiveStep", b))
         out.simpleCombatLiveStep = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "attackRpc", b)) out.attackRpc = b ? 1u : 0u;
@@ -221,6 +246,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.attackRpcDamage = ClampAttackRpcDamage(u);
     if (IniGetBool(ini, "core", "autoLie", b)) out.autoLie = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoLieDryRun", b)) out.autoLieDryRun = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "movepathFlushProbe", b)) out.movepathFlushProbe = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "autoLieAlarmTestSeq", u)) out.autoLieAlarmTestSeq = u;
     if (IniGetU32(ini, "core", "autoLieMouseSmokeSeq", u)) out.autoLieMouseSmokeSeq = u;
     if (IniGetU32(ini, "core", "manualRejoinSeq", u)) out.manualRejoinSeq = u;
@@ -232,6 +258,43 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.teleportKickStressFine10Seq = u;
     if (IniGetU32(ini, "core", "teleportKickStressLocalSeq", u))
         out.teleportKickStressLocalSeq = u;
+    // 位移试推 seq/参数：新键 moveProbe* / moveHop*；旧 impact* 仅兜底。
+    if (IniGetU32(ini, "core", "moveProbeASeq", u))
+        out.impactNockBackTestSeq = u;
+    else if (IniGetU32(ini, "core", "impactNockBackTestSeq", u))
+        out.impactNockBackTestSeq = u;
+    if (IniGetU32(ini, "core", "moveProbeBSeq", u))
+        out.impactSetNextTestSeq = u;
+    else if (IniGetU32(ini, "core", "impactSetNextTestSeq", u))
+        out.impactSetNextTestSeq = u;
+    if (IniGetU32(ini, "core", "moveProbeDir", u))
+        out.impactImpulseDir = ClampImpactImpulseDir(static_cast<int32_t>(u));
+    else if (IniGetU32(ini, "core", "impactImpulseDir", u))
+        out.impactImpulseDir = ClampImpactImpulseDir(static_cast<int32_t>(u));
+    if (IniGetU32(ini, "core", "moveProbeVx", u))
+        out.impactImpulseVx = ClampImpactImpulseSpeed(u);
+    else if (IniGetU32(ini, "core", "impactImpulseVx", u))
+        out.impactImpulseVx = ClampImpactImpulseSpeed(u);
+    if (IniGetU32(ini, "core", "moveProbeVy", u))
+        out.impactImpulseVy = ClampImpactImpulseSpeed(u);
+    else if (IniGetU32(ini, "core", "impactImpulseVy", u))
+        out.impactImpulseVy = ClampImpactImpulseSpeed(u);
+    if (IniGetU32(ini, "core", "moveHopTestSeq", u))
+        out.impactHopTestSeq = u;
+    else if (IniGetU32(ini, "core", "impactHopTestSeq", u))
+        out.impactHopTestSeq = u;
+    {
+        std::string dxStr;
+        if ((IniGetString(ini, "core", "moveHopDeltaX", dxStr) ||
+             IniGetString(ini, "core", "impactHopDeltaX", dxStr)) &&
+            !dxStr.empty()) {
+            out.impactHopDeltaX = ClampImpactHopDeltaX(static_cast<int32_t>(atoi(dxStr.c_str())));
+        }
+    }
+    if (IniGetBool(ini, "core", "moveHopForce", b))
+        out.impactHopForce = b ? 1u : 0u;
+    else if (IniGetBool(ini, "core", "impactHopForce", b))
+        out.impactHopForce = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoRelogin", b)) out.autoRelogin = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoReloginStopCombat", b))
         out.autoReloginStopCombat = b ? 1u : 0u;
@@ -354,13 +417,20 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         normalized.simpleCombatTickMs ? normalized.simpleCombatTickMs
                                       : kSimpleCombatTickDefaultMs);
     normalized.mobScanIntervalMs = ClampMobScanIntervalMs(
-        normalized.mobScanIntervalMs ? normalized.mobScanIntervalMs
-                                     : kMobScanIntervalDefaultMs);
+        !normalized.mobScanIntervalMs
+            ? kMobScanIntervalDefaultMs
+            : (normalized.mobScanIntervalMs == kMobScanIntervalLegacyDefaultMs
+                   ? kMobScanIntervalDefaultMs
+                   : normalized.mobScanIntervalMs));
     normalized.simpleCombatAttackHoldMs = ClampAttackHoldMs(
         normalized.simpleCombatAttackHoldMs ? normalized.simpleCombatAttackHoldMs
                                             : kAttackHoldDefaultMs);
     normalized.clusterWeight = normalized.clusterWeight ? 1u : 0u;
-    normalized.simpleCombatTeleport = 1u;
+    normalized.simpleCombatTeleport = 0u;
+    normalized.simpleCombatImpactApproach = normalized.simpleCombatImpactApproach ? 1u : 0u;
+    normalized.simpleCombatHumanWalk = normalized.simpleCombatHumanWalk ? 1u : 0u;
+    // 追怪位移单选：空中贴怪开则压掉拟人（旧盘两者同开时等价于仅空中）。
+    if (normalized.simpleCombatImpactApproach) normalized.simpleCombatHumanWalk = 0u;
     normalized.simpleCombatLiveStep = normalized.simpleCombatLiveStep ? 1u : 0u;
     normalized.attackRpc = normalized.attackRpc ? 1u : 0u;
     normalized.attackRpcMobs = ClampAttackRpcMobs(
@@ -441,6 +511,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     if (normalized.mpThresholdPct > 99) normalized.mpThresholdPct = 99;
     if (normalized.writeTickMs == 0) normalized.writeTickMs = NowTickMs();
     normalized.worldName[sizeof(normalized.worldName) - 1] = 0;
+    normalized.impactHopDeltaX = ClampImpactHopDeltaX(normalized.impactHopDeltaX);
+    normalized.impactHopForce = normalized.impactHopForce ? 1u : 0u;
 
     const std::string path = UserConfigIniPath(binDir);
     const bool ok = UpdateIniFile(path.c_str(), [&](IniStore& ini) {
@@ -479,6 +551,11 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "simpleCombatAttackHoldMs", normalized.simpleCombatAttackHoldMs);
         IniSetU32(ini, "core", "clusterWeight", normalized.clusterWeight);
         IniSetBool(ini, "core", "simpleCombatTeleport", normalized.simpleCombatTeleport != 0);
+        // 落盘中性键；擦掉旧 Impact* 键名。
+        IniSetBool(ini, "core", "simpleCombatAirApproach",
+                   normalized.simpleCombatImpactApproach != 0);
+        IniEraseKey(ini, "core", "simpleCombatImpactApproach");
+        IniSetBool(ini, "core", "simpleCombatHumanWalk", normalized.simpleCombatHumanWalk != 0);
         IniSetBool(ini, "core", "simpleCombatLiveStep", normalized.simpleCombatLiveStep != 0);
         IniSetBool(ini, "core", "attackRpc", normalized.attackRpc != 0);
         IniSetU32(ini, "core", "attackRpcMobs", normalized.attackRpcMobs);
@@ -486,6 +563,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "attackRpcDamage", normalized.attackRpcDamage);
         IniSetBool(ini, "core", "autoLie", normalized.autoLie != 0);
         IniSetBool(ini, "core", "autoLieDryRun", normalized.autoLieDryRun != 0);
+        IniSetBool(ini, "core", "movepathFlushProbe", normalized.movepathFlushProbe != 0);
         IniSetU32(ini, "core", "autoLieAlarmTestSeq", normalized.autoLieAlarmTestSeq);
         IniSetU32(ini, "core", "autoLieMouseSmokeSeq", normalized.autoLieMouseSmokeSeq);
         IniSetU32(ini, "core", "manualRejoinSeq", normalized.manualRejoinSeq);
@@ -497,6 +575,30 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                   normalized.teleportKickStressFine10Seq);
         IniSetU32(ini, "core", "teleportKickStressLocalSeq",
                   normalized.teleportKickStressLocalSeq);
+        IniSetU32(ini, "core", "moveProbeASeq", normalized.impactNockBackTestSeq);
+        IniSetU32(ini, "core", "moveProbeBSeq", normalized.impactSetNextTestSeq);
+        IniSetU32(ini, "core", "moveProbeDir",
+                  static_cast<uint32_t>(ClampImpactImpulseDir(normalized.impactImpulseDir)));
+        IniSetU32(ini, "core", "moveProbeVx",
+                  ClampImpactImpulseSpeed(normalized.impactImpulseVx));
+        IniSetU32(ini, "core", "moveProbeVy",
+                  ClampImpactImpulseSpeed(normalized.impactImpulseVy));
+        IniSetU32(ini, "core", "moveHopTestSeq", normalized.impactHopTestSeq);
+        {
+            char dxBuf[16]{};
+            snprintf(dxBuf, sizeof(dxBuf), "%d",
+                     (int)ClampImpactHopDeltaX(normalized.impactHopDeltaX));
+            IniSetString(ini, "core", "moveHopDeltaX", dxBuf);
+        }
+        IniSetBool(ini, "core", "moveHopForce", normalized.impactHopForce != 0);
+        IniEraseKey(ini, "core", "impactNockBackTestSeq");
+        IniEraseKey(ini, "core", "impactSetNextTestSeq");
+        IniEraseKey(ini, "core", "impactImpulseDir");
+        IniEraseKey(ini, "core", "impactImpulseVx");
+        IniEraseKey(ini, "core", "impactImpulseVy");
+        IniEraseKey(ini, "core", "impactHopTestSeq");
+        IniEraseKey(ini, "core", "impactHopDeltaX");
+        IniEraseKey(ini, "core", "impactHopForce");
         IniSetBool(ini, "core", "autoRelogin", normalized.autoRelogin != 0);
         IniSetBool(ini, "core", "autoReloginStopCombat",
                    normalized.autoReloginStopCombat != 0);

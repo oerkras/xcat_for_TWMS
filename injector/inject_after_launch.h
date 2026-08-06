@@ -18,6 +18,10 @@ struct Options {
     int waitGameAssemblySec = 120;
     // 仅缓冲：GA 出现 ≠ 托管就绪。真正的冷启门闩在 xcat.dll Bootstrap（等 MainPump）。
     int settleMs = 3000;
+    // false：跳过等 GameAssembly / settle（调试自定义 DLL 可关）。
+    bool waitForGameAssembly = true;
+    // false：不按 DLL 旁路重绑 inject.jsonl（自定义路径常在 XCat 树外）。
+    bool registerInjectLog = true;
 };
 
 struct Result {

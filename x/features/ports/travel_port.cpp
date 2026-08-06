@@ -4,10 +4,11 @@
 #endif
 #include "travel_port.h"
 
+#include "foothold_path.h"
 #include "teleport_port.h"
 #include "world_port.h"
-#include "foothold_path.h"
-#include "foothold_port.h"
+#include "../fly/fly.h"
+#include "../invuln/invuln.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_mapdata.h"
@@ -16,7 +17,6 @@
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
-#include "../../runtime/main_thread_pump.h"
 #include "../../runtime/anchor_lamps.h"
 #include "../../ui/player_vitals.h"
 #include "input_port.h"
@@ -38,34 +38,30 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 constexpr char kPortalManagerClass[] =
-    "cce70e130cc0ea3b4c77574230246f5d88b70c68de229bbc1e256c09320efb4";  // remounted 2026-08-04
-// WM / UserLocal / NM ??il2cpp_shape Resolve*Klass?hash + shape ????
+    "e67f9ad37cf404d09bae32979e6e59ad535a364232b52dcf9a1d59458a0ed91";  // remounted 2026-08-06
+// WM / UserLocal / NM → il2cpp_shape Resolve*Klass（hash + shape）
+// SEND OutPacket TypeDef 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "f07686cc7a01760c9166b2cf7a72f4ac7c084f1ee39bd1c3bdc42c351e884bb";
-// ?????dump.cs ? remount 2026-08-04???void()/EncodeStr ??????????
+    "b2cb1e0adcf26c5021bc6b1880a32e838d1eb783e3880f4a70e70990079a04b";
+// remounted 2026-08-06 · dump.cs / script.json
 constexpr char kHashCheckMovePortal[] =
-    "f919f4ffcc978acefa58dc5c9ed1336a1f381b097ac87e4cbc217a2890a9de9";
+    "f480d61f81686460994a568f0a78aaf5e4ae9c12fe009658ba7af2517c58eb3";
 constexpr char kHashOutCreate[] =
-    "ef87de519630cf113299d43987ff14b1f1676915e89829fad3840a2ba3d6363";
+    "d5cef5f625ea2385cd9eaaf8b9a49342353732f8534da040cfa123e58f0ed27";
 constexpr char kHashEncode1[] =
-    "ad9431895506411dc6fe026818f2ee62a880edd40acff717a91c0698fe4e18a";
+    "e8c10cdad1bc8d76acb9eec60662b480fca2022b3f2e7c27220303c60151bde";  // Encode1(byte)
 constexpr char kHashEncodeStr[] =
-    "a4d208e8366660c2ac3285830093126c5111acb7e229fa93122f98d04ac2baa";
+    "c9ea89f993b612dbfdc4fffe6486b28a58cfd581c4c3d2af5262c85dd5a4395";
 constexpr char kHashSendPacket[] =
-    "a3e15e8fb1d9cacfe30bdb5b652ad6f7df5037a51e3a48cfede943d8fc2d59b";
+    "ddc1a3d2b1ecceba615002a4805504bc8dc6096ad3706c3d16a06875bd4de28";  // Session bool(OutPacket)
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04
-constexpr uint32_t kRvaCompGetGo = 0x4E53330;              // remounted 2026-08-04
-constexpr uint32_t kRvaObjGetName = 0x4E60290;             // remounted 2026-08-04
-constexpr uint32_t kRvaTfSetPos = 0x4E6DDE0;  // remounted 2026-08-04 Transform.set_position
-// WorldManager.CheckMovePortal????SetMyUser / InitCamera ????
-constexpr uint32_t kRvaCheckMovePortal = 0xDD08D0;  // remounted 2026-08-04
-// OutPacket / NetworkManager.Send?C?S??
-constexpr uint32_t kRvaOutPacketCreate = 0x1CC22D0;  // remounted 2026-08-04
-constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CCE8B0;  // remounted 2026-08-04
-constexpr uint32_t kRvaOutPacketEncodeStr = 0x1CCF0F0;  // remounted 2026-08-04
-constexpr uint32_t kRvaNmSend = 0x1CC3EE0;  // remounted 2026-08-04 Session.SendPacket
-// CMS ClientPacket.UserPortalTeleportRequest = 114 ??e59 wire 0x0072
+// Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
+constexpr uint32_t kRvaCheckMovePortal = 0xDCC6D0;  // remounted 2026-08-06 WM.CheckMovePortal
+constexpr uint32_t kRvaOutPacketCreate = 0x1CC63D0;  // remounted 2026-08-06 OutPacket.Create
+constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CD2AE0;  // remounted 2026-08-06 Encode1(byte)
+constexpr uint32_t kRvaOutPacketEncodeStr = 0x1CD31F0;  // remounted 2026-08-06 EncodeStr
+constexpr uint32_t kRvaNmSend = 0x1CC7FE0;  // remounted 2026-08-06 Session.SendPacket bool
+// CMS ClientPacket.UserPortalTeleportRequest = 114 · wire 0x0072
 constexpr int kClientPortalTeleport = 114;
 constexpr uint16_t kWirePortalTeleport = 0x0072;
 
@@ -81,57 +77,58 @@ constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 
 constexpr char kMapPortalDataClass[] =
-    "a91d2e09edd6e7ecbf1c9e5b24c97b7a1abbe4f0e261edfefb85479b9579987";
+    "e33e43ed48276e30b1ffac1e543e2d7f439e5b5709b9e8b3140fdac25a6bb60";  // remounted 2026-08-06
 constexpr char kPortalClass[] =
-    "e14a58ebd818c4c5d72a24f3f16f357f9dfc6a9ef1ed5c81a1dc983cbdc7f5e";
+    "d0a22aa37d18c7ac1fb75be043fa2115169e2c7410e110876a1f5d34004f486";  // remounted 2026-08-06
 constexpr char kActorBaseClass[] =
-    "ddef6db860cfa2bea6dca39e201bf3065a897797f86009fb4d6104830143d94";
+    "edc85ce203606bdb549e5fb94458b1d2d11ce78034d24d41e39a54c0288d38e";  // = teleport_port
 constexpr char kVecCtrlClass[] =
-    "ef24024acbe225bcc90ca332f3e00aff5800daa32a769057d2e830eeac776bb";
+    "e0eb55b82f10cb9eeb9424eb3aadf1450a014afa564bc55c3739b2909abfbbc";  // = teleport_port
 constexpr char kPacketClass[] =
-    "fc6ae331019bd3c1e987ba71c4f75e3591b683aabc4278715ac9c79480cbdac";
+    "b374f35823e074687fd2a9225e7738d9b8b664c18aed556fc7835da03f2bad1";  // Packet base 13773
 
 constexpr char kHashPortalData[] =
-    "f8d092284cbb4575d53243e4243b8a686a6387972a425331abf7f3c559c73ae";
+    "bbe42ed7f0f97903601a2a6124e43ee9439f5966c25a7ddc7c9d0bfcb39ec1b";
 constexpr char kHashMpdId[] =
-    "<e42bf60d5d1464c5af4fea6350354857cca52dcc5d91c345dbb640006eaa320>k__BackingField";
+    "<ad9a043484d1666fc6beef64680b7208afecfc60044e7bd92f4f2f85a72e174>k__BackingField";
 constexpr char kHashMpdType[] =
-    "<eeafe8e6a3f6e9cd3659f7643cb9a78fd4a8d9dfb21b783a6f56e897f087e75>k__BackingField";
+    "<c70d5285f0b73da84151d639d00281113d897c7a3b95716c045ae40c8a17345>k__BackingField";
 constexpr char kHashMpdEnable[] =
-    "<bb5e086289a63bbe366789d211fa709cca3ff895538a61b4a7edc0e88b14b64>k__BackingField";
+    "<a4289b27033bae7778f40426f264efb62d877cc244b3008a7c8ab0cd0cae7c5>k__BackingField";
 constexpr char kHashMpdPName[] =
-    "<addfadeffbc3c71c1b357406f2cd702450dfb3695d02b5a68ea9738296debd5>k__BackingField";
+    "<ac7608e244c4a4ad5ab2c8f4ae620ce34c8fa3370f803a04a682dcbb0aa7dad>k__BackingField";
 constexpr char kHashMpdX[] =
-    "<e49aaaa93d5514fa05fa51744bb57631089967749b0e83dc2a07f5423a1d339>k__BackingField";
+    "<a6fcd2442fb866867177acd414a548e6a39cfe7b975d1fb4f3a8249ca499aa9>k__BackingField";
 constexpr char kHashMpdY[] =
-    "<a89faf45ce0904cb1d7ea80c0ab36665fa6af2cbf756d3a96df0d80f9c84755>k__BackingField";
+    "<e6e9f7534c7873ef275b8322f860a8fab3fe54e149dfd0e968b8f8071778103>k__BackingField";
 constexpr char kHashMpdToMapId[] =
-    "<d547da7ecfe12bfed575b3255bbf24574763ce3b1eed394654fa14736e196f9>k__BackingField";
-// MapPortalData ????dump restore_field_map ? ????hash?offset??
+    "<c752ecd5869737e7695b94c3efc683bbc4add8ab1a158fbf0134d1abdcd7ece>k__BackingField";
+// MapPortalData 字段偏移未漂；hash remount 2026-08-06 dump.cs TypeDef 2079
 constexpr char kHashMpdPortalRect[] =
-    "<ad819f1db6df4cccb1842f1abad2969a7613d6965076de507173f8a75d1c9ab>k__BackingField";
+    "<b7eda6420d187bddc78bfa953700f2e07f13886728996dc99d8fa75b41d0a80>k__BackingField";
 constexpr char kHashMpdHRange[] =
-    "<d2be40bd4b4f5a643ae20d8c582ea4c7dc5349e9edb87c09c19bfb37c317189>k__BackingField";
+    "<ca5ca41653dfe9237dda1d3bae61d17374303c0ffc1fb14935cdfce335dbd6b>k__BackingField";
 constexpr char kHashMpdVRange[] =
-    "<a60aec2d99475a8c3fa14c908789d71bef49c3d131ddf358d78b979c4117035>k__BackingField";
+    "<af31f84bba631be21538593d480729aae05f73bd1d4a159a52971b7d7cb49b5>k__BackingField";
 constexpr char kHashMpdVImpact[] =
-    "<e9929d2059a510fa6d418f899db9f9cc9d7af56fe48c2fe1697add861f97952>k__BackingField";
+    "<f7253c0afdbbb613471491479ebf75a254b7b4fd456edf4ee2096c4eb41f950>k__BackingField";
 constexpr char kHashMpdHImpact[] =
-    "<b9fa99b3ffd3fdee2b4482cb905ced180565d34f42d80864bbb64e3df787586>k__BackingField";
+    "<a8112a6f65f4705a1c24feb059524b57d8932575337e639a021adb4adaeb348>k__BackingField";
 constexpr char kHashWmFieldKey[] =
-    "c1d14be8e70914fef7c7c4e723b2ec84991b1780e9264fe5b1dcc785203af5f";
+    "b4ba3b6c23175b5e7a2099cdc465f07c421273042694938c0193ea5be2a924c";  // = world_port
+// Packet base 13773 buffer/offset；SEND OutPacket 13775 id@0x20（非 InPacket backing）
 constexpr char kHashPacketBuffer[] =
-    "<c096dd8ffc6b9c4dc1a6458417487a3a0d8fb33676030af7deb507639a12e2b>k__BackingField";
+    "<f144fe8dbde79dea20d46b23b481b820339104f066fb33eda5c77a04363b872>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<f9bbb972b920d8265c641b982330d9a76a2a52c97dee9c9c8ed0a9030c1778c>k__BackingField";
+    "<a22ae0bd7de5fc24a4a31fea49b5261e154c755a12e02510fd592b6dc594841>k__BackingField";
 constexpr char kHashOutPacketId[] =
-    "a40d505bf94e3c9d0dbbc1dad4cfa27e37c562ef01c4fe5364e92e03c6f04af";
+    "e124ab3ffe08d49850755d299692770376cce0daf952029aeb0b5a6286398f2";
 constexpr char kHashUserVecCtrl[] =
-    "<dc76f5c9e250bc9a327a219b39e16c345cdabf7b01ad5c60b568045069c9120>k__BackingField";
+    "<acb8946a384ed398c4ad9268349397cf4f6e65cf136078ebc9aa26a949efd41>k__BackingField";
 constexpr char kHashVcAp[] =
-    "a860e652f11e3e8846eaf4dfb600e319058d3e0e9e79b3fd7a3447344d98bb9";
+    "e558fbd3da65bf13bea9360dfa61506af709ad89f925bc16b67e7e1cdb24107";
 constexpr char kHashVcApl[] =
-    "ddcaef33563d49269da8f9db8391866dfc59ec057b8cca4ffa15a5b38f271b3";
+    "b5eb27f6f80eeaea51f811969e3c5bc8a7b73b19741a8cb481b29a0082c958d";
 
 constexpr size_t kFbPortalData = 0x10, kFbMpdId = 0x10, kFbMpdType = 0x14, kFbMpdEnable = 0x18;
 constexpr size_t kFbMpdPName = 0x20, kFbMpdX = 0x28, kFbMpdY = 0x2C, kFbMpdToMapId = 0x30;
@@ -214,43 +211,67 @@ void EnsureTravelFieldOff() {
     gTravelFieldTried = true;
     void* mpd = x::runtime::il2cpp::FindClass("", kMapPortalDataClass);
     void* portal = x::runtime::il2cpp::FindClass("", kPortalClass);
+    // WorldManager hash（与 il2cpp_shape / world_port 同源）
+    constexpr char kWorldManagerClass[] =
+        "acda742ab51e7e2e3003fd2b44fbc00eababde4300ef17ac35b5f4fd01bee68";
     void* wm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+    if (!wm) wm = x::runtime::il2cpp::FindClass("", kWorldManagerClass);
     void* actor = x::runtime::il2cpp::FindClass("", kActorBaseClass);
     if (!actor) actor = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
     void* vc = x::runtime::il2cpp::FindClass("", kVecCtrlClass);
     void* pkt = x::runtime::il2cpp::FindClass("", kPacketClass);
-    if (!pkt) pkt = x::runtime::il2cpp::FindClass("", kOutPacketClass);
+    // OutPacket.id@0x20 只在 OutPacket 子类（TDI 13775），不在 Packet 基类
+    void* outPkt = x::runtime::il2cpp::FindClass("", kOutPacketClass);
+    if (!outPkt) outPkt = x::runtime::il2cpp::FindClass("", "OutPacket");
     int hits = 0;
-    auto hit = [&](bool ok) {
-        if (ok) ++hits;
+    char miss[96] = {};
+    size_t missN = 0;
+    auto hit = [&](bool ok, const char* tag) {
+        if (ok) {
+            ++hits;
+            return;
+        }
+        if (missN + 1 < sizeof(miss)) {
+            if (missN) miss[missN++] = ',';
+            for (const char* p = tag; *p && missN + 1 < sizeof(miss); ++p) miss[missN++] = *p;
+            miss[missN] = 0;
+        }
     };
-    hit(TravelFieldOffHit(portal, kHashPortalData, kFbPortalData, &gOffPortalData, 0x08, 0x40));
-    hit(TravelFieldOffHit(mpd, kHashMpdId, kFbMpdId, &gOffMpdId, 0x08, 0x40));
-    hit(TravelFieldOffHit(mpd, kHashMpdType, kFbMpdType, &gOffMpdType, 0x08, 0x40));
-    hit(TravelFieldOffHit(mpd, kHashMpdEnable, kFbMpdEnable, &gOffMpdEnable, 0x08, 0x40));
-    hit(TravelFieldOffHit(mpd, kHashMpdPName, kFbMpdPName, &gOffMpdPName, 0x10, 0x40));
-    hit(TravelFieldOffHit(mpd, kHashMpdX, kFbMpdX, &gOffMpdX, 0x18, 0x40));
-    hit(TravelFieldOffHit(mpd, kHashMpdY, kFbMpdY, &gOffMpdY, 0x18, 0x40));
-    hit(TravelFieldOffHit(mpd, kHashMpdToMapId, kFbMpdToMapId, &gOffMpdToMapId, 0x18, 0x40));
-    hit(TravelFieldOffHit(mpd, kHashMpdPortalRect, kFbMpdPortalRect, &gOffMpdPortalRect, 0x40, 0x90));
-    hit(TravelFieldOffHit(mpd, kHashMpdHRange, kFbMpdHRange, &gOffMpdHRange, 0x40, 0x90));
-    hit(TravelFieldOffHit(mpd, kHashMpdVRange, kFbMpdVRange, &gOffMpdVRange, 0x40, 0x90));
-    hit(TravelFieldOffHit(mpd, kHashMpdVImpact, kFbMpdVImpact, &gOffMpdVImpact, 0x40, 0x90));
-    hit(TravelFieldOffHit(mpd, kHashMpdHImpact, kFbMpdHImpact, &gOffMpdHImpact, 0x40, 0x90));
-    hit(TravelFieldOffHit(wm, kHashWmFieldKey, kFbWmFieldKey, &gOffWmFieldKey, 0x60, 0xA0));
-    hit(TravelFieldOffHit(pkt, kHashPacketBuffer, kFbPacketBuffer, &gOffPacketBuffer, 0x08, 0x40));
-    hit(TravelFieldOffHit(pkt, kHashPacketOffset, kFbPacketOffset, &gOffPacketOffset, 0x08, 0x40));
-    hit(TravelFieldOffHit(pkt, kHashOutPacketId, kFbOutPacketId, &gOffOutPacketId, 0x10, 0x40));
-    hit(TravelFieldOffHit(actor, kHashUserVecCtrl, kFbUserVecCtrl, &gOffUserVecCtrl, 0x40, 0x100));
-    hit(TravelFieldOffHit(vc, kHashVcAp, kFbVcAp, &gOffVcAp, 0x80, 0x100));
-    hit(TravelFieldOffHit(vc, kHashVcApl, kFbVcApl, &gOffVcApl, 0x80, 0x100));
+    hit(TravelFieldOffHit(portal, kHashPortalData, kFbPortalData, &gOffPortalData, 0x08, 0x40),
+        "portal");
+    hit(TravelFieldOffHit(mpd, kHashMpdId, kFbMpdId, &gOffMpdId, 0x08, 0x40), "mpdId");
+    hit(TravelFieldOffHit(mpd, kHashMpdType, kFbMpdType, &gOffMpdType, 0x08, 0x40), "mpdTy");
+    hit(TravelFieldOffHit(mpd, kHashMpdEnable, kFbMpdEnable, &gOffMpdEnable, 0x08, 0x40), "mpdEn");
+    hit(TravelFieldOffHit(mpd, kHashMpdPName, kFbMpdPName, &gOffMpdPName, 0x10, 0x40), "mpdPn");
+    hit(TravelFieldOffHit(mpd, kHashMpdX, kFbMpdX, &gOffMpdX, 0x18, 0x40), "mpdX");
+    hit(TravelFieldOffHit(mpd, kHashMpdY, kFbMpdY, &gOffMpdY, 0x18, 0x40), "mpdY");
+    hit(TravelFieldOffHit(mpd, kHashMpdToMapId, kFbMpdToMapId, &gOffMpdToMapId, 0x18, 0x40), "mpdTo");
+    hit(TravelFieldOffHit(mpd, kHashMpdPortalRect, kFbMpdPortalRect, &gOffMpdPortalRect, 0x40, 0x90),
+        "rect");
+    hit(TravelFieldOffHit(mpd, kHashMpdHRange, kFbMpdHRange, &gOffMpdHRange, 0x40, 0x90), "hRange");
+    hit(TravelFieldOffHit(mpd, kHashMpdVRange, kFbMpdVRange, &gOffMpdVRange, 0x40, 0x90), "vRange");
+    hit(TravelFieldOffHit(mpd, kHashMpdVImpact, kFbMpdVImpact, &gOffMpdVImpact, 0x40, 0x90), "vImp");
+    hit(TravelFieldOffHit(mpd, kHashMpdHImpact, kFbMpdHImpact, &gOffMpdHImpact, 0x40, 0x90), "hImp");
+    // FieldKey@0x80：与 WorldPort 同宽 plausible（避免过窄 range 误杀）
+    hit(TravelFieldOffHit(wm, kHashWmFieldKey, kFbWmFieldKey, &gOffWmFieldKey, 0x20, 0x200), "fk");
+    hit(TravelFieldOffHit(pkt, kHashPacketBuffer, kFbPacketBuffer, &gOffPacketBuffer, 0x08, 0x40),
+        "buf");
+    hit(TravelFieldOffHit(pkt, kHashPacketOffset, kFbPacketOffset, &gOffPacketOffset, 0x08, 0x40),
+        "off");
+    hit(TravelFieldOffHit(outPkt, kHashOutPacketId, kFbOutPacketId, &gOffOutPacketId, 0x10, 0x40),
+        "outId");
+    hit(TravelFieldOffHit(actor, kHashUserVecCtrl, kFbUserVecCtrl, &gOffUserVecCtrl, 0x40, 0x100),
+        "ulVc");
+    hit(TravelFieldOffHit(vc, kHashVcAp, kFbVcAp, &gOffVcAp, 0x80, 0x100), "ap");
+    hit(TravelFieldOffHit(vc, kHashVcApl, kFbVcApl, &gOffVcApl, 0x80, 0x100), "apl");
     constexpr int kExpect = 20;
     x::runtime::LogI("Travel",
                      "travel slots path=%s hits=%d/%d mpdId=0x%zX pn=0x%zX rect=0x%zX fk=0x%zX "
-                     "vc=0x%zX ap=0x%zX myUser=0x%zX",
+                     "vc=0x%zX ap=0x%zX apl=0x%zX outId=0x%zX myUser=0x%zX miss=%s",
                      hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits, kExpect,
                      gOffMpdId, gOffMpdPName, gOffMpdPortalRect, gOffWmFieldKey, gOffUserVecCtrl,
-                     gOffVcAp, x::ui::player::OffWmMyUser());
+                     gOffVcAp, gOffVcApl, gOffOutPacketId, x::ui::player::OffWmMyUser(),
+                     missN ? miss : "-");
 }
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
@@ -261,10 +282,6 @@ using FnCompGo = void* (*)(void* comp, void* method);
 using FnObjName = void* (*)(void* go, void* method);
 using FnClassGetMethods = void* (*)(void* klass, void** iter);
 using FnStrNew = void* (*)(const char* str);
-struct Vector3 {
-    float x, y, z;
-};
-using FnSetPos = void (*)(void* self, Vector3* value, const void* method);
 using FnCheckMovePortal = void (*)(void* self, const void* method);
 using FnOutCreate = void* (*)(int packetEnum, const void* method);
 using FnEncode1 = void (*)(void* self, uint8_t v, const void* method);
@@ -286,8 +303,6 @@ FnRuntimeClassInit gRuntimeClassInit = nullptr;
 FnClassGetMethods gClassGetMethods = nullptr;
 FnCompGo gCompGo = nullptr;
 FnObjName gObjName = nullptr;
-FnSetPos gSetPos = nullptr;
-MethodInfoHead* gMiSetPos = nullptr;
 FnStrNew gStrNew = nullptr;
 
 void* gPmKlass = nullptr;
@@ -309,14 +324,13 @@ DWORD gLastRebindMs = 0;
 
 // ??????????+ ?? CheckMovePortal????
 std::atomic<int> gFireMode{static_cast<int>(FireMode::DirectEnter)};
-// ???? Ap???? WaitStood????????????fh=0 ????BIN ???????
-constexpr DWORD kTeleportSettleMs = 80;
-constexpr DWORD kStandPollMs = 40;
-// BIN b71cfd: 400ms ??? native ?????? NOT_STOOD ?????
-constexpr DWORD kStandWaitMaxMs = 1200;
+// 已站门判定：无 rect 时用门坐标近距；有 rect 用 Strict 触发框。
 constexpr float kStandYTol = 12.f;
 constexpr float kStickNearR = 72.f;
-// WaitStood / ???????????fh snap ?? X ???? 8px??
+// Impact 远处贴门：分段冲量直到进触发区。
+constexpr DWORD kImpactStickMaxMs = 10000;
+constexpr DWORD kImpactStickPollMs = 50;
+// FindMovePortal 触发框松弛（pre-fire / PointInPortalRect）
 constexpr float kPortalRectSlop = 12.f;
 std::atomic<bool> gCaptureOn{false};
 std::atomic<bool> gCaptureInstalled{false};
@@ -346,91 +360,6 @@ uint16_t ReadU16(void* obj, size_t off) {
     }
 }
 
-MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
-    if (!klass || !rva) return nullptr;
-    const auto& ex = x::runtime::il2cpp::Get();
-    if (!ex.classGetMethods) return nullptr;
-    HMODULE ga = gGA ? gGA : ex.ga;
-    if (!ga) return nullptr;
-    void* target = reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(ga) + rva);
-    void* cur = klass;
-    for (int depth = 0; cur && depth < 8; ++depth) {
-        void* iter = nullptr;
-        __try {
-            for (;;) {
-                void* miRaw = ex.classGetMethods(cur, &iter);
-                if (!miRaw) break;
-                auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
-                void* mp = nullptr;
-                void* vp = nullptr;
-                __try {
-                    mp = mi->methodPointer;
-                    vp = mi->virtualMethodPointer;
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                    continue;
-                }
-                if (mp == target || vp == target) return mi;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            return nullptr;
-        }
-        if (!ex.classParent) break;
-        void* parent = nullptr;
-        __try {
-            parent = ex.classParent(cur);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            parent = nullptr;
-        }
-        if (!parent || parent == cur) break;
-        cur = parent;
-    }
-    return nullptr;
-}
-
-MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
-    if (!klass || !name) return nullptr;
-    const auto& e = x::runtime::il2cpp::Get();
-    MethodInfoHead* mi = nullptr;
-    if (e.classGetMethodFromName) {
-        const int tryArgc[] = {argc, -1};
-        for (int ac : tryArgc) {
-            __try {
-                mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, ac));
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                mi = nullptr;
-            }
-            if (mi && mi->methodPointer) return mi;
-        }
-    }
-    if (!e.classGetMethods || !e.methodGetName) return nullptr;
-    void* cur = klass;
-    for (int depth = 0; cur && depth < 8; ++depth) {
-        void* iter = nullptr;
-        __try {
-            for (;;) {
-                void* raw = e.classGetMethods(cur, &iter);
-                if (!raw) break;
-                const char* nm = e.methodGetName(raw);
-                if (nm && strcmp(nm, name) == 0) {
-                    mi = reinterpret_cast<MethodInfoHead*>(raw);
-                    if (mi && mi->methodPointer) return mi;
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-        if (!e.classParent) break;
-        void* parent = nullptr;
-        __try {
-            parent = e.classParent(cur);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            parent = nullptr;
-        }
-        if (!parent || parent == cur) break;
-        cur = parent;
-    }
-    return nullptr;
-}
-
 // hash ??plain ??RVA/kind?FindMethodResolved SSOT???
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
@@ -442,29 +371,6 @@ MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
         x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plainName, hashName);
     if (outPath) *outPath = mr.path;
     return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
-}
-
-// Unity ??????FindMethodResolved = ?? ? RVA/kind?set_position ??????
-MethodInfoHead* ResolveUnityMi(void* klass, uint32_t rva, const char* plain,
-                               const x::runtime::il2cpp_method::MethodShape& shape,
-                               x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
-    if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
-    if (!klass) return nullptr;
-    const auto mr =
-        x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, nullptr);
-    if (outPath) *outPath = mr.path;
-    if (mr.method && mr.path == x::runtime::il2cpp_method::ResolvePath::Kind) {
-        x::runtime::LogI("Travel", "ResolveUnityMi kind hit rva=0x%X plain=%s", rva,
-                         plain ? plain : "-");
-    }
-    if (mr.method) return reinterpret_cast<MethodInfoHead*>(mr.method);
-    return FindMethodByRva(klass, rva);
-}
-
-template <typename Fn>
-Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
-    if (mi && mi->methodPointer) return reinterpret_cast<Fn>(mi->methodPointer);
-    return AtRva<Fn>(rva);
 }
 
 bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
@@ -541,14 +447,6 @@ uint8_t ReadU8(void* obj, size_t off) {
     }
 }
 
-void WriteF64(void* obj, size_t off, double v) {
-    if (!obj) return;
-    __try {
-        *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(obj) + off) = v;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-}
-
 double ReadF64(void* obj, size_t off) {
     if (!obj) return 0.0;
     __try {
@@ -591,19 +489,6 @@ bool ReadIl2CppString(void* strObj, char* out, int outSz) {
         }
         out[n] = 0;
         return n > 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-bool GetGoName(void* comp, char* out, int outSz) {
-    if (!comp || !out || outSz <= 0 || !gCompGo || !gObjName) return false;
-    out[0] = 0;
-    __try {
-        void* go = gCompGo(comp, nullptr);
-        if (!go) return false;
-        void* nameObj = gObjName(go, nullptr);
-        return ReadIl2CppString(nameObj, out, outSz);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
@@ -668,45 +553,6 @@ bool ResolveApi() {
         gClassGetMethods = e.classGetMethods;
         gStrNew = reinterpret_cast<FnStrNew>(e.stringNew);
     }
-
-    using x::runtime::il2cpp_method::MethodShape;
-    using x::runtime::il2cpp_method::TypeKind;
-    // ??????????set_position????exports ?????????TravelPos ????
-    if (!gMiSetPos) {
-        void* tfKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Transform");
-        if (tfKlass) {
-            constexpr MethodShape kSet{1, TypeKind::Void, false, true, {TypeKind::Any}};
-            gMiSetPos = ResolveUnityMi(tfKlass, kRvaTfSetPos, "set_position", kSet);
-        }
-    }
-    gSetPos = FnFromMi<FnSetPos>(gMiSetPos, kRvaTfSetPos);
-    // TravelPos ??????????????teleport???????????????
-    if (gMiSetPos) {
-        static bool sLoggedOk = false;
-        if (!sLoggedOk) {
-            x::runtime::LogI("Travel", "unity methods path=plain hits=1/1 set_position mi=%p rva=0x%X",
-                             gMiSetPos, kRvaTfSetPos);
-            sLoggedOk = true;
-        }
-        x::runtime::anchor_lamps::Set("TravelPos", x::runtime::anchor_lamps::AnchorLampCode::Ok,
-                                     "set_position MI");
-    } else if (gSetPos) {
-        static bool sLoggedDeg = false;
-        if (!sLoggedDeg) {
-            x::runtime::LogW("Travel", "set_position MI miss ??RVA 0x%X fallback", kRvaTfSetPos);
-            sLoggedDeg = true;
-        }
-        x::runtime::anchor_lamps::Set("TravelPos",
-                                     x::runtime::anchor_lamps::AnchorLampCode::Degraded, "RVA");
-    } else {
-        static bool sLoggedMiss = false;
-        if (!sLoggedMiss) {
-            x::runtime::LogW("Travel", "set_position resolve fail");
-            sLoggedMiss = true;
-        }
-        x::runtime::anchor_lamps::Set("TravelPos", x::runtime::anchor_lamps::AnchorLampCode::Miss,
-                                     "MISS");
-    }
     return gFindAll && gClassGetMethods;
 }
 
@@ -737,7 +583,9 @@ bool RebindManagers(DWORD now) {
     }
 
     gPm = ResolveSingleton(gPmKlass);
-    if (!gPm && gPmType && gFindAll) {
+    // InterStage：禁 FindAll；Singleton / WM.MyUser 仍可轻量绑。
+    const bool allowFindAll = world::IsPlayReady();
+    if (!gPm && allowFindAll && gPmType && gFindAll) {
         void* arr = x::runtime::managed_main::FindAll(gFindAll, gPmType, 1500);
         const int n = arr ? static_cast<int>(
                                 *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) +
@@ -760,7 +608,7 @@ bool RebindManagers(DWORD now) {
         void* mu = ReadPtr(gWm, kOffWmMyUser);
         if (LooksLikeHeapPtr(mu)) gLocalUser = mu;
     }
-    if (!gLocalUser && gLuType && gFindAll) {
+    if (!gLocalUser && allowFindAll && gLuType && gFindAll) {
         void* arr = x::runtime::managed_main::FindAll(gFindAll, gLuType, 1500);
         const int n = arr ? static_cast<int>(
                                 *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + kOffArrLen))
@@ -768,17 +616,15 @@ bool RebindManagers(DWORD now) {
         for (int i = 0; i < n && i < 32; ++i) {
             void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + kOffArrData +
                                                 static_cast<size_t>(i) * sizeof(void*));
-            if (!LooksLikeHeapPtr(o)) continue;
-            char name[64]{};
-            if (GetGoName(o, name, sizeof(name)) && strcmp(name, "MyUser") == 0) {
-                gLocalUser = o;
-                break;
-            }
+            // FindAll 在泵上跑完后仍回到 worker：禁 GetGoName（GC unknown thread）。
+            if (!LooksLikeHeapPtr(o) || !ReadPtr(o, 0) || !ReadPtr(o, 0x10)) continue;
+            gLocalUser = o;
+            break;
         }
     }
 
     void* facade = ResolveSingleton(gFacadeKlass);
-    if (!facade && gFacadeType && gFindAll) {
+    if (!facade && allowFindAll && gFacadeType && gFindAll) {
         void* arr = x::runtime::managed_main::FindAll(gFindAll, gFacadeType, 1500);
         const int n = arr ? static_cast<int>(
                                 *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + kOffArrLen))
@@ -825,10 +671,10 @@ bool RebindManagers(DWORD now) {
                                      kHashOutCreate, &pCreate);
             note(pCreate);
         }
-        // Encode1(sbyte) dump ???EncodeStr(string) ???????????
+        // Encode1(byte) / EncodeStr(string) — SEND OutPacket 13775
         constexpr MethodShape kEnc{1, TypeKind::Void, true, false, {TypeKind::Any}};
         if (!gMiEncode1) {
-            gMiEncode1 = ResolveMi(gOutPacketKlass, kRvaOutPacketEncode1Byte, kEnc, nullptr,
+            gMiEncode1 = ResolveMi(gOutPacketKlass, kRvaOutPacketEncode1Byte, kEnc, "Encode1",
                                    kHashEncode1, &pEnc);
             note(pEnc);
         }
@@ -1044,43 +890,15 @@ bool FillFromData(void* data, const std::string& mapKey, PortalInfo& out) {
     return true;
 }
 
-bool WarpLocalUser(float x, float y) {
-    if (!LooksLikeHeapPtr(gLocalUser)) return false;
-    void* vc = ReadPtr(gLocalUser, kOffUserVecCtrl);
-    if (!LooksLikeHeapPtr(vc)) return false;
-    WriteF64(vc, kOffVcApX, x);
-    WriteF64(vc, kOffVcApY, y);
-    WriteF64(vc, kOffVcAplX, x);
-    WriteF64(vc, kOffVcAplY, y);
-    // Transform SetPos if available
-    if (gSetPos && gCompGo) {
-        __try {
-            void* go = gCompGo(gLocalUser, nullptr);
-            if (LooksLikeHeapPtr(go)) {
-                // Transform often @ Component+0x10 ??wait, Unity Component has m_CachedPtr;
-                // LocalUser may hold Transform separately. Skip if unclear ??AbsPos is enough for
-                // many portal proximity checks.
-                (void)go;
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-    }
-    return true;
-}
-
 }  // namespace
 
 bool EnsureBound() { return RebindManagers(GetTickCount()); }
 
 void Init() {
-    // ???? set_position??????????EnsureBound??
-    const bool api = ResolveApi();
-    if (gMiSetPos) {
-        x::runtime::LogI("Travel", "port init api ready setPosMi=1");
-    } else if (api && gSetPos) {
-        x::runtime::LogW("Travel", "port init set_position degraded (RVA; MI pending upgrade)");
+    if (ResolveApi()) {
+        x::runtime::LogI("Travel", "port init api ready");
     } else {
-        x::runtime::LogW("Travel", "port init ResolveApi incomplete setPosMi=0");
+        x::runtime::LogW("Travel", "port init ResolveApi incomplete");
     }
 }
 
@@ -1171,9 +989,6 @@ bool FirePortalByName(const std::string& portalName, std::string& outResult) {
 
 struct FireJob {
     FireMode mode = FireMode::Up;
-    bool warpFirst = true;
-    float x = 0.f;
-    float y = 0.f;
     char name[96]{};
     uint8_t fieldKey = 0;
     bool ok = false;
@@ -1209,21 +1024,12 @@ void FireJobOnMain(void* user) {
     auto* job = reinterpret_cast<FireJob*>(user);
     if (!job) return;
     __try {
-        // TeleportStick / DirectEnter??????teleport_port ??worker ????????????
-        // Up / CheckMove???? AbsPos ????????Doing ??????
-        const bool productEnter = (job->mode == FireMode::TeleportStick ||
-                                   job->mode == FireMode::DirectEnter);
-        if (job->warpFirst && !productEnter) {
-            if (!WarpLocalUser(job->x, job->y)) {
-                snprintf(job->result, sizeof(job->result), "NO_LOCALUSER");
-                return;
-            }
-        }
-
-        if (job->mode == FireMode::Up || job->mode == FireMode::TeleportStick) {
+        // Impact 贴门已在 worker 侧完成；此处只触发 CheckMove/↑ / Rpc。
+        // 禁止 AbsPos/Transform 硬写坐标；禁止 fill+Doing。
+        if (job->mode == FireMode::Up || job->mode == FireMode::StickUp) {
             job->ok = CallUpKey(job->result, sizeof(job->result));
-            if (job->ok && job->mode == FireMode::TeleportStick)
-                snprintf(job->result, sizeof(job->result), "FIRED_TP_STICK");
+            if (job->ok && job->mode == FireMode::StickUp)
+                snprintf(job->result, sizeof(job->result), "FIRED_STICK_UP");
             return;
         }
 
@@ -1234,7 +1040,7 @@ void FireJobOnMain(void* user) {
             return;
         }
 
-        // Rpc?Create(114) + Encode1(fieldKey) + EncodeStr(pn) + Send
+        // Rpc：Create(114) + Encode1(fieldKey) + EncodeStr(pn) + Send
         if (!gNm || !gMiOutCreate || !gMiEncodeStr || !gMiSend || !gStrNew) {
             snprintf(job->result, sizeof(job->result), "NO_RPC_API");
             return;
@@ -1268,7 +1074,7 @@ void FireJobOnMain(void* user) {
     }
 }
 
-// teleport_port::TeleportNativeSkillCall ?? InvokeAndWait????? FireJobOnMain ???????
+// 读 LocalUser.VecCtrl.Ap（worker 可调；必要时 RebindManagers）。
 bool ReadLocalAp(float& outX, float& outY) {
     if (!LooksLikeHeapPtr(gLocalUser)) {
         // ?? worker ??????MyUser??????
@@ -1282,61 +1088,58 @@ bool ReadLocalAp(float& outX, float& outY) {
     return true;
 }
 
-// Wait until Ap is near stand (and inside portal trigger when rectValid).
-// Without inRect, stick can succeed while pre-fire OUT_OF_RECT loops (Bugbot).
-bool WaitStoodNearStand(float standX, float standY, uint32_t expectFh, const PortalInfo* portal,
-                        std::string& outResult) {
-    const DWORD t0 = GetTickCount();
-    for (;;) {
-        if (!world::IsInMapScene() || !world::IsPlayReady()) {
-            outResult = "MAP_TRANSITION";
-            return true;
-        }
-        float ax = 0.f, ay = 0.f;
-        if (ReadLocalAp(ax, ay)) {
-            const uint32_t curFh = foothold::PeekCurFhId();
-            const float dx = ax - standX;
-            const float dy = ay - standY;
-            const bool geoOk =
-                std::fabs(dy) <= kStandYTol && (dx * dx + dy * dy) <= (kStickNearR * kStickNearR);
-            const bool rectOk = !portal || PointInPortalRect(*portal, ax, ay);
-            if (geoOk && rectOk) {
-                outResult = "OK";
-                (void)expectFh;
-                (void)curFh;
-                return true;
-            }
-        }
-        if (GetTickCount() - t0 >= kStandWaitMaxMs) break;
-        Sleep(kStandPollMs);
-    }
-    outResult = "NOT_STOOD";
+bool AlreadyStoodAtPortal(const PortalInfo& portal) {
     float ax = 0.f, ay = 0.f;
-    const bool gotAp = ReadLocalAp(ax, ay);
-    x::runtime::LogW("Travel",
-                     "stand wait timeout near=(%.0f,%.0f) expectFh=%u curFh=%u ap=(%.0f,%.0f) "
-                     "gotAp=%d inRect=%d",
-                     standX, standY, (unsigned)expectFh, (unsigned)foothold::PeekCurFhId(),
-                     gotAp ? ax : 0.f, gotAp ? ay : 0.f, gotAp ? 1 : 0,
-                     (gotAp && portal) ? (PointInPortalRect(*portal, ax, ay) ? 1 : 0) : -1);
-    return false;
+    if (!ReadLocalAp(ax, ay)) return false;
+    if (portal.rectValid) return PointInPortalRectStrict(portal, ax, ay);
+    const float dx = ax - portal.x;
+    const float dy = ay - portal.y;
+    return std::fabs(dy) <= kStandYTol &&
+           (dx * dx + dy * dy) <= (kStickNearR * kStickNearR);
 }
 
-bool TeleportToPortal(const PortalInfo& portal, std::string& outResult, float* outSx, float* outSy) {
+// Impact 贴门（仅 travel）：Snap 后分段 toward；掠过触发区当拍 CheckMove/↑，不要求刹停。
+// 不改 teleport_port / fly / combat 的默认 opts 或公共 API。
+bool TryFireEnterOnMain(FireMode mode, std::string& outResult) {
+    FireJob job{};
+    job.mode = mode;
+    job.fieldKey = gWm ? ReadU8(gWm, kOffWmFieldKey) : 0;
+    if (mode == FireMode::Up) {
+        FireJobOnMain(&job);
+    } else if (!x::runtime::managed_main::Call(&FireJobOnMain, &job, 2500)) {
+        outResult = "MAIN_TIMEOUT";
+        return false;
+    }
+    if (!world::IsInMapScene() || !world::IsPlayReady()) {
+        outResult = "MAP_TRANSITION";
+        return true;
+    }
+    outResult = job.result;
+    return job.ok;
+}
+
+bool InPortalTrigger(const PortalInfo& portal) {
+    // 与引擎进门一致：有框用触发框（含 slop）；无框退回近距站立判定。
+    float ax = 0.f, ay = 0.f;
+    if (!ReadLocalAp(ax, ay)) return false;
+    if (portal.rectValid) return PointInPortalRect(portal, ax, ay);
+    return AlreadyStoodAtPortal(portal);
+}
+
+bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::string& outResult,
+                         float* outSx, float* outSy) {
     float aimX = portal.x;
     float aimY = portal.y;
     if (portal.rectValid) {
-        // ???????????????????? FindMovePortal ????
         if (!PointInPortalRect(portal, aimX, aimY)) ClampIntoPortalRect(portal, aimX, aimY);
     }
     if (outSx) *outSx = aimX;
     if (outSy) *outSy = aimY;
-    // ??????????/ ??PlayReady ?????????? Doing??
+
     if (!world::IsInMapScene() || !world::IsPlayReady()) {
         outResult = "NOT_PLAY_READY";
         return false;
     }
-    // BIN 15:57?scene ??Map ??MyUser ????Doing ?????????? Ap
     float luX = 0.f, luY = 0.f;
     if (!ReadLocalAp(luX, luY)) {
         outResult = "NO_LOCALUSER";
@@ -1344,13 +1147,7 @@ bool TeleportToPortal(const PortalInfo& portal, std::string& outResult, float* o
     }
     (void)luX;
     (void)luY;
-    if (!ports::teleport::EnsureBound()) {
-        outResult = "TELEPORT_UNBOUND";
-        return false;
-    }
 
-    // BIN 07:26: forbid fh=0 stick. Portal: Walk chain covering door, then flattest
-    // segment intersecting PortalRect, SnapOnFh.
     float standX = aimX, standY = aimY;
     uint32_t fh = 0;
     if (!ports::foothold_path::SnapStandForPortal(aimX, aimY, portal.rectL, portal.rectT,
@@ -1358,13 +1155,12 @@ bool TeleportToPortal(const PortalInfo& portal, std::string& outResult, float* o
                                                  &standX, &standY, &fh) ||
         fh == 0) {
         outResult = "FH0_FORBID";
-        x::runtime::LogW("Travel", "teleport forbid fh=0 portal=(%.0f,%.0f) aim=(%.0f,%.0f) "
-                                   "snap=(%.0f,%.0f)",
+        x::runtime::LogW("Travel",
+                         "impact stick forbid fh=0 portal=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                         "snap=(%.0f,%.0f)",
                          portal.x, portal.y, aimX, aimY, standX, standY);
         return false;
     }
-    // Snap may land outside trigger rect (BIN b71cfd). Prefer portal center X,
-    // re-pick on same chain+rect rules, then force X into rect if still out.
     if (portal.rectValid && !PointInPortalRectStrict(portal, standX, standY)) {
         const float beforeX = standX, beforeY = standY;
         float targetX = portal.x;
@@ -1384,10 +1180,8 @@ bool TeleportToPortal(const PortalInfo& portal, std::string& outResult, float* o
             standY = portal.y;
         }
         if (!PointInPortalRectStrict(portal, standX, standY)) {
-            // Keep Y/fh from last snap; pin X to portal center (or rect edge).
             standX = targetX;
             ClampIntoPortalRect(portal, standX, standY);
-            // Re-pin onto chosen FH so X clamp does not slide onto a slope neighbor.
             float sx3 = standX, sy3 = standY;
             if (fh != 0 &&
                 ports::foothold_path::SnapOnFh(fh, standX, &sx3, &sy3,
@@ -1401,8 +1195,8 @@ bool TeleportToPortal(const PortalInfo& portal, std::string& outResult, float* o
             }
         }
         x::runtime::LogW("Travel",
-                         "snap clamp name=%s before=(%.0f,%.0f) after=(%.0f,%.0f) rect=(%.0f,%.0f)-"
-                         "(%.0f,%.0f) in=%d",
+                         "impact snap clamp name=%s before=(%.0f,%.0f) after=(%.0f,%.0f) "
+                         "rect=(%.0f,%.0f)-(%.0f,%.0f) in=%d",
                          portal.name.c_str(), beforeX, beforeY, standX, standY, portal.rectL,
                          portal.rectT, portal.rectR, portal.rectB,
                          PointInPortalRectStrict(portal, standX, standY) ? 1 : 0);
@@ -1411,147 +1205,96 @@ bool TeleportToPortal(const PortalInfo& portal, std::string& outResult, float* o
     if (outSy) *outSy = standY;
 
     x::runtime::LogI("Travel",
-                     "stick aim name=%s portal=(%.0f,%.0f) rect=%d (%.0f,%.0f)-(%.0f,%.0f) "
-                     "stand=(%.0f,%.0f) fh=%u inRect=%d",
-                     portal.name.c_str(), portal.x, portal.y, portal.rectValid ? 1 : 0, portal.rectL,
-                     portal.rectT, portal.rectR, portal.rectB, standX, standY, (unsigned)fh,
-                     PointInPortalRect(portal, standX, standY) ? 1 : 0);
+                     "impact stick aim name=%s portal=(%.0f,%.0f) rect=%d "
+                     "(%.0f,%.0f)-(%.0f,%.0f) stand=(%.0f,%.0f) fh=%u",
+                     portal.name.c_str(), portal.x, portal.y, portal.rectValid ? 1 : 0,
+                     portal.rectL, portal.rectT, portal.rectR, portal.rectB, standX, standY,
+                     (unsigned)fh);
 
-    // snapStand=false when rectValid: Native must not re-Snap (BIN b71cfd bounce).
-    // BIN bbda00 101010000/west00: fill lands inRect then foothold slides Ap to
-    // (-1591) outside ?20 box within ~1s ? NOT_STOOD fuse. Re-pin ASAP and
-    // proceed as soon as Ap is strictly inRect (do not wait full stood window).
-    ports::teleport::SetNativeCooldownMs(80);
-    const bool reSnap = !portal.rectValid;
-    constexpr int kRepinMax = 4;
-    constexpr DWORD kQuickInRectMs = 280;
-    bool stoodOk = false;
-    for (int pin = 0; pin < kRepinMax; ++pin) {
-        if (pin > 0) {
-            if (!portal.rectValid) break;
-            ports::teleport::ClearNativeSelfCd();
-            ports::teleport::SetNativeCooldownMs(50);
-            x::runtime::LogW("Travel", "re-pin name=%s pin=%d stand=(%.0f,%.0f) fh=%u",
-                             portal.name.c_str(), pin, standX, standY, (unsigned)fh);
+    if (!x::features::invuln::IsEnabled()) {
+        outResult = "INVULN_OFF";
+        x::runtime::LogW("Travel", "impact stick refuse invuln_off name=%s", portal.name.c_str());
+        return false;
+    }
+
+    const auto route = x::features::fly::GetMode() == 1u
+                           ? ports::teleport::ImpactRoute::SetImpactNext
+                           : ports::teleport::ImpactRoute::NockBack;
+    // 仅本循环本地 opts：近距 soft-brake，不改 fly/combat 默认。
+    ports::teleport::ImpactTowardOpts opts{};
+    opts.quietLog = true;
+    opts.adaptive = true;
+    opts.leadSec = 0.f;
+    opts.maxSegPx = 320.f;
+    opts.minSegPx = 8.f;
+    opts.maxSpeed = 1600.f;
+    opts.speedScale = 4.f;
+
+    const DWORD t0 = GetTickCount();
+    int failStreak = 0;
+    int hopN = 0;
+    for (;;) {
+        if (!world::IsInMapScene() || !world::IsPlayReady()) {
+            outResult = "MAP_TRANSITION";
+            x::runtime::LogI("Travel", "impact stick map transition name=%s hops=%d",
+                             portal.name.c_str(), hopN);
+            return true;
         }
-        if (!ports::teleport::TeleportNativeSkillCall(standX, standY, fh, /*snapStand=*/reSnap)) {
-            outResult = "TELEPORT_FAIL";
+        // 掠过即火：进触发区当拍开火，本拍不再 toward（避免残速把人推出框后再二次判定）。
+        if (InPortalTrigger(portal)) {
+            float ax = 0.f, ay = 0.f;
+            (void)ReadLocalAp(ax, ay);
+            x::runtime::LogI("Travel",
+                             "impact stick glide-fire name=%s ap=(%.0f,%.0f) stand=(%.0f,%.0f) "
+                             "hops=%d mode=%s",
+                             portal.name.c_str(), ax, ay, standX, standY, hopN,
+                             FireModeName(enterMode));
+            return TryFireEnterOnMain(enterMode, outResult);
+        }
+        if (GetTickCount() - t0 >= kImpactStickMaxMs) {
+            outResult = "NOT_STOOD";
+            float ax = 0.f, ay = 0.f;
+            const bool got = ReadLocalAp(ax, ay);
+            x::runtime::LogW("Travel",
+                             "impact stick timeout name=%s ap=(%.0f,%.0f) stand=(%.0f,%.0f) "
+                             "hops=%d failStreak=%d",
+                             portal.name.c_str(), got ? ax : 0.f, got ? ay : 0.f, standX, standY,
+                             hopN, failStreak);
             return false;
         }
-        if (!world::IsInMapScene() || !world::IsPlayReady()) {
-            outResult = "MAP_TRANSITION";
-            return true;
-        }
-        Sleep(portal.rectValid ? 20 : kTeleportSettleMs);
-        if (!world::IsInMapScene() || !world::IsPlayReady()) {
-            outResult = "MAP_TRANSITION";
-            return true;
-        }
 
-        const DWORD t0 = GetTickCount();
-        for (;;) {
-            if (!world::IsInMapScene() || !world::IsPlayReady()) {
-                outResult = "MAP_TRANSITION";
-                return true;
+        if (!ports::teleport::ImpactImpulseToward(standX, standY, route, opts)) {
+            ++failStreak;
+            if (failStreak >= 8) {
+                outResult = "IMPACT_STICK_FAIL";
+                x::runtime::LogW("Travel",
+                                 "impact stick fail name=%s streak=%d hops=%d route=%u",
+                                 portal.name.c_str(), failStreak, hopN,
+                                 static_cast<unsigned>(route));
+                return false;
             }
-            float ax = 0.f, ay = 0.f;
-            if (ReadLocalAp(ax, ay)) {
-                if (portal.rectValid) {
-                    // CheckMove needs engine trigger; fire as soon as Ap is inside.
-                    if (PointInPortalRectStrict(portal, ax, ay)) {
-                        x::runtime::LogI("Travel",
-                                         "stood name=%s ap=(%.0f,%.0f) inRect=1 pin=%d",
-                                         portal.name.c_str(), ax, ay, pin);
-                        stoodOk = true;
-                        break;
-                    }
-                } else {
-                    const float dx = ax - standX;
-                    const float dy = ay - standY;
-                    const bool nearStand =
-                        std::fabs(dy) <= kStandYTol &&
-                        (dx * dx + dy * dy) <= (kStickNearR * kStickNearR);
-                    if (nearStand) {
-                        x::runtime::LogI("Travel",
-                                         "stood name=%s ap=(%.0f,%.0f) inRect=1 pin=%d",
-                                         portal.name.c_str(), ax, ay, pin);
-                        stoodOk = true;
-                        break;
-                    }
-                }
-            }
-            if (GetTickCount() - t0 >= (portal.rectValid ? kQuickInRectMs : kStandWaitMaxMs))
-                break;
-            Sleep(kStandPollMs);
+        } else {
+            failStreak = 0;
+            ++hopN;
         }
-        if (stoodOk) break;
-
-        float ax = 0.f, ay = 0.f;
-        if (ReadLocalAp(ax, ay)) {
-            x::runtime::LogW("Travel",
-                             "post-tp drift name=%s pin=%d ap=(%.0f,%.0f) stand=(%.0f,%.0f) "
-                             "inStrict=%d",
-                             portal.name.c_str(), pin, ax, ay, standX, standY,
-                             PointInPortalRectStrict(portal, ax, ay) ? 1 : 0);
-        }
-        // BIN d1a58e / bbda00 west00?fill ? Walk ?? Ap ???????????????
-        if (portal.rectValid) {
-            struct LatchJob {
-                bool ok = false;
-            } latch{};
-            auto latchFn = [](void* p) {
-                auto* j = static_cast<LatchJob*>(p);
-                if (!j) return;
-                j->ok = ports::teleport::ClearMotionLatchMainThread();
-            };
-            (void)x::runtime::main_thread::Ensure();
-            (void)x::runtime::main_thread::InvokeAndWait(
-                latchFn, &latch, 80, x::runtime::main_thread::JobPrio::High);
-        }
-        if (!portal.rectValid) break;
+        Sleep(kImpactStickPollMs);
     }
-
-    if (!stoodOk) {
-        if (!WaitStoodNearStand(standX, standY, fh, &portal, outResult)) return false;
-    }
-    if (outSx) *outSx = standX;
-    if (outSy) *outSy = standY;
-    return true;
 }
 
-// ?????????????????????Doing????fh=0 ????????
-bool StickThenEnterReady(const PortalInfo& portal, std::string& outResult) {
-    const std::string mapBefore = CurrentMapKey();
-    float sx = portal.x, sy = portal.y;
-
-    auto acceptStuck = [&]() -> bool {
-        const std::string mapAfter = CurrentMapKey();
-        if (!mapBefore.empty() && !mapAfter.empty() && mapAfter != mapBefore) {
-            outResult = "MAP_CHANGED";
-            return true;
+// 已在门内：返回 OK，由 FirePortal 补一枪（无惯性问题）。
+// 远处：冲量掠过触发区当拍开火，outResult 已是 FIRED_* / MAP_*。
+bool StickThenEnterReady(const PortalInfo& portal, FireMode enterMode, std::string& outResult) {
+    if (AlreadyStoodAtPortal(portal) || InPortalTrigger(portal)) {
+        outResult = "OK";
+        float ax = 0.f, ay = 0.f;
+        if (ReadLocalAp(ax, ay)) {
+            x::runtime::LogI("Travel",
+                             "stick skip-impact already_in name=%s ap=(%.0f,%.0f)",
+                             portal.name.c_str(), ax, ay);
         }
-        outResult = "STUCK";
-        return true;
-    };
-
-    if (!TeleportToPortal(portal, outResult, &sx, &sy)) {
-        if (outResult != "NOT_STOOD") return false;
-    } else if (outResult == "MAP_TRANSITION") {
-        x::runtime::LogI("Travel", "stick ??map transition name=%s", portal.name.c_str());
-        return true;
-    } else {
-        return acceptStuck();
-    }
-
-    if (!world::IsPlayReady()) {
-        outResult = "MAP_TRANSITION";
         return true;
     }
-    x::runtime::LogW("Travel", "re-stick name=%s (not_stood)", portal.name.c_str());
-    float sx2 = sx, sy2 = sy;
-    if (!TeleportToPortal(portal, outResult, &sx2, &sy2)) return false;
-    if (outResult == "MAP_TRANSITION") return true;
-    return acceptStuck();
+    return ImpactStickToPortal(portal, enterMode, outResult, nullptr, nullptr);
 }
 
 bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string& outResult) {
@@ -1568,24 +1311,23 @@ bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string
     }
     // ?????Enable ??????????????????????????DISABLED??
     if (warpFirst && !p.activate && mode != FireMode::Rpc &&
-        mode != FireMode::TeleportStick && mode != FireMode::DirectEnter) {
+        mode != FireMode::StickUp && mode != FireMode::DirectEnter) {
         outResult = "PORTAL_DISABLED";
         return false;
     }
 
-    // ?????worker ???????????????????????
-    if ((mode == FireMode::TeleportStick || mode == FireMode::DirectEnter) && warpFirst) {
-        // ?????ForceNative ??????????Doing?BIN 16:11?????????? ??205??
-        const uint32_t rem = ports::teleport::NativeCooldownRemainingMs();
-        if (rem > 0) {
-            outResult = "TELEPORT_COOLDOWN";
-            return false;
-        }
-        if (!StickThenEnterReady(p, outResult)) return false;
-        // ????????????CheckMove?WM/LU ??????
+    // 产品贴门：已在门内 → 下面补火；远处冲量掠过 → Stick 内已开火。
+    if ((mode == FireMode::StickUp || mode == FireMode::DirectEnter) && warpFirst) {
+        if (!StickThenEnterReady(p, mode, outResult)) return false;
         if (outResult == "MAP_TRANSITION" || outResult == "MAP_CHANGED") {
             x::runtime::LogI("Travel", "skip CheckMove (%s) name=%s", outResult.c_str(),
                              portalName.c_str());
+            return true;
+        }
+        // 掠过当拍已开火：勿再二次 inRect（残速易 OUT_OF_RECT）也勿再排队一枪。
+        if (outResult.rfind("FIRED_", 0) == 0) {
+            x::runtime::LogI("Travel", "glide-fire done name=%s res=%s", portalName.c_str(),
+                             outResult.c_str());
             return true;
         }
         if (!world::IsPlayReady()) {
@@ -1601,8 +1343,6 @@ bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string
                              "pre-fire name=%s ap=(%.0f,%.0f) rect=%d inRect=%d mode=%s",
                              portalName.c_str(), apX, apY, p.rectValid ? 1 : 0, inRect ? 1 : 0,
                              FireModeName(mode));
-            // CheckMove/Up miss silently when outside FindMovePortal rect ? do not
-            // report FIRED (uniqueBridge soft-fail). Retry via transient OUT_OF_RECT.
             if (p.rectValid && !inRect) {
                 outResult = "OUT_OF_RECT";
                 x::runtime::LogW("Travel",
@@ -1617,11 +1357,6 @@ bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string
 
     FireJob job{};
     job.mode = mode;
-    // ??????????????AbsPos ??
-    job.warpFirst =
-        warpFirst && !(mode == FireMode::TeleportStick || mode == FireMode::DirectEnter);
-    job.x = p.x;
-    job.y = p.y;
     job.fieldKey = gWm ? ReadU8(gWm, kOffWmFieldKey) : 0;
     strncpy_s(job.name, portalName.c_str(), _TRUNCATE);
 
@@ -1653,7 +1388,7 @@ const char* FireModeName(FireMode mode) {
         return "check";
     case FireMode::Rpc:
         return "rpc";
-    case FireMode::TeleportStick:
+    case FireMode::StickUp:
         return "stick";
     case FireMode::DirectEnter:
         return "direct";

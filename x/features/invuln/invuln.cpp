@@ -1,15 +1,15 @@
-// TWMS Classic — data-plane invuln v2.6.4 (remount 2026-08-03).
+// TWMS Classic — data-plane invuln v2.6.5 (field-hash remount 2026-08-06).
 //
 // Hit gate: User+0x298 i-frame (~100ms worker top-up).
 // Anti-blink hybrid: MainPump frame tick (before+after SendWill) + worker 8ms backup.
 // Soft +0x228/+0x22C DISABLED. Optional layout probe: XCAT_INVULN_PROBE=1 (default off).
 // Bind SSOT: WM.MyUser@+0x28 first (same as Drop/Skill/Combat); FindAll fallback.
-// Rebind: WM path every tick when unbound; FindAll 400ms / InterStage 80ms.
+// Rebind: WM path every tick when unbound; FindAll MapScene-only（InterStage 禁扫）。
 // 1.5s ACCEPT grace; LU drop keeps SecondaryStat.
 // No hotkey — panel / [core] invuln / XCAT_INVULN=1 only.
 // Docs: docs/features/invuln/模块设计.md
-// Remount 2026-08-03: dump MD5 B87DB932…; UserLocal=ac2e48cc…; field offs UNCHANGED
-// (hit 0x298 / layer 0x2A8 / CurPos 0x240 / soft 0x228|0x22C); Unity FindAll via il2cpp_bind.
+// Remount 2026-08-06: GA MD5 c7a3842d…; User=b8c9aedb…; UserLocal=d81db6fb…;
+// SS=fda0a837… @WM+0xF0（勿用 +0xB8 嵌套 struct）；字段偏移未漂，类/字段哈希已换。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -48,37 +48,41 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-// True UserLocal → il2cpp_shape::ResolveUserLocalKlass（hash ac2e48cc… + Teleport@0x3C8）
+// True UserLocal → il2cpp_shape::ResolveUserLocalKlass（hash d81db6fb… + Teleport@0x3C8）
 
-// WM / SecondaryStat / User：hash → field_get_offset；MyUser/SS 指针优先走 player SSOT
+// User / SecondaryStat：dump.cs 2026-08-06 字段哈希 → field_get_offset；失败回退下方 kFb*
+// User=b8c9aedb…（TDI 1560）；SS=fda0a837…（TDI 1329，WM+0xF0）
 constexpr char kSecondaryStatClass[] =
-    "b66e6c1639331514fade7a757dd74e7e70d7d903c49252b516d09778ecc46d6";
+    "fda0a837975e9b385db9604d6689232d1f1783dcfafa16403a92309b5604df3";
 constexpr char kUserClass[] =
-    "d9ad004bbff1a41ca96697c8e44ed3175dae9846fb772898fd54ec65040348b";
+    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";
 constexpr char kHashNInv[] =
-    "b53c25b3c150e1404c78ab2868d74cd710a7aef4e63e9648917e6bcfc50b12f";
+    "e98b6e87685fc78c2f74b7dd85ca150b35bb9e550991d6264beaa67b9fe436d";
 constexpr char kHashRInv[] =
-    "d155f481628fccd2ee0af5d983397507f031124765fe1647ffde6cda2d66314";
+    "f2a5d68e49e9dd95a60a2f2abd5c8a4cb99a1f821f684b9cd84999f67019e19";
 constexpr char kHashTInv[] =
-    "e0e7510e170bd280ed7da3f18bdaa4e4a230c9d1343096d43f051b8d6211710";
+    "e415d2cfd38e4437565e29ed1dd7bf5730cb3a05ac9d7ddfb96a5a91011e152";
 constexpr char kHashNDojang[] =
-    "c379f975468d8a305ea37e798f3529ecdeeee5eb89dd325271f6ea0e75f99e0";
+    "e99d3c3988e6da5a9f000c8151254c7a2c725abdb6820adfe4305356c8b0115";
 constexpr char kHashRDojang[] =
-    "f6c920856909dd50793e56e8edc7cab23cdb4da808e0c75ae33c1552e42478f";
+    "e9965f4019fa98b9578015b1b2c6f936bc0f2c64cf2291ed77d025930c1bafb";
 constexpr char kHashTDojang[] =
-    "c968475528a642858c25b66b35a6615f0570259d6d6c14b7db78ebecaec3816";
+    "af35c7201848a5c9ed7322b38d61307b0ebf11b91fedad529262798a08e08fa";
 constexpr char kHashHitPeriodRemain[] =
-    "a6b2ed619b844d0a346d09cb322cc0bd8b73e54e1ae91a216c19f144bd9e1d7";
+    "cc208180bc674b16bc511bb007c0e67b6e31f0ed01e9175269b63691391a0c5";
 constexpr char kHashLayerStateCounter[] =
-    "ddd646a4dc04ccdcb9e6a985f58b66bbb60393c2b03fbe1799ee1ec3661621c";
+    "b3218357bb9d811b199fae891e9229947b4d4ebb124b0f50eca7898f4c167c5";
 constexpr char kHashLogicalPos[] =
-    "b992bfa57dd45d484f39e25a6290a95d76e19fc1059423bff8fb0c9507dbda7";
+    "c4adef19821f3737cd477a7840968c11697f4afd8eb8696cafb37d1c297b926";
+// VisPos 在 User 祖先 edc85ce2…（MonoBehaviour 派生）@+0x64
 constexpr char kHashVisPos[] =
-    "c9d7ef4393802ebe9fdf9ebe7eaf7245d5cef3eeaa2a8d052fb4ad4883e34dc";
+    "cc96f38a9acbe6b4e8005a2d56a7846324bc67690c2059661962502f74b928a";
 constexpr char kHashSoftTickA[] =
-    "ad863b61e7367f57367e33eec3e48599f3a4f3c648bbba41af1ea2463eb8df0";
+    "e7012feca7a69005087bdbfbb3ced57be48c0bdd52b2457c415ef18af660c8c";
 constexpr char kHashSoftTickB[] =
-    "d122b7827d055e22bfce4f5478f3ddd8a982bbca24db0a9e15c8459def06bf4";
+    "c966ad04198c567254ab6ecce269f4d4d2677bea40daf7b729675eae4250b81";
+
+constexpr size_t kFbWmSecondaryStat = 0xF0;
 
 constexpr size_t kFbNInv = 0xEC;
 constexpr size_t kFbRInv = 0xF0;
@@ -130,9 +134,9 @@ constexpr int kHitPeriodKeep = 5000;
 constexpr DWORD kGateRefreshMs = 100;
 // Hybrid anti-blink: frame tick is primary; worker backup covers Update races.
 constexpr DWORD kAntiBlinkBackupMs = 8;
-// FindAll fallback throttle (steady). WM.MyUser path is unthrottled when unbound.
+// FindAll fallback throttle (steady MapScene). WM.MyUser path is unthrottled when unbound.
 constexpr DWORD kRebindMs = 400;
-// InterStage / unbound transit: faster FindAll retry (WM path still preferred).
+// 仅 MapScene 内短暂无绑：加快 FindAll。InterStage 禁止 FindAll（见 SkipFindAllTransit）。
 constexpr DWORD kRebindFastMs = 80;
 // FindAll 失败路径刷屏节流（重试仍按 kRebind*；日志 10s 一条）。
 constexpr DWORD kBindFailLogMs = 10000;
@@ -447,9 +451,11 @@ bool TryResolveWorldManagers() {
     if (x::runtime::managed_main::IsLoginFrozen()) return false;
     void* wm = x::features::ports::world::GetWorldManager();
     if (!wm) return false;
+    // SSOT：WM+0xF0（fda0a837…）。勿用 +0xB8（08-06 dump 为嵌套小 struct）。
     void* ss = x::ui::player::LocalSecondaryStat();
+    if (!LooksLikeHeapPtr(ss)) ss = ReadPtr(wm, kFbWmSecondaryStat);
     gSecondaryStats.clear();
-    if (ss) {
+    if (LooksLikeHeapPtr(ss)) {
         gSecondaryStats.push_back(ss);
         Log("WM via world_port wm=%p ss@F0=%p", wm, ss);
     }
@@ -591,8 +597,17 @@ bool TryBindWmMyUser() {
     return AcceptLocalUser(mu, "wm.MyUser");
 }
 
+// InterStage/None/Login：Unity FindObjects 会拖长黑屏；只靠 WM.MyUser，禁止 FindAll。
+bool SkipFindAllTransit() {
+    using x::features::ports::world::GetSceneState;
+    using x::features::ports::world::SceneState;
+    const SceneState sc = GetSceneState();
+    return sc == SceneState::InterStage || sc == SceneState::None || sc == SceneState::Login;
+}
+
 bool TryResolveLocalUserFindAll() {
     if (x::runtime::managed_main::IsLoginFrozen()) return false;
+    if (SkipFindAllTransit()) return false;
     if (!gLuType) {
         gLuType = x::runtime::il2cpp::ClassTypeObject(
             x::runtime::il2cpp_shape::ResolveUserLocalKlass());
@@ -670,10 +685,8 @@ bool WmMyUserDrifted() {
 }
 
 DWORD RebindIntervalMs() {
-    using x::features::ports::world::GetSceneState;
-    using x::features::ports::world::SceneState;
-    const SceneState sc = GetSceneState();
-    if (sc == SceneState::InterStage || sc == SceneState::None || !gLocalUser) return kRebindFastMs;
+    // 图内无绑才加速；卸图空窗走 SkipFindAllTransit，不再误用 80ms 狂扫。
+    if (!gLocalUser) return kRebindFastMs;
     return kRebindMs;
 }
 
@@ -811,8 +824,8 @@ void EnsureBindings() {
 DWORD WINAPI InvulnThread(LPVOID) {
     Beep(740, 80);
     WarnIfSoftEnvRequested();
-    Log("Invuln worker v2.6.4 start (hit=+0x298; anti-blink=frame+backup8ms; bind=wm.MyUser+FindAll; "
-        "rebind=%ums/%ums grace=%ums; probe228 %s)",
+    Log("Invuln worker v2.6.5 start (hit=+0x298; anti-blink=frame+backup8ms; bind=wm.MyUser+FindAll; "
+        "rebind=%ums/%ums grace=%ums; FindAll skip InterStage; probe228 %s)",
         (unsigned)kRebindFastMs, (unsigned)kRebindMs, (unsigned)kBindGraceMs,
         ProbeEnabled() ? "on" : "off");
 
@@ -874,11 +887,13 @@ DWORD WINAPI InvulnThread(LPVOID) {
                 if (!SecondaryStatsAlive()) TryResolveWorldManagers();
 
                 // WM.MyUser：无绑时每 tick 试（不限流）—— scene=3 后通常同窗可 ACCEPT。
+                // InterStage 黑屏窗：禁 FindAll（曾 80ms 打主线程，对齐日志 ~6s 黑屏）。
                 if (!LocalUserStillAlive()) {
                     if (TryBindWmMyUser()) {
                         ApplyInvuln(true);
                         lastGate = now;
-                    } else if (now - lastFindAll >= RebindIntervalMs()) {
+                    } else if (!SkipFindAllTransit() &&
+                               now - lastFindAll >= RebindIntervalMs()) {
                         lastFindAll = now;
                         if (TryResolveLocalUserFindAll()) {
                             ApplyInvuln(true);

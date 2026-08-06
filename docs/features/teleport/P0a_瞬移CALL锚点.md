@@ -21,7 +21,7 @@
 | ~~法师 `TryRegisterTeleport`~~ | 技能包 | **已拆除**；产品不发瞬移技能包 |
 | ~~`RestoreWalkable` / `SyncRelPosOnly` settle~~ | 旁路收尾 | **已拆除**；Settling 禁止再 SyncRel |
 
-BIN（2026-08-01）：Attr 远距一跳可达（例 hop≈1435）；冷静间隔 + Restore 后可走；狂点易 `pendingError=205` 软断。怪仍能打到角色 ⇒ **服务器认坐标**，非纯视觉。
+BIN（2026-08-01）：Attr 远距一跳可达（例 hop≈1435）；冷静间隔 + Restore 后可走；狂点易软断（`Disconnected` + `lean_local_or_soft`；sticky `pendingError=205`=哨兵≠踢因）。怪仍能打到角色 ⇒ **服务器认坐标**，非纯视觉。
 
 ---
 
@@ -188,7 +188,7 @@ VA 一直对，错在 VA→RVA 手算；因法师线长期关着，错误休眠�
 |------|------|
 | `ok path=attr` + hop 至 ~1435 | Attr 远距一跳可行 |
 | `RestoreWalkable ok` · `ma raw=2` Stand | 冷静间隔后可恢复走路 |
-| 狂点 → 冷却拒跳 → `Disconnected` · `pendingError=205` | 频率/超距风控；kick 环常 `lean_local_or_soft` |
+| 狂点 → 冷却拒跳 → `Disconnected` · sticky `pendingError=205`（哨兵） | 频率/超距风控；kick 环常 `lean_local_or_soft`；205≠踢因 |
 | 怪能打到角色 | 服务器认坐标 |
 | `bound path=attr-only mage=0` | 产品关闭法师线后的绑定日志 |
 | 测试按钮全程 `path=attr` | `allowLongHop=true` 强制 Attr（刻意） |

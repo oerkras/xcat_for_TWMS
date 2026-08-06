@@ -53,6 +53,12 @@ mobscan n=…/M=… map=… lifeMob=… lifeAll=… raw=… trunc=… mapKey=…
 | `ready` | `IsReady != 0` |
 | `deadType` | `== 0` |
 | `hpPct` | `> 0` |
+| `inViewSplit@0x100` | `!= 0`（与 `FindHitMobInRect` 同构） |
+| `suspended@0x1B8` | `== 0`（同上） |
+| `tpl` | `!= 9999999`（地图特殊体） |
+
+> **不要**用 `VecCtrl.Active@0x80` 挡活怪：`SetRemoteMob` 置 false 后怪仍可命中；BIN（`1000002`）曾因此 `raw>0 n=0`。  
+> `n>M` 若仍出现且样本怪坐标/tpl 正常，更像池内真实多怪（非失活留尸），与 LifeList 容量不必强行相等。
 
 失败时回退 `FindAll(Mob)`（同样走 `FillLite`）。
 
@@ -78,6 +84,7 @@ mobscan n=…/M=… map=… lifeMob=… lifeAll=… raw=… trunc=… mapKey=…
 | 观察 | 含义 |
 |------|------|
 | `raw ≈ n` | 池内条目几乎都是就绪活怪；过滤没有乱砍半池 |
+| `n ≤ M`（稳态） | 常见；若长期 `n>M` 且样本怪正常，先当真实多怪/事件怪，勿用 Active 硬砍 |
 | `lifeMob == M` 且稳定 | LifeList 读通，不是峰值瞎回退 |
 | `lifeAll ≥ lifeMob` | 差值多为 NPC 等非 Mob life |
 | `trunc=0` | 未顶 128 上限 |
@@ -134,7 +141,8 @@ mobscan n=11/M=25 lifeMob=25 lifeAll=25 raw=11 trunc=0
 
 | 文档 | 关系 |
 |------|------|
-| [`simple_combat/模块设计.md`](../simple_combat/模块设计.md) §12 | 刷怪槽对照枫星；详表以本文为准 |
+| [`mob_scan/模块设计.md`](../mob_scan/模块设计.md) | worker 周期、事件唤醒、按需刷新、MobCtrl、相对旧实现优势、面板 `mobScanIntervalMs` |
+| [`simple_combat/模块设计.md`](../simple_combat/模块设计.md) | 消费缓存选怪；刷怪槽对照枫星；详表以本文为准 |
 | [`titlebar/模块设计.md`](../titlebar/模块设计.md) | 标题 `怪 n/M` 展示 |
 | [`world_manager/字段全表.md`](../world_manager/字段全表.md) | `MapData.LifeList` 锚点 |
 | 枫星对照 | `xcat_for_fengxing` spawnSlots / Life 子节点（模式复用，偏移不照搬） |

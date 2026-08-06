@@ -16,6 +16,11 @@ namespace msc::launcher {
 int GetGamaPassNickSlot();
 void SetGamaPassNickSlot(int slot1Based);
 
+// select-account 页：1-based 账号卡槽（自上而下第 N 张，跳过「使用其他帳號」）。
+// 默认 1；范围 1..16；写入程序目录 gamapass_account_slot.txt。
+int GetGamaPassAccountSlot();
+void SetGamaPassAccountSlot(int slot1Based);
+
 // 打开/附着 Chrome|Edge → Galaxy → 点 Gama Pass → 选号 → 选昵称 → 收 OTT 换票
 HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log = nullptr, int timeoutMs = 240000);
 

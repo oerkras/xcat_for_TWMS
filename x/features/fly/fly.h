@@ -1,7 +1,7 @@
 #pragma once
-// fly — Classic TWMS 鼠标飞
-// 策略：flyMode 0=点击飞(A) / 1=跟随飞(B)；F6/面板武装。
-// A/B：fill+Doing hop，flyHopCdMs 控间隔，不钉台。
+// fly — Classic TWMS 鼠标飞：Impact（SetImpactNext/NockBack）→ MoveElem Attr=2
+// flyMode：0=NockBack  1=SetImpactNext
+// 武装期：fly_fh_ban 禁挂台；ApplyImpact 必须放行（旁路已拆除）。
 
 namespace x::features::fly {
 
@@ -17,7 +17,7 @@ void SetArmed(bool on);
 void SetExternalPause(bool on);
 bool IsExternallyPaused();
 
-// 0=点击飞(A) 1=跟随飞(B)
+// 0=Impact NockBack  1=Impact SetImpactNext
 void SetMode(unsigned mode);
 unsigned GetMode();
 

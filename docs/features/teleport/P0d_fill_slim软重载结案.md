@@ -10,7 +10,7 @@
 
 ## 0. 一句话
 
-挂机贴怪「飞出图外 / Field 软重载」的主因**不是**跨层落点本身，而是 **Doing 成功后我们再抢钉台 / 硬写 Ap / HealVisual**，与官方 `TryDoingTeleport` 收态打架；~80–200ms 后 Ap 漂到 `(0,0)`（或图外），触发 `pendingError=205` + `lean_local_or_soft` + MyUser drift。
+挂机贴怪「飞出图外 / Field 软重载」的主因**不是**跨层落点本身，而是 **Doing 成功后我们再抢钉台 / 硬写 Ap / HealVisual**，与官方 `TryDoingTeleport` 收态打架；~80–200ms 后 Ap 漂到 `(0,0)`（或图外），触发断线边沿（`lean_local_or_soft` + MyUser drift；日志里 sticky `pendingError=205` 是 Session **哨兵**，不是踢因码——见 [`../kick_sniff/断线错误码.md`](../kick_sniff/断线错误码.md) §3）。
 
 **修复**：Doing 后只做 `Apl←Ap`（且 Ap 近原点则跳过），日志标记 `fill_slim`。
 
@@ -25,7 +25,7 @@
 | 低发 | 平坦同层短跳为主的图（同一套 fill，但跨层竖直跳更少） |
 | 日志链 | Settling `near_zero` abort → 随后 MyUser drift / KickSniff `lean_local_or_soft`（战斗中段，非进图瞬间） |
 
-说明：进图瞬间的 `pendingError=205` / `Connecting↔Connected` 是频道/进场常态，**不等于**战斗软重载。
+说明：进图瞬间的 sticky `pendingError=205`（哨兵）/ `Connecting↔Connected` 是频道/进场常态，**不等于**战斗软重载。
 
 ---
 
@@ -170,7 +170,7 @@
 |---|---|
 | 样本 | `a9b624` · 同图 · replant 已生效（enter 74/74 `curFh=wantFh`） |
 | 现象 A | 一次 `land_miss`：plant fh130 后沿 Walk 链滑走（130→131→…→121），`rpV=nan`，`d=637` |
-| 现象 B | settle_ok 时 `wantFh≠curFh` + `rpV=nan` → Aim/Fire → `near_zero` / `pendingError=205` |
+| 现象 B | settle_ok 时 `wantFh≠curFh` + `rpV=nan` → Aim/Fire → `near_zero` / 断线（sticky `pendingError=205`=哨兵） |
 | 根因 | Doing 后 InputX 锁存 → CalcWalk 积 RelPos；邻台交接偶发 `RelPos.V=nan`；放行出刀易软重载 |
 | 处置 | fill 后 `SetInput(0,0)` + 零 Ap.V；Settling 拒 nan/`\|rpV\|` 过大；同点滑台主线程 `StabilizeFoothold` 一次，仍毒则 `land_miss` |
 

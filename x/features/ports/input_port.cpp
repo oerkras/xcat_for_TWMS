@@ -6,6 +6,7 @@
 #endif
 #include "input_port.h"
 #include "player_combat_port.h"
+#include "world_port.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_shape.h"
@@ -30,24 +31,24 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaOnKey = 0x101F6B0;  // remounted 2026-08-04 · UserLocal.(KeyInputType,Key)
-constexpr uint32_t kRvaIsFocusedInputField = 0x166A180;  // remounted 2026-08-04 · reads _focus@0x30
+constexpr uint32_t kRvaOnKey = 0x1021520;  // remounted 2026-08-06 · UserLocal.OnKey (+0x1E70)
+constexpr uint32_t kRvaIsFocusedInputField = 0x166CFC0;  // remounted 2026-08-06 · IM IsFocusedInputField
 constexpr int32_t kKeyInputDown = 0;
 constexpr int32_t kKeyInputUp = 1;
 
-// Game InputManager（非 UnityEngine）。08-03 c829ef06… 在 08-04 dump 已不存在。
+// Game InputManager（非 UnityEngine）。Remount 2026-08-06：TDI 2303 ACS 重哈希。
 constexpr char kInputManagerClass[] =
-    "ed910d2a0f7854cab3740bf212820b284c0ca06173f84c42a21c2a7bf5058c9";
+    "ab1dbbc390881790e19a5b1557c84a32d8c2261a26e7e4eaaf8f02e6be32a99";
 // remounted UserLocal class hash（与 il2cpp_shape::kHashUserLocal 同）
 constexpr char kUserLocalClass[] =
-    "d344a8e976a30de427223e36a7cf5447b64fa0a92c37e51ea3899629d7c69fd";  // remounted 2026-08-04 UL
+    "d81db6fbb1dc9506e153d6ee92c803ded0eef9dd0bf5c0e2334f2a98cabf4b0";  // remounted 2026-08-06 UL
 constexpr char kHashOnKey[] =
-    "f56ee57b4270be9567e8fc0efc15e4c38099d6db2ebf2cd066df7109efbaf48";
+    "c9267edb5f4326ea327c145d59260ac5b26a09697b8e7ca18757436ed63ff52";
 constexpr char kHashIsFocused[] =
-    "abda7a2b7e9232195eb54223c829b9932388cdebe1c9d628223eff022b03da1";
-// TargetUser 字段防漂移：hash → field_get_offset；dump 常量仅 fallback（08-04 仍 @0x20）
+    "a36c99b43bc935805103a390ef12a527cf5d2a22830caa6501177adf2cd8601";
+// TargetUser 字段防漂移：hash → field_get_offset；仍 @0x20
 constexpr char kHashTargetUser[] =
-    "<c5fa4ee490630c3ed756dd67f1cfdb1466ec8c100da69ae4521d889b7eaf3ab>k__BackingField";
+    "<a5f06ffcd14e4475088ea9ac03212af97c74fd7aa80d2839f35c33b2bc91f8d>k__BackingField";
 constexpr size_t kFbTargetUser = 0x20;
 
 constexpr DWORD kRebindMs = 3000;
@@ -428,6 +429,7 @@ void* TryResolveSingleton() {
 }
 
 void* TryResolveFindAll() {
+    if (!world::IsPlayReady()) return nullptr;
     if (!gImType) gImType = FindClassTypeObject(kInputManagerClass);
     if (!gImType || !gFindAll) return nullptr;
     void* arr = nullptr;
@@ -468,17 +470,23 @@ bool ResolveInputManager(DWORD now) {
     gLastRebind = now;
     if (!BindApis()) return false;
 
+    // InterStage / 卸图：禁 FindAll（targetUser 本就空，扫了只会拖黑屏）。
+    // Singleton 仍可试；无 targetUser 则下面 ok=false。
+    const bool allowFindAll = world::IsPlayReady();
+
     // RuntimeClassInit / Singleton 读托管静态字段必须在主线程，否则 GC unknown thread。
     struct Ctx {
         bool ok = false;
+        bool allowFindAll = false;
         const char* how = "?";
     } ctx;
+    ctx.allowFindAll = allowFindAll;
     auto job = [](void* user) {
         auto* c = reinterpret_cast<Ctx*>(user);
         if (!gImKlass) gImKlass = FindClass("", kInputManagerClass);
         void* best = TryResolveSingleton();
         c->how = "singleton";
-        if (!best) {
+        if (!best && c->allowFindAll) {
             // FindAll 直调（已在主线程）；禁止再套 managed_main::FindAll
             if (!gImType) {
                 void* klass = gImKlass ? gImKlass : FindClass("", kInputManagerClass);

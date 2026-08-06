@@ -15,6 +15,7 @@
 #include "../features/encounter/encounter.h"
 #include "../features/ports/attack_rpc_port.h"
 #include "../features/ports/attack_input_port.h"
+#include "../features/ports/teleport_port.h"
 #include "../features/ports/world_port.h"
 #include "../features/simple_combat/simple_combat.h"
 #include "../features/mob_scan/mob_scan.h"
@@ -23,6 +24,7 @@
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/player_hide/player_hide.h"
 #include "../features/frame_lock/frame_lock.h"
+#include "../features/movepath_flush_probe/movepath_flush_probe.h"
 #include "../runtime/log.h"
 #include "../runtime/main_thread_pump.h"
 #include "../runtime/managed_main.h"
@@ -158,95 +160,172 @@ void ApplyAutoLieMouseSmokeSeq(const xcat::PayloadControl& c) {
 }
 
 void ApplyTeleportTestSeq(const xcat::PayloadControl& c) {
+    // 封禁风险：调试贴怪瞬移已禁用；只收养 seq，不开火。
     if (c.teleportTestSeq == 0) return;
     const uint32_t last = ReadLieSeqStamp("last_teleport_test_seq.txt");
-    static std::atomic<bool> s_bootstrapped{false};
-    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
-        if (c.teleportTestSeq != last) {
-            WriteLieSeqStamp("last_teleport_test_seq.txt", c.teleportTestSeq);
-        }
-        return;
-    }
     if (c.teleportTestSeq <= last) return;
     WriteLieSeqStamp("last_teleport_test_seq.txt", c.teleportTestSeq);
-    x::features::simple_combat::RequestTeleportToRandomMob();
+    x::runtime::LogW("Control", "teleportTestSeq=%u refused (native fill+Doing disabled)",
+                     c.teleportTestSeq);
 }
 
 void ApplyTeleportNativeTestSeq(const xcat::PayloadControl& c) {
     if (c.teleportNativeTestSeq == 0) return;
     const uint32_t last = ReadLieSeqStamp("last_teleport_native_test_seq.txt");
-    static std::atomic<bool> s_bootstrapped{false};
-    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
-        if (c.teleportNativeTestSeq != last) {
-            WriteLieSeqStamp("last_teleport_native_test_seq.txt", c.teleportNativeTestSeq);
-        }
-        return;
-    }
     if (c.teleportNativeTestSeq <= last) return;
     WriteLieSeqStamp("last_teleport_native_test_seq.txt", c.teleportNativeTestSeq);
-    x::features::simple_combat::RequestNativeTeleportCall();
+    x::runtime::LogW("Control", "teleportNativeTestSeq=%u refused (native fill+Doing disabled)",
+                     c.teleportNativeTestSeq);
 }
 
 void ApplyTeleportKickStressSeq(const xcat::PayloadControl& c) {
     if (c.teleportKickStressSeq == 0) return;
     const uint32_t last = ReadLieSeqStamp("last_teleport_kick_stress_seq.txt");
-    static std::atomic<bool> s_bootstrapped{false};
-    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
-        if (c.teleportKickStressSeq != last) {
-            WriteLieSeqStamp("last_teleport_kick_stress_seq.txt", c.teleportKickStressSeq);
-        }
-        return;
-    }
     if (c.teleportKickStressSeq <= last) return;
     WriteLieSeqStamp("last_teleport_kick_stress_seq.txt", c.teleportKickStressSeq);
-    x::features::simple_combat::RequestTeleportKickStress();
+    x::runtime::LogW("Control", "teleportKickStressSeq=%u refused (native fill+Doing disabled)",
+                     c.teleportKickStressSeq);
 }
 
 void ApplyTeleportKickStressFineSeq(const xcat::PayloadControl& c) {
     if (c.teleportKickStressFineSeq == 0) return;
     const uint32_t last = ReadLieSeqStamp("last_teleport_kick_stress_fine_seq.txt");
-    static std::atomic<bool> s_bootstrapped{false};
-    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
-        if (c.teleportKickStressFineSeq != last) {
-            WriteLieSeqStamp("last_teleport_kick_stress_fine_seq.txt", c.teleportKickStressFineSeq);
-        }
-        return;
-    }
     if (c.teleportKickStressFineSeq <= last) return;
     WriteLieSeqStamp("last_teleport_kick_stress_fine_seq.txt", c.teleportKickStressFineSeq);
-    x::features::simple_combat::RequestTeleportKickStressFine();
+    x::runtime::LogW("Control",
+                     "teleportKickStressFineSeq=%u refused (native fill+Doing disabled)",
+                     c.teleportKickStressFineSeq);
 }
 
 void ApplyTeleportKickStressFine10Seq(const xcat::PayloadControl& c) {
     if (c.teleportKickStressFine10Seq == 0) return;
     const uint32_t last = ReadLieSeqStamp("last_teleport_kick_stress_fine10_seq.txt");
-    static std::atomic<bool> s_bootstrapped{false};
-    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
-        if (c.teleportKickStressFine10Seq != last) {
-            WriteLieSeqStamp("last_teleport_kick_stress_fine10_seq.txt",
-                             c.teleportKickStressFine10Seq);
-        }
-        return;
-    }
     if (c.teleportKickStressFine10Seq <= last) return;
     WriteLieSeqStamp("last_teleport_kick_stress_fine10_seq.txt", c.teleportKickStressFine10Seq);
-    x::features::simple_combat::RequestTeleportKickStressFine10();
+    x::runtime::LogW("Control",
+                     "teleportKickStressFine10Seq=%u refused (native fill+Doing disabled)",
+                     c.teleportKickStressFine10Seq);
 }
 
 void ApplyTeleportKickStressLocalSeq(const xcat::PayloadControl& c) {
     if (c.teleportKickStressLocalSeq == 0) return;
     const uint32_t last = ReadLieSeqStamp("last_teleport_kick_stress_local_seq.txt");
-    static std::atomic<bool> s_bootstrapped{false};
-    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
-        if (c.teleportKickStressLocalSeq != last) {
-            WriteLieSeqStamp("last_teleport_kick_stress_local_seq.txt",
-                             c.teleportKickStressLocalSeq);
-        }
-        return;
-    }
     if (c.teleportKickStressLocalSeq <= last) return;
     WriteLieSeqStamp("last_teleport_kick_stress_local_seq.txt", c.teleportKickStressLocalSeq);
-    x::features::simple_combat::RequestTeleportKickStressLocal();
+    x::runtime::LogW("Control",
+                     "teleportKickStressLocalSeq=%u refused (native fill+Doing disabled)",
+                     c.teleportKickStressLocalSeq);
+}
+
+void ApplyImpactNockBackTestSeq(const xcat::PayloadControl& c) {
+    if (c.impactNockBackTestSeq == 0) return;
+    const uint32_t diskLast = ReadLieSeqStamp("last_impact_nockback_seq.txt");
+    // 同 manualRejoin：首拍无条件收养会吞掉「注入后第一次点 A」（UI 已 toast 但 DLL 不开火）。
+    static const uint64_t s_moduleStartMs = GetTickCount64();
+    static std::atomic<bool> s_bootstrapped{false};
+    static std::atomic<uint32_t> s_lastApplied{0};
+    auto fire = [&](uint32_t seq) {
+        s_lastApplied.store(seq, std::memory_order_release);
+        WriteLieSeqStamp("last_impact_nockback_seq.txt", seq);
+        const int dir = xcat::ClampImpactImpulseDir(c.impactImpulseDir);
+        const int vx = static_cast<int>(xcat::ClampImpactImpulseSpeed(c.impactImpulseVx));
+        const int vy = static_cast<int>(xcat::ClampImpactImpulseSpeed(c.impactImpulseVy));
+        x::runtime::LogI("PayloadControl", "impact A fire seq=%u dir=%d vx=%d vy=%d", seq, dir, vx,
+                         vy);
+        (void)x::features::ports::teleport::FireImpactNockBackTest(dir, vx, vy);
+    };
+    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
+        const bool newerThanStamp = c.impactNockBackTestSeq > diskLast;
+        const bool writtenAfterInject =
+            c.writeTickMs != 0 && c.writeTickMs >= s_moduleStartMs;
+        if (newerThanStamp && writtenAfterInject) {
+            fire(c.impactNockBackTestSeq);
+            return;
+        }
+        const uint32_t adopt =
+            c.impactNockBackTestSeq > diskLast ? c.impactNockBackTestSeq : diskLast;
+        s_lastApplied.store(adopt, std::memory_order_release);
+        WriteLieSeqStamp("last_impact_nockback_seq.txt", adopt);
+        x::runtime::LogI("PayloadControl", "impact A bootstrap adopt seq=%u (no fire)", adopt);
+        return;
+    }
+    const uint32_t last = s_lastApplied.load(std::memory_order_acquire);
+    const uint32_t gate = last > diskLast ? last : diskLast;
+    if (c.impactNockBackTestSeq <= gate) return;
+    fire(c.impactNockBackTestSeq);
+}
+
+void ApplyImpactSetNextTestSeq(const xcat::PayloadControl& c) {
+    if (c.impactSetNextTestSeq == 0) return;
+    const uint32_t diskLast = ReadLieSeqStamp("last_impact_setnext_seq.txt");
+    static const uint64_t s_moduleStartMs = GetTickCount64();
+    static std::atomic<bool> s_bootstrapped{false};
+    static std::atomic<uint32_t> s_lastApplied{0};
+    auto fire = [&](uint32_t seq) {
+        s_lastApplied.store(seq, std::memory_order_release);
+        WriteLieSeqStamp("last_impact_setnext_seq.txt", seq);
+        const int dir = xcat::ClampImpactImpulseDir(c.impactImpulseDir);
+        const double vx = static_cast<double>(xcat::ClampImpactImpulseSpeed(c.impactImpulseVx));
+        const double vy = static_cast<double>(xcat::ClampImpactImpulseSpeed(c.impactImpulseVy));
+        const double svx = (dir == 0) ? vx : (static_cast<double>(dir) * vx);
+        x::runtime::LogI("PayloadControl", "impact B fire seq=%u svx=%.0f vy=%.0f", seq, svx, vy);
+        (void)x::features::ports::teleport::FireImpactSetNextTest(svx, vy);
+    };
+    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
+        const bool newerThanStamp = c.impactSetNextTestSeq > diskLast;
+        const bool writtenAfterInject =
+            c.writeTickMs != 0 && c.writeTickMs >= s_moduleStartMs;
+        if (newerThanStamp && writtenAfterInject) {
+            fire(c.impactSetNextTestSeq);
+            return;
+        }
+        const uint32_t adopt =
+            c.impactSetNextTestSeq > diskLast ? c.impactSetNextTestSeq : diskLast;
+        s_lastApplied.store(adopt, std::memory_order_release);
+        WriteLieSeqStamp("last_impact_setnext_seq.txt", adopt);
+        x::runtime::LogI("PayloadControl", "impact B bootstrap adopt seq=%u (no fire)", adopt);
+        return;
+    }
+    const uint32_t last = s_lastApplied.load(std::memory_order_acquire);
+    const uint32_t gate = last > diskLast ? last : diskLast;
+    if (c.impactSetNextTestSeq <= gate) return;
+    fire(c.impactSetNextTestSeq);
+}
+
+void ApplyImpactHopTestSeq(const xcat::PayloadControl& c) {
+    if (c.impactHopTestSeq == 0) return;
+    const uint32_t diskLast = ReadLieSeqStamp("last_impact_hop_seq.txt");
+    static const uint64_t s_moduleStartMs = GetTickCount64();
+    static std::atomic<bool> s_bootstrapped{false};
+    static std::atomic<uint32_t> s_lastApplied{0};
+    auto fire = [&](uint32_t seq) {
+        s_lastApplied.store(seq, std::memory_order_release);
+        WriteLieSeqStamp("last_impact_hop_seq.txt", seq);
+        x::features::ports::teleport::ImpactHopOpts opts{};
+        opts.force = c.impactHopForce != 0;
+        const int dx = static_cast<int>(xcat::ClampImpactHopDeltaX(c.impactHopDeltaX));
+        x::runtime::LogI("PayloadControl", "impact hop fire seq=%u dx=%d force=%u", seq, dx,
+                         (unsigned)c.impactHopForce);
+        (void)x::features::ports::teleport::ImpactHopDeltaX(dx, opts);
+    };
+    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
+        const bool newerThanStamp = c.impactHopTestSeq > diskLast;
+        const bool writtenAfterInject =
+            c.writeTickMs != 0 && c.writeTickMs >= s_moduleStartMs;
+        if (newerThanStamp && writtenAfterInject) {
+            fire(c.impactHopTestSeq);
+            return;
+        }
+        const uint32_t adopt = c.impactHopTestSeq > diskLast ? c.impactHopTestSeq : diskLast;
+        s_lastApplied.store(adopt, std::memory_order_release);
+        WriteLieSeqStamp("last_impact_hop_seq.txt", adopt);
+        x::runtime::LogI("PayloadControl", "impact hop bootstrap adopt seq=%u (no fire)", adopt);
+        return;
+    }
+    const uint32_t last = s_lastApplied.load(std::memory_order_acquire);
+    const uint32_t gate = last > diskLast ? last : diskLast;
+    if (c.impactHopTestSeq <= gate) return;
+    fire(c.impactHopTestSeq);
 }
 
 void ApplyControl(const xcat::PayloadControl& c) {
@@ -304,7 +383,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
                                                           : xcat::kAttackHoldDefaultMs));
     x::features::simple_combat::SetSmartInterval(c.simpleCombatSmartInterval != 0);
     x::features::simple_combat::SetClusterPriority(c.clusterWeight != 0);
-    x::features::simple_combat::SetTeleportEnabled(c.simpleCombatTeleport != 0);
+    x::features::simple_combat::SetTeleportEnabled(false);  // fill+Doing 战斗回落已禁用
+    x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
+    x::features::simple_combat::SetHumanWalkEnabled(c.simpleCombatHumanWalk != 0);
     x::features::simple_combat::SetLiveStepEnabled(c.simpleCombatLiveStep != 0);
     x::features::simple_combat::SetTeleportParams(
         c.simpleCombatTeleportMinDx, c.simpleCombatTeleportStandOff, c.simpleCombatTeleportCooldownMs,
@@ -326,6 +407,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::attack_rpc::SetEnabled(c.attackRpc != 0);
     x::features::auto_lie::SetEnabled(c.autoLie != 0);
     x::features::auto_lie::SetDryRun(c.autoLieDryRun != 0);
+    x::features::movepath_flush_probe::SetEnabled(c.movepathFlushProbe != 0);
     x::features::drop_alert_bypass::SetEnabled(c.dropAlertBypass != 0);
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
     // 自动补给真源：user.ini [auto_supply]（HotReadConfig）；勿再用 core.autoSell 灌开关。
@@ -344,6 +426,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
     ApplyTeleportKickStressFineSeq(c);
     ApplyTeleportKickStressFine10Seq(c);
     ApplyTeleportKickStressLocalSeq(c);
+    ApplyImpactNockBackTestSeq(c);
+    ApplyImpactSetNextTestSeq(c);
+    ApplyImpactHopTestSeq(c);
     // 回城/中止改由 [auto_supply] manualSeq+manualKind 驱动，不再读 core.autoSell*Seq。
     gLastAppliedTick.store(c.writeTickMs);
     gHaveApplied.store(true);

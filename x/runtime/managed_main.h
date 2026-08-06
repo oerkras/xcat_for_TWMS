@@ -7,6 +7,9 @@
 // Do NOT clear from auto_enter Done — that races lobby FindAll before play-ready.
 // world_port 场景解析必须 bypassFreeze，否则 Titlebar/端口永远解不了冻（死锁）。
 // Auto-enter probe runs FindAll directly inside its own main-thread job (bypass freeze).
+//
+// Map-transit block：!IsPlayReady（InterStage/CashShop/…）时禁托管 FindAll，防换图黑屏被扫对象拖长。
+// 由 world_port::IsPlayReady 维护；bypassFreeze 仍放行（仅 WM 冷绑等）。
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -22,7 +25,11 @@ using FnTypeGetObject = void* (*)(void* type);
 void SetLoginFreeze(bool on);
 bool IsLoginFrozen();
 
-// Returns managed array or nullptr. Honors login freeze unless bypassFreeze.
+// !PlayReady 时置位；FindAll/TypeGetObject 默认拒绝（bypassFreeze 除外）。
+void SetMapTransitBlock(bool on);
+bool IsMapTransitBlocked();
+
+// Returns managed array or nullptr. Honors login freeze / map-transit unless bypassFreeze.
 void* FindAll(FnFindAll fn, void* typeObj, DWORD timeoutMs = 2000, bool bypassFreeze = false);
 
 // Returns System.Type object or nullptr.

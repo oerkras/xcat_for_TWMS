@@ -399,6 +399,9 @@ void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui) {
         if (attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode())) {
             ui.status = "手动模式：约 " + std::to_string(prepLeft) +
                         " 秒后自动开始监视（可再点按钮取消）";
+        } else if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::OneClickLogin) {
+            ui.status = "gamania (HK)：约 " + std::to_string(prepLeft) +
+                        " 秒后自动启动（可再点按钮取消）";
         } else {
             ui.status = "GAMA PASS：约 " + std::to_string(prepLeft) +
                         " 秒后自动换票（可再点按钮取消）";
@@ -424,16 +427,13 @@ void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui) {
         return;
     }
 
-    // 一键类模式：GAMA PASS 自动换票；gamania (HK) 等用户点（冷启不自动填账密跑）。
+    // 一键类：GAMA PASS / gamania (HK) 准备窗到期后自动换票启动。
     if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto) {
         msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
     } else if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::OneClickLogin) {
         if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
             msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
         }
-        ui.pendingAutoLaunch = false;
-        ui.status = "gamania (HK)：请粘贴账密后点「一键启动游戏」";
-        return;
     }
     if (!msc::weblogin::CanStartOneClick()) return;
     if (msc::weblogin::IsBusy()) {
@@ -452,10 +452,15 @@ void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui) {
     }
 
     ui.pendingAutoLaunch = false;
+    const bool hk =
+        attach_inject::GetLaunchMode() == attach_inject::LaunchMode::OneClickLogin;
     if (LaunchPanel_StartOneClick(ui)) {
-        xcat::log::Info("App", "auto GamaPass launch started");
+        xcat::log::Info("App", hk ? "auto gamania(HK) launch started"
+                                  : "auto GamaPass launch started");
     } else {
-        xcat::log::Warn("App", "auto GamaPass launch failed: %s", ui.status.c_str());
+        xcat::log::Warn("App", hk ? "auto gamania(HK) launch failed: %s"
+                                  : "auto GamaPass launch failed: %s",
+                        ui.status.c_str());
     }
 }
 

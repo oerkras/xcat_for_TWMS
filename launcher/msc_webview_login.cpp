@@ -483,7 +483,18 @@ void SetGamaPassNickSlot(int slot1Based) {
     msc::launcher::SetGamaPassNickSlot(slot1Based);
     const int after = msc::launcher::GetGamaPassNickSlot();
     if (after != before) {
-        QueueLog(L"[OK] GAMA PASS 昵称槽已设为 " + std::to_wstring(after));
+        QueueLog(L"[OK] 将使用第 " + std::to_wstring(after) + L" 个游戏昵称");
+    }
+}
+
+int GetGamaPassAccountSlot() { return msc::launcher::GetGamaPassAccountSlot(); }
+
+void SetGamaPassAccountSlot(int slot1Based) {
+    const int before = msc::launcher::GetGamaPassAccountSlot();
+    msc::launcher::SetGamaPassAccountSlot(slot1Based);
+    const int after = msc::launcher::GetGamaPassAccountSlot();
+    if (after != before) {
+        QueueLog(L"[OK] 将登录第 " + std::to_wstring(after) + L" 个账号");
     }
 }
 

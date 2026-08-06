@@ -1,0 +1,15 @@
+---
+description: 禁止擅自打包、发布或启动发布站；仅用户明确要求时才可执行
+alwaysApply: true
+---
+
+# 禁止擅自打包发布
+
+- **禁止**在用户未明确要求时执行打包、出包、发布、上架相关动作，包括但不限于：
+  - 跑 `publish_site\*.ps1`、`packaging\**`、release/zip 生成脚本
+  - 写入/覆盖 `artifacts\release\`、`publish_site\downloads\`、`publish_site\update\`
+  - 启动/重启发布站（如 `publish_site\start-server.ps1`、`scripts\start-twms-update-server.ps1`）
+  - 改版本号、`latest.json` / `versions.json`、把 zip 拷到可下载目录当「已发布」
+- 本轮任务若只是修代码、构建 Debug/本机验证：做到编过 / 单测即可，**不要**顺手「顺便出一包给用户」。
+- 仅当用户**明确**说「打包 / 出包 / 发布 / publish / 上架 / 开发布站」等时，才可执行对应脚本；范围严格按当轮指令，不扩大到未点名的发布步骤。
+- 交付总结里若提到「可发布」，只给命令与路径提示，由用户自行决定是否跑；不得默认已替用户发布。

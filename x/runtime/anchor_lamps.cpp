@@ -19,9 +19,10 @@ constexpr size_t kSlots = xcat::kAnchorLampMax;
 // 固定展示顺序：shape → 泵 → feature。Publish 时一律预挂灰灯，避免「未 Set 就不出现」。
 const char* const kOrder[] = {"WM",         "UL",         "NM",         "FAC",
                               "SA",         "Pump",       "FlyCam",     "TravelSend",
-                              "TravelPos",  "ShopUnity",  "AttackFK",   "ChanHop",
-                              "DropAlert",  "InputOnKey", "WorldMap",   "Consumable",
-                              "Teleport",   "PetAct",     "PetRect",    "DropFields"};
+                              "ShopUnity",  "AttackFK",   "ChanHop",    "DropAlert",
+                              "InputOnKey", "WorldMap",   "Consumable", "Teleport",
+                              "PetAct",     "PetRect",    "DropFields", "SkillMax",
+                              "FaForce"};
 
 struct Slot {
     char id[xcat::kAnchorLampIdLen]{};

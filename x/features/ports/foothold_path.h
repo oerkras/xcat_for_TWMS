@@ -79,6 +79,10 @@ bool IsXSafeOnFh(uint32_t fhId, float x, bool avoidWalkJunction = true);
 bool ZMassOfFh(uint32_t fhId, int32_t* outZMass);
 bool ZMassAt(float x, float y, int32_t* outZMass, uint32_t* outFhId = nullptr);
 
+// 仅 Prev/Next 步行边连通（不含绳/下跳）。拟人走路可达性；同台则 true。
+// 图未就绪 / 未知 FH → false（调用方决定是否退回纯 Y 带）。
+bool SameWalkComponent(uint32_t fhA, uint32_t fhB);
+
 bool PlanFirst(uint32_t fromFh, uint32_t toFh, FirstAction* out);
 
 struct GraphMeta {

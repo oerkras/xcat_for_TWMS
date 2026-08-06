@@ -20,8 +20,8 @@ namespace msc::launcher {
 namespace {
 
 constexpr int kCdpPort = msc::cdp::kDefaultRemoteDebugPort;
-constexpr int kNickSlotMin = 1;
-constexpr int kNickSlotMax = 16;
+constexpr int kSlotMin = 1;
+constexpr int kSlotMax = 16;
 
 constexpr wchar_t kGalaxyLogin[] =
     L"https://galaxy.games.gamania.com/webapi/view/login/mstc"
@@ -50,6 +50,7 @@ std::wstring ExeDirLocal() {
 }
 
 std::wstring NickSlotPath() { return ExeDirLocal() + L"\\gamapass_nick_slot.txt"; }
+std::wstring AccountSlotPath() { return ExeDirLocal() + L"\\gamapass_account_slot.txt"; }
 
 std::string NarrowPath(const std::wstring& w) {
     if (w.empty()) return {};
@@ -60,35 +61,41 @@ std::string NarrowPath(const std::wstring& w) {
     return out;
 }
 
-int ClampNickSlot(int slot) {
-    if (slot < kNickSlotMin) return kNickSlotMin;
-    if (slot > kNickSlotMax) return kNickSlotMax;
+int ClampSlot(int slot) {
+    if (slot < kSlotMin) return kSlotMin;
+    if (slot > kSlotMax) return kSlotMax;
     return slot;
 }
 
-int gNickSlotCached = 0;  // 0=未加载
-
-int LoadNickSlotFromDisk() {
-    std::ifstream f(NarrowPath(NickSlotPath()), std::ios::binary);
-    if (!f) return kNickSlotMin;
+int LoadSlotFile(const std::wstring& path) {
+    std::ifstream f(NarrowPath(path), std::ios::binary);
+    if (!f) return kSlotMin;
     std::string raw((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     while (!raw.empty() &&
            (raw.back() == '\r' || raw.back() == '\n' || raw.back() == ' ' || raw.back() == '\t'))
         raw.pop_back();
-    if (raw.empty()) return kNickSlotMin;
+    if (raw.empty()) return kSlotMin;
     try {
-        return ClampNickSlot(std::stoi(raw));
+        return ClampSlot(std::stoi(raw));
     } catch (...) {
-        return kNickSlotMin;
+        return kSlotMin;
     }
 }
 
-void SaveNickSlotToDisk(int slot) {
-    slot = ClampNickSlot(slot);
-    std::ofstream f(NarrowPath(NickSlotPath()), std::ios::binary | std::ios::trunc);
+void SaveSlotFile(const std::wstring& path, int slot) {
+    slot = ClampSlot(slot);
+    std::ofstream f(NarrowPath(path), std::ios::binary | std::ios::trunc);
     if (!f) return;
     f << slot;
 }
+
+int gNickSlotCached = 0;     // 0=未加载
+int gAccountSlotCached = 0;  // 0=未加载
+
+int LoadNickSlotFromDisk() { return LoadSlotFile(NickSlotPath()); }
+void SaveNickSlotToDisk(int slot) { SaveSlotFile(NickSlotPath(), slot); }
+int LoadAccountSlotFromDisk() { return LoadSlotFile(AccountSlotPath()); }
+void SaveAccountSlotToDisk(int slot) { SaveSlotFile(AccountSlotPath(), slot); }
 
 std::wstring JsClickGamaPassProvider() {
     // 只触发一次原生 click：勿叠加 pointer/mouse 序列 + click()，否则官网 OAuth
@@ -134,12 +141,17 @@ std::wstring JsClickGamaPassProvider() {
            L"}catch(e){return 'err:'+String(e);}})();";
 }
 
-std::wstring JsSelectAccountFirst() {
-    // accounts.gamania.com/login/select-account：点账号卡片（邮箱+昵称），避开「使用其他帳號」。
-    // build51 实锤：纯 element.click() 会报 select-account-first 但 URL 不离开（React 卡片常挂在
-    // 外层 div）。用「卡片中心一次 MouseEvent click」；禁止 pointer 序列 + 双 click。
+std::wstring JsSelectAccount(int accountSlot) {
+    // accounts.gamania.com/login/select-account：按自上而下序号点第 N 张账号卡。
+    // 避开「使用其他帳號」；卡片中心一次 MouseEvent click（React 外层 div 需坐标点击）。
+    // 刹车：父节点若含 ≥2 个邮箱绝不往上扩，避免两张卡被收成一块。
+    accountSlot = ClampSlot(accountSlot);
     return std::wstring(L"(function(){try{") +
+           L"var wantSlot=" + std::to_wstring(accountSlot) + L";"
            L"function T(el){return ((el&&(el.innerText||el.textContent||''))||'').replace(/\\s+/g,' ').trim();}"
+           L"function mailCount(t){var m=(t||'').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi); return m?m.length:0;}"
+           L"function mailKey(t){var m=(t||'').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);"
+           L"  return m?m[0].toLowerCase():'';}"
            L"function bad(t){t=(t||'').toLowerCase();"
            L"  return t.indexOf('使用其他')>=0||t.indexOf('其他帳')>=0||t.indexOf('其它帳')>=0||"
            L"         t.indexOf('other account')>=0||t.indexOf('建立')>=0||t.indexOf('创建帳')>=0;}"
@@ -148,19 +160,21 @@ std::wstring JsSelectAccountFirst() {
            L"  for(var k=0;k<10&&t.parentElement;k++){"
            L"    var p=t.parentElement; var pt=T(p);"
            L"    if(!pt||pt.length>160||bad(pt)) break;"
-           // 含邮箱的更大块更像整张卡片；继续往上扩到仍含 @ 的一层。
+           // 父块已含两张及以上邮箱 → 列表容器，停在当前单卡。
+           L"    if(mailCount(pt)>=2) break;"
            L"    if(pt.indexOf('@')>=0) t=p; else break;"
            L"  }"
-           L"  try{var c=t.closest('a,button,[role=button],li'); if(c&&!bad(T(c))&&T(c).length<=160) t=c;}catch(e){}"
+           L"  try{var c=t.closest('a,button,[role=button],li');"
+           L"    if(c&&!bad(T(c))&&T(c).length<=160&&mailCount(T(c))<=1) t=c;}catch(e){}"
            L"  return t;}"
-           L"function fireOnce(el){var t=resolveCard(el); if(!t)return false;"
+           L"function fireOnce(el){var t=resolveCard(el)||el; if(!t)return false;"
            L"  try{t.scrollIntoView({block:'center'});}catch(e){}"
            L"  var r=t.getBoundingClientRect();"
            L"  if(!(r.width>=12&&r.height>=12)) return false;"
            L"  var x=Math.floor(r.left+r.width/2), y=Math.floor(r.top+r.height/2);"
            L"  var top=document.elementFromPoint(x,y)||t;"
            L"  try{var up=top.closest('a,button,[role=button],li,div');"
-           L"    if(up&&!bad(T(up))&&T(up).indexOf('@')>=0&&T(up).length<=160) top=up;}catch(e){}"
+           L"    if(up&&!bad(T(up))&&mailCount(T(up))===1&&T(up).length<=160) top=up;}catch(e){}"
            L"  try{"
            L"    top.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,"
            L"      clientX:x,clientY:y,button:0,buttons:1}));"
@@ -171,7 +185,7 @@ std::wstring JsSelectAccountFirst() {
            L"if(!onSelect && (location.href||'').toLowerCase().indexOf('accounts.gamania.com')<0)"
            L"  return 'wait-select-account';"
            L"var all=[].slice.call(document.querySelectorAll('a,button,li,div,span,p,section,article'));"
-           L"var hits=[];"
+           L"var raw=[];"
            L"for(var i=0;i<all.length;i++){"
            L"  var el=all[i]; var t=T(el); if(!t||t.length<3||t.length>120) continue;"
            L"  if(bad(t)) continue;"
@@ -179,30 +193,59 @@ std::wstring JsSelectAccountFirst() {
            L"  var hasMail=t.indexOf('@')>=0;"
            L"  var hasId=/[a-z]{2,}[0-9]{2,}/i.test(t);"
            L"  if(!hasMail && !hasId) continue;"
+           L"  var card=resolveCard(el)||el;"
+           L"  var ct=T(card);"
+           L"  if(bad(ct)) continue;"
+           // 仍含多邮箱的块不当作单卡（列表壳）。
+           L"  if(mailCount(ct)>=2) continue;"
+           L"  var top=0,left=0,area=0;"
+           L"  try{var rr=card.getBoundingClientRect(); top=rr.top; left=rr.left; area=rr.width*rr.height;}catch(e){}"
+           L"  if(area<80) continue;"
+           L"  var mk=mailKey(ct)||mailKey(t);"
+           L"  var mc=mailCount(ct)||mailCount(t);"
            L"  var bonus=0;"
-           L"  if(hasMail) bonus+=10;"
+           L"  if(mc===1) bonus+=20;"
+           L"  if(hasMail||ct.indexOf('@')>=0) bonus+=10;"
            L"  if(hasId) bonus+=10;"
-           L"  if(hasMail&&hasId) bonus+=30;"
-           // 整张卡片（mail+id 同行）优先于只含邮箱/只含 id 的小节点。
-           L"  if(hasMail&&hasId&&t.length>=12&&t.length<=100) bonus+=15;"
-           L"  var card=resolveCard(el); var area=0;"
-           L"  try{var rr=(card||el).getBoundingClientRect(); area=rr.width*rr.height;}catch(e){}"
-           L"  hits.push({el:el,t:t,score:-(bonus*100000)-area+t.length});"
+           L"  if(mc===1&&hasId) bonus+=30;"
+           L"  raw.push({el:card,t:ct||t,mk:mk,top:top,left:left,area:area,bonus:bonus,mc:mc});"
            L"}"
-           L"if(!hits.length){"
+           L"if(!raw.length){"
            L"  var txt=(document.body&&document.body.innerText||'').slice(0,200);"
            L"  return 'wait-select-account|'+txt.replace(/\\s+/g,' ').slice(0,60);"
            L"}"
-           L"hits.sort(function(a,b){return a.score-b.score;});"
-           L"if(!fireOnce(hits[0].el)) return 'wait-select-account|click-fail';"
-           L"return 'select-account-first|'+hits[0].t.slice(0,50);"
+           // 按邮箱去重；contains 合并时优先保留单邮箱、更完整的那张（勿吞并成列表壳）。
+           L"var uniq=[];"
+           L"for(var i=0;i<raw.length;i++){"
+           L"  var h=raw[i]; var idx=-1;"
+           L"  for(var j=0;j<uniq.length;j++){"
+           L"    var u=uniq[j];"
+           L"    if((h.mk&&u.mk&&h.mk===u.mk)||h.el===u.el||"
+           L"       (h.el.contains&&u.el.contains&&(h.el.contains(u.el)||u.el.contains(h.el)))){ idx=j; break; }"
+           L"  }"
+           L"  if(idx<0){ uniq.push(h); continue; }"
+           L"  var cur=uniq[idx];"
+           L"  var preferH=false;"
+           L"  if((h.mc===1)&&(cur.mc!==1)) preferH=true;"
+           L"  else if((h.mc!==1)&&(cur.mc===1)) preferH=false;"
+           L"  else if(h.bonus>cur.bonus||(h.bonus===cur.bonus&&h.area>cur.area)) preferH=true;"
+           L"  if(preferH) uniq[idx]=h;"
+           L"}"
+           L"uniq.sort(function(a,b){return (a.top-b.top)||(a.left-b.left);});"
+           L"var idx=wantSlot-1; var clamped=0;"
+           L"if(idx<0){ idx=0; clamped=1; }"
+           L"if(idx>=uniq.length){ idx=uniq.length-1; clamped=1; }"
+           L"var pick=uniq[idx];"
+           L"var tag='slot'+wantSlot+'|use'+(idx+1)+'|goods'+uniq.length+(clamped?'|clamped':'');"
+           L"if(!fireOnce(pick.el)) return 'wait-select-account|click-fail|'+tag;"
+           L"return 'select-account|'+tag+'|'+pick.t.slice(0,50);"
            L"}catch(e){return 'err:'+String(e);}})();";
 }
 
 std::wstring JsSelectGameNick(int nickSlot) {
     // SelectGameAccount：①按 1-based 槽勾选昵称 ②仅在目标已勾选后点「繼續」
     // 跳过「建立遊戲暱稱」；控件只 click 一次。
-    nickSlot = ClampNickSlot(nickSlot);
+    nickSlot = ClampSlot(nickSlot);
     return std::wstring(L"(function(){try{") +
            L"var wantSlot=" + std::to_wstring(nickSlot) + L";"
            L"function T(el){return ((el&&(el.innerText||el.textContent||el.value||''))||'').replace(/\\s+/g,' ').trim();}"
@@ -465,14 +508,25 @@ int GetGamaPassNickSlot() {
 }
 
 void SetGamaPassNickSlot(int slot1Based) {
-    gNickSlotCached = ClampNickSlot(slot1Based);
+    gNickSlotCached = ClampSlot(slot1Based);
     SaveNickSlotToDisk(gNickSlotCached);
+}
+
+int GetGamaPassAccountSlot() {
+    if (gAccountSlotCached == 0) gAccountSlotCached = LoadAccountSlotFromDisk();
+    return gAccountSlotCached;
+}
+
+void SetGamaPassAccountSlot(int slot1Based) {
+    gAccountSlotCached = ClampSlot(slot1Based);
+    SaveAccountSlotToDisk(gAccountSlotCached);
 }
 
 HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
     const int nickSlot = GetGamaPassNickSlot();
-    Log(log, L"[gamapass-cdp] 开始：默认浏览器点选（不调用 refresh/token，不改 LS）；昵称槽=" +
-                 std::to_wstring(nickSlot));
+    const int accountSlot = GetGamaPassAccountSlot();
+    Log(log, L"[gamapass-cdp] 开始：默认浏览器点选（不调用 refresh/token，不改 LS）；账号=" +
+                 std::to_wstring(accountSlot) + L" 昵称=" + std::to_wstring(nickSlot));
 
     msc::cdp::BrowserProfile profile;
     if (!msc::cdp::ResolvePreferredChromium(profile, [&](const std::wstring& s) { Log(log, s); })) {
@@ -761,14 +815,19 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
 
     // NGM 只作「官网已开始拉起」的早信号；成功仍要求 Classic + 可解析 cmdline 票。
     // 只认本轮 sessionNotBefore 之后创建的 NGM，避免残留进程误报。
+    // 见 NGM 即可关调试浏览器：票已在拉起链路上，网页不再需要。
+    bool closedBrowserAfterNgm = false;
     auto noteNgmLaunchHint = [&]() {
         if (sawNgmHint) return false;
         if (!IsNgmProcessRunningCreatedAfter(sessionNotBefore)) return false;
         sawNgmHint = true;
         ngmHintAt = GetTickCount();
         Log(log, L"[gamapass-cdp] 探测到 NGM 已启动（官网拉起中；成功门禁仍等经典版 cmdline 票）…");
-        parkAwayFromMainOtt(
-            L"[gamapass-cdp] 已见 NGM，离开 Main?OTT（防官网兑 init 票弹超时/锁定）…");
+        if (!closedBrowserAfterNgm) {
+            closedBrowserAfterNgm = true;
+            Log(log, L"[gamapass-cdp] 已见 NGM，关闭登录用网页（后续只等经典版 cmdline 票）…");
+            msc::cdp::CloseRemoteBrowser(kCdpPort, [&](const std::wstring& s) { Log(log, s); });
+        }
         return true;
     };
 
@@ -1105,8 +1164,8 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
             }
         } else if (stage == Stage::AccWait && IsSelectAccountUrl(hrefLower) &&
                    stageDom.find("ready-acc") == 0) {
-            auto r = runJs(JsSelectAccountFirst());
-            if (r.find("select-account-first") == 0) {
+            auto r = runJs(JsSelectAccount(accountSlot));
+            if (r.find("select-account|") == 0) {
                 ackFromUrl = lastUrl;
                 noClickUntil = GetTickCount() + kAfterAccClickMs;
                 enterStage(Stage::AwaitLeaveAcc, L"clicked-acc");

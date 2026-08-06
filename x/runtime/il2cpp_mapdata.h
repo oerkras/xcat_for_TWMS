@@ -11,7 +11,7 @@ void Ensure();
 // WorldManager → MapData*
 size_t OffWmMapData();  // fb 0x88
 
-// MapData（hash a08e1596…）
+// MapData（hash a2eca01a… · remount 2026-08-06）
 size_t OffMapId();         // fb 0x10
 size_t OffMapLifeList();   // fb 0x38 List<MapLifeData>
 size_t OffMapPortals();    // fb 0x40 List<MapPortalData>

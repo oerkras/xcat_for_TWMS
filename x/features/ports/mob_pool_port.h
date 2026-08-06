@@ -1,8 +1,8 @@
 #pragma once
 // mob_pool_port — Classic TWMS 活怪只读快照 + 刷怪槽 M
 //
-// 真源：Dumps/runtime/out/dump.cs（2026-08-03 remount）
-//   MobPool(f4afa0ce…) / Mob(a803dc63…) / MapData(a08e1596…＝WM+0x88 字段类型)
+// 真源：Dumps/runtime/out/dump.cs（2026-08-06 remount）
+//   MobPool(a1d83b2f…) / Mob(d8cb6fb7…) / MapData(a2eca01a…＝WM+0x88 字段类型)
 //   MapData.LifeList@+0x38 · MapLifeData.Type@+0x20 (1=Mob)
 //   WorldManager._currentMapData@+0x88
 // 禁止 INLINE HOOK；不调用游戏写接口。
@@ -116,6 +116,13 @@ bool TryReadDamageInfoList(void* mob, DamageInfoSnap& out);
 const char* CtrlName(int32_t ctrl);
 const char* AbsHpSrcName(AbsHpSrc src);
 
+// 抢怪软优先：>0 我方控、0 中性、<0 他人驱动。同分再比距离；全员 Passive 时行为与旧版一致。
+inline int CtrlPreferRank(int32_t ctrl) {
+    if (ctrl > 0) return 2;
+    if (ctrl == 0) return 1;
+    return 0;
+}
+
 struct Snapshot {
     bool ok = false;
     bool truncated = false;
@@ -133,7 +140,8 @@ struct Snapshot {
 bool EnsureBound();
 
 // 同步采集一帧快照（SEH 护体；可在 worker 线程调）
-bool Collect(Snapshot& out);
+// fillSpawnSlots=false：跳过 LifeList 扫 M，沿用上一帧 spawnSlots（热路径减负）。
+bool Collect(Snapshot& out, bool fillSpawnSlots = true);
 
 // 锁怪热路径：直接读 mob 指针字段（不等 mobscan 缓存）。
 // 活着填 out 返回 true；尸体/空血/野指针返回 false。expectId!=0 时校验 id。
@@ -144,6 +152,12 @@ bool TryFillLive(void* mob, int32_t expectId, MobLite& out);
 bool GetCached(Snapshot& out);
 int GetCachedAliveCount();
 int GetCachedSpawnSlots();  // -1=未知
+// 缓存年龄（ms）；无缓存返回 ~0xFFFFFFFF。
+uint32_t GetCachedAgeMs();
+
+// 战斗 worker 安全刷新：仅当 MobPool Singleton 已由 mob_scan 热身后，只读字典 + Publish。
+// 不 FindAll、不 RuntimeClassInit、不扫 LifeList。失败返回 false（继续用缓存 + RequestImmediateScan）。
+bool TryRefreshCacheLite(Snapshot& out);
 
 // 仅刷怪槽：优先 MapData.LifeList(Mob)；失败回退本图峰值（需先 Collect 过）
 int CountMapMobLifeSlots();

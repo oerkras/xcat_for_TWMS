@@ -43,24 +43,24 @@ constexpr uint32_t kUnableMigrateBit = 0x10u;
 
 // TypeDef hashes (dump.cs 2026-08-04).
 constexpr char kHashMapDataInfo[] =
-    "b3ef6432e5d656785439a78f3a15712ba11d05a9658ada4329d857e650e279d";
+    "a5fbae684ca9f39b46ece8fc0599b711f8e42ceb90ae91f2c0c9d1e65c38710";
 constexpr char kHashMapData[] =
-    "a08e159696c821e2f934c073a759701d4e6b402cd2f0070450066102602e91e";
+    "a2eca01ad670b3c4b4ba85636ed1dfa4dc01ac28c03a91163597f3e0c9f4cf1";
 constexpr char kHashSceneMap[] =
-    "c1607d012d9941255a4311cb45cf47e03fb0734bdf2135912fd491649108e9d";
+    "a0e81e802b84e652108c9ee7f8c05d725ea5198ae5b3ac01471779364217bfb";
 // IsTown / Option / Info / MapData backing / WM._field / WM._currentMapData
 constexpr char kHashIsTown[] =
-    "e7f59da34c0c229452bb9fcbb9ca820cf678bef001daf4f554da8319b4ab750";
+    "a0b6dac350c4a664a60c84dc90562fc5e127ab592ec77dbd7f08b7a25ebfeb3";
 constexpr char kHashOption[] =
-    "a94e2f7e901a469b3a23b08cb054c45f05b6fa032b687c4e8fadf9e1a70905a";
+    "a47df7b10bff5609aa05203b6f844beb94245afcbb4a848e47c9e8d289e70b3";
 constexpr char kHashMapDataInfoField[] =
-    "bf148145f08af34ee54153706ab530251d9eda4c312c8754e7a0e843b8b1729";
+    "d08fedab3887df3ffd2354535aa3baa385c9e49c098e1911177ebe43144150b";
 constexpr char kHashSceneMapDataBacking[] =
-    "<bf741fc69fa57e1fce8866516a66f33e0799d9c30cf854529675cf1ca99731e>k__BackingField";
+    "<bcab656236804c9b54d1bee33c5176eb9fa13c123b9787bd7ff0ae4903722ca>k__BackingField";
 constexpr char kHashWmField[] =
-    "a1466fc5ed9eeb49778c306ae741bfe859e433ccc633df746db2bbf5b36d22d";
+    "cd05676f83eff32a7a754d6c6287f124ca239987ddd9c57667f9cce26502a0e";
 constexpr char kHashWmCurrentMapData[] =
-    "d658906e3036511ee12af4b6ed3923401195d9865e97d89014f475202c563ed";
+    "ca7537d2fae3d15edc28a3fb9695328e94aedb3358c69a3c33807338687b5b9";
 
 constexpr DWORD kTickMsOn = 50;
 constexpr DWORD kTickMsOff = 500;

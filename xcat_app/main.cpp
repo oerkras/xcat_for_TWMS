@@ -169,7 +169,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     // attach_inject 日志进启动面板；启动模式落盘到 XCat_data/state（更新保留）。
     xcat::app::attach_inject::Init(&xcat::app::LaunchPanel_OnWebLog, prefsBin);
 
-    // 冷启：手动模式自动开监视；GAMA PASS 自动换票；gamania (HK) 等用户点。
+    // 冷启：手动自动监视；GAMA PASS / gamania (HK) 准备窗后自动换票启动。
     ui.pendingAutoLaunch = true;
     if (xcat::app::attach_inject::IsAttachWatchMode(
             xcat::app::attach_inject::GetLaunchMode())) {
@@ -180,9 +180,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
             // weblogin 尚未 Init；稍后 Init 会读盘。此处只设状态。
         }
-        ui.pendingAutoLaunch = false;
-        ui.status = "启动模式：gamania (HK) — 粘贴账密后点启动";
-        xcat::log::Info("App", "pending manual gamania(HK) one-click (no auto)");
+        xcat::app::LaunchPanel_ArmStrategyPrep(ui, 6000);
+        ui.status = "gamania (HK)：约 6 秒后自动启动（可再点按钮取消）";
+        xcat::log::Info("App", "pending auto gamania(HK) launch (defer 6s)");
     } else {
         msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
         xcat::app::LaunchPanel_ArmStrategyPrep(ui, 7000);

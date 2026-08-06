@@ -24,30 +24,29 @@ namespace {
 
 namespace il2 = x::runtime::il2cpp;
 
-// WM klass：il2cpp_shape::ResolveWorldManagerKlass（hash af152981… + shape 兜底）
-// SceneState / Field / CharacterId / FieldKey：hash → field_get_offset
+// WM klass：il2cpp_shape::ResolveWorldManagerKlass（hash acda742a… + shape 兜底）
+// SceneState / Field / CharacterId / FieldKey：hash → field_get_offset（2026-08-06 remount）
 // CharacterData / CharacterStat：SSOT = x::ui::player
 constexpr char kWorldManagerClass[] =
-    "af1529816d3e158e2939f3c03b4fe68c04930802ea39c8d6567d1fb4865b742";
-constexpr char kFieldClass[] =
-    "cfec8c2698a50442d8c39915b0ace84807a884ba8f42a4d45bdcd80c3d675d0";
+    "acda742ab51e7e2e3003fd2b44fbc00eababde4300ef17ac35b5f4fd01bee68";
 constexpr char kHashWmSceneState[] =
-    "d26c89da7c7b0b6cc91998e1c9f3c4d791ae04b1a293529ac4b0cb08810fc92";
+    "d190e0af58c4288d25573fdf91171036e93c69653c7357f9a1e4c7b7efd0077";
 constexpr char kHashWmField[] =
-    "a1466fc5ed9eeb49778c306ae741bfe859e433ccc633df746db2bbf5b36d22d";
+    "cd05676f83eff32a7a754d6c6287f124ca239987ddd9c57667f9cce26502a0e";
 constexpr char kHashWmCharacterId[] =
-    "<b22c0eb9efe2be1d842a589108889cca3ac4bb5bcdf1fb94cef55dcec6a48bb>k__BackingField";
-constexpr char kHashFieldKey[] =
-    "<c2521cc6ecfd1d5ca939178fc977a2eab4eaf08c7a72f669d21c8faba6e99c8>k__BackingField";
+    "<b33ad98e8d2b26e76c74ed2a5a5fe8ca99561c5ac3fc68e2962ea770f11acdf>k__BackingField";
+// FieldKey 现挂在 WM 本体（byte@_fieldKey），不再走 SceneField+0x98
+constexpr char kHashWmFieldKey[] =
+    "b4ba3b6c23175b5e7a2099cdc465f07c421273042694938c0193ea5be2a924c";
 
 constexpr size_t kFbWmSceneState = 0x34;
 constexpr size_t kFbWmField = 0x58;
-constexpr size_t kFbWmCharacterId = 0x98;
-constexpr size_t kFbFieldKey = 0x98;
+constexpr size_t kFbWmCharacterId = 0x90;  // was 0x98
+constexpr size_t kFbWmFieldKey = 0x80;     // was Field+0x98
 size_t gOffWmSceneState = kFbWmSceneState;
 size_t gOffWmField = kFbWmField;
 size_t gOffWmCharacterId = kFbWmCharacterId;
-size_t gOffFieldKey = kFbFieldKey;
+size_t gOffFieldKey = kFbWmFieldKey;
 #define kOffWmSceneState (gOffWmSceneState)
 #define kOffWmField (gOffWmField)
 #define kOffWmCharacterId (gOffWmCharacterId)
@@ -100,12 +99,11 @@ void EnsureWmFieldOff() {
     gWmFieldTried = true;
     void* wm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
     if (!wm) wm = il2::FindClass("", kWorldManagerClass);
-    void* field = il2::FindClass("", kFieldClass);
     int hits = 0;
     if (WmFieldOffHit(wm, kHashWmSceneState, kFbWmSceneState, &gOffWmSceneState)) ++hits;
     if (WmFieldOffHit(wm, kHashWmField, kFbWmField, &gOffWmField)) ++hits;
     if (WmFieldOffHit(wm, kHashWmCharacterId, kFbWmCharacterId, &gOffWmCharacterId)) ++hits;
-    if (WmFieldOffHit(field, kHashFieldKey, kFbFieldKey, &gOffFieldKey)) ++hits;
+    if (WmFieldOffHit(wm, kHashWmFieldKey, kFbWmFieldKey, &gOffFieldKey)) ++hits;
     x::runtime::LogI("WorldPort",
                      "wm/field slots path=%s hits=%d/4 scene=0x%zX field=0x%zX charId=0x%zX "
                      "fkey=0x%zX",
@@ -301,6 +299,7 @@ void Invalidate() {
     PublishWmLive(false);
     // Explicit leave-map: do not wait for the next IsPlayReady poll.
     x::runtime::main_thread::SetPumpPhase(x::runtime::main_thread::PumpPhase::Bootstrap);
+    x::runtime::managed_main::SetMapTransitBlock(true);
 }
 
 SceneState GetSceneState() {
@@ -347,6 +346,8 @@ bool IsPlayReady() {
     // Phase: InMap drains on WM.FixedUpdate/Update once MI patched; else Bootstrap hooks.
     x::runtime::main_thread::SetPumpPhase(ready ? x::runtime::main_thread::PumpPhase::InMap
                                                 : x::runtime::main_thread::PumpPhase::Bootstrap);
+    // 仓级契约：!PlayReady ⇒ managed_main::FindAll 默认拒（bypassFreeze 除外）。
+    x::runtime::managed_main::SetMapTransitBlock(!ready);
     return ready;
 }
 
@@ -358,9 +359,10 @@ void* GetMapScene() {
 }
 
 int GetMapSceneKey() {
-    void* mapScene = GetMapScene();
-    if (!mapScene) return -1;
-    return static_cast<int>(ReadU8(mapScene, kOffFieldKey));
+    // FieldKey 在 WM@0x80（2026-08-06），不再挂在 SceneField 上
+    void* wm = GetWorldManager();
+    if (!il2::LooksLikeHeapPtr(wm)) return -1;
+    return static_cast<int>(ReadU8(wm, kOffFieldKey));
 }
 
 int GetMapId() {

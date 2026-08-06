@@ -35,6 +35,9 @@ void IniSetU32(IniStore& ini, const char* section, const char* key, uint32_t val
 void IniSetBool(IniStore& ini, const char* section, const char* key, bool value);
 void IniSetFloat(IniStore& ini, const char* section, const char* key, float value);
 
+// 删除 section 内单个 key（不存在则无操作）。
+void IniEraseKey(IniStore& ini, const char* section, const char* key);
+
 // 删除 section 内所有以 prefix 开头的 key。
 // 写入约定：凡「prefix.N.field」可变/固定数组，Write 前必须先对本 prefix 调用本函数再按当前
 // count/槽位数重写；启动迁移 UserConfigMigrateObsolete 会按 count 清 N>count 的历史孤儿。

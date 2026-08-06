@@ -27,6 +27,9 @@
 #include "../features/ccu/ccu.h"
 #include "../features/multi_skill/multi_skill.h"
 #include "../features/simple_combat/simple_combat.h"
+#include "../features/ports/keypad_walk_bin.h"
+#include "../features/ports/unity_kbd_port.h"
+#include "../features/ports/key_macro_bin.h"
 #include "../features/auto_lie/auto_lie.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
@@ -87,6 +90,9 @@ constexpr DWORD kPumpTickAgeMaxMs = 3000;  // ≥ kPumpAliveMinMs
 constexpr uint32_t kPumpAliveMinTicks = 10;
 constexpr DWORD kPumpAlivePollMs = 200;
 constexpr DWORD kPlayReadyPollMs = 400;
+// play-ready 瞬间常仍 freeze=1（c9b8dc 第 2 局）；冻屏未散就开 PLAY → drain/job timeout。
+// 要求连续未冻满此时长再放行。
+constexpr DWORD kPlayUnfreezeStableMs = 300;
 
 struct ManagedProbeGuard {
     ManagedProbeGuard() { gInManagedProbe.store(true, std::memory_order_release); }
@@ -128,6 +134,10 @@ void StopAllFeatureWorkers() {
     xcat::sound::CancelPlayback();
     x::features::fly::StopWorker();
     x::features::simple_combat::StopWorker();
+    x::features::ports::keypad_walk_bin::Shutdown();
+    x::features::ports::key_macro_bin::Shutdown();
+    // 摘掉 Keyboard.PreProcessEvent 的 vtable 钩，否则卸载后游戏会调进已释放内存。
+    x::features::ports::unity_kbd::Shutdown();
     x::features::auto_supply::StopWorker();
     x::features::sellbag::StopWorker();
     x::features::attack_rpc::StopWorker();
@@ -161,12 +171,118 @@ void StopAllFeatureWorkers() {
         stmt;                        \
     } while (0)
 
-// 登录期：只开过图/会话必需，避免 login-freeze 下齐开 FindClass 重活（5e3768/review）。
+// play-ready 后齐开会把 MainPump 队列打满（实机：进场秒 131 LogI/s + job timeout → 卡顿）。
+// 每步等泵排空再让出；批次之间再拉长。XCAT_PLAY_BOOT_STAGGER=0 可关回同步齐开。
+// c72cff：固定 500ms settle 起步仍 q=3 → settle 内 job timeout；改为等 q=0（带上下限）。
+constexpr DWORD kPlayBootSettleMinMs = 300;   // 至少让出切图帧
+constexpr DWORD kPlayBootSettleMaxMs = 2500;  // 等 q=0 上限；到期仍堵则 cap 后继续
+constexpr DWORD kPlayBootStepGapMs = 80;
+constexpr DWORD kPlayBootBatchGapMs = 250;
+constexpr DWORD kPlayBootDrainMaxMs = 2000;  // ≥ InvokeAndWait 默认 1500，避免半排空就下一步
+constexpr DWORD kPlayBootDrainPollMs = 20;
+
+bool EnvPlayBootStaggerOff() {
+    char buf[8]{};
+    const DWORD n = GetEnvironmentVariableA("XCAT_PLAY_BOOT_STAGGER", buf, sizeof(buf));
+    if (!n || n >= sizeof(buf)) return false;
+    return buf[0] == '0' || buf[0] == 'n' || buf[0] == 'N' || buf[0] == 'f' || buf[0] == 'F';
+}
+
+// unfreeze 后等泵空闲再动第一批 survival（削 settle 窗 job timeout）。
+bool WaitPlayBootSettleIdle() {
+    if (AbortRequested()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    const int q0 = x::runtime::main_thread::QueuedJobCount();
+    x::runtime::LogI("Bootstrap",
+                     "play-boot settle wait q=0 (min=%ums max=%ums, q0=%d congested=%d)",
+                     (unsigned)kPlayBootSettleMinMs, (unsigned)kPlayBootSettleMaxMs, q0,
+                     x::runtime::main_thread::IsCongested() ? 1 : 0);
+    const DWORD t0 = GetTickCount();
+    DWORD lastLog = 0;
+    while (!AbortRequested()) {
+        const int q = x::runtime::main_thread::QueuedJobCount();
+        const bool congested = x::runtime::main_thread::IsCongested();
+        const DWORD elapsed = GetTickCount() - t0;
+        if (elapsed >= kPlayBootSettleMinMs && q <= 0 && !congested) {
+            x::runtime::LogI("Bootstrap", "play-boot settle idle after %ums (q=0)",
+                             (unsigned)elapsed);
+            return true;
+        }
+        if (elapsed >= kPlayBootSettleMaxMs) {
+            x::runtime::LogI("Bootstrap",
+                             "play-boot settle cap %ums q=%d congested=%d — proceed",
+                             (unsigned)elapsed, q, congested ? 1 : 0);
+            break;
+        }
+        if (lastLog == 0 || elapsed - lastLog >= 500) {
+            lastLog = elapsed;
+            x::runtime::LogI("Bootstrap", "play-boot settle… %ums q=%d congested=%d",
+                             (unsigned)elapsed, q, congested ? 1 : 0);
+        }
+        Sleep(kPlayBootDrainPollMs);
+    }
+    if (AbortRequested()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    return true;
+}
+
+bool YieldAfterPlayBootStep(bool batchBoundary) {
+    if (AbortRequested()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    if (EnvPlayBootStaggerOff()) return true;
+    const DWORD t0 = GetTickCount();
+    while (!AbortRequested()) {
+        const int q = x::runtime::main_thread::QueuedJobCount();
+        const bool congested = x::runtime::main_thread::IsCongested();
+        if (q <= 0 && !congested) break;
+        if (GetTickCount() - t0 >= kPlayBootDrainMaxMs) {
+            x::runtime::LogI("Bootstrap", "play-boot drain cap q=%d congested=%d", q,
+                             congested ? 1 : 0);
+            break;
+        }
+        Sleep(kPlayBootDrainPollMs);
+    }
+    if (AbortRequested()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    Sleep(batchBoundary ? kPlayBootBatchGapMs : kPlayBootStepGapMs);
+    if (AbortRequested()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    return true;
+}
+
+#define XCAT_PLAY_BOOT_STEP(stmt)                            \
+    do {                                                     \
+        if (AbortRequested()) {                              \
+            StopAllFeatureWorkers();                         \
+            return false;                                    \
+        }                                                    \
+        stmt;                                                \
+        if (!YieldAfterPlayBootStep(false)) return false;    \
+    } while (0)
+
+#define XCAT_PLAY_BOOT_BATCH(tag)                                                 \
+    do {                                                                          \
+        if (!YieldAfterPlayBootStep(true)) return false;                          \
+        x::runtime::LogI("Bootstrap", "play-boot batch %s (q=%d)", (tag),         \
+                         x::runtime::main_thread::QueuedJobCount());              \
+    } while (0)
+
+// 登录期：会话必需 + 可无角色/地图的冷绑定与读盘（削落地 FindClass/TSV 尖峰）。
+// 勿在此处 StartWorker 依赖 MyUser/怪池的玩法；login-freeze 期间若 DETACH 仍走 Abort。
 bool StartLoginPathWorkers() {
     if (AbortRequested()) return false;
     x::runtime::LogI("Bootstrap",
-                     "MainPump alive — start LOGIN workers (kick_sniff + auto_enter + ccu + "
-                     "payload_status + titlebar)");
+                     "MainPump alive — start LOGIN workers (session + preland cold init)");
     XCAT_BOOT_STEP(x::features::kick_sniff::Init());
     XCAT_BOOT_STEP(x::features::kick_sniff::StartWorker());
     XCAT_BOOT_STEP(x::features::auto_enter::Init());
@@ -176,6 +292,26 @@ bool StartLoginPathWorkers() {
     XCAT_BOOT_STEP(x::ipc::PayloadStatus_Start());
     XCAT_BOOT_STEP(x::features::titlebar::Init());
     XCAT_BOOT_STEP(x::features::titlebar::StartWorker());
+
+    // —— pre-land 冷绑定 / 读盘 / 空转线程（选角·进图途中摊掉）——
+    x::runtime::LogI("Bootstrap", "LOGIN preland cold init (skill/input/consumable/graph/…)");
+    XCAT_BOOT_STEP(x::features::buffs::Init());
+    XCAT_BOOT_STEP(x::ipc::PayloadBuffs_ApplyInitial());
+    XCAT_BOOT_STEP(x::features::multi_skill::Init());
+    XCAT_BOOT_STEP(x::features::timed_keys::Init());
+    XCAT_BOOT_STEP(x::ipc::PayloadTimedKeys_ApplyInitial());
+    XCAT_BOOT_STEP(x::features::autopot::Init());
+    XCAT_BOOT_STEP(x::features::travel::Init());
+    XCAT_BOOT_STEP(x::features::travel::PreloadGraph());
+    XCAT_BOOT_STEP(x::features::sellbag::Init());
+    XCAT_BOOT_STEP(x::features::worldmap_marker_travel::Init());
+    XCAT_BOOT_STEP(x::features::frame_lock::Init());
+    XCAT_BOOT_STEP(x::features::frame_lock::StartWorker());
+    XCAT_BOOT_STEP(x::features::channel_hop::Init());
+    XCAT_BOOT_STEP(x::features::channel_hop::StartWorker());
+    XCAT_BOOT_STEP(x::features::auto_lie::Init());
+    XCAT_BOOT_STEP(x::features::auto_lie::StartWorker());
+
     if (AbortRequested()) {
         StopAllFeatureWorkers();
         return false;
@@ -183,65 +319,71 @@ bool StartLoginPathWorkers() {
     return true;
 }
 
-// 进图后：其余 FindClass / 玩法 workers。
+// 进图后：只开需要角色/地图的 Init + StartWorker。冷绑定已在 LOGIN。
+// 分片启动，避免进场帧被泵队列堵死。
 bool StartPlayPathWorkers() {
     if (AbortRequested()) return false;
+    const bool stagger = !EnvPlayBootStaggerOff();
     x::runtime::LogI("Bootstrap",
-                     "play-ready — start PLAY workers (invuln + combat + loot + …)");
-    XCAT_BOOT_STEP(x::features::invuln::Init());
-    XCAT_BOOT_STEP(x::features::invuln::StartWorker());
-    XCAT_BOOT_STEP(x::features::attack_accel::Init());
-    XCAT_BOOT_STEP(x::features::attack_accel::StartWorker());
-    XCAT_BOOT_STEP(x::features::final_attack_force::Init());
-    XCAT_BOOT_STEP(x::features::final_attack_force::StartWorker());
-    XCAT_BOOT_STEP(x::features::skill_max_level::Init());
-    XCAT_BOOT_STEP(x::features::skill_max_level::StartWorker());
-    XCAT_BOOT_STEP(x::features::mob_scan::Init());
-    XCAT_BOOT_STEP(x::features::mob_scan::StartWorker());
-    XCAT_BOOT_STEP(x::features::autopot::Init());
-    XCAT_BOOT_STEP(x::features::autopot::StartWorker());
-    XCAT_BOOT_STEP(x::features::pet_feed::Init());
-    XCAT_BOOT_STEP(x::features::pet_feed::StartWorker());
-    XCAT_BOOT_STEP(x::features::pet_loot::Init());
-    XCAT_BOOT_STEP(x::ipc::PayloadPetLoot_ApplyInitial());
-    XCAT_BOOT_STEP(x::features::pet_loot::StartWorker());
-    XCAT_BOOT_STEP(x::features::timed_keys::Init());
-    XCAT_BOOT_STEP(x::ipc::PayloadTimedKeys_ApplyInitial());
-    XCAT_BOOT_STEP(x::features::timed_keys::StartWorker());
-    XCAT_BOOT_STEP(x::features::buffs::Init());
-    XCAT_BOOT_STEP(x::ipc::PayloadBuffs_ApplyInitial());
-    XCAT_BOOT_STEP(x::features::buffs::StartWorker());
-    XCAT_BOOT_STEP(x::features::multi_skill::Init());
-    XCAT_BOOT_STEP(x::features::multi_skill::StartWorker());
-    XCAT_BOOT_STEP(x::features::travel::Init());
-    XCAT_BOOT_STEP(x::features::travel::StartWorker());
-    XCAT_BOOT_STEP(x::features::worldmap_marker_travel::Init());
-    XCAT_BOOT_STEP(x::features::sellbag::Init());
-    XCAT_BOOT_STEP(x::features::sellbag::StartWorker());
-    XCAT_BOOT_STEP(x::features::attack_rpc::Init());
-    XCAT_BOOT_STEP(x::features::attack_rpc::StartWorker());
-    XCAT_BOOT_STEP(x::features::auto_supply::Init());
-    XCAT_BOOT_STEP(x::features::auto_supply::StartWorker());
-    XCAT_BOOT_STEP(x::features::simple_combat::Init());
-    XCAT_BOOT_STEP(x::features::simple_combat::StartWorker());
-    XCAT_BOOT_STEP(x::features::fly::Init());
-    XCAT_BOOT_STEP(x::features::fly::StartWorker());
-    XCAT_BOOT_STEP(x::features::auto_lie::Init());
-    XCAT_BOOT_STEP(x::features::auto_lie::StartWorker());
-    XCAT_BOOT_STEP(x::features::drop_alert_bypass::Init());
-    XCAT_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
-    XCAT_BOOT_STEP(x::features::auction_town_bypass::Init());
-    XCAT_BOOT_STEP(x::features::auction_town_bypass::StartWorker());
-    XCAT_BOOT_STEP(x::features::ga_text_probe::Init());
-    XCAT_BOOT_STEP(x::features::ga_text_probe::StartWorker());
-    XCAT_BOOT_STEP(x::features::channel_hop::Init());
-    XCAT_BOOT_STEP(x::features::channel_hop::StartWorker());
-    XCAT_BOOT_STEP(x::features::encounter::Init());
-    XCAT_BOOT_STEP(x::features::encounter::StartWorker());
-    XCAT_BOOT_STEP(x::features::player_hide::Init());
-    XCAT_BOOT_STEP(x::features::player_hide::StartWorker());
-    XCAT_BOOT_STEP(x::features::frame_lock::Init());
-    XCAT_BOOT_STEP(x::features::frame_lock::StartWorker());
+                     "play-ready — start PLAY workers %s (survival first; cold init already done)",
+                     stagger ? "staggered" : "sync(XCAT_PLAY_BOOT_STAGGER=0)");
+
+    // 切图刚落地时主线程最忙：等泵 q=0（min/max）再动第一批。
+    if (stagger) {
+        if (!WaitPlayBootSettleIdle()) return false;
+    }
+
+    // 1) 保命：无敌 → 掉落报警 → 药/键/Buff 线程 → 攻速
+    XCAT_PLAY_BOOT_STEP(x::features::invuln::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::invuln::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
+    XCAT_PLAY_BOOT_BATCH("survival-skills");
+    XCAT_PLAY_BOOT_STEP(x::features::autopot::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::timed_keys::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::buffs::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::multi_skill::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::attack_accel::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::attack_accel::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::final_attack_force::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::final_attack_force::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::skill_max_level::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::skill_max_level::StartWorker());
+
+    // 2) 扫描 / 宠物 / 赶路卖物（Init 已提前的只 StartWorker）
+    XCAT_PLAY_BOOT_BATCH("scan+pets+travel");
+    XCAT_PLAY_BOOT_STEP(x::features::mob_scan::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::mob_scan::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::pet_feed::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::pet_feed::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::pet_loot::Init());
+    XCAT_PLAY_BOOT_STEP(x::ipc::PayloadPetLoot_ApplyInitial());
+    XCAT_PLAY_BOOT_STEP(x::features::pet_loot::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::travel::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::sellbag::StartWorker());
+
+    // 3) 战斗与其余（teleport EnsureBound 改懒绑，Worker 入口不再扫方法表）
+    XCAT_PLAY_BOOT_BATCH("combat+misc");
+    XCAT_PLAY_BOOT_STEP(x::features::attack_rpc::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::attack_rpc::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::auto_supply::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::auto_supply::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::simple_combat::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::simple_combat::StartWorker());
+    // 走路只读采证（默认开；XCAT_WALK_BIN=0 关）。请关 F5/拟人后手按左右。
+    XCAT_PLAY_BOOT_STEP(x::features::ports::keypad_walk_bin::Init());
+    // KeyMacroAnalyzer Put/句柄 BIN（默认开；XCAT_KEYMACRO_BIN=0 关）→ key_macro_bin.log
+    XCAT_PLAY_BOOT_STEP(x::features::ports::key_macro_bin::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::fly::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::fly::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::ga_text_probe::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::ga_text_probe::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::encounter::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::encounter::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::player_hide::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::player_hide::StartWorker());
     if (AbortRequested()) {
         StopAllFeatureWorkers();
         return false;
@@ -250,6 +392,8 @@ bool StartPlayPathWorkers() {
 }
 
 #undef XCAT_BOOT_STEP
+#undef XCAT_PLAY_BOOT_STEP
+#undef XCAT_PLAY_BOOT_BATCH
 
 // 自首次见到真实 tick 起墙钟满 minMs，且当前仍在跳动、累计 ticks 够 —— 不要求无间隙连续 streak。
 bool WaitPumpTicking() {
@@ -293,23 +437,34 @@ bool WaitPumpTicking() {
     return false;
 }
 
-// 进图后再开玩法 workers。IsPlayReady 经泵；冻屏期间失败则继续等。
+// 进图后再开玩法 workers：要 map+WM ready，且 login-freeze 已散（再稳一小段）。
 bool WaitPlayReadyForWorkers() {
     DWORD lastLog = 0;
+    DWORD unfreezeSince = 0;
     x::runtime::LogI("Bootstrap",
-                     "wait play-ready (map+WM) before PLAY workers (login-freeze safe)");
+                     "wait play-ready + unfreeze (≥%ums) before PLAY workers",
+                     static_cast<unsigned>(kPlayUnfreezeStableMs));
     while (!AbortRequested()) {
-        if (x::features::ports::world::IsPlayReady()) {
-            x::runtime::LogI("Bootstrap", "play-ready ok — freeze=%d",
-                             x::runtime::managed_main::IsLoginFrozen() ? 1 : 0);
-            return true;
-        }
+        const bool ready = x::features::ports::world::IsPlayReady();
+        const bool frozen = x::runtime::managed_main::IsLoginFrozen();
         const DWORD now = GetTickCount();
+        if (ready && !frozen) {
+            if (!unfreezeSince) unfreezeSince = now;
+            if (now - unfreezeSince >= kPlayUnfreezeStableMs) {
+                x::runtime::LogI("Bootstrap",
+                                 "play-ready + unfreeze ok (stable=%ums freeze=0) — PLAY next",
+                                 static_cast<unsigned>(now - unfreezeSince));
+                return true;
+            }
+        } else {
+            unfreezeSince = 0;
+        }
         if (lastLog == 0 || now - lastLog >= kColdStartLogMs) {
             lastLog = now;
             x::runtime::LogI("Bootstrap",
-                             "play-ready wait… freeze=%d pumpLive=%d scene=%d",
-                             x::runtime::managed_main::IsLoginFrozen() ? 1 : 0,
+                             "play-ready wait… ready=%d freeze=%d unfreezeMs=%u pumpLive=%d scene=%d",
+                             ready ? 1 : 0, frozen ? 1 : 0,
+                             unfreezeSince ? static_cast<unsigned>(now - unfreezeSince) : 0u,
                              x::runtime::main_thread::IsPumpTicking(kPumpTickAgeMaxMs) ? 1 : 0,
                              static_cast<int>(x::features::ports::world::GetSceneState()));
         }

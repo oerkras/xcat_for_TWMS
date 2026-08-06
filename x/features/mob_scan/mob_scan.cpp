@@ -27,16 +27,22 @@ namespace features {
 namespace mob_scan {
 namespace {
 
-// BIN：攻击加速下缓存 360ms 会拖尸体空砍；打怪开启时用面板周期（默认 50）对齐同行瞬切。
+// BIN：攻击加速下缓存 360ms 会拖尸体空砍；打怪开启时用面板周期（默认 20）对齐同行瞬切。
 constexpr DWORD kScanIntervalIdleMs = 360;
 constexpr DWORD kIdleSleepMs = 15;
 constexpr DWORD kForceLogMs = 5000;
 constexpr DWORD kCountLogMs = 500;  // count 变：短摘要写盘上限
 constexpr DWORD kMissLogMs = 15000;
+// 同图 foothold / LifeList(M) 降频：活怪字典仍按 combat interval 扫。
+constexpr DWORD kFhRefreshMs = 500;
+constexpr DWORD kSpawnSlotsRefreshMs = 500;
 
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
 std::atomic<uint32_t> gCombatIntervalMs{xcat::kMobScanIntervalDefaultMs};
+std::atomic<bool> gForceScan{false};
+// auto-reset：RequestImmediateScan / Stop 打断等待。Stop 不 join，故进程内永不 Close。
+std::atomic<HANDLE> gWakeEvt{nullptr};
 HANDLE gLog = INVALID_HANDLE_VALUE;
 
 void WriteLogHandle(HANDLE h, const char* buf, int n) {
@@ -110,6 +116,37 @@ void LogLine(const char* fmt, ...) {
     x::runtime::LogI("MobScan", "%s", body);
 }
 
+void EnsureWakeEvent() {
+    if (gWakeEvt.load(std::memory_order_acquire)) return;
+    HANDLE ev = CreateEventW(nullptr, FALSE /*auto-reset*/, FALSE, nullptr);
+    if (!ev) {
+        LogLine("EnsureWakeEvent CreateEvent failed gle=%lu (fallback Sleep)",
+                (unsigned long)GetLastError());
+        return;
+    }
+    HANDLE expected = nullptr;
+    if (!gWakeEvt.compare_exchange_strong(expected, ev, std::memory_order_acq_rel,
+                                          std::memory_order_acquire)) {
+        CloseHandle(ev);  // 输给另一条创建 路径，保留赢家
+    }
+}
+
+void SignalWake() {
+    HANDLE ev = gWakeEvt.load(std::memory_order_acquire);
+    if (ev) SetEvent(ev);
+}
+
+// 可被 SignalWake 打断的等待；无事件时回退 Sleep。
+void WaitWake(DWORD ms) {
+    if (ms < 1) ms = 1;
+    HANDLE ev = gWakeEvt.load(std::memory_order_acquire);
+    if (ev) {
+        WaitForSingleObject(ev, ms);
+        return;
+    }
+    Sleep(ms);
+}
+
 DWORD WINAPI Worker(LPVOID) {
     timeBeginPeriod(1);
     OpenLog();
@@ -125,6 +162,8 @@ DWORD WINAPI Worker(LPVOID) {
     int lastFhMapId = -1;
     bool lastCombat = false;
     DWORD lastCombatInterval = 0;
+    DWORD lastFhRefresh = 0;
+    DWORD lastSlotsRefresh = 0;
 
     while (!gWorkerStop.load(std::memory_order_acquire)) {
         const DWORD now = GetTickCount();
@@ -133,18 +172,20 @@ DWORD WINAPI Worker(LPVOID) {
                 lastMissLog = now;
                 LogLine("mobscan wait: GameAssembly / class bind");
             }
-            Sleep(kIdleSleepMs);
+            WaitWake(kIdleSleepMs);
             continue;
         }
 
         if (!ports::world::IsPlayReady()) {
             lastFhMapId = -1;  // 离开地图后重进同图也要再 dump
+            lastFhRefresh = 0;
+            lastSlotsRefresh = 0;
             if (now - lastMissLog >= kMissLogMs) {
                 lastMissLog = now;
                 const int st = static_cast<int>(ports::world::GetSceneState());
                 LogLine("mobscan wait: not play ready scene=%d", st);
             }
-            Sleep(kIdleSleepMs);
+            WaitWake(kIdleSleepMs);
             continue;
         }
 
@@ -152,6 +193,15 @@ DWORD WINAPI Worker(LPVOID) {
         const DWORD combatInterval = static_cast<DWORD>(
             xcat::ClampMobScanIntervalMs(gCombatIntervalMs.load(std::memory_order_acquire)));
         const DWORD interval = combatOn ? combatInterval : kScanIntervalIdleMs;
+        if (gForceScan.exchange(false, std::memory_order_acq_rel)) {
+            lastScan = 0;
+            static DWORD sForceLog = 0;
+            if (!sForceLog || now - sForceLog > 200) {
+                sForceLog = now;
+                LogLine("mobscan force interval=%ums combat=%d", (unsigned)interval,
+                        combatOn ? 1 : 0);
+            }
+        }
         if (combatOn != lastCombat || (combatOn && combatInterval != lastCombatInterval)) {
             lastCombat = combatOn;
             lastCombatInterval = combatInterval;
@@ -160,36 +210,54 @@ DWORD WINAPI Worker(LPVOID) {
             lastScan = 0;  // 立刻扫一帧，避免切模式/改速空窗
         }
         if (lastScan && now - lastScan < interval) {
-            Sleep(kIdleSleepMs);
+            if (gForceScan.load(std::memory_order_acquire)) {
+                lastScan = 0;
+                continue;
+            }
+            // 按剩余时间等；SetEvent 可立刻打断（杀怪/停线程），不必再切 15ms 片。
+            DWORD remain = interval - (now - lastScan);
+            if (remain < 1) remain = 1;
+            WaitWake(remain);
             continue;
         }
-        lastScan = now;
 
-        // 换图：堆缓存枚举 foothold / 绳子（勿栈 Snapshot）
-        {
+        // 换图或周期性：堆缓存枚举 foothold / 绳子（勿栈 Snapshot）。同图降频减负。
+        const bool needFh =
+            !lastFhRefresh || (now - lastFhRefresh >= kFhRefreshMs) || lastFhMapId <= 0;
+        if (needFh) {
             ports::foothold::SnapshotMeta fh{};
-            if (ports::foothold::CollectToCache(&fh) && fh.mapId > 0 && fh.mapId != lastFhMapId) {
-                lastFhMapId = fh.mapId;
-                ports::foothold::DumpCachedLog();
-                ports::foothold_path::GraphMeta gm{};
-                const bool gOk = ports::foothold_path::EnsureGraph() &&
-                                 ports::foothold_path::GetGraphMeta(&gm);
-                LogLine("foothold map=%d n=%d ladders=%d curFh=%u mismatch=%d "
-                        "graph=%d nodes=%d walk=%d climb=%d fall=%d ropeLink=%d (see foothold.log)",
-                        fh.mapId, fh.footholdN, fh.ladderN, fh.curFhId, fh.idMismatch,
-                        gOk ? 1 : 0, gm.nodes, gm.walkEdges, gm.climbEdges, gm.fallEdges,
-                        gm.ropeLinked);
+            if (ports::foothold::CollectToCache(&fh) && fh.mapId > 0) {
+                lastFhRefresh = GetTickCount();  // 与 lastScan 同：采集完成后再记时
+                if (fh.mapId != lastFhMapId) {
+                    lastFhMapId = fh.mapId;
+                    lastSlotsRefresh = 0;  // 换图立刻重刷 M
+                    ports::foothold::DumpCachedLog();
+                    ports::foothold_path::GraphMeta gm{};
+                    const bool gOk = ports::foothold_path::EnsureGraph() &&
+                                     ports::foothold_path::GetGraphMeta(&gm);
+                    LogLine("foothold map=%d n=%d ladders=%d curFh=%u mismatch=%d "
+                            "graph=%d nodes=%d walk=%d climb=%d fall=%d ropeLink=%d (see foothold.log)",
+                            fh.mapId, fh.footholdN, fh.ladderN, fh.curFhId, fh.idMismatch,
+                            gOk ? 1 : 0, gm.nodes, gm.walkEdges, gm.climbEdges, gm.fallEdges,
+                            gm.ropeLinked);
+                }
             }
         }
 
+        const bool fillSlots =
+            !lastSlotsRefresh || (now - lastSlotsRefresh >= kSpawnSlotsRefreshMs);
         ports::mob::Snapshot snap{};
-        if (!ports::mob::Collect(snap)) {
+        if (!ports::mob::Collect(snap, fillSlots)) {
             if (now - lastMissLog >= kMissLogMs) {
                 lastMissLog = now;
                 LogLine("mobscan miss: pool/findall empty");
             }
+            // 失败不推进 lastScan，短等后重试（禁止空转占满 combat interval）。
+            WaitWake(kIdleSleepMs);
             continue;
         }
+        lastScan = GetTickCount();  // Collect 之后，避免长 Collect 把间隔算偏紧
+        if (fillSlots) lastSlotsRefresh = lastScan;
 
         // 日志与扫描解耦：count 变 → 短摘要（仅文件，≥kCountLogMs）；
         // 每 kForceLogMs → 带样例（文件+x.jsonl）。
@@ -243,10 +311,12 @@ DWORD WINAPI Worker(LPVOID) {
 
 void Init() {
     OpenLog();
+    EnsureWakeEvent();
     LogLine("Init");
 }
 
 void Shutdown() {
+    // 不 Close gWakeEvt：StopWorker 不 join，worker 可能仍在 WaitWake；句柄随进程回收。
     StopWorker();
     if (gLog != INVALID_HANDLE_VALUE) {
         CloseHandle(gLog);
@@ -256,6 +326,7 @@ void Shutdown() {
 
 void StartWorker() {
     if (gWorkerThread.load(std::memory_order_acquire)) return;
+    EnsureWakeEvent();
     gWorkerStop.store(false, std::memory_order_release);
     HANDLE th = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
     if (!th) {
@@ -267,6 +338,7 @@ void StartWorker() {
 
 void StopWorker() {
     gWorkerStop.store(true, std::memory_order_release);
+    SignalWake();  // 打断 WaitWake，尽快离开循环（仍不 join）
     HANDLE th = gWorkerThread.exchange(nullptr, std::memory_order_acq_rel);
     // DllMain detach: never join (loader lock). Just signal.
     if (th) CloseHandle(th);
@@ -275,11 +347,19 @@ void StopWorker() {
 void SetCombatIntervalMs(uint32_t ms) {
     const uint32_t v = xcat::ClampMobScanIntervalMs(ms ? ms : xcat::kMobScanIntervalDefaultMs);
     const uint32_t prev = gCombatIntervalMs.exchange(v, std::memory_order_acq_rel);
-    if (prev != v) LogLine("SetCombatIntervalMs %u (prev=%u)", (unsigned)v, (unsigned)prev);
+    if (prev != v) {
+        LogLine("SetCombatIntervalMs %u (prev=%u)", (unsigned)v, (unsigned)prev);
+        SignalWake();  // 立刻按新间隔重算，别卡在旧 remain
+    }
 }
 
 uint32_t GetCombatIntervalMs() {
     return gCombatIntervalMs.load(std::memory_order_acquire);
+}
+
+void RequestImmediateScan() {
+    gForceScan.store(true, std::memory_order_release);
+    SignalWake();
 }
 
 }  // namespace mob_scan

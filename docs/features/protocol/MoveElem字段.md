@@ -288,6 +288,227 @@ CMS 另有更大的 `ActionType`（Walk1/Stand1/Swing… 动画层，TypeDef 151
 
 ## 11. InputX 调用链与 OnResolveMoveAction 决策树（2026-08-01）
 
+> **⚠️ 结论更正 · 2026-08-07 实机定案（先读这段再往下看）**
+>
+> 本章 §11.6～§11.12 的调查方向整体偏了一层。真源是 `UnityEngine.InputSystem` 的 `Keyboard` 设备；
+> KeyPad / latch / `SetInput` 全在它下游，被上游「有没有按键」那道门闩管着——门不开，`CalcWalk` 根本不跑。
+>
+> **门闩吃「状态变化」，不吃「当前状态」**（2026-08-07 IDB 逐项查证 + 实机数据双向确认）。
+> 游戏代码段（`0x7ff849xxxxxx`）对所有轮询式输入 API 的调用次数：
+>
+> | API | RVA | 游戏代码调用方 |
+> |---|---|---|
+> | `Keyboard.get_current` | `0x4755120` | 无（仅 MethodInfo 数据引用） |
+> | `InputAction.IsPressed` / `WasPressedThisFrame` | `0x469D330` / `0x469D490` | 无（仅 InputSystem 包自身） |
+> | `InputAction.ReadValue<float/int>` | `0x210B3D0` / `0x210B1F0` | 无 |
+> | `InputAction.get_triggered` / `get_phase` | `0x469C3C0` / `0x469C070` | 无 |
+> | `Input.GetAxis` / `GetAxisRaw` / `GetKeyInt` | `0x4F13480` / `0x4F13600` / `0x4F13900` | 无 |
+> | `Input.GetKey(KeyCode)` | `0x4F13BC0` | **仅 1 处**：`UserLocal.IsSit()` @ `0x1080BA0` |
+>
+> 那唯一一处旧版调用只管起立，与走位无关；三个 KeyCode 被常量混淆，实读种子表 `0x7FF84F4D3940` 手算：
+> `0x1DBDC3E4+0xE2423D2D=0x1_00000111`→273 上、`0xF7FCD8EB+0x08032829=0x1_00000114`→276 左、
+> `0x27C18122+0xD83E7FF1=0x1_00000113`→275 右。
+>
+> 一处都不轮询，配上运行时实测（纯事件注入 71.4% 能走 / 直写状态缓冲降到 10.2%），
+> 结论是消费方式为**变化驱动**（change monitor / `InputAction` 回调），只认状态发生了改变。
+> 这一条同时解释了「前台一顿一顿」和「直写反而更差」两个现象，见下方坑 4。
+>
+> 三条已实机证伪的路径，别再试：
+>
+> | 路径 | 实机结果 |
+> |---|---|
+> | 写 `KeyPad.SetFields`(A/B/C) | 无位移 |
+> | vtable 钩「`KeyPad.PackState`」(Slot4) 改返回值 `bit0` | **该测试无效**，见下 |
+> | 直写 `VecCtrl.InputX@+0x50` 或锁存 `+0x100+0x10` | `inX`/`ma` 确实写进去了，`vx` 恒 `0.00` |
+>
+> ⚠️ **第二条是伪实验，结论不成立**（2026-08-07 更正）。`kOffKeyPadSlot4`（`klass+0x178`）所指的类
+> **不是** KeyPad 而是 `Rand32`，slot 4 = `Rand32.Random()`。四条独立证据一致：
+> ① 运行期自校验日志 `origRva=0x16C9170 expect=0x16C9170 match=1`，地址是真的；
+> ② 该 RVA 在 dump 里就是 `public virtual uint Random()`；
+> ③ 反编译为 xorshift（三状态字 `a1[4..6]`、移位 13/19 · 4/25 · 8/11，XOR 全被展开成
+> `(a|~b)+(b|~a)-2*~(a|b)-2*(a&b)` 的混淆形式）；
+> ④ `Random()` 正是 `Rand32` 的首个自有虚方法，恰好落在 slot 4（前四槽属 `Object`）。
+> 所以当初是在给一个伪随机数翻位，从未碰到真的 PackState。连带后果：BIN 里 `packRet` / `qbit` / `hits`
+> 三列全是随机噪声，且 `hits>0` 几乎恒真，把 BIN 的空闲节流整体旁通。钩子与这三列已拆除；
+> `attack_input_port` 里那条会**写** `bit0` 的 PackBit 驱动路（等于污染游戏 RNG 流）已默认拒装。
+>
+> 第三条的 BIN 早就给了答案，只是当时读反了：我们写的 `inX=1 ma=2` **一直挂着没被清零**，
+> 说明 `WorkUpdate` 的输入分支压根没进来——既没人覆盖我们，也没人算速度。
+> 所以 §11.6 表格里「被同帧 `SetInput(锁存)` 盖掉」这个判断方向对、机制错：真问题是**门闩没开**。
+>
+> **正解**：构造 `StateEvent` 灌进 Keyboard 设备，见 `x/features/ports/unity_kbd_port.cpp`。
+> 整条链会当成「真的按住了方向键」来跑，且绕开 Raw Input，**失焦照样生效**。
+>
+> 实机验证（02:14 BIN）：`walkW Hold mode=Kbd kbd=1 vk=0x00 fg=0` 持续位移，
+> `human_no_move` 0 次；尾段 1496 个采样里 1079 个 `vx≠0`，峰值 `|vx|=1270.97`。
+>
+> #### 真源链路
+>
+> ```
+> InputSystem.QueueEvent(StateEvent 'STAT' + 'KEYS')
+>   → Keyboard.IEventPreProcessor.PreProcessEvent   ← 每个事件的必经收口点（守位钩子在这里）
+>   → Keyboard 设备状态位图（leftArrow=bit61 / rightArrow=bit62）
+>   → 状态变化监视器 / InputAction 回调   ← 门闩在这里（吃变化，不吃当前值）
+>   → latch (vc+0x100+0x10)
+>   → VecCtrl.SetInput → OnResolveMoveAction → ma
+>   → CalcWalk → vx → ApX
+> ```
+>
+> | 项 | 值（运行期 dump · remount 2026-08-06） |
+> |---|---|
+> | `InputSystem.QueueEvent(InputEventPtr)` | RVA `0x46F9C30` |
+> | `Keyboard.get_current()` | RVA `0x4755120` |
+> | `InputSystem.get_settings()` | RVA `0x46FA2E0` |
+> | `InputSettings.set_backgroundBehavior` | RVA `0x47786B0` |
+> | `InputSystem.EnableDevice(InputDevice)` | RVA `0x46F8920` |
+> | `InputDevice.m_DeviceId` | `+0xE4` |
+> | `InputDevice.m_LastUpdateTimeInternal` | `+0x130` |
+> | `StateEvent` 布局 | `baseEvent@0x00`（20B）· `stateFormat@0x14` · `stateData@0x18` |
+> | `KeyboardState` | fmt `'KEYS'` · 16B 位图 · **`Key` 枚举值 == 位号** |
+> | `Keyboard.IEventPreProcessor.PreProcessEvent` | RVA `0x4757020` |
+>
+> `PreProcessEvent` 反编译（VA `0x7FF84D3D7020`）顺带交叉验证了上面两行布局：
+> 它判 `type=='STAT'`（`1398030676`）→ 判 `*(u32*)(ev+0x14)=='KEYS'` → 拿 `ev+0x18` 当位图
+> **原地改写**（Unity 自己把 bit111 挪到 bit127），恒返回 1。偏移与 `StateEvent` 表一致，
+> 且证明「在这里改事件位图」是 Unity 认可的用法。
+>
+> 四个必踩的坑：
+>
+> 1. **时间戳**：`InputManager` 会丢弃早于 `device.m_LastUpdateTimeInternal` 的乱序状态事件。
+>    取「设备上次更新时间 + ε」并保证严格递增——既不判乱序，也不会落到未来被推迟到下一帧。
+> 2. **失焦保活**：默认 `backgroundBehavior` 会在失焦时 Reset 并禁用键盘设备，注入整个被丢弃；
+>    必须先置 `IgnoreFocus`，后台走位才成立。
+> 3. **别空发**：状态事件是整块覆盖，手里没按键时入队等于把玩家真按住的键抹掉一帧。
+> 4. **前台卡顿的真身是「取消」信号，不是「抢写」竞争**：这条是本页最贵的一课，
+>    前后走错两次方向才定案。
+>
+>    窗口在**前台**时，Unity 原生输入后端每帧都会投一条真实键盘事件（内容是「方向键=未按」，
+>    实测约 31/s）。既然门闩吃的是**状态变化**，每条这种事件都会触发一次 `canceled`，
+>    游戏就停一步；我们下一个事件再触发 `performed`，又走一步——所以表现是**一顿一顿**，
+>    不是变慢。**先后两次错判都源于把它当成「谁最后落笔谁赢」的抢写竞争**：
+>    提高补写频率（占空比 33%→54%）是在跟一个「取消」信号抢，抢不到；直写状态缓冲更糟，见下。
+>
+>    **正解：在 `Keyboard.PreProcessEvent`（RVA `0x4757020`）里把自己持有的方向键位 OR 回事件位图。**
+>    它是每个键盘事件落到设备前的必经收口点，改完外来事件就不再携带「未按」，
+>    取消信号根本不会产生，卡顿从根上消失。只碰自己持有的那几位，玩家真按的其他键一律不动；
+>    松手时掩码清空、钩子自动停手，清零事件正常放行去触发 `canceled`，角色照常停下。
+>
+>    实现要点：该方法是**显式接口实现**，IDB 里只有数据引用、没有代码引用，派发完全走运行期 vtable。
+>    硬编码槽位换个构建就错，改为在 `Il2CppClass` 对象内**按已知原函数地址逐 qword 匹配**并改写
+>    （见 `unity_kbd_port.cpp::InstallEventGuard`）——自带正确性校验，也不依赖结构体布局。
+>    `XCAT_KBD_GUARD=0` 可关。只处理 `'STAT'`：原函数自身也只认 `'STAT'`；
+>    若日后发现 `guard/s` 压不住卡顿，`DeltaStateEvent`（`stateOffset@0x1C` / `data@0x20`）是第一嫌疑。
+>
+>    **量化前必须先按 `keys=` 拆样本。** `keypad_walk_bin` 的 `keys=` 列走的是
+>    `GetAsyncKeyState(VK_LEFT/VK_RIGHT)`，读的是 **OS 物理按键**，和内部注入毫无关系。
+>    调试时人手按一下方向键，那几秒的 `vx≠0` 会被算进「内部注入的成绩」，
+>    直接把结论带偏一个数量级。只有 `keys=-` 的样本才是纯内部注入。
+>
+>    按 `keys=-` 统计的实测：
+>
+>    | 做法 | 纯内部注入样本 | `vx≠0` | `inX` 有效但 `vx=0` |
+>    |---|---|---|---|
+>    | 每帧 `QueueEvent` 补写 | 1170 | **71.4%** | 4.7% |
+>    | 每帧直写前台状态缓冲 | 196 | **10.2%** | 39% |
+>
+>    **直写是死路，别再试第二遍。** 思路本身看着无懈可击：
+>    `InputControl.get_currentStatePtr()`（RVA `0x46FD900`，内部转
+>    `InputStateBuffers.GetFrontBufferForDevice`）拿到设备前台状态缓冲基址，加设备
+>    `+0x14`（`m_StateBlock@0x10` + `m_ByteOffset@0x04`）得到 16B 位图首地址，
+>    在 `WM.FixedUpdate` orig 之前改位——此刻事件队列早已在 `EarlyUpdate` 抽干，
+>    我们是本帧最后落笔的人，稳赢排队竞争。**但实测反而更差。**
+>    原因是游戏那道门闩吃的不是「位图当前值」而是**状态变化**（只有事件路径才会触发的
+>    change monitor / `InputAction`）：直写把位提前设成 1，随后到达的事件因「状态没变」
+>    而不再触发门闩，等于自断触发。代码保留在 `XCAT_KBD_DIRECT=1` 开关后面仅供复验，
+>    **默认必须关**。
+>
+>    帧槽要用 `main_thread::SetInputFrameTick`，**别用 `SetPrePhysicsFrameTick`**：
+>    后者宿主是 `WM.FixedUpdate` 钩子，钩子没挂上或 idle 回落时整个槽静默，
+>    补写毫无征兆停摆，而日志里「注册成功」照样打印。`SetInputFrameTick` 首选同一相位、
+>    宿主失活时自动回落 `SendWill` 渲染帧。
+>
+>    自证：`unity_kbd::Stats()` 给出 `pushes` / `clobbers` / `directs` / `guards` / `hookCalls`，
+>    `walkW Hold` 行按 `grd=<钩子是否装上> tick=h<宿主>@<次/秒> dw= push= clob= guard= hc=` 打出速率。
+>    读法：
+>
+>    | 字段 | 前台应有 | 失焦应有 | 不对时说明 |
+>    |---|---|---|---|
+>    | `grd` | `1` | `1` | `0` = vtable 槽没匹配上，卡顿修复未生效 |
+>    | `hc/s` | ≈2×`push`（128~172） | ≈`push`（70~103） | 为 0 = 钩子压根没被调到（见下「两种 guard=0」） |
+>    | `guard/s` | ≈`hc`−`push`（68~94） | ≈0 | `hc>0` 而此项为 0 = 被调到但没改写，多半事件结构认错 |
+>    | `dw/s` | `0` | `0` | 非 0 说明误开了 `XCAT_KBD_DIRECT` |
+>    | `push/s` | >0 | >0 | 为 0 = 帧槽没跑（只注册成功不算数） |
+>
+>    `guard` 计的是**真正改写过位的次数**，等价于「被拦下的 `canceled` 数」，
+>    所以它前台≈外来事件率、失焦≈0 才是正常特征。
+>
+>    **别拿 `clob` 当外来事件率的标尺**：`clob` 只在每次推送时比一次设备时间戳，
+>    每次推送最多计 1 次，天然低估。实测前台 `clob≈30/s` 而 `guard≈83/s`，
+>    差的不是 bug 而是采样口径 —— 逐事件计数的 `guard` 才准，对照式取 `guard ≈ hc − push`。
+>
+>    **两种 `guard=0` 必须分开**（实测踩过：`grd=1` 且槽地址校验无误，但 `guard` 恒 0）：
+>
+>    - `hc=0` → 钩子没进来。两个已知成因：
+>      ① `InputManager` 调 pre-processor 前先看设备标志位
+>      `InputDevice.DeviceFlags.HasEventPreProcessor`（`0x4000`），这位为 0 则永不调用。
+>      用 `get_hasEventPreProcessor`（RVA `0x4709030`）实读、`set_hasEventPreProcessor`
+>      （RVA `0x4709040`）置位；`hasEventPreProcessor before=/after=` 日志给出实测值。
+>      **本仓实测 `before=1`，即标志位本来就开着，不是此因。**
+>      ② 改错了槽 —— 见下「vtable 槽必须按公式算」。**本仓实测就是此因。**
+>    - `hc>0` → 进来了但没改写。见下「事件指针按值传」。
+
+### 接口派发：vtable 槽必须按公式算，不能扫描
+
+`InputManager.OnUpdate`（RVA `0x4773560`）里调 `PreProcessEvent` 的派发序列，是本节所有
+偏移的唯一来源：
+
+```asm
+call sub_…389030                 ; get_hasEventPreProcessor(device)
+test al, al
+jz   …                           ; 标志位为 0 → 整段 pre-process 跳过
+…
+mov   rax, [r12]                 ; klass 取自「设备实例」，不是 FindClass 的结果
+movzx ecx, word ptr [rax+12Eh]   ; interface_offsets_count (uint16)
+mov   r8,  [rax+0B0h]            ; Il2CppRuntimeInterfaceOffsetPair*（每项 16B）
+cmp   [r8-8], rdx                ; 逐项比 interfaceType == IEventPreProcessor
+movsxd rcx, dword ptr [r8]       ; 命中项 +8 处的 int32 offset
+shl   rcx, 4                     ; × sizeof(VirtualInvokeData) = 16
+add   rax, rcx
+add   rax, 138h                  ; klass->vtable 基址
+mov   r8,  [rax+8]               ; VirtualInvokeData.method
+mov   rdx, r15                   ; eventPtr —— 单寄存器
+call  qword ptr [rax]            ; VirtualInvokeData.methodPtr ← 要改的就是这一格
+test  al, al
+jz    …                          ; 返回 false ⇒ 该事件被整条丢弃
+```
+
+由此定下三条：
+
+| 事实 | 后果 |
+|---|---|
+| 槽地址 = `deviceKlass + 0x138 + interfaceOffset*16` | 必须按此式算；`IEventPreProcessor` 只有一个方法，接口内槽位恒 0 |
+| klass 取自实例 `*(void**)dev` | 不能用 `FindClass` 的类对象顶替 |
+| `eventPtr` 走单寄存器 | `InputEventPtr` **按值传**，拿到的直接是 `InputEvent*`，不必再解一层 |
+
+> **踩坑（务必别重犯）**：初版图省事，在类对象里开 8KB 窗口「逐 qword 找等于
+> `PreProcessEvent` 地址的格子，命中即改」，并自认为「扫到就等于校验通过」。实测
+> `slots=1`、`orig` 减映像基址正好等于 RVA `0x4757020`，看着毫无破绽 —— 但 `hc` 恒 0，
+> 钩子一次都没进。**同一个函数地址在类对象里会出现在不止一处，扫到的那格未必是派发读的那格。**
+> 地址值对 ≠ 位置对。凡是运行期按表派发的东西，一律按派发器自己的公式算地址，
+> 并且**写完回读**确认落地（`PatchVtableMethodPtr` 返回 true 也不代表写进去了）。
+>
+> 改成按公式算之后，`guard resolve` 一行把两处病灶同时照出来（某次实测值）：
+>
+> ```
+> devKlass=…51892640  findKlass=…51892910  slot=…518928F8  off=696(0x2B8)  match=1
+> ```
+>
+> ① `FindClass("UnityEngine.InputSystem","Keyboard")` 返回的类对象与设备实例的
+> `*(void**)dev` **不是同一个**（差 `0x2D0`）—— 所以必须用实例的 klass；
+> ② 真正的接口槽在 `devKlass+0x2B8`，**比旧扫描起点 `findKlass` 还靠前 `0x18` 字节**，
+> 旧代码从物理上就扫不到它，扫到的是同一函数在 vtable 里的类级槽位（接口派发不读）。
+> 两处叠加，才造出「一切校验都过、钩子却一次不进」的假象。
+
 ### 11.1 `VecCtrl.InputX/Y` 身份
 
 | 证据 | 内容 |
@@ -431,11 +652,12 @@ VecCtrlUser_WorkUpdateActive @ 0x11CFA90
 
 | 控制面 | 能否驱动 CalcWalk | 备注 |
 |---|---|---|
-| 只写 `InputX@+0x50`（现行） | **否（静态）** | 被同帧 `SetInput(锁存)` 覆盖 |
-| 写锁存 `*(vc+0x100)+0x10` | **否（静态）** | 同帧更早的 KeyPad 采样会重写锁存 |
-| MainPump 在 `SetInput` 之后写 `+0x50` | 理论可行 | 要插在 ①② 之间，难无 hook |
-| `input_port` 注入左右键 | **首选** | 见 §11.8 |
+| 只写 `InputX@+0x50`（旧现行） | **否（实机已证）** | 门闩未开 → 输入分支不进，`vx` 恒 0 |
+| 写锁存 `*(vc+0x100)+0x10` | **否（实机已证）** | 同上，仍在门闩下游 |
+| MainPump 在 `SetInput` 之后写 `+0x50` | 无意义 | 同帧 `CalcWalk` 不跑，插进去也没人算 |
+| `input_port` 注入左右键（`UserLocal.OnKey`） | 否 | 走的不是这条；真源是 Keyboard 设备的状态**变化** |
 | hook `SetInput` 注入方向 | 可行但碰 `.text` | GRAP 默认禁止 |
+| **灌 Keyboard 设备状态** | **是（2026-08-07 实机）** | 唯一真源，见本章开头结论更正 |
 
 `VecCtrl.Move` 仍是置位 Ap，与走路无关。  
 `VecCtrlDragon_WorkUpdateActive`（旧误标 User）**不**走 `CalcWalk`；本地角色是 `VecCtrlUser`。
@@ -614,6 +836,10 @@ KeyPad_Query(mod, mask):
 
 #### 与锁存 X 的张力（重要）
 
+> **已作废（2026-08-07）**：下面「`bit0` → `latchX` 极性」这条推断实机不成立。
+> vtable 钩 Slot4 强改返回值 `bit0`，`hook=1` 但 `travel=0` / `vx=0`。
+> 本节保留仅作代数拆解参考，**不要**据此写驱动代码；真源见本章开头的结论更正。
+
 User 路径：`even → latchX=+1`，`odd → latchX=−1`，且**无“未按键跳过写”**。  
 若虚体真是 PackState，则空闲 `(0,0,0)` / Obf-tag 空闲皆 even → **每帧强制 +1**，与正常站立矛盾。
 
@@ -634,9 +860,14 @@ User 路径：`even → latchX=+1`，`odd → latchX=−1`，且**无“未按�
 
 #### 下一步（BIN / 静态）
 
-1. 运行时看 `GetState` @ `call [rax]` 实际落入哪；对比按左/右/空闲返回值。  
-2. 若虚体非 Pack：回到 **D.`input_port`** 或找真正写锁存前的键采样函数。  
-3. 若虚体是 Pack：用 GetFields 在实机按键时采 A/B/C，再反推左右。
+> **已结案（2026-08-07）**：下列三步不必再做。答案是第 2 条的方向——
+> 「真正写锁存前的键采样」来自 InputSystem `Keyboard` 设备的状态**变化**
+> （change monitor / `InputAction` 回调，非轮询；本章开头已列出零轮询的实证表），
+> 落地见本章开头结论更正与 `x/features/ports/unity_kbd_port.cpp`。
+
+1. ~~运行时看 `GetState` @ `call [rax]` 实际落入哪；对比按左/右/空闲返回值。~~  
+2. ~~若虚体非 Pack：回到 **D.`input_port`** 或找真正写锁存前的键采样函数。~~  
+3. ~~若虚体是 Pack：用 GetFields 在实机按键时采 A/B/C，再反推左右。~~
 
 ### 11.11 `Slot:4` 钉死 + KeyPadLive 子类（2026-08-01 续）
 
@@ -873,7 +1104,7 @@ F6 控左右仍优先：G.`SetFields`（每帧 Query 前）或 D.`input_port`；
 | `fly.log` | `FLY_TELEPORT_HOP set=1` → `F6 teleport-hop ON`（**无** `scheme G`） |
 | `movepath_elems` | 全程 `drive=0`；`Teleport(4)` + Jump `v=(0,-60)` 空中 fh=0 |
 | 时长 | F6@06:58:32 → soft disc@06:58:34.5（~2s） |
-| `kick.log` | `lean_local_or_soft` / `pendingError=205`，无 op=432 |
+| `kick.log` | `lean_local_or_soft` / sticky `pendingError=205`（哨兵），无 op=432 |
 
 = 与先前 Attr=4 短跳踢线同构；**方案 G 仍未采到有效样本**。下次必须确认：短跳关、驱动开、log 出现 `F6 drive-input ON … scheme G`。
 

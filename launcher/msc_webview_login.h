@@ -51,6 +51,10 @@ const char* CaptchaUiModeLabel(CaptchaUiMode m);
 int GetGamaPassNickSlot();
 void SetGamaPassNickSlot(int slot1Based);
 
+// GAMA PASS：select-account 页 1-based 账号槽（默认 1；写入 bin/gamapass_account_slot.txt）
+int GetGamaPassAccountSlot();
+void SetGamaPassAccountSlot(int slot1Based);
+
 bool StartOneClick(const std::wstring& accountLine, std::wstring& err);
 
 bool TryParseAccountLine(const std::wstring& accountLine, std::wstring& err);

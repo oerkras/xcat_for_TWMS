@@ -34,12 +34,12 @@
 | 文档 | 主题 |
 |------|------|
 | [`invuln/模块设计.md`](invuln/模块设计.md) | 无敌 ✅ v2.6.3：`+0x298` hit 门 + 帧钉/`8ms` 去闪；重绑 `400ms` + 绑宽限 `1.5s`；面板 `[core] invuln`；**无** inline / **无**热键（F10=换频） |
-| [`kick_sniff/断线错误码.md`](kick_sniff/断线错误码.md) | Session `_pendingErrorCode` / 断线边沿；**TW≠CMS 偏移**；`kick.log` |
+| [`kick_sniff/断线错误码.md`](kick_sniff/断线错误码.md) | `SessionState` / RING；`pendingError=205`=哨兵≠踢因；AutoBlock 22/24 **不进** `+0x40`；**TW≠CMS 偏移** |
 | [`titlebar/模块设计.md`](titlebar/模块设计.md) | Win32 标题栏 vitals + 金/经/物值每分 + 职业繁中名；锚点 `WM→CharacterData→CharacterStat`（共享 `player_vitals`）+ 背包卖价（DumpRestoredData） |
 | [`world_manager/字段全表.md`](world_manager/字段全表.md) | `WorldManager` TW 字段全表 + CharacterData/Field/MapData 一跳；对 CMS 漂移标注 |
 | [`world_manager/SceneState与Field.md`](world_manager/SceneState与Field.md) | 进图门控 `SceneState` + `Field`/`SceneMap` 字段拆解；与现行 MyUser 门控对照 |
 | [`autopot/模块设计.md`](autopot/模块设计.md) | 自动喝药：阈值策略 + `SendStatChangeItemUseRequest`（药水）；回家卷见 auto_supply `PortalScroll`；面板 `[core] hpPotion/mpPotion`（✅ 已挂入；实机待验） |
-| [`simple_combat/模块设计.md`](simple_combat/模块设计.md) | 自动打怪状态机重设计：站桩出刀 + 可选贴怪瞬移互斥；默认关瞬移/智能间隔 |
+| [`simple_combat/模块设计.md`](simple_combat/模块设计.md) | 自动打怪：Impact 贴怪 = 近战直升机（旋翼环闭环悬停，默认）/ 拟人走路 / fill+Doing 瞬移互斥；F5 |
 | [`attack_speed/模块设计.md`](attack_speed/模块设计.md) | **攻击加速** ✅ BIN 结案：清忙锁 + `SS+1BC=140`；频率=面板间隔；**不做** layer mid-cut |
 | [`attack_rpc/模块设计.md`](attack_rpc/模块设计.md) | 结算层出刀实验 🔍；目标全屏多怪；默认关 |
 | [`attack_rpc/P0a_本地出刀与OnMelee误区.md`](attack_rpc/P0a_本地出刀与OnMelee误区.md) | 否决直调 `OnMeleeAttack`（UserRemote）；`SetAttackAction` `0xFD39C0` |
@@ -51,20 +51,28 @@
 | [`attack_speed/P0c_TemporaryStat生命周期.md`](attack_speed/P0c_TemporaryStat生命周期.md) | Decode/Reset/CheckByTime；Speed 客户端不自清 |
 | [`teleport/模块设计.md`](teleport/模块设计.md) | 瞬移 port：仅 fill+Doing（`fill_slim`）；点飞不钉台 |
 | [`teleport/P0d_fill_slim软重载结案.md`](teleport/P0d_fill_slim软重载结案.md) | **挂机飞出图 / Field 软重载** ✅：Doing 后抢收态 → Ap→0；瘦身后置只 `Apl←Ap`（BIN `101030400`） |
-| [`fly/模块设计.md`](fly/模块设计.md) | F6 飞：A 点击 hop / B 跟随 hop（吸附/pin 已退役） |
+| [`fly/模块设计.md`](fly/模块设计.md) | F6 Impact 飞（Attr=2）+ fh-ban；Coast/fill 点飞已拆；给后续 Agent 的真源说明 |
 | [`travel/模块设计.md`](travel/模块设计.md) | **超级赶路** ✅：同盘 seed BFS + Snap 钉台贴门（`snap=1`，禁悬空）；世界地图 Spot 预检 Notice；无码头/跨盘自动 |
 | [`worldmap_marker_travel/模块设计.md`](worldmap_marker_travel/模块设计.md) | **世界地图 Spot 双击赶路** ✅：`UpdateView`/`OnPointerDown` 换桩 → YesNo/Notice → `RequestGoto`；字段偏移与 BIN |
 | [`teleport/P0a_瞬移CALL锚点.md`](teleport/P0a_瞬移CALL锚点.md) | TW IDA 钉死 Register/Doing/Attr RVA、原生调用链、旁路 vs 原生、BIN 纪要；§1.1 视觉层同步链锚点（13 个 RVA + 字段偏移） |
 | [`teleport/P0b_引擎实现原理.md`](teleport/P0b_引擎实现原理.md) | **位移真源**：`SetImpactNext` 的 fmax/fmin 饱和合并语义、完整消费链（`ApplyImpact 0x11A4E60` / `LeaveFoothold 0x11AF5C0`）、「踏板偷换才是位移主因」及三个证伪实验；`MovePathType` 全表 / `MoveElem`·`MovePath`·`VecCtrl` 布局；14 组偏移核对零偏差；文档时间线纠偏 |
 | [`teleport/P0c_视觉层同步链.md`](teleport/P0c_视觉层同步链.md) | **皮跟谁走**：`VecCtrl.GetPos()` = `round(lerp(Ap, Apl, alpha))`、`Apl` 由 `BeginUpdateActive` 每帧滚动、Slot 16 写 TRS 的三道门控与整数脏检查；实证 `Pos@0x64` 不参与视觉；「改坐标皮出错」逐症状机制对照 |
 | [`mob_pool/活怪n与刷怪槽M.md`](mob_pool/活怪n与刷怪槽M.md) | **n**=MobPool 活怪 / **M**=LifeList 刷怪槽；实现 +「为何 n≪M」官方引擎说明；BIN 自洽判据 |
+| [`mob_scan/模块设计.md`](mob_scan/模块设计.md) | ✅ 扫怪 worker：面板周期、事件唤醒、按需 Lite、MobCtrl、相对旧实现优势；消费端协作 |
+| [`mob_pool/P0a_OnLocalMob与Init包体.md`](mob_pool/P0a_OnLocalMob与Init包体.md) | 🔍 Mob 包族：`EnterField`/`LeaveField`/`ChangeController`；`SetLocalMob`/`SetRemoteMob`；`Mob.Init` 包体；方案 ⑥ 观察点（已纠名） |
+| [`mob_pool/P0b_MI观察与按需Collect.md`](mob_pool/P0b_MI观察与按需Collect.md) | 📐 设计：MI 观察 Enter/Leave → `RequestImmediateScan`；SetRemote **条件踢池**；**未落码** |
+| [`mob_pool/P0c_Enter到开火时间线.md`](mob_pool/P0c_Enter到开火时间线.md) | 🔍 Enter→开火门控；**FindHit 要 inViewSplit、不要 MobCtrl/Active**；感知 vs 贴身/RTT |
+| [`mob_pool/P0d_suspended与initDelay.md`](mob_pool/P0d_suspended与initDelay.md) | 🔍 `_suspended`/`_initDelay`：Init 写 true、Update×GetUpdateTime 解除；窗口多约 1 帧 |
+| [`mob_pool/P0e_SetDeadType与deadType.md`](mob_pool/P0e_SetDeadType与deadType.md) | 🔍 `SetDeadType`/`_deadType@0x1B4`：唯一写 API；Leave 不写；调用方静态 BLOCKED |
+| [`mob_pool/P0f_SetDeadType观察方案.md`](mob_pool/P0f_SetDeadType观察方案.md) | 📐 MI/HWBP 采 `edx`+返回址；与 Leave 时序；**未落码** |
+| [`mob_pool/REMOUNT_20260806.md`](mob_pool/REMOUNT_20260806.md) | 🔧 晚间 GA remount：RVA+0x1E70；字段 off 稳；`mob_pool_port` 哈希已钉 |
 | [`pet_feed/模块设计.md`](pet_feed/模块设计.md) | **只自动召唤**（喂食交官方）；`[core] petSummon` → `SendActivatePetRequest`（🚧 P0c✅ 待实机） |
 | [`pet_feed/P0a_锚点复核.md`](pet_feed/P0a_锚点复核.md) | **2026-08-03 remount**：`m_apPet@0x2B0`、Activate `0xC56910`、新类哈希 |
 | [`timed_keys/模块设计.md`](timed_keys/模块设计.md) | 定时按键：7 槽周期脉冲；对照枫星 `timed_keys`，经典版走 `InputManager.KeyDownTouch/Up`（✅ 已挂入；实机待验） |
 | [`buffs/模块设计.md`](buffs/模块设计.md) | BUFF 管理器：技能-only 续航；对照枫星 `buffs`，经典版走 `AffectedSkillEntry` + `DoActiveSkillPrepare`（✅ 已挂入；实机待验） |
 | [`buffs/P0a_锚点复核.md`](buffs/P0a_锚点复核.md) | TW IDB 钉死：在身列表 `+0x330`、Prepare/GetSkill/GetSkillLevel RVA |
 | [`multi_skill/模块设计.md`](multi_skill/模块设计.md) | 技能多发：勾选清单 gap 串发；对照枫星 `multi_skill_port`，经典版走 `DoActiveSkillPrepare`（✅ 已挂入；实机待验） |
-| [`auto_enter/模块设计.md`](auto_enter/模块设计.md) | 自动进游戏：分区→最少人频道→选角；单次 Go、禁 Trigger；选角 settle/假 Done 修复（✅ BIN 实锤） |
+| [`auto_enter/模块设计.md`](auto_enter/模块设计.md) | 自动进游戏：分区→**未满频道随机 (PickOpen)**→选角；单次 Go、禁 Trigger（✅；旧 PickLeast 已退役） |
 | [`auto_enter/选角与SelectedIndex锚点.md`](auto_enter/选角与SelectedIndex锚点.md) | TW IDA 钉死：`UILoginCharacter+0x168` SelectedIndex；可跳过 Select 的依据 |
 | [`auto_enter/RVA重锚_20260803.md`](auto_enter/RVA重锚_20260803.md) | 2026-08-03 客户端更新：登录 UI 类哈希 + 方法 RVA 全表重锚 |
 | [`ccu/模块设计.md`](ccu/模块设计.md) | 分区 CCU：只认 auto_enter 选频喂数一次 → SHM → 底栏（✅；无被动 Probe） |
@@ -121,10 +129,10 @@
 | `x/features/ports/mob_pool_port.*` | 活怪 n + 刷怪槽 M；见 [`mob_pool/活怪n与刷怪槽M.md`](mob_pool/活怪n与刷怪槽M.md) |
 | `x/features/ports/player_combat_port.*` | LocalUser 战斗坐标 |
 | `x/features/ports/attack_input_port.*` | 普攻键脉冲（InjectKeyHold） |
-| `x/features/mob_scan/` | 扫怪 worker → `logs/mobscan.log`（`n=/M=`）；同上 |
-| `x/features/simple_combat/` | 状态机打怪 → `[core] simpleCombat` · F5 · `logs/combat.log` · 默认关贴怪瞬移 |
-| `x/features/ports/teleport_port.*` | 瞬移 fill+Doing（`fill_slim`）；见 [`teleport/模块设计.md`](teleport/模块设计.md) · [`P0d`](teleport/P0d_fill_slim软重载结案.md) |
-| `x/features/fly/` | 鼠标飞 A/B/C；见 [`fly/模块设计.md`](fly/模块设计.md) |
+| `x/features/mob_scan/` | 扫怪 worker → `[core] mobScanIntervalMs` · 事件唤醒 / 按需刷新；见 [`mob_scan/模块设计.md`](mob_scan/模块设计.md) · n/M 见 [`mob_pool/活怪n与刷怪槽M.md`](mob_pool/活怪n与刷怪槽M.md) |
+| `x/features/simple_combat/` | 状态机打怪 → `[core] simpleCombat` · F5 · Impact贴怪默认（含 `heli_rotor` 旋翼环）· `logs/combat.log` |
+| `x/features/ports/teleport_port.*` | QueryFlightState / ImpactSetVelocity / ImpactImpulseToward + fill+Doing；见 [`teleport/模块设计.md`](teleport/模块设计.md) · [`P0d`](teleport/P0d_fill_slim软重载结案.md) |
+| `x/features/fly/` | F6 Impact 飞 + fh-ban；见 [`fly/模块设计.md`](fly/模块设计.md) |
 | `x/features/travel/` + `ports/travel_port.*` + `worldmap_marker_travel/` | 同盘赶路 + Spot 入口；见 [`travel/模块设计.md`](travel/模块设计.md) · [`worldmap_marker_travel/模块设计.md`](worldmap_marker_travel/模块设计.md) |
 | `x/features/pet_feed/` + `ports/pet_port.*` | P0b 宠物只读探针 → `logs/petfeed.log` |
 | `x/features/pet_loot/` + `ports/drop_pool_port.*` | 宠物吸物 → `user.ini [pet_loot]` · `logs/petloot.log` |

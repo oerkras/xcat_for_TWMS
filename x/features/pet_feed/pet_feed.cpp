@@ -9,6 +9,8 @@
 #include "../ports/world_port.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/dbg_log_file.h"
+#include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
 #include "../../ui/player_vitals.h"
 
@@ -37,8 +39,60 @@ constexpr DWORD kPendingMs = 5000;
     // 与 simple_combat 协调：开召宠时打怪最多等这么久；超时放行以免卡死挂机。
     // 预算从「打怪侧真正询问让路」起算；未落地/警戒 defer 会 PauseHoldBudget 清零。
     constexpr DWORD kHoldCombatMaxMs = 20000;
-// UserBase 短 IsAlertMode：LocalUser+0x114 > 0（种子验算 = cmp field, 0）
-constexpr size_t kOffAlertAt = 0x114;
+// UserBase 短 IsAlertMode：LocalUser alert stamp > 0（与 drop_alert 同字段）
+// hash → field_get_offset；dump fallback 0x114
+constexpr char kUserAlertClass[] =
+    "c99c0bcb0549788a98e73a02acc1cf7e5476d3f920f9a4f5f69a76490798a16";
+constexpr char kHashAlertAt[] =
+    "c469c323e5afda2bab68c386c87ea8b571b3fd726ece08d92aa459848a6d351";
+constexpr size_t kFbAlertAt = 0x114;
+size_t gOffAlertAt = kFbAlertAt;
+bool gAlertFieldTried = false;
+
+bool AlertFieldOffHit(void* klass, const char* nameHash, size_t fb, size_t* out) {
+    if (!klass || !nameHash || !out || !x::runtime::il2cpp::Ensure()) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetFieldFromName || !e.fieldGetOffset) return false;
+    for (void* k = klass; k;) {
+        void* field = nullptr;
+        __try {
+            field = e.classGetFieldFromName(k, nameHash);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            field = nullptr;
+        }
+        if (field) {
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (off >= 0x10 && off < 0x800) {
+                *out = off;
+                return true;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+    *out = fb;
+    return false;
+}
+
+void EnsureAlertFieldOff() {
+    if (gAlertFieldTried) return;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    gAlertFieldTried = true;
+    void* klass = x::runtime::il2cpp::FindClass("", kUserAlertClass);
+    if (!klass) klass = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+    const bool hit = AlertFieldOffHit(klass, kHashAlertAt, kFbAlertAt, &gOffAlertAt);
+    x::runtime::LogI("PetFeed", "alert field path=%s off=0x%zX", hit ? "meta" : "fallback",
+                     gOffAlertAt);
+}
 
 std::atomic<bool> gDesired{false};
 std::atomic<bool> gRequireFood{true};  // 与 common 默认一致：有粮才召，防召出即饿
@@ -110,15 +164,16 @@ void LogLine(const char* fmt, ...) {
 }
 
 bool ReadAlertMode() {
+    EnsureAlertFieldOff();
     void* lu = nullptr;
     if (!ports::player_combat::QueryLocalUser(&lu) || !lu) return false;
     int stamp = 0;
     __try {
-        stamp = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(lu) + kOffAlertAt);
+        stamp = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(lu) + gOffAlertAt);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    // IsAlertMode @0x124A3C0：field > (seed+IMM)=0 → 非 0 即警戒
+    // IsAlertMode：field > (seed+IMM)=0 → 非 0 即警戒
     return stamp > 0;
 }
 

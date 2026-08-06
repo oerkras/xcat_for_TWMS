@@ -29,29 +29,30 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 // HP/MP 真源在 x::ui::player（WM→CS）；LocalUser → il2cpp_shape::ResolveUserLocalKlass
-// ItemDataManager：08-03 后无明文名；以 dump 类哈希为准（dataTable@+0x18 / bundleMap@+0x38）。
+// ItemDataManager：08-06 remount（TypeDef 2027；dataTable@+0x18 / bundleMap@+0x38）
 constexpr char kItemDataManagerClass[] =
-    "eff831ff245fe0b660f0b6c5e016131cc0e4efb19e1fdf81772174dc4838a21";  // remounted 2026-08-04 ItemDataManager
+    "de1c111ab825716f33574ba3f3978092564030384a1f03c2ea2676e99ea71c2";
 constexpr char kItemDataClass[] =
-    "aef689abc72bee1aa21eeaec98304465b11b314910702a0cdc4f78ee964ac2c";
+    "f621ae15dbc3cb71335f3e8c226da19a11ca3bd1bbfa67913aecd861a8875e4";
 constexpr char kItemBundleClass[] =
-    "f2084400139319c91922b1e41c8aadb2fa8142e03370c3899686dd54d8792d3";
+    "c2f3c9349695dedb3b3a45795c1e60bb7a5c97ddda6b2736643de8ce66b4db7";
+// ItemData.info 实际类型（restored Info · TypeDef 2031），不是旧 ItemInfo 名
 constexpr char kItemInfoClass[] =
-    "e85010969aa8a2f9e4e2928b792c08f3e00ad1a2d76c6d1f0054a862c5b9f2f";
+    "b6c2d6b5bde207d472a7e8ea0798b51fda0d25068579cfac9a8a467feded236";
 
 // IDM / ItemData / Bundle / Info 价位：hash → field_get_offset（dump fallback）
 constexpr char kHashIdmDataTable[] =
-    "e61b745d225e422a2228dc716cfb3056904fb9d2ecb8ee0fdccde52b5366278";
+    "a96e655147f3659f9a24e3836052e342ab9db997dd3647c5db2d15ac376972a";
 constexpr char kHashIdmBundleMap[] =
-    "a087bdaf8378e368da7ca2d5445049ec6768fb199f87e2ddd5460f784b59b18";
+    "bf0d6d387c3598d051d5089e0932cea80521839a69083ab04b283b5acddb3e0";
 constexpr char kHashBundleSellPrice[] =
-    "c1bf4de6d56889a53f7d09b4a4fa00a0319c8d4c353abbbaac17c334306596b";
+    "a10749449fb7a2c19504ec7092ab2dc668cdfc31f4b436fdffa6c48ebe14392";
 constexpr char kHashItemDataInfo[] =
-    "e1816d635f171a0029c9759ac09d72240735dd89dedb43dd5392a8bbed14559";
+    "d85749d6426c0e4657ff23f4fc1ca8a12961891ab0f4aec5b7824271ee1a5a5";
 constexpr char kHashInfoPrice[] =
-    "bf0c497e748c8cdb68097c7d5b6a322a93223e24e673d2ab38b6a3212fa44df";
+    "b96bdf76a975afaa84ebc6c1ca0090fab5acc5eff8b7627ce67d13a7b8f7c73";
 constexpr char kHashInfoNotSale[] =
-    "f53ec2d717e4310118ceb163b07c9e5a8c418ac52ba79df35e8adfe1fdebd05";
+    "d11cfcde5d2e4b572c68d7357431e7316f0f2362442b8d5a017703a8e006e77";
 
 constexpr size_t kFbIdmDataTable = 0x18;
 constexpr size_t kFbIdmBundleMap = 0x38;

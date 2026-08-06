@@ -38,8 +38,8 @@ constexpr DWORD kTickMs = 50;
 // 旧 8s/13s 把「CheckMove 未命中」误当成「服端慢换图」，多跳路径每假火空等 ~13s。
 constexpr DWORD kHopWaitMs = 1200;
 constexpr DWORD kHopWaitUniqueBridgeMs = 1500;  // 唯一桥也快重试；晚到换图仍靠 leave-from 检测
-// BIN 15:57 回挂机：700ms settle 后立刻 fill+Doing，落点后仍 InterStage 闪黑屏。
-constexpr DWORD kMidHopSettleMs = 1500;         // 换图后多等稳图，避免下一跳 Doing 撞卸图
+// BIN 15:57 回挂机：换图后立刻开火会撞 InterStage 闪黑屏；稳图再下一跳。
+constexpr DWORD kMidHopSettleMs = 1500;         // 换图后多等稳图，避免下一跳撞卸图
 constexpr DWORD kPlayReadyStableMs = 500;       // 连续 PlayReady 才开火 / 认到站
 constexpr DWORD kArriveStableMs = 1500;         // 到目标图后再稳一会才 Idle（防到站二次卸图）
 constexpr DWORD kUniqueBridgeLateGraceMs = 10000;
@@ -414,14 +414,15 @@ bool IsTransientFireFail(const std::string& res) {
     return res == "TELEPORT_FAIL" || res == "TELEPORT_UNBOUND" || res == "MAIN_TIMEOUT" ||
            res == "NO_CHECKMOVE" || res == "NO_LOCALUSER" || res == "KEY_FAIL" ||
            res == "EXCEPTION" || res == "NOT_PLAY_READY" || res == "TELEPORT_COOLDOWN" ||
-           res == "NOT_STOOD" || res == "OUT_OF_RECT";
+           res == "NOT_STOOD" || res == "OUT_OF_RECT" || res == "IMPACT_STICK_FAIL";
 }
 
 // 可累计 FireStuck 熔断的硬贴门失败（冷却/未就绪只重试，不熔断，防误停）。
 bool IsFusableTransientFireFail(const std::string& res) {
     return res == "TELEPORT_FAIL" || res == "TELEPORT_UNBOUND" || res == "MAIN_TIMEOUT" ||
            res == "NO_CHECKMOVE" || res == "NO_LOCALUSER" || res == "KEY_FAIL" ||
-           res == "EXCEPTION" || res == "NOT_STOOD" || res == "OUT_OF_RECT";
+           res == "EXCEPTION" || res == "NOT_STOOD" || res == "OUT_OF_RECT" ||
+           res == "IMPACT_STICK_FAIL";
 }
 
 // 返回 true=已停赶路并 Notify；false=继续重试。
@@ -622,8 +623,8 @@ void HandleCmd(const std::string& cmd) {
             ports::travel::SetFireMode(ports::travel::FireMode::CheckMove);
         else if (arg == "rpc")
             ports::travel::SetFireMode(ports::travel::FireMode::Rpc);
-        else if (arg == "stick" || arg == "tp" || arg == "teleport")
-            ports::travel::SetFireMode(ports::travel::FireMode::TeleportStick);
+        else if (arg == "stick" || arg == "stickup" || arg == "tp" || arg == "teleport")
+            ports::travel::SetFireMode(ports::travel::FireMode::StickUp);
         else if (arg == "direct" || arg == "enter")
             ports::travel::SetFireMode(ports::travel::FireMode::DirectEnter);
         gLastMsg = std::string("firemode=") + ports::travel::FireModeName(ports::travel::GetFireMode());
@@ -651,7 +652,7 @@ void HandleCmd(const std::string& cmd) {
         return;
     }
     if (cmd.rfind("stick ", 0) == 0) {
-        fireOne(ports::travel::FireMode::TeleportStick, true, cmd.substr(6));
+        fireOne(ports::travel::FireMode::StickUp, true, cmd.substr(6));
         return;
     }
     if (cmd.rfind("direct ", 0) == 0) {
@@ -867,7 +868,7 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
         return;
     }
 
-    // FirePortalByName 内含 Sleep/瞬移，禁止持 gMu（否则 QuerySnapshot/Stop 卡住）
+    // FirePortalByName：Impact 贴门循环 + CheckMove；禁止持 gMu（否则 QuerySnapshot/Stop 卡住）
     const std::string hopPortalId = hop.portalId;
     const std::string hopDest = hop.destMap;
     const uint32_t fireEpoch = gFireEpoch;
@@ -884,6 +885,17 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
 
     if (!firedOk) {
         gLastMsg = fireResult;
+        if (fireResult == "INVULN_OFF") {
+            // Impact 贴门需无敌；Hold 异常时立刻停，禁止空转。
+            ClearTransientFire();
+            char detail[128]{};
+            snprintf(detail, sizeof(detail), "%s INVULN_OFF", liveName.c_str());
+            x::runtime::LogW("Travel", "fire stop %s: impact stick needs invuln",
+                             liveName.c_str());
+            SetIdle("invuln_off", FailKind::FireStuck);
+            NotifyTravelOutcome(FailKind::FireStuck, cur, gTarget, detail);
+            return;
+        }
         if (IsTransientFireFail(fireResult)) {
             (void)NoteTransientFireFail(now, cur, liveName, fireResult);
             return;
@@ -956,6 +968,11 @@ void Init() {
     gWorkerStop.store(false);
     x::runtime::LogI("Travel", "feature init (classic same-plate goto)");
     ports::travel::Init();
+}
+
+void PreloadGraph() {
+    if (!kEnabled) return;
+    EnsureGraphLoaded();
 }
 
 void Shutdown() {

@@ -39,6 +39,7 @@
 #include "imgui.h"
 
 #include <Windows.h>
+#include <commdlg.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -252,9 +253,9 @@ void DrawLaunchTab(LaunchUiState& ui) {
         {
             const auto cur = attach_inject::GetLaunchMode();
             int modeIdx = 0;
-            if (cur == attach_inject::LaunchMode::OneClickLogin) modeIdx = 1;
-            else if (cur == attach_inject::LaunchMode::GamaPassAuto) modeIdx = 2;
-            const char* items[] = {"手动启动并注入（推荐）", "gamania (HK)", "GAMA PASS自动登录"};
+            if (cur == attach_inject::LaunchMode::GamaPassAuto) modeIdx = 1;
+            else if (cur == attach_inject::LaunchMode::OneClickLogin) modeIdx = 2;
+            const char* items[] = {"手动启动并注入（推荐）", "GAMA PASS自动登录", "gamania (HK)"};
             ImGui::SetNextItemWidth(-1.f);
             if (ImGui::Combo("##launch_mode", &modeIdx, items, 3)) {
                 LaunchPanel_ArmStrategyPrep(ui, 7000);
@@ -264,30 +265,30 @@ void DrawLaunchTab(LaunchUiState& ui) {
                     ui.status = "已切换：手动启动并注入 — 约 7 秒后自动开始监视";
                 } else if (modeIdx == 1) {
                     if (attach_inject::IsWatching()) attach_inject::StopWatch();
-                    attach_inject::SetLaunchMode(attach_inject::LaunchMode::OneClickLogin);
-                    if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
-                        msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
-                    }
-                    ui.pendingAutoLaunch = false;
-                    ui.status = "已切换：gamania (HK) — 约 7 秒后可点启动（防误触）";
-                } else {
-                    if (attach_inject::IsWatching()) attach_inject::StopWatch();
                     attach_inject::SetLaunchMode(attach_inject::LaunchMode::GamaPassAuto);
                     msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
                     // 无人值守闭环：切到本模式后约 7s 自动换票（与冷启一致）。
                     // 准备窗内仍可点一次「取消自动换票」打断。
                     ui.pendingAutoLaunch = true;
                     ui.status = "已切换：GAMA PASS自动登录 — 约 7 秒后自动换票（可再点取消）";
+                } else {
+                    if (attach_inject::IsWatching()) attach_inject::StopWatch();
+                    attach_inject::SetLaunchMode(attach_inject::LaunchMode::OneClickLogin);
+                    if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
+                        msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
+                    }
+                    ui.pendingAutoLaunch = false;
+                    ui.status = "已切换：gamania (HK) — 约 7 秒后可点启动（防误触）";
                 }
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip(
                     "手动启动并注入：自行拉起游戏客户端后注入。\n"
-                    "gamania (HK)：账密走 HTTP 换票 → 官方启动链 → 注入。\n"
                     "GAMA PASS自动登录：优先 Chrome++/Chrome 点选换票（无需账密）；"
                     "只用 Edge 请先卸 Google Chrome。"
                     "切模式/冷启约 7 秒自动换票；准备中再点一次可取消。"
                     "挂机时段到点、守护干净重拉也会自动一键。\n"
+                    "gamania (HK)：账密走 HTTP 换票 → 官方启动链 → 注入。\n"
                     "写入 XCat_data/state/launch_mode.txt 与程序目录 launch_mode.txt");
             }
         }
@@ -447,18 +448,49 @@ void DrawLaunchTab(LaunchUiState& ui) {
             ImGui::PopTextWrapPos();
 
             {
-                int nickSlot = msc::weblogin::GetGamaPassNickSlot();
                 const bool busy = msc::weblogin::IsBusy();
                 ImGui::Spacing();
                 const ImVec2 boxPad = ImGui::GetStyle().FramePadding;
                 const float boxH = btnH * 2.15f + boxPad.y * 2.f;
+
+                int accountSlot = msc::weblogin::GetGamaPassAccountSlot();
+                ImGui::PushStyleColor(ImGuiCol_ChildBg,
+                                     ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+                ImGui::BeginChild("##gp_account_box", ImVec2(-1.f, boxH),
+                                  ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
+                ImGui::TextUnformatted("登录账号");
+                ImGui::SameLine();
+                ImGui::TextDisabled("（第几个 · 1=第一个）");
+                if (busy) ImGui::BeginDisabled();
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                                   ImVec2(boxPad.x * 1.6f, boxPad.y * 1.35f));
+                ImGui::SetNextItemWidth(-1.f);
+                if (ImGui::InputInt("##gp_account_slot", &accountSlot, 1, 1)) {
+                    if (accountSlot < 1) accountSlot = 1;
+                    if (accountSlot > 16) accountSlot = 16;
+                    msc::weblogin::SetGamaPassAccountSlot(accountSlot);
+                    ui.status = "将登录第 " + std::to_string(accountSlot) + " 个账号";
+                }
+                ImGui::PopStyleVar();
+                if (busy) ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip(
+                        "点「使用 Gama Pass 登入」后出现的账号列表：\n"
+                        "填 1 = 第一个账号，2 = 第二个，以此类推。\n"
+                        "超过列表长度则用最后一个。换票进行中不可改。");
+                }
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+                ImGui::Spacing();
+
+                int nickSlot = msc::weblogin::GetGamaPassNickSlot();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg,
                                      ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
                 ImGui::BeginChild("##gp_nick_box", ImVec2(-1.f, boxH),
                                   ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
-                ImGui::TextUnformatted("游戏昵称槽");
+                ImGui::TextUnformatted("游戏昵称");
                 ImGui::SameLine();
-                ImGui::TextDisabled("（多昵称时选第几个 · 1 起）");
+                ImGui::TextDisabled("（第几个 · 1=第一个）");
                 if (busy) ImGui::BeginDisabled();
                 ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
                                    ImVec2(boxPad.x * 1.6f, boxPad.y * 1.35f));
@@ -467,17 +499,16 @@ void DrawLaunchTab(LaunchUiState& ui) {
                     if (nickSlot < 1) nickSlot = 1;
                     if (nickSlot > 16) nickSlot = 16;
                     msc::weblogin::SetGamaPassNickSlot(nickSlot);
-                    ui.status = "GAMA PASS 昵称槽已设为 " + std::to_string(nickSlot) +
-                                "（SelectGameAccount 第 N 个可选项，跳过「建立暱稱」）";
+                    ui.status = "将使用第 " + std::to_string(nickSlot) + " 个游戏昵称";
                 }
                 ImGui::PopStyleVar();
                 if (busy) ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                     ImGui::SetTooltip(
-                        "游戏昵称选择页（SelectGameAccount）的序号，从 1 起。\n"
-                        "有多个昵称时填 1 / 2 / …；超过列表长度则取最后一个。\n"
-                        "换票进行中不可改（本轮已锁定）。\n"
-                        "写入程序目录 gamapass_nick_slot.txt");
+                        "选完账号后的游戏昵称列表：\n"
+                        "填 1 = 第一个昵称，2 = 第二个，以此类推。\n"
+                        "「建立暱稱」不计入。超过列表长度则用最后一个。\n"
+                        "换票进行中不可改。");
                 }
                 ImGui::EndChild();
                 ImGui::PopStyleColor();
@@ -551,10 +582,13 @@ void DrawLaunchTab(LaunchUiState& ui) {
 
 // LiveStep UI 状态：首页落盘与「实验」TAB 共用，避免两处 static 互相覆盖。
 static bool gUiCombatLiveStep = false;
-// 跳过 Prepare / 砍动画倒计时：首页落盘；控件在实验 TAB 独立卡片。
+// 跳过攻击动画 / 砍动画倒计时：首页落盘；控件在实验 TAB 独立卡片。
 static bool gUiAttackAccelSkipPrepare = false;  // 与 PayloadControl 默认一致
 static bool gUiAttackAccelCutLayer = false;
 static bool gUiAttackAccelBooster = false;
+// 技能满级 / 终极一击：首页落盘保留字段；控件在实验 TAB。
+static bool gUiSkillMaxLevel = false;
+static bool gUiFinalAttackForce = false;
 // 打怪 TICK：首页落盘；控件在调试 TAB。
 static int gUiCombatTickMs = (int)xcat::kSimpleCombatTickDefaultMs;
 // 出刀按键 hold：控件在调试 TAB，与 TICK 同卡片共用一次读盘。
@@ -574,8 +608,6 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool autoLie = false;
     static bool invincible = true;  // 与 PayloadControl 默认一致
     static bool attackAccel = false;
-    static bool finalAttackForce = false;
-    static bool skillMaxLevel = false;
     static bool fly = false;
     static bool hpPotion = true;
     static bool mpPotion = true;
@@ -584,12 +616,13 @@ void DrawHomeTab(LaunchUiState& ui) {
     static int hpThresholdPct = 50;
     static int mpThresholdPct = 30;
     static bool autoCombat = false;
+    // F5 追怪位移：单选 0=空中贴怪 / 1=拟人 / 2=关闭（站桩）
+    static int approachMode = 0;
     static bool smartInterval = false;
     static int attackMs = (int)xcat::kSimpleCombatAttackIntervalDefaultMs;
     static int clusterWeight = 0;  // 0/1：群怪优先（沿用 clusterWeight 落盘）
     static int teleportMinDx = 220;
     static int teleportStandOff = (int)xcat::kCombatTeleportStandOffDefault;
-    static int teleportCooldownMs = (int)xcat::kCombatTeleportCooldownDefaultMs;
     static int mobScanIntervalMs = (int)xcat::kMobScanIntervalDefaultMs;
     static int crossLayerFillGateMs = (int)xcat::kCombatCrossLayerFillGateDefaultMs;
     static int fillBudgetPx = (int)xcat::kCombatFillBudgetPxDefault;
@@ -633,8 +666,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                 autoLie = disk.autoLie != 0;
                 invincible = disk.invuln != 0;
                 attackAccel = disk.attackAccel != 0;
-                finalAttackForce = disk.finalAttackForce != 0;
-                skillMaxLevel = disk.skillMaxLevel != 0;
+                gUiFinalAttackForce = disk.finalAttackForce != 0;
+                gUiSkillMaxLevel = disk.skillMaxLevel != 0;
                 gUiAttackAccelCutLayer = disk.attackAccelCutLayer != 0;
                 gUiAttackAccelSkipPrepare = disk.attackAccelSkipPrepare != 0;
                 gUiAttackAccelBooster = disk.attackAccelBooster != 0;
@@ -645,6 +678,12 @@ void DrawHomeTab(LaunchUiState& ui) {
                 petSummon = disk.petSummon != 0;
                 petSummonRequireFood = disk.petSummonRequireFood != 0;
                 autoCombat = disk.simpleCombat != 0;
+                if (disk.simpleCombatImpactApproach != 0)
+                    approachMode = 0;
+                else if (disk.simpleCombatHumanWalk != 0)
+                    approachMode = 1;
+                else
+                    approachMode = 2;
                 smartInterval = disk.simpleCombatSmartInterval != 0;
                 attackMs = (int)xcat::ClampSimpleCombatAttackIntervalMs(
                     disk.simpleCombatAttackIntervalMs
@@ -654,7 +693,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                     disk.simpleCombatTickMs ? disk.simpleCombatTickMs
                                            : xcat::kSimpleCombatTickDefaultMs);
                 clusterWeight = disk.clusterWeight != 0 ? 1 : 0;
-                // 贴怪瞬移已强制开；LiveStep / attack_rpc 仍默认关，仅实验 TAB 可勾。
+                // 贴怪瞬移已禁用；LiveStep / attack_rpc 仍默认关，仅实验 TAB 可勾。
                 gUiCombatLiveStep = disk.simpleCombatLiveStep != 0;
                 gUiAttackRpc = disk.attackRpc != 0;
                 gUiAttackRpcMobs = (int)xcat::ClampAttackRpcMobs(
@@ -671,9 +710,6 @@ void DrawHomeTab(LaunchUiState& ui) {
                 teleportStandOff = (int)xcat::ClampCombatTeleportStandOff(
                     disk.simpleCombatTeleportStandOff ? disk.simpleCombatTeleportStandOff
                                                       : xcat::kCombatTeleportStandOffDefault);
-                teleportCooldownMs = (int)xcat::ClampCombatTeleportCooldownMs(
-                    disk.simpleCombatTeleportCooldownMs ? disk.simpleCombatTeleportCooldownMs
-                                                          : xcat::kCombatTeleportCooldownDefaultMs);
                 mobScanIntervalMs = (int)xcat::ClampMobScanIntervalMs(
                     disk.mobScanIntervalMs ? disk.mobScanIntervalMs
                                            : xcat::kMobScanIntervalDefaultMs);
@@ -751,28 +787,30 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.autoLie = autoLie ? 1u : 0u;
         c.invuln = invincible ? 1u : 0u;
         c.attackAccel = attackAccel ? 1u : 0u;
-        c.finalAttackForce = finalAttackForce ? 1u : 0u;
-        c.skillMaxLevel = skillMaxLevel ? 1u : 0u;
+        c.finalAttackForce = gUiFinalAttackForce ? 1u : 0u;
+        c.skillMaxLevel = gUiSkillMaxLevel ? 1u : 0u;
         c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
         c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
         c.attackAccelBooster = gUiAttackAccelBooster ? 1u : 0u;
         c.attackSameFrameBurst = xcat::kAttackSameFrameBurstDefault;
         c.fly = fly ? 1u : 0u;
-        // 策略入口已隐藏：始终跟随飞；间隔只在调试 TAB 改，这里不覆盖 flyHopCdMs
-        c.flyMode = xcat::kFlyModeFollow;
+        // flyMode 由调试 TAB 选推进路线；首页不覆盖
         c.autoEnter = autoEnter ? 1u : 0u;
         c.hpPotion = hpPotion ? 1u : 0u;
         c.mpPotion = mpPotion ? 1u : 0u;
         c.petSummon = petSummon ? 1u : 0u;
         c.petSummonRequireFood = petSummonRequireFood ? 1u : 0u;
         c.simpleCombat = autoCombat ? 1u : 0u;
+        // 单选落盘：空中贴怪 / 拟人互斥；关闭则两者皆关。
+        c.simpleCombatImpactApproach = (approachMode == 0) ? 1u : 0u;
+        c.simpleCombatHumanWalk = (approachMode == 1) ? 1u : 0u;
         c.simpleCombatSmartInterval = smartInterval ? 1u : 0u;
         c.simpleCombatAttackIntervalMs =
             xcat::ClampSimpleCombatAttackIntervalMs(static_cast<uint32_t>(attackMs));
         c.simpleCombatTickMs = xcat::ClampSimpleCombatTickMs(
             static_cast<uint32_t>(gUiCombatTickMs < 0 ? 0 : gUiCombatTickMs));
         c.clusterWeight = clusterWeight ? 1u : 0u;
-        c.simpleCombatTeleport = 1u;  // 面板无入口，始终开
+        c.simpleCombatTeleport = 0u;  // 原生瞬移贴怪已禁用
         c.simpleCombatLiveStep = gUiCombatLiveStep ? 1u : 0u;
         c.attackRpc = gUiAttackRpc ? 1u : 0u;
         c.attackRpcMobs = xcat::ClampAttackRpcMobs(
@@ -785,8 +823,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             xcat::ClampCombatTeleportMinDx(static_cast<uint32_t>(teleportMinDx < 0 ? 0 : teleportMinDx));
         c.simpleCombatTeleportStandOff = xcat::ClampCombatTeleportStandOff(
             static_cast<uint32_t>(teleportStandOff < 0 ? 0 : teleportStandOff));
-        c.simpleCombatTeleportCooldownMs = xcat::ClampCombatTeleportCooldownMs(
-            static_cast<uint32_t>(teleportCooldownMs < 0 ? 0 : teleportCooldownMs));
+        // 贴怪节流用代码默认；面板已拆除「瞬移冷却」入口。
+        c.simpleCombatTeleportCooldownMs = xcat::kCombatTeleportCooldownDefaultMs;
         c.mobScanIntervalMs = xcat::ClampMobScanIntervalMs(
             static_cast<uint32_t>(mobScanIntervalMs < 0 ? 0 : mobScanIntervalMs));
         c.simpleCombatCrossLayerFillGateMs = xcat::ClampCombatCrossLayerFillGateMs(
@@ -821,14 +859,19 @@ void DrawHomeTab(LaunchUiState& ui) {
             lastSeenTick = c.writeTickMs;
             xcat::log::Ok("App",
                           "已下发 core：测谎=%d 无敌=%d 自动进=%d 加血=%d@%d 加蓝=%d@%d 召宠=%d "
-                          "有粮才召=%d 打怪=%d 间隔=%d 贴怪瞬移=1 LiveStep=%d 分区=%d 槽=%d 守护=%d "
-                          "瞬移CD=%d 读怪=%d 终极一击=%d 技能满级=%d 加速=%d",
+                          "有粮才召=%d 打怪=%d 追怪=%s 间隔=%d 贴怪瞬移=0 LiveStep=%d "
+                          "分区=%d 槽=%d 守护=%d "
+                          "读怪=%d 终极一击=%d 技能满级=%d 加速=%d",
                           autoLie ? 1 : 0, invincible ? 1 : 0, autoEnter ? 1 : 0,
                           hpPotion ? 1 : 0, hpThresholdPct, mpPotion ? 1 : 0, mpThresholdPct,
                           petSummon ? 1 : 0, petSummonRequireFood ? 1 : 0, autoCombat ? 1 : 0,
-                          attackMs, gUiCombatLiveStep ? 1 : 0, worldId, charSlot,
-                          watchdog ? 1 : 0, teleportCooldownMs, mobScanIntervalMs,
-                          finalAttackForce ? 1 : 0, skillMaxLevel ? 1 : 0, attackAccel ? 1 : 0);
+                          approachMode == 0   ? "空中贴怪"
+                          : approachMode == 1 ? "拟人"
+                                              : "关闭",
+                          attackMs,
+                          gUiCombatLiveStep ? 1 : 0, worldId, charSlot, watchdog ? 1 : 0,
+                          mobScanIntervalMs, gUiFinalAttackForce ? 1 : 0, gUiSkillMaxLevel ? 1 : 0,
+                          attackAccel ? 1 : 0);
         } else {
             xcat::log::Warn("App", "写入 user.ini [core] 失败");
         }
@@ -1116,11 +1159,12 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         if (xcat::ui::OptionCheckbox("飞行", &fly)) persistCore();
         ImGui::SameLine();
-        ImGui::TextDisabled("(F6 · 跟随飞)");
+        ImGui::TextDisabled("(F6)");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "跟随飞：武装后按冷却跟鼠标连跳（不钉台）。\n"
-                "Ctrl/Shift 暂停。间隔在「调试」TAB 调整。");
+                "跟随鼠标飞行；需开无敌。\n"
+                "推进间隔可在「调试」TAB 调整。\n"
+                "Ctrl/Shift 暂停跟随。");
         }
         if (xcat::ui::OptionCheckbox("自动打怪", &autoCombat)) persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
@@ -1130,27 +1174,24 @@ void DrawHomeTab(LaunchUiState& ui) {
         ImGui::TextDisabled("F5");
         ImGui::SameLine(0.f, ui::Gap() * 1.2f);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("瞬移冷却");
+        ImGui::TextUnformatted("追怪");
         ImGui::SameLine(0.f, ui::Gap());
-        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
-        if (ImGui::DragInt("##tp_cd", &teleportCooldownMs, 1,
-                           (int)xcat::kCombatTeleportCooldownMinMs,
-                           (int)xcat::kCombatTeleportCooldownMaxMs)) {
-            teleportCooldownMs = (int)xcat::ClampCombatTeleportCooldownMs(
-                static_cast<uint32_t>(teleportCooldownMs < 0 ? 0 : teleportCooldownMs));
-            persistCore();
+        ImGui::SetNextItemWidth(AppDpi_Px(120.f));
+        {
+            const char* approachItems[] = {"空中贴怪", "拟人模式", "关闭"};
+            if (approachMode < 0 || approachMode > 2) approachMode = 0;
+            if (ImGui::Combo("##f5_approach_mode", &approachMode, approachItems,
+                             IM_ARRAYSIZE(approachItems))) {
+                persistCore();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "单选追怪方式。\n"
+                    "· 空中贴怪：悬停在怪旁出刀，需无敌，可穿层；默认。\n"
+                    "· 拟人模式：同层走路贴近后 A 键出刀，不做跨层。\n"
+                    "· 关闭：不追怪（站桩，够得着才砍）。");
+            }
         }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "贴怪瞬移最小间隔（%u–%u ms），按你机器/网络自行评估。\n"
-                "调太低（接近 %u）瞬移+出刀会灌爆游戏主线程、拉高 GC 频率，\n"
-                "有概率触发游戏「GC」致命弹窗卡死；偏保守更稳。",
-                (unsigned)xcat::kCombatTeleportCooldownMinMs,
-                (unsigned)xcat::kCombatTeleportCooldownMaxMs,
-                (unsigned)xcat::kCombatTeleportCooldownMinMs);
-        }
-        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-        ImGui::TextDisabled("ms");
         ImGui::SameLine(0.f, ui::Gap() * 1.2f);
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("跨层门控");
@@ -1165,7 +1206,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "跨层贴稳后额外等待（%u–%u ms），与「瞬移冷却」独立。\n"
+                "跨层贴稳后额外等待（%u–%u ms）。\n"
                 "切段中间跳不武装。0=关闭。偏大则追怪像爬楼梯；偏小跨层连跳更猛。",
                 (unsigned)xcat::kCombatCrossLayerFillGateMinMs,
                 (unsigned)xcat::kCombatCrossLayerFillGateMaxMs);
@@ -1206,8 +1247,8 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "打怪开启时刷新怪物列表的周期（%u–%u ms，默认 %u）。\n"
-                "数值越小越快看见新刷怪/尸体消失，抢怪更灵敏；过低更吃 CPU。\n"
-                "未开打怪时仍用较慢闲置扫描，不受此值影响。",
+                "数值越小越快看见新刷怪/尸体消失；换怪时会额外按需刷一帧。\n"
+                "建议 15–30；过低更吃 CPU。未开打怪时仍用较慢闲置扫描。",
                 (unsigned)xcat::kMobScanIntervalMinMs,
                 (unsigned)xcat::kMobScanIntervalMaxMs,
                 (unsigned)xcat::kMobScanIntervalDefaultMs);
@@ -1544,32 +1585,6 @@ void DrawHomeTab(LaunchUiState& ui) {
     }
     CardGap();
     {
-        xcat::ui::CardGuard card("##tab_home_final_attack", "终极一击");
-        if (xcat::ui::OptionCheckbox("普攻必出终极一击", &finalAttackForce)) persistCore();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "已学终极攻击（如狂战士終極之劍/斧）：Prop→100，并强制注册出刀。\n"
-                "数据面改 SkillLevelData / FinalAttack 结构体，不改 GameAssembly 代码。\n"
-                "需已学习对应武器的终极技能；关掉后会尽量还原原 Prop。\n"
-                "服端若校验伤害/技能，以服为准。");
-        }
-        ImGui::TextDisabled("狂战士劍/斧 · Prop100 + 强制注册出刀");
-    }
-    CardGap();
-    {
-        xcat::ui::CardGuard card("##tab_home_skill_max", "技能满级");
-        if (xcat::ui::OptionCheckbox("已学技能按满级生效", &skillMaxLevel)) persistCore();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "A：SkillRecord/Ex 已学技能（≥1）等级写成满级。\n"
-                "B：Hook GetSkillLevel 作 fallback（抗同步打回）。\n"
-                "日志 SkillMax src=dict|hook|dict+hook。\n"
-                "关掉还原字典原等级并卸钩；服端结算以服为准。");
-        }
-        ImGui::TextDisabled("dict + GetSkillLevel hook · src 见日志");
-    }
-    CardGap();
-    {
         xcat::ui::CardGuard card("##tab_home_combat", "打怪设置");
 
         if (xcat::ui::OptionCheckbox("智能间隔", &smartInterval)) persistCore();
@@ -1577,18 +1592,28 @@ void DrawHomeTab(LaunchUiState& ui) {
         ImGui::TextDisabled("在攻击间隔附近 ±40ms 抖动");
 
         ImGui::Spacing();
-        ImGui::TextUnformatted("贴怪位移");
-        ImGui::TextDisabled("贴怪瞬移默认开（无面板开关）；fill+Doing 落怪侧");
+        ImGui::TextUnformatted("出刀站距");
+        ImGui::TextDisabled("人到怪心的水平目标距离；命中带约 站距×1.55");
         ImGui::Spacing();
 
         {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("站位偏移");
+            ImGui::TextUnformatted("站距");
             ImGui::SameLine(0.f, ui::Gap());
             ImGui::SetNextItemWidth(AppDpi_Px(72.f));
-            if (ImGui::DragInt("##tp_off", &teleportStandOff, 1, 12, 200)) persistCore();
+            if (ImGui::DragInt("##combat_standoff", &teleportStandOff, 1, 12, 200))
+                persistCore();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "贴怪落在怪左或右侧的水平距离（%u–%u px，默认 %u）。\n"
+                    "真命中带：同层且 10 ≤ |dx| ≤ 站距×1.55。\n"
+                    "不是选怪触发距离。",
+                    (unsigned)xcat::kCombatTeleportStandOffMin,
+                    (unsigned)xcat::kCombatTeleportStandOffMax,
+                    (unsigned)xcat::kCombatTeleportStandOffDefault);
+            }
             ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-            ImGui::TextDisabled("px · 落在怪左/右侧，禁怪心");
+            ImGui::TextDisabled("px · 怪旁，禁叠怪心");
             // 触发距离已不再参与选靶/贴怪门控，保留落盘字段但不展示，避免语义误导。
             (void)teleportMinDx;
         }
@@ -3598,7 +3623,7 @@ void DrawBetaTab(LaunchUiState& ui) {
 
     CardGap();
     {
-        xcat::ui::CardGuard card("##tab_beta_skip_prepare", "跳过 Prepare");
+        xcat::ui::CardGuard card("##tab_beta_skip_prepare", "跳过攻击动画");
         static bool skipPrepLoaded = false;
         static uint64_t skipPrepSeen = 0;
         if (!ui.prefsBinDir.empty()) {
@@ -3632,18 +3657,17 @@ void DrawBetaTab(LaunchUiState& ui) {
             }
         };
 
-        if (xcat::ui::OptionCheckbox("跳过 Prepare", &gUiAttackAccelSkipPrepare))
+        if (xcat::ui::OptionCheckbox("跳过攻击动画", &gUiAttackAccelSkipPrepare))
             persistSkipPrep();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "实验项（默认关）：钉 LocalUser 虚表槽，拦住攻击类 PrepareActionLayer，\n"
-                "出刀仍写忙锁，但不建攻击动作层（无抬手）；跳过时清忙锁并回 Idle。\n"
-                "Idle(action=6) 永远透传；进图/换图落地约 1s 内不武装。\n"
-                "勾选从关→开也会重开落地窗。与下方「砍动画倒计时」互斥（开跳过则不砍层）。\n"
-                "不改攻击加速的清忙锁/攻速；关勾选即透传原 Prepare。\n"
-                "禁止 GA .text；防漂移装钩（哈希/RVA/扫槽）。");
+                "实验项（默认关）：出刀时不播攻击抬手/挥砍动作，减轻动画堆积。\n"
+                "站立呼吸等待机动作仍保留；进图/换图落地约 1 秒内暂不生效。\n"
+                "从关→开也会重新等落地。不影响攻击加速的出刀间隔。\n"
+                "与下方「砍动画倒计时」不要同时开（开本项则不砍倒计时）。\n"
+                "可能皮错/偶发卡刀，出问题先关掉。");
         }
-        ImGui::TextDisabled("Idle 透传；落地后才跳过攻击 Prepare");
+        ImGui::TextDisabled("保留待机动作；落地后才跳过攻击抬手");
     }
 
     CardGap();
@@ -3690,10 +3714,10 @@ void DrawBetaTab(LaunchUiState& ui) {
                 "逼动画帧尽快推进，减轻连挥堆叠（偏视觉）。\n"
                 "不改攻击加速的清忙锁/攻速逻辑。\n"
                 "可能空砍/皮抽；可单独开，不依赖攻击加速「启用」。\n"
-                "会连带催快待机呼吸——更想「无动画」请用上方「跳过 Prepare」。\n"
-                "与「跳过 Prepare」互斥（开跳过则不砍层）。");
+                "会连带催快待机呼吸——更想少抬手请用上方「跳过攻击动画」。\n"
+                "与「跳过攻击动画」互斥（开跳过则不砍层）。");
         }
-        ImGui::TextDisabled("默认关；与「跳过 Prepare」勿同时开");
+        ImGui::TextDisabled("默认关；与「跳过攻击动画」勿同时开");
     }
 
     CardGap();
@@ -3748,15 +3772,113 @@ void DrawBetaTab(LaunchUiState& ui) {
 
     CardGap();
     {
+        xcat::ui::CardGuard card("##tab_beta_final_attack", "终极一击");
+        static bool faForceLoaded = false;
+        static uint64_t faForceSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!faForceLoaded || disk.writeTickMs != faForceSeen) {
+                    gUiFinalAttackForce = disk.finalAttackForce != 0;
+                    faForceSeen = disk.writeTickMs;
+                    faForceLoaded = true;
+                }
+            } else if (!faForceLoaded) {
+                faForceLoaded = true;
+            }
+        } else if (!faForceLoaded) {
+            faForceLoaded = true;
+        }
+
+        auto persistFaForce = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.finalAttackForce = gUiFinalAttackForce ? 1u : 0u;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                faForceSeen = c.writeTickMs;
+                dropSeenTick = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：finalAttackForce=%d（实验）",
+                              gUiFinalAttackForce ? 1 : 0);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] finalAttackForce 失败");
+            }
+        };
+
+        if (xcat::ui::OptionCheckbox("普攻必出终极一击", &gUiFinalAttackForce))
+            persistFaForce();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "实验项（默认关）：已学终极攻击（如狂战士終極之劍/斧）\n"
+                "Prop→100，并强制注册 FinalAttack 出刀。\n"
+                "数据面改 SkillLevelData / FinalAttack 结构体，不改 GameAssembly 代码。\n"
+                "需已学习对应武器的终极技能；关掉后会尽量还原原 Prop。\n"
+                "服端若校验伤害/技能，以服为准。");
+        }
+        ImGui::TextDisabled("Prop100 + 强制注册出刀 · 日志 FaForce");
+    }
+
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_beta_skill_max", "技能满级");
+        static bool skillMaxLoaded = false;
+        static uint64_t skillMaxSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!skillMaxLoaded || disk.writeTickMs != skillMaxSeen) {
+                    gUiSkillMaxLevel = disk.skillMaxLevel != 0;
+                    skillMaxSeen = disk.writeTickMs;
+                    skillMaxLoaded = true;
+                }
+            } else if (!skillMaxLoaded) {
+                skillMaxLoaded = true;
+            }
+        } else if (!skillMaxLoaded) {
+            skillMaxLoaded = true;
+        }
+
+        auto persistSkillMax = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.skillMaxLevel = gUiSkillMaxLevel ? 1u : 0u;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                skillMaxSeen = c.writeTickMs;
+                dropSeenTick = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：skillMaxLevel=%d（实验）",
+                              gUiSkillMaxLevel ? 1 : 0);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] skillMaxLevel 失败");
+            }
+        };
+
+        if (xcat::ui::OptionCheckbox("已学技能按满级生效", &gUiSkillMaxLevel))
+            persistSkillMax();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "实验项（默认关）：A 写 SkillRecord/Ex 已学等级→满级；\n"
+                "B Hook UserLocal + SkillInfo.GetSkillLevel/GetPure；\n"
+                "C skill_port 施法/读级双保险。\n"
+                "日志 SkillMax · hookUl/hookSi/hookPure。\n"
+                "关掉还原字典原等级并卸钩；服端结算以服为准。");
+        }
+        ImGui::TextDisabled("dict + UL/SI/Pure GetSkillLevel hook · src 见日志");
+    }
+
+    CardGap();
+    {
         xcat::ui::CardGuard card("##tab_beta_combat_exp", "打怪实验");
-        // 贴怪瞬移产品常开；LiveStep 仍默认关。
+        // 贴怪瞬移已禁用；LiveStep 仍默认关。
         if (xcat::ui::OptionCheckbox("LiveStep 跟位", &gUiCombatLiveStep)) {
             if (ui.prefsBinDir.empty()) {
                 // no-op
             } else {
                 xcat::PayloadControl c{};
                 (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-                c.simpleCombatTeleport = 1u;
+                c.simpleCombatTeleport = 0u;
                 c.simpleCombatLiveStep = gUiCombatLiveStep ? 1u : 0u;
                 c.writeTickMs = GetTickCount64();
                 if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
@@ -3774,7 +3896,7 @@ void DrawBetaTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "实验项：用瞬移技做跟位，可能加重客服坐标压力\n"
                 "关：只在出带/换靶时贴怪（推荐）\n"
-                "开：怪挪了也在同层用瞬移冷却跟位；hop<80 才走短收态");
+                "开：怪挪了也在同层用内置间隔跟位；hop<80 才走短收态");
         }
 
         if (xcat::ui::OptionCheckbox("攻包伪造探针", &gUiAttackRpc)) persistAttackRpc();
@@ -3909,6 +4031,132 @@ void DrawDebugTab(LaunchUiState& ui) {
         ImGui::TextDisabled("注入后由 PayloadStatus SHM 点亮 LP/Map；Cache=测谎 TypeResolve");
         ImGui::TextDisabled("游戏 PID / 注入状态：见顶栏灯与状态条");
     }
+#if 0  // 暂时隐藏：自定义 DLL 注入入口（后端 InjectCustomDll 仍保留，改 1 即恢复 UI）
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_custom_inject", "自定义 DLL 注入");
+        static char dllPathBuf[1024]{};
+        static bool waitGa = false;  // 默认不等 GA；需要时再勾
+        static bool pathLoaded = false;
+        static std::string pathLoadedFor;
+        static std::string lastStatus;
+
+        const std::string persistPath =
+            ui.prefsBinDir.empty() ? std::string{}
+                                   : (ui.prefsBinDir + "\\state\\custom_inject_dll.txt");
+        if (!persistPath.empty() && (!pathLoaded || pathLoadedFor != persistPath)) {
+            pathLoaded = true;
+            pathLoadedFor = persistPath;
+            dllPathBuf[0] = '\0';
+            waitGa = false;
+            std::ifstream in(persistPath, std::ios::binary);
+            if (in) {
+                std::string line;
+                if (std::getline(in, line)) {
+                    while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+                        line.pop_back();
+                    std::snprintf(dllPathBuf, sizeof(dllPathBuf), "%s", line.c_str());
+                }
+                std::string flag;
+                if (std::getline(in, flag)) {
+                    while (!flag.empty() && (flag.back() == '\r' || flag.back() == '\n'))
+                        flag.pop_back();
+                    if (flag == "1" || flag == "true" || flag == "yes") waitGa = true;
+                }
+            }
+        }
+
+        auto persistCustomInject = [&]() {
+            if (persistPath.empty()) return;
+            const size_t slash = persistPath.find_last_of("\\/");
+            if (slash != std::string::npos) {
+                (void)xcat::CreateDirectoryUtf8(persistPath.substr(0, slash));
+            }
+            std::ofstream out(persistPath, std::ios::binary | std::ios::trunc);
+            if (!out) return;
+            out << dllPathBuf << "\n" << (waitGa ? "1" : "0") << "\n";
+        };
+
+        ImGui::TextWrapped(
+            "向当前 Maplestory_Classic.exe 注入自选 DLL（LoadLibraryW）。"
+            "与正式 xcat.dll 注入共用忙锁；成功不标记「已注入载荷」，监视仍会补正式 DLL。");
+
+        const DWORD gamePid = xcat::FindProcessIdByName(L"Maplestory_Classic.exe");
+        if (gamePid) {
+            ImGui::Text("目标进程：PID %lu", static_cast<unsigned long>(gamePid));
+        } else {
+            ImGui::TextDisabled("目标进程：未找到 Maplestory_Classic.exe");
+        }
+
+        ImGui::SetNextItemWidth(-1.f);
+        if (ImGui::InputTextWithHint("##dbg_custom_dll", "DLL 绝对路径（.dll）", dllPathBuf,
+                                     sizeof(dllPathBuf))) {
+            persistCustomInject();
+        }
+
+        const float gap = ui::Gap();
+        const float halfW = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+        if (ImGui::Button("浏览…##dbg_custom_dll_browse", ImVec2(halfW, 0.f))) {
+            sound::UiClick();
+            wchar_t fileBuf[MAX_PATH]{};
+            const std::wstring cur = xcat::Utf8ToWide(dllPathBuf);
+            if (!cur.empty() && cur.size() < MAX_PATH) {
+                wcsncpy_s(fileBuf, cur.c_str(), _TRUNCATE);
+            }
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = GetActiveWindow();
+            ofn.lpstrFilter = L"DLL (*.dll)\0*.dll\0All (*.*)\0*.*\0";
+            ofn.lpstrFile = fileBuf;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
+            ofn.lpstrTitle = L"选择要注入的 DLL";
+            if (GetOpenFileNameW(&ofn)) {
+                const std::string utf8 = xcat::WideToUtf8(fileBuf);
+                std::snprintf(dllPathBuf, sizeof(dllPathBuf), "%s", utf8.c_str());
+                persistCustomInject();
+                lastStatus.clear();
+            }
+        }
+        ImGui::SameLine(0.f, gap);
+        const bool injBusy = attach_inject::IsInjectBusy();
+        if (injBusy || !gamePid || !dllPathBuf[0]) ImGui::BeginDisabled();
+        if (ImGui::Button("注入所选 DLL##dbg_custom_dll_go", ImVec2(halfW, 0.f))) {
+            sound::UiClick();
+            persistCustomInject();
+            std::wstring err;
+            if (!attach_inject::InjectCustomDll(xcat::Utf8ToWide(dllPathBuf), waitGa, &err)) {
+                lastStatus = err.empty() ? "自定义注入失败" : xcat::WideToUtf8(err);
+                ui.status = lastStatus;
+                notify::PushLocal(/*Danger*/ 3, "custom-inject", "注入失败", lastStatus.c_str(),
+                                  4000);
+                sound::UiError();
+            } else {
+                lastStatus = waitGa ? "已开始自定义注入（等待 GameAssembly）…"
+                                    : "已开始自定义注入…";
+                ui.status = lastStatus;
+                notify::PushLocal(/*Ok*/ 1, "custom-inject", "已开始注入", lastStatus.c_str(),
+                                  2500);
+            }
+        }
+        if (injBusy || !gamePid || !dllPathBuf[0]) ImGui::EndDisabled();
+
+        if (ImGui::Checkbox("等待 GameAssembly 后再注入##dbg_custom_dll_waitga", &waitGa)) {
+            persistCustomInject();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "勾选：与正式注入相同，等 GameAssembly.dll 出现后再 LoadLibrary（推荐游戏相关 DLL）。\n"
+                "取消：立刻注入（适合不依赖 GA 的工具 DLL）。");
+        }
+        if (injBusy) {
+            ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f), "注入进行中…");
+        } else if (!lastStatus.empty()) {
+            ImGui::TextDisabled("%s", lastStatus.c_str());
+        }
+        ImGui::TextDisabled("进度见面板日志 / bin/logs/launcher.jsonl（标签 Attach）");
+    }
+#endif
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_dbg_maint", "日志 / 更新");
@@ -4244,14 +4492,18 @@ void DrawDebugTab(LaunchUiState& ui) {
     CardGap();
     {
         static int flyHopCdMs = (int)xcat::kFlyHopCdDefaultMs;
+        static int flyRoute = (int)xcat::kFlyModeDefault;
         static bool flyDbgLoaded = false;
         static uint64_t flyDbgTick = 0;
+        static bool editingFlyCd = false;
         if (!ui.prefsBinDir.empty()) {
             xcat::PayloadControl disk{};
             if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
-                if (!flyDbgLoaded || disk.writeTickMs != flyDbgTick) {
+                // 正在改间隔时不要被其它写盘把值拽回去
+                if (!flyDbgLoaded || (!editingFlyCd && disk.writeTickMs != flyDbgTick)) {
                     flyHopCdMs = (int)xcat::ClampFlyHopCdMs(
                         disk.flyHopCdMs ? disk.flyHopCdMs : xcat::kFlyHopCdDefaultMs);
+                    flyRoute = (int)xcat::ClampFlyMode(disk.flyMode);
                     flyDbgTick = disk.writeTickMs;
                     flyDbgLoaded = true;
                 }
@@ -4263,28 +4515,98 @@ void DrawDebugTab(LaunchUiState& ui) {
             if (ui.prefsBinDir.empty()) return;
             xcat::PayloadControl c{};
             (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-            c.flyMode = xcat::kFlyModeFollow;
+            c.flyMode = xcat::ClampFlyMode(static_cast<uint32_t>(flyRoute < 0 ? 0 : flyRoute));
             c.flyHopCdMs = xcat::ClampFlyHopCdMs(
                 static_cast<uint32_t>(flyHopCdMs < 0 ? 0 : flyHopCdMs));
+            flyRoute = (int)c.flyMode;
+            flyHopCdMs = (int)c.flyHopCdMs;
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) flyDbgTick = c.writeTickMs;
         };
 
         xcat::ui::CardGuard card("##tab_dbg_fly", "飞行调试");
-        ImGui::TextUnformatted("跟随飞间隔");
+        ImGui::TextDisabled("F6 飞行；武装期禁挂台");
+        ImGui::TextUnformatted("推进路线");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
-        if (ImGui::DragInt("##dbg_fly_hop_cd", &flyHopCdMs, 1, (int)xcat::kFlyHopCdMinMs,
-                           (int)xcat::kFlyHopCdMaxMs)) {
+        if (ImGui::RadioButton("路线 A##dbg_fly_nb", flyRoute == (int)xcat::kFlyModeImpactNockBack)) {
+            flyRoute = (int)xcat::kFlyModeImpactNockBack;
+            persistFlyDbg();
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("路线 B##dbg_fly_sin",
+                               flyRoute == (int)xcat::kFlyModeImpactSetNext)) {
+            flyRoute = (int)xcat::kFlyModeImpactSetNext;
+            persistFlyDbg();
+        }
+
+        ImGui::TextUnformatted("推进间隔 (ms)");
+        ImGui::SetNextItemWidth(AppDpi_Px(120.f));
+        if (ImGui::InputInt("##dbg_fly_hop_cd_in", &flyHopCdMs, 1, 10)) {
             flyHopCdMs = (int)xcat::ClampFlyHopCdMs(
                 static_cast<uint32_t>(flyHopCdMs < 0 ? 0 : flyHopCdMs));
             persistFlyDbg();
         }
+        editingFlyCd = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit()) persistFlyDbg();
+        ImGui::SetNextItemWidth(AppDpi_Px(-1.f));
+        if (ImGui::SliderInt("##dbg_fly_hop_cd_sl", &flyHopCdMs, (int)xcat::kFlyHopCdMinMs,
+                             (int)xcat::kFlyHopCdMaxMs, "%d ms")) {
+            flyHopCdMs = (int)xcat::ClampFlyHopCdMs(
+                static_cast<uint32_t>(flyHopCdMs < 0 ? 0 : flyHopCdMs));
+            persistFlyDbg();
+        }
+        editingFlyCd = editingFlyCd || ImGui::IsItemActive();
+        // 快捷档：极致 / 跟手 / 干净包
+        auto bumpCd = [&](int v) {
+            flyHopCdMs = (int)xcat::ClampFlyHopCdMs(static_cast<uint32_t>(v));
+            persistFlyDbg();
+        };
+        if (ImGui::Button("40ms##dbg_fly_cd40")) bumpCd(40);
         ImGui::SameLine();
-        ImGui::TextUnformatted("ms");
-        ImGui::TextDisabled("首页仅保留飞行开关；策略固定跟随飞。范围 %u–%u，默认 %u",
+        if (ImGui::Button("80ms##dbg_fly_cd80")) bumpCd(80);
+        ImGui::SameLine();
+        if (ImGui::Button("120ms##dbg_fly_cd120")) bumpCd(120);
+        ImGui::SameLine();
+        if (ImGui::Button("160ms##dbg_fly_cd160")) bumpCd(160);
+        ImGui::SameLine();
+        if (ImGui::Button("400ms##dbg_fly_cd400")) bumpCd(400);
+        ImGui::TextDisabled("范围 %u–%u，默认 %u（过低会卡主线程）；禁挂台穿层",
                             xcat::kFlyHopCdMinMs, xcat::kFlyHopCdMaxMs,
                             xcat::kFlyHopCdDefaultMs);
+    }
+    CardGap();
+    {
+        // MovePath.Flush 采证：inline hook 上报包，dump MoveElem → logs\movepath_flush.log。
+        // 本仓禁止常驻 inline hook——此开关默认关，只在抓「被踢前上报了什么」时手动开，用完即关。
+        static bool mpFlush = false;
+        static bool mpLoaded = false;
+        static uint64_t mpTick = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!mpLoaded || disk.writeTickMs != mpTick) {
+                    mpFlush = disk.movepathFlushProbe != 0;
+                    mpTick = disk.writeTickMs;
+                    mpLoaded = true;
+                }
+            } else if (!mpLoaded) {
+                mpLoaded = true;
+            }
+        }
+        auto persistMpFlush = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.movepathFlushProbe = mpFlush ? 1u : 0u;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) mpTick = c.writeTickMs;
+        };
+        xcat::ui::CardGuard card("##tab_dbg_mpflush", "上报采证(MovePath.Flush)");
+        if (xcat::ui::OptionCheckbox("采证上报包(测试专用·用完即关)", &mpFlush)) persistMpFlush();
+        ImGui::SameLine();
+        ImGui::TextDisabled("勾选自动允许.text钩");
+        ImGui::TextDisabled("进图后开→跑一段/点试推 A；对 logs\\movepath_flush.log");
+        ImGui::TextDisabled("标注：a=N!非Normal  fh=0*空中  err=..!!越包络(地>18/空>27)  头 maxErr/air/tel/over");
     }
     CardGap();
     {
@@ -4375,120 +4697,187 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
-        // 瞬移探针 / 踢号压测：从首页挪出，避免占用日常挂机界面
-        auto bumpTpSeq = [&](const char* which) {
+        // 位移试推：路线 A/B + 短推。无热键，仅按钮。
+        static int impactDir = (int)xcat::kImpactImpulseDirDefault;
+        static int impactVx = (int)xcat::kImpactImpulseVxDefault;
+        static int impactVy = (int)xcat::kImpactImpulseVyDefault;
+        static int impactHopDx = (int)xcat::kImpactHopDeltaXDefault;
+        static bool impactHopForce = false;
+        static bool impactLoaded = false;
+        static uint64_t impactTick = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!impactLoaded || disk.writeTickMs != impactTick) {
+                    impactDir = (int)xcat::ClampImpactImpulseDir(disk.impactImpulseDir);
+                    impactVx = (int)xcat::ClampImpactImpulseSpeed(disk.impactImpulseVx);
+                    impactVy = (int)xcat::ClampImpactImpulseSpeed(disk.impactImpulseVy);
+                    impactHopDx = (int)xcat::ClampImpactHopDeltaX(disk.impactHopDeltaX);
+                    impactHopForce = disk.impactHopForce != 0;
+                    impactTick = disk.writeTickMs;
+                    impactLoaded = true;
+                }
+            } else if (!impactLoaded) {
+                impactLoaded = true;
+            }
+        }
+        auto persistImpactParams = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.impactImpulseDir = xcat::ClampImpactImpulseDir(impactDir);
+            c.impactImpulseVx =
+                xcat::ClampImpactImpulseSpeed(static_cast<uint32_t>(impactVx < 0 ? 0 : impactVx));
+            c.impactImpulseVy =
+                xcat::ClampImpactImpulseSpeed(static_cast<uint32_t>(impactVy < 0 ? 0 : impactVy));
+            c.impactHopDeltaX = xcat::ClampImpactHopDeltaX(impactHopDx);
+            c.impactHopForce = impactHopForce ? 1u : 0u;
+            impactDir = (int)c.impactImpulseDir;
+            impactVx = (int)c.impactImpulseVx;
+            impactVy = (int)c.impactImpulseVy;
+            impactHopDx = (int)c.impactHopDeltaX;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) impactTick = c.writeTickMs;
+        };
+        auto bumpImpact = [&](bool nockBack) {
             if (ui.prefsBinDir.empty()) {
-                notify::PushLocal(/*Warning*/ 2, "tp-dbg", "下发失败", "无数据目录", 3000);
+                notify::PushLocal(/*Warning*/ 2, "move-dbg", "下发失败", "无数据目录", 3000);
                 return;
             }
             const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
             if (leds.gamePid == 0) {
-                notify::PushLocal(/*Warning*/ 2, "tp-dbg", "下发失败", "需已注入游戏", 3000);
+                notify::PushLocal(/*Warning*/ 2, "move-dbg", "下发失败", "需已注入游戏", 3000);
                 return;
             }
             xcat::PayloadControl c{};
             if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) {
                 xcat::PayloadControlSetDefaults(c);
             }
+            c.impactImpulseDir = xcat::ClampImpactImpulseDir(impactDir);
+            c.impactImpulseVx =
+                xcat::ClampImpactImpulseSpeed(static_cast<uint32_t>(impactVx < 0 ? 0 : impactVx));
+            c.impactImpulseVy =
+                xcat::ClampImpactImpulseSpeed(static_cast<uint32_t>(impactVy < 0 ? 0 : impactVy));
             auto bump = [](uint32_t& seq) {
                 seq = seq == 0 ? 1u : seq + 1u;
                 if (seq == 0) seq = 1u;
             };
-            const char* okTitle = "已下发";
-            const char* okBody = "";
-            const char* tag = "tp-dbg";
-            if (strcmp(which, "test") == 0) {
-                bump(c.teleportTestSeq);
-                tag = "tp-test";
-                okTitle = "测试贴怪瞬移已下发";
-                okBody = "一跳到位后恢复走路；见 combat.log";
-                xcat::log::Ok("App", "teleportTestSeq=%u", c.teleportTestSeq);
-            } else if (strcmp(which, "native") == 0) {
-                bump(c.teleportNativeTestSeq);
-                tag = "tp-native";
-                okTitle = "原生瞬移CALL已下发";
-                okBody = "短距 WZ range；见 combat.log";
-                xcat::log::Ok("App", "teleportNativeTestSeq=%u", c.teleportNativeTestSeq);
-            } else if (strcmp(which, "wide") == 0) {
-                bump(c.teleportKickStressSeq);
-                tag = "tp-kick";
-                okTitle = "踢号压测已下发（再点停止）";
-                okBody = "随机贴怪 2000→50ms；见 combat.log kick_stress DONE";
-                xcat::log::Ok("App", "teleportKickStressSeq=%u", c.teleportKickStressSeq);
-            } else if (strcmp(which, "fine0") == 0) {
-                bump(c.teleportKickStressFineSeq);
-                tag = "tp-kick-fine";
-                okTitle = "细扫压测已下发（再点停止）";
-                okBody = "50→0ms/−5；mode=fine0-50";
-                xcat::log::Ok("App", "teleportKickStressFineSeq=%u", c.teleportKickStressFineSeq);
-            } else if (strcmp(which, "fine10") == 0) {
-                bump(c.teleportKickStressFine10Seq);
-                tag = "tp-kick-f10";
-                okTitle = "细扫10已下发（再点停止）";
-                okBody = "30→10ms/−5；mode=fine10-30";
-                xcat::log::Ok("App", "teleportKickStressFine10Seq=%u",
-                              c.teleportKickStressFine10Seq);
-            } else if (strcmp(which, "local") == 0) {
-                bump(c.teleportKickStressLocalSeq);
-                tag = "tp-kick-loc";
-                okTitle = "原地短跳已下发（再点停止）";
-                okBody = "同台±120px 来回；mode=local0-50";
-                xcat::log::Ok("App", "teleportKickStressLocalSeq=%u", c.teleportKickStressLocalSeq);
+            if (nockBack) {
+                bump(c.impactNockBackTestSeq);
+                xcat::log::Ok("App", "impactNockBackTestSeq=%u dir=%d vx=%u vy=%u",
+                              c.impactNockBackTestSeq, (int)c.impactImpulseDir, c.impactImpulseVx,
+                              c.impactImpulseVy);
             } else {
-                return;
+                bump(c.impactSetNextTestSeq);
+                xcat::log::Ok("App", "impactSetNextTestSeq=%u dir=%d vx=%u vy=%u",
+                              c.impactSetNextTestSeq, (int)c.impactImpulseDir, c.impactImpulseVx,
+                              c.impactImpulseVy);
             }
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-                notify::PushLocal(/*Info*/ 0, tag, okTitle, okBody, 4500);
+                impactTick = c.writeTickMs;
+                notify::PushLocal(/*Info*/ 0, "move-dbg",
+                                  nockBack ? "试推 A 已下发" : "试推 B 已下发",
+                                  "看运行日志确认是否生效", 4500);
             } else {
-                notify::PushLocal(/*Warning*/ 2, tag, "写盘失败", "user.ini", 3000);
+                notify::PushLocal(/*Warning*/ 2, "move-dbg", "写盘失败", "user.ini", 3000);
+            }
+        };
+        auto bumpImpactHop = [&]() {
+            if (ui.prefsBinDir.empty()) {
+                notify::PushLocal(/*Warning*/ 2, "move-hop", "下发失败", "无数据目录", 3000);
+                return;
+            }
+            const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
+            if (leds.gamePid == 0) {
+                notify::PushLocal(/*Warning*/ 2, "move-hop", "下发失败", "需已注入游戏", 3000);
+                return;
+            }
+            xcat::PayloadControl c{};
+            if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) {
+                xcat::PayloadControlSetDefaults(c);
+            }
+            c.impactHopDeltaX = xcat::ClampImpactHopDeltaX(impactHopDx);
+            c.impactHopForce = impactHopForce ? 1u : 0u;
+            impactHopDx = (int)c.impactHopDeltaX;
+            auto bump = [](uint32_t& seq) {
+                seq = seq == 0 ? 1u : seq + 1u;
+                if (seq == 0) seq = 1u;
+            };
+            bump(c.impactHopTestSeq);
+            xcat::log::Ok("App", "impactHopTestSeq=%u dx=%d force=%u", c.impactHopTestSeq,
+                          (int)c.impactHopDeltaX, c.impactHopForce);
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                impactTick = c.writeTickMs;
+                notify::PushLocal(/*Info*/ 0, "move-hop", "短推已下发",
+                                  impactHopForce ? "强制旁路无敌 · 看运行日志"
+                                                 : "需无敌开 · 看运行日志",
+                                  4500);
+            } else {
+                notify::PushLocal(/*Warning*/ 2, "move-hop", "写盘失败", "user.ini", 3000);
             }
         };
 
-        xcat::ui::CardGuard card("##tab_dbg_tp", "瞬移 / 踢号压测");
-        ImGui::TextDisabled("结果看 bin/XCat_data/logs/combat.log · kick_stress / Teleport");
+        xcat::ui::CardGuard card("##tab_dbg_move", "位移试推");
+        ImGui::TextDisabled("需开无敌；对照路线 A / B。");
+        ImGui::TextDisabled("参数：方向 · 水平速度 · 竖直速度（约 px/s）");
+        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+        if (ImGui::DragInt("dir##dbg_move_dir", &impactDir, 1, -1, 1)) persistImpactParams();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("±1=水平方向；0=A 跟朝向，B 用 +vx");
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+        if (ImGui::DragInt("vx##dbg_move_vx", &impactVx, 1, 0, (int)xcat::kImpactImpulseVxMax))
+            persistImpactParams();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+        if (ImGui::DragInt("vy##dbg_move_vy", &impactVy, 1, 0, (int)xcat::kImpactImpulseVyMax))
+            persistImpactParams();
+        ImGui::TextDisabled("默认 dir=%d vx=%u vy=%u",
+                            (int)xcat::kImpactImpulseDirDefault, xcat::kImpactImpulseVxDefault,
+                            xcat::kImpactImpulseVyDefault);
         {
             const float gap = ImGui::GetStyle().ItemSpacing.x;
             const float rowW = ImGui::GetContentRegionAvail().x;
-            const float btnW2 = (std::max)(1.f, (rowW - gap) * 0.5f);
-            const float btnW4 = (std::max)(1.f, (rowW - gap * 3.f) * 0.25f);
-
-            if (ImGui::Button("测试贴怪瞬移", ImVec2(btnW2, 0.f))) bumpTpSeq("test");
+            const float btnW = (std::max)(1.f, (rowW - gap) * 0.5f);
+            if (ImGui::Button("试推 A", ImVec2(btnW, 0.f))) bumpImpact(true);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip(
-                    "随机瞬移到一只怪身边（fill+Doing）。\n"
-                    "用首页「落点偏移」；不依赖贴怪开关。与 F11 同路径。");
+                ImGui::SetTooltip("路线 A：按 dir×vx / vy 试推一次");
             }
             ImGui::SameLine(0.f, gap);
-            if (ImGui::Button("原生CALL", ImVec2(btnW2, 0.f))) bumpTpSeq("native");
+            if (ImGui::Button("试推 B", ImVec2(btnW, 0.f))) bumpImpact(false);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip("短距探针：fill+Doing（~140px 自选落点）");
-            }
-
-            if (ImGui::Button("踢号压测", ImVec2(btnW4, 0.f))) bumpTpSeq("wide");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip(
-                    "随机贴怪 2000→50ms，每级−50 / 8跳；再点停止。\n"
-                    "DONE last_ok_cd=…；压测中挂起 F5。");
-            }
-            ImGui::SameLine(0.f, gap);
-            if (ImGui::Button("细扫0-50", ImVec2(btnW4, 0.f))) bumpTpSeq("fine0");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip("50→0ms/−5，每级12跳；mode=fine0-50");
-            }
-            ImGui::SameLine(0.f, gap);
-            if (ImGui::Button("细扫10-30", ImVec2(btnW4, 0.f))) bumpTpSeq("fine10");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip("30→10ms/−5，每级12跳；mode=fine10-30");
-            }
-            ImGui::SameLine(0.f, gap);
-            if (ImGui::Button("原地短跳", ImVec2(btnW4, 0.f))) bumpTpSeq("local");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip(
-                    "同台左右来回（排除远距）；50→0ms；mode=local0-50\n"
-                    "再点同按钮停止。");
+                ImGui::SetTooltip("路线 B：按 ±vx / vy 试推一次");
             }
         }
+        ImGui::Separator();
+        ImGui::TextDisabled("短推：按水平距离估算一次推进（冷却约 400ms）");
+        ImGui::SetNextItemWidth(AppDpi_Px(88.f));
+        if (ImGui::DragInt("目标 Δx##dbg_move_hop_dx", &impactHopDx, 1,
+                           (int)xcat::kImpactHopDeltaXMin, (int)xcat::kImpactHopDeltaXMax))
+            persistImpactParams();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("有符号 px；建议 ±80 / ±120 / ±160");
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("强制（无视无敌）##dbg_move_hop_force", &impactHopForce))
+            persistImpactParams();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("仅调试；产品飞行默认要求无敌开");
+        }
+        if (ImGui::Button("短推试一次", ImVec2(-1.f, 0.f))) bumpImpactHop();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("按目标 Δx 试推一次；需无敌（或勾强制）");
+        }
+    }
+    CardGap();
+    {
+        // 原生瞬移调试入口已禁用；位移试推见上一卡。
+        xcat::ui::CardGuard card("##tab_dbg_tp", "瞬移 / 踢号压测");
+        ImGui::TextDisabled("原生瞬移调试按钮已关闭（测试贴怪 / 原生CALL / 踢号压测）。");
+        ImGui::TextDisabled("旧 user.ini 的 teleport*Seq 会被 payload 拒发并写 Control 日志。");
     }
     CardGap();
     {

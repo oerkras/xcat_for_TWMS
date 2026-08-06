@@ -1,6 +1,6 @@
 // Shared player vitals — Classic TWMS.
 // 真源唯一：WorldManager→CharacterData→CharacterStat（WM BasicStat 抬 mhp/mmp）。
-// 字段防漂移：dump 哈希 → field_get_offset；失败回退下方 Hint（remount 2026-08-04）。
+// 字段防漂移：dump 哈希 → field_get_offset；失败回退下方 Hint（remount 2026-08-06 晚 · CS/BS/NL/Slot）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -26,84 +26,97 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-// --- dump.cs / restored TypeDef（2026-08-04）---
+// --- dump.cs / restored TypeDef（2026-08-06）---
 constexpr char kHashWorldManager[] =
-    "af1529816d3e158e2939f3c03b4fe68c04930802ea39c8d6567d1fb4865b742";
+    "acda742ab51e7e2e3003fd2b44fbc00eababde4300ef17ac35b5f4fd01bee68";
 constexpr char kHashCharacterData[] =
-    "e410fb711868f2306f8a6368e8330e0e76e59c504fcdcce6952ceec81952e38";
+    "d5453e03707efd1001d8348a46ee270f8117468d2f1504fd0dadd0cc7c10468";
 constexpr char kHashCharacterStat[] =
-    "f06c1e01b4fddd601707785f97dd0a798d9b6f32b0bdd35d7289bb77218a4ea";
+    "ca7b3435f1b05d7af051a90fa92e45df20dcb6847f36903689a997eb20b5682";
 constexpr char kHashBasicStat[] =
-    "b6531d86b1298b77a11682f4d3023027071a1918ef37b7b07a5753ec2fcabcf";
+    "fd59831ad8dc46e0adbf3509f7b0b17783ee5c7931092cb5b4019b51e9933b9";
 constexpr char kHashNextLevel[] =
-    "e0a3375a8abea880d8bdfeffd488e70c14d014382d45d154468bc20ea198777";
+    "c2dce53ea924b0f5383bb3487ddef85b213868b54931cbb43268f085af0aff1";  // TypeDef 1834 Nextlevel
+constexpr char kHashItemSlotBase[] =
+    "e082912531f0de2015f6705b27ab5d3192e55481d44daaba05ed84b183076a5";  // TypeDef 1837
+constexpr char kHashItemSlotBundle[] =
+    "c8e2810801e0f102a4884f6a39994f988d9e601fcabd68b4c1c61457251a5ae";  // TypeDef 1840
 
 // WM
 constexpr char kHashWmMyUser[] =
-    "<d4428e1b7aab1a1fca5b6951009bf64f2c5cfb39f9a183f582fed4ff3a1aaaa>k__BackingField";
+    "<ef4652eaf850c6fcba53fee8385959f223111ee46e00417bb435eebc026d15e>k__BackingField";
+// 2026-08-06 BIN：旧哈希 c39c747b… 实为 WM+0xA8 的 bool；真 CharacterData* @0xE0。
 constexpr char kHashWmCharacterData[] =
-    "b57ace627893d12b66c4fe3b71ba9ab74056636018d089be72d9c93bab9f5a1";
+    "bf626b2e3edea540151d6fac0585e42759be6a77b833a03a455c50c8e3f9f9a";
+// BasicStat* @0xE8（旧 a96d3d20… 是 int[] @0xB0）
 constexpr char kHashWmBasicStat[] =
-    "ff367f3a2d08506773717fe61fd76de085291b7aa6c8f7fd9740cae9150dd5c";
+    "c9fc1cf369b5e4487b50b36d2bc609fddcabaeeeda7298cd5aa012765434151";
 // CharacterData
 constexpr char kHashCdCharacterStat[] =
-    "ef9ee721714c61ccb4781a5674e197ff0cbe50a034f7c8a804fb03eb71a8d6a";
+    "da9615c500cd9ca84a3432f5a2c56eba55e9942f0801ebb6bbea300be416990";
 constexpr char kHashCdItemSlots[] =
-    "e756936a01b4cb1ab54a49b063b06337b0f0666ee05ead8415f35a8e278b760";  // List<ItemSlotBase>[]
+    "d2c891b1081084763d55e5348620df70c9946eac62b007ad5b0f9089fd18b42";  // List<ItemSlotBase>[]
 constexpr char kHashCdSkillRecord[] =
-    "ba3361082014233983ead400c9c134963c964ba8ad882f2284d0f3a296c19ff";  // Dict<int,int>
+    "f5088d7f088ca3763146424d065dab0b6a6ecc686aa352e81fade16eb80e6b5";  // Dict<int,int>
 constexpr char kHashCdSkillRecordEx[] =
-    "e3d90051458e6b5050457693db084fe9ec5f17cc97ebd23356a35c7d330f515";
+    "a1eff055911fa719001f03a42e7b744b3fbc18ff377e8308cb7f73a6f4e5997";
+constexpr char kHashCdSkillMasterLevel[] =
+    "d6cf5f43fedeb6a9092777d61efdc3fcf28fde0c2c17ff56838aa2f53e11174";  // Dict<int,int>
 constexpr char kHashCdSkillCooltime[] =
-    "f8c076a149b98ee307b788e694cf7e9dcd3e1caf26b3242025bd7aea62cff6f";  // Dict<int,ushort>
+    "a1c62b0d258482be0898e85b36289f5e063472502d9ebaa406ee8a173d7c0cb";  // Dict<int,ushort>
 constexpr char kHashCdSkillCoolTimeOver[] =
-    "d6b5690505bd851816423d69e69d0369d89527b802327dc8d3742b61f39ef84";  // Dict<int,int>
+    "d41ab04834d2cd95e378a463754e411e8a0faa29f6d4ba95c07dcc831a52711";  // Dict<int,int>
 constexpr char kHashWmSecondaryStat[] =
-    "aae31a6398f01aee6aa0d82bfd982fd5185807939e4a1862b45cd7b3e3e052c";
-// ItemSlotBase / ItemSlotBundle（明文类名 + 字段）
-constexpr char kFldSlotItemId[] = "ItemId";
+    "a9b99e97d2bcb10bb398b17937dd3c18b7a3f387b972374ae82ffa6e9b51b38";  // WM+0xF0；勿用 +0xB8 嵌套 struct
+// ItemSlotBase / ItemSlotBundle（08-06 remount：类名已哈希，字段亦哈希）
+constexpr char kHashSlotItemId[] =
+    "a6ed5f11fa353cae3b4659363eda05ed44cd4461eddf82c7c8491f976cc1d44";  // ItemId @0x10
+constexpr char kHashSlotBundleNumber[] =
+    "ae33d4afd39595ca1db745fe37096eb4e36ee4e5ac2431a6882d631932bf8d4";  // nNumber @0x28
+constexpr char kFldSlotItemId[] = "ItemId";           // restored 明文兜底
 constexpr char kFldSlotBundleNumber[] = "nNumber";
-// CharacterStat
+// CharacterStat（08-06 remount · TypeDef 1833）
 constexpr char kHashCsName[] =
-    "f216de52c6bb5f9ee7a0f4ebe4270cc3377ce61b1e4c7aa3c2e49d08c3da688";
+    "f78abe756742e082e9ee5202b07bfbfca50552418ff7377c69e193d50023807";  // CharacterName @0x18
 constexpr char kHashCsLevel[] =
-    "ac28038f1841b43960798b30d266cb33d510620b8c9cbbeaed67bb41897ff78";
+    "dff9f7fca1f8ed08dba902115033c23d10282d05efe6810839a21496bd25dfe";  // level @0x38
 constexpr char kHashCsJob[] =
-    "da3698da6d23c8d4aba0e5b1be6f4f8e319f5ae61793ea35fdfcb20e0feb9c8";
+    "b9294cf29366a9314c47dd9c32eedba4676ab93fb8da893455dae4b8c415c89";  // job @0x3A
 constexpr char kHashCsHp[] =
-    "a39e66c6936b3fedb87c6cb9c2ef0fe6b7280ed8cbfc627bff32fe9212d27c2";
+    "e254e56380a8565d0586d510c1f8983c63b51ca60746a059fcc30e954478fc0";  // hp @0x44
 constexpr char kHashCsMhp[] =
-    "e4191a79ddb6c5ea57e6ae58950fe1774fcf5fda36422cf40137b487f1ba72d";
+    "a7dc4e45f84f17a6ff59777d376e7cb91f1d24afd8133828a29d7a3fee1e73a";  // mhp @0x46
 constexpr char kHashCsMp[] =
-    "adaceeb57a830269c02c8c34e093eef5d09f07315480772b8196da28b241695";
+    "e98148fb8b6a83965d4939c69b8812134d0fefdc8e9905ff2a551598d678cd9";  // mp @0x48
 constexpr char kHashCsMmp[] =
-    "f63e4525fe1637d2049a2ff8c1592ac3d42e7ace28385f6668e7c36a3f6de6c";
+    "e41e5dd08667305a1eb7d0103a98f41d0322c6c5e1edb3c666f956f57060342";  // mmp @0x4A
 constexpr char kHashCsExp[] =
-    "a955322ec95c0a3a77b40b46c760dde3b2061a00aff4523c3c63a54da23e309";
+    "b51c8ddb8465668bb7568196af54a574922998b5bcf7aeab1ffdfddc5d5b267";  // exp @0x50
 constexpr char kHashCsMoney[] =
-    "c4f0d2ae158f16ee0dbf5f780dc5df5d69b3b85ff4971b0496308559a426f51";
+    "e7bbcd5dffa3abe973422fe8a2a01047ed71adf7cbd16fae3c93a6caf48e688";  // money @0x58
 constexpr char kHashCsNextLevel[] =
-    "a75e7e06d24f762d1ba80d631f58a7b090ddbfe1e76bdca517468b18d3b8262";
-// BasicStat
+    "c835fd74473a619e8a0b2314ac26ffb0b36adb855103e7dd52903c7b10cd161";  // Nextlevel* @0x80
+// BasicStat（08-06 remount · TypeDef 1322）
 constexpr char kHashBsNmhp[] =
-    "f6a5cf63ddc0537d5d648dfb28bbe7d3e1f73c1989d37976e19375a0b9e80e6";
+    "fb0542fbf709b3b32a1420d42dca6ee51c26048f09eb5a33e434864842975ba";  // nMHP @0x30
 constexpr char kHashBsNmmp[] =
-    "ad1d81abaa50537c6b8cd8db7aaf66ca0c426b35dce16580db5ec0b556cfdc1";
-// NextLevel.int[]
+    "be90514926537bce5ba6e0c383f35cd5e96c24be23f7723464bd738c47b7a8d";  // nMMP @0x34
+// Nextlevel.int[]（08-06 remount）
 constexpr char kHashNextArr[] =
-    "b9a7dc9ca20a45d234fe8c8879b7c945d0d18d0a5693e41871c9b38f3edd911";
+    "e62c0db40328453711e4eaa4f5a8fcac45c2fd8396e1db88ba8cc42937eeaef";  // @0x10
 
-// Hint（dump 复核；hash 失败时回退）
+// Hint（dump 复核；hash 失败时回退）— remount 2026-08-06 晚间（CD@0xE0 / BS@0xE8）
 constexpr size_t kFbWmMyUser = 0x28;
-constexpr size_t kFbWmCharacterData = 0xE0;
-constexpr size_t kFbWmBasicStat = 0xE8;
+constexpr size_t kFbWmCharacterData = 0xE0;  // was 0xA8（bool 误标）
+constexpr size_t kFbWmBasicStat = 0xE8;      // was 0xB0（int[] 误标）
 constexpr size_t kFbCdCharacterStat = 0x10;
 constexpr size_t kFbCdItemSlots = 0x40;
 constexpr size_t kFbCdSkillRecord = 0x50;
 constexpr size_t kFbCdSkillRecordEx = 0x58;
+constexpr size_t kFbCdSkillMasterLevel = 0x60;
 constexpr size_t kFbCdSkillCooltime = 0x68;
 constexpr size_t kFbCdSkillCoolTimeOver = 0x70;
-constexpr size_t kFbWmSecondaryStat = 0xF0;
+constexpr size_t kFbWmSecondaryStat = 0xF0;  // SecondaryStat*（08-06 dump；旧误标 0xB8 为嵌套 struct）
 constexpr size_t kFbSlotItemId = 0x10;
 constexpr size_t kFbSlotBundleNumber = 0x28;  // ItemSlotBundle.nNumber
 constexpr size_t kFbCsName = 0x18;
@@ -128,6 +141,7 @@ size_t gOffCdCharacterStat = kFbCdCharacterStat;
 size_t gOffCdItemSlots = kFbCdItemSlots;
 size_t gOffCdSkillRecord = kFbCdSkillRecord;
 size_t gOffCdSkillRecordEx = kFbCdSkillRecordEx;
+size_t gOffCdSkillMasterLevel = kFbCdSkillMasterLevel;
 size_t gOffCdSkillCooltime = kFbCdSkillCooltime;
 size_t gOffCdSkillCoolTimeOver = kFbCdSkillCoolTimeOver;
 size_t gOffWmSecondaryStat = kFbWmSecondaryStat;
@@ -256,21 +270,27 @@ void EnsureFieldOffsets() {
             PickOff(FieldOffsetByHash(cd, kHashCdSkillRecord), kFbCdSkillRecord, &cdH);
         gOffCdSkillRecordEx =
             PickOff(FieldOffsetByHash(cd, kHashCdSkillRecordEx), kFbCdSkillRecordEx, &cdH);
+        gOffCdSkillMasterLevel = PickOff(FieldOffsetByHash(cd, kHashCdSkillMasterLevel),
+                                         kFbCdSkillMasterLevel, &cdH);
         gOffCdSkillCooltime =
             PickOff(FieldOffsetByHash(cd, kHashCdSkillCooltime), kFbCdSkillCooltime, &cdH);
         gOffCdSkillCoolTimeOver = PickOff(FieldOffsetByHash(cd, kHashCdSkillCoolTimeOver),
                                           kFbCdSkillCoolTimeOver, &cdH);
     }
-    void* slotBase = x::runtime::il2cpp::FindClass("", "ItemSlotBase");
-    void* slotBundle = x::runtime::il2cpp::FindClass("", "ItemSlotBundle");
+    void* slotBase = x::runtime::il2cpp::FindClass("", kHashItemSlotBase);
+    if (!slotBase) slotBase = x::runtime::il2cpp::FindClass("", "ItemSlotBase");
+    void* slotBundle = x::runtime::il2cpp::FindClass("", kHashItemSlotBundle);
+    if (!slotBundle) slotBundle = x::runtime::il2cpp::FindClass("", "ItemSlotBundle");
     bool slotH = false;
     if (slotBase) {
-        gOffSlotItemId =
-            PickOff(FieldOffsetByHash(slotBase, kFldSlotItemId), kFbSlotItemId, &slotH);
+        size_t got = FieldOffsetByHash(slotBase, kHashSlotItemId);
+        if (!got) got = FieldOffsetByHash(slotBase, kFldSlotItemId);
+        gOffSlotItemId = PickOff(got, kFbSlotItemId, &slotH);
     }
     if (slotBundle) {
-        gOffSlotBundleNumber = PickOff(FieldOffsetByHash(slotBundle, kFldSlotBundleNumber),
-                                       kFbSlotBundleNumber, &slotH);
+        size_t got = FieldOffsetByHash(slotBundle, kHashSlotBundleNumber);
+        if (!got) got = FieldOffsetByHash(slotBundle, kFldSlotBundleNumber);
+        gOffSlotBundleNumber = PickOff(got, kFbSlotBundleNumber, &slotH);
     }
     if (cs) {
         gOffCsName = PickOff(FieldOffsetByHash(cs, kHashCsName), kFbCsName, &csH);
@@ -533,6 +553,11 @@ size_t OffSkillRecord() {
 size_t OffSkillRecordEx() {
     EnsureFieldOffsets();
     return gOffCdSkillRecordEx;
+}
+
+size_t OffSkillMasterLevel() {
+    EnsureFieldOffsets();
+    return gOffCdSkillMasterLevel;
 }
 
 size_t OffSkillCooltime() {

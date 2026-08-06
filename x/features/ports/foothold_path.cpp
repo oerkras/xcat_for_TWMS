@@ -32,8 +32,13 @@ constexpr int kEndInsetCliff = 36;  // 链条左右端点（无更外侧 Walk）
 // 仅战斗 Snap 开启：有 Walk 邻台的端点再缩一点；贴门 / 赶路 SnapOnFh 仍只做悬崖内缩。
 // 1d2b0b：8px 不够——斜坡落点结算后横滑 16~17px 跨缝到邻段（doing_miss，服端位置违规源头），
 // 内缩必须盖过滑移量。极短段由 lo>hi 中点回退兜底。
-// a7dc3e：20px 仍漏——残余 miss 里 5/8 是跨一条缝、滑移 21~30px，故抬到 32（≈悬崖 36 量级）。
-constexpr int kJunctionInset = 32;
+// a7dc3e：20px 仍漏——残余 miss 里 5/8 是跨一条缝、滑移 21~30px，曾抬到 32。
+// 79d048 幽深峽谷Ⅲ：fh63 左端=783 接斜坡 fh62，lo=783+32=815 正好是毒点——Doing 挂不上
+// 台，CollisionDetect 掉到下层 fh60@(786,-1463)。实机 827(+44) 稳，故抬到 48。
+constexpr int kJunctionInset = 48;
+// 钳到安全带刀刃时再往内收一点，避免 standOff 把落点钉死在 lo/hi（815 类 miss）。
+constexpr int kEdgeBiasPx = 8;
+constexpr int kEdgeBiasMinSpan = 24;
 
 struct Edge {
     uint16_t to = 0;
@@ -202,7 +207,13 @@ int ClampToSafeStandX(const Graph& g, int idx, int ix, bool avoidWalkJunction) {
         const int xmax = (std::max)(g.x1[idx], g.x2[idx]);
         return (xmin + xmax) / 2;
     }
-    return (std::max)(lo, (std::min)(hi, ix));
+    int cx = (std::max)(lo, (std::min)(hi, ix));
+    // 宽段才偏置：贴 lo/hi 时往段内收，躲开接缝刀刃（赶路 avoidWalkJunction=false 同样受益）。
+    if (hi - lo >= kEdgeBiasMinSpan) {
+        if (cx == lo) cx = lo + kEdgeBiasPx;
+        else if (cx == hi) cx = hi - kEdgeBiasPx;
+    }
+    return cx;
 }
 
 // 同 z 链被端点内缩压成单点 = 台面过短，fill+Doing 易滑落（勿当战斗落点）。
@@ -888,6 +899,40 @@ bool ZMassAt(float x, float y, int32_t* outZMass, uint32_t* outFhId) {
     if (!SnapStandAt(x, y, &sx, &sy, &fh) || !fh) return false;
     if (outFhId) *outFhId = fh;
     return ZMassOfFh(fh, outZMass);
+}
+
+bool SameWalkComponent(uint32_t fhA, uint32_t fhB) {
+    if (!fhA || !fhB) return false;
+    if (fhA == fhB) return true;
+    if (!EnsureGraph()) return false;
+
+    std::lock_guard<std::mutex> lock(gMu);
+    if (!gGraph || !gGraph->ok) return false;
+    const Graph& g = *gGraph;
+    const int src = IndexOf(g, fhA);
+    const int dst = IndexOf(g, fhB);
+    if (src < 0 || dst < 0) return false;
+    if (src == dst) return true;
+
+    // 仅 Walk 边 BFS（绳/下跳不算拟人可走）。
+    static uint16_t q[foothold::kMaxFootholds];
+    static uint8_t seen[foothold::kMaxFootholds];
+    std::memset(seen, 0, g.n);
+    int qh = 0, qt = 0;
+    q[qt++] = static_cast<uint16_t>(src);
+    seen[src] = 1;
+    while (qh < qt) {
+        const int u = q[qh++];
+        if (u == dst) return true;
+        for (int ei = 0; ei < g.deg[u]; ++ei) {
+            if (g.adj[u][ei].kind != EdgeKind::Walk) continue;
+            const int v = g.adj[u][ei].to;
+            if (seen[v]) continue;
+            seen[v] = 1;
+            q[qt++] = static_cast<uint16_t>(v);
+        }
+    }
+    return false;
 }
 
 bool PlanFirst(uint32_t fromFh, uint32_t toFh, FirstAction* out) {

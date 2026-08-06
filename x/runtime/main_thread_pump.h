@@ -39,8 +39,26 @@ bool InvokeAndWait(JobFn fn, void* user, DWORD timeoutMs = 1500,
 
 // Sticky per-frame callback: runs on pump thread AFTER orig SendWill (always).
 // No queue, no wait — for light data-plane work only (no GC / no FindAll).
-// Single slot (invuln anti-blink); nullptr clears it.
+// Primary slot (invuln anti-blink); nullptr clears it.
 void SetFrameTick(JobFn fn, void* user = nullptr);
+// Second sticky slot (legacy / 非物理路径); 与 primary 并存，互不覆盖。
+void SetAuxFrameTick(JobFn fn, void* user = nullptr);
+// 第三槽：只读 walk BIN（keypad_walk_bin）；与 primary/aux 并存。
+void SetBinFrameTick(JobFn fn, void* user = nullptr);
+// 物理前槽：WM.FixedUpdate 的 orig 之前调用（拟人走路 SetInput，赶在 CalcWalk 前）。
+// WM FixedUpdate 未挂上时不会触发；与 SendWill FrameTick 无关。
+void SetPrePhysicsFrameTick(JobFn fn, void* user = nullptr);
+// 物理后槽：WM.FixedUpdate orig **之后**（UserWU 已把 InputX 灌成 0 后，再补一轮
+// SetInput(held)+基类 CalcWalk）。虚表钩未命中时的保底通道。
+void SetPostPhysicsFrameTick(JobFn fn, void* user = nullptr);
+// 输入补写槽：与 Pre/PostPhysics 不同，**保证有宿主**。首选 WM.FixedUpdate orig 之前
+// （设备状态先就位，本帧读输入的逻辑才看得到）；该钩未挂上或 idle 超过 1s 时自动
+// 回落到 SendWill 渲染帧。给 InputSystem 设备状态注入这种「必须每帧补」的用途。
+void SetInputFrameTick(JobFn fn, void* user = nullptr);
+// 累计触发次数：调用方据此证明补写真的在跑，而不是只注册成功。
+uint32_t InputFrameTickRuns();
+// 当前宿主：0=未触发 1=WM.FixedUpdate 2=SendWill 保底。
+uint8_t InputFrameTickHost();
 bool IsInstalled();
 
 void SetPumpPhase(PumpPhase phase);

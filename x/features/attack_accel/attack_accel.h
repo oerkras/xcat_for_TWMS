@@ -23,7 +23,7 @@ namespace attack_accel {
 //   仅落地武装后才跳过攻击类 Prepare；action==6 Idle 永远透传。
 //   跳过时立刻 +0x118=-1 并改调 Idle Prepare（无攻击层则 Slot14 永不解锁，会卡刀）。
 //   SetAttackAction 仍可能事后写 actionIdx → worker 在 skipArmed 时周期清忙锁兜底。
-// remount 2026-08-04：Prepare 0xFDE830/0x1251E30；AbsSpeed 种子阈 0 已验。
+// remount 2026-08-06：Prepare 0xFE06A0/0x1253CA0；字段位移未变，哈希已换；IDB imagebase 0x7ff848c80000。
 void Init();
 void Shutdown();
 void StartWorker();

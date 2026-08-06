@@ -49,9 +49,10 @@ void* GetItemSlotList(int invType);
 size_t OffSlotItemId();
 size_t OffSlotBundleNumber();
 
-// CharacterData 技能字典偏移（hash 防漂；dump fallback 0x50/0x58/0x68/0x70）
+// CharacterData 技能字典偏移（hash 防漂；dump fallback 0x50/0x58/0x60/0x68/0x70）
 size_t OffSkillRecord();
 size_t OffSkillRecordEx();
+size_t OffSkillMasterLevel();  // Dict<int,int>；满级封顶
 size_t OffSkillCooltime();
 size_t OffSkillCoolTimeOver();
 void* LocalSecondaryStat();  // WM→SecondaryStat*

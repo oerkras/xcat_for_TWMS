@@ -33,12 +33,13 @@ int32_t ReadI32Local(void* obj, size_t off) {
 // TW TypeDef 15147 — SecurityClient 攻包窗；resolve：il2cpp_shape::ResolveSecAttackKlass
 // （hash e439d992… + static Dict@0/8 + I32@0x10；旧 ba499947… 已作废）
 
+// Remount 2026-08-06：TDI 15147 字段 ACS 重哈希；偏移仍 0/8/0x10；klass cf990184… 未漂。
 constexpr char kHashPktDict[] =
-    "b76fb498ae817969b9c13c9067cc3659313bba7516615ede12014165625d25b";  // Dictionary<ushort,int>
+    "d87491da2374f815e43cf3ce5d21f637171b2bba55112b8d27d2ec8d2f84264";  // Dictionary<ushort,int>
 constexpr char kHashSkillDict[] =
-    "a02680a0130d03c2ed2b68d513dced8cc9d81b82998619c241bd6b3763abd15";  // Dictionary<int,int>
+    "e2536ba7e6bd90ceb4e19ab119d02560d65bcf3200d03c48d3f150c3ccad735";  // Dictionary<int,int>
 constexpr char kHashDetectTime[] =
-    "c261db3ccb94785d0b2c8832e632626be162d5968ee5b4f54ef029b361bb0bf";
+    "c5c58d4820beefd3153ff06483d828a765e6261b45db32658bd1cc34090b1e4";
 constexpr size_t kFbPktDict = 0x0;
 constexpr size_t kFbSkillDict = 0x8;
 constexpr size_t kFbDetectTime = 0x10;
@@ -90,22 +91,39 @@ bool FieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    if (!PlausibleStaticOff(off)) return false;
-    *out = off;
+    // 静态槽偶发返回非 0..0x3F 的编码；名已命中则用 dump fb（布局未漂）
+    if (PlausibleStaticOff(off)) {
+        *out = off;
+    } else {
+        *out = fb;
+    }
     return true;
 }
 
 void EnsureStaticFieldOff() {
-    if (gFieldOffTried) return;
-    gFieldOffTried = true;
-    if (!gKlass) gKlass = x::runtime::il2cpp_shape::ResolveSecAttackKlass();
+    constexpr int kExpect = 3;
+    static int sLastHits = -1;
+    if (gFieldOffTried && sLastHits >= kExpect) return;
+    if (!gKlass) {
+        gKlass = x::runtime::il2cpp_shape::ResolveSecAttackKlass();
+        if (!gKlass) {
+            gKlass = x::runtime::il2cpp::FindClass(
+                "", "cf990184167a3debe30b85ee608efab18ffc750676a5f79617009d0f56bec8d");
+        }
+    }
+    if (!gKlass) return;
     int hits = 0;
     if (FieldOffHit(gKlass, kHashPktDict, kFbPktDict, &gOffPktDict)) ++hits;
     if (FieldOffHit(gKlass, kHashSkillDict, kFbSkillDict, &gOffSkillDict)) ++hits;
     if (FieldOffHit(gKlass, kHashDetectTime, kFbDetectTime, &gOffDetectTime)) ++hits;
-    runtime::LogI("SecAttack", "static fields path=%s hits=%d/3 pkt=0x%zX skill=0x%zX detect=0x%zX",
-                  hits == 3 ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffPktDict,
-                  gOffSkillDict, gOffDetectTime);
+    gFieldOffTried = true;
+    if (hits != sLastHits) {
+        sLastHits = hits;
+        runtime::LogI("SecAttack",
+                      "static fields path=%s hits=%d/3 pkt=0x%zX skill=0x%zX detect=0x%zX",
+                      hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+                      gOffPktDict, gOffSkillDict, gOffDetectTime);
+    }
 }
 
 struct DictScan {

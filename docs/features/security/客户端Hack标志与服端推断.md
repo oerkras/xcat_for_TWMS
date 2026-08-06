@@ -1,8 +1,8 @@
 # 客户端 Hack 标志 → 服端逻辑推断（Classic TWMS）
 
-> **状态**：dump 符号 + TW IDA xref/常量解码 + BIN 探针（攻包窗详文 2026-08-01）  
+> **状态**：dump 符号 + TW IDA xref/常量解码 + BIN 探针（攻包窗详文 2026-08-01；**pendingError/AutoBlock 边界 2026-08-06 修订**）  
 > **证据源**：`Dumps/cms_cw/dump.cs`（语义名）；TW `runtime/out` / `GameAssembly.dll.i64`；`x.jsonl` tag=`SecAttack`  
-> **日期**：2026-07-30（§3.3 攻包窗于 2026-08-01 扩链至专文）  
+> **日期**：2026-07-30（§3.3 攻包窗于 2026-08-01 扩链至专文；§4 AutoBlock↔pendingError 于 2026-08-06 证伪）  
 > **目的**：澄清 `m_bFloatHackCheckNeed` / `m_bABHackCheckNeed` / `ClientHacksType` **能**反推什么、**不能**当成玩家飞天校验器
 
 ---
@@ -10,8 +10,9 @@
 ## 0. 一句话
 
 这三样推的是 **怪物仿真完整性 + 客户端宏/速度举报** 的服端处置链；  
-**推不出** 玩家 C→S `UserMove` 的 `HackingAutoBlock.Move/Position` 物理校验公式。  
-F6 飞天踢线请对齐 MovePath 基线 + [`../kick_sniff/断线错误码.md`](../kick_sniff/断线错误码.md)，不要去清角色上不存在的 Float/AB 标志。
+**推不出** 玩家 C→S `UserMove` 的物理校验公式。  
+`HackingAutoBlock.Move/Position` 只是 CMS **结果码名**：TW `Session._pendingErrorCode@0x40` **从不写出 22/24**（只见哨兵 204/205）——见 [`../kick_sniff/断线错误码.md`](../kick_sniff/断线错误码.md) §3。  
+F6 飞天踢线请对齐 MovePath 基线 + kick_sniff 的 **STATE / RING**，不要去清角色上不存在的 Float/AB 标志，也不要等 `pendingError=22/24`。
 
 ---
 
@@ -171,15 +172,15 @@ F6 飞天踢线请对齐 MovePath 基线 + [`../kick_sniff/断线错误码.md`](
 |---|---|---|---|
 | Float / AB / Mob `HackCode` | **怪** | 客户端自检 → 上报 | 无关 |
 | `ClientHacksType` | 宏 / 攻速 / 怪速 | C→S 举报 | 基本无关（除非同开宏） |
-| `HackingAutoBlock.Move=22` / `Position=24` | 玩法终裁**结果码名** | 多为服端裁定后体现在踢/通知 | 飞天相关，**无公式** |
+| `HackingAutoBlock.Move=22` / `Position=24` | CMS **结果码名** | 服端裁定用语；**TW 不写入** `Session+0x40` | 飞天相关语义，**无客户端公式**；踢线看 TCP/STATE |
 | C→S `UserMove`（CMS=47） | **角色**路径 | 客户端 Flush → 服端验 | **真·位移入口** |
 
 玩家飞天诊断路径：
 
 1. [`../fly/模块设计.md`](../fly/模块设计.md) — 积分器 / MoveElem 自洽  
 2. [`../protocol/移动协议.md`](../protocol/移动协议.md) — Flush / opcode  
-3. [`../kick_sniff/断线错误码.md`](../kick_sniff/断线错误码.md) — 断线边沿 / `pendingError`  
-4. **不要**改地图重力、不要在 `VecCtrlUser` 上找 Float/AB
+3. [`../kick_sniff/断线错误码.md`](../kick_sniff/断线错误码.md) — `SessionState` / RING / **哨兵 205**（勿当踢因）  
+4. **不要**改地图重力、不要在 `VecCtrlUser` 上找 Float/AB、**不要**等 `pendingError=22/24`
 
 ---
 
@@ -187,10 +188,10 @@ F6 飞天踢线请对齐 MovePath 基线 + [`../kick_sniff/断线错误码.md`](
 
 | 级别 | 内容 |
 |---|---|
-| 实锤 | 标志在 `VecCtrlMob`；`ClientHacks` 发包与枚举；SecurityClient 攻包/怪速 API |
-| 强推断 | AB=碰撞前后；Float=怪浮空/飞目标；服端收举报后阈值断线 |
-| 弱推断 | 具体阈值、是否映射到 Move=22、TW opcode 数值是否与 CMS 273/30 相同 |
-| **推不出** | 玩家 UserMove 物理校验器源码与阈值；靠清 Float 过飞天踢 |
+| 实锤 | 标志在 `VecCtrlMob`；`ClientHacks` 发包与枚举；SecurityClient 攻包/怪速 API；**TW `Session+0x40` 只写 204/205，非 AutoBlock** |
+| 强推断 | AB=碰撞前后；Float=怪浮空/飞目标；服端收举报后阈值断线；位移踢 = 服端掐 TCP + 客户端本地拆线 |
+| 弱推断 | 具体阈值；AutoBlock 名是否出现在 notice payload；TW opcode 数值是否与 CMS 273/30 相同 |
+| **推不出** | 玩家 UserMove 物理校验器源码与阈值；靠清 Float 过飞天踢；靠 `pendingError=Move/Position` 认踢 |
 
 ---
 

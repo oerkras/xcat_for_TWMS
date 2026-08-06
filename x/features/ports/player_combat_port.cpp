@@ -25,51 +25,50 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04
-constexpr uint32_t kRvaCompGetGo = 0x4E53330;              // remounted 2026-08-04
-constexpr uint32_t kRvaObjGetName = 0x4E60290;             // remounted 2026-08-04
+// Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
 
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
+// Remount 2026-08-06：ACS hash 全换；字段 off 未漂（与 drop_pool / mob_pool 同源）
 constexpr char kActorBaseClass[] =
-    "ddef6db860cfa2bea6dca39e201bf3065a897797f86009fb4d6104830143d94";
+    "edc85ce203606bdb549e5fb94458b1d2d11ce78034d24d41e39a54c0288d38e";
 constexpr char kVecCtrlClass[] =
-    "ef24024acbe225bcc90ca332f3e00aff5800daa32a769057d2e830eeac776bb";
+    "e0eb55b82f10cb9eeb9424eb3aadf1450a014afa564bc55c3739b2909abfbbc";
 constexpr char kFhClass[] =
-    "f7493895c6355227ba46ff22f0b3d491fac47e4c4ad2e735773a72878d9f860";
+    "efa6625ea3b04a69e7c5b850c9e7f5be45cc60edd0f20d9bd6cd400a4dcd51a";
 
 // hash → field_get_offset（与 foothold / mob / invuln / skill 同源）
 constexpr char kHashUserVecCtrl[] =
-    "<dc76f5c9e250bc9a327a219b39e16c345cdabf7b01ad5c60b568045069c9120>k__BackingField";
+    "<acb8946a384ed398c4ad9268349397cf4f6e65cf136078ebc9aa26a949efd41>k__BackingField";
 constexpr char kHashPos[] =
-    "c9d7ef4393802ebe9fdf9ebe7eaf7245d5cef3eeaa2a8d052fb4ad4883e34dc";
+    "cc96f38a9acbe6b4e8005a2d56a7846324bc67690c2059661962502f74b928a";
 constexpr char kHashVcCurFh[] =
-    "<b7b98b20290b6ec6221cc7a98ad9113018910968cd1f681f60fe20f109ef629>k__BackingField";
+    "<ee95e4ea9526a8d5a2c0e38ae6b59726f52587018d82072a2020dc6ac5a2398>k__BackingField";
 constexpr char kHashVcAp[] =
-    "a860e652f11e3e8846eaf4dfb600e319058d3e0e9e79b3fd7a3447344d98bb9";  // AbsPos; Y=+8
+    "e558fbd3da65bf13bea9360dfa61506af709ad89f925bc16b67e7e1cdb24107";  // AbsPos; Y=+8
 constexpr char kHashVcApl[] =
-    "ddcaef33563d49269da8f9db8391866dfc59ec057b8cca4ffa15a5b38f271b3";  // Apl; Y=+8
+    "b5eb27f6f80eeaea51f811969e3c5bc8a7b73b19741a8cb481b29a0082c958d";  // Apl; Y=+8
 constexpr char kHashVcRelPos[] =
-    "b43a7d8d34af59258f63b62c55068f9d50d59aa86f239fd75d9c5f7d8f008e7";  // RelPos; V=+8
+    "f9386810e222adacdfbd2e9232322d7cfcd301fa19b7734975ad616d30dfc0c";  // RelPos; V=+8
 constexpr char kHashFhId[] =
-    "<fc80e4108c6083194f2a7f6abf37ab87633bd47152fe92eea0ba2c7c23abed8>k__BackingField";
+    "<ab99fc2ea23e823db386154818b332da48af46523c77e5ed4646fd7596d7404>k__BackingField";
 // LocalUser 镜头 CurPos@0x240（只读诊断）。
 // 2026-08-04 撤销「镜头自愈」：0.1.36 实测只读探针 dApCur 静息 27~53px、dApPos=0、
 // dAA=0.0，引擎跟随本就是活的；dApCur 变大只是因为贴怪每秒瞬移 ~6.7 次、每次几百像素，
 // 平滑跟随物理上无法收敛。自愈据此每 0.29s 硬拧一次镜头（中位 343px、峰值 1419px），
 // 反而成了撕裂源。原「镜头粘死」证据取自 nSlow_=140 污染动作层的旧局，根因已换，立论作废。
 constexpr char kHashLogicalPos[] =
-    "b992bfa57dd45d484f39e25a6290a95d76e19fc1059423bff8fb0c9507dbda7";
+    "c4adef19821f3737cd477a7840968c11697f4afd8eb8696cafb37d1c297b926";
 // e2a28(Key) 键位移偏移对（IDA：mov [rsi+4B4h], rdx · 两 int32）
 constexpr char kHashKeyMoveDelta[] =
-    "<b03c77b0f3d0e67be0b55ae8ba32083c250e4db239feca211c1e9817c674f81>k__BackingField";
+    "<e06ad6b14b1b28a75adc7955d968a196c1d5109ff1d28d71b80a783b705e381>k__BackingField";
 
 constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 // Mob 专属 PvcActive；LU 上无同名槽，保留软探针（LooksLikeHeapPtr 失败 → VecCtrl）
 constexpr char kHashPvcActive[] =
-    "dd4c058e1a627d9c1177b6369307c3fdc5165d7b6b7249523e08ad05f82b0c3";
+    "f41915458cfcf30cd7e7c5b963b167580c606c9c0dfd38d8305b82b611c7ec0";
 constexpr char kMobClass[] =
-    "a803dc6312a27204244f43331114818db6b799117c7970d93707d2051ade498";
+    "d8cb6fb7d6903613c27c6c663961d0c02d458f0191006f691706e9ef9783849";
 constexpr size_t kFbPvcActive = 0xF0;
 size_t gOffPvcActive = kFbPvcActive;
 #define kOffPvcActive (gOffPvcActive)
@@ -130,12 +129,13 @@ bool CombatFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out, si
 }
 
 void EnsureCombatFieldOff() {
-    if (gCombatFieldTried) return;
+    constexpr int kExpect = 10;
+    static int sLastHits = -1;
+    if (gCombatFieldTried && sLastHits >= kExpect) return;
     if (!x::runtime::il2cpp::Ensure()) return;
-    gCombatFieldTried = true;
-    void* actor = x::runtime::il2cpp::FindClass("", kActorBaseClass);
-    if (!actor) actor = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
     void* ul = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+    void* actor = x::runtime::il2cpp::FindClass("", kActorBaseClass);
+    if (!actor) actor = ul;
     void* vc = x::runtime::il2cpp::FindClass("", kVecCtrlClass);
     void* fh = x::runtime::il2cpp::FindClass("", kFhClass);
     int hits = 0;
@@ -148,18 +148,21 @@ void EnsureCombatFieldOff() {
     hit(CombatFieldOffHit(vc, kHashVcAp, kFbVcAp, &gOffVcAp, 0x80, 0x100));
     hit(CombatFieldOffHit(vc, kHashVcApl, kFbVcApl, &gOffVcApl, 0x80, 0x100));
     hit(CombatFieldOffHit(vc, kHashVcRelPos, kFbVcRelPos, &gOffVcRelPos, 0x60, 0x100));
-    hit(CombatFieldOffHit(fh, kHashFhId, kFbFhId, &gOffFhId, 0x10, 0x40));
+    hit(CombatFieldOffHit(fh, kHashFhId, kFbFhId, &gOffFhId, 0x10, 0x80));  // 与 foothold 同窗
     hit(CombatFieldOffHit(ul, kHashLogicalPos, kFbLogicalPos, &gOffLogicalPos, 0x200, 0x300));
     hit(CombatFieldOffHit(ul, kHashKeyMoveDelta, kFbKeyMoveDelta, &gOffKeyMoveDelta, 0x400, 0x600));
     void* mob = x::runtime::il2cpp::FindClass("", kMobClass);
     hit(CombatFieldOffHit(mob, kHashPvcActive, kFbPvcActive, &gOffPvcActive, 0x80, 0x180));
-    constexpr int kExpect = 10;
-    x::runtime::LogI("PlayerCombat",
-                     "combat slots path=%s hits=%d/%d vc=0x%zX pos=0x%zX ap=0x%zX cur=0x%zX "
-                     "key=0x%zX pvc=0x%zX myUser=0x%zX",
-                     hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits, kExpect,
-                     gOffVecCtrl, gOffPos, gOffVcAp, gOffLogicalPos, gOffKeyMoveDelta, gOffPvcActive,
-                     x::ui::player::OffWmMyUser());
+    gCombatFieldTried = true;
+    if (hits != sLastHits) {
+        sLastHits = hits;
+        x::runtime::LogI("PlayerCombat",
+                         "combat slots path=%s hits=%d/%d vc=0x%zX pos=0x%zX ap=0x%zX cur=0x%zX "
+                         "key=0x%zX pvc=0x%zX myUser=0x%zX",
+                         hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+                         kExpect, gOffVecCtrl, gOffPos, gOffVcAp, gOffLogicalPos, gOffKeyMoveDelta,
+                         gOffPvcActive, x::ui::player::OffWmMyUser());
+    }
 }
 
 // 仅用于 dCurBody 日志，把镜头静息高度折算回身体位；不参与任何写入。
@@ -404,6 +407,10 @@ bool TryResolveLocalUser(DWORD now) {
         forceRebind = true;
     }
     gLocalUser = nullptr;
+
+    // InterStage / 卸图：禁主线程 FindAll（拖黑屏）；MyUser 空则等 PlayReady。
+    if (!world::IsPlayReady()) return false;
+
     if (!forceRebind && gLastLuRebind && now - gLastLuRebind < kRebindMs) return false;
     gLastLuRebind = now;
 

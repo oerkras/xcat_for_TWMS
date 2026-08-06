@@ -395,7 +395,7 @@ ArmImpactBlinkSettle(...)                          // 等 Valid 翻位后收尾
 ### ③ `DiscardByInterrupt(int, VecCtrl, bool)@0x119F600` —— ⬜ 待逆
 
 名字直译「因中断丢弃移动路径」。P0a §5 记录的
-「狂点 → 冷却拒跳 → `Disconnected` · `pendingError=205`」仍未定位到判定点，这个函数是最像的候选。
+「狂点 → 冷却拒跳 → `Disconnected` · sticky `pendingError=205`（哨兵≠踢因）」仍未定位到判定点，这个函数是最像的候选。
 **仅命名推断，未验证。**
 
 ### ④ §4.4 的三个实验 —— ⬜ 全部未执行

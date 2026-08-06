@@ -1,8 +1,9 @@
 #pragma once
-// simple_combat — Classic TWMS 站桩自动打怪（状态机重设计）
+// simple_combat — Classic TWMS 自动打怪（状态机）
 //
-// Idle → Acquire → [MoveTo→Settling] → Aim → Firing → Recover → …
-// 瞬移与出刀互斥；F5 / 面板启停。
+// Idle → Acquire → [MoveTo→Impact|human] → Aim → Firing → Recover → …
+// 位移：Impact 贴怪（默认，同 F6 Impact）> 拟人走路。fill+Doing 已废。
+// Impact 与出刀互斥；F5 / 面板启停。
 
 #include <Windows.h>
 #include <cstdint>
@@ -26,7 +27,14 @@ void SetTickIntervalMs(uint32_t ms);
 void SetSmartInterval(bool on);
 void SetClusterPriority(bool on);
 bool IsClusterPriority();
-void SetTeleportEnabled(bool on);
+void SetTeleportEnabled(bool on);  // 强制关：fill+Doing 战斗回落已禁用
+// Impact 贴怪（默认开）：近战直升机——旋翼环持续托举悬停在怪旁，空中出刀。
+// 优先于拟人。需无敌；交战期间自动挂 fh-ban（无怪超宽限则卸掉落地）。
+void SetImpactApproachEnabled(bool on);
+bool IsImpactApproachEnabled();
+// 拟人位移：同层走路贴近；仅当 Impact 贴怪关时生效。
+void SetHumanWalkEnabled(bool on);
+bool IsHumanWalkEnabled();
 void SetLiveStepEnabled(bool on);
 bool IsLiveStepEnabled();
 void SetTeleportParams(uint32_t minDx, uint32_t standOff, uint32_t cooldownMs, uint32_t maxHop,
@@ -54,26 +62,22 @@ void ReleaseExternalPause();
 // 注：现行 SettleMs*=0 时 TP 后进 Aim 不进 Settling，故运行时几乎只剩 map arm。
 bool IsTeleportTransit();
 // 吸物时分复用：未挂机恒 true；挂机中仅换怪/贴怪等待与落地脉冲窗为 true。
-// Aim/Firing/Recover 为 false。pet_loot 据此开门；勿与 IsTeleportTransit 混用。
+// Aim/Firing/Recover 为 false；拟人 HoldWalk 中亦为 false（防捡物打断走路）。
+// pet_loot 据此开门；勿与 IsTeleportTransit 混用。
 bool IsLootPulseActive();
 // 脉冲代数：pet_loot 边沿检测用（Settling 武装 / 从关到开续期时递增）。
 uint32_t LootPulseGeneration();
 void ResetForMapChange();
 
-// F11 / 测试贴怪：fill+Doing → 随机活怪身边（长距绝对落点）。
+// 以下原生瞬移入口已禁用（封禁风险）；调用只记日志。
 void RequestNativeTeleportToRandomMob();
 void RequestTeleportToRandomMob();
-
-// 面板「原生CALL」：短距 ~140px fill+Doing。
 void RequestNativeTeleportCall();
 
-// 踢号压测：随机贴怪 fill+Doing，间隔由慢→快直到断线；见 combat.log DONE。
+// 踢号压测已禁用（同 fill+Doing）。
 void RequestTeleportKickStress();
-// 细扫档：50→0ms，步进 5ms，每级 12 跳。
 void RequestTeleportKickStressFine();
-// 钉地板：30→10ms，步进 5ms，每级 12 跳（不到 5/0，验证 10ms 是否可过）。
 void RequestTeleportKickStressFine10();
-// 原地短跳：同台 ±120px 来回，CD 扫档对齐 fine0-50（排除远距因素）。
 void RequestTeleportKickStressLocal();
 void StopTeleportKickStress();
 bool IsTeleportKickStressActive();

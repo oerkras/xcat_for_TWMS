@@ -3,6 +3,9 @@
 // Callers MUST use this for domain/FindAll/TypeObject; keep only feature-specific RVAs locally.
 // FindAll / TypeGetObject still go through managed_main (Unity main thread + login freeze).
 // Ensure() only resolves exports — safe from pump BindApis (no managed_main / no cycle).
+// Unity 三件套：Ensure 先垫脚裸 RVA，domain 就绪后明文 MI 软升级。
+// 日志：Il2CppBind unity managed upgrade OK hits=3/3 … | PARTIAL … still on naked RVA pad。
+// 仅 Plain/Hash/Kind 计 hit；纯 Rva 路径不算升级成功。
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -14,9 +17,9 @@
 namespace x::runtime::il2cpp {
 
 // UnityEngine.Object / Component — shared across ports (TW Classic dump).
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4A610;  // remounted 2026-08-04 Resources.FindObjectsOfTypeAll(Type)
-constexpr uint32_t kRvaCompGetGo = 0x4E53330;              // remounted 2026-08-04 Component.get_gameObject
-constexpr uint32_t kRvaObjGetName = 0x4E60290;             // remounted 2026-08-04 Object.get_name
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4EF20;  // remounted 2026-08-06 Resources.FindObjectsOfTypeAll(Type)
+constexpr uint32_t kRvaCompGetGo = 0x4E57300;              // remounted 2026-08-06 Component.get_gameObject
+constexpr uint32_t kRvaObjGetName = 0x4E64260;             // remounted 2026-08-06 Object.get_name
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
 using FnCompGo = void* (*)(void* comp, void* methodInfo);
@@ -169,15 +172,12 @@ void* ReadPtr(void* base, size_t off);
 uintptr_t ArrayLen(void* arr);
 void* ArrayAt(void* arr, uintptr_t i);
 
-// GC-safe managed-heap guards. A managed allocation performed on a worker
-// thread while the Unity main thread is frozen (client hang / session lost
-// mid-load) aborts the whole process with "Fatal error in GC: Collecting from
-// unknown thread": the collecting thread is not registered with the runtime.
-// These wrappers refuse the allocation unless we are ON the pump thread, or the
-// pump is actively ticking (client alive) — then the game's own GC drives the
-// collection from a registered thread. During a freeze they no-op (null/false)
-// and callers simply retry once the pump resumes. ALWAYS use these instead of
-// calling Get().objectNew / stringNew / runtimeClassInit directly.
+// GC-safe managed-heap guards. Worker-thread objectNew / stringNew /
+// runtimeClassInit → "Fatal error in GC: Collecting from unknown thread"
+// (the *collecting* thread is unregistered). ONLY safe on the Unity main /
+// MainPump drain thread — "pump is ticking" is NOT enough. Off-pump → no-op;
+// callers retry via managed_main::Call / InvokeAndWait. ALWAYS use these
+// instead of Get().objectNew / stringNew / runtimeClassInit directly.
 bool ManagedAllocSafe();
 void* AllocObject(void* klass);          // guarded il2cpp_object_new
 void* NewString(const char* utf8);       // guarded il2cpp_string_new

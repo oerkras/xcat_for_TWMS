@@ -36,7 +36,7 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 // TW NetworkManager facade (df34ff16… TypeDef 13772 : Singleton<>) → Session* @0x10
-// Session (f0ee06b6… TypeDef 13797) 承载 Socket/seq/SendPacket；CALL_EDGE 挂 Session klass。
+// Session (TDI 13797 · 新 hash db2678aa…) 承载 Socket/seq/SendPacket；CALL_EDGE 挂 Session klass。
 // 旧 CMS Session 哈希 cd7c86a4… 已并入 Session 类，不再单独 FindClass。
 
 // NetworkManager facade + Session → il2cpp_network SSOT（勿抄 CMS RecvList/State）
@@ -49,15 +49,16 @@ using x::runtime::il2cpp::ReadPtr;
 #define kOffSessionClosed (x::runtime::il2cpp_network::OffSessionClosed())
 #define kOffSessionSeqSend (x::runtime::il2cpp_network::OffSessionSeqSend())
 
-// Packet / OutPacket fields：hash → field_get_offset（In/Out 同布局）
+// Packet / OutPacket fields：hash → field_get_offset（In/Out 同布局 · remount 2026-08-06）
 constexpr char kPacketBaseClass[] =
-    "fc6ae331019bd3c1e987ba71c4f75e3591b683aabc4278715ac9c79480cbdac";
+    "b374f35823e074687fd2a9225e7738d9b8b664c18aed556fc7835da03f2bad1";
 constexpr char kHashPacketBuffer[] =
-    "<c096dd8ffc6b9c4dc1a6458417487a3a0d8fb33676030af7deb507639a12e2b>k__BackingField";
+    "<f144fe8dbde79dea20d46b23b481b820339104f066fb33eda5c77a04363b872>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<f9bbb972b920d8265c641b982330d9a76a2a52c97dee9c9c8ed0a9030c1778c>k__BackingField";
+    "<a22ae0bd7de5fc24a4a31fea49b5261e154c755a12e02510fd592b6dc594841>k__BackingField";
+// OutPacket.id@0x20（TDI 13775）— 勿用 InPacket TDI 13774 的 f4e004d8… backing
 constexpr char kHashOutPacketId[] =
-    "a40d505bf94e3c9d0dbbc1dad4cfa27e37c562ef01c4fe5364e92e03c6f04af";
+    "e124ab3ffe08d49850755d299692770376cce0daf952029aeb0b5a6286398f2";
 constexpr size_t kFbOutPacketId = 0x20;
 constexpr size_t kFbPacketBuffer = 0x10;
 constexpr size_t kFbPacketOffset = 0x18;
@@ -69,42 +70,46 @@ size_t gOffPacketOffset = kFbPacketOffset;
 #define kOffPacketBuffer (gOffPacketBuffer)
 #define kOffPacketOffset (gOffPacketOffset)
 bool gPktFieldTried = false;
+int gPktFieldHits = -1;
 
-// TW dump.cs RVAs — call-edge targets（方法在 Session / f0ee06b6… 上）。
+// TW dump.cs RVAs — call-edge targets（Session TDI 13797 · remount 2026-08-06 按方法序对齐）。
 // CloseSession=旧 CloseSocket；Disconnect=旧 Close；另挂 OnDisconnect / set_SessionState。
-constexpr uintptr_t kRvaNmCloseSession = 0x1CD0FC0;  // remounted 2026-08-04
-constexpr uintptr_t kRvaNmDisconnect = 0x1CC1E20;    // remounted 2026-08-04
-constexpr uintptr_t kRvaSessionSetState = 0x1CD0B40;  // remounted 2026-08-04: set_SessionState (+0x60)
-constexpr uintptr_t kRvaSessionOnDisc = 0x1CD2190;  // remounted 2026-08-04: void() writes SessionState@+0x60
-
-// Outbound funnel (2026-08-04)：Session.SendPacket(OutPacket)→bool（P0b 钉死 RVA 0x1CC3EE0）。
-// ABI：rcx=Session* / rdx=OutPacket*；VEH 读 +0x20 PacketId / Buffer。Wire 内才 EncodeForSend。
-constexpr uintptr_t kRvaSessionSend = 0x1CC3EE0;  // Session.SendPacket
+constexpr uintptr_t kRvaNmCloseSession = 0x1CD50C0;  // remounted 2026-08-06
+constexpr uintptr_t kRvaNmDisconnect = 0x1CC5F20;    // remounted 2026-08-06
+constexpr uintptr_t kRvaSessionSetState = 0x1CD4C40;  // remounted 2026-08-06: set_SessionState
+constexpr uintptr_t kRvaSessionOnDisc = 0x1CD6290;  // remounted 2026-08-06: OnDisconnect
+// Outbound funnel（Session.SendPacket）
+constexpr uintptr_t kRvaSessionSend = 0x1CC7FE0;  // remounted 2026-08-06
 // 方法哈希（Session 上 void() 极多，kind 不唯一；哈希漂 RVA 时仍可活）
 constexpr char kHashCloseSession[] =
-    "f2059e3d241219fa216801d3ea7106d6bfe3b31da45df104b020c38c59905d1";
+    "c793578722e29984e2da932223b4d3f27403040237461ca3438083f0496b24d";
 constexpr char kHashDisconnect[] =
-    "dbcbaf282bf74ef11e941ba61b4c77eb02a6318d8236291b42d15258c119480";
+    "b1d93da68c582074d5f57c0f056b4c22c5eea30ac0d09059a55ed7d41021109";
 constexpr char kHashOnDisconnect[] =
-    "f459fc80bcb9c76f65b0cb7c2df1cfe5455043ae9ac6a31e4ed6a087e67ff02";
+    "cd92be8f7e5e074b4ba8a3df143171d27a09991b9d2461306b4cc50af51fe65";
 constexpr char kHashSetSessionState[] =
-    "c75bb306d32f8a0d3d20a18220f320ca0f62ff4366e1474eb6ba2bbeca2ee68";
+    "e0db20741980ff8095d0fdfd5b54d721d166fa88b436cb4170ddca609b40155";
 constexpr char kHashSendPacket[] =
-    "a3e15e8fb1d9cacfe30bdb5b652ad6f7df5037a51e3a48cfede943d8fc2d59b";
+    "ddc1a3d2b1ecceba615002a4805504bc8dc6096ad3706c3d16a06875bd4de28";
+// SEND OutPacket TDI 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "f07686cc7a01760c9166b2cf7a72f4ac7c084f1ee39bd1c3bdc42c351e884bb";
-// a480 local-disconnect fork（WM af152981…）：Try 置 +0x298，Update 再调 DoLocal。
-constexpr uintptr_t kRvaA480TryLocalDisc = 0xDCB780;  // remounted 2026-08-04: writes +0x298
-constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDD8105;  // remounted 2026-08-04: Update call DoLocal
-constexpr uintptr_t kRvaA480DoLocalDisc = 0xDDFFA0;  // remounted 2026-08-04
+    "b2cb1e0adcf26c5021bc6b1880a32e838d1eb783e3880f4a70e70990079a04b";
+// a480 local-disconnect（WM TDI 1387）：TryLocal/Update 写 bool@0x2A0 + float@0x2A4 后 call DoLocal。
+// 旁路 bool@0x290（cd9d8b96…）仍在，但 HWBP 边沿路径以 0x2A0 为准。RVA remount 2026-08-06：
+// dump 方法序 + IDA xref（Update@0xDD9380 内 call DoLocal @0xDDA277）。
+constexpr uintptr_t kRvaA480TryLocalDisc = 0xDCD6C0;  // remounted 2026-08-06
+constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDDA277;  // remounted 2026-08-06
+constexpr uintptr_t kRvaA480DoLocalDisc = 0xDE2140;  // remounted 2026-08-06
 constexpr char kWorldManagerClass[] =
-    "af1529816d3e158e2939f3c03b4fe68c04930802ea39c8d6567d1fb4865b742";
+    "acda742ab51e7e2e3003fd2b44fbc00eababde4300ef17ac35b5f4fd01bee68";
 constexpr char kHashA480ForceDisc[] =
-    "cd1beb2fd8f950d0651fbdfe1fd27c8f65e04d58fc45b07c151fed6b13c34c7";
+    "e97b937a54e81b9a2a8503031e3023ae3125d0dc95326110f6f79a8c7d8c416";  // bool@0x2A0
+constexpr char kHashA480ForceDiscAlt[] =
+    "cd9d8b969fbed4627875470235cae5ab8c3d86789e3383395ec2fcd90c3bca8";  // bool@0x290 旁路
 constexpr char kHashA480DiscTimer[] =
-    "c87edc325b9a1c76ef2f902f79891cdd3aa87a84a314b56d6b3dd86fd00172d";
-constexpr size_t kFbA480ForceDiscFlag = 0x298;
-constexpr size_t kFbA480DiscTimer = 0x29C;
+    "c99ef776e1825d4f059ef4989bc9174a6d996d39df61d4fa7126e64ac57948c";  // float@0x2A4
+constexpr size_t kFbA480ForceDiscFlag = 0x2A0;
+constexpr size_t kFbA480DiscTimer = 0x2A4;
 size_t gOffA480ForceDiscFlag = kFbA480ForceDiscFlag;
 size_t gOffA480DiscTimer = kFbA480DiscTimer;
 #define kOffA480ForceDiscFlag (gOffA480ForceDiscFlag)
@@ -154,11 +159,13 @@ bool PktFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
 }
 
 void EnsureKickFieldOff() {
-    if (gPktFieldTried) return;
-    gPktFieldTried = true;
+    constexpr int kExpect = 5;
+    if (gPktFieldTried && gPktFieldHits >= kExpect) return;
+    if (!x::runtime::il2cpp::Ensure()) return;
     void* outKlass = x::runtime::il2cpp::FindClass("", kOutPacketClass);
     void* baseKlass = x::runtime::il2cpp::FindClass("", kPacketBaseClass);
-    void* wmKlass = x::runtime::il2cpp::FindClass("", kWorldManagerClass);
+    void* wmKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+    if (!wmKlass) wmKlass = x::runtime::il2cpp::FindClass("", kWorldManagerClass);
     int hits = 0;
     // PacketId on OutPacket; Buffer/Offset on Packet base (also walk from OutPacket)
     if (PktFieldOffHit(outKlass, kHashOutPacketId, kFbOutPacketId, &gOffOutPacketId)) ++hits;
@@ -168,13 +175,19 @@ void EnsureKickFieldOff() {
     if (PktFieldOffHit(outKlass ? outKlass : baseKlass, kHashPacketOffset, kFbPacketOffset,
                        &gOffPacketOffset))
         ++hits;
-    if (PktFieldOffHit(wmKlass, kHashA480ForceDisc, kFbA480ForceDiscFlag, &gOffA480ForceDiscFlag))
+    if (PktFieldOffHit(wmKlass, kHashA480ForceDisc, kFbA480ForceDiscFlag, &gOffA480ForceDiscFlag) ||
+        PktFieldOffHit(wmKlass, kHashA480ForceDiscAlt, 0x290, &gOffA480ForceDiscFlag))
         ++hits;
     if (PktFieldOffHit(wmKlass, kHashA480DiscTimer, kFbA480DiscTimer, &gOffA480DiscTimer)) ++hits;
-    x::runtime::LogI("KickSniff",
-                     "pkt/a480 fields path=%s hits=%d/5 id=0x%zX buf=0x%zX off=0x%zX a480=0x%zX",
-                     hits == 5 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
-                     gOffOutPacketId, gOffPacketBuffer, gOffPacketOffset, gOffA480ForceDiscFlag);
+    gPktFieldTried = true;
+    if (hits != gPktFieldHits) {
+        gPktFieldHits = hits;
+        x::runtime::LogI(
+            "KickSniff",
+            "pkt/a480 fields path=%s hits=%d/5 id=0x%zX buf=0x%zX off=0x%zX a480=0x%zX",
+            hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffOutPacketId,
+            gOffPacketBuffer, gOffPacketOffset, gOffA480ForceDiscFlag);
+    }
 }
 
 
@@ -273,7 +286,7 @@ struct HwbpTarget {
     const char* name;
     uintptr_t rva;  // 0 = dynamic write watch (DR2)
     bool selfIsSession;
-    bool selfIsA480;  // rcx = a480* → dump +0x298/+0x29C
+    bool selfIsA480;  // rcx = a480*/WM* → ForceDisc@0x2A0 + DiscTimer@0x2A4
 };
 HwbpTarget gHwbpTargets[4] = {
     {"a480.TryLocalDisconnect", kRvaA480TryLocalDisc, false, true},
@@ -322,7 +335,7 @@ void __fastcall HookNmDisconnect(void* self, const void* method);
 void __fastcall HookNmOnDisc(void* self, const void* method);
 void __fastcall HookNmSetState(void* self, int state, const void* method);
 
-// Session 已并入 NetworkManager（f0ee06b6…）：只挂 Session klass。
+// Session TDI 13797：只挂 Session klass（勿挂错并入的 NM facade）。
 // 旧 Session.Close / CloseSocket 与 Nm.Disconnect / CloseSession 同 RVA，不再重复安装。
 HookSlot gHooks[] = {
     {"Nm.CloseSession", kRvaNmCloseSession, reinterpret_cast<void*>(&HookNmCloseSession), nullptr,
@@ -497,7 +510,8 @@ const char* StateName(int s) {
     }
 }
 
-// CMS Framework.Network.HackingAutoBlock — may appear as pendingError / notice payload.
+// CMS Framework.Network.HackingAutoBlock — 日志 hint 用；TW Session+0x40 实锤只写 204/205，
+// 从未观察到 pendingError=22/24（见 docs/features/kick_sniff/断线错误码.md §3）。
 const char* HackingAutoBlockName(int code) {
     switch (code) {
     case 12:
@@ -604,7 +618,7 @@ const char* CmsServerPacketHint(int op) {
     case 161:
         return "TransferFieldReqIgnored";
     case 205:
-        return "SummonedEnterField";  // also sticky pendingError=205 observed
+        return "SummonedEnterField";  // opcode hint only；勿与 sticky pendingError=205（Session 哨兵）混读
     case 215:
         return "UserMove";
     case 261:
@@ -942,12 +956,44 @@ void DumpRingHistogram(DWORD now, int windowMs) {
     }
 }
 
+int CountKickHintsInRing(DWORD now, int windowMs) {
+    int hits = 0;
+    const int start = (gRingNext - gRingCount + kRingCap) % kRingCap;
+    for (int i = 0; i < gRingCount; ++i) {
+        const RingEntry& e = gRing[(start + i) % kRingCap];
+        const int age = static_cast<int>(now - e.tick);
+        if (age < 0 || age > windowMs) continue;
+        if (LooksLikeKickRelatedOp(e.op)) ++hits;
+    }
+    return hits;
+}
+
 void DumpRing(const char* why) {
-    // 全量 RING+hist 很贵：冷却内只记一行，避免 lost_session 抖动刷满 kick.log。
+    // 全量 RING+hist 很贵：每行 Log 都会进 kick.log + x.jsonl(LogI)。
+    // 进图切会话时 SessionTcpLayer 常短暂空窗 → lost_session；环里通常没有踢线提示，
+    // 却会一次倾倒 HIST+最多 24 条 ring（实测进场秒 ~47 条 KickSniff）。软路径只留一行。
     static DWORD s_lastFull = 0;
+    static DWORD s_lastSoftLost = 0;
     static char s_lastWhy[48]{};
     constexpr DWORD kDumpRingCooldownMs = 15000;
+    constexpr DWORD kSoftLostCooldownMs = 3000;
     const DWORD now = GetTickCount();
+    const bool lostSession = why && strcmp(why, "lost_session") == 0;
+    const int kickHitsEarly = CountKickHintsInRing(now, 3000);
+
+    // 进图/迁频 churn：无踢线提示的 lost_session → 一行带过。不占用 full-dump 冷却，
+    // 以免紧随其后的真踢（why=disconnect / 环内有 kick hint）被 15s 冷却误吞。
+    if (lostSession && kickHitsEarly == 0) {
+        if (s_lastSoftLost && now - s_lastSoftLost < kSoftLostCooldownMs) {
+            return;  // 抖动窗口内静默去重（连 soft 一行也不再打）
+        }
+        s_lastSoftLost = now;
+        Log("RING why=lost_session soft count=%d (no kick hint in 3s — field/session churn; "
+            "skip HIST/ring)",
+            gRingCount);
+        return;
+    }
+
     if (s_lastFull && now - s_lastFull < kDumpRingCooldownMs) {
         Log("RING why=%s skipped (cooldown %ums since last=%s count=%d)", why ? why : "?",
             (unsigned)(now - s_lastFull), s_lastWhy[0] ? s_lastWhy : "?", gRingCount);
@@ -1043,7 +1089,8 @@ void LogCallEdge(const char* edge, void* self, bool selfIsSession, bool selfIsA4
     if (selfIsA480 && self) {
         const int flag = ReadU8(self, kOffA480ForceDiscFlag);
         const float timer = ReadF32(self, kOffA480DiscTimer);
-        Log("  a480 flag+0x298=%d timer+0x29C=%.4f", flag, (double)timer);
+        Log("  a480 flag+0x%zX=%d timer+0x%zX=%.4f", kOffA480ForceDiscFlag, flag,
+            kOffA480DiscTimer, (double)timer);
     }
 
     void* frames[kStackFrames]{};

@@ -311,6 +311,13 @@ void IniSetFloat(IniStore& ini, const char* section, const char* key, float valu
     IniSetString(ini, section, key, buf);
 }
 
+void IniEraseKey(IniStore& ini, const char* section, const char* key) {
+    if (!section || !key || !key[0]) return;
+    const auto sit = ini.find(section);
+    if (sit == ini.end()) return;
+    sit->second.erase(key);
+}
+
 void IniEraseKeysWithPrefix(IniStore& ini, const char* section, const char* prefix) {
     if (!section || !prefix || !prefix[0]) return;
     const auto sit = ini.find(section);

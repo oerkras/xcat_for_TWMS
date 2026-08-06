@@ -33,6 +33,7 @@ add_library(xcat_probe SHARED
   ../features/ports/pet_port.cpp
   ../features/ports/drop_pool_port.cpp
   ../features/ports/input_port.cpp
+  ../features/ports/unity_kbd_port.cpp
   ../features/ports/skill_port.cpp
   ../features/ports/multi_skill_port.cpp
   ../features/ports/security_attack_port.cpp
@@ -40,7 +41,10 @@ add_library(xcat_probe SHARED
   ../features/ports/player_combat_port.cpp
   ../features/ports/action_gate.cpp
   ../features/ports/attack_input_port.cpp
+  ../features/ports/keypad_walk_bin.cpp
+  ../features/ports/key_macro_bin.cpp
   ../features/ports/teleport_port.cpp
+  ../features/ports/fly_fh_ban.cpp
   ../features/ports/foothold_port.cpp
   ../features/ports/foothold_path.cpp
   ../features/ports/map_bounds_port.cpp
@@ -61,6 +65,7 @@ add_library(xcat_probe SHARED
   ../features/buffs/buffs.cpp
   ../features/multi_skill/multi_skill.cpp
   ../features/simple_combat/simple_combat.cpp
+  ../features/simple_combat/heli_rotor.cpp
   ../features/fly/fly.cpp
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
   ../features/auction_town_bypass/auction_town_bypass.cpp
@@ -72,6 +77,7 @@ add_library(xcat_probe SHARED
   ../features/auto_lie/anti_macro_port.cpp
   ../features/auto_lie/anti_macro_follower.cpp
   ../features/auto_lie/auto_lie.cpp
+  ../features/movepath_flush_probe/movepath_flush_probe.cpp
   ../features/notify/notify.cpp
   ../ipc/payload_control.cpp
   ../ipc/payload_timed_keys.cpp

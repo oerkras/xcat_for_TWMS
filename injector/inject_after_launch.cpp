@@ -189,20 +189,28 @@ Result InjectIntoClassic(const Options& opt, LogFn log) {
         return out;
     }
     if (GetFileAttributesW(abs.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        out.message = "DLL 不存在（请先编 xcat_probe → bin/XCat_data/xcat.dll）";
+        out.message = opt.dllPath.empty()
+                          ? "DLL 不存在（请先编 xcat_probe → bin/XCat_data/xcat.dll）"
+                          : "DLL 不存在";
         LogLine(log, L"[FAIL] 注入：未找到 " + abs);
         return out;
     }
 
-    inject_log::RegisterFromDllPath(abs);
-
-    LogLine(log, L"[…] 等待 GameAssembly.dll…");
-    if (!WaitForModuleByName(opt.pid, L"GameAssembly.dll", opt.waitGameAssemblySec, log)) {
-        out.message = "等待 GameAssembly.dll 超时";
-        return out;
+    if (opt.registerInjectLog) {
+        inject_log::RegisterFromDllPath(abs);
     }
-    LogLine(log, L"[OK] 已见 GameAssembly.dll");
-    if (opt.settleMs > 0) Sleep(static_cast<DWORD>(opt.settleMs));
+
+    if (opt.waitForGameAssembly) {
+        LogLine(log, L"[…] 等待 GameAssembly.dll…");
+        if (!WaitForModuleByName(opt.pid, L"GameAssembly.dll", opt.waitGameAssemblySec, log)) {
+            out.message = "等待 GameAssembly.dll 超时";
+            return out;
+        }
+        LogLine(log, L"[OK] 已见 GameAssembly.dll");
+        if (opt.settleMs > 0) Sleep(static_cast<DWORD>(opt.settleMs));
+    } else {
+        LogLine(log, L"[…] 跳过等待 GameAssembly（自定义注入）");
+    }
 
     if (ClassicFindLoadedModuleBase(opt.pid, abs)) {
         out.ok = true;

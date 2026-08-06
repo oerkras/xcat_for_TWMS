@@ -4,7 +4,8 @@
 // 真源：UserLocal.OnFuncKey(Down/Up, FuncKey)。
 // 默认读 A 键（InputSystem.Key.A=15）绑定；空才回退 BasicActionAttack(5/52)。
 // BIN：硬编 OnKey(Ctrl) 易假成功且 pktSum=0。
-// 禁止 SendInput / KeyTouch；朝向 = VecCtrl.SetInput(±1,0) Resolve（禁 L/R OnKey Up SEH）。
+// 朝向 = VecCtrl.SetInput(±1,0) Resolve（禁 L/R OnKey Up SEH）。
+// 拟人走路：默认内部输入（InputSystem Keyboard 设备状态，见 unity_kbd_port）。
 
 #include <Windows.h>
 #include <cstdint>
@@ -31,6 +32,12 @@ bool GetSmartInterval();
 // 记录目标相对 dx；出刀前 ApplyFaceNow → VecCtrl.SetInput(±1,0) Resolve 朝向。
 bool FaceToward(float dx);
 bool ApplyFaceNow();
+
+// 拟人走路：默认灌 Keyboard 设备状态（失焦可走）；出刀/关 F5 前须 StopWalk。inputX 仅 -1/0/1。
+// XCAT_WALK_KBD=0 回落 Win32 SendInput（需前台）；XCAT_WALK_KP=1 = PackBit 试验（证伪）。
+bool HoldWalk(int inputX);
+bool StopWalk();
+bool IsWalkHeld();
 
 // 间隔+松键门控后 OnFuncKey（A 槽绑定优先）。
 // 软拒绝（间隔未到 / pendingUp / FireSuppressed）返回 false 且不计 fail；仅 OnFuncKey Down 失败计 fail。

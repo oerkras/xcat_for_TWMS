@@ -20,27 +20,27 @@ constexpr size_t kFbSessionPendingError = 0x40;
 constexpr size_t kFbSessionRecvList = 0x58;
 constexpr size_t kFbSessionState = 0x60;
 
-// dump.cs 2026-08-04 · Facade fields
+// dump.cs 2026-08-06 · Facade / Session fields（TypeDef 13772 / 13797）
 constexpr char kHashNmSession[] =
-    "da70d8f2c294c1aa23bba716563c4024d86650e983ee858df7ad25164ef6a68";
+    "d23a4e4ac7025221941f4b08d8c6a5b8a77815f4a7fa51c424966f1a481f73a";
 constexpr char kHashNmSessionState[] =
-    "d117fb71a7b01782e6511a693b43e98155a0447bac8a45f50f9327494647285";
+    "ee5af12006f471810dd9200697e77294cfa606d365b73d6417fa425f489536d";
 constexpr char kHashNmPacketQueue[] =
-    "d61c40786e9efb072d4ce181717ac967e2824243f44c708b562a95767ec4714";
+    "f17011feefb2923afb2d2e0189cf48c2638219995dc6c488716c34bdd0a9177";
 constexpr char kHashNmOpcodeHashSet[] =
-    "e1e5e0f312ac3e1a8447b93b3795755e09292e76fed86bb8313e25aa0b4ac8b";
+    "c49516c63e1c5a6700b379387791dc69d491d5f3ba6e36297d938dca0164999";
 
 // Session fields
 constexpr char kHashSessionSeqSend[] =
-    "b14bce92eabf4c93e32bd1903839ebd68514d9d9c00ddb762b7ea1f1447fa31";
+    "a004c476479bd1584b471187d69e7734adf1755c57b14674b1686b22aed51e9";
 constexpr char kHashSessionClosed[] =
-    "c1bed398dbb1b588bd70c4a6736eaffc6f0b781da1e0e1b8b005558816a908b";
+    "bbda301752c64033d9643d569998cf15049c353ec80cf22aa52d09f16104153";
 constexpr char kHashSessionPendingError[] =
-    "fdfecba7216ccb67b647e0fd165869d194536b4fded6e670e3867c3f8aa8300";
+    "b8b1da8845113f3d86fe07afbc25658519f3ddb298d978e1e1169c213d7da76";
 constexpr char kHashSessionRecvList[] =
-    "f55d4b12639b25bff4fe80e6c17f8db95bedac29b480a7eeba6e974c962b7df";
+    "e1a6ed9383933116081a9fdb98509374ecb06b79192832f9b7712d89d2b8c79";
 constexpr char kHashSessionState[] =
-    "<e148c6bf304b6d8cf56d6f4a89d7a00cf17b37671106e022d59cbb86201ae4c>k__BackingField";
+    "<c0279c8dd3fb739c73570ec9e1780da1fc06da59a642af4d24330bc49a5c17b>k__BackingField";
 
 size_t gOffNmSession = kFbNmSession;
 size_t gOffNmSessionState = kFbNmSessionState;
