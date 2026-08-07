@@ -26,6 +26,24 @@ bool QueryPlayBounds(int mapId, Rect* out);
 // marginPx：向内缩（默认 kLandMarginPx）。无边界数据时返回 true（不误杀；台上 Snap 仍是主闸）。
 bool PointInPlayBounds(float x, float y, int mapId, int marginPx = kLandMarginPx);
 
+// 「这一列脚下有没有地板」——掉落区判据，AABB 无法替代。
+//
+// AABB 是全图地板取 min/max 的外接矩形，**表达不了矩形内部的空洞**：BIN a69130 里角色沉到
+// (-707,-1064)，距 B(-1052) 只剩 12px，`PointInPlayBounds` 判「界内」，0.4s 后就掉出图触发换图
+// （102020200→102020300，3s 后被路线拉回）。矩形永远看不见 x=-707 那一列底下是空的。
+//
+// 这里按 x 逐列实算：取所有横跨该列的地板，在该列上线性插值出高度（斜坡不能拿端点近似），
+// 挑出脚下最近的一块。找不到 ⇒ 失去升力就会一路掉出地图 = 掉落区。
+// 竖直段（x1==x2）是墙不是地板，不计入。
+//
+// 坐标：与 foothold / mob / combat.log 同一空间，+Y 向下（`top`=min y、`bottom`=max y）。
+// 无地板数据（含换图瞬间 FH 未 Collect）返回 true，宁可不拦也不误杀。
+bool HasFloorBelow(float x, float y, int mapId, float* floorYOut = nullptr);
+
+// 从 x 出发，向左右找最近的「脚下有地板」的列，返回该列 x。用于掉落区自救的水平方向。
+// 只给横向目标，不涉及垂直冲量符号——垂直符号历来是事故高发区，不在本判据职责内。
+bool NearestFloorColumn(float x, float y, int mapId, float maxScanPx, float* safeXOut);
+
 // 换图 / FH 缓存重建后清 AABB 缓存（可选；Query 按 mapId 也会错位失效）。
 void InvalidateFhAabbCache();
 

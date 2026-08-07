@@ -103,6 +103,8 @@ void MaybeLaunchFeedbackFromLog(const std::wstring& line) {
     if (line.find(L"[OK] 一键启动并注入完成") != std::wstring::npos) {
         sound::LaunchOk();
         notify::PushLocal(/*Success*/ 1, "launch-ok", "启动成功", "一键登录并注入完成。", 4200);
+        // 换票成功阶段会写「正在开游戏/注入…」；成功后必须收口（状态栏闲态不再常亮进行中文案）。
+        if (gLogUi) gLogUi->status = "启动成功";
         return;
     }
     if (line.find(L"[OK] 附着注入完成") != std::wstring::npos) {

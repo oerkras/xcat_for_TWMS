@@ -212,8 +212,17 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
                     msc::weblogin::OnFlushLogs();
                 } else if (msg.message == msc::weblogin::kMsgIdle) {
                     msc::weblogin::OnIdle();
-                    if (ui.status.find("已开始") != std::string::npos ||
-                        ui.status.find("进行中") != std::string::npos) {
+                    // 换票中/开游戏中等进行态：会话闲下后必须收口，否则 GAMA PASS 成功后
+                    // 「换票成功，正在开游戏/注入…」会一直挂在状态栏。
+                    const bool inFlightHint =
+                        ui.status.find("已开始") != std::string::npos ||
+                        ui.status.find("进行中") != std::string::npos ||
+                        ui.status.find("正在开游戏") != std::string::npos ||
+                        ui.status.find("自动登录中") != std::string::npos ||
+                        ui.status.find("登录换票中") != std::string::npos ||
+                        ui.status.find("正在自动登录") != std::string::npos ||
+                        ui.status.find("正在按时段拉起") != std::string::npos;
+                    if (inFlightHint) {
                         ui.status = msc::weblogin::IsBusy() ? "正在登录/换票中…" : "空闲";
                     }
                 }

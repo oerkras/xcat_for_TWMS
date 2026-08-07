@@ -387,6 +387,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::simple_combat::SetClusterPriority(c.clusterWeight != 0);
     x::features::simple_combat::SetTeleportEnabled(false);  // fill+Doing 战斗回落已禁用
     x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
+    x::features::simple_combat::SetFlySpeedPct(c.simpleCombatFlySpeedPct);
     x::features::simple_combat::SetHumanWalkEnabled(c.simpleCombatHumanWalk != 0);
     x::features::simple_combat::SetLiveStepEnabled(c.simpleCombatLiveStep != 0);
     x::features::simple_combat::SetTeleportParams(

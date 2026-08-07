@@ -80,6 +80,38 @@ bool FhAabbForMap(int mapId, Rect* out) {
     return true;
 }
 
+// 该地板在 x 列上的高度。斜坡必须插值——拿端点近似会在长斜坡上错出上百 px。
+// 返回 false 表示这块地板不覆盖 x，或它是竖直墙段（x1==x2，不是地板）。
+bool FloorYAt(const foothold::FootholdLite& fh, float x, float* yOut) {
+    if (fh.id == 0 || fh.x1 == fh.x2) return false;
+    const float ax = static_cast<float>((std::min)(fh.x1, fh.x2));
+    const float bx = static_cast<float>((std::max)(fh.x1, fh.x2));
+    if (x < ax || x > bx) return false;
+    const float t = (x - static_cast<float>(fh.x1)) /
+                    static_cast<float>(fh.x2 - fh.x1);
+    *yOut = static_cast<float>(fh.y1) +
+            t * static_cast<float>(fh.y2 - fh.y1);
+    return true;
+}
+
+// 在 x 列上找 y 之下最近的地板。found=false ⇒ 掉落区。
+// 调用方必须已持有 gFhMu，且已确认 gFhSnap 对齐当前图。
+bool FloorBelowLocked(float x, float y, float* floorYOut) {
+    bool found = false;
+    float best = 0.f;
+    for (int i = 0; i < gFhSnap->footholdN; ++i) {
+        float fy = 0.f;
+        if (!FloorYAt(gFhSnap->footholds[i], x, &fy)) continue;
+        if (fy < y) continue;  // +Y 向下：地板要在脚下
+        if (!found || fy < best) {
+            best = fy;
+            found = true;
+        }
+    }
+    if (found && floorYOut) *floorYOut = best;
+    return found;
+}
+
 void MaybeLogBounds(int mapId, const Rect& r) {
     if (!r.ok || mapId <= 0) return;
     std::lock_guard<std::mutex> lock(gLogMu);
@@ -87,6 +119,28 @@ void MaybeLogBounds(int mapId, const Rect& r) {
     gLoggedMapId = mapId;
     x::runtime::LogI("MapBounds", "play bounds map=%d src=%s L=%d T=%d R=%d B=%d", mapId,
                      r.src ? r.src : "?", r.left, r.top, r.right, r.bottom);
+
+    // 顺带把「矩形内部的空洞」摊开：以 32px 扫一遍列，统计完全没有地板的列。
+    // 这些列就是掉落区——AABB 判它们「界内」，实际踩进去会掉出图。
+    // 每图只打一行，用来在真实日志里核对本判据是否认得出事故点。
+    std::lock_guard<std::mutex> fhLock(gFhMu);
+    if (!gFhSnap || gFhSnap->mapId != mapId || gFhSnap->footholdN <= 0) return;
+    const float lo = static_cast<float>(r.left);
+    const float hi = static_cast<float>(r.right);
+    const float step = 32.f;
+    int cols = 0, voids = 0;
+    float firstVoid = 0.f, lastVoid = 0.f;
+    for (float x = lo; x <= hi; x += step) {
+        ++cols;
+        // 从矩形顶端往下看：整列都没有地板 ⇒ 空洞列
+        if (FloorBelowLocked(x, static_cast<float>(r.top) - 1.f, nullptr)) continue;
+        if (!voids) firstVoid = x;
+        lastVoid = x;
+        ++voids;
+    }
+    x::runtime::LogI("MapBounds",
+                     "danger map=%d cols=%d void=%d (%.0f%%) span=[%.0f,%.0f] step=%.0f", mapId,
+                     cols, voids, cols ? 100.0 * voids / cols : 0.0, firstVoid, lastVoid, step);
 }
 
 }  // namespace
@@ -134,6 +188,44 @@ bool PointInPlayBounds(float x, float y, int mapId, int marginPx) {
     const float B = static_cast<float>(r.bottom - m);
     if (!(L < R && T < B)) return true;
     return x >= L && x <= R && y >= T && y <= B;
+}
+
+bool HasFloorBelow(float x, float y, int mapId, float* floorYOut) {
+    if (!std::isfinite(x) || !std::isfinite(y)) return false;
+    if (mapId <= 0) mapId = world::GetMapId();
+    Rect r{};
+    // 借 FhAabbForMap 把 gFhSnap 拉起来并对齐 mapId；拿不到数据就不拦。
+    if (!FhAabbForMap(mapId, &r) || !r.ok) return true;
+    std::lock_guard<std::mutex> lock(gFhMu);
+    if (!gFhSnap || gFhSnap->mapId != mapId || gFhSnap->footholdN <= 0) return true;
+    return FloorBelowLocked(x, y, floorYOut);
+}
+
+bool NearestFloorColumn(float x, float y, int mapId, float maxScanPx, float* safeXOut) {
+    if (!safeXOut || !std::isfinite(x) || !std::isfinite(y)) return false;
+    if (mapId <= 0) mapId = world::GetMapId();
+    Rect r{};
+    if (!FhAabbForMap(mapId, &r) || !r.ok) return false;
+    std::lock_guard<std::mutex> lock(gFhMu);
+    if (!gFhSnap || gFhSnap->mapId != mapId || gFhSnap->footholdN <= 0) return false;
+
+    // 由近及远向两侧扫，先命中先返回——自救要就近，不能横穿半张图。
+    const float step = 16.f;
+    const float lo = static_cast<float>(r.left);
+    const float hi = static_cast<float>(r.right);
+    for (float d = step; d <= maxScanPx; d += step) {
+        const float l = x - d;
+        if (l >= lo && FloorBelowLocked(l, y, nullptr)) {
+            *safeXOut = l;
+            return true;
+        }
+        const float rr = x + d;
+        if (rr <= hi && FloorBelowLocked(rr, y, nullptr)) {
+            *safeXOut = rr;
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace x::features::ports::map_bounds

@@ -61,18 +61,28 @@ constexpr int kStateConnected = 3;
 // UIUtilDialog（非 Ex）— 与 worldmap_marker_travel 同源
 constexpr char kUtilDialogClass[] =
     "b91dd9a7ee32ddf1538501f7a23119b0ad38634f3237d3dd148e6e986d70c69";
+// UIDialog 基类（UIUtilDialog 父类；Close @ 0x117A290）
+constexpr char kUiDialogClass[] =
+    "b386e7e275c5b13fd8250c343b276b1f5e8854ca7084cf2927620d34ecff375";
 // UIUtilDialogEx — 与 shop_port 同源
 constexpr char kUtilDialogExClass[] =
     "f38993609fdcd5d4329046a4fea16805d838d5855315efe7fe2a8c5b05bc042";
+// 官方关窗（CMS CloseDialog→UIDialog.Close）；不走 OnClickYes/Ok，避免踢线「確認」
+constexpr uint32_t kRvaCloseDialog = 0x778CC0;   // UIUtilDialog.CloseDialog
+constexpr uint32_t kRvaUiDialogClose = 0x117A290;  // UIDialog.Close（shop_port 同源）
+constexpr char kHashCloseDialog[] =
+    "de9ac0fd03b2844bad25ca20166c27d327514761da7bc4b9dca3ba858666441";
 constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
 constexpr uint32_t kRvaGoSetActive = 0x4E5CAD0;
 constexpr uint32_t kRvaGoGetActiveSelf = 0x4E5CC70;
 constexpr size_t kOffCachedPtr = 0x10;  // UnityEngine.Object.m_CachedPtr
 constexpr int kDismissMissRetries = 3;
 constexpr DWORD kDismissMissGapMs = 350;
-// 进图后断线 Notice 常晚于 Connected 出现；play-ready 后再爆发关窗。
-constexpr int kPostReadyDismissTries = 8;
+// 进图后断线 Notice 常晚于 Connected / play-ready；4427f8 仅扫两轮空就停，弹窗仍在。
+constexpr int kPostReadyDismissTries = 24;
 constexpr DWORD kPostReadyDismissGapMs = 250;
+// 连续空扫这么多次才提前结束（且至少已跑过半程）。
+constexpr int kPostReadyEmptyStop = 8;
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -85,6 +95,7 @@ using FnGetGameObject = void* (*)(void* self, const void* method);
 using FnGoSetActive = void (*)(void* self, bool value, const void* method);
 using FnGoGetActiveSelf = bool (*)(void* self, const void* method);
 using FnObjectDestroy = void (*)(void* obj, const void* method);
+using FnDialogClose = void (*)(void* self, const void* method);  // CloseDialog / UIDialog.Close
 
 std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gThread{nullptr};
@@ -107,13 +118,13 @@ struct SampleCtx {
 };
 
 struct DismissCtx {
-    // in: 1=进图后强卸（含 alreadyOff 僵尸；本 GO SetActive + Destroy；绝不点 OK/Close/卸父）
+    // in: 1=强卸；Close 成功且已不可见则停，否则 SetActive(+Destroy)；绝不点 Yes/Ok
     int aggressive = 0;
     int scanned = 0;
     int skippedDead = 0;
     int skippedInactive = 0;
-    int closed = 0;      // 兼容日志；恒 0
-    int clickedOk = 0;   // 恒 0
+    int closed = 0;       // CloseDialog / UIDialog.Close 成功次数
+    int clickedOk = 0;    // 恒 0（禁止 OnClickYes/Ok）
     int inactivated = 0;
     int destroyed = 0;
     char detail[192]{};
@@ -410,6 +421,18 @@ bool GoActiveSelf(void* go, MethodInfoHead* miGetActive) {
     return active;
 }
 
+// activeSelf=false 时父节点仍可能撑着可见层；有 activeInHierarchy 则优先用它判「是否还在画」。
+bool GoActiveInHierarchy(void* go, MethodInfoHead* miHier) {
+    if (!go || !miHier || !miHier->methodPointer) return true;
+    bool active = true;
+    __try {
+        active = reinterpret_cast<FnGoGetActiveSelf>(miHier->methodPointer)(go, miHier);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        active = true;
+    }
+    return active;
+}
+
 void SetGoActive(void* go, bool on, MethodInfoHead* miSetActive) {
     if (!go || !LooksLikeHeapPtr(go) || !miSetActive || !miSetActive->methodPointer) return;
     __try {
@@ -418,10 +441,12 @@ void SetGoActive(void* go, bool on, MethodInfoHead* miSetActive) {
     }
 }
 
-// 只卸本弹窗 GO：SetActive(false) +（激进时）Destroy。不点 OK/Close，不向上卸父（防误关 HUD）。
-void HideDialogVisual(void* dlg, MethodInfoHead* miGetGo, MethodInfoHead* miSetActive,
-                      MethodInfoHead* miGetActive, MethodInfoHead* miDestroy, bool forceInactive,
-                      DismissCtx* ctx) {
+// 优先官方 CloseDialog（→ UIDialog.Close）；Close 成功且已不可见才跳过 fallback。
+// 绝不点 OnClickYes/Ok（踢线 Notice 点確認=认踢）。
+void HideDialogVisual(void* dlg, MethodInfoHead* miCloseDialog, MethodInfoHead* miUiClose,
+                      MethodInfoHead* miGetGo, MethodInfoHead* miSetActive,
+                      MethodInfoHead* miGetActive, MethodInfoHead* miGetHier,
+                      MethodInfoHead* miDestroy, bool forceInactive, DismissCtx* ctx) {
     if (!dlg || !ctx) return;
     if (!UnityAlive(dlg)) {
         ++ctx->skippedDead;
@@ -436,35 +461,63 @@ void HideDialogVisual(void* dlg, MethodInfoHead* miGetGo, MethodInfoHead* miSetA
             go = nullptr;
         }
     }
-    if (!go || !LooksLikeHeapPtr(go)) {
-        ++ctx->skippedDead;
-        return;
-    }
 
-    const bool inactive = !GoActiveSelf(go, miGetActive);
-    if (inactive && !forceInactive) {
-        ++ctx->skippedInactive;
-        return;
+    bool visiblyOff = false;
+    if (go && LooksLikeHeapPtr(go)) {
+        const bool selfOn = GoActiveSelf(go, miGetActive);
+        const bool hierOn = miGetHier ? GoActiveInHierarchy(go, miGetHier) : selfOn;
+        visiblyOff = !selfOn && !hierOn;
+        if (visiblyOff && !forceInactive) {
+            ++ctx->skippedInactive;
+            return;
+        }
+        if (visiblyOff) ++ctx->skippedInactive;
     }
-    if (inactive) ++ctx->skippedInactive;
 
     ++ctx->scanned;
 
-    SetGoActive(go, false, miSetActive);
-    ++ctx->inactivated;
-
-    if (forceInactive && miDestroy && miDestroy->methodPointer) {
+    bool closed = false;
+    auto tryClose = [&](MethodInfoHead* mi) {
+        if (closed || !mi || !mi->methodPointer) return;
         __try {
-            reinterpret_cast<FnObjectDestroy>(miDestroy->methodPointer)(go, miDestroy);
-            ++ctx->destroyed;
+            reinterpret_cast<FnDialogClose>(mi->methodPointer)(dlg, mi);
+            closed = true;
+            ++ctx->closed;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    };
+    tryClose(miCloseDialog);
+    tryClose(miUiClose);
+
+    // Close 调用未抛 ≠ 已关干净：复核可见性；仍在画或无法判 → 走 fallback。
+    // b2558a：Close 成功后再 Destroy×9 易拆烂 UI；仅「Close 成功且已不可见」才跳过 Destroy。
+    if (closed) {
+        if (!go || !LooksLikeHeapPtr(go) || !UnityAlive(dlg)) return;
+        const bool selfOn = GoActiveSelf(go, miGetActive);
+        const bool hierOn = miGetHier ? GoActiveInHierarchy(go, miGetHier) : selfOn;
+        if (!selfOn && !hierOn) return;
+        // Close 声称成功但 GO 仍可见 → 继续 SetActive/Destroy
+    }
+
+    // Close 失败，或 Close 后仍可见：藏/拆本 GO（不向上卸父）；forceInactive 才 Destroy。
+    if (go && LooksLikeHeapPtr(go)) {
+        SetGoActive(go, false, miSetActive);
+        ++ctx->inactivated;
+        if (forceInactive && miDestroy && miDestroy->methodPointer) {
+            __try {
+                reinterpret_cast<FnObjectDestroy>(miDestroy->methodPointer)(go, miDestroy);
+                ++ctx->destroyed;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
         }
     }
 }
 
 void DismissDialogsOfKlass(void* klass, bool forceInactive, DismissCtx* ctx,
+                           MethodInfoHead* miCloseDialog, MethodInfoHead* miUiClose,
                            MethodInfoHead* miGetGo, MethodInfoHead* miSetActive,
-                           MethodInfoHead* miGetActive, MethodInfoHead* miDestroy) {
+                           MethodInfoHead* miGetActive, MethodInfoHead* miGetHier,
+                           MethodInfoHead* miDestroy) {
     if (!klass || !ctx) return;
     void* typeObj = ClassTypeObjectOnPump(klass);
     if (!typeObj) return;
@@ -497,7 +550,8 @@ void DismissDialogsOfKlass(void* klass, bool forceInactive, DismissCtx* ctx,
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             o = nullptr;
         }
-        HideDialogVisual(o, miGetGo, miSetActive, miGetActive, miDestroy, forceInactive, ctx);
+        HideDialogVisual(o, miCloseDialog, miUiClose, miGetGo, miSetActive, miGetActive, miGetHier,
+                         miDestroy, forceInactive, ctx);
     }
 }
 
@@ -521,7 +575,10 @@ void DismissKickDialogOnPump(void* user) {
     MethodInfoHead* miGetGo = nullptr;
     MethodInfoHead* miSetActive = nullptr;
     MethodInfoHead* miGetActive = nullptr;
+    MethodInfoHead* miGetHier = nullptr;
     MethodInfoHead* miDestroy = nullptr;
+    MethodInfoHead* miCloseDialog = nullptr;
+    MethodInfoHead* miUiClose = nullptr;
     void* compKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Component");
     void* goKlass = x::runtime::il2cpp::FindClass("UnityEngine", "GameObject");
     void* objKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Object");
@@ -540,6 +597,9 @@ void DismissKickDialogOnPump(void* user) {
         auto ra = x::runtime::il2cpp_method::FindMethodResolved(goKlass, kRvaGoGetActiveSelf, kAct,
                                                                 "get_activeSelf", nullptr);
         miGetActive = AsMi(ra.method);
+        void* byHier =
+            x::runtime::il2cpp_method::FindMethodByName(goKlass, "get_activeInHierarchy", 0, false);
+        miGetHier = AsMi(byHier);
     }
     if (objKlass) {
         constexpr MethodShape kDes{1, TypeKind::Void, true, true, {TypeKind::Ptr}};
@@ -556,22 +616,38 @@ void DismissKickDialogOnPump(void* user) {
     if (!util) util = x::runtime::il2cpp::FindClass("Msc.UI", "UIUtilDialog");
     void* utilEx = x::runtime::il2cpp::FindClass("", kUtilDialogExClass);
     if (!utilEx) utilEx = x::runtime::il2cpp::FindClass("Msc.UI", "UIUtilDialogEx");
+    void* uiDlg = x::runtime::il2cpp::FindClass("", kUiDialogClass);
+    if (!uiDlg) uiDlg = x::runtime::il2cpp::FindClass("Msc.UI", "UIDialog");
+    if (!uiDlg) uiDlg = x::runtime::il2cpp::FindClass("", "UIDialog");
+
+    constexpr MethodShape kClose0{0, TypeKind::Void, true, false};
+    if (util) {
+        auto r = x::runtime::il2cpp_method::FindMethodResolved(
+            util, kRvaCloseDialog, kClose0, "CloseDialog", kHashCloseDialog);
+        miCloseDialog = AsMi(r.method);
+    }
+    void* closeKlass = uiDlg ? uiDlg : util;
+    if (closeKlass) {
+        auto r = x::runtime::il2cpp_method::FindMethodResolved(closeKlass, kRvaUiDialogClose, kClose0,
+                                                              "Close", nullptr);
+        miUiClose = AsMi(r.method);
+    }
 
     const bool force = aggressive != 0;
     MethodInfoHead* destroyMi = force ? miDestroy : nullptr;
-    DismissDialogsOfKlass(utilEx, force, ctx, miGetGo, miSetActive, miGetActive, destroyMi);
-    DismissDialogsOfKlass(util, force, ctx, miGetGo, miSetActive, miGetActive, destroyMi);
-    if (force) {
-        void* uiDlg = x::runtime::il2cpp::FindClass("Msc.UI", "UIDialog");
-        if (!uiDlg) uiDlg = x::runtime::il2cpp::FindClass("", "UIDialog");
-        if (uiDlg && uiDlg != util && uiDlg != utilEx) {
-            DismissDialogsOfKlass(uiDlg, true, ctx, miGetGo, miSetActive, miGetActive, miDestroy);
-        }
-    }
+    // 只扫 Util / UtilEx（踢线 Notice 常见具体类）。UIDialog 基类只用于解析 Close，
+    // 不再 FindAll——避免把商店/系统框一并 Close（审查中风险 #2）。
+    DismissDialogsOfKlass(utilEx, force, ctx, miCloseDialog, miUiClose, miGetGo, miSetActive,
+                          miGetActive, miGetHier, destroyMi);
+    DismissDialogsOfKlass(util, force, ctx, miCloseDialog, miUiClose, miGetGo, miSetActive,
+                          miGetActive, miGetHier, destroyMi);
 
     snprintf(ctx->detail, sizeof(ctx->detail),
-             "agg=%d scan=%d close=0 ok=0 inactive=%d destroy=%d dead=%d alreadyOff=%d", aggressive,
-             ctx->scanned, ctx->inactivated, ctx->destroyed, ctx->skippedDead, ctx->skippedInactive);
+             "agg=%d scan=%d close=%d ok=0 inactive=%d destroy=%d dead=%d alreadyOff=%d "
+             "miClose=%d miUiClose=%d hier=%d",
+             aggressive, ctx->scanned, ctx->closed, ctx->inactivated, ctx->destroyed,
+             ctx->skippedDead, ctx->skippedInactive, miCloseDialog ? 1 : 0, miUiClose ? 1 : 0,
+             miGetHier ? 1 : 0);
 }
 
 void SamplePlayReadyOnPump(void* user) {
@@ -639,11 +715,13 @@ DWORD WINAPI Worker(LPVOID) {
             continue;
         }
         if (!IsArmed()) {
-            LogLine("skip: not armed why=%s", gWhy);
+            LogLine("skip: not armed why=%s — clear hold", gWhy);
+            SetHold(false);
             continue;
         }
         if (gBusy.exchange(true)) {
-            LogLine("skip: busy why=%s", gWhy);
+            // 已在试连中：保留 hold，pending 已消费；进行中的 attempt 会覆盖本轮。
+            LogLine("skip: busy why=%s (hold kept)", gWhy);
             continue;
         }
 
@@ -867,19 +945,27 @@ DWORD WINAPI Worker(LPVOID) {
                             playOk = true;
                             LogLine("play-ready — post-dismiss burst (Notice may appear late)");
                             KickLogLine("play-ready post_dismiss_burst");
+                            int emptyStreak = 0;
                             for (int d = 0; d < kPostReadyDismissTries && !gStop.load(); ++d) {
                                 DismissCtx post{};
                                 post.aggressive = 1;
                                 if (!x::runtime::managed_main::Call(&DismissKickDialogOnPump, &post,
                                                                     3000)) {
                                     LogLine("post_dismiss Call fail try=%d", d);
+                                    emptyStreak = 0;  // 失败不计入「已清干净」
                                 } else {
                                     LogLine("post_dismiss try=%d %s", d, post.detail);
                                     KickLogLine("post_dismiss try=%d %s", d, post.detail);
+                                    const bool empty = post.inactivated == 0 &&
+                                                       post.destroyed == 0 && post.scanned == 0 &&
+                                                       post.closed == 0;
+                                    emptyStreak = empty ? emptyStreak + 1 : 0;
                                 }
-                                // 连续两轮无卸挡/Destroy → 认为清干净
-                                if (d > 0 && post.inactivated == 0 && post.destroyed == 0 &&
-                                    post.scanned == 0) {
+                                // 4427f8：两轮空扫就停，晚到的 Notice 仍挂着。至少半程 + 连续空才停。
+                                if (emptyStreak >= kPostReadyEmptyStop &&
+                                    d + 1 >= kPostReadyDismissTries / 2) {
+                                    LogLine("post_dismiss settled emptyStreak=%d try=%d",
+                                            emptyStreak, d);
                                     break;
                                 }
                                 if (d + 1 < kPostReadyDismissTries) Sleep(kPostReadyDismissGapMs);
@@ -1001,7 +1087,13 @@ void RequestAttempt(const char* why) {
     if (!IsArmed()) return;
     memset(gWhy, 0, sizeof(gWhy));
     strncpy_s(gWhy, why ? why : "disconnect", _TRUNCATE);
+    // 必须在 kick_sniff 抬 disconnectSeq / 宿主读 status 之前同步 hold。
+    // 若只靠 worker 50ms 轮询再 SetHold，守护会先看到 seq 上涨且 hold=0 → 立刻干净重拉
+    // （upload 9fee22：10:38:37 disconnect → 10:38:39 kill，soft_login 无 attempt begin）。
+    SetHold(true);
     gPending.store(true);
+    LogLine("request why=%s hold=1 (sync before worker)", gWhy);
+    KickLogLine("request why=%s hold=1", gWhy);
 }
 
 }  // namespace x::features::soft_login_probe

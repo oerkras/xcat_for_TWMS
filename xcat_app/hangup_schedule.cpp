@@ -78,6 +78,10 @@ struct State {
     uint32_t lastConsumedDisconnectSeq = 0;
     uint32_t lastLoggedDisconnectSeq = 0;
     bool haveDisconnectBaseline = false;
+    // softLoginResult==1 只在上升沿吞 seq，避免成功后永久误吞后续断线。
+    uint32_t lastSeenSoftLoginResult = 0;
+    // 最近一次新鲜 SHM 见到的 softLoginHold；进程已死后 stFresh 常假，靠 latch 说明 ProcessDead。
+    bool softLoginHoldLatched = false;
     uint64_t lastCooldownBlockLogTick = 0;
     RelaunchJob relaunch{};
     guardian_policy::RuntimeState runtime{};
@@ -152,6 +156,8 @@ void ClearSessionTrack() {
     g.lastConsumedDisconnectSeq = 0;
     g.lastLoggedDisconnectSeq = 0;
     g.haveDisconnectBaseline = false;
+    g.lastSeenSoftLoginResult = 0;
+    g.softLoginHoldLatched = false;
 }
 
 void ArmSessionIfLive(DWORD livePid, bool handshakeOk) {
@@ -741,9 +747,12 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     input.mapId = input.mapIdValid ? st.mapId : 0;
 
     // 服务器踢线/断线边沿 → hard-fail → 干净重拉（不依赖「自动打怪」）。
-    // soft_login 试连观察窗内推迟；成功则吞掉本轮 disconnectSeq，避免 hold 结束后误重拉。
+    // soft_login 试连观察窗内推迟；成功上升沿吞掉本轮 disconnectSeq，避免 hold 结束后误重拉。
     if (g.sessionArmed && stFresh) {
-        if (st.version >= 8u && st.softLoginResult == 1u &&
+        const uint32_t softResult = (st.version >= 8u) ? st.softLoginResult : 0u;
+        g.softLoginHoldLatched = (st.version >= 8u && st.softLoginHold != 0u);
+        // 仅 result 0→1 上升沿吸收；result 一直为 1 时不得吞后续新 seq（否则二次断线失败也不重拉）。
+        if (softResult == 1u && g.lastSeenSoftLoginResult != 1u &&
             st.disconnectSeq > g.lastConsumedDisconnectSeq) {
             xcat::log::Info("Watchdog",
                             "soft_login success — absorb disconnectSeq %u->%u (no clean relaunch)",
@@ -751,6 +760,7 @@ void Tick(LaunchUiState& ui, bool appExiting) {
             g.lastConsumedDisconnectSeq = st.disconnectSeq;
             g.lastLoggedDisconnectSeq = st.disconnectSeq;
         }
+        g.lastSeenSoftLoginResult = softResult;
         if (!g.haveDisconnectBaseline) {
             g.lastConsumedDisconnectSeq = st.disconnectSeq;
             g.haveDisconnectBaseline = true;
@@ -777,6 +787,8 @@ void Tick(LaunchUiState& ui, bool appExiting) {
             }
         }
     }
+    // soft hold 期间心跳常不新鲜：勿因 !stFresh 清 latch，否则 ProcessDead 诊断 Warn 丢。
+    // latch 只在：新鲜 SHM 写 hold=0/1、ProcessDead 打过日志、ClearSessionTrack。
 
     const guardian_policy::Decision decision = guardian_policy::Evaluate(g.runtime, input);
     g.runtime = decision.next;
@@ -792,6 +804,13 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     }
 
     if (decision.stateChanged) {
+        if (decision.gate == guardian_policy::Gate::ProcessDead && g.softLoginHoldLatched) {
+            xcat::log::Warn(
+                "Watchdog",
+                "process-dead during soft_login hold (Classic already gone — not kick-kill; "
+                "soft attempt aborted)");
+            g.softLoginHoldLatched = false;
+        }
         xcat::log::Info("Watchdog", "mode %s->%s gate=%s action=%s reason=%s stale=%u",
                         guardian_policy::ModeLabel(decision.previousMode),
                         guardian_policy::ModeLabel(decision.next.mode), g.gate,

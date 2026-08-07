@@ -149,16 +149,21 @@ struct ModeCaps {
     float speed;  // 合速上限（矢量幅值），两轴共享
 };
 
+// 用户可调倍率，基准 1.0。语义与边界见 heli_rotor.h 的 SetSpeedScale 注释。
+std::atomic<float> gSpeedScale{1.0f};
+
 ModeCaps CapsFor(Mode m) {
+    const float k = gSpeedScale.load(std::memory_order_relaxed);
     switch (m) {
         case Mode::Cruise:
-            return {620.f};
+            return {620.f * k};
+        // Rtb 只许更快：自救权限不该因为用户想慢点打怪而被削。
         case Mode::Rtb:
-            return {660.f};
+            return {660.f * (k > 1.f ? k : 1.f)};
         case Mode::Station:
-            return {480.f};
+            return {480.f * k};
         case Mode::Hold:
-            return {360.f};
+            return {360.f * k};
         default:
             return {0.f};
     }
@@ -244,7 +249,15 @@ void Reset() {
     gLastTickFired = false;
     gBailed.store(false, std::memory_order_release);
     gStaleTicks = 0;
+    // 倍率是用户设置，不是本轮状态，换图/开关都不该把它冲掉。
 }
+
+void SetSpeedScale(float scale) {
+    if (!std::isfinite(scale)) return;
+    gSpeedScale.store(Clamp(scale, 0.25f, 3.0f), std::memory_order_relaxed);
+}
+
+float SpeedScale() { return gSpeedScale.load(std::memory_order_relaxed); }
 
 bool Tick(DWORD now, Telemetry* out) {
     Telemetry tm{};

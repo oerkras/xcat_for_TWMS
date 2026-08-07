@@ -2609,40 +2609,68 @@ bool InHeliHoverBand(float px, float py, float mx, float my, float standOff) {
     return dx <= standOff * kHitBandMaxFrac + kHeliStationSlack;
 }
 
-// 出刀带比悬停带窄得多，两者必须分开：悬停带回答「还要不要再飞」，出刀带回答「这一刀
-// 够不够得到」。历史上共用 kHeliHoverMaxDy=80，代价是近一半的刀砍在空气里。
+// 出刀带与悬停带必须分开：悬停带回答「还要不要再飞」，出刀带回答「这一刀够不够得到」。
+// 历史上共用 kHeliHoverMaxDy=80，代价是近一半的刀砍在空气里。
 //
-// BIN 14a58c + b8c7f6 合并 483 次出刀实测（dy = 角色 y − 怪 y，+ 为角色在上方）：
-//   命中：中位 +13，四分位 [0, +19]，|dy|>40 仅 1.6%
-//   空刀：中位  −3，四分位 [−57, +21]，|dy|>40 占 47.2%
-// dy 是命中/空刀的**唯一**显著区分量——同一批数据里 |dx| 两组中位 44 vs 43，毫无区分力，
-// 别再往横向站距上找原因。
+// ★ 判据真源已从「客户端猜」换成「客户端自己说」。攻包 op=50 的 `flags` 高 nibble 就是
+// 命中判定的输出（命中 0x11 / 落空 0x01），命中包还带着怪物与玩家坐标——等于客户端把
+// 每一次判决连同当时的相对位置都标注好了，不必去反编译判定函数。
 //
-// 阈值 35 是权衡曲线的拐点：保住 98.4% 的命中、拦掉 50.9% 的空刀。收到 30 只多拦 5 个点
-// 却白丢 6 个点命中；放到 40 命中一点不涨、反而少拦 4 个点。
+// 据此得到两组数（脚本见 `Dumps/runtime/_hitbox.py` 与 `_hitrate.py`）：
+//   · 34,360 个命中样本反解出的命中盒：dx ∈ [-20,+130]、dy ∈ ±45（尾到 ±61）；矩形，非椭圆
+//   · 12,063 刀（攻包判决 × combat.log 站位，±120ms 配对）的条件命中率：
+//       dy<15 & dx<40 → 96% ｜ dx 40~80 → 92% ｜ dx 80~120 → 60%
+//       dy 15~30      → 89% ｜ dy 30~45 → 53%
 //
-// ⚠️ 这个 dy 必须在**全部五处**门禁上同步生效，少一处就会两头对推（BIN 1394b0 实证）：
+// ⚠️ **不要再据此收紧出刀闸**。曾按 lastHitted 推出的空刀率（口径更糙）把闸收到
+// dy24/dx60，实测 kills/min 119→109，因为它砍掉了全部命中的 17%。边际账是负的：
+// dx 80~100 那 1,772 刀虽只有 58% 命中，拦掉也只省 744 次空挥 ≈ 91s，而这 91s 按
+// 平均 86.4% 本能换 639 次命中，代价却是 1,028 次命中——净亏 389。
+// 正解是**不拦刀、只把站位往 96% 那格压**（见下方 kHeliStation*）。
+//
+// 仍然成立的旧结论：速度不判别空刀。只取 |dy|<12 且 |dx|<40 的刀，合速 0~200/200~400/
+// 400~600 的空刀率是 5%/5%/2%；边际上「越快越空」是「飞得快时更常在框外出刀」的伪装。
+//
+// ⚠️ 出刀闸必须在**全部五处**门禁上同步生效，少一处就会两头对推（BIN 1394b0 实证）：
 //   ① `MoveTo` 的 `heli_in_band` 到位判定
 //   ② `Aim` 的 `heli_hover`
 //   ③ `Aim` 的 `InHitBand / InMeleeHoldBand` 旁路
 //   ④ `Recover` 的 `heli_hold` / `heli_near`
-//   ⑤ `Firing` 的 P0 硬门（`FireGateOk` 是地面口径，dy 超限须一票否决）
-// 以及 `NeedsHeliStationKeep`（「够不到就得继续飞」，口径同上）。
-constexpr float kHeliFireMaxDy = 35.f;
+//   ⑤ `Firing` 的 P0 硬门（`FireGateOk` 是地面口径，超限须一票否决）
+// 出刀闸 = 客户端自己的命中盒，**只否决几何上不可能的刀**。
+// 数值取自 34,360 个 op=50 命中包反解出的真实边界（`_hitbox.py`）：命中被接受的
+// dx 最远 136（p99 103）、dy 最远 ±61（p99 ±33），且各 dy 带的 dx 触及距离一致 —— 是矩形不是椭圆。
+constexpr float kHeliFireMaxDy = 45.f;
+constexpr float kHeliFireMaxDx = 120.f;
+
+// 到位判据 = 「96% 命中」那一格，只用来决定**还要不要继续飞**，不用来拦刀。
+// 12,063 刀配对判决（`_hitrate.py`）：dy<15 且 dx<40 命中 96%，dx 放到 80 仍有 92%，
+// 越过 dx 80 掉到 60%、越过 dy 30 掉到 53%。故旋翼一路把站位往这格里压。
+constexpr float kHeliStationDy = 15.f;
+constexpr float kHeliStationDx = 40.f;
+
+// 「这一刀够不够得到」的纯几何判据：旁路门禁一律用它一票否决。
+bool HeliReachOk(float px, float py, float mx, float my) {
+    return std::fabs(my - py) <= kHeliFireMaxDy && std::fabs(mx - px) <= kHeliFireMaxDx;
+}
+
+// 「站位是否已经够好、可以不再挪」——比出刀闸严得多，二者**必须分开**。
+bool HeliStationOk(float px, float py, float mx, float my) {
+    return std::fabs(my - py) <= kHeliStationDy && std::fabs(mx - px) <= kHeliStationDx;
+}
 
 bool InHeliFireBand(float px, float py, float mx, float my, float standOff) {
-    if (std::fabs(my - py) > kHeliFireMaxDy) return false;
+    if (!HeliReachOk(px, py, mx, my)) return false;
     return InHeliHoverBand(px, py, mx, my, standOff);
 }
 
 bool NeedsHeliStationKeep(float px, float py, float mx, float my, float standOff) {
-    // 口径跟着出刀带走：**够不到就得继续飞**。若这里仍按 80 判「已到位」，角色会在
-    // dy≈50 处既不飞也不砍地干等（出刀门禁已收到 35），白白空转。
-    if (InHeliFireBand(px, py, mx, my, standOff)) return false;
-    // 近距可续砍则不必飞（纵漂在出刀带内）。
-    if (std::fabs(mx - px) < kReapproachMinDx && std::fabs(my - py) <= kHeliFireMaxDy)
-        return false;
-    return true;
+    // 曾经这里跟着出刀带走（够不到才飞），等于「能砍就不再挪」，站位便长期停在 60% 命中那片区。
+    // 现在改成盯 96% 格：**边打边挪**——出刀闸宽、到位判据窄，两者不会互锁。
+    // 之所以不能反过来（拦刀去换站位），是因为边际账是负的：dx 80~100 那 1,772 刀命中 58%，
+    // 拦掉只省 744 次空挥≈91s，而这 91s 按 86.4% 本能换 639 次命中，却要丢掉 1,028 次。净亏 389。
+    (void)standOff;
+    return !HeliStationOk(px, py, mx, my);
 }
 
 // 悬停站位点：怪旁 standOff、略高于怪心，再夹进本图 FH AABB。
@@ -3363,11 +3391,21 @@ void TickImpl(DWORD now) {
                 // 连换靶自救都做不到，角色就在怪下方原地空转。
                 // BIN 1394b0：70s 内翻 4495 次（≈64/s），头顶台上的怪一直打不到；同一路径
                 // 在收紧出刀带之前只有约 1.9 次/秒。
-                const bool heliDyOk = std::fabs(gLock.y - player.y) <= kHeliFireMaxDy;
-                if (heliDyOk &&
+                const bool heliReachOk = HeliReachOk(player.x, player.y, gLock.x, gLock.y);
+                if (heliReachOk &&
                     (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
                      InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
                      InHeliHoverBand(player.x, player.y, gLock.x, gLock.y, standOff))) {
+                    // 冷却期别弹进 Firing：那一趟只会撞上 pace_wait 原地退回，白重置状态。
+                    // BIN b2558a：1162 次进 Firing 有 735 次（63%）就是这么空转的，
+                    // 把迁移频次从 654/min 推到 1652/min（27 次/秒）。
+                    // 留在 MoveTo 反而更划算——旋翼会继续把站位往 96% 格压，
+                    // 等于把这 123ms 冷却用在改善下一刀的命中率上。`Recover→Firing`
+                    // 一直有这道检查，这里漏了。
+                    if (!ports::attack::CanFirePrimary()) {
+                        RenewLootPulseHold(now);
+                        break;
+                    }
                     ClearStickySpin();
                     ClearLootPulse();
                     EnterState(State::Firing, now, "heli_in_band");
@@ -4023,11 +4061,12 @@ void TickImpl(DWORD now) {
                 EnterState(State::Firing, now, "heli_hover");
                 continue;
             }
-            // InHitBand / InMeleeHoldBand 的纵向容差（SameLayer 45、同台 100）是给地面站桩
-            // 定的，空中够不到那么远。Impact 悬停时必须再叠一道出刀带的 dy，否则这条支路
-            // 会绕过上面刚收紧的 heli_hover 门禁继续空砍。
-            const bool heliDyOk = !impactOn || std::fabs(gLock.y - player.y) <= kHeliFireMaxDy;
-            if (heliDyOk &&
+            // InHitBand / InMeleeHoldBand 的容差（纵向 SameLayer 45 / 同台 100，横向放到
+            // dx<100）是给地面站桩定的，空中够不到那么远。Impact 悬停时必须再叠一道出刀带
+            // 的 dy+dx，否则这条支路会绕过上面刚收紧的 heli_hover 门禁继续空砍。
+            const bool heliReachOk =
+                !impactOn || HeliReachOk(player.x, player.y, gLock.x, gLock.y);
+            if (heliReachOk &&
                 (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
                  (!humanOn &&
                   InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff)))) {
@@ -4082,14 +4121,14 @@ void TickImpl(DWORD now) {
             }
             // P0 出刀硬门：未进带绝不砍（含误入 Firing 的路径）。
             // 直升机：出刀带放行（空中 SameLayer 常失败，FireGate/InHitBand 会误拒）；
-            // 反过来，出刀带的 dy 一旦超了就**一票否决**——FireGateOk 用的是地面口径，
-            // 会把 dy=60 这种够不到的位置判成可打。
+            // 反过来，出刀带的 dy/dx 一旦超了就**一票否决**——FireGateOk 用的是地面口径，
+            // 会把 dy=60 或 dx=90 这种够不到的位置判成可打。
             const bool heliFireOk =
                 impactOn && InHeliFireBand(player.x, player.y, gLock.x, gLock.y, standOff);
-            const bool heliDyBlocked =
-                impactOn && std::fabs(gLock.y - player.y) > kHeliFireMaxDy;
+            const bool heliReachBlocked =
+                impactOn && !HeliReachOk(player.x, player.y, gLock.x, gLock.y);
             if (!heliFireOk &&
-                (heliDyBlocked ||
+                (heliReachBlocked ||
                  !FireGateOk(player.x, player.y, gLock.x, gLock.y, standOff, now, "Firing"))) {
                 if (impactOn && NeedsHeliStationKeep(player.x, player.y, gLock.x, gLock.y, standOff)) {
                     if (TryEnterMoveTo(now, "heli_fire_gate")) continue;
@@ -4152,9 +4191,10 @@ void TickImpl(DWORD now) {
                 ok = ports::attack::TryFirePrimary();
                 if (ok) {
                     // dy / v 是为了判「空刀由什么决定」而补的：历史上这行只有 dx，
-                    // 结果 780 档空刀翻 7 倍时手上没有能判决的量，横向前瞻假设扫了一轮
-                    // 才发现 AUC 在 Δ=0 最高（即与速度无关），白跑。dy 取「角色 − 怪」，
-                    // 与 kHeliFireMaxDy 注释里那 483 刀的实测同向，可直接并表。
+                    // 结果 780 档空刀翻 7 倍时手上没有能判决的量，白扫了一轮横向前瞻假设。
+                    // 补上后一份数据即定案（见 kHeliFireMaxDy 注释）：空刀由站位决定、
+                    // 与速度无关。dy 取「角色 − 怪」，与那处阈值同向，可直接并表。
+                    // 这三个量是收闸后验收 kills/min 的唯一依据，别再删。
                     LogToFile("fire id=%d dx=%.0f dy=%.0f v=(%.0f,%.0f) hp=%d whiff=%d arm=%d",
                               gLock.id, faceDx, player.y - gLock.y, gHeliLastVx, gHeliLastVy,
                               hpBefore, gLock.whiff, gLock.firesInArm);
@@ -4207,8 +4247,8 @@ void TickImpl(DWORD now) {
             // 直升机：悬停续砍；漂出站位才 MoveTo；怪死走 Acquire 换下一只。
             if (impactOn && !gLock.needApproachCorrect) {
                 // 与 MoveTo/Aim/Firing 同口径：够不到就别回 Firing（见 MoveTo 处的对推说明）。
-                const bool heliDyOk = std::fabs(gLock.y - player.y) <= kHeliFireMaxDy;
-                if (heliDyOk &&
+                const bool heliReachOk = HeliReachOk(player.x, player.y, gLock.x, gLock.y);
+                if (heliReachOk &&
                     (InHeliHoverBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
                      (!NeedsHeliStationKeep(player.x, player.y, gLock.x, gLock.y, standOff) &&
                       InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff)))) {
@@ -4220,9 +4260,9 @@ void TickImpl(DWORD now) {
                     if (!TryEnterMoveTo(now, "heli_reapproach")) break;
                     continue;
                 }
-                // 够不到但又没到「要重飞」的程度：交给旋翼继续压 dy，这一拍不砍也不迁移，
+                // 够不到但又没到「要重飞」的程度：交给旋翼继续收敛，这一拍不砍也不迁移，
                 // 绝不能落到下面的 heli_near 无条件出刀（那正是对推的另一半来源）。
-                if (!heliDyOk) break;
+                if (!heliReachOk) break;
                 if (!ports::attack::CanFirePrimary()) break;
                 EnterState(State::Firing, now, "heli_near");
                 continue;
@@ -4470,6 +4510,20 @@ void SetImpactApproachEnabled(bool on) {
 
 bool IsImpactApproachEnabled() {
     return gImpactApproachEnabled.load(std::memory_order_acquire);
+}
+
+void SetFlySpeedPct(unsigned pct) {
+    const float scale = static_cast<float>(pct) / 100.f;
+    const float prev = heli::SpeedScale();
+    heli::SetSpeedScale(scale);
+    const float now = heli::SpeedScale();
+    // Clamp 后仍相同就不刷日志：IPC 每次下发全量配置，否则每轮都打一行。
+    if (std::fabs(now - prev) < 1e-3f) return;
+    LogLine("SetFlySpeedPct %u → %.2fX (req %.2f)", pct, now, scale);
+}
+
+unsigned FlySpeedPct() {
+    return static_cast<unsigned>(heli::SpeedScale() * 100.f + 0.5f);
 }
 
 void SetHumanWalkEnabled(bool on) {

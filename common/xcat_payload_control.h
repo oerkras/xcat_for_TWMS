@@ -32,7 +32,7 @@ constexpr int32_t kImpactHopDeltaXMin = -400;
 constexpr int32_t kImpactHopDeltaXMax = 400;
 constexpr uint32_t kFrameLockFpsDefault = 120u;
 constexpr uint32_t kFrameLockFpsMin = 15u;
-// 软顶：仅防离谱输入；120/240/360/480/640/720 只是 UI 预设，不是业务上限。
+// 软顶：仅防离谱输入；120/240/360/480/640/720/860/1000 只是 UI 预设，不是业务上限。
 constexpr uint32_t kFrameLockFpsMax = 10000u;
 // flyMode: 0=Impact·NockBack  1=Impact·SetImpactNext（fill+Doing 瞬移飞已禁用）
 constexpr uint32_t kFlyModeImpactNockBack = 0u;
@@ -82,6 +82,13 @@ constexpr uint32_t kSimpleCombatTickMinMs = 1u;
 constexpr uint32_t kSimpleCombatTickMaxMs = 100u;
 // 打怪开时 mob_scan 刷新周期；越小越快看见新怪/尸体，CPU 更高。闲置仍用 worker 内固定 360ms。
 // 默认 20：对齐 Sleep 地板与抢怪体验；旧默认 50 读盘时迁到 20（显式其它值保留）。
+// 空中贴怪的飞行速度倍率，百分比。100 = 基准 1.0X（Cruise 620 / Rtb 660 / Station 480 / Hold 360）。
+// 只缩放「意图」上限，不动作动器上限 kMaxCmdV*(1700)，也不动 kMaxFallVy 等安全闸——
+// 那几道是独立防坠机制，跟着倍率走会让低倍率反而更容易掉出图。
+// 上限 300：Cruise 620×3=1860 已越过作动器 1700，再高只是被截断，给了也没用。
+constexpr uint32_t kHeliSpeedPctDefault = 100u;
+constexpr uint32_t kHeliSpeedPctMin = 25u;
+constexpr uint32_t kHeliSpeedPctMax = 300u;
 constexpr uint32_t kMobScanIntervalDefaultMs = 20u;
 constexpr uint32_t kMobScanIntervalLegacyDefaultMs = 50u;
 constexpr uint32_t kMobScanIntervalMinMs = 1u;
@@ -223,6 +230,8 @@ struct PayloadControl {
     uint32_t simpleCombatTeleport = 0;
     // 空中贴怪（ini: simpleCombatAirApproach；旧键 ImpactApproach 读盘兜底）。
     uint32_t simpleCombatImpactApproach = 1;
+    // v52: 空中贴怪飞行速度倍率（%）。100 = 基准 1.0X。仅在空中贴怪开启时生效。
+    uint32_t simpleCombatFlySpeedPct = kHeliSpeedPctDefault;
     // 拟人位移：同层走路贴近后 A 键出刀；与空中贴怪互斥（空中开时恒 0）。
     uint32_t simpleCombatHumanWalk = 0;
     uint32_t simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
@@ -362,6 +371,12 @@ inline uint32_t ClampAttackSameFrameBurst(uint32_t n) {
     if (n < kAttackSameFrameBurstMin) return kAttackSameFrameBurstMin;
     if (n > kAttackSameFrameBurstMax) return kAttackSameFrameBurstMax;
     return n;
+}
+
+inline uint32_t ClampHeliSpeedPct(uint32_t pct) {
+    if (pct < kHeliSpeedPctMin) return kHeliSpeedPctMin;
+    if (pct > kHeliSpeedPctMax) return kHeliSpeedPctMax;
+    return pct;
 }
 
 inline uint32_t ClampSimpleCombatTickMs(uint32_t ms) {

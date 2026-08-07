@@ -130,18 +130,20 @@ ImVec4 StatusAlertBlue() {
     return ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
 }
 
-bool StatusLooksActionable(const std::string& s) {
+// 闲态仍值得常亮：失败 / 需用户动作。进行中文案（换票中、正在开游戏…）只靠 inFlight 展示，
+// 避免 GAMA PASS 成功后蓝字永久挂着。
+bool StatusLooksStickyAlert(const std::string& s) {
     if (s.empty()) return false;
-    // 结构化前缀优先，少靠零散单字（避免无关「跳过」误亮）。
-    static const char* kPrefixes[] = {
-        "GAMA PASS", "HTTP ", "正在", "已开始", "已取消", "挂机", "守护", "监视",
-        "请先关闭", "需要网页", "登录会话", "非挂机", "清理 NGM", "干净重拉",
-        "启动失败", "登录/换票失败", "HTTP 登录失败", "注入失败", "自动监视启动失败",
+    if (s.find("失败") != std::string::npos) return true;
+    if (s.find("超时") != std::string::npos) return true;
+    static const char* kAlerts[] = {
+        "请先关闭", "需要网页", "登录会话", "非挂机", "已取消", "账号串为空",
+        "账号无效", "无法启动", "无法开始",
     };
-    for (const char* p : kPrefixes) {
-        if (s.rfind(p, 0) == 0 || s.find(p) != std::string::npos) return true;
+    for (const char* p : kAlerts) {
+        if (s.find(p) != std::string::npos) return true;
     }
-    return s.find("失败") != std::string::npos;
+    return false;
 }
 
 void DrawStatusEllipsis(const ImVec4& col, const std::string& text) {
@@ -310,15 +312,14 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
             hs.hangupOn && hs.mode == hangup_schedule::UiMode::Starting;
         const bool watchdogRecovering =
             hs.watchdogOn && hs.watchdogMode == hangup_schedule::WatchdogUiMode::Recovering;
+        const bool inFlight = busy || autoPending || relaunching || hangupStarting ||
+                              watchdogRecovering;
+        // 进行中：任何非空状态都亮；闲态：仅失败/需动作，不因「GAMA PASS/正在」旧文案常亮。
         const bool showLoginHint =
-            !ui.status.empty() &&
-            (busy || autoPending || relaunching || hangupStarting || watchdogRecovering ||
-             StatusLooksActionable(ui.status));
+            !ui.status.empty() && (inFlight || StatusLooksStickyAlert(ui.status));
         const bool showUpdate = UpdateShouldDrawProgressUi();
         // 自动登录提示优先于更新条：用户默认在首页，换票进度更紧急。
         if (showLoginHint) {
-            const bool inFlight = busy || autoPending || relaunching || hangupStarting ||
-                                  watchdogRecovering;
             DrawStatusEllipsis(inFlight ? StatusHintBlue() : StatusAlertBlue(), ui.status);
         } else if (showUpdate) {
             DrawUpdateProgressMini();

@@ -32,6 +32,10 @@ void SetTeleportEnabled(bool on);  // 强制关：fill+Doing 战斗回落已禁�
 // 优先于拟人。需无敌；交战期间自动挂 fh-ban（无怪超宽限则卸掉落地）。
 void SetImpactApproachEnabled(bool on);
 bool IsImpactApproachEnabled();
+// 飞行速度倍率（百分比，100 = 基准 1.0X）。只缩放旋翼各档的意图上限；
+// 作动器上限与防坠闸不跟随（理由见 heli_rotor.h 的 SetSpeedScale）。
+void SetFlySpeedPct(unsigned pct);
+unsigned FlySpeedPct();
 // 拟人位移：同层走路贴近；仅当 Impact 贴怪关时生效。
 void SetHumanWalkEnabled(bool on);
 bool IsHumanWalkEnabled();

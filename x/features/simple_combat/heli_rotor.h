@@ -142,6 +142,19 @@ bool Tick(DWORD now, Telemetry* out);
 // F5 开关/换图时清发射时钟与符号自检状态。
 void Reset();
 
+// 飞行速度倍率。1.0 = 基准（Cruise 620 / Rtb 660 / Station 480 / Hold 360）。
+//
+// 只作用于 `CapsFor()` 给出的「意图」上限，**不碰**下面这些：
+//   · 作动器上限 kMaxCmdVx/Vy(1700) —— 它是硬件面，倍率再高也越不过去
+//   · kMaxFallVy 落速闸、撞墙预刹、深度缴械 —— 三道独立防坠机制。跟着倍率缩会让
+//     低倍率反而更容易掉出图（救援权限被一起削），这是反直觉但必须守住的边界。
+//   · Rtb 档取 `max(基准, 基准×倍率)` —— 只许更快、不许更慢。自救不该因为用户
+//     想慢点打怪就变弱。
+//
+// 越界会被 Clamp 到 [0.25, 3.0]。3.0 以上无意义：Cruise 620×3=1860 已被作动器 1700 截断。
+void SetSpeedScale(float scale);
+float SpeedScale();
+
 const char* ModeName(Mode m);
 
 }  // namespace x::features::simple_combat::heli

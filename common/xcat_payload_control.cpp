@@ -98,6 +98,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.clusterWeight = kClusterWeightDefault;
     out.simpleCombatTeleport = 0;
     out.simpleCombatImpactApproach = 1;
+    out.simpleCombatFlySpeedPct = kHeliSpeedPctDefault;
     out.simpleCombatHumanWalk = 0;  // 与 Impact 互斥；面板单选
     out.simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     out.simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
@@ -234,6 +235,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.simpleCombatImpactApproach = b ? 1u : 0u;
     else
         out.simpleCombatImpactApproach = 1u;
+    if (IniGetU32(ini, "core", "simpleCombatFlySpeedPct", u))
+        out.simpleCombatFlySpeedPct = ClampHeliSpeedPct(u);
+    else
+        out.simpleCombatFlySpeedPct = kHeliSpeedPctDefault;
     if (IniGetBool(ini, "core", "simpleCombatHumanWalk", b))
         out.simpleCombatHumanWalk = b ? 1u : 0u;
     else
@@ -436,6 +441,11 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.clusterWeight = normalized.clusterWeight ? 1u : 0u;
     normalized.simpleCombatTeleport = 0u;
     normalized.simpleCombatImpactApproach = normalized.simpleCombatImpactApproach ? 1u : 0u;
+    // 0 视为「旧盘没有这个键」，回默认 100 而非被 Clamp 抬到下限 25——
+    // 后者会让老配置一升级就悄悄变成 0.25X。
+    normalized.simpleCombatFlySpeedPct = ClampHeliSpeedPct(
+        normalized.simpleCombatFlySpeedPct ? normalized.simpleCombatFlySpeedPct
+                                           : kHeliSpeedPctDefault);
     normalized.simpleCombatHumanWalk = normalized.simpleCombatHumanWalk ? 1u : 0u;
     // 追怪位移单选：空中贴怪开则压掉拟人（旧盘两者同开时等价于仅空中）。
     if (normalized.simpleCombatImpactApproach) normalized.simpleCombatHumanWalk = 0u;
@@ -563,6 +573,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "simpleCombatAirApproach",
                    normalized.simpleCombatImpactApproach != 0);
         IniEraseKey(ini, "core", "simpleCombatImpactApproach");
+        IniSetU32(ini, "core", "simpleCombatFlySpeedPct", normalized.simpleCombatFlySpeedPct);
         IniSetBool(ini, "core", "simpleCombatHumanWalk", normalized.simpleCombatHumanWalk != 0);
         IniSetBool(ini, "core", "simpleCombatLiveStep", normalized.simpleCombatLiveStep != 0);
         IniSetBool(ini, "core", "attackRpc", normalized.attackRpc != 0);

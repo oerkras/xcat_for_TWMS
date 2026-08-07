@@ -1866,17 +1866,18 @@ void OnStateChange(int prev, int now, int err) {
         err, hack ? " hackHint=" : "", hack ? hack : "");
     if (now == kStateDisconnected || now == kStateDisconnecting) {
         gSawDisconnect.store(true);
+        // Soft-relogin：先 RequestAttempt（同步 softLoginHold），再 bump disconnectSeq，
+        // 避免宿主读到「seq+1 且 hold=0」立刻干净重拉。
+        x::features::galaxy_token_probe::RequestSample(
+            now == kStateDisconnecting ? "disconnecting" : "disconnected");
+        x::features::soft_login_probe::RequestAttempt(
+            now == kStateDisconnecting ? "disconnecting" : "disconnected");
         gDisconnectSeq.fetch_add(1, std::memory_order_relaxed);
         // Mark the drop inside the outbound trace too, so the last packets we sent before it
         // can be read off without cross-referencing timestamps against kick.log.
         SendLog("==== STATE %s(%d) pendingError=%d ====", StateName(now), now, err);
         FlushSendLog();
         Snapshot("disconnect");
-        // Soft-relogin dig: Galaxy_* still in PlayerPrefs after the edge?
-        x::features::galaxy_token_probe::RequestSample(
-            now == kStateDisconnecting ? "disconnecting" : "disconnected");
-        x::features::soft_login_probe::RequestAttempt(
-            now == kStateDisconnecting ? "disconnecting" : "disconnected");
     } else if (now == kStateConnected && prev != kStateConnected) {
         x::features::galaxy_token_probe::RequestSample("connected");
     }

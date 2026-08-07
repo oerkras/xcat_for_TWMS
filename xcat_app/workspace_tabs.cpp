@@ -618,6 +618,7 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool autoCombat = false;
     // F5 追怪位移：单选 0=空中贴怪 / 1=拟人 / 2=关闭（站桩）
     static int approachMode = 0;
+    static int gUiFlySpeedPct = (int)xcat::kHeliSpeedPctDefault;
     static bool smartInterval = false;
     static int attackMs = (int)xcat::kSimpleCombatAttackIntervalDefaultMs;
     static int clusterWeight = 0;  // 0/1：群怪优先（沿用 clusterWeight 落盘）
@@ -685,6 +686,9 @@ void DrawHomeTab(LaunchUiState& ui) {
                     approachMode = 1;
                 else
                     approachMode = 2;
+                gUiFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
+                    disk.simpleCombatFlySpeedPct ? disk.simpleCombatFlySpeedPct
+                                                 : xcat::kHeliSpeedPctDefault);
                 smartInterval = disk.simpleCombatSmartInterval != 0;
                 attackMs = (int)xcat::ClampSimpleCombatAttackIntervalMs(
                     disk.simpleCombatAttackIntervalMs
@@ -746,8 +750,9 @@ void DrawHomeTab(LaunchUiState& ui) {
                     xcat::ClampWatchdogNoExpSec(disk.launcherWatchdogNoExpSec));
                 cooldownSec = static_cast<int>(
                     xcat::ClampWatchdogCooldownSec(disk.launcherWatchdogCooldownSec));
-                // 合并：旧版曾分拆 galaxyTokenProbe；任一开过则视为软重连开。
-                softLoginProbe = disk.softLoginProbe != 0 || disk.galaxyTokenProbe != 0;
+                // 软重连只跟 softLoginProbe；禁止用旧 galaxyTokenProbe OR 抬成软重连
+                //（仅采证请用 galaxy_token_probe.on / GALAXY_TOKEN_PROBE=1）。
+                softLoginProbe = disk.softLoginProbe != 0;
                 // 不从 core.autoSell* 灌 UI：真源 [auto_supply]
                 lastSeenTick = disk.writeTickMs;
                 coreLoaded = true;
@@ -807,6 +812,8 @@ void DrawHomeTab(LaunchUiState& ui) {
         // 单选落盘：空中贴怪 / 拟人互斥；关闭则两者皆关。
         c.simpleCombatImpactApproach = (approachMode == 0) ? 1u : 0u;
         c.simpleCombatHumanWalk = (approachMode == 1) ? 1u : 0u;
+        c.simpleCombatFlySpeedPct =
+            xcat::ClampHeliSpeedPct(static_cast<uint32_t>(gUiFlySpeedPct < 0 ? 0 : gUiFlySpeedPct));
         c.simpleCombatSmartInterval = smartInterval ? 1u : 0u;
         c.simpleCombatAttackIntervalMs =
             xcat::ClampSimpleCombatAttackIntervalMs(static_cast<uint32_t>(attackMs));
@@ -856,7 +863,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             xcat::ClampWatchdogNoExpSec(static_cast<uint32_t>(noExpSec));
         c.launcherWatchdogCooldownSec =
             xcat::ClampWatchdogCooldownSec(static_cast<uint32_t>(cooldownSec));
-        // 软重连开关同时武装 Galaxy Token 采证（只读 prefs）。
+        // UI 开软重连时同步武装 Galaxy Token 采证；关则两字段都关。
+        // 仅采证不软重连：galaxy_token_probe.on / GALAXY_TOKEN_PROBE=1（不走本勾选）。
         c.softLoginProbe = softLoginProbe ? 1u : 0u;
         c.galaxyTokenProbe = softLoginProbe ? 1u : 0u;
         // 补给开关/店图不写 core：真源 [auto_supply]（persistAsup）。
@@ -1199,6 +1207,27 @@ void DrawHomeTab(LaunchUiState& ui) {
                     "· 关闭：不追怪（站桩，够得着才砍）。");
             }
         }
+        // 飞行倍率只对「空中贴怪」有意义；拟人/关闭时置灰，避免调了没反应。
+        ImGui::SameLine(0.f, ui::Gap() * 1.2f);
+        ImGui::BeginDisabled(approachMode != 0);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("飞行速度");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(96.f));
+        if (ImGui::DragInt("##f5_fly_speed", &gUiFlySpeedPct, 5,
+                           (int)xcat::kHeliSpeedPctMin, (int)xcat::kHeliSpeedPctMax, "%d%%",
+                           ImGuiSliderFlags_AlwaysClamp)) {
+            persistCore();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "空中贴怪的飞行速度倍率，100%% = 基准 1.0X。\n"
+                "基准各档合速：转场 620 / 拉回 660 / 站位 480 / 悬停 360 px/s。\n"
+                "· 只缩放飞行意图，落速闸与撞墙预刹不跟随——调低不会更容易掉出图。\n"
+                "· 300%% 以上无意义：转场 620x3 已越过作动器上限 1700。\n"
+                "· 提速会拉长高速暴露时长，历史上 780 档曾把存活从 358s 压到 79s，加档请配合看日志。");
+        }
+        ImGui::EndDisabled();
         ImGui::SameLine(0.f, ui::Gap() * 1.2f);
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("跨层门控");
@@ -3588,7 +3617,7 @@ void DrawBetaTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "锁 Unity 主循环目标帧率（Application.targetFrameRate），并关闭引擎 vSync。\n"
                 "不修改显示器硬件刷新率。用于高低配显示器对齐打怪节奏。\n"
-                "预设 120 / 240 / 360 / 480 / 640 / 720；也可自定义（%u~%u）。默认关。\n"
+                "预设两行：120/240/360/480 与 640/720/860/1000；也可自定义（%u~%u）。默认关。\n"
                 "关闭时还原引擎 vSync=1（游戏无公开 getter，按经典版常见默认）。",
                 xcat::kFrameLockFpsMin, xcat::kFrameLockFpsMax);
         }
@@ -3601,12 +3630,14 @@ void DrawBetaTab(LaunchUiState& ui) {
                 if (sel)
                     ImGui::PushStyleColor(ImGuiCol_Button,
                                          ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                if (ImGui::Button(lab, ImVec2(48.f, 0))) {
+                if (ImGui::Button(lab, ImVec2(52.f, 0))) {
                     frameLockFps = fps;
                     persistDrop();
                 }
                 if (sel) ImGui::PopStyleColor();
             };
+            const float labelW =
+                ImGui::CalcTextSize("预设").x + ImGui::GetStyle().ItemSpacing.x;
             ImGui::TextUnformatted("预设");
             ImGui::SameLine();
             presetBtn(120);
@@ -3616,10 +3647,16 @@ void DrawBetaTab(LaunchUiState& ui) {
             presetBtn(360);
             ImGui::SameLine();
             presetBtn(480);
-            ImGui::SameLine();
+            // 第二行：与首行按钮左对齐
+            ImGui::Dummy(ImVec2(labelW, 0.f));
+            ImGui::SameLine(0.f, 0.f);
             presetBtn(640);
             ImGui::SameLine();
             presetBtn(720);
+            ImGui::SameLine();
+            presetBtn(860);
+            ImGui::SameLine();
+            presetBtn(1000);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                 ImGui::SetTooltip("点选即下发；开启态约 200ms 内由载荷重刷。");
             }
