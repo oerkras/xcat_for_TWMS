@@ -41,8 +41,7 @@ void SetHumanWalkEnabled(bool on);
 bool IsHumanWalkEnabled();
 void SetLiveStepEnabled(bool on);
 bool IsLiveStepEnabled();
-void SetTeleportParams(uint32_t minDx, uint32_t standOff, uint32_t cooldownMs, uint32_t maxHop,
-                       uint32_t crossLayerFillGateMs, uint32_t fillBudgetPx);
+void SetTeleportParams(uint32_t minDx, uint32_t standOff, uint32_t cooldownMs, uint32_t maxHop);
 // 加速秒杀早切：maxHp=0 关闭此道；其余见 common/xcat_payload_control.h 默认值。
 void SetOneshotParams(uint32_t maxHp, uint32_t minBumps, uint32_t minFires, uint32_t minLagMs,
                       uint32_t foxFillGapMs);

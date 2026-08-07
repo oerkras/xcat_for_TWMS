@@ -43,14 +43,16 @@ constexpr char kHashSceneLoginGet[] =
 constexpr char kHashConnectLoginStart[] =
     "df9624adb7823429c61a527eb2015ae2370ec841f8dafa9ec07c66edd732c9c";
 
-constexpr DWORD kSettleMs = 1500;
+// settle 用墙钟截止（见 Worker）：Call 耗时曾未计入 waited，实机 1500ms 常被拉成 2.5–3s+。
+// Notice 多在断线瞬间弹出；Connecting 早退即可，不必死等满窗。
+constexpr DWORD kSettleMs = 600;
 constexpr DWORD kPollMs = 400;
 constexpr int kPollRounds = 25;  // ~10s to Connected（invoke 已成功后）
-constexpr DWORD kReenterPollMs = 500;
-constexpr int kReenterRounds = 90;  // ~45s auto_enter → play-ready；超时则 fail → 守护重拉
+constexpr DWORD kReenterPollMs = 350;
+constexpr int kReenterRounds = 130;  // ~45s auto_enter → play-ready；超时则 fail → 守护重拉
 // 进图后断线 SceneLogin 常晚于 settle 才重建；sl_null 时 hold 内重试，顺带吃游戏自连。
-constexpr DWORD kConnectWaitMs = 400;
-constexpr int kConnectWaitRounds = 50;  // ~20s 等 SL / Connecting / Connected
+constexpr DWORD kConnectWaitMs = 250;
+constexpr int kConnectWaitRounds = 80;  // ~20s 等 SL / Connecting / Connected
 constexpr int kConnectHardFailGrace = 3;  // 非 sl_null 硬错也先重试几轮再放弃
 
 constexpr int kStateDisconnecting = 0;
@@ -76,13 +78,14 @@ constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
 constexpr uint32_t kRvaGoSetActive = 0x4E5CAD0;
 constexpr uint32_t kRvaGoGetActiveSelf = 0x4E5CC70;
 constexpr size_t kOffCachedPtr = 0x10;  // UnityEngine.Object.m_CachedPtr
-constexpr int kDismissMissRetries = 3;
-constexpr DWORD kDismissMissGapMs = 350;
-// 进图后断线 Notice 常晚于 Connected / play-ready；4427f8 仅扫两轮空就停，弹窗仍在。
-constexpr int kPostReadyDismissTries = 24;
-constexpr DWORD kPostReadyDismissGapMs = 250;
-// 连续空扫这么多次才提前结束（且至少已跑过半程）。
-constexpr int kPostReadyEmptyStop = 8;
+constexpr int kDismissMissRetries = 2;
+constexpr DWORD kDismissMissGapMs = 80;
+constexpr DWORD kDismissCallMs = 500;  // 关窗泵调用；实机通常 <50ms，勿再卡 3s
+constexpr DWORD kEarlyDismissGapMs = 120;  // settle / connect-wait 内提前扫窗
+// 进图后断线 Notice 偶发晚到；窗已在 settle 卸过，post 只收尾。
+constexpr int kPostReadyDismissTries = 8;
+constexpr DWORD kPostReadyDismissGapMs = 60;
+constexpr int kPostReadyEmptyStop = 2;
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -118,8 +121,10 @@ struct SampleCtx {
 };
 
 struct DismissCtx {
-    // in: 1=强卸；Close 成功且已不可见则停，否则 SetActive(+Destroy)；绝不点 Yes/Ok
+    // in: 1=强卸；Close 后必 SetActive；Destroy 仅仍可见；绝不点 Yes/Ok
     int aggressive = 0;
+    // in: 1=额外 FindAll UIDialog 基类（settle/connect/Connected/收尾均开；断线 Notice 常只挂基类）
+    int scanBase = 0;
     int scanned = 0;
     int skippedDead = 0;
     int skippedInactive = 0;
@@ -441,8 +446,8 @@ void SetGoActive(void* go, bool on, MethodInfoHead* miSetActive) {
     }
 }
 
-// 优先官方 CloseDialog（→ UIDialog.Close）；Close 成功且已不可见才跳过 fallback。
-// 绝不点 OnClickYes/Ok（踢线 Notice 点確認=认踢）。
+// 优先官方 CloseDialog（→ UIDialog.Close）；Close 后必 SetActive(false)（对齐 shop_port）。
+// 绝不点 OnClickYes/Ok（踢线 YesNo 点確認=认踢；断线 Notice 的確認另议）。
 void HideDialogVisual(void* dlg, MethodInfoHead* miCloseDialog, MethodInfoHead* miUiClose,
                       MethodInfoHead* miGetGo, MethodInfoHead* miSetActive,
                       MethodInfoHead* miGetActive, MethodInfoHead* miGetHier,
@@ -462,16 +467,15 @@ void HideDialogVisual(void* dlg, MethodInfoHead* miCloseDialog, MethodInfoHead* 
         }
     }
 
-    bool visiblyOff = false;
     if (go && LooksLikeHeapPtr(go)) {
         const bool selfOn = GoActiveSelf(go, miGetActive);
         const bool hierOn = miGetHier ? GoActiveInHierarchy(go, miGetHier) : selfOn;
-        visiblyOff = !selfOn && !hierOn;
-        if (visiblyOff && !forceInactive) {
+        // FindAll 含池/资源：起点已不可见则跳过（含激进）。935fae 是「Close 后误判已关
+        // 而跳过 SetActive」；对起点仍可见的实例下面仍 Close+必 SetActive。
+        if (!selfOn && !hierOn) {
             ++ctx->skippedInactive;
             return;
         }
-        if (visiblyOff) ++ctx->skippedInactive;
     }
 
     ++ctx->scanned;
@@ -489,25 +493,21 @@ void HideDialogVisual(void* dlg, MethodInfoHead* miCloseDialog, MethodInfoHead* 
     tryClose(miCloseDialog);
     tryClose(miUiClose);
 
-    // Close 调用未抛 ≠ 已关干净：复核可见性；仍在画或无法判 → 走 fallback。
-    // b2558a：Close 成功后再 Destroy×9 易拆烂 UI；仅「Close 成功且已不可见」才跳过 Destroy。
-    if (closed) {
-        if (!go || !LooksLikeHeapPtr(go) || !UnityAlive(dlg)) return;
-        const bool selfOn = GoActiveSelf(go, miGetActive);
-        const bool hierOn = miGetHier ? GoActiveInHierarchy(go, miGetHier) : selfOn;
-        if (!selfOn && !hierOn) return;
-        // Close 声称成功但 GO 仍可见 → 继续 SetActive/Destroy
-    }
-
-    // Close 失败，或 Close 后仍可见：藏/拆本 GO（不向上卸父）；forceInactive 才 Destroy。
+    // 935fae：close=2 后因 alreadyOff 跳过 SetActive → 断线「確認」窗仍在画。
+    // shop_port：Close 后仍强 SetActive(false)（Close 常留残层）。此处同样必藏本 GO。
+    // Destroy 仅在 SetActive 后仍 hier 可见时（避免对 FindAll 资源/池实例乱 Destroy→b2558a）。
     if (go && LooksLikeHeapPtr(go)) {
         SetGoActive(go, false, miSetActive);
         ++ctx->inactivated;
         if (forceInactive && miDestroy && miDestroy->methodPointer) {
-            __try {
-                reinterpret_cast<FnObjectDestroy>(miDestroy->methodPointer)(go, miDestroy);
-                ++ctx->destroyed;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            const bool selfOn = GoActiveSelf(go, miGetActive);
+            const bool hierOn = miGetHier ? GoActiveInHierarchy(go, miGetHier) : selfOn;
+            if (selfOn || hierOn) {
+                __try {
+                    reinterpret_cast<FnObjectDestroy>(miDestroy->methodPointer)(go, miDestroy);
+                    ++ctx->destroyed;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
             }
         }
     }
@@ -559,8 +559,10 @@ void DismissKickDialogOnPump(void* user) {
     auto* ctx = static_cast<DismissCtx*>(user);
     if (!ctx) return;
     const int aggressive = ctx->aggressive;
+    const int scanBase = ctx->scanBase;
     *ctx = {};
     ctx->aggressive = aggressive;
+    ctx->scanBase = scanBase;
     if (!x::runtime::main_thread::AssertOnPumpThread("SoftLoginDismiss")) {
         snprintf(ctx->detail, sizeof(ctx->detail), "not_on_pump");
         return;
@@ -589,11 +591,12 @@ void DismissKickDialogOnPump(void* user) {
         miGetGo = AsMi(r.method);
     }
     if (goKlass) {
-        constexpr MethodShape kSet{1, TypeKind::Void, true, false, {TypeKind::Bool}};
+        // 与 shop_port 同形：unique=false（SetActive/set_active 撞车）+ walkParents + RVA。
+        constexpr MethodShape kSet{1, TypeKind::Void, false, true, {TypeKind::Bool}};
         auto r = x::runtime::il2cpp_method::FindMethodResolved(goKlass, kRvaGoSetActive, kSet,
                                                                "SetActive", nullptr);
         miSetActive = AsMi(r.method);
-        constexpr MethodShape kAct{0, TypeKind::Bool, true, false};
+        constexpr MethodShape kAct{0, TypeKind::Bool, true, true, {}};
         auto ra = x::runtime::il2cpp_method::FindMethodResolved(goKlass, kRvaGoGetActiveSelf, kAct,
                                                                 "get_activeSelf", nullptr);
         miGetActive = AsMi(ra.method);
@@ -635,17 +638,21 @@ void DismissKickDialogOnPump(void* user) {
 
     const bool force = aggressive != 0;
     MethodInfoHead* destroyMi = force ? miDestroy : nullptr;
-    // 只扫 Util / UtilEx（踢线 Notice 常见具体类）。UIDialog 基类只用于解析 Close，
-    // 不再 FindAll——避免把商店/系统框一并 Close（审查中风险 #2）。
+    // Util / Ex 先扫；scanBase 时再扫 UIDialog 基类（断线 Notice 偶发只挂基类 FindAll）。
+    // alreadyOff 起点跳过；可见实例 Close+必 SetActive；Destroy 仅仍可见（935fae / b2558a）。
     DismissDialogsOfKlass(utilEx, force, ctx, miCloseDialog, miUiClose, miGetGo, miSetActive,
                           miGetActive, miGetHier, destroyMi);
     DismissDialogsOfKlass(util, force, ctx, miCloseDialog, miUiClose, miGetGo, miSetActive,
                           miGetActive, miGetHier, destroyMi);
+    if (scanBase && force && uiDlg && uiDlg != util && uiDlg != utilEx) {
+        DismissDialogsOfKlass(uiDlg, true, ctx, miCloseDialog, miUiClose, miGetGo, miSetActive,
+                              miGetActive, miGetHier, destroyMi);
+    }
 
     snprintf(ctx->detail, sizeof(ctx->detail),
-             "agg=%d scan=%d close=%d ok=0 inactive=%d destroy=%d dead=%d alreadyOff=%d "
+             "agg=%d base=%d scan=%d close=%d ok=0 inactive=%d destroy=%d dead=%d alreadyOff=%d "
              "miClose=%d miUiClose=%d hier=%d",
-             aggressive, ctx->scanned, ctx->closed, ctx->inactivated, ctx->destroyed,
+             aggressive, scanBase, ctx->scanned, ctx->closed, ctx->inactivated, ctx->destroyed,
              ctx->skippedDead, ctx->skippedInactive, miCloseDialog ? 1 : 0, miUiClose ? 1 : 0,
              miGetHier ? 1 : 0);
 }
@@ -738,7 +745,60 @@ DWORD WINAPI Worker(LPVOID) {
         }
         x::features::galaxy_token_probe::RequestSample("pre_soft_login");
 
-        for (DWORD waited = 0; waited < kSettleMs && !gStop.load(); waited += 50) Sleep(50);
+        // 断线 Notice 往往立刻弹出；勿等 Connected 才关。
+        // 墙钟截止：旧逻辑只把 Sleep 计入 waited，Call 一慢 settle 就拖成 2.5–3s+（302081）。
+        // Connecting/Connected 早退：游戏已自连时不必耗满 settle。
+        // scanBase=1：断线 Notice 偶发只挂 UIDialog 基类 FindAll（Connected/post 才关得着）。
+        {
+            const DWORD settleDeadline = GetTickCount() + kSettleMs;
+            bool settleEarlyNm = false;
+            while (!gStop.load() && static_cast<int>(settleDeadline - GetTickCount()) > 0) {
+                DismissCtx early{};
+                early.aggressive = 1;
+                early.scanBase = 1;
+                if (x::runtime::managed_main::Call(&DismissKickDialogOnPump, &early,
+                                                   kDismissCallMs) &&
+                    (early.closed > 0 || early.inactivated > 0)) {
+                    LogLine("settle_dismiss %s", early.detail);
+                    KickLogLine("settle_dismiss %s", early.detail);
+                }
+                const int remainBeforeSample = static_cast<int>(settleDeadline - GetTickCount());
+                if (remainBeforeSample <= 0) break;
+                // Sample 超时勿超过剩余墙钟，否则单轮 Call 仍能把 settle 拖过 deadline。
+                const DWORD sampleMs =
+                    remainBeforeSample < 800 ? static_cast<DWORD>(remainBeforeSample) : 800u;
+                SampleCtx sample{};
+                if (x::runtime::managed_main::Call(&SampleNmOnPump, &sample, sampleMs) &&
+                    sample.nmOk &&
+                    (sample.state == kStateConnecting || sample.state == kStateConnected)) {
+                    LogLine("settle early-exit nm=%s(%d) remain≈%dms", StateName(sample.state),
+                            sample.state, static_cast<int>(settleDeadline - GetTickCount()));
+                    KickLogLine("settle early_nm state=%s(%d)", StateName(sample.state),
+                                sample.state);
+                    settleEarlyNm = true;
+                    break;
+                }
+                const DWORD now = GetTickCount();
+                const int remain = static_cast<int>(settleDeadline - now);
+                if (remain <= 0) break;
+                const DWORD gap =
+                    remain < static_cast<int>(kEarlyDismissGapMs) ? static_cast<DWORD>(remain)
+                                                                  : kEarlyDismissGapMs;
+                Sleep(gap);
+            }
+            if (settleEarlyNm) {
+                // 已进入自连：再补一枪关窗，然后直接进 connect-wait。
+                DismissCtx extra{};
+                extra.aggressive = 1;
+                extra.scanBase = 1;
+                if (x::runtime::managed_main::Call(&DismissKickDialogOnPump, &extra,
+                                                   kDismissCallMs) &&
+                    (extra.closed > 0 || extra.inactivated > 0)) {
+                    LogLine("settle_dismiss %s", extra.detail);
+                    KickLogLine("settle_dismiss %s", extra.detail);
+                }
+            }
+        }
         if (gStop.load()) {
             Finish(2, "abort: stop during settle");
             break;
@@ -766,17 +826,26 @@ DWORD WINAPI Worker(LPVOID) {
                         LogLine("NM Connecting during connect-wait try=%d — hold, no re-invoke", t);
                         KickLogLine("connect_wait Connecting try=%d", t);
                     }
+                    // Connecting 时仍可卸残留 Notice（不点 Yes/Ok）；基类一并扫。
+                    {
+                        DismissCtx pre{};
+                        pre.aggressive = 1;
+                        pre.scanBase = 1;
+                        (void)x::runtime::managed_main::Call(&DismissKickDialogOnPump, &pre,
+                                                             kDismissCallMs);
+                    }
                     Sleep(kConnectWaitMs);
                     continue;
                 }
             }
 
-            // 卸挡用非激进：此时可能仍有踢线 YesNo，Close≈取消退出。
-            if ((t % 2) == 0) {
+            // 每轮激进关窗：断线 Notice 单钮「確認」≠踢线 YesNo；Close+SetActive 安全。
+            {
                 DismissCtx pre{};
-                pre.aggressive = 0;
-                if (x::runtime::managed_main::Call(&DismissKickDialogOnPump, &pre, 2000) &&
-                    (pre.scanned > 0 || t == 0)) {
+                pre.aggressive = 1;
+                pre.scanBase = 1;
+                if (x::runtime::managed_main::Call(&DismissKickDialogOnPump, &pre, kDismissCallMs) &&
+                    (pre.scanned > 0 || pre.closed > 0 || t == 0)) {
                     LogLine("pre_dismiss try=%d %s", t, pre.detail);
                 }
             }
@@ -854,6 +923,16 @@ DWORD WINAPI Worker(LPVOID) {
         int lastErr = -1;
         bool sawNm = false;
         for (int i = 0; i < kPollRounds && !gStop.load(); ++i) {
+            {
+                DismissCtx mid{};
+                mid.aggressive = 1;
+                mid.scanBase = 1;
+                if (x::runtime::managed_main::Call(&DismissKickDialogOnPump, &mid, kDismissCallMs) &&
+                    (mid.closed > 0 || mid.inactivated > 0)) {
+                    LogLine("poll_dismiss[%d] %s", i, mid.detail);
+                    KickLogLine("poll_dismiss[%d] %s", i, mid.detail);
+                }
+            }
             Sleep(kPollMs);
             SampleCtx sample{};
             if (!x::runtime::managed_main::Call(&SampleNmOnPump, &sample, 1500)) {
@@ -896,15 +975,20 @@ DWORD WINAPI Worker(LPVOID) {
                 int dismissHits = 0;
                 for (int d = 0; d < kDismissMissRetries && !gStop.load(); ++d) {
                     dismiss = {};
-                    if (!x::runtime::managed_main::Call(&DismissKickDialogOnPump, &dismiss, 3000)) {
+                    // 断线 Notice 在 FindAll 里常被判 alreadyOff；非激进会直接跳过（935fae）。
+                    // 基类 UIDialog 从 settle 起已扫；此处再扫一次收 Connected 后新窗。
+                    dismiss.aggressive = 1;
+                    dismiss.scanBase = 1;
+                    if (!x::runtime::managed_main::Call(&DismissKickDialogOnPump, &dismiss,
+                                                        kDismissCallMs)) {
                         LogLine("dismiss Call fail/timeout try=%d", d);
                         KickLogLine("dismiss_fail reason=pump try=%d", d);
                     } else {
                         LogLine("dismiss try=%d %s", d, dismiss.detail);
                         KickLogLine("dismiss try=%d %s", d, dismiss.detail);
                     }
-                    dismissHits += dismiss.scanned;
-                    if (dismiss.scanned > 0) break;
+                    dismissHits += dismiss.scanned + dismiss.inactivated + dismiss.closed;
+                    if (dismiss.closed > 0 || dismiss.inactivated > 0) break;
                     if (d + 1 < kDismissMissRetries) Sleep(kDismissMissGapMs);
                 }
                 if (gStop.load()) {
@@ -925,8 +1009,19 @@ DWORD WINAPI Worker(LPVOID) {
                     bool playOk = false;
                     bool earlyFail = false;
                     for (int r = 0; r < kReenterRounds && !gStop.load(); ++r) {
-                        Sleep(kReenterPollMs);
-                        if (gStop.load()) break;
+                        // 先关窗再睡：旧顺序 Sleep→采样→关窗，Connected 后首枪白白晚 ~500ms。
+                        {
+                            DismissCtx again{};
+                            again.aggressive = 1;
+                            again.scanBase = 1;
+                            if (x::runtime::managed_main::Call(&DismissKickDialogOnPump, &again,
+                                                               kDismissCallMs) &&
+                                (again.closed > 0 || again.inactivated > 0 || (r % 5) == 0)) {
+                                LogLine("dismiss retry %s", again.detail);
+                                if (again.closed > 0 || again.inactivated > 0)
+                                    KickLogLine("dismiss retry %s", again.detail);
+                            }
+                        }
 
                         if (x::features::auto_enter::IsFailed()) {
                             char fail[220]{};
@@ -949,21 +1044,20 @@ DWORD WINAPI Worker(LPVOID) {
                             for (int d = 0; d < kPostReadyDismissTries && !gStop.load(); ++d) {
                                 DismissCtx post{};
                                 post.aggressive = 1;
+                                post.scanBase = 1;
                                 if (!x::runtime::managed_main::Call(&DismissKickDialogOnPump, &post,
-                                                                    3000)) {
+                                                                    kDismissCallMs)) {
                                     LogLine("post_dismiss Call fail try=%d", d);
                                     emptyStreak = 0;  // 失败不计入「已清干净」
                                 } else {
                                     LogLine("post_dismiss try=%d %s", d, post.detail);
                                     KickLogLine("post_dismiss try=%d %s", d, post.detail);
-                                    const bool empty = post.inactivated == 0 &&
-                                                       post.destroyed == 0 && post.scanned == 0 &&
-                                                       post.closed == 0;
+                                    // alreadyOff 已早退不计入 closed/inactive；无动作即视觉已清。
+                                    const bool empty = post.closed == 0 && post.inactivated == 0 &&
+                                                       post.destroyed == 0;
                                     emptyStreak = empty ? emptyStreak + 1 : 0;
                                 }
-                                // 4427f8：两轮空扫就停，晚到的 Notice 仍挂着。至少半程 + 连续空才停。
-                                if (emptyStreak >= kPostReadyEmptyStop &&
-                                    d + 1 >= kPostReadyDismissTries / 2) {
+                                if (emptyStreak >= kPostReadyEmptyStop) {
                                     LogLine("post_dismiss settled emptyStreak=%d try=%d",
                                             emptyStreak, d);
                                     break;
@@ -985,16 +1079,9 @@ DWORD WINAPI Worker(LPVOID) {
                             break;
                         }
 
-                        // 弹窗偶发再起：进图前每 ~1.5s 激进扫一次
-                        if ((r % 3) == 2) {
-                            DismissCtx again{};
-                            again.aggressive = 1;
-                            (void)x::runtime::managed_main::Call(&DismissKickDialogOnPump, &again,
-                                                                 2000);
-                            LogLine("dismiss retry %s", again.detail);
-                            if (again.scanned > 0) KickLogLine("dismiss retry %s", again.detail);
-                        }
                         if ((r % 10) == 0) LogLine("reenter wait[%d] playReady=0", r);
+                        Sleep(kReenterPollMs);
+                        if (gStop.load()) break;
                     }
                     if (earlyFail) {
                         goto next;
@@ -1094,6 +1181,32 @@ void RequestAttempt(const char* why) {
     gPending.store(true);
     LogLine("request why=%s hold=1 (sync before worker)", gWhy);
     KickLogLine("request why=%s hold=1", gWhy);
+}
+
+void RequestManualDismiss() {
+    LogLine("manual dismiss — CloseDialog+SetActive (no Yes/Ok)");
+    KickLogLine("manual dismiss begin");
+    DismissCtx ctx{};
+    ctx.aggressive = 1;
+    ctx.scanBase = 1;
+    if (!x::runtime::managed_main::Call(&DismissKickDialogOnPump, &ctx, kDismissCallMs)) {
+        LogLine("manual dismiss Call fail/timeout");
+        KickLogLine("manual dismiss fail pump");
+        x::features::notify::PublishNotification(x::features::notify::NotificationEvent{
+            x::features::notify::NotificationKind::Warning, "soft-dismiss-manual", "关断线弹窗失败",
+            "泵调用超时/失败 · 确认已注入且在游戏内", 5000});
+        return;
+    }
+    LogLine("manual dismiss %s", ctx.detail);
+    KickLogLine("manual dismiss %s", ctx.detail);
+    char body[192]{};
+    snprintf(body, sizeof(body), "scan=%d close=%d inactive=%d destroy=%d", ctx.scanned, ctx.closed,
+             ctx.inactivated, ctx.destroyed);
+    const bool hit = ctx.scanned > 0 || ctx.closed > 0 || ctx.inactivated > 0;
+    x::features::notify::PublishNotification(x::features::notify::NotificationEvent{
+        hit ? x::features::notify::NotificationKind::Success
+            : x::features::notify::NotificationKind::Info,
+        "soft-dismiss-manual", hit ? "已尝试关闭断线弹窗" : "未扫到活动弹窗", body, 4500});
 }
 
 }  // namespace x::features::soft_login_probe

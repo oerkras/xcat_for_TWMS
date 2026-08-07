@@ -21,8 +21,8 @@ constexpr uint32_t kPetLootFilterCash = 1u << 5;
 constexpr uint32_t kPetLootFilterDefault =
     kPetLootFilterMeso | kPetLootFilterEquip | kPetLootFilterConsume | kPetLootFilterEtc;
 
-// 默认调度 800ms × 1（可改；打怪同开时勿长期压到 50 / 高 burst）
-constexpr uint32_t kPetLootIntervalDefaultMs = 800u;
+// 默认调度 200ms × 1（对齐官方脚边/宠拾取定时；可改；勿长期压到 50 / 高 burst）
+constexpr uint32_t kPetLootIntervalDefaultMs = 200u;
 constexpr uint32_t kPetLootCharVacIntervalMs = kPetLootIntervalDefaultMs;  // 语义别名
 constexpr uint32_t kPetLootIntervalMinMs = 50u;
 constexpr uint32_t kPetLootIntervalMaxMs = 2000u;

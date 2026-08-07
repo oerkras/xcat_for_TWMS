@@ -96,14 +96,22 @@ bool FloorYAt(const foothold::FootholdLite& fh, float x, float* yOut) {
 
 // 在 x 列上找 y 之下最近的地板。found=false ⇒ 掉落区。
 // 调用方必须已持有 gFhMu，且已确认 gFhSnap 对齐当前图。
+// ★ 坐标是 **+Y 向上**（实测，非注释推断）：日志里 vy>0 的样本其后 y 增大占 84.8%、
+//   vy<0 的占 18.8%（y 与 vy 同向），而下坠恒为负 vy（BIN 2d6176 用户实机印证）。
+//   ⇒ 脚下的地板是 **fy ≤ y**，最近的一块是其中**最大**的 fy。
+//
+//   本函数原先写成 `fy < y ⇒ continue` + 取最小，那是 +Y 向下的写法，与本工程实际
+//   相反。它当时唯一的调用方 MaybeLogBounds 传 `r.top-1`（全图之下），在反语义下
+//   恰好答对了「这列有没有地板」，所以掉落区检测一直是对的、错的只是契约——
+//   一旦有第二个调用方按字面语义用它就会翻车。现已摆正，调用方同步改为从图顶往下问。
 bool FloorBelowLocked(float x, float y, float* floorYOut) {
     bool found = false;
     float best = 0.f;
     for (int i = 0; i < gFhSnap->footholdN; ++i) {
         float fy = 0.f;
         if (!FloorYAt(gFhSnap->footholds[i], x, &fy)) continue;
-        if (fy < y) continue;  // +Y 向下：地板要在脚下
-        if (!found || fy < best) {
+        if (fy > y) continue;  // +Y 向上：地板要在脚下 ⇒ 不高于当前高度
+        if (!found || fy > best) {
             best = fy;
             found = true;
         }
@@ -132,8 +140,9 @@ void MaybeLogBounds(int mapId, const Rect& r) {
     float firstVoid = 0.f, lastVoid = 0.f;
     for (float x = lo; x <= hi; x += step) {
         ++cols;
-        // 从矩形顶端往下看：整列都没有地板 ⇒ 空洞列
-        if (FloorBelowLocked(x, static_cast<float>(r.top) - 1.f, nullptr)) continue;
+        // 从矩形顶端往下看：整列都没有地板 ⇒ 空洞列。
+        // +Y 向上 ⇒ 图顶是 bottom（数值最大），从它上方 1px 起往下问。
+        if (FloorBelowLocked(x, static_cast<float>(r.bottom) + 1.f, nullptr)) continue;
         if (!voids) firstVoid = x;
         lastVoid = x;
         ++voids;

@@ -66,6 +66,7 @@ add_library(xcat_probe SHARED
   ../features/multi_skill/multi_skill.cpp
   ../features/simple_combat/simple_combat.cpp
   ../features/simple_combat/heli_rotor.cpp
+  ../features/simple_combat/reach_cal.cpp
   ../features/fly/fly.cpp
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
   ../features/auction_town_bypass/auction_town_bypass.cpp

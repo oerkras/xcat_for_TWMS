@@ -24,4 +24,8 @@ unsigned ResultCode();
 
 void RequestAttempt(const char* why);
 
+// 调试 / 手动：安全关断线弹窗（CloseDialog + SetActive，绝不点確認/Yes）。
+// 不依赖软重连是否武装；须在已注入且泵可用时调用。
+void RequestManualDismiss();
+
 }  // namespace x::features::soft_login_probe

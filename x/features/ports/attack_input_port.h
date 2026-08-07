@@ -33,6 +33,20 @@ bool GetSmartInterval();
 bool FaceToward(float dx);
 bool ApplyFaceNow();
 
+// 上一次 ApplyFaceNow 的落地情况（只读探针，供 combat.log 逐刀取证）。
+//   maOut   引擎 VecCtrl.moveAction；bit0=1 面朝左、0 面朝右。-1=本次未读到。
+//   whyOut  0=已下发 SetInput（ma 为同帧实读）
+//           1=|dx|<死区跳过  2=sticky 跳过（同号且 |dx| 小）
+//           3=无主线程泵    4=job 超时    5=job 失败
+// why≥1 时 ma 是**上一次成功下发**时读到的旧值，不能当本刀的引擎朝向用。
+void FaceDebug(int* maOut, int* whyOut);
+
+// 这一刀是否需要**反向**转身（而非同向重申）。
+// 反向会真下发 SetInput 触发转身动作，把同一拍的攻击顶掉——实证见 simple_combat.cpp
+// 出刀点的「转身与出刀必须分拍」注释。同向重申无害，故只认换向。
+// 调用方应在为真时「本拍只转身、下一拍再挥」。
+bool FaceNeedsFlip(float dx);
+
 // 拟人走路：默认灌 Keyboard 设备状态（失焦可走）；出刀/关 F5 前须 StopWalk。inputX 仅 -1/0/1。
 // XCAT_WALK_KBD=0 回落 Win32 SendInput（需前台）；XCAT_WALK_KP=1 = PackBit 试验（证伪）。
 bool HoldWalk(int inputX);

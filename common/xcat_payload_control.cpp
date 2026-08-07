@@ -75,6 +75,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.fly = 0;
     out.flyMode = kFlyModeDefault;
     out.flyHopCdMs = kFlyHopCdDefaultMs;
+    out.flySpeedPct = kFlySpeedPctDefault;
     out.autoEnter = 1;  // 默认开（与面板图例一致：1 雪吉拉 / 槽1）
     out.charSlot = 1;
     out.worldId = kDefaultWorldId;
@@ -103,8 +104,6 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     out.simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
     out.simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
-    out.simpleCombatCrossLayerFillGateMs = kCombatCrossLayerFillGateDefaultMs;
-    out.simpleCombatFillBudgetPx = kCombatFillBudgetPxDefault;
     out.simpleCombatTeleportMaxHop = kCombatTeleportMaxHopDefault;
     out.simpleCombatLiveStep = 0;
     out.simpleCombatOneshotMaxHp = kCombatOneshotMaxHpDefault;
@@ -137,12 +136,13 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.impactHopTestSeq = 0;
     out.impactHopDeltaX = kImpactHopDeltaXDefault;
     out.impactHopForce = 0;
+    out.softLoginDismissSeq = 0;
     out.autoRelogin = 0;
     out.autoReloginStopCombat = 1;
     out.autoReloginReconnect = 1;
     out.autoReloginGmEscalate = 1;
     out.hideOtherPlayers = 0;
-    out.frameLock = 0;
+    out.frameLock = 1;  // 默认开
     out.frameLockFps = kFrameLockFpsDefault;
     out.dropAlertBypass = 0;  // 默认关
     out.auctionTownBypass = 0;
@@ -185,6 +185,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     out.fly = ReadFlyArmedSession(binDir) ? 1u : 0u;
     if (IniGetU32(ini, "core", "flyMode", u)) out.flyMode = ClampFlyMode(u);
     if (IniGetU32(ini, "core", "flyHopCdMs", u)) out.flyHopCdMs = ClampFlyHopCdMs(u);
+    if (IniGetU32(ini, "core", "flySpeedPct", u))
+        out.flySpeedPct = ClampHeliSpeedPct(u);
+    else
+        out.flySpeedPct = kFlySpeedPctDefault;
     if (IniGetBool(ini, "core", "autoEnter", b)) out.autoEnter = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "hpPotion", b)) out.hpPotion = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mpPotion", b)) out.mpPotion = b ? 1u : 0u;
@@ -256,6 +260,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "movepathFlushProbe", b)) out.movepathFlushProbe = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "galaxyTokenProbe", b)) out.galaxyTokenProbe = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "softLoginProbe", b)) out.softLoginProbe = b ? 1u : 0u;
+    if (IniGetU32(ini, "core", "softLoginDismissSeq", u)) out.softLoginDismissSeq = u;
     if (IniGetU32(ini, "core", "autoLieAlarmTestSeq", u)) out.autoLieAlarmTestSeq = u;
     if (IniGetU32(ini, "core", "autoLieMouseSmokeSeq", u)) out.autoLieMouseSmokeSeq = u;
     if (IniGetU32(ini, "core", "manualRejoinSeq", u)) out.manualRejoinSeq = u;
@@ -340,10 +345,6 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     }
     if (IniGetU32(ini, "core", "simpleCombatTeleportCooldownMs", u))
         out.simpleCombatTeleportCooldownMs = ClampCombatTeleportCooldownMs(u);
-    if (IniGetU32(ini, "core", "simpleCombatCrossLayerFillGateMs", u))
-        out.simpleCombatCrossLayerFillGateMs = ClampCombatCrossLayerFillGateMs(u);
-    if (IniGetU32(ini, "core", "simpleCombatFillBudgetPx", u))
-        out.simpleCombatFillBudgetPx = ClampCombatFillBudgetPx(u);
     if (IniGetU32(ini, "core", "simpleCombatTeleportMaxHop", u)) {
         // 旧默认 400 / 520 → 550；显式调过其它值保留。
         if (u == kCombatTeleportMaxHopLegacyDefault || u == kCombatTeleportMaxHopPrevDefault)
@@ -405,6 +406,9 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.flyMode = ClampFlyMode(normalized.flyMode);
     normalized.flyHopCdMs = ClampFlyHopCdMs(
         normalized.flyHopCdMs ? normalized.flyHopCdMs : kFlyHopCdDefaultMs);
+    // 0 = 旧档没有这个字段：回默认，而不是被 Clamp 抬到 Min（那会静默改掉用户没设过的值）。
+    normalized.flySpeedPct =
+        ClampHeliSpeedPct(normalized.flySpeedPct ? normalized.flySpeedPct : kFlySpeedPctDefault);
     normalized.autoEnter = normalized.autoEnter ? 1u : 0u;
     normalized.hpPotion = normalized.hpPotion ? 1u : 0u;
     normalized.mpPotion = normalized.mpPotion ? 1u : 0u;
@@ -490,10 +494,6 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                                          ? normalized.simpleCombatTeleportCooldownMs
                                          : kCombatTeleportCooldownDefaultMs);
     // 0 合法（关门控）；勿把 0 当成缺省。
-    normalized.simpleCombatCrossLayerFillGateMs =
-        ClampCombatCrossLayerFillGateMs(normalized.simpleCombatCrossLayerFillGateMs);
-    normalized.simpleCombatFillBudgetPx =
-        ClampCombatFillBudgetPx(normalized.simpleCombatFillBudgetPx);
     // 旧默认 400/520：抬到 550（=上限）。显式调过其它值保留。
     {
         uint32_t hop = normalized.simpleCombatTeleportMaxHop;
@@ -527,7 +527,13 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     if (normalized.hpThresholdPct > 99) normalized.hpThresholdPct = 99;
     if (normalized.mpThresholdPct < 1) normalized.mpThresholdPct = 1;
     if (normalized.mpThresholdPct > 99) normalized.mpThresholdPct = 99;
-    if (normalized.writeTickMs == 0) normalized.writeTickMs = NowTickMs();
+    // 同毫秒连续写会让 payload 因 writeTickMs 未变而跳过 Apply；强制单调递增。
+    // （与 WriteAutoSupply / WriteSellbag 同款；换频/impact 等 bump seq 依赖此字段变更。）
+    static uint64_t s_lastTick = 0;
+    uint64_t tick = normalized.writeTickMs ? normalized.writeTickMs : NowTickMs();
+    if (tick <= s_lastTick) tick = s_lastTick + 1;
+    s_lastTick = tick;
+    normalized.writeTickMs = tick;
     normalized.worldName[sizeof(normalized.worldName) - 1] = 0;
     normalized.impactHopDeltaX = ClampImpactHopDeltaX(normalized.impactHopDeltaX);
     normalized.impactHopForce = normalized.impactHopForce ? 1u : 0u;
@@ -549,6 +555,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "fly", false);
         IniSetU32(ini, "core", "flyMode", normalized.flyMode);
         IniSetU32(ini, "core", "flyHopCdMs", normalized.flyHopCdMs);
+        IniSetU32(ini, "core", "flySpeedPct", normalized.flySpeedPct);
         IniSetBool(ini, "core", "autoEnter", normalized.autoEnter != 0);
         IniSetBool(ini, "core", "hpPotion", normalized.hpPotion != 0);
         IniSetBool(ini, "core", "mpPotion", normalized.mpPotion != 0);
@@ -585,6 +592,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "movepathFlushProbe", normalized.movepathFlushProbe != 0);
         IniSetBool(ini, "core", "galaxyTokenProbe", normalized.galaxyTokenProbe != 0);
         IniSetBool(ini, "core", "softLoginProbe", normalized.softLoginProbe != 0);
+        IniSetU32(ini, "core", "softLoginDismissSeq", normalized.softLoginDismissSeq);
         IniSetU32(ini, "core", "autoLieAlarmTestSeq", normalized.autoLieAlarmTestSeq);
         IniSetU32(ini, "core", "autoLieMouseSmokeSeq", normalized.autoLieMouseSmokeSeq);
         IniSetU32(ini, "core", "manualRejoinSeq", normalized.manualRejoinSeq);
@@ -649,10 +657,9 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                   normalized.simpleCombatTeleportStandOff);
         IniSetU32(ini, "core", "simpleCombatTeleportCooldownMs",
                   normalized.simpleCombatTeleportCooldownMs);
-        IniSetU32(ini, "core", "simpleCombatCrossLayerFillGateMs",
-                  normalized.simpleCombatCrossLayerFillGateMs);
-        IniSetU32(ini, "core", "simpleCombatFillBudgetPx",
-                  normalized.simpleCombatFillBudgetPx);
+        // fill+Doing 已废：清掉历史跨层门控 / 位移预算 key。
+        IniEraseKey(ini, "core", "simpleCombatCrossLayerFillGateMs");
+        IniEraseKey(ini, "core", "simpleCombatFillBudgetPx");
         IniSetU32(ini, "core", "simpleCombatTeleportMaxHop",
                   normalized.simpleCombatTeleportMaxHop);
         IniSetU32(ini, "core", "simpleCombatOneshotMaxHp",

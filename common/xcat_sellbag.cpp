@@ -200,7 +200,11 @@ bool WriteSellbag(const char* binDir, const SellbagConfig& cfg) {
         normalized.keepRuleCount = static_cast<uint32_t>(kSellbagMaxKeepRules);
     normalized.manualMask &= kSellbagBagAll;
 
-    const uint64_t tick = normalized.writeTickMs ? normalized.writeTickMs : GetTickCount64();
+    // 同毫秒连续写会让 payload 因 writeTickMs 未变而忽略配置；强制单调递增。
+    static uint64_t s_lastTick = 0;
+    uint64_t tick = normalized.writeTickMs ? normalized.writeTickMs : GetTickCount64();
+    if (tick <= s_lastTick) tick = s_lastTick + 1;
+    s_lastTick = tick;
     normalized.writeTickMs = tick;
 
     return WriteSellbagKeepRulesIni(binDir, normalized, tick);

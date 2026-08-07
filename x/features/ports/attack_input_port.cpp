@@ -206,6 +206,9 @@ std::atomic<uint32_t> gFireFail{0};   // 仅 OnFuncKey Down 硬失败
 std::atomic<uint32_t> gFireSoft{0};   // 间隔/pending 软拒绝（加速短间隔下同 tick 空点）
 std::atomic<float> gFaceDx{0.f};
 std::atomic<int> gLastFaceSign{0};  // -1 左 / +1 右 / 0 未知
+// 逐刀取证用：上次 ApplyFaceNow 读到的引擎 moveAction 与本次的落地/跳过原因。
+std::atomic<int> gFaceLastMa{-1};
+std::atomic<int> gFaceLastWhy{-1};
 std::atomic<int> gWalkHeld{0};      // 拟人走路锁存：-1/0/+1
 DWORD gRateWindowStart = 0;
 
@@ -1503,14 +1506,21 @@ bool ApplyFaceNow() {
         (void)StopWalk();
     }
     const float dx = gFaceDx.load(std::memory_order_relaxed);
-    if (!std::isfinite(dx) || std::fabs(dx) < kFaceDeadzone) return true;
+    if (!std::isfinite(dx) || std::fabs(dx) < kFaceDeadzone) {
+        gFaceLastWhy.store(1, std::memory_order_relaxed);
+        return true;
+    }
 
     const int want = (dx < 0.f) ? -1 : 1;
     const int last = gLastFaceSign.load(std::memory_order_relaxed);
     // 怪贴身穿过：dx 在 ±20 间抖会每刀翻面；同号且未走出 sticky 则跳过。
-    if (last == want && std::fabs(dx) < kFaceStickyPx) return true;
+    if (last == want && std::fabs(dx) < kFaceStickyPx) {
+        gFaceLastWhy.store(2, std::memory_order_relaxed);
+        return true;
+    }
 
     if (!runtime::main_thread::Ensure()) {
+        gFaceLastWhy.store(3, std::memory_order_relaxed);
         x::runtime::LogWThrottled(51, 3000, "Attack", "face SetInput pump missing");
         return false;
     }
@@ -1519,15 +1529,19 @@ bool ApplyFaceNow() {
     job.inputX = want;
     if (!runtime::main_thread::InvokeAndWait(&FaceSetInputJobFn, &job, kFaceJobWaitMs,
                                             runtime::main_thread::JobPrio::High)) {
+        gFaceLastWhy.store(4, std::memory_order_relaxed);
         x::runtime::LogWThrottled(51, 3000, "Attack", "face SetInput timeout dx=%.0f", dx);
         return false;
     }
     if (!job.ok) {
+        gFaceLastWhy.store(5, std::memory_order_relaxed);
         x::runtime::LogWThrottled(51, 3000, "Attack", "face SetInput fail=%s dx=%.0f",
                                   job.fail[0] ? job.fail : "?", dx);
         return false;
     }
     gLastFaceSign.store(want, std::memory_order_relaxed);
+    gFaceLastMa.store(job.maAfter, std::memory_order_relaxed);
+    gFaceLastWhy.store(0, std::memory_order_relaxed);
 
     static uint32_t sFace = 0;
     if (sFace < 32) {
@@ -1536,6 +1550,20 @@ bool ApplyFaceNow() {
                 job.maAfter, job.maAfter >= 0 ? (job.maAfter & 1) : -1);
     }
     return true;
+}
+
+void FaceDebug(int* maOut, int* whyOut) {
+    if (maOut) *maOut = gFaceLastMa.load(std::memory_order_relaxed);
+    if (whyOut) *whyOut = gFaceLastWhy.load(std::memory_order_relaxed);
+}
+
+bool FaceNeedsFlip(float dx) {
+    if (!std::isfinite(dx) || std::fabs(dx) < kFaceDeadzone) return false;
+    const int last = gLastFaceSign.load(std::memory_order_relaxed);
+    if (last == 0) return false;  // 还没成功下发过，谈不上「换」向
+    // 注意 sticky（本文件 ApplyFaceNow）只在 last == want 时才跳过，换向一律真下发，
+    // 所以这里**不能**再叠 kFaceStickyPx 判断，否则会漏掉小 dx 的换向。
+    return last != ((dx < 0.f) ? -1 : 1);
 }
 
 DWORD EffectiveAnimBusyMs() {

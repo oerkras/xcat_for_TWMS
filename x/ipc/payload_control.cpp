@@ -145,6 +145,15 @@ void ApplyManualRejoinSeq(const xcat::PayloadControl& c) {
     }
 }
 
+void ApplySoftLoginDismissSeq(const xcat::PayloadControl& c) {
+    if (c.softLoginDismissSeq == 0) return;
+    const uint32_t last = ReadLieSeqStamp("last_soft_login_dismiss_seq.txt");
+    if (c.softLoginDismissSeq <= last) return;
+    WriteLieSeqStamp("last_soft_login_dismiss_seq.txt", c.softLoginDismissSeq);
+    x::runtime::LogI("Control", "softLoginDismissSeq=%u → manual dismiss", c.softLoginDismissSeq);
+    x::features::soft_login_probe::RequestManualDismiss();
+}
+
 void ApplyAutoLieAlarmTestSeq(const xcat::PayloadControl& c) {
     if (c.autoLieAlarmTestSeq == 0) return;
     const uint32_t last = ReadLieSeqStamp("last_alarm_seq.txt");
@@ -361,6 +370,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::attack::SetImmediateUp(c.attackAccel != 0);
     x::features::fly::SetMode(c.flyMode);
     x::features::fly::SetHopCdMs(c.flyHopCdMs);
+    x::features::fly::SetSpeedPct(c.flySpeedPct);
     x::features::fly::SetArmed(c.fly != 0);
     x::features::autopot::SetHpEnabled(c.hpPotion != 0);
     x::features::autopot::SetMpEnabled(c.mpPotion != 0);
@@ -393,8 +403,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::simple_combat::SetTeleportParams(
         c.simpleCombatTeleportMinDx, c.simpleCombatTeleportStandOff, c.simpleCombatTeleportCooldownMs,
         c.simpleCombatTeleportMaxHop ? c.simpleCombatTeleportMaxHop
-                                    : xcat::kCombatTeleportMaxHopDefault,
-        c.simpleCombatCrossLayerFillGateMs, c.simpleCombatFillBudgetPx);
+                                    : xcat::kCombatTeleportMaxHopDefault);
     x::features::simple_combat::SetOneshotParams(c.simpleCombatOneshotMaxHp,
                                                  c.simpleCombatOneshotMinBumps,
                                                  c.simpleCombatOneshotMinFires,
@@ -435,6 +444,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     ApplyImpactNockBackTestSeq(c);
     ApplyImpactSetNextTestSeq(c);
     ApplyImpactHopTestSeq(c);
+    ApplySoftLoginDismissSeq(c);
     // 回城/中止改由 [auto_supply] manualSeq+manualKind 驱动，不再读 core.autoSell*Seq。
     gLastAppliedTick.store(c.writeTickMs);
     gHaveApplied.store(true);

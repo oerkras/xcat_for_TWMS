@@ -185,6 +185,12 @@ constexpr DWORD kProbePumpTickMaxAgeMs = 2000;
 // 0.1.66+ 已无 job timeout；3s 过长（BIN 09a8a2：Connected→PickWorld≈3.2s 体感拖沓）→ 收至 800ms。
 constexpr int kSessionConnected = 3;
 constexpr DWORD kAfterConnectedSettleMs = 800;
+// 软重连：登录页/分区表多半还在内存，800ms 偏肉（302081：Connected→PickWorld≈1s 里大半在等 settle）。
+constexpr DWORD kAfterConnectedSettleSoftMs = 200;
+constexpr DWORD kAfterWorldClickSoftMs = 150;
+constexpr DWORD kAfterSelectChannelSoftMs = 120;
+constexpr DWORD kCharReadySettleSoftMs = 80;
+constexpr DWORD kWaitWorldProbeMinSoftMs = 200;
 constexpr DWORD kPumpFailBackoffLoadMs = 4000;  // WaitWorldList 超时用更长退避
 constexpr DWORD kWaitWorldProbeWaitMs = 400;    // 加载窗短等，勿 1.5s 占坑
 
@@ -275,6 +281,10 @@ DWORD gPhaseSince = 0;
 void* gPickedWorld = nullptr;
 int gPickedWorldIndex = -1;
 int gPickedChannelId = -1;
+// 软重连快轨：RequestRestart(soft_login) 置位；Done/Failed/关自动进 清。
+std::atomic<bool> gSoftFastTrack{false};
+// 上次成功进图的频道；跨 soft Restart 保留，优先粘回（满员/成人频再回落 PickOpen）。
+int gStickyChannelId = -1;
 DWORD gLastLogMs = 0;
 DWORD gWorldClickedAt = 0;
 DWORD gChannelSelectedAt = 0;
@@ -891,6 +901,20 @@ void ProbeOnMain(void*) {
     gSnap = snap;
 }
 
+bool SoftFastTrack() { return gSoftFastTrack.load(std::memory_order_acquire); }
+
+DWORD AfterConnectedSettleMs() {
+    return SoftFastTrack() ? kAfterConnectedSettleSoftMs : kAfterConnectedSettleMs;
+}
+DWORD AfterWorldClickMs() { return SoftFastTrack() ? kAfterWorldClickSoftMs : kAfterWorldClickMs; }
+DWORD AfterSelectChannelMs() {
+    return SoftFastTrack() ? kAfterSelectChannelSoftMs : kAfterSelectChannelMs;
+}
+DWORD CharReadySettleMs() { return SoftFastTrack() ? kCharReadySettleSoftMs : kCharReadySettleMs; }
+DWORD WaitWorldProbeMinMs() {
+    return SoftFastTrack() ? kWaitWorldProbeMinSoftMs : kWaitWorldProbeMinMs;
+}
+
 bool LoginNetReadyForWorldProbe() {
     const int st = kick_sniff::LastSessionState();
     if (st != kSessionConnected) {
@@ -899,7 +923,7 @@ bool LoginNetReadyForWorldProbe() {
     }
     const DWORD now = GetTickCount();
     if (!gConnectedSinceMs) gConnectedSinceMs = now;
-    return (now - gConnectedSinceMs) >= kAfterConnectedSettleMs;
+    return (now - gConnectedSinceMs) >= AfterConnectedSettleMs();
 }
 
 bool RefreshSnap(bool idleCache = false) {
@@ -1078,6 +1102,7 @@ bool EnqueueJobAndWait(JobKind kind, void* ui, int a, int b = 0) {
 void SetPhase(Phase p) {
     gPhase = p;
     gPhaseSince = GetTickCount();
+    if (p == Phase::Failed) gSoftFastTrack.store(false, std::memory_order_release);
     // 注意：Done/Failed 时不要 SetLoginFreeze(false)。
     // 选角刚结束、尚未 play-ready 时解冻，会放开 titlebar/ports 的 lobby FindAll；
     // 解冻交给 titlebar 读到 vitals / invuln bind / drop_pool（进图后）。
@@ -1093,8 +1118,10 @@ bool TryMarkEnterDone(const char* why) {
     if (playReady) {
         Log("enter Done (%s): play ready charUi=%d confirm=%d", why ? why : "?",
             gSnap.charUi ? 1 : 0, gCharConfirmAttempts);
+        if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
+        gSoftFastTrack.store(false, std::memory_order_release);
         SetPhase(Phase::Done);
-        Log("Done — latched until autoEnter off");
+        Log("Done — latched until autoEnter off stickyCh=%d", gStickyChannelId);
         return true;
     }
     const bool leftCharOk = !gSnap.charUi &&
@@ -1102,8 +1129,10 @@ bool TryMarkEnterDone(const char* why) {
                              gPhase == Phase::ConfirmChar);
     if (leftCharOk) {
         Log("enter Done (%s): left char UI confirm=%d", why ? why : "?", gCharConfirmAttempts);
+        if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
+        gSoftFastTrack.store(false, std::memory_order_release);
         SetPhase(Phase::Done);
-        Log("Done — latched until autoEnter off");
+        Log("Done — latched until autoEnter off stickyCh=%d", gStickyChannelId);
         return true;
     }
     return false;
@@ -1258,6 +1287,17 @@ int PickOpenChannelId(void* worldItem) {
         Log("PickOpen ? none of %d channels", n);
         return -1;
     }
+    // 仅 softFast：优先粘回上次进图/换频后的频道（仍空闲且非成人）；冷启仍 PickOpen。
+    const int sticky = gStickyChannelId;
+    if (SoftFastTrack() && sticky > 0) {
+        for (int i = 0; i < candN; ++i) {
+            if (candId[i] == sticky) {
+                Log("PickSticky id=%d users=%d (softFast)", sticky, candUsers[i]);
+                return sticky;
+            }
+        }
+        Log("PickSticky miss id=%d softFast=1 — fall back PickOpen (pool=%d)", sticky, candN);
+    }
     const uint32_t seed = ChannelPickSeed(candN);
     const int pick = static_cast<int>(seed % static_cast<uint32_t>(candN));
     Log("PickOpen ? id=%d users=%d pool=%d/%d (seed=0x%08X)", candId[pick], candUsers[pick],
@@ -1303,6 +1343,7 @@ void Tick() {
     if (!gDesired.load()) {
         if (gPhase != Phase::Idle) {
             Log("desired off ? Idle");
+            gSoftFastTrack.store(false, std::memory_order_release);
             SetPhase(Phase::Idle);
             ResetRuntime();
         }
@@ -1352,7 +1393,7 @@ void Tick() {
     const DWORD nowTick = GetTickCount();
     const bool waitingLoginUi =
         (gPhase == Phase::WaitWorldList && (!gSnap.sceneLogin || !gSnap.worldUi));
-    const DWORD probeMin = waitingLoginUi ? kWaitWorldProbeMinMs : kActiveProbeMinMs;
+    const DWORD probeMin = waitingLoginUi ? WaitWorldProbeMinMs() : kActiveProbeMinMs;
     if (waitingLoginUi && gLastActiveProbeMs && (nowTick - gLastActiveProbeMs) < probeMin) {
         return;
     }
@@ -1446,7 +1487,7 @@ void Tick() {
                          ReadI32(sel, gOffWorldId));
             return;
         }
-        if (gWorldClickedAt && GetTickCount() - gWorldClickedAt < kAfterWorldClickMs) {
+        if (gWorldClickedAt && GetTickCount() - gWorldClickedAt < AfterWorldClickMs()) {
             return;
         }
         const int chN = ListSize(ReadPtr(sel, gOffWorldChannels));
@@ -1502,7 +1543,7 @@ void Tick() {
             }
             return;
         }
-        if (gChannelSelectedAt && GetTickCount() - gChannelSelectedAt < kAfterSelectChannelMs) {
+        if (gChannelSelectedAt && GetTickCount() - gChannelSelectedAt < AfterSelectChannelMs()) {
             return;
         }
         const int worldIdLog =
@@ -1512,6 +1553,7 @@ void Tick() {
             SetPhase(Phase::Failed);
             return;
         }
+        if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
         gEnterAttemptAt = GetTickCount();
         gEnterAttempts = 1;
         gLeftChannelAt = 0;
@@ -1545,9 +1587,9 @@ void Tick() {
             if (!gCharReadyAt) {
                 gCharReadyAt = GetTickCount();
                 Log("char UI ready avatars=%d phase=%d — settle %ums before Select", count,
-                    gSnap.slLoginPhase, (unsigned)kCharReadySettleMs);
+                    gSnap.slLoginPhase, (unsigned)CharReadySettleMs());
             }
-            if (GetTickCount() - gCharReadyAt < kCharReadySettleMs) return;
+            if (GetTickCount() - gCharReadyAt < CharReadySettleMs()) return;
             Log("char UI settled avatars=%d phase=%d (ignore lingering channel ptr)", count,
                 gSnap.slLoginPhase);
             SetPhase(Phase::PickChar);
@@ -1756,12 +1798,20 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
         if (ports::world::IsPlayReady()) {
             x::runtime::managed_main::SetLoginFreeze(false);
         }
+        gSoftFastTrack.store(false, std::memory_order_release);
         SetPhase(Phase::Idle);
         ResetRuntime();
     }
 }
 
 bool IsDesired() { return gDesired.load(); }
+
+void NoteStickyChannel(int channelId1Based, const char* why) {
+    if (channelId1Based < 1 || channelId1Based > 64) return;
+    if (gStickyChannelId == channelId1Based) return;
+    Log("stickyCh %d→%d (%s)", gStickyChannelId, channelId1Based, why ? why : "?");
+    gStickyChannelId = channelId1Based;
+}
 
 void RequestRestart(const char* why) {
     if (!gDesired.load()) {
@@ -1771,10 +1821,13 @@ void RequestRestart(const char* why) {
     EnsureCs();
     // 软重进仍在大厅：保持 freeze，避免 titlebar/ports 抢跑 FindAll。
     x::runtime::managed_main::SetLoginFreeze(true);
+    const bool soft = why && std::strcmp(why, "soft_login") == 0;
+    gSoftFastTrack.store(soft, std::memory_order_release);
     SetPhase(Phase::Idle);
-    ResetRuntime();
-    Log("RequestRestart → Idle (%s) worldId=%d slot=%u", why ? why : "?", gWorldId.load(),
-        gCharSlot.load());
+    ResetRuntime();  // 不碰 gStickyChannelId / gSoftFastTrack
+    Log("RequestRestart → Idle (%s) worldId=%d slot=%u softFast=%d stickyCh=%d settle=%ums",
+        why ? why : "?", gWorldId.load(), gCharSlot.load(), soft ? 1 : 0, gStickyChannelId,
+        (unsigned)AfterConnectedSettleMs());
 }
 
 bool IsFailed() { return gPhase == Phase::Failed; }

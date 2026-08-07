@@ -109,6 +109,7 @@ Chrome 136+ 对「日常 User Data」静默忽略 `--remote-debugging-port`，�
 |---|---|
 | 见本轮新建 NGM | 仅 `about:blank` 停泊（`parkLoginTabBlank`），**不**立刻 `Browser.close` |
 | 收齐经典版 cmdline 票 / OTT 兑票成功 | `returnIfTicketOk` → blank + `CloseRemoteBrowser` |
+| 落到 `accounts/error` | **最多 1 次** `oauth-error-clean-restart`：关调试浏览器 → 短等 → `EnsureBrowser` + **新** Galaxy OTT 再走一轮（对齐二次手动启动成功；**非**同标签 Navigate soft-retry）。识别靠 `HttpLoginResult::accountsOauthError`，不靠文案。完整 `/login` 不走此路径 |
 | `CloseRemoteBrowser` | `Browser.close` → **轮询**调试口至多 ~800ms（口死即停，非盲等）→ 再按调试口精确杀残留 |
 
 过早强杀易打断 Cookie 落盘，且残留旧 NGM 时关页会导致 TokenWait 空等。
@@ -273,7 +274,7 @@ GA exports → native settle ≈15s + UnityWndClass
 
 | 路径 | 职责 |
 |---|---|
-| `launcher/gamapass_cdp_login.*` | CDP 点选状态机；见 NGM blank；收票后关浏览器；`Get/SetGamaPassAccountSlot`、NickSlot |
+| `launcher/gamapass_cdp_login.*` | CDP 点选状态机；见 NGM blank；收票后关浏览器；`accounts/error` 干净重开 1 次；`Get/SetGamaPassAccountSlot`、NickSlot |
 | `launcher/chromium_cdp.*` | 调试口 / Runtime.evaluate；`PrepareCdpSafeUserData`；`RequestCdpSessionResync`；`CloseRemoteBrowser` 轮询落盘 |
 | `launcher/msc_webview_login.*` | 一键会话编排 → 注入 |
 | `launcher/msc_launch.*` | NGM deep-link / 接管验票 |
@@ -296,6 +297,7 @@ GA exports → native settle ≈15s + UnityWndClass
 |---|---|
 | 停在 select-account | `msc_launcher.log` 是否 `clicked-acc` 后仍不离页；应用单次坐标点击包 |
 | 官网「登录阶段超时」 | GP 点击后是否长时间停在 Galaxy；见 NGM 后是否 blank；干净重拉日志是否含 `kill launch-chain` 的 NGM 计数；残留旧 NGM 时 TokenWait 会空等 |
+| 偶发首发 `accounts/error`、重开就好 | OAuth 半残态；现已自动 `oauth-error-clean-restart` 1 次。若日志无该标记仍失败：日常窗勾记住 / 关多余 Galaxy·OAuth 标签后再试 |
 | 重拉后掉到完整 `/login` | 是否只杀了 Classic；是否过早 Browser.close；标准 Chrome 是否应用「复用/强制重同步」；日常窗是否仍勾选记住 |
 | 绑到空 Chrome | Edge-only 用户未卸 Google Chrome |
 | 注入失败 OpenProcess | 管理员 / SeDebugPrivilege 日志 |

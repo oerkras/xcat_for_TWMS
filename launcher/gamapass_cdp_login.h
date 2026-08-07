@@ -3,7 +3,10 @@
 // Gama Pass：在用户默认 Chromium 浏览器里 CDP 点选换票
 // ★ 红线：绝不清除浏览器 Cookie / Local Storage / refreshToken；
 //   绝不调用 /v1/refresh/token；绝不 Navigate 强制 prompt=login 冲刷 SSO。
-// 失败策略：accounts/error、完整登录页、选昵称 ack 失败 → 立刻停、不重开登录页；
+// 失败策略：
+//   accounts/error → 置 accountsOauthError，外层关调试浏览器后干净重开 1 次（新 Galaxy OTT；
+//     非同标签 soft-retry；识别靠标志位而非 Fail 文案）；
+//   完整登录页、选昵称 ack 失败 → 立刻停、不重开登录页；
 //   Main 上 init/过期 OTT 等官网拉起：可宽限后「最后一次」stale-ott-retry 重开 Galaxy
 //  （见实现；非无限 soft-retry）。
 

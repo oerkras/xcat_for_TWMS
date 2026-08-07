@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 61u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 63u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -30,7 +30,7 @@ constexpr uint32_t kImpactImpulseVyMax = 5000u;
 constexpr int32_t kImpactHopDeltaXDefault = 120;
 constexpr int32_t kImpactHopDeltaXMin = -400;
 constexpr int32_t kImpactHopDeltaXMax = 400;
-constexpr uint32_t kFrameLockFpsDefault = 120u;
+constexpr uint32_t kFrameLockFpsDefault = 1000u;
 constexpr uint32_t kFrameLockFpsMin = 15u;
 // 软顶：仅防离谱输入；120/240/360/480/640/720/860/1000 只是 UI 预设，不是业务上限。
 constexpr uint32_t kFrameLockFpsMax = 10000u;
@@ -41,10 +41,32 @@ constexpr uint32_t kFlyModeDefault = kFlyModeImpactNockBack;
 // 兼容旧名（语义已变：不再是点击/跟随）
 constexpr uint32_t kFlyModeClick = kFlyModeImpactNockBack;
 constexpr uint32_t kFlyModeFollow = kFlyModeImpactSetNext;
-// 每一飞自冷却（两条 Impact 路线共用）；默认 400；下限 1 仅供压测跟手
-constexpr uint32_t kFlyHopCdDefaultMs = 120u;
-// 过低 CD 会 STW+Impact 双排队打满 Unity 主线程（卡顿/MainPump timeout）。
-constexpr uint32_t kFlyHopCdMinMs = 40u;
+// 目标点刷新间隔（历史名 HopCd，语义见 fly.h）。
+//
+// 默认从 120 降到 40：120ms 下目标本身每秒才更新 8 次，光标扫得快时目标点自己就是陈的。
+// 40 是用户实测手感的落点（BIN a0ab58 手动调到 40 后明显改善）。
+//
+// ★ **下限 5 只是不挡路，不代表真能跑到 5ms**——真实地板由系统时钟分辨率决定，实测 15.625ms。
+//
+// 证据（BIN 5c3950 + a0ab58，104 个 `Fly heli … since=` 样本）：取值只有
+// 0 / 15·16 / 31·32 / 47 / 62·63 / 78·79，**全是 15.625 的整数倍，没有一个中间值**。
+// 刷新闸 `AimReady()` 比的是 `GetTickCount()` 差值，它每 15.625ms 才跳一格；worker 的
+// `Sleep(8)` 同理实际睡 ~15.6ms。所以 5 / 10 / 15 / 16 走的是完全相同的代码路径。
+//
+// 保留 5 这个下限是为了**不写死一个会过期的假设**：若哪天进程时钟被提到 1ms
+// （Unity 或别的进程调 timeBeginPeriod），这个旋钮就自动开始咬合，不必再改代码。
+// 想真正跑到 5ms 只能自己 timeBeginPeriod(1)，那是**进程级副作用**（影响游戏自身计时与功耗），
+// 不该由本功能替用户决定 —— 要做也得是显式开关。
+//
+// 主泵代价：BIN 5c3950 在 16ms 下跑满一轮，`aim pump timeout` / `ScreenToWorld fail` /
+// 拥堵均为 **0**，说明当前档位离主泵瓶颈还远，卡的确实是时钟不是负载。
+//
+// 另注：加了速度前馈之后（见 heli::Setpoint::leadVx），刷新间隔对跟手的影响已降一个量级——
+// 两次刷新之间角色会按估出的光标速度继续走，不再是钉住旧点干等。
+// 默认 120→40→**16**：16 正好压在下面那条 15.625ms 的时钟地板上，也就是「这套时钟能给到的
+// 最密刷新」。再往下不会更跟手（同一条路径），往上则白白让出跟手度，所以 16 就是最优默认。
+constexpr uint32_t kFlyHopCdDefaultMs = 16u;
+constexpr uint32_t kFlyHopCdMinMs = 5u;
 constexpr uint32_t kFlyHopCdMaxMs = 2000u;
 // hangup hour mask: bit0=00:00 .. bit23=23:00 (local time).
 constexpr uint32_t kHangupScheduleMaskAll = 0x00FFFFFFu;
@@ -83,12 +105,29 @@ constexpr uint32_t kSimpleCombatTickMaxMs = 100u;
 // 打怪开时 mob_scan 刷新周期；越小越快看见新怪/尸体，CPU 更高。闲置仍用 worker 内固定 360ms。
 // 默认 20：对齐 Sleep 地板与抢怪体验；旧默认 50 读盘时迁到 20（显式其它值保留）。
 // 空中贴怪的飞行速度倍率，百分比。100 = 基准 1.0X（Cruise 620 / Rtb 660 / Station 480 / Hold 360）。
-// 只缩放「意图」上限，不动作动器上限 kMaxCmdV*(1700)，也不动 kMaxFallVy 等安全闸——
-// 那几道是独立防坠机制，跟着倍率走会让低倍率反而更容易掉出图。
-// 上限 300：Cruise 620×3=1860 已越过作动器 1700，再高只是被截断，给了也没用。
-constexpr uint32_t kHeliSpeedPctDefault = 100u;
+// 只缩放旋翼各档的「意图」上限；位置包线、撞墙预刹、深度缴械这些**绝对**阈值不跟随。
+//
+// ⚠️ 落速闸 kMaxFallVy **必须**跟随（已改成函数 FallGateVy）。它不是绝对阈值而是
+//    「想快降 vs 失控」的判别式，钉死会在高倍率下反号成极限环（BIN 2d6176 抖动事故）。
+//
+// 上限 1000（Cruise 6200 px/s）。这个数由作动器上限 kMaxCmdV=8000 反解：
+// 可救性要求 cap ≤ 8000−230−300−60 = 7410，而 10X 下最快的 Rtb 是 660×10 = 6600 < 7410。
+// heli_rotor 里有同源的 kSpeedScaleMax 与 static_assert，两处不会再走散。
+//
+// 曾短暂设成 175，是因为当时还要求「满速反向一拍完成」(cap ≤ C/2)；那条是性能优化不是
+// 安全需求，已由 heli_rotor 的可达集钳位取代。
+//
+// ⚠️ 两条实机约束，调高前先想清楚：
+//   · 作动器实测到 cmd=3231/v=3100（5X，零饱和），8000 是从那儿起的 2.1 倍外推、未验。
+//   · 撞墙预刹按 room/0.2s 限速 ⇒ **高倍率在小图上拿不满**：离墙 800px 时最快只有
+//     4000 px/s，与倍率无关。10X 的收益随地图尺寸递减。
+//   · 服务端对 6200 px/s（约合法步行速 50 倍）的容忍度从未测过。加档必须配合看日志。
+constexpr uint32_t kHeliSpeedPctDefault = 300u;
 constexpr uint32_t kHeliSpeedPctMin = 25u;
-constexpr uint32_t kHeliSpeedPctMax = 300u;
+constexpr uint32_t kHeliSpeedPctMax = 1000u;
+// F6 手动飞默认倍率（与 F5 滑翔同为 300%）：换旋翼前开环等效约 1600 px/s ≈ 2.6X，
+// 直接给 1.0X（Cruise 620）会比旧版慢一大截；3X 开箱手感更接近旧手动飞。
+constexpr uint32_t kFlySpeedPctDefault = 300u;
 constexpr uint32_t kMobScanIntervalDefaultMs = 20u;
 constexpr uint32_t kMobScanIntervalLegacyDefaultMs = 50u;
 constexpr uint32_t kMobScanIntervalMinMs = 1u;
@@ -128,15 +167,6 @@ constexpr uint32_t kCombatTeleportStandOffMax = 200u;
 constexpr uint32_t kCombatTeleportCooldownDefaultMs = 200u;
 constexpr uint32_t kCombatTeleportCooldownMinMs = 5u;
 constexpr uint32_t kCombatTeleportCooldownMaxMs = 8000u;
-// 跨层 fill 后额外互斥（与贴怪节流独立）；0=关。首页面板可调。
-constexpr uint32_t kCombatCrossLayerFillGateDefaultMs = 280u;
-constexpr uint32_t kCombatCrossLayerFillGateMinMs = 0u;
-constexpr uint32_t kCombatCrossLayerFillGateMaxMs = 2000u;
-// 10 秒滚动窗口内 fill 位移预算（px）；0=关。踢线主因经证实是 land_miss（写入位置被引擎
-// 打回票），位移限速属粗放兜底且实测卡掉四成时间（a7dc3e），故默认关，留旋钮备用。
-constexpr uint32_t kCombatFillBudgetPxDefault = 0u;
-constexpr uint32_t kCombatFillBudgetPxMin = 0u;
-constexpr uint32_t kCombatFillBudgetPxMax = 40000u;
 // 单次贴怪 hop 上限（px）；更远分段贴近。调试 TAB 可调。
 // 默认 550（=上限）：盖住常见中台→顶台垂直落差。
 constexpr uint32_t kCombatTeleportMaxHopDefault = 550u;
@@ -200,7 +230,11 @@ struct PayloadControl {
     // v24: 0=Impact NockBack 1=Impact SetImpactNext（瞬移飞已禁用；旧点击/跟随语义废）
     uint32_t flyMode = kFlyModeDefault;
     // v25: 每一飞间隔 ms（两条 Impact 路线共用自冷却）
+    // 换旋翼后语义变为「目标点刷新间隔」：冲量节奏由 A 层自控，这里只管多久重算一次 STW。
     uint32_t flyHopCdMs = kFlyHopCdDefaultMs;
+    // F6 手动飞的速度倍率（%）。与 simpleCombatFlySpeedPct **分开存**：旧 F6 开环等效约
+    // 1600 px/s，而 Cruise 基准只有 620，手动飞与自动打怪共用一个旋钮必有一方别扭。
+    uint32_t flySpeedPct = kFlySpeedPctDefault;
     uint32_t autoEnter = 1;   // 默认开：分区→最少人频道→选角（图例：雪吉拉 / 槽1）
     uint32_t charSlot = 1;    // 1-based 角色槽
     int32_t worldId = kDefaultWorldId;  // 默认雪吉拉（worldId=1）
@@ -237,10 +271,6 @@ struct PayloadControl {
     uint32_t simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     uint32_t simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
     uint32_t simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
-    // v46: 跨层 fill 后额外门控（ms）；0=关；切段中间跳不武装
-    uint32_t simpleCombatCrossLayerFillGateMs = kCombatCrossLayerFillGateDefaultMs;
-    // v47: 10s 滚动窗口 fill 位移预算（px）；0=关
-    uint32_t simpleCombatFillBudgetPx = kCombatFillBudgetPxDefault;
     // v45: 单次贴怪 hop 上限（px）；调试 TAB
     uint32_t simpleCombatTeleportMaxHop = kCombatTeleportMaxHopDefault;
     // v26: 锁怪后同层微瞬移贴位（近似枫星 LiveStep）；默认关；依赖贴怪瞬移
@@ -292,10 +322,12 @@ struct PayloadControl {
     // 调试采证：inline hook MovePath.Flush，dump C→S UserMove 的 MoveElem。默认关，
     // 仅测试时经「调试」TAB 开启（本仓禁止常驻 inline hook）。见 movepath_flush_probe。
     uint32_t movepathFlushProbe = 0;
-    // v61: 软重连试连（首页单勾选；同时武装 Galaxy token 只读采证）。
+    // v61: 软重连试连（首页单勾选；同时武装 Galaxy token 只读采证）。默认开。
     // 亦可用 soft_login_probe.on / SOFT_LOGIN_PROBE=1；旧 galaxy_token_probe.on 仍可单独采证。
-    uint32_t galaxyTokenProbe = 0;  // 与 softLoginProbe 同步写入；保留字段兼容旧 ini
-    uint32_t softLoginProbe = 0;
+    uint32_t galaxyTokenProbe = 1;  // 与 softLoginProbe 同步写入；保留字段兼容旧 ini
+    uint32_t softLoginProbe = 1;
+    // v62: 调试 TAB「关闭断线弹窗」— bump 后载荷走 CloseDialog+SetActive（不点確認）
+    uint32_t softLoginDismissSeq = 0;
     // v20: 遇人策略 UX（UserPool + channel_hop，非 Reload）
     uint32_t autoRelogin = 0;             // 检测同图玩家
     uint32_t autoReloginStopCombat = 1;   // 先停手
@@ -305,7 +337,7 @@ struct PayloadControl {
     // v46: 隐藏同图其他玩家（UserPool 远程 → AvatarRoot.SetActive；默认关）
     uint32_t hideOtherPlayers = 0;
     // v47: 引擎帧率锁（vSync=0 + Application.targetFrameRate；非显示器硬件刷新率）
-    uint32_t frameLock = 0;
+    uint32_t frameLock = 1;  // 默认开，目标见 kFrameLockFpsDefault
     uint32_t frameLockFps = kFrameLockFpsDefault;
     // v48: 普攻必出终极一击（Final Attack prop→100；默认关）
     uint32_t finalAttackForce = 0;
@@ -438,16 +470,6 @@ inline uint32_t ClampCombatTeleportCooldownMs(uint32_t v) {
     if (v > kCombatTeleportCooldownMaxMs) return kCombatTeleportCooldownMaxMs;
     return v;
 }
-inline uint32_t ClampCombatCrossLayerFillGateMs(uint32_t v) {
-    if (v > kCombatCrossLayerFillGateMaxMs) return kCombatCrossLayerFillGateMaxMs;
-    return v;  // 0 = 关闭门控
-}
-
-inline uint32_t ClampCombatFillBudgetPx(uint32_t v) {
-    if (v > kCombatFillBudgetPxMax) return kCombatFillBudgetPxMax;
-    return v;  // 0 = 关闭预算
-}
-
 inline uint32_t ClampCombatTeleportMaxHop(uint32_t v) {
     if (v < kCombatTeleportMaxHopMin) return kCombatTeleportMaxHopMin;
     if (v > kCombatTeleportMaxHopMax) return kCombatTeleportMaxHopMax;

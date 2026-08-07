@@ -4,11 +4,11 @@
 #endif
 #include "travel_port.h"
 
-#include "foothold_path.h"
+#include "fly_fh_ban.h"
 #include "teleport_port.h"
 #include "world_port.h"
-#include "../fly/fly.h"
 #include "../invuln/invuln.h"
+#include "../simple_combat/heli_rotor.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_mapdata.h"
@@ -327,9 +327,16 @@ std::atomic<int> gFireMode{static_cast<int>(FireMode::DirectEnter)};
 // 已站门判定：无 rect 时用门坐标近距；有 rect 用 Strict 触发框。
 constexpr float kStandYTol = 12.f;
 constexpr float kStickNearR = 72.f;
-// Impact 远处贴门：分段冲量直到进触发区。
+// Impact 贴门：对齐 F5 旋翼滑翔（heli Cruise/Station → ImpactSetVelocity）。
+// 速度倍率共用 ImGui「滑翔速度」→ heli::SpeedScale（simpleCombatFlySpeedPct）。
+// 到位门对齐 HeliStationOk：进触发框后先 Station 收速，再 CheckMove（禁止掠过即火）。
 constexpr DWORD kImpactStickMaxMs = 10000;
-constexpr DWORD kImpactStickPollMs = 50;
+constexpr DWORD kImpactStickPollMs = 16;  // 对齐 combat tick；heli 内部 ~90ms 发射闸
+constexpr float kHeliCruiseRadius = 140.f;  // 与 simple_combat PublishHeliSetpoint 同阈值
+constexpr float kPortalStationDx = 40.f;    // = simple_combat::kHeliStationDx
+constexpr float kPortalStationDy = 15.f;    // = simple_combat::kHeliStationDy
+constexpr float kPortalSettleSpeed = 180.f; // 进门前合速上限（px/s）；过高易 205
+constexpr DWORD kPortalSettleMaxMs = 1200;  // 进框后最多收这么久，超时仍进门防卡死
 // FindMovePortal 触发框松弛（pre-fire / PointInPortalRect）
 constexpr float kPortalRectSlop = 12.f;
 std::atomic<bool> gCaptureOn{false};
@@ -1126,8 +1133,21 @@ bool InPortalTrigger(const PortalInfo& portal) {
     return AlreadyStoodAtPortal(portal);
 }
 
+// Impact 贴门：对齐 F5 旋翼「滑翔到站位点再干活」。
+//   Cruise→Station → 进触发框后继续 Station 收到站位/低速 → 再 CheckMove。
+// 速度倍率共用 ImGui「滑翔速度」；成功进门 ban 留到换图/Idle（旋翼在开火前已收速）。
 bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::string& outResult,
                          float* outSx, float* outSy) {
+    namespace heli = x::features::simple_combat::heli;
+
+    auto portalStationOk = [](float px, float py, float ax, float ay) {
+        return std::fabs(ax - px) <= kPortalStationDx && std::fabs(ay - py) <= kPortalStationDy;
+    };
+    auto portalSpeedOk = [](float vx, float vy) {
+        return std::sqrt(vx * vx + vy * vy) <= kPortalSettleSpeed;
+    };
+
+    // 目标 = 传送门位置（触发区内），对齐打怪站位点；不要求钉台/FH。
     float aimX = portal.x;
     float aimY = portal.y;
     if (portal.rectValid) {
@@ -1145,144 +1165,158 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         outResult = "NO_LOCALUSER";
         return false;
     }
-    (void)luX;
-    (void)luY;
-
-    float standX = aimX, standY = aimY;
-    uint32_t fh = 0;
-    if (!ports::foothold_path::SnapStandForPortal(aimX, aimY, portal.rectL, portal.rectT,
-                                                 portal.rectR, portal.rectB, portal.rectValid,
-                                                 &standX, &standY, &fh) ||
-        fh == 0) {
-        outResult = "FH0_FORBID";
-        x::runtime::LogW("Travel",
-                         "impact stick forbid fh=0 portal=(%.0f,%.0f) aim=(%.0f,%.0f) "
-                         "snap=(%.0f,%.0f)",
-                         portal.x, portal.y, aimX, aimY, standX, standY);
-        return false;
-    }
-    if (portal.rectValid && !PointInPortalRectStrict(portal, standX, standY)) {
-        const float beforeX = standX, beforeY = standY;
-        float targetX = portal.x;
-        if (targetX < portal.rectL) targetX = portal.rectL;
-        if (targetX > portal.rectR) targetX = portal.rectR;
-        float sx2 = targetX, sy2 = portal.y;
-        uint32_t fh2 = 0;
-        if (ports::foothold_path::SnapStandForPortal(targetX, portal.y, portal.rectL, portal.rectT,
-                                                     portal.rectR, portal.rectB, true, &sx2, &sy2,
-                                                     &fh2) &&
-            fh2 != 0) {
-            standX = sx2;
-            standY = sy2;
-            fh = fh2;
-        } else {
-            standX = targetX;
-            standY = portal.y;
-        }
-        if (!PointInPortalRectStrict(portal, standX, standY)) {
-            standX = targetX;
-            ClampIntoPortalRect(portal, standX, standY);
-            float sx3 = standX, sy3 = standY;
-            if (fh != 0 &&
-                ports::foothold_path::SnapOnFh(fh, standX, &sx3, &sy3,
-                                              /*avoidWalkJunction=*/false)) {
-                standX = sx3;
-                standY = sy3;
-                if (!PointInPortalRectStrict(portal, standX, standY)) {
-                    standX = targetX;
-                    ClampIntoPortalRect(portal, standX, standY);
-                }
-            }
-        }
-        x::runtime::LogW("Travel",
-                         "impact snap clamp name=%s before=(%.0f,%.0f) after=(%.0f,%.0f) "
-                         "rect=(%.0f,%.0f)-(%.0f,%.0f) in=%d",
-                         portal.name.c_str(), beforeX, beforeY, standX, standY, portal.rectL,
-                         portal.rectT, portal.rectR, portal.rectB,
-                         PointInPortalRectStrict(portal, standX, standY) ? 1 : 0);
-    }
-    if (outSx) *outSx = standX;
-    if (outSy) *outSy = standY;
 
     x::runtime::LogI("Travel",
-                     "impact stick aim name=%s portal=(%.0f,%.0f) rect=%d "
-                     "(%.0f,%.0f)-(%.0f,%.0f) stand=(%.0f,%.0f) fh=%u",
-                     portal.name.c_str(), portal.x, portal.y, portal.rectValid ? 1 : 0,
-                     portal.rectL, portal.rectT, portal.rectR, portal.rectB, standX, standY,
-                     (unsigned)fh);
+                     "heli stick aim name=%s portal=(%.0f,%.0f) aim=(%.0f,%.0f) ap=(%.0f,%.0f) "
+                     "rect=%d speed=%.2fX",
+                     portal.name.c_str(), portal.x, portal.y, aimX, aimY, luX, luY,
+                     portal.rectValid ? 1 : 0, heli::SpeedScale(heli::Owner::Travel));
 
     if (!x::features::invuln::IsEnabled()) {
         outResult = "INVULN_OFF";
-        x::runtime::LogW("Travel", "impact stick refuse invuln_off name=%s", portal.name.c_str());
+        x::runtime::LogW("Travel", "heli stick refuse invuln_off name=%s", portal.name.c_str());
         return false;
     }
 
-    const auto route = x::features::fly::GetMode() == 1u
-                           ? ports::teleport::ImpactRoute::SetImpactNext
-                           : ports::teleport::ImpactRoute::NockBack;
-    // 仅本循环本地 opts：近距 soft-brake，不改 fly/combat 默认。
-    ports::teleport::ImpactTowardOpts opts{};
-    opts.quietLog = true;
-    opts.adaptive = true;
-    opts.leadSec = 0.f;
-    opts.maxSegPx = 320.f;
-    opts.minSegPx = 8.f;
-    opts.maxSpeed = 1600.f;
-    opts.speedScale = 4.f;
+    struct TravelFhBanGuard {
+        bool armed = false;
+        bool leaveArmed = false;
+        void Arm() {
+            if (armed) return;
+            ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, true);
+            armed = true;
+            x::runtime::LogI("Travel", "heli stick fhBan=1 mask=0x%x",
+                             ports::fly_fh_ban::ActiveMask());
+        }
+        void LeaveArmedForEnter() { leaveArmed = true; }
+        ~TravelFhBanGuard() {
+            // 开火前已 Station 收速；退出时停旋翼。ban 成功路径留给换图/Idle。
+            heli::Disarm(heli::Owner::Travel);
+            heli::Release(heli::Owner::Travel);
+            if (!armed || leaveArmed) return;
+            ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+            x::runtime::LogI("Travel", "heli stick fhBan off mask=0x%x",
+                             ports::fly_fh_ban::ActiveMask());
+        }
+    } fhBan;
+    fhBan.Arm();
+    // 无主才接管：F6 手动飞抢占时赶路自动让位，它释放后下面循环每拍还会再试。
+    (void)heli::TryAcquire(heli::Owner::Travel);
 
     const DWORD t0 = GetTickCount();
+    DWORD settleSince = 0;  // 首次进触发框时刻；0=尚未进框
+    int tickN = 0;
+    int fireN = 0;
     int failStreak = 0;
-    int hopN = 0;
     for (;;) {
+        const DWORD now = GetTickCount();
         if (!world::IsInMapScene() || !world::IsPlayReady()) {
             outResult = "MAP_TRANSITION";
-            x::runtime::LogI("Travel", "impact stick map transition name=%s hops=%d",
-                             portal.name.c_str(), hopN);
+            fhBan.LeaveArmedForEnter();
+            x::runtime::LogI("Travel", "heli stick map transition name=%s ticks=%d fire=%d",
+                             portal.name.c_str(), tickN, fireN);
             return true;
         }
-        // 掠过即火：进触发区当拍开火，本拍不再 toward（避免残速把人推出框后再二次判定）。
-        if (InPortalTrigger(portal)) {
-            float ax = 0.f, ay = 0.f;
-            (void)ReadLocalAp(ax, ay);
-            x::runtime::LogI("Travel",
-                             "impact stick glide-fire name=%s ap=(%.0f,%.0f) stand=(%.0f,%.0f) "
-                             "hops=%d mode=%s",
-                             portal.name.c_str(), ax, ay, standX, standY, hopN,
-                             FireModeName(enterMode));
-            return TryFireEnterOnMain(enterMode, outResult);
-        }
-        if (GetTickCount() - t0 >= kImpactStickMaxMs) {
+        if (now - t0 >= kImpactStickMaxMs) {
             outResult = "NOT_STOOD";
             float ax = 0.f, ay = 0.f;
             const bool got = ReadLocalAp(ax, ay);
             x::runtime::LogW("Travel",
-                             "impact stick timeout name=%s ap=(%.0f,%.0f) stand=(%.0f,%.0f) "
-                             "hops=%d failStreak=%d",
-                             portal.name.c_str(), got ? ax : 0.f, got ? ay : 0.f, standX, standY,
-                             hopN, failStreak);
+                             "heli stick timeout name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                             "ticks=%d fire=%d failStreak=%d",
+                             portal.name.c_str(), got ? ax : 0.f, got ? ay : 0.f, aimX, aimY,
+                             tickN, fireN, failStreak);
             return false;
         }
 
-        if (!ports::teleport::ImpactImpulseToward(standX, standY, route, opts)) {
+        float px = 0.f, py = 0.f;
+        if (!ReadLocalAp(px, py)) {
             ++failStreak;
-            if (failStreak >= 8) {
+            if (failStreak >= 30) {
+                outResult = "IMPACT_STICK_FAIL";
+                x::runtime::LogW("Travel", "heli stick no_ap name=%s streak=%d",
+                                 portal.name.c_str(), failStreak);
+                return false;
+            }
+            Sleep(kImpactStickPollMs);
+            continue;
+        }
+
+        const bool inTrig = InPortalTrigger(portal);
+        if (inTrig && settleSince == 0) {
+            settleSince = now;
+            x::runtime::LogI("Travel",
+                             "heli stick settle begin name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                             "ticks=%d",
+                             portal.name.c_str(), px, py, aimX, aimY, tickN);
+        }
+
+        const float dx = aimX - px;
+        const float dy = aimY - py;
+        const float dist = std::sqrt(dx * dx + dy * dy);
+        heli::Setpoint sp{};
+        sp.x = aimX;
+        sp.y = aimY;
+        // 进框后强制 Station（对齐打怪近距收站）；框外 Cruise/Station 按距切换。
+        if (inTrig || dist <= kHeliCruiseRadius) {
+            sp.mode = heli::Mode::Station;
+        } else {
+            sp.mode = heli::Mode::Cruise;
+        }
+        heli::SetSetpoint(heli::Owner::Travel, sp);
+
+        heli::Telemetry tm{};
+        const bool fired = heli::Tick(heli::Owner::Travel, now, &tm);
+        ++tickN;
+        if (fired) {
+            ++fireN;
+            failStreak = 0;
+        } else if (tm.guard && tm.guard[0] &&
+                   std::strcmp(tm.guard, "cadence") != 0 &&
+                   std::strcmp(tm.guard, "deadband") != 0) {
+            ++failStreak;
+            if (failStreak >= 60) {
                 outResult = "IMPACT_STICK_FAIL";
                 x::runtime::LogW("Travel",
-                                 "impact stick fail name=%s streak=%d hops=%d route=%u",
-                                 portal.name.c_str(), failStreak, hopN,
-                                 static_cast<unsigned>(route));
+                                 "heli stick fail name=%s guard=%s streak=%d ticks=%d mode=%s",
+                                 portal.name.c_str(), tm.guard ? tm.guard : "?", failStreak,
+                                 tickN, heli::ModeName(sp.mode));
                 return false;
             }
         } else {
             failStreak = 0;
-            ++hopN;
         }
+
+        // 对齐 heli_in_band：进框 + 站位 OK +（低速或死区）才进门；旋翼仍在转。
+        if (inTrig) {
+            const bool stOk = portalStationOk(px, py, aimX, aimY);
+            const bool spdOk =
+                portalSpeedOk(tm.vx, tm.vy) ||
+                (tm.guard && std::strcmp(tm.guard, "deadband") == 0);
+            const bool settleTimeout =
+                settleSince != 0 && (now - settleSince) >= kPortalSettleMaxMs;
+            if ((stOk && spdOk) || settleTimeout) {
+                x::runtime::LogI(
+                    "Travel",
+                    "heli stick enter-armed name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                    "v=(%.0f,%.0f) st=%d spd=%d timeout=%d ticks=%d fire=%d mode=%s fhBan=1",
+                    portal.name.c_str(), px, py, aimX, aimY, tm.vx, tm.vy, stOk ? 1 : 0,
+                    spdOk ? 1 : 0, settleTimeout ? 1 : 0, tickN, fireN,
+                    FireModeName(enterMode));
+                const bool ok = TryFireEnterOnMain(enterMode, outResult);
+                if (ok || outResult == "MAP_TRANSITION" || outResult.rfind("FIRED_", 0) == 0) {
+                    fhBan.LeaveArmedForEnter();
+                }
+                return ok;
+            }
+        }
+
         Sleep(kImpactStickPollMs);
     }
 }
 
 // 已在门内：返回 OK，由 FirePortal 补一枪（无惯性问题）。
-// 远处：冲量掠过触发区当拍开火，outResult 已是 FIRED_* / MAP_*。
+// 远处：旋翼滑翔 → 进框 Station 收速到位 → 再开火（对齐 Impact heli_in_band）。
 bool StickThenEnterReady(const PortalInfo& portal, FireMode enterMode, std::string& outResult) {
     if (AlreadyStoodAtPortal(portal) || InPortalTrigger(portal)) {
         outResult = "OK";

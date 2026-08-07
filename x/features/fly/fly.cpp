@@ -1,4 +1,13 @@
-// Classic TWMS — mouse fly：Impact（Attr=2）+ 武装期 fh-ban。Coast / ApplyImpact 旁路已拆除。
+// Classic TWMS — mouse fly：鼠标世界点 → 旋翼 setpoint（A 层闭环）+ 武装期 fh-ban。
+//
+// 2026-08-07 从开环 `ImpactImpulseToward` 换成 F5 那套旋翼。旧实现每 120ms 朝目标发一发
+// 冲量（speedScale=4 / maxSpeed=1600），**从不读自己的速度、也没有任何重力配平**——靠
+// 超调硬顶重力，所以鼠标不动时要每 200ms「重钉」一次落点才不往下沉（kHoverRepinMs）。
+// 换成旋翼后白拿四样：重力配平（真悬停，重钉整段删掉）、速度闭环、撞墙预刹 + 位置包线
+// （旧实现能把人直接飞出图，那正是越界断线的来源）、落速闸与深度缴械。
+//
+// 坐标系可直接对接：`ImpactImpulseToward` 内部就是拿 `worldX - apX` 算差值，而旋翼的
+// setpoint / QueryFlightState 用的是同一组 Ap —— ScreenToWorldPoint 的输出无需任何换算。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -8,6 +17,7 @@
 #include "../ports/fly_fh_ban.h"
 #include "../ports/action_gate.h"
 #include "../ports/world_port.h"
+#include "../simple_combat/heli_rotor.h"
 #include "../invuln/invuln.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/bin_dir.h"
@@ -30,6 +40,8 @@
 namespace x::features::fly {
 namespace {
 
+namespace heli = x::features::simple_combat::heli;
+
 // 屏→世界：回归更新前 `ScreenToWorldPoint(Vector3)` 三参重载。
 // 2026-08-03 误把旧 0x4DDEF70 映到四参版 0x4DDD340，且 eye 误用 Mono=0
 //（Unity 枚举：Left=0 Right=1 Mono=2）。三参包装在 IDA 内硬编码 eye=2。
@@ -42,12 +54,17 @@ constexpr uint32_t kRvaTfGetPos = 0x4E71C90;          // remounted 2026-08-06 Tr
 
 // 1ms 空转会放大 F6 跟飞对主泵的压力；8ms 足够跟手且显著减负。
 constexpr DWORD kWorkerSleepMs = 8;
-constexpr DWORD kDefaultHopCdMs = 120;
+// 目标点刷新间隔（原「hop 冷却」，语义已变）。旧实现里它是发冲量的节奏；现在冲量节奏
+// 由旋翼内部自控（~11Hz），这里只管「多久重算一次鼠标对应的世界点」。
+// 默认值与下限的取值依据（含实测的 15.625ms 时钟地板）见 xcat_payload_control.h，
+// 此处只做别名，别再单独存一份——之前两份各写 40，改一边就会悄悄分叉。
+constexpr DWORD kDefaultAimCdMs = xcat::kFlyHopCdDefaultMs;
 // 跟随飞：用客户区像素判「鼠标是否动了」。世界坐标死区会在相机跟随后把同一屏点
-// STW 漂进 12 内 → 误判静止并 hover 钉旧点，表现为抖动、不跟鼠标。
+// STW 漂进 12 内 → 误判静止并钉旧点，表现为抖动、不跟鼠标。
 constexpr float kScreenStillPx = 3.f;
-// 屏光标静止时偶尔重钉上次落点（滞空），勿每 CD 狂跳。
-constexpr DWORD kHoverRepinMs = 200;
+// 远于此距离用 Cruise（最快档）。近了**且光标停手**才转 Station 收速；光标还在动就一直
+// 留在 Cruise（理由见 DriveRotor 里的选档注释）。F5 打怪没有这条，它的 Station 就是要收速。
+constexpr float kCruiseRadiusPx = 140.f;
 
 struct Vec3 {
     float x = 0.f, y = 0.f, z = 0.f;
@@ -81,26 +98,61 @@ std::atomic<HANDLE> gWorkerThread{nullptr};
 std::atomic<bool> gArmed{false};
 std::atomic<bool> gExternalPause{false};
 std::atomic<unsigned> gMode{0};  // 0=NockBack 1=SetImpactNext
-std::atomic<unsigned> gHopCdMs{kDefaultHopCdMs};
+std::atomic<unsigned> gAimCdMs{kDefaultAimCdMs};
 
 bool gF6WasDown = false;
 bool gLmbWasDown = false;
 float gClickScale = 1.f;
 
-DWORD gLastHopMs = 0;
-float gLastHopWx = 0.f;
-float gLastHopWy = 0.f;
-bool gHaveLastHop = false;
+// 当前悬停目标（世界坐标，与 Ap 同一空间）。旋翼会一直朝它收敛，所以鼠标不动＝真悬停。
+DWORD gLastAimMs = 0;
+float gTgtX = 0.f;
+float gTgtY = 0.f;
+bool gHaveTgt = false;
 DWORD gLastFollowLogMs = 0;
 long gLastClientX = 0;
 long gLastClientY = 0;
 bool gHaveLastClient = false;
 bool gWasPlayReady = false;
 int gLastMapId = -1;
+// 因旋翼判死而临时卸掉禁挂台的闩，仅用于去抖，真值以 fly_fh_ban 为准。
+bool gBailBanReleased = false;
+// 断供探针状态（见 DriveRotor）。发射间隔超过阈值就记一行，正常节拍是 ~90ms。
+constexpr DWORD kStarveWarnMs = 250;
+DWORD gLastFiredMs = 0;
+float gStarveY = 0.f;
+char gStarveGuard[16] = {};
+
+// 光标世界速度估计，喂给旋翼前馈（见 heli::Setpoint::leadVx）。
+// EMA 系数按「两三次刷新内跟上、又滤掉单次抖动」取；上限只挡离谱毛刺，真正的限速在旋翼。
+constexpr float kLeadEma = 0.5f;
+constexpr float kLeadMax = 2400.f;
+// 超过这么久没有新的跟随刷新，就认定光标停了、前馈归零，否则角色会顺着旧速度一直飘。
+// 取值须大于刷新间隔上限（aim cd 最大 400ms），否则连续扫动中途会被误判成停手。
+constexpr DWORD kLeadHoldMs = 500;
+// 低于此速视为「光标基本停着」，用于选档（见 DriveRotor）。
+constexpr float kLeadIdle = 200.f;
+float gLeadVx = 0.f;
+float gLeadVy = 0.f;
+float gPrevTgtX = 0.f;
+float gPrevTgtY = 0.f;
+DWORD gPrevTgtMs = 0;
+
+float ClampF(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+void ClearLead() {
+    gLeadVx = 0.f;
+    gLeadVy = 0.f;
+    gPrevTgtMs = 0;
+}
 
 void ClearFollowTrack() {
-    gHaveLastHop = false;
+    gHaveTgt = false;
     gHaveLastClient = false;
+    // 断供探针也要清：跨过一段「没武装」的空窗算出来的 gap 只是关机时长，不是断供。
+    gLastFiredMs = 0;
+    gStarveGuard[0] = '\0';
+    ClearLead();
 }
 
 // 换图 / 重新进 PlayReady：丢掉旧图落点与屏点门控，立刻允许首跳。
@@ -111,7 +163,11 @@ void NoteMapLandGate(DWORD now) {
     const bool mapChanged = play && mapId > 0 && mapId != gLastMapId && gLastMapId > 0;
     if (rose || mapChanged) {
         ClearFollowTrack();
-        gLastHopMs = 0;
+        gLastAimMs = 0;
+        // 换图后旋翼的发射时钟/缴械态要清，否则上一张图的 bailout 一直挡着新图起飞。
+        // ★ 必须先确认自己是持有者：Reset 是全局复位（连所有权一起清），F6 没武装时
+        //   在这里无条件复位会把正在打怪的 F5 一起掀翻。
+        if (heli::CurrentOwner() == heli::Owner::Fly) heli::Reset();
         x::runtime::LogI("Fly", "map land gate open why=%s map=%d", rose ? "play_ready" : "map_id",
                          mapId);
     }
@@ -125,14 +181,11 @@ void NoteMapLandGate(DWORD now) {
     (void)now;
 }
 
+// ⚠️ 换旋翼后这个 mode 对**飞行**已不再起作用：冲量路由由 A 层内部的 ImpactSetVelocity
+// 决定，不走 NockBack / SetImpactNext 分支。字段与 IPC 保留只为不破面板与存档兼容，
+// 日志里照打便于对照历史 BIN。要真删得连 payload 字段一起清，属另一件事。
 const char* ModeName(unsigned mode) {
     return mode == 1u ? "impact_setnext" : "impact_nockback";
-}
-
-ports::teleport::ImpactRoute CurrentRoute() {
-    return gMode.load(std::memory_order_acquire) == 1u
-               ? ports::teleport::ImpactRoute::SetImpactNext
-               : ports::teleport::ImpactRoute::NockBack;
 }
 
 template <typename T>
@@ -283,7 +336,7 @@ void LoadScaleFromEnv() {
     }
 }
 
-DWORD HopCdMs() { return static_cast<DWORD>(gHopCdMs.load(std::memory_order_acquire)); }
+DWORD AimCdMs() { return static_cast<DWORD>(gAimCdMs.load(std::memory_order_acquire)); }
 
 struct StwJob {
     float unitySx = 0.f;
@@ -380,48 +433,9 @@ bool ScreenToWorld(float* outX, float* outY, bool verbose) {
     return true;
 }
 
-bool HopReady(DWORD now) {
-    const DWORD cd = HopCdMs();
-    return !gLastHopMs || (now - gLastHopMs) >= cd;
-}
-
-// 跟飞：STW + Impact 同一主线程 job，避免每 hop 两次 InvokeAndWait 卡帧。
-struct FollowDriveJob {
-    float unitySx = 0.f;
-    float unitySy = 0.f;
-    unsigned impactMode = 1;  // 0=NockBack 1=SetImpactNext
-    float outX = 0.f;
-    float outY = 0.f;
-    bool stwOk = false;
-    bool hopOk = false;
-};
-
-void FollowDriveJobFn(void* user) {
-    auto* job = reinterpret_cast<FollowDriveJob*>(user);
-    if (!job) return;
-    job->stwOk = false;
-    job->hopOk = false;
-
-    StwJob stw{};
-    stw.unitySx = job->unitySx;
-    stw.unitySy = job->unitySy;
-    ScreenToWorldJobFn(&stw);
-    if (!stw.ok) return;
-    job->outX = stw.outX;
-    job->outY = stw.outY;
-    job->stwOk = true;
-
-    ports::teleport::ImpactTowardOpts opts{};
-    opts.quietLog = true;
-    opts.adaptive = false;
-    opts.leadSec = 0.f;
-    opts.maxSegPx = 320.f;
-    opts.minSegPx = 8.f;
-    opts.maxSpeed = 1600.f;
-    opts.speedScale = 4.f;
-    const auto route = job->impactMode == 1u ? ports::teleport::ImpactRoute::SetImpactNext
-                                             : ports::teleport::ImpactRoute::NockBack;
-    job->hopOk = ports::teleport::ImpactImpulseToward(job->outX, job->outY, route, opts);
+bool AimReady(DWORD now) {
+    const DWORD cd = AimCdMs();
+    return !gLastAimMs || (now - gLastAimMs) >= cd;
 }
 
 bool ClientToUnityScreen(float* outSx, float* outSy) {
@@ -441,52 +455,45 @@ bool ClientToUnityScreen(float* outSx, float* outSy) {
     return true;
 }
 
-bool HopTo(float wx, float wy, const char* tag, bool quiet) {
-    if (!std::isfinite(wx) || !std::isfinite(wy)) return false;
-    if (!ports::world::IsPlayReady()) {
-        x::runtime::LogW("Fly", "hop skip not_play_ready");
-        return false;
-    }
-    // 产品门禁：飞需无敌；不偷偷 SetDesired。
-    if (!x::features::invuln::IsEnabled()) {
-        if (!quiet) {
-            x::runtime::LogW("Fly", "hop refuse invuln_off tag=%s", tag ? tag : "?");
-        }
-        return false;
-    }
+// 设新目标点。只更新 setpoint，不直接发冲量——发不发、发多大交给旋翼闭环。
+//
+// **不夹进合法空域**：F6 是手动驾驶，指哪儿飞哪儿（见 heli::Setpoint::unbounded）。
+// 早先这里夹过一版，结果是把目标点钉在了包线的绊线上，过冲 1px 就吃一发满档下压，
+// 表现为「到点→掉落→吸附」的循环（BIN a0ab58）。现在包线本身对 F6 已让位，
+// 再夹一次反而是重新造出那条绊线。
+//
+// track=true 表示「这是连续扫动中的一次刷新」，用它差分出光标的世界速度喂给旋翼前馈
+// （见 heli::Setpoint::leadVx）。点击瞬移传 false：那是跳变，差分出来是毛刺不是速度。
+void SetTarget(float wx, float wy, const char* tag, bool quiet, bool track) {
+    if (!std::isfinite(wx) || !std::isfinite(wy)) return;
     const DWORD now = GetTickCount();
-    const unsigned mode = gMode.load(std::memory_order_acquire);
-    const char* driveName = ModeName(mode);
-    ports::teleport::ImpactTowardOpts opts{};
-    opts.quietLog = quiet;
-    opts.adaptive = false;
-    opts.leadSec = 0.f;
-    opts.maxSegPx = 320.f;
-    opts.minSegPx = 8.f;
-    opts.maxSpeed = 1600.f;
-    opts.speedScale = 4.f;
-    if (!ports::teleport::ImpactImpulseToward(wx, wy, CurrentRoute(), opts)) {
-        if (!quiet) {
-            x::runtime::LogW("Fly", "hop fail tag=%s drive=%s to=(%.0f,%.0f)", tag ? tag : "?",
-                             driveName, wx, wy);
+    if (track && gPrevTgtMs) {
+        const DWORD dt = now - gPrevTgtMs;
+        // 下界挡住 dt≈0 的除零放大，上界挡住「停了很久又动一下」被算成高速扫动。
+        if (dt >= 8 && dt <= 300) {
+            const float k = 1000.f / static_cast<float>(dt);
+            const float rawVx = (wx - gPrevTgtX) * k;
+            const float rawVy = (wy - gPrevTgtY) * k;
+            gLeadVx += (rawVx - gLeadVx) * kLeadEma;
+            gLeadVy += (rawVy - gLeadVy) * kLeadEma;
+            gLeadVx = ClampF(gLeadVx, -kLeadMax, kLeadMax);
+            gLeadVy = ClampF(gLeadVy, -kLeadMax, kLeadMax);
         }
-        return false;
+    } else if (!track) {
+        gLeadVx = 0.f;  // 跳变落点：从零重新起估，别把跳变距离当速度发出去
+        gLeadVy = 0.f;
     }
-    gLastHopMs = now;
-    gLastHopWx = wx;
-    gLastHopWy = wy;
-    gHaveLastHop = true;
+    gPrevTgtX = wx;
+    gPrevTgtY = wy;
+    gPrevTgtMs = now ? now : 1;
+
+    gTgtX = wx;
+    gTgtY = wy;
+    gHaveTgt = true;
+    gLastAimMs = now;
     if (!quiet) {
-        x::runtime::LogI("Fly", "hop ok tag=%s drive=%s to=(%.0f,%.0f)", tag ? tag : "?",
-                         driveName, wx, wy);
-    } else {
-        if (!gLastFollowLogMs || now - gLastFollowLogMs > 1000) {
-            gLastFollowLogMs = now;
-            x::runtime::LogI("Fly", "follow hold drive=%s to=(%.0f,%.0f) cd=%ums", driveName, wx,
-                             wy, HopCdMs());
-        }
+        x::runtime::LogI("Fly", "aim tag=%s to=(%.0f,%.0f)", tag ? tag : "?", wx, wy);
     }
-    return true;
 }
 
 bool ReadClientCursor(long* outX, long* outY) {
@@ -549,97 +556,176 @@ void PollLmbHop() {
         return;
     }
     if (down && !gLmbWasDown) {
-        const DWORD now = GetTickCount();
-        if (!HopReady(now)) {
-            gLmbWasDown = down;
-            return;
-        }
         float wx = 0.f, wy = 0.f;
         if (ScreenToWorld(&wx, &wy, /*verbose=*/true)) {
-            (void)HopTo(wx, wy, "A", /*quiet=*/false);
+            SetTarget(wx, wy, "click", /*quiet=*/false, /*track=*/false);
         } else {
-            x::runtime::LogW("Fly", "ScreenToWorld fail (A)");
+            x::runtime::LogW("Fly", "ScreenToWorld fail (click)");
         }
     }
     gLmbWasDown = down;
 }
 
-void PollFollowMouse() {
-    if (!gArmed.load(std::memory_order_acquire)) return;
-    if (gExternalPause.load(std::memory_order_acquire)) return;
+// 只负责「目标点跟不跟鼠标」。失焦 / 按住 Ctrl-Shift / 主泵拥堵时**只是不更新目标**，
+// 绝不影响下面 DriveRotor 继续悬停——旧实现在这些情况下直接 return，等于停发冲量，
+// 而 fh-ban 还挂着，人就往下掉。
+void PollAimFollow() {
     if (x::features::ports::action_gate::IsSkillCastBusy()) return;
     if (!GameWindowFocused()) return;
     if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) return;
     if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0) return;
 
     const DWORD now = GetTickCount();
-    if (!HopReady(now)) return;
+    if (!AimReady(now)) return;
     // 主泵拥堵时宁可不跟这一拍，避免 job timeout 螺旋卡死。
     if (runtime::main_thread::IsCongested()) return;
 
     long cx = 0, cy = 0;
     if (!ReadClientCursor(&cx, &cy)) return;
-
-    // 屏光标几乎不动：不 STW、不每拍 hover（防相机反馈抖）；偶发重钉保滞空。
-    if (!ScreenCursorMoved(cx, cy)) {
-        if (gHaveLastHop && (now - gLastHopMs) >= kHoverRepinMs) {
-            (void)HopTo(gLastHopWx, gLastHopWy, "Bh", /*quiet=*/true);
-        }
-        return;
-    }
-
-    if (!ports::world::IsPlayReady()) return;
-    if (!x::features::invuln::IsEnabled()) return;
+    // 屏光标几乎不动：不必重算 STW。旋翼会自己钉住旧目标，不需要「重钉」那套 hack。
+    if (!ScreenCursorMoved(cx, cy)) return;
     if (!runtime::main_thread::Ensure()) return;
 
     float sx = 0.f, sy = 0.f;
     if (!ClientToUnityScreen(&sx, &sy)) return;
 
-    FollowDriveJob job{};
+    StwJob job{};
     job.unitySx = sx;
     job.unitySy = sy;
-    job.impactMode = gMode.load(std::memory_order_acquire);
-    if (!runtime::main_thread::InvokeAndWait(&FollowDriveJobFn, &job, 800,
+    if (!runtime::main_thread::InvokeAndWait(&ScreenToWorldJobFn, &job, 800,
                                             runtime::main_thread::JobPrio::High)) {
         if (!gLastFollowLogMs || now - gLastFollowLogMs > 1000) {
             gLastFollowLogMs = now;
-            x::runtime::LogW("Fly", "follow drive pump timeout");
+            x::runtime::LogW("Fly", "aim pump timeout");
         }
         return;
     }
-    if (!job.stwOk) {
+    if (!job.ok) {
         if (!gLastFollowLogMs || now - gLastFollowLogMs > 1000) {
             gLastFollowLogMs = now;
-            x::runtime::LogW("Fly", "follow ScreenToWorld fail");
-        }
-        if (gHaveLastHop && (now - gLastHopMs) >= kHoverRepinMs) {
-            (void)HopTo(gLastHopWx, gLastHopWy, "Bh", /*quiet=*/true);
+            x::runtime::LogW("Fly", "aim ScreenToWorld fail");
         }
         return;
     }
     NoteClientCursor(cx, cy);
-    if (!job.hopOk) return;
-    gLastHopMs = now;
-    gLastHopWx = job.outX;
-    gLastHopWy = job.outY;
-    gHaveLastHop = true;
+    SetTarget(job.outX, job.outY, "follow", /*quiet=*/true, /*track=*/true);
+}
+
+// A 层入口。武装期**每个 worker 拍都要调**（旋翼内部自控 ~11Hz，不必外部限频）：
+// 只要 fh-ban 挂着，停一拍就是掉一段——这条与 F5 的 TickHeliRotor 是同一条铁律。
+void DriveRotor(DWORD now) {
+    if (!gArmed.load(std::memory_order_acquire)) return;
+    // 外部暂停（auto_supply 补给中）：停发冲量，语义与旧实现「不 hop」一致。
+    // 注：此时 fh-ban 仍挂着，角色会持续下坠且接不住地板——这是改造前就有的行为，
+    // 本轮原样保留，不在这里顺手改语义。
+    if (gExternalPause.load(std::memory_order_acquire)) {
+        heli::Disarm(heli::Owner::Fly);
+        return;
+    }
+    if (!ports::world::IsPlayReady()) return;
+    // 产品门禁：飞需无敌；不偷偷 SetDesired。（Impact 端口自身也会拒，这里只是早退省开销）
+    if (!x::features::invuln::IsEnabled()) return;
+
+    // 旋翼判死（状态停更 / 深度出界）后必须**先卸掉禁挂台**：清 bail 的唯一条件是 onFh，
+    // 而禁挂台挂着就永远接不住地板 —— 那是「一路掉到出图也醒不过来」的死锁。注意不能就此
+    // return，清 bail 发生在 Tick 内部（在 Bailed 闸之前），停调 Tick 等于把自愈路径也掐了。
+    // 落地清掉 bail 后这里再把禁挂台接回去，闭环自愈。语义同 F5 的 SyncImpactFhBan。
+    const bool bailed = heli::Bailed();
+    if (bailed != gBailBanReleased) {
+        gBailBanReleased = bailed;
+        ports::fly_fh_ban::SetArmedBan(!bailed);
+        x::runtime::LogW("Fly", "rotor bailed=%d -> fh-ban %s", bailed ? 1 : 0,
+                         bailed ? "released(let engine catch)" : "restored");
+    }
+
+    ports::teleport::FlightState st{};
+    const bool haveSt = ports::teleport::QueryFlightState(st) && st.ok;
+    // 还没取到目标（刚武装 / 失焦 / STW 未回）：拿当前位置当目标原地悬停。
+    // 不能直接 return —— fh-ban 此刻已经挂上了，不发冲量那一段就是自由落体。
+    if (!gHaveTgt) {
+        if (!haveSt) return;
+        // 不走 SetTarget：那会消耗掉刷新冷却，把真正的首次跟鼠标推迟一整个间隔。
+        gTgtX = st.x;
+        gTgtY = st.y;
+        gHaveTgt = true;
+    }
+
+    // 光标停手后前馈必须归零，否则角色会顺着最后一次扫动的速度一直飘出去。
+    // 判据用「距上次跟随刷新多久」而不是「光标是否移动」：后者由 ScreenCursorMoved 的
+    // 死区决定，微抖也算动，会让停手判不出来。
+    if (gLastAimMs && now - gLastAimMs > kLeadHoldMs) ClearLead();
+
+    heli::Setpoint sp{};
+    sp.x = gTgtX;
+    sp.y = gTgtY;
+    sp.leadVx = gLeadVx;
+    sp.leadVy = gLeadVy;
+    // 手动驾驶：左右与上方交还给用户，只保留「不许俯冲出图」那一面。
+    sp.unbounded = true;
+    if (haveSt) {
+        const float dx = sp.x - st.x;
+        const float dy = sp.y - st.y;
+        // 别把它叫 far：Windows.h 里 far 还是个遗留宏，会把声明整段吃掉。
+        const bool outside = (dx * dx + dy * dy) > (kCruiseRadiusPx * kCruiseRadiusPx);
+        // 目标在动就必须给快档，哪怕此刻误差很小：Station 的低上限会把前馈裁掉，角色跟不上
+        // 光标 ⇒ 误差变大 ⇒ 又切回 Cruise，白白在两档之间来回。Station 只留给「光标停手」。
+        const bool moving = (gLeadVx * gLeadVx + gLeadVy * gLeadVy) > (kLeadIdle * kLeadIdle);
+        sp.mode = (outside || moving) ? heli::Mode::Cruise : heli::Mode::Station;
+    } else {
+        sp.mode = heli::Mode::Cruise;
+    }
+    heli::SetSetpoint(heli::Owner::Fly, sp);
+
+    heli::Telemetry tm{};
+    (void)heli::Tick(heli::Owner::Fly, now, &tm);
+
+    // ── 断供探针 ───────────────────────────────────────────────────────
+    // 现有证据到这里就分不下去了：UserMove 的 BODY 截到 64B，一次 flush 只看得见前 4 个
+    // 元素，于是「vy=+1227 是旋翼下令下降」还是「连续 20 个重力步无人对抗」在包里长得一样。
+    // 1Hz 遥测同样抓不到 —— 断供只要几百毫秒就够掉一大截，采样期望连一次都碰不上。
+    // 所以在这里按事件记账：只要两次成功发射之间超过 kStarveWarnMs 就必然留一行，
+    // 并带上期间最后一个 guard —— 那才是「谁把冲量拦下来的」的直接答案。
+    if (tm.fired) {
+        if (gLastFiredMs && now - gLastFiredMs > kStarveWarnMs) {
+            x::runtime::LogW("Fly", "rotor starve gap=%ums lastGuard=%s vy=%.0f fell=%.0f",
+                             static_cast<unsigned>(now - gLastFiredMs),
+                             gStarveGuard[0] ? gStarveGuard : "-", tm.vy, gStarveY - tm.y);
+        }
+        gLastFiredMs = now;
+        gStarveGuard[0] = '\0';
+        gStarveY = tm.y;
+    } else if (tm.guard && tm.guard[0]) {
+        // 只留最后一个：cadence 是常态噪声，真凶（impact_fail / congested / stale / bailed）
+        // 会紧贴断供尾部，覆盖掉 cadence 正是我们想要的。
+        strncpy_s(gStarveGuard, tm.guard, _TRUNCATE);
+    }
+
     if (!gLastFollowLogMs || now - gLastFollowLogMs > 1000) {
         gLastFollowLogMs = now;
-        x::runtime::LogI("Fly", "follow hold drive=%s to=(%.0f,%.0f) cd=%ums",
-                         ModeName(job.impactMode), job.outX, job.outY, HopCdMs());
+        x::runtime::LogI("Fly",
+                         "heli mode=%s tgt=(%.0f,%.0f) ap=(%.0f,%.0f) v=(%.0f,%.0f) "
+                         "lead=(%.0f,%.0f) des=(%.0f,%.0f) emg=%d since=%ums speed=%.2fX%s%s",
+                         heli::ModeName(tm.mode), sp.x, sp.y, tm.x, tm.y, tm.vx, tm.vy,
+                         sp.leadVx, sp.leadVy, tm.desiredVx, tm.desiredVy, tm.emergency ? 1 : 0,
+                         static_cast<unsigned>(gLastFiredMs ? now - gLastFiredMs : 0),
+                         heli::SpeedScale(heli::Owner::Fly), tm.guard && tm.guard[0] ? " guard=" : "",
+                         tm.guard ? tm.guard : "");
     }
 }
 
 DWORD WINAPI Worker(LPVOID) {
-    x::runtime::LogI("Fly", "worker start Camera.STW scale=%.2f cd=%ums drive=impact fh-ban",
-                     gClickScale, HopCdMs());
+    x::runtime::LogI("Fly", "worker start Camera.STW scale=%.2f aimCd=%ums drive=heli fh-ban",
+                     gClickScale, AimCdMs());
     while (!gWorkerStop.load(std::memory_order_acquire)) {
         const DWORD now = GetTickCount();
         NoteMapLandGate(now);
         PollF6();
-        // Impact 跟随；禁挂台由 F6 SetArmed 负责。
-        PollFollowMouse();
-        PollLmbHop();
+        if (gArmed.load(std::memory_order_acquire)) {
+            // 顺序要紧：先更目标再驱动，同一拍就能跟上鼠标。禁挂台由 SetArmed 负责。
+            PollAimFollow();
+            PollLmbHop();
+            DriveRotor(now);
+        }
         Sleep(kWorkerSleepMs);
     }
     x::runtime::LogI("Fly", "worker stop");
@@ -651,16 +737,16 @@ DWORD WINAPI Worker(LPVOID) {
 void Init() {
     LoadScaleFromEnv();
     char env[32]{};
-    unsigned cd = kDefaultHopCdMs;
+    unsigned cd = kDefaultAimCdMs;
     if (GetEnvironmentVariableA("FLY_FOLLOW_CD_MS", env, sizeof(env)) > 0) {
         const int v = atoi(env);
-        if (v >= 40 && v <= 2000) cd = static_cast<unsigned>(v);
+        if (v >= static_cast<int>(xcat::kFlyHopCdMinMs) && v <= 2000) cd = static_cast<unsigned>(v);
     }
-    gHopCdMs.store(cd, std::memory_order_release);
+    gAimCdMs.store(cd, std::memory_order_release);
     gArmed.store(false, std::memory_order_release);
     gMode.store(0, std::memory_order_release);
     gWorkerStop.store(false, std::memory_order_release);
-    gLastHopMs = 0;
+    gLastAimMs = 0;
     ClearFollowTrack();
     gWasPlayReady = false;
     gLastMapId = -1;
@@ -675,7 +761,7 @@ void Init() {
             xcat::ClearFlyArmedSession(bin);
         }
     }
-    x::runtime::LogI("Fly", "init drive=impact (teleport-fly DISABLED; coast removed)");
+    x::runtime::LogI("Fly", "init drive=heli (closed-loop rotor; open-loop impact removed)");
 }
 
 void Shutdown() {
@@ -703,6 +789,8 @@ void StopWorker() {
     }
     gArmed.store(false, std::memory_order_release);
     ports::fly_fh_ban::SetArmedBan(false);
+    heli::Disarm(heli::Owner::Fly);
+    heli::Release(heli::Owner::Fly);
     ClearFollowTrack();
 }
 
@@ -721,12 +809,23 @@ void SetArmed(bool on) {
     if (prev == on) return;
     gLmbWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     ClearFollowTrack();
+    gBailBanReleased = false;  // 与紧接着这次 SetArmedBan 对齐，别把上一轮的闩带进新一轮
     // 武装：禁挂台；ApplyImpact 放行（Impact 消费 → Attr=2）。
     ports::fly_fh_ban::SetArmedBan(on);
+    if (on) {
+        // 手动入口用**抢占式** Acquire：人按了 F6 就该立刻听人的，哪怕 F5 正在打怪。
+        // 被抢的一方 SetSetpoint/Tick 静默 no-op，它自己的循环不用改；旋翼一拍没停。
+        (void)heli::Acquire(heli::Owner::Fly);
+    } else {
+        // 交还后旋翼变无主，F5/赶路下一拍的 TryAcquire 会把它接回去，不会出现空转期。
+        heli::Disarm(heli::Owner::Fly);
+        heli::Release(heli::Owner::Fly);
+    }
     const unsigned mode = gMode.load(std::memory_order_acquire);
-    x::runtime::LogI("Fly", "panel/ipc %s drive=impact mode=%u(%s) fhBan=%d",
+    x::runtime::LogI("Fly", "panel/ipc %s drive=heli mode=%u(%s) fhBan=%d speed=%.2fX",
                      on ? "ARMED" : "OFF", mode, ModeName(mode),
-                     ports::fly_fh_ban::IsBanActive() ? 1 : 0);
+                     ports::fly_fh_ban::IsBanActive() ? 1 : 0,
+                     heli::SpeedScale(heli::Owner::Fly));
 }
 
 void SetMode(unsigned mode) {
@@ -741,13 +840,29 @@ void SetMode(unsigned mode) {
 unsigned GetMode() { return gMode.load(std::memory_order_acquire); }
 
 void SetHopCdMs(unsigned ms) {
-    if (ms < 40u) ms = 40u;
+    // 与面板/IPC 同一口径，下限见 xcat_payload_control.h 的 kFlyHopCdMinMs：那里记着实测的
+    // 15.625ms 时钟分辨率——比它小的设定不会报错，只是走同一条路径，不会更跟手。
+    if (ms < xcat::kFlyHopCdMinMs) ms = xcat::kFlyHopCdMinMs;
     if (ms > 2000u) ms = 2000u;
-    const unsigned prev = gHopCdMs.exchange(ms, std::memory_order_acq_rel);
+    const unsigned prev = gAimCdMs.exchange(ms, std::memory_order_acq_rel);
     if (prev == ms) return;
-    x::runtime::LogI("Fly", "hop cd -> %ums", ms);
+    x::runtime::LogI("Fly", "aim cd -> %ums", ms);
 }
 
-unsigned GetHopCdMs() { return gHopCdMs.load(std::memory_order_acquire); }
+unsigned GetHopCdMs() { return gAimCdMs.load(std::memory_order_acquire); }
+
+void SetSpeedPct(unsigned pct) {
+    const float scale = static_cast<float>(pct) / 100.f;
+    const float prev = heli::SpeedScale(heli::Owner::Fly);
+    heli::SetSpeedScale(heli::Owner::Fly, scale);
+    const float now = heli::SpeedScale(heli::Owner::Fly);
+    // Clamp 后仍相同就不刷日志：IPC 每次下发全量配置，否则每轮都打一行。
+    if (std::fabs(now - prev) < 1e-3f) return;
+    x::runtime::LogI("Fly", "speed %u%% -> %.2fX (req %.2f)", pct, now, scale);
+}
+
+unsigned SpeedPct() {
+    return static_cast<unsigned>(heli::SpeedScale(heli::Owner::Fly) * 100.f + 0.5f);
+}
 
 }  // namespace x::features::fly

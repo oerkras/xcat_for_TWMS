@@ -17,8 +17,13 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
 bool IsDesired();
 
 // Soft-relogin / 踢线回登录后：若自动进仍开着，从 Done/Failed 拉回 Idle 重跑选区选角。
+// why=="soft_login" 时开快轨：Connected settle 缩短、**仅该轮**优先粘回 sticky 频道。
 // worker 可调；下一拍 Tick 会进 WaitWorldList。
 void RequestRestart(const char* why);
+
+// 记下「当前应粘回」的 1-based 频道（与 UI ch.N / auto_enter Pick 同口径）。
+// channel_hop 成功后调用；软重连 PickSticky 只在 softFast 时消费。
+void NoteStickyChannel(int channelId1Based, const char* why);
 
 // 当前是否停在 Failed（软重进可据此早退，不必空等到 play-ready 超时）。
 bool IsFailed();

@@ -37,6 +37,12 @@ HttpLoginResult Fail(HttpLoginError e, const std::string& msg) {
     return r;
 }
 
+HttpLoginResult FailAccountsOauthError(const std::string& msg) {
+    HttpLoginResult r = Fail(HttpLoginError::Protocol, msg);
+    r.accountsOauthError = true;
+    return r;
+}
+
 void Log(const HttpLoginLogFn& log, const std::wstring& s) {
     if (log) log(s);
 }
@@ -522,7 +528,8 @@ void SetGamaPassAccountSlot(int slot1Based) {
     SaveAccountSlotToDisk(gAccountSlotCached);
 }
 
-HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
+// 单轮 CDP 点选；accounts/error 的干净重开由外层 HttpGamaPassCdpLoginToOtt 负责。
+static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int timeoutMs) {
     const int nickSlot = GetGamaPassNickSlot();
     const int accountSlot = GetGamaPassAccountSlot();
     Log(log, L"[gamapass-cdp] 开始：默认浏览器点选（不调用 refresh/token，不改 LS）；账号=" +
@@ -905,9 +912,9 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
                 if (IsAccountsErrorUrl(lowerNav)) {
                     Log(log, L"[gamapass-cdp] 落到 accounts/error（OAuth 失败）。"
                              L"不会清 Cookie；请回 Galaxy 页再点一次 Gama Pass，或手动登录后重试。");
-                    return Fail(HttpLoginError::Protocol,
-                                "Gama Pass OAuth 失败（accounts/error）。"
-                                "请回到 Galaxy 登录页重新点 Gama Pass；程序不会清 Cookie。");
+                    return FailAccountsOauthError(
+                        "Gama Pass OAuth 失败（accounts/error）。"
+                        "请回到 Galaxy 登录页重新点 Gama Pass；程序不会清 Cookie。");
                 }
                 if (stage == Stage::AwaitLeaveGalaxy) {
                     // oauth2/authorize 是中间跳转：继续等，勿当完整登录页、勿改 URL
@@ -960,9 +967,9 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
             if (IsAccountsErrorUrl(lowerNav)) {
                 Log(log, L"[gamapass-cdp] 落到 accounts/error（OAuth 失败）。"
                          L"不会清 Cookie；请回 Galaxy 页再点一次 Gama Pass。");
-                return Fail(HttpLoginError::Protocol,
-                            "Gama Pass OAuth 失败（accounts/error）。"
-                            "请回到 Galaxy 登录页重新点 Gama Pass；程序不会清 Cookie。");
+                return FailAccountsOauthError(
+                    "Gama Pass OAuth 失败（accounts/error）。"
+                    "请回到 Galaxy 登录页重新点 Gama Pass；程序不会清 Cookie。");
             }
             // 任意阶段落到完整登录页：立刻停（禁止 soft-retry 再 Navigate Galaxy）
             if (IsGamaniaFullLoginUrl(lowerNav)) {
@@ -1264,6 +1271,24 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
                  L"程序不会另开登录页、也不会调用 refresh。");
     return Fail(HttpLoginError::OttMissing, "浏览器点选超时，未捕获 OTT");
 
+}
+
+static bool IsAccountsOauthErrorFail(const HttpLoginResult& r) {
+    return !r.ok && r.accountsOauthError;
+}
+
+HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
+    auto first = HttpGamaPassCdpLoginToOttOnce(log, timeoutMs);
+    if (first.ok || !IsAccountsOauthErrorFail(first)) return first;
+
+    // 实锤：authorize 半残 → /error 后，关调试浏览器 + 新 Galaxy OTT 再走一轮可进 select-account。
+    // 禁止同标签 Navigate soft-retry；禁止清 Cookie / refresh / 改 prompt。完整 /login 不走此路径。
+    // 识别靠 HttpLoginResult::accountsOauthError（非文案匹配）。
+    Log(log, L"[gamapass-cdp] accounts/error：oauth-error-clean-restart"
+             L"（关调试浏览器后重开一轮，最多 1 次）…");
+    msc::cdp::CloseRemoteBrowser(kCdpPort, [&](const std::wstring& s) { Log(log, s); });
+    Sleep(1800);
+    return HttpGamaPassCdpLoginToOttOnce(log, timeoutMs);
 }
 
 }  // namespace msc::launcher

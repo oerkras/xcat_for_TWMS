@@ -193,13 +193,17 @@ void PollExternalManualCommand(DWORD now) {
     xcat::SellbagConfig c{};
     if (!xcat::ReadSellbag(runtime::GetBinDir(), c)) return;
 
+    // 与 auto_supply 同坑：绝不能在「用户已点过按钮之后」的首次热读里用当前磁盘
+    // seq 做 bootstrap，否则会把第一下一键卖当成旧命令吞掉。
     if (!g_manualSeqInit) {
         g_manualSeqInit = true;
-        g_lastManualSeq = c.manualSeq;
+        g_lastManualSeq = 0;
+        runtime::LogW("Sellbag", "bootstrap late manualSeq=0 (guard; prefer Init)");
     }
     if (!g_abortSeqInit) {
         g_abortSeqInit = true;
-        g_lastAbortSeq = c.abortSeq;
+        g_lastAbortSeq = 0;
+        runtime::LogW("Sellbag", "bootstrap late abortSeq=0 (guard; prefer Init)");
     }
     if (c.writeTickMs != g_cfgTick) {
         g_cfgTick = c.writeTickMs;
@@ -563,15 +567,38 @@ DWORD WINAPI WorkerProc(LPVOID) {
 }  // namespace
 
 void Init() {
+    g_manualSeqInit = false;
+    g_abortSeqInit = false;
+    g_lastManualSeq = 0;
+    g_lastAbortSeq = 0;
     xcat::SellbagSetDefaults(g_cfg);
     const auto& pack = Catalog();
     runtime::LogI("Sellbag", "init catalog=%d names=%zu sellPrices=%zu", pack.loaded ? 1 : 0,
                   pack.nameByCode.size(), pack.sellPriceByCode.size());
     ReloadConfigIfChanged();
+    // 注入瞬间对齐磁盘 seq，只忽略加载前已存在的旧一键卖/中止命令。
+    // 读失败也必须对齐到 0：否则首次成功热读会收养用户第一下刚写的 seq。
+    xcat::SellbagConfig boot{};
+    if (xcat::ReadSellbag(runtime::GetBinDir(), boot)) {
+        g_lastManualSeq = boot.manualSeq;
+        g_lastAbortSeq = boot.abortSeq;
+        runtime::LogI("Sellbag", "bootstrap manualSeq=%u abortSeq=%u via=init", g_lastManualSeq,
+                      g_lastAbortSeq);
+    } else {
+        g_lastManualSeq = 0;
+        g_lastAbortSeq = 0;
+        runtime::LogI("Sellbag", "bootstrap manualSeq=0 abortSeq=0 via=init-empty");
+    }
+    g_manualSeqInit = true;
+    g_abortSeqInit = true;
     if (g_keepIdsDirty) RebuildKeepIds();
 }
 
-void Shutdown() { StopWorker(); }
+void Shutdown() {
+    StopWorker();
+    g_manualSeqInit = false;
+    g_abortSeqInit = false;
+}
 
 void StartWorker() {
     if (gThread.load()) return;

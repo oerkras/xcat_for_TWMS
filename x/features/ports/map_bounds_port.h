@@ -36,7 +36,11 @@ bool PointInPlayBounds(float x, float y, int mapId, int marginPx = kLandMarginPx
 // 挑出脚下最近的一块。找不到 ⇒ 失去升力就会一路掉出地图 = 掉落区。
 // 竖直段（x1==x2）是墙不是地板，不计入。
 //
-// 坐标：与 foothold / mob / combat.log 同一空间，+Y 向下（`top`=min y、`bottom`=max y）。
+// 坐标：与 foothold / mob / combat.log / FlightState 同一空间，**+Y 向上**（实测，见
+// map_bounds_port.cpp 里 FloorBelowLocked 的证据段）。`Rect` 的 top/bottom 是**数值**
+// 含义（top=min y、bottom=max y），故 +Y 向上时 **top 才是图底、bottom 才是图顶**——
+// 这两个字段名与直觉相反，用之前先回头看这一行。
+// 「脚下」= fy ≤ y，最近的一块是其中最大的 fy。
 // 无地板数据（含换图瞬间 FH 未 Collect）返回 true，宁可不拦也不误杀。
 bool HasFloorBelow(float x, float y, int mapId, float* floorYOut = nullptr);
 

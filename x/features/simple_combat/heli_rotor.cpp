@@ -5,13 +5,17 @@
 #include "heli_rotor.h"
 
 #include "../invuln/invuln.h"
+#include "../kick_sniff/kick_sniff.h"
 #include "../ports/map_bounds_port.h"
 #include "../ports/skill_port.h"
 #include "../ports/teleport_port.h"
+#include "../soft_login_probe/soft_login_probe.h"
+#include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 
 namespace x::features::simple_combat::heli {
 namespace {
@@ -60,32 +64,82 @@ constexpr float kKpY = 7.0f;
 
 // 包线：越过即 emergency，忽略战斗意图先保命。判定框见 heli_rotor.h 的 kEnvSlackX/YPx
 // （**外扩** AABB；曾经内缩 72px，把最外沿台上的怪判成禁区，BIN 4a79e4）。
-// 落速超此 → 判定为失控下坠，弃战拉平。
-// ★ 它必须**紧贴**最大下降意图（合速档上限现为 620）上方，两头都不能松：
-//   · 低了 → 每次正常快速下降被误判成紧急，紧急忽略战斗意图并强行上拉，下降永远踩不到底；
-//   · 高了 → 620~此值之间的异常下坠检测不到，白白让出一段保护窗口。
-//   齿距余量：90ms 周期里重力吃 180px/s，瞬时值绕均值上下摆约 ±90，故 620 档预期可见
-//   约 710 的瞬时落速（560 档实测过 670）。取 850 让开锯齿又不过度放宽。
-//   可救性：从 -850 拉到 kRescueClimbVy 需增量 1150 + 配平 60 = 1210 ≤ kMaxCmdVy。
-constexpr float kMaxFallVy = 850.f;
+//
+// ★★ 落速闸**不是绝对安全阈值，是判别式**——它区分「我想快速下降」与「我失控了」，
+//    因此它的含义天生相对于最大下降意图定义，必须跟着意图走。曾经把它写成常量 850，
+//    再让用户可调倍率去抬意图，判别式当场反号（BIN 2d6176）：
+//      倍率拉到 3.0X ⇒ 下降意图 -1440 < -850 ⇒ 每一拍正常下降都被判失控
+//      ⇒ 强行上拉 +300 ⇒ 速度回到闸上方 ⇒ P 控又要 -1440 ⇒ **极限环**。
+//    实测：vy<-850 占 55.2%、emg=1 占 37.0%、相邻样本 vy 变号 21.0%、摆幅 -1627~+1319，
+//    现象就是用户说的「人物疯狂抖动」。
+//    两头都不能松的原理没变：低了误判正常下降，高了让出保护窗口。变的是它得是个函数。
+//
+// 余量 230 = 锯齿半周期（90ms 周期里重力吃 180px/s，瞬时值绕均值摆 ±90）+ 余量 140。
+// 与旧常量自洽：Cruise 620 + 230 = 850，正是原值。
+constexpr float kFallGateMarginVy = 230.f;
 constexpr float kEnvPushVx = 300.f;
 // 救援目标速度（不是增量）。闭环会自己算出「从当前 -600 拉到 +300」需要多大增量。
 constexpr float kRescueClimbVy = 300.f;
 
 // 作动器上限：一次能发出的**增量**幅值，两轴同级（合速限幅后两轴权限本就对称）。
-// 必须覆盖最坏的一次反向，否则被钳掉的那部分就是「刹不住」：
-//   · 常控：-660(Rtb 档最高) → +660                    = 1320 + 配平 60 = 1380
-//   · 救援：-kMaxFallVy(850) → +kRescueClimbVy(300)     = 1150 + 配平 60 = 1210
-// 取 1700 覆盖两者并留余量（此处宽一点无害，见下段）。
 //
-// 实测只到 900 且落地线性（见 CapsFor 注释②），1700 是同一线性段内的外推、**未验**。
-// 但抬这个数是**单调无害**的：若引擎在某处真有封顶，落地效果等同于被钳在更低的值上，
-// 也就是回到抬之前的行为，不会引入新失效模式。下一轮日志可用遥测的 cmd/v 对照复核。
-constexpr float kMaxCmdVy = 1700.f;
-// 横向同理。这个数**不是**限速：落地速度恒等于 desiredVx（受合速档约束），钳位只咬命令幅值。
-// 曾经把它设成档位上限，等于把「从 -556 反向到 +300」需要的 856 削成 340，
+// 这个数同时也是**最高可达速度**——这一点容易看漏。叠加语义里同向加速走的是
+// `cmd = vt` 那条分支（见 VxCommandFor），落地 `clamp(v+vt, ±max(|v|,|vt|))`：想跑到 S
+// 就必须发得出 |cmd| = S。发不出就永远停在 kMaxCmdV 上，再喊也没用。
+//
+// 取值由**安全机动一拍可达**反解，这是真正的硬约束（性能类机动允许摊到多拍，见 ReachableV）：
+//   · 坠落自救：从落速闸上界拉回 +kRescueClimbVy —— maxCap + 230 + 300 + 配平 60
+//   · 界外内推：从 +maxCap 反到 -kEnvPushVx     —— maxCap + 300
+// 前者更严 ⇒ kMaxCmdV ≥ maxCap + 590。10X 下 maxCap = Rtb 660×10 = 6600 ⇒ ≥ 7190，取 8000。
+//
+// ★ 实测区间已两次外推、两次被实机证实，逐轮记账（都是「意图给多少就到多少、零饱和」）：
+//     基线    cmd ≤  900 → v 840↑/670↓     全归档 20363 条遥测
+//     3.0X    cmd = 2003 → v 1938          BIN 2e63d5
+//     5.0X    cmd = 3231 → v 3100（=620×5，精确到个位）  BIN c05ac2
+//   8000 是从 3100 起的 2.1 倍外推——与上一步（1940→4000，2.06 倍）同量级，那步已验。
+//   仍属**未验**，但它的失效模式是良性的：若引擎在更低处封顶，表现是**速度上不去**而非
+//   失控（可达集钳位保证「落地 == 意图」的等式仍成立，只是意图达不到）。遥测的 cmd 对
+//   下一拍 v 可直接证伪，每轮加档必看。
+constexpr float kMaxCmdVy = 8000.f;
+// 横向同理。这个数**不是**限速阀门：落地速度恒等于 desiredVx（受合速档约束），钳位只咬
+// 命令幅值。曾经把它设成档位上限，等于把「从 -556 反向到 +300」需要的 856 削成 340，
 // 结果一发只能把速度推到 -256（人还在往外飞），连发四拍才反向 → 出界 43px（BIN c72cff）。
-constexpr float kMaxCmdVx = 1700.f;
+constexpr float kMaxCmdVx = 8000.f;
+
+// 意图上限的**安全兜底**（不是速度档，档位见 CapsFor）。由可救性反解：
+//   落速闸 = cap + 230，拉回 +300 还要配平 60，全部要塞进一发 kMaxCmdVy。
+// ⇒ cap ≤ kMaxCmdVy − 230 − 300 − 60 = 7410。10X 下 Rtb 6600 < 7410，正常不咬合；
+// 它只在有人把倍率上限调过头时兜底，防止出现「救不回来的坠落」。
+constexpr float kIntentCeilV =
+    kMaxCmdVy - kFallGateMarginVy - kRescueClimbVy - kGravityPerStep;
+
+// ★★ 把意图钳进「这一拍真发得出去」的可达集。**5X 能成立全靠这一步。**
+//
+// 换算层保证「落地速度 == 意图」，但那是在 cmd 没被 kMaxCmdV 削掉的前提下。一旦削掉，
+// 撞墙预刹赖以成立的等式就悄悄失效——预刹按 `desiredV × 视野` 预测本周期位移，等式一破
+// 算出的余量就是假的（c72cff 的失效链）。
+//
+// 历史解法是反过来压意图上限：要求满速反向（增量 2·cap）一拍完成 ⇒ cap ≤ C/2。
+// 代价是把最高速度砍成作动器权限的一半，5X 直接无解。而「反向一拍完成」是**性能优化，
+// 不是安全需求**——真正必须一拍到位的只有刹停、界外内推、坠落自救，它们的 |vt−v| 都
+// ≤ maxCap + 300，已由 kMaxCmdV 的取值覆盖。
+//
+// 改成直接钳可达集后，等式**按构造**恒成立：反向自然摊到两三拍，每一拍的预测依然精确，
+// 最高速度不再打折。可达集（C = 作动器上限）：
+//   · 差值分支 cmd = vt−v，要求 |vt−v| ≤ C          ⇒ vt ∈ [v−C, v+C]
+//   · 加速分支 cmd = vt，  要求 |vt| ≤ C            ⇒ 合起来 |vt| ≤ max(C, |v|)
+//     （|vt| > |v| 才走加速分支，故 max 取到 C 时正好等价于 |vt| ≤ C）
+// bias 是竖直的重力前馈：竖直发的是 (vt−v)+ff，可达区间整体平移 −ff。
+float ReachableV(float vt, float v, float bias, float cmax) {
+    const float av = std::fabs(v);
+    const float reach = av > cmax ? av : cmax;
+    float lo = v - bias - cmax;
+    float hi = v - bias + cmax;
+    if (lo < -reach) lo = -reach;
+    if (hi > reach) hi = reach;
+    if (lo > hi) return vt;  // 退化（|bias| > C）：交给下游钳位，别返回反向的怪值
+    return vt < lo ? lo : (vt > hi ? hi : vt);
+}
 
 // 把「想要的速度」翻译成「该发的增量」。作动器实测语义（头文件事实①，11/11 样本吻合）：
 //     v_new = clamp(v_old + cmd, ±max(|v_old|, |cmd|))
@@ -103,8 +157,15 @@ float VxCommandFor(float vt, float v) {
 
 // 深度出界：超过安全框这么多就判不可救，缴械让引擎接管（见 Bailed()）。
 constexpr float kBailoutPx = 420.f;
-// 位置与速度连续这么多拍完全不变 = 状态停更（断线/切图/死亡）。
-constexpr int kStaleTicksLimit = 12;
+// 位置与速度持续这么久完全不变 = 状态停更（断线/切图/死亡）。
+//
+// ★ 必须按**墙钟**计，不能按拍数计。曾经写作「连续 12 拍」，但 Tick 的节拍由调用方决定：
+//    F5 战斗 16ms 一拍（窗口 192ms），F6 飞行 8ms 一拍（窗口只剩 96ms）。而一次 96ms 的
+//    引擎卡顿就能让 Ap 的四个字段一字不变，于是被误判成断线：gBailed 置起、旋翼停发，
+//    偏偏解除条件只有 onFh（落地），净效果就是「自由落体 → 落地 → 自动重飞」。
+//    鼠标不动时 PollAimFollow 不再阻塞 worker，拍频跑满，最容易踩中——正是 306d6e 的现象。
+//    真·断线是秒级的，取 1s 既远离帧卡顿量级，也不会拖慢真断线后的缴械。
+constexpr DWORD kStaleHoldMs = 1000;
 
 // 每档的**意图**上限，不是作动器上限。
 //
@@ -149,25 +210,75 @@ struct ModeCaps {
     float speed;  // 合速上限（矢量幅值），两轴共享
 };
 
-// 用户可调倍率，基准 1.0。语义与边界见 heli_rotor.h 的 SetSpeedScale 注释。
-std::atomic<float> gSpeedScale{1.0f};
+// 各档 1.0X 基准合速。提出来命名是为了让倍率上限能由它反解（见 kSpeedScaleMax），
+// 而不是又一个跟别处对不上的字面量。
+constexpr float kBaseCruise = 620.f;
+constexpr float kBaseRtb = 660.f;  // 各档最高
+constexpr float kBaseStation = 480.f;
+constexpr float kBaseHold = 360.f;
+
+// 倍率边界。上限由**可救性**反解：最快的 Rtb 档乘上倍率不得越过 kIntentCeilV，
+// 否则坠落拉不回来 ⇒ 7410 / 660 = 11.2X。
+//
+// ★ 这里曾写死 3.0，与面板的 kHeliSpeedPctMax 各管各的。面板放到 500 之后实机仍只跑
+//   3.00X —— BIN 2e63d5 日志原话：`SetFlySpeedPct 500 → 3.00X (req 5.00)`。
+//   两道钳位分别硬编码，就一定会有走散的那天；改成同源反解后不可能再错位，
+//   static_assert 还会在编译期替我们复核一遍。
+constexpr float kSpeedScaleMin = 0.25f;
+constexpr float kSpeedScaleMax = kIntentCeilV / kBaseRtb;
+static_assert(kBaseRtb * 10.0f <= kIntentCeilV, "10X 必须落在可救性范围内，否则坠落拉不回");
+
+// 当前持有者。语义见 heli_rotor.h 的 Owner 注释：抢占式，被抢者静默 no-op。
+std::atomic<unsigned> gOwner{static_cast<unsigned>(Owner::None)};
+
+bool Owns(Owner o) {
+    return o != Owner::None && gOwner.load(std::memory_order_acquire) == static_cast<unsigned>(o);
+}
+
+// 用户可调倍率，基准 1.0，**按 Owner 各存一份**（手动飞与自动打怪的手感诉求不同）。
+// 语义与边界见 heli_rotor.h 的 SetSpeedScale 注释。
+constexpr size_t kOwnerCount = 4;  // None / Combat / Travel / Fly
+std::atomic<float> gSpeedScale[kOwnerCount] = {{1.0f}, {1.0f}, {1.0f}, {1.0f}};
+
+// 生效的是**当前持有者**那一份：交接时自动跟着换，不需要谁存档/恢复。
+float ActiveSpeedScale() {
+    const size_t i = static_cast<size_t>(gOwner.load(std::memory_order_acquire));
+    return i < kOwnerCount ? gSpeedScale[i].load(std::memory_order_relaxed) : 1.0f;
+}
 
 ModeCaps CapsFor(Mode m) {
-    const float k = gSpeedScale.load(std::memory_order_relaxed);
+    const float k = ActiveSpeedScale();
+    float s = 0.f;
     switch (m) {
         case Mode::Cruise:
-            return {620.f * k};
+            s = kBaseCruise * k;
+            break;
         // Rtb 只许更快：自救权限不该因为用户想慢点打怪而被削。
         case Mode::Rtb:
-            return {660.f * (k > 1.f ? k : 1.f)};
+            s = kBaseRtb * (k > 1.f ? k : 1.f);
+            break;
         case Mode::Station:
-            return {480.f * k};
+            s = kBaseStation * k;
+            break;
         case Mode::Hold:
-            return {360.f * k};
+            s = kBaseHold * k;
+            break;
         default:
             return {0.f};
     }
+    // 安全兜底，正常倍率（≤5X）不咬合。越过它坠落就救不回来了，见 kIntentCeilV。
+    return {s < kIntentCeilV ? s : kIntentCeilV};
 }
+
+// 失控落速的判别线。跟着**最大**下降意图走而非跟当前档走：档间切换时若判别线也跟着跳，
+// 一次 Cruise→Station 的正常降档就会把巡航中的合法下降瞬间判成失控。Rtb 恒为各档最高
+// （倍率 <1 时它有 1.0 地板），故用它当上界。
+//
+// 可救性自检（这条链断了就会出现「救不回来的坠落」）：
+//   5X 最坏落速 = Rtb(3300) + 余量(230) = 3530
+//   拉回 kRescueClimbVy(+300) 需增量 3830 + 配平 60 = 3890 ≤ kMaxCmdVy(4000) ✓
+//   ——这正是 kMaxCmdVy 取 4000 的来处，两者是同一约束的两种写法，改一个必须改另一个。
+float FallGateVy() { return CapsFor(Mode::Rtb).speed + kFallGateMarginVy; }
 
 // 两次发射之间重力吃掉的速度 = 盈亏线。用**真实耗时**而非标称周期：主线程一拥塞
 // 发射就变稀，需要的配平同比变大；写死常数正是历史上净下沉的根源。
@@ -181,6 +292,9 @@ float GravityLoss(DWORD sinceMs) {
 std::atomic<unsigned> gMode{static_cast<unsigned>(Mode::Off)};
 std::atomic<float> gSpX{0.f};
 std::atomic<float> gSpY{0.f};
+std::atomic<float> gSpLeadX{0.f};
+std::atomic<float> gSpLeadY{0.f};
+std::atomic<bool> gSpUnbounded{false};
 
 DWORD gLastIssueMs = 0;
 bool gLastTickFired = false;
@@ -190,27 +304,29 @@ std::atomic<bool> gBailed{false};
 // 状态停更检测：断线/切图后 QueryFlightState 会一直回同一组死数据，此时任何冲量
 // 都是空发。bea1c3 断线后旋翼又对着冻结的 (932,-1188) 发了 500ms。
 float gStaleX = 0.f, gStaleY = 0.f, gStaleVx = 0.f, gStaleVy = 0.f;
-int gStaleTicks = 0;
+DWORD gStaleSinceMs = 0;  // 状态开始「一字不变」的时刻；0 = 尚未取过基准
 
 float Clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-// 返回 true = 本拍数据与上一拍逐字节相同，已连续超过阈值。
-bool UpdateStaleness(const ports::teleport::FlightState& st) {
-    if (st.x == gStaleX && st.y == gStaleY && st.vx == gStaleVx && st.vy == gStaleVy) {
-        if (gStaleTicks < kStaleTicksLimit) ++gStaleTicks;
-    } else {
-        gStaleTicks = 0;
-        gStaleX = st.x;
-        gStaleY = st.y;
-        gStaleVx = st.vx;
-        gStaleVy = st.vy;
+// 返回 true = 数据与基准逐字节相同已持续超过 kStaleHoldMs。
+bool UpdateStaleness(const ports::teleport::FlightState& st, DWORD now) {
+    if (gStaleSinceMs && st.x == gStaleX && st.y == gStaleY && st.vx == gStaleVx &&
+        st.vy == gStaleVy) {
+        return (now - gStaleSinceMs) >= kStaleHoldMs;
     }
-    return gStaleTicks >= kStaleTicksLimit;
+    gStaleSinceMs = now ? now : 1;  // 0 是「无基准」的哨兵，撞上就借一毫秒
+    gStaleX = st.x;
+    gStaleY = st.y;
+    gStaleVx = st.vx;
+    gStaleVy = st.vy;
+    return false;
 }
 
 }  // namespace
 
 bool Bailed() { return gBailed.load(std::memory_order_acquire); }
+
+void ClearBailed() { gBailed.store(false, std::memory_order_release); }
 
 const char* ModeName(Mode m) {
     switch (m) {
@@ -227,9 +343,73 @@ const char* ModeName(Mode m) {
     }
 }
 
-void SetSetpoint(const Setpoint& sp) {
+bool ClampToAirspace(float* x, float* y) {
+    if (!x || !y) return false;
+    ports::map_bounds::Rect r{};
+    if (!ports::map_bounds::QueryPlayBounds(0, &r) || !r.ok) return true;
+    const float l = static_cast<float>(r.left) - kEnvSlackXPx;
+    const float ri = static_cast<float>(r.right) + kEnvSlackXPx;
+    const float t = static_cast<float>(r.top) - kEnvSlackYPx;
+    const float b = static_cast<float>(r.bottom) + kEnvSlackYPx;
+    if (ri <= l || b <= t) return true;
+    if (*x < l) *x = l;
+    if (*x > ri) *x = ri;
+    if (*y < t) *y = t;
+    if (*y > b) *y = b;
+    return true;
+}
+
+const char* OwnerName(Owner o) {
+    switch (o) {
+        case Owner::Combat:
+            return "combat";
+        case Owner::Travel:
+            return "travel";
+        case Owner::Fly:
+            return "fly";
+        default:
+            return "none";
+    }
+}
+
+bool Acquire(Owner o) {
+    if (o == Owner::None) return false;
+    const unsigned prev = gOwner.exchange(static_cast<unsigned>(o), std::memory_order_acq_rel);
+    if (prev == static_cast<unsigned>(o)) return false;
+    // 易主不清 setpoint：新主第一拍就会写自己的，中间那一小段沿用旧点比归零安全
+    // （归零 = 朝地图原点飞）。发射时钟也不重置，否则交接瞬间会多发一拍。
+    x::runtime::LogI("Heli", "owner %s -> %s", OwnerName(static_cast<Owner>(prev)), OwnerName(o));
+    return true;
+}
+
+bool TryAcquire(Owner o) {
+    if (o == Owner::None) return false;
+    unsigned expect = static_cast<unsigned>(Owner::None);
+    if (!gOwner.compare_exchange_strong(expect, static_cast<unsigned>(o),
+                                        std::memory_order_acq_rel))
+        return Owns(o);  // 已是自己 → 视为成功；被别人占着 → false
+    x::runtime::LogI("Heli", "owner none -> %s", OwnerName(o));
+    return true;
+}
+
+void Release(Owner o) {
+    unsigned expect = static_cast<unsigned>(o);
+    // 只有当前持有者能释放：被抢占的一方随后调 Release 不该把新主踢下去。
+    if (!gOwner.compare_exchange_strong(expect, static_cast<unsigned>(Owner::None),
+                                        std::memory_order_acq_rel))
+        return;
+    x::runtime::LogI("Heli", "owner %s -> none", OwnerName(o));
+}
+
+Owner CurrentOwner() { return static_cast<Owner>(gOwner.load(std::memory_order_acquire)); }
+
+void SetSetpoint(Owner o, const Setpoint& sp) {
+    if (!Owns(o)) return;
     gSpX.store(sp.x, std::memory_order_release);
     gSpY.store(sp.y, std::memory_order_release);
+    gSpLeadX.store(sp.leadVx, std::memory_order_release);
+    gSpLeadY.store(sp.leadVy, std::memory_order_release);
+    gSpUnbounded.store(sp.unbounded, std::memory_order_release);
     gMode.store(static_cast<unsigned>(sp.mode), std::memory_order_release);
 }
 
@@ -238,28 +418,49 @@ Setpoint CurrentSetpoint() {
     sp.mode = static_cast<Mode>(gMode.load(std::memory_order_acquire));
     sp.x = gSpX.load(std::memory_order_acquire);
     sp.y = gSpY.load(std::memory_order_acquire);
+    sp.leadVx = gSpLeadX.load(std::memory_order_acquire);
+    sp.leadVy = gSpLeadY.load(std::memory_order_acquire);
+    sp.unbounded = gSpUnbounded.load(std::memory_order_acquire);
     return sp;
 }
 
-void Disarm() { SetSetpoint(Setpoint{}); }
+void Disarm(Owner o) { SetSetpoint(o, Setpoint{}); }
 
 void Reset() {
-    Disarm();
+    // Reset 是「换图/开关」的全局复位，不走 Owns 闸：此时正需要把残留所有权一并清掉，
+    // 否则上一张图的持有者会把新图的驱动方一直挡在门外。
+    gOwner.store(static_cast<unsigned>(Owner::None), std::memory_order_release);
+    gSpX.store(0.f, std::memory_order_release);
+    gSpY.store(0.f, std::memory_order_release);
+    gSpLeadX.store(0.f, std::memory_order_release);
+    gSpLeadY.store(0.f, std::memory_order_release);
+    gSpUnbounded.store(false, std::memory_order_release);
+    gMode.store(static_cast<unsigned>(Mode::Off), std::memory_order_release);
     gLastIssueMs = 0;
     gLastTickFired = false;
     gBailed.store(false, std::memory_order_release);
-    gStaleTicks = 0;
+    gStaleSinceMs = 0;
     // 倍率是用户设置，不是本轮状态，换图/开关都不该把它冲掉。
 }
 
-void SetSpeedScale(float scale) {
+void SetSpeedScale(Owner o, float scale) {
     if (!std::isfinite(scale)) return;
-    gSpeedScale.store(Clamp(scale, 0.25f, 3.0f), std::memory_order_relaxed);
+    const size_t i = static_cast<size_t>(o);
+    if (i >= kOwnerCount) return;
+    gSpeedScale[i].store(Clamp(scale, kSpeedScaleMin, kSpeedScaleMax), std::memory_order_relaxed);
 }
 
-float SpeedScale() { return gSpeedScale.load(std::memory_order_relaxed); }
+float SpeedScale(Owner o) {
+    const size_t i = static_cast<size_t>(o);
+    if (i >= kOwnerCount) return 1.f;
+    return gSpeedScale[i].load(std::memory_order_relaxed);
+}
 
-bool Tick(DWORD now, Telemetry* out) {
+bool Tick(Owner o, DWORD now, Telemetry* out) {
+    if (!Owns(o)) {
+        if (out) *out = Telemetry{};
+        return false;
+    }
     Telemetry tm{};
     const Setpoint sp = CurrentSetpoint();
     tm.mode = sp.mode;
@@ -278,8 +479,10 @@ bool Tick(DWORD now, Telemetry* out) {
         tm.vy = st.vy;
         tm.onFh = st.onFh;
         if (st.onFh) {  // 引擎把人接住了 = 脱险，可重新武装
-            gBailed.store(false, std::memory_order_release);
-            gStaleTicks = 0;
+            if (gBailed.exchange(false, std::memory_order_acq_rel)) {
+                x::runtime::LogI("Heli", "bail cleared onFh at (%.0f,%.0f)", st.x, st.y);
+            }
+            gStaleSinceMs = 0;
         }
     }
 
@@ -301,8 +504,30 @@ bool Tick(DWORD now, Telemetry* out) {
         if (out) *out = tm;
         return false;
     }
-    if (UpdateStaleness(st)) {  // 断线/切图：再发也只是对着死数据空转
-        gBailed.store(true, std::memory_order_release);
+    // soft settle / NM 已断：禁止任何 Owner 继续发 Impact（752824：settle 窗内仍 Firing
+    // + heli，约 1.2s 后 Classic 自退；SawDisconnect 粘性不能当闸，只用 hold + 当前态）。
+    if (x::features::soft_login_probe::IsHoldActive()) {
+        tm.guard = "soft_hold";
+        gLastTickFired = false;
+        if (out) *out = tm;
+        return false;
+    }
+    {
+        const int nm = kick_sniff::LastSessionState();
+        // CMS: Disconnecting=0 Disconnected=1（kick_sniff）；-1=尚未采样，放行。
+        if (nm == 0 || nm == 1) {
+            tm.guard = "nm_down";
+            gLastTickFired = false;
+            if (out) *out = tm;
+            return false;
+        }
+    }
+    if (UpdateStaleness(st, now)) {  // 断线/切图：再发也只是对着死数据空转
+        if (!gBailed.exchange(true, std::memory_order_acq_rel)) {
+            x::runtime::LogW("Heli", "bail stale owner=%s pos=(%.0f,%.0f) v=(%.0f,%.0f) held=%ums",
+                             OwnerName(o), st.x, st.y, st.vx, st.vy,
+                             static_cast<unsigned>(now - gStaleSinceMs));
+        }
         tm.guard = "stale";
         gLastTickFired = false;
         if (out) *out = tm;
@@ -316,18 +541,24 @@ bool Tick(DWORD now, Telemetry* out) {
     tm.trimVy = trim;
 
     // 两轴都先算「这一周期想要的速度」，作动器增量最后统一换算。
-    float desiredVx = 0.f;
+    //
+    // 意图 = 目标自身速度（前馈）+ Kp·误差（反馈）。前馈项负责「跟上」，反馈项只负责
+    // 「补掉剩下的偏差」；少了前馈就只能靠偏差换速度，于是跟移动目标恒留 V目标/Kp 的滞后
+    // （见 Setpoint::leadVx）。它必须加在这里、即所有钳位之前 —— 档位限幅、包线内推、
+    // 撞墙预刹、可达集依旧在下游最后说话，安全性一分不减。
     const float errX = sp.x - st.x;
     const float errY = sp.y - st.y;
-    if (std::fabs(errX) > kDeadX) desiredVx = kKpX * errX;
+    float desiredVx = sp.leadVx;
+    if (std::fabs(errX) > kDeadX) desiredVx += kKpX * errX;
 
     // 竖直：先定「这一周期想要的平均速度」，作动器指令另算。+Y 向上 ⇒ errY>0 = 往上。
-    float desiredVy = 0.f;
-    if (!st.onFh && std::fabs(errY) > kDeadY) desiredVy = kKpY * errY;
+    // 挂着台时不给前馈：地板上的水平/竖直语义由引擎走路负责，硬塞竖直意图会把人抠离地板。
+    float desiredVy = st.onFh ? 0.f : sp.leadVy;
+    if (!st.onFh && std::fabs(errY) > kDeadY) desiredVy += kKpY * errY;
 
     // ── 安全包线 ────────────────────────────────────────────────────
     bool emergency = false;
-    if (!st.onFh && st.vy < -kMaxFallVy) {  // 高速下坠：弃战拉平
+    if (!st.onFh && st.vy < -FallGateVy()) {  // 高速下坠：弃战拉平
         desiredVy = kRescueClimbVy;
         emergency = true;
     }
@@ -342,30 +573,45 @@ bool Tick(DWORD now, Telemetry* out) {
         const float t = static_cast<float>(r.top) - kEnvSlackYPx;
         const float b = static_cast<float>(r.bottom) + kEnvSlackYPx;
         if (ri > l && b > t) {
-            if (st.x < l) {
-                desiredVx = kEnvPushVx;
-                emergency = true;
-            } else if (st.x > ri) {
-                desiredVx = -kEnvPushVx;
-                emergency = true;
-            }
+            // ── 向下：恒生效，不受 sp.unbounded 放行 ──────────────────
+            // 四个方向里只有这一个会毁掉会话（穿出最低台 ⇒ 引擎判掉图 ⇒ 重载/断线，
+            // 即 a69130 野猪图那次「越界重拉」）。左右和上方都是纯空气，飞出去最坏什么
+            // 也不发生，所以那三面允许手动驾驶放开；这一面对谁都不放。
             // Rect 的 top/bottom 是**数值**含义（top=min y）；+Y 向上 ⇒ top 才是图底。
-            if (st.y < t) {  // 已跌破最低台：这是唯一会掉出地图的方向，全力上拉
+            if (st.y < t) {  // 已跌破最低台：全力上拉
                 desiredVy = kRescueClimbVy;
                 emergency = true;
                 if (st.y < t - kBailoutPx) {
                     // 掉这么深已经不是控制问题，冲量也追不回来。缴械让引擎接管落地/复位，
                     // 别像 bea1c3 那样对着注定的结局继续空发到断线。
-                    gBailed.store(true, std::memory_order_release);
+                    if (!gBailed.exchange(true, std::memory_order_acq_rel)) {
+                        x::runtime::LogW("Heli", "bail deep owner=%s y=%.0f floor=%.0f depth=%.0f",
+                                         OwnerName(o), st.y, t, t - st.y);
+                    }
                     tm.guard = "bailout";
                     gLastTickFired = false;
                     if (out) *out = tm;
                     return false;
                 }
-            } else if (st.y > b) {
-                // 已在最高台之上：下降是免费的，给个受控下沉速度而不是放任自由落体。
-                desiredVy = -caps.speed;
-                emergency = true;
+            }
+
+            // ── 左右 / 上方：手动驾驶时整段让位给驾驶员（见 Setpoint::unbounded）──
+            if (!sp.unbounded) {
+                if (st.x < l) {
+                    desiredVx = kEnvPushVx;
+                    emergency = true;
+                } else if (st.x > ri) {
+                    desiredVx = -kEnvPushVx;
+                    emergency = true;
+                }
+                // 与横向**各自独立**判断（别串成 else if）。这里可以只写 st.y > b：
+                // 它与上面的 st.y < t 因 b > t 而互斥，等价于原先那条 else if。
+                if (st.y > b) {
+                    // 已在最高台之上：下降是免费的，给个受控下沉速度而不是放任自由落体。
+                    // 用固定值而非 caps.speed，理由见 kEnvSinkVy。
+                    desiredVy = -kEnvSinkVy;
+                    emergency = true;
+                }
             }
 
             // ── 撞墙预刹 ────────────────────────────────────────────
@@ -383,11 +629,38 @@ bool Tick(DWORD now, Telemetry* out) {
             // 106ms），按标称算会刹不住。早刹几十毫秒不影响出刀，冲出去要掉线。
             // 视野按「一次错过的发射」给足：紧急档 45ms，卡顿时实测能拖到 106ms，取 200ms。
             constexpr float kBrakeHorizonSec = 0.200f;
-            const float roomR = (rawR - st.x) / kBrakeHorizonSec;  // 允许的最大 +vx
-            const float roomL = (rawL - st.x) / kBrakeHorizonSec;  // 允许的最小 vx（界内为负）
-            // 已在界外时 room 同号，这两句会把意图顶成内推，与紧急推同向且力度更足。
-            if (desiredVx > roomR) desiredVx = roomR;
-            if (desiredVx < roomL) desiredVx = roomL;
+            // 刹车线从 AABB 内缩 kBrakeInsetXPx，让稳态停靠点离墙留出余量而不是紧贴 rawR
+            //（成因与「为什么横向能缩、竖直不能」见 heli_rotor.h 的 kBrakeInsetXPx）。
+            // 窄图兜底：内缩量不超过图宽的 1/4，两条刹车线永远不会交叉——交叉了这两句钳位
+            // 会互相打架，把人钉死在某一侧。
+            float insetX = (rawR - rawL) * 0.25f;
+            if (insetX > kBrakeInsetXPx) insetX = kBrakeInsetXPx;
+            if (insetX < 0.f) insetX = 0.f;
+            if (!sp.unbounded) {
+                const float roomR = (rawR - insetX - st.x) / kBrakeHorizonSec;  // 允许的最大 +vx
+                const float roomL = (rawL + insetX - st.x) / kBrakeHorizonSec;  // 允许的最小 vx（界内为负）
+                // 已在刹车线之外时 room 同号，这两句会把意图顶成内推，与紧急推同向且力度更足。
+                if (desiredVx > roomR) desiredVx = roomR;
+                if (desiredVx < roomL) desiredVx = roomL;
+            }
+
+            // 埋点：内缩之后还能贴到离 AABB 半个内缩量以内，说明有东西绕过了这条钳位。
+            // 只在跨过阈值的那一拍打一行，不刷屏；平时一行都不该出现。
+            // 自由空域下贴墙是驾驶员的意图，不是异常，不记。
+            if (!sp.unbounded) {
+                const float dR = rawR - st.x;
+                const float dL = st.x - rawL;
+                const float clearance = dR < dL ? dR : dL;
+                static std::atomic<bool> gWallTight{false};
+                const bool tight = clearance < insetX * 0.5f;
+                if (tight && !gWallTight.exchange(tight, std::memory_order_acq_rel)) {
+                    x::runtime::LogW("Heli",
+                                     "wall tight owner=%s x=%.0f clr=%.0f vx=%.0f sp=%.0f aabb=[%.0f,%.0f]",
+                                     OwnerName(o), st.x, clearance, st.vx, sp.x, rawL, rawR);
+                } else if (!tight) {
+                    gWallTight.store(false, std::memory_order_release);
+                }
+            }
 
             // 竖直预刹 —— 竖直提速到与横向同级后，这一段是**必需品**而非对称美化：
             // 620px/s 下降在一个 90ms 周期里走 56px，位置包线是「越过才报警」的事后判据，
@@ -396,9 +669,20 @@ bool Tick(DWORD now, Telemetry* out) {
             // 用**外扩后**的 t/b（合法空域）而非 raw：贴地面层的怪就站在 rawT 上，
             // 站位点本身在 rawT 附近，距 t 还有整整 kEnvSlackYPx 的余量，正常作战根本
             // 碰不到这条线；它只在锯齿或卡顿导致的异常下沉时才咬合。
-            const float roomB = (b - st.y) / kBrakeHorizonSec;  // 允许的最大 +vy（上升）
-            const float roomT = (t - st.y) / kBrakeHorizonSec;  // 允许的最小 vy（界内为负）
-            if (desiredVy > roomB) desiredVy = roomB;
+            // 刹车线同样从空域上下沿内缩，让稳态停靠点落在紧急触发线**里侧** 24px —— 否则
+            // 目标点被钳到 b、绊线也在 b，人就贴着开关悬停，过冲 1px 就吃一发下压。
+            // 成因、几何免费性与 BIN a0ab58 的实测见 heli_rotor.h 的 kBrakeInsetYPx。
+            // 矮图兜底同 X：内缩量不超过空域高度的 1/4，两条刹车线永不交叉。
+            float insetY = (b - t) * 0.25f;
+            if (insetY > kBrakeInsetYPx) insetY = kBrakeInsetYPx;
+            if (insetY < 0.f) insetY = 0.f;
+            //
+            // 上沿那条随自由空域一起让位；**底侧那条不让** —— 它才是「不许俯冲出图」的实际
+            // 执行者：位置包线是越过才报警的事后判据，5X 一个周期就能走过整个 kBailoutPx，
+            // 只留位置判据等于没留。放开上沿、留住底侧，正是「四面里只关会摔死的那一面」。
+            const float roomB = (b - insetY - st.y) / kBrakeHorizonSec;  // 允许的最大 +vy（上升）
+            const float roomT = (t + insetY - st.y) / kBrakeHorizonSec;  // 允许的最小 vy（界内为负）
+            if (!sp.unbounded && desiredVy > roomB) desiredVy = roomB;
             if (desiredVy < roomT) desiredVy = roomT;
         }
     }
@@ -425,6 +709,16 @@ bool Tick(DWORD now, Telemetry* out) {
             desiredVy *= k;
         }
     }
+    // ── 可达集钳位（必须在换算成增量之前）────────────────────────────
+    // 让「落地速度 == 意图」按构造成立，撞墙预刹与竖直预刹的预测才是真的。原理与它
+    // 取代的那条 cap ≤ C/2 约束，见 ReachableV。
+    //
+    // 放在预刹与档位限幅**之后**：它只在意图本身这一拍够不着时才收窄，而刹停/内推/救援
+    // 这些安全机动恒满足 |vt−v| ≤ maxCap+300 ≤ C，一拍可达，不会被它撤销（见 kMaxCmdVx）。
+    // 会被摊到多拍的只有「满速换靶到反方向」这类纯性能场景。
+    const float feedforward = trim * 0.5f + kGravityPerStep * 0.5f;
+    desiredVx = ReachableV(desiredVx, st.vx, 0.f, kMaxCmdVx);
+    if (!st.onFh) desiredVy = ReachableV(desiredVy, st.vy, feedforward, kMaxCmdVy);
     tm.desiredVy = desiredVy;
 
     // 叠加语义 ⇒ 发的是**增量**：把当前速度补到目标，再预付本周期的重力损耗。
@@ -434,7 +728,6 @@ bool Tick(DWORD now, Telemetry* out) {
     // vp+cmd-60, vp+cmd-120, …, vp+cmd-60N，平均 = vp + cmd - (trim/2 + 30)。
     // 令其等于 desiredVy 即得下式。末尾那个 kGravityPerStep/2 就是"落地帧那一步"，
     // 漏掉它稳态会稳定下沉 30px/s —— 十秒 300px，正是过去"看着在悬停却越飘越低"的量级。
-    const float feedforward = trim * 0.5f + kGravityPerStep * 0.5f;
     float cmdVy = st.onFh ? 0.f : (desiredVy - st.vy) + feedforward;
 
     // 限幅落在**意图速度**上（这才是落地速度），再换算成增量。反过来钳增量会把反向

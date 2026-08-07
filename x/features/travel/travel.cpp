@@ -7,8 +7,10 @@
 
 #include "travel_graph.h"
 #include "../ports/travel_port.h"
+#include "../ports/fly_fh_ban.h"
 #include "../ports/world_port.h"
 #include "../invuln/invuln.h"
+#include "../simple_combat/heli_rotor.h"
 #include "../notify/notify.h"
 #include "../simple_combat/simple_combat.h"
 #include "../../runtime/bin_dir.h"
@@ -120,6 +122,21 @@ void ReleaseInvulnForTravel() {
     x::runtime::LogI("Travel", "invuln release (restored=%d)", gInvulnPrevDesired ? 1 : 0);
 }
 
+// Idle/停路兜底：卸 Travel 禁挂台 + 停旋翼（贴门成功路径会 LeaveArmed，换图/Idle 在此收尾）。
+// 只清 BanSource::Travel，不碰 F5 CombatImpact / F6 Fly。
+void ReleaseTravelFhBan() {
+    namespace heli = x::features::simple_combat::heli;
+    // 带 owner：只停自己那份。F6 抢占中时这里静默 no-op，不会把人从天上掐下来。
+    heli::Disarm(heli::Owner::Travel);
+    heli::Release(heli::Owner::Travel);
+    if ((ports::fly_fh_ban::ActiveMask() &
+         static_cast<unsigned>(ports::fly_fh_ban::BanSource::Travel)) == 0) {
+        return;
+    }
+    ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+    x::runtime::LogI("Travel", "fhBan Travel release mask=0x%x", ports::fly_fh_ban::ActiveMask());
+}
+
 // 用户可见反馈：BIN 有 log 不够，launcher 气泡要跟上。
 void NotifyTravelOutcome(FailKind kind, const std::string& src, const std::string& dst,
                          const char* raw = nullptr) {
@@ -209,6 +226,7 @@ void SetIdle(const char* msg, FailKind fail = FailKind::None) {
     ClearTransientFire();
     ClearLateWait();
     ReleaseInvulnForTravel();
+    ReleaseTravelFhBan();
     gFailKind = fail;
     if (msg) gLastMsg = msg;
     gLastSnapMs = GetTickCount();
@@ -702,6 +720,8 @@ void TryFlushPendingGoto() {
 }
 
 void OnMapEnterConfirmed(const std::string& cur, DWORD now) {
+    // 贴门成功进门后 ban 留到换图；新图稳图前卸 Travel 位，允许落地 midhop。
+    ReleaseTravelFhBan();
     if (!gFiredPortal.empty() || !gPendingSeedId.empty()) {
         gGraph.SetDest(gPendingFrom, gPendingSeedId, cur, cur, /*measured=*/true);
         if (!gPendingName.empty()) {

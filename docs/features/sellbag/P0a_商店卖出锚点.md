@@ -59,3 +59,17 @@ NetworkManager.Send           // 禁止 Session.Send 旁路 HashSet（会本地�
   - 本拍刚切 TAB / `listN==0` → 返回 `LIST_STALE`，`sellbag` 限次重试（勿当失败跳过）。
   - 列表非空但未命中 item → 仍为 `LIST_MISS`（真缺项）。
   - `SHOP_BUSY` / `LIST_STALE` 均不消耗队列下标。
+
+## 手动一键卖 · 首击无效（2026-08-07）
+
+**现象**：面板「一键卖装 / 一键卖其他 / 一键卖装备和其他」注入后第一次点无效，再点一次才有 `收到外部一键卖出`。
+
+**根因**：与 auto_supply 同形——`PollExternalManualCommand` 首次成功读盘时用**当前** `manualSeq` 做 bootstrap，把用户刚写入的第一下当成「注入前旧命令」吞掉。
+
+**修复**（`sellbag.cpp` / `xcat_sellbag.cpp`）：
+
+- `Init` 读盘对齐 `manualSeq`/`abortSeq`；读失败也对齐到 `0`
+- 热读兜底禁止用当前磁盘 seq 收养（只允许 `0`）
+- `WriteSellbag` 强制 `writeTickMs` 单调递增
+
+**仍须**：店已开（`ShopReady`）；未开店会提示「请先打开 NPC 商店」（与首击吞命令不同）。

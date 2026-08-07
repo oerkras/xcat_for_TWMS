@@ -5,6 +5,7 @@
 #endif
 #include "channel_hop.h"
 
+#include "../auto_enter/auto_enter.h"
 #include "../auto_lie/auto_lie.h"
 #include "../ccu/ccu.h"
 #include "../encounter/encounter.h"
@@ -133,7 +134,7 @@ constexpr DWORD kNoPacketBackoffMs = 1000;     // A8 未置位后同目标退避
 constexpr DWORD kWaitNoPacketMs = 15000;       // 同目标 no-packet 总窗，防空转
 constexpr int kNoPacketMaxStreak = 8;          // 同目标连续 A8=0 次数上限
 constexpr int kChannelCountFallbackMax = 128;  // Classic 可达 ~60 频；原 40 会误杀
-constexpr int kMaxFireAttempts = 3;            // 含首次；满人/未进则换其它频重试
+constexpr int kMaxFireAttempts = 5;            // 含首次；满人/未进则换其它频重试
 
 using FnSendTransferChannel = void (*)(void* self, int channelId, const void* methodInfo);
 using FnIsAlertMode = uint8_t (*)(void* self, const void* methodInfo);
@@ -1039,6 +1040,11 @@ void SettleOk(const char* how, int curIdx, DWORD now) {
         snprintf(body, sizeof(body), "ch.%d → ch.%d", DispCh(gFromChannel), DispCh(shownToIdx));
     }
     Notify(notify::NotificationKind::Info, "manual-rejoin-ok", "随机换频成功", body);
+    // sticky 用 UI 口径 ch.N（1-based），与 auto_enter Pick 一致；仅 soft 重连时消费。
+    {
+        const int sticky1 = DispCh(gKnownChannelIdx >= 0 ? gKnownChannelIdx : shownToIdx);
+        if (sticky1 > 0) auto_enter::NoteStickyChannel(sticky1, "channel_hop");
+    }
     FinishActive(kCooldownAfterOkMs, now);
 }
 

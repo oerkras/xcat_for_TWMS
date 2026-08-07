@@ -190,6 +190,12 @@ void DesignBanner() {
 
 void CardGap() { ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.55f)); }
 
+// 准备窗提示色：白天深蓝 / 黑夜亮蓝（浅灰底上暖黄对比不足）。
+ImVec4 PrepHintBlue() {
+    if (AppTheme_IsLight()) return ImVec4(0.00f, 0.33f, 0.65f, 1.0f);
+    return AppTheme_Palette().brandText;
+}
+
 // 对齐枫星 payload_info::DrawUpdateControl：调试 TAB「日志 / 更新」内全宽按钮 + 进度。
 void DrawUpdateControl() {
     const bool updateUi = UpdateShouldDrawProgressUi();
@@ -391,10 +397,10 @@ void DrawLaunchTab(LaunchUiState& ui) {
             if (injBusy) ImGui::EndDisabled();
 
             if (autoPending && strategyPrepLeft > 0) {
-                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                ImGui::TextColored(PrepHintBlue(),
                                    "准备中：%u 秒后自动监视（再点可取消）", strategyPrepLeft);
             } else if (prepBlocksStart) {
-                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                ImGui::TextColored(PrepHintBlue(),
                                    "准备中：%u 秒后可开始监视（防误触）", strategyPrepLeft);
             }
 
@@ -428,7 +434,7 @@ void DrawLaunchTab(LaunchUiState& ui) {
         }
             if (startBlocked) ImGui::EndDisabled();
             if (strategyPrepLeft > 0) {
-                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                ImGui::TextColored(PrepHintBlue(),
                                    "准备中：%u 秒后可启动（防误触）", strategyPrepLeft);
             }
 
@@ -533,10 +539,10 @@ void DrawLaunchTab(LaunchUiState& ui) {
             }
             if (busy) ImGui::EndDisabled();
             if (autoPending && strategyPrepLeft > 0) {
-                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                ImGui::TextColored(PrepHintBlue(),
                                    "准备中：%u 秒后自动换票（再点可取消）", strategyPrepLeft);
             } else if (autoPending) {
-                ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f),
+                ImGui::TextColored(PrepHintBlue(),
                                    "即将自动换票…（再点可取消）");
             }
 
@@ -598,9 +604,12 @@ static bool gUiAttackRpc = false;
 static int gUiAttackRpcMobs = (int)xcat::kAttackRpcMobsDefault;
 static int gUiAttackRpcIntervalMs = (int)xcat::kAttackRpcIntervalDefaultMs;
 static int gUiAttackRpcDamage = (int)xcat::kAttackRpcDamageDefault;
+// F6 手动飞 / F5 滑翔倍率：首页「飞行速度」卡；调试 TAB 不再改这两项。
+static int gUiManualFlySpeedPct = (int)xcat::kFlySpeedPctDefault;
+static int gUiFlySpeedPct = (int)xcat::kHeliSpeedPctDefault;
 
 void DrawHomeTab(LaunchUiState& ui) {
-    // 首页卡片顺序：挂机 → 拾物 → 攻击加速 → 打怪设置 → 卖背包（低内存守护在调试 TAB）
+    // 首页卡片顺序：挂机 → 飞行速度 → 拾物 → 攻击加速 → 打怪设置 → 卖背包（低内存守护在调试 TAB）
     static bool autoEnter = true;  // 默认开：1 雪吉拉 / 槽1
     static int charSlot = 1;
     static int worldId = xcat::kDefaultWorldId;
@@ -618,15 +627,12 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool autoCombat = false;
     // F5 追怪位移：单选 0=空中贴怪 / 1=拟人 / 2=关闭（站桩）
     static int approachMode = 0;
-    static int gUiFlySpeedPct = (int)xcat::kHeliSpeedPctDefault;
     static bool smartInterval = false;
     static int attackMs = (int)xcat::kSimpleCombatAttackIntervalDefaultMs;
     static int clusterWeight = 0;  // 0/1：群怪优先（沿用 clusterWeight 落盘）
     static int teleportMinDx = 220;
     static int teleportStandOff = (int)xcat::kCombatTeleportStandOffDefault;
     static int mobScanIntervalMs = (int)xcat::kMobScanIntervalDefaultMs;
-    static int crossLayerFillGateMs = (int)xcat::kCombatCrossLayerFillGateDefaultMs;
-    static int fillBudgetPx = (int)xcat::kCombatFillBudgetPxDefault;
     static int oneshotMaxHp = (int)xcat::kCombatOneshotMaxHpDefault;
     static int oneshotMinBumps = (int)xcat::kCombatOneshotMinBumpsDefault;
     static int oneshotMinFires = (int)xcat::kCombatOneshotMinFiresDefault;
@@ -657,7 +663,7 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool watchdog = true;
     static int noExpSec = static_cast<int>(xcat::kWatchdogNoExpSecDefault);
     static int cooldownSec = static_cast<int>(xcat::kWatchdogCooldownSecDefault);
-    static bool softLoginProbe = false;
+    static bool softLoginProbe = true;  // 与 PayloadControl 默认一致：软重连默认开
     static bool coreLoaded = false;
     static uint64_t lastSeenTick = 0;
 
@@ -689,6 +695,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                 gUiFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
                     disk.simpleCombatFlySpeedPct ? disk.simpleCombatFlySpeedPct
                                                  : xcat::kHeliSpeedPctDefault);
+                gUiManualFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
+                    disk.flySpeedPct ? disk.flySpeedPct : xcat::kFlySpeedPctDefault);
                 smartInterval = disk.simpleCombatSmartInterval != 0;
                 attackMs = (int)xcat::ClampSimpleCombatAttackIntervalMs(
                     disk.simpleCombatAttackIntervalMs
@@ -718,10 +726,6 @@ void DrawHomeTab(LaunchUiState& ui) {
                 mobScanIntervalMs = (int)xcat::ClampMobScanIntervalMs(
                     disk.mobScanIntervalMs ? disk.mobScanIntervalMs
                                            : xcat::kMobScanIntervalDefaultMs);
-                // 0=关门控，合法；勿用 ? : 把 0 洗成默认。
-                crossLayerFillGateMs =
-                    (int)xcat::ClampCombatCrossLayerFillGateMs(disk.simpleCombatCrossLayerFillGateMs);
-                fillBudgetPx = (int)xcat::ClampCombatFillBudgetPx(disk.simpleCombatFillBudgetPx);
                 oneshotMaxHp = (int)xcat::ClampCombatOneshotMaxHp(disk.simpleCombatOneshotMaxHp);
                 oneshotMinBumps =
                     (int)xcat::ClampCombatOneshotMinBumps(disk.simpleCombatOneshotMinBumps);
@@ -814,6 +818,8 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.simpleCombatHumanWalk = (approachMode == 1) ? 1u : 0u;
         c.simpleCombatFlySpeedPct =
             xcat::ClampHeliSpeedPct(static_cast<uint32_t>(gUiFlySpeedPct < 0 ? 0 : gUiFlySpeedPct));
+        c.flySpeedPct = xcat::ClampHeliSpeedPct(
+            static_cast<uint32_t>(gUiManualFlySpeedPct < 0 ? 0 : gUiManualFlySpeedPct));
         c.simpleCombatSmartInterval = smartInterval ? 1u : 0u;
         c.simpleCombatAttackIntervalMs =
             xcat::ClampSimpleCombatAttackIntervalMs(static_cast<uint32_t>(attackMs));
@@ -837,10 +843,6 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.simpleCombatTeleportCooldownMs = xcat::kCombatTeleportCooldownDefaultMs;
         c.mobScanIntervalMs = xcat::ClampMobScanIntervalMs(
             static_cast<uint32_t>(mobScanIntervalMs < 0 ? 0 : mobScanIntervalMs));
-        c.simpleCombatCrossLayerFillGateMs = xcat::ClampCombatCrossLayerFillGateMs(
-            static_cast<uint32_t>(crossLayerFillGateMs < 0 ? 0 : crossLayerFillGateMs));
-        c.simpleCombatFillBudgetPx =
-            xcat::ClampCombatFillBudgetPx(static_cast<uint32_t>(fillBudgetPx < 0 ? 0 : fillBudgetPx));
         c.simpleCombatOneshotMaxHp = xcat::ClampCombatOneshotMaxHp(
             static_cast<uint32_t>(oneshotMaxHp < 0 ? 0 : oneshotMaxHp));
         c.simpleCombatOneshotMinBumps = xcat::ClampCombatOneshotMinBumps(
@@ -1207,67 +1209,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                     "· 关闭：不追怪（站桩，够得着才砍）。");
             }
         }
-        // 飞行倍率只对「空中贴怪」有意义；拟人/关闭时置灰，避免调了没反应。
-        ImGui::SameLine(0.f, ui::Gap() * 1.2f);
-        ImGui::BeginDisabled(approachMode != 0);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("飞行速度");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::SetNextItemWidth(AppDpi_Px(96.f));
-        if (ImGui::DragInt("##f5_fly_speed", &gUiFlySpeedPct, 5,
-                           (int)xcat::kHeliSpeedPctMin, (int)xcat::kHeliSpeedPctMax, "%d%%",
-                           ImGuiSliderFlags_AlwaysClamp)) {
-            persistCore();
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "空中贴怪的飞行速度倍率，100%% = 基准 1.0X。\n"
-                "基准各档合速：转场 620 / 拉回 660 / 站位 480 / 悬停 360 px/s。\n"
-                "· 只缩放飞行意图，落速闸与撞墙预刹不跟随——调低不会更容易掉出图。\n"
-                "· 300%% 以上无意义：转场 620x3 已越过作动器上限 1700。\n"
-                "· 提速会拉长高速暴露时长，历史上 780 档曾把存活从 358s 压到 79s，加档请配合看日志。");
-        }
-        ImGui::EndDisabled();
-        ImGui::SameLine(0.f, ui::Gap() * 1.2f);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("跨层门控");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
-        if (ImGui::DragInt("##tp_cross_gate", &crossLayerFillGateMs, 1,
-                           (int)xcat::kCombatCrossLayerFillGateMinMs,
-                           (int)xcat::kCombatCrossLayerFillGateMaxMs)) {
-            crossLayerFillGateMs = (int)xcat::ClampCombatCrossLayerFillGateMs(
-                static_cast<uint32_t>(crossLayerFillGateMs < 0 ? 0 : crossLayerFillGateMs));
-            persistCore();
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "跨层贴稳后额外等待（%u–%u ms）。\n"
-                "切段中间跳不武装。0=关闭。偏大则追怪像爬楼梯；偏小跨层连跳更猛。",
-                (unsigned)xcat::kCombatCrossLayerFillGateMinMs,
-                (unsigned)xcat::kCombatCrossLayerFillGateMaxMs);
-        }
-        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-        ImGui::TextDisabled("ms");
-        ImGui::SameLine(0.f, ui::Gap() * 1.2f);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("位移预算");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::SetNextItemWidth(AppDpi_Px(80.f));
-        if (ImGui::DragInt("##tp_dist_budget", &fillBudgetPx, 50, (int)xcat::kCombatFillBudgetPxMin,
-                           (int)xcat::kCombatFillBudgetPxMax)) {
-            fillBudgetPx = (int)xcat::ClampCombatFillBudgetPx(
-                static_cast<uint32_t>(fillBudgetPx < 0 ? 0 : fillBudgetPx));
-            persistCore();
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip("10 秒内瞬移总位移上限（0–%u px）。0=关闭（默认）。\n"
-                              "超额则留在原地等额度回来，不弃怪。\n"
-                              "怀疑被服端按移动速率判定时才开；调小会明显拖慢追怪。",
-                              (unsigned)xcat::kCombatFillBudgetPxMax);
-        }
-        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-        ImGui::TextDisabled("px/10s");
+        // 倍率在下方「飞行速度」卡调。
 
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("怪物读取速度");
@@ -1381,6 +1323,56 @@ void DrawHomeTab(LaunchUiState& ui) {
             "日志 soft_login.log / galaxy_token.log。\n"
             "亦可用 soft_login_probe.on / SOFT_LOGIN_PROBE=1\n"
             "（或旧 marker galaxy_token_probe.on 仅采证）。");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_home_fly_speed", "飞行速度");
+        // 两档倍率共用控件：输入 + 巡航换算 + 快捷档（原调试 TAB「飞行调试」）。
+        // 1.0X 基准合速：巡航 620（heli_rotor.cpp kBase*）。
+        auto speedRow = [&](const char* label, const char* id, int* v, const char* tip,
+                            bool enabled) {
+            ImGui::BeginDisabled(!enabled);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(label);
+            ImGui::SameLine(0.f, ui::Gap());
+            ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+            char inId[64]{};
+            snprintf(inId, sizeof(inId), "##%s_in", id);
+            if (ImGui::DragInt(inId, v, 5, (int)xcat::kHeliSpeedPctMin,
+                               (int)xcat::kHeliSpeedPctMax, "%d%%",
+                               ImGuiSliderFlags_AlwaysClamp)) {
+                persistCore();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", tip);
+            ImGui::SameLine(0.f, ui::Gap() * 0.5f);
+            ImGui::TextDisabled("= %.0f px/s 巡航", 620.f * (float)(*v) / 100.f);
+            const int presets[] = {100, 200, 300, 500};
+            for (int p : presets) {
+                char btnId[64]{};
+                snprintf(btnId, sizeof(btnId), "%dX##%s_p%d", p / 100, id, p);
+                ImGui::SameLine(0.f, ui::Gap() * 0.4f);
+                if (ImGui::Button(btnId)) {
+                    *v = (int)xcat::ClampHeliSpeedPct(static_cast<uint32_t>(p));
+                    persistCore();
+                }
+            }
+            ImGui::EndDisabled();
+        };
+
+        speedRow("F6 手动飞", "home_fly_speed", &gUiManualFlySpeedPct,
+                 "F6 手动飞的速度倍率，与 F5 那份各存各的。\n"
+                 "100% = 巡航 620 px/s。换旋翼前的开环实现等效约 1600（≈2.6X），\n"
+                 "所以默认给 3X，别按 1X 去对旧手感。",
+                 true);
+        speedRow("F5 滑翔", "home_combat_speed", &gUiFlySpeedPct,
+                 "F5 空中贴怪 + 自动赶路共用（都是「自动飞」）。\n"
+                 "仅「空中贴怪」模式下可调；拟人/关闭时置灰。",
+                 approachMode == 0);
+        ImGui::TextDisabled(
+            "范围 %u–%u%%。只放大「意图」速度；撞墙预刹 / 位置包线 / 坠落自救不跟着缩。\n"
+            "实测已验到 5X；更高属外推。推进间隔仍在「调试 → 飞行调试」。",
+            xcat::kHeliSpeedPctMin, xcat::kHeliSpeedPctMax);
     }
     CardGap();
     {
@@ -1657,9 +1649,15 @@ void DrawHomeTab(LaunchUiState& ui) {
     {
         xcat::ui::CardGuard card("##tab_home_combat", "打怪设置");
 
-        if (xcat::ui::OptionCheckbox("智能间隔", &smartInterval)) persistCore();
+        ImGui::BeginDisabled();
+        smartInterval = false;
+        xcat::ui::OptionCheckbox("智能间隔", &smartInterval);
+        ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::TextDisabled("在攻击间隔附近 ±40ms 抖动");
+        ImGui::TextDisabled("当前暂不可用");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("智能间隔暂时未接入，先用上方攻击间隔固定值。");
+        }
 
         ImGui::Spacing();
         ImGui::TextUnformatted("出刀站距");
@@ -3508,7 +3506,7 @@ void DrawBetaTab(LaunchUiState& ui) {
     DesignBanner();
     static bool dropInCombat = false;
     static bool auctionTownBypass = false;
-    static bool frameLock = false;
+    static bool frameLock = true;
     static int frameLockFps = (int)xcat::kFrameLockFpsDefault;
     static bool skipDialog = false;
     static bool autoAccept = true;
@@ -3617,7 +3615,7 @@ void DrawBetaTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "锁 Unity 主循环目标帧率（Application.targetFrameRate），并关闭引擎 vSync。\n"
                 "不修改显示器硬件刷新率。用于高低配显示器对齐打怪节奏。\n"
-                "预设两行：120/240/360/480 与 640/720/860/1000；也可自定义（%u~%u）。默认关。\n"
+                "预设两行：120/240/360/480 与 640/720/860/1000；也可自定义（%u~%u）。默认开·1000。\n"
                 "关闭时还原引擎 vSync=1（游戏无公开 getter，按经典版常见默认）。",
                 xcat::kFrameLockFpsMin, xcat::kFrameLockFpsMax);
         }
@@ -4120,6 +4118,46 @@ void DrawDebugTab(LaunchUiState& ui) {
         ImGui::TextDisabled("注入后由 PayloadStatus SHM 点亮 LP/Map；Cache=测谎 TypeResolve");
         ImGui::TextDisabled("游戏 PID / 注入状态：见顶栏灯与状态条");
     }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_soft_dismiss", "断线弹窗");
+        ImGui::TextDisabled(
+            "自动关窗失败时点一次。安全路径：CloseDialog + SetActive，不点「確認」。");
+        if (ImGui::Button("关闭断线弹窗", ImVec2(-1.f, 0.f))) {
+            if (ui.prefsBinDir.empty()) {
+                notify::PushLocal(/*Warning*/ 2, "soft-dismiss", "下发失败", "无数据目录", 3000);
+            } else {
+                const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
+                if (leds.gamePid == 0) {
+                    notify::PushLocal(/*Warning*/ 2, "soft-dismiss", "下发失败", "需已注入游戏",
+                                     3000);
+                } else {
+                    xcat::PayloadControl c{};
+                    if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) {
+                        xcat::PayloadControlSetDefaults(c);
+                    }
+                    c.softLoginDismissSeq =
+                        c.softLoginDismissSeq == 0 ? 1u : c.softLoginDismissSeq + 1u;
+                    if (c.softLoginDismissSeq == 0) c.softLoginDismissSeq = 1u;
+                    c.writeTickMs = GetTickCount64();
+                    if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                        xcat::log::Ok("App", "softLoginDismissSeq=%u（调试关断线弹窗）",
+                                      c.softLoginDismissSeq);
+                        notify::PushLocal(/*Info*/ 1, "soft-dismiss", "已下发关窗",
+                                         "载荷将 CloseDialog+SetActive", 3500);
+                    } else {
+                        notify::PushLocal(/*Warning*/ 2, "soft-dismiss", "下发失败",
+                                         "写 core 失败", 3000);
+                    }
+                }
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "与软重连自动关窗同路径；不会点「確認」（防误认踢）。\n"
+                "需游戏已注入；结果见 soft_login.log / 气泡。");
+        }
+    }
 #if 0  // 暂时隐藏：自定义 DLL 注入入口（后端 InjectCustomDll 仍保留，改 1 即恢复 UI）
     CardGap();
     {
@@ -4239,7 +4277,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                 "取消：立刻注入（适合不依赖 GA 的工具 DLL）。");
         }
         if (injBusy) {
-            ImGui::TextColored(ImVec4(1.f, 0.75f, 0.25f, 1.f), "注入进行中…");
+            ImGui::TextColored(PrepHintBlue(), "注入进行中…");
         } else if (!lastStatus.empty()) {
             ImGui::TextDisabled("%s", lastStatus.c_str());
         }
@@ -4593,6 +4631,12 @@ void DrawDebugTab(LaunchUiState& ui) {
                     flyHopCdMs = (int)xcat::ClampFlyHopCdMs(
                         disk.flyHopCdMs ? disk.flyHopCdMs : xcat::kFlyHopCdDefaultMs);
                     flyRoute = (int)xcat::ClampFlyMode(disk.flyMode);
+                    // 倍率在首页「飞行速度」卡；此处只跟盘同步共享变量，避免调试页改路线时盖掉倍率。
+                    gUiManualFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
+                        disk.flySpeedPct ? disk.flySpeedPct : xcat::kFlySpeedPctDefault);
+                    gUiFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
+                        disk.simpleCombatFlySpeedPct ? disk.simpleCombatFlySpeedPct
+                                                     : xcat::kHeliSpeedPctDefault);
                     flyDbgTick = disk.writeTickMs;
                     flyDbgLoaded = true;
                 }
@@ -4607,6 +4651,7 @@ void DrawDebugTab(LaunchUiState& ui) {
             c.flyMode = xcat::ClampFlyMode(static_cast<uint32_t>(flyRoute < 0 ? 0 : flyRoute));
             c.flyHopCdMs = xcat::ClampFlyHopCdMs(
                 static_cast<uint32_t>(flyHopCdMs < 0 ? 0 : flyHopCdMs));
+            // 不覆盖 flySpeedPct / simpleCombatFlySpeedPct（首页卡真源）
             flyRoute = (int)c.flyMode;
             flyHopCdMs = (int)c.flyHopCdMs;
             c.writeTickMs = GetTickCount64();
@@ -4614,7 +4659,11 @@ void DrawDebugTab(LaunchUiState& ui) {
         };
 
         xcat::ui::CardGuard card("##tab_dbg_fly", "飞行调试");
-        ImGui::TextDisabled("F6 飞行；武装期禁挂台");
+        ImGui::TextDisabled("F6 飞行（闭环旋翼）；武装期禁挂台");
+        ImGui::TextDisabled("F6/F5 速度倍率：首页「飞行速度」卡（当前手动 %d%% / 滑翔 %d%%）",
+                            gUiManualFlySpeedPct, gUiFlySpeedPct);
+
+        ImGui::Separator();
         ImGui::TextUnformatted("推进路线");
         ImGui::SameLine();
         if (ImGui::RadioButton("路线 A##dbg_fly_nb", flyRoute == (int)xcat::kFlyModeImpactNockBack)) {
@@ -4628,7 +4677,12 @@ void DrawDebugTab(LaunchUiState& ui) {
             persistFlyDbg();
         }
 
-        ImGui::TextUnformatted("推进间隔 (ms)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("换闭环旋翼后这两条路线对飞行已不起作用：\n"
+                              "冲量路由由旋翼内部决定。保留仅为存档兼容。");
+        }
+
+        ImGui::TextUnformatted("目标刷新间隔 (ms)");
         ImGui::SetNextItemWidth(AppDpi_Px(120.f));
         if (ImGui::InputInt("##dbg_fly_hop_cd_in", &flyHopCdMs, 1, 10)) {
             flyHopCdMs = (int)xcat::ClampFlyHopCdMs(
@@ -4650,18 +4704,21 @@ void DrawDebugTab(LaunchUiState& ui) {
             flyHopCdMs = (int)xcat::ClampFlyHopCdMs(static_cast<uint32_t>(v));
             persistFlyDbg();
         };
+        if (ImGui::Button("5ms##dbg_fly_cd5")) bumpCd(5);
+        ImGui::SameLine();
+        if (ImGui::Button("16ms##dbg_fly_cd16")) bumpCd(16);
+        ImGui::SameLine();
         if (ImGui::Button("40ms##dbg_fly_cd40")) bumpCd(40);
         ImGui::SameLine();
         if (ImGui::Button("80ms##dbg_fly_cd80")) bumpCd(80);
         ImGui::SameLine();
         if (ImGui::Button("120ms##dbg_fly_cd120")) bumpCd(120);
         ImGui::SameLine();
-        if (ImGui::Button("160ms##dbg_fly_cd160")) bumpCd(160);
-        ImGui::SameLine();
         if (ImGui::Button("400ms##dbg_fly_cd400")) bumpCd(400);
-        ImGui::TextDisabled("范围 %u–%u，默认 %u（过低会卡主线程）；禁挂台穿层",
+        ImGui::TextDisabled("范围 %u–%u，默认 %u（多久重算一次鼠标世界点）",
                             xcat::kFlyHopCdMinMs, xcat::kFlyHopCdMaxMs,
                             xcat::kFlyHopCdDefaultMs);
+        ImGui::TextDisabled("实测系统时钟一格 15.6ms：低于 16 的设定不会更跟手，走同一条路径。");
     }
     CardGap();
     {

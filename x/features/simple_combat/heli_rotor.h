@@ -67,6 +67,32 @@ struct Setpoint {
     Mode mode = Mode::Off;
     float x = 0.f;
     float y = 0.f;
+    // 目标点自身的移动速度（px/s），**前馈**项，不参与反馈。
+    //
+    // 纯比例控制跟移动目标必然留稳态滞后：desiredV = Kp·err ⇒ err = V目标/Kp。Kp=7 时
+    // 光标扫到 800px/s 就永久落后 114px（BIN 752824 实测中位数正是 114）—— 这就是 F6
+    // 「不跟手」的全部来源，与档位上限无关（当时意图速度 792，两档 1440/1860 都没咬住）。
+    // 把目标速度直接前馈进意图，稳态滞后即归零，且因为是开环项不动闭环极点、不带来振荡。
+    //
+    // 只有「目标在动且知道它多快」的驱动方才该填：F6 跟随鼠标填光标世界速度；F5 打怪
+    // 留 0 —— 它的 setpoint 是在怪之间**跳变**的，差分出来的不是速度而是跳变毛刺。
+    float leadVx = 0.f;
+    float leadVy = 0.f;
+
+    // 自由空域：放弃「把角色关在 AABB⊕slack 里」的那套包线。给**手动驾驶**用。
+    //
+    // 为什么要有这个开关：包线是为**自动**打怪设计的——那时没人盯着，角色必须自己别飞丢。
+    // F6 是用户拿鼠标在开，包线就成了跟驾驶员抢方向盘：他指哪儿、机器往回顶哪儿。
+    // 何况 AABB 只是**可站立面**的包围盒，从来就不等于合法空域（见下方 kEnvSlackYPx 长注），
+    // 拿它当围栏对手动飞是结构性过严。
+    //
+    // 放开的：左右内推、上沿下沉、以及这三个方向的撞墙预刹。它们之外都是纯空气，
+    // 飞出去最坏什么也不发生。
+    //
+    // ★ **不放开向下**：穿出最低台是四个方向里唯一会毁掉会话的（引擎判掉图 → 重载/断线，
+    // 就是 a69130 野猪图那次「越界重拉」）。所以 `st.y < t` 的上拉、底侧预刹与
+    // `kBailoutPx` 深度缴械对所有模式恒生效——这不是限制驾驶员，是拦住唯一那扇会摔死的门。
+    bool unbounded = false;
 };
 
 // ★ 合法空域 = FH AABB ⊕ 近战够怪半径。两轴的余量**不同**，别再合并成一个数。
@@ -109,6 +135,68 @@ constexpr float kEnvSlackYPx = 48.f;
 // 只有 24px，远小于 ±35 的出刀带，所以边沿台上的怪照样够得着。
 constexpr float kEnvReturnInsetPx = 24.f;
 
+// 撞墙预刹的**横向**刹车线，从 AABB 左右沿各自内缩这么多。
+//
+// 为什么需要：`ClampToAirspace` 允许 setpoint 外扩到 rawR + kEnvSlackXPx，预刹却按 rawR
+// 收，于是「setpoint 往外拉 vs 预刹往里顶」的稳态解就是**紧贴 rawR**。BIN bf5f9f 实测
+// 14:02:11 与 14:02:27 两次停在 x=1369（101030001 rawR=1373，净余量 4px，vx 已被刹到 0，
+// setpoint 分别是 1376 / 1381）。判据上没出界，但 4px 等于没有余量：发射一稀疏就出去了。
+// 跳到最右台的野猪（tpl 2230102，同图实测最远 x=1364）能把这个状态稳定复现。
+//
+// 与 4a79e4 那次事故的区别 —— 那次内缩的是 **setpoint**，站位点被顶出出刀带，边沿台上的
+// 怪永远够不着；这里内缩的是**预刹的速度钳位线**，setpoint 照旧指到怪身上，只是人停在
+// 离墙 24px 处出刀。横向出刀带 kHeliFireMaxDx = 120：怪就算站在 rawR 上，从 rawR−24 出刀
+// dx 也只有 24，离禁飞还差 96px，几何上零代价。
+//
+// 只作用在 X 轴。竖直出刀带只有 ±45，且最低/最高台上站着怪是常态，内缩就直接出带——
+// 那正是 4a79e4 的翻车方式，别对称化。
+//
+// 取值与 kEnvReturnInsetPx 同为 24：RTB 也是拉回内缩 24 的位置，两处口径一致，
+// 免得预刹停在 A、RTB 又拽到 B 互相拉扯。
+constexpr float kBrakeInsetXPx = 24.f;
+
+// 撞墙预刹的**竖直**刹车线内缩量。与 X 同为 24，理由同构，但成因值得单独记一笔。
+//
+// ★ 这里修掉的是一类结构性缺陷：**「目标点的钳位线」与「紧急机动的触发线」不可以是同一条**。
+// `ClampToAirspace` 把 setpoint 夹到 b，而 Tick 里 `st.y > b` 就是紧急下压的触发条件 ——
+// 于是「指到图外」的稳态解是**贴着绊线悬停**，过冲 1px 就吃一发满档下压，砸下去几十 px
+// 再被 P 项拽回来，周而复始。这不是调参问题，是 bang-bang 控制器被要求停在自己的开关上。
+//
+// BIN a0ab58 实测（map 101030000，B=345 ⇒ b=393）：34 个遥测样本里 25 个 tgt.y 恰好 =393；
+// send.log 10Hz 轨迹显示平时保持冲量只有 ±124（90ms 的重力配平），却周期性穿插
+// vy=-419 的下压，随后以 -599/-659 砸落 45~65px。用户看到的就是「到点后掉落又吸附」。
+//
+// 为什么内缩**预刹线**而不是钳位线：内缩 setpoint 正是 4a79e4 的翻车方式（站位点被顶出
+// ±45 出刀带，边沿台上的怪永远够不着）。内缩预刹线则不动 setpoint，只让人**停在**离绊线
+// 24px 处 —— 与 X 轴 kBrakeInsetXPx 的取舍完全同构，且几何上同样免费：
+//   · b − 24 = rawB + 24，怪站最高台（rawB）时 dy=24 ≤ kHeliFireMaxDy(45)，在带内 ✓
+//   · t + 24 = rawT − 24，怪站最低台（rawT）时 dy=24 ≤ 45，同样在带内 ✓
+// 也就是说这 24px 全部花在 AABB 之外的纯余量壳层里，战斗几何一分未动。
+//
+// 副产品：两条紧急触发线从此恒在停靠线之外 24px，等于白拿一段迟滞。近界区间交还给
+// 预刹这个**连续**控制器（roomB/roomT 本就随距离线性收速），紧急分支退回它该待的位置 ——
+// 只处理真异常，而不是参与日常闭环。
+constexpr float kBrakeInsetYPx = 24.f;
+
+// 越过空域上沿后的受控下沉速度。
+//
+// 原实现用 `-caps.speed`，与另外三个方向（kEnvPushVx / kRescueClimbVy 都是固定 300）不对称，
+// 而且会**跟着用户的速度倍率放大**：1X 是 480，5X 就是 2400。可上沿之外是纯空气，
+// 「回来」本身没有紧迫性，用户把倍率调高更不该换来更猛的下砸。固定成与其余方向同一口径。
+constexpr float kEnvSinkVy = 300.f;
+
+// 把一个 setpoint 夹进合法空域（AABB ⊕ 两轴 slack，口径同 A 层包线）。
+//
+// 必须夹：A 层包线作用在**玩家实际位置**上，不看 setpoint。指到图外的话，就变成
+// 「包线往回推 vs setpoint 往外拉」的边界震荡——这是抖动类事故的经典成因。
+//
+// ⚠️ 只许**外扩**、绝不许向内缩。曾用 `kLandMarginPx + 48 = 72` 内缩，把 AABB 最外一圈
+// 判成禁区，最低/最高台上的怪全在那一圈里 → 站位点被顶开永远进不了出刀带（BIN 4a79e4）。
+// 那个 72 借自**瞬移落点**的安全内缩，语义不通用：落点要避边界，悬停点不用。
+//
+// 无 bounds 数据时原样返回 true（宁可不夹也不误杀）。
+bool ClampToAirspace(float* x, float* y);
+
 // 一次 tick 的遥测。由 simple_combat 写进 combat.log（BIN 分析都在那张日志里）。
 struct Telemetry {
     bool haveState = false;
@@ -130,14 +218,48 @@ struct Telemetry {
 // 已判定不可救（状态停更 / 深度出界）。飞控据此卸 fh-ban 让引擎接管落地，
 // 别再对着一个死掉的状态空发冲量（bea1c3 断线后仍发了 500ms）。
 bool Bailed();
+// 清缴械闩。断线/切图会 Release 掉 owner，而 Tick 在 !Owns 时早退、永远看不到 onFh，
+// 残留 Bailed 会让 SyncImpactFhBan 永久拒绝 TryAcquire（upload 7848f4：软重连后
+// rotor inbound 但无 heli mode、连发 heli_timeout）。
+void ClearBailed();
 
-void SetSetpoint(const Setpoint& sp);
+// ── 所有权 ────────────────────────────────────────────────────────────
+// 旋翼是**单例**：一份 setpoint、一份发射时钟。而驱动方已经有三个（F5 打怪 /
+// 自动赶路 / F6 手动飞），三方各写各的就是抢方向盘。
+//
+// ★ 为什么不能靠「把另一个暂停掉」解决：`simple_combat::Tick` 里 `TickHeliRotor(now)`
+//   刻意放在 `gExternalPause` 判断**之前**，因为 fh-ban 挂着时停一拍旋翼就是掉一段。
+//   也就是说旋翼**必须一直转**，能换的只有 setpoint 的来源 —— 所以要的是交接，不是暂停。
+//
+// 交接语义：`Acquire` 抢占式，后来者直接接管（手动 F6 压过自动，符合直觉）。被抢走的
+// 一方 `SetSetpoint`/`Tick` 静默变空操作，它自己的循环不用改，也不会把 fh-ban 拆掉。
+// 释放后下一个 `Acquire` 立刻能接回来，中间旋翼一拍没停。
+enum class Owner : unsigned { None = 0, Combat, Travel, Fly };
+
+// 抢占式接管，恒成功。给**手动**入口用（F6）：人按了键就该立刻听人的。
+// 返回值只表示「是否发生了易主」，用于打日志。
+bool Acquire(Owner o);
+
+// 仅当旋翼无主时接管。给**自动**入口用（打怪 / 赶路），每 tick 调都行，很便宜。
+//
+// ★ 自动方必须用这个而不是 Acquire，否则 F6 抢过去的下一拍就被抢回来，两边对拽。
+// ★ 也必须**每 tick 都调**而不是只在武装时调一次：F6 释放后旋翼变无主，若自动方
+//   不主动接回来，fh-ban 还挂着而没人发冲量 = 自由落体。
+bool TryAcquire(Owner o);
+// 交还。仅当当前持有者就是 o 时才生效，避免把别人的所有权误释放。
+void Release(Owner o);
+Owner CurrentOwner();
+const char* OwnerName(Owner o);
+
+// 下面两个都要带 owner：不是持有者时静默 no-op。这是把「三方互斥」从口头约定
+// 变成代码事实的唯一位置，别加无 owner 的重载。
+void SetSetpoint(Owner o, const Setpoint& sp);
 Setpoint CurrentSetpoint();
-void Disarm();  // = SetSetpoint({Mode::Off})
+void Disarm(Owner o);  // = SetSetpoint(o, {Mode::Off})
 
-// 每个 combat tick 都调（内部自控 ~11Hz 发射节奏，不必外部限频）。
-// 返回 true = 本 tick 真发了冲量。out 可为空。
-bool Tick(DWORD now, Telemetry* out);
+// 每个驱动 tick 都调（内部自控 ~11Hz 发射节奏，不必外部限频）。
+// 返回 true = 本 tick 真发了冲量。out 可为空。非持有者恒返回 false。
+bool Tick(Owner o, DWORD now, Telemetry* out);
 
 // F5 开关/换图时清发射时钟与符号自检状态。
 void Reset();
@@ -145,15 +267,23 @@ void Reset();
 // 飞行速度倍率。1.0 = 基准（Cruise 620 / Rtb 660 / Station 480 / Hold 360）。
 //
 // 只作用于 `CapsFor()` 给出的「意图」上限，**不碰**下面这些：
-//   · 作动器上限 kMaxCmdVx/Vy(1700) —— 它是硬件面，倍率再高也越不过去
-//   · kMaxFallVy 落速闸、撞墙预刹、深度缴械 —— 三道独立防坠机制。跟着倍率缩会让
+//   · 作动器上限 kMaxCmdVx/Vy —— 硬件面，倍率再高也越不过去（它同时也是最高可达速度）
+//   · 撞墙预刹、位置包线、深度缴械 —— 判据是位置与时间，与速度无关。跟着倍率缩会让
 //     低倍率反而更容易掉出图（救援权限被一起削），这是反直觉但必须守住的边界。
 //   · Rtb 档取 `max(基准, 基准×倍率)` —— 只许更快、不许更慢。自救不该因为用户
 //     想慢点打怪就变弱。
+// 唯一**必须**跟随倍率的是落速闸 `FallGateVy()`：它是「想快降 vs 失控」的判别式而非
+// 绝对阈值，钉死会在高倍率下反号成极限环（BIN 2d6176 抖动事故）。
 //
-// 越界会被 Clamp 到 [0.25, 3.0]。3.0 以上无意义：Cruise 620×3=1860 已被作动器 1700 截断。
-void SetSpeedScale(float scale);
-float SpeedScale();
+// 越界会被 Clamp 到 [kSpeedScaleMin, kSpeedScaleMax]。上限由**可救性**反解
+// （kIntentCeilV / Rtb 基准 = 5.17X），不是手写常数——曾经这里写死 3.0、面板写 500，
+// 结果实机只跑 3.00X（BIN 2e63d5）。改动上限请改 kMaxCmdVy，别在这里加字面量。
+//
+// 倍率**按 Owner 各存一份**：手动飞和自动打怪对手感的诉求不同（F6 旧实现等效约
+// 1600 px/s，比 F5 的 Cruise 620 快得多，共用一个旋钮必然有一方别扭）。
+// 生效的是**当前持有者**那一份，交接时自动跟着换，不需要谁去存档/恢复。
+void SetSpeedScale(Owner o, float scale);
+float SpeedScale(Owner o);
 
 const char* ModeName(Mode m);
 

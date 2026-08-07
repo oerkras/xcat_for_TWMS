@@ -27,6 +27,8 @@ struct HttpLoginResult {
     std::wstring ott;       // OTT:944:Login:... 或含 OTT 的 URL
     GalaxyTicket ticket;    // 若已换票则填好；否则调用方再 FetchGalaxyTicketFromOtt
     bool ticketFilled = false;
+    // GamaPass CDP：落到 accounts.gamania.com/error（外层干净重开用；其它路径保持 false）
+    bool accountsOauthError = false;
 };
 
 using HttpLoginLogFn = std::function<void(const std::wstring& line)>;
