@@ -10,6 +10,7 @@ namespace ccu {
 struct CcuStatus {
     long long worldChannelOnline = -1;  // -1 = 尚未采到
     int worldChannelCount = 0;
+    int32_t worldId = 0;  // 快照所属分区；0=未知
     uint32_t worldChannelAgeSec = 0;
     int fillKnown = 0;       // 已知人数的频道数（login ChannelItem 表）
     int fillPrefer = 0;      // 其中未满且非成人

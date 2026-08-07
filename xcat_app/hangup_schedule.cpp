@@ -22,6 +22,8 @@ namespace xcat::app::hangup_schedule {
 namespace {
 
 constexpr wchar_t kClassicExe[] = L"Maplestory_Classic.exe";
+constexpr wchar_t kNgmExe[] = L"NGM.exe";
+constexpr wchar_t kNgm64Exe[] = L"NGM64.exe";
 constexpr uint32_t kHangupStartCooldownSec = 120;
 // Async clean relaunch (UI-thread state machine; no long Sleep in Tick).
 constexpr uint64_t kRelaunchGoneWaitMs = 15000;
@@ -98,6 +100,20 @@ bool IsHourActiveImpl(uint32_t mask, int hour) {
 
 DWORD ClassicPid() { return xcat::FindProcessIdByName(kClassicExe); }
 bool ClassicPresent() { return ClassicPid() != 0; }
+bool NgmPresent() {
+    return xcat::FindProcessIdByName(kNgmExe) != 0 || xcat::FindProcessIdByName(kNgm64Exe) != 0;
+}
+// 干净重拉须清掉 Classic + NGM：只杀游戏会留下旧 NGM，下一轮官网 Main 常不再拉新经典版。
+bool LaunchChainPresent() { return ClassicPresent() || NgmPresent(); }
+unsigned KillLaunchChain(const char* why, const char* logTag = "Watchdog") {
+    const unsigned classic = xcat::KillProcessesByExeName(kClassicExe);
+    const unsigned ngm64 = xcat::KillProcessesByExeName(kNgm64Exe);
+    const unsigned ngm = xcat::KillProcessesByExeName(kNgmExe);
+    xcat::log::Info(logTag && logTag[0] ? logTag : "Watchdog",
+                    "kill launch-chain (%s): Classic x%u NGM64 x%u NGM x%u",
+                    why && why[0] ? why : "launch-chain", classic, ngm64, ngm);
+    return classic + ngm64 + ngm;
+}
 bool RelaunchInFlight() { return g.relaunch.phase != RelaunchPhase::None; }
 
 void PushStatus(LaunchUiState& ui, const char* line, const char* status) {
@@ -144,7 +160,7 @@ void ArmSessionIfLive(DWORD livePid, bool handshakeOk) {
     if (handshakeOk) g.sessionArmed = true;
 }
 
-// Begin clean relaunch: kill Classic, wait-gone, settle, then one-click.
+// Begin clean relaunch: kill Classic+NGM, wait-gone, settle, then one-click.
 // Returns false if busy/cooldown/WebView not ready (does not consume cooldown).
 bool BeginCleanRelaunch(LaunchUiState& ui, uint64_t now, uint32_t cooldownSec,
                         const char* logLine, const char* statusLine) {
@@ -180,8 +196,7 @@ bool BeginCleanRelaunch(LaunchUiState& ui, uint64_t now, uint32_t cooldownSec,
     g.lastCooldownBlockLogTick = 0;
     ClearSessionTrack();
 
-    const unsigned n = xcat::KillProcessesByExeName(kClassicExe);
-    xcat::log::Info("Watchdog", "clean relaunch: kill Classic x%u", n);
+    (void)KillLaunchChain("begin");
 
     g.relaunch = {};
     g.relaunch.phase = RelaunchPhase::WaitingGone;
@@ -189,7 +204,7 @@ bool BeginCleanRelaunch(LaunchUiState& ui, uint64_t now, uint32_t cooldownSec,
     if (logLine) strncpy_s(g.relaunch.logLine, logLine, _TRUNCATE);
     if (statusLine) strncpy_s(g.relaunch.statusLine, statusLine, _TRUNCATE);
     PushStatus(ui, g.relaunch.logLine,
-               statusLine && statusLine[0] ? statusLine : "守护模式：正在结束旧游戏…");
+               statusLine && statusLine[0] ? statusLine : "守护模式：正在结束旧游戏与 NGM…");
     g.mode = UiMode::Starting;
     g.launchBusy = true;  // block hangup parallel start
 
@@ -197,7 +212,7 @@ bool BeginCleanRelaunch(LaunchUiState& ui, uint64_t now, uint32_t cooldownSec,
     const char* body =
         (statusLine && statusLine[0]) ? statusLine
         : (logLine && logLine[0])     ? logLine
-                                     : "正在杀死游戏并干净重拉";
+                                     : "正在杀死游戏/NGM 并干净重拉";
     notify::PushLocal(/*Warning*/ 2, "watchdog-clean-relaunch", "守护干净重拉", body, 7000);
     return true;
 }
@@ -208,25 +223,27 @@ void PumpCleanRelaunch(LaunchUiState& ui, uint64_t now) {
 
     switch (g.relaunch.phase) {
     case RelaunchPhase::WaitingGone: {
-        if (!ClassicPresent()) {
+        if (!LaunchChainPresent()) {
             g.relaunch.phase = RelaunchPhase::Settling;
             g.relaunch.phaseSince = now;
             PushStatus(ui, nullptr, "守护模式：旧进程已退出，冷却后重拉…");
-            xcat::log::Info("Watchdog", "clean relaunch: Classic gone → settle %llums",
+            xcat::log::Info("Watchdog", "clean relaunch: launch-chain gone → settle %llums",
                             static_cast<unsigned long long>(kRelaunchSettleMs));
             break;
         }
         const uint64_t waited = now >= g.relaunch.phaseSince ? now - g.relaunch.phaseSince : 0;
         if (!g.relaunch.retriedKill && waited >= kRelaunchRetryKillAtMs) {
             g.relaunch.retriedKill = true;
-            const unsigned n = xcat::KillProcessesByExeName(kClassicExe);
-            xcat::log::Warn("Watchdog", "clean relaunch: retry kill Classic x%u", n);
+            (void)KillLaunchChain("retry");
         }
         if (waited >= kRelaunchGoneWaitMs) {
-            xcat::log::Warn("Watchdog",
-                            "clean relaunch aborted: Classic still present after %llums",
-                            static_cast<unsigned long long>(kRelaunchGoneWaitMs));
-            PushStatus(ui, "[Watchdog] 旧游戏未清净，已中止重拉",
+            xcat::log::Warn(
+                "Watchdog",
+                "clean relaunch aborted: launch-chain still present after %llums "
+                "(Classic=%u NGM=%u)",
+                static_cast<unsigned long long>(kRelaunchGoneWaitMs),
+                ClassicPresent() ? 1u : 0u, NgmPresent() ? 1u : 0u);
+            PushStatus(ui, "[Watchdog] 旧游戏/NGM 未清净，已中止重拉",
                        "守护模式：旧进程未退出，禁止重拉");
             ClearRelaunchJob();
             g.launchBusy = msc::weblogin::IsBusy();
@@ -237,19 +254,22 @@ void PumpCleanRelaunch(LaunchUiState& ui, uint64_t now) {
         break;
     }
     case RelaunchPhase::Settling: {
-        if (ClassicPresent()) {
+        if (LaunchChainPresent()) {
             // Respawned / kill raced — back to waiting.
             g.relaunch.phase = RelaunchPhase::WaitingGone;
             g.relaunch.phaseSince = now;
             g.relaunch.retriedKill = false;
-            xcat::log::Warn("Watchdog", "clean relaunch: Classic reappeared during settle");
+            xcat::log::Warn("Watchdog",
+                            "clean relaunch: launch-chain reappeared during settle "
+                            "(Classic=%u NGM=%u)",
+                            ClassicPresent() ? 1u : 0u, NgmPresent() ? 1u : 0u);
             break;
         }
         if (now - g.relaunch.phaseSince < kRelaunchSettleMs) break;
 
         // Final confirm (fengxing: gone=false forbids relaunch).
-        if (ClassicPresent()) {
-            PushStatus(ui, "[Watchdog] settle 后仍有 Classic，中止重拉",
+        if (LaunchChainPresent()) {
+            PushStatus(ui, "[Watchdog] settle 后仍有 Classic/NGM，中止重拉",
                        "守护模式：旧进程未清净");
             ClearRelaunchJob();
             g.launchBusy = false;
@@ -514,11 +534,9 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     if (hangupOn && !g.launchBusy && !RelaunchInFlight()) {
         if (!scheduleActive) {
             g.mode = UiMode::OffHour;
-            if (ClassicPresent()) {
-                const unsigned n = xcat::KillProcessesByExeName(kClassicExe);
-                xcat::log::Info("Hangup", "schedule off->kill Classic x%u hour=%d", n,
-                                g.localHour);
-                PushStatus(ui, "[Hangup] 非挂机时段，结束游戏", "挂机时段：非挂机（已关机）");
+            if (LaunchChainPresent()) {
+                (void)KillLaunchChain("hangup-off", "Hangup");
+                PushStatus(ui, "[Hangup] 非挂机时段，结束游戏与 NGM", "挂机时段：非挂机（已关机）");
                 ClearSessionTrack();
             }
         } else if (!ClassicPresent()) {
@@ -531,40 +549,55 @@ void Tick(LaunchUiState& ui, bool appExiting) {
             if (!deferToWatchdog &&
                 !CooldownBlocks(now, g.lastStartTick, kHangupStartCooldownSec) &&
                 (attachMode || msc::weblogin::CanStartOneClick())) {
-                g.lastStartTick = now;
-                g.mode = UiMode::Starting;
-                if (attachMode) {
-                    xcat::log::Info("Hangup",
-                                    "schedule on->attach-watch hour=%d mask=0x%06X", g.localHour,
-                                    g.mask);
-                    PushStatus(ui, "[Hangup] 挂机时段：请手动开游戏（监视自动注入）",
-                               "挂机时段：监视中，请手动拉起游戏");
-                    if (!attach_inject::IsWatching()) {
-                        (void)attach_inject::StartWatch();
+                // 冷启前清残留 NGM：否则官网 Main 常不再拉新经典版（与干净重拉同根）。
+                bool ngmBlocking = false;
+                if (NgmPresent()) {
+                    (void)KillLaunchChain("hangup-cold", "Hangup");
+                    if (NgmPresent()) {
+                        ngmBlocking = true;
+                        g.mode = UiMode::Starting;
+                        PushStatus(ui, "[Hangup] 挂机时段：正在清理残留 NGM…",
+                                   "挂机时段：清理 NGM 后拉起…");
                     }
-                    ui.pendingAutoLaunch = false;
-                    ui.autoLaunchNotBeforeMs = 0;
-                } else {
-                    if (attach_inject::GetLaunchMode() ==
-                        attach_inject::LaunchMode::GamaPassAuto) {
-                        msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
-                        xcat::log::Info("Hangup", "schedule on->gamapass hour=%d mask=0x%06X",
-                                        g.localHour, g.mask);
-                        PushStatus(ui, "[Hangup] 挂机时段，GAMA PASS 自动启动并注入",
-                                   "挂机时段：正在按时段拉起…");
-                    } else {
-                        if (msc::weblogin::GetAuthStrategy() ==
-                            msc::weblogin::AuthStrategy::GamaPassAuto) {
-                            msc::weblogin::SetAuthStrategy(
-                                msc::weblogin::AuthStrategy::HttpFirst);
+                }
+                if (!ngmBlocking) {
+                    g.lastStartTick = now;
+                    g.mode = UiMode::Starting;
+                    if (attachMode) {
+                        xcat::log::Info("Hangup",
+                                        "schedule on->attach-watch hour=%d mask=0x%06X", g.localHour,
+                                        g.mask);
+                        PushStatus(ui, "[Hangup] 挂机时段：请手动开游戏（监视自动注入）",
+                                   "挂机时段：监视中，请手动拉起游戏");
+                        if (!attach_inject::IsWatching()) {
+                            (void)attach_inject::StartWatch();
                         }
-                        xcat::log::Info("Hangup", "schedule on->http-oneclick hour=%d mask=0x%06X",
-                                        g.localHour, g.mask);
-                        PushStatus(ui, "[Hangup] 挂机时段，gamania (HK) 自动启动并注入",
-                                   "挂机时段：正在按时段拉起…");
+                        ui.pendingAutoLaunch = false;
+                        ui.autoLaunchNotBeforeMs = 0;
+                    } else {
+                        if (attach_inject::GetLaunchMode() ==
+                            attach_inject::LaunchMode::GamaPassAuto) {
+                            msc::weblogin::SetAuthStrategy(
+                                msc::weblogin::AuthStrategy::GamaPassAuto);
+                            xcat::log::Info("Hangup", "schedule on->gamapass hour=%d mask=0x%06X",
+                                            g.localHour, g.mask);
+                            PushStatus(ui, "[Hangup] 挂机时段，GAMA PASS 自动启动并注入",
+                                       "挂机时段：正在按时段拉起…");
+                        } else {
+                            if (msc::weblogin::GetAuthStrategy() ==
+                                msc::weblogin::AuthStrategy::GamaPassAuto) {
+                                msc::weblogin::SetAuthStrategy(
+                                    msc::weblogin::AuthStrategy::HttpFirst);
+                            }
+                            xcat::log::Info("Hangup",
+                                            "schedule on->http-oneclick hour=%d mask=0x%06X",
+                                            g.localHour, g.mask);
+                            PushStatus(ui, "[Hangup] 挂机时段，gamania (HK) 自动启动并注入",
+                                       "挂机时段：正在按时段拉起…");
+                        }
+                        if (LaunchPanel_StartOneClick(ui, /*honorStrategyPrep=*/false))
+                            g.launchBusy = true;
                     }
-                    if (LaunchPanel_StartOneClick(ui, /*honorStrategyPrep=*/false))
-                        g.launchBusy = true;
                 }
             } else {
                 g.mode = UiMode::OnHour;
@@ -708,20 +741,39 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     input.mapId = input.mapIdValid ? st.mapId : 0;
 
     // 服务器踢线/断线边沿 → hard-fail → 干净重拉（不依赖「自动打怪」）。
+    // soft_login 试连观察窗内推迟；成功则吞掉本轮 disconnectSeq，避免 hold 结束后误重拉。
     if (g.sessionArmed && stFresh) {
+        if (st.version >= 8u && st.softLoginResult == 1u &&
+            st.disconnectSeq > g.lastConsumedDisconnectSeq) {
+            xcat::log::Info("Watchdog",
+                            "soft_login success — absorb disconnectSeq %u->%u (no clean relaunch)",
+                            g.lastConsumedDisconnectSeq, st.disconnectSeq);
+            g.lastConsumedDisconnectSeq = st.disconnectSeq;
+            g.lastLoggedDisconnectSeq = st.disconnectSeq;
+        }
         if (!g.haveDisconnectBaseline) {
             g.lastConsumedDisconnectSeq = st.disconnectSeq;
             g.haveDisconnectBaseline = true;
         } else if (st.disconnectSeq > g.lastConsumedDisconnectSeq) {
-            input.reloginHardFailed = true;
-            input.hardFailCode = xcat::kHardFailServerKick;
-            if (g.lastLoggedDisconnectSeq != st.disconnectSeq) {
-                g.lastLoggedDisconnectSeq = st.disconnectSeq;
-                xcat::log::Warn(
-                    "Watchdog",
-                    "server kick/disconnect seq %u->%u state=%d err=%d",
-                    g.lastConsumedDisconnectSeq, st.disconnectSeq, st.sessionState,
-                    st.pendingErrorCode);
+            if (st.version >= 8u && st.softLoginHold != 0u) {
+                if (g.lastLoggedDisconnectSeq != st.disconnectSeq) {
+                    g.lastLoggedDisconnectSeq = st.disconnectSeq;
+                    xcat::log::Info(
+                        "Watchdog",
+                        "soft_login hold — defer kick relaunch seq=%u state=%d err=%d",
+                        st.disconnectSeq, st.sessionState, st.pendingErrorCode);
+                }
+            } else {
+                input.reloginHardFailed = true;
+                input.hardFailCode = xcat::kHardFailServerKick;
+                if (g.lastLoggedDisconnectSeq != st.disconnectSeq) {
+                    g.lastLoggedDisconnectSeq = st.disconnectSeq;
+                    xcat::log::Warn(
+                        "Watchdog",
+                        "server kick/disconnect seq %u->%u state=%d err=%d",
+                        g.lastConsumedDisconnectSeq, st.disconnectSeq, st.sessionState,
+                        st.pendingErrorCode);
+                }
             }
         }
     }

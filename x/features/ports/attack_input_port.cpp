@@ -1335,11 +1335,19 @@ bool HoldWalk(int inputX) {
     if (inputX != -1 && inputX != 1) return StopWalk();
 
     ArmWalkTick();
-    gWalkHeld.store(inputX, std::memory_order_release);
-
     const int mode = gWalkDriveMode.load(std::memory_order_relaxed);
     const bool packMode = (mode == 1);
     const bool kbdMode = (mode == 3);
+
+    // 同向已锁存：靠 InputFrameTick Repush 续按，勿每 combat tick 再 InvokeAndWait
+    // 抢主线程（拟人进带抖动时 Hold+Stop 齐喷 → ImGui/泵卡死，upload 48610f）。
+    const int held = gWalkHeld.load(std::memory_order_acquire);
+    if (held == inputX && kbdMode && gWalkTickArmed.load(std::memory_order_acquire)) {
+        return true;
+    }
+
+    gWalkHeld.store(inputX, std::memory_order_release);
+
     bool osOk = false;  // 仅在真的按了 OS 键时才置位，否则 Hold 日志里的 os= 会骗人
     if (packMode || kbdMode) {
         ClearOsWalkKeys();
@@ -1408,6 +1416,9 @@ bool StopWalk() {
     const int prev = gWalkHeld.exchange(0, std::memory_order_acq_rel);
     ClearOsWalkKeys();
 
+    // 没在走：禁止空转 InvokeAndWait（Impact 空路径 / 重复 Stop 曾冻死 ImGui，见模块设计）。
+    if (prev == 0) return true;
+
     if (runtime::main_thread::Ensure()) {
         FaceJob job{};
         job.inputX = 0;
@@ -1420,14 +1431,12 @@ bool StopWalk() {
             },
             &job, kFaceJobWaitMs, runtime::main_thread::JobPrio::High);
     }
-    if (prev != 0) {
-        static uint32_t sStop = 0;
-        if (sStop < 32) {
-            ++sStop;
-            LogLine("walkW Stop prev=%d mode=%d keep_armed=%d", prev,
-                    gWalkDriveMode.load(std::memory_order_relaxed),
-                    gWalkTickArmed.load(std::memory_order_relaxed) ? 1 : 0);
-        }
+    static uint32_t sStop = 0;
+    if (sStop < 32) {
+        ++sStop;
+        LogLine("walkW Stop prev=%d mode=%d keep_armed=%d", prev,
+                gWalkDriveMode.load(std::memory_order_relaxed),
+                gWalkTickArmed.load(std::memory_order_relaxed) ? 1 : 0);
     }
     return true;
 }

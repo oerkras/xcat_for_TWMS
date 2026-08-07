@@ -12,6 +12,9 @@ namespace kick_sniff {
 //   KICK_CALL_EDGE=1 → MethodInfo swap Close/Disconnect/OnDisconnect/set_SessionState (via=MI)
 //   KICK_HWBP=1      → DR execute/write on call-edge + SessionState (via=HWBP)
 //   KICK_SEND=1      → DR on SendPacket → send.log
+//                      （等价开关：把 send_probe.on 放在 kick.log 同目录或 DLL 同目录，
+//                        免设环境变量、不受启动顺序影响；删文件即关）
+//   GALAXY_TOKEN_PROBE / galaxy_token_probe.on → 断线/连上时读 PlayerPrefs Galaxy_*（见 galaxy_token_probe）
 // No GameAssembly .text patch.
 //
 // Offset truth table (TW ≠ CMS): docs/features/kick_sniff/断线错误码.md

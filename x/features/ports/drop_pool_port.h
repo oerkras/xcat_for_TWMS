@@ -1,7 +1,8 @@
 #pragma once
 // drop_pool_port — Classic TWMS DropPool 只读 + 宠物吸物 + 角色脚边拾取
 // 真源：docs/features/pet_loot/P0a_锚点复核.md
-// 正式吸物：.rdata 矩形包 → Pet.TryPickUpDrop → ByPet → Pet.Send（禁止手组包 / 改 GA .text）
+// 宠吸：.rdata 矩形包 → Pet.TryPickUpDrop → ByPet → Pet.Send（禁止手组包 / 改 GA .text）
+// 脚下：只自动触发原生 DropPool.TryPickUpDrop(userPos)；不盖戳、不清闸、不扩盒
 
 #include <cstdint>
 #include <unordered_set>
@@ -94,9 +95,7 @@ struct FootResult {
     int dropCount = 0;
     int dropCountAfter = 0;
     int dropsDelta = 0;
-    int nearCount = 0;
-    int nearWant = 0;
-    int stamped = 0;
+    bool poolFellSinceLast = false;
     float userX = 0.f;
     float userY = 0.f;
     uint32_t petSendHits = 0;
@@ -156,8 +155,8 @@ bool CollectProbe(ProbeSnapshot& out, float nearHalfW, float nearHalfH);
 
 bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumResult& out);
 
-// 主线程：盖黑名单 LastTryPickUp → DropPool.TryPickUpDrop(userPos)
-bool TryFootPickup(float halfW, float halfH, const SkipIds* skipIds, FootResult& out);
+// 主线程：仅 DropPool.TryPickUpDrop(角色位)；范围/门禁全交给游戏原生
+bool TryFootPickup(FootResult& out);
 
 // 主线程：枚举池 → 复刻门禁 → DropPool.SendDropPickUpRequest(角色真实位置, dropId, 0)
 // maxSend 建议 1（对齐 ByPet 一调一件）；吞吐靠外层 burst 连调，别在同一次 Invoke 里连发。

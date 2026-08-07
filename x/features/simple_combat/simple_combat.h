@@ -61,11 +61,11 @@ void ReleaseExternalPause();
 // ExternalPause 永远进不去，定时键/BUFF 会 defer 到死（BIN 0.1.40）。
 // 注：现行 SettleMs*=0 时 TP 后进 Aim 不进 Settling，故运行时几乎只剩 map arm。
 bool IsTeleportTransit();
-// 吸物时分复用：未挂机恒 true；挂机中仅换怪/贴怪等待与落地脉冲窗为 true。
-// Aim/Firing/Recover 为 false；拟人 HoldWalk 中亦为 false（防捡物打断走路）。
+// 吸物时分复用：未挂机恒 true；挂机中「不出刀就吸」——仅 Aim/Firing/Recover 为 false。
+// 拟人 MoveTo / Settling / Acquire / Idle 均放行（charVac 直调官方 Send，不走捡物键）。
 // pet_loot 据此开门；勿与 IsTeleportTransit 混用。
 bool IsLootPulseActive();
-// 脉冲代数：pet_loot 边沿检测用（Settling 武装 / 从关到开续期时递增）。
+// 脉冲代数：pet_loot 边沿检测用（离开出刀链 / Settling 武装时递增）。
 uint32_t LootPulseGeneration();
 void ResetForMapChange();
 

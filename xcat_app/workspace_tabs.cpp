@@ -656,6 +656,7 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool watchdog = true;
     static int noExpSec = static_cast<int>(xcat::kWatchdogNoExpSecDefault);
     static int cooldownSec = static_cast<int>(xcat::kWatchdogCooldownSecDefault);
+    static bool softLoginProbe = false;
     static bool coreLoaded = false;
     static uint64_t lastSeenTick = 0;
 
@@ -745,6 +746,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                     xcat::ClampWatchdogNoExpSec(disk.launcherWatchdogNoExpSec));
                 cooldownSec = static_cast<int>(
                     xcat::ClampWatchdogCooldownSec(disk.launcherWatchdogCooldownSec));
+                // 合并：旧版曾分拆 galaxyTokenProbe；任一开过则视为软重连开。
+                softLoginProbe = disk.softLoginProbe != 0 || disk.galaxyTokenProbe != 0;
                 // 不从 core.autoSell* 灌 UI：真源 [auto_supply]
                 lastSeenTick = disk.writeTickMs;
                 coreLoaded = true;
@@ -853,6 +856,9 @@ void DrawHomeTab(LaunchUiState& ui) {
             xcat::ClampWatchdogNoExpSec(static_cast<uint32_t>(noExpSec));
         c.launcherWatchdogCooldownSec =
             xcat::ClampWatchdogCooldownSec(static_cast<uint32_t>(cooldownSec));
+        // 软重连开关同时武装 Galaxy Token 采证（只读 prefs）。
+        c.softLoginProbe = softLoginProbe ? 1u : 0u;
+        c.galaxyTokenProbe = softLoginProbe ? 1u : 0u;
         // 补给开关/店图不写 core：真源 [auto_supply]（persistAsup）。
         c.writeTickMs = GetTickCount64();
         if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
@@ -860,7 +866,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             xcat::log::Ok("App",
                           "已下发 core：测谎=%d 无敌=%d 自动进=%d 加血=%d@%d 加蓝=%d@%d 召宠=%d "
                           "有粮才召=%d 打怪=%d 追怪=%s 间隔=%d 贴怪瞬移=0 LiveStep=%d "
-                          "分区=%d 槽=%d 守护=%d "
+                          "分区=%d 槽=%d 守护=%d softLogin=%d "
                           "读怪=%d 终极一击=%d 技能满级=%d 加速=%d",
                           autoLie ? 1 : 0, invincible ? 1 : 0, autoEnter ? 1 : 0,
                           hpPotion ? 1 : 0, hpThresholdPct, mpPotion ? 1 : 0, mpThresholdPct,
@@ -870,6 +876,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                                               : "关闭",
                           attackMs,
                           gUiCombatLiveStep ? 1 : 0, worldId, charSlot, watchdog ? 1 : 0,
+                          softLoginProbe ? 1 : 0,
                           mobScanIntervalMs, gUiFinalAttackForce ? 1 : 0, gUiSkillMaxLevel ? 1 : 0,
                           attackAccel ? 1 : 0);
         } else {
@@ -1336,11 +1343,20 @@ void DrawHomeTab(LaunchUiState& ui) {
                 ImGui::TextDisabled("%s", hangup_schedule::FormatWatchdogTimerText(snap).c_str());
             }
         }
+
+        if (xcat::ui::OptionCheckbox("软重连试连", &softLoginProbe)) persistCore();
+        ImGui::SetItemTooltip(
+            "采证+软重进（默认关）。断线后试 ConnectLogin、卸弹窗、重跑自动进游戏；\n"
+            "观察窗内推迟守护干净重拉，进图成功则吞 disconnectSeq。\n"
+            "同时只读采样 Galaxy_* 写 galaxy_token.log（仅 len+前缀，不清登录态）。\n"
+            "日志 soft_login.log / galaxy_token.log。\n"
+            "亦可用 soft_login_probe.on / SOFT_LOGIN_PROBE=1\n"
+            "（或旧 marker galaxy_token_probe.on 仅采证）。");
     }
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_home_pickup", "拾物");
-        // 0=关 1=脚下 2=宠吸（3200×2400）3=人物直吸（官方 Send，不靠宠；单选互斥）
+        // 0=关 1=脚下 2=宠吸（人物附近 300×200）3=人物直吸（官方 Send，不靠宠；单选互斥）
         enum : int { kLootOff = 0, kLootFoot = 1, kLootPet = 2, kLootChar = 3 };
         static bool petLootLoaded = false;
         static int lootMode = kLootOff;
@@ -1387,13 +1403,14 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (ui.prefsBinDir.empty()) return;
             const bool footLoot = (lootMode == kLootFoot);
             const bool petLoot = (lootMode == kLootPet);
-            const bool charLoot = (lootMode == kLootChar);
+            const bool charLoot =
+                xcat::kPetLootCharVacUserEnabled && (lootMode == kLootChar);
             xcat::PetLootConfig cfg{};
             (void)xcat::ReadPetLoot(ui.prefsBinDir.c_str(), cfg);
             cfg.enabled = petLoot ? 1u : 0u;
             cfg.footEnabled = footLoot ? 1u : 0u;
             cfg.charVacEnabled = charLoot ? 1u : 0u;
-            // 宠吸固定近图真空；关宠时清 mapVacuum，避免旧 ini 残留误导
+            // 宠吸固定人物附近真空；关宠时清 mapVacuum，避免旧 ini 残留误导
             cfg.mapVacuumEnabled = petLoot ? 1u : 0u;
             cfg.intervalMs = xcat::PetLootClampIntervalMs(
                 lootIntervalMs > 0 ? static_cast<uint32_t>(lootIntervalMs) : 0u);
@@ -1427,10 +1444,12 @@ void DrawHomeTab(LaunchUiState& ui) {
                 body = "已切换为脚下拾取（与宠吸/人物直吸互斥）。";
             } else if (next == kLootPet) {
                 kind = 2;
-                body = "已切换为宠吸（3200×2400 .rdata 真空）。";
+                body = "已切换为宠吸（人物附近 300×200 .rdata 真空）。";
             } else if (next == kLootChar) {
                 kind = 2;
-                body = "已切换为人物直吸（官方送包，1500×1500，不靠宠物）。";
+                body = xcat::kPetLootCharVacUserEnabled
+                           ? "已切换为人物直吸（官方送包，人物附近 300×200，不靠宠物）。"
+                           : "人物直吸暂未开放。";
             }
             notify::PushLocal(kind, "petloot-mode", "拾物模式", body, 4200);
         };
@@ -1443,7 +1462,9 @@ void DrawHomeTab(LaunchUiState& ui) {
                     const bool diskPet = disk.enabled != 0;
                     const bool diskFoot = disk.footEnabled != 0;
                     const bool diskMap = disk.mapVacuumEnabled != 0;
-                    const bool diskChar = disk.charVacEnabled != 0;
+                    // ReadPetLoot 已 Normalize：用户面关闭时 diskChar 恒为 0
+                    const bool diskChar =
+                        xcat::kPetLootCharVacUserEnabled && disk.charVacEnabled != 0;
                     const int activeModes =
                         (diskPet || diskMap ? 1 : 0) + (diskChar ? 1 : 0) + (diskFoot ? 1 : 0);
                     const bool conflict = activeModes > 1;
@@ -1489,16 +1510,36 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
 
         {
+            // 用户面禁用人物直吸：旧会话/静态态若仍停在该档，落回关闭并写盘清 ini。
+            if (!xcat::kPetLootCharVacUserEnabled && lootMode == kLootChar) {
+                const int prevMode = lootMode;
+                lootMode = kLootOff;
+                notifyLootMode(prevMode, lootMode);
+                persistPetLoot();
+            }
             const int prevMode = lootMode;
             bool changed = false;
             if (xcat::ui::OptionRadioButton("关闭", &lootMode, kLootOff)) changed = true;
             ImGui::SameLine();
             if (xcat::ui::OptionRadioButton("脚下拾取", &lootMode, kLootFoot)) changed = true;
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "自动触发游戏原生脚下拾取（DropPool.TryPickUpDrop）。\n"
+                    "不扩盒、不清闸、不盖黑名单戳；范围与手捡一致（约 50×60）。");
+            }
             ImGui::SameLine();
             if (xcat::ui::OptionRadioButton("宠吸", &lootMode, kLootPet)) changed = true;
             ImGui::SameLine();
+            ImGui::BeginDisabled(!xcat::kPetLootCharVacUserEnabled);
             if (xcat::ui::OptionRadioButton("人物直吸", &lootMode, kLootChar)) changed = true;
+            ImGui::EndDisabled();
+            if (!xcat::kPetLootCharVacUserEnabled &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("人物直吸暂未开放（实现保留，稍后上架）。");
+            }
             if (changed) {
+                if (!xcat::kPetLootCharVacUserEnabled && lootMode == kLootChar)
+                    lootMode = kLootOff;
                 notifyLootMode(prevMode, lootMode);
                 persistPetLoot();
             }
@@ -1544,7 +1585,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (xcat::ui::OptionCheckbox("启用拾取黑名单", &pickupBlacklist)) persistPetLoot();
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputTextWithHint("##bl",
-                                     "itemId/关键词（逗号分隔；金币填 2147483647；脚边+宠+人物共用）",
+                                     "itemId/关键词（逗号分隔；金币填 2147483647；宠吸/人物共用；脚下走原生不读）",
                                      blacklistKw, sizeof(blacklistKw))) {
             // debounce on deactivate / checkbox
         }
@@ -2744,6 +2785,7 @@ void DrawReloginTab(LaunchUiState& ui) {
     static bool detect = false;
     static bool stopCombat = true;
     static bool channelHop = true;
+    static bool gmEscalate = true;
     static bool hideOthers = false;
     static std::string s_loadedBin;
     static uint64_t s_lastTick = 0;
@@ -2754,6 +2796,7 @@ void DrawReloginTab(LaunchUiState& ui) {
             detect = false;
             stopCombat = true;
             channelHop = true;
+            gmEscalate = true;
             hideOthers = false;
             s_lastTick = 0;
             return;
@@ -2765,6 +2808,7 @@ void DrawReloginTab(LaunchUiState& ui) {
         detect = c.autoRelogin != 0;
         stopCombat = c.autoReloginStopCombat != 0;
         channelHop = c.autoReloginReconnect != 0;
+        gmEscalate = c.autoReloginGmEscalate != 0;
         hideOthers = c.hideOtherPlayers != 0;
         s_lastTick = c.writeTickMs;
     };
@@ -2776,6 +2820,7 @@ void DrawReloginTab(LaunchUiState& ui) {
         c.autoRelogin = detect ? 1u : 0u;
         c.autoReloginStopCombat = stopCombat ? 1u : 0u;
         c.autoReloginReconnect = channelHop ? 1u : 0u;
+        c.autoReloginGmEscalate = gmEscalate ? 1u : 0u;
         c.hideOtherPlayers = hideOthers ? 1u : 0u;
         c.writeTickMs = GetTickCount64();
         if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
@@ -2811,10 +2856,13 @@ void DrawReloginTab(LaunchUiState& ui) {
     ImGui::TextUnformatted("处理流程");
     if (xcat::ui::OptionCheckbox("先停手", &stopCombat)) trySaveOrRevert();
     if (xcat::ui::OptionCheckbox("一直有人就换频", &channelHop)) trySaveOrRevert();
+    if (xcat::ui::OptionCheckbox("GM/隐身立即处理", &gmEscalate)) trySaveOrRevert();
+    ImGui::TextDisabled(
+        "Admin/Manager(800/900)或未藏人时的隐身实体 → 立刻停手/换频（跳过确认与主城豁免）+ 强制 Alarm。");
+    ImGui::TextDisabled("关则只走普通遇人确认窗；服务端不广播跟踪仍无法发现。");
     ImGui::Separator();
     if (xcat::ui::OptionCheckbox("隐藏同图其他玩家", &hideOthers)) trySaveOrRevert();
     ImGui::TextDisabled("藏皮/伤字(DamageSkin)/技能特效；自己可见；不影响遇人人数检测。");
-    ImGui::TextDisabled("同图 UserPool 远程人数；换频走直调发包（无菜单）。");
     if (s_saveFailed) {
         ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存遇人策略失败（已恢复为磁盘值）");
     }
@@ -3429,7 +3477,7 @@ void DrawTravelTab(LaunchUiState& ui) {
 
 void DrawBetaTab(LaunchUiState& ui) {
     DesignBanner();
-    static bool dropInCombat = true;
+    static bool dropInCombat = false;
     static bool auctionTownBypass = false;
     static bool frameLock = false;
     static int frameLockFps = (int)xcat::kFrameLockFpsDefault;
@@ -3521,7 +3569,7 @@ void DrawBetaTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
                 "清 LocalUser 警戒时间戳：战斗中可丢物，并抑制客户端警戒\n"
-                "（打怪后警戒很快解除属预期）。仅客户端；服务端 Drop 权威不变。默认开。");
+                "（打怪后警戒很快解除属预期）。仅客户端；服务端 Drop 权威不变。默认关。");
         }
         if (xcat::ui::OptionCheckbox("野外可开拍卖（仅客户端）", &auctionTownBypass))
             persistDrop();
@@ -3540,7 +3588,7 @@ void DrawBetaTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "锁 Unity 主循环目标帧率（Application.targetFrameRate），并关闭引擎 vSync。\n"
                 "不修改显示器硬件刷新率。用于高低配显示器对齐打怪节奏。\n"
-                "预设 120 / 240 / 360 / 480；也可自定义（%u~%u）。默认关。\n"
+                "预设 120 / 240 / 360 / 480 / 640 / 720；也可自定义（%u~%u）。默认关。\n"
                 "关闭时还原引擎 vSync=1（游戏无公开 getter，按经典版常见默认）。",
                 xcat::kFrameLockFpsMin, xcat::kFrameLockFpsMax);
         }
@@ -3568,6 +3616,10 @@ void DrawBetaTab(LaunchUiState& ui) {
             presetBtn(360);
             ImGui::SameLine();
             presetBtn(480);
+            ImGui::SameLine();
+            presetBtn(640);
+            ImGui::SameLine();
+            presetBtn(720);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                 ImGui::SetTooltip("点选即下发；开启态约 200ms 内由载荷重刷。");
             }

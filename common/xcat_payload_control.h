@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 57u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 61u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -20,6 +20,7 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 57u;
 // v55: pumpDrainBudget — 主线程泵每 tick Drain 上限（调试 TAB）
 // v56: mobScanIntervalMs 默认 50→20；读盘迁旧默认 + 换怪按需刷新
 // v57: 位移试推 A/B oneshot；ini=moveProbe*（旧 impact* 读盘兜底、写盘擦除）
+// v59: simpleCombatAttackIntervalMs 默认 46→123；读盘迁旧默认 50/46
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -31,7 +32,7 @@ constexpr int32_t kImpactHopDeltaXMin = -400;
 constexpr int32_t kImpactHopDeltaXMax = 400;
 constexpr uint32_t kFrameLockFpsDefault = 120u;
 constexpr uint32_t kFrameLockFpsMin = 15u;
-// 软顶：仅防离谱输入；480 只是 UI 预设之一，不是业务上限。
+// 软顶：仅防离谱输入；120/240/360/480/640/720 只是 UI 预设，不是业务上限。
 constexpr uint32_t kFrameLockFpsMax = 10000u;
 // flyMode: 0=Impact·NockBack  1=Impact·SetImpactNext（fill+Doing 瞬移飞已禁用）
 constexpr uint32_t kFlyModeImpactNockBack = 0u;
@@ -62,13 +63,13 @@ constexpr const char* kDefaultWorldName = "雪吉拉";
 constexpr uint32_t kMultiSkillGapDefaultMs = 120u;
 constexpr uint32_t kMultiSkillGapMinMs = 1u;
 constexpr uint32_t kMultiSkillGapMaxMs = 500u;
-// 默认 46：本机 Unity 泵 ≈15.625ms/帧，3 帧 = 46.875ms，锁住 3 帧节奏（约 21.3 刀/秒）。
-// 下限 1（用户自选；hold 地板同步）。过短易空砍；服端同怪命中地板约 30ms。
-constexpr uint32_t kSimpleCombatAttackIntervalDefaultMs = 46u;
+// 默认 123：面板「间隔」出厂值（约 8.1 刀/秒）。下限 1（用户自选；hold 地板同步）。
+constexpr uint32_t kSimpleCombatAttackIntervalDefaultMs = 123u;
 constexpr uint32_t kSimpleCombatAttackIntervalMinMs = 1u;
 constexpr uint32_t kSimpleCombatAttackIntervalMaxMs = 10000u;
-// 旧默认 50：时钟修好前被 GetTickCount 量化到 62.5；迁到 46 以吃满 3 帧。
+// 读盘迁移：旧默认 50 / 46 → 123；显式调过其它值保留。
 constexpr uint32_t kSimpleCombatAttackIntervalLegacyDefaultMs = 50u;
+constexpr uint32_t kSimpleCombatAttackIntervalLegacyDefaultMs46 = 46u;
 // 出刀按键 hold 时长（调试 TAB）：OnFuncKey Down→Up 的间隔。
 // 实际 hold = min(此值, 面板间隔)，hold ≥ 间隔会让 pendingUp 把下一刀锁死。
 // 注意：攻击加速开启时走 Down+Up 同泵的 pulse 路径（hold=0），此值不参与。
@@ -174,7 +175,7 @@ struct PayloadControl {
     uint32_t magic = kPayloadControlMagic;
     uint32_t version = kPayloadControlVersion;
     uint32_t invuln = 1;  // 默认开
-    // v27/v38: 攻击加速（开=跳过动作等待；间隔默认 50，下限 1）
+    // v27/v38: 攻击加速（开=跳过动作等待；间隔默认见 kSimpleCombatAttackIntervalDefaultMs）
     uint32_t attackAccel = 0;
     // 实验：砍动作层 layer+0x14 倒计时（默认关；不改变 attackAccel 语义）
     uint32_t attackAccelCutLayer = 0;
@@ -282,10 +283,16 @@ struct PayloadControl {
     // 调试采证：inline hook MovePath.Flush，dump C→S UserMove 的 MoveElem。默认关，
     // 仅测试时经「调试」TAB 开启（本仓禁止常驻 inline hook）。见 movepath_flush_probe。
     uint32_t movepathFlushProbe = 0;
-    // v20: ????????? UX????? UserPool + channel_hop?? Reload?
-    uint32_t autoRelogin = 0;             // ??????
-    uint32_t autoReloginStopCombat = 1;   // ???
-    uint32_t autoReloginReconnect = 1;    // ???????
+    // v61: 软重连试连（首页单勾选；同时武装 Galaxy token 只读采证）。
+    // 亦可用 soft_login_probe.on / SOFT_LOGIN_PROBE=1；旧 galaxy_token_probe.on 仍可单独采证。
+    uint32_t galaxyTokenProbe = 0;  // 与 softLoginProbe 同步写入；保留字段兼容旧 ini
+    uint32_t softLoginProbe = 0;
+    // v20: 遇人策略 UX（UserPool + channel_hop，非 Reload）
+    uint32_t autoRelogin = 0;             // 检测同图玩家
+    uint32_t autoReloginStopCombat = 1;   // 先停手
+    uint32_t autoReloginReconnect = 1;    // 一直有人就换频
+    // v60: GM/隐身升级（Admin·Manager 或客户端隐身 → 立刻停手/换频 + 强制 Alarm；默认开）
+    uint32_t autoReloginGmEscalate = 1;
     // v46: 隐藏同图其他玩家（UserPool 远程 → AvatarRoot.SetActive；默认关）
     uint32_t hideOtherPlayers = 0;
     // v47: 引擎帧率锁（vSync=0 + Application.targetFrameRate；非显示器硬件刷新率）
@@ -296,7 +303,7 @@ struct PayloadControl {
     // v54: 已学技能按满级（改 SkillRecord/Ex 等级；默认关）
     uint32_t skillMaxLevel = 0;
     // ????????? DragManager.CanPerformAction ??????????
-    uint32_t dropAlertBypass = 1;
+    uint32_t dropAlertBypass = 0;  // 默认关：开着会抑制客户端警戒
     // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认关）。
     // 服端可能断线；与挂机「守护模式」叠加会干净重拉——故默认关。
     uint32_t auctionTownBypass = 0;

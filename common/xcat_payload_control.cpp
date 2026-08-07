@@ -139,10 +139,11 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.autoRelogin = 0;
     out.autoReloginStopCombat = 1;
     out.autoReloginReconnect = 1;
+    out.autoReloginGmEscalate = 1;
     out.hideOtherPlayers = 0;
     out.frameLock = 0;
     out.frameLockFps = kFrameLockFpsDefault;
-    out.dropAlertBypass = 1;
+    out.dropAlertBypass = 0;  // 默认关
     out.auctionTownBypass = 0;
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
@@ -199,8 +200,9 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetU32(ini, "core", "multiSkillGapMs", u))
         out.multiSkillGapMs = ClampMultiSkillGapMs(u);
     if (IniGetU32(ini, "core", "simpleCombatAttackIntervalMs", u)) {
-        // 旧默认 50 → 46（锁 3 帧）；显式调过其它值保留。
-        if (u == kSimpleCombatAttackIntervalLegacyDefaultMs)
+        // 旧默认 50 / 46 → 123；显式调过其它值保留。
+        if (u == kSimpleCombatAttackIntervalLegacyDefaultMs ||
+            u == kSimpleCombatAttackIntervalLegacyDefaultMs46)
             u = kSimpleCombatAttackIntervalDefaultMs;
         out.simpleCombatAttackIntervalMs = ClampSimpleCombatAttackIntervalMs(u);
     }
@@ -247,6 +249,8 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "autoLie", b)) out.autoLie = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoLieDryRun", b)) out.autoLieDryRun = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "movepathFlushProbe", b)) out.movepathFlushProbe = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "galaxyTokenProbe", b)) out.galaxyTokenProbe = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "softLoginProbe", b)) out.softLoginProbe = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "autoLieAlarmTestSeq", u)) out.autoLieAlarmTestSeq = u;
     if (IniGetU32(ini, "core", "autoLieMouseSmokeSeq", u)) out.autoLieMouseSmokeSeq = u;
     if (IniGetU32(ini, "core", "manualRejoinSeq", u)) out.manualRejoinSeq = u;
@@ -300,6 +304,8 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.autoReloginStopCombat = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoReloginReconnect", b))
         out.autoReloginReconnect = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "autoReloginGmEscalate", b))
+        out.autoReloginGmEscalate = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "hideOtherPlayers", b)) out.hideOtherPlayers = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "frameLock", b)) out.frameLock = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "frameLockFps", u)) out.frameLockFps = ClampFrameLockFps(u);
@@ -407,8 +413,10 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.simpleCombatSmartInterval = normalized.simpleCombatSmartInterval ? 1u : 0u;
     normalized.simpleCombatAttackIntervalMs = EffectiveSimpleCombatAttackIntervalMs(
         normalized.simpleCombatAttackIntervalMs
-            ? (normalized.simpleCombatAttackIntervalMs ==
-                       kSimpleCombatAttackIntervalLegacyDefaultMs
+            ? ((normalized.simpleCombatAttackIntervalMs ==
+                    kSimpleCombatAttackIntervalLegacyDefaultMs ||
+                normalized.simpleCombatAttackIntervalMs ==
+                    kSimpleCombatAttackIntervalLegacyDefaultMs46)
                    ? kSimpleCombatAttackIntervalDefaultMs
                    : normalized.simpleCombatAttackIntervalMs)
             : kSimpleCombatAttackIntervalDefaultMs,
@@ -564,6 +572,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "autoLie", normalized.autoLie != 0);
         IniSetBool(ini, "core", "autoLieDryRun", normalized.autoLieDryRun != 0);
         IniSetBool(ini, "core", "movepathFlushProbe", normalized.movepathFlushProbe != 0);
+        IniSetBool(ini, "core", "galaxyTokenProbe", normalized.galaxyTokenProbe != 0);
+        IniSetBool(ini, "core", "softLoginProbe", normalized.softLoginProbe != 0);
         IniSetU32(ini, "core", "autoLieAlarmTestSeq", normalized.autoLieAlarmTestSeq);
         IniSetU32(ini, "core", "autoLieMouseSmokeSeq", normalized.autoLieMouseSmokeSeq);
         IniSetU32(ini, "core", "manualRejoinSeq", normalized.manualRejoinSeq);
@@ -604,6 +614,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                    normalized.autoReloginStopCombat != 0);
         IniSetBool(ini, "core", "autoReloginReconnect",
                    normalized.autoReloginReconnect != 0);
+        IniSetBool(ini, "core", "autoReloginGmEscalate",
+                   normalized.autoReloginGmEscalate != 0);
         IniSetBool(ini, "core", "hideOtherPlayers", normalized.hideOtherPlayers != 0);
         IniSetBool(ini, "core", "frameLock", normalized.frameLock != 0);
         IniSetU32(ini, "core", "frameLockFps", ClampFrameLockFps(normalized.frameLockFps));

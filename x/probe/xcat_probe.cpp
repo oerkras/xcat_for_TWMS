@@ -34,6 +34,8 @@
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/ga_text_probe/ga_text_probe.h"
+#include "../features/galaxy_token_probe/galaxy_token_probe.h"
+#include "../features/soft_login_probe/soft_login_probe.h"
 #include "../features/channel_hop/channel_hop.h"
 #include "../features/encounter/encounter.h"
 #include "../features/player_hide/player_hide.h"
@@ -159,6 +161,8 @@ void StopAllFeatureWorkers() {
     x::features::attack_accel::StopWorker();
     x::features::invuln::StopWorker();
     x::features::kick_sniff::StopWorker();
+    x::features::soft_login_probe::StopWorker();
+    x::features::galaxy_token_probe::Shutdown();
 }
 
 // 每步可打断：DETACH 置 stop 后尽快 StopAll，避免半开 workers。
@@ -277,14 +281,17 @@ bool YieldAfterPlayBootStep(bool batchBoundary) {
                          x::runtime::main_thread::QueuedJobCount());              \
     } while (0)
 
-// 登录期：会话必需 + 可无角色/地图的冷绑定与读盘（削落地 FindClass/TSV 尖峰）。
-// 勿在此处 StartWorker 依赖 MyUser/怪池的玩法；login-freeze 期间若 DETACH 仍走 Abort。
+// 登录期：只开过图/会话必需 + 纯磁盘预载。
+// 禁止在此 FindClass/skill·input 冷绑——login-freeze=1 时会堵泵，分区 UI 进不去（da2b90）。
 bool StartLoginPathWorkers() {
     if (AbortRequested()) return false;
     x::runtime::LogI("Bootstrap",
-                     "MainPump alive — start LOGIN workers (session + preland cold init)");
+                     "MainPump alive — start LOGIN workers (session + disk preload only)");
     XCAT_BOOT_STEP(x::features::kick_sniff::Init());
     XCAT_BOOT_STEP(x::features::kick_sniff::StartWorker());
+    XCAT_BOOT_STEP(x::features::galaxy_token_probe::Init());
+    XCAT_BOOT_STEP(x::features::soft_login_probe::Init());
+    XCAT_BOOT_STEP(x::features::soft_login_probe::StartWorker());
     XCAT_BOOT_STEP(x::features::auto_enter::Init());
     XCAT_BOOT_STEP(x::features::auto_enter::StartWorker());
     XCAT_BOOT_STEP(x::features::ccu::Init());
@@ -293,24 +300,12 @@ bool StartLoginPathWorkers() {
     XCAT_BOOT_STEP(x::features::titlebar::Init());
     XCAT_BOOT_STEP(x::features::titlebar::StartWorker());
 
-    // —— pre-land 冷绑定 / 读盘 / 空转线程（选角·进图途中摊掉）——
-    x::runtime::LogI("Bootstrap", "LOGIN preland cold init (skill/input/consumable/graph/…)");
-    XCAT_BOOT_STEP(x::features::buffs::Init());
-    XCAT_BOOT_STEP(x::ipc::PayloadBuffs_ApplyInitial());
-    XCAT_BOOT_STEP(x::features::multi_skill::Init());
-    XCAT_BOOT_STEP(x::features::timed_keys::Init());
-    XCAT_BOOT_STEP(x::ipc::PayloadTimedKeys_ApplyInitial());
-    XCAT_BOOT_STEP(x::features::autopot::Init());
-    XCAT_BOOT_STEP(x::features::travel::Init());
+    // 纯磁盘：不碰托管堆 / FindClass
+    x::runtime::LogI("Bootstrap", "LOGIN disk preload (graph + sellbag catalog + cfg)");
     XCAT_BOOT_STEP(x::features::travel::PreloadGraph());
     XCAT_BOOT_STEP(x::features::sellbag::Init());
-    XCAT_BOOT_STEP(x::features::worldmap_marker_travel::Init());
-    XCAT_BOOT_STEP(x::features::frame_lock::Init());
-    XCAT_BOOT_STEP(x::features::frame_lock::StartWorker());
-    XCAT_BOOT_STEP(x::features::channel_hop::Init());
-    XCAT_BOOT_STEP(x::features::channel_hop::StartWorker());
-    XCAT_BOOT_STEP(x::features::auto_lie::Init());
-    XCAT_BOOT_STEP(x::features::auto_lie::StartWorker());
+    XCAT_BOOT_STEP(x::ipc::PayloadBuffs_ApplyInitial());
+    XCAT_BOOT_STEP(x::ipc::PayloadTimedKeys_ApplyInitial());
 
     if (AbortRequested()) {
         StopAllFeatureWorkers();
@@ -319,19 +314,45 @@ bool StartLoginPathWorkers() {
     return true;
 }
 
-// 进图后：只开需要角色/地图的 Init + StartWorker。冷绑定已在 LOGIN。
-// 分片启动，避免进场帧被泵队列堵死。
+// play-ready + unfreeze + settle idle 之后：FindClass 冷绑定（分片排空）。
+// 勿在 LOGIN / settle 前调用——冻屏期堵分区（da2b90），settle 前齐开则进场尖峰回流。
+bool StartPostSettleColdInits() {
+    if (AbortRequested()) return false;
+    x::runtime::LogI("Bootstrap",
+                     "post-settle cold init (skill/input/consumable/travel_port/…)");
+    XCAT_PLAY_BOOT_STEP(x::features::buffs::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::multi_skill::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::timed_keys::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::autopot::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::travel::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::worldmap_marker_travel::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::frame_lock::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::frame_lock::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::channel_hop::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::channel_hop::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::auto_lie::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::auto_lie::StartWorker());
+    if (AbortRequested()) {
+        StopAllFeatureWorkers();
+        return false;
+    }
+    return true;
+}
+
+// 进图后：settle → FindClass 冷绑 → survival StartWorker…
+// LOGIN 仅磁盘预载；FindClass 禁在冻屏期（da2b90）。
 bool StartPlayPathWorkers() {
     if (AbortRequested()) return false;
     const bool stagger = !EnvPlayBootStaggerOff();
     x::runtime::LogI("Bootstrap",
-                     "play-ready — start PLAY workers %s (survival first; cold init already done)",
+                     "play-ready — start PLAY workers %s (settle → cold init → survival)",
                      stagger ? "staggered" : "sync(XCAT_PLAY_BOOT_STAGGER=0)");
 
-    // 切图刚落地时主线程最忙：等泵 q=0（min/max）再动第一批。
+    // 切图刚落地：先等泵空，再 FindClass，再开 survival。
     if (stagger) {
         if (!WaitPlayBootSettleIdle()) return false;
     }
+    if (!StartPostSettleColdInits()) return false;
 
     // 1) 保命：无敌 → 掉落报警 → 药/键/Buff 线程 → 攻速
     XCAT_PLAY_BOOT_STEP(x::features::invuln::Init());
@@ -483,6 +504,7 @@ bool BootFeatureWorkersTwoPhase() {
         StopAllFeatureWorkers();
         return false;
     }
+    // FindClass 冷绑在 StartPlayPathWorkers 内：settle idle 之后再分片跑（防进场尖峰）。
     return StartPlayPathWorkers();
 }
 

@@ -1,5 +1,5 @@
-// TWMS Classic CCU — only accepts auto_enter feed (PickLeast WorldItem.ci sum).
-// No login-page FindAll / passive probe (avoids main-pump contention & GC).
+// TWMS Classic CCU — latch 当前所选分区在线人数（login idle 或 auto_enter 喂数）。
+// 不在本模块 FindAll；换分区可覆盖快照，同分区不重复写。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -33,6 +33,7 @@ struct FillSlot {
 struct Store {
     long long sum = -1;
     int count = 0;
+    int32_t worldId = 0;  // 0 = 尚未绑定分区
     DWORD updateTick = 0;
     FillSlot fill[kFillSlots]{};
     int fillKnown = 0;
@@ -83,22 +84,43 @@ void LogLine(const char* fmt, ...) {
     x::runtime::LogI("CCU", "%s", body);
 }
 
-bool ApplyTotals(long long sum, int count, const char* src) {
+// worldId：0 = 未知分区（仅首次可写）；非 0 时同分区拒覆盖，换分区允许更新。
+bool ApplyTotals(long long sum, int count, const char* src, int32_t worldId) {
     if (count <= 0 || sum < 0) return false;
     const DWORD now = GetTickCount();
     EnsureCs();
     EnterCriticalSection(&gStoreCs);
-    if (gDone && gStore.sum >= 0) {
-        LeaveCriticalSection(&gStoreCs);
-        return false;
+    const bool had = gDone && gStore.sum >= 0;
+    if (had) {
+        if (worldId != 0 && gStore.worldId != 0 && worldId == gStore.worldId) {
+            LeaveCriticalSection(&gStoreCs);
+            return false;  // 同分区已采过
+        }
+        if (worldId == 0) {
+            LeaveCriticalSection(&gStoreCs);
+            return false;  // 无分区 id 时不覆盖已有快照
+        }
     }
+    const int32_t prevWorld = gStore.worldId;
+    const bool worldChanged = (had && worldId != 0 && prevWorld != 0 && prevWorld != worldId);
     gStore.sum = sum;
     gStore.count = count;
+    gStore.worldId = worldId;
     gStore.updateTick = now;
     gDone = true;
+    // 换分区：旧分区的拒收标记对新 ci 无意义。
+    if (worldChanged) {
+        for (int i = 0; i < kFillSlots; ++i) gStore.fill[i].rejected = 0;
+    }
     LeaveCriticalSection(&gStoreCs);
-    LogLine("频道快照[%s]: 分区在线=%lld channels=%d", src ? src : "?", sum, count);
-    LogLine("latched once — feed-only; SHM via PayloadStatus publisher");
+    if (worldChanged) {
+        LogLine("频道快照[%s]: 换分区 %d→%d 在线=%lld channels=%d", src ? src : "?", prevWorld,
+                worldId, sum, count);
+    } else {
+        LogLine("频道快照[%s]: 分区在线=%lld channels=%d worldId=%d", src ? src : "?", sum, count,
+                worldId);
+    }
+    LogLine("published — SHM via PayloadStatus publisher");
     return true;
 }
 
@@ -110,27 +132,37 @@ bool AlreadyLatched() {
     return ok;
 }
 
-void NotifySnapshotImpl(long long sum, int channelCount, const char* src) {
-    OpenLog();
-    (void)ApplyTotals(sum, channelCount, src && src[0] ? src : "auto_enter");
-}
-
 }  // namespace
 
-void Ccu_NotifySnapshot(long long sum, int channelCount, const char* src) {
-    NotifySnapshotImpl(sum, channelCount, src);
+bool Ccu_ShouldSkipFeed(int32_t worldId) {
+    EnsureCs();
+    EnterCriticalSection(&gStoreCs);
+    const bool had = gDone && gStore.sum >= 0;
+    const int32_t latched = gStore.worldId;
+    LeaveCriticalSection(&gStoreCs);
+    if (!had) return false;
+    if (worldId == 0) return true;          // 无 id：不能换区/升级，防空刷
+    if (latched == worldId) return true;    // 同分区
+    return false;                           // 换区或 0→真 id 升级
 }
 
-void Ccu_NotifyFillTable(const ChannelFillRow* rows, int n, const char* src) {
+bool Ccu_NotifySnapshot(long long sum, int channelCount, const char* src, int32_t worldId) {
+    OpenLog();
+    return ApplyTotals(sum, channelCount, src && src[0] ? src : "feed", worldId);
+}
+
+void Ccu_NotifyFillTable(const ChannelFillRow* rows, int n, const char* src, int32_t worldId) {
     if (!rows || n <= 0) return;
     EnsureCs();
     OpenLog();
     EnterCriticalSection(&gStoreCs);
+    // 拒收清理由 ApplyTotals 在换分区时完成；此处同分区保留。
     uint8_t keepRejected[kFillSlots]{};
     for (int i = 0; i < kFillSlots; ++i) {
         keepRejected[i] = gStore.fill[i].rejected;
         gStore.fill[i] = FillSlot{};
     }
+    if (worldId != 0) gStore.worldId = worldId;
     int known = 0;
     int prefer = 0;
     for (int i = 0; i < n; ++i) {
@@ -147,7 +179,6 @@ void Ccu_NotifyFillTable(const ChannelFillRow* rows, int n, const char* src) {
         const bool full = slot.cap > 0 && slot.users >= slot.cap;
         if (!slot.adult && !full && !slot.rejected) ++prefer;
     }
-    // 未出现在新表里的频：只保留拒收标记，其余未知
     for (int i = 0; i < kFillSlots; ++i) {
         if (gStore.fill[i].known) continue;
         if (keepRejected[i]) gStore.fill[i].rejected = 1;
@@ -156,7 +187,8 @@ void Ccu_NotifyFillTable(const ChannelFillRow* rows, int n, const char* src) {
     gStore.fillPrefer = prefer;
     gStore.fillTick = GetTickCount();
     LeaveCriticalSection(&gStoreCs);
-    LogLine("频道填表[%s]: known=%d prefer=%d of %d rows", src ? src : "?", known, prefer, n);
+    LogLine("频道填表[%s]: known=%d prefer=%d of %d rows worldId=%d", src ? src : "?", known,
+            prefer, n, worldId);
 }
 
 ChannelPickHint Ccu_GetChannelPickHint(int zeroBasedIdx) {
@@ -195,7 +227,7 @@ void Ccu_Init() {
     EnterCriticalSection(&gStoreCs);
     gStore = Store{};
     LeaveCriticalSection(&gStoreCs);
-    LogLine("Init (feed-only: wait auto_enter PickLeast)");
+    LogLine("Init (wait login channel UI or auto_enter feed; world switch updates)");
 }
 
 void Ccu_Shutdown() {
@@ -207,10 +239,9 @@ void Ccu_Shutdown() {
 
 void Ccu_Tick(DWORD now) {
     if (AlreadyLatched()) return;
-    // 未 latch：不 Probe；只等 auto_enter 喂数。SHM 由 PayloadStatus 发布线程写。
     if (!gLastWaitLog || now - gLastWaitLog >= kWaitLogMs) {
         gLastWaitLog = now;
-        LogLine("waiting auto_enter feed…");
+        LogLine("waiting channel snapshot (login UI or auto_enter)…");
     }
 }
 
@@ -220,6 +251,7 @@ CcuStatus Ccu_GetStatus() {
     EnterCriticalSection(&gStoreCs);
     s.worldChannelOnline = gStore.sum;
     s.worldChannelCount = gStore.count;
+    s.worldId = gStore.worldId;
     s.fillKnown = gStore.fillKnown;
     s.fillPrefer = gStore.fillPrefer;
     const DWORD updateTick = gStore.updateTick;
@@ -233,6 +265,14 @@ CcuStatus Ccu_GetStatus() {
         s.fillAgeSec = (now - fillTick) / 1000u;
     }
     return s;
+}
+
+int32_t Ccu_SnapshotWorldId() {
+    EnsureCs();
+    EnterCriticalSection(&gStoreCs);
+    const int32_t id = (gDone && gStore.sum >= 0) ? gStore.worldId : 0;
+    LeaveCriticalSection(&gStoreCs);
+    return id;
 }
 
 }  // namespace ccu

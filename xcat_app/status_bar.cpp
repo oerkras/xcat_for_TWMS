@@ -38,7 +38,13 @@ void FormatDurationHms(uint64_t sec, char* out, size_t outN) {
 }
 
 const char* SessionPhase(const RuntimeLeds& leds) {
-    if (msc::weblogin::IsBusy()) return "换票中";
+    if (msc::weblogin::IsBusy()) {
+        if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto ||
+            msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto)
+            return "GAMA PASS登录中";
+        return "换票中";
+    }
+    if (hangup_schedule::IsCleanRelaunchInFlight()) return "干净重拉中";
     if (leds.gameContext) return "游戏运行中";
     if (leds.ipc) return "空闲";
     return "初始化";
@@ -110,6 +116,61 @@ void DrawCcuText(const LaunchUiState& ui) {
 
 void BeginStatusRow(const ImVec2& origin, float rowH, int row) {
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rowH * static_cast<float>(row)));
+}
+
+// 昼夜都清晰的提示蓝：白天深蓝、黑夜亮蓝（对齐 brandText）。
+ImVec4 StatusHintBlue() {
+    if (AppTheme_IsLight()) return ImVec4(0.00f, 0.33f, 0.65f, 1.0f);  // ~#0054A6
+    return AppTheme_Palette().brandText;                                 // ~#76BAFF
+}
+
+ImVec4 StatusAlertBlue() {
+    // 失败/拦截：同系略沉，仍保持蓝调可读（非暖黄/橙）。
+    if (AppTheme_IsLight()) return ImVec4(0.00f, 0.28f, 0.58f, 1.0f);
+    return ImVec4(0.55f, 0.78f, 1.0f, 1.0f);
+}
+
+bool StatusLooksActionable(const std::string& s) {
+    if (s.empty()) return false;
+    // 结构化前缀优先，少靠零散单字（避免无关「跳过」误亮）。
+    static const char* kPrefixes[] = {
+        "GAMA PASS", "HTTP ", "正在", "已开始", "已取消", "挂机", "守护", "监视",
+        "请先关闭", "需要网页", "登录会话", "非挂机", "清理 NGM", "干净重拉",
+        "启动失败", "登录/换票失败", "HTTP 登录失败", "注入失败", "自动监视启动失败",
+    };
+    for (const char* p : kPrefixes) {
+        if (s.rfind(p, 0) == 0 || s.find(p) != std::string::npos) return true;
+    }
+    return s.find("失败") != std::string::npos;
+}
+
+void DrawStatusEllipsis(const ImVec4& col, const std::string& text) {
+    const float maxW = ImGui::GetContentRegionAvail().x;
+    if (maxW <= 8.f || ImGui::CalcTextSize(text.c_str()).x <= maxW) {
+        ImGui::TextColored(col, "%s", text.c_str());
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !text.empty())
+            ImGui::SetTooltip("%s", text.c_str());
+        return;
+    }
+    // 按显示宽度收成「…」；UTF-8 按字节回退到字符边界。
+    std::string shown = text;
+    const char* ell = "\xE2\x80\xA6";  // UTF-8 …
+    while (shown.size() > 1) {
+        size_t cut = shown.size();
+        while (cut > 0 && (static_cast<unsigned char>(shown[cut - 1]) & 0xC0) == 0x80) --cut;
+        if (cut == 0) break;
+        shown.resize(cut - 1);
+        const std::string trial = shown + ell;
+        if (ImGui::CalcTextSize(trial.c_str()).x <= maxW) {
+            ImGui::TextColored(col, "%s", trial.c_str());
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("%s", text.c_str());
+            return;
+        }
+    }
+    ImGui::TextColored(col, "%s", ell);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", text.c_str());
 }
 
 }  // namespace
@@ -240,19 +301,31 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         DrawCcuText(ui);
 
         // —— 4/4 状态 / 更新 ——
+        // 用户默认停在首页 TAB，倒计时/自动登录/干净重拉必须在顶部可见。
         BeginStatusRow(origin, rowH, 3);
         ImGui::AlignTextToFramePadding();
-        const bool showStatus =
-            !ui.status.empty() && (busy || ui.status.find("失败") != std::string::npos);
+        const hangup_schedule::Snapshot hs = hangup_schedule::GetSnapshot();
+        const bool relaunching = hangup_schedule::IsCleanRelaunchInFlight();
+        const bool hangupStarting =
+            hs.hangupOn && hs.mode == hangup_schedule::UiMode::Starting;
+        const bool watchdogRecovering =
+            hs.watchdogOn && hs.watchdogMode == hangup_schedule::WatchdogUiMode::Recovering;
+        const bool showLoginHint =
+            !ui.status.empty() &&
+            (busy || autoPending || relaunching || hangupStarting || watchdogRecovering ||
+             StatusLooksActionable(ui.status));
         const bool showUpdate = UpdateShouldDrawProgressUi();
-        if (showUpdate) {
+        // 自动登录提示优先于更新条：用户默认在首页，换票进度更紧急。
+        if (showLoginHint) {
+            const bool inFlight = busy || autoPending || relaunching || hangupStarting ||
+                                  watchdogRecovering;
+            DrawStatusEllipsis(inFlight ? StatusHintBlue() : StatusAlertBlue(), ui.status);
+        } else if (showUpdate) {
             DrawUpdateProgressMini();
             if (!snap.message.empty()) {
                 ImGui::SameLine(0.f, ui::Gap());
                 ImGui::TextDisabled("%s", snap.message.c_str());
             }
-        } else if (showStatus) {
-            ImGui::TextDisabled("%s", ui.status.c_str());
         } else {
             ImGui::TextDisabled(" ");
         }

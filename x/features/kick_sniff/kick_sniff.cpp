@@ -7,6 +7,8 @@
 #endif
 #include "kick_sniff.h"
 
+#include "../galaxy_token_probe/galaxy_token_probe.h"
+#include "../soft_login_probe/soft_login_probe.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -227,6 +229,9 @@ constexpr int kScanPtrCap = 48;
 
 constexpr wchar_t kLogDirDev[] = L"C:\\Users\\kras\\Desktop\\xcat_for_TWMS\\Dumps\\runtime";
 
+// 放在 kick.log 同目录或 DLL 同目录即武装发包探针；见 InstallSendProbe。
+constexpr wchar_t kSendMarkerName[] = L"send_probe.on";
+
 HANDLE gLog = INVALID_HANDLE_VALUE;
 std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gThread{nullptr};
@@ -311,7 +316,10 @@ std::atomic<uint32_t> gSendUnreadable{0};
 
 // Body capture for a short list of opcodes. Strictly quota'd.
 constexpr int kDumpOpMax = 8;
-constexpr int kDumpQuotaDefault = 24;
+// 配额是从会话开头往下扣的，所以它决定了我们抓到哪一头。排查掉线要看的是**断线前**那几个包，
+// 24 个 UserMove 只够覆盖开局约 12 秒，恰好是没用的那一头。放大到能覆盖整场：UserMove ~2/s、
+// 攻击 ~4/s，一场十分钟约 3600 个包，每行约 150B → send.log 几百 KB，可接受。
+constexpr int kDumpQuotaDefault = 4000;
 constexpr int kDumpBodyBytes = 64;
 int gDumpOp[kDumpOpMax]{};
 std::atomic<int> gDumpLeft[kDumpOpMax]{};
@@ -351,6 +359,11 @@ HookSlot gHooks[] = {
 bool DirExists(const std::wstring& dir) {
     const DWORD a = GetFileAttributesW(dir.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+bool FileExists(const std::wstring& p) {
+    const DWORD a = GetFileAttributesW(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
 std::wstring ModuleDir() {
@@ -1428,6 +1441,29 @@ MethodInfoHead* ResolveSessionMi(void* klass, uintptr_t rva, int arity, const ch
                                  const char* hash,
                                  x::runtime::il2cpp_method::ResolvePath* outPath = nullptr);
 
+// 两种打开方式，任一命中即武装：
+//   · `KICK_SEND=1` —— 启动器 CreateProcessW 传的是 nullptr 环境，客户端会继承，但整条链
+//     （xcat → 启动器 → 客户端）必须在设好之后全部重启才生效，排查现场很容易踩空。
+//   · 标记文件 `send_probe.on` —— 放在 kick.log 同目录（`ResolveLogDir()`）或 DLL 同目录，
+//     重进游戏即生效，删文件即关。不必动系统环境变量，也不受启动顺序影响。
+// 单独成函数是因为 InstallSendProbe 里有 __try，MSVC 不许同一函数内出现需展开的对象（C2712）。
+bool SendProbeRequested(bool* outByEnv) {
+    char env[8]{};
+    const bool byEnv = GetEnvironmentVariableA("KICK_SEND", env, sizeof(env)) > 0 && env[0] == '1';
+    if (outByEnv) *outByEnv = byEnv;
+    const std::wstring logDir = ResolveLogDir();
+    const std::wstring modDir = ModuleDir();
+    const bool byFile = (!logDir.empty() && FileExists(logDir + L"\\" + kSendMarkerName)) ||
+                        (!modDir.empty() && FileExists(modDir + L"\\" + kSendMarkerName));
+    if (byEnv || byFile) return true;
+    // 把实际探过的两个路径打出来：标记文件放错目录是最常见的「开了却没生效」。
+    Log("SEND_PROBE skip: set KICK_SEND=1, or drop %ls to arm SendPacket DR → send.log",
+        kSendMarkerName);
+    Log("SEND_PROBE marker probed: %ls\\%ls | %ls\\%ls", logDir.c_str(), kSendMarkerName,
+        modDir.c_str(), kSendMarkerName);
+    return false;
+}
+
 void InstallSendProbe() {
     if (gSendProbe.load()) return;
     if (!gGaBase) {
@@ -1435,11 +1471,8 @@ void InstallSendProbe() {
         return;
     }
     // Default off: DR + VEH + send.log are diagnostic only; Session poll / 守护 disconnectSeq 不依赖。
-    char env[8]{};
-    if (!(GetEnvironmentVariableA("KICK_SEND", env, sizeof(env)) > 0 && env[0] == '1')) {
-        Log("SEND_PROBE skip: set KICK_SEND=1 to arm SendPacket DR → send.log");
-        return;
-    }
+    bool byEnv = false;
+    if (!SendProbeRequested(&byEnv)) return;
     if (gOwnSlot[kDrSendSlot]) {
         Log("SEND_PROBE skip: DR%d already holds %s (KICK_HWBP=1)", kDrSendSlot,
             gHwbpTargets[kDrSendSlot].name);
@@ -1451,13 +1484,13 @@ void InstallSendProbe() {
         return;
     }
 
-    // 207 is MobMove (decoded 08-02: mobId, per-mob seq, start xy, then 14-byte elements) and the
-    // 50-53 block is the attack family. Both are default targets because the open question is
-    // what an attack reports about our position while UserMove is withheld. KICK_SEND_DUMP takes a
-    // comma list to retarget, or "0" to capture nothing.
+    // 47 是 UserMove——服端校验位移的真入口（见 docs/features/protocol/移动协议.md），排查
+    // 「飞行被判位移外挂」时它是主证据，所以放在默认列表首位。50-53 是攻击族，用来对照攻击包
+    // 自报的坐标。207(MobMove) 服务的是另一条已结案的问题，且怪多时速率很高会淹掉 send.log，
+    // 默认不再抓；需要时用 KICK_SEND_DUMP 指定。该变量取逗号列表，填 "0" 表示只记 op 不抓体。
     char dumpEnv[64]{};
     if (GetEnvironmentVariableA("KICK_SEND_DUMP", dumpEnv, sizeof(dumpEnv)) == 0) {
-        strcpy_s(dumpEnv, "207,50,51,52,53");
+        strcpy_s(dumpEnv, "47,50,51,52,53");
     }
     if (dumpEnv[0] != '0' || dumpEnv[1] != '\0') {
         for (const char* s = dumpEnv; *s && gDumpOpN < kDumpOpMax;) {
@@ -1517,8 +1550,9 @@ void InstallSendProbe() {
 
     const int n = ApplyHwbpAllThreads(true);
     gHwbpInstalled.store(true);
-    Log("SEND_PROBE armed DR%d NM.SendPacket ga+0x%llX -> %p threads=%d (outbound -> send.log)",
-        kDrSendSlot, (unsigned long long)kRvaSessionSend, (void*)gHwbpAddr[kDrSendSlot], n);
+    Log("SEND_PROBE armed DR%d NM.SendPacket ga+0x%llX -> %p threads=%d via=%s (outbound -> send.log)",
+        kDrSendSlot, (unsigned long long)kRvaSessionSend, (void*)gHwbpAddr[kDrSendSlot], n,
+        byEnv ? "KICK_SEND" : "marker");
     SendLog("---- send probe armed pid=%lu ga+0x%llX ----", GetCurrentProcessId(),
             (unsigned long long)kRvaSessionSend);
 }
@@ -1838,6 +1872,13 @@ void OnStateChange(int prev, int now, int err) {
         SendLog("==== STATE %s(%d) pendingError=%d ====", StateName(now), now, err);
         FlushSendLog();
         Snapshot("disconnect");
+        // Soft-relogin dig: Galaxy_* still in PlayerPrefs after the edge?
+        x::features::galaxy_token_probe::RequestSample(
+            now == kStateDisconnecting ? "disconnecting" : "disconnected");
+        x::features::soft_login_probe::RequestAttempt(
+            now == kStateDisconnecting ? "disconnecting" : "disconnected");
+    } else if (now == kStateConnected && prev != kStateConnected) {
+        x::features::galaxy_token_probe::RequestSample("connected");
     }
 }
 

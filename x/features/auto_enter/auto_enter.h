@@ -16,6 +16,13 @@ void StopWorker();
 void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSlot);
 bool IsDesired();
 
+// Soft-relogin / 踢线回登录后：若自动进仍开着，从 Done/Failed 拉回 Idle 重跑选区选角。
+// worker 可调；下一拍 Tick 会进 WaitWorldList。
+void RequestRestart(const char* why);
+
+// 当前是否停在 Failed（软重进可据此早退，不必空等到 play-ready 超时）。
+bool IsFailed();
+
 }  // namespace auto_enter
 }  // namespace features
 }  // namespace x

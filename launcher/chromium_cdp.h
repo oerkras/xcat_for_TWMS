@@ -21,6 +21,10 @@ struct BrowserProfile {
 // 解析本机首选 Chromium 与 User Data（进程反查 / 默认浏览器 / Chrome++ / 官方路径）
 bool ResolvePreferredChromium(BrowserProfile& out, const LogFn& log = nullptr);
 
+// 下一轮 PrepareCdpSafeUserData 强制从日常 User Data 重同步 Cookies/会话
+//（落到完整 /login 后调用；日常重新勾选记住后再一键即可吃到新会话）。
+void RequestCdpSessionResync();
+
 // 关闭占用该调试口的 Chromium：先 CDP Browser.close，再按 cmdline 精确 TerminateProcess。
 // ★ 只杀带 --remote-debugging-port=<port> 的 chrome/msedge/chromium，不动日常无调试口窗口。
 // 不清 Cookie / User Data。用户已授权在登录成功后结束该调试实例。

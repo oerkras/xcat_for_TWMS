@@ -239,7 +239,7 @@ constexpr int kLastTrySkipStamp = 0x7FFFFFFF;
 //      （IMM 0x328634BB + seed@0x7FFB8A2C92A8=0xCD79CB48 → 3）
 //   ③ now - PickStamp(0x88) >= 3000（有符号）——宠吸同款拍前清闸后由官方 Send 再盖
 //   ④ 归属链交由服务端裁决 + 退避兜底
-//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用配置半盒枚举（默认全盒 1500×1500）
+//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用配置半盒枚举（默认全盒近身 300×200）
 //      —— 送包坐标仍是角色位；过大盒会多打拒收，靠 pending/AddStall 与 burst=1 兜底
 //   通过后 Point(角色 Maple 坐标) → Send(pt, Id, 0)
 //      （第 4 参 IMM 0x353E87DA + seed@…92B4=0xCAC17826 → 0，无需伪造 CRC）
@@ -394,9 +394,6 @@ struct VacJob {
 };
 
 struct FootJob {
-    float halfW = 100.f;
-    float halfH = 80.f;
-    SkipIds skip{};
     FootResult result{};
     bool done = false;
 };
@@ -1714,6 +1711,123 @@ int StampStalledDropsNear(void* pool, float cx, float cy, float halfW, float hal
 int RestoreStalledStampsNear(void* pool, float cx, float cy, float halfW, float halfH, DWORD now,
                              const SkipIds* skip);
 
+// 宠吸近盒一次扫池：Count + 清闸(budget) + Stall 盖戳 + Skip 盖戳（语义对齐原多趟顺序）。
+struct PetVacNearPass {
+    int total = 0;
+    int nearN = 0;
+    int nearMoney = 0;
+    int nearItem = 0;
+    int sampleIsMoney = -1;
+    int sampleInfo = 0;
+    int sampleOwn = -1;
+    int sampleLast = 0;
+    int sampleEnd = 0;
+    int gatesCleared = 0;
+    int stallStamped = 0;
+    int skipStamped = 0;
+};
+
+PetVacNearPass PreparePetVacNearPass(void* pool, float cx, float cy, float halfW, float halfH,
+                                     DWORD now, const SkipIds* skip, int maxClear) {
+    PetVacNearPass out{};
+    if (!pool) return out;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return out;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return out;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return out;
+
+    const bool writesOk = DropWritesAllowed();
+    const bool doStall = writesOk && !gStallOff && !gStall.empty();
+    const bool haveSkip = skip && !skip->empty();
+    bool haveMoneySample = false;
+    bool haveAnySample = false;
+    bool gateSampled = false;
+
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        ++out.total;
+
+        float dpx = 0.f, dpy = 0.f;
+        if (!ReadDropPt(drop, dpx, dpy)) continue;
+        if (std::fabs(dpx - cx) > halfW || std::fabs(dpy - cy) > halfH) continue;
+        ++out.nearN;
+
+        const bool money = ReadU8(drop, kOffDropIsMoney) != 0;
+        const int info = ReadI32(drop, kOffDropInfo);
+        if (money) {
+            ++out.nearMoney;
+            if (!haveMoneySample) {
+                haveMoneySample = true;
+                haveAnySample = true;
+                out.sampleIsMoney = 1;
+                out.sampleInfo = info;
+            }
+        } else {
+            ++out.nearItem;
+            if (!haveAnySample) {
+                haveAnySample = true;
+                out.sampleIsMoney = 0;
+                out.sampleInfo = info;
+            }
+        }
+
+        // 黑名单：不碰清闸/Stall；有写权限才盖长期戳
+        if (haveSkip && DropMatchesSkip(drop, *skip)) {
+            if (writesOk) {
+                const int last = ReadI32(drop, kOffDropLastTry);
+                const int endp = ReadI32(drop, kOffDropEndPara);
+                bool touched = false;
+                if (last != kLastTrySkipStamp) {
+                    WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
+                    touched = true;
+                }
+                if (endp == kEndParaReady) {
+                    WriteI32(drop, kOffDropEndPara, kEndParaSkipHold);
+                    touched = true;
+                }
+                if (touched) ++out.skipStamped;
+            }
+            continue;
+        }
+
+        // 与原序一致：先清闸（可碰 StallActive 但尚未 INT_MAX 的件），再盖 Stall。
+        const int lastTry = ReadI32(drop, kOffDropLastTry);
+        if (maxClear > 0 && out.gatesCleared < maxClear && ReadU8(drop, kOffDropPickable) != 0 &&
+            lastTry != kLastTrySkipStamp) {
+            if (!gateSampled) {
+                gateSampled = true;
+                out.sampleOwn = ReadI32(drop, kOffDropOwnType);
+                out.sampleLast = lastTry;
+                out.sampleEnd = ReadI32(drop, kOffDropEndPara);
+            }
+            if (ClearPickupGatesOne(drop, /*forceEndParaReady=*/true)) ++out.gatesCleared;
+        }
+
+        if (doStall) {
+            const int did = ReadI32(drop, kOffDropId);
+            if (StallActive(did, now) && ReadI32(drop, kOffDropLastTry) != kLastTrySkipStamp) {
+                WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
+                ++out.stallStamped;
+            }
+        }
+    }
+    return out;
+}
+
+// 跨拍池下降：上一成功拍有 near/gates，本拍池变少（服端异步删 drop 的真吸证据）
+bool PetVacPoolFellSinceLast(bool prevOk, DWORD prevTick, int prevDropAfter, int prevNear,
+                             int prevGates, DWORD nowTick, int dropCount) {
+    const bool recentPrev = prevOk && prevTick != 0 && (nowTick - prevTick) <= 3000u;
+    return recentPrev && prevDropAfter > 0 && dropCount < prevDropAfter &&
+           (prevNear > 0 || prevGates > 0);
+}
+
 void RunVacuumOnMain() {
     VacuumResult& r = gJob.result;
     r = {};
@@ -1747,36 +1861,70 @@ void RunVacuumOnMain() {
     float px = 0.f, py = 0.f;
     ReadPetPos(pet, px, py);
     r.dropCount = ReadPoolDropCount(pool);
+
+    const float halfW = gJob.vacuumW * 0.5f;
+    const float halfH = gJob.vacuumH * 0.5f;
+    constexpr int kPetVacGateClearBudget = 8;
+    const SkipIds* skipPtr = gJob.skip.empty() ? nullptr : &gJob.skip;
+
+    // 跨拍池下降证据（空盒早退与正式调用共用）
+    static int s_prevDropAfter = -1;
+    static int s_prevNear = 0;
+    static int s_prevGates = 0;
+    static DWORD s_prevTick = 0;
+    static bool s_prevOk = false;
+
+    // 一次扫池：统计 +（有近物时）清闸/Stall/Skip；空盒无写并早退。
     if (pool) {
-        int totalEnum = 0;
-        r.nearCount = CountDropsNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f,
-                                    &totalEnum, &r.nearMoney, &r.nearItem, &r.sampleIsMoney,
-                                    &r.sampleInfo);
-        if (r.dropCount <= 0 && totalEnum > 0) r.dropCount = totalEnum;
-        // 轻清闸：ByPet 一拍摸不了上百件；限额清候选，避免 3200 盒 gates=100+ 占泵
-        constexpr int kPetVacGateClearBudget = 8;
-        r.gatesCleared =
-            ClearPickupGatesNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f,
-                                 &r.sampleOwnType, &r.sampleLastTry, &r.sampleEndPara,
-                                 gJob.skip.empty() ? nullptr : &gJob.skip, kPetVacGateClearBudget);
-        // 退避黑名单：挡住服端刚拒收的那件，避免它霸占 ByPet 队头把整盒堵死（拍末恢复）
         const int stallActiveBefore = StallActiveCount(now);
-        r.stallStamped =
-            StampStalledDropsNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f, now,
-                                  gJob.skip.empty() ? nullptr : &gJob.skip);
+        const PetVacNearPass pass =
+            PreparePetVacNearPass(pool, px, py, halfW, halfH, now, skipPtr, kPetVacGateClearBudget);
+        r.nearCount = pass.nearN;
+        r.nearMoney = pass.nearMoney;
+        r.nearItem = pass.nearItem;
+        r.sampleIsMoney = pass.sampleIsMoney;
+        r.sampleInfo = pass.sampleInfo;
+        r.sampleOwnType = pass.sampleOwn;
+        r.sampleLastTry = pass.sampleLast;
+        r.sampleEndPara = pass.sampleEnd;
+        r.gatesCleared = pass.gatesCleared;
+        r.stallStamped = pass.stallStamped;
+        r.skipStamped = pass.skipStamped;
+        if (r.dropCount <= 0 && pass.total > 0) r.dropCount = pass.total;
+
+        if (r.nearCount == 0) {
+            if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
+
+            r.dropCountAfter = r.dropCount;
+            r.dropsDelta = 0;
+            const DWORD nowTick = GetTickCount();
+            // 与旧「空盒仍调官方口成功」对齐：called=1；跨拍池下降仍记 ok_absorbed
+            const bool poolFell = PetVacPoolFellSinceLast(
+                s_prevOk, s_prevTick, s_prevDropAfter, s_prevNear, s_prevGates, nowTick,
+                r.dropCount);
+            r.poolFellSinceLast = poolFell;
+            r.called = true;
+            r.ok = true;
+            r.why = poolFell ? "ok_absorbed" : "ok_empty";
+            r.stallHeld = StallActiveCount(nowTick);
+            r.beforeRc = ReadRect(pet, kOffPetRc);
+            r.afterRc.x = -halfW;
+            r.afterRc.y = -halfH;
+            r.afterRc.w = gJob.vacuumW;
+            r.afterRc.h = gJob.vacuumH;
+            s_prevDropAfter = r.dropCountAfter;
+            s_prevNear = r.nearCount;
+            s_prevGates = r.gatesCleared;
+            s_prevTick = nowTick;
+            s_prevOk = true;
+            return;
+        }
+
         // 不变量：Drop.Id 唯一 → 盒内被盖住的件数不可能超过生效退避条目数。
-        // 超了说明 Id 偏移漂移读到了非唯一字段，会把整盒挡死 → 自动停用（本拍仍照常还原）。
         if (r.stallStamped > stallActiveBefore) {
             gStallOff = true;
             x::runtime::LogW("droppool", "stall off: Drop.Id not unique (stamped=%d > held=%d)",
                              r.stallStamped, stallActiveBefore);
-        }
-        // 黑名单：脚边同款盖 LastTry=INT_MAX（ExceptionList 容量/官方门控不可靠；宽词截断曾漏 紅寶殼）
-        if (gJob.skip.size() > 0) {
-            int nearIgn = 0, wantIgn = 0, totalIgn = 0;
-            r.skipStamped =
-                StampSkippedDropsNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f,
-                                      gJob.skip, &nearIgn, &wantIgn, &totalIgn);
         }
     }
 
@@ -1786,8 +1934,8 @@ void RunVacuumOnMain() {
     r.beforeRc = ReadRect(pet, kOffPetRc);
 
     Rect4 vacuum{};
-    vacuum.x = -gJob.vacuumW * 0.5f;
-    vacuum.y = -gJob.vacuumH * 0.5f;
+    vacuum.x = -halfW;
+    vacuum.y = -halfH;
     vacuum.w = gJob.vacuumW;
     vacuum.h = gJob.vacuumH;
     // 日志 rc= 表示本拍意图真空尺寸（实际写入 .rdata 矩形包）
@@ -1830,25 +1978,17 @@ void RunVacuumOnMain() {
     r.poolSendDelta = r.poolSendHits - poolHits0;
 
     // 服端异步删 drop：同拍前后常仍相等；用跨拍池下降作真吸证据
-    static int s_prevDropAfter = -1;
-    static int s_prevNear = 0;
-    static int s_prevGates = 0;
-    static DWORD s_prevTick = 0;
-    static bool s_prevOk = false;
     const DWORD nowTick = GetTickCount();
-    const bool recentPrev =
-        s_prevOk && s_prevTick != 0 && (nowTick - s_prevTick) <= 3000u;
-    const bool poolFell = recentPrev && s_prevDropAfter > 0 && r.dropCount < s_prevDropAfter &&
-                          (s_prevNear > 0 || s_prevGates > 0);
+    const bool poolFell = PetVacPoolFellSinceLast(s_prevOk, s_prevTick, s_prevDropAfter,
+                                                  s_prevNear, s_prevGates, nowTick, r.dropCount);
     r.poolFellSinceLast = poolFell;
 
     // 仅在「调用成功且本拍池未同步下降」时轻扫盖戳，避免成功吸收再多走一趟
     if (ok && pool && r.nearCount > 0 && r.dropsDelta >= 0 && !poolFell) {
         int stallIds[16] = {};
         int stallN = 0;
-        r.sendTouch =
-            CountPostSendTouchesNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f,
-                                     &r.sendTouchMoney, stallIds, 16, &stallN);
+        r.sendTouch = CountPostSendTouchesNear(pool, px, py, halfW, halfH, &r.sendTouchMoney,
+                                               stallIds, 16, &stallN);
         const bool probeSend = r.petSendDelta > 0 || r.poolSendDelta > 0;
         if (r.sendTouch > 0 || probeSend) r.sentButPoolSame = 1;
         // 提交了但池没掉 → 多为该栏已满被服端拒收：登记退避，下一拍轮到别的掉落
@@ -1857,9 +1997,7 @@ void RunVacuumOnMain() {
 
     // 拍末必须把退避盖戳还原（含 seh / no_rect_patch 路径），否则切到脚边拾取时这些道具捡不起来
     if (pool && r.stallStamped > 0) {
-        r.stallRestored =
-            RestoreStalledStampsNear(pool, px, py, gJob.vacuumW * 0.5f, gJob.vacuumH * 0.5f, now,
-                                     gJob.skip.empty() ? nullptr : &gJob.skip);
+        r.stallRestored = RestoreStalledStampsNear(pool, px, py, halfW, halfH, now, skipPtr);
     }
     // 停用后才清表：清早了 RestoreStalledStampsNear 就找不到该还原谁，会把戳留在池里
     if (gStallOff && !gStall.empty()) gStall.clear();
@@ -2116,13 +2254,8 @@ void RunFootOnMain() {
     }
     r.userX = ux;
     r.userY = uy;
+    r.dropCount = ReadPoolDropCount(pool);
 
-    const int poolBefore = ReadPoolDropCount(pool);
-    r.stamped = StampSkippedDropsNear(pool, ux, uy, gFoot.halfW, gFoot.halfH, gFoot.skip,
-                                      &r.nearCount, &r.nearWant, &r.dropCount);
-    if (poolBefore > 0) r.dropCount = poolBefore;
-
-    // 枚举失败/空池时仍调用官方 TryPickUpDrop：盖戳只是黑名单辅助，不能当「有没有掉落」门禁。
     if (!gDropPoolKlass) gDropPoolKlass = FindClass(kDropPoolClass);
     if (!gMiFootTryPickUp && gDropPoolKlass) {
         using x::runtime::il2cpp_method::MethodShape;
@@ -2141,6 +2274,7 @@ void RunFootOnMain() {
     bool ok = false;
     __try {
         if (fn) {
+            // 脚下走 DropPool 口：传解析到的 MI（与旧脚边一致；宠吸 Pet 口才用 nullptr 躲 CFF）
             fn(pool, pos, gMiFootTryPickUp);
             ok = true;
         }
@@ -2157,29 +2291,31 @@ void RunFootOnMain() {
     r.called = ok;
     r.ok = ok;
 
+    // 跨拍吸收：须上一拍有 pool Send（避免远处自然消/他人捡误记 ok_absorbed）
     static int s_footPrevAfter = -1;
-    static int s_footPrevNearWant = 0;
+    static uint32_t s_footPrevPoolSendDelta = 0;
     static DWORD s_footPrevTick = 0;
     static bool s_footPrevOk = false;
     const DWORD nowTick = GetTickCount();
     const bool recentPrev =
         s_footPrevOk && s_footPrevTick != 0 && (nowTick - s_footPrevTick) <= 3000u;
     const bool poolFell = recentPrev && s_footPrevAfter > 0 && r.dropCount < s_footPrevAfter &&
-                          s_footPrevNearWant > 0;
+                          s_footPrevPoolSendDelta > 0;
+    r.poolFellSinceLast = poolFell;
 
     if (ok) {
         if (r.dropsDelta < 0 || poolFell) r.why = "ok_absorbed";
-        else if (r.nearWant > 0) r.why = "ok";
-        else if (r.nearCount > 0) r.why = "ok_all_skip";
-        else if (r.dropCount > 0) r.why = "ok_far";
-        else r.why = "ok_empty";
+        else if (r.dropCount > 0)
+            r.why = "ok_called";  // 已触发；池里仍有物（未必在盒内 / 未必捡到）
+        else
+            r.why = "ok_empty";
     } else if (!r.why || !r.why[0] || strcmp(r.why, "fail") == 0) {
         r.why = "no_fn";
     }
 
     if (ok) {
         s_footPrevAfter = r.dropCountAfter;
-        s_footPrevNearWant = r.nearWant;
+        s_footPrevPoolSendDelta = r.poolSendDelta;
         s_footPrevTick = nowTick;
         s_footPrevOk = true;
     }
@@ -2252,7 +2388,7 @@ void RunCharVacOnMain() {
         CountDropsNear(pool, ux, uy, halfW, halfH, &totalEnum, nullptr, nullptr, nullptr, nullptr);
     if (r.dropCount <= 0 && totalEnum > 0) r.dropCount = totalEnum;
 
-    // 不调全盒 ClearPickupGatesNear：1500 盒 near≈100+ 时每拍上百次写会占死 MainPump，
+    // 不调全盒 ClearPickupGatesNear：大盒 near 多时每拍上百次写会占死 MainPump，
     // 打怪/瞬移/攻击加速同泵排队 → 日志见 fires 归零 + drain budget deferred。
     r.gatesCleared = 0;
 
@@ -2272,10 +2408,13 @@ void RunCharVacOnMain() {
     const uintptr_t arrLen =
         (LooksLikeHeapPtr(entries) && count >= 0 && count <= 4096) ? ArrayLen(entries) : 0;
 
-    // 一调一件。抛物未落地(EndPara!=3)的 drop 一律不写字段——065ed0 实证：先 Clear 再判
-    // EndPara 会在盒内扫过多件并清 LastTry/PickStamp，落地动画循环重播（gates 常 2~12）。
-    // 只对已 Ready 的那一件清冷却后 Send；不动 EndPara/OwnType（禁写 0 / 禁无谓回写）。
-    for (uintptr_t i = 0; i < arrLen && r.sent < 1; ++i) {
+    // 一调一件，且只吸人物最近的 Ready drop（盒内按距离² 选最近）。
+    // 抛物未落地(EndPara!=3)一律不写字段——065ed0：先 Clear 再判 EndPara 会扫多件并
+    // 清 LastTry/PickStamp，落地动画打转。只对选中那一件清冷却后 Send。
+    void* bestDrop = nullptr;
+    int bestId = 0;
+    float bestD2 = 0.f;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
         uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
         if (ReadI32(entry, kOffEntryHash) < 0) continue;
         void* drop = ReadPtr(entry, kOffEntryValue);
@@ -2297,17 +2436,28 @@ void RunCharVacOnMain() {
         if (ReadI32(drop, kOffDropLastTry) == kLastTrySkipStamp) continue;
         if (ReadI32(drop, kOffDropEndPara) != kEndParaReady) continue;
 
+        const float dx = px - ux;
+        const float dy = py - uy;
+        const float d2 = dx * dx + dy * dy;
+        if (!bestDrop || d2 < bestD2) {
+            bestDrop = drop;
+            bestId = id;
+            bestD2 = d2;
+        }
+    }
+
+    if (bestDrop && bestId != 0) {
         // 仅清冷却戳，便于官方 Send 过 PickStamp 窗；绝不碰 EndPara
         if (DropWritesAllowed()) {
             bool touched = false;
-            const int last = ReadI32(drop, kOffDropLastTry);
-            const int stamp = ReadI32(drop, kOffDropPickStamp);
+            const int last = ReadI32(bestDrop, kOffDropLastTry);
+            const int stamp = ReadI32(bestDrop, kOffDropPickStamp);
             if (stamp != 0) {
-                WriteI32(drop, kOffDropPickStamp, 0);
+                WriteI32(bestDrop, kOffDropPickStamp, 0);
                 touched = true;
             }
             if (last != 0 && last != kLastTrySkipStamp) {
-                WriteI32(drop, kOffDropLastTry, 0);
+                WriteI32(bestDrop, kOffDropLastTry, 0);
                 touched = true;
             }
             if (touched) ++r.gatesCleared;
@@ -2315,13 +2465,14 @@ void RunCharVacOnMain() {
         ++r.nearWant;
 
         __try {
-            fn(pool, pt, id, 0u, nullptr);
+            fn(pool, pt, bestId, 0u, nullptr);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             seh = true;
         }
-        if (seh) break;
-        ++r.sent;
-        r.sentDropId = id;
+        if (!seh) {
+            ++r.sent;
+            r.sentDropId = bestId;
+        }
     }
 
     gCharSentTotal.fetch_add(static_cast<uint32_t>(r.sent), std::memory_order_relaxed);
@@ -2393,7 +2544,7 @@ void CharVacJobThunk(void*) {
 void Init() {
     BindIl2Cpp();
     (void)ResolveByPetRectPack(false);
-    x::runtime::LogI("DropPort", "init pet_loot port (formal=pet vacuum; foot optional)");
+    x::runtime::LogI("DropPort", "init pet_loot port (pet vacuum; foot=native TryPickUpDrop only)");
 }
 
 void Shutdown() {
@@ -2482,21 +2633,13 @@ bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumRe
     return out.ok;
 }
 
-bool TryFootPickup(float halfW, float halfH, const SkipIds* skipIds, FootResult& out) {
+bool TryFootPickup(FootResult& out) {
     out = {};
     if (!EnsureBound()) {
         out.why = "unbound";
         return false;
     }
-    if (!(halfW > 1.f) || !(halfH > 1.f)) {
-        out.why = "bad_box";
-        return false;
-    }
 
-    gFoot.halfW = halfW;
-    gFoot.halfH = halfH;
-    gFoot.skip = {};
-    if (skipIds) gFoot.skip = *skipIds;
     gFoot.result = {};
     gFoot.done = false;
 

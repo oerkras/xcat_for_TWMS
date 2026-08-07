@@ -7,6 +7,7 @@
 #include "../features/ccu/ccu.h"
 #include "../features/frame_lock/frame_lock.h"
 #include "../features/kick_sniff/kick_sniff.h"
+#include "../features/soft_login_probe/soft_login_probe.h"
 #include "../features/ports/travel_port.h"
 #include "../features/ports/world_port.h"
 #include "../features/sellbag/sellbag.h"
@@ -154,6 +155,9 @@ void PayloadStatus_Publish() {
     st.frameLockOn = x::features::frame_lock::IsEnabled() ? 1u : 0u;
     st.frameLockWant = x::features::frame_lock::TargetFps();
     st.frameLockReadback = x::features::frame_lock::LastAppliedFps();
+
+    st.softLoginHold = x::features::soft_login_probe::IsHoldActive() ? 1u : 0u;
+    st.softLoginResult = x::features::soft_login_probe::ResultCode();
 
     st.writeTickMs = GetTickCount64();
     (void)xcat::WritePayloadStatus(binDir, st);

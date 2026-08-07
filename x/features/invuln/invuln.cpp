@@ -1,10 +1,12 @@
-// TWMS Classic — data-plane invuln v2.6.5 (field-hash remount 2026-08-06).
+// TWMS Classic — data-plane invuln v2.6.6+hard (field-hash remount 2026-08-06).
 //
 // Hit gate: User+0x298 i-frame (~100ms worker top-up).
 // Anti-blink hybrid: MainPump frame tick (before+after SendWill) + worker 8ms backup.
 // Soft +0x228/+0x22C DISABLED. Optional layout probe: XCAT_INVULN_PROBE=1 (default off).
 // Bind SSOT: WM.MyUser@+0x28 first (same as Drop/Skill/Combat); FindAll fallback.
-// Rebind: WM path every tick when unbound; FindAll MapScene-only（InterStage 禁扫）。
+// Rebind: WM path every tick when unbound; FindAll 仅 IsPlayReady（禁 InterStage/Login/
+// CashShop/GlobalMarket — BIN D217：拍卖 scene=5 时 80ms FindAll 堵 MainPump）。
+// 裸 gFindAll：泵内硬检 LoginFreeze + MapTransitBlock + PlayReady。
 // 1.5s ACCEPT grace; LU drop keeps SecondaryStat.
 // No hotkey — panel / [core] invuln / XCAT_INVULN=1 only.
 // Docs: docs/features/invuln/模块设计.md
@@ -136,7 +138,7 @@ constexpr DWORD kGateRefreshMs = 100;
 constexpr DWORD kAntiBlinkBackupMs = 8;
 // FindAll fallback throttle (steady MapScene). WM.MyUser path is unthrottled when unbound.
 constexpr DWORD kRebindMs = 400;
-// 仅 MapScene 内短暂无绑：加快 FindAll。InterStage 禁止 FindAll（见 SkipFindAllTransit）。
+// 仅 IsPlayReady 内短暂无绑：加快 FindAll。非玩法场景禁止 FindAll（见 SkipFindAllTransit）。
 constexpr DWORD kRebindFastMs = 80;
 // FindAll 失败路径刷屏节流（重试仍按 kRebind*；日志 10s 一条）。
 constexpr DWORD kBindFailLogMs = 10000;
@@ -570,6 +572,8 @@ bool AcceptLocalUser(void* lu, const char* how) {
 // Fast path: WM.MyUser SSOT (same as DropPort / SkillPort). No FindAll.
 bool TryBindWmMyUser() {
     if (x::runtime::managed_main::IsLoginFrozen()) return false;
+    // 拍卖/商城/过渡：不写 hit、也不为校 GO 名占 MainPump。
+    if (!x::features::ports::world::IsPlayReady()) return false;
     void* mu = PeekWmMyUser();
     if (!LooksLikeHeapPtr(mu)) return false;
 
@@ -582,7 +586,7 @@ bool TryBindWmMyUser() {
         return AcceptLocalUser(mu, "wm.MyUser");
     }
 
-    // 非地图：校 GO 名，防登录壳误绑。
+    // 非地图但仍 PlayReady（极少）：校 GO 名，防登录壳误绑。
     struct Ctx {
         void* mu = nullptr;
         bool ok = false;
@@ -597,12 +601,10 @@ bool TryBindWmMyUser() {
     return AcceptLocalUser(mu, "wm.MyUser");
 }
 
-// InterStage/None/Login：Unity FindObjects 会拖长黑屏；只靠 WM.MyUser，禁止 FindAll。
+// 非玩法就绪：Unity FindObjects 会拖黑屏 / 堵拍卖·商城主线程；只靠 WM.MyUser，禁止 FindAll。
+// SSOT = IsPlayReady（覆盖 InterStage/None/Login/CashShop/GlobalMarket）。
 bool SkipFindAllTransit() {
-    using x::features::ports::world::GetSceneState;
-    using x::features::ports::world::SceneState;
-    const SceneState sc = GetSceneState();
-    return sc == SceneState::InterStage || sc == SceneState::None || sc == SceneState::Login;
+    return !x::features::ports::world::IsPlayReady();
 }
 
 bool TryResolveLocalUserFindAll() {
@@ -628,6 +630,13 @@ bool TryResolveLocalUserFindAll() {
     }
     auto job = [](void* user) {
         auto* c = reinterpret_cast<Ctx*>(user);
+        // 裸 gFindAll 绕过 managed_main::MapTransitBlock —— 泵内必须自检仓级闸。
+        if (x::runtime::managed_main::IsLoginFrozen() ||
+            x::runtime::managed_main::IsMapTransitBlocked() ||
+            !x::features::ports::world::IsPlayReady()) {
+            c->ok = false;
+            return;
+        }
         void* arr = nullptr;
         __try {
             arr = gFindAll(gLuType, nullptr);
@@ -824,8 +833,9 @@ void EnsureBindings() {
 DWORD WINAPI InvulnThread(LPVOID) {
     Beep(740, 80);
     WarnIfSoftEnvRequested();
-    Log("Invuln worker v2.6.5 start (hit=+0x298; anti-blink=frame+backup8ms; bind=wm.MyUser+FindAll; "
-        "rebind=%ums/%ums grace=%ums; FindAll skip InterStage; probe228 %s)",
+    Log("Invuln worker v2.6.6+hard start (hit=+0x298; anti-blink=frame+backup8ms; "
+        "bind=wm.MyUser+FindAll; rebind=%ums/%ums grace=%ums; "
+        "FindAll=PlayReady+TransitBlock; probe228 %s)",
         (unsigned)kRebindFastMs, (unsigned)kRebindMs, (unsigned)kBindGraceMs,
         ProbeEnabled() ? "on" : "off");
 
@@ -887,7 +897,7 @@ DWORD WINAPI InvulnThread(LPVOID) {
                 if (!SecondaryStatsAlive()) TryResolveWorldManagers();
 
                 // WM.MyUser：无绑时每 tick 试（不限流）—— scene=3 后通常同窗可 ACCEPT。
-                // InterStage 黑屏窗：禁 FindAll（曾 80ms 打主线程，对齐日志 ~6s 黑屏）。
+                // 非 IsPlayReady（InterStage/拍卖/商城）：禁 FindAll，防主线程堵泵。
                 if (!LocalUserStillAlive()) {
                     if (TryBindWmMyUser()) {
                         ApplyInvuln(true);

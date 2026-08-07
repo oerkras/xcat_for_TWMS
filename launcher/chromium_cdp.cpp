@@ -134,6 +134,33 @@ bool MirrorTreeFile(const std::wstring& src, const std::wstring& dst) {
     return false;
 }
 
+constexpr wchar_t kForceSessionSyncMarker[] = L".xcat_force_session_sync";
+
+bool HasUsableCookies(const std::wstring& profileDef) {
+    // Chrome 新版多把 Cookie 放在 Network\Cookies；旧布局在 Default\Cookies。
+    const std::wstring candidates[] = {
+        profileDef + L"\\Network\\Cookies",
+        profileDef + L"\\Cookies",
+    };
+    for (const auto& p : candidates) {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW(p.c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        FindClose(h);
+        const ULARGE_INTEGER sz{fd.nFileSizeLow, fd.nFileSizeHigh};
+        if (sz.QuadPart > 64) return true;  // 空壳/占位不算可用
+    }
+    return false;
+}
+
+bool PeekForceSessionSync(const std::wstring& cdpRoot) {
+    return FileExists(cdpRoot + L"\\" + kForceSessionSyncMarker);
+}
+
+void ClearForceSessionSync(const std::wstring& cdpRoot) {
+    DeleteFileW((cdpRoot + L"\\" + kForceSessionSyncMarker).c_str());
+}
+
 bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCdpData, const LogFn& log) {
     outCdpData.clear();
     wchar_t localApp[MAX_PATH]{};
@@ -141,29 +168,61 @@ bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCd
     outCdpData = std::wstring(localApp) + L"\\XCat\\GamaPassCdpProfile";
     if (!EnsureDir(std::wstring(localApp) + L"\\XCat") || !EnsureDir(outCdpData)) return false;
 
-    // 同步会话相关到副本（只读源→副本，绝不反向写回日常 User Data）
-    CopyFileTo(srcUserData + L"\\Local State", outCdpData + L"\\Local State");
     const std::wstring srcDef = srcUserData + L"\\Default";
     const std::wstring dstDef = outCdpData + L"\\Default";
     EnsureDir(dstDef);
-    const wchar_t* files[] = {L"Preferences",         L"Secure Preferences", L"Login Data",
-                              L"Login Data-journal",  L"Web Data",           L"Web Data-journal",
-                              L"History",             L"Bookmarks",          L"Favicons",
-                              L"Cookies",             L"Cookies-journal"};
-    for (const wchar_t* f : files) {
+
+    // Local State / Preferences：每次轻量同步（不含 Cookie，风险低）
+    CopyFileTo(srcUserData + L"\\Local State", outCdpData + L"\\Local State");
+    const wchar_t* alwaysFiles[] = {L"Preferences", L"Secure Preferences", L"Login Data",
+                                    L"Login Data-journal", L"Web Data",     L"Web Data-journal",
+                                    L"History",     L"Bookmarks",          L"Favicons"};
+    for (const wchar_t* f : alwaysFiles) {
         CopyFileTo(srcDef + L"\\" + f, dstDef + L"\\" + f);
     }
-    MirrorTreeFile(srcDef + L"\\Network", dstDef + L"\\Network");
-    // Local Storage / IndexedDB 可能承载 Gama Pass 会话
-    MirrorTreeFile(srcDef + L"\\Local Storage", dstDef + L"\\Local Storage");
-    MirrorTreeFile(srcDef + L"\\Session Storage", dstDef + L"\\Session Storage");
-    MirrorTreeFile(srcDef + L"\\IndexedDB", dstDef + L"\\IndexedDB");
 
-    LogLine(log, L"[cdp] Chromium 标准目录不能开调试口，已同步会话到：" + outCdpData);
+    // 会话文件：无脑覆盖会把 CDP 刚写热的 GamaPass SSO 盖成日常目录的旧副本；
+    // 仅在「首次种子」或「完整 /login 失败后强制重同步」时从日常灌入。
+    // marker 只在灌入后 CDP 侧确有可用 Cookies 才清掉，避免拷贝失败丢重同步机会。
+    const bool forceSync = PeekForceSessionSync(outCdpData);
+    const bool needSeed = forceSync || !HasUsableCookies(dstDef);
+    if (needSeed) {
+        CopyFileTo(srcDef + L"\\Cookies", dstDef + L"\\Cookies");
+        CopyFileTo(srcDef + L"\\Cookies-journal", dstDef + L"\\Cookies-journal");
+        MirrorTreeFile(srcDef + L"\\Network", dstDef + L"\\Network");
+        MirrorTreeFile(srcDef + L"\\Local Storage", dstDef + L"\\Local Storage");
+        MirrorTreeFile(srcDef + L"\\Session Storage", dstDef + L"\\Session Storage");
+        MirrorTreeFile(srcDef + L"\\IndexedDB", dstDef + L"\\IndexedDB");
+        if (HasUsableCookies(dstDef)) {
+            ClearForceSessionSync(outCdpData);
+            LogLine(log, std::wstring(L"[cdp] Chromium 标准目录不能开调试口，已") +
+                             (forceSync ? L"强制重同步" : L"首次同步") + L"会话到：" + outCdpData);
+        } else {
+            LogLine(log, L"[cdp] 会话同步未得到可用 Cookies（日常目录可能尚未登录）；"
+                         L"保留强制重同步标记，下次再试：" + outCdpData);
+        }
+    } else {
+        LogLine(log, L"[cdp] Chromium 标准目录不能开调试口，复用已有会话（未覆盖 Cookies）：" +
+                         outCdpData);
+    }
     return DirExists(outCdpData);
 }
 
 }  // namespace
+
+void RequestCdpSessionResync() {
+    // 下一轮 PrepareCdpSafeUserData 见到此 marker 会从日常 User Data 重灌 Cookies。
+    wchar_t localApp[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return;
+    const std::wstring xcat = std::wstring(localApp) + L"\\XCat";
+    const std::wstring profile = xcat + L"\\GamaPassCdpProfile";
+    CreateDirectoryW(xcat.c_str(), nullptr);
+    CreateDirectoryW(profile.c_str(), nullptr);
+    const std::wstring marker = profile + L"\\.xcat_force_session_sync";
+    HANDLE h = CreateFileW(marker.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+}
 
 bool ResolvePreferredChromium(BrowserProfile& out, const LogFn& log) {
     out = {};
@@ -914,10 +973,15 @@ bool Session::IsPortAlive(int port) {
 bool CloseRemoteBrowser(int port, const LogFn& log) {
     if (port <= 0) port = kDefaultRemoteDebugPort;
 
-    // 先礼后兵：CDP 优雅关 → 再按调试口精确杀进程（Chrome++ 上 Browser.close 常关不干净）
+    // 先礼后兵：Browser.close → 轮询等调试口自行消失（Cookie 落盘窗口）→ 再精确杀残留。
+    // 口已死则立刻往下，不再盲等满额；最长约 800ms。
     Session s;
     (void)s.QuitBrowser(port, log);
-    Sleep(300);
+    const DWORD deadline = GetTickCount() + 800u;
+    while (Session::IsPortAlive(port)) {
+        if (GetTickCount() >= deadline) break;
+        Sleep(50);
+    }
 
     const unsigned n = KillBrowsersOnDebugPort(port, log);
     // 再扫一轮残留

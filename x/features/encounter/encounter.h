@@ -24,11 +24,13 @@ void StartWorker();
 void StopWorker();
 
 void SetEnabled(bool on);
-void SetStrategies(bool stopCombat, bool reconnect);
+void SetStrategies(bool stopCombat, bool reconnect, bool gmEscalate = true);
 
 State GetState();
 const char* GetStateName();
 int LastOtherCount();
+int LastAdminLikeCount();     // JobCategory 8/9
+int LastHideSuspectCount();   // avatar 未激活嫌疑（藏人功能开时恒 0）
 // 遇人仍钉着 simple_combat pause（channel_hop Fail/OK 结束时勿抢清）
 bool HoldsCombatPause();
 

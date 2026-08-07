@@ -120,11 +120,23 @@ void MaybeLaunchFeedbackFromLog(const std::wstring& line) {
         return;
     }
     if (line.find(msc::weblogin::kHttpBusyTag) != std::wstring::npos) {
-        if (gLogUi) gLogUi->status = "HTTP 登录换票中…";
+        if (gLogUi) {
+            gLogUi->status =
+                (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto ||
+                 attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto)
+                    ? "GAMA PASS 自动登录中…（浏览器点选换票，请稍候）"
+                    : "HTTP 登录换票中…";
+        }
         return;
     }
     if (line.find(msc::weblogin::kHttpTicketOkTag) != std::wstring::npos) {
-        if (gLogUi) gLogUi->status = "HTTP 换票成功，正在开游戏…";
+        if (gLogUi) {
+            gLogUi->status =
+                (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto ||
+                 attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto)
+                    ? "GAMA PASS 换票成功，正在开游戏/注入…"
+                    : "HTTP 换票成功，正在开游戏…";
+        }
         return;
     }
     if (line.find(msc::weblogin::kHttpTimeoutTag) != std::wstring::npos) {
@@ -368,7 +380,7 @@ bool LaunchPanel_StartOneClick(LaunchUiState& ui, bool honorStrategyPrep) {
         return false;
     }
     if (msc::weblogin::IsBusy()) {
-        ui.status = "正在登录/换票中…";
+        ui.status = "正在自动登录/换票中…";
         return false;
     }
     sound::UiClick();
@@ -382,7 +394,7 @@ bool LaunchPanel_StartOneClick(LaunchUiState& ui, bool honorStrategyPrep) {
         return false;
     }
     ui.status = needCreds ? "已开始一键登录/换票/开游戏/注入"
-                          : "已开始 GAMA PASS（浏览器会话）换票/开游戏/注入";
+                          : "GAMA PASS 自动登录已开始…（顶部可看进度）";
     // 任意入口成功启动后，取消切策略留下的自动待办，避免准备窗到期再打一发。
     ui.pendingAutoLaunch = false;
     ui.autoLaunchNotBeforeMs = 0;
@@ -404,7 +416,7 @@ void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui) {
                         " 秒后自动启动（可再点按钮取消）";
         } else {
             ui.status = "GAMA PASS：约 " + std::to_string(prepLeft) +
-                        " 秒后自动换票（可再点按钮取消）";
+                        " 秒后自动换票（顶部可取消，或切到启动页）";
         }
         return;
     }

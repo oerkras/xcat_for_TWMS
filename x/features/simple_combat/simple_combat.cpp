@@ -643,28 +643,26 @@ void RenewLootPulseHold(DWORD now) {
 
 void EnterState(State s, DWORD now, const char* why) {
     if (gState == s) return;
+    const State prev = gState;
     // 离开走路追怪态时清 InputX，避免粘键拖进出刀/Idle。
     //
-    // ⚠️ Impact 直升机路径**从不走路**（位移全靠旋翼冲量，`HoldWalk` 只属拟人档），这里的
-    // `StopWalk` 是空转；但它的代价极高——会 `InvokeAndWait` **阻塞抢占游戏主线程**（High 优先级），
-    // 并给左右方向键各注入一次抬起事件，且自身没有「没在走就早退」的短路。
-    // BIN 1394b0：FSM 自激到 64 次/秒时，这条路径打出 4528 次合成输入（69/s，峰值 112/s）
-    // 外加同量的主线程抢占，直接把 IMGUI 覆盖层冻到点不动。
-    // 自激本身已修，但**放大器也必须断掉**：任何未来的状态抖动都不该再有能力冻死用户的 UI。
-    // 切档时的锁存清理由 `SetImpactApproachEnabled` / `SetHumanWalkEnabled` 各自兜底，不会漏。
-    if (gState == State::MoveTo && s != State::MoveTo &&
+    // ⚠️ StopWalk 会 `InvokeAndWait` **阻塞抢占游戏主线程**（High），没在走时也曾空跑整段。
+    // BIN 1394b0：FSM 自激 64/s → 合成键+泵抢占冻死 ImGui。Impact 从不走路：直接跳过。
+    // 拟人仍需停步，但 StopWalk 已对 prev==0 早退、HoldWalk 同向短路；出带另有迟滞。
+    // 切档锁存清理由 `SetImpactApproachEnabled` / `SetHumanWalkEnabled` 兜底。
+    if (prev == State::MoveTo && s != State::MoveTo &&
         !gImpactApproachEnabled.load(std::memory_order_acquire)) {
         (void)ports::attack::StopWalk();
     }
     const bool hotCycle =
-        (gState == State::Firing && s == State::Recover) ||
-        (gState == State::Recover && s == State::Firing);
+        (prev == State::Firing && s == State::Recover) ||
+        (prev == State::Recover && s == State::Firing);
     const char* msgWhy = why && why[0] ? why : "";
     const char* sep = why && why[0] ? " " : "";
     if (hotCycle) {
-        LogToFile("state %s→%s%s%s", StateName(gState), StateName(s), sep, msgWhy);
+        LogToFile("state %s→%s%s%s", StateName(prev), StateName(s), sep, msgWhy);
     } else {
-        LogLine("state %s→%s%s%s", StateName(gState), StateName(s), sep, msgWhy);
+        LogLine("state %s→%s%s%s", StateName(prev), StateName(s), sep, msgWhy);
     }
     gState = s;
     gStateEnterMs = now;
@@ -674,17 +672,22 @@ void EnterState(State s, DWORD now, const char* why) {
         gHumanWalkArmedMs = 0;
         gHumanWalkFocusTickMs = 0;
     }
-    // 吸物脉冲：落地 Settling 武装；出刀链 / Idle 立刻关（挂机停后走自由吸路径）。
-    if (s == State::Settling) {
-        DWORD remain = kLootPulseFloorMs;
-        if (gSettleUntil && static_cast<int>(gSettleUntil - now) > 0) {
-            remain = gSettleUntil - now;
-            if (remain < kLootPulseFloorMs) remain = kLootPulseFloorMs;
-        }
-        ArmLootPulse(now, remain, /*edge=*/true);
-    } else if (s == State::Aim || s == State::Firing || s == State::Recover ||
-               s == State::Idle) {
+    // 吸物：出刀链关脉冲；其余态开门。离开出刀 / 进 Settling 时边沿，便于立刻吸一拍。
+    if (s == State::Aim || s == State::Firing || s == State::Recover) {
         ClearLootPulse();
+    } else {
+        const bool fromFire =
+            prev == State::Aim || prev == State::Firing || prev == State::Recover;
+        if (s == State::Settling) {
+            DWORD remain = kLootPulseFloorMs;
+            if (gSettleUntil && static_cast<int>(gSettleUntil - now) > 0) {
+                remain = gSettleUntil - now;
+                if (remain < kLootPulseFloorMs) remain = kLootPulseFloorMs;
+            }
+            ArmLootPulse(now, remain, /*edge=*/true);
+        } else if (fromFire) {
+            ArmLootPulse(now, kLootPulseFloorMs, /*edge=*/true);
+        }
     }
 }
 
@@ -1705,6 +1708,15 @@ bool InHitBand(float playerX, float playerY, float mobX, float mobY, float stand
     return dx <= standOff * kHitBandMaxFrac;
 }
 
+// 拟人出带迟滞：进带用紧口径，Recover 用宽口径，避免带边 MoveTo↔Aim 自激打 StopWalk。
+constexpr float kHumanBandExitSlackPx = 36.f;
+bool InHumanHoldBand(float playerX, float playerY, float mobX, float mobY, float standOff) {
+    if (!SameLayer(playerX, playerY, mobX, mobY)) return false;
+    const float dx = std::fabs(mobX - playerX);
+    if (dx < kMinLandAway) return false;
+    return dx <= standOff * kHitBandMaxFrac + kHumanBandExitSlackPx;
+}
+
 // 无脑A 续砍带：同层且未到重贴距离 → 继续打（与 NeedsReapproach 无缝衔接）。
 // 含 dx≈0 怪心重叠：旧版 dx<1 拒刀 + Aim 不重贴 → melee_wait_tp 空等（upload d8cd64 ≈7s）。
 // BIN 7b792b：起伏双台 |dy|~50 但 dx 已近 → 仍可续砍，勿因 SameLayerY(45) 卡死。
@@ -2491,13 +2503,40 @@ void PollF11NativeMob() {
 // 叠加纵向死区的残差后角色稳定悬在怪上方 32px，砍空气（BIN 14a58c 实测）。
 // 近战要的是同高，别再往这里加"保险余量"。
 constexpr float kHeliLiftPx = 0.f;
-constexpr float kHeliCruiseRadius = 260.f;  // 超此距离走 Cruise 档（放宽水平速度）
+// 超此距离走 Cruise 档（放宽速度上限）。
+//
+// 260 → 140（BIN adc7b2）：Station 的职责是「已经到怪身边了，稳住站位」，260 却把整段
+// 中距赶路也划了进去 —— 实测 120~260px 的进近有 248 次、合计 92s，全程被压在 Station 档，
+// 而这段路和 300px 的路没有任何性质区别，只是短一点。
+//
+// 收窄不会带来过冲：Kp·T ≤ 1 已保证单调收敛（见 heli_rotor 的 kKpX 注释），末段速度由
+// 增益而非档位决定，抬高档位只影响「远处能跑多快」。140px 约等于 Station 档 3 个发射周期
+// 的位移（480px/s × 94ms ≈ 45px），够旋翼把站位稳下来。
+constexpr float kHeliCruiseRadius = 140.f;
 // 丢目标宽限：宽限内钉住原地悬停等换怪；到点则卸 fh-ban 让它正常落地。
 // 不设宽限而直接停旋翼 = fh-ban 下无人托举 → 一路掉出图底，这正是「掉出地图」的主因。
 constexpr DWORD kHeliAirborneGraceMs = 1500;
-// 进近超时：旋翼一直推不进命中带（怪卡死角/被地形挡）就换目标，别无限盘旋。
-constexpr DWORD kHeliApproachTimeoutMs = 2600;
+// 进近看门狗：判据是「**还在不在靠近**」，不是给行程掐秒表。
+//
+// 曾经是固定 2600ms 预算，与地图尺寸直接冲突：换靶时目标常在 1200~1900px 外，而实际
+// 巡航均速只有约 400~470px/s（Cruise 上限 560，还要扣加速段和近端 Station 收窄），
+// 2600ms 只够飞约 1100px ——**超过这个距离的目标在算术上不可能按时到达**。
+// BIN 8bd148 三次超时全是同一形态：距离 1872/1741/1223px 单调下降、全程没停，
+// 都在差约 200px 时被砍掉，整趟 2.6 秒白飞，还顺手把那只怪软禁 2.5 秒。
+//
+// 换成看推进量之后，长途不再误判，真卡住时 1.2s 就放弃，比原来的 2.6s 还果断。
+constexpr DWORD kHeliApproachStallMs = 1200;     // 距离无实质改善这么久 = 卡住
+constexpr float kHeliApproachProgressPx = 60.f;  // 「实质改善」的门槛
+// 兜底上限：防止追一只与我们同速逃跑的怪追到天荒地老。按 450px/s 覆盖约 3600px，
+// 远宽于常见地图，正常的跨图长途碰不到它。
+constexpr DWORD kHeliApproachHardCapMs = 8000;
 constexpr DWORD kHeliApproachSoftBanMs = 2500;
+
+// 进近看门狗的本趟状态。epoch 绑定 gStateEnterMs，用来识别「换了一趟进近」，
+// 这样不必往 EnterState 里插重置钩子。
+DWORD gHeliApproachEpoch = 0;
+DWORD gHeliProgressMs = 0;  // 上次取得实质改善的时刻
+float gHeliBestDist = 0.f;  // 本趟见过的最近距离
 
 DWORD gHeliAirborneUntilMs = 0;
 bool gHeliHoldValid = false;
@@ -2530,10 +2569,14 @@ void SyncImpactFhBan() {
     }
 }
 
-// 旋翼 setpoint 夹取：只保证「不指到图外」，夹到**原始 FH AABB**。
+// 旋翼 setpoint 夹取：只保证「不指到空域外」。
 // BIN ac21f9：朝地面落点猛推 → Y 过冲到图外 → 205，所以这道夹取必须留着。
 //
-// ⚠️ 但**绝不能再向内缩**。曾经用 `kLandMarginPx + 48 = 72` 内缩，把 AABB 最外一圈判成
+// 口径与 A 层包线、`NeedsHeliRtb`、`PlayerOutOfPlayBounds` 三处**必须一致**（合法空域 =
+// AABB ⊕ 两轴 slack，见 heli_rotor.h）。夹到原始 AABB 会把贴地面层的站位点顶高 —— 怪就
+// 站在 AABB 下沿上，站位点跟它同高才对。
+//
+// ⚠️ 更**绝不能向内缩**。曾经用 `kLandMarginPx + 48 = 72` 内缩，把 AABB 最外一圈判成
 // 禁区；站在最低/最高台的怪恰好全在那一圈里，站位点被顶开 50~72px，永远进不了 ±35 的
 // 出刀带 → 每只怪 2600ms 超时换靶（BIN 4a79e4：「头顶和脚下的怪都打不中，只有中段能中」）。
 // 那 72 是**瞬移落点**的安全内缩，语义不通用：落点要避开边界，悬停点不用——怪站在那儿
@@ -2542,10 +2585,10 @@ bool ClampAimInPlayBounds(float* x, float* y) {
     if (!x || !y) return false;
     ports::map_bounds::Rect r{};
     if (!ports::map_bounds::QueryPlayBounds(0, &r) || !r.ok) return true;
-    float l = static_cast<float>(r.left);
-    float t = static_cast<float>(r.top);
-    float ri = static_cast<float>(r.right);
-    float b = static_cast<float>(r.bottom);
+    float l = static_cast<float>(r.left) - heli::kEnvSlackXPx;
+    float t = static_cast<float>(r.top) - heli::kEnvSlackYPx;
+    float ri = static_cast<float>(r.right) + heli::kEnvSlackXPx;
+    float b = static_cast<float>(r.bottom) + heli::kEnvSlackYPx;
     if (ri <= l || b <= t) return true;
     if (*x < l) *x = l;
     if (*x > ri) *x = ri;
@@ -2633,11 +2676,12 @@ bool NeedsHeliRtb(float px, float py, float* outX, float* outY) {
     const float rt = static_cast<float>(r.top);
     const float rb = static_cast<float>(r.bottom);
     if (rr <= rl || rb <= rt) return false;
-    // 判定框**外扩**（见 heli_rotor.h 的 kEnvSlackPx）：AABB 内一律合法，最外沿的台上有怪
-    // 是常态。内缩会让 RTB 每拍抢走竖直 setpoint，角色够不到那些怪（BIN 4a79e4）。
-    // 必须与 A 层包线用同一个数，否则一层想下去、另一层判紧急往上拉，互相打架。
-    const float s = heli::kEnvSlackPx;
-    if (px >= rl - s && px <= rr + s && py >= rt - s && py <= rb + s) return false;
+    // 判定框**外扩**成合法空域（见 heli_rotor.h：AABB 是可站立面，不是空域）。竖直余量
+    // 必须覆盖出刀带，否则贴地面层的怪飞行时每拍都被判出界（BIN b3d1bd 970 次误判）。
+    // 必须与 A 层包线用同一对数，否则一层想下去、另一层判紧急往上拉，互相打架。
+    const float sx = heli::kEnvSlackXPx;
+    const float sy = heli::kEnvSlackYPx;
+    if (px >= rl - sx && px <= rr + sx && py >= rt - sy && py <= rb + sy) return false;
     // 拉回目标 = 最近的 AABB 内的点，再往里让 kEnvReturnInsetPx 做迟滞：拉到边沿上
     // 会立刻又落进出界判定，模式在 rtb/station 之间抖。内缩量远小于出刀带，不影响够怪。
     const float k = heli::kEnvReturnInsetPx;
@@ -2646,9 +2690,13 @@ bool NeedsHeliRtb(float px, float py, float* outX, float* outY) {
     return true;
 }
 
-// 人在 AABB 之外吗？纯位置判定，不带任何余量。
-// 界外出刀 = 拿非法坐标去撞服务端校验：BIN c9b8dc 两段界外攻击（x=-658，左沿 -585）
-// 对上了用户报的两次掉线。所以这是攻击链上的硬闸——控制律再怎么改，界外都不许出手。
+// 人在**合法空域**之外吗？界外出刀 = 拿非法坐标去撞服务端校验：BIN c9b8dc 两段界外攻击
+// （x=-658，左沿 -585）对上了用户报的两次掉线。所以这是攻击链上的硬闸。
+//
+// ⚠️ 但判据必须是空域、不是 AABB。曾经这里用**零余量**的原始 AABB，而 AABB 下沿就压在
+// 最低那排台上、怪就站在那儿：贴地打怪时悬停抖动每拍都可能压线，970 次 oob_hold 里越线
+// 深度中位仅 3px、100% 在出刀带内，全是误判（BIN b3d1bd）。竖直余量取 kEnvSlackYPx 之后
+// 真正的「深度出界出刀」仍然拦得住 —— 那种是几十上百 px 级，不是 3px。
 // 拿不到边界时返回 false：宁可放行，也不能因为读不到图信息就哑火。
 bool PlayerOutOfPlayBounds(float px, float py) {
     ports::map_bounds::Rect r{};
@@ -2658,7 +2706,9 @@ bool PlayerOutOfPlayBounds(float px, float py) {
     const float rt = static_cast<float>(r.top);
     const float rb = static_cast<float>(r.bottom);
     if (rr <= rl || rb <= rt) return false;
-    return px < rl || px > rr || py < rt || py > rb;
+    const float sx = heli::kEnvSlackXPx;
+    const float sy = heli::kEnvSlackYPx;
+    return px < rl - sx || px > rr + sx || py < rt - sy || py > rb + sy;
 }
 
 // 把「打哪只、站哪儿」翻译成旋翼 setpoint。每 tick 可重复调，幂等。
@@ -2708,11 +2758,19 @@ void PublishHeliSetpoint(DWORD now, float px, float py, bool haveLock) {
     gHeliHoldValid = false;
 }
 
+// 最近一拍的旋翼速度。出刀日志要用它，而遥测每 500ms 才落一行、对不上单刀。
+// 旋翼与战斗 FSM 同 tick，所以这份缓存与出刀瞬间的时差就是一个 tick。
+// 读不到飞行状态（未起飞 / Impact 关）时归零：那种情况下是地面出刀，速度本就不参与判读。
+float gHeliLastVx = 0.f;
+float gHeliLastVy = 0.f;
+
 // A 层入口：必须在 TickImpl 所有提前 return 之前调，否则 skill_prepare / 池未热身 /
 // arm_grace 这些 return 会让旋翼停转，fh-ban 下就是自由落体。
 void TickHeliRotor(DWORD now) {
     heli::Telemetry tm{};
     const bool fired = heli::Tick(now, &tm);
+    gHeliLastVx = tm.haveState ? tm.vx : 0.f;
+    gHeliLastVy = tm.haveState ? tm.vy : 0.f;
     static DWORD sLog = 0;
     const char* g = tm.guard ? tm.guard : "";
     const bool notable =
@@ -3301,7 +3359,7 @@ void TickImpl(DWORD now) {
                 // ⚠️ 到位判定必须与 Firing 的出刀硬门**同口径**。这三条带的纵向容差分别是
                 // SameLayer 45 / 同台 100 / 悬停 80，全都宽于出刀带的 35。dy 落在中间时
                 // MoveTo 说「到了」→ Firing，Firing 说「够不到」→ MoveTo，两头对推；更糟的是
-                // `gStateEnterMs` 被每次迁移重置，`kHeliApproachTimeoutMs` 永远触发不了，
+                // `gStateEnterMs` 被每次迁移重置，进近看门狗永远触发不了，
                 // 连换靶自救都做不到，角色就在怪下方原地空转。
                 // BIN 1394b0：70s 内翻 4495 次（≈64/s），头顶台上的怪一直打不到；同一路径
                 // 在收紧出刀带之前只有约 1.9 次/秒。
@@ -3324,13 +3382,28 @@ void TickImpl(DWORD now) {
                     RenewLootPulseHold(now);
                     break;
                 }
-                // 进近超时：怪在死角/旋翼推不进去时换目标，别无限盘旋。
+                // 进近看门狗：只在「不再靠近」时换靶。长途本身不是卡住，别给行程掐秒表
+                //（见 kHeliApproachStallMs 上的事故记录）。
                 const DWORD age = gStateEnterMs ? (now - gStateEnterMs) : 0u;
-                if (age > kHeliApproachTimeoutMs) {
+                const float ddx = gLock.x - player.x;
+                const float ddy = gLock.y - player.y;
+                const float dist = std::sqrt(ddx * ddx + ddy * ddy);
+                if (gHeliApproachEpoch != gStateEnterMs || gHeliProgressMs == 0) {
+                    gHeliApproachEpoch = gStateEnterMs;
+                    gHeliBestDist = dist;
+                    gHeliProgressMs = now;
+                } else if (dist < gHeliBestDist - kHeliApproachProgressPx) {
+                    gHeliBestDist = dist;
+                    gHeliProgressMs = now;
+                }
+                const DWORD stalled = now - gHeliProgressMs;
+                if (stalled > kHeliApproachStallMs || age > kHeliApproachHardCapMs) {
                     SoftBanFor(gLock.id, now, kHeliApproachSoftBanMs, kBanUnreachable);
-                    LogLine("MoveTo heli timeout id=%d age=%ums d=(%.0f,%.0f) — softBan %ums",
-                            gLock.id, (unsigned)age, gLock.x - player.x, gLock.y - player.y,
-                            (unsigned)kHeliApproachSoftBanMs);
+                    LogLine(
+                        "MoveTo heli timeout id=%d age=%ums stall=%ums d=(%.0f,%.0f) best=%.0f "
+                        "— softBan %ums",
+                        gLock.id, (unsigned)age, (unsigned)stalled, ddx, ddy, gHeliBestDist,
+                        (unsigned)kHeliApproachSoftBanMs);
                     ClearLockRetarget(/*forceLite=*/false);
                     EnterState(State::Acquire, now, "heli_timeout");
                     continue;
@@ -3383,7 +3456,7 @@ void TickImpl(DWORD now) {
                 }
                 // 途中已进命中带的同层怪：停走换锁出刀，勿路过浪费。
                 if (TryHumanPassbyRetarget(snap, player.x, player.y, standOff, now)) {
-                    (void)ports::attack::StopWalk();
+                    // EnterState(Aim) 离 MoveTo 会 StopWalk，此处勿再同步抢泵一次。
                     EnterState(State::Aim, now, "human_passby");
                     continue;
                 }
@@ -3476,9 +3549,8 @@ void TickImpl(DWORD now) {
                     LogLine("MoveTo human walk id=%d dx=%.0f dir=%d age=%ums", gLock.id, dx, dir,
                             gStateEnterMs ? (unsigned)(now - gStateEnterMs) : 0u);
                 }
-                // 拟人走路中关吸物脉冲：charVac/TryPick 会打断位移；键锁存不重发 DN → 站桩。
-                // 站桩干等（上方 dx≈0）仍 RenewLootPulseHold，停稳再吸。
-                ClearLootPulse();
+                // 拟人走路：不出刀即可吸（charVac 直调 Send）。续脉冲边沿供 interval 豁免。
+                RenewLootPulseHold(now);
                 break;
             }
             if (!tpOn) {
@@ -4054,7 +4126,8 @@ void TickImpl(DWORD now) {
                 char reason[64]{};
                 ok = multi_skill::TryCast(reason, sizeof(reason));
                 if (ok) {
-                    LogToFile("multi fire id=%d dx=%.0f hp=%d whiff=%d arm=%d", gLock.id, faceDx,
+                    LogToFile("multi fire id=%d dx=%.0f dy=%.0f v=(%.0f,%.0f) hp=%d whiff=%d arm=%d",
+                              gLock.id, faceDx, player.y - gLock.y, gHeliLastVx, gHeliLastVy,
                               hpBefore, gLock.whiff, gLock.firesInArm);
                     if (!gStandstillSince) {
                         gStandstillSince = now;
@@ -4078,8 +4151,13 @@ void TickImpl(DWORD now) {
                 }
                 ok = ports::attack::TryFirePrimary();
                 if (ok) {
-                    LogToFile("fire id=%d dx=%.0f hp=%d whiff=%d arm=%d", gLock.id, faceDx, hpBefore,
-                              gLock.whiff, gLock.firesInArm);
+                    // dy / v 是为了判「空刀由什么决定」而补的：历史上这行只有 dx，
+                    // 结果 780 档空刀翻 7 倍时手上没有能判决的量，横向前瞻假设扫了一轮
+                    // 才发现 AUC 在 Δ=0 最高（即与速度无关），白跑。dy 取「角色 − 怪」，
+                    // 与 kHeliFireMaxDy 注释里那 483 刀的实测同向，可直接并表。
+                    LogToFile("fire id=%d dx=%.0f dy=%.0f v=(%.0f,%.0f) hp=%d whiff=%d arm=%d",
+                              gLock.id, faceDx, player.y - gLock.y, gHeliLastVx, gHeliLastVy,
+                              hpBefore, gLock.whiff, gLock.firesInArm);
                     if (!gStandstillSince) {
                         gStandstillSince = now;
                         gStandstillAnchorX = player.x;
@@ -4152,7 +4230,8 @@ void TickImpl(DWORD now) {
             // needApproachCorrect 未清时禁止 still_valid/near_band 空砍。
             if (same && !gLock.needApproachCorrect) {
                 if (humanOn) {
-                    if (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
+                    // 出带迟滞：仍在宽松带内就续砍，勿 reapproach→立刻 human_in_band 抖 StopWalk。
+                    if (InHumanHoldBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
                         if (!ports::attack::CanFirePrimary()) break;
                         EnterState(State::Firing, now, "still_valid");
                         continue;
@@ -4330,11 +4409,10 @@ bool IsFarmingActive() {
 }
 
 bool IsLootPulseActive() {
-    // 拟人 HoldWalk 期间禁吸（与脉冲窗无关）——捡物会打断 OS 走键位移。
-    if (ports::attack::IsWalkHeld()) return false;
-    // 未真正挂机：吸物自由跑（与改前一致）。
+    // 未真正挂机：吸物自由跑。
     if (!IsFarmingActive()) return true;
-    return LootPulseOpenNow(GetTickCount());
+    // 不出刀就吸：仅 Aim/Firing/Recover 让路；MoveTo（含拟人走路）/Settling/Acquire/Idle 放行。
+    return gState != State::Aim && gState != State::Firing && gState != State::Recover;
 }
 
 uint32_t LootPulseGeneration() {

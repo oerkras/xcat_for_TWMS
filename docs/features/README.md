@@ -11,7 +11,7 @@
 
 | 文档 | 主题 |
 |------|------|
-| [`ops/GAMA_PASS与注入闭环.md`](ops/GAMA_PASS与注入闭环.md) | **GAMA PASS 无人值守** + Classic `LoadLibraryW` 注入 + 守护/挂机闭环（✅ build 56 实机） |
+| [`ops/GAMA_PASS与注入闭环.md`](ops/GAMA_PASS与注入闭环.md) | **GAMA PASS 无人值守** + Classic 注入 + 守护/挂机 `KillLaunchChain` + Cookie 复用/强制重同步 + 顶栏登录提示 |
 | [`ops/启动系统实现.md`](ops/启动系统实现.md) | Galaxy 换票、NGM deep-link、启动骨架（对照枫星注入器启动文档） |
 | [`ops/架构总览.md`](ops/架构总览.md) | TWMS 分层 DAG；`xcat_app` 内嵌 WebView / GamaPass 换票 |
 | [`ops/日志系统.md`](ops/日志系统.md) | 统一 `xcat_log`：launcher / inject / payload JSONL + GUI callback |
@@ -75,9 +75,9 @@
 | [`auto_enter/模块设计.md`](auto_enter/模块设计.md) | 自动进游戏：分区→**未满频道随机 (PickOpen)**→选角；单次 Go、禁 Trigger（✅；旧 PickLeast 已退役） |
 | [`auto_enter/选角与SelectedIndex锚点.md`](auto_enter/选角与SelectedIndex锚点.md) | TW IDA 钉死：`UILoginCharacter+0x168` SelectedIndex；可跳过 Select 的依据 |
 | [`auto_enter/RVA重锚_20260803.md`](auto_enter/RVA重锚_20260803.md) | 2026-08-03 客户端更新：登录 UI 类哈希 + 方法 RVA 全表重锚 |
-| [`ccu/模块设计.md`](ccu/模块设计.md) | 分区 CCU：只认 auto_enter 选频喂数一次 → SHM → 底栏（✅；无被动 Probe） |
+| [`ccu/模块设计.md`](ccu/模块设计.md) | 分区 CCU：登录频道页或 auto_enter 喂数一次 → SHM → 底栏（✅） |
 | [`channel_hop/模块设计.md`](channel_hop/模块设计.md) | 随机换频：挂机卡/F10 → `manualRejoinSeq` → **直调** `SendTransfer@0xBB5200`（无菜单；✅ 挂入；08-03 锚点已同步） |
-| [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：UserPool 同图人数 → 停手/停飞 → 持续有人则 `channel_hop`（✅ 挂入；实机待验） |
+| [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：UserPool → 停手/换频；可勾选 GM/隐身升级 + 强制 Alarm（✅ 契约 v60） |
 | [`pet_feed/P0b_只读探针.md`](pet_feed/P0b_只读探针.md) | `ReadState` + `petfeed.log`；字段只读，未发包 |
 | [`pet_feed/P0c_自动召唤.md`](pet_feed/P0c_自动召唤.md) | `TryActivatePet` + `[core] petSummon`；喂食交官方 |
 | [`pet_loot/模块设计.md`](pet_loot/模块设计.md) | **拾物**：脚下 `TryPickUpDrop` + 宠扩盒吸物；共用黑名单 `[pet_loot]`（🚧 已挂入；实机待验） |
@@ -88,7 +88,7 @@
 | [`auto_supply/模块设计.md`](auto_supply/模块设计.md) | **自动回城卖/补给**：就近寻店卖装 + 去店用卷 `SendPortalScrollUseRequest`（2030000/2030059）+ 可选补货；Charge/回程用卷待验 |
 | [`auto_supply/P2_货架寻店.md`](auto_supply/P2_货架寻店.md) | 按货架/物品码全局寻店：**不做**（无 SetShopDlg Commodity 全表；产品语义为就近能卖） |
 | [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认关；服端断线+守护会干净重拉 |
-| [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ 数据面清 `LocalUser+0x114`；抑制客户端警戒；默认开 |
+| [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ 数据面清 `LocalUser+0x114`；抑制客户端警戒；默认关 |
 
 ---
 
@@ -140,7 +140,7 @@
 | `x/features/buffs/` + `ports/skill_port.*` | BUFF 续航 → `user.ini [buffs]` + runtime SHM；见 [`buffs/模块设计.md`](buffs/模块设计.md) |
 | `x/features/multi_skill/` + `ports/multi_skill_port.*` + `skill_port.*` | 技能多发 → `[core] multiSkill*` + `multiskill_select.tsv`；见 [`multi_skill/模块设计.md`](multi_skill/模块设计.md) |
 | `x/features/auto_enter/` | 自动进游戏；见 [`auto_enter/模块设计.md`](auto_enter/模块设计.md)、[`选角与SelectedIndex锚点.md`](auto_enter/选角与SelectedIndex锚点.md) |
-| `x/features/ccu/` | 分区 CCU（auto_enter 喂数）→ SHM → 底栏；见 [`ccu/模块设计.md`](ccu/模块设计.md) |
+| `x/features/ccu/` | 分区 CCU（登录页/auto_enter 喂数）→ SHM → 底栏；见 [`ccu/模块设计.md`](ccu/模块设计.md) |
 | `x/features/channel_hop/` | 随机换频 → `[core] manualRejoinSeq`；见 [`channel_hop/模块设计.md`](channel_hop/模块设计.md) |
 | `x/features/encounter/` | 遇人策略 → `[core] autoRelogin*`；见 [`encounter/模块设计.md`](encounter/模块设计.md) |
 | `x/features/auto_supply/` + `ports/shop_port.*` + `ports/consumable_port.*` | 自动回城卖/补给 → `[auto_supply]`；去店用卷 `PortalScroll`；见 [`auto_supply/模块设计.md`](auto_supply/模块设计.md) |

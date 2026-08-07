@@ -49,12 +49,34 @@ std::atomic<bool> gFieldOffResolved{false};
 
 constexpr int kEnumCapHard = 256;
 
+// UserRemote.GetJobCode → *(uint16*)(this+0x3AE)；JobCategory = job%1000/100（8=Manager 9=Admin）.
+constexpr size_t kOffRemoteJobCode = 0x3AE;
+constexpr char kHashAvatarRootField[] =
+    "e4b6b4386df519caa3bf9fc13fed749d6bc8ffc7457bbbb6b116975d4e74f85";
+constexpr char kFldAvatarRoot[] = "_avatarRoot";
+constexpr size_t kFbAvatarRoot = 0x80;
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4E5CC70;  // remount 2026-08-06 · shop_port 同源
+
 constexpr DWORD kJobWaitMs = 800;
 constexpr DWORD kRebindMs = 2000;
 
 void* gKlass = nullptr;
 void* gPool = nullptr;
 DWORD gLastBind = 0;
+
+size_t gOffAvatarRoot = kFbAvatarRoot;
+bool gAvatarOffTried = false;
+
+struct MethodInfoHead {
+    void* methodPointer;
+    void* virtualMethodPointer;
+    void* invoker;
+    const void* nameOrHandle;
+};
+
+using FnGoGetActiveSelf = bool (*)(void* self, const void* method);
+MethodInfoHead* gMiGoGetActiveSelf = nullptr;
+bool gActiveSelfTried = false;
 
 using FnClassParent = void* (*)(void* klass);
 using FnClassStaticData = void* (*)(void* klass);
@@ -336,6 +358,164 @@ int EnumFromPool(void* pool, void** out, int cap) {
     return n;
 }
 
+uint16_t ReadU16(void* base, size_t off) {
+    if (!base) return 0;
+    uint16_t v = 0;
+    __try {
+        v = *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(base) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return v;
+}
+
+bool IsAdminLikeJob(uint16_t job) {
+    if (job == 0 || job == 0xFFFF) return false;
+    const int cat = static_cast<int>(job % 1000) / 100;
+    return cat == 8 || cat == 9;  // Manager / Admin
+}
+
+void EnsureAvatarRootOffset() {
+    if (gAvatarOffTried) return;
+    gAvatarOffTried = true;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    const auto& e = x::runtime::il2cpp::Get();
+    // remotes 是 User 子类；用 User 哈希类找 avatar（与 player_hide 同 hash）；不依赖 UserPool gKlass.
+    void* k = x::runtime::il2cpp::FindClass("",
+        "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078");
+    if (!k) k = x::runtime::il2cpp::FindClass("Msc.Game.Object", "User");
+    if (!k) return;
+    const char* names[] = {kFldAvatarRoot, kHashAvatarRootField};
+    for (; k; ) {
+        for (const char* nm : names) {
+            if (!nm || !e.classGetFieldFromName || !e.fieldGetOffset) continue;
+            void* field = nullptr;
+            __try {
+                field = e.classGetFieldFromName(k, nm);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                field = nullptr;
+            }
+            if (!field) continue;
+            size_t off = 0;
+            __try {
+                off = e.fieldGetOffset(field);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                off = 0;
+            }
+            if (off) {
+                gOffAvatarRoot = off;
+                x::runtime::LogI("UserPool", "AvatarRoot off=0x%zX", gOffAvatarRoot);
+                return;
+            }
+        }
+        if (!e.classParent) break;
+        __try {
+            k = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            break;
+        }
+    }
+}
+
+void EnsureActiveSelfMi() {
+    if (gActiveSelfTried) return;
+    gActiveSelfTried = true;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    const auto& e = x::runtime::il2cpp::Get();
+    void* goKlass = x::runtime::il2cpp::FindClass("UnityEngine", "GameObject");
+    if (!goKlass || !e.classGetMethods || !e.ga) return;
+    const uintptr_t want = reinterpret_cast<uintptr_t>(e.ga) + kRvaGoGetActiveSelf;
+    void* iter = nullptr;
+    __try {
+        for (;;) {
+            void* miRaw = e.classGetMethods(goKlass, &iter);
+            if (!miRaw) break;
+            auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
+            void* mp = nullptr;
+            __try {
+                mp = mi->methodPointer ? mi->methodPointer : mi->virtualMethodPointer;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                mp = nullptr;
+            }
+            if (reinterpret_cast<uintptr_t>(mp) == want) {
+                gMiGoGetActiveSelf = mi;
+                break;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (!gMiGoGetActiveSelf && e.classGetMethodFromName) {
+        void* mi = nullptr;
+        __try {
+            mi = e.classGetMethodFromName(goKlass, "get_activeSelf", 0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            mi = nullptr;
+        }
+        if (mi) gMiGoGetActiveSelf = reinterpret_cast<MethodInfoHead*>(mi);
+    }
+}
+
+bool ReadAvatarActiveSelf(void* user) {
+    if (!LooksLikeHeapPtr(user)) return true;
+    EnsureAvatarRootOffset();
+    void* go = ReadPtr(user, gOffAvatarRoot);
+    if (!LooksLikeHeapPtr(go)) return true;  // 无 avatar → 不当隐身嫌疑
+    EnsureActiveSelfMi();
+    FnGoGetActiveSelf fn = nullptr;
+    const void* mi = gMiGoGetActiveSelf;
+    if (gMiGoGetActiveSelf && gMiGoGetActiveSelf->methodPointer)
+        fn = reinterpret_cast<FnGoGetActiveSelf>(gMiGoGetActiveSelf->methodPointer);
+    else
+        fn = AtRva<FnGoGetActiveSelf>(kRvaGoGetActiveSelf);
+    if (!fn) return true;
+    bool active = true;
+    __try {
+        active = fn(go, mi);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        active = true;
+    }
+    return active;
+}
+
+void FillThreatFromUsers(void** users, int n, RemoteThreatSample* out, bool checkAvatarHide) {
+    if (!out) return;
+    out->remoteCount = n > 0 ? n : 0;
+    out->adminLikeCount = 0;
+    out->hideSuspectCount = 0;
+    out->sampleAdminJob = 0;
+    for (int i = 0; i < n; ++i) {
+        void* u = users[i];
+        if (!LooksLikeHeapPtr(u)) continue;
+        const uint16_t job = ReadU16(u, kOffRemoteJobCode);
+        if (IsAdminLikeJob(job)) {
+            ++out->adminLikeCount;
+            if (!out->sampleAdminJob) out->sampleAdminJob = job;
+        }
+        if (checkAvatarHide && !ReadAvatarActiveSelf(u)) ++out->hideSuspectCount;
+    }
+}
+
+struct ThreatJobCtx {
+    bool ok = false;
+    bool checkAvatarHide = false;
+    RemoteThreatSample* out = nullptr;
+};
+
+void ThreatJobFn(void* user) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("user_pool.Threat");
+    auto* job = reinterpret_cast<ThreatJobCtx*>(user);
+    if (!job || !job->out) return;
+    job->ok = false;
+    *job->out = RemoteThreatSample{};
+    void* pool = ResolveUserPool();
+    if (!pool) return;
+    void* users[kEnumCapHard]{};
+    const int n = EnumFromPool(pool, users, kEnumCapHard);
+    if (n < 0) return;
+    FillThreatFromUsers(users, n, job->out, job->checkAvatarHide);
+    job->ok = true;
+}
+
 struct JobCtx {
     bool ok = false;
     int count = -1;
@@ -385,6 +565,26 @@ bool SampleRemoteUserCount(int* outCount) {
     if (!job.ok || job.count < 0) return false;
     *outCount = job.count;
     return true;
+}
+
+bool SampleRemoteThreat(RemoteThreatSample* out, bool checkAvatarHide) {
+    if (!out) return false;
+    *out = RemoteThreatSample{};
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        void* pool = ResolveUserPool();
+        if (!pool) return false;
+        void* users[kEnumCapHard]{};
+        const int n = EnumFromPool(pool, users, kEnumCapHard);
+        if (n < 0) return false;
+        FillThreatFromUsers(users, n, out, checkAvatarHide);
+        return true;
+    }
+    ThreatJobCtx job{};
+    job.checkAvatarHide = checkAvatarHide;
+    job.out = out;
+    if (!x::runtime::main_thread::Ensure()) return false;
+    if (!x::runtime::main_thread::InvokeAndWait(&ThreatJobFn, &job, kJobWaitMs)) return false;
+    return job.ok;
 }
 
 bool EnumRemoteUsers(void** out, int cap, int* outCount) {

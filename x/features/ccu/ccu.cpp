@@ -29,7 +29,7 @@ DWORD WINAPI WorkerProc(LPVOID) {
 
 void Init() {
     gStop.store(false);
-    x::runtime::LogI("CCU", "ready (feed-only via auto_enter)");
+    x::runtime::LogI("CCU", "ready (login UI or auto_enter; world switch updates)");
 }
 
 void Shutdown() { StopWorker(); }
@@ -48,12 +48,21 @@ void StopWorker() {
 
 CcuStatus GetCcuStatus() { return Ccu_GetStatus(); }
 
-void NotifyWorldChannelSnapshot(long long sum, int channelCount, const char* src) {
-    Ccu_NotifySnapshot(sum, channelCount, src);
+bool HasSnapshot() {
+    const CcuStatus s = Ccu_GetStatus();
+    return s.worldChannelOnline >= 0 && s.worldChannelCount > 0;
 }
 
-void NotifyChannelFillTable(const ChannelFillRow* rows, int n, const char* src) {
-    Ccu_NotifyFillTable(rows, n, src);
+int32_t SnapshotWorldId() { return Ccu_SnapshotWorldId(); }
+
+bool ShouldSkipFeed(int32_t worldId) { return Ccu_ShouldSkipFeed(worldId); }
+
+bool NotifyWorldChannelSnapshot(long long sum, int channelCount, const char* src, int32_t worldId) {
+    return Ccu_NotifySnapshot(sum, channelCount, src, worldId);
+}
+
+void NotifyChannelFillTable(const ChannelFillRow* rows, int n, const char* src, int32_t worldId) {
+    Ccu_NotifyFillTable(rows, n, src, worldId);
 }
 
 ChannelPickHint GetChannelPickHint(int zeroBasedIdx) {

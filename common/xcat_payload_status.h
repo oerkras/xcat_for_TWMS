@@ -4,7 +4,8 @@
 // v1：仅 CCU；v2：顶栏 5 灯；v3：守护 exp；v4：playReady/wmAlive/sceneState + 人类可读图名；
 // v5：sellbag 一键卖状态（对照枫星字段名）；
 // v6：kick_sniff 断线边沿（守护干净重拉）；
-// v7：引擎帧率锁读回（frame_lock）。
+// v7：引擎帧率锁读回（frame_lock）；
+// v8：soft_login 试连观察窗（抑制踢线干净重拉）。
 
 #include <Windows.h>
 
@@ -14,7 +15,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 7u;
+constexpr uint32_t kPayloadStatusVersion = 8u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -66,6 +67,10 @@ struct PayloadStatus {
     uint32_t frameLockOn = 0;         // 功能开关（desired）
     uint32_t frameLockWant = 0;       // 目标 fps（clamp 后）
     int32_t frameLockReadback = -1;   // 最近一次引擎读回；-1=尚未采到/失败
+
+    // v8：soft_login_probe 试连观察窗（守护推迟踢线干净重拉）
+    uint32_t softLoginHold = 0;       // 1=观察中，勿因 disconnectSeq 立刻重拉
+    uint32_t softLoginResult = 0;     // 0=无 1=试连成功(Connected) 2=失败/超时
 };
 #pragma pack(pop)
 

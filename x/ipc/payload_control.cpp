@@ -25,6 +25,8 @@
 #include "../features/player_hide/player_hide.h"
 #include "../features/frame_lock/frame_lock.h"
 #include "../features/movepath_flush_probe/movepath_flush_probe.h"
+#include "../features/galaxy_token_probe/galaxy_token_probe.h"
+#include "../features/soft_login_probe/soft_login_probe.h"
 #include "../runtime/log.h"
 #include "../runtime/main_thread_pump.h"
 #include "../runtime/managed_main.h"
@@ -408,12 +410,15 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::auto_lie::SetEnabled(c.autoLie != 0);
     x::features::auto_lie::SetDryRun(c.autoLieDryRun != 0);
     x::features::movepath_flush_probe::SetEnabled(c.movepathFlushProbe != 0);
+    x::features::galaxy_token_probe::SetEnabled(c.galaxyTokenProbe != 0);
+    x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
     x::features::drop_alert_bypass::SetEnabled(c.dropAlertBypass != 0);
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
     // 自动补给真源：user.ini [auto_supply]（HotReadConfig）；勿再用 core.autoSell 灌开关。
     x::features::encounter::SetEnabled(c.autoRelogin != 0);
     x::features::encounter::SetStrategies(c.autoReloginStopCombat != 0,
-                                          c.autoReloginReconnect != 0);
+                                          c.autoReloginReconnect != 0,
+                                          c.autoReloginGmEscalate != 0);
     x::features::player_hide::SetEnabled(c.hideOtherPlayers != 0);
     x::features::frame_lock::SetTargetFps(c.frameLockFps);
     x::features::frame_lock::SetEnabled(c.frameLock != 0);

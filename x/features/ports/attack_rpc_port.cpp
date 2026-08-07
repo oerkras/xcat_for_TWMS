@@ -474,8 +474,10 @@ bool ResolveApi() {
 // Worker 调 Rebind 时必须走泵；已在主线程 job 内则直调（禁嵌套 InvokeAndWait）。
 void* SafeFindAll(void* typeObj) {
     if (!gFindAll || !typeObj) return nullptr;
-    // 卸图空窗禁扫（与 managed_main map-transit 同口径；直调 gFindAll 不经托管闸）。
-    if (!world::IsPlayReady()) return nullptr;
+    // 裸 gFindAll 不经 managed_main 包装 —— 自检仓级闸。
+    if (x::runtime::managed_main::IsLoginFrozen() ||
+        x::runtime::managed_main::IsMapTransitBlocked() || !world::IsPlayReady())
+        return nullptr;
     if (x::runtime::main_thread::IsOnPumpThread()) {
         void* arr = nullptr;
         __try {
@@ -485,7 +487,6 @@ void* SafeFindAll(void* typeObj) {
         }
         return arr;
     }
-    if (x::runtime::managed_main::IsLoginFrozen()) return nullptr;
     return x::runtime::managed_main::FindAll(gFindAll, typeObj, 2000, false);
 }
 

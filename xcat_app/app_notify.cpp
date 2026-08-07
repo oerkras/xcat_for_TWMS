@@ -110,7 +110,9 @@ bool WriteNotifySoundMuted(const std::string& prefsBinDir, bool muted) {
 
 bool IsPayloadOwnedAlarmKey(const std::string& key) {
     // 测谎进行中/测试报警：专用 Alarm 由 payload 周期播放，面板只负责气泡，避免双进程叠播。
-    return key == "auto-lie-detected" || key == "auto-lie-alarm-test";
+    // GM/隐身：同模式（payload 播 Alarm，不受通知静音影响）。
+    return key == "auto-lie-detected" || key == "auto-lie-alarm-test" ||
+           key == "encounter-gm-threat" || key == "encounter-gm-hop";
 }
 
 bool IsUnmutableCriticalAlarmKey(const std::string& key) {

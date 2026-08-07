@@ -435,7 +435,11 @@ bool TryResolveLocalUser() {
             return;
         }
         gLocalUser = nullptr;
-        if (!ports::world::IsPlayReady()) return;
+        // 裸 gFindAll：与 invuln / player_combat 同守仓级闸。
+        if (x::runtime::managed_main::IsLoginFrozen() ||
+            x::runtime::managed_main::IsMapTransitBlocked() ||
+            !ports::world::IsPlayReady())
+            return;
         if (!gLuType || !gFindAll) return;
         void* array = nullptr;
         __try { array = gFindAll(gLuType, nullptr); } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -466,6 +470,9 @@ bool TryResolveItemDataManager() {
     struct Context { bool ok; } context{false};
     auto task = [](void* raw) {
         auto* ctx = static_cast<Context*>(raw);
+        if (x::runtime::managed_main::IsLoginFrozen() ||
+            x::runtime::managed_main::IsMapTransitBlocked())
+            return;
         void* array = nullptr;
         __try { array = gFindAll(gIdmType, nullptr); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
         for (uintptr_t index = 0, count = ArrayLen(array); index < count && index < 4; ++index) {

@@ -70,6 +70,8 @@ add_library(xcat_probe SHARED
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
   ../features/auction_town_bypass/auction_town_bypass.cpp
   ../features/ga_text_probe/ga_text_probe.cpp
+  ../features/galaxy_token_probe/galaxy_token_probe.cpp
+  ../features/soft_login_probe/soft_login_probe.cpp
   ../features/channel_hop/channel_hop.cpp
   ../features/encounter/encounter.cpp
   ../features/player_hide/player_hide.cpp
@@ -109,6 +111,8 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/drop_alert_bypass
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auction_town_bypass
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/ga_text_probe
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/galaxy_token_probe
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/soft_login_probe
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/channel_hop
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/encounter
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/player_hide

@@ -1,14 +1,22 @@
 {
-    "updatedAt":  "2026-08-07 05:39:47",
-    "latest":  "xcat_for_twms_0807_0.1.103_build103.zip",
+    "updatedAt":  "2026-08-07 10:12:40",
+    "latest":  "xcat_for_twms_0807_0.1.104_build104.zip",
     "versions":  [
+                     {
+                         "name":  "xcat_for_twms_0807_0.1.104_build104.zip",
+                         "file":  "/downloads/xcat_for_twms_0807_0.1.104_build104.zip",
+                         "publishedAt":  "2026-08-07 10:12:40",
+                         "sizeBytes":  2915838,
+                         "sizeText":  "2.78 MB",
+                         "isLatest":  true
+                     },
                      {
                          "name":  "xcat_for_twms_0807_0.1.103_build103.zip",
                          "file":  "/downloads/xcat_for_twms_0807_0.1.103_build103.zip",
                          "publishedAt":  "2026-08-07 05:39:47",
                          "sizeBytes":  2895562,
                          "sizeText":  "2.76 MB",
-                         "isLatest":  true
+                         "isLatest":  false
                      },
                      {
                          "name":  "xcat_for_twms_0807_0.1.102_build102.zip",

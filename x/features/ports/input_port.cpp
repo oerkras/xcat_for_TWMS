@@ -488,6 +488,11 @@ bool ResolveInputManager(DWORD now) {
         c->how = "singleton";
         if (!best && c->allowFindAll) {
             // FindAll 直调（已在主线程）；禁止再套 managed_main::FindAll
+            if (x::runtime::managed_main::IsLoginFrozen() ||
+                x::runtime::managed_main::IsMapTransitBlocked()) {
+                c->ok = false;
+                return;
+            }
             if (!gImType) {
                 void* klass = gImKlass ? gImKlass : FindClass("", kInputManagerClass);
                 gImType = x::runtime::il2cpp::ClassTypeObjectOnMain(klass);

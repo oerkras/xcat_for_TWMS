@@ -42,24 +42,50 @@ constexpr float kDeadX = 12.f;
 constexpr float kDeadY = 12.f;
 
 // P 增益（px/s per px）。两轴的 P 都只算**期望速度**，真正要发的增量由闭环补差（见 Tick）。
-constexpr float kKpX = 4.0f;
-constexpr float kKpY = 3.0f;
+//
+// 两轴同增益：竖直曾取 3.0，是历史上「怕掉出图」的遗留代偿。现在防坠有三道独立机制
+// （位置包线 + 竖直预刹 + kMaxFallVy 速度闸），不需要再靠钝化增益来间接减速——
+// 那样只会让换层进近全程慢 25%，而对真·坠落毫无帮助（坠落是重力驱动的，与 Kp 无关）。
+//
+// ★ 取值由**实测发射周期**定，不是拍脑袋（BIN adc7b2，482 次发射）：
+//    单周期位移 = Kp·err·T ⇒ 残差按 (1 - Kp·T) 逐拍收敛。
+//      · |1-Kp·T| < 1（即 Kp·T < 2）才收敛；
+//      · Kp·T ≤ 1 则**单调无过冲**，这是我们要的档位。
+//    实测 sinceMs：中位 94、p90 106、p99 117、**最大 126**ms。按最坏的 126ms 反解
+//    Kp ≤ 1/0.126 = 7.9。取 **7.0**：最坏 7×0.126=0.88（仍无过冲），常态
+//    7×0.094=0.66 ⇒ 每拍残差降到 34%，而旧值 4.0 只降到 64%。
+//    进近末段是指数收敛段，占了单次进近的大头，这一项比抬速度上限更能省时间。
+constexpr float kKpX = 7.0f;
+constexpr float kKpY = 7.0f;
 
-// 包线：越过即 emergency，忽略战斗意图先保命。判定框见 heli_rotor.h 的 kEnvSlackPx
+// 包线：越过即 emergency，忽略战斗意图先保命。判定框见 heli_rotor.h 的 kEnvSlackX/YPx
 // （**外扩** AABB；曾经内缩 72px，把最外沿台上的怪判成禁区，BIN 4a79e4）。
-constexpr float kMaxFallVy = 460.f;  // 落速超此 → 弃战拉平
+// 落速超此 → 判定为失控下坠，弃战拉平。
+// ★ 它必须**紧贴**最大下降意图（合速档上限现为 620）上方，两头都不能松：
+//   · 低了 → 每次正常快速下降被误判成紧急，紧急忽略战斗意图并强行上拉，下降永远踩不到底；
+//   · 高了 → 620~此值之间的异常下坠检测不到，白白让出一段保护窗口。
+//   齿距余量：90ms 周期里重力吃 180px/s，瞬时值绕均值上下摆约 ±90，故 620 档预期可见
+//   约 710 的瞬时落速（560 档实测过 670）。取 850 让开锯齿又不过度放宽。
+//   可救性：从 -850 拉到 kRescueClimbVy 需增量 1150 + 配平 60 = 1210 ≤ kMaxCmdVy。
+constexpr float kMaxFallVy = 850.f;
 constexpr float kEnvPushVx = 300.f;
 // 救援目标速度（不是增量）。闭环会自己算出「从当前 -600 拉到 +300」需要多大增量。
 constexpr float kRescueClimbVy = 300.f;
 
-// 作动器上限：一次能发出的**增量**幅值。它必须大到能把最坏落速一次拉正
-// （-600 → +300 需要 900 + 预付重力），否则紧急救援在算术上就不成立。
-constexpr float kMaxCmdVy = 900.f;
-// 横向同理。反向要发的增量是 |vt| + |v|，最坏 340 + 560 = 900；给到 1200 留余量。
-// 这个数**不是**限速：落地速度恒等于 desiredVx（受 caps.vx 约束），钳位只咬命令幅值。
-// 曾经把它设成 caps.vx，等于把「从 -556 反向到 +300」需要的 856 削成 340，
+// 作动器上限：一次能发出的**增量**幅值，两轴同级（合速限幅后两轴权限本就对称）。
+// 必须覆盖最坏的一次反向，否则被钳掉的那部分就是「刹不住」：
+//   · 常控：-660(Rtb 档最高) → +660                    = 1320 + 配平 60 = 1380
+//   · 救援：-kMaxFallVy(850) → +kRescueClimbVy(300)     = 1150 + 配平 60 = 1210
+// 取 1700 覆盖两者并留余量（此处宽一点无害，见下段）。
+//
+// 实测只到 900 且落地线性（见 CapsFor 注释②），1700 是同一线性段内的外推、**未验**。
+// 但抬这个数是**单调无害**的：若引擎在某处真有封顶，落地效果等同于被钳在更低的值上，
+// 也就是回到抬之前的行为，不会引入新失效模式。下一轮日志可用遥测的 cmd/v 对照复核。
+constexpr float kMaxCmdVy = 1700.f;
+// 横向同理。这个数**不是**限速：落地速度恒等于 desiredVx（受合速档约束），钳位只咬命令幅值。
+// 曾经把它设成档位上限，等于把「从 -556 反向到 +300」需要的 856 削成 340，
 // 结果一发只能把速度推到 -256（人还在往外飞），连发四拍才反向 → 出界 43px（BIN c72cff）。
-constexpr float kMaxCmdVx = 1200.f;
+constexpr float kMaxCmdVx = 1700.f;
 
 // 把「想要的速度」翻译成「该发的增量」。作动器实测语义（头文件事实①，11/11 样本吻合）：
 //     v_new = clamp(v_old + cmd, ±max(|v_old|, |cmd|))
@@ -80,26 +106,61 @@ constexpr float kBailoutPx = 420.f;
 // 位置与速度连续这么多拍完全不变 = 状态停更（断线/切图/死亡）。
 constexpr int kStaleTicksLimit = 12;
 
-// 每档的**意图**上限，不是作动器上限。下降速度必须低于「一个发射周期内能抵消的量」，
-// 否则一旦进入下降就再也拉不平——bea1c3 的 -300 俯冲指令就是这么把人送出图的。
+// 每档的**意图**上限，不是作动器上限。
+//
+// ★ 三轴同速（2026-08-07）：竖直曾被压到横向的 40%~70%（Cruise 560/420/240），
+//    换层进近因此奇慢。压制的两条理由现在都已失效：
+//
+//    ① 「下降速度必须低于一个发射周期内能抵消的量，否则一旦下沉就再也拉不平」——
+//       这条在**设速度**模型下成立，在实测的**叠加**模型下不成立。叠加语义允许一发
+//       冲量把任意速度改写成任意速度（`cmd = vt - v`），从 -560 拉到 +300 只要
+//       一发 920，不存在「拉不平」。真正的历史成因是 bea1c3 当年配平写死常数导致
+//       净下沉，已由 GravityLoss() 按真实耗时补偿修掉。
+//    ② 「竖直作动器只实测到 cmd=300」——已结掉。全归档 20363 条遥测实测：
+//       指令发到过 **900**，实际速度上升达 **840** / 下降达 **670**，全程线性无饱和。
+//
+//    防坠改由三道**独立**机制承担，不再靠钝化速度间接代偿：
+//       位置包线（st.y < t）→ 竖直撞墙预刹（见 Tick）→ kMaxFallVy 速度闸 → 深度缴械。
+//
+// ★ 限幅口径是**合速矢量**，不是分轴（2026-08-07）。分轴钳有个隐蔽的各向异性：
+//    同一个「多快算快」，纯横向只能跑 cap，45°斜向却能跑 cap·√2 —— 相差 41%。
+//    而实测（BIN adc7b2，770 次进近）**74.4% 的进近横纵比 ≤ 0.1**，即绝大多数
+//    赶路是近乎纯单轴的，全都被按最慢的那档限住了：
+//      · 各方向实际可达合速：中位 560、p90 634、最大 784
+//      · 改按合速钳到 780 后：中位 +39%，而**峰值 784→780 反而略降**
+//    这是唯一能大幅提速却不抬高服务端所见峰值的改法，所以先做它、再谈抬上限。
+//
+//    各档取值 = 原分轴值 × √2 向下取整到十位，即「把斜向早就能跑的速度，允许所有
+//    方向都跑」。峰值逐档保持不变：560→780(792)、480→660(679)、340→480(481)、
+//    260→360(368)。括号内是旧口径下该档斜向本就可达的合速。
+//
+// ★★ Cruise 单独回调 780 → 620（BIN 270783）。**峰值不变 ≠ 暴露不变**，这是上面那套
+//    推理漏掉的一环，而实机把它打了出来：
+//      · 旧口径下 780 只有罕见的 45° 斜向摸得到；改合速后 74% 的纯单轴进近全程都在那儿。
+//        `|v|>700` 的时间占比 1.7% → **24.4%**（14 倍），峰值却确实没动（865 → 848）。
+//      · 同图同战斗强度下，会话存活 358s → **79s**；全归档 158 次掉线里 <110s 占 34.8%，
+//        三次独立全落在该区间的概率 4.2%。
+//      · 决定性的是**净产出**：重连空窗恒为 ~48s，占空比 90.9% → 70.8%，
+//        墙钟效率 81.8 → **60.1 杀/分（−27%）**。空中省下的时间全被重连吃光，提速是亏的。
+//    取 620 而非退回 780 之前的等效值：620 的峰值（约 680，含锯齿）**比改动前的 865 还低**，
+//    而 74% 的纯单轴进近仍比旧口径的 560 快 11%。若存活恢复，即证实「高速暴露时长」
+//    才是掉线自变量（峰值不是）；若不恢复，则速度整体被排除，回头查 invuln。
 struct ModeCaps {
-    float vx;
-    float climb;    // 期望上升速度上限
-    float descend;  // 期望下降速度上限（正数）
+    float speed;  // 合速上限（矢量幅值），两轴共享
 };
 
 ModeCaps CapsFor(Mode m) {
     switch (m) {
         case Mode::Cruise:
-            return {560.f, 420.f, 240.f};
+            return {620.f};
         case Mode::Rtb:
-            return {480.f, 460.f, 200.f};
+            return {660.f};
         case Mode::Station:
-            return {340.f, 300.f, 200.f};
+            return {480.f};
         case Mode::Hold:
-            return {260.f, 260.f, 160.f};
+            return {360.f};
         default:
-            return {0.f, 0.f, 0.f};
+            return {0.f};
     }
 }
 
@@ -261,11 +322,12 @@ bool Tick(DWORD now, Telemetry* out) {
     if (ports::map_bounds::QueryPlayBounds(0, &r) && r.ok) {
         const float rawL = static_cast<float>(r.left);
         const float rawR = static_cast<float>(r.right);
-        // 外扩，不是内缩：AABB 内一律合法（含最外沿的台）。见 heli_rotor.h 的 kEnvSlackPx。
-        const float l = rawL - kEnvSlackPx;
-        const float ri = rawR + kEnvSlackPx;
-        const float t = static_cast<float>(r.top) - kEnvSlackPx;
-        const float b = static_cast<float>(r.bottom) + kEnvSlackPx;
+        // 外扩成合法空域，且两轴余量不同：AABB 是**可站立面**，最低/最高台上站着怪是常态，
+        // 竖直必须让出整条出刀带才够得着（见 heli_rotor.h 的 kEnvSlackXPx / kEnvSlackYPx）。
+        const float l = rawL - kEnvSlackXPx;
+        const float ri = rawR + kEnvSlackXPx;
+        const float t = static_cast<float>(r.top) - kEnvSlackYPx;
+        const float b = static_cast<float>(r.bottom) + kEnvSlackYPx;
         if (ri > l && b > t) {
             if (st.x < l) {
                 desiredVx = kEnvPushVx;
@@ -289,14 +351,17 @@ bool Tick(DWORD now, Telemetry* out) {
                 }
             } else if (st.y > b) {
                 // 已在最高台之上：下降是免费的，给个受控下沉速度而不是放任自由落体。
-                desiredVy = -caps.descend;
+                desiredVy = -caps.speed;
                 emergency = true;
             }
 
             // ── 撞墙预刹 ────────────────────────────────────────────
-            // X 是**设速度**语义：这一拍发多少，接下来整个发射周期就以多少速度平移。
-            // 于是只要让「本周期位移」落在 AABB 内，就不可能冲出边界——从源头消灭过冲。
-            // 事后靠 RTB 拉回是追不上的：kEnvPushVx=300 反不过 448 的入射速度。
+            // 落地速度恒等于 desiredV（横向由 VxCommandFor 保证、竖直由闭环补差保证），
+            // 于是「本周期位移 ≈ desiredV × 周期」是可预测的。只要让这段位移落在边界内，
+            // 就不可能冲出去——从源头消灭过冲。事后靠 RTB 拉回是追不上的：
+            // kEnvPushVx=300 反不过 448 的入射速度。
+            //（注：这里**不是**「设速度语义」。作动器是叠加的，见 heli_rotor.h 事实③；
+            // 能这么算是因为换算层已把落地速度钉死在 desiredV 上，不是因为引擎直接设速。）
             //
             // BIN c9b8dc：怪在最左台，角色带 vx=-448 扑过去，AABB 左沿 -585 却冲到 -658
             //（出界 73px）并在界外继续出刀，服务端判非法坐标，一轮掉线两次。
@@ -310,13 +375,43 @@ bool Tick(DWORD now, Telemetry* out) {
             // 已在界外时 room 同号，这两句会把意图顶成内推，与紧急推同向且力度更足。
             if (desiredVx > roomR) desiredVx = roomR;
             if (desiredVx < roomL) desiredVx = roomL;
+
+            // 竖直预刹 —— 竖直提速到与横向同级后，这一段是**必需品**而非对称美化：
+            // 620px/s 下降在一个 90ms 周期里走 56px，位置包线是「越过才报警」的事后判据，
+            // 等它发现时人已经在界外几十 px。横向冲出去是掉线，竖直冲出去是掉出地图。
+            //
+            // 用**外扩后**的 t/b（合法空域）而非 raw：贴地面层的怪就站在 rawT 上，
+            // 站位点本身在 rawT 附近，距 t 还有整整 kEnvSlackYPx 的余量，正常作战根本
+            // 碰不到这条线；它只在锯齿或卡顿导致的异常下沉时才咬合。
+            const float roomB = (b - st.y) / kBrakeHorizonSec;  // 允许的最大 +vy（上升）
+            const float roomT = (t - st.y) / kBrakeHorizonSec;  // 允许的最小 vy（界内为负）
+            if (desiredVy > roomB) desiredVy = roomB;
+            if (desiredVy < roomT) desiredVy = roomT;
         }
     }
     tm.emergency = emergency;
 
-    // 意图限幅：下降速度必须低于「一个发射周期内能抵消掉的量」，否则一旦下沉就再也
-    // 拉不平。bea1c3 的 sp.y 指到下层怪 → desiredVy 算出 -864 → 直接送出图。
-    desiredVy = Clamp(desiredVy, -caps.descend, caps.climb);
+    // 档位限幅：按**合速矢量**等比缩，不分轴（口径与实测依据见 CapsFor）。
+    //
+    // 仍然放在预刹**之后**，与分轴时代同序：预刹给的是「离边界还有多远所以最多能多快」，
+    // 档位给的是「这个模式下最多想多快」，两者取交集，谁更严谁生效。等比缩只会减小幅值，
+    // 不会让任一轴反超预刹给的余量，所以后钳不会撤销前者。
+    //
+    // ★ 这一钳还兼着一个**必需**的兜底：界外时预刹的 room 与位移同号，那两句会把意图顶成
+    //   「(出界深度)/0.2」的大幅内推——深出界 400px 就是 2000px/s。分轴时代靠这里的
+    //   Clamp 兜住，改合速后若把限幅前移到包线之前，这个值就没人管了。
+    //
+    // 曾经这里写着「下降必须低于一个发射周期能抵消的量，否则再也拉不平」——那条已随
+    // 叠加语义的实证作废（见 CapsFor 注释①）。bea1c3 送出图的真凶是配平写死常数，
+    // 不是下降太快。
+    {
+        const float mag = std::sqrt(desiredVx * desiredVx + desiredVy * desiredVy);
+        if (mag > caps.speed && mag > 1e-3f) {
+            const float k = caps.speed / mag;
+            desiredVx *= k;
+            desiredVy *= k;
+        }
+    }
     tm.desiredVy = desiredVy;
 
     // 叠加语义 ⇒ 发的是**增量**：把当前速度补到目标，再预付本周期的重力损耗。
@@ -331,7 +426,6 @@ bool Tick(DWORD now, Telemetry* out) {
 
     // 限幅落在**意图速度**上（这才是落地速度），再换算成增量。反过来钳增量会把反向
     // 所需的 |vt|+|v| 削掉，那正是 c72cff 里刹不住的原因。
-    desiredVx = Clamp(desiredVx, -caps.vx, caps.vx);
     tm.desiredVx = desiredVx;
     float cmdVx = VxCommandFor(desiredVx, st.vx);
 
@@ -384,7 +478,7 @@ bool Tick(DWORD now, Telemetry* out) {
     }
 
     ports::teleport::ImpactVelOpts vopts{};
-    // 端口这层只做防呆兜底。按 caps.vx 收窄会削掉反向所需的大增量（同 cmdVy 那条注释）；
+    // 端口这层只做防呆兜底。按档位上限收窄会削掉反向所需的大增量（同 cmdVy 那条注释）；
     // 真正的限速是上面的 desiredVx——落地速度恒等于它，与命令幅值无关。
     vopts.maxAbsVx = kMaxCmdVx;
     // 端口这一层只做防呆兜底，真正的意图限幅在上面的 desiredVy；这里再按档位收窄

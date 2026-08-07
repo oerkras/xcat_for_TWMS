@@ -3,7 +3,7 @@
 // 启用后周期：
 //   - LocalUser+0x118=-1（跳过动作等待；字段哈希 a55e80b9… 防漂移）
 //   - CutLayerDelays（砍动作层 delay）
-// 出刀频率由 simpleCombatAttackIntervalMs（面板「间隔」，默认 50，下限 1）控制。
+// 出刀频率由 simpleCombatAttackIntervalMs（面板「间隔」，默认 123，下限 1）控制。
 // 禁止 GA .text E9。
 //
 // 2026-08-04 撤销「Prepare 绝对攻速」写入：SecondaryStat+0x1BC/0x1C4 经 IDA 实证

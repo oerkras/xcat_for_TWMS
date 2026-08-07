@@ -75,7 +75,7 @@ struct MethodInfoHead {
 
 using FnCanPerformAction = uint8_t (*)(void* self, uint8_t bCheckAlert, void* methodInfo);
 
-std::atomic<bool> gDesired{true};
+std::atomic<bool> gDesired{false};
 std::atomic<bool> gInstalled{false};
 std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gWorker{nullptr};
@@ -514,11 +514,11 @@ DWORD WINAPI Worker(LPVOID) {
 }  // namespace
 
 void Init() {
-    gDesired.store(true);
+    gDesired.store(false);
     EnsureAlertFieldOff();
     x::runtime::LogI("DropAlert",
                      "init — primary: LocalUser+0x%zX clear; IsAlertMode rva=0x%X; MI rva=0x%X "
-                     "secondary",
+                     "secondary (default off)",
                      gOffAlertAt, kRvaIsAlertMode, kRvaCanPerformAction);
 }
 

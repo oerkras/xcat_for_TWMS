@@ -1132,6 +1132,51 @@ uint32_t ChannelPickSeed(int poolN) {
     return s ? s : 0xA5A5A5A5u;
 }
 
+// 从当前 WorldItem.ci 喂 CCU 总和 + 填表（手动登录 idle / auto_enter 选频共用）。
+// 同分区已 latch 则跳过；换分区可覆盖（底栏跟最终所选分区）。
+// 填表仅在总和快照写入成功后更新，避免人数与 hop 表错位。
+void FeedCcuFromWorldItem(void* worldItem, const char* src) {
+    if (!worldItem) return;
+    EnsureHolderFieldOff();
+    const int32_t worldId = ReadI32(worldItem, gOffWorldId);
+    if (x::features::ccu::ShouldSkipFeed(worldId)) return;
+
+    void* list = ReadPtr(worldItem, gOffWorldChannels);
+    const int n = ListSize(list);
+    if (n <= 0) return;
+
+    long long ccuSum = 0;
+    int ccuN = 0;
+    x::features::ccu::ChannelFillRow fillRows[64]{};
+    int fillN = 0;
+    for (int i = 0; i < n; ++i) {
+        void* ch = ListAt(list, i);
+        if (!ch) continue;
+        const int id = (int)ReadU8(ch, gOffChChannelId);
+        const int users = ReadI32(ch, gOffChUserNo);
+        const int cap = ReadI32(ch, gOffChCapacity);
+        const int adult = (int)ReadU8(ch, gOffChAdult);
+        if (id >= 1 && id <= 64 && fillN < 64) {
+            fillRows[fillN].channelId = static_cast<uint8_t>(id);
+            fillRows[fillN].users = static_cast<int16_t>(users > 32767 ? 32767 : users);
+            fillRows[fillN].cap = static_cast<int16_t>(cap > 32767 ? 32767 : cap);
+            fillRows[fillN].adult = adult != 0 ? 1 : 0;
+            ++fillN;
+        }
+        if (id < 1 || id > 64) continue;
+        if (adult != 0) continue;
+        if (users < 0) continue;
+        ccuSum += users;
+        ++ccuN;
+    }
+    if (ccuN <= 0) return;
+    const char* tag = (src && src[0]) ? src : "login";
+    if (!x::features::ccu::NotifyWorldChannelSnapshot(ccuSum, ccuN, tag, worldId)) return;
+    if (fillN > 0) {
+        x::features::ccu::NotifyChannelFillTable(fillRows, fillN, tag, worldId);
+    }
+}
+
 // ?? + ????????? id 1..64 ????????? 1..20??
 // ?????????????????????????????
 int PickOpenChannelId(void* worldItem) {
@@ -1145,49 +1190,24 @@ int PickOpenChannelId(void* worldItem) {
         u20[id] = -1;
         flag20[id] = '?';
     }
-    // CCU?????????????????????
-    // ???????????? channel_hop ?????
-    {
-        long long ccuSum = 0;
-        int ccuN = 0;
-        x::features::ccu::ChannelFillRow fillRows[64]{};
-        int fillN = 0;
-        for (int i = 0; i < n; ++i) {
-            void* ch = ListAt(list, i);
-            if (!ch) continue;
-            const int id = (int)ReadU8(ch, gOffChChannelId);
-            const int users = ReadI32(ch, gOffChUserNo);
-            const int cap = ReadI32(ch, gOffChCapacity);
-            const int adult = (int)ReadU8(ch, gOffChAdult);
-            if (id >= 1 && id <= 20) {
-                u20[id] = users;
-                if (adult != 0)
-                    flag20[id] = 'A';
-                else if (users < 0)
-                    flag20[id] = '?';
-                else if (cap > 0 && users >= cap)
-                    flag20[id] = 'F';
-                else
-                    flag20[id] = ' ';
-            }
-            if (id >= 1 && id <= 64 && fillN < 64) {
-                fillRows[fillN].channelId = static_cast<uint8_t>(id);
-                fillRows[fillN].users = static_cast<int16_t>(users > 32767 ? 32767 : users);
-                fillRows[fillN].cap = static_cast<int16_t>(cap > 32767 ? 32767 : cap);
-                fillRows[fillN].adult = adult != 0 ? 1 : 0;
-                ++fillN;
-            }
-            if (id < 1 || id > 64) continue;
-            if (adult != 0) continue;
-            if (users < 0) continue;
-            ccuSum += users;
-            ++ccuN;
-        }
-        if (ccuN > 0) {
-            x::features::ccu::NotifyWorldChannelSnapshot(ccuSum, ccuN, "auto_enter");
-        }
-        if (fillN > 0) {
-            x::features::ccu::NotifyChannelFillTable(fillRows, fillN, "auto_enter");
+    FeedCcuFromWorldItem(worldItem, "auto_enter");
+    for (int i = 0; i < n; ++i) {
+        void* ch = ListAt(list, i);
+        if (!ch) continue;
+        const int id = (int)ReadU8(ch, gOffChChannelId);
+        const int users = ReadI32(ch, gOffChUserNo);
+        const int cap = ReadI32(ch, gOffChCapacity);
+        const int adult = (int)ReadU8(ch, gOffChAdult);
+        if (id >= 1 && id <= 20) {
+            u20[id] = users;
+            if (adult != 0)
+                flag20[id] = 'A';
+            else if (users < 0)
+                flag20[id] = '?';
+            else if (cap > 0 && users >= cap)
+                flag20[id] = 'F';
+            else
+                flag20[id] = ' ';
         }
     }
     // ???? 1..20??? A=?? F=??????=?????=?????
@@ -1296,7 +1316,13 @@ void Tick() {
         }
         if (now - sLastIdleProbe > kIdleProbeMinMs) {
             sLastIdleProbe = now;
-            if (RefreshSnap(/*idleCache=*/true)) FlushPendingWorldsCache();
+            if (RefreshSnap(/*idleCache=*/true)) {
+                FlushPendingWorldsCache();
+                // 手动登录：停在分区频道页时喂一次 CCU（不依赖自动进游戏）。
+                if (gSnap.channelUi && gSnap.selectedWorld) {
+                    FeedCcuFromWorldItem(gSnap.selectedWorld, "login");
+                }
+            }
         }
         return;
     }
@@ -1736,6 +1762,22 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
 }
 
 bool IsDesired() { return gDesired.load(); }
+
+void RequestRestart(const char* why) {
+    if (!gDesired.load()) {
+        Log("RequestRestart skip: autoEnter off (%s)", why ? why : "?");
+        return;
+    }
+    EnsureCs();
+    // 软重进仍在大厅：保持 freeze，避免 titlebar/ports 抢跑 FindAll。
+    x::runtime::managed_main::SetLoginFreeze(true);
+    SetPhase(Phase::Idle);
+    ResetRuntime();
+    Log("RequestRestart → Idle (%s) worldId=%d slot=%u", why ? why : "?", gWorldId.load(),
+        gCharSlot.load());
+}
+
+bool IsFailed() { return gPhase == Phase::Failed; }
 
 }  // namespace auto_enter
 }  // namespace features

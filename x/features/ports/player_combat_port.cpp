@@ -369,6 +369,12 @@ void ResolveLuJobOnMain(void* user) {
 
     if (!gFindAll || !gLuType) return;
 
+    // 裸 gFindAll 绕过 managed_main 包装 —— 与 invuln 同守仓级闸。
+    if (x::runtime::managed_main::IsLoginFrozen() ||
+        x::runtime::managed_main::IsMapTransitBlocked() || !world::IsPlayReady()) {
+        return;
+    }
+
     void* arr = nullptr;
     __try {
         arr = gFindAll(gLuType, nullptr);  // already on main — no nested pump

@@ -744,12 +744,14 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
     auto failNeedManualLogin = [&]() -> HttpLoginResult {
         Log(log, L"[gamapass-cdp] 落到 accounts 完整登录页（非 select-account）。"
                  L"未调用 refresh、未清 Cookie；当前会话没有可用 SSO。");
+        // 下一轮从日常 User Data 重灌 Cookies（用户勾选记住后再一键）。
+        msc::cdp::RequestCdpSessionResync();
         return Fail(HttpLoginError::BadInput,
                     "Gama Pass 需要先登录：浏览器打开的是完整登录表单，没有「已登录账号」可选。"
                     "程序没有调用 refresh、也没有清除 Cookie。"
-                    "请在日志「浏览器=」对应的日常窗口登录 Gama Pass（accounts 选号页勾选记住），再点一键启动。"
-                    "只用 Edge 请先卸载 Google Chrome（优先序：Chrome++/Chrome > Edge）。"
-                    "（配置目录以日志 UserData= 为准。）");
+                    "请用日常 Chrome/Edge 打开 accounts.gamania.com 勾选记住后，再点一键启动"
+                    "（下次会从日常 User Data 重同步到 GamaPassCdpProfile）。"
+                    "只用 Edge 请先卸载 Google Chrome（优先序：Chrome++/Chrome > Edge）。");
     };
 
     auto tryOttFromUrl = [&](const std::wstring& url) -> HttpLoginResult {
@@ -796,37 +798,53 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
         Sleep(200);
     };
 
-    auto parkBrowserAfterTicketOk = [&]() {
-        parkAwayFromMainOtt(
-            L"[gamapass-cdp] 换票成功，离开 Main?OTT（防官网二次兑票误报「帳號鎖定」）…");
+    auto parkLoginTabBlank = [&](const wchar_t* why) {
+        parkAwayFromMainOtt(why);
         if (!parkedAwayFromMain) {
             parkedAwayFromMain = true;
+            Log(log, why && why[0] ? why : L"[gamapass-cdp] 登录页 blank…");
             cdp.Navigate(L"about:blank", [&](const std::wstring& s) { Log(log, s); });
             Sleep(200);
         }
     };
 
+    auto parkBrowserAfterTicketOk = [&]() {
+        parkLoginTabBlank(
+            L"[gamapass-cdp] 换票成功，离开 Main?OTT（防官网二次兑票误报「帳號鎖定」）…");
+    };
+
+    bool closedBrowserAfterTicket = false;
+    auto closeBrowserAfterTicket = [&]() {
+        if (closedBrowserAfterTicket) return;
+        closedBrowserAfterTicket = true;
+        Log(log, L"[gamapass-cdp] 已收票/经典版，关闭登录用网页…");
+        msc::cdp::CloseRemoteBrowser(kCdpPort, [&](const std::wstring& s) { Log(log, s); });
+    };
+
     auto returnIfTicketOk = [&](HttpLoginResult&& r) -> HttpLoginResult {
         if (r.ok && r.ticketFilled) {
             parkBrowserAfterTicketOk();
+            // 收票后再关：见 NGM 立刻 Close+Terminate 易打断 Cookie 落盘；
+            // 干净重拉若残留旧 NGM，过早关页会让 TokenWait 永远等不到新经典版。
+            closeBrowserAfterTicket();
         }
         return std::move(r);
     };
 
     // NGM 只作「官网已开始拉起」的早信号；成功仍要求 Classic + 可解析 cmdline 票。
     // 只认本轮 sessionNotBefore 之后创建的 NGM，避免残留进程误报。
-    // 见 NGM 即可关调试浏览器：票已在拉起链路上，网页不再需要。
-    bool closedBrowserAfterNgm = false;
+    // 见 NGM 仅 blank 停泊，等 cmdline 票收齐后再 CloseRemoteBrowser。
+    bool parkedAfterNgm = false;
     auto noteNgmLaunchHint = [&]() {
         if (sawNgmHint) return false;
         if (!IsNgmProcessRunningCreatedAfter(sessionNotBefore)) return false;
         sawNgmHint = true;
         ngmHintAt = GetTickCount();
         Log(log, L"[gamapass-cdp] 探测到 NGM 已启动（官网拉起中；成功门禁仍等经典版 cmdline 票）…");
-        if (!closedBrowserAfterNgm) {
-            closedBrowserAfterNgm = true;
-            Log(log, L"[gamapass-cdp] 已见 NGM，关闭登录用网页（后续只等经典版 cmdline 票）…");
-            msc::cdp::CloseRemoteBrowser(kCdpPort, [&](const std::wstring& s) { Log(log, s); });
+        if (!parkedAfterNgm && !closedBrowserAfterTicket) {
+            parkedAfterNgm = true;
+            parkLoginTabBlank(
+                L"[gamapass-cdp] 已见 NGM，登录页已 blank（等经典版票后再关浏览器）…");
         }
         return true;
     };

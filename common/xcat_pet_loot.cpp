@@ -16,10 +16,6 @@ bool EnsureStateDir(const char* binDir) {
 void ClampVacuum(PetLootConfig& cfg) {
     if (!(cfg.vacuumW > 1.f) || cfg.vacuumW > kPetLootVacuumMax) cfg.vacuumW = kPetLootVacuumWDefault;
     if (!(cfg.vacuumH > 1.f) || cfg.vacuumH > kPetLootVacuumMax) cfg.vacuumH = kPetLootVacuumHDefault;
-    if (!(cfg.footHalfW > 1.f) || cfg.footHalfW > kPetLootFootHalfMax)
-        cfg.footHalfW = kPetLootFootHalfWDefault;
-    if (!(cfg.footHalfH > 1.f) || cfg.footHalfH > kPetLootFootHalfMax)
-        cfg.footHalfH = kPetLootFootHalfHDefault;
     if (!(cfg.charHalfW > 1.f) || cfg.charHalfW > kPetLootCharHalfMax)
         cfg.charHalfW = kPetLootCharHalfWDefault;
     if (!(cfg.charHalfH > 1.f) || cfg.charHalfH > kPetLootCharHalfMax)
@@ -44,8 +40,6 @@ bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTi
     IniGetU32(ini, "pet_loot", "burstPerTick", out.burstPerTick);
     IniGetFloat(ini, "pet_loot", "vacuumW", out.vacuumW);
     IniGetFloat(ini, "pet_loot", "vacuumH", out.vacuumH);
-    IniGetFloat(ini, "pet_loot", "footHalfW", out.footHalfW);
-    IniGetFloat(ini, "pet_loot", "footHalfH", out.footHalfH);
     if (IniGetBool(ini, "pet_loot", "charVacEnabled", b)) out.charVacEnabled = b ? 1u : 0u;
     IniGetFloat(ini, "pet_loot", "charHalfW", out.charHalfW);
     IniGetFloat(ini, "pet_loot", "charHalfH", out.charHalfH);
@@ -98,8 +92,9 @@ bool WritePetLootIni(const char* binDir, const PetLootConfig& cfg, uint64_t writ
         IniSetU32(ini, "pet_loot", "burstPerTick", cfg.burstPerTick);
         IniSetFloat(ini, "pet_loot", "vacuumW", cfg.vacuumW);
         IniSetFloat(ini, "pet_loot", "vacuumH", cfg.vacuumH);
-        IniSetFloat(ini, "pet_loot", "footHalfW", cfg.footHalfW);
-        IniSetFloat(ini, "pet_loot", "footHalfH", cfg.footHalfH);
+        // 脚下已改原生盒：不再读写自定义半宽；擦掉旧键避免误导
+        IniEraseKey(ini, "pet_loot", "footHalfW");
+        IniEraseKey(ini, "pet_loot", "footHalfH");
         IniSetBool(ini, "pet_loot", "charVacEnabled", cfg.charVacEnabled != 0);
         IniSetFloat(ini, "pet_loot", "charHalfW", cfg.charHalfW);
         IniSetFloat(ini, "pet_loot", "charHalfH", cfg.charHalfH);
@@ -136,10 +131,10 @@ uint32_t PetLootClampBurstPerTick(uint32_t n) {
 }
 
 void PetLootEffectiveVacuum(const PetLootConfig& cfg, float& outW, float& outH) {
-    // 宠吸唯一尺寸 = 原近图真空；enabled 即用 MapVacuum（兼容旧 mapVacuumEnabled）
+    // 宠吸 = 人物附近真空（默认 300×200）；不再钉全图 3200×2400
     if (cfg.enabled || cfg.mapVacuumEnabled) {
-        outW = kPetLootMapVacuumW;
-        outH = kPetLootMapVacuumH;
+        outW = cfg.vacuumW > 1.f ? cfg.vacuumW : kPetLootVacuumWDefault;
+        outH = cfg.vacuumH > 1.f ? cfg.vacuumH : kPetLootVacuumHDefault;
         return;
     }
     outW = cfg.vacuumW;
@@ -158,16 +153,23 @@ void PetLootNormalize(PetLootConfig& cfg) {
     cfg.footEnabled = cfg.footEnabled ? 1u : 0u;
     cfg.mapVacuumEnabled = cfg.mapVacuumEnabled ? 1u : 0u;
     cfg.charVacEnabled = cfg.charVacEnabled ? 1u : 0u;
-    // 三种吸物模式互斥：宠吸 > 人物直吸 > 脚边（宠吸开时脚边空成功会刷 LastTry 锁死宠吸）
+    // 用户面禁用：配置层掐死，避免旧 ini / 面板残留仍驱动 payload。
+    if (!kPetLootCharVacUserEnabled) cfg.charVacEnabled = 0;
+    // 三种吸物模式互斥：宠吸 > 人物直吸 > 脚边（脚下只触发原生口，仍与宠吸分时）
     if (cfg.enabled) {
         cfg.charVacEnabled = 0;
         cfg.footEnabled = 0;
     } else if (cfg.charVacEnabled) {
         cfg.footEnabled = 0;
     }
-    // 人物直吸全盒钉死 1500×1500（冲掉旧 400×320 / 3200×2400）
+    // 人物直吸全盒钉死近身 300×200（冲掉旧 1500×1500 / 400×320）
     cfg.charHalfW = kPetLootCharHalfWDefault;
     cfg.charHalfH = kPetLootCharHalfHDefault;
+    // 宠吸钉近身默认盒，冲掉旧 ini 残留的 3200×2400「全图」尺寸
+    if (cfg.enabled || cfg.mapVacuumEnabled) {
+        cfg.vacuumW = kPetLootVacuumWDefault;
+        cfg.vacuumH = kPetLootVacuumHDefault;
+    }
     cfg.intervalMs = PetLootClampIntervalMs(cfg.intervalMs);
     cfg.burstPerTick = PetLootClampBurstPerTick(cfg.burstPerTick);
     ClampVacuum(cfg);
@@ -195,8 +197,6 @@ void PetLootSetDefaults(PetLootConfig& out) {
     out.burstPerTick = kPetLootBurstDefault;
     out.vacuumW = kPetLootVacuumWDefault;
     out.vacuumH = kPetLootVacuumHDefault;
-    out.footHalfW = kPetLootFootHalfWDefault;
-    out.footHalfH = kPetLootFootHalfHDefault;
     out.charHalfW = kPetLootCharHalfWDefault;
     out.charHalfH = kPetLootCharHalfHDefault;
     out.filterFlags = kPetLootFilterDefault;

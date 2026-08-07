@@ -211,22 +211,12 @@ void Tick(DWORD now) {
         return;
     }
 
-    // 拟人走路中硬让路（IsLootPulseActive 已含；日志单独标，便于 BIN）。
-    if (ports::attack::IsWalkHeld()) {
-        static DWORD sWalkLog = 0;
-        if (!sWalkLog || now - sWalkLog > 2000) {
-            sWalkLog = now;
-            LogLineOd("yield human_walk (defer loot while HoldWalk)");
-        }
-        return;
-    }
-
-    // 挂机时分复用：仅换怪/贴怪落地脉冲窗吸；出刀链（Aim/Firing/Recover）硬让路。
+    // 挂机时分复用：不出刀就吸；仅 Aim/Firing/Recover 让路（含拟人走路 MoveTo）。
     if (!simple_combat::IsLootPulseActive()) {
         static DWORD sFireLog = 0;
         if (!sFireLog || now - sFireLog > 2000) {
             sFireLog = now;
-            LogLineOd("yield combat_fire_window (loot pulse closed; defer for Aim/Fire)");
+            LogLineOd("yield combat_fire_window (defer loot for Aim/Fire/Recover)");
         }
         return;
     }
@@ -235,7 +225,8 @@ void Tick(DWORD now) {
 
     // 人物直吸 = 宠吸控制面，主体换成角色；盒子为近身可达范围（非宠吸全图）；
     // 官方 Send 不写 LastTry，拒收必须靠 sentDropId AddStall；burst 跟面板（1–5）。
-    if (gCfg.charVacEnabled && !gCfg.enabled) {
+    // 用户面关闭时 Normalize 已掐 charVac；此处再挡一层，代码路径保留便于重开。
+    if (xcat::kPetLootCharVacUserEnabled && gCfg.charVacEnabled && !gCfg.enabled) {
         const uint32_t burst = xcat::PetLootClampBurstPerTick(gCfg.burstPerTick);
         float charHW = 0.f, charHH = 0.f;
         xcat::PetLootEffectiveCharHalf(gCfg, charHW, charHH);
@@ -284,22 +275,20 @@ void Tick(DWORD now) {
         (void)cok;
     }
 
-    // 正式吸物走宠扩盒时不并行脚边：脚边空成功会刷 LastTry，把宠吸锁死
+    // 脚下：只自动触发原生 DropPool.TryPickUpDrop；与宠吸互斥（Normalize 已保证）
     if (gCfg.footEnabled && !gCfg.enabled && !gCfg.charVacEnabled) {
         ports::drop::FootResult fr{};
-        const bool fok =
-            ports::drop::TryFootPickup(gCfg.footHalfW, gCfg.footHalfH, skip, fr);
+        const bool fok = ports::drop::TryFootPickup(fr);
         static DWORD s_lastFoot = 0;
         const bool force = !s_lastFoot || (now - s_lastFoot >= kDetailLogMs);
         if (force || (fr.why && (std::strcmp(fr.why, "seh") == 0))) {
             s_lastFoot = now;
             LogLine(
-                "mode=foot pos=(%.1f,%.1f) box=%.0fx%.0f drops=%d→%d Δ=%d near=%d want=%d "
-                "stamp=%d called=%d why=%s poolSendΔ=%u skipN=%d",
-                fr.userX, fr.userY, gCfg.footHalfW * 2.f, gCfg.footHalfH * 2.f, fr.dropCount,
-                fr.dropCountAfter, fr.dropsDelta, fr.nearCount, fr.nearWant, fr.stamped,
+                "mode=foot native pos=(%.1f,%.1f) drops=%d→%d Δ=%d called=%d why=%s "
+                "poolSendΔ=%u poolFell=%d",
+                fr.userX, fr.userY, fr.dropCount, fr.dropCountAfter, fr.dropsDelta,
                 fr.called ? 1 : 0, fr.why ? fr.why : "?", fr.poolSendDelta,
-                skip ? (int)skip->size() : 0);
+                fr.poolFellSinceLast ? 1 : 0);
         }
         (void)fok;
     }
@@ -470,12 +459,12 @@ DWORD WINAPI Worker(LPVOID) {
             float charHW = 0.f, charHH = 0.f;
             xcat::PetLootEffectiveCharHalf(gCfg, charHW, charHH);
             LogLineOd("config pet=%d foot=%d charVac=%d mapVac=%d interval=%u burst=%u "
-                    "box=%.0fx%.0f footBox=%.0fx%.0f charBox=%.0fx%.0f filters=0x%X "
-                    "skipFilter=%d skipRules=%u",
+                      "box=%.0fx%.0f(near) footBox=50x60(native) charBox=%.0fx%.0f filters=0x%X "
+                      "skipFilter=%d skipRules=%u",
                     gCfg.enabled ? 1 : 0, gCfg.footEnabled ? 1 : 0, gCfg.charVacEnabled ? 1 : 0,
                     gCfg.mapVacuumEnabled ? 1 : 0, gCfg.intervalMs, gCfg.burstPerTick, vacW, vacH,
-                    gCfg.footHalfW * 2.f, gCfg.footHalfH * 2.f, charHW * 2.f, charHH * 2.f,
-                    gCfg.filterFlags, gCfg.skipFilterEnabled ? 1 : 0, gCfg.skipRuleCount);
+                    charHW * 2.f, charHH * 2.f, gCfg.filterFlags, gCfg.skipFilterEnabled ? 1 : 0,
+                    gCfg.skipRuleCount);
         }
 
         // 脚边 / 人物直吸：DropPool+MyUser；宠吸：额外 pet_port

@@ -6,7 +6,7 @@ namespace features {
 namespace attack_accel {
 
 // 攻击加速（SetDesired）：清忙锁 LocalUser+0x118=-1（字段哈希防漂移，hint 0x118）。
-// 出刀频率看面板「间隔」/ simpleCombatAttackIntervalMs（默认 50，下限 1）。
+// 出刀频率看面板「间隔」/ simpleCombatAttackIntervalMs（默认 123，下限 1）。
 // 非「技能无 CD」。禁止 GA .text hook。
 //
 // 攻速槽（SetBoosterDesired，独立开关，默认关）：写 SecondaryStat.nBooster_@0xBC = -8
