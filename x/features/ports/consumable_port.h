@@ -28,7 +28,7 @@ bool FindPotion(PotionKind kind, FindResult& out);
 bool FindAndUsePotion(PotionKind kind, FindResult& out);
 
 // Resolve PageDown(HP)/PageUp(MP) FuncKeyMapped Item bind → consume slot.
-// Type must be FuncType.Item(2); soft-trust HpRank/MpRank; no scan fallback.
+// Type must be FuncType.Item(2); 绑了什么就喝什么（无反类 soft-reject）；无扫栏回退。
 bool ResolveBoundPotion(bool wantHp, FindResult& out);
 
 // Resolve bind + SendStatChangeItemUseRequest (autopot main path; like fengxing bind-only).

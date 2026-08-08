@@ -223,8 +223,8 @@ void Tick(DWORD now) {
 
     const ports::drop::SkipIds* skip = CurrentSkipIds();
 
-    // 人物直吸 = 宠吸控制面，主体换成角色；盒子为近身可达范围（非宠吸全图）；
-    // 官方 Send 不写 LastTry，拒收必须靠 sentDropId AddStall；burst 跟面板（1–5）。
+    // 人物直吸 = 宠吸控制面，主体换成角色；半盒 = vacuumW/H / 2（与宠吸共用全盒）；
+    // 官方 Send 不写 LastTry，拒收必须靠 sentDropId AddStall；burst 跟面板（自设，硬顶 HardCap）。
     // 用户面关闭时 Normalize 已掐 charVac；此处再挡一层，代码路径保留便于重开。
     if (xcat::kPetLootCharVacUserEnabled && gCfg.charVacEnabled && !gCfg.enabled) {
         const uint32_t burst = xcat::PetLootClampBurstPerTick(gCfg.burstPerTick);
@@ -331,6 +331,7 @@ void Tick(DWORD now) {
                         std::strcmp(one.why, "no_lu") == 0))
             break;
         if (one.why && std::strcmp(one.why, "ok_empty") == 0) break;
+        if (one.why && std::strcmp(one.why, "reject_backoff") == 0) break;
         if (one.nearCount == 0 && !(one.why && std::strcmp(one.why, "ok_absorbed") == 0)) break;
     }
 
@@ -339,6 +340,16 @@ void Tick(DWORD now) {
             gLastNoSkillLog = now;
             LogLineOd("mode=petmap pets=1 skill=0x%X skillSlot=0x%X why=no_skill (need PickupItem)",
                       (unsigned)vr.petSkill, (unsigned)vr.petSkillSlot);
+        }
+        return;
+    }
+
+    if (vr.why && std::strcmp(vr.why, "reject_backoff") == 0) {
+        static DWORD s_lastBackoffLog = 0;
+        if (!s_lastBackoffLog || now - s_lastBackoffLog >= kForceLogMs) {
+            s_lastBackoffLog = now;
+            LogLineOd("mode=petmap why=reject_backoff (sentSame streak; 清栏后 %us 内少空转)",
+                      5u);
         }
         return;
     }

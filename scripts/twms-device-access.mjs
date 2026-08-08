@@ -281,7 +281,24 @@ export function createDeviceAccess(opts) {
         map.delete(k);
       }
     }
-    if (!explicit && !candidates.length) {
+    // 扫全表：ban/unban 可能留下同机不同 key（tok/mac/dev）孤儿条，解禁后仍命中 evaluate。
+    if (tok || macHex || d || (m && d)) {
+      for (const [k, row] of [...map.entries()]) {
+        if (!row) continue;
+        const rowTok = normalizeToken(row.token || (String(k).startsWith("tok:") ? k.slice(4) : ""));
+        const rowMac = normalizeMac(row.mac || (String(k).startsWith("mac:") ? k.slice(4) : ""));
+        const rowM = normalizePart(row.machine || "");
+        const rowD = normalizePart(row.deviceId || "", 64);
+        const hitTok = tok && rowTok && tok === rowTok;
+        const hitMac = macHex && rowMac && macHex === rowMac;
+        const hitDev = d && rowD && d === rowD && (!m || !rowM || m === rowM);
+        if (hitTok || hitMac || hitDev) {
+          last = row;
+          map.delete(k);
+        }
+      }
+    }
+    if (!explicit && !candidates.length && !tok && !macHex && !d) {
       const err = new Error("key or machine/deviceId/mac/token required");
       err.status = 400;
       throw err;

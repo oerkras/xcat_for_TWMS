@@ -5,12 +5,14 @@
 namespace x::features::ports::multi_skill {
 
 // Classic TWMS 技能多发端口。
-// 对照枫星 multi_skill_port 语义；技能默认走 skill_port::CastSkill，
-// 可选 SendSkillUseRequest / 普攻攻包直发；默认普攻走 attack::TryFirePrimary。
+// 对照枫星 multi_skill_port 语义（清单/gap/busy）；不搬 Lua Immediate。
+// 技能默认 CastSkill(DoActive)；可选 SendSkillUseRequest。
+// 多发普攻：TryFirePrimaryForMultiSkill；间隔地板=实测 ActionBusy 周期（不低于官方出刀节奏）。
+// 技能：排程与到期前跳过 CoolTimeOver/本地 CD 仍剩余者（只发不在 CD 的）。
 // 首版不做连招扩族 / 职业 DPS 优化。
 
 void SetConfig(bool enabled, uint32_t gapMs, bool safeStagger);
-// 可选：技能 SendSkillUseRequest + 普攻 Create(50) 直发（默认关；失败回退原路径）。
+// 可选：技能优先 SendSkillUseRequest（默认关；失败回退 DoActive）。不影响普攻。
 void SetSendUseRequest(bool on);
 bool GetSendUseRequest();
 bool IsEnabled();

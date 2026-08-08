@@ -8,12 +8,17 @@ namespace x::features::auto_lie::anti_macro_follower {
 
 void Init();
 void SetEnabled(bool enabled);
+void SetRegionOverlayEnabled(bool enabled);
+bool IsRegionOverlayPref();  // 用户勾选偏好（模拟结束后恢复叠层用）
+bool TryCopyPublishedPanelRect(RECT& out);  // 活计划青框 AABB → 桌面 RECT
+void RefreshAutoLieHardPauseFromOutside();  // 模拟线程结束后重算硬闸
 void Tick(DWORD now);
 void Stop();
 void Shutdown();
 
 bool IsFollowing();
 bool IsUiVisible();
-void SetQuizWorldPaused(bool paused); // quiz 意图；实际硬闸 = quiz|following|ui（见 Refresh）
+bool IsRegionOverlayEnabled();
+void SetQuizWorldPaused(bool paused); // 硬闸 = quiz|following|(ui&&!answerDone)|sim
 
 }  // namespace x::features::auto_lie::anti_macro_follower

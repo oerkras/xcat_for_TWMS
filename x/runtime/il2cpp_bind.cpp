@@ -5,6 +5,7 @@
 #include "il2cpp_bind.h"
 
 #include "il2cpp_container.h"
+#include "il2cpp_metadata_lock.h"
 #include "il2cpp_method.h"
 #include "log.h"
 #include "main_thread_pump.h"
@@ -25,6 +26,14 @@ struct MethodInfoHead {
     void* virtualMethodPointer;
 };
 
+// 凡是「进了 il2cpp 又被 SEH 异常弹出来」的地方都要走一趟。这些 API 内部会先拿一把
+// 全局递归元数据锁，而那把锁没有 SEH 清理路径：__except 吞异常时展开会跨过解锁代码，
+// 锁便永久挂在本线程名下，之后全进程（含 Unity 主线程）的元数据查找全部挂死。
+// 没漏时是廉价空操作。纯内存读的 __except（ReadPtr / ArrayLen 等）不涉及锁，不必调。
+void ReturnLeakedMetadataLock(const char* where) {
+    x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread(where);
+}
+
 // FindClass 定义在后面；升级时用已 ready 的 gExp 直查，避免声明顺序问题。
 void* FindClassWithExports(const char* ns, const char* name) {
     if (!gExp.domainGet || !gExp.domainAssemblies || !gExp.asmImage || !gExp.classFromName || !name)
@@ -42,6 +51,7 @@ void* FindClassWithExports(const char* ns, const char* name) {
             if (klass) return klass;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("classFromName/upgrade");
     }
     return nullptr;
 }
@@ -296,6 +306,7 @@ void* FindClass(const char* ns, const char* name) {
             if (klass) return klass;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("classFromName");
     }
     return nullptr;
 }
@@ -306,6 +317,7 @@ void* ClassTypeObject(void* klass, bool bypassFreeze) {
     __try {
         type = gExp.classGetType(klass);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("classGetType");
         return nullptr;
     }
     if (!type) return nullptr;
@@ -319,6 +331,7 @@ void* ClassTypeObjectOnMain(void* klass) {
         if (!type) return nullptr;
         return gExp.typeGetObject(type);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("classGetType/onMain");
         return nullptr;
     }
 }
@@ -402,6 +415,7 @@ bool RuntimeClassInit(void* klass) {
         gExp.runtimeClassInit(klass);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("runtimeClassInit");
         return false;
     }
 }

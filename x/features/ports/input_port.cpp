@@ -1,10 +1,10 @@
-// Classic TWMS — UserLocal.OnKey via shared main_thread_pump.
-// KeyDownTouch/Up CFF 实机 SEH → 改走 OnKey @0x10181E0。
-// 官方站点常 xor MI；调用仍传 null。MI 解析只为 FnFromMi / MISS 灯。
+// Classic TWMS — Inject* 门面 → unity_kbd（InputSystem KeyboardState）。
+// 旧 OnKey 解析代码仍留在本文件（灯/诊断），Inject 路径不再调用。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include "input_port.h"
+#include "unity_kbd_port.h"
 #include "player_combat_port.h"
 #include "world_port.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -721,19 +721,100 @@ void Init() {
     EnterCriticalSection(&gRelCs);
     for (auto& s : gReleases) s = {};
     LeaveCriticalSection(&gRelCs);
-    x::runtime::LogI("InputPort", "ready (UserLocal.OnKey via shared MainPump)");
-    // 急切绑定：启动即解析字段偏移 / OnKey MI / 上报灯（不必等第一次发键）
+    x::runtime::LogI("InputPort", "ready (Inject* → unity_kbd KeyboardState; OnKey path idle)");
+    // 急切：unity_kbd + 旧 OnKey 灯（诊断用，Inject 不走 OnKey）
+    (void)unity_kbd::EnsureBound();
     if (BindApis()) {
         EnsureTargetUserOffset();
         EnsureMethodInfos();
     }
 }
 
-void Shutdown() { gInputManager = nullptr; }
+void Shutdown() {
+    gInputManager = nullptr;
+    // unity_kbd::Shutdown 由 probe 统一调用；此处不重复摘钩。
+}
 
-bool EnsureBound() { return ResolveInputManager(GetTickCount()); }
+bool EnsureBound() { return unity_kbd::EnsureBound() || unity_kbd::Ready(); }
 
-bool Ready() { return InputManagerHasTargetUser() && gGA != nullptr; }
+bool Ready() { return unity_kbd::Ready() || unity_kbd::EnsureBound(); }
+
+namespace {
+
+constexpr DWORD kPulsePollMs = 16;
+constexpr DWORD kKbdJobWaitMs = 800;
+
+struct KbdHeldJob {
+    int32_t key = 0;
+    bool down = false;
+    bool ok = false;
+};
+
+void KbdHeldJobOnMain(void* user) {
+    auto* j = static_cast<KbdHeldJob*>(user);
+    if (!j || j->key <= 0) return;
+    j->ok = unity_kbd::SetKeyHeldOnMain(j->key, j->down);
+    if (j->down) (void)unity_kbd::RepushOnMain();
+}
+
+// 已在泵线程则内联，禁止嵌套 InvokeAndWait（travel BIN 死锁）。
+bool RunKbdHeld(int32_t unityKey, bool down, bool* outOk) {
+    if (outOk) *outOk = false;
+    KbdHeldJob job{};
+    job.key = unityKey;
+    job.down = down;
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        KbdHeldJobOnMain(&job);
+    } else {
+        if (!x::runtime::main_thread::Ensure()) return false;
+        if (!x::runtime::main_thread::InvokeAndWait(&KbdHeldJobOnMain, &job, kKbdJobWaitMs,
+                                                     x::runtime::main_thread::JobPrio::High)) {
+            return false;
+        }
+    }
+    if (outOk) *outOk = job.ok;
+    return true;
+}
+
+bool TryKeyUp(int32_t unityKey) {
+    for (int i = 0; i < 3; ++i) {
+        bool ok = false;
+        if (RunKbdHeld(unityKey, false, &ok) && ok) return true;
+        Sleep(kPulsePollMs);
+    }
+    return false;
+}
+
+// Worker 优先；若误在主线程调用则内联执行（不嵌套等泵）。
+bool PulseUnityKeySync(int32_t unityKey, DWORD holdMs) {
+    if (unityKey <= 0) return false;
+    if (!x::runtime::main_thread::Ensure() && !x::runtime::main_thread::IsOnPumpThread()) {
+        x::runtime::LogWThrottled(40, 5000, "InputPort", "unity_kbd pulse: main pump missing");
+        return false;
+    }
+    (void)unity_kbd::EnsureBound();
+    const DWORD hold = holdMs < 50 ? 50 : holdMs;
+    char detail[96]{};
+    // 固定时长：until 恒 false，min=max=hold（与 Travel HoldUntil 同路）。
+    const bool ok =
+        unity_kbd::HoldUntil(unityKey, hold, hold, nullptr, nullptr, detail, sizeof(detail));
+    if (!ok) {
+        x::runtime::LogWThrottled(40, 5000, "InputPort",
+                                  "unity_kbd HoldUntil fail key=%d detail=%s why=%s", (int)unityKey,
+                                  detail, unity_kbd::LastFail());
+    }
+    return ok;
+}
+
+bool ForceUnityKeyUp(int32_t unityKey) {
+    if (unityKey <= 0) return false;
+    // SetKeyHeld(false) 对未持有位 no-op，不会空推全零态。
+    bool ok = false;
+    if (!RunKbdHeld(unityKey, false, &ok)) return false;
+    return ok;
+}
+
+}  // namespace
 
 bool InjectKeyHold(WORD vk, DWORD holdMs) {
     const int32_t key = VkToUnityKey(vk);
@@ -741,112 +822,28 @@ bool InjectKeyHold(WORD vk, DWORD holdMs) {
         x::runtime::LogW("InputPort", "no Unity Key for VK=0x%02X", (unsigned)vk);
         return false;
     }
-
-    const DWORD now = GetTickCount();
-    const DWORD hold = holdMs < 50 ? 50 : holdMs;
-    const DWORD dueAt = now + hold;
-
-    if (ExtendHoldIfActive(vk, key, dueAt)) return true;
-
-    if (!EnsureBound()) return false;
-
-    bool focusedSkip = false;
-    if (!EnqueueAndWait(JobKind::Down, key, &focusedSkip)) {
-        if (focusedSkip) {
-            x::runtime::LogWThrottled(41, 3000, "InputPort", "input field focused — skip fire");
-        } else {
-            x::runtime::LogWThrottled(40, 5000, "InputPort", "Down fail VK=0x%02X (no user / SEH / pump)",
-                                     (unsigned)vk);
-        }
-        return false;
-    }
-
-    if (!ScheduleRelease(vk, key, dueAt)) {
-        x::runtime::LogW("InputPort", "release queue full — immediate Up VK=0x%02X", (unsigned)vk);
-        (void)EnqueueAndWait(JobKind::Up, key, nullptr);
-        return false;
-    }
-    return true;
+    return PulseUnityKeySync(key, holdMs);
 }
 
 bool InjectUnityKeyHold(int32_t unityKey, DWORD holdMs) {
     if (unityKey <= 0) return false;
-    // Synthetic VK slot: high bit marks Unity-key direct path (avoid VkToUnityKey).
-    const WORD synthVk = static_cast<WORD>(0x8000u | (static_cast<uint16_t>(unityKey) & 0x7FFFu));
-
-    const DWORD now = GetTickCount();
-    const DWORD hold = holdMs < 50 ? 50 : holdMs;
-    const DWORD dueAt = now + hold;
-
-    if (ExtendHoldIfActive(synthVk, unityKey, dueAt)) return true;
-    if (!EnsureBound()) return false;
-
-    bool focusedSkip = false;
-    if (!EnqueueAndWait(JobKind::Down, unityKey, &focusedSkip)) {
-        if (focusedSkip) {
-            x::runtime::LogWThrottled(41, 3000, "InputPort", "input field focused — skip fire");
-        } else {
-            x::runtime::LogWThrottled(42, 5000, "InputPort", "Down fail UnityKey=%d (no user / SEH / pump)",
-                                     (int)unityKey);
-        }
-        return false;
-    }
-    if (!ScheduleRelease(synthVk, unityKey, dueAt)) {
-        (void)EnqueueAndWait(JobKind::Up, unityKey, nullptr);
-        return false;
-    }
-    return true;
+    return PulseUnityKeySync(unityKey, holdMs);
 }
 
-void TickReleases(DWORD nowMs) {
-    EnsureCs();
-    ReleaseSlot due[kReleaseSlots]{};
-    size_t dueCount = 0;
-    EnterCriticalSection(&gRelCs);
-    for (auto& slot : gReleases) {
-        if (!slot.active) continue;
-        if (static_cast<int>(nowMs - slot.dueAt) < 0) continue;
-        if (dueCount < kReleaseSlots) due[dueCount++] = slot;
-        slot = {};
-    }
-    LeaveCriticalSection(&gRelCs);
-
-    for (size_t i = 0; i < dueCount; ++i) {
-        (void)EnqueueAndWait(JobKind::Up, due[i].key, nullptr);
-    }
+void TickReleases(DWORD /*nowMs*/) {
+    // 同步脉冲无异步松键队列。
 }
 
 void ForceReleaseVk(WORD vk) {
     const int32_t key = VkToUnityKey(vk);
     if (key <= 0) return;
-    EnsureCs();
-    bool wasActive = false;
-    EnterCriticalSection(&gRelCs);
-    for (auto& slot : gReleases) {
-        if (!slot.active || slot.vk != vk) continue;
-        slot = {};
-        wasActive = true;
-    }
-    LeaveCriticalSection(&gRelCs);
-    // Only Up if we actually held the key. Blind Up → KeyTouch SEH → MainPump crash.
-    if (!wasActive) return;
-    if (EnsureBound()) (void)EnqueueAndWait(JobKind::Up, key, nullptr);
+    (void)ForceUnityKeyUp(key);
 }
 
 void ForceReleaseUnityKey(int32_t unityKey) {
     if (unityKey <= 0) return;
-    const WORD synthVk = static_cast<WORD>(0x8000u | (static_cast<uint16_t>(unityKey) & 0x7FFFu));
-    EnsureCs();
-    bool wasActive = false;
-    EnterCriticalSection(&gRelCs);
-    for (auto& slot : gReleases) {
-        if (!slot.active || slot.vk != synthVk) continue;
-        slot = {};
-        wasActive = true;
-    }
-    LeaveCriticalSection(&gRelCs);
-    if (!wasActive) return;
-    if (EnsureBound()) (void)EnqueueAndWait(JobKind::Up, unityKey, nullptr);
+    (void)ForceUnityKeyUp(unityKey);
 }
 
 }  // namespace x::features::ports::input
+

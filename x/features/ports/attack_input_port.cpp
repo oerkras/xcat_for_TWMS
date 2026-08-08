@@ -11,10 +11,12 @@
 #endif
 #include "attack_input_port.h"
 
+#include "ground_spoof.h"
 #include "input_port.h"
 #include "key_macro_bin.h"
 #include "player_combat_port.h"
 #include "unity_kbd_port.h"
+#include "../attack_accel/attack_accel.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -738,6 +740,17 @@ bool EnsureAttackFkOnMain() {
     return true;
 }
 
+// 出刀结果探针（详见 attack_input_port.h 的 FireOutcomeDebug）。只在主线程泵上写，
+// 面板/日志线程读，所以用 atomic。-2 = 没读到，别当业务语义。
+constexpr int kBusyUnread = -2;
+std::atomic<int> gFireBusy0{kBusyUnread};
+std::atomic<int> gFireBusy1{kBusyUnread};
+
+int ReadActionBusy(void* localUser) {
+    int v = 0;
+    return attack_accel::QueryActionBusy(localUser, v) ? v : kBusyUnread;
+}
+
 struct FireJob {
     bool ok = false;
     bool isUp = false;
@@ -765,6 +778,16 @@ void FireJobOnMain(void* user) {
     }
 
     const int32_t inputType = job->isUp ? kKeyInputUp : kKeyInputDown;
+    // 站立伪装：种台/摘台必须夹在这一次同步派发的两侧（OnFuncKey→OnAttack→TryDoing*
+    // 全在本 job 内跑完），跨出去物理就会看见这块台。__try 函数里不能放带析构的对象
+    // （C2712），所以只能显式配对，且 __except 路径也必须摘。
+    // 只夹 Down：技能派发在 Down 那一拍，Up 种台既没用又白开一次窗口；而且异步 Up
+    // 会把 Down 记下的忙位快照冲掉，抢在 combat.log 读之前 → 打点串味。
+    const bool spoof = !job->isUp;
+    if (spoof) {
+        gFireBusy0.store(ReadActionBusy(ctx.localUser), std::memory_order_relaxed);
+        (void)ground_spoof::PlantForFire(ctx.localUser);
+    }
     __try {
         fn(ctx.localUser, inputType, gAttackFk, 0u, gMiOnFuncKey);
         job->ok = true;
@@ -773,6 +796,11 @@ void FireJobOnMain(void* user) {
         job->ok = false;
         job->err = "SEH";
         ClearAttackFk();
+    }
+    if (spoof) {
+        // 派发是同步的，返回时引擎已经决定接不接这一刀，忙位就是判决书。
+        gFireBusy1.store(ReadActionBusy(ctx.localUser), std::memory_order_relaxed);
+        ground_spoof::UnplantAfterFire();
     }
 }
 
@@ -815,6 +843,9 @@ void FirePulseOnMain(void* user) {
         return;
     }
 
+    // 站立伪装：Down/Up 同泵，整段夹在种台窗口内（理由同 FireJobOnMain）。
+    gFireBusy0.store(ReadActionBusy(ctx.localUser), std::memory_order_relaxed);
+    (void)ground_spoof::PlantForFire(ctx.localUser);
     __try {
         fn(ctx.localUser, kKeyInputDown, gAttackFk, 0u, gMiOnFuncKey);
         job->downOk = true;
@@ -825,6 +856,8 @@ void FirePulseOnMain(void* user) {
         job->err = "SEH";
         ClearAttackFk();
     }
+    gFireBusy1.store(ReadActionBusy(ctx.localUser), std::memory_order_relaxed);
+    ground_spoof::UnplantAfterFire();
 }
 
 bool InvokeFirePulse() {
@@ -1278,27 +1311,19 @@ void WalkLatchJobFn(void* p) {
     ApplyWalkSetInput(job->inputX, job);
 }
 
-// 每帧在 CalcWalk 之前把按住状态补回设备：前台时真实键盘事件（方向键=未按）会覆盖注入，
-// 只靠 HoldWalk 那点频率补写会走一帧停一帧（02:14 BIN：fg=1 占空比 33% vs fg=0 90%）。
-void KbdRepushFrameTick(void*) { (void)unity_kbd::RepushOnMain(); }
-
+// 每帧补写已迁至 unity_kbd 自管（gMask 非空挂 InputFrameTick）；走路只灌方向位。
 void ArmWalkTick() {
     if (gWalkTickArmed.exchange(true, std::memory_order_acq_rel)) return;
     if (runtime::main_thread::Ensure()) {
         runtime::main_thread::SetPrePhysicsFrameTick(nullptr, nullptr);
         runtime::main_thread::SetPostPhysicsFrameTick(nullptr, nullptr);
-        runtime::main_thread::SetInputFrameTick(nullptr, nullptr);
     }
     if (WantKbdWalk() && !WantKeyPadWalk()) {
         UninstallPackDriveHook();
         ClearOsWalkKeys();  // 纯内部输入，不碰 OS 键，失焦也能走
         gWalkDriveMode.store(3, std::memory_order_relaxed);
-        bool tick = false;
-        if (runtime::main_thread::Ensure()) {
-            runtime::main_thread::SetInputFrameTick(&KbdRepushFrameTick, nullptr);
-            tick = true;
-        }
-        LogLine("walkW armed (InputSystem Keyboard state; OS off; repush=%d)", tick ? 1 : 0);
+        (void)unity_kbd::EnsureBound();
+        LogLine("walkW armed (InputSystem Keyboard state; OS off; kbd-owned repush)");
     } else if (WantKeyPadWalk()) {
         const bool hooked = InstallPackDriveHook();
         gWalkDriveMode.store(hooked ? 1 : 2, std::memory_order_relaxed);
@@ -1328,7 +1353,7 @@ void DisarmWalkTick() {
     if (runtime::main_thread::Ensure()) {
         runtime::main_thread::SetPrePhysicsFrameTick(nullptr, nullptr);
         runtime::main_thread::SetPostPhysicsFrameTick(nullptr, nullptr);
-        runtime::main_thread::SetInputFrameTick(nullptr, nullptr);
+        // InputFrameTick 由 unity_kbd 按掩码自管；走路松左右后若仍有 ↑ 等脉冲，tick 保留。
     }
     gWalkDriveMode.store(0, std::memory_order_relaxed);
     LogLine("walkW disarmed");
@@ -1342,7 +1367,7 @@ bool HoldWalk(int inputX) {
     const bool packMode = (mode == 1);
     const bool kbdMode = (mode == 3);
 
-    // 同向已锁存：靠 InputFrameTick Repush 续按，勿每 combat tick 再 InvokeAndWait
+    // 同向已锁存：靠 unity_kbd 自管 InputFrameTick Repush 续按，勿每 combat tick 再 InvokeAndWait
     // 抢主线程（拟人进带抖动时 Hold+Stop 齐喷 → ImGui/泵卡死，upload 48610f）。
     const int held = gWalkHeld.load(std::memory_order_acquire);
     if (held == inputX && kbdMode && gWalkTickArmed.load(std::memory_order_acquire)) {
@@ -1374,9 +1399,6 @@ bool HoldWalk(int inputX) {
     // 内部输入绑不上就别装死：回落 Win32，至少前台还能走。
     if (kbdMode && !kbdOk) {
         gWalkDriveMode.store(2, std::memory_order_relaxed);
-        if (runtime::main_thread::Ensure()) {
-            runtime::main_thread::SetInputFrameTick(nullptr, nullptr);
-        }
         LogLine("walkW Kbd inject FAIL (%s) → OS fallback", unity_kbd::LastFail());
         osOk = EnsureOsWalkDir(inputX);
     }
@@ -1557,13 +1579,20 @@ void FaceDebug(int* maOut, int* whyOut) {
     if (whyOut) *whyOut = gFaceLastWhy.load(std::memory_order_relaxed);
 }
 
+void FireOutcomeDebug(int* busy0, int* busy1) {
+    if (busy0) *busy0 = gFireBusy0.load(std::memory_order_relaxed);
+    if (busy1) *busy1 = gFireBusy1.load(std::memory_order_relaxed);
+}
+
 bool FaceNeedsFlip(float dx) {
     if (!std::isfinite(dx) || std::fabs(dx) < kFaceDeadzone) return false;
     const int last = gLastFaceSign.load(std::memory_order_relaxed);
-    if (last == 0) return false;  // 还没成功下发过，谈不上「换」向
-    // 注意 sticky（本文件 ApplyFaceNow）只在 last == want 时才跳过，换向一律真下发，
-    // 所以这里**不能**再叠 kFaceStickyPx 判断，否则会漏掉小 dx 的换向。
-    return last != ((dx < 0.f) ? -1 : 1);
+    const int want = (dx < 0.f) ? -1 : 1;
+    // 冷启动 / 关 F5 后 ForceRelease 会把 last 清 0。旧逻辑 `last==0 → 不 settle`
+    // 会让首刀同拍 SetInput 翻面 + OnFuncKey，必空（BIN 21:42:48 F5 开：ma 6→7 后 52ms 出刀，无 face_settle）。
+    // 未知朝向一律当需要 settle：先 ApplyFaceNow，下一拍再挥。
+    if (last == 0) return true;
+    return last != want;
 }
 
 DWORD EffectiveAnimBusyMs() {
@@ -1610,7 +1639,7 @@ bool CanFirePrimary() {
     return !SoftBlocked(now);
 }
 
-bool TryFirePrimary() {
+bool TryFirePrimaryEx(bool ignoreCombatInterval) {
     const DWORD now = NowMs();
     MaybeLogRate(now);
     FlushPendingUp(now);
@@ -1621,9 +1650,14 @@ bool TryFirePrimary() {
         return false;
     }
 
-    // 出刀门 = 面板有效间隔；不再与 animBusy 取 max。
+    // 出刀门 = 面板有效间隔；多发普攻改走固定间隔，此处可跳过。
     // 软拒绝不计 fail——加速 5ms 时 Recover→Firing 同 tick 空点会刷出假 fail≈两成。
-    if (SoftBlocked(now)) {
+    if (!ignoreCombatInterval && SoftBlocked(now)) {
+        gFireSoft.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    // 多发仍须等松键，否则粘 Down。
+    if (ignoreCombatInterval && gPendingUp.load(std::memory_order_acquire)) {
         gFireSoft.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -1682,6 +1716,10 @@ bool TryFirePrimary() {
     }
     return true;
 }
+
+bool TryFirePrimary() { return TryFirePrimaryEx(/*ignoreCombatInterval=*/false); }
+
+bool TryFirePrimaryForMultiSkill() { return TryFirePrimaryEx(/*ignoreCombatInterval=*/true); }
 
 void TickReleases() { FlushPendingUp(NowMs()); }
 

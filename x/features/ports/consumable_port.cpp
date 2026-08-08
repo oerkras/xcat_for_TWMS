@@ -289,12 +289,8 @@ bool ReadFkFields(void* fk, int32_t* outType, int32_t* outValue) {
     return true;
 }
 
-bool SoftTrustBound(bool wantHp, int itemId) {
-    if (itemId <= 0) return false;
-    // 对齐枫星 soft-trust：红路径拒纯蓝，蓝路径拒纯红；双效药两边都过。
-    if (wantHp) return HpRank(itemId) >= 0;
-    return MpRank(itemId) >= 0;
-}
+// 绑药路径：用户绑什么就喝什么（仅校验 itemId>0）。扫栏 FindPotion 仍走 HpRank/MpRank。
+bool AcceptBoundItemId(int itemId) { return itemId > 0; }
 
 bool FkFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out, size_t lo, size_t hi) {
     *out = fb;
@@ -965,8 +961,10 @@ bool ResolveBoundPotionOnMain(bool wantHp, FindResult& out) {
     if (!fk || !LooksLikeHeapPtr(fk)) return fail("empty_bind", 0, 0);
     int32_t type = 0, value = 0;
     if (!ReadFkFields(fk, &type, &value)) return fail("fk_read", -1, 0);
+    // FuncType.None(0)+value0 = 未绑；勿写成 not_item。
+    if (type == 0 && value == 0) return fail("empty_bind", type, value);
     if (type != kFuncTypeItem) return fail("not_item", type, value, value);
-    if (!SoftTrustBound(wantHp, value)) return fail("soft_reject", type, value, value);
+    if (!AcceptBoundItemId(value)) return fail("bad_item", type, value, value);
     if (!FindItemIdOnMain(value, out) || !out.ok) return fail("not_in_bag", type, value, value);
     out.missWhy = nullptr;
     return true;

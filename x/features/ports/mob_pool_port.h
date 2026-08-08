@@ -49,6 +49,8 @@ struct MobLite {
     float x = 0.f;
     float y = 0.f;
     bool ready = false;
+    // FindHit 要 inView；选怪/旋翼不再因 false 剔出 n（BIN：下层满血怪 v=0 → 假空图落地）。
+    bool inView = false;
     // ResolveAbsHp 填充（TryFillLive / Collect 可选）；src=None 表示未解析。
     int64_t absHp = 0;
     int64_t absMaxHp = 0;
@@ -123,6 +125,22 @@ inline int CtrlPreferRank(int32_t ctrl) {
     return 0;
 }
 
+// FillLite 拒样：n=0 但 raw>0 时拆拒绝门（尸体/未就绪等）。
+struct FillRejectSample {
+    int id = 0;
+    int tpl = 0;
+    int hpPct = 0;
+    int deadType = 0;
+    float x = 0.f;
+    float y = 0.f;
+    uint8_t ready = 0;
+    uint8_t inView = 0;
+    uint8_t suspended = 0;
+    // R=notReady D=deadType H=hp S=suspended P=dirtyPos O=other(klass/id/special)
+    char why = '?';
+};
+constexpr int kMaxFillRejectSamples = 4;
+
 struct Snapshot {
     bool ok = false;
     bool truncated = false;
@@ -134,6 +152,17 @@ struct Snapshot {
     int lifeAll = -1;     // LifeList 总条数
     uint64_t tickMs = 0;
     MobLite mobs[kMaxLiteMobs]{};
+    // 入榜但 FindHit 尚不可用的活怪数（inView=0）；不挡 n，供 BIN / 选怪软优先对照。
+    int nInView0 = 0;
+    // raw - n 归因（每帧 Collect 清零重计）
+    int rejNotReady = 0;
+    int rejDeadType = 0;
+    int rejHp = 0;
+    int rejSuspended = 0;
+    int rejDirty = 0;
+    int rejOther = 0;
+    int rejSampleN = 0;
+    FillRejectSample rejSamples[kMaxFillRejectSamples]{};
 };
 
 // 解析 MobPool / APIs（可重复调用；失败返回 false）

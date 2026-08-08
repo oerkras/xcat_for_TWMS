@@ -14,8 +14,10 @@
 
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/log.h"
+#include "../../runtime/main_thread_pump.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 namespace x::features::ports::unity_kbd {
@@ -78,8 +80,8 @@ using FnPreProcess = char(__fastcall*)(void* self, void* eventPtr, const void* m
 using FnGetBool = char(__fastcall*)(void* self, const void* mi);
 using FnSetBool = void(__fastcall*)(void* self, char value, const void* mi);
 
-// 本模块独占的按键位；直写只碰这 4 位，玩家真按的其他键一律不动。
-constexpr int32_t kOwnedKeys[] = {kKeyLeftArrow, kKeyRightArrow, kKeyUpArrow, kKeyDownArrow};
+// 历史：守位/直写曾只碰箭头。现按 gMask 全位（含 PageDown/技能键脉冲），玩家未持有的位不动。
+uint8_t gPrevDirectMask[kKeyboardStateBytes]{};
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -113,6 +115,7 @@ uint32_t gForeign = 0;
 uint32_t gDirect = 0;
 uint32_t gGuarded = 0;
 bool gDirectWrite = false;  // XCAT_KBD_DIRECT=1 才开；见 RepushOnMain 注释
+bool gInputTickOwned = false;  // 本模块已挂 InputFrameTick（掩码非空自管）
 
 std::atomic<FnPreProcess> gOrigPreProcess{nullptr};
 void** gGuardSlots[4]{};
@@ -380,15 +383,12 @@ bool WriteStateDirect(void* dev) {
             return false;
         }
         keys = base + off;
-        for (int32_t bit : kOwnedKeys) {
-            const size_t idx = static_cast<size_t>(bit) / 8u;
-            const uint8_t m = static_cast<uint8_t>(1u << (static_cast<uint32_t>(bit) & 7u));
-            if (gMask[idx] & m) {
-                keys[idx] = static_cast<uint8_t>(keys[idx] | m);
-            } else {
-                keys[idx] = static_cast<uint8_t>(keys[idx] & ~m);
-            }
+        for (int i = 0; i < kKeyboardStateBytes; ++i) {
+            const uint8_t clearBits =
+                static_cast<uint8_t>(gPrevDirectMask[i] & static_cast<uint8_t>(~gMask[i]));
+            keys[i] = static_cast<uint8_t>((keys[i] & static_cast<uint8_t>(~clearBits)) | gMask[i]);
         }
+        memcpy(gPrevDirectMask, gMask, sizeof(gMask));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         gFail = "state_write_seh";
         return false;
@@ -405,6 +405,32 @@ bool MaskEmpty() {
     return true;
 }
 
+void InputRepushFrameTick(void*) { (void)RepushOnMain(); }
+
+// 掩码非空 → 挂 InputFrameTick；变空 → 摘掉。走路不再独占该槽。
+void SyncInputFrameTick() {
+    const bool want = !MaskEmpty();
+    if (want == gInputTickOwned) return;
+    if (!x::runtime::main_thread::Ensure() && !x::runtime::main_thread::IsOnPumpThread()) {
+        // 泵未就绪：下次 Push/Hold 再试；勿永久卡死。
+        return;
+    }
+    if (want) {
+        x::runtime::main_thread::SetInputFrameTick(&InputRepushFrameTick, nullptr);
+        gInputTickOwned = true;
+    } else {
+        x::runtime::main_thread::SetInputFrameTick(nullptr, nullptr);
+        gInputTickOwned = false;
+    }
+}
+
+bool BitIsSet(int32_t bit) {
+    if (bit <= 0 || bit >= kMaxKeyBit) return false;
+    const size_t byteIdx = static_cast<size_t>(bit) / 8u;
+    const uint8_t bitMask = static_cast<uint8_t>(1u << (static_cast<uint32_t>(bit) & 7u));
+    return (gMask[byteIdx] & bitMask) != 0;
+}
+
 bool SetBit(int32_t bit, bool on) {
     if (bit <= 0 || bit >= kMaxKeyBit) return false;
     const size_t byteIdx = static_cast<size_t>(bit) / 8u;
@@ -414,14 +440,14 @@ bool SetBit(int32_t bit, bool on) {
     } else {
         gMask[byteIdx] = static_cast<uint8_t>(gMask[byteIdx] & ~bitMask);
     }
+    SyncInputFrameTick();
     return true;
 }
 
-// 把本模块正持有的方向键位 OR 回事件位图。
-// 前台 Unity 原生输入后端每帧都发一条「整块键盘状态」事件，方向键位=0；游戏那道门闩吃的是
-// **状态变化**（change monitor / InputAction 回调），于是每条这种事件都触发一次 canceled，
-// 走一步停一步 —— 这就是「一顿一顿」的真身，靠提高补写频率是抢不过的（那是抢「取消」信号）。
-// 在这里把位补回去，取消信号根本不会产生。只碰自己持有的位，玩家真按的其他键一律不动。
+// 把本模块正持有的键位（gMask）OR 回事件位图。
+// 前台 Unity 原生输入后端每帧都发一条「整块键盘状态」事件，注入位常被写成 0；游戏那道门闩吃的是
+// **状态变化**（change monitor / InputAction 回调），于是每条这种事件都触发一次 canceled。
+// 在这里把位补回去，取消信号根本不会产生。只碰 gMask 里按下的位，玩家真按的其他键一律不动。
 // `InputEventPtr` 是只含一个指针字段的结构。il2cpp 对这种结构可能按值传（拿到的直接就是
 // `InputEvent*`），也可能按引用传（拿到的是结构地址，要再解一层）。原函数的反编译看不出是哪种，
 // 所以用 'STAT' 这个 FourCC 当判据实测一次并记住，两种 ABI 都能吃。
@@ -450,12 +476,13 @@ void GuardOwnedBits(void* evRaw) {
         if (*reinterpret_cast<uint16_t*>(p + 4) < sizeof(KeyboardStateEvent)) return;
         if (*reinterpret_cast<uint32_t*>(p + 0x14) != kFourCcKeyboard) return;
         uint8_t* keys = p + 0x18;
-        for (int32_t bit : kOwnedKeys) {
-            const size_t idx = static_cast<size_t>(bit) / 8u;
-            const uint8_t m = static_cast<uint8_t>(1u << (static_cast<uint32_t>(bit) & 7u));
-            if (!(gMask[idx] & m)) continue;  // 没在按的位不补
-            if (keys[idx] & m) continue;      // 事件里已经是按下，无需干预
-            keys[idx] = static_cast<uint8_t>(keys[idx] | m);
+        for (int i = 0; i < kKeyboardStateBytes; ++i) {
+            const uint8_t want = gMask[i];
+            if (!want) continue;
+            const uint8_t before = keys[i];
+            const uint8_t after = static_cast<uint8_t>(before | want);
+            if (after == before) continue;
+            keys[i] = after;
             touched = true;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -601,8 +628,32 @@ bool InstallEventGuard(void* dev) {
 }  // namespace
 
 bool SetKeyHeldOnMain(int32_t unityKey, bool down) {
-    if (!SetBit(unityKey, down)) return false;
+    if (down) {
+        if (!SetBit(unityKey, true)) return false;
+        return PushState();
+    }
+    // Up：未持有则 no-op，禁止入队全零态抹掉走路/玩家键。
+    if (!BitIsSet(unityKey)) {
+        gFail = "ok";
+        return true;
+    }
+    if (!SetBit(unityKey, false)) return false;
     return PushState();
+}
+
+bool BeginHoldOnMain(int32_t unityKey) { return SetKeyHeldOnMain(unityKey, true); }
+
+bool EndHoldOnMain(int32_t unityKey) { return SetKeyHeldOnMain(unityKey, false); }
+
+bool AnyHeld() { return !MaskEmpty(); }
+
+uint32_t HeldMaskHash() {
+    uint32_t h = 2166136261u;
+    for (uint8_t b : gMask) {
+        h ^= b;
+        h *= 16777619u;
+    }
+    return h;
 }
 
 bool SetWalkDirOnMain(int inputX) {
@@ -615,8 +666,22 @@ bool SetWalkDirOnMain(int inputX) {
 }
 
 bool ReleaseAllOnMain() {
-    if (MaskEmpty()) return true;
-    memset(gMask, 0, sizeof(gMask));
+    // 只松走路左右；保留脉冲位（PageDown/技能/StickUp），避免与 Inject 互抹。
+    const bool hadL = BitIsSet(kKeyLeftArrow);
+    const bool hadR = BitIsSet(kKeyRightArrow);
+    if (!hadL && !hadR) return true;
+    SetBit(kKeyLeftArrow, false);
+    SetBit(kKeyRightArrow, false);
+    // gPrevDirectMask：清掉左右对应位，免直写路径误清脉冲。
+    {
+        const int32_t bits[2] = {kKeyLeftArrow, kKeyRightArrow};
+        for (int n = 0; n < 2; ++n) {
+            const int32_t bit = bits[n];
+            const size_t i = static_cast<size_t>(bit) / 8u;
+            const uint8_t m = static_cast<uint8_t>(1u << (static_cast<uint32_t>(bit) & 7u));
+            gPrevDirectMask[i] = static_cast<uint8_t>(gPrevDirectMask[i] & ~m);
+        }
+    }
     return PushState();
 }
 
@@ -634,6 +699,136 @@ bool RepushOnMain() {
     return PushState();
 }
 
+namespace {
+
+constexpr DWORD kHoldPollMs = 16;
+constexpr DWORD kHoldJobWaitMs = 800;
+
+struct HoldKeyJob {
+    int32_t key = 0;
+    bool down = false;
+    bool ok = false;
+};
+
+void HoldKeyJobOnMain(void* user) {
+    auto* j = static_cast<HoldKeyJob*>(user);
+    if (!j || j->key <= 0) return;
+    j->ok = j->down ? BeginHoldOnMain(j->key) : EndHoldOnMain(j->key);
+}
+
+bool RunHoldKey(int32_t unityKey, bool down) {
+    HoldKeyJob job{};
+    job.key = unityKey;
+    job.down = down;
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        HoldKeyJobOnMain(&job);
+        return job.ok;
+    }
+    if (!x::runtime::main_thread::Ensure()) return false;
+    if (!x::runtime::main_thread::InvokeAndWait(&HoldKeyJobOnMain, &job, kHoldJobWaitMs,
+                                                 x::runtime::main_thread::JobPrio::High)) {
+        return false;
+    }
+    return job.ok;
+}
+
+bool ForceEndHold(int32_t unityKey) {
+    for (int i = 0; i < 3; ++i) {
+        if (RunHoldKey(unityKey, false)) return true;
+        Sleep(kHoldPollMs);
+    }
+    return false;
+}
+
+}  // namespace
+
+bool HoldUntil(int32_t unityKey, DWORD minHoldMs, DWORD maxHoldMs, HoldUntilFn until, void* user,
+               char* detail, size_t detailCap, DWORD afterUntilDrainMs) {
+    if (detail && detailCap) detail[0] = '\0';
+    if (unityKey <= 0) {
+        if (detail && detailCap) snprintf(detail, detailCap, "fail:bad_key");
+        return false;
+    }
+    if (!EnsureBound()) {
+        if (detail && detailCap) snprintf(detail, detailCap, "fail:unbound");
+        return false;
+    }
+    if (!x::runtime::main_thread::Ensure() && !x::runtime::main_thread::IsOnPumpThread()) {
+        if (detail && detailCap) snprintf(detail, detailCap, "fail:no_pump");
+        return false;
+    }
+
+    DWORD minMs = minHoldMs;
+    DWORD maxMs = maxHoldMs;
+    if (maxMs < minMs) maxMs = minMs;
+    if (minMs < 1) minMs = 1;
+
+    uint32_t pushes0 = 0, guards0 = 0;
+    Stats(&pushes0, nullptr, nullptr, &guards0, nullptr);
+
+    if (!RunHoldKey(unityKey, true)) {
+        if (detail && detailCap)
+            snprintf(detail, detailCap, "fail:down:%s", LastFail() ? LastFail() : "?");
+        x::runtime::LogW("UnityKbd", "HoldUntil down fail key=%d why=%s", unityKey, LastFail());
+        return false;
+    }
+
+    const DWORD t0 = GetTickCount();
+    bool untilHit = false;
+    bool untilBeforeMin = false;
+    const char* reason = "timeout";
+
+    // 主线程上勿 Sleep 整段（卡游戏）；最短脉冲后立刻松。
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        reason = "pump_inline";
+    } else {
+        while (static_cast<int>(GetTickCount() - t0) < static_cast<int>(maxMs)) {
+            const DWORD now = GetTickCount();
+            const DWORD elapsed = now - t0;
+            const bool stop = until && until(user);
+            if (stop) {
+                untilHit = true;
+                untilBeforeMin = elapsed < minMs;
+                // drain：至少撑满 minHold；until 后再额外 afterUntilDrainMs（Travel 进门）。
+                DWORD drainUntil = t0 + minMs;
+                const DWORD postUntil = now + afterUntilDrainMs;
+                if (postUntil > drainUntil) drainUntil = postUntil;
+                while (GetTickCount() < drainUntil) {
+                    Sleep(kHoldPollMs);
+                }
+                reason = untilBeforeMin ? "until_drain" : "until";
+                break;
+            }
+            if (elapsed >= maxMs) {
+                reason = "timeout";
+                break;
+            }
+            Sleep(kHoldPollMs);
+        }
+        if (!untilHit) reason = "timeout";
+    }
+
+    const DWORD heldMs = GetTickCount() - t0;
+    const bool upOk = ForceEndHold(unityKey);
+
+    uint32_t pushes1 = 0, guards1 = 0;
+    Stats(&pushes1, nullptr, nullptr, &guards1, nullptr);
+    x::runtime::LogI("UnityKbd",
+                     "HoldUntil key=%d held=%ums reason=%s until=%d drain=%d up=%d "
+                     "dPush=%u dGuard=%u guardOn=%d tick=%u host=%u",
+                     unityKey, static_cast<unsigned>(heldMs), reason, untilHit ? 1 : 0,
+                     untilBeforeMin ? 1 : 0, upOk ? 1 : 0, pushes1 - pushes0, guards1 - guards0,
+                     GuardActive() ? 1 : 0,
+                     static_cast<unsigned>(x::runtime::main_thread::InputFrameTickRuns()),
+                     static_cast<unsigned>(x::runtime::main_thread::InputFrameTickHost()));
+
+    if (detail && detailCap) {
+        snprintf(detail, detailCap, "%s held=%ums up=%d", reason, static_cast<unsigned>(heldMs),
+                 upOk ? 1 : 0);
+    }
+    return upOk;
+}
+
 void Stats(uint32_t* pushes, uint32_t* clobbers, uint32_t* directs, uint32_t* guards,
            uint32_t* hookCalls) {
     if (pushes) *pushes = gQueued;
@@ -647,11 +842,17 @@ bool GuardActive() { return gGuardSlotCount > 0; }
 
 bool Ready() { return gBindOk; }
 
+bool EnsureBound() { return Bind(); }
+
 const char* LastFail() { return gFail; }
 
 void Shutdown() {
     // 必须还原：vtable 槽指向本 DLL 内的 PreProcessEventHook，卸载后游戏下一个键盘事件
     // 就会调进已释放内存。先摘钩再松键，顺序不能反。
+    if (gInputTickOwned) {
+        x::runtime::main_thread::SetInputFrameTick(nullptr, nullptr);
+        gInputTickOwned = false;
+    }
     FnPreProcess orig = gOrigPreProcess.exchange(nullptr, std::memory_order_acq_rel);
     if (orig) {
         for (int i = 0; i < gGuardSlotCount; ++i) {
@@ -673,6 +874,7 @@ void Shutdown() {
     for (auto*& s : gGuardSlots) s = nullptr;
     gGuardSlotCount = 0;
     memset(gMask, 0, sizeof(gMask));
+    memset(gPrevDirectMask, 0, sizeof(gPrevDirectMask));
 }
 
 }  // namespace x::features::ports::unity_kbd

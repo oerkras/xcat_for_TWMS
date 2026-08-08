@@ -45,7 +45,9 @@
 
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/anchor_lamps.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
@@ -62,7 +64,10 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace x {
 namespace features {
@@ -74,6 +79,14 @@ constexpr size_t kOffActionBusyHint = 0x118;
 constexpr size_t kOffActionLayerAHint = 0x120;
 constexpr size_t kOffActionLayerBHint = 0x128;
 constexpr size_t kOffLayerDelay = 0x14;
+// ActionLayer：Prepare 把已缩放 delay 写入 int[]（Il2CppArray），再拷当前帧到 +0x14。
+// IDA User_PrepareActionLayer：`mov [layer+20h], arr` / `[arr+idx*4+20h]`；Slot14 每 tick ≈−30。
+constexpr size_t kOffLayerDelayArr = 0x20;
+// sum(delay') → ms：−30/tick × ~50Hz → ms = sum * 20 / 30 = sum * 2/3。
+constexpr DWORD DelaySumToMs(int sum) {
+    if (sum <= 0) return 0;
+    return static_cast<DWORD>((static_cast<uint64_t>(sum) * 2ull) / 3ull);
+}
 // WM.MyUser / SecondaryStat → x::ui::player SSOT（hash 防漂）
 // nSlow_ / tSlow_ —— 只读诊断，本模块不再写（见文件头 2026-08-04 说明）。
 constexpr size_t kOffSlowHint = 0x1BC;
@@ -1224,6 +1237,339 @@ void SetSkipPrepareDesired(bool on) {
 }
 
 bool IsSkipPrepareDesired() { return gSkipPrepareDesired.load(std::memory_order_acquire); }
+
+bool QueryActionBusy(void* localUser, int& outBusy) {
+    if (!localUser) return false;
+    // 幂等（gFieldOffResolved 早退）。worker 启动时已解析过，这里只兜住「worker 尚未起来」。
+    EnsureFieldOffsets();
+    if (!gFieldOffResolved.load(std::memory_order_acquire)) return false;
+    // 不复用 ReadI32：它把读故障也返回 0，而 0 在本语义下 = 忙，会变成永久禁止出刀。
+    int v = 0;
+    __try {
+        v = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(localUser) + gOffActionBusy);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    outBusy = v;
+    return true;
+}
+
+bool ClearActionBusy(void* localUser) {
+    if (!localUser) return false;
+    EnsureFieldOffsets();
+    if (!gFieldOffResolved.load(std::memory_order_acquire)) return false;
+    __try {
+        *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(localUser) + gOffActionBusy) = -1;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool QueryActionLayerDelayRemain(void* localUser, int& outRemain) {
+    if (!localUser) return false;
+    EnsureFieldOffsets();
+    if (!gFieldOffResolved.load(std::memory_order_acquire)) return false;
+    int best = 0;
+    bool any = false;
+    const size_t offs[] = {gOffActionLayerA, gOffActionLayerB};
+    for (size_t off : offs) {
+        void* layer = nullptr;
+        __try {
+            layer = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(localUser) + off);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            continue;
+        }
+        if (!LooksLikeHeapPtr(layer)) continue;
+        int rem = 0;
+        __try {
+            rem = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(layer) + kOffLayerDelay);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            continue;
+        }
+        if (rem > best) best = rem;
+        any = true;
+    }
+    if (!any) return false;
+    outRemain = best;
+    return true;
+}
+
+// ActionLayer+0x20 → Il2Cpp int[]：Prepare 写入的 delay'（已 ×100/ActionSpeed）。
+bool SumLayerDelayArr(void* layer, int& outSum) {
+    outSum = 0;
+    if (!LooksLikeHeapPtr(layer)) return false;
+    void* arr = nullptr;
+    __try {
+        arr = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(layer) + kOffLayerDelayArr);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!LooksLikeHeapPtr(arr)) return false;
+    const size_t offLen = x::runtime::il2cpp_container::OffArrayMaxLength();
+    const size_t offData = x::runtime::il2cpp_container::OffArrayData();
+    int n = 0;
+    __try {
+        n = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(arr) + offLen);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (n <= 0 || n > 256) return false;  // 动作帧数上限护栏
+    int sum = 0;
+    __try {
+        const int* data = reinterpret_cast<const int*>(reinterpret_cast<uint8_t*>(arr) + offData);
+        for (int i = 0; i < n; ++i) {
+            const int d = data[i];
+            if (d > 0 && d < 100000) sum += d;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (sum <= 0) return false;
+    outSum = sum;
+    return true;
+}
+
+bool QueryActionLayerDelaySum(void* localUser, int& outSum) {
+    if (!localUser) return false;
+    EnsureFieldOffsets();
+    if (!gFieldOffResolved.load(std::memory_order_acquire)) return false;
+    int best = 0;
+    bool any = false;
+    const size_t offs[] = {gOffActionLayerA, gOffActionLayerB};
+    for (size_t off : offs) {
+        void* layer = nullptr;
+        __try {
+            layer = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(localUser) + off);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            continue;
+        }
+        int sum = 0;
+        if (!SumLayerDelayArr(layer, sum)) continue;
+        if (sum > best) best = sum;
+        any = true;
+    }
+    if (!any) return false;
+    outSum = best;
+    return true;
+}
+
+// SecondaryStat 基速（Forced/装备 SetFrom 默认约 100）；Prepare 无 +1BC 覆盖时用它。
+constexpr size_t kOffSsActionSpeedBase = 0x80;
+
+bool QueryActionLayerAnimMs(void* localUser, DWORD& outMs) {
+    int sum = 0;
+    if (!QueryActionLayerDelaySum(localUser, sum)) return false;
+    const DWORD ms = DelaySumToMs(sum);
+    if (ms < 40u || ms > 5000u) return false;
+    outMs = ms;
+    return true;
+}
+
+DWORD DelayUnitsToAnimMs(int delaySum) { return DelaySumToMs(delaySum); }
+
+int ScaleDelayByActionSpeed(int baseSum, int actionSpeed) {
+    if (baseSum <= 0) return 0;
+    int sp = actionSpeed;
+    if (sp < 70) sp = 70;
+    if (sp > 140) sp = 140;
+    return static_cast<int>((static_cast<int64_t>(baseSum) * 100) / sp);
+}
+
+int UnscaleDelayByActionSpeed(int scaledSum, int actionSpeed) {
+    if (scaledSum <= 0) return 0;
+    int sp = actionSpeed;
+    if (sp < 70) sp = 70;
+    if (sp > 140) sp = 140;
+    return static_cast<int>((static_cast<int64_t>(scaledSum) * sp) / 100);
+}
+
+int AnimMsToBaseSum(DWORD animMs, int actionSpeed) {
+    // DelaySumToMs：ms = sum×2/3 → sum = ms×3/2；再按现速反解 base。
+    if (animMs < 40u || animMs > 5000u) return 0;
+    const int scaled =
+        static_cast<int>((static_cast<uint64_t>(animMs) * 3ull) / 2ull);
+    if (scaled <= 0) return 0;
+    return UnscaleDelayByActionSpeed(scaled, actionSpeed);
+}
+
+bool QueryActionSpeed(void* localUser, int& outSpeed) {
+    (void)localUser;
+    EnsureFieldOffsets();
+    void* ss = ResolveSecondaryStat();
+    if (!ss) {
+        outSpeed = 100;
+        return true;  // 无 SS 时按名义 100，避免挡离线估算
+    }
+    int speed = 100;
+    __try {
+        // Prepare：SS+0x1BC != 0 则覆盖名义 speed（字段名 nSlow_，语义上是 Prepare 的绝对 speed）。
+        const int ov = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ss) + gOffSlow);
+        if (ov != 0) {
+            speed = ov;
+        } else {
+            speed = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ss) + kOffSsActionSpeedBase);
+            if (speed == 0) speed = 100;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        outSpeed = 100;
+        return false;
+    }
+    if (speed < 70) speed = 70;
+    if (speed > 140) speed = 140;
+    outSpeed = speed;
+    return true;
+}
+
+namespace {
+
+std::once_flag gOfflineActionOnce;
+std::unordered_map<std::string, int> gActionBasePos;  // action → delay_sum_pos
+std::unordered_map<int, std::string> gSkillAction;     // skillId → action name
+bool gOfflineActionOk = false;
+
+void LoadOfflineActionTablesOnce() {
+    std::call_once(gOfflineActionOnce, [] {
+        std::string base = x::runtime::GetBinDir() ? x::runtime::GetBinDir() : "";
+        if (!base.empty() && base.back() != '\\' && base.back() != '/') base += '\\';
+        const std::string actPath = base + "dataservice\\action_delay_base.tsv";
+        const std::string skPath = base + "dataservice\\skill_action.tsv";
+        {
+            std::ifstream f(actPath, std::ios::binary);
+            if (!f) {
+                x::runtime::LogW("AttackAccel", "action_delay_base.tsv missing path=%s",
+                                 actPath.c_str());
+            } else {
+                std::string line;
+                size_t n = 0;
+                while (std::getline(f, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    if (line.empty() || line[0] == '#') continue;
+                    // action \t frames \t delay_sum_pos \t delay_sum_all
+                    const size_t t0 = line.find('\t');
+                    if (t0 == std::string::npos) continue;
+                    const size_t t1 = line.find('\t', t0 + 1);
+                    if (t1 == std::string::npos) continue;
+                    const size_t t2 = line.find('\t', t1 + 1);
+                    if (t2 == std::string::npos) continue;
+                    const std::string act = line.substr(0, t0);
+                    const int spos = atoi(line.c_str() + t1 + 1);
+                    if (act.empty() || spos <= 0) continue;
+                    gActionBasePos[act] = spos;
+                    ++n;
+                }
+                x::runtime::LogI("AttackAccel", "action_delay_base loaded n=%zu path=%s", n,
+                                 actPath.c_str());
+            }
+        }
+        {
+            std::ifstream f(skPath, std::ios::binary);
+            if (!f) {
+                x::runtime::LogW("AttackAccel", "skill_action.tsv missing path=%s", skPath.c_str());
+            } else {
+                std::string line;
+                size_t n = 0;
+                while (std::getline(f, line)) {
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    if (line.empty() || line[0] == '#') continue;
+                    const size_t t0 = line.find('\t');
+                    if (t0 == std::string::npos) continue;
+                    const int sid = atoi(line.c_str());
+                    std::string act = line.substr(t0 + 1);
+                    const size_t t1 = act.find('\t');
+                    if (t1 != std::string::npos) act.resize(t1);
+                    if (sid <= 0 || act.empty()) continue;
+                    gSkillAction[sid] = act;
+                    ++n;
+                }
+                x::runtime::LogI("AttackAccel", "skill_action loaded n=%zu path=%s", n,
+                                 skPath.c_str());
+            }
+        }
+        gOfflineActionOk = !gActionBasePos.empty();
+    });
+}
+
+bool AnimMsFromBaseSum(void* localUser, int baseSum, DWORD& outMs) {
+    if (baseSum <= 0) return false;
+    int speed = 100;
+    (void)QueryActionSpeed(localUser, speed);
+    const int scaled = ScaleDelayByActionSpeed(baseSum, speed);
+    const DWORD ms = DelaySumToMs(scaled);
+    if (ms < 40u || ms > 5000u) return false;
+    outMs = ms;
+    return true;
+}
+
+}  // namespace
+
+bool LookupOfflineSkillBaseSum(int skillId, int& outBaseSum);
+bool LookupOfflineSkillAnimMs(void* localUser, int skillId, DWORD& outMs);
+bool LookupOfflineActionAnimMs(void* localUser, const char* actionName, DWORD& outMs);
+
+bool LookupOfflineSkillAnimMs(void* localUser, int skillId, DWORD& outMs) {
+    if (skillId <= 0) return false;
+    int baseSum = 0;
+    if (!LookupOfflineSkillBaseSum(skillId, baseSum)) return false;
+    return AnimMsFromBaseSum(localUser, baseSum, outMs);
+}
+
+bool LookupOfflineSkillBaseSum(int skillId, int& outBaseSum) {
+    if (skillId <= 0) return false;
+    LoadOfflineActionTablesOnce();
+    if (!gOfflineActionOk) return false;
+    const auto sit = gSkillAction.find(skillId);
+    if (sit == gSkillAction.end()) return false;
+    const auto ait = gActionBasePos.find(sit->second);
+    if (ait == gActionBasePos.end()) return false;
+    outBaseSum = ait->second;
+    return true;
+}
+
+bool LookupOfflineActionAnimMs(void* localUser, const char* actionName, DWORD& outMs) {
+    if (!actionName || !actionName[0]) return false;
+    LoadOfflineActionTablesOnce();
+    if (!gOfflineActionOk) return false;
+    const auto it = gActionBasePos.find(actionName);
+    if (it == gActionBasePos.end()) return false;
+    return AnimMsFromBaseSum(localUser, it->second, outMs);
+}
+
+bool QueryAttackSpeedDegree(void* localUser, int& outDegree) {
+    if (!localUser) return false;
+    EnsureFieldOffsets();
+    int wpn = 6;  // 无武器默认档（P0b / 战斗点自洽）
+    __try {
+        wpn = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(localUser) + kOffLuWeaponDegree);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    int boost = 0;
+    if (gFieldOffResolved.load(std::memory_order_acquire)) {
+        void* ss = ResolveSecondaryStat();
+        if (ss) {
+            __try {
+                boost = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ss) + gOffBoost);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                boost = 0;
+            }
+        }
+    }
+    int deg = wpn + boost;
+    if (deg < 2) deg = 2;
+    if (deg > 10) deg = 10;
+    outDegree = deg;
+    return true;
+}
+
+DWORD EstimateDamageDelayScaleMs(void* localUser, DWORD baseMsAtDegree6) {
+    const DWORD base = baseMsAtDegree6 ? baseMsAtDegree6 : 120u;
+    int deg = 6;
+    if (!QueryAttackSpeedDegree(localUser, deg)) return base;
+    // degree=6 → ×16/16；degree=2 → ×12/16；degree=10 → ×20/16（相对缩放，非官方绝对 ms）
+    const DWORD ms = static_cast<DWORD>((static_cast<uint64_t>(base) * (deg + 10)) / 16u);
+    return ms < 40u ? 40u : ms;
+}
 
 }  // namespace attack_accel
 }  // namespace features

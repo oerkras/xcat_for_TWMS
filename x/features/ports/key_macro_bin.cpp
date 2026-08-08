@@ -1,7 +1,7 @@
 // Classic TWMS — KeyMacroAnalyzer 只读 BIN（SendInput vs Raw 句柄）。
 // 2026-08-06 BIN：Put 被 RawInputHandler 直接 call（非 MethodInfo）→ MI 换槽捕不到。
 // 主路径：解析单例 + 帧末读 hunt/keyboards（数据面）；MI 钩仅作辅（可能仍 0 hit）。
-// 关：XCAT_KEYMACRO_BIN=0。
+// 默认关；排障设 XCAT_KEYMACRO_BIN=1（日志巨大，勿日常开）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -127,8 +127,8 @@ void LogLine(const char* fmt, ...) {
 bool EnvOn() {
     char buf[8]{};
     const DWORD n = GetEnvironmentVariableA("XCAT_KEYMACRO_BIN", buf, sizeof(buf));
-    if (n == 0) return true;
-    return !(buf[0] == '0' && buf[1] == '\0');
+    if (n == 0) return false;  // 缺省关（采证已完成；开着日志巨大）
+    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
 }
 
 intptr_t RdHandle(void* self, size_t off) {
@@ -466,7 +466,7 @@ void Init() {
     if (gInited.exchange(true)) return;
     if (!EnvOn()) {
         gEnabled.store(false);
-        x::runtime::LogI("KeyMacroBin", "XCAT_KEYMACRO_BIN=0 — off");
+        x::runtime::LogI("KeyMacroBin", "off (set XCAT_KEYMACRO_BIN=1 to enable)");
         return;
     }
     gEnabled.store(true);

@@ -298,6 +298,9 @@ void PumpCleanRelaunch(LaunchUiState& ui, uint64_t now) {
             g.launchBusy = false;
             g.runtime.restartInFlight = false;
             g.mode = UiMode::Starting;
+            // BeginCleanRelaunch 已 ClearSessionTrack（await=0）。必须重新 NoteLaunch，
+            // 否则 Backoff 到期时进程已手动开起但尚未进图 → RecoveryRetry 误杀活进程（c73656）。
+            NoteLaunchStarted(0);
             xcat::log::Info("Watchdog", "clean relaunch: attach-watch waiting for manual launch");
         } else {
             if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto) {
@@ -747,7 +750,10 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     input.mapId = input.mapIdValid ? st.mapId : 0;
 
     // 服务器踢线/断线边沿 → hard-fail → 干净重拉（不依赖「自动打怪」）。
-    // soft_login 试连观察窗内推迟；成功上升沿吞掉本轮 disconnectSeq，避免 hold 结束后误重拉。
+    // 契约：软重连已武装并进入观察窗时，守护不得因踢线/无经验/心跳等重拉；
+    // 必须等 softLoginResult==2（路径完全失败）或进程已死，才允许干净重拉。
+    // 成功上升沿吞掉本轮 disconnectSeq，避免 hold 结束后误重拉。
+    bool softHoldBlocksRelaunch = false;
     if (g.sessionArmed && stFresh) {
         const uint32_t softResult = (st.version >= 8u) ? st.softLoginResult : 0u;
         g.softLoginHoldLatched = (st.version >= 8u && st.softLoginHold != 0u);
@@ -759,6 +765,15 @@ void Tick(LaunchUiState& ui, bool appExiting) {
                             g.lastConsumedDisconnectSeq, st.disconnectSeq);
             g.lastConsumedDisconnectSeq = st.disconnectSeq;
             g.lastLoggedDisconnectSeq = st.disconnectSeq;
+        }
+        // 软路径完全失败：显式放行踢线硬失败（不依赖 hold 已清的竞态）。
+        if (softResult == 2u && g.lastSeenSoftLoginResult != 2u) {
+            input.reloginHardFailed = true;
+            input.hardFailCode = xcat::kHardFailServerKick;
+            xcat::log::Warn(
+                "Watchdog",
+                "soft_login completely failed — allow guardian clean relaunch seq=%u",
+                st.disconnectSeq);
         }
         g.lastSeenSoftLoginResult = softResult;
         if (!g.haveDisconnectBaseline) {
@@ -773,7 +788,8 @@ void Tick(LaunchUiState& ui, bool appExiting) {
                         "soft_login hold — defer kick relaunch seq=%u state=%d err=%d",
                         st.disconnectSeq, st.sessionState, st.pendingErrorCode);
                 }
-            } else {
+            } else if (!input.reloginHardFailed) {
+                // 软未 hold（未武装/未接管）：立即硬失败。已在 result=2 上升沿置位则勿重复刷日志。
                 input.reloginHardFailed = true;
                 input.hardFailCode = xcat::kHardFailServerKick;
                 if (g.lastLoggedDisconnectSeq != st.disconnectSeq) {
@@ -789,7 +805,10 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     }
     // soft hold 期间心跳常不新鲜：勿因 !stFresh 清 latch，否则 ProcessDead 诊断 Warn 丢。
     // latch 只在：新鲜 SHM 写 hold=0/1、ProcessDead 打过日志、ClearSessionTrack。
+    // 进程仍在时：latch/hold 挡住一切守护干净重拉（含无经验），直到软路径失败或成功。
+    softHoldBlocksRelaunch = processAlive && g.softLoginHoldLatched;
 
+    const guardian_policy::RuntimeState runtimeBefore = g.runtime;
     const guardian_policy::Decision decision = guardian_policy::Evaluate(g.runtime, input);
     g.runtime = decision.next;
     g.gate = guardian_policy::GateLabel(decision.gate);
@@ -810,6 +829,7 @@ void Tick(LaunchUiState& ui, bool appExiting) {
                 "process-dead during soft_login hold (Classic already gone — not kick-kill; "
                 "soft attempt aborted)");
             g.softLoginHoldLatched = false;
+            softHoldBlocksRelaunch = false;
         }
         xcat::log::Info("Watchdog", "mode %s->%s gate=%s action=%s reason=%s stale=%u",
                         guardian_policy::ModeLabel(decision.previousMode),
@@ -836,6 +856,23 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     if (decision.action != guardian_policy::Action::Restart) return;
     if (!scheduleActive) return;
     if (RelaunchInFlight()) return;
+    if (softHoldBlocksRelaunch) {
+        // 丢弃本拍 Restart 状态推进，避免 restartInFlight 空转却不杀进程。
+        g.runtime = runtimeBefore;
+        g.gate = guardian_policy::GateLabel(guardian_policy::Gate::None);
+        g.watchdogMode = ToWatchdogUi(g.runtime.mode, true);
+        g.combatHold = false;
+        g.combatHoldHardLimitSec = 0;
+        static uint64_t sLastSoftBlockLog = 0;
+        if (sLastSoftBlockLog == 0 || now - sLastSoftBlockLog >= 5000u) {
+            sLastSoftBlockLog = now;
+            xcat::log::Info(
+                "Watchdog",
+                "soft_login hold — defer guardian relaunch reason=%s (wait soft fail/success)",
+                decision.restartReason ? decision.restartReason : "?");
+        }
+        return;
+    }
 
     char line[192]{};
     snprintf(line, sizeof(line), "[Watchdog] 干净重拉：%s (stale=%us)",

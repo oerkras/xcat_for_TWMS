@@ -547,7 +547,7 @@ void Init() {
     ports::input::Init();
     x::ui::player::Init();
     runtime::LogI("TimedKeys",
-                  "init (UserLocal.OnKey pulse; combat hold 1000ms pause-only, no teleport lock)");
+                  "init (unity_kbd pulse; combat hold 1000ms pause-only, no teleport lock)");
 }
 
 void Shutdown() {

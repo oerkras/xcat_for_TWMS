@@ -10,6 +10,7 @@
 #include "il2cpp_method.h"
 #include "il2cpp_shape.h"
 #include "log.h"
+#include "managed_main.h"
 
 #include <atomic>
 #include <cstdio>
@@ -78,6 +79,8 @@ std::atomic<JobFn> gAuxFrameTick{nullptr};
 std::atomic<void*> gAuxFrameTickUser{nullptr};
 std::atomic<JobFn> gBinFrameTick{nullptr};
 std::atomic<void*> gBinFrameTickUser{nullptr};
+std::atomic<JobFn> gLieFrameTick{nullptr};
+std::atomic<void*> gLieFrameTickUser{nullptr};
 std::atomic<JobFn> gPrePhysicsFrameTick{nullptr};
 std::atomic<void*> gPrePhysicsFrameTickUser{nullptr};
 std::atomic<JobFn> gPostPhysicsFrameTick{nullptr};
@@ -103,6 +106,10 @@ void NotePumpThread() {
 // If Canvas.SendWill is not ticking (login/load freeze), refuse to park jobs for
 // the full timeout — otherwise N workers fill kQueueCap and log "queue full".
 constexpr DWORD kPumpIdleFailMs = 2000;
+// InterStage / leave-map（transit 且已解 login-freeze）：更快拒排队，别占满队等 2s。
+constexpr DWORD kTransitIdleFailMs = 400;
+// 同窗 InvokeAndWait 等待上限（auto_enter 仍在 freeze=1 时不走此帽）。
+constexpr DWORD kTransitInvokeCapMs = 500;
 // Per-tick Drain 上限；面板/ini 可调，默认抽干整队（=kQueueCap）。
 std::atomic<int> gDrainBudget{kQueueCap};
 // Queue depth at/above which IsCongested() tells producers to back off.
@@ -297,9 +304,16 @@ void RunOne(QueuedJob& j) {
     if (j.done) SetEvent(j.done);
 }
 
+bool IsTransitQuiesce() {
+    // 进图后卸图/InterStage：freeze 已散、transit 仍挡。登录大厅 freeze=1 不走此闸（auto_enter）。
+    return managed_main::IsMapTransitBlocked() && !managed_main::IsLoginFrozen();
+}
+
 // Pop up to maxJobs (higher JobPrio first; same prio → earlier enqueue). Leftovers next tick.
+// InterStage quiesce：本拍只抽 High，避免 Low/Normal FindAll 类活拖黑屏。
 int DrainQueueBudget(int maxJobs) {
     if (maxJobs <= 0) return 0;
+    const bool quiesce = IsTransitQuiesce();
     EnsureCs();
     int ran = 0;
     for (; ran < maxJobs;) {
@@ -309,6 +323,7 @@ int DrainQueueBudget(int maxJobs) {
         int best = -1;
         for (int i = 0; i < kQueueCap; ++i) {
             if (!gQueue[i].slotUsed) continue;
+            if (quiesce && gQueue[i].prio < static_cast<int>(JobPrio::High)) continue;
             if (best < 0) {
                 best = i;
                 continue;
@@ -342,8 +357,8 @@ int DrainQueueBudget(int maxJobs) {
         const DWORD now = GetTickCount();
         if (now - gLastBudgetLogMs.load() >= 3000) {
             gLastBudgetLogMs.store(now);
-            x::runtime::LogW("MainPump", "drain leftover — deferred to next tick (budget=%d)",
-                             gDrainBudget.load(std::memory_order_relaxed));
+            x::runtime::LogW("MainPump", "drain leftover — deferred to next tick (budget=%d quiesce=%d)",
+                             gDrainBudget.load(std::memory_order_relaxed), quiesce ? 1 : 0);
         }
     }
     return ran;
@@ -365,6 +380,8 @@ void RunFrameTick() {
                     gAuxFrameTickUser.load(std::memory_order_acquire), "aux");
     RunOneFrameTick(gBinFrameTick.load(std::memory_order_acquire),
                     gBinFrameTickUser.load(std::memory_order_acquire), "bin");
+    RunOneFrameTick(gLieFrameTick.load(std::memory_order_acquire),
+                    gLieFrameTickUser.load(std::memory_order_acquire), "lie");
 }
 
 void NoteHeartbeat() {
@@ -693,6 +710,16 @@ void SetBinFrameTick(JobFn fn, void* user) {
     gBinFrameTick.store(fn, std::memory_order_release);
 }
 
+void SetLieFrameTick(JobFn fn, void* user) {
+    if (!fn) {
+        gLieFrameTick.store(nullptr, std::memory_order_release);
+        gLieFrameTickUser.store(nullptr, std::memory_order_release);
+        return;
+    }
+    gLieFrameTickUser.store(user, std::memory_order_release);
+    gLieFrameTick.store(fn, std::memory_order_release);
+}
+
 void SetPrePhysicsFrameTick(JobFn fn, void* user) {
     if (!fn) {
         gPrePhysicsFrameTick.store(nullptr, std::memory_order_release);
@@ -738,12 +765,16 @@ bool IsOnPumpThread() {
     return tid != 0 && tid == GetCurrentThreadId();
 }
 
+DWORD PumpThreadId() { return gPumpTid.load(std::memory_order_acquire); }
+
 int QueuedJobCount() {
     const int n = gQueuedCount.load(std::memory_order_relaxed);
     return n < 0 ? 0 : n;
 }
 
 bool IsCongested() {
+    // InterStage / 卸图：让打怪/吸物等认背压直接让路（登录 freeze 期不触发，护 auto_enter）。
+    if (IsTransitQuiesce()) return true;
     const int th = gCongestionThreshold.load(std::memory_order_relaxed);
     if (th <= 0) return false;  // 0 = backpressure off
     return gQueuedCount.load(std::memory_order_relaxed) >= th;
@@ -789,14 +820,33 @@ bool InvokeAndWait(JobFn fn, void* user, DWORD timeoutMs, JobPrio prio) {
     if (!Ensure()) return false;
     if (!gPumpInstalled.load()) return false;
 
+    const bool transit = managed_main::IsMapTransitBlocked();
+    const bool freeze = managed_main::IsLoginFrozen();
+    const bool quiesce = transit && !freeze;  // = IsTransitQuiesce；此处内联免跨层歧义
+
+    // 玩法 Low（吸物等）：冻屏/卸图一律拒排，别占 kQueueCap。
+    if (prio == JobPrio::Low && (transit || freeze)) {
+        FailLogThrottled("reject Low (transit/freeze)");
+        return false;
+    }
+    // InterStage：Normal 也拒（出刀/重绑）；High 留给换频/系统短探。
+    if (quiesce && prio != JobPrio::High) {
+        FailLogThrottled("reject non-High (interstage quiesce)");
+        return false;
+    }
+
     const DWORD now = GetTickCount();
     const DWORD lastHb = gLastHeartbeatMs.load(std::memory_order_acquire);
+    const DWORD idleLimit = quiesce ? kTransitIdleFailMs : kPumpIdleFailMs;
     // 从未真实 tick（含刚装泵）：禁止排队，避免 5e3768 式 job timeout / 冻死。
-    if (!lastHb || now - lastHb > kPumpIdleFailMs) {
-        FailLogThrottled(lastHb ? "pump idle (no drain-host tick — load/freeze)"
+    if (!lastHb || now - lastHb > idleLimit) {
+        FailLogThrottled(lastHb ? (quiesce ? "pump idle (interstage/load — fast fail)"
+                                           : "pump idle (no drain-host tick — load/freeze)")
                                 : "pump not ticking yet (wait first drain-host tick)");
         return false;
     }
+
+    if (quiesce && timeoutMs > kTransitInvokeCapMs) timeoutMs = kTransitInvokeCapMs;
 
     HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!done) return false;
@@ -836,7 +886,7 @@ bool InvokeAndWait(JobFn fn, void* user, DWORD timeoutMs, JobPrio prio) {
         LeaveCriticalSection(&gCs);
         if (!stillQueued) (void)WaitForSingleObject(done, 500);
         CloseHandle(done);
-        FailLogThrottled("job timeout");
+        FailLogThrottled(quiesce ? "job timeout (interstage)" : "job timeout");
         return false;
     }
     CloseHandle(done);
@@ -850,6 +900,8 @@ void Shutdown() {
     gAuxFrameTickUser.store(nullptr, std::memory_order_release);
     gBinFrameTick.store(nullptr, std::memory_order_release);
     gBinFrameTickUser.store(nullptr, std::memory_order_release);
+    gLieFrameTick.store(nullptr, std::memory_order_release);
+    gLieFrameTickUser.store(nullptr, std::memory_order_release);
     gPrePhysicsFrameTick.store(nullptr, std::memory_order_release);
     gPrePhysicsFrameTickUser.store(nullptr, std::memory_order_release);
     gPostPhysicsFrameTick.store(nullptr, std::memory_order_release);

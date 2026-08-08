@@ -5,7 +5,9 @@
 #include "travel_port.h"
 
 #include "fly_fh_ban.h"
+#include "foothold_path.h"
 #include "teleport_port.h"
+#include "unity_kbd_port.h"
 #include "world_port.h"
 #include "../invuln/invuln.h"
 #include "../simple_combat/heli_rotor.h"
@@ -15,8 +17,10 @@
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_network.h"
 #include "../../runtime/il2cpp_shape.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
+#include "../../runtime/main_thread_pump.h"
 #include "../../runtime/anchor_lamps.h"
 #include "../../ui/player_vitals.h"
 #include "input_port.h"
@@ -27,6 +31,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -61,9 +66,16 @@ constexpr uint32_t kRvaOutPacketCreate = 0x1CC63D0;  // remounted 2026-08-06 Out
 constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CD2AE0;  // remounted 2026-08-06 Encode1(byte)
 constexpr uint32_t kRvaOutPacketEncodeStr = 0x1CD31F0;  // remounted 2026-08-06 EncodeStr
 constexpr uint32_t kRvaNmSend = 0x1CC7FE0;  // remounted 2026-08-06 Session.SendPacket bool
-// CMS ClientPacket.UserPortalTeleportRequest = 114 · wire 0x0072
+constexpr uint32_t kRvaSendOutPacket = 0x1CC64D0;  // Network.SendOutPacket → 直调 SendPacket RVA
+// CMS ClientPacket.UserPortalTeleportRequest = 114 · wire 0x0072（Rpc 伪造仍用 enum）
 constexpr int kClientPortalTeleport = 114;
 constexpr uint16_t kWirePortalTeleport = 0x0072;
+// CheckMovePortal 真出站（运行时 dump 种子实算 · imagebase 无关 RVA）：
+//   D0D0 主路径（FindMovePortal 成功）：Create(u16) ← word_seed+0xFFFFE527 → 0x0138
+//   备路 Create：word_seed+0x5CF9 → 0x0116
+// StickUp 产品只 unity_kbd ↑；直调 CheckMovePortal 贴门后易断线（BIN 2026-08-08）。
+constexpr uint16_t kWirePortalMove = 0x0138;
+constexpr uint16_t kWirePortalMoveAlt = 0x0116;
 
 constexpr size_t kOffCachedPtr = 0x10;
 #define kOffPmPortalList (x::runtime::il2cpp_mapdata::OffPmPortalList())
@@ -306,7 +318,6 @@ FnObjName gObjName = nullptr;
 FnStrNew gStrNew = nullptr;
 
 void* gPmKlass = nullptr;
-void* gPmType = nullptr;
 void* gPm = nullptr;
 void* gWmType = nullptr;
 void* gWm = nullptr;
@@ -317,39 +328,175 @@ void* gNmKlass = nullptr;      // Session?Send MethodInfo??
 void* gNmType = nullptr;       // legacy
 void* gNm = nullptr;           // Session*
 void* gFacadeKlass = nullptr;
-void* gFacadeType = nullptr;
 void* gOutPacketKlass = nullptr;
 #define kOffNmSession (x::runtime::il2cpp_network::OffNmSession())
 DWORD gLastRebindMs = 0;
 
 // ??????????+ ?? CheckMovePortal????
-std::atomic<int> gFireMode{static_cast<int>(FireMode::DirectEnter)};
+std::atomic<int> gFireMode{static_cast<int>(FireMode::StickUp)};
 // 已站门判定：无 rect 时用门坐标近距；有 rect 用 Strict 触发框。
 constexpr float kStandYTol = 12.f;
 constexpr float kStickNearR = 72.f;
 // Impact 贴门：对齐 F5 旋翼滑翔（heli Cruise/Station → ImpactSetVelocity）。
-// 速度倍率共用 ImGui「滑翔速度」→ heli::SpeedScale（simpleCombatFlySpeedPct）。
-// 到位门对齐 HeliStationOk：进触发框后先 Station 收速，再 CheckMove（禁止掠过即火）。
-constexpr DWORD kImpactStickMaxMs = 10000;
+// 全程面板「滑翔速度」倍率（与打怪同款）；接近只切 Station，不压倍率。
+// Station 带滞后：进圈锁住，飘出须超过 enter+slack 才回 Cruise（防档位抽风）。
+// 到位：Station → hold（停 Move + 卸 Travel ban 落地）→ ↑（禁止掠过即火）。
+constexpr DWORD kImpactStickMaxMs = 14000;  // 含 settle + hold + pre-fire land
 constexpr DWORD kImpactStickPollMs = 16;  // 对齐 combat tick；heli 内部 ~90ms 发射闸
-constexpr float kHeliCruiseRadius = 140.f;  // 与 simple_combat PublishHeliSetpoint 同阈值
+constexpr float kHeliCruiseRadius = 140.f;  // 与 simple_combat PublishHeliSetpoint 同口径
+// Station 滞后：进入 ≤enter；退出须 >enter+slack（对齐打怪「一次运动到站」）。
+constexpr float kTravelStationEnterR = kHeliCruiseRadius;
+constexpr float kTravelStationExitSlack = 80.f;
 constexpr float kPortalStationDx = 40.f;    // = simple_combat::kHeliStationDx
 constexpr float kPortalStationDy = 15.f;    // = simple_combat::kHeliStationDy
-constexpr float kPortalSettleSpeed = 180.f; // 进门前合速上限（px/s）；过高易 205
-constexpr DWORD kPortalSettleMaxMs = 1200;  // 进框后最多收这么久，超时仍进门防卡死
+// 贴门瞄准相对站立点再抬高（AbsPos：更大 Y = 更高，远离掉落方向）。
+// BIN：aimY-= 会把点压到台下 → 无限掉（east01 aim -389 / ap -735）。
+constexpr float kPortalAimLiftY = 24.f;
+constexpr float kPortalSettleSpeed = 80.f;  // 近站合速（进 hold 前还要过竖速/贴高）
+constexpr DWORD kPortalSettleMaxMs = 2500;  // 进框后最多等多久；超时仍须 bleed 才卸推
+// 进 hold 前「门边刹住」：高门 BIN 常带 v.y=64~125 就 Disarm → 掉出框 abort×2~3。
+constexpr float kPortalHoldEnterVy = 35.f;  // 竖速硬门槛（对齐发门合速）
+constexpr float kPortalHoldEnterDy = 20.f;  // |ap.y-aimY| 贴高再卸推
+// hold 中短暂出框宽限；未挂上 FH 时另用 nearAim 保海岸（BIN 50000 west00：
+// hold≈500ms 出框 → abort → 10X Station 甩到 vy≈500 循环 → NOT_STOOD）。
+constexpr DWORD kPortalHoldLeaveGraceMs = 800;
+constexpr float kPortalHoldNearAimDx = 80.f;
+constexpr float kPortalHoldNearAimDy = 160.f;
+constexpr float kPortalHoldAbortDist = 220.f;
+// abort 后重贴软速（相对面板倍率）；避免 10X 怼门弹飞。
+constexpr float kPortalStickSoftScale = 2.f;
+// 高速贴门停推：F6 同序 —— Disarm 后、fhBan 仍 ON 时写 (0,0)；再卸 ban 落地。
+// 进门前再写 SetImpactNext(0,0)（prefire）在 BIN 01:44 仍黑屏，默认关。
+// 站稳真源 = AbsPos 连续静止 + 合速门槛；漂移/滑步 → 整段重等。
+// BIN 02:06：10X 贴门 + holdZero 后首枪 ↑ 仍黑屏；拉长静立再 ↑。
+constexpr DWORD kPortalReadyStableMs = 800;
+constexpr float kPortalReadyApDrift = 8.f;   // 相对锚点 |ΔAp|
+constexpr float kPortalReadyApStep = 4.f;    // 相邻采样 |ΔAp|（滑步）
+// 卸 ban 后挂不上 FH：失败上限（与「就绪即走」解耦）。
+constexpr DWORD kPortalLandTimeoutMs = 4000;
+// 就绪后再抽一拍确认仍站稳（含 Ap 未漂）。
+constexpr DWORD kPortalPreFireLandMs = 250;
+// 发门合速辅助门槛（px/s）；主门仍是 Ap 静止。
+constexpr float kPortalFireSpeed = 18.f;
+// 发门前 |ap.x-portal.x|：Snap 内缩曾把 aim 挪离门心（BIN 100040000 east00：
+// portal=1120 aim=1096 ap=1090 → 站门左假火）。瞄准锁门 X；开火也卡门 X。
+constexpr float kPortalFireMaxDx = 16.f;
 // FindMovePortal 触发框松弛（pre-fire / PointInPortalRect）
 constexpr float kPortalRectSlop = 12.f;
 std::atomic<bool> gCaptureOn{false};
 std::atomic<bool> gCaptureInstalled{false};
 MethodInfoHead* gMiSend = nullptr;
-void* gOrigSend = nullptr;
+void* gOrigSend = nullptr;  // Abs trampoline（直调 SendPacket 体）
 MethodInfoHead* gMiCheckMove = nullptr;
 MethodInfoHead* gMiOutCreate = nullptr;
 MethodInfoHead* gMiEncode1 = nullptr;
 MethodInfoHead* gMiEncodeStr = nullptr;
+
+// Abs hook：SendOutPacket 直调 SendPacket RVA，MI 补丁捕不到 ↑ 进门包。
+struct SendAbsHook {
+    void* target = nullptr;
+    void* trampoline = nullptr;
+    uint8_t saved[32]{};
+    size_t stolen = 0;
+    bool active = false;
+};
+SendAbsHook gSendAbs{};
+// push rbp/rsi/rdi; sub rsp,0A0h; lea rbp,[rsp+80h] = 15B（remounted 2026-08-06）
+constexpr uint8_t kSendSig[15] = {0x55, 0x56, 0x57, 0x48, 0x83, 0xEC, 0xA0,
+                                  0x48, 0x8D, 0xAC, 0x24, 0x80, 0x00, 0x00, 0x00};
+constexpr size_t kSendSteal = 15;
+
 std::mutex gLastCapMu;
 std::string gLastCapHex;
 uint16_t gLastCapId = 0;
+DWORD gLastCapTick = 0;
+// capture 窗内全部出站 id（诊断白枪：有没有 0x138）
+constexpr size_t kCapIdRing = 24;
+uint16_t gCapIdRing[kCapIdRing]{};
+size_t gCapIdN = 0;
+
+void ClearLastCap() {
+    std::lock_guard<std::mutex> lock(gLastCapMu);
+    gLastCapHex.clear();
+    gLastCapId = 0;
+    gLastCapTick = 0;
+    gCapIdN = 0;
+}
+
+bool IsPortalWireId(uint16_t id) {
+    return id == kWirePortalMove || id == kWirePortalMoveAlt || id == kWirePortalTeleport ||
+           id == (uint16_t)kClientPortalTeleport || id == 0x0071;
+}
+
+// ↑ 后短等，看有没有打出传送 C2S（首枪假火：吞键 vs CheckMovePortal 未发 0x138）。
+void LogUpPortalCap(const char* tag) {
+    uint16_t id = 0;
+    std::string hex;
+    DWORD age = 0;
+    char ring[160]{};
+    {
+        std::lock_guard<std::mutex> lock(gLastCapMu);
+        id = gLastCapId;
+        hex = gLastCapHex;
+        if (gLastCapTick) age = GetTickCount() - gLastCapTick;
+        int nhex = 0;
+        for (size_t i = 0; i < gCapIdN && nhex + 8 < (int)sizeof(ring); ++i)
+            nhex += snprintf(ring + nhex, sizeof(ring) - (size_t)nhex, "%s0x%04X",
+                             i ? "," : "", (unsigned)gCapIdRing[i]);
+    }
+    if (id != 0) {
+        x::runtime::LogI("Travel", "Up C2S %s id=0x%04X age=%ums hex=%s all=[%s]",
+                         tag ? tag : "?", (unsigned)id, (unsigned)age, hex.c_str(), ring);
+    } else {
+        x::runtime::LogW("Travel",
+                         "Up C2S NONE %s (无 0x138/0x116；窗内 all=[%s])",
+                         tag ? tag : "?", ring[0] ? ring : "-");
+    }
+}
+
+void WriteAbsJmp(void* at, void* to) {
+    auto* p = reinterpret_cast<uint8_t*>(at);
+    p[0] = 0x48;
+    p[1] = 0xB8;
+    *reinterpret_cast<uint64_t*>(p + 2) = reinterpret_cast<uint64_t>(to);
+    p[10] = 0xFF;
+    p[11] = 0xE0;
+}
+
+bool InstallSendAbs(void* target, void* hook) {
+    if (gSendAbs.active) return true;
+    if (!target || !hook) return false;
+    for (size_t i = 0; i < sizeof(kSendSig); ++i) {
+        if (reinterpret_cast<uint8_t*>(target)[i] != kSendSig[i]) {
+            x::runtime::LogW("Travel", "Send Abs refuse: sig mismatch @%p b0=%02X", target,
+                             reinterpret_cast<uint8_t*>(target)[0]);
+            return false;
+        }
+    }
+    void* tramp =
+        VirtualAlloc(nullptr, kSendSteal + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return false;
+    memcpy(gSendAbs.saved, target, kSendSteal);
+    memcpy(tramp, target, kSendSteal);
+    WriteAbsJmp(reinterpret_cast<uint8_t*>(tramp) + kSendSteal,
+                reinterpret_cast<uint8_t*>(target) + kSendSteal);
+    gOrigSend = tramp;
+    DWORD old = 0;
+    if (!VirtualProtect(target, kSendSteal, PAGE_EXECUTE_READWRITE, &old)) {
+        VirtualFree(tramp, 0, MEM_RELEASE);
+        gOrigSend = nullptr;
+        return false;
+    }
+    WriteAbsJmp(target, hook);
+    for (size_t i = 12; i < kSendSteal; ++i) reinterpret_cast<uint8_t*>(target)[i] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), target, kSendSteal);
+    VirtualProtect(target, kSendSteal, old, &old);
+    gSendAbs.target = target;
+    gSendAbs.trampoline = tramp;
+    gSendAbs.stolen = kSendSteal;
+    gSendAbs.active = true;
+    return true;
+}
 
 template <typename T>
 T AtRva(uint32_t rva) {
@@ -418,22 +565,57 @@ void DumpOutPacket(void* pkt, const char* tag) {
     CopyPacketHex(buf, off, hex, sizeof(hex));
     x::runtime::LogI("Travel", "C2S %s id=0x%04X(%u) off=%d hex=%s%s", tag ? tag : "pkt", id,
                      (unsigned)id, off, hex, off > 96 ? "..." : "");
-    if (id == kWirePortalTeleport || id == (uint16_t)kClientPortalTeleport) {
+    {
         std::lock_guard<std::mutex> lock(gLastCapMu);
-        gLastCapId = id;
-        gLastCapHex = hex;
+        if (gCapIdN < kCapIdRing) gCapIdRing[gCapIdN++] = id;
+        if (IsPortalWireId(id)) {
+            gLastCapId = id;
+            gLastCapHex = hex;
+            gLastCapTick = GetTickCount();
+        }
     }
 }
 
 bool __fastcall HookNmSend(void* self, void* outPacket, const void* method) {
     if (gCaptureOn.load() && outPacket) {
         const uint16_t id = ReadU16(outPacket, kOffOutPacketId);
-        if (id == kWirePortalTeleport || id == (uint16_t)kClientPortalTeleport ||
-            id == 0x0071 /* script portal candidate */)
-            DumpOutPacket(outPacket, "portal?");
+        if (IsPortalWireId(id))
+            DumpOutPacket(outPacket, "portal");
+        else {
+            // 窗内非门包只记 id，避免刷屏；LogUpPortalCap 的 all=[] 用它证「钩子活着」
+            std::lock_guard<std::mutex> lock(gLastCapMu);
+            if (gCapIdN < kCapIdRing) gCapIdRing[gCapIdN++] = id;
+        }
     }
     auto* orig = reinterpret_cast<FnNmSend>(gOrigSend);
     return orig ? orig(self, outPacket, method) : false;
+}
+
+// 懒装：默认不钩 Send；仅 capture on（或 StickUp 且已开探针）时安装。
+void EnsureSendCaptureInstalled() {
+    if (gCaptureInstalled.load()) return;
+    if (!gGA) return;
+    void* sendBody = AtRva<void*>(kRvaNmSend);
+    if (InstallSendAbs(sendBody, reinterpret_cast<void*>(&HookNmSend))) {
+        gCaptureInstalled.store(true);
+        x::runtime::LogI("Travel",
+                         "Send Abs capture ok target=%p tramp=%p (wire portal=0x%04X/0x%04X)",
+                         sendBody, gSendAbs.trampoline, (unsigned)kWirePortalMove,
+                         (unsigned)kWirePortalMoveAlt);
+        x::runtime::anchor_lamps::Set("TravelSend", x::runtime::anchor_lamps::AnchorLampCode::Ok,
+                                     "Abs ok");
+        (void)kRvaSendOutPacket;
+        return;
+    }
+    if (gMiSend && PatchMethodInfo(gMiSend, reinterpret_cast<void*>(&HookNmSend), &gOrigSend)) {
+        gCaptureInstalled.store(true);
+        x::runtime::LogW("Travel", "Send Abs fail → MethodInfo fallback mi=%p", (void*)gMiSend);
+        x::runtime::anchor_lamps::Set("TravelSend",
+                                     x::runtime::anchor_lamps::AnchorLampCode::Degraded, "MI only");
+        return;
+    }
+    x::runtime::anchor_lamps::Set("TravelSend", x::runtime::anchor_lamps::AnchorLampCode::Miss,
+                                 "MISS");
 }
 
 int32_t ReadI32(void* obj, size_t off) {
@@ -571,7 +753,6 @@ bool RebindManagers(DWORD now) {
     if (!ResolveApi()) return false;
 
     if (!gPmKlass) gPmKlass = FindClass(kPortalManagerClass);
-    if (!gPmType && gPmKlass) gPmType = ClassTypeObject(gPmKlass);
     if (!gWmType) {
         void* wmKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
         gWmType = ClassTypeObject(wmKlass);
@@ -583,30 +764,18 @@ bool RebindManagers(DWORD now) {
     if (!gWmKlass) gWmKlass = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
     if (!gFacadeKlass) gFacadeKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerFacadeKlass();
     if (!gNmKlass) gNmKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();  // Session
-    if (!gFacadeType && gFacadeKlass) gFacadeType = ClassTypeObject(gFacadeKlass);
     if (!gOutPacketKlass) {
         gOutPacketKlass = FindClass("OutPacket");
         if (!gOutPacketKlass) gOutPacketKlass = FindClass(kOutPacketClass);
     }
 
+    // PortalManager 与 NetworkManager facade 都不是 UnityEngine.Object（facade 还是 Singleton<>），
+    // Resources.FindObjectsOfTypeAll 会被引擎的类型闸当场拒掉：永远拿不到对象，只会往客户端
+    // Player.log 刷一行 "The type has to be derived from UnityEngine.Object"，同时白占一个
+    // 1500ms 的主泵 job。2026-08-09 实测一局刷了 454 行（两类各 227 次，即每 2s 一轮 rebind
+    // 各来一次），把引擎日志淹到 83%，换图崩溃现场无从查起。所以这两个只走单例槽，
+    // 扫不到就等下一轮 rebind。
     gPm = ResolveSingleton(gPmKlass);
-    // InterStage：禁 FindAll；Singleton / WM.MyUser 仍可轻量绑。
-    const bool allowFindAll = world::IsPlayReady();
-    if (!gPm && allowFindAll && gPmType && gFindAll) {
-        void* arr = x::runtime::managed_main::FindAll(gFindAll, gPmType, 1500);
-        const int n = arr ? static_cast<int>(
-                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) +
-                                                              kOffArrLen))
-                          : 0;
-        for (int i = 0; i < n && i < 8; ++i) {
-            void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + kOffArrData +
-                                                static_cast<size_t>(i) * sizeof(void*));
-            if (LooksLikeHeapPtr(o) && LooksLikeHeapPtr(ReadPtr(o, kOffPmPortalList))) {
-                gPm = o;
-                break;
-            }
-        }
-    }
 
     gWm = world::GetWorldManager();
 
@@ -615,6 +784,8 @@ bool RebindManagers(DWORD now) {
         void* mu = ReadPtr(gWm, kOffWmMyUser);
         if (LooksLikeHeapPtr(mu)) gLocalUser = mu;
     }
+    // UserLocal 是 UnityEngine.Object，FindAll 对它有效；InterStage 仍要禁（WM.MyUser 够用）。
+    const bool allowFindAll = world::IsPlayReady();
     if (!gLocalUser && allowFindAll && gLuType && gFindAll) {
         void* arr = x::runtime::managed_main::FindAll(gFindAll, gLuType, 1500);
         const int n = arr ? static_cast<int>(
@@ -630,21 +801,8 @@ bool RebindManagers(DWORD now) {
         }
     }
 
+    // 同上：facade 不吃 FindAll，只走单例槽。
     void* facade = ResolveSingleton(gFacadeKlass);
-    if (!facade && allowFindAll && gFacadeType && gFindAll) {
-        void* arr = x::runtime::managed_main::FindAll(gFindAll, gFacadeType, 1500);
-        const int n = arr ? static_cast<int>(
-                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + kOffArrLen))
-                          : 0;
-        for (int i = 0; i < n && i < 4; ++i) {
-            void* o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + kOffArrData +
-                                                static_cast<size_t>(i) * sizeof(void*));
-            if (LooksLikeHeapPtr(o) && (!gFacadeKlass || ReadPtr(o, 0) == gFacadeKlass)) {
-                facade = o;
-                break;
-            }
-        }
-    }
     gNm = nullptr;
     if (facade) {
         void* sess = ReadPtr(facade, kOffNmSession);
@@ -704,19 +862,7 @@ bool RebindManagers(DWORD now) {
         if (!gMiSend)
             gMiSend = ResolveMi(gNmKlass, kRvaNmSend, kSend, "Send", kHashSendPacket, &pSend);
         note(pSend);
-        if (gMiSend && PatchMethodInfo(gMiSend, reinterpret_cast<void*>(&HookNmSend), &gOrigSend)) {
-            gCaptureInstalled.store(true);
-            x::runtime::LogI("Travel", "Send capture MethodInfo ok mi=%p", (void*)gMiSend);
-            x::runtime::anchor_lamps::Set("TravelSend",
-                                         x::runtime::anchor_lamps::AnchorLampCode::Ok, "MI ok");
-        } else if (gMiSend) {
-            x::runtime::anchor_lamps::Set("TravelSend",
-                                         x::runtime::anchor_lamps::AnchorLampCode::Degraded,
-                                         "MI no patch");
-        } else {
-            x::runtime::anchor_lamps::Set("TravelSend",
-                                         x::runtime::anchor_lamps::AnchorLampCode::Miss, "MISS");
-        }
+        // Send Abs 探针默认不装；仅 SetCaptureEnabled(true) → EnsureSendCaptureInstalled。
     }
     static bool sMethodHitsLogged = false;
     if (!sMethodHitsLogged && (gMiCheckMove || gMiOutCreate || gMiEncode1 || gMiEncodeStr || gMiSend)) {
@@ -1017,12 +1163,201 @@ bool CallCheckMovePortal(char* result, size_t resultCap) {
     return true;
 }
 
-bool CallUpKey(char* result, size_t resultCap) {
-    ports::input::EnsureBound();
-    if (!ports::input::InjectKeyHold(VK_UP, 120)) {
+// StickUp/Up：拟人走路同款 unity_kbd（InputSystem 设备态）。
+// BIN 12:08：managed_main→FireJob→InjectKeyHold→EnqueueAndWait(OnKey)
+// 主线程里再等主线程 → ~2s KEY_FAIL + 卡游戏。按住时长只 Sleep 在 worker。
+constexpr DWORD kPortalUpHoldMs = 160;
+constexpr DWORD kPortalUpPollMs = 16;
+// StickUp：最短按住 kPortalUpHoldMs；若仍同图且 PlayReady，最多撑到本值等 MapId
+//（BIN 02:34 hop2：160ms 松键后 ~29ms MapId 才变 → 半截进门 InterStage 黑屏）。
+constexpr DWORD kPortalUpHoldMaxMs = 700;
+// MapId 已变后额外按住：旧 drain 只撑到 HoldMs，若变图发生在 160ms 之后会立刻松键
+//（BIN 02:42：drain@203ms → held=203 → Field 永不回）。
+constexpr DWORD kPortalUpPostChangeDrainMs = 220;
+// StickUp 首枪后补发间隔：覆盖服端偶发吞 ↑（仍站在门内时）。
+constexpr DWORD kPortalUpFollowGapMs = 72;
+
+// BIN 2026-08-09 01:01：首枪 ↑ 后 MapId 已变仍补第二枪 → InterStage 黑屏。
+// 默认：MapId 一变跳过补枪；hold 内 MapId 变了默认撑满再松（见 UpDrain）。回退：
+//   · XCAT_TRAVEL_MAPID_GATE=0  或 DLL 旁 travel_mapid_gate.off → 关掉 MapId 闸
+//   · XCAT_TRAVEL_UP2=0/1      或 DLL 旁 travel_up2.off        → 补第二枪（默认关）
+constexpr bool kTravelMapIdGateDefault = true;
+// BIN 01:27 首枪未换图时仍补第二枪 → fake soft；默认关，需要时 XCAT_TRAVEL_UP2=1。
+constexpr bool kTravelUp2Default = false;
+// BIN 01:27 hop2：MapId 刚闪变就 releaseUp → 半截传送黑屏；默认撑满 hold。
+// 回退：XCAT_TRAVEL_UP_DRAIN=0 或 travel_up_drain.off → 立刻松键（旧行为）。
+constexpr bool kTravelUpDrainDefault = true;
+
+bool EnvFlagOff(const char* name) {
+    char env[16]{};
+    if (GetEnvironmentVariableA(name, env, sizeof(env)) == 0) return false;
+    return env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' || env[0] == 'F';
+}
+
+bool EnvFlagOn(const char* name) {
+    char env[16]{};
+    if (GetEnvironmentVariableA(name, env, sizeof(env)) == 0) return false;
+    return env[0] == '1' || env[0] == 'y' || env[0] == 'Y' || env[0] == 't' || env[0] == 'T';
+}
+
+bool MarkerOffFile(const char* fileName) {
+    const char* bin = x::runtime::GetBinDir();
+    if (!bin || !bin[0] || !fileName || !fileName[0]) return false;
+    char path[MAX_PATH]{};
+    _snprintf_s(path, sizeof(path), _TRUNCATE, "%s\\%s", bin, fileName);
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+bool TravelMapIdGateEnabled() {
+    if (EnvFlagOff("XCAT_TRAVEL_MAPID_GATE") || MarkerOffFile("travel_mapid_gate.off")) {
+        return false;
+    }
+    if (EnvFlagOn("XCAT_TRAVEL_MAPID_GATE")) return true;
+    return kTravelMapIdGateDefault;
+}
+
+bool TravelUp2Enabled() {
+    if (EnvFlagOff("XCAT_TRAVEL_UP2") || MarkerOffFile("travel_up2.off")) return false;
+    if (EnvFlagOn("XCAT_TRAVEL_UP2")) return true;
+    return kTravelUp2Default;
+}
+
+bool TravelUpDrainEnabled() {
+    if (EnvFlagOff("XCAT_TRAVEL_UP_DRAIN") || MarkerOffFile("travel_up_drain.off")) {
+        return false;
+    }
+    if (EnvFlagOn("XCAT_TRAVEL_UP_DRAIN")) return true;
+    return kTravelUpDrainDefault;
+}
+
+// BIN 2026-08-09 01:22：MapId 闸已跳过补枪，但首枪 ↑ 仍黑屏。
+// 曾在 enter-armed 直前 SetImpactNext(0,0)；BIN 01:44 仍黑屏 → 默认关。
+// 清零改到 hold 始（fhBan ON，对齐 F6）。需要时：XCAT_TRAVEL_PREFIRE_ZERO=1
+constexpr bool kTravelPreFireZeroDefault = false;
+
+bool TravelPreFireZeroEnabled() {
+    if (EnvFlagOff("XCAT_TRAVEL_PREFIRE_ZERO") || MarkerOffFile("travel_prefire_zero.off")) {
+        return false;
+    }
+    if (EnvFlagOn("XCAT_TRAVEL_PREFIRE_ZERO")) return true;
+    return kTravelPreFireZeroDefault;
+}
+
+// hold 始清零：BIN 02:06 仍 `hold zero-vel ok` → 首枪 ↑ → 永久 InterStage。
+// 默认关；进门前禁止再写 SetImpactNext。需要时：XCAT_TRAVEL_HOLD_ZERO=1
+constexpr bool kTravelHoldZeroDefault = false;
+
+bool TravelHoldZeroEnabled() {
+    if (EnvFlagOff("XCAT_TRAVEL_HOLD_ZERO") || MarkerOffFile("travel_hold_zero.off")) {
+        return false;
+    }
+    if (EnvFlagOn("XCAT_TRAVEL_HOLD_ZERO")) return true;
+    return kTravelHoldZeroDefault;
+}
+
+void TryClearImpactZero(const char* tag, const char* phase) {
+    ports::teleport::ImpactVelOpts zopts{};
+    zopts.minAbs = 0.f;
+    zopts.quietLog = true;
+    const bool ok = ports::teleport::ImpactSetVelocity(
+        0.f, 0.f, ports::teleport::ImpactRoute::SetImpactNext, zopts);
+    x::runtime::LogI("Travel", "%s zero-vel %s tag=%s (SetImpactNext 0,0)",
+                     phase ? phase : "impact", ok ? "ok" : "fail", tag ? tag : "-");
+    if (ok) Sleep(48);
+}
+
+void TryPreFireClearImpact(const char* tag) {
+    if (!TravelPreFireZeroEnabled()) {
+        x::runtime::LogI("Travel", "prefire zero-vel skipped (kill-switch) tag=%s",
+                         tag ? tag : "-");
+        return;
+    }
+    if (!world::IsPlayReady()) {
+        x::runtime::LogI("Travel", "prefire zero-vel skipped (not_play_ready) tag=%s",
+                         tag ? tag : "-");
+        return;
+    }
+    TryClearImpactZero(tag, "prefire");
+}
+
+void TryHoldClearImpact(const char* tag) {
+    if (!TravelHoldZeroEnabled()) {
+        x::runtime::LogI("Travel", "hold zero-vel skipped (kill-switch) tag=%s",
+                         tag ? tag : "-");
+        return;
+    }
+    if (!world::IsPlayReady()) {
+        x::runtime::LogI("Travel", "hold zero-vel skipped (not_play_ready) tag=%s",
+                         tag ? tag : "-");
+        return;
+    }
+    // 调用约定：先 heli::Disarm，且 fhBan 仍 ON（对齐 Fly::TryDisarmZeroImpactVel）。
+    TryClearImpactZero(tag, "hold");
+}
+
+bool MapIdChangedFrom(int expectMapId) {
+    if (expectMapId <= 0 || !TravelMapIdGateEnabled()) return false;
+    const int mid = world::GetMapId();
+    return mid > 0 && mid != expectMapId;
+}
+
+struct UpUntilCtx {
+    int expectMapId = 0;
+    bool transit = false;
+    bool mapChanged = false;
+};
+
+bool UpHoldUntilFn(void* user) {
+    auto* ctx = static_cast<UpUntilCtx*>(user);
+    if (!ctx) return true;
+    if (!world::IsInMapScene() || !world::IsPlayReady()) {
+        ctx->transit = true;
+        return true;
+    }
+    if (MapIdChangedFrom(ctx->expectMapId)) {
+        ctx->mapChanged = true;
+        return true;
+    }
+    return false;
+}
+
+// 必须在 worker 调用（禁止嵌在 FireJobOnMain 里）。
+// HoldUntil：最短 kPortalUpHoldMs，最长 kPortalUpHoldMaxMs；MapId/transit 结束。
+// until 早于 min / MapId 晚闪：drain + afterUntilDrain（BIN 02:34/02:42）。
+bool CallUpKey(char* result, size_t resultCap, int expectMapId = 0) {
+    if (!x::runtime::main_thread::Ensure()) {
         snprintf(result, resultCap, "KEY_FAIL");
         return false;
     }
+    (void)unity_kbd::EnsureBound();
+
+    UpUntilCtx ctx{};
+    ctx.expectMapId = expectMapId;
+    char detail[96]{};
+    const DWORD postDrain = TravelUpDrainEnabled() ? kPortalUpPostChangeDrainMs : 0;
+    const bool ok = unity_kbd::HoldUntil(
+        unity_kbd::kKeyUpArrow, kPortalUpHoldMs, kPortalUpHoldMaxMs, &UpHoldUntilFn, &ctx, detail,
+        sizeof(detail), postDrain);
+    if (!ok) {
+        x::runtime::LogW("Travel", "kbd Up HoldUntil fail detail=%s why=%s", detail,
+                         unity_kbd::LastFail());
+        snprintf(result, resultCap, "KEY_FAIL");
+        return false;
+    }
+
+    if (ctx.transit || !world::IsInMapScene() || !world::IsPlayReady()) {
+        x::runtime::LogI("Travel", "kbd Up transit detail=%s", detail);
+        snprintf(result, resultCap, "MAP_TRANSITION");
+        return true;
+    }
+    if (ctx.mapChanged || MapIdChangedFrom(expectMapId)) {
+        x::runtime::LogI("Travel", "kbd Up done mapId %d->%d (gate) detail=%s", expectMapId,
+                         world::GetMapId(), detail);
+        snprintf(result, resultCap, "MAP_CHANGED");
+        return true;
+    }
+    x::runtime::LogI("Travel", "kbd Up pulse min=%ums max=%ums detail=%s (unity_kbd)",
+                     (unsigned)kPortalUpHoldMs, (unsigned)kPortalUpHoldMaxMs, detail);
     snprintf(result, resultCap, "FIRED_UP");
     return true;
 }
@@ -1031,12 +1366,10 @@ void FireJobOnMain(void* user) {
     auto* job = reinterpret_cast<FireJob*>(user);
     if (!job) return;
     __try {
-        // Impact 贴门已在 worker 侧完成；此处只触发 CheckMove/↑ / Rpc。
-        // 禁止 AbsPos/Transform 硬写坐标；禁止 fill+Doing。
+        // StickUp 在 TryFireEnter 里只 CallUpKey；此处勿再接 StickUp（防嵌套）。
         if (job->mode == FireMode::Up || job->mode == FireMode::StickUp) {
-            job->ok = CallUpKey(job->result, sizeof(job->result));
-            if (job->ok && job->mode == FireMode::StickUp)
-                snprintf(job->result, sizeof(job->result), "FIRED_STICK_UP");
+            snprintf(job->result, sizeof(job->result), "USE_KBD_UP");
+            job->ok = false;
             return;
         }
 
@@ -1105,15 +1438,87 @@ bool AlreadyStoodAtPortal(const PortalInfo& portal) {
            (dx * dx + dy * dy) <= (kStickNearR * kStickNearR);
 }
 
-// Impact 贴门（仅 travel）：Snap 后分段 toward；掠过触发区当拍 CheckMove/↑，不要求刹停。
+// StickUp / Up：unity_kbd ↑；掠过触发区当拍开火，不要求刹停。
 // 不改 teleport_port / fly / combat 的默认 opts 或公共 API。
 bool TryFireEnterOnMain(FireMode mode, std::string& outResult) {
+    // Up / StickUp：仅 unity_kbd ↑（worker 上 CallUpKey，勿嵌 OnKey）。
+    // 禁止 StickUp 直调 CheckMovePortal：贴门后 ~100ms 断线（BIN DirectEnter/CHK 全灭）。
+    if (mode == FireMode::Up || mode == FireMode::StickUp) {
+        const bool probe = gCaptureOn.load();
+        if (probe) {
+            ClearLastCap();
+            (void)EnsureBound();
+            EnsureSendCaptureInstalled();
+        }
+
+        if (probe) ClearLastCap();
+        const int map0 = world::GetMapId();
+        char buf[80]{};
+        const bool ok = CallUpKey(buf, sizeof(buf), map0);
+        if (!world::IsInMapScene() || !world::IsPlayReady() ||
+            std::strcmp(buf, "MAP_TRANSITION") == 0 ||
+            std::strcmp(buf, "MAP_CHANGED") == 0 || MapIdChangedFrom(map0)) {
+            outResult = (std::strcmp(buf, "MAP_CHANGED") == 0 || MapIdChangedFrom(map0))
+                            ? "MAP_CHANGED"
+                            : "MAP_TRANSITION";
+            x::runtime::LogI("Travel", "stick-up1 done res=%s map0=%d mapNow=%d skipUp2=1",
+                             outResult.c_str(), map0, world::GetMapId());
+            return true;
+        }
+        Sleep(80);
+        // BIN 02:34 hop2：CallUpKey 标 pulse 后 Sleep 窗内 MapId 已变，旧逻辑未再查
+        // 就 stick-up2 skipped → FIRED_STICK_UP（松键后进门 → InterStage 卡死）。
+        if (!world::IsInMapScene() || !world::IsPlayReady() || MapIdChangedFrom(map0)) {
+            outResult = MapIdChangedFrom(map0) ? "MAP_CHANGED" : "MAP_TRANSITION";
+            x::runtime::LogI("Travel",
+                             "stick-up1 post-sleep res=%s map0=%d mapNow=%d skipUp2=1",
+                             outResult.c_str(), map0, world::GetMapId());
+            return true;
+        }
+        if (probe) LogUpPortalCap(mode == FireMode::StickUp ? "stick-up1" : "up-pulse1");
+
+        if (ok && mode == FireMode::StickUp) {
+            if (!TravelUp2Enabled()) {
+                x::runtime::LogI("Travel", "stick-up2 skipped (kill-switch) map0=%d", map0);
+                outResult = "FIRED_STICK_UP";
+                return true;
+            }
+            if (probe) ClearLastCap();
+            Sleep(kPortalUpFollowGapMs);
+            if (!world::IsInMapScene() || !world::IsPlayReady() || MapIdChangedFrom(map0)) {
+                outResult = MapIdChangedFrom(map0) ? "MAP_CHANGED" : "MAP_TRANSITION";
+                x::runtime::LogI("Travel", "stick-up2 aborted res=%s map0=%d mapNow=%d",
+                                 outResult.c_str(), map0, world::GetMapId());
+                return true;
+            }
+            char buf2[80]{};
+            if (CallUpKey(buf2, sizeof(buf2), map0)) {
+                if (!world::IsInMapScene() || !world::IsPlayReady() ||
+                    std::strcmp(buf2, "MAP_TRANSITION") == 0 ||
+                    std::strcmp(buf2, "MAP_CHANGED") == 0 || MapIdChangedFrom(map0)) {
+                    outResult = (std::strcmp(buf2, "MAP_CHANGED") == 0 || MapIdChangedFrom(map0))
+                                    ? "MAP_CHANGED"
+                                    : "MAP_TRANSITION";
+                    x::runtime::LogI("Travel", "stick-up2 mid-transition res=%s map0=%d mapNow=%d",
+                                     outResult.c_str(), map0, world::GetMapId());
+                    return true;
+                }
+                x::runtime::LogI("Travel", "kbd Up follow-up (stick cover)");
+                Sleep(80);
+                if (probe) LogUpPortalCap("stick-up2");
+            }
+            outResult = "FIRED_STICK_UP";
+            return true;
+        }
+
+        outResult = buf;
+        return ok;
+    }
+
     FireJob job{};
     job.mode = mode;
     job.fieldKey = gWm ? ReadU8(gWm, kOffWmFieldKey) : 0;
-    if (mode == FireMode::Up) {
-        FireJobOnMain(&job);
-    } else if (!x::runtime::managed_main::Call(&FireJobOnMain, &job, 2500)) {
+    if (!x::runtime::managed_main::Call(&FireJobOnMain, &job, 2500)) {
         outResult = "MAIN_TIMEOUT";
         return false;
     }
@@ -1134,8 +1539,8 @@ bool InPortalTrigger(const PortalInfo& portal) {
 }
 
 // Impact 贴门：对齐 F5 旋翼「滑翔到站位点再干活」。
-//   Cruise→Station → 进触发框后继续 Station 收到站位/低速 → 再 CheckMove。
-// 速度倍率共用 ImGui「滑翔速度」；成功进门 ban 留到换图/Idle（旋翼在开火前已收速）。
+//   瞄准 SnapStandForPortal → 全程面板倍率 Cruise → Station（滞后）→ hold → ↑。
+// hold 期禁止再 Station（会打掉 CurFh 门前抖）。
 bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::string& outResult,
                          float* outSx, float* outSy) {
     namespace heli = x::features::simple_combat::heli;
@@ -1143,13 +1548,37 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     auto portalStationOk = [](float px, float py, float ax, float ay) {
         return std::fabs(ax - px) <= kPortalStationDx && std::fabs(ay - py) <= kPortalStationDy;
     };
-    auto portalSpeedOk = [](float vx, float vy) {
-        return std::sqrt(vx * vx + vy * vy) <= kPortalSettleSpeed;
+    auto speedLenOk = [](float vx, float vy, float lim) {
+        return std::sqrt(vx * vx + vy * vy) <= lim;
     };
 
-    // 目标 = 传送门位置（触发区内），对齐打怪站位点；不要求钉台/FH。
+    // 瞄准 X = 门心（进门几何真源）；Snap 只取可站 Y/FH。
+    // 禁止沿用 Snap 的 X：悬崖内缩会把人挪到门左/右（假火 + 体感「位置不正确」）。
+    // 再相对站立点抬高 aimY（AbsPos 更大 Y）；Disarm 后下落挂台。禁止减小 Y。
     float aimX = portal.x;
     float aimY = portal.y;
+    uint32_t aimFh = 0;
+    {
+        float sx = portal.x, sy = portal.y;
+        uint32_t sfh = 0;
+        if (foothold_path::SnapStandForPortal(portal.x, portal.y, portal.rectL, portal.rectT,
+                                             portal.rectR, portal.rectB, portal.rectValid, &sx, &sy,
+                                             &sfh) &&
+            sfh != 0) {
+            // Y 须仍在触发框（抬高前）；X 一律 portal.x
+            if (!portal.rectValid || PointInPortalRect(portal, portal.x, sy)) {
+                if (std::fabs(sx - portal.x) > 0.5f) {
+                    x::runtime::LogI("Travel",
+                                     "heli stick snapX ignored name=%s portalX=%.0f snap=(%.0f,%.0f) "
+                                     "→ aimX=portal",
+                                     portal.name.c_str(), portal.x, sx, sy);
+                }
+                aimY = sy;
+                aimFh = sfh;
+            }
+        }
+    }
+    aimY += kPortalAimLiftY;
     if (portal.rectValid) {
         if (!PointInPortalRect(portal, aimX, aimY)) ClampIntoPortalRect(portal, aimX, aimY);
     }
@@ -1166,31 +1595,95 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         return false;
     }
 
-    x::runtime::LogI("Travel",
-                     "heli stick aim name=%s portal=(%.0f,%.0f) aim=(%.0f,%.0f) ap=(%.0f,%.0f) "
-                     "rect=%d speed=%.2fX",
-                     portal.name.c_str(), portal.x, portal.y, aimX, aimY, luX, luY,
-                     portal.rectValid ? 1 : 0, heli::SpeedScale(heli::Owner::Travel));
-
     if (!x::features::invuln::IsEnabled()) {
         outResult = "INVULN_OFF";
         x::runtime::LogW("Travel", "heli stick refuse invuln_off name=%s", portal.name.c_str());
         return false;
     }
 
+    // 贴门全程钉住「软速」：BIN 02:06 面板 10X 巡航贴门 → 首枪黑屏。
+    // 上限 kPortalStickSoftScale（2X）；退出还原面板倍率。
+    struct TravelStickSpeedGuard {
+        float prev = 1.f;
+        float use = 1.f;
+        TravelStickSpeedGuard() {
+            prev = heli::SpeedScale(heli::Owner::Travel);
+            use = (std::min)(prev, kPortalStickSoftScale);
+            heli::SetSpeedScale(heli::Owner::Travel, use);
+            if (use + 0.01f < prev) {
+                x::runtime::LogI("Travel",
+                                 "heli stick speed cap %.2fX -> %.2fX (no panel 10X)", prev,
+                                 use);
+            }
+        }
+        ~TravelStickSpeedGuard() { heli::SetSpeedScale(heli::Owner::Travel, prev); }
+    } speedGuard;
+
+    // Station 滞后：进 ≤enter（或触发框）锁 approach；回 Cruise 须 dist>enter+slack 且离框。
+    bool approachLatched = false;
+    bool softApproachNear = false;  // 开局已在 Station 圈：全程 ≤2X，禁 10X 短冲
+    auto wantStation = [&](float dist, bool inTrig) -> bool {
+        if (inTrig || dist <= kTravelStationEnterR) {
+            approachLatched = true;
+            return true;
+        }
+        if (approachLatched && dist <= kTravelStationEnterR + kTravelStationExitSlack)
+            return true;
+        if (approachLatched) {
+            approachLatched = false;
+            x::runtime::LogI("Travel",
+                             "heli stick mode phase=cruise name=%s dist=%.0f (left approach)",
+                             portal.name.c_str(), dist);
+        }
+        return false;
+    };
+
+    {
+        const float d0 = std::sqrt((aimX - luX) * (aimX - luX) + (aimY - luY) * (aimY - luY));
+        const bool st0 = wantStation(d0, InPortalTrigger(portal));
+        x::runtime::LogI("Travel",
+                         "heli stick aim name=%s portal=(%.0f,%.0f) aim=(%.0f,%.0f) ap=(%.0f,%.0f) "
+                         "rect=%d aimFh=%u liftY=%.0f speed=%.2fX (panel) mode=%s enterR=%.0f "
+                         "exitR=%.0f dist=%.0f",
+                         portal.name.c_str(), portal.x, portal.y, aimX, aimY, luX, luY,
+                         portal.rectValid ? 1 : 0, aimFh, kPortalAimLiftY, speedGuard.use,
+                         st0 ? "approach" : "cruise", kTravelStationEnterR,
+                         kTravelStationEnterR + kTravelStationExitSlack, d0);
+        if (st0) {
+            x::runtime::LogI("Travel",
+                             "heli stick mode phase=approach name=%s dist=%.0f (latched)",
+                             portal.name.c_str(), d0);
+        }
+        // BIN 01:44：已在 Station 圈内仍用面板 10X 短冲 → 进门黑屏。近门强制 ≤2X。
+        if (d0 <= kTravelStationEnterR) {
+            softApproachNear = true;
+        }
+    }
+
     struct TravelFhBanGuard {
         bool armed = false;
         bool leaveArmed = false;
         void Arm() {
+            leaveArmed = false;
             if (armed) return;
             ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, true);
             armed = true;
             x::runtime::LogI("Travel", "heli stick fhBan=1 mask=0x%x",
                              ports::fly_fh_ban::ActiveMask());
         }
+        void DisarmForLand() {
+            if (!armed) {
+                leaveArmed = true;
+                return;
+            }
+            ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+            armed = false;
+            leaveArmed = true;
+            x::runtime::LogI("Travel", "heli stick fhBan land mask=0x%x",
+                             ports::fly_fh_ban::ActiveMask());
+        }
         void LeaveArmedForEnter() { leaveArmed = true; }
         ~TravelFhBanGuard() {
-            // 开火前已 Station 收速；退出时停旋翼。ban 成功路径留给换图/Idle。
             heli::Disarm(heli::Owner::Travel);
             heli::Release(heli::Owner::Travel);
             if (!armed || leaveArmed) return;
@@ -1200,14 +1693,30 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         }
     } fhBan;
     fhBan.Arm();
-    // 无主才接管：F6 手动飞抢占时赶路自动让位，它释放后下面循环每拍还会再试。
     (void)heli::TryAcquire(heli::Owner::Travel);
 
     const DWORD t0 = GetTickCount();
-    DWORD settleSince = 0;  // 首次进触发框时刻；0=尚未进框
+    DWORD settleSince = 0;
+    DWORD holdSince = 0;
+    DWORD readySince = 0;  // onFh∧低速∧Ap静；滑移则整段清零重等
+    float readyApX = 0.f, readyApY = 0.f;
+    float prevApX = 0.f, prevApY = 0.f;
+    bool havePrevAp = false;
+    DWORD leftTrigSince = 0;  // hold 中离开触发框的起点；宽限内不 abort
+    bool holdPhase = false;   // 已进 hold（卸 ban + 停旋翼）
+    bool stoodOnFh = false;   // CurFh 已挂上（日志/掉台提示）
+    bool loggedBleedNudge = false;
+    const float panelScale = speedGuard.use;  // 已封顶 ≤2X；勿用 prev（面板 10X）
+    // abort 后继续软速；开局近门仅打日志
+    bool softApproach = softApproachNear;
+    if (softApproachNear) {
+        x::runtime::LogI("Travel",
+                         "heli stick soft-near scale=%.2fX (dist<=enterR)", panelScale);
+    }
     int tickN = 0;
     int fireN = 0;
     int failStreak = 0;
+    heli::Telemetry tm{};
     for (;;) {
         const DWORD now = GetTickCount();
         if (!world::IsInMapScene() || !world::IsPlayReady()) {
@@ -1221,11 +1730,14 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             outResult = "NOT_STOOD";
             float ax = 0.f, ay = 0.f;
             const bool got = ReadLocalAp(ax, ay);
+            ports::teleport::FlightState fs{};
+            const bool haveFs = ports::teleport::QueryFlightState(fs) && fs.ok;
             x::runtime::LogW("Travel",
                              "heli stick timeout name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
-                             "ticks=%d fire=%d failStreak=%d",
+                             "onFh=%d v=(%.0f,%.0f) ticks=%d fire=%d failStreak=%d",
                              portal.name.c_str(), got ? ax : 0.f, got ? ay : 0.f, aimX, aimY,
-                             tickN, fireN, failStreak);
+                             haveFs && fs.onFh ? 1 : 0, haveFs ? fs.vx : tm.vx,
+                             haveFs ? fs.vy : tm.vy, tickN, fireN, failStreak);
             return false;
         }
 
@@ -1242,91 +1754,392 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             continue;
         }
 
-        const bool inTrig = InPortalTrigger(portal);
-        if (inTrig && settleSince == 0) {
-            settleSince = now;
-            x::runtime::LogI("Travel",
-                             "heli stick settle begin name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
-                             "ticks=%d",
-                             portal.name.c_str(), px, py, aimX, aimY, tickN);
-        }
-
-        const float dx = aimX - px;
-        const float dy = aimY - py;
-        const float dist = std::sqrt(dx * dx + dy * dy);
-        heli::Setpoint sp{};
-        sp.x = aimX;
-        sp.y = aimY;
-        // 进框后强制 Station（对齐打怪近距收站）；框外 Cruise/Station 按距切换。
-        if (inTrig || dist <= kHeliCruiseRadius) {
-            sp.mode = heli::Mode::Station;
-        } else {
-            sp.mode = heli::Mode::Cruise;
-        }
-        heli::SetSetpoint(heli::Owner::Travel, sp);
-
-        heli::Telemetry tm{};
-        const bool fired = heli::Tick(heli::Owner::Travel, now, &tm);
-        ++tickN;
-        if (fired) {
-            ++fireN;
-            failStreak = 0;
-        } else if (tm.guard && tm.guard[0] &&
-                   std::strcmp(tm.guard, "cadence") != 0 &&
-                   std::strcmp(tm.guard, "deadband") != 0) {
-            ++failStreak;
-            if (failStreak >= 60) {
-                outResult = "IMPACT_STICK_FAIL";
-                x::runtime::LogW("Travel",
-                                 "heli stick fail name=%s guard=%s streak=%d ticks=%d mode=%s",
-                                 portal.name.c_str(), tm.guard ? tm.guard : "?", failStreak,
-                                 tickN, heli::ModeName(sp.mode));
-                return false;
+        const float distAim =
+            std::sqrt((aimX - px) * (aimX - px) + (aimY - py) * (aimY - py));
+        const bool inTrigNow = InPortalTrigger(portal);
+        if (inTrigNow) {
+            leftTrigSince = 0;
+            if (settleSince == 0) {
+                settleSince = now;
+                x::runtime::LogI("Travel",
+                                 "heli stick settle begin name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                                 "ticks=%d",
+                                 portal.name.c_str(), px, py, aimX, aimY, tickN);
             }
-        } else {
-            failStreak = 0;
+        } else if (holdPhase && leftTrigSince == 0) {
+            leftTrigSince = now;
+        }
+        // hold 保海岸：宽限出框，或未站稳但仍贴近 aim（掉出台阶瞬间不立刻 10X 重贴）。
+        const bool graceHold = holdPhase && leftTrigSince != 0 &&
+                               (now - leftTrigSince) < kPortalHoldLeaveGraceMs;
+        const bool nearAimCoast =
+            holdPhase && !stoodOnFh && distAim < kPortalHoldAbortDist &&
+            std::fabs(px - aimX) <= kPortalHoldNearAimDx &&
+            std::fabs(py - aimY) <= kPortalHoldNearAimDy;
+        const bool holdInZone = inTrigNow || graceHold || nearAimCoast;
+
+        ports::teleport::FlightState fs{};
+        const bool haveFs = ports::teleport::QueryFlightState(fs) && fs.ok;
+        const float liveVx = haveFs ? fs.vx : tm.vx;
+        const float liveVy = haveFs ? fs.vy : tm.vy;
+        const bool onFh = haveFs && fs.onFh;
+
+        // hold 期必须停旋翼：Station/Impact 会把刚挂上的 CurFh 打掉 → 门前抖 10s+（BIN 11:51）。
+        // 接近阶段才 Cruise/Station；hold 只靠重力落到 aimFh。
+        // 全程面板倍率；abort 后 softApproach 压到 ≤2X 再贴。
+        if (!holdPhase) {
+            const float useScale =
+                softApproach ? (std::min)(panelScale, kPortalStickSoftScale) : panelScale;
+            heli::SetSpeedScale(heli::Owner::Travel, useScale);
+            const float dx = aimX - px;
+            const float dy = aimY - py;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            const bool wasApproach = approachLatched;
+            const bool station = wantStation(dist, inTrigNow);
+            if (station && !wasApproach) {
+                x::runtime::LogI("Travel",
+                                 "heli stick mode phase=approach name=%s dist=%.0f%s",
+                                 portal.name.c_str(), dist,
+                                 softApproach ? " soft=1" : " (latched)");
+            }
+            heli::Setpoint sp{};
+            sp.x = aimX;
+            sp.y = aimY;
+            sp.mode = station ? heli::Mode::Station : heli::Mode::Cruise;
+            heli::SetSetpoint(heli::Owner::Travel, sp);
+
+            tm = {};
+            const bool fired = heli::Tick(heli::Owner::Travel, now, &tm);
+            ++tickN;
+            if (fired) {
+                ++fireN;
+                failStreak = 0;
+            } else if (tm.guard && tm.guard[0] &&
+                       std::strcmp(tm.guard, "cadence") != 0 &&
+                       std::strcmp(tm.guard, "deadband") != 0) {
+                ++failStreak;
+                if (failStreak >= 60) {
+                    outResult = "IMPACT_STICK_FAIL";
+                    x::runtime::LogW(
+                        "Travel",
+                        "heli stick fail name=%s guard=%s streak=%d ticks=%d mode=%s",
+                        portal.name.c_str(), tm.guard ? tm.guard : "?", failStreak, tickN,
+                        heli::ModeName(sp.mode));
+                    return false;
+                }
+            } else {
+                failStreak = 0;
+            }
         }
 
-        // 对齐 heli_in_band：进框 + 站位 OK +（低速或死区）才进门；旋翼仍在转。
-        if (inTrig) {
+        if (holdInZone) {
             const bool stOk = portalStationOk(px, py, aimX, aimY);
-            const bool spdOk =
-                portalSpeedOk(tm.vx, tm.vy) ||
+            const bool settleSpdOk =
+                speedLenOk(liveVx, liveVy, kPortalSettleSpeed) ||
                 (tm.guard && std::strcmp(tm.guard, "deadband") == 0);
+            // 门边刹住：竖速 + 贴高够了再 Disarm（高门少掉 2~3 次）。
+            const bool bleedOk = std::fabs(liveVy) <= kPortalHoldEnterVy &&
+                                 std::fabs(py - aimY) <= kPortalHoldEnterDy;
             const bool settleTimeout =
                 settleSince != 0 && (now - settleSince) >= kPortalSettleMaxMs;
-            if ((stOk && spdOk) || settleTimeout) {
+            const bool canHold = inTrigNow && stOk && settleSpdOk && bleedOk;
+
+            if (!holdPhase && canHold) {
+                holdPhase = true;
+                holdSince = now;
+                readySince = 0;
+                stoodOnFh = false;
+                loggedBleedNudge = false;
+                softApproach = false;
+                havePrevAp = false;
+                heli::SetSpeedScale(heli::Owner::Travel, panelScale);
+                heli::Disarm(heli::Owner::Travel);
+                TryHoldClearImpact(portal.name.c_str());  // fhBan 仍 ON，对齐 F6
+                fhBan.DisarmForLand();
                 x::runtime::LogI(
                     "Travel",
-                    "heli stick enter-armed name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
-                    "v=(%.0f,%.0f) st=%d spd=%d timeout=%d ticks=%d fire=%d mode=%s fhBan=1",
-                    portal.name.c_str(), px, py, aimX, aimY, tm.vx, tm.vy, stOk ? 1 : 0,
-                    spdOk ? 1 : 0, settleTimeout ? 1 : 0, tickN, fireN,
-                    FireModeName(enterMode));
-                const bool ok = TryFireEnterOnMain(enterMode, outResult);
-                if (ok || outResult == "MAP_TRANSITION" || outResult.rfind("FIRED_", 0) == 0) {
-                    fhBan.LeaveArmedForEnter();
+                    "heli stick hold begin name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                    "v=(%.0f,%.0f) onFh=%d st=%d spd=%d bleed=1 holdZero "
+                    "ready=onFh+lowV+apStill stable=%ums coast=1",
+                    portal.name.c_str(), px, py, aimX, aimY, liveVx, liveVy, onFh ? 1 : 0,
+                    stOk ? 1 : 0, settleSpdOk ? 1 : 0, (unsigned)kPortalReadyStableMs);
+            } else if (!holdPhase && inTrigNow && settleTimeout && !bleedOk) {
+                // 超时仍竖速大：继续 Station 自然收速，禁止 Impact(0,0) 硬刹。
+                if (!loggedBleedNudge) {
+                    loggedBleedNudge = true;
+                    x::runtime::LogI(
+                        "Travel",
+                        "heli stick bleed wait name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                        "v=(%.0f,%.0f) needVy<=%.0f dy<=%.0f (no zero-vel)",
+                        portal.name.c_str(), px, py, aimX, aimY, liveVx, liveVy,
+                        kPortalHoldEnterVy, kPortalHoldEnterDy);
                 }
-                return ok;
+            } else if (!holdPhase && inTrigNow && settleTimeout && bleedOk && stOk) {
+                // 超时但已刹住：允许进 hold（仍不写零速）。
+                holdPhase = true;
+                holdSince = now;
+                readySince = 0;
+                stoodOnFh = false;
+                softApproach = false;
+                havePrevAp = false;
+                heli::SetSpeedScale(heli::Owner::Travel, panelScale);
+                heli::Disarm(heli::Owner::Travel);
+                TryHoldClearImpact(portal.name.c_str());
+                fhBan.DisarmForLand();
+                x::runtime::LogI(
+                    "Travel",
+                    "heli stick hold begin name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                    "v=(%.0f,%.0f) onFh=%d st=%d spd=%d settleTo=1 bleed=1 holdZero "
+                    "ready=onFh+lowV+apStill stable=%ums coast=1",
+                    portal.name.c_str(), px, py, aimX, aimY, liveVx, liveVy, onFh ? 1 : 0,
+                    stOk ? 1 : 0, settleSpdOk ? 1 : 0, (unsigned)kPortalReadyStableMs);
             }
+
+            if (holdPhase) {
+                // 残留 → 等站稳再进门。停推后靠自然衰减 + AbsPos 静止；不硬写 (0,0)。
+                const bool fireSpdOk = speedLenOk(liveVx, liveVy, kPortalFireSpeed);
+                const bool onPortalX = std::fabs(px - portal.x) <= kPortalFireMaxDx;
+                const bool apStepOk =
+                    !havePrevAp || (std::fabs(px - prevApX) <= kPortalReadyApStep &&
+                                    std::fabs(py - prevApY) <= kPortalReadyApStep);
+                if (inTrigNow && onFh && fireSpdOk && onPortalX && apStepOk) {
+                    if (!stoodOnFh) {
+                        stoodOnFh = true;
+                        x::runtime::LogI(
+                            "Travel",
+                            "heli stick stood onFh name=%s ap=(%.0f,%.0f) v=(%.0f,%.0f) "
+                            "aimFh=%u (waiting Ap settle %ums)",
+                            portal.name.c_str(), px, py, liveVx, liveVy, aimFh,
+                            (unsigned)kPortalReadyStableMs);
+                    }
+                    if (readySince == 0) {
+                        readySince = now;
+                        readyApX = px;
+                        readyApY = py;
+                    } else if (std::fabs(px - readyApX) > kPortalReadyApDrift ||
+                               std::fabs(py - readyApY) > kPortalReadyApDrift) {
+                        x::runtime::LogI(
+                            "Travel",
+                            "heli stick wait settle (ap-drift) name=%s ap=(%.0f,%.0f) "
+                            "anchor=(%.0f,%.0f) → re-wait %ums",
+                            portal.name.c_str(), px, py, readyApX, readyApY,
+                            (unsigned)kPortalReadyStableMs);
+                        readySince = 0;  // 整段重等，禁止滑窗凑满
+                    }
+                } else {
+                    if (stoodOnFh && !onFh) {
+                        x::runtime::LogI("Travel", "heli stick lost onFh name=%s ap=(%.0f,%.0f)",
+                                         portal.name.c_str(), px, py);
+                    } else if (stoodOnFh && onFh && !fireSpdOk) {
+                        x::runtime::LogI(
+                            "Travel",
+                            "heli stick wait settle (speed) name=%s ap=(%.0f,%.0f) "
+                            "v=(%.0f,%.0f)",
+                            portal.name.c_str(), px, py, liveVx, liveVy);
+                    } else if (stoodOnFh && onFh && !apStepOk) {
+                        x::runtime::LogI(
+                            "Travel",
+                            "heli stick wait settle (ap-step) name=%s ap=(%.0f,%.0f) "
+                            "prev=(%.0f,%.0f)",
+                            portal.name.c_str(), px, py, prevApX, prevApY);
+                    } else if (stoodOnFh && onFh && !onPortalX) {
+                        x::runtime::LogI(
+                            "Travel",
+                            "heli stick wait settle (portal-x) name=%s ap=(%.0f,%.0f) "
+                            "portalX=%.0f maxDx=%.0f",
+                            portal.name.c_str(), px, py, portal.x, kPortalFireMaxDx);
+                    }
+                    stoodOnFh = onFh;
+                    readySince = 0;
+                }
+                prevApX = px;
+                prevApY = py;
+                havePrevAp = true;
+
+                const bool ready =
+                    readySince != 0 && (now - readySince) >= kPortalReadyStableMs;
+                const bool landTimeout =
+                    !onFh && (now - holdSince) >= kPortalLandTimeoutMs;
+
+                if (landTimeout) {
+                    outResult = "NOT_STOOD";
+                    x::runtime::LogW(
+                        "Travel",
+                        "heli stick land timeout name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                        "onFh=0 v=(%.0f,%.0f) waited=%ums",
+                        portal.name.c_str(), px, py, aimX, aimY, liveVx, liveVy,
+                        (unsigned)(now - holdSince));
+                    return false;
+                }
+
+                if (ready) {
+                    x::runtime::LogI(
+                        "Travel",
+                        "heli stick pre-fire land name=%s ap=(%.0f,%.0f) onFh=%d "
+                        "v=(%.0f,%.0f) ready=%ums wait=%ums",
+                        portal.name.c_str(), px, py, onFh ? 1 : 0, liveVx, liveVy,
+                        (unsigned)(now - readySince), (unsigned)kPortalPreFireLandMs);
+                    const DWORD land0 = GetTickCount();
+                    while (GetTickCount() - land0 < kPortalPreFireLandMs) {
+                        if (!world::IsInMapScene() || !world::IsPlayReady()) {
+                            outResult = "MAP_TRANSITION";
+                            fhBan.LeaveArmedForEnter();
+                            return true;
+                        }
+                        Sleep(kImpactStickPollMs);
+                    }
+                    float fx = px, fy = py;
+                    (void)ReadLocalAp(fx, fy);
+                    ports::teleport::FlightState fs2{};
+                    const bool have2 = ports::teleport::QueryFlightState(fs2) && fs2.ok;
+                    const bool apStill =
+                        std::fabs(fx - readyApX) <= kPortalReadyApDrift &&
+                        std::fabs(fy - readyApY) <= kPortalReadyApDrift;
+                    const bool onPortalX2 = std::fabs(fx - portal.x) <= kPortalFireMaxDx;
+                    const bool stillReady =
+                        have2 && fs2.onFh &&
+                        speedLenOk(fs2.vx, fs2.vy, kPortalFireSpeed) &&
+                        PointInPortalRect(portal, fx, fy) && apStill && onPortalX2;
+                    if (!stillReady) {
+                        stoodOnFh = have2 && fs2.onFh;
+                        readySince = 0;
+                        x::runtime::LogI(
+                            "Travel",
+                            "heli stick pre-fire not-ready name=%s ap=(%.0f,%.0f) "
+                            "onFh=%d v=(%.0f,%.0f) inRect=%d apStill=%d onPortalX=%d",
+                            portal.name.c_str(), fx, fy, have2 && fs2.onFh ? 1 : 0,
+                            have2 ? fs2.vx : 0.f, have2 ? fs2.vy : 0.f,
+                            PointInPortalRect(portal, fx, fy) ? 1 : 0, apStill ? 1 : 0,
+                            onPortalX2 ? 1 : 0);
+                    } else {
+                        x::runtime::LogI(
+                            "Travel",
+                            "heli stick enter-armed name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                            "v=(%.0f,%.0f) onFh=1 ready=%ums ticks=%d fire=%d mode=%s "
+                            "fhBan=0",
+                            portal.name.c_str(), fx, fy, aimX, aimY, fs2.vx, fs2.vy,
+                            (unsigned)(GetTickCount() - readySince), tickN, fireN,
+                            FireModeName(enterMode));
+                        TryPreFireClearImpact(portal.name.c_str());
+                        if (!world::IsInMapScene() || !world::IsPlayReady()) {
+                            outResult = "MAP_TRANSITION";
+                            fhBan.LeaveArmedForEnter();
+                            return true;
+                        }
+                        const bool ok = TryFireEnterOnMain(enterMode, outResult);
+                        if (ok || outResult == "MAP_TRANSITION" ||
+                            outResult == "MAP_CHANGED" ||
+                            outResult.rfind("FIRED_", 0) == 0) {
+                            fhBan.LeaveArmedForEnter();
+                        }
+                        return ok;
+                    }
+                }
+            }
+        } else if (holdPhase) {
+            // 真甩远才 abort；否则会 10X Station 弹飞（BIN 15:58 map 50000 west00）。
+            holdPhase = false;
+            holdSince = 0;
+            readySince = 0;
+            leftTrigSince = 0;
+            stoodOnFh = false;
+            softApproach = true;
+            heli::SetSpeedScale(heli::Owner::Travel,
+                                (std::min)(panelScale, kPortalStickSoftScale));
+            (void)heli::TryAcquire(heli::Owner::Travel);
+            if (!fhBan.armed) fhBan.Arm();
+            x::runtime::LogI(
+                "Travel",
+                "heli stick hold abort (left trigger) name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                "dist=%.0f v=(%.0f,%.0f) onFh=%d soft=%.1fX",
+                portal.name.c_str(), px, py, aimX, aimY, distAim, liveVx, liveVy, onFh ? 1 : 0,
+                (std::min)(panelScale, kPortalStickSoftScale));
         }
 
         Sleep(kImpactStickPollMs);
     }
 }
 
-// 已在门内：返回 OK，由 FirePortal 补一枪（无惯性问题）。
-// 远处：旋翼滑翔 → 进框 Station 收速到位 → 再开火（对齐 Impact heli_in_band）。
+// 已在门内：状态就绪（框内 + onFh + 低速）即可补火；否则短等落地，不再盲等 1.5s。
+// 远处：旋翼滑翔 → 进框 Station 收速 → hold 等就绪 → 开火。
 bool StickThenEnterReady(const PortalInfo& portal, FireMode enterMode, std::string& outResult) {
     if (AlreadyStoodAtPortal(portal) || InPortalTrigger(portal)) {
-        outResult = "OK";
         float ax = 0.f, ay = 0.f;
-        if (ReadLocalAp(ax, ay)) {
-            x::runtime::LogI("Travel",
-                             "stick skip-impact already_in name=%s ap=(%.0f,%.0f)",
-                             portal.name.c_str(), ax, ay);
+        (void)ReadLocalAp(ax, ay);
+        x::runtime::LogI("Travel",
+                         "stick already_in wait-ready name=%s ap=(%.0f,%.0f) "
+                         "need=onFh+lowV+apStill stable=%ums",
+                         portal.name.c_str(), ax, ay, (unsigned)kPortalReadyStableMs);
+        const DWORD t0 = GetTickCount();
+        DWORD readySince = 0;
+        float readyApX = ax, readyApY = ay;
+        float prevApX = ax, prevApY = ay;
+        bool havePrevAp = false;
+        while (GetTickCount() - t0 < kPortalLandTimeoutMs) {
+            if (!world::IsInMapScene() || !world::IsPlayReady()) {
+                outResult = "MAP_TRANSITION";
+                return true;
+            }
+            if (!InPortalTrigger(portal)) {
+                break;
+            }
+            ports::teleport::FlightState fs{};
+            const bool haveFs = ports::teleport::QueryFlightState(fs) && fs.ok;
+            const float spd =
+                haveFs ? std::sqrt(fs.vx * fs.vx + fs.vy * fs.vy) : 9999.f;
+            (void)ReadLocalAp(ax, ay);
+            const bool apStepOk =
+                !havePrevAp || (std::fabs(ax - prevApX) <= kPortalReadyApStep &&
+                                std::fabs(ay - prevApY) <= kPortalReadyApStep);
+            const bool readyNow =
+                haveFs && fs.onFh && spd <= kPortalFireSpeed && apStepOk;
+            const DWORD now = GetTickCount();
+            if (readyNow) {
+                if (readySince == 0) {
+                    readySince = now;
+                    readyApX = ax;
+                    readyApY = ay;
+                } else if (std::fabs(ax - readyApX) > kPortalReadyApDrift ||
+                           std::fabs(ay - readyApY) > kPortalReadyApDrift) {
+                    x::runtime::LogI(
+                        "Travel",
+                        "stick already_in wait settle (ap-drift) name=%s ap=(%.0f,%.0f) "
+                        "→ re-wait",
+                        portal.name.c_str(), ax, ay);
+                    readySince = 0;
+                }
+                if (readySince != 0 && now - readySince >= kPortalReadyStableMs) {
+                    x::runtime::LogI("Travel",
+                                     "stick already_in ready name=%s ap=(%.0f,%.0f) "
+                                     "onFh=1 v=(%.0f,%.0f) waited=%ums",
+                                     portal.name.c_str(), ax, ay, haveFs ? fs.vx : 0.f,
+                                     haveFs ? fs.vy : 0.f, (unsigned)(now - t0));
+                    outResult = "OK";
+                    return true;
+                }
+            } else {
+                if (haveFs && fs.onFh && !apStepOk) {
+                    x::runtime::LogI(
+                        "Travel",
+                        "stick already_in wait settle (ap-step) name=%s ap=(%.0f,%.0f)",
+                        portal.name.c_str(), ax, ay);
+                }
+                readySince = 0;
+            }
+            prevApX = ax;
+            prevApY = ay;
+            havePrevAp = true;
+            Sleep(kImpactStickPollMs);
         }
-        return true;
+        if (InPortalTrigger(portal) || AlreadyStoodAtPortal(portal)) {
+            // 超时仍未就绪：禁止 blind 补火（易 205）；交给 Impact 卸推/落地再判。
+            x::runtime::LogW("Travel",
+                             "stick already_in ready-timeout name=%s ap=(%.0f,%.0f) "
+                             "→ ImpactStick (no blind fire)",
+                             portal.name.c_str(), ax, ay);
+            return ImpactStickToPortal(portal, enterMode, outResult, nullptr, nullptr);
+        }
+        return ImpactStickToPortal(portal, enterMode, outResult, nullptr, nullptr);
     }
     return ImpactStickToPortal(portal, enterMode, outResult, nullptr, nullptr);
 }
@@ -1389,19 +2202,26 @@ bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string
         }
     }
 
+    // StickUp/Up 补火：与贴门内开火同一条（含 follow-up ↑）。
+    if (mode == FireMode::Up || mode == FireMode::StickUp) {
+        TryPreFireClearImpact(portalName.c_str());
+        if (!world::IsPlayReady()) {
+            outResult = "MAP_TRANSITION";
+            x::runtime::LogI("Travel", "skip Up after prefire (not play ready) name=%s",
+                             portalName.c_str());
+            return true;
+        }
+        return TryFireEnterOnMain(mode, outResult);
+    }
+
     FireJob job{};
     job.mode = mode;
     job.fieldKey = gWm ? ReadU8(gWm, kOffWmFieldKey) : 0;
     strncpy_s(job.name, portalName.c_str(), _TRUNCATE);
 
-    // Up ????????????managed_main?GC / MethodInfo??
-    if (job.mode == FireMode::Up) {
-        FireJobOnMain(&job);
-    } else {
-        if (!x::runtime::managed_main::Call(&FireJobOnMain, &job, 2500)) {
-            outResult = "MAIN_TIMEOUT";
-            return false;
-        }
+    if (!x::runtime::managed_main::Call(&FireJobOnMain, &job, 2500)) {
+        outResult = "MAIN_TIMEOUT";
+        return false;
     }
     outResult = job.result;
     return job.ok;
@@ -1434,6 +2254,7 @@ const char* FireModeName(FireMode mode) {
 void SetCaptureEnabled(bool on) {
     gCaptureOn.store(on);
     EnsureBound();
+    if (on) EnsureSendCaptureInstalled();
     x::runtime::LogI("Travel", "capture=%d installed=%d", on ? 1 : 0,
                      gCaptureInstalled.load() ? 1 : 0);
 }

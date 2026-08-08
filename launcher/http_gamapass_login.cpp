@@ -1343,8 +1343,20 @@ void CollectLevelDbDirs(std::vector<std::wstring>& out) {
 
 bool PreferredBrowserExeImpl(std::wstring& outExe) {
     outExe.clear();
+
+    // ① 系统默认浏览器（Https UserChoice）；仅收 Chromium 系。
+    {
+        std::vector<std::wstring> defaults;
+        CollectDefaultHttpBrowserExe(defaults);
+        if (!defaults.empty()) {
+            outExe = defaults.front();
+            return true;
+        }
+    }
+
+    // ② 默认非 Chromium / 解析失败：安装与进程回退（Plus > Chrome > Edge > 360）
     std::vector<std::wstring> exes;
-    CollectChromeExeCandidates(exes);  // 已含：进程反查 → 默认浏览器 → 固定路径
+    CollectChromeExeCandidates(exes);
 
     auto isPlus = [](const std::wstring& exe) {
         const std::wstring app = ParentDirW(exe);
@@ -1368,9 +1380,6 @@ bool PreferredBrowserExeImpl(std::wstring& outExe) {
                leaf.find(L"360browser") != std::wstring::npos;
     };
 
-    // 优先级：Chrome++ > Chrome > Edge > 360（同档：正在跑优先于仅安装）。
-    // ★ 禁止「任意正在跑的浏览器压过已安装的 Chrome」——Edge 常驻后台时会选 Edge，
-    //   而 HasUsableSession / LS 往往来自 Chrome，CDP 副本无 GamaPass SSO（O5HKKC1 实锤）。
     std::vector<std::wstring> running;
     CollectRunningChromiumExes(running);
 

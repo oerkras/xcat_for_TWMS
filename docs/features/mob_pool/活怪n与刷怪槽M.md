@@ -26,6 +26,7 @@
 | `count` → **n** | `n=` | 入榜活怪数（≤128，超则 `trunc=1`） |
 | `spawnSlots` → **M** | `M=` | 刷怪槽；优先 `lifeMob`，失败用本图峰值 |
 | `rawDict` | `raw=` | MobPool 字典里有效 Mob 指针数（活怪过滤**前**） |
+| `nInView0` | `iv0=`（`fill_rej` / 摘要） | 入榜但 `inView=0` 的活怪数（不挡 n） |
 | `lifeMob` | `lifeMob=` | `MapData.LifeList` 中 `Type==Mob(1)` 条数 |
 | `lifeAll` | `lifeAll=` | LifeList 总条数（含 NPC 等） |
 | `mapId` | `map=` | `MapData.Id` |
@@ -53,11 +54,13 @@ mobscan n=…/M=… map=… lifeMob=… lifeAll=… raw=… trunc=… mapKey=…
 | `ready` | `IsReady != 0` |
 | `deadType` | `== 0` |
 | `hpPct` | `> 0` |
-| `inViewSplit@0x100` | `!= 0`（与 `FindHitMobInRect` 同构） |
-| `suspended@0x1B8` | `== 0`（同上） |
+| `suspended@0x1B8` | `== 0` |
 | `tpl` | `!= 9999999`（地图特殊体） |
+| `inViewSplit@0x100` | **不挡入榜**（只写入 `MobLite.inView`；FindHit 出刀仍要它。BIN：当硬门 → 下层活怪假空图落地） |
 
 > **不要**用 `VecCtrl.Active@0x80` 挡活怪：`SetRemoteMob` 置 false 后怪仍可命中；BIN（`1000002`）曾因此 `raw>0 n=0`。  
+> **不要**把 `inViewSplit` 当成「场上有没有怪」：它是命中资格，不是存在性。  
+> **出刀侧**：`simple_combat` 锁怪可带 `iv=0`（避免假空图），但 `Firing` 在 `!inView` 时**只贴飞不砍**（`fire hold iv=0`）；**站稳后**约 2.5s 仍不可命中则 `iv0_timeout` + `kBanUnreachable`(2.5s) 换怪；飞近纠位期间不计超时。避免 FindHit 拒刀空挥吃 whiff softban。  
 > `n>M` 若仍出现且样本怪坐标/tpl 正常，更像池内真实多怪（非失活留尸），与 LifeList 容量不必强行相等。
 
 失败时回退 `FindAll(Mob)`（同样走 `FillLite`）。

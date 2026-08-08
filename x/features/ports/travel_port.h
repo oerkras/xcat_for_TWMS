@@ -1,8 +1,8 @@
 #pragma once
 // Classic TWMS travel port — PortalManager + WorldManager mapId + 进门。
-// 产品主路径：DirectEnter / StickUp —— 冲量贴门 + 掠过触发区即 CheckMove/↑。
-// fill+Doing 已废；远处贴门分段冲量，进框当拍开火（不要求刹停）。
-// 调试旁路：Up / CheckMove（当前位置触发）/ Rpc（手组包）。禁止 AbsPos/Transform 硬写坐标。
+// 产品主路径：StickUp（贴门 + unity_kbd ↑；禁直调 CheckMovePortal）。
+// fill+Doing 已废；远处贴门旋翼滑翔，站稳后再进门。
+// 调试旁路：Up / CheckMove / DirectEnter（贴门+CheckMove，易断线）/ Rpc。禁止 AbsPos/Transform 硬写坐标。
 
 #include <string>
 #include <vector>
@@ -29,11 +29,11 @@ struct PortalInfo {
 };
 
 enum class FireMode {
-    Up = 0,             // 当前位置 VK_UP（调试；不硬写坐标）
+    Up = 0,             // 当前位置 unity_kbd ↑（调试；不硬写坐标）
     CheckMove = 1,      // 当前位置 WM.CheckMovePortal（调试；不硬写坐标）
     Rpc = 2,            // OutPacket.Create(114) + EncodeStr(+可选 fieldKey) + Send
-    StickUp = 3,        // Impact 贴门 + VK_UP（旧名 TeleportStick）
-    DirectEnter = 4,    // Impact 贴门 + CheckMovePortal（默认）
+    StickUp = 3,        // Impact 贴门 + unity_kbd ↑（产品；禁 CheckMove）
+    DirectEnter = 4,    // Impact 贴门 + CheckMovePortal（易断线，调试保留）
 };
 
 bool EnsureBound();

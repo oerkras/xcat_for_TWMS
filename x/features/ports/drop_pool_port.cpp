@@ -239,7 +239,7 @@ constexpr int kLastTrySkipStamp = 0x7FFFFFFF;
 //      （IMM 0x328634BB + seed@0x7FFB8A2C92A8=0xCD79CB48 → 3）
 //   ③ now - PickStamp(0x88) >= 3000（有符号）——宠吸同款拍前清闸后由官方 Send 再盖
 //   ④ 归属链交由服务端裁决 + 退避兜底
-//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用配置半盒枚举（默认全盒近身 300×200）
+//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用 vacuum 半盒枚举（与宠吸共用 vacuumW/H，默认 300×200）
 //      —— 送包坐标仍是角色位；过大盒会多打拒收，靠 pending/AddStall 与 burst=1 兜底
 //   通过后 Point(角色 Maple 坐标) → Send(pt, Id, 0)
 //      （第 4 参 IMM 0x353E87DA + seed@…92B4=0xCAC17826 → 0，无需伪造 CRC）
@@ -381,6 +381,8 @@ const char* gByPetRectVia = nullptr;
 std::atomic<uint32_t> gPetSendHits{0};
 std::atomic<uint32_t> gPoolSendHits{0};
 std::atomic<bool> gSendProbeInstalled{false};
+// 拒收连击整段休眠截止 tick（worker 侧可读，避免退避期仍排队 MainPump）
+std::atomic<DWORD> gRejectBackoffUntil{0};
 
 DWORD gLastLuRebind = 0;
 DWORD gLastPoolRebind = 0;
@@ -1471,8 +1473,8 @@ bool DropMatchesSkip(void* drop, const SkipIds& skip);
 
 // 只清一件：人物直吸每拍只送 1 件，全盒 Clear 上百次写会占死 MainPump，打怪/瞬移饿死。
 // EndPara：
-// - 默认只解除 SkipHold(4)→Ready(3)（人物直吸）：抛物中强行写 3 会重播落地动画
-// - forceEndParaReady=true（宠吸 ByPet）：!=3 写成 3，否则 ByPet 直接跳过；禁写 0
+// - 默认只解除 SkipHold(4)→Ready(3)：抛物中强行写 3 会重播落地动画（宠吸/人物均勿 force）
+// - forceEndParaReady=true：!=3 写成 3（禁写 0）；仅遗留 ClearPickupGatesNear，宠吸已改 false
 bool ClearPickupGatesOne(void* drop, bool forceEndParaReady = false) {
     if (!LooksLikeHeapPtr(drop) || !DropWritesAllowed()) return false;
     bool touched = false;
@@ -1544,7 +1546,7 @@ int ClearPickupGatesNear(void* pool, float cx, float cy, float halfW, float half
             if (outSampleLast) *outSampleLast = ReadI32(drop, kOffDropLastTry);
             if (outSampleEnd) *outSampleEnd = ReadI32(drop, kOffDropEndPara);
         }
-        if (ClearPickupGatesOne(drop, /*forceEndParaReady=*/true)) ++cleared;
+        if (ClearPickupGatesOne(drop, /*forceEndParaReady=*/false)) ++cleared;
     }
     return cleared;
 }
@@ -1806,7 +1808,10 @@ PetVacNearPass PreparePetVacNearPass(void* pool, float cx, float cy, float halfW
                 out.sampleLast = lastTry;
                 out.sampleEnd = ReadI32(drop, kOffDropEndPara);
             }
-            if (ClearPickupGatesOne(drop, /*forceEndParaReady=*/true)) ++out.gatesCleared;
+            // 勿 force EndPara→3：抛物中强改 Ready 会重播落地动画（upload E226 dcaf08
+            // endPara=1 + 地上打转）。ByPet 本就会跳过 EndPara!=3；只清 LastTry/Stamp，
+            // SkipHold(4)→3 仍由 ClearPickupGatesOne 默认路径处理。
+            if (ClearPickupGatesOne(drop, /*forceEndParaReady=*/false)) ++out.gatesCleared;
         }
 
         if (doStall) {
@@ -1834,6 +1839,29 @@ void RunVacuumOnMain() {
     r.why = "fail";
 
     const DWORD now = GetTickCount();
+
+    // 跨拍池下降 / 拒收整段休眠（满栏连打时跳过扫池+ByPet）
+    static int s_prevDropAfter = -1;
+    static int s_prevNear = 0;
+    static int s_prevGates = 0;
+    static DWORD s_prevTick = 0;
+    static bool s_prevOk = false;
+    static DWORD s_rejectBackoffUntil = 0;
+    static int s_rejectStrikes = 0;
+    constexpr int kRejectBackoffNeed = 3;
+    constexpr DWORD kRejectBackoffMs = 5000;
+
+    if (s_rejectBackoffUntil != 0 && now < s_rejectBackoffUntil) {
+        r.why = "reject_backoff";
+        r.ok = true;
+        r.called = false;
+        return;
+    }
+    if (s_rejectBackoffUntil != 0 && now >= s_rejectBackoffUntil) {
+        s_rejectBackoffUntil = 0;
+        gRejectBackoffUntil.store(0, std::memory_order_relaxed);
+    }
+
     if (!ResolveLocalUser(now)) {
         r.why = "no_lu";
         return;
@@ -1849,7 +1877,6 @@ void RunVacuumOnMain() {
     }
 
     if (!gPetKlass) gPetKlass = FindClass(kPetClass);
-    EnsureSendProbe();
     const uint16_t skill = ReadPetSkill(pet);
     r.petSkill = skill;
     r.petSkillSlot = ReadPetSkillSlot(pet);
@@ -1867,65 +1894,71 @@ void RunVacuumOnMain() {
     constexpr int kPetVacGateClearBudget = 8;
     const SkipIds* skipPtr = gJob.skip.empty() ? nullptr : &gJob.skip;
 
-    // 跨拍池下降证据（空盒早退与正式调用共用）
-    static int s_prevDropAfter = -1;
-    static int s_prevNear = 0;
-    static int s_prevGates = 0;
-    static DWORD s_prevTick = 0;
-    static bool s_prevOk = false;
+    auto finishEmptyLike = [&](DWORD nowTick, bool poolFell) {
+        r.dropCountAfter = r.dropCount;
+        r.dropsDelta = 0;
+        r.poolFellSinceLast = poolFell;
+        r.called = true;
+        r.ok = true;
+        r.why = poolFell ? "ok_absorbed" : "ok_empty";
+        r.stallHeld = StallActiveCount(nowTick);
+        r.beforeRc = ReadRect(pet, kOffPetRc);
+        r.afterRc.x = -halfW;
+        r.afterRc.y = -halfH;
+        r.afterRc.w = gJob.vacuumW;
+        r.afterRc.h = gJob.vacuumH;
+        s_prevDropAfter = r.dropCountAfter;
+        s_prevNear = r.nearCount;
+        s_prevGates = r.gatesCleared;
+        s_prevTick = nowTick;
+        s_prevOk = true;
+        if (poolFell) {
+            s_rejectStrikes = 0;
+            s_rejectBackoffUntil = 0;
+            gRejectBackoffUntil.store(0, std::memory_order_relaxed);
+        }
+    };
+
+    // 全图无掉落：O(1) 读 dict count，跳过 PreparePetVacNearPass 全表扫描
+    if (!pool || r.dropCount <= 0) {
+        if (!gJob.skip.empty() && pet) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
+        const DWORD nowTick = GetTickCount();
+        const bool poolFell = PetVacPoolFellSinceLast(
+            s_prevOk, s_prevTick, s_prevDropAfter, s_prevNear, s_prevGates, nowTick, r.dropCount);
+        finishEmptyLike(nowTick, poolFell);
+        return;
+    }
 
     // 一次扫池：统计 +（有近物时）清闸/Stall/Skip；空盒无写并早退。
-    if (pool) {
-        const int stallActiveBefore = StallActiveCount(now);
-        const PetVacNearPass pass =
-            PreparePetVacNearPass(pool, px, py, halfW, halfH, now, skipPtr, kPetVacGateClearBudget);
-        r.nearCount = pass.nearN;
-        r.nearMoney = pass.nearMoney;
-        r.nearItem = pass.nearItem;
-        r.sampleIsMoney = pass.sampleIsMoney;
-        r.sampleInfo = pass.sampleInfo;
-        r.sampleOwnType = pass.sampleOwn;
-        r.sampleLastTry = pass.sampleLast;
-        r.sampleEndPara = pass.sampleEnd;
-        r.gatesCleared = pass.gatesCleared;
-        r.stallStamped = pass.stallStamped;
-        r.skipStamped = pass.skipStamped;
-        if (r.dropCount <= 0 && pass.total > 0) r.dropCount = pass.total;
+    const int stallActiveBefore = StallActiveCount(now);
+    const PetVacNearPass pass =
+        PreparePetVacNearPass(pool, px, py, halfW, halfH, now, skipPtr, kPetVacGateClearBudget);
+    r.nearCount = pass.nearN;
+    r.nearMoney = pass.nearMoney;
+    r.nearItem = pass.nearItem;
+    r.sampleIsMoney = pass.sampleIsMoney;
+    r.sampleInfo = pass.sampleInfo;
+    r.sampleOwnType = pass.sampleOwn;
+    r.sampleLastTry = pass.sampleLast;
+    r.sampleEndPara = pass.sampleEnd;
+    r.gatesCleared = pass.gatesCleared;
+    r.stallStamped = pass.stallStamped;
+    r.skipStamped = pass.skipStamped;
 
-        if (r.nearCount == 0) {
-            if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
+    if (r.nearCount == 0) {
+        if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
+        const DWORD nowTick = GetTickCount();
+        const bool poolFell = PetVacPoolFellSinceLast(
+            s_prevOk, s_prevTick, s_prevDropAfter, s_prevNear, s_prevGates, nowTick, r.dropCount);
+        finishEmptyLike(nowTick, poolFell);
+        return;
+    }
 
-            r.dropCountAfter = r.dropCount;
-            r.dropsDelta = 0;
-            const DWORD nowTick = GetTickCount();
-            // 与旧「空盒仍调官方口成功」对齐：called=1；跨拍池下降仍记 ok_absorbed
-            const bool poolFell = PetVacPoolFellSinceLast(
-                s_prevOk, s_prevTick, s_prevDropAfter, s_prevNear, s_prevGates, nowTick,
-                r.dropCount);
-            r.poolFellSinceLast = poolFell;
-            r.called = true;
-            r.ok = true;
-            r.why = poolFell ? "ok_absorbed" : "ok_empty";
-            r.stallHeld = StallActiveCount(nowTick);
-            r.beforeRc = ReadRect(pet, kOffPetRc);
-            r.afterRc.x = -halfW;
-            r.afterRc.y = -halfH;
-            r.afterRc.w = gJob.vacuumW;
-            r.afterRc.h = gJob.vacuumH;
-            s_prevDropAfter = r.dropCountAfter;
-            s_prevNear = r.nearCount;
-            s_prevGates = r.gatesCleared;
-            s_prevTick = nowTick;
-            s_prevOk = true;
-            return;
-        }
-
-        // 不变量：Drop.Id 唯一 → 盒内被盖住的件数不可能超过生效退避条目数。
-        if (r.stallStamped > stallActiveBefore) {
-            gStallOff = true;
-            x::runtime::LogW("droppool", "stall off: Drop.Id not unique (stamped=%d > held=%d)",
-                             r.stallStamped, stallActiveBefore);
-        }
+    // 不变量：Drop.Id 唯一 → 盒内被盖住的件数不可能超过生效退避条目数。
+    if (r.stallStamped > stallActiveBefore) {
+        gStallOff = true;
+        x::runtime::LogW("droppool", "stall off: Drop.Id not unique (stamped=%d > held=%d)",
+                         r.stallStamped, stallActiveBefore);
     }
 
     if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
@@ -1940,6 +1973,8 @@ void RunVacuumOnMain() {
     vacuum.h = gJob.vacuumH;
     // 日志 rc= 表示本拍意图真空尺寸（实际写入 .rdata 矩形包）
     r.afterRc = vacuum;
+
+    EnsureSendProbe();  // 仅即将调 ByPet 时装探针（空拍/无技能不再碰）
 
     ByPetRectBackup rectBak{};
     const bool rectPatched = PatchByPetRectPack(gJob.vacuumW, gJob.vacuumH, rectBak);
@@ -2020,6 +2055,24 @@ void RunVacuumOnMain() {
         s_prevGates = r.gatesCleared;
         s_prevTick = nowTick;
         s_prevOk = true;
+
+        if (r.dropsDelta < 0 || poolFell) {
+            s_rejectStrikes = 0;
+            s_rejectBackoffUntil = 0;
+            gRejectBackoffUntil.store(0, std::memory_order_relaxed);
+        } else if (r.sentButPoolSame) {
+            if (s_rejectStrikes < 100) ++s_rejectStrikes;
+            if (s_rejectStrikes >= kRejectBackoffNeed) {
+                s_rejectBackoffUntil = nowTick + kRejectBackoffMs;
+                gRejectBackoffUntil.store(s_rejectBackoffUntil, std::memory_order_relaxed);
+                s_rejectStrikes = 0;
+                x::runtime::LogW("droppool",
+                                 "reject_backoff %ums (sentSame streak → skip vac; 清背包栏后自愈)",
+                                 (unsigned)kRejectBackoffMs);
+            }
+        } else {
+            s_rejectStrikes = 0;
+        }
     }
 }
 
@@ -2611,6 +2664,14 @@ bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumRe
     if (!(vacuumW > 1.f) || !(vacuumH > 1.f)) {
         out.why = "bad_box";
         return false;
+    }
+
+    const DWORD backoffUntil = gRejectBackoffUntil.load(std::memory_order_relaxed);
+    if (backoffUntil != 0 && GetTickCount() < backoffUntil) {
+        out.why = "reject_backoff";
+        out.ok = true;
+        out.called = false;
+        return true;
     }
 
     gJob.vacuumW = vacuumW;

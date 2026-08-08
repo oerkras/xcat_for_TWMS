@@ -55,6 +55,11 @@ constexpr char kHashAvatarRootField[] =
     "e4b6b4386df519caa3bf9fc13fed749d6bc8ffc7457bbbb6b116975d4e74f85";
 constexpr char kFldAvatarRoot[] = "_avatarRoot";
 constexpr size_t kFbAvatarRoot = 0x80;
+// User.<CharacterName>k__BackingField（dump.cs.restored TypeDef 1560；titlebar 同源）
+constexpr char kHashCharacterNameField[] =
+    "c8f23d0c8b6e61781cb66724a21f32f7c05b7b3d8ac032f6385b65676ed6ba8";
+constexpr char kFldCharacterName[] = "<CharacterName>k__BackingField";
+constexpr size_t kFbCharacterName = 0x1B8;
 constexpr uint32_t kRvaGoGetActiveSelf = 0x4E5CC70;  // remount 2026-08-06 · shop_port 同源
 
 constexpr DWORD kJobWaitMs = 800;
@@ -66,6 +71,8 @@ DWORD gLastBind = 0;
 
 size_t gOffAvatarRoot = kFbAvatarRoot;
 bool gAvatarOffTried = false;
+size_t gOffCharacterName = kFbCharacterName;
+bool gCharNameOffTried = false;
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -417,6 +424,62 @@ void EnsureAvatarRootOffset() {
     }
 }
 
+void* ResolveUserKlass() {
+    void* k = x::runtime::il2cpp::FindClass("",
+        "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078");
+    if (!k) k = x::runtime::il2cpp::FindClass("Msc.Game.Object", "User");
+    return k;
+}
+
+void EnsureCharacterNameOffset() {
+    if (gCharNameOffTried) return;
+    gCharNameOffTried = true;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    void* k = ResolveUserKlass();
+    if (!k) return;
+    size_t off = FieldOffsetByHash(k, kHashCharacterNameField);
+    if (!off) off = FieldOffsetByHash(k, kFldCharacterName);
+    if (!off) off = FieldOffsetByHash(k, "CharacterName");
+    if (off >= 0x10 && off < 0x800) {
+        gOffCharacterName = off;
+        x::runtime::LogI("UserPool", "CharacterName off=0x%zX", gOffCharacterName);
+    }
+}
+
+bool ReadIl2CppStringUtf8(void* str, char* out, int outSz) {
+    if (!str || !out || outSz <= 0) return false;
+    out[0] = 0;
+    __try {
+        const int len = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(str) + 0x10);
+        if (len <= 0 || len > 64) return false;
+        const wchar_t* chars =
+            reinterpret_cast<const wchar_t*>(reinterpret_cast<uint8_t*>(str) + 0x14);
+        // 按码点缩短，避免缓冲区不够时 WC 失败或截出半截 UTF-8。
+        for (int wlen = len; wlen > 0; --wlen) {
+            const int n =
+                WideCharToMultiByte(CP_UTF8, 0, chars, wlen, out, outSz - 1, nullptr, nullptr);
+            if (n > 0) {
+                out[n] = 0;
+                return true;
+            }
+        }
+        out[0] = 0;
+        return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = 0;
+        return false;
+    }
+}
+
+bool ReadUserCharacterNameLocked(void* user, char* out, int outSz) {
+    if (!LooksLikeHeapPtr(user) || !out || outSz <= 0) return false;
+    out[0] = 0;
+    EnsureCharacterNameOffset();
+    void* nameObj = ReadPtr(user, gOffCharacterName);
+    if (!LooksLikeHeapPtr(nameObj)) return false;
+    return ReadIl2CppStringUtf8(nameObj, out, outSz);
+}
+
 void EnsureActiveSelfMi() {
     if (gActiveSelfTried) return;
     gActiveSelfTried = true;
@@ -483,6 +546,8 @@ void FillThreatFromUsers(void** users, int n, RemoteThreatSample* out, bool chec
     out->adminLikeCount = 0;
     out->hideSuspectCount = 0;
     out->sampleAdminJob = 0;
+    out->nameCount = 0;
+    for (int i = 0; i < kRemoteNameMax; ++i) out->names[i][0] = 0;
     for (int i = 0; i < n; ++i) {
         void* u = users[i];
         if (!LooksLikeHeapPtr(u)) continue;
@@ -492,6 +557,12 @@ void FillThreatFromUsers(void** users, int n, RemoteThreatSample* out, bool chec
             if (!out->sampleAdminJob) out->sampleAdminJob = job;
         }
         if (checkAvatarHide && !ReadAvatarActiveSelf(u)) ++out->hideSuspectCount;
+        if (out->nameCount < kRemoteNameMax) {
+            char* slot = out->names[out->nameCount];
+            if (ReadUserCharacterNameLocked(u, slot, kRemoteNameLen) && slot[0]) {
+                ++out->nameCount;
+            }
+        }
     }
 }
 
@@ -616,5 +687,9 @@ void* PeekUserLocal() {
 }
 
 void* PeekUserPool() { return gPool; }
+
+bool ReadUserCharacterName(void* user, char* out, int outSz) {
+    return ReadUserCharacterNameLocked(user, out, outSz);
+}
 
 }  // namespace x::features::ports::user_pool

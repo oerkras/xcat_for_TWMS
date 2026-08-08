@@ -400,8 +400,10 @@ CMS 另有更大的 `ActionType`（Walk1/Stand1/Swing… 动画层，TypeDef 151
 >    `XCAT_KBD_GUARD=0` 可关。只处理 `'STAT'`：原函数自身也只认 `'STAT'`；
 >    若日后发现 `guard/s` 压不住卡顿，`DeltaStateEvent`（`stateOffset@0x1C` / `data@0x20`）是第一嫌疑。
 >
->    **量化前必须先按 `keys=` 拆样本。** `keypad_walk_bin` 的 `keys=` 列走的是
->    `GetAsyncKeyState(VK_LEFT/VK_RIGHT)`，读的是 **OS 物理按键**，和内部注入毫无关系。
+>    **量化前必须先按 `keys=` 拆样本。** `keypad_walk_bin`（**默认关**；排障设
+>    `XCAT_WALK_BIN=1`，产物 `logs/keypad_walk_bin.log` 体积大、日常勿开；上传器亦跳过该频道）
+>    的 `keys=` 列走的是 `GetAsyncKeyState(VK_LEFT/VK_RIGHT)`，读的是 **OS 物理按键**，
+>    和内部注入毫无关系。
 >    调试时人手按一下方向键，那几秒的 `vx≠0` 会被算进「内部注入的成绩」，
 >    直接把结论带偏一个数量级。只有 `keys=-` 的样本才是纯内部注入。
 >

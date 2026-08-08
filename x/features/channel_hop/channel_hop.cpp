@@ -17,6 +17,7 @@
 #include "../ports/teleport_port.h"
 #include "../ports/world_port.h"
 #include "../simple_combat/simple_combat.h"
+#include "../soft_login_probe/soft_login_probe.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
@@ -129,6 +130,9 @@ constexpr DWORD kPostHopQuietMs = 4000;    // 结算后暂缓恢复战斗（BIN�
 constexpr DWORD kSettleReadyMs = 1500;     // 未离图时的最短观察
 constexpr DWORD kStayConfirmMs = 1200;     // 从未离图且仍原频 → 才判拒绝
 constexpr DWORD kPostLandGraceMs = 2500;   // 离图再落地后：等频道号追上
+// BIN 0.1.109：Connecting/A8 后常仍 play≈1～2s，才闪 InterStage；提前 settle
+//（migrate_seen_no_leave / channel_match）→ 黑屏窗无人等待、泵空闲卡住。
+constexpr DWORD kPostFireLeaveExpectMs = 5500;  // 发包后等晚到离图的观察窗
 constexpr DWORD kDisconnectingGraceMs = 3000;  // Disconnecting 短闪不立刻 Fail
 constexpr DWORD kNoPacketBackoffMs = 1000;     // A8 未置位后同目标退避
 constexpr DWORD kWaitNoPacketMs = 15000;       // 同目标 no-packet 总窗，防空转
@@ -796,7 +800,9 @@ bool RunJob(JobCtx& job) {
         strncpy_s(job.err, "main_thread", _TRUNCATE);
         return false;
     }
-    if (!x::runtime::main_thread::InvokeAndWait(&JobFn, &job, kJobWaitMs)) {
+    // High：InterStage quiesce 仍可入队（读频道/警戒/发包）；Normal 会被泵拒。
+    if (!x::runtime::main_thread::InvokeAndWait(&JobFn, &job, kJobWaitMs,
+                                               x::runtime::main_thread::JobPrio::High)) {
         strncpy_s(job.err, "job timeout", _TRUNCATE);
         return false;
     }
@@ -998,6 +1004,16 @@ void FinishActive(DWORD cooldownMs, DWORD now) {
 
 void TickPostHopResume(DWORD now) {
     if (gResumeAt == 0 || now < gResumeAt) return;
+    // settle 后晚到的 InterStage：静默期满仍勿 resume，等回图再放刀。
+    if (!ports::world::IsPlayReady()) {
+        static DWORD s_holdResumeLog = 0;
+        if (!s_holdResumeLog || now - s_holdResumeLog > 2000) {
+            s_holdResumeLog = now;
+            Log("post-hop resume hold: not play-ready scene=%d",
+                static_cast<int>(ports::world::GetSceneState()));
+        }
+        return;
+    }
     gResumeAt = 0;
     ResumeCombatAfterHop();
 }
@@ -1008,6 +1024,27 @@ void Fail(const char* why) {
     Notify(notify::NotificationKind::Warning, "manual-rejoin-fail", "随机换频失败",
            why ? why : "未知错误");
     FinishActive(kCooldownAfterFailMs, GetTickCount());
+}
+
+// 迁频超时仍黑屏：粘 sticky + 拉 soft_login（已 Connected 则 dismiss+RequestRestart；
+// 仍不回图则 soft 失败交守护）。soft_login 未开则只记 sticky。
+void RecoverMigrateTimeout(const char* why) {
+    if (gTargetChannel >= 0) {
+        auto_enter::NoteStickyChannel(DispCh(gTargetChannel), why);
+    }
+    if (!soft_login_probe::IsArmed()) {
+        Log("soft recover skip: soft_login not armed (%s)", why ? why : "?");
+        return;
+    }
+    if (soft_login_probe::IsHoldActive()) {
+        Log("soft recover skip: soft_login already hold (%s)", why ? why : "?");
+        return;
+    }
+    Log("soft recover → RequestAttempt (%s) stickyCh=%d", why ? why : "?",
+        DispCh(gTargetChannel));
+    soft_login_probe::RequestAttempt(why ? why : "channel_hop_timeout");
+    Notify(notify::NotificationKind::Info, "manual-rejoin-soft", "换频超时·软重连",
+           "黑屏未回图，已触发软重连试进");
 }
 
 void SettleOk(const char* how, int curIdx, DWORD now) {
@@ -1141,7 +1178,12 @@ void MaybeNotifyDefer(uint32_t seq, const char* reason, DWORD now) {
     if (gLastDeferNotifySeq == seq) return;
     gLastDeferNotifySeq = seq;
     char body[96]{};
-    snprintf(body, sizeof(body), "延后：%s", reason ? reason : "?");
+    const bool autoAfter =
+        reason && (std::strcmp(reason, "冷却中") == 0 || std::strcmp(reason, "换频静默") == 0);
+    if (autoAfter)
+        snprintf(body, sizeof(body), "延后：%s（结束后自动换）", reason);
+    else
+        snprintf(body, sizeof(body), "延后：%s", reason ? reason : "?");
     Notify(notify::NotificationKind::Info, "manual-rejoin-defer", "随机换频排队中", body);
 }
 
@@ -1363,6 +1405,7 @@ void TickWaiting(DWORD now) {
 
     if (!play) {
         if (now - gPhaseAt > kWaitMigrateMs) {
+            RecoverMigrateTimeout("channel_hop_interstage");
             Fail("换频超时（迁频未回图）");
         }
         return;
@@ -1387,10 +1430,29 @@ void TickWaiting(DWORD now) {
         cur = cur6c;
     }
 
+    // 已发包/见 Connecting 但尚未离图：晚到 InterStage 仍在路上，禁止提前 settle。
+    const bool awaitLateLeave =
+        (gExclArmed || gSawConnecting) && !gSawLeavePlay &&
+        (now - gPhaseAt < kPostFireLeaveExpectMs);
+    if (awaitLateLeave) {
+        static DWORD s_awaitLeaveLog = 0;
+        if (!s_awaitLeaveLog || now - s_awaitLeaveLog > 1500) {
+            s_awaitLeaveLog = now;
+            Log("await late leave seq=%u target=%d armed=%d sawConn=%d raw68=%d raw6c=%d elapsed=%ums",
+                gActiveSeq.load(), gTargetChannel, gExclArmed ? 1 : 0, gSawConnecting ? 1 : 0,
+                cur68, cur6c, static_cast<unsigned>(now - gPhaseAt));
+        }
+        return;
+    }
+
     // 硬成功：内存频道号已追上目标（0-based）
+    // 过晚窗仍未离图 + 频道已变：真软迁频；频道已追上也可 settle。
     if (gTargetChannel >= 0 && (cur6c == gTargetChannel || cur68 == gTargetChannel)) {
-        SettleOk(cur6c == gTargetChannel ? "channel_match_6c" : "channel_match_68",
-                 cur6c == gTargetChannel ? cur6c : cur68, now);
+        const char* how = cur6c == gTargetChannel ? "channel_match_6c" : "channel_match_68";
+        if ((gExclArmed || gSawConnecting) && !gSawLeavePlay) {
+            how = cur6c == gTargetChannel ? "channel_match_6c_stable" : "channel_match_68_stable";
+        }
+        SettleOk(how, cur6c == gTargetChannel ? cur6c : cur68, now);
         return;
     }
 
@@ -1425,18 +1487,10 @@ void TickWaiting(DWORD now) {
                 SettleOk("alert_hold_channel_changed", cur, now);
                 return;
             }
-            // 已见迁频握手：频道号可能滞后，宽限后按目标软成功，避免 timeout→换频道重发
-            if (gSawConnecting && now - gPhaseAt >= kPostLandGraceMs) {
-                SettleOk("migrate_seen_channel_lag", gTargetChannel >= 0 ? gTargetChannel : cur, now);
-                return;
-            }
-            if (now - gPhaseAt > kWaitAlertMs) {
-                if (gSawConnecting) {
-                    SettleOk("migrate_seen_alert_timeout", gTargetChannel >= 0 ? gTargetChannel : cur,
-                             now);
-                } else {
-                    Fail("警戒中换频未确认落地");
-                }
+            // 警戒持有时也不再假设目标已达：等到迁频总窗再 Fail，避免黑屏假成功。
+            if (now - gPhaseAt > kWaitMigrateMs) {
+                RecoverMigrateTimeout("channel_hop_alert_timeout");
+                Fail(gSawConnecting ? "警戒中换频超时（未见离图）" : "警戒中换频未确认落地");
             }
             return;
         }
@@ -1463,26 +1517,26 @@ void TickWaiting(DWORD now) {
     }
 
     if (now - gPhaseAt < kSettleReadyMs + kStayConfirmMs) return;
-    // 已见 Connecting：软迁频常不离图，频道号滞后时勿换目标重发（BIN 0.1.40 二次换频）
-    if (gSawConnecting) {
-        SettleOk("migrate_seen_no_leave", gTargetChannel >= 0 ? gTargetChannel : cur, now);
-        return;
-    }
-    // A8 已武装：软迁频可能不闪 Connecting；频道已变则成功，否则拉长等到 migrate 窗再 Fail。
-    // 绝换目标重发（review：armed+漏采 Connecting 仍 retry → 二次换频）。
-    if (gExclArmed) {
+    // 已见 Connecting / A8 武装：禁止 migrate_seen_no_leave 假成功。
+    // 过晚窗仍 play：仅当内存频道已变才软成功；否则等到 migrate 窗 Fail。
+    if (gSawConnecting || gExclArmed) {
         if (cur >= 0 && gFromChannel >= 0 && cur != gFromChannel) {
-            SettleOk("armed_channel_changed", cur, now);
+            SettleOk(gSawConnecting ? "migrate_stable_channel_changed" : "armed_channel_changed",
+                     cur, now);
             return;
         }
         static DWORD s_armedWaitLog = 0;
         if (!s_armedWaitLog || now - s_armedWaitLog > 1500) {
             s_armedWaitLog = now;
-            Log("waiting armed settle (no retry) seq=%u target=%d raw68=%d raw6c=%d from=%d",
-                gActiveSeq.load(), gTargetChannel, cur68, cur6c, gFromChannel);
+            Log("waiting migrate land (no early settle) seq=%u target=%d sawConn=%d armed=%d "
+                "raw68=%d raw6c=%d from=%d",
+                gActiveSeq.load(), gTargetChannel, gSawConnecting ? 1 : 0, gExclArmed ? 1 : 0,
+                cur68, cur6c, gFromChannel);
         }
         if (now - gPhaseAt > kWaitMigrateMs) {
-            Fail("换频未确认落地（已发包未迁频）");
+            RecoverMigrateTimeout(gSawConnecting ? "channel_hop_no_leave"
+                                                : "channel_hop_armed_timeout");
+            Fail(gSawConnecting ? "换频超时（迁频未见离图）" : "换频超时（已发包未见频道变化）");
         }
         return;
     }
@@ -1496,6 +1550,11 @@ void TickWaiting(DWORD now) {
 }  // namespace
 
 void Init() {
+    // PLAY 冷启动可能晚于 Control Apply：保留已排队 seq，否则首点/F10 会被 Init 清掉。
+    const uint32_t keepPending = gPendingSeq.load(std::memory_order_acquire);
+    const DWORD keepReady = gFireReadyAt.load(std::memory_order_acquire);
+    const bool keepEarly = gEarlyHoldFromRequest.load(std::memory_order_acquire);
+
     gWorkerStop.store(false);
     SetState(State::Idle);
     gPendingSeq.store(0);
@@ -1521,6 +1580,18 @@ void Init() {
     gNoPacketStreak = 0;
     gFireReadyAt.store(0, std::memory_order_release);
     Log("Init (direct transfer, no UIChannelShift/GameMenu)");
+
+    if (keepPending != 0) {
+        gPendingSeq.store(keepPending, std::memory_order_release);
+        const DWORD now = GetTickCount();
+        DWORD ready = keepReady;
+        if (ready == 0 || ready <= now) ready = now + kPreFireSettleMs;
+        gFireReadyAt.store(ready, std::memory_order_release);
+        gEarlyHoldFromRequest.store(true, std::memory_order_release);
+        PauseCombatForHop(/*holdInvuln=*/false);
+        Log("Init keep pending seq=%u early=%d readyIn=%ums", keepPending, keepEarly ? 1 : 0,
+            static_cast<unsigned>(ready - now));
+    }
 }
 
 void Shutdown() { StopWorker(); }
@@ -1601,20 +1672,15 @@ void Tick(DWORD now) {
             // fall through to switch (Idle no-op)
         } else if (const char* defer = DeferReason()) {
             MaybeNotifyDefer(seq, defer, now);
-            // BIN：成功后冷却/静默内连点勿挂起自动续 hop（易脏会话被踢）
-            if (std::strcmp(defer, "冷却中") == 0 || std::strcmp(defer, "换频静默") == 0) {
-                uint32_t expect = seq;
-                if (gPendingSeq.compare_exchange_strong(expect, 0)) {
-                    Log("drop pending seq=%u during %s (re-click after cool)", seq, defer);
-                    // Request 边沿停手但未 Begin：非静默持闸期则放行，勿提前拆掉 post-hop quiet。
-                    if (gEarlyHoldFromRequest.exchange(false, std::memory_order_acq_rel) &&
-                        gResumeAt == 0) {
-                        gFireReadyAt.store(0, std::memory_order_release);
-                        ResumeCombatAfterHop();
-                    } else {
-                        gEarlyHoldFromRequest.store(false, std::memory_order_release);
-                    }
-                }
+            // 冷却/静默内连点：保留 pending，到期后自动 Begin（勿丢弃，否则体感「点了没触发」）。
+            // 仍等满 cooldown 再开火，不缩短冷却窗（BIN 踢号风险）。
+            // 静默已结束（仅剩冷却）则放刀；勿因排队把战斗停到冷却满。
+            if ((std::strcmp(defer, "冷却中") == 0 || std::strcmp(defer, "换频静默") == 0) &&
+                gResumeAt == 0 &&
+                gEarlyHoldFromRequest.exchange(false, std::memory_order_acq_rel)) {
+                gFireReadyAt.store(0, std::memory_order_release);
+                ResumeCombatAfterHop();
+                Log("hold pending seq=%u during %s (combat resume, fire after cool)", seq, defer);
             }
         } else {
             BeginActive(seq, now);

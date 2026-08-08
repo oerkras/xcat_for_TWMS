@@ -31,7 +31,7 @@
 | Combo | `LaunchMode` | 取票 | 冷启/切模式自动？ |
 |---|---|---|---|
 | 手动启动并注入 | `AttachWatch` | 不换票 | 约 7s 后自动 **监视** |
-| GAMA PASS自动登录 | `GamaPassAuto` | CDP 点选 | 约 7s 后自动 **换票+开游戏+注入** |
+| GAMA PASS自动登录 | `GamaPassAuto` | 日常浏览器 UIA 点选 | 约 7s 后自动 **换票+开游戏+注入** |
 | gamania (HK) | `OneClickLogin` | HTTP/WebView 账密 | **否**（手点「一键启动」；7s 防误触） |
 
 落盘：`XCat_data/state/launch_mode.txt`（及安装根同步）。  
@@ -53,66 +53,60 @@
 
 ## 3. GAMA PASS 换票流水线
 
-入口：`msc::weblogin::StartOneClick`（策略 `GamaPassAuto`）→ `gamapass_cdp_login`。
+入口：`msc::weblogin::StartOneClick`（策略 `GamaPassAuto`）→ `HttpGamaPassUiaLoginToOtt`。
 
 ```
 StartOneClick
-→ 探测默认浏览器（优先 Chrome++/Chrome，其次 Edge）
-→ CDP 开 Galaxy 登录页
-→ 单次点击 Gama Pass
-→ select-account：按 **登录账号序号**（1=第一个，自上而下）点第 N 张卡 + 一次中心坐标 MouseEvent('click')
-→ 昵称：按 **游戏昵称序号**（1=第一个）勾选 radio/label + 单次「繼續」
-→ result 页拿 access_token / 等官网回跳
-→ 见 NGM：登录页 blank 停泊（**不**立刻 Browser.close；成功门禁仍等经典版 cmdline）
-→ 经典版 cmdline 四元组匹配 → 接管并关闭调试浏览器；否则 NGM deep-link
+→ 探测系统默认 Chromium 浏览器（Https UserChoice；非 Chromium 再安装回退）
+→ CreateProcess 日常目录：--force-renderer-accessibility --new-window Galaxy URL
+  （无 --remote-debugging-port、无 GamaPassCdpProfile）
+→ Windows UI Automation 附着浏览器窗
+→ 点 Gama Pass → 第 N 张账号卡 → 第 N 昵称 →「繼續」
+→ 见 NGM / 等经典版 cmdline 四元组 → 接管
 → InjectIntoClassic
-→ （若浏览器仍在）收尾再关一次调试口
+→ WM_CLOSE 本轮登录窗（不杀日常主进程）
 ```
 
 要点：
 
 | 项 | 约定 |
 |---|---|
-| 点击风暴 | GP / 选号 / 昵称均为 **单次**点击（防卡在 select-account） |
-| 账号 | UI「登录账号」→ 第几个（1=第一个）；落盘 `gamapass_account_slot.txt`；CDP 单邮箱去重后自上而下取第 N 张（父节点 ≥2 邮箱不向上扩）；越界钳末项；换票中禁用 |
-| 昵称 | UI「游戏昵称」→ 第几个（1=第一个）；落盘 `gamapass_nick_slot.txt`；跳过「建立暱稱」后取第 N 个；越界钳末项；换票中禁用 |
-| HTTP 死路径 | `http_gamapass_login.*` 非主路径；`TrySubmitSelectGameAccount` 已跟 `GetGamaPassNickSlot`（radio/select 第 N 项；仅 `__doPostBack` 时退回第一项并打日志）；禁止 `prompt=login→none` 改写 |
-| WebView2 | **已拆除**；GamaPass / HK 均不依赖 |
-| Edge-only 用户 | 须先卸 Google Chrome，否则会绑到空 Chrome 会话 |
-| 守护干净重拉 | 同时结束 **Classic + NGM/NGM64**，再走一键；只杀游戏会残留旧 NGM，官网 Main 常不再拉新经典版，TokenWait 空等后易把 SSO 打崩 |
-| 挂机关时段 | 同样结束 Classic + NGM（避免下一挂机时段冷启踩残留 NGM） |
-| 挂机开时段冷启 | 无 Classic 时若仍有 NGM，先 `kill launch-chain`；清不掉则本 Tick 不启动、下轮再试 |
-| SSO / Cookie | 见 §3.1；Chrome++ 等非标准 User Data **不走**副本逻辑 |
-| 顶栏进度 | 见 §5.4；用户默认在首页 TAB，倒计时/换票必须在状态条可见 |
+| 点击 | **UIA** Invoke / 可点击点（非 CDP DOM） |
+| 账号 | UI「登录账号」→ 第几个（1=第一个）；落盘 `gamapass_account_slot.txt`；UIA 按带 `@` 等 Name 自上而下取第 N 项 |
+| 昵称 | UI「游戏昵称」→ 第几个；落盘 `gamapass_nick_slot.txt`；Radio/ListItem 第 N 项后点繼續 |
+| HTTP 死路径 | `http_gamapass_login.*` 非主路径；禁止 `prompt=login→none` 改写 |
+| WebView2 | **已拆除** |
+| 浏览器选择 | **系统默认** Chromium |
+| 守护干净重拉 | 同时结束 **Classic + NGM/NGM64**，再走一键 |
+| 挂机关时段 | 同样结束 Classic + NGM |
+| 挂机开时段冷启 | 无 Classic 时若仍有 NGM，先 `kill launch-chain` |
+| SSO / Cookie | 见 §3.1；**正道=日常浏览器 UIA**；与日常同一 Cookie 罐 |
+| 顶栏进度 | 见 §5.4 |
+| CDP 旧路径 | `gamapass_cdp_login.*` / `chromium_cdp.*` **保留可编译**，一键入口不再调用 |
 
-### 3.1 SSO 副本与 Cookie（标准 Chrome / Edge）
+### 3.1 日常浏览器与 UIA（正道）
 
-Chrome 136+ 对「日常 User Data」静默忽略 `--remote-debugging-port`，故标准目录会改走隔离副本（**只读日常 → 副本，绝不反向写回**）：
+官方 Chrome 136+ 对默认 User Data **静默忽略**调试口，故产品主路径不再依赖 CDP/副本。
+
+**正道**：日常 Chromium + `--force-renderer-accessibility` + Windows UI Automation 自动点选。会话与日常浏览同源，避免「副本登录顶掉日常 SSO」。
 
 | 项 | 约定 |
 |---|---|
-| 副本路径 | `%LocalAppData%\XCat\GamaPassCdpProfile` |
-| 适用 | `IsStandardChromiumUserData`（官方 Chrome / Edge / 360 默认 User Data） |
-| 不适用 | Chrome++ 等已可开调试口的目录（如 `Program Files\Chrome\Data`）直开，无副本同步日志 |
-| 每次轻量同步 | `Local State`、Preferences、Login Data、Bookmarks 等（**不含**会话 Cookie） |
-| **复用** | 副本已有可用 Cookies（`Default\Network\Cookies` 或 `Default\Cookies`，体积 >64B）→ **不覆盖**会话树，日志：`复用已有会话（未覆盖 Cookies）` |
-| **首次同步** | 副本无可用 Cookies → 从日常灌入 Cookies / Network / Local Storage / Session Storage / IndexedDB |
-| **强制重同步** | 落到完整 `/login`（`failNeedManualLogin`）→ `RequestCdpSessionResync()` 写 `.xcat_force_session_sync`；下一轮 `PrepareCdpSafeUserData` 从日常重灌 |
-| 标记清除 | **仅**灌入后副本侧确有可用 Cookies 才删 marker；日常尚未登录则保留，下次再试 |
-| 无人值守含义 | 稳态靠**复用**撑重拉；服端+日常双灭会话时无法自动救（红线内不 refresh / 不填账密） |
+| 会话目录 | 浏览器默认 User Data（不建 `GamaPassCdpProfile`） |
+| 拉起 | `CreateProcess` + Galaxy URL；无 remote-debugging-port |
+| 点选 | `launcher/win_uia.cpp` + `gamapass_uia_login.cpp` |
+| 收票 | `gamapass_ticket_harvest.cpp`：经典版 cmdline 四元组 |
+| 落到账密页 | `ManualLogin`：提示在本窗登录；出现选账号后继续 UIA |
+| 关窗 | 收票后对附着 HWND `WM_CLOSE`；**不清 Cookie / 不写回 / 不 refresh** |
+| 日志锚点 | `[gamapass-uia]` / `click-gamapass` / `select-account` / `nick-` / `接管票` |
 
-实现：`launcher/chromium_cdp.cpp`（`PrepareCdpSafeUserData` / `RequestCdpSessionResync` / `HasUsableCookies`）。
-
-### 3.2 关调试浏览器时机
+### 3.2 关浏览器时机（UIA）
 
 | 时机 | 行为 |
 |---|---|
-| 见本轮新建 NGM | 仅 `about:blank` 停泊（`parkLoginTabBlank`），**不**立刻 `Browser.close` |
-| 收齐经典版 cmdline 票 / OTT 兑票成功 | `returnIfTicketOk` → blank + `CloseRemoteBrowser` |
-| 落到 `accounts/error` | **最多 1 次** `oauth-error-clean-restart`：关调试浏览器 → 短等 → `EnsureBrowser` + **新** Galaxy OTT 再走一轮（对齐二次手动启动成功；**非**同标签 Navigate soft-retry）。识别靠 `HttpLoginResult::accountsOauthError`，不靠文案。完整 `/login` 不走此路径 |
-| `CloseRemoteBrowser` | `Browser.close` → **轮询**调试口至多 ~800ms（口死即停，非盲等）→ 再按调试口精确杀残留 |
-
-过早强杀易打断 Cookie 落盘，且残留旧 NGM 时关页会导致 TokenWait 空等。
+| 收齐经典版 cmdline 票 | `WM_CLOSE` 本轮登录窗 |
+| 超时 / 失败 | 同样尝试 `WM_CLOSE`；不 Terminate 日常主进程 |
+| （历史）CDP `CloseRemoteBrowser` | 仅旧 CDP 路径；一键主路径不再走 |
 
 票与 NGM 细节见 [`启动系统实现.md`](启动系统实现.md) §3–§5。
 
@@ -274,7 +268,10 @@ GA exports → native settle ≈15s + UnityWndClass
 
 | 路径 | 职责 |
 |---|---|
-| `launcher/gamapass_cdp_login.*` | CDP 点选状态机；见 NGM blank；收票后关浏览器；`accounts/error` 干净重开 1 次；`Get/SetGamaPassAccountSlot`、NickSlot |
+| `launcher/gamapass_uia_login.*` | **主路径** UIA 点选；日常浏览器 + 收票 |
+| `launcher/win_uia.*` | UI Automation 封装 |
+| `launcher/gamapass_ticket_harvest.*` | 经典版 cmdline 收票共用 |
+| `launcher/gamapass_cdp_login.*` | （保留）旧 CDP 状态机；一键入口不再调用；槽位 Get/Set 仍在此 |
 | `launcher/chromium_cdp.*` | 调试口 / Runtime.evaluate；`PrepareCdpSafeUserData`；`RequestCdpSessionResync`；`CloseRemoteBrowser` 轮询落盘 |
 | `launcher/msc_webview_login.*` | 一键会话编排 → 注入 |
 | `launcher/msc_launch.*` | NGM deep-link / 接管验票 |

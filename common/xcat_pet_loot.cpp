@@ -14,12 +14,13 @@ bool EnsureStateDir(const char* binDir) {
 }
 
 void ClampVacuum(PetLootConfig& cfg) {
-    if (!(cfg.vacuumW > 1.f) || cfg.vacuumW > kPetLootVacuumMax) cfg.vacuumW = kPetLootVacuumWDefault;
-    if (!(cfg.vacuumH > 1.f) || cfg.vacuumH > kPetLootVacuumMax) cfg.vacuumH = kPetLootVacuumHDefault;
-    if (!(cfg.charHalfW > 1.f) || cfg.charHalfW > kPetLootCharHalfMax)
-        cfg.charHalfW = kPetLootCharHalfWDefault;
-    if (!(cfg.charHalfH > 1.f) || cfg.charHalfH > kPetLootCharHalfMax)
-        cfg.charHalfH = kPetLootCharHalfHDefault;
+    if (!(cfg.vacuumW >= kPetLootVacuumMin) || cfg.vacuumW > kPetLootVacuumMax)
+        cfg.vacuumW = kPetLootVacuumWDefault;
+    if (!(cfg.vacuumH >= kPetLootVacuumMin) || cfg.vacuumH > kPetLootVacuumMax)
+        cfg.vacuumH = kPetLootVacuumHDefault;
+    // 人物直吸与宠吸共用 vacuum*；半盒镜像写入以便旧读路径/ini 一致
+    cfg.charHalfW = cfg.vacuumW * 0.5f;
+    cfg.charHalfH = cfg.vacuumH * 0.5f;
 }
 
 bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTick) {
@@ -126,24 +127,20 @@ uint32_t PetLootClampIntervalMs(uint32_t ms) {
 
 uint32_t PetLootClampBurstPerTick(uint32_t n) {
     if (n < kPetLootBurstMin) return kPetLootBurstMin;
-    if (n > kPetLootBurstMax) return kPetLootBurstMax;
+    if (n > kPetLootBurstHardCap) return kPetLootBurstHardCap;
     return n;
 }
 
 void PetLootEffectiveVacuum(const PetLootConfig& cfg, float& outW, float& outH) {
-    // 宠吸 = 人物附近真空（默认 300×200）；不再钉全图 3200×2400
-    if (cfg.enabled || cfg.mapVacuumEnabled) {
-        outW = cfg.vacuumW > 1.f ? cfg.vacuumW : kPetLootVacuumWDefault;
-        outH = cfg.vacuumH > 1.f ? cfg.vacuumH : kPetLootVacuumHDefault;
-        return;
-    }
-    outW = cfg.vacuumW;
-    outH = cfg.vacuumH;
+    outW = cfg.vacuumW >= kPetLootVacuumMin ? cfg.vacuumW : kPetLootVacuumWDefault;
+    outH = cfg.vacuumH >= kPetLootVacuumMin ? cfg.vacuumH : kPetLootVacuumHDefault;
 }
 
 void PetLootEffectiveCharHalf(const PetLootConfig& cfg, float& outHalfW, float& outHalfH) {
-    outHalfW = cfg.charHalfW;
-    outHalfH = cfg.charHalfH;
+    float w = 0.f, h = 0.f;
+    PetLootEffectiveVacuum(cfg, w, h);
+    outHalfW = w * 0.5f;
+    outHalfH = h * 0.5f;
 }
 
 void PetLootNormalize(PetLootConfig& cfg) {
@@ -162,17 +159,15 @@ void PetLootNormalize(PetLootConfig& cfg) {
     } else if (cfg.charVacEnabled) {
         cfg.footEnabled = 0;
     }
-    // 人物直吸全盒钉死近身 300×200（冲掉旧 1500×1500 / 400×320）
-    cfg.charHalfW = kPetLootCharHalfWDefault;
-    cfg.charHalfH = kPetLootCharHalfHDefault;
-    // 宠吸钉近身默认盒，冲掉旧 ini 残留的 3200×2400「全图」尺寸
-    if (cfg.enabled || cfg.mapVacuumEnabled) {
+    // 宠吸/人物直吸共用 vacuumW/H；旧「全图」3200×2400 一次性压回默认
+    if (cfg.vacuumW >= 3199.f && cfg.vacuumW <= 3201.f && cfg.vacuumH >= 2399.f &&
+        cfg.vacuumH <= 2401.f) {
         cfg.vacuumW = kPetLootVacuumWDefault;
         cfg.vacuumH = kPetLootVacuumHDefault;
     }
     cfg.intervalMs = PetLootClampIntervalMs(cfg.intervalMs);
     cfg.burstPerTick = PetLootClampBurstPerTick(cfg.burstPerTick);
-    ClampVacuum(cfg);
+    ClampVacuum(cfg);  // 同步 charHalf* = vacuum*/2
     if (cfg.filterFlags == 0) cfg.filterFlags = kPetLootFilterDefault;
     cfg.skipFilterEnabled = cfg.skipFilterEnabled ? 1u : 0u;
     if (cfg.skipRuleCount > static_cast<uint32_t>(kPetLootMaxSkipRules))
@@ -208,6 +203,7 @@ bool ReadPetLoot(const char* binDir, PetLootConfig& out) {
     uint64_t tick = 0;
     if (!ReadPetLootIni(binDir, out, &tick)) return false;
     out.writeTickMs = tick;
+    PetLootNormalize(out);
     return true;
 }
 

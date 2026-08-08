@@ -15,6 +15,7 @@
 | [`ops/启动系统实现.md`](ops/启动系统实现.md) | Galaxy 换票、NGM deep-link、启动骨架（对照枫星注入器启动文档） |
 | [`ops/架构总览.md`](ops/架构总览.md) | TWMS 分层 DAG；`xcat_app` 内嵌 WebView / GamaPass 换票 |
 | [`ops/日志系统.md`](ops/日志系统.md) | 统一 `xcat_log`：launcher / inject / payload JSONL + GUI callback |
+| [`ops/il2cpp托管调用线程规约.md`](ops/il2cpp托管调用线程规约.md) | **托管调用必须在 MainPump 上**：换图黑屏根因（Class::Init 被打断）、故障链反汇编、`il2cpp_fault_probe` / `hang_autopsy` 排障手册 |
 
 ---
 
@@ -71,10 +72,11 @@
 | [`timed_keys/模块设计.md`](timed_keys/模块设计.md) | 定时按键：7 槽周期脉冲；对照枫星 `timed_keys`，经典版走 `InputManager.KeyDownTouch/Up`（✅ 已挂入；实机待验） |
 | [`buffs/模块设计.md`](buffs/模块设计.md) | BUFF 管理器：技能-only 续航；对照枫星 `buffs`，经典版走 `AffectedSkillEntry` + `DoActiveSkillPrepare`（✅ 已挂入；实机待验） |
 | [`buffs/P0a_锚点复核.md`](buffs/P0a_锚点复核.md) | TW IDB 钉死：在身列表 `+0x330`、Prepare/GetSkill/GetSkillLevel RVA |
-| [`multi_skill/模块设计.md`](multi_skill/模块设计.md) | 技能多发：勾选清单 gap 串发；对照枫星 `multi_skill_port`，经典版走 `DoActiveSkillPrepare`（✅ 已挂入；实机待验） |
-| [`auto_enter/模块设计.md`](auto_enter/模块设计.md) | 自动进游戏：分区→**未满频道随机 (PickOpen)**→选角；单次 Go、禁 Trigger（✅；旧 PickLeast 已退役） |
+| [`multi_skill/模块设计.md`](multi_skill/模块设计.md) | 技能多发：清单 gap 串发；技能 `DoActiveSkill`（可选 SendUse）+ 普攻 OnFuncKey；对照枫星仅借排程语义（✅ 可行性对照；实机待验） |
+| [`auto_enter/模块设计.md`](auto_enter/模块设计.md) | 自动进游戏：分区→**未满频道随机 (PickOpen)**→选角；单次 Go、禁 Trigger；**softFast**/sticky（✅；旧 PickLeast 已退役） |
 | [`auto_enter/选角与SelectedIndex锚点.md`](auto_enter/选角与SelectedIndex锚点.md) | TW IDA 钉死：`UILoginCharacter+0x168` SelectedIndex；可跳过 Select 的依据 |
 | [`auto_enter/RVA重锚_20260803.md`](auto_enter/RVA重锚_20260803.md) | 2026-08-03 客户端更新：登录 UI 类哈希 + 方法 RVA 全表重锚 |
+| [`soft_login/模块设计.md`](soft_login/模块设计.md) | 软重连试连：ConnectLogin→softFast 重进→playReady；Done≠playReady 闸 + 90s 墙钟（✅ 默认关） |
 | [`ccu/模块设计.md`](ccu/模块设计.md) | 分区 CCU：登录频道页或 auto_enter 喂数一次 → SHM → 底栏（✅） |
 | [`channel_hop/模块设计.md`](channel_hop/模块设计.md) | 随机换频：挂机卡/F10 → `manualRejoinSeq` → **直调** `SendTransfer@0xBB5200`（无菜单；✅ 挂入；08-03 锚点已同步） |
 | [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：UserPool → 停手/换频；可勾选 GM/隐身升级 + 强制 Alarm（✅ 契约 v60） |
@@ -130,7 +132,7 @@
 | `x/features/ports/player_combat_port.*` | LocalUser 战斗坐标 |
 | `x/features/ports/attack_input_port.*` | 普攻键脉冲（InjectKeyHold） |
 | `x/features/mob_scan/` | 扫怪 worker → `[core] mobScanIntervalMs` · 事件唤醒 / 按需刷新；见 [`mob_scan/模块设计.md`](mob_scan/模块设计.md) · n/M 见 [`mob_pool/活怪n与刷怪槽M.md`](mob_pool/活怪n与刷怪槽M.md) |
-| `x/features/simple_combat/` | 状态机打怪 → `[core] simpleCombat` · F5 · Impact贴怪默认（含 `heli_rotor` 旋翼环）· `logs/combat.log` |
+| `x/features/simple_combat/` | 状态机打怪 → `[core] simpleCombat` · F5 · Impact贴怪默认（含 `heli_rotor` 旋翼环）· **防抖** [`simple_combat/防抖.md`](simple_combat/防抖.md) · `logs/combat.log` |
 | `x/features/ports/teleport_port.*` | QueryFlightState / ImpactSetVelocity / ImpactImpulseToward + fill+Doing；见 [`teleport/模块设计.md`](teleport/模块设计.md) · [`P0d`](teleport/P0d_fill_slim软重载结案.md) |
 | `x/features/fly/` | F6 Impact 飞 + fh-ban；见 [`fly/模块设计.md`](fly/模块设计.md) |
 | `x/features/travel/` + `ports/travel_port.*` + `worldmap_marker_travel/` | 同盘赶路 + Spot 入口；见 [`travel/模块设计.md`](travel/模块设计.md) · [`worldmap_marker_travel/模块设计.md`](worldmap_marker_travel/模块设计.md) |
@@ -140,6 +142,7 @@
 | `x/features/buffs/` + `ports/skill_port.*` | BUFF 续航 → `user.ini [buffs]` + runtime SHM；见 [`buffs/模块设计.md`](buffs/模块设计.md) |
 | `x/features/multi_skill/` + `ports/multi_skill_port.*` + `skill_port.*` | 技能多发 → `[core] multiSkill*` + `multiskill_select.tsv`；见 [`multi_skill/模块设计.md`](multi_skill/模块设计.md) |
 | `x/features/auto_enter/` | 自动进游戏；见 [`auto_enter/模块设计.md`](auto_enter/模块设计.md)、[`选角与SelectedIndex锚点.md`](auto_enter/选角与SelectedIndex锚点.md) |
+| `x/features/soft_login_probe/` | 软重连试连；见 [`soft_login/模块设计.md`](soft_login/模块设计.md) |
 | `x/features/ccu/` | 分区 CCU（登录页/auto_enter 喂数）→ SHM → 底栏；见 [`ccu/模块设计.md`](ccu/模块设计.md) |
 | `x/features/channel_hop/` | 随机换频 → `[core] manualRejoinSeq`；见 [`channel_hop/模块设计.md`](channel_hop/模块设计.md) |
 | `x/features/encounter/` | 遇人策略 → `[core] autoRelogin*`；见 [`encounter/模块设计.md`](encounter/模块设计.md) |

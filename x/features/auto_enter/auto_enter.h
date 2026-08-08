@@ -17,7 +17,8 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
 bool IsDesired();
 
 // Soft-relogin / 踢线回登录后：若自动进仍开着，从 Done/Failed 拉回 Idle 重跑选区选角。
-// why=="soft_login" 时开快轨：Connected settle 缩短、**仅该轮**优先粘回 sticky 频道。
+// why=="soft_login" 时开快轨：Connected/点区/选频/离频/选角 settle 压到最短、
+// **仅该轮**优先粘 sticky；频道 UI 已武装到 sticky 则跳过 SelectChannel 直 GoWorld。
 // worker 可调；下一拍 Tick 会进 WaitWorldList。
 void RequestRestart(const char* why);
 
@@ -27,6 +28,10 @@ void NoteStickyChannel(int channelId1Based, const char* why);
 
 // 当前是否停在 Failed（软重进可据此早退，不必空等到 play-ready 超时）。
 bool IsFailed();
+
+// 选角链路已收尾（Done）。软重进用来发现「Done 了但迟迟不 play-ready」的卡死，
+// 避免空等到 reenter_timeout（dcaf08：Done@01:16:21 → 仍 playReady=0 直到 01:18:11 fail）。
+bool IsDone();
 
 }  // namespace auto_enter
 }  // namespace features

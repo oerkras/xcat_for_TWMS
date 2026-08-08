@@ -18,7 +18,8 @@ struct BrowserProfile {
     std::wstring userData;  // User Data / Chrome++ Data
 };
 
-// 解析本机首选 Chromium 与 User Data（进程反查 / 默认浏览器 / Chrome++ / 官方路径）
+// 解析本机首选 Chromium 与 User Data（系统默认优先）。
+// 官方 Chrome/360 标准目录 → GamaPassCdpProfile 副本；Edge / Chrome++ → 直开日常。
 bool ResolvePreferredChromium(BrowserProfile& out, const LogFn& log = nullptr);
 
 // 下一轮 PrepareCdpSafeUserData 强制从日常 User Data 重同步 Cookies/会话
@@ -31,6 +32,18 @@ void RequestCdpSessionResync();
 // 返回：是否已无调试口响应（关干净或本来就没开）。
 bool CloseRemoteBrowser(int port = kDefaultRemoteDebugPort, const LogFn& log = nullptr);
 
+// Gama Pass 自动登录前防呆：结束会锁住 profile.userData 的日常浏览器（用户已授权）。
+// ★ 只杀 Chromium 系且命中目标目录 / 同安装默认同目录的实例；跳过已带本调试口的进程。
+// 不清 Cookie、不写回 User Data。返回成功 Terminate 的进程数。
+unsigned KillBrowsersBlockingProfile(const BrowserProfile& profile,
+                                     int debugPort = kDefaultRemoteDebugPort,
+                                     const LogFn& log = nullptr);
+
+// UIA 自动登录前：结束「首选浏览器」同安装的日常主进程（用户授权），确保本轮只拉起登录窗。
+// ★ 只杀 Chromium 主进程（跳过 --type= 子进程）；不清 Cookie / User Data。
+unsigned KillDailyBrowsersForUiaLogin(const std::wstring& preferredExe,
+                                      const LogFn& log = nullptr);
+
 class Session {
 public:
     Session();
@@ -41,12 +54,12 @@ public:
     // 连接已有调试口；失败返回 false
     bool Connect(int port, const LogFn& log = nullptr);
     // 若未连接：用 profile 启动浏览器（带调试口），再 Connect。
-    // 启动前检测同 User Data / 同浏览器实例是否已被无调试口占用（不杀进程）；
+    // 启动前先 KillBrowsersBlockingProfile 释放目录，再探测残留冲突；
     // 冲突或失败时 outFailHint 为人话提示（可空）。
     bool EnsureBrowser(const BrowserProfile& profile, int port, const LogFn& log = nullptr,
                        std::wstring* outFailHint = nullptr);
 
-    // 检测配置目录是否正被「无本调试口」的 Chromium 占用（不杀进程）。
+    // 检测配置目录是否正被「无本调试口」的 Chromium 占用（只读探测，不杀）。
     static bool ProbeUserDataConflict(const BrowserProfile& profile, int debugPort,
                                       std::wstring& outHint, const LogFn& log = nullptr);
 

@@ -23,6 +23,23 @@ namespace {
 // 发射节奏：~11Hz。每发一次 = 一个主线程泵 job，太密会拖帧；太疏则两拍之间重力
 // 累积的落差变大（90ms = 3 个物理步 = 180px/s 锯齿 ≈ 8px 位置起伏，可接受）。
 constexpr DWORD kIssueMs = 90;
+// 贴怪到位悬停：加密到战斗 tick（16ms）。比物理步 30ms 更密，可在一步重力中途
+// 再纠一次 vy，把位置锯齿往「接近 0」压。进近/赶路仍 90。禁止 AbsPos 硬写。
+// 仅 SoftSettleEnabled（=面板防抖）为真时启用；关防抖必须整段旁路，否则体感开关失灵。
+constexpr DWORD kIssueSettleMs = 16;
+// 配平加密 / 软钉 sp 的位置窗（略宽于进近 P 死区，避免边缘掉回 90ms）。
+constexpr float kSettleErrX = 16.f;
+constexpr float kSettleErrY = 16.f;
+// 到位软钉（两轴对称）：进近死区 ±12 会把残差冻在进入点（BIN X 中位 |ex|≈11）。
+// 1px 死区 + 中等 P；限幅防 /T 死拍把几 px 放大成泵。GravityLoss 已按真实 since。
+constexpr float kSettleDeadX = 1.f;
+constexpr float kSettleDeadY = 1.f;
+constexpr float kKpXSettle = 10.f;
+constexpr float kKpYSettle = 10.f;
+constexpr float kSettleMaxVx = 160.f;
+// 跟跳时 settle 窗内 |ey| 常到数 px～十余 px：160 收得太肉（BIN 起跳后 des 被钉）。
+// 静止 |ey|≤1 仍走死区；窗外走进近/满火力，不靠这条。
+constexpr float kSettleMaxVy = 360.f;
 // 紧急档要按 tick 率走（旋翼 ~55Hz）。已出界还在往外飞时，每被节奏闸拦一拍就多滑
 // 一个 v*Δt：BIN 1ce9a0 里连拦两拍 40ms、以 545px/s 多滑 22px，那正是剩余的全部出界深度。
 // 紧急是短促的几拍，按 tick 发不构成持续高频。
@@ -228,6 +245,17 @@ constexpr float kSpeedScaleMin = 0.25f;
 constexpr float kSpeedScaleMax = kIntentCeilV / kBaseRtb;
 static_assert(kBaseRtb * 10.0f <= kIntentCeilV, "10X 必须落在可救性范围内，否则坠落拉不回");
 
+// 面板「飞行速度」拉到 1000%（=10.0X）时的满火力门槛。
+// 只在这一档改控制律；其它倍率仍走 Kp=7 的温和 P，避免 3X/5X 也变成暴力冲刺。
+// 阈值用 9.95 吃掉 float 舍入：UI/IPC 以整数百分数下发，10.00 不会漂。
+constexpr float kFullFireScale = 10.0f;
+constexpr float kFullFireScaleEps = 0.05f;
+// 1000% 对站点预刹（与撞墙预刹同形：允许速度 ≤ 剩余距离 / 视野）。
+// ★ 回退：改 false 即整段失效，死拍/7410 天花板不动。效果差就关，别拆别的。
+constexpr bool kFullFireApproachBrake = true;
+// 0.15s：进站约多半秒减速尾巴，比撞墙 0.2s 少磨叽。改 0.10 更猛、0.20 更稳。
+constexpr float kFullFireApproachBrakeSec = 0.15f;
+
 // 当前持有者。语义见 heli_rotor.h 的 Owner 注释：抢占式，被抢者静默 no-op。
 std::atomic<unsigned> gOwner{static_cast<unsigned>(Owner::None)};
 
@@ -246,7 +274,17 @@ float ActiveSpeedScale() {
     return i < kOwnerCount ? gSpeedScale[i].load(std::memory_order_relaxed) : 1.0f;
 }
 
+bool FullFireScale() {
+    return ActiveSpeedScale() + kFullFireScaleEps >= kFullFireScale;
+}
+
 ModeCaps CapsFor(Mode m) {
+    // 1000% 满火力：巡航/站位/悬停/自救一律顶到可救天花板（≈7410），
+    // 不再吃 Cruise 6200 / Station 4800 那道软限速。
+    // Rtb 必须一起抬：否则 FallGate 仍按 6600 算，意图 7410 的下降会被误判成失控拉平。
+    if (FullFireScale() && m != Mode::Off) {
+        return {kIntentCeilV};
+    }
     const float k = ActiveSpeedScale();
     float s = 0.f;
     switch (m) {
@@ -282,9 +320,13 @@ float FallGateVy() { return CapsFor(Mode::Rtb).speed + kFallGateMarginVy; }
 
 // 两次发射之间重力吃掉的速度 = 盈亏线。用**真实耗时**而非标称周期：主线程一拥塞
 // 发射就变稀，需要的配平同比变大；写死常数正是历史上净下沉的根源。
+//
+// ★ 禁止再把 since 抬到物理步 30ms：settle 加密到 16ms 后，地板会让每拍 trim 恒=60、
+// feedforward 恒≈60，多配约 +30px/s → 软 P 只能用 ey≈−5 顶回去（BIN 02:11 92/123
+// 样本钉在 ey=-5）。亚物理步按比例配平；下限 1ms 防首拍/时钟毛刺除爆。
 float GravityLoss(DWORD sinceMs) {
     float ms = static_cast<float>(sinceMs);
-    if (ms < kPhysicsStepMs) ms = kPhysicsStepMs;
+    if (ms < 1.f) ms = 1.f;
     if (ms > kMaxTrimWindowMs) ms = kMaxTrimWindowMs;
     return kGravityPerStep * ms / kPhysicsStepMs;
 }
@@ -298,6 +340,9 @@ std::atomic<bool> gSpUnbounded{false};
 
 DWORD gLastIssueMs = 0;
 bool gLastTickFired = false;
+
+// 与 simple_combat 防抖同开同关（SetAntiJitterEnabled 转发）。
+std::atomic<bool> gSoftSettleEnabled{true};
 
 std::atomic<bool> gBailed{false};
 
@@ -352,6 +397,44 @@ bool ClampToAirspace(float* x, float* y) {
     const float t = static_cast<float>(r.top) - kEnvSlackYPx;
     const float b = static_cast<float>(r.bottom) + kEnvSlackYPx;
     if (ri <= l || b <= t) return true;
+    if (*x < l) *x = l;
+    if (*x > ri) *x = ri;
+    if (*y < t) *y = t;
+    if (*y > b) *y = b;
+    return true;
+}
+
+bool QueryCombatMoveBounds(float* left, float* top, float* right, float* bottom) {
+    ports::map_bounds::Rect r{};
+    if (!ports::map_bounds::QueryPlayBounds(0, &r) || !r.ok) return false;
+    const float rawL = static_cast<float>(r.left);
+    const float rawR = static_cast<float>(r.right);
+    const float rawT = static_cast<float>(r.top);
+    const float rawB = static_cast<float>(r.bottom);
+    if (!(rawR > rawL) || !(rawB > rawT)) return false;
+    const float cx = 0.5f * (rawL + rawR);
+    const float cy = 0.5f * (rawT + rawB);
+    float hw = 0.5f * (rawR - rawL) * kCombatMoveBoundsScale;
+    float hh = 0.5f * (rawB - rawT) * kCombatMoveBoundsScale;
+    if (hw < 1.f) hw = 1.f;
+    if (hh < 1.f) hh = 1.f;
+    if (left) *left = cx - hw;
+    if (right) *right = cx + hw;
+    if (top) *top = cy - hh;
+    if (bottom) *bottom = cy + hh;
+    return true;
+}
+
+bool PointInCombatMoveBounds(float x, float y) {
+    float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
+    if (!QueryCombatMoveBounds(&l, &t, &ri, &b)) return true;
+    return x >= l && x <= ri && y >= t && y <= b;
+}
+
+bool ClampToCombatMoveBounds(float* x, float* y) {
+    if (!x || !y) return false;
+    float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
+    if (!QueryCombatMoveBounds(&l, &t, &ri, &b)) return true;
     if (*x < l) *x = l;
     if (*x > ri) *x = ri;
     if (*y < t) *y = t;
@@ -441,6 +524,15 @@ void Reset() {
     gBailed.store(false, std::memory_order_release);
     gStaleSinceMs = 0;
     // 倍率是用户设置，不是本轮状态，换图/开关都不该把它冲掉。
+    // SoftSettle 同理：跟面板防抖走，Reset 不改。
+}
+
+void SetSoftSettleEnabled(bool on) {
+    gSoftSettleEnabled.store(on, std::memory_order_release);
+}
+
+bool SoftSettleEnabled() {
+    return gSoftSettleEnabled.load(std::memory_order_acquire);
 }
 
 void SetSpeedScale(Owner o, float scale) {
@@ -548,13 +640,81 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // 撞墙预刹、可达集依旧在下游最后说话，安全性一分不减。
     const float errX = sp.x - st.x;
     const float errY = sp.y - st.y;
+    // 提前判定「到位悬停」：改竖直律 + 节奏；emergency 稍后置位时再关掉加密。
+    // 必须吃 SoftSettleEnabled：否则关防抖只拆钉点、软钉仍开 → ImGui 勾选体感无效。
+    const bool settleHoverCand =
+        gSoftSettleEnabled.load(std::memory_order_acquire) && !st.onFh &&
+        (sp.mode == Mode::Station || sp.mode == Mode::Hold) &&
+        std::fabs(errX) <= kSettleErrX && std::fabs(errY) <= kSettleErrY;
+
     float desiredVx = sp.leadVx;
-    if (std::fabs(errX) > kDeadX) desiredVx += kKpX * errX;
+    if (settleHoverCand) {
+        // 水平软钉：与 Y 同律。进近 kDeadX=12 在 settle 窗内会把 |ex| 冻在 ~11（BIN 02:23）。
+        if (std::fabs(errX) > kSettleDeadX) {
+            desiredVx = sp.leadVx + kKpXSettle * errX;
+            desiredVx = Clamp(desiredVx, -kSettleMaxVx, kSettleMaxVx);
+        }
+    } else if (std::fabs(errX) > kDeadX) {
+        desiredVx += kKpX * errX;
+    }
 
     // 竖直：先定「这一周期想要的平均速度」，作动器指令另算。+Y 向上 ⇒ errY>0 = 往上。
     // 挂着台时不给前馈：地板上的水平/竖直语义由引擎走路负责，硬塞竖直意图会把人抠离地板。
     float desiredVy = st.onFh ? 0.f : sp.leadVy;
-    if (!st.onFh && std::fabs(errY) > kDeadY) desiredVy += kKpY * errY;
+    if (!st.onFh) {
+        if (settleHoverCand) {
+            // 软钉 sp：±1 内纯配平（desired=lead）；之外 P 往 sp 收。不用进近 ±12 死区。
+            if (std::fabs(errY) > kSettleDeadY) {
+                desiredVy = sp.leadVy + kKpYSettle * errY;
+                desiredVy = Clamp(desiredVy, -kSettleMaxVy, kSettleMaxVy);
+            }
+        } else if (std::fabs(errY) > kDeadY) {
+            desiredVy += kKpY * errY;
+        }
+    }
+
+    // ── 1000% 满火力：一拍走完误差（远距顶满；近距按距离收油）──────────────
+    //
+    // 普通档 desiredV = Kp·err（Kp=7）。典型贴怪一两百 px → 意图只有 700~1400，
+    // 档位上限再高也摸不到。
+    //
+    // 面板拉到 1000% 时改成死拍（deadbeat）：desiredV = 误差 / 周期。
+    //   · 远距：|err|/T ≫ caps → 下游合速钳咬到档位上限（满火力 CapsFor≈7410）
+    //   · 近距：|err|/T < caps → 自动收油，一拍落到目标（不冲穿）
+    // 曾试过 bang-bang「死区外恒满速」：出刀点本来就贴怪，fire 行 |v| 仍低；接近段
+    // 过冲晃刀，用户判定不行 → 已回退为本死拍。只开 Cruise/Station。
+    // 撞墙预刹 / 合速钳 / 可达集全在下游。
+    // 到位软钉时两轴都禁止死拍：几 px 残差会被 /T 放大成泵，与「接近 0」相反。
+    if (FullFireScale() && (sp.mode == Mode::Cruise || sp.mode == Mode::Station)) {
+        float Tsec = static_cast<float>(sinceMs) * 0.001f;
+        if (Tsec < 0.020f) Tsec = 0.020f;  // 与紧急档同量级下限，避免除零/火箭
+        if (!settleHoverCand && std::fabs(errX) > kDeadX)
+            desiredVx = sp.leadVx + errX / Tsec;
+        if (!settleHoverCand && !st.onFh && std::fabs(errY) > kDeadY)
+            desiredVy = sp.leadVy + errY / Tsec;
+
+        // 对站点预刹：远距 room=err/H ≫ caps → 不咬合，仍满速；进站才收油。
+        // 回退开关见文件顶部 kFullFireApproachBrake。
+        if (kFullFireApproachBrake && kFullFireApproachBrakeSec > 1e-4f) {
+            const float H = kFullFireApproachBrakeSec;
+            if (!settleHoverCand && std::fabs(errX) > kDeadX) {
+                const float room = errX / H;  // 与误差同号
+                if (errX > 0.f) {
+                    if (desiredVx > room) desiredVx = room;
+                } else {
+                    if (desiredVx < room) desiredVx = room;
+                }
+            }
+            if (!settleHoverCand && !st.onFh && std::fabs(errY) > kDeadY) {
+                const float room = errY / H;
+                if (errY > 0.f) {
+                    if (desiredVy > room) desiredVy = room;
+                } else {
+                    if (desiredVy < room) desiredVy = room;
+                }
+            }
+        }
+    }
 
     // ── 安全包线 ────────────────────────────────────────────────────
     bool emergency = false;
@@ -566,19 +726,26 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     if (ports::map_bounds::QueryPlayBounds(0, &r) && r.ok) {
         const float rawL = static_cast<float>(r.left);
         const float rawR = static_cast<float>(r.right);
-        // 外扩成合法空域，且两轴余量不同：AABB 是**可站立面**，最低/最高台上站着怪是常态，
-        // 竖直必须让出整条出刀带才够得着（见 heli_rotor.h 的 kEnvSlackXPx / kEnvSlackYPx）。
-        const float l = rawL - kEnvSlackXPx;
-        const float ri = rawR + kEnvSlackXPx;
-        const float t = static_cast<float>(r.top) - kEnvSlackYPx;
-        const float b = static_cast<float>(r.bottom) + kEnvSlackYPx;
+        // Combat/Travel：可位移区 = raw×0.95（中心缩放）。F6 仍用外扩空域（unbounded 另放行）。
+        const bool combatMove = (o == Owner::Combat || o == Owner::Travel);
+        float l = rawL - kEnvSlackXPx;
+        float ri = rawR + kEnvSlackXPx;
+        float t = static_cast<float>(r.top) - kEnvSlackYPx;
+        float b = static_cast<float>(r.bottom) + kEnvSlackYPx;
+        float moveL = l, moveR = ri, moveT = t, moveB = b;
+        if (combatMove && QueryCombatMoveBounds(&moveL, &moveT, &moveR, &moveB)) {
+            l = moveL;
+            ri = moveR;
+            t = moveT;
+            b = moveB;
+        }
         if (ri > l && b > t) {
             // ── 向下：恒生效，不受 sp.unbounded 放行 ──────────────────
             // 四个方向里只有这一个会毁掉会话（穿出最低台 ⇒ 引擎判掉图 ⇒ 重载/断线，
             // 即 a69130 野猪图那次「越界重拉」）。左右和上方都是纯空气，飞出去最坏什么
             // 也不发生，所以那三面允许手动驾驶放开；这一面对谁都不放。
             // Rect 的 top/bottom 是**数值**含义（top=min y）；+Y 向上 ⇒ top 才是图底。
-            if (st.y < t) {  // 已跌破最低台：全力上拉
+            if (st.y < t) {  // 已跌破工作框下沿：全力上拉
                 desiredVy = kRescueClimbVy;
                 emergency = true;
                 if (st.y < t - kBailoutPx) {
@@ -629,34 +796,33 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
             // 106ms），按标称算会刹不住。早刹几十毫秒不影响出刀，冲出去要掉线。
             // 视野按「一次错过的发射」给足：紧急档 45ms，卡顿时实测能拖到 106ms，取 200ms。
             constexpr float kBrakeHorizonSec = 0.200f;
-            // 刹车线从 AABB 内缩 kBrakeInsetXPx，让稳态停靠点离墙留出余量而不是紧贴 rawR
-            //（成因与「为什么横向能缩、竖直不能」见 heli_rotor.h 的 kBrakeInsetXPx）。
-            // 窄图兜底：内缩量不超过图宽的 1/4，两条刹车线永远不会交叉——交叉了这两句钳位
-            // 会互相打架，把人钉死在某一侧。
-            float insetX = (rawR - rawL) * 0.25f;
+            // 刹车线相对**工作框**内缩：Combat 工作框已是 raw×0.95；再套 kBrakeInset 防贴边。
+            // 窄图兜底：内缩量不超过框宽的 1/4，两条刹车线永不交叉。
+            const float edgeL = combatMove ? l : rawL;
+            const float edgeR = combatMove ? ri : rawR;
+            float insetX = (edgeR - edgeL) * 0.25f;
             if (insetX > kBrakeInsetXPx) insetX = kBrakeInsetXPx;
             if (insetX < 0.f) insetX = 0.f;
             if (!sp.unbounded) {
-                const float roomR = (rawR - insetX - st.x) / kBrakeHorizonSec;  // 允许的最大 +vx
-                const float roomL = (rawL + insetX - st.x) / kBrakeHorizonSec;  // 允许的最小 vx（界内为负）
-                // 已在刹车线之外时 room 同号，这两句会把意图顶成内推，与紧急推同向且力度更足。
+                const float roomR = (edgeR - insetX - st.x) / kBrakeHorizonSec;
+                const float roomL = (edgeL + insetX - st.x) / kBrakeHorizonSec;
                 if (desiredVx > roomR) desiredVx = roomR;
                 if (desiredVx < roomL) desiredVx = roomL;
             }
 
-            // 埋点：内缩之后还能贴到离 AABB 半个内缩量以内，说明有东西绕过了这条钳位。
+            // 埋点：内缩之后还能贴到离工作框半个内缩量以内，说明有东西绕过了这条钳位。
             // 只在跨过阈值的那一拍打一行，不刷屏；平时一行都不该出现。
             // 自由空域下贴墙是驾驶员的意图，不是异常，不记。
             if (!sp.unbounded) {
-                const float dR = rawR - st.x;
-                const float dL = st.x - rawL;
+                const float dR = edgeR - st.x;
+                const float dL = st.x - edgeL;
                 const float clearance = dR < dL ? dR : dL;
                 static std::atomic<bool> gWallTight{false};
                 const bool tight = clearance < insetX * 0.5f;
                 if (tight && !gWallTight.exchange(tight, std::memory_order_acq_rel)) {
                     x::runtime::LogW("Heli",
                                      "wall tight owner=%s x=%.0f clr=%.0f vx=%.0f sp=%.0f aabb=[%.0f,%.0f]",
-                                     OwnerName(o), st.x, clearance, st.vx, sp.x, rawL, rawR);
+                                     OwnerName(o), st.x, clearance, st.vx, sp.x, edgeL, edgeR);
                 } else if (!tight) {
                     gWallTight.store(false, std::memory_order_release);
                 }
@@ -666,11 +832,8 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
             // 620px/s 下降在一个 90ms 周期里走 56px，位置包线是「越过才报警」的事后判据，
             // 等它发现时人已经在界外几十 px。横向冲出去是掉线，竖直冲出去是掉出地图。
             //
-            // 用**外扩后**的 t/b（合法空域）而非 raw：贴地面层的怪就站在 rawT 上，
-            // 站位点本身在 rawT 附近，距 t 还有整整 kEnvSlackYPx 的余量，正常作战根本
-            // 碰不到这条线；它只在锯齿或卡顿导致的异常下沉时才咬合。
-            // 刹车线同样从空域上下沿内缩，让稳态停靠点落在紧急触发线**里侧** 24px —— 否则
-            // 目标点被钳到 b、绊线也在 b，人就贴着开关悬停，过冲 1px 就吃一发下压。
+            // 用工作框 t/b（Combat=raw×0.95；F6=外扩空域）而非裸 raw。
+            // 刹车线同样从工作框上下沿内缩，让稳态停靠点落在紧急触发线**里侧**。
             // 成因、几何免费性与 BIN a0ab58 的实测见 heli_rotor.h 的 kBrakeInsetYPx。
             // 矮图兜底同 X：内缩量不超过空域高度的 1/4，两条刹车线永不交叉。
             float insetY = (b - t) * 0.25f;
@@ -760,15 +923,19 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
             if (out) *out = tm;
             return false;
         }
+        // Prepare/BUFF 同理：地上可以停一拍避视觉层；悬空+fh-ban 停冲量 = 自由落体。
+        // BIN 22:28:47 F6 飞中 BUFF1002 → guard=skill_prep → 人往下掉。
         int prepSkill = 0;
-        if (ports::skill::IsPreparingSkill(&prepSkill)) {
+        if (st.onFh && ports::skill::IsPreparingSkill(&prepSkill)) {
             tm.guard = "skill_prep";
             gLastTickFired = false;
             if (out) *out = tm;
             return false;
         }
     }
-    const DWORD cadence = emergency ? kIssueEmergencyMs : kIssueMs;
+    const bool settleHover = !emergency && settleHoverCand;
+    const DWORD cadence =
+        emergency ? kIssueEmergencyMs : (settleHover ? kIssueSettleMs : kIssueMs);
     if (gLastIssueMs && (now - gLastIssueMs) < cadence) {
         tm.guard = "cadence";
         gLastTickFired = false;
@@ -776,7 +943,9 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
         return false;
     }
 
-    if (!emergency && std::fabs(cmdVx) < 8.f && std::fabs(cmdVy) < 8.f) {
+    // 到位悬停：即使增量看起来很小也要发配平。旧门 (|cmd|<8) 会在「刚配平好看」
+    // 时连跳数拍 → since 被拉长 → 下一发 trim 变大 → 正是微晃放大器。
+    if (!emergency && !settleHover && std::fabs(cmdVx) < 8.f && std::fabs(cmdVy) < 8.f) {
         tm.guard = "deadband";
         gLastTickFired = false;
         if (out) *out = tm;

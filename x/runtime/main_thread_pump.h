@@ -45,6 +45,8 @@ void SetFrameTick(JobFn fn, void* user = nullptr);
 void SetAuxFrameTick(JobFn fn, void* user = nullptr);
 // 第三槽：只读 walk BIN（keypad_walk_bin）；与 primary/aux 并存。
 void SetBinFrameTick(JobFn fn, void* user = nullptr);
+// 第四槽：测谎 NonFinite 物理光标脉冲（anti_macro_follower）；与上三者并存。
+void SetLieFrameTick(JobFn fn, void* user = nullptr);
 // 物理前槽：WM.FixedUpdate 的 orig 之前调用（拟人走路 SetInput，赶在 CalcWalk 前）。
 // WM FixedUpdate 未挂上时不会触发；与 SendWill FrameTick 无关。
 void SetPrePhysicsFrameTick(JobFn fn, void* user = nullptr);
@@ -85,6 +87,10 @@ bool IsDirectMode();
 // when already true (queued job is already on pump).
 bool IsOnPumpThread();
 
+// Unity pump 宿主线程 id；0 = 还没有任何一次 hook 进入过。
+// 给 hang_autopsy 用：卡死取证要在一堆线程里认出主线程是哪个。
+DWORD PumpThreadId();
+
 // Jobs currently parked in the queue (0..capacity). Lockless snapshot.
 int QueuedJobCount();
 
@@ -92,6 +98,8 @@ int QueuedJobCount();
 // low-value work this tick instead of parking more jobs. Parking on a saturated
 // queue only yields job timeout → retry → more load (a load death-spiral that
 // also raises GC pressure on the pump thread). Lockless snapshot.
+// Also true during InterStage quiesce (map-transit && !login-freeze) so play
+// features back off without waiting for queue depth.
 bool IsCongested();
 
 // Congestion queue-depth threshold, runtime-tunable from the panel/config.

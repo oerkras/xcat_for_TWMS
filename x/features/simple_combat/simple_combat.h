@@ -32,6 +32,9 @@ void SetTeleportEnabled(bool on);  // 强制关：fill+Doing 战斗回落已禁�
 // 优先于拟人。需无敌；交战期间自动挂 fh-ban（无怪超宽限则卸掉落地）。
 void SetImpactApproachEnabled(bool on);
 bool IsImpactApproachEnabled();
+// 空中贴怪防抖（钉点 + 旋翼到位软悬停）。关=安全回退到每拍跟理想点 + 旧 90ms 律。
+void SetAntiJitterEnabled(bool on);
+bool IsAntiJitterEnabled();
 // 飞行速度倍率（百分比，100 = 基准 1.0X）。只缩放旋翼各档的意图上限；
 // 作动器上限与防坠闸不跟随（理由见 heli_rotor.h 的 SetSpeedScale）。
 void SetFlySpeedPct(unsigned pct);
@@ -42,6 +45,12 @@ bool IsHumanWalkEnabled();
 void SetLiveStepEnabled(bool on);
 bool IsLiveStepEnabled();
 void SetTeleportParams(uint32_t minDx, uint32_t standOff, uint32_t cooldownMs, uint32_t maxHop);
+// F5 空中贴怪的**自定义站距**（远程职业用）。与上面 SetTeleportParams 的 standOff 无关：
+// 那个还乘进 InHitBand 等地面判定，这个只喂直升机悬停点与它自己的闸门。
+// custom=false → 用内置近战最优值（kHeliStandOffPx / kHeliLiftPx，实测最优，别乱调）。
+// custom=true  → x/y 原样生效，且出刀闸与到位判据随之放大；命中率由用户自行负责。
+// y 带符号：+Y 向上 ⇒ 正数 = 站在怪上方。
+void SetStandOffParams(bool custom, uint32_t x, int32_t y);
 // 加速秒杀早切：maxHp=0 关闭此道；其余见 common/xcat_payload_control.h 默认值。
 void SetOneshotParams(uint32_t maxHp, uint32_t minBumps, uint32_t minFires, uint32_t minLagMs,
                       uint32_t foxFillGapMs);
@@ -70,6 +79,8 @@ bool IsTeleportTransit();
 bool IsLootPulseActive();
 // 脉冲代数：pet_loot 边沿检测用（离开出刀链 / Settling 武装时递增）。
 uint32_t LootPulseGeneration();
+// 多发：普攻 OnFuncKey 真正成功时再武装空刀观察（勿在 TryCast 排程时记账）。
+void NotifyMultiNormalAttackFired();
 void ResetForMapChange();
 
 // 以下原生瞬移入口已禁用（封禁风险）；调用只记日志。

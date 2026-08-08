@@ -41,6 +41,21 @@ bool ApplyFaceNow();
 // why≥1 时 ma 是**上一次成功下发**时读到的旧值，不能当本刀的引擎朝向用。
 void FaceDebug(int* maOut, int* whyOut);
 
+// 上一刀的**引擎判决**：派发前后各读一次动作忙位（LocalUser+ActionBusy，只读，
+// 复用 attack_accel::QueryActionBusy 的 hash 防漂偏移）。派发是同步的，所以
+// OnFuncKey 返回时忙位已经写好，这一对快照就把「引擎接没接这一刀」钉死了。
+//   busy0  派发前，正常 -1（simple_combat 已在忙锁上先拦过一道）
+//   busy1  派发后：
+//            ≥0  接了；值即攻击动作 id，与攻击包 BODY+11 的 action 同源
+//                （实测近战 5/6/7/16/17、蝸牛術 op=52 为 29）
+//            -1  被吞了——OnFuncKey 正常返回但引擎没起动作，
+//                典型就是没过技能派发里的地面门（站立伪装要治的正是这个）
+//            -2  没读到（偏移未就绪 / 越界），别当成上面任何一种
+// 注意这不是攻击包本身：包只在 busy1≥0 时才会发出去，要核 wire 字节仍看 send.log。
+// 前提：**攻击加速必须关着**（v65 起面板已置灰、下发强制 0）。它的 worker 会往同一个
+// 字段写 -1 清忙锁，一旦重开，busy1 就会被冲成 -1，"接了"会被误读成"被吞了"。
+void FireOutcomeDebug(int* busy0, int* busy1);
+
 // 这一刀是否需要**反向**转身（而非同向重申）。
 // 反向会真下发 SetInput 触发转身动作，把同一拍的攻击顶掉——实证见 simple_combat.cpp
 // 出刀点的「转身与出刀必须分拍」注释。同向重申无害，故只认换向。
@@ -56,6 +71,10 @@ bool IsWalkHeld();
 // 间隔+松键门控后 OnFuncKey（A 槽绑定优先）。
 // 软拒绝（间隔未到 / pendingUp / FireSuppressed）返回 false 且不计 fail；仅 OnFuncKey Down 失败计 fail。
 bool TryFirePrimary();
+
+// 技能多发专用：跳过战斗面板间隔 SoftBlocked，改由 multi_skill 固定 NA 间隔门控。
+// 仍受 pendingUp / FireSuppressed / 泵拥堵约束；成功仍写入 gLastFireMs（与战斗路径共享冷却痕迹）。
+bool TryFirePrimaryForMultiSkill();
 
 // 先泵松键，再看间隔/pending/suppressed；未就绪时勿进 Firing，避免同 tick 空点刷 soft fail。
 bool CanFirePrimary();

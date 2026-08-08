@@ -3,8 +3,11 @@
 // After disconnect, call SceneLogin's no-arg connect starter (starts ConnectLogin
 // coroutine → NM.ConnectServer). On Connected: CloseDialog (not OnClickYes/Ok) on
 // UIUtilDialog(s), RequestRestart auto_enter, hold until play-ready (or timeout → fail →
-// guardian clean relaunch).
-// While observing, publishes softLoginHold via PayloadStatus so hangup 守护推迟踢线干净重拉.
+// guardian clean relaunch). Recoverable fails retry up to kSoftCycleMax soft cycles;
+// Done+!inMap may RequestRestart up to kDoneNoPlayMaxRestarts per cycle;
+// Done+inMap wall timeout → degrade success (no ConnectLogin soft cycle).
+// While observing, publishes softLoginHold via PayloadStatus：守护推迟一切干净重拉
+//（踢线/无经验/心跳等）；须 softLoginResult=2（完全失败）或进程已死才允许重拉。
 //
 // SceneLogin 进图后可能暂为空（sl_null）：hold 内重试 ~20s，并接受游戏自连 Connecting；
 // 勿在首次 sl_null 立刻放 hold（否则守护会杀进程重拉）。

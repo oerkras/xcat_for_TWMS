@@ -96,8 +96,12 @@ bool ReadMultiSkillSelect(const char* binDir, std::vector<std::string>& codes) {
     if (!ReadLinesFile(path.c_str(), lines)) {
         return GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES;
     }
+    bool hasNa = false;
     for (std::string& s : lines) {
-        if (IsNormalAttackCode(s.c_str())) s = kNormalAttackCode;
+        if (IsNormalAttackCode(s.c_str())) {
+            hasNa = true;
+            continue;
+        }
         bool dup = false;
         for (const std::string& old : codes) {
             if (old == s) {
@@ -107,6 +111,8 @@ bool ReadMultiSkillSelect(const char* binDir, std::vector<std::string>& codes) {
         }
         if (!dup) codes.push_back(std::move(s));
     }
+    // 与面板置顶一致：勾了普攻则始终排在串发队首（旧 tsv 常把 1000 写在前面）。
+    if (hasNa) codes.insert(codes.begin(), kNormalAttackCode);
     return true;
 }
 
@@ -114,10 +120,14 @@ bool WriteMultiSkillSelect(const char* binDir, const std::vector<std::string>& c
     if (!EnsureStateDir(binDir)) return false;
     std::vector<std::string> out;
     out.reserve(codes.size());
+    bool hasNa = false;
     for (const std::string& c : codes) {
         if (c.empty()) continue;
+        if (IsNormalAttackCode(c.c_str())) {
+            hasNa = true;
+            continue;  // 稍后置顶写入，避免勾选追加序把普攻挤到蜗牛术后面
+        }
         std::string id = c;
-        if (IsNormalAttackCode(id.c_str())) id = kNormalAttackCode;
         bool dup = false;
         for (const std::string& old : out) {
             if (old == id) {
@@ -127,6 +137,7 @@ bool WriteMultiSkillSelect(const char* binDir, const std::vector<std::string>& c
         }
         if (!dup) out.push_back(std::move(id));
     }
+    if (hasNa) out.insert(out.begin(), kNormalAttackCode);
     std::string text = "# multi_skill select (one skill code per line; Classic TWMS)\n";
     for (const std::string& c : out) {
         text += c;

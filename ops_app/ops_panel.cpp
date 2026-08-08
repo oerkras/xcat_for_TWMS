@@ -21,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 
 namespace xcat::ops {
@@ -937,20 +938,86 @@ void FormatIdleSec(int idleSec, char* buf, size_t bufSize) {
 }
 
 void CopyClientSummary(const OpsState::ConnectedClient& c) {
-    char buf[384]{};
-    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\tgate=%s\tidle=%ds",
+    char buf[512]{};
+    std::snprintf(buf, sizeof(buf),
+                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\tgate=%s\tidle=%ds",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
+                  c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
+                  c.charJobName.empty() ? "-" : c.charJobName.c_str(),
+                  c.charMeso.empty() ? "-" : c.charMeso.c_str(),
                   c.gate.empty() ? "?" : c.gate.c_str(), c.idleSec);
     CopyText(buf);
 }
 
 void AppendClientSummaryLine(std::string& out, const OpsState::ConnectedClient& c) {
-    char buf[384]{};
-    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n", c.ip.c_str(),
-                  c.machine.c_str(), c.mac.c_str(), c.token.c_str(), c.deviceId.c_str(),
-                  c.appVersion.c_str(), c.gate.empty() ? "?" : c.gate.c_str(), c.idleSec);
+    char buf[512]{};
+    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\n",
+                  c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
+                  c.deviceId.c_str(), c.appVersion.c_str(),
+                  c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
+                  c.charJobName.empty() ? "-" : c.charJobName.c_str(),
+                  c.charMeso.empty() ? "-" : c.charMeso.c_str(),
+                  c.gate.empty() ? "?" : c.gate.c_str(), c.idleSec);
     out += buf;
+}
+
+void FormatMesoDisplay(const std::string& mesoRaw, char* out, size_t outN) {
+    if (!out || outN == 0) return;
+    out[0] = '\0';
+    if (mesoRaw.empty()) {
+        std::snprintf(out, outN, "—");
+        return;
+    }
+    // 万/亿单位（与标题栏金币紧凑显示一致）：<1万原样，≥1万用万，≥1亿用亿。
+    std::string digits;
+    digits.reserve(mesoRaw.size());
+    bool neg = false;
+    for (size_t i = 0; i < mesoRaw.size(); ++i) {
+        const char c = mesoRaw[i];
+        if (i == 0 && c == '-') {
+            neg = true;
+            continue;
+        }
+        if (c >= '0' && c <= '9') digits.push_back(c);
+    }
+    if (digits.empty()) {
+        std::snprintf(out, outN, "%s", mesoRaw.c_str());
+        return;
+    }
+    // 超长（>18 位）不进 long long，退回截断原串。
+    if (digits.size() > 18) {
+        std::snprintf(out, outN, "%s%s…", neg ? "-" : "", digits.substr(0, 12).c_str());
+        return;
+    }
+    char* end = nullptr;
+    const unsigned long long absVal = std::strtoull(digits.c_str(), &end, 10);
+    if (!end || *end != '\0') {
+        std::snprintf(out, outN, "%s", mesoRaw.c_str());
+        return;
+    }
+    const char* sign = neg ? "-" : "";
+    if (absVal < 10000ull) {
+        std::snprintf(out, outN, "%s%llu", sign, absVal);
+        return;
+    }
+    if (absVal >= 100000000ull) {
+        const double scaled = static_cast<double>(absVal) / 100000000.0;
+        if (scaled >= 100.0)
+            std::snprintf(out, outN, "%s%.0f亿", sign, scaled);
+        else if (scaled >= 10.0)
+            std::snprintf(out, outN, "%s%.1f亿", sign, scaled);
+        else
+            std::snprintf(out, outN, "%s%.2f亿", sign, scaled);
+        return;
+    }
+    const double scaled = static_cast<double>(absVal) / 10000.0;
+    if (scaled >= 100.0)
+        std::snprintf(out, outN, "%s%.0f万", sign, scaled);
+    else if (scaled >= 10.0)
+        std::snprintf(out, outN, "%s%.1f万", sign, scaled);
+    else
+        std::snprintf(out, outN, "%s%.2f万", sign, scaled);
 }
 
 ImVec4 AppVersionColor(const OpsState& st, const std::string& ver) {
@@ -1085,6 +1152,11 @@ bool ParseClientsPayload(const std::string& body, OpsState& st) {
         row.mac = FindJsonString(obj, "mac");
         row.token = FindJsonString(obj, "token");
         row.appVersion = FindJsonString(obj, "appVersion");
+        row.charName = FindJsonString(obj, "charName");
+        row.charJobName = FindJsonString(obj, "charJobName");
+        row.charMeso = FindJsonString(obj, "charMeso");
+        row.charLevel = JsonIntField(obj, "charLevel", 0);
+        row.charJob = JsonIntField(obj, "charJob", 0);
         row.lastKind = FindJsonString(obj, "lastKind");
         row.lastSeenAt = FindJsonString(obj, "lastSeenAt");
         row.lastDenyAt = FindJsonString(obj, "lastDenyAt");
@@ -1533,7 +1605,8 @@ bool ClientMatchesFilter(const OpsState& st, const OpsState::ConnectedClient& c,
            ContainsIgnoreCase(c.mac, filter) || ContainsIgnoreCase(c.token, filter) ||
            ContainsIgnoreCase(c.device, filter) || ContainsIgnoreCase(c.deviceId, filter) ||
            ContainsIgnoreCase(c.geo, filter) || ContainsIgnoreCase(c.gate, filter) ||
-           ContainsIgnoreCase(c.appVersion, filter);
+           ContainsIgnoreCase(c.appVersion, filter) || ContainsIgnoreCase(c.charName, filter) ||
+           ContainsIgnoreCase(c.charJobName, filter);
 }
 
 const char* GateFilterLabel(const char* key) {
@@ -1742,7 +1815,7 @@ void DrawClientsPanel(OpsState& st) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("在线判定窗口（秒）");
     ImGui::SameLine(0, 10.f);
     ImGui::SetNextItemWidth(168.f);
-    ImGui::InputTextWithHint("##clients_filter", "筛选 IP/机名/MAC/TOKEN…", st.clientsFilter,
+    ImGui::InputTextWithHint("##clients_filter", "筛选 IP/机名/角色/MAC/TOKEN…", st.clientsFilter,
                              sizeof(st.clientsFilter));
     if (st.clientsFilter[0] != '\0') {
         ImGui::SameLine();
@@ -1763,8 +1836,23 @@ void DrawClientsPanel(OpsState& st) {
     ImGui::Checkbox("空闲优先", &st.clientsSortIdleFirst);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("空闲秒数小的排前（刚探活靠上）");
     ImGui::SameLine(0, 6.f);
+    ImGui::Checkbox("同IP折叠", &st.clientsGroupByIp);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("同公网 IP 多台设备合并为一组，默认折叠；点 ▶ 展开");
+    if (st.clientsGroupByIp) {
+        ImGui::SameLine(0, 4.f);
+        if (ImGui::SmallButton("全展##ip_expand_all")) {
+            for (const auto& c : st.clients) {
+                if (!c.ip.empty()) st.clientsIpExpanded.insert(c.ip);
+            }
+        }
+        ImGui::SameLine(0, 2.f);
+        if (ImGui::SmallButton("全折##ip_collapse_all")) st.clientsIpExpanded.clear();
+    }
+    ImGui::SameLine(0, 6.f);
     if (ImGui::SmallButton("复制可见##clients")) {
-        std::string out = "ip\tmachine\tmac\ttoken\tdeviceId\tver\tgate\tidle\n";
+        std::string out =
+            "ip\tmachine\tmac\ttoken\tdeviceId\tver\tchar\tlevel\tjob\tmeso\tgate\tidle\n";
         int n = 0;
         for (const auto& c : st.clients) {
             if (!ClientMatchesFilter(st, c, st.clientsFilter)) continue;
@@ -1791,15 +1879,19 @@ void DrawClientsPanel(OpsState& st) {
         ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
     // 工具条收紧后主表再抬一点。
     const float clientsH = (std::max)(260.f, ImGui::GetContentRegionAvail().y * 0.58f);
-    if (ImGui::BeginTable("clients_table", 12, flags, ImVec2(0, clientsH))) {
+    if (ImGui::BeginTable("clients_table", 16, flags, ImVec2(0, clientsH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 100.f);
-        ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.3f);
-        ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+        ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("等级", ImGuiTableColumnFlags_WidthFixed, 44.f);
+        ImGui::TableSetupColumn("职业", ImGuiTableColumnFlags_WidthFixed, 88.f);
+        ImGui::TableSetupColumn("背包金", ImGuiTableColumnFlags_WidthFixed, 100.f);
         ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 110.f);
         ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 88.f);
-        ImGui::TableSetupColumn("设备", ImGuiTableColumnFlags_WidthStretch, 1.1f);
-        ImGui::TableSetupColumn("版本", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+        ImGui::TableSetupColumn("设备", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("版本", ImGuiTableColumnFlags_WidthStretch, 0.85f);
         ImGui::TableSetupColumn("最近活动", ImGuiTableColumnFlags_WidthFixed, 120.f);
         ImGui::TableSetupColumn("空闲", ImGuiTableColumnFlags_WidthFixed, 42.f);
         ImGui::TableSetupColumn("门禁", ImGuiTableColumnFlags_WidthFixed, 128.f);
@@ -1817,7 +1909,17 @@ void DrawClientsPanel(OpsState& st) {
             for (size_t idx = 0; idx < st.clients.size(); ++idx) {
                 if (ClientMatchesFilter(st, st.clients[idx], st.clientsFilter)) order.push_back(idx);
             }
-            if (st.clientsSortIdleFirst) {
+            if (st.clientsGroupByIp) {
+                // 同 IP 聚在一起；组内再按空闲
+                std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                    const auto& ca = st.clients[a];
+                    const auto& cb = st.clients[b];
+                    if (ca.ip != cb.ip) return ca.ip < cb.ip;
+                    if (st.clientsSortIdleFirst && ca.idleSec != cb.idleSec)
+                        return ca.idleSec < cb.idleSec;
+                    return false;
+                });
+            } else if (st.clientsSortIdleFirst) {
                 std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
                     const int ia = st.clients[a].idleSec;
                     const int ib = st.clients[b].idleSec;
@@ -1825,27 +1927,151 @@ void DrawClientsPanel(OpsState& st) {
                     return st.clients[a].ip < st.clients[b].ip;
                 });
             }
+
+            struct IpGroup {
+                std::string ip;
+                std::vector<size_t> members;
+            };
+            std::vector<IpGroup> groups;
+            groups.reserve(order.size());
+            if (st.clientsGroupByIp) {
+                for (size_t idx : order) {
+                    const std::string& ip = st.clients[idx].ip;
+                    if (groups.empty() || groups.back().ip != ip) {
+                        groups.push_back(IpGroup{ip, {idx}});
+                    } else {
+                        groups.back().members.push_back(idx);
+                    }
+                }
+            } else {
+                for (size_t idx : order) {
+                    groups.push_back(IpGroup{st.clients[idx].ip, {idx}});
+                }
+            }
+
             int shown = 0;
-            for (size_t idx : order) {
+            for (const auto& g : groups) {
+                const bool multi = st.clientsGroupByIp && g.members.size() >= 2;
+                const bool expanded =
+                    !multi || st.clientsIpExpanded.find(g.ip) != st.clientsIpExpanded.end();
+
+                if (multi) {
+                    const auto& head = st.clients[g.members.front()];
+                    ImGui::PushID(g.ip.c_str());
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    const bool open = expanded;
+                    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.f, 0.f, 0.f, 0.f));
+                    ImGui::PushStyleColor(ImGuiCol_HeaderHovered,
+                                         ImVec4(OpsTone::Warn().x, OpsTone::Warn().y,
+                                                OpsTone::Warn().z, 0.22f));
+                    ImGui::PushStyleColor(ImGuiCol_HeaderActive,
+                                         ImVec4(OpsTone::Warn().x, OpsTone::Warn().y,
+                                                OpsTone::Warn().z, 0.35f));
+                    char grpLabel[128]{};
+                    std::snprintf(grpLabel, sizeof(grpLabel), "%s  %s  ·%zu台", open ? "▼" : "▶",
+                                  g.ip.c_str(), g.members.size());
+                    if (ImGui::Selectable(grpLabel, false)) {
+                        if (open)
+                            st.clientsIpExpanded.erase(g.ip);
+                        else
+                            st.clientsIpExpanded.insert(g.ip);
+                    }
+                    ImGui::PopStyleColor(3);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "同公网 IP 当前筛选 %zu 台（点行折叠/展开）\n归属：%s",
+                            g.members.size(), head.geo.empty() ? "—" : head.geo.c_str());
+                    }
+
+                    ImGui::TableSetColumnIndex(1);
+                    if (head.geo.empty()) ImGui::TextDisabled("—");
+                    else ImGui::TextUnformatted(head.geo.c_str());
+
+                    ImGui::TableSetColumnIndex(2);
+                    {
+                        std::string summary;
+                        int nShow = 0;
+                        for (size_t mi : g.members) {
+                            const auto& m = st.clients[mi];
+                            const char* tag =
+                                !m.machine.empty() ? m.machine.c_str()
+                                : (!m.charName.empty() ? m.charName.c_str() : m.device.c_str());
+                            if (!tag || !tag[0]) tag = "?";
+                            if (nShow > 0) summary += " / ";
+                            summary += tag;
+                            if (++nShow >= 4) {
+                                summary += " …";
+                                break;
+                            }
+                        }
+                        ImGui::TextColored(OpsTone::Warn(), "%s", summary.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(3);
+                    {
+                        std::string chars;
+                        int nShow = 0;
+                        for (size_t mi : g.members) {
+                            const auto& m = st.clients[mi];
+                            if (m.charName.empty()) continue;
+                            if (nShow > 0) chars += " / ";
+                            chars += m.charName;
+                            if (++nShow >= 4) {
+                                chars += " …";
+                                break;
+                            }
+                        }
+                        if (chars.empty()) ImGui::TextDisabled("—");
+                        else ImGui::TextUnformatted(chars.c_str());
+                    }
+                    for (int col = 4; col <= 15; ++col) {
+                        ImGui::TableSetColumnIndex(col);
+                        if (col == 12) {
+                            int bestIdle = head.idleSec;
+                            for (size_t mi : g.members)
+                                bestIdle = (std::min)(bestIdle, st.clients[mi].idleSec);
+                            char idleBuf[16]{};
+                            FormatIdleSec(bestIdle, idleBuf, sizeof(idleBuf));
+                            ImGui::TextColored(IdleSecColor(bestIdle), "%s", idleBuf);
+                        } else if (col == 14) {
+                            int hits = 0;
+                            for (size_t mi : g.members) hits += st.clients[mi].hits;
+                            ImGui::TextDisabled("%d", hits);
+                        } else {
+                            ImGui::TextDisabled(open ? "" : "…");
+                        }
+                    }
+                    ImGui::PopID();
+                    ++shown;
+                    if (!expanded) continue;
+                }
+
+                for (size_t memberPos = 0; memberPos < g.members.size(); ++memberPos) {
+                const size_t idx = g.members[memberPos];
                 const auto& c = st.clients[idx];
+                const bool childRow = multi;
                 ++shown;
                 ImGui::PushID(static_cast<int>(idx));
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 char ipLabel[96]{};
-                if (c.sameIpOnline > 1 || c.knownOnIp > 1) {
+                if (childRow) {
+                    std::snprintf(ipLabel, sizeof(ipLabel), "  └");
+                } else if (c.sameIpOnline > 1 || c.knownOnIp > 1) {
                     std::snprintf(ipLabel, sizeof(ipLabel), "%s ·×%d", c.ip.c_str(),
                                   (std::max)(c.sameIpOnline, c.knownOnIp));
                 } else {
                     std::snprintf(ipLabel, sizeof(ipLabel), "%s", c.ip.c_str());
                 }
                 if (c.banned) ImGui::TextColored(OpsTone::Danger(), "%s", ipLabel);
-                else if (c.knownOnIp > 1 || c.sameIpOnline > 1)
+                else if (!childRow && (c.knownOnIp > 1 || c.sameIpOnline > 1))
                     ImGui::TextColored(OpsTone::Warn(), "%s", ipLabel);
                 else if (allowMode && !c.allowed)
                     ImGui::TextColored(OpsTone::Warn(), "%s", ipLabel);
                 else if (c.allowed)
                     ImGui::TextColored(OpsTone::Ok(), "%s", ipLabel);
+                else if (childRow)
+                    ImGui::TextDisabled("%s", ipLabel);
                 else
                     ImGui::Selectable(ipLabel, false);
                 const bool ipHovered = ImGui::IsItemHovered();
@@ -1876,6 +2102,7 @@ void DrawClientsPanel(OpsState& st) {
                 if (ImGui::BeginPopupContextItem("ip")) {
                     if (ImGui::MenuItem("复制 IP")) CopyText(c.ip.c_str());
                     if (c.identified && ImGui::MenuItem("复制计算机名")) CopyText(c.machine.c_str());
+                    if (!c.charName.empty() && ImGui::MenuItem("复制角色名")) CopyText(c.charName.c_str());
                     if (c.identified && !c.deviceId.empty() && ImGui::MenuItem("复制 deviceId")) {
                         CopyText(c.deviceId.c_str());
                     }
@@ -1924,16 +2151,48 @@ void DrawClientsPanel(OpsState& st) {
                     ImGui::TextUnformatted(c.machine.empty() ? "—" : c.machine.c_str());
                 }
                 ImGui::TableSetColumnIndex(3);
-                ImGui::TextUnformatted((!c.identified || c.mac.empty()) ? "—" : c.mac.c_str());
+                if (c.charName.empty()) {
+                    ImGui::TextDisabled("—");
+                } else {
+                    ImGui::TextUnformatted(c.charName.c_str());
+                    if (ImGui::IsItemHovered()) {
+                        char mesoTip[48]{};
+                        FormatMesoDisplay(c.charMeso, mesoTip, sizeof(mesoTip));
+                        ImGui::SetTooltip("角色 %s\n等级 %d · 职业 %s (id=%d)\n背包金 %s（精确 %s）",
+                                          c.charName.c_str(), c.charLevel,
+                                          c.charJobName.empty() ? "?" : c.charJobName.c_str(),
+                                          c.charJob, mesoTip,
+                                          c.charMeso.empty() ? "—" : c.charMeso.c_str());
+                    }
+                }
                 ImGui::TableSetColumnIndex(4);
+                if (c.charLevel <= 0) ImGui::TextDisabled("—");
+                else ImGui::Text("%d", c.charLevel);
+                ImGui::TableSetColumnIndex(5);
+                if (c.charJobName.empty()) {
+                    if (c.charJob != 0) ImGui::TextDisabled("%d", c.charJob);
+                    else ImGui::TextDisabled("—");
+                } else {
+                    ImGui::TextUnformatted(c.charJobName.c_str());
+                }
+                ImGui::TableSetColumnIndex(6);
+                {
+                    char mesoBuf[48]{};
+                    FormatMesoDisplay(c.charMeso, mesoBuf, sizeof(mesoBuf));
+                    if (c.charMeso.empty()) ImGui::TextDisabled("—");
+                    else ImGui::TextUnformatted(mesoBuf);
+                }
+                ImGui::TableSetColumnIndex(7);
+                ImGui::TextUnformatted((!c.identified || c.mac.empty()) ? "—" : c.mac.c_str());
+                ImGui::TableSetColumnIndex(8);
                 if (!c.identified || c.token.empty()) {
                     ImGui::TextDisabled("—");
                 } else {
                     ImGui::TextColored(OpsTone::Token(), "%s", c.token.c_str());
                 }
-                ImGui::TableSetColumnIndex(5);
+                ImGui::TableSetColumnIndex(9);
                 ImGui::TextUnformatted((!c.identified || c.device.empty()) ? "—" : c.device.c_str());
-                ImGui::TableSetColumnIndex(6);
+                ImGui::TableSetColumnIndex(10);
                 if (c.appVersion.empty()) {
                     ImGui::TextDisabled("—");
                 } else {
@@ -1944,7 +2203,7 @@ void DrawClientsPanel(OpsState& st) {
                                           st.latestClientVersionText.c_str());
                     }
                 }
-                ImGui::TableSetColumnIndex(7);
+                ImGui::TableSetColumnIndex(11);
                 if (!c.lastSeenAt.empty()) {
                     ImGui::Text("%s", c.lastSeenAt.c_str());
                     ImGui::SameLine(0, 6.f);
@@ -1952,12 +2211,12 @@ void DrawClientsPanel(OpsState& st) {
                 } else {
                     ImGui::TextDisabled("—");
                 }
-                ImGui::TableSetColumnIndex(8);
+                ImGui::TableSetColumnIndex(12);
                 char idleBuf[16]{};
                 FormatIdleSec(c.idleSec, idleBuf, sizeof(idleBuf));
                 ImGui::TextColored(IdleSecColor(c.idleSec), "%s", idleBuf);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("空闲 %d 秒", c.idleSec);
-                ImGui::TableSetColumnIndex(9);
+                ImGui::TableSetColumnIndex(13);
                 {
                     auto formatRemain = [](int sec, char* out, size_t outN) {
                         if (sec <= 0) {
@@ -2023,9 +2282,9 @@ void DrawClientsPanel(OpsState& st) {
                             c.leaseTtlHours > 0 ? c.leaseTtlHours : 64);
                     }
                 }
-                ImGui::TableSetColumnIndex(10);
+                ImGui::TableSetColumnIndex(14);
                 ImGui::Text("%d", c.hits);
-                ImGui::TableSetColumnIndex(11);
+                ImGui::TableSetColumnIndex(15);
                 if (c.identified && (!c.deviceId.empty() || !c.mac.empty())) {
                     if (c.banned) {
                         if (NeutralSmallButton("解禁")) {
@@ -2086,7 +2345,8 @@ void DrawClientsPanel(OpsState& st) {
                     ImGui::TextDisabled("—");
                 }
                 ImGui::PopID();
-            }
+                }  // members
+            }  // groups
             if (shown == 0) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);

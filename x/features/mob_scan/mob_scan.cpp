@@ -147,6 +147,33 @@ void WaitWake(DWORD ms) {
     Sleep(ms);
 }
 
+// FillLite raw-n 归因。n=0 窗单独节流，不依赖 mobscan 摘要拍（空窗 count 不变会跳过摘要）。
+constexpr DWORD kFillRejZeroMs = 300;
+void LogFillReject(const ports::mob::Snapshot& snap, bool toJsonl) {
+    if (snap.rawDict <= snap.count) return;
+    char rejSample[512]{};
+    int rn = 0;
+    for (int i = 0; i < snap.rejSampleN; ++i) {
+        const auto& s = snap.rejSamples[i];
+        const int left = (int)sizeof(rejSample) - rn;
+        if (left < 64) break;
+        rn += snprintf(rejSample + rn, (size_t)left,
+                       " [%c id=%d tpl=%d hp=%d%% dt=%d r=%u v=%u s=%u (%.0f,%.0f)]", s.why, s.id,
+                       s.tpl, s.hpPct, s.deadType, (unsigned)s.ready, (unsigned)s.inView,
+                       (unsigned)s.suspended, s.x, s.y);
+    }
+    // iv0= 入榜但 inView=0 的活怪（不挡 n）；与拒绝字母 V 无关（已删除）。
+    if (toJsonl) {
+        LogLine("fill_rej n=%d raw=%d R=%d D=%d H=%d S=%d P=%d O=%d iv0=%d%s", snap.count,
+                snap.rawDict, snap.rejNotReady, snap.rejDeadType, snap.rejHp, snap.rejSuspended,
+                snap.rejDirty, snap.rejOther, snap.nInView0, rejSample);
+    } else {
+        LogToFile("fill_rej n=%d raw=%d R=%d D=%d H=%d S=%d P=%d O=%d iv0=%d%s", snap.count,
+                  snap.rawDict, snap.rejNotReady, snap.rejDeadType, snap.rejHp, snap.rejSuspended,
+                  snap.rejDirty, snap.rejOther, snap.nInView0, rejSample);
+    }
+}
+
 DWORD WINAPI Worker(LPVOID) {
     timeBeginPeriod(1);
     OpenLog();
@@ -157,6 +184,7 @@ DWORD WINAPI Worker(LPVOID) {
     DWORD lastForceLog = 0;
     DWORD lastCountLog = 0;
     DWORD lastMissLog = 0;
+    DWORD lastFillRejZeroLog = 0;
     int lastCount = -1;
     int lastSlots = -999;
     int lastFhMapId = -1;
@@ -265,6 +293,12 @@ DWORD WINAPI Worker(LPVOID) {
         const bool force = !lastForceLog || (now - lastForceLog >= kForceLogMs);
         const bool countLog =
             countChanged && (!lastCountLog || now - lastCountLog >= kCountLogMs);
+        // n=0 且 raw>0：摘要可能被跳过，这里单独落归因（≥300ms），空窗全程可追。
+        if (snap.count == 0 && snap.rawDict > 0 &&
+            (!lastFillRejZeroLog || now - lastFillRejZeroLog >= kFillRejZeroMs)) {
+            lastFillRejZeroLog = now;
+            LogFillReject(snap, /*toJsonl=*/true);
+        }
         if (!countLog && !force) {
             if (countChanged) {
                 lastCount = snap.count;
@@ -291,14 +325,19 @@ DWORD WINAPI Worker(LPVOID) {
                                " [%d id=%d tpl=%d hp=%d%% (%.0f,%.0f)]", i, m.id, m.templateId,
                                m.hpPct, m.x, m.y);
             }
-            LogLine("mobscan n=%d/M=%d map=%d lifeMob=%d lifeAll=%d raw=%d trunc=%d mapKey=%d%s",
+            LogLine("mobscan n=%d/M=%d map=%d lifeMob=%d lifeAll=%d raw=%d trunc=%d iv0=%d mapKey=%d%s",
                     snap.count, snap.spawnSlots, snap.mapId, snap.lifeMob, snap.lifeAll,
-                    snap.rawDict, snap.truncated ? 1 : 0, fk, sample);
+                    snap.rawDict, snap.truncated ? 1 : 0, snap.nInView0, fk, sample);
         } else {
             lastCountLog = now;
-            LogToFile("mobscan n=%d/M=%d map=%d lifeMob=%d lifeAll=%d raw=%d trunc=%d mapKey=%d",
+            LogToFile("mobscan n=%d/M=%d map=%d lifeMob=%d lifeAll=%d raw=%d trunc=%d iv0=%d mapKey=%d",
                       snap.count, snap.spawnSlots, snap.mapId, snap.lifeMob, snap.lifeAll,
-                      snap.rawDict, snap.truncated ? 1 : 0, fk);
+                      snap.rawDict, snap.truncated ? 1 : 0, snap.nInView0, fk);
+        }
+        // raw>n 且本拍已打 mobscan 摘要：补一行归因（n=0 刚在上面打过则跳过，防双份）。
+        if (snap.rawDict > snap.count &&
+            !(snap.count == 0 && lastFillRejZeroLog && now - lastFillRejZeroLog < 50)) {
+            LogFillReject(snap, /*toJsonl=*/snap.count == 0);
         }
     }
 

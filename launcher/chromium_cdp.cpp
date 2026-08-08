@@ -90,13 +90,12 @@ void CopyFileTo(const std::wstring& src, const std::wstring& dst) {
     CopyFileW(src.c_str(), dst.c_str(), FALSE);
 }
 
-// Chrome 136+：对「默认」User Data 静默忽略 --remote-debugging-port。
-// 必须改用非默认目录；这里同步会话关键文件到 XCat 专用目录。
+// Chrome 136+：默认 User Data 静默忽略调试口 → 官方 Chrome/360 必须走非默认副本目录。
+// Edge：直开日常（拷贝后 Cookie 常解不开）。Chrome++：非标准目录，直开。
 bool IsStandardChromiumUserData(const std::wstring& userData) {
     wchar_t localApp[MAX_PATH]{};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return false;
     const std::wstring chrome = std::wstring(localApp) + L"\\Google\\Chrome\\User Data";
-    const std::wstring edge = std::wstring(localApp) + L"\\Microsoft\\Edge\\User Data";
     const std::wstring chrome360x = std::wstring(localApp) + L"\\360ChromeX\\Chrome\\User Data";
     const std::wstring chrome360 = std::wstring(localApp) + L"\\360Chrome\\Chrome\\User Data";
     auto eq = [](std::wstring a, std::wstring b) {
@@ -108,8 +107,23 @@ bool IsStandardChromiumUserData(const std::wstring& userData) {
         while (!b.empty() && (b.back() == L'\\' || b.back() == L'/')) b.pop_back();
         return _wcsicmp(a.c_str(), b.c_str()) == 0;
     };
-    return eq(userData, chrome) || eq(userData, edge) || eq(userData, chrome360x) ||
-           eq(userData, chrome360);
+    return eq(userData, chrome) || eq(userData, chrome360x) || eq(userData, chrome360);
+}
+
+bool IsEdgeUserDataDir(const std::wstring& userData) {
+    wchar_t localApp[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return false;
+    const std::wstring edge = std::wstring(localApp) + L"\\Microsoft\\Edge\\User Data";
+    auto eq = [](std::wstring a, std::wstring b) {
+        for (auto& c : a)
+            if (c == L'/') c = L'\\';
+        for (auto& c : b)
+            if (c == L'/') c = L'\\';
+        while (!a.empty() && (a.back() == L'\\' || a.back() == L'/')) a.pop_back();
+        while (!b.empty() && (b.back() == L'\\' || b.back() == L'/')) b.pop_back();
+        return _wcsicmp(a.c_str(), b.c_str()) == 0;
+    };
+    return eq(userData, edge);
 }
 
 bool MirrorTreeFile(const std::wstring& src, const std::wstring& dst) {
@@ -137,7 +151,6 @@ bool MirrorTreeFile(const std::wstring& src, const std::wstring& dst) {
 constexpr wchar_t kForceSessionSyncMarker[] = L".xcat_force_session_sync";
 
 bool HasUsableCookies(const std::wstring& profileDef) {
-    // Chrome 新版多把 Cookie 放在 Network\Cookies；旧布局在 Default\Cookies。
     const std::wstring candidates[] = {
         profileDef + L"\\Network\\Cookies",
         profileDef + L"\\Cookies",
@@ -148,7 +161,7 @@ bool HasUsableCookies(const std::wstring& profileDef) {
         if (h == INVALID_HANDLE_VALUE) continue;
         FindClose(h);
         const ULARGE_INTEGER sz{fd.nFileSizeLow, fd.nFileSizeHigh};
-        if (sz.QuadPart > 64) return true;  // 空壳/占位不算可用
+        if (sz.QuadPart > 64) return true;
     }
     return false;
 }
@@ -161,6 +174,8 @@ void ClearForceSessionSync(const std::wstring& cdpRoot) {
     DeleteFileW((cdpRoot + L"\\" + kForceSessionSyncMarker).c_str());
 }
 
+// 只读日常 → 写入副本；绝不反向写回。不结束日常 Chrome。
+// 重灌仅：空副本 / 强制标记（不用 mtime 自动盖，避免半残日常毁掉可用 SSO）。
 bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCdpData, const LogFn& log) {
     outCdpData.clear();
     wchar_t localApp[MAX_PATH]{};
@@ -168,11 +183,14 @@ bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCd
     outCdpData = std::wstring(localApp) + L"\\XCat\\GamaPassCdpProfile";
     if (!EnsureDir(std::wstring(localApp) + L"\\XCat") || !EnsureDir(outCdpData)) return false;
 
+    LogLine(log, L"[cdp] 会话目录：只读源（日常）=" + srcUserData);
+    LogLine(log, L"[cdp] 会话目录：写入目标（副本）=" + outCdpData);
+    LogLine(log, L"[cdp] 会话目录：不写回日常、不清日常 Cookie/LS、不结束日常浏览器");
+
     const std::wstring srcDef = srcUserData + L"\\Default";
     const std::wstring dstDef = outCdpData + L"\\Default";
     EnsureDir(dstDef);
 
-    // Local State / Preferences：每次轻量同步（不含 Cookie，风险低）
     CopyFileTo(srcUserData + L"\\Local State", outCdpData + L"\\Local State");
     const wchar_t* alwaysFiles[] = {L"Preferences", L"Secure Preferences", L"Login Data",
                                     L"Login Data-journal", L"Web Data",     L"Web Data-journal",
@@ -181,11 +199,9 @@ bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCd
         CopyFileTo(srcDef + L"\\" + f, dstDef + L"\\" + f);
     }
 
-    // 会话文件：无脑覆盖会把 CDP 刚写热的 GamaPass SSO 盖成日常目录的旧副本；
-    // 仅在「首次种子」或「完整 /login 失败后强制重同步」时从日常灌入。
-    // marker 只在灌入后 CDP 侧确有可用 Cookies 才清掉，避免拷贝失败丢重同步机会。
     const bool forceSync = PeekForceSessionSync(outCdpData);
-    const bool needSeed = forceSync || !HasUsableCookies(dstDef);
+    const bool emptyDst = !HasUsableCookies(dstDef);
+    const bool needSeed = forceSync || emptyDst;
     if (needSeed) {
         CopyFileTo(srcDef + L"\\Cookies", dstDef + L"\\Cookies");
         CopyFileTo(srcDef + L"\\Cookies-journal", dstDef + L"\\Cookies-journal");
@@ -195,15 +211,22 @@ bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCd
         MirrorTreeFile(srcDef + L"\\IndexedDB", dstDef + L"\\IndexedDB");
         if (HasUsableCookies(dstDef)) {
             ClearForceSessionSync(outCdpData);
-            LogLine(log, std::wstring(L"[cdp] Chromium 标准目录不能开调试口，已") +
-                             (forceSync ? L"强制重同步" : L"首次同步") + L"会话到：" + outCdpData);
+            const wchar_t* why = forceSync ? L"强制重同步" : L"首次同步";
+            LogLine(log, std::wstring(L"[cdp] Chromium 标准目录不能开调试口，") + why +
+                             L"（仅写入副本，未结束日常浏览器）：" + outCdpData);
         } else {
-            LogLine(log, L"[cdp] 会话同步未得到可用 Cookies（日常目录可能尚未登录）；"
-                         L"保留强制重同步标记，下次再试：" + outCdpData);
+            LogLine(log, L"[cdp] 会话同步未得到可用 Cookies（日常可能被锁或尚未登录）；"
+                         L"保留强制重同步标记，下次再试（未改日常、未杀浏览器）：" + outCdpData);
+            if (!forceSync) {
+                const std::wstring marker = outCdpData + L"\\" + kForceSessionSyncMarker;
+                HANDLE h = CreateFileW(marker.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            }
         }
     } else {
-        LogLine(log, L"[cdp] Chromium 标准目录不能开调试口，复用已有会话（未覆盖 Cookies）：" +
-                         outCdpData);
+        LogLine(log, L"[cdp] Chromium 标准目录不能开调试口，复用已有会话"
+                     L"（未覆盖副本 Cookies，未改日常）：" + outCdpData);
     }
     return DirExists(outCdpData);
 }
@@ -211,7 +234,6 @@ bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCd
 }  // namespace
 
 void RequestCdpSessionResync() {
-    // 下一轮 PrepareCdpSafeUserData 见到此 marker 会从日常 User Data 重灌 Cookies。
     wchar_t localApp[MAX_PATH]{};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return;
     const std::wstring xcat = std::wstring(localApp) + L"\\XCat";
@@ -227,11 +249,10 @@ void RequestCdpSessionResync() {
 bool ResolvePreferredChromium(BrowserProfile& out, const LogFn& log) {
     out = {};
     if (!msc::launcher::HttpGamaPassPreferredBrowserExe(out.exe)) {
-        LogLine(log, L"[cdp] 未找到 Chromium 系浏览器（Chrome / Edge / Chrome++ / 360）");
+        LogLine(log, L"[cdp] 未找到 Chromium 系浏览器（请将系统默认浏览器设为 Chrome / Edge / Chrome++）");
         return false;
     }
     if (!msc::launcher::HttpGamaPassResolveUserDataDir(out.exe, out.userData)) {
-        // 官方 / 360 默认兜底
         wchar_t localApp[MAX_PATH]{};
         if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) {
             std::wstring leaf = out.exe;
@@ -256,14 +277,31 @@ bool ResolvePreferredChromium(BrowserProfile& out, const LogFn& log) {
         LogLine(log, L"[cdp] 未解析到 User Data：" + out.exe);
         return false;
     }
-    // Chrome 136+：标准目录改走 CDP 安全副本（保留源路径仅用于同步）
-    if (IsStandardChromiumUserData(out.userData)) {
+
+    // 官方 Chrome/360：副本（调试口）；不杀日常窗。Edge/Chrome++：直开日常，须先释放目录锁。
+    const bool standardChrome = IsStandardChromiumUserData(out.userData);
+    if (!standardChrome) {
+        const unsigned n = KillBrowsersBlockingProfile(out, kDefaultRemoteDebugPort, log);
+        if (n > 0) Sleep(800);
+    } else {
+        LogLine(log, L"[cdp] Chrome/360 走 GamaPassCdpProfile 副本（绕过默认目录禁调试口；"
+                     L"不结束日常浏览器，不写回日常 Cookie）");
+    }
+
+    if (standardChrome) {
         std::wstring cdpData;
         if (!PrepareCdpSafeUserData(out.userData, cdpData, log)) {
             LogLine(log, L"[cdp] 无法准备 CDP 专用 User Data 副本");
             return false;
         }
         out.userData = cdpData;
+    } else if (IsEdgeUserDataDir(out.userData)) {
+        LogLine(log, L"[cdp] 会话目录：Edge 直开日常 User Data（不建副本）=" + out.userData);
+        LogLine(log, L"[cdp] 会话目录：已尝试结束日常 Edge 主进程；关调试窗只杀带调试口实例，"
+                     L"不清 Cookie");
+    } else {
+        LogLine(log, L"[cdp] 会话目录：直开用户目录（非标准 User Data）=" + out.userData);
+        LogLine(log, L"[cdp] 会话目录：已尝试结束占用主进程；关窗只杀带调试口实例");
     }
     LogLine(log, L"[cdp] 浏览器=" + out.exe);
     LogLine(log, L"[cdp] UserData=" + out.userData);
@@ -543,11 +581,6 @@ std::wstring ParentPathW(const std::wstring& p) {
     return p.substr(0, slash);
 }
 
-bool IsGamaPassCdpCopyDir(const std::wstring& userData) {
-    const std::wstring n = NormalizePathKey(userData);
-    return n.find(L"\\xcat\\gamapasscdpprofile") != std::wstring::npos;
-}
-
 bool ExtractUserDataDirFromCmd(const std::wstring& cmd, std::wstring& outDir) {
     outDir.clear();
     const auto args = msc::launcher::SplitCommandLineArgs(cmd);
@@ -602,7 +635,257 @@ bool QueryProcessImagePath(DWORD pid, std::wstring& outPath) {
     return true;
 }
 
+bool IsWantedChromiumProcessName(const wchar_t* name) {
+    return (_wcsicmp(name, L"chrome.exe") == 0) || (_wcsicmp(name, L"msedge.exe") == 0) ||
+           (_wcsicmp(name, L"chromium.exe") == 0) || (_wcsicmp(name, L"360chrome.exe") == 0) ||
+           (_wcsicmp(name, L"360chromex.exe") == 0) || (_wcsicmp(name, L"360se.exe") == 0) ||
+           (_wcsicmp(name, L"360browser.exe") == 0);
+}
+
+// GPU/renderer/utility/crashpad 等子进程 cmdline 带 --type=；杀掉它们既释放不了 Singleton，
+// 还可能误伤刚拉起的调试实例（E216：等待期把 msedge 杀掉后调试口永死）。
+bool IsChromiumSubprocessCmd(const std::wstring& cmd) {
+    if (cmd.empty()) return false;
+    std::wstring al = cmd;
+    for (auto& c : al) c = (wchar_t)towlower(c);
+    return al.find(L"--type=") != std::wstring::npos;
+}
+
+struct ConflictHit {
+    DWORD pid = 0;
+    std::wstring leaf;
+};
+
+bool IsGamaPassCdpCopyDir(const std::wstring& userData) {
+    wchar_t localApp[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return false;
+    const std::wstring copy = std::wstring(localApp) + L"\\XCat\\GamaPassCdpProfile";
+    return PathKeysEqual(userData, copy);
+}
+
+void CollectConflictingBrowserHits(const BrowserProfile& profile, int debugPort,
+                                   std::vector<ConflictHit>& out) {
+    out.clear();
+    if (profile.userData.empty()) return;
+
+    // 副本目录：只杀显式 --user-data-dir=副本 的实例，绝不按「同安装」误杀日常 Chrome。
+    const bool usingCdpCopy = IsGamaPassCdpCopyDir(profile.userData);
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (!Process32FirstW(snap, &pe)) {
+        CloseHandle(snap);
+        return;
+    }
+
+    do {
+        if (pe.th32ProcessID == GetCurrentProcessId()) continue;
+        if (!IsWantedChromiumProcessName(pe.szExeFile)) continue;
+
+        const DWORD pid = pe.th32ProcessID;
+        std::wstring img;
+        if (!QueryProcessImagePath(pid, img)) continue;
+
+        const std::wstring cmd = msc::launcher::GetProcessCommandLineW(pid);
+        if (CmdHasRemoteDebugPort(cmd, debugPort)) continue;  // 已是我们要的调试实例
+        if (IsChromiumSubprocessCmd(cmd)) continue;           // 只杀浏览器主进程
+
+        std::wstring ud;
+        const bool hasUd = ExtractUserDataDirFromCmd(cmd, ud);
+
+        bool hit = false;
+        if (hasUd && PathKeysEqual(ud, profile.userData)) {
+            hit = true;
+        } else if (!usingCdpCopy && SameBrowserInstall(img, profile.exe) &&
+                   !(hasUd && !PathKeysEqual(ud, profile.userData))) {
+            // 直开日常：同安装主进程且未显式指向其它 User Data → 多半锁日常目录
+            hit = true;
+        }
+
+        if (!hit) continue;
+
+        bool dup = false;
+        for (const auto& existing : out) {
+            if (existing.pid == pid) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+
+        ConflictHit c;
+        c.pid = pid;
+        c.leaf = pe.szExeFile;
+        out.push_back(std::move(c));
+    } while (Process32NextW(snap, &pe));
+    CloseHandle(snap);
+}
+
+unsigned TerminateConflictHits(const std::vector<ConflictHit>& hits, const LogFn& log) {
+    unsigned killed = 0;
+    for (const auto& h : hits) {
+        HANDLE proc = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, h.pid);
+        if (!proc) {
+            LogLine(log, L"[cdp] 防呆：无法打开进程终止权限 pid=" + std::to_wstring(h.pid) +
+                             L" name=" + h.leaf);
+            continue;
+        }
+        if (TerminateProcess(proc, 1)) {
+            WaitForSingleObject(proc, 3000);
+            ++killed;
+            LogLine(log, L"[cdp] 防呆：已结束 " + h.leaf + L" pid=" + std::to_wstring(h.pid) +
+                             L"（释放 User Data，未清 Cookie）");
+        }
+        CloseHandle(proc);
+    }
+    return killed;
+}
+
+bool AnyChromiumHasDebugPort(int debugPort) {
+    if (debugPort <= 0) return false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (!Process32FirstW(snap, &pe)) {
+        CloseHandle(snap);
+        return false;
+    }
+    bool found = false;
+    do {
+        if (!IsWantedChromiumProcessName(pe.szExeFile)) continue;
+        const std::wstring cmd = msc::launcher::GetProcessCommandLineW(pe.th32ProcessID);
+        if (CmdHasRemoteDebugPort(cmd, debugPort)) {
+            found = true;
+            break;
+        }
+    } while (Process32NextW(snap, &pe));
+    CloseHandle(snap);
+    return found;
+}
+
+// CreateProcess 比 ShellExecute 更稳：Edge 经 Shell 启动时偶发丢掉调试参数（E216 调试口永不起）。
+bool LaunchChromiumWithDebugPort(const BrowserProfile& profile, int port, const LogFn& log,
+                                 DWORD* outPid) {
+    if (outPid) *outPid = 0;
+    if (profile.exe.empty() || profile.userData.empty() || port <= 0) return false;
+
+    {
+        const std::wstring def = profile.userData + L"\\Default";
+        DeleteFileW((def + L"\\Current Session").c_str());
+        DeleteFileW((def + L"\\Current Tabs").c_str());
+        DeleteFileW((def + L"\\Last Session").c_str());
+        DeleteFileW((def + L"\\Last Tabs").c_str());
+    }
+
+    // 整行命令行；user-data-dir 加引号防空格路径
+    std::wstring cmd = L"\"";
+    cmd += profile.exe;
+    cmd += L"\" --remote-debugging-port=";
+    cmd += std::to_wstring(port);
+    cmd += L" --remote-allow-origins=* --user-data-dir=\"";
+    cmd += profile.userData;
+    cmd += L"\" --no-first-run --no-default-browser-check"
+           L" --disable-session-crashed-bubble --new-window about:blank";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+    mutableCmd.push_back(L'\0');
+
+    LogLine(log, L"[cdp] 启动浏览器（CreateProcess + 调试口）…");
+    if (!CreateProcessW(profile.exe.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                        nullptr, &si, &pi)) {
+        const DWORD err = GetLastError();
+        LogLine(log, L"[cdp] CreateProcess 失败 err=" + std::to_wstring(err) + L" exe=" + profile.exe);
+        return false;
+    }
+    if (outPid) *outPid = pi.dwProcessId;
+    LogLine(log, L"[cdp] 已拉起浏览器 pid=" + std::to_wstring(pi.dwProcessId) + L" port=" +
+                     std::to_wstring(port));
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
 }  // namespace
+
+unsigned KillBrowsersBlockingProfile(const BrowserProfile& profile, int debugPort, const LogFn& log) {
+    if (profile.userData.empty()) return 0;
+    unsigned total = 0;
+    for (int round = 0; round < 3; ++round) {
+        std::vector<ConflictHit> hits;
+        CollectConflictingBrowserHits(profile, debugPort, hits);
+        if (hits.empty()) break;
+        total += TerminateConflictHits(hits, log);
+        Sleep(400);
+    }
+    if (total > 0) {
+        LogLine(log, L"[cdp] 防呆：已结束占用配置目录的浏览器 ×" + std::to_wstring(total) +
+                         L" dir=" + profile.userData);
+    }
+    return total;
+}
+
+unsigned KillDailyBrowsersForUiaLogin(const std::wstring& preferredExe, const LogFn& log) {
+    if (preferredExe.empty()) return 0;
+
+    unsigned total = 0;
+    for (int round = 0; round < 3; ++round) {
+        std::vector<ConflictHit> hits;
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE) break;
+
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (pe.th32ProcessID == GetCurrentProcessId()) continue;
+                if (!IsWantedChromiumProcessName(pe.szExeFile)) continue;
+
+                const DWORD pid = pe.th32ProcessID;
+                std::wstring img;
+                if (!QueryProcessImagePath(pid, img)) continue;
+                if (!SameBrowserInstall(img, preferredExe)) continue;
+
+                const std::wstring cmd = msc::launcher::GetProcessCommandLineW(pid);
+                if (IsChromiumSubprocessCmd(cmd)) continue;  // 只杀主进程
+
+                bool dup = false;
+                for (const auto& existing : hits) {
+                    if (existing.pid == pid) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) continue;
+
+                ConflictHit c;
+                c.pid = pid;
+                c.leaf = pe.szExeFile;
+                hits.push_back(std::move(c));
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+
+        if (hits.empty()) break;
+        total += TerminateConflictHits(hits, log);
+        Sleep(500);
+    }
+
+    if (total > 0) {
+        LogLine(log, L"[uia] 自动登录前已结束已开浏览器主进程 ×" + std::to_wstring(total) +
+                         L"（同安装；不清 Cookie，本轮只拉起登录窗）");
+        Sleep(800);  // 等 User Data 锁释放
+    } else {
+        LogLine(log, L"[uia] 自动登录前：未发现需关闭的已开浏览器主进程");
+    }
+    return total;
+}
 
 bool Session::Connect(int port, const LogFn& log) {
     Close();
@@ -628,74 +911,21 @@ bool Session::Connect(int port, const LogFn& log) {
 bool Session::ProbeUserDataConflict(const BrowserProfile& profile, int debugPort,
                                     std::wstring& outHint, const LogFn& log) {
     outHint.clear();
-    if (profile.userData.empty()) return false;
+    std::vector<ConflictHit> hits;
+    CollectConflictingBrowserHits(profile, debugPort, hits);
+    if (hits.empty()) return false;
 
-    const bool usingCdpCopy = IsGamaPassCdpCopyDir(profile.userData);
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-
-    PROCESSENTRY32W pe{};
-    pe.dwSize = sizeof(pe);
-    if (!Process32FirstW(snap, &pe)) {
-        CloseHandle(snap);
-        return false;
-    }
-
-    DWORD hitPid = 0;
-    std::wstring hitExe;
-    do {
-        const wchar_t* name = pe.szExeFile;
-        const bool want = (_wcsicmp(name, L"chrome.exe") == 0) ||
-                          (_wcsicmp(name, L"msedge.exe") == 0) ||
-                          (_wcsicmp(name, L"chromium.exe") == 0) ||
-                          (_wcsicmp(name, L"360chrome.exe") == 0) ||
-                          (_wcsicmp(name, L"360chromex.exe") == 0) ||
-                          (_wcsicmp(name, L"360se.exe") == 0) ||
-                          (_wcsicmp(name, L"360browser.exe") == 0);
-        if (!want) continue;
-
-        const DWORD pid = pe.th32ProcessID;
-        std::wstring img;
-        if (!QueryProcessImagePath(pid, img)) continue;
-
-        const std::wstring cmd = msc::launcher::GetProcessCommandLineW(pid);
-        if (CmdHasRemoteDebugPort(cmd, debugPort)) continue;  // 已是我们要的调试实例
-
-        std::wstring ud;
-        const bool hasUd = ExtractUserDataDirFromCmd(cmd, ud);
-
-        // 显式 --user-data-dir 命中目标目录 → 冲突
-        if (hasUd && PathKeysEqual(ud, profile.userData)) {
-            hitPid = pid;
-            hitExe = img;
-            break;
-        }
-
-        // 官方 Chrome/Edge 走 GamaPassCdpProfile 副本时：日常浏览器默认目录不算冲突
-        if (usingCdpCopy) continue;
-
-        // Chrome++ / 便携直用日常目录：同安装目录且未开本调试口 → 多半会锁 data_dir
-        if (!SameBrowserInstall(img, profile.exe)) continue;
-        if (hasUd && !PathKeysEqual(ud, profile.userData)) continue;  // 明确用了别的目录
-        hitPid = pid;
-        hitExe = img;
-        break;
-    } while (Process32NextW(snap, &pe));
-    CloseHandle(snap);
-
-    if (!hitPid) return false;
-
-    const wchar_t* leaf = hitExe.c_str();
-    const size_t slash = hitExe.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) leaf = hitExe.c_str() + slash + 1;
-
-    outHint = L"检测到浏览器已在运行且未开启调试口（";
-    outHint += leaf;
+    outHint = L"检测到浏览器仍占用配置目录（";
+    outHint += hits.front().leaf;
     outHint += L" pid=";
-    outHint += std::to_wstring(hitPid);
-    outHint += L"）。请先自行关闭该浏览器窗口后再点一键启动"
-               L"（程序不会自动结束进程；Chrome++ 需关掉日常窗口）。";
-    LogLine(log, L"[cdp] 防呆：" + outHint);
+    outHint += std::to_wstring(hits.front().pid);
+    if (hits.size() > 1) {
+        outHint += L" 等共 ";
+        outHint += std::to_wstring(hits.size());
+        outHint += L" 个进程";
+    }
+    outHint += L"）。已尝试自动结束仍残留，请手动关闭该浏览器后重试。";
+    LogLine(log, L"[cdp] 防呆残留：" + outHint);
     LogLine(log, L"[cdp] 冲突配置目录=" + profile.userData);
     return true;
 }
@@ -709,54 +939,66 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
         return false;
     }
 
+    // 自动登录前再清一轮占用目标目录的主进程（Resolve 已对日常目录做过）
+    {
+        const unsigned n = KillBrowsersBlockingProfile(profile, port, log);
+        if (n > 0) Sleep(800);
+    }
+
     std::wstring busyHint;
     if (ProbeUserDataConflict(profile, port, busyHint, log)) {
         if (outFailHint) *outFailHint = busyHint;
         return false;
     }
 
-    // 启动：只开调试口 + 空白页；Galaxy 由上层按需 Navigate 一次（禁止启动参数再带登录 URL 造成双开）
-    // 清掉上次 park/about:blank 留下的 Session 恢复，避免再开出「空标签页」
-    {
-        const std::wstring def = profile.userData + L"\\Default";
-        DeleteFileW((def + L"\\Current Session").c_str());
-        DeleteFileW((def + L"\\Current Tabs").c_str());
-        DeleteFileW((def + L"\\Last Session").c_str());
-        DeleteFileW((def + L"\\Last Tabs").c_str());
-    }
-    std::wstring args = L"--remote-debugging-port=" + std::to_wstring(port) +
-                        L" --remote-allow-origins=*"
-                        L" --user-data-dir=\"" + profile.userData +
-                        L"\" --no-first-run --no-default-browser-check"
-                        L" --disable-session-crashed-bubble about:blank";
-    LogLine(log, L"[cdp] 启动浏览器（带调试口）…");
-    HINSTANCE sh =
-        ShellExecuteW(nullptr, L"open", profile.exe.c_str(), args.c_str(), nullptr, SW_SHOWNORMAL);
-    if (reinterpret_cast<INT_PTR>(sh) <= 32) {
-        std::wstring hint =
-            L"启动浏览器失败。若浏览器已打开，请先自行关闭后再试（不会自动结束进程）。";
-        LogLine(log, L"[cdp] " + hint);
-        if (outFailHint) *outFailHint = hint;
-        return false;
-    }
-    for (int i = 0; i < 40; ++i) {
-        Sleep(500);
-        if (Connect(port, log)) return true;
-        // 中途若发现同目录被无调试口实例占用，提前给出防呆（例如用户又开了一份日常窗口）
-        if ((i == 4 || i == 14 || i == 29) &&
-            ProbeUserDataConflict(profile, port, busyHint, log)) {
-            if (outFailHint) *outFailHint = busyHint;
+    auto tryLaunch = [&]() -> bool {
+        DWORD pid = 0;
+        if (!LaunchChromiumWithDebugPort(profile, port, log, &pid)) {
+            std::wstring hint = L"启动浏览器失败（CreateProcess）。请确认 Edge/Chrome 可手动打开后重试。";
+            LogLine(log, L"[cdp] " + hint);
+            if (outFailHint) *outFailHint = hint;
             return false;
         }
+        return true;
+    };
+
+    if (!tryLaunch()) return false;
+
+    // 等待调试口；若进程未带上调试参数（Edge Singleton/Shell 丢参），杀主进程后重开，切勿空等。
+    int relaunches = 0;
+    for (int i = 0; i < 50; ++i) {
+        Sleep(400);
+        if (Connect(port, log)) return true;
+
+        const bool checkpoint = (i == 8 || i == 18 || i == 30 || i == 40);
+        if (!checkpoint) continue;
+
+        if (AnyChromiumHasDebugPort(port)) {
+            // 已有带调试口的进程，继续等口起来（启动慢）
+            LogLine(log, L"[cdp] 已检测到调试口进程，继续等待 port=" + std::to_wstring(port));
+            continue;
+        }
+
+        if (relaunches >= 2) continue;
+        LogLine(log, L"[cdp] 未检测到带调试口的浏览器进程，防呆结束占用后重开…");
+        (void)KillBrowsersBlockingProfile(profile, port, log);
+        Sleep(600);
+        if (!tryLaunch()) return false;
+        ++relaunches;
     }
+
     if (ProbeUserDataConflict(profile, port, busyHint, log)) {
         if (outFailHint) *outFailHint = busyHint;
         return false;
     }
     const std::wstring hint =
-        L"等待浏览器调试口超时。请先关掉占用中的 Chrome/Edge/Chrome++ 后再点启动"
-        L"（程序不会自动结束进程）。";
+        L"等待浏览器调试口超时。官方 Chrome 应走 GamaPassCdpProfile 副本；"
+        L"若仍超时，请检查副本是否被占用，或改用 Edge / Chrome++ 直开日常目录。";
     LogLine(log, L"[cdp] " + hint);
+    if (!AnyChromiumHasDebugPort(port)) {
+        LogLine(log, L"[cdp] 诊断：全程未出现 cmdline 含 --remote-debugging-port=" +
+                         std::to_wstring(port) + L" 的进程（参数可能被浏览器忽略）");
+    }
     if (outFailHint) *outFailHint = hint;
     return false;
 }

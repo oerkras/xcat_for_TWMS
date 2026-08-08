@@ -33,7 +33,7 @@ namespace {
 
 constexpr DWORD kPublishIntervalMs = 500;
 
-// docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-04（与 anti_macro_port 对齐）
+// docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-06（与 anti_macro_port 对齐）
 constexpr char kAntiMacroUtilClass[] =
     "ec3b217aea4af2d5989a2428d24c7dd36a7bcaef541c9c40fa4c5eb46d1c0aa";
 constexpr char kAntiMacroNonFiniteClass[] =
@@ -110,11 +110,28 @@ void FillLeds(xcat::PayloadStatus& st) {
 
     st.playerExp = 0;
     st.playerExpValid = 0;
+    st.playerCharValid = 0;
+    st.playerLevel = 0;
+    st.playerJob = 0;
+    st.playerMeso = 0;
+    st.playerName[0] = '\0';
+    st.playerJobName[0] = '\0';
     if (st.localPlayerOk) {
         x::features::titlebar::game::Vitals vitals{};
         if (x::features::titlebar::game::ReadVitals(vitals) && vitals.ok) {
             st.playerExp = static_cast<uint64_t>(static_cast<uint32_t>(vitals.exp));
             st.playerExpValid = 1u;
+            if (vitals.name[0] && vitals.level > 0) {
+                st.playerCharValid = 1u;
+                st.playerLevel = vitals.level;
+                st.playerJob = vitals.job;
+                st.playerMeso = vitals.meso;
+                strncpy_s(st.playerName, vitals.name, _TRUNCATE);
+                char jobFallback[16]{};
+                const char* jobTw =
+                    x::features::titlebar::game::JobText(vitals.job, jobFallback);
+                if (jobTw) strncpy_s(st.playerJobName, jobTw, _TRUNCATE);
+            }
         }
     }
 }

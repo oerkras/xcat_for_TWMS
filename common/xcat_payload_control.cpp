@@ -84,8 +84,8 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mpPotion = 1;
     out.hpThresholdPct = 50;
     out.mpThresholdPct = 30;
-    out.petSummon = 1;
-    out.petSummonRequireFood = 1;
+    out.petSummon = 0;
+    out.petSummonRequireFood = 0;
     out.multiSkill = 0;
     out.multiSkillGapMs = kMultiSkillGapDefaultMs;
     out.multiSkillSafeStagger = 1;
@@ -103,6 +103,11 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.simpleCombatHumanWalk = 0;  // 与 Impact 互斥；面板单选
     out.simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     out.simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
+    out.simpleCombatStandOffCustom = kCombatStandOffCustomDefault;
+    out.simpleCombatStandOffX = kCombatStandOffXDefault;
+    out.simpleCombatStandOffY = kCombatStandOffYDefault;
+    out.simpleCombatGroundSpoof = kCombatGroundSpoofDefault;
+    out.simpleCombatAntiJitter = kCombatAntiJitterDefault;
     out.simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
     out.simpleCombatTeleportMaxHop = kCombatTeleportMaxHopDefault;
     out.simpleCombatLiveStep = 0;
@@ -117,10 +122,12 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.attackRpcMobs = kAttackRpcMobsDefault;
     out.attackRpcIntervalMs = kAttackRpcIntervalDefaultMs;
     out.attackRpcDamage = kAttackRpcDamageDefault;
-    out.autoLie = 0;
+    out.autoLie = 1;  // 默认开启；ini 有显式项时仍以 ini 为准
     out.autoLieDryRun = 0;
+    out.autoLieMouseRegionOverlay = 0;
     out.autoLieAlarmTestSeq = 0;
     out.autoLieMouseSmokeSeq = 0;
+    out.autoLieMouseSimSeq = 0;
     out.manualRejoinSeq = 0;
     out.teleportTestSeq = 0;
     out.teleportNativeTestSeq = 0;
@@ -144,6 +151,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.hideOtherPlayers = 0;
     out.frameLock = 1;  // 默认开
     out.frameLockFps = kFrameLockFpsDefault;
+    out.pointBlankShoot = 1;  // 默认开：贴身仍射箭
     out.dropAlertBypass = 0;  // 默认关
     out.auctionTownBypass = 0;
     out.autoSell = 0;
@@ -172,6 +180,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "attackAccel", b)) out.attackAccel = b ? 1u : 0u;
     // v30 兼容：旧「跳过动作等待」开着则视为攻击加速开
     if (IniGetBool(ini, "core", "attackAccelClearBusy", b) && b) out.attackAccel = 1u;
+    if (!kAttackAccelUserEnabled) out.attackAccel = 0;
     if (IniGetBool(ini, "core", "attackAccelCutLayer", b)) out.attackAccelCutLayer = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "attackAccelSkipPrepare", b))
         out.attackAccelSkipPrepare = b ? 1u : 0u;
@@ -257,12 +266,15 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.attackRpcDamage = ClampAttackRpcDamage(u);
     if (IniGetBool(ini, "core", "autoLie", b)) out.autoLie = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoLieDryRun", b)) out.autoLieDryRun = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "autoLieMouseRegionOverlay", b))
+        out.autoLieMouseRegionOverlay = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "movepathFlushProbe", b)) out.movepathFlushProbe = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "galaxyTokenProbe", b)) out.galaxyTokenProbe = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "softLoginProbe", b)) out.softLoginProbe = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "softLoginDismissSeq", u)) out.softLoginDismissSeq = u;
     if (IniGetU32(ini, "core", "autoLieAlarmTestSeq", u)) out.autoLieAlarmTestSeq = u;
     if (IniGetU32(ini, "core", "autoLieMouseSmokeSeq", u)) out.autoLieMouseSmokeSeq = u;
+    if (IniGetU32(ini, "core", "autoLieMouseSimSeq", u)) out.autoLieMouseSimSeq = u;
     if (IniGetU32(ini, "core", "manualRejoinSeq", u)) out.manualRejoinSeq = u;
     if (IniGetU32(ini, "core", "teleportTestSeq", u)) out.teleportTestSeq = u;
     if (IniGetU32(ini, "core", "teleportNativeTestSeq", u)) out.teleportNativeTestSeq = u;
@@ -320,6 +332,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "frameLock", b)) out.frameLock = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "frameLockFps", u)) out.frameLockFps = ClampFrameLockFps(u);
     if (IniGetBool(ini, "core", "dropAlertBypass", b)) out.dropAlertBypass = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "pointBlankShoot", b)) out.pointBlankShoot = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "auctionTownBypass", b)) out.auctionTownBypass = b ? 1u : 0u;
     // core.autoSell* 已废弃：真源 [auto_supply]；此处强制清零，避免旧 key 干扰。
     out.autoSell = 0;
@@ -343,6 +356,22 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         if (u == kCombatTeleportStandOffLegacyDefault) u = kCombatTeleportStandOffDefault;
         out.simpleCombatTeleportStandOff = ClampCombatTeleportStandOff(u);
     }
+    if (IniGetBool(ini, "core", "simpleCombatStandOffCustom", b))
+        out.simpleCombatStandOffCustom = b ? 1u : 0u;
+    // X 允许 0（贴着怪心），所以不能用「读到 0 就回默认」那套 —— 那是给
+    // 「0 = 旧盘没这个键」的字段用的。这里靠 Custom 开关本身区分新旧盘：
+    // 旧盘没有 Custom 键 ⇒ 恒 0 ⇒ X/Y 根本不参与计算。
+    if (IniGetU32(ini, "core", "simpleCombatStandOffX", u))
+        out.simpleCombatStandOffX = ClampCombatStandOffX(u);
+    {
+        int32_t sy = 0;
+        if (IniGetI32(ini, "core", "simpleCombatStandOffY", sy))
+            out.simpleCombatStandOffY = ClampCombatStandOffY(sy);
+    }
+    if (IniGetBool(ini, "core", "simpleCombatGroundSpoof", b))
+        out.simpleCombatGroundSpoof = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "simpleCombatAntiJitter", b))
+        out.simpleCombatAntiJitter = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "simpleCombatTeleportCooldownMs", u))
         out.simpleCombatTeleportCooldownMs = ClampCombatTeleportCooldownMs(u);
     if (IniGetU32(ini, "core", "simpleCombatTeleportMaxHop", u)) {
@@ -395,7 +424,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.magic = kPayloadControlMagic;
     normalized.version = kPayloadControlVersion;
     normalized.invuln = normalized.invuln ? 1u : 0u;
-    normalized.attackAccel = normalized.attackAccel ? 1u : 0u;
+    normalized.attackAccel =
+        (kAttackAccelUserEnabled && normalized.attackAccel) ? 1u : 0u;
     normalized.attackAccelCutLayer = normalized.attackAccelCutLayer ? 1u : 0u;
     normalized.attackAccelSkipPrepare = normalized.attackAccelSkipPrepare ? 1u : 0u;
     normalized.attackAccelBooster = normalized.attackAccelBooster ? 1u : 0u;
@@ -464,7 +494,9 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         normalized.attackRpcDamage ? normalized.attackRpcDamage : kAttackRpcDamageDefault);
     normalized.autoLie = normalized.autoLie ? 1u : 0u;
     normalized.autoLieDryRun = normalized.autoLieDryRun ? 1u : 0u;
+    normalized.autoLieMouseRegionOverlay = normalized.autoLieMouseRegionOverlay ? 1u : 0u;
     normalized.dropAlertBypass = normalized.dropAlertBypass ? 1u : 0u;
+    normalized.pointBlankShoot = normalized.pointBlankShoot ? 1u : 0u;
     normalized.auctionTownBypass = normalized.auctionTownBypass ? 1u : 0u;
     normalized.autoSell = normalized.autoSell ? 1u : 0u;
     normalized.launcherHangupSchedule = normalized.launcherHangupSchedule ? 1u : 0u;
@@ -489,6 +521,11 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
             off = kCombatTeleportStandOffDefault;
         normalized.simpleCombatTeleportStandOff = ClampCombatTeleportStandOff(off);
     }
+    normalized.simpleCombatStandOffCustom = normalized.simpleCombatStandOffCustom ? 1u : 0u;
+    normalized.simpleCombatStandOffX = ClampCombatStandOffX(normalized.simpleCombatStandOffX);
+    normalized.simpleCombatStandOffY = ClampCombatStandOffY(normalized.simpleCombatStandOffY);
+    normalized.simpleCombatGroundSpoof = normalized.simpleCombatGroundSpoof ? 1u : 0u;
+    normalized.simpleCombatAntiJitter = normalized.simpleCombatAntiJitter ? 1u : 0u;
     normalized.simpleCombatTeleportCooldownMs =
         ClampCombatTeleportCooldownMs(normalized.simpleCombatTeleportCooldownMs
                                          ? normalized.simpleCombatTeleportCooldownMs
@@ -589,12 +626,15 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "attackRpcDamage", normalized.attackRpcDamage);
         IniSetBool(ini, "core", "autoLie", normalized.autoLie != 0);
         IniSetBool(ini, "core", "autoLieDryRun", normalized.autoLieDryRun != 0);
+        IniSetBool(ini, "core", "autoLieMouseRegionOverlay",
+                   normalized.autoLieMouseRegionOverlay != 0);
         IniSetBool(ini, "core", "movepathFlushProbe", normalized.movepathFlushProbe != 0);
         IniSetBool(ini, "core", "galaxyTokenProbe", normalized.galaxyTokenProbe != 0);
         IniSetBool(ini, "core", "softLoginProbe", normalized.softLoginProbe != 0);
         IniSetU32(ini, "core", "softLoginDismissSeq", normalized.softLoginDismissSeq);
         IniSetU32(ini, "core", "autoLieAlarmTestSeq", normalized.autoLieAlarmTestSeq);
         IniSetU32(ini, "core", "autoLieMouseSmokeSeq", normalized.autoLieMouseSmokeSeq);
+        IniSetU32(ini, "core", "autoLieMouseSimSeq", normalized.autoLieMouseSimSeq);
         IniSetU32(ini, "core", "manualRejoinSeq", normalized.manualRejoinSeq);
         IniSetU32(ini, "core", "teleportTestSeq", normalized.teleportTestSeq);
         IniSetU32(ini, "core", "teleportNativeTestSeq", normalized.teleportNativeTestSeq);
@@ -639,6 +679,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "frameLock", normalized.frameLock != 0);
         IniSetU32(ini, "core", "frameLockFps", ClampFrameLockFps(normalized.frameLockFps));
         IniSetBool(ini, "core", "dropAlertBypass", normalized.dropAlertBypass != 0);
+        IniSetBool(ini, "core", "pointBlankShoot", normalized.pointBlankShoot != 0);
         IniSetBool(ini, "core", "auctionTownBypass", normalized.auctionTownBypass != 0);
         // 剥离双轨：不再写 core.autoSell*，并清掉历史 key。
         IniEraseKeysWithPrefix(ini, "core", "autoSell");
@@ -655,6 +696,14 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                   normalized.simpleCombatTeleportMinDx);
         IniSetU32(ini, "core", "simpleCombatTeleportStandOff",
                   normalized.simpleCombatTeleportStandOff);
+        IniSetBool(ini, "core", "simpleCombatStandOffCustom",
+                   normalized.simpleCombatStandOffCustom != 0);
+        IniSetU32(ini, "core", "simpleCombatStandOffX", normalized.simpleCombatStandOffX);
+        IniSetI32(ini, "core", "simpleCombatStandOffY", normalized.simpleCombatStandOffY);
+        IniSetBool(ini, "core", "simpleCombatGroundSpoof",
+                   normalized.simpleCombatGroundSpoof != 0);
+        IniSetBool(ini, "core", "simpleCombatAntiJitter",
+                   normalized.simpleCombatAntiJitter != 0);
         IniSetU32(ini, "core", "simpleCombatTeleportCooldownMs",
                   normalized.simpleCombatTeleportCooldownMs);
         // fill+Doing 已废：清掉历史跨层门控 / 位移预算 key。

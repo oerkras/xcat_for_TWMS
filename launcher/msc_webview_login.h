@@ -18,7 +18,7 @@ enum class AuthStrategy {
     HttpFirst = 0,    // HK：HTTP 换票（磁盘兼容名；与 HttpOnly 行为相同）
     HttpOnly = 1,     // 历史值：读盘归一为 HttpFirst
     // 2 = 历史 webview_only：读盘归一为 HttpFirst
-    GamaPassAuto = 3, // 默认浏览器 CDP 点选换票（无需账密）
+    GamaPassAuto = 3, // 日常浏览器 Windows UI Automation 点选换票（无需账密）
 };
 
 inline bool AuthStrategyNeedsAccountCreds(AuthStrategy s) {

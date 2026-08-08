@@ -22,6 +22,9 @@ struct LaunchUiState {
     DWORD autoLaunchNotBeforeMs = 0;
 };
 
+// GAMA PASS 冷启/切模式自动换票准备窗（防误触；用户反馈 7s 过长）
+inline constexpr DWORD kGamaPassAutoPrepMs = 3000;
+
 void LaunchPanel_LoadAccount(LaunchUiState& ui);
 void LaunchPanel_SaveAccount(LaunchUiState& ui);
 void LaunchPanel_FormatAccountForUi(LaunchUiState& ui);  // 连续 '-' 处分行，便于换行显示

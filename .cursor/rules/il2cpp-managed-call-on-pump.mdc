@@ -1,0 +1,61 @@
+---
+description: il2cpp 托管调用必须在 MainPump 上；off-pump 触发 Class::Init 会打断类初始化，主线程永久黑屏
+alwaysApply: true
+---
+
+# il2cpp 托管调用只许在主泵上（经典版 / TWMS）
+
+**任何可能触发 il2cpp 类初始化的调用，必须在 MainPump（Unity 主线程）上执行。**
+后台 worker 只许做纯内存读（已解析的字段偏移、已缓存的指针）。
+
+细节与反汇编证据见 [`docs/features/ops/il2cpp托管调用线程规约.md`](../../docs/features/ops/il2cpp托管调用线程规约.md)。
+
+## 必须
+
+- 托管方法（`FnFromMi<...>(mi, rva)(mi)` 一类的函数指针直调）、`il2cpp_runtime_class_init` /
+  `object_new` / `string_new`，一律 `x::runtime::main_thread::InvokeAndWait` 投到泵上。
+- 高频谓词：**一个 job 一次算完多个结果 + 自缓存**（本仓 `anti_macro_port::Predicates()` 用 150 ms），
+  别按 30 Hz tick 逐个投。
+- 泵在换图 quiesce 期会拒非 High 的 job：`InvokeAndWait` 失败时按「取不到 / 未开启」降级返回，
+  **不得**退回到 worker 上硬调。
+- 碰 il2cpp 的每个 `__except` 都要 `ReturnLeakedMetadataLock(<where>)`。
+
+## 禁止
+
+- 在 worker / 任意非泵线程上直调托管方法或触发元数据解析。
+- 以「`il2cpp_bind` 已经有 off-pump 守卫」为由放心 off-pump：那道守卫只挡显式 API，
+  **挡不住托管方法序言里的隐式类初始化**——本次事故就是从这个缺口进来的。
+- 以「归还了元数据锁 / 有 pump-stall 兜底 / 有定点抢修」为由放心 off-pump：
+  这三条只压得住漏锁，**救不回被打断的类初始化**。
+
+## 为什么：一次崩就死透（`GameAssembly`，IDB imagebase `0x7ff848c80000`）
+
+```c
+// sub_7FF849075660（RVA 0x3f5660）—— 取全局元数据锁再进 Init
+if ((klass[309] & 2) == 0) { 抢锁; sub_7FF849078670(klass, &lock); 解锁; }
+
+// sub_7FF849078670（RVA 0x3f8670）—— Init 本体
+klass[309] |= 0x40;            // ★ 先置「正在初始化」
+v12 = sub_7FF84905FBD0();      // ★ RVA 0x3dfbd0 在此 AV：解 klass->generic_class 读到 -1
+...
+klass[309] |= 2;               // 只有走到底才置「已初始化」
+```
+
+klass 是从 `MethodInfo + 0x38` 的 rgctx 表惰性解出来的；**非泵线程解出来是垃圾指针**。
+炸了之后 `0x40` 再没人清、位 2 永远置不上 → 主线程每次碰这个类都抢一次全局锁再空转，
+客户端黑屏、CPU 满载。
+
+## 三个已被证伪的假设（别重走）
+
+| 假设 | 证伪 |
+|---|---|
+| 锁泄漏是病根，归还就能救 | 1.2 s 内还了锁、取证显示 `lock: 空闲`，主线程照样空转黑屏 |
+| 一次性类初始化，泵上预热一次即可 | 泵上预热成功后 **0.8 秒**，worker 调同样方法照炸；这是每次调用都走的路 |
+| 换图 / InterStage 时序问题 | 泵上成功那次与 worker 失败那次处在**同一个 `phase Bootstrap` 窗口**，只有线程不同 |
+
+## 排障
+
+- 日志出现 `★持锁时抛异常★` → 有人 off-pump 碰了托管代码；栈里 `xcat.dll` 帧用
+  `python scripts\symbolize_hang.py x --rva <rva...>` 反查即是元凶。
+- 取证文件显示 `lock: 空闲` 但主线程仍卡在 `GameAssembly+0x3f5xxx` → 就是本条的坑，别再查锁。
+- `Il2Cpp skip runtimeClassInit off-pump` 是守卫正常命中，不是错误。

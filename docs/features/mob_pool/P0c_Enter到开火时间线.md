@@ -61,12 +61,15 @@ T8  服务器结算（与他人比的是 T8 到达序）
 | hpPct | `> 0` | 硬 |
 | 坐标 | 有限、非原点脏、不超界；可回退 VecCtrl Ap | 硬（脏则跳过） |
 | 特殊模板 | 排除占位 tpl | 硬 |
+| **suspended** | `== 0` | 硬 |
+| **inViewSplit** | **不挡入榜**；写入 `MobLite.inView`，计数 `nInView0` | 软（选怪偏置 / BIN） |
 | **VecCtrl.Active** | **不读** | — |
 | **MobCtrlState** | 只写入 `MobLite.ctrl`，不挡入榜 | — |
 
 含义：
 
 - EnterField 创建尾 `IsReady=true` 后，**只要坐标已种好**，即可进 Snapshot。  
+- `inView` 是 **FindHit 出刀门**，不是存在性；曾当硬门会导致下层活怪假空图落地（BIN 2026-08-08）。  
 - SetRemote 失活但未踢池时，若仍 ready/hp>0，**仍可能占活怪榜**（P0a §7.6 风险；实机 **NOT RUN**）。  
 - 「我方控」只影响 `PickNearestTarget` 的 `CtrlPreferRank`（软优先），**不是** FillLite 硬门。
 

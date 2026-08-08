@@ -5,6 +5,7 @@
 #include "il2cpp_prefab.h"
 
 #include "il2cpp_bind.h"
+#include "il2cpp_metadata_lock.h"
 #include "log.h"
 
 #include <cstring>
@@ -20,6 +21,14 @@ constexpr char kPrefabAttrClass[] =
 constexpr size_t kOffPrefabPath = 0x10;
 
 bool LooksLikeHeapPtr(void* p) { return il2::LooksLikeHeapPtr(p); }
+
+// 这里会把每个 image 的每个类都过一遍属性，单次扫描就是上万次 il2cpp 调用，是漏锁的
+// 高危面：这些 API 内部先拿全局递归元数据锁，而那把锁没有 SEH 清理路径，__except 吞掉
+// 异常时展开会跨过解锁代码，锁便永久挂在本线程名下 → 全进程元数据查找挂死 = 黑屏。
+// 没漏时是廉价空操作。
+void ReturnLeakedMetadataLock(const char* where) {
+    x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread(where);
+}
 
 bool Utf16EqualsAscii(const wchar_t* w, int n, const char* ascii) {
     if (!w || !ascii || n < 0) return false;
@@ -93,6 +102,7 @@ void* FindClassByPrefabName(const char* prefabName) {
         void* rawAsms = e.domainAssemblies(e.domainGet(), &nAsm);
         asms = static_cast<void**>(rawAsms);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("prefab/domainAssemblies");
         return nullptr;
     }
     if (!asms || nAsm == 0) return nullptr;
@@ -102,6 +112,7 @@ void* FindClassByPrefabName(const char* prefabName) {
         __try {
             image = e.asmImage(asms[ai]);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("prefab/asmImage");
             continue;
         }
         if (!image) continue;
@@ -109,6 +120,7 @@ void* FindClassByPrefabName(const char* prefabName) {
         __try {
             iname = e.imageGetName(image);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("prefab/imageGetName");
             iname = nullptr;
         }
         if (!ImageNameOk(iname)) continue;
@@ -117,6 +129,7 @@ void* FindClassByPrefabName(const char* prefabName) {
         __try {
             nClass = e.imageGetClassCount(image);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("prefab/imageGetClassCount");
             continue;
         }
         for (size_t ci = 0; ci < nClass; ++ci) {
@@ -124,6 +137,7 @@ void* FindClassByPrefabName(const char* prefabName) {
             __try {
                 klass = e.imageGetClass(image, ci);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ReturnLeakedMetadataLock("prefab/imageGetClass");
                 continue;
             }
             if (!klass) continue;
@@ -132,6 +146,7 @@ void* FindClassByPrefabName(const char* prefabName) {
             __try {
                 has = e.classHasAttribute(klass, attrKlass);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ReturnLeakedMetadataLock("prefab/classHasAttribute");
                 continue;
             }
             if (!has) continue;
@@ -142,6 +157,7 @@ void* FindClassByPrefabName(const char* prefabName) {
                 ainfo = e.customAttrsFromClass(klass);
                 if (ainfo) attrObj = e.customAttrsGetAttr(ainfo, attrKlass);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ReturnLeakedMetadataLock("prefab/customAttrs");
                 attrObj = nullptr;
             }
             const bool match = PrefabPathEquals(attrObj, prefabName);
@@ -149,6 +165,7 @@ void* FindClassByPrefabName(const char* prefabName) {
                 __try {
                     e.customAttrsFree(ainfo);
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    ReturnLeakedMetadataLock("prefab/customAttrsFree");
                 }
             }
             if (!match) continue;

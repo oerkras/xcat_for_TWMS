@@ -185,9 +185,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         xcat::log::Info("App", "pending auto gamania(HK) launch (defer 6s)");
     } else {
         msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
-        xcat::app::LaunchPanel_ArmStrategyPrep(ui, 7000);
-        ui.status = "GAMA PASS：约 7 秒后自动换票（可先改成「手动启动并注入」）";
-        xcat::log::Info("App", "pending auto GamaPass launch (defer 7s)");
+        xcat::app::LaunchPanel_ArmStrategyPrep(ui, xcat::app::kGamaPassAutoPrepMs);
+        ui.status = "GAMA PASS：约 3 秒后自动换票（可先改成「手动启动并注入」）";
+        xcat::log::Info("App", "pending auto GamaPass launch (defer 3s)");
     }
 
     if (!msc::weblogin::Init(app.hwnd, &xcat::app::LaunchPanel_OnWebLog)) {

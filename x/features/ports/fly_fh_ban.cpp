@@ -13,6 +13,7 @@
 #endif
 #include "fly_fh_ban.h"
 
+#include "ground_spoof.h"
 #include "player_combat_port.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/log.h"
@@ -118,6 +119,9 @@ void RestoreSlot(void** slot, FnDetect orig) {
 
 void ClearFhOnVc(void* vc) {
     if (!LooksLikeHeapPtr(vc)) return;
+    // 清掉之前先把这块台的 ID 留给「站立伪装」——起飞那一帧走的就是这里，
+    // 之后 CurFh 恒为空，再没别的地方能拿到一块本图的合法台。
+    ground_spoof::NoticeFhObject(ReadPtrSeh(vc, kFbVcCurFh));
     WritePtrSeh(vc, kFbVcCurFh, nullptr);
     WritePtrSeh(vc, kFbVcLastFh, nullptr);
     WritePtrSeh(vc, kFbVcLadderOrRope, nullptr);

@@ -123,19 +123,69 @@ DWORD gLastFiredMs = 0;
 float gStarveY = 0.f;
 char gStarveGuard[16] = {};
 
+// 前馈退场采证（成因见 kLeadFadeMs）。停手瞬间打一个锚点，退完记一行。
+// 为什么必须按事件记账而不是靠遥测：滑行只持续约 120ms，而遥测是 1Hz——采样期望
+// 连一次都碰不上。BIN bc23b1 就是这么卡住的：改完没有任何证据能判断退场有没有生效。
+// 记的两个量直接对应病灶：coast=停手后还飞了多远（修前 3X 理论值 930px），
+// err 从多少变到多少（变大＝确实冲过头了）。
+bool gFadeArmed = false;
+float gFadeX0 = 0.f;
+float gFadeY0 = 0.f;
+float gFadeV0 = 0.f;
+float gFadeErr0 = 0.f;
+DWORD gFadeT0 = 0;
+
+// ★ 相机漂移追踪：**屏光标没动 ≠ 世界目标没变**。
+// 相机跟着角色走，角色一位移，同一个屏幕点对应的世界坐标就跟着漂。早先跟随刷新只看
+// 「屏光标动没动」（kScreenStillPx），于是整段飞行途中都不重算 STW，目标被钉死在上次
+// 动鼠标那一刻的世界点上——表现就是「鼠标不动就不再更新，角色停在旧位置不跟手」。
+//
+// 不能改成每拍无条件重算：停机悬停时那是每秒 62 次主线程 job，纯属白烧。
+// 判据取「角色自上次 STW 起位移了多少」：相机近似 1:1 跟随角色，位移多少世界点就漂多少。
+// 阈值取 8px（小于 12px 控制死区，保证目标比控制精度更新鲜）；悬停时位置纹波只有 ±2~3px，
+// 落在阈值内，照旧零额外开销。
+constexpr float kCamPanPx = 8.f;
+float gLastApX = 0.f;
+float gLastApY = 0.f;
+bool gHaveLastAp = false;
+float gStwApX = 0.f;
+float gStwApY = 0.f;
+bool gHaveStwAp = false;
+
 // 光标世界速度估计，喂给旋翼前馈（见 heli::Setpoint::leadVx）。
 // EMA 系数按「两三次刷新内跟上、又滤掉单次抖动」取；上限只挡离谱毛刺，真正的限速在旋翼。
 constexpr float kLeadEma = 0.5f;
 constexpr float kLeadMax = 2400.f;
-// 超过这么久没有新的跟随刷新，就认定光标停了、前馈归零，否则角色会顺着旧速度一直飘。
-// 取值须大于刷新间隔上限（aim cd 最大 400ms），否则连续扫动中途会被误判成停手。
-constexpr DWORD kLeadHoldMs = 500;
+// ★ 停手后前馈必须**平滑退场**——早先这里是「满舵硬撑 kLeadHoldMs=500ms 再一刀切零」，
+// 那是 3X 手感发飘的根因。
+//
+// 病灶在于上面那个 EMA **只在 SetTarget(track=true) 里更新**，而它只在光标真的移动过才被
+// 调用。所以光标一停，估计值就**冻结在最后一次扫动的速度上**：既不衰减，也不归零。
+// BIN bc23b1 的 3X 段实测：11:27:31 时角色离目标只剩 82px，却仍被下满舵 1860；一秒后
+// 冲过目标 295px，速度反向也顶到 -1859，形成过冲—反冲。
+//
+// 滑行距离 = 满舵速度 × 冻结时长，**随倍率线性放大**，这正是「200% 手感好、300% 很奇怪」：
+//     1X → 620×0.5s = 310px（几乎无感）
+//     2X → 1240×0.5s = 620px（尚在跟手范围）
+//     3X → 1860×0.5s = 930px（接近一屏，明显冲过头）
+//
+// 现在改成按「距上次跟随刷新多久」算一个衰减系数，**不改 gLead 本身**：
+//   · 连续扫动时 age ≤ 一个刷新间隔 ⇒ 系数恒为 1，对跟手零影响；
+//   · 一停手，系数在 kLeadFadeMs 内线性归零，3X 的滑行降到约 200px。
+// 满舵窗口跟着刷新间隔走而不是写死：间隔可由用户在 16–400ms 之间调，写死任一端都会在
+// 另一端出错——太短会把慢速拖动误判成停手，太长就退回本次要修的病。
+constexpr DWORD kLeadFadeMs = 120;
+constexpr DWORD kLeadHoldMinMs = 48;
+constexpr DWORD kLeadHoldMaxMs = 400;
 // 低于此速视为「光标基本停着」，用于选档（见 DriveRotor）。
 constexpr float kLeadIdle = 200.f;
 float gLeadVx = 0.f;
 float gLeadVy = 0.f;
 float gPrevTgtX = 0.f;
 float gPrevTgtY = 0.f;
+// 上一次差分时的相机位置：用来把相机自身位移从 Δtgt 里扣掉（理由见 SetTarget）。
+float gPrevCamX = 0.f;
+float gPrevCamY = 0.f;
 DWORD gPrevTgtMs = 0;
 
 float ClampF(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -152,6 +202,9 @@ void ClearFollowTrack() {
     // 断供探针也要清：跨过一段「没武装」的空窗算出来的 gap 只是关机时长，不是断供。
     gLastFiredMs = 0;
     gStarveGuard[0] = '\0';
+    gFadeArmed = false;
+    gHaveLastAp = false;
+    gHaveStwAp = false;
     ClearLead();
 }
 
@@ -384,7 +437,10 @@ void ScreenToWorldJobFn(void* user) {
     job->ok = true;
 }
 
-bool ScreenToWorld(float* outX, float* outY, bool verbose) {
+// outCam* 可选：点击路径也要拿相机位置，否则 gPrevCam 会跟 gPrevTgt 对不上，
+// 点击后的第一次差分会把「点击点与相机的相对位移」当成光标速度（见 SetTarget）。
+bool ScreenToWorld(float* outX, float* outY, bool verbose, float* outCamX = nullptr,
+                   float* outCamY = nullptr) {
     if (!outX || !outY) return false;
     HWND hwnd = GameHwnd();
     if (!hwnd) return false;
@@ -422,6 +478,8 @@ bool ScreenToWorld(float* outX, float* outY, bool verbose) {
 
     *outX = job.outX;
     *outY = job.outY;
+    if (outCamX) *outCamX = job.camX;
+    if (outCamY) *outCamY = job.camY;
     if (verbose) {
         x::runtime::LogI(
             "Fly",
@@ -464,7 +522,13 @@ bool ClientToUnityScreen(float* outSx, float* outSy) {
 //
 // track=true 表示「这是连续扫动中的一次刷新」，用它差分出光标的世界速度喂给旋翼前馈
 // （见 heli::Setpoint::leadVx）。点击瞬移传 false：那是跳变，差分出来是毛刺不是速度。
-void SetTarget(float wx, float wy, const char* tag, bool quiet, bool track) {
+//
+// ★ 差分必须**扣掉相机自身位移**：世界目标点 = 相机位置 + 光标的屏幕偏移换算，所以
+// Δtgt 里同时含「光标动了」和「相机跟着角色漂了」两份。不扣的话就是正反馈——
+// 角色右移 ⇒ 相机右漂 ⇒ Δtgt 右移 ⇒ 前馈判成「光标在往右扫」⇒ 再加速右移，自激发散。
+// 扣掉之后，光标真停着时 Δtgt−Δcam ≈ 0，前馈自然归零，这也让 EMA 在飞行途中能真正衰减。
+void SetTarget(float wx, float wy, float camX, float camY, const char* tag, bool quiet,
+               bool track) {
     if (!std::isfinite(wx) || !std::isfinite(wy)) return;
     const DWORD now = GetTickCount();
     if (track && gPrevTgtMs) {
@@ -472,8 +536,8 @@ void SetTarget(float wx, float wy, const char* tag, bool quiet, bool track) {
         // 下界挡住 dt≈0 的除零放大，上界挡住「停了很久又动一下」被算成高速扫动。
         if (dt >= 8 && dt <= 300) {
             const float k = 1000.f / static_cast<float>(dt);
-            const float rawVx = (wx - gPrevTgtX) * k;
-            const float rawVy = (wy - gPrevTgtY) * k;
+            const float rawVx = ((wx - gPrevTgtX) - (camX - gPrevCamX)) * k;
+            const float rawVy = ((wy - gPrevTgtY) - (camY - gPrevCamY)) * k;
             gLeadVx += (rawVx - gLeadVx) * kLeadEma;
             gLeadVy += (rawVy - gLeadVy) * kLeadEma;
             gLeadVx = ClampF(gLeadVx, -kLeadMax, kLeadMax);
@@ -485,6 +549,8 @@ void SetTarget(float wx, float wy, const char* tag, bool quiet, bool track) {
     }
     gPrevTgtX = wx;
     gPrevTgtY = wy;
+    gPrevCamX = camX;
+    gPrevCamY = camY;
     gPrevTgtMs = now ? now : 1;
 
     gTgtX = wx;
@@ -556,9 +622,9 @@ void PollLmbHop() {
         return;
     }
     if (down && !gLmbWasDown) {
-        float wx = 0.f, wy = 0.f;
-        if (ScreenToWorld(&wx, &wy, /*verbose=*/true)) {
-            SetTarget(wx, wy, "click", /*quiet=*/false, /*track=*/false);
+        float wx = 0.f, wy = 0.f, wcamX = 0.f, wcamY = 0.f;
+        if (ScreenToWorld(&wx, &wy, /*verbose=*/true, &wcamX, &wcamY)) {
+            SetTarget(wx, wy, wcamX, wcamY, "click", /*quiet=*/false, /*track=*/false);
         } else {
             x::runtime::LogW("Fly", "ScreenToWorld fail (click)");
         }
@@ -582,8 +648,15 @@ void PollAimFollow() {
 
     long cx = 0, cy = 0;
     if (!ReadClientCursor(&cx, &cy)) return;
-    // 屏光标几乎不动：不必重算 STW。旋翼会自己钉住旧目标，不需要「重钉」那套 hack。
-    if (!ScreenCursorMoved(cx, cy)) return;
+    // 屏光标动了要重算；光标没动但**角色位移了**也要重算——相机会跟着漂，同一屏点已经
+    // 不是同一个世界点了（详见 kCamPanPx）。两个条件都不满足才真的可以跳过这一拍。
+    bool camPanned = false;
+    if (gHaveLastAp && gHaveStwAp) {
+        const float mx = gLastApX - gStwApX;
+        const float my = gLastApY - gStwApY;
+        camPanned = (mx * mx + my * my) > (kCamPanPx * kCamPanPx);
+    }
+    if (!ScreenCursorMoved(cx, cy) && !camPanned) return;
     if (!runtime::main_thread::Ensure()) return;
 
     float sx = 0.f, sy = 0.f;
@@ -608,7 +681,24 @@ void PollAimFollow() {
         return;
     }
     NoteClientCursor(cx, cy);
-    SetTarget(job.outX, job.outY, "follow", /*quiet=*/true, /*track=*/true);
+    // 记下本次 STW 时角色在哪：下次据此判断相机漂了多少（见 kCamPanPx）。
+    gStwApX = gLastApX;
+    gStwApY = gLastApY;
+    gHaveStwAp = gHaveLastAp;
+    SetTarget(job.outX, job.outY, job.camX, job.camY, "follow", /*quiet=*/true, /*track=*/true);
+}
+
+// 前馈退场系数（成因见 kLeadFadeMs 那段）。age = 距上次跟随刷新的时长。
+// 满舵窗口取 3 倍刷新间隔：连续扫动时刷新是 ≤1 个间隔一次，留 3 倍余量吸收抖动与
+// ScreenCursorMoved 的 3px 死区，不会把慢速拖动误判成停手。
+float LeadFade(DWORD age) {
+    DWORD hold = AimCdMs() * 3;
+    if (hold < kLeadHoldMinMs) hold = kLeadHoldMinMs;
+    if (hold > kLeadHoldMaxMs) hold = kLeadHoldMaxMs;
+    if (age <= hold) return 1.f;
+    const DWORD fade = age - hold;
+    if (fade >= kLeadFadeMs) return 0.f;
+    return 1.f - static_cast<float>(fade) / static_cast<float>(kLeadFadeMs);
 }
 
 // A 层入口。武装期**每个 worker 拍都要调**（旋翼内部自控 ~11Hz，不必外部限频）：
@@ -640,6 +730,13 @@ void DriveRotor(DWORD now) {
 
     ports::teleport::FlightState st{};
     const bool haveSt = ports::teleport::QueryFlightState(st) && st.ok;
+    // 供 PollAimFollow 判断相机漂移用（见 kCamPanPx）。它在本函数之前跑，读到的是上一拍的
+    // 值，差 8~16ms，对 8px 的判据无影响。
+    if (haveSt) {
+        gLastApX = st.x;
+        gLastApY = st.y;
+        gHaveLastAp = true;
+    }
     // 还没取到目标（刚武装 / 失焦 / STW 未回）：拿当前位置当目标原地悬停。
     // 不能直接 return —— fh-ban 此刻已经挂上了，不发冲量那一段就是自由落体。
     if (!gHaveTgt) {
@@ -650,16 +747,48 @@ void DriveRotor(DWORD now) {
         gHaveTgt = true;
     }
 
-    // 光标停手后前馈必须归零，否则角色会顺着最后一次扫动的速度一直飘出去。
+    // 光标停手后前馈按时间平滑退场（成因与量化见 kLeadFadeMs 那段）。
     // 判据用「距上次跟随刷新多久」而不是「光标是否移动」：后者由 ScreenCursorMoved 的
     // 死区决定，微抖也算动，会让停手判不出来。
-    if (gLastAimMs && now - gLastAimMs > kLeadHoldMs) ClearLead();
+    const float fade = gLastAimMs ? LeadFade(now - gLastAimMs) : 0.f;
+
+    // 退场采证（见 gFadeArmed）。只在「停手瞬间前馈确实还在出力」时打锚点，
+    // 否则记下来的是本就为零的噪声，会把真正的滑行样本淹掉。
+    if (haveSt) {
+        const float leadMag2 = gLeadVx * gLeadVx + gLeadVy * gLeadVy;
+        if (fade >= 1.f) {
+            gFadeArmed = false;
+        } else if (!gFadeArmed && leadMag2 > (kLeadIdle * kLeadIdle)) {
+            gFadeArmed = true;
+            gFadeX0 = st.x;
+            gFadeY0 = st.y;
+            gFadeV0 = std::sqrt(st.vx * st.vx + st.vy * st.vy);
+            gFadeErr0 = std::sqrt((gTgtX - st.x) * (gTgtX - st.x) + (gTgtY - st.y) * (gTgtY - st.y));
+            gFadeT0 = now;
+        }
+        if (gFadeArmed && fade <= 0.f) {
+            gFadeArmed = false;
+            const float cx = st.x - gFadeX0;
+            const float cy = st.y - gFadeY0;
+            const float ex = gTgtX - st.x;
+            const float ey = gTgtY - st.y;
+            x::runtime::LogI("Fly", "lead fade coast=%.0f dur=%ums v0=%.0f err %.0f->%.0f speed=%.2fX",
+                             std::sqrt(cx * cx + cy * cy),
+                             static_cast<unsigned>(now - gFadeT0), gFadeV0, gFadeErr0,
+                             std::sqrt(ex * ex + ey * ey), heli::SpeedScale(heli::Owner::Fly));
+        }
+    }
+
+    // 退完就真清掉，免得冻结值留到下次起飞被当成初值复活。
+    if (fade <= 0.f && (gLeadVx != 0.f || gLeadVy != 0.f)) ClearLead();
+    const float leadVx = gLeadVx * fade;
+    const float leadVy = gLeadVy * fade;
 
     heli::Setpoint sp{};
     sp.x = gTgtX;
     sp.y = gTgtY;
-    sp.leadVx = gLeadVx;
-    sp.leadVy = gLeadVy;
+    sp.leadVx = leadVx;
+    sp.leadVy = leadVy;
     // 手动驾驶：左右与上方交还给用户，只保留「不许俯冲出图」那一面。
     sp.unbounded = true;
     if (haveSt) {
@@ -669,7 +798,9 @@ void DriveRotor(DWORD now) {
         const bool outside = (dx * dx + dy * dy) > (kCruiseRadiusPx * kCruiseRadiusPx);
         // 目标在动就必须给快档，哪怕此刻误差很小：Station 的低上限会把前馈裁掉，角色跟不上
         // 光标 ⇒ 误差变大 ⇒ 又切回 Cruise，白白在两档之间来回。Station 只留给「光标停手」。
-        const bool moving = (gLeadVx * gLeadVx + gLeadVy * gLeadVy) > (kLeadIdle * kLeadIdle);
+        // 用退场后的值判「光标在不在动」：拿冻结的原值会让停手后仍判成在动，
+        // 一直卡在 Cruise 的高上限里收不了速——那正是过冲的另一半。
+        const bool moving = (leadVx * leadVx + leadVy * leadVy) > (kLeadIdle * kLeadIdle);
         sp.mode = (outside || moving) ? heli::Mode::Cruise : heli::Mode::Station;
     } else {
         sp.mode = heli::Mode::Cruise;
@@ -721,7 +852,7 @@ DWORD WINAPI Worker(LPVOID) {
         NoteMapLandGate(now);
         PollF6();
         if (gArmed.load(std::memory_order_acquire)) {
-            // 顺序要紧：先更目标再驱动，同一拍就能跟上鼠标。禁挂台由 SetArmed 负责。
+            // F6 自由飞：不因近门自动卸飞。发门/贴门进门由超级赶路 travel 管。
             PollAimFollow();
             PollLmbHop();
             DriveRotor(now);
@@ -788,8 +919,8 @@ void StopWorker() {
         CloseHandle(th);
     }
     gArmed.store(false, std::memory_order_release);
-    ports::fly_fh_ban::SetArmedBan(false);
     heli::Disarm(heli::Owner::Fly);
+    ports::fly_fh_ban::SetArmedBan(false);
     heli::Release(heli::Owner::Fly);
     ClearFollowTrack();
 }
@@ -810,15 +941,16 @@ void SetArmed(bool on) {
     gLmbWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     ClearFollowTrack();
     gBailBanReleased = false;  // 与紧接着这次 SetArmedBan 对齐，别把上一轮的闩带进新一轮
-    // 武装：禁挂台；ApplyImpact 放行（Impact 消费 → Attr=2）。
-    ports::fly_fh_ban::SetArmedBan(on);
     if (on) {
+        // 武装：禁挂台；ApplyImpact 放行（Impact 消费 → Attr=2）。
+        ports::fly_fh_ban::SetArmedBan(true);
         // 手动入口用**抢占式** Acquire：人按了 F6 就该立刻听人的，哪怕 F5 正在打怪。
         // 被抢的一方 SetSetpoint/Tick 静默 no-op，它自己的循环不用改；旋翼一拍没停。
         (void)heli::Acquire(heli::Owner::Fly);
     } else {
-        // 交还后旋翼变无主，F5/赶路下一拍的 TryAcquire 会把它接回去，不会出现空转期。
+        // 卸飞：停推 → 放挂台 → 交还所有权（不再写 Impact 对冲刹速）。
         heli::Disarm(heli::Owner::Fly);
+        ports::fly_fh_ban::SetArmedBan(false);
         heli::Release(heli::Owner::Fly);
     }
     const unsigned mode = gMode.load(std::memory_order_acquire);

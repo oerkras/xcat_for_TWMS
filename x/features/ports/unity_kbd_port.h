@@ -9,7 +9,10 @@
 // 直写缓冲反而自断触发。
 // 不依赖窗口焦点：事件绕过 Raw Input，直接进 InputSystem 队列。
 // 前台卡顿另需 PreProcessEvent 守位钩子压住外来「方向键=未按」事件，见 .cpp 内注释。
-// 全部接口仅限 Unity 主线程调用（读托管静态 + 入队）。
+//
+// Hold 语义：gMask 非空时自管 InputFrameTick 每帧 Repush（不依赖走路 armed）。
+// Travel StickUp / timed_keys / autopot 与走路共用同一套持有+补写。
+// 全部 OnMain 接口仅限 Unity 主线程；HoldUntil 可在 worker 调（内部 InvokeAndWait）。
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -32,10 +35,25 @@ bool SetKeyHeldOnMain(int32_t unityKey, bool down);
 // 主线程：方向锁存，-1 左 / +1 右 / 0 双松（互斥，切向时自动清另一侧）。
 bool SetWalkDirOnMain(int inputX);
 
-// 主线程：清空本模块持有的全部按键并入队。
+// 主线程：清空**走路**左右键并入队（不碰 PageDown/技能/StickUp 等脉冲位）。
 bool ReleaseAllOnMain();
 
-// 每帧补写（PrePhysics 槽专用）：只重发当前掩码，绝不绑定 / 不分配 / 不打日志。
+// 主线程：Hold 租约（与 SetKeyHeld 等价，语义更明确；掩码非空时挂帧 tick）。
+bool BeginHoldOnMain(int32_t unityKey);
+bool EndHoldOnMain(int32_t unityKey);
+bool AnyHeld();
+uint32_t HeldMaskHash();
+
+// Worker 安全：Down → 轮询 → 必 Up（失败也松）。
+// until(user) 在 worker 调；返回 true 表示可以结束 hold。
+// 时机：至少按住 minHoldMs；之后 until 为真或到达 maxHoldMs 再松。
+// until 在 minHold 之前为真时仍撑满 minHold（进门 drain）。
+// afterUntilDrainMs：until 命中后再额外按住（MapId 晚闪时避免立刻松键）。
+using HoldUntilFn = bool (*)(void* user);
+bool HoldUntil(int32_t unityKey, DWORD minHoldMs, DWORD maxHoldMs, HoldUntilFn until, void* user,
+               char* detail, size_t detailCap, DWORD afterUntilDrainMs = 0);
+
+// 每帧补写（InputFrameTick 槽 / 手动）：只重发当前掩码，绝不绑定 / 不分配 / 不打日志。
 // 真实按住的键在设备缓冲里是持续存在的；我们用「绝对状态事件」模拟，就必须每帧补，
 // 否则前台的真实键盘事件（方向键=未按）会把注入的状态覆盖掉，表现为一顿一顿。
 // 未绑定或手里没按键时直接 no-op。
@@ -55,8 +73,11 @@ void Stats(uint32_t* pushes, uint32_t* clobbers, uint32_t* directs, uint32_t* gu
 // 守位钩子是否已装上（vtable 槽匹配成功）。没装上则前台卡顿修复未生效。
 bool GuardActive();
 
-// 已绑定（klass/方法/设备齐）。
+// 已绑定（klass/方法齐；设备在首次 Push 时再取）。
 bool Ready();
+
+// 尝试 Bind（可在 worker 调；失败有退避）。Ready() 为真前 Inject 应先 EnsureBound。
+bool EnsureBound();
 
 // 最近一次失败原因，供日志；成功为 "ok"。
 const char* LastFail();

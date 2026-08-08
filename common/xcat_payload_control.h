@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 63u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 68u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -21,6 +21,9 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 63u;
 // v56: mobScanIntervalMs 默认 50→20；读盘迁旧默认 + 换怪按需刷新
 // v57: 位移试推 A/B oneshot；ini=moveProbe*（旧 impact* 读盘兜底、写盘擦除）
 // v59: simpleCombatAttackIntervalMs 默认 46→123；读盘迁旧默认 50/46
+// v64: simpleCombatStandOffCustom/X/Y — F5 空中贴怪自定义站距（远程职业）
+// v65: 攻击加速用户入口暂关（面板置灰；读盘/下发强制 attackAccel=0）
+// v66: simpleCombatGroundSpoof — 站立伪装（出刀瞬间种 CurFh；默认开）
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -85,6 +88,9 @@ constexpr const char* kDefaultWorldName = "雪吉拉";
 constexpr uint32_t kMultiSkillGapDefaultMs = 120u;
 constexpr uint32_t kMultiSkillGapMinMs = 1u;
 constexpr uint32_t kMultiSkillGapMaxMs = 500u;
+// 多发普攻：冷启动地板（尚无 degree=6 基准样本时）。
+// 有样本后 = EstimateDamageDelayScaleMs(学到的 base@deg6)，随攻速档即时缩放。
+constexpr uint32_t kMultiSkillNativeNaFloorBootstrapMs = 600u;
 // 默认 123：面板「间隔」出厂值（约 8.1 刀/秒）。下限 1（用户自选；hold 地板同步）。
 constexpr uint32_t kSimpleCombatAttackIntervalDefaultMs = 123u;
 constexpr uint32_t kSimpleCombatAttackIntervalMinMs = 1u;
@@ -122,10 +128,17 @@ constexpr uint32_t kSimpleCombatTickMaxMs = 100u;
 //   · 撞墙预刹按 room/0.2s 限速 ⇒ **高倍率在小图上拿不满**：离墙 800px 时最快只有
 //     4000 px/s，与倍率无关。10X 的收益随地图尺寸递减。
 //   · 服务端对 6200 px/s（约合法步行速 50 倍）的容忍度从未测过。加档必须配合看日志。
-constexpr uint32_t kHeliSpeedPctDefault = 300u;
+// F5 滑翔 / 自动赶路默认倍率：面板顶格 1000%（满火力死拍档）。可调低；旧 ini 有值则读盘为准。
+//
+// ⚠️ 两条实机约束，调高前先想清楚：
+//   · 作动器实测到 cmd=3231/v=3100（5X，零饱和），8000 是从那儿起的 2.1 倍外推、未验。
+//   · 撞墙预刹按 room/0.2s 限速 ⇒ **高倍率在小图上拿不满**：离墙 800px 时最快只有
+//     4000 px/s，与倍率无关。10X 的收益随地图尺寸递减。
+//   · 服务端对 6200 px/s（约合法步行速 50 倍）的容忍度从未测过。加档必须配合看日志。
+constexpr uint32_t kHeliSpeedPctDefault = 1000u;
 constexpr uint32_t kHeliSpeedPctMin = 25u;
 constexpr uint32_t kHeliSpeedPctMax = 1000u;
-// F6 手动飞默认倍率（与 F5 滑翔同为 300%）：换旋翼前开环等效约 1600 px/s ≈ 2.6X，
+// F6 手动飞默认倍率 300%：换旋翼前开环等效约 1600 px/s ≈ 2.6X，
 // 直接给 1.0X（Cruise 620）会比旧版慢一大截；3X 开箱手感更接近旧手动飞。
 constexpr uint32_t kFlySpeedPctDefault = 300u;
 constexpr uint32_t kMobScanIntervalDefaultMs = 20u;
@@ -134,6 +147,8 @@ constexpr uint32_t kMobScanIntervalMinMs = 1u;
 constexpr uint32_t kMobScanIntervalMaxMs = 500u;
 // 与全局 Min 对齐；加速不另抬间隔。
 constexpr uint32_t kAttackAccelIntervalFloorMs = 1u;
+// false：首页「攻击加速」置灰不可选；读盘/Normalize/Apply 强制关闭，防旧 ini 误开。
+constexpr bool kAttackAccelUserEnabled = false;
 // 群怪优先：落盘仍用 clusterWeight；0=关，非 0=开（旧 1–100 权重一律视为开）。
 constexpr uint32_t kClusterWeightDefault = 0u;
 constexpr uint32_t kClusterWeightMax = 100u;
@@ -163,6 +178,33 @@ constexpr uint32_t kCombatTeleportStandOffMin = 12u;
 constexpr uint32_t kCombatTeleportStandOffLegacyDefault = 25u;
 // UI / simple_combat 上界；过大无意义
 constexpr uint32_t kCombatTeleportStandOffMax = 200u;
+
+// ── F5 空中贴怪：自定义站距（面板「自定义站距」勾选） ──────────────────
+// 与上面那组 kCombatTeleportStandOff* **无关**：那组是瞬移/拟人落点用的，还会乘进
+// InHitBand（×1.55）等地面判定；这组只喂直升机悬停点与它自己的闸门。
+//
+// 关：用内置近战最优值（simple_combat::kHeliStandOffPx / kHeliLiftPx），
+//     那是 3,265 个观察窗实测出来的（见模块设计文档「站距」节）。
+// 开：完全听用户的 —— 远程职业站在自己的射程上打，命中率由用户自己调。
+//     ⚠️ 出刀闸与到位判据会**跟着放大**，否则站到 250px 会被 |dx|<=120 的硬闸一票否决。
+constexpr uint32_t kCombatStandOffCustomDefault = 0u;
+// X = 人↔怪心的水平目标距离（px，恒正；左右哪一侧由飞控自己选）。
+// 自定义开箱默认 39/-17（用户实机常用远程站位）；关勾选仍走内置近战最优。
+constexpr uint32_t kCombatStandOffXDefault = 39u;
+constexpr uint32_t kCombatStandOffXMin = 0u;
+// 上界给到 900：够覆盖弓/弩/法师的屏内射程；再远怪也出屏了，选靶先饿死。
+constexpr uint32_t kCombatStandOffXMax = 900u;
+// Y = 相对怪心的垂直偏移（px，**带符号**；+Y 向上 ⇒ 正数=站在怪上方）。
+// 用 IniGetI32 直存负号，别偏置编码：user.ini 是用户会直接改的文件。
+constexpr int32_t kCombatStandOffYDefault = -17;
+constexpr int32_t kCombatStandOffYMin = -600;
+constexpr int32_t kCombatStandOffYMax = 600;
+// 站立伪装默认开：滑翔时 CurFh 恒空，一切「必须站立」的技能（蝸牛術、部分职业主
+// 攻技）全被引擎那道内联地面门拒掉，不开等于这些职业没法用 F5。种台只在同步派发
+// 的两侧各一次、随即清回 null，物理与飞控都看不见。见 ground_spoof.h。
+constexpr uint32_t kCombatGroundSpoofDefault = 1u;
+// F5 空中贴怪「防抖」：到位后钉住站位点（仍 Station，不改 Hold）。关=立即回退旧跟点行为。
+constexpr uint32_t kCombatAntiJitterDefault = 1u;
 // 贴怪/LiveStep 共用面板冷却；默认 200；下限 5（大 hop 另有 80/120 地板）。
 constexpr uint32_t kCombatTeleportCooldownDefaultMs = 200u;
 constexpr uint32_t kCombatTeleportCooldownMinMs = 5u;
@@ -243,15 +285,15 @@ struct PayloadControl {
     uint32_t mpPotion = 1;         // 自动加蓝（默认开）
     uint32_t hpThresholdPct = 50;  // 1-99
     uint32_t mpThresholdPct = 30;  // 1-99
-    uint32_t petSummon = 1;              // 自动召唤宠物（默认开）
-    uint32_t petSummonRequireFood = 1;   // 1=有粮才召（默认开）
+    uint32_t petSummon = 0;              // 自动召唤宠物（默认关）
+    uint32_t petSummonRequireFood = 0;   // 1=有粮才召（默认关）
     uint32_t multiSkill = 0;              // ???????
     uint32_t multiSkillGapMs = kMultiSkillGapDefaultMs;
     uint32_t multiSkillSafeStagger = 1;   // ?????????>=120?
     // v44: 多发可选直发（技能 SendSkillUseRequest + 普攻 Create50；默认关；失败回退）
     uint32_t multiSkillSendUseRequest = 0;
     uint32_t simpleCombat = 0;            // ????????
-    uint32_t simpleCombatSmartInterval = 0;  // ???????????
+    uint32_t simpleCombatSmartInterval = 0;  // 智能间隔：面板间隔附近 ±40ms 抖动（默认关）
     uint32_t simpleCombatAttackIntervalMs = kSimpleCombatAttackIntervalDefaultMs;
     // v39: 打怪状态机 Tick 间隔（首页「TICK值」）；默认 16，下限 5
     uint32_t simpleCombatTickMs = kSimpleCombatTickDefaultMs;
@@ -270,6 +312,14 @@ struct PayloadControl {
     uint32_t simpleCombatHumanWalk = 0;
     uint32_t simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     uint32_t simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
+    // v64: F5 空中贴怪自定义站距（远程职业）；关则用内置近战最优值。见上方常量注释。
+    uint32_t simpleCombatStandOffCustom = kCombatStandOffCustomDefault;
+    uint32_t simpleCombatStandOffX = kCombatStandOffXDefault;
+    int32_t simpleCombatStandOffY = kCombatStandOffYDefault;
+    // v66: 站立伪装 —— 出刀那一瞬把 CurFh 种回合法台，骗过技能的「必须站立」门。
+    uint32_t simpleCombatGroundSpoof = kCombatGroundSpoofDefault;
+    // v67: 空中贴怪防抖 —— 到位后冻结站位点，模式仍 Station（可 ini/面板一键关）。
+    uint32_t simpleCombatAntiJitter = kCombatAntiJitterDefault;
     uint32_t simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
     // v45: 单次贴怪 hop 上限（px）；调试 TAB
     uint32_t simpleCombatTeleportMaxHop = kCombatTeleportMaxHopDefault;
@@ -291,10 +341,12 @@ struct PayloadControl {
     uint32_t attackRpcMobs = kAttackRpcMobsDefault;
     uint32_t attackRpcIntervalMs = kAttackRpcIntervalDefaultMs;
     uint32_t attackRpcDamage = kAttackRpcDamageDefault;
-    uint32_t autoLie = 0;  // ?????TextCaptcha+LLM / NonFinite ????
+    uint32_t autoLie = 1;  // 默认开：TextCaptcha+LLM / NonFinite 物理跟随
     uint32_t autoLieDryRun = 0;         // 1=???LLM ??? OnOk
+    uint32_t autoLieMouseRegionOverlay = 0;  // 调试：NonFinite 题目区域叠层
     uint32_t autoLieAlarmTestSeq = 0;   // ???? payload ????
     uint32_t autoLieMouseSmokeSeq = 0;  // ???????????? UI?
+    uint32_t autoLieMouseSimSeq = 0;    // 调试：内置轨迹模拟答题（bump 触发）
     // v19: hangup "random channel" edge command. Bump on click/F10; payload channel_hop.
     uint32_t manualRejoinSeq = 0;
     // v21: 面板测试贴怪 → fill+Doing 随机怪（原 ImpactBlink 已拆除）
@@ -343,6 +395,8 @@ struct PayloadControl {
     uint32_t finalAttackForce = 0;
     // v54: 已学技能按满级（改 SkillRecord/Ex 等级；默认关）
     uint32_t skillMaxLevel = 0;
+    // v65: 贴身仍射箭 — TryDoingShootAttack 强制 isMortalBlow=1（弓/弩不挥弓；默认开）
+    uint32_t pointBlankShoot = 1;
     // ????????? DragManager.CanPerformAction ??????????
     uint32_t dropAlertBypass = 0;  // 默认关：开着会抑制客户端警戒
     // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认关）。
@@ -462,6 +516,18 @@ inline uint32_t ClampCombatTeleportMinDx(uint32_t v) {
 inline uint32_t ClampCombatTeleportStandOff(uint32_t v) {
     if (v < kCombatTeleportStandOffMin) return kCombatTeleportStandOffMin;
     if (v > kCombatTeleportStandOffMax) return kCombatTeleportStandOffMax;
+    return v;
+}
+
+inline uint32_t ClampCombatStandOffX(uint32_t v) {
+    if (v < kCombatStandOffXMin) return kCombatStandOffXMin;
+    if (v > kCombatStandOffXMax) return kCombatStandOffXMax;
+    return v;
+}
+
+inline int32_t ClampCombatStandOffY(int32_t v) {
+    if (v < kCombatStandOffYMin) return kCombatStandOffYMin;
+    if (v > kCombatStandOffYMax) return kCombatStandOffYMax;
     return v;
 }
 

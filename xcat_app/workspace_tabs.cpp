@@ -264,20 +264,22 @@ void DrawLaunchTab(LaunchUiState& ui) {
             const char* items[] = {"手动启动并注入（推荐）", "GAMA PASS自动登录", "gamania (HK)"};
             ImGui::SetNextItemWidth(-1.f);
             if (ImGui::Combo("##launch_mode", &modeIdx, items, 3)) {
-                LaunchPanel_ArmStrategyPrep(ui, 7000);
                 if (modeIdx == 0) {
+                    LaunchPanel_ArmStrategyPrep(ui, 7000);
                     attach_inject::SetLaunchMode(attach_inject::LaunchMode::AttachWatch);
                     ui.pendingAutoLaunch = true;
                     ui.status = "已切换：手动启动并注入 — 约 7 秒后自动开始监视";
                 } else if (modeIdx == 1) {
+                    LaunchPanel_ArmStrategyPrep(ui, kGamaPassAutoPrepMs);
                     if (attach_inject::IsWatching()) attach_inject::StopWatch();
                     attach_inject::SetLaunchMode(attach_inject::LaunchMode::GamaPassAuto);
                     msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
-                    // 无人值守闭环：切到本模式后约 7s 自动换票（与冷启一致）。
+                    // 无人值守闭环：切到本模式后约 3s 自动换票（与冷启一致）。
                     // 准备窗内仍可点一次「取消自动换票」打断。
                     ui.pendingAutoLaunch = true;
-                    ui.status = "已切换：GAMA PASS自动登录 — 约 7 秒后自动换票（可再点取消）";
+                    ui.status = "已切换：GAMA PASS自动登录 — 约 3 秒后自动换票（可再点取消）";
                 } else {
+                    LaunchPanel_ArmStrategyPrep(ui, 7000);
                     if (attach_inject::IsWatching()) attach_inject::StopWatch();
                     attach_inject::SetLaunchMode(attach_inject::LaunchMode::OneClickLogin);
                     if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
@@ -292,7 +294,7 @@ void DrawLaunchTab(LaunchUiState& ui) {
                     "手动启动并注入：自行拉起游戏客户端后注入。\n"
                     "GAMA PASS自动登录：优先 Chrome++/Chrome 点选换票（无需账密）；"
                     "只用 Edge 请先卸 Google Chrome。"
-                    "切模式/冷启约 7 秒自动换票；准备中再点一次可取消。"
+                    "切模式/冷启约 3 秒自动换票；准备中再点一次可取消。"
                     "挂机时段到点、守护干净重拉也会自动一键。\n"
                     "gamania (HK)：账密走 HTTP 换票 → 官方启动链 → 注入。\n"
                     "写入 XCat_data/state/launch_mode.txt 与程序目录 launch_mode.txt");
@@ -446,9 +448,9 @@ void DrawLaunchTab(LaunchUiState& ui) {
                 "优先使用 Chrome++ / Google Chrome，其次才是 Edge。"
                 "只用 Edge 的用户请先卸载 Google Chrome，否则会绑到空的 Chrome 会话。"
                 "请在将使用的浏览器里登录 GAMA PASS（accounts 选号页勾选记住）；"
-                "一键前若该浏览器日常窗口已开且冲突，请先关掉（不会自动结束进程）。"
+                "一键前会先结束同安装已开的浏览器主进程（防挂错窗，不清 Cookie），再只拉起登录窗；"
                 "本程序自动点选账号/昵称换票，不会改写登录数据、不会调用 refresh。"
-                "切换到本模式或冷启（已是本模式）约 7 秒后自动换票并启动游戏；"
+                "切换到本模式或冷启（已是本模式）约 3 秒后自动换票并启动游戏；"
                 "准备中可再点一次「取消自动换票」打断，之后需手动启动。"
                 "挂机到点 / 守护干净重拉也会自动一键（无人值守）。");
             ImGui::PopTextWrapPos();
@@ -607,6 +609,8 @@ static int gUiAttackRpcDamage = (int)xcat::kAttackRpcDamageDefault;
 // F6 手动飞 / F5 滑翔倍率：首页「飞行速度」卡；调试 TAB 不再改这两项。
 static int gUiManualFlySpeedPct = (int)xcat::kFlySpeedPctDefault;
 static int gUiFlySpeedPct = (int)xcat::kHeliSpeedPctDefault;
+// 空中贴怪防抖：首页落盘；控件在调试 TAB「飞行调试」。
+static bool gUiAntiJitter = xcat::kCombatAntiJitterDefault != 0;
 
 void DrawHomeTab(LaunchUiState& ui) {
     // 首页卡片顺序：挂机 → 飞行速度 → 拾物 → 攻击加速 → 打怪设置 → 卖背包（低内存守护在调试 TAB）
@@ -614,19 +618,26 @@ void DrawHomeTab(LaunchUiState& ui) {
     static int charSlot = 1;
     static int worldId = xcat::kDefaultWorldId;
     static char worldName[64]{"雪吉拉"};
-    static bool autoLie = false;
+    static bool autoLie = true;  // 与 PayloadControl 默认一致；读盘后覆盖
     static bool invincible = true;  // 与 PayloadControl 默认一致
     static bool attackAccel = false;
+    static bool pointBlankShoot = true;  // 与 PayloadControl 默认一致：贴身仍射箭
     static bool fly = false;
     static bool hpPotion = true;
     static bool mpPotion = true;
-    static bool petSummon = true;
-    static bool petSummonRequireFood = true;
+    static bool petSummon = false;
+    static bool petSummonRequireFood = false;
     static int hpThresholdPct = 50;
     static int mpThresholdPct = 30;
     static bool autoCombat = false;
     // F5 追怪位移：单选 0=空中贴怪 / 1=拟人 / 2=关闭（站桩）
     static int approachMode = 0;
+    // 空中贴怪的自定义站距：关=用内置近战最优值；开=完全听用户的（远程职业）
+    static bool standOffCustom = false;
+    static int standOffX = (int)xcat::kCombatStandOffXDefault;
+    static int standOffY = (int)xcat::kCombatStandOffYDefault;
+    // 站立伪装：出刀瞬间伪造踩台，给腾空放不出技能的职业用；默认关
+    static bool groundSpoof = false;
     static bool smartInterval = false;
     static int attackMs = (int)xcat::kSimpleCombatAttackIntervalDefaultMs;
     static int clusterWeight = 0;  // 0/1：群怪优先（沿用 clusterWeight 落盘）
@@ -673,7 +684,9 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (!coreLoaded || disk.writeTickMs != lastSeenTick) {
                 autoLie = disk.autoLie != 0;
                 invincible = disk.invuln != 0;
-                attackAccel = disk.attackAccel != 0;
+                attackAccel =
+                    xcat::kAttackAccelUserEnabled && disk.attackAccel != 0;
+                pointBlankShoot = disk.pointBlankShoot != 0;
                 gUiFinalAttackForce = disk.finalAttackForce != 0;
                 gUiSkillMaxLevel = disk.skillMaxLevel != 0;
                 gUiAttackAccelCutLayer = disk.attackAccelCutLayer != 0;
@@ -692,6 +705,11 @@ void DrawHomeTab(LaunchUiState& ui) {
                     approachMode = 1;
                 else
                     approachMode = 2;
+                standOffCustom = disk.simpleCombatStandOffCustom != 0;
+                standOffX = (int)xcat::ClampCombatStandOffX(disk.simpleCombatStandOffX);
+                standOffY = (int)xcat::ClampCombatStandOffY(disk.simpleCombatStandOffY);
+                groundSpoof = disk.simpleCombatGroundSpoof != 0;
+                gUiAntiJitter = disk.simpleCombatAntiJitter != 0;
                 gUiFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
                     disk.simpleCombatFlySpeedPct ? disk.simpleCombatFlySpeedPct
                                                  : xcat::kHeliSpeedPctDefault);
@@ -798,7 +816,9 @@ void DrawHomeTab(LaunchUiState& ui) {
         (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
         c.autoLie = autoLie ? 1u : 0u;
         c.invuln = invincible ? 1u : 0u;
-        c.attackAccel = attackAccel ? 1u : 0u;
+        c.attackAccel =
+            (xcat::kAttackAccelUserEnabled && attackAccel) ? 1u : 0u;
+        c.pointBlankShoot = pointBlankShoot ? 1u : 0u;
         c.finalAttackForce = gUiFinalAttackForce ? 1u : 0u;
         c.skillMaxLevel = gUiSkillMaxLevel ? 1u : 0u;
         c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
@@ -816,6 +836,12 @@ void DrawHomeTab(LaunchUiState& ui) {
         // 单选落盘：空中贴怪 / 拟人互斥；关闭则两者皆关。
         c.simpleCombatImpactApproach = (approachMode == 0) ? 1u : 0u;
         c.simpleCombatHumanWalk = (approachMode == 1) ? 1u : 0u;
+        c.simpleCombatStandOffCustom = standOffCustom ? 1u : 0u;
+        c.simpleCombatStandOffX =
+            xcat::ClampCombatStandOffX(static_cast<uint32_t>(standOffX < 0 ? 0 : standOffX));
+        c.simpleCombatStandOffY = xcat::ClampCombatStandOffY(static_cast<int32_t>(standOffY));
+        c.simpleCombatGroundSpoof = groundSpoof ? 1u : 0u;
+        c.simpleCombatAntiJitter = gUiAntiJitter ? 1u : 0u;
         c.simpleCombatFlySpeedPct =
             xcat::ClampHeliSpeedPct(static_cast<uint32_t>(gUiFlySpeedPct < 0 ? 0 : gUiFlySpeedPct));
         c.flySpeedPct = xcat::ClampHeliSpeedPct(
@@ -1211,6 +1237,68 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         // 倍率在下方「飞行速度」卡调。
 
+        // 自定义站距：只对「空中贴怪」生效（拟人/关闭走的是地面落点，不归这套飞控管）。
+        ImGui::BeginDisabled(approachMode != 0);
+        if (xcat::ui::OptionCheckbox("自定义站距", &standOffCustom)) persistCore();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "自己指定悬停在怪的哪个方位，给远程职业用。\n"
+                "不勾 = 用内置近战最优值（X=%u，Y=%d），那是几千次出刀分桶实测出来的。\n"
+                "勾上后出刀判定会跟着你设的距离一起放宽，否则站远了会一刀都不出。\n"
+                "命中率就归你自己调了——站太远打不到，程序不会替你拦。",
+                (unsigned)xcat::kCombatStandOffXDefault, (int)xcat::kCombatStandOffYDefault);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 1.2f);
+        ImGui::BeginDisabled(approachMode != 0 || !standOffCustom);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("X");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(64.f));
+        if (ImGui::DragInt("##f5_standoff_x", &standOffX, 1, (int)xcat::kCombatStandOffXMin,
+                           (int)xcat::kCombatStandOffXMax)) {
+            standOffX = (int)xcat::ClampCombatStandOffX(
+                static_cast<uint32_t>(standOffX < 0 ? 0 : standOffX));
+            persistCore();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "水平站距：人离怪中心多远（px，%u–%u）。\n"
+                "站哪一侧由飞控自己选，你只管定距离。\n"
+                "近战 20–45 命中最好；弓/弩/法师按自己的射程填。",
+                (unsigned)xcat::kCombatStandOffXMin, (unsigned)xcat::kCombatStandOffXMax);
+        }
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Y");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(64.f));
+        if (ImGui::DragInt("##f5_standoff_y", &standOffY, 1, (int)xcat::kCombatStandOffYMin,
+                           (int)xcat::kCombatStandOffYMax)) {
+            standOffY = (int)xcat::ClampCombatStandOffY(static_cast<int32_t>(standOffY));
+            persistCore();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "垂直站距：**正数悬在怪上方**，负数在怪下方（px，%d–%d）。\n"
+                "0 = 与怪同高，近战实测最优。",
+                (int)xcat::kCombatStandOffYMin, (int)xcat::kCombatStandOffYMax);
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+
+        // 站立伪装：同样只对「空中贴怪」有意义（地面追怪本来就站着，没什么好伪装的）。
+        ImGui::BeginDisabled(approachMode != 0);
+        if (xcat::ui::OptionCheckbox("站立伪装", &groundSpoof)) persistCore();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "出刀那一瞬让引擎以为你踩在台上，出完立刻还原。\n"
+                "给「腾空中放不出技能」的职业用（法师系一类技能会检查站立态）。\n"
+                "不改飞行本身，滑翔照旧；只有出刀的那几微秒生效。\n"
+                "默认关：它会让攻击包里的动作字段从腾空斩变成站立斩，\n"
+                "先开一小会儿对比 combat.log 的 act1 再决定长开。");
+        }
+        ImGui::EndDisabled();
+
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("怪物读取速度");
         ImGui::SameLine(0.f, ui::Gap());
@@ -1317,8 +1405,9 @@ void DrawHomeTab(LaunchUiState& ui) {
 
         if (xcat::ui::OptionCheckbox("软重连试连", &softLoginProbe)) persistCore();
         ImGui::SetItemTooltip(
-            "采证+软重进（默认关）。断线后试 ConnectLogin、卸弹窗、重跑自动进游戏；\n"
-            "观察窗内推迟守护干净重拉，进图成功则吞 disconnectSeq。\n"
+            "采证+软重进（默认开）。断线后试 ConnectLogin、卸弹窗、重跑自动进游戏；\n"
+            "观察窗内推迟守护一切干净重拉（踢线/无经验/心跳等），\n"
+            "须等软路径完全失败（或进程已死）才交由守护重拉；进图成功则吞 disconnectSeq。\n"
             "同时只读采样 Galaxy_* 写 galaxy_token.log（仅 len+前缀，不清登录态）。\n"
             "日志 soft_login.log / galaxy_token.log。\n"
             "亦可用 soft_login_probe.on / SOFT_LOGIN_PROBE=1\n"
@@ -1367,7 +1456,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                  true);
         speedRow("F5 滑翔", "home_combat_speed", &gUiFlySpeedPct,
                  "F5 空中贴怪 + 自动赶路共用（都是「自动飞」）。\n"
-                 "仅「空中贴怪」模式下可调；拟人/关闭时置灰。",
+                 "默认 1000%（满火力档）；仅「空中贴怪」模式下可调；拟人/关闭时置灰。",
                  approachMode == 0);
         ImGui::TextDisabled(
             "范围 %u–%u%%。只放大「意图」速度；撞墙预刹 / 位置包线 / 坠落自救不跟着缩。\n"
@@ -1377,13 +1466,15 @@ void DrawHomeTab(LaunchUiState& ui) {
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_home_pickup", "拾物");
-        // 0=关 1=脚下 2=宠吸（人物附近 300×200）3=人物直吸（官方 Send，不靠宠；单选互斥）
+        // 0=关 1=脚下 2=宠吸 3=人物直吸（官方 Send，不靠宠；单选互斥；2/3 共用 vacuumW/H）
         enum : int { kLootOff = 0, kLootFoot = 1, kLootPet = 2, kLootChar = 3 };
         static bool petLootLoaded = false;
         static int lootMode = kLootOff;
         static bool pickupBlacklist = false;
         static int lootIntervalMs = static_cast<int>(xcat::kPetLootIntervalDefaultMs);
         static int lootBurstPerTick = static_cast<int>(xcat::kPetLootBurstDefault);
+        static float lootVacW = xcat::kPetLootVacuumWDefault;
+        static float lootVacH = xcat::kPetLootVacuumHDefault;
         static char blacklistKw[256]{};
         static uint64_t petLootTick = 0;
         static bool petLootSaveFailed = false;
@@ -1431,7 +1522,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             cfg.enabled = petLoot ? 1u : 0u;
             cfg.footEnabled = footLoot ? 1u : 0u;
             cfg.charVacEnabled = charLoot ? 1u : 0u;
-            // 宠吸固定人物附近真空；关宠时清 mapVacuum，避免旧 ini 残留误导
+            // 关宠时清 mapVacuum，避免旧 ini 残留误导；vacuumW/H 始终保留用户设定
             cfg.mapVacuumEnabled = petLoot ? 1u : 0u;
             cfg.intervalMs = xcat::PetLootClampIntervalMs(
                 lootIntervalMs > 0 ? static_cast<uint32_t>(lootIntervalMs) : 0u);
@@ -1439,6 +1530,11 @@ void DrawHomeTab(LaunchUiState& ui) {
             cfg.burstPerTick = xcat::PetLootClampBurstPerTick(
                 lootBurstPerTick > 0 ? static_cast<uint32_t>(lootBurstPerTick) : 0u);
             lootBurstPerTick = static_cast<int>(cfg.burstPerTick);
+            cfg.vacuumW = lootVacW;
+            cfg.vacuumH = lootVacH;
+            xcat::PetLootNormalize(cfg);
+            lootVacW = cfg.vacuumW;
+            lootVacH = cfg.vacuumH;
             parseBlacklistToCfg(cfg);
             // WritePetLoot 内部用新 tick 落盘，必须回写到 petLootTick，否则下帧误判
             // disk≠ui → 清空 blacklistKw 再从（可能已被旧逻辑写空的）规则重建。
@@ -1446,10 +1542,11 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (xcat::WritePetLoot(ui.prefsBinDir.c_str(), cfg)) {
                 petLootTick = cfg.writeTickMs;
                 xcat::log::Ok("App",
-                              "已下发 pet_loot：脚边=%d 宠吸=%d 人物=%d 间隔=%ums 连吸=%u 黑名单=%d "
-                              "rules=%u",
+                              "已下发 pet_loot：脚边=%d 宠吸=%d 人物=%d 间隔=%ums 连吸=%u "
+                              "vac=%.0fx%.0f 黑名单=%d rules=%u",
                               footLoot ? 1 : 0, petLoot ? 1 : 0, charLoot ? 1 : 0, cfg.intervalMs,
-                              cfg.burstPerTick, pickupBlacklist ? 1 : 0, cfg.skipRuleCount);
+                              cfg.burstPerTick, cfg.vacuumW, cfg.vacuumH, pickupBlacklist ? 1 : 0,
+                              cfg.skipRuleCount);
             } else {
                 petLootSaveFailed = true;
                 xcat::log::Warn("App", "写入 user.ini [pet_loot] 失败");
@@ -1465,11 +1562,11 @@ void DrawHomeTab(LaunchUiState& ui) {
                 body = "已切换为脚下拾取（与宠吸/人物直吸互斥）。";
             } else if (next == kLootPet) {
                 kind = 2;
-                body = "已切换为宠吸（人物附近 300×200 .rdata 真空）。";
+                body = "已切换为宠吸（与人物直吸共用范围，尺寸可调；默认 300×200）。";
             } else if (next == kLootChar) {
                 kind = 2;
                 body = xcat::kPetLootCharVacUserEnabled
-                           ? "已切换为人物直吸（官方送包，人物附近 300×200，不靠宠物）。"
+                           ? "已切换为人物直吸（官方送包，不靠宠物；范围与宠吸共用，默认 300×200）。"
                            : "人物直吸暂未开放。";
             }
             notify::PushLocal(kind, "petloot-mode", "拾物模式", body, 4200);
@@ -1494,6 +1591,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                         xcat::PetLootClampIntervalMs(disk.intervalMs));
                     lootBurstPerTick = static_cast<int>(
                         xcat::PetLootClampBurstPerTick(disk.burstPerTick));
+                    lootVacW = disk.vacuumW;
+                    lootVacH = disk.vacuumH;
                     pickupBlacklist = disk.skipFilterEnabled != 0;
                     blacklistKw[0] = '\0';
                     size_t off = 0;
@@ -1550,13 +1649,26 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
             ImGui::SameLine();
             if (xcat::ui::OptionRadioButton("宠吸", &lootMode, kLootPet)) changed = true;
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "宠物官方吸物（扩 .rdata 矩形 → TryPickUpDrop）。\n"
+                    "范围见下方「吸物范围」（与人物直吸共用）；默认 %.0f×%.0f。",
+                    xcat::kPetLootVacuumWDefault, xcat::kPetLootVacuumHDefault);
+            }
             ImGui::SameLine();
             ImGui::BeginDisabled(!xcat::kPetLootCharVacUserEnabled);
             if (xcat::ui::OptionRadioButton("人物直吸", &lootMode, kLootChar)) changed = true;
             ImGui::EndDisabled();
-            if (!xcat::kPetLootCharVacUserEnabled &&
-                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("人物直吸暂未开放（实现保留，稍后上架）。");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled |
+                                     ImGuiHoveredFlags_DelayNormal)) {
+                if (!xcat::kPetLootCharVacUserEnabled) {
+                    ImGui::SetTooltip("人物直吸暂未开放（实现保留，稍后上架）。");
+                } else {
+                    ImGui::SetTooltip(
+                        "官方 SendDropPickUpRequest（角色坐标，不靠宠）。\n"
+                        "范围见下方「吸物范围」（与宠吸共用）；默认 %.0f×%.0f。",
+                        xcat::kPetLootVacuumWDefault, xcat::kPetLootVacuumHDefault);
+                }
             }
             if (changed) {
                 if (!xcat::kPetLootCharVacUserEnabled && lootMode == kLootChar)
@@ -1591,17 +1703,50 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SetNextItemWidth(AppDpi_Px(48.f));
             if (ImGui::DragInt("##loot_burst", &lootBurstPerTick, 1,
                                static_cast<int>(xcat::kPetLootBurstMin),
-                               static_cast<int>(xcat::kPetLootBurstMax)))
+                               static_cast<int>(xcat::kPetLootBurstHardCap)))
                 persistPetLoot();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
                     "每拍连调官方吸物次数（%u–%u，默认 %u）。\n"
                     "越大同秒吸越多，发包更密，打怪同开时尖峰更高。",
-                    (unsigned)xcat::kPetLootBurstMin, (unsigned)xcat::kPetLootBurstMax,
+                    (unsigned)xcat::kPetLootBurstMin, (unsigned)xcat::kPetLootBurstHardCap,
                     (unsigned)xcat::kPetLootBurstDefault);
             }
             ImGui::SameLine(0.f, ui::Gap() * 0.35f);
             ImGui::TextUnformatted("次/拍");
+        }
+        {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("吸物范围");
+            ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+            ImGui::BeginDisabled(lootMode != kLootPet && lootMode != kLootChar);
+            ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+            if (ImGui::DragFloat("##loot_vac_w", &lootVacW, 1.f, xcat::kPetLootVacuumMin,
+                                 xcat::kPetLootVacuumMax, "%.0f"))
+                persistPetLoot();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "宠吸 / 人物直吸共用真空宽度（%.0f–%.0f，默认 %.0f）。\n"
+                    "以宠/人物为中心的矩形宽；过大发包更密、易拒收。",
+                    xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
+                    xcat::kPetLootVacuumWDefault);
+            }
+            ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+            ImGui::TextUnformatted("宽");
+            ImGui::SameLine(0.f, ui::Gap() * 0.55f);
+            ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+            if (ImGui::DragFloat("##loot_vac_h", &lootVacH, 1.f, xcat::kPetLootVacuumMin,
+                                 xcat::kPetLootVacuumMax, "%.0f"))
+                persistPetLoot();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "宠吸 / 人物直吸共用真空高度（%.0f–%.0f，默认 %.0f）。",
+                    xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
+                    xcat::kPetLootVacuumHDefault);
+            }
+            ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+            ImGui::TextUnformatted("高");
+            ImGui::EndDisabled();
         }
         if (xcat::ui::OptionCheckbox("启用拾取黑名单", &pickupBlacklist)) persistPetLoot();
         ImGui::SetNextItemWidth(-1);
@@ -1618,8 +1763,19 @@ void DrawHomeTab(LaunchUiState& ui) {
     {
         // 一行：启用 + 间隔；跳过动作等待随启用隐含开启，无单独入口
         xcat::ui::CardGuard card("##tab_home_attack_accel", "攻击加速");
+        if (!xcat::kAttackAccelUserEnabled) {
+            attackAccel = false;
+            ImGui::BeginDisabled();
+        }
         if (xcat::ui::OptionCheckbox("启用", &attackAccel)) persistCore();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        if (!xcat::kAttackAccelUserEnabled) {
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("当前暂不可用");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("攻击加速暂时关闭，防止误开；出刀仍可用右侧间隔。");
+            }
+        } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "开启后自动跳过动作等待（清忙锁）并抬动作攻速。\n"
                 "与是否开「自动打怪」无关——走路/落地也会生效。\n"
@@ -1659,9 +1815,18 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SetTooltip("智能间隔暂时未接入，先用上方攻击间隔固定值。");
         }
 
+        if (xcat::ui::OptionCheckbox("不挥弓", &pointBlankShoot)) persistCore();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "弓/弩贴身仍射箭，不挥弓近战；主动技贴身也不改近战。\n"
+                "仅装备弓(45)/弩(46)时生效；其它武器原样。\n"
+                "默认开。进图后武装。");
+        }
+
         ImGui::Spacing();
         ImGui::TextUnformatted("出刀站距");
         ImGui::TextDisabled("人到怪心的水平目标距离；命中带约 站距×1.55");
+        ImGui::TextDisabled("仅「拟人 / 瞬移」；空中贴怪走首页「自定义站距」");
         ImGui::Spacing();
 
         {
@@ -1675,7 +1840,9 @@ void DrawHomeTab(LaunchUiState& ui) {
                 ImGui::SetTooltip(
                     "贴怪落在怪左或右侧的水平距离（%u–%u px，默认 %u）。\n"
                     "真命中带：同层且 10 ≤ |dx| ≤ 站距×1.55。\n"
-                    "不是选怪触发距离。",
+                    "不是选怪触发距离。\n"
+                    "⚠️ 只管「拟人 / 瞬移」两条地面路径。「空中贴怪」已改用自己的站距，\n"
+                    "   要调它请到首页打怪设置勾「自定义站距」。",
                     (unsigned)xcat::kCombatTeleportStandOffMin,
                     (unsigned)xcat::kCombatTeleportStandOffMax,
                     (unsigned)xcat::kCombatTeleportStandOffDefault);
@@ -4340,6 +4507,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                 notify::PushLocal(/*Danger*/ 3, "ops-token", "清空失败", "", 3500);
             }
         }
+        ImGui::TextDisabled("保存后写入本机 ProgramData（与设备 ID 同目录），换包/重装清目录后仍可自动找回。");
     }
     CardGap();
     {
@@ -4637,6 +4805,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                     gUiFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
                         disk.simpleCombatFlySpeedPct ? disk.simpleCombatFlySpeedPct
                                                      : xcat::kHeliSpeedPctDefault);
+                    gUiAntiJitter = disk.simpleCombatAntiJitter != 0;
                     flyDbgTick = disk.writeTickMs;
                     flyDbgLoaded = true;
                 }
@@ -4657,11 +4826,30 @@ void DrawDebugTab(LaunchUiState& ui) {
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) flyDbgTick = c.writeTickMs;
         };
+        auto persistAntiJitter = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.simpleCombatAntiJitter = gUiAntiJitter ? 1u : 0u;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) flyDbgTick = c.writeTickMs;
+        };
 
         xcat::ui::CardGuard card("##tab_dbg_fly", "飞行调试");
         ImGui::TextDisabled("F6 飞行（闭环旋翼）；武装期禁挂台");
         ImGui::TextDisabled("F6/F5 速度倍率：首页「飞行速度」卡（当前手动 %d%% / 滑翔 %d%%）",
                             gUiManualFlySpeedPct, gUiFlySpeedPct);
+
+        if (xcat::ui::OptionCheckbox("防抖", &gUiAntiJitter)) persistAntiJitter();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "空中贴怪防抖 = 钉 Y + X 跟 ideal + 两轴软悬停（默认开）。\n"
+                "开：锁怪后接近静止；关：回旧跟点 + 90ms 进近律（会重新有微晃）。\n"
+                "仍用 Station（保留满速进站预刹）；不会改成 Hold。\n"
+                "ini：core.simpleCombatAntiJitter=0 也可关。");
+        }
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::TextDisabled("F5 空中贴怪 · 默认开");
 
         ImGui::Separator();
         ImGui::TextUnformatted("推进路线");

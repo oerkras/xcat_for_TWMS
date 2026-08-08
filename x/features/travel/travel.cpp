@@ -39,11 +39,22 @@ constexpr DWORD kTickMs = 50;
 // BIN 11:44–11:47：真换图多在 FIRED 后 <300ms；假火则空等满窗才重试。
 // 旧 8s/13s 把「CheckMove 未命中」误当成「服端慢换图」，多跳路径每假火空等 ~13s。
 constexpr DWORD kHopWaitMs = 1200;
-constexpr DWORD kHopWaitUniqueBridgeMs = 1500;  // 唯一桥也快重试；晚到换图仍靠 leave-from 检测
+// 唯一桥假火空等：1500 时首跳常 FIRED→soft≈1.5s 体感卡 2s（BIN 17:47）。
+// 仍靠 leave-from 认换图；过短易把慢进图误判 soft（可再调）。
+constexpr DWORD kHopWaitUniqueBridgeMs = 700;
 // BIN 15:57 回挂机：换图后立刻开火会撞 InterStage 闪黑屏；稳图再下一跳。
-constexpr DWORD kMidHopSettleMs = 1500;         // 换图后多等稳图，避免下一跳撞卸图
-constexpr DWORD kPlayReadyStableMs = 500;       // 连续 PlayReady 才开火 / 认到站
+// BIN 02:34：hop1 Field 闪回后 1.5s 就 hop2 stick，第二跳 Up 半截进门卡死 → 加长 midhop。
+constexpr DWORD kMidHopSettleMs = 2500;         // 换图后多等稳图，避免下一跳撞卸图
+// 首跳（Goto 起点、未换图）同样要稳图：BIN 首枪常假火，soft 空等≈本值后补枪秒过；
+// 与 midhop 同窗，禁止只靠 PlayReadyStable(500) 就开火。
+constexpr DWORD kFirstHopSettleMs = 1500;
+constexpr DWORD kPlayReadyStableMs = 500;       // 连续 PlayReady / Field 才开火 / 认到站
 constexpr DWORD kArriveStableMs = 1500;         // 到目标图后再稳一会才 Idle（防到站二次卸图）
+// BIN 01:48：FIRED_STICK_UP 后 uniqueBridge 700ms 就 soft 补 ↑，第二枪撞半截换图 → 黑屏。
+// 任意开火后禁补枪静默窗（MapId 未变也不许 soft 重试）。
+constexpr DWORD kPostFireQuietMs = 2500;
+// WM 状态机：进 InterStage / MapId 已闪变后等 Field；超时则停（客户端已卡死）。
+constexpr DWORD kInterStageStuckMs = 12000;
 constexpr DWORD kUniqueBridgeLateGraceMs = 10000;
 constexpr int kFakeFireSoftConfirm = 2;          // 未满：只重试，不标死
 constexpr int kFakeFireFuseConfirm = 3;          // 满：停赶路
@@ -67,13 +78,18 @@ size_t gHopIdx = 0;
 DWORD gHopStartedMs = 0;
 DWORD gNextHopReadyAt = 0;  // mid-hop 稳图后再发下一跳
 DWORD gPlayReadySince = 0;  // 连续 PlayReady 起点；掉就绪清零
+std::string gStableMapKey;  // PlayReady 连续计时所属图；换图必须重计（BIN 01:27）
 DWORD gArriveReadyAt = 0;   // 非 0：已到目标图，等到该时刻再 SetIdle(arrived)
+DWORD gGotoAtMs = 0;        // StartGoto 墙钟；首枪假火探针用 sinceGoto
 std::string gExpectMap;
 std::string gPendingFrom;
 std::string gPendingSeedId;
 std::string gPendingName;  // 逻辑门名（假火 streak key）
 std::string gFiredPortal;  // 实际开火用的 live 名
-
+// WM 状态机旁证：MapId 已离出发图 / 见过 InterStage，但尚未 Field 闭合。
+bool gTransferSeen = false;
+DWORD gTransferSinceMs = 0;
+std::string gTransferToMap;
 struct FakeFireStreak {
     std::string key;
     int count = 0;
@@ -207,6 +223,12 @@ void ClearFakeFire() { gFakeFire = FakeFireStreak{}; }
 void ClearTransientFire() { gTransientFire = TransientFireStreak{}; }
 void ClearLateWait() { gUniqueLate = LateWait{}; }
 
+void ClearTransferWatch() {
+    gTransferSeen = false;
+    gTransferSinceMs = 0;
+    gTransferToMap.clear();
+}
+
 void SetIdle(const char* msg, FailKind fail = FailKind::None) {
     gMode = Mode::Idle;
     ++gFireEpoch;
@@ -220,8 +242,11 @@ void SetIdle(const char* msg, FailKind fail = FailKind::None) {
     gHopStartedMs = 0;
     gNextHopReadyAt = 0;
     gPlayReadySince = 0;
+    gStableMapKey.clear();
     gArriveReadyAt = 0;
+    gGotoAtMs = 0;
     gPendingGoto.clear();
+    ClearTransferWatch();
     ClearFakeFire();
     ClearTransientFire();
     ClearLateWait();
@@ -235,14 +260,72 @@ void SetIdle(const char* msg, FailKind fail = FailKind::None) {
 void NotePlayReadyGate(DWORD now, bool ready) {
     if (!ready) {
         gPlayReadySince = 0;
+        gStableMapKey.clear();
         if (gArriveReadyAt) gArriveReadyAt = now + kArriveStableMs;
         return;
     }
     if (!gPlayReadySince) gPlayReadySince = now;
 }
 
+// BIN 2026-08-09 01:27：MapId 先闪变时 PlayReady 仍短时为真，旧图的
+// PlayReadyStable 时钟未清 → 过早 map ok → 下一跳贴门撞半截 InterStage。
+void NoteMapKeyForStable(const std::string& cur, DWORD now) {
+    if (cur.empty()) return;
+    if (gStableMapKey == cur) return;
+    if (!gStableMapKey.empty()) {
+        x::runtime::LogI("Travel", "play_ready stable reset map %s -> %s",
+                         gStableMapKey.c_str(), cur.c_str());
+    }
+    gStableMapKey = cur;
+    gPlayReadySince = now;  // 换图后必须重新攒满 kPlayReadyStableMs
+}
+
 bool PlayReadyStable(DWORD now) {
     return gPlayReadySince != 0 && (now - gPlayReadySince) >= kPlayReadyStableMs;
+}
+
+// 到站真源 = WM 状态机闭合：Field + mapScene + IsPlayReady。
+// MapId 只作「传送已启动」旁证，绝不当 map ok。
+bool WmFieldClosed() {
+    if (ports::world::GetSceneState() != ports::world::SceneState::Field) return false;
+    if (!ports::world::GetMapScene()) return false;
+    return ports::world::IsPlayReady();
+}
+
+void NoteTransferStarted(const std::string& toMap, DWORD now, const char* why) {
+    if (!gTransferSeen) {
+        gTransferSeen = true;
+        gTransferSinceMs = now ? now : GetTickCount();
+        gTransferToMap = toMap;
+        x::runtime::LogI("Travel",
+                         "wm transfer started from=%s to=%s why=%s scene=%d (wait Field)",
+                         gPendingFrom.empty() ? "?" : gPendingFrom.c_str(),
+                         toMap.empty() ? "?" : toMap.c_str(), why ? why : "-",
+                         static_cast<int>(ports::world::GetSceneState()));
+    } else if (!toMap.empty() && gTransferToMap != toMap) {
+        gTransferToMap = toMap;
+    }
+}
+
+bool MapLeftPendingFrom(const std::string& cur) {
+    return !gPendingFrom.empty() && !cur.empty() && cur != gPendingFrom;
+}
+
+// InterStage / MapId 已闪变后等 Field；超时停路（客户端黑屏卡死）。
+bool NoteInterStageStuck(DWORD now, const std::string& curHint) {
+    if (!gTransferSeen || gTransferSinceMs == 0) return false;
+    if (now - gTransferSinceMs < kInterStageStuckMs) return false;
+    char detail[128]{};
+    snprintf(detail, sizeof(detail), "InterStage stuck %ums ->%s",
+             (unsigned)(now - gTransferSinceMs),
+             gTransferToMap.empty() ? (curHint.empty() ? "?" : curHint.c_str())
+                                    : gTransferToMap.c_str());
+    x::runtime::LogW("Travel", "interstage_stuck stop %s scene=%d", detail,
+                     static_cast<int>(ports::world::GetSceneState()));
+    SetIdle("interstage_stuck", FailKind::FireStuck);
+    NotifyTravelOutcome(FailKind::FireStuck,
+                        gPendingFrom.empty() ? curHint : gPendingFrom, gTarget, detail);
+    return true;
 }
 
 bool StartGotoResolved(const std::string& src, const std::string& dst, const std::string& rawArg) {
@@ -287,6 +370,7 @@ bool StartGotoResolved(const std::string& src, const std::string& dst, const std
     ClearFakeFire();
     ClearTransientFire();
     ClearLateWait();
+    ClearTransferWatch();
     gFailKind = FailKind::None;
     gExpectMap.clear();
     gPendingFrom.clear();
@@ -294,13 +378,21 @@ bool StartGotoResolved(const std::string& src, const std::string& dst, const std
     gPendingName.clear();
     gFiredPortal.clear();
     gHopStartedMs = 0;
-    gNextHopReadyAt = 0;
+    // 首跳也走 settle：世界地图确认/刚进 Goto 时 PlayReady 已亮，但进门脚本常未就绪；
+    // 旧逻辑只等 500ms → 首枪假火 → uniqueBridge 再空等一轮（体感首跳卡 ~2s）。
+    gNextHopReadyAt = GetTickCount() + kFirstHopSettleMs;
+    if (gNextHopReadyAt == 0) gNextHopReadyAt = 1;
+    gGotoAtMs = GetTickCount();
+    if (gGotoAtMs == 0) gGotoAtMs = 1;
     gPlayReadySince = 0;
+    gStableMapKey.clear();
     gArriveReadyAt = 0;
     gLastMsg = "goto " + dst + " hops=" + std::to_string(gHops.size());
     gLastSnapMs = GetTickCount();
-    x::runtime::LogI("Travel", "goto %s -> %s hops=%d fire=%s", src.c_str(), dst.c_str(),
-                     (int)gHops.size(), ports::travel::FireModeName(ports::travel::GetFireMode()));
+    x::runtime::LogI("Travel", "goto %s -> %s hops=%d fire=%s firstSettle=%ums", src.c_str(),
+                     dst.c_str(), (int)gHops.size(),
+                     ports::travel::FireModeName(ports::travel::GetFireMode()),
+                     (unsigned)kFirstHopSettleMs);
     HoldInvulnForTravel();
     return true;
 }
@@ -486,6 +578,19 @@ bool NoteTransientFireFail(DWORD now, const std::string& curMap, const std::stri
 
 // 返回 true=已停赶路；false=清 pending 后由 Tick 重试/改路。
 bool NoteNoMapChangeTimeout(DWORD now) {
+    // MapId 已离出发图：传送在跑，禁假火补 ↑（BIN 01:48 第二枪黑屏）。
+    const std::string curNow = ports::travel::CurrentMapKey();
+    if (MapLeftPendingFrom(curNow) || gTransferSeen) {
+        NoteTransferStarted(curNow, now, "timeout_guard");
+        x::runtime::LogI("Travel",
+                         "skip fake-fire (wm transfer in flight) from=%s cur=%s",
+                         gPendingFrom.c_str(), curNow.empty() ? "?" : curNow.c_str());
+        return false;
+    }
+    // 开火后静默窗：uniqueBridge 700ms 太短，stick 首枪未换图就 soft 补枪。
+    if (gHopStartedMs != 0 && now - gHopStartedMs < kPostFireQuietMs) {
+        return false;
+    }
     const std::string logic =
         !gPendingName.empty() ? gPendingName
                               : (!gFiredPortal.empty() ? gFiredPortal : gPendingSeedId);
@@ -722,6 +827,7 @@ void TryFlushPendingGoto() {
 void OnMapEnterConfirmed(const std::string& cur, DWORD now) {
     // 贴门成功进门后 ban 留到换图；新图稳图前卸 Travel 位，允许落地 midhop。
     ReleaseTravelFhBan();
+    ClearTransferWatch();
     if (!gFiredPortal.empty() || !gPendingSeedId.empty()) {
         gGraph.SetDest(gPendingFrom, gPendingSeedId, cur, cur, /*measured=*/true);
         if (!gPendingName.empty()) {
@@ -761,8 +867,8 @@ void OnMapEnterConfirmed(const std::string& cur, DWORD now) {
         return;
     }
     gLastMsg = "midhop settle -> next";
-    x::runtime::LogI("Travel", "map ok %s hop=%d/%d settle=%ums", cur.c_str(), (int)gHopIdx,
-                     (int)gHops.size(), (unsigned)kMidHopSettleMs);
+    x::runtime::LogI("Travel", "map ok %s hop=%d/%d settle=%ums (wm Field stable)", cur.c_str(),
+                     (int)gHopIdx, (int)gHops.size(), (unsigned)kMidHopSettleMs);
 }
 
 void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
@@ -775,24 +881,46 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
         NotifyTravelOutcome(FailKind::CombatOn, cur, gTarget);
         return;
     }
-    // 硬门禁：换图 scene!=play —— 不准开火；若正在 midhop/arrive settle，卸图期间把时钟后推
-    if (!ports::world::IsInMapScene() || !ports::world::IsPlayReady()) {
+
+    const auto scene = ports::world::GetSceneState();
+    const bool play = ports::world::IsInMapScene() && ports::world::IsPlayReady();
+    // InterStage 时 MapId（_currentMapData）仍可读；用作 transfer 旁证。
+    const std::string curPeek = ports::travel::CurrentMapKey();
+
+    if (!play) {
         NotePlayReadyGate(now, false);
         if (gNextHopReadyAt) gNextHopReadyAt = now + kMidHopSettleMs;
+
+        if (!gExpectMap.empty() || gUniqueLate.active) {
+            if (MapLeftPendingFrom(curPeek)) {
+                NoteTransferStarted(curPeek, now, "map_id");
+            } else if (scene == ports::world::SceneState::InterStage && !gExpectMap.empty()) {
+                NoteTransferStarted(curPeek, now, "interstage");
+            }
+            if (gTransferSeen && NoteInterStageStuck(now, curPeek)) return;
+            gLastMsg = gTransferSeen ? "wait_wm_field" : "wait_play_ready";
+            return;
+        }
         gLastMsg = "wait_play_ready";
         return;
     }
     NotePlayReadyGate(now, true);
 
-    const std::string cur = ports::travel::CurrentMapKey();
+    const std::string cur = curPeek.empty() ? ports::travel::CurrentMapKey() : curPeek;
     if (cur.empty()) return;
+    NoteMapKeyForStable(cur, now);
 
-    // 唯一桥迟到观察窗：等换图，超时才 FakeFireStop
+    // 唯一桥迟到观察窗：等 WM Field 闭合，超时才 FakeFireStop
     if (gUniqueLate.active) {
         if (cur != gUniqueLate.fromMap && !gUniqueLate.fromMap.empty()) {
-            x::runtime::LogI("Travel", "uniqueBridge late map-change %s -> %s",
+            if (!WmFieldClosed() || !PlayReadyStable(now)) {
+                if (MapLeftPendingFrom(cur)) NoteTransferStarted(cur, now, "unique_late");
+                if (NoteInterStageStuck(now, cur)) return;
+                gLastMsg = "unique_bridge_enter_stable";
+                return;
+            }
+            x::runtime::LogI("Travel", "uniqueBridge late map-change %s -> %s (wm Field)",
                              gUniqueLate.fromMap.c_str(), cur.c_str());
-            // 当作确认换图：用观察窗记录的门名实测
             gPendingFrom = gUniqueLate.fromMap;
             gPendingName = gUniqueLate.hintName;
             gPendingSeedId = "seed:" + gUniqueLate.fromMap + "/" + gUniqueLate.hintName;
@@ -802,7 +930,6 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
             return;
         }
         if (static_cast<int>(now - gUniqueLate.untilMs) >= 0) {
-            // 先拷贝再 SetIdle（Idle 会 ClearLateWait，否则 log/notify 变成 from=?）
             const std::string lateFrom = gUniqueLate.fromMap;
             const std::string lateName = gUniqueLate.hintName;
             SetIdle("fake_fire_stop", FailKind::FakeFireStop);
@@ -815,26 +942,39 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
         return;
     }
 
-    // 等待换图确认：离开出发图即实测成功（seed dest 可撒谎）
+    // 等待换图确认：到站真源 = WM Field 闭合；MapId 闪变只记 transfer。
     if (!gExpectMap.empty()) {
-        if (!gPendingFrom.empty() && cur != gPendingFrom) {
+        if (MapLeftPendingFrom(cur)) {
+            NoteTransferStarted(cur, now, "map_id_play");
+            if (!WmFieldClosed() || !PlayReadyStable(now)) {
+                gLastMsg = "map_enter_stable";
+                return;
+            }
             OnMapEnterConfirmed(cur, now);
             return;
         }
+        // 仍在出发图：静默窗内不假火；transfer 已见则只等 Field。
+        if (gTransferSeen) {
+            gLastMsg = "wait_wm_field";
+            return;
+        }
+        const DWORD wall = GetTickCount();
         const DWORD waitMs =
             (!gPendingName.empty() &&
              gGraph.IsUniqueBridgeName(gPendingFrom, gTarget, gPendingName))
                 ? kHopWaitUniqueBridgeMs
                 : kHopWaitMs;
-        if (now - gHopStartedMs > waitMs) {
-            if (NoteNoMapChangeTimeout(now)) return;
+        const DWORD needMs = waitMs > kPostFireQuietMs ? waitMs : kPostFireQuietMs;
+        if (gHopStartedMs != 0 && wall - gHopStartedMs > needMs) {
+            if (NoteNoMapChangeTimeout(wall)) return;
         }
         return;
     }
 
     if (cur == gTarget) {
         if (!gArriveReadyAt) gArriveReadyAt = now + kArriveStableMs;
-        if (static_cast<int>(now - gArriveReadyAt) < 0 || !PlayReadyStable(now)) {
+        if (static_cast<int>(now - gArriveReadyAt) < 0 || !WmFieldClosed() ||
+            !PlayReadyStable(now)) {
             gLastMsg = "arrive_settle";
             return;
         }
@@ -845,17 +985,17 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
     }
     gArriveReadyAt = 0;
 
-    // 硬门禁：hop settle 未完成不准下一跳（时钟未到 / 未清零）
+    // 硬门禁：hop settle 未完成不准开火（首跳 firstSettle / 换图后 midhop 同窗）
     if (gNextHopReadyAt) {
         if (static_cast<int>(now - gNextHopReadyAt) < 0) {
-            gLastMsg = "midhop_settle";
+            gLastMsg = "hop_settle";
             return;
         }
         if (!PlayReadyStable(now)) {
             gLastMsg = "play_ready_stable";
             return;
         }
-        x::runtime::LogI("Travel", "midhop settle done map=%s", cur.c_str());
+        x::runtime::LogI("Travel", "hop settle done map=%s", cur.c_str());
         gNextHopReadyAt = 0;
     } else if (!PlayReadyStable(now)) {
         gLastMsg = "play_ready_stable";
@@ -939,17 +1079,31 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
     }
 
     ClearTransientFire();
+    ClearTransferWatch();
     gPendingFrom = cur;
     gPendingSeedId = hopPortalId;
     gPendingName = hint;
     gFiredPortal = liveName;
     gExpectMap = hopDest;
-    gHopStartedMs = now;
+    // 贴门/↑ 可能耗时数秒；禁止用 Tick 入口的 stale now，否则 uniqueBridge
+    // 1.5s 窗几乎一开火就耗尽 → 误 soft → 无意义补 ↑（BIN 16:10 FIRED→452ms soft）。
+    gHopStartedMs = GetTickCount();
     gLastMsg = "fire " + liveName + " -> " + hopDest;
-    gLastSnapMs = now;
-    x::runtime::LogI("Travel", "FIRED name=%s hint=%s expect=%s mode=%s", liveName.c_str(),
-                     hint.c_str(), hopDest.c_str(),
-                     ports::travel::FireModeName(ports::travel::GetFireMode()));
+    gLastSnapMs = gHopStartedMs;
+    if (fireResult == "MAP_CHANGED" || fireResult == "MAP_TRANSITION") {
+        const std::string to = ports::travel::CurrentMapKey();
+        NoteTransferStarted(to.empty() ? hopDest : to, gHopStartedMs,
+                            fireResult == "MAP_CHANGED" ? "fire_map_changed"
+                                                        : "fire_map_transition");
+    }
+    const DWORD sinceGoto =
+        (gGotoAtMs != 0) ? (gHopStartedMs - gGotoAtMs) : 0;
+    x::runtime::LogI("Travel",
+                     "FIRED name=%s hint=%s expect=%s mode=%s sinceGoto=%ums path=%s",
+                     liveName.c_str(), hint.c_str(), hopDest.c_str(),
+                     ports::travel::FireModeName(ports::travel::GetFireMode()),
+                     (unsigned)sinceGoto,
+                     fireResult.rfind("FIRED_", 0) == 0 ? fireResult.c_str() : "ok");
 }
 
 void Tick(DWORD now) {

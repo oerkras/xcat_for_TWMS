@@ -1,8 +1,10 @@
 #include "auto_lie.h"
 #include "anti_macro_follower.h"
 #include "anti_macro_port.h"
+#include "mouse_trajectory_sim.h"
 
 #include "../notify/notify.h"
+#include "../simple_combat/simple_combat.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
@@ -299,8 +301,10 @@ void TickMouseSmoke(DWORD now) {
     const DWORD until = gMouseSmokeUntil.load();
     if (!until) {
         if (gMouseSmokeHaveOrigin) {
+            // 遗留路径：旧版曾 ClipCursor；确保释放。
             ClipCursor(nullptr);
             gMouseSmokeHaveOrigin = false;
+            anti_macro_follower::RefreshAutoLieHardPauseFromOutside();
         }
         return;
     }
@@ -308,25 +312,27 @@ void TickMouseSmoke(DWORD now) {
         ClipCursor(nullptr);
         gMouseSmokeUntil.store(0);
         gMouseSmokeHaveOrigin = false;
+        // 结束硬闸，交回 follower 聚合口（quiz|following|ui|sim）。
+        anti_macro_follower::RefreshAutoLieHardPauseFromOutside();
         Log("mouse smoke finished");
         if (gPhase == "mouse_smoke") gPhase = "idle";
         return;
     }
     gPhase = "mouse_smoke";
-    // 仅游戏前台时锁光标；失焦释放，计时继续（避免锁死桌面）
+    // 烟测期间硬闸战斗：避免 Clip/光标抖动与 OnFuncKey/face 抢主线程泵 → 旋翼卡死。
+    x::features::simple_combat::SetHardPause(
+        x::features::simple_combat::HardPauseHolder::AutoLie, true);
+
+    // 仅游戏前台时挪光标；失焦跳过（不锁桌面）。
+    // 故意不用 ClipCursor：实机已证锁光标 + 战斗仍开火 → face/OnFuncKey pump timeout、heli stale。
     if (!anti_macro_port::IsGameForeground()) {
-        if (gMouseSmokeHaveOrigin) {
-            ClipCursor(nullptr);
-            gMouseSmokeHaveOrigin = false;
-        }
         return;
     }
     if (!gMouseSmokeHaveOrigin) {
         GetCursorPos(&gMouseSmokeOrigin);
         gMouseSmokeHaveOrigin = true;
-        RECT clip{gMouseSmokeOrigin.x - 48, gMouseSmokeOrigin.y - 48, gMouseSmokeOrigin.x + 48,
-                  gMouseSmokeOrigin.y + 48};
-        ClipCursor(&clip);
+        Log("mouse smoke cursor origin=(%ld,%ld) (SetCursorPos only, no ClipCursor)",
+            gMouseSmokeOrigin.x, gMouseSmokeOrigin.y);
     }
     const int step = static_cast<int>((now / 180) % 4);
     const int dx[] = {-36, 36, 36, -36};
@@ -588,6 +594,15 @@ void TickQuiz(DWORD now) {
 }
 
 void TickImpl(DWORD now) {
+    // 模拟线程结束后清掉误用的 mouse_smoke phase
+    static bool s_simWas = false;
+    const bool simNow = mouse_trajectory_sim::IsRunning();
+    if (s_simWas && !simNow && gPhase == "mouse_smoke") {
+        gPhase = "idle";
+        WriteStatus(now, true);
+    }
+    s_simWas = simNow;
+
     TickAlarmTest(now);
     TickMouseSmoke(now);
     RefreshInfra(now);
@@ -603,6 +618,7 @@ void TickImpl(DWORD now) {
         gBusy.store(false);
         if (!IsInfraPhase(gPhase)) gPhase = "idle";
         anti_macro_follower::SetEnabled(false);
+        anti_macro_follower::Tick(now);  // 题目区域显示可在 autoLie 关时独立刷新
         WriteStatus(now);
         return;
     }
@@ -698,6 +714,7 @@ DWORD WINAPI Worker(LPVOID) {
 
 void Init() {
     anti_macro_follower::Init();
+    mouse_trajectory_sim::Init();
     ClearPending();
     gEnabled.store(false);
     gDryRun.store(false);
@@ -709,6 +726,7 @@ void Init() {
 
 void Shutdown() {
     StopWorker();
+    mouse_trajectory_sim::Shutdown();
     anti_macro_follower::Shutdown();
     SetWorldPause(false);
     ClipCursor(nullptr);
@@ -767,6 +785,12 @@ void SetDryRun(bool on) {
 
 bool IsDryRun() { return gDryRun.load(); }
 
+void SetMouseRegionOverlay(bool on) {
+    anti_macro_follower::SetRegionOverlayEnabled(on);
+}
+
+bool IsMouseRegionOverlay() { return anti_macro_follower::IsRegionOverlayEnabled(); }
+
 void StartAlarmTest() {
     const DWORD now = GetTickCount();
     gAlarmTestUntil.store(now + kAlarmTestDurationMs);
@@ -785,17 +809,30 @@ void StartAlarmTest() {
 
 void StartMouseSmoke() {
     const DWORD now = GetTickCount();
-    ClipCursor(nullptr);
+    ClipCursor(nullptr);  // 清掉任何残留锁
     gMouseSmokeHaveOrigin = false;
     gMouseSmokeUntil.store(now + kMouseSmokeDurationMs);
     gPhase = "mouse_smoke";
-    Log("mouse smoke started duration=%lums",
+    // 立刻硬闸，不等首 Tick（防止与战斗泵撞车）。
+    x::features::simple_combat::SetHardPause(
+        x::features::simple_combat::HardPauseHolder::AutoLie, true);
+    Log("mouse smoke started duration=%lums (no ClipCursor, hard-pause combat)",
         static_cast<unsigned long>(kMouseSmokeDurationMs));
     WriteStatus(now, true);
 }
 
+void StartMouseSim(uint32_t seq) {
+    mouse_trajectory_sim::RequestStart(seq);
+    // 不占用 mouse_smoke phase（避免与光标烟测戳/状态串味）；sim 自有 IsRunning。
+    Log("mouse sim requested seq=%u", seq);
+    WriteStatus(GetTickCount(), true);
+}
+
 void Tick(DWORD now) { TickImpl(now); }
 
-bool IsBusy() { return gBusy.load() || anti_macro_follower::IsFollowing(); }
+bool IsBusy() {
+    return gBusy.load() || anti_macro_follower::IsFollowing() ||
+           mouse_trajectory_sim::IsRunning();
+}
 
 }  // namespace x::features::auto_lie

@@ -11,6 +11,8 @@ void StartWorker();
 void StopWorker();
 
 bool IsArmed();
+// 卸武装会先停旋翼，再可选 SetImpactNext(0,0) 刹残速，最后放 fhBan。
+// 试修回退：XCAT_FLY_DISARM_ZERO=0 或 DLL 旁 fly_disarm_zero.off（见 fly.cpp）。
 void SetArmed(bool on);
 
 // 外部暂停（补给/测谎等）：不改 armed 开关，仅抑制 hop；解除后恢复。

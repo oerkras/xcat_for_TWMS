@@ -5,6 +5,7 @@
 #include "buffs.h"
 
 #include "../ports/action_gate.h"
+#include "../ports/attack_input_port.h"
 #include "../ports/player_combat_port.h"
 #include "../ports/skill_port.h"
 #include "../ports/world_port.h"
@@ -40,6 +41,10 @@ constexpr DWORD kProbeLogMs = 15000;
 constexpr DWORD kNotReadyLogThrottleMs = 2000;
 // 施法前后短暂停战斗：BIN（a20d2e）master 开后 DoActive 插在 Melee 风暴中 → 客户报卡住。
 // Hold + WaitFireIdle 走 ports::action_gate（与 timed_keys 共享）。
+// ★ lockTeleport=false：只停刀（ExternalPause），不抬 SkillCastBusy。
+//   旧逻辑 busy=1 → F6 PollAimFollow/点飞被挡、IsTeleportForbidden 锁移动；
+//   Prepare 残留时 ReleaseIfDue 还续 busy →「放 BUFF 后卡住不会动」（BIN 22:56 seh_prepare 连刷）。
+//   原生 fill+Doing 已禁用，BUFF 不必再借 busy 挡瞬移。
 constexpr DWORD kCombatHoldAfterCastMs = 1000;
 constexpr DWORD kCombatHoldSettleTimeoutMs = 80;
 constexpr DWORD kCombatHoldSettleAfterFireMs = 32;
@@ -365,21 +370,27 @@ bool TryCastSlot(size_t idx, DWORD now) {
                                s.skillId);
         return false;
     }
-    // 与 fill+Doing / 贴怪收态互斥：途中不 DoActive（对齐 timed_keys）。
-    // SkillCastBusy depth 由 Hold::Arm/Release 管理（勿再手写 Set）。
+    // 与贴怪收态互斥：途中不 DoActive（对齐 timed_keys）。
+    // 只 ExternalPause 停刀；lockTeleport=false 不抬 SkillCastBusy（见上方常量注释）。
     using ports::action_gate::Block;
     const Block gate = ports::action_gate::BeginAct(
         gCombatHold, now, kCombatHoldAfterCastMs, kCombatHoldSettleTimeoutMs,
-        kCombatHoldSettleAfterFireMs);
+        kCombatHoldSettleAfterFireMs, /*lockTeleport=*/false);
     if (gate == Block::TeleportTransit) {
         g_nextCastAt = now + 80;
         runtime::LogWThrottled(310, 1500, "Buffs", "cast defer skill=%d reason=teleport_transit",
                                s.skillId);
         return false;
     }
+    // 清走路锁存：出刀朝向 SetInput 残留时，种台/挂台瞬间会播行走并滑步。
+    (void)ports::attack::StopWalk();
     bool notReady = false;
     char reason[48]{};
-    const bool ok = ports::skill::CastSkill(s.skillId, &notReady, reason, sizeof(reason));
+    // 不回退 Prepare：BIN 22:56 skill=1002 连刷 seh_prepare，人沿台滑且像卡住。
+    // DoActive 本身可成（同局 ok_do_active）；Prepare 失败只添粘滞。
+    const bool ok =
+        ports::skill::CastSkill(s.skillId, &notReady, reason, sizeof(reason),
+                                /*noPrepareFallback=*/true);
     {
         char camNote[96]{};
         std::snprintf(camNote, sizeof(camNote), "skill=%d ok=%d nr=%d reason=%s", s.skillId,
@@ -388,7 +399,7 @@ bool TryCastSlot(size_t idx, DWORD now) {
     }
     if (ok) {
         // 仅成功才续事后 Hold；失败若也续窗，not_ready 重试会把 Hold 钉死。
-        gCombatHold.Arm(GetTickCount(), kCombatHoldAfterCastMs);
+        gCombatHold.Arm(GetTickCount(), kCombatHoldAfterCastMs, /*lockTeleport=*/false);
         g_nextCastAt = GetTickCount() + kSafeGapMs;
         EnterVerify(s, GetTickCount());
         runtime::LogI("Buffs", "cast ok skill=%d slot=%zu reason=%s", s.skillId, idx + 1,

@@ -71,7 +71,7 @@ void ResetMpRuntime() {
     gMpFailStreak = 0;
 }
 
-// UseRequest 连续无效时，危急下脉冲 PageDown/PageUp（对齐枫星 FirePotionKeyFallback）。
+// UseRequest 连续无效时，危急下 unity_kbd 脉冲 PageDown/PageUp（对齐枫星兜底；非 OnKey）。
 void FirePotionKeyFallback(bool wantHp) {
     if (!ports::input::Ready()) return;
     ports::input::InjectKeyHold(wantHp ? VK_NEXT : VK_PRIOR, 80);
@@ -268,9 +268,7 @@ void Tick(DWORD now) {
             static DWORD s_noHp = 0;
             if (!s_noHp || static_cast<int>(now - s_noHp) >= 10000) {
                 s_noHp = now;
-                if (std::strcmp(why, "soft_reject") == 0) {
-                    x::runtime::LogW("AutoPot", "PageDown HP bind soft-reject id=%d", fr.itemId);
-                } else if (std::strcmp(why, "not_in_bag") == 0) {
+                if (std::strcmp(why, "not_in_bag") == 0) {
                     x::runtime::LogW("AutoPot", "PageDown HP bind not in bag id=%d", fr.itemId);
                 } else if (std::strcmp(why, "not_item") == 0) {
                     x::runtime::LogW("AutoPot", "PageDown key not Item (value=%d)", fr.itemId);
@@ -314,9 +312,7 @@ void Tick(DWORD now) {
             static DWORD s_noMp = 0;
             if (!s_noMp || static_cast<int>(now - s_noMp) >= 10000) {
                 s_noMp = now;
-                if (std::strcmp(why, "soft_reject") == 0) {
-                    x::runtime::LogW("AutoPot", "PageUp MP bind soft-reject id=%d", fr.itemId);
-                } else if (std::strcmp(why, "not_in_bag") == 0) {
+                if (std::strcmp(why, "not_in_bag") == 0) {
                     x::runtime::LogW("AutoPot", "PageUp MP bind not in bag id=%d", fr.itemId);
                 } else if (std::strcmp(why, "not_item") == 0) {
                     x::runtime::LogW("AutoPot", "PageUp key not Item (value=%d)", fr.itemId);

@@ -445,12 +445,27 @@ void AddFeatureChannelLogs(std::vector<LogBlob>& logs, const char* payloadBinDir
 
     const size_t cap = maxBackups > kMaxLogBackups ? kMaxLogBackups : maxBackups;
 
+    // 只读采证 BIN：默认已关，但磁盘上常残留数百 MB；勿进日常上传拖垮包体。
+    // 要传时手动拷，或临时 XCAT_WALK_BIN=1 / XCAT_KEYMACRO_BIN=1 再开一轮只收那次。
+    static const char* kSkipDiagBases[] = {
+        "keypad_walk_bin.log",
+        "key_macro_bin.log",
+    };
+
     for (fs::directory_iterator it(logsDir, ec), end; it != end; it.increment(ec)) {
         if (ec) break;
         if (!it->is_regular_file(ec) || ec) continue;
         const std::string leaf = xcat::WideToUtf8(it->path().filename().wstring());
         const std::string base = ParseRotatedLogBaseName(leaf);
         if (base.empty()) continue;
+        bool skipDiag = false;
+        for (const char* b : kSkipDiagBases) {
+            if (base == b) {
+                skipDiag = true;
+                break;
+            }
+        }
+        if (skipDiag) continue;
         if (alreadyBases.count(base)) continue;  // 白名单已收该频道（含其轮转）
         if (already.count(leaf)) continue;
 
@@ -1652,20 +1667,97 @@ std::string NormalizeOpsToken(std::string_view raw) {
     return s;
 }
 
-std::string LoadOpsToken(const std::string& payloadBinDir) {
-    if (payloadBinDir.empty()) return {};
-    xcat::IniStore ini{};
-    const std::string path = xcat::UserConfigIniPath(payloadBinDir.c_str());
-    if (!xcat::LoadIniFile(path.c_str(), ini)) return {};
-    std::string value;
-    if (!xcat::IniGetString(ini, "update", "token", value)) return {};
-    return NormalizeOpsToken(value);
+// TOKEN 机级镜像：与 deviceId 同 ProgramData 目录；路径分片 + 全机 tok.dat 兜底
+//（新路径重装也能找回）。不写注册表，避免 HKCU/提权与手工清理成本。
+namespace {
+std::string OpsTokenMachinePathLegacy() {
+    const std::string dir = DeviceIdMachineDir();
+    if (dir.empty()) return {};
+    return dir + "\\tok.dat";
 }
 
-bool SaveOpsToken(const std::string& payloadBinDir, std::string_view raw) {
-    if (payloadBinDir.empty()) return false;
-    const std::string normalized = NormalizeOpsToken(raw);
-    const std::string path = xcat::UserConfigIniPath(payloadBinDir.c_str());
+std::string OpsTokenMachinePathForInstall(const char* payloadBinDir) {
+    const std::string dir = DeviceIdMachineDir();
+    if (dir.empty()) return {};
+    const std::string key = NormalizeInstallKey(payloadBinDir);
+    if (key.empty()) return OpsTokenMachinePathLegacy();
+    char name[32]{};
+    std::snprintf(name, sizeof(name), "\\tok_%08x.dat", HashInstallKey(key));
+    return dir + name;
+}
+
+bool ReadOpsTokenFile(const std::string& path, std::string& out) {
+    out.clear();
+    if (path.empty()) return false;
+    const DWORD attr = GetFileAttributesA(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+    char buf[96]{};
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return false;
+    std::string raw(buf, n);
+    while (!raw.empty() && (raw.back() == '\n' || raw.back() == '\r' || raw.back() == ' ' ||
+                            raw.back() == '\t' || raw.back() == '\0')) {
+        raw.pop_back();
+    }
+    out = NormalizeOpsToken(raw);
+    return !out.empty();
+}
+
+bool WriteOpsTokenFile(const std::string& path, const std::string& token) {
+    if (path.empty() || token.empty()) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(xcat::Utf8ToWide(path)).parent_path(),
+                                        ec);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+    const std::string body = token + "\n";
+    const size_t n = fwrite(body.data(), 1, body.size(), f);
+    fclose(f);
+    return n == body.size();
+}
+
+bool DeleteOpsTokenFile(const std::string& path) {
+    if (path.empty()) return true;
+    const DWORD attr = GetFileAttributesA(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES) return true;
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
+    return DeleteFileA(path.c_str()) != 0;
+}
+
+bool PersistOpsTokenMirrors(const char* payloadBinDir, const std::string& token) {
+    if (token.empty()) return false;
+    bool any = false;
+    if (WriteOpsTokenFile(OpsTokenMachinePathForInstall(payloadBinDir), token)) any = true;
+    // 全机兜底：换目录/重装包后仍能读回。
+    if (WriteOpsTokenFile(OpsTokenMachinePathLegacy(), token)) any = true;
+    return any;
+}
+
+bool ClearOpsTokenMirrors(const char* payloadBinDir, const std::string& onlyIfLegacyEquals) {
+    // 只删本安装分片；全机 tok.dat 仅当内容==被清空的 TOKEN 才删，避免同机多目录互抢。
+    bool ok = DeleteOpsTokenFile(OpsTokenMachinePathForInstall(payloadBinDir));
+    if (!onlyIfLegacyEquals.empty()) {
+        std::string legacy;
+        if (ReadOpsTokenFile(OpsTokenMachinePathLegacy(), legacy) &&
+            legacy == onlyIfLegacyEquals) {
+            if (!DeleteOpsTokenFile(OpsTokenMachinePathLegacy())) ok = false;
+        }
+    }
+    return ok;
+}
+
+bool ReadOpsTokenMirror(const char* payloadBinDir, std::string& out) {
+    out.clear();
+    if (ReadOpsTokenFile(OpsTokenMachinePathForInstall(payloadBinDir), out)) return true;
+    return ReadOpsTokenFile(OpsTokenMachinePathLegacy(), out);
+}
+
+bool PersistOpsTokenToUserIni(const char* payloadBinDir, const std::string& normalized) {
+    if (!payloadBinDir || !payloadBinDir[0]) return false;
+    const std::string path = xcat::UserConfigIniPath(payloadBinDir);
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(xcat::Utf8ToWide(path)).parent_path(),
                                         ec);
@@ -1683,6 +1775,71 @@ bool SaveOpsToken(const std::string& payloadBinDir, std::string_view raw) {
             xcat::IniSetString(ini, "update", "token", normalized.c_str());
         }
     });
+}
+}  // namespace
+
+std::string LoadOpsToken(const std::string& payloadBinDir) {
+    // 1) 本安装 user.ini  2) 路径分片镜像  3) 全机 tok.dat
+    // 镜像命中且 ini 空 → 回填 ini，避免下次再靠兜底。
+    std::string fromIni;
+    if (!payloadBinDir.empty()) {
+        xcat::IniStore ini{};
+        const std::string path = xcat::UserConfigIniPath(payloadBinDir.c_str());
+        if (xcat::LoadIniFile(path.c_str(), ini)) {
+            std::string value;
+            if (xcat::IniGetString(ini, "update", "token", value)) {
+                fromIni = NormalizeOpsToken(value);
+            }
+        }
+    }
+    if (!fromIni.empty()) {
+        (void)PersistOpsTokenMirrors(payloadBinDir.c_str(), fromIni);
+        return fromIni;
+    }
+
+    std::string fromMirror;
+    if (ReadOpsTokenMirror(payloadBinDir.c_str(), fromMirror) && !fromMirror.empty()) {
+        if (!payloadBinDir.empty()) {
+            if (PersistOpsTokenToUserIni(payloadBinDir.c_str(), fromMirror)) {
+                xcat::log::Info("Update", "ops token healed from machine mirror");
+            } else {
+                xcat::log::Warn("Update", "ops token mirror ok but heal user.ini failed");
+            }
+            (void)PersistOpsTokenMirrors(payloadBinDir.c_str(), fromMirror);
+        }
+        return fromMirror;
+    }
+    return {};
+}
+
+bool SaveOpsToken(const std::string& payloadBinDir, std::string_view raw) {
+    if (payloadBinDir.empty()) return false;
+    const std::string normalized = NormalizeOpsToken(raw);
+    if (normalized.empty()) {
+        // 清空前记下当前值，供选择性删除全机 tok.dat（仅当内容一致）。
+        std::string prev;
+        {
+            xcat::IniStore ini{};
+            const std::string path = xcat::UserConfigIniPath(payloadBinDir.c_str());
+            if (xcat::LoadIniFile(path.c_str(), ini)) {
+                std::string value;
+                if (xcat::IniGetString(ini, "update", "token", value)) {
+                    prev = NormalizeOpsToken(value);
+                }
+            }
+        }
+        if (prev.empty()) (void)ReadOpsTokenMirror(payloadBinDir.c_str(), prev);
+        const bool iniOk = PersistOpsTokenToUserIni(payloadBinDir.c_str(), normalized);
+        const bool mirrorOk = ClearOpsTokenMirrors(payloadBinDir.c_str(), prev);
+        return iniOk && mirrorOk;
+    }
+    const bool iniOk = PersistOpsTokenToUserIni(payloadBinDir.c_str(), normalized);
+    const bool mirrorOk = PersistOpsTokenMirrors(payloadBinDir.c_str(), normalized);
+    // ini 成功即可用；镜像失败只告警（权限/杀软偶发），不挡保存。
+    if (!mirrorOk) {
+        xcat::log::Warn("Update", "ops token saved to ini but machine mirror failed");
+    }
+    return iniOk;
 }
 
 std::string NormalizeUploadNote(std::string_view raw) {

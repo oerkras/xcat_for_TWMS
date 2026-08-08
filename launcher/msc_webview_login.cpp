@@ -1,5 +1,5 @@
 // 新楓之谷經典版 · 登录/换票会话（嵌入 xcat_app）
-// GAMA PASS CDP / HTTP Beanfun；已移除 WebView2。
+// GAMA PASS UIA / HTTP Beanfun；已移除 WebView2。
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -15,6 +15,7 @@
 #include "http_beanfun_login.h"
 #include "http_gamapass_login.h"
 #include "gamapass_cdp_login.h"
+#include "gamapass_uia_login.h"
 #include "chromium_cdp.h"
 #include "inject_after_launch.h"
 
@@ -335,38 +336,33 @@ void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
         g.cred = {};
         SetBusy(true);
         QueueLog(std::wstring(kHttpBusyTag) + L" GAMA PASS 浏览器点选换票中…");
-        QueueLog(L"[…] GAMA PASS：CDP 点选（优先 Chrome++/Chrome，其次 Edge；不使用账密 / 不调用 refresh）");
-        QueueLog(L"[提示] 只用 Edge 请先卸载 Google Chrome，否则会优先绑到空的 Chrome 会话；"
-                 L"请在将使用的浏览器里打开 accounts.gamania.com 勾选记住后再启动");
+        QueueLog(L"[…] GAMA PASS：日常浏览器 + Windows UI Automation 自动点选"
+                 L"（无 CDP 副本 / 无调试口；与日常同一登录态）");
+        QueueLog(L"[提示] 一键前会先结束同安装已开浏览器（防挂错窗，不清 Cookie），再拉起登录窗；"
+                 L"若出现完整登录页请在该窗登录并勾选记住。不调用 refresh。");
 
         std::thread([]() {
             const bool usable = msc::launcher::HttpGamaPassHasUsableSession();
-            QueueLog(usable ? L"[探测] Gama Pass：有未过期 userToken（仅探测，本轮仍走 CDP）"
-                            : L"[探测] Gama Pass：无可用未过期 userToken（仅探测，本轮仍走 CDP）");
+            QueueLog(usable ? L"[探测] Gama Pass：有未过期 userToken（仅探测，本轮仍走 UIA）"
+                            : L"[探测] Gama Pass：无可用未过期 userToken（仅探测，本轮仍走 UIA）");
 
-            auto lr = msc::launcher::HttpGamaPassCdpLoginToOtt(
+            auto lr = msc::launcher::HttpGamaPassUiaLoginToOtt(
                 [](const std::wstring& line) { QueueLog(line); });
             if (lr.ok && lr.ticketFilled) {
                 QueueLog(std::wstring(kHttpTicketOkTag) + L" GAMA PASS 换票成功，正在开游戏…");
                 QueueLog(L"[OK] 换票成功 uid=" + lr.ticket.userObjectId + L" gid=" + lr.ticket.gid);
-                const bool injectOk =
-                    LaunchWithTicket(std::move(lr.ticket), /*attachExistingClassic=*/true);
-                QueueLog(injectOk ? L"[…] 注入成功，关闭登录用浏览器…"
-                                  : L"[…] 换票/启动已结束，关闭登录用浏览器…");
-                msc::cdp::CloseRemoteBrowser(msc::cdp::kDefaultRemoteDebugPort,
-                                             [](const std::wstring& line) { QueueLog(line); });
+                // 成功收口已由 LaunchWithTicket 写「[OK] 一键启动并注入完成」；
+                // 此处勿再打同句，否则 launch_panel 会双响/双气泡。
+                if (!LaunchWithTicket(std::move(lr.ticket), /*attachExistingClassic=*/true)) {
+                    QueueLog(L"[…] 换票/启动已结束");
+                }
                 return;
             }
 
             QueueLog(L"[FAIL] 登录失败 [" +
                      WidenUtf8(msc::launcher::HttpLoginErrorName(lr.error)) + L"] " +
                      WidenUtf8(lr.message));
-            QueueLog(L"[…] 登录未完成，关闭调试浏览器（避免残留空白标签）…");
-            msc::cdp::CloseRemoteBrowser(msc::cdp::kDefaultRemoteDebugPort,
-                                         [](const std::wstring& line) { QueueLog(line); });
-            QueueLog(L"[提示] GAMA PASS 点选未完成。请用日志里「浏览器=」对应的日常窗口打开 "
-                     L"accounts.gamania.com 勾选记住后再启动；"
-                     L"只用 Edge 须先卸 Google Chrome（优先序 Chrome++/Chrome > Edge）；"
+            QueueLog(L"[提示] GAMA PASS UIA 未完成。请重新一键，在日常浏览器窗口内登录（勾选记住）；"
                      L"不会调用 refresh/token。");
             PostMessageW(g.hwnd, kMsgIdle, 0, 0);
         }).detach();

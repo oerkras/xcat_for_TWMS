@@ -195,7 +195,21 @@ constexpr float kEnvSinkVy = 300.f;
 // 那个 72 借自**瞬移落点**的安全内缩，语义不通用：落点要避边界，悬停点不用。
 //
 // 无 bounds 数据时原样返回 true（宁可不夹也不误杀）。
+// F6 等仍可用本函数；**F5 Combat 可位移区见 ClampToCombatMoveBounds（raw×0.95）**。
 bool ClampToAirspace(float* x, float* y);
+
+// F5 / 自动赶路可位移区：raw FH AABB 中心等比缩到 kCombatMoveBoundsScale（默认 0.95）。
+// 站位点、Combat 包线、出刀闸与此同框；贴边怪照打，人不得稳出此框。
+constexpr float kCombatMoveBoundsScale = 0.95f;
+
+// 写出 move 框。成功且非退化返回 true；无 bounds / 非法 raw 返回 false（调用方应放行）。
+bool QueryCombatMoveBounds(float* left, float* top, float* right, float* bottom);
+
+// 点是否在可位移框内。无 bounds 时返回 true（不误杀）。
+bool PointInCombatMoveBounds(float x, float y);
+
+// 把点夹进可位移框。无 bounds 时原样返回 true。
+bool ClampToCombatMoveBounds(float* x, float* y);
 
 // 一次 tick 的遥测。由 simple_combat 写进 combat.log（BIN 分析都在那张日志里）。
 struct Telemetry {
@@ -264,6 +278,11 @@ bool Tick(Owner o, DWORD now, Telemetry* out);
 // F5 开关/换图时清发射时钟与符号自检状态。
 void Reset();
 
+// 到位软悬停（16ms 加密 + 软钉 Y）。与面板「防抖」同开同关：关=回 90ms/进近死区，
+// 避免只关钉点、软钉仍开导致「勾不勾都几乎不抖」。默认开。
+void SetSoftSettleEnabled(bool on);
+bool SoftSettleEnabled();
+
 // 飞行速度倍率。1.0 = 基准（Cruise 620 / Rtb 660 / Station 480 / Hold 360）。
 //
 // 只作用于 `CapsFor()` 给出的「意图」上限，**不碰**下面这些：
@@ -276,8 +295,15 @@ void Reset();
 // 绝对阈值，钉死会在高倍率下反号成极限环（BIN 2d6176 抖动事故）。
 //
 // 越界会被 Clamp 到 [kSpeedScaleMin, kSpeedScaleMax]。上限由**可救性**反解
-// （kIntentCeilV / Rtb 基准 = 5.17X），不是手写常数——曾经这里写死 3.0、面板写 500，
-// 结果实机只跑 3.00X（BIN 2e63d5）。改动上限请改 kMaxCmdVy，别在这里加字面量。
+// （kIntentCeilV / Rtb 基准，约 11X；面板顶到 1000%=10X），不是手写常数——曾经这里
+// 写死 3.0、面板写 500，结果实机只跑 3.00X（BIN 2e63d5）。改动上限请改 kMaxCmdVy。
+//
+// ★ 面板拉到 **1000%（10.0X）** 时：
+//   1) Cruise/Station 死拍 desiredV = err/T（远距顶满；近距按距离收油）
+//   2) 档位意图顶到 kIntentCeilV（≈7410）；Rtb 同步抬
+//   3) 可选对站点预刹（kFullFireApproachBrake）：允许速度 ≤ 剩余距离/0.15s，
+//      只在本档生效；回退改该常量 false 即可，不拆其它逻辑
+// 其它倍率仍是 Kp·err + 分档限速。撞墙预刹 / 包线 / 可达集不撤。
 //
 // 倍率**按 Owner 各存一份**：手动飞和自动打怪对手感的诉求不同（F6 旧实现等效约
 // 1600 px/s，比 F5 的 Cruise 620 快得多，共用一个旋钮必然有一方别扭）。

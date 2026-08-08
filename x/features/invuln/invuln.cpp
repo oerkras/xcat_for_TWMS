@@ -1,4 +1,4 @@
-// TWMS Classic — data-plane invuln v2.6.6+hard (field-hash remount 2026-08-06).
+// TWMS Classic — data-plane invuln v2.6.7 (field-hash remount 2026-08-06).
 //
 // Hit gate: User+0x298 i-frame (~100ms worker top-up).
 // Anti-blink hybrid: MainPump frame tick (before+after SendWill) + worker 8ms backup.
@@ -7,7 +7,8 @@
 // Rebind: WM path every tick when unbound; FindAll 仅 IsPlayReady（禁 InterStage/Login/
 // CashShop/GlobalMarket — BIN D217：拍卖 scene=5 时 80ms FindAll 堵 MainPump）。
 // 裸 gFindAll：泵内硬检 LoginFreeze + MapTransitBlock + PlayReady。
-// 1.5s ACCEPT grace; LU drop keeps SecondaryStat.
+// BIN 7ae984：!PlayReady（InterStage 等）停写 SS/hit + 卸 FrameTick，避免迁频窗污染/抢主线程。
+// 1.5s ACCEPT grace; LU drop keeps SecondaryStat（仅 PlayReady 内写）。
 // No hotkey — panel / [core] invuln / XCAT_INVULN=1 only.
 // Docs: docs/features/invuln/模块设计.md
 // Remount 2026-08-06: GA MD5 c7a3842d…; User=b8c9aedb…; UserLocal=d81db6fb…;
@@ -148,6 +149,19 @@ constexpr DWORD kWorkerSleepOnMs = 8;
 constexpr DWORD kWorkerSleepOffMs = 16;
 constexpr DWORD kProbeMs = 1000;
 constexpr DWORD kPumpRetryMs = 2000;
+// BIN 02:18：刚回 Field 立刻 FindAll → job timeout + pump idle。
+// 只挡 FindAll；WM.MyUser 快路径不受影响。2026-08-09：2000→500 加快兜底重绑。
+constexpr DWORD kLandQuietMs = 500;
+DWORD gLandQuietUntilMs = 0;
+// BIN 02:48：手动换图 MapId 已闪仍 PlayReady 时 Invuln 还写 LU → InterStage 永卡。
+// MapId 变即静默禁写；2026-08-09：3000→1000（仍防脏窗，缩短 F5/F6 无敌真空）。
+constexpr DWORD kMapIdQuietMs = 1000;
+DWORD gMapIdQuietUntilMs = 0;
+int gQuietTrackMapId = 0;
+
+bool InMapIdQuiet(DWORD now) {
+    return gMapIdQuietUntilMs != 0 && static_cast<int>(now - gMapIdQuietUntilMs) < 0;
+}
 // CMS-named TW candidates (read-only; never write)
 #define kOffSoftTickA (gOffSoftTickA)
 #define kOffSoftTickB (gOffSoftTickB)
@@ -712,6 +726,9 @@ void ApplyHitGate(bool on) {
 
 void ApplyAntiBlink() {
     if (!gLocalUser) return;
+    // InterStage / 卸图：禁写 layer；帧回调也可能晚到一拍。
+    if (!x::features::ports::world::IsPlayReady()) return;
+    if (InMapIdQuiet(GetTickCount())) return;
     // Lightweight: no StillAlive / FindAll — safe for main-thread frame tick.
     WriteU32(gLocalUser, kOffLayerStateCounter, kLayerCounterOpaque);
 }
@@ -719,10 +736,16 @@ void ApplyAntiBlink() {
 // MainPump sticky tick (after SendWill/Update). Data-plane only.
 void AntiBlinkFrameTick(void*) {
     if (!gDesired.load(std::memory_order_relaxed)) return;
+    if (!x::features::ports::world::IsPlayReady()) return;
+    if (InMapIdQuiet(GetTickCount())) return;
     ApplyAntiBlink();
 }
 
 bool TryArmFrameBlink(const char* why) {
+    if (!x::features::ports::world::IsPlayReady()) {
+        gFrameBlink.store(false);
+        return false;
+    }
     if (!x::runtime::main_thread::Ensure()) {
         gFrameBlink.store(false);
         return false;
@@ -778,7 +801,9 @@ void ProbeSoftSlots(const char* tag) {
 }
 
 void ApplyInvuln(bool on) {
-    // LU teardown must not wipe SecondaryStat — SS is independent and still useful mid-hop.
+    // BIN 7ae984：InterStage/卸图禁写 SS+hit，避免迁频窗污染角色态；回 Field 再钉。
+    if (!x::features::ports::world::IsPlayReady()) return;
+    // LU teardown must not wipe SecondaryStat — SS is independent while in-map.
     if (gLocalUser && !LocalUserStillAlive()) {
         ClearLocalUser(on ? "dead before invuln write" : "dead on disable");
     }
@@ -833,9 +858,9 @@ void EnsureBindings() {
 DWORD WINAPI InvulnThread(LPVOID) {
     Beep(740, 80);
     WarnIfSoftEnvRequested();
-    Log("Invuln worker v2.6.6+hard start (hit=+0x298; anti-blink=frame+backup8ms; "
+    Log("Invuln worker v2.6.7 start (hit=+0x298; anti-blink=frame+backup8ms; "
         "bind=wm.MyUser+FindAll; rebind=%ums/%ums grace=%ums; "
-        "FindAll=PlayReady+TransitBlock; probe228 %s)",
+        "FindAll=PlayReady+TransitBlock; write=PlayReady-only; probe228 %s)",
         (unsigned)kRebindFastMs, (unsigned)kRebindMs, (unsigned)kBindGraceMs,
         ProbeEnabled() ? "on" : "off");
 
@@ -869,22 +894,92 @@ DWORD WINAPI InvulnThread(LPVOID) {
     DWORD lastProbe = 0;
     DWORD lastPumpTry = 0;
     DWORD lastHb = GetTickCount();
+    DWORD lastTransitLog = 0;
+    bool wasPlayReady = x::features::ports::world::IsPlayReady();
 
     while (!gWorkerStop.load()) {
         const DWORD now = GetTickCount();
         const bool on = gDesired.load();
+        const bool play = x::features::ports::world::IsPlayReady();
 
         if (now - lastPoll >= 200) {
             lastPoll = now;
             x::ipc::PayloadControl_Poll();
         }
 
-        if (on && !gFrameBlink.load() && now - lastPumpTry >= kPumpRetryMs) {
+        // 卸图/InterStage：卸帧钉、丢旧 LU/SS 缓存，本拍不写不重绑。
+        if (on && !play) {
+            if (gFrameBlink.load(std::memory_order_acquire)) {
+                DisarmFrameBlink();
+                if (!lastTransitLog || now - lastTransitLog > 2000) {
+                    lastTransitLog = now;
+                    Log("transit hold: disarm frame-tick + skip SS/hit writes scene=%d",
+                        static_cast<int>(x::features::ports::world::GetSceneState()));
+                }
+            }
+            if (gLocalUser) ClearLocalUser("transit !PlayReady");
+            if (!gSecondaryStats.empty()) ClearSecondaryStats("transit !PlayReady");
+            wasPlayReady = false;
+            gQuietTrackMapId = 0;  // 下一张图重新建 track
+            if (now - lastHb >= 5000) {
+                lastHb = now;
+                Log("heartbeat n=%lu desired=%d transit=1 blink=off lu=%p alive=0", gTickCount,
+                    on ? 1 : 0, gLocalUser);
+            }
+            Sleep(kWorkerSleepOnMs);
+            continue;
+        }
+
+        // MapId 闪变仍 PlayReady：立刻停写（手动/Travel 进门脏窗，BIN 02:48）。
+        if (on && play) {
+            const int mid = x::features::ports::world::GetMapId();
+            if (mid > 0) {
+                if (gQuietTrackMapId > 0 && mid != gQuietTrackMapId) {
+                    gMapIdQuietUntilMs = now + kMapIdQuietMs;
+                    if (gMapIdQuietUntilMs == 0) gMapIdQuietUntilMs = 1;
+                    if (gFrameBlink.load(std::memory_order_acquire)) DisarmFrameBlink();
+                    if (gLocalUser) ClearLocalUser("map_id change quiet");
+                    if (!gSecondaryStats.empty()) ClearSecondaryStats("map_id change quiet");
+                    Log("map_id quiet: %d->%d skip writes %ums (pre-InterStage dirty window)",
+                        gQuietTrackMapId, mid, (unsigned)kMapIdQuietMs);
+                }
+                gQuietTrackMapId = mid;
+            }
+            if (InMapIdQuiet(now)) {
+                static DWORD sLastMapQuietLog = 0;
+                if (!sLastMapQuietLog || now - sLastMapQuietLog > 1500) {
+                    sLastMapQuietLog = now;
+                    Log("map_id quiet active remain=%ums mid=%d",
+                        (unsigned)(gMapIdQuietUntilMs - now), mid);
+                }
+                Sleep(kWorkerSleepOnMs);
+                continue;
+            }
+        }
+
+        // 刚回 Field：重新武装帧钉（desired 仍开）；落地静默窗内禁 FindAll。
+        if (on && play && !wasPlayReady) {
+            gLandQuietUntilMs = now + kLandQuietMs;
+            if (gLandQuietUntilMs == 0) gLandQuietUntilMs = 1;
+            gMapIdQuietUntilMs = 0;  // Field 已回，结束 map_id 静默
+            TryArmFrameBlink("play_ready");
+            lastGate = 0;  // 落地立刻补钉一拍
+            Log("transit resume: play-ready → rebind+write (land_quiet=%ums)",
+                (unsigned)kLandQuietMs);
+            // 当拍急绑：MyUser 已就绪则立刻写，勿空等本拍后段 / FindAll 静默。
+            if (TryBindWmMyUser()) {
+                ApplyInvuln(true);
+                lastGate = now;
+            }
+        }
+        wasPlayReady = play;
+
+        if (on && play && !gFrameBlink.load() && now - lastPumpTry >= kPumpRetryMs) {
             lastPumpTry = now;
             TryArmFrameBlink("retry");
         }
 
-        if (on) {
+        if (on && play) {
             // 换图：WM.MyUser 指针变了/清空 → 立刻丢旧绑，勿继续写死对象。
             if (gLocalUser && WmMyUserDrifted()) ClearLocalUser("wm.MyUser drift");
 
@@ -903,11 +998,21 @@ DWORD WINAPI InvulnThread(LPVOID) {
                         ApplyInvuln(true);
                         lastGate = now;
                     } else if (!SkipFindAllTransit() &&
+                               !(gLandQuietUntilMs &&
+                                 static_cast<int>(now - gLandQuietUntilMs) < 0) &&
                                now - lastFindAll >= RebindIntervalMs()) {
                         lastFindAll = now;
                         if (TryResolveLocalUserFindAll()) {
                             ApplyInvuln(true);
                             lastGate = now;
+                        }
+                    } else if (gLandQuietUntilMs &&
+                               static_cast<int>(now - gLandQuietUntilMs) < 0) {
+                        static DWORD sLastQuietLog = 0;
+                        if (!sLastQuietLog || now - sLastQuietLog > 1500) {
+                            sLastQuietLog = now;
+                            Log("land quiet: skip FindAll remain=%ums",
+                                (unsigned)(gLandQuietUntilMs - now));
                         }
                     }
                 }
@@ -925,7 +1030,7 @@ DWORD WINAPI InvulnThread(LPVOID) {
         }
 
         // C: read-only layout probe (no FindAll — reuse existing LocalUser bind)
-        if (ProbeEnabled() && now - lastProbe >= kProbeMs) {
+        if (ProbeEnabled() && play && now - lastProbe >= kProbeMs) {
             lastProbe = now;
             if (gLocalUser && LocalUserStillAlive()) {
                 ProbeSoftSlots(on ? "on" : "off");
@@ -982,7 +1087,8 @@ void SetDesired(bool on) {
     const bool prev = gDesired.exchange(on);
     if (prev == on) return;
     Log("SetDesired %d", on ? 1 : 0);
-    if (on) EnsureBindings();
+    // InterStage：只记 desired；回 Field 由 worker transit resume 再绑再写。
+    if (on && x::features::ports::world::IsPlayReady()) EnsureBindings();
     ApplyInvuln(on);
 }
 

@@ -8,6 +8,7 @@
 #include "../common/xcat_access_deny_sticky.h"
 #include "../common/xcat_config_ini.h"
 #include "../common/xcat_log.h"
+#include "../common/xcat_payload_status.h"
 #include "../common/xcat_version.h"
 
 #include <Windows.h>
@@ -1475,6 +1476,24 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
 
 void DownloadWorker();
 
+enum class AccessContactKind { Allowed, Denied, Unreachable };
+struct AccessContactResult {
+    AccessContactKind kind = AccessContactKind::Unreachable;
+    std::string reason;
+    std::string mode;
+    std::string key;
+    std::string detail;
+};
+AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
+                                        const std::string& payloadBinDir, bool quick);
+bool ClearAccessDenySticky(const std::string& payloadBinDir);
+bool WriteAccessDenySticky(const std::string& payloadBinDir, const std::string& reason,
+                           const std::string& mode, const std::string& key);
+bool WriteOnlineLease(const std::string& payloadBinDir);
+bool ClearOnlineLease(const std::string& payloadBinDir);
+void RequestExitForDeviceAccessDeny(const std::string& reason, const std::string& mode,
+                                    bool fromSticky);
+
 std::string ResolveDownloadUrl(const std::string& manifestUrl, const Manifest& m) {
     ParsedUrl parsed{};
     if (!ParseUrl(manifestUrl, parsed)) return {};
@@ -1488,6 +1507,33 @@ std::string ResolveDownloadUrl(const std::string& manifestUrl, const Manifest& m
 }
 
 void CheckWorker(std::string serviceUrl) {
+    // 手动检查时顺带探活：解禁后清残留粘性；仍 Denied 则给明确文案（避免只看到「连不上更新口」）。
+    {
+        const std::string prefsHint = []() -> std::string {
+            // CheckWorker 无 payloadBinDir 参数；用 exe 旁 XCat_data（与主程序 prefs 一致）。
+            wchar_t mod[MAX_PATH]{};
+            if (!GetModuleFileNameW(nullptr, mod, MAX_PATH)) return {};
+            std::filesystem::path p(mod);
+            p = p.parent_path() / L"XCat_data";
+            return xcat::WideToUtf8(p.wstring());
+        }();
+        if (!serviceUrl.empty() && !prefsHint.empty()) {
+            const AccessContactResult ac =
+                ContactDeviceAccess(serviceUrl, prefsHint, /*quick=*/true);
+            if (ac.kind == AccessContactKind::Allowed) {
+                g_sessionAccessDeny.store(false, std::memory_order_release);
+                (void)ClearAccessDenySticky(prefsHint);
+                (void)WriteOnlineLease(prefsHint);
+            } else if (ac.kind == AccessContactKind::Denied) {
+                (void)WriteAccessDenySticky(prefsHint, ac.reason, ac.mode, ac.key);
+                (void)ClearOnlineLease(prefsHint);
+                SetSnapshot(UpdatePhase::Failed, "设备仍被禁止访问，无法检查更新");
+                RequestExitForDeviceAccessDeny(ac.reason, ac.mode, /*fromSticky=*/false);
+                return;
+            }
+        }
+    }
+
     const std::string manifestUrl = UpdateManifestUrlFromServiceUrl(serviceUrl);
     if (manifestUrl.empty()) {
         SetSnapshot(UpdatePhase::Failed, "更新服务地址无效");
@@ -1552,6 +1598,16 @@ void CheckWorker(std::string serviceUrl) {
     }
     if (shouldAutoDownload) {
         DownloadWorker();
+        // 若另一路下载正占坑，DownloadWorker 会直接 return，但上面已把 phase 设成
+        // Downloading —— 会卡死「检查并安装」按钮。收回可点状态。
+        {
+            std::lock_guard<std::mutex> lk(g_state.mtx);
+            if (g_state.snapshot.phase == UpdatePhase::Downloading && !g_state.downloadInFlight &&
+                g_state.snapshot.zipPath.empty() && g_state.snapshot.downloadedBytes == 0) {
+                SetPhaseUiLocked(UpdatePhase::UpdateAvailable,
+                                 "发现新版本（下载繁忙，请稍后重试）");
+            }
+        }
     }
 }
 
@@ -1898,6 +1954,7 @@ void RequestExitForDeviceAccessDeny(const std::string& reason, const std::string
 // —— 在线租约：成功探活放行后写入；掐运维服/断网超过窗口后无法继续启动或运行 ——
 constexpr uint64_t kOnlineLeaseTtlSec = 64ull * 3600ull;       // 64h（正式探活续约）
 constexpr uint64_t kBootstrapGraceTtlSec = 1ull * 3600ull;     // 首次宽限 1h
+constexpr uint64_t kStickyRecoverTtlSec = 30ull * 60ull;       // 粘性+探活失败恢复 30m
 
 uint64_t UnixTimeNowSec() {
     FILETIME ft{};
@@ -2112,25 +2169,51 @@ void RequestExitForOnlineLeaseRequired(const char* detail) {
     }
 }
 
-enum class AccessContactKind { Allowed, Denied, Unreachable };
-
-struct AccessContactResult {
-    AccessContactKind kind = AccessContactKind::Unreachable;
-    std::string reason;
-    std::string mode;
-    std::string key;
-    std::string detail;
-};
-
-std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id) {
-    auto sanitizeHdr = [](std::wstring s) {
+std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
+                                        const char* payloadBinDir) {
+    auto sanitizeHdrLen = [](std::wstring s, size_t maxLen) {
         for (wchar_t& ch : s) {
             if (ch == L'\r' || ch == L'\n' || ch == L'\0') ch = L'_';
         }
-        if (s.size() > 96) s.resize(96);
+        if (s.size() > maxLen) s.resize(maxLen);
         return s;
     };
-    wchar_t identityHeaders[768]{};
+    auto sanitizeHdr = [&](std::wstring s) { return sanitizeHdrLen(std::move(s), 96); };
+    // 角色名/职业名：UTF-8 → base64，前缀 b64.，保证 HTTP 头纯 ASCII（避免中文乱码）。
+    auto utf8ToB64Hdr = [](const char* utf8) -> std::wstring {
+        if (!utf8 || !utf8[0]) return L"b64.";
+        static constexpr char kTable[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        // 限 72 字节输入 → b64≈96 + "b64."；避免后续头长截断破坏 padding。
+        size_t len = std::strlen(utf8);
+        if (len > 72) {
+            len = 72;
+            while (len > 0 && (static_cast<unsigned char>(utf8[len]) & 0xC0) == 0x80) --len;
+        }
+        std::string b64;
+        b64.reserve(4 + ((len + 2) / 3) * 4);
+        b64 = "b64.";
+        size_t i = 0;
+        for (; i + 2 < len; i += 3) {
+            const uint32_t v = (static_cast<unsigned char>(utf8[i]) << 16) |
+                               (static_cast<unsigned char>(utf8[i + 1]) << 8) |
+                               static_cast<unsigned char>(utf8[i + 2]);
+            b64.push_back(kTable[(v >> 18) & 0x3F]);
+            b64.push_back(kTable[(v >> 12) & 0x3F]);
+            b64.push_back(kTable[(v >> 6) & 0x3F]);
+            b64.push_back(kTable[v & 0x3F]);
+        }
+        if (i < len) {
+            uint32_t v = static_cast<unsigned char>(utf8[i]) << 16;
+            if (i + 1 < len) v |= static_cast<unsigned char>(utf8[i + 1]) << 8;
+            b64.push_back(kTable[(v >> 18) & 0x3F]);
+            b64.push_back(kTable[(v >> 12) & 0x3F]);
+            b64.push_back(i + 1 < len ? kTable[(v >> 6) & 0x3F] : '=');
+            b64.push_back('=');
+        }
+        return xcat::Utf8ToWide(b64);
+    };
+    wchar_t identityHeaders[1024]{};
     char ver[64]{};
     std::snprintf(ver, sizeof(ver), "%s build %u", xcat::kXcatVersionString, xcat::kXcatBuildId);
     const std::wstring machineW = sanitizeHdr(xcat::Utf8ToWide(id.machine));
@@ -2144,11 +2227,41 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id) {
     }
     const std::wstring macW = sanitizeHdr(xcat::Utf8ToWide(macJoined));
     const std::wstring passW = sanitizeHdr(xcat::Utf8ToWide(id.token));
-    _snwprintf(identityHeaders, 768,
+    _snwprintf(identityHeaders, 1024,
                L"X-XCat-Machine: %s\r\nX-XCat-Device-Id: %s\r\nX-XCat-App-Version: %s\r\n"
                L"X-XCat-Mac: %s\r\nX-XCat-Token: %s\r\n",
                machineW.c_str(), deviceW.c_str(), verW.c_str(), macW.c_str(), passW.c_str());
-    return identityHeaders;
+    std::wstring out = identityHeaders;
+
+    // 角色快照：DLL→PayloadStatus SHM；新鲜且有效才带上头（未进角色不覆盖服务端旧值）。
+    if (payloadBinDir && payloadBinDir[0]) {
+        xcat::PayloadStatus st{};
+        if (xcat::ReadPayloadStatus(payloadBinDir, st) &&
+            xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 8000) &&
+            st.playerCharValid && st.playerName[0]) {
+            char levelBuf[16]{};
+            char jobBuf[16]{};
+            char mesoBuf[32]{};
+            std::snprintf(levelBuf, sizeof(levelBuf), "%d", st.playerLevel);
+            std::snprintf(jobBuf, sizeof(jobBuf), "%d", st.playerJob);
+            std::snprintf(mesoBuf, sizeof(mesoBuf), "%lld",
+                          static_cast<long long>(st.playerMeso));
+            const std::wstring nameW = sanitizeHdrLen(utf8ToB64Hdr(st.playerName), 120);
+            const std::wstring jobNameW = sanitizeHdrLen(utf8ToB64Hdr(st.playerJobName), 120);
+            const std::wstring levelW = sanitizeHdr(xcat::Utf8ToWide(levelBuf));
+            const std::wstring jobW = sanitizeHdr(xcat::Utf8ToWide(jobBuf));
+            const std::wstring mesoW = sanitizeHdr(xcat::Utf8ToWide(mesoBuf));
+            wchar_t charHeaders[768]{};
+            _snwprintf(charHeaders, 768,
+                       L"X-XCat-Char-Name: %s\r\nX-XCat-Char-Level: %s\r\n"
+                       L"X-XCat-Char-Job: %s\r\nX-XCat-Char-Job-Name: %s\r\n"
+                       L"X-XCat-Char-Meso: %s\r\n",
+                       nameW.c_str(), levelW.c_str(), jobW.c_str(), jobNameW.c_str(),
+                       mesoW.c_str());
+            out += charHeaders;
+        }
+    }
+    return out;
 }
 
 AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
@@ -2162,7 +2275,7 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
     const std::string accessUrl =
         parsed.origin + UpdateAccessPathFromServicePath(xcat::WideToUtf8(parsed.path));
     const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
-    const std::wstring headers = BuildClientIdentityHeaders(id);
+    const std::wstring headers = BuildClientIdentityHeaders(id, payloadBinDir.c_str());
     const HttpResult access =
         quick ? HttpGetTextQuick(accessUrl, headers.c_str()) : HttpGetText(accessUrl, headers.c_str());
     if (access.err.empty() && access.status == 200) {
@@ -2243,13 +2356,19 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
             std::string stickyReason;
             std::string stickyMode;
             if (ReadAccessDenySticky(payloadBinDir, stickyReason, stickyMode)) {
-                xcat::log::Warn("Update", "gate/2 cached m=%s r=%s", GateModeLogCode(stickyMode),
-                                GateReasonLogCode(stickyReason));
-                RequestExitForDeviceAccessDeny(stickyReason, stickyMode, /*fromSticky=*/true);
-                finish();
-                return;
-            }
-            if (!OnlineLeaseValid(payloadBinDir)) {
+                // 粘性 + 探活失败：有有效租约则继续（解禁后 access 抖一下不该踢）；
+                // 无租约才按本地拒绝硬退（真封禁会在 Denied 时清租约）。
+                if (OnlineLeaseValid(payloadBinDir)) {
+                    xcat::log::Warn("Update", "gate/2 cached m=%s r=%s but lease ok; continue",
+                                    GateModeLogCode(stickyMode), GateReasonLogCode(stickyReason));
+                } else {
+                    xcat::log::Warn("Update", "gate/2 cached m=%s r=%s", GateModeLogCode(stickyMode),
+                                    GateReasonLogCode(stickyReason));
+                    RequestExitForDeviceAccessDeny(stickyReason, stickyMode, /*fromSticky=*/true);
+                    finish();
+                    return;
+                }
+            } else if (!OnlineLeaseValid(payloadBinDir)) {
                 RequestExitForOnlineLeaseRequired(
                     ac.detail.empty() ? "net miss" : ac.detail.c_str());
                 finish();
@@ -2259,7 +2378,7 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
     }
 
     const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
-    const std::wstring identityHeaders = BuildClientIdentityHeaders(id);
+    const std::wstring identityHeaders = BuildClientIdentityHeaders(id, payloadBinDir.c_str());
     const HttpResult resp = HttpGetText(forceUrl, identityHeaders.c_str());
     if (!resp.err.empty()) {
         xcat::log::Warn("Update", "force update poll failed url=%s err=%s", forceUrl.c_str(),
@@ -2391,18 +2510,30 @@ bool SetAutoReceiveUpdatesEnabled(const std::string& payloadBinDir, bool enabled
 }
 
 bool StartUpdateCheck(const std::string& serviceUrl) {
+    const char* busyWhy = nullptr;
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
         if (g_state.snapshot.phase == UpdatePhase::Checking ||
             g_state.snapshot.phase == UpdatePhase::Downloading ||
             g_state.snapshot.phase == UpdatePhase::ReadyToInstall ||
             g_state.snapshot.phase == UpdatePhase::Installing) {
-            return false;
+            busyWhy = "更新进行中，请稍候";
+            if (g_state.snapshot.phase == UpdatePhase::Downloading) busyWhy = "正在下载更新，请稍候";
+            else if (g_state.snapshot.phase == UpdatePhase::ReadyToInstall ||
+                     g_state.snapshot.phase == UpdatePhase::Installing)
+                busyWhy = "正在安装更新，请稍候";
+            else if (g_state.snapshot.phase == UpdatePhase::Checking) busyWhy = "正在检查更新，请稍候";
+        } else {
+            SetPhaseUiLocked(UpdatePhase::Checking, "检查更新中...");
+            g_state.snapshot.zipPath.clear();
+            // 一键更新：有新版本则自动下载，UI 侧 TryStartAutoInstall 后装包重启。
+            g_state.autoInstallAfterDownload = true;
         }
-        SetPhaseUiLocked(UpdatePhase::Checking, "检查更新中...");
-        g_state.snapshot.zipPath.clear();
-        // 一键更新：有新版本则自动下载，UI 侧 TryStartAutoInstall 后装包重启。
-        g_state.autoInstallAfterDownload = true;
+    }
+    if (busyWhy) {
+        // 必须在 g_state.mtx 外弹气泡，避免 notify→UI 回碰更新状态死锁。
+        notify::PushLocal(/*Warning*/ 2, "update-busy", "检查更新", busyWhy, 3500);
+        return false;
     }
     std::thread(CheckWorker, serviceUrl).detach();
     return true;
@@ -2594,7 +2725,7 @@ bool EnforceStickyDeviceAccessOnStartup(const std::string& serviceUrl,
     if (!ReadAccessDenySticky(payloadBinDir, stickyReason, stickyMode)) return false;
 
     // 旧逻辑：有粘性就直接 exit，解禁后永远探不到服、粘性清不掉。
-    // 现：先探活；allowed 清粘性；仍 deny 刷新粘性；不可达才沿用本地粘性拦。
+    // 现：先探活；allowed 清粘性；仍 deny 刷新粘性；不可达不硬退（短恢复租约 + 租约门禁）。
     if (!serviceUrl.empty()) {
         xcat::log::Warn("Update", "startup gate/2 cached m=%s r=%s; netchk",
                         GateModeLogCode(stickyMode), GateReasonLogCode(stickyReason));
@@ -2616,8 +2747,20 @@ bool EnforceStickyDeviceAccessOnStartup(const std::string& serviceUrl,
             RequestExitForDeviceAccessDeny(ac.reason, ac.mode, /*fromSticky=*/false);
             return true;
         }
-        xcat::log::Warn("Update", "startup sticky netchk miss n=%s; keep cache",
+        // Unreachable：不要用粘性硬退。解禁后 access 瞬断（12002/12029）时旧逻辑会把人
+        // 锁在门外，表现为「已解开但开不了/检查不了更新」。真封禁随后 ForcePoll 探到
+        // Denied 仍会写粘性并退；此处把决定权交给租约门禁。
+        // 封禁会清租约：若此时无租约，发 30min 恢复租约，避免「宽限已用 + access 抖」仍 gate/3。
+        xcat::log::Warn("Update", "startup sticky netchk miss n=%s; defer to lease gate",
                         GateNetLogCode(ac.detail.empty() ? nullptr : ac.detail.c_str()));
+        if (!OnlineLeaseValid(payloadBinDir)) {
+            if (WriteOnlineLeaseTtl(payloadBinDir, kStickyRecoverTtlSec, "s")) {
+                xcat::log::Warn("Update", "startup sticky recover lease 30m issued");
+            } else {
+                xcat::log::Warn("Update", "startup sticky recover lease write failed");
+            }
+        }
+        return false;
     } else {
         xcat::log::Warn("Update", "startup gate/2 cached m=%s r=%s (no service url)",
                         GateModeLogCode(stickyMode), GateReasonLogCode(stickyReason));

@@ -4,6 +4,7 @@
 #endif
 #include "skill_port.h"
 
+#include "ground_spoof.h"
 #include "player_combat_port.h"
 #include "world_port.h"
 #include "../skill_max_level/skill_max_level.h"
@@ -55,10 +56,18 @@ constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDC3D20;
 // 禁止手扫 entries 容量：BIN 会命中残留脏槽（over≈GetTickCount 量级）。
 constexpr uint32_t kRvaGetSkillCoolTimeOver = 0x12E76C0;
 constexpr uint32_t kRvaIsExistSkillCoolTimeOver = 0x12E8F40;
+// SkillEntry.GetLevelData(int level) → SkillLevelData*（与 final_attack_force 同锚）
+constexpr uint32_t kRvaGetLevelData = 0x1564A30;
+// CMS/TW SkillLevelData：Prop@0x84 已证实同布局 → MPCon@0x68
+constexpr size_t kFbMpCon = 0x68;
+// CMS/TW SkillLevelData.Cooltime@0xD4（秒；与 Prop@0x84 同布局已证实）
+constexpr size_t kFbCooltime = 0xD4;
 
 // 方法哈希（dump 名；RVA 漂时优先）
 constexpr char kHashGetSkillLevel[] =
     "e3f94beec124905fdceee7be877c5006e976256d338613487b632a8015ff251";
+constexpr char kHashGetLevelData[] =
+    "f47191da3f08f5e8a7d4a64a286be8d40e43c4f3f66724aa962070342297d3e";
 constexpr char kHashDoActiveSkill[] =
     "eb301d84ff17b393a674e50db3efe41819693d74d425ee1835d2b166a7db88e";
 constexpr char kHashDoActiveSkillPrepare[] =
@@ -160,6 +169,7 @@ using FnGetRemainTime = int (*)(void* self, int skillId, int tCur, const void* m
 using FnGetUpdateTime = int (*)(const void* methodInfo);
 using FnGetSkillCoolTimeOver = int (*)(void* self, int skillId, const void* methodInfo);
 using FnIsExistSkillCoolTimeOver = bool (*)(void* self, int skillId, const void* methodInfo);
+using FnGetLevelData = void* (*)(void* self, int level, const void* methodInfo);
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -182,6 +192,10 @@ FnGetRemainTime gGetRemainTime = nullptr;
 FnGetUpdateTime gGetUpdateTime = nullptr;
 FnGetSkillCoolTimeOver gGetSkillCoolTimeOver = nullptr;
 FnIsExistSkillCoolTimeOver gIsExistSkillCoolTimeOver = nullptr;
+FnGetLevelData gGetLevelData = nullptr;
+MethodInfoHead* gMiGetLevelData = nullptr;
+size_t gOffMpCon = kFbMpCon;
+size_t gOffCooltime = kFbCooltime;
 
 void* gLuType = nullptr;
 void* gLocalUser = nullptr;
@@ -217,7 +231,7 @@ std::unordered_map<int, float> gTableCdSec;      // skillId → 表内总 CD 秒
 bool gTableCdTried = false;
 
 float TableCooltimeSec(int skillId);
-void NoteLocalCooldownAfterCast(int skillId);
+void NoteLocalCooldownAfterCast(int skillId, float minDurSec = 0.f);
 float LocalCooldownRemainSec(int skillId);
 
 size_t gOffAffectedList = kFbAffectedList;
@@ -236,6 +250,9 @@ void EnsureSkillFieldOffsets();
 struct CastJob {
     int skillId = 0;
     bool preferSendUse = false;  // 可选：先试 SendSkillUseRequest
+    bool sendUseOnly = false;    // true：SendUse 失败也不回退 DoActive/Prepare
+    // true：DoActive 拒施后不走 Prepare（多发攻击技；避免 prepare_false/IsPreparingSkill 粘滞）
+    bool noPrepareFallback = false;
     bool ok = false;
     bool notReady = false;
     char reason[48]{};
@@ -941,6 +958,16 @@ void EnsureMethodInfos() {
         gIsExistSkillCoolTimeOver = FnFromMi<FnIsExistSkillCoolTimeOver>(
             gMiIsExistSkillCoolTimeOver, kRvaIsExistSkillCoolTimeOver);
 
+    // SkillEntry.GetLevelData —— SendUse 前读 MPCon
+    {
+        void* seKlass = FindClass(kSkillEntryClass);
+        constexpr MethodShape kLd{1, TypeKind::Ptr, true, false, {TypeKind::I32}};
+        fill(gMiGetLevelData, seKlass, kRvaGetLevelData, kLd, "GetLevelData", kHashGetLevelData);
+        if (gMiGetLevelData)
+            gGetLevelData = FnFromMi<FnGetLevelData>(gMiGetLevelData, kRvaGetLevelData);
+        if (!gGetLevelData) gGetLevelData = AtRva<FnGetLevelData>(kRvaGetLevelData);
+    }
+
     static bool sLogged = false;
     const int hits = (gMiGetSkillLevel ? 1 : 0) + (gMiDoActiveSkill ? 1 : 0) + (gMiPrepare ? 1 : 0) +
                      (gMiSendSkillUse ? 1 : 0) + (gMiGetSkill ? 1 : 0) + (gMiGetRemainTime ? 1 : 0) +
@@ -962,6 +989,80 @@ void EnsureMethodInfos() {
 void SetJobReason(CastJob* job, const char* why) {
     if (!job) return;
     strncpy_s(job->reason, why ? why : "fail", _TRUNCATE);
+}
+
+// 当前等级 SkillLevelData.MPCon；读失败返回 -1（SendUse 门禁 fail-closed）。
+int PeekSkillMpCon(int skillId, void* entryOpt, int levelOpt) {
+    EnsureMethodInfos();
+    if (!gGetLevelData) return -1;
+    void* entry = entryOpt;
+    int level = levelOpt;
+    if (!LooksLikeHeapPtr(entry) || level <= 0) {
+        if (skillId <= 0) return -1;
+        entry = GetSkillEntry(skillId);
+        level = GetSkillLevel(skillId);
+    }
+    if (!LooksLikeHeapPtr(entry) || level <= 0) return -1;
+    void* ld = nullptr;
+    __try {
+        ld = gGetLevelData(entry, level, gMiGetLevelData);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+    if (!LooksLikeHeapPtr(ld)) return -1;
+    const int mpCon = ReadI32(ld, gOffMpCon);
+    if (mpCon < 0 || mpCon > 100000) return -1;
+    return mpCon;
+}
+
+// 当前等级表内冷却秒；读失败返回 0。
+float PeekSkillLevelCooltimeSec(int skillId, void* entryOpt, int levelOpt) {
+    EnsureMethodInfos();
+    if (!gGetLevelData) return 0.f;
+    void* entry = entryOpt;
+    int level = levelOpt;
+    if (!LooksLikeHeapPtr(entry) || level <= 0) {
+        if (skillId <= 0) return 0.f;
+        entry = GetSkillEntry(skillId);
+        level = GetSkillLevel(skillId);
+    }
+    if (!LooksLikeHeapPtr(entry) || level <= 0) return 0.f;
+    void* ld = nullptr;
+    __try {
+        ld = gGetLevelData(entry, level, gMiGetLevelData);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0.f;
+    }
+    if (!LooksLikeHeapPtr(ld)) return 0.f;
+    const int cool = ReadI32(ld, gOffCooltime);
+    // WZ 常见秒；偶发毫秒脏值丢掉。
+    if (cool <= 0) return 0.f;
+    if (cool > 0 && cool < 3600) return static_cast<float>(cool);
+    if (cool >= 3600 && cool <= 600000) return static_cast<float>(cool) / 1000.f;
+    return 0.f;
+}
+
+// SendUse 直发前验蓝（对齐枫星 resourceDeny：读不到消耗/蓝 → fail-closed）。
+bool GateSendUseMp(int skillId, void* entry, int level, CastJob* job) {
+    const int mpCon = PeekSkillMpCon(skillId, entry, level);
+    if (mpCon < 0) {
+        SetJobReason(job, "mp_con_fail");
+        job->notReady = true;
+        return false;
+    }
+    if (mpCon == 0) return true;  // 表内无蓝耗
+    x::ui::player::Vitals v{};
+    if (!x::ui::player::Read(v) || !v.ok) {
+        SetJobReason(job, "mp_vitals_fail");
+        job->notReady = true;
+        return false;
+    }
+    if (v.mp < mpCon) {
+        SetJobReason(job, "short_mp");
+        job->notReady = true;
+        return false;
+    }
+    return true;
 }
 
 // 游戏逻辑钟：WorldManager.GetUpdateTime = (int)(_updateTime * 1000)。
@@ -1234,16 +1335,20 @@ float TableCooltimeSec(int skillId) {
     return it == gTableCdSec.end() ? 0.f : it->second;
 }
 
-void NoteLocalCooldownAfterCast(int skillId) {
-    const float dur = TableCooltimeSec(skillId);
-    if (dur < 0.5f) return;
+void NoteLocalCooldownAfterCast(int skillId, float minDurSec) {
+    float dur = TableCooltimeSec(skillId);
+    const float fromLd = PeekSkillLevelCooltimeSec(skillId, nullptr, 0);
+    if (fromLd > dur) dur = fromLd;
+    if (minDurSec > dur) dur = minDurSec;
+    // 无表 CD 且调用方未给地板：不记假短 CD（交给引擎 ActionBusy / CoolTimeOver）。
+    if (dur < 0.05f) return;
     const DWORD now = GetTickCount();
     const DWORD end = now + static_cast<DWORD>(dur * 1000.f + 0.5f);
     {
         std::lock_guard<std::mutex> lock(gLocalCdMu);
         gLocalCdEndTick[skillId] = end;
     }
-    runtime::LogI("SkillPort", "local cd confirm id=%d dur=%.0fs endTick=%u", skillId, dur, end);
+    runtime::LogI("SkillPort", "local cd confirm id=%d dur=%.2fs endTick=%u", skillId, dur, end);
 }
 
 float LocalCooldownRemainSec(int skillId) {
@@ -1442,7 +1547,7 @@ void CastJobFnBody(CastJob* job) {
     EnsureMethodInfos();
 
     // 可选直发：SendSkillUseRequest(SkillEntry, pPet=0, pt=0, nSLV=level| -1, weapons=null, charge=0)
-    // 失败不中断 —— 继续走下方 DoActive 原路径，避免可选开关搞挂施放。
+    // preferSendUse：失败可回退 DoActive；sendUseOnly：失败即停（多发穿动画接技）。
     if (job->preferSendUse && gSendSkillUse) {
         void* si = ResolveSkillInfoSingleton(GetTickCount());
         void* entry = nullptr;
@@ -1461,6 +1566,7 @@ void CastJobFnBody(CastJob* job) {
             }
         }
         if (LooksLikeHeapPtr(entry)) {
+            if (!GateSendUseMp(job->skillId, entry, level, job)) return;
             const int nSlv = level > 0 ? level : -1;
             bool sendOk = false;
             __try {
@@ -1468,7 +1574,6 @@ void CastJobFnBody(CastJob* job) {
                                        /*weapons=*/nullptr, /*charge=*/0, gMiSendSkillUse);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 SetJobReason(job, "seh_send_use");
-                // fall through to DoActive
                 sendOk = false;
             }
             if (sendOk) {
@@ -1476,7 +1581,35 @@ void CastJobFnBody(CastJob* job) {
                 SetJobReason(job, gMiSendSkillUse ? "ok_send_use" : "ok_send_use_mi0");
                 return;
             }
+            if (job->sendUseOnly) {
+                if (!job->reason[0]) SetJobReason(job, "send_use_false");
+                job->notReady = true;
+                return;
+            }
             // 保留 send 失败痕迹后再走 DoActive（reason 会被覆盖）。
+        } else if (job->sendUseOnly) {
+            SetJobReason(job, "send_use_no_entry");
+            job->notReady = true;
+            return;
+        }
+    } else if (job->sendUseOnly) {
+        SetJobReason(job, gSendSkillUse ? "send_use_off" : "no_send_use_api");
+        job->notReady = true;
+        return;
+    }
+
+    // DoActive 前验蓝（只在能读到 mpCon>0 时拦）：空蓝勿进引擎，更勿回退 Prepare。
+    // BIN 2026-08-08：嫩宝 DoActive 拒施 → Prepare seh/false → IsPreparingSkill 粘滞堵战斗。
+    // 与 SendUse 的 GateSendUseMp 不同：读不到消耗/vitals 时放行，避免挡无表技。
+    {
+        const int mpCon = PeekSkillMpCon(job->skillId, nullptr, 0);
+        if (mpCon > 0) {
+            x::ui::player::Vitals v{};
+            if (x::ui::player::Read(v) && v.ok && v.mp < mpCon) {
+                SetJobReason(job, "short_mp");
+                job->notReady = true;
+                return;
+            }
         }
     }
 
@@ -1501,6 +1634,14 @@ void CastJobFnBody(CastJob* job) {
     if (IsSkillActive(job->skillId, &remain)) {
         job->ok = true;  // 视为已在身上，上层走 verify/assumed
         SetJobReason(job, "already_active");
+        return;
+    }
+
+    // 多发攻击技：勿 Prepare。BIN 2026-08-08：NA 后边沿 DoActive false→Prepare false→短重试，
+    // 有蓝也会刷 prepare_false；上层改 do_false 软等或回退普攻即可。
+    if (job->noPrepareFallback) {
+        SetJobReason(job, "do_false");
+        job->notReady = true;
         return;
     }
 
@@ -1553,6 +1694,7 @@ void CastJobFnBody(CastJob* job) {
         ok = gPrepare(gLocalUser, entry, level, 0u, gMiPrepare);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         SetJobReason(job, "seh_prepare");
+        job->notReady = true;
         return;
     }
     job->ok = ok;
@@ -1574,7 +1716,13 @@ void CastJobFn(void* user) {
     char note[96]{};
     std::snprintf(note, sizeof(note), "skill=%d", job->skillId);
     player_combat::LogDoActiveVisProbe("pre", note, nullptr);
+    // 站立伪装：技能分支不经 OnFuncKey，得在这儿自己种台，否则 DoActiveSkill 与 Prepare
+    // 回退里那道内联 CurFh 门会在滑翔时把技能全拒掉（见 ground_spoof.h 的实测数据）。
+    // 包住整个 body：SendUse 直发、DoActive 主路径、Prepare 回退与全部 early return
+    // 都在里面；body 自带 __except，异常也会正常返回到下面这行摘台。
+    (void)ground_spoof::PlantForCast(gLocalUser);
     CastJobFnBody(job);
+    ground_spoof::UnplantAfterFire();
     std::snprintf(note, sizeof(note), "skill=%d ok=%d nr=%d reason=%s", job->skillId,
                   job->ok ? 1 : 0, job->notReady ? 1 : 0,
                   job->reason[0] ? job->reason : "-");
@@ -1607,10 +1755,12 @@ void Shutdown() {
     gMiGetUpdateTime = nullptr;
     gMiGetSkillCoolTimeOver = nullptr;
     gMiIsExistSkillCoolTimeOver = nullptr;
+    gMiGetLevelData = nullptr;
     gGetRemainTime = nullptr;
     gGetUpdateTime = nullptr;
     gGetSkillCoolTimeOver = nullptr;
     gIsExistSkillCoolTimeOver = nullptr;
+    gGetLevelData = nullptr;
     gCharacterDataKlass = nullptr;
     gWorldManagerKlass = nullptr;
     {
@@ -1717,9 +1867,49 @@ int GetSkillLevel(int skillId) {
     return x::features::skill_max_level::AdjustLevelIfForced(skillId, lv);
 }
 
+// 换图脏窗里 SkillInfo 单例还在（LooksLikeHeapPtr 过得去），它内部的技能表却正在重建，
+// 于是 SkillInfo.GetSkill 会在**引擎自己的代码里**读空引用。2026-08-09 05:52 实测：
+// final_attack_force 的工作线程在换图那一秒把这条路打了 24 次，每次都是
+// GameAssembly+0x3a0bde 读 0x0，全靠外层 __except 兜住（取证 hang_20260809_055217.txt）。
+//
+// 「让引擎在自己代码里炸、我们在外面接住」这套做法本身就是本轮黑屏的病根：同样的展开
+// 一旦发生在持有 il2cpp 元数据锁的路径上，就会把那把全局递归锁永久漏掉，全客户端黑屏。
+// 所以换图后先静默一段，等表重建完再问。静默期返回 null，调用方本来就按「查不到」处理。
+// 这条路会被多个 feature 的工作线程同时走，状态用原子的；抢着写只会让静默窗多刷新一次。
+// 1200 ms 是照 Invuln 那档抄的，实测太短：06:28 那次进图，静默在 +1.2 s 到期，
+// final_attack_force 在 +1.84 s 调 GetSkill 仍然读到空表（GameAssembly+0x3a0bde 空指针）。
+// 这类空读不持锁、不会连累主线程，纯属噪音，但既然量到了就按实测给足。
+constexpr DWORD kSkillMapQuietMs = 3000;
+static std::atomic<DWORD> gSkillMapQuietUntilMs{0};
+static std::atomic<int> gSkillTrackMapId{0};
+
+static bool InSkillMapQuiet() {
+    const DWORD now = GetTickCount();
+    if (!world::IsPlayReady()) {
+        gSkillTrackMapId.store(0, std::memory_order_relaxed);  // 卸图：下次进图重新起算
+        return true;
+    }
+    const int mid = world::GetMapId();
+    if (mid > 0) {
+        const int prev = gSkillTrackMapId.exchange(mid, std::memory_order_relaxed);
+        // prev==0 是「刚进图」（首次登入或卸图后重进）。06:11 实测那三次空指针读就发生在
+        // 首次进图、还没发生任何换图的时候，所以这一档同样要静默，不能只盯着 A→B。
+        if (prev != mid) {
+            DWORD until = now + kSkillMapQuietMs;
+            if (until == 0) until = 1;
+            gSkillMapQuietUntilMs.store(until, std::memory_order_relaxed);
+            x::runtime::LogI("SkillPort", "map_id quiet: %d->%d 暂停 SkillInfo.GetSkill %u ms",
+                             prev, mid, static_cast<unsigned>(kSkillMapQuietMs));
+        }
+    }
+    const DWORD until = gSkillMapQuietUntilMs.load(std::memory_order_relaxed);
+    return until != 0 && static_cast<int>(now - until) < 0;
+}
+
 void* GetSkillEntry(int skillId) {
     if (skillId <= 0) return nullptr;
     if (!EnsureBound()) return nullptr;
+    if (InSkillMapQuiet()) return nullptr;
     EnsureMethodInfos();
     void* si = ResolveSkillInfoSingleton(GetTickCount());
     if (!LooksLikeHeapPtr(si) || !gGetSkill) return nullptr;
@@ -1730,6 +1920,11 @@ void* GetSkillEntry(int skillId) {
         return nullptr;
     }
     return LooksLikeHeapPtr(entry) ? entry : nullptr;
+}
+
+int GetSkillMpCon(int skillId) {
+    if (skillId <= 0 || !EnsureBound()) return -1;
+    return PeekSkillMpCon(skillId, nullptr, 0);
 }
 
 bool ResolveSkillName(int skillId, char* out, int outSz) {
@@ -1859,12 +2054,16 @@ float GetSkillCooldownRemainSec(int skillId) {
 
 float GetSkillCooldownDurationSec(int skillId) {
     if (skillId <= 0) return 0.f;
-    return TableCooltimeSec(skillId);
+    float dur = TableCooltimeSec(skillId);
+    const float fromLd = PeekSkillLevelCooltimeSec(skillId, nullptr, 0);
+    if (fromLd > dur) dur = fromLd;
+    return dur;
 }
 
 int GetGameUpdateTimeMs() { return GameUpdateTimeMsImpl(); }
 
-bool CastSkill(int skillId, bool* notReady, char* outReason, int reasonSz) {
+bool CastSkill(int skillId, bool* notReady, char* outReason, int reasonSz,
+               bool noPrepareFallback) {
     auto setReason = [&](const char* r) {
         if (outReason && reasonSz > 0) strncpy_s(outReason, reasonSz, r ? r : "", _TRUNCATE);
     };
@@ -1889,6 +2088,7 @@ bool CastSkill(int skillId, bool* notReady, char* outReason, int reasonSz) {
     }
     CastJob job{};
     job.skillId = skillId;
+    job.noPrepareFallback = noPrepareFallback;
     if (!runtime::main_thread::InvokeAndWait(&CastJobFn, &job, kJobWaitMs,
                                             runtime::main_thread::JobPrio::High)) {
         if (notReady) *notReady = true;
@@ -1936,9 +2136,45 @@ bool CastSkillPreferSendUse(int skillId, bool* notReady, char* outReason, int re
     return job.ok;
 }
 
-void ConfirmLocalCooldown(int skillId) {
+bool CastSkillSendUseOnly(int skillId, bool* notReady, char* outReason, int reasonSz) {
+    auto setReason = [&](const char* r) {
+        if (outReason && reasonSz > 0) strncpy_s(outReason, reasonSz, r ? r : "", _TRUNCATE);
+    };
+    if (notReady) *notReady = false;
+    if (skillId <= 0) {
+        setReason("bad_id");
+        return false;
+    }
+    if (!EnsureBound() || !LocalUserStillAlive()) {
+        if (notReady) *notReady = true;
+        setReason("no_lu");
+        return false;
+    }
+    (void)ResolveSkillInfoSingleton(GetTickCount());
+    EnsureMethodInfos();
+    if (!runtime::main_thread::Ensure()) {
+        if (notReady) *notReady = true;
+        setReason("pump_fail");
+        return false;
+    }
+    CastJob job{};
+    job.skillId = skillId;
+    job.preferSendUse = true;
+    job.sendUseOnly = true;
+    if (!runtime::main_thread::InvokeAndWait(&CastJobFn, &job, kJobWaitMs,
+                                            runtime::main_thread::JobPrio::High)) {
+        if (notReady) *notReady = true;
+        setReason("invoke_timeout");
+        return false;
+    }
+    if (notReady) *notReady = job.notReady && !job.ok;
+    setReason(job.reason[0] ? job.reason : (job.ok ? "ok" : "fail"));
+    return job.ok;
+}
+
+void ConfirmLocalCooldown(int skillId, float minDurSec) {
     if (skillId <= 0) return;
-    NoteLocalCooldownAfterCast(skillId);
+    NoteLocalCooldownAfterCast(skillId, minDurSec);
 }
 
 }  // namespace x::features::ports::skill

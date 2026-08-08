@@ -89,7 +89,9 @@ struct ClientHostIdentity {
 };
 ClientHostIdentity ResolveClientHostIdentity(const std::string& payloadBinDir);
 
-// 调试 TAB TOKEN：持久化到 user.ini [update] token（换包白名单保留）；空=清除。
+// 调试 TAB TOKEN：双写 user.ini [update] token + ProgramData 机级镜像
+//（与 deviceId 同目录；换包/重装清目录后仍可恢复）。空=清除 ini + 本安装分片；
+// 全机 tok.dat 仅当内容与被清 TOKEN 一致时才删（防同机多目录互抢）。
 constexpr size_t kOpsTokenMaxChars = 48;
 std::string      NormalizeOpsToken(std::string_view raw);
 std::string      LoadOpsToken(const std::string& payloadBinDir);

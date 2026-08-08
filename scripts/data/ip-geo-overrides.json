@@ -1,0 +1,4 @@
+{
+  "_comment": "TWMS 运维台 IP 归属地本地纠偏（优先于 ip9）。支持精确 ip 或 cidr；geo 为展示文案。公开库错标时可在此补人话。",
+  "overrides": []
+}

@@ -160,6 +160,8 @@ int gMethodHits = -1;  // -1 = not probed yet
 #define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
 
 constexpr DWORD kTickMs = 80;
+// 软重连进频后：把 worker 睡扁，尽快看见 charUi（bc23b1：Go→char≈250ms，探测别再加一截）。
+constexpr DWORD kTickSoftWaitCharMs = 16;
 constexpr DWORD kJobWaitMs = 4000;
 constexpr DWORD kPhaseTimeoutMs = 60000;
 constexpr DWORD kLogThrottleMs = 3000;
@@ -185,12 +187,14 @@ constexpr DWORD kProbePumpTickMaxAgeMs = 2000;
 // 0.1.66+ 已无 job timeout；3s 过长（BIN 09a8a2：Connected→PickWorld≈3.2s 体感拖沓）→ 收至 800ms。
 constexpr int kSessionConnected = 3;
 constexpr DWORD kAfterConnectedSettleMs = 800;
-// 软重连：登录页/分区表多半还在内存，800ms 偏肉（302081：Connected→PickWorld≈1s 里大半在等 settle）。
-constexpr DWORD kAfterConnectedSettleSoftMs = 200;
-constexpr DWORD kAfterWorldClickSoftMs = 150;
-constexpr DWORD kAfterSelectChannelSoftMs = 120;
+// 软重连：登录页/分区表多半还在；再压 settle，尽快落到选角（bc23b1 已证 sticky 稳）。
+constexpr DWORD kAfterConnectedSettleSoftMs = 100;
+constexpr DWORD kAfterWorldClickSoftMs = 50;
+constexpr DWORD kAfterSelectChannelSoftMs = 0;  // armed 即 GoWorld
+// 0 在弱网/重进偶发「仍停选角页」→ 二次 Confirm（BIN 19:00/19:03）；给一短窗对齐冷启体感。
 constexpr DWORD kCharReadySettleSoftMs = 80;
-constexpr DWORD kWaitWorldProbeMinSoftMs = 200;
+constexpr DWORD kWaitWorldProbeMinSoftMs = 100;
+constexpr DWORD kLeftChannelHoldSoftMs = 0;  // charUi 一到就走；不必空等离频 settle
 constexpr DWORD kPumpFailBackoffLoadMs = 4000;  // WaitWorldList 超时用更长退避
 constexpr DWORD kWaitWorldProbeWaitMs = 400;    // 加载窗短等，勿 1.5s 占坑
 
@@ -914,6 +918,25 @@ DWORD CharReadySettleMs() { return SoftFastTrack() ? kCharReadySettleSoftMs : kC
 DWORD WaitWorldProbeMinMs() {
     return SoftFastTrack() ? kWaitWorldProbeMinSoftMs : kWaitWorldProbeMinMs;
 }
+DWORD LeftChannelHoldMs() {
+    return SoftFastTrack() ? kLeftChannelHoldSoftMs : kLeftChannelHoldMs;
+}
+
+// softFast 卡在「进频后等选角 / 确认后等离页」时加快 Tick，少吃 Sleep(80) 探测滞后。
+DWORD WorkerTickSleepMs() {
+    if (!SoftFastTrack()) return kTickMs;
+    switch (gPhase) {
+    case Phase::WaitChannelArmed:
+    case Phase::WaitCharSelect:
+    case Phase::PickChar:
+    case Phase::WaitCharArmed:
+    case Phase::ConfirmChar:
+    case Phase::WaitLeaveChar:
+        return kTickSoftWaitCharMs;
+    default:
+        return kTickMs;
+    }
+}
 
 bool LoginNetReadyForWorldProbe() {
     const int st = kick_sniff::LastSessionState();
@@ -1428,7 +1451,9 @@ void Tick() {
             void* sel = gSnap.selectedWorld;
             if (chUi && sel && WorldMatches(sel, wantId, wantName)) {
                 gPickedWorld = sel;
-                Log("resume from channel UI worldId=%d", ReadI32(sel, gOffWorldId));
+                Log("resume from channel UI worldId=%d softFast=%d armedCh=%d sticky=%d",
+                    ReadI32(sel, gOffWorldId), SoftFastTrack() ? 1 : 0, gSnap.selectedChannelId,
+                    gStickyChannelId);
                 SetPhase(Phase::PickChannel);
                 break;
             }
@@ -1514,6 +1539,15 @@ void Tick() {
             SetPhase(Phase::Failed);
             return;
         }
+        // softFast：频道 UI 已武装到目标频 → 跳过 SelectChannel，下一拍直接 GoWorld。
+        if (SoftFastTrack() && gSnap.selectedChannelId == chId) {
+            Log("PickChannel already-armed id=%d softFast — skip SelectChannel → GoWorld", chId);
+            gPickedChannelId = chId;
+            gChannelSelectedAt = 0;  // AfterSelectChannel 门禁：0 = 不等
+            gEnterAttempts = 0;
+            SetPhase(Phase::WaitChannelArmed);
+            break;
+        }
         Log("PickChannel Select id=%d", chId);
         if (!EnqueueJobAndWait(JobKind::SelectChannel, chUi, chId)) {
             SetPhase(Phase::Failed);
@@ -1558,6 +1592,17 @@ void Tick() {
         gEnterAttempts = 1;
         gLeftChannelAt = 0;
         SetPhase(Phase::WaitCharSelect);
+        // softFast：Go 后同 Tick 再探；服端已回包则少睡一轮再进 PickChar。
+        if (SoftFastTrack() && RefreshSnap()) {
+            gLastActiveProbeMs = GetTickCount();
+            if (gSnap.charUi && gSnap.avatarCount > 0 &&
+                gSnap.slLoginPhase == kSlPhaseForCharConfirm && gSnap.slBusy == 0) {
+                Log("softFast GoWorld→char same-tick avatars=%d +%ums", gSnap.avatarCount,
+                    static_cast<unsigned>(GetTickCount() - gEnterAttemptAt));
+                gCharReadyAt = GetTickCount();
+                SetPhase(Phase::PickChar);
+            }
+        }
         break;
     }
     case Phase::WaitCharSelect: {
@@ -1604,7 +1649,7 @@ void Tick() {
         }
 
         if (!gLeftChannelAt) gLeftChannelAt = GetTickCount();
-        if (GetTickCount() - gLeftChannelAt < kLeftChannelHoldMs) {
+        if (GetTickCount() - gLeftChannelAt < LeftChannelHoldMs()) {
             LogThrottled("left channel UI, settling before char UI?");
             return;
         }
@@ -1741,7 +1786,7 @@ DWORD WINAPI WorkerProc(LPVOID) {
         if (gGA || BindApis()) {
             Tick();
         }
-        Sleep(kTickMs);
+        Sleep(WorkerTickSleepMs());
     }
     Log("worker stop");
     return 0;
@@ -1831,6 +1876,8 @@ void RequestRestart(const char* why) {
 }
 
 bool IsFailed() { return gPhase == Phase::Failed; }
+
+bool IsDone() { return gPhase == Phase::Done; }
 
 }  // namespace auto_enter
 }  // namespace features

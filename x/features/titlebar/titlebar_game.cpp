@@ -100,7 +100,6 @@ FnFindAll gFindAll = nullptr;
 FnCompGo gCompGo = nullptr;
 FnObjName gObjName = nullptr;
 void* gLuType = nullptr;
-void* gIdmType = nullptr;
 void* gLocalUser = nullptr;
 void* gItemDataManager = nullptr;
 std::unordered_map<int, unsigned long long> gLootBaseline;
@@ -457,38 +456,20 @@ bool TryResolveLocalUser() {
     return x::runtime::managed_main::Call(+task, &context, 2500) && context.ok;
 }
 
+// ItemDataManager 不是 UnityEngine.Object，Resources.FindObjectsOfTypeAll 会被引擎的类型闸当场
+// 拒掉：永远返回不了对象，只会往客户端 Player.log 刷 "The type has to be derived from
+// UnityEngine.Object"，同时白占一个 2500ms 的主泵 job。原先整条解析路只有那个必错分支给
+// gItemDataManager 赋值，所以物价查询实际上从未工作过——去掉它不损失任何已有功能。
+// 要真修好得走 Singleton<T> 的 Lazy 静态槽（参考 travel_port::ResolveSingleton），
+// 但 ItemDataManager 是否 Singleton<> 尚未证实，未验证前不猜静态槽地址。
 bool TryResolveItemDataManager() {
     EnsurePriceFieldOff();
     if (LooksLikeHeapPtr(gItemDataManager)) return true;
-    if (x::runtime::managed_main::IsLoginFrozen()) return false;
-    if (!gIdmType) gIdmType = x::runtime::il2cpp::FindClassTypeObject(kItemDataManagerClass);
-    if (!gIdmType || !gFindAll) {
-        x::runtime::LogWThrottled(912, 30000, "Titlebar", "ItemDataManager type miss hash=%s",
-                                  kItemDataManagerClass);
-        return false;
-    }
-    struct Context { bool ok; } context{false};
-    auto task = [](void* raw) {
-        auto* ctx = static_cast<Context*>(raw);
-        if (x::runtime::managed_main::IsLoginFrozen() ||
-            x::runtime::managed_main::IsMapTransitBlocked())
-            return;
-        void* array = nullptr;
-        __try { array = gFindAll(gIdmType, nullptr); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
-        for (uintptr_t index = 0, count = ArrayLen(array); index < count && index < 4; ++index) {
-            void* manager = ArrayAt(array, index);
-            if (!LooksLikeHeapPtr(manager)) continue;
-            if (LooksLikeHeapPtr(ReadPtr(manager, kOffIdmDataTable)) ||
-                LooksLikeHeapPtr(ReadPtr(manager, kOffIdmBundleMap))) {
-                gItemDataManager = manager;
-                ctx->ok = true;
-                return;
-            }
-            if (!gItemDataManager) gItemDataManager = manager;
-        }
-        ctx->ok = LooksLikeHeapPtr(gItemDataManager);
-    };
-    return x::runtime::managed_main::Call(+task, &context, 2500) && context.ok;
+    x::runtime::LogWThrottled(912, 300000, "Titlebar",
+                              "ItemDataManager 未解析（FindAll 对非 UnityEngine.Object 无效），"
+                              "物价查询停用 hash=%s",
+                              kItemDataManagerClass);
+    return false;
 }
 
 bool ReadVitals(Vitals& out) {

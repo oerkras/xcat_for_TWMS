@@ -32,6 +32,7 @@
 #include "../features/ports/key_macro_bin.h"
 #include "../features/auto_lie/auto_lie.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
+#include "../features/pointblank_shoot/pointblank_shoot.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/ga_text_probe/ga_text_probe.h"
 #include "../features/galaxy_token_probe/galaxy_token_probe.h"
@@ -54,8 +55,11 @@
 #include "../ipc/payload_pet_loot.h"
 #include "../ipc/payload_status.h"
 #include "../ipc/payload_timed_keys.h"
+#include "../features/crash_upload_guard/crash_upload_guard.h"
 #include "../runtime/bin_dir.h"
+#include "../runtime/hang_autopsy.h"
 #include "../runtime/il2cpp_bind.h"
+#include "../runtime/il2cpp_fault_probe.h"
 #include "../runtime/log.h"
 #include "../runtime/main_thread_pump.h"
 #include "../runtime/managed_main.h"
@@ -131,6 +135,8 @@ void StopAllFeatureWorkers() {
     x::features::channel_hop::StopWorker();
     x::features::ga_text_probe::StopWorker();
     x::features::drop_alert_bypass::StopWorker();
+    x::features::pointblank_shoot::StopWorker();
+    x::features::pointblank_shoot::Shutdown();
     x::features::auction_town_bypass::StopWorker();
     x::features::auto_lie::StopWorker();
     xcat::sound::CancelPlayback();
@@ -359,6 +365,8 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::invuln::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::Init());
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::pointblank_shoot::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::pointblank_shoot::StartWorker());
     XCAT_PLAY_BOOT_BATCH("survival-skills");
     XCAT_PLAY_BOOT_STEP(x::features::autopot::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::timed_keys::StartWorker());
@@ -566,6 +574,16 @@ DWORD WINAPI BootstrapThread(LPVOID) {
                      "cold-start gate: GA → settle → MainPump MI → real ticks → "
                      "LOGIN workers → play-ready → PLAY workers (abort on detach)");
 
+    // 先于任何 feature 起看门狗：卡死可能发生在任意阶段，而它自己会等主泵
+    // 真正 tick 过之后才开始判死，不会误伤冷启动。
+    x::runtime::hang_autopsy::Start();
+    // 同理要赶在 feature 之前：崩溃上传会在主线程上同步走 WinINet，网络不通时能把
+    // 客户端冻死（2026-08-09 04:45 实测）。这里只给它套超时，不禁用上报本身。
+    x::features::crash_upload_guard::Start();
+    // 也要抢在所有 feature 之前挂上：元数据锁泄漏的源头是 il2cpp 内部的访问违例被
+    // __except 吞掉，只有首次异常阶段能看见它。
+    x::runtime::il2cpp_fault_probe::Start();
+
     if (!WaitNativeGameAssembly()) {
         x::runtime::LogI("Bootstrap", "cold-start aborted before GA (detach)");
         gPhase.store(static_cast<int>(Phase::Idle), std::memory_order_release);
@@ -671,6 +689,9 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID) {
     case DLL_PROCESS_DETACH: {
         // Signal only; never join (loader lock).
         gBootstrapStop.store(true, std::memory_order_release);
+        x::runtime::hang_autopsy::Stop();
+        x::features::crash_upload_guard::Stop();
+        x::runtime::il2cpp_fault_probe::Stop();
         const int prev = gPhase.exchange(static_cast<int>(Phase::Stopping),
                                          std::memory_order_acq_rel);
         if (gBootstrapThread) {

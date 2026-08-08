@@ -8,6 +8,9 @@ add_library(msc_launch STATIC
   http_gamapass_login.cpp
   chromium_cdp.cpp
   gamapass_cdp_login.cpp
+  gamapass_ticket_harvest.cpp
+  gamapass_uia_login.cpp
+  win_uia.cpp
   msc_webview_login.cpp
 )
 target_include_directories(msc_launch PUBLIC
@@ -26,11 +29,13 @@ target_link_libraries(msc_launch PUBLIC
   advapi32
   winhttp
   ole32
+  oleaut32
   shlwapi
   version
   bcrypt
   crypt32
   rpcrt4
+  UIAutomationCore
   xcat_inject
 )
 

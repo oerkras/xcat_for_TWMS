@@ -29,7 +29,7 @@ import { createLogUpload } from "./twms-log-upload.mjs";
 import { createDeviceAccess } from "./twms-device-access.mjs";
 import { createIpGeo } from "./twms-ip-geo.mjs";
 
-const SERVER_VERSION = "0.4.3";
+const SERVER_VERSION = "0.4.5";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
@@ -119,10 +119,33 @@ function headerText(req, name) {
   return raw.replace(/[\u0000-\u001f\u007f]/g, "").trim();
 }
 
+/** 解码角色名/职业：优先 b64.<base64>；旧客户端明文亦兼容。 */
+function decodeCharHeaderText(raw, maxChars) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (s.startsWith("b64.")) {
+    try {
+      const decoded = Buffer.from(s.slice(4), "base64").toString("utf8");
+      return decoded.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, maxChars);
+    } catch {
+      return "";
+    }
+  }
+  return s.slice(0, maxChars);
+}
+
 function clientIdentityFromReq(req) {
   const macRaw = headerText(req, "x-xcat-mac");
   const macs = access.parseMacList(macRaw);
   const token = access.normalizeToken(headerText(req, "x-xcat-token") || "");
+  const charName = decodeCharHeaderText(headerText(req, "x-xcat-char-name"), 48);
+  const charLevelRaw = headerText(req, "x-xcat-char-level");
+  const charJobRaw = headerText(req, "x-xcat-char-job");
+  const charJobName = decodeCharHeaderText(headerText(req, "x-xcat-char-job-name"), 32);
+  const charMesoRaw = headerText(req, "x-xcat-char-meso");
+  const charLevel = /^-?\d+$/.test(charLevelRaw) ? Number(charLevelRaw) : null;
+  const charJob = /^-?\d+$/.test(charJobRaw) ? Number(charJobRaw) : null;
+  const charMeso = /^-?\d+$/.test(charMesoRaw) ? charMesoRaw : "";
   return {
     machine: headerText(req, "x-xcat-machine").slice(0, 80),
     deviceId: headerText(req, "x-xcat-device-id").slice(0, 64),
@@ -130,6 +153,12 @@ function clientIdentityFromReq(req) {
     macs,
     mac: macs[0] ? access.formatMac(macs[0]) : "",
     token,
+    charName,
+    charLevel,
+    charJob,
+    charJobName,
+    charMeso,
+    hasChar: !!(charName && charLevel != null && charLevel > 0),
   };
 }
 
@@ -256,6 +285,12 @@ function touchClient({
   macs,
   mac,
   token,
+  charName,
+  charLevel,
+  charJob,
+  charJobName,
+  charMeso,
+  hasChar,
 }) {
   if (!ip || ip === "unknown") return;
   const identified = !!(machine || deviceId || (macs && macs.length) || mac || token);
@@ -276,6 +311,11 @@ function touchClient({
       macs: [],
       token: "",
       identified: false,
+      charName: "",
+      charLevel: 0,
+      charJob: 0,
+      charJobName: "",
+      charMeso: "",
       firstSeenMs: now,
       lastSeenMs: now,
       hits: 0,
@@ -304,6 +344,14 @@ function touchClient({
     row.mac = mac || access.formatMac(macs[0]);
   } else if (mac) {
     row.mac = mac;
+  }
+  // 仅在探活带上有效角色快照时刷新；未进图的请求不抹掉上次快照。
+  if (hasChar) {
+    row.charName = String(charName || "").slice(0, 48);
+    row.charLevel = Number.isFinite(charLevel) ? Math.max(0, Math.floor(charLevel)) : 0;
+    row.charJob = Number.isFinite(charJob) ? Math.floor(charJob) : 0;
+    row.charJobName = String(charJobName || "").slice(0, 32);
+    row.charMeso = String(charMeso || "").replace(/[^\d-]/g, "").slice(0, 24);
   }
   row.identified = !!(
     row.machine ||
@@ -482,6 +530,11 @@ function listActiveClients(activeSec) {
         macs: row.identified ? row.macs || [] : [],
         token: row.identified ? row.token || "" : "",
         appVersion: row.appVersion || "",
+        charName: row.charName || "",
+        charLevel: row.charLevel || 0,
+        charJob: row.charJob || 0,
+        charJobName: row.charJobName || "",
+        charMeso: row.charMeso || "",
         identified: !!row.identified,
         sameIpOnline: byIp.get(row.ip) || 1,
         knownOnIp: devicesByIp.get(row.ip)?.size || 0,
@@ -626,6 +679,12 @@ function recordRequest({
   macs,
   mac,
   token,
+  charName,
+  charLevel,
+  charJob,
+  charJobName,
+  charMeso,
+  hasChar,
 }) {
   stats.requestsTotal += 1;
   stats.lastRequestAt = ts();
@@ -637,7 +696,25 @@ function recordRequest({
 
   if (isLoopback(ip) && (kind === "health" || kind === "ready" || kind === "admin")) return;
 
-  touchClient({ ip, kind, pathName, status, ua, machine, deviceId, appVersion, macs, mac, token });
+  touchClient({
+    ip,
+    kind,
+    pathName,
+    status,
+    ua,
+    machine,
+    deviceId,
+    appVersion,
+    macs,
+    mac,
+    token,
+    charName,
+    charLevel,
+    charJob,
+    charJobName,
+    charMeso,
+    hasChar,
+  });
 
   if (isQuietForcePoll(status, kind, routedPath)) return;
 
@@ -674,6 +751,12 @@ function attachRequestRecorder(req, res, meta) {
       macs: id.macs,
       mac: id.mac,
       token: id.token,
+      charName: id.charName,
+      charLevel: id.charLevel,
+      charJob: id.charJob,
+      charJobName: id.charJobName,
+      charMeso: id.charMeso,
+      hasChar: id.hasChar,
     });
   });
 }

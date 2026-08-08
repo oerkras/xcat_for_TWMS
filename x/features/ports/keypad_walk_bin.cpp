@@ -2,6 +2,7 @@
 // 不写 A/B/C、不改 Query bit0、不 SetInput。仅观察：
 //   PackState 返回值（Slot4 透传钩）+ MainPump 帧末 Ap/inX/latch/OS键
 //   + MovePath 尾段 Attr（挨打击退时钉 a=12 / Jump / Normal）。
+// 默认关；排障设 XCAT_WALK_BIN=1（日志巨大，勿日常开）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -232,8 +233,8 @@ void LogLine(const char* fmt, ...) {
 bool EnvOn() {
     char buf[8]{};
     const DWORD n = GetEnvironmentVariableA("XCAT_WALK_BIN", buf, sizeof(buf));
-    if (n == 0) return true;  // 缺省开
-    return !(buf[0] == '0' || buf[0] == 'n' || buf[0] == 'N' || buf[0] == 'f' || buf[0] == 'F');
+    if (n == 0) return false;  // 缺省关（采证已完成；开着日志巨大）
+    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
 }
 
 char KeysTag() {
@@ -406,7 +407,7 @@ void Init() {
     if (gInited.exchange(true)) return;
     if (!EnvOn()) {
         gEnabled.store(false);
-        x::runtime::LogI("WalkBin", "XCAT_WALK_BIN=0 — keypad_walk_bin off");
+        x::runtime::LogI("WalkBin", "off (set XCAT_WALK_BIN=1 to enable)");
         return;
     }
     gEnabled.store(true);

@@ -76,11 +76,24 @@
 | TickCounter | `+0xB8` | `+0xE0` |
 | `_rawPosList` | `+0xC0` | `+0xE8` |
 | `_mousePosList` | `+0xC8` | `+0xF0` |
-| `_isResultRecv` | `+0xD0` | `+0xF8` |
+| `_isResultRecv` | `+0xD0` | `+0xF8`（hash `e377d738…`；XCAT `ReadNonFiniteIsResultRecv`） |
 | `_pathTexture` | `+0xD8` | `+0x100` |
 | `_isSuccess` | `+0xE0` | `+0x108` |
 
-关键方法（TW RVA）：`CreateLieDetector 0x925D30` · `Update 0x9282F0` · `DecodePath` 系 · `SendAnswer` 系（见同 TypeDef 方法表）。
+关键方法（TW RVA，runtime IDB `GameAssembly.dll.i64` imagebase `0x7ff848c80000`）：
+
+| 语义 | RVA | 备注 |
+|---|---|---|
+| `GetAntiMacro` | `0x927DB0` | 已绑 XCAT |
+| `IsInstantiated` | `0x928110` | |
+| `OnOpen` | `0x9282C0` | **旧表误把本址当 Update** |
+| **`Update`** | **`0x929740`** | 真 Update（~0x14e5；控制流平坦化） |
+| Sample / 采点 | `0x92BC70` | → `GetCursorPointVec2Int@0x92FC00` → `mousePosList(+0xF0)` |
+| Count≥POS_COUNT 门闩 | Update 内 | `Count(+0x18)` vs **330**（`0x81FDFF34 ^ seed@0x7FF84F4B53CC`）后读 `_isResultRecv(+0xF8)` |
+| MaybeSend | `0x92C9C0` | `!_isResultRecv` 时由 Update 调用；内含 `0x9310B0` |
+| Decode/Build 管线 | `0x927530` | 调 `0x92CF30` / `0x92D8C0` |
+
+> `SendAnswer` 罗塞塔哈希仍在；本轮未把哈希钉到单一公开 RVA，优先用 `0x92C9C0` / `0x9310B0` 调用链。
 
 ---
 
@@ -105,10 +118,10 @@
 
 | CMS API | TW RVA | 用途 |
 |---|---|---|
-| `IsOpenAntiMacro` | **`0x936780`** | **总开关探测（首选）** |
+| `IsOpenAntiMacro` | **`0x936780`** | **总开关探测（首选）**；落在更大函 `0x935AE0` 内时需按符号/MI 核 |
 | `IsOpenAntiMacro_Keyboard` | `0x9367B0` | 键盘宏场景 |
-| `TryGetWinCursorPos` | `0x936C30` | 轨迹物理路径 |
-| `TryGetCursorPos` | `0x937040` | 面板局部坐标 |
+| `TryGetWinCursorPos` | **`0x938290`** | 轨迹物理路径（`Vector2` by-value→RDX；旧注 `0x936C30` 已废）；**内层** `0x938670` |
+| `TryGetCursorPos` | ~~`0x936F00`~~ **作废** | `0x936F00` **不是** screen→local；与 TextCaptcha OnOk 一带重叠。反向采点走 NonFinite `0x92FC00`（`get_rect` + Unity 坐标变换），**非** Util 上独立 `TryGetCursorPos` |
 | `GetDifficulty` | `0x937330` | 难度表 |
 | `SetDifficulty(shader, lv)` | `0x92CB30` | 写 LieDetectorShader |
 | `GetShape` | `0x937580` | 形状枚举 |

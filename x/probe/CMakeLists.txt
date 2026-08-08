@@ -8,12 +8,16 @@ add_library(xcat_probe SHARED
   ../runtime/il2cpp_bind.cpp
   ../runtime/il2cpp_shape.cpp
   ../runtime/il2cpp_method.cpp
+  ../runtime/il2cpp_metadata_lock.cpp
+  ../runtime/il2cpp_fault_probe.cpp
   ../runtime/il2cpp_prefab.cpp
   ../runtime/il2cpp_container.cpp
   ../runtime/il2cpp_network.cpp
   ../runtime/il2cpp_mapdata.cpp
   ../runtime/main_thread_pump.cpp
   ../runtime/managed_main.cpp
+  ../runtime/hang_autopsy.cpp
+  ../features/crash_upload_guard/crash_upload_guard.cpp
   ../runtime/anchor_lamps.cpp
   ../ui/player_vitals.cpp
   ../features/invuln/invuln.cpp
@@ -45,6 +49,7 @@ add_library(xcat_probe SHARED
   ../features/ports/key_macro_bin.cpp
   ../features/ports/teleport_port.cpp
   ../features/ports/fly_fh_ban.cpp
+  ../features/ports/ground_spoof.cpp
   ../features/ports/foothold_port.cpp
   ../features/ports/foothold_path.cpp
   ../features/ports/map_bounds_port.cpp
@@ -69,6 +74,7 @@ add_library(xcat_probe SHARED
   ../features/simple_combat/reach_cal.cpp
   ../features/fly/fly.cpp
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
+  ../features/pointblank_shoot/pointblank_shoot.cpp
   ../features/auction_town_bypass/auction_town_bypass.cpp
   ../features/ga_text_probe/ga_text_probe.cpp
   ../features/galaxy_token_probe/galaxy_token_probe.cpp
@@ -79,6 +85,8 @@ add_library(xcat_probe SHARED
   ../features/frame_lock/frame_lock.cpp
   ../features/auto_lie/anti_macro_port.cpp
   ../features/auto_lie/anti_macro_follower.cpp
+  ../features/auto_lie/mouse_region_overlay.cpp
+  ../features/auto_lie/mouse_trajectory_sim.cpp
   ../features/auto_lie/auto_lie.cpp
   ../features/movepath_flush_probe/movepath_flush_probe.cpp
   ../features/notify/notify.cpp
@@ -110,6 +118,7 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/simple_combat
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/fly
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/drop_alert_bypass
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/pointblank_shoot
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auction_town_bypass
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/ga_text_probe
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/galaxy_token_probe
@@ -133,6 +142,15 @@ target_compile_definitions(xcat_probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_ME
 target_link_libraries(xcat_probe PRIVATE xcat_common winmm Psapi User32)
 if (MSVC)
   target_compile_options(xcat_probe PRIVATE /utf-8 /EHsc)
+  # 卡死取证（hang_autopsy）落盘的只有 `xcat.dll+0xRVA`。没有链接器 PDB 就永远翻不成函数名，
+  # 2026-08-09 主线程死锁栈里那 6 帧 XCat 代码就因此只能靠猜。所有配置都产出 PDB。
+  # 显式补回 /OPT:REF /OPT:ICF：MSVC 在给了 /DEBUG 之后会把这两项默认关掉，不补就等于
+  # 顺手改了 Release 的代码布局与体积，可能把要查的时序问题一起盖掉。
+  target_link_options(xcat_probe PRIVATE
+      /DEBUG
+      $<$<NOT:$<CONFIG:Debug>>:/OPT:REF>
+      $<$<NOT:$<CONFIG:Debug>>:/OPT:ICF>
+  )
   set_property(TARGET xcat_probe PROPERTY
       MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
   )
@@ -146,4 +164,11 @@ set_target_properties(xcat_probe PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_SOURCE_DIR}/bin/XCat_data
   LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin/XCat_data
   ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+  # 逐配置写死，理由同上面的 RUNTIME_OUTPUT_DIRECTORY_*：VS 这类多配置生成器会给
+  # 不带 _<CONFIG> 后缀的输出目录再追加一层 Release/Debug，PDB 就跟 DLL 分家了。
+  PDB_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin/XCat_data
+  PDB_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin/XCat_data
+  PDB_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/bin/XCat_data
+  PDB_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_SOURCE_DIR}/bin/XCat_data
+  PDB_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_SOURCE_DIR}/bin/XCat_data
 )

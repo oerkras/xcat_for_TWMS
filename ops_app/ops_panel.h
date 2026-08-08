@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -77,6 +78,11 @@ struct OpsState {
         std::string mac;
         std::string token;
         std::string appVersion;
+        std::string charName;
+        std::string charJobName;
+        std::string charMeso;  // 十进制字符串，避免大数精度问题
+        int charLevel = 0;
+        int charJob = 0;
         std::string lastKind;
         std::string lastSeenAt;
         int idleSec = 0;
@@ -107,6 +113,9 @@ struct OpsState {
     char clientsGateFilter[24]{};   // 门禁 chip：probe_ok|lease|…|__stale__（与文本筛选 AND）
     bool forceOpenIpAlerts = false;
     bool clientsSortIdleFirst = true;  // 空闲少的排前（刚探活的在上）
+    bool clientsGroupByIp = true;      // 同公网 IP 合并为可折叠组
+    // 展开中的 IP（缺省折叠；仅 clientsGroupByIp 且组内≥2 时生效）
+    std::set<std::string> clientsIpExpanded;
 
     struct AccessDenyHit {
         std::string at;

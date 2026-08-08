@@ -18,7 +18,7 @@ HttpLoginResult HttpGamaPassLoginToOtt(const std::wstring& user, const std::wstr
 // 是否已有可用会话（本地文件或可从 Chrome/Edge Local Storage 导入）
 bool HttpGamaPassHasUsableSession();
 
-// 优先 Chrome++ / 便携 Chrome / 官方 Chrome，其次 Edge（供引导打开 URL）
+// 优先系统默认浏览器（须 Chromium 系）；失败再回退安装探测
 bool HttpGamaPassPreferredBrowserExe(std::wstring& outExe);
 
 // 根据 chrome/msedge.exe 解析 User Data（含 chrome++.ini data_dir）

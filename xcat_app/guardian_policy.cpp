@@ -211,8 +211,10 @@ Decision Evaluate(const RuntimeState& state, const Input& input) {
                 static_cast<uint32_t>((state.backoffUntilTick - input.now + 999u) / 1000u);
             return finish();
         }
-        // 冷启宽限内进程仍在：只延长等待，禁止「恢复重试」再杀一遍。
-        if (input.progressGrace && input.processAlive) {
+        // 冷启宽限内禁止「恢复重试」再杀：
+        // - 进程在：等进图（旧逻辑只护这一支）
+        // - 进程不在：AttachWatch 等手动重开；勿空转 kill 循环，也勿在加载中途误杀（c73656）
+        if (input.progressGrace) {
             decision.gate = Gate::Backoff;
             decision.backoffSec = 0;
             return finish();

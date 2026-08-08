@@ -79,7 +79,8 @@ int            HandleAccessGateUiMessage(unsigned long long wParam);
 bool           ShouldKillGameOnLauncherClose(const std::string& payloadBinDir);
 void           StopGameForAccessGateExit();
 // 启动时若存在本机粘性拒绝：先探运维 access。
-// 远端已放行（解禁）→清粘性并续约，返回 false；仍拒绝 / 探活不可达 → gate/2，返回 true。
+// 远端已放行（解禁）→清粘性并续约，返回 false；仍拒绝 → gate/2，返回 true；
+// 探活不可达 → 不在此硬退（可发短恢复租约），交由在线租约门禁 / 后续 ForcePoll 裁决。
 bool           EnforceStickyDeviceAccessOnStartup(const std::string& serviceUrl,
                                                   const std::string& payloadBinDir);
 // 启动在线租约门禁：租约有效则放行（并后台立刻探活，deny 则请求退出）；

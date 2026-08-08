@@ -5,6 +5,7 @@
 #include "il2cpp_method.h"
 
 #include "il2cpp_bind.h"
+#include "il2cpp_metadata_lock.h"
 
 #include <cstring>
 
@@ -29,6 +30,30 @@ struct MethodInfoHead {
 };
 
 bool LooksLikeHeapPtr(void* p) { return il2::LooksLikeHeapPtr(p); }
+
+// 本文件里凡是「进了 il2cpp 又被异常弹出来」的地方都要走一趟：il2cpp 的类元数据 API
+// 内部先拿一把全局递归锁再解引用 klass，而那把锁没有任何 SEH 清理路径。__except 把
+// 异常吞掉时展开会直接跨过解锁代码，锁便永久挂在本线程名下，此后全进程（含 Unity
+// 主线程）的元数据查找统统挂死 —— 表现就是黑屏卡死。没漏时这里是个廉价空操作。
+void ReturnLeakedMetadataLock(const char* where) {
+    x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread(where);
+}
+
+// 上面那条路的另一半：与其等它在锁里踩爆再抢救，不如先别让野指针走进去。
+// il2::LooksLikeHeapPtr 只是个地址区间判断，未映射的地址照样能过，所以这里额外确认
+// 这一页确实已提交且可读。VirtualQuery 的开销远小于一次全客户端死锁。
+bool ClassPointerUsable(void* p) {
+    if (!LooksLikeHeapPtr(p)) return false;
+    if (reinterpret_cast<uintptr_t>(p) & 7u) return false;  // Il2CppClass 必然 8 字节对齐
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(p, &mbi, sizeof(mbi)) != sizeof(mbi)) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    constexpr DWORD kReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                PAGE_EXECUTE_WRITECOPY;
+    return (mbi.Protect & kReadable) != 0;
+}
 
 uint32_t PtrToRva(void* p) {
     if (!p) return 0;
@@ -74,6 +99,7 @@ int ReadTypeEnum(void* type) {
     __try {
         te = e.typeGetType(type);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("typeGetType");
         return 0;
     }
     return te;
@@ -87,6 +113,7 @@ bool RetMatches(void* method, TypeKind want) {
     __try {
         type = e.methodGetReturnType(method);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("methodGetReturnType");
         return false;
     }
     if (!type) return want == TypeKind::Void;
@@ -104,6 +131,7 @@ bool ParamMatches(void* method, const MethodShape& shape) {
         __try {
             type = e.methodGetParam(method, static_cast<uint32_t>(i));
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("methodGetParam");
             return false;
         }
         if (wantKlass) {
@@ -115,6 +143,8 @@ bool ParamMatches(void* method, const MethodShape& shape) {
                 else
                     pk = e.classFromType(type);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
+                // 这两个都会走 Class::Init，是实打实持锁的路径。
+                ReturnLeakedMetadataLock("classFromType");
                 return false;
             }
             if (pk != wantKlass) return false;
@@ -133,6 +163,7 @@ bool KindMatches(void* method, const MethodShape& shape) {
         __try {
             n = e.methodGetParamCount(method);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("methodGetParamCount");
             return false;
         }
         if (static_cast<int>(n) != shape.arity) return false;
@@ -166,12 +197,14 @@ const char* PathName(ResolvePath p) {
 
 void* FindMethodByName(void* klass, const char* name, int arity, bool walkParents) {
     if (!klass || !name || !name[0] || !il2::Ensure()) return nullptr;
+    if (!ClassPointerUsable(klass)) return nullptr;
     const auto& e = il2::Get();
     if (e.classGetMethodFromName) {
         void* mi = nullptr;
         __try {
             mi = e.classGetMethodFromName(klass, name, arity);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("classGetMethodFromName");
             mi = nullptr;
         }
         if (mi) {
@@ -181,7 +214,7 @@ void* FindMethodByName(void* klass, const char* name, int arity, bool walkParent
     }
     if (!e.classGetMethods || !e.methodGetName) return nullptr;
     void* cur = klass;
-    for (int depth = 0; depth < 8 && LooksLikeHeapPtr(cur); ++depth) {
+    for (int depth = 0; depth < 8 && ClassPointerUsable(cur); ++depth) {
         void* iter = nullptr;
         __try {
             for (;;) {
@@ -207,6 +240,7 @@ void* FindMethodByName(void* klass, const char* name, int arity, bool walkParent
                 if (head->methodPointer || head->virtualMethodPointer) return raw;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("classGetMethods/byName");
             return nullptr;
         }
         if (!walkParents || !e.classParent) break;
@@ -214,6 +248,7 @@ void* FindMethodByName(void* klass, const char* name, int arity, bool walkParent
         __try {
             parent = e.classParent(cur);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("classParent");
             parent = nullptr;
         }
         if (!LooksLikeHeapPtr(parent) || parent == cur) break;
@@ -227,7 +262,7 @@ void* FindMethodByRva(void* klass, uint32_t rva, bool walkParents) {
     const auto& e = il2::Get();
     if (!e.classGetMethods) return nullptr;
     void* cur = klass;
-    for (int depth = 0; depth < 8 && LooksLikeHeapPtr(cur); ++depth) {
+    for (int depth = 0; depth < 8 && ClassPointerUsable(cur); ++depth) {
         void* iter = nullptr;
         __try {
             for (;;) {
@@ -236,6 +271,7 @@ void* FindMethodByRva(void* klass, uint32_t rva, bool walkParents) {
                 if (MethodRva(mi) == rva) return mi;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("classGetMethods/byRva");
             return nullptr;
         }
         if (!walkParents || !e.classParent) break;
@@ -243,6 +279,7 @@ void* FindMethodByRva(void* klass, uint32_t rva, bool walkParents) {
         __try {
             parent = e.classParent(cur);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("classParent");
             parent = nullptr;
         }
         if (!LooksLikeHeapPtr(parent) || parent == cur) break;
@@ -257,7 +294,7 @@ void* FindMethodByKind(void* klass, const MethodShape& shape) {
     void* hit = nullptr;
     int hits = 0;
     void* cur = klass;
-    for (int depth = 0; depth < 8 && LooksLikeHeapPtr(cur); ++depth) {
+    for (int depth = 0; depth < 8 && ClassPointerUsable(cur); ++depth) {
         void* iter = nullptr;
         __try {
             for (;;) {
@@ -272,6 +309,7 @@ void* FindMethodByKind(void* klass, const MethodShape& shape) {
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("classGetMethods/byKind");
             return nullptr;
         }
         if (shape.unique && hits > 1) return nullptr;
@@ -280,6 +318,7 @@ void* FindMethodByKind(void* klass, const MethodShape& shape) {
         __try {
             parent = e.classParent(cur);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("classParent");
             parent = nullptr;
         }
         if (!LooksLikeHeapPtr(parent) || parent == cur) break;

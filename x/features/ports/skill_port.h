@@ -45,7 +45,8 @@ float GetSkillCooldownRemainSec(int skillId);
 // 表内「再使用冷却」总时长（秒）；未知返回 0。供 UI cooldownSec。
 float GetSkillCooldownDurationSec(int skillId);
 // 确认效果在身后记本地 CD（勿在 CastSkill 报 ok 时调用——假 ok 会种出假 CD）。
-void ConfirmLocalCooldown(int skillId);
+// minDurSec：多发清忙锁后对「表 CD≈0」技强制的最短持有（秒）；0=不额外抬。
+void ConfirmLocalCooldown(int skillId, float minDurSec = 0.f);
 
 // 游戏逻辑钟 WorldManager.GetUpdateTime = (int)(_updateTime*1000)，取不到返回 0。
 // SecondaryStat 的 tXxx_ 到期字段一律以此为基；写 GetTickCount 会让 CheckByTime 判错。
@@ -57,18 +58,29 @@ bool ResolveSkillName(int skillId, char* out, int outSz);
 // SkillInfo.GetSkill → SkillEntry*（未学也可能有表项；失败 null）。
 void* GetSkillEntry(int skillId);
 
+// 当前等级表内 MP 消耗（SkillLevelData.MPCon）。读失败返回 -1（SendUse 会 fail-closed）。
+int GetSkillMpCon(int skillId);
+
 // heavy：SkillRecord(+Ex) 优先；条目过少时回退扫 SkillInfo._dictionarySkill + GetSkillLevel。
 int ListLearnedSkills(SkillInfoLite* out, int cap);
 
 // 主线程出刀：优先 UserLocal.DoActiveSkill(skillId)（对标枫星 UseOnClientImmediate）；
 // 失败再回退 DoActiveSkillPrepare（才需要 SkillInfo）。默认不直调 SendSkillUseRequest。
+// noPrepareFallback：多发攻击技用——DoActive 拒施勿进 Prepare（BIN：prepare_false 粘滞堵战斗）。
+// BUFF 等保持默认 false，仍可 Prepare 回退。
 // outReason：ok_do_active / ok_prepare / prepare_false / do_false_* / no_level / …
 // 带 _mi0 后缀表示 MethodInfo 未解析到（调用仍可能成功，便于对照）。
 // 注意：不再因 SkillInfo 未绑定而提前返回 no_si（主路径不依赖 SI）。
-bool CastSkill(int skillId, bool* notReady = nullptr, char* outReason = nullptr, int reasonSz = 0);
+bool CastSkill(int skillId, bool* notReady = nullptr, char* outReason = nullptr, int reasonSz = 0,
+               bool noPrepareFallback = false);
 
 // 可选：优先直调 SendSkillUseRequest(SkillEntry,…)；失败仍回退 CastSkill 主路径。
 // 供多发面板开关；BUFF 等原调用方不受影响。
 bool CastSkillPreferSendUse(int skillId, bool* notReady = nullptr, char* outReason = nullptr,
                             int reasonSz = 0);
+
+// 仅 SendSkillUseRequest：成功即返回；失败不回退 DoActive/Prepare。
+// 多发「普攻后立刻接技能」用：ActionBusy 期间 Prepare 会拒施，发包可穿动画。
+bool CastSkillSendUseOnly(int skillId, bool* notReady = nullptr, char* outReason = nullptr,
+                          int reasonSz = 0);
 }  // namespace x::features::ports::skill

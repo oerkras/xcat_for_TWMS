@@ -15,12 +15,14 @@
 #include "../features/encounter/encounter.h"
 #include "../features/ports/attack_rpc_port.h"
 #include "../features/ports/attack_input_port.h"
+#include "../features/ports/ground_spoof.h"
 #include "../features/ports/teleport_port.h"
 #include "../features/ports/world_port.h"
 #include "../features/simple_combat/simple_combat.h"
 #include "../features/mob_scan/mob_scan.h"
 #include "../features/fly/fly.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
+#include "../features/pointblank_shoot/pointblank_shoot.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/player_hide/player_hide.h"
 #include "../features/frame_lock/frame_lock.h"
@@ -168,6 +170,18 @@ void ApplyAutoLieMouseSmokeSeq(const xcat::PayloadControl& c) {
     if (c.autoLieMouseSmokeSeq == last) return;
     WriteLieSeqStamp("last_mouse_smoke_seq.txt", c.autoLieMouseSmokeSeq);
     x::features::auto_lie::StartMouseSmoke();
+}
+
+void ApplyAutoLieMouseRegionOverlay(const xcat::PayloadControl& c) {
+    x::features::auto_lie::SetMouseRegionOverlay(c.autoLieMouseRegionOverlay != 0);
+}
+
+void ApplyAutoLieMouseSimSeq(const xcat::PayloadControl& c) {
+    if (c.autoLieMouseSimSeq == 0) return;
+    const uint32_t last = ReadLieSeqStamp("last_mouse_sim_seq.txt");
+    if (c.autoLieMouseSimSeq == last) return;
+    WriteLieSeqStamp("last_mouse_sim_seq.txt", c.autoLieMouseSimSeq);
+    x::features::auto_lie::StartMouseSim(c.autoLieMouseSimSeq);
 }
 
 void ApplyTeleportTestSeq(const xcat::PayloadControl& c) {
@@ -358,16 +372,18 @@ void ApplyControl(const xcat::PayloadControl& c) {
     }
 
     x::features::invuln::SetDesired(c.invuln != 0);
-    x::features::attack_accel::SetDesired(c.attackAccel != 0);
+    const bool attackAccelOn =
+        xcat::kAttackAccelUserEnabled && c.attackAccel != 0;
+    x::features::attack_accel::SetDesired(attackAccelOn);
     x::features::attack_accel::SetBoosterDesired(c.attackAccelBooster != 0);
     x::features::attack_accel::SetCutLayerDesired(c.attackAccelCutLayer != 0);
     x::features::attack_accel::SetSkipPrepareDesired(c.attackAccelSkipPrepare != 0);
     x::features::final_attack_force::SetDesired(c.finalAttackForce != 0);
     x::features::skill_max_level::SetDesired(c.skillMaxLevel != 0);
     // 攻击加速：清动作忙锁，换怪贴身不再被 animBusy(220) 拖住。
-    x::features::ports::attack::SetAnimBusyOverrideMs(c.attackAccel ? 0 : -1);
+    x::features::ports::attack::SetAnimBusyOverrideMs(attackAccelOn ? 0 : -1);
     // 加速：Down+Up 同泵，消 pending 跨 tick（刀间隔只跟面板 interval）。
-    x::features::ports::attack::SetImmediateUp(c.attackAccel != 0);
+    x::features::ports::attack::SetImmediateUp(attackAccelOn);
     x::features::fly::SetMode(c.flyMode);
     x::features::fly::SetHopCdMs(c.flyHopCdMs);
     x::features::fly::SetSpeedPct(c.flySpeedPct);
@@ -383,7 +399,8 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::multi_skill::SetSendUseRequest(c.multiSkillSendUseRequest != 0);
     x::features::simple_combat::SetEnabled(c.simpleCombat != 0);
     x::features::simple_combat::SetAttackIntervalMs(
-        xcat::EffectiveSimpleCombatAttackIntervalMs(c.simpleCombatAttackIntervalMs, c.attackAccel));
+        xcat::EffectiveSimpleCombatAttackIntervalMs(c.simpleCombatAttackIntervalMs,
+                                                     attackAccelOn ? 1u : 0u));
     x::features::simple_combat::SetTickIntervalMs(
         xcat::ClampSimpleCombatTickMs(c.simpleCombatTickMs ? c.simpleCombatTickMs
                                                            : xcat::kSimpleCombatTickDefaultMs));
@@ -397,6 +414,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::simple_combat::SetClusterPriority(c.clusterWeight != 0);
     x::features::simple_combat::SetTeleportEnabled(false);  // fill+Doing 战斗回落已禁用
     x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
+    x::features::simple_combat::SetAntiJitterEnabled(c.simpleCombatAntiJitter != 0);
     x::features::simple_combat::SetFlySpeedPct(c.simpleCombatFlySpeedPct);
     x::features::simple_combat::SetHumanWalkEnabled(c.simpleCombatHumanWalk != 0);
     x::features::simple_combat::SetLiveStepEnabled(c.simpleCombatLiveStep != 0);
@@ -404,6 +422,11 @@ void ApplyControl(const xcat::PayloadControl& c) {
         c.simpleCombatTeleportMinDx, c.simpleCombatTeleportStandOff, c.simpleCombatTeleportCooldownMs,
         c.simpleCombatTeleportMaxHop ? c.simpleCombatTeleportMaxHop
                                     : xcat::kCombatTeleportMaxHopDefault);
+    x::features::simple_combat::SetStandOffParams(
+        c.simpleCombatStandOffCustom != 0,
+        xcat::ClampCombatStandOffX(c.simpleCombatStandOffX),
+        xcat::ClampCombatStandOffY(c.simpleCombatStandOffY));
+    x::features::ports::ground_spoof::SetEnabled(c.simpleCombatGroundSpoof != 0);
     x::features::simple_combat::SetOneshotParams(c.simpleCombatOneshotMaxHp,
                                                  c.simpleCombatOneshotMinBumps,
                                                  c.simpleCombatOneshotMinFires,
@@ -423,6 +446,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::galaxy_token_probe::SetEnabled(c.galaxyTokenProbe != 0);
     x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
     x::features::drop_alert_bypass::SetEnabled(c.dropAlertBypass != 0);
+    x::features::pointblank_shoot::SetEnabled(c.pointBlankShoot != 0);
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
     // 自动补给真源：user.ini [auto_supply]（HotReadConfig）；勿再用 core.autoSell 灌开关。
     x::features::encounter::SetEnabled(c.autoRelogin != 0);
@@ -434,6 +458,8 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::frame_lock::SetEnabled(c.frameLock != 0);
     ApplyAutoLieAlarmTestSeq(c);
     ApplyAutoLieMouseSmokeSeq(c);
+    ApplyAutoLieMouseRegionOverlay(c);
+    ApplyAutoLieMouseSimSeq(c);
     ApplyManualRejoinSeq(c);
     ApplyTeleportTestSeq(c);
     ApplyTeleportNativeTestSeq(c);

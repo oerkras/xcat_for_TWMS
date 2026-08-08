@@ -157,11 +157,11 @@ void EnsureCombatFieldOff() {
     if (hits != sLastHits) {
         sLastHits = hits;
         x::runtime::LogI("PlayerCombat",
-                         "combat slots path=%s hits=%d/%d vc=0x%zX pos=0x%zX ap=0x%zX cur=0x%zX "
-                         "key=0x%zX pvc=0x%zX myUser=0x%zX",
+                         "combat slots path=%s hits=%d/%d vc=0x%zX pos=0x%zX ap=0x%zX key=0x%zX "
+                         "pvc=0x%zX myUser=0x%zX",
                          hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
-                         kExpect, gOffVecCtrl, gOffPos, gOffVcAp, gOffLogicalPos, gOffKeyMoveDelta,
-                         gOffPvcActive, x::ui::player::OffWmMyUser());
+                         kExpect, gOffVecCtrl, gOffPos, gOffVcAp, gOffKeyMoveDelta, gOffPvcActive,
+                         x::ui::player::OffWmMyUser());
     }
 }
 

@@ -26,12 +26,16 @@ bool UpdateIniFile(const char* path, const std::function<void(IniStore&)>& mutat
 bool IniGetString(const IniStore& ini, const char* section, const char* key, std::string& out);
 bool IniGetU64(const IniStore& ini, const char* section, const char* key, uint64_t& out);
 bool IniGetU32(const IniStore& ini, const char* section, const char* key, uint32_t& out);
+// 带符号整数：给「可正可负的偏移量」用（如 F5 自定义站距的 Y）。
+// 不要用 U32 加偏置去凑负数——user.ini 是用户会直接看/改的文件，偏置值读不懂也改不对。
+bool IniGetI32(const IniStore& ini, const char* section, const char* key, int32_t& out);
 bool IniGetBool(const IniStore& ini, const char* section, const char* key, bool& out);
 bool IniGetFloat(const IniStore& ini, const char* section, const char* key, float& out);
 
 void IniSetString(IniStore& ini, const char* section, const char* key, const char* value);
 void IniSetU64(IniStore& ini, const char* section, const char* key, uint64_t value);
 void IniSetU32(IniStore& ini, const char* section, const char* key, uint32_t value);
+void IniSetI32(IniStore& ini, const char* section, const char* key, int32_t value);
 void IniSetBool(IniStore& ini, const char* section, const char* key, bool value);
 void IniSetFloat(IniStore& ini, const char* section, const char* key, float value);
 

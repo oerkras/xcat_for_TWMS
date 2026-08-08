@@ -95,7 +95,7 @@ void EnsureAlertFieldOff() {
 }
 
 std::atomic<bool> gDesired{false};
-std::atomic<bool> gRequireFood{true};  // 与 common 默认一致：有粮才召，防召出即饿
+std::atomic<bool> gRequireFood{false};  // 与 common 默认一致：默认关
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
 HANDLE gLog = INVALID_HANDLE_VALUE;

@@ -263,6 +263,17 @@ bool IniGetU32(const IniStore& ini, const char* section, const char* key, uint32
     return true;
 }
 
+bool IniGetI32(const IniStore& ini, const char* section, const char* key, int32_t& out) {
+    std::string v;
+    if (!IniGetString(ini, section, key, v)) return false;
+    try {
+        out = static_cast<int32_t>(std::stol(v));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool IniGetBool(const IniStore& ini, const char* section, const char* key, bool& out) {
     std::string v;
     if (!IniGetString(ini, section, key, v)) return false;
@@ -288,6 +299,10 @@ void IniSetU64(IniStore& ini, const char* section, const char* key, uint64_t val
 
 void IniSetU32(IniStore& ini, const char* section, const char* key, uint32_t value) {
     IniSetU64(ini, section, key, static_cast<uint64_t>(value));
+}
+
+void IniSetI32(IniStore& ini, const char* section, const char* key, int32_t value) {
+    IniSetString(ini, section, key, std::to_string(value).c_str());
 }
 
 void IniSetBool(IniStore& ini, const char* section, const char* key, bool value) {

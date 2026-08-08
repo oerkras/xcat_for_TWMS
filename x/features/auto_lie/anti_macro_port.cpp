@@ -1,13 +1,19 @@
 #include "anti_macro_port.h"
 
+#include "../titlebar/titlebar_win.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
+#include "../../runtime/il2cpp_metadata_lock.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_prefab.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cstdarg>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -22,7 +28,7 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::GaBase;
 using x::runtime::il2cpp::ReadPtr;
 
-// Prefab 类哈希（与 payload_status Cache 灯一致）· remount 2026-08-04
+// Prefab 类哈希（与 payload_status Cache 灯一致）· remount 2026-08-06 dump / 2026-08-08 复核
 // Util 无 Prefab 属性（纯工具类）；Text/NonFinite 可走 Prefab 串兜底。
 constexpr const char* kUtilClass =
     "ec3b217aea4af2d5989a2428d24c7dd36a7bcaef541c9c40fa4c5eb46d1c0aa";
@@ -43,13 +49,19 @@ void* ResolveQuizKlass(const char* hashName, const char* prefabName) {
     return x::runtime::il2cpp::FindClass("", hashName);
 }
 
-constexpr uint32_t kRvaIsOpenAntiMacro = 0x937E00;  // remounted 2026-08-04 Util.IsOpenAntiMacro
-constexpr uint32_t kRvaTextGet = 0x934920;  // remounted 2026-08-04 GetAntiMacro
-constexpr uint32_t kRvaTextIsInst = 0x934D10;  // remounted 2026-08-04 IsInstantiated
-constexpr uint32_t kRvaTextOnOk = 0x9378C0;  // remounted 2026-08-04 OnOk
-constexpr uint32_t kRvaNonGet = 0x927DB0;  // remounted 2026-08-04 GetAntiMacro
-constexpr uint32_t kRvaNonIsInst = 0x928110;  // remounted 2026-08-04 IsInstantiated
-constexpr uint32_t kRvaTryGetWinCursorPos = 0x938290;  // remounted 2026-08-04 Util.TryGetWinCursorPos
+constexpr uint32_t kRvaIsOpenAntiMacro = 0x937E00;  // Util.IsOpenAntiMacro
+constexpr uint32_t kRvaTextGet = 0x934920;  // TextCaptcha.GetAntiMacro
+constexpr uint32_t kRvaTextIsInst = 0x934D10;  // TextCaptcha.IsInstantiated
+// 真 OnOk（Rosetta bee55c…）；旧误钉 OnSuccess@0x9378C0 / abd99c…
+constexpr uint32_t kRvaTextOnOk = 0x936F00;
+constexpr uint32_t kRvaNonGet = 0x927DB0;  // NonFinite.GetAntiMacro
+constexpr uint32_t kRvaNonIsInst = 0x928110;  // NonFinite.IsInstantiated
+constexpr uint32_t kRvaTryGetWinCursorPos = 0x938290;  // Util.TryGetWinCursorPos（IDB 实钉；旧文档 0x936C30 已废）
+// 面板仿射主映射（对照 Artale PanelLocalToDesktop；RVA = runtime dump 包装，plain 名主路径）
+constexpr uint32_t kRvaCamGetMain = 0x4DECFC0;           // Camera.get_main（与 fly 同钉）
+constexpr uint32_t kRvaCamWorldToScreen = 0x5DEC950;     // Camera.WorldToScreenPoint(Vector3) eye=Mono
+constexpr uint32_t kRvaRectGetRect = 0x5E6F510;          // RectTransform.get_rect
+constexpr uint32_t kRvaTransformPoint = 0x5E758D0;       // Transform.TransformPoint(Vector3)
 
 // 方法哈希（dump.cs）— static bool()/void() 同形多，哈希主路径
 constexpr char kHashIsOpenAntiMacro[] =
@@ -59,14 +71,13 @@ constexpr char kHashTextGet[] =
 constexpr char kHashTextIsInst[] =
     "a8af1b81967cb3b4cacdb1233b02ddbe9aadc8dccf101190483baccc48f6553";
 constexpr char kHashTextOnOk[] =
-    "abd99c92633b6f9b1806336f4ac0305b15a65910977ea6597f09da1f3eb9836";
+    "bee55c238b1db01fce8031cff4dfc13e3055ec00e1cdb38d2701831c5d694ff";
 constexpr char kHashNonGet[] =
     "ba5e6786ccf2f82fa288006796af373ff40ae8ee33545f3b0049fd77ab9b015";
 constexpr char kHashNonIsInst[] =
     "a9592c9ed66c631c5d8ff5373b7a7cb983abb45766575222d23f9f1d51d0205";
 constexpr char kHashTryGetWinCursorPos[] =
     "eae4d921e42f8b37b6d334fa8ad82a05fb26c47fa4bd34795aaf865ace27b79";
-
 // Quiz 字段：hash → field_get_offset（dump 常量仅 fallback）
 constexpr char kHashTextRawImage[] =
     "f7cca706a82942451055bacbbff2a9fd6686523c29b0ccc549acd056819e7b1";
@@ -80,6 +91,8 @@ constexpr char kHashNonRawPosList[] =
     "d04c64957129da50394b71468bb35f3c55bc0af45486222f6676183adb9ccc7";  // List<Vector2>
 constexpr char kHashNonMousePosList[] =
     "a3cdf17266d326410afb418df59ecbd326b4ab692168f314ee03694d4064933";  // List<Vector2Int>
+constexpr char kHashNonIsResultRecv[] =
+    "e377d738cd6a9d305856166c2356eb9b809a801ca244ecadf610804966892a6";  // bool _isResultRecv
 constexpr char kHashInfoJpegData[] =
     "f6c574d29d885e52644d264341a94ef8b28c31a85140a6ea5bd8b3b1d99a0b4";
 constexpr char kHashTickFrame[] =
@@ -93,6 +106,7 @@ constexpr size_t kFbNonRawImage = 0xA0;
 constexpr size_t kFbNonTick = 0xE0;
 constexpr size_t kFbNonRawPosList = 0xE8;
 constexpr size_t kFbNonMousePosList = 0xF0;
+constexpr size_t kFbNonIsResultRecv = 0xF8;
 constexpr size_t kFbInfoJpegData = 0x20;
 constexpr size_t kFbTickFrame = 0x10;
 size_t gOffTextRawImage = kFbTextRawImage;
@@ -101,6 +115,7 @@ size_t gOffNonRawImage = kFbNonRawImage;
 size_t gOffNonTick = kFbNonTick;
 size_t gOffNonRawPosList = kFbNonRawPosList;
 size_t gOffNonMousePosList = kFbNonMousePosList;
+size_t gOffNonIsResultRecv = kFbNonIsResultRecv;
 size_t gOffInfoJpegData = kFbInfoJpegData;
 size_t gOffTickFrame = kFbTickFrame;
 #define kOffTextRawImage (gOffTextRawImage)
@@ -114,6 +129,16 @@ bool gQuizFieldOffTried = false;
 #define kOffListSize (x::runtime::il2cpp_container::OffListSize())
 #define kOffByteArrayData (x::runtime::il2cpp_container::OffArrayData())
 
+// 本文件自带一套私有的 FindMethodByName / ResolveMethod / 字段查找，直接调 il2cpp 导出，
+// 不走 runtime/il2cpp_method.cpp。这些导出内部先拿全局递归元数据锁再解引用 klass，而那把
+// 锁没有 SEH 清理路径：__except 吞掉异常时展开会跨过解锁代码，锁就永久挂在本线程名下，
+// 之后全进程（含 Unity 主线程与加载线程）的元数据查找全部挂死 = 黑屏。
+// 2026-08-09 04:46 的现场里泄漏者正是本 TU 的 worker（tid 42852，recursion=3）。
+// 没漏时下面这个调用是廉价空操作。
+void ReturnLeakedMetadataLock(const char* where) {
+    x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread(where);
+}
+
 bool FieldOffHit(void* klass, const char* hash, size_t fb, size_t* out, size_t minOff,
                  size_t maxOff) {
     *out = fb;
@@ -124,6 +149,7 @@ bool FieldOffHit(void* klass, const char* hash, size_t fb, size_t* out, size_t m
     __try {
         field = e.classGetFieldFromName(klass, hash);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("classGetFieldFromName");
         field = nullptr;
     }
     if (!field) return false;
@@ -131,6 +157,9 @@ bool FieldOffHit(void* klass, const char* hash, size_t fb, size_t* out, size_t m
     __try {
         off = e.fieldGetOffset(field);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // 屏障对没持锁的情况是空操作，所以宁可每个 __except 都挂上：漏一处就可能是一次
+        // 永久黑屏，而多挂一处的代价是零。
+        ReturnLeakedMetadataLock("antiMacro/fieldGetOffset");
         return false;
     }
     if (off < minOff || off >= maxOff) return false;
@@ -157,6 +186,7 @@ void* FindNonTickKlass(void* nonKlass) {
                     if (f) return nk;
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {
+                ReturnLeakedMetadataLock("classGetNestedTypes");
             }
         }
     }
@@ -183,15 +213,19 @@ void EnsureQuizFieldOff() {
     if (FieldOffHit(non, kHashNonMousePosList, kFbNonMousePosList, &gOffNonMousePosList, 0x80,
                     0x200))
         ++hits;
+    if (FieldOffHit(non, kHashNonIsResultRecv, kFbNonIsResultRecv, &gOffNonIsResultRecv, 0x80,
+                    0x200))
+        ++hits;
     if (FieldOffHit(info, kHashInfoJpegData, kFbInfoJpegData, &gOffInfoJpegData, 0x10, 0x80))
         ++hits;
     if (FieldOffHit(tick, kHashTickFrame, kFbTickFrame, &gOffTickFrame, 0x10, 0x40)) ++hits;
     x::runtime::LogI("AutoLiePort",
-                     "quiz fields path=%s hits=%d/8 txtRaw=0x%zX in=0x%zX nonRaw=0x%zX tick=0x%zX "
-                     "rawPos=0x%zX mouse=0x%zX jpeg=0x%zX frame=0x%zX",
-                     hits == 8 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+                     "quiz fields path=%s hits=%d/9 txtRaw=0x%zX in=0x%zX nonRaw=0x%zX tick=0x%zX "
+                     "rawPos=0x%zX mouse=0x%zX recv=0x%zX jpeg=0x%zX frame=0x%zX",
+                     hits == 9 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
                      gOffTextRawImage, gOffTextInputField, gOffNonRawImage, gOffNonTick,
-                     gOffNonRawPosList, gOffNonMousePosList, gOffInfoJpegData, gOffTickFrame);
+                     gOffNonRawPosList, gOffNonMousePosList, gOffNonIsResultRecv, gOffInfoJpegData,
+                     gOffTickFrame);
 }
 
 using FnIsOpen = bool (*)(const void* methodInfo);
@@ -203,7 +237,37 @@ using FnGetTransform = void* (*)(void* self, const void* methodInfo);
 using FnGetTexture = void* (*)(void* self, const void* methodInfo);
 // TW Unity：仅有 EncodeToPNG(Texture2D) —— 无 EncodeToJPG。
 using FnEncodePng = void* (*)(void* tex, const void* methodInfo);
-using FnTryWinCursor = bool (*)(void* rectTf, float ox, float oy, Vec2* out, const void* methodInfo);
+// BIN（RVA 0x938290 序言）：rcx=RectTransform*, rdx=Vector2(8B by-value), r8=out*, r9=MethodInfo*
+// 误写成 (float,float) 会把 out* 挤到 R9、RDX/R8 成垃圾 → MapBatch 全点 ok=0（E175 真题）。
+static_assert(sizeof(Vec2) == 8, "Vec2 must be 8B for IL2CPP Vector2-by-value ABI");
+// IDA（GameAssembly runtime dump）：TryGetWinCursorPos @ RVA 0x938290
+//   prologue: rdi=rcx(RectTransform*), rbx=rdx(Vector2 by-value), rsi=r8(Vector2* out)
+//   返回 bool；写出 Windows 屏幕坐标 float（内含 Y 翻转），与 SetCursorPos 同空间。
+//   MethodShape 第 2 参必须是 Any（valuetype Vector2），禁止写成 Ptr / 拆 float×2。
+using FnTryWinCursor = bool (*)(void* rectTf, Vec2 localPos, Vec2* out, const void* methodInfo);
+
+struct Vec3 {
+    float x = 0.f, y = 0.f, z = 0.f;
+};
+struct UnityRect {
+    float x = 0.f, y = 0.f, width = 0.f, height = 0.f;
+};
+struct PointD {
+    double x = 0.0, y = 0.0;
+};
+struct PanelGeometry {
+    UnityRect rect{};
+    Vec2 offset{};  // TWMS NonFinite 暂无 CursorEnv；固定 0
+    POINT corners[4]{};
+    PointD cornersF[4]{};
+    RECT bounds{};
+};
+
+// Unity valuetype 隐式返回指针 ABI（与 fly get_position / ScreenToWorld 同款）
+using FnCamMain = void* (*)(const void* methodInfo);
+using FnGetRect = UnityRect* (*)(UnityRect* ret, void* self, const void* methodInfo);
+using FnTransformPoint = Vec3* (*)(Vec3* ret, void* self, const Vec3* local, const void* methodInfo);
+using FnWorldToScreen = Vec3* (*)(Vec3* ret, void* cam, const Vec3* world);
 
 std::mutex gMtx;
 bool gReady = false;
@@ -218,6 +282,12 @@ void* gMiTextOnOk = nullptr;
 void* gMiNonGet = nullptr;
 void* gMiNonIsInst = nullptr;
 void* gMiTryWinCursor = nullptr;
+void* gMiCamMain = nullptr;
+void* gMiGetRect = nullptr;
+void* gMiTransformPoint = nullptr;
+void* gMiWorldToScreen = nullptr;
+bool gPanelMapBound = false;
+bool gPanelMapTried = false;
 
 void Log(const char* fmt, ...) {
     char buf[512]{};
@@ -258,6 +328,7 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
         __try {
             mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("antiMacro/classGetMethodFromName");
             mi = nullptr;
         }
     }
@@ -277,12 +348,14 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
                 }
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("antiMacro/classGetMethods");
         }
         if (!e.classParent) break;
         void* parent = nullptr;
         __try {
             parent = e.classParent(cur);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ReturnLeakedMetadataLock("antiMacro/classParent");
             parent = nullptr;
         }
         if (!parent || parent == cur) break;
@@ -330,6 +403,7 @@ void EnsureGameMethodInfos() {
         constexpr MethodShape kOpen{0, TypeKind::Bool, false, true, {}};
         fill(gMiIsOpen, util, kRvaIsOpenAntiMacro, kOpen, "IsOpenAntiMacro",
              kHashIsOpenAntiMacro);
+        // arity=3 static：RectTransform* / Vector2(by-value→Any) / Vector2* out
         constexpr MethodShape kCur{3, TypeKind::Bool, true, true,
                                    {TypeKind::Ptr, TypeKind::Any, TypeKind::Ptr}};
         fill(gMiTryWinCursor, util, kRvaTryGetWinCursorPos, kCur, "TryGetWinCursorPos",
@@ -370,6 +444,7 @@ void* ResolveMethod(void* klass, const char* name, int argc) {
     __try {
         return e.classGetMethodFromName(klass, name, argc);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("antiMacro/resolveMethod");
         return nullptr;
     }
 }
@@ -392,6 +467,252 @@ bool ResolveHelpers() {
         if (!gMiEncodePng) gMiEncodePng = ResolveMethod(enc, "EncodeToPNG", 0);
     }
     return gMiSetText && gMiGetTransform;
+}
+
+bool BindPanelMapApis() {
+    if (gPanelMapBound) return true;
+    if (gPanelMapTried) return false;
+    gPanelMapTried = true;
+    if (!x::runtime::il2cpp::Ensure()) return false;
+
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    void* camKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Camera");
+    void* rectKlass = x::runtime::il2cpp::FindClass("UnityEngine", "RectTransform");
+    void* tfKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Transform");
+    if (!tfKlass) tfKlass = rectKlass;
+
+    if (camKlass) {
+        constexpr MethodShape kMain{0, TypeKind::Ptr, true, true, {}};
+        if (!gMiCamMain)
+            gMiCamMain = ResolveMi(camKlass, kRvaCamGetMain, kMain, "get_main", nullptr);
+        // arity=1 Vector3 包装（内部 eye=Mono=2）；避开四参眼位重载（与 fly STW 同口径）
+        constexpr MethodShape kWts{1, TypeKind::Any, true, true, {TypeKind::Any}};
+        if (!gMiWorldToScreen)
+            gMiWorldToScreen =
+                ResolveMi(camKlass, kRvaCamWorldToScreen, kWts, "WorldToScreenPoint", nullptr);
+    }
+    if (rectKlass) {
+        constexpr MethodShape kRect{0, TypeKind::Any, true, true, {}};
+        if (!gMiGetRect)
+            gMiGetRect = ResolveMi(rectKlass, kRvaRectGetRect, kRect, "get_rect", nullptr);
+    }
+    if (tfKlass) {
+        constexpr MethodShape kTp{1, TypeKind::Any, true, true, {TypeKind::Any}};
+        if (!gMiTransformPoint)
+            gMiTransformPoint =
+                ResolveMi(tfKlass, kRvaTransformPoint, kTp, "TransformPoint", nullptr);
+    }
+
+    gPanelMapBound = gMiCamMain && gMiWorldToScreen && gMiGetRect && gMiTransformPoint;
+    Log("panel-map bind ok=%d camMain=%d wts=%d getRect=%d tp=%d", gPanelMapBound ? 1 : 0,
+        gMiCamMain ? 1 : 0, gMiWorldToScreen ? 1 : 0, gMiGetRect ? 1 : 0,
+        gMiTransformPoint ? 1 : 0);
+    return gPanelMapBound;
+}
+
+HWND FindGameHwndLocal() {
+    HWND hwnd = x::features::titlebar::win::FindUnityWndClass();
+    if (!hwnd || !IsWindow(hwnd)) hwnd = x::features::titlebar::win::FindGameWindow();
+    if (hwnd && IsWindow(hwnd)) return hwnd;
+    return nullptr;
+}
+
+bool PanelLocalToDesktop(void* targetRect, const Vec3& local, HWND hwnd, POINT& desktop,
+                         PointD& desktopF) {
+    if (!BindPanelMapApis() || !targetRect || !hwnd) return false;
+    auto tp = reinterpret_cast<FnTransformPoint>(MethodPtr(gMiTransformPoint));
+    auto camMain = reinterpret_cast<FnCamMain>(MethodPtr(gMiCamMain));
+    auto wts = reinterpret_cast<FnWorldToScreen>(MethodPtr(gMiWorldToScreen));
+    if (!tp || !camMain || !wts) return false;
+
+    Vec3 world{};
+    Vec3 screen{};
+    void* cam = nullptr;
+    __try {
+        tp(&world, targetRect, &local, gMiTransformPoint);
+        cam = camMain(gMiCamMain);
+        if (!cam) return false;
+        wts(&screen, cam, &world);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!std::isfinite(world.x) || !std::isfinite(world.y) || !std::isfinite(world.z) ||
+        !std::isfinite(screen.x) || !std::isfinite(screen.y)) {
+        return false;
+    }
+
+    RECT client{};
+    POINT origin{};
+    if (!GetClientRect(hwnd, &client) || !ClientToScreen(hwnd, &origin)) return false;
+    const int clientHeight = client.bottom - client.top;
+    // Unity 屏 Y 自下而上 → Windows 桌面 Y 自上而下（对照 Artale PanelLocalToDesktop）
+    desktopF.x = static_cast<double>(origin.x) + static_cast<double>(screen.x);
+    desktopF.y = static_cast<double>(origin.y) + static_cast<double>(clientHeight) -
+                 static_cast<double>(screen.y);
+    desktop.x = static_cast<long>(std::lround(desktopF.x));
+    desktop.y = static_cast<long>(std::lround(desktopF.y));
+    return true;
+}
+
+bool ResolvePanelGeometry(void* targetRect, HWND hwnd, PanelGeometry& panel) {
+    panel = {};
+    if (!BindPanelMapApis() || !targetRect || !hwnd) return false;
+    auto getRect = reinterpret_cast<FnGetRect>(MethodPtr(gMiGetRect));
+    if (!getRect) return false;
+
+    UnityRect rect{};
+    __try {
+        getRect(&rect, targetRect, gMiGetRect);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!std::isfinite(rect.x) || !std::isfinite(rect.y) || !std::isfinite(rect.width) ||
+        !std::isfinite(rect.height) || rect.width < 100.f || rect.height < 100.f) {
+        return false;
+    }
+    panel.rect = rect;
+
+    const float x0 = rect.x;
+    const float y0 = rect.y;
+    const float x1 = rect.x + rect.width;
+    const float y1 = rect.y + rect.height;
+    const Vec3 localCorners[4] = {
+        {x0, y0, 0.f},
+        {x1, y0, 0.f},
+        {x1, y1, 0.f},
+        {x0, y1, 0.f},
+    };
+    for (int i = 0; i < 4; ++i) {
+        if (!PanelLocalToDesktop(targetRect, localCorners[i], hwnd, panel.corners[i],
+                                 panel.cornersF[i])) {
+            return false;
+        }
+    }
+
+    double minX = panel.cornersF[0].x, maxX = panel.cornersF[0].x;
+    double minY = panel.cornersF[0].y, maxY = panel.cornersF[0].y;
+    for (int i = 1; i < 4; ++i) {
+        minX = (std::min)(minX, panel.cornersF[i].x);
+        minY = (std::min)(minY, panel.cornersF[i].y);
+        maxX = (std::max)(maxX, panel.cornersF[i].x);
+        maxY = (std::max)(maxY, panel.cornersF[i].y);
+    }
+    panel.bounds = {static_cast<long>(std::floor(minX)), static_cast<long>(std::floor(minY)),
+                    static_cast<long>(std::ceil(maxX)), static_cast<long>(std::ceil(maxY))};
+    if (panel.bounds.right - panel.bounds.left < 100 ||
+        panel.bounds.bottom - panel.bounds.top < 100) {
+        return false;
+    }
+
+    const double predictedX = panel.cornersF[0].x + (panel.cornersF[1].x - panel.cornersF[0].x) +
+                              (panel.cornersF[3].x - panel.cornersF[0].x);
+    const double predictedY = panel.cornersF[0].y + (panel.cornersF[1].y - panel.cornersF[0].y) +
+                              (panel.cornersF[3].y - panel.cornersF[0].y);
+    if (std::hypot(predictedX - panel.cornersF[2].x, predictedY - panel.cornersF[2].y) > 3.0) {
+        return false;
+    }
+    return true;
+}
+
+bool CursorPointToPanelDesktop(const PanelGeometry& panel, float cursorX, float cursorY,
+                               POINT& desktop) {
+    const double localX =
+        static_cast<double>(cursorX) - panel.rect.width * 0.5 - panel.offset.x;
+    const double localY =
+        panel.rect.height * 0.5 - static_cast<double>(cursorY) - panel.offset.y;
+    const double u = (localX - panel.rect.x) / panel.rect.width;
+    const double v = (localY - panel.rect.y) / panel.rect.height;
+    constexpr double kPanelEpsilon = 0.01;
+    if (!std::isfinite(u) || !std::isfinite(v) || u < -kPanelEpsilon || u > 1.0 + kPanelEpsilon ||
+        v < -kPanelEpsilon || v > 1.0 + kPanelEpsilon) {
+        return false;
+    }
+
+    const double dxX = panel.cornersF[1].x - panel.cornersF[0].x;
+    const double dxY = panel.cornersF[1].y - panel.cornersF[0].y;
+    const double dyX = panel.cornersF[3].x - panel.cornersF[0].x;
+    const double dyY = panel.cornersF[3].y - panel.cornersF[0].y;
+    desktop.x =
+        static_cast<long>(std::lround(panel.cornersF[0].x + u * dxX + v * dyX));
+    desktop.y =
+        static_cast<long>(std::lround(panel.cornersF[0].y + u * dxY + v * dyY));
+    return desktop.x >= panel.bounds.left && desktop.x <= panel.bounds.right &&
+           desktop.y >= panel.bounds.top && desktop.y <= panel.bounds.bottom;
+}
+
+bool MapBatchByPanelAffine(void* rectTf, const std::vector<Vec2>& cursorLocal,
+                           std::vector<POINT>& outScreen, PanelGeometry& panel,
+                           float* outVerifyMaxErr) {
+    outScreen.clear();
+    if (outVerifyMaxErr) *outVerifyMaxErr = -1.f;
+    HWND hwnd = FindGameHwndLocal();
+    if (!hwnd || !ResolvePanelGeometry(rectTf, hwnd, panel)) return false;
+
+    outScreen.reserve(cursorLocal.size());
+    for (const auto& lp : cursorLocal) {
+        POINT pt{};
+        if (!CursorPointToPanelDesktop(panel, lp.x, lp.y, pt)) return false;
+        outScreen.push_back(pt);
+    }
+    if (outScreen.size() != cursorLocal.size()) return false;
+
+    // TryGet 交叉验证首/中/末（对照 Artale；不挡主路径，只记最大误差）
+    auto fn = FnFromMi<FnTryWinCursor>(gMiTryWinCursor, kRvaTryGetWinCursorPos);
+    float maxErr = 0.f;
+    int verifyN = 0;
+    if (fn && !cursorLocal.empty()) {
+        const size_t n = cursorLocal.size();
+        const size_t idxs[3] = {0, n / 2, n - 1};
+        for (size_t k = 0; k < 3; ++k) {
+            const size_t i = idxs[k];
+            Vec2 out{};
+            bool hit = false;
+            __try {
+                hit = fn(rectTf, cursorLocal[i], &out, gMiTryWinCursor);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                hit = false;
+            }
+            if (!hit) continue;
+            const float dx = out.x - static_cast<float>(outScreen[i].x);
+            const float dy = out.y - static_cast<float>(outScreen[i].y);
+            const float err = std::sqrt(dx * dx + dy * dy);
+            if (err > maxErr) maxErr = err;
+            ++verifyN;
+        }
+    }
+    if (outVerifyMaxErr && verifyN > 0) *outVerifyMaxErr = maxErr;
+    return true;
+}
+
+bool MapBatchByTryGet(void* rectTf, const std::vector<Vec2>& cursorLocal,
+                      std::vector<POINT>& outScreen, int* outOkN, int* outSehN) {
+    outScreen.clear();
+    auto fn = FnFromMi<FnTryWinCursor>(gMiTryWinCursor, kRvaTryGetWinCursorPos);
+    if (!fn) return false;
+    outScreen.reserve(cursorLocal.size());
+    int okN = 0;
+    int sehN = 0;
+    for (const auto& lp : cursorLocal) {
+        Vec2 out{};
+        bool hit = false;
+        __try {
+            hit = fn(rectTf, lp, &out, gMiTryWinCursor);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            hit = false;
+            ++sehN;
+        }
+        POINT pt{};
+        if (hit) {
+            pt.x = static_cast<LONG>(out.x + 0.5f);
+            pt.y = static_cast<LONG>(out.y + 0.5f);
+            ++okN;
+        }
+        outScreen.push_back(pt);
+    }
+    if (outOkN) *outOkN = okN;
+    if (outSehN) *outSehN = sehN;
+    return okN > 0 && !outScreen.empty();
 }
 
 bool CopyByteArray(void* arr, std::vector<uint8_t>& out) {
@@ -513,6 +834,10 @@ struct MainCtx {
     POINT screen{};
     const std::vector<Vec2>* localPts = nullptr;
     std::vector<POINT>* screenPts = nullptr;
+    POINT panelCorners[4]{};
+    bool havePanelCorners = false;
+    const char* mapMode = "none";
+    float verifyMaxErr = -1.f;
 };
 
 void MainJob(void* user) {
@@ -582,9 +907,10 @@ void MainJob(void* user) {
     if (ctx->op == MainCtx::Op::MapCursor) {
         if (!ctx->rectTf) return;
         Vec2 out{};
+        const Vec2 local{ctx->lx, ctx->ly};
         auto fn = FnFromMi<FnTryWinCursor>(gMiTryWinCursor, kRvaTryGetWinCursorPos);
         __try {
-            ctx->ok = fn(ctx->rectTf, ctx->lx, ctx->ly, &out, gMiTryWinCursor);
+            ctx->ok = fn(ctx->rectTf, local, &out, gMiTryWinCursor);
             if (ctx->ok) {
                 ctx->screen.x = static_cast<LONG>(out.x + 0.5f);
                 ctx->screen.y = static_cast<LONG>(out.y + 0.5f);
@@ -597,29 +923,157 @@ void MainJob(void* user) {
     if (ctx->op == MainCtx::Op::MapBatch) {
         if (!ctx->rectTf || !ctx->localPts || !ctx->screenPts) return;
         ctx->screenPts->clear();
-        auto fn = FnFromMi<FnTryWinCursor>(gMiTryWinCursor, kRvaTryGetWinCursorPos);
-        if (!fn) return;
-        ctx->screenPts->reserve(ctx->localPts->size());
-        int okN = 0;
-        for (const auto& lp : *ctx->localPts) {
-            Vec2 out{};
-            bool hit = false;
-            __try {
-                hit = fn(ctx->rectTf, lp.x, lp.y, &out, gMiTryWinCursor);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                hit = false;
+        ctx->havePanelCorners = false;
+        ctx->mapMode = "none";
+        ctx->verifyMaxErr = -1.f;
+
+        PanelGeometry panel{};
+        float verifyErr = -1.f;
+        constexpr float kPanelVerifyMaxErrPx = 24.f;  // 仿射与 TryGet 差过大 → 相机/空间不对，回退
+        if (MapBatchByPanelAffine(ctx->rectTf, *ctx->localPts, *ctx->screenPts, panel,
+                                  &verifyErr)) {
+            if (verifyErr >= 0.f && verifyErr > kPanelVerifyMaxErrPx) {
+                Log("MapBatch panel-affine reject verifyMaxErr=%.2f > %.0f → tryget", verifyErr,
+                    kPanelVerifyMaxErrPx);
+                ctx->screenPts->clear();
+                ctx->havePanelCorners = false;
+            } else {
+                ctx->ok = !ctx->screenPts->empty();
+                ctx->mapMode = "panel-affine";
+                ctx->verifyMaxErr = verifyErr;
+                ctx->havePanelCorners = true;
+                std::memcpy(ctx->panelCorners, panel.corners, sizeof(ctx->panelCorners));
+                const Vec2& p0 = (*ctx->localPts)[0];
+                const POINT& s0 = (*ctx->screenPts)[0];
+                Log("MapBatch mode=panel-affine pts=%zu firstLocal=(%.2f,%.2f) firstScreen=(%ld,%ld) "
+                    "panel=(%ld,%ld)-(%ld,%ld) verifyMaxErr=%.2f",
+                    ctx->localPts->size(), p0.x, p0.y, s0.x, s0.y, panel.bounds.left,
+                    panel.bounds.top, panel.bounds.right, panel.bounds.bottom, verifyErr);
+                return;
             }
-            POINT pt{};
-            if (hit) {
-                pt.x = static_cast<LONG>(out.x + 0.5f);
-                pt.y = static_cast<LONG>(out.y + 0.5f);
-                ++okN;
-            }
-            ctx->screenPts->push_back(pt);
+        }
+
+        int okN = 0, sehN = 0;
+        if (!MapBatchByTryGet(ctx->rectTf, *ctx->localPts, *ctx->screenPts, &okN, &sehN)) {
+            ctx->ok = false;
+            ctx->mapMode = "tryget-fail";
+            Log("MapBatch mode=tryget-fail pts=%zu (panel-affine miss)", ctx->localPts->size());
+            return;
         }
         ctx->ok = okN > 0 && !ctx->screenPts->empty();
-        Log("MapBatch pts=%zu ok=%d", ctx->localPts->size(), okN);
+        ctx->mapMode = "tryget-fallback";
+        ctx->verifyMaxErr = verifyErr;
+        const Vec2& p0 = (*ctx->localPts)[0];
+        const POINT& s0 = (*ctx->screenPts)[0];
+        Log("MapBatch mode=tryget-fallback pts=%zu ok=%d seh=%d firstLocal=(%.2f,%.2f) "
+            "firstScreen=(%ld,%ld) panelVerifyMaxErr=%.2f",
+            ctx->localPts->size(), okN, sehN, p0.x, p0.y, s0.x, s0.y, verifyErr);
     }
+}
+
+// --- 托管调用的裸壳 ---
+// 公开接口会先把请求投到泵上（见下面 Predicates），泵上的 job 直接用这些裸壳，避免绕回去递归。
+bool RawIsOpen() {
+    __try {
+        return FnFromMi<FnIsOpen>(gMiIsOpen, kRvaIsOpenAntiMacro)(gMiIsOpen);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("antiMacro/isOpen");
+        return false;
+    }
+}
+
+bool RawTextInst() {
+    __try {
+        return FnFromMi<FnIsInst>(gMiTextIsInst, kRvaTextIsInst)(gMiTextIsInst);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("antiMacro/textIsInst");
+        return false;
+    }
+}
+
+bool RawNonInst() {
+    __try {
+        return FnFromMi<FnIsInst>(gMiNonIsInst, kRvaNonIsInst)(gMiNonIsInst);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("antiMacro/nonIsInst");
+        return false;
+    }
+}
+
+void* RawTextObj() {
+    __try {
+        return FnFromMi<FnGetObj>(gMiTextGet, kRvaTextGet)(gMiTextGet);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("antiMacro/textGet");
+        return nullptr;
+    }
+}
+
+void* RawNonObj() {
+    __try {
+        return FnFromMi<FnGetObj>(gMiNonGet, kRvaNonGet)(gMiNonGet);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("antiMacro/nonGet");
+        return nullptr;
+    }
+}
+
+// --- 三个谓词一律在主泵上求值 ---
+// 这三条路都会进 il2cpp 的 Class::Init（GameAssembly sub_7FF849078670，取全局元数据锁）。
+// Init 要的目标类是从 MethodInfo+0x38 的 rgctx 表惰性解出来的——在 worker 上解出来的是垃圾：
+// klass+0x60 读到 -1，当场在 GameAssembly+0x3dfbd0 触发 AV。同样的调用在泵上从没炸过。
+//
+// 2026-08-09 06:39 实测钉死了这个对比：41.79 在泵上把三个谓词各跑一次，干干净净；0.8 秒后
+// worker(tid 57340) 调同样三个方法，四次全炸。此前一版按「一次性类初始化」理解、只预热一次，
+// 日志证明想错了——这是每次调用都要走的路，换线程就必炸。
+//
+// 炸完的后果比漏锁严重得多：Init 在出错前已经把 klass+0x135 的「正在初始化」位置上了，异常
+// 一展开再没人清。主线程之后碰到这个类就永远回不来，客户端黑屏——上一轮元数据锁已按时归还，
+// 照样没救回来，因为坏的是初始化状态，不是锁。
+//
+// 所以每次都投到泵上算，结果缓存 150 ms，免得 30 Hz 的 tick 把泵打爆。换图 quiesce 期间泵会
+// 直接拒非 High 的 job，此时按「没开测谎」处理即可：那段本来也不可能弹测谎 UI。
+constexpr DWORD kPredCacheMs = 150;
+
+struct PredSnapshot {
+    bool open = false;
+    bool text = false;
+    bool nonFinite = false;
+    // 两个实例指针顺带在同一个 job 里取回：GetAntiMacro() 也是托管静态方法，同样不能在
+    // worker 上调，而它紧跟在「开着吗」后面被 follower 调用。搭同一趟车，不额外占泵。
+    void* textInst = nullptr;
+    void* nonInst = nullptr;
+};
+
+std::mutex gPredMtx;
+PredSnapshot gPredCache;
+DWORD gPredAtMs = 0;
+
+void PredJob(void* user) {
+    auto* out = static_cast<PredSnapshot*>(user);
+    out->open = (gMiIsOpen && GaBase()) ? RawIsOpen() : false;
+    out->text = gMiTextIsInst ? RawTextInst() : false;
+    out->nonFinite = gMiNonIsInst ? RawNonInst() : false;
+    // 没开着就不必去取实例：GetAntiMacro() 这时本来也只会返回 null。
+    out->textInst = (out->text && gMiTextGet) ? RawTextObj() : nullptr;
+    out->nonInst = (out->nonFinite && gMiNonGet) ? RawNonObj() : nullptr;
+}
+
+PredSnapshot Predicates() {
+    std::lock_guard<std::mutex> lk(gPredMtx);
+    const DWORD now = GetTickCount();
+    if (gPredAtMs && static_cast<int>(now - gPredAtMs) < static_cast<int>(kPredCacheMs))
+        return gPredCache;
+
+    PredSnapshot snap;
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        PredJob(&snap);
+    } else if (!x::runtime::main_thread::InvokeAndWait(&PredJob, &snap, 800)) {
+        snap = PredSnapshot{};
+    }
+    gPredAtMs = now;
+    gPredCache = snap;
+    return snap;
 }
 
 }  // namespace
@@ -661,47 +1115,27 @@ BindReady ProbeBindReady() {
 
 bool IsOpenAntiMacro() {
     if (!Ensure() || !GaBase()) return false;
-    __try {
-        return FnFromMi<FnIsOpen>(gMiIsOpen, kRvaIsOpenAntiMacro)(gMiIsOpen);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Predicates().open;
 }
 
 bool IsTextCaptchaOpen() {
     if (!Ensure()) return false;
-    __try {
-        return FnFromMi<FnIsInst>(gMiTextIsInst, kRvaTextIsInst)(gMiTextIsInst);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Predicates().text;
 }
 
 bool IsNonFiniteOpen() {
     if (!Ensure()) return false;
-    __try {
-        return FnFromMi<FnIsInst>(gMiNonIsInst, kRvaNonIsInst)(gMiNonIsInst);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
+    return Predicates().nonFinite;
 }
 
 void* GetTextCaptcha() {
     if (!Ensure()) return nullptr;
-    __try {
-        return FnFromMi<FnGetObj>(gMiTextGet, kRvaTextGet)(gMiTextGet);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
+    return Predicates().textInst;
 }
 
 void* GetNonFinite() {
     if (!Ensure()) return nullptr;
-    __try {
-        return FnFromMi<FnGetObj>(gMiNonGet, kRvaNonGet)(gMiNonGet);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
+    return Predicates().nonInst;
 }
 
 bool DumpTextCaptchaImage(std::vector<uint8_t>& out, CaptchaImageKind& kind) {
@@ -744,6 +1178,23 @@ int ReadMouseSampleCount(void* instance) {
     return ListSize(list);
 }
 
+bool ReadNonFiniteIsResultRecv(void* instance) {
+    if (!instance) return false;
+    EnsureQuizFieldOff();
+    __try {
+        return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(instance) +
+                                           gOffNonIsResultRecv) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void* PeekNonFiniteMouseList(void* instance) {
+    if (!instance) return nullptr;
+    EnsureQuizFieldOff();
+    return ReadPtr(instance, gOffNonMousePosList);
+}
+
 bool ReadRawPosList(void* instance, std::vector<Vec2>& out) {
     out.clear();
     if (!instance) return false;
@@ -754,11 +1205,15 @@ bool ReadRawPosList(void* instance, std::vector<Vec2>& out) {
     if (!items || n <= 0 || n > 2000) return false;
     __try {
         const uint8_t* base = reinterpret_cast<uint8_t*>(items) + kOffByteArrayData;
+        // List<Vector2>：元素 stride=8（两 float）；勿按 Vector2Int/指针读。
+        const size_t maxLen = *reinterpret_cast<const int*>(
+            reinterpret_cast<const uint8_t*>(items) + 0x18);
+        if (maxLen > 0 && static_cast<size_t>(n) > maxLen) return false;
         out.resize(static_cast<size_t>(n));
         for (int i = 0; i < n; ++i) {
-            const float* p = reinterpret_cast<const float*>(base + static_cast<size_t>(i) * 8u);
-            out[static_cast<size_t>(i)].x = p[0];
-            out[static_cast<size_t>(i)].y = p[1];
+            const auto* p =
+                reinterpret_cast<const Vec2*>(base + static_cast<size_t>(i) * sizeof(Vec2));
+            out[static_cast<size_t>(i)] = *p;
         }
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -767,17 +1222,121 @@ bool ReadRawPosList(void* instance, std::vector<Vec2>& out) {
     }
 }
 
+namespace {
+
+// Component.get_transform 也是托管方法，同样只许在泵上调（follower 的 BuildAndPublishPlan /
+// TickCalibration 都在 worker 上）。这条不像谓词那样每 tick 都要，直接一次一个 job 即可。
+struct RectCtx {
+    void* rawImage = nullptr;
+    void* result = nullptr;
+};
+
+void RectJob(void* user) {
+    auto* c = static_cast<RectCtx*>(user);
+    auto getTf = reinterpret_cast<FnGetTransform>(MethodPtr(gMiGetTransform));
+    if (!getTf) return;
+    __try {
+        c->result = getTf(c->rawImage, gMiGetTransform);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("antiMacro/getTransform");
+        c->result = nullptr;
+    }
+}
+
+}  // namespace
+
 void* ReadNonFiniteTargetRect(void* instance) {
     if (!instance || !ResolveHelpers() || !gMiGetTransform) return nullptr;
-    void* rawImage = ReadPtr(instance, kOffNonRawImage);
-    if (!rawImage) return nullptr;
-    auto getTf = reinterpret_cast<FnGetTransform>(MethodPtr(gMiGetTransform));
-    if (!getTf) return nullptr;
-    __try {
-        return getTf(rawImage, gMiGetTransform);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    RectCtx ctx{};
+    ctx.rawImage = ReadPtr(instance, kOffNonRawImage);
+    if (!ctx.rawImage) return nullptr;
+    if (x::runtime::main_thread::IsOnPumpThread())
+        RectJob(&ctx);
+    else if (!x::runtime::main_thread::InvokeAndWait(&RectJob, &ctx, 800))
         return nullptr;
+    return ctx.result;
+}
+
+// CMS/枫星 DecryptPointToCursorPoint：归一化 path → 750×500 题面像素局部。
+constexpr float kRawDecryptAddX = 0.75f;
+constexpr float kRawDecryptAddY = 0.5f;
+constexpr float kRawDecryptScale = 500.f;
+constexpr float kCanvasPixelSpanMin = 50.f;  // 已是题面像素则不再二次放大
+constexpr long kScreenCollapseMaxPx = 8;    // 本地有跨度但屏幕 ≤ 此值 = 塌缩
+
+Vec2 RawToCursorLocal(Vec2 raw) {
+    return Vec2{(raw.x + kRawDecryptAddX) * kRawDecryptScale,
+                (raw.y + kRawDecryptAddY) * kRawDecryptScale};
+}
+
+bool RawPathLooksLikeCanvasPixels(const std::vector<Vec2>& raw) {
+    if (raw.size() < 2) return false;
+    float minX = raw[0].x, maxX = raw[0].x, minY = raw[0].y, maxY = raw[0].y;
+    for (const auto& p : raw) {
+        minX = (std::min)(minX, p.x);
+        maxX = (std::max)(maxX, p.x);
+        minY = (std::min)(minY, p.y);
+        maxY = (std::max)(maxY, p.y);
     }
+    const float span = (std::max)(maxX - minX, maxY - minY);
+    return span >= kCanvasPixelSpanMin;
+}
+
+bool IsScreenPathCollapsed(const std::vector<Vec2>& localPts, const std::vector<POINT>& screen,
+                           long* outSpanX, long* outSpanY) {
+    if (outSpanX) *outSpanX = 0;
+    if (outSpanY) *outSpanY = 0;
+    if (localPts.size() < 2 || screen.size() != localPts.size()) return true;
+
+    float minLx = localPts[0].x, maxLx = localPts[0].x;
+    float minLy = localPts[0].y, maxLy = localPts[0].y;
+    long minSx = screen[0].x, maxSx = screen[0].x;
+    long minSy = screen[0].y, maxSy = screen[0].y;
+    for (size_t i = 0; i < localPts.size(); ++i) {
+        minLx = (std::min)(minLx, localPts[i].x);
+        maxLx = (std::max)(maxLx, localPts[i].x);
+        minLy = (std::min)(minLy, localPts[i].y);
+        maxLy = (std::max)(maxLy, localPts[i].y);
+        minSx = (std::min)(minSx, screen[i].x);
+        maxSx = (std::max)(maxSx, screen[i].x);
+        minSy = (std::min)(minSy, screen[i].y);
+        maxSy = (std::max)(maxSy, screen[i].y);
+    }
+    const long spanX = maxSx - minSx;
+    const long spanY = maxSy - minSy;
+    if (outSpanX) *outSpanX = spanX;
+    if (outSpanY) *outSpanY = spanY;
+
+    const float localSpan = (std::max)(maxLx - minLx, maxLy - minLy);
+    if (localSpan < 1e-3f) return true;  // 本地本身无轨迹
+    if ((std::max)(spanX, spanY) <= kScreenCollapseMaxPx) return true;
+
+    // 飞出游戏客户区（E175：Y=1511 而 client 高 768）也当塌缩/废图。
+    HWND hwnd = x::features::titlebar::win::FindUnityWndClass();
+    if (!hwnd || !IsWindow(hwnd)) hwnd = x::features::titlebar::win::FindGameWindow();
+    if (hwnd && IsWindow(hwnd)) {
+        RECT cr{};
+        POINT origin{};
+        if (GetClientRect(hwnd, &cr) && ClientToScreen(hwnd, &origin)) {
+            const long l = origin.x;
+            const long t = origin.y;
+            const long r = origin.x + (cr.right - cr.left);
+            const long b = origin.y + (cr.bottom - cr.top);
+            const long pad = 64;
+            int outside = 0;
+            const int n = static_cast<int>(screen.size());
+            const int probe = (std::min)(n, 32);
+            for (int i = 0; i < probe; ++i) {
+                const size_t idx =
+                    probe <= 1 ? 0u : static_cast<size_t>(i) * static_cast<size_t>(n - 1) /
+                                          static_cast<size_t>(probe - 1);
+                const POINT& p = screen[idx];
+                if (p.x < l - pad || p.x > r + pad || p.y < t - pad || p.y > b + pad) ++outside;
+            }
+            if (outside * 2 >= probe) return true;
+        }
+    }
+    return false;
 }
 
 bool TryMapWinCursor(void* rectTransform, float localX, float localY, POINT& outScreen) {
@@ -794,25 +1353,119 @@ bool TryMapWinCursor(void* rectTransform, float localX, float localY, POINT& out
 }
 
 bool MapWinCursorBatch(void* rectTransform, const std::vector<Vec2>& localPts,
-                       std::vector<POINT>& outScreen) {
+                       std::vector<POINT>& outScreen, POINT* outPanelCorners4,
+                       bool* outHavePanelCorners) {
     outScreen.clear();
+    if (outHavePanelCorners) *outHavePanelCorners = false;
     if (!Ensure() || !rectTransform || localPts.empty()) return false;
-    // 330 点映射可能略久；给足超时，避免半成品计划
+
+    // 归一化 raw → 题面像素局部（已是像素则原样）。
+    std::vector<Vec2> cursorLocal;
+    cursorLocal.reserve(localPts.size());
+    const bool alreadyPx = RawPathLooksLikeCanvasPixels(localPts);
+    for (const auto& p : localPts) {
+        cursorLocal.push_back(alreadyPx ? p : RawToCursorLocal(p));
+    }
+
+    // 主线程绑定面板 API（失败仍可走 TryGet 回退）
+    (void)BindPanelMapApis();
+
     MainCtx ctx{};
     ctx.op = MainCtx::Op::MapBatch;
     ctx.rectTf = rectTransform;
-    ctx.localPts = &localPts;
+    ctx.localPts = &cursorLocal;
     ctx.screenPts = &outScreen;
     if (!x::runtime::main_thread::InvokeAndWait(&MainJob, &ctx, 8000)) return false;
-    return ctx.ok && outScreen.size() == localPts.size();
+    if (!ctx.ok || outScreen.size() != localPts.size()) return false;
+
+    if (outPanelCorners4 && ctx.havePanelCorners) {
+        std::memcpy(outPanelCorners4, ctx.panelCorners, sizeof(POINT) * 4);
+        if (outHavePanelCorners) *outHavePanelCorners = true;
+    }
+
+    long spanX = 0, spanY = 0;
+    const bool collapsed = IsScreenPathCollapsed(cursorLocal, outScreen, &spanX, &spanY);
+    Log("MapBatch decrypt=%d mode=%s firstRaw=(%.3f,%.3f) firstCursor=(%.1f,%.1f) "
+        "screenSpan=(%ld,%ld) collapsed=%d verifyMaxErr=%.2f panelCorners=%d",
+        alreadyPx ? 0 : 1, ctx.mapMode ? ctx.mapMode : "?", localPts[0].x, localPts[0].y,
+        cursorLocal[0].x, cursorLocal[0].y, spanX, spanY, collapsed ? 1 : 0, ctx.verifyMaxErr,
+        ctx.havePanelCorners ? 1 : 0);
+    if (collapsed) {
+        // 保留 outScreen 供 caller 落盘取证；勿清空。
+        return false;
+    }
+    return true;
 }
 
+namespace {
+
+HWND ResolveGameHwnd() {
+    HWND hwnd = x::features::titlebar::win::FindUnityWndClass();
+    if (!hwnd || !IsWindow(hwnd)) hwnd = x::features::titlebar::win::FindGameWindow();
+    if (hwnd && IsWindow(hwnd)) return hwnd;
+    return nullptr;
+}
+
+DWORD gLastFgAttemptMs = 0;
+constexpr DWORD kFgRetryMs = 400;
+
+}  // namespace
+
 bool IsGameForeground() {
-    HWND fg = GetForegroundWindow();
-    if (!fg) return false;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(fg, &pid);
-    return pid == GetCurrentProcessId();
+    HWND hwnd = ResolveGameHwnd();
+    if (!hwnd) return false;
+    if (IsIconic(hwnd)) return false;
+    return GetForegroundWindow() == hwnd;
+}
+
+bool TryBringGameForeground(const char* why, bool force) {
+    // 对照仓（Artale）默认外部策略：在 **worker** 上 AttachThreadInput + SFW。
+    // 经典版踩坑：把 SFW 丢进 MainPump InvokeAndWait / 无 Attach 的外线程 → 泵死。
+    // 铁律：只在非泵线程直调；最小化只 ShowWindowAsync（不在此处 Sleep，避免堵 Tick）。
+    HWND hwnd = ResolveGameHwnd();
+    if (!hwnd) {
+        x::runtime::LogW("AutoLieFocus", "skip (%s): no game hwnd", why ? why : "?");
+        return false;
+    }
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        x::runtime::LogW("AutoLieFocus", "refuse (%s): on pump thread", why ? why : "?");
+        return IsGameForeground();
+    }
+    if (GetForegroundWindow() == hwnd && !IsIconic(hwnd)) return true;
+
+    const DWORD now = GetTickCount();
+    if (!force && gLastFgAttemptMs && now - gLastFgAttemptMs < kFgRetryMs) {
+        return IsGameForeground();
+    }
+    gLastFgAttemptMs = now;
+
+    if (IsIconic(hwnd)) ShowWindowAsync(hwnd, SW_RESTORE);
+
+    AllowSetForegroundWindow(ASFW_ANY);
+
+    const HWND fore = GetForegroundWindow();
+    const DWORD curTid = GetCurrentThreadId();
+    const DWORD foreTid = fore ? GetWindowThreadProcessId(fore, nullptr) : 0;
+    const DWORD targetTid = GetWindowThreadProcessId(hwnd, nullptr);
+    const bool attachFore =
+        fore && foreTid && foreTid != curTid && AttachThreadInput(curTid, foreTid, TRUE);
+    const bool attachTarget = targetTid && targetTid != curTid && targetTid != foreTid &&
+                              AttachThreadInput(curTid, targetTid, TRUE);
+
+    BringWindowToTop(hwnd);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    const BOOL setOk = SetForegroundWindow(hwnd);
+    if (!IsIconic(hwnd)) ShowWindow(hwnd, SW_SHOW);
+
+    if (attachTarget) AttachThreadInput(curTid, targetTid, FALSE);
+    if (attachFore) AttachThreadInput(curTid, foreTid, FALSE);
+
+    const bool ok = IsGameForeground();
+    x::runtime::LogI("AutoLieFocus", "%s (%s) attach-SFW force=%d set=%d fg=%d",
+                     ok ? "ok" : "weak", why ? why : "?", force ? 1 : 0, setOk ? 1 : 0,
+                     ok ? 1 : 0);
+    return ok;
 }
 
 }  // namespace x::features::auto_lie::anti_macro_port

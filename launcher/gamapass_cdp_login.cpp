@@ -1,6 +1,7 @@
 #include "gamapass_cdp_login.h"
 
 #include "chromium_cdp.h"
+#include "gamapass_ticket_harvest.h"
 #include "msc_launch.h"
 #include "ott_ticket_fetch.h"
 
@@ -447,6 +448,16 @@ bool IsAccountsErrorUrl(const std::wstring& lowerUrl) {
     return path == L"/error";
 }
 
+// 与 UIA Classify 同口径：galaxy?redirect_url=maple... 不算已到经典官网
+bool IsMapleStoryClassicHostUrl(const std::wstring& lowerUrl) {
+    const size_t posMaple = lowerUrl.find(L"maplestoryclassic.beanfun.com");
+    if (posMaple == std::wstring::npos) return false;
+    if (lowerUrl.find(L"galaxy.games.gamania.com") != std::wstring::npos) return false;
+    const size_t posRedirect = lowerUrl.find(L"redirect_url");
+    if (posRedirect != std::wstring::npos && posMaple > posRedirect) return false;
+    return true;
+}
+
 HttpLoginResult TryFetchFromOtt(const std::wstring& ott, const HttpLoginLogFn& log) {
     if (ott.empty() || ott.find(L"OTT:") == std::wstring::npos) {
         return Fail(HttpLoginError::OttMissing, "OTT 无效");
@@ -559,8 +570,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                                                      : utf8);
         }
         return Fail(HttpLoginError::Network,
-                    "无法连接浏览器调试口。若浏览器已在运行，请先自行关闭后重试"
-                    "（程序不会自动结束你的浏览器）。");
+                    "无法连接浏览器调试口。已尝试自动结束占用进程；请确认浏览器可启动后重试。");
     }
     Log(log, L"[gamapass-cdp] Browser=" + cdp.BrowserVersion());
 
@@ -576,7 +586,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         if (lower.find(L"access_token=") != std::wstring::npos) return true;
         if (lower.find(L"webtoken=") != std::wstring::npos) return true;
         // Main（含带 OTT）一律不复用：OTT 可能已兑过；守护重拉必须重走 Galaxy
-        if (lower.find(L"maplestoryclassic.beanfun.com") != std::wstring::npos) return false;
+        if (IsMapleStoryClassicHostUrl(lower)) return false;
         // Galaxy 登录入口可继续点 Gama Pass；其它 Galaxy 页不盲目复用
         if (lower.find(L"galaxy.games.gamania.com") != std::wstring::npos) {
             return lower.find(L"/login/") != std::wstring::npos ||
@@ -613,8 +623,9 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         NickWaitContinue,
         AwaitLeaveNick,
         TokenWait,
+        ManualLoginWait,  // 完整 /login：等人在本 CDP 窗登完，再恢复自动点选
     };
-    enum class Step : int { Galaxy = 0, Acc, Nick, Token };
+    enum class Step : int { Galaxy = 0, Acc, Nick, Token, ManualLogin };
     auto stageName = [](Stage s) -> const wchar_t* {
         switch (s) {
             case Stage::GalaxyWaitGp: return L"GalaxyWaitGp";
@@ -625,6 +636,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
             case Stage::NickWaitContinue: return L"NickWaitContinue";
             case Stage::AwaitLeaveNick: return L"AwaitLeaveNick";
             case Stage::TokenWait: return L"TokenWait";
+            case Stage::ManualLoginWait: return L"ManualLoginWait";
         }
         return L"?";
     };
@@ -642,6 +654,8 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                 return Step::Nick;
             case Stage::TokenWait:
                 return Step::Token;
+            case Stage::ManualLoginWait:
+                return Step::ManualLogin;
         }
         return Step::Galaxy;
     };
@@ -712,7 +726,8 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
             case Step::Galaxy: return kStepGalaxyMs;
             case Step::Acc: return kStepAccMs;
             case Step::Nick: return kStepNickMs;
-            case Step::Token: return 0;  // 吃总超时
+            case Step::Token: return 0;        // 吃总超时
+            case Step::ManualLogin: return 0;  // 等人在 CDP 窗登录，吃总超时
         }
         return 60000;
     };
@@ -721,8 +736,15 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         if (hrefLower.find(L"access_token=") != std::wstring::npos ||
             hrefLower.find(L"webtoken=") != std::wstring::npos)
             return Stage::TokenWait;
+        // Galaxy 必须先于 maple：启动页 URL 自带 redirect_url=maplestoryclassic...
+        if (hrefLower.find(L"galaxy.games.gamania.com") != std::wstring::npos) {
+            if (hrefLower.find(L"login/result") != std::wstring::npos ||
+                hrefLower.find(L"access_token=") != std::wstring::npos)
+                return Stage::TokenWait;
+            return Stage::GalaxyWaitGp;
+        }
         // Main 带 OTT 才进 TokenWait；空 Main 不进（避免 reuse-align 卡死）
-        if (hrefLower.find(L"maplestoryclassic.beanfun.com") != std::wstring::npos) {
+        if (IsMapleStoryClassicHostUrl(hrefLower)) {
             if (hrefLower.find(L"ott=") != std::wstring::npos ||
                 hrefLower.find(L"ott:") != std::wstring::npos)
                 return Stage::TokenWait;
@@ -730,12 +752,11 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         }
         if (hrefLower.find(L"selectgameaccount") != std::wstring::npos)
             return Stage::NickWaitRadio;
-        // 完整登录页 / error 不推进（由主循环显式 Fail；启动时也不应 reusable）
-        if (IsGamaniaFullLoginUrl(hrefLower) || IsAccountsErrorUrl(hrefLower)) return stage;
+        // 完整登录页：等人在本窗登录（正道=UI 点选窗内会话）；error 不推进
+        if (IsGamaniaFullLoginUrl(hrefLower)) return Stage::ManualLoginWait;
+        if (IsAccountsErrorUrl(hrefLower)) return stage;
         if (IsSelectAccountUrl(hrefLower)) return Stage::AccWait;
         if (IsOauthAuthorizeUrl(hrefLower)) return Stage::AwaitLeaveGalaxy;
-        if (hrefLower.find(L"galaxy.games.gamania.com") != std::wstring::npos)
-            return Stage::GalaxyWaitGp;
         return stage;
     };
 
@@ -748,17 +769,24 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         enterStage(inferred, L"reuse-align", true);
     }
 
+    auto enterManualLoginWait = [&]() {
+        if (stage == Stage::ManualLoginWait) return;
+        enterStage(Stage::ManualLoginWait, L"need-login-in-cdp-window", true);
+        Log(log, L"[gamapass-cdp] 落到完整登录页。请直接在本自动点选窗口内登录并勾选记住；"
+                 L"出现选账号后会继续自动点选。不要用日常 Chrome 另开登录（Gama 会话互斥会被顶掉）。"
+                 L"未调用 refresh、未清 Cookie、不从日常重灌。");
+    };
+    if (stage == Stage::ManualLoginWait) {
+        Log(log, L"[gamapass-cdp] 当前已是完整登录页。请直接在本自动点选窗口内登录并勾选记住；"
+                 L"出现选账号后会继续自动点选。不要用日常 Chrome 另开登录（会话互斥）。");
+    }
+
     auto failNeedManualLogin = [&]() -> HttpLoginResult {
-        Log(log, L"[gamapass-cdp] 落到 accounts 完整登录页（非 select-account）。"
-                 L"未调用 refresh、未清 Cookie；当前会话没有可用 SSO。");
-        // 下一轮从日常 User Data 重灌 Cookies（用户勾选记住后再一键）。
-        msc::cdp::RequestCdpSessionResync();
+        Log(log, L"[gamapass-cdp] 等待本窗手动登录超时。未调用 refresh、未清 Cookie。");
         return Fail(HttpLoginError::BadInput,
-                    "Gama Pass 需要先登录：浏览器打开的是完整登录表单，没有「已登录账号」可选。"
+                    "Gama Pass 需要先在本程序弹出的自动点选窗口内登录（勾选记住）。"
                     "程序没有调用 refresh、也没有清除 Cookie。"
-                    "请用日常 Chrome/Edge 打开 accounts.gamania.com 勾选记住后，再点一键启动"
-                    "（下次会从日常 User Data 重同步到 GamaPassCdpProfile）。"
-                    "只用 Edge 请先卸载 Google Chrome（优先序：Chrome++/Chrome > Edge）。");
+                    "请重新一键，在弹出的浏览器窗口里完成登录；不要去日常 Chrome 另登（会话会被顶掉）。");
     };
 
     auto tryOttFromUrl = [&](const std::wstring& url) -> HttpLoginResult {
@@ -783,7 +811,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
             !IsGalaxyInitSessionUrl(url)) {
             if (ToLower(url).find(L"ott=") != std::wstring::npos ||
                 url.rfind(L"OTT:", 0) == 0 ||
-                ToLower(url).find(L"maplestoryclassic.beanfun.com") != std::wstring::npos) {
+                IsMapleStoryClassicHostUrl(ToLower(url))) {
                 return TryFetchFromOtt(ott, log);
             }
         }
@@ -795,7 +823,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
     auto parkAwayFromMainOtt = [&](const wchar_t* why) {
         if (parkedAwayFromMain) return;
         const std::wstring lower = ToLower(lastUrl);
-        if (lower.find(L"maplestoryclassic.beanfun.com") == std::wstring::npos) return;
+        if (!IsMapleStoryClassicHostUrl(lower)) return;
         if (lower.find(L"ott=") == std::wstring::npos && lower.find(L"ott:") == std::wstring::npos)
             return;
         parkedAwayFromMain = true;
@@ -857,33 +885,14 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
     };
 
     auto tryHarvestRunningClassic = [&]() -> HttpLoginResult {
-        noteNgmLaunchHint();
-        std::wstring cmd;
-        bool matched = false;
-        GalaxyTicket empty{};
-        const DWORD pid = FindExistingClassicPid(empty, L"Maplestory_Classic.exe", &cmd, &matched,
-                                                 &sessionNotBefore);
-        if (!pid) return {};
-        const auto parsed = ParseClassicPassArgs(cmd);
-        if (!parsed.ok) {
-            Log(log, L"[gamapass-cdp] 已有经典版 PID=" + std::to_wstring(pid) +
-                         L" 但 cmdline 无 Galaxy 四元组，继续等…");
-            return {};
+        const bool sawBefore = sawNgmHint;
+        auto out =
+            GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgmHint, log, L"[gamapass-cdp]");
+        if (sawNgmHint && !sawBefore && !parkedAfterNgm && !closedBrowserAfterTicket) {
+            parkedAfterNgm = true;
+            parkLoginTabBlank(
+                L"[gamapass-cdp] 已见 NGM，登录页已 blank（等经典版票后再关浏览器）…");
         }
-        Log(log, L"[gamapass-cdp] 官网已拉起经典版 PID=" + std::to_wstring(pid) +
-                     L"，从 cmdline 接管票（跳过 NGM 重开）" +
-                     (sawNgmHint ? L"（此前已见 NGM）" : L""));
-        HttpLoginResult out;
-        out.ok = true;
-        out.error = HttpLoginError::Ok;
-        out.message = "attach-existing-classic";
-        out.ticket.userObjectId = parsed.userObjectId;
-        out.ticket.userSessionToken = parsed.userSessionToken;
-        out.ticket.gid = parsed.gid;
-        out.ticket.galaxyGameId = parsed.galaxyGameId;
-        out.ticket.ngmGameId = parsed.galaxyGameId;
-        out.ticketFilled = true;
-        out.ott = L"(from-classic-cmdline)";
         return out;
     };
 
@@ -924,13 +933,12 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                         enterStage(Stage::AccWait, L"gp-click-acked");
                         noClickUntil = GetTickCount() + kNavSettleMs;
                     } else if (IsGamaniaFullLoginUrl(lowerNav)) {
-                        return failNeedManualLogin();
+                        enterManualLoginWait();
                     } else if (lowerNav.find(L"selectgameaccount") != std::wstring::npos) {
                         enterStage(Stage::NickWaitRadio, L"gp-skip-to-nick");
                         noClickUntil = GetTickCount() + kNavSettleMs;
                     } else if (lowerNav.find(L"access_token=") != std::wstring::npos ||
-                               lowerNav.find(L"maplestoryclassic.beanfun.com") !=
-                                   std::wstring::npos) {
+                               IsMapleStoryClassicHostUrl(lowerNav)) {
                         enterStage(Stage::TokenWait, L"gp-skip-to-token");
                         noClickUntil = GetTickCount() + kNavSettleMs;
                     }
@@ -939,8 +947,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                         enterStage(Stage::NickWaitRadio, L"acc-click-acked");
                         noClickUntil = GetTickCount() + kNavSettleMs;
                     } else if (lowerNav.find(L"access_token=") != std::wstring::npos ||
-                               lowerNav.find(L"maplestoryclassic.beanfun.com") !=
-                                   std::wstring::npos) {
+                               IsMapleStoryClassicHostUrl(lowerNav)) {
                         enterStage(Stage::TokenWait, L"acc-skip-to-token");
                         noClickUntil = GetTickCount() + kNavSettleMs;
                     } else if (lowerNav.find(L"select-account") == std::wstring::npos &&
@@ -971,9 +978,26 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                     "Gama Pass OAuth 失败（accounts/error）。"
                     "请回到 Galaxy 登录页重新点 Gama Pass；程序不会清 Cookie。");
             }
-            // 任意阶段落到完整登录页：立刻停（禁止 soft-retry 再 Navigate Galaxy）
+            // 任意阶段落到完整登录页：停在本 CDP 窗等人登录（禁止 Fail 关窗 / 禁止引导日常重灌）
             if (IsGamaniaFullLoginUrl(lowerNav)) {
-                return failNeedManualLogin();
+                enterManualLoginWait();
+            } else if (stage == Stage::ManualLoginWait) {
+                // 用户在本窗登完 → 恢复自动点选
+                if (IsSelectAccountUrl(lowerNav)) {
+                    enterStage(Stage::AccWait, L"manual-login-done");
+                    noClickUntil = GetTickCount() + kNavSettleMs;
+                } else if (lowerNav.find(L"selectgameaccount") != std::wstring::npos) {
+                    enterStage(Stage::NickWaitRadio, L"manual-login-to-nick");
+                    noClickUntil = GetTickCount() + kNavSettleMs;
+                } else if (lowerNav.find(L"access_token=") != std::wstring::npos ||
+                           IsMapleStoryClassicHostUrl(lowerNav)) {
+                    enterStage(Stage::TokenWait, L"manual-login-to-token");
+                    noClickUntil = GetTickCount() + kNavSettleMs;
+                } else if (lowerNav.find(L"galaxy.games.gamania.com") != std::wstring::npos &&
+                           !IsGamaniaFullLoginUrl(lowerNav)) {
+                    enterStage(Stage::GalaxyWaitGp, L"manual-login-back-galaxy");
+                    noClickUntil = GetTickCount() + kNavSettleMs;
+                }
             }
             if (lowerNav.find(L"errorhandler") != std::wstring::npos ||
                 lowerNav.find(L"spga0001") != std::wstring::npos ||
@@ -991,7 +1015,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
             // 禁止立刻重开 Galaxy——会整段点选第二遍，体感=登录两次/开两次游戏。
             // 若已见 NGM：说明官网已在拉，再宽限到 45s，勿过早 stale-ott-retry。
             if (!fromOtt.message.empty() &&
-                ToLower(url).find(L"maplestoryclassic.beanfun.com") != std::wstring::npos &&
+                IsMapleStoryClassicHostUrl(ToLower(url)) &&
                 (ToLower(url).find(L"ott=") != std::wstring::npos ||
                  ToLower(url).find(L"ott:") != std::wstring::npos)) {
                 noteNgmLaunchHint();
@@ -1072,7 +1096,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
 
         {
             const std::wstring hrefLower = ToLower(lastUrl);
-            if (hrefLower.find(L"maplestoryclassic.beanfun.com") != std::wstring::npos) {
+            if (IsMapleStoryClassicHostUrl(hrefLower)) {
                 noteNgmLaunchHint();
                 std::string ev;
                 cdp.Evaluate(JsScrapeTicketOtt(), ev, nullptr);
@@ -1108,6 +1132,10 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                 Log(log, sawNgmHint
                              ? L"[gamapass-cdp] TokenWait：已见 NGM，仍等经典版 cmdline 票…"
                              : L"[gamapass-cdp] TokenWait 仍在等 OTT/经典版进程（受总超时约束）…");
+            }
+            if (curStep == Step::ManualLogin && wallNow - lastStageLog > 8000) {
+                lastStageLog = wallNow;
+                Log(log, L"[gamapass-cdp] ManualLoginWait：请在本自动点选窗口内完成登录…");
             }
         }
 
@@ -1146,7 +1174,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
             continue;
         }
 
-        if (stage == Stage::TokenWait) {
+        if (stage == Stage::TokenWait || stage == Stage::ManualLoginWait) {
             Sleep(kPollMs);
             continue;
         }
@@ -1265,6 +1293,8 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         auto harvested = returnIfTicketOk(tryHarvestRunningClassic());
         if (harvested.ok && harvested.ticketFilled) return harvested;
     }
+
+    if (stage == Stage::ManualLoginWait) return failNeedManualLogin();
 
     Log(log, std::wstring(L"[gamapass-cdp] 超时 @") + stageName(stage) +
                  L"。若停在登录/选号页，请在当前浏览器窗口手动点一下；"

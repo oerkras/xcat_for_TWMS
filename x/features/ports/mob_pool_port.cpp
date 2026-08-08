@@ -77,7 +77,8 @@ constexpr char kHashHpPct[] =
     "<a30f6b17651ada7f1b621d9d2bc6a97f6777b512423da8679e555371dda2444>k__BackingField";
 constexpr char kHashMobCtrlState[] =
     "cf1cb7de11d79cbc53a86d208a9a510f9d326266b7dd2936fa11163ef9ad7cf";
-// FindHitMobInRect 同构门：inViewSplit@0x100 / suspended@0x1B8（见 P0c/P0a）
+// FindHit 同构门参考：inViewSplit@0x100 / suspended@0x1B8（见 P0c/P0a）。
+// suspended 仍挡入榜；inView 只写入 MobLite（出刀归 FindHit，不挡 n）。
 constexpr char kHashInViewSplit[] =
     "ad13dc061755cd8bffc462468576bab6639dd70573fdac202ec8c842f998fcd";
 constexpr char kHashSuspended[] =
@@ -539,30 +540,118 @@ void ReadMobPos(void* mob, float& x, float& y) {
     }
 }
 
-bool FillLite(void* mob, MobLite& out) {
-    if (!UnityObjectAlive(mob)) return false;
-    if (gMobKlass && !ObjKlassIs(mob, gMobKlass)) return false;
+// FillLite 失败码：供 Collect 做 raw-n 归因。
+enum class LiteFail : uint8_t {
+    Ok = 0,
+    Other,      // 野指针 / 错 klass / id=0 / 特殊 tpl
+    NotReady,
+    DeadType,
+    Hp,
+    Suspended,
+    DirtyPos,
+};
+
+struct LiteDiag {
+    int id = 0;
+    int tpl = 0;
+    int hpPct = 0;
+    int deadType = 0;
+    float x = 0.f;
+    float y = 0.f;
+    uint8_t ready = 0;
+    uint8_t inView = 0;
+    uint8_t suspended = 0;
+};
+
+char LiteFailTag(LiteFail f) {
+    switch (f) {
+        case LiteFail::NotReady: return 'R';
+        case LiteFail::DeadType: return 'D';
+        case LiteFail::Hp: return 'H';
+        case LiteFail::Suspended: return 'S';
+        case LiteFail::DirtyPos: return 'P';
+        default: return 'O';
+    }
+}
+
+bool SampleLooksAlive(const FillRejectSample& s) {
+    return s.ready && s.deadType == 0 && s.hpPct > 0 && s.id != 0;
+}
+
+void NoteFillReject(Snapshot& snap, LiteFail why, const LiteDiag& d) {
+    switch (why) {
+        case LiteFail::NotReady: ++snap.rejNotReady; break;
+        case LiteFail::DeadType: ++snap.rejDeadType; break;
+        case LiteFail::Hp: ++snap.rejHp; break;
+        case LiteFail::Suspended: ++snap.rejSuspended; break;
+        case LiteFail::DirtyPos: ++snap.rejDirty; break;
+        default: ++snap.rejOther; break;
+    }
+    FillRejectSample cand{};
+    cand.id = d.id;
+    cand.tpl = d.tpl;
+    cand.hpPct = d.hpPct;
+    cand.deadType = d.deadType;
+    cand.x = d.x;
+    cand.y = d.y;
+    cand.ready = d.ready;
+    cand.inView = d.inView;
+    cand.suspended = d.suspended;
+    cand.why = LiteFailTag(why);
+    if (snap.rejSampleN < kMaxFillRejectSamples) {
+        snap.rejSamples[snap.rejSampleN++] = cand;
+        return;
+    }
+    // 槽满：优先留像活怪的拒样（ready+有血），少被尸体占满。
+    if (!SampleLooksAlive(cand)) return;
+    for (int i = 0; i < snap.rejSampleN; ++i) {
+        if (!SampleLooksAlive(snap.rejSamples[i])) {
+            snap.rejSamples[i] = cand;
+            return;
+        }
+    }
+}
+
+LiteFail FillLiteEx(void* mob, MobLite& out, LiteDiag* diag) {
+    if (!UnityObjectAlive(mob)) return LiteFail::Other;
+    if (gMobKlass && !ObjKlassIs(mob, gMobKlass)) return LiteFail::Other;
 
     const int id = ReadI32(mob, kOffMobId);
-    if (id == 0) return false;
+    if (id == 0) return LiteFail::Other;
 
     const int deadType = ReadI32(mob, kOffDeadType);
     const int hpPct = ReadI32(mob, kOffHpPct);
     const bool ready = ReadU8(mob, kOffIsReady) != 0;
-
-    // 未就绪 / 尸体 / 空血：不入活怪榜（曾被乱码注释吞掉 ready 门 → 池脏坐标贴飞）。
-    if (!ready) return false;
-    if (deadType != 0) return false;
-    if (hpPct <= 0) return false;
-
-    // 与官方 FindHitMobInRect 对齐：无 inView / suspended 中 → 不可命中，不算活怪 n。
-    // 注意：不要用 VecCtrl.Active@0x80——SetRemote 会置 false，但怪仍可被 FindHit 命中；
-    // BIN 1000002：加 Active 后门 → raw=9 n=0，打怪全 miss。
-    if (ReadU8(mob, kOffInViewSplit) == 0) return false;
-    if (ReadU8(mob, kOffSuspended) != 0) return false;
-
+    const uint8_t inView = ReadU8(mob, kOffInViewSplit);
+    const uint8_t sus = ReadU8(mob, kOffSuspended);
     float x = 0.f, y = 0.f;
     ReadMobPos(mob, x, y);
+    if (diag) {
+        diag->id = id;
+        diag->tpl = ReadI32(mob, kOffTemplateId);
+        diag->hpPct = hpPct;
+        diag->deadType = deadType;
+        diag->x = x;
+        diag->y = y;
+        diag->ready = ready ? 1 : 0;
+        diag->inView = inView != 0 ? 1 : 0;
+        diag->suspended = sus != 0 ? 1 : 0;
+    }
+
+    // 未就绪 / 尸体 / 空血：不入活怪榜（曾被乱码注释吞掉 ready 门 → 池脏坐标贴飞）。
+    if (!ready) return LiteFail::NotReady;
+    if (deadType != 0) return LiteFail::DeadType;
+    if (hpPct <= 0) return LiteFail::Hp;
+
+    // suspended：Init/暂挂中，不进 n。
+    // 注意：不要用 VecCtrl.Active@0x80——SetRemote 会置 false，但怪仍可被 FindHit 命中；
+    // BIN 1000002：加 Active 后门 → raw=9 n=0，打怪全 miss。
+    if (sus != 0) return LiteFail::Suspended;
+
+    // ★ inView 不再挡入榜。FindHitMobInRect 要 inView——那是**出刀**门，不是「场上有没有怪」。
+    // BIN 2026-08-08：上层清空后下层满血怪 inView=0 → n=0 → 旋翼宽限落地；同一只稍后仍可杀。
+    // 选怪/旋翼认活怪；命中仍交给官方 FindHit（inView 恢复或贴近后再中）。
+
     // 池槽复用瞬间坐标可能未种好：NaN / 超界 / 原点 → 贴过去会把人甩出图。
     if (!std::isfinite(x) || !std::isfinite(y) || std::fabs(x) > kMaxPosAbs ||
         std::fabs(y) > kMaxPosAbs || (std::fabs(x) < kMinPosAbs && std::fabs(y) < kMinPosAbs)) {
@@ -572,15 +661,16 @@ bool FillLite(void* mob, MobLite& out) {
             sDirty = now;
             x::runtime::LogW("MobPool",
                              "skip dirty pool pos id=%d tpl=%d ready=%d hp=%d pos=(%.0f,%.0f)", id,
-                             ReadI32(mob, kOffTemplateId), ready ? 1 : 0, hpPct, x, y);
+                             diag ? diag->tpl : ReadI32(mob, kOffTemplateId), ready ? 1 : 0, hpPct, x,
+                             y);
         }
-        return false;
+        return LiteFail::DirtyPos;
     }
 
     out.ptr = mob;
     out.id = id;
-    out.templateId = ReadI32(mob, kOffTemplateId);
-    if (out.templateId == kSpecialTplExclude) return false;
+    out.templateId = diag ? diag->tpl : ReadI32(mob, kOffTemplateId);
+    if (out.templateId == kSpecialTplExclude) return LiteFail::Other;
     out.hpPct = hpPct;
     out.lastHitted = ReadI32(mob, kOffLastHitted);
     out.deadType = deadType;
@@ -588,8 +678,11 @@ bool FillLite(void* mob, MobLite& out) {
     out.x = x;
     out.y = y;
     out.ready = ready;
-    return true;
+    out.inView = inView != 0;
+    return LiteFail::Ok;
 }
+
+bool FillLite(void* mob, MobLite& out) { return FillLiteEx(mob, out, nullptr) == LiteFail::Ok; }
 
 bool PushLite(Snapshot& snap, const MobLite& m) {
     if (snap.count >= kMaxLiteMobs) {
@@ -624,8 +717,17 @@ int CollectFromDict(void* pool, Snapshot& snap) {
         if (!LooksLikeHeapPtr(mob)) continue;
         ++raw;
         MobLite lite{};
-        if (!FillLite(mob, lite)) continue;
-        if (!PushLite(snap, lite) && snap.truncated) break;
+        LiteDiag diag{};
+        const LiteFail fail = FillLiteEx(mob, lite, &diag);
+        if (fail != LiteFail::Ok) {
+            NoteFillReject(snap, fail, diag);
+            continue;
+        }
+        if (!PushLite(snap, lite)) {
+            if (snap.truncated) break;
+            continue;
+        }
+        if (!lite.inView) ++snap.nInView0;
     }
     snap.rawDict = raw;
     return snap.count;
@@ -653,8 +755,17 @@ int CollectFromFindAll(Snapshot& snap) {
         if (!LooksLikeHeapPtr(mob)) continue;
         ++raw;
         MobLite lite{};
-        if (!FillLite(mob, lite)) continue;
-        if (!PushLite(snap, lite) && snap.truncated) break;
+        LiteDiag diag{};
+        const LiteFail fail = FillLiteEx(mob, lite, &diag);
+        if (fail != LiteFail::Ok) {
+            NoteFillReject(snap, fail, diag);
+            continue;
+        }
+        if (!PushLite(snap, lite)) {
+            if (snap.truncated) break;
+            continue;
+        }
+        if (!lite.inView) ++snap.nInView0;
     }
     snap.rawDict = raw;
     return snap.count;
