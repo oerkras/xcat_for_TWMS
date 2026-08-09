@@ -228,6 +228,8 @@ DWORD EffectiveSkillAnimMs(int skillId) {
 }
 
 bool SkillAnimBlocking(int skillId, DWORD /*tickNow*/, DWORD* outRemainMs) {
+    // 服端按「单技」频率审计：闸门只看该 skillId 上次成功→自身动画/CD，
+    // 绝不拿其它技能的间隔来挡本技（多发 6 技同波靠 ClearBusy+gap 叠放）。
     if (outRemainMs) *outRemainMs = 0;
     if (skillId <= 0) return false;
     const DWORD t = GetTickCount();
@@ -1176,22 +1178,30 @@ void Tick() {
         }
 
         // 上一技 busy 还在量：等自然结束，禁止预清忙把采样砍断。
+        bool measuring = false;
         {
-            bool measuring = false;
-            {
-                std::lock_guard<std::mutex> lk(g_skillAnimMu);
-                measuring = !g_skillBusyArmMs.empty();
+            std::lock_guard<std::mutex> lk(g_skillAnimMu);
+            measuring = !g_skillBusyArmMs.empty();
+        }
+        if (measuring) {
+            void* luBusy = nullptr;
+            int busy = -1;
+            if (ports::player_combat::QueryLocalUser(&luBusy) && luBusy &&
+                attack_accel::QueryActionBusy(luBusy, busy) && busy >= 0) {
+                requeueSkill("skill_busy", 40u, kNaMaxRetries);
+                continue;
             }
-            if (measuring) {
-                void* luBusy = nullptr;
-                int busy = -1;
-                if (ports::player_combat::QueryLocalUser(&luBusy) && luBusy &&
-                    attack_accel::QueryActionBusy(luBusy, busy) && busy >= 0) {
-                    requeueSkill("skill_busy", 40u, kNaMaxRetries);
-                    continue;
-                }
-                PollSkillAnimBusy(now);
-            }
+            PollSkillAnimBusy(now);
+        }
+
+        // 与普攻+蜗牛同原理：多发叠技靠 ClearBusy +「每技自己的」anim/CD 限频。
+        // 服端只看单技使用频率，不评估整串——6 技同波用 gap 错开即可，勿用引擎忙锁串行。
+        // BIN：斷魂→二连 仅隔 gap 不清忙 → 第二发 do_false。
+        const bool stackSkills = g_selectHasSkill.load(std::memory_order_relaxed) &&
+                                 !g_naNativeGate.load(std::memory_order_relaxed) &&
+                                 !MpNaFallbackActive(now) && !measuring;
+        if (stackSkills) {
+            (void)ClearBusyForCast();
         }
 
         bool notReady = false;
@@ -1205,12 +1215,29 @@ void Tick() {
         if (ok) {
             const DWORD okAt = GetTickCount();
             NoteSkillCastOk(pc.skillId, okAt);
-            const DWORD animMs = EffectiveSkillAnimMs(pc.skillId);
+            if (stackSkills) {
+                (void)ClearBusyForCast();  // 给队列下一技留空闲，同 NA→技
+            }
             ports::skill::ConfirmLocalCooldown(pc.skillId, 0.f);
+            // 叠技：burst 只覆盖 gap/队列排水，单技重复间隔由 SkillAnimBlocking 管。
+            // 若这里写成 okAt+全长 anim，6 技同波会被「最后一技 anim」拖死下一波。
             const DWORD holdGap = EffectiveGapMs();
-            DWORD holdMs = animMs;
-            if (holdGap > holdMs) holdMs = holdGap;
-            if (holdMs < 450u) holdMs = 450u;
+            DWORD holdMs = holdGap;
+            if (!stackSkills) {
+                const DWORD animMs = EffectiveSkillAnimMs(pc.skillId);
+                holdMs = animMs;
+                if (holdGap > holdMs) holdMs = holdGap;
+                if (holdMs < 450u) holdMs = 450u;
+            } else if (holdMs < 50u) {
+                holdMs = 50u;
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_queueMu);
+                if (!g_queue.empty() && stackSkills) {
+                    // 同波后续技还在队列：IsBurstBusy 已因非空队列挡 TryCast，不必拉长 burst。
+                    holdMs = holdGap > 50u ? holdGap : 50u;
+                }
+            }
             const DWORD hold = okAt + holdMs;
             const DWORD until = g_burstBusyUntil.load();
             if (!until || static_cast<int>(hold - until) > 0) g_burstBusyUntil = hold;
@@ -1236,9 +1263,9 @@ void Tick() {
         ground_spoof::CastDebug(&spV, &spFh);
         runtime::LogI("MultiSkill",
                       "cast id=%d ok=%d notReady=%d reason=%s sendUse=%d "
-                      "clearBusy=%s anim=%ums sp=%d spfh=%u",
+                      "clearBusy=%d anim=%ums sp=%d spfh=%u",
                       pc.skillId, ok ? 1 : 0, notReady ? 1 : 0, reason[0] ? reason : "-",
-                      pc.sendUseOnly ? 1 : 0, "0",
+                      pc.sendUseOnly ? 1 : 0, stackSkills ? 1 : 0,
                       EffectiveSkillAnimMs(pc.skillId), spV, spFh);
     }
 

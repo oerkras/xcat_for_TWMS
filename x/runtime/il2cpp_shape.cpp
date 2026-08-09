@@ -6,6 +6,7 @@
 
 #include "il2cpp_bind.h"
 #include "log.h"
+#include "main_thread_pump.h"
 
 #include <cstring>
 
@@ -406,6 +407,15 @@ ResolveResult FindClassCached(const char* hashName, const ClassShape& shape) {
 
 void* ResolveWorldManagerKlass() {
     if (gCacheWm) return gCacheWm;
+    // 仅在泵已装好时才跳泵：InstallPump 自身会冷调本函数；此时 InvokeAndWait→Ensure
+    // 会死锁（BIN 10:18：settle 后无 MainPump 日志 → 守护 ProcessDead 干净重拉）。
+    if (!x::runtime::main_thread::IsOnPumpThread() &&
+        x::runtime::main_thread::IsInstalled()) {
+        x::runtime::main_thread::InvokeAndWait(
+            [](void*) { (void)ResolveWorldManagerKlass(); }, nullptr, 2500,
+            x::runtime::main_thread::JobPrio::High);
+        return gCacheWm;
+    }
     const ResolveResult r = FindClassCached(kHashWorldManager, kWmShape);
     gCacheWm = r.klass;
     gPathWm = r.path;
@@ -422,6 +432,13 @@ void* ResolveUserLocalKlass() {
 
 void* ResolveNetworkManagerKlass() {
     if (gCacheNm) return gCacheNm;
+    if (!x::runtime::main_thread::IsOnPumpThread() &&
+        x::runtime::main_thread::IsInstalled()) {
+        x::runtime::main_thread::InvokeAndWait(
+            [](void*) { (void)ResolveNetworkManagerKlass(); }, nullptr, 2500,
+            x::runtime::main_thread::JobPrio::High);
+        return gCacheNm;
+    }
     const ResolveResult r = FindClassCached(kHashNetworkManager, kNmShape);
     gCacheNm = r.klass;
     gPathNm = r.path;
@@ -430,6 +447,13 @@ void* ResolveNetworkManagerKlass() {
 
 void* ResolveNetworkManagerFacadeKlass() {
     if (gCacheNmFacade) return gCacheNmFacade;
+    if (!x::runtime::main_thread::IsOnPumpThread() &&
+        x::runtime::main_thread::IsInstalled()) {
+        x::runtime::main_thread::InvokeAndWait(
+            [](void*) { (void)ResolveNetworkManagerFacadeKlass(); }, nullptr, 2500,
+            x::runtime::main_thread::JobPrio::High);
+        return gCacheNmFacade;
+    }
     const ResolveResult r = FindClassCached(kHashNetworkManagerFacade, kNmFacadeShape);
     gCacheNmFacade = r.klass;
     gPathNmFacade = r.path;

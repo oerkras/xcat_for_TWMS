@@ -57,6 +57,7 @@
 #include "../ports/skill_port.h"
 #include "../ports/world_port.h"
 #include "../../ui/player_vitals.h"
+#include "xcat_payload_control.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1211,6 +1212,7 @@ void SetDesired(bool on) {
 bool IsDesired() { return gDesired.load(std::memory_order_acquire); }
 
 void SetBoosterDesired(bool on) {
+    if (!xcat::kAttackAccelBoosterUserEnabled) on = false;
     const bool was = gBoosterDesired.exchange(on, std::memory_order_acq_rel);
     if (was != on) Log("SetBoosterDesired on=%d (nBooster_=%d)", on ? 1 : 0, kBoosterValue);
 }

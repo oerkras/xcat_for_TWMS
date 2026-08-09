@@ -15,6 +15,7 @@
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 #include "../../ui/player_vitals.h"
+#include "xcat_payload_control.h"
 
 #include <Windows.h>
 
@@ -778,6 +779,11 @@ bool EnvForceOn() {
 }  // namespace
 
 void Init() {
+    if (!xcat::kSkillMaxLevelUserEnabled) {
+        gDesired.store(false, std::memory_order_relaxed);
+        x::runtime::LogI("SkillMax", "user gate off — skipped (keep code)");
+        return;
+    }
     if (EnvForceOn()) {
         gDesired.store(true, std::memory_order_relaxed);
         x::runtime::LogI("SkillMax", "env XCAT_SKILL_MAX_LEVEL → on");
@@ -792,6 +798,13 @@ void Shutdown() {
 }
 
 void StartWorker() {
+    if (!xcat::kSkillMaxLevelUserEnabled) {
+        gDesired.store(false, std::memory_order_relaxed);
+        x::runtime::anchor_lamps::Set("SkillMax",
+                                     x::runtime::anchor_lamps::AnchorLampCode::Unknown,
+                                     "disabled");
+        return;
+    }
     if (gWorker.load(std::memory_order_acquire)) return;
     gStop.store(false, std::memory_order_relaxed);
     HANDLE h = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
@@ -808,7 +821,10 @@ void StopWorker() {
     UninstallHook();
 }
 
-void SetDesired(bool on) { gDesired.store(on, std::memory_order_relaxed); }
+void SetDesired(bool on) {
+    if (!xcat::kSkillMaxLevelUserEnabled) on = false;
+    gDesired.store(on, std::memory_order_relaxed);
+}
 
 bool IsDesired() { return gDesired.load(std::memory_order_relaxed); }
 

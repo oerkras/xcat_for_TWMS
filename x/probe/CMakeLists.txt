@@ -1,5 +1,6 @@
 # Injected payload DLL — LoadLibrary target for Classic inject.
-# OUTPUT_NAME "xcat" → bin/XCat_data/xcat.dll
+# OUTPUT_NAME "xcat" → bin/XCat_data/xcat.dll（仅 Release / RelWithDebInfo / MinSizeRel）
+# Debug 单独落到 bin/XCat_data/debug/，避免漏写 --config Release 时静默覆盖注入路径。
 add_library(xcat_probe SHARED
   xcat_probe.cpp
   ../runtime/bin_dir.cpp
@@ -158,7 +159,9 @@ endif()
 set_target_properties(xcat_probe PROPERTIES
   OUTPUT_NAME "xcat"
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin/XCat_data
-  RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin/XCat_data
+  # Debug 不得覆盖注入路径：漏 --config Release 时最多「DLL 没更新」，
+  # 不会悄悄换成时序完全不同的 Debug 版（本仓主泵对时序极敏感）。
+  RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin/XCat_data/debug
   RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/bin/XCat_data
   RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_SOURCE_DIR}/bin/XCat_data
   RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_SOURCE_DIR}/bin/XCat_data
@@ -167,7 +170,7 @@ set_target_properties(xcat_probe PROPERTIES
   # 逐配置写死，理由同上面的 RUNTIME_OUTPUT_DIRECTORY_*：VS 这类多配置生成器会给
   # 不带 _<CONFIG> 后缀的输出目录再追加一层 Release/Debug，PDB 就跟 DLL 分家了。
   PDB_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin/XCat_data
-  PDB_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin/XCat_data
+  PDB_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin/XCat_data/debug
   PDB_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/bin/XCat_data
   PDB_OUTPUT_DIRECTORY_RELWITHDEBINFO ${CMAKE_SOURCE_DIR}/bin/XCat_data
   PDB_OUTPUT_DIRECTORY_MINSIZEREL ${CMAKE_SOURCE_DIR}/bin/XCat_data

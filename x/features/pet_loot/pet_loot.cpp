@@ -331,6 +331,7 @@ void Tick(DWORD now) {
                         std::strcmp(one.why, "no_lu") == 0))
             break;
         if (one.why && std::strcmp(one.why, "ok_empty") == 0) break;
+        if (one.why && std::strcmp(one.why, "wait_land") == 0) break;
         if (one.why && std::strcmp(one.why, "reject_backoff") == 0) break;
         if (one.nearCount == 0 && !(one.why && std::strcmp(one.why, "ok_absorbed") == 0)) break;
     }
@@ -389,14 +390,14 @@ void Tick(DWORD now) {
             "mode=petmap pets=%d skill=0x%X skillSlot=0x%X box=%.0fx%.0f mapVac=%d burst=%u/%u "
             "absorbed=%d drops=%d→%d Δ=%d fell=%d near=%d money=%d item=%d "
             "sampMoney=%d sampInfo=%d sendTouch=%d touchMoney=%d sentSame=%d "
-            "gates=%d skipStamp=%d stall=%d/%d/%d own=%d lastTry=%d endPara=%d "
+            "gates=%d skipStamp=%d stall=%d/%d/%d fly=%d own=%d lastTry=%d endPara=%d "
             "called=%d why=%s petSendΔ=%u poolSendΔ=%u skipN=%d",
             pst.activatedCount, (unsigned)vr.petSkill, (unsigned)vr.petSkillSlot, vacW, vacH,
             gCfg.mapVacuumEnabled ? 1 : 0, calls, burst, absorbedN, vr.dropCount, vr.dropCountAfter,
             vr.dropsDelta, vr.poolFellSinceLast ? 1 : 0, vr.nearCount, vr.nearMoney, vr.nearItem,
             vr.sampleIsMoney, vr.sampleInfo, vr.sendTouch, vr.sendTouchMoney, vr.sentButPoolSame,
             vr.gatesCleared, vr.skipStamped, vr.stallHeld, vr.stallStamped, vr.stallRestored,
-            vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara, vr.called ? 1 : 0,
+            vr.flyHeld, vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara, vr.called ? 1 : 0,
             vr.why ? vr.why : "?", vr.petSendDelta, vr.poolSendDelta,
             skip ? (int)skip->size() : 0);
         s_absorbAcc = 0;
@@ -411,7 +412,7 @@ void Tick(DWORD now) {
             "sentSame=%d touchMax=%d itemWhileMoney=%d "
             "drops=%d→%d Δ=%d fell=%d near=%d money=%d item=%d "
             "sampMoney=%d sampInfo=%d sendTouch=%d touchMoney=%d "
-            "gates=%d skipStamp=%d stall=%d/%d/%d own=%d lastTry=%d endPara=%d "
+            "gates=%d skipStamp=%d stall=%d/%d/%d fly=%d own=%d lastTry=%d endPara=%d "
             "called=%d why=%s petSendΔ=%u poolSendΔ=%u skipN=%d",
             pst.activatedCount, (unsigned)vr.petSkill, (unsigned)vr.petSkillSlot, vacW, vacH,
             gCfg.mapVacuumEnabled ? 1 : 0, calls, burst, s_absorbAcc, s_tickAcc, s_nearMax,
@@ -419,7 +420,7 @@ void Tick(DWORD now) {
             vr.dropCountAfter, vr.dropsDelta, vr.poolFellSinceLast ? 1 : 0, vr.nearCount,
             vr.nearMoney, vr.nearItem, vr.sampleIsMoney, vr.sampleInfo, vr.sendTouch,
             vr.sendTouchMoney, vr.gatesCleared, vr.skipStamped, vr.stallHeld, vr.stallStamped,
-            vr.stallRestored, vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara,
+            vr.stallRestored, vr.flyHeld, vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara,
             vr.called ? 1 : 0, vr.why ? vr.why : "?", vr.petSendDelta, vr.poolSendDelta,
             skip ? (int)skip->size() : 0);
         s_absorbAcc = 0;

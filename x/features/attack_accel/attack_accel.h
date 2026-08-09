@@ -10,10 +10,8 @@ namespace attack_accel {
 // 非「技能无 CD」。禁止 GA .text hook。
 //
 // 攻速槽（SetBoosterDesired，独立开关，默认关）：写 SecondaryStat.nBooster_@0xBC = -8
-//   并按游戏钟续 tBooster_@0xC4。与清忙锁**刻意不共用开关** —— attackAccel 会顺带下发
-//   animBusyOverride=0 / immediateUp，挂在一起就量不出 booster 的净效果。
-//   0.1.36(无 booster) 与 0.1.37(有 booster) 实测出刀中位同为 63/64ms，说明清忙锁开着时
-//   引擎那条延迟根本不是瓶颈；booster 单开（不碰忙锁）才是它真正的用武场景。
+//   并按游戏钟续 tBooster_@0xC4。与清忙锁**刻意不共用开关**。
+//   用户入口：kAttackAccelBoosterUserEnabled=false（置灰 + Apply 强制关）；代码保留。
 //
 // 实验·砍动作层倒计时（默认关，独立开关，不改动上述加速语义）：
 //   周期把 User+0x120/0x128 指向的 layer+0x14 置 0 → 动画帧尽快推进（偏视觉，易 whiff）。

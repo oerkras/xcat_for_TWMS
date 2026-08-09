@@ -149,6 +149,10 @@ constexpr uint32_t kMobScanIntervalMaxMs = 500u;
 constexpr uint32_t kAttackAccelIntervalFloorMs = 1u;
 // false：首页「攻击加速」置灰不可选；读盘/Normalize/Apply 强制关闭，防旧 ini 误开。
 constexpr bool kAttackAccelUserEnabled = false;
+// false：实验 TAB「攻速槽 nBooster_」置灰；读盘/落盘/Apply 强制关（写 -8 有指纹风险）。
+constexpr bool kAttackAccelBoosterUserEnabled = false;
+// false：实验 TAB「技能满级」置灰；读盘/落盘/Apply 强制关，不启 worker（服端伤不认客户端等级）。
+constexpr bool kSkillMaxLevelUserEnabled = false;
 // 群怪优先：落盘仍用 clusterWeight；0=关，非 0=开（旧 1–100 权重一律视为开）。
 constexpr uint32_t kClusterWeightDefault = 0u;
 constexpr uint32_t kClusterWeightMax = 100u;
@@ -260,9 +264,8 @@ struct PayloadControl {
     uint32_t attackAccelCutLayer = 0;
     // 实验：跳过 PrepareActionLayer（默认关；LocalUser 虚表；实验 TAB）
     uint32_t attackAccelSkipPrepare = 0;
-    // 实验：SecondaryStat.nBooster_ 攻速槽（默认关）。与 attackAccel 完全独立，
-    // 可单开做「不碰忙锁」对照 —— attackAccel 会顺带下发 animBusyOverride/immediateUp，
-    // 若挂在同一开关上就没法把 booster 的净效果量出来。
+    // 实验：SecondaryStat.nBooster_ 攻速槽（默认关）。与 attackAccel 完全独立。
+    // 用户入口已关（kAttackAccelBoosterUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t attackAccelBooster = 0;
     // 已关停：读写一律压回 1，清掉实验期落盘的 2/3。
     uint32_t attackSameFrameBurst = kAttackSameFrameBurstDefault;
@@ -394,9 +397,10 @@ struct PayloadControl {
     // v48: 普攻必出终极一击（Final Attack prop→100；默认关）
     uint32_t finalAttackForce = 0;
     // v54: 已学技能按满级（改 SkillRecord/Ex 等级；默认关）
+    // 用户入口已关（kSkillMaxLevelUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t skillMaxLevel = 0;
-    // v65: 贴身仍射箭 — TryDoingShootAttack 强制 isMortalBlow=1（弓/弩不挥弓；默认开）
-    uint32_t pointBlankShoot = 1;
+    // v65: 不挥弓 — CED + Shoot(MB=1) + FindHit±120；禁止注入未学技（默认关）
+    uint32_t pointBlankShoot = 0;
     // ????????? DragManager.CanPerformAction ??????????
     uint32_t dropAlertBypass = 0;  // 默认关：开着会抑制客户端警戒
     // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认关）。

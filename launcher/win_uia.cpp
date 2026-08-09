@@ -355,8 +355,10 @@ std::wstring DescribeHitAt(IUIAutomation* uia, IUIAutomationElement* card, float
     return out;
 }
 
-// clickVariant 0 = 直调阶梯（Invoke → Legacy 默认动作 → 卡内可 Invoke 后代 → 焦点+Enter），
-// 全不可用才落几何点击；重试变体换水平落点走鼠标兜底。outHow 写回实际走的路径，便于 BIN 核对。
+// BIN 06:47 实锤：卡是 Button(t50000) 且有 InvokePattern，Invoke 返回成功却不跳转
+// （Blink 模拟 click 触发不了处理器）；同轮几何点击一次即进昵称页。
+// 故几何优先，直调（Invoke / Legacy / 卡内后代 / 焦点+Enter）仅作几何失败兜底。
+// outHow / DescribeHitAt 用于 BIN 核对「落点下是不是同一元素」。
 bool ActivateAccountCard(const Session* self, IUIAutomationElement* card, int clickVariant,
                          IUIAutomation* uia, std::wstring* outHow) {
     if (!self || !card) return false;
@@ -365,9 +367,6 @@ bool ActivateAccountCard(const Session* self, IUIAutomationElement* card, int cl
         return true;
     };
 
-    // BIN 06:47 实锤：卡是 Button(t50000) 且有 InvokePattern，Invoke 返回成功却不跳转
-    // （Blink 的模拟 click 触发不了它的处理器）；同轮几何点击一次即进昵称页。
-    // 故首点直接走几何中心，直调只留作几何失败时的最后兜底。
     const float xfs[] = {0.50f, 0.22f, 0.72f};
     const float xf = xfs[(clickVariant >= 0 ? clickVariant : 0) % 3];
     const std::wstring hit = DescribeHitAt(uia, card, xf);
@@ -381,6 +380,7 @@ bool ActivateAccountCard(const Session* self, IUIAutomationElement* card, int cl
         if (ok) return mark(L"kid-inv");
     }
     if (TryFocusEnter(card)) return mark(L"focus-enter");
+    if (outHow) *outHow = L"fail|hit=" + hit;
     return false;
 }
 

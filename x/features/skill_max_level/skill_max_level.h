@@ -7,6 +7,7 @@
 //            Pure 一并抬是本功能语义，非「保留纯加点」）
 // C 双保险：ports::skill::GetSkillLevel（及施法路径）经 AdjustLevelIfForced
 // 关掉还原字典原等级并卸钩。服端结算以服为准。
+// 用户入口：kSkillMaxLevelUserEnabled=false（置灰 + 不启 worker）；代码保留。
 // 默认关；面板 / user.ini [core] skillMaxLevel / XCAT_SKILL_MAX_LEVEL=1。
 
 namespace x {

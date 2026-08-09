@@ -100,6 +100,14 @@ struct OpsState {
         std::string gate;  // probe_ok|lease|denied|policy_deny|lease_expired|no_allow|unknown
         int leaseRemainSec = 0;
         int leaseTtlHours = 64;
+        // OPS 拉取日志命令状态（服务端队列）
+        std::string logFetchId;
+        std::string logFetchMode;    // light|full
+        std::string logFetchStatus;  // queued|offered|acked
+        // 指定设备强更
+        std::string forceTargetId;
+        std::string forceTargetStatus;
+        uint32_t forceTargetBuildId = 0;
     };
     std::vector<ConnectedClient> clients;
     std::string clientsError;

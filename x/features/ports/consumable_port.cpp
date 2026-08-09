@@ -118,6 +118,50 @@ DWORD gLastFkmRebind = 0;
 DWORD gLastBindMissLogHp = 0;
 DWORD gLastBindMissLogMp = 0;
 
+// UseRequest nPOS vs List index.
+// BIN 2026-08-09: bound MP id=2000003 succeeds at pos=listIndex (7), fails when oneBased
+// heuristic flips and primary becomes listIndex+1 (8) — wrong POS burns CD; alt=7 then empty.
+// Prefer listIndex when index>=1; latch ListIndexIsPos only on pos==listIndex qty-drop
+// (never latch PlusOne from alt — mis-attribution permanently flips primary wrong).
+enum class ConsumePosMode : int { Unknown = 0, ListIndexIsPos = 1, ListIndexPlusOne = 2 };
+std::atomic<int> gConsumePosMode{static_cast<int>(ConsumePosMode::Unknown)};
+
+// Only latch ListIndexIsPos (TWMS BIN default). Never latch PlusOne from alt "success":
+// delayed qty drop after primary may be mis-attributed to alt and permanently flip primary wrong.
+void NoteConsumePosSuccess(int listIndex, int pos) {
+    if (listIndex < 0 || pos <= 0) return;
+    if (pos == listIndex) {
+        gConsumePosMode.store(static_cast<int>(ConsumePosMode::ListIndexIsPos),
+                              std::memory_order_relaxed);
+    }
+}
+
+// primary/alt for UseRequest. outAlt may be -1 when no alternate.
+void PickConsumePos(int listIndex, int* outPrimary, int* outAlt) {
+    if (!outPrimary || !outAlt) return;
+    *outPrimary = -1;
+    *outAlt = -1;
+    if (listIndex < 0) return;
+    const int asIndex = listIndex;
+    const int asPlus1 = listIndex + 1;
+    // Always prefer listIndex when ≥1 (BIN). PlusOne mode kept for rare explicit latch only —
+    // currently never written; branch retained for safe rollback if a real +1 layout appears.
+    const int mode = gConsumePosMode.load(std::memory_order_relaxed);
+    if (mode == static_cast<int>(ConsumePosMode::ListIndexPlusOne)) {
+        *outPrimary = asPlus1;
+        *outAlt = (listIndex >= 1) ? asIndex : -1;
+        return;
+    }
+    if (listIndex >= 1) {
+        *outPrimary = asIndex;
+        *outAlt = asPlus1;
+        return;
+    }
+    // Item at index 0: only +1 is a valid maple POS.
+    *outPrimary = asPlus1;
+    *outAlt = -1;
+}
+
 struct UseJobCtx {
     int pos = 0;
     int itemId = 0;  // 2nd arg: itemId (NOT pPet) — see FuncKey.Value / UISlot call sites
@@ -801,8 +845,6 @@ bool FindPotionOnMain(PotionKind kind, FindResult& out) {
     const int n = ListSize(list);
     if (n <= 0 || n > 256) return false;
 
-    const bool oneBased = (n > 1 && ListAt(list, 0) == nullptr && ListAt(list, 1) != nullptr);
-
     int bestPos = -1;
     int bestIdx = -1;
     int bestId = 0;
@@ -816,7 +858,9 @@ bool FindPotionOnMain(PotionKind kind, FindResult& out) {
         if (rank < 0) continue;
         const int qty = ItemQty(item);
         if (qty <= 0) continue;
-        const int pos = oneBased ? i : (i + 1);
+        int pos = -1, alt = -1;
+        PickConsumePos(i, &pos, &alt);
+        (void)alt;
         if (pos <= 0) continue;
         if (bestPos < 0 || rank < bestRank ||
             (rank == bestRank && (pos < bestPos || (pos == bestPos && qty > bestQty)))) {
@@ -911,14 +955,15 @@ bool FindItemIdOnMain(int itemId, FindResult& out) {
     if (!list) return false;
     const int n = ListSize(list);
     if (n <= 0 || n > 256) return false;
-    const bool oneBased = (n > 1 && ListAt(list, 0) == nullptr && ListAt(list, 1) != nullptr);
     for (int i = 0; i < n; ++i) {
         void* item = ListAt(list, i);
         if (!item) continue;
         if (ReadI32(item, gOffItemId) != itemId) continue;
         const int qty = ItemQty(item);
         if (qty <= 0) continue;
-        const int pos = oneBased ? i : (i + 1);
+        int pos = -1, alt = -1;
+        PickConsumePos(i, &pos, &alt);
+        (void)alt;
         if (pos <= 0) continue;
         out.pos = pos;
         out.listIndex = i;
@@ -1078,6 +1123,7 @@ void Init() {
     gLoggedPortalRvaMiss = false;
     gLastUseMiRetryMs = 0;
     gLastPortalMiRetryMs = 0;
+    gConsumePosMode.store(static_cast<int>(ConsumePosMode::Unknown), std::memory_order_relaxed);
     gFieldOffResolved.store(false, std::memory_order_release);
     gOffWmCharacterData = kFbWmCharacterData;
     gOffCdItemSlots = kFbCdItemSlots;
@@ -1104,6 +1150,7 @@ void Shutdown() {
     gLoggedPortalRvaMiss = false;
     gLastUseMiRetryMs = 0;
     gLastPortalMiRetryMs = 0;
+    gConsumePosMode.store(static_cast<int>(ConsumePosMode::Unknown), std::memory_order_relaxed);
 }
 
 bool FindPotion(PotionKind kind, FindResult& out) {
@@ -1132,15 +1179,17 @@ bool FindAndUsePotion(PotionKind kind, FindResult& out) {
 
     // Server may lag; wait on worker WITHOUT touching managed, then one main-thread qty read.
     if (ctx.qtyBefore >= 0 && ctx.qtyAfter >= 0 && ctx.qtyAfter < ctx.qtyBefore) {
+        NoteConsumePosSuccess(ctx.fr.listIndex, ctx.fr.pos);
         x::runtime::LogI("Consumable", "UseRequest ok pos=%d id=%d qty %d→%d", ctx.fr.pos,
                          ctx.fr.itemId, ctx.qtyBefore, ctx.qtyAfter);
         return true;
     }
-    Sleep(220);
+    Sleep(280);
     QtyJobCtx q{};
     q.itemId = ctx.fr.itemId;
     if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
         ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
+        NoteConsumePosSuccess(ctx.fr.listIndex, ctx.fr.pos);
         x::runtime::LogI("Consumable", "UseRequest ok pos=%d id=%d qty %d→%d (delayed)",
                          ctx.fr.pos, ctx.fr.itemId, ctx.qtyBefore, q.qty);
         return true;
@@ -1168,12 +1217,13 @@ bool FindAndUsePotion(PotionKind kind, FindResult& out) {
         !retry.ok) {
         return false;
     }
-    Sleep(220);
+    Sleep(280);
     q = {};
     q.itemId = ctx.fr.itemId;
     if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
         ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
         out.pos = alt;
+        NoteConsumePosSuccess(ctx.fr.listIndex, alt);
         x::runtime::LogI("Consumable", "UseRequest ok altPos=%d id=%d qty %d→%d", alt,
                          ctx.fr.itemId, ctx.qtyBefore, q.qty);
         return true;
@@ -1212,22 +1262,26 @@ bool FindAndUseBoundPotion(bool wantHp, FindResult& out) {
     if (!ctx.used) return false;
 
     if (ctx.qtyBefore >= 0 && ctx.qtyAfter >= 0 && ctx.qtyAfter < ctx.qtyBefore) {
+        NoteConsumePosSuccess(ctx.fr.listIndex, ctx.fr.pos);
         x::runtime::LogI("Consumable", "UseRequest(bound) ok pos=%d id=%d qty %d→%d key=%s",
                          ctx.fr.pos, ctx.fr.itemId, ctx.qtyBefore, ctx.qtyAfter,
                          wantHp ? "PageDown" : "PageUp");
         return true;
     }
-    Sleep(220);
+    Sleep(280);
     QtyJobCtx q{};
     q.itemId = ctx.fr.itemId;
     if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
         ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
+        NoteConsumePosSuccess(ctx.fr.listIndex, ctx.fr.pos);
         x::runtime::LogI("Consumable",
                          "UseRequest(bound) ok pos=%d id=%d qty %d→%d (delayed) key=%s", ctx.fr.pos,
                          ctx.fr.itemId, ctx.qtyBefore, q.qty, wantHp ? "PageDown" : "PageUp");
         return true;
     }
 
+    // One alt-POS retry entirely via main jobs (still no worker managed reads).
+    // Prefer path already uses listIndex; alt covers rare ListIndexPlusOne layouts.
     int alt = -1;
     if (ctx.fr.listIndex >= 0) {
         if (ctx.fr.pos == ctx.fr.listIndex + 1)
@@ -1249,12 +1303,13 @@ bool FindAndUseBoundPotion(bool wantHp, FindResult& out) {
         !retry.ok) {
         return false;
     }
-    Sleep(220);
+    Sleep(280);
     q = {};
     q.itemId = ctx.fr.itemId;
     if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
         ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
         out.pos = alt;
+        NoteConsumePosSuccess(ctx.fr.listIndex, alt);
         x::runtime::LogI("Consumable", "UseRequest(bound) ok altPos=%d id=%d qty %d→%d", alt,
                          ctx.fr.itemId, ctx.qtyBefore, q.qty);
         return true;
@@ -1356,14 +1411,13 @@ bool UseStatChangeItem(int nPos) {
                 if (!list) return;
                 const int n = ListSize(list);
                 if (n <= 0 || n > 256) return;
-                const bool oneBased =
-                    (n > 1 && ListAt(list, 0) == nullptr && ListAt(list, 1) != nullptr);
                 for (int i = 0; i < n; ++i) {
                     void* item = ListAt(list, i);
                     if (!item) continue;
-                    const int pos = oneBased ? i : (i + 1);
-                    if (pos != c->pos) continue;
-                    c->fr.pos = pos;
+                    int primary = -1, alt = -1;
+                    PickConsumePos(i, &primary, &alt);
+                    if (primary != c->pos && alt != c->pos) continue;
+                    c->fr.pos = c->pos;
                     c->fr.listIndex = i;
                     c->fr.itemId = ReadI32(item, gOffItemId);
                     c->fr.qty = ItemQty(item);

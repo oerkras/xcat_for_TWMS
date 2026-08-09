@@ -172,6 +172,9 @@ struct State {
     ULONGLONG lastForcePollMs = 0;
     // 检查瞬间完成时也要让进度区多停几秒，避免用户点完按钮「什么都没发生」。
     ULONGLONG stickyProgressUiUntilMs = 0;
+    // 下一轮探活带回 ACK（OPS log-fetch 已开始上传）
+    std::string logFetchAckId;
+    std::string lastStartedLogFetchId;
 };
 
 State g_state;
@@ -1483,6 +1486,11 @@ struct AccessContactResult {
     std::string mode;
     std::string key;
     std::string detail;
+    // OPS 下发的拉取日志命令（经 access.json 捎带）
+    std::string pendingOp;
+    std::string pendingId;
+    std::string pendingMode;
+    std::string pendingNote;
 };
 AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
                                         const std::string& payloadBinDir, bool quick);
@@ -2275,10 +2283,24 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
     const std::string accessUrl =
         parsed.origin + UpdateAccessPathFromServicePath(xcat::WideToUtf8(parsed.path));
     const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
-    const std::wstring headers = BuildClientIdentityHeaders(id, payloadBinDir.c_str());
+    std::wstring headers = BuildClientIdentityHeaders(id, payloadBinDir.c_str());
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (!g_state.logFetchAckId.empty()) {
+            headers += L"X-XCat-Log-Fetch-Ack: ";
+            headers += xcat::Utf8ToWide(g_state.logFetchAckId);
+            headers += L"\r\n";
+            g_state.logFetchAckId.clear();
+        }
+    }
     const HttpResult access =
         quick ? HttpGetTextQuick(accessUrl, headers.c_str()) : HttpGetText(accessUrl, headers.c_str());
     if (access.err.empty() && access.status == 200) {
+        out.pendingOp = JsonString(access.body, "pendingOp");
+        out.pendingId = JsonString(access.body, "pendingId");
+        out.pendingMode = JsonString(access.body, "pendingMode");
+        out.pendingNote = JsonString(access.body, "pendingNote");
+
         const bool denied = access.body.find("\"allowed\":false") != std::string::npos ||
                             access.body.find("\"allowed\": false") != std::string::npos;
         const bool allowed = access.body.find("\"allowed\":true") != std::string::npos ||
@@ -2320,6 +2342,52 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
     return out;
 }
 
+void TryHandleOpsLogFetch(const std::string& serviceUrl, const std::string& payloadBinDir,
+                          const AccessContactResult& ac) {
+    if (ac.pendingOp != "uploadLogs" || ac.pendingId.empty()) return;
+
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (g_state.lastStartedLogFetchId == ac.pendingId) return;
+    }
+    if (LogUploadBusy()) {
+        xcat::log::Info("Update", "ops log-fetch deferred busy id=%s mode=%s", ac.pendingId.c_str(),
+                        ac.pendingMode.c_str());
+        return;
+    }
+
+    wchar_t mod[MAX_PATH]{};
+    std::string exeBinDir;
+    if (GetModuleFileNameW(nullptr, mod, MAX_PATH)) {
+        exeBinDir = xcat::WideToUtf8(xcat::ParentDirWithSlash(mod));
+    }
+
+    LogUploadRequest req{};
+    req.url = serviceUrl.empty() ? std::string(kDefaultUpdateServiceUrl) : serviceUrl;
+    req.profileId = "twms";
+    req.exeBinDir = exeBinDir;
+    req.payloadBinDir = payloadBinDir;
+    req.mode = (ac.pendingMode == "full" || ac.pendingMode == "Full") ? LogUploadMode::Full
+                                                                       : LogUploadMode::Light;
+    if (!ac.pendingNote.empty()) {
+        req.note = NormalizeUploadNote(ac.pendingNote);
+    } else {
+        req.note = NormalizeUploadNote(std::string("ops-fetch:") + ac.pendingId);
+    }
+
+    if (!StartLogUpload(std::move(req))) {
+        xcat::log::Warn("Update", "ops log-fetch start failed id=%s", ac.pendingId.c_str());
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        g_state.lastStartedLogFetchId = ac.pendingId;
+        g_state.logFetchAckId = ac.pendingId;
+    }
+    xcat::log::Info("Update", "ops log-fetch started id=%s mode=%s", ac.pendingId.c_str(),
+                    ac.pendingMode.empty() ? "light" : ac.pendingMode.c_str());
+}
+
 void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
     const auto finish = []() {
         std::lock_guard<std::mutex> lk(g_state.mtx);
@@ -2338,6 +2406,8 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
     // 运维访问策略：可达以远端为准；不可达则粘性拒绝优先，其次看在线租约。
     {
         const AccessContactResult ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
+        // 封禁退出前也要尽量开跑 OPS 点名的日志上传（服务端会对 pending 放行 /v1/logs）。
+        TryHandleOpsLogFetch(serviceUrl, payloadBinDir, ac);
         if (ac.kind == AccessContactKind::Denied) {
             const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
             xcat::log::Warn("Update", "gate/2 remote m=%s r=%s macs=%zu", GateModeLogCode(ac.mode),

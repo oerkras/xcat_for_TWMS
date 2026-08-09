@@ -198,17 +198,21 @@ constexpr float kEnvSinkVy = 300.f;
 // F6 等仍可用本函数；**F5 Combat 可位移区见 ClampToCombatMoveBounds（raw×0.95）**。
 bool ClampToAirspace(float* x, float* y);
 
-// F5 / 自动赶路可位移区：raw FH AABB 中心等比缩到 kCombatMoveBoundsScale（默认 0.95）。
-// 站位点、Combat 包线、出刀闸与此同框；贴边怪照打，人不得稳出此框。
+// 仅 F5 自动打怪可位移区：raw FH AABB 中心等比缩到 kCombatMoveBoundsScale（默认 0.95）。
+// ★ **只约束左右**：站位夹取 / RTB / oob_hold / Combat 包线左右与预刹用 0.95 的 L/R。
+//   竖直不夹不闸——BIN 10:24 站位被钉死 `sp.y=图底×0.95`（如 -607）=「下界保护」误伤下层怪。
+//   真下穿图底仍由 A 层 raw±slack 的恒生效上拉/bailout 保命（与 F6 unbounded 同门）。
+// **不含** Owner::Travel（超级赶路贴边门，走 raw±slack，勿套 0.95）。
 constexpr float kCombatMoveBoundsScale = 0.95f;
 
-// 写出 move 框。成功且非退化返回 true；无 bounds / 非法 raw 返回 false（调用方应放行）。
+// 写出 move 框（L/R=0.95；T/B 仍写出缩放值供诊断，业务竖直勿当闸）。
+// 成功且非退化返回 true；无 bounds / 非法 raw 返回 false（调用方应放行）。
 bool QueryCombatMoveBounds(float* left, float* top, float* right, float* bottom);
 
-// 点是否在可位移框内。无 bounds 时返回 true（不误杀）。
+// 点是否在可位移**左右**框内（忽略 Y）。无 bounds 时返回 true（不误杀）。
 bool PointInCombatMoveBounds(float x, float y);
 
-// 把点夹进可位移框。无 bounds 时原样返回 true。
+// 把点的 **X** 夹进可位移左右框；Y 原样。无 bounds 时原样返回 true。
 bool ClampToCombatMoveBounds(float* x, float* y);
 
 // 一次 tick 的遥测。由 simple_combat 写进 combat.log（BIN 分析都在那张日志里）。

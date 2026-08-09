@@ -748,12 +748,17 @@ void StartWorker() {
 void StopWorker() {
     gWorkerStop.store(true);
     HANDLE th = gWorkerThread.exchange(nullptr);
-    if (!th) return;
-    const DWORD wait = WaitForSingleObject(th, 5000);
-    if (wait == WAIT_TIMEOUT) {
-        Log("StopWorker wait timeout; thread may still be exiting");
+    if (th) {
+        const DWORD wait = WaitForSingleObject(th, 5000);
+        if (wait == WAIT_TIMEOUT) {
+            Log("StopWorker wait timeout; thread may still be exiting");
+        }
+        CloseHandle(th);
     }
-    CloseHandle(th);
+    // 本 worker 是谓词的唯一提问方，停完它再停刷新线程，顺序不能反。
+    // 挂在这里而不是 Shutdown()：卸载路径走的是 StopAllFeatureWorkers → StopWorker，
+    // auto_lie::Shutdown() 全仓没有调用方。
+    anti_macro_port::StopRefresher();
 }
 
 void SetEnabled(bool on) {

@@ -60,10 +60,12 @@
 #include "../runtime/hang_autopsy.h"
 #include "../runtime/il2cpp_bind.h"
 #include "../runtime/il2cpp_fault_probe.h"
-#include "../runtime/log.h"
+#include "../runtime/il2cpp_network.h"
 #include "../runtime/main_thread_pump.h"
+#include "../runtime/log.h"
 #include "../runtime/managed_main.h"
 #include "../features/ports/world_port.h"
+#include "../x_version.h"
 
 #include "xcat_sound.h"
 
@@ -293,6 +295,8 @@ bool StartLoginPathWorkers() {
     if (AbortRequested()) return false;
     x::runtime::LogI("Bootstrap",
                      "MainPump alive — start LOGIN workers (session + disk preload only)");
+    // BIN 10:11：KickSniff worker 冷 Ensure/FindClass → GC Fatal。泵上预热后再开 worker。
+    XCAT_BOOT_STEP(x::runtime::il2cpp_network::WarmForLoginWorkers());
     XCAT_BOOT_STEP(x::features::kick_sniff::Init());
     XCAT_BOOT_STEP(x::features::kick_sniff::StartWorker());
     XCAT_BOOT_STEP(x::features::galaxy_token_probe::Init());
@@ -667,7 +671,7 @@ DWORD WINAPI BootstrapThread(LPVOID) {
 
 BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID) {
     switch (reason) {
-    case DLL_PROCESS_ATTACH:
+    case DLL_PROCESS_ATTACH: {
         DisableThreadLibraryCalls(h);
         x::runtime::SetImageModule(h);
         x::runtime::LogInit();
@@ -675,9 +679,17 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID) {
         gBootstrapStop.store(false, std::memory_order_release);
         gInManagedProbe.store(false, std::memory_order_release);
         gPhase.store(static_cast<int>(Phase::Idle), std::memory_order_release);
+        // 自报身份：注入路径曾被 Debug 静默覆盖；launcher.log / x.jsonl 一眼能看出跑的是哪份。
+#if defined(_DEBUG)
+        constexpr const char* kBuiltCfg = "Debug";
+#else
+        constexpr const char* kBuiltCfg = "Release";
+#endif
         x::runtime::LogI("Bootstrap",
-                         "attached — defer feature workers until MainPump "
-                         "(cold-start GC gate)");
+                         "attached — %s build=%u built=%s %s %s — defer feature workers "
+                         "until MainPump (cold-start GC gate)",
+                         x::kVersionString, static_cast<unsigned>(x::kBuildId), kBuiltCfg,
+                         __DATE__, __TIME__);
         gBootstrapThread = CreateThread(nullptr, 0, &BootstrapThread, nullptr, 0, nullptr);
         if (!gBootstrapThread) {
             UnmarkReady();
@@ -686,6 +698,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID) {
                              "(would risk GC fatal); probe-ready cleared");
         }
         break;
+    }
     case DLL_PROCESS_DETACH: {
         // Signal only; never join (loader lock).
         gBootstrapStop.store(true, std::memory_order_release);

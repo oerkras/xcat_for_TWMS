@@ -337,7 +337,8 @@ CMS 另有更大的 `ActionType`（Walk1/Stand1/Swing… 动画层，TypeDef 151
 > 说明 `WorkUpdate` 的输入分支压根没进来——既没人覆盖我们，也没人算速度。
 > 所以 §11.6 表格里「被同帧 `SetInput(锁存)` 盖掉」这个判断方向对、机制错：真问题是**门闩没开**。
 >
-> **正解**：构造 `StateEvent` 灌进 Keyboard 设备，见 `x/features/ports/unity_kbd_port.cpp`。
+> **正解**：构造 `StateEvent` 灌进 Keyboard 设备，见 `x/features/ports/unity_kbd_port.cpp`。  
+> **模块设计（Hold / 自管 Repush / 外部用法）**：[`../unity_kbd/模块设计.md`](../unity_kbd/模块设计.md)。  
 > 整条链会当成「真的按住了方向键」来跑，且绕开 Raw Input，**失焦照样生效**。
 >
 > 实机验证（02:14 BIN）：`walkW Hold mode=Kbd kbd=1 vk=0x00 fg=0` 持续位移，

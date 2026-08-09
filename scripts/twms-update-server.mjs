@@ -19,6 +19,10 @@
  *   GET  /twms/admin/bans          (loopback；封禁清单，兼容)
  *   POST /twms/admin/bans          (loopback；action=ban|unban|allow|unallow|setMode)
  *   GET  /twms/admin/access        (loopback；mode+黑白名单)
+ *   POST /twms/admin/log-fetch     (loopback；action=enqueue|cancel；mode=light|full)
+ *   GET  /twms/admin/log-fetch     (loopback；待拉取队列)
+ *   POST /twms/admin/force-target  (loopback；指定设备强更 enqueue|cancel)
+ *   GET  /twms/admin/force-target  (loopback；指定强更队列)
  */
 import http from "node:http";
 import { createReadStream } from "node:fs";
@@ -27,9 +31,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLogUpload } from "./twms-log-upload.mjs";
 import { createDeviceAccess } from "./twms-device-access.mjs";
+import { createLogFetchQueue } from "./twms-log-fetch.mjs";
+import { createForceTargetQueue } from "./twms-force-target.mjs";
 import { createIpGeo } from "./twms-ip-geo.mjs";
 
-const SERVER_VERSION = "0.4.5";
+const SERVER_VERSION = "0.4.7";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
@@ -111,6 +117,23 @@ const access = createDeviceAccess({
   logInfo,
   logWarn,
   ts,
+});
+
+const logFetch = createLogFetchQueue({
+  logInfo,
+  logWarn,
+  ts,
+  parseMacList: (v) => access.parseMacList(v),
+  normalizeMac: (v) => {
+    const list = access.parseMacList(v);
+    return list[0] || "";
+  },
+});
+
+const forceTarget = createForceTargetQueue({
+  logInfo,
+  ts,
+  parseMacList: (v) => access.parseMacList(v),
 });
 
 function headerText(req, name) {
@@ -556,6 +579,20 @@ function listActiveClients(activeSec) {
         gate: gv.gate,
         leaseRemainSec: gv.leaseRemainSec,
         leaseTtlHours: gv.leaseTtlHours,
+        logFetch: logFetch.statusFor({
+          machine: row.machine,
+          deviceId: row.deviceId,
+          macs: row.macs,
+          mac: row.mac,
+          token: row.token,
+        }),
+        forceTarget: forceTarget.statusFor({
+          machine: row.machine,
+          deviceId: row.deviceId,
+          macs: row.macs,
+          mac: row.mac,
+          token: row.token,
+        }),
       };
     })
     .sort((a, b) => a.idleSec - b.idleSec || a.ip.localeCompare(b.ip));
@@ -827,7 +864,18 @@ async function handleUpdate(req, res, routedPath) {
         token: id.token,
       });
     }
-    sendJson(res, 200, {
+    const ackId = headerText(req, "x-xcat-log-fetch-ack");
+    const pending = logFetch.onAccess(
+      {
+        machine: id.machine,
+        deviceId: id.deviceId,
+        macs: id.macs,
+        mac: id.mac,
+        token: id.token,
+      },
+      ackId,
+    );
+    const payload = {
       ok: true,
       allowed: !!decision.allowed,
       mode: decision.mode,
@@ -835,7 +883,15 @@ async function handleUpdate(req, res, routedPath) {
       key: decision.key || "",
       match: decision.match || "",
       at: decision.at || "",
-    });
+    };
+    if (pending) {
+      payload.pendingOp = pending.op;
+      payload.pendingId = pending.id;
+      payload.pendingMode = pending.mode;
+      payload.pendingNote = pending.note || "";
+      payload.pending = pending;
+    }
+    sendJson(res, 200, payload);
     return;
   }
   if (routedPath === "/update/latest.json") {
@@ -845,6 +901,29 @@ async function handleUpdate(req, res, routedPath) {
     return;
   }
   if (routedPath === "/update/force.json") {
+    const id = clientIdentityFromReq(req);
+    const targeted = forceTarget.offerForForceGet(
+      {
+        machine: id.machine,
+        deviceId: id.deviceId,
+        macs: id.macs,
+        mac: id.mac,
+        token: id.token,
+      },
+      id.appVersion,
+    );
+    if (targeted) {
+      sendJson(res, 200, {
+        version: targeted.version,
+        buildId: targeted.buildId,
+        zipName: targeted.zipName,
+        sha256: targeted.sha256,
+        issuedAt: targeted.issuedAt,
+        targetId: targeted.targetId,
+        scope: "device",
+      });
+      return;
+    }
     try {
       await sendFile(
         req,
@@ -1054,6 +1133,140 @@ async function handleAdmin(req, res, routedPath) {
     });
     return;
   }
+  if (routedPath === "/admin/log-fetch" && req.method === "GET") {
+    sendJson(res, 200, { ok: true, pending: logFetch.list() });
+    return;
+  }
+  if (routedPath === "/admin/log-fetch" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const action = String(body?.action || "enqueue").trim().toLowerCase();
+    if (action === "cancel") {
+      const result = body?.id
+        ? logFetch.cancel(String(body.id))
+        : logFetch.cancel({
+            machine: body?.machine,
+            deviceId: body?.deviceId,
+            mac: body?.mac,
+            macs: body?.macs,
+            token: body?.token,
+          });
+      sendJson(res, 200, { ok: true, action: "cancel", result, pending: logFetch.list() });
+      return;
+    }
+    if (action === "enqueue" || action === "fetch" || action === "request") {
+      try {
+        const row = logFetch.enqueue({
+          machine: body?.machine,
+          deviceId: body?.deviceId,
+          mac: body?.mac,
+          macs: body?.macs,
+          token: body?.token,
+          mode: body?.mode,
+          note: body?.note,
+          by: body?.by || "ops",
+        });
+        sendJson(res, 200, { ok: true, action: "enqueue", job: row, pending: logFetch.list() });
+      } catch (err) {
+        sendJson(res, err?.status || 400, {
+          ok: false,
+          error: err?.message || "enqueue failed",
+        });
+      }
+      return;
+    }
+    sendJson(res, 400, { ok: false, error: "action must be enqueue|cancel" });
+    return;
+  }
+  if (routedPath === "/admin/force-target" && req.method === "GET") {
+    sendJson(res, 200, { ok: true, pending: forceTarget.list() });
+    return;
+  }
+  if (routedPath === "/admin/force-target" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const action = String(body?.action || "enqueue").trim().toLowerCase();
+    if (action === "cancel") {
+      const result = body?.id
+        ? forceTarget.cancel(String(body.id))
+        : forceTarget.cancel({
+            machine: body?.machine,
+            deviceId: body?.deviceId,
+            mac: body?.mac,
+            macs: body?.macs,
+            token: body?.token,
+          });
+      sendJson(res, 200, { ok: true, action: "cancel", result, pending: forceTarget.list() });
+      return;
+    }
+    if (action === "enqueue" || action === "push" || action === "target") {
+      try {
+        // 全体 force-update.json 仍在时禁止指定推送，避免「只推一台、别人照样更」
+        const globalForcePath = path.join(releaseRoot, "force-update.json");
+        try {
+          await fs.access(globalForcePath);
+          sendJson(res, 409, {
+            ok: false,
+            error:
+              "global force-update.json is active; clear 全体强制更新 before per-device push",
+            code: "global_force_active",
+          });
+          return;
+        } catch {
+          /* no global force — ok */
+        }
+
+        let version = body?.version;
+        let buildId = body?.buildId;
+        let zipName = body?.zipName;
+        let sha256 = body?.sha256;
+        // 未带包信息时默认用当前 latest.json
+        if (!zipName || !sha256 || !buildId) {
+          const latestPath = path.join(releaseRoot, "latest.json");
+          const latest = JSON.parse(await fs.readFile(latestPath, "utf8"));
+          version = version || latest.version;
+          buildId = buildId || latest.buildId;
+          zipName = zipName || latest.zipName;
+          sha256 = sha256 || latest.sha256;
+        }
+        const zipPath = path.join(releaseRoot, path.basename(String(zipName || "")));
+        try {
+          const st = await fs.stat(zipPath);
+          if (!st.isFile()) throw new Error("not a file");
+        } catch {
+          const err = new Error(`release zip missing: ${path.basename(String(zipName || ""))}`);
+          err.status = 400;
+          throw err;
+        }
+        const row = forceTarget.enqueue({
+          machine: body?.machine,
+          deviceId: body?.deviceId,
+          mac: body?.mac,
+          macs: body?.macs,
+          token: body?.token,
+          version,
+          buildId,
+          zipName,
+          sha256,
+          note: body?.note,
+          by: body?.by || "ops",
+        });
+        sendJson(res, 200, {
+          ok: true,
+          action: "enqueue",
+          job: row,
+          pending: forceTarget.list(),
+          note: "queue is in-memory; restarting update server drops pending targets",
+        });
+      } catch (err) {
+        sendJson(res, err?.status || 400, {
+          ok: false,
+          error: err?.message || "enqueue failed",
+        });
+      }
+      return;
+    }
+    sendJson(res, 400, { ok: false, error: "action must be enqueue|cancel" });
+    return;
+  }
   sendJson(res, 404, { ok: false, error: "not found" });
 }
 
@@ -1099,7 +1312,14 @@ const server = http.createServer(async (req, res) => {
         macs: id.macs,
         token: id.token,
       });
-      if (!decision.allowed) {
+      const fetchBypass = logFetch.allowsUpload({
+        machine: id.machine,
+        deviceId: id.deviceId,
+        macs: id.macs,
+        mac: id.mac,
+        token: id.token,
+      });
+      if (!decision.allowed && !fetchBypass) {
         noteAccessDeny({
           ip,
           machine: id.machine,
@@ -1173,6 +1393,8 @@ server.listen(port, host, () => {
   );
   logInfo(`client default: http://xcat.work:${port}${basePath}`);
   logInfo(`admin: POST ${basePath}/admin/shutdown (loopback only)`);
+  logInfo(`admin: POST ${basePath}/admin/log-fetch (enqueue light|full)`);
+  logInfo(`admin: POST ${basePath}/admin/force-target (per-device force update)`);
 });
 
 server.on("error", (err) => {

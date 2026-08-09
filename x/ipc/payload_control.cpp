@@ -375,11 +375,13 @@ void ApplyControl(const xcat::PayloadControl& c) {
     const bool attackAccelOn =
         xcat::kAttackAccelUserEnabled && c.attackAccel != 0;
     x::features::attack_accel::SetDesired(attackAccelOn);
-    x::features::attack_accel::SetBoosterDesired(c.attackAccelBooster != 0);
+    x::features::attack_accel::SetBoosterDesired(
+        xcat::kAttackAccelBoosterUserEnabled && c.attackAccelBooster != 0);
     x::features::attack_accel::SetCutLayerDesired(c.attackAccelCutLayer != 0);
     x::features::attack_accel::SetSkipPrepareDesired(c.attackAccelSkipPrepare != 0);
     x::features::final_attack_force::SetDesired(c.finalAttackForce != 0);
-    x::features::skill_max_level::SetDesired(c.skillMaxLevel != 0);
+    x::features::skill_max_level::SetDesired(xcat::kSkillMaxLevelUserEnabled &&
+                                             c.skillMaxLevel != 0);
     // 攻击加速：清动作忙锁，换怪贴身不再被 animBusy(220) 拖住。
     x::features::ports::attack::SetAnimBusyOverrideMs(attackAccelOn ? 0 : -1);
     // 加速：Down+Up 同泵，消 pending 跨 tick（刀间隔只跟面板 interval）。

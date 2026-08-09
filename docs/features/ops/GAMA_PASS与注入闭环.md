@@ -71,7 +71,7 @@ StartOneClick
 
 | 项 | 约定 |
 |---|---|
-| 点击 | **UIA** Invoke / 可点击点（非 CDP DOM） |
+| 点击 | **GP / 繼續**：UIA Invoke 优先；**账号卡**：几何 `SendInput`（见 [`GAMA_PASS账号卡UIA点选.md`](GAMA_PASS账号卡UIA点选.md)） |
 | 账号 | UI「登录账号」→ 第几个（1=第一个）；落盘 `gamapass_account_slot.txt`；UIA 按带 `@` 等 Name 自上而下取第 N 项 |
 | 昵称 | UI「游戏昵称」→ 第几个；落盘 `gamapass_nick_slot.txt`；Radio/ListItem 第 N 项后点繼續 |
 | HTTP 死路径 | `http_gamapass_login.*` 非主路径；禁止 `prompt=login→none` 改写 |
@@ -95,10 +95,11 @@ StartOneClick
 | 会话目录 | 浏览器默认 User Data（不建 `GamaPassCdpProfile`） |
 | 拉起 | `CreateProcess` + Galaxy URL；无 remote-debugging-port |
 | 点选 | `launcher/win_uia.cpp` + `gamapass_uia_login.cpp` |
+| 账号卡 | **几何 `SendInput` 为主**（Invoke 假成功）；门禁/cooldown/日志见 [`GAMA_PASS账号卡UIA点选.md`](GAMA_PASS账号卡UIA点选.md) |
 | 收票 | `gamapass_ticket_harvest.cpp`：经典版 cmdline 四元组 |
 | 落到账密页 | `ManualLogin`：提示在本窗登录；出现选账号后继续 UIA |
 | 关窗 | 收票后对附着 HWND `WM_CLOSE`；**不清 Cookie / 不写回 / 不 refresh** |
-| 日志锚点 | `[gamapass-uia]` / `click-gamapass` / `select-account` / `nick-` / `接管票` |
+| 日志锚点 | `[gamapass-uia]` / `click-gamapass` / `click-account-card` / `nick-` / `接管票` |
 
 ### 3.2 关浏览器时机（UIA）
 
@@ -269,7 +270,8 @@ GA exports → native settle ≈15s + UnityWndClass
 | 路径 | 职责 |
 |---|---|
 | `launcher/gamapass_uia_login.*` | **主路径** UIA 点选；日常浏览器 + 收票 |
-| `launcher/win_uia.*` | UI Automation 封装 |
+| `launcher/win_uia.*` | UI Automation 封装；账号卡几何激活 |
+| [`GAMA_PASS账号卡UIA点选.md`](GAMA_PASS账号卡UIA点选.md) | 账号卡 Invoke 不可用结论 + 门禁/cooldown/BIN 验收 |
 | `launcher/gamapass_ticket_harvest.*` | 经典版 cmdline 收票共用 |
 | `launcher/gamapass_cdp_login.*` | （保留）旧 CDP 状态机；一键入口不再调用；槽位 Get/Set 仍在此 |
 | `launcher/chromium_cdp.*` | 调试口 / Runtime.evaluate；`PrepareCdpSafeUserData`；`RequestCdpSessionResync`；`CloseRemoteBrowser` 轮询落盘 |
@@ -292,7 +294,7 @@ GA exports → native settle ≈15s + UnityWndClass
 
 | 现象 | 优先看 |
 |---|---|
-| 停在 select-account | `msc_launcher.log` 是否 `clicked-acc` 后仍不离页；应用单次坐标点击包 |
+| 停在 select-account / 狂点账号列表 | 见 [`GAMA_PASS账号卡UIA点选.md`](GAMA_PASS账号卡UIA点选.md)：须 `click-account-card|…|pt|hit=` 且 cooldown≥2.5s；勿指望 Invoke |
 | 官网「登录阶段超时」 | GP 点击后是否长时间停在 Galaxy；见 NGM 后是否 blank；干净重拉日志是否含 `kill launch-chain` 的 NGM 计数；残留旧 NGM 时 TokenWait 会空等 |
 | 偶发首发 `accounts/error`、重开就好 | OAuth 半残态；现已自动 `oauth-error-clean-restart` 1 次。若日志无该标记仍失败：日常窗勾记住 / 关多余 Galaxy·OAuth 标签后再试 |
 | 重拉后掉到完整 `/login` | 是否只杀了 Classic；是否过早 Browser.close；标准 Chrome 是否应用「复用/强制重同步」；日常窗是否仍勾选记住 |

@@ -151,7 +151,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.hideOtherPlayers = 0;
     out.frameLock = 1;  // 默认开
     out.frameLockFps = kFrameLockFpsDefault;
-    out.pointBlankShoot = 1;  // 默认开：贴身仍射箭
+    out.pointBlankShoot = 0;  // 默认关：job300 贴身闸未破前勿开；曾因注入未学 MB 秒断
     out.dropAlertBypass = 0;  // 默认关
     out.auctionTownBypass = 0;
     out.autoSell = 0;
@@ -186,8 +186,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.attackAccelSkipPrepare = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "attackAccelBooster", b))
         out.attackAccelBooster = b ? 1u : 0u;
+    if (!kAttackAccelBoosterUserEnabled) out.attackAccelBooster = 0;
     if (IniGetBool(ini, "core", "finalAttackForce", b)) out.finalAttackForce = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "skillMaxLevel", b)) out.skillMaxLevel = b ? 1u : 0u;
+    if (!kSkillMaxLevelUserEnabled) out.skillMaxLevel = 0;
     // 同帧连打已关停：无视落盘值，强制 1。
     out.attackSameFrameBurst = kAttackSameFrameBurstDefault;
     // fly 开关不读 ini（历史 key 忽略）；只读会话态 state/fly_armed。
@@ -428,9 +430,11 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         (kAttackAccelUserEnabled && normalized.attackAccel) ? 1u : 0u;
     normalized.attackAccelCutLayer = normalized.attackAccelCutLayer ? 1u : 0u;
     normalized.attackAccelSkipPrepare = normalized.attackAccelSkipPrepare ? 1u : 0u;
-    normalized.attackAccelBooster = normalized.attackAccelBooster ? 1u : 0u;
+    normalized.attackAccelBooster =
+        (kAttackAccelBoosterUserEnabled && normalized.attackAccelBooster) ? 1u : 0u;
     normalized.finalAttackForce = normalized.finalAttackForce ? 1u : 0u;
-    normalized.skillMaxLevel = normalized.skillMaxLevel ? 1u : 0u;
+    normalized.skillMaxLevel =
+        (kSkillMaxLevelUserEnabled && normalized.skillMaxLevel) ? 1u : 0u;
     normalized.attackSameFrameBurst = kAttackSameFrameBurstDefault;
     normalized.fly = normalized.fly ? 1u : 0u;
     normalized.flyMode = ClampFlyMode(normalized.flyMode);

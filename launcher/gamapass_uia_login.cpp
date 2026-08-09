@@ -333,6 +333,11 @@ bool LooksLikeAccountsOauthError(msc::uia::Session& uia, IUIAutomationElement* r
 
 bool IsJunkClickName(const std::wstring& name) {
     if (name.empty()) return true;
+    // 账号卡日志会拼 |WxH|t…|v…|how；只判名字段，别把诊断后缀当垃圾（BIN 07:49：
+    // 点卡成功 → size>80 被拒 → lastAccClickAt 未记 → 40ms 狂点账号列表）
+    const size_t pipe = name.find(L'|');
+    const std::wstring stem = (pipe == std::wstring::npos) ? name : name.substr(0, pipe);
+    if (stem.empty()) return true;
     const wchar_t* junk[] = {
         L"Google", L"Chrome", L"崩潰", L"崩溃", L"統計", L"统计", L"使用情況", L"使用情况",
         L"報告",   L"报告",   L"cookie", L"Cookie", L"隱私", L"隐私", L"設定", L"设置",
@@ -341,9 +346,9 @@ bool IsJunkClickName(const std::wstring& name) {
         L"關閉",   L"关闭",   L"Close",
     };
     for (const wchar_t* j : junk) {
-        if (name.find(j) != std::wstring::npos) return true;
+        if (stem.find(j) != std::wstring::npos) return true;
     }
-    return name.size() > 80;  // 过长多半是说明文字/复选框文案
+    return stem.size() > 80;  // 过长多半是说明文字/复选框文案
 }
 
 bool LooksLikeGalaxyReady(msc::uia::Session& uia, IUIAutomationElement* root) {
@@ -534,6 +539,9 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     DWORD lastGpClickAt = 0;
     DWORD lastAccClickAt = 0;
     DWORD selectUrlSeenAt = 0;  // 地址栏真正到 select-account 的时刻（跳转在途不算）
+    DWORD selectDomSeenAt = 0;  // 首次在 DOM 上看到选账号页（地址栏抖动时的兜底计时）
+    bool accGateLogged = false;    // 一次性：首点被门禁挡住
+    bool accNoCardLogged = false;  // 一次性：选账号页上没解析出卡
     DWORD lastNickClickAt = 0;
     DWORD lastContinueClickAt = 0;
     int gpRetryCount = 0;
@@ -555,6 +563,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     constexpr DWORD kAccRetryMs = 2500;       // 点卡后仍停选账号页 → 重点卡
     // BIN 06:15/06:38：卡已进树但地址栏仍 oauth2/authorize，首点落在即将被替换的页上 → 必废
     constexpr DWORD kAccSettleMs = 320;       // 地址栏到 select-account 后再等一拍才首点
+    constexpr DWORD kAccStarveMs = 1200;      // 地址栏读数抖动时的兜底：见页 1.2s 必点
     constexpr DWORD kNickRetryMs = 3000;      // 点昵称后未到繼續/跳转 → 重选
     constexpr DWORD kContinueRetryMs = 5000;  // BIN 03:14/03:23：首点后 2.5s 仍 Nick 多为跳转中，误重试
     constexpr DWORD kContinueRetryMsAgain = 2800;  // 第 2 次及以后仍未离开再重点
@@ -835,14 +844,13 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
 
             // 跳转在途（URL 还在 authorize/其它过渡页）时卡片已可见但点了必废：
             // 等地址栏真到 select-account 且稳定一拍再首点（BIN 06:15/06:38 的 v0 全废）
-            if (urlNow == UrlKind::SelectAccount) {
-                if (!selectUrlSeenAt) selectUrlSeenAt = now;
-            } else if (urlNow != UrlKind::Unknown) {
-                selectUrlSeenAt = 0;
-            }
+            if (urlNow == UrlKind::SelectAccount && !selectUrlSeenAt) selectUrlSeenAt = now;
+            if (onSelect && !selectDomSeenAt) selectDomSeenAt = now;
+            // 计时器只记不清；settle 不再要求「当前帧仍是 SelectAccount」（URL/标题抖动会饿死首点）
+            // DOM 见页兜底：最迟 kAccStarveMs 必点（BIN 07:13/07:28）
             const bool accSettled =
-                selectUrlSeenAt ? (now - selectUrlSeenAt) >= kAccSettleMs
-                                : (lastGpClickAt && sinceGp >= 2500);  // 地址栏读不到时的兜底
+                (selectUrlSeenAt && (now - selectUrlSeenAt) >= kAccSettleMs) ||
+                (selectDomSeenAt && (now - selectDomSeenAt) >= kAccStarveMs);
 
             // 点卡成功后留时间给跳转；超时仍停选账号页再重点
             const bool allowAccClick =
@@ -861,16 +869,34 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
             // 选账号页：紧单卡尺寸过滤 + 几何点击；日志带 WxH 便于核对选区
             if (allowAccClick && onSelect) {
                 clicked = uia.ClickAccountCardIndex(root, idx, &hitName, accRetryCount);
-                if (clicked && IsJunkClickName(hitName)) clicked = false;
+                // 只要选出了候选并尝试过激活（hitName 非空），就必须记 cooldown——
+                // 成功/失败/曾误 junk 都不许 40ms 狂点（BIN 07:49 + review High）
+                if (clicked || !hitName.empty()) {
+                    lastClickAt = now;
+                    lastAccClickAt = now;
+                    ++accRetryCount;
+                }
+                if (clicked) {
+                    Log(log, std::wstring(kLogTag) + L" click-account-card|slot" +
+                                 std::to_wstring(accountSlot) + L"|" + hitName.substr(0, 96) +
+                                 L"|card（待确认跳转）");
+                } else if (!hitName.empty()) {
+                    Log(log, std::wstring(kLogTag) + L" click-account-card|fail|" +
+                                 hitName.substr(0, 96) + L"（已记 cooldown）");
+                } else if (!accNoCardLogged) {
+                    accNoCardLogged = true;
+                    Log(log, std::wstring(kLogTag) +
+                                 L" 首点未发出：选账号页未解析出账号卡（种子/尺寸过滤全落空）");
+                }
+            } else if (onSelect && !allowAccClick && !accGateLogged) {
+                accGateLogged = true;
+                Log(log, std::wstring(kLogTag) + L" 首点被门禁挡住：url=" + UrlKindName(urlNow) +
+                             L" urlAge=" +
+                             std::to_wstring(selectUrlSeenAt ? (now - selectUrlSeenAt) : 0) +
+                             L" domAge=" +
+                             std::to_wstring(selectDomSeenAt ? (now - selectDomSeenAt) : 0));
             }
-            if (clicked) {
-                lastClickAt = now;
-                lastAccClickAt = now;
-                ++accRetryCount;
-                Log(log, std::wstring(kLogTag) + L" click-account-card|slot" +
-                             std::to_wstring(accountSlot) + L"|" + hitName.substr(0, 64) +
-                             L"|card（待确认跳转）");
-            } else if (now - lastStageLog > 5000) {
+            if (!clicked && now - lastStageLog > 5000) {
                 lastStageLog = now;
                 if (onSelect)
                     Log(log, std::wstring(kLogTag) + L" 等待选账号卡片…settled=" +

@@ -3,6 +3,7 @@
 #include "il2cpp_bind.h"
 #include "il2cpp_shape.h"
 #include "log.h"
+#include "main_thread_pump.h"
 
 #include <atomic>
 #include <cstdio>
@@ -90,9 +91,9 @@ void ApplyOne(void* klass, const char* nm, size_t fb, size_t* out, bool (*ok)(si
     }
 }
 
-}  // namespace
-
-void Ensure() {
+// 必须在 MainPump 上跑：Resolve klass + field_get_offset 可能触元数据/隐式类初始化。
+// BIN 10:11：KickSniff worker 上 Ensure → GC「Collecting from unknown thread」。
+void EnsureOnPump() {
     if (gTried.load(std::memory_order_acquire)) return;
     gTried.store(true, std::memory_order_release);
     if (!x::runtime::il2cpp::Ensure()) {
@@ -127,6 +128,53 @@ void Ensure() {
         "session={err=0x%zX recv=0x%zX st=0x%zX}",
         gPath, hits, kExpect, gOffNmSession, gOffNmSessionState, gOffNmPacketQueue,
         gOffNmOpcodeHashSet, gOffSessionPendingError, gOffSessionRecvList, gOffSessionState);
+}
+
+void EnsureJob(void* /*user*/) { EnsureOnPump(); }
+
+}  // namespace
+
+void Ensure() {
+    if (gTried.load(std::memory_order_acquire)) return;
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        EnsureOnPump();
+        return;
+    }
+    // 泵未装好时禁止 InvokeAndWait（其内部会再 Ensure/InstallPump，与 shape 冷解析互锁）。
+    if (!x::runtime::main_thread::IsInstalled()) {
+        EnsureOnPump();
+        return;
+    }
+    // worker：投到泵上解析，禁止本线程碰 klass/field meta。
+    if (!x::runtime::main_thread::InvokeAndWait(&EnsureJob, nullptr, 2500,
+                                                 x::runtime::main_thread::JobPrio::High)) {
+        if (gTried.exchange(true, std::memory_order_acq_rel)) return;
+        snprintf(gPath, sizeof(gPath), "fallback-offpump");
+        x::runtime::LogW("Il2CppNetwork",
+                         "Ensure pump-wait fail — dump fallback (avoid GC unknown-thread)");
+    }
+}
+
+void WarmForLoginWorkers() {
+    // 在泵上把 FAC/NM/WM klass + network 字段偏移一次算完；LOGIN workers 只读缓存。
+    auto job = [](void*) {
+        (void)x::runtime::il2cpp_shape::ResolveNetworkManagerFacadeKlass();
+        (void)x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
+        (void)x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+        EnsureOnPump();
+        x::runtime::LogI("Il2CppNetwork", "WarmForLoginWorkers done path=%s",
+                         gPath[0] ? gPath : "?");
+    };
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        job(nullptr);
+        return;
+    }
+    if (!x::runtime::main_thread::InvokeAndWait(job, nullptr, 2500,
+                                                 x::runtime::main_thread::JobPrio::High)) {
+        // 勿在此 Ensure()→fallback-offpump 永久钉死：冷启偶发 idle 拒排时还应允许后续 Off* 再试。
+        x::runtime::LogW("Il2CppNetwork",
+                         "WarmForLoginWorkers pump-wait fail — leave untried for later Ensure");
+    }
 }
 
 size_t OffNmSession() {

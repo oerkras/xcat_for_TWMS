@@ -1,4 +1,4 @@
-// TWMS Classic — data-plane invuln v2.6.7 (field-hash remount 2026-08-06).
+// TWMS Classic — data-plane invuln v2.6.8 (land-pin after InterStage 2026-08-09).
 //
 // Hit gate: User+0x298 i-frame (~100ms worker top-up).
 // Anti-blink hybrid: MainPump frame tick (before+after SendWill) + worker 8ms backup.
@@ -8,6 +8,9 @@
 // CashShop/GlobalMarket — BIN D217：拍卖 scene=5 时 80ms FindAll 堵 MainPump）。
 // 裸 gFindAll：泵内硬检 LoginFreeze + MapTransitBlock + PlayReady。
 // BIN 7ae984：!PlayReady（InterStage 等）停写 SS/hit + 卸 FrameTick，避免迁频窗污染/抢主线程。
+// map_id quiet：挡「MapId 闪仍 PlayReady」进门脏窗（BIN 02:48）；回场急钉靠 resume
+// 先于 quiet continue（BIN 07:51：旧顺序让 quiet 活过 InterStage → 落地无伤真空）。
+// 不在 !PlayReady 提前清 quiet，避免脏窗内 PlayReady 闪断误开写闸。
 // 1.5s ACCEPT grace; LU drop keeps SecondaryStat（仅 PlayReady 内写）。
 // No hotkey — panel / [core] invuln / XCAT_INVULN=1 only.
 // Docs: docs/features/invuln/模块设计.md
@@ -154,7 +157,7 @@ constexpr DWORD kPumpRetryMs = 2000;
 constexpr DWORD kLandQuietMs = 500;
 DWORD gLandQuietUntilMs = 0;
 // BIN 02:48：手动换图 MapId 已闪仍 PlayReady 时 Invuln 还写 LU → InterStage 永卡。
-// MapId 变即静默禁写；2026-08-09：3000→1000（仍防脏窗，缩短 F5/F6 无敌真空）。
+// MapId 变即静默禁写；回场由 resume 清 quiet（勿在 !PlayReady 闪断时提前放开）。
 constexpr DWORD kMapIdQuietMs = 1000;
 DWORD gMapIdQuietUntilMs = 0;
 int gQuietTrackMapId = 0;
@@ -858,9 +861,10 @@ void EnsureBindings() {
 DWORD WINAPI InvulnThread(LPVOID) {
     Beep(740, 80);
     WarnIfSoftEnvRequested();
-    Log("Invuln worker v2.6.7 start (hit=+0x298; anti-blink=frame+backup8ms; "
+    Log("Invuln worker v2.6.8 start (hit=+0x298; anti-blink=frame+backup8ms; "
         "bind=wm.MyUser+FindAll; rebind=%ums/%ums grace=%ums; "
-        "FindAll=PlayReady+TransitBlock; write=PlayReady-only; probe228 %s)",
+        "FindAll=PlayReady+TransitBlock; write=PlayReady-only; "
+        "map_quiet=pre-InterStage-only; probe228 %s)",
         (unsigned)kRebindFastMs, (unsigned)kRebindMs, (unsigned)kBindGraceMs,
         ProbeEnabled() ? "on" : "off");
 
@@ -921,6 +925,9 @@ DWORD WINAPI InvulnThread(LPVOID) {
             if (!gSecondaryStats.empty()) ClearSecondaryStats("transit !PlayReady");
             wasPlayReady = false;
             gQuietTrackMapId = 0;  // 下一张图重新建 track
+            // 注意：此处**不**清 gMapIdQuietUntilMs。
+            // quiet 只服务「MapId 已闪仍 PlayReady」的进门脏窗（BIN 02:48）；
+            // 回场急钉靠下面「resume 先于 quiet continue」恢复，勿在 !PlayReady 闪断时提前放开写闸。
             if (now - lastHb >= 5000) {
                 lastHb = now;
                 Log("heartbeat n=%lu desired=%d transit=1 blink=off lu=%p alive=0", gTickCount,
@@ -930,7 +937,34 @@ DWORD WINAPI InvulnThread(LPVOID) {
             continue;
         }
 
+        // 刚回 Field：必须先于 map_id quiet 的 continue。
+        // 旧顺序：quiet 定时器若活过 InterStage，回场整段被 continue 掉，急钉要等 quiet 到期
+        // （BIN 07:51 怪密图落地 hit298=1320）。resume 本就会 gMapIdQuietUntilMs=0，
+        // 挪到 quiet 之前 = 恢复 v2.6.7 写闸意图，不是在脏窗里新开写。
+        // 写闸未放松：!PlayReady 仍停写；MapId 闪变仍 PlayReady 时 quiet 仍禁写（BIN 02:48）。
+        if (on && play && !wasPlayReady) {
+            gLandQuietUntilMs = now + kLandQuietMs;
+            if (gLandQuietUntilMs == 0) gLandQuietUntilMs = 1;
+            gMapIdQuietUntilMs = 0;  // Field 已回，结束 map_id 静默
+            TryArmFrameBlink("play_ready");
+            lastGate = 0;  // 落地立刻补钉一拍
+            Log("transit resume: play-ready → rebind+write (land_quiet=%ums)",
+                (unsigned)kLandQuietMs);
+            // 当拍急绑：MyUser 已就绪则立刻写，勿空等本拍后段 / FindAll 静默。
+            // land_quiet 只挡 FindAll，不挡这条 WM.MyUser 快路径。
+            if (TryBindWmMyUser()) {
+                ApplyInvuln(true);
+                lastGate = now;
+                Log("land pin hit298=%d (resume MyUser)",
+                    ReadI32(gLocalUser, kOffHitPeriodRemain));
+            } else {
+                Log("land pin defer: MyUser not ready yet");
+            }
+        }
+        wasPlayReady = play;
+
         // MapId 闪变仍 PlayReady：立刻停写（手动/Travel 进门脏窗，BIN 02:48）。
+        // 语义不变：只挡进门脏窗；真正回场由上面的 resume 清 quiet 并急钉。
         if (on && play) {
             const int mid = x::features::ports::world::GetMapId();
             if (mid > 0) {
@@ -956,23 +990,6 @@ DWORD WINAPI InvulnThread(LPVOID) {
                 continue;
             }
         }
-
-        // 刚回 Field：重新武装帧钉（desired 仍开）；落地静默窗内禁 FindAll。
-        if (on && play && !wasPlayReady) {
-            gLandQuietUntilMs = now + kLandQuietMs;
-            if (gLandQuietUntilMs == 0) gLandQuietUntilMs = 1;
-            gMapIdQuietUntilMs = 0;  // Field 已回，结束 map_id 静默
-            TryArmFrameBlink("play_ready");
-            lastGate = 0;  // 落地立刻补钉一拍
-            Log("transit resume: play-ready → rebind+write (land_quiet=%ums)",
-                (unsigned)kLandQuietMs);
-            // 当拍急绑：MyUser 已就绪则立刻写，勿空等本拍后段 / FindAll 静默。
-            if (TryBindWmMyUser()) {
-                ApplyInvuln(true);
-                lastGate = now;
-            }
-        }
-        wasPlayReady = play;
 
         if (on && play && !gFrameBlink.load() && now - lastPumpTry >= kPumpRetryMs) {
             lastPumpTry = now;

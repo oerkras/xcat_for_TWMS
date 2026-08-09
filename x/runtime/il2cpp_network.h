@@ -7,7 +7,12 @@
 
 namespace x::runtime::il2cpp_network {
 
+// 字段偏移解析。内部保证：未完成时若在非泵线程会 InvokeAndWait 到 MainPump
+//（BIN 10:11 KickSniff worker 直调 → GC「Collecting from unknown thread」）。
 void Ensure();
+
+// LOGIN workers 启动前显式预热（与 Ensure 等价；语义上标「冷启动闸」）。
+void WarmForLoginWorkers();
 
 // —— NetworkManager Facade（TypeDef 13772 / hash c053d224…）——
 size_t OffNmSession();        // fb 0x10 Session*

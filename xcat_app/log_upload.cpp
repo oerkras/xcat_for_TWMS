@@ -1250,6 +1250,39 @@ std::string BuildUploadJson(const LogUploadRequest& req, const std::vector<LogBl
     return body;
 }
 
+ClientHostIdentity ResolveClientHostIdentityImpl(const std::string& payloadBinDir);
+
+std::wstring SanitizeUploadHdr(const std::wstring& in) {
+    std::wstring out;
+    out.reserve(in.size());
+    for (wchar_t ch : in) {
+        if (ch == L'\r' || ch == L'\n' || ch == 0) continue;
+        out.push_back(ch);
+    }
+    return out;
+}
+
+// 让 /v1/logs* 门禁能认设备（OPS 拉取封禁机日志时靠此匹配 pending）。
+std::wstring BuildLogUploadIdentityHeaders(const std::string& payloadBinDir) {
+    const ClientHostIdentity id = ResolveClientHostIdentityImpl(payloadBinDir);
+    const std::string token = LoadOpsToken(payloadBinDir);
+    std::string macJoined;
+    for (size_t i = 0; i < id.macs.size(); ++i) {
+        if (i) macJoined += ',';
+        macJoined += id.macs[i];
+        if (macJoined.size() > 180) break;
+    }
+    wchar_t buf[768]{};
+    _snwprintf(buf, 768,
+               L"X-XCat-Machine: %s\r\nX-XCat-Device-Id: %s\r\n"
+               L"X-XCat-Mac: %s\r\nX-XCat-Token: %s\r\n",
+               SanitizeUploadHdr(xcat::Utf8ToWide(id.machine)).c_str(),
+               SanitizeUploadHdr(xcat::Utf8ToWide(id.deviceId)).c_str(),
+               SanitizeUploadHdr(xcat::Utf8ToWide(macJoined)).c_str(),
+               SanitizeUploadHdr(xcat::Utf8ToWide(token)).c_str());
+    return buf;
+}
+
 HttpResult HttpExchangeOnce(const ParsedUrl& base, const std::wstring& path, const wchar_t* method,
                             const void* body, DWORD bodyLen, const std::wstring& headers,
                             DWORD accessType, const char* mode) {
@@ -1358,11 +1391,12 @@ HttpResult HttpExchange(const ParsedUrl& base, const std::wstring& path, const w
                             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, "auto-proxy");
 }
 
-HttpResult PostJson(const ParsedUrl& url, const std::string& body) {
+HttpResult PostJson(const ParsedUrl& url, const std::string& body, const std::string& payloadBinDir) {
     const std::wstring headers =
         L"Content-Type: application/json\r\n"
         L"Accept: application/json\r\n"
-        L"Connection: close\r\n";
+        L"Connection: close\r\n" +
+        BuildLogUploadIdentityHeaders(payloadBinDir);
     return HttpExchange(url, url.path, L"POST", body.data(), static_cast<DWORD>(body.size()), headers);
 }
 
@@ -1460,10 +1494,12 @@ bool UploadViaSession(const ParsedUrl& url, const LogUploadRequest& req,
 
     SetSnapshot(LogUploadPhase::Uploading, "上传中（创建会话）...");
     const std::wstring sessionPath = JoinServicePath(url, L"/v1/logs/sessions");
+    const std::wstring identityHeaders = BuildLogUploadIdentityHeaders(req.payloadBinDir);
     const std::wstring jsonHeaders =
         L"Content-Type: application/json\r\n"
         L"Accept: application/json\r\n"
-        L"Connection: close\r\n";
+        L"Connection: close\r\n" +
+        identityHeaders;
     HttpResult created = HttpExchange(url, sessionPath, L"POST", "{}", 2, jsonHeaders);
     outStatus = created.status;
     if (!created.err.empty()) {
@@ -1510,6 +1546,7 @@ bool UploadViaSession(const ParsedUrl& url, const LogUploadRequest& req,
         headers += std::to_wstring(log.size);
         headers += L"\r\nX-XCat-Truncated: ";
         headers += log.truncated ? L"1\r\n" : L"0\r\n";
+        headers += identityHeaders;
 
         HttpResult put = HttpExchange(url, filePath, L"PUT", log.bytes.data(),
                                       static_cast<DWORD>(log.bytes.size()), headers);
@@ -1614,7 +1651,7 @@ void UploadWorker(LogUploadRequest req) {
         xcat::log::Warn("LogUpload", "session api missing; fallback legacy json");
         SetSnapshot(LogUploadPhase::Uploading, "上传中（兼容模式）...");
         const std::string body = BuildUploadJson(req, logs);
-        const HttpResult resp = PostJson(url, body);
+        const HttpResult resp = PostJson(url, body, req.payloadBinDir);
         if (!resp.err.empty()) {
             xcat::log::Warn("LogUpload", "legacy upload failed err=%s", resp.err.c_str());
             SetSnapshot(LogUploadPhase::Failed, resp.err, {}, resp.status);

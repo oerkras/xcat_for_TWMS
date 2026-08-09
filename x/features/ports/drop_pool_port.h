@@ -57,7 +57,8 @@ struct VacuumResult {
     int dropCountAfter = 0;
     int nearCount = 0;
     int dropsDelta = 0;
-    int gatesCleared = 0;  // 拍前清 LastTry/EndParabolic 个数
+    int gatesCleared = 0;  // 拍前清 LastTry/EndParabolic 个数（宠吸现多为 0）
+    int flyHeld = 0;       // ByPet 前临时挡住的未落地件数（LastTry 戳，拍末还原）
     int skipStamped = 0;   // 黑名单 LastTry=INT_MAX 盖戳数（宠吸主路径）
     int sampleOwnType = -1;
     int sampleLastTry = 0;

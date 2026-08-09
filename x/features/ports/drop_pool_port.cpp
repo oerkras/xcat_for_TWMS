@@ -1472,24 +1472,24 @@ void RestoreByPetRectPack(ByPetRectBackup& bak) {
 bool DropMatchesSkip(void* drop, const SkipIds& skip);
 
 // 只清一件：人物直吸每拍只送 1 件，全盒 Clear 上百次写会占死 MainPump，打怪/瞬移饿死。
-// EndPara：
-// - 默认只解除 SkipHold(4)→Ready(3)：抛物中强行写 3 会重播落地动画（宠吸/人物均勿 force）
-// - forceEndParaReady=true：!=3 写成 3（禁写 0）；仅遗留 ClearPickupGatesNear，宠吸已改 false
+// EndPara 纪律（upload E226 / 065ed0 / BIN 2026-08-09 petloot）：
+// - Ready(3)：只清 PickStamp / LastTry / 异常 OwnType，绝不改 EndPara
+// - 抛物中（!=3 且非 SkipHold）：默认一律不写——清冷却也会搅动画态，落地打转
+// - SkipHold(4)：默认不碰（黑名单长期戳）；force=true 才允许升回 3（遗留路径）
+// - forceEndParaReady=true：!=0 写成 3（禁写 0）；宠吸禁止 force
 bool ClearPickupGatesOne(void* drop, bool forceEndParaReady = false) {
     if (!LooksLikeHeapPtr(drop) || !DropWritesAllowed()) return false;
-    bool touched = false;
+    const int endp = ReadI32(drop, kOffDropEndPara);
+    if (endp != kEndParaReady) {
+        if (!forceEndParaReady) return false;  // 抛物中 / SkipHold：默认零写
+        if (endp == 0) return false;          // 禁写 0（重置抛物飞落）
+        WriteI32(drop, kOffDropEndPara, kEndParaReady);
+        // force 路径仍继续清冷却，便于遗留调用方一次到位
+    }
+    bool touched = (endp != kEndParaReady);  // force 已写 EndPara
     const int own = ReadI32(drop, kOffDropOwnType);
     const int last = ReadI32(drop, kOffDropLastTry);
-    const int endp = ReadI32(drop, kOffDropEndPara);
     const int stamp = ReadI32(drop, kOffDropPickStamp);
-    if (endp != kEndParaReady) {
-        const bool promote =
-            endp == kEndParaSkipHold || (forceEndParaReady && endp != 0);  // 0=禁写（重置抛物）
-        if (promote) {
-            WriteI32(drop, kOffDropEndPara, kEndParaReady);
-            touched = true;
-        }
-    }
     if (stamp != 0) {
         WriteI32(drop, kOffDropPickStamp, 0);
         touched = true;
@@ -1719,6 +1719,7 @@ struct PetVacNearPass {
     int nearN = 0;
     int nearMoney = 0;
     int nearItem = 0;
+    int readyNear = 0;  // EndPara==Ready 且可碰（非黑名单/非退避戳）
     int sampleIsMoney = -1;
     int sampleInfo = 0;
     int sampleOwn = -1;
@@ -1798,19 +1799,25 @@ PetVacNearPass PreparePetVacNearPass(void* pool, float cx, float cy, float halfW
             continue;
         }
 
-        // 与原序一致：先清闸（可碰 StallActive 但尚未 INT_MAX 的件），再盖 Stall。
         const int lastTry = ReadI32(drop, kOffDropLastTry);
-        if (maxClear > 0 && out.gatesCleared < maxClear && ReadU8(drop, kOffDropPickable) != 0 &&
-            lastTry != kLastTrySkipStamp) {
-            if (!gateSampled) {
-                gateSampled = true;
-                out.sampleOwn = ReadI32(drop, kOffDropOwnType);
-                out.sampleLast = lastTry;
-                out.sampleEnd = ReadI32(drop, kOffDropEndPara);
-            }
-            // 勿 force EndPara→3：抛物中强改 Ready 会重播落地动画（upload E226 dcaf08
-            // endPara=1 + 地上打转）。ByPet 本就会跳过 EndPara!=3；只清 LastTry/Stamp，
-            // SkipHold(4)→3 仍由 ClearPickupGatesOne 默认路径处理。
+        const int endPara = ReadI32(drop, kOffDropEndPara);
+        if (!gateSampled) {
+            gateSampled = true;
+            out.sampleOwn = ReadI32(drop, kOffDropOwnType);
+            out.sampleLast = lastTry;
+            out.sampleEnd = endPara;
+        }
+
+        // 可被 ByPet 真正捡的：已落地 + Pickable + 非退避戳
+        const bool readyPick =
+            endPara == kEndParaReady && ReadU8(drop, kOffDropPickable) != 0 &&
+            lastTry != kLastTrySkipStamp;
+        if (readyPick) ++out.readyNear;
+
+        // 宠吸默认 maxClear=0：每拍清 LastTry/PickStamp 会让拒收件永远排队头，
+        // 官方反复碰同一堆 → 地上落地动画打转（模块设计 §3.4 + BIN 2026-08-09）。
+        // 拒收靠 StallActive / reject_backoff；冷却交给官方 PickStamp 窗。
+        if (maxClear > 0 && out.gatesCleared < maxClear && readyPick) {
             if (ClearPickupGatesOne(drop, /*forceEndParaReady=*/false)) ++out.gatesCleared;
         }
 
@@ -1832,6 +1839,16 @@ bool PetVacPoolFellSinceLast(bool prevOk, DWORD prevTick, int prevDropAfter, int
     return recentPrev && prevDropAfter > 0 && dropCount < prevDropAfter &&
            (prevNear > 0 || prevGates > 0);
 }
+
+// ByPet 前软挡未落地：完整类型须在 RunVacuumOnMain 之前（栈数组）。
+struct FlyHold {
+    int id = 0;
+    int prevLast = 0;
+};
+int StampNonReadyOutNear(void* pool, float cx, float cy, float halfW, float halfH,
+                         const SkipIds* skip, FlyHold* out, int cap, int* outN);
+int RestoreNonReadyOutNear(void* pool, float cx, float cy, float halfW, float halfH,
+                           const FlyHold* holds, int holdN);
 
 void RunVacuumOnMain() {
     VacuumResult& r = gJob.result;
@@ -1891,7 +1908,8 @@ void RunVacuumOnMain() {
 
     const float halfW = gJob.vacuumW * 0.5f;
     const float halfH = gJob.vacuumH * 0.5f;
-    constexpr int kPetVacGateClearBudget = 8;
+    // 0：禁止拍前清闸（见 PreparePetVacNearPass 注释）；拒收靠 Stall / reject_backoff
+    constexpr int kPetVacGateClearBudget = 0;
     const SkipIds* skipPtr = gJob.skip.empty() ? nullptr : &gJob.skip;
 
     auto finishEmptyLike = [&](DWORD nowTick, bool poolFell) {
@@ -1954,6 +1972,27 @@ void RunVacuumOnMain() {
         return;
     }
 
+    // 盒内只有抛物中/不可捡：禁止调 ByPet。大盒下 ByPet 仍会碰未落地物盖戳，落地动画打转
+    // （BIN：near>0 endPara=0/1 sendTouch>0 gates=0）。
+    if (pass.readyNear <= 0) {
+        if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
+        if (pool && r.stallStamped > 0) {
+            r.stallRestored = RestoreStalledStampsNear(pool, px, py, halfW, halfH, now, skipPtr);
+        }
+        r.stallHeld = StallActiveCount(now);
+        r.dropCountAfter = r.dropCount;
+        r.dropsDelta = 0;
+        r.called = false;
+        r.ok = true;
+        r.why = "wait_land";
+        r.beforeRc = ReadRect(pet, kOffPetRc);
+        r.afterRc.x = -halfW;
+        r.afterRc.y = -halfH;
+        r.afterRc.w = gJob.vacuumW;
+        r.afterRc.h = gJob.vacuumH;
+        return;
+    }
+
     // 不变量：Drop.Id 唯一 → 盒内被盖住的件数不可能超过生效退避条目数。
     if (r.stallStamped > stallActiveBefore) {
         gStallOff = true;
@@ -1975,6 +2014,11 @@ void RunVacuumOnMain() {
     r.afterRc = vacuum;
 
     EnsureSendProbe();  // 仅即将调 ByPet 时装探针（空拍/无技能不再碰）
+
+    // ByPet 前挡未落地：LastTry=INT_MAX（不写 EndPara）；拍末按 id 还原。
+    FlyHold flyHolds[64]{};
+    int flyN = 0;
+    r.flyHeld = StampNonReadyOutNear(pool, px, py, halfW, halfH, skipPtr, flyHolds, 64, &flyN);
 
     ByPetRectBackup rectBak{};
     const bool rectPatched = PatchByPetRectPack(gJob.vacuumW, gJob.vacuumH, rectBak);
@@ -2004,6 +2048,9 @@ void RunVacuumOnMain() {
     }
 
     RestoreByPetRectPack(rectBak);
+    if (pool && flyN > 0) {
+        (void)RestoreNonReadyOutNear(pool, px, py, halfW, halfH, flyHolds, flyN);
+    }
 
     r.dropCountAfter = ReadPoolDropCount(pool);
     r.dropsDelta = r.dropCountAfter - r.dropCount;
@@ -2208,6 +2255,88 @@ int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float hal
     if (outWant) *outWant = want;
     if (outTotal) *outTotal = total;
     return stamped;
+}
+
+// ByPet 前把未落地挡出队头：只盖 LastTry=INT_MAX（绝不写 EndPara）。
+// 官方 Contains 之后仍可能先碰抛物中物盖戳 → 落地打转；与 Stall 同款软挡。
+// 记录 prevLast，拍末按 id 还原（不与 Stall/黑名单长期戳混淆：只还原本拍写下的 id）。
+int StampNonReadyOutNear(void* pool, float cx, float cy, float halfW, float halfH,
+                         const SkipIds* skip, FlyHold* out, int cap, int* outN) {
+    if (outN) *outN = 0;
+    if (!pool || !out || cap <= 0 || !DropWritesAllowed()) return 0;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return 0;
+
+    int stamped = 0;
+    int n = 0;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float dpx = 0.f, dpy = 0.f;
+        if (!ReadDropPt(drop, dpx, dpy)) continue;
+        if (std::fabs(dpx - cx) > halfW || std::fabs(dpy - cy) > halfH) continue;
+        if (skip && !skip->empty() && DropMatchesSkip(drop, *skip)) continue;
+
+        const int endp = ReadI32(drop, kOffDropEndPara);
+        if (endp == kEndParaReady) continue;  // 已落地：留给 ByPet
+
+        const int last = ReadI32(drop, kOffDropLastTry);
+        if (last == kLastTrySkipStamp) continue;  // 已是 Stall/黑名单戳
+
+        const int id = ReadI32(drop, kOffDropId);
+        if (id == 0) continue;
+
+        WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
+        ++stamped;
+        if (n < cap) {
+            out[n].id = id;
+            out[n].prevLast = last;
+            ++n;
+        }
+    }
+    if (outN) *outN = n;
+    return stamped;
+}
+
+int RestoreNonReadyOutNear(void* pool, float cx, float cy, float halfW, float halfH,
+                           const FlyHold* holds, int holdN) {
+    if (!pool || !holds || holdN <= 0) return 0;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return 0;
+
+    int restored = 0;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float dpx = 0.f, dpy = 0.f;
+        if (!ReadDropPt(drop, dpx, dpy)) continue;
+        if (std::fabs(dpx - cx) > halfW || std::fabs(dpy - cy) > halfH) continue;
+        if (ReadI32(drop, kOffDropLastTry) != kLastTrySkipStamp) continue;
+
+        const int id = ReadI32(drop, kOffDropId);
+        if (id == 0) continue;
+        for (int h = 0; h < holdN; ++h) {
+            if (holds[h].id != id) continue;
+            WriteI32(drop, kOffDropLastTry, holds[h].prevLast);
+            ++restored;
+            break;
+        }
+    }
+    return restored;
 }
 
 // 退避黑名单：盖 LastTry=INT_MAX（拍末还原）。不动 EndPara，避免拍内 3↔4 重播落地。

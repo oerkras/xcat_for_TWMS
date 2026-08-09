@@ -51,9 +51,14 @@ struct BindReady {
 
 BindReady ProbeBindReady();
 
+// 下面三个谓词与两个 GetXxx 都由一条后台刷新线程在**主泵**上求值，调用方只读快照、绝不阻塞。
+// 快照超过 600ms 未刷新即视为「取不到」，一律返回 false / nullptr。
 bool IsOpenAntiMacro();
 bool IsTextCaptchaOpen();
 bool IsNonFiniteOpen();
+
+// 停掉那条刷新线程（由 auto_lie::Shutdown 调用）。
+void StopRefresher();
 
 void* GetTextCaptcha();
 void* GetNonFinite();

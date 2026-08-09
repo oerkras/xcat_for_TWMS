@@ -428,17 +428,21 @@ bool QueryCombatMoveBounds(float* left, float* top, float* right, float* bottom)
 bool PointInCombatMoveBounds(float x, float y) {
     float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
     if (!QueryCombatMoveBounds(&l, &t, &ri, &b)) return true;
-    return x >= l && x <= ri && y >= t && y <= b;
+    (void)y;
+    (void)t;
+    (void)b;
+    return x >= l && x <= ri;
 }
 
 bool ClampToCombatMoveBounds(float* x, float* y) {
     if (!x || !y) return false;
     float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
     if (!QueryCombatMoveBounds(&l, &t, &ri, &b)) return true;
+    (void)t;
+    (void)b;
+    (void)y;  // 竖直不夹——避免站位钉在 0.95 下沿（BIN 10:24 sp.y=-607）
     if (*x < l) *x = l;
     if (*x > ri) *x = ri;
-    if (*y < t) *y = t;
-    if (*y > b) *y = b;
     return true;
 }
 
@@ -726,8 +730,9 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     if (ports::map_bounds::QueryPlayBounds(0, &r) && r.ok) {
         const float rawL = static_cast<float>(r.left);
         const float rawR = static_cast<float>(r.right);
-        // Combat/Travel：可位移区 = raw×0.95（中心缩放）。F6 仍用外扩空域（unbounded 另放行）。
-        const bool combatMove = (o == Owner::Combat || o == Owner::Travel);
+        // 仅 F5 Combat：左右可位移 = raw×0.95；竖直仍用 raw±slack（真下穿图底才上拉）。
+        // 若把 t/b 也换成 0.95，站位/包线会把人钉在「假下界」（BIN 10:24 sp.y=-607）。
+        const bool combatMove = (o == Owner::Combat);
         float l = rawL - kEnvSlackXPx;
         float ri = rawR + kEnvSlackXPx;
         float t = static_cast<float>(r.top) - kEnvSlackYPx;
@@ -736,8 +741,8 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
         if (combatMove && QueryCombatMoveBounds(&moveL, &moveT, &moveR, &moveB)) {
             l = moveL;
             ri = moveR;
-            t = moveT;
-            b = moveB;
+            (void)moveT;
+            (void)moveB;
         }
         if (ri > l && b > t) {
             // ── 向下：恒生效，不受 sp.unbounded 放行 ──────────────────

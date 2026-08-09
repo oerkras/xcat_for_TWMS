@@ -3052,15 +3052,47 @@ bool NeedsHeliStationKeep(float px, float py, float mx, float my) {
     return !HeliStationOk(px, py, mx, my);
 }
 
-// 悬停站位点：怪旁 standOff、略高于怪心，再夹进本图 FH AABB。
+// 悬停站位点：怪旁 standOff、略高于怪心；**X** 夹进 Combat 左右框（raw×0.95），Y 不夹。
 // 给的是「要待着的地方」，不是「这一拍往哪推」——推多少由旋翼按 P 控 + 重力前馈自己算。
+//
+// ★ 左右竖边：强制站**地图内侧**朝外打（BIN 弓箭手 205 / 08:37 框沿空挥）。
+//   1) 外侧站位 mx∓X 越可位移框；或两侧都越界 → 朝图心；
+//   2) **更早（BIN 08:37）**：人已在朝该缘一侧，且人到该缘余量 < X
+//      （怪从内侧贴过来时，等「外侧站位 OOB」才翻 → 人先被挤到框沿、|dx|被压半、whiff）。
 void BuildHeliStationPoint(float px, float py, float mx, float my, float* outX, float* outY,
                            int* outSide) {
     const HeliStand s = HeliStandOff();
     int side = gLandSide;
     if (side == 0) side = (px >= mx) ? 1 : -1;
-    // 已明确在某一侧：锁侧，避免左右拍打像甩头。
+    // 已明确在某一侧：锁侧，避免左右拍打像甩头（边怪内侧强制可覆盖）。
     if (std::fabs(mx - px) >= kMinLandAway) side = (px >= mx) ? 1 : -1;
+
+    float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
+    if (heli::QueryCombatMoveBounds(&l, &t, &ri, &b) && s.x > 0.f) {
+        const float leftSt = mx - s.x;
+        const float rightSt = mx + s.x;
+        const bool leftOob = leftSt < l;
+        const bool rightOob = rightSt > ri;
+        if (leftOob && !rightOob) {
+            side = 1;  // 左竖边：站怪右侧（图内）朝左打
+        } else if (rightOob && !leftOob) {
+            side = -1;  // 右竖边：站怪左侧（图内）朝右打
+        } else if (leftOob && rightOob) {
+            const float cx = 0.5f * (l + ri);
+            side = (mx <= cx) ? 1 : -1;
+        } else {
+            // 人侧余量：人在怪左且距左缘 < X → 再往左保站距会顶框；对称右缘。
+            // 只朝**更挤的那一侧**翻，同拍最多一次——否则宽 < 2X 时左右 if 互打（REVIEW）。
+            const float roomL = px - l;
+            const float roomR = ri - px;
+            if (side < 0 && roomL < s.x && roomL <= roomR) {
+                side = 1;
+            } else if (side > 0 && roomR < s.x && roomR < roomL) {
+                side = -1;
+            }
+        }
+    }
+
     float tx = mx + static_cast<float>(side) * s.x;
     // 内置档相对怪心 Y=kHeliLiftPx（现 -17）；+Y 向上，抬高是加不是减。死区上偏会把落点自然带到
     // +11~12，而那正是实测最优命中带 [8,15) 的正中——别去"修正"它。
@@ -3069,32 +3101,83 @@ void BuildHeliStationPoint(float px, float py, float mx, float my, float* outX, 
     if (outX) *outX = tx;
     if (outY) *outY = ty;
     if (outSide) *outSide = side;
-    (void)px;
     (void)py;
+    (void)t;
+    (void)b;
 }
 
-// 需要弃战自救吗？出 **Combat 可位移框**（raw×0.95）任一侧都算。
-// 拉回目标夹进同框（再略内缩 kEnvReturnInsetPx 做迟滞，防 rtb/station 抖）。
+// 需要弃战自救吗？**只判左右竖边**（出 Combat 可位移框 left/right）。
+// 上下（top/bottom）不进 RTB——竖直仍由 A 层包线与站位点夹取管。
+// 已回左右框内即停 RTB（可 Station）；latch 深入后清除。走门由用户关 F5/F6。
+constexpr float kRtbAimInsetPx = 48.f;
+constexpr float kRtbExitInsetPx = 48.f;
+bool gHeliRtbLatched = false;
+
+// RTB latch 清闩：只看水平是否深入左右框（与 NeedsHeliRtb 同口径）。
+bool CombatMoveDeepInsideX(float px, float inset) {
+    float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
+    if (!heli::QueryCombatMoveBounds(&l, &t, &ri, &b)) return true;
+    (void)t;
+    (void)b;
+    float ix = inset;
+    const float halfW = 0.5f * (ri - l);
+    if (ix > halfW) ix = halfW;
+    if (ix < 0.f) ix = 0.f;
+    return px >= l + ix && px <= ri - ix;
+}
+
+void ComputeRtbAim(float px, float py, float* outX, float* outY) {
+    float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
+    if (!heli::QueryCombatMoveBounds(&l, &t, &ri, &b)) {
+        if (outX) *outX = px;
+        if (outY) *outY = py;
+        return;
+    }
+    (void)t;
+    (void)b;
+    float k = kRtbAimInsetPx;
+    const float halfW = 0.5f * (ri - l);
+    if (k > halfW) k = halfW;
+    if (k < 1.f) k = 1.f;
+    // 只内缩 X；Y 保持当前高度，不去拽上下界。
+    float tx = px;
+    if (tx < l + k) tx = l + k;
+    if (tx > ri - k) tx = ri - k;
+    if (tx < l) tx = l;
+    if (tx > ri) tx = ri;
+    if (outX) *outX = tx;
+    if (outY) *outY = py;
+}
+
 bool NeedsHeliRtb(float px, float py, float* outX, float* outY) {
     float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
-    if (!heli::QueryCombatMoveBounds(&l, &t, &ri, &b)) return false;
-    if (px >= l && px <= ri && py >= t && py <= b) return false;
-    const float k = heli::kEnvReturnInsetPx;
-    float tx = px < l ? l + k : (px > ri ? ri - k : px);
-    float ty = py > b ? b - k : (py < t ? t + k : py);
-    // 内缩后仍可能越框（窄图）：再夹回 move 框。
-    heli::ClampToCombatMoveBounds(&tx, &ty);
-    if (outX) *outX = tx;
-    if (outY) *outY = ty;
-    return true;
+    if (!heli::QueryCombatMoveBounds(&l, &t, &ri, &b)) {
+        gHeliRtbLatched = false;
+        return false;
+    }
+    (void)t;
+    (void)b;
+    const bool outsideX = px < l || px > ri;
+    if (outsideX) {
+        gHeliRtbLatched = true;
+        ComputeRtbAim(px, py, outX, outY);
+        return true;
+    }
+    if (gHeliRtbLatched && CombatMoveDeepInsideX(px, kRtbExitInsetPx)) {
+        gHeliRtbLatched = false;
+    }
+    return false;
 }
 
-// 人在 Combat 可位移框外吗？Impact 出刀硬闸用此口径（堵住「框外打框内」）。
+// 人在 Combat 左右可位移框外吗？Impact 出刀硬闸（只闸 L/R；Y 不闸）。
 // 无 bounds 返回 false：宁可放行，也不能因为读不到图信息就哑火。
 bool PlayerOutOfPlayBounds(float px, float py) {
     float l = 0.f, t = 0.f, ri = 0.f, b = 0.f;
     if (!heli::QueryCombatMoveBounds(&l, &t, &ri, &b)) return false;
-    return px < l || px > ri || py < t || py > b;
+    (void)py;
+    (void)t;
+    (void)b;
+    return px < l || px > ri;
 }
 
 // 把「打哪只、站哪儿」翻译成旋翼 setpoint。每 tick 可重复调，幂等。
@@ -3102,6 +3185,7 @@ void PublishHeliSetpoint(DWORD now, float px, float py, bool haveLock) {
     if (!HeliBaseArmed()) {
         heli::Disarm(heli::Owner::Combat);
         gHeliHoldValid = false;
+        gHeliRtbLatched = false;
         return;
     }
     // SetSetpoint 要求持有 Combat；断线 Sync 会 Release。仅无主时清 bail 并抢回，
@@ -3114,7 +3198,7 @@ void PublishHeliSetpoint(DWORD now, float px, float py, bool haveLock) {
     if (NeedsHeliRtb(px, py, &sp.x, &sp.y)) {
         sp.mode = heli::Mode::Rtb;
         gHeliAirborneUntilMs = now + kHeliAirborneGraceMs;
-        gHeliHoldValid = false;
+        gHeliHoldValid = false;  // RTB 期间禁止 Hold 钉危险点（BIN 07:00 抖）
         heli::SetSetpoint(heli::Owner::Combat, sp);
         return;
     }
@@ -3182,6 +3266,7 @@ void PublishHeliSetpoint(DWORD now, float px, float py, bool haveLock) {
     gStationStickValid = false;
     gStationStickLockId = 0;
     // 无锁：宽限内钉住「进入 Hold 的那一刻」的点悬停（不可每拍跟当前位置，否则等于放任下坠）。
+    // 走传送门由用户关 F5/F6，不在浅区无锁时强行 Disarm。
     if (gHeliAirborneUntilMs && static_cast<int>(now - gHeliAirborneUntilMs) < 0) {
         if (!gHeliHoldValid) {
             gHeliHoldValid = true;
@@ -3636,6 +3721,7 @@ void TickImpl(DWORD now) {
     const int mapId = ports::world::GetMapId();
     if (mapId > 0 && mapId != gLastMapId) {
         gLastMapId = mapId;
+        gHeliRtbLatched = false;
         BeginMapArmGrace(now, "map_change");
     }
     if (gMapArmUntilMs && static_cast<int>(now - gMapArmUntilMs) < 0) {
@@ -4535,8 +4621,8 @@ void TickImpl(DWORD now) {
                     break;
                 }
             }
-            // 可位移框外一律不出手（raw×0.95）。必须放在出刀带判定**之前**：heliFireOk
-            // 会绕过 FireGateOk。回 Aim 让旋翼 RTB 把人拽回框内再打。
+            // 左右可位移框外一律不出手（raw×0.95 的 L/R；Y 不闸）。必须放在出刀带判定**之前**。
+            // 回 Aim 让旋翼 RTB 把人拽回左右框内再打。
             if (impactOn && PlayerOutOfPlayBounds(player.x, player.y)) {
                 EnterState(State::Aim, now, "oob_hold");
                 break;
@@ -5023,6 +5109,8 @@ void SetEnabled(bool on) {
         gSettleUntil = 0;
         heli::Reset();
         gHeliAirborneUntilMs = 0;
+        gHeliRtbLatched = false;
+        gHeliHoldValid = false;
         // 切回 idle 扫描节奏，别卡在 combat remain 上。
         mob_scan::RequestImmediateScan();
     } else {

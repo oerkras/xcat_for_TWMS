@@ -16,6 +16,7 @@
 | [`ops/架构总览.md`](ops/架构总览.md) | TWMS 分层 DAG；`xcat_app` 内嵌 WebView / GamaPass 换票 |
 | [`ops/日志系统.md`](ops/日志系统.md) | 统一 `xcat_log`：launcher / inject / payload JSONL + GUI callback |
 | [`ops/il2cpp托管调用线程规约.md`](ops/il2cpp托管调用线程规约.md) | **托管调用必须在 MainPump 上**：换图黑屏根因（Class::Init 被打断）、故障链反汇编、`il2cpp_fault_probe` / `hang_autopsy` 排障手册 |
+| [`unity_kbd/模块设计.md`](unity_kbd/模块设计.md) | **InputSystem 键盘真源** ✅：QueueEvent + 自管 Repush + `HoldUntil`；走路 / Travel ↑ / 定时键同路 |
 
 ---
 
@@ -69,7 +70,8 @@
 | [`mob_pool/REMOUNT_20260806.md`](mob_pool/REMOUNT_20260806.md) | 🔧 晚间 GA remount：RVA+0x1E70；字段 off 稳；`mob_pool_port` 哈希已钉 |
 | [`pet_feed/模块设计.md`](pet_feed/模块设计.md) | **只自动召唤**（喂食交官方）；`[core] petSummon` → `SendActivatePetRequest`（🚧 P0c✅ 待实机） |
 | [`pet_feed/P0a_锚点复核.md`](pet_feed/P0a_锚点复核.md) | **2026-08-03 remount**：`m_apPet@0x2B0`、Activate `0xC56910`、新类哈希 |
-| [`timed_keys/模块设计.md`](timed_keys/模块设计.md) | 定时按键：7 槽周期脉冲；对照枫星 `timed_keys`，经典版走 `InputManager.KeyDownTouch/Up`（✅ 已挂入；实机待验） |
+| [`timed_keys/模块设计.md`](timed_keys/模块设计.md) | 定时按键：7 槽周期脉冲；发键真源 **`unity_kbd` / `InjectKeyHold`**（✅ 已挂入；实机待验） |
+| [`unity_kbd/模块设计.md`](unity_kbd/模块设计.md) | **InputSystem Keyboard** ✅：Hold + 自管帧 Repush；Travel / 走路 / 脉冲消费说明 |
 | [`buffs/模块设计.md`](buffs/模块设计.md) | BUFF 管理器：技能-only 续航；对照枫星 `buffs`，经典版走 `AffectedSkillEntry` + `DoActiveSkillPrepare`（✅ 已挂入；实机待验） |
 | [`buffs/P0a_锚点复核.md`](buffs/P0a_锚点复核.md) | TW IDB 钉死：在身列表 `+0x330`、Prepare/GetSkill/GetSkillLevel RVA |
 | [`multi_skill/模块设计.md`](multi_skill/模块设计.md) | 技能多发：清单 gap 串发；技能 `DoActiveSkill`（可选 SendUse）+ 普攻 OnFuncKey；对照枫星仅借排程语义（✅ 可行性对照；实机待验） |

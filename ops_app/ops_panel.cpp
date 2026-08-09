@@ -21,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -219,6 +220,37 @@ std::string FindJsonString(const std::string& body, const char* key) {
     size_t j = i;
     while (j < body.size() && body[j] != '"') ++j;
     return body.substr(i, j - i);
+}
+
+// 取 "key":{...} 对象正文（含花括号），供嵌套字段再 FindJsonString。
+std::string FindJsonObjectSlice(const std::string& body, const char* key) {
+    const std::string needle = std::string("\"") + key + "\":";
+    const size_t p = body.find(needle);
+    if (p == std::string::npos) return "";
+    size_t i = p + needle.size();
+    while (i < body.size() && std::isspace(static_cast<unsigned char>(body[i]))) ++i;
+    if (i >= body.size() || body[i] != '{') return "";
+    int depth = 0;
+    const size_t start = i;
+    for (; i < body.size(); ++i) {
+        const char c = body[i];
+        if (c == '{') ++depth;
+        else if (c == '}') {
+            --depth;
+            if (depth == 0) return body.substr(start, i - start + 1);
+        } else if (c == '"') {
+            ++i;
+            while (i < body.size()) {
+                if (body[i] == '\\') {
+                    i += 2;
+                    continue;
+                }
+                if (body[i] == '"') break;
+                ++i;
+            }
+        }
+    }
+    return "";
 }
 
 struct ReleaseInfo {
@@ -634,8 +666,9 @@ void Ops_RequestForceClientUpdate(OpsState& st) {
             SetStatus(st, "推送失败：" + err);
             return;
         }
-        SetStatus(st, "已推送强制更新 v" + latest.version + " build " +
-                          std::to_string(latest.buildId) + "（客户端将在下次轮询时下载安装）");
+        SetStatus(st, "已全体推送强制更新 v" + latest.version + " build " +
+                          std::to_string(latest.buildId) +
+                          "（所有客户端轮询都会更新；单机请用连接表「推更」）");
     });
 }
 
@@ -1174,6 +1207,21 @@ bool ParseClientsPayload(const std::string& body, OpsState& st) {
         row.identified = obj.find("\"identified\":true") != std::string::npos;
         row.banned = obj.find("\"banned\":true") != std::string::npos;
         row.allowed = obj.find("\"allowed\":true") != std::string::npos;
+        {
+            const std::string lf = FindJsonObjectSlice(obj, "logFetch");
+            if (!lf.empty()) {
+                row.logFetchId = FindJsonString(lf, "id");
+                row.logFetchMode = FindJsonString(lf, "mode");
+                row.logFetchStatus = FindJsonString(lf, "status");
+            }
+            const std::string ft = FindJsonObjectSlice(obj, "forceTarget");
+            if (!ft.empty()) {
+                row.forceTargetId = FindJsonString(ft, "id");
+                row.forceTargetStatus = FindJsonString(ft, "status");
+                row.forceTargetBuildId =
+                    static_cast<uint32_t>(JsonIntField(ft, "buildId", 0));
+            }
+        }
         if (!row.identified && !row.machine.empty() && !row.device.empty()) row.identified = true;
         st.clients.push_back(std::move(row));
     });
@@ -1335,6 +1383,135 @@ bool PostBanAction(OpsState& st, const char* action, const std::string& machine,
         return false;
     }
     ParseBansPayload(r.body, st);
+    return true;
+}
+
+bool PostLogFetch(OpsState& st, const OpsState::ConnectedClient& c, const char* mode,
+                  std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    if (!c.identified || (c.deviceId.empty() && c.mac.empty())) {
+        err = "需要 deviceId 或 MAC";
+        return false;
+    }
+    const char* m = (mode && std::strcmp(mode, "full") == 0) ? "full" : "light";
+    std::string note = std::string("ops-fetch ") + m;
+    if (!c.machine.empty()) note += " " + c.machine;
+    if (!c.charName.empty()) note += " " + c.charName;
+    std::string body = "{\"action\":\"enqueue\",\"mode\":\"";
+    body += m;
+    body += "\",\"note\":\"" + JsonEscapeLocal(note) + "\"";
+    if (!c.machine.empty()) body += ",\"machine\":\"" + JsonEscapeLocal(c.machine) + "\"";
+    if (!c.deviceId.empty()) body += ",\"deviceId\":\"" + JsonEscapeLocal(c.deviceId) + "\"";
+    if (!c.mac.empty()) body += ",\"mac\":\"" + JsonEscapeLocal(c.mac) + "\"";
+    body += "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/log-fetch", body.c_str(), 2500, 64 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务（需含 log-fetch）";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "拉取请求失败";
+        return false;
+    }
+    return true;
+}
+
+bool PostForceTarget(OpsState& st, const OpsState::ConnectedClient& c, std::string& err,
+                     std::string* tip = nullptr) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    if (!c.identified || (c.deviceId.empty() && c.mac.empty())) {
+        err = "需要 deviceId 或 MAC";
+        return false;
+    }
+    if (st.forcedClientBuildId > 0) {
+        err = "请先取消全体强制更新（否则其他在线设备仍会一起更新）";
+        return false;
+    }
+    if (st.latestClientBuildId == 0 || st.latestClientVersionText.empty()) {
+        err = "无最新发布包（latest.json）";
+        return false;
+    }
+    {
+        ReleaseInfo latest{};
+        if (!LoadReleaseInfo(st, L"latest.json", latest) || latest.zipName.empty()) {
+            err = "latest.json 无效";
+            return false;
+        }
+        const std::wstring zipPath = ReleasePath(st, xcat::Utf8ToWide(latest.zipName).c_str());
+        std::error_code existsError;
+        if (!std::filesystem::is_regular_file(zipPath, existsError) || existsError) {
+            err = "最新发布 zip 不存在：" + latest.zipName;
+            return false;
+        }
+    }
+    if (tip && !c.appVersion.empty() &&
+        c.appVersion.find(st.latestClientVersionText) != std::string::npos) {
+        *tip = "该设备版本字符串已含最新号（若 build 已达标则服务端会立刻清任务）";
+    }
+    std::string note = "ops-force-target";
+    if (!c.machine.empty()) note += " " + c.machine;
+    if (!c.charName.empty()) note += " " + c.charName;
+    std::string body = "{\"action\":\"enqueue\"";
+    body += ",\"note\":\"" + JsonEscapeLocal(note) + "\"";
+    if (!c.machine.empty()) body += ",\"machine\":\"" + JsonEscapeLocal(c.machine) + "\"";
+    if (!c.deviceId.empty()) body += ",\"deviceId\":\"" + JsonEscapeLocal(c.deviceId) + "\"";
+    if (!c.mac.empty()) body += ",\"mac\":\"" + JsonEscapeLocal(c.mac) + "\"";
+    body += "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/force-target", body.c_str(), 2500, 64 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务（需含 force-target）";
+        if (r.status == 409 || r.body.find("global_force_active") != std::string::npos) {
+            err = "请先取消全体强制更新（服务端仍有 force-update.json）";
+        }
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "指定推送失败";
+        if (r.body.find("global_force_active") != std::string::npos) {
+            err = "请先取消全体强制更新（服务端仍有 force-update.json）";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool PostForceTargetCancel(OpsState& st, const OpsState::ConnectedClient& c, std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    std::string body = "{\"action\":\"cancel\"";
+    if (!c.forceTargetId.empty()) {
+        body += ",\"id\":\"" + JsonEscapeLocal(c.forceTargetId) + "\"";
+    } else {
+        if (!c.machine.empty()) body += ",\"machine\":\"" + JsonEscapeLocal(c.machine) + "\"";
+        if (!c.deviceId.empty()) body += ",\"deviceId\":\"" + JsonEscapeLocal(c.deviceId) + "\"";
+        if (!c.mac.empty()) body += ",\"mac\":\"" + JsonEscapeLocal(c.mac) + "\"";
+    }
+    body += "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/force-target", body.c_str(), 2500, 64 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "取消指定推送失败";
+        return false;
+    }
     return true;
 }
 
@@ -1619,6 +1796,119 @@ const char* GateFilterLabel(const char* key) {
     return key;
 }
 
+// 客户端表列 UserID（点击列头排序）
+enum ClientSortCol : ImGuiID {
+    kCliIp = 1,
+    kCliGeo,
+    kCliMachine,
+    kCliChar,
+    kCliLevel,
+    kCliJob,
+    kCliMeso,
+    kCliMac,
+    kCliToken,
+    kCliDevice,
+    kCliVer,
+    kCliLastSeen,
+    kCliIdle,
+    kCliGate,
+    kCliHits,
+    kCliAction,
+};
+
+int CmpStrField(const std::string& a, const std::string& b) {
+    return a.compare(b);
+}
+
+int CmpIntField(int a, int b) {
+    return (a > b) - (a < b);
+}
+
+// 背包金是十进制字符串，按数值比（长度优先，避免大数溢出）
+int CmpMesoField(const std::string& a, const std::string& b) {
+    auto digits = [](const std::string& s) -> std::string {
+        size_t i = 0;
+        while (i < s.size() && (s[i] == '0' || s[i] == '+' || s[i] == ' ')) ++i;
+        if (i >= s.size()) return "0";
+        return s.substr(i);
+    };
+    const std::string na = digits(a);
+    const std::string nb = digits(b);
+    if (na.size() != nb.size()) return CmpIntField(static_cast<int>(na.size()), static_cast<int>(nb.size()));
+    return na.compare(nb);
+}
+
+int CompareConnectedClient(const OpsState::ConnectedClient& a, const OpsState::ConnectedClient& b,
+                           ImGuiID col) {
+    switch (col) {
+        case kCliIp:
+            return CmpStrField(a.ip, b.ip);
+        case kCliGeo:
+            return CmpStrField(a.geo, b.geo);
+        case kCliMachine:
+            return CmpStrField(a.machine, b.machine);
+        case kCliChar:
+            return CmpStrField(a.charName, b.charName);
+        case kCliLevel:
+            return CmpIntField(a.charLevel, b.charLevel);
+        case kCliJob:
+            return CmpStrField(a.charJobName, b.charJobName);
+        case kCliMeso:
+            return CmpMesoField(a.charMeso, b.charMeso);
+        case kCliMac:
+            return CmpStrField(a.mac, b.mac);
+        case kCliToken:
+            return CmpStrField(a.token, b.token);
+        case kCliDevice:
+            return CmpStrField(a.device, b.device);
+        case kCliVer:
+            return CmpStrField(a.appVersion, b.appVersion);
+        case kCliLastSeen:
+            return CmpStrField(a.lastSeenAt, b.lastSeenAt);
+        case kCliIdle:
+            return CmpIntField(a.idleSec, b.idleSec);
+        case kCliGate:
+            return CmpStrField(a.gate, b.gate);
+        case kCliHits:
+            return CmpIntField(a.hits, b.hits);
+        default:
+            return 0;
+    }
+}
+
+template <typename GetItem>
+void StableSortByTableSpecs(std::vector<size_t>& order, const ImGuiTableSortSpecs* specs,
+                            GetItem&& getItem) {
+    if (!specs || specs->SpecsCount <= 0 || order.size() < 2) return;
+    std::stable_sort(order.begin(), order.end(), [&](size_t ia, size_t ib) {
+        for (int n = 0; n < specs->SpecsCount; ++n) {
+            const ImGuiTableColumnSortSpecs& s = specs->Specs[n];
+            const int delta = getItem(ia, ib, s.ColumnUserID);
+            if (delta != 0) {
+                return (s.SortDirection == ImGuiSortDirection_Ascending) ? (delta < 0) : (delta > 0);
+            }
+        }
+        return ia < ib;
+    });
+}
+
+int CompareBannedDevice(const OpsState::BannedDevice& a, const OpsState::BannedDevice& b, ImGuiID col) {
+    switch (col) {
+        case 1:
+            return CmpStrField(a.key, b.key);
+        case 2:
+            return CmpStrField(a.machine, b.machine);
+        case 3:
+            return CmpStrField(a.mac, b.mac);
+        case 4:
+            return CmpStrField(a.token, b.token);
+        case 5:
+            return CmpStrField(a.reason, b.reason);
+        default:
+            return 0;
+    }
+}
+
 ImVec4 StatusMessageColor(const std::string& msg) {
     auto has = [&](const char* s) { return ContainsIgnoreCase(msg, s); };
     if (has("失败") || has("错误") || has("error") || has("缺少") || has("须填") || has("LNK"))
@@ -1834,7 +2124,8 @@ void DrawClientsPanel(OpsState& st) {
     }
     ImGui::SameLine(0, 8.f);
     ImGui::Checkbox("空闲优先", &st.clientsSortIdleFirst);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("空闲秒数小的排前（刚探活靠上）");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("未点列头时：空闲秒数小的排前。\n点任意列头可改排序（再点切换升/降）");
     ImGui::SameLine(0, 6.f);
     ImGui::Checkbox("同IP折叠", &st.clientsGroupByIp);
     if (ImGui::IsItemHovered())
@@ -1876,27 +2167,30 @@ void DrawClientsPanel(OpsState& st) {
 
     const ImGuiTableFlags flags =
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
-        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Sortable |
+        ImGuiTableFlags_SortTristate;
     // 工具条收紧后主表再抬一点。
     const float clientsH = (std::max)(260.f, ImGui::GetContentRegionAvail().y * 0.58f);
     if (ImGui::BeginTable("clients_table", 16, flags, ImVec2(0, clientsH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 100.f);
-        ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 0.9f);
-        ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("等级", ImGuiTableColumnFlags_WidthFixed, 44.f);
-        ImGui::TableSetupColumn("职业", ImGuiTableColumnFlags_WidthFixed, 88.f);
-        ImGui::TableSetupColumn("背包金", ImGuiTableColumnFlags_WidthFixed, 100.f);
-        ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 110.f);
-        ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 88.f);
-        ImGui::TableSetupColumn("设备", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("版本", ImGuiTableColumnFlags_WidthStretch, 0.85f);
-        ImGui::TableSetupColumn("最近活动", ImGuiTableColumnFlags_WidthFixed, 120.f);
-        ImGui::TableSetupColumn("空闲", ImGuiTableColumnFlags_WidthFixed, 42.f);
-        ImGui::TableSetupColumn("门禁", ImGuiTableColumnFlags_WidthFixed, 128.f);
-        ImGui::TableSetupColumn("请求", ImGuiTableColumnFlags_WidthFixed, 40.f);
-        ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthFixed, 118.f);
+        ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 100.f, kCliIp);
+        ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.2f, kCliGeo);
+        ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 0.9f, kCliMachine);
+        ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 1.0f, kCliChar);
+        ImGui::TableSetupColumn("等级", ImGuiTableColumnFlags_WidthFixed, 44.f, kCliLevel);
+        ImGui::TableSetupColumn("职业", ImGuiTableColumnFlags_WidthFixed, 88.f, kCliJob);
+        ImGui::TableSetupColumn("背包金", ImGuiTableColumnFlags_WidthFixed, 100.f, kCliMeso);
+        ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 110.f, kCliMac);
+        ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 88.f, kCliToken);
+        ImGui::TableSetupColumn("设备", ImGuiTableColumnFlags_WidthStretch, 1.0f, kCliDevice);
+        ImGui::TableSetupColumn("版本", ImGuiTableColumnFlags_WidthStretch, 0.85f, kCliVer);
+        ImGui::TableSetupColumn("最近活动", ImGuiTableColumnFlags_WidthFixed, 120.f, kCliLastSeen);
+        ImGui::TableSetupColumn("空闲", ImGuiTableColumnFlags_WidthFixed, 42.f, kCliIdle);
+        ImGui::TableSetupColumn("门禁", ImGuiTableColumnFlags_WidthFixed, 128.f, kCliGate);
+        ImGui::TableSetupColumn("请求", ImGuiTableColumnFlags_WidthFixed, 40.f, kCliHits);
+        ImGui::TableSetupColumn("操作",
+                                ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 200.f,
+                                kCliAction);
         ImGui::TableHeadersRow();
 
         if (st.clients.empty()) {
@@ -1909,24 +2203,12 @@ void DrawClientsPanel(OpsState& st) {
             for (size_t idx = 0; idx < st.clients.size(); ++idx) {
                 if (ClientMatchesFilter(st, st.clients[idx], st.clientsFilter)) order.push_back(idx);
             }
-            if (st.clientsGroupByIp) {
-                // 同 IP 聚在一起；组内再按空闲
-                std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-                    const auto& ca = st.clients[a];
-                    const auto& cb = st.clients[b];
-                    if (ca.ip != cb.ip) return ca.ip < cb.ip;
-                    if (st.clientsSortIdleFirst && ca.idleSec != cb.idleSec)
-                        return ca.idleSec < cb.idleSec;
-                    return false;
-                });
-            } else if (st.clientsSortIdleFirst) {
-                std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-                    const int ia = st.clients[a].idleSec;
-                    const int ib = st.clients[b].idleSec;
-                    if (ia != ib) return ia < ib;
-                    return st.clients[a].ip < st.clients[b].ip;
-                });
-            }
+
+            ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
+            const bool haveColSort = sortSpecs && sortSpecs->SpecsCount > 0;
+            auto cmpClientIdx = [&](size_t ia, size_t ib, ImGuiID col) {
+                return CompareConnectedClient(st.clients[ia], st.clients[ib], col);
+            };
 
             struct IpGroup {
                 std::string ip;
@@ -1934,16 +2216,62 @@ void DrawClientsPanel(OpsState& st) {
             };
             std::vector<IpGroup> groups;
             groups.reserve(order.size());
+
             if (st.clientsGroupByIp) {
-                for (size_t idx : order) {
-                    const std::string& ip = st.clients[idx].ip;
-                    if (groups.empty() || groups.back().ip != ip) {
-                        groups.push_back(IpGroup{ip, {idx}});
-                    } else {
-                        groups.back().members.push_back(idx);
+                // 先按 IP 分桶，组内/组间再按列头（或空闲优先）排
+                std::map<std::string, std::vector<size_t>> byIp;
+                for (size_t idx : order) byIp[st.clients[idx].ip].push_back(idx);
+                std::vector<std::string> ips;
+                ips.reserve(byIp.size());
+                for (auto& kv : byIp) {
+                    if (haveColSort) {
+                        StableSortByTableSpecs(kv.second, sortSpecs, cmpClientIdx);
+                    } else if (st.clientsSortIdleFirst) {
+                        std::stable_sort(kv.second.begin(), kv.second.end(), [&](size_t a, size_t b) {
+                            const int ia = st.clients[a].idleSec;
+                            const int ib = st.clients[b].idleSec;
+                            if (ia != ib) return ia < ib;
+                            return a < b;
+                        });
                     }
+                    ips.push_back(kv.first);
+                }
+                if (haveColSort) {
+                    std::stable_sort(ips.begin(), ips.end(), [&](const std::string& a, const std::string& b) {
+                        const auto& ma = byIp[a];
+                        const auto& mb = byIp[b];
+                        if (ma.empty() || mb.empty()) return a < b;
+                        for (int n = 0; n < sortSpecs->SpecsCount; ++n) {
+                            const ImGuiTableColumnSortSpecs& s = sortSpecs->Specs[n];
+                            int delta = 0;
+                            if (s.ColumnUserID == kCliIp) {
+                                delta = CmpStrField(a, b);
+                            } else {
+                                delta = CompareConnectedClient(st.clients[ma.front()],
+                                                               st.clients[mb.front()], s.ColumnUserID);
+                            }
+                            if (delta != 0) {
+                                return (s.SortDirection == ImGuiSortDirection_Ascending) ? (delta < 0)
+                                                                                         : (delta > 0);
+                            }
+                        }
+                        return a < b;
+                    });
+                }
+                for (const auto& ip : ips) {
+                    groups.push_back(IpGroup{ip, std::move(byIp[ip])});
                 }
             } else {
+                if (haveColSort) {
+                    StableSortByTableSpecs(order, sortSpecs, cmpClientIdx);
+                } else if (st.clientsSortIdleFirst) {
+                    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                        const int ia = st.clients[a].idleSec;
+                        const int ib = st.clients[b].idleSec;
+                        if (ia != ib) return ia < ib;
+                        return st.clients[a].ip < st.clients[b].ip;
+                    });
+                }
                 for (size_t idx : order) {
                     groups.push_back(IpGroup{st.clients[idx].ip, {idx}});
                 }
@@ -2126,6 +2454,54 @@ void DrawClientsPanel(OpsState& st) {
                             FillAllowFormFromClient(st, c);
                             SetStatus(st, "已填入白名单表单（未带 TOKEN）");
                         }
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("拉取轻量日志")) {
+                            std::string err;
+                            if (PostLogFetch(st, c, "light", err)) {
+                                SetStatus(st, "已请求轻量日志（约 15s 内客户端探活上报）");
+                                RefreshClients(st, true);
+                            } else {
+                                SetStatus(st, err);
+                            }
+                        }
+                        if (ImGui::MenuItem("拉取全量日志")) {
+                            std::string err;
+                            if (PostLogFetch(st, c, "full", err)) {
+                                SetStatus(st, "已请求全量日志（约 15s 内客户端探活上报）");
+                                RefreshClients(st, true);
+                            } else {
+                                SetStatus(st, err);
+                            }
+                        }
+                        ImGui::Separator();
+                        if (st.latestClientBuildId == 0 || st.forcedClientBuildId > 0) {
+                            ImGui::BeginDisabled();
+                            ImGui::MenuItem("推送更新到此设备");
+                            ImGui::EndDisabled();
+                        } else if (ImGui::MenuItem("推送更新到此设备")) {
+                            std::string err;
+                            std::string tip;
+                            if (PostForceTarget(st, c, err, &tip)) {
+                                std::string msg =
+                                    "已排队指定推送 build " +
+                                    std::to_string(st.latestClientBuildId) +
+                                    "（仅此设备；重启更新服务会丢队列）";
+                                if (!tip.empty()) msg += "；" + tip;
+                                SetStatus(st, msg);
+                                RefreshClients(st, true);
+                            } else {
+                                SetStatus(st, err);
+                            }
+                        }
+                        if (!c.forceTargetId.empty() && ImGui::MenuItem("取消此设备推送")) {
+                            std::string err;
+                            if (PostForceTargetCancel(st, c, err)) {
+                                SetStatus(st, "已取消指定推送");
+                                RefreshClients(st, true);
+                            } else {
+                                SetStatus(st, err);
+                            }
+                        }
                     }
                     ImGui::EndPopup();
                 }
@@ -2286,6 +2662,100 @@ void DrawClientsPanel(OpsState& st) {
                 ImGui::Text("%d", c.hits);
                 ImGui::TableSetColumnIndex(15);
                 if (c.identified && (!c.deviceId.empty() || !c.mac.empty())) {
+                    const bool forcePending = !c.forceTargetId.empty() &&
+                                              (c.forceTargetStatus == "queued" ||
+                                               c.forceTargetStatus == "offered");
+                    if (forcePending) {
+                        ImGui::TextColored(OpsTone::Warn(), "推#%u",
+                                           c.forceTargetBuildId > 0 ? c.forceTargetBuildId
+                                                                    : st.latestClientBuildId);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "指定推送排队中 build %u\n状态 %s\n点右键可取消；仅此设备\n"
+                                "队列在更新服务内存中，重启服务会丢",
+                                c.forceTargetBuildId, c.forceTargetStatus.c_str());
+                        }
+                        if (ImGui::BeginPopupContextItem("force_tgt")) {
+                            if (ImGui::MenuItem("取消此设备推送")) {
+                                std::string err;
+                                if (PostForceTargetCancel(st, c, err)) {
+                                    SetStatus(st, "已取消指定推送");
+                                    RefreshClients(st, true);
+                                } else {
+                                    SetStatus(st, err);
+                                }
+                            }
+                            ImGui::EndPopup();
+                        }
+                    } else {
+                        const bool blockByGlobal = st.forcedClientBuildId > 0;
+                        if (st.latestClientBuildId == 0 || blockByGlobal) ImGui::BeginDisabled();
+                        if (SafeSmallButton("推更")) {
+                            std::string err;
+                            std::string tip;
+                            if (PostForceTarget(st, c, err, &tip)) {
+                                std::string msg =
+                                    "已排队指定推送（仅此设备；重启更新服务会丢队列）";
+                                if (!tip.empty()) msg += "；" + tip;
+                                SetStatus(st, msg);
+                                RefreshClients(st, true);
+                            } else {
+                                SetStatus(st, err);
+                            }
+                        }
+                        if (st.latestClientBuildId == 0 || blockByGlobal) ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                            if (blockByGlobal) {
+                                ImGui::SetTooltip(
+                                    "请先取消全体强制更新（强制#%u），否则其他设备仍会一起更新",
+                                    st.forcedClientBuildId);
+                            } else {
+                                ImGui::SetTooltip(
+                                    "只推这一台到最新包 build %u\n不会写全体 force-update.json\n"
+                                    "队列在更新服务内存中，重启服务会丢",
+                                    st.latestClientBuildId);
+                            }
+                        }
+                    }
+                    ImGui::SameLine(0, 4.f);
+                    const bool fetchPending = !c.logFetchId.empty() &&
+                                              (c.logFetchStatus == "queued" ||
+                                               c.logFetchStatus == "offered");
+                    if (fetchPending) {
+                        ImGui::TextDisabled("%s",
+                                            c.logFetchMode == "full" ? "全量…" : "轻量…");
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "已排队：%s\n状态 %s\nid %s\n客户端约 15s 探活后上报",
+                                c.logFetchMode.c_str(), c.logFetchStatus.c_str(),
+                                c.logFetchId.c_str());
+                        }
+                    } else {
+                        if (SafeSmallButton("轻志")) {
+                            std::string err;
+                            if (PostLogFetch(st, c, "light", err)) {
+                                SetStatus(st, "已请求轻量日志（约 15s 内探活上报）");
+                                RefreshClients(st, true);
+                            } else {
+                                SetStatus(st, err);
+                            }
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("FETCH 轻量：各频道最近约 10 卷");
+                        ImGui::SameLine(0, 2.f);
+                        if (SafeSmallButton("全志")) {
+                            std::string err;
+                            if (PostLogFetch(st, c, "full", err)) {
+                                SetStatus(st, "已请求全量日志（约 15s 内探活上报）");
+                                RefreshClients(st, true);
+                            } else {
+                                SetStatus(st, err);
+                            }
+                        }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("FETCH 全量：各频道最多约 360 卷");
+                    }
+                    ImGui::SameLine(0, 4.f);
                     if (c.banned) {
                         if (NeutralSmallButton("解禁")) {
                             std::string err;
@@ -2378,18 +2848,46 @@ void DrawClientsPanel(OpsState& st) {
                 if (ImGui::BeginTable("recent_denies", 7,
                                       ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                           ImGuiTableFlags_ScrollY |
-                                          ImGuiTableFlags_SizingStretchProp,
+                                          ImGuiTableFlags_SizingStretchProp |
+                                          ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate,
                                       ImVec2(0, denyH))) {
                     ImGui::TableSetupScrollFreeze(0, 1);
-                    ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 130.f);
-                    ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 110.f);
-                    ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-                    ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 100.f);
-                    ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 88.f);
-                    ImGui::TableSetupColumn("匹配", ImGuiTableColumnFlags_WidthFixed, 80.f);
-                    ImGui::TableSetupColumn("原因", ImGuiTableColumnFlags_WidthStretch, 1.3f);
+                    ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 130.f, 1);
+                    ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 110.f, 2);
+                    ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 1.0f, 3);
+                    ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 100.f, 4);
+                    ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 88.f, 5);
+                    ImGui::TableSetupColumn("匹配", ImGuiTableColumnFlags_WidthFixed, 80.f, 6);
+                    ImGui::TableSetupColumn("原因", ImGuiTableColumnFlags_WidthStretch, 1.3f, 7);
                     ImGui::TableHeadersRow();
-                    for (size_t i = 0; i < st.recentDenies.size(); ++i) {
+                    std::vector<size_t> denyOrder(st.recentDenies.size());
+                    for (size_t i = 0; i < denyOrder.size(); ++i) denyOrder[i] = i;
+                    if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs()) {
+                        StableSortByTableSpecs(denyOrder, specs, [&](size_t ia, size_t ib, ImGuiID col) {
+                            const auto& a = st.recentDenies[ia];
+                            const auto& b = st.recentDenies[ib];
+                            switch (col) {
+                                case 1:
+                                    return CmpStrField(a.at, b.at);
+                                case 2:
+                                    return CmpStrField(a.ip, b.ip);
+                                case 3:
+                                    return CmpStrField(a.machine, b.machine);
+                                case 4:
+                                    return CmpStrField(a.mac, b.mac);
+                                case 5:
+                                    return CmpStrField(a.token, b.token);
+                                case 6:
+                                    return CmpStrField(a.match, b.match);
+                                case 7:
+                                    return CmpStrField(a.reason, b.reason);
+                                default:
+                                    return 0;
+                            }
+                        });
+                    }
+                    for (size_t oi = 0; oi < denyOrder.size(); ++oi) {
+                        const size_t i = denyOrder[oi];
                         const auto& d = st.recentDenies[i];
                         ImGui::PushID(static_cast<int>(i) + 30000);
                         ImGui::TableNextRow();
@@ -2448,15 +2946,37 @@ void DrawClientsPanel(OpsState& st) {
             const float alertH = (std::min)(72.f, belowH * 0.18f);
             if (ImGui::BeginTable("ip_alerts", 4,
                                   ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
+                                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp |
+                                      ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate,
                                   ImVec2(0, alertH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 120.f);
-                ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.6f);
-                ImGui::TableSetupColumn("设备数", ImGuiTableColumnFlags_WidthFixed, 56.f);
-                ImGui::TableSetupColumn("摘要", ImGuiTableColumnFlags_WidthStretch, 2.2f);
+                ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 120.f, 1);
+                ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.6f, 2);
+                ImGui::TableSetupColumn("设备数", ImGuiTableColumnFlags_WidthFixed, 56.f, 3);
+                ImGui::TableSetupColumn("摘要", ImGuiTableColumnFlags_WidthStretch, 2.2f, 4);
                 ImGui::TableHeadersRow();
-                for (size_t i = 0; i < st.ipAlerts.size(); ++i) {
+                std::vector<size_t> alertOrder(st.ipAlerts.size());
+                for (size_t i = 0; i < alertOrder.size(); ++i) alertOrder[i] = i;
+                if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs()) {
+                    StableSortByTableSpecs(alertOrder, specs, [&](size_t ia, size_t ib, ImGuiID col) {
+                        const auto& a = st.ipAlerts[ia];
+                        const auto& b = st.ipAlerts[ib];
+                        switch (col) {
+                            case 1:
+                                return CmpStrField(a.ip, b.ip);
+                            case 2:
+                                return CmpStrField(a.geo, b.geo);
+                            case 3:
+                                return CmpIntField(a.deviceCount, b.deviceCount);
+                            case 4:
+                                return CmpStrField(a.summary, b.summary);
+                            default:
+                                return 0;
+                        }
+                    });
+                }
+                for (size_t oi = 0; oi < alertOrder.size(); ++oi) {
+                    const size_t i = alertOrder[oi];
                     const auto& a = st.ipAlerts[i];
                     ImGui::PushID(static_cast<int>(i) + 40000);
                     ImGui::TableNextRow();
@@ -2533,22 +3053,36 @@ void DrawClientsPanel(OpsState& st) {
             ImGui::EndTable();
         }
         {
+            const ImGuiTableFlags listFlags =
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp |
+                ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate;
             const float listH = (std::max)(80.f, ImGui::GetContentRegionAvail().y);
-            if (ImGui::BeginTable("bans_table", 6, flags, ImVec2(0, listH))) {
+            if (ImGui::BeginTable("bans_table", 6, listFlags, ImVec2(0, listH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("键", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-                ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 0.9f);
-                ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 96.f);
-                ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 72.f);
-                ImGui::TableSetupColumn("原因", ImGuiTableColumnFlags_WidthStretch, 0.9f);
-                ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthFixed, 52.f);
+                ImGui::TableSetupColumn("键", ImGuiTableColumnFlags_WidthStretch, 1.2f, 1);
+                ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 0.9f, 2);
+                ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 96.f, 3);
+                ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 72.f, 4);
+                ImGui::TableSetupColumn("原因", ImGuiTableColumnFlags_WidthStretch, 0.9f, 5);
+                ImGui::TableSetupColumn("操作",
+                                        ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
+                                        52.f, 6);
                 ImGui::TableHeadersRow();
                 if (st.bans.empty()) {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
                     ImGui::TextDisabled("(无封禁 · 可从在线表/拒绝记录右键填入)");
                 } else {
-                    for (size_t idx = 0; idx < st.bans.size(); ++idx) {
+                    std::vector<size_t> banOrder(st.bans.size());
+                    for (size_t i = 0; i < banOrder.size(); ++i) banOrder[i] = i;
+                    if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs()) {
+                        StableSortByTableSpecs(banOrder, specs, [&](size_t ia, size_t ib, ImGuiID col) {
+                            return CompareBannedDevice(st.bans[ia], st.bans[ib], col);
+                        });
+                    }
+                    for (size_t oi = 0; oi < banOrder.size(); ++oi) {
+                        const size_t idx = banOrder[oi];
                         const auto& b = st.bans[idx];
                         ImGui::PushID(static_cast<int>(idx) + 10000);
                         ImGui::TableNextRow();
@@ -2635,22 +3169,36 @@ void DrawClientsPanel(OpsState& st) {
             ImGui::EndTable();
         }
         {
+            const ImGuiTableFlags listFlags =
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp |
+                ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate;
             const float listH = (std::max)(80.f, ImGui::GetContentRegionAvail().y);
-            if (ImGui::BeginTable("allows_table", 6, flags, ImVec2(0, listH))) {
+            if (ImGui::BeginTable("allows_table", 6, listFlags, ImVec2(0, listH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("键", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-                ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 0.9f);
-                ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 96.f);
-                ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 72.f);
-                ImGui::TableSetupColumn("备注", ImGuiTableColumnFlags_WidthStretch, 0.9f);
-                ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthFixed, 52.f);
+                ImGui::TableSetupColumn("键", ImGuiTableColumnFlags_WidthStretch, 1.2f, 1);
+                ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 0.9f, 2);
+                ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 96.f, 3);
+                ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthFixed, 72.f, 4);
+                ImGui::TableSetupColumn("备注", ImGuiTableColumnFlags_WidthStretch, 0.9f, 5);
+                ImGui::TableSetupColumn("操作",
+                                        ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
+                                        52.f, 6);
                 ImGui::TableHeadersRow();
                 if (st.allows.empty()) {
                     ImGui::TableNextRow();
                     ImGui::TableSetColumnIndex(0);
                     ImGui::TextDisabled("(无白名单 · 可从在线表右键填入)");
                 } else {
-                    for (size_t idx = 0; idx < st.allows.size(); ++idx) {
+                    std::vector<size_t> allowOrder(st.allows.size());
+                    for (size_t i = 0; i < allowOrder.size(); ++i) allowOrder[i] = i;
+                    if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs()) {
+                        StableSortByTableSpecs(allowOrder, specs, [&](size_t ia, size_t ib, ImGuiID col) {
+                            return CompareBannedDevice(st.allows[ia], st.allows[ib], col);
+                        });
+                    }
+                    for (size_t oi = 0; oi < allowOrder.size(); ++oi) {
+                        const size_t idx = allowOrder[oi];
                         const auto& a = st.allows[idx];
                         ImGui::PushID(static_cast<int>(idx) + 20000);
                         ImGui::TableNextRow();
@@ -2954,16 +3502,21 @@ void OpsPanel_Draw(OpsState& st) {
             if (ImGui::SmallButton("同步##p")) Ops_RequestSyncPublish(st);
             ImGui::SameLine();
             if (st.latestClientBuildId == 0) ImGui::BeginDisabled();
-            if (ImGui::SmallButton("推送更新##p")) ImGui::OpenPopup("confirm_force_update");
+            if (ImGui::SmallButton("全体推送##p")) ImGui::OpenPopup("confirm_force_update");
             if (st.latestClientBuildId == 0) ImGui::EndDisabled();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("写入 force-update.json，所有在线客户端都会更新。\n"
+                                  "只想更新一台：用连接表「推更」。");
             if (ImGui::BeginPopupModal("confirm_force_update", nullptr,
                                        ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::Text("确认推送强制更新？");
+                ImGui::TextColored(OpsTone::Warn(), "确认全体强制更新？");
                 ImGui::TextDisabled("目标：v%s  build %u", st.latestClientVersionText.c_str(),
                                     st.latestClientBuildId);
-                ImGui::TextWrapped("在线客户端会按强制版本策略拉新包；请确认发布站已同步。");
+                ImGui::TextWrapped(
+                    "会写入 force-update.json，所有轮询到的客户端都会拉新包。"
+                    "若只要更新个别机器，请关闭此框，改用「连接与访问」表里的「推更」。");
                 ImGui::Spacing();
-                if (SafeButton("确认推送##force_yes", ImVec2(120, 0))) {
+                if (SafeButton("确认全体推送##force_yes", ImVec2(140, 0))) {
                     Ops_RequestForceClientUpdate(st);
                     ImGui::CloseCurrentPopup();
                 }

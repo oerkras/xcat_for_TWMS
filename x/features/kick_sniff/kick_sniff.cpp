@@ -16,6 +16,7 @@
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_network.h"
 #include "../../runtime/il2cpp_shape.h"
+#include "../../runtime/main_thread_pump.h"
 
 #include <Windows.h>
 #include <TlHelp32.h>
@@ -163,6 +164,14 @@ bool PktFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
 void EnsureKickFieldOff() {
     constexpr int kExpect = 5;
     if (gPktFieldTried && gPktFieldHits >= kExpect) return;
+    // FindClass / WM Resolve：泵已装好则跳泵；装泵前（极少）就地解析，避免 InvokeAndWait↔Ensure 死锁。
+    if (!x::runtime::main_thread::IsOnPumpThread() &&
+        x::runtime::main_thread::IsInstalled()) {
+        x::runtime::main_thread::InvokeAndWait(
+            [](void*) { EnsureKickFieldOff(); }, nullptr, 2500,
+            x::runtime::main_thread::JobPrio::High);
+        return;
+    }
     if (!x::runtime::il2cpp::Ensure()) return;
     void* outKlass = x::runtime::il2cpp::FindClass("", kOutPacketClass);
     void* baseKlass = x::runtime::il2cpp::FindClass("", kPacketBaseClass);

@@ -1045,9 +1045,23 @@ struct PredSnapshot {
     void* nonInst = nullptr;
 };
 
+// 快照过期就按「取不到 = 没开测谎」处理：宁可慢半拍发现题目，也不拿陈旧结论去动光标。
+constexpr DWORD kPredStaleMs = 600;
+// 连着这么久没人问，刷新线程转空档，别白占泵。
+constexpr DWORD kPredIdleMs = 3000;
+
+// 这把锁**只护一次结构体拷贝，绝不跨泵等待**。跨着持锁去等泵是个闭环陷阱：泵侧只要有谁
+// 回调本 port 一句谓词，就会「worker 持锁等泵、泵等锁」当场死。今天泵侧没有这种调用者
+// （LieFramePulse / PulseCursorOnPump / MainJob 都不碰），但那是巧合，不能当设计依据。
 std::mutex gPredMtx;
 PredSnapshot gPredCache;
 DWORD gPredAtMs = 0;
+
+// 谁在问、刷新线程活着没。
+std::atomic<DWORD> gPredWantMs{0};
+std::atomic<bool> gRefreshRun{false};
+std::atomic<HANDLE> gRefreshThread{nullptr};
+std::mutex gRefreshStartMtx;
 
 void PredJob(void* user) {
     auto* out = static_cast<PredSnapshot*>(user);
@@ -1059,21 +1073,65 @@ void PredJob(void* user) {
     out->nonInst = (out->nonFinite && gMiNonGet) ? RawNonObj() : nullptr;
 }
 
-PredSnapshot Predicates() {
+void PublishPred(const PredSnapshot& snap) {
+    DWORD now = GetTickCount();
+    if (!now) now = 1;
     std::lock_guard<std::mutex> lk(gPredMtx);
-    const DWORD now = GetTickCount();
-    if (gPredAtMs && static_cast<int>(now - gPredAtMs) < static_cast<int>(kPredCacheMs))
-        return gPredCache;
-
-    PredSnapshot snap;
-    if (x::runtime::main_thread::IsOnPumpThread()) {
-        PredJob(&snap);
-    } else if (!x::runtime::main_thread::InvokeAndWait(&PredJob, &snap, 800)) {
-        snap = PredSnapshot{};
-    }
-    gPredAtMs = now;
     gPredCache = snap;
-    return snap;
+    gPredAtMs = now;
+}
+
+// 专用刷新线程：**所有等泵的时间都花在这条可牺牲的线程上**。auto_lie worker 只读快照，
+// 节奏不受泵拥堵影响——真题跟随时 worker 要按拍建计划/判中止，被 InvokeAndWait 顶住 800 ms
+// 是能看出来的。（对照仓也是这个思路：危险且会阻塞的调用放后台线程，帧脉冲保持非阻塞。）
+DWORD WINAPI PredRefreshThread(LPVOID) {
+    while (gRefreshRun.load(std::memory_order_acquire)) {
+        const DWORD want = gPredWantMs.load(std::memory_order_relaxed);
+        const bool wanted =
+            want && static_cast<int>(GetTickCount() - want) < static_cast<int>(kPredIdleMs);
+        if (wanted) {
+            PredSnapshot snap;
+            if (x::runtime::main_thread::InvokeAndWait(&PredJob, &snap, 800)) PublishPred(snap);
+            // 泵拒（换图 quiesce）或超时：不覆盖旧值，让它自然过期成 stale，
+            // 上面读到过期就返回全 false，等于「这会儿没开测谎」。
+        }
+        Sleep(wanted ? kPredCacheMs / 2 : 250);
+    }
+    return 0;
+}
+
+void EnsureRefresher() {
+    if (gRefreshRun.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lk(gRefreshStartMtx);
+    if (gRefreshRun.load(std::memory_order_acquire)) return;
+    gRefreshRun.store(true, std::memory_order_release);
+    HANDLE th = CreateThread(nullptr, 0, &PredRefreshThread, nullptr, 0, nullptr);
+    if (!th) {
+        gRefreshRun.store(false, std::memory_order_release);
+        Log("谓词刷新线程 CreateThread 失败，测谎探测将持续返回「未开启」");
+        return;
+    }
+    gRefreshThread.store(th, std::memory_order_release);
+}
+
+PredSnapshot Predicates() {
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        // 已经在泵上，直接算最新的，顺手把快照刷了；这条路不等任何东西。
+        PredSnapshot snap;
+        PredJob(&snap);
+        PublishPred(snap);
+        return snap;
+    }
+
+    DWORD now = GetTickCount();
+    if (!now) now = 1;
+    gPredWantMs.store(now, std::memory_order_relaxed);
+    EnsureRefresher();
+
+    std::lock_guard<std::mutex> lk(gPredMtx);
+    if (!gPredAtMs || static_cast<int>(now - gPredAtMs) > static_cast<int>(kPredStaleMs))
+        return PredSnapshot{};
+    return gPredCache;
 }
 
 }  // namespace
@@ -1111,6 +1169,23 @@ BindReady ProbeBindReady() {
     r.mouseOk = r.gaBase && r.klassUtil && r.klassNonFinite && r.getTransform;
     r.ok = r.quizOk && r.mouseOk;
     return r;
+}
+
+void StopRefresher() {
+    gRefreshRun.store(false, std::memory_order_release);
+    HANDLE th = gRefreshThread.exchange(nullptr, std::memory_order_acq_rel);
+    if (!th) return;
+    // 若在泵上收尾就绝不能等：刷新线程此刻可能正卡在 InvokeAndWait 上等这条泵，
+    // 一等就是互锁。已置 gRefreshRun=false，让它自己走完当前这拍退出。
+    // 现有卸载路径（StopAllFeatureWorkers）都在 bootstrap/detach 线程上，这里是保险。
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        CloseHandle(th);
+        return;
+    }
+    // 最多卡在一次 InvokeAndWait(800) 里，5s 足够；超时只记一笔，不强杀。
+    if (WaitForSingleObject(th, 5000) == WAIT_TIMEOUT)
+        Log("StopRefresher wait timeout; 刷新线程可能仍在退出");
+    CloseHandle(th);
 }
 
 bool IsOpenAntiMacro() {

@@ -621,7 +621,7 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool autoLie = true;  // 与 PayloadControl 默认一致；读盘后覆盖
     static bool invincible = true;  // 与 PayloadControl 默认一致
     static bool attackAccel = false;
-    static bool pointBlankShoot = true;  // 与 PayloadControl 默认一致：贴身仍射箭
+    static bool pointBlankShoot = false;  // 与 PayloadControl / ini 默认一致：关
     static bool fly = false;
     static bool hpPotion = true;
     static bool mpPotion = true;
@@ -688,10 +688,12 @@ void DrawHomeTab(LaunchUiState& ui) {
                     xcat::kAttackAccelUserEnabled && disk.attackAccel != 0;
                 pointBlankShoot = disk.pointBlankShoot != 0;
                 gUiFinalAttackForce = disk.finalAttackForce != 0;
-                gUiSkillMaxLevel = disk.skillMaxLevel != 0;
+                gUiSkillMaxLevel =
+                    xcat::kSkillMaxLevelUserEnabled && disk.skillMaxLevel != 0;
                 gUiAttackAccelCutLayer = disk.attackAccelCutLayer != 0;
                 gUiAttackAccelSkipPrepare = disk.attackAccelSkipPrepare != 0;
-                gUiAttackAccelBooster = disk.attackAccelBooster != 0;
+                gUiAttackAccelBooster =
+                    xcat::kAttackAccelBoosterUserEnabled && disk.attackAccelBooster != 0;
                 fly = disk.fly != 0;
                 autoEnter = disk.autoEnter != 0;
                 hpPotion = disk.hpPotion != 0;
@@ -820,10 +822,12 @@ void DrawHomeTab(LaunchUiState& ui) {
             (xcat::kAttackAccelUserEnabled && attackAccel) ? 1u : 0u;
         c.pointBlankShoot = pointBlankShoot ? 1u : 0u;
         c.finalAttackForce = gUiFinalAttackForce ? 1u : 0u;
-        c.skillMaxLevel = gUiSkillMaxLevel ? 1u : 0u;
+        c.skillMaxLevel =
+            (xcat::kSkillMaxLevelUserEnabled && gUiSkillMaxLevel) ? 1u : 0u;
         c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
         c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
-        c.attackAccelBooster = gUiAttackAccelBooster ? 1u : 0u;
+        c.attackAccelBooster =
+            (xcat::kAttackAccelBoosterUserEnabled && gUiAttackAccelBooster) ? 1u : 0u;
         c.attackSameFrameBurst = xcat::kAttackSameFrameBurstDefault;
         c.fly = fly ? 1u : 0u;
         // flyMode 由调试 TAB 选推进路线；首页不覆盖
@@ -1820,7 +1824,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "弓/弩贴身仍射箭，不挥弓近战；主动技贴身也不改近战。\n"
                 "仅装备弓(45)/弩(46)时生效；其它武器原样。\n"
-                "默认开。进图后武装。");
+                "默认关。进图后武装。");
         }
 
         ImGui::Spacing();
@@ -3983,7 +3987,8 @@ void DrawBetaTab(LaunchUiState& ui) {
             xcat::PayloadControl disk{};
             if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
                 if (!boosterLoaded || disk.writeTickMs != boosterSeen) {
-                    gUiAttackAccelBooster = disk.attackAccelBooster != 0;
+                    gUiAttackAccelBooster =
+                    xcat::kAttackAccelBoosterUserEnabled && disk.attackAccelBooster != 0;
                     boosterSeen = disk.writeTickMs;
                     boosterLoaded = true;
                 }
@@ -3998,7 +4003,8 @@ void DrawBetaTab(LaunchUiState& ui) {
             if (ui.prefsBinDir.empty()) return;
             xcat::PayloadControl c{};
             (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-            c.attackAccelBooster = gUiAttackAccelBooster ? 1u : 0u;
+            c.attackAccelBooster =
+            (xcat::kAttackAccelBoosterUserEnabled && gUiAttackAccelBooster) ? 1u : 0u;
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
                 boosterSeen = c.writeTickMs;
@@ -4010,9 +4016,22 @@ void DrawBetaTab(LaunchUiState& ui) {
             }
         };
 
+        if (!xcat::kAttackAccelBoosterUserEnabled) {
+            gUiAttackAccelBooster = false;
+            ImGui::BeginDisabled();
+        }
         if (xcat::ui::OptionCheckbox("攻速槽 nBooster_", &gUiAttackAccelBooster))
             persistBooster();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        if (!xcat::kAttackAccelBoosterUserEnabled) {
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("当前暂不可用");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "已停用：写 nBooster_=-8 超出合法值域，存在指纹风险。\n"
+                    "代码保留；需要时把 kAttackAccelBoosterUserEnabled 改回 true。");
+            }
+        } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "实验项（默认关）：写 SecondaryStat.nBooster_=-8，把攻速 degree 夹到最快的 2，\n"
                 "攻击延迟 ×0.75；到期时间按游戏钟每拍续 60s，关勾选时原值奉还。\n"
@@ -4021,7 +4040,10 @@ void DrawBetaTab(LaunchUiState& ui) {
                 "它真正的用法是**替掉**「启用」：只开本项，不碰动作忙锁，约慢 5ms 但更干净。\n"
                 "注意 -8 超出合法 booster 值域（正常只有 -1/-2），存在被识别的风险。");
         }
-        ImGui::TextDisabled("对照用：与「启用」分开开关，可单独开");
+        ImGui::TextDisabled(
+            xcat::kAttackAccelBoosterUserEnabled
+                ? "对照用：与「启用」分开开关，可单独开"
+                : "已禁用（不写 nBooster_）· 代码保留");
     }
 
     CardGap();
@@ -4082,7 +4104,8 @@ void DrawBetaTab(LaunchUiState& ui) {
             xcat::PayloadControl disk{};
             if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
                 if (!skillMaxLoaded || disk.writeTickMs != skillMaxSeen) {
-                    gUiSkillMaxLevel = disk.skillMaxLevel != 0;
+                    gUiSkillMaxLevel =
+                        xcat::kSkillMaxLevelUserEnabled && disk.skillMaxLevel != 0;
                     skillMaxSeen = disk.writeTickMs;
                     skillMaxLoaded = true;
                 }
@@ -4097,7 +4120,8 @@ void DrawBetaTab(LaunchUiState& ui) {
             if (ui.prefsBinDir.empty()) return;
             xcat::PayloadControl c{};
             (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-            c.skillMaxLevel = gUiSkillMaxLevel ? 1u : 0u;
+            c.skillMaxLevel =
+                (xcat::kSkillMaxLevelUserEnabled && gUiSkillMaxLevel) ? 1u : 0u;
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
                 skillMaxSeen = c.writeTickMs;
@@ -4109,9 +4133,22 @@ void DrawBetaTab(LaunchUiState& ui) {
             }
         };
 
+        if (!xcat::kSkillMaxLevelUserEnabled) {
+            gUiSkillMaxLevel = false;
+            ImGui::BeginDisabled();
+        }
         if (xcat::ui::OptionCheckbox("已学技能按满级生效", &gUiSkillMaxLevel))
             persistSkillMax();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        if (!xcat::kSkillMaxLevelUserEnabled) {
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("当前暂不可用");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "已停用：只改客户端等级，服端伤害仍按库里真实等级。\n"
+                    "代码保留；需要时把 kSkillMaxLevelUserEnabled 改回 true。");
+            }
+        } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "实验项（默认关）：A 写 SkillRecord/Ex 已学等级→满级；\n"
                 "B Hook UserLocal + SkillInfo.GetSkillLevel/GetPure；\n"
@@ -4119,7 +4156,10 @@ void DrawBetaTab(LaunchUiState& ui) {
                 "日志 SkillMax · hookUl/hookSi/hookPure。\n"
                 "关掉还原字典原等级并卸钩；服端结算以服为准。");
         }
-        ImGui::TextDisabled("dict + UL/SI/Pure GetSkillLevel hook · src 见日志");
+        ImGui::TextDisabled(
+            xcat::kSkillMaxLevelUserEnabled
+                ? "dict + UL/SI/Pure GetSkillLevel hook · src 见日志"
+                : "已禁用（不启 worker）· 服端伤害不认客户端满级");
     }
 
     CardGap();

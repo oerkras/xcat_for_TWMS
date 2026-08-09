@@ -1,11 +1,14 @@
 // Classic TWMS — pointblank_shoot：不挥弓（贴身仍射箭）。
 //
-// 三层（均按弓/弩门控；职业兜底）：
-// 1) CED7E0 → false：主动技贴身早闸留在射箭分支
-// 2) TryDoingShootAttack → isMortalBlow=1：Melee 内探测/MB 路径
-// 3) TryDoingMeleeAttack 入口改道 → 只调 Shoot(MB=1)，禁止落入挥弓 Encode(50)
+// 回退锚点：用户确认「贴身拉弦」生效版（摸 FindMobInRectHackLog 家族之前）。
+// 四层（均按弓/弩门控；职业兜底）：
+// 1) CED7E0 → false
+// 2) TryDoingShootAttack → isMortalBlow=1（禁止注入未学 MB skillId）
+// 3) TryDoingMeleeAttack → 改道 Shoot(MB=1)
+// 4) FindHitMobInRect：force 期间 **一律** 扩 Rect X ±120（不先试原框、无二档）
 //
-// BIN 2026-08-09：钩已 arm 仍挥弓 → 门控未命中或 Melee 失败落点仍 bonk。
+// 其后缩小扩幅 / 仅 count==0 / Encode C 钩均已撤；勿再加回。
+// Worker 禁调 ShouldForceNoBonk（GetWeaponType/player::Read → GC unknown-thread）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -33,12 +36,16 @@ using x::runtime::il2cpp::ReadPtr;
 constexpr uint32_t kRvaTryDoingShootAttack = 0x103D2A0;
 constexpr uint32_t kRvaCedGate = 0x106D7E0;
 constexpr uint32_t kRvaTryDoingMeleeAttack = 0x10B0BB0;
+constexpr uint32_t kRvaFindHitMobInRect = 0xF6A4E0;
 constexpr uint32_t kRvaGetWeaponType = 0x1418B10;
 
-// Shoot：55 41 57 41 56 41 55 41 54 56 57 53
+// Shoot / FindHit：55 41 57 41 56 41 55 41 54 56 57 53
 constexpr uint8_t kShootSig[12] = {0x55, 0x41, 0x57, 0x41, 0x56, 0x41,
                                    0x55, 0x41, 0x54, 0x56, 0x57, 0x53};
 constexpr size_t kShootSteal = 12;
+constexpr uint8_t kFindHitSig[12] = {0x55, 0x41, 0x57, 0x41, 0x56, 0x41,
+                                     0x55, 0x41, 0x54, 0x56, 0x57, 0x53};
+constexpr size_t kFindHitSteal = 12;
 
 // CED：41 57 41 56 56 57 53 48 81 EC 70 02 00 00
 constexpr uint8_t kCedSig[14] = {0x41, 0x57, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48,
@@ -66,6 +73,10 @@ using FnCed = uint8_t(__fastcall*)(void* self, void* methodInfo);
 using FnMelee = uint8_t(__fastcall*)(void* self, void* skill, int32_t skillLevel, void* shootRange,
                                      int32_t serialSkill, int32_t lastMob, int32_t timeKeyDown,
                                      void* grenade, void* methodInfo);
+// MobPool.FindHitMobInRect — Shoot 调点：rcx=pool rdx=Rect(float×4) r8=out r9=1 + 栈参
+using FnFindHit = int(__fastcall*)(void* self, float* rect, void* a3, int32_t a4, int32_t a5,
+                                   int32_t a6, int32_t a7, int32_t a8, uint8_t a9, int32_t a10,
+                                   int32_t a11, void* methodInfo);
 using FnGetWeaponType = int(__fastcall*)(int itemId, void* methodInfo);
 
 struct AbsHookState {
@@ -82,19 +93,30 @@ std::atomic<HANDLE> gWorker{nullptr};
 AbsHookState gShoot{};
 AbsHookState gCed{};
 AbsHookState gMelee{};
+AbsHookState gFindHit{};
 FnShoot gShootTramp = nullptr;
 FnCed gCedTramp = nullptr;
 FnMelee gMeleeTramp = nullptr;
+FnFindHit gFindHitTramp = nullptr;
 std::atomic<uint32_t> gForceMbHits{0};
 std::atomic<uint32_t> gForceCedHits{0};
 std::atomic<uint32_t> gMeleeRedirectHits{0};
 std::atomic<uint32_t> gPassHits{0};
+std::atomic<uint32_t> gShootOk{0};
+std::atomic<uint32_t> gShootFail{0};
+std::atomic<uint32_t> gInjectSkillHits{0};
+std::atomic<uint32_t> gExpandHits{0};
 std::atomic<bool> gShootRefuse{false};
 std::atomic<bool> gCedRefuse{false};
 std::atomic<bool> gMeleeRefuse{false};
+std::atomic<bool> gFindHitRefuse{false};
 std::atomic<int> gLastWt{0};
 std::atomic<int> gLastJob{0};
+std::atomic<bool> gLastForce{false};
 bool gWeSetPatchEnv = false;
+thread_local int gForceShootDepth = 0;
+// 生效版：force 期间双向各扩 120（BIN 拉弦实锤）。勿改回 56 / 仅 count==0。
+constexpr float kRectExpand = 120.f;
 
 int ReadI32(void* obj, size_t off) {
     int v = 0;
@@ -163,6 +185,9 @@ int WeaponTypeFromItemId(int itemId) {
 
 int CallGetWeaponType(int itemId) {
     if (itemId <= 0) return 0;
+    // 托管方法：仅 MainPump。Worker/heart 调会炸 Unity GC「Collecting from unknown thread」。
+    if (x::runtime::main_thread::IsInstalled() && !x::runtime::main_thread::IsOnPumpThread())
+        return 0;
     auto fn = x::runtime::il2cpp::AtRva<FnGetWeaponType>(kRvaGetWeaponType);
     if (!fn) return 0;
     int wt = 0;
@@ -232,8 +257,13 @@ bool IsArcherJob(int job) {
 }
 
 // 弓/弩才强制；wt 未知时用职业兜底。已知近战武器绝不强制。
+// 非泵线程只回缓存（禁 player::Read / GetWeaponType → GC unknown-thread）。
 bool ShouldForceNoBonk() {
     if (!gWant.load(std::memory_order_relaxed)) return false;
+
+    const bool offPump = x::runtime::main_thread::IsInstalled() &&
+                         !x::runtime::main_thread::IsOnPumpThread();
+    if (offPump) return gLastForce.load(std::memory_order_relaxed);
 
     static DWORD sLastMs = 0;
     static int sWt = 0;
@@ -267,6 +297,7 @@ bool ShouldForceNoBonk() {
     sLastMs = now;
     gLastWt.store(wt, std::memory_order_relaxed);
     gLastJob.store(job, std::memory_order_relaxed);
+    gLastForce.store(force, std::memory_order_relaxed);
     return force;
 }
 
@@ -331,18 +362,33 @@ uint8_t __fastcall HookShoot(void* self, void* skill, int32_t skillLevel, void* 
                              void* methodInfo) {
     const FnShoot o = gShootTramp;
     if (!o) return 0;
-    if (ShouldForceNoBonk()) {
-        if (!isMortalBlow) gForceMbHits.fetch_add(1, std::memory_order_relaxed);
-        isMortalBlow = 1;
-    } else {
+
+    if (!ShouldForceNoBonk()) {
         gPassHits.fetch_add(1, std::memory_order_relaxed);
+        __try {
+            return o(self, skill, skillLevel, shootRange, isMortalBlow, timeKeyDown, randMb,
+                     methodInfo);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return 0;
+        }
     }
+
+    // 禁止注入未学 MB。贴身失败主因：FindHitMob 射箭框裁掉近距 → 扩框（见 HookFindHit）。
+    gForceMbHits.fetch_add(1, std::memory_order_relaxed);
+    ++gForceShootDepth;
+    uint8_t r = 0;
     __try {
-        return o(self, skill, skillLevel, shootRange, isMortalBlow, timeKeyDown, randMb,
-                 methodInfo);
+        r = o(self, skill, skillLevel, shootRange, /*isMortalBlow=*/1, timeKeyDown, randMb,
+              methodInfo);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
+        r = 0;
     }
+    --gForceShootDepth;
+    if (r)
+        gShootOk.fetch_add(1, std::memory_order_relaxed);
+    else
+        gShootFail.fetch_add(1, std::memory_order_relaxed);
+    return r;
 }
 
 uint8_t __fastcall HookCed(void* self, void* methodInfo) {
@@ -367,14 +413,21 @@ uint8_t __fastcall HookMelee(void* self, void* skill, int32_t skillLevel, void* 
         const FnShoot shoot = gShootTramp;
         if (shoot) {
             gMeleeRedirectHits.fetch_add(1, std::memory_order_relaxed);
+            ++gForceShootDepth;
+            uint8_t r = 0;
             __try {
-                return shoot(self, skill, skillLevel, shootRange, /*isMortalBlow=*/1, timeKeyDown,
-                             0, methodInfo);
+                r = shoot(self, skill, skillLevel, shootRange, /*isMortalBlow=*/1, timeKeyDown, 0,
+                          methodInfo);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
-                return 0;
+                r = 0;
             }
+            --gForceShootDepth;
+            if (r)
+                gShootOk.fetch_add(1, std::memory_order_relaxed);
+            else
+                gShootFail.fetch_add(1, std::memory_order_relaxed);
+            return r;
         }
-        // Shoot 钩未就绪时仍拒绝落入原 Melee（宁可空挥也不 bonk）
         return 0;
     }
     const FnMelee o = gMeleeTramp;
@@ -385,6 +438,42 @@ uint8_t __fastcall HookMelee(void* self, void* skill, int32_t skillLevel, void* 
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
+}
+
+int CallFindHitOrig(FnFindHit o, void* self, float* rect, void* a3, int32_t a4, int32_t a5,
+                    int32_t a6, int32_t a7, int32_t a8, uint8_t a9, int32_t a10, int32_t a11,
+                    void* methodInfo) {
+    if (!o) return 0;
+    __try {
+        return o(self, rect, a3, a4, a5, a6, a7, a8, a9, a10, a11, methodInfo);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// 贴身：射箭 Rect 近沿被 afterimage 裁掉 → count=0。
+// 生效版：force 期间直接扩 float[0]/[2] 各 ±120（不先试原框）。
+int __fastcall HookFindHit(void* self, float* rect, void* a3, int32_t a4, int32_t a5, int32_t a6,
+                           int32_t a7, int32_t a8, uint8_t a9, int32_t a10, int32_t a11,
+                           void* methodInfo) {
+    const FnFindHit o = gFindHitTramp;
+    if (!o) return 0;
+    if (gForceShootDepth <= 0 || !rect) {
+        return CallFindHitOrig(o, self, rect, a3, a4, a5, a6, a7, a8, a9, a10, a11, methodInfo);
+    }
+    float tmp[4]{};
+    __try {
+        tmp[0] = rect[0];
+        tmp[1] = rect[1];
+        tmp[2] = rect[2];
+        tmp[3] = rect[3];
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return CallFindHitOrig(o, self, rect, a3, a4, a5, a6, a7, a8, a9, a10, a11, methodInfo);
+    }
+    tmp[0] -= kRectExpand;
+    tmp[2] += kRectExpand;
+    gExpandHits.fetch_add(1, std::memory_order_relaxed);
+    return CallFindHitOrig(o, self, tmp, a3, a4, a5, a6, a7, a8, a9, a10, a11, methodInfo);
 }
 
 void ReportLamp(x::runtime::anchor_lamps::AnchorLampCode code, const char* detail) {
@@ -417,6 +506,7 @@ void PumpApply(void*) {
         void* shootTramp = gShootTramp;
         void* cedTramp = gCedTramp;
         void* meleeTramp = gMeleeTramp;
+        void* findHitTramp = gFindHitTramp;
         TryArmOne(gShoot, gShootRefuse, kRvaTryDoingShootAttack, kShootSig, kShootSteal,
                   reinterpret_cast<void*>(&HookShoot), "Shoot", &shootTramp);
         gShootTramp = reinterpret_cast<FnShoot>(shootTramp);
@@ -426,29 +516,40 @@ void PumpApply(void*) {
         TryArmOne(gMelee, gMeleeRefuse, kRvaTryDoingMeleeAttack, kMeleeSig, kMeleeSteal,
                   reinterpret_cast<void*>(&HookMelee), "Melee", &meleeTramp);
         gMeleeTramp = reinterpret_cast<FnMelee>(meleeTramp);
+        TryArmOne(gFindHit, gFindHitRefuse, kRvaFindHitMobInRect, kFindHitSig, kFindHitSteal,
+                  reinterpret_cast<void*>(&HookFindHit), "FindHit", &findHitTramp);
+        gFindHitTramp = reinterpret_cast<FnFindHit>(findHitTramp);
 
-        const bool ok = gShoot.active && gCed.active && gMelee.active;
+        const bool ok = gShoot.active && gCed.active && gMelee.active && gFindHit.active;
         ReportLamp(ok ? x::runtime::anchor_lamps::AnchorLampCode::Ok
-                      : (gShoot.active || gCed.active || gMelee.active)
+                      : (gShoot.active || gCed.active || gMelee.active || gFindHit.active)
                             ? x::runtime::anchor_lamps::AnchorLampCode::Ok
                             : x::runtime::anchor_lamps::AnchorLampCode::Miss,
                    ok ? "armed" : "partial");
-        x::runtime::LogI("PbShoot", "arm shoot=%d ced=%d melee=%d wt=%d job=%d",
+        x::runtime::LogI("PbShoot",
+                         "arm shoot=%d ced=%d melee=%d findHit=%d wt=%d job=%d",
                          gShoot.active ? 1 : 0, gCed.active ? 1 : 0, gMelee.active ? 1 : 0,
+                         gFindHit.active ? 1 : 0,
                          gLastWt.load(std::memory_order_relaxed),
                          gLastJob.load(std::memory_order_relaxed));
-    } else if (gShoot.active || gCed.active || gMelee.active) {
+    } else if (gShoot.active || gCed.active || gMelee.active || gFindHit.active) {
         RemoveAbs(gShoot);
         gShootTramp = nullptr;
         RemoveAbs(gCed);
         gCedTramp = nullptr;
         RemoveAbs(gMelee);
         gMeleeTramp = nullptr;
-        x::runtime::LogI("PbShoot", "disarm mb=%u ced=%u meleeRedir=%u pass=%u",
+        RemoveAbs(gFindHit);
+        gFindHitTramp = nullptr;
+        x::runtime::LogI("PbShoot",
+                         "disarm mb=%u ced=%u meleeRedir=%u pass=%u ok=%u fail=%u exp=%u",
                          gForceMbHits.load(std::memory_order_relaxed),
                          gForceCedHits.load(std::memory_order_relaxed),
                          gMeleeRedirectHits.load(std::memory_order_relaxed),
-                         gPassHits.load(std::memory_order_relaxed));
+                         gPassHits.load(std::memory_order_relaxed),
+                         gShootOk.load(std::memory_order_relaxed),
+                         gShootFail.load(std::memory_order_relaxed),
+                         gExpandHits.load(std::memory_order_relaxed));
         ReportLamp(x::runtime::anchor_lamps::AnchorLampCode::Unknown, "off");
     }
 }
@@ -491,23 +592,27 @@ DWORD WINAPI Worker(LPVOID) {
         const bool need =
             want && ((!gShoot.active && !gShootRefuse.load(std::memory_order_relaxed)) ||
                      (!gCed.active && !gCedRefuse.load(std::memory_order_relaxed)) ||
-                     (!gMelee.active && !gMeleeRefuse.load(std::memory_order_relaxed)));
+                     (!gMelee.active && !gMeleeRefuse.load(std::memory_order_relaxed)) ||
+                     (!gFindHit.active && !gFindHitRefuse.load(std::memory_order_relaxed)));
         if (need) RequestApply();
         const DWORD now = GetTickCount();
         if (want && (!lastHeart || now - lastHeart >= kHeartMs)) {
             lastHeart = now;
-            (void)ShouldForceNoBonk();  // refresh wt/job cache
+            // 禁止在此调 ShouldForceNoBonk（会进托管 → GC unknown-thread）；只读原子缓存。
             x::runtime::LogI(
                 "PbShoot",
-                "heart want=1 shoot=%d ced=%d melee=%d force=%d wt=%d job=%d mb=%u cedH=%u "
-                "redir=%u pass=%u",
+                "heart want=1 shoot=%d ced=%d melee=%d findHit=%d force=%d wt=%d job=%d "
+                "mb=%u cedH=%u redir=%u pass=%u ok=%u fail=%u exp=%u",
                 gShoot.active ? 1 : 0, gCed.active ? 1 : 0, gMelee.active ? 1 : 0,
-                ShouldForceNoBonk() ? 1 : 0, gLastWt.load(std::memory_order_relaxed),
-                gLastJob.load(std::memory_order_relaxed),
+                gFindHit.active ? 1 : 0, gLastForce.load(std::memory_order_relaxed) ? 1 : 0,
+                gLastWt.load(std::memory_order_relaxed), gLastJob.load(std::memory_order_relaxed),
                 gForceMbHits.load(std::memory_order_relaxed),
                 gForceCedHits.load(std::memory_order_relaxed),
                 gMeleeRedirectHits.load(std::memory_order_relaxed),
-                gPassHits.load(std::memory_order_relaxed));
+                gPassHits.load(std::memory_order_relaxed),
+                gShootOk.load(std::memory_order_relaxed),
+                gShootFail.load(std::memory_order_relaxed),
+                gExpandHits.load(std::memory_order_relaxed));
         }
         Sleep(want ? 1000 : 2000);
     }
@@ -522,13 +627,14 @@ void Init() {
     gShootRefuse.store(false, std::memory_order_relaxed);
     gCedRefuse.store(false, std::memory_order_relaxed);
     gMeleeRefuse.store(false, std::memory_order_relaxed);
+    gFindHitRefuse.store(false, std::memory_order_relaxed);
     ReportLamp(x::runtime::anchor_lamps::AnchorLampCode::Unknown, "init");
 }
 
 void Shutdown() {
     StopWorker();
     gWant.store(false, std::memory_order_release);
-    if (gShoot.active || gCed.active || gMelee.active) {
+    if (gShoot.active || gCed.active || gMelee.active || gFindHit.active) {
         if (x::runtime::main_thread::IsInstalled() && !x::runtime::main_thread::IsOnPumpThread())
             x::runtime::main_thread::InvokeAndWait(&PumpApply, nullptr, 2000);
         else {
@@ -538,6 +644,8 @@ void Shutdown() {
             gCedTramp = nullptr;
             RemoveAbs(gMelee);
             gMeleeTramp = nullptr;
+            RemoveAbs(gFindHit);
+            gFindHitTramp = nullptr;
         }
     }
     EnsurePatchEnv(false);
@@ -575,17 +683,21 @@ void SetEnabled(bool on) {
         gShootRefuse.store(false, std::memory_order_relaxed);
         gCedRefuse.store(false, std::memory_order_relaxed);
         gMeleeRefuse.store(false, std::memory_order_relaxed);
+        gFindHitRefuse.store(false, std::memory_order_relaxed);
     }
     const bool prev = gWant.exchange(on, std::memory_order_acq_rel);
-    const bool fullyOn = gShoot.active && gCed.active && gMelee.active;
-    if (prev == on && ((on && fullyOn) || (!on && !gShoot.active && !gCed.active && !gMelee.active)))
+    const bool fullyOn = gShoot.active && gCed.active && gMelee.active && gFindHit.active;
+    if (prev == on &&
+        ((on && fullyOn) ||
+         (!on && !gShoot.active && !gCed.active && !gMelee.active && !gFindHit.active)))
         return;
-    x::runtime::LogI("PbShoot", "want=%d shoot=%d ced=%d melee=%d", on ? 1 : 0,
-                     gShoot.active ? 1 : 0, gCed.active ? 1 : 0, gMelee.active ? 1 : 0);
+    x::runtime::LogI("PbShoot", "want=%d shoot=%d ced=%d melee=%d findHit=%d", on ? 1 : 0,
+                     gShoot.active ? 1 : 0, gCed.active ? 1 : 0, gMelee.active ? 1 : 0,
+                     gFindHit.active ? 1 : 0);
     RequestApply();
 }
 
 bool IsEnabled() { return gWant.load(std::memory_order_acquire); }
-bool IsActive() { return gShoot.active || gCed.active || gMelee.active; }
+bool IsActive() { return gShoot.active || gCed.active || gMelee.active || gFindHit.active; }
 
 }  // namespace x::features::pointblank_shoot
