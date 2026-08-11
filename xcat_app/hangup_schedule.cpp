@@ -107,6 +107,11 @@ bool ClassicPresent() { return ClassicPid() != 0; }
 bool NgmPresent() {
     return xcat::FindProcessIdByName(kNgmExe) != 0 || xcat::FindProcessIdByName(kNgm64Exe) != 0;
 }
+// 与 travel / auto_supply 一致：大区室外主城 mapId 后 6 位为 0（如 100000000 弓箭手村）。
+// 守护据此置 safeZonePause，避免主城挂机/补给时因无经验误杀（policy 门闩此前未接线）。
+bool IsOutdoorTownMapId(uint32_t mapId) {
+    return mapId >= 100000000u && (mapId % 1000000u) == 0u;
+}
 // 干净重拉须清掉 Classic + NGM：只杀游戏会留下旧 NGM，下一轮官网 Main 常不再拉新经典版。
 bool LaunchChainPresent() { return ClassicPresent() || NgmPresent(); }
 unsigned KillLaunchChain(const char* why, const char* logTag = "Watchdog") {
@@ -453,6 +458,8 @@ std::string FormatWatchdogTimerText(const Snapshot& snap) {
         snprintf(buf, sizeof(buf), "战斗暂缓 %u/%u秒", elapsed, holdLimit);
         return buf;
     }
+    if (snap.gate && std::strcmp(snap.gate, "safe-zone") == 0) return "主城（暂停无经验）";
+    if (snap.gate && std::strcmp(snap.gate, "combat-off") == 0) return "战斗关闭（暂停无经验）";
     if (snap.watchdogMode == WatchdogUiMode::Healthy || snap.hasProgress) {
         snprintf(buf, sizeof(buf), "挂机中 %u/%u秒", elapsed, limit);
         return buf;
@@ -748,6 +755,12 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     input.playerExp = input.playerExpValid ? st.playerExp : 0;
     input.mapIdValid = stFresh && st.mapId != 0;
     input.mapId = input.mapIdValid ? st.mapId : 0;
+    // 主城暂停无经验：优先原生 IsTown（v11）；未采到时回退室外主城 mapId 启发式。
+    if (stFresh && st.version >= 11u && st.mapIsTownValid != 0) {
+        input.safeZonePause = st.mapIsTown != 0;
+    } else {
+        input.safeZonePause = input.mapIdValid && IsOutdoorTownMapId(input.mapId);
+    }
 
     // 服务器踢线/断线边沿 → hard-fail → 干净重拉（不依赖「自动打怪」）。
     // 契约：软重连已武装并进入观察窗时，守护不得因踢线/无经验/心跳等重拉；

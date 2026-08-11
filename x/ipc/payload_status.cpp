@@ -4,7 +4,9 @@
 #endif
 #include "payload_status.h"
 
+#include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/ccu/ccu.h"
+#include "../features/channel_hop/channel_hop.h"
 #include "../features/frame_lock/frame_lock.h"
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/soft_login_probe/soft_login_probe.h"
@@ -99,11 +101,15 @@ void FillLeds(xcat::PayloadStatus& st) {
     }
     st.mapId = mapId > 0 ? static_cast<uint32_t>(mapId) : 0u;
     st.currentMapName[0] = '\0';
+    st.channelId = 0;
     if (play) {
         const xcat::MapNamesPack& names = xcat::GetSharedMapNames(x::runtime::GetBinDir());
         std::string label = xcat::MapNamesLabelById(names, mapId);
         if (label.empty()) label = "地圖";
         xcat::CopyUtf8Truncate(st.currentMapName, sizeof(st.currentMapName), label.c_str());
+        // 与 soft sticky / 官方 UI 观测同源：1-based ch.N；未知保持 0。
+        const int ch1 = x::features::channel_hop::LastKnownChannel1Based();
+        if (ch1 > 0) st.channelId = ch1;
     }
 
     st.quizCacheRootOk = EnsureQuizTypesResolved() ? 1u : 0u;
@@ -175,6 +181,17 @@ void PayloadStatus_Publish() {
 
     st.softLoginHold = x::features::soft_login_probe::IsHoldActive() ? 1u : 0u;
     st.softLoginResult = x::features::soft_login_probe::ResultCode();
+
+    {
+        const int town = x::features::auction_town_bypass::QueryNativeIsTown();
+        if (town >= 0) {
+            st.mapIsTownValid = 1u;
+            st.mapIsTown = town ? 1u : 0u;
+        } else {
+            st.mapIsTownValid = 0u;
+            st.mapIsTown = 0u;
+        }
+    }
 
     st.writeTickMs = GetTickCount64();
     (void)xcat::WritePayloadStatus(binDir, st);

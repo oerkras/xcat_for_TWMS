@@ -338,7 +338,7 @@ void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
         QueueLog(std::wstring(kHttpBusyTag) + L" GAMA PASS 浏览器点选换票中…");
         QueueLog(L"[…] GAMA PASS：日常浏览器 + Windows UI Automation 自动点选"
                  L"（无 CDP 副本 / 无调试口；与日常同一登录态）");
-        QueueLog(L"[提示] 一键前会先结束同安装已开浏览器（防挂错窗，不清 Cookie），再拉起登录窗；"
+        QueueLog(L"[提示] 一键会新开登录窗（不结束已开浏览器、不清 Cookie）；"
                  L"若出现完整登录页请在该窗登录并勾选记住。不调用 refresh。");
 
         std::thread([]() {

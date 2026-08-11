@@ -35,7 +35,7 @@ import { createLogFetchQueue } from "./twms-log-fetch.mjs";
 import { createForceTargetQueue } from "./twms-force-target.mjs";
 import { createIpGeo } from "./twms-ip-geo.mjs";
 
-const SERVER_VERSION = "0.4.7";
+const SERVER_VERSION = "0.4.10";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
@@ -169,6 +169,11 @@ function clientIdentityFromReq(req) {
   const charLevel = /^-?\d+$/.test(charLevelRaw) ? Number(charLevelRaw) : null;
   const charJob = /^-?\d+$/.test(charJobRaw) ? Number(charJobRaw) : null;
   const charMeso = /^-?\d+$/.test(charMesoRaw) ? charMesoRaw : "";
+  const mapIdRaw = headerText(req, "x-xcat-map-id");
+  const channelRaw = headerText(req, "x-xcat-channel");
+  const mapName = decodeCharHeaderText(headerText(req, "x-xcat-map-name"), 64);
+  const mapId = /^\d+$/.test(mapIdRaw) ? Number(mapIdRaw) : null;
+  const channelId = /^-?\d+$/.test(channelRaw) ? Number(channelRaw) : null;
   return {
     machine: headerText(req, "x-xcat-machine").slice(0, 80),
     deviceId: headerText(req, "x-xcat-device-id").slice(0, 64),
@@ -182,6 +187,10 @@ function clientIdentityFromReq(req) {
     charJobName,
     charMeso,
     hasChar: !!(charName && charLevel != null && charLevel > 0),
+    mapId,
+    mapName,
+    channelId,
+    hasMap: !!(mapId != null && mapId > 0) || !!(channelId != null && channelId > 0),
   };
 }
 
@@ -259,7 +268,11 @@ function rememberDeviceOnIp(ip, identity) {
   }
 }
 
-function listIpMultiDeviceAlerts() {
+/** OPS 同 IP 告警列表：全量易把 /admin/clients 撑到 >256KB，截断 UTF-8 → 界面 '?'。 */
+const kIpAlertListCap = 48;
+const kIpAlertDevicesCap = 4;
+
+function listIpMultiDeviceAlerts({ limit = kIpAlertListCap } = {}) {
   const out = [];
   for (const [ip, set] of devicesByIp) {
     if (!set || set.size < 2) continue;
@@ -274,6 +287,7 @@ function listIpMultiDeviceAlerts() {
         mac: known.mac || "",
         device: known.device || fp,
       });
+      if (devices.length >= kIpAlertDevicesCap) break;
     }
     let geo = "";
     let geoStatus = "";
@@ -289,11 +303,13 @@ function listIpMultiDeviceAlerts() {
       geo,
       geoStatus,
       deviceCount: set.size,
-      devices: devices.slice(0, 16),
+      devices,
     });
   }
   out.sort((a, b) => b.deviceCount - a.deviceCount || a.ip.localeCompare(b.ip));
-  return out;
+  const total = out.length;
+  const capped = Number.isFinite(limit) && limit > 0 ? out.slice(0, Math.floor(limit)) : out;
+  return { alerts: capped, total };
 }
 
 function touchClient({
@@ -314,6 +330,10 @@ function touchClient({
   charJobName,
   charMeso,
   hasChar,
+  mapId,
+  mapName,
+  channelId,
+  hasMap,
 }) {
   if (!ip || ip === "unknown") return;
   const identified = !!(machine || deviceId || (macs && macs.length) || mac || token);
@@ -339,6 +359,9 @@ function touchClient({
       charJob: 0,
       charJobName: "",
       charMeso: "",
+      mapId: 0,
+      mapName: "",
+      channelId: 0,
       firstSeenMs: now,
       lastSeenMs: now,
       hits: 0,
@@ -375,6 +398,16 @@ function touchClient({
     row.charJob = Number.isFinite(charJob) ? Math.floor(charJob) : 0;
     row.charJobName = String(charJobName || "").slice(0, 32);
     row.charMeso = String(charMeso || "").replace(/[^\d-]/g, "").slice(0, 24);
+  }
+  // 地图/频道同口径：有新值才刷，未进图探活不抹掉上次。
+  // mapName 勿在仅带 channel、mapId=0 时清空（否则 OPS 留下旧 mapId + 空名）。
+  if (hasMap) {
+    if (Number.isFinite(mapId) && mapId > 0) {
+      row.mapId = Math.floor(mapId);
+      const name = String(mapName || "").slice(0, 64);
+      if (name) row.mapName = name;
+    }
+    if (Number.isFinite(channelId) && channelId > 0) row.channelId = Math.floor(channelId);
   }
   row.identified = !!(
     row.machine ||
@@ -558,6 +591,9 @@ function listActiveClients(activeSec) {
         charJob: row.charJob || 0,
         charJobName: row.charJobName || "",
         charMeso: row.charMeso || "",
+        mapId: row.mapId || 0,
+        mapName: row.mapName || "",
+        channelId: row.channelId || 0,
         identified: !!row.identified,
         sameIpOnline: byIp.get(row.ip) || 1,
         knownOnIp: devicesByIp.get(row.ip)?.size || 0,
@@ -722,6 +758,10 @@ function recordRequest({
   charJobName,
   charMeso,
   hasChar,
+  mapId,
+  mapName,
+  channelId,
+  hasMap,
 }) {
   stats.requestsTotal += 1;
   stats.lastRequestAt = ts();
@@ -751,6 +791,10 @@ function recordRequest({
     charJobName,
     charMeso,
     hasChar,
+    mapId,
+    mapName,
+    channelId,
+    hasMap,
   });
 
   if (isQuietForcePoll(status, kind, routedPath)) return;
@@ -794,6 +838,10 @@ function attachRequestRecorder(req, res, meta) {
       charJobName: id.charJobName,
       charMeso: id.charMeso,
       hasChar: id.hasChar,
+      mapId: id.mapId,
+      mapName: id.mapName,
+      channelId: id.channelId,
+      hasMap: id.hasMap,
     });
   });
 }
@@ -865,6 +913,7 @@ async function handleUpdate(req, res, routedPath) {
       });
     }
     const ackId = headerText(req, "x-xcat-log-fetch-ack");
+    const doneId = headerText(req, "x-xcat-log-fetch-done");
     const pending = logFetch.onAccess(
       {
         machine: id.machine,
@@ -874,6 +923,7 @@ async function handleUpdate(req, res, routedPath) {
         token: id.token,
       },
       ackId,
+      doneId,
     );
     const payload = {
       ok: true,
@@ -1038,7 +1088,8 @@ async function handleAdmin(req, res, routedPath) {
       }
     }
     const snap = access.snapshot();
-    const ipAlerts = listIpMultiDeviceAlerts();
+    const { alerts: ipAlerts, total: ipAlertTotal } = listIpMultiDeviceAlerts();
+    // clients 放前：即便告警段被客户端截断，在线表仍可解析。
     sendJson(res, 200, {
       ok: true,
       activeSec,
@@ -1048,10 +1099,11 @@ async function handleAdmin(req, res, routedPath) {
       accessMode: snap.mode,
       banCount: snap.banCount,
       allowCount: snap.allowCount,
+      clients,
       recentDenies: recentAccessDenies.slice(0, 20),
       ipMultiDeviceAlerts: ipAlerts,
-      ipMultiDeviceAlertCount: ipAlerts.length,
-      clients,
+      ipMultiDeviceAlertCount: ipAlertTotal,
+      ipMultiDeviceAlertListed: ipAlerts.length,
     });
     return;
   }

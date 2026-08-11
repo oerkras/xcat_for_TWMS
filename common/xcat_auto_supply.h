@@ -14,7 +14,7 @@ namespace xcat {
 // 飞镖 Charge 字段保留兼容；经典版执行侧暂 stub（UIShop Charge CF 平坦化未钉入口）。
 
 constexpr uint32_t kAutoSupplyMagic   = 0x50555341u;  // 'ASUP'
-constexpr uint32_t kAutoSupplyVersion = 6u;
+constexpr uint32_t kAutoSupplyVersion = 9u;
 
 // 回家卷軸（智能回最近主城）。离线 catalog：2030000 / 2030059 同名「回家卷軸」。
 // 用卷时主码失败会再试备用码；补买仍买主码（杂货店货架常见 2030000）。
@@ -23,24 +23,29 @@ constexpr const char* kAutoSupplyAltReturnScrollCode     = "2030059";
 constexpr const char* kAutoSupplyDefaultPotionCode       = "2000000";
 
 // 可选补红/补蓝 UI 默认名（精确中文）与经典 CODE；红/蓝默认不勾选。
-// 补蓝默认「藍色藥水」(2000003)，补到 300、默认关（维港杂货常见；非神社黑輪）。
+// 补蓝默认「藍色藥水」(2000003)，补到 100、默认关（维港杂货常见；非神社黑輪）。
 // 自定义默认「回家卷軸」(2030000)，补到 100、默认关；简体「回家卷轴」同 CODE。
-// 饲料默认勾选、补到 100；执行优先美味飼料→寵物食品（店内无则跳过）。
+// 自定义2默认「箭矢」(2060000)，补到 2000、默认关。
+// 饲料默认勾选、补到 10；执行优先美味飼料→寵物食品（店内无则跳过）。
 // 寻店不按这些 CODE 选型；用户应勾选挂机附近店有卖的品类。
 // 离线 catalog 名优先来自 LOCAL *StringDataBaked；内置仅兜底默认项
 //（避免「紅色藥水」与宠物卷轴等同名时选错 CODE）。
 constexpr const char* kAutoSupplyDefaultRefillHpName      = "紅色藥水";
 constexpr const char* kAutoSupplyDefaultRefillMpName      = "藍色藥水";
 constexpr const char* kAutoSupplyDefaultRefillCustomName  = "回家卷軸";
+constexpr const char* kAutoSupplyDefaultRefillCustom2Name = "箭矢";
 constexpr const char* kAutoSupplyDefaultRefillFeedName    = "美味飼料";
 constexpr const char* kAutoSupplyDefaultRefillFeedAltName = "寵物食品";
 constexpr const char* kAutoSupplyDefaultRefillHpCode      = "2000000";
 constexpr const char* kAutoSupplyDefaultRefillMpCode      = "2000003";
 constexpr const char* kAutoSupplyDefaultRefillCustomCode  = kAutoSupplyDefaultReturnScrollCode;
+constexpr const char* kAutoSupplyDefaultRefillCustom2Code = "2060000";
 constexpr const char* kAutoSupplyDefaultRefillFeedCode    = "2120008";
 constexpr const char* kAutoSupplyDefaultRefillFeedAltCode = "2120000";
-constexpr int32_t     kAutoSupplyDefaultRefillMpBuyTo       = 300;
+constexpr int32_t     kAutoSupplyDefaultRefillMpBuyTo       = 100;
+constexpr int32_t     kAutoSupplyDefaultRefillFeedBuyTo     = 10;
 constexpr int32_t     kAutoSupplyDefaultRefillCustomBuyTo   = 100;
+constexpr int32_t     kAutoSupplyDefaultRefillCustom2BuyTo  = 2000;
 
 constexpr int kAutoSupplyMaxBuyRules  = 8;
 constexpr int kAutoSupplyMaxSellRules = 16;
@@ -137,23 +142,39 @@ struct AutoSupplyConfig {
     // 执行仍走 CODE 买店；识别/配置侧禁止用 CODE 当用户输入（红/蓝/自定义）。
     uint32_t refillHpEnabled = 0;
     uint32_t refillMpEnabled = 0;
-    uint32_t refillCustomEnabled = 0;  // 默认关：自定义消耗品（默认名回家卷軸）
-    uint32_t refillFeedEnabled = 1;  // 默认开：补美味飼料
+    uint32_t refillCustomEnabled = 0;   // 默认关：自定义消耗品槽1
+    uint32_t refillCustom2Enabled = 0;  // 默认关：自定义消耗品槽2
+    uint32_t refillFeedEnabled = 1;     // 默认开：补美味飼料
     char     refillHpName[kAutoSupplyNameLen] = {};
     char     refillMpName[kAutoSupplyNameLen] = {};
     char     refillCustomName[kAutoSupplyNameLen] = {};
+    char     refillCustom2Name[kAutoSupplyNameLen] = {};
     char     refillFeedName[kAutoSupplyNameLen] = {};
     char     refillHpCode[kAutoSupplyCodeLen] = {};
     char     refillMpCode[kAutoSupplyCodeLen] = {};
     char     refillCustomCode[kAutoSupplyCodeLen] = {};
+    char     refillCustom2Code[kAutoSupplyCodeLen] = {};
     char     refillFeedCode[kAutoSupplyCodeLen] = {};
     int32_t  refillHpBuyTo = 0;
     int32_t  refillMpBuyTo = 0;
     int32_t  refillCustomBuyTo = kAutoSupplyDefaultRefillCustomBuyTo;
-    int32_t  refillFeedBuyTo = 100;
+    int32_t  refillCustom2BuyTo = kAutoSupplyDefaultRefillCustom2BuyTo;
+    int32_t  refillFeedBuyTo = kAutoSupplyDefaultRefillFeedBuyTo;
 
     // 卖装行程开店后：消耗栏可充值手里剑自动 Charge；钱不够跳过该件。默认关。
     uint32_t rechargeStarsEnabled = 0;
+
+    // 缺药自动补：绑定药数量 < tripOnPotionBelow 时回城（默认 below=1 即空袋）。默认关。
+    uint32_t tripOnPotionEmpty = 0;
+    int32_t  tripOnPotionBelow = 1;
+
+    // 自定义/饲料低库存触发：数量 < below 时回城。需对应「自动补*」且 CODE 有效；Normalize 保证 below < buyTo。
+    uint32_t tripOnCustomLow = 0;
+    int32_t  tripOnCustomBelow = 0;
+    uint32_t tripOnCustom2Low = 0;
+    int32_t  tripOnCustom2Below = 0;
+    uint32_t tripOnFeedLow = 0;
+    int32_t  tripOnFeedBelow = 0;
 
     uint64_t writeTickMs = 0;
 };
@@ -170,6 +191,23 @@ struct AutoSupplyStatus {
     char     lastFarmMapName[kAutoSupplyNameLen] = {};
     // 1=卖完后回挂机图未完成（含回图途中崩溃）；重拉后优先续跑回图，不依赖满包
     uint32_t pendingReturnFarm = 0;
+    // PageDown/PageUp 绑定消耗品 itemId（0=未绑/非道具/未知）；供 GUI 把补红/蓝 CODE 对齐到绑药
+    int32_t  boundHpItemId = 0;
+    int32_t  boundMpItemId = 0;
+    // 低库存监视快照（have=-1 表示未监视）；供 GUI 状态行
+    int32_t  watchCustomHave = -1;
+    int32_t  watchCustomBelow = 0;
+    uint32_t watchCustomArmed = 1;
+    int32_t  watchCustom2Have = -1;
+    int32_t  watchCustom2Below = 0;
+    uint32_t watchCustom2Armed = 1;
+    int32_t  watchFeedHave = -1;
+    int32_t  watchFeedBelow = 0;
+    uint32_t watchFeedArmed = 1;
+    int32_t  watchPotHpHave = -1;
+    int32_t  watchPotMpHave = -1;
+    int32_t  watchPotBelow = 1;
+    uint32_t watchPotArmed = 1;
     uint64_t writeTickMs = 0;
 };
 #pragma pack(pop)

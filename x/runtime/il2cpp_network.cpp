@@ -156,11 +156,12 @@ void Ensure() {
 }
 
 void WarmForLoginWorkers() {
-    // 在泵上把 FAC/NM/WM klass + network 字段偏移一次算完；LOGIN workers 只读缓存。
+    // 在泵上把 FAC/NM/WM/UL klass + network 字段偏移一次算完；LOGIN workers 只读缓存。
     auto job = [](void*) {
         (void)x::runtime::il2cpp_shape::ResolveNetworkManagerFacadeKlass();
         (void)x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
         (void)x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
+        (void)x::runtime::il2cpp_shape::ResolveUserLocalKlass();
         EnsureOnPump();
         x::runtime::LogI("Il2CppNetwork", "WarmForLoginWorkers done path=%s",
                          gPath[0] ? gPath : "?");

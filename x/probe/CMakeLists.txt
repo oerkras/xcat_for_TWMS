@@ -75,7 +75,6 @@ add_library(xcat_probe SHARED
   ../features/simple_combat/reach_cal.cpp
   ../features/fly/fly.cpp
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
-  ../features/pointblank_shoot/pointblank_shoot.cpp
   ../features/auction_town_bypass/auction_town_bypass.cpp
   ../features/ga_text_probe/ga_text_probe.cpp
   ../features/galaxy_token_probe/galaxy_token_probe.cpp
@@ -88,6 +87,8 @@ add_library(xcat_probe SHARED
   ../features/auto_lie/anti_macro_follower.cpp
   ../features/auto_lie/mouse_region_overlay.cpp
   ../features/auto_lie/mouse_trajectory_sim.cpp
+  ../features/auto_lie/lie_log.cpp
+  ../features/auto_lie/lie_stats.cpp
   ../features/auto_lie/auto_lie.cpp
   ../features/movepath_flush_probe/movepath_flush_probe.cpp
   ../features/notify/notify.cpp
@@ -119,7 +120,6 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/simple_combat
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/fly
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/drop_alert_bypass
-  ${CMAKE_CURRENT_SOURCE_DIR}/../features/pointblank_shoot
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auction_town_bypass
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/ga_text_probe
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/galaxy_token_probe

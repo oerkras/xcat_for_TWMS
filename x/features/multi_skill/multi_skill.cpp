@@ -33,6 +33,7 @@ DWORD gLastSecAttackProbeMs = 0;
 constexpr DWORD kSkillRefreshMs = 3000;
 constexpr DWORD kSecAttackProbeMs = 15000;
 constexpr DWORD kTickMs = 30;
+constexpr DWORD kIdleTickMs = 200;  // 多发关闭：降唤醒频率（仍要 Poll IPC / 学技刷新）
 
 void RefreshLearnedSkills() {
     if (!ports::skill::EnsureBound()) return;
@@ -61,11 +62,13 @@ DWORD WINAPI WorkerMain(LPVOID) {
     while (!gWorkerStop.load()) {
         x::ipc::PayloadControl_Poll();
 
+        const bool enabled = ports::multi_skill::IsEnabled();
+
         if (xcat::ConsumeMultiSkillCastRequest(runtime::GetBinDir())) {
             // 出刀前采一次 SecurityClient 计数窗（type20）；LiveValue 430/557/558 已挖空，不挂热路径。
             ports::security_attack::ProbeWindow();
             char reason[64]{};
-            if (!ports::multi_skill::IsEnabled()) {
+            if (!enabled) {
                 runtime::LogW("MultiSkill", "cast-request ignored (disabled)");
             } else {
                 const bool ok = ports::multi_skill::TryCast(reason, sizeof(reason));
@@ -75,20 +78,22 @@ DWORD WINAPI WorkerMain(LPVOID) {
         }
 
         const DWORD now = GetTickCount();
+        // 已学技能表给面板用：关多发也要刷；SecAttack 周期探针仅开启时做。
         if (!gLastSkillRefreshMs ||
             static_cast<DWORD>(now - gLastSkillRefreshMs) >= kSkillRefreshMs) {
             gLastSkillRefreshMs = now;
             RefreshLearnedSkills();
         }
-        if (!gLastSecAttackProbeMs ||
-            static_cast<DWORD>(now - gLastSecAttackProbeMs) >= kSecAttackProbeMs) {
+        if (enabled &&
+            (!gLastSecAttackProbeMs ||
+             static_cast<DWORD>(now - gLastSecAttackProbeMs) >= kSecAttackProbeMs)) {
             gLastSecAttackProbeMs = now;
             ports::security_attack::ProbeWindow();
         }
 
-        // Tick() 内部已泵 attack::TickReleases，此处不重复。
+        // Tick：关闭时内部早退（只泵 TickReleases）；开启才跑队列/忙锁。
         ports::multi_skill::Tick();
-        Sleep(kTickMs);
+        Sleep(enabled ? kTickMs : kIdleTickMs);
     }
     ports::attack::ForceRelease();
     ports::security_attack::Shutdown();

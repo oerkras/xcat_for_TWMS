@@ -600,13 +600,18 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
         if (out) *out = tm;
         return false;
     }
-    // soft settle / NM 已断：禁止任何 Owner 继续发 Impact（752824：settle 窗内仍 Firing
-    // + heli，约 1.2s 后 Classic 自退；SawDisconnect 粘性不能当闸，只用 hold + 当前态）。
-    if (x::features::soft_login_probe::IsHoldActive()) {
-        tm.guard = "soft_hold";
-        gLastTickFired = false;
-        if (out) *out = tm;
-        return false;
+    // soft settle / land quiet / NM 已断：禁止任何 Owner 继续发 Impact（752824：settle 窗内仍 Firing
+    // + heli，约 1.2s 后 Classic 自退；SawDisconnect 粘性不能当闸，只用 GameplayQuiet + 当前态）。
+    // BIN 681ebe：soft_land_quiet 已回图；若仍悬空则放行抗重力（落台 Station/Cruise），地上仍禁。
+    if (x::features::soft_login_probe::IsGameplayQuiet()) {
+        const bool softHold = x::features::soft_login_probe::IsHoldActive();
+        if (softHold || st.onFh) {
+            tm.guard = softHold ? "soft_hold" : "soft_land_quiet";
+            gLastTickFired = false;
+            if (out) *out = tm;
+            return false;
+        }
+        // soft_land_quiet + !onFh：落下继续算冲量。
     }
     {
         const int nm = kick_sniff::LastSessionState();
@@ -911,12 +916,16 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     tm.cmdVy = cmdVy;
 
     // ── 闸门 ─────────────────────────────────────────────────────────
-    // emergency 只让过节奏闸与技能前置闸；无敌闸不能绕（Impact 端口自身也会拒）。
+    // emergency 只让过节奏闸与技能前置闸；无敌闸：地上禁，悬空放行抗重力。
+    // BIN 681ebe：soft land quiet 期 Combat 停；无敌已可 MyUser 急钉。悬空仍放行抗重力。
+    // → 开打前自由落体；出刀仍由 MoveTo/Firing 的 invuln 门挡着。
     if (!x::features::invuln::IsEnabled()) {
-        tm.guard = "invuln_off";
-        gLastTickFired = false;
-        if (out) *out = tm;
-        return false;
+        if (st.onFh) {
+            tm.guard = "invuln_off";
+            gLastTickFired = false;
+            if (out) *out = tm;
+            return false;
+        }
     }
     if (!emergency) {
         // 拥塞闸只在**挂着台**时生效：脚下有地板，少发几拍无非是站着不动。
@@ -966,6 +975,9 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     vopts.maxAbsVy = kMaxCmdVy;
     vopts.minAbs = 6.f;  // 叠加语义下写 0 是空操作，跳过即可省一个泵 job
     vopts.quietLog = true;
+    // 悬空 + 无敌未钉（soft stagger）：仍要抗重力。ImpactSetVelocity 默认拒 invuln_off
+    // → guard=impact_fail 自由落体（BIN f99271）。地上仍尊重无敌闸。
+    vopts.force = !st.onFh && !x::features::invuln::IsEnabled();
     const bool ok = ports::teleport::ImpactSetVelocity(
         cmdVx, cmdVy, ports::teleport::ImpactRoute::SetImpactNext, vopts);
     if (!ok) {

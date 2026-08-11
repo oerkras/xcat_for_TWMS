@@ -1,5 +1,7 @@
 #include "auto_supply.h"
 
+#include "../auction_town_bypass/auction_town_bypass.h"
+#include "../autopot/autopot.h"
 #include "../fly/fly.h"
 #include "../notify/notify.h"
 #include "../ports/consumable_port.h"
@@ -69,6 +71,8 @@ DWORD gLastBagPoll = 0;
 DWORD gCooldownUntil = 0;
 DWORD gWaitOpenNotified = 0;
 DWORD gLastTalkAttempt = 0;
+int gTalkMissStreak = 0;  // OpeningShop：目标 NPC 连续对不上 → 提早改道（BIN 4bb7ea）
+constexpr int kTalkMissReroute = 3;
 DWORD gLastMenuAttempt = 0;
 DWORD gLastBuyAttempt = 0;
 DWORD gLastCloseShopAttempt = 0;
@@ -83,6 +87,17 @@ bool gPreferDirect = false;
 bool gPausedCombat = false;
 bool gPausedFly = false;
 bool gManualTrip = false;
+bool gPotionEmptyArmed = true;  // 缺药触发后闭锁，直到绑定药再次达标才重开
+bool gCustomLowArmed = true;
+bool gCustom2LowArmed = true;
+bool gFeedLowArmed = true;
+int gBoundHpItemId = 0;
+int gBoundMpItemId = 0;
+// 监视快照（PublishStatusIni）
+int gWatchCustomHave = -1, gWatchCustomBelow = 0;
+int gWatchCustom2Have = -1, gWatchCustom2Below = 0;
+int gWatchFeedHave = -1, gWatchFeedBelow = 0;
+int gWatchPotHpHave = -1, gWatchPotMpHave = -1, gWatchPotBelow = 1;
 DWORD gReturnStableSince = 0;
 DWORD gTripTravelArmAt = 0;  // 非 0：此前禁止 RequestGoto（开趟冷却窗）
 Status gStatus{};
@@ -92,6 +107,7 @@ enum class BuyStep : int {
     Charge,
     PlanRefills,
     BuyRefills,
+    ConfirmBuy,  // 等消耗栏到账后再扣 need（避免 FIRED 但服拒/未入包就当买完）
     Done,
 };
 BuyStep gBuyStep = BuyStep::ReturnScroll;
@@ -100,6 +116,7 @@ enum class BuySlot : int {
     Hp = 0,
     Mp,
     Custom,
+    Custom2,
     Feed,
     FeedAlt,
     Done,
@@ -107,7 +124,17 @@ enum class BuySlot : int {
 BuySlot gBuySlot = BuySlot::Hp;
 int gBuyNeed = 0;
 int gActiveBuyId = 0;
-int gPlannedNeed[5]{};  // per slot after meso split
+int gBuyConfirmBefore = 0;   // ConfirmBuy：发包前 CountConsume
+int gBuyConfirmExpect = 0;   // ConfirmBuy：本拍实发 qty（MaxSlot 截断后）
+DWORD gBuyConfirmSince = 0;
+int gBuyNoGainStreak = 0;    // 连续「发包后库存未增」次数；过大则跳过该目标
+int gBuySoftBatchCap = 0;    // >0：到账失败后的保守单批上限（如 1000）
+int64_t gMesoBudgetOverride = -1;  // >=0：规划用保守金币
+int gScrollJustBoughtPrice = 0;    // 本趟已买回城卷标价
+int64_t gMesoBeforeScrollBuy = -1; // 买卷前读数；用于判断 Money 是否已扣
+constexpr int kBuySlotCount = 6;
+int gPlannedNeed[kBuySlotCount]{};  // per slot after meso split
+int gPlannedPrice[kBuySlotCount]{}; // 对应单价，买入时再按实时 meso 截断
 
 std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gThread{nullptr};
@@ -168,7 +195,13 @@ void LoadTownIds() {
 
 bool IsTownMapIdHeuristic(int mapId) {
     if (mapId <= 0) return false;
-    // 大区室外主城：后 6 位为 0
+    // 当前图：优先原生 MapDataInfo.IsTown（室内城也准；拍卖绕过强制写时仍用备份原值）。
+    const int cur = ports::travel::CurrentMapId();
+    if (cur > 0 && cur == mapId) {
+        const int native = auction_town_bypass::QueryNativeIsTown();
+        if (native >= 0) return native != 0;
+    }
+    // 非当前图 / IsTown 未采到：室外主城规则 + map_info 城镇表。
     if (mapId % 1000000 == 0) return true;
     LoadTownIds();
     std::lock_guard<std::mutex> lock(gTownMu);
@@ -224,6 +257,21 @@ void PublishStatusIni() {
     strncpy_s(st.message, gStatus.message, _TRUNCATE);
     strncpy_s(st.lastFarmMapName, gLastFarmMap, _TRUNCATE);
     st.pendingReturnFarm = gPendingReturnFarm ? 1u : 0u;
+    st.boundHpItemId = gBoundHpItemId > 0 ? gBoundHpItemId : 0;
+    st.boundMpItemId = gBoundMpItemId > 0 ? gBoundMpItemId : 0;
+    st.watchCustomHave = gWatchCustomHave;
+    st.watchCustomBelow = gWatchCustomBelow;
+    st.watchCustomArmed = gCustomLowArmed ? 1u : 0u;
+    st.watchCustom2Have = gWatchCustom2Have;
+    st.watchCustom2Below = gWatchCustom2Below;
+    st.watchCustom2Armed = gCustom2LowArmed ? 1u : 0u;
+    st.watchFeedHave = gWatchFeedHave;
+    st.watchFeedBelow = gWatchFeedBelow;
+    st.watchFeedArmed = gFeedLowArmed ? 1u : 0u;
+    st.watchPotHpHave = gWatchPotHpHave;
+    st.watchPotMpHave = gWatchPotMpHave;
+    st.watchPotBelow = gWatchPotBelow;
+    st.watchPotArmed = gPotionEmptyArmed ? 1u : 0u;
     st.writeTickMs = GetTickCount64();
     (void)xcat::WriteAutoSupplyStatus(runtime::GetBinDir(), st);
 }
@@ -284,6 +332,63 @@ bool TripTravelReady(DWORD now) {
 
 void ClearTripTravelArm() { gTripTravelArmAt = 0; }
 
+void RearmLowStockLatchesAfterTrip(const char* why);
+
+// 硬闸上升沿会 BeginLieSafeLand；用卷/赶路/开店前必须站稳，否则底层低 Y 掉出图外重载。
+// review：不能只看 IsSafeLandActive——soft_or_net_quiet 拆台后 inactive 仍可能悬空。
+bool WaitSafeLand(DWORD now) {
+    if (simple_combat::IsSafeLandActive()) {
+        SetMsg("安全落台中…");
+        static DWORD sLog = 0;
+        if (!sLog || now - sLog >= 1500) {
+            sLog = now;
+            runtime::LogI("AutoSupply", "wait safe land (before scroll/travel/shop)");
+        }
+        return false;
+    }
+
+    ports::teleport::FlightState st{};
+    const bool have = ports::teleport::QueryFlightState(st) && st.ok;
+    if (have && st.onFh) return true;
+
+    // Travel 托空中：不抢 Combat 落台，也不要空中发卷/开店。
+    if (travel::IsActive()) {
+        SetMsg("赶路稳图中…");
+        static DWORD sTravelLog = 0;
+        if (!sTravelLog || now - sTravelLog >= 1500) {
+            sTravelLog = now;
+            runtime::LogI("AutoSupply", "wait travel settle (airborne before scroll/shop)");
+        }
+        return false;
+    }
+
+    if (have && !st.onFh) {
+        runtime::LogI("AutoSupply", "wait safe land re-request airborne ap=(%.0f,%.0f)", st.x,
+                      st.y);
+        simple_combat::RequestSafeLand("auto_supply_wait_airborne");
+        SetMsg("安全落台中…");
+        return false;
+    }
+
+    // 飞控读不到：放行（避免 InterStage 卡死）；EnsureSafeLandIfAirborne 下一拍会再兜。
+    return true;
+}
+
+// BIN 9d504e：Travel settle 到站后落台可能已结束（挂机图 onFh 早卸），店图仍悬空。
+// 未挂台且 Travel 已 Idle → 再开同款落台，再等 WaitSafeLand。
+void EnsureSafeLandIfAirborne(DWORD now) {
+    if (simple_combat::IsSafeLandActive()) return;
+    if (travel::IsActive()) return;
+    ports::teleport::FlightState st{};
+    if (!ports::teleport::QueryFlightState(st) || !st.ok) return;
+    if (st.onFh) return;
+    runtime::LogI("AutoSupply", "request safe land airborne ap=(%.0f,%.0f)", st.x, st.y);
+    simple_combat::RequestSafeLand("auto_supply_airborne");
+    (void)now;
+}
+
+void RearmLowStockLatchesAfterTrip(const char* why);
+
 void FailTrip(const char* why) {
     travel::RequestStop();
     sellbag::Abort(why);
@@ -292,6 +397,7 @@ void FailTrip(const char* why) {
     gPendingReturnFarm = false;
     gReturnStableSince = 0;
     ClearTripTravelArm();
+    RearmLowStockLatchesAfterTrip("fail_trip");
     PublishStatusIni();
     Publish(notify::NotificationKind::Warning, "auto-supply-fail", "自动补给中止", why);
     gCooldownUntil = GetTickCount() + kCooldownMs;
@@ -313,6 +419,211 @@ bool EquipTriggerMet(int& used, int& cap) {
     if (cap <= 0) return false;
     if (gEquipTrigger <= 0) return used >= cap;
     return used >= gEquipTrigger;
+}
+
+int CountConsume(int itemId);  // 自定义低库存触发 / 补货计划共用
+
+// 绑定药数量；not_in_bag 视为 0。其它 miss 返回 false（*outHave 可仍为 -1）。
+bool BoundPotionHave(bool wantHp, int& outHave) {
+    outHave = -1;
+    consumable::FindResult fr{};
+    (void)consumable::ResolveBoundPotion(wantHp, fr);
+    if (!fr.ok) {
+        if (!fr.missWhy || std::strcmp(fr.missWhy, "not_in_bag") != 0) return false;
+        outHave = 0;
+        return true;
+    }
+    outHave = fr.qty;
+    return true;
+}
+
+bool BoundPotionQtyLow(bool wantHp, int below, char* why, size_t whyCap) {
+    if (below < 1) below = 1;
+    consumable::FindResult fr{};
+    (void)consumable::ResolveBoundPotion(wantHp, fr);
+    int have = -1;
+    if (!fr.ok) {
+        if (!fr.missWhy || std::strcmp(fr.missWhy, "not_in_bag") != 0) return false;
+        have = 0;
+    } else {
+        have = fr.qty;
+    }
+    if (have >= below) return false;
+    if (why && whyCap) {
+        snprintf(why, whyCap, "%s have=%d<%d id=%d", wantHp ? "hp" : "mp", have, below, fr.itemId);
+    }
+    return true;
+}
+
+bool BoundPotionSidesStillLow(int below) {
+    // 与触发一致：未勾选「补红/补蓝」的一侧不监视、不闭锁
+    const bool hpOn = autopot::IsHpEnabled() && gCfg.refillHpEnabled != 0;
+    const bool mpOn = autopot::IsMpEnabled() && gCfg.refillMpEnabled != 0;
+    if (!hpOn && !mpOn) return false;
+    if (hpOn && BoundPotionQtyLow(true, below, nullptr, 0)) return true;
+    if (mpOn && BoundPotionQtyLow(false, below, nullptr, 0)) return true;
+    return false;
+}
+
+bool PotionLowTriggerMet(char* why, size_t whyCap) {
+    if (!gCfg.tripOnPotionEmpty) return false;
+    // 缺药回城只对「已勾选补货」的绑定侧生效；未勾选红/蓝绝不因该侧空药开趟去补
+    const bool hpOn = autopot::IsHpEnabled() && gCfg.refillHpEnabled != 0;
+    const bool mpOn = autopot::IsMpEnabled() && gCfg.refillMpEnabled != 0;
+    if (!hpOn && !mpOn) return false;
+    const int below = gCfg.tripOnPotionBelow > 0 ? gCfg.tripOnPotionBelow : 1;
+    gWatchPotBelow = below;
+    int hpHave = -1, mpHave = -1;
+    if (hpOn) (void)BoundPotionHave(true, hpHave);
+    if (mpOn) (void)BoundPotionHave(false, mpHave);
+    gWatchPotHpHave = hpOn ? hpHave : -1;
+    gWatchPotMpHave = mpOn ? mpHave : -1;
+    if (!gPotionEmptyArmed) {
+        if (!BoundPotionSidesStillLow(below)) {
+            gPotionEmptyArmed = true;
+            runtime::LogI("AutoSupply", "缺药触发已重开（绑定药已达标 below=%d）", below);
+        }
+        return false;
+    }
+    if (hpOn && BoundPotionQtyLow(true, below, why, whyCap)) return true;
+    if (mpOn && BoundPotionQtyLow(false, below, why, whyCap)) return true;
+    return false;
+}
+
+// 消耗栏 CODE 低库存触发（自定义1/2）；armed 指针可空。
+bool ConsumeCodeLowTriggerMet(bool tripOn, bool refillOn, const char* code, int below, int buyTo,
+                              bool* armed, int* outHave, int* outBelow, const char* tag, char* why,
+                              size_t whyCap) {
+    if (outHave) *outHave = -1;
+    if (outBelow) *outBelow = below;
+    if (!tripOn || !refillOn || below <= 0 || buyTo <= 0) return false;
+    const int id = (code && code[0]) ? atoi(code) : 0;
+    if (id <= 0) return false;
+    const int have = CountConsume(id);
+    if (outHave) *outHave = have;
+    if (armed && !*armed) {
+        if (have >= below) {
+            *armed = true;
+            runtime::LogI("AutoSupply", "%s低库存触发已重开 id=%d have=%d below=%d", tag ? tag : "?",
+                          id, have, below);
+        }
+        return false;
+    }
+    if (have >= below) return false;
+    if (why && whyCap) {
+        snprintf(why, whyCap, "%s id=%d have=%d<%d", tag ? tag : "?", id, have, below);
+    }
+    return true;
+}
+
+bool CustomLowTriggerMet(char* why, size_t whyCap) {
+    return ConsumeCodeLowTriggerMet(gCfg.tripOnCustomLow != 0, gCfg.refillCustomEnabled != 0,
+                                    gCfg.refillCustomCode, gCfg.tripOnCustomBelow,
+                                    gCfg.refillCustomBuyTo, &gCustomLowArmed, &gWatchCustomHave,
+                                    &gWatchCustomBelow, "自定义", why, whyCap);
+}
+
+bool Custom2LowTriggerMet(char* why, size_t whyCap) {
+    return ConsumeCodeLowTriggerMet(gCfg.tripOnCustom2Low != 0, gCfg.refillCustom2Enabled != 0,
+                                    gCfg.refillCustom2Code, gCfg.tripOnCustom2Below,
+                                    gCfg.refillCustom2BuyTo, &gCustom2LowArmed, &gWatchCustom2Have,
+                                    &gWatchCustom2Below, "自定义2", why, whyCap);
+}
+
+int CountFeedHave() {
+    const int primary = gCfg.refillFeedCode[0] ? atoi(gCfg.refillFeedCode) : 0;
+    const int alt = atoi(xcat::kAutoSupplyDefaultRefillFeedAltCode);
+    int sum = 0;
+    if (primary > 0) sum += CountConsume(primary);
+    if (alt > 0) sum += CountConsume(alt);
+    return sum;
+}
+
+bool FeedLowTriggerMet(char* why, size_t whyCap) {
+    gWatchFeedHave = -1;
+    gWatchFeedBelow = gCfg.tripOnFeedBelow;
+    if (!gCfg.tripOnFeedLow || !gCfg.refillFeedEnabled) return false;
+    if (gCfg.tripOnFeedBelow <= 0 || gCfg.refillFeedBuyTo <= 0) return false;
+    const int have = CountFeedHave();
+    const int below = gCfg.tripOnFeedBelow;
+    gWatchFeedHave = have;
+    if (!gFeedLowArmed) {
+        if (have >= below) {
+            gFeedLowArmed = true;
+            runtime::LogI("AutoSupply", "饲料低库存触发已重开 have=%d below=%d", have, below);
+        }
+        return false;
+    }
+    if (have >= below) return false;
+    if (why && whyCap) snprintf(why, whyCap, "feed have=%d<%d", have, below);
+    return true;
+}
+
+// 仅对「本趟已闭锁且仍低」的监视项告警，避免装备/手动一趟误报「已暂停」。
+void NotifyIfStillLowAfterTrip() {
+    char detail[160]{};
+    size_t n = 0;
+    auto append = [&](const char* s) {
+        if (!s || !s[0] || n + 1 >= sizeof(detail)) return;
+        if (n) detail[n++] = ';';
+        const size_t len = strlen(s);
+        if (n + len >= sizeof(detail)) return;
+        memcpy(detail + n, s, len);
+        n += len;
+        detail[n] = 0;
+    };
+    if (!gCustomLowArmed && gCfg.tripOnCustomLow && gCfg.refillCustomEnabled &&
+        gCfg.tripOnCustomBelow > 0) {
+        const int id = atoi(gCfg.refillCustomCode);
+        if (id > 0 && CountConsume(id) < gCfg.tripOnCustomBelow) {
+            append("自定义仍低");
+            gCustomLowArmed = true;
+            runtime::LogW("AutoSupply", "自定义闭锁已重开（本趟未补上，冷却后可再试）");
+        }
+    }
+    if (!gCustom2LowArmed && gCfg.tripOnCustom2Low && gCfg.refillCustom2Enabled &&
+        gCfg.tripOnCustom2Below > 0) {
+        const int id = atoi(gCfg.refillCustom2Code);
+        if (id > 0 && CountConsume(id) < gCfg.tripOnCustom2Below) {
+            append("自定义2仍低");
+            gCustom2LowArmed = true;
+            runtime::LogW("AutoSupply", "自定义2闭锁已重开（本趟未补上，冷却后可再试）");
+        }
+    }
+    if (!gFeedLowArmed && gCfg.tripOnFeedLow && gCfg.refillFeedEnabled &&
+        gCfg.tripOnFeedBelow > 0) {
+        if (CountFeedHave() < gCfg.tripOnFeedBelow) {
+            append("饲料仍低");
+            gFeedLowArmed = true;
+            runtime::LogW("AutoSupply", "饲料闭锁已重开（本趟未补上，冷却后可再试）");
+        }
+    }
+    if (!gPotionEmptyArmed && gCfg.tripOnPotionEmpty) {
+        const int below = gCfg.tripOnPotionBelow > 0 ? gCfg.tripOnPotionBelow : 1;
+        if (BoundPotionSidesStillLow(below)) {
+            append("绑药仍低");
+            // 空趟/店无货时若一直闭锁，用户会感觉「没蓝了也不再回去」
+            gPotionEmptyArmed = true;
+            runtime::LogW("AutoSupply", "缺药闭锁已重开（本趟未补上，冷却后可再试）");
+        }
+    }
+    if (!detail[0]) return;
+    runtime::LogW("AutoSupply", "趟后仍低库存：%s", detail);
+    Publish(notify::NotificationKind::Warning, "auto-supply-still-low", "本趟未补够",
+            detail[0] ? detail : "店内可能无货/未到账/背包满；冷却后可再试");
+}
+
+// 行程结束（含冷却开始）必须重开闭锁。
+// 否则：店内补满 → 闭锁 → 回城/冷却 45s 内喝光 → Idle 时仍判「偏低」永远不重开（本机 22:48 蓝药复现）。
+void RearmLowStockLatchesAfterTrip(const char* why) {
+    const bool any = !gPotionEmptyArmed || !gCustomLowArmed || !gCustom2LowArmed || !gFeedLowArmed;
+    gPotionEmptyArmed = true;
+    gCustomLowArmed = true;
+    gCustom2LowArmed = true;
+    gFeedLowArmed = true;
+    if (any) {
+        runtime::LogI("AutoSupply", "低库存触发已重开（%s）", why && why[0] ? why : "trip_done");
+    }
 }
 
 bool MapMatchesTarget(const char* target) {
@@ -454,6 +765,8 @@ int ParseItemCode(const char* code) {
 }
 
 // 回家卷軸：主码 2030000 + 同名备用 2030059（离线 item_catalog）。
+// BIN b19da8：PortalScroll 已换图但 qty 读 -1 时，consumable 现认 map_changed；此处再兜一层，
+// 避免误 try next / 误 walk，并防止第二张卷在主城再发一次。
 bool TryUseReturnScroll(consumable::FindResult& outFr, int& outUsedId) {
     outFr = {};
     outUsedId = 0;
@@ -461,6 +774,8 @@ bool TryUseReturnScroll(consumable::FindResult& outFr, int& outUsedId) {
         xcat::kAutoSupplyDefaultReturnScrollCode,
         xcat::kAutoSupplyAltReturnScrollCode,
     };
+    char mapAtStart[64]{};
+    FillCurrentMapName(mapAtStart, sizeof(mapAtStart));
     bool anyValid = false;
     for (const char* code : codes) {
         const int id = ParseItemCode(code);
@@ -476,7 +791,17 @@ bool TryUseReturnScroll(consumable::FindResult& outFr, int& outUsedId) {
             runtime::LogI("AutoSupply", "用回城卷 ok id=%d pos=%d qty=%d", id, fr.pos, fr.qty);
             return true;
         }
-        // FindAndUseByItemId 已打 not_found / use_fail / list_miss；这里补 AutoSupply 层摘要
+        // FindAndUse 报 fail 但图已变：卷已生效，勿试下一码。
+        char cur[64]{};
+        if (FillCurrentMapName(cur, sizeof(cur)) && mapAtStart[0] && cur[0] &&
+            _stricmp(cur, mapAtStart) != 0) {
+            outFr = fr;
+            outUsedId = id;
+            runtime::LogW("AutoSupply",
+                          "用回城卷 false_fail id=%d but map %s→%s — treat ok", id, mapAtStart,
+                          cur);
+            return true;
+        }
         runtime::LogW("AutoSupply", "用回城卷 fail id=%d → try next", id);
     }
     if (!anyValid) {
@@ -498,6 +823,8 @@ int CountConsume(int itemId) {
 }
 
 void StartReturnOrDone() {
+    NotifyIfStillLowAfterTrip();
+    RearmLowStockLatchesAfterTrip("supply_done");
     gPendingReturnFarm = gLastFarmMap[0] != 0;
     PublishStatusIni();
     if (!gLastFarmMap[0]) {
@@ -556,31 +883,45 @@ bool BeginBuying() {
     gBuySlot = BuySlot::Hp;
     gBuyNeed = 0;
     gActiveBuyId = 0;
+    gBuyConfirmBefore = 0;
+    gBuyConfirmExpect = 0;
+    gBuyConfirmSince = 0;
+    gBuyNoGainStreak = 0;
+    gBuySoftBatchCap = 0;
+    gMesoBudgetOverride = -1;
+    gScrollJustBoughtPrice = 0;
+    gMesoBeforeScrollBuy = -1;
     gLastBuyAttempt = 0;
     memset(gPlannedNeed, 0, sizeof(gPlannedNeed));
+    memset(gPlannedPrice, 0, sizeof(gPlannedPrice));
     Enter(Phase::Buying, "补货中…");
     return true;
 }
 
 void PlanRefillsWithMeso() {
     memset(gPlannedNeed, 0, sizeof(gPlannedNeed));
+    memset(gPlannedPrice, 0, sizeof(gPlannedPrice));
     struct Want {
         int slot = -1;
         int id = 0;
         int need = 0;
         int price = 0;
     };
-    Want wants[5]{};
+    Want wants[kBuySlotCount]{};
     int n = 0;
     auto push = [&](BuySlot slot, bool en, const char* code, int buyTo) {
-        if (!en || buyTo <= 0 || n >= 5) return;
+        if (!en || buyTo <= 0 || n >= kBuySlotCount) return;
         const int id = ParseItemCode(code);
         if (id <= 0) return;
         const int have = CountConsume(id);
         if (have >= buyTo) return;
         bool inShop = false;
         int price = 0;
-        if (!shop::QueryShopBuyOffer(id, inShop, price) || !inShop || price <= 0) return;
+        if (!shop::QueryShopBuyOffer(id, inShop, price) || !inShop || price <= 0) {
+            runtime::LogW("AutoSupply", "补货跳过 slot=%d id=%d：店内无货或无价",
+                          static_cast<int>(slot), id);
+            return;
+        }
         wants[n].slot = static_cast<int>(slot);
         wants[n].id = id;
         wants[n].need = buyTo - have;
@@ -591,6 +932,8 @@ void PlanRefillsWithMeso() {
     push(BuySlot::Mp, gCfg.refillMpEnabled != 0, gCfg.refillMpCode, gCfg.refillMpBuyTo);
     push(BuySlot::Custom, gCfg.refillCustomEnabled != 0, gCfg.refillCustomCode,
          gCfg.refillCustomBuyTo);
+    push(BuySlot::Custom2, gCfg.refillCustom2Enabled != 0, gCfg.refillCustom2Code,
+         gCfg.refillCustom2BuyTo);
     push(BuySlot::Feed, gCfg.refillFeedEnabled != 0, gCfg.refillFeedCode, gCfg.refillFeedBuyTo);
     if (gCfg.refillFeedEnabled) {
         const int primary = ParseItemCode(gCfg.refillFeedCode);
@@ -604,23 +947,59 @@ void PlanRefillsWithMeso() {
                      gCfg.refillFeedBuyTo);
         }
     }
-    if (n == 0) return;
+
+    if (n == 0) {
+        runtime::LogI("AutoSupply", "refill plan empty（无启用项/已达标/店内无货）");
+        return;
+    }
 
     long long totalCost = 0;
     for (int i = 0; i < n; ++i) totalCost += 1LL * wants[i].need * wants[i].price;
-    const int64_t meso = shop::QueryMeso();
+
+    int64_t mesoRaw = shop::QueryMeso();
+    int64_t meso = mesoRaw;
+    if (gMesoBudgetOverride >= 0) {
+        meso = gMesoBudgetOverride;
+        gMesoBudgetOverride = -1;
+    } else if (gScrollJustBoughtPrice > 0 && gMesoBeforeScrollBuy >= 0 && mesoRaw >= 0) {
+        const int64_t expectAfter =
+            gMesoBeforeScrollBuy >= gScrollJustBoughtPrice
+                ? gMesoBeforeScrollBuy - static_cast<int64_t>(gScrollJustBoughtPrice)
+                : 0;
+        // Money 仍明显高于「买卷后应有值」→ 视为未扣，按 expectAfter 做比例
+        if (mesoRaw > expectAfter + 50) {
+            runtime::LogW("AutoSupply",
+                          "refill meso stale raw=%lld beforeScroll=%lld scroll=%d → budget=%lld",
+                          static_cast<long long>(mesoRaw),
+                          static_cast<long long>(gMesoBeforeScrollBuy), gScrollJustBoughtPrice,
+                          static_cast<long long>(expectAfter));
+            meso = expectAfter;
+        }
+        gScrollJustBoughtPrice = 0;
+        gMesoBeforeScrollBuy = -1;
+    }
+
     double scale = 1.0;
     if (meso >= 0 && totalCost > meso && totalCost > 0)
         scale = static_cast<double>(meso) / static_cast<double>(totalCost);
+
+    // 按比例后再用「剩余预算」串行截断，避免多槽合计仍超金币
+    int64_t budget = meso >= 0 ? meso : 0;
     for (int i = 0; i < n; ++i) {
         int need = static_cast<int>(wants[i].need * scale);
         if (need < 0) need = 0;
-        if (scale < 1.0 && need == 0 && wants[i].need > 0 && meso >= wants[i].price) need = 1;
-        while (need > 0 && 1LL * need * wants[i].price > meso) --need;
-        if (wants[i].slot >= 0 && wants[i].slot < 5) gPlannedNeed[wants[i].slot] = need;
+        if (scale < 1.0 && need == 0 && wants[i].need > 0 && budget >= wants[i].price) need = 1;
+        while (need > 0 && 1LL * need * wants[i].price > budget) --need;
+        if (wants[i].slot >= 0 && wants[i].slot < kBuySlotCount) {
+            gPlannedNeed[wants[i].slot] = need;
+            gPlannedPrice[wants[i].slot] = wants[i].price;
+        }
+        if (need > 0 && wants[i].price > 0) budget -= 1LL * need * wants[i].price;
     }
-    runtime::LogI("AutoSupply", "refill plan meso=%lld totalCost=%lld scale=%.3f n=%d",
-                  static_cast<long long>(meso), totalCost, scale, n);
+    runtime::LogI("AutoSupply",
+                  "refill plan mesoRaw=%lld budget=%lld totalCost=%lld scale=%.3f n=%d",
+                  static_cast<long long>(mesoRaw), static_cast<long long>(meso), totalCost, scale,
+                  n);
 }
 
 bool NextBuyTarget(int& outId, int& outNeed, const char*& outLabel) {
@@ -644,6 +1023,10 @@ bool NextBuyTarget(int& outId, int& outNeed, const char*& outLabel) {
             code = gCfg.refillCustomCode;
             label = "补自定义";
             break;
+        case BuySlot::Custom2:
+            code = gCfg.refillCustom2Code;
+            label = "补自定义2";
+            break;
         case BuySlot::Feed:
             code = gCfg.refillFeedCode;
             label = "补饲料";
@@ -657,15 +1040,10 @@ bool NextBuyTarget(int& outId, int& outNeed, const char*& outLabel) {
             return false;
         }
         gBuySlot = static_cast<BuySlot>(slotIdx + 1);
-        int need = (slotIdx >= 0 && slotIdx < 5) ? gPlannedNeed[slotIdx] : 0;
+        int need = (slotIdx >= 0 && slotIdx < kBuySlotCount) ? gPlannedNeed[slotIdx] : 0;
         if (need <= 0) continue;
         const int id = ParseItemCode(code);
         if (id <= 0) continue;
-        const int have = CountConsume(id);
-        // planned was relative to start; re-clamp
-        if (have >= need && slotIdx < 4) {
-            // if plan said need X of buyTo gap, already counted; skip if bag now enough vs buyTo
-        }
         outId = id;
         outNeed = need;
         outLabel = label;
@@ -731,6 +1109,26 @@ void TickIdle(DWORD now) {
         }
     }
 
+    // 绑定药 ID 刷新不依赖补给开关：只要进图 Idle，就写 status 给 GUI 对齐补红/蓝。
+    if (ports::world::IsPlayReady()) {
+        static DWORD sLastBoundPeek = 0;
+        if (!sLastBoundPeek || now - sLastBoundPeek >= kBagPollMs) {
+            sLastBoundPeek = now;
+            int hpId = 0, mpId = 0;
+            const bool hpOk = consumable::PeekBoundPotionItemId(true, hpId);
+            const bool mpOk = consumable::PeekBoundPotionItemId(false, mpId);
+            const int nextHp = hpOk ? hpId : 0;
+            const int nextMp = mpOk ? mpId : 0;
+            if (nextHp != gBoundHpItemId || nextMp != gBoundMpItemId) {
+                runtime::LogI("AutoSupply", "bound potion id hp=%d→%d mp=%d→%d", gBoundHpItemId,
+                              nextHp, gBoundMpItemId, nextMp);
+                gBoundHpItemId = nextHp;
+                gBoundMpItemId = nextMp;
+                PublishStatusIni();
+            }
+        }
+    }
+
     if (!gDesired.load()) return;
     if (now < gCooldownUntil) return;
     if (gLastBagPoll && now - gLastBagPoll < kBagPollMs) return;
@@ -739,8 +1137,39 @@ void TickIdle(DWORD now) {
     if (!ports::world::IsPlayReady()) return;
     if (sellbag::IsBusy() || travel::IsActive()) return;
 
+    static int sPotionLowStreak = 0;
+    static int sCustomLowStreak = 0;
+    static int sCustom2LowStreak = 0;
+    static int sFeedLowStreak = 0;
+    char potionWhy[96]{};
+    char customWhy[96]{};
+    char custom2Why[96]{};
+    char feedWhy[96]{};
+    const bool potionLow = PotionLowTriggerMet(potionWhy, sizeof(potionWhy));
+    const bool customLow = CustomLowTriggerMet(customWhy, sizeof(customWhy));
+    const bool custom2Low = Custom2LowTriggerMet(custom2Why, sizeof(custom2Why));
+    const bool feedLow = FeedLowTriggerMet(feedWhy, sizeof(feedWhy));
+    auto streak2 = [](bool met, int& streak) -> bool {
+        if (!met) {
+            streak = 0;
+            return false;
+        }
+        return ++streak >= 2;
+    };
+    const bool potionFire = streak2(potionLow, sPotionLowStreak);
+    const bool customFire = streak2(customLow, sCustomLowStreak);
+    const bool custom2Fire = streak2(custom2Low, sCustom2LowStreak);
+    const bool feedFire = streak2(feedLow, sFeedLowStreak);
+    // 任一还在攒 streak：等下一拍（已确认的也一起等，避免半拍开火）
+    if ((potionLow && !potionFire) || (customLow && !customFire) || (custom2Low && !custom2Fire) ||
+        (feedLow && !feedFire))
+        return;
+
+    const bool sellTriggerOn =
+        (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0);
     int used = 0, cap = 0;
-    if (!EquipTriggerMet(used, cap)) return;
+    const bool equipMet = sellTriggerOn && EquipTriggerMet(used, cap);
+    if (!potionFire && !customFire && !custom2Fire && !feedFire && !equipMet) return;
 
     char msg[96]{};
     if (!ResolveShopTarget(msg, sizeof(msg))) {
@@ -748,10 +1177,61 @@ void TickIdle(DWORD now) {
         return;
     }
     gShopExclude[0] = 0;
-    runtime::LogI("AutoSupply", "装备触发 %d/%d thr=%d → shop=%s", used, cap, gEquipTrigger,
-                  gShopMap);
+    // 并发触发必须全部闭锁：旧 if/else 只关一路，另一路仍 armed 会冷却后空转第二趟。
+    const char* pauseMsg = "停手并记下挂机图…";
+    if (potionFire || customFire || custom2Fire || feedFire) {
+        if (potionFire) {
+            gPotionEmptyArmed = false;
+            runtime::LogI("AutoSupply", "缺药触发 %s → shop=%s（已闭锁）",
+                          potionWhy[0] ? potionWhy : "-", gShopMap);
+        }
+        if (customFire) {
+            gCustomLowArmed = false;
+            runtime::LogI("AutoSupply", "自定义低库存触发 %s → shop=%s（已闭锁）",
+                          customWhy[0] ? customWhy : "-", gShopMap);
+        }
+        if (custom2Fire) {
+            gCustom2LowArmed = false;
+            runtime::LogI("AutoSupply", "自定义2低库存触发 %s → shop=%s（已闭锁）",
+                          custom2Why[0] ? custom2Why : "-", gShopMap);
+        }
+        if (feedFire) {
+            gFeedLowArmed = false;
+            runtime::LogI("AutoSupply", "饲料低库存触发 %s → shop=%s（已闭锁）",
+                          feedWhy[0] ? feedWhy : "-", gShopMap);
+        }
+        if (potionFire && !customFire && !custom2Fire && !feedFire) {
+            Publish(notify::NotificationKind::Info, "auto-supply-potion", "缺药自动补",
+                    "绑定药水偏低，开始回城补给");
+            pauseMsg = "缺药补给：停手并记下挂机图…";
+        } else if (customFire && !potionFire && !custom2Fire && !feedFire) {
+            Publish(notify::NotificationKind::Info, "auto-supply-custom", "自定义物品补给",
+                    "自定义物品数量过低，开始回城补给");
+            pauseMsg = "自定义低库存：停手并记下挂机图…";
+        } else if (custom2Fire && !potionFire && !customFire && !feedFire) {
+            Publish(notify::NotificationKind::Info, "auto-supply-custom2", "自定义2补给",
+                    "自定义2数量过低，开始回城补给");
+            pauseMsg = "自定义2低库存：停手并记下挂机图…";
+        } else if (feedFire && !potionFire && !customFire && !custom2Fire) {
+            Publish(notify::NotificationKind::Info, "auto-supply-feed", "饲料补给",
+                    "饲料数量过低，开始回城补给");
+            pauseMsg = "饲料低库存：停手并记下挂机图…";
+        } else {
+            Publish(notify::NotificationKind::Info, "auto-supply-multi", "低库存补给",
+                    "多项库存偏低，开始回城补给");
+            pauseMsg = "低库存补给：停手并记下挂机图…";
+        }
+    } else {
+        runtime::LogI("AutoSupply", "装备触发 %d/%d thr=%d → shop=%s", used, cap, gEquipTrigger,
+                      gShopMap);
+    }
+    sPotionLowStreak = 0;
+    sCustomLowStreak = 0;
+    sCustom2LowStreak = 0;
+    sFeedLowStreak = 0;
     gManualTrip = false;
-    Enter(Phase::Pause, "停手并记下挂机图…");
+    PublishStatusIni();
+    Enter(Phase::Pause, pauseMsg);
 }
 
 void TickPause(DWORD now) {
@@ -776,6 +1256,7 @@ void TickPause(DWORD now) {
         Enter(Phase::OpeningShop, "已在店图，尝试对话开店");
         gWaitOpenNotified = 0;
         gLastTalkAttempt = 0;
+        gTalkMissStreak = 0;
         gLastMenuAttempt = 0;
         gShopReadySince = 0;
         return;
@@ -794,12 +1275,16 @@ void TickGoingTown(DWORD now) {
         Enter(Phase::OpeningShop, "尝试对话开店");
         gWaitOpenNotified = 0;
         gLastTalkAttempt = 0;
+        gTalkMissStreak = 0;
         gLastMenuAttempt = 0;
         gShopReadySince = 0;
         return;
     }
 
+    // 开趟冷却可与落台并行；到期后仍须等站稳再发卷/RequestGoto。
     if (!TripTravelReady(now)) return;
+    EnsureSafeLandIfAirborne(now);
+    if (!WaitSafeLand(now)) return;
 
     if (!gPreferDirect && !gTriedScroll) {
         // 已成功用卷：等离开用卷前地图（或离开挂机图），落地后结束用卷并重估店。
@@ -855,6 +1340,25 @@ void TickGoingTown(DWORD now) {
                 }
                 return;
             }
+            // 双码都报 fail，但图已离开用卷前/挂机图：仍当卷已落地（consumable 漏判兜底）。
+            char cur[64]{};
+            const bool haveCur = FillCurrentMapName(cur, sizeof(cur));
+            const bool leftBefore =
+                haveCur && before[0] && cur[0] && _stricmp(cur, before) != 0;
+            const bool leftFarm =
+                haveCur && gLastFarmMap[0] && cur[0] && _stricmp(cur, gLastFarmMap) != 0;
+            if (leftBefore || leftFarm) {
+                runtime::LogW("AutoSupply",
+                              "用回城卷 API fail but left map before=%s farm=%s cur=%s — treat land",
+                              before[0] ? before : "-", gLastFarmMap[0] ? gLastFarmMap : "-",
+                              cur);
+                gScrollAttemptAt = now;
+                ++gScrollTries;
+                gScrollPendingLand = true;
+                strncpy_s(gScrollMapAtUse, before[0] ? before : gLastFarmMap, _TRUNCATE);
+                ReplanAfterScrollLand(cur);
+                return;
+            }
             gTriedScroll = true;
             gPreferDirect = true;
         }
@@ -874,20 +1378,30 @@ void TickGoingTown(DWORD now) {
     }
 }
 
+bool TryRerouteShopAfterOpenMiss(const char* why) {
+    if (!gShopMap[0] || gCfg.shopMapName[0]) return false;
+    strncpy_s(gShopExclude, gShopMap, _TRUNCATE);
+    char msg[96]{};
+    if (!ResolveShopTarget(msg, sizeof(msg)) || MapMatchesTarget(gShopMap)) return false;
+    runtime::LogW("AutoSupply", "%s，改道 %s npc=%s", why ? why : "开店失败", gShopMap,
+                  gResolvedNpc);
+    gTalkMissStreak = 0;
+    gWaitOpenNotified = 0;
+    gLastTalkAttempt = 0;
+    gLastMenuAttempt = 0;
+    gShopReadySince = 0;
+    gTriedScroll = true;
+    gPreferDirect = true;
+    Enter(Phase::GoingTown, "改道其他杂货店…");
+    return true;
+}
+
 void TickOpeningShop(DWORD now) {
+    // 已在店图开趟：Travel 到站后仍可能悬空；先请求落台再等站稳。
+    EnsureSafeLandIfAirborne(now);
+    if (!WaitSafeLand(now)) return;
     if (now - gPhaseSince > kWaitOpenTimeoutMs) {
-        // 轻量改道：排除本店图再解析
-        if (gShopMap[0] && !gCfg.shopMapName[0]) {
-            strncpy_s(gShopExclude, gShopMap, _TRUNCATE);
-            char msg[96]{};
-            if (ResolveShopTarget(msg, sizeof(msg)) && !MapMatchesTarget(gShopMap)) {
-                runtime::LogW("AutoSupply", "开店超时，改道 %s", gShopMap);
-                Enter(Phase::GoingTown, "改道其他杂货店…");
-                gTriedScroll = true;
-                gPreferDirect = true;
-                return;
-            }
-        }
+        if (TryRerouteShopAfterOpenMiss("开店超时")) return;
         FailTrip("等待开店超时");
         return;
     }
@@ -915,6 +1429,7 @@ void TickOpeningShop(DWORD now) {
             FailTrip("卖出排队失败");
             return;
         }
+        gTalkMissStreak = 0;
         Enter(Phase::Selling, "自动卖出中…");
         return;
     }
@@ -925,8 +1440,16 @@ void TickOpeningShop(DWORD now) {
         const int tpl = gResolvedNpc[0] ? atoi(gResolvedNpc) : 0;
         const bool talked = shop::TryTalkNearestNpc(0.f, tpl);
         if (!talked) {
+            ++gTalkMissStreak;
             // 与改版前一致：Talk 失败再用 FuncKey 兜底（经典版可远距开店）
             (void)shop::TryNpcTalkFuncKey();
+            // BIN 4bb7ea：戶外吉姆卷落點對不上 → 勿乾等 90s，連 miss 後排除改道室內藥店
+            if (tpl > 0 && gTalkMissStreak >= kTalkMissReroute &&
+                TryRerouteShopAfterOpenMiss("开店找不到目标NPC")) {
+                return;
+            }
+        } else {
+            gTalkMissStreak = 0;
         }
         // Talk 后立刻再扫一次菜单（服端回包稍后；节流由 gLastMenuAttempt 管）
         gLastMenuAttempt = now;
@@ -956,7 +1479,10 @@ void TickBuyingReal(DWORD now) {
         StartReturnOrDone();
         return;
     }
-    if (gLastBuyAttempt && now - gLastBuyAttempt < kBuyRetryMs) return;
+    // ConfirmBuy 要轮询到账，不受买入间隔卡住；其它步进仍限频防刷包
+    if (gBuyStep != BuyStep::ConfirmBuy) {
+        if (gLastBuyAttempt && now - gLastBuyAttempt < kBuyRetryMs) return;
+    }
 
     bool ready = false;
     if (!shop::ShopReady(ready) || !ready) {
@@ -975,13 +1501,19 @@ void TickBuyingReal(DWORD now) {
         const int scrollId = ParseItemCode(xcat::kAutoSupplyDefaultReturnScrollCode);
         bool inShop = false;
         int price = 0;
+        gScrollJustBoughtPrice = 0;
+        gMesoBeforeScrollBuy = -1;
         if (scrollId > 0 && shop::QueryShopBuyOffer(scrollId, inShop, price) && inShop) {
             std::string err;
+            gMesoBeforeScrollBuy = shop::QueryMeso();
             if (!shop::BuyItem(scrollId, 1, err)) {
                 if (err == "SHOP_BUSY") return;
                 runtime::LogW("AutoSupply", "补回城卷 fail %s → skip", err.c_str());
+                gMesoBeforeScrollBuy = -1;
             } else {
-                runtime::LogI("AutoSupply", "补回城卷 ok");
+                gScrollJustBoughtPrice = price > 0 ? price : 0;
+                runtime::LogI("AutoSupply", "补回城卷 ok price=%d mesoBefore=%lld", price,
+                              static_cast<long long>(gMesoBeforeScrollBuy));
             }
         } else {
             runtime::LogI("AutoSupply", "店内无回城卷，跳过");
@@ -1022,7 +1554,57 @@ void TickBuyingReal(DWORD now) {
         gBuySlot = BuySlot::Hp;
         gActiveBuyId = 0;
         gBuyNeed = 0;
+        gBuyNoGainStreak = 0;
+        gBuySoftBatchCap = 0;
         gBuyStep = BuyStep::BuyRefills;
+        return;
+    }
+
+    if (gBuyStep == BuyStep::ConfirmBuy) {
+        constexpr DWORD kBuyConfirmMinMs = 250;
+        constexpr DWORD kBuyConfirmMaxMs = 1800;
+        if (now - gBuyConfirmSince < kBuyConfirmMinMs) return;
+        const int have = CountConsume(gActiveBuyId);
+        const int gained = have - gBuyConfirmBefore;
+        if (gained > 0) {
+            gBuyNeed -= gained;
+            if (gBuyNeed < 0) gBuyNeed = 0;
+            gBuyNoGainStreak = 0;
+            if (gBuySoftBatchCap > 0 && gained >= gBuyConfirmExpect) gBuySoftBatchCap = 0;
+            runtime::LogI("AutoSupply", "buy confirm id=%d +%d have=%d needLeft=%d", gActiveBuyId,
+                          gained, have, gBuyNeed);
+            if (gBuyNeed <= 0) {
+                gActiveBuyId = 0;
+                gBuyNeed = 0;
+            }
+            gBuyStep = BuyStep::BuyRefills;
+            gLastBuyAttempt = now;  // 下一拍再买，给 SHOP_BUSY 消散时间
+            return;
+        }
+        if (now - gBuyConfirmSince < kBuyConfirmMaxMs) {
+            SetMsg("等待入包…");
+            return;
+        }
+        // 超时仍未到账：多半超堆叠/背包满/服拒；缩小单批重试，避免再发同样大包
+        ++gBuyNoGainStreak;
+        runtime::LogW("AutoSupply",
+                      "buy no-gain id=%d expect=%d before=%d have=%d streak=%d", gActiveBuyId,
+                      gBuyConfirmExpect, gBuyConfirmBefore, have, gBuyNoGainStreak);
+        if (gBuyConfirmExpect > 1000) {
+            gBuySoftBatchCap = 1000;
+        } else if (gBuyConfirmExpect > 200) {
+            gBuySoftBatchCap = 200;
+        }
+        if (gBuyNoGainStreak >= 3) {
+            runtime::LogW("AutoSupply", "buy give-up id=%d after %d no-gain → next", gActiveBuyId,
+                          gBuyNoGainStreak);
+            gActiveBuyId = 0;
+            gBuyNeed = 0;
+            gBuyNoGainStreak = 0;
+            gBuySoftBatchCap = 0;
+        }
+        gBuyStep = BuyStep::BuyRefills;
+        gLastBuyAttempt = now;
         return;
     }
 
@@ -1036,14 +1618,46 @@ void TickBuyingReal(DWORD now) {
             }
             gActiveBuyId = id;
             gBuyNeed = need;
+            gBuyNoGainStreak = 0;
             char msg[96]{};
             snprintf(msg, sizeof(msg), "%s #%d 还需%d", label, id, need);
             SetMsg(msg);
         }
         gLastBuyAttempt = now;
-        const int batch = gBuyNeed > 100 ? 100 : gBuyNeed;
+        // 协议 Encode2(nCount)，UI「补到」上限 9999；店侧 MaxSlot 在 BuyItem 再截。
+        // SoftCap：超大批到账失败后的保守重试（日志曾见 cnt=3000 未入包）。
+        constexpr int kBuyBatchMax = 9999;
+        int batchMax = kBuyBatchMax;
+        if (gBuySoftBatchCap > 0 && gBuySoftBatchCap < batchMax) batchMax = gBuySoftBatchCap;
+        int batch = gBuyNeed > batchMax ? batchMax : gBuyNeed;
+        // 买入前再按实时金币截断（规划后飞镖充值/读数滞后都可能让计划偏大）
+        {
+            bool inShop = false;
+            int price = 0;
+            if (shop::QueryShopBuyOffer(gActiveBuyId, inShop, price) && inShop && price > 0) {
+                const int64_t mesoNow = shop::QueryMeso();
+                if (mesoNow >= 0) {
+                    const int afford = static_cast<int>(mesoNow / price);
+                    if (afford <= 0) {
+                        runtime::LogW("AutoSupply", "buy skip id=%d NO_MESO meso=%lld price=%d",
+                                      gActiveBuyId, static_cast<long long>(mesoNow), price);
+                        StartReturnOrDone();
+                        return;
+                    }
+                    if (batch > afford) {
+                        runtime::LogI("AutoSupply",
+                                      "buy meso-afford clamp id=%d %d→%d meso=%lld price=%d",
+                                      gActiveBuyId, batch, afford,
+                                      static_cast<long long>(mesoNow), price);
+                        batch = afford;
+                    }
+                }
+            }
+        }
+        const int before = CountConsume(gActiveBuyId);
         std::string err;
-        if (!shop::BuyItem(gActiveBuyId, batch, err)) {
+        int bought = 0;
+        if (!shop::BuyItem(gActiveBuyId, batch, err, &bought)) {
             if (err == "SHOP_BUSY") return;
             if (err == "NO_MESO") {
                 runtime::LogW("AutoSupply", "buy NO_MESO → finish buying");
@@ -1055,11 +1669,14 @@ void TickBuyingReal(DWORD now) {
             gBuyNeed = 0;
             return;
         }
-        gBuyNeed -= batch;
-        if (gBuyNeed <= 0) {
-            gActiveBuyId = 0;
-            gBuyNeed = 0;
-        }
+        const int expect = bought > 0 ? bought : batch;
+        gBuyConfirmBefore = before;
+        gBuyConfirmExpect = expect;
+        gBuyConfirmSince = now;
+        gBuyStep = BuyStep::ConfirmBuy;
+        char msg[96]{};
+        snprintf(msg, sizeof(msg), "买入 #%d x%d…", gActiveBuyId, expect);
+        SetMsg(msg);
         return;
     }
 
@@ -1096,6 +1713,7 @@ void FinishReturnToFarm(DWORD now) {
     ClearTripTravelArm();
     ResumeSystems();
     gPendingReturnFarm = false;
+    RearmLowStockLatchesAfterTrip("back_to_farm");
     PublishStatusIni();
     char body[160]{};
     snprintf(body, sizeof(body), "已返回 %s", gLastFarmMap);
@@ -1145,6 +1763,8 @@ void TickReturning(DWORD now) {
         return;
     }
     if (!TripTravelReady(now)) return;
+    EnsureSafeLandIfAirborne(now);
+    if (!WaitSafeLand(now)) return;
     if (!travel::IsActive()) {
         travel::Snapshot snap{};
         if (travel::QuerySnapshot(snap)) {
@@ -1166,12 +1786,14 @@ void TickReturning(DWORD now) {
 void TickCooldown(DWORD now) {
     // 冷却中点「立即一趟 / 回挂机」：立刻让出，勿干等 45s
     if (gTripReq.load(std::memory_order_acquire) || gReturnReq.load(std::memory_order_acquire)) {
+        RearmLowStockLatchesAfterTrip("cooldown_abort");
         gCooldownUntil = 0;
         Enter(Phase::Idle, "空闲");
         SetMsg("");
         return;
     }
     if (now >= gCooldownUntil) {
+        RearmLowStockLatchesAfterTrip("cooldown_end");
         Enter(Phase::Idle, "空闲");
         SetMsg("");
     }
@@ -1247,7 +1869,9 @@ void HotReadConfig() {
         gCfg = cfg;
     }
 
-    const bool on = (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0);
+    const bool on = (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0) ||
+                    (gCfg.tripOnPotionEmpty != 0) || (gCfg.tripOnCustomLow != 0) ||
+                    (gCfg.tripOnCustom2Low != 0) || (gCfg.tripOnFeedLow != 0);
     gDesired.store(on, std::memory_order_release);
     gEquipTrigger = gCfg.sellFreeSlotsAtOrBelow;
 
@@ -1268,6 +1892,10 @@ void HotReadConfig() {
             AbortTrip("用户停止动作");
             gCfg.enabled = 0;
             gCfg.autoSellOnBagFullEnabled = 0;
+            gCfg.tripOnPotionEmpty = 0;
+            gCfg.tripOnCustomLow = 0;
+            gCfg.tripOnCustom2Low = 0;
+            gCfg.tripOnFeedLow = 0;
             gCfg.manualKind = xcat::kAutoSupplyManualNone;
             gCfg.writeTickMs = GetTickCount64();
             (void)xcat::WriteAutoSupply(runtime::GetBinDir(), gCfg);
@@ -1343,7 +1971,9 @@ void Init() {
         if (xcat::ReadAutoSupply(runtime::GetBinDir(), boot)) {
             gCfg = boot;
             gSeenCfgTick = boot.writeTickMs;
-            const bool on = (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0);
+            const bool on = (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0) ||
+                            (gCfg.tripOnPotionEmpty != 0) || (gCfg.tripOnCustomLow != 0) ||
+                            (gCfg.tripOnCustom2Low != 0) || (gCfg.tripOnFeedLow != 0);
             gDesired.store(on, std::memory_order_release);
             BootstrapManualSeq(boot.manualSeq, "init");
         } else {

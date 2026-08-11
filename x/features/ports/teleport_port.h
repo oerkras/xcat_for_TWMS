@@ -31,8 +31,9 @@ uint32_t NativeCooldownRemainingMs();
 // 最近一次 native ok 后的收态窗（历史互斥；fill+Doing 停用后通常恒 false）。
 bool IsPostTeleportQuiet(uint32_t quietMs = 220);
 
-// 必须已在主线程泵上。清 InputX + 零 Ap.V/RelPos.V。
-bool StabilizeFootholdMainThread(float landX, float landY, uint32_t fhId, bool replant = true);
+// 必须已在主线程泵上。拆 CurFh/LastFh + 清 InputX/Ap.V/Rp.V（land/fh 仅日志上下文）。
+// 禁止补种台面 / 写 RelPos 弧长（旧 replant=1 = AbsPos 重算 = 体感瞬移，已删除该路径）。
+bool StabilizeFootholdMainThread(float landX, float landY, uint32_t fhId);
 
 // 必须已在主线程。只清 InputX + 零速度，不拆 CurFh。
 bool ClearMotionLatchMainThread();

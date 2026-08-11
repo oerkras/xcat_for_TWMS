@@ -28,6 +28,7 @@
 #include "../../runtime/managed_main.h"
 #include "../ports/skill_port.h"
 #include "../ports/world_port.h"
+#include "../soft_login_probe/soft_login_probe.h"
 #include "../../ui/player_vitals.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_shape.h"
@@ -156,6 +157,11 @@ constexpr DWORD kPumpRetryMs = 2000;
 // 只挡 FindAll；WM.MyUser 快路径不受影响。2026-08-09：2000→500 加快兜底重绑。
 constexpr DWORD kLandQuietMs = 500;
 DWORD gLandQuietUntilMs = 0;
+// soft hold：整段停写（大厅 / 未进图）。
+// soft land quiet：已回图，允许 WM.MyUser 急钉+维持；仍禁 FindAll/帧钉与 Combat 齐抢泵。
+// quiet 结束后再 arm 帧钉（pending）；不再用 400ms stagger 拖无敌。
+bool gPendingSoftLandResume = false;
+DWORD gSoftInvulnStaggerUntilMs = 0;  // 保留字段清零兼容；不再武装错峰延钉
 // BIN 02:48：手动换图 MapId 已闪仍 PlayReady 时 Invuln 还写 LU → InterStage 永卡。
 // MapId 变即静默禁写；回场由 resume 清 quiet（勿在 !PlayReady 闪断时提前放开）。
 constexpr DWORD kMapIdQuietMs = 1000;
@@ -576,6 +582,8 @@ void* PeekWmMyUser() {
     return ReadPtr(wm, kOffWmMyUser);
 }
 
+void ApplyInvuln(bool on);  // AcceptLocalUser 急钉
+
 bool AcceptLocalUser(void* lu, const char* how) {
     if (!lu) return false;
     gLocalUser = lu;
@@ -583,6 +591,12 @@ bool AcceptLocalUser(void* lu, const char* how) {
     Log("LocalUser ACCEPT %s lu=%p hit298=%d grace=%ums", how, gLocalUser,
         ReadI32(gLocalUser, kOffHitPeriodRemain), (unsigned)kBindGraceMs);
     x::runtime::managed_main::SetLoginFreeze(false);
+    // 冷启/重绑：ACCEPT 当拍急钉，勿等下一轮 gate（BIN 00:28：ACCEPT hit298=330 → 2s 后才 refresh）。
+    if (gDesired.load() && x::features::ports::world::IsPlayReady()) {
+        ApplyInvuln(true);
+        Log("land pin hit298=%d (ACCEPT %s)", ReadI32(gLocalUser, kOffHitPeriodRemain),
+            how ? how : "?");
+    }
     return true;
 }
 
@@ -810,6 +824,11 @@ void ApplyInvuln(bool on) {
     if (gLocalUser && !LocalUserStillAlive()) {
         ClearLocalUser(on ? "dead before invuln write" : "dead on disable");
     }
+    // soft 过图会 drop SS；急钉前先重绑，否则 n/r/t 空窗挨打（BIN 00:40 ss=0/0/0）。
+    if (on && !SecondaryStatsAlive()) {
+        gSecondaryStats.clear();
+        TryResolveWorldManagers();
+    }
     ApplySsOnly(on);
     if (!gLocalUser) return;
     ApplyHitGate(on);
@@ -887,8 +906,13 @@ DWORD WINAPI InvulnThread(LPVOID) {
         Log("env XCAT_INVULN → desired=1");
     }
 
-    Sleep(1500);
+    // 冷启：勿再 Sleep(1500) — 落地空窗会挨打（BIN 00:28 ACCEPT 前空等）。
+    // desired 可能稍后才从 PayloadControl 来；先绑，desired 到了 SetDesired/ACCEPT 急钉。
     EnsureBindings();
+    if (gDesired.load() && x::features::ports::world::IsPlayReady() && gLocalUser) {
+        ApplyInvuln(true);
+        Log("boot pin hit298=%d", ReadI32(gLocalUser, kOffHitPeriodRemain));
+    }
     if (ProbeEnabled() && gLocalUser) ProbeSoftSlots("boot");
 
     DWORD lastGate = 0;
@@ -924,6 +948,8 @@ DWORD WINAPI InvulnThread(LPVOID) {
             if (gLocalUser) ClearLocalUser("transit !PlayReady");
             if (!gSecondaryStats.empty()) ClearSecondaryStats("transit !PlayReady");
             wasPlayReady = false;
+            gPendingSoftLandResume = false;
+            gSoftInvulnStaggerUntilMs = 0;
             gQuietTrackMapId = 0;  // 下一张图重新建 track
             // 注意：此处**不**清 gMapIdQuietUntilMs。
             // quiet 只服务「MapId 已闪仍 PlayReady」的进门脏窗（BIN 02:48）；
@@ -938,31 +964,78 @@ DWORD WINAPI InvulnThread(LPVOID) {
         }
 
         // 刚回 Field：必须先于 map_id quiet 的 continue。
-        // 旧顺序：quiet 定时器若活过 InterStage，回场整段被 continue 掉，急钉要等 quiet 到期
-        // （BIN 07:51 怪密图落地 hit298=1320）。resume 本就会 gMapIdQuietUntilMs=0，
-        // 挪到 quiet 之前 = 恢复 v2.6.7 写闸意图，不是在脏窗里新开写。
-        // 写闸未放松：!PlayReady 仍停写；MapId 闪变仍 PlayReady 时 quiet 仍禁写（BIN 02:48）。
+        // soft hold：只记 pending，不急钉（LU 常空）。
+        // soft land quiet / 已 play-ready：立刻 MyUser 急钉（用户要 quiet 期也有无敌）。
         if (on && play && !wasPlayReady) {
-            gLandQuietUntilMs = now + kLandQuietMs;
-            if (gLandQuietUntilMs == 0) gLandQuietUntilMs = 1;
             gMapIdQuietUntilMs = 0;  // Field 已回，结束 map_id 静默
-            TryArmFrameBlink("play_ready");
-            lastGate = 0;  // 落地立刻补钉一拍
-            Log("transit resume: play-ready → rebind+write (land_quiet=%ums)",
-                (unsigned)kLandQuietMs);
-            // 当拍急绑：MyUser 已就绪则立刻写，勿空等本拍后段 / FindAll 静默。
-            // land_quiet 只挡 FindAll，不挡这条 WM.MyUser 快路径。
-            if (TryBindWmMyUser()) {
-                ApplyInvuln(true);
-                lastGate = now;
-                Log("land pin hit298=%d (resume MyUser)",
-                    ReadI32(gLocalUser, kOffHitPeriodRemain));
+            lastGate = 0;
+            const bool softHold = x::features::soft_login_probe::IsHoldActive();
+            const bool landQuiet = x::features::soft_login_probe::IsLandQuiet();
+            if (softHold) {
+                gPendingSoftLandResume = true;
+                gSoftInvulnStaggerUntilMs = 0;
+                Log("transit resume soft_hold play-ready — light pin (no FindAll)");
+                // reenter 等待窗：人已 play-ready 但 hold 未放 → 旧逻辑整段停写会挨打（BIN 00:39:56→58）。
+                if (!SecondaryStatsAlive()) TryResolveWorldManagers();
+                if (TryBindWmMyUser()) {
+                    lastGate = now;
+                    Log("land pin hit298=%d (soft_hold play-ready)",
+                        ReadI32(gLocalUser, kOffHitPeriodRemain));
+                } else {
+                    Log("land pin defer: MyUser not ready yet (soft_hold)");
+                }
             } else {
-                Log("land pin defer: MyUser not ready yet");
+                gPendingSoftLandResume = landQuiet;  // quiet 结束再 arm 帧钉
+                gSoftInvulnStaggerUntilMs = 0;
+                gLandQuietUntilMs = now + kLandQuietMs;
+                if (gLandQuietUntilMs == 0) gLandQuietUntilMs = 1;
+                if (!landQuiet) TryArmFrameBlink("play_ready");
+                Log("transit resume: play-ready → rebind+write (softLandQuiet=%d land_quiet=%ums)",
+                    landQuiet ? 1 : 0, (unsigned)kLandQuietMs);
+                if (TryBindWmMyUser()) {
+                    ApplyInvuln(true);
+                    lastGate = now;
+                    Log("land pin hit298=%d (resume MyUser%s)",
+                        ReadI32(gLocalUser, kOffHitPeriodRemain),
+                        landQuiet ? " soft_land_quiet" : "");
+                } else {
+                    gPendingSoftLandResume = true;
+                    Log("land pin defer: MyUser not ready yet");
+                }
             }
         }
         wasPlayReady = play;
 
+        // soft hold 结束 / land quiet 中：补 MyUser 急钉；quiet 结束后再 arm 帧钉。
+        if (on && play && gPendingSoftLandResume &&
+            !x::features::soft_login_probe::IsHoldActive()) {
+            if (!LocalUserStillAlive() && TryBindWmMyUser()) {
+                ApplyInvuln(true);
+                lastGate = now;
+                Log("land pin hit298=%d (soft_land_quiet MyUser)",
+                    ReadI32(gLocalUser, kOffHitPeriodRemain));
+            } else if (LocalUserStillAlive() &&
+                       (!lastGate || now - lastGate >= kGateRefreshMs)) {
+                ApplyInvuln(true);
+                lastGate = now;
+            }
+            if (!x::features::soft_login_probe::IsLandQuiet()) {
+                gPendingSoftLandResume = false;
+                gSoftInvulnStaggerUntilMs = 0;
+                gLandQuietUntilMs = now + kLandQuietMs;
+                if (gLandQuietUntilMs == 0) gLandQuietUntilMs = 1;
+                gMapIdQuietUntilMs = 0;
+                lastGate = 0;
+                TryArmFrameBlink("play_ready");
+                Log("transit resume soft_land_quiet end → arm frame-tick");
+                if (TryBindWmMyUser()) {
+                    ApplyInvuln(true);
+                    lastGate = now;
+                    Log("land pin hit298=%d (post soft_land_quiet)",
+                        ReadI32(gLocalUser, kOffHitPeriodRemain));
+                }
+            }
+        }
         // MapId 闪变仍 PlayReady：立刻停写（手动/Travel 进门脏窗，BIN 02:48）。
         // 语义不变：只挡进门脏窗；真正回场由上面的 resume 清 quiet 并急钉。
         if (on && play) {
@@ -989,6 +1062,59 @@ DWORD WINAPI InvulnThread(LPVOID) {
                 Sleep(kWorkerSleepOnMs);
                 continue;
             }
+        }
+
+        // soft hold：已 play-ready 则轻钉（禁 FindAll）；大厅未进图才整段停写。
+        // BIN 00:39：hold 挡写到 RESULT 约 2s，落地空窗挨打。
+        if (on && play && x::features::soft_login_probe::IsHoldActive()) {
+            if (gFrameBlink.load(std::memory_order_acquire)) DisarmFrameBlink();
+            if (!SecondaryStatsAlive()) TryResolveWorldManagers();
+            if (!LocalUserStillAlive()) {
+                if (TryBindWmMyUser()) {
+                    lastGate = now;
+                    static DWORD sLastHoldPin = 0;
+                    if (!sLastHoldPin || now - sLastHoldPin > 1500) {
+                        sLastHoldPin = now;
+                        Log("soft_hold pin hit298=%d",
+                            ReadI32(gLocalUser, kOffHitPeriodRemain));
+                    }
+                }
+            } else if (!lastGate || now - lastGate >= kGateRefreshMs) {
+                ApplyInvuln(true);
+                lastGate = now;
+            }
+            if (now - lastBlink >= kAntiBlinkBackupMs) {
+                lastBlink = now;
+                ApplyAntiBlink();
+            }
+            Sleep(kWorkerSleepOnMs);
+            continue;
+        }
+        if (on && play && x::features::soft_login_probe::IsLandQuiet()) {
+            // 维持急钉（不 FindAll）；帧钉等 quiet 结束再 arm。
+            if (gFrameBlink.load(std::memory_order_acquire)) DisarmFrameBlink();
+            if (!SecondaryStatsAlive()) TryResolveWorldManagers();
+            if (!LocalUserStillAlive()) {
+                if (TryBindWmMyUser()) {
+                    ApplyInvuln(true);
+                    lastGate = now;
+                    static DWORD sLastQuietPin = 0;
+                    if (!sLastQuietPin || now - sLastQuietPin > 1500) {
+                        sLastQuietPin = now;
+                        Log("soft_land_quiet pin hit298=%d",
+                            ReadI32(gLocalUser, kOffHitPeriodRemain));
+                    }
+                }
+            } else if (!lastGate || now - lastGate >= kGateRefreshMs) {
+                ApplyInvuln(true);
+                lastGate = now;
+            }
+            if (now - lastBlink >= kAntiBlinkBackupMs) {
+                lastBlink = now;
+                ApplyAntiBlink();
+            }
+            Sleep(kWorkerSleepOnMs);
+            continue;
         }
 
         if (on && play && !gFrameBlink.load() && now - lastPumpTry >= kPumpRetryMs) {

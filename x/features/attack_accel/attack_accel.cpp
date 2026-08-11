@@ -83,10 +83,13 @@ constexpr size_t kOffLayerDelay = 0x14;
 // ActionLayer：Prepare 把已缩放 delay 写入 int[]（Il2CppArray），再拷当前帧到 +0x14。
 // IDA User_PrepareActionLayer：`mov [layer+20h], arr` / `[arr+idx*4+20h]`；Slot14 每 tick ≈−30。
 constexpr size_t kOffLayerDelayArr = 0x20;
-// sum(delay') → ms：−30/tick × ~50Hz → ms = sum * 20 / 30 = sum * 2/3。
+// sum(delay') → 闸门 ms（多发限频用）。
+// 硬事实：Slot14 每 tick delay≈−30。墙钟换算若按 ~50Hz → sum×2/3；但帧率锁/卡顿下
+// Update 可能更慢 → 真实动作更长。多发策略「只能多不能少」：闸门取上界
+// **ms = sum**（等价假定 ≤~30Hz 逻辑节拍），绝不短于 sum×2/3。
 constexpr DWORD DelaySumToMs(int sum) {
     if (sum <= 0) return 0;
-    return static_cast<DWORD>((static_cast<uint64_t>(sum) * 2ull) / 3ull);
+    return static_cast<DWORD>(sum);
 }
 // WM.MyUser / SecondaryStat → x::ui::player SSOT（hash 防漂）
 // nSlow_ / tSlow_ —— 只读诊断，本模块不再写（见文件头 2026-08-04 说明）。
@@ -96,13 +99,49 @@ constexpr size_t kOffSlowExpireHint = 0x1C4;
 constexpr size_t kOffBoostHint = 0xBC;
 constexpr size_t kOffBoostReasonHint = 0xC0;
 constexpr size_t kOffBoostExpireHint = 0xC4;
+// A 系 CTS Speed：nSpeed_@0x84 / tSpeed_@0x8C（GetActionSpeed 读 +80/+84；CheckByTime 不扫）。
+// SecondaryStat 基速 nSpeed@+0x80（Forced/装备 SetFrom 默认约 100，常被鞋顶到近 140）。
+constexpr size_t kOffSpeedBase = 0x80;
+constexpr size_t kOffSpeedNHint = 0x84;
+constexpr size_t kOffSpeedTHint = 0x8C;
+constexpr int kActionSpeedClampLo = 70;
+constexpr int kActionSpeedClampHi = 140;
+// TempStats[] @ +0x450；PartyBooster = index 4；TempStatBase.Value @ +0x18。
+constexpr size_t kOffTempStatsHint = 0x450;
+constexpr size_t kIl2CppArrayLenOff = 0x18;
+constexpr size_t kIl2CppArrayDataOff = 0x20;
+constexpr size_t kTempStatValueOff = 0x18;
+constexpr int kPartyBoosterIndex = 4;
+constexpr int kDashSpeedIndex = 1;
 // LocalUser+0x15C = 武器攻速 degree（战斗点 0x7FFB84A62C52 `mov edi,[rdi+15Ch]`）。只读。
 constexpr size_t kOffLuWeaponDegree = 0x15C;
-// 引擎夹 [2,10]；-8 保证任何武器都落到 2（最快，延迟 ×0.75）。
-// 合法 booster 只写 -1/-2，本值超出合法域 —— 若客户端把 nBooster_ 原样上报即为指纹。
+// 引擎夹 [2,10]；默认 -8 保证任何武器都落到 2（最快，延迟 ×0.75）。
+// 合法 booster 只写 -1/-2；Party 滑条可调，见 xcat::kAttackAccelPartyBoosterValue*。
+// nBooster_ 仍写死 -8（用户入口已关）。
 constexpr int kBoosterValue = -8;
+constexpr int kPartyBoosterValueDefault = -8;
+// CalcWeaponAttackSpeedTier（RVA 0x15940F0 @ imagebase 0x7ff848c80000）：
+//   lo = dword_7FF84F4E956C ^ 0xE95BBBB4  → 种子 0xE95BBBB6 解出 2（独占 xref）
+// 破限：写种子使 lo=滑条值（默认 -10）；不改 Party / nBooster_。
+// delay=(deg+10)/16；deg=-10 → ×0。
+constexpr uint32_t kRvaDegreeClampLoSeed = 0x686956Cu;
+constexpr uint32_t kDegreeClampLoXorImm = 0xE95BBBB4u;
+constexpr uint32_t kDegreeClampLoSeedPristine = 0xE95BBBB6u;  // → 2
+constexpr int kDegreeClampLoDefault = -10;
+constexpr DWORD kDegreeFloorSeedRetryMs = 2000;
+
+uint32_t SeedForDegreeClampLo(int lo) {
+    return static_cast<uint32_t>(lo) ^ kDegreeClampLoXorImm;
+}
+
+int DegreeClampLoFromSeed(uint32_t seed) {
+    return static_cast<int>(seed ^ kDegreeClampLoXorImm);
+}
+// nSpeed_=+40 + 基速 100 → GetActionSpeed≈140（Prepare clamp 上限）。
+constexpr int kActionSpeedNValue = 40;
 // tBooster_ 按游戏钟续到 now+60s，每拍重写；过期会被 CheckByTime→Reset 清掉。
 constexpr int kBoosterHoldMs = 60000;
+constexpr int kActionSpeedHoldMs = 60000;
 constexpr DWORD kRefreshMs = 16;
 constexpr DWORD kRebindMs = 2000;
 constexpr DWORD kLogChangeMs = 1000;  // 字段变化：最短间隔（防抖）
@@ -159,6 +198,13 @@ struct MethodInfoHead {
 
 std::atomic<bool> gDesired{false};
 std::atomic<bool> gBoosterDesired{false};
+std::atomic<bool> gActionSpeedDesired{false};
+std::atomic<bool> gPartyBoosterDesired{false};
+std::atomic<int> gPartyBoosterValue{kPartyBoosterValueDefault};
+std::atomic<bool> gBreakDegreeFloorDesired{false};
+std::atomic<bool> gBreakDegreeFloorApplied{false};
+std::atomic<int> gBreakDegreeFloorLo{kDegreeClampLoDefault};
+std::atomic<int> gBreakDegreeFloorAppliedLo{2};  // 诊断用：当前种子解出的 lo
 std::atomic<bool> gCutLayerDesired{false};
 std::atomic<bool> gSkipPrepareDesired{false};
 std::atomic<bool> gSkipPrepareArmed{false};
@@ -186,6 +232,9 @@ size_t gOffSlowExpire = kOffSlowExpireHint;
 size_t gOffBoost = kOffBoostHint;
 size_t gOffBoostReason = kOffBoostReasonHint;
 size_t gOffBoostExpire = kOffBoostExpireHint;
+size_t gOffSpeedN = kOffSpeedNHint;
+size_t gOffSpeedT = kOffSpeedTHint;
+size_t gOffTempStats = kOffTempStatsHint;
 std::atomic<bool> gFieldOffResolved{false};
 char gFieldOffPath[80]{};
 
@@ -200,6 +249,33 @@ int gBoostLastT = 0;
 bool gBoostHeld = false;
 uint32_t gBoostRebaseCnt = 0;  // 重登基线次数：持续上涨 = 引擎每帧在跟我们抢这个字段
 DWORD gBoostRebaseLogAt = 0;   // 上条 baseline 日志时刻（16ms 一拍，不节流会刷爆）
+
+// A 系 nSpeed_ 接管
+void* gActSpSs = nullptr;
+int gActSpBaseN = 0;
+int gActSpBaseT = 0;
+int gActSpLastN = 0;
+int gActSpLastT = 0;
+bool gActSpHeld = false;
+uint32_t gActSpRebaseCnt = 0;
+DWORD gActSpRebaseLogAt = 0;
+
+// PartyBooster TempStats[4].Value 接管
+void* gPartySs = nullptr;
+void* gPartyElem = nullptr;
+int gPartyBaseV = 0;
+int gPartyLastV = 0;
+bool gPartyHeld = false;
+uint32_t gPartyRebaseCnt = 0;
+DWORD gPartyRebaseLogAt = 0;
+uint32_t gPartyMissLogAt = 0;
+
+// B 系 degree 下限种子（CalcWeaponAttackSpeedTier 独占 .data）
+bool gDegreeFloorSeedHeld = false;
+uint32_t gDegreeFloorSeedOrig = kDegreeClampLoSeedPristine;
+uintptr_t gDegreeFloorSeedBase = 0;
+DWORD gDegreeFloorSeedTryAt = 0;
+DWORD gDegreeFloorSeedLogAt = 0;
 
 void WriteLogHandle(HANDLE h, const char* buf, int n) {
     if (h == INVALID_HANDLE_VALUE || n <= 0) return;
@@ -435,6 +511,114 @@ void Hook_PrepareActionLayer(void* self, int32_t action, int32_t speed, uint8_t 
     // 立刻清忙锁，并透传 Idle Prepare 重建呼吸层（action==6 不会再进本分支）。
     WriteI32(self, gOffActionBusy, -1);
     orig(self, kPrepareActionIdle, 100, 0, methodInfo);
+}
+
+bool PatchGaU32(uint32_t* p, uint32_t want) {
+    if (!p) return false;
+    DWORD old = 0;
+    if (!VirtualProtect(p, sizeof(uint32_t), PAGE_READWRITE, &old)) return false;
+    bool ok = false;
+    __try {
+        *p = want;
+        ok = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    VirtualProtect(p, sizeof(uint32_t), old, &old);
+    return ok;
+}
+
+void RestoreDegreeFloorSeed() {
+    if (!gDegreeFloorSeedHeld) {
+        gBreakDegreeFloorApplied.store(false, std::memory_order_release);
+        gBreakDegreeFloorAppliedLo.store(2, std::memory_order_release);
+        return;
+    }
+    const uintptr_t base = x::runtime::il2cpp::GaBase();
+    if (base && base == gDegreeFloorSeedBase) {
+        auto* p = reinterpret_cast<uint32_t*>(base + kRvaDegreeClampLoSeed);
+        if (!PatchGaU32(p, gDegreeFloorSeedOrig)) {
+            Log("breakFloor restore fail p=%p orig=0x%X", p, gDegreeFloorSeedOrig);
+        } else {
+            Log("breakFloor restore seed=0x%X (lo=%d)", gDegreeFloorSeedOrig,
+                DegreeClampLoFromSeed(gDegreeFloorSeedOrig));
+        }
+    } else {
+        Log("breakFloor drop restore (base %p -> %p)", (void*)gDegreeFloorSeedBase,
+            (void*)base);
+    }
+    gDegreeFloorSeedHeld = false;
+    gDegreeFloorSeedBase = 0;
+    gBreakDegreeFloorApplied.store(false, std::memory_order_release);
+    gBreakDegreeFloorAppliedLo.store(2, std::memory_order_release);
+}
+
+// 开：写独占种子使 clamp lo=滑条值；关：原值奉还。不碰 PartyBooster / nBooster_。
+void SyncDegreeFloorSeed(bool want) {
+    const DWORD now = GetTickCount();
+    if (!want) {
+        RestoreDegreeFloorSeed();
+        return;
+    }
+    const int wantLo = static_cast<int>(
+        xcat::ClampAttackAccelBreakDegreeFloorLo(gBreakDegreeFloorLo.load(std::memory_order_acquire)));
+    const uint32_t wantSeed = SeedForDegreeClampLo(wantLo);
+    const uintptr_t base = x::runtime::il2cpp::GaBase();
+    if (!base) {
+        if (!gDegreeFloorSeedLogAt || now - gDegreeFloorSeedLogAt >= kDegreeFloorSeedRetryMs) {
+            gDegreeFloorSeedLogAt = now;
+            Log("breakFloor pending — GaBase null");
+        }
+        return;
+    }
+    if (gDegreeFloorSeedHeld && gDegreeFloorSeedBase != base) {
+        Log("breakFloor GaBase rebound %p -> %p — reapply", (void*)gDegreeFloorSeedBase,
+            (void*)base);
+        gDegreeFloorSeedHeld = false;
+        gBreakDegreeFloorApplied.store(false, std::memory_order_release);
+    }
+    auto* p = reinterpret_cast<uint32_t*>(base + kRvaDegreeClampLoSeed);
+    uint32_t cur = 0;
+    __try {
+        cur = *p;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (!gDegreeFloorSeedLogAt || now - gDegreeFloorSeedLogAt >= kDegreeFloorSeedRetryMs) {
+            gDegreeFloorSeedLogAt = now;
+            Log("breakFloor read AV p=%p", p);
+        }
+        return;
+    }
+    if (gDegreeFloorSeedHeld && cur == wantSeed) {
+        gBreakDegreeFloorApplied.store(true, std::memory_order_release);
+        gBreakDegreeFloorAppliedLo.store(wantLo, std::memory_order_release);
+        return;
+    }
+    // 滑条变了：允许立刻改写（不走 fail 冷却）。
+    const bool retarget = gDegreeFloorSeedHeld && cur != wantSeed;
+    if (!retarget && gDegreeFloorSeedTryAt && now - gDegreeFloorSeedTryAt < kDegreeFloorSeedRetryMs &&
+        !gDegreeFloorSeedHeld) {
+        return;
+    }
+    gDegreeFloorSeedTryAt = now;
+    if (!gDegreeFloorSeedHeld) {
+        if (DegreeClampLoFromSeed(cur) == 2) {
+            gDegreeFloorSeedOrig = cur;
+        } else {
+            Log("breakFloor unexpected seed=0x%X (xorLo=%d) — still patch; orig=pristine", cur,
+                DegreeClampLoFromSeed(cur));
+            gDegreeFloorSeedOrig = kDegreeClampLoSeedPristine;
+        }
+    }
+    if (!PatchGaU32(p, wantSeed)) {
+        Log("breakFloor patch fail p=%p cur=0x%X wantLo=%d", p, cur, wantLo);
+        return;
+    }
+    gDegreeFloorSeedHeld = true;
+    gDegreeFloorSeedBase = base;
+    gBreakDegreeFloorApplied.store(true, std::memory_order_release);
+    gBreakDegreeFloorAppliedLo.store(wantLo, std::memory_order_release);
+    Log("breakFloor apply seed 0x%X -> 0x%X (lo 2->%d) rva=0x%X", gDegreeFloorSeedOrig, wantSeed,
+        wantLo, (unsigned)kRvaDegreeClampLoSeed);
 }
 
 bool PatchVtableMethodPtr(void** slot, void* hook, void** outOrig) {
@@ -912,6 +1096,50 @@ void ResetBoosterState() {
     gBoostRebaseLogAt = 0;
 }
 
+void ResetActionSpeedState() {
+    gActSpSs = nullptr;
+    gActSpBaseN = gActSpBaseT = 0;
+    gActSpLastN = gActSpLastT = 0;
+    gActSpHeld = false;
+    gActSpRebaseCnt = 0;
+    gActSpRebaseLogAt = 0;
+}
+
+void ResetPartyBoosterState() {
+    gPartySs = nullptr;
+    gPartyElem = nullptr;
+    gPartyBaseV = gPartyLastV = 0;
+    gPartyHeld = false;
+    gPartyRebaseCnt = 0;
+    gPartyRebaseLogAt = 0;
+}
+
+// TempStats[index].Value；失败返回 false（数组/槽空）。
+bool ReadTempStatValue(void* ss, int index, int& outVal) {
+    if (!ss || index < 0) return false;
+    void* arr = ReadPtr(ss, gOffTempStats);
+    if (!LooksLikeHeapPtr(arr)) return false;
+    const int len = ReadI32(arr, kIl2CppArrayLenOff);
+    if (index >= len) return false;
+    void* elem = ReadPtr(arr, kIl2CppArrayDataOff + (size_t)index * sizeof(void*));
+    if (!LooksLikeHeapPtr(elem)) return false;
+    outVal = ReadI32(elem, kTempStatValueOff);
+    return true;
+}
+
+bool ResolveTempStatElem(void* ss, int index, void** outElem) {
+    if (!ss || !outElem || index < 0) return false;
+    *outElem = nullptr;
+    void* arr = ReadPtr(ss, gOffTempStats);
+    if (!LooksLikeHeapPtr(arr)) return false;
+    const int len = ReadI32(arr, kIl2CppArrayLenOff);
+    if (index >= len) return false;
+    void* elem = ReadPtr(arr, kIl2CppArrayDataOff + (size_t)index * sizeof(void*));
+    if (!LooksLikeHeapPtr(elem)) return false;
+    *outElem = elem;
+    return true;
+}
+
 // 接管 nBooster_ 并按游戏钟续 tBooster_。ss 须已 ProbeSsAlive。返回本拍是否真的写了。
 bool ApplyBooster(void* ss) {
     if (!ss) return false;
@@ -966,13 +1194,133 @@ void BoosterOff(void* ssNow) {
     ResetBoosterState();
 }
 
+// 对齐 GetSpeed / GetActionSpeed（未 clamp）：(+80 if +84>=0 else 0) + Max(+84, Dash)。
+int ComputeActionSpeedRaw(void* ss, int* outN80 = nullptr, int* outDash = nullptr) {
+    if (!ss) return 100;
+    const int n80 = ReadI32(ss, kOffSpeedBase);
+    const int n84 = ReadI32(ss, gOffSpeedN);
+    int dash = 0;
+    (void)ReadTempStatValue(ss, kDashSpeedIndex, dash);
+    if (outN80) *outN80 = n80;
+    if (outDash) *outDash = dash;
+    const int basePart = (n84 >= 0) ? n80 : 0;
+    const int add = (n84 > dash) ? n84 : dash;
+    return basePart + add;
+}
+
+int ClampActionSpeed(int raw) {
+    if (raw < kActionSpeedClampLo) return kActionSpeedClampLo;
+    if (raw > kActionSpeedClampHi) return kActionSpeedClampHi;
+    return raw;
+}
+
+// A 系：写 nSpeed_=+40，并按游戏钟续 tSpeed_（即使 CheckByTime 不扫，也方便对照 Decode）。
+// 注意：Prepare 再 clamp [70,140]。若 nSpeed@+80 已近 140，加 +40 后仍被夹死 → 体感无变化（≠写失败）。
+bool ApplyActionSpeed(void* ss) {
+    if (!ss) return false;
+    const int gt = x::features::ports::skill::GetGameUpdateTimeMs();
+    if (gt <= 0) return false;
+
+    const int n = ReadI32(ss, gOffSpeedN);
+    const int t = ReadI32(ss, gOffSpeedT);
+    if (!gActSpHeld || ss != gActSpSs || n != gActSpLastN || t != gActSpLastT) {
+        gActSpBaseN = n;
+        gActSpBaseT = t;
+        ++gActSpRebaseCnt;
+        int n80 = 0, dash = 0;
+        const int rawBefore = ComputeActionSpeedRaw(ss, &n80, &dash);
+        const int aSpBefore = ClampActionSpeed(rawBefore);
+        const DWORD now = GetTickCount();
+        if (!gActSpRebaseLogAt || now - gActSpRebaseLogAt >= 1000) {
+            gActSpRebaseLogAt = now;
+            Log("actionSpeed baseline ss=%p n80=%d nSpeed_=%d dash=%d raw=%d aSp=%d t=%d gt=%d "
+                "held=%d rebase=%u",
+                ss, n80, n, dash, rawBefore, aSpBefore, t, gt, gActSpHeld ? 1 : 0, gActSpRebaseCnt);
+            if (aSpBefore >= kActionSpeedClampHi) {
+                Log("actionSpeed noop warn: Prepare already at clamp aSp=%d (n80=%d) — A系无法再加速；"
+                    "体感请用 PartyBooster/nBooster_（B系 degree）",
+                    aSpBefore, n80);
+            }
+        }
+    }
+
+    const int wantT = gt + kActionSpeedHoldMs;
+    WriteI32(ss, gOffSpeedN, kActionSpeedNValue);
+    WriteI32(ss, gOffSpeedT, wantT);
+    gActSpSs = ss;
+    gActSpLastN = kActionSpeedNValue;
+    gActSpLastT = wantT;
+    gActSpHeld = true;
+    return true;
+}
+
+void ActionSpeedOff(void* ssNow) {
+    if (!gActSpHeld) return;
+    if (ssNow && ssNow == gActSpSs && ProbeSsAlive(ssNow)) {
+        WriteI32(ssNow, gOffSpeedN, gActSpBaseN);
+        WriteI32(ssNow, gOffSpeedT, gActSpBaseN ? gActSpBaseT : 0);
+        Log("actionSpeed restore ss=%p nSpeed_=%d t=%d", ssNow, gActSpBaseN,
+            gActSpBaseN ? gActSpBaseT : 0);
+    } else {
+        Log("actionSpeed drop (ss %p -> %p)", gActSpSs, ssNow);
+    }
+    ResetActionSpeedState();
+}
+
+bool ApplyPartyBooster(void* ss) {
+    if (!ss) return false;
+    void* elem = nullptr;
+    if (!ResolveTempStatElem(ss, kPartyBoosterIndex, &elem) || !elem) {
+        const DWORD now = GetTickCount();
+        if (!gPartyMissLogAt || now - gPartyMissLogAt >= 2000) {
+            gPartyMissLogAt = now;
+            Log("partyBooster miss TempStats[%d] ss=%p", kPartyBoosterIndex, ss);
+        }
+        return false;
+    }
+    const int want = gPartyBoosterValue.load(std::memory_order_acquire);
+    const int v = ReadI32(elem, kTempStatValueOff);
+    if (!gPartyHeld || ss != gPartySs || elem != gPartyElem || v != gPartyLastV) {
+        gPartyBaseV = v;
+        ++gPartyRebaseCnt;
+        const DWORD now = GetTickCount();
+        if (!gPartyRebaseLogAt || now - gPartyRebaseLogAt >= 1000) {
+            gPartyRebaseLogAt = now;
+            Log("partyBooster baseline ss=%p elem=%p v=%d want=%d held=%d rebase=%u", ss, elem, v,
+                want, gPartyHeld ? 1 : 0, gPartyRebaseCnt);
+        }
+    }
+    WriteI32(elem, kTempStatValueOff, want);
+    gPartySs = ss;
+    gPartyElem = elem;
+    gPartyLastV = want;
+    gPartyHeld = true;
+    return true;
+}
+
+void PartyBoosterOff(void* ssNow) {
+    if (!gPartyHeld) return;
+    if (ssNow && ssNow == gPartySs && ProbeSsAlive(ssNow) && gPartyElem) {
+        void* elem = nullptr;
+        if (ResolveTempStatElem(ssNow, kPartyBoosterIndex, &elem) && elem == gPartyElem) {
+            WriteI32(elem, kTempStatValueOff, gPartyBaseV);
+            Log("partyBooster restore ss=%p v=%d", ssNow, gPartyBaseV);
+        } else {
+            Log("partyBooster drop elem moved (ss %p)", ssNow);
+        }
+    } else {
+        Log("partyBooster drop (ss %p -> %p)", gPartySs, ssNow);
+    }
+    ResetPartyBoosterState();
+}
+
 DWORD WINAPI Worker(LPVOID) {
     OpenLog();
     EnsureFieldOffsets();
-    Log("worker start (clearBusy | nBooster_=%d/hold=%ums 独立开关; landGrace=%ums; "
+    Log("worker start (clearBusy | nBooster_=%d | nSpeed_=%d | partyV=%d; landGrace=%ums; "
         "skipPrepLandGrace=%ums)",
-        kBoosterValue, (unsigned)kBoosterHoldMs, (unsigned)kLandGraceMs,
-        (unsigned)kSkipPrepareLandGraceMs);
+        kBoosterValue, kActionSpeedNValue, gPartyBoosterValue.load(std::memory_order_relaxed),
+        (unsigned)kLandGraceMs, (unsigned)kSkipPrepareLandGraceMs);
     DWORD lastRebind = 0;
     DWORD lastLog = 0;
     DWORD landGraceUntil = 0;  // PlayReady/换皮后宽限，禁止写忙锁 / 禁止武装 SkipPrepare
@@ -988,9 +1336,14 @@ DWORD WINAPI Worker(LPVOID) {
     while (!gWorkerStop.load(std::memory_order_acquire)) {
         const bool accelOn = gDesired.load(std::memory_order_acquire);
         const bool boostOn = gBoosterDesired.load(std::memory_order_acquire);
+        const bool actSpOn = gActionSpeedDesired.load(std::memory_order_acquire);
+        const bool partyOn = gPartyBoosterDesired.load(std::memory_order_acquire);
         const bool cutOn = gCutLayerDesired.load(std::memory_order_acquire);
         const bool skipPrepOn = gSkipPrepareDesired.load(std::memory_order_acquire);
-        const bool anyWrite = accelOn || boostOn || cutOn;
+        const bool breakFloorOn = gBreakDegreeFloorDesired.load(std::memory_order_acquire);
+        // GA .data 种子：与 PlayReady / Party 无关，每拍同步（开写 / 关还原）。
+        SyncDegreeFloorSeed(breakFloorOn);
+        const bool anyWrite = accelOn || boostOn || actSpOn || partyOn || cutOn;
         // 跳过 Prepare 也要跟落地窗，不能只在「加速/砍层」开着时才追踪 PlayReady。
         const bool needLand = anyWrite || skipPrepOn;
         const DWORD now = GetTickCount();
@@ -1014,8 +1367,10 @@ DWORD WINAPI Worker(LPVOID) {
                 } else {
                     gSkipPrepareArmed.store(false, std::memory_order_release);
                 }
-                // 离场前尽量把 booster 还回去；ss 已失效则只丢状态（残值最多 60s 后自然到期）。
+                // 离场前尽量把数值槽还回去；ss 已失效则只丢状态。
                 BoosterOff(ss);
+                ActionSpeedOff(ss);
+                PartyBoosterOff(ss);
                 lu = nullptr;
                 ss = nullptr;
                 Sleep(kRefreshMs);
@@ -1047,7 +1402,7 @@ DWORD WINAPI Worker(LPVOID) {
                 ss = nullptr;
             }
             const bool luStale = lu && (!myUser || lu != myUser);
-            const bool needSs = boostOn;
+            const bool needSs = boostOn || actSpOn || partyOn;
             if (!lu || (needSs && !ss) || luStale || now - lastRebind >= kRebindMs) {
                 if (luStale) Log("LocalUser stale %p -> wm.MyUser=%p, rebind", lu, myUser);
                 if (luStale && !myUser) {
@@ -1061,13 +1416,21 @@ DWORD WINAPI Worker(LPVOID) {
                 ss = nullptr;
             }
 
-            // booster 是纯数值字段，不吃落地宽限 —— 宽限是为忙锁/SkipPrepare 那类可视写入设的。
-            // 开关仍开着但 ss 暂时没解析出来时保持接管：此刻 BoosterOff 会把基线丢成我们自己
-            // 写的 -8，等 ss 回来再登记就成了假基线，关闭时「还」不回去。
+            // 数值槽不吃落地宽限（宽限是为忙锁/SkipPrepare 可视写入设的）。
             if (boostOn) {
                 if (ss) ApplyBooster(ss);
             } else {
                 BoosterOff(ss);
+            }
+            if (actSpOn) {
+                if (ss) ApplyActionSpeed(ss);
+            } else {
+                ActionSpeedOff(ss);
+            }
+            if (partyOn) {
+                if (ss) ApplyPartyBooster(ss);
+            } else {
+                PartyBoosterOff(ss);
             }
 
             if (gSkipPrepareNeedGrace.exchange(false, std::memory_order_acq_rel)) {
@@ -1090,7 +1453,8 @@ DWORD WINAPI Worker(LPVOID) {
                 const int holdSig = (inGrace ? 1 : 0) | ((fireHeld ? 1 : 0) << 1) |
                                     ((lu ? 1 : 0) << 2) | ((skipArmed ? 1 : 0) << 3) |
                                     ((accelOn ? 1 : 0) << 4) | ((boostOn ? 1 : 0) << 5) |
-                                    ((cutOn ? 1 : 0) << 6);
+                                    ((cutOn ? 1 : 0) << 6) | ((actSpOn ? 1 : 0) << 7) |
+                                    ((partyOn ? 1 : 0) << 8);
                 const bool changed = holdSig != prevHoldSig;
                 const bool due =
                     !lastLog || (changed && now - lastLog >= kLogChangeMs) ||
@@ -1098,9 +1462,11 @@ DWORD WINAPI Worker(LPVOID) {
                 if (due) {
                     lastLog = now;
                     prevHoldSig = holdSig;
-                    Log("hold grace=%d suppress=%d lu=%p skipArmed=%d accel=%d boost=%d cut=%d",
+                    Log("hold grace=%d suppress=%d lu=%p skipArmed=%d accel=%d boost=%d "
+                        "actSp=%d party=%d cut=%d",
                         inGrace ? 1 : 0, fireHeld ? 1 : 0, lu, skipArmed ? 1 : 0,
-                        accelOn ? 1 : 0, boostOn ? 1 : 0, cutOn ? 1 : 0);
+                        accelOn ? 1 : 0, boostOn ? 1 : 0, actSpOn ? 1 : 0, partyOn ? 1 : 0,
+                        cutOn ? 1 : 0);
                 }
                 Sleep(kRefreshMs);
                 continue;
@@ -1115,20 +1481,32 @@ DWORD WINAPI Worker(LPVOID) {
             int cutN = 0;
             if (cutOn && !skipPrepOn) cutN = CutLayerDelays(lu);
 
-            if (accelOn || boostOn || cutOn || skipArmed) {
+            if (accelOn || boostOn || actSpOn || partyOn || cutOn || skipArmed || breakFloorOn) {
                 const int busy = ReadI32(lu, gOffActionBusy);
                 const int slow = ss ? ReadI32(ss, gOffSlow) : 0;
                 const int tSlow = ss ? ReadI32(ss, gOffSlowExpire) : 0;
                 const int boost = ss ? ReadI32(ss, gOffBoost) : 0;
                 const int tBoost = ss ? ReadI32(ss, gOffBoostExpire) : 0;
+                const int nSp = ss ? ReadI32(ss, gOffSpeedN) : 0;
+                int n80 = 0;
+                const int aSp = ss ? ClampActionSpeed(ComputeActionSpeedRaw(ss, &n80)) : 100;
+                int partyV = 0;
+                const bool partyOk = ss && ReadTempStatValue(ss, kPartyBoosterIndex, partyV);
                 const int wpn = ReadI32(lu, kOffLuWeaponDegree);
-                const int deg = (std::min)(10, (std::max)(2, wpn + boost));
-                // hits/pass 不进签名：否则出刀期仍会每秒刷；事件路径另有 Log。
+                const bool floorBroken =
+                    gBreakDegreeFloorApplied.load(std::memory_order_acquire);
+                const int degLo =
+                    floorBroken ? gBreakDegreeFloorAppliedLo.load(std::memory_order_acquire) : 2;
+                const int deg =
+                    (std::min)(10, (std::max)(degLo, wpn + boost + (partyOk ? partyV : 0)));
                 const int onSig =
                     busy + 3 * slow + 5 * tSlow + 7 * boost + 11 * tBoost + 13 * wpn + 17 * deg +
-                    19 * cutN + (gBoostHeld ? 23 : 0) + (accelOn ? 29 : 0) + (boostOn ? 31 : 0) +
-                    ((cutOn && !skipPrepOn) ? 37 : 0) + (skipArmed ? 41 : 0) +
-                    (gBoostRebaseCnt * 43);
+                    19 * cutN + 23 * nSp + 29 * partyV + 31 * n80 + 37 * aSp +
+                    (gBoostHeld ? 41 : 0) + (gActSpHeld ? 43 : 0) + (gPartyHeld ? 47 : 0) +
+                    (accelOn ? 53 : 0) + (boostOn ? 59 : 0) + (actSpOn ? 61 : 0) +
+                    (partyOn ? 67 : 0) + ((cutOn && !skipPrepOn) ? 71 : 0) +
+                    (skipArmed ? 73 : 0) + (gBoostRebaseCnt * 79) + (gActSpRebaseCnt * 83) +
+                    (gPartyRebaseCnt * 89) + (floorBroken ? 97 : 0);
                 const bool changed = onSig != prevOnSig;
                 const bool due =
                     !lastLog || (changed && now - lastLog >= kLogChangeMs) ||
@@ -1136,12 +1514,15 @@ DWORD WINAPI Worker(LPVOID) {
                 if (due) {
                     lastLog = now;
                     prevOnSig = onSig;
-                    Log("on lu=%p busy=%d ss=%p slow=%d tSlow=%d boost=%d tBoost=%d held=%d "
-                        "wpn=%d deg=%d x%.2f rebase=%u accel=%d bst=%d cut=%d cutN=%d "
-                        "skipArmed=%d skipHits=%u pass=%u",
-                        lu, busy, ss, slow, tSlow, boost, tBoost, gBoostHeld ? 1 : 0, wpn, deg,
-                        (deg + 10) / 16.0, gBoostRebaseCnt, accelOn ? 1 : 0, boostOn ? 1 : 0,
-                        (cutOn && !skipPrepOn) ? 1 : 0, cutN, skipArmed ? 1 : 0,
+                    Log("on lu=%p busy=%d ss=%p slow=%d tSlow=%d boost=%d tBoost=%d n80=%d nSp=%d "
+                        "aSp=%d party=%d/%d heldB=%d heldS=%d heldP=%d wpn=%d deg=%d x%.2f "
+                        "accel=%d bst=%d actSp=%d partyOn=%d cut=%d cutN=%d skipArmed=%d "
+                        "brkFloor=%d skipHits=%u pass=%u",
+                        lu, busy, ss, slow, tSlow, boost, tBoost, n80, nSp, aSp, partyOk ? 1 : 0,
+                        partyV, gBoostHeld ? 1 : 0, gActSpHeld ? 1 : 0, gPartyHeld ? 1 : 0, wpn, deg,
+                        (deg + 10) / 16.0, accelOn ? 1 : 0, boostOn ? 1 : 0, actSpOn ? 1 : 0,
+                        partyOn ? 1 : 0, (cutOn && !skipPrepOn) ? 1 : 0, cutN, skipArmed ? 1 : 0,
+                        floorBroken ? 1 : 0,
                         gSkipPrepareHits.load(std::memory_order_relaxed),
                         gSkipPreparePassHits.load(std::memory_order_relaxed));
                 }
@@ -1163,6 +1544,8 @@ DWORD WINAPI Worker(LPVOID) {
         } else {
             gSkipPrepareArmed.store(false, std::memory_order_release);
             BoosterOff(ss);
+            ActionSpeedOff(ss);
+            PartyBoosterOff(ss);
             lu = nullptr;
             ss = nullptr;
             lastMyUser = nullptr;
@@ -1174,6 +1557,9 @@ DWORD WINAPI Worker(LPVOID) {
 
     gSkipPrepareArmed.store(false, std::memory_order_release);
     BoosterOff(ss);
+    ActionSpeedOff(ss);
+    PartyBoosterOff(ss);
+    RestoreDegreeFloorSeed();
     UninstallSkipPrepareHook();
     Log("worker stop");
     return 0;
@@ -1240,6 +1626,50 @@ void SetSkipPrepareDesired(bool on) {
 
 bool IsSkipPrepareDesired() { return gSkipPrepareDesired.load(std::memory_order_acquire); }
 
+void SetActionSpeedDesired(bool on) {
+    const bool was = gActionSpeedDesired.exchange(on, std::memory_order_acq_rel);
+    if (was != on) Log("SetActionSpeedDesired on=%d (nSpeed_=%d)", on ? 1 : 0, kActionSpeedNValue);
+}
+
+bool IsActionSpeedDesired() { return gActionSpeedDesired.load(std::memory_order_acquire); }
+
+void SetPartyBoosterDesired(bool on) {
+    const bool was = gPartyBoosterDesired.exchange(on, std::memory_order_acq_rel);
+    if (was != on)
+        Log("SetPartyBoosterDesired on=%d (TempStats[%d].Value=%d)", on ? 1 : 0, kPartyBoosterIndex,
+            gPartyBoosterValue.load(std::memory_order_relaxed));
+}
+
+bool IsPartyBoosterDesired() { return gPartyBoosterDesired.load(std::memory_order_acquire); }
+
+void SetPartyBoosterValue(int v) {
+    const int clamped = static_cast<int>(xcat::ClampAttackAccelPartyBoosterValue(v));
+    const int was = gPartyBoosterValue.exchange(clamped, std::memory_order_acq_rel);
+    if (was != clamped)
+        Log("SetPartyBoosterValue %d -> %d", was, clamped);
+}
+
+int PartyBoosterValue() { return gPartyBoosterValue.load(std::memory_order_acquire); }
+
+void SetBreakDegreeFloorDesired(bool on) {
+    const bool was = gBreakDegreeFloorDesired.exchange(on, std::memory_order_acq_rel);
+    if (was != on)
+        Log("SetBreakDegreeFloorDesired on=%d (CalcWeaponAttackSpeedTier lo→%d)", on ? 1 : 0,
+            gBreakDegreeFloorLo.load(std::memory_order_relaxed));
+}
+
+bool IsBreakDegreeFloorDesired() {
+    return gBreakDegreeFloorDesired.load(std::memory_order_acquire);
+}
+
+void SetBreakDegreeFloorLo(int lo) {
+    const int clamped = static_cast<int>(xcat::ClampAttackAccelBreakDegreeFloorLo(lo));
+    const int was = gBreakDegreeFloorLo.exchange(clamped, std::memory_order_acq_rel);
+    if (was != clamped) Log("SetBreakDegreeFloorLo %d -> %d", was, clamped);
+}
+
+int BreakDegreeFloorLo() { return gBreakDegreeFloorLo.load(std::memory_order_acquire); }
+
 bool QueryActionBusy(void* localUser, int& outBusy) {
     if (!localUser) return false;
     // 幂等（gFieldOffResolved 早退）。worker 启动时已解析过，这里只兜住「worker 尚未起来」。
@@ -1254,6 +1684,26 @@ bool QueryActionBusy(void* localUser, int& outBusy) {
     }
     outBusy = v;
     return true;
+}
+
+bool QueryActionIndex(void* localUser, int& outActionIdx) {
+    int busy = -1;
+    if (!QueryActionBusy(localUser, busy) || busy < 0) return false;
+    outActionIdx = busy;
+    return true;
+}
+
+// 对照 Dumps/cms_cw/dump.cs · Msc.Game.Object.Avatar.ActionType（与 busy 实测 5/6/7/16/17 吻合）。
+bool IsRangedShootAction(int actionIdx) {
+    if (actionIdx >= 22 && actionIdx <= 27) return true;  // Shoot1..ShooTf
+    if (actionIdx == 48) return true;                     // Shoot6
+    return false;
+}
+
+bool IsMeleeWeaponAction(int actionIdx) {
+    if (actionIdx >= 5 && actionIdx <= 21) return true;  // SwingO1..StabTf
+    if (actionIdx == 32) return true;                    // ProneStab
+    return false;
 }
 
 bool ClearActionBusy(void* localUser) {
@@ -1356,9 +1806,6 @@ bool QueryActionLayerDelaySum(void* localUser, int& outSum) {
     return true;
 }
 
-// SecondaryStat 基速（Forced/装备 SetFrom 默认约 100）；Prepare 无 +1BC 覆盖时用它。
-constexpr size_t kOffSsActionSpeedBase = 0x80;
-
 bool QueryActionLayerAnimMs(void* localUser, DWORD& outMs) {
     int sum = 0;
     if (!QueryActionLayerDelaySum(localUser, sum)) return false;
@@ -1387,10 +1834,9 @@ int UnscaleDelayByActionSpeed(int scaledSum, int actionSpeed) {
 }
 
 int AnimMsToBaseSum(DWORD animMs, int actionSpeed) {
-    // DelaySumToMs：ms = sum×2/3 → sum = ms×3/2；再按现速反解 base。
+    // 与 DelaySumToMs 互逆：闸门 ms≡scaled delay 上界 → scaled≈animMs，再反解 base。
     if (animMs < 40u || animMs > 5000u) return 0;
-    const int scaled =
-        static_cast<int>((static_cast<uint64_t>(animMs) * 3ull) / 2ull);
+    const int scaled = static_cast<int>(animMs);
     if (scaled <= 0) return 0;
     return UnscaleDelayByActionSpeed(scaled, actionSpeed);
 }
@@ -1405,21 +1851,19 @@ bool QueryActionSpeed(void* localUser, int& outSpeed) {
     }
     int speed = 100;
     __try {
-        // Prepare：SS+0x1BC != 0 则覆盖名义 speed（字段名 nSlow_，语义上是 Prepare 的绝对 speed）。
+        // Prepare：nSlow_@1BC != 0 则绝对覆盖 GetActionSpeed。
         const int ov = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ss) + gOffSlow);
         if (ov != 0) {
             speed = ov;
         } else {
-            speed = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ss) + kOffSsActionSpeedBase);
+            speed = ComputeActionSpeedRaw(ss);
             if (speed == 0) speed = 100;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         outSpeed = 100;
         return false;
     }
-    if (speed < 70) speed = 70;
-    if (speed > 140) speed = 140;
-    outSpeed = speed;
+    outSpeed = ClampActionSpeed(speed);
     return true;
 }
 
@@ -1547,6 +1991,7 @@ bool QueryAttackSpeedDegree(void* localUser, int& outDegree) {
         return false;
     }
     int boost = 0;
+    int party = 0;
     if (gFieldOffResolved.load(std::memory_order_acquire)) {
         void* ss = ResolveSecondaryStat();
         if (ss) {
@@ -1555,10 +2000,14 @@ bool QueryAttackSpeedDegree(void* localUser, int& outDegree) {
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 boost = 0;
             }
+            (void)ReadTempStatValue(ss, kPartyBoosterIndex, party);
         }
     }
-    int deg = wpn + boost;
-    if (deg < 2) deg = 2;
+    int deg = wpn + boost + party;
+    const int degLo = gBreakDegreeFloorApplied.load(std::memory_order_acquire)
+                          ? gBreakDegreeFloorAppliedLo.load(std::memory_order_acquire)
+                          : 2;
+    if (deg < degLo) deg = degLo;
     if (deg > 10) deg = 10;
     outDegree = deg;
     return true;

@@ -123,9 +123,36 @@
 | `TryGetWinCursorPos` | **`0x938290`** | 轨迹物理路径（`Vector2` by-value→RDX；旧注 `0x936C30` 已废）；**内层** `0x938670` |
 | `TryGetCursorPos` | ~~`0x936F00`~~ **作废** | `0x936F00` **不是** screen→local；与 TextCaptcha OnOk 一带重叠。反向采点走 NonFinite `0x92FC00`（`get_rect` + Unity 坐标变换），**非** Util 上独立 `TryGetCursorPos` |
 | `GetDifficulty` | `0x937330` | 难度表 |
+| — | — | **坐标空间见下方 §5.1，误用会把光标甩出客户区** |
 | `SetDifficulty(shader, lv)` | `0x92CB30` | 写 LieDetectorShader |
 | `GetShape` | `0x937580` | 形状枚举 |
 | `MakePathCanvas(path)` | `0x92D3E0` | path → 纹理 |
+
+### 5.1 三个坐标空间（0.1.114 事故根因）
+
+| 空间 | 范围 / 原点 | Y 方向 | 来源 |
+|---|---|---|---|
+| `rawPosList` | 归一化，约 ±0.75 × ±0.5 | 向上 | 原生字段 `+0xE8` |
+| **cursor-point 画布** | `0..750 × 0..500`，左上原点 | **向下** | `RawToCursorLocal`：`(x+0.75)*500` / `(y+0.5)*500` |
+| **RectTransform 局部** | `rect.x..x+width`，中心原点 | **向上** | `RectTransform.get_rect` |
+
+`TryGetWinCursorPos` 收的是**第三种**，且按 **1:1** 折算成 Windows 屏幕像素（只加面板原点 + 翻 Y）。
+
+0.1.114 真题（`0E4D4B42F0A0`）把第二种直接喂了进去，两处同时错：
+
+- 少了画布 → UI 单位的缩放与中心化
+- Y 方向没翻转
+
+落盘轨拟合出 `screenX = 499.97·rawX + 1227`、`screenY = −499.93·rawY + 193`（残差 0.5px），
+即缩放恰为 1.0；轨迹被推到 `x∈[1229,1540] y∈[31,256]`，而客户区只有 `(20,43)-(1386,811)`
+→ **121/330 点在窗外**，客户体感「鼠标在动但焦点不在游戏里」，测谎判失败。
+
+同一个错也让 `panel-affine` 主路径全程 miss：`u = cursorX / rect.width` 在 rect 约 314 宽时恒 `>1`，
+UV 校验直接拒，于是每次都退到错误的 TryGet。
+
+**铁律**：喂 `TryGetWinCursorPos` / 做面板仿射前，一律先过 `CursorPointToRectLocal`
+（画布常量 `750×500` 归一化 → 乘 `rect` 实际尺寸 → 翻 Y）。**禁止**拿 `rect.width/height`
+当画布尺寸去除 cursor-point 坐标。
 
 ---
 

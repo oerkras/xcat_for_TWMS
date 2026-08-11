@@ -627,28 +627,6 @@ bool FillTeleportPending(void* lu, float tx, float ty) {
     return true;
 }
 
-// 落点在踏板线段上的弧长 → RelPos.Pos；V=0。有台时下一帧 AbsPos←RelPos 用这个，防假到位回拉。
-bool WriteRelPosFromLand(void* vc, void* fhObj, float tx, float ty) {
-    if (!LooksLikeHeapPtr(vc) || !LooksLikeHeapPtr(fhObj)) return false;
-    const int x1 = ReadI32(fhObj, kOffFhX1);
-    const int y1 = ReadI32(fhObj, kOffFhY1);
-    const int x2 = ReadI32(fhObj, kOffFhX2);
-    const int y2 = ReadI32(fhObj, kOffFhY2);
-    const double dx = static_cast<double>(x2 - x1);
-    const double dy = static_cast<double>(y2 - y1);
-    const double len2 = dx * dx + dy * dy;
-    double pos = 0.0;
-    if (len2 > 1.0) {
-        double t = ((static_cast<double>(tx) - x1) * dx + (static_cast<double>(ty) - y1) * dy) / len2;
-        if (t < 0.0) t = 0.0;
-        if (t > 1.0) t = 1.0;
-        pos = t * std::sqrt(len2);
-    }
-    WriteF64(vc, kOffVcRpPos, pos);
-    WriteF64(vc, kOffVcRpV, 0.0);
-    return true;
-}
-
 // requireFh=true：贴地瞬移（F5/短跳）要本图 FH 缓存+图就绪。
 // requireFh=false：F6 点飞悬空——只验 PlayReady + LocalUser/VecCtrl，不改变起飞手感。
 bool CheckPhysicsReadyUnlocked(bool requireFh, char* fail, size_t failN) {
@@ -961,7 +939,7 @@ bool IsPostTeleportQuiet(uint32_t quietMs) {
     return (now - last) < quietMs;
 }
 
-bool StabilizeFootholdMainThread(float landX, float landY, uint32_t fhId, bool replant) {
+bool StabilizeFootholdMainThread(float landX, float landY, uint32_t fhId) {
     (void)x::runtime::main_thread::AssertOnPumpThread("teleport.StabilizeFh");
     if (!std::isfinite(landX) || !std::isfinite(landY)) return false;
     if (!BindFns()) return false;
@@ -971,20 +949,11 @@ bool StabilizeFootholdMainThread(float landX, float landY, uint32_t fhId, bool r
     void* vc = ReadPtr(lu, kOffVecCtrl);
     if (!LooksLikeHeapPtr(vc)) return false;
 
-    if (replant) {
-        if (!fhId || (std::fabs(landX) < 8.f && std::fabs(landY) < 8.f)) return false;
-        void* plantFh = foothold::ResolveFhObject(fhId);
-        if (!LooksLikeHeapPtr(plantFh)) return false;
-        WritePtr(vc, kOffVcCurFh, plantFh);
-        WritePtr(vc, kOffVcLastFh, plantFh);
-        if (!WriteRelPosFromLand(vc, plantFh, landX, landY)) return false;
-    } else {
-        // BIN 4ab7b0：同点 fhDrift 时 replant=1 与 CollisionDetect 抢交接 → soft。
-        // 拆掉 CurFh 打断 Walk/CalcWalk；只清 V + InputX。不拧 RelPos、不硬写 Ap。
-        WritePtr(vc, kOffVcCurFh, nullptr);
-        WritePtr(vc, kOffVcLastFh, nullptr);
-        WriteF64(vc, kOffVcRpV, 0.0);
-    }
+    // 只 detach：BIN 4ab7b0 证实补种 CurFh+RelPos（旧 replant）与 CollisionDetect 抢交接 → soft；
+    // 且按弧长重算 AbsPos = 体感瞬移。该路径已删除，禁止再加回来。
+    WritePtr(vc, kOffVcCurFh, nullptr);
+    WritePtr(vc, kOffVcLastFh, nullptr);
+    WriteF64(vc, kOffVcRpV, 0.0);
     WriteF64(vc, kOffVcApVx, 0.0);
     WriteF64(vc, kOffVcApVy, 0.0);
     attack::ClearWalkLatchMainThread();
@@ -998,9 +967,8 @@ bool StabilizeFootholdMainThread(float landX, float landY, uint32_t fhId, bool r
             WriteF64(vc, kOffVcAplY, ny);
         }
     }
-    x::runtime::LogI("Teleport", "stabilize fh=%u land=(%.0f,%.0f) rp=%.1f replant=%d detach=%d",
-                     (unsigned)fhId, landX, landY, ReadF64(vc, kOffVcRpPos), replant ? 1 : 0,
-                     replant ? 0 : 1);
+    x::runtime::LogI("Teleport", "stabilize detach fh=%u land=(%.0f,%.0f) rp=%.1f",
+                     (unsigned)fhId, landX, landY, ReadF64(vc, kOffVcRpPos));
     return true;
 }
 

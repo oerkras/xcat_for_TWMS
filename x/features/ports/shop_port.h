@@ -48,12 +48,20 @@ bool TryConfirmShopScriptMenu();
 // 扫装备栏(invType=1)或其它栏(invType=4)。names 用离线 catalog 填。
 bool ScanBag(bool equipBag, BagItem* items, int maxItems, int& outCount);
 
+// 开店后快照当前 TAB 的 _sellItemList（切 TAB + CmpSellItem）。
+// 任务道具等不进卖栏投影；sellbag 建队时用此表跳过，避免 LIST_STALE 空耗。
+// outItemIds 可空；成功时 outListN=投影条数（可为 0）。
+// outTabSwitched：本拍刚切 TAB（列表可能尚未刷新；调用方宜短等再拍）。
+bool SnapshotShopSellList(int invType, int* outItemIds, int maxOut, int& outCount, int& outListN,
+                          bool* outTabSwitched = nullptr);
+
 // 卖一件：需 ShopReady。成功仅表示已发包；对账由调用方看槽位变化。
 bool SellItem(int invType, int pos, int itemId, int count, std::string& outErr);
 
 // 买一件：需 ShopReady；按 ItemId 匹配买栏（+0x178/+0x180）后走 UI 发包。
+// 成功仅表示已发包；数量可能被 MaxSlot 截断，实发写入 outBought（可空）。
 // 失败码：NO_SHOP / SHOP_BUSY / LIST_MISS / NO_MESO / BAD_ARGS / ...
-bool BuyItem(int itemId, int count, std::string& outErr);
+bool BuyItem(int itemId, int count, std::string& outErr, int* outBought = nullptr);
 
 // 店内是否有该商品；outPrice=Item.Price（单价）；未命中 outInShop=false。
 bool QueryShopBuyOffer(int itemId, bool& outInShop, int& outPrice);

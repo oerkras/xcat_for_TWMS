@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace x::features::sellbag {
@@ -45,13 +46,15 @@ int64_t g_roundMesoStart = 0;
 bool g_roundMesoOk = false;
 int g_listStaleRetries = 0;  // LIST_STALE / SHOP_BUSY 同项重试计数（切 TAB 后投影延迟）
 
-constexpr DWORD kStepMs = 180;  // 略大于店内请求回包；SHOP_BUSY 时同步进重试
+// 步进下限：上一笔已确认后到下一发的间隔。SHOP_BUSY 仍是硬闸（店内请求未清不发）。
+// 180→80：BIN 卖出走 UI SendSellRequestPacket，回包常 <100ms；过长纯浪费。
+constexpr DWORD kStepMs = 80;
 constexpr DWORD kFlowHardTimeoutMs = 90000;
 constexpr int kSellMax = 512;
 constexpr int kScanMax = 256;
-constexpr int kListStaleMax = 12;  // ~2s@180ms；TAB 切完后列表仍空则放弃
-constexpr DWORD kConfirmSoftTimeoutMs = 2500;
-constexpr DWORD kConfirmHardTimeoutMs = 10000;
+constexpr int kListStaleMax = 20;  // ~1.6s@80ms；TAB 切完后列表仍空则放弃
+constexpr DWORD kConfirmSoftTimeoutMs = 2000;
+constexpr DWORD kConfirmHardTimeoutMs = 8000;
 constexpr DWORD kCfgPollMs = 500;
 constexpr DWORD kShopReadyPollMs = 1000;
 
@@ -280,12 +283,51 @@ bool BuildQueueForCurrentBag() {
     int n = 0;
     if (!shop::ScanBag(g_curEquipBag, items, kScanMax, n)) return false;
 
+    // 店卖栏投影 = 客户端认可的可卖格；任务道具有卖价也不进表 → 建队时跳过。
+    // 刚切 TAB 时投影可能短暂为空，短等再拍，避免把可卖物全跳过。
+    std::unordered_set<int> onSellList;
+    bool sellSnapOk = false;
+    {
+        const int invType = g_curEquipBag ? 1 : 4;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            int snapIds[kScanMax]{};
+            int snapCount = 0;
+            int listN = 0;
+            bool tabSwitched = false;
+            if (!shop::SnapshotShopSellList(invType, snapIds, kScanMax, snapCount, listN,
+                                           &tabSwitched)) {
+                runtime::LogW("Sellbag", "卖栏投影失败，回退仅按离线卖价建队");
+                break;
+            }
+            if (tabSwitched && listN <= 0 && attempt + 1 < 4) {
+                Sleep(60);
+                continue;
+            }
+            sellSnapOk = true;
+            for (int i = 0; i < snapCount && i < kScanMax; ++i) {
+                if (snapIds[i] > 0) onSellList.insert(snapIds[i]);
+            }
+            runtime::LogI("Sellbag", "卖栏投影 %s: listN=%d uniqueIds=%zu attempt=%d",
+                          g_curEquipBag ? "装备" : "其他", listN, onSellList.size(), attempt + 1);
+            break;
+        }
+    }
+
+    int skippedQuest = 0;
     g_queue.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
         const auto& it = items[i];
         if (!it.sellable || it.pos <= 0 || it.itemId <= 0) continue;
         if (g_skip.count(it.itemId)) continue;
         if (ShouldKeep(it, bagBit)) continue;
+        if (sellSnapOk && onSellList.find(it.itemId) == onSellList.end()) {
+            ++skippedQuest;
+            ++g_status.kept;
+            const char* offline = OfflineName(it.itemId);
+            runtime::LogI("Sellbag", "跳过(任务/店不可卖) id=%d name=%s", it.itemId,
+                          it.name[0] ? it.name : offline);
+            continue;
+        }
 
         QueueItem q{};
         q.pos = it.pos;
@@ -295,8 +337,8 @@ bool BuildQueueForCurrentBag() {
         strncpy_s(q.name, it.name, _TRUNCATE);
         g_queue.push_back(q);
     }
-    runtime::LogI("Sellbag", "队列生成 %s: candidates=%zu scanned=%d",
-                  g_curEquipBag ? "装备" : "其他", g_queue.size(), n);
+    runtime::LogI("Sellbag", "队列生成 %s: candidates=%zu scanned=%d skipQuest=%d",
+                  g_curEquipBag ? "装备" : "其他", g_queue.size(), n, skippedQuest);
     return true;
 }
 
@@ -523,6 +565,14 @@ void TickSelling(DWORD now) {
                 return;
             }
             runtime::LogW("Sellbag", "列表未就绪耗尽 id=%d pos=%d", q.itemId, q.pos);
+            // 投影始终无此项（任务道具常见）：记保留跳过，不抬失败计数
+            ++g_queueIndex;
+            ++g_status.kept;
+            g_skip[q.itemId] = 1;
+            g_listStaleRetries = 0;
+            runtime::LogI("Sellbag", "跳过(任务/店不可卖) id=%d pos=%d (LIST_STALE 耗尽)", q.itemId,
+                          q.pos);
+            return;
         }
         ++g_queueIndex;
         ++g_status.failed;
@@ -558,7 +608,8 @@ DWORD WINAPI WorkerProc(LPVOID) {
     runtime::LogI("Sellbag", "worker start");
     while (!gStop.load()) {
         Tick(GetTickCount());
-        Sleep(50);
+        // 卖出中更勤扫：ConfirmPending / SHOP_BUSY 边沿别多睡半拍。
+        Sleep(g_state == State::Selling ? 25 : 50);
     }
     runtime::LogI("Sellbag", "worker stop");
     return 0;

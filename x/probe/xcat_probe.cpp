@@ -32,7 +32,6 @@
 #include "../features/ports/key_macro_bin.h"
 #include "../features/auto_lie/auto_lie.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
-#include "../features/pointblank_shoot/pointblank_shoot.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/ga_text_probe/ga_text_probe.h"
 #include "../features/galaxy_token_probe/galaxy_token_probe.h"
@@ -44,6 +43,7 @@
 #include "../features/fly/fly.h"
 #include "../features/timed_keys/timed_keys.h"
 #include "../features/titlebar/titlebar.h"
+#include "../features/titlebar/titlebar_game.h"
 #include "../features/titlebar/titlebar_win.h"
 #include "../features/travel/travel.h"
 #include "../features/worldmap_marker_travel/worldmap_marker_travel.h"
@@ -137,8 +137,6 @@ void StopAllFeatureWorkers() {
     x::features::channel_hop::StopWorker();
     x::features::ga_text_probe::StopWorker();
     x::features::drop_alert_bypass::StopWorker();
-    x::features::pointblank_shoot::StopWorker();
-    x::features::pointblank_shoot::Shutdown();
     x::features::auction_town_bypass::StopWorker();
     x::features::auto_lie::StopWorker();
     xcat::sound::CancelPlayback();
@@ -307,6 +305,8 @@ bool StartLoginPathWorkers() {
     XCAT_BOOT_STEP(x::features::ccu::Init());
     XCAT_BOOT_STEP(x::features::ccu::StartWorker());
     XCAT_BOOT_STEP(x::ipc::PayloadStatus_Start());
+    // BIN 11:56 LOADING：Titlebar worker BindApis→FindClass(ItemData*) → GC Fatal。
+    XCAT_BOOT_STEP(x::features::titlebar::game::WarmForLoginWorkers());
     XCAT_BOOT_STEP(x::features::titlebar::Init());
     XCAT_BOOT_STEP(x::features::titlebar::StartWorker());
 
@@ -355,22 +355,23 @@ bool StartPlayPathWorkers() {
     if (AbortRequested()) return false;
     const bool stagger = !EnvPlayBootStaggerOff();
     x::runtime::LogI("Bootstrap",
-                     "play-ready — start PLAY workers %s (settle → cold init → survival)",
+                     "play-ready — start PLAY workers %s (invuln first → settle → cold init → rest)",
                      stagger ? "staggered" : "sync(XCAT_PLAY_BOOT_STAGGER=0)");
 
-    // 切图刚落地：先等泵空，再 FindClass，再开 survival。
+    // 保命优先：无敌先于 settle/冷绑。落地空窗等 cold init 会挨打（用户反馈首次启动）。
+    // Invuln MyUser 急钉不依赖 FindClass 冷绑。
+    XCAT_PLAY_BOOT_STEP(x::features::invuln::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::invuln::StartWorker());
+
+    // 切图刚落地：再等泵空，FindClass，开其余 survival。
     if (stagger) {
         if (!WaitPlayBootSettleIdle()) return false;
     }
     if (!StartPostSettleColdInits()) return false;
 
-    // 1) 保命：无敌 → 掉落报警 → 药/键/Buff 线程 → 攻速
-    XCAT_PLAY_BOOT_STEP(x::features::invuln::Init());
-    XCAT_PLAY_BOOT_STEP(x::features::invuln::StartWorker());
+    // 1) 其余保命：掉落报警 → 药/键/Buff 线程 → 攻速
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::Init());
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
-    XCAT_PLAY_BOOT_STEP(x::features::pointblank_shoot::Init());
-    XCAT_PLAY_BOOT_STEP(x::features::pointblank_shoot::StartWorker());
     XCAT_PLAY_BOOT_BATCH("survival-skills");
     XCAT_PLAY_BOOT_STEP(x::features::autopot::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::timed_keys::StartWorker());
@@ -581,8 +582,8 @@ DWORD WINAPI BootstrapThread(LPVOID) {
     // 先于任何 feature 起看门狗：卡死可能发生在任意阶段，而它自己会等主泵
     // 真正 tick 过之后才开始判死，不会误伤冷启动。
     x::runtime::hang_autopsy::Start();
-    // 同理要赶在 feature 之前：崩溃上传会在主线程上同步走 WinINet，网络不通时能把
-    // 客户端冻死（2026-08-09 04:45 实测）。这里只给它套超时，不禁用上报本身。
+    // 同理可赶在 feature 之前：崩溃上传会在主线程上同步走 WinINet，网络不通时能把
+    // 客户端冻死（2026-08-09 04:45 实测）。默认关；XCAT_CRASH_UPLOAD_GUARD=1 才套 IAT 超时。
     x::features::crash_upload_guard::Start();
     // 也要抢在所有 feature 之前挂上：元数据锁泄漏的源头是 il2cpp 内部的访问违例被
     // __except 吞掉，只有首次异常阶段能看见它。

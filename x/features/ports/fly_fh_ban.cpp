@@ -7,7 +7,8 @@
 //   VecCtrl_WorkUpdateActive @ RVA 0x11AD0C0
 //   有台：call [klass+0x208]  CollisionDetect     (r9=0)
 //   无台：call [klass+0x218]  CollisionDetectFloat (r9=1)
-// 安装：改 klass 上对应 methodPtr（VirtualProtect）；可选灭 MemoryCrc.RpmScan。
+// 安装：改 klass 上对应 methodPtr（VirtualProtect）。
+// MemoryCrc.RpmScan 灭火默认关（禁台只改虚表，非 GA .text）；应急：XCAT_FH_BAN_CRC=1。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -42,10 +43,15 @@ constexpr size_t kFbVcLadderOrRope = 0x40;
 constexpr size_t kKlassOffCdMethodPtr = 0x208;
 constexpr size_t kKlassOffCdfMethodPtr = 0x218;
 
-// grap-core MemoryCrc.RpmScan — 与 ga_text_probe 同 RVA；禁台属产品 .text/虚表改写，默认灭火。
+// grap-core MemoryCrc.RpmScan — 与 ga_text_probe 同 RVA。默认不碰；仅 XCAT_FH_BAN_CRC=1 时 early-ret。
 constexpr uint32_t kRvaMemoryCrcRpmScan = 0x102D610;
 constexpr uint8_t kRpmScanPrologueExpect[] = {0x41, 0x57, 0x41, 0x56};
 constexpr uint8_t kEarlyRet[] = {0x33, 0xC0, 0xC3};  // xor eax,eax ; ret
+
+bool EnvCrcExtinguishOn() {
+    char buf[16]{};
+    return GetEnvironmentVariableA("XCAT_FH_BAN_CRC", buf, sizeof(buf)) > 0 && buf[0] == '1';
+}
 
 // (this, a2, a3, flag) → bool；MI 由调用方放栈，不进寄存器。
 using FnDetect = uint8_t(__fastcall*)(void* self, void* a2, void* a3, uint8_t flag);
@@ -246,7 +252,11 @@ void InstallJobFn(void* p) {
         strncpy_s(job->why, "null_mp", _TRUNCATE);
         return;
     }
-    ExtinguishMemoryCrcIfPresent();
+    if (EnvCrcExtinguishOn()) {
+        ExtinguishMemoryCrcIfPresent();
+    } else {
+        x::runtime::LogI("FlyFhBan", "skip MemoryCrc extinguish (set XCAT_FH_BAN_CRC=1 to enable)");
+    }
     if (!PatchSlot(slotCd, reinterpret_cast<void*>(&HookCollisionDetect), &gOrigCd)) {
         strncpy_s(job->why, "patch_cd", _TRUNCATE);
         return;

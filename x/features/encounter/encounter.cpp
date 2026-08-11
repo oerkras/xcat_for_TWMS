@@ -27,11 +27,11 @@ namespace {
 
 constexpr DWORD kTickMs = 200;
 constexpr DWORD kCheckIntervalMs = 1000;
-constexpr DWORD kConfirmMs = 4000;
+constexpr DWORD kConfirmMs = 1000;  // 再提速：2s→1s（采样约 1s，约一拍确认）
 constexpr DWORD kFirstLandGraceMs = 5000;
 // BIN：再 hop 宽限须 ≥ channel_hop 成功冷却，否则宽限一过就狂 RequestHop.
 // 停手恢复不绑这条：Hopping 在 !HasPending 后即可采样 Resume（出刀另受 hop 4s 静默）.
-constexpr DWORD kPostHopGraceMs = 22000;  // 对齐成功冷却 20s + 余量（仅挡再换频）
+constexpr DWORD kPostHopGraceMs = 0;  // 用户：遇人再 hop 不绑宽限（冷却已关；仅 HasPending 挡并发）
 constexpr DWORD kHopDeferLogMs = 4000;
 constexpr DWORD kGmAlarmPulseMs = 3000;  // 对齐 auto_lie：威胁期间每 3s 强制 Alarm
 constexpr int kHideSuspectConfirmSamples = 2;  // 连续 N 拍才认隐身，压进图/加载假阳
@@ -141,32 +141,53 @@ void StopGmAlarm() {
 
 // 无刷怪图 ≈ 标题栏「怪 N/M」均为 0（LifeList M=0 且活怪 n=0）。
 // 废都狩猎图图号也常带 000 段，旧图号启发式会误豁免；改跟 mob 缓存（与 titlebar 同源）。
-// · 缓存图号≠当前图 → 不豁免
+// · 缓存图号≠当前图 → **现读** LifeList（勿直接 false：BIN 10:55 回城后旧缓存导致主城误 Pause+落台）
 // · M 未知 / 缓存无 mapId → 现读 CountMapMobLifeSlots（禁用陈旧 M=0）
 // · 现读成功且 M==0 → 豁免（不依赖可能属旧图的 n）
-bool IsTownLikeNoMobMap(int mapId, ports::mob::Snapshot* outSnap = nullptr) {
-    ports::mob::Snapshot snap{};
-    if (!ports::mob::GetCached(snap)) return false;
-    if (outSnap) *outSnap = snap;
+// · outUnknown：换图窗现读也失败 → 调用方进图宽限内勿普通 Pause（GM 升级路径不走这里）
+bool IsTownLikeNoMobMap(int mapId, ports::mob::Snapshot* outSnap = nullptr,
+                        bool* outUnknown = nullptr) {
+    if (outUnknown) *outUnknown = false;
 
-    const int n = snap.count;
-    int m = snap.spawnSlots;
-    const int cachedMap = snap.mapId;
-
-    if (cachedMap > 0 && mapId > 0 && cachedMap != mapId) return false;
-
-    const bool needLive = (m < 0) || (cachedMap == 0 && mapId > 0);
-    if (needLive) {
-        const int liveM = ports::mob::CountMapMobLifeSlots();
-        if (liveM < 0) return false;
-        m = liveM;
+    auto applyLive = [&](int liveM) {
         if (outSnap) {
             outSnap->spawnSlots = liveM;
             outSnap->lifeMob = liveM;
             if (mapId > 0) outSnap->mapId = mapId;
         }
+    };
+
+    ports::mob::Snapshot snap{};
+    const bool haveCache = ports::mob::GetCached(snap);
+    if (haveCache && outSnap) *outSnap = snap;
+
+    if (!haveCache) {
+        const int liveM = ports::mob::CountMapMobLifeSlots();
+        if (liveM < 0) {
+            if (outUnknown) *outUnknown = true;
+            return false;
+        }
+        applyLive(liveM);
+        return liveM == 0;
+    }
+
+    const int n = snap.count;
+    int m = snap.spawnSlots;
+    const int cachedMap = snap.mapId;
+    const bool cacheStale = cachedMap > 0 && mapId > 0 && cachedMap != mapId;
+
+    // 换图瞬间旧 n/M 不可信：只信当前图 LifeList。
+    const bool needLive =
+        cacheStale || (m < 0) || (cachedMap == 0 && mapId > 0);
+    if (needLive) {
+        const int liveM = ports::mob::CountMapMobLifeSlots();
+        if (liveM < 0) {
+            if (outUnknown) *outUnknown = true;
+            return false;
+        }
+        applyLive(liveM);
         // 现读 M：只信 LifeList；狩猎图 M>0 不会误豁免
-        return m == 0;
+        return liveM == 0;
     }
 
     return n <= 0 && m == 0;
@@ -296,6 +317,8 @@ void RequestHop(const ports::user_pool::RemoteThreatSample& t, bool threat) {
     }
     ++gHopSeq;
     if (gHopSeq < kHopSeqBase) gHopSeq = kHopSeqBase + 1;
+    // 离开当前挤频前软拉黑，下一次选池优先避开（本图 TTL）
+    channel_hop::NoteCrowdedChannel();
     channel_hop::RequestManualRejoin(gHopSeq);
     char body[256]{};
     if (threat) {
@@ -325,6 +348,7 @@ void OnMapChange(int mapId, DWORD now) {
     gHideSuspectStreak = 0;
     if (GetStateLocal() == State::Confirming) SetState(State::Watching);
     Log("map change id=%d grace=%ums", mapId, (unsigned)kFirstLandGraceMs);
+    channel_hop::OnMapChanged(mapId);
     // 打怪侧：清锁 + 武装宽限，避免换图后 F5 立刻远跳脱同步。
     simple_combat::ResetForMapChange();
 }
@@ -437,7 +461,7 @@ void Tick(DWORD now) {
             if (gGmAlarmActive) PulseGmAlarm(now, /*force=*/false);
             return;
         }
-        // 与 channel_hop 冷却对齐（成功 20s / 失败 3s）；失败也至少吃满 PostHopGrace.
+        // 与 channel_hop 冷却对齐（成功/失败均已关冷却）；宽限 kPostHopGraceMs=0
         // 宽限只挡「再 RequestHop」，不挡采样/Resume：落地后无人即可恢复打怪
         // （真正出刀还受 channel_hop 结算后 4s 静默约束）.
         const DWORD cd = channel_hop::CooldownRemainingMs();
@@ -506,7 +530,8 @@ void Tick(DWORD now) {
     if (gGmAlarmActive || gLastGmAlarmAt != 0) StopGmAlarm();
 
     ports::mob::Snapshot mobSnap{};
-    if (IsTownLikeNoMobMap(mapId, &mobSnap)) {
+    bool townUnknown = false;
+    if (IsTownLikeNoMobMap(mapId, &mobSnap, &townUnknown)) {
         // 普通遇人：无刷怪图豁免 = 不维持 pause（升级路径已 early return，不会走到这里）。
         // 关 GM 升级 / 威胁消失后若仍钉着硬闸，必须在此松开。
         if (other > 0 && gNotifyOther != other) {
@@ -526,11 +551,26 @@ void Tick(DWORD now) {
 
     const bool inLandGrace = (now - gLandedAt) < kFirstLandGraceMs;
 
+    // 换图后缓存未对齐且 LifeList 暂不可读：宽限内普通遇人先别 Pause/落台。
+    // GM 升级已在上方 early return，不受影响；宽限后仍 unknown 则走原逻辑（偏狩猎图不停手漏）。
+    if (townUnknown && inLandGrace) {
+        static DWORD sTownUnkLog = 0;
+        if (!sTownUnkLog || now - sTownUnkLog >= 2000) {
+            sTownUnkLog = now;
+            Log("town-like unknown map=%d other=%d cachedMap=%d (defer pause in land grace)",
+                mapId, other, mobSnap.mapId);
+        }
+        SetState(State::Watching);
+        gConfirmSince = 0;
+        return;
+    }
+
     if (other <= 0) {
         gConfirmSince = 0;
         gNotifyOther = -1;
-        // 换频宽限内：连续无人确认后再 Resume，避免落地 UserPool 短暂空表误恢复。
-        if (now < gHopGraceUntil) {
+        // 换频宽限内且仍停手：连续无人确认后再 Resume，避免落地 UserPool 短暂空表误恢复。
+        // 已 Resume 则不再走 streak（避免 grace 内刷 1/2 日志）。
+        if (now < gHopGraceUntil && gPaused) {
             ++gPostHopClearStreak;
             if (gPostHopClearStreak < kPostHopClearSamples) {
                 Log("post-hop clear confirm %d/%d (hold pause)", gPostHopClearStreak,

@@ -1001,13 +1001,8 @@ bool TryFillLive(void* mob, int32_t expectId, MobLite& out) {
     MobLite lite{};
     if (!FillLite(mob, lite)) return false;
     if (expectId != 0 && lite.id != expectId) return false;
-
-    AbsHp abs{};
-    if (ResolveAbsHp(lite.id, lite.templateId, lite.hpPct, abs, /*refreshUi=*/false)) {
-        lite.absHp = abs.cur;
-        lite.absMaxHp = abs.max;
-        lite.absSrc = abs.src;
-    }
+    // 热路径不 ResolveAbsHp（%×表 / 缓存）：出刀只靠 hpPct/lastHitted。
+    // 脆皮早切需要 maxHP 时由 simple_combat 锁怪时按需查表。
     out = lite;
     return true;
 }

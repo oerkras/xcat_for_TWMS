@@ -95,6 +95,13 @@ bool WmFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
 
 void EnsureWmFieldOff() {
     if (gWmFieldTried) return;
+    if (!x::runtime::main_thread::IsOnPumpThread() &&
+        x::runtime::main_thread::IsInstalled()) {
+        x::runtime::main_thread::InvokeAndWait(
+            [](void*) { EnsureWmFieldOff(); }, nullptr, 2500,
+            x::runtime::main_thread::JobPrio::High);
+        return;
+    }
     if (!il2::Ensure()) return;
     gWmFieldTried = true;
     void* wm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();

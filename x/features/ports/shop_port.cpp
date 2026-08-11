@@ -2145,7 +2145,20 @@ void BuyJobOnMain(void* user) {
             x::runtime::LogW("Shop", "buy LIST_MISS id=%d buyListN=%d", job->itemId, listN);
             return;
         }
-        const int qty = job->count > 0 ? job->count : 1;
+        int qty = job->count > 0 ? job->count : 1;
+        // 货架 Item.MaxSlotCount：箭矢等堆叠上限；一次买超上限会被服端拒而客户端仍 FIRED
+        {
+            void* list = ReadPtr(gShopDlg, listOff);
+            void* row = (listN > 0 && buyIdx >= 0 && buyIdx < listN) ? ListAt(list, buyIdx) : nullptr;
+            if (LooksLikeHeapPtr(row)) {
+                const int maxSlot = ReadI32(row, kOffShopItemMaxSlot);
+                if (maxSlot > 0 && qty > maxSlot) {
+                    x::runtime::LogI("Shop", "buy clamp id=%d cnt %d→%d (MaxSlot)", job->itemId, qty,
+                                     maxSlot);
+                    qty = maxSlot;
+                }
+            }
+        }
         if (price > 0) {
             const int64_t meso = ReadMesoNow();
             if (meso >= 0 && (int64_t)price * (int64_t)qty > meso) {
@@ -2157,6 +2170,7 @@ void BuyJobOnMain(void* user) {
         WriteI32(gShopDlg, kOffLastBuyIndex, buyIdx);
         sendPkt(gShopDlg, qty, gMiSendBuyPacket);
         job->ok = true;
+        job->count = qty;  // 回写实发数量，供调用方扣减 need
         snprintf(job->err, sizeof(job->err), "FIRED via=ui");
         x::runtime::LogI("Shop",
                          "buy FIRED via=ui id=%d idx=%d cnt=%d price=%d listOff=0x%zX listN=%d",
@@ -2349,6 +2363,84 @@ bool ScanBag(bool equipBag, BagItem* items, int maxItems, int& outCount) {
     return job.ok;
 }
 
+struct SellSnapJob {
+    int invType = 0;
+    int* outIds = nullptr;
+    int maxOut = 0;
+    int count = 0;
+    int listN = 0;
+    bool tabSwitched = false;
+    bool ok = false;
+};
+
+void SellSnapJobOnMain(void* user) {
+    auto* job = reinterpret_cast<SellSnapJob*>(user);
+    if (!job) return;
+    job->ok = false;
+    job->count = 0;
+    job->listN = 0;
+    job->tabSwitched = false;
+    __try {
+        gLastRebindMs = 0;
+        if (!Rebind(GetTickCount())) return;
+        ReadyJob ready{};
+        ReadyJobOnMain(&ready);
+        if (!ready.ready || !LooksLikeHeapPtr(gShopDlg)) return;
+
+        bool tabSwitched = false;
+        (void)EnsureShopSellInvTab(gShopDlg, job->invType, &tabSwitched);
+        job->tabSwitched = tabSwitched;
+        auto* cmpSell = reinterpret_cast<FnCmpSellItem>(
+            gMiCmpSellItem && gMiCmpSellItem->methodPointer ? gMiCmpSellItem->methodPointer
+                                                           : AtRva<void*>(kRvaCmpSellItem));
+        if (cmpSell) {
+            __try {
+                cmpSell(gShopDlg, gMiCmpSellItem);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+
+        void* list = ReadPtr(gShopDlg, kOffSellItemList);
+        const int n = ListSize(list);
+        job->listN = n;
+        if (n < 0 || n > 512) {
+            job->ok = true;  // 空/异常投影也算快照成功（listN 如实）
+            return;
+        }
+        for (int i = 0; i < n; ++i) {
+            void* it = ListAt(list, i);
+            if (!LooksLikeHeapPtr(it)) continue;
+            const int id = ReadI32(it, kOffShopItemId);
+            if (id <= 0) continue;
+            if (job->outIds && job->count < job->maxOut) job->outIds[job->count] = id;
+            ++job->count;
+        }
+        job->ok = true;
+        if (tabSwitched) {
+            x::runtime::LogI("Shop", "sell snap inv=%d listN=%d ids=%d switched=1", job->invType,
+                             job->listN, job->count);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        job->ok = false;
+    }
+}
+
+bool SnapshotShopSellList(int invType, int* outItemIds, int maxOut, int& outCount, int& outListN,
+                          bool* outTabSwitched) {
+    outCount = 0;
+    outListN = 0;
+    if (outTabSwitched) *outTabSwitched = false;
+    SellSnapJob job{};
+    job.invType = invType;
+    job.outIds = outItemIds;
+    job.maxOut = maxOut > 0 ? maxOut : 0;
+    if (!x::runtime::managed_main::Call(&SellSnapJobOnMain, &job, kJobWaitMs)) return false;
+    outCount = job.count;
+    outListN = job.listN;
+    if (outTabSwitched) *outTabSwitched = job.tabSwitched;
+    return job.ok;
+}
+
 bool SellItem(int invType, int pos, int itemId, int count, std::string& outErr) {
     outErr.clear();
     SellJob job{};
@@ -2364,8 +2456,9 @@ bool SellItem(int invType, int pos, int itemId, int count, std::string& outErr) 
     return job.ok;
 }
 
-bool BuyItem(int itemId, int count, std::string& outErr) {
+bool BuyItem(int itemId, int count, std::string& outErr, int* outBought) {
     outErr.clear();
+    if (outBought) *outBought = 0;
     BuyJob job{};
     job.itemId = itemId;
     job.count = count;
@@ -2374,6 +2467,7 @@ bool BuyItem(int itemId, int count, std::string& outErr) {
         return false;
     }
     outErr = job.err;
+    if (outBought && job.ok) *outBought = job.count > 0 ? job.count : 0;
     return job.ok;
 }
 
@@ -2486,6 +2580,12 @@ bool MapEqualsLoose(const char* a, const char* b) {
     return _stricmp(a, b) == 0;
 }
 
+// 主城户外街图（…000）：卷落地点常找不到「後街」类 NPC（BIN 4bb7ea 吉姆）。
+// 加 >1hop 惩罚，让室内杂货/药店在 via=0 vs via=1 时胜出。
+bool LooksLikeTownOutdoorMap(int mapId) {
+    return mapId >= 100000000 && (mapId % 1000) == 0;
+}
+
 std::string CurrentMapForHops() {
     const int id = ports::travel::CurrentMapId();
     if (id > 0) {
@@ -2529,6 +2629,7 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
     const GrocerySeed* best = nullptr;
     int bestDirect = -1;
     int bestVia = -1;
+    int bestHops = -1;
 
     for (const auto& s : gSeeds) {
         if (excludeMap && excludeMap[0] && MapEqualsLoose(s.mapId, excludeMap)) continue;
@@ -2551,14 +2652,17 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
             hops = via;
         else
             hops = 9999;  // unreachable → last resort
-        // hops 优先；同 hops 偏好 potion（杂货更常直接开店 / 菜单更短）
-        const int score = hops * 10000 + ((s.tags & kTagPotion) ? 0 : 1000) +
+        // hops 优先；户外主城加罚（BIN 4bb7ea）；同 hops 偏好 potion
+        const int mapIdNum = atoi(s.mapId);
+        const int outdoorPen = LooksLikeTownOutdoorMap(mapIdNum) ? 15000 : 0;
+        const int score = hops * 10000 + outdoorPen + ((s.tags & kTagPotion) ? 0 : 1000) +
                           ((s.tags & kTagSell) ? 0 : 10);
         if (score < bestScore) {
             bestScore = score;
             best = &s;
             bestDirect = direct;
             bestVia = via;
+            bestHops = hops;
         }
     }
     if (!best) return false;
@@ -2566,12 +2670,12 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
     outShopId = best->npcId;  // Classic 无独立 shopId；填 npc 便于日志
     outMapName = best->mapId;
     outMapId = atoi(best->mapId);
-    const int hopsLog = bestScore / 10000;
-    x::runtime::LogI("Shop",
-                     "ResolveShop nearest npc=%s map=%s hops=%d direct=%d via=%s/%d potion=%d",
-                     best->npcId, best->mapId, hopsLog == 9999 ? -1 : hopsLog, bestDirect,
-                     allowScrollVia ? scrollTown : "-", bestVia,
-                     (best->tags & kTagPotion) ? 1 : 0);
+    x::runtime::LogI(
+        "Shop",
+        "ResolveShop nearest npc=%s map=%s hops=%d direct=%d via=%s/%d potion=%d outdoor=%d",
+        best->npcId, best->mapId, bestHops == 9999 ? -1 : bestHops, bestDirect,
+        allowScrollVia ? scrollTown : "-", bestVia, (best->tags & kTagPotion) ? 1 : 0,
+        LooksLikeTownOutdoorMap(outMapId) ? 1 : 0);
     return true;
 }
 

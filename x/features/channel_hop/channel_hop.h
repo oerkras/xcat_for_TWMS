@@ -33,6 +33,15 @@ const char* GetStateName();
 bool HasPending();
 // 成功/失败冷却剩余 ms；0=可立刻再 hop（遇人策略对齐用）
 DWORD CooldownRemainingMs();
+// 上次成功换频 / 图内读到的频道（UI 口径 ch.N，1-based）；未知返回 0。
+// soft_login RequestRestart 前同步 sticky，避免遇人换频后仍粘进图旧频。
+int LastKnownChannel1Based();
+
+// 遇人策略即将换频：把当前频记入「本图短期软拉黑」（落地仍有人 → 优先别再抽回）。
+// 手动 F10 不调用；TTL 内重复标记会刷新计时。
+void NoteCrowdedChannel();
+// 换图清空软拉黑（mapId<=0 仅清；同图 no-op）。
+void OnMapChanged(int mapId);
 
 void Tick(DWORD now);
 

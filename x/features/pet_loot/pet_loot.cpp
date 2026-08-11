@@ -211,7 +211,7 @@ void Tick(DWORD now) {
         return;
     }
 
-    // 挂机时分复用：不出刀就吸；仅 Aim/Firing/Recover 让路（含拟人走路 MoveTo）。
+    // 挂机时分复用：不出刀就吸；仅 Aim/Firing/Recover 让路（含拟人 MoveTo）。
     if (!simple_combat::IsLootPulseActive()) {
         static DWORD sFireLog = 0;
         if (!sFireLog || now - sFireLog > 2000) {
@@ -429,14 +429,16 @@ void Tick(DWORD now) {
         s_sentSameAcc = s_sendTouchMax = s_sentItemWhileMoney = 0;
     }
 
-    // 大量掉落被服端持续拒收：宠吸已跳过它们继续吸别的，但用户看到的是「吸不动」，给一条人话提示
+    // 不读背包格数。stallHeld 大只说明「送包后池未降」被登记进软件退避表——
+    // 满栏只是常见原因之一；距离/归属/服端异步/同拍误登记也会堆 stall（0b66c7 用户袋空仍刷）。
+    // 无 sentSame 信号时不提示，避免挂机饿吸/wait_land 堆表时吓人。
     static DWORD s_lastInvHint = 0;
-    if (vr.stallHeld >= kInvFullHintStall &&
+    if (vr.stallHeld >= kInvFullHintStall && s_sentSameAcc > 0 &&
         (!s_lastInvHint || now - s_lastInvHint >= kInvFullHintMs)) {
         s_lastInvHint = now;
-        LogLine("mode=petmap hint=inv_full_suspect stall=%d near=%d money=%d item=%d "
-                "(服端持续拒收，多为背包某栏已满；已跳过塞不进的道具继续吸其余)",
-                vr.stallHeld, vr.nearCount, vr.nearMoney, vr.nearItem);
+        LogLine("mode=petmap hint=reject_stall_suspect stall=%d near=%d money=%d item=%d "
+                "sentSame=%d (未读背包；送包后池未降的退避堆积，满栏只是可能原因之一)",
+                vr.stallHeld, vr.nearCount, vr.nearMoney, vr.nearItem, s_sentSameAcc);
     }
     (void)ok;
 }

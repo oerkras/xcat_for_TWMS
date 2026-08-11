@@ -19,6 +19,8 @@ struct Vitals {
 };
 
 bool BindApis();
+// LOGIN workers 前泵上预热 ItemData* FindClass（BIN 11:56 Titlebar worker → GC Fatal）。
+void WarmForLoginWorkers();
 bool TryResolveLocalUser();
 bool TryResolveItemDataManager();
 void* LocalCharacterStat();  // → x::ui::player（WM→CS）

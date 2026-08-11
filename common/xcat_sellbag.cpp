@@ -21,16 +21,12 @@ bool EnsureStateDir(const char* binDir) {
 }
 
 const char* TargetMaskToIni(uint32_t mask) {
-    if ((mask & kSellbagBagAll) == kSellbagBagAll) return "all";
-    if (mask & kSellbagBagEquip) return "equip";
-    if (mask & kSellbagBagEtc) return "etc";
-    return "all";
+    (void)mask;
+    return "all";  // 不卖名单全栏共用；保留符号以免旧调用断链
 }
 
 uint32_t TargetMaskFromIni(const char* s) {
-    if (!s || !s[0]) return kSellbagBagAll;
-    if (_stricmp(s, "equip") == 0 || _stricmp(s, "装备") == 0) return kSellbagBagEquip;
-    if (_stricmp(s, "etc") == 0 || _stricmp(s, "其他") == 0) return kSellbagBagEtc;
+    (void)s;
     return kSellbagBagAll;
 }
 
@@ -68,8 +64,11 @@ void SellbagSetDefaults(SellbagConfig& out) {
     out = {};
     out.magic = kSellbagMagic;
     out.version = kSellbagVersion;
-    // 保留关键词默认留空，由用户自行配置。
-    out.keepRuleCount = 0;
+    // 默认保留「礦」（矿石等）；用户可清空或改关键词。
+    out.keepRuleCount = 1;
+    out.keepRules[0].enabled = 1;
+    out.keepRules[0].targetMask = kSellbagBagAll;
+    strncpy_s(out.keepRules[0].nameKey, kSellbagDefaultKeepNameKey, _TRUNCATE);
 }
 
 std::string SellbagRelPath() { return "state\\sellbag.bin"; }
@@ -105,9 +104,8 @@ bool ReadSellbagKeepRulesIni(const char* binDir, SellbagConfig& out, uint64_t* o
         std::string key = std::string(prefix) + "enabled";
         if (IniGetBool(ini, "sellbag", key.c_str(), enabled)) r.enabled = enabled ? 1u : 0u;
 
-        std::string target;
-        key = std::string(prefix) + "target";
-        if (IniGetString(ini, "sellbag", key.c_str(), target)) r.targetMask = TargetMaskFromIni(target.c_str());
+        // 产品：不卖名单全栏共用（装备+其他）。可读历史 keep.N.target，写入侧仍落 all。
+        r.targetMask = kSellbagBagAll;
 
         key = std::string(prefix) + "name";
         std::string name;
@@ -151,8 +149,8 @@ bool WriteSellbagKeepRulesIni(const char* binDir, const SellbagConfig& cfg, uint
             snprintf(prefix, sizeof(prefix), "keep.%u.", i + 1);
 
             IniSetBool(ini, "sellbag", (std::string(prefix) + "enabled").c_str(), r.enabled != 0);
-            IniSetString(ini, "sellbag", (std::string(prefix) + "target").c_str(),
-                         TargetMaskToIni(r.targetMask));
+            // 不卖名单不按栏拆分；强制 all，清掉历史 equip/etc。
+            IniSetString(ini, "sellbag", (std::string(prefix) + "target").c_str(), "all");
             IniSetString(ini, "sellbag", (std::string(prefix) + "name").c_str(), r.nameKey);
         }
     });
@@ -187,6 +185,11 @@ bool ReadSellbag(const char* binDir, SellbagConfig& out) {
         return false;
     }
 
+    // 读盘兜底：历史 keep.N.target=equip/etc 一律抬成全栏共用。
+    for (uint32_t i = 0; i < out.keepRuleCount && i < static_cast<uint32_t>(kSellbagMaxKeepRules);
+         ++i) {
+        out.keepRules[i].targetMask = kSellbagBagAll;
+    }
     return true;
 }
 
@@ -199,6 +202,9 @@ bool WriteSellbag(const char* binDir, const SellbagConfig& cfg) {
     if (normalized.keepRuleCount > static_cast<uint32_t>(kSellbagMaxKeepRules))
         normalized.keepRuleCount = static_cast<uint32_t>(kSellbagMaxKeepRules);
     normalized.manualMask &= kSellbagBagAll;
+    // 不卖名单：全栏共用，忽略规则上的分栏掩码。
+    for (uint32_t i = 0; i < normalized.keepRuleCount; ++i)
+        normalized.keepRules[i].targetMask = kSellbagBagAll;
 
     // 同毫秒连续写会让 payload 因 writeTickMs 未变而忽略配置；强制单调递增。
     static uint64_t s_lastTick = 0;

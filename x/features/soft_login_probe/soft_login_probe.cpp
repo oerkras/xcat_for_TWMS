@@ -7,6 +7,7 @@
 #include "../auto_enter/auto_enter.h"
 #include "../galaxy_token_probe/galaxy_token_probe.h"
 #include "../notify/notify.h"
+#include "../ports/foothold_port.h"
 #include "../ports/world_port.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -43,41 +44,73 @@ constexpr char kHashSceneLoginGet[] =
 constexpr char kHashConnectLoginStart[] =
     "df9624adb7823429c61a527eb2015ae2370ec841f8dafa9ec07c66edd732c9c";
 
+// Session.Disconnect / CloseSession（与 kick_sniff 同口径）。
+// BIN 01:53：Disconnect 只把 Connected→Connecting→Connected，WorldItems 仍空（书页大厅）。
+// 空大厅改 CloseSession 硬拆，再等 Disconnected 后才 ConnectLogin。
+constexpr uint32_t kRvaNmDisconnect = 0x1CC5F20;
+constexpr uint32_t kRvaNmCloseSession = 0x1CD50C0;
+constexpr char kHashNmDisconnect[] =
+    "b1d93da68c582074d5f57c0f056b4c22c5eea30ac0d09059a55ed7d41021109";
+constexpr char kHashNmCloseSession[] =
+    "c793578722e29984e2da932223b4d3f27403040237461ca3438083f0496b24d";
+
 // settle 用墙钟截止（见 Worker）：Call 耗时曾未计入 waited，实机 1500ms 常被拉成 2.5–3s+。
 // Notice 多在断线瞬间弹出；Connecting 早退即可，不必死等满窗。
 constexpr DWORD kSettleMs = 600;
 constexpr DWORD kPollMs = 400;
-constexpr int kPollRounds = 25;  // ~10s to Connected（invoke 已成功后）
+constexpr int kPollRounds = 40;  // ~16s；空大厅会提前在 kEmptyHallPollRounds 拆线
+// BIN 01:53：Connected items=0 空等满 poll≈16s 体感卡死；满 8 轮(~3.2s) 即 CloseSession。
+constexpr int kEmptyHallPollRounds = 8;
+constexpr DWORD kWaitDiscAfterCloseMs = 4000;
+constexpr int kEmptyHallSoftCycleMax = 3;  // 连续空大厅满额放 hold → 守护干净重拉
 constexpr DWORD kReenterPollMs = 350;
 // 墙钟总预算（每轮含 dismiss/SamplePlayReady Call，旧「130×350≈45s」严重低估；dcaf08 卡死约 114s）。
-// 成功样本 armed→playReady 约 10–37s；Done→playReady 可达 ~32s。
-constexpr DWORD kReenterBudgetMs = 90000;
+// 成功样本 armed→playReady 约 10–37s；Done→playReady 可达 ~32s；弱网再给裕量。
+constexpr DWORD kReenterBudgetMs = 150000;
 // Done(=left char)→play-ready 成功样本常 4–32s；满窗再 RequestRestart 并重置墙钟预算。
 // 仅当泵采样确认仍 !inMap 时再启——已回图却因泵堵误判 !playReady 时再启会冻死主线程（E216）。
-constexpr DWORD kDoneNoPlayRestartMs = 40000;
-constexpr DWORD kDoneNoPlayFailMs = 40000;
+constexpr DWORD kDoneNoPlayRestartMs = 50000;
+constexpr DWORD kDoneNoPlayFailMs = 50000;
 // 单次 soft cycle 内 Done+!playReady 最多再拉几次选区（弱网多给机会，满额才 fail）。
-constexpr int kDoneNoPlayMaxRestarts = 3;
-// 同一断线边沿：ConnectLogin→重进 整轮可重试几次；仍失败才放 hold 交守护。
-constexpr int kSoftCycleMax = 5;
-constexpr DWORD kSoftCycleRetryGapMs = 800;
+constexpr int kDoneNoPlayMaxRestarts = 5;
+// 同一断线边沿：ConnectLogin→重进 整轮可重试；多给机会再放 hold 交守护（B9B 体感乱杀）。
+constexpr int kSoftCycleMax = 10;
+constexpr DWORD kSoftCycleRetryGapMs = 1200;
 // 重进等待：playReady 采样宜短；泵堵时 1500ms 等满只会叠 job timeout（E216）。
 constexpr DWORD kPlayReadySampleMs = 400;
-// 泵心跳：与 MainPump::IsPumpTicking 默认 1500ms 对齐。BIN 02:23：软重连在 pump idle
-// 上仍每 350ms SoftPumpCall → job timeout 螺旋；先等活再动，死透则交守护。
+// 已 playReady+inMap 但 curFh=0（悬空/掉落，ec1fe7 heli 半空软重进）：再等挂台再 RESULT。
+// 覆盖同图热重载数轮（约 3s/次）；满窗降级成功，勿再 ConnectLogin soft cycle。
+constexpr DWORD kStandReadyWaitMs = 15000;
+// 泵心跳：与 MainPump::IsPumpTicking 默认 1500ms 对齐。断线 InterStage 常短暂 idle
+// （B9B 08:32：~2.5s idle 后游戏自连）；先等活再动，勿立刻放 hold 交守护。
 constexpr DWORD kPumpAliveMaxAgeMs = 1500;
-constexpr DWORD kPumpWaitBeforeSoftMs = 8000;
-constexpr int kReenterPumpFailMax = 16;       // 连续泵失败后 fail soft（约数秒～十余秒，视退避）
+// SoftPumpCall 新鲜度：对齐泵 quiesce idle 闸（kTransitIdleFailMs=400）略严。
+// 仍用 1500 判「可 Call」会在 Bootstrap 半死时空打 High Sample/Dismiss（B9B 9865c3）。
+constexpr DWORD kSoftPumpFreshMs = 300;
+constexpr DWORD kSoftSampleCallMs = 400;  // 对齐 kTransitInvokeCapMs；勿再等满 1500
+// 成功进图后玩法错峰：Finish 放 hold，但仍压 Combat/Invuln 急钉，避免 q=8 齐开（B9B）。
+// ce6797：quiet 一结束立刻 BAN ON + |v|~7k Impact → 再软断。
+// land quiet = 整段停刀/停旋翼；post_air_gate ≥ quiet，防 quiet 被提前清掉后仍空中开打。
+// BIN 01:17：arm=3s/air=4.5s → RESULT 后 ~4.7s 才首刀，体感静默偏长；无敌已 hold/quiet 急钉，压到 1.5s/2.5s。
+constexpr DWORD kSoftLandQuietMs = 1500;
+constexpr DWORD kSoftPostAirGateMs = 2500;
+// Connected 后等分区列表刷出再 RequestRestart（BIN 21:44：壳指针先到、WorldItems=0）。
+// BIN 00:46：Connected 空列表卡书页大厅；12s×2 体感「没连世界」。缩短单次等待，空列表靠 soft cycle + ConnectLogin 刷新。
+constexpr DWORD kHallReadyWaitMs = 6000;
+constexpr DWORD kHallReadyPollMs = 200;
+// softFast 卡空 WorldItems：早于 150s 墙钟 soft cycle。
+constexpr DWORD kWorldItemsStarveMs = 10000;
+constexpr DWORD kPumpWaitBeforeSoftMs = 20000;   // soft cycle 开头等泵
+constexpr DWORD kPumpWaitConnectMs = 20000;      // connect-wait 判死前再等一轮
+constexpr int kReenterPumpFailMax = 48;          // 重进连续泵失败（退避睡眠，约半分钟级）
 constexpr DWORD kReenterPumpFailSleepMinMs = 500;
 constexpr DWORD kReenterPumpFailSleepMaxMs = 2500;
-// connect-wait：InterStage 卡死时泵已死，再 SoftPumpCall 只会拖住 hold（BIN 02:30：20s×Call fail）。
-constexpr int kConnectPumpFailMax = 8;
-// 大厅期偶发关窗即可；进图后每轮 FindAll dismiss = 主线程死螺旋（E216 13:01:56～41）。
-constexpr int kReenterHallDismissEvery = 6;  // ~2.1s @ 350ms，仅 !IsDone
+// connect-wait：连续 idle/Call 失败阈值；满额先 WaitPumpAlive，仍死才 soft cycle / 放 hold。
+constexpr int kConnectPumpFailMax = 40;  // ~18–25s @ 450ms；再等泵窗，勿早交守护
 // 进图后断线 SceneLogin 常晚于 settle 才重建；sl_null 时 hold 内重试，顺带吃游戏自连。
 constexpr DWORD kConnectWaitMs = 250;
-constexpr int kConnectWaitRounds = 80;  // ~20s 等 SL / Connecting / Connected
-constexpr int kConnectHardFailGrace = 3;  // 非 sl_null 硬错也先重试几轮再放弃
+constexpr int kConnectWaitRounds = 160;  // ~40s 等 SL / Connecting / Connected
+constexpr int kConnectHardFailGrace = 8;  // 非 sl_null 硬错也先多轮重试再放弃
 
 constexpr int kStateDisconnecting = 0;
 constexpr int kStateDisconnected = 1;
@@ -116,6 +149,15 @@ constexpr uint32_t kRvaCloseDialog = 0x778CC0;   // UIUtilDialog.CloseDialog
 constexpr uint32_t kRvaUiDialogClose = 0x117A290;  // UIDialog.Close（shop_port 同源）
 constexpr char kHashCloseDialog[] =
     "de9ac0fd03b2844bad25ca20166c27d327514761da7bc4b9dca3ba858666441";
+// UIUtilDialog.Notice — 直 call 入口 Abs trampoline（非 MI 换针；≥400 处 bypass methodPointer）
+// 默认关闭：代码保留待测稳后再开；现行 dismiss 只走 FindAll。
+constexpr bool kNoticeAbsEnabled = false;
+constexpr uint32_t kRvaNotice = 0x74ACD0;
+// 序言：push r15/r14/r12/rsi/rdi/rbp/rbx ; sub rsp,80h（17B，指令边界；IDA 运行时 dump）
+constexpr size_t kNoticeSteal = 17;
+constexpr uint8_t kNoticeSig[kNoticeSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x56, 0x57,
+                                              0x55, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00,
+                                              0x00};
 constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
 constexpr uint32_t kRvaGoSetActive = 0x4E5CAD0;
 constexpr uint32_t kRvaGoGetActiveSelf = 0x4E5CC70;
@@ -132,20 +174,38 @@ struct MethodInfoHead {
 
 using FnSceneLoginGet = void* (*)(const void* method);
 using FnConnectLoginStart = void(__fastcall*)(void* self, const void* method);
+using FnNmVoid0 = void(__fastcall*)(void* self, const void* method);
 using FnGetGameObject = void* (*)(void* self, const void* method);
 using FnGoSetActive = void (*)(void* self, bool value, const void* method);
 using FnGoGetActiveSelf = bool (*)(void* self, const void* method);
 using FnObjectDestroy = void (*)(void* obj, const void* method);
 using FnDialogClose = void (*)(void* self, const void* method);  // CloseDialog / UIDialog.Close
+using FnNotice = void* (*)(void* sMsg, void* sSub, uint8_t a, uint8_t b, uint8_t c, void* ok,
+                           const void* method);
+
+struct AbsHook {
+    void* target = nullptr;
+    void* trampoline = nullptr;
+    uint8_t saved[32]{};
+    size_t stolen = 0;
+    bool active = false;
+};
 
 std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gThread{nullptr};
 std::atomic<bool> gPending{false};
 std::atomic<bool> gBusy{false};
 std::atomic<bool> gHold{false};
+std::atomic<DWORD> gLandQuietUntilMs{0};     // GetTickCount 截止；0=无静默
+std::atomic<DWORD> gPostSoftAirUntilMs{0};  // 禁止 F5 空中；≥ land quiet
 std::atomic<unsigned> gResult{0};  // 0 none 1 ok 2 fail
 std::atomic<bool> gUiEnabled{false};
 char gWhy[64]{};
+
+AbsHook gNoticeAbs{};
+std::atomic<void*> gLastNoticeDlg{nullptr};   // Abs hook 截到的最近 Notice 返回值
+std::atomic<unsigned> gNoticeAbsHits{0};      // 进程内累计捕获次数
+std::atomic<int> gNoticeAbsInstall{0};        // 0=未试 1=ok 2=fail
 
 struct PumpCtx {
     int ok = 0;
@@ -156,9 +216,11 @@ struct SampleCtx {
     int state = -1;
     int err = -1;
     int nmOk = 0;
-    int slOk = 0;       // SceneLogin 实例可读
-    int worldUi = 0;    // SL+0xC8 非空
-    int channelUi = 0;  // SL+0xC0 非空
+    int slOk = 0;        // SceneLogin 实例可读
+    int worldUi = 0;     // SoftHall：分区 UI
+    int channelUi = 0;   // SoftHall：频道 UI
+    int worldItems = 0;  // WorldItems.Count
+    int hallReady = 0;   // 列表非空或频道页可续进（禁止仅壳指针）
 };
 
 // InterStage quiesce（map-transit && !freeze）只放行 High；soft 系统短探对齐 channel_hop。
@@ -167,9 +229,16 @@ bool SoftPumpCall(x::runtime::main_thread::JobFn fn, void* user, DWORD timeoutMs
                                                  x::runtime::main_thread::JobPrio::High);
 }
 
-// 已 Connected 且世界/频道选单已挂上：游戏已自回登录大厅，勿再 ConnectLogin。
+// 泵心跳不够新鲜则禁 SoftPumpCall（Sleep 等活）。禁止用 IsMapTransitBlocked /
+// IsCongested：quiesce 期恒真，登录大厅会饿死 ConnectLogin。
+bool SoftShouldDeferPumpWork() {
+    return !x::runtime::main_thread::IsPumpTicking(kSoftPumpFreshMs);
+}
+
+// 已 Connected 且大厅可点分区（WorldItems>0 或频道页可续进）：勿再 ConnectLogin。
+// BIN 21:44：仅 world/ch 壳指针非空会过早 RequestRestart → waiting WorldItems? 卡死。
 bool LoginUiReady(const SampleCtx& s) {
-    return s.nmOk != 0 && s.state == kStateConnected && (s.worldUi != 0 || s.channelUi != 0);
+    return s.nmOk != 0 && s.state == kStateConnected && s.hallReady != 0;
 }
 
 struct DismissCtx {
@@ -185,13 +254,15 @@ struct DismissCtx {
     int inactivated = 0;
     int destroyed = 0;
     int skippedHud = 0;  // UIMiniMap 等图内 HUD（UIDialog 子类，禁止 Close）
-    char detail[192]{};
+    int cacheTried = 0;  // Abs 捕获实例本枪尝试关
+    char detail[224]{};
 };
 
 struct PlayReadyCtx {
     int ready = 0;
     int inMap = 0;
     int sampled = 0;  // 1=泵上跑完；0=未进泵 / Assert 失败
+    uint32_t curFh = 0;  // PeekCurFhId；inMap 时采，悬空=0
 };
 
 bool DirExists(const std::wstring& p) {
@@ -386,6 +457,8 @@ void SampleNmOnPump(void* user) {
     ctx->slOk = 0;
     ctx->worldUi = 0;
     ctx->channelUi = 0;
+    ctx->worldItems = 0;
+    ctx->hallReady = 0;
     if (!x::runtime::main_thread::AssertOnPumpThread("SoftLoginSample")) return;
     if (!x::runtime::il2cpp::Ensure()) return;
     x::runtime::il2cpp_network::Ensure();
@@ -401,14 +474,17 @@ void SampleNmOnPump(void* user) {
         ctx->state = ReadI32(nm, x::runtime::il2cpp_network::OffNmSessionState());
         ctx->err = -1;
     }
-    // 登录 UI：与 NM 同拍采样，供「已在世界页则跳过 ConnectLogin」。
     void* sl = PeekSceneLoginOnPump();
-    if (!sl) return;
-    ctx->slOk = 1;
-    void* ch = ReadPtr(sl, kOffSlChannelUi);
-    void* wu = ReadPtr(sl, kOffSlWorldUi);
-    if (ch && LooksLikeHeapPtr(ch)) ctx->channelUi = 1;
-    if (wu && LooksLikeHeapPtr(wu)) ctx->worldUi = 1;
+    if (sl) ctx->slOk = 1;
+    // 大厅真就绪：同泵 SoftHall（分区列表 / 频道续进），勿只认壳指针。
+    x::features::auto_enter::SoftHallCtx hall{};
+    x::features::auto_enter::SoftHallSampleOnPump(&hall);
+    if (hall.ok) {
+        ctx->worldUi = hall.worldUi;
+        ctx->channelUi = hall.channelUi;
+        ctx->worldItems = hall.worldItems;
+        ctx->hallReady = hall.ready;
+    }
 }
 
 void DoConnectOnPump(void* user) {
@@ -457,6 +533,114 @@ void DoConnectOnPump(void* user) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         snprintf(ctx->detail, sizeof(ctx->detail), "exn");
     }
+}
+
+// Connected 但 WorldItems 空：Disconnect 只会自连回 Connected（BIN 01:53）；用 CloseSession 硬拆。
+void DoNmCloseSessionOnPump(void* user) {
+    auto* ctx = static_cast<PumpCtx*>(user);
+    if (!ctx) return;
+    ctx->ok = 0;
+    ctx->detail[0] = '\0';
+    if (!x::runtime::main_thread::AssertOnPumpThread("SoftLoginNmClose")) {
+        snprintf(ctx->detail, sizeof(ctx->detail), "not_on_pump");
+        return;
+    }
+    if (!x::runtime::il2cpp::Ensure()) {
+        snprintf(ctx->detail, sizeof(ctx->detail), "il2cpp");
+        return;
+    }
+    x::runtime::il2cpp_network::Ensure();
+    void* nm = ResolveNmFacadeOnPump();
+    if (!nm || !LooksLikeHeapPtr(nm)) {
+        snprintf(ctx->detail, sizeof(ctx->detail), "nm_null");
+        return;
+    }
+    void* session = ReadPtr(nm, x::runtime::il2cpp_network::OffNmSession());
+    if (!session || !LooksLikeHeapPtr(session)) {
+        snprintf(ctx->detail, sizeof(ctx->detail), "session_null");
+        return;
+    }
+    void* sessKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
+    if (!sessKlass) {
+        snprintf(ctx->detail, sizeof(ctx->detail), "sess_klass");
+        return;
+    }
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    const MethodShape kVoid0{0, TypeKind::Void, true, true};
+    auto closeRes = x::runtime::il2cpp_method::FindMethodResolved(
+        sessKlass, kRvaNmCloseSession, kVoid0, "CloseSession", kHashNmCloseSession);
+    MethodInfoHead* mi = AsMi(closeRes.method);
+    if (!mi || !mi->methodPointer) {
+        // CloseSession 解析失败时退 Disconnect（弱于 Close，但总好过空转 ConnectLogin）。
+        auto discRes = x::runtime::il2cpp_method::FindMethodResolved(
+            sessKlass, kRvaNmDisconnect, kVoid0, "Disconnect", kHashNmDisconnect);
+        mi = AsMi(discRes.method);
+        if (!mi || !mi->methodPointer) {
+            snprintf(ctx->detail, sizeof(ctx->detail), "close_mi");
+            return;
+        }
+        __try {
+            reinterpret_cast<FnNmVoid0>(mi->methodPointer)(session, mi);
+            ctx->ok = 1;
+            snprintf(ctx->detail, sizeof(ctx->detail), "Disconnect session=%p path=%s", session,
+                     x::runtime::il2cpp_method::PathName(discRes.path));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            snprintf(ctx->detail, sizeof(ctx->detail), "exn");
+        }
+        return;
+    }
+    __try {
+        reinterpret_cast<FnNmVoid0>(mi->methodPointer)(session, mi);
+        ctx->ok = 1;
+        snprintf(ctx->detail, sizeof(ctx->detail), "CloseSession session=%p path=%s", session,
+                 x::runtime::il2cpp_method::PathName(closeRes.path));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        snprintf(ctx->detail, sizeof(ctx->detail), "exn");
+    }
+}
+
+// CloseSession 后等掉到 Disconnected / session 空，避免立刻又 ConnectLogin 打在 Connected 上。
+bool WaitNmNotConnected(DWORD waitMs, const char* tag) {
+    const DWORD deadline = GetTickCount() + waitMs;
+    while (!gStop.load() && static_cast<int>(deadline - GetTickCount()) > 0) {
+        if (SoftShouldDeferPumpWork()) {
+            Sleep(100);
+            continue;
+        }
+        SampleCtx s{};
+        if (!SoftPumpCall(&SampleNmOnPump, &s, kSoftSampleCallMs)) {
+            Sleep(100);
+            continue;
+        }
+        if (!s.nmOk || s.state == kStateDisconnected || s.state == kStateDisconnecting ||
+            s.state < 0) {
+            LogLine("wait_disc ok tag=%s nmOk=%d state=%s(%d)", tag ? tag : "?", s.nmOk,
+                    StateName(s.state), s.state);
+            KickLogLine("wait_disc ok tag=%s state=%d", tag ? tag : "?", s.state);
+            return true;
+        }
+        Sleep(150);
+    }
+    LogLine("wait_disc timeout tag=%s %ums", tag ? tag : "?", static_cast<unsigned>(waitMs));
+    KickLogLine("wait_disc timeout tag=%s", tag ? tag : "?");
+    return false;
+}
+
+// true=已发起硬拆（或 session 已空）；调用方清 invokeOk，等 Disconnected 再 ConnectLogin。
+bool SoftForceNmTeardown(const char* why) {
+    PumpCtx ctx{};
+    if (!SoftPumpCall(&DoNmCloseSessionOnPump, &ctx, 3000)) {
+        LogLine("force_nm_close Call fail/timeout why=%s", why ? why : "?");
+        KickLogLine("force_nm_close pump_fail");
+        return false;
+    }
+    LogLine("force_nm_close ok=%d detail=%s why=%s", ctx.ok, ctx.detail, why ? why : "?");
+    KickLogLine("force_nm_close ok=%d why=%s", ctx.ok, why ? why : "?");
+    const bool closed = ctx.ok != 0 || std::strcmp(ctx.detail, "session_null") == 0 ||
+                        std::strcmp(ctx.detail, "nm_null") == 0;
+    if (closed) (void)WaitNmNotConnected(kWaitDiscAfterCloseMs, why);
+    return closed;
 }
 
 void* ClassTypeObjectOnPump(void* klass) {
@@ -663,6 +847,92 @@ void* ResolveUiKlass(const char* hashName, const char* plainName) {
     return k;
 }
 
+void WriteAbsJmp(void* at, void* to) {
+    auto* p = reinterpret_cast<uint8_t*>(at);
+    p[0] = 0x48;
+    p[1] = 0xB8;
+    *reinterpret_cast<uint64_t*>(p + 2) = reinterpret_cast<uint64_t>(to);
+    p[10] = 0xFF;
+    p[11] = 0xE0;
+}
+
+void* __fastcall HookNoticeAbs(void* sMsg, void* sSub, uint8_t a, uint8_t b, uint8_t c, void* ok,
+                               const void* method) {
+    auto* orig = reinterpret_cast<FnNotice>(gNoticeAbs.trampoline);
+    void* dlg = nullptr;
+    if (orig) {
+        __try {
+            dlg = orig(sMsg, sSub, a, b, c, ok, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            dlg = nullptr;
+        }
+    }
+    // 软登录 hold 期才记；其它 Notice（旅行 tip 等）不冲断线窗指针。
+    if (dlg && gHold.load(std::memory_order_acquire)) {
+        gLastNoticeDlg.store(dlg, std::memory_order_release);
+        gNoticeAbsHits.fetch_add(1, std::memory_order_relaxed);
+    }
+    return dlg;
+}
+
+bool InstallNoticeAbs(void* target) {
+    if (gNoticeAbs.active) return true;
+    if (!target) return false;
+    auto* bytes = reinterpret_cast<uint8_t*>(target);
+    for (size_t i = 0; i < kNoticeSteal; ++i) {
+        if (bytes[i] != kNoticeSig[i]) {
+            LogLine("Notice Abs refuse: sig mismatch @%p b0=%02X want=%02X", target, bytes[0],
+                    kNoticeSig[0]);
+            return false;
+        }
+    }
+    void* tramp =
+        VirtualAlloc(nullptr, kNoticeSteal + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) return false;
+    memcpy(gNoticeAbs.saved, target, kNoticeSteal);
+    memcpy(tramp, target, kNoticeSteal);
+    WriteAbsJmp(reinterpret_cast<uint8_t*>(tramp) + kNoticeSteal,
+                reinterpret_cast<uint8_t*>(target) + kNoticeSteal);
+    DWORD old = 0;
+    if (!VirtualProtect(target, kNoticeSteal, PAGE_EXECUTE_READWRITE, &old)) {
+        VirtualFree(tramp, 0, MEM_RELEASE);
+        return false;
+    }
+    WriteAbsJmp(target, reinterpret_cast<void*>(&HookNoticeAbs));
+    for (size_t i = 12; i < kNoticeSteal; ++i) reinterpret_cast<uint8_t*>(target)[i] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), target, kNoticeSteal);
+    VirtualProtect(target, kNoticeSteal, old, &old);
+    gNoticeAbs.target = target;
+    gNoticeAbs.trampoline = tramp;
+    gNoticeAbs.stolen = kNoticeSteal;
+    gNoticeAbs.active = true;
+    return true;
+}
+
+// 进程级一次：直 call Notice 入口 Abs（对齐 travel_port Send Abs），截返回实例。
+// kNoticeAbsEnabled=false 时为空操作（实现保留，等测稳再开）。
+void EnsureNoticeAbsHook() {
+    if (!kNoticeAbsEnabled) return;
+    if (gNoticeAbs.active) {
+        gNoticeAbsInstall.store(1, std::memory_order_relaxed);
+        return;
+    }
+    const int st = gNoticeAbsInstall.load(std::memory_order_relaxed);
+    if (st == 2) return;  // 签名失败等硬拒，勿重试
+    HMODULE ga = x::runtime::il2cpp::GameAssembly();
+    if (!ga) ga = GetModuleHandleW(L"GameAssembly.dll");
+    if (!ga) return;  // 未加载：保持 st=0，下次再试
+    void* target = reinterpret_cast<uint8_t*>(ga) + kRvaNotice;
+    if (!InstallNoticeAbs(target)) {
+        gNoticeAbsInstall.store(2, std::memory_order_relaxed);
+        LogLine("Notice Abs install fail rva=0x%X", kRvaNotice);
+        return;
+    }
+    gNoticeAbsInstall.store(1, std::memory_order_relaxed);
+    LogLine("Notice Abs install ok rva=0x%X steal=%zu (direct-call capture)", kRvaNotice,
+            kNoticeSteal);
+}
+
 void DismissKickDialogOnPump(void* user) {
     auto* ctx = static_cast<DismissCtx*>(user);
     if (!ctx) return;
@@ -683,6 +953,7 @@ void DismissKickDialogOnPump(void* user) {
         snprintf(ctx->detail, sizeof(ctx->detail), "il2cpp");
         return;
     }
+    EnsureNoticeAbsHook();
 
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
@@ -746,13 +1017,26 @@ void DismissKickDialogOnPump(void* user) {
 
     const bool force = aggressive != 0;
     MethodInfoHead* destroyMi = force ? miDestroy : nullptr;
-    // 优雅路径：只扫 Util/Ex +（可选）Notice 白名单；永不 FindAll(UIDialog 基类)。
-    // 旧 scanBase=基类 FindAll 会误关 UIMiniMap/任务闹钟/组队血条等 121 个子类中的 HUD。
+
+    // Abs 捕获实例优先关一枪（仅 kNoticeAbsEnabled）；仍强制 FindAll（69c8f9）。
+    int cacheTried = 0;
+    if (kNoticeAbsEnabled && scanNotices) {
+        void* cached = gLastNoticeDlg.exchange(nullptr, std::memory_order_acq_rel);
+        if (cached && LooksLikeHeapPtr(cached)) {
+            cacheTried = 1;
+            HideDialogVisual(cached, miCloseDialog, miUiClose, miGetGo, miSetActive, miGetActive,
+                             miGetHier, destroyMi, force, ctx);
+        }
+    }
+    ctx->cacheTried = cacheTried;
+
+    // 正式关窗：CloseDialog(+SetActive) + FindAll(Util/Ex[/Notice 白名单])。
+    // 永不 FindAll(UIDialog 基类)。
+    int noticeHits = 0;
     DismissDialogsOfKlass(utilEx, force, ctx, miCloseDialog, miUiClose, miGetGo, miSetActive,
                           miGetActive, miGetHier, destroyMi);
     DismissDialogsOfKlass(util, force, ctx, miCloseDialog, miUiClose, miGetGo, miSetActive,
                           miGetActive, miGetHier, destroyMi);
-    int noticeHits = 0;
     if (scanNotices && force) {
         struct NoticeSpec {
             const char* hash;
@@ -777,11 +1061,13 @@ void DismissKickDialogOnPump(void* user) {
     }
 
     snprintf(ctx->detail, sizeof(ctx->detail),
-             "agg=%d notices=%d noticeKinds=%d scan=%d close=%d ok=0 inactive=%d destroy=%d "
-             "dead=%d alreadyOff=%d skipHud=%d miClose=%d miUiClose=%d hier=%d",
-             aggressive, scanNotices, noticeHits, ctx->scanned, ctx->closed, ctx->inactivated,
-             ctx->destroyed, ctx->skippedDead, ctx->skippedInactive, ctx->skippedHud,
-             miCloseDialog ? 1 : 0, miUiClose ? 1 : 0, miGetHier ? 1 : 0);
+             "agg=%d notices=%d noticeKinds=%d cache=%d abs=%d hits=%u scan=%d close=%d ok=0 "
+             "inactive=%d destroy=%d dead=%d alreadyOff=%d skipHud=%d miClose=%d miUiClose=%d "
+             "hier=%d",
+             aggressive, scanNotices, noticeHits, cacheTried, gNoticeAbs.active ? 1 : 0,
+             gNoticeAbsHits.load(std::memory_order_relaxed), ctx->scanned, ctx->closed,
+             ctx->inactivated, ctx->destroyed, ctx->skippedDead, ctx->skippedInactive,
+             ctx->skippedHud, miCloseDialog ? 1 : 0, miUiClose ? 1 : 0, miGetHier ? 1 : 0);
 }
 
 void SamplePlayReadyOnPump(void* user) {
@@ -790,14 +1076,39 @@ void SamplePlayReadyOnPump(void* user) {
     ctx->ready = 0;
     ctx->inMap = 0;
     ctx->sampled = 0;
+    ctx->curFh = 0;
     if (!x::runtime::main_thread::AssertOnPumpThread("SoftLoginPlayReady")) return;
     // 仅在 Unity 泵上调（副作用 SetPumpPhase/Transit 与 publisher 同线程）。
     ctx->inMap = x::features::ports::world::IsInMapScene() ? 1 : 0;
     ctx->ready = x::features::ports::world::IsPlayReady() ? 1 : 0;
+    if (ctx->inMap) {
+        __try {
+            ctx->curFh = x::features::ports::foothold::PeekCurFhId();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ctx->curFh = 0;
+        }
+    }
     ctx->sampled = 1;
 }
 
 void SetHold(bool on) { gHold.store(on, std::memory_order_release); }
+
+void ArmLandQuiet(DWORD ms) {
+    const DWORD dur = ms ? ms : kSoftLandQuietMs;
+    const DWORD now = GetTickCount();
+    DWORD until = now + dur;
+    if (until == 0) until = 1;
+    gLandQuietUntilMs.store(until, std::memory_order_release);
+    DWORD airUntil = now + kSoftPostAirGateMs;
+    if (airUntil == 0) airUntil = 1;
+    // 若调用方传入更长 quiet，空中闸至少盖住 quiet。
+    if (static_cast<int>(airUntil - until) < 0) airUntil = until;
+    gPostSoftAirUntilMs.store(airUntil, std::memory_order_release);
+    LogLine("land_quiet arm=%ums post_air_gate=%ums", static_cast<unsigned>(dur),
+            static_cast<unsigned>(airUntil - now));
+    KickLogLine("land_quiet arm=%ums post_air=%ums", static_cast<unsigned>(dur),
+                static_cast<unsigned>(airUntil - now));
+}
 
 void PublishSoftLoginNotify(unsigned result, const char* line) {
     using x::features::notify::NotificationEvent;
@@ -859,36 +1170,84 @@ bool WaitPumpAlive(DWORD waitMs, const char* tag) {
     return false;
 }
 
-// 泵已死 / InterStage 卡死：再 soft cycle 只会空等 pump_wait（BIN 02:30 cycle2/3）。
-// 立刻 Finish 放 hold，交守护干净重拉。
-bool SoftFailIsFatalNoRetry(const char* failLine) {
-    if (!failLine || !failLine[0]) return false;
-    if (std::strstr(failLine, "pump_dead")) return true;
-    if (std::strstr(failLine, "reenter_pump_dead")) return true;
-    if (std::strstr(failLine, "reenter_pump_fail")) return true;
-    if (std::strstr(failLine, "connect_wait_timeout") && std::strstr(failLine, "last=pump"))
-        return true;
-    if (std::strstr(failLine, "connect_wait_pump_dead")) return true;
+// Connected 后等分区列表（或频道续进）就绪再 RequestRestart。
+// true=可进；false=超时/停止（调用方 soft cycle，勿空等 WorldItems）。
+bool WaitHallPickReady(DWORD waitMs) {
+    const DWORD deadline = GetTickCount() + waitMs;
+    int lastItems = -1;
+    int lastReady = -1;
+    while (!gStop.load()) {
+        if (SoftShouldDeferPumpWork()) {
+            Sleep(kHallReadyPollMs);
+            if (static_cast<int>(deadline - GetTickCount()) <= 0) break;
+            continue;
+        }
+        x::features::auto_enter::SoftHallCtx hall{};
+        if (SoftPumpCall(&x::features::auto_enter::SoftHallSampleOnPump, &hall,
+                         kSoftSampleCallMs) &&
+            hall.ok) {
+            if (hall.worldItems != lastItems || hall.ready != lastReady) {
+                LogLine("hall_ready poll world=%d ch=%d items=%d selWorld=%d ready=%d",
+                        hall.worldUi, hall.channelUi, hall.worldItems, hall.selectedWorld,
+                        hall.ready);
+                lastItems = hall.worldItems;
+                lastReady = hall.ready;
+            }
+            if (hall.ready) {
+                KickLogLine("hall_ready ok items=%d selWorld=%d", hall.worldItems,
+                            hall.selectedWorld);
+                return true;
+            }
+        }
+        if (static_cast<int>(deadline - GetTickCount()) <= 0) break;
+        Sleep(kHallReadyPollMs);
+    }
+    LogLine("hall_ready timeout %ums lastItems=%d", static_cast<unsigned>(waitMs), lastItems);
+    KickLogLine("hall_ready timeout items=%d", lastItems);
     return false;
 }
 
-// 弱网可恢复失败：未用尽 soft cycle 则保持 hold/busy，回跳再跑 ConnectLogin→重进。
+// 弱网 / 泵暂死可恢复：未用尽 soft cycle 则保持 hold/busy，回跳再跑 ConnectLogin→重进。
 // true = 调用方 ++softCycle 后 goto soft_cycle_begin；false = 已 Finish(2) 或应停。
-bool SoftFailOrRetry(int softCycle, const char* failLine) {
-    if (!SoftFailIsFatalNoRetry(failLine) && softCycle < kSoftCycleMax && !gStop.load()) {
-        // 勿把 retry 行写成 RESULT fail（避免统计虚高）；正式 fail 只走下方 Finish(2)。
+// 泵短暂 idle 允许 soft cycle（B9B 08:32：connect_wait_pump_dead 后 ~1s 自连，
+// 旧 soft_fatal_no_retry 立刻放 hold → 守护干净重拉，体感「乱杀」）。
+// emptyHallStreak：连续空大厅满 kEmptyHallSoftCycleMax 放 hold（BIN 01:53 书页空转）。
+bool SoftFailOrRetry(int softCycle, const char* failLine, int* emptyHallStreak) {
+    const bool emptyHall =
+        failLine && std::strstr(failLine, "hall_world_items_empty") != nullptr;
+    if (emptyHall && emptyHallStreak) {
+        ++(*emptyHallStreak);
+        if (*emptyHallStreak >= kEmptyHallSoftCycleMax) {
+            LogLine("empty_hall streak=%d/%d — release hold for guardian", *emptyHallStreak,
+                    kEmptyHallSoftCycleMax);
+            KickLogLine("empty_hall give_up streak=%d", *emptyHallStreak);
+            Finish(2, failLine);
+            return false;
+        }
+    } else if (emptyHallStreak) {
+        *emptyHallStreak = 0;
+    }
+    if (softCycle < kSoftCycleMax && !gStop.load()) {
+        const bool pumpish =
+            failLine && (std::strstr(failLine, "pump_dead") || std::strstr(failLine, "pump_fail") ||
+                         (std::strstr(failLine, "connect_wait_timeout") &&
+                          std::strstr(failLine, "last=pump")));
+        if (pumpish) {
+            // 周期开头还会 WaitPumpAlive；此处先再等一窗，吃「自连前泵刚醒」窗口。
+            (void)WaitPumpAlive(kPumpWaitConnectMs, "soft_cycle_retry");
+        }
         LogLine("soft_cycle_retry %d/%d after %ums | %s", softCycle, kSoftCycleMax,
                 static_cast<unsigned>(kSoftCycleRetryGapMs), failLine ? failLine : "?");
         KickLogLine("soft_cycle_retry %d/%d", softCycle, kSoftCycleMax);
         Sleep(kSoftCycleRetryGapMs);
         return true;
     }
-    if (SoftFailIsFatalNoRetry(failLine)) {
-        LogLine("soft_fatal_no_retry | %s", failLine ? failLine : "?");
-        KickLogLine("soft_fatal_no_retry");
-    }
     Finish(2, failLine);
     return false;
+}
+
+bool SoftFailOrRetry(int softCycle, const char* failLine) {
+    return SoftFailOrRetry(softCycle, failLine, nullptr);
 }
 
 bool DetailIsSlNull(const char* detail) {
@@ -923,6 +1282,7 @@ DWORD WINAPI Worker(LPVOID) {
 
         gResult.store(0, std::memory_order_release);
         SetHold(true);
+        EnsureNoticeAbsHook();
         LogLine("attempt begin why=%s settle=%ums hold=1 softCycles=%d doneRestarts=%d", gWhy,
                 static_cast<unsigned>(kSettleMs), kSoftCycleMax, kDoneNoPlayMaxRestarts);
         KickLogLine("attempt begin why=%s hold=1 softCycles=%d", gWhy, kSoftCycleMax);
@@ -936,6 +1296,7 @@ DWORD WINAPI Worker(LPVOID) {
         x::features::galaxy_token_probe::RequestSample("pre_soft_login");
 
         int softCycle = 1;
+        int emptyHallStreak = 0;
     soft_cycle_begin:
         LogLine("soft cycle begin %d/%d why=%s", softCycle, kSoftCycleMax, gWhy);
         KickLogLine("soft_cycle begin %d/%d", softCycle, kSoftCycleMax);
@@ -950,7 +1311,7 @@ DWORD WINAPI Worker(LPVOID) {
         if (!WaitPumpAlive(kPumpWaitBeforeSoftMs, "soft_cycle")) {
             char fail[200]{};
             snprintf(fail, sizeof(fail),
-                     "RESULT fail pump_dead before_settle why=%s soft_cycle=%d — release hold",
+                     "RESULT fail pump_dead before_settle why=%s soft_cycle=%d — soft cycle or release hold",
                      gWhy, softCycle);
             KickLogLine("RESULT fail pump_dead before_settle cycle=%d", softCycle);
             if (SoftFailOrRetry(softCycle, fail)) {
@@ -961,36 +1322,59 @@ DWORD WINAPI Worker(LPVOID) {
         }
 
         // 断线 Notice 往往立刻弹出；勿等 Connected 才关。
-        // 墙钟截止：旧逻辑只把 Sleep 计入 waited，Call 一慢 settle 就拖成 2.5–3s+（302081）。
-        // Connecting/Connected 早退：游戏已自连时不必耗满 settle。
-        // scanBase=1：额外扫 Notice 白名单（UINoticeDialog 等）；永不 FindAll(UIDialog 基类)。
+        // 墙钟截止 + Connecting/Connected 早退（302081）。
+        // 大厅减负（d29b56 后）：settle 内 **最多 1 次** FindAll dismiss，其余轮只 Sample NM；
+        // 勿每 120ms 叠 Util/Ex/Notice（Bootstrap 半死时易挤 ConnectLogin）。
+        // scanBase=1：Notice 白名单；永不 FindAll(UIDialog 基类)。
         {
             const DWORD settleDeadline = GetTickCount() + kSettleMs;
-            bool settleEarlyNm = false;
+            bool settleDismissDone = false;
             while (!gStop.load() && static_cast<int>(settleDeadline - GetTickCount()) > 0) {
-                DismissCtx early{};
-                early.aggressive = 1;
-                early.scanBase = 1;
-                if (SoftPumpCall(&DismissKickDialogOnPump, &early,
-                                                   kDismissCallMs) &&
-                    (early.closed > 0 || early.inactivated > 0)) {
-                    LogLine("settle_dismiss %s", early.detail);
-                    KickLogLine("settle_dismiss %s", early.detail);
+                const int remain0 = static_cast<int>(settleDeadline - GetTickCount());
+                if (remain0 <= 0) break;
+                if (SoftShouldDeferPumpWork()) {
+                    const DWORD gap =
+                        remain0 < static_cast<int>(kEarlyDismissGapMs)
+                            ? static_cast<DWORD>(remain0)
+                            : kEarlyDismissGapMs;
+                    Sleep(gap);
+                    continue;
+                }
+                if (!settleDismissDone) {
+                    DismissCtx early{};
+                    early.aggressive = 1;
+                    early.scanBase = 1;
+                    if (SoftPumpCall(&DismissKickDialogOnPump, &early, kDismissCallMs)) {
+                        LogLine("settle_dismiss %s", early.detail);
+                        KickLogLine("settle_dismiss %s", early.detail);
+                        // 关到窗才收工；空枪保留机会吃晚到的 Notice。
+                        if (early.closed > 0 || early.inactivated > 0) settleDismissDone = true;
+                    }
                 }
                 const int remainBeforeSample = static_cast<int>(settleDeadline - GetTickCount());
                 if (remainBeforeSample <= 0) break;
-                // Sample 超时勿超过剩余墙钟，否则单轮 Call 仍能把 settle 拖过 deadline。
+                if (SoftShouldDeferPumpWork()) {
+                    Sleep(remainBeforeSample < static_cast<int>(kEarlyDismissGapMs)
+                              ? static_cast<DWORD>(remainBeforeSample)
+                              : kEarlyDismissGapMs);
+                    continue;
+                }
+                // Sample 超时勿超过剩余墙钟，且对齐 kSoftSampleCallMs（勿空等 1500）。
                 const DWORD sampleMs =
-                    remainBeforeSample < 800 ? static_cast<DWORD>(remainBeforeSample) : 800u;
+                    remainBeforeSample < static_cast<int>(kSoftSampleCallMs)
+                        ? static_cast<DWORD>(remainBeforeSample)
+                        : kSoftSampleCallMs;
                 SampleCtx sample{};
-                if (SoftPumpCall(&SampleNmOnPump, &sample, sampleMs) &&
-                    sample.nmOk &&
-                    (sample.state == kStateConnecting || sample.state == kStateConnected)) {
-                    LogLine("settle early-exit nm=%s(%d) remain≈%dms", StateName(sample.state),
-                            sample.state, static_cast<int>(settleDeadline - GetTickCount()));
-                    KickLogLine("settle early_nm state=%s(%d)", StateName(sample.state),
-                                sample.state);
-                    settleEarlyNm = true;
+                if (SoftPumpCall(&SampleNmOnPump, &sample, sampleMs) && sample.nmOk &&
+                    (sample.state == kStateConnecting ||
+                     (sample.state == kStateConnected && LoginUiReady(sample)))) {
+                    LogLine("settle early-exit nm=%s(%d) items=%d ready=%d remain≈%dms "
+                            "dismiss_done=%d",
+                            StateName(sample.state), sample.state, sample.worldItems,
+                            sample.hallReady, static_cast<int>(settleDeadline - GetTickCount()),
+                            settleDismissDone ? 1 : 0);
+                    KickLogLine("settle early_nm state=%s(%d) ready=%d", StateName(sample.state),
+                                sample.state, sample.hallReady);
                     break;
                 }
                 const DWORD now = GetTickCount();
@@ -1001,18 +1385,7 @@ DWORD WINAPI Worker(LPVOID) {
                                                                   : kEarlyDismissGapMs;
                 Sleep(gap);
             }
-            if (settleEarlyNm) {
-                // 已进入自连：再补一枪关窗，然后直接进 connect-wait。
-                DismissCtx extra{};
-                extra.aggressive = 1;
-                extra.scanBase = 1;
-                if (SoftPumpCall(&DismissKickDialogOnPump, &extra,
-                                                   kDismissCallMs) &&
-                    (extra.closed > 0 || extra.inactivated > 0)) {
-                    LogLine("settle_dismiss %s", extra.detail);
-                    KickLogLine("settle_dismiss %s", extra.detail);
-                }
-            }
+            // 已 dismiss 过则不再 early-NM 补枪；窗仍在由 pre_dismiss / Connected dismiss 收。
         }
         if (gStop.load()) {
             Finish(2, "abort: stop during settle");
@@ -1027,13 +1400,14 @@ DWORD WINAPI Worker(LPVOID) {
         strncpy_s(lastDetail, "none", _TRUNCATE);
 
         // ③ 已在世界/频道 UI 且 NM Connected：游戏自回大厅，跳过 ConnectLogin → dismiss+reenter。
-        {
+        if (!SoftShouldDeferPumpWork()) {
             SampleCtx peek{};
-            if (SoftPumpCall(&SampleNmOnPump, &peek, 1500) && LoginUiReady(peek)) {
-                LogLine("login_ui_ready post-settle world=%d ch=%d — skip ConnectLogin arm reenter",
-                        peek.worldUi, peek.channelUi);
-                KickLogLine("resume_login_ui skip_connect world=%d ch=%d where=post_settle",
-                            peek.worldUi, peek.channelUi);
+            if (SoftPumpCall(&SampleNmOnPump, &peek, kSoftSampleCallMs) && LoginUiReady(peek)) {
+                LogLine("login_ui_ready post-settle world=%d ch=%d items=%d — skip ConnectLogin "
+                        "arm reenter",
+                        peek.worldUi, peek.channelUi, peek.worldItems);
+                KickLogLine("resume_login_ui skip_connect world=%d ch=%d items=%d where=post_settle",
+                            peek.worldUi, peek.channelUi, peek.worldItems);
                 invokeOk = true;
                 goto connected_path;
             }
@@ -1041,8 +1415,8 @@ DWORD WINAPI Worker(LPVOID) {
 
         connectPumpFail = 0;
         for (int t = 0; t < kConnectWaitRounds && !gStop.load(); ++t) {
-            // InterStage/load 泵死：禁止再 Sample/Dismiss/ConnectLogin（BIN 02:30 空打 ~20s）。
-            if (!x::runtime::main_thread::IsPumpTicking(kPumpAliveMaxAgeMs)) {
+            // 泵 idle：禁止 Sample/Dismiss/ConnectLogin（BIN 02:30 空打 ~20s）。
+            if (SoftShouldDeferPumpWork()) {
                 ++connectPumpFail;
                 snprintf(lastDetail, sizeof(lastDetail), "pump");
                 if ((connectPumpFail % 2) == 1) {
@@ -1053,10 +1427,17 @@ DWORD WINAPI Worker(LPVOID) {
                     KickLogLine("connect_wait pump_idle streak=%d", connectPumpFail);
                 }
                 if (connectPumpFail >= kConnectPumpFailMax) {
+                    // 满额先再等泵一窗（B9B：idle 数秒后自连）；活了就清 streak 继续本 cycle。
+                    if (WaitPumpAlive(kPumpWaitConnectMs, "connect_wait")) {
+                        connectPumpFail = 0;
+                        LogLine("connect-wait pump revived after idle — continue try=%d", t);
+                        KickLogLine("connect_wait pump_revived try=%d", t);
+                        continue;
+                    }
                     char fail[220]{};
                     snprintf(fail, sizeof(fail),
                              "RESULT fail connect_wait_pump_dead why=%s streak=%d try=%d — "
-                             "release hold for guardian",
+                             "soft cycle or release hold",
                              gWhy, connectPumpFail, t);
                     KickLogLine("RESULT fail connect_wait_pump_dead streak=%d", connectPumpFail);
                     if (SoftFailOrRetry(softCycle, fail)) {
@@ -1070,39 +1451,72 @@ DWORD WINAPI Worker(LPVOID) {
             }
 
             SampleCtx sample{};
-            if (SoftPumpCall(&SampleNmOnPump, &sample, 1500) && sample.nmOk) {
+            const bool sampleCallOk =
+                SoftPumpCall(&SampleNmOnPump, &sample, kSoftSampleCallMs);
+            if (!sampleCallOk) {
+                // Call fail 同轮禁 pre_dismiss+Connect，下一轮再 Sample。
+                snprintf(lastDetail, sizeof(lastDetail), "pump");
+                ++connectPumpFail;
+                if ((t % 5) == 0 || connectPumpFail <= 2) {
+                    LogLine("connect-wait try=%d Sample Call fail/timeout streak=%d", t,
+                            connectPumpFail);
+                    KickLogLine("connect_wait sample_pump_fail try=%d streak=%d", t,
+                                connectPumpFail);
+                }
+                if (connectPumpFail >= kConnectPumpFailMax) {
+                    if (WaitPumpAlive(kPumpWaitConnectMs, "connect_wait_sample")) {
+                        connectPumpFail = 0;
+                        LogLine("connect-wait pump revived after Sample fail — continue try=%d",
+                                t);
+                        KickLogLine("connect_wait pump_revived_sample try=%d", t);
+                        continue;
+                    }
+                    char fail[220]{};
+                    snprintf(fail, sizeof(fail),
+                             "RESULT fail connect_wait_pump_dead why=%s streak=%d try=%d "
+                             "last=sample_pump — soft cycle or release hold",
+                             gWhy, connectPumpFail, t);
+                    KickLogLine("RESULT fail connect_wait_pump_dead streak=%d", connectPumpFail);
+                    if (SoftFailOrRetry(softCycle, fail)) {
+                        ++softCycle;
+                        goto soft_cycle_begin;
+                    }
+                    goto next;
+                }
+                Sleep(kConnectWaitMs);
+                continue;
+            }
+            if (sample.nmOk) {
                 connectPumpFail = 0;
                 if (sample.state == kStateConnected) {
                     if (LoginUiReady(sample)) {
-                        LogLine("login_ui_ready world=%d ch=%d try=%d — skip ConnectLogin",
-                                sample.worldUi, sample.channelUi, t);
-                        KickLogLine("resume_login_ui skip_connect world=%d ch=%d try=%d",
-                                    sample.worldUi, sample.channelUi, t);
-                    } else {
-                        LogLine("NM already Connected during connect-wait try=%d world=%d ch=%d "
-                                "sl=%d — skip ConnectLogin",
-                                t, sample.worldUi, sample.channelUi, sample.slOk);
-                        KickLogLine("connect_wait already Connected try=%d world=%d ch=%d", t,
-                                    sample.worldUi, sample.channelUi);
+                        LogLine("login_ui_ready world=%d ch=%d items=%d try=%d — skip ConnectLogin",
+                                sample.worldUi, sample.channelUi, sample.worldItems, t);
+                        KickLogLine("resume_login_ui skip_connect world=%d ch=%d items=%d try=%d",
+                                    sample.worldUi, sample.channelUi, sample.worldItems, t);
+                        invokeOk = true;
+                        goto connected_path;
                     }
-                    invokeOk = true;
-                    // 直接走 Connected 后续（dismiss+reenter），不再二次 ConnectLogin。
-                    goto connected_path;
+                    // BIN 01:53：Connected+items=0 时 ConnectLogin 空转；Disconnect 只自连回
+                    // Connected。禁止在 Connected 上 ConnectLogin → CloseSession 等到掉线再连。
+                    LogLine("NM Connected but hall not ready world=%d ch=%d items=%d try=%d — "
+                            "CloseSession (no ConnectLogin while Connected)",
+                            sample.worldUi, sample.channelUi, sample.worldItems, t);
+                    KickLogLine("connect_wait Connected_close_session try=%d items=%d", t,
+                                sample.worldItems);
+                    SoftForceNmTeardown("connected_empty_hall");
+                    invokeOk = false;
+                    sawConnecting = false;
+                    Sleep(kConnectWaitMs);
+                    continue;
                 }
                 if (sample.state == kStateConnecting) {
                     if (!sawConnecting) {
                         sawConnecting = true;
-                        LogLine("NM Connecting during connect-wait try=%d — hold, no re-invoke", t);
+                        LogLine("NM Connecting during connect-wait try=%d — hold, no dismiss", t);
                         KickLogLine("connect_wait Connecting try=%d", t);
                     }
-                    // Connecting 时仍可卸残留 Notice（不点 Yes/Ok）；基类一并扫。
-                    {
-                        DismissCtx pre{};
-                        pre.aggressive = 1;
-                        pre.scanBase = 1;
-                        (void)SoftPumpCall(&DismissKickDialogOnPump, &pre,
-                                                             kDismissCallMs);
-                    }
+                    // Connecting：自连优先，不抢泵做 dismiss。
                     Sleep(kConnectWaitMs);
                     continue;
                 }
@@ -1133,13 +1547,19 @@ DWORD WINAPI Worker(LPVOID) {
                     LogLine("connect-wait try=%d Call fail/timeout streak=%d", t, connectPumpFail);
                     KickLogLine("connect_wait pump_fail try=%d streak=%d", t, connectPumpFail);
                 }
-                if (connectPumpFail >= kConnectPumpFailMax ||
-                    !x::runtime::main_thread::IsPumpTicking(kPumpAliveMaxAgeMs)) {
+                if (connectPumpFail >= kConnectPumpFailMax || SoftShouldDeferPumpWork()) {
                     if (connectPumpFail >= kConnectPumpFailMax) {
+                        if (WaitPumpAlive(kPumpWaitConnectMs, "connect_wait_call")) {
+                            connectPumpFail = 0;
+                            LogLine("connect-wait pump revived after Call fail — continue try=%d",
+                                    t);
+                            KickLogLine("connect_wait pump_revived_call try=%d", t);
+                            continue;
+                        }
                         char fail[220]{};
                         snprintf(fail, sizeof(fail),
                                  "RESULT fail connect_wait_pump_dead why=%s streak=%d try=%d "
-                                 "last=pump — release hold for guardian",
+                                 "last=pump — soft cycle or release hold",
                                  gWhy, connectPumpFail, t);
                         KickLogLine("RESULT fail connect_wait_pump_dead streak=%d",
                                     connectPumpFail);
@@ -1216,6 +1636,7 @@ DWORD WINAPI Worker(LPVOID) {
         int best = -1;
         int lastErr = -1;
         bool sawNm = false;
+        int emptyHallPoll = 0;
         for (int i = 0; i < kPollRounds && !gStop.load(); ++i) {
             {
                 DismissCtx mid{};
@@ -1229,7 +1650,7 @@ DWORD WINAPI Worker(LPVOID) {
             }
             Sleep(kPollMs);
             SampleCtx sample{};
-            if (!SoftPumpCall(&SampleNmOnPump, &sample, 1500)) {
+            if (!SoftPumpCall(&SampleNmOnPump, &sample, kSoftSampleCallMs)) {
                 LogLine("poll[%d] sample_pump_fail", i);
                 continue;
             }
@@ -1247,26 +1668,50 @@ DWORD WINAPI Worker(LPVOID) {
                 lastErr = sample.err;
             }
             if (sample.state == kStateConnected) {
-                KickLogLine("RESULT connected rounds=%d world=%d ch=%d — dismiss+reenter", i + 1,
-                            sample.worldUi, sample.channelUi);
+                KickLogLine("RESULT connected rounds=%d world=%d ch=%d items=%d ready=%d", i + 1,
+                            sample.worldUi, sample.channelUi, sample.worldItems, sample.hallReady);
                 if (LoginUiReady(sample)) {
-                    LogLine("NM Connected+login_ui after soft path why=%s rounds=%d world=%d ch=%d",
-                            gWhy, i + 1, sample.worldUi, sample.channelUi);
-                } else {
-                    LogLine("NM Connected after soft ConnectLogin why=%s rounds=%d world=%d ch=%d "
-                            "sl=%d — dismiss dialogs",
-                            gWhy, i + 1, sample.worldUi, sample.channelUi, sample.slOk);
+                    LogLine("NM Connected+login_ui after soft path why=%s rounds=%d world=%d ch=%d "
+                            "items=%d hallReady=1",
+                            gWhy, i + 1, sample.worldUi, sample.channelUi, sample.worldItems);
+                    goto connected_path;
                 }
-                goto connected_path;
+                // BIN 01:53：空等满 poll≈16s；满 kEmptyHallPollRounds 即 CloseSession soft cycle。
+                ++emptyHallPoll;
+                if ((emptyHallPoll % 2) == 1) {
+                    LogLine("poll[%d] Connected hall not ready items=%d empty=%d/%d", i,
+                            sample.worldItems, emptyHallPoll, kEmptyHallPollRounds);
+                }
+                if (emptyHallPoll >= kEmptyHallPollRounds) break;
+                continue;
             }
+            emptyHallPoll = 0;
         }
         {
+            SampleCtx last{};
+            if (SoftPumpCall(&SampleNmOnPump, &last, kSoftSampleCallMs) && last.nmOk &&
+                last.state == kStateConnected && !LoginUiReady(last)) {
+                LogLine("poll end Connected items=%d — CloseSession then soft cycle",
+                        last.worldItems);
+                KickLogLine("poll_end Connected_empty_hall close_session");
+                SoftForceNmTeardown("poll_empty_hall");
+                char failHall[200]{};
+                snprintf(failHall, sizeof(failHall),
+                         "RESULT fail hall_world_items_empty why=%s where=poll — soft cycle "
+                         "or release hold",
+                         gWhy);
+                if (SoftFailOrRetry(softCycle, failHall, &emptyHallStreak)) {
+                    ++softCycle;
+                    goto soft_cycle_begin;
+                }
+                goto next;
+            }
             char fail[220]{};
             snprintf(fail, sizeof(fail),
                      "RESULT fail final_state=%s(%d) err=%d nm_seen=%d why=%s", StateName(best),
                      best, lastErr, sawNm ? 1 : 0, gWhy);
             KickLogLine("RESULT fail state=%s(%d) err=%d", StateName(best), best, lastErr);
-            if (SoftFailOrRetry(softCycle, fail)) {
+            if (SoftFailOrRetry(softCycle, fail, &emptyHallStreak)) {
                 ++softCycle;
                 goto soft_cycle_begin;
             }
@@ -1303,6 +1748,23 @@ DWORD WINAPI Worker(LPVOID) {
                     KickLogLine("dismiss_miss");
                 }
 
+                // 分区列表未刷出就 RequestRestart → auto_enter 卡 waiting WorldItems?（BIN 21:44）。
+                if (!WaitHallPickReady(kHallReadyWaitMs)) {
+                    SoftForceNmTeardown("hall_wait_timeout");
+                    char fail[200]{};
+                    snprintf(fail, sizeof(fail),
+                             "RESULT fail hall_world_items_empty why=%s wait=%ums — soft cycle "
+                             "or release hold",
+                             gWhy, static_cast<unsigned>(kHallReadyWaitMs));
+                    KickLogLine("RESULT fail hall_world_items_empty");
+                    if (SoftFailOrRetry(softCycle, fail, &emptyHallStreak)) {
+                        ++softCycle;
+                        goto soft_cycle_begin;
+                    }
+                    goto next;
+                }
+                emptyHallStreak = 0;
+
                 if (x::features::auto_enter::IsDesired()) {
                     x::features::auto_enter::RequestRestart("soft_login");
                     LogLine("auto_enter RequestRestart armed — wait play-ready up to %us wall",
@@ -1314,6 +1776,8 @@ DWORD WINAPI Worker(LPVOID) {
                     DWORD doneSinceMs = 0;
                     int doneRestartCount = 0;
                     bool sawInMapWhileDone = false;
+                    bool awaitingStand = false;  // playReady+inMap 但 curFh=0
+                    DWORD standSinceMs = 0;
                     int pumpFailStreak = 0;
                     DWORD budgetStartMs = GetTickCount();
                     DWORD budgetMs = kReenterBudgetMs;
@@ -1336,10 +1800,17 @@ DWORD WINAPI Worker(LPVOID) {
                                 KickLogLine("reenter pump_idle streak=%d", pumpFailStreak);
                             }
                             if (pumpFailStreak >= kReenterPumpFailMax) {
+                                if (WaitPumpAlive(kPumpWaitConnectMs, "reenter_idle")) {
+                                    pumpFailStreak = 0;
+                                    LogLine("reenter pump revived after idle — continue round=%d",
+                                            r + 1);
+                                    KickLogLine("reenter pump_revived round=%d", r + 1);
+                                    continue;
+                                }
                                 char fail[220]{};
                                 snprintf(fail, sizeof(fail),
                                          "RESULT fail reenter_pump_dead why=%s streak=%d "
-                                         "round=%d — release hold for guardian",
+                                         "round=%d — soft cycle or release hold",
                                          gWhy, pumpFailStreak, r + 1);
                                 KickLogLine("RESULT fail reenter_pump_dead streak=%d",
                                             pumpFailStreak);
@@ -1355,10 +1826,10 @@ DWORD WINAPI Worker(LPVOID) {
                             continue;
                         }
 
-                        // 大厅期偶发关窗；进图后禁止每轮 FindAll dismiss（E216 主线程死螺旋）。
+                        // 大厅关窗仅重进首轮一枪；进图后禁止每轮 FindAll（E216）；勿再按 every-N 叠泵。
                         const bool stillInHall = !x::features::auto_enter::IsDone() &&
                                                  !x::features::auto_enter::IsFailed();
-                        if (stillInHall && (r % kReenterHallDismissEvery) == 0) {
+                        if (stillInHall && r == 0) {
                             DismissCtx again{};
                             again.aggressive = 1;
                             // 重进大厅只卸 Util/Ex；Notice 白名单已在 Connected 前扫过，勿再叠 FindAll。
@@ -1386,6 +1857,22 @@ DWORD WINAPI Worker(LPVOID) {
                             break;
                         }
 
+                        // softFast 卡空分区列表：勿空耗 150s 墙钟。
+                        if (x::features::auto_enter::IsWorldItemsStarve(kWorldItemsStarveMs)) {
+                            char fail[220]{};
+                            snprintf(fail, sizeof(fail),
+                                     "RESULT fail world_items_starve why=%s age>=%ums "
+                                     "reenter_round=%d — soft cycle or release hold",
+                                     gWhy, static_cast<unsigned>(kWorldItemsStarveMs), r + 1);
+                            KickLogLine("RESULT fail world_items_starve round=%d", r + 1);
+                            if (SoftFailOrRetry(softCycle, fail)) {
+                                ++softCycle;
+                                goto soft_cycle_begin;
+                            }
+                            earlyFail = true;
+                            break;
+                        }
+
                         PlayReadyCtx play{};
                         const bool sampleOk = SoftPumpCall(
                             &SamplePlayReadyOnPump, &play, kPlayReadySampleMs);
@@ -1402,10 +1889,18 @@ DWORD WINAPI Worker(LPVOID) {
                                         r, pumpFailStreak, static_cast<unsigned>(sleepMs));
                             }
                             if (pumpFailStreak >= kReenterPumpFailMax) {
+                                if (WaitPumpAlive(kPumpWaitConnectMs, "reenter_call")) {
+                                    pumpFailStreak = 0;
+                                    LogLine("reenter pump revived after Call fail — continue "
+                                            "round=%d",
+                                            r + 1);
+                                    KickLogLine("reenter pump_revived_call round=%d", r + 1);
+                                    continue;
+                                }
                                 char fail[220]{};
                                 snprintf(fail, sizeof(fail),
                                          "RESULT fail reenter_pump_fail why=%s streak=%d "
-                                         "round=%d — release hold for guardian",
+                                         "round=%d — soft cycle or release hold",
                                          gWhy, pumpFailStreak, r + 1);
                                 KickLogLine("RESULT fail reenter_pump_fail streak=%d",
                                             pumpFailStreak);
@@ -1422,24 +1917,70 @@ DWORD WINAPI Worker(LPVOID) {
                         }
                         pumpFailStreak = 0;
                         if (play.ready) {
-                            playOk = true;
-                            // 进图后禁止 FindAll(UIDialog) 收尾：UIMiniMap : UIDialog，Close 会弄丢小地图。
-                            // Util/Ex 关踢线窗在大厅期已做过；图内残窗交给玩家/后续非基类路径。
-                            if (play.inMap) {
-                                LogLine("play-ready — skip post-dismiss (inMap; protect UIMiniMap)");
-                                KickLogLine("play-ready skip_post_dismiss inMap=1");
-                            } else {
-                                LogLine("play-ready — light post-dismiss (inMap=%d)", play.inMap);
-                                KickLogLine("play-ready post_dismiss_light");
-                                DismissCtx post{};
-                                post.aggressive = 1;
-                                post.scanBase = 0;
-                                if (SoftPumpCall(&DismissKickDialogOnPump, &post,
-                                                                    kDismissCallMs)) {
-                                    LogLine("post_dismiss %s", post.detail);
-                                    if (post.closed > 0 || post.inactivated > 0)
-                                        KickLogLine("post_dismiss %s", post.detail);
+                            // 图内须挂台（curFh≠0）再 RESULT；悬空=掉落/热重载循环（ec1fe7）。
+                            if (play.inMap && play.curFh == 0) {
+                                awaitingStand = true;
+                                sawInMapWhileDone = true;  // 热重载 !inMap 时勿 Done 再启
+                                const DWORD now = GetTickCount();
+                                if (!standSinceMs) {
+                                    standSinceMs = now;
+                                    LogLine("play-ready wait stand curFh=0 inMap=1 — up to %ums "
+                                            "(heli/void land)",
+                                            static_cast<unsigned>(kStandReadyWaitMs));
+                                    KickLogLine("play-ready wait_stand curFh=0");
+                                } else if (now - standSinceMs >= kStandReadyWaitMs) {
+                                    LogLine("stand_wait timeout curFh=0 after %ums — degrade "
+                                            "success (no soft_cycle ConnectLogin)",
+                                            static_cast<unsigned>(now - standSinceMs));
+                                    KickLogLine("RESULT success degrade_stand_timeout");
+                                    playOk = true;
+                                    LogLine("degrade stand — light post-dismiss (curFh=0)");
+                                    DismissCtx post{};
+                                    post.aggressive = 1;
+                                    post.scanBase = 0;
+                                    if (SoftPumpCall(&DismissKickDialogOnPump, &post,
+                                                     kDismissCallMs)) {
+                                        LogLine("post_dismiss %s", post.detail);
+                                        if (post.closed > 0 || post.inactivated > 0)
+                                            KickLogLine("post_dismiss %s", post.detail);
+                                    }
+                                    x::runtime::managed_main::SetLoginFreeze(false);
+                                    char ok[240]{};
+                                    snprintf(ok, sizeof(ok),
+                                             "RESULT success degrade stand_timeout curFh=0 "
+                                             "why=%s reenter_rounds=%d soft_cycle=%d/%d",
+                                             gWhy, r + 1, softCycle, kSoftCycleMax);
+                                    ArmLandQuiet(kSoftLandQuietMs);
+                                    Finish(1, ok);
+                                    break;
                                 }
+                                if ((r % 10) == 0 && standSinceMs) {
+                                    LogLine("reenter wait[%d] playReady=1 inMap=1 curFh=0 "
+                                            "stand=%ums/%ums soft_cycle=%d",
+                                            r,
+                                            static_cast<unsigned>(now - standSinceMs),
+                                            static_cast<unsigned>(kStandReadyWaitMs), softCycle);
+                                }
+                                Sleep(kReenterPollMs);
+                                if (gStop.load()) break;
+                                continue;
+                            }
+
+                            playOk = true;
+                            awaitingStand = false;
+                            // 进图后禁止 FindAll(UIDialog 基类)；仍允许 Util/Ex 轻关，
+                            // 收大厅漏网的断线「確認」窗（69c8f9 残屏）。UIMiniMap 不在 Util 树。
+                            LogLine("play-ready — light post-dismiss (inMap=%d curFh=%u)",
+                                    play.inMap, static_cast<unsigned>(play.curFh));
+                            KickLogLine("play-ready post_dismiss_light inMap=%d curFh=%u",
+                                        play.inMap, static_cast<unsigned>(play.curFh));
+                            DismissCtx post{};
+                            post.aggressive = 1;
+                            post.scanBase = 0;  // 仅 Util/Ex，不扫 Notice 白名单/基类
+                            if (SoftPumpCall(&DismissKickDialogOnPump, &post, kDismissCallMs)) {
+                                LogLine("post_dismiss %s", post.detail);
+                                if (post.closed > 0 || post.inactivated > 0)
+                                    KickLogLine("post_dismiss %s", post.detail);
                             }
                             x::runtime::managed_main::SetLoginFreeze(false);
                             if (gStop.load()) {
@@ -1447,19 +1988,23 @@ DWORD WINAPI Worker(LPVOID) {
                                 earlyFail = true;
                                 break;
                             }
-                            char ok[220]{};
+                            char ok[240]{};
                             snprintf(ok, sizeof(ok),
                                      "RESULT success play-ready after soft reenter why=%s "
-                                     "reenter_rounds=%d soft_cycle=%d/%d",
-                                     gWhy, r + 1, softCycle, kSoftCycleMax);
-                            KickLogLine("RESULT success play-ready rounds=%d soft_cycle=%d", r + 1,
-                                        softCycle);
+                                     "reenter_rounds=%d soft_cycle=%d/%d curFh=%u",
+                                     gWhy, r + 1, softCycle, kSoftCycleMax,
+                                     static_cast<unsigned>(play.curFh));
+                            KickLogLine("RESULT success play-ready rounds=%d soft_cycle=%d "
+                                        "curFh=%u",
+                                        r + 1, softCycle, static_cast<unsigned>(play.curFh));
+                            ArmLandQuiet(kSoftLandQuietMs);
                             Finish(1, ok);
                             break;
                         }
 
                         // Done 却迟迟不进图：仅确认仍在大厅 (!inMap) 才 RequestRestart。
                         // 已 inMap 而 !ready / 泵曾堵：再启会冻主线程（E216）。
+                        // awaitingStand 期间同图热重载会短暂 !inMap：禁止当「未进图」再启。
                         if (x::features::auto_enter::IsDone()) {
                             const DWORD now = GetTickCount();
                             if (play.sampled && play.inMap) {
@@ -1471,7 +2016,15 @@ DWORD WINAPI Worker(LPVOID) {
                                 }
                                 doneSinceMs = 0;  // 不走 Done 再启时钟
                             } else if (play.sampled && !play.inMap) {
-                                if (!doneSinceMs) {
+                                if (awaitingStand) {
+                                    // 热重载 / Bootstrap：保持等挂台，勿 RequestRestart。
+                                    doneSinceMs = 0;
+                                    if ((r % 10) == 0) {
+                                        LogLine("reenter wait[%d] stand_wait map_transit "
+                                                "!inMap — no Done restart",
+                                                r);
+                                    }
+                                } else if (!doneSinceMs) {
                                     doneSinceMs = now;
                                     LogLine("reenter: auto_enter Done but still !inMap — watch "
                                             "%ums (restarts %d/%d)",
@@ -1509,13 +2062,13 @@ DWORD WINAPI Worker(LPVOID) {
                             }
                         } else {
                             doneSinceMs = 0;
-                            sawInMapWhileDone = false;
+                            if (!awaitingStand) sawInMapWhileDone = false;
                         }
 
                         if ((r % 10) == 0) {
-                            LogLine("reenter wait[%d] playReady=0 inMap=%d wall=%ums/%ums "
+                            LogLine("reenter wait[%d] playReady=0 inMap=%d curFh=%u wall=%ums/%ums "
                                     "soft_cycle=%d done_restarts=%d",
-                                    r, play.inMap,
+                                    r, play.inMap, static_cast<unsigned>(play.curFh),
                                     static_cast<unsigned>(GetTickCount() - budgetStartMs),
                                     static_cast<unsigned>(budgetMs), softCycle, doneRestartCount);
                         }
@@ -1539,14 +2092,25 @@ DWORD WINAPI Worker(LPVOID) {
                             KickLogLine("RESULT success degrade_in_map_timeout soft_cycle=%d",
                                         softCycle);
                             x::runtime::managed_main::SetLoginFreeze(false);
-                            // 已 inMap：禁止基类 UIDialog FindAll 收尾（同 play-ready 路径）。
-                            LogLine("degrade — skip post-dismiss (Done+inMap; protect UIMiniMap)");
-                            KickLogLine("degrade skip_post_dismiss inMap=1");
+                            // 同 play-ready：仅 Util/Ex 轻关，禁基类 FindAll。
+                            LogLine("degrade — light post-dismiss (Done+inMap)");
+                            KickLogLine("degrade post_dismiss_light");
+                            {
+                                DismissCtx post{};
+                                post.aggressive = 1;
+                                post.scanBase = 0;
+                                if (SoftPumpCall(&DismissKickDialogOnPump, &post, kDismissCallMs)) {
+                                    LogLine("degrade_post_dismiss %s", post.detail);
+                                    if (post.closed > 0 || post.inactivated > 0)
+                                        KickLogLine("degrade_post_dismiss %s", post.detail);
+                                }
+                            }
                             char ok[240]{};
                             snprintf(ok, sizeof(ok),
                                      "RESULT success degrade Done+inMap timeout playReady=0 "
                                      "why=%s soft_cycle=%d/%d",
                                      gWhy, softCycle, kSoftCycleMax);
+                            ArmLandQuiet(kSoftLandQuietMs);
                             Finish(1, ok);
                         } else {
                             char fail[220]{};
@@ -1630,6 +2194,26 @@ bool IsArmed() {
 
 bool IsHoldActive() { return gHold.load(std::memory_order_acquire); }
 
+bool IsLandQuiet() {
+    DWORD until = gLandQuietUntilMs.load(std::memory_order_acquire);
+    if (!until) return false;
+    const DWORD now = GetTickCount();
+    if (static_cast<int>(until - now) > 0) return true;
+    (void)gLandQuietUntilMs.compare_exchange_strong(until, 0, std::memory_order_acq_rel);
+    return false;
+}
+
+bool IsPostSoftAirCombatBlocked() {
+    DWORD until = gPostSoftAirUntilMs.load(std::memory_order_acquire);
+    if (!until) return false;
+    const DWORD now = GetTickCount();
+    if (static_cast<int>(until - now) > 0) return true;
+    (void)gPostSoftAirUntilMs.compare_exchange_strong(until, 0, std::memory_order_acq_rel);
+    return false;
+}
+
+bool IsGameplayQuiet() { return IsHoldActive() || IsLandQuiet(); }
+
 unsigned ResultCode() { return gResult.load(std::memory_order_acquire); }
 
 void RequestAttempt(const char* why) {
@@ -1641,6 +2225,7 @@ void RequestAttempt(const char* why) {
     // （upload 9fee22：10:38:37 disconnect → 10:38:39 kill，soft_login 无 attempt begin）。
     SetHold(true);
     gPending.store(true);
+    EnsureNoticeAbsHook();  // 断线 Notice 往往立刻直 call；须在弹窗前装好 Abs
     LogLine("request why=%s hold=1 (sync before worker)", gWhy);
     KickLogLine("request why=%s hold=1", gWhy);
 }

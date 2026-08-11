@@ -52,7 +52,7 @@ export function createLogUpload(opts) {
   const softMaxBytes = Number(opts.softMaxBytes || 12 * 1024 * 1024);
   const maxBytes = Number(opts.maxBytes || 16 * 1024 * 1024);
   const kMaxFileBytes = Number(opts.maxFileBytes || softMaxBytes);
-  const kMaxSessionFiles = Number(opts.maxSessionFiles || 512);
+  const kMaxSessionFiles = Number(opts.maxSessionFiles || 2048);
   const maxUploads = Number(opts.maxUploads || 10);
   const maxUploadsPerIp = Number(opts.maxUploadsPerIp || 3);
   const rateLimitMax = Number(opts.rateLimitMax || 30);

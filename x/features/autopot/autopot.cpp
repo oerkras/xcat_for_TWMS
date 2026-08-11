@@ -34,14 +34,20 @@ DWORD gHpBackoffUntil = 0;
 DWORD gMpBackoffUntil = 0;
 DWORD gHpBindMissUntil = 0;  // 未绑/soft拒/空袋：紧急也不可破
 DWORD gMpBindMissUntil = 0;
+DWORD gHpEmptyCdUntil = 0;  // UseRequest empty（qty 未降）：游戏 CD 窗
+DWORD gMpEmptyCdUntil = 0;
+DWORD gHpLastEmptyStreakAt = 0;  // empty streak 按 empty-CD 间距计数
+DWORD gMpLastEmptyStreakAt = 0;
 DWORD gHpHealStuckUntil = 0;
 DWORD gMpHealStuckUntil = 0;
 DWORD gHpVerifyAt = 0;
 DWORD gMpVerifyAt = 0;
 int gHpBeforePot = -1;
 int gMpBeforePot = -1;
-int gHpFailStreak = 0;
-int gMpFailStreak = 0;
+int gHpEmptyStreak = 0;         // UseRequest empty（qty 未降）
+int gMpEmptyStreak = 0;
+int gHpIneffectiveStreak = 0;   // VerifyPot：喝了但 vitals 未涨
+int gMpIneffectiveStreak = 0;
 bool gPrevHpEnabled = false;
 bool gPrevMpEnabled = false;
 bool gPrevLanded = false;
@@ -55,20 +61,26 @@ void ResetHpRuntime() {
     gLastHpPot = 0;
     gHpBackoffUntil = 0;
     gHpBindMissUntil = 0;
+    gHpEmptyCdUntil = 0;
+    gHpLastEmptyStreakAt = 0;
     gHpHealStuckUntil = 0;
     gHpVerifyAt = 0;
     gHpBeforePot = -1;
-    gHpFailStreak = 0;
+    gHpEmptyStreak = 0;
+    gHpIneffectiveStreak = 0;
 }
 
 void ResetMpRuntime() {
     gLastMpPot = 0;
     gMpBackoffUntil = 0;
     gMpBindMissUntil = 0;
+    gMpEmptyCdUntil = 0;
+    gMpLastEmptyStreakAt = 0;
     gMpHealStuckUntil = 0;
     gMpVerifyAt = 0;
     gMpBeforePot = -1;
-    gMpFailStreak = 0;
+    gMpEmptyStreak = 0;
+    gMpIneffectiveStreak = 0;
 }
 
 // UseRequest 连续无效时，危急下 unity_kbd 脉冲 PageDown/PageUp（对齐枫星兜底；非 OnKey）。
@@ -199,10 +211,10 @@ void Tick(DWORD now) {
         gStats.valid = true;
     }
 
-    VerifyPot(gHpVerifyAt, gHpBeforePot, gHpFailStreak, gHpBackoffUntil, gHpHealStuckUntil, hpPct,
-              now, "hp");
-    VerifyPot(gMpVerifyAt, gMpBeforePot, gMpFailStreak, gMpBackoffUntil, gMpHealStuckUntil, mpPct,
-              now, "mp");
+    VerifyPot(gHpVerifyAt, gHpBeforePot, gHpIneffectiveStreak, gHpBackoffUntil, gHpHealStuckUntil,
+              hpPct, now, "hp");
+    VerifyPot(gMpVerifyAt, gMpBeforePot, gMpIneffectiveStreak, gMpBackoffUntil, gMpHealStuckUntil,
+              mpPct, now, "mp");
 
     bool allowHp =
         hpOn && (!gLastHpPot || static_cast<int>(now - gLastHpPot) >= (int)config::kHpCooldownMs);
@@ -225,6 +237,7 @@ void Tick(DWORD now) {
     const int mpTh = gMpThreshold.load();
     const bool hpEmergency = hpOn && hpPct >= 0 && hpPct < config::kHpEmergencyPct;
     const bool mpEmergency = mpOn && mpPct >= 0 && mpPct < config::kMpEmergencyPct;
+    // 危急可破软退避，仍须过冷却；empty-CD / bind-miss / heal-stuck 不可破。
     if (hpEmergency && !hpVerifyPending && !hpHealStuck) {
         allowHp =
             !gLastHpPot || static_cast<int>(now - gLastHpPot) >= (int)config::kHpCooldownMs;
@@ -233,17 +246,22 @@ void Tick(DWORD now) {
         allowMp =
             !gLastMpPot || static_cast<int>(now - gLastMpPot) >= (int)config::kMpCooldownMs;
     }
-    // 绑药 miss：紧急也不可破（没绑硬打主线程无意义）
+    if (gHpEmptyCdUntil && static_cast<int>(now - gHpEmptyCdUntil) < 0) allowHp = false;
+    if (gMpEmptyCdUntil && static_cast<int>(now - gMpEmptyCdUntil) < 0) allowMp = false;
     if (gHpBindMissUntil && static_cast<int>(now - gHpBindMissUntil) < 0) allowHp = false;
     if (gMpBindMissUntil && static_cast<int>(now - gMpBindMissUntil) < 0) allowMp = false;
 
     if (hpPct >= hpTh) {
         gHpHealStuckUntil = 0;
-        gHpFailStreak = 0;
+        gHpEmptyCdUntil = 0;
+        gHpEmptyStreak = 0;
+        gHpIneffectiveStreak = 0;
     }
     if (mpPct >= mpTh) {
         gMpHealStuckUntil = 0;
-        gMpFailStreak = 0;
+        gMpEmptyCdUntil = 0;
+        gMpEmptyStreak = 0;
+        gMpIneffectiveStreak = 0;
     }
 
     const bool tryHp = allowHp && ((hpPct >= 0 && hpPct < hpTh) || hpEmergency);
@@ -256,7 +274,8 @@ void Tick(DWORD now) {
         if (ports::consumable::FindAndUseBoundPotion(true, fr)) {
             gStats.hpPotionQty = fr.qty;
             gLastHpPot = now;
-            gHpFailStreak = 0;
+            gHpEmptyCdUntil = 0;
+            gHpEmptyStreak = 0;
             gHpBeforePot = hpPct;
             gHpVerifyAt = now + config::kPotEffectDelayMs;
             x::runtime::LogI("AutoPot", "act=hp pos=%d id=%d qty=%d hp=%d%%", fr.pos, fr.itemId,
@@ -281,17 +300,29 @@ void Tick(DWORD now) {
                 }
             }
         } else {
+            // 找到药但 qty 未降：按游戏 CD/拒用处理，勿在同窗连打进 heal-stuck。
             gStats.hpPotionQty = fr.qty;
-            gLastHpPot = now;  // 失败也冷却，避免狂打
-            if (++gHpFailStreak >= config::kFailStreakLimit) {
-                gHpBackoffUntil = now + config::kEmptyPotBackoffMs;
-                gHpHealStuckUntil = now + config::kHealStuckBackoffMs;
-                x::runtime::LogW("AutoPot",
-                                 "hp use empty/fail streak → soft-backoff %us heal-stuck %us",
-                                 config::kEmptyPotBackoffMs / 1000,
-                                 config::kHealStuckBackoffMs / 1000);
-                if (hpEmergency && hpPct > 1) FirePotionKeyFallback(true);
-                gHpFailStreak = 0;
+            gLastHpPot = now;
+            gHpEmptyCdUntil = now + config::kEmptyUseCooldownMs;
+            const bool countStreak =
+                !gHpLastEmptyStreakAt ||
+                static_cast<int>(now - gHpLastEmptyStreakAt) >= (int)config::kEmptyStreakGapMs;
+            if (countStreak) {
+                gHpLastEmptyStreakAt = now;
+                if (++gHpEmptyStreak >= config::kFailStreakLimit) {
+                    // empty = 游戏 CD/拒用：只软退避，不 heal-stuck（危急仍可破软退避）。
+                    gHpBackoffUntil = now + config::kEmptyPotBackoffMs;
+                    x::runtime::LogW("AutoPot",
+                                     "hp use empty streak → soft-backoff %us (no heal-stuck)",
+                                     config::kEmptyPotBackoffMs / 1000);
+                    if (hpEmergency && hpPct > 1) FirePotionKeyFallback(true);
+                    gHpEmptyStreak = 0;
+                } else {
+                    x::runtime::LogW("AutoPot",
+                                     "hp use empty → cd %ums streak=%d/%d pos=%d id=%d",
+                                     config::kEmptyUseCooldownMs, gHpEmptyStreak,
+                                     config::kFailStreakLimit, fr.pos, fr.itemId);
+                }
             }
         }
     }
@@ -300,7 +331,8 @@ void Tick(DWORD now) {
         if (ports::consumable::FindAndUseBoundPotion(false, fr)) {
             gStats.mpPotionQty = fr.qty;
             gLastMpPot = now;
-            gMpFailStreak = 0;
+            gMpEmptyCdUntil = 0;
+            gMpEmptyStreak = 0;
             gMpBeforePot = mpPct;
             gMpVerifyAt = now + config::kPotEffectDelayMs;
             x::runtime::LogI("AutoPot", "act=mp pos=%d id=%d qty=%d mp=%d%%", fr.pos, fr.itemId,
@@ -327,15 +359,26 @@ void Tick(DWORD now) {
         } else {
             gStats.mpPotionQty = fr.qty;
             gLastMpPot = now;
-            if (++gMpFailStreak >= config::kFailStreakLimit) {
-                gMpBackoffUntil = now + config::kEmptyPotBackoffMs;
-                gMpHealStuckUntil = now + config::kHealStuckBackoffMs;
-                x::runtime::LogW("AutoPot",
-                                 "mp use empty/fail streak → soft-backoff %us heal-stuck %us",
-                                 config::kEmptyPotBackoffMs / 1000,
-                                 config::kHealStuckBackoffMs / 1000);
-                if (mpEmergency && mpPct > 1) FirePotionKeyFallback(false);
-                gMpFailStreak = 0;
+            gMpEmptyCdUntil = now + config::kEmptyUseCooldownMs;
+            const bool countStreak =
+                !gMpLastEmptyStreakAt ||
+                static_cast<int>(now - gMpLastEmptyStreakAt) >= (int)config::kEmptyStreakGapMs;
+            if (countStreak) {
+                gMpLastEmptyStreakAt = now;
+                if (++gMpEmptyStreak >= config::kFailStreakLimit) {
+                    // empty = 游戏 CD/拒用：只软退避，不 heal-stuck（危急仍可破软退避）。
+                    gMpBackoffUntil = now + config::kEmptyPotBackoffMs;
+                    x::runtime::LogW("AutoPot",
+                                     "mp use empty streak → soft-backoff %us (no heal-stuck)",
+                                     config::kEmptyPotBackoffMs / 1000);
+                    if (mpEmergency && mpPct > 1) FirePotionKeyFallback(false);
+                    gMpEmptyStreak = 0;
+                } else {
+                    x::runtime::LogW("AutoPot",
+                                     "mp use empty → cd %ums streak=%d/%d pos=%d id=%d",
+                                     config::kEmptyUseCooldownMs, gMpEmptyStreak,
+                                     config::kFailStreakLimit, fr.pos, fr.itemId);
+                }
             }
         }
     }

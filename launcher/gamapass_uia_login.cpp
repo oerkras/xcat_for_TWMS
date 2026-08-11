@@ -1,6 +1,5 @@
 #include "gamapass_uia_login.h"
 
-#include "chromium_cdp.h"
 #include "gamapass_cdp_login.h"
 #include "gamapass_ticket_harvest.h"
 #include "http_gamapass_login.h"
@@ -424,29 +423,32 @@ UrlKind ClassifyUrlHint(const std::wstring& hint) {
     return UrlKind::Unknown;
 }
 
-// 自动登录全程保前台：每轮轮询强制还原+置顶（ClickPoint 依赖屏幕坐标）
+// 自动登录全程保前台+最大化：每轮轮询强制还原/最大化+置顶（ClickPoint 依赖屏幕坐标）
 bool KeepLoginBrowserForeground(HWND hwnd, const HttpLoginLogFn& log, DWORD* lastFgLog) {
     if (!hwnd || !IsWindow(hwnd)) return false;
 
     const bool wasIconic = IsIconic(hwnd) != FALSE;
+    const bool notMax = IsZoomed(hwnd) == FALSE;
     const HWND fore = GetForegroundWindow();
     const bool notFore = (fore != hwnd);
 
-    if (wasIconic || notFore || !msc::uia::IsBrowserWindowInteractive(hwnd)) {
+    if (wasIconic || notMax || notFore || !msc::uia::IsBrowserWindowInteractive(hwnd)) {
         msc::uia::BringToForeground(hwnd);
         if (lastFgLog) {
             const DWORD now = GetTickCount();
-            // 最小化必打日志；丢前台节流，避免刷屏
-            if (wasIconic || now - *lastFgLog > 3000) {
+            // 最小化/未最大化必打日志；丢前台节流，避免刷屏
+            if (wasIconic || notMax || now - *lastFgLog > 3000) {
                 *lastFgLog = now;
                 if (wasIconic)
-                    Log(log, std::wstring(kLogTag) + L" 登录窗被最小化，已强制还原并置前");
+                    Log(log, std::wstring(kLogTag) + L" 登录窗被最小化，已强制最大化并置前");
+                else if (notMax)
+                    Log(log, std::wstring(kLogTag) + L" 登录窗未最大化，已强制最大化并置前");
                 else
                     Log(log, std::wstring(kLogTag) + L" 登录窗不在前台，已强制置前");
             }
         }
     }
-    // 即便已在前台，也周期性再顶一次，防止被 xcat/其它窗抢走
+    // 即便已在前台且最大化，也周期性再顶一次，防止被 xcat/其它窗抢走
     else if (lastFgLog) {
         const DWORD now = GetTickCount();
         if (now - *lastFgLog > 4000) {
@@ -466,7 +468,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     Log(log, std::wstring(kLogTag) + L" 开始：日常浏览器 UIA 点选（不调用 refresh/token）；账号=" +
                  std::to_wstring(accountSlot) + L" 昵称=" + std::to_wstring(nickSlot));
     Log(log, std::wstring(kLogTag) +
-                 L" 自动登录期间将强制保持浏览器登录窗在前台（最小化/被挡都会自动拉回）。");
+                 L" 自动登录期间将强制保持浏览器登录窗最大化并在前台（最小化/窗口化/被挡都会自动拉回）。");
     Log(log, std::wstring(kLogTag) +
                  L" 快轮询+兜底：clickPoll=40ms cooldown=150ms；GP/账号卡/昵称/繼續均可重试；"
                  L"校验地址栏/标题阶段");
@@ -478,15 +480,9 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     }
     Log(log, std::wstring(kLogTag) + L" 浏览器=" + exe);
 
-    // 用户授权：先关掉同安装已开主进程，避免挂到日常旧窗 / 单例移交错窗（不清 Cookie）
-    {
-        const unsigned n = msc::cdp::KillDailyBrowsersForUiaLogin(
-            exe, [&](const std::wstring& s) { Log(log, s); });
-        Log(log, std::wstring(kLogTag) + L" 启动前已处理已开浏览器（结束主进程 ×" +
-                     std::to_wstring(n) + L"），本轮只拉起 Galaxy");
-        // 杀进程后稍等再快照，避免枚举到正在销毁的顶层窗
-        Sleep(n > 0 ? 1000 : 50);
-    }
+    // ★ 不结束日常浏览器：靠启动前 hwnd 快照 + --new-window 只附着本轮新窗，避免误杀会话 Cookie。
+    Log(log, std::wstring(kLogTag) +
+                 L" 启动前不结束已开浏览器；用 --new-window + 快照只挂本轮登录窗（不清 Cookie）");
 
     DWORD launchPid = 0;
     std::vector<HWND> beforeHwnds;
@@ -498,7 +494,8 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     HWND hwnd = WaitBrowserHwnd(launchPid, 40000, log, &attachPid, beforeHwnds);
     if (!hwnd) {
         return Fail(HttpLoginError::Network,
-                    "未找到浏览器窗口（UIA 附着失败）。请重试一键；程序会先关闭已开浏览器再拉起 Galaxy。");
+                    "未找到浏览器窗口（UIA 附着失败）。请确认 Edge/Chrome 能弹出新窗打开 Galaxy 后重试一键；"
+                    "不会关闭已开浏览器。");
     }
     launchPid = attachPid ? attachPid : launchPid;
     DWORD lastFgLog = 0;

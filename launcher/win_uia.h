@@ -107,7 +107,7 @@ HWND FindNewBrowserHwnd(const std::vector<HWND>& beforeLaunch,
 HWND FindBrowserHwndByTitleKeywords(const std::vector<std::wstring>& keywords,
                                     const LogFn& log = nullptr, DWORD restrictPid = 0);
 
-// 还原最小化并尝试置前；最小化时 ClickPoint 无有效屏幕坐标，点选会失败
+// 还原最小化、最大化并置前；小窗/最小化时 ClickPoint 屏幕坐标易偏/失效
 bool BringToForeground(HWND hwnd);
 
 bool IsBrowserWindowInteractive(HWND hwnd);

@@ -14,6 +14,9 @@ constexpr uint32_t kSellbagVersion = 2u;
 constexpr int kSellbagMaxKeepRules = 32;
 constexpr int kSellbagNameKeyLen   = 48;
 
+// 全新配置默认保留关键词（物品名包含匹配；繁中「礦」覆盖各类矿石/礦石名）。
+constexpr const char* kSellbagDefaultKeepNameKey = "礦";
+
 // 卖出目标栏位掩码。
 constexpr uint32_t kSellbagBagEquip = 1u << 0;  // 装备栏
 constexpr uint32_t kSellbagBagEtc   = 1u << 1;  // 其他/ETC 栏
@@ -21,9 +24,10 @@ constexpr uint32_t kSellbagBagAll   = kSellbagBagEquip | kSellbagBagEtc;
 
 #pragma pack(push, 1)
 // 保留白名单规则：物品名（繁中）关键词包含匹配，命中即跳过不卖。
+// targetMask 字段保留布局兼容；读写强制 all（装备+其他共用，无分栏 UI）。
 struct SellbagKeepRule {
     uint32_t enabled    = 0;                       // 0/1
-    uint32_t targetMask = kSellbagBagAll;          // 作用栏位
+    uint32_t targetMask = kSellbagBagAll;          // 恒为 all；勿按栏拆分
     char     nameKey[kSellbagNameKeyLen] = {};     // 名称关键词（UTF-8）
 };
 

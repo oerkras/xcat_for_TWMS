@@ -22,6 +22,7 @@
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 #include "../../ui/player_vitals.h"
+#include "xcat_payload_control.h"
 
 #include <Windows.h>
 
@@ -774,22 +775,52 @@ void ForceFaOnMain(void* user) {
     job->did = 1;
 }
 
-int TickProp(bool forceOn) {
-    if (!x::features::ports::world::IsPlayReady()) return 0;
-    if (!x::features::ports::skill::EnsureBound()) return 0;
+struct PropJob {
+    bool forceOn = false;
+    int changed = 0;
+};
+
+// 仅主泵：GetSkill* 托管 + Prop 内存补丁。worker 禁止直调（BIN 00:28:36 GA+0x3a0bde TLS AV）。
+void TickPropOnMain(void* p) {
+    auto* job = static_cast<PropJob*>(p);
+    if (!job) return;
+    job->changed = 0;
+    if (!x::features::ports::world::IsPlayReady()) return;
+    if (!x::features::ports::skill::EnsureBound()) return;
     EnsureFieldOffsets();
 
-    int changed = 0;
     for (int id : kFinalAttackIds) {
         const int lv = x::features::ports::skill::GetSkillLevel(id);
-        if (forceOn && lv <= 0) continue;
+        if (job->forceOn && lv <= 0) continue;
         void* entry = x::features::ports::skill::GetSkillEntry(id);
         if (!entry) continue;
         const int st = ReadI32(entry, kFbSkillType);
         if (st != 0 && st != kSkillTypeFinalAttack && !IsKnownFaId(id)) continue;
-        changed += PatchSkillEntry(entry, lv > 0 ? lv : 1, forceOn);
+        job->changed += PatchSkillEntry(entry, lv > 0 ? lv : 1, job->forceOn);
     }
-    return changed;
+}
+
+int TickProp(bool forceOn) {
+    if (!x::features::ports::world::IsPlayReady()) return 0;
+    if (!x::features::ports::skill::EnsureBound()) return 0;
+
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        PropJob job{};
+        job.forceOn = forceOn;
+        TickPropOnMain(&job);
+        return job.changed;
+    }
+    if (!x::runtime::main_thread::Ensure()) return 0;
+    if (x::runtime::main_thread::IsCongested()) return 0;
+
+    PropJob job{};
+    job.forceOn = forceOn;
+    // Normal：不抢 ForceFa High；整批一次避免 N×GetSkill 往返。
+    if (!x::runtime::main_thread::InvokeAndWait(&TickPropOnMain, &job, kForceJobWaitMs,
+                                               x::runtime::main_thread::JobPrio::Normal)) {
+        return 0;
+    }
+    return job.changed;
 }
 
 void TickForce() {
@@ -885,7 +916,22 @@ bool EnvForceOn() {
 
 }  // namespace
 
+int QueryEquippedWeaponType() {
+    return ReadEquippedWeaponType(nullptr, nullptr);
+}
+
+bool EquippedWeaponIsBowFamily() {
+    const int wt = QueryEquippedWeaponType();
+    // MapleWeaponType：45=弓、46=弩（与 FA 表 / WeaponTypeFromItemId 一致）。
+    return wt == 45 || wt == 46;
+}
+
 void Init() {
+    if (!xcat::kFinalAttackForceUserEnabled) {
+        gDesired.store(false, std::memory_order_relaxed);
+        x::runtime::LogI("FaForce", "user gate off — skipped (retired; keep code)");
+        return;
+    }
     if (EnvForceOn()) {
         gDesired.store(true, std::memory_order_relaxed);
         x::runtime::LogI("FaForce", "env XCAT_FINAL_ATTACK_FORCE → on");
@@ -899,6 +945,13 @@ void Shutdown() {
 }
 
 void StartWorker() {
+    if (!xcat::kFinalAttackForceUserEnabled) {
+        gDesired.store(false, std::memory_order_relaxed);
+        x::runtime::anchor_lamps::Set("FaForce",
+                                     x::runtime::anchor_lamps::AnchorLampCode::Unknown,
+                                     "disabled");
+        return;
+    }
     if (gWorker.load(std::memory_order_acquire)) return;
     gStop.store(false, std::memory_order_relaxed);
     HANDLE h = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
@@ -914,7 +967,10 @@ void StopWorker() {
     }
 }
 
-void SetDesired(bool on) { gDesired.store(on, std::memory_order_relaxed); }
+void SetDesired(bool on) {
+    if (!xcat::kFinalAttackForceUserEnabled) on = false;
+    gDesired.store(on, std::memory_order_relaxed);
+}
 
 bool IsDesired() { return gDesired.load(std::memory_order_relaxed); }
 

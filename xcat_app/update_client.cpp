@@ -175,6 +175,15 @@ struct State {
     // 下一轮探活带回 ACK（OPS log-fetch 已开始上传）
     std::string logFetchAckId;
     std::string lastStartedLogFetchId;
+    // 已开传、等待上传结束再 Done
+    std::string logFetchWatchId;
+    std::string logFetchDoneId;
+    std::string logFetchDoneResult;  // ok|fail
+    // 封禁已判定但 OPS 拉日志仍在传：延后退出
+    bool deferAccessDenyExit = false;
+    std::string deferAccessDenyReason;
+    std::string deferAccessDenyMode;
+    ULONGLONG deferAccessDenyDeadlineMs = 0;
 };
 
 State g_state;
@@ -1129,6 +1138,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     //   - 安装根：account.txt（账号串）+ auth_strategy/captcha_ui/launch_mode + xcat_imgui.ini
     //   - state：user.ini（含 [buffs]/[core]/[update] token 等）+ buffs.lkg/control.lkg + 多技能勾选
     //           + launch_mode.txt（启动模式，优先于安装根）
+    //           + lie_stats.tsv（按角色累计的测谎战绩：是攒出来的历史，不是运行态）
     // 其余 state（赶路学习图/测谎运行态/IPC .bin/冷启标记）仍丢弃，包内 travel_* 种子始终用新包。
     ps += "Write-XCatLog ('stage user prefs whitelist + prev logs; discard runtime state; dest=' + $finalDest)\r\n";
     // 换包会冲掉 logs；先快照到 TEMP，落新包后再写回 XCat_data\\logs\\prev。
@@ -1160,7 +1170,9 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "      Write-XCatLog ('user pref staged (install root): ' + $leaf)\r\n";
     ps += "    } catch { Write-XCatLog ('user pref stage failed (root): ' + $leaf + ' :: ' + $_.Exception.Message) }\r\n";
     ps += "  }\r\n";
-    ps += "  foreach ($leaf in @('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt')) {\r\n";
+    ps += "  foreach ($leaf in "
+          "@('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt','lie_"
+          "stats.tsv')) {\r\n";
     ps += "    $s=Join-Path $oldDest ('XCat_data\\state\\' + $leaf)\r\n";
     ps += "    if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "    try {\r\n";
@@ -1267,7 +1279,9 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "    }\r\n";
     ps += "    $dstState=Join-Path $finalDest 'XCat_data\\state'\r\n";
     ps += "    New-Item -ItemType Directory -Path $dstState -Force | Out-Null\r\n";
-    ps += "    foreach ($leaf in @('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt')) {\r\n";
+    ps += "    foreach ($leaf in "
+          "@('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt','lie_"
+          "stats.tsv')) {\r\n";
     ps += "      $s=Join-Path $userPrefsBak $leaf\r\n";
     ps += "      if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "      $d=Join-Path $dstState $leaf\r\n";
@@ -2241,32 +2255,49 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
                machineW.c_str(), deviceW.c_str(), verW.c_str(), macW.c_str(), passW.c_str());
     std::wstring out = identityHeaders;
 
-    // 角色快照：DLL→PayloadStatus SHM；新鲜且有效才带上头（未进角色不覆盖服务端旧值）。
+    // 角色/地图/频道：DLL→PayloadStatus SHM；新鲜才带上头（未进图不覆盖服务端旧值）。
     if (payloadBinDir && payloadBinDir[0]) {
         xcat::PayloadStatus st{};
         if (xcat::ReadPayloadStatus(payloadBinDir, st) &&
-            xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 8000) &&
-            st.playerCharValid && st.playerName[0]) {
-            char levelBuf[16]{};
-            char jobBuf[16]{};
-            char mesoBuf[32]{};
-            std::snprintf(levelBuf, sizeof(levelBuf), "%d", st.playerLevel);
-            std::snprintf(jobBuf, sizeof(jobBuf), "%d", st.playerJob);
-            std::snprintf(mesoBuf, sizeof(mesoBuf), "%lld",
-                          static_cast<long long>(st.playerMeso));
-            const std::wstring nameW = sanitizeHdrLen(utf8ToB64Hdr(st.playerName), 120);
-            const std::wstring jobNameW = sanitizeHdrLen(utf8ToB64Hdr(st.playerJobName), 120);
-            const std::wstring levelW = sanitizeHdr(xcat::Utf8ToWide(levelBuf));
-            const std::wstring jobW = sanitizeHdr(xcat::Utf8ToWide(jobBuf));
-            const std::wstring mesoW = sanitizeHdr(xcat::Utf8ToWide(mesoBuf));
-            wchar_t charHeaders[768]{};
-            _snwprintf(charHeaders, 768,
-                       L"X-XCat-Char-Name: %s\r\nX-XCat-Char-Level: %s\r\n"
-                       L"X-XCat-Char-Job: %s\r\nX-XCat-Char-Job-Name: %s\r\n"
-                       L"X-XCat-Char-Meso: %s\r\n",
-                       nameW.c_str(), levelW.c_str(), jobW.c_str(), jobNameW.c_str(),
-                       mesoW.c_str());
-            out += charHeaders;
+            xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 8000)) {
+            if (st.playerCharValid && st.playerName[0]) {
+                char levelBuf[16]{};
+                char jobBuf[16]{};
+                char mesoBuf[32]{};
+                std::snprintf(levelBuf, sizeof(levelBuf), "%d", st.playerLevel);
+                std::snprintf(jobBuf, sizeof(jobBuf), "%d", st.playerJob);
+                std::snprintf(mesoBuf, sizeof(mesoBuf), "%lld",
+                              static_cast<long long>(st.playerMeso));
+                const std::wstring nameW = sanitizeHdrLen(utf8ToB64Hdr(st.playerName), 120);
+                const std::wstring jobNameW = sanitizeHdrLen(utf8ToB64Hdr(st.playerJobName), 120);
+                const std::wstring levelW = sanitizeHdr(xcat::Utf8ToWide(levelBuf));
+                const std::wstring jobW = sanitizeHdr(xcat::Utf8ToWide(jobBuf));
+                const std::wstring mesoW = sanitizeHdr(xcat::Utf8ToWide(mesoBuf));
+                wchar_t charHeaders[768]{};
+                _snwprintf(charHeaders, 768,
+                           L"X-XCat-Char-Name: %s\r\nX-XCat-Char-Level: %s\r\n"
+                           L"X-XCat-Char-Job: %s\r\nX-XCat-Char-Job-Name: %s\r\n"
+                           L"X-XCat-Char-Meso: %s\r\n",
+                           nameW.c_str(), levelW.c_str(), jobW.c_str(), jobNameW.c_str(),
+                           mesoW.c_str());
+                out += charHeaders;
+            }
+            if (st.mapId > 0 || st.channelId > 0) {
+                char mapIdBuf[16]{};
+                char chBuf[16]{};
+                std::snprintf(mapIdBuf, sizeof(mapIdBuf), "%u", st.mapId);
+                std::snprintf(chBuf, sizeof(chBuf), "%d", st.channelId);
+                const std::wstring mapIdW = sanitizeHdr(xcat::Utf8ToWide(mapIdBuf));
+                const std::wstring chW = sanitizeHdr(xcat::Utf8ToWide(chBuf));
+                const std::wstring mapNameW =
+                    sanitizeHdrLen(utf8ToB64Hdr(st.currentMapName), 160);
+                wchar_t mapHeaders[512]{};
+                _snwprintf(mapHeaders, 512,
+                           L"X-XCat-Map-Id: %s\r\nX-XCat-Map-Name: %s\r\n"
+                           L"X-XCat-Channel: %s\r\n",
+                           mapIdW.c_str(), mapNameW.c_str(), chW.c_str());
+                out += mapHeaders;
+            }
         }
     }
     return out;
@@ -2280,12 +2311,42 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
         out.detail = "bad service url";
         return out;
     }
+    // 上传已结束：把 Done 挂到本轮探活（先于 Ack，服务端先 markDone）
+    std::string watchId;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        watchId = g_state.logFetchWatchId;
+    }
+    if (!watchId.empty() && !LogUploadBusy()) {
+        const LogUploadSnapshot snap = GetLogUploadSnapshot();
+        if (snap.phase == LogUploadPhase::Succeeded || snap.phase == LogUploadPhase::Failed) {
+            std::lock_guard<std::mutex> lk(g_state.mtx);
+            if (g_state.logFetchWatchId == watchId) {
+                g_state.logFetchDoneId = watchId;
+                g_state.logFetchDoneResult =
+                    snap.phase == LogUploadPhase::Succeeded ? "ok" : "fail";
+                g_state.logFetchWatchId.clear();
+            }
+        }
+    }
     const std::string accessUrl =
         parsed.origin + UpdateAccessPathFromServicePath(xcat::WideToUtf8(parsed.path));
     const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
     std::wstring headers = BuildClientIdentityHeaders(id, payloadBinDir.c_str());
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (!g_state.logFetchDoneId.empty()) {
+            headers += L"X-XCat-Log-Fetch-Done: ";
+            headers += xcat::Utf8ToWide(g_state.logFetchDoneId);
+            headers += L"\r\n";
+            if (!g_state.logFetchDoneResult.empty()) {
+                headers += L"X-XCat-Log-Fetch-Result: ";
+                headers += xcat::Utf8ToWide(g_state.logFetchDoneResult);
+                headers += L"\r\n";
+            }
+            g_state.logFetchDoneId.clear();
+            g_state.logFetchDoneResult.clear();
+        }
         if (!g_state.logFetchAckId.empty()) {
             headers += L"X-XCat-Log-Fetch-Ack: ";
             headers += xcat::Utf8ToWide(g_state.logFetchAckId);
@@ -2383,6 +2444,7 @@ void TryHandleOpsLogFetch(const std::string& serviceUrl, const std::string& payl
         std::lock_guard<std::mutex> lk(g_state.mtx);
         g_state.lastStartedLogFetchId = ac.pendingId;
         g_state.logFetchAckId = ac.pendingId;
+        g_state.logFetchWatchId = ac.pendingId;
     }
     xcat::log::Info("Update", "ops log-fetch started id=%s mode=%s", ac.pendingId.c_str(),
                     ac.pendingMode.empty() ? "light" : ac.pendingMode.c_str());
@@ -2405,6 +2467,38 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
 
     // 运维访问策略：可达以远端为准；不可达则粘性拒绝优先，其次看在线租约。
     {
+        // 先前延后的封禁退出：上传结束或超时后再退
+        {
+            bool doExit = false;
+            std::string reason, mode;
+            const bool uploadBusy = LogUploadBusy();
+            {
+                std::lock_guard<std::mutex> lk(g_state.mtx);
+                if (g_state.deferAccessDenyExit) {
+                    const ULONGLONG now = GetTickCount64();
+                    const bool timedOut =
+                        g_state.deferAccessDenyDeadlineMs != 0 &&
+                        now >= g_state.deferAccessDenyDeadlineMs;
+                    if (!uploadBusy || timedOut) {
+                        doExit = true;
+                        reason = g_state.deferAccessDenyReason;
+                        mode = g_state.deferAccessDenyMode;
+                        g_state.deferAccessDenyExit = false;
+                        g_state.deferAccessDenyReason.clear();
+                        g_state.deferAccessDenyMode.clear();
+                        g_state.deferAccessDenyDeadlineMs = 0;
+                    }
+                }
+            }
+            if (doExit) {
+                xcat::log::Warn("Update", "gate/2 deferred deny exit after log-fetch busy=%d",
+                                uploadBusy ? 1 : 0);
+                RequestExitForDeviceAccessDeny(reason, mode, /*fromSticky=*/false);
+                finish();
+                return;
+            }
+        }
+
         const AccessContactResult ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
         // 封禁退出前也要尽量开跑 OPS 点名的日志上传（服务端会对 pending 放行 /v1/logs）。
         TryHandleOpsLogFetch(serviceUrl, payloadBinDir, ac);
@@ -2414,6 +2508,17 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
                             GateReasonLogCode(ac.reason), id.macs.size());
             (void)WriteAccessDenySticky(payloadBinDir, ac.reason, ac.mode, ac.key);
             (void)ClearOnlineLease(payloadBinDir);
+            // OPS 拉日志进行中：延后退出，避免掐断 /v1/logs（最长约 3 分钟）
+            if (LogUploadBusy()) {
+                std::lock_guard<std::mutex> lk(g_state.mtx);
+                g_state.deferAccessDenyExit = true;
+                g_state.deferAccessDenyReason = ac.reason;
+                g_state.deferAccessDenyMode = ac.mode;
+                g_state.deferAccessDenyDeadlineMs = GetTickCount64() + 3ull * 60ull * 1000ull;
+                xcat::log::Warn("Update", "gate/2 deny deferred: log-fetch upload in flight");
+                finish();
+                return;
+            }
             RequestExitForDeviceAccessDeny(ac.reason, ac.mode, /*fromSticky=*/false);
             finish();
             return;
@@ -2422,6 +2527,13 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
             g_sessionAccessDeny.store(false, std::memory_order_release);
             (void)ClearAccessDenySticky(payloadBinDir);
             (void)WriteOnlineLease(payloadBinDir);
+            {
+                std::lock_guard<std::mutex> lk(g_state.mtx);
+                g_state.deferAccessDenyExit = false;
+                g_state.deferAccessDenyReason.clear();
+                g_state.deferAccessDenyMode.clear();
+                g_state.deferAccessDenyDeadlineMs = 0;
+            }
         } else {
             std::string stickyReason;
             std::string stickyMode;
@@ -2431,6 +2543,13 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
                 if (OnlineLeaseValid(payloadBinDir)) {
                     xcat::log::Warn("Update", "gate/2 cached m=%s r=%s but lease ok; continue",
                                     GateModeLogCode(stickyMode), GateReasonLogCode(stickyReason));
+                } else if (LogUploadBusy()) {
+                    std::lock_guard<std::mutex> lk(g_state.mtx);
+                    g_state.deferAccessDenyExit = true;
+                    g_state.deferAccessDenyReason = stickyReason;
+                    g_state.deferAccessDenyMode = stickyMode;
+                    g_state.deferAccessDenyDeadlineMs = GetTickCount64() + 3ull * 60ull * 1000ull;
+                    xcat::log::Warn("Update", "gate/2 sticky deny deferred: log-fetch upload");
                 } else {
                     xcat::log::Warn("Update", "gate/2 cached m=%s r=%s", GateModeLogCode(stickyMode),
                                     GateReasonLogCode(stickyReason));

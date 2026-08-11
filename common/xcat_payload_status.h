@@ -6,7 +6,9 @@
 // v6：kick_sniff 断线边沿（守护干净重拉）；
 // v7：引擎帧率锁读回（frame_lock）；
 // v8：soft_login 试连观察窗（抑制踢线干净重拉）；
-// v9：角色快照（名/等级/职业/背包金 → launcher 探活头 → 运维台）。
+// v9：角色快照（名/等级/职业/背包金 → launcher 探活头 → 运维台）；
+// v10：当前频道（1-based ch.N）→ 探活头 → 运维台（地图 Id 已在 v2 mapId）。
+// v11：原生 MapDataInfo.IsTown（守护主城无经验豁免；绕过拍卖强制写前的真值）。
 
 #include <Windows.h>
 
@@ -16,7 +18,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 9u;
+constexpr uint32_t kPayloadStatusVersion = 11u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -80,6 +82,13 @@ struct PayloadStatus {
     int64_t playerMeso = 0;
     char playerName[64]{};
     char playerJobName[48]{};
+
+    // v10：当前频道（UI ch.N，1-based；0=未知/未进图）。地图见 mapId。
+    int32_t channelId = 0;
+
+    // v11：原生 IsTown（拍卖绕过强制写 1 时仍报备份原值）。
+    uint32_t mapIsTown = 0;       // 1=主城
+    uint32_t mapIsTownValid = 0;  // 1=已采到；0=未知（读侧可回退 mapId 启发式）
 };
 #pragma pack(pop)
 

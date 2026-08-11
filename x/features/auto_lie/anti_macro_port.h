@@ -75,6 +75,21 @@ int ReadNonFiniteTickFrame(void* instance);
 int ReadMouseSampleCount(void* instance);
 // _isResultRecv（TW +0xF8）：服端结果已回；对照 Artale recvResult，优先于 path 长度放闸。
 bool ReadNonFiniteIsResultRecv(void* instance);
+// _isSuccess（TW +0x108）：服端对这次测谎的判定，客户端唯一能看到的官方结果。
+// 只在 _isResultRecv 为真后才有意义（在那之前是实例复用的残值）。
+//
+// 返回**原始字节**，-1 = 读不到。这个偏移没有罗塞塔哈希、是按相对布局推出来的，所以刻意
+// 不在这里归一成 bool：正常只该读到 0 或 1，读到别的值就等于偏移不对，调用方据此拒绝记账
+// 而不是把垃圾当「通过」。
+int ReadNonFiniteIsSuccess(void* instance);
+
+// 谓词快照是否新鲜。IsNonFiniteOpen / GetNonFinite 这类查询走 150 ms 自缓存，主泵拥堵或换图
+// quiesce 时刷新会失败，快照过期后一律降级成「没开测谎」。
+//
+// 调用方必须用它区分「真关了」与「这一刻取不到」：BIN aa29bc 08-10 22:45 实测，主线程卡了
+// 600 ms+（同期采样掉到 27.7Hz），follower 把降级当成面板关闭，Abort 把光标弹回答题前的位置，
+// 游戏那几帧照采，轨迹里就留下一段人为瞬移。
+bool IsPredFresh();
 // mousePosList 对象指针（供 SendWill 帧脉冲无锁读 Count；勿跨题缓存）。
 void* PeekNonFiniteMouseList(void* instance);
 bool ReadRawPosList(void* instance, std::vector<Vec2>& out);
@@ -86,6 +101,19 @@ void* ReadNonFiniteTargetRect(void* instance);  // RawImage → RectTransform
 Vec2 RawToCursorLocal(Vec2 raw);
 bool RawPathLooksLikeCanvasPixels(const std::vector<Vec2>& raw);
 
+// 一次 MapBatch 的取证快照：够在离线把 raw → cursor-point → RectTransform 局部 → 桌面
+// 整条链路重算一遍。0.1.114 事故时证据里缺 rect，只能靠拟合反推缩放才定位到病根。
+struct MapDiag {
+    bool haveRect = false;
+    float rectX = 0.f;  // RectTransform.rect（UI 单位，中心原点、Y 向上）
+    float rectY = 0.f;
+    float rectW = 0.f;
+    float rectH = 0.f;
+    const char* mode = "none";     // panel-affine / affine-fail / none
+    bool panelFromAffine = false;  // 四角来自真实面板仿射（false=TryGet 映 AABB 凑的伪面板）
+    float verifyMaxErr = -1.f;
+};
+
 bool TryMapWinCursor(void* rectTransform, float localX, float localY, POINT& outScreen);
 // 一次主线程任务把整条局部轨迹映射成屏幕点（避免逐点 InvokeAndWait 拖死跟随）。
 // 内部会按需 RawToCursorLocal；调用方仍传 rawPosList 原值即可。
@@ -95,7 +123,7 @@ bool TryMapWinCursor(void* rectTransform, float localX, float localY, POINT& out
 // rect (x0,y0)/(x1,y0)/(x1,y1)/(x0,y1)）。
 bool MapWinCursorBatch(void* rectTransform, const std::vector<Vec2>& localPts,
                        std::vector<POINT>& outScreen, POINT* outPanelCorners4 = nullptr,
-                       bool* outHavePanelCorners = nullptr);
+                       bool* outHavePanelCorners = nullptr, MapDiag* outDiag = nullptr);
 // 屏幕轨是否塌缩（本地跨度尚可但桌面 AABB 过小 / 飞出客户区）。
 bool IsScreenPathCollapsed(const std::vector<Vec2>& localPts, const std::vector<POINT>& screen,
                            long* outSpanX = nullptr, long* outSpanY = nullptr);

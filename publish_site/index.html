@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>XCat · 台服经典版 发布页</title>
+  <title>XCat 发布页</title>
   <link rel="icon" href="/favicon.ico" type="image/x-icon">
   <style>
     :root {
@@ -124,9 +124,9 @@
 <body>
   <main class="wrap">
     <section class="hero">
-      <div class="badge">XCat · 台服经典版</div>
-      <h1>XCat for 台服经典版</h1>
-      <p>新楓之谷經典版专用发布页。解压后运行 xcat.exe。</p>
+      <div class="badge">XCat</div>
+      <h1>XCat</h1>
+      <p>解压后运行 xcat.exe。</p>
       <div class="actions">
         <a id="download" class="btn" href="#">下载最新版</a>
       </div>
@@ -147,6 +147,15 @@
       })[c]);
     }
 
+    /** 页面只展示软件名，隐藏产品线敏感片段；下载路径仍用原 file。 */
+    function displayName(name) {
+      return String(name || "")
+        .replace(/_for_twms/gi, "")
+        .replace(/twms_/gi, "")
+        .replace(/_twms/gi, "")
+        .replace(/twms/gi, "xcat");
+    }
+
     fetch("/versions.json", { cache: "no-store" })
       .then(r => r.ok ? r.json() : Promise.reject())
       .then(data => {
@@ -154,7 +163,7 @@
         const latest = versions.find(v => v.isLatest) || versions[0];
         if (latest) {
           document.getElementById("download").href = latest.file;
-          document.getElementById("latestName").textContent = latest.name;
+          document.getElementById("latestName").textContent = displayName(latest.name);
         } else {
           document.getElementById("download").style.display = "none";
           document.getElementById("latestName").textContent = "暂无发布包";
@@ -168,7 +177,7 @@
         const rows = versions.map(v => `
           <tr>
             <td data-label="包名">
-              <span class="mono">${esc(v.name)}</span>
+              <span class="mono">${esc(displayName(v.name))}</span>
               ${v.isLatest ? '<span class="tag">最新</span>' : ''}
             </td>
             <td data-label="发布时间">${esc(v.publishedAt || "-")}</td>

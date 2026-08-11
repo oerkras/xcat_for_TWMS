@@ -1,4 +1,5 @@
 // Classic TWMS — 给游戏自带 CrashReporter 的同步上传套上超时，避免它冻住主线程。
+// 默认关；应急：XCAT_CRASH_UPLOAD_GUARD=1。
 //
 // 背景（2026-08-09 实机取证 hang_20260809_044528.txt）：
 // 托管层抛异常后，Maplestory_Classic_Data/Plugins/x86_64/CrashReporter.dll 会**在 Unity
@@ -227,7 +228,18 @@ DWORD WINAPI WatchThread(LPVOID) {
 
 }  // namespace
 
+bool EnvGuardOn() {
+    char buf[16]{};
+    return GetEnvironmentVariableA("XCAT_CRASH_UPLOAD_GUARD", buf, sizeof(buf)) > 0 &&
+           buf[0] == '1';
+}
+
 void Start() {
+    if (!EnvGuardOn()) {
+        x::runtime::LogI("CrashUpload",
+                         "skip (default off; set XCAT_CRASH_UPLOAD_GUARD=1 to enable IAT timeout)");
+        return;
+    }
     bool expected = false;
     if (!gRunning.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
     gStop.store(false, std::memory_order_release);

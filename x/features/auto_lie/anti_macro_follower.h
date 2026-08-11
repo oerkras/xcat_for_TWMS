@@ -11,6 +11,8 @@ void SetEnabled(bool enabled);
 void SetRegionOverlayEnabled(bool enabled);
 bool IsRegionOverlayPref();  // 用户勾选偏好（模拟结束后恢复叠层用）
 bool TryCopyPublishedPanelRect(RECT& out);  // 活计划青框 AABB → 桌面 RECT
+// 活计划真面板四角（BL,BR,TR,TL）；仅在计划带仿射四角时成立，不做 AABB 退化。
+bool TryCopyPublishedPanelCorners(POINT out4[4]);
 void RefreshAutoLieHardPauseFromOutside();  // 模拟线程结束后重算硬闸
 void Tick(DWORD now);
 void Stop();

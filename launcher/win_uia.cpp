@@ -1454,8 +1454,11 @@ bool BringToForeground(HWND hwnd) {
     if (targetPid) AllowSetForegroundWindow(targetPid);
     AllowSetForegroundWindow(ASFW_ANY);
 
-    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
-    ShowWindow(hwnd, SW_SHOW);
+    // GAMA PASS 账号卡靠几何 SendInput：窗口化过小易裁切/点空 → 一律最大化
+    if (IsIconic(hwnd) || !IsZoomed(hwnd))
+        ShowWindow(hwnd, SW_MAXIMIZE);
+    else
+        ShowWindow(hwnd, SW_SHOW);
 
     HWND fore = GetForegroundWindow();
     const DWORD foreTid = fore ? GetWindowThreadProcessId(fore, nullptr) : 0;
@@ -1477,6 +1480,8 @@ bool BringToForeground(HWND hwnd) {
         SetForegroundWindow(hwnd);
         SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     }
+    // 置前后再确认一次最大化（偶发第一次被忽略）
+    if (!IsZoomed(hwnd) && !IsIconic(hwnd)) ShowWindow(hwnd, SW_MAXIMIZE);
     return IsBrowserWindowInteractive(hwnd);
 }
 

@@ -72,12 +72,18 @@ bool IsWalkHeld();
 // 软拒绝（间隔未到 / pendingUp / FireSuppressed）返回 false 且不计 fail；仅 OnFuncKey Down 失败计 fail。
 bool TryFirePrimary();
 
+// ignoreCombatInterval=true：跳过面板间隔 SoftBlocked（仍受 pendingUp / suppressed / 泵拥堵）。
+// 换锁首刀用：BIN 22:41 近距已 Aim 仍 acq→fire≈240ms，几乎全是间隔残值。
+bool TryFirePrimaryEx(bool ignoreCombatInterval);
+
 // 技能多发专用：跳过战斗面板间隔 SoftBlocked，改由 multi_skill 固定 NA 间隔门控。
 // 仍受 pendingUp / FireSuppressed / 泵拥堵约束；成功仍写入 gLastFireMs（与战斗路径共享冷却痕迹）。
 bool TryFirePrimaryForMultiSkill();
 
-// 先泵松键，再看间隔/pending/suppressed；未就绪时勿进 Firing，避免同 tick 空点刷 soft fail。
+// 先泵松键，再看间隔/pending/suppressed。
 bool CanFirePrimary();
+// 同上；ignoreCombatInterval=true 时不看面板间隔（换锁首刀与 TryFirePrimaryEx 配对）。
+bool CanFirePrimaryEx(bool ignoreCombatInterval);
 
 // Down 未 Up，或距上次成功出刀仍在 recover 窗内。
 bool MotionBusy();

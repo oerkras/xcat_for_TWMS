@@ -1,5 +1,6 @@
 #include "anti_macro_port.h"
 
+#include "lie_log.h"
 #include "../titlebar/titlebar_win.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
@@ -107,6 +108,10 @@ constexpr size_t kFbNonTick = 0xE0;
 constexpr size_t kFbNonRawPosList = 0xE8;
 constexpr size_t kFbNonMousePosList = 0xF0;
 constexpr size_t kFbNonIsResultRecv = 0xF8;
+// _isSuccess 没有罗塞塔哈希，只能靠相对布局取：recv(bool,+0xF8) → _pathTexture(ptr,+0x100)
+// → _isSuccess(bool,+0x108)，8 字节对齐下正好隔 0x10（见 docs P0a 字段表）。
+// recv 若被 meta 校正过，success 跟着平移，见 EnsureQuizFieldOff。
+constexpr size_t kFbNonIsSuccess = 0x108;
 constexpr size_t kFbInfoJpegData = 0x20;
 constexpr size_t kFbTickFrame = 0x10;
 size_t gOffTextRawImage = kFbTextRawImage;
@@ -116,6 +121,7 @@ size_t gOffNonTick = kFbNonTick;
 size_t gOffNonRawPosList = kFbNonRawPosList;
 size_t gOffNonMousePosList = kFbNonMousePosList;
 size_t gOffNonIsResultRecv = kFbNonIsResultRecv;
+size_t gOffNonIsSuccess = kFbNonIsSuccess;
 size_t gOffInfoJpegData = kFbInfoJpegData;
 size_t gOffTickFrame = kFbTickFrame;
 #define kOffTextRawImage (gOffTextRawImage)
@@ -216,16 +222,22 @@ void EnsureQuizFieldOff() {
     if (FieldOffHit(non, kHashNonIsResultRecv, kFbNonIsResultRecv, &gOffNonIsResultRecv, 0x80,
                     0x200))
         ++hits;
+    // 跟着 recv 平移，不单独计入 hits（无哈希可校）。
+    gOffNonIsSuccess = gOffNonIsResultRecv + (kFbNonIsSuccess - kFbNonIsResultRecv);
     if (FieldOffHit(info, kHashInfoJpegData, kFbInfoJpegData, &gOffInfoJpegData, 0x10, 0x80))
         ++hits;
     if (FieldOffHit(tick, kHashTickFrame, kFbTickFrame, &gOffTickFrame, 0x10, 0x40)) ++hits;
-    x::runtime::LogI("AutoLiePort",
-                     "quiz fields path=%s hits=%d/9 txtRaw=0x%zX in=0x%zX nonRaw=0x%zX tick=0x%zX "
-                     "rawPos=0x%zX mouse=0x%zX recv=0x%zX jpeg=0x%zX frame=0x%zX",
-                     hits == 9 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
-                     gOffTextRawImage, gOffTextInputField, gOffNonRawImage, gOffNonTick,
-                     gOffNonRawPosList, gOffNonMousePosList, gOffNonIsResultRecv, gOffInfoJpegData,
-                     gOffTickFrame);
+    // 这条是排障基线（字段有没有绑上），得跟测谎其它日志一起留在 auto_lie.log 里。
+    // Log() 定义在本文件后面，这里直接拼串走分流。
+    char buf[420]{};
+    snprintf(buf, sizeof(buf),
+             "quiz fields path=%s hits=%d/9 txtRaw=0x%zX in=0x%zX nonRaw=0x%zX tick=0x%zX "
+             "rawPos=0x%zX mouse=0x%zX recv=0x%zX succ=0x%zX jpeg=0x%zX frame=0x%zX",
+             hits == 9 ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffTextRawImage,
+             gOffTextInputField, gOffNonRawImage, gOffNonTick, gOffNonRawPosList,
+             gOffNonMousePosList, gOffNonIsResultRecv, gOffNonIsSuccess, gOffInfoJpegData,
+             gOffTickFrame);
+    lie_log::Line("AutoLiePort", buf);
 }
 
 using FnIsOpen = bool (*)(const void* methodInfo);
@@ -263,6 +275,24 @@ struct PanelGeometry {
     RECT bounds{};
 };
 
+// RawToCursorLocal 把归一化 raw 映到 CMS cursor-point 画布 (0..750, 0..500)，Y 向下。
+// 这是**逻辑画布**，不是 RectTransform 的 UI 单位：面板实际只有几百 UI 单位宽。
+// 0.1.114 事故：两者被当成同一空间 —— panel-affine 的 UV 恒 >1 直接 miss，
+// 回退的 TryGetWinCursorPos 又按 1:1 收下 (376.9,249.3)，把轨迹推到客户区右外侧
+// （实测拟合 screen = raw*500 + C，缩放正好 1.0）。任何时候先过这两个常量归一化。
+constexpr float kCursorCanvasW = 750.f;
+constexpr float kCursorCanvasH = 500.f;
+
+// cursor-point → RectTransform 局部（中心为原点、Y 向上、UI 单位）。
+bool CursorPointToRectLocal(const UnityRect& rect, float cursorX, float cursorY, Vec2& out) {
+    if (!(rect.width > 1.f) || !(rect.height > 1.f)) return false;
+    const float u = cursorX / kCursorCanvasW;
+    const float v = cursorY / kCursorCanvasH;  // cursor-point 的 Y 向下
+    out.x = rect.x + u * rect.width;
+    out.y = rect.y + (1.f - v) * rect.height;
+    return std::isfinite(out.x) && std::isfinite(out.y);
+}
+
 // Unity valuetype 隐式返回指针 ABI（与 fly get_position / ScreenToWorld 同款）
 using FnCamMain = void* (*)(const void* methodInfo);
 using FnGetRect = UnityRect* (*)(UnityRect* ret, void* self, const void* methodInfo);
@@ -295,7 +325,7 @@ void Log(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    x::runtime::LogI("AutoLiePort", "%s", buf);
+    lie_log::Line("AutoLiePort", buf);
 }
 
 void* MethodPtr(void* methodInfo) {
@@ -504,7 +534,8 @@ bool BindPanelMapApis() {
                 ResolveMi(tfKlass, kRvaTransformPoint, kTp, "TransformPoint", nullptr);
     }
 
-    gPanelMapBound = gMiCamMain && gMiWorldToScreen && gMiGetRect && gMiTransformPoint;
+    // Overlay 口径只需 get_rect + TransformPoint；camMain/wts 仅留作诊断，缺了也不挡主路径。
+    gPanelMapBound = gMiGetRect && gMiTransformPoint;
     Log("panel-map bind ok=%d camMain=%d wts=%d getRect=%d tp=%d", gPanelMapBound ? 1 : 0,
         gMiCamMain ? 1 : 0, gMiWorldToScreen ? 1 : 0, gMiGetRect ? 1 : 0,
         gMiTransformPoint ? 1 : 0);
@@ -522,23 +553,15 @@ bool PanelLocalToDesktop(void* targetRect, const Vec3& local, HWND hwnd, POINT& 
                          PointD& desktopF) {
     if (!BindPanelMapApis() || !targetRect || !hwnd) return false;
     auto tp = reinterpret_cast<FnTransformPoint>(MethodPtr(gMiTransformPoint));
-    auto camMain = reinterpret_cast<FnCamMain>(MethodPtr(gMiCamMain));
-    auto wts = reinterpret_cast<FnWorldToScreen>(MethodPtr(gMiWorldToScreen));
-    if (!tp || !camMain || !wts) return false;
+    if (!tp) return false;
 
     Vec3 world{};
-    Vec3 screen{};
-    void* cam = nullptr;
     __try {
         tp(&world, targetRect, &local, gMiTransformPoint);
-        cam = camMain(gMiCamMain);
-        if (!cam) return false;
-        wts(&screen, cam, &world);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    if (!std::isfinite(world.x) || !std::isfinite(world.y) || !std::isfinite(world.z) ||
-        !std::isfinite(screen.x) || !std::isfinite(screen.y)) {
+    if (!std::isfinite(world.x) || !std::isfinite(world.y) || !std::isfinite(world.z)) {
         return false;
     }
 
@@ -546,21 +569,28 @@ bool PanelLocalToDesktop(void* targetRect, const Vec3& local, HWND hwnd, POINT& 
     POINT origin{};
     if (!GetClientRect(hwnd, &client) || !ClientToScreen(hwnd, &origin)) return false;
     const int clientHeight = client.bottom - client.top;
-    // Unity 屏 Y 自下而上 → Windows 桌面 Y 自上而下（对照 Artale PanelLocalToDesktop）
-    desktopF.x = static_cast<double>(origin.x) + static_cast<double>(screen.x);
+    // 测谎 Canvas 是 Screen Space - Overlay：UI 的 world 坐标**本身就是屏幕像素**
+    // （Y 自下而上），只需翻 Y 再加客户区原点。
+    //
+    // 绝不能再过 Camera.main.WorldToScreenPoint：Camera.main 是跟着角色跑的游戏世界相机，
+    // 它会把面板整体平移「相机位置」那么多，且偏移量随角色走位变化，所以每次测谎偏的方向
+    // 都不一样。0.1.117（67A6 设备 82a4b0）实测铁证：反解出 1 世界单位 = 1.001 像素、
+    // 相机中心 (925.2,560.1)，而同刻角色 AbsPos=(999→950, 554)，y 仅差 6 px；扣掉相机后
+    // UI world 四角为 x:[308,1058] y:[134,634] —— 宽 750 高 500、左右边距各 308、上下各
+    // 134，在 1366x768 客户区里完美居中，正是真面板该在的位置。
+    desktopF.x = static_cast<double>(origin.x) + static_cast<double>(world.x);
     desktopF.y = static_cast<double>(origin.y) + static_cast<double>(clientHeight) -
-                 static_cast<double>(screen.y);
+                 static_cast<double>(world.y);
     desktop.x = static_cast<long>(std::lround(desktopF.x));
     desktop.y = static_cast<long>(std::lround(desktopF.y));
     return true;
 }
 
-bool ResolvePanelGeometry(void* targetRect, HWND hwnd, PanelGeometry& panel) {
-    panel = {};
-    if (!BindPanelMapApis() || !targetRect || !hwnd) return false;
+// RectTransform.get_rect 只读壳（泵上调用）。TryGet 路径也要它把画布坐标降到 UI 单位。
+bool ReadRectOf(void* targetRect, UnityRect& out) {
+    if (!BindPanelMapApis() || !targetRect) return false;
     auto getRect = reinterpret_cast<FnGetRect>(MethodPtr(gMiGetRect));
     if (!getRect) return false;
-
     UnityRect rect{};
     __try {
         getRect(&rect, targetRect, gMiGetRect);
@@ -568,9 +598,20 @@ bool ResolvePanelGeometry(void* targetRect, HWND hwnd, PanelGeometry& panel) {
         return false;
     }
     if (!std::isfinite(rect.x) || !std::isfinite(rect.y) || !std::isfinite(rect.width) ||
-        !std::isfinite(rect.height) || rect.width < 100.f || rect.height < 100.f) {
+        !std::isfinite(rect.height) || rect.width < 1.f || rect.height < 1.f) {
         return false;
     }
+    out = rect;
+    return true;
+}
+
+bool ResolvePanelGeometry(void* targetRect, HWND hwnd, PanelGeometry& panel) {
+    panel = {};
+    if (!BindPanelMapApis() || !targetRect || !hwnd) return false;
+
+    UnityRect rect{};
+    if (!ReadRectOf(targetRect, rect)) return false;
+    if (rect.width < 100.f || rect.height < 100.f) return false;
     panel.rect = rect;
 
     const float x0 = rect.x;
@@ -612,17 +653,42 @@ bool ResolvePanelGeometry(void* targetRect, HWND hwnd, PanelGeometry& panel) {
     if (std::hypot(predictedX - panel.cornersF[2].x, predictedY - panel.cornersF[2].y) > 3.0) {
         return false;
     }
+
+    // 真面板总是居中在客户区里。若算出来的四角跑出窗口，说明 canvas 口径与假设不符——
+    // 此时必须 affine-fail 让上层报警、由玩家手动作答；把光标甩到窗口外只会白送一次失败。
+    RECT client{};
+    POINT origin{};
+    if (!GetClientRect(hwnd, &client) || !ClientToScreen(hwnd, &origin)) return false;
+    const long cl = origin.x;
+    const long ct = origin.y;
+    const long cr = origin.x + (client.right - client.left);
+    const long cb = origin.y + (client.bottom - client.top);
+    const long midX = (panel.bounds.left + panel.bounds.right) / 2;
+    const long midY = (panel.bounds.top + panel.bounds.bottom) / 2;
+    if (midX < cl || midX > cr || midY < ct || midY > cb) {
+        Log("panel reject: center (%ld,%ld) outside client LTRB=(%ld,%ld,%ld,%ld)", midX, midY, cl,
+            ct, cr, cb);
+        return false;
+    }
+    constexpr long kEdgePad = 8;  // 只容忍取整/边框误差
+    if (panel.bounds.left < cl - kEdgePad || panel.bounds.top < ct - kEdgePad ||
+        panel.bounds.right > cr + kEdgePad || panel.bounds.bottom > cb + kEdgePad) {
+        Log("panel reject: bounds LTRB=(%ld,%ld,%ld,%ld) spills client LTRB=(%ld,%ld,%ld,%ld)",
+            panel.bounds.left, panel.bounds.top, panel.bounds.right, panel.bounds.bottom, cl, ct, cr,
+            cb);
+        return false;
+    }
     return true;
 }
 
 bool CursorPointToPanelDesktop(const PanelGeometry& panel, float cursorX, float cursorY,
                                POINT& desktop) {
-    const double localX =
-        static_cast<double>(cursorX) - panel.rect.width * 0.5 - panel.offset.x;
-    const double localY =
-        panel.rect.height * 0.5 - static_cast<double>(cursorY) - panel.offset.y;
-    const double u = (localX - panel.rect.x) / panel.rect.width;
-    const double v = (localY - panel.rect.y) / panel.rect.height;
+    // 归一化必须用 cursor-point 画布常量，勿用 panel.rect 尺寸：rect 是面板 UI 单位
+    // （本机实测约 314×222），拿它去除 0..750 的画布坐标会让 u 恒 >1，仿射整条 miss。
+    // offset 与 cursorX/Y 同为画布单位；TWMS 无 CursorEnv 时恒 0。
+    const double u = (static_cast<double>(cursorX) - panel.offset.x) / kCursorCanvasW;
+    const double v =
+        1.0 - (static_cast<double>(cursorY) - panel.offset.y) / kCursorCanvasH;
     constexpr double kPanelEpsilon = 0.01;
     if (!std::isfinite(u) || !std::isfinite(v) || u < -kPanelEpsilon || u > 1.0 + kPanelEpsilon ||
         v < -kPanelEpsilon || v > 1.0 + kPanelEpsilon) {
@@ -647,12 +713,28 @@ bool MapBatchByPanelAffine(void* rectTf, const std::vector<Vec2>& cursorLocal,
     outScreen.clear();
     if (outVerifyMaxErr) *outVerifyMaxErr = -1.f;
     HWND hwnd = FindGameHwndLocal();
-    if (!hwnd || !ResolvePanelGeometry(rectTf, hwnd, panel)) return false;
+    if (!hwnd) {
+        Log("panel-affine miss: no game hwnd");
+        return false;
+    }
+    if (!ResolvePanelGeometry(rectTf, hwnd, panel)) {
+        Log("panel-affine miss: ResolvePanelGeometry (rect/corners)");
+        return false;
+    }
 
     outScreen.reserve(cursorLocal.size());
+    int uvFail = 0;
     for (const auto& lp : cursorLocal) {
         POINT pt{};
-        if (!CursorPointToPanelDesktop(panel, lp.x, lp.y, pt)) return false;
+        if (!CursorPointToPanelDesktop(panel, lp.x, lp.y, pt)) {
+            ++uvFail;
+            outScreen.clear();
+            Log("panel-affine miss: UV/bounds fail at local=(%.2f,%.2f) rect=(%.1f,%.1f,%.1f,%.1f) "
+                "uvFails=%d/%zu",
+                lp.x, lp.y, panel.rect.x, panel.rect.y, panel.rect.width, panel.rect.height, uvFail,
+                cursorLocal.size());
+            return false;
+        }
         outScreen.push_back(pt);
     }
     if (outScreen.size() != cursorLocal.size()) return false;
@@ -666,10 +748,13 @@ bool MapBatchByPanelAffine(void* rectTf, const std::vector<Vec2>& cursorLocal,
         const size_t idxs[3] = {0, n / 2, n - 1};
         for (size_t k = 0; k < 3; ++k) {
             const size_t i = idxs[k];
+            Vec2 local{};
+            if (!CursorPointToRectLocal(panel.rect, cursorLocal[i].x, cursorLocal[i].y, local))
+                continue;
             Vec2 out{};
             bool hit = false;
             __try {
-                hit = fn(rectTf, cursorLocal[i], &out, gMiTryWinCursor);
+                hit = fn(rectTf, local, &out, gMiTryWinCursor);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 hit = false;
             }
@@ -683,36 +768,6 @@ bool MapBatchByPanelAffine(void* rectTf, const std::vector<Vec2>& cursorLocal,
     }
     if (outVerifyMaxErr && verifyN > 0) *outVerifyMaxErr = maxErr;
     return true;
-}
-
-bool MapBatchByTryGet(void* rectTf, const std::vector<Vec2>& cursorLocal,
-                      std::vector<POINT>& outScreen, int* outOkN, int* outSehN) {
-    outScreen.clear();
-    auto fn = FnFromMi<FnTryWinCursor>(gMiTryWinCursor, kRvaTryGetWinCursorPos);
-    if (!fn) return false;
-    outScreen.reserve(cursorLocal.size());
-    int okN = 0;
-    int sehN = 0;
-    for (const auto& lp : cursorLocal) {
-        Vec2 out{};
-        bool hit = false;
-        __try {
-            hit = fn(rectTf, lp, &out, gMiTryWinCursor);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            hit = false;
-            ++sehN;
-        }
-        POINT pt{};
-        if (hit) {
-            pt.x = static_cast<LONG>(out.x + 0.5f);
-            pt.y = static_cast<LONG>(out.y + 0.5f);
-            ++okN;
-        }
-        outScreen.push_back(pt);
-    }
-    if (outOkN) *outOkN = okN;
-    if (outSehN) *outSehN = sehN;
-    return okN > 0 && !outScreen.empty();
 }
 
 bool CopyByteArray(void* arr, std::vector<uint8_t>& out) {
@@ -838,6 +893,9 @@ struct MainCtx {
     bool havePanelCorners = false;
     const char* mapMode = "none";
     float verifyMaxErr = -1.f;
+    // 取证：无论走哪条路都先记一份 rect，离线才能复算 cursor-point → UI 单位那一步。
+    bool haveRect = false;
+    UnityRect rect{};
 };
 
 void MainJob(void* user) {
@@ -906,8 +964,16 @@ void MainJob(void* user) {
     }
     if (ctx->op == MainCtx::Op::MapCursor) {
         if (!ctx->rectTf) return;
+        // 单点 TryGet 只剩闭环节的 log-only 诊断在用（主映射一律走仿射）；
+        // 口径仍与仿射一致：画布坐标先降到 RectTransform UI 单位再喂。
+        UnityRect rect{};
+        Vec2 local{};
+        if (!ReadRectOf(ctx->rectTf, rect) ||
+            !CursorPointToRectLocal(rect, ctx->lx, ctx->ly, local)) {
+            ctx->ok = false;
+            return;
+        }
         Vec2 out{};
-        const Vec2 local{ctx->lx, ctx->ly};
         auto fn = FnFromMi<FnTryWinCursor>(gMiTryWinCursor, kRvaTryGetWinCursorPos);
         __try {
             ctx->ok = fn(ctx->rectTf, local, &out, gMiTryWinCursor);
@@ -926,48 +992,34 @@ void MainJob(void* user) {
         ctx->havePanelCorners = false;
         ctx->mapMode = "none";
         ctx->verifyMaxErr = -1.f;
+        ctx->haveRect = ReadRectOf(ctx->rectTf, ctx->rect);
 
+        // 面板仿射是**唯一**主映射路径。TryGet 已被 0.1.114 / 0.1.116 三台机两个版本证明
+        // 系统性漏乘 canvas scaleFactor（screen = cursor×1.0 + 面板原点），映出来的轨迹被压成
+        // 画布原尺寸塞进客户区一角 —— 它既不能当兜底，更不能反过来当真值去校验仿射。
+        // 现在它只在 MapBatchByPanelAffine 内做首/中/末交叉诊断，差值记进 verifyMaxErr 供分析。
         PanelGeometry panel{};
         float verifyErr = -1.f;
-        constexpr float kPanelVerifyMaxErrPx = 24.f;  // 仿射与 TryGet 差过大 → 相机/空间不对，回退
-        if (MapBatchByPanelAffine(ctx->rectTf, *ctx->localPts, *ctx->screenPts, panel,
-                                  &verifyErr)) {
-            if (verifyErr >= 0.f && verifyErr > kPanelVerifyMaxErrPx) {
-                Log("MapBatch panel-affine reject verifyMaxErr=%.2f > %.0f → tryget", verifyErr,
-                    kPanelVerifyMaxErrPx);
-                ctx->screenPts->clear();
-                ctx->havePanelCorners = false;
-            } else {
-                ctx->ok = !ctx->screenPts->empty();
-                ctx->mapMode = "panel-affine";
-                ctx->verifyMaxErr = verifyErr;
-                ctx->havePanelCorners = true;
-                std::memcpy(ctx->panelCorners, panel.corners, sizeof(ctx->panelCorners));
-                const Vec2& p0 = (*ctx->localPts)[0];
-                const POINT& s0 = (*ctx->screenPts)[0];
-                Log("MapBatch mode=panel-affine pts=%zu firstLocal=(%.2f,%.2f) firstScreen=(%ld,%ld) "
-                    "panel=(%ld,%ld)-(%ld,%ld) verifyMaxErr=%.2f",
-                    ctx->localPts->size(), p0.x, p0.y, s0.x, s0.y, panel.bounds.left,
-                    panel.bounds.top, panel.bounds.right, panel.bounds.bottom, verifyErr);
-                return;
-            }
-        }
-
-        int okN = 0, sehN = 0;
-        if (!MapBatchByTryGet(ctx->rectTf, *ctx->localPts, *ctx->screenPts, &okN, &sehN)) {
+        if (!MapBatchByPanelAffine(ctx->rectTf, *ctx->localPts, *ctx->screenPts, panel,
+                                   &verifyErr)) {
             ctx->ok = false;
-            ctx->mapMode = "tryget-fail";
-            Log("MapBatch mode=tryget-fail pts=%zu (panel-affine miss)", ctx->localPts->size());
+            ctx->mapMode = "affine-fail";
+            ctx->screenPts->clear();
+            Log("MapBatch mode=affine-fail pts=%zu — refuse follow (no TryGet fallback by design)",
+                ctx->localPts->size());
             return;
         }
-        ctx->ok = okN > 0 && !ctx->screenPts->empty();
-        ctx->mapMode = "tryget-fallback";
+        ctx->ok = !ctx->screenPts->empty();
+        ctx->mapMode = "panel-affine";
         ctx->verifyMaxErr = verifyErr;
+        ctx->havePanelCorners = true;
+        std::memcpy(ctx->panelCorners, panel.corners, sizeof(ctx->panelCorners));
         const Vec2& p0 = (*ctx->localPts)[0];
         const POINT& s0 = (*ctx->screenPts)[0];
-        Log("MapBatch mode=tryget-fallback pts=%zu ok=%d seh=%d firstLocal=(%.2f,%.2f) "
-            "firstScreen=(%ld,%ld) panelVerifyMaxErr=%.2f",
-            ctx->localPts->size(), okN, sehN, p0.x, p0.y, s0.x, s0.y, verifyErr);
+        Log("MapBatch mode=panel-affine pts=%zu firstLocal=(%.2f,%.2f) firstScreen=(%ld,%ld) "
+            "panel=(%ld,%ld)-(%ld,%ld) verifyMaxErr=%.2f (tryget diff, log-only)",
+            ctx->localPts->size(), p0.x, p0.y, s0.x, s0.y, panel.bounds.left, panel.bounds.top,
+            panel.bounds.right, panel.bounds.bottom, verifyErr);
     }
 }
 
@@ -1264,6 +1316,26 @@ bool ReadNonFiniteIsResultRecv(void* instance) {
     }
 }
 
+int ReadNonFiniteIsSuccess(void* instance) {
+    if (!instance) return -1;
+    EnsureQuizFieldOff();
+    __try {
+        // 原始字节，不归一：0/1 之外的值就是偏移不对的证据（见头文件）。
+        return static_cast<int>(
+            *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(instance) + gOffNonIsSuccess));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+bool IsPredFresh() {
+    // 泵上直接算，永远新鲜（Predicates 那条路不等任何东西）。
+    if (x::runtime::main_thread::IsOnPumpThread()) return true;
+    const DWORD now = GetTickCount();
+    std::lock_guard<std::mutex> lk(gPredMtx);
+    return gPredAtMs != 0 && static_cast<int>(now - gPredAtMs) <= static_cast<int>(kPredStaleMs);
+}
+
 void* PeekNonFiniteMouseList(void* instance) {
     if (!instance) return nullptr;
     EnsureQuizFieldOff();
@@ -1386,7 +1458,9 @@ bool IsScreenPathCollapsed(const std::vector<Vec2>& localPts, const std::vector<
     if (localSpan < 1e-3f) return true;  // 本地本身无轨迹
     if ((std::max)(spanX, spanY) <= kScreenCollapseMaxPx) return true;
 
-    // 飞出游戏客户区（E175：Y=1511 而 client 高 768）也当塌缩/废图。
+    // 飞出游戏客户区也当塌缩/废图。
+    // BIN 本单（0.1.114 / 03bc3c）：span=311×225 但 121/330 点在客户区外（mid x=1518 >
+    // clientRight=1386），旧阈值「32 探针半数越界」过松 → 跟出窗外 → 测谎失败。
     HWND hwnd = x::features::titlebar::win::FindUnityWndClass();
     if (!hwnd || !IsWindow(hwnd)) hwnd = x::features::titlebar::win::FindGameWindow();
     if (hwnd && IsWindow(hwnd)) {
@@ -1397,18 +1471,12 @@ bool IsScreenPathCollapsed(const std::vector<Vec2>& localPts, const std::vector<
             const long t = origin.y;
             const long r = origin.x + (cr.right - cr.left);
             const long b = origin.y + (cr.bottom - cr.top);
-            const long pad = 64;
-            int outside = 0;
-            const int n = static_cast<int>(screen.size());
-            const int probe = (std::min)(n, 32);
-            for (int i = 0; i < probe; ++i) {
-                const size_t idx =
-                    probe <= 1 ? 0u : static_cast<size_t>(i) * static_cast<size_t>(n - 1) /
-                                          static_cast<size_t>(probe - 1);
-                const POINT& p = screen[idx];
-                if (p.x < l - pad || p.x > r + pad || p.y < t - pad || p.y > b + pad) ++outside;
+            const long pad = 24;  // 允许边框/DPI 抖动；勿大到把「半屏在窗外」放过
+            // AABB 覆盖全部点：任一点越界即废。题面板永远在客户区内部，正确映射不会贴边，
+            // 所以这里不留百分比容忍——旧的「32 探针半数越界」放过了本单 37% 的越界点。
+            if (minSx < l - pad || maxSx > r + pad || minSy < t - pad || maxSy > b + pad) {
+                return true;
             }
-            if (outside * 2 >= probe) return true;
         }
     }
     return false;
@@ -1429,9 +1497,10 @@ bool TryMapWinCursor(void* rectTransform, float localX, float localY, POINT& out
 
 bool MapWinCursorBatch(void* rectTransform, const std::vector<Vec2>& localPts,
                        std::vector<POINT>& outScreen, POINT* outPanelCorners4,
-                       bool* outHavePanelCorners) {
+                       bool* outHavePanelCorners, MapDiag* outDiag) {
     outScreen.clear();
     if (outHavePanelCorners) *outHavePanelCorners = false;
+    if (outDiag) *outDiag = MapDiag{};
     if (!Ensure() || !rectTransform || localPts.empty()) return false;
 
     // 归一化 raw → 题面像素局部（已是像素则原样）。
@@ -1450,7 +1519,19 @@ bool MapWinCursorBatch(void* rectTransform, const std::vector<Vec2>& localPts,
     ctx.rectTf = rectTransform;
     ctx.localPts = &cursorLocal;
     ctx.screenPts = &outScreen;
-    if (!x::runtime::main_thread::InvokeAndWait(&MainJob, &ctx, 8000)) return false;
+    const bool pumped = x::runtime::main_thread::InvokeAndWait(&MainJob, &ctx, 8000);
+    if (outDiag) {
+        // 即便本次映射失败也回填：map-fail 档的 rect / mode 正是事后定位所需。
+        outDiag->haveRect = ctx.haveRect;
+        outDiag->rectX = ctx.rect.x;
+        outDiag->rectY = ctx.rect.y;
+        outDiag->rectW = ctx.rect.width;
+        outDiag->rectH = ctx.rect.height;
+        outDiag->mode = ctx.mapMode ? ctx.mapMode : "none";
+        outDiag->panelFromAffine = ctx.havePanelCorners;
+        outDiag->verifyMaxErr = ctx.verifyMaxErr;
+    }
+    if (!pumped) return false;
     if (!ctx.ok || outScreen.size() != localPts.size()) return false;
 
     if (outPanelCorners4 && ctx.havePanelCorners) {
@@ -1460,10 +1541,33 @@ bool MapWinCursorBatch(void* rectTransform, const std::vector<Vec2>& localPts,
 
     long spanX = 0, spanY = 0;
     const bool collapsed = IsScreenPathCollapsed(cursorLocal, outScreen, &spanX, &spanY);
+    // 诊断：客户区越界计数（与 IsScreenPathCollapsed 同口径 pad=24）
+    int outsideN = 0;
+    long clientL = 0, clientT = 0, clientR = 0, clientB = 0;
+    HWND hwndDiag = x::features::titlebar::win::FindUnityWndClass();
+    if (!hwndDiag || !IsWindow(hwndDiag)) hwndDiag = x::features::titlebar::win::FindGameWindow();
+    if (hwndDiag && IsWindow(hwndDiag)) {
+        RECT cr{};
+        POINT origin{};
+        if (GetClientRect(hwndDiag, &cr) && ClientToScreen(hwndDiag, &origin)) {
+            clientL = origin.x;
+            clientT = origin.y;
+            clientR = origin.x + (cr.right - cr.left);
+            clientB = origin.y + (cr.bottom - cr.top);
+            constexpr long kPad = 24;
+            for (const POINT& p : outScreen) {
+                if (p.x < clientL - kPad || p.x > clientR + kPad || p.y < clientT - kPad ||
+                    p.y > clientB + kPad)
+                    ++outsideN;
+            }
+        }
+    }
     Log("MapBatch decrypt=%d mode=%s firstRaw=(%.3f,%.3f) firstCursor=(%.1f,%.1f) "
-        "screenSpan=(%ld,%ld) collapsed=%d verifyMaxErr=%.2f panelCorners=%d",
+        "screenSpan=(%ld,%ld) collapsed=%d outside=%d/%zu clientLTRB=(%ld,%ld,%ld,%ld) "
+        "verifyMaxErr=%.2f panelCorners=%d",
         alreadyPx ? 0 : 1, ctx.mapMode ? ctx.mapMode : "?", localPts[0].x, localPts[0].y,
-        cursorLocal[0].x, cursorLocal[0].y, spanX, spanY, collapsed ? 1 : 0, ctx.verifyMaxErr,
+        cursorLocal[0].x, cursorLocal[0].y, spanX, spanY, collapsed ? 1 : 0, outsideN,
+        outScreen.size(), clientL, clientT, clientR, clientB, ctx.verifyMaxErr,
         ctx.havePanelCorners ? 1 : 0);
     if (collapsed) {
         // 保留 outScreen 供 caller 落盘取证；勿清空。
@@ -1537,9 +1641,12 @@ bool TryBringGameForeground(const char* why, bool force) {
     if (attachFore) AttachThreadInput(curTid, foreTid, FALSE);
 
     const bool ok = IsGameForeground();
-    x::runtime::LogI("AutoLieFocus", "%s (%s) attach-SFW force=%d set=%d fg=%d",
-                     ok ? "ok" : "weak", why ? why : "?", force ? 1 : 0, setOk ? 1 : 0,
-                     ok ? 1 : 0);
+    // 焦点日志必须留住：0.1.114 那次客户报的「鼠标跟着轨迹动、但焦点不在游戏窗口」，
+    // 判据就是这条的 fg=0。挤在 x.jsonl 里会被高频通道冲掉。
+    char buf[220]{};
+    snprintf(buf, sizeof(buf), "%s (%s) attach-SFW force=%d set=%d fg=%d", ok ? "ok" : "weak",
+             why ? why : "?", force ? 1 : 0, setOk ? 1 : 0, ok ? 1 : 0);
+    lie_log::Line("AutoLieFocus", buf);
     return ok;
 }
 

@@ -1,8 +1,11 @@
 #include "anti_macro_follower.h"
 #include "anti_macro_port.h"
+#include "lie_log.h"
+#include "lie_stats.h"
 #include "mouse_region_overlay.h"
 #include "mouse_trajectory_sim.h"
 
+#include "../notify/notify.h"
 #include "../simple_combat/simple_combat.h"
 #include "../titlebar/titlebar_win.h"
 #include "../../runtime/bin_dir.h"
@@ -31,6 +34,10 @@ constexpr DWORD kFrameReassertMs = 30;
 constexpr DWORD kProgressLogMs = 1000;
 constexpr DWORD kFocusBringEveryMs = 400;
 constexpr int kMapFailBudget = 3;
+// 建图连败到这个数就报警：plan 重试节流 800ms，5 次≈4s，仍在求解窗内来得及提醒人工接手。
+constexpr int kMapFailNotifyStreak = 5;
+// 已 follow 但这么久没挪过光标 = 帧钩子没跳 / 移动一直被拒；脉冲里静默返回，只能在这兜。
+constexpr DWORD kPulseStallWarnMs = 1500;
 // 闭环节：桌面点位误差（GetCursorPos vs 计划）；对照 Artale local 3px，桌面放宽到 8。
 constexpr float kCalibDesktopMaxErrPx = 8.f;
 
@@ -38,6 +45,9 @@ struct PhysicalPlan {
     void* instance = nullptr;
     void* mouseList = nullptr;
     int pointCount = 0;
+    // screenPoints 是**绝对桌面坐标**，只在建 plan 那一刻有效。客户改分辨率 / 拖窗 / 切全屏
+    // 之后整条轨迹就偏了，所以连客户区一起快照，每拍比对，不一致就强制重建。
+    RECT clientSnapshot{};
     POINT screenPoints[kPosCount]{};
     bool havePanelCorners = false;
     POINT panelCorners[4]{};
@@ -78,6 +88,12 @@ std::atomic<uint32_t> gPulseMoves{0};
 std::atomic<uint32_t> gPulseMissed{0};
 std::atomic<uint32_t> gPulseFails{0};
 std::atomic<uint32_t> gPulseReasserts{0};
+// 脉冲跑在主泵上，LogI 有磁盘 IO，绝不能在那打日志：异常只累加计数，由 worker 侧 Tick 播报。
+std::atomic<uint32_t> gPulseBadSample{0};
+uint32_t gPulseBadSampleLogged = 0;
+DWORD gPulseStallLoggedMs = 0;
+int gMapFailStreak = 0;
+bool gMapFailNotified = false;
 
 std::mutex gCursorMtx;
 bool gClipActive = false;
@@ -88,6 +104,24 @@ DWORD gLastPlanAttempt = 0;
 DWORD gLastProgressLog = 0;
 DWORD gLastFocusBringMs = 0;
 bool gWasNonFiniteOpen = false;
+// 谓词降级（主泵拥堵 → 快照过期 → 一律报「没开」）的起始时刻。跟随中撞上它必须按住不动：
+// Abort 会把光标弹回答题前的位置，而游戏那几帧照采，轨迹里就多一段人为瞬移。
+// BIN aa29bc 08-10 22:45：samples 288/330 时降级，光标被弹走约 260 ms（约 7~8 个采样点），
+// 泵恢复后又被当成新题重开，接着走完 330 交了卷 —— 交上去的轨迹是脏的。
+DWORD gStaleSinceMs = 0;
+// 按住的上限。真关闭时泵是好的（谓词照样算得出「没开」且新鲜），所以走到这条只可能是泵真卡死，
+// 那时测谎大概也黄了，放手让原关闭路径收尾。
+constexpr DWORD kPredStaleHoldMs = 3000;
+// 服端判定只落一次（_isResultRecv 置位后 _isSuccess 才有意义）。
+bool gVerdictLogged = false;
+// 空闲期谓词 stale = 我们对测谎面板是瞎的：题真弹出来也读不到，既不留日志也没人答。
+// 客户报 08-11 05:20 测谎失败，而那个时段（同期 83 次 err=205 断线）日志里一行测谎都没有
+// —— 恰恰是这种情形没法证伪。这三个量就是为了把「瞎了多久」记下来。
+DWORD gBlindSinceMs = 0;
+DWORD gBlindLoggedMs = 0;
+DWORD gBlindTotalMs = 0;
+constexpr DWORD kBlindWarnMs = 2000;
+constexpr DWORD kBlindWarnEveryMs = 15000;
 // 求解起点强制终映射一次（准备窗窗口可能移动；短轨也可能刚补满）。
 bool gForceRemapOnce = false;
 bool gSolvingRemapDone = false;
@@ -110,7 +144,7 @@ void Log(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    x::runtime::LogI("AutoLieMouse", "%s", buf);
+    lie_log::Line("AutoLieMouse", buf);
 }
 
 void EnsureDirRecursive(const std::string& path) {
@@ -135,11 +169,27 @@ bool WriteTextFile(const std::string& path, const std::string& body) {
     return n == body.size();
 }
 
+// 客户区在桌面坐标下的矩形。plan 的屏幕点全挂在它上面，变了就得整条重算。
+bool ReadGameClientRectDesktop(RECT& out) {
+    HWND hwnd = x::features::titlebar::win::FindUnityWndClass();
+    if (!hwnd || !IsWindow(hwnd)) hwnd = x::features::titlebar::win::FindGameWindow();
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    RECT client{};
+    POINT origin{};
+    if (!GetClientRect(hwnd, &client) || !ClientToScreen(hwnd, &origin)) return false;
+    out.left = origin.x;
+    out.top = origin.y;
+    out.right = origin.x + (client.right - client.left);
+    out.bottom = origin.y + (client.bottom - client.top);
+    return out.right > out.left && out.bottom > out.top;
+}
+
 // phase: have-path（仅 local）| mapped（含 screen，成功）| map-fail（local + 半成品 screen）
 // gPathDumpMapped 仅在 phase=="mapped" 时置位；map-fail 不得挡后续成功升级。
 void DumpMousePathEvidence(void* inst, const std::vector<anti_macro_port::Vec2>& path,
                            const std::vector<POINT>* screen, const POINT* panelCorners4,
-                           bool havePanelCorners, const char* phase, const char* failWhy) {
+                           bool havePanelCorners, const char* phase, const char* failWhy,
+                           const anti_macro_port::MapDiag* diag = nullptr) {
     if (!inst || path.empty()) return;
     const bool mapped = screen && screen->size() == path.size();
     // 同实例：已有成功映射档 → 跳过；仅有 local 档且本次仍无 screen → 跳过；有 screen → 可升级覆写。
@@ -205,6 +255,22 @@ void DumpMousePathEvidence(void* inst, const std::vector<anti_macro_port::Vec2>&
         haveDesktopPanel = (panelR - panelL) >= 8 && (panelB - panelT) >= 8;
     }
 
+    // 四角只可能来自仿射（TryGet 凑伪面板的回退已删）；unknown 说明有人又加了别的来源。
+    const char* panelSource = !havePanelCorners               ? "none"
+                              : (diag && diag->panelFromAffine) ? "affine"
+                                                                : "unknown";
+
+    // 四角原值（BL,BR,TR,TL，与 anti_macro_port::ResolvePanelGeometry 同序）。
+    // 只落 AABB 会把倾斜面板抹平，模拟题回放这份几何时就复现不出真实形状。
+    long cx[4]{};
+    long cy[4]{};
+    if (havePanelCorners && panelCorners4) {
+        for (int i = 0; i < 4; ++i) {
+            cx[i] = panelCorners4[i].x;
+            cy[i] = panelCorners4[i].y;
+        }
+    }
+
     // path_local.jsonl
     {
         std::string body;
@@ -248,11 +314,14 @@ void DumpMousePathEvidence(void* inst, const std::vector<anti_macro_port::Vec2>&
     {
         std::string inc;
         inc.reserve(path.size() * 36 + 512);
-        char hdr[512]{};
+        // 头部含 UTF-8 中文注释 + 11 个常量，实测约 560 字节：旧的 512 会被 snprintf 从
+        // kMouseSimPanelClientL 中间截断，落盘的 .inc 缺数组声明头、编不过（0E4D4B42F0A0 单）。
+        char hdr[1024]{};
         snprintf(hdr, sizeof(hdr),
                  "// Auto-generated from live NonFinite dump id=%s phase=%s\n"
                  "// Product=经典版 TWMS. Local AABB UV (not Artale desktop UV).\n"
                  "// localAABB=(%.3f,%.3f)-(%.3f,%.3f) pts=%zu mapped=%d\n"
+                 "// rect=(%.1f,%.1f,%.1f,%.1f) mapMode=%s panelSource=%s\n"
                  "constexpr int kMouseSimPointCount = %zu;\n"
                  "constexpr long kMouseSimPanelL = %ld;\n"
                  "constexpr long kMouseSimPanelT = %ld;\n"
@@ -266,7 +335,11 @@ void DumpMousePathEvidence(void* inst, const std::vector<anti_macro_port::Vec2>&
                  "constexpr float kMouseSimPanelClientB = %.1ff;\n"
                  "constexpr float kMouseSimUv[kMouseSimPointCount][2] = {\n",
                  gPathDumpId, phase ? phase : "?", minLx, minLy, maxLx, maxLy, path.size(),
-                 mapped ? 1 : 0, path.size(),
+                 mapped ? 1 : 0, diag && diag->haveRect ? diag->rectX : 0.f,
+                 diag && diag->haveRect ? diag->rectY : 0.f,
+                 diag && diag->haveRect ? diag->rectW : 0.f,
+                 diag && diag->haveRect ? diag->rectH : 0.f,
+                 diag && diag->mode ? diag->mode : "?", panelSource, path.size(),
                  haveDesktopPanel ? panelL : 0L, haveDesktopPanel ? panelT : 0L,
                  haveDesktopPanel ? panelR : 0L, haveDesktopPanel ? panelB : 0L,
                  clientW > 0 ? clientW : 1280, clientH > 0 ? clientH : 720,
@@ -309,12 +382,24 @@ void DumpMousePathEvidence(void* inst, const std::vector<anti_macro_port::Vec2>&
                  "localAABB=%.6f,%.6f,%.6f,%.6f\n"
                  "client=%dx%d origin=(%ld,%ld)\n"
                  "panelDesktop=LTRB(%ld,%ld,%ld,%ld)\n"
+                 "panelCorners=%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n"
+                 "panelSource=%s\n"
+                 "mapMode=%s\n"
+                 "verifyMaxErr=%.2f\n"
+                 "rect=%.3f,%.3f,%.3f,%.3f\n"
+                 "cursorCanvas=750x500\n"
                  "firstLocal=%.6f,%.6f\n"
                  "lastLocal=%.6f,%.6f\n",
                  gPathDumpId, phase ? phase : "?", failWhy ? failWhy : "",
                  static_cast<unsigned long>(now), path.size(), mapped ? 1 : 0,
                  havePanelCorners ? 1 : 0, minLx, minLy, maxLx, maxLy, clientW, clientH,
-                 originX, originY, panelL, panelT, panelR, panelB, path.front().x,
+                 originX, originY, panelL, panelT, panelR, panelB, cx[0], cy[0], cx[1], cy[1],
+                 cx[2], cy[2], cx[3], cy[3], panelSource,
+                 diag && diag->mode ? diag->mode : "?", diag ? diag->verifyMaxErr : -1.f,
+                 diag && diag->haveRect ? diag->rectX : 0.f,
+                 diag && diag->haveRect ? diag->rectY : 0.f,
+                 diag && diag->haveRect ? diag->rectW : 0.f,
+                 diag && diag->haveRect ? diag->rectH : 0.f, path.front().x,
                  path.front().y, path.back().x, path.back().y);
         (void)WriteTextFile(dir + "\\meta.txt", meta);
     }
@@ -396,23 +481,41 @@ void PublishOverlayWaiting(const char* label) {
     if (mouse_trajectory_sim::IsRunning()) return;
     if (!mouse_region_overlay::IsEnabled()) return;
     mouse_region_overlay::Snapshot snap{};
-    // 无真题计划时也画合成面板青框（与模拟 SYNTH 同几何），避免「只有左上角字、看不见区域」。
-    RECT panel{};
-    bool live = false;
-    if (mouse_trajectory_sim::ResolveTestPanel(panel, &live) &&
-        panel.right - panel.left >= 40 && panel.bottom - panel.top >= 40) {
+    // 无真题计划时也画回放/合成面板青框，避免「只有左上角字、看不见区域」。
+    mouse_trajectory_sim::PanelQuad panel{};
+    auto panelSrc = mouse_trajectory_sim::PanelSource::Synth;
+    long spanX = 0;
+    long spanY = 0;
+    if (mouse_trajectory_sim::ResolveTestPanelQuad(panel, &panelSrc)) {
+        long minX = panel.c[0].x, maxX = panel.c[0].x;
+        long minY = panel.c[0].y, maxY = panel.c[0].y;
+        for (int i = 1; i < 4; ++i) {
+            minX = (std::min)(minX, panel.c[i].x);
+            maxX = (std::max)(maxX, panel.c[i].x);
+            minY = (std::min)(minY, panel.c[i].y);
+            maxY = (std::max)(maxY, panel.c[i].y);
+        }
+        spanX = maxX - minX;
+        spanY = maxY - minY;
+    }
+    if (spanX >= 40 && spanY >= 40) {
         snap.valid = true;
-        snap.corners[0] = {panel.left, panel.bottom};
-        snap.corners[1] = {panel.right, panel.bottom};
-        snap.corners[2] = {panel.right, panel.top};
-        snap.corners[3] = {panel.left, panel.top};
-        snap.center.x = (panel.left + panel.right) / 2;
-        snap.center.y = (panel.top + panel.bottom) / 2;
+        long sumX = 0;
+        long sumY = 0;
+        for (int i = 0; i < 4; ++i) {
+            snap.corners[i] = panel.c[i];
+            sumX += panel.c[i].x;
+            sumY += panel.c[i].y;
+        }
+        snap.center.x = sumX / 4;
+        snap.center.y = sumY / 4;
         if (label && label[0]) {
             strncpy_s(snap.label, label, _TRUNCATE);
         } else {
-            strncpy_s(snap.label, live ? "waiting — LIVE panel" : "waiting — SYNTH panel",
-                      _TRUNCATE);
+            char waiting[64]{};
+            snprintf(waiting, sizeof(waiting), "waiting — %s panel",
+                     mouse_trajectory_sim::PanelSourceTag(panelSrc));
+            strncpy_s(snap.label, waiting, _TRUNCATE);
         }
     } else if (label && label[0]) {
         strncpy_s(snap.label, label, _TRUNCATE);
@@ -485,6 +588,14 @@ void Abort(const char* reason) {
     gFocusLost.store(false);
     gAnswerDone.store(false, std::memory_order_release);
     ClearPublishedPlan();
+    gPulseBadSample.store(0, std::memory_order_relaxed);
+    gPulseBadSampleLogged = 0;
+    gPulseStallLoggedMs = 0;
+    gMapFailStreak = 0;
+    if (gMapFailNotified) {
+        gMapFailNotified = false;
+        x::features::notify::DismissNotification("auto-lie-map-fail");
+    }
     RefreshAutoLieHardPause();
 }
 
@@ -502,6 +613,25 @@ void SoftStopFollow(const char* reason, int samples, int planPts) {
     RefreshAutoLieHardPause();
 }
 
+// 服端判定回来时记一笔。这是客户端唯一能看到的官方结果：我们自己的 answered 只代表
+// 「把 330 个点交出去了」，交上去的轨迹合不合格得看 _isSuccess。
+// 读的时机在交卷后的淡出期 —— 那会儿 UI 还开着、实例活着；等 UI 关了对象就可能没了。
+void LogServerVerdict(void* inst) {
+    if (gVerdictLogged || !inst) return;
+    if (!anti_macro_port::ReadNonFiniteIsResultRecv(inst)) return;
+    gVerdictLogged = true;
+    const int verdict = anti_macro_port::ReadNonFiniteIsSuccess(inst);
+    Log("server verdict success=%d samples=%d/%d id=%s", verdict,
+        anti_macro_port::ReadMouseSampleCount(inst), kPosCount,
+        gPathDumpId[0] ? gPathDumpId : "-");
+    // 只认干净的 0/1。读不到（-1）或读到别的字节都说明那个推导出来的偏移不对，
+    // 宁可不记账，也别把垃圾当「服端判通过」写进战绩。
+    if (verdict == 0 || verdict == 1)
+        lie_stats::RecordVerdict(lie_stats::Kind::Mouse, verdict == 1);
+    else
+        Log("server verdict byte=%d not bool — _isSuccess offset suspect, skip recording", verdict);
+}
+
 void FinishAnswerSent(const char* reason, int samples, int planPts) {
     Log("%s samples=%d/%d moves=%u missed=%u — resume world (ui may still open)",
         reason ? reason : "answer-sent", samples, planPts,
@@ -512,6 +642,7 @@ void FinishAnswerSent(const char* reason, int samples, int planPts) {
     gFollowing.store(false, std::memory_order_release);
     gFocusLost.store(false, std::memory_order_release);
     gAnswerDone.store(true, std::memory_order_release);
+    lie_stats::RecordOutcome(lie_stats::Kind::Mouse, lie_stats::Outcome::Answered);
     ClearPublishedPlan();
     RefreshAutoLieHardPause();
 }
@@ -551,7 +682,11 @@ void LieFramePulse(void* /*user*/) {
     if (!plan || !plan->mouseList || plan->pointCount < 2) return;
 
     const int sampleCount = ReadListSizeFast(plan->mouseList);
-    if (sampleCount < 0 || sampleCount > plan->pointCount) return;
+    if (sampleCount < 0 || sampleCount > plan->pointCount) {
+        // 原生采样数越过 plan 长度 = 读到脏 List 或 plan 与实例错配：静默返回会让人完全无从查起。
+        gPulseBadSample.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (sampleCount >= plan->pointCount) return;
 
     const int previous = gPulseLastSample.load(std::memory_order_acquire);
@@ -596,6 +731,22 @@ bool BuildAndPublishPlan(void* inst, DWORD now) {
         Log("plan final-remap (solving start / preempt)");
     }
     // 已发布计划：rawPos 仍在增长则重建；已 follow 且已开始采样则锁死。
+    if (!forceRefresh) {
+        if (const PhysicalPlan* existing = PublishedPlan();
+            gBuildingInstance == inst && existing) {
+            // 客户区变了（改分辨率 / 拖窗 / 切全屏）优先于下面的锁死：屏幕点已经全偏，
+            // 与其按旧坐标继续跟，不如重算。点序不变，samples 不受影响。
+            RECT nowClient{};
+            if (ReadGameClientRectDesktop(nowClient) &&
+                !EqualRect(&nowClient, &existing->clientSnapshot)) {
+                Log("plan refresh: client rect changed (%ld,%ld,%ld,%ld) -> (%ld,%ld,%ld,%ld)",
+                    existing->clientSnapshot.left, existing->clientSnapshot.top,
+                    existing->clientSnapshot.right, existing->clientSnapshot.bottom, nowClient.left,
+                    nowClient.top, nowClient.right, nowClient.bottom);
+                forceRefresh = true;
+            }
+        }
+    }
     if (!forceRefresh) {
         if (const PhysicalPlan* existing = PublishedPlan();
             gBuildingInstance == inst && existing) {
@@ -647,11 +798,27 @@ bool BuildAndPublishPlan(void* inst, DWORD now) {
     std::vector<POINT> screen;
     POINT panelCorners[4]{};
     bool havePanelCorners = false;
-    if (!anti_macro_port::MapWinCursorBatch(rect, path, screen, panelCorners, &havePanelCorners) ||
+    anti_macro_port::MapDiag diag{};
+    if (!anti_macro_port::MapWinCursorBatch(rect, path, screen, panelCorners, &havePanelCorners,
+                                            &diag) ||
         screen.size() != path.size()) {
         DumpMousePathEvidence(inst, path, screen.empty() ? nullptr : &screen, nullptr, false,
-                              "map-fail", "map-batch-or-collapsed");
-        Log("plan fail: map-batch/collapsed (refuse follow — E175 kick guard)");
+                              "map-fail", "map-batch-or-collapsed", &diag);
+        ++gMapFailStreak;
+        Log("plan fail: map-batch/collapsed streak=%d mode=%s (refuse follow — E175 kick guard)",
+            gMapFailStreak, diag.mode ? diag.mode : "?");
+        // 仿射已是唯一主映射（TryGet 兜底已删），连败就是这题不会有人答了 —— 必须叫人。
+        if (gMapFailStreak >= kMapFailNotifyStreak && !gMapFailNotified) {
+            gMapFailNotified = true;
+            char body[192]{};
+            snprintf(body, sizeof(body),
+                     "轨迹映射连续失败 %d 次（%s），本题不会自动作答，请手动完成测谎。",
+                     gMapFailStreak, diag.mode ? diag.mode : "?");
+            x::features::notify::PublishNotification(x::features::notify::NotificationEvent{
+                x::features::notify::NotificationKind::Danger, "auto-lie-map-fail",
+                "测谎无法自动作答", body, 15000});
+            Log("map-fail notify raised (streak=%d)", gMapFailStreak);
+        }
         return false;
     }
 
@@ -673,6 +840,7 @@ bool BuildAndPublishPlan(void* inst, DWORD now) {
     plan.instance = inst;
     plan.mouseList = mouseList;
     plan.pointCount = static_cast<int>(screen.size());
+    (void)ReadGameClientRectDesktop(plan.clientSnapshot);
     for (int i = 0; i < plan.pointCount; ++i) plan.screenPoints[i] = screen[static_cast<size_t>(i)];
 
     // 闭环节：首/中/末题面局部（Decrypt 后）
@@ -688,41 +856,14 @@ bool BuildAndPublishPlan(void* inst, DWORD now) {
         plan.verifyLocal[i] = toCursor(path[static_cast<size_t>(idx)]);
     }
 
-    // 题目区域：优先用面板四角仿射几何（MapBatch 主路径）；否则回退路径 AABB。
-    if (havePanelCorners) {
-        plan.havePanelCorners = true;
-        std::memcpy(plan.panelCorners, panelCorners, sizeof(panelCorners));
-    } else {
-        float minLx = path[0].x;
-        float maxLx = path[0].x;
-        float minLy = path[0].y;
-        float maxLy = path[0].y;
-        for (const auto& p : path) {
-            minLx = (std::min)(minLx, p.x);
-            maxLx = (std::max)(maxLx, p.x);
-            minLy = (std::min)(minLy, p.y);
-            maxLy = (std::max)(maxLy, p.y);
-        }
-        auto cornerLocal = [&](float x, float y) {
-            return toCursor(anti_macro_port::Vec2{x, y});
-        };
-        const auto cL0 = cornerLocal(minLx, minLy);
-        const auto cL1 = cornerLocal(maxLx, minLy);
-        const auto cL2 = cornerLocal(maxLx, maxLy);
-        const auto cL3 = cornerLocal(minLx, maxLy);
-        POINT corners[4]{};
-        const bool c0 = anti_macro_port::TryMapWinCursor(rect, cL0.x, cL0.y, corners[0]);
-        const bool c1 = anti_macro_port::TryMapWinCursor(rect, cL1.x, cL1.y, corners[1]);
-        const bool c2 = anti_macro_port::TryMapWinCursor(rect, cL2.x, cL2.y, corners[2]);
-        const bool c3 = anti_macro_port::TryMapWinCursor(rect, cL3.x, cL3.y, corners[3]);
-        if (c0 && c1 && c2 && c3) {
-            plan.havePanelCorners = true;
-            std::memcpy(plan.panelCorners, corners, sizeof(corners));
-        }
-    }
+    // 题目区域只认仿射四角。MapBatch 现在唯一主路径就是仿射，成功即必有四角；
+    // 旧的「TryGet 映 local AABB 凑四角」回退已删——它凑出来的是漏乘 canvas scale 的伪面板
+    // （0.1.116 两台机的 panelSource=tryget-aabb 就是它，右边界还越出了客户区）。
+    plan.havePanelCorners = havePanelCorners;
+    if (havePanelCorners) std::memcpy(plan.panelCorners, panelCorners, sizeof(panelCorners));
 
     DumpMousePathEvidence(inst, path, &screen, plan.havePanelCorners ? plan.panelCorners : nullptr,
-                          plan.havePanelCorners, "mapped", nullptr);
+                          plan.havePanelCorners, "mapped", nullptr, &diag);
 
     gPulseLastSample.store(-1, std::memory_order_release);
     gPulseLastMoveMs.store(0, std::memory_order_release);
@@ -730,15 +871,20 @@ bool BuildAndPublishPlan(void* inst, DWORD now) {
     gPulseMissed.store(0, std::memory_order_relaxed);
     gPulseFails.store(0, std::memory_order_relaxed);
     gPulseReasserts.store(0, std::memory_order_relaxed);
+    gPulseBadSample.store(0, std::memory_order_relaxed);
+    gPulseBadSampleLogged = 0;
+    gPulseStallLoggedMs = 0;
+    gMapFailStreak = 0;
     gPublishedPlan.store(token, std::memory_order_release);
     gBuildingInstance = inst;
-    // 准备窗：新计划重跑闭环节；求解期补映射来不及三拍，标 Passed（依赖 MapBatch verify）。
     ClearCalibState(false);
     gCalibPlanToken = token;
+    // 闭环节要把光标实挪到首/中/末三点，求解期做等于往原生 mousePosList 塞三个乱序点。
+    // 求解期只靠 MapBatch 的客户区越界门 + panel-affine verify 把关（0.1.114 事故后已收紧）。
     const int frameNow = anti_macro_port::ReadNonFiniteTickFrame(inst);
     if (frameNow >= kStartSolvingFrame) {
         gCalibPhase = CalibPhase::Passed;
-        Log("calib skip (solving-frame) token=%u frame=%d", token, frameNow);
+        Log("calib skip (solving-frame) token=%u frame=%d — bounds guard only", token, frameNow);
     } else {
         gCalibPhase = CalibPhase::Idle;
     }
@@ -864,11 +1010,38 @@ bool TickCalibration(void* inst, DWORD now) {
     return true;
 }
 
+// missed 取证：lie_stats 补记 missed 时回调一次，把现场拼进 lie_events\missed.txt。
+// 只读原子量——回调可能落在帧脉冲线程上，碰 il2cpp 会违反托管调用线程规约。
+//
+// 最该看的两项：sample=?/330 说明轨迹播到哪一点断的，sinceMove 说明是不是早就停了。
+// aa29bc 那次 missed 之所以查不出来，就是缺这段——证据只证明了「映射是对的」。
+void FillMissedSnapshot(char* out, int outSz) {
+    if (!out || outSz <= 0) return;
+    const DWORD now = GetTickCount();
+    const DWORD lastMove = gPulseLastMoveMs.load(std::memory_order_acquire);
+    snprintf(out, static_cast<size_t>(outSz),
+             "follower enabled=%d following=%d ui=%d quizPaused=%d focusLost=%d playback=%d "
+             "answerDone=%d\r\n"
+             "plan published=%u seq=%u mapFailStreak=%d building=%d calib=%d\r\n"
+             "pulse sample=%d/%d moves=%u missed=%u fails=%u reasserts=%u badSample=%u\r\n"
+             "pulse sinceMove=%lums\r\n"
+             "lastDump id=%.47s mapped=%d",
+             gEnabled.load() ? 1 : 0, gFollowing.load() ? 1 : 0, gUiVisible.load() ? 1 : 0,
+             gQuizPaused.load() ? 1 : 0, gFocusLost.load() ? 1 : 0, gPlayback.load() ? 1 : 0,
+             gAnswerDone.load() ? 1 : 0, gPublishedPlan.load(), gPlanSeq.load(), gMapFailStreak,
+             gBuildingInstance ? 1 : 0, static_cast<int>(gCalibPhase), gPulseLastSample.load(),
+             kPosCount, gPulseMoves.load(), gPulseMissed.load(), gPulseFails.load(),
+             gPulseReasserts.load(), gPulseBadSample.load(),
+             static_cast<unsigned long>(lastMove ? now - lastMove : 0), gPathDumpId,
+             gPathDumpMapped ? 1 : 0);
+}
+
 }  // namespace
 
 void Init() {
     gEnabled.store(false);
     x::runtime::main_thread::SetLieFrameTick(&LieFramePulse, nullptr);
+    lie_stats::SetSnapshotProvider(lie_stats::Kind::Mouse, &FillMissedSnapshot);
     Abort("init");
 }
 
@@ -884,6 +1057,13 @@ void SetRegionOverlayEnabled(bool enabled) {
 }
 
 bool IsRegionOverlayPref() { return gOverlayPref.load(std::memory_order_acquire); }
+
+bool TryCopyPublishedPanelCorners(POINT out4[4]) {
+    const PhysicalPlan* plan = PublishedPlan();
+    if (!plan || !plan->havePanelCorners) return false;
+    std::memcpy(out4, plan->panelCorners, sizeof(POINT) * 4);
+    return true;
+}
 
 bool TryCopyPublishedPanelRect(RECT& out) {
     const PhysicalPlan* plan = PublishedPlan();
@@ -986,14 +1166,68 @@ void Tick(DWORD now) {
     }
 
     const bool open = anti_macro_port::IsNonFiniteOpen();
+
+    // 「没开」有两种：真关了，和主泵拥堵导致谓词快照过期后的降级。跟随中途只认前者。
+    // 误认后者的代价不是记错账，而是 Abort 把光标弹回答题前的位置、游戏照采，
+    // 轨迹里留一段人为瞬移（BIN aa29bc 08-10 22:45）。泵恢复通常在几百毫秒内，按住等它。
+    if (!open && !anti_macro_port::IsPredFresh() &&
+        (gFollowing.load() || gClipActive || gPublishedPlan.load(std::memory_order_acquire))) {
+        if (!gStaleSinceMs) {
+            gStaleSinceMs = now ? now : 1;
+            Log("pred stale while following — hold cursor+plan (samples=%d)",
+                gPulseLastSample.load());
+        }
+        if (now - gStaleSinceMs < kPredStaleHoldMs) {
+            // 什么都不动：gUiVisible / gWasNonFiniteOpen / 计划 / 光标夹全部保持，
+            // 帧脉冲继续按已发布计划走点（mouseList 对象没被销毁，读 Count 依旧有效）。
+            RefreshAutoLieHardPause();
+            return;
+        }
+        Log("pred stale %lums >= hold — treat as closed", static_cast<unsigned long>(now - gStaleSinceMs));
+    }
+    gStaleSinceMs = 0;
+
+    // 没在跟随时的 stale 同样要留痕：那段时间面板弹出来我们也发现不了，事后只剩一片空白。
+    // 走到这里 gEnabled 必为真（上面已 return），所以这就是「该盯着却盯不住」的时间。
+    //
+    // 但只有人在图里才算数。换图 / 软登录期泵会主动 fast-fail 掉所有 job（InterStage quiesce），
+    // 谓词必然 stale——那时人根本不在图里，测谎题压根不会弹。BIN d43e77（08-11 20:10~21:13）
+    // 八次盲区共 51 s，全是自动换频道换出来的（stickyCh 17→18→19，playReady=0 inMap=0），
+    // 一条真风险都没有；照报只会把「图里泵卡住」这种真该看的淹在噪音里。
+    // GetPumpPhase 是 world_port 维护的纯读快照，不像 IsPlayReady 会反写相位。
+    const bool inMap =
+        x::runtime::main_thread::GetPumpPhase() == x::runtime::main_thread::PumpPhase::InMap;
+    if (!anti_macro_port::IsPredFresh() && inMap) {
+        if (!gBlindSinceMs) gBlindSinceMs = now ? now : 1;
+        const DWORD held = now - gBlindSinceMs;
+        if (held >= kBlindWarnMs &&
+            (!gBlindLoggedMs || now - gBlindLoggedMs >= kBlindWarnEveryMs)) {
+            gBlindLoggedMs = now;
+            Log("pred blind %lums (session total %lums) — a quiz popping now would go unnoticed",
+                static_cast<unsigned long>(held),
+                static_cast<unsigned long>(gBlindTotalMs + held));
+        }
+    } else if (gBlindSinceMs) {
+        const DWORD held = now - gBlindSinceMs;
+        gBlindTotalMs += held;
+        gBlindSinceMs = 0;
+        gBlindLoggedMs = 0;
+        if (held >= kBlindWarnMs)
+            Log("pred blind recovered after %lums (session total %lums)",
+                static_cast<unsigned long>(held), static_cast<unsigned long>(gBlindTotalMs));
+    }
+
     gUiVisible.store(open);
     if (!open) {
+        // 开过题却没走到 FinishAnswerSent：自动作答没成，闩会在这里补记 missed。
+        if (gWasNonFiniteOpen) lie_stats::NotifyClosed(lie_stats::Kind::Mouse);
         gWasNonFiniteOpen = false;
         gForceRemapOnce = false;
         gSolvingRemapDone = false;
         gPathDumpInst = nullptr;
         gPathDumpMapped = false;
         gPathDumpId[0] = '\0';
+        gVerdictLogged = false;
         gAnswerDone.store(false, std::memory_order_release);
         if (gFollowing.load() || gClipActive || gPublishedPlan.load(std::memory_order_acquire))
             Abort("ui-closed");
@@ -1008,7 +1242,10 @@ void Tick(DWORD now) {
         gWasNonFiniteOpen = true;
         gSolvingRemapDone = false;
         gForceRemapOnce = false;
+        gVerdictLogged = false;
         gAnswerDone.store(false, std::memory_order_release);
+        lie_stats::RecordSeen(lie_stats::Kind::Mouse,
+                              reinterpret_cast<uint64_t>(anti_macro_port::GetNonFinite()));
         Log("NonFinite open — force foreground (Attach-SFW)");
         anti_macro_port::TryBringGameForeground("lie-open", true);
         gLastFocusBringMs = now;
@@ -1024,16 +1261,22 @@ void Tick(DWORD now) {
 
     // 已交卷：淡出期只维持放闸，勿重建 plan / 再跟（对照 Artale answer-sent return）。
     if (gAnswerDone.load(std::memory_order_acquire)) {
+        // 服端结果就在这个窗口里回来。
+        LogServerVerdict(inst);
         RefreshAutoLieHardPause();
         if (mouse_region_overlay::IsEnabled())
             PublishOverlayWaiting("answer-done — waiting UI close");
         return;
     }
 
+    const int frame = anti_macro_port::ReadNonFiniteTickFrame(inst);
+
     // 交卷终态优先：_isResultRecv / POS_COUNT（对照 Artale recvResult / sendResult）。
-    {
+    // 只在求解期判：准备窗读到的 recv/samples 可能是实例复用的残值，误放闸会让整题不跟。
+    if (frame >= kStartSolvingFrame) {
         const int samplesEarly = anti_macro_port::ReadMouseSampleCount(inst);
         if (anti_macro_port::ReadNonFiniteIsResultRecv(inst)) {
+            LogServerVerdict(inst);
             FinishAnswerSent("answer-received", samplesEarly, kPosCount);
             if (mouse_region_overlay::IsEnabled())
                 PublishOverlayWaiting("answer-received — waiting UI close");
@@ -1064,7 +1307,6 @@ void Tick(DWORD now) {
         Log("focus restored");
     }
 
-    const int frame = anti_macro_port::ReadNonFiniteTickFrame(inst);
     if (frame < kStartSolvingFrame) {
         if (frame >= 0) (void)BuildAndPublishPlan(inst, now);
         gPlayback.store(false, std::memory_order_release);
@@ -1193,10 +1435,27 @@ void Tick(DWORD now) {
 
     if (!gLastProgressLog || now - gLastProgressLog >= kProgressLogMs) {
         gLastProgressLog = now;
-        Log("follow progress frame=%d samples=%d/%d moves=%u missed=%u fails=%u", frame, samples,
-            plan->pointCount, gPulseMoves.load(std::memory_order_relaxed),
+        const uint32_t badNow = gPulseBadSample.load(std::memory_order_relaxed);
+        Log("follow progress frame=%d samples=%d/%d moves=%u missed=%u fails=%u bad=%u", frame,
+            samples, plan->pointCount, gPulseMoves.load(std::memory_order_relaxed),
             gPulseMissed.load(std::memory_order_relaxed),
-            gPulseFails.load(std::memory_order_relaxed));
+            gPulseFails.load(std::memory_order_relaxed), badNow);
+        if (badNow > gPulseBadSampleLogged) {
+            gPulseBadSampleLogged = badNow;
+            Log("pulse bad-sample x%u — native count out of plan range (plan=%d) ; cursor idle",
+                badNow, plan->pointCount);
+        }
+        // 光标停滞：跟随中却长时间没挪过。脉冲侧只能静默返回，这里是唯一能发现它的地方。
+        const DWORD lastMove = gPulseLastMoveMs.load(std::memory_order_acquire);
+        if (samples < plan->pointCount && lastMove && now - lastMove >= kPulseStallWarnMs &&
+            (!gPulseStallLoggedMs || now - gPulseStallLoggedMs >= kProgressLogMs * 3)) {
+            gPulseStallLoggedMs = now;
+            Log("pulse stall %lums (samples=%d/%d moves=%u fails=%u) — frame hook not firing or "
+                "move refused",
+                now - lastMove, samples, plan->pointCount,
+                gPulseMoves.load(std::memory_order_relaxed),
+                gPulseFails.load(std::memory_order_relaxed));
+        }
         if (gPulseFails.load(std::memory_order_relaxed) >=
             static_cast<uint32_t>(kMapFailBudget) * 10u) {
             Abort("pulse-fail-budget");

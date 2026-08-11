@@ -115,9 +115,9 @@ export function createLogFetchQueue(opts) {
       err.status = 400;
       throw err;
     }
-    // 同设备未完成的旧命令取消，避免堆叠
+    // 同设备未完成的旧命令取消，避免堆叠（含 acked：重新点名覆盖上传中任务）
     for (const [oldId, row] of [...byId.entries()]) {
-      if (row.status === "queued" || row.status === "offered") {
+      if (row.status === "queued" || row.status === "offered" || row.status === "acked") {
         if (matches(row, { machine, deviceId, macs: macs || mac, mac, token })) {
           row.status = "cancelled";
           byId.delete(oldId);
@@ -168,21 +168,28 @@ export function createLogFetchQueue(opts) {
     return { cancelled: n };
   }
 
-  /** access.json 探活时：ack 旧命令 + 下发待办 */
-  function onAccess(identity, ackId) {
+  /** access.json 探活：ack=已开传；done=上传结束；仅 queued|offered 再下发 pendingOp */
+  function onAccess(identity, ackId, doneId) {
     pruneExpired();
+    if (doneId) {
+      if (markDone(doneId)) {
+        logInfo(`log-fetch done id=${doneId}`);
+      }
+    }
     if (ackId) {
       const row = byId.get(String(ackId));
       if (row && matches(row, identity)) {
         row.status = "acked";
         row.ackedAt = ts();
         logInfo(`log-fetch acked id=${ackId}`);
-        // 保留短时供 clients 列表展示，随后 prune
+        // 无 Done 的旧客户端：约 60s 后 prune；新客户端应尽快 Done
         row.createdMs = Date.now() - (kTtlMs - 60_000);
       }
     }
     const pending = findActiveFor(identity);
     if (!pending) return null;
+    // acked：仍显示在 clients.statusFor，但不再反复下发 uploadLogs
+    if (pending.status === "acked") return null;
     if (pending.status === "queued" || pending.status === "offered") {
       pending.status = "offered";
       pending.offeredAt = ts();

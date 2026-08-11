@@ -16,7 +16,22 @@ void RequestStop(const char* why = nullptr);
 bool IsRunning();
 void Shutdown();
 
-// 解析测试面板桌面矩形：优先活 NonFinite 计划角点；否则客户区合成。
+// 面板四角（桌面坐标）；0=BL 1=BR 2=TR 3=TL，与 anti_macro_port::ResolvePanelGeometry 同序。
+// 真面板未必轴对齐，AABB 会把倾斜抹平，故映射走四角而非 RECT。
+struct PanelQuad {
+    POINT c[4]{};
+};
+
+enum class PanelSource {
+    Synth = 0,   // 按当前客户区比例缩放 fixture 里的面板常量
+    Replay = 1,  // 回放本机真题证据（state\lie_events\mouse_*\meta.txt）里的仿射四角
+    Live = 2,    // 当前活 NonFinite 计划的真面板
+};
+const char* PanelSourceTag(PanelSource src);
+
+// 解析测试面板：优先级 Live > Replay > Synth。
+bool ResolveTestPanelQuad(PanelQuad& out, PanelSource* src = nullptr);
+// AABB 壳（overlay 等只要外接矩形的调用方）；live 仅在 Live 档为真。
 bool ResolveTestPanel(RECT& out, bool* live = nullptr);
 
 // 泵线程脉冲（由 anti_macro_follower::LieFramePulse 调用）：若模拟在跑则夹光标并返回 true。

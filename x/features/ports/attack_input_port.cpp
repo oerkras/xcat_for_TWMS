@@ -1629,15 +1629,19 @@ void SetImmediateUp(bool on) {
     }
 }
 
-bool CanFirePrimary() {
+bool CanFirePrimaryEx(bool ignoreCombatInterval) {
     if (gFireSuppressed.load(std::memory_order_acquire)) return false;
-    // 泵拥堵作为软门的一部分：让战斗循环走 pace_wait 软路径，而不是把背压跳刀
-    // 误判成 OnFuncKey 硬失败（TryFirePrimary 里同样有此闸做直调兜底）。
     if (x::runtime::main_thread::IsCongested()) return false;
     const DWORD now = NowMs();
     FlushPendingUp(now);
+    if (ignoreCombatInterval) {
+        // 与 TryFirePrimaryEx(ignore) 对齐：只挡还没松完的键，不挡面板间隔。
+        return !gPendingUp.load(std::memory_order_acquire);
+    }
     return !SoftBlocked(now);
 }
+
+bool CanFirePrimary() { return CanFirePrimaryEx(/*ignoreCombatInterval=*/false); }
 
 bool TryFirePrimaryEx(bool ignoreCombatInterval) {
     const DWORD now = NowMs();

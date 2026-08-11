@@ -35,6 +35,11 @@ bool IsImpactApproachEnabled();
 // 空中贴怪防抖（钉点 + 旋翼到位软悬停）。关=安全回退到每拍跟理想点 + 旧 90ms 律。
 void SetAntiJitterEnabled(bool on);
 bool IsAntiJitterEnabled();
+// 防贴脸退避（LiveStep）：站距 X/Y 内有任何怪（含锁定目标）就把旋翼站位点沿 X 推开。
+// 需同时满足「自定义站距开 + 空中贴怪开 + 有锁」，任一不满足即静默不生效，行为与关闭时一致。
+// 关闭是唯一总闸：关掉后所有退避代码不执行，站位点回到 mx ± standOff。
+void SetAntiHugEnabled(bool on);
+bool IsAntiHugEnabled();
 // 飞行速度倍率（百分比，100 = 基准 1.0X）。只缩放旋翼各档的意图上限；
 // 作动器上限与防坠闸不跟随（理由见 heli_rotor.h 的 SetSpeedScale）。
 void SetFlySpeedPct(unsigned pct);
@@ -60,8 +65,16 @@ enum class HardPauseHolder : uint32_t {
     Encounter = 1u << 1,
     AutoLie = 1u << 2,
     AutoSupply = 1u << 3,
+    // 空中换图（回城卷 / 手动回城 / 贴门过图）：进图后同测谎落台，站稳即自清。
+    MapArrive = 1u << 4,
 };
 void SetHardPause(HardPauseHolder holder, bool on);
+// 硬闸安全落台进行中（测谎 / 自动补给 / 遇人 / 进图）：旋翼飞近可站台再卸禁挂台。
+// 补给用卷/赶路前应等本函数为 false，避免图底 freefall→重载。
+bool IsSafeLandActive();
+// 主动请求同款安全落台（开店前 / 赶路到站后仍悬空）。Travel 活跃时 no-op（由 Travel settle 托空）。
+// 已有落台则重钉本图落点；否则 Begin + MapArrive（无其它硬闸持有者时靠 MapArrive 保闸）。
+void RequestSafeLand(const char* why);
 // 兼容旧调用：映射到 HardPauseHolder::AutoLie（仅 auto_lie 仍走此入口时）。
 // 新代码请用 SetHardPause。
 void SetExternalPause(bool on);
@@ -73,8 +86,8 @@ void ReleaseExternalPause();
 // ExternalPause 永远进不去，定时键/BUFF 会 defer 到死（BIN 0.1.40）。
 // 注：现行 SettleMs*=0 时 TP 后进 Aim 不进 Settling，故运行时几乎只剩 map arm。
 bool IsTeleportTransit();
-// 吸物时分复用：未挂机恒 true；挂机中「不出刀就吸」——仅 Aim/Firing/Recover 为 false。
-// 拟人 MoveTo / Settling / Acquire / Idle 均放行（charVac 直调官方 Send，不走捡物键）。
+// 吸物时分复用：未挂机恒 true；挂机中仅 Aim/Firing/Recover 为 false。
+// MoveTo（含拟人）/Settling/Acquire/Idle 放行（0b66c7：拟人禁吸会漏地上物）。
 // pet_loot 据此开门；勿与 IsTeleportTransit 混用。
 bool IsLootPulseActive();
 // 脉冲代数：pet_loot 边沿检测用（离开出刀链 / Settling 武装时递增）。

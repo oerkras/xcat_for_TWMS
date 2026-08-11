@@ -139,6 +139,9 @@ void PetLootEffectiveVacuum(const PetLootConfig& cfg, float& outW, float& outH) 
 void PetLootEffectiveCharHalf(const PetLootConfig& cfg, float& outHalfW, float& outHalfH) {
     float w = 0.f, h = 0.f;
     PetLootEffectiveVacuum(cfg, w, h);
+    // 人物直吸硬顶：与宠吸可共用 ini 大盒，但枚举/Send 不得超出服端可接受范围
+    if (w > kPetLootCharVacWMax) w = kPetLootCharVacWMax;
+    if (h > kPetLootCharVacHMax) h = kPetLootCharVacHMax;
     outHalfW = w * 0.5f;
     outHalfH = h * 0.5f;
 }

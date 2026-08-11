@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -38,6 +39,8 @@ namespace {
 constexpr size_t kMaxBytesPerLog = 512 * 1024;  // 与 payload 单文件轮转上限对齐（整文件收取）
 // 全量上限与 payload LogInit maxBackups / kLogUploadBackupsFull 对齐；收集时再按 mode 截断。
 constexpr size_t kMaxLogBackups = kLogUploadBackupsFull;
+// 会话创建未返回 maxFiles 时的保守上限（旧服务曾默认 512）。
+constexpr size_t kFallbackSessionMaxFiles = 512;
 constexpr size_t kMaxLieEventsZipBytes = 12 * 1024 * 1024;      // 与服务端 softMax / max-file 对齐
 constexpr size_t kMaxLieEventsStageBytes = 48 * 1024 * 1024;    // 压缩前暂存预算（BMP 压缩比高）
 constexpr size_t kMaxLieEventsFiles = 120;
@@ -864,6 +867,10 @@ CollectedLogs CollectLogs(const LogUploadRequest& req) {
                         xcat::JoinBinPath(req.payloadBinDir.c_str(), "state\\update_failed.notify"));
     }
 
+    // 测谎作答统计（角色 × 题型累计）：几百字节，随包带上才看得到客户端战绩。
+    AddLogIfPresent(out.logs, "lie_stats.tsv", "XCat_data/state/lie_stats.tsv",
+                    xcat::JoinBinPath(req.payloadBinDir.c_str(), "state\\lie_stats.tsv"));
+
     // 功能频道日志：combat / foothold / petloot / invuln / auto_enter …（白名单未列的一律扫入）。
     AddFeatureChannelLogs(out.logs, req.payloadBinDir.c_str(), backups);
 
@@ -1436,6 +1443,84 @@ std::string ExtractJsonString(const std::string& json, const char* key) {
     return out;
 }
 
+/** 解析 JSON 非负整数字段（无引号）；失败返回 0。 */
+size_t ExtractJsonU64(const std::string& json, const char* key) {
+    const std::string needle = std::string("\"") + key + "\":";
+    const size_t pos = json.find(needle);
+    if (pos == std::string::npos) return 0;
+    size_t i = pos + needle.size();
+    while (i < json.size() && std::isspace(static_cast<unsigned char>(json[i]))) ++i;
+    if (i >= json.size() || !std::isdigit(static_cast<unsigned char>(json[i]))) return 0;
+    unsigned long long v = 0;
+    while (i < json.size() && std::isdigit(static_cast<unsigned char>(json[i]))) {
+        v = v * 10ull + static_cast<unsigned long long>(json[i] - '0');
+        if (v > static_cast<unsigned long long>(SIZE_MAX)) return SIZE_MAX;
+        ++i;
+    }
+    return static_cast<size_t>(v);
+}
+
+/** 轮转序号：当前卷=0；`name.N`→N；解析失败当很大（优先丢掉）。 */
+unsigned long LogRotationIndex(const std::string& name) {
+    const size_t lastDot = name.rfind('.');
+    if (lastDot == std::string::npos || lastDot + 1 >= name.size()) return 0;
+    for (size_t i = lastDot + 1; i < name.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(name[i]))) return 0;
+    }
+    // 基名需像 .log / .jsonl（避免把 x.jsonl 的「jsonl」当序号——上面已要求后缀全数字）
+    const std::string base = name.substr(0, lastDot);
+    if (base.size() >= 4) {
+        const std::string_view b(base);
+        auto ends = [](std::string_view s, std::string_view suf) {
+            return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+        };
+        if (ends(b, ".log") || ends(b, ".jsonl") || ends(b, ".tsv") || ends(b, ".txt")) {
+            try {
+                return std::stoul(name.substr(lastDot + 1));
+            } catch (...) {
+                return ULONG_MAX;
+            }
+        }
+    }
+    return 0;
+}
+
+bool IsUploadKeepFirst(const std::string& name) {
+    if (name.empty()) return false;
+    if (name == "lie_events.zip" || name.rfind("lie_events", 0) == 0) return true;
+    if (name.rfind("freeze_incident", 0) == 0) return true;
+    return false;
+}
+
+/**
+ * 会话文件上限裁剪：优先保留 lie/freeze 与当前卷，再按轮转序号从小到大（新→旧）。
+ * 全量模式可收 360×多频道，超过服务端 maxFiles 时否则 PUT 400 整单失败。
+ */
+void TrimLogsToMaxFiles(std::vector<LogBlob>& logs, size_t maxFiles) {
+    if (maxFiles == 0 || logs.size() <= maxFiles) return;
+
+    std::vector<size_t> order(logs.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+        const LogBlob& A = logs[a];
+        const LogBlob& B = logs[b];
+        const bool keepA = IsUploadKeepFirst(A.name);
+        const bool keepB = IsUploadKeepFirst(B.name);
+        if (keepA != keepB) return keepA;
+        const unsigned long ra = LogRotationIndex(A.name);
+        const unsigned long rb = LogRotationIndex(B.name);
+        if (ra != rb) return ra < rb;
+        return a < b;
+    });
+
+    std::vector<LogBlob> kept;
+    kept.reserve(maxFiles);
+    for (size_t i = 0; i < maxFiles; ++i) {
+        kept.push_back(std::move(logs[order[i]]));
+    }
+    logs.swap(kept);
+}
+
 void SetSnapshot(LogUploadPhase phase, std::string message, std::string uploadId = {},
                  uint32_t httpStatus = 0) {
     if (phase == LogUploadPhase::Failed) {
@@ -1486,7 +1571,7 @@ void AddHistoryEntry(const std::string& uploadId, const std::string& message, ui
 }
 
 bool UploadViaSession(const ParsedUrl& url, const LogUploadRequest& req,
-                      const std::vector<LogBlob>& logs, std::string& outUploadId, std::string& outErr,
+                      std::vector<LogBlob>& logs, std::string& outUploadId, std::string& outErr,
                       DWORD& outStatus) {
     outUploadId.clear();
     outErr.clear();
@@ -1521,6 +1606,20 @@ bool UploadViaSession(const ParsedUrl& url, const LogUploadRequest& req,
     const std::string sessionId = ExtractJsonString(created.body, "sessionId");
     if (sessionId.empty()) {
         outErr = "服务未返回 sessionId";
+        return false;
+    }
+
+    size_t maxFiles = ExtractJsonU64(created.body, "maxFiles");
+    if (maxFiles == 0) maxFiles = kFallbackSessionMaxFiles;
+    const size_t collectedN = logs.size();
+    TrimLogsToMaxFiles(logs, maxFiles);
+    if (logs.size() < collectedN) {
+        xcat::log::Warn("LogUpload",
+                        "session file cap: upload %zu/%zu files (maxFiles=%zu mode=%s)",
+                        logs.size(), collectedN, maxFiles, LogUploadModeLabel(req.mode));
+    }
+    if (logs.empty()) {
+        outErr = "会话文件上限过低，无可上传日志";
         return false;
     }
 
@@ -1613,7 +1712,8 @@ void UploadWorker(LogUploadRequest req) {
     }
 
     const CollectedLogs collected = CollectLogs(req);
-    const std::vector<LogBlob>& logs = collected.logs;
+    std::vector<LogBlob> logs = std::move(collected.logs);
+    const LieEventsAttach lieEvents = collected.lieEvents;
     if (logs.empty()) {
         SetSnapshot(LogUploadPhase::Failed, "未找到可上传的日志文件");
         return;
@@ -1624,11 +1724,11 @@ void UploadWorker(LogUploadRequest req) {
     xcat::log::Info("LogUpload",
                     "upload begin protocol=session-v2 mode=%s files=%zu bytes=%zu lie=%d url=%s",
                     LogUploadModeLabel(req.mode), logs.size(), totalBytes,
-                    static_cast<int>(collected.lieEvents), req.url.c_str());
+                    static_cast<int>(lieEvents), req.url.c_str());
 
     auto successMessage = [&](const std::string& id) -> std::string {
         std::string msg = id.empty() ? "上传成功" : ("上传成功: " + id);
-        if (collected.lieEvents == LieEventsAttach::Failed) {
+        if (lieEvents == LieEventsAttach::Failed) {
             msg += "（lie_events 打包失败，未附带）";
         }
         return msg;
@@ -1641,7 +1741,7 @@ void UploadWorker(LogUploadRequest req) {
         const std::string msg = successMessage(uploadId);
         xcat::log::Info("LogUpload", "upload ok protocol=session-v2 mode=%s id=%s files=%zu lie=%d",
                         LogUploadModeLabel(req.mode), uploadId.c_str(), logs.size(),
-                        static_cast<int>(collected.lieEvents));
+                        static_cast<int>(lieEvents));
         SetSnapshot(LogUploadPhase::Succeeded, msg, uploadId, status);
         AddHistoryEntry(uploadId, msg, status, logs.size());
         return;

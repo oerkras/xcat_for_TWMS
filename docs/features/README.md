@@ -78,7 +78,7 @@
 | [`auto_enter/模块设计.md`](auto_enter/模块设计.md) | 自动进游戏：分区→**未满频道随机 (PickOpen)**→选角；单次 Go、禁 Trigger；**softFast**/sticky（✅；旧 PickLeast 已退役） |
 | [`auto_enter/选角与SelectedIndex锚点.md`](auto_enter/选角与SelectedIndex锚点.md) | TW IDA 钉死：`UILoginCharacter+0x168` SelectedIndex；可跳过 Select 的依据 |
 | [`auto_enter/RVA重锚_20260803.md`](auto_enter/RVA重锚_20260803.md) | 2026-08-03 客户端更新：登录 UI 类哈希 + 方法 RVA 全表重锚 |
-| [`soft_login/模块设计.md`](soft_login/模块设计.md) | 软重连试连：ConnectLogin→softFast 重进→playReady；Done≠playReady 闸 + 90s 墙钟（✅ 默认关） |
+| [`soft_login/模块设计.md`](soft_login/模块设计.md) | 软重连试连：ConnectLogin→softFast 重进→playReady；Done≠playReady 闸 + 150s 墙钟 / 10 轮 soft cycle（✅ 默认关） |
 | [`ccu/模块设计.md`](ccu/模块设计.md) | 分区 CCU：登录频道页或 auto_enter 喂数一次 → SHM → 底栏（✅） |
 | [`channel_hop/模块设计.md`](channel_hop/模块设计.md) | 随机换频：挂机卡/F10 → `manualRejoinSeq` → **直调** `SendTransfer@0xBB5200`（无菜单；✅ 挂入；08-03 锚点已同步） |
 | [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：UserPool → 停手/换频；可勾选 GM/隐身升级 + 强制 Alarm（✅ 契约 v60） |
@@ -91,7 +91,7 @@
 | [`auto_lie/P0a_锚点复核.md`](auto_lie/P0a_锚点复核.md) | **测谎数据源**：UIAntiMacro* Prefab、jpegData/path、WM+0x1D0、`IsOpenAntiMacro@0x936780` |
 | [`auto_supply/模块设计.md`](auto_supply/模块设计.md) | **自动回城卖/补给**：就近寻店卖装 + 去店用卷 `SendPortalScrollUseRequest`（2030000/2030059）+ 可选补货；Charge/回程用卷待验 |
 | [`auto_supply/P2_货架寻店.md`](auto_supply/P2_货架寻店.md) | 按货架/物品码全局寻店：**不做**（无 SetShopDlg Commodity 全表；产品语义为就近能卖） |
-| [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认关；服端断线+守护会干净重拉 |
+| [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认开；服端断线+守护会干净重拉 |
 | [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ 数据面清 `LocalUser+0x114`；抑制客户端警戒；默认关 |
 
 ---

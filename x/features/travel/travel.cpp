@@ -8,6 +8,8 @@
 #include "travel_graph.h"
 #include "../ports/travel_port.h"
 #include "../ports/fly_fh_ban.h"
+#include "../ports/foothold_path.h"
+#include "../ports/teleport_port.h"
 #include "../ports/world_port.h"
 #include "../invuln/invuln.h"
 #include "../simple_combat/heli_rotor.h"
@@ -23,6 +25,7 @@
 
 #include <atomic>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -43,13 +46,17 @@ constexpr DWORD kHopWaitMs = 1200;
 // 仍靠 leave-from 认换图；过短易把慢进图误判 soft（可再调）。
 constexpr DWORD kHopWaitUniqueBridgeMs = 700;
 // BIN 15:57 回挂机：换图后立刻开火会撞 InterStage 闪黑屏；稳图再下一跳。
-// BIN 02:34：hop1 Field 闪回后 1.5s 就 hop2 stick，第二跳 Up 半截进门卡死 → 加长 midhop。
-constexpr DWORD kMidHopSettleMs = 2500;         // 换图后多等稳图，避免下一跳撞卸图
-// 首跳（Goto 起点、未换图）同样要稳图：BIN 首枪常假火，soft 空等≈本值后补枪秒过；
-// 与 midhop 同窗，禁止只靠 PlayReadyStable(500) 就开火。
-constexpr DWORD kFirstHopSettleMs = 1500;
+// BIN 02:34：hop1 Field 闪回后 1.5s 就 hop2 stick，第二跳 Up 半截进门卡死 → 曾拉到 2500。
+// 体感每跳「准备很久」：2500→1200（仍 ≥ PlayReadyStable 500；过短再加回）。
+constexpr DWORD kMidHopSettleMs = 1200;         // 换图后稳图再下一跳
+// 首跳（Goto 起点、未换图）同样要稳图：BIN 首枪常假火；禁止只靠 PlayReadyStable(500)。
+// BIN 18:47：世界地图 YesNo 后 ~1.2s 就 ↑，前两枪 timeout until=0；加长到 1200 给关图后进门窗。
+constexpr DWORD kFirstHopSettleMs = 1200;
 constexpr DWORD kPlayReadyStableMs = 500;       // 连续 PlayReady / Field 才开火 / 认到站
 constexpr DWORD kArriveStableMs = 1500;         // 到目标图后再稳一会才 Idle（防到站二次卸图）
+// BIN 8fa033：稳图计时到了仍 curFh=0 就 Idle → 卸旋翼 freefall；再托一会等 onFh。
+constexpr DWORD kArriveLandExtraMs = 2000;
+constexpr DWORD kHopLandExtraMs = 800;
 // BIN 01:48：FIRED_STICK_UP 后 uniqueBridge 700ms 就 soft 补 ↑，第二枪撞半截换图 → 黑屏。
 // 任意开火后禁补枪静默窗（MapId 未变也不许 soft 重试）。
 constexpr DWORD kPostFireQuietMs = 2500;
@@ -153,6 +160,229 @@ void ReleaseTravelFhBan() {
     x::runtime::LogI("Travel", "fhBan Travel release mask=0x%x", ports::fly_fh_ban::ActiveMask());
 }
 
+// BIN 9d504e / adfed6：贴门后 Disarm → settle 窗 freefall。
+// 对齐 Combat 软着陆：approach 带 Travel ban → 靠近后卸 ban（否则引擎永不 onFh）→
+// 短 Station 消速 → drop 卸旋翼挂台。禁止「一直 BAN ON 却指望 onFh」。
+constexpr float kSettleArrivePx = 36.f;
+constexpr float kSettleOnFhOkPx = 64.f;
+constexpr float kSettleResnapPx = 520.f;
+// BIN d76f13：回城卷落到 (132,60)，SnapStandAt(preferFlat) 退化到同高远台 (-232,47)
+// → settle hover 横飞 ~360px「怪位置」。托台只许近距落点，远点就地卸 ban。
+constexpr float kSettleMaxSnapPx = 100.f;
+// BIN f283a3：换图后 d≈49 仍走 approach BAN ON → 起飞再 catch 落地。近台且非暴坠时直接 catch。
+// BIN 64b013：回城卷出生点 d=81 仍 BAN ON 起飞；软接半径与 MaxSnap 对齐。
+constexpr float kSettleSoftCatchPx = 100.f;
+constexpr float kSettleSoftMaxSpeed = 560.f;
+constexpr DWORD kSettleCatchHoldMs = 350;
+
+float gSettleSx = 0.f;
+float gSettleSy = 0.f;
+uint32_t gSettleFh = 0;
+bool gSettleHave = false;
+bool gSettleCatching = false;
+bool gSettleDrop = false;
+DWORD gSettleCatchAt = 0;
+
+void ClearSettleHoverState() {
+    gSettleHave = false;
+    gSettleFh = 0;
+    gSettleCatching = false;
+    gSettleDrop = false;
+    gSettleCatchAt = 0;
+}
+
+void TickSettleHover(DWORD now, const char* phase) {
+    namespace heli = x::features::simple_combat::heli;
+    ports::teleport::FlightState st{};
+    if (!ports::teleport::QueryFlightState(st) || !st.ok) return;
+
+    if (st.onFh) {
+        if (heli::CurrentOwner() == heli::Owner::Travel ||
+            (ports::fly_fh_ban::ActiveMask() &
+             static_cast<unsigned>(ports::fly_fh_ban::BanSource::Travel)) != 0) {
+            heli::Disarm(heli::Owner::Travel);
+            heli::Release(heli::Owner::Travel);
+            if ((ports::fly_fh_ban::ActiveMask() &
+                 static_cast<unsigned>(ports::fly_fh_ban::BanSource::Travel)) != 0) {
+                ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+            }
+            static DWORD sLandLog = 0;
+            if (!sLandLog || now - sLandLog >= 800) {
+                sLandLog = now;
+                x::runtime::LogI("Travel", "settle hover onFh phase=%s ap=(%.0f,%.0f)",
+                                 phase ? phase : "?", st.x, st.y);
+            }
+        }
+        ClearSettleHoverState();
+        return;
+    }
+
+    // settle 托台期间禁止 stale bail 拆旋翼（BIN adfed6：Station 到位 v=0 被判 stale →
+    // 卸 ban 直坠；用户体感「FH ARM 卸不掉」——其实是 ban 卡死无法 onFh）。
+    if (heli::Bailed()) heli::ClearBailed();
+
+    // 钉死第一次可用落点；坠落中每拍 Snap 会跳到远处/图底台（adfed6 fh 跳变）。
+    // preferFlat=false：settle 要「脚下/近处」台，不要同高几百 px 外的平台（d76f13）。
+    auto resnap = [&]() {
+        float sx = st.x;
+        float sy = st.y;
+        uint32_t fh = 0;
+        bool got = ports::foothold_path::SnapStandAt(st.x, st.y, &sx, &sy, &fh,
+                                                     /*preferFlat=*/false) &&
+                   fh != 0;
+        if (got) {
+            const float sdx = sx - st.x;
+            const float sdy = sy - st.y;
+            const float sd = std::sqrt(sdx * sdx + sdy * sdy);
+            if (sd > kSettleMaxSnapPx) {
+                static DWORD sFar = 0;
+                if (!sFar || now - sFar >= 800) {
+                    sFar = now;
+                    x::runtime::LogI("Travel",
+                                     "settle hover snap reject far d=%.0f fh=%u "
+                                     "sp=(%.0f,%.0f) ap=(%.0f,%.0f) → in-place",
+                                     sd, (unsigned)fh, sx, sy, st.x, st.y);
+                }
+                sx = st.x;
+                sy = st.y;
+                fh = 0;
+                got = false;
+            }
+        }
+        if (got) {
+            gSettleSx = sx;
+            gSettleSy = sy;
+            gSettleFh = fh;
+            gSettleHave = true;
+        } else if (!gSettleHave) {
+            // 无近台：钉在出生点，随后 catch 卸 ban 原地挂台（勿横飞找台）。
+            gSettleSx = st.x;
+            gSettleSy = st.y;
+            gSettleFh = 0;
+            gSettleHave = true;
+        }
+    };
+    if (!gSettleHave || gSettleFh == 0) {
+        resnap();
+    } else {
+        const float rdx = st.x - gSettleSx;
+        const float rdy = st.y - gSettleSy;
+        if (std::sqrt(rdx * rdx + rdy * rdy) > kSettleResnapPx) {
+            gSettleCatching = false;
+            gSettleDrop = false;
+            gSettleCatchAt = 0;
+            resnap();
+        }
+    }
+
+    const float dx = st.x - gSettleSx;
+    const float dy = st.y - gSettleSy;
+    const float d = std::sqrt(dx * dx + dy * dy);
+    const float spd = std::sqrt(st.vx * st.vx + st.vy * st.vy);
+    // 近台：禁止 approach 的 BAN ON（换图「起飞又落地」体感）。直接卸 ban 等挂台。
+    const bool softNear =
+        d <= kSettleSoftCatchPx && spd <= kSettleSoftMaxSpeed;
+
+    // BIN 0b0e8c：换图后 soft catch 仍 Station 托 350ms → 体感「多余飞一下再落地」。
+    // 近台/软接：不抢旋翼、不 Station，只卸 Travel ban 让引擎挂台，再去贴门。
+    if (d <= kSettleArrivePx || softNear) {
+        if (!gSettleCatching) {
+            gSettleCatching = true;
+            gSettleDrop = true;
+            gSettleCatchAt = now;
+            x::runtime::LogI("Travel",
+                             "settle hover soft-drop phase=%s d=%.0f spd=%.0f soft=%d fh=%u "
+                             "ap=(%.0f,%.0f) sp=(%.0f,%.0f) skipHeli=1",
+                             phase ? phase : "?", d, spd, softNear ? 1 : 0,
+                             (unsigned)gSettleFh, st.x, st.y, gSettleSx, gSettleSy);
+        }
+        if (heli::CurrentOwner() == heli::Owner::Travel) {
+            heli::Disarm(heli::Owner::Travel);
+            heli::Release(heli::Owner::Travel);
+        }
+        ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+        // 仅超出软接半径才改走 approach；OnFhOk 内继续等引擎挂台（勿 BAN ON 起飞）。
+        if (gSettleDrop && d > kSettleSoftCatchPx) {
+            gSettleCatching = false;
+            gSettleDrop = false;
+            gSettleCatchAt = 0;
+            x::runtime::LogI("Travel", "settle hover soft drop_far retry d=%.0f", d);
+        } else {
+            return;
+        }
+    }
+
+    // F6 占着旋翼：不抢；只记日志。
+    if (!heli::TryAcquire(heli::Owner::Travel)) {
+        static DWORD sSkip = 0;
+        if (!sSkip || now - sSkip >= 1000) {
+            sSkip = now;
+            x::runtime::LogI("Travel", "settle hover skip owner=%s phase=%s",
+                             heli::OwnerName(heli::CurrentOwner()), phase ? phase : "?");
+        }
+        return;
+    }
+
+    if (!gSettleCatching && d <= kSettleArrivePx) {
+        // 远距 approach 拉近后的收束（soft 路径上面已 return）。
+        gSettleCatching = true;
+        gSettleDrop = false;
+        gSettleCatchAt = now;
+        ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+        x::runtime::LogI("Travel",
+                         "settle hover catch begin phase=%s d=%.0f spd=%.0f soft=0 fh=%u "
+                         "ap=(%.0f,%.0f) sp=(%.0f,%.0f) banOff=1",
+                         phase ? phase : "?", d, spd, (unsigned)gSettleFh, st.x, st.y,
+                         gSettleSx, gSettleSy);
+    }
+
+    if (gSettleCatching) {
+        const DWORD catchAge = gSettleCatchAt ? (now - gSettleCatchAt) : 0;
+        if (!gSettleDrop && catchAge >= kSettleCatchHoldMs) {
+            gSettleDrop = true;
+            heli::Disarm(heli::Owner::Travel);
+            heli::Release(heli::Owner::Travel);
+            x::runtime::LogI("Travel", "settle hover catch drop phase=%s d=%.0f age=%ums",
+                             phase ? phase : "?", d, (unsigned)catchAge);
+        }
+        if (gSettleDrop) {
+            if (d > kSettleOnFhOkPx) {
+                gSettleCatching = false;
+                gSettleDrop = false;
+                gSettleCatchAt = 0;
+                x::runtime::LogI("Travel", "settle hover catch drop_far retry d=%.0f", d);
+            }
+            return;
+        }
+        // catch hold：ban 已卸，Station 消速等引擎挂台。
+        ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+        heli::Setpoint sp{};
+        sp.mode = heli::Mode::Station;
+        sp.x = gSettleSx;
+        sp.y = gSettleSy;
+        heli::SetSetpoint(heli::Owner::Travel, sp);
+        (void)heli::Tick(heli::Owner::Travel, now, nullptr);
+        return;
+    }
+
+    ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, true);
+    heli::Setpoint sp{};
+    sp.mode = (d > 120.f) ? heli::Mode::Cruise : heli::Mode::Station;
+    sp.x = gSettleSx;
+    sp.y = gSettleSy;
+    heli::SetSetpoint(heli::Owner::Travel, sp);
+    (void)heli::Tick(heli::Owner::Travel, now, nullptr);
+
+    static DWORD sDriveLog = 0;
+    if (!sDriveLog || now - sDriveLog >= 400) {
+        sDriveLog = now;
+        x::runtime::LogI("Travel",
+                         "settle hover drive phase=%s fh=%u sp=(%.0f,%.0f) ap=(%.0f,%.0f) d=%.0f",
+                         phase ? phase : "?", (unsigned)gSettleFh, gSettleSx, gSettleSy, st.x,
+                         st.y, d);
+    }
+}
+
 // 用户可见反馈：BIN 有 log 不够，launcher 气泡要跟上。
 void NotifyTravelOutcome(FailKind kind, const std::string& src, const std::string& dst,
                          const char* raw = nullptr) {
@@ -252,6 +482,7 @@ void SetIdle(const char* msg, FailKind fail = FailKind::None) {
     ClearLateWait();
     ReleaseInvulnForTravel();
     ReleaseTravelFhBan();
+    ClearSettleHoverState();
     gFailKind = fail;
     if (msg) gLastMsg = msg;
     gLastSnapMs = GetTickCount();
@@ -827,6 +1058,7 @@ void TryFlushPendingGoto() {
 void OnMapEnterConfirmed(const std::string& cur, DWORD now) {
     // 贴门成功进门后 ban 留到换图；新图稳图前卸 Travel 位，允许落地 midhop。
     ReleaseTravelFhBan();
+    ClearSettleHoverState();  // 新图须重钉；近台走 soft catch，避免再 BAN ON 起飞
     ClearTransferWatch();
     if (!gFiredPortal.empty() || !gPendingSeedId.empty()) {
         gGraph.SetDest(gPendingFrom, gPendingSeedId, cur, cur, /*measured=*/true);
@@ -898,7 +1130,10 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
                 NoteTransferStarted(curPeek, now, "interstage");
             }
             if (gTransferSeen && NoteInterStageStuck(now, curPeek)) return;
+            // BIN 8fa033：MAP_CHANGED 后 InterStage/~1s 等 Field 时已 Disarm 旋翼，
+            // 此窗无 hover → 每跳 curFh=0 无限掉落。托台优先于稳图。
             gLastMsg = gTransferSeen ? "wait_wm_field" : "wait_play_ready";
+            TickSettleHover(now, gLastMsg.c_str());
             return;
         }
         gLastMsg = "wait_play_ready";
@@ -917,6 +1152,7 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
                 if (MapLeftPendingFrom(cur)) NoteTransferStarted(cur, now, "unique_late");
                 if (NoteInterStageStuck(now, cur)) return;
                 gLastMsg = "unique_bridge_enter_stable";
+                TickSettleHover(now, "unique_bridge_enter_stable");
                 return;
             }
             x::runtime::LogI("Travel", "uniqueBridge late map-change %s -> %s (wm Field)",
@@ -939,6 +1175,7 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
             return;
         }
         gLastMsg = "unique_bridge_late_wait";
+        TickSettleHover(now, "unique_bridge_late_wait");
         return;
     }
 
@@ -948,14 +1185,38 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
             NoteTransferStarted(cur, now, "map_id_play");
             if (!WmFieldClosed() || !PlayReadyStable(now)) {
                 gLastMsg = "map_enter_stable";
+                TickSettleHover(now, "map_enter_stable");
                 return;
             }
             OnMapEnterConfirmed(cur, now);
             return;
         }
-        // 仍在出发图：静默窗内不假火；transfer 已见则只等 Field。
+        // 仍在出发图：静默窗内不假火；真卸图则等 Field。
         if (gTransferSeen) {
             gLastMsg = "wait_wm_field";
+            TickSettleHover(now, "wait_wm_field");
+            // BIN cb18f8：假 MAP_TRANSITION 同图仍 PlayReady → 旧逻辑无限等，补给 180s 超时。
+            // MapId 未离出发图且 Field 已稳：清假 latch，走假火软确认重试贴门。
+            if (!MapLeftPendingFrom(cur) && WmFieldClosed() && PlayReadyStable(now)) {
+                const DWORD wall = GetTickCount();
+                const DWORD waitMs =
+                    (!gPendingName.empty() &&
+                     gGraph.IsUniqueBridgeName(gPendingFrom, gTarget, gPendingName))
+                        ? kHopWaitUniqueBridgeMs
+                        : kHopWaitMs;
+                const DWORD needMs = waitMs > kPostFireQuietMs ? waitMs : kPostFireQuietMs;
+                if (gHopStartedMs != 0 && wall - gHopStartedMs > needMs) {
+                    x::runtime::LogW(
+                        "Travel",
+                        "wait_wm_field same-map timeout from=%s expect=%s → clear latch+soft",
+                        gPendingFrom.c_str(),
+                        gExpectMap.empty() ? "?" : gExpectMap.c_str());
+                    ClearTransferWatch();
+                    if (NoteNoMapChangeTimeout(wall)) return;
+                }
+            } else if (NoteInterStageStuck(now, cur)) {
+                return;
+            }
             return;
         }
         const DWORD wall = GetTickCount();
@@ -976,10 +1237,26 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
         if (static_cast<int>(now - gArriveReadyAt) < 0 || !WmFieldClosed() ||
             !PlayReadyStable(now)) {
             gLastMsg = "arrive_settle";
+            TickSettleHover(now, "arrive_settle");
+            return;
+        }
+        // 稳图够了仍未挂台：继续 hover，超时再交棒 Combat 落台（防到站即坠）。
+        ports::teleport::FlightState arriveSt{};
+        const bool arriveFlightOk =
+            ports::teleport::QueryFlightState(arriveSt) && arriveSt.ok;
+        const bool arriveOnFh = arriveFlightOk && arriveSt.onFh;
+        const DWORD landDeadline = gArriveReadyAt + kArriveLandExtraMs;
+        if (!arriveOnFh && static_cast<int>(now - landDeadline) < 0) {
+            gLastMsg = "arrive_land";
+            TickSettleHover(now, "arrive_land");
             return;
         }
         SetIdle("arrived");
-        x::runtime::LogI("Travel", "arrived %s", cur.c_str());
+        x::runtime::LogI("Travel", "arrived %s onFh=%d", cur.c_str(), arriveOnFh ? 1 : 0);
+        if (!arriveOnFh) {
+            // Travel 已 Idle：交棒 Combat 软着陆（同测谎落台）。
+            simple_combat::RequestSafeLand("travel_arrive_airborne");
+        }
         SaveGraph();
         return;
     }
@@ -989,16 +1266,29 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
     if (gNextHopReadyAt) {
         if (static_cast<int>(now - gNextHopReadyAt) < 0) {
             gLastMsg = "hop_settle";
+            TickSettleHover(now, "hop_settle");
             return;
         }
         if (!PlayReadyStable(now)) {
             gLastMsg = "play_ready_stable";
+            TickSettleHover(now, "play_ready_stable");
             return;
         }
-        x::runtime::LogI("Travel", "hop settle done map=%s", cur.c_str());
+        ports::teleport::FlightState hopSt{};
+        const bool hopFlightOk = ports::teleport::QueryFlightState(hopSt) && hopSt.ok;
+        const bool hopOnFh = hopFlightOk && hopSt.onFh;
+        const DWORD hopLandDeadline = gNextHopReadyAt + kHopLandExtraMs;
+        if (!hopOnFh && static_cast<int>(now - hopLandDeadline) < 0) {
+            gLastMsg = "hop_land";
+            TickSettleHover(now, "hop_land");
+            return;
+        }
+        x::runtime::LogI("Travel", "hop settle done map=%s onFh=%d", cur.c_str(),
+                         hopOnFh ? 1 : 0);
         gNextHopReadyAt = 0;
     } else if (!PlayReadyStable(now)) {
         gLastMsg = "play_ready_stable";
+        TickSettleHover(now, "play_ready_stable");
         return;
     }
 
@@ -1092,9 +1382,23 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
     gLastSnapMs = gHopStartedMs;
     if (fireResult == "MAP_CHANGED" || fireResult == "MAP_TRANSITION") {
         const std::string to = ports::travel::CurrentMapKey();
-        NoteTransferStarted(to.empty() ? hopDest : to, gHopStartedMs,
-                            fireResult == "MAP_CHANGED" ? "fire_map_changed"
-                                                        : "fire_map_transition");
+        const auto scene = ports::world::GetSceneState();
+        const bool left = MapLeftPendingFrom(to);
+        // 真换图：MapId 已离出发，或已进 InterStage / 非 PlayReady。
+        // BIN cb18f8：勇士 east00 freefall 也会报 MAP_TRANSITION，图号未变且仍 Field
+        // → 若仍 NoteTransferStarted，PlayReady 同图 wait_wm_field 会死等。
+        const bool unloading =
+            scene == ports::world::SceneState::InterStage || !ports::world::IsPlayReady();
+        if (left || unloading) {
+            NoteTransferStarted(to.empty() ? hopDest : to, gHopStartedMs,
+                                fireResult == "MAP_CHANGED" ? "fire_map_changed"
+                                                            : "fire_map_transition");
+        } else {
+            x::runtime::LogW(
+                "Travel",
+                "ignore same-map %s name=%s from=%s (no transfer latch)",
+                fireResult.c_str(), liveName.c_str(), cur.c_str());
+        }
     }
     const DWORD sinceGoto =
         (gGotoAtMs != 0) ? (gHopStartedMs - gGotoAtMs) : 0;

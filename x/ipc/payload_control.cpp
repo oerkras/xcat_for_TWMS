@@ -22,7 +22,6 @@
 #include "../features/mob_scan/mob_scan.h"
 #include "../features/fly/fly.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
-#include "../features/pointblank_shoot/pointblank_shoot.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/player_hide/player_hide.h"
 #include "../features/frame_lock/frame_lock.h"
@@ -47,6 +46,12 @@ namespace {
 
 std::atomic<uint64_t> gLastAppliedTick{0};
 std::atomic<bool> gHaveApplied{false};
+
+// DLL 加载时刻（文件域静态，勿放进 Apply 首次非 0 才初始化——否则 App 写盘 tick
+// 总早于 Apply 内 GetTickCount64，首点 afterInject 恒为 0，见本地 19:02:30 adopt）。
+const uint64_t kManualRejoinModuleStartMs = GetTickCount64();
+// App 写盘 → DLL 读到之间的正常抖动；仅放宽 afterInject，不放宽「注入前旧 tick」。
+constexpr uint64_t kManualRejoinWriteSkewMs = 5000;
 
 std::string PayloadBinDir() {
     HMODULE self = nullptr;
@@ -102,21 +107,38 @@ void WriteLieSeqStamp(const char* name, uint32_t seq) {
 }
 
 void ApplyManualRejoinSeq(const xcat::PayloadControl& c) {
-    if (c.manualRejoinSeq == 0) return;
+    // 见过 seq=0：control 曾空闲/被清零；之后注入后新写的非 0 seq 视为新点击（即使 ≤ stamp）。
+    static std::atomic<bool> s_sawZeroAfterInject{false};
+    if (c.manualRejoinSeq == 0) {
+        s_sawZeroAfterInject.store(true, std::memory_order_release);
+        return;
+    }
     const uint32_t diskLast = ReadLieSeqStamp("last_manual_rejoin_seq.txt");
     // 注入后首次 Apply：默认收养 stamp，禁止重放「进图前残留」F10（BIN reinject seq=10）。
-    // 但若 ini seq > stamp 且 writeTickMs 落在本 DLL 加载之后，视为注入后新点击，必须放行
-    // （BIN：App seq=1 已写盘，首拍无条件 return → 第一次点无反应）。
-    static const uint64_t s_moduleStartMs = GetTickCount64();
+    // 放行条件（须 writeTickMs 落在本 DLL 加载附近/之后）：
+    //   · ini seq > stamp，或
+    //   · ini seq < stamp（control 清零后重从 1 计），或
+    //   · 本模块生命周期内曾见过 seq=0 再出现非 0（073f12：stamp≥1 且点出 seq=1）
     static std::atomic<bool> s_bootstrapped{false};
     static std::atomic<uint32_t> s_lastApplied{0};
+    const bool writtenAfterInject =
+        c.writeTickMs != 0 &&
+        (c.writeTickMs + kManualRejoinWriteSkewMs) >= kManualRejoinModuleStartMs;
     if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
         const bool newerThanStamp = c.manualRejoinSeq > diskLast;
-        const bool writtenAfterInject =
-            c.writeTickMs != 0 && c.writeTickMs >= s_moduleStartMs;
-        if (newerThanStamp && writtenAfterInject) {
+        const bool seqBelowStamp = diskLast != 0 && c.manualRejoinSeq < diskLast;
+        const bool afterIdleZero = s_sawZeroAfterInject.load(std::memory_order_acquire);
+        if (writtenAfterInject && (newerThanStamp || seqBelowStamp || afterIdleZero)) {
             s_lastApplied.store(c.manualRejoinSeq, std::memory_order_release);
             WriteLieSeqStamp("last_manual_rejoin_seq.txt", c.manualRejoinSeq);
+            s_sawZeroAfterInject.store(false, std::memory_order_release);
+            x::runtime::LogI("Control",
+                             "manualRejoinSeq=%u → hop (boot fire stamp=%u newer=%d below=%d "
+                             "idle0=%d writeTick=%llu modStart=%llu)",
+                             c.manualRejoinSeq, diskLast, newerThanStamp ? 1 : 0,
+                             seqBelowStamp ? 1 : 0, afterIdleZero ? 1 : 0,
+                             (unsigned long long)c.writeTickMs,
+                             (unsigned long long)kManualRejoinModuleStartMs);
             x::features::channel_hop::RequestManualRejoin(c.manualRejoinSeq);
             return;
         }
@@ -126,6 +148,12 @@ void ApplyManualRejoinSeq(const xcat::PayloadControl& c) {
         if (adopt != diskLast) {
             WriteLieSeqStamp("last_manual_rejoin_seq.txt", adopt);
         }
+        x::runtime::LogI("Control",
+                         "manualRejoinSeq=%u adopt stamp=%u→%u (no hop, afterInject=%d "
+                         "writeTick=%llu modStart=%llu)",
+                         c.manualRejoinSeq, diskLast, adopt, writtenAfterInject ? 1 : 0,
+                         (unsigned long long)c.writeTickMs,
+                         (unsigned long long)kManualRejoinModuleStartMs);
         return;
     }
     // 进程内 CAS：防同 tick 双 Apply 都读到旧 stamp → 双 request（BIN seq=18）
@@ -137,10 +165,25 @@ void ApplyManualRejoinSeq(const xcat::PayloadControl& c) {
         prev = s_lastApplied.load(std::memory_order_acquire);
     }
     for (;;) {
+        // control 清零后重计：seq 回落到 prev 以下且写盘在注入后 → 放行（勿永卡在旧 stamp）
+        if (c.manualRejoinSeq < prev && writtenAfterInject) {
+            if (s_lastApplied.compare_exchange_weak(prev, c.manualRejoinSeq,
+                                                    std::memory_order_acq_rel)) {
+                WriteLieSeqStamp("last_manual_rejoin_seq.txt", c.manualRejoinSeq);
+                s_sawZeroAfterInject.store(false, std::memory_order_release);
+                x::runtime::LogI("Control",
+                                 "manualRejoinSeq=%u → hop (reset below prev=%u)",
+                                 c.manualRejoinSeq, prev);
+                x::features::channel_hop::RequestManualRejoin(c.manualRejoinSeq);
+                return;
+            }
+            continue;
+        }
         if (c.manualRejoinSeq <= prev) return;
         if (s_lastApplied.compare_exchange_weak(prev, c.manualRejoinSeq,
                                                 std::memory_order_acq_rel)) {
             WriteLieSeqStamp("last_manual_rejoin_seq.txt", c.manualRejoinSeq);
+            s_sawZeroAfterInject.store(false, std::memory_order_release);
             x::features::channel_hop::RequestManualRejoin(c.manualRejoinSeq);
             return;
         }
@@ -374,17 +417,24 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::invuln::SetDesired(c.invuln != 0);
     const bool attackAccelOn =
         xcat::kAttackAccelUserEnabled && c.attackAccel != 0;
-    x::features::attack_accel::SetDesired(attackAccelOn);
+    const bool clearBusyOn = c.attackAccelClearBusy != 0;
+    // 首页 attackAccel（暂关）或实验·清忙锁 → worker 写 ActionBusy=-1。
+    x::features::attack_accel::SetDesired(attackAccelOn || clearBusyOn);
     x::features::attack_accel::SetBoosterDesired(
         xcat::kAttackAccelBoosterUserEnabled && c.attackAccelBooster != 0);
+    x::features::attack_accel::SetActionSpeedDesired(c.attackAccelActionSpeed != 0);
+    x::features::attack_accel::SetPartyBoosterValue(c.attackAccelPartyBoosterValue);
+    x::features::attack_accel::SetPartyBoosterDesired(c.attackAccelPartyBooster != 0);
+    x::features::attack_accel::SetBreakDegreeFloorLo(c.attackAccelBreakDegreeFloorLo);
+    x::features::attack_accel::SetBreakDegreeFloorDesired(c.attackAccelBreakDegreeFloor != 0);
     x::features::attack_accel::SetCutLayerDesired(c.attackAccelCutLayer != 0);
     x::features::attack_accel::SetSkipPrepareDesired(c.attackAccelSkipPrepare != 0);
-    x::features::final_attack_force::SetDesired(c.finalAttackForce != 0);
+    x::features::final_attack_force::SetDesired(xcat::kFinalAttackForceUserEnabled &&
+                                                c.finalAttackForce != 0);
     x::features::skill_max_level::SetDesired(xcat::kSkillMaxLevelUserEnabled &&
                                              c.skillMaxLevel != 0);
-    // 攻击加速：清动作忙锁，换怪贴身不再被 animBusy(220) 拖住。
+    // 下列副作用只跟首页 attackAccel 包；实验清忙锁只写 ActionBusy。
     x::features::ports::attack::SetAnimBusyOverrideMs(attackAccelOn ? 0 : -1);
-    // 加速：Down+Up 同泵，消 pending 跨 tick（刀间隔只跟面板 interval）。
     x::features::ports::attack::SetImmediateUp(attackAccelOn);
     x::features::fly::SetMode(c.flyMode);
     x::features::fly::SetHopCdMs(c.flyHopCdMs);
@@ -401,8 +451,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::multi_skill::SetSendUseRequest(c.multiSkillSendUseRequest != 0);
     x::features::simple_combat::SetEnabled(c.simpleCombat != 0);
     x::features::simple_combat::SetAttackIntervalMs(
-        xcat::EffectiveSimpleCombatAttackIntervalMs(c.simpleCombatAttackIntervalMs,
-                                                     attackAccelOn ? 1u : 0u));
+        xcat::EffectiveAttackIntervalForApply(c.simpleCombatAttackIntervalMs,
+                                              attackAccelOn ? 1u : 0u, clearBusyOn ? 1u : 0u,
+                                              c.attackAccelClearBusyMinIntervalMs));
     x::features::simple_combat::SetTickIntervalMs(
         xcat::ClampSimpleCombatTickMs(c.simpleCombatTickMs ? c.simpleCombatTickMs
                                                            : xcat::kSimpleCombatTickDefaultMs));
@@ -417,6 +468,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::simple_combat::SetTeleportEnabled(false);  // fill+Doing 战斗回落已禁用
     x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
     x::features::simple_combat::SetAntiJitterEnabled(c.simpleCombatAntiJitter != 0);
+    x::features::simple_combat::SetAntiHugEnabled(c.simpleCombatAntiHug != 0);
     x::features::simple_combat::SetFlySpeedPct(c.simpleCombatFlySpeedPct);
     x::features::simple_combat::SetHumanWalkEnabled(c.simpleCombatHumanWalk != 0);
     x::features::simple_combat::SetLiveStepEnabled(c.simpleCombatLiveStep != 0);
@@ -448,7 +500,6 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::galaxy_token_probe::SetEnabled(c.galaxyTokenProbe != 0);
     x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
     x::features::drop_alert_bypass::SetEnabled(c.dropAlertBypass != 0);
-    x::features::pointblank_shoot::SetEnabled(c.pointBlankShoot != 0);
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
     // 自动补给真源：user.ini [auto_supply]（HotReadConfig）；勿再用 core.autoSell 灌开关。
     x::features::encounter::SetEnabled(c.autoRelogin != 0);

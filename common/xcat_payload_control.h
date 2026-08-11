@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 68u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 75u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -24,6 +24,15 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 68u;
 // v64: simpleCombatStandOffCustom/X/Y — F5 空中贴怪自定义站距（远程职业）
 // v65: 攻击加速用户入口暂关（面板置灰；读盘/下发强制 attackAccel=0）
 // v66: simpleCombatGroundSpoof — 站立伪装（出刀瞬间种 CurFh；默认开）
+// v69: simpleCombatAntiHug — 防贴脸退避（LiveStep）；复用自定义站距 X/Y 作躲避半径；默认关
+// v70: pointBlankShoot 拆除 — 「不挥弓」已证伪（改客户端分支会打断整条伤害链），
+//      改由 simpleCombatAntiHug 从物理上避开挥弓框；字段与 ini key 一并清掉。
+//      结论见 Dumps/runtime/ARCHER_SHOOT_VS_BONK_GATE_20260809.md
+// v71: attackAccelPartyBoosterValue — PartyBooster TempStats[4] 加数滑条（默认 -8，范围 [-8,0]）
+// v72: attackAccelBreakDegreeFloor — 破 B 系 degree 下限（改 GA 种子；与 Party 独立）
+// v73: attackAccelBreakDegreeFloorLo — 破限目标 lo 滑条（默认 -10，范围 [-10,0]）
+// v74: attackAccelClearBusy — 实验·清 ActionBusy 忙锁（与首页 attackAccel 入口独立）
+// v75: attackAccelClearBusyMinIntervalMs — 清忙锁开启时出刀间隔地板（默认 410）
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -147,12 +156,29 @@ constexpr uint32_t kMobScanIntervalMinMs = 1u;
 constexpr uint32_t kMobScanIntervalMaxMs = 500u;
 // 与全局 Min 对齐；加速不另抬间隔。
 constexpr uint32_t kAttackAccelIntervalFloorMs = 1u;
+// 清忙锁专用出刀间隔地板：拆掉 ActionBusy 后防止贴着面板 1/70ms 狂射。
+// 只在 Apply→SetAttackIntervalMs 时抬有效间隔，不回写面板「间隔」落盘值。
+constexpr uint32_t kAttackAccelClearBusyMinIntervalDefaultMs = 410u;
+constexpr uint32_t kAttackAccelClearBusyMinIntervalMinMs = 50u;
+constexpr uint32_t kAttackAccelClearBusyMinIntervalMaxMs = 1000u;
+
+// PartyBooster（TempStats[4].Value）加数：越负越快，引擎 degree 夹 [2,10]；-8 已够顶格。
+constexpr int32_t kAttackAccelPartyBoosterValueDefault = -8;
+constexpr int32_t kAttackAccelPartyBoosterValueMin = -8;
+constexpr int32_t kAttackAccelPartyBoosterValueMax = 0;
+// 破 degree 下限目标 lo（开破限时写入 GA 种子）；越负越快；deg=-10 → 延迟×0。
+constexpr int32_t kAttackAccelBreakDegreeFloorLoDefault = -10;
+constexpr int32_t kAttackAccelBreakDegreeFloorLoMin = -10;
+constexpr int32_t kAttackAccelBreakDegreeFloorLoMax = 0;
 // false：首页「攻击加速」置灰不可选；读盘/Normalize/Apply 强制关闭，防旧 ini 误开。
 constexpr bool kAttackAccelUserEnabled = false;
 // false：实验 TAB「攻速槽 nBooster_」置灰；读盘/落盘/Apply 强制关（写 -8 有指纹风险）。
 constexpr bool kAttackAccelBoosterUserEnabled = false;
 // false：实验 TAB「技能满级」置灰；读盘/落盘/Apply 强制关，不启 worker（服端伤不认客户端等级）。
 constexpr bool kSkillMaxLevelUserEnabled = false;
+// false：实验 TAB「普攻必出终极一击」置灰；读盘/落盘/Apply 强制关，不启 FaForce worker
+//（曾 off-pump GetSkill → GA+0x3a0bde TLS AV；功能已弃用，代码保留防日后重开）。
+constexpr bool kFinalAttackForceUserEnabled = false;
 // 群怪优先：落盘仍用 clusterWeight；0=关，非 0=开（旧 1–100 权重一律视为开）。
 constexpr uint32_t kClusterWeightDefault = 0u;
 constexpr uint32_t kClusterWeightMax = 100u;
@@ -193,14 +219,14 @@ constexpr uint32_t kCombatTeleportStandOffMax = 200u;
 //     ⚠️ 出刀闸与到位判据会**跟着放大**，否则站到 250px 会被 |dx|<=120 的硬闸一票否决。
 constexpr uint32_t kCombatStandOffCustomDefault = 0u;
 // X = 人↔怪心的水平目标距离（px，恒正；左右哪一侧由飞控自己选）。
-// 自定义开箱默认 39/-17（用户实机常用远程站位）；关勾选仍走内置近战最优。
-constexpr uint32_t kCombatStandOffXDefault = 39u;
+// 自定义开箱默认 42/-7（与内置空中站位一致）；关勾选仍走同一组内置值。
+constexpr uint32_t kCombatStandOffXDefault = 42u;
 constexpr uint32_t kCombatStandOffXMin = 0u;
 // 上界给到 900：够覆盖弓/弩/法师的屏内射程；再远怪也出屏了，选靶先饿死。
 constexpr uint32_t kCombatStandOffXMax = 900u;
 // Y = 相对怪心的垂直偏移（px，**带符号**；+Y 向上 ⇒ 正数=站在怪上方）。
 // 用 IniGetI32 直存负号，别偏置编码：user.ini 是用户会直接改的文件。
-constexpr int32_t kCombatStandOffYDefault = -17;
+constexpr int32_t kCombatStandOffYDefault = -7;
 constexpr int32_t kCombatStandOffYMin = -600;
 constexpr int32_t kCombatStandOffYMax = 600;
 // 站立伪装默认开：滑翔时 CurFh 恒空，一切「必须站立」的技能（蝸牛術、部分职业主
@@ -259,7 +285,13 @@ struct PayloadControl {
     uint32_t version = kPayloadControlVersion;
     uint32_t invuln = 1;  // 默认开
     // v27/v38: 攻击加速（开=跳过动作等待；间隔默认见 kSimpleCombatAttackIntervalDefaultMs）
+    // 首页入口已关（kAttackAccelUserEnabled）；实验清忙锁见 attackAccelClearBusy。
     uint32_t attackAccel = 0;
+    // 实验：周期写 LocalUser ActionBusy=-1（清引擎忙锁）；默认关。不绑首页 attackAccel。
+    // 不是技能无 CD；仍受面板间隔 / 服端校验约束。
+    uint32_t attackAccelClearBusy = 0;
+    // 清忙锁开启时的出刀间隔地板（ms）；默认 200。不改写面板间隔落盘。
+    uint32_t attackAccelClearBusyMinIntervalMs = kAttackAccelClearBusyMinIntervalDefaultMs;
     // 实验：砍动作层 layer+0x14 倒计时（默认关；不改变 attackAccel 语义）
     uint32_t attackAccelCutLayer = 0;
     // 实验：跳过 PrepareActionLayer（默认关；LocalUser 虚表；实验 TAB）
@@ -267,6 +299,17 @@ struct PayloadControl {
     // 实验：SecondaryStat.nBooster_ 攻速槽（默认关）。与 attackAccel 完全独立。
     // 用户入口已关（kAttackAccelBoosterUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t attackAccelBooster = 0;
+    // 实验：A 系 nSpeed_@0x84=+40（GetActionSpeed → Prepare clamp 140）；默认关。
+    uint32_t attackAccelActionSpeed = 0;
+    // 实验：TempStats[4].Value(PartyBooster)（B 系 degree 加数）；默认关。
+    uint32_t attackAccelPartyBooster = 0;
+    // PartyBooster 写入值（越负越快；默认 -8；范围见 kAttackAccelPartyBoosterValue*）。
+    int32_t attackAccelPartyBoosterValue = kAttackAccelPartyBoosterValueDefault;
+    // 实验：破 CalcWeaponAttackSpeedTier 下限（写 GA .data 独占种子；默认关）。
+    // 与 PartyBooster 完全独立：不开本项时 PB=-8 仍夹到 deg=2。
+    uint32_t attackAccelBreakDegreeFloor = 0;
+    // 破限目标 lo（默认 -10；范围见 kAttackAccelBreakDegreeFloorLo*）。
+    int32_t attackAccelBreakDegreeFloorLo = kAttackAccelBreakDegreeFloorLoDefault;
     // 已关停：读写一律压回 1，清掉实验期落盘的 2/3。
     uint32_t attackSameFrameBurst = kAttackSameFrameBurstDefault;
     // v23: 飞行武装（面板勾选 / F6）；策略由 flyMode 决定；不钉台。
@@ -323,6 +366,9 @@ struct PayloadControl {
     uint32_t simpleCombatGroundSpoof = kCombatGroundSpoofDefault;
     // v67: 空中贴怪防抖 —— 到位后冻结站位点，模式仍 Station（可 ini/面板一键关）。
     uint32_t simpleCombatAntiJitter = kCombatAntiJitterDefault;
+    // v69: 防贴脸退避 —— 站距 X/Y 内有任何怪（含锁定目标）就把站位点推开。默认关；
+    // 需同时开「自定义站距」+ 空中贴怪，任一不满足即静默不生效（见 simple_combat 退避总闸）。
+    uint32_t simpleCombatAntiHug = 0;
     uint32_t simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
     // v45: 单次贴怪 hop 上限（px）；调试 TAB
     uint32_t simpleCombatTeleportMaxHop = kCombatTeleportMaxHopDefault;
@@ -395,17 +441,16 @@ struct PayloadControl {
     uint32_t frameLock = 1;  // 默认开，目标见 kFrameLockFpsDefault
     uint32_t frameLockFps = kFrameLockFpsDefault;
     // v48: 普攻必出终极一击（Final Attack prop→100；默认关）
+    // 用户入口已关（kFinalAttackForceUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t finalAttackForce = 0;
     // v54: 已学技能按满级（改 SkillRecord/Ex 等级；默认关）
     // 用户入口已关（kSkillMaxLevelUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t skillMaxLevel = 0;
-    // v65: 不挥弓 — CED + Shoot(MB=1) + FindHit±120；禁止注入未学技（默认关）
-    uint32_t pointBlankShoot = 0;
     // ????????? DragManager.CanPerformAction ??????????
     uint32_t dropAlertBypass = 0;  // 默认关：开着会抑制客户端警戒
-    // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认关）。
-    // 服端可能断线；与挂机「守护模式」叠加会干净重拉——故默认关。
-    uint32_t auctionTownBypass = 0;
+    // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认开）。
+    // 服端可能断线；与挂机「守护模式」叠加会干净重拉——挂机/守护时建议关。
+    uint32_t auctionTownBypass = 1;
     // Deprecated（经典版）：补给真源为 user.ini [auto_supply]。
     // 字段仅保留结构布局兼容；Read/WritePayloadControl 不再读写，并会清掉 core.autoSell*。
     uint32_t autoSell = 0;
@@ -488,6 +533,24 @@ inline uint32_t EffectiveSimpleCombatAttackIntervalMs(uint32_t ms, uint32_t atta
     return v;
 }
 
+inline uint32_t ClampAttackAccelClearBusyMinIntervalMs(uint32_t ms) {
+    if (ms < kAttackAccelClearBusyMinIntervalMinMs) return kAttackAccelClearBusyMinIntervalMinMs;
+    if (ms > kAttackAccelClearBusyMinIntervalMaxMs) return kAttackAccelClearBusyMinIntervalMaxMs;
+    return ms;
+}
+
+// Apply 用：面板间隔 +（可选）首页加速地板 + 清忙锁专用地板。不用于改写落盘间隔。
+inline uint32_t EffectiveAttackIntervalForApply(uint32_t panelMs, uint32_t attackAccel,
+                                               uint32_t clearBusy, uint32_t clearBusyMinMs) {
+    uint32_t v = EffectiveSimpleCombatAttackIntervalMs(panelMs, attackAccel);
+    if (clearBusy) {
+        const uint32_t floor = ClampAttackAccelClearBusyMinIntervalMs(
+            clearBusyMinMs ? clearBusyMinMs : kAttackAccelClearBusyMinIntervalDefaultMs);
+        if (v < floor) v = floor;
+    }
+    return v;
+}
+
 inline uint32_t ClampClusterWeight(uint32_t w) {
     if (w > kClusterWeightMax) return kClusterWeightMax;
     return w;
@@ -532,6 +595,18 @@ inline uint32_t ClampCombatStandOffX(uint32_t v) {
 inline int32_t ClampCombatStandOffY(int32_t v) {
     if (v < kCombatStandOffYMin) return kCombatStandOffYMin;
     if (v > kCombatStandOffYMax) return kCombatStandOffYMax;
+    return v;
+}
+
+inline int32_t ClampAttackAccelPartyBoosterValue(int32_t v) {
+    if (v < kAttackAccelPartyBoosterValueMin) return kAttackAccelPartyBoosterValueMin;
+    if (v > kAttackAccelPartyBoosterValueMax) return kAttackAccelPartyBoosterValueMax;
+    return v;
+}
+
+inline int32_t ClampAttackAccelBreakDegreeFloorLo(int32_t v) {
+    if (v < kAttackAccelBreakDegreeFloorLoMin) return kAttackAccelBreakDegreeFloorLoMin;
+    if (v > kAttackAccelBreakDegreeFloorLoMax) return kAttackAccelBreakDegreeFloorLoMax;
     return v;
 }
 

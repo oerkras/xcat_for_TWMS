@@ -1,6 +1,8 @@
 #include "auto_lie.h"
 #include "anti_macro_follower.h"
 #include "anti_macro_port.h"
+#include "lie_log.h"
+#include "lie_stats.h"
 #include "mouse_trajectory_sim.h"
 
 #include "../notify/notify.h"
@@ -53,6 +55,11 @@ std::atomic<DWORD> gAlarmTestUntil{0};
 std::atomic<DWORD> gLastAlarmTestSound{0};
 std::atomic<DWORD> gLastAlarmTestNotify{0};
 std::atomic<DWORD> gMouseSmokeUntil{0};
+// 答题中途被压下的 autoLie=0 的到达时刻。SetEnabled 在 IPC 线程、落实在 worker 的 TickImpl，
+// 所以得是原子量。0 = 没有待落实的关闭。
+std::atomic<DWORD> gPendingOffMs{0};
+// 压得再久也要放手：万一跟随卡住不退出，别让开关永远关不掉。
+constexpr DWORD kDeferOffMaxMs = 30000;
 
 DWORD gLastPoll = 0;
 DWORD gLastAnsPoll = 0;
@@ -98,7 +105,7 @@ void Log(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    x::runtime::LogI("AutoLie", "%s", buf);
+    lie_log::Line("AutoLie", buf);
 }
 
 void EnsureDir(const std::string& path) {
@@ -530,6 +537,7 @@ void TickQuiz(DWORD now) {
                 Log("%s (keep alarm until UI closes)", gLastError.c_str());
                 // 对照仓：超时用 AlarmTimeout，与进行中 Alarm 一听可辨。
                 xcat::sound::PlayAsync(xcat::sound::Id::AlarmTimeout);
+                lie_stats::RecordOutcome(lie_stats::Kind::Text, lie_stats::Outcome::Timeout);
                 Notify(x::features::notify::NotificationKind::Warning, "auto-lie-solver-timeout",
                        "测谎识别超时",
                        "AI 未在限时内返回答案，请检查启动器、网络或 LLM 服务。", 5200);
@@ -583,6 +591,7 @@ void TickQuiz(DWORD now) {
         // 对照仓：掐断报警队列后插播 LiePass；窗未关前不再 PulseAlarm。
         StopAlarm(/*suppressUntilUiGone=*/true);
         xcat::sound::PlayInterrupt(xcat::sound::Id::LiePass);
+        lie_stats::RecordOutcome(lie_stats::Kind::Text, lie_stats::Outcome::Answered);
         Notify(x::features::notify::NotificationKind::Success, "auto-lie-result", "测谎已提交",
                gAnsText.c_str(), 4500);
         WriteStatus(now, true);
@@ -606,6 +615,17 @@ void TickImpl(DWORD now) {
     TickAlarmTest(now);
     TickMouseSmoke(now);
     RefreshInfra(now);
+
+    // 之前压下的 autoLie=0：答题收了尾就落实（等太久也放手，别让卡住的跟随把开关锁死）。
+    const DWORD pendingOff = gPendingOffMs.load();
+    if (pendingOff &&
+        (!anti_macro_follower::IsFollowing() || now - pendingOff >= kDeferOffMaxMs)) {
+        const DWORD held = now - pendingOff;
+        gPendingOffMs.store(0);
+        Log("deferred autoLie=0 applied after %lums", static_cast<unsigned long>(held));
+        SetEnabled(false);
+        return;  // 本拍收手，下一拍走关闭路径
+    }
 
     if (!gEnabled.load()) {
         if (gWorldPaused) SetWorldPause(false);
@@ -636,6 +656,17 @@ void TickImpl(DWORD now) {
     const bool mouseOpen = anti_macro_port::IsNonFiniteOpen();
     const bool anyOpen =
         anti_macro_port::IsOpenAntiMacro() || textOpen || mouseOpen;
+
+    // 知识题记账（轨迹题在 follower 里埋）；关窗时若没提交过答案，闩会补记 missed。
+    static bool s_textWasOpen = false;
+    if (textOpen != s_textWasOpen) {
+        s_textWasOpen = textOpen;
+        if (textOpen)
+            lie_stats::RecordSeen(lie_stats::Kind::Text,
+                                  reinterpret_cast<uint64_t>(anti_macro_port::GetTextCaptcha()));
+        else
+            lie_stats::NotifyClosed(lie_stats::Kind::Text);
+    }
 
     // 实机测谎 UI 优先；基建 phase 仅在无 UI 时保留
     if (mouseOpen && !IsInfraPhase(gPhase)) gPhase = "mouse";
@@ -710,11 +741,29 @@ DWORD WINAPI Worker(LPVOID) {
     return 0;
 }
 
+// missed 取证（知识题）。只会在 worker 线程被回调——Text 的 seen / outcome / closed 全部从
+// TickImpl 触发，与下面这些状态的写方同线程，所以读 gPhase / gLastError 是安全的。
+// 轨迹题那份在 anti_macro_follower.cpp 里，两者互不相干。
+void FillMissedSnapshot(char* out, int outSz) {
+    if (!out || outSz <= 0) return;
+    snprintf(out, static_cast<size_t>(outSz),
+             "auto_lie phase=%.24s busy=%d dryRun=%d worldPaused=%d\r\n"
+             "text pendingId=%.32s haveAns=%d ansLen=%d submitted=%d timeoutLogged=%d\r\n"
+             "infra dirsOk=%d infraOk=%d infraFull=%d\r\n"
+             "lastError=%.160s",
+             gPhase.c_str(), gBusy.load() ? 1 : 0, gDryRun.load() ? 1 : 0, gWorldPaused ? 1 : 0,
+             gPendingId.c_str(), gHaveAns ? 1 : 0, static_cast<int>(gAnsText.size()),
+             gSubmitted ? 1 : 0, gTimeoutLogged ? 1 : 0, gDirsOk ? 1 : 0, gInfraOk ? 1 : 0,
+             gInfraFull ? 1 : 0, gLastError.empty() ? "(none)" : gLastError.c_str());
+}
+
 }  // namespace
 
 void Init() {
     anti_macro_follower::Init();
     mouse_trajectory_sim::Init();
+    lie_stats::Init();
+    lie_stats::SetSnapshotProvider(lie_stats::Kind::Text, &FillMissedSnapshot);
     ClearPending();
     gEnabled.store(false);
     gDryRun.store(false);
@@ -762,6 +811,20 @@ void StopWorker() {
 }
 
 void SetEnabled(bool on) {
+    // 答题进行中收到 autoLie=0 先别照办。IPC 每拍下发全量配置，实机见过面板侧这一位短暂
+    // 掉 0 又弹回来（BIN aa29bc 08-11 05:24 / 05:26 / 05:35，各 117 / 641 / 182 ms）。
+    // 那三次都落在空闲期所以无害，可要是落进答题窗口，follower 的 Abort 会把光标弹回答题前
+    // 的位置、游戏那几帧照采，轨迹里就多一段人为瞬移 —— 与谓词 stale 误判是同一种伤。
+    // 真想关的话不会漏：答题收尾（或 kDeferOffMaxMs 到点）后由 TickImpl 落实。
+    if (!on && gEnabled.load() && anti_macro_follower::IsFollowing()) {
+        DWORD expected = 0;
+        DWORD mark = GetTickCount();
+        if (!mark) mark = 1;
+        if (gPendingOffMs.compare_exchange_strong(expected, mark))
+            Log("autoLie=0 arrived mid-follow — defer off until quiz ends");
+        return;
+    }
+    gPendingOffMs.store(0);
     const bool prev = gEnabled.exchange(on);
     if (prev != on) Log("enabled=%d", on ? 1 : 0);
     if (!on) {
@@ -786,6 +849,7 @@ bool IsEnabled() { return gEnabled.load(); }
 void SetDryRun(bool on) {
     const bool prev = gDryRun.exchange(on);
     if (prev != on) Log("dryRun=%d", on ? 1 : 0);
+    lie_stats::SetSuppressed(on);
 }
 
 bool IsDryRun() { return gDryRun.load(); }

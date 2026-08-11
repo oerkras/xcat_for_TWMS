@@ -18,6 +18,8 @@ target_include_directories(xcat_ops PRIVATE
 
 target_sources(xcat_ops PRIVATE
     ${CMAKE_SOURCE_DIR}/common_ui/xcat_imgui_theme.cpp
+    # 仅链地图名离线表，不拉整包 xcat_common（运维台刻意轻量）
+    ${CMAKE_SOURCE_DIR}/common/xcat_map_names.cpp
 )
 
 target_link_libraries(xcat_ops PRIVATE

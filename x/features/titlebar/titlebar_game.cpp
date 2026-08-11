@@ -9,6 +9,7 @@
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
+#include "../../runtime/main_thread_pump.h"
 #include "../../runtime/managed_main.h"
 #include "../../ui/player_vitals.h"
 #include "xcat_item_catalog.h"
@@ -189,6 +190,14 @@ bool PriceFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
 
 void EnsurePriceFieldOff() {
     if (gPriceFieldTried) return;
+    // BIN 11:56 LOADING：Titlebar worker 上 FindClass → GC Fatal（紧挨 price fields 日志）。
+    if (!x::runtime::main_thread::IsOnPumpThread() &&
+        x::runtime::main_thread::IsInstalled()) {
+        x::runtime::main_thread::InvokeAndWait(
+            [](void*) { EnsurePriceFieldOff(); }, nullptr, 2500,
+            x::runtime::main_thread::JobPrio::High);
+        return;
+    }
     if (!x::runtime::il2cpp::Ensure()) return;
     gPriceFieldTried = true;
     void* idm = x::runtime::il2cpp::FindClass("", kItemDataManagerClass);
@@ -388,6 +397,20 @@ bool BindApis() {
     EnsurePriceFieldOff();
     x::runtime::LogI("Titlebar", "BindApis ok GA=%p FindAll=%p", exports.ga, gFindAll);
     return true;
+}
+
+void WarmForLoginWorkers() {
+    // LOGIN 开 Titlebar worker 前：泵上跑完 FindClass，避免 LOADING 期 GC Fatal。
+    auto job = [](void*) { EnsurePriceFieldOff(); };
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        job(nullptr);
+        return;
+    }
+    if (!x::runtime::main_thread::IsInstalled() ||
+        !x::runtime::main_thread::InvokeAndWait(job, nullptr, 2500,
+                                                 x::runtime::main_thread::JobPrio::High)) {
+        x::runtime::LogW("Titlebar", "WarmForLoginWorkers pump-wait fail");
+    }
 }
 
 void* LocalCharacterStat() { return x::ui::player::LocalCharacterStat(); }

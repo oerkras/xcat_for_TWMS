@@ -5,6 +5,7 @@
 #include "consumable_port.h"
 
 #include "input_port.h"
+#include "travel_port.h"
 #include "world_port.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
@@ -1058,6 +1059,8 @@ struct FindUseIdJobCtx {
     FindResult fr{};
     int qtyBefore = -1;
     int qtyAfter = -1;
+    int mapIdBefore = 0;
+    int mapIdAfter = 0;
     bool found = false;
     bool used = false;
     bool resolveMiss = false;
@@ -1090,11 +1093,14 @@ void FindUseIdJobOnMain(void* user) {
         ctx->resolveMiss = true;
         return;
     }
+    ctx->mapIdBefore = travel::CurrentMapId();
     __try {
         // 与 FuncKey / UseJobOnMain 一致：第三参传 null MI。
         gFnPortalScroll(ctx->fr.pos, ctx->fr.itemId, nullptr);
         ctx->used = true;
+        // 换图窗内消耗栏常短暂不可读 → qtyAfter=-1（BIN b19da8）；仍以 mapId 旁证成功。
         ctx->qtyAfter = QtyOfItemId(ctx->fr.itemId);
+        ctx->mapIdAfter = travel::CurrentMapId();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ctx->used = false;
         ctx->seh = true;
@@ -1247,6 +1253,23 @@ bool ResolveBoundPotion(bool wantHp, FindResult& out) {
     return ctx.ok;
 }
 
+bool PeekBoundPotionItemId(bool wantHp, int& outItemId) {
+    outItemId = 0;
+    FindResult fr{};
+    (void)ResolveBoundPotion(wantHp, fr);
+    if (fr.itemId <= 0) return false;
+    // ok / not_in_bag / qty=0：都是合法 Item 绑定；其它 miss（empty_bind/not_item/…）不算。
+    if (fr.ok) {
+        outItemId = fr.itemId;
+        return true;
+    }
+    if (fr.missWhy && std::strcmp(fr.missWhy, "not_in_bag") == 0) {
+        outItemId = fr.itemId;
+        return true;
+    }
+    return false;
+}
+
 bool FindAndUseBoundPotion(bool wantHp, FindResult& out) {
     out = {};
     FindUseBoundJobCtx ctx{};
@@ -1268,20 +1291,39 @@ bool FindAndUseBoundPotion(bool wantHp, FindResult& out) {
                          wantHp ? "PageDown" : "PageUp");
         return true;
     }
-    Sleep(280);
+    // 双段 delayed：首段短、失败再补一拍（BIN 多数首段即 ok；过长会拖慢连喝）。
+    for (int pass = 0; pass < 2; ++pass) {
+        Sleep(pass == 0 ? 200 : 180);
+        QtyJobCtx q{};
+        q.itemId = ctx.fr.itemId;
+        if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
+            ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
+            NoteConsumePosSuccess(ctx.fr.listIndex, ctx.fr.pos);
+            x::runtime::LogI("Consumable",
+                             "UseRequest(bound) ok pos=%d id=%d qty %d→%d (delayed%s) key=%s",
+                             ctx.fr.pos, ctx.fr.itemId, ctx.qtyBefore, q.qty,
+                             pass == 0 ? "" : "2", wantHp ? "PageDown" : "PageUp");
+            return true;
+        }
+    }
     QtyJobCtx q{};
     q.itemId = ctx.fr.itemId;
-    if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
-        ctx.qtyBefore >= 0 && q.qty < ctx.qtyBefore) {
-        NoteConsumePosSuccess(ctx.fr.listIndex, ctx.fr.pos);
-        x::runtime::LogI("Consumable",
-                         "UseRequest(bound) ok pos=%d id=%d qty %d→%d (delayed) key=%s", ctx.fr.pos,
-                         ctx.fr.itemId, ctx.qtyBefore, q.qty, wantHp ? "PageDown" : "PageUp");
-        return true;
+    q.qty = -1;
+    (void)x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs);
+
+    // listIndex 作 nPOS 已验证时，alt=listIndex+1 只会空烧时间/CD（BIN: pos=3 ok、alt=4 empty）。
+    const int mode = gConsumePosMode.load(std::memory_order_relaxed);
+    const bool skipAlt =
+        mode == static_cast<int>(ConsumePosMode::ListIndexIsPos) ||
+        (ctx.fr.listIndex >= 1 && ctx.fr.pos == ctx.fr.listIndex);
+    if (skipAlt) {
+        x::runtime::LogW("Consumable",
+                         "UseRequest(bound) empty id=%d pos=%d qtyBefore=%d after=%d (skip alt)",
+                         ctx.fr.itemId, ctx.fr.pos, ctx.qtyBefore, q.qty);
+        return false;
     }
 
     // One alt-POS retry entirely via main jobs (still no worker managed reads).
-    // Prefer path already uses listIndex; alt covers rare ListIndexPlusOne layouts.
     int alt = -1;
     if (ctx.fr.listIndex >= 0) {
         if (ctx.fr.pos == ctx.fr.listIndex + 1)
@@ -1303,7 +1345,7 @@ bool FindAndUseBoundPotion(bool wantHp, FindResult& out) {
         !retry.ok) {
         return false;
     }
-    Sleep(280);
+    Sleep(180);
     q = {};
     q.itemId = ctx.fr.itemId;
     if (x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs) && q.qty >= 0 &&
@@ -1361,6 +1403,14 @@ bool FindAndUseByItemId(int itemId, FindResult& out) {
                          ctx.qtyBefore, ctx.qtyAfter);
         return true;
     }
+    // BIN b19da8：发包当拍已 104000100→104000000，但换图窗 qtyAfter=-1 → 旧逻辑误判 no_consume。
+    if (ctx.mapIdBefore > 0 && ctx.mapIdAfter > 0 && ctx.mapIdAfter != ctx.mapIdBefore) {
+        x::runtime::LogI("Consumable",
+                         "PortalScroll ok pos=%d id=%d map %d→%d (qty %d→%d; map_changed)",
+                         ctx.fr.pos, itemId, ctx.mapIdBefore, ctx.mapIdAfter, ctx.qtyBefore,
+                         ctx.qtyAfter);
+        return true;
+    }
     Sleep(220);
     QtyJobCtx q{};
     q.itemId = itemId;
@@ -1370,10 +1420,19 @@ bool FindAndUseByItemId(int itemId, FindResult& out) {
                          itemId, ctx.qtyBefore, q.qty);
         return true;
     }
-    // 已发包但数量未降：对回城卷视为失败（勿冒充 ok 让 AutoSupply 干等后改走路）
+    // delayed 复核时图可能已变（qty 仍读不到）：再认一次 map 旁证。
+    const int mapNow = travel::CurrentMapId();
+    if (ctx.mapIdBefore > 0 && mapNow > 0 && mapNow != ctx.mapIdBefore) {
+        x::runtime::LogI("Consumable",
+                         "PortalScroll ok pos=%d id=%d map %d→%d (delayed map_changed; qtyAfter=%d)",
+                         ctx.fr.pos, itemId, ctx.mapIdBefore, mapNow, q.qty);
+        return true;
+    }
+    // 已发包、数量未降且未换图：真失败（勿冒充 ok 让 AutoSupply 干等）。
     x::runtime::LogW("Consumable",
-                     "PortalScroll no_consume id=%d pos=%d qtyBefore=%d after=%d → fail", itemId,
-                     ctx.fr.pos, ctx.qtyBefore, q.qty);
+                     "PortalScroll no_consume id=%d pos=%d qtyBefore=%d after=%d map=%d→%d/%d → fail",
+                     itemId, ctx.fr.pos, ctx.qtyBefore, q.qty, ctx.mapIdBefore, ctx.mapIdAfter,
+                     mapNow);
     return false;
 }
 

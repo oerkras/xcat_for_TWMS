@@ -39,8 +39,8 @@ unsigned KillBrowsersBlockingProfile(const BrowserProfile& profile,
                                      int debugPort = kDefaultRemoteDebugPort,
                                      const LogFn& log = nullptr);
 
-// UIA 自动登录前：结束「首选浏览器」同安装的日常主进程（用户授权），确保本轮只拉起登录窗。
-// ★ 只杀 Chromium 主进程（跳过 --type= 子进程）；不清 Cookie / User Data。
+// （保留）曾用于 UIA 一键前杀日常浏览器；现 UIA 正道已改为不杀，靠 --new-window + 快照附着。
+// ★ 只杀 Chromium 主进程（跳过 --type= 子进程）；不清 Cookie / User Data。勿再接到默认登录路径。
 unsigned KillDailyBrowsersForUiaLogin(const std::wstring& preferredExe,
                                       const LogFn& log = nullptr);
 

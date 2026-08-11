@@ -424,6 +424,14 @@ void* ResolveWorldManagerKlass() {
 
 void* ResolveUserLocalKlass() {
     if (gCacheUl) return gCacheUl;
+    // LogResolveSelfCheck / Titlebar GetWM 会在 LOGIN worker 上冷解 UL=shape（BIN 11:56）。
+    if (!x::runtime::main_thread::IsOnPumpThread() &&
+        x::runtime::main_thread::IsInstalled()) {
+        x::runtime::main_thread::InvokeAndWait(
+            [](void*) { (void)ResolveUserLocalKlass(); }, nullptr, 2500,
+            x::runtime::main_thread::JobPrio::High);
+        return gCacheUl;
+    }
     const ResolveResult r = FindClassCached(kHashUserLocal, kUlShape);
     gCacheUl = r.klass;
     gPathUl = r.path;

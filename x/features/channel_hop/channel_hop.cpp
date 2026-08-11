@@ -113,19 +113,23 @@ constexpr int kSessConnecting = 2;
 
 constexpr DWORD kTickMs = 80;
 constexpr DWORD kJobWaitMs = 2500;
+constexpr DWORD kObserveWmIntervalMs = 2000;  // 官方 UI 换频：图内轻量读 WM 同步 sticky
+constexpr DWORD kObserveWmJobMs = 400;       // 仅两字段，短超时；失败跳过不刷泵
+
 constexpr DWORD kWaitMigrateMs = 12000;
 constexpr DWORD kWaitAlertMs = 20000;       // 警戒解除最长等待
 constexpr DWORD kWaitExclMs = 20000;        // excl 独占解除最长等待
-constexpr DWORD kPreFireSettleMs = 6500;    // BIN 0.1.39：3s 停手干净仍踢；F5 战中换频再放宽
+constexpr DWORD kPreFireSettleMs = 4000;    // 提速：6.5s→4s（BIN 0.1.39：3s 仍踢；介于 3～6.5）
 constexpr DWORD kPostAlertGraceMs = 1500;   // 脱战后额外稍等（与 PreFire 取较晚者）
 constexpr DWORD kFireIdleTimeoutMs = 2000;  // WaitFireIdle 上限（排空在途攻击键）
 constexpr DWORD kFireIdleSettleMs = 400;    // 末次开火后再静默
-constexpr DWORD kTeleportForceCdMs = 6500;  // 与 settle 对齐：禁新瞬移，等旧 tp 态散掉
+// 必须与 PreFire 同窗。BIN a164e3：settle=4s 但 ForceCd 仍 6.5s → tpCdRem≈2.5s 拖满旧体感。
+constexpr DWORD kTeleportForceCdMs = kPreFireSettleMs;
 constexpr DWORD kAlertSampleMs = 200;
 constexpr DWORD kExclSampleMs = 200;
 constexpr DWORD kLandGraceMs = 4000;        // 进图后门控宽限，避免加载瞬间误发挂起 seq
-constexpr DWORD kCooldownAfterOkMs = 20000;  // BIN：成功后 ~9s 内连点曾脏会话硬断；15s 不够，拉到 20s
-constexpr DWORD kCooldownAfterFailMs = 3000;
+constexpr DWORD kCooldownAfterOkMs = 0;    // 用户：遇人/手动换频不要成功冷却（脏断风险自负）
+constexpr DWORD kCooldownAfterFailMs = 0;  // 同上：失败也不挡立刻再试
 constexpr DWORD kPostHopQuietMs = 4000;    // 结算后暂缓恢复战斗（BIN：settle 后立刻 resume → 会话层仍在撕；无敌已不在 hop 中关闭）
 constexpr DWORD kSettleReadyMs = 1500;     // 未离图时的最短观察
 constexpr DWORD kStayConfirmMs = 1200;     // 从未离图且仍原频 → 才判拒绝
@@ -169,6 +173,11 @@ int gChannelCount = 0;
 int gFireAttempt = 0;
 int gTried[128]{};
 int gTriedN = 0;
+// 本图「落地仍挤 → 刚离开」的频道：选池 prefer 时优先避开；池空再放宽。
+constexpr DWORD kSoftAvoidTtlMs = 5 * 60 * 1000;
+DWORD gSoftAvoidAt[128]{};  // 0=未拉黑；非 0=标记时刻（GetTickCount）
+int gSoftAvoidMapId = -1;
+int gSoftAvoidLive = 0;  // 诊断：当前未过期条数（Note/Pick 时刷新）
 DWORD gStaySince = 0;      // 从未离图且连续仍停原频
 DWORD gLandedAt = 0;       // 离图后再进 PlayReady 的时刻；0=本轮未落地过
 bool gSawLeavePlay = false;  // 发包后是否见过 !IsPlayReady（黑屏/InterStage）
@@ -202,8 +211,25 @@ uint32_t gLastDeferNotifySeq = 0;
 // UI / toast：0-based idx → 玩家看到的 ch.N
 int DispCh(int idx) { return idx >= 0 ? idx + 1 : idx; }
 
+int KnownDisp1Based() {
+    if (gKnownChannelIdx < 0) return 0;
+    return DispCh(gKnownChannelIdx);
+}
+
+// 把 known 推到 auto_enter sticky（遇人换频后 soft 必须粘新频，不能只靠进图 Done）。
+void PushStickyFromKnown(const char* why) {
+    const int ch1 = KnownDisp1Based();
+    if (ch1 > 0) auto_enter::NoteStickyChannel(ch1, why);
+}
+
 struct JobCtx {
-    enum class Kind : int { ReadInfo, FireTransfer, QueryAlert, QueryExcl } kind = Kind::ReadInfo;
+    enum class Kind : int {
+        ReadInfo,
+        FireTransfer,
+        QueryAlert,
+        QueryExcl,
+        ObserveWm  // 轻量：只读 +0x6C/+0x68，供官方 UI 换频同步 sticky
+    } kind = Kind::ReadInfo;
     bool ok = false;
     int channelId = 0;       // 0-based 当前（选频/排除用）
     int channelRaw68 = 0;    // WM+0x68 原值
@@ -685,6 +711,43 @@ void JobFn(void* user) {
         job->ok = true;
         break;
     }
+    case JobCtx::Kind::ObserveWm: {
+        // 官方 UIChannelShift 等绕过本状态机：只读两字段，不扫成人表/CCU。
+        void* wm = ports::world::GetWorldManager();
+        if (!wm) {
+            strncpy_s(job->err, "no WorldManager", _TRUNCATE);
+            return;
+        }
+        job->channelRaw68 = ReadI32(wm, gOffWmChannelId);
+        job->channelRaw6c = ReadI32(wm, gOffWmChannelAlt);
+        constexpr int kMaxCh = 64;
+        auto inRange = [](int v) { return v >= 0 && v < kMaxCh; };
+        if (inRange(job->channelRaw6c) && gLastRaw6c != -999 &&
+            job->channelRaw6c != gLastRaw6c) {
+            job->channelId = job->channelRaw6c;
+            job->channelSrc = "wm6c_adv";
+        } else if (inRange(job->channelRaw68) && gLastRaw68 != -999 &&
+                   job->channelRaw68 != gLastRaw68) {
+            job->channelId = job->channelRaw68;
+            job->channelSrc = "wm68_adv";
+        } else if (gKnownChannelIdx >= 0 && gKnownChannelIdx < kMaxCh) {
+            job->channelId = gKnownChannelIdx;
+            job->channelSrc = "known";
+        } else if (inRange(job->channelRaw6c)) {
+            job->channelId = job->channelRaw6c;
+            job->channelSrc = "wm6c";
+        } else if (inRange(job->channelRaw68)) {
+            job->channelId = job->channelRaw68;
+            job->channelSrc = "wm68";
+        } else {
+            strncpy_s(job->err, "observe raw OOR", _TRUNCATE);
+            return;
+        }
+        gLastRaw68 = job->channelRaw68;
+        gLastRaw6c = job->channelRaw6c;
+        job->ok = true;
+        break;
+    }
     case JobCtx::Kind::QueryAlert: {
         job->alert = false;
         ports::player_combat::CombatCtx ctx{};
@@ -809,12 +872,116 @@ bool RunJob(JobCtx& job) {
     return job.ok;
 }
 
+bool RunObserveJob(JobCtx& job) {
+    if (!x::runtime::main_thread::Ensure()) {
+        strncpy_s(job.err, "main_thread", _TRUNCATE);
+        return false;
+    }
+    if (!x::runtime::main_thread::InvokeAndWait(&JobFn, &job, kObserveWmJobMs,
+                                               x::runtime::main_thread::JobPrio::High)) {
+        strncpy_s(job.err, "job timeout", _TRUNCATE);
+        return false;
+    }
+    return job.ok;
+}
+
+// Idle+playReady：观测 WM 频变（官方 UI 换频），写 known + sticky。失败跳过。
+void MaybeObserveNativeChannel(DWORD now) {
+    if (GetStateLocal() != State::Idle) return;
+    if (!ports::world::IsPlayReady()) return;
+    static DWORD sLastObserveMs = 0;
+    if (sLastObserveMs && now - sLastObserveMs < kObserveWmIntervalMs) return;
+    sLastObserveMs = now;
+
+    JobCtx job{};
+    job.kind = JobCtx::Kind::ObserveWm;
+    if (!RunObserveJob(job)) return;  // 超时/失败：不重试刷泵
+
+    if (job.channelId < 0) return;
+    if (gKnownChannelIdx == job.channelId) {
+        // known 已对齐：仍推 sticky（进图 Done 后 known 可能晚于 sticky，或 sticky 被冷启覆盖）
+        PushStickyFromKnown("native_wm");
+        return;
+    }
+    const int from = gKnownChannelIdx;
+    gKnownChannelIdx = job.channelId;
+    Log("native_wm ch %d→%d (src=%s raw6c=%d raw68=%d) — sticky", DispCh(from),
+        DispCh(job.channelId), job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
+        job.channelRaw68);
+    auto_enter::NoteStickyChannel(DispCh(job.channelId), "native_wm");
+}
+
+bool SoftAvoidActive(int id, DWORD now) {
+    if (id < 0 || id >= 128) return false;
+    if (gSoftAvoidAt[id] == 0) return false;
+    return (now - gSoftAvoidAt[id]) < kSoftAvoidTtlMs;
+}
+
+int CountSoftAvoidLive(DWORD now) {
+    int n = 0;
+    for (int i = 0; i < 128; ++i) {
+        if (SoftAvoidActive(i, now)) ++n;
+    }
+    gSoftAvoidLive = n;
+    return n;
+}
+
+void ClearSoftAvoid(const char* why) {
+    const int hadMap = gSoftAvoidMapId;
+    const int hadLive = gSoftAvoidLive;
+    std::memset(gSoftAvoidAt, 0, sizeof(gSoftAvoidAt));
+    gSoftAvoidLive = 0;
+    gSoftAvoidMapId = -1;
+    if (hadMap >= 0 || hadLive > 0) {
+        Log("soft-avoid clear map=%d liveWas=%d why=%s", hadMap, hadLive, why ? why : "?");
+    }
+}
+
+void EnsureSoftAvoidMap(int mapId) {
+    if (mapId <= 0) return;
+    if (gSoftAvoidMapId == mapId) return;
+    // 会话级（map=0）升格为真图号：保留已有 mark，勿静默清空
+    if (gSoftAvoidMapId == 0) {
+        Log("soft-avoid map adopt 0→%d (keep marks live=%d)", mapId, gSoftAvoidLive);
+        gSoftAvoidMapId = mapId;
+        return;
+    }
+    if (gSoftAvoidMapId > 0) {
+        Log("soft-avoid map change %d→%d — flush", gSoftAvoidMapId, mapId);
+    }
+    std::memset(gSoftAvoidAt, 0, sizeof(gSoftAvoidAt));
+    gSoftAvoidLive = 0;
+    gSoftAvoidMapId = mapId;
+}
+
+bool TryRefreshKnownIdx(const char* why) {
+    if (gKnownChannelIdx >= 0 && gKnownChannelIdx < 128) return true;
+    JobCtx job{};
+    job.kind = JobCtx::Kind::ObserveWm;
+    if (!RunObserveJob(job) || !job.ok || job.channelId < 0 || job.channelId >= 128) {
+        Log("soft-avoid known refresh fail why=%s err=%s", why ? why : "?",
+            job.err[0] ? job.err : "unset");
+        return false;
+    }
+    gKnownChannelIdx = job.channelId;
+    Log("soft-avoid known refresh src=%s idx=%d ch=%d why=%s",
+        job.channelSrc ? job.channelSrc : "?", job.channelId, DispCh(job.channelId),
+        why ? why : "?");
+    return true;
+}
+
 int PickRandomChannel(int currentIdx, int count) {
     if (count <= 1) return -1;
-    int prefer[128]{};
-    int neutral[128]{};
+    const DWORD now = GetTickCount();
+    EnsureSoftAvoidMap(ports::world::GetMapId());
+    const int softLive = CountSoftAvoidLive(now);
+
+    int preferClean[128]{};
+    int preferSoft[128]{};
+    int neutralClean[128]{};
+    int neutralSoft[128]{};
     int avoid[128]{};
-    int nPrefer = 0, nNeutral = 0, nAvoid = 0;
+    int nPreferClean = 0, nPreferSoft = 0, nNeutralClean = 0, nNeutralSoft = 0, nAvoid = 0;
     auto excluded = [&](int id) {
         if (id == currentIdx) return true;
         for (int i = 0; i < gTriedN; ++i) {
@@ -832,25 +999,40 @@ int PickRandomChannel(int currentIdx, int count) {
         } else if (IsAdultIdx(id) && hint == ccu::ChannelPickHint::Neutral) {
             hint = ccu::ChannelPickHint::Avoid;
         }
+        const bool soft = SoftAvoidActive(id, now);
         if (hint == ccu::ChannelPickHint::Prefer) {
-            prefer[nPrefer++] = id;
+            if (soft)
+                preferSoft[nPreferSoft++] = id;
+            else
+                preferClean[nPreferClean++] = id;
         } else if (hint == ccu::ChannelPickHint::Avoid) {
             avoid[nAvoid++] = id;
+        } else if (soft) {
+            neutralSoft[nNeutralSoft++] = id;
         } else {
-            neutral[nNeutral++] = id;
+            neutralClean[nNeutralClean++] = id;
         }
     }
     const int* pool = nullptr;
     int n = 0;
     const char* poolName = "none";
-    if (nPrefer > 0) {
-        pool = prefer;
-        n = nPrefer;
+    // prefer → prefer_soft → neutral → neutral_soft → avoid
+    if (nPreferClean > 0) {
+        pool = preferClean;
+        n = nPreferClean;
         poolName = "prefer";
-    } else if (nNeutral > 0) {
-        pool = neutral;
-        n = nNeutral;
+    } else if (nPreferSoft > 0) {
+        pool = preferSoft;
+        n = nPreferSoft;
+        poolName = "prefer_soft";
+    } else if (nNeutralClean > 0) {
+        pool = neutralClean;
+        n = nNeutralClean;
         poolName = "neutral";
+    } else if (nNeutralSoft > 0) {
+        pool = neutralSoft;
+        n = nNeutralSoft;
+        poolName = "neutral_soft";
     } else if (nAvoid > 0) {
         pool = avoid;
         n = nAvoid;
@@ -858,10 +1040,12 @@ int PickRandomChannel(int currentIdx, int count) {
     }
     if (n <= 0 || !pool) return -1;
     const uint32_t mix =
-        GetTickCount() ^ (gActiveSeq.load() * 2654435761u) ^ (static_cast<uint32_t>(gFireAttempt) * 97u);
+        now ^ (gActiveSeq.load() * 2654435761u) ^ (static_cast<uint32_t>(gFireAttempt) * 97u);
     const int picked = pool[mix % static_cast<uint32_t>(n)];
-    Log("pick-pool %s size=%d (prefer=%d neutral=%d avoid=%d adultSnap=%d) → idx=%d ch=%d",
-        poolName, n, nPrefer, nNeutral, nAvoid, gAdultFlagN, picked, DispCh(picked));
+    Log("pick-pool %s size=%d (prefer=%d soft=%d softLive=%d neutral=%d nSoft=%d avoid=%d "
+        "adultSnap=%d) → idx=%d ch=%d",
+        poolName, n, nPreferClean, nPreferSoft, softLive, nNeutralClean, nNeutralSoft, nAvoid,
+        gAdultFlagN, picked, DispCh(picked));
     return picked;
 }
 
@@ -1158,7 +1342,7 @@ void UpdatePlayReadyClock(DWORD now) {
 const char* DeferReason() {
     if (!ports::world::IsPlayReady() || gPlayReadySince == 0) return "未进图";
     const DWORD now = GetTickCount();
-    if (gResumeAt != 0 && now < gResumeAt) return "换频静默";
+    // 换频静默只挡自动 resume 出刀，不挡立刻再 hop（BeginActive 会清 gResumeAt 并续持闸）
     if (now - gPlayReadySince < kLandGraceMs) return "进图冷却";
     const auto ss = ports::world::GetSceneState();
     if (ss == ports::world::SceneState::CashShop) return "商城中";
@@ -1259,6 +1443,16 @@ void TickConfirming(DWORD now) {
         const DWORD readyAt = gFireReadyAt.load(std::memory_order_acquire);
         if (readyAt != 0 && now < readyAt) return;
         gFireReadyAt.store(0, std::memory_order_release);
+    }
+
+    // 空中点换频：硬闸已触发安全落台；站稳前勿发 Transfer（否则仍可能半空切频掉穿）。
+    if (simple_combat::IsSafeLandActive()) {
+        static DWORD sLandDeferLog = 0;
+        if (!sLandDeferLog || now - sLandDeferLog > 1000) {
+            sLandDeferLog = now;
+            Log("defer transfer safe_land seq=%u", gActiveSeq.load());
+        }
+        return;
     }
 
     // 瞬移自冷未清：再推迟，避免 tp 刚落地立刻 Transfer（BIN：停火后仍踢）
@@ -1549,6 +1743,40 @@ void TickWaiting(DWORD now) {
 
 }  // namespace
 
+int LastKnownChannel1Based() { return KnownDisp1Based(); }
+
+void NoteCrowdedChannel() {
+    if (!TryRefreshKnownIdx("note_crowded")) {
+        Log("soft-avoid skip: knownIdx unset");
+        return;
+    }
+    const int idx = gKnownChannelIdx;
+    if (idx < 0 || idx >= 128) {
+        Log("soft-avoid skip: knownIdx unset");
+        return;
+    }
+    const int mapId = ports::world::GetMapId();
+    if (mapId > 0) {
+        EnsureSoftAvoidMap(mapId);
+    } else if (gSoftAvoidMapId < 0) {
+        gSoftAvoidMapId = 0;  // 无图号：会话级，换到真图号时 adopt 保留 mark
+    }
+    const DWORD now = GetTickCount();
+    const bool wasLive = SoftAvoidActive(idx, now);
+    gSoftAvoidAt[idx] = now;
+    CountSoftAvoidLive(now);
+    Log("soft-avoid mark idx=%d ch=%d map=%d refresh=%d live=%d ttl=%ums", idx, DispCh(idx),
+        gSoftAvoidMapId, wasLive ? 1 : 0, gSoftAvoidLive, (unsigned)kSoftAvoidTtlMs);
+}
+
+void OnMapChanged(int mapId) {
+    if (mapId <= 0) {
+        if (gSoftAvoidMapId >= 0 || gSoftAvoidLive > 0) ClearSoftAvoid("map_unknown");
+        return;
+    }
+    EnsureSoftAvoidMap(mapId);
+}
+
 void Init() {
     // PLAY 冷启动可能晚于 Control Apply：保留已排队 seq，否则首点/F10 会被 Init 清掉。
     const uint32_t keepPending = gPendingSeq.load(std::memory_order_acquire);
@@ -1572,6 +1800,7 @@ void Init() {
     gAdultFlagN = 0;
     gCooldownUntil = 0;
     gResumeAt = 0;
+    ClearSoftAvoid("init");
     gWatchDisconnect = false;
     gDisconnectingSince = 0;
     gSawConnecting = false;
@@ -1651,18 +1880,27 @@ void Tick(DWORD now) {
         gCombatPaused.store(true, std::memory_order_release);
     }
 
-    // 登录场景清 known，避免跨角色/重登串缓存
+    // 登录场景：先把 known 推进 sticky，再清缓存。
+    // soft hold 期间保留 known，供 RequestRestart 再同步（遇人换频后软重连粘旧频根因）。
     {
         const auto ss = ports::world::GetSceneState();
         if (ss == ports::world::SceneState::Login) {
             if (gKnownChannelIdx >= 0) {
-                Log("clear knownIdx=%d on Login", gKnownChannelIdx);
+                PushStickyFromKnown("pre_login_clear");
+                Log("clear knownIdx=%d on Login (sticky preserved) softHold=%d", gKnownChannelIdx,
+                    soft_login_probe::IsHoldActive() ? 1 : 0);
             }
-            gKnownChannelIdx = -1;
-            gLastRaw68 = -999;
-            gLastRaw6c = -999;
-            gAdultFlagN = 0;
-            gPlayReadySince = 0;
+            if (!soft_login_probe::IsHoldActive()) {
+                gKnownChannelIdx = -1;
+                gLastRaw68 = -999;
+                gLastRaw6c = -999;
+                gAdultFlagN = 0;
+                gPlayReadySince = 0;
+                ClearSoftAvoid("login");
+            }
+        } else {
+            // 图内观测官方 UI 换频；活跃 hop 状态机内跳过（SettleOk 已写 sticky）。
+            MaybeObserveNativeChannel(now);
         }
     }
 

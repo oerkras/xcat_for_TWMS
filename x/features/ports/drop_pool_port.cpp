@@ -239,8 +239,9 @@ constexpr int kLastTrySkipStamp = 0x7FFFFFFF;
 //      （IMM 0x328634BB + seed@0x7FFB8A2C92A8=0xCD79CB48 → 3）
 //   ③ now - PickStamp(0x88) >= 3000（有符号）——宠吸同款拍前清闸后由官方 Send 再盖
 //   ④ 归属链交由服务端裁决 + 退避兜底
-//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用 vacuum 半盒枚举（与宠吸共用 vacuumW/H，默认 300×200）
-//      —— 送包坐标仍是角色位；过大盒会多打拒收，靠 pending/AddStall 与 burst=1 兜底
+//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用 vacuum 半盒枚举（默认 1000×1000）
+//      —— 送包坐标仍是角色位；服端距离校验 → EffectiveCharHalf 钳到 CharVacW/HMax=1500
+//         （上传汇总：1500 盒 abs/sent≈0.84；4000 盒≈0；Stall 挡不住远处 Ready 空 Send）
 //   通过后 Point(角色 Maple 坐标) → Send(pt, Id, 0)
 //      （第 4 参 IMM 0x353E87DA + seed@…92B4=0xCAC17826 → 0，无需伪造 CRC）
 
@@ -264,6 +265,8 @@ void* gStallPool = nullptr;
 bool gStallOff = false;
 // 人物直吸：送包当帧池常未掉，立刻 AddStall 会误伤真吸。记下 id，下一拍仍在池再登记。
 int gCharPendingStallId = 0;
+
+void ClearFlyHolds();  // 飞物软挡表；换池与 Stall 一并清
 
 bool StallExpired(const StallEntry& e, DWORD now) {
     return static_cast<int32_t>(now - e.until) >= 0;
@@ -289,6 +292,7 @@ void ResetStallIfPoolChanged(void* pool) {
     gStallPool = pool;
     gStall.clear();
     gCharPendingStallId = 0;
+    ClearFlyHolds();
 }
 
 bool StallActive(int dropId, DWORD now) {
@@ -305,6 +309,11 @@ void AddStall(int dropId, DWORD now) {
     for (int i = 1; i < e.strikes && ms < kStallMaxMs; ++i) ms <<= 1;
     if (ms > kStallMaxMs) ms = kStallMaxMs;
     e.until = now + ms;
+}
+
+void ClearStallId(int dropId) {
+    if (dropId == 0 || gStall.empty()) return;
+    gStall.erase(dropId);
 }
 
 int StallActiveCount(DWORD now) {
@@ -1720,6 +1729,7 @@ struct PetVacNearPass {
     int nearMoney = 0;
     int nearItem = 0;
     int readyNear = 0;  // EndPara==Ready 且可碰（非黑名单/非退避戳）
+    int flyNear = 0;    // 盒内仍抛物中（EndPara!=Ready；已跳过黑名单）
     int sampleIsMoney = -1;
     int sampleInfo = 0;
     int sampleOwn = -1;
@@ -1808,6 +1818,10 @@ PetVacNearPass PreparePetVacNearPass(void* pool, float cx, float cy, float halfW
             out.sampleEnd = endPara;
         }
 
+        // 仍在飞：与 ready 分开计。ed7ff1：仅 readyNear>0 就 ByPet → fly>0 仍 called=1，
+        // 体感「物还没掉完宠物就吸」。黑名单已 continue，此处不含 SkipHold。
+        if (endPara != kEndParaReady) ++out.flyNear;
+
         // 可被 ByPet 真正捡的：已落地 + Pickable + 非退避戳
         const bool readyPick =
             endPara == kEndParaReady && ReadU8(drop, kOffDropPickable) != 0 &&
@@ -1840,15 +1854,93 @@ bool PetVacPoolFellSinceLast(bool prevOk, DWORD prevTick, int prevDropAfter, int
            (prevNear > 0 || prevGates > 0);
 }
 
-// ByPet 前软挡未落地：完整类型须在 RunVacuumOnMain 之前（栈数组）。
-struct FlyHold {
-    int id = 0;
-    int prevLast = 0;
-};
-int StampNonReadyOutNear(void* pool, float cx, float cy, float halfW, float halfH,
-                         const SkipIds* skip, FlyHold* out, int cap, int* outN);
-int RestoreNonReadyOutNear(void* pool, float cx, float cy, float halfW, float halfH,
-                           const FlyHold* holds, int holdN);
+// 飞物软挡（LastTry）已证伪：ByPet 仍会碰抛物中物（BIN touchMax=45 / fly>0+called=1），
+// 盖戳反而可能拖落地。现行：盒内 flyNear>0 则不调 ByPet；并卸掉历史软挡戳。
+std::unordered_map<int, int> gFlyPrevLast;  // 仅用于卸掉旧会话残留
+
+void ClearFlyHolds() { gFlyPrevLast.clear(); }
+
+// 卸掉池内仍挂着的飞物软挡（不论 EndPara）；旧 sticky 路径残留。
+int AbandonAllFlyHolds(void* pool) {
+    if (!pool || gFlyPrevLast.empty()) {
+        ClearFlyHolds();
+        return 0;
+    }
+    if (!DropWritesAllowed()) {
+        ClearFlyHolds();
+        return 0;
+    }
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) {
+        ClearFlyHolds();
+        return 0;
+    }
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) {
+        ClearFlyHolds();
+        return 0;
+    }
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) {
+        ClearFlyHolds();
+        return 0;
+    }
+
+    int released = 0;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        const int id = ReadI32(drop, kOffDropId);
+        if (id == 0) continue;
+        auto it = gFlyPrevLast.find(id);
+        if (it == gFlyPrevLast.end()) continue;
+        if (ReadI32(drop, kOffDropLastTry) == kLastTrySkipStamp) {
+            WriteI32(drop, kOffDropLastTry, it->second);
+            ++released;
+        }
+    }
+    ClearFlyHolds();
+    return released;
+}
+
+// 人吸选件前：若仍有记账，按盒还原已落地件（兼容切模式）。
+int ReleaseLandedFlyHoldsNear(void* pool, float cx, float cy, float halfW, float halfH) {
+    if (!pool || gFlyPrevLast.empty() || !DropWritesAllowed()) return 0;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return 0;
+
+    int released = 0;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float dpx = 0.f, dpy = 0.f;
+        if (!ReadDropPt(drop, dpx, dpy)) continue;
+        if (std::fabs(dpx - cx) > halfW || std::fabs(dpy - cy) > halfH) continue;
+        const int id = ReadI32(drop, kOffDropId);
+        if (id == 0) continue;
+        auto it = gFlyPrevLast.find(id);
+        if (it == gFlyPrevLast.end()) continue;
+        if (ReadI32(drop, kOffDropEndPara) != kEndParaReady) continue;
+        if (ReadI32(drop, kOffDropLastTry) == kLastTrySkipStamp) {
+            WriteI32(drop, kOffDropLastTry, it->second);
+            ++released;
+        }
+        gFlyPrevLast.erase(it);
+    }
+    return released;
+}
+
+bool ReadUserPos(float& x, float& y);
 
 void RunVacuumOnMain() {
     VacuumResult& r = gJob.result;
@@ -1886,6 +1978,12 @@ void RunVacuumOnMain() {
     void* pool = ResolveDropPool(now);
     ResetStallIfPoolChanged(pool);
     PruneStall(now);
+    // 混飞按件 Send 与人吸共用 pending Stall
+    if (gCharPendingStallId != 0) {
+        const int pending = gCharPendingStallId;
+        gCharPendingStallId = 0;
+        if (pool && !gStallOff && DropIdInPool(pool, pending)) AddStall(pending, now);
+    }
 
     void* pet = FirstActivePet();
     if (!pet) {
@@ -1939,6 +2037,7 @@ void RunVacuumOnMain() {
 
     // 全图无掉落：O(1) 读 dict count，跳过 PreparePetVacNearPass 全表扫描
     if (!pool || r.dropCount <= 0) {
+        ClearFlyHolds();
         if (!gJob.skip.empty() && pet) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
         const DWORD nowTick = GetTickCount();
         const bool poolFell = PetVacPoolFellSinceLast(
@@ -1946,6 +2045,9 @@ void RunVacuumOnMain() {
         finishEmptyLike(nowTick, poolFell);
         return;
     }
+
+    // 卸掉旧飞物软挡残留（不再盖戳）；再扫池。
+    if (!gFlyPrevLast.empty()) (void)AbandonAllFlyHolds(pool);
 
     // 一次扫池：统计 +（有近物时）清闸/Stall/Skip；空盒无写并早退。
     const int stallActiveBefore = StallActiveCount(now);
@@ -1972,14 +2074,154 @@ void RunVacuumOnMain() {
         return;
     }
 
-    // 盒内只有抛物中/不可捡：禁止调 ByPet。大盒下 ByPet 仍会碰未落地物盖戳，落地动画打转
-    // （BIN：near>0 endPara=0/1 sendTouch>0 gates=0）。
+    // 混飞优先：不要先用 readyNear==0 挡掉（BIN：endPara=3 但 LastTry 退避戳 → readyNear=0
+    // 会永远 wait_land，地上 Ready 吸不到）。fly>0 时按件 Send，必要时打穿 Stall。
+    if (pass.flyNear > 0) {
+        // 混飞秒杀：不大盒 ByPet；按件 Pool.Send 只吸 EndPara==Ready（宠坐标）。
+        if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
+        if (pool && r.stallStamped > 0) {
+            r.stallRestored = RestoreStalledStampsNear(pool, px, py, halfW, halfH, now, skipPtr);
+        }
+
+        EnsureSendProbe();
+        auto fn = gOrigPoolSend ? reinterpret_cast<FnPoolSend>(gOrigPoolSend)
+                                : FnFromMi<FnPoolSend>(gMiPoolSend, kRvaPoolSendDropPickUp);
+        if (!fn) {
+            r.stallHeld = StallActiveCount(now);
+            r.flyHeld = pass.flyNear;
+            r.dropCountAfter = r.dropCount;
+            r.dropsDelta = 0;
+            r.called = false;
+            r.ok = true;
+            r.why = "wait_land";
+            r.beforeRc = ReadRect(pet, kOffPetRc);
+            r.afterRc.x = -halfW;
+            r.afterRc.y = -halfH;
+            r.afterRc.w = gJob.vacuumW;
+            r.afterRc.h = gJob.vacuumH;
+            return;
+        }
+
+        void* dict = ReadPtr(pool, kOffPoolDict);
+        void* entries = LooksLikeHeapPtr(dict) ? ReadPtr(dict, kOffDictEntries) : nullptr;
+        const int count = dict ? ReadI32(dict, kOffDictCount) : 0;
+        const uintptr_t arrLen =
+            (LooksLikeHeapPtr(entries) && count >= 0 && count <= 4096) ? ArrayLen(entries) : 0;
+
+        void* bestDrop = nullptr;
+        int bestId = 0;
+        float bestD2 = 0.f;
+        bool bestWasStalled = false;
+        auto consider = [&](bool allowStalled) {
+            bestDrop = nullptr;
+            bestId = 0;
+            bestD2 = 0.f;
+            bestWasStalled = false;
+            for (uintptr_t i = 0; i < arrLen; ++i) {
+                uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+                if (ReadI32(entry, kOffEntryHash) < 0) continue;
+                void* drop = ReadPtr(entry, kOffEntryValue);
+                if (!LooksLikeHeapPtr(drop)) continue;
+                float dpx = 0.f, dpy = 0.f;
+                if (!ReadDropPt(drop, dpx, dpy)) continue;
+                if (std::fabs(dpx - px) > halfW || std::fabs(dpy - py) > halfH) continue;
+                if (skipPtr && DropMatchesSkip(drop, *skipPtr)) continue;
+                if (ReadU8(drop, kOffDropPickable) == 0) continue;
+                if (ReadI32(drop, kOffDropEndPara) != kEndParaReady) continue;
+                const int id = ReadI32(drop, kOffDropId);
+                if (id == 0) continue;
+                if (id == gCharPendingStallId) continue;
+                const bool stalled = StallActive(id, now);
+                if (stalled && !allowStalled) continue;
+                const float dx = dpx - px;
+                const float dy = dpy - py;
+                const float d2 = dx * dx + dy * dy;
+                if (!bestDrop || d2 < bestD2) {
+                    bestDrop = drop;
+                    bestId = id;
+                    bestD2 = d2;
+                    bestWasStalled = stalled;
+                }
+            }
+        };
+        consider(/*allowStalled=*/false);
+        if (!bestDrop) consider(/*allowStalled=*/true);  // BIN：Ready 全在 Stall 里
+
+        r.flyHeld = pass.flyNear;
+        r.beforeRc = ReadRect(pet, kOffPetRc);
+        r.afterRc.x = -halfW;
+        r.afterRc.y = -halfH;
+        r.afterRc.w = gJob.vacuumW;
+        r.afterRc.h = gJob.vacuumH;
+
+        if (!bestDrop || bestId == 0) {
+            r.stallHeld = StallActiveCount(now);
+            r.dropCountAfter = r.dropCount;
+            r.dropsDelta = 0;
+            r.called = false;
+            r.ok = true;
+            r.why = "wait_land";  // 盒内尚无 EndPara==Ready
+            return;
+        }
+
+        if (bestWasStalled) ClearStallId(bestId);
+        gCharPendingStallId = 0;
+
+        if (DropWritesAllowed()) {
+            const int last = ReadI32(bestDrop, kOffDropLastTry);
+            const int stamp = ReadI32(bestDrop, kOffDropPickStamp);
+            if (stamp != 0) WriteI32(bestDrop, kOffDropPickStamp, 0);
+            if (last != 0) WriteI32(bestDrop, kOffDropLastTry, 0);
+            r.gatesCleared = 1;
+        }
+
+        int32_t pt[2] = {static_cast<int32_t>(px), static_cast<int32_t>(py)};
+        bool seh = false;
+        __try {
+            fn(pool, pt, bestId, 0u, nullptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            seh = true;
+        }
+
+        const DWORD nowTick = GetTickCount();
+        r.dropCountAfter = ReadPoolDropCount(pool);
+        r.dropsDelta = r.dropCountAfter - r.dropCount;
+        const bool poolFell = PetVacPoolFellSinceLast(
+            s_prevOk, s_prevTick, s_prevDropAfter, s_prevNear, s_prevGates, nowTick, r.dropCount);
+        r.poolFellSinceLast = poolFell;
+        r.called = !seh;
+        r.ok = !seh;
+        if (seh) {
+            r.why = "seh";
+        } else if (r.dropsDelta < 0 || poolFell) {
+            r.why = "ok_absorbed";
+            s_rejectStrikes = 0;
+            s_rejectBackoffUntil = 0;
+            gRejectBackoffUntil.store(0, std::memory_order_relaxed);
+        } else {
+            r.why = "ok_sent";
+            if (!StallActive(bestId, nowTick)) gCharPendingStallId = bestId;
+            r.sentButPoolSame = 1;
+        }
+        r.stallHeld = StallActiveCount(nowTick);
+        if (!seh) {
+            s_prevDropAfter = r.dropCountAfter;
+            s_prevNear = r.nearCount;
+            s_prevGates = r.gatesCleared;
+            s_prevTick = nowTick;
+            s_prevOk = true;
+        }
+        return;
+    }
+
+    // 无飞物：无 Ready 才等；有 Ready 走下方扩盒 ByPet
     if (pass.readyNear <= 0) {
         if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
         if (pool && r.stallStamped > 0) {
             r.stallRestored = RestoreStalledStampsNear(pool, px, py, halfW, halfH, now, skipPtr);
         }
         r.stallHeld = StallActiveCount(now);
+        r.flyHeld = 0;
         r.dropCountAfter = r.dropCount;
         r.dropsDelta = 0;
         r.called = false;
@@ -2015,10 +2257,7 @@ void RunVacuumOnMain() {
 
     EnsureSendProbe();  // 仅即将调 ByPet 时装探针（空拍/无技能不再碰）
 
-    // ByPet 前挡未落地：LastTry=INT_MAX（不写 EndPara）；拍末按 id 还原。
-    FlyHold flyHolds[64]{};
-    int flyN = 0;
-    r.flyHeld = StampNonReadyOutNear(pool, px, py, halfW, halfH, skipPtr, flyHolds, 64, &flyN);
+    r.flyHeld = 0;  // 能走到这里说明 flyNear==0
 
     ByPetRectBackup rectBak{};
     const bool rectPatched = PatchByPetRectPack(gJob.vacuumW, gJob.vacuumH, rectBak);
@@ -2048,9 +2287,6 @@ void RunVacuumOnMain() {
     }
 
     RestoreByPetRectPack(rectBak);
-    if (pool && flyN > 0) {
-        (void)RestoreNonReadyOutNear(pool, px, py, halfW, halfH, flyHolds, flyN);
-    }
 
     r.dropCountAfter = ReadPoolDropCount(pool);
     r.dropsDelta = r.dropCountAfter - r.dropCount;
@@ -2255,88 +2491,6 @@ int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float hal
     if (outWant) *outWant = want;
     if (outTotal) *outTotal = total;
     return stamped;
-}
-
-// ByPet 前把未落地挡出队头：只盖 LastTry=INT_MAX（绝不写 EndPara）。
-// 官方 Contains 之后仍可能先碰抛物中物盖戳 → 落地打转；与 Stall 同款软挡。
-// 记录 prevLast，拍末按 id 还原（不与 Stall/黑名单长期戳混淆：只还原本拍写下的 id）。
-int StampNonReadyOutNear(void* pool, float cx, float cy, float halfW, float halfH,
-                         const SkipIds* skip, FlyHold* out, int cap, int* outN) {
-    if (outN) *outN = 0;
-    if (!pool || !out || cap <= 0 || !DropWritesAllowed()) return 0;
-    void* dict = ReadPtr(pool, kOffPoolDict);
-    if (!LooksLikeHeapPtr(dict)) return 0;
-    void* entries = ReadPtr(dict, kOffDictEntries);
-    const int count = ReadI32(dict, kOffDictCount);
-    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
-    const uintptr_t arrLen = ArrayLen(entries);
-    if (arrLen == 0 || arrLen > 8192) return 0;
-
-    int stamped = 0;
-    int n = 0;
-    for (uintptr_t i = 0; i < arrLen; ++i) {
-        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
-        if (ReadI32(entry, kOffEntryHash) < 0) continue;
-        void* drop = ReadPtr(entry, kOffEntryValue);
-        if (!LooksLikeHeapPtr(drop)) continue;
-        float dpx = 0.f, dpy = 0.f;
-        if (!ReadDropPt(drop, dpx, dpy)) continue;
-        if (std::fabs(dpx - cx) > halfW || std::fabs(dpy - cy) > halfH) continue;
-        if (skip && !skip->empty() && DropMatchesSkip(drop, *skip)) continue;
-
-        const int endp = ReadI32(drop, kOffDropEndPara);
-        if (endp == kEndParaReady) continue;  // 已落地：留给 ByPet
-
-        const int last = ReadI32(drop, kOffDropLastTry);
-        if (last == kLastTrySkipStamp) continue;  // 已是 Stall/黑名单戳
-
-        const int id = ReadI32(drop, kOffDropId);
-        if (id == 0) continue;
-
-        WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
-        ++stamped;
-        if (n < cap) {
-            out[n].id = id;
-            out[n].prevLast = last;
-            ++n;
-        }
-    }
-    if (outN) *outN = n;
-    return stamped;
-}
-
-int RestoreNonReadyOutNear(void* pool, float cx, float cy, float halfW, float halfH,
-                           const FlyHold* holds, int holdN) {
-    if (!pool || !holds || holdN <= 0) return 0;
-    void* dict = ReadPtr(pool, kOffPoolDict);
-    if (!LooksLikeHeapPtr(dict)) return 0;
-    void* entries = ReadPtr(dict, kOffDictEntries);
-    const int count = ReadI32(dict, kOffDictCount);
-    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
-    const uintptr_t arrLen = ArrayLen(entries);
-    if (arrLen == 0 || arrLen > 8192) return 0;
-
-    int restored = 0;
-    for (uintptr_t i = 0; i < arrLen; ++i) {
-        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
-        if (ReadI32(entry, kOffEntryHash) < 0) continue;
-        void* drop = ReadPtr(entry, kOffEntryValue);
-        if (!LooksLikeHeapPtr(drop)) continue;
-        float dpx = 0.f, dpy = 0.f;
-        if (!ReadDropPt(drop, dpx, dpy)) continue;
-        if (std::fabs(dpx - cx) > halfW || std::fabs(dpy - cy) > halfH) continue;
-        if (ReadI32(drop, kOffDropLastTry) != kLastTrySkipStamp) continue;
-
-        const int id = ReadI32(drop, kOffDropId);
-        if (id == 0) continue;
-        for (int h = 0; h < holdN; ++h) {
-            if (holds[h].id != id) continue;
-            WriteI32(drop, kOffDropLastTry, holds[h].prevLast);
-            ++restored;
-            break;
-        }
-    }
-    return restored;
 }
 
 // 退避黑名单：盖 LastTry=INT_MAX（拍末还原）。不动 EndPara，避免拍内 3↔4 重播落地。
@@ -2560,8 +2714,14 @@ void RunCharVacOnMain() {
         }
     }
 
-    const float halfW = gCharVac.halfW;
-    const float halfH = gCharVac.halfH;
+    // 双保险：外层 PetLootEffectiveCharHalf 已钳；此处再顶，防直调/旧配置越界空 Send
+    // （与 common kPetLootCharVacW/HMax 对齐：全盒 1500×1500 → 半盒 750×750；上传实证）
+    constexpr float kCharHalfWCap = 750.f;
+    constexpr float kCharHalfHCap = 750.f;
+    float halfW = gCharVac.halfW;
+    float halfH = gCharVac.halfH;
+    if (halfW > kCharHalfWCap) halfW = kCharHalfWCap;
+    if (halfH > kCharHalfHCap) halfH = kCharHalfHCap;
     const SkipIds* skip = gCharVac.skip.empty() ? nullptr : &gCharVac.skip;
 
     r.dropCount = ReadPoolDropCount(pool);
@@ -2593,6 +2753,9 @@ void RunCharVacOnMain() {
     // 一调一件，且只吸人物最近的 Ready drop（盒内按距离² 选最近）。
     // 抛物未落地(EndPara!=3)一律不写字段——065ed0：先 Clear 再判 EndPara 会扫多件并
     // 清 LastTry/PickStamp，落地动画打转。只对选中那一件清冷却后 Send。
+    // 若刚从宠吸切来：释放已落地的飞物软挡，避免 LastTry=INT_MAX 被人吸永久跳过。
+    (void)ReleaseLandedFlyHoldsNear(pool, ux, uy, halfW, halfH);
+
     void* bestDrop = nullptr;
     int bestId = 0;
     float bestD2 = 0.f;

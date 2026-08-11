@@ -8,6 +8,7 @@ namespace attack_accel {
 // 攻击加速（SetDesired）：清忙锁 LocalUser+0x118=-1（字段哈希防漂移，hint 0x118）。
 // 出刀频率看面板「间隔」/ simpleCombatAttackIntervalMs（默认 123，下限 1）。
 // 非「技能无 CD」。禁止 GA .text hook。
+// 实验入口：PayloadControl.attackAccelClearBusy（实验 TAB）；首页 attackAccel 暂关。
 //
 // 攻速槽（SetBoosterDesired，独立开关，默认关）：写 SecondaryStat.nBooster_@0xBC = -8
 //   并按游戏钟续 tBooster_@0xC4。与清忙锁**刻意不共用开关**。
@@ -21,6 +22,19 @@ namespace attack_accel {
 //   仅落地武装后才跳过攻击类 Prepare；action==6 Idle 永远透传。
 //   跳过时立刻 +0x118=-1 并改调 Idle Prepare（无攻击层则 Slot14 永不解锁，会卡刀）。
 //   SetAttackAction 仍可能事后写 actionIdx → worker 在 skipArmed 时周期清忙锁兜底。
+//
+// 实验·A 系 ActionSpeed（SetActionSpeedDesired，默认关）：写 SecondaryStat.nSpeed_@0x84=+40
+//   → GetActionSpeed ≈ nSpeed(+80) + Max(40, Dash) → Prepare clamp 到 140（只抬手/动画）。
+//   若鞋/Forced 已把 +80 顶到近 140，加完仍被夹死 → 写成功但体感无；要攻速体感用 Party/nBooster_。
+//   不写 nSlow_@1BC；CheckByTime 不扫 Speed，服端 002A/002B 仍可覆盖。
+//
+// 实验·PartyBooster（SetPartyBoosterDesired，默认关）：写 TempStats[4].Value（滑条，默认 -8）
+//   → GetAttackSpeedDegree 的 partyBooster 加数（与 nBooster_ 同属 B 系，可叠加）。
+//
+// 实验·破 degree 下限（SetBreakDegreeFloorDesired，默认关；与 Party 独立）：
+//   写 CalcWeaponAttackSpeedTier 独占种子 dword（GA .data，禁 E9）：lo 由滑条设定（默认 -10）。
+//   不开本项时引擎仍夹 [2,10]，PB=-8 顶格仍是 deg=2（×0.75）。
+//   开启后 PB=-8 可落到 deg<0（如 wpn4+(-8)→-4，×0.375）；lo=-10 时最快 deg=-10 → 延迟×0。
 // remount 2026-08-06：Prepare 0xFE06A0/0x1253CA0；字段位移未变，哈希已换；IDB imagebase 0x7ff848c80000。
 void Init();
 void Shutdown();
@@ -34,19 +48,38 @@ void SetCutLayerDesired(bool on);
 bool IsCutLayerDesired();
 void SetSkipPrepareDesired(bool on);
 bool IsSkipPrepareDesired();
+void SetActionSpeedDesired(bool on);
+bool IsActionSpeedDesired();
+void SetPartyBoosterDesired(bool on);
+bool IsPartyBoosterDesired();
+// PartyBooster 写入值（越负越快；夹到 xcat::kAttackAccelPartyBoosterValue*）。
+void SetPartyBoosterValue(int v);
+int PartyBoosterValue();
+void SetBreakDegreeFloorDesired(bool on);
+bool IsBreakDegreeFloorDesired();
+// 破限目标 lo（越负越快；夹到 xcat::kAttackAccelBreakDegreeFloorLo*）。
+void SetBreakDegreeFloorLo(int lo);
+int BreakDegreeFloorLo();
 
 // 只读引擎动作忙位（LocalUser + ActionBusy，即上面清忙锁写的那个字段）。
 // **只读、不写、不 hook、不调引擎函数**——与已停用的 SetDesired(清忙锁写 -1) 是两条路。
 //
 // 语义（428 份历史 attack_accel.log 实测：-1 占 99.2%，其余为 0/5/6/7/16/17 等小整数）：
 //   busy <  0 → 空闲，攻击键会被引擎接受
-//   busy >= 0 → 正在放动作（值是动作序号），此刻按键会被引擎吞掉
+//   busy >= 0 → 正在放动作（值是动作序号 ActionType），此刻按键会被引擎吞掉
 //
 // localUser 由调用方传入（simple_combat 的 tick 里已有 CombatCtx），本函数不重复解析，
 // 以免在高频出刀路径上再走一遍 QueryCombatCtx。
 // 返回 false = 偏移未就绪 / lu 为空 / 读取越界。调用方**必须按「不拦」处理**：
 // 读不到时退回旧行为，绝不能让一次读失败演变成永久禁止出刀。
 bool QueryActionBusy(void* localUser, int& outBusy);
+
+// 出刀成功后立刻读：busy>=0 时即为当前 ActionType（对照 dump ActionType：
+// SwingO1=5…StabTf=21 近战挥砍；Shoot1=22…ShooTf=27 / Shoot6=48 远程射击）。
+// 用于多发区分「贴脸挥弓 vs 远程射击」。
+bool QueryActionIndex(void* localUser, int& outActionIdx);
+bool IsRangedShootAction(int actionIdx);
+bool IsMeleeWeaponAction(int actionIdx);
 
 // 多发等短窗清忙锁：只写 ActionBusy=-1，不启攻击加速 worker/开关。
 // 调用方须另用间隔/技能 CD 限频，避免服端看出刀过密。
@@ -60,12 +93,12 @@ bool QueryActionLayerDelayRemain(void* localUser, int& outRemain);
 // 单位：引擎 delay 计数。取两层中 sum 较大者。读失败 / 空表返回 false。
 bool QueryActionLayerDelaySum(void* localUser, int& outSum);
 
-// 整段动作时长 ms：sum × 2/3（Slot14 约每 tick −30、Update≈50Hz → 20ms/tick）。
-// 须在 Prepare/出刀成功后立刻读（ClearBusy 不毁表；下一刀 Prepare 会覆盖）。
+// 整段动作闸门 ms（多发限频）：对 delay 加总取**上界** ms=sum（只能多不能少；
+// 旧 sum×2/3 在 Update 变慢时可能偏短）。须在 Prepare/出刀成功后立刻读层。
 bool QueryActionLayerAnimMs(void* localUser, DWORD& outMs);
 
-// 只读当前 ActionSpeed（对齐 Prepare 缩放：clamp 后用于 delay' = base*100/speed）。
-// 优先 SS+0x1BC（Prepare 非 0 覆盖）；否则 SS+0x80 基速；默认 100。失败返回 false。
+// 只读当前 ActionSpeed（对齐 GetActionSpeed：nSpeed(+80)+Max(nSpeed_,Dash)；
+// nSlow_@1BC!=0 时绝对覆盖；再 clamp [70,140]）。失败返回 false。
 bool QueryActionSpeed(void* localUser, int& outSpeed);
 
 // 离线表（dataservice/action_delay_base.tsv + skill_action.tsv）：
@@ -83,9 +116,9 @@ int UnscaleDelayByActionSpeed(int scaledSum, int actionSpeed);
 // busy 墙钟 ≈ 已缩放动画 ms → 反解未乘 ActionSpeed 的 baseSum；失败返回 0。
 int AnimMsToBaseSum(DWORD animMs, int actionSpeed);
 
-// 只读有效攻速档 degree∈[2,10]：clamp(LocalUser+0x15C 武器档 + SecondaryStat.nBooster_, 2, 10)。
-// 对齐 GetAttackSpeedDegree 缩放因子 (degree+10)/16（degree=6 → 1.0）。诊断用。
-// 不含 PartyBooster TwoState（首版）；读失败返回 false。
+// 只读有效攻速档 degree：
+// clamp(WAS(+15C) + nBooster_ + TempStats[4].Value(PartyBooster), lo, 10)。
+// 默认可读 lo=2；BreakDegreeFloor 生效时 lo=滑条值。对齐 (degree+10)/16。诊断用。
 bool QueryAttackSpeedDegree(void* localUser, int& outDegree);
 
 // 相对缩放估算：delay ≈ baseMsAtDegree6 × (degree+10)/16（degree=6 → ×1.0）。

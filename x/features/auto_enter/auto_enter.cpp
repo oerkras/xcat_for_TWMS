@@ -17,6 +17,7 @@
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../ccu/ccu.h"
+#include "../channel_hop/channel_hop.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../ports/world_port.h"
 
@@ -41,6 +42,7 @@ namespace {
 
 using x::runtime::il2cpp::ArrayAt;
 using x::runtime::il2cpp::ArrayLen;
+using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
@@ -1311,6 +1313,7 @@ int PickOpenChannelId(void* worldItem) {
         return -1;
     }
     // 仅 softFast：优先粘回上次进图/换频后的频道（仍空闲且非成人）；冷启仍 PickOpen。
+    // sticky 满员/成人/不在表：与冷启同池随机，禁止就近/偏人少（避免扎堆）；禁止硬粘满频。
     const int sticky = gStickyChannelId;
     if (SoftFastTrack() && sticky > 0) {
         for (int i = 0; i < candN; ++i) {
@@ -1319,7 +1322,12 @@ int PickOpenChannelId(void* worldItem) {
                 return sticky;
             }
         }
-        Log("PickSticky miss id=%d softFast=1 — fall back PickOpen (pool=%d)", sticky, candN);
+        const uint32_t seedMiss = ChannelPickSeed(candN);
+        const int pickMiss = static_cast<int>(seedMiss % static_cast<uint32_t>(candN));
+        Log("PickSticky miss id=%d → random open id=%d users=%d pool=%d/%d "
+            "(softFast full/adult/absent seed=0x%08X)",
+            sticky, candId[pickMiss], candUsers[pickMiss], pickMiss + 1, candN, seedMiss);
+        return candId[pickMiss];
     }
     const uint32_t seed = ChannelPickSeed(candN);
     const int pick = static_cast<int>(seed % static_cast<uint32_t>(candN));
@@ -1464,6 +1472,13 @@ void Tick() {
             return;
         }
         if (gSnap.worldItemCount <= 0) {
+            // softFast：空列表久等会拖满 soft 150s 墙钟（BIN 21:44）；提前 Failed 让 soft cycle。
+            if (SoftFastTrack() && (GetTickCount() - gPhaseSince) >= 12000) {
+                Log("WaitWorldList WorldItems empty %ums softFast — Failed (soft cycle)",
+                    static_cast<unsigned>(GetTickCount() - gPhaseSince));
+                SetPhase(Phase::Failed);
+                return;
+            }
             LogThrottled("waiting WorldItems?");
             return;
         }
@@ -1867,6 +1882,11 @@ void RequestRestart(const char* why) {
     // 软重进仍在大厅：保持 freeze，避免 titlebar/ports 抢跑 FindAll。
     x::runtime::managed_main::SetLoginFreeze(true);
     const bool soft = why && std::strcmp(why, "soft_login") == 0;
+    if (soft) {
+        // 遇人/手动换频后 known 可能比进图 Done sticky 更新；软重进前再推一次。
+        const int hopCh = channel_hop::LastKnownChannel1Based();
+        if (hopCh > 0) NoteStickyChannel(hopCh, "soft_restart_sync");
+    }
     gSoftFastTrack.store(soft, std::memory_order_release);
     SetPhase(Phase::Idle);
     ResetRuntime();  // 不碰 gStickyChannelId / gSoftFastTrack
@@ -1878,6 +1898,71 @@ void RequestRestart(const char* why) {
 bool IsFailed() { return gPhase == Phase::Failed; }
 
 bool IsDone() { return gPhase == Phase::Done; }
+
+void SoftHallSampleOnPump(void* user) {
+    auto* ctx = static_cast<SoftHallCtx*>(user);
+    if (!ctx) return;
+    *ctx = {};
+    if (!x::runtime::main_thread::AssertOnPumpThread("auto_enter.SoftHall")) return;
+    if (!gGA && !BindApis()) return;
+    if (!ResolveTypes()) return;
+    EnsureHolderFieldOff();
+
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    constexpr MethodShape kGet{0, TypeKind::Ptr, true, false, {}};
+    auto* miGet =
+        ResolveMi(gKlassSceneLogin, kRvaSceneLoginGet, kGet, "get_Instance", kHashSceneLoginGet);
+    auto getSl = FnFromMi<FnSceneLoginGet>(miGet, kRvaSceneLoginGet);
+    void* sl = nullptr;
+    if (getSl) {
+        __try {
+            sl = getSl(miGet);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            sl = nullptr;
+        }
+    }
+    ctx->ok = 1;
+    if (!sl) return;
+
+    void* ch = ReadPtr(sl, gOffSlChannelUi);
+    void* wu = ReadPtr(sl, gOffSlWorldUi);
+    if (ch && LooksLikeHeapPtr(ch)) {
+        ctx->channelUi = 1;
+        void* sel = ReadPtr(ch, gOffChannelSelectedWorld);
+        if (sel && LooksLikeHeapPtr(sel)) ctx->selectedWorld = 1;
+    }
+    if (wu && LooksLikeHeapPtr(wu)) {
+        ctx->worldUi = 1;
+        ctx->worldItems = ListSize(ReadPtr(wu, gOffWorldItems));
+        if (ctx->worldItems < 0) ctx->worldItems = 0;
+    }
+    // SL 槽可挂空壳 UILoginWorld（items=0）；BIN 01:18 ConnectLogin 空转时仍 world=1。
+    // items 空则再 FindFirst，取列表更满的实例。
+    if (ctx->worldItems <= 0 && gTypeWorld) {
+        void* found = FindFirstOfType(gTypeWorld);
+        if (found && LooksLikeHeapPtr(found)) {
+            const int n = ListSize(ReadPtr(found, gOffWorldItems));
+            if (n > ctx->worldItems) {
+                ctx->worldUi = 1;
+                ctx->worldItems = n;
+            } else if (!ctx->worldUi) {
+                ctx->worldUi = 1;
+                if (n > 0) ctx->worldItems = n;
+            }
+        }
+    }
+    if (ctx->worldItems > 0 || (ctx->channelUi && ctx->selectedWorld)) ctx->ready = 1;
+}
+
+bool IsWorldItemsStarve(DWORD minAgeMs) {
+    if (gPhase != Phase::WaitWorldList) return false;
+    if (gSnap.worldItemCount > 0) return false;
+    // 已能从频道页续进则不算饿死。
+    if (gSnap.channelUi && gSnap.selectedWorld) return false;
+    if (minAgeMs == 0) minAgeMs = 1;
+    return (GetTickCount() - gPhaseSince) >= minAgeMs;
+}
 
 }  // namespace auto_enter
 }  // namespace features

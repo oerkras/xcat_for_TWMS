@@ -372,14 +372,14 @@ constexpr float kPortalHoldNearAimDx = 80.f;
 constexpr float kPortalHoldNearAimDy = 160.f;
 constexpr float kPortalHoldAbortDist = 220.f;
 // 站稳真源 = AbsPos 连续静止 + 合速门槛；漂移/滑步 → 整段重等。
-// BIN 02:06：10X 贴门 + holdZero 后首枪 ↑ 仍黑屏；拉长静立再 ↑。
-constexpr DWORD kPortalReadyStableMs = 800;
+// BIN 02:06 曾拉到 800 防 10X 黑屏；黑屏已另修，800+250 每跳体感拖沓 → 400+120。
+constexpr DWORD kPortalReadyStableMs = 400;
 constexpr float kPortalReadyApDrift = 8.f;   // 相对锚点 |ΔAp|
 constexpr float kPortalReadyApStep = 4.f;    // 相邻采样 |ΔAp|（滑步）
 // 卸 ban 后挂不上 FH：失败上限（与「就绪即走」解耦）。
 constexpr DWORD kPortalLandTimeoutMs = 4000;
 // 就绪后再抽一拍确认仍站稳（含 Ap 未漂）。
-constexpr DWORD kPortalPreFireLandMs = 250;
+constexpr DWORD kPortalPreFireLandMs = 120;
 // 发门合速辅助门槛（px/s）；主门仍是 Ap 静止。
 constexpr float kPortalFireSpeed = 18.f;
 // 发门前 |ap.x-portal.x|：Snap 内缩曾把 aim 挪离门心（BIN 100040000 east00：
@@ -1182,12 +1182,14 @@ constexpr DWORD kPortalUpPostChangeDrainMs = 220;
 constexpr DWORD kPortalUpFollowGapMs = 72;
 
 // BIN 2026-08-09 01:01：首枪 ↑ 后 MapId 已变仍补第二枪 → InterStage 黑屏。
-// 默认：MapId 一变跳过补枪；hold 内 MapId 变了默认撑满再松（见 UpDrain）。回退：
+// 现路径：MapId/PlayReady 闸后再决定是否补枪；hold 内 MapId 变了默认撑满再松（UpDrain）。
+// 回退：
 //   · XCAT_TRAVEL_MAPID_GATE=0  或 DLL 旁 travel_mapid_gate.off → 关掉 MapId 闸
-//   · XCAT_TRAVEL_UP2=0/1      或 DLL 旁 travel_up2.off        → 补第二枪（默认关）
+//   · XCAT_TRAVEL_UP2=0        或 DLL 旁 travel_up2.off        → 关补第二枪
 constexpr bool kTravelMapIdGateDefault = true;
-// BIN 01:27 首枪未换图时仍补第二枪 → fake soft；默认关，需要时 XCAT_TRAVEL_UP2=1。
-constexpr bool kTravelUp2Default = false;
+// BIN 18:47 already_in：首枪 HoldUntil timeout until=0（键按了门未吃），up2 关则空等
+// PostFireQuiet 2.5s×2 才 soft 过。默认开补枪：仅首枪未换图时走（已换图早退）。
+constexpr bool kTravelUp2Default = true;
 // BIN 01:27 hop2：MapId 刚闪变就 releaseUp → 半截传送黑屏；默认撑满 hold。
 // 回退：XCAT_TRAVEL_UP_DRAIN=0 或 travel_up_drain.off → 立刻松键（旧行为）。
 constexpr bool kTravelUpDrainDefault = true;

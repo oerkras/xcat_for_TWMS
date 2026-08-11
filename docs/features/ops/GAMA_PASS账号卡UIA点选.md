@@ -66,6 +66,7 @@ Chromium 会把很多节点标成可 Invoke，但走的是 **a11y 默认动作**
 | `SetFocus` + Enter | 可试一次 | 未证 |
 | `PostMessage` 假鼠标到 Chrome HWND | — | **禁止指望**（Chromium 吞掉） |
 | BoundingRect + `SendInput` | **是** | **主路径**（已证） |
+| 登录窗最大化 | **是** | `BringToForeground`：最小化/窗口化一律 `SW_MAXIMIZE`，避免小窗裁切点空 |
 | CDP `Input.dispatchMouseEvent` / `JsSelectAccount` | 与「日常无调试口」冲突 | 仅旧路径/特例；不默认开 |
 
 若将来必须「零光标」：需单独立项放开 CDP（与 SSO/日常同罐策略一并评审），**不是**再抠 UIA Invoke。

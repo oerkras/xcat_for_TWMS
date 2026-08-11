@@ -7,6 +7,7 @@
 
 #include "../simple_combat/simple_combat.h"
 #include "../titlebar/titlebar_win.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace x::features::auto_lie::mouse_trajectory_sim {
 namespace {
@@ -50,31 +52,69 @@ RECT g_pumpSavedClip{};
 POINT g_pumpSavedCursor{};
 bool g_loggedFirstPulse = false;
 
-MappedPoint UvToDesktop(float u, float v, const RECT& panel) {
-    const double w = static_cast<double>(panel.right - panel.left);
-    const double h = static_cast<double>(panel.bottom - panel.top);
+PanelQuad QuadFromRect(const RECT& r) {
+    PanelQuad q{};
+    q.c[0] = {r.left, r.bottom};
+    q.c[1] = {r.right, r.bottom};
+    q.c[2] = {r.right, r.top};
+    q.c[3] = {r.left, r.top};
+    return q;
+}
+
+RECT QuadAabb(const PanelQuad& q) {
+    RECT r{q.c[0].x, q.c[0].y, q.c[0].x, q.c[0].y};
+    for (int i = 1; i < 4; ++i) {
+        r.left = (std::min)(r.left, q.c[i].x);
+        r.top = (std::min)(r.top, q.c[i].y);
+        r.right = (std::max)(r.right, q.c[i].x);
+        r.bottom = (std::max)(r.bottom, q.c[i].y);
+    }
+    return r;
+}
+
+bool QuadSpanOk(const PanelQuad& q, long minSpan) {
+    const RECT r = QuadAabb(q);
+    return (r.right - r.left) >= minSpan && (r.bottom - r.top) >= minSpan;
+}
+
+// UV 双线性：u 沿 TL→TR / BL→BR，v 向下（v=0 顶边）。轴对齐时退化为原来的矩形插值。
+MappedPoint UvToDesktop(float u, float v, const PanelQuad& q) {
+    const double uu = static_cast<double>(u);
+    const double vv = static_cast<double>(v);
+    const double topX = q.c[3].x + uu * static_cast<double>(q.c[2].x - q.c[3].x);
+    const double topY = q.c[3].y + uu * static_cast<double>(q.c[2].y - q.c[3].y);
+    const double botX = q.c[0].x + uu * static_cast<double>(q.c[1].x - q.c[0].x);
+    const double botY = q.c[0].y + uu * static_cast<double>(q.c[1].y - q.c[0].y);
     return MappedPoint{
-        static_cast<long>(std::lround(panel.left + u * w)),
-        static_cast<long>(std::lround(panel.top + v * h)),
+        static_cast<long>(std::lround(topX + vv * (botX - topX))),
+        static_cast<long>(std::lround(topY + vv * (botY - topY))),
     };
 }
 
-void RemapAll(MappedPoint* out, const RECT& panel) {
+void RemapAll(MappedPoint* out, const PanelQuad& panel) {
     for (int i = 0; i < kMouseSimPointCount; ++i) {
         out[i] = UvToDesktop(kMouseSimUv[i][0], kMouseSimUv[i][1], panel);
     }
 }
 
-bool ResolveSyntheticPanel(RECT& out) {
-    HWND hwnd = x::features::titlebar::win::FindUnityWndClass();
+bool GetGameClient(HWND& hwnd, POINT& origin, int& cw, int& ch) {
+    hwnd = x::features::titlebar::win::FindUnityWndClass();
     if (!hwnd || !IsWindow(hwnd)) hwnd = x::features::titlebar::win::FindGameWindow();
     if (!hwnd || !IsWindow(hwnd)) return false;
     RECT client{};
-    POINT origin{};
+    origin = POINT{};
     if (!GetClientRect(hwnd, &client) || !ClientToScreen(hwnd, &origin)) return false;
-    const int cw = client.right - client.left;
-    const int ch = client.bottom - client.top;
-    if (cw < 200 || ch < 200) return false;
+    cw = client.right - client.left;
+    ch = client.bottom - client.top;
+    return cw >= 200 && ch >= 200;
+}
+
+bool ResolveSyntheticPanel(RECT& out) {
+    HWND hwnd = nullptr;
+    POINT origin{};
+    int cw = 0;
+    int ch = 0;
+    if (!GetGameClient(hwnd, origin, cw, ch)) return false;
 
     const double sx = static_cast<double>(cw) / static_cast<double>(kMouseSimDumpClientW);
     const double sy = static_cast<double>(ch) / static_cast<double>(kMouseSimDumpClientH);
@@ -88,6 +128,163 @@ bool ResolveSyntheticPanel(RECT& out) {
     out.right = (std::min)(out.right, origin.x + cw);
     out.bottom = (std::min)(out.bottom, origin.y + ch);
     if (out.right - out.left < 80 || out.bottom - out.top < 80) return false;
+    return true;
+}
+
+// —— 真题几何回放 ————————————————————————————————————————
+// 证据是磁盘上的只读快照，扫一次就够；窗口尺寸变了只需按新客户区重算四角。
+bool g_replayScanned = false;
+bool g_replayOk = false;
+PanelQuad g_replayClientQuad{};  // dump 时的客户区相对坐标
+int g_replayDumpW = 0;
+int g_replayDumpH = 0;
+char g_replayId[64]{};
+
+bool ReadWholeFile(const std::string& path, std::string& out) {
+    HANDLE h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[4096]{};
+    DWORD got = 0;
+    const bool ok = ReadFile(h, buf, sizeof(buf) - 1, &got, nullptr) != FALSE;
+    CloseHandle(h);
+    if (!ok) return false;
+    out.assign(buf, got);
+    return true;
+}
+
+bool MetaLine(const std::string& text, const char* key, std::string& val) {
+    const std::string k = std::string(key) + "=";
+    size_t pos = std::string::npos;
+    if (text.compare(0, k.size(), k) == 0) {
+        pos = 0;
+    } else {
+        const size_t p = text.find("\n" + k);
+        if (p == std::string::npos) return false;
+        pos = p + 1;
+    }
+    const size_t s = pos + k.size();
+    const size_t e = text.find('\n', s);
+    val = text.substr(s, e == std::string::npos ? std::string::npos : e - s);
+    while (!val.empty() && (val.back() == '\r' || val.back() == ' ')) val.pop_back();
+    return true;
+}
+
+// 只认仿射产出的四角：tryget-fallback 那批是漏乘 canvas scale 的伪面板（0.1.116 事故），
+// 拿它回放等于把当年的 bug 当成真几何再演一遍。
+bool ParseReplayMeta(const std::string& text, PanelQuad& clientQuad, int& dumpW, int& dumpH) {
+    std::string v;
+    if (!MetaLine(text, "mapMode", v) || v != "panel-affine") return false;
+    if (!MetaLine(text, "panelSource", v) || v != "affine") return false;
+    if (!MetaLine(text, "havePanelCorners", v) || v != "1") return false;
+
+    if (!MetaLine(text, "client", v)) return false;
+    int cw = 0, ch = 0;
+    long ox = 0, oy = 0;
+    if (sscanf_s(v.c_str(), "%dx%d origin=(%ld,%ld)", &cw, &ch, &ox, &oy) != 4) return false;
+    if (cw < 200 || ch < 200) return false;
+
+    if (!MetaLine(text, "panelCorners", v)) return false;
+    long xs[4]{};
+    long ys[4]{};
+    if (sscanf_s(v.c_str(), "%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld", &xs[0], &ys[0], &xs[1], &ys[1],
+                 &xs[2], &ys[2], &xs[3], &ys[3]) != 8) {
+        return false;
+    }
+
+    PanelQuad q{};
+    for (int i = 0; i < 4; ++i) q.c[i] = POINT{xs[i] - ox, ys[i] - oy};
+    if (!QuadSpanOk(q, 80)) return false;
+    // 越出 dump 客户区的四角本身就是坏样本（0.1.114 伪面板右边界 1536 > 客户区 1386）。
+    const RECT aabb = QuadAabb(q);
+    if (aabb.left < -8 || aabb.top < -8 || aabb.right > cw + 8 || aabb.bottom > ch + 8)
+        return false;
+
+    clientQuad = q;
+    dumpW = cw;
+    dumpH = ch;
+    return true;
+}
+
+void ScanReplayEvidence() {
+    if (g_replayScanned) return;
+    g_replayScanned = true;
+
+    const char* bin = x::runtime::GetBinDir();
+    if (!bin || !bin[0]) return;
+    const std::string root = std::string(bin) + "state\\lie_events\\";
+
+    WIN32_FIND_DATAA fd{};
+    HANDLE h = FindFirstFileA((root + "mouse_*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        x::runtime::LogI("AutoLieSim", "replay scan: no lie_events dumps under %s", root.c_str());
+        return;
+    }
+
+    FILETIME best{};
+    int seen = 0;
+    int usable = 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (fd.cFileName[0] == '.') continue;
+        ++seen;
+        const std::string meta = root + fd.cFileName + "\\meta.txt";
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        if (!GetFileAttributesExA(meta.c_str(), GetFileExInfoStandard, &fa)) continue;
+        std::string text;
+        if (!ReadWholeFile(meta, text)) continue;
+        PanelQuad q{};
+        int dw = 0, dh = 0;
+        if (!ParseReplayMeta(text, q, dw, dh)) continue;
+        ++usable;
+        if (g_replayOk && CompareFileTime(&fa.ftLastWriteTime, &best) <= 0) continue;
+        best = fa.ftLastWriteTime;
+        g_replayOk = true;
+        g_replayClientQuad = q;
+        g_replayDumpW = dw;
+        g_replayDumpH = dh;
+        strncpy_s(g_replayId, fd.cFileName, _TRUNCATE);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    if (g_replayOk) {
+        x::runtime::LogI("AutoLieSim",
+                         "replay panel from %s (dumps=%d usable=%d) client=%dx%d "
+                         "quad=(%ld,%ld)(%ld,%ld)(%ld,%ld)(%ld,%ld)",
+                         g_replayId, seen, usable, g_replayDumpW, g_replayDumpH,
+                         g_replayClientQuad.c[0].x, g_replayClientQuad.c[0].y,
+                         g_replayClientQuad.c[1].x, g_replayClientQuad.c[1].y,
+                         g_replayClientQuad.c[2].x, g_replayClientQuad.c[2].y,
+                         g_replayClientQuad.c[3].x, g_replayClientQuad.c[3].y);
+    } else {
+        x::runtime::LogI("AutoLieSim",
+                         "replay panel unavailable (dumps=%d, none with mapMode=panel-affine) "
+                         "— falling back to synthetic panel",
+                         seen);
+    }
+}
+
+bool ResolveReplayPanel(PanelQuad& out) {
+    ScanReplayEvidence();
+    if (!g_replayOk || g_replayDumpW <= 0 || g_replayDumpH <= 0) return false;
+
+    HWND hwnd = nullptr;
+    POINT origin{};
+    int cw = 0;
+    int ch = 0;
+    if (!GetGameClient(hwnd, origin, cw, ch)) return false;
+
+    const double sx = static_cast<double>(cw) / static_cast<double>(g_replayDumpW);
+    const double sy = static_cast<double>(ch) / static_cast<double>(g_replayDumpH);
+    PanelQuad q{};
+    for (int i = 0; i < 4; ++i) {
+        q.c[i] = POINT{
+            origin.x + static_cast<long>(std::lround(g_replayClientQuad.c[i].x * sx)),
+            origin.y + static_cast<long>(std::lround(g_replayClientQuad.c[i].y * sy)),
+        };
+    }
+    if (!QuadSpanOk(q, 80)) return false;
+    out = q;
     return true;
 }
 
@@ -165,15 +362,18 @@ bool PumpMoveLocked(long x, long y) {
 }
 
 void PublishOverlayHint(const MappedPoint* mapped, int pointCount, int liveEnd,
-                        const RECT& panel, const char* label) {
+                        const PanelQuad& panel, const char* label) {
     mouse_region_overlay::Snapshot snap{};
     snap.valid = true;
-    snap.corners[0] = {panel.left, panel.bottom};
-    snap.corners[1] = {panel.right, panel.bottom};
-    snap.corners[2] = {panel.right, panel.top};
-    snap.corners[3] = {panel.left, panel.top};
-    snap.center.x = (panel.left + panel.right) / 2;
-    snap.center.y = (panel.top + panel.bottom) / 2;
+    long sumX = 0;
+    long sumY = 0;
+    for (int i = 0; i < 4; ++i) {
+        snap.corners[i] = panel.c[i];
+        sumX += panel.c[i].x;
+        sumY += panel.c[i].y;
+    }
+    snap.center.x = sumX / 4;
+    snap.center.y = sumY / 4;
 
     if (mapped && pointCount > 0) {
         const int answerN = (std::min)(pointCount, mouse_region_overlay::kMaxTrailPoints);
@@ -236,17 +436,18 @@ DWORD WINAPI SimThread(LPVOID) {
 
         if (keepOverlay) {
             mouse_region_overlay::Snapshot snap{};
-            RECT panel{};
-            bool live = false;
-            if (ResolveTestPanel(panel, &live) && panel.right - panel.left >= 40 &&
-                panel.bottom - panel.top >= 40) {
+            PanelQuad panel{};
+            if (ResolveTestPanelQuad(panel, nullptr) && QuadSpanOk(panel, 40)) {
                 snap.valid = true;
-                snap.corners[0] = {panel.left, panel.bottom};
-                snap.corners[1] = {panel.right, panel.bottom};
-                snap.corners[2] = {panel.right, panel.top};
-                snap.corners[3] = {panel.left, panel.top};
-                snap.center.x = (panel.left + panel.right) / 2;
-                snap.center.y = (panel.top + panel.bottom) / 2;
+                long sumX = 0;
+                long sumY = 0;
+                for (int i = 0; i < 4; ++i) {
+                    snap.corners[i] = panel.c[i];
+                    sumX += panel.c[i].x;
+                    sumY += panel.c[i].y;
+                }
+                snap.center.x = sumX / 4;
+                snap.center.y = sumY / 4;
             }
             strncpy_s(snap.label, "sim done — waiting NonFinite", _TRUNCATE);
             mouse_region_overlay::SetSnapshot(snap);
@@ -267,10 +468,10 @@ DWORD WINAPI SimThread(LPVOID) {
 
     Sleep(30);
 
-    RECT panel{};
-    bool live = false;
+    PanelQuad panel{};
+    PanelSource src = PanelSource::Synth;
     x::runtime::LogI("AutoLieSim", "resolving panel…");
-    if (!ResolveTestPanel(panel, &live)) {
+    if (!ResolveTestPanelQuad(panel, &src)) {
         x::runtime::LogW("AutoLieSim",
                          "abort: no game window — cannot synthesize test panel");
         finish("abort: no panel");
@@ -279,12 +480,15 @@ DWORD WINAPI SimThread(LPVOID) {
 
     MappedPoint mapped[kMouseSimPointCount]{};
     RemapAll(mapped, panel);
-    x::runtime::LogI(
-        "AutoLieSim",
-        "start uv-map points=%d ready=%d hz=%u live=%d panel=(%ld,%ld)-(%ld,%ld) "
-        "start=(%ld,%ld) clip=pump-LieFrameTick",
-        kMouseSimPointCount, kReadyTicks, kSampleHz, live ? 1 : 0, panel.left, panel.top,
-        panel.right, panel.bottom, mapped[0].x, mapped[0].y);
+    {
+        const RECT aabb = QuadAabb(panel);
+        x::runtime::LogI(
+            "AutoLieSim",
+            "start uv-map points=%d ready=%d hz=%u src=%s panel=(%ld,%ld)-(%ld,%ld) "
+            "start=(%ld,%ld) clip=pump-LieFrameTick",
+            kMouseSimPointCount, kReadyTicks, kSampleHz, PanelSourceTag(src), aabb.left, aabb.top,
+            aabb.right, aabb.bottom, mapped[0].x, mapped[0].y);
+    }
 
     char label[96];
 
@@ -301,17 +505,17 @@ DWORD WINAPI SimThread(LPVOID) {
     for (int tick = 0; tick < kReadyTicks && !g_stop.load(std::memory_order_acquire);
          ++tick) {
         if (tick > 0 && (tick % kReprobeEvery) == 0) {
-            RECT fresh{};
-            bool freshLive = false;
-            if (ResolveTestPanel(fresh, &freshLive)) {
+            PanelQuad fresh{};
+            PanelSource freshSrc = PanelSource::Synth;
+            if (ResolveTestPanelQuad(fresh, &freshSrc)) {
                 panel = fresh;
-                live = freshLive;
+                src = freshSrc;
                 RemapAll(mapped, panel);
             }
         }
         publishTarget(mapped[0].x, mapped[0].y);
         std::snprintf(label, sizeof(label), "SIM READY %d/%d %s @(%ld,%ld)", tick + 1,
-                      kReadyTicks, live ? "LIVE" : "SYNTH", mapped[0].x, mapped[0].y);
+                      kReadyTicks, PanelSourceTag(src), mapped[0].x, mapped[0].y);
         PublishOverlayHint(mapped, kMouseSimPointCount, 1, panel, label);
         Sleep(kFrameMs);
     }
@@ -319,17 +523,17 @@ DWORD WINAPI SimThread(LPVOID) {
     for (int i = 0; i < kMouseSimPointCount && !g_stop.load(std::memory_order_acquire);
          ++i) {
         if (i > 0 && (i % kReprobeEvery) == 0) {
-            RECT fresh{};
-            bool freshLive = false;
-            if (ResolveTestPanel(fresh, &freshLive)) {
+            PanelQuad fresh{};
+            PanelSource freshSrc = PanelSource::Synth;
+            if (ResolveTestPanelQuad(fresh, &freshSrc)) {
                 panel = fresh;
-                live = freshLive;
+                src = freshSrc;
                 RemapAll(mapped, panel);
             }
         }
         publishTarget(mapped[i].x, mapped[i].y);
         std::snprintf(label, sizeof(label), "SIM PLAY %d/%d %s @(%ld,%ld)", i + 1,
-                      kMouseSimPointCount, live ? "LIVE" : "SYNTH", mapped[i].x,
+                      kMouseSimPointCount, PanelSourceTag(src), mapped[i].x,
                       mapped[i].y);
         PublishOverlayHint(mapped, kMouseSimPointCount, i + 1, panel, label);
         Sleep(kFrameMs);
@@ -398,18 +602,48 @@ bool PulseCursorOnPump() {
 
 void ReleaseCursorOnPump() { PumpReleaseClip(true); }
 
-bool ResolveTestPanel(RECT& out, bool* live) {
-    RECT livePanel{};
-    if (anti_macro_follower::TryCopyPublishedPanelRect(livePanel)) {
-        out = livePanel;
-        if (live) *live = true;
+const char* PanelSourceTag(PanelSource src) {
+    switch (src) {
+        case PanelSource::Live: return "LIVE";
+        case PanelSource::Replay: return "REPLAY";
+        default: return "SYNTH";
+    }
+}
+
+bool ResolveTestPanelQuad(PanelQuad& out, PanelSource* src) {
+    if (src) *src = PanelSource::Synth;
+
+    POINT liveCorners[4]{};
+    if (anti_macro_follower::TryCopyPublishedPanelCorners(liveCorners)) {
+        for (int i = 0; i < 4; ++i) out.c[i] = liveCorners[i];
+        if (src) *src = PanelSource::Live;
         return true;
     }
-    if (!ResolveSyntheticPanel(out)) {
+    RECT livePanel{};
+    if (anti_macro_follower::TryCopyPublishedPanelRect(livePanel)) {
+        out = QuadFromRect(livePanel);
+        if (src) *src = PanelSource::Live;
+        return true;
+    }
+    if (ResolveReplayPanel(out)) {
+        if (src) *src = PanelSource::Replay;
+        return true;
+    }
+    RECT synth{};
+    if (!ResolveSyntheticPanel(synth)) return false;
+    out = QuadFromRect(synth);
+    return true;
+}
+
+bool ResolveTestPanel(RECT& out, bool* live) {
+    PanelQuad q{};
+    PanelSource src = PanelSource::Synth;
+    if (!ResolveTestPanelQuad(q, &src)) {
         if (live) *live = false;
         return false;
     }
-    if (live) *live = false;
+    out = QuadAabb(q);
+    if (live) *live = src == PanelSource::Live;
     return true;
 }
 

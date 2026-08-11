@@ -6,6 +6,7 @@
 #include "skill_port.h"
 
 #include "../attack_accel/attack_accel.h"
+#include "../final_attack_force/final_attack_force.h"
 #include "../simple_combat/simple_combat.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
@@ -104,11 +105,29 @@ std::unordered_map<int, DWORD> g_skillAnimMs;     // skillId → 最近算出的
 std::unordered_map<int, int> g_skillBaseSum;      // skillId → 未乘 ActionSpeed 的 delay 加总
 std::unordered_map<int, DWORD> g_skillLastOkMs;    // skillId → 上次成功施放
 std::unordered_map<int, DWORD> g_skillBusyArmMs;   // skillId → 开始量 busy 周期
+// WZ 无 action/0 的弓技贴脸会走武器挥砍通道；技能侧 QueryActionIndex 常仍报 shoot（BIN
+// 844bf0/213e1b），故齐发/串行不听技能 act，而以「弓/弩 + 最近 NA ActionType」为 SSOT。
+// 半近时 NA 偶发仍报 shoot：用 bow_melee_latch 迟滞（挥砍/do_false 闩上，连续射击才开）。
+// 剑/斧等非弓不强制串行。
+std::atomic<DWORD> g_weaponChanLastOkMs{0};
+std::atomic<int> g_lastNaActionIdx{-1};
+std::atomic<bool> g_bowMeleeLatch{false};
+std::atomic<int> g_bowMeleeShootStreak{0};
+// 闩锁解开：需连续若干刀射击 NA（避免半近 act 在 9↔22 间抖一下就恢复齐发）。
+constexpr int kBowMeleeReleaseShootStreak = 2;
 
 DWORD EffectiveMultiNaIntervalMs();  // 下方定义
 void PollNativeNaFloor(DWORD tickNow);  // 下方定义
 bool ClearBusyForCast();             // 下方定义
 void ClearPostNaSkills();            // 下方定义
+bool SkillHasOfflineAction(int skillId);
+bool IsWeaponBoundSkill(int skillId);
+bool SkillAllowsClearBusyStack(int skillId);
+bool PendingSkillsAllowClearBusyStack();
+void NoteWeaponChannelOk(DWORD okAt);
+void NoteBowNaAction(int actIdx);
+void ArmBowMeleeLatch(const char* why, bool dropPending);
+void DropBowNoActionSkillsFromQueue();
 
 // 用当前 ActionSpeed 把 baseSum → 闸门 ms；失败返回 0。
 DWORD AnimMsFromBaseSumNow(int baseSum) {
@@ -120,6 +139,113 @@ DWORD AnimMsFromBaseSumNow(int baseSum) {
     }
     const int scaled = attack_accel::ScaleDelayByActionSpeed(baseSum, speed);
     return attack_accel::DelayUnitsToAnimMs(scaled);
+}
+
+bool SkillHasOfflineAction(int skillId) {
+    if (skillId <= 0) return false;
+    int base = 0;
+    return attack_accel::LookupOfflineSkillBaseSum(skillId, base) && base > 0;
+}
+
+// 弓/弩 + 无离线 action/0 +（闩锁或最近 NA 非射击）→ 与 NA 共用武器通道。
+bool IsWeaponBoundSkill(int skillId) {
+    if (skillId <= 0) return false;
+    if (SkillHasOfflineAction(skillId)) return false;
+    if (!final_attack_force::EquippedWeaponIsBowFamily()) return false;
+    if (g_bowMeleeLatch.load(std::memory_order_relaxed)) return true;
+    const int naAct = g_lastNaActionIdx.load(std::memory_order_relaxed);
+    return !attack_accel::IsRangedShootAction(naAct);
+}
+
+void NoteWeaponChannelOk(DWORD okAt) {
+    if (!okAt) return;
+    g_weaponChanLastOkMs.store(okAt, std::memory_order_relaxed);
+}
+
+void DropBowNoActionSkillsFromQueue() {
+    std::lock_guard<std::mutex> lk(g_queueMu);
+    std::vector<PendingCast> kept;
+    kept.reserve(g_queue.size());
+    for (const PendingCast& q : g_queue) {
+        if (q.skillId == kPendingNormalAttack) {
+            kept.push_back(q);
+            continue;
+        }
+        if (q.skillId > 0 && SkillHasOfflineAction(q.skillId)) {
+            kept.push_back(q);
+            continue;
+        }
+        // 丢掉弓无 action/0 待施技，避免半近齐发队列继续出刀。
+    }
+    g_queue.swap(kept);
+}
+
+void ArmBowMeleeLatch(const char* why, bool dropPending) {
+    if (!final_attack_force::EquippedWeaponIsBowFamily()) return;
+    const bool was = g_bowMeleeLatch.exchange(true, std::memory_order_acq_rel);
+    g_bowMeleeShootStreak.store(0, std::memory_order_relaxed);
+    if (dropPending) {
+        ClearPostNaSkills();
+        DropBowNoActionSkillsFromQueue();
+    }
+    if (!was) {
+        runtime::LogI("MultiSkill", "bow_melee_latch ON (%s)", why ? why : "?");
+    }
+}
+
+void NoteBowNaAction(int actIdx) {
+    if (!final_attack_force::EquippedWeaponIsBowFamily()) {
+        g_bowMeleeLatch.store(false, std::memory_order_relaxed);
+        g_bowMeleeShootStreak.store(0, std::memory_order_relaxed);
+        return;
+    }
+    if (attack_accel::IsMeleeWeaponAction(actIdx)) {
+        // 不在这里清 post-NA：交给随后 EnqueueSkillsAfterNa 按门控跳过。
+        ArmBowMeleeLatch("na_melee", /*dropPending=*/false);
+        return;
+    }
+    if (!attack_accel::IsRangedShootAction(actIdx)) return;
+    if (!g_bowMeleeLatch.load(std::memory_order_relaxed)) {
+        g_bowMeleeShootStreak.store(0, std::memory_order_relaxed);
+        return;
+    }
+    const int streak = g_bowMeleeShootStreak.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (streak >= kBowMeleeReleaseShootStreak) {
+        g_bowMeleeLatch.store(false, std::memory_order_release);
+        g_bowMeleeShootStreak.store(0, std::memory_order_relaxed);
+        runtime::LogI("MultiSkill", "bow_melee_latch OFF after %d shoot NA", streak);
+    } else {
+        runtime::LogI("MultiSkill", "bow_melee_latch hold shootStreak=%d/%d", streak,
+                      kBowMeleeReleaseShootStreak);
+    }
+}
+
+// 有 WZ action/0 → 可 ClearBusy；
+// 弓无 action/0 → 闩锁中禁止；否则仅最近 NA 为射击才齐发；
+// 非弓无 action → 不强制串行。
+bool SkillAllowsClearBusyStack(int skillId) {
+    if (skillId <= 0) return false;
+    if (SkillHasOfflineAction(skillId)) return true;
+    if (!final_attack_force::EquippedWeaponIsBowFamily()) return true;
+    if (g_bowMeleeLatch.load(std::memory_order_relaxed)) return false;
+    const int naAct = g_lastNaActionIdx.load(std::memory_order_relaxed);
+    return attack_accel::IsRangedShootAction(naAct);
+}
+
+bool PendingSkillsAllowClearBusyStack() {
+    {
+        std::lock_guard<std::mutex> lk(g_postNaMu);
+        for (int id : g_postNaSkills) {
+            if (SkillAllowsClearBusyStack(id)) return true;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_queueMu);
+        for (const PendingCast& q : g_queue) {
+            if (q.skillId > 0 && SkillAllowsClearBusyStack(q.skillId)) return true;
+        }
+    }
+    return false;
 }
 bool MpNaFallbackActive(DWORD now) {
     const DWORD until = g_mpNaFallbackUntil.load(std::memory_order_relaxed);
@@ -199,8 +325,7 @@ void FeedSkillBaseSum(int skillId, int baseSum, const char* tag) {
     }
 }
 
-// 技能时长：离线现算 → 缓存 baseSum×现速 → 旧 ms 缓存 → NA 地板。
-// ActionSpeed buff 变化时，前两路立即跟上；不会死抱旧间隔。
+// 技能时长：离线现算 → 武器通道(=naIv) → 缓存 baseSum×现速 → 旧 ms → NA 地板。
 DWORD EffectiveSkillAnimMs(int skillId) {
     if (skillId <= 0) return EffectiveMultiNaIntervalMs();
     void* lu = nullptr;
@@ -208,6 +333,10 @@ DWORD EffectiveSkillAnimMs(int skillId) {
     if (ports::player_combat::QueryLocalUser(&lu) && lu &&
         attack_accel::LookupOfflineSkillAnimMs(lu, skillId, offlineMs)) {
         return offlineMs;
+    }
+    // 贴脸挥弓等：层 delay 是武器动作，闸门跟普攻同一通道（只能多不能少）。
+    if (IsWeaponBoundSkill(skillId)) {
+        return EffectiveMultiNaIntervalMs();
     }
     int baseSum = 0;
     {
@@ -228,19 +357,27 @@ DWORD EffectiveSkillAnimMs(int skillId) {
 }
 
 bool SkillAnimBlocking(int skillId, DWORD /*tickNow*/, DWORD* outRemainMs) {
-    // 服端按「单技」频率审计：闸门只看该 skillId 上次成功→自身动画/CD，
-    // 绝不拿其它技能的间隔来挡本技（多发 6 技同波靠 ClearBusy+gap 叠放）。
+    // 有专属 action：按单技频率。武器通道技（無 action/0 + 层≈普攻）：
+    // 與 NA/其它武器通道技共用 lastOk，避免 ClearBusy 叠成 1 秒 6 刀近战。
     if (outRemainMs) *outRemainMs = 0;
     if (skillId <= 0) return false;
     const DWORD t = GetTickCount();
+    const bool weaponBound = IsWeaponBoundSkill(skillId);
     DWORD last = 0;
-    {
+    if (weaponBound) {
+        last = g_weaponChanLastOkMs.load(std::memory_order_relaxed);
+        if (!last) {
+            std::lock_guard<std::mutex> lk(g_skillAnimMu);
+            const auto lit = g_skillLastOkMs.find(skillId);
+            if (lit != g_skillLastOkMs.end()) last = lit->second;
+        }
+    } else {
         std::lock_guard<std::mutex> lk(g_skillAnimMu);
         const auto lit = g_skillLastOkMs.find(skillId);
         if (lit == g_skillLastOkMs.end() || !lit->second) return false;
         last = lit->second;
     }
-    // 用现速重算的时长，避免吃攻速 buff 后仍按旧间隔挡刀。
+    if (!last) return false;
     DWORD anim = EffectiveSkillAnimMs(skillId);
     if (!anim) anim = EffectiveMultiNaIntervalMs();
     if (static_cast<DWORD>(t - last) >= anim) return false;
@@ -290,7 +427,7 @@ void PollSkillAnimBusy(DWORD /*tickNow*/) {
     }
 }
 
-// 施放成功：离线 base → 实时层反解 base → busy_cycle。闸门一律按现速重算。
+// 施放成功：离线 base → 实时层反解 base（并识别武器通道）→ busy_cycle。
 void NoteSkillCastOk(int skillId, DWORD okAt) {
     if (skillId <= 0) return;
     {
@@ -317,9 +454,29 @@ void NoteSkillCastOk(int skillId, DWORD okAt) {
         int speed = 100;
         (void)attack_accel::QueryActionSpeed(lu, speed);
         const int baseSum = attack_accel::UnscaleDelayByActionSpeed(delaySum, speed);
-        runtime::LogI("MultiSkill", "skill_table id=%d sum=%d speed=%d base=%d", skillId, delaySum,
-                      speed, baseSum);
-        FeedSkillBaseSum(skillId, baseSum > 0 ? baseSum : delaySum, "action_table");
+        const int store = baseSum > 0 ? baseSum : delaySum;
+        const int naBase = g_naActionBaseSum.load(std::memory_order_relaxed);
+        int skillAct = -1;
+        (void)attack_accel::QueryActionIndex(lu, skillAct);
+        const int naAct = g_lastNaActionIdx.load(std::memory_order_relaxed);
+        const int wt = final_attack_force::QueryEquippedWeaponType();
+        // 门控听 NA；skillAct 仅诊断（贴脸时常仍报 22）。
+        const bool weaponBound = IsWeaponBoundSkill(skillId);
+        const char* kind = weaponBound ? "na_melee_gate" : "na_ranged_gate";
+        if (weaponBound) {
+            NoteWeaponChannelOk(okAt);
+            runtime::LogI("MultiSkill",
+                          "skill_melee_serial id=%d skillAct=%d naAct=%d wt=%d sum=%d speed=%d "
+                          "base=%d naBase=%d kind=%s (no ClearBusy stack)",
+                          skillId, skillAct, naAct, wt, delaySum, speed, store, naBase, kind);
+            FeedSkillBaseSum(skillId, store, kind);
+            return;
+        }
+        runtime::LogI("MultiSkill",
+                      "skill_ranged_stack id=%d skillAct=%d naAct=%d wt=%d sum=%d speed=%d "
+                      "base=%d kind=%s (ClearBusy ok)",
+                      skillId, skillAct, naAct, wt, delaySum, speed, store, kind);
+        FeedSkillBaseSum(skillId, store, kind);
         return;
     }
     {
@@ -359,11 +516,39 @@ void EnqueueSkillsAfterNa(DWORD now, uint32_t gap) {
         skills.swap(g_postNaSkills);
     }
     if (skills.empty()) return;
+
+    // 方案1：弓贴脸（最近 NA 非射击）→ 无 action/0 技本波不跟刀，只打 NA，
+    // 避免 NA→断魂→二连连续三下挥弓；有离线 action 的技仍可排。
+    std::vector<int> kept;
+    kept.reserve(skills.size());
+    size_t skippedMelee = 0;
+    for (int id : skills) {
+        if (SkillAllowsClearBusyStack(id)) {
+            kept.push_back(id);
+        } else {
+            ++skippedMelee;
+        }
+    }
+    if (kept.empty()) {
+        const int naAct = g_lastNaActionIdx.load(std::memory_order_relaxed);
+        runtime::LogI("MultiSkill",
+                      "post_na skip melee_gate skipped=%zu naAct=%d latch=%d (NA-only this swing)",
+                      skippedMelee, naAct, g_bowMeleeLatch.load(std::memory_order_relaxed) ? 1 : 0);
+        return;
+    }
+    if (skippedMelee) {
+        const int naAct = g_lastNaActionIdx.load(std::memory_order_relaxed);
+        runtime::LogI("MultiSkill",
+                      "post_na partial melee_gate keep=%zu skip=%zu naAct=%d latch=%d", kept.size(),
+                      skippedMelee, naAct,
+                      g_bowMeleeLatch.load(std::memory_order_relaxed) ? 1 : 0);
+    }
+
     std::vector<PendingCast> add;
-    add.reserve(skills.size());
-    for (size_t i = 0; i < skills.size(); ++i) {
+    add.reserve(kept.size());
+    for (size_t i = 0; i < kept.size(); ++i) {
         PendingCast pc{};
-        pc.skillId = skills[i];
+        pc.skillId = kept[i];
         pc.dueMs = now + static_cast<DWORD>((i + 1) * gap);
         // NA 已 OnFuncKey 成功并 ClearActionBusy：此时客户端已空闲。
         // 再走 SendUseOnly 只会 ok_send_use，BIN 上蜗牛无动作/弹道；
@@ -382,7 +567,7 @@ void EnqueueSkillsAfterNa(DWORD now, uint32_t gap) {
         g_burstBusyUntil = need;
     }
     runtime::LogI("MultiSkill", "post_na enqueue skills=%zu gap=%u firstDue=+%ums doActive=1",
-                  skills.size(), gap, gap);
+                  kept.size(), gap, gap);
 }
 
 ULONGLONG FileMtimeOrZero(const std::string& path) {
@@ -475,14 +660,19 @@ bool TryFeedNaFromActionTable() {
     const int baseSum = attack_accel::UnscaleDelayByActionSpeed(delaySum, speed);
     const int store = baseSum > 0 ? baseSum : delaySum;
     g_naActionBaseSum.store(store, std::memory_order_relaxed);
+    int actIdx = -1;
+    if (attack_accel::QueryActionIndex(lu, actIdx)) {
+        g_lastNaActionIdx.store(actIdx, std::memory_order_relaxed);
+        NoteBowNaAction(actIdx);
+    }
     const DWORD ms = AnimMsFromBaseSumNow(store);
     if (ms >= 120u) {
         g_naTableMs.store(ms, std::memory_order_relaxed);
         g_nativeNaFloorMs.store(ms, std::memory_order_relaxed);
     }
     g_naBusyProbeActive.store(false, std::memory_order_relaxed);
-    runtime::LogI("MultiSkill", "na_table sum=%d speed=%d base=%d → %ums", delaySum, speed, store,
-                  ms);
+    runtime::LogI("MultiSkill", "na_table sum=%d speed=%d base=%d act=%d → %ums", delaySum, speed,
+                  store, actIdx, ms);
     return ms >= 120u;
 }
 
@@ -612,6 +802,10 @@ void Init() {
     g_naNativeGate = false;
     g_naBusyProbeActive = false;
     g_waveIntervalMs = 0;
+    g_weaponChanLastOkMs = 0;
+    g_lastNaActionIdx = -1;
+    g_bowMeleeLatch = false;
+    g_bowMeleeShootStreak = 0;
     {
         std::lock_guard<std::mutex> lk(g_skillAnimMu);
         g_skillAnimMs.clear();
@@ -634,9 +828,24 @@ void Shutdown() {
 }
 
 void SetConfig(bool enabled, uint32_t gapMs, bool safeStagger) {
+    const bool was = g_enabled.load(std::memory_order_relaxed);
     g_enabled = enabled;
     g_gapMs = xcat::ClampMultiSkillGapMs(gapMs);
     g_safeStagger = safeStagger;
+    // 关闭：丢掉在途波，避免 Tick 空转仍派发残留。
+    if (was && !enabled) {
+        ClearPostNaSkills();
+        {
+            std::lock_guard<std::mutex> lk(g_queueMu);
+            g_queue.clear();
+        }
+        g_burstBusyUntil = 0;
+        g_naBusyProbeActive.store(false, std::memory_order_relaxed);
+        g_naNativeGate.store(false, std::memory_order_relaxed);
+        g_bowMeleeLatch.store(false, std::memory_order_relaxed);
+        g_bowMeleeShootStreak.store(0, std::memory_order_relaxed);
+        runtime::LogI("MultiSkill", "disabled → clear queue/latch");
+    }
 }
 
 void SetSendUseRequest(bool on) { g_sendUseRequest = on; }
@@ -975,8 +1184,11 @@ bool TryCast(char* out, int outSz) {
 }
 
 void Tick() {
-    // 普攻 Down 后异步 Up：多发 worker 也要泵，不能只靠 simple_combat。
+    // 普攻 Down 后异步 Up：多发 worker 也要泵（simple_combat 关着/切图时仍可能挂着 pending Up）。
     ports::attack::TickReleases();
+    // 未开启：不轮询 na/skill 忙锁、不派发队列（关开关时 SetConfig 已清空）。
+    if (!g_enabled.load(std::memory_order_relaxed)) return;
+
     const DWORD nowPoll = GetTickCount();
     PollNativeNaFloor(nowPoll);
     PollSkillAnimBusy(nowPoll);
@@ -1064,13 +1276,34 @@ void Tick() {
                 const DWORD lastNa = g_lastMultiNaOkMs.load();
                 DWORD waveIv = g_waveIntervalMs.load(std::memory_order_relaxed);
                 if (!waveIv) waveIv = EffectiveMultiNaIntervalMs();
+                // 武器通道技与 NA 共用节奏：也受 weaponChan 约束。
+                const DWORD lastWpn = g_weaponChanLastOkMs.load(std::memory_order_relaxed);
+                const DWORD naIv = EffectiveMultiNaIntervalMs();
+                if (lastWpn && naIv && static_cast<DWORD>(now - lastWpn) < naIv) {
+                    requeueNa("weapon_channel");
+                    continue;
+                }
                 if (lastNa && static_cast<DWORD>(now - lastNa) < waveIv) {
                     requeueNa("wave_interval");
                     continue;
                 }
-                g_naFloorSkipBusySample.store(true, std::memory_order_relaxed);
+                // 仅当后续技有专属 action / 已证实非武器通道时才 ClearBusy（斷魂贴脸禁止）。
+                const bool clearBusy = PendingSkillsAllowClearBusyStack();
+                g_naFloorSkipBusySample.store(clearBusy, std::memory_order_relaxed);
                 g_naBusyArmMs.store(0, std::memory_order_relaxed);
-                (void)ClearBusyForCast();
+                if (clearBusy) {
+                    (void)ClearBusyForCast();
+                } else {
+                    // 跟 ActionBusy：贴脸挥弓与普攻串行，避免 1s 内叠 6 刀。
+                    void* luBusy = nullptr;
+                    int busy = -1;
+                    if (ports::player_combat::QueryLocalUser(&luBusy) && luBusy &&
+                        attack_accel::QueryActionBusy(luBusy, busy) && busy >= 0) {
+                        requeueNa("action_busy");
+                        continue;
+                    }
+                    g_naFloorSkipBusySample.store(false, std::memory_order_relaxed);
+                }
             } else {
                 // 纯普攻/探针：等引擎 ActionBusy，不清忙；用成功瞬间打戳量 busy_cycle。
                 void* luBusy = nullptr;
@@ -1098,7 +1331,10 @@ void Tick() {
             auto onNaOk = [&](const char* tag) {
                 const DWORD okAt = GetTickCount();  // 出手成功墙钟，禁用 Tick 入口 now
                 const bool gotTable = TryFeedNaFromActionTable();
-                if (withSkills) {
+                NoteWeaponChannelOk(okAt);  // 普攻占用武器出刀通道
+                const bool clearBusyAfter =
+                    withSkills && PendingSkillsAllowClearBusyStack();
+                if (clearBusyAfter) {
                     (void)ClearBusyForCast();
                 } else if (!gotTable) {
                     // 表读失败才走忙锁边沿 / ok_gap 回落
@@ -1117,7 +1353,7 @@ void Tick() {
                               "naIv=%u wave=%ums deg=%d clearBusy=%d nativeGate=%d table=%d",
                               tag ? tag : "", spV, spFh, b0, b1, EffectiveMultiNaIntervalMs(),
                               g_waveIntervalMs.load(std::memory_order_relaxed), deg,
-                              withSkills ? 1 : 0,
+                              clearBusyAfter ? 1 : 0,
                               g_naNativeGate.load(std::memory_order_relaxed) ? 1 : 0,
                               gotTable ? 1 : 0);
             };
@@ -1194,14 +1430,22 @@ void Tick() {
             PollSkillAnimBusy(now);
         }
 
-        // 与普攻+蜗牛同原理：多发叠技靠 ClearBusy +「每技自己的」anim/CD 限频。
-        // 服端只看单技使用频率，不评估整串——6 技同波用 gap 错开即可，勿用引擎忙锁串行。
-        // BIN：斷魂→二连 仅隔 gap 不清忙 → 第二发 do_false。
+        // 专属 action 可 ClearBusy；弓无 action/0 仅在最近 NA 为射击时齐发，否则跟武器通道。
         const bool stackSkills = g_selectHasSkill.load(std::memory_order_relaxed) &&
                                  !g_naNativeGate.load(std::memory_order_relaxed) &&
-                                 !MpNaFallbackActive(now) && !measuring;
+                                 !MpNaFallbackActive(now) && !measuring &&
+                                 SkillAllowsClearBusyStack(pc.skillId);
         if (stackSkills) {
             (void)ClearBusyForCast();
+        } else if (!measuring) {
+            // 武器通道 / 未分类：等 ActionBusy 自然结束再出下一刀。
+            void* luBusy = nullptr;
+            int busy = -1;
+            if (ports::player_combat::QueryLocalUser(&luBusy) && luBusy &&
+                attack_accel::QueryActionBusy(luBusy, busy) && busy >= 0) {
+                requeueSkill("action_busy", 40u, kNaMaxRetries);
+                continue;
+            }
         }
 
         bool notReady = false;
@@ -1215,6 +1459,9 @@ void Tick() {
         if (ok) {
             const DWORD okAt = GetTickCount();
             NoteSkillCastOk(pc.skillId, okAt);
+            if (IsWeaponBoundSkill(pc.skillId)) {
+                NoteWeaponChannelOk(okAt);
+            }
             if (stackSkills) {
                 (void)ClearBusyForCast();  // 给队列下一技留空闲，同 NA→技
             }
@@ -1252,9 +1499,16 @@ void Tick() {
                 EnterMpNaFallback(now, pc.skillId, reason);
             } else if (std::strcmp(reason, "send_use_false") == 0 ||
                        std::strncmp(reason, "do_false", 8) == 0) {
-                // DoActive 边沿拒施：短等再试 DoActive（已禁 Prepare），耗尽则 na_fallback。
-                requeueSkill(reason[0] ? reason : "cast_false", kSkillSoftRetryMs,
-                             kSkillSoftMaxRetries);
+                // 弓无 action/0 + do_false：半近假齐发边角 → 闩上并丢掉跟刀，改走 NA-only。
+                if (std::strncmp(reason, "do_false", 8) == 0 &&
+                    !SkillHasOfflineAction(pc.skillId) &&
+                    final_attack_force::EquippedWeaponIsBowFamily()) {
+                    ArmBowMeleeLatch("do_false", /*dropPending=*/true);
+                } else {
+                    // DoActive 边沿拒施：短等再试 DoActive（已禁 Prepare），耗尽则 na_fallback。
+                    requeueSkill(reason[0] ? reason : "cast_false", kSkillSoftRetryMs,
+                                 kSkillSoftMaxRetries);
+                }
             }
         }
         // 站立伪装取证（见 ground_spoof.h::CastDebug）：sp=1 才代表台确实种上了。

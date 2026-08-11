@@ -17,6 +17,7 @@
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
 #include "../../runtime/main_thread_pump.h"
+#include "../../runtime/il2cpp_metadata_lock.h"
 
 #include "xcat_skill_names.h"
 
@@ -1854,17 +1855,45 @@ bool IsPreparingSkill(int* outSkillId) {
     return true;
 }
 
-int GetSkillLevel(int skillId) {
-    if (skillId <= 0 || !EnsureBound() || !gLocalUser || !gGetSkillLevel) return 0;
+// 仅许在主泵上直调托管 GetSkillLevel（il2cpp TLS / 类初始化）。
+static int GetSkillLevelOnPump(int skillId) {
+    if (skillId <= 0 || !gLocalUser || !gGetSkillLevel) return 0;
     EnsureMethodInfos();
     int lv = 0;
     __try {
         lv = gGetSkillLevel(gLocalUser, skillId, gMiGetSkillLevel);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread("skill.GetSkillLevel");
         return 0;
     }
-    // 双保险：即便 skill_port 仍握着未钩 RVA，也能抬满级（与 Hook B 同源）。
     return x::features::skill_max_level::AdjustLevelIfForced(skillId, lv);
+}
+
+struct GetSkillLevelJob {
+    int skillId = 0;
+    int level = 0;
+};
+
+void GetSkillLevelJobFn(void* p) {
+    auto* job = static_cast<GetSkillLevelJob*>(p);
+    if (!job) return;
+    job->level = GetSkillLevelOnPump(job->skillId);
+}
+
+int GetSkillLevel(int skillId) {
+    if (skillId <= 0 || !EnsureBound() || !gLocalUser || !gGetSkillLevel) return 0;
+    if (runtime::main_thread::IsOnPumpThread()) {
+        return GetSkillLevelOnPump(skillId);
+    }
+    // worker：投泵。拥堵/未装泵 → 0（调用方按未学会处理），禁止 off-pump 直调托管。
+    if (!runtime::main_thread::Ensure() || runtime::main_thread::IsCongested()) return 0;
+    GetSkillLevelJob job{};
+    job.skillId = skillId;
+    constexpr DWORD kGetSkillPumpWaitMs = 80;
+    if (!runtime::main_thread::InvokeAndWait(&GetSkillLevelJobFn, &job, kGetSkillPumpWaitMs)) {
+        return 0;
+    }
+    return job.level;
 }
 
 // 换图脏窗里 SkillInfo 单例还在（LooksLikeHeapPtr 过得去），它内部的技能表却正在重建，
@@ -1872,13 +1901,9 @@ int GetSkillLevel(int skillId) {
 // final_attack_force 的工作线程在换图那一秒把这条路打了 24 次，每次都是
 // GameAssembly+0x3a0bde 读 0x0，全靠外层 __except 兜住（取证 hang_20260809_055217.txt）。
 //
-// 「让引擎在自己代码里炸、我们在外面接住」这套做法本身就是本轮黑屏的病根：同样的展开
-// 一旦发生在持有 il2cpp 元数据锁的路径上，就会把那把全局递归锁永久漏掉，全客户端黑屏。
-// 所以换图后先静默一段，等表重建完再问。静默期返回 null，调用方本来就按「查不到」处理。
-// 这条路会被多个 feature 的工作线程同时走，状态用原子的；抢着写只会让静默窗多刷新一次。
-// 1200 ms 是照 Invuln 那档抄的，实测太短：06:28 那次进图，静默在 +1.2 s 到期，
-// final_attack_force 在 +1.84 s 调 GetSkill 仍然读到空表（GameAssembly+0x3a0bde 空指针）。
-// 这类空读不持锁、不会连累主线程，纯属噪音，但既然量到了就按实测给足。
+// 2026-08-12：根因升级为「worker 无 il2cpp TLS → GA+0x3a0bde TlsGetValue 空解」。
+// 静默窗仍保留（降换图表重建噪音）；**off-pump 一律投 MainPump**，禁止再靠 __except 吞 AV。
+// 「让引擎在自己代码里炸、我们在外面接住」一旦碰上元数据锁路径就会黑屏——见 il2cpp 托管调用线程规约。
 constexpr DWORD kSkillMapQuietMs = 3000;
 static std::atomic<DWORD> gSkillMapQuietUntilMs{0};
 static std::atomic<int> gSkillTrackMapId{0};
@@ -1906,20 +1931,51 @@ static bool InSkillMapQuiet() {
     return until != 0 && static_cast<int>(now - until) < 0;
 }
 
-void* GetSkillEntry(int skillId) {
-    if (skillId <= 0) return nullptr;
-    if (!EnsureBound()) return nullptr;
-    if (InSkillMapQuiet()) return nullptr;
+static void* GetSkillEntryOnPump(int skillId) {
+    if (skillId <= 0 || !gGetSkill) return nullptr;
     EnsureMethodInfos();
     void* si = ResolveSkillInfoSingleton(GetTickCount());
-    if (!LooksLikeHeapPtr(si) || !gGetSkill) return nullptr;
+    if (!LooksLikeHeapPtr(si)) return nullptr;
     void* entry = nullptr;
     __try {
         entry = gGetSkill(si, skillId, gMiGetSkill);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread("skill.GetSkillEntry");
         return nullptr;
     }
     return LooksLikeHeapPtr(entry) ? entry : nullptr;
+}
+
+struct GetSkillEntryJob {
+    int skillId = 0;
+    void* entry = nullptr;
+};
+
+void GetSkillEntryJobFn(void* p) {
+    auto* job = static_cast<GetSkillEntryJob*>(p);
+    if (!job) return;
+    if (InSkillMapQuiet()) {
+        job->entry = nullptr;
+        return;
+    }
+    job->entry = GetSkillEntryOnPump(job->skillId);
+}
+
+void* GetSkillEntry(int skillId) {
+    if (skillId <= 0) return nullptr;
+    if (!EnsureBound()) return nullptr;
+    if (InSkillMapQuiet()) return nullptr;
+    if (runtime::main_thread::IsOnPumpThread()) {
+        return GetSkillEntryOnPump(skillId);
+    }
+    if (!runtime::main_thread::Ensure() || runtime::main_thread::IsCongested()) return nullptr;
+    GetSkillEntryJob job{};
+    job.skillId = skillId;
+    constexpr DWORD kGetSkillPumpWaitMs = 80;
+    if (!runtime::main_thread::InvokeAndWait(&GetSkillEntryJobFn, &job, kGetSkillPumpWaitMs)) {
+        return nullptr;
+    }
+    return job.entry;
 }
 
 int GetSkillMpCon(int skillId) {

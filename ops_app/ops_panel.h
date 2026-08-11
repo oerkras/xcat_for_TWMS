@@ -83,6 +83,9 @@ struct OpsState {
         std::string charMeso;  // 十进制字符串，避免大数精度问题
         int charLevel = 0;
         int charJob = 0;
+        uint32_t mapId = 0;
+        std::string mapName;
+        int channelId = 0;  // UI ch.N，1-based；0=未知
         std::string lastKind;
         std::string lastSeenAt;
         int idleSec = 0;
@@ -121,9 +124,25 @@ struct OpsState {
     char clientsGateFilter[24]{};   // 门禁 chip：probe_ok|lease|…|__stale__（与文本筛选 AND）
     bool forceOpenIpAlerts = false;
     bool clientsSortIdleFirst = true;  // 空闲少的排前（刚探活的在上）
-    bool clientsGroupByIp = true;      // 同公网 IP 合并为可折叠组
-    // 展开中的 IP（缺省折叠；仅 clientsGroupByIp 且组内≥2 时生效）
+    bool clientsGroupByToken = true;   // 同 TOKEN（用户唯一标识）合并为可折叠组
+    bool clientsGroupByIp = true;      // 同 IP 折叠：TOKEN 内嵌套，或关闭 TOKEN 时顶层按 IP
+    // 展开中的 TOKEN 组键（缺省折叠）
+    std::set<std::string> clientsGroupExpanded;
+    // 展开中的 IP 组键：顶层为 IP；嵌套为 "token\\x1fip"
     std::set<std::string> clientsIpExpanded;
+
+    struct ForceTargetPending {
+        std::string id;
+        std::string status;
+        std::string machine;
+        std::string deviceId;
+        std::string mac;
+        std::string note;
+        std::string at;
+        uint32_t buildId = 0;
+    };
+    std::vector<ForceTargetPending> forceTargetQueue;
+    std::string forceTargetQueueError;
 
     struct AccessDenyHit {
         std::string at;

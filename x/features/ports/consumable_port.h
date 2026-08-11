@@ -31,12 +31,16 @@ bool FindAndUsePotion(PotionKind kind, FindResult& out);
 // Type must be FuncType.Item(2); 绑了什么就喝什么（无反类 soft-reject）；无扫栏回退。
 bool ResolveBoundPotion(bool wantHp, FindResult& out);
 
+// 读绑定消耗品 itemId（背包有/无均可）。未绑 / 非道具 / pump 失败返回 false。
+bool PeekBoundPotionItemId(bool wantHp, int& outItemId);
+
 // Resolve bind + SendStatChangeItemUseRequest (autopot main path; like fengxing bind-only).
 bool FindAndUseBoundPotion(bool wantHp, FindResult& out);
 
 // 按精确 itemId 找消耗栏并用 SendPortalScrollUseRequest（回家卷軸等）。
 // 失败会打 Consumable 日志：bad_code / list_miss / not_found / use_fail / no_consume / pump fail。
-// 成功要求数量下降（或 delayed 复核下降）；仅发包未扣量不算成功。
+// 成功：qty 下降，或发包后 mapId 已变（换图窗背包可读性差时 qty 可能为 -1）。
+// 仅发包、数量未降且未换图 → 失败。
 bool FindAndUseByItemId(int itemId, FindResult& out);
 
 // UseRequest only (main-thread). Prefer FindAndUsePotion from workers.

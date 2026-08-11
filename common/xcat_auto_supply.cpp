@@ -50,16 +50,42 @@ void NormalizeConfig(AutoSupplyConfig& cfg) {
     cfg.refillHpEnabled = cfg.refillHpEnabled ? 1u : 0u;
     cfg.refillMpEnabled = cfg.refillMpEnabled ? 1u : 0u;
     cfg.refillCustomEnabled = cfg.refillCustomEnabled ? 1u : 0u;
+    cfg.refillCustom2Enabled = cfg.refillCustom2Enabled ? 1u : 0u;
     cfg.refillFeedEnabled = cfg.refillFeedEnabled ? 1u : 0u;
     cfg.rechargeStarsEnabled = cfg.rechargeStarsEnabled ? 1u : 0u;
-    if (cfg.refillHpBuyTo < 0) cfg.refillHpBuyTo = 0;
-    if (cfg.refillHpBuyTo > 9999) cfg.refillHpBuyTo = 9999;
-    if (cfg.refillMpBuyTo < 0) cfg.refillMpBuyTo = 0;
-    if (cfg.refillMpBuyTo > 9999) cfg.refillMpBuyTo = 9999;
-    if (cfg.refillCustomBuyTo < 0) cfg.refillCustomBuyTo = 0;
-    if (cfg.refillCustomBuyTo > 9999) cfg.refillCustomBuyTo = 9999;
-    if (cfg.refillFeedBuyTo < 0) cfg.refillFeedBuyTo = 0;
-    if (cfg.refillFeedBuyTo > 9999) cfg.refillFeedBuyTo = 9999;
+    cfg.tripOnPotionEmpty = cfg.tripOnPotionEmpty ? 1u : 0u;
+    cfg.tripOnCustomLow = cfg.tripOnCustomLow ? 1u : 0u;
+    cfg.tripOnCustom2Low = cfg.tripOnCustom2Low ? 1u : 0u;
+    cfg.tripOnFeedLow = cfg.tripOnFeedLow ? 1u : 0u;
+    auto clampBuy = [](int32_t& v) {
+        if (v < 0) v = 0;
+        if (v > 9999) v = 9999;
+    };
+    auto clampBelow = [](int32_t& below, int32_t buyTo, bool tripOn) {
+        if (below < 0) below = 0;
+        if (below > 9999) below = 9999;
+        // 触发阈值必须严格小于补到，否则买完仍低/闭锁死锁
+        if (tripOn && buyTo > 0 && below >= buyTo) below = buyTo - 1;
+        if (tripOn && buyTo <= 0) below = 0;  // 没补到数量则无法有效触发
+    };
+    clampBuy(cfg.refillHpBuyTo);
+    clampBuy(cfg.refillMpBuyTo);
+    clampBuy(cfg.refillCustomBuyTo);
+    clampBuy(cfg.refillCustom2BuyTo);
+    clampBuy(cfg.refillFeedBuyTo);
+    if (cfg.tripOnPotionBelow < 1) cfg.tripOnPotionBelow = 1;
+    if (cfg.tripOnPotionBelow > 9999) cfg.tripOnPotionBelow = 9999;
+    clampBelow(cfg.tripOnCustomBelow, cfg.refillCustomBuyTo, cfg.tripOnCustomLow != 0);
+    clampBelow(cfg.tripOnCustom2Below, cfg.refillCustom2BuyTo, cfg.tripOnCustom2Low != 0);
+    clampBelow(cfg.tripOnFeedBelow, cfg.refillFeedBuyTo, cfg.tripOnFeedLow != 0);
+    // buyTo==0 或 CODE 无效时关掉对应低库存触发，避免配置摆设/静默不触发
+    auto codeOk = [](const char* code) {
+        if (!code || !code[0]) return false;
+        return atoi(code) > 0;
+    };
+    if (cfg.refillCustomBuyTo <= 0 || !codeOk(cfg.refillCustomCode)) cfg.tripOnCustomLow = 0;
+    if (cfg.refillCustom2BuyTo <= 0 || !codeOk(cfg.refillCustom2Code)) cfg.tripOnCustom2Low = 0;
+    if (cfg.refillFeedBuyTo <= 0 || !codeOk(cfg.refillFeedCode)) cfg.tripOnFeedLow = 0;
     // 空名回填默认展示名；内置名强制经典 CODE（避免 catalog 误匹配）。
     if (!cfg.refillHpName[0]) {
         strncpy_s(cfg.refillHpName, kAutoSupplyDefaultRefillHpName, _TRUNCATE);
@@ -77,17 +103,24 @@ void NormalizeConfig(AutoSupplyConfig& cfg) {
         // 仅回填展示名；不抬 buyTo，避免「空名/买到 0」的旧惰性配置被悄悄激活。
         strncpy_s(cfg.refillCustomName, kAutoSupplyDefaultRefillCustomName, _TRUNCATE);
     }
+    if (!cfg.refillCustom2Name[0]) {
+        strncpy_s(cfg.refillCustom2Name, kAutoSupplyDefaultRefillCustom2Name, _TRUNCATE);
+    }
     // 饲料名/CODE 执行侧固定，读写一律收敛到主选，避免旧 ini 改名造成 UI/行为漂移。
     strncpy_s(cfg.refillFeedName, kAutoSupplyDefaultRefillFeedName, _TRUNCATE);
     strncpy_s(cfg.refillFeedCode, kAutoSupplyDefaultRefillFeedCode, _TRUNCATE);
+    // 内置名：仅空 CODE 时回填经典码。非空以 UI/绑定同步为准，避免「绑药 ID ≠ 默认红/蓝」被改回。
     if (const char* hpCode = AutoSupplyBuiltinRefillCodeForName(cfg.refillHpName)) {
-        strncpy_s(cfg.refillHpCode, hpCode, _TRUNCATE);
+        if (!cfg.refillHpCode[0]) strncpy_s(cfg.refillHpCode, hpCode, _TRUNCATE);
     }
     if (const char* mpCode = AutoSupplyBuiltinRefillCodeForName(cfg.refillMpName)) {
-        strncpy_s(cfg.refillMpCode, mpCode, _TRUNCATE);
+        if (!cfg.refillMpCode[0]) strncpy_s(cfg.refillMpCode, mpCode, _TRUNCATE);
     }
     if (const char* customCode = AutoSupplyBuiltinRefillCodeForName(cfg.refillCustomName)) {
-        strncpy_s(cfg.refillCustomCode, customCode, _TRUNCATE);
+        if (!cfg.refillCustomCode[0]) strncpy_s(cfg.refillCustomCode, customCode, _TRUNCATE);
+    }
+    if (const char* custom2Code = AutoSupplyBuiltinRefillCodeForName(cfg.refillCustom2Name)) {
+        if (!cfg.refillCustom2Code[0]) strncpy_s(cfg.refillCustom2Code, custom2Code, _TRUNCATE);
     }
 }
 
@@ -181,6 +214,9 @@ bool ReadAutoSupplyIni(const char* binDir, AutoSupplyConfig& out, uint64_t* outW
     const bool hadCustomEnabledKey =
         IniGetBool(ini, "auto_supply", "refillCustomEnabled", refillCustom);
     if (hadCustomEnabledKey) out.refillCustomEnabled = refillCustom ? 1u : 0u;
+    bool refillCustom2 = false;
+    if (IniGetBool(ini, "auto_supply", "refillCustom2Enabled", refillCustom2))
+        out.refillCustom2Enabled = refillCustom2 ? 1u : 0u;
     bool refillFeed = false;
     if (IniGetBool(ini, "auto_supply", "refillFeedEnabled", refillFeed))
         out.refillFeedEnabled = refillFeed ? 1u : 0u;
@@ -194,6 +230,9 @@ bool ReadAutoSupplyIni(const char* binDir, AutoSupplyConfig& out, uint64_t* outW
     const bool hadCustomNameKey =
         IniGetString(ini, "auto_supply", "refillCustomName", refillCustomName);
     if (hadCustomNameKey) strncpy_s(out.refillCustomName, refillCustomName.c_str(), _TRUNCATE);
+    std::string refillCustom2Name;
+    if (IniGetString(ini, "auto_supply", "refillCustom2Name", refillCustom2Name))
+        strncpy_s(out.refillCustom2Name, refillCustom2Name.c_str(), _TRUNCATE);
     std::string refillFeedName;
     if (IniGetString(ini, "auto_supply", "refillFeedName", refillFeedName))
         strncpy_s(out.refillFeedName, refillFeedName.c_str(), _TRUNCATE);
@@ -207,6 +246,9 @@ bool ReadAutoSupplyIni(const char* binDir, AutoSupplyConfig& out, uint64_t* outW
     const bool hadCustomCodeKey =
         IniGetString(ini, "auto_supply", "refillCustomCode", refillCustomCode);
     if (hadCustomCodeKey) strncpy_s(out.refillCustomCode, refillCustomCode.c_str(), _TRUNCATE);
+    std::string refillCustom2Code;
+    if (IniGetString(ini, "auto_supply", "refillCustom2Code", refillCustom2Code))
+        strncpy_s(out.refillCustom2Code, refillCustom2Code.c_str(), _TRUNCATE);
     std::string refillFeedCode;
     if (IniGetString(ini, "auto_supply", "refillFeedCode", refillFeedCode))
         strncpy_s(out.refillFeedCode, refillFeedCode.c_str(), _TRUNCATE);
@@ -222,11 +264,33 @@ bool ReadAutoSupplyIni(const char* binDir, AutoSupplyConfig& out, uint64_t* outW
         (hadCustomEnabledKey || hadCustomNameKey || hadCustomCodeKey)) {
         out.refillCustomBuyTo = 0;
     }
+    if (IniGetU32(ini, "auto_supply", "refillCustom2BuyTo", u32))
+        out.refillCustom2BuyTo = static_cast<int32_t>(u32);
     if (IniGetU32(ini, "auto_supply", "refillFeedBuyTo", u32))
         out.refillFeedBuyTo = static_cast<int32_t>(u32);
     bool rechargeStars = false;
     if (IniGetBool(ini, "auto_supply", "rechargeStarsEnabled", rechargeStars))
         out.rechargeStarsEnabled = rechargeStars ? 1u : 0u;
+    bool tripOnPotionEmpty = out.tripOnPotionEmpty != 0;
+    if (IniGetBool(ini, "auto_supply", "tripOnPotionEmpty", tripOnPotionEmpty))
+        out.tripOnPotionEmpty = tripOnPotionEmpty ? 1u : 0u;
+    if (IniGetU32(ini, "auto_supply", "tripOnPotionBelow", u32))
+        out.tripOnPotionBelow = static_cast<int32_t>(u32);
+    bool tripOnCustomLow = out.tripOnCustomLow != 0;
+    if (IniGetBool(ini, "auto_supply", "tripOnCustomLow", tripOnCustomLow))
+        out.tripOnCustomLow = tripOnCustomLow ? 1u : 0u;
+    if (IniGetU32(ini, "auto_supply", "tripOnCustomBelow", u32))
+        out.tripOnCustomBelow = static_cast<int32_t>(u32);
+    bool tripOnCustom2Low = out.tripOnCustom2Low != 0;
+    if (IniGetBool(ini, "auto_supply", "tripOnCustom2Low", tripOnCustom2Low))
+        out.tripOnCustom2Low = tripOnCustom2Low ? 1u : 0u;
+    if (IniGetU32(ini, "auto_supply", "tripOnCustom2Below", u32))
+        out.tripOnCustom2Below = static_cast<int32_t>(u32);
+    bool tripOnFeedLow = out.tripOnFeedLow != 0;
+    if (IniGetBool(ini, "auto_supply", "tripOnFeedLow", tripOnFeedLow))
+        out.tripOnFeedLow = tripOnFeedLow ? 1u : 0u;
+    if (IniGetU32(ini, "auto_supply", "tripOnFeedBelow", u32))
+        out.tripOnFeedBelow = static_cast<int32_t>(u32);
 
     if (IniGetU32(ini, "auto_supply", "buyRuleCount", u32)) {
         out.buyRuleCount = u32 > static_cast<uint32_t>(kAutoSupplyMaxBuyRules)
@@ -322,14 +386,18 @@ bool WriteAutoSupplyIni(const char* binDir, const AutoSupplyConfig& cfg, uint64_
         IniSetBool(ini, "auto_supply", "refillHpEnabled", normalized.refillHpEnabled != 0);
         IniSetBool(ini, "auto_supply", "refillMpEnabled", normalized.refillMpEnabled != 0);
         IniSetBool(ini, "auto_supply", "refillCustomEnabled", normalized.refillCustomEnabled != 0);
+        IniSetBool(ini, "auto_supply", "refillCustom2Enabled",
+                   normalized.refillCustom2Enabled != 0);
         IniSetBool(ini, "auto_supply", "refillFeedEnabled", normalized.refillFeedEnabled != 0);
         IniSetString(ini, "auto_supply", "refillHpName", normalized.refillHpName);
         IniSetString(ini, "auto_supply", "refillMpName", normalized.refillMpName);
         IniSetString(ini, "auto_supply", "refillCustomName", normalized.refillCustomName);
+        IniSetString(ini, "auto_supply", "refillCustom2Name", normalized.refillCustom2Name);
         IniSetString(ini, "auto_supply", "refillFeedName", normalized.refillFeedName);
         IniSetString(ini, "auto_supply", "refillHpCode", normalized.refillHpCode);
         IniSetString(ini, "auto_supply", "refillMpCode", normalized.refillMpCode);
         IniSetString(ini, "auto_supply", "refillCustomCode", normalized.refillCustomCode);
+        IniSetString(ini, "auto_supply", "refillCustom2Code", normalized.refillCustom2Code);
         IniSetString(ini, "auto_supply", "refillFeedCode", normalized.refillFeedCode);
         IniSetU32(ini, "auto_supply", "refillHpBuyTo",
                   static_cast<uint32_t>(normalized.refillHpBuyTo));
@@ -337,10 +405,27 @@ bool WriteAutoSupplyIni(const char* binDir, const AutoSupplyConfig& cfg, uint64_
                   static_cast<uint32_t>(normalized.refillMpBuyTo));
         IniSetU32(ini, "auto_supply", "refillCustomBuyTo",
                   static_cast<uint32_t>(normalized.refillCustomBuyTo));
+        IniSetU32(ini, "auto_supply", "refillCustom2BuyTo",
+                  static_cast<uint32_t>(normalized.refillCustom2BuyTo));
         IniSetU32(ini, "auto_supply", "refillFeedBuyTo",
                   static_cast<uint32_t>(normalized.refillFeedBuyTo));
         IniSetBool(ini, "auto_supply", "rechargeStarsEnabled",
                    normalized.rechargeStarsEnabled != 0);
+        IniSetBool(ini, "auto_supply", "tripOnPotionEmpty",
+                   normalized.tripOnPotionEmpty != 0);
+        IniSetU32(ini, "auto_supply", "tripOnPotionBelow",
+                  static_cast<uint32_t>(normalized.tripOnPotionBelow));
+        IniSetBool(ini, "auto_supply", "tripOnCustomLow",
+                   normalized.tripOnCustomLow != 0);
+        IniSetU32(ini, "auto_supply", "tripOnCustomBelow",
+                  static_cast<uint32_t>(normalized.tripOnCustomBelow));
+        IniSetBool(ini, "auto_supply", "tripOnCustom2Low",
+                   normalized.tripOnCustom2Low != 0);
+        IniSetU32(ini, "auto_supply", "tripOnCustom2Below",
+                  static_cast<uint32_t>(normalized.tripOnCustom2Below));
+        IniSetBool(ini, "auto_supply", "tripOnFeedLow", normalized.tripOnFeedLow != 0);
+        IniSetU32(ini, "auto_supply", "tripOnFeedBelow",
+                  static_cast<uint32_t>(normalized.tripOnFeedBelow));
 
         const uint32_t buyCount = normalized.buyRuleCount;
         // 先清 buy.N.* / sell.N.*，再按当前 count 重写，避免收缩后残留孤儿 key。
@@ -429,6 +514,39 @@ bool ReadAutoSupplyStatusIni(const char* binDir, AutoSupplyStatus& out, uint64_t
     if (IniGetU32(ini, "auto_supply_status", "pendingReturnFarm", u32))
         out.pendingReturnFarm = u32 ? 1u : 0u;
 
+    if (IniGetU32(ini, "auto_supply_status", "boundHpItemId", u32))
+        out.boundHpItemId = static_cast<int32_t>(u32);
+    if (IniGetU32(ini, "auto_supply_status", "boundMpItemId", u32))
+        out.boundMpItemId = static_cast<int32_t>(u32);
+
+    auto readI32 = [&](const char* key, int32_t& dst) {
+        if (IniGetU32(ini, "auto_supply_status", key, u32)) dst = static_cast<int32_t>(u32);
+    };
+    // have 用有符号：-1=未监视，用字符串读写避免 uint 截断
+    std::string haveStr;
+    if (IniGetString(ini, "auto_supply_status", "watchCustomHave", haveStr) && !haveStr.empty())
+        out.watchCustomHave = atoi(haveStr.c_str());
+    readI32("watchCustomBelow", out.watchCustomBelow);
+    if (IniGetU32(ini, "auto_supply_status", "watchCustomArmed", u32))
+        out.watchCustomArmed = u32 ? 1u : 0u;
+    if (IniGetString(ini, "auto_supply_status", "watchCustom2Have", haveStr) && !haveStr.empty())
+        out.watchCustom2Have = atoi(haveStr.c_str());
+    readI32("watchCustom2Below", out.watchCustom2Below);
+    if (IniGetU32(ini, "auto_supply_status", "watchCustom2Armed", u32))
+        out.watchCustom2Armed = u32 ? 1u : 0u;
+    if (IniGetString(ini, "auto_supply_status", "watchFeedHave", haveStr) && !haveStr.empty())
+        out.watchFeedHave = atoi(haveStr.c_str());
+    readI32("watchFeedBelow", out.watchFeedBelow);
+    if (IniGetU32(ini, "auto_supply_status", "watchFeedArmed", u32))
+        out.watchFeedArmed = u32 ? 1u : 0u;
+    if (IniGetString(ini, "auto_supply_status", "watchPotHpHave", haveStr) && !haveStr.empty())
+        out.watchPotHpHave = atoi(haveStr.c_str());
+    if (IniGetString(ini, "auto_supply_status", "watchPotMpHave", haveStr) && !haveStr.empty())
+        out.watchPotMpHave = atoi(haveStr.c_str());
+    readI32("watchPotBelow", out.watchPotBelow);
+    if (IniGetU32(ini, "auto_supply_status", "watchPotArmed", u32))
+        out.watchPotArmed = u32 ? 1u : 0u;
+
     if (outWriteTick) IniGetU64(ini, "auto_supply_status", "writeTickMs", *outWriteTick);
     NormalizeStatus(out);
     return true;
@@ -454,6 +572,32 @@ bool WriteAutoSupplyStatusIni(const char* binDir, const AutoSupplyStatus& status
         IniSetString(ini, "auto_supply_status", "lastFarmMapName", normalized.lastFarmMapName);
         IniSetU32(ini, "auto_supply_status", "pendingReturnFarm",
                   normalized.pendingReturnFarm != 0 ? 1u : 0u);
+        IniSetU32(ini, "auto_supply_status", "boundHpItemId",
+                  static_cast<uint32_t>(normalized.boundHpItemId > 0 ? normalized.boundHpItemId : 0));
+        IniSetU32(ini, "auto_supply_status", "boundMpItemId",
+                  static_cast<uint32_t>(normalized.boundMpItemId > 0 ? normalized.boundMpItemId : 0));
+        char num[24]{};
+        auto setI32 = [&](const char* key, int32_t v) {
+            snprintf(num, sizeof(num), "%d", (int)v);
+            IniSetString(ini, "auto_supply_status", key, num);
+        };
+        setI32("watchCustomHave", normalized.watchCustomHave);
+        setI32("watchCustomBelow", normalized.watchCustomBelow);
+        IniSetU32(ini, "auto_supply_status", "watchCustomArmed",
+                  normalized.watchCustomArmed != 0 ? 1u : 0u);
+        setI32("watchCustom2Have", normalized.watchCustom2Have);
+        setI32("watchCustom2Below", normalized.watchCustom2Below);
+        IniSetU32(ini, "auto_supply_status", "watchCustom2Armed",
+                  normalized.watchCustom2Armed != 0 ? 1u : 0u);
+        setI32("watchFeedHave", normalized.watchFeedHave);
+        setI32("watchFeedBelow", normalized.watchFeedBelow);
+        IniSetU32(ini, "auto_supply_status", "watchFeedArmed",
+                  normalized.watchFeedArmed != 0 ? 1u : 0u);
+        setI32("watchPotHpHave", normalized.watchPotHpHave);
+        setI32("watchPotMpHave", normalized.watchPotMpHave);
+        setI32("watchPotBelow", normalized.watchPotBelow);
+        IniSetU32(ini, "auto_supply_status", "watchPotArmed",
+                  normalized.watchPotArmed != 0 ? 1u : 0u);
 
     });
 }
@@ -471,6 +615,8 @@ const char* AutoSupplyBuiltinRefillCodeForName(const char* nameZh) {
         return kAutoSupplyDefaultRefillCustomCode;
     // 简体别名：与 catalog「回家卷軸」同 CODE
     if (strcmp(nameZh, "回家卷轴") == 0) return kAutoSupplyDefaultRefillCustomCode;
+    if (strcmp(nameZh, kAutoSupplyDefaultRefillCustom2Name) == 0)
+        return kAutoSupplyDefaultRefillCustom2Code;
     if (strcmp(nameZh, kAutoSupplyDefaultRefillFeedName) == 0) return kAutoSupplyDefaultRefillFeedCode;
     if (strcmp(nameZh, kAutoSupplyDefaultRefillFeedAltName) == 0)
         return kAutoSupplyDefaultRefillFeedAltCode;
@@ -493,18 +639,30 @@ void AutoSupplySetDefaults(AutoSupplyConfig& out) {
     out.refillHpEnabled = 0;
     out.refillMpEnabled = 0;
     out.refillCustomEnabled = 0;
+    out.refillCustom2Enabled = 0;
     out.refillFeedEnabled = 1;
-    out.refillFeedBuyTo = 100;
+    out.refillFeedBuyTo = kAutoSupplyDefaultRefillFeedBuyTo;
     out.refillMpBuyTo = kAutoSupplyDefaultRefillMpBuyTo;
     out.refillCustomBuyTo = kAutoSupplyDefaultRefillCustomBuyTo;
+    out.refillCustom2BuyTo = kAutoSupplyDefaultRefillCustom2BuyTo;
     out.rechargeStarsEnabled = 0;
+    out.tripOnPotionEmpty = 0;
+    out.tripOnPotionBelow = 1;
+    out.tripOnCustomLow = 0;
+    out.tripOnCustomBelow = 0;
+    out.tripOnCustom2Low = 0;
+    out.tripOnCustom2Below = 0;
+    out.tripOnFeedLow = 0;
+    out.tripOnFeedBelow = 0;
     strncpy_s(out.refillHpName, kAutoSupplyDefaultRefillHpName, _TRUNCATE);
     strncpy_s(out.refillMpName, kAutoSupplyDefaultRefillMpName, _TRUNCATE);
     strncpy_s(out.refillCustomName, kAutoSupplyDefaultRefillCustomName, _TRUNCATE);
+    strncpy_s(out.refillCustom2Name, kAutoSupplyDefaultRefillCustom2Name, _TRUNCATE);
     strncpy_s(out.refillFeedName, kAutoSupplyDefaultRefillFeedName, _TRUNCATE);
     strncpy_s(out.refillHpCode, kAutoSupplyDefaultRefillHpCode, _TRUNCATE);
     strncpy_s(out.refillMpCode, kAutoSupplyDefaultRefillMpCode, _TRUNCATE);
     strncpy_s(out.refillCustomCode, kAutoSupplyDefaultRefillCustomCode, _TRUNCATE);
+    strncpy_s(out.refillCustom2Code, kAutoSupplyDefaultRefillCustom2Code, _TRUNCATE);
     strncpy_s(out.refillFeedCode, kAutoSupplyDefaultRefillFeedCode, _TRUNCATE);
 }
 

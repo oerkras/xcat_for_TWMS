@@ -85,6 +85,9 @@ inline const ImWchar* UiSymbolFallbackRanges() {
         0x2260,  // ≠
         0x2264,  // ≤
         0x2265,  // ≥
+        0x25B6,  // ▶ 同 IP 折叠展开
+        0x25BC,  // ▼
+        0x2514,  // └ 子行缩进
         0,
     };
     for (const ImWchar* p = kPinned; *p; ++p) b.AddChar(*p);
