@@ -22,7 +22,6 @@ namespace x::features::galaxy_token_probe {
 namespace {
 
 constexpr wchar_t kMarkerName[] = L"galaxy_token_probe.on";
-constexpr wchar_t kLogDirDev[] = L"C:\\Users\\kras\\Desktop\\xcat_for_TWMS\\Dumps\\runtime";
 
 // dump.cs TypeDef 1706 key names (PlayerPrefs).
 constexpr const char* kKeyObjectId = "Galaxy_UserObjectID";
@@ -74,8 +73,10 @@ std::wstring ModuleDir() {
 }
 
 std::wstring ResolveLogDir() {
-    std::wstring dir = DirExists(kLogDirDev) ? kLogDirDev : ModuleDir();
-    if (!DirExists(kLogDirDev) && !dir.empty()) {
+    const std::wstring dev = x::runtime::OptionalRepoRuntimeDumpDir();
+    if (!dev.empty()) return dev;
+    std::wstring dir = ModuleDir();
+    if (!dir.empty()) {
         const std::wstring logs = dir + L"\\logs";
         CreateDirectoryW(logs.c_str(), nullptr);
         if (DirExists(logs)) dir = logs;

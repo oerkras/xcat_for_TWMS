@@ -10,6 +10,7 @@
 #include "../ports/world_port.h"
 #include "../auto_enter/auto_enter.h"
 #include "../simple_combat/simple_combat.h"
+#include "../notify/notify.h"
 #include "../../ipc/payload_pet_loot.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
@@ -196,12 +197,79 @@ const ports::drop::SkipIds* CurrentSkipIds() {
     return gSkipResolved.empty() ? nullptr : &gSkipResolved;
 }
 
+void TickHighValueDropNotify(DWORD now) {
+    if (!gCfg.scrollDropNotify) return;
+    static DWORD s_last = 0;
+    if (s_last && now - s_last < 200) return;
+    s_last = now;
+
+    ports::drop::HighValueDropAlert hits[8]{};
+    const int n = ports::drop::CollectNewHighValueDropAlerts(hits, 8);
+    if (n <= 0) return;
+
+    const xcat::ItemCatalogPack& pack = xcat::GetSharedItemCatalog(x::runtime::GetBinDir());
+    auto fillName = [&](int itemId, char* buf, size_t buflen) {
+        char code[16]{};
+        snprintf(code, sizeof(code), "%d", itemId);
+        const char* name = xcat::ItemCatalogLookupName(pack, code);
+        if (name && name[0])
+            snprintf(buf, buflen, "%s（%d）", name, itemId);
+        else
+            snprintf(buf, buflen, "itemId=%d", itemId);
+    };
+
+    auto publishGroup = [&](int kind, const char* keyPrefix, const char* title,
+                            const char* logTag) {
+        ports::drop::HighValueDropAlert group[8]{};
+        int gn = 0;
+        for (int i = 0; i < n && gn < 8; ++i) {
+            if (hits[i].kind != kind) continue;
+            group[gn++] = hits[i];
+        }
+        if (gn <= 0) return;
+        if (gn == 1) {
+            char key[48]{};
+            snprintf(key, sizeof(key), "%s-%d", keyPrefix, group[0].dropId);
+            char body[128]{};
+            fillName(group[0].itemId, body, sizeof(body));
+            notify::PublishNotification(notify::NotificationEvent{
+                notify::NotificationKind::Success, key, title, body, 4500});
+            LogLineOd("%s notify dropId=%d itemId=%d", logTag, group[0].dropId, group[0].itemId);
+            return;
+        }
+        char key[48]{};
+        snprintf(key, sizeof(key), "%s-batch-%u", keyPrefix, (unsigned)now);
+        char body[256]{};
+        size_t off = 0;
+        off += (size_t)snprintf(body + off, sizeof(body) - off, "×%d　", gn);
+        for (int i = 0; i < gn && off + 8 < sizeof(body); ++i) {
+            char piece[96]{};
+            fillName(group[i].itemId, piece, sizeof(piece));
+            const int wrote =
+                snprintf(body + off, sizeof(body) - off, "%s%s", i ? "、" : "", piece);
+            if (wrote < 0) break;
+            off += (size_t)wrote;
+        }
+        notify::PublishNotification(notify::NotificationEvent{
+            notify::NotificationKind::Success, key, title, body, 5000});
+        LogLineOd("%s notify batch n=%d", logTag, gn);
+    };
+
+    // 仅卷軸：装备已取消音效提醒
+    publishGroup(2, "petloot-scroll", "掉落卷軸", "scrollDrop");
+}
+
 void Tick(DWORD now) {
-    if (!gCfg.enabled && !gCfg.footEnabled && !gCfg.charVacEnabled) return;
+    if (!gCfg.enabled && !gCfg.footEnabled && !gCfg.charVacEnabled) {
+        simple_combat::SetHighValueLootUrgent(false);
+        return;
+    }
 
     // 与自动打怪/瞬移共用 MainPump（drainBudget=2 + JobPrio）。泵拥堵时让路，否则吸物会把出刀饿死
     // （upload 211841：interval=50 + 全盒清闸 → combat fires 连续 40s 归零）。
     if (x::runtime::main_thread::IsCongested()) {
+        // 堵泵时吸不到：fail-closed 清紧急，避免 ExternalPause 空挂
+        simple_combat::SetHighValueLootUrgent(false);
         static DWORD sCongLog = 0;
         if (!sCongLog || now - sCongLog > 2000) {
             sCongLog = now;
@@ -211,17 +279,49 @@ void Tick(DWORD now) {
         return;
     }
 
-    // 挂机时分复用：不出刀就吸；仅 Aim/Firing/Recover 让路（含拟人 MoveTo）。
+    // 挂机时分复用：不出刀就吸；仅 Firing 让路（Aim/Recover 放行）。
+    // 高价值优先：出刀窗前先 Peek（宠真空∩角色半盒）；有可吸装备/卷軸则打断出刀。
+    const ports::drop::SkipIds* skip = CurrentSkipIds();
+    if (gCfg.highValuePriority && gCfg.enabled) {
+        float vacW0 = 0.f, vacH0 = 0.f;
+        xcat::PetLootEffectiveVacuum(gCfg, vacW0, vacH0);
+        ports::drop::ProbeSnapshot snap{};
+        const bool havePet =
+            ports::drop::CollectProbe(snap, vacW0 * 0.5f, vacH0 * 0.5f) && snap.hasPet;
+        int hvN = 0, hvFull = 0;
+        int hvDrop = 0, hvInfo = 0, hvKind = 0;
+        // 无宠位 / Peek 失败 → fail-closed 清 urgent（禁止 (0,0) 误扫、禁止 Pause 泄漏）
+        if (!havePet ||
+            !ports::drop::PeekHighValueActionable(snap.petX, snap.petY, vacW0 * 0.5f,
+                                                  vacH0 * 0.5f, skip, hvN, hvFull, &hvDrop,
+                                                  &hvInfo, &hvKind)) {
+            simple_combat::SetHighValueLootUrgent(false);
+        } else {
+            simple_combat::SetHighValueLootUrgent(hvN > 0);
+            if (hvN > 0) {
+                static DWORD sHvLog = 0;
+                if (!sHvLog || now - sHvLog > 2000) {
+                    sHvLog = now;
+                    const char* kind =
+                        hvKind == 1 ? "equip" : (hvKind == 2 ? "scroll" : "?");
+                    LogLineOd("highValue urgent near=%d skippedFull=%d dropId=%d itemId=%d "
+                              "kind=%s (interrupt fire)",
+                              hvN, hvFull, hvDrop, hvInfo, kind);
+                }
+            }
+        }
+    } else {
+        simple_combat::SetHighValueLootUrgent(false);
+    }
+
     if (!simple_combat::IsLootPulseActive()) {
         static DWORD sFireLog = 0;
         if (!sFireLog || now - sFireLog > 2000) {
             sFireLog = now;
-            LogLineOd("yield combat_fire_window (defer loot for Aim/Fire/Recover)");
+            LogLineOd("yield combat_fire_window (defer loot for Firing only)");
         }
         return;
     }
-
-    const ports::drop::SkipIds* skip = CurrentSkipIds();
 
     // 人物直吸 = 宠吸控制面，主体换成角色；半盒 = vacuumW/H / 2（与宠吸共用全盒）；
     // 官方 Send 不写 LastTry，拒收必须靠 sentDropId AddStall；burst 跟面板（自设，硬顶 HardCap）。
@@ -296,10 +396,15 @@ void Tick(DWORD now) {
     if (!gCfg.enabled) return;
 
     ports::pet::PetCareState pst{};
-    if (!ports::pet::ReadState(pst) || !pst.hasLocalUser) return;
+    if (!ports::pet::ReadState(pst) || !pst.hasLocalUser) {
+        simple_combat::SetHighValueLootUrgent(false);
+        return;
+    }
 
     if (pst.activatedCount <= 0) {
         if (!gNoPetSince) gNoPetSince = now;
+        // 无活宠吸不到：清紧急，避免 ExternalPause 空挂
+        simple_combat::SetHighValueLootUrgent(false);
         if (now - gNoPetSince >= kNoPetGateMs) {
             static DWORD s_lastNoPet = 0;
             if (!s_lastNoPet || now - s_lastNoPet >= kForceLogMs) {
@@ -321,7 +426,7 @@ void Tick(DWORD now) {
     int absorbedN = 0;
     for (uint32_t bi = 0; bi < burst; ++bi) {
         ports::drop::VacuumResult one{};
-        ok = ports::drop::TryPetVacuum(vacW, vacH, skip, one);
+        ok = ports::drop::TryPetVacuum(vacW, vacH, skip, one, gCfg.highValuePriority != 0);
         ++calls;
         vr = one;
         if (one.why && std::strcmp(one.why, "ok_absorbed") == 0) ++absorbedN;
@@ -332,8 +437,47 @@ void Tick(DWORD now) {
             break;
         if (one.why && std::strcmp(one.why, "ok_empty") == 0) break;
         if (one.why && std::strcmp(one.why, "wait_land") == 0) break;
+        if (one.why && std::strcmp(one.why, "ok_own") == 0) break;
         if (one.why && std::strcmp(one.why, "reject_backoff") == 0) break;
         if (one.nearCount == 0 && !(one.why && std::strcmp(one.why, "ok_absorbed") == 0)) break;
+        // 根治洪泛：送出一包 / 池未掉即停本拍（人物直吸同口径）。大盒 ByPet 一拍已够。
+        if (one.sentButPoolSame) break;
+        if (one.why && (std::strcmp(one.why, "ok_sent") == 0 || std::strcmp(one.why, "ok") == 0))
+            break;
+        // ok_absorbed：池已掉，可同拍再吸下一件（仍受 burst 顶）
+    }
+
+    if (gCfg.highValuePriority) {
+        // vacuum 未跑完 Scan 的早退：保留 Peek 的 urgent（避免 reject_backoff 抖动清 Pause）
+        // 明确吸不了：清 urgent
+        const char* why = vr.why ? vr.why : "";
+        const bool clearUrgent = std::strcmp(why, "no_pet") == 0 ||
+                                 std::strcmp(why, "no_skill") == 0 ||
+                                 std::strcmp(why, "no_lu") == 0 ||
+                                 std::strcmp(why, "seh") == 0 ||
+                                 std::strcmp(why, "ok_far") == 0 ||
+                                 std::strcmp(why, "ok_own") == 0 ||
+                                 std::strcmp(why, "ok_empty") == 0 ||
+                                 std::strcmp(why, "ok_hold") == 0 ||
+                                 std::strcmp(why, "wait_land") == 0;
+        const bool keepPeekUrgent = std::strcmp(why, "reject_backoff") == 0 ||
+                                    std::strcmp(why, "no_pump") == 0 ||
+                                    std::strcmp(why, "timeout") == 0 ||
+                                    std::strcmp(why, "unbound") == 0;
+        if (clearUrgent)
+            simple_combat::SetHighValueLootUrgent(false);
+        else if (!keepPeekUrgent)
+            simple_combat::SetHighValueLootUrgent(vr.highValueUrgent);
+        // 诊断：HV 按件选中必打（含 itemId），便于 BIN 核对是否真捡到卷/装
+        if (vr.pacedPickRank == 2) {
+            LogLineOd("highValue paced dropId=%d itemId=%d rank=%d sampleKind=%d why=%s Δ=%d "
+                      "fell=%d",
+                      vr.pacedPickDropId, vr.pacedPickInfo, vr.pacedPickRank,
+                      vr.highValueSampleKind, why[0] ? why : "?", vr.dropsDelta,
+                      vr.poolFellSinceLast ? 1 : 0);
+        }
+    } else {
+        simple_combat::SetHighValueLootUrgent(false);
     }
 
     if (!ok && vr.why && std::strcmp(vr.why, "no_skill") == 0) {
@@ -349,7 +493,7 @@ void Tick(DWORD now) {
         static DWORD s_lastBackoffLog = 0;
         if (!s_lastBackoffLog || now - s_lastBackoffLog >= kForceLogMs) {
             s_lastBackoffLog = now;
-            LogLineOd("mode=petmap why=reject_backoff (sentSame streak; 清栏后 %us 内少空转)",
+            LogLineOd("mode=petmap why=reject_backoff (sentSame streak; %us 内少空转，未必满栏)",
                       5u);
         }
         return;
@@ -363,6 +507,7 @@ void Tick(DWORD now) {
     static int s_nearMax = 0;
     static int s_moneyMax = 0;
     static int s_itemMax = 0;
+    static int s_ownSkipMax = 0;
     static int s_sentSameAcc = 0;
     static int s_sendTouchMax = 0;
     static int s_sentItemWhileMoney = 0;
@@ -372,6 +517,7 @@ void Tick(DWORD now) {
     if (vr.nearCount > s_nearMax) s_nearMax = vr.nearCount;
     if (vr.nearMoney > s_moneyMax) s_moneyMax = vr.nearMoney;
     if (vr.nearItem > s_itemMax) s_itemMax = vr.nearItem;
+    if (vr.ownSkipped > s_ownSkipMax) s_ownSkipMax = vr.ownSkipped;
     if (vr.sentButPoolSame) ++s_sentSameAcc;
     if (vr.sendTouch > s_sendTouchMax) s_sendTouchMax = vr.sendTouch;
     if (vr.sentButPoolSame && vr.sendTouchMoney == 0 && vr.nearMoney > 0) ++s_sentItemWhileMoney;
@@ -380,8 +526,9 @@ void Tick(DWORD now) {
         vr.why && (std::strcmp(vr.why, "seh") == 0 || std::strcmp(vr.why, "no_rect_patch") == 0);
     const bool errDue = hardErr && (!s_lastErr || now - s_lastErr >= kErrLogMs);
     const bool detailDue = !s_lastDetail || (now - s_lastDetail >= kDetailLogMs);
-    // nearMax  alone 不算信号：站在吸不动的堆上会每间隔刷一行。
-    const bool hasSignal = s_absorbAcc > 0 || s_sentSameAcc > 0 || hardErr;
+    // near/ownSkip 也算信号：否则归属全跳过时永远不刷 mode=petmap，无法验预筛
+    const bool hasSignal =
+        s_absorbAcc > 0 || s_sentSameAcc > 0 || hardErr || s_nearMax > 0 || s_ownSkipMax > 0;
 
     if (errDue) {
         s_lastErr = now;
@@ -390,19 +537,24 @@ void Tick(DWORD now) {
             "mode=petmap pets=%d skill=0x%X skillSlot=0x%X box=%.0fx%.0f mapVac=%d burst=%u/%u "
             "absorbed=%d drops=%d→%d Δ=%d fell=%d near=%d money=%d item=%d "
             "sampMoney=%d sampInfo=%d sendTouch=%d touchMoney=%d sentSame=%d "
-            "gates=%d skipStamp=%d stall=%d/%d/%d fly=%d own=%d lastTry=%d endPara=%d "
+            "gates=%d skipStamp=%d ownSkip=%d remotes=%d stall=%d/%d/%d fly=%d ownType=%d ownRaw=%d "
+            "ownerId=%d myCid=%d hv=%d/%d hvDrop=%d hvInfo=%d hvKind=%d "
+            "pickDrop=%d pickInfo=%d pickRank=%d "
+            "lastTry=%d endPara=%d "
             "called=%d why=%s petSendΔ=%u poolSendΔ=%u skipN=%d",
             pst.activatedCount, (unsigned)vr.petSkill, (unsigned)vr.petSkillSlot, vacW, vacH,
             gCfg.mapVacuumEnabled ? 1 : 0, calls, burst, absorbedN, vr.dropCount, vr.dropCountAfter,
             vr.dropsDelta, vr.poolFellSinceLast ? 1 : 0, vr.nearCount, vr.nearMoney, vr.nearItem,
             vr.sampleIsMoney, vr.sampleInfo, vr.sendTouch, vr.sendTouchMoney, vr.sentButPoolSame,
-            vr.gatesCleared, vr.skipStamped, vr.stallHeld, vr.stallStamped, vr.stallRestored,
-            vr.flyHeld, vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara, vr.called ? 1 : 0,
-            vr.why ? vr.why : "?", vr.petSendDelta, vr.poolSendDelta,
-            skip ? (int)skip->size() : 0);
+            vr.gatesCleared, vr.skipStamped, vr.ownSkipped, vr.remoteUsers, vr.stallHeld, vr.stallStamped,
+            vr.stallRestored, vr.flyHeld, vr.sampleOwnType, vr.sampleOwnRaw, vr.sampleOwnerId,
+            vr.localCharId, vr.highValueNear, vr.highValueSkippedFull, vr.highValueSampleDropId,
+            vr.highValueSampleInfo, vr.highValueSampleKind, vr.pacedPickDropId, vr.pacedPickInfo,
+            vr.pacedPickRank, vr.sampleLastTry, vr.sampleEndPara, vr.called ? 1 : 0,
+            vr.why ? vr.why : "?", vr.petSendDelta, vr.poolSendDelta, skip ? (int)skip->size() : 0);
         s_absorbAcc = 0;
         s_tickAcc = 0;
-        s_nearMax = s_moneyMax = s_itemMax = 0;
+        s_nearMax = s_moneyMax = s_itemMax = s_ownSkipMax = 0;
         s_sentSameAcc = s_sendTouchMax = s_sentItemWhileMoney = 0;
     } else if (detailDue && hasSignal) {
         s_lastDetail = now;
@@ -412,20 +564,26 @@ void Tick(DWORD now) {
             "sentSame=%d touchMax=%d itemWhileMoney=%d "
             "drops=%d→%d Δ=%d fell=%d near=%d money=%d item=%d "
             "sampMoney=%d sampInfo=%d sendTouch=%d touchMoney=%d "
-            "gates=%d skipStamp=%d stall=%d/%d/%d fly=%d own=%d lastTry=%d endPara=%d "
+            "gates=%d skipStamp=%d ownSkip=%d remotes=%d stall=%d/%d/%d fly=%d ownType=%d ownRaw=%d "
+            "ownerId=%d myCid=%d hv=%d/%d hvDrop=%d hvInfo=%d hvKind=%d "
+            "pickDrop=%d pickInfo=%d pickRank=%d "
+            "lastTry=%d endPara=%d "
             "called=%d why=%s petSendΔ=%u poolSendΔ=%u skipN=%d",
             pst.activatedCount, (unsigned)vr.petSkill, (unsigned)vr.petSkillSlot, vacW, vacH,
             gCfg.mapVacuumEnabled ? 1 : 0, calls, burst, s_absorbAcc, s_tickAcc, s_nearMax,
             s_moneyMax, s_itemMax, s_sentSameAcc, s_sendTouchMax, s_sentItemWhileMoney, vr.dropCount,
             vr.dropCountAfter, vr.dropsDelta, vr.poolFellSinceLast ? 1 : 0, vr.nearCount,
             vr.nearMoney, vr.nearItem, vr.sampleIsMoney, vr.sampleInfo, vr.sendTouch,
-            vr.sendTouchMoney, vr.gatesCleared, vr.skipStamped, vr.stallHeld, vr.stallStamped,
-            vr.stallRestored, vr.flyHeld, vr.sampleOwnType, vr.sampleLastTry, vr.sampleEndPara,
-            vr.called ? 1 : 0, vr.why ? vr.why : "?", vr.petSendDelta, vr.poolSendDelta,
-            skip ? (int)skip->size() : 0);
+            vr.sendTouchMoney, vr.gatesCleared, vr.skipStamped, vr.ownSkipped, vr.remoteUsers, vr.stallHeld,
+            vr.stallStamped, vr.stallRestored, vr.flyHeld, vr.sampleOwnType, vr.sampleOwnRaw,
+            vr.sampleOwnerId, vr.localCharId, vr.highValueNear, vr.highValueSkippedFull,
+            vr.highValueSampleDropId, vr.highValueSampleInfo, vr.highValueSampleKind,
+            vr.pacedPickDropId, vr.pacedPickInfo, vr.pacedPickRank, vr.sampleLastTry,
+            vr.sampleEndPara, vr.called ? 1 : 0, vr.why ? vr.why : "?", vr.petSendDelta,
+            vr.poolSendDelta, skip ? (int)skip->size() : 0);
         s_absorbAcc = 0;
         s_tickAcc = 0;
-        s_nearMax = s_moneyMax = s_itemMax = 0;
+        s_nearMax = s_moneyMax = s_itemMax = s_ownSkipMax = 0;
         s_sentSameAcc = s_sendTouchMax = s_sentItemWhileMoney = 0;
     }
 
@@ -463,7 +621,9 @@ DWORD WINAPI Worker(LPVOID) {
         const uint32_t cfgSig = (gCfg.enabled ? 1u : 0u) | (gCfg.footEnabled ? 2u : 0u) |
                                 (gCfg.mapVacuumEnabled ? 4u : 0u) |
                                 (gCfg.charVacEnabled ? 8u : 0u) | (gCfg.skipRuleCount << 8) |
-                                (gCfg.skipFilterEnabled ? 0x80000000u : 0);
+                                (gCfg.skipFilterEnabled ? 0x80000000u : 0) |
+                                (gCfg.highValuePriority ? 0x40000000u : 0) |
+                                (gCfg.scrollDropNotify ? 0x20000000u : 0);
         const uint32_t cfgSig2 = (gCfg.intervalMs & 0xFFFFu) | (gCfg.burstPerTick << 16);
         if (cfgSig != lastCfgSig || cfgSig2 != lastCfgSig2) {
             lastCfgSig = cfgSig;
@@ -474,25 +634,34 @@ DWORD WINAPI Worker(LPVOID) {
             xcat::PetLootEffectiveCharHalf(gCfg, charHW, charHH);
             LogLineOd("config pet=%d foot=%d charVac=%d mapVac=%d interval=%u burst=%u "
                       "box=%.0fx%.0f(near) footBox=50x60(native) charBox=%.0fx%.0f filters=0x%X "
-                      "skipFilter=%d skipRules=%u",
+                      "skipFilter=%d skipRules=%u highValue=%d scrollNotify=%d",
                     gCfg.enabled ? 1 : 0, gCfg.footEnabled ? 1 : 0, gCfg.charVacEnabled ? 1 : 0,
                     gCfg.mapVacuumEnabled ? 1 : 0, gCfg.intervalMs, gCfg.burstPerTick, vacW, vacH,
                     charHW * 2.f, charHH * 2.f, gCfg.filterFlags, gCfg.skipFilterEnabled ? 1 : 0,
-                    gCfg.skipRuleCount);
+                    gCfg.skipRuleCount, gCfg.highValuePriority ? 1 : 0,
+                    gCfg.scrollDropNotify ? 1 : 0);
         }
 
         // 脚边 / 人物直吸：DropPool+MyUser；宠吸：额外 pet_port
+        // 卷軸提示音可在「拾物全关」时单独跑（挂机出刀仍能听见掉卷）
         const bool wantFoot = gCfg.footEnabled != 0;
         const bool wantPet = gCfg.enabled != 0;
         const bool wantChar = gCfg.charVacEnabled != 0;
-        if (!wantFoot && !wantPet && !wantChar) {
+        const bool wantScrollNotify = gCfg.scrollDropNotify != 0;
+        if (!wantFoot && !wantPet && !wantChar && !wantScrollNotify) {
             Sleep(kIdleSleepMs);
             continue;
         }
 
         const bool dropOk = ports::drop::EnsureBound();
+        if (wantScrollNotify && dropOk) TickHighValueDropNotify(now);
+
         const bool petOk = !wantPet || ports::pet::EnsureBound();
         const bool anyReady = dropOk && (wantFoot || wantChar || (wantPet && petOk));
+        if (!wantFoot && !wantPet && !wantChar) {
+            Sleep(kIdleSleepMs);
+            continue;
+        }
         if (!anyReady) {
             if (now - lastMiss >= kMissLogMs) {
                 lastMiss = now;
@@ -558,14 +727,19 @@ DWORD WINAPI Worker(LPVOID) {
             }
         }
 
-        const DWORD interval = xcat::PetLootClampIntervalMs(gCfg.intervalMs);
+        DWORD interval = xcat::PetLootClampIntervalMs(gCfg.intervalMs);
+        if (simple_combat::IsHighValueLootUrgent() &&
+            interval > xcat::kPetLootHighValueIntervalMs) {
+            interval = xcat::kPetLootHighValueIntervalMs;
+        }
         // 脉冲边沿（Settling 武装 / 干等从关到开）：无视 interval 立刻吸一拍，吃满短落地窗。
         static uint32_t sPulseGen = 0;
         const uint32_t pulseGen = simple_combat::LootPulseGeneration();
         const bool pulseEdge = pulseGen != sPulseGen;
         if (pulseEdge) sPulseGen = pulseGen;
         const bool due = !lastTick || (now - lastTick >= interval) ||
-                         (pulseEdge && simple_combat::IsLootPulseActive());
+                         (pulseEdge && simple_combat::IsLootPulseActive()) ||
+                         simple_combat::IsHighValueLootUrgent();
         if (due) {
             lastTick = now;
             Tick(now);

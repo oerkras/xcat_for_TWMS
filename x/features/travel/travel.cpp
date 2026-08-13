@@ -13,6 +13,7 @@
 #include "../ports/world_port.h"
 #include "../invuln/invuln.h"
 #include "../simple_combat/heli_rotor.h"
+#include "../soft_login_probe/soft_login_probe.h"
 #include "../notify/notify.h"
 #include "../simple_combat/simple_combat.h"
 #include "../../runtime/bin_dir.h"
@@ -214,6 +215,30 @@ void TickSettleHover(DWORD now, const char* phase) {
             }
         }
         ClearSettleHoverState();
+        return;
+    }
+
+    // soft_login 静默 hold 期：heli::Tick 整拍 return false（guard=soft_hold），
+    // 此时若下面 approach 分支 BAN ON，人被摘台又没冲量托着 → 自由落体到底。
+    // BIN 2026-08-13 00:17:58 勇士之村 102000000：hold=1 时走 approach，
+    // ap 从 -1765 掉到 -2718（图底 T=-2250）→ ghost/oob → 客户端重载地图。
+    // 静默期一律撒手：卸 ban、放旋翼，交给引擎自然挂台，闸开后再照常 approach。
+    if (x::features::soft_login_probe::IsHoldActive()) {
+        if (heli::CurrentOwner() == heli::Owner::Travel) {
+            heli::Disarm(heli::Owner::Travel);
+            heli::Release(heli::Owner::Travel);
+        }
+        if ((ports::fly_fh_ban::ActiveMask() &
+             static_cast<unsigned>(ports::fly_fh_ban::BanSource::Travel)) != 0) {
+            ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+        }
+        static DWORD sHoldLog = 0;
+        if (!sHoldLog || now - sHoldLog >= 800) {
+            sHoldLog = now;
+            x::runtime::LogI("Travel",
+                             "settle hover soft_hold release phase=%s ap=(%.0f,%.0f) v=(%.0f,%.0f)",
+                             phase ? phase : "?", st.x, st.y, st.vx, st.vy);
+        }
         return;
     }
 

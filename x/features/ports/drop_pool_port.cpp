@@ -16,6 +16,11 @@
 #include "../../runtime/anchor_lamps.h"
 #include "pet_port.h"
 #include "world_port.h"
+#include "user_pool_port.h"
+#include "../../ui/player_vitals.h"
+#include "../../../common/xcat_pet_loot.h"
+#include "../../../common/xcat_item_catalog.h"
+#include "../../runtime/bin_dir.h"
 
 #include <Windows.h>
 #include <Psapi.h>
@@ -26,6 +31,7 @@
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #pragma comment(lib, "Psapi.lib")
 
@@ -105,6 +111,7 @@ constexpr size_t kFbFieldPos = 0x64;
 constexpr size_t kFbCurPos = 0x240;
 constexpr size_t kFbVcAp = 0x98;  // AbsPos 结构起点；Y = Ap+8
 constexpr size_t kFbDropId = 0x30;
+constexpr size_t kFbDropOwnerId = 0x34;  // CMS Drop.OwnerId
 constexpr size_t kFbDropOwnType = 0x3C;
 constexpr size_t kFbDropIsMoney = 0x44;
 constexpr size_t kFbDropInfo = 0x48;
@@ -173,6 +180,7 @@ struct DropFieldOff {
     size_t curPos = kFbCurPos;
     size_t vcAp = kFbVcAp;
     size_t dropId = kFbDropId;
+    size_t dropOwnerId = kFbDropOwnerId;
     size_t dropOwnType = kFbDropOwnType;
     size_t dropIsMoney = kFbDropIsMoney;
     size_t dropInfo = kFbDropInfo;
@@ -211,6 +219,7 @@ bool DropWritesAllowed() { return gOff.writeSafe; }
 #define kOffVcApX (gOff.vcAp)
 #define kOffVcApY (gOff.vcAp + 8)
 #define kOffDropId (gOff.dropId)
+#define kOffDropOwnerId (gOff.dropOwnerId)
 #define kOffDropOwnType (gOff.dropOwnType)
 #define kOffDropIsMoney (gOff.dropIsMoney)
 #define kOffDropInfo (gOff.dropInfo)
@@ -225,6 +234,15 @@ bool DropWritesAllowed() { return gOff.writeSafe; }
 
 // DropOwnType（CMS）：User=0 Party=1 No=2 ExplosiveNoOwn=3 UserOwnMoney=4
 constexpr int kDropOwnNo = 2;
+// 定义见 ReadI32 之后（依赖堆读 + world::GetCharacterId）
+bool DropClientPickable(void* drop);
+
+struct OwnSkipStamp {
+    void* drop = nullptr;
+    int prevLast = 0;
+};
+std::vector<OwnSkipStamp> gOwnSkipStamps;
+
 // IDA ByPet：cmp [drop+0x7C], 3 / cmovz 才继续；写 0 会重置抛物线（近图飞落根因）
 constexpr int kEndParaReady = 3;
 // 黑名单挡 ByPet：必须 !=3；禁止写 0（会重置抛物线飞落）
@@ -238,7 +256,7 @@ constexpr int kLastTrySkipStamp = 0x7FFFFFFF;
 //   ① [drop+0x2D] 必须为真                       ② EndPara(0x7C) == 3
 //      （IMM 0x328634BB + seed@0x7FFB8A2C92A8=0xCD79CB48 → 3）
 //   ③ now - PickStamp(0x88) >= 3000（有符号）——宠吸同款拍前清闸后由官方 Send 再盖
-//   ④ 归属链交由服务端裁决 + 退避兜底
+//   ④ 归属：客户端先跳过非己/非无主；服端仍裁决 + Stall 兜底
 //   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用 vacuum 半盒枚举（默认 1000×1000）
 //      —— 送包坐标仍是角色位；服端距离校验 → EffectiveCharHalf 钳到 CharVacW/HMax=1500
 //         （上传汇总：1500 盒 abs/sent≈0.84；4000 盒≈0；Stall 挡不住远处 Ready 空 Send）
@@ -393,12 +411,48 @@ std::atomic<bool> gSendProbeInstalled{false};
 // 拒收连击整段休眠截止 tick（worker 侧可读，避免退避期仍排队 MainPump）
 std::atomic<DWORD> gRejectBackoffUntil{0};
 
+constexpr int kInvTiEquip = 1;
+constexpr int kInvTiConsume = 2;
+
+enum class HvClass : int { None = 0, Equip = 1, Scroll = 2 };
+
+bool InvHasFreeSlot(int invType);
+HvClass ClassifyHighValueItem(int info, bool isMoney);
+bool HighValueBagAllows(HvClass hv);
+bool ReadUserPos(float& x, float& y);
+// 可吸 HV = 宠真空 ∩ 角色半盒 ∩ 栏未满；可选填首件样本
+void ScanHighValueNear(void* pool, float petX, float petY, float halfW, float halfH, float ux,
+                       float uy, float charHalfW, float charHalfH, const SkipIds* skip,
+                       int& outNearHv, int& outSkippedFull, int* outSampleDropId = nullptr,
+                       int* outSampleInfo = nullptr, int* outSampleKind = nullptr);
+
+const char* HvClassName(HvClass hv) {
+    switch (hv) {
+    case HvClass::Equip:
+        return "equip";
+    case HvClass::Scroll:
+        return "scroll";
+    default:
+        return "none";
+    }
+}
+
+const char* LookupItemNameBrief(int info) {
+    if (info <= 0) return "";
+    char code[16]{};
+    snprintf(code, sizeof(code), "%d", info);
+    const xcat::ItemCatalogPack& pack = xcat::GetSharedItemCatalog(x::runtime::GetBinDir());
+    const char* name = xcat::ItemCatalogLookupName(pack, code);
+    return (name && name[0]) ? name : "";
+}
+
 DWORD gLastLuRebind = 0;
 DWORD gLastPoolRebind = 0;
 
 struct VacJob {
     float vacuumW = 300.f;
     float vacuumH = 200.f;
+    bool highValuePriority = false;
     SkipIds skip{};
     VacuumResult result{};
     bool done = false;
@@ -489,6 +543,360 @@ void WriteI32(void* obj, size_t off, int32_t v) {
         *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + off) = v;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+int RestoreOwnSkipStamps() {
+    int n = 0;
+    if (DropWritesAllowed()) {
+        for (const auto& e : gOwnSkipStamps) {
+            if (!LooksLikeHeapPtr(e.drop)) continue;
+            if (ReadI32(e.drop, kOffDropLastTry) != kLastTrySkipStamp) continue;
+            WriteI32(e.drop, kOffDropLastTry, e.prevLast);
+            ++n;
+        }
+    }
+    gOwnSkipStamps.clear();
+    return n;
+}
+
+// 客户端预筛「己 / 无主」——反转口径（2026-08-12）：
+//   挡「OwnerId ∈ 远程玩家 ID 集合」；独图（remotes=0）不挡归属。
+// BIN：Drop.OwnerId=118536 ≠ CS+0x10=194899，禁止用错槽硬否决己物。
+// 真吸认亲仍作多人兜底；热路径禁止 SampleRemoteUserCount/InvokeAndWait。
+uint32_t gDropSelfOwnerId = 0;
+uint32_t gCharPendingLearnOwner = 0;
+
+constexpr DWORD kRemoteOwnerRefreshMs = 400;
+constexpr int kRemoteOwnerCap = 96;
+uint32_t gRemoteOwnerIds[kRemoteOwnerCap]{};
+int gRemoteOwnerN = 0;
+int gRemoteCountCached = 0;
+bool gRemotePeekOk = false;
+DWORD gRemoteOwnerRefreshAt = 0;
+size_t gRemoteDropOwnerOff = 0;  // 远程 User 上命中过 Drop.OwnerId 的偏移（学到才用）
+
+bool PlausibleDropCid(uint32_t id) { return id != 0 && id < 0x04000000u; }
+
+bool ScanObjU32(void* obj, size_t begin, size_t end, uint32_t want, size_t* outOff) {
+    if (!LooksLikeHeapPtr(obj) || begin >= end) return false;
+    for (size_t off = begin; off + 4 <= end; off += 4) {
+        if (static_cast<uint32_t>(ReadI32(obj, off)) == want) {
+            if (outOff) *outOff = off;
+            return true;
+        }
+    }
+    return false;
+}
+
+void ClearRemoteOwnerCache() {
+    gRemoteOwnerN = 0;
+    gRemoteCountCached = 0;
+    gRemotePeekOk = false;
+    gRemoteOwnerRefreshAt = 0;
+}
+
+void ClearDropSelfOwnerCache() {
+    gDropSelfOwnerId = 0;
+    gCharPendingLearnOwner = 0;
+    ClearRemoteOwnerCache();
+    gRemoteDropOwnerOff = 0;
+    x::features::ports::world::ClearDropOwnerWmFieldOff();
+}
+
+void PushRemoteOwnerId(uint32_t id) {
+    if (!PlausibleDropCid(id)) return;
+    if (gDropSelfOwnerId && id == gDropSelfOwnerId) return;
+    for (int i = 0; i < gRemoteOwnerN; ++i) {
+        if (gRemoteOwnerIds[i] == id) return;
+    }
+    if (gRemoteOwnerN >= kRemoteOwnerCap) return;
+    gRemoteOwnerIds[gRemoteOwnerN++] = id;
+}
+
+void CollectRemoteUserDropIds(void* user) {
+    if (!LooksLikeHeapPtr(user)) return;
+    // 远程 Drop.OwnerId 与本地一样不是 User+0x1B0（该槽常≈CS 系）。
+    // 只读「真吸/外物扫描」学到的槽；未学到则靠 allowOwned 的 myId 严格分支。
+    if (gRemoteDropOwnerOff)
+        PushRemoteOwnerId(static_cast<uint32_t>(ReadI32(user, gRemoteDropOwnerOff)));
+}
+
+// 若 foreign OwnerId 落在某远程 User 上，记住偏移（下次刷新直接读）。
+void MaybeLearnRemoteDropOwnerOff(uint32_t foreignId) {
+    if (gRemoteDropOwnerOff || !PlausibleDropCid(foreignId)) return;
+    if (gDropSelfOwnerId && foreignId == gDropSelfOwnerId) return;
+    void* users[64]{};
+    int n = 0;
+    if (!x::features::ports::user_pool::PeekEnumRemoteUsers(users, 64, &n) || n <= 0) return;
+    for (int i = 0; i < n; ++i) {
+        size_t off = 0;
+        if (!ScanObjU32(users[i], 0x10, 0x400, foreignId, &off)) continue;
+        gRemoteDropOwnerOff = off;
+        PushRemoteOwnerId(foreignId);
+        x::runtime::LogI("DropPort", "Drop.OwnerId remote slot User+0x%zx (sample=%u remotes=%d)",
+                         off, foreignId, n);
+        return;
+    }
+}
+
+void RefreshRemoteDropOwnersIfDue() {
+    const DWORD now = GetTickCount();
+    if (gRemoteOwnerRefreshAt && now - gRemoteOwnerRefreshAt < kRemoteOwnerRefreshMs) return;
+    gRemoteOwnerRefreshAt = now;
+    gRemoteOwnerN = 0;
+    gRemoteCountCached = 0;
+    gRemotePeekOk = false;
+
+    int remotes = 0;
+    if (!x::features::ports::user_pool::PeekRemoteUserCount(&remotes)) return;
+    gRemotePeekOk = true;
+    gRemoteCountCached = remotes;
+    if (remotes <= 0) return;
+
+    void* users[64]{};
+    int n = 0;
+    if (!x::features::ports::user_pool::PeekEnumRemoteUsers(users, 64, &n) || n <= 0) return;
+    for (int i = 0; i < n; ++i) CollectRemoteUserDropIds(users[i]);
+}
+
+bool IsRemoteDropOwner(uint32_t ownerId) {
+    if (!PlausibleDropCid(ownerId) || gRemoteOwnerN <= 0) return false;
+    for (int i = 0; i < gRemoteOwnerN; ++i) {
+        if (gRemoteOwnerIds[i] == ownerId) return true;
+    }
+    return false;
+}
+
+// OwnType：ByPetParity 死钉 +0x3C（cmp User=0 解混淆常量）；哈希常误钉到 Id/SourceId → 日志百万级。
+int ReadDropOwnType(void* drop) {
+    if (!LooksLikeHeapPtr(drop)) return -1;
+    const int v = ReadI32(drop, kFbDropOwnType);
+    if (v >= 0 && v <= 4) return v;
+    return -1;
+}
+
+int ReadDropOwnRaw(void* drop) {
+    if (!LooksLikeHeapPtr(drop)) return 0;
+    return ReadI32(drop, kFbDropOwnType);
+}
+
+// Ready 落地物：dump +0x30..+0x48 + 扫描 0..4 候选槽（节流）
+void MaybeProbeDropOwnLayout(void* drop, int endPara) {
+    if (!LooksLikeHeapPtr(drop) || endPara != kEndParaReady) return;
+    static DWORD s_lastMs = 0;
+    static int s_count = 0;
+    if (s_count >= 12) return;
+    const DWORD now = GetTickCount();
+    if (s_lastMs && now - s_lastMs < 1200u) return;
+    s_lastMs = now;
+    ++s_count;
+
+    const int id = ReadI32(drop, kFbDropId);
+    const int owner = ReadI32(drop, kFbDropOwnerId);
+    const int src = ReadI32(drop, 0x38);
+    const int o3c = ReadI32(drop, kFbDropOwnType);
+    const int o40 = ReadI32(drop, 0x40);
+    const int o48 = ReadI32(drop, 0x48);
+    const unsigned b2d = ReadU8(drop, kFbDropPickable);
+    const unsigned b40 = ReadU8(drop, 0x40);
+    const unsigned b44 = ReadU8(drop, kFbDropIsMoney);
+
+    char cand[128];
+    int cn = 0;
+    cand[0] = '\0';
+    for (size_t off = 0x2C; off <= 0x50 && cn + 16 < (int)sizeof(cand); off += 4) {
+        const int v = ReadI32(drop, off);
+        if (v < 0 || v > 4) continue;
+        cn += snprintf(cand + cn, sizeof(cand) - cn, "%s0x%zx=%d", cn ? " " : "", off, v);
+        if (cn < 0 || cn >= (int)sizeof(cand)) {
+            cand[sizeof(cand) - 1] = '\0';
+            break;
+        }
+    }
+    x::runtime::LogI(
+        "DropPort",
+        "Drop.OwnProbe ready id=%d owner=%d +30=%d +34=%d +38=%d +3C=%d +40=%d +40b=%u +44b=%u "
+        "real=%u +48=%d cand[%s]",
+        id, owner, id, owner, src, o3c, o40, b40, b44, b2d, o48, cand[0] ? cand : "-");
+}
+
+void NoteDropSelfOwnerFromPickup(uint32_t ownerId) {
+    if (!PlausibleDropCid(ownerId)) return;
+    if (gDropSelfOwnerId == ownerId) return;
+    if (gDropSelfOwnerId != 0 && gDropSelfOwnerId != ownerId) {
+        x::runtime::LogW("DropPort", "Drop.OwnerId self relearn %u → %u", gDropSelfOwnerId, ownerId);
+    }
+    gDropSelfOwnerId = ownerId;
+    x::runtime::LogI("DropPort", "Drop.OwnerId self=%u (learned from pickup; cs+0x10=%u)", ownerId,
+                     x::features::ports::world::GetCharacterId());
+    // 本机 User 上若有同值，记偏移供远程对称读取（可能扫不到——BIN 本地常无此槽）
+    size_t off = 0;
+    void* mu = gLocalUser ? gLocalUser : x::ui::player::LocalMyUser();
+    if (!gRemoteDropOwnerOff && ScanObjU32(mu, 0x10, 0x400, ownerId, &off)) {
+        gRemoteDropOwnerOff = off;
+        x::runtime::LogI("DropPort", "Drop.OwnerId local User+0x%zx (=self)", off);
+    }
+}
+
+uint32_t LocalDropSelfOwnerId(uint32_t ownerHint) {
+    const uint32_t cs10 = x::features::ports::world::GetCharacterId();
+
+    // CS 毒：缓存被写成 CS+0x10，但地上 Drop.OwnerId 是另一套 ID（例 118536≠194899）。
+    // 本角若 Drop.OwnerId 本来就等于 CS（例 195466==cs），不得清——否则 myCid 永 0、认亲打转。
+    if (gDropSelfOwnerId && cs10 && gDropSelfOwnerId == cs10 && PlausibleDropCid(ownerHint) &&
+        ownerHint != cs10) {
+        x::runtime::LogW("DropPort",
+                         "Drop.OwnerId self cache purge %u (==cs+0x10; ground=%u)", gDropSelfOwnerId,
+                         ownerHint);
+        gDropSelfOwnerId = 0;
+    }
+    if (gDropSelfOwnerId) return gDropSelfOwnerId;
+
+    // 地上 OwnerId（含 ==cs 的角）反扫 WM → 钉 Drop 同槽
+    if (PlausibleDropCid(ownerHint)) {
+        void* wm = x::features::ports::world::PeekWorldManager();
+        if (!LooksLikeHeapPtr(wm)) wm = x::features::ports::world::GetWorldManager();
+        size_t off = 0;
+        if (LooksLikeHeapPtr(wm) && ScanObjU32(wm, 0x10, 0x180, ownerHint, &off)) {
+            x::features::ports::world::NoteDropOwnerWmFieldOff(off);
+            gDropSelfOwnerId = ownerHint;
+            static bool s_wmScanLogged = false;
+            if (!s_wmScanLogged) {
+                s_wmScanLogged = true;
+                const uint32_t wm98 = static_cast<uint32_t>(ReadI32(wm, 0x98));
+                x::runtime::LogI("DropPort",
+                                 "Drop.OwnerId self=%u via WM+0x%zx scan (wm+0x98=%u cs+0x10=%u)",
+                                 ownerHint, off, wm98, cs10);
+            }
+            return gDropSelfOwnerId;
+        }
+        if (LooksLikeHeapPtr(wm)) {
+            void* box = ReadPtr(wm, 0x90);
+            if (LooksLikeHeapPtr(box) && ScanObjU32(box, 0x10, 0x40, ownerHint, &off)) {
+                gDropSelfOwnerId = ownerHint;
+                static bool s_boxLogged = false;
+                if (!s_boxLogged) {
+                    s_boxLogged = true;
+                    x::runtime::LogI("DropPort",
+                                     "Drop.OwnerId self=%u via WM+0x90 box+0x%zx (cs+0x10=%u)",
+                                     ownerHint, off, cs10);
+                }
+                return gDropSelfOwnerId;
+            }
+        }
+    }
+
+    const uint32_t dropCid = x::features::ports::world::GetDropOwnerCharacterId();
+    // GetDropOwnerCharacterId 已排除 WM+0x98==CS；+0x114 允许 ==CS（本角合一）
+    if (PlausibleDropCid(dropCid)) {
+        gDropSelfOwnerId = dropCid;
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            x::runtime::LogI(
+                "DropPort",
+                "Drop.OwnerId self=%u via WM field/ByPetParity (cs+0x10=%u hint=%u pinOff=0x%zx)",
+                dropCid, cs10, ownerHint, x::features::ports::world::PeekDropOwnerWmFieldOff());
+        }
+        return gDropSelfOwnerId;
+    }
+
+    // 地上 OwnerId 即 CS：信任为 Drop 归属（BIN 本角 195466）
+    if (PlausibleDropCid(ownerHint) && cs10 && ownerHint == cs10) {
+        gDropSelfOwnerId = ownerHint;
+        static bool s_eqCsLogged = false;
+        if (!s_eqCsLogged) {
+            s_eqCsLogged = true;
+            x::runtime::LogI("DropPort",
+                             "Drop.OwnerId self=%u (==cs+0x10; ground OwnerId equals CS on this char)",
+                             ownerHint);
+        }
+        return gDropSelfOwnerId;
+    }
+
+    static DWORD s_lastProbeMs = 0;
+    const DWORD now = GetTickCount();
+    if (!PlausibleDropCid(ownerHint) || (s_lastProbeMs && now - s_lastProbeMs < 2000u)) {
+        static bool s_probe = false;
+        if (!s_probe && PlausibleDropCid(ownerHint)) {
+            s_probe = true;
+            void* wm = x::features::ports::world::PeekWorldManager();
+            if (!LooksLikeHeapPtr(wm)) wm = x::features::ports::world::GetWorldManager();
+            const uint32_t wm98 = LooksLikeHeapPtr(wm) ? static_cast<uint32_t>(ReadI32(wm, 0x98)) : 0;
+            void* box = LooksLikeHeapPtr(wm) ? ReadPtr(wm, 0x90) : nullptr;
+            x::runtime::LogI("DropPort",
+                             "Drop.OwnerId probe hint=%u cs=%u wm=%p +98=%u box=%p get=%u", ownerHint,
+                             cs10, wm, wm98, box, dropCid);
+        }
+        return 0;
+    }
+    s_lastProbeMs = now;
+
+    size_t off = 0;
+    void* mu = gLocalUser ? gLocalUser : x::ui::player::LocalMyUser();
+    if (ScanObjU32(mu, 0x10, 0x400, ownerHint, &off)) {
+        gDropSelfOwnerId = ownerHint;
+        if (!gRemoteDropOwnerOff) gRemoteDropOwnerOff = off;
+        x::runtime::LogI("DropPort", "Drop.OwnerId self=%u @ User+0x%zx (cs+0x10=%u)", ownerHint,
+                         off, cs10);
+        return gDropSelfOwnerId;
+    }
+    void* cd = x::features::ports::world::GetCharacterData();
+    if (ScanObjU32(cd, 0x10, 0x300, ownerHint, &off)) {
+        gDropSelfOwnerId = ownerHint;
+        x::runtime::LogI("DropPort",
+                         "Drop.OwnerId self=%u @ CharacterData+0x%zx (cs+0x10=%u)", ownerHint, off,
+                         cs10);
+        return gDropSelfOwnerId;
+    }
+    return 0;
+}
+
+bool DropClientPickable(void* drop) {
+    if (!LooksLikeHeapPtr(drop)) return false;
+    const int ownerId = ReadI32(drop, kOffDropOwnerId);
+    const int ownType = ReadDropOwnType(drop);
+
+    RefreshRemoteDropOwnersIfDue();
+
+    const uint32_t hint = ownerId > 0 ? static_cast<uint32_t>(ownerId) : 0;
+    const uint32_t myId = LocalDropSelfOwnerId(hint);
+
+    auto allowOwned = [&]() -> bool {
+        if (ownerId == 0) return true;
+        // 独图：无远程玩家，但可能有「别人走后残留、尚未变无主」的物。
+        // 已认亲 → 只收自己；未认亲 → 放行（分不清己/残留，服端会拒非己）。
+        if (gRemotePeekOk && gRemoteCountCached <= 0) {
+            if (myId == 0) return true;
+            if (hint == myId) return true;
+            // 独图却对不上：缓存认亲错了（典型 CS 毒）。清掉后本拍放行，靠真吸重学。
+            if (gDropSelfOwnerId == myId) {
+                x::runtime::LogW("DropPort",
+                                 "Drop.OwnerId self mismatch alone cache=%u drop=%u → purge", myId,
+                                 hint);
+                gDropSelfOwnerId = 0;
+            }
+            return true;
+        }
+        if (IsRemoteDropOwner(hint)) return false;
+        // 多人兜底：已认亲则只收自己；顺带学远程 User 上的 OwnerId 槽
+        if (myId != 0) {
+            if (hint == myId) return true;
+            MaybeLearnRemoteDropOwnerOff(hint);
+            return false;
+        }
+        // 远程集合未命中且未认亲：放行（避免再堵吸）；服端仍会拒收非己
+        return true;
+    };
+
+    if (ownType >= 0 && ownType <= 4) {
+        if (ownType == 1) return false;                 // Party
+        if (ownType == 2 || ownType == 3) return true;  // No / ExplosiveNoOwn
+        if (ownType == 0 || ownType == 4) return allowOwned();
+        return false;
+    }
+
+    return allowOwned();
 }
 
 // Drop.Pt1：CMS/TW 均为 System.Drawing.Point（int x/y），禁止当 float 读。
@@ -627,9 +1035,25 @@ void EnsureFieldOffsets() {
     hit(FieldOffOrFb(userKlass, kHashFldCurPos, kFbCurPos, &gOff.curPos, false));
     hit(FieldOffOrFb(vcKlass, kHashFldVcAp, kFbVcAp, &gOff.vcAp, false));
     const bool okId = hit(FieldOffOrFb(dropKlass, kHashFldDropId, kFbDropId, &gOff.dropId, false));
-    const bool okOwn =
-        hit(FieldOffOrFb(dropKlass, kHashFldDropOwnType, kFbDropOwnType, &gOff.dropOwnType, false));
+    // OwnerId：无独立 hash 时用 CMS 死钉 0x34（与 Id@0x30 相邻；归属预筛主路径）
+    gOff.dropOwnerId = kFbDropOwnerId;
+    // OwnType：CMS hash 在 TW 常误解析到 Id/SourceId（BIN ownType=8xxxxxx）。
+    // ByPetParity：`mov ecx,[rdi+3Ch]` + seed 解出 cmp User=0 → 死钉 0x3C。
+    (void)FieldOffOrFb(dropKlass, kHashFldDropOwnType, kFbDropOwnType, &gOff.dropOwnType, false);
+    if (gOff.dropOwnType != kFbDropOwnType) {
+        x::runtime::LogW("DropPort", "Drop.OwnType hashOff=0x%zx → pin ByPetParity 0x3C",
+                         gOff.dropOwnType);
+        gOff.dropOwnType = kFbDropOwnType;
+    }
+    const bool okOwn = true;
+    hit(okOwn);
+    // IsMoney：ByPet `movzx eax,byte [rdi+44h]`；fb=0x44（CMS 曾在 0x40）
     hit(FieldOffOrFb(dropKlass, kHashFldDropIsMoney, kFbDropIsMoney, &gOff.dropIsMoney, false));
+    if (gOff.dropIsMoney != kFbDropIsMoney) {
+        x::runtime::LogW("DropPort", "Drop.IsMoney hashOff=0x%zx → pin ByPetParity 0x44",
+                         gOff.dropIsMoney);
+        gOff.dropIsMoney = kFbDropIsMoney;
+    }
     hit(FieldOffOrFb(dropKlass, kHashFldDropInfo, kFbDropInfo, &gOff.dropInfo, false));
     const bool okPt1 =
         hit(FieldOffOrFb(dropKlass, kHashFldDropPt1, kFbDropPt1, &gOff.dropPt1, false));
@@ -926,10 +1350,12 @@ bool ResolveLocalUser(DWORD now) {
         void* myUser = wm ? ReadPtr(wm, kOffWmMyUser) : nullptr;
         if (LooksLikeHeapPtr(myUser) && myUser != gLocalUser) {
             gLocalUser = nullptr;
+            ClearDropSelfOwnerCache();
             gLastLuRebind = 0;  // 强制 fall-through 立刻重绑
         } else if (!LooksLikeHeapPtr(myUser)) {
             // 换图空窗 MyUser 暂空：丢掉旧缓存，勿继续当活的用。
             gLocalUser = nullptr;
+            ClearDropSelfOwnerCache();
             gLastLuRebind = 0;
         } else if (LooksLikeHeapPtr(gLocalUser) && ReadPtr(gLocalUser, 0) &&
                    ReadPtr(gLocalUser, 0x10)) {
@@ -937,10 +1363,12 @@ bool ResolveLocalUser(DWORD now) {
             return true;
         } else {
             gLocalUser = nullptr;
+            ClearDropSelfOwnerCache();
         }
     }
     if (gLastLuRebind && now - gLastLuRebind < kRebindMs && !gLocalUser) return false;
     gLastLuRebind = now;
+    void* prevLu = gLocalUser;
     gLocalUser = nullptr;
     if (!BindIl2Cpp()) return false;
 
@@ -949,8 +1377,11 @@ bool ResolveLocalUser(DWORD now) {
     void* myUser = ReadPtr(wm, kOffWmMyUser);
     // 禁 GetGoName（worker）；WM.MyUser + m_CachedPtr 即权威。
     if (UnityObjectAlive(myUser)) {
+        if (prevLu != myUser) {
+            ClearDropSelfOwnerCache();
+            x::runtime::LogI("DropPort", "LocalUser ACCEPT wm.MyUser=%p", myUser);
+        }
         gLocalUser = myUser;
-        x::runtime::LogI("DropPort", "LocalUser ACCEPT wm.MyUser=%p", gLocalUser);
         MaybeClearLoginFreeze();
         return true;
     }
@@ -974,8 +1405,11 @@ bool ResolveLocalUser(DWORD now) {
     for (uintptr_t i = 0; i < n && i < 64; ++i) {
         void* cand = ArrayAt(arr, i);
         if (!UnityObjectAlive(cand)) continue;
+        if (prevLu != cand) {
+            ClearDropSelfOwnerCache();
+            x::runtime::LogI("DropPort", "LocalUser ACCEPT FindAll=%p", cand);
+        }
         gLocalUser = cand;
-        x::runtime::LogI("DropPort", "LocalUser ACCEPT FindAll=%p", gLocalUser);
         MaybeClearLoginFreeze();
         return true;
     }
@@ -1496,7 +1930,7 @@ bool ClearPickupGatesOne(void* drop, bool forceEndParaReady = false) {
         // force 路径仍继续清冷却，便于遗留调用方一次到位
     }
     bool touched = (endp != kEndParaReady);  // force 已写 EndPara
-    const int own = ReadI32(drop, kOffDropOwnType);
+    const int own = ReadDropOwnType(drop);
     const int last = ReadI32(drop, kOffDropLastTry);
     const int stamp = ReadI32(drop, kOffDropPickStamp);
     if (stamp != 0) {
@@ -1508,10 +1942,8 @@ bool ClearPickupGatesOne(void* drop, bool forceEndParaReady = false) {
         WriteI32(drop, kOffDropLastTry, 0);
         touched = true;
     }
-    if (own < 0 || own > 4) {
-        WriteI32(drop, kOffDropOwnType, kDropOwnNo);
-        touched = true;
-    }
+    // OwnType 仅允许写合法枚举；未解析（-1）绝不写 No=2
+    (void)own;
     return touched;
 }
 
@@ -1551,7 +1983,7 @@ int ClearPickupGatesNear(void* pool, float cx, float cy, float halfW, float half
 
         if (!sampled) {
             sampled = true;
-            if (outSampleOwn) *outSampleOwn = ReadI32(drop, kOffDropOwnType);
+            if (outSampleOwn) *outSampleOwn = ReadDropOwnType(drop);
             if (outSampleLast) *outSampleLast = ReadI32(drop, kOffDropLastTry);
             if (outSampleEnd) *outSampleEnd = ReadI32(drop, kOffDropEndPara);
         }
@@ -1658,6 +2090,87 @@ int CountPostSendTouchesNear(void* pool, float cx, float cy, float halfW, float 
     return touch;
 }
 
+// sentSame 但 CountPostSendTouches 抓不到官方戳（stallN=0）时：仍要登记队头，否则
+// gStall 空 → 下拍 stallHeld>0&stamp=0 错觉/或根本无 held → ByPet 反复撞同一拒收件，
+// 金币被挡（BIN itemWhileMoney / reject_backoff）。
+// 策略：盒内有钱则只退避 Ready 非钱；否则退避最近 Ready（仍跳过已 Stall / 黑名单）。
+int AddStallFallbackHeadsNear(void* pool, float cx, float cy, float halfW, float halfH, DWORD now,
+                              const SkipIds* skip, int cap) {
+    if (!pool || gStallOff || cap <= 0) return 0;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return 0;
+
+    bool haveMoney = false;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float px = 0.f, py = 0.f;
+        if (!ReadDropPt(drop, px, py)) continue;
+        if (std::fabs(px - cx) > halfW || std::fabs(py - cy) > halfH) continue;
+        if (ReadU8(drop, kOffDropIsMoney) != 0) {
+            haveMoney = true;
+            break;
+        }
+    }
+
+    int added = 0;
+    int bestId = 0;
+    float bestD2 = 0.f;
+    bool haveBest = false;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float px = 0.f, py = 0.f;
+        if (!ReadDropPt(drop, px, py)) continue;
+        if (std::fabs(px - cx) > halfW || std::fabs(py - cy) > halfH) continue;
+        if (skip && !skip->empty() && DropMatchesSkip(drop, *skip)) continue;
+        if (!DropClientPickable(drop)) continue;
+        if (ReadU8(drop, kOffDropPickable) == 0) continue;
+        if (ReadI32(drop, kOffDropEndPara) != kEndParaReady) continue;
+        const bool money = ReadU8(drop, kOffDropIsMoney) != 0;
+        if (haveMoney && money) continue;  // 有钱时只挡道具队头
+        const int id = ReadI32(drop, kOffDropId);
+        if (id == 0 || StallActive(id, now)) continue;
+        const float dx = px - cx;
+        const float dy = py - cy;
+        const float d2 = dx * dx + dy * dy;
+        if (!haveBest || d2 < bestD2) {
+            haveBest = true;
+            bestD2 = d2;
+            bestId = id;
+        }
+        if (haveMoney) {
+            // 有钱：把盒内所有 Ready 非钱都登退避（盖戳后 ByPet 才能轮到钱）
+            AddStall(id, now);
+            ++added;
+            if (added >= cap) return added;
+        }
+    }
+    if (!haveMoney && haveBest && bestId != 0) {
+        AddStall(bestId, now);
+        ++added;
+    }
+    if (added > 0) {
+        static DWORD s_lastFb = 0;
+        if (!s_lastFb || now - s_lastFb > 3000u) {
+            s_lastFb = now;
+            x::runtime::LogI("droppool",
+                             "stall fallback heads=%d haveMoney=%d (sentSame touch=0)", added,
+                             haveMoney ? 1 : 0);
+        }
+    }
+    return added;
+}
+
 bool EnsureExceptionIds(void* pet, const SkipIds& skip) {
     if (!pet || skip.empty()) return true;
     // 偏移没解析满时别往「可能不是 ExceptionList」的指针里追加 id（返回 false → 下次仍会重试）
@@ -1733,16 +2246,24 @@ struct PetVacNearPass {
     int sampleIsMoney = -1;
     int sampleInfo = 0;
     int sampleOwn = -1;
+    int sampleOwnRaw = 0;
+    int sampleOwnerId = 0;
     int sampleLast = 0;
     int sampleEnd = 0;
     int gatesCleared = 0;
     int stallStamped = 0;
     int skipStamped = 0;
+    int ownSkipped = 0;   // 盒内非己/非无主（未进 readyNear）
+    int ownStamped = 0;   // 为挡 ByPet 临时盖 LastTry 的件数（拍末还原）
+    // 可吸盒内 OwnerId>0 的一致值；mixed 则本拍不拿来认亲（防多人图误学别人）
+    int learnOwnerId = 0;
+    bool learnOwnerMixed = false;
 };
 
 PetVacNearPass PreparePetVacNearPass(void* pool, float cx, float cy, float halfW, float halfH,
                                      DWORD now, const SkipIds* skip, int maxClear) {
     PetVacNearPass out{};
+    gOwnSkipStamps.clear();
     if (!pool) return out;
     void* dict = ReadPtr(pool, kOffPoolDict);
     if (!LooksLikeHeapPtr(dict)) return out;
@@ -1811,18 +2332,43 @@ PetVacNearPass PreparePetVacNearPass(void* pool, float cx, float cy, float halfW
 
         const int lastTry = ReadI32(drop, kOffDropLastTry);
         const int endPara = ReadI32(drop, kOffDropEndPara);
-        if (!gateSampled) {
+        const int own = ReadDropOwnType(drop);
+        const int ownRaw = ReadDropOwnRaw(drop);
+        const int ownerId = ReadI32(drop, kOffDropOwnerId);
+        MaybeProbeDropOwnLayout(drop, endPara);
+        // 优先用 Ready 样本（飞行中 OwnType 可能未写好）
+        if (!gateSampled || (out.sampleEnd != kEndParaReady && endPara == kEndParaReady)) {
             gateSampled = true;
-            out.sampleOwn = ReadI32(drop, kOffDropOwnType);
+            out.sampleOwn = own;
+            out.sampleOwnRaw = ownRaw;
+            out.sampleOwnerId = ownerId;
             out.sampleLast = lastTry;
             out.sampleEnd = endPara;
+        }
+
+        // 非己/非无主：不进 ready/fly；Ready 时临时盖 LastTry 挡 ByPet（拍末还原）
+        if (!DropClientPickable(drop)) {
+            ++out.ownSkipped;
+            if (writesOk && endPara == kEndParaReady && lastTry != kLastTrySkipStamp) {
+                gOwnSkipStamps.push_back(OwnSkipStamp{drop, lastTry});
+                WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
+                ++out.ownStamped;
+            }
+            continue;
+        }
+
+        if (ownerId > 0) {
+            if (out.learnOwnerId == 0)
+                out.learnOwnerId = ownerId;
+            else if (out.learnOwnerId != ownerId)
+                out.learnOwnerMixed = true;
         }
 
         // 仍在飞：与 ready 分开计。ed7ff1：仅 readyNear>0 就 ByPet → fly>0 仍 called=1，
         // 体感「物还没掉完宠物就吸」。黑名单已 continue，此处不含 SkipHold。
         if (endPara != kEndParaReady) ++out.flyNear;
 
-        // 可被 ByPet 真正捡的：已落地 + Pickable + 非退避戳
+        // 可被 ByPet 真正捡的：已落地 + Pickable + 非退避戳 + 己/无主
         const bool readyPick =
             endPara == kEndParaReady && ReadU8(drop, kOffDropPickable) != 0 &&
             lastTry != kLastTrySkipStamp;
@@ -1978,11 +2524,25 @@ void RunVacuumOnMain() {
     void* pool = ResolveDropPool(now);
     ResetStallIfPoolChanged(pool);
     PruneStall(now);
-    // 混飞按件 Send 与人吸共用 pending Stall
+    // 混飞按件 Send 与人吸共用 pending Stall：下拍仍在池才算真拒收（同帧 Δ=0 多为异步真吸）
     if (gCharPendingStallId != 0) {
         const int pending = gCharPendingStallId;
         gCharPendingStallId = 0;
-        if (pool && !gStallOff && DropIdInPool(pool, pending)) AddStall(pending, now);
+        if (pool && !gStallOff && DropIdInPool(pool, pending)) {
+            AddStall(pending, now);
+            if (s_rejectStrikes < 100) ++s_rejectStrikes;
+            if (s_rejectStrikes >= kRejectBackoffNeed) {
+                s_rejectBackoffUntil = now + kRejectBackoffMs;
+                gRejectBackoffUntil.store(s_rejectBackoffUntil, std::memory_order_relaxed);
+                s_rejectStrikes = 0;
+                x::runtime::LogW(
+                    "droppool",
+                    "reject_backoff %ums (pending still in pool; 距离/归属/冷却，未必满栏)",
+                    (unsigned)kRejectBackoffMs);
+            }
+        } else {
+            s_rejectStrikes = 0;
+        }
     }
 
     void* pet = FirstActivePet();
@@ -2011,6 +2571,8 @@ void RunVacuumOnMain() {
     const SkipIds* skipPtr = gJob.skip.empty() ? nullptr : &gJob.skip;
 
     auto finishEmptyLike = [&](DWORD nowTick, bool poolFell) {
+        RefreshRemoteDropOwnersIfDue();
+        r.remoteUsers = gRemotePeekOk ? gRemoteCountCached : -1;
         r.dropCountAfter = r.dropCount;
         r.dropsDelta = 0;
         r.poolFellSinceLast = poolFell;
@@ -2059,13 +2621,39 @@ void RunVacuumOnMain() {
     r.sampleIsMoney = pass.sampleIsMoney;
     r.sampleInfo = pass.sampleInfo;
     r.sampleOwnType = pass.sampleOwn;
+    r.sampleOwnRaw = pass.sampleOwnRaw;
+    r.sampleOwnerId = pass.sampleOwnerId;
+    r.localCharId = static_cast<int>(LocalDropSelfOwnerId(
+        pass.sampleOwnerId > 0 ? static_cast<uint32_t>(pass.sampleOwnerId) : 0));
+    // 与预筛同拍：强制刷新一次远程人数（便于 mode=petmap 看 remotes=）
+    RefreshRemoteDropOwnersIfDue();
+    r.remoteUsers = gRemotePeekOk ? gRemoteCountCached : -1;
     r.sampleLastTry = pass.sampleLast;
     r.sampleEndPara = pass.sampleEnd;
     r.gatesCleared = pass.gatesCleared;
     r.stallStamped = pass.stallStamped;
     r.skipStamped = pass.skipStamped;
+    r.ownSkipped = pass.ownSkipped;
+
+    // 高价值优先：宠真空 ∩ 角色半盒 ∩ 栏未满 → 紧急；栏满跳过（不打断出刀）
+    float hvUx = px, hvUy = py;
+    const bool hvHaveUser = ReadUserPos(hvUx, hvUy);
+    if (gJob.highValuePriority) {
+        int hvN = 0, hvFull = 0;
+        if (hvHaveUser) {
+            const float charHalfW = xcat::kPetLootCharVacWMax * 0.5f;
+            const float charHalfH = xcat::kPetLootCharVacHMax * 0.5f;
+            ScanHighValueNear(pool, px, py, halfW, halfH, hvUx, hvUy, charHalfW, charHalfH,
+                              skipPtr, hvN, hvFull, &r.highValueSampleDropId, &r.highValueSampleInfo,
+                              &r.highValueSampleKind);
+        }
+        r.highValueNear = hvN;
+        r.highValueSkippedFull = hvFull;
+        r.highValueUrgent = hvN > 0;
+    }
 
     if (r.nearCount == 0) {
+        (void)RestoreOwnSkipStamps();
         if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
         const DWORD nowTick = GetTickCount();
         const bool poolFell = PetVacPoolFellSinceLast(
@@ -2074,33 +2662,58 @@ void RunVacuumOnMain() {
         return;
     }
 
-    // 混飞优先：不要先用 readyNear==0 挡掉（BIN：endPara=3 但 LastTry 退避戳 → readyNear=0
-    // 会永远 wait_land，地上 Ready 吸不到）。fly>0 时按件 Send，必要时打穿 Stall。
-    if (pass.flyNear > 0) {
-        // 混飞秒杀：不大盒 ByPet；按件 Pool.Send 只吸 EndPara==Ready（宠坐标）。
+    // 按件 Pool.Send（禁大盒 ByPet）——触发：
+    // 1) 混飞 flyNear>0：ByPet 会碰抛物中物
+    // 2) 密堆 readyNear>ByPetReadyMax：ByPet 一拍连发 N 个 Pet.Send → BIN 静默 DC
+    // 3) 真空过大（>1000）：ByPet 扩矩形后人够不着 → 服端拒（BIN 含金币 sentSame，与背包无关）
+    // 4) 高价值紧急：必须按件选装备/卷軸（金币让路）
+    // 送包坐标必须用角色 Maple 位（与人物直吸同口径）；枚举仍按宠真空盒。
+    const bool largeVacByPetRisk = gJob.vacuumW > 1000.f || gJob.vacuumH > 1000.f;
+    const bool pacedSend = largeVacByPetRisk || r.highValueUrgent || pass.flyNear > 0 ||
+                           pass.readyNear > xcat::kPetLootByPetReadyMax;
+    if (pacedSend) {
         if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
         if (pool && r.stallStamped > 0) {
             r.stallRestored = RestoreStalledStampsNear(pool, px, py, halfW, halfH, now, skipPtr);
         }
+        (void)RestoreOwnSkipStamps();
 
         EnsureSendProbe();
         auto fn = gOrigPoolSend ? reinterpret_cast<FnPoolSend>(gOrigPoolSend)
                                 : FnFromMi<FnPoolSend>(gMiPoolSend, kRvaPoolSendDropPickUp);
+
+        r.flyHeld = pass.flyNear;
+        r.beforeRc = ReadRect(pet, kOffPetRc);
+        r.afterRc.x = -halfW;
+        r.afterRc.y = -halfH;
+        r.afterRc.w = gJob.vacuumW;
+        r.afterRc.h = gJob.vacuumH;
+
         if (!fn) {
             r.stallHeld = StallActiveCount(now);
-            r.flyHeld = pass.flyNear;
             r.dropCountAfter = r.dropCount;
             r.dropsDelta = 0;
             r.called = false;
             r.ok = true;
-            r.why = "wait_land";
-            r.beforeRc = ReadRect(pet, kOffPetRc);
-            r.afterRc.x = -halfW;
-            r.afterRc.y = -halfH;
-            r.afterRc.w = gJob.vacuumW;
-            r.afterRc.h = gJob.vacuumH;
+            r.why = pass.flyNear > 0 ? "wait_land" : "ok_hold";
             return;
         }
+
+        float ux = px, uy = py;
+        if (!ReadUserPos(ux, uy)) {
+            // 无角色坐标则宁可不送，避免宠 AbsPos 冒充 Maple 触发服端异常
+            r.stallHeld = StallActiveCount(now);
+            r.dropCountAfter = r.dropCount;
+            r.dropsDelta = 0;
+            r.called = false;
+            r.ok = true;
+            r.why = pass.flyNear > 0 ? "wait_land" : "ok_hold";
+            return;
+        }
+
+        // 发包前整理：服端按角色距离验 DropPool.Send；宠盒内但人够不着 → 不送（BIN 空 Send/Stall 堆）
+        const float charHalfW = xcat::kPetLootCharVacWMax * 0.5f;
+        const float charHalfH = xcat::kPetLootCharVacHMax * 0.5f;
 
         void* dict = ReadPtr(pool, kOffPoolDict);
         void* entries = LooksLikeHeapPtr(dict) ? ReadPtr(dict, kOffDictEntries) : nullptr;
@@ -2110,13 +2723,21 @@ void RunVacuumOnMain() {
 
         void* bestDrop = nullptr;
         int bestId = 0;
+        int bestInfo = 0;
         float bestD2 = 0.f;
-        bool bestWasStalled = false;
-        auto consider = [&](bool allowStalled) {
+        bool bestMoney = false;
+        int bestHvRank = 0;  // 0=普通 1=金币 2=高价值
+        HvClass bestHv = HvClass::None;
+        int readyInPet = 0;  // 宠真空内 Ready（可能够不着）
+        auto consider = [&]() {
             bestDrop = nullptr;
             bestId = 0;
+            bestInfo = 0;
             bestD2 = 0.f;
-            bestWasStalled = false;
+            bestMoney = false;
+            bestHvRank = 0;
+            bestHv = HvClass::None;
+            readyInPet = 0;
             for (uintptr_t i = 0; i < arrLen; ++i) {
                 uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
                 if (ReadI32(entry, kOffEntryHash) < 0) continue;
@@ -2126,33 +2747,46 @@ void RunVacuumOnMain() {
                 if (!ReadDropPt(drop, dpx, dpy)) continue;
                 if (std::fabs(dpx - px) > halfW || std::fabs(dpy - py) > halfH) continue;
                 if (skipPtr && DropMatchesSkip(drop, *skipPtr)) continue;
+                if (!DropClientPickable(drop)) continue;
                 if (ReadU8(drop, kOffDropPickable) == 0) continue;
                 if (ReadI32(drop, kOffDropEndPara) != kEndParaReady) continue;
                 const int id = ReadI32(drop, kOffDropId);
                 if (id == 0) continue;
                 if (id == gCharPendingStallId) continue;
-                const bool stalled = StallActive(id, now);
-                if (stalled && !allowStalled) continue;
-                const float dx = dpx - px;
-                const float dy = dpy - py;
+                // 拒收退避中：禁止再送（勿 ClearStall 强开，满栏时会立刻再撞 sentSame）
+                if (StallActive(id, now)) continue;
+                const bool money = ReadU8(drop, kOffDropIsMoney) != 0;
+                const int info = ReadI32(drop, kOffDropInfo);
+                const HvClass hv = gJob.highValuePriority ? ClassifyHighValueItem(info, money)
+                                                         : HvClass::None;
+                // 高价值但对应栏满 → 跳过（用户要求：包满不吸）
+                if (hv != HvClass::None && !HighValueBagAllows(hv)) continue;
+                ++readyInPet;
+                // ★ 角色半盒闸（与人吸顶同 750）：够不着不进候选，避免空 Send
+                if (std::fabs(dpx - ux) > charHalfW || std::fabs(dpy - uy) > charHalfH) continue;
+                const float dx = dpx - ux;
+                const float dy = dpy - uy;
                 const float d2 = dx * dx + dy * dy;
-                if (!bestDrop || d2 < bestD2) {
+                // 优先级：高价值(2) > 金币(1) > 其它(0)；同档比距离
+                int rank = 0;
+                if (hv != HvClass::None)
+                    rank = 2;
+                else if (money)
+                    rank = 1;
+                const bool better =
+                    !bestDrop || rank > bestHvRank || (rank == bestHvRank && d2 < bestD2);
+                if (better) {
                     bestDrop = drop;
                     bestId = id;
+                    bestInfo = info;
                     bestD2 = d2;
-                    bestWasStalled = stalled;
+                    bestMoney = money;
+                    bestHvRank = rank;
+                    bestHv = hv;
                 }
             }
         };
-        consider(/*allowStalled=*/false);
-        if (!bestDrop) consider(/*allowStalled=*/true);  // BIN：Ready 全在 Stall 里
-
-        r.flyHeld = pass.flyNear;
-        r.beforeRc = ReadRect(pet, kOffPetRc);
-        r.afterRc.x = -halfW;
-        r.afterRc.y = -halfH;
-        r.afterRc.w = gJob.vacuumW;
-        r.afterRc.h = gJob.vacuumH;
+        consider();
 
         if (!bestDrop || bestId == 0) {
             r.stallHeld = StallActiveCount(now);
@@ -2160,12 +2794,30 @@ void RunVacuumOnMain() {
             r.dropsDelta = 0;
             r.called = false;
             r.ok = true;
-            r.why = "wait_land";  // 盒内尚无 EndPara==Ready
+            // 无可达候选：不应继续紧急停刀（HV 在宠盒外/人够不着）
+            if (gJob.highValuePriority) r.highValueUrgent = false;
+            // 宠旁有 Ready 但角色够不着 → ok_far；全无 Ready → 飞中 wait_land / 落地 ok_hold
+            if (readyInPet > 0)
+                r.why = "ok_far";
+            else if (pass.ownSkipped > 0 && pass.flyNear <= 0)
+                r.why = "ok_own";
+            else
+                r.why = pass.flyNear > 0 ? "wait_land" : "ok_hold";
             return;
         }
 
-        if (bestWasStalled) ClearStallId(bestId);
         gCharPendingStallId = 0;
+
+        r.pacedPickDropId = bestId;
+        r.pacedPickInfo = bestInfo;
+        r.pacedPickRank = bestHvRank;
+        if (bestHvRank == 2 || r.highValueUrgent) {
+            const char* nm = LookupItemNameBrief(bestInfo);
+            x::runtime::LogI("droppool",
+                             "paced pick dropId=%d info=%d rank=%d money=%d hv=%s name=%s", bestId,
+                             bestInfo, bestHvRank, bestMoney ? 1 : 0, HvClassName(bestHv),
+                             (nm && nm[0]) ? nm : "-");
+        }
 
         if (DropWritesAllowed()) {
             const int last = ReadI32(bestDrop, kOffDropLastTry);
@@ -2175,7 +2827,8 @@ void RunVacuumOnMain() {
             r.gatesCleared = 1;
         }
 
-        int32_t pt[2] = {static_cast<int32_t>(px), static_cast<int32_t>(py)};
+        const int sentOwner = ReadI32(bestDrop, kOffDropOwnerId);
+        int32_t pt[2] = {static_cast<int32_t>(ux), static_cast<int32_t>(uy)};
         bool seh = false;
         __try {
             fn(pool, pt, bestId, 0u, nullptr);
@@ -2198,10 +2851,17 @@ void RunVacuumOnMain() {
             s_rejectStrikes = 0;
             s_rejectBackoffUntil = 0;
             gRejectBackoffUntil.store(0, std::memory_order_relaxed);
+            if (sentOwner > 0) NoteDropSelfOwnerFromPickup(static_cast<uint32_t>(sentOwner));
         } else {
             r.why = "ok_sent";
+            // 同帧池常未掉＝异步真吸常态；pending 下拍仍在才 AddStall / 计 reject
             if (!StallActive(bestId, nowTick)) gCharPendingStallId = bestId;
-            r.sentButPoolSame = 1;
+        }
+        if (bestHvRank == 2 || r.highValueUrgent) {
+            x::runtime::LogI("droppool",
+                             "paced result dropId=%d info=%d rank=%d why=%s Δ=%d fell=%d", bestId,
+                             bestInfo, bestHvRank, r.why ? r.why : "?", r.dropsDelta,
+                             poolFell ? 1 : 0);
         }
         r.stallHeld = StallActiveCount(nowTick);
         if (!seh) {
@@ -2214,19 +2874,20 @@ void RunVacuumOnMain() {
         return;
     }
 
-    // 无飞物：无 Ready 才等；有 Ready 走下方扩盒 ByPet
+    // 无飞物：无 Ready 才等；有 Ready 且未超密堆顶 → 下方小批量 ByPet
     if (pass.readyNear <= 0) {
         if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
         if (pool && r.stallStamped > 0) {
             r.stallRestored = RestoreStalledStampsNear(pool, px, py, halfW, halfH, now, skipPtr);
         }
+        (void)RestoreOwnSkipStamps();
         r.stallHeld = StallActiveCount(now);
         r.flyHeld = 0;
         r.dropCountAfter = r.dropCount;
         r.dropsDelta = 0;
         r.called = false;
         r.ok = true;
-        r.why = "wait_land";
+        r.why = (pass.ownSkipped > 0 && pass.flyNear <= 0) ? "ok_own" : "wait_land";
         r.beforeRc = ReadRect(pet, kOffPetRc);
         r.afterRc.x = -halfW;
         r.afterRc.y = -halfH;
@@ -2311,12 +2972,17 @@ void RunVacuumOnMain() {
         if (r.sendTouch > 0 || probeSend) r.sentButPoolSame = 1;
         // 提交了但池没掉 → 多为该栏已满被服端拒收：登记退避，下一拍轮到别的掉落
         for (int i = 0; i < stallN; ++i) AddStall(stallIds[i], nowTick);
+        // 官方拒收常不留可识别 LastTry/PickStamp → stallN=0 仍 sentSame：补登队头
+        if (r.sentButPoolSame && stallN == 0) {
+            (void)AddStallFallbackHeadsNear(pool, px, py, halfW, halfH, nowTick, skipPtr, 8);
+        }
     }
 
     // 拍末必须把退避盖戳还原（含 seh / no_rect_patch 路径），否则切到脚边拾取时这些道具捡不起来
     if (pool && r.stallStamped > 0) {
         r.stallRestored = RestoreStalledStampsNear(pool, px, py, halfW, halfH, now, skipPtr);
     }
+    (void)RestoreOwnSkipStamps();
     // 停用后才清表：清早了 RestoreStalledStampsNear 就找不到该还原谁，会把戳留在池里
     if (gStallOff && !gStall.empty()) gStall.clear();
     r.stallHeld = StallActiveCount(nowTick);
@@ -2343,15 +3009,18 @@ void RunVacuumOnMain() {
             s_rejectStrikes = 0;
             s_rejectBackoffUntil = 0;
             gRejectBackoffUntil.store(0, std::memory_order_relaxed);
+            if (!pass.learnOwnerMixed && pass.learnOwnerId > 0)
+                NoteDropSelfOwnerFromPickup(static_cast<uint32_t>(pass.learnOwnerId));
         } else if (r.sentButPoolSame) {
             if (s_rejectStrikes < 100) ++s_rejectStrikes;
             if (s_rejectStrikes >= kRejectBackoffNeed) {
                 s_rejectBackoffUntil = nowTick + kRejectBackoffMs;
                 gRejectBackoffUntil.store(s_rejectBackoffUntil, std::memory_order_relaxed);
                 s_rejectStrikes = 0;
-                x::runtime::LogW("droppool",
-                                 "reject_backoff %ums (sentSame streak → skip vac; 清背包栏后自愈)",
-                                 (unsigned)kRejectBackoffMs);
+                x::runtime::LogW(
+                    "droppool",
+                    "reject_backoff %ums (sentSame streak → skip vac; 距离/归属/冷却，未必满栏)",
+                    (unsigned)kRejectBackoffMs);
             }
         } else {
             s_rejectStrikes = 0;
@@ -2372,6 +3041,95 @@ bool DropMatchesSkip(void* drop, const SkipIds& skip) {
     if (money) return SkipHas(skip, kMesoSkipId);
     const int info = ReadI32(drop, kOffDropInfo);
     return info > 0 && SkipHas(skip, info);
+}
+
+bool InvHasFreeSlot(int invType) {
+    void* list = x::ui::player::GetItemSlotList(invType);
+    if (!LooksLikeHeapPtr(list)) return true;  // 读不到 → 不挡拾取
+    const int n = ReadI32(list, kOffListSize);
+    if (n <= 0 || n > 512) return true;
+    void* items = ReadPtr(list, kOffListItems);
+    if (!LooksLikeHeapPtr(items)) return true;
+    const size_t idOff = x::ui::player::OffSlotItemId();
+    if (!idOff) return true;
+    const uintptr_t cap = ArrayLen(items);
+    int used = 0;
+    for (int i = 0; i < n && static_cast<uintptr_t>(i) < cap; ++i) {
+        void* slot = ArrayAt(items, static_cast<uintptr_t>(i));
+        if (!LooksLikeHeapPtr(slot)) continue;
+        if (ReadI32(slot, idOff) > 0) ++used;
+    }
+    return used < n;
+}
+
+HvClass ClassifyHighValueItem(int info, bool isMoney) {
+    if (isMoney || info <= 0) return HvClass::None;
+    // 装备：经典版 itemId / 1e6 == 1
+    if (info / 1000000 == 1) return HvClass::Equip;
+    // 装备卷常見段 204xxxx
+    if (info >= 2040000 && info < 2050000) return HvClass::Scroll;
+    char code[16]{};
+    snprintf(code, sizeof(code), "%d", info);
+    const xcat::ItemCatalogPack& pack = xcat::GetSharedItemCatalog(x::runtime::GetBinDir());
+    const char* name = xcat::ItemCatalogLookupName(pack, code);
+    if (name && name[0] && (strstr(name, "卷軸") || strstr(name, "卷轴"))) return HvClass::Scroll;
+    return HvClass::None;
+}
+
+bool HighValueBagAllows(HvClass hv) {
+    if (hv == HvClass::Equip) return InvHasFreeSlot(kInvTiEquip);
+    if (hv == HvClass::Scroll) return InvHasFreeSlot(kInvTiConsume);
+    return false;
+}
+
+// 扫真空盒 ∩ 角色半盒：可吸高价值 / 栏满跳过数（纯内存；与 Send 同口径）
+void ScanHighValueNear(void* pool, float petX, float petY, float halfW, float halfH, float ux,
+                       float uy, float charHalfW, float charHalfH, const SkipIds* skip,
+                       int& outNearHv, int& outSkippedFull, int* outSampleDropId,
+                       int* outSampleInfo, int* outSampleKind) {
+    outNearHv = 0;
+    outSkippedFull = 0;
+    if (outSampleDropId) *outSampleDropId = 0;
+    if (outSampleInfo) *outSampleInfo = 0;
+    if (outSampleKind) *outSampleKind = 0;
+    if (!pool || charHalfW <= 0.f || charHalfH <= 0.f) return;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return;
+
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        float dpx = 0.f, dpy = 0.f;
+        if (!ReadDropPt(drop, dpx, dpy)) continue;
+        if (std::fabs(dpx - petX) > halfW || std::fabs(dpy - petY) > halfH) continue;
+        if (skip && !skip->empty() && DropMatchesSkip(drop, *skip)) continue;
+        if (!DropClientPickable(drop)) continue;
+        if (ReadU8(drop, kOffDropPickable) == 0) continue;
+        if (ReadI32(drop, kOffDropEndPara) != kEndParaReady) continue;
+        const bool money = ReadU8(drop, kOffDropIsMoney) != 0;
+        const int info = ReadI32(drop, kOffDropInfo);
+        const HvClass hv = ClassifyHighValueItem(info, money);
+        if (hv == HvClass::None) continue;
+        if (!HighValueBagAllows(hv)) {
+            ++outSkippedFull;
+            continue;
+        }
+        // 人够不着 → 不计入可吸（勿 urgent）；栏满已在上分支
+        if (std::fabs(dpx - ux) > charHalfW || std::fabs(dpy - uy) > charHalfH) continue;
+        if (outNearHv == 0) {
+            if (outSampleDropId) *outSampleDropId = ReadI32(drop, kOffDropId);
+            if (outSampleInfo) *outSampleInfo = info;
+            if (outSampleKind) *outSampleKind = static_cast<int>(hv);
+        }
+        ++outNearHv;
+    }
 }
 
 bool ReadUserPos(float& x, float& y) {
@@ -2774,6 +3532,7 @@ void RunCharVacOnMain() {
             continue;
         }
         if (skip && DropMatchesSkip(drop, *skip)) continue;
+        if (!DropClientPickable(drop)) continue;
 
         const int id = ReadI32(drop, kOffDropId);
         if (id == 0) continue;
@@ -2809,6 +3568,7 @@ void RunCharVacOnMain() {
         }
         ++r.nearWant;
 
+        const int sentOwner = ReadI32(bestDrop, kOffDropOwnerId);
         __try {
             fn(pool, pt, bestId, 0u, nullptr);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -2818,6 +3578,9 @@ void RunCharVacOnMain() {
             ++r.sent;
             r.sentDropId = bestId;
         }
+        gCharPendingLearnOwner = (!seh && sentOwner > 0) ? static_cast<uint32_t>(sentOwner) : 0;
+    } else {
+        gCharPendingLearnOwner = 0;
     }
 
     gCharSentTotal.fetch_add(static_cast<uint32_t>(r.sent), std::memory_order_relaxed);
@@ -2845,6 +3608,8 @@ void RunCharVacOnMain() {
         }
     } else if (!seh && r.sent > 0 && (r.dropsDelta < 0 || poolFell)) {
         gCharPendingStallId = 0;
+        if (gCharPendingLearnOwner) NoteDropSelfOwnerFromPickup(gCharPendingLearnOwner);
+        gCharPendingLearnOwner = 0;
     }
 
     // 人物直吸不盖/不还原 EndPara 戳（见上）；stallHeld 仍反映软件退避表
@@ -2858,6 +3623,8 @@ void RunCharVacOnMain() {
         r.why = "seh";
     } else if (r.dropsDelta < 0 || poolFell) {
         r.why = "ok_absorbed";
+        if (gCharPendingLearnOwner) NoteDropSelfOwnerFromPickup(gCharPendingLearnOwner);
+        gCharPendingLearnOwner = 0;
     } else if (r.sent > 0) {
         r.why = r.sentButPoolSame ? "ok" : "ok_sent";
     } else if (r.stallHeld > 0) {
@@ -2947,7 +3714,8 @@ bool CollectProbe(ProbeSnapshot& out, float nearHalfW, float nearHalfH) {
     return true;
 }
 
-bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumResult& out) {
+bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumResult& out,
+                  bool highValuePriority) {
     out = {};
     if (!EnsureBound()) {
         out.why = "unbound";
@@ -2968,6 +3736,7 @@ bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumRe
 
     gJob.vacuumW = vacuumW;
     gJob.vacuumH = vacuumH;
+    gJob.highValuePriority = highValuePriority;
     gJob.skip = {};
     if (skipIds) gJob.skip = *skipIds;
     gJob.result = {};
@@ -2984,6 +3753,94 @@ bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumRe
     }
     out = gJob.result;
     return out.ok;
+}
+
+bool PeekHighValueActionable(float petX, float petY, float halfW, float halfH, const SkipIds* skip,
+                             int& outNearHv, int& outSkippedFull, int* outSampleDropId,
+                             int* outSampleInfo, int* outSampleKind) {
+    outNearHv = 0;
+    outSkippedFull = 0;
+    if (outSampleDropId) *outSampleDropId = 0;
+    if (outSampleInfo) *outSampleInfo = 0;
+    if (outSampleKind) *outSampleKind = 0;
+    if (!EnsureBound()) return false;
+    void* pool = PeekDropPool();
+    if (!LooksLikeHeapPtr(pool)) pool = ResolveDropPool(GetTickCount());
+    if (!LooksLikeHeapPtr(pool)) return false;
+    if (!ResolveLocalUser(GetTickCount())) return false;
+    float ux = 0.f, uy = 0.f;
+    if (!ReadUserPos(ux, uy)) return false;
+    const float charHalfW = xcat::kPetLootCharVacWMax * 0.5f;
+    const float charHalfH = xcat::kPetLootCharVacHMax * 0.5f;
+    ScanHighValueNear(pool, petX, petY, halfW, halfH, ux, uy, charHalfW, charHalfH, skip,
+                      outNearHv, outSkippedFull, outSampleDropId, outSampleInfo, outSampleKind);
+    return true;
+}
+
+int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut) {
+    if (!out || maxOut <= 0) return 0;
+    if (!EnsureBound()) return 0;
+    void* pool = PeekDropPool();
+    if (!LooksLikeHeapPtr(pool)) pool = ResolveDropPool(GetTickCount());
+    if (!LooksLikeHeapPtr(pool)) return 0;
+
+    static void* s_alertPool = nullptr;
+    static std::unordered_set<int> s_alerted;
+    static bool s_seeded = false;
+    if (pool != s_alertPool) {
+        s_alertPool = pool;
+        s_alerted.clear();
+        s_seeded = false;  // 换池先静默登记现有件，避免进图瞬间刷一串提示
+    }
+
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return 0;
+
+    // 池内仍在的 id：顺带修剪已吸走的，避免 set 无限涨
+    std::unordered_set<int> live;
+    live.reserve(static_cast<size_t>(count) + 8u);
+
+    int nOut = 0;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+        const int id = ReadI32(drop, kOffDropId);
+        if (id == 0) continue;
+        live.insert(id);
+        if (ReadU8(drop, kOffDropIsMoney) != 0) continue;
+        const int info = ReadI32(drop, kOffDropInfo);
+        const HvClass hv = ClassifyHighValueItem(info, false);
+        if (hv != HvClass::Scroll) continue;  // 仅卷軸提示音；装备不提醒
+        if (!DropClientPickable(drop)) continue;
+        if (!s_seeded) {
+            s_alerted.insert(id);
+            continue;
+        }
+        if (s_alerted.contains(id)) continue;
+        // 本拍 out 已满：不要 insert，留给下一拍再吐，避免永久漏提示
+        if (nOut >= maxOut) continue;
+        s_alerted.insert(id);
+        out[nOut].dropId = id;
+        out[nOut].itemId = info;
+        out[nOut].kind = static_cast<int>(HvClass::Scroll);
+        ++nOut;
+    }
+    if (!s_seeded) s_seeded = true;
+    // 修剪：只保留仍在池的
+    for (auto it = s_alerted.begin(); it != s_alerted.end();) {
+        if (!live.contains(*it))
+            it = s_alerted.erase(it);
+        else
+            ++it;
+    }
+    return nOut;
 }
 
 bool TryFootPickup(FootResult& out) {

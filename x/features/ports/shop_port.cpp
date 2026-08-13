@@ -31,6 +31,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace x::features::ports::shop {
@@ -202,7 +203,9 @@ constexpr size_t kFbShopItemPos = 0x14;
 constexpr size_t kFbShopItemPrice = 0x28;
 constexpr size_t kFbShopItemUnitPrice = 0x30;
 constexpr size_t kFbShopItemMaxSlot = 0x38;
+constexpr size_t kFbShopItemStock = 0x3C;  // CmpSellItem 比数量；卖栏投影常为 0
 constexpr size_t kFbShopItemQty = 0x40;
+constexpr size_t kFbShopItemSlot = 0x48;  // ItemSlotBase*；Charge 真源数量在 Bundle.nNumber
 constexpr size_t kFbUiTabCurrentIndex = 0x20;
 constexpr size_t kFbUiTabItems = 0x28;
 
@@ -268,7 +271,9 @@ struct ShopFieldOff {
     size_t itemPrice = kFbShopItemPrice;
     size_t itemUnitPrice = kFbShopItemUnitPrice;
     size_t itemMaxSlot = kFbShopItemMaxSlot;
+    size_t itemStock = kFbShopItemStock;
     size_t itemQty = kFbShopItemQty;
+    size_t itemSlot = kFbShopItemSlot;
     size_t tabCurrent = kFbUiTabCurrentIndex;
     size_t tabItems = kFbUiTabItems;
     bool tried = false;
@@ -293,13 +298,59 @@ ShopFieldOff gOff{};
 #define kOffShopItemPrice (gOff.itemPrice)
 #define kOffShopItemUnitPrice (gOff.itemUnitPrice)
 #define kOffShopItemMaxSlot (gOff.itemMaxSlot)
+#define kOffShopItemStock (gOff.itemStock)
 #define kOffShopItemQty (gOff.itemQty)
+#define kOffShopItemSlot (gOff.itemSlot)
 #define kOffUiTabCurrentIndex (gOff.tabCurrent)
 #define kOffUiTabItems (gOff.tabItems)
 
 constexpr int kShurikenIdMin = 2070000;
 constexpr int kShurikenIdMax = 2079999;
+// 卖栏 Item.MaxSlotCount 常为 0。满格真源：ItemBundle.nMaxPerSlot / Info.slotMax（按 itemId）。
+// 仅 IDM 全失败时才退回 500（BIN：部分飞镖满格=500；勿再用统一 800）。
+constexpr int kShurikenDefaultMaxSlot = 500;
 constexpr int kSessionStateConnected = 3;
+
+// ItemDataManager : Singleton<>（TDI 2027）— 与 titlebar 同源 hash
+constexpr char kItemDataManagerClass[] =
+    "de1c111ab825716f33574ba3f3978092564030384a1f03c2ea2676e99ea71c2";
+constexpr char kItemDataClass[] =
+    "f621ae15dbc3cb71335f3e8c226da19a11ca3bd1bbfa67913aecd861a8875e4";
+constexpr char kItemBundleClass[] =
+    "c2f3c9349695dedb3b3a45795c1e60bb7a5c97ddda6b2736643de8ce66b4db7";
+constexpr char kItemInfoClass[] =
+    "b6c2d6b5bde207d472a7e8ea0798b51fda0d25068579cfac9a8a467feded236";
+constexpr char kHashIdmDataTable[] =
+    "a96e655147f3659f9a24e3836052e342ab9db997dd3647c5db2d15ac376972a";
+constexpr char kHashIdmBundleMap[] =
+    "bf0d6d387c3598d051d5089e0932cea80521839a69083ab04b283b5acddb3e0";
+constexpr char kHashItemDataInfo[] =
+    "d85749d6426c0e4657ff23f4fc1ca8a12961891ab0f4aec5b7824271ee1a5a5";
+// 运行时字段名已哈希；明文 nMaxPerSlot/slotMax 会 field_get_offset miss
+constexpr char kHashBundleMaxPerSlot[] =
+    "bfe3de6208803ab58d59e229ce9e709a90d8cd29784ba7117ed9ad19b08820e";
+constexpr char kHashInfoSlotMax[] =
+    "bca765baa57391d92bc7f8f59e70a867a9fd546e3c9eb0541c2e90f3c911322";
+constexpr size_t kFbIdmDataTable = 0x18;
+constexpr size_t kFbIdmBundleMap = 0x38;       // Dictionary<int, ItemBundle>
+constexpr size_t kFbItemDataInfo = 0x18;
+constexpr size_t kFbBundleMaxPerSlot = 0x4C;  // short nMaxPerSlot
+constexpr size_t kFbInfoSlotMax = 0x58;       // int slotMax
+size_t gOffIdmDataTable = kFbIdmDataTable;
+size_t gOffIdmBundleMap = kFbIdmBundleMap;
+size_t gOffItemDataInfo = kFbItemDataInfo;
+size_t gOffBundleMaxPerSlot = kFbBundleMaxPerSlot;
+size_t gOffInfoSlotMax = kFbInfoSlotMax;
+#define kOffIdmDataTable (gOffIdmDataTable)
+#define kOffIdmBundleMap (gOffIdmBundleMap)
+#define kOffItemDataInfo (gOffItemDataInfo)
+#define kOffBundleMaxPerSlot (gOffBundleMaxPerSlot)
+#define kOffInfoSlotMax (gOffInfoSlotMax)
+void* gItemDataManagerKlass = nullptr;
+void* gItemDataManager = nullptr;
+DWORD gLastIdmRebind = 0;
+bool gIdmFieldTried = false;
+std::unordered_map<int, int> gItemMaxSlotCache;
 
 constexpr int kInvTiEquip = 1;
 constexpr int kInvTiConsume = 2;
@@ -516,6 +567,16 @@ void EnsureShopFieldOffsets() {
     hit(FieldOffOrFb(itemKlass, kFldItemUnitPrice, kFbShopItemUnitPrice, &gOff.itemUnitPrice));
     hit(FieldOffOrFb(itemKlass, kFldItemMaxSlot, kFbShopItemMaxSlot, &gOff.itemMaxSlot));
     hit(FieldOffOrFb(itemKlass, kFldItemQty, kFbShopItemQty, &gOff.itemQty));
+    // Stock@MaxSlot+4：dump 明文可解析；哈希化时用 MaxSlot/Quantity 夹心推导（0x38/0x3C/0x40）
+    {
+        bool stockOk = FieldOffOrFb(itemKlass, "Stock", kFbShopItemStock, &gOff.itemStock);
+        if (!stockOk && gOff.itemQty == gOff.itemMaxSlot + 8) {
+            gOff.itemStock = gOff.itemMaxSlot + 4;
+            stockOk = true;
+        }
+        hit(stockOk);
+    }
+    hit(FieldOffOrFb(itemKlass, "ItemSlot", kFbShopItemSlot, &gOff.itemSlot));
 
     hit(FieldOffOrFb(tabKlass, kFldUiTabCurrent, kFbUiTabCurrentIndex, &gOff.tabCurrent));
     hit(FieldOffOrFb(tabKlass, kFldUiTabItems, kFbUiTabItems, &gOff.tabItems));
@@ -548,7 +609,7 @@ void EnsureShopFieldOffsets() {
     if (!pktBase) pktBase = pktKlass;
     hit(FieldOffOrFb(pktBase, kHashPacketOffset, kFbPacketOffset, &gOffPacketOffset));
 
-    constexpr int kExpect = 28;
+    constexpr int kExpect = 30;
     gOff.hits = hits;
     gOff.path = hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback");
     x::runtime::LogI(
@@ -602,6 +663,208 @@ int ItemQty(void* slot) {
     if (!LooksLikeHeapPtr(slot)) return 0;
     const int16_t n = ReadI16(slot, x::ui::player::OffSlotBundleNumber());
     return n > 0 ? static_cast<int>(n) : 1;
+}
+
+// Charge 用：允许 0；读失败返回 -1（勿用 ItemQty：n<=0 会落成 1）
+int BundleNumberRaw(void* slot) {
+    if (!LooksLikeHeapPtr(slot)) return -1;
+    const int16_t n = ReadI16(slot, x::ui::player::OffSlotBundleNumber());
+    if (n < 0) return -1;
+    return static_cast<int>(n);
+}
+
+void* FindClass(const char* name);
+void* TryLazyValue(void* lazy);
+
+#define kOffDictBuckets (x::runtime::il2cpp_container::OffDictBuckets())
+#define kOffDictEntries (x::runtime::il2cpp_container::OffDictEntries())
+#define kOffDictCount (x::runtime::il2cpp_container::OffDictCount())
+#define kOffDictFreeCount (x::runtime::il2cpp_container::OffDictFreeCount())
+#define kOffEntryHash (x::runtime::il2cpp_container::OffDictEntryHash())
+#define kOffEntryNext (x::runtime::il2cpp_container::OffDictEntryNext())
+#define kOffEntryKey (x::runtime::il2cpp_container::OffDictEntryKey())
+#define kOffEntryValue (x::runtime::il2cpp_container::OffDictEntryValuePtr())
+#define kEntrySize (x::runtime::il2cpp_container::DictEntryStrideIntPtr())
+
+int ArrayI32At(void* array, uintptr_t index) {
+    if (!LooksLikeHeapPtr(array)) return -1;
+    __try {
+        if (index >= ArrayLen(array)) return -1;
+        return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(array) + kOffArrData +
+                                           index * sizeof(int32_t));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+void* DictGetIntPtr(void* dictionary, int key) {
+    if (!LooksLikeHeapPtr(dictionary)) return nullptr;
+    void* entries = ReadPtr(dictionary, kOffDictEntries);
+    const int count = ReadI32(dictionary, kOffDictCount);
+    const int freeCount = ReadI32(dictionary, kOffDictFreeCount);
+    const uintptr_t entryCount = ArrayLen(entries);
+    if (!LooksLikeHeapPtr(entries) || count <= 0 || count > 200000 || entryCount == 0 ||
+        entryCount > 400000) {
+        return nullptr;
+    }
+    const int hashCode = key & 0x7fffffff;
+    void* buckets = ReadPtr(dictionary, kOffDictBuckets);
+    if (LooksLikeHeapPtr(buckets)) {
+        const uintptr_t bucketCount = ArrayLen(buckets);
+        if (bucketCount > 0 && bucketCount <= 400000) {
+            int index = ArrayI32At(buckets, static_cast<uintptr_t>(hashCode) % bucketCount);
+            const int limit = count > freeCount ? count - freeCount + 8 : count + 8;
+            for (int guard = 0; index >= 0 && guard < limit &&
+                                static_cast<uintptr_t>(index) < entryCount; ++guard) {
+                uint8_t* entry =
+                    x::runtime::il2cpp_container::DictEntryAt(entries, index, kEntrySize);
+                if (!entry) break;
+                if (ReadI32(entry, kOffEntryHash) == hashCode &&
+                    ReadI32(entry, kOffEntryKey) == key) {
+                    void* value = ReadPtr(entry, kOffEntryValue);
+                    return LooksLikeHeapPtr(value) ? value : nullptr;
+                }
+                index = ReadI32(entry, kOffEntryNext);
+            }
+            return nullptr;
+        }
+    }
+    for (uintptr_t index = 0; index < entryCount; ++index) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(
+            entries, static_cast<int>(index), kEntrySize);
+        if (!entry) continue;
+        if (ReadI32(entry, kOffEntryHash) < 0 || ReadI32(entry, kOffEntryKey) != key) continue;
+        void* value = ReadPtr(entry, kOffEntryValue);
+        return LooksLikeHeapPtr(value) ? value : nullptr;
+    }
+    return nullptr;
+}
+
+void EnsureIdmFieldOffsets() {
+    if (gIdmFieldTried) return;
+    gIdmFieldTried = true;
+    x::runtime::il2cpp_container::Ensure();
+    void* idmKlass = FindClass(kItemDataManagerClass);
+    void* dataKlass = FindClass(kItemDataClass);
+    void* bundleKlass = FindClass(kItemBundleClass);
+    void* infoKlass = FindClass(kItemInfoClass);
+    gItemDataManagerKlass = idmKlass;
+    int hits = 0;
+    if (FieldOffOrFb(idmKlass, kHashIdmDataTable, kFbIdmDataTable, &gOffIdmDataTable)) ++hits;
+    if (FieldOffOrFb(idmKlass, kHashIdmBundleMap, kFbIdmBundleMap, &gOffIdmBundleMap)) ++hits;
+    if (FieldOffOrFb(dataKlass, kHashItemDataInfo, kFbItemDataInfo, &gOffItemDataInfo)) ++hits;
+    if (FieldOffOrFb(bundleKlass, kHashBundleMaxPerSlot, kFbBundleMaxPerSlot,
+                     &gOffBundleMaxPerSlot))
+        ++hits;
+    if (FieldOffOrFb(infoKlass, kHashInfoSlotMax, kFbInfoSlotMax, &gOffInfoSlotMax)) ++hits;
+    x::runtime::LogI("Shop",
+                     "IDM slotMax fields hits=%d/%d bundleMap=0x%zx nMaxPerSlot=0x%zx "
+                     "info=0x%zx slotMax=0x%zx",
+                     hits, 5, gOffIdmBundleMap, gOffBundleMaxPerSlot, gOffItemDataInfo,
+                     gOffInfoSlotMax);
+}
+
+bool LooksLikeItemDataManager(void* cand) {
+    if (!LooksLikeHeapPtr(cand)) return false;
+    if (gItemDataManagerKlass) {
+        void* k = ReadPtr(cand, 0);
+        if (k != gItemDataManagerKlass) return false;
+    }
+    void* bundleMap = ReadPtr(cand, kOffIdmBundleMap);
+    if (!LooksLikeHeapPtr(bundleMap)) return false;
+    const int count = ReadI32(bundleMap, kOffDictCount);
+    return count >= 0 && count < 500000;
+}
+
+void* ResolveItemDataManager() {
+    EnsureIdmFieldOffsets();
+    constexpr DWORD kRebindMs = 3000;
+    const DWORD now = GetTickCount();
+    if (LooksLikeItemDataManager(gItemDataManager)) return gItemDataManager;
+    if (gLastIdmRebind && now - gLastIdmRebind < kRebindMs && !gItemDataManager) return nullptr;
+    gLastIdmRebind = now;
+    gItemDataManager = nullptr;
+    if (!gItemDataManagerKlass) gItemDataManagerKlass = FindClass(kItemDataManagerClass);
+    if (!gItemDataManagerKlass) return nullptr;
+
+    const auto& e = x::runtime::il2cpp::Get();
+    // Charge 只在 MainPump 调；允许 class_init。勿在 worker 复用本函数碰托管。
+    if (e.runtimeClassInit) x::runtime::il2cpp::RuntimeClassInit(gItemDataManagerKlass);
+
+    void* staticsKlass = gItemDataManagerKlass;
+    void* parent = nullptr;
+    if (e.classParent) {
+        __try {
+            parent = e.classParent(gItemDataManagerKlass);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            parent = nullptr;
+        }
+        if (parent) {
+            if (e.runtimeClassInit) x::runtime::il2cpp::RuntimeClassInit(parent);
+            staticsKlass = parent;
+        }
+    }
+
+    auto staticsOf = [&](void* k) -> void* {
+        if (!k || !e.classStaticData) return nullptr;
+        __try {
+            void* sd = e.classStaticData(k);
+            return LooksLikeHeapPtr(sd) ? sd : nullptr;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+    };
+
+    void* best = nullptr;
+    auto scan = [&](void* sd) {
+        if (!sd || best) return;
+        for (size_t s = 0; s <= 0x40; s += sizeof(void*)) {
+            void* lazy = ReadPtr(sd, s);
+            void* cand = TryLazyValue(lazy);
+            if (!cand) cand = lazy;
+            if (LooksLikeItemDataManager(cand)) {
+                best = cand;
+                return;
+            }
+        }
+    };
+    scan(staticsOf(staticsKlass));
+    if (!best) scan(staticsOf(gItemDataManagerKlass));
+
+    if (best) {
+        gItemDataManager = best;
+        x::runtime::LogI("Shop", "ItemDataManager ACCEPT idm=%p", gItemDataManager);
+    } else {
+        x::runtime::LogWThrottled(41, 15000, "Shop", "ItemDataManager resolve miss klass=%p",
+                                  gItemDataManagerKlass);
+    }
+    return gItemDataManager;
+}
+
+// 返回 >0 的堆叠上限；失败 0。优先 ItemBundle.nMaxPerSlot，其次 Info.slotMax。
+int LookupItemMaxPerSlot(int itemId) {
+    if (itemId <= 0) return 0;
+    const auto it = gItemMaxSlotCache.find(itemId);
+    if (it != gItemMaxSlotCache.end()) return it->second;
+
+    int maxSlot = 0;
+    void* idm = ResolveItemDataManager();
+    if (LooksLikeHeapPtr(idm)) {
+        if (void* bundle = DictGetIntPtr(ReadPtr(idm, kOffIdmBundleMap), itemId)) {
+            const int16_t n = ReadI16(bundle, kOffBundleMaxPerSlot);
+            if (n > 0) maxSlot = static_cast<int>(n);
+        }
+        if (maxSlot <= 0) {
+            if (void* data = DictGetIntPtr(ReadPtr(idm, kOffIdmDataTable), itemId)) {
+                if (void* info = ReadPtr(data, kOffItemDataInfo); LooksLikeHeapPtr(info)) {
+                    const int sm = ReadI32(info, kOffInfoSlotMax);
+                    if (sm > 0) maxSlot = sm;
+                }
+            }
+        }
+    }
+    gItemMaxSlotCache[itemId] = maxSlot;
+    return maxSlot;
 }
 
 void* FindClass(const char* name) {
@@ -1503,7 +1766,7 @@ void FuncKeyTalkJobOnMain(void* user) {
         job->err = "FuncKey alloc";
         return;
     }
-    uint32_t gc = 0;
+    uintptr_t gc = 0;
     if (e.gcHandleNew) {
         __try {
             gc = e.gcHandleNew(fk, false);
@@ -1941,6 +2204,51 @@ struct ChargeJob {
     char err[96]{};
 };
 
+// BIN 22:42：空格充完后对 pos=9 slotN=500 连发数十次（金币不变）直至超时弹错。
+// 同 pos+qty+meso 连火 ≥kChargeStuckLimit → 本会话拉黑该 pos（多半已满/服拒，投影未刷新）。
+constexpr int kChargeStuckLimit = 3;
+constexpr int kChargeSkipCap = 32;
+int gChargeSkipPos[kChargeSkipCap]{};
+int gChargeSkipN = 0;
+int gChargeStuckPos = -1;
+int gChargeStuckQty = -1;
+int64_t gChargeStuckMeso = -1;
+int gChargeStuckHits = 0;
+// BIN 23:19：开店后首切消耗 TAB 时常 listN=0；若之后不再切 TAB，CmpSellItem
+// 会一直空投影 → Charge 死等 LIST_STALE。偶数拍弹到 Etc 再切回 Consume 强制刷新。
+int gChargeEmptyStreak = 0;
+
+bool ChargePosIsSkipped(int pos) {
+    for (int i = 0; i < gChargeSkipN; ++i) {
+        if (gChargeSkipPos[i] == pos) return true;
+    }
+    return false;
+}
+
+void ChargePosSkip(int pos) {
+    if (ChargePosIsSkipped(pos) || gChargeSkipN >= kChargeSkipCap) return;
+    gChargeSkipPos[gChargeSkipN++] = pos;
+    x::runtime::LogW("Shop", "charge skipStuck pos=%d (no meso/qty change ×%d)", pos,
+                     kChargeStuckLimit);
+}
+
+void NoteChargeFired(int pos, int qty, int64_t meso) {
+    if (pos == gChargeStuckPos && qty == gChargeStuckQty && meso == gChargeStuckMeso) {
+        ++gChargeStuckHits;
+        if (gChargeStuckHits >= kChargeStuckLimit) ChargePosSkip(pos);
+    } else {
+        gChargeStuckPos = pos;
+        gChargeStuckQty = qty;
+        gChargeStuckMeso = meso;
+        gChargeStuckHits = 1;
+    }
+}
+
+bool ChargeLooksStuck(int pos, int qty, int64_t meso) {
+    return pos == gChargeStuckPos && qty == gChargeStuckQty && meso == gChargeStuckMeso &&
+           gChargeStuckHits >= 1;
+}
+
 bool IsShurikenItemId(int itemId) {
     return itemId >= kShurikenIdMin && itemId <= kShurikenIdMax;
 }
@@ -1984,7 +2292,11 @@ void ChargeJobOnMain(void* user) {
             return;
         }
         bool tabSwitched = false;
-        (void)EnsureShopSellInvTab(gShopDlg, kInvTiConsume, &tabSwitched);
+        // 连续空投影：先弹 Etc（仅刷新用，本拍不扫飞镖），下拍再回 Consume。
+        const bool bounceEtc =
+            gChargeEmptyStreak > 0 && (gChargeEmptyStreak % 4) == 2;
+        const int wantInv = bounceEtc ? kInvTiEtc : kInvTiConsume;
+        (void)EnsureShopSellInvTab(gShopDlg, wantInv, &tabSwitched);
         if (cmpSell) {
             __try {
                 cmpSell(gShopDlg, gMiCmpSellItem);
@@ -1993,51 +2305,120 @@ void ChargeJobOnMain(void* user) {
         }
         void* list = ReadPtr(gShopDlg, kOffSellItemList);
         const int listN = ListSize(list);
-        if (tabSwitched || listN <= 0) {
+        if (bounceEtc || tabSwitched || listN <= 0) {
+            if (listN <= 0 || bounceEtc) ++gChargeEmptyStreak;
             strncpy_s(job->err, "LIST_STALE", _TRUNCATE);
-            x::runtime::LogW("Shop", "charge LIST_STALE sellListN=%d switched=%d (retry)", listN,
-                             tabSwitched ? 1 : 0);
+            x::runtime::LogW("Shop",
+                             "charge LIST_STALE sellListN=%d switched=%d bounce=%d emptyN=%d "
+                             "(retry)",
+                             listN, tabSwitched ? 1 : 0, bounceEtc ? 1 : 0, gChargeEmptyStreak);
             return;
         }
+        gChargeEmptyStreak = 0;
         if (listN > 512) {
             strncpy_s(job->err, "LIST_BAD", _TRUNCATE);
             return;
         }
         const int64_t meso = ReadMesoNow();
+        // 读钱失败：禁止乐观发包（买入路径同款 meso>=0 门禁；此处直接收工）
+        if (meso < 0) {
+            job->ok = true;
+            strncpy_s(job->err, "NO_MESO", _TRUNCATE);
+            ++job->skipMeso;
+            x::runtime::LogW("Shop", "charge meso unread listN=%d → NO_MESO", listN);
+            return;
+        }
+        for (int pickGuard = 0; pickGuard < 32; ++pickGuard) {
         int bestIdx = -1;
         int bestDeficit = 0;
+        int64_t bestCost = 0;
         int bestId = 0;
         int bestPos = 0;
         int bestMax = 0;
         int bestQty = 0;
         double bestUnit = 0.0;
+        int diagLogged = 0;
         for (int i = 0; i < listN; ++i) {
             void* it = ListAt(list, i);
             if (!LooksLikeHeapPtr(it)) continue;
             const int itemId = ReadI32(it, kOffShopItemId);
             if (!IsShurikenItemId(itemId)) continue;
-            const int maxSlot = ReadI32(it, kOffShopItemMaxSlot);
-            const int qty = ReadI32(it, kOffShopItemQty);
-            const double unit = ReadF64(it, kOffShopItemUnitPrice);
-            if (maxSlot <= 0 || qty >= maxSlot) {
+            const int itemPos = ReadI32(it, kOffShopItemPos);
+            if (ChargePosIsSkipped(itemPos)) {
                 ++job->skipOther;
+                continue;
+            }
+            // BIN 20:11：卖栏 MaxSlot/Stock/Quantity 常 0；游戏 Charge 读 ItemSlot@0x48
+            const int dtoMax = ReadI32(it, kOffShopItemMaxSlot);
+            const int stock = ReadI32(it, kOffShopItemStock);
+            const int qtyField = ReadI32(it, kOffShopItemQty);
+            void* slot = ReadPtr(it, kOffShopItemSlot);
+            const int slotN = BundleNumberRaw(slot);
+            // 满格：DTO → ItemBundle.nMaxPerSlot / Info.slotMax → 最后才 500
+            int maxSlot = dtoMax;
+            if (maxSlot <= 0) maxSlot = LookupItemMaxPerSlot(itemId);
+            if (maxSlot <= 0) maxSlot = kShurikenDefaultMaxSlot;
+            // 当前量优先 Bundle.nNumber（BIN 22:42：Stock 有值时勿盖过 slotN）
+            int qty = (slotN >= 0) ? slotN : stock;
+            if (qty < 0) qty = qtyField;
+            if (slotN < 0 && stock <= 0 && qtyField <= 0) {
+                ++job->skipOther;
+                if (diagLogged < 3) {
+                    ++diagLogged;
+                    x::runtime::LogI(
+                        "Shop",
+                        "charge skipNoSlot id=%d dtoMax=%d stock=%d qty=%d slot=%p unit=%.2f",
+                        itemId, dtoMax, stock, qtyField, slot,
+                        ReadF64(it, kOffShopItemUnitPrice));
+                }
+                continue;
+            }
+            // 一口价 = UintPrice；unit=0 不发包（BIN 23:48：已满格 unit=0 cost=0 空耗）
+            const double unit = ReadF64(it, kOffShopItemUnitPrice);
+            if (qty >= maxSlot) {
+                ++job->skipOther;
+                if (diagLogged < 3) {
+                    ++diagLogged;
+                    x::runtime::LogI(
+                        "Shop",
+                        "charge skipFull id=%d slotN=%d stock=%d dtoMax=%d max=%d unit=%.2f",
+                        itemId, slotN, stock, dtoMax, maxSlot, unit);
+                }
                 continue;
             }
             if (!(unit > 0.0)) {
                 ++job->skipOther;
+                if (diagLogged < 3) {
+                    ++diagLogged;
+                    x::runtime::LogI(
+                        "Shop",
+                        "charge skipUnit id=%d slotN=%d/%d unit=%.2f",
+                        itemId, qty, maxSlot, unit);
+                }
                 continue;
             }
             const int deficit = maxSlot - qty;
-            const int64_t cost = static_cast<int64_t>(unit * static_cast<double>(deficit) + 0.5);
-            if (meso >= 0 && cost > meso) {
+            const int64_t cost = static_cast<int64_t>(unit + 0.5);
+            if (cost > meso) {
                 ++job->skipMeso;
+                if (diagLogged < 3) {
+                    ++diagLogged;
+                    x::runtime::LogI(
+                        "Shop",
+                        "charge skipMeso id=%d slotN=%d/%d unit=%.2f cost=%lld meso=%lld",
+                        itemId, qty, maxSlot, unit, static_cast<long long>(cost),
+                        static_cast<long long>(meso));
+                }
                 continue;
             }
-            if (deficit > bestDeficit) {
+            const bool better = bestIdx < 0 || cost < bestCost ||
+                                (cost == bestCost && deficit > bestDeficit);
+            if (better) {
                 bestDeficit = deficit;
+                bestCost = cost;
                 bestIdx = i;
                 bestId = itemId;
-                bestPos = ReadI32(it, kOffShopItemPos);
+                bestPos = itemPos;
                 bestMax = maxSlot;
                 bestQty = qty;
                 bestUnit = unit;
@@ -2054,16 +2435,29 @@ void ChargeJobOnMain(void* user) {
                              static_cast<long long>(meso));
             return;
         }
+        // 同格同量同金币已火过 → 拉黑重选，勿再空发（BIN 23:48）
+        if (ChargeLooksStuck(bestPos, bestQty, meso)) {
+            ChargePosSkip(bestPos);
+            ++job->skipOther;
+            continue;
+        }
         WriteI32(gShopDlg, kOffSellSelectedIndex, bestIdx);
         WriteI32(gShopDlg, kOffLastSellIndex, bestIdx);
         sendPkt(gShopDlg, gMiSendRechargePacket);
+        NoteChargeFired(bestPos, bestQty, meso);
         job->charged = 1;
         job->ok = true;
         snprintf(job->err, sizeof(job->err), "FIRED via=ui");
         x::runtime::LogI(
             "Shop",
-            "charge FIRED via=ui id=%d pos=%d idx=%d qty=%d/%d unit=%.2f deficit=%d listN=%d",
-            bestId, bestPos, bestIdx, bestQty, bestMax, bestUnit, bestDeficit, listN);
+            "charge FIRED via=ui id=%d pos=%d idx=%d slotN=%d/%d unit=%.2f deficit=%d "
+            "cost=%lld meso=%lld listN=%d",
+            bestId, bestPos, bestIdx, bestQty, bestMax, bestUnit, bestDeficit,
+            static_cast<long long>(bestCost), static_cast<long long>(meso), listN);
+        return;
+        }  // pickGuard
+        job->ok = true;
+        strncpy_s(job->err, "NONE", _TRUNCATE);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         strncpy_s(job->err, "EXCEPTION", _TRUNCATE);
     }
@@ -2089,6 +2483,11 @@ bool FindBuyListIndex(void* dlg, int itemId, int& outIndex, int& outPrice, int& 
             if (ReadI32(it, kOffShopItemId) != itemId) continue;
             outIndex = i;
             outPrice = ReadI32(it, kOffShopItemPrice);
+            // 部分货架 Price 明文为 0，单价在 UintPrice(double)；买入规划要求 price>0
+            if (outPrice <= 0) {
+                const double unit = ReadF64(it, kOffShopItemUnitPrice);
+                if (unit > 0.0 && unit < 1.0e9) outPrice = static_cast<int>(unit + 0.5);
+            }
             outListOff = lo;
             return true;
         }
@@ -2482,6 +2881,69 @@ bool QueryShopBuyOffer(int itemId, bool& outInShop, int& outPrice) {
     return job.ok;
 }
 
+struct BuyShelfSnapJob {
+    int focusId = 0;
+    bool ok = false;
+};
+
+void BuyShelfSnapJobOnMain(void* user) {
+    auto* job = reinterpret_cast<BuyShelfSnapJob*>(user);
+    if (!job) return;
+    job->ok = false;
+    gLastRebindMs = 0;
+    if (!Rebind(GetTickCount())) return;
+    ReadyJob ready{};
+    ReadyJobOnMain(&ready);
+    if (!ready.ready || !LooksLikeHeapPtr(gShopDlg)) {
+        x::runtime::LogW("Shop", "buyShelf snap NO_SHOP focus=%d", job->focusId);
+        job->ok = true;  // 调用方已知无店；仍算完成
+        return;
+    }
+    const size_t offs[] = {kOffBuyItemList0, kOffBuyItemList1};
+    int focusHit = 0;
+    int focusPrice = 0;
+    double focusUnit = 0.0;
+    for (size_t lo : offs) {
+        void* list = ReadPtr(gShopDlg, lo);
+        const int n = ListSize(list);
+        char sample[160]{};
+        size_t pos = 0;
+        const int show = n > 12 ? 12 : n;
+        for (int i = 0; i < show; ++i) {
+            void* it = ListAt(list, i);
+            if (!LooksLikeHeapPtr(it)) continue;
+            const int id = ReadI32(it, kOffShopItemId);
+            const int price = ReadI32(it, kOffShopItemPrice);
+            const double unit = ReadF64(it, kOffShopItemUnitPrice);
+            if (job->focusId > 0 && id == job->focusId) {
+                focusHit = 1;
+                focusPrice = price;
+                focusUnit = unit;
+            }
+            if (pos + 28 < sizeof(sample)) {
+                pos += static_cast<size_t>(
+                    snprintf(sample + pos, sizeof(sample) - pos, "%s%d:%d", pos ? "," : "", id, price));
+            }
+        }
+        if (n > show && pos + 8 < sizeof(sample)) {
+            snprintf(sample + pos, sizeof(sample) - pos, ",…");
+        }
+        x::runtime::LogI("Shop", "buyShelf off=0x%zX n=%d sample(id:price)=[%s]", lo, n, sample);
+    }
+    if (job->focusId > 0) {
+        x::runtime::LogI("Shop", "buyShelf focus id=%d hit=%d price=%d unit=%.3f", job->focusId,
+                         focusHit, focusPrice, focusUnit);
+    }
+    job->ok = true;
+}
+
+bool LogBuyShelfSnapshot(int focusItemId) {
+    BuyShelfSnapJob job{};
+    job.focusId = focusItemId;
+    if (!x::runtime::managed_main::Call(&BuyShelfSnapJobOnMain, &job, kJobWaitMs)) return false;
+    return job.ok;
+}
+
 bool QueryItemPresent(int invType, int itemId, bool& outPresent, int& outCount) {
     outPresent = false;
     outCount = 0;
@@ -2691,6 +3153,15 @@ bool ResolveShopNpcForSupply(const char* /*preferredItemCode*/, std::string& out
                               const char* excludeMapName) {
     // 不按补给品选型：与 ForSell 相同（店内有货再买，无货跳过）。
     return ResolveShopNpcForSell(outNpcId, outShopId, outMapName, outMapId, excludeMapName);
+}
+
+void ResetChargeSession() {
+    gChargeSkipN = 0;
+    gChargeStuckPos = -1;
+    gChargeStuckQty = -1;
+    gChargeStuckMeso = -1;
+    gChargeStuckHits = 0;
+    gChargeEmptyStreak = 0;
 }
 
 bool RechargeShurikensInOpenShop(int& outCharged, int& outSkippedNoMeso, int& outSkippedOther,

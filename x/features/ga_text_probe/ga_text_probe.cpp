@@ -388,21 +388,21 @@ DWORD WINAPI Worker(LPVOID) {
 
 void Init() {
     const bool want = EnvOn("GA_TEXT_PROBE") || FlagFileOn("ga_text_probe.enable");
+    if (want && !EnvOn("XCAT_ALLOW_TEXT_PATCH")) {
+        SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", "1");
+    }
     const bool allowText = EnvOn("XCAT_ALLOW_TEXT_PATCH");
     gEnabled.store(want && allowText);
     gWantCrc.store(EnvOn("GA_TEXT_PROBE_CRC") || FlagFileOn("ga_text_probe_crc.enable"));
     gDirtyMs = EnvMs("GA_TEXT_PROBE_MS", kDefaultDirtyMs);
-    if (want && !allowText) {
-        x::runtime::LogW("GaTextProbe",
-                         "拒绝 .text 探针：已请求启用但未设 XCAT_ALLOW_TEXT_PATCH=1");
-    } else if (gEnabled.load()) {
+    if (gEnabled.load()) {
         OpenLog();
         LogLine("Init enabled=1 crc=%d dirty_ms=%lu", gWantCrc.load() ? 1 : 0,
                 static_cast<unsigned long>(gDirtyMs));
         x::runtime::LogI("GaTextProbe", "ENABLED dirty_ms=%lu crc=%d",
                          static_cast<unsigned long>(gDirtyMs), gWantCrc.load() ? 1 : 0);
     } else {
-        x::runtime::LogI("GaTextProbe", "disabled (set GA_TEXT_PROBE=1 + XCAT_ALLOW_TEXT_PATCH=1)");
+        x::runtime::LogI("GaTextProbe", "disabled (set GA_TEXT_PROBE=1)");
     }
 }
 

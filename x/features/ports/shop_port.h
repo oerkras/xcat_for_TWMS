@@ -63,8 +63,12 @@ bool SellItem(int invType, int pos, int itemId, int count, std::string& outErr);
 // 失败码：NO_SHOP / SHOP_BUSY / LIST_MISS / NO_MESO / BAD_ARGS / ...
 bool BuyItem(int itemId, int count, std::string& outErr, int* outBought = nullptr);
 
-// 店内是否有该商品；outPrice=Item.Price（单价）；未命中 outInShop=false。
+// 店内是否有该商品；outPrice=Item.Price（单价，必要时回退 UintPrice）；未命中 outInShop=false。
 bool QueryShopBuyOffer(int itemId, bool& outInShop, int& outPrice);
+
+// 诊断：开店后把买栏 (+0x178/+0x180) 条数与货架 ID/价打到 Shop 日志。
+// focusItemId>0 时额外标是否命中该 ID。失败（无店）返回 false。
+bool LogBuyShelfSnapshot(int focusItemId = 0);
 
 // 按 itemId 查该栏是否仍有货（确认用）。invType: 1/2/4。
 bool QueryItemPresent(int invType, int itemId, bool& outPresent, int& outCount);
@@ -85,9 +89,10 @@ bool ResolveShopNpcForSupply(const char* preferredItemCode, std::string& outNpcI
                               std::string& outShopId, std::string& outMapName, int& outMapId,
                               const char* excludeMapName = nullptr);
 
-// 飞镖 Charge：开店后扫消耗栏卖栏投影，对 207xxxx 且 Quantity<MaxSlotCount、UintPrice>0
-// 的飞镖写卖栏选中并调 SendRechargeRequestPacket。每次最多充 1 格；SHOP_BUSY/LIST_STALE
-// 时 outErr 对应码、调用方应重试；无候选时 outCharged=0 且返回 true。
+// 飞镖 Charge：开店后扫消耗栏卖栏投影，对 207xxxx 未满格写卖栏选中并调
+// SendRechargeRequestPacket。每次最多 1 格；SHOP_BUSY/LIST_STALE 时 outErr 对应码。
+// 开始一键/行程 Charge 前调用 ResetChargeSession（清卡住格拉黑）。
+void ResetChargeSession();
 bool RechargeShurikensInOpenShop(int& outCharged, int& outSkippedNoMeso, int& outSkippedOther,
                                  std::string& outErr);
 

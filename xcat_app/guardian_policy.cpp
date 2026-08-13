@@ -6,6 +6,7 @@ namespace xcat::app::guardian_policy {
 
 namespace {
 
+// hangup_schedule 在 ProcessDead 时会用 game_exit_probe 覆盖为「崩溃/无证据/探测失败」。
 constexpr const char* kReasonProcessDead = "游戏进程已退出";
 constexpr const char* kReasonStatusStale = "payload 心跳/状态停滞";
 constexpr const char* kReasonPayloadHung = "游戏假死(payload 心跳停滞)";

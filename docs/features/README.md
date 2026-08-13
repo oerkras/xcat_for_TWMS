@@ -84,8 +84,9 @@
 | [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：UserPool → 停手/换频；可勾选 GM/隐身升级 + 强制 Alarm（✅ 契约 v60） |
 | [`pet_feed/P0b_只读探针.md`](pet_feed/P0b_只读探针.md) | `ReadState` + `petfeed.log`；字段只读，未发包 |
 | [`pet_feed/P0c_自动召唤.md`](pet_feed/P0c_自动召唤.md) | `TryActivatePet` + `[core] petSummon`；喂食交官方 |
-| [`pet_loot/模块设计.md`](pet_loot/模块设计.md) | **拾物**：脚下 `TryPickUpDrop` + 宠扩盒吸物；共用黑名单 `[pet_loot]`（🚧 已挂入；实机待验） |
+| [`pet_loot/模块设计.md`](pet_loot/模块设计.md) | **拾物**：脚下 / 宠扩盒 / 人物直吸；黑名单默认箭矢·彈丸；归属预筛 |
 | [`pet_loot/P0a_锚点复核.md`](pet_loot/P0a_锚点复核.md) | TW IDA 钉死：DropPool/Pet 拾取 RVA、技能位、`_rcPet@0x100` |
+| [`pet_loot/P0b_Drop归属预筛.md`](pet_loot/P0b_Drop归属预筛.md) | **Drop.OwnerId**：`WM+0x114` 真源；禁 CS/`+0x98`；远程 Peek 黑名单 |
 | [`auto_lie/模块设计.md`](auto_lie/模块设计.md) | 自动测谎：TextCaptcha+LLM / NonFinite / 測謊機 `2190000` / 契约·status（✅ 挂入；离线基建 BIN 已过） |
 | [`auto_lie/基建与离线验收.md`](auto_lie/基建与离线验收.md) | 离线基建验收：就绪灯、本地/LLM 夹具泵（真 PNG）、报警·烟测、BIN 清单 |
 | [`auto_lie/P0a_锚点复核.md`](auto_lie/P0a_锚点复核.md) | **测谎数据源**：UIAntiMacro* Prefab、jpegData/path、WM+0x1D0、`IsOpenAntiMacro@0x936780` |
@@ -109,6 +110,7 @@
 | [`security/KRW驱动.md`](security/KRW驱动.md) | 本仓自研 `tools/krw`（IOCTL R/W）；对照 RW_Driver 不入库；**非** AC bypass |
 | [`security/客户端Hack标志与服端推断.md`](security/客户端Hack标志与服端推断.md) | Float/AB（**VecCtrlMob**）+ `ClientHacksType` → 服端举报链；**≠** 玩家飞天校验 |
 | [`security/攻包计数窗与type20.md`](security/攻包计数窗与type20.md) | SecurityClient **60s/2000** 攻包窗；`IsAttackPacket` 白名单；type20/21；BIN `SecAttack` |
+| [`security/检测面盘点与187秒墙.md`](security/检测面盘点与187秒墙.md) | **我方检测面 SSOT**：3 分钟断线 = 自家 HWBP（93 段零越线）；`Collecting from unknown thread` 根因；三层检测面清单；`.text` 授权不再自签 |
 
 原始数据：`Dumps/client_file_crc_paths.{json,tsv}` · 采证 DLL：`Dumps/runtime/out_bin/ClientFileCrcTrace.dll`
 

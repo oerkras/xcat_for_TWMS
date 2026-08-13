@@ -14,13 +14,27 @@ bool EnsureStateDir(const char* binDir) {
 }
 
 void ClampVacuum(PetLootConfig& cfg) {
-    if (!(cfg.vacuumW >= kPetLootVacuumMin) || cfg.vacuumW > kPetLootVacuumMax)
-        cfg.vacuumW = kPetLootVacuumWDefault;
-    if (!(cfg.vacuumH >= kPetLootVacuumMin) || cfg.vacuumH > kPetLootVacuumMax)
-        cfg.vacuumH = kPetLootVacuumHDefault;
+    if (!(cfg.vacuumW >= kPetLootVacuumMin)) cfg.vacuumW = kPetLootVacuumWDefault;
+    if (!(cfg.vacuumH >= kPetLootVacuumMin)) cfg.vacuumH = kPetLootVacuumHDefault;
+    // 超顶钳到 Max（旧 ini 4000 一次压回安全顶，勿整段打回默认丢用户意图）
+    if (cfg.vacuumW > kPetLootVacuumMax) cfg.vacuumW = kPetLootVacuumMax;
+    if (cfg.vacuumH > kPetLootVacuumMax) cfg.vacuumH = kPetLootVacuumMax;
     // 人物直吸与宠吸共用 vacuum*；半盒镜像写入以便旧读路径/ini 一致
     cfg.charHalfW = cfg.vacuumW * 0.5f;
     cfg.charHalfH = cfg.vacuumH * 0.5f;
+}
+
+// 经典版默认黑名单：箭矢 / 彈丸（名称含匹配，展开图鉴）
+void ApplyDefaultSkipRules(PetLootConfig& cfg) {
+    static constexpr const char* kDefaults[] = {"箭矢", "彈丸"};
+    cfg.skipRuleCount = 0;
+    for (const char* key : kDefaults) {
+        if (cfg.skipRuleCount >= static_cast<uint32_t>(kPetLootMaxSkipRules)) break;
+        PetLootSkipRule& r = cfg.skipRules[cfg.skipRuleCount++];
+        r = {};
+        r.enabled = 1;
+        strncpy_s(r.nameKey, key, _TRUNCATE);
+    }
 }
 
 bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTick) {
@@ -46,6 +60,8 @@ bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTi
     IniGetFloat(ini, "pet_loot", "charHalfH", out.charHalfH);
     IniGetU32(ini, "pet_loot", "filterFlags", out.filterFlags);
     if (IniGetBool(ini, "pet_loot", "skipFilterEnabled", b)) out.skipFilterEnabled = b ? 1u : 0u;
+    if (IniGetBool(ini, "pet_loot", "highValuePriority", b)) out.highValuePriority = b ? 1u : 0u;
+    if (IniGetBool(ini, "pet_loot", "scrollDropNotify", b)) out.scrollDropNotify = b ? 1u : 0u;
     uint32_t skipCount = 0;
     const bool hadSkip = IniGetU32(ini, "pet_loot", "skipCount", skipCount);
     if (hadSkip) {
@@ -72,6 +88,7 @@ bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTi
                 }
             }
         }
+        // skipCount=0：尊重用户清空；缺键时保留 SetDefaults 的「箭矢/彈丸」
     }
     PetLootNormalize(out);
     if (outWriteTick) IniGetU64(ini, "pet_loot", "writeTickMs", *outWriteTick);
@@ -101,6 +118,8 @@ bool WritePetLootIni(const char* binDir, const PetLootConfig& cfg, uint64_t writ
         IniSetFloat(ini, "pet_loot", "charHalfH", cfg.charHalfH);
         IniSetU32(ini, "pet_loot", "filterFlags", cfg.filterFlags);
         IniSetBool(ini, "pet_loot", "skipFilterEnabled", cfg.skipFilterEnabled != 0);
+        IniSetBool(ini, "pet_loot", "highValuePriority", cfg.highValuePriority != 0);
+        IniSetBool(ini, "pet_loot", "scrollDropNotify", cfg.scrollDropNotify != 0);
         // 清理已删除的角色全图吸键（charDrop*）
         IniEraseKeysWithPrefix(ini, "pet_loot", "charDrop");
         IniEraseKeysWithPrefix(ini, "pet_loot", "skip.");
@@ -134,6 +153,8 @@ uint32_t PetLootClampBurstPerTick(uint32_t n) {
 void PetLootEffectiveVacuum(const PetLootConfig& cfg, float& outW, float& outH) {
     outW = cfg.vacuumW >= kPetLootVacuumMin ? cfg.vacuumW : kPetLootVacuumWDefault;
     outH = cfg.vacuumH >= kPetLootVacuumMin ? cfg.vacuumH : kPetLootVacuumHDefault;
+    if (outW > kPetLootVacuumMax) outW = kPetLootVacuumMax;
+    if (outH > kPetLootVacuumMax) outH = kPetLootVacuumMax;
 }
 
 void PetLootEffectiveCharHalf(const PetLootConfig& cfg, float& outHalfW, float& outHalfH) {
@@ -173,6 +194,8 @@ void PetLootNormalize(PetLootConfig& cfg) {
     ClampVacuum(cfg);  // 同步 charHalf* = vacuum*/2
     if (cfg.filterFlags == 0) cfg.filterFlags = kPetLootFilterDefault;
     cfg.skipFilterEnabled = cfg.skipFilterEnabled ? 1u : 0u;
+    cfg.highValuePriority = cfg.highValuePriority ? 1u : 0u;
+    cfg.scrollDropNotify = cfg.scrollDropNotify ? 1u : 0u;
     if (cfg.skipRuleCount > static_cast<uint32_t>(kPetLootMaxSkipRules))
         cfg.skipRuleCount = static_cast<uint32_t>(kPetLootMaxSkipRules);
     for (uint32_t i = 0; i < cfg.skipRuleCount; ++i) {
@@ -199,6 +222,7 @@ void PetLootSetDefaults(PetLootConfig& out) {
     out.charHalfH = kPetLootCharHalfHDefault;
     out.filterFlags = kPetLootFilterDefault;
     out.skipFilterEnabled = 1;
+    ApplyDefaultSkipRules(out);
 }
 
 bool ReadPetLoot(const char* binDir, PetLootConfig& out) {

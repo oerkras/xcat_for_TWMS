@@ -37,6 +37,10 @@ DWORD CooldownRemainingMs();
 // soft_login RequestRestart 前同步 sticky，避免遇人换频后仍粘进图旧频。
 int LastKnownChannel1Based();
 
+// auto_enter 进图 Done：用选中频（1-based）写 known，并重置 WM 前进基线。
+// BIN 02:12：soft 进图后 ObserveWm 把 +0x6C 瞬态当成 wm6c_adv → sticky N→N+1。
+void SyncKnownAfterEnter(int channelId1Based, const char* why);
+
 // 遇人策略即将换频：把当前频记入「本图短期软拉黑」（落地仍有人 → 优先别再抽回）。
 // 手动 F10 不调用；TTL 内重复标记会刷新计时。
 void NoteCrowdedChannel();

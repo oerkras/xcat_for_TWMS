@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 75u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 81u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -33,6 +33,14 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 75u;
 // v73: attackAccelBreakDegreeFloorLo — 破限目标 lo 滑条（默认 -10，范围 [-10,0]）
 // v74: attackAccelClearBusy — 实验·清 ActionBusy 忙锁（与首页 attackAccel 入口独立）
 // v75: attackAccelClearBusyMinIntervalMs — 清忙锁开启时出刀间隔地板（默认 410）
+// v76: restMpAccel — 实验·坐下/椅子回蓝累加器加速（写 WM+0x17C/+0x180；默认关）
+// v77: restMpAccelIntervalMs — 写满间隔（默认 2500；过密会踢；BIN 已证真回蓝）
+// v78: meleeVeto — 「近战不挥拳」：让普攻那一发 TryDoingMeleeAttack 判负，落到兜底射击。
+//      勾上后先测量再决定：观测到近战体内自己转调射击（nest>0）就拒绝拦截 —— 弓正是这样，
+//      拦了会把整条伤害链打断（见 ARCHER_SHOOT_VS_BONK_GATE_20260809.md §0″/§0‴）。默认关。
+// v79: curFhGateBypass — 实验·地面门旁路（改 GA CurFh 判空跳转；≠ 站立伪装）
+// v80: infiniteStars — 实验·无限飞镖：自动维持 4121006 无形镖 + 客户端冻 207xxxx 扣数；默认关
+// v81: kInfiniteStarsUserEnabled=false — 实验 TAB 不画入口；不启 worker / 不挂钩；代码保留
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -179,6 +187,8 @@ constexpr bool kSkillMaxLevelUserEnabled = false;
 // false：实验 TAB「普攻必出终极一击」置灰；读盘/落盘/Apply 强制关，不启 FaForce worker
 //（曾 off-pump GetSkill → GA+0x3a0bde TLS AV；功能已弃用，代码保留防日后重开）。
 constexpr bool kFinalAttackForceUserEnabled = false;
+// false：实验 TAB 不画「无限飞镖」入口；读盘/落盘/Apply 强制关，不启 worker、不挂钩。
+constexpr bool kInfiniteStarsUserEnabled = false;
 // 群怪优先：落盘仍用 clusterWeight；0=关，非 0=开（旧 1–100 权重一律视为开）。
 constexpr uint32_t kClusterWeightDefault = 0u;
 constexpr uint32_t kClusterWeightMax = 100u;
@@ -193,6 +203,10 @@ constexpr uint32_t kAttackRpcMobsMax = 15u;
 constexpr uint32_t kAttackRpcIntervalDefaultMs = 500u;
 constexpr uint32_t kAttackRpcIntervalMinMs = 50u;
 constexpr uint32_t kAttackRpcIntervalMaxMs = 5000u;
+// rest_mp_accel：两次写满累加器间隔。自然约 5~10s；默认 2.5s；过小会踢。
+constexpr uint32_t kRestMpAccelIntervalDefaultMs = 2500u;
+constexpr uint32_t kRestMpAccelIntervalMinMs = 50u;
+constexpr uint32_t kRestMpAccelIntervalMaxMs = 10000u;
 constexpr uint32_t kAttackRpcDamageDefault = 1u;
 constexpr uint32_t kAttackRpcDamageMin = 1u;
 constexpr uint32_t kAttackRpcDamageMax = 999999u;
@@ -219,14 +233,14 @@ constexpr uint32_t kCombatTeleportStandOffMax = 200u;
 //     ⚠️ 出刀闸与到位判据会**跟着放大**，否则站到 250px 会被 |dx|<=120 的硬闸一票否决。
 constexpr uint32_t kCombatStandOffCustomDefault = 0u;
 // X = 人↔怪心的水平目标距离（px，恒正；左右哪一侧由飞控自己选）。
-// 自定义开箱默认 42/-7（与内置空中站位一致）；关勾选仍走同一组内置值。
-constexpr uint32_t kCombatStandOffXDefault = 42u;
+// 自定义开箱默认 60/-4（与内置空中站位一致）；关勾选仍走同一组内置值。
+constexpr uint32_t kCombatStandOffXDefault = 60u;
 constexpr uint32_t kCombatStandOffXMin = 0u;
 // 上界给到 900：够覆盖弓/弩/法师的屏内射程；再远怪也出屏了，选靶先饿死。
 constexpr uint32_t kCombatStandOffXMax = 900u;
 // Y = 相对怪心的垂直偏移（px，**带符号**；+Y 向上 ⇒ 正数=站在怪上方）。
 // 用 IniGetI32 直存负号，别偏置编码：user.ini 是用户会直接改的文件。
-constexpr int32_t kCombatStandOffYDefault = -7;
+constexpr int32_t kCombatStandOffYDefault = -4;
 constexpr int32_t kCombatStandOffYMin = -600;
 constexpr int32_t kCombatStandOffYMax = 600;
 // 站立伪装默认开：滑翔时 CurFh 恒空，一切「必须站立」的技能（蝸牛術、部分职业主
@@ -369,6 +383,9 @@ struct PayloadControl {
     // v69: 防贴脸退避 —— 站距 X/Y 内有任何怪（含锁定目标）就把站位点推开。默认关；
     // 需同时开「自定义站距」+ 空中贴怪，任一不满足即静默不生效（见 simple_combat 退避总闸）。
     uint32_t simpleCombatAntiHug = 0;
+    // v78: 近战不挥拳 —— 普攻的 TryDoingMeleeAttack 判负，交给分发器的兜底射击。默认关；
+    // 模块内自带「先测量再拦」判决，弓/弩一定拿不到 safe（伤害源就在近战体内）。
+    uint32_t meleeVeto = 0;
     uint32_t simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
     // v45: 单次贴怪 hop 上限（px）；调试 TAB
     uint32_t simpleCombatTeleportMaxHop = kCombatTeleportMaxHopDefault;
@@ -390,6 +407,9 @@ struct PayloadControl {
     uint32_t attackRpcMobs = kAttackRpcMobsDefault;
     uint32_t attackRpcIntervalMs = kAttackRpcIntervalDefaultMs;
     uint32_t attackRpcDamage = kAttackRpcDamageDefault;
+    // v79: 地面门旁路 —— 改 Magic/Shoot/Prepare 的 CurFh 判空跳转（.text）；默认关；实验 TAB。
+    // 与 simpleCombatGroundSpoof（出刀瞬间种台）独立，可单独开做 A/B。
+    uint32_t curFhGateBypass = 0;
     uint32_t autoLie = 1;  // 默认开：TextCaptcha+LLM / NonFinite 物理跟随
     uint32_t autoLieDryRun = 0;         // 1=???LLM ??? OnOk
     uint32_t autoLieMouseRegionOverlay = 0;  // 调试：NonFinite 题目区域叠层
@@ -451,6 +471,11 @@ struct PayloadControl {
     // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认开）。
     // 服端可能断线；与挂机「守护模式」叠加会干净重拉——挂机/守护时建议关。
     uint32_t auctionTownBypass = 1;
+    // v76/v77: 实验·坐下/椅子回蓝（刷 WM 累加器；默认关）。BIN 已证真蓝会动；过密踢。
+    uint32_t restMpAccel = 0;
+    uint32_t restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
+    // v80/v81: 实验·无限飞镖。用户入口已关（kInfiniteStarsUserEnabled）；字段保留防旧 ini / 日后重开。
+    uint32_t infiniteStars = 0;
     // Deprecated（经典版）：补给真源为 user.ini [auto_supply]。
     // 字段仅保留结构布局兼容；Read/WritePayloadControl 不再读写，并会清掉 core.autoSell*。
     uint32_t autoSell = 0;
@@ -565,6 +590,12 @@ inline uint32_t ClampAttackRpcMobs(uint32_t n) {
 inline uint32_t ClampAttackRpcIntervalMs(uint32_t ms) {
     if (ms < kAttackRpcIntervalMinMs) return kAttackRpcIntervalMinMs;
     if (ms > kAttackRpcIntervalMaxMs) return kAttackRpcIntervalMaxMs;
+    return ms;
+}
+
+inline uint32_t ClampRestMpAccelIntervalMs(uint32_t ms) {
+    if (ms < kRestMpAccelIntervalMinMs) return kRestMpAccelIntervalMinMs;
+    if (ms > kRestMpAccelIntervalMaxMs) return kRestMpAccelIntervalMaxMs;
     return ms;
 }
 

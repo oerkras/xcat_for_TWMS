@@ -889,6 +889,8 @@ bool RunObserveJob(JobCtx& job) {
 void MaybeObserveNativeChannel(DWORD now) {
     if (GetStateLocal() != State::Idle) return;
     if (!ports::world::IsPlayReady()) return;
+    // soft 重进 / 落地静默：WM+0x6C 会抖，勿当官方换频推 sticky（BIN soft N→N+1）。
+    if (soft_login_probe::IsHoldActive() || soft_login_probe::IsLandQuiet()) return;
     static DWORD sLastObserveMs = 0;
     if (sLastObserveMs && now - sLastObserveMs < kObserveWmIntervalMs) return;
     sLastObserveMs = now;
@@ -898,6 +900,20 @@ void MaybeObserveNativeChannel(DWORD now) {
     if (!RunObserveJob(job)) return;  // 超时/失败：不重试刷泵
 
     if (job.channelId < 0) return;
+    const int sticky1 = auto_enter::StickyChannel1Based();
+    // BIN 02:30：Done sync known 后 Login 清 known；冷读 wm6c=N（与 sticky ch.N 同号）
+    // 被当成 0-based → DispCh → sticky N→N+1。raw==sticky 时按「进图回声/1-based」吞掉。
+    if (sticky1 > 0 && job.channelId == sticky1) {
+        gKnownChannelIdx = sticky1 - 1;
+        Log("native_wm keep sticky ch.%d (raw=%d==sticky src=%s raw6c=%d raw68=%d)", sticky1,
+            job.channelId, job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
+            job.channelRaw68);
+        return;
+    }
+    if (sticky1 > 0 && DispCh(job.channelId) == sticky1) {
+        gKnownChannelIdx = job.channelId;
+        return;
+    }
     if (gKnownChannelIdx == job.channelId) {
         // known 已对齐：仍推 sticky（进图 Done 后 known 可能晚于 sticky，或 sticky 被冷启覆盖）
         PushStickyFromKnown("native_wm");
@@ -1745,6 +1761,23 @@ void TickWaiting(DWORD now) {
 
 int LastKnownChannel1Based() { return KnownDisp1Based(); }
 
+void SyncKnownAfterEnter(int channelId1Based, const char* why) {
+    if (channelId1Based < 1 || channelId1Based > 64) return;
+    const int idx = channelId1Based - 1;
+    const int prev = gKnownChannelIdx;
+    gKnownChannelIdx = idx;
+    // 清前进基线：下一拍 ObserveWm 走 known，勿把进图后 +0x6C 抖动当 wm6c_adv。
+    gLastRaw68 = -999;
+    gLastRaw6c = -999;
+    if (prev != idx) {
+        Log("sync known after enter %d→%d (ch.%d) why=%s — wm baseline reset", prev, idx,
+            channelId1Based, why ? why : "?");
+    } else {
+        Log("sync known after enter keep idx=%d (ch.%d) why=%s — wm baseline reset", idx,
+            channelId1Based, why ? why : "?");
+    }
+}
+
 void NoteCrowdedChannel() {
     if (!TryRefreshKnownIdx("note_crowded")) {
         Log("soft-avoid skip: knownIdx unset");
@@ -1891,7 +1924,15 @@ void Tick(DWORD now) {
                     soft_login_probe::IsHoldActive() ? 1 : 0);
             }
             if (!soft_login_probe::IsHoldActive()) {
-                gKnownChannelIdx = -1;
+                // Done 可能发生在仍 Login（WaitLeaveChar）；勿把 SyncKnown 清成 -1，
+                // 否则随后冷读 wm6c=sticky → DispCh 把 sticky +1（BIN 02:30 ch.6→7）。
+                const int st = auto_enter::StickyChannel1Based();
+                if (st > 0) {
+                    gKnownChannelIdx = st - 1;
+                    Log("login clear keep known from sticky ch.%d → idx=%d", st, gKnownChannelIdx);
+                } else {
+                    gKnownChannelIdx = -1;
+                }
                 gLastRaw68 = -999;
                 gLastRaw6c = -999;
                 gAdultFlagN = 0;

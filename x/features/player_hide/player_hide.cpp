@@ -59,15 +59,18 @@ constexpr char kHashMobDamageTick[] =
 // CMS LocalUser ≡ TW User（TypeDef 1560）
 constexpr char kHashUserClass[] =
     "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";
-// dump 明文类名仍为 Mob（TypeDef 1507）；hash 查找作兜底（旧 a803dc63… 已废）
-constexpr char kHashMobClass[] = "Mob";
+// 运行时类名已哈希；与 mob_pool / player_combat 同锚（旧 a803dc63… 已废；明文 "Mob" FindClass 会 miss）
+constexpr char kHashMobClass[] =
+    "d8cb6fb7d6903613c27c6c663961d0c02d458f0191006f691706e9ef9783849";
 constexpr size_t kFbMobDamageInfoList = 0x1D8;             // Mob._damageInfo List<DamageInfo>（未漂）
 constexpr size_t kOffDamageInfoCharacterId = 0x14;         // DamageInfo.CharacterId（未漂）
 
 constexpr int kMaxUsers = 128;
 constexpr int kMaxDamageInfos = 256;
-constexpr DWORD kTickMsOn = 250;
+constexpr DWORD kTickMsOn = 50;       // 常驻：进图后游戏会反复 SetActive(true)，250ms 会露人
+constexpr DWORD kTickMsBurst = 16;    // 换图后短时加力
 constexpr DWORD kTickMsOff = 500;
+constexpr DWORD kBurstMs = 5000;
 constexpr DWORD kJobWaitMs = 800;
 constexpr DWORD kLogMs = 5000;
 constexpr DWORD kFxInstallRetryMs = 3000;
@@ -102,6 +105,8 @@ size_t gOffAvatarRoot = kFbAvatarRoot;
 bool gAvatarOffTried = false;
 DWORD gLastLog = 0;
 DWORD gLastFxInstallTry = 0;
+int gLastMapId = 0;
+DWORD gBurstUntil = 0;
 
 MethodInfoHead* gMiSkillEffect = nullptr;
 MethodInfoHead* gMiSkillAffected = nullptr;
@@ -155,11 +160,16 @@ bool IsRemoteUser(void* user) {
     return user != local;
 }
 
-// 从 Mob._damageInfo 剔除远程玩家条目，避免 Slot14→OnHit→ShowDamage→EffectHp 画字。
+// 从 Mob._damageInfo 剔除远程玩家条目，避免 Slot14→OnHit/ShowDamage→EffectHp 画字。
 int FilterRemoteDamageInfos(void* mob) {
     if (!LooksLikeHeapPtr(mob)) return 0;
-    const uint32_t localCid = ports::world::GetCharacterId();
-    if (localCid == 0) return 0;
+
+    uint32_t localCid = ports::world::GetCharacterId();
+    if (localCid == 0) {
+        // WM/CS 偶发取不到时，直接读 UserLocal.CharacterId@0x1B0（与 DamageInfo 写入同源）
+        void* lu = ports::user_pool::PeekUserLocal();
+        if (LooksLikeHeapPtr(lu)) localCid = ReadU32(lu, 0x1B0);
+    }
 
     x::runtime::il2cpp_container::Ensure();
     void* list = ReadPtr(mob, kFbMobDamageInfoList);
@@ -170,14 +180,20 @@ int FilterRemoteDamageInfos(void* mob) {
 
     int kept = 0;
     int dropped = 0;
+    uint32_t sampleRemote = 0;
     for (int i = 0; i < size; ++i) {
         void* di = ArrayAt(items, static_cast<uintptr_t>(i));
         bool keep = true;
         if (LooksLikeHeapPtr(di)) {
             const uint32_t cid = ReadU32(di, kOffDamageInfoCharacterId);
-            if (cid != 0 && cid != localCid) {
+            // localCid 已知时：非本角一律丢（含 cid==0 的脏包，避免漏远程）
+            // localCid 未知时：宁可全留，避免误吞自己的字
+            if (localCid != 0 && cid != localCid) {
                 keep = false;
                 ++dropped;
+                if (!sampleRemote && cid) sampleRemote = cid;
+                // 双保险：即便后续仍遍历到该槽，伤害值也已清零
+                WriteI32(di, 0x24, 0);
             }
         }
         if (keep) {
@@ -188,9 +204,16 @@ int FilterRemoteDamageInfos(void* mob) {
     if (dropped > 0) {
         for (int i = kept; i < size; ++i) WritePtrSlot(items, static_cast<uintptr_t>(i), nullptr);
         WriteI32(list, x::runtime::il2cpp_container::OffListSize(), kept);
+        x::runtime::LogWThrottled(77, 3000, "PlayerHide",
+                                  "drop remote dmgInfo n=%d/%d localCid=%u sampleRemote=%u", dropped,
+                                  size, localCid, sampleRemote);
     }
     return dropped;
 }
+
+std::atomic<uint32_t> gDmgTickCalls{0};
+std::atomic<uint32_t> gDmgTickWithList{0};
+DWORD gLastDmgProbeLog = 0;
 
 void EnsureAvatarRootOffset() {
     if (gAvatarOffTried) return;
@@ -376,10 +399,30 @@ void Hook_ShowSkillSpecial(void* self, void* a1, int a2, void* grenade, const vo
 
 void Hook_MobDamageTick(void* self, const void* method) {
     if (gDesired.load(std::memory_order_relaxed)) {
-        const int n = FilterRemoteDamageInfos(self);
-        if (n > 0) {
-            x::runtime::LogWThrottled(77, 5000, "PlayerHide", "drop remote dmgInfo n=%d", n);
+        gDmgTickCalls.fetch_add(1, std::memory_order_relaxed);
+        // 探针：即便 size=0 也周期性打点，确认钩在跑 / localCid 是否为 0
+        int listSize = 0;
+        uint32_t localCid = ports::world::GetCharacterId();
+        if (localCid == 0) {
+            void* lu = ports::user_pool::PeekUserLocal();
+            if (LooksLikeHeapPtr(lu)) localCid = ReadU32(lu, 0x1B0);
         }
+        if (LooksLikeHeapPtr(self)) {
+            void* list = ReadPtr(self, kFbMobDamageInfoList);
+            if (LooksLikeHeapPtr(list)) {
+                listSize = ReadI32(list, x::runtime::il2cpp_container::OffListSize());
+                if (listSize > 0) gDmgTickWithList.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        const DWORD now = GetTickCount();
+        if (gLastDmgProbeLog == 0 || now - gLastDmgProbeLog >= 5000) {
+            gLastDmgProbeLog = now;
+            x::runtime::LogI("PlayerHide",
+                             "dmgTick probe calls=%u withList=%u lastSize=%d localCid=%u",
+                             gDmgTickCalls.load(std::memory_order_relaxed),
+                             gDmgTickWithList.load(std::memory_order_relaxed), listSize, localCid);
+        }
+        (void)FilterRemoteDamageInfos(self);
     }
     if (gOrigMobDamageTick) gOrigMobDamageTick(self, method);
 }
@@ -423,8 +466,8 @@ bool InstallFxHooks() {
     if (!userKlass) userKlass = x::runtime::il2cpp::FindClass("", "User");
     if (!userKlass) userKlass = x::runtime::il2cpp::FindClass("", "LocalUser");
     if (!userKlass) userKlass = x::runtime::il2cpp::FindClass("Msc.Game.Object", "LocalUser");
-    void* mobKlass = x::runtime::il2cpp::FindClass("", "Mob");
-    if (!mobKlass) mobKlass = x::runtime::il2cpp::FindClass("", kHashMobClass);
+    void* mobKlass = x::runtime::il2cpp::FindClass("", kHashMobClass);
+    if (!mobKlass) mobKlass = x::runtime::il2cpp::FindClass("", "Mob");
     if (!mobKlass) mobKlass = x::runtime::il2cpp::FindClass("Msc.Game.Object", "Mob");
 
     if (!userKlass || !mobKlass) {
@@ -591,19 +634,36 @@ void TickOnce(DWORD now) {
             }
             gWasOn.store(false, std::memory_order_relaxed);
             gLastHidden.store(0, std::memory_order_relaxed);
+            gBurstUntil = 0;
             x::runtime::LogI("PlayerHide", "restore touched=%d remote=%d", touched, remote);
         }
         return;
     }
 
-    // 关图外也可装钩，避免进图第一刀漏特效/伤字；Avatar 仍要求 PlayReady。
+    // 关图外也可装钩，避免进图第一刀漏特效/伤字。
     (void)InvokeApply(/*hide=*/true, /*avatar=*/false, nullptr, nullptr);
 
-    if (!ports::world::IsPlayReady()) return;
     const auto ss = ports::world::GetSceneState();
     if (ss == ports::world::SceneState::CashShop || ss == ports::world::SceneState::Login)
         return;
 
+    // 换图：mapId 变化或 InterStage → 短时加力重藏（进图 Spawn 会把 AvatarRoot 又点亮）。
+    const int mapId = ports::world::GetMapId();
+    if (mapId > 0 && mapId != gLastMapId) {
+        if (gLastMapId != 0) {
+            gBurstUntil = now + kBurstMs;
+            gLastLog = 0;
+            x::runtime::LogI("PlayerHide", "map change %d→%d burst %ums", gLastMapId, mapId,
+                             kBurstMs);
+        }
+        gLastMapId = mapId;
+    }
+    if (ss == ports::world::SceneState::InterStage) {
+        gBurstUntil = now + kBurstMs;
+    }
+
+    // 不再硬等 IsPlayReady：换图窗口远程可能已入池/已渲染，等 PlayReady 再藏会露一整段。
+    // CashShop/Login 已在上面挡掉；Apply 失败（泵 quiesce）下一拍重试。
     int touched = 0, remote = 0;
     if (!InvokeApply(/*hide=*/true, /*avatar=*/true, &touched, &remote)) return;
     gWasOn.store(true, std::memory_order_relaxed);
@@ -611,8 +671,9 @@ void TickOnce(DWORD now) {
 
     if (gLastLog == 0 || now - gLastLog >= kLogMs) {
         gLastLog = now;
-        x::runtime::LogI("PlayerHide", "hide touched=%d remote=%d fx=%d", touched, remote,
-                         gFxInstalled.load() ? 1 : 0);
+        x::runtime::LogI("PlayerHide", "hide touched=%d remote=%d fx=%d map=%d burst=%d", touched,
+                         remote, gFxInstalled.load() ? 1 : 0, mapId,
+                         (gBurstUntil && now < gBurstUntil) ? 1 : 0);
     }
 }
 
@@ -623,7 +684,11 @@ DWORD WINAPI Worker(LPVOID) {
         TickOnce(now);
         const bool on = gDesired.load(std::memory_order_relaxed) ||
                         gWasOn.load(std::memory_order_relaxed);
-        Sleep(on ? kTickMsOn : kTickMsOff);
+        DWORD sleepMs = kTickMsOff;
+        if (on) {
+            sleepMs = (gBurstUntil && now < gBurstUntil) ? kTickMsBurst : kTickMsOn;
+        }
+        Sleep(sleepMs);
     }
     if (gFxInstalled.load(std::memory_order_relaxed)) {
         (void)InvokeApply(/*hide=*/false, /*avatar=*/false, nullptr, nullptr);
@@ -655,6 +720,8 @@ void Init() {
     gOffAvatarRoot = kFbAvatarRoot;
     gLastLog = 0;
     gLastFxInstallTry = 0;
+    gLastMapId = 0;
+    gBurstUntil = 0;
     gFxInstalled.store(false);
     gOrigSkillEffect = nullptr;
     gOrigSkillAffected = nullptr;

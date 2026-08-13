@@ -60,7 +60,12 @@ struct VacuumResult {
     int gatesCleared = 0;  // 拍前清 LastTry/EndParabolic 个数（宠吸现多为 0）
     int flyHeld = 0;       // ByPet 前临时挡住的未落地件数（LastTry 戳，拍末还原）
     int skipStamped = 0;   // 黑名单 LastTry=INT_MAX 盖戳数（宠吸主路径）
-    int sampleOwnType = -1;
+    int ownSkipped = 0;    // 盒内非己/非无主（客户端预筛跳过）
+    int sampleOwnType = -1;  // Drop.OwnType（0..4；未解析=-1）
+    int sampleOwnRaw = 0;    // 死钉 +0x3C 原始 i32（诊断）
+    int sampleOwnerId = 0;   // Drop.OwnerId@+0x34（归属预筛）
+    int localCharId = 0;     // 掉落侧自己 OwnerId（认亲后）；未认亲为 0
+    int remoteUsers = -1;    // UserPool 远程人数；-1=Peek 失败（勿当独图）
     int sampleLastTry = 0;
     int sampleEndPara = 0;
     // 金币诊断（CountDropsNear 顺带读，不加第三趟扫池）
@@ -76,6 +81,16 @@ struct VacuumResult {
     int stallStamped = 0;   // 本拍盖住的退避中件数
     int stallRestored = 0;  // 拍末还原数；应等于 stallStamped，不等即有残留戳
     int stallHeld = 0;      // 退避集合内仍生效的 dropId 数
+    // 高价值优先（装备/卷軸）
+    int highValueNear = 0;     // 盒内可吸高价值（对应栏有空位）
+    int highValueSkippedFull = 0;  // 高价值但栏满跳过
+    bool highValueUrgent = false;  // 有可吸高价值 → 应打断出刀
+    int highValueSampleDropId = 0;  // 扫盒样本 dropId（Peek/Scan 首件）
+    int highValueSampleInfo = 0;    // 扫盒样本 itemId
+    int highValueSampleKind = 0;    // 0无 1装备 2卷軸
+    int pacedPickDropId = 0;        // 本拍按件 Send 选中的 dropId
+    int pacedPickInfo = 0;          // 选中 itemId（金币时为金额）
+    int pacedPickRank = 0;          // 0普通 1金币 2高价值
     // 服端异步清池：同拍 Δ 常为 0；跨拍 dropCount < 上拍 after → 真吸
     bool poolFellSinceLast = false;
     uint16_t petSkill = 0;       // GetUpgradePetSkill()（= GetItemSlot→usPetSkill）
@@ -154,7 +169,25 @@ void* PeekDropPool();
 
 bool CollectProbe(ProbeSnapshot& out, float nearHalfW, float nearHalfH);
 
-bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumResult& out);
+// highValuePriority：装备/卷軸优先；对应背包栏满则跳过该件；有可吸件时 out.highValueUrgent
+bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumResult& out,
+                  bool highValuePriority = false);
+
+// 纯内存扫池：宠真空 ∩ 角色半盒内是否有「栏未满」的装备/卷軸（与 Send 同口径；worker 可调）
+// 失败 / 无角色位 → false（调用方应 fail-closed 清 urgent）
+// 可选 outSample*：首件可吸 HV 的 dropId/itemId/kind(1装备/2卷)
+bool PeekHighValueActionable(float petX, float petY, float halfW, float halfH, const SkipIds* skip,
+                             int& outNearHv, int& outSkippedFull, int* outSampleDropId = nullptr,
+                             int* outSampleInfo = nullptr, int* outSampleKind = nullptr);
+
+struct HighValueDropAlert {
+    int dropId = 0;
+    int itemId = 0;
+    int kind = 0;  // 1=装备 2=卷軸（与 ClassifyHighValueItem 一致）
+};
+
+// 全图扫池：新出现的可捡卷軸（按 dropId 去重；换 DropPool 清空）。装备不进提示。
+int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut);
 
 // 主线程：仅 DropPool.TryPickUpDrop(角色位)；范围/门禁全交给游戏原生
 bool TryFootPickup(FootResult& out);

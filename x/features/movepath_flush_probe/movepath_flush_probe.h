@@ -6,8 +6,9 @@
 // 到 logs\movepath_flush.log。用途：land_miss 被踢时对齐 kick.log 时间线，实锤看清
 // 「我们上报的落点/fh 到底畸形在哪」——把 inset 从经验值升级成引擎口径。
 //
-// 红线：本仓禁止常驻 inline hook。此钩默认关；UI 勾选「采证上报包」时由 SetEnabled
-// 自动在游戏进程设 XCAT_ALLOW_TEXT_PATCH=1（关开关则清回）。关开关或探针卸载即还原 .text。
+// 红线：本仓禁止常驻 inline hook。此钩默认关；UI 勾选「采证上报包」只有在游戏进程
+// 已带 XCAT_ALLOW_TEXT_PATCH=1 时才真下钩，否则 SetEnabled 拒绝并记一条 WARN。
+// 关开关或探针卸载即还原 .text。
 // install/remove 一律在 Unity pump 线程上做（Flush 的执行线程），避免改字节时另一线程正执行该处。
 namespace x::features::movepath_flush_probe {
 

@@ -296,26 +296,17 @@ void PumpApply(void*) {
 }  // namespace
 
 void SetEnabled(bool on) {
-    // UI 勾选「采证上报包」时自动在本进程设 XCAT_ALLOW_TEXT_PATCH=1，免手动环境变量。
-    // 仅清理由本开关亲手写上的值，不碰用户预先设好的 1。
-    static bool sWeSetPatchEnv = false;
+    // 勾上即自行放行 .text 补丁。关开关不撤环境变量（与 melee_veto / 无限飞镖共用这根旗）。
     if (on) {
         char env[8]{};
         const DWORD n = GetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", env, sizeof(env));
-        const bool allowed = (n > 0 && env[0] == '1');
-        if (!allowed) {
+        if (!(n > 0 && env[0] == '1')) {
             if (!SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", "1")) {
-                x::runtime::LogW("MpFlush", "无法设置 XCAT_ALLOW_TEXT_PATCH=1（GetLastError=%lu）",
+                x::runtime::LogW("MpFlush", "无法设置 XCAT_ALLOW_TEXT_PATCH=1 err=%lu",
                                  GetLastError());
                 return;
             }
-            sWeSetPatchEnv = true;
-            x::runtime::LogI("MpFlush", "auto XCAT_ALLOW_TEXT_PATCH=1（采证开关）");
         }
-    } else if (sWeSetPatchEnv) {
-        SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", nullptr);
-        sWeSetPatchEnv = false;
-        x::runtime::LogI("MpFlush", "cleared XCAT_ALLOW_TEXT_PATCH（采证关）");
     }
     const bool prev = gWant.exchange(on, std::memory_order_acq_rel);
     if (prev == on) return;

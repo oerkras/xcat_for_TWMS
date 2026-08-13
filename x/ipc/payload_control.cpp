@@ -15,14 +15,18 @@
 #include "../features/encounter/encounter.h"
 #include "../features/ports/attack_rpc_port.h"
 #include "../features/ports/attack_input_port.h"
+#include "../features/ports/curfh_gate_bypass.h"
 #include "../features/ports/ground_spoof.h"
 #include "../features/ports/teleport_port.h"
 #include "../features/ports/world_port.h"
+#include "../features/melee_veto/melee_veto.h"
 #include "../features/simple_combat/simple_combat.h"
 #include "../features/mob_scan/mob_scan.h"
 #include "../features/fly/fly.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
+#include "../features/rest_mp_accel/rest_mp_accel.h"
+#include "../features/infinite_stars/infinite_stars.h"
 #include "../features/player_hide/player_hide.h"
 #include "../features/frame_lock/frame_lock.h"
 #include "../features/movepath_flush_probe/movepath_flush_probe.h"
@@ -400,15 +404,23 @@ void ApplyControl(const xcat::PayloadControl& c) {
     // 登录阶段只灌 auto_enter：BIN 11:47 在 LOGIN worker 里 Poll→Apply 打开了
     // invuln/加速/打怪/Travel MI，随后进程闪退。play-ready 前禁止玩法开关。
     x::features::auto_enter::SetDesired(c.autoEnter != 0, c.worldId, c.worldName, c.charSlot);
+    // 软重连必须在 play-ready 前武装：选频/选角 Session 闪断时 KickSniff 会 RequestAttempt；
+    // 若仍 idle，守护把 disconnectSeq 当硬踢干净杀（upload caa553：soft Init idle，
+    // 进图后才 UI enable；用户首页软重连实际已开）。银河 token 与软重连同开关，一并提前。
+    x::features::galaxy_token_probe::SetEnabled(c.galaxyTokenProbe != 0);
+    x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
+    ApplySoftLoginDismissSeq(c);
     if (x::runtime::managed_main::IsLoginFrozen() ||
         !x::features::ports::world::IsPlayReady()) {
         static bool sLoggedDefer = false;
         if (!sLoggedDefer) {
             sLoggedDefer = true;
             x::runtime::LogI("PayloadControl",
-                             "defer play features until play-ready (login-freeze=%d play=%d)",
+                             "defer play features until play-ready (login-freeze=%d play=%d; "
+                             "softLogin armed early=%d)",
                              x::runtime::managed_main::IsLoginFrozen() ? 1 : 0,
-                             x::features::ports::world::IsPlayReady() ? 1 : 0);
+                             x::features::ports::world::IsPlayReady() ? 1 : 0,
+                             c.softLoginProbe != 0 ? 1 : 0);
         }
         // 不 latch gHaveApplied：进图后需完整 Apply 一次。
         return;
@@ -469,6 +481,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
     x::features::simple_combat::SetAntiJitterEnabled(c.simpleCombatAntiJitter != 0);
     x::features::simple_combat::SetAntiHugEnabled(c.simpleCombatAntiHug != 0);
+    x::features::melee_veto::SetEnabled(c.meleeVeto != 0);
     x::features::simple_combat::SetFlySpeedPct(c.simpleCombatFlySpeedPct);
     x::features::simple_combat::SetHumanWalkEnabled(c.simpleCombatHumanWalk != 0);
     x::features::simple_combat::SetLiveStepEnabled(c.simpleCombatLiveStep != 0);
@@ -494,6 +507,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::attack_rpc::SetIntervalMs(c.attackRpcIntervalMs);
     x::features::ports::attack_rpc::SetDamage(static_cast<int>(c.attackRpcDamage));
     x::features::ports::attack_rpc::SetEnabled(c.attackRpc != 0);
+    x::features::ports::curfh_gate_bypass::SetEnabled(c.curFhGateBypass != 0);
     x::features::auto_lie::SetEnabled(c.autoLie != 0);
     x::features::auto_lie::SetDryRun(c.autoLieDryRun != 0);
     x::features::movepath_flush_probe::SetEnabled(c.movepathFlushProbe != 0);
@@ -501,6 +515,10 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
     x::features::drop_alert_bypass::SetEnabled(c.dropAlertBypass != 0);
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
+    x::features::rest_mp_accel::SetIntervalMs(c.restMpAccelIntervalMs);
+    x::features::rest_mp_accel::SetEnabled(c.restMpAccel != 0);
+    if (xcat::kInfiniteStarsUserEnabled)
+        x::features::infinite_stars::SetEnabled(c.infiniteStars != 0);
     // 自动补给真源：user.ini [auto_supply]（HotReadConfig）；勿再用 core.autoSell 灌开关。
     x::features::encounter::SetEnabled(c.autoRelogin != 0);
     x::features::encounter::SetStrategies(c.autoReloginStopCombat != 0,

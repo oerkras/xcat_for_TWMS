@@ -116,6 +116,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.simpleCombatGroundSpoof = kCombatGroundSpoofDefault;
     out.simpleCombatAntiJitter = kCombatAntiJitterDefault;
     out.simpleCombatAntiHug = 0;
+    out.meleeVeto = 0;
     out.simpleCombatTeleportCooldownMs = kCombatTeleportCooldownDefaultMs;
     out.simpleCombatTeleportMaxHop = kCombatTeleportMaxHopDefault;
     out.simpleCombatLiveStep = 0;
@@ -130,6 +131,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.attackRpcMobs = kAttackRpcMobsDefault;
     out.attackRpcIntervalMs = kAttackRpcIntervalDefaultMs;
     out.attackRpcDamage = kAttackRpcDamageDefault;
+    out.curFhGateBypass = 0;
     out.autoLie = 1;  // 默认开启；ini 有显式项时仍以 ini 为准
     out.autoLieDryRun = 0;
     out.autoLieMouseRegionOverlay = 0;
@@ -161,6 +163,9 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.frameLockFps = kFrameLockFpsDefault;
     out.dropAlertBypass = 0;  // 默认关
     out.auctionTownBypass = 1;  // 默认开
+    out.restMpAccel = 0;  // 实验·默认关
+    out.restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
+    out.infiniteStars = 0;  // 实验·默认关
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
     out.autoSellReturnFarmSeq = 0;
@@ -299,6 +304,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.attackRpcIntervalMs = ClampAttackRpcIntervalMs(u);
     if (IniGetU32(ini, "core", "attackRpcDamage", u))
         out.attackRpcDamage = ClampAttackRpcDamage(u);
+    if (IniGetBool(ini, "core", "curFhGateBypass", b)) out.curFhGateBypass = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoLie", b)) out.autoLie = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoLieDryRun", b)) out.autoLieDryRun = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoLieMouseRegionOverlay", b))
@@ -368,6 +374,11 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetU32(ini, "core", "frameLockFps", u)) out.frameLockFps = ClampFrameLockFps(u);
     if (IniGetBool(ini, "core", "dropAlertBypass", b)) out.dropAlertBypass = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "auctionTownBypass", b)) out.auctionTownBypass = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "restMpAccel", b)) out.restMpAccel = b ? 1u : 0u;
+    if (IniGetU32(ini, "core", "restMpAccelIntervalMs", u))
+        out.restMpAccelIntervalMs = ClampRestMpAccelIntervalMs(u);
+    if (IniGetBool(ini, "core", "infiniteStars", b)) out.infiniteStars = b ? 1u : 0u;
+    if (!kInfiniteStarsUserEnabled) out.infiniteStars = 0;
     // core.autoSell* 已废弃：真源 [auto_supply]；此处强制清零，避免旧 key 干扰。
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
@@ -408,6 +419,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.simpleCombatAntiJitter = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "simpleCombatAntiHug", b))
         out.simpleCombatAntiHug = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "meleeVeto", b)) out.meleeVeto = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "simpleCombatTeleportCooldownMs", u))
         out.simpleCombatTeleportCooldownMs = ClampCombatTeleportCooldownMs(u);
     if (IniGetU32(ini, "core", "simpleCombatTeleportMaxHop", u)) {
@@ -544,11 +556,18 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                                        : kAttackRpcIntervalDefaultMs);
     normalized.attackRpcDamage = ClampAttackRpcDamage(
         normalized.attackRpcDamage ? normalized.attackRpcDamage : kAttackRpcDamageDefault);
+    normalized.curFhGateBypass = normalized.curFhGateBypass ? 1u : 0u;
     normalized.autoLie = normalized.autoLie ? 1u : 0u;
     normalized.autoLieDryRun = normalized.autoLieDryRun ? 1u : 0u;
     normalized.autoLieMouseRegionOverlay = normalized.autoLieMouseRegionOverlay ? 1u : 0u;
     normalized.dropAlertBypass = normalized.dropAlertBypass ? 1u : 0u;
     normalized.auctionTownBypass = normalized.auctionTownBypass ? 1u : 0u;
+    normalized.restMpAccel = normalized.restMpAccel ? 1u : 0u;
+    normalized.restMpAccelIntervalMs = ClampRestMpAccelIntervalMs(
+        normalized.restMpAccelIntervalMs ? normalized.restMpAccelIntervalMs
+                                         : kRestMpAccelIntervalDefaultMs);
+    normalized.infiniteStars =
+        (kInfiniteStarsUserEnabled && normalized.infiniteStars) ? 1u : 0u;
     normalized.autoSell = normalized.autoSell ? 1u : 0u;
     normalized.launcherHangupSchedule = normalized.launcherHangupSchedule ? 1u : 0u;
     normalized.launcherHangupScheduleMask =
@@ -578,6 +597,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.simpleCombatGroundSpoof = normalized.simpleCombatGroundSpoof ? 1u : 0u;
     normalized.simpleCombatAntiJitter = normalized.simpleCombatAntiJitter ? 1u : 0u;
     normalized.simpleCombatAntiHug = normalized.simpleCombatAntiHug ? 1u : 0u;
+    normalized.meleeVeto = normalized.meleeVeto ? 1u : 0u;
     normalized.simpleCombatTeleportCooldownMs =
         ClampCombatTeleportCooldownMs(normalized.simpleCombatTeleportCooldownMs
                                          ? normalized.simpleCombatTeleportCooldownMs
@@ -690,6 +710,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "attackRpcMobs", normalized.attackRpcMobs);
         IniSetU32(ini, "core", "attackRpcIntervalMs", normalized.attackRpcIntervalMs);
         IniSetU32(ini, "core", "attackRpcDamage", normalized.attackRpcDamage);
+        IniSetBool(ini, "core", "curFhGateBypass", normalized.curFhGateBypass != 0);
         IniSetBool(ini, "core", "autoLie", normalized.autoLie != 0);
         IniSetBool(ini, "core", "autoLieDryRun", normalized.autoLieDryRun != 0);
         IniSetBool(ini, "core", "autoLieMouseRegionOverlay",
@@ -748,6 +769,12 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         // 「不挥弓」已拆除（v70）：清掉历史 key，免得旧 ini 一直留着个没人读的开关。
         IniEraseKey(ini, "core", "pointBlankShoot");
         IniSetBool(ini, "core", "auctionTownBypass", normalized.auctionTownBypass != 0);
+        IniSetBool(ini, "core", "restMpAccel", normalized.restMpAccel != 0);
+        IniSetU32(ini, "core", "restMpAccelIntervalMs",
+                  ClampRestMpAccelIntervalMs(normalized.restMpAccelIntervalMs
+                                                 ? normalized.restMpAccelIntervalMs
+                                                 : kRestMpAccelIntervalDefaultMs));
+        IniSetBool(ini, "core", "infiniteStars", normalized.infiniteStars != 0);
         // 剥离双轨：不再写 core.autoSell*，并清掉历史 key。
         IniEraseKeysWithPrefix(ini, "core", "autoSell");
         IniSetBool(ini, "core", "launcherHangupSchedule",
@@ -772,6 +799,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "simpleCombatAntiJitter",
                    normalized.simpleCombatAntiJitter != 0);
         IniSetBool(ini, "core", "simpleCombatAntiHug", normalized.simpleCombatAntiHug != 0);
+        IniSetBool(ini, "core", "meleeVeto", normalized.meleeVeto != 0);
         IniSetU32(ini, "core", "simpleCombatTeleportCooldownMs",
                   normalized.simpleCombatTeleportCooldownMs);
         // fill+Doing 已废：清掉历史跨层门控 / 位移预算 key。

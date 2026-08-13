@@ -103,6 +103,8 @@ const char* AutoSupplyStateLabel(uint32_t state) {
         return "开店中";
     case xcat::kAutoSupplyStateTripTrading:
         return "买卖中";
+    case xcat::kAutoSupplyStateRecharging:
+        return "充飞镖中";
     case xcat::kAutoSupplyStateReturning:
         return "回挂机图";
     case xcat::kAutoSupplyStateTripDone:
@@ -553,6 +555,8 @@ static bool gUiAttackRpc = false;
 static int gUiAttackRpcMobs = (int)xcat::kAttackRpcMobsDefault;
 static int gUiAttackRpcIntervalMs = (int)xcat::kAttackRpcIntervalDefaultMs;
 static int gUiAttackRpcDamage = (int)xcat::kAttackRpcDamageDefault;
+// 地面门旁路：仅实验 TAB；与站立伪装（simpleCombatGroundSpoof）独立。
+static bool gUiCurFhGateBypass = false;
 // F6 手动飞 / F5 滑翔倍率：首页「飞行速度」卡；调试 TAB 不再改这两项。
 static int gUiManualFlySpeedPct = (int)xcat::kFlySpeedPctDefault;
 static int gUiFlySpeedPct = (int)xcat::kHeliSpeedPctDefault;
@@ -592,6 +596,8 @@ void DrawHomeTab(LaunchUiState& ui) {
     static int standOffY = (int)xcat::kCombatStandOffYDefault;
     // 防贴脸退避：站距 X/Y 内有任何怪就把站位点推开；复用上面那组 X/Y 当半径；默认关
     static bool antiHug = false;
+    // 近战不挥拳：让普攻的近战那一发判负，落到兜底射击；模块内先测量再决定要不要真拦
+    static bool meleeVeto = false;
     // 站立伪装：出刀瞬间伪造踩台，给腾空放不出技能的职业用；默认关
     static bool groundSpoof = false;
     static bool smartInterval = false;
@@ -690,6 +696,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 standOffX = (int)xcat::ClampCombatStandOffX(disk.simpleCombatStandOffX);
                 standOffY = (int)xcat::ClampCombatStandOffY(disk.simpleCombatStandOffY);
                 antiHug = disk.simpleCombatAntiHug != 0;
+                meleeVeto = disk.meleeVeto != 0;
                 groundSpoof = disk.simpleCombatGroundSpoof != 0;
                 gUiAntiJitter = disk.simpleCombatAntiJitter != 0;
                 gUiFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
@@ -848,6 +855,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             xcat::ClampCombatStandOffX(static_cast<uint32_t>(standOffX < 0 ? 0 : standOffX));
         c.simpleCombatStandOffY = xcat::ClampCombatStandOffY(static_cast<int32_t>(standOffY));
         c.simpleCombatAntiHug = antiHug ? 1u : 0u;
+        c.meleeVeto = meleeVeto ? 1u : 0u;
         c.simpleCombatGroundSpoof = groundSpoof ? 1u : 0u;
         c.simpleCombatAntiJitter = gUiAntiJitter ? 1u : 0u;
         c.simpleCombatFlySpeedPct =
@@ -910,7 +918,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             lastSeenTick = c.writeTickMs;
             xcat::log::Ok("App",
                           "已下发 core：测谎=%d 无敌=%d 自动进=%d 加血=%d@%d 加蓝=%d@%d 召宠=%d "
-                          "有粮才召=%d 打怪=%d 追怪=%s 间隔=%d 贴怪瞬移=0 LiveStep=%d "
+                          "有粮才召=%d 打怪=%d 追怪=%s 间隔=%d 群怪=%d 贴怪瞬移=0 LiveStep=%d "
                           "分区=%d 槽=%d 守护=%d softLogin=%d "
                           "读怪=%d 终极一击=%d 技能满级=%d 加速=%d",
                           autoLie ? 1 : 0, invincible ? 1 : 0, autoEnter ? 1 : 0,
@@ -919,7 +927,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                           approachMode == 0   ? "空中贴怪"
                           : approachMode == 1 ? "拟人"
                                               : "关闭",
-                          gUiSimpleCombatAttackIntervalMs,
+                          gUiSimpleCombatAttackIntervalMs, clusterWeight ? 1 : 0,
                           gUiCombatLiveStep ? 1 : 0, worldId, charSlot, watchdog ? 1 : 0,
                           softLoginProbe ? 1 : 0,
                           mobScanIntervalMs, gUiFinalAttackForce ? 1 : 0, gUiSkillMaxLevel ? 1 : 0,
@@ -1269,8 +1277,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "自己指定悬停在怪的哪个方位，给远程职业用。\n"
                 "不勾 = 用内置近战最优值（X=%u，Y=%d），那是几千次出刀分桶实测出来的。\n"
-                "勾上后出刀判定会跟着你设的距离一起放宽，否则站远了会一刀都不出。\n"
-                "命中率就归你自己调了——站太远打不到，程序不会替你拦。",
+                "勾上后：用你设的 X/Y 在角色周围模拟攻击 AABB，框内有怪才出刀。\n"
+                "命中率归你调——站太远打不到，程序不会替你拦。",
                 (unsigned)xcat::kCombatStandOffXDefault, (int)xcat::kCombatStandOffYDefault);
         }
         ImGui::SameLine(0.f, ui::Gap() * 1.2f);
@@ -1287,8 +1295,8 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "水平站距：人离怪中心多远（px，%u–%u）。\n"
-                "站哪一侧由飞控自己选，你只管定距离。\n"
+                "水平站距 / 攻击 AABB 半宽（px，%u–%u）。\n"
+                "站哪一侧由飞控自己选；出刀：|人↔怪|X ≤ 此值。\n"
                 "近战 20–45 命中最好；弓/弩/法师按自己的射程填。",
                 (unsigned)xcat::kCombatStandOffXMin, (unsigned)xcat::kCombatStandOffXMax);
         }
@@ -1305,7 +1313,8 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "垂直站距：**正数悬在怪上方**，负数在怪下方（px，%d–%d）。\n"
-                "0 = 与怪同高，近战实测最优。",
+                "0 = 与怪同高，近战实测最优。\n"
+                "出刀 AABB 竖直中心按此偏置；半高至少为出刀容差。",
                 (int)xcat::kCombatStandOffYMin, (int)xcat::kCombatStandOffYMax);
         }
         ImGui::EndDisabled();
@@ -1325,6 +1334,22 @@ void DrawHomeTab(LaunchUiState& ui) {
                 "行为退回没勾时一模一样。取消勾选立即生效。");
         }
         ImGui::EndDisabled();
+
+        // 近战不挥拳：与站位无关，任何追怪模式下都能勾（它改的是普攻的分支，不是走位）。
+        if (xcat::ui::OptionCheckbox("近战不挥拳", &meleeVeto)) persistCore();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "把贴脸时那一发挥拳**取消掉**（实测是取消，不是改成远程那一发）。\n"
+                "只动普攻，技能攻击完全不碰 —— 靠技能键输出的循环不受影响。\n"
+                "\n"
+                "**只拦投掷飞镖**（武器类型 47），勾上即刻生效、不需要观测。\n"
+                "拿别的武器勾了普攻照旧，只会在日志里记一笔观测数据。弓尤其不能拦：\n"
+                "弓的普攻伤害本来就在近战分支里产生，拦了会变成「只飘伤害数字、\n"
+                "怪不掉血」，所以干脆不让它进这条路。\n"
+                "\n"
+                "判决只保证伤害源不在近战分支，服务端认不认还得看 combat.log 里\n"
+                "怪物血量有没有真的掉。发现只飘数字不掉血，立刻取消勾选。");
+        }
 
         // 站立伪装：同样只对「空中贴怪」有意义（地面追怪本来就站着，没什么好伪装的）。
         ImGui::BeginDisabled(approachMode != 0);
@@ -1511,6 +1536,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         static bool petLootLoaded = false;
         static int lootMode = kLootOff;
         static bool pickupBlacklist = false;
+        static bool highValuePriority = true;
         static int lootIntervalMs = static_cast<int>(xcat::kPetLootIntervalDefaultMs);
         static int lootBurstPerTick = static_cast<int>(xcat::kPetLootBurstDefault);
         static float lootVacW = xcat::kPetLootVacuumWDefault;
@@ -1576,6 +1602,9 @@ void DrawHomeTab(LaunchUiState& ui) {
             lootVacW = cfg.vacuumW;
             lootVacH = cfg.vacuumH;
             parseBlacklistToCfg(cfg);
+            cfg.highValuePriority = highValuePriority ? 1u : 0u;
+            // scrollDropNotify：入口在调试 TAB，此处保留盘上值（Read 已载入）
+            xcat::PetLootNormalize(cfg);
             // WritePetLoot 内部用新 tick 落盘，必须回写到 petLootTick，否则下帧误判
             // disk≠ui → 清空 blacklistKw 再从（可能已被旧逻辑写空的）规则重建。
             cfg.writeTickMs = GetTickCount64();
@@ -1583,10 +1612,10 @@ void DrawHomeTab(LaunchUiState& ui) {
                 petLootTick = cfg.writeTickMs;
                 xcat::log::Ok("App",
                               "已下发 pet_loot：脚边=%d 宠吸=%d 人物=%d 间隔=%ums 连吸=%u "
-                              "vac=%.0fx%.0f 黑名单=%d rules=%u",
+                              "vac=%.0fx%.0f 黑名单=%d rules=%u highValue=%d",
                               footLoot ? 1 : 0, petLoot ? 1 : 0, charLoot ? 1 : 0, cfg.intervalMs,
                               cfg.burstPerTick, cfg.vacuumW, cfg.vacuumH, pickupBlacklist ? 1 : 0,
-                              cfg.skipRuleCount);
+                              cfg.skipRuleCount, cfg.highValuePriority ? 1 : 0);
             } else {
                 petLootSaveFailed = true;
                 xcat::log::Warn("App", "写入 user.ini [pet_loot] 失败");
@@ -1634,6 +1663,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                     lootVacW = disk.vacuumW;
                     lootVacH = disk.vacuumH;
                     pickupBlacklist = disk.skipFilterEnabled != 0;
+                    highValuePriority = disk.highValuePriority != 0;
                     blacklistKw[0] = '\0';
                     size_t off = 0;
                     for (uint32_t i = 0; i < disk.skipRuleCount; ++i) {
@@ -1648,7 +1678,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                         if (!piece || !piece[0]) continue;
                         const size_t need = strlen(piece) + (off ? 1u : 0u);
                         if (off + need + 1 >= sizeof(blacklistKw)) break;
-                        if (off) blacklistKw[off++] = ',';
+                        if (off) blacklistKw[off++] = ' ';
                         memcpy(blacklistKw + off, piece, strlen(piece));
                         off += strlen(piece);
                         blacklistKw[off] = '\0';
@@ -1817,10 +1847,17 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::TextUnformatted("高");
             ImGui::EndDisabled();
         }
+        if (xcat::ui::OptionCheckbox("高价值优先吸", &highValuePriority)) persistPetLoot();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "地图出现装备 / 卷軸时优先拾取（可打断出刀）。\n"
+                "对应背包栏已满则跳过该件；栏未满则缩短吸物间隔尽快吸起。\n"
+                "仅宠吸路径生效；默认开启。");
+        }
         if (xcat::ui::OptionCheckbox("启用拾取黑名单", &pickupBlacklist)) persistPetLoot();
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputTextWithHint("##bl",
-                                     "itemId/关键词（逗号分隔；金币填 2147483647；宠吸/人物共用；脚下走原生不读）",
+                                     "itemId/关键词（逗号或空格分隔；金币填 2147483647；宠吸/人物共用；脚下走原生不读）",
                                      blacklistKw, sizeof(blacklistKw))) {
             // debounce on deactivate / checkbox
         }
@@ -1920,16 +1957,30 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (xcat::ui::OptionCheckbox("群怪优先", &clusterPri)) {
                 clusterWeight = clusterPri ? 1 : 0;
                 persistCore();
+                // 写盘后回读核对：避免 UI 勾了但 user.ini 仍是 0（DLL 永远不生效）。
+                xcat::PayloadControl verify{};
+                if (!ui.prefsBinDir.empty() &&
+                    xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify)) {
+                    const int got = verify.clusterWeight != 0 ? 1 : 0;
+                    if (got != (clusterWeight ? 1 : 0)) {
+                        xcat::log::Warn("App", "群怪优先写盘核对失败 want=%d got=%d",
+                                        clusterWeight ? 1 : 0, got);
+                    } else {
+                        xcat::log::Ok("App", "群怪优先已下发 %d（acquire 应见 cluster≥0）", got);
+                    }
+                }
             }
             ImGui::SameLine();
             ImGui::TextDisabled("先打近堆；过远不跨追");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "开：优先周围 250px 内活怪更多的目标；更密最多比当前近约 1.5 倍距，"
-                    "避免换锁去追老远密堆发呆\n"
+                    "开：换锁时优先周围 250px 内活怪更多的目标；更密最多比当前近约 2 倍距，\n"
+                    "避免去追老远密堆发呆\n"
                     "空中贴怪时仍可跨层，但同样受距离倍数限制\n"
                     "关：只按距离/hop 选最近可打怪（同层有怪就不跨层）\n"
-                    "密度相同仍打更近的；拟人/不跨层时仍只在同层比");
+                    "密度相同仍打更近的；拟人/不跨层时仍只在同层比\n"
+                    "注意：已锁定交手中不会中途改锁去更密堆——只影响下一次选怪\n"
+                    "生效核对：combat.log 出现 SetClusterPriority 1，acquire 的 cluster≥1");
             }
         }
 
@@ -2118,9 +2169,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::EndDisabled();
         }
 
-        static bool pickupPriority = false;
-        xcat::ui::OptionCheckbox("拾取优先", &pickupPriority);
         ImGui::TextDisabled("粘怪 / 低血撤 / 限定区间：Classic 锚点确认后再接");
+        ImGui::TextDisabled("装备/卷軸优先拾取：见上方「拾物 → 高价值优先吸」");
     }
     CardGap();
     {
@@ -2128,7 +2178,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         // 产品语义：经典版手动卖 + 自动回城卖/补给（Il2Cpp 买卖）。
         xcat::ui::CardGuard card("##tab_home_sell", "卖背包 / 自动补给");
         ImGui::TextWrapped(
-            "上面填「不卖名单」；下面分手动卖、自动回城卖。两边共用同一份名单。");
+            "上面填「不卖名单」；下面分手动卖/充飞镖、自动回城卖。两边共用同一份名单。");
 
         static char keepRulesBuf[1024]{};
         static uint64_t keepRulesTick = 0;
@@ -2152,14 +2202,19 @@ void DrawHomeTab(LaunchUiState& ui) {
         auto applyKeepText = [](xcat::SellbagConfig& cfg, const char* text) {
             for (auto& r : cfg.keepRules) r = {};
             cfg.keepRuleCount = 0;
-            std::istringstream in(text ? text : "");
-            std::string token;
-            while (in >> token &&
-                   cfg.keepRuleCount < static_cast<uint32_t>(xcat::kSellbagMaxKeepRules)) {
+            if (!text || !text[0]) return;
+            char buf[1024]{};
+            strncpy_s(buf, text, _TRUNCATE);
+            char* ctx = nullptr;
+            for (char* tok = strtok_s(buf, ",;| \t", &ctx); tok;
+                 tok = strtok_s(nullptr, ",;| \t", &ctx)) {
+                while (*tok == ' ' || *tok == '\t') ++tok;
+                if (!*tok) continue;
+                if (cfg.keepRuleCount >= static_cast<uint32_t>(xcat::kSellbagMaxKeepRules)) break;
                 auto& r = cfg.keepRules[cfg.keepRuleCount++];
                 r.enabled = 1;
                 r.targetMask = xcat::kSellbagBagAll;
-                strncpy_s(r.nameKey, token.c_str(), _TRUNCATE);
+                strncpy_s(r.nameKey, tok, _TRUNCATE);
             }
         };
         auto loadSellbag = [&](xcat::SellbagConfig& out) {
@@ -2224,7 +2279,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         ImGui::TextDisabled("（装备栏+其他栏共用；手动卖 / 自动卖共用）");
         ImGui::SetNextItemWidth(-1.f);
         ImGui::InputTextWithHint("##sellbag_keep_rules_quick",
-                                 "不卖关键词，空格分隔（默认：礦）", keepRulesBuf,
+                                 "不卖关键词，逗号或空格分隔（默认：礦）", keepRulesBuf,
                                  sizeof(keepRulesBuf));
         const bool keepRulesEditing = ImGui::IsItemActive();
         if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -2265,14 +2320,17 @@ void DrawHomeTab(LaunchUiState& ui) {
                 const auto& pack = xcat::GetSharedItemCatalog(ui.prefsBinDir.c_str());
                 s_keepCatalogOk = pack.loaded;
                 if (pack.loaded) {
-                    std::istringstream in(keepRulesBuf);
-                    std::string token;
-                    while (in >> token) {
+                    char buf[1024]{};
+                    strncpy_s(buf, keepRulesBuf, _TRUNCATE);
+                    char* ctx = nullptr;
+                    for (char* tok = strtok_s(buf, ",;| \t", &ctx); tok;
+                         tok = strtok_s(nullptr, ",;| \t", &ctx)) {
+                        while (*tok == ' ' || *tok == '\t') ++tok;
+                        if (!*tok) continue;
                         SellbagKeepHitPreview h{};
-                        h.key = token;
+                        h.key = tok;
                         std::vector<std::string> codes;
-                        h.hit = xcat::ItemCatalogCollectCodesByNameContains(pack, token.c_str(),
-                                                                            codes, 1);
+                        h.hit = xcat::ItemCatalogCollectCodesByNameContains(pack, tok, codes, 1);
                         if (!codes.empty()) {
                             h.sampleCode = codes[0];
                             if (const char* nm =
@@ -2328,13 +2386,17 @@ void DrawHomeTab(LaunchUiState& ui) {
         ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.25f));
 
         // —— 手动卖出（对照仓 DrawNativeSellbagActions）——
-        ImGui::TextUnformatted("手动卖出");
+        ImGui::TextUnformatted("手动卖出 / 充飞镖");
         ImGui::TextDisabled("需先打开 NPC 商店，再点下方按钮。");
 
         const bool busy = [&]() {
             if (ui.prefsBinDir.empty()) return false;
             xcat::PayloadStatus st{};
-            return xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) && st.sellbagBusy != 0;
+            if (xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) && st.sellbagBusy != 0)
+                return true;
+            xcat::AutoSupplyStatus as{};
+            return xcat::ReadAutoSupplyStatus(ui.prefsBinDir.c_str(), as) &&
+                   xcat::AutoSupplyStateIsBusy(as.state);
         }();
 
         const float gap = ImGui::GetStyle().ItemSpacing.x;
@@ -2365,6 +2427,21 @@ void DrawHomeTab(LaunchUiState& ui) {
             } else {
                 manualCmdHint = "已发送一键卖装备和其他命令";
             }
+        }
+        if (ImGui::Button("一键充值飞镖", ImVec2(-1.f, 0.f))) {
+            if (!writeAsupManual(xcat::kAutoSupplyManualRechargeStars)) {
+                manualCmdHint = "发送失败：payload 忙、未注入或命令写入失败";
+                notify::PushLocal(/*Warning*/ 2, "auto-supply-charge", "一键充飞镖失败",
+                                  ui.prefsBinDir.empty() ? "无数据目录" : "写入命令失败", 3500);
+            } else {
+                manualCmdHint = "已发送一键充值飞镖命令";
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip(
+                "需已打开 NPC 商店\n"
+                "扫描消耗栏手里剑并 Charge（每次 1 格，循环至满或金币不够）\n"
+                "不卖装、不补药、不关店、不回城");
         }
         if (busy) ImGui::EndDisabled();
         if (manualCmdHint && manualCmdHint[0]) ImGui::TextDisabled("%s", manualCmdHint);
@@ -3890,6 +3967,8 @@ void DrawBetaTab(LaunchUiState& ui) {
     DesignBanner();
     static bool dropInCombat = false;
     static bool auctionTownBypass = true;
+    static bool restMpAccel = false;
+    static int restMpAccelIntervalMs = (int)xcat::kRestMpAccelIntervalDefaultMs;
     static bool frameLock = true;
     static int frameLockFps = (int)xcat::kFrameLockFpsDefault;
     static bool skipDialog = false;
@@ -3904,11 +3983,16 @@ void DrawBetaTab(LaunchUiState& ui) {
             if (!dropLoaded || disk.writeTickMs != dropSeenTick) {
                 dropInCombat = disk.dropAlertBypass != 0;
                 auctionTownBypass = disk.auctionTownBypass != 0;
+                restMpAccel = disk.restMpAccel != 0;
+                restMpAccelIntervalMs = (int)xcat::ClampRestMpAccelIntervalMs(
+                    disk.restMpAccelIntervalMs ? disk.restMpAccelIntervalMs
+                                               : xcat::kRestMpAccelIntervalDefaultMs);
                 frameLock = disk.frameLock != 0;
                 frameLockFps = (int)xcat::ClampFrameLockFps(
                     disk.frameLockFps ? disk.frameLockFps : xcat::kFrameLockFpsDefault);
                 gUiCombatLiveStep = disk.simpleCombatLiveStep != 0;
                 gUiAttackRpc = disk.attackRpc != 0;
+                gUiCurFhGateBypass = disk.curFhGateBypass != 0;
                 gUiAttackRpcMobs = (int)xcat::ClampAttackRpcMobs(
                     disk.attackRpcMobs ? disk.attackRpcMobs : xcat::kAttackRpcMobsDefault);
                 gUiAttackRpcIntervalMs = (int)xcat::ClampAttackRpcIntervalMs(
@@ -3933,6 +4017,11 @@ void DrawBetaTab(LaunchUiState& ui) {
         (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
         c.dropAlertBypass = dropInCombat ? 1u : 0u;
         c.auctionTownBypass = auctionTownBypass ? 1u : 0u;
+        c.restMpAccel = restMpAccel ? 1u : 0u;
+        c.restMpAccelIntervalMs = xcat::ClampRestMpAccelIntervalMs(
+            static_cast<uint32_t>(restMpAccelIntervalMs < 0 ? 0 : restMpAccelIntervalMs));
+        restMpAccelIntervalMs = (int)c.restMpAccelIntervalMs;
+        c.infiniteStars = 0;
         c.frameLock = frameLock ? 1u : 0u;
         c.frameLockFps = xcat::ClampFrameLockFps(
             static_cast<uint32_t>(frameLockFps < 0 ? 0 : frameLockFps));
@@ -3941,11 +4030,12 @@ void DrawBetaTab(LaunchUiState& ui) {
         if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
             dropSeenTick = c.writeTickMs;
             xcat::log::Ok("App",
-                          "已下发 core：战斗中可丢物=%d 野外可开拍卖=%d 引擎帧率锁=%d fps=%u",
-                          dropInCombat ? 1 : 0, auctionTownBypass ? 1 : 0, frameLock ? 1 : 0,
-                          c.frameLockFps);
+                          "已下发 core：战斗中可丢物=%d 野外可开拍卖=%d 坐下回蓝加速=%d "
+                          "回蓝间隔=%ums 引擎帧率锁=%d fps=%u",
+                          dropInCombat ? 1 : 0, auctionTownBypass ? 1 : 0, restMpAccel ? 1 : 0,
+                          c.restMpAccelIntervalMs, frameLock ? 1 : 0, c.frameLockFps);
         } else {
-            xcat::log::Warn("App", "写入 user.ini [core] drop/auction/frameLock 失败");
+            xcat::log::Warn("App", "写入 user.ini [core] drop/auction/restMp/frameLock 失败");
         }
     };
 
@@ -3994,6 +4084,29 @@ void DrawBetaTab(LaunchUiState& ui) {
             "挂机/守护期间建议关。默认开。\n"
             "开启期间其它读 IsTown/该 Option 位的逻辑也会受影响。");
         }
+        if (xcat::ui::OptionCheckbox("回蓝加速（实验）", &restMpAccel)) persistDrop();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "按间隔写满 WorldManager 回蓝累加器（+0x17C 休息 / +0x180 椅子）。\n"
+                "BIN 已证真蓝会动；过密会踢——用下方间隔自己调。\n"
+                "不要求坐椅（站着也会催）。日志：XCat_data/logs/rest_mp_accel.log\n"
+                "默认关·间隔默认 2500ms（曾 16ms 狂刷会秒踢）。");
+        }
+        ImGui::BeginDisabled(!restMpAccel);
+        ImGui::SetNextItemWidth(160.f);
+        if (ImGui::SliderInt("回蓝间隔(ms)##rest_mp_iv", &restMpAccelIntervalMs,
+                             (int)xcat::kRestMpAccelIntervalMinMs,
+                             (int)xcat::kRestMpAccelIntervalMaxMs)) {
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) persistDrop();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "两次催回蓝的最小间隔。越小越快、踢风险越高。\n"
+                "范围 %u~%u，默认 %u。建议从 1000+ 往下拧。",
+                xcat::kRestMpAccelIntervalMinMs, xcat::kRestMpAccelIntervalMaxMs,
+                xcat::kRestMpAccelIntervalDefaultMs);
+        }
+        ImGui::EndDisabled();
         ImGui::Separator();
         if (xcat::ui::OptionCheckbox("引擎帧率锁", &frameLock)) persistDrop();
         if (ImGui::IsItemHovered()) {
@@ -4784,6 +4897,36 @@ void DrawBetaTab(LaunchUiState& ui) {
                 "开：怪挪了也在同层用内置间隔跟位；hop<80 才走短收态");
         }
 
+        if (xcat::ui::OptionCheckbox("地面门旁路", &gUiCurFhGateBypass)) {
+            if (!ui.prefsBinDir.empty()) {
+                xcat::PayloadControl c{};
+                (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+                c.curFhGateBypass = gUiCurFhGateBypass ? 1u : 0u;
+                c.writeTickMs = GetTickCount64();
+                if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                    dropSeenTick = c.writeTickMs;
+                    xcat::log::Ok("App", "已下发 core：curFhGateBypass=%d（实验）",
+                                  gUiCurFhGateBypass ? 1 : 0);
+                } else {
+                    xcat::log::Warn("App", "写入 user.ini [core] curFhGateBypass 失败");
+                }
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("改引擎判空跳转（≠站立伪装，默认关）");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "实验项：直接改 GameAssembly 里 Magic/Shoot/Prepare 的 CurFh 判空分支，\n"
+                "空台也走「有台」路径——不种台、不写 VecCtrl。\n"
+                "\n"
+                "和首页「站立伪装」怎么选：\n"
+                "· 站立伪装 = 出刀瞬间种 CurFh（改内存字段）\n"
+                "· 地面门旁路 = 改判定跳转（改 .text）\n"
+                "两套独立，可单独开做 A/B；别当成同一个勾选。\n"
+                "近战 Melee 看的是绳梯门，本旁路帮不上。\n"
+                "改 .text 会留脏页，完整性校验可能扫到；建议短开对照 combat.log。");
+        }
+
         if (xcat::ui::OptionCheckbox("攻包伪造探针", &gUiAttackRpc)) persistAttackRpc();
         ImGui::SameLine();
         ImGui::TextDisabled("伪造攻击事件 Create(50)；服端自算伤（默认关）");
@@ -4915,6 +5058,60 @@ void DrawDebugTab(LaunchUiState& ui) {
         ImGui::TextDisabled("顶栏 5 灯：IPC / GameContext / LocalPlayer / Map / Cache");
         ImGui::TextDisabled("注入后由 PayloadStatus SHM 点亮 LP/Map；Cache=测谎 TypeResolve");
         ImGui::TextDisabled("游戏 PID / 注入状态：见顶栏灯与状态条");
+    }
+    CardGap();
+    {
+        // 卷軸掉落提示：从首页拾物迁到调试（日常挂机少碰；与测谎诊断同区）
+        xcat::ui::CardGuard card("##tab_dbg_scroll_notify", "卷軸掉落提示");
+        static bool scrollDbgLoaded = false;
+        static uint64_t scrollDbgSeen = 0;
+        static bool scrollDropNotify = true;
+        static bool scrollSaveFailed = false;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PetLootConfig disk{};
+            if (xcat::ReadPetLoot(ui.prefsBinDir.c_str(), disk)) {
+                if (!scrollDbgLoaded || disk.writeTickMs != scrollDbgSeen) {
+                    scrollDropNotify = disk.scrollDropNotify != 0;
+                    scrollDbgSeen = disk.writeTickMs;
+                    scrollDbgLoaded = true;
+                }
+            } else if (!scrollDbgLoaded) {
+                scrollDbgLoaded = true;
+            }
+        } else if (!scrollDbgLoaded) {
+            scrollDbgLoaded = true;
+        }
+
+        auto persistScrollNotify = [&]() {
+            scrollSaveFailed = false;
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PetLootConfig cfg{};
+            (void)xcat::ReadPetLoot(ui.prefsBinDir.c_str(), cfg);
+            cfg.scrollDropNotify = scrollDropNotify ? 1u : 0u;
+            xcat::PetLootNormalize(cfg);
+            cfg.writeTickMs = GetTickCount64();
+            if (xcat::WritePetLoot(ui.prefsBinDir.c_str(), cfg)) {
+                scrollDbgSeen = cfg.writeTickMs;
+                xcat::log::Ok("App", "已下发 pet_loot：scrollDropNotify=%d（调试）",
+                              cfg.scrollDropNotify ? 1 : 0);
+            } else {
+                scrollSaveFailed = true;
+                xcat::log::Warn("App", "写入 user.ini [pet_loot] scrollDropNotify 失败");
+            }
+        };
+
+        if (xcat::ui::OptionCheckbox("卷軸掉落提示音", &scrollDropNotify)) persistScrollNotify();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "可捡卷軸新落地时弹出通知并播放明亮叮咚音效。\n"
+                "装备掉落不提醒。\n"
+                "不受「通知静音」影响（与测谎/限制警报同级）。\n"
+                "拾物关闭时也可单独开启；默认开启。\n"
+                "写入 [pet_loot] scrollDropNotify。");
+        }
+        if (scrollSaveFailed)
+            ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存 user.ini [pet_loot] 失败");
+        ImGui::TextDisabled("首页「拾物」改其它项不会冲掉本开关。");
     }
     CardGap();
     {

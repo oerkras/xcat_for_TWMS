@@ -7,6 +7,7 @@
 #include "../auto_enter/auto_enter.h"
 #include "../galaxy_token_probe/galaxy_token_probe.h"
 #include "../notify/notify.h"
+#include "../ports/fly_fh_ban.h"
 #include "../ports/foothold_port.h"
 #include "../ports/world_port.h"
 #include "../../runtime/dbg_log_file.h"
@@ -34,7 +35,6 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 constexpr wchar_t kMarkerName[] = L"soft_login_probe.on";
-constexpr wchar_t kLogDirDev[] = L"C:\\Users\\kras\\Desktop\\xcat_for_TWMS\\Dumps\\runtime";
 
 // SceneLogin public void() — starts ConnectLoginServer IEnumerator via StartCoroutine.
 constexpr uint32_t kRvaSceneLoginGet = 0xC02B40;
@@ -58,11 +58,20 @@ constexpr char kHashNmCloseSession[] =
 // Notice 多在断线瞬间弹出；Connecting 早退即可，不必死等满窗。
 constexpr DWORD kSettleMs = 600;
 constexpr DWORD kPollMs = 400;
-constexpr int kPollRounds = 40;  // ~16s；空大厅会提前在 kEmptyHallPollRounds 拆线
-// BIN 01:53：Connected items=0 空等满 poll≈16s 体感卡死；满 8 轮(~3.2s) 即 CloseSession。
-constexpr int kEmptyHallPollRounds = 8;
+// BIN 04:20：Disconnected 空耗满 40 轮≈16s 才 soft cycle；总 cap 须盖住 empty-hall 等待窗。
+constexpr int kPollRounds = 36;  // ≥ kEmptyHallPollRounds；~14s @ kPollMs
+// Connected items=0：先等多等列表（BIN 书页大厅会晚刷）。
+// BUILD118 后曾满 8 轮(~3.2s) 就 CloseSession → 登录会话作废 →「已登出登入的帳號」+ avatars=0。
+// 现策略：只等 / soft cycle，**禁止**为 empty hall 硬拆（见 kAllowEmptyHallCloseSession）。
+constexpr int kEmptyHallPollRounds = 30;  // ~12s @ kPollMs
+// connect-wait 内 Connected+items=0：约 10s 仍空再 soft cycle（勿 CloseSession）。
+constexpr int kEmptyHallConnectWaitRounds = 40;  // ~10s @ kConnectWaitMs
+// BIN 04:20：ConnectLogin 后变 Disconnected，仍空等到 poll 末尾；满 4 轮(~1.6s+) 即 soft cycle。
+constexpr int kDiscPollFailRounds = 4;
 constexpr DWORD kWaitDiscAfterCloseMs = 4000;
 constexpr int kEmptyHallSoftCycleMax = 3;  // 连续空大厅满额放 hold → 守护干净重拉
+// 空大厅 CloseSession：默认关。仅调试「真·书页死锁且确认非登录竞态」时可临时开。
+constexpr bool kAllowEmptyHallCloseSession = false;
 constexpr DWORD kReenterPollMs = 350;
 // 墙钟总预算（每轮含 dismiss/SamplePlayReady Call，旧「130×350≈45s」严重低估；dcaf08 卡死约 114s）。
 // 成功样本 armed→playReady 约 10–37s；Done→playReady 可达 ~32s；弱网再给裕量。
@@ -75,7 +84,8 @@ constexpr DWORD kDoneNoPlayFailMs = 50000;
 constexpr int kDoneNoPlayMaxRestarts = 5;
 // 同一断线边沿：ConnectLogin→重进 整轮可重试；多给机会再放 hold 交守护（B9B 体感乱杀）。
 constexpr int kSoftCycleMax = 10;
-constexpr DWORD kSoftCycleRetryGapMs = 1200;
+// BIN 04:20：cycle1 失败后还 Sleep 1200 才 cycle2；压到 400。
+constexpr DWORD kSoftCycleRetryGapMs = 400;
 // 重进等待：playReady 采样宜短；泵堵时 1500ms 等满只会叠 job timeout（E216）。
 constexpr DWORD kPlayReadySampleMs = 400;
 // 已 playReady+inMap 但 curFh=0（悬空/掉落，ec1fe7 heli 半空软重进）：再等挂台再 RESULT。
@@ -95,8 +105,8 @@ constexpr DWORD kSoftSampleCallMs = 400;  // 对齐 kTransitInvokeCapMs；勿再
 constexpr DWORD kSoftLandQuietMs = 1500;
 constexpr DWORD kSoftPostAirGateMs = 2500;
 // Connected 后等分区列表刷出再 RequestRestart（BIN 21:44：壳指针先到、WorldItems=0）。
-// BIN 00:46：Connected 空列表卡书页大厅；12s×2 体感「没连世界」。缩短单次等待，空列表靠 soft cycle + ConnectLogin 刷新。
-constexpr DWORD kHallReadyWaitMs = 6000;
+// 空列表靠加长等待 + soft cycle；勿 CloseSession 刷新（会登出登录会话）。
+constexpr DWORD kHallReadyWaitMs = 12000;
 constexpr DWORD kHallReadyPollMs = 200;
 // softFast 卡空 WorldItems：早于 150s 墙钟 soft cycle。
 constexpr DWORD kWorldItemsStarveMs = 10000;
@@ -111,6 +121,8 @@ constexpr int kConnectPumpFailMax = 40;  // ~18–25s @ 450ms；再等泵窗，�
 constexpr DWORD kConnectWaitMs = 250;
 constexpr int kConnectWaitRounds = 160;  // ~40s 等 SL / Connecting / Connected
 constexpr int kConnectHardFailGrace = 8;  // 非 sl_null 硬错也先多轮重试再放弃
+// BIN 04:20：Connecting 空耗 try=1→20 才 ConnectLogin；满 ~3s 改去 poll（自连优先，勿叠登）。
+constexpr int kConnectingStallRounds = 12;
 
 constexpr int kStateDisconnecting = 0;
 constexpr int kStateDisconnected = 1;
@@ -149,8 +161,9 @@ constexpr uint32_t kRvaCloseDialog = 0x778CC0;   // UIUtilDialog.CloseDialog
 constexpr uint32_t kRvaUiDialogClose = 0x117A290;  // UIDialog.Close（shop_port 同源）
 constexpr char kHashCloseDialog[] =
     "de9ac0fd03b2844bad25ca20166c27d327514761da7bc4b9dca3ba858666441";
-// UIUtilDialog.Notice — 直 call 入口 Abs trampoline（非 MI 换针；≥400 处 bypass methodPointer）
-// 默认关闭：代码保留待测稳后再开；现行 dismiss 只走 FindAll。
+// UIUtilDialog.Notice — Abs trampoline 会 PATCH GA .text（NGS/GRAP 忌讳）。
+// BIN 16:xx：装 Abs 后反复「安全模組…強制關閉」；封禁/踢线文案改走 DialogScrape。
+// 开启：截 sMsg + 返回实例；dismiss 仍以 FindAll 为主。
 constexpr bool kNoticeAbsEnabled = false;
 constexpr uint32_t kRvaNotice = 0x74ACD0;
 // 序言：push r15/r14/r12/rsi/rdi/rbp/rbx ; sub rsp,80h（17B，指令边界；IDA 运行时 dump）
@@ -158,6 +171,17 @@ constexpr size_t kNoticeSteal = 17;
 constexpr uint8_t kNoticeSig[kNoticeSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x56, 0x57,
                                               0x55, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00,
                                               0x00};
+// YesNo — 同表邻接；封禁单钮窗也可能不经 Notice
+constexpr uint32_t kRvaYesNo = 0x746B50;
+constexpr size_t kYesNoSteal = 19;
+constexpr uint8_t kYesNoSig[kYesNoSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                                            0x56, 0x57, 0x55, 0x53, 0x48, 0x81, 0xEC, 0x88,
+                                            0x00, 0x00, 0x00};
+// UIUtilDialog 表邻接备用 Open（少 xref；登录封禁路径候选，callee of login packet handler）
+constexpr uint32_t kRvaAltDlgOpen = 0x77FCF0;
+constexpr size_t kAltDlgSteal = 14;
+constexpr uint8_t kAltDlgSig[kAltDlgSteal] = {0x41, 0x57, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48,
+                                              0x81, 0xEC, 0x90, 0x00, 0x00, 0x00};
 constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
 constexpr uint32_t kRvaGoSetActive = 0x4E5CAD0;
 constexpr uint32_t kRvaGoGetActiveSelf = 0x4E5CC70;
@@ -182,6 +206,10 @@ using FnObjectDestroy = void (*)(void* obj, const void* method);
 using FnDialogClose = void (*)(void* self, const void* method);  // CloseDialog / UIDialog.Close
 using FnNotice = void* (*)(void* sMsg, void* sSub, uint8_t a, uint8_t b, uint8_t c, void* ok,
                            const void* method);
+using FnYesNo = void* (*)(void* sMsg, void* yes, void* no, void* sSnd, uint8_t a, uint8_t b,
+                          uint8_t c, uint8_t d, const void* method);
+using FnAltDlgOpen = void* (*)(void* a1, void* a2, void* a3, void* a4, uint8_t a5, uint8_t a6,
+                               uint8_t a7, const void* method);
 
 struct AbsHook {
     void* target = nullptr;
@@ -201,11 +229,56 @@ std::atomic<DWORD> gPostSoftAirUntilMs{0};  // 禁止 F5 空中；≥ land quiet
 std::atomic<unsigned> gResult{0};  // 0 none 1 ok 2 fail
 std::atomic<bool> gUiEnabled{false};
 char gWhy[64]{};
+// 图内 CloseSession 粘性武装（BIN 17:08：踢线无 Disconnected / lost_session 被吞 → 永不 attempt）
+std::atomic<bool> gDeferred{false};
+std::atomic<DWORD> gDeferredSinceMs{0};
+char gDeferredWhy[64]{};
+constexpr DWORD kDeferredSoftMaxMs = 120000;
+
+// 「本轮 why 需要真重连」的判定量。gWhy 是裸 char[64]，RequestAttempt 先 memset 再 strncpy_s，
+// 读侧撞上中间态会拿到空串 → 判成「非真断线」→ 又放开假 already_in_map（BIN 17:29 误杀）。
+// 判定只读这个原子量；gWhy 退化为纯日志用途。
+std::atomic<bool> gWhyNeedsReconnect{false};
+
+// attempt 起点（GetTickCount，0=无）；Finish 用它兑现最小 hold 时长。
+std::atomic<DWORD> gAttemptBeginMs{0};
+// 守护 Status SHM 每 500ms 才发布一拍。attempt 若整段落在同一拍内，
+// 「result 0→1 上升沿」与「hold=1」会一起被跳过，守护只看到「seq 涨了且 hold=0」
+// → 判服务器踢线 → 干净重拉杀进程（BIN 17:29）。成功后把 hold 多按住几拍。
+constexpr DWORD kMinHoldMs = 2000;
+
+// 图内确认恢复：真断线 why 下 MapScene 残留不许算成功（否则 hold 只闪十余 ms），
+// 但「playReady + 挂台 + NM Connected」连续保持这么久就是游戏自己恢复了（假断线边沿）。
+// 没有这个出口时 connect-wait 会空耗 160 轮 × 10 cycle ≈ 十分钟 hold（全程停打怪），
+// 最后 Finish(2) 反而让守护把好端端在图里的客户端杀掉。
+constexpr DWORD kInMapRecoverConfirmMs = 8000;
+std::atomic<DWORD> gInMapRecoverSinceMs{0};
+
+// 连续软失败熔断：hold 期间守护的一切干净重拉都被丢弃（hangup_schedule softHoldBlocksRelaunch），
+// 而 result=2 只有上升沿有效 —— 失败后立刻再 hold 可以无限架空守护。
+// 窗口内连续失败满额则暂停接管，让守护干净重拉一次。
+constexpr int kSoftFailBreakerMax = 3;
+constexpr DWORD kSoftFailBreakerWindowMs = 300000;
+constexpr DWORD kSoftFailBreakerHoldOffMs = 300000;
+std::atomic<int> gFailStreak{0};
+std::atomic<DWORD> gFailStreakFirstMs{0};
+std::atomic<DWORD> gBreakerUntilMs{0};
 
 AbsHook gNoticeAbs{};
+AbsHook gYesNoAbs{};
+AbsHook gAltDlgAbs{};
 std::atomic<void*> gLastNoticeDlg{nullptr};   // Abs hook 截到的最近 Notice 返回值
 std::atomic<unsigned> gNoticeAbsHits{0};      // 进程内累计捕获次数
 std::atomic<int> gNoticeAbsInstall{0};        // 0=未试 1=ok 2=fail
+std::atomic<int> gYesNoAbsInstall{0};
+std::atomic<int> gAltDlgAbsInstall{0};
+std::atomic<unsigned> gDialogScrapeSeq{0};
+char gLastScrapeMsg[480]{};
+DWORD gLastScrapeLogMs = 0;
+// 泵上 FindAll 到的活窗；泵卡死（封禁弹窗）后 worker 纯内存深扫。
+constexpr int kDlgCacheCap = 12;
+std::atomic<uintptr_t> gDlgCache[kDlgCacheCap]{};
+std::atomic<int> gDlgCacheRr{0};
 
 struct PumpCtx {
     int ok = 0;
@@ -291,8 +364,10 @@ std::wstring ModuleDir() {
 }
 
 std::wstring ResolveLogDir() {
-    std::wstring dir = DirExists(kLogDirDev) ? kLogDirDev : ModuleDir();
-    if (!DirExists(kLogDirDev) && !dir.empty()) {
+    const std::wstring dev = x::runtime::OptionalRepoRuntimeDumpDir();
+    if (!dev.empty()) return dev;
+    std::wstring dir = ModuleDir();
+    if (!dir.empty()) {
         const std::wstring logs = dir + L"\\logs";
         CreateDirectoryW(logs.c_str(), nullptr);
         if (DirExists(logs)) dir = logs;
@@ -306,11 +381,29 @@ bool EnvOn(const char* name) {
     return n > 0 && buf[0] == '1';
 }
 
-bool MarkerArmed() {
+// IsArmed 会被 MethodInfo hook 在 Unity 主线程上（Nm.CloseSession 里）调到；
+// 每次实测要跑 ResolveLogDir（含 CreateDirectoryW）+ 两次 GetFileAttributesW。
+// 断线瞬间这就是主线程上的同步磁盘 I/O，缓存一小段窗口（marker 最多晚这么久生效）。
+constexpr DWORD kMarkerTtlMs = 2000;
+std::atomic<DWORD> gMarkerCheckMs{0};
+std::atomic<int> gMarkerCached{-1};
+
+bool MarkerArmedUncached() {
     const std::wstring logDir = ResolveLogDir();
     const std::wstring modDir = ModuleDir();
     return (!logDir.empty() && FileExists(logDir + L"\\" + kMarkerName)) ||
            (!modDir.empty() && FileExists(modDir + L"\\" + kMarkerName));
+}
+
+bool MarkerArmed() {
+    const DWORD now = GetTickCount();
+    const DWORD last = gMarkerCheckMs.load(std::memory_order_acquire);
+    const int cached = gMarkerCached.load(std::memory_order_acquire);
+    if (cached >= 0 && last != 0 && now - last < kMarkerTtlMs) return cached != 0;
+    const bool armed = MarkerArmedUncached();
+    gMarkerCached.store(armed ? 1 : 0, std::memory_order_release);
+    gMarkerCheckMs.store(now ? now : 1, std::memory_order_release);
+    return armed;
 }
 
 void LogLine(const char* fmt, ...) {
@@ -627,8 +720,36 @@ bool WaitNmNotConnected(DWORD waitMs, const char* tag) {
     return false;
 }
 
+bool WaitNmNotConnected(DWORD waitMs, const char* tag);
+bool WaitPumpAlive(DWORD waitMs, const char* tag);
+
 // true=已发起硬拆（或 session 已空）；调用方清 invokeOk，等 Disconnected 再 ConnectLogin。
+// 已进图 / 泵不新鲜：拒绝硬拆（返回 false），由 SoftProbeInMapOrFinish 解 hold。
+// 空大厅 why：默认拒绝（kAllowEmptyHallCloseSession=false）——硬拆会「已登出登入的帳號」。
 bool SoftForceNmTeardown(const char* why) {
+    if (!kAllowEmptyHallCloseSession && why &&
+        (std::strstr(why, "empty_hall") || std::strstr(why, "hall_wait"))) {
+        LogLine("force_nm_close refuse empty_hall_policy why=%s", why);
+        KickLogLine("force_nm_close refuse_empty_hall why=%s", why ? why : "?");
+        return false;
+    }
+    if (x::features::ports::world::IsInMapScene()) {
+        LogLine("force_nm_close refuse inMap why=%s", why ? why : "?");
+        KickLogLine("force_nm_close refuse_inMap");
+        return false;
+    }
+    if (SoftShouldDeferPumpWork()) {
+        if (!WaitPumpAlive(kPumpWaitConnectMs, "force_nm_close")) {
+            LogLine("force_nm_close defer pump_dead why=%s", why ? why : "?");
+            KickLogLine("force_nm_close defer");
+            return false;
+        }
+        if (x::features::ports::world::IsInMapScene()) {
+            LogLine("force_nm_close refuse inMap after_wait why=%s", why ? why : "?");
+            KickLogLine("force_nm_close refuse_inMap");
+            return false;
+        }
+    }
     PumpCtx ctx{};
     if (!SoftPumpCall(&DoNmCloseSessionOnPump, &ctx, 3000)) {
         LogLine("force_nm_close Call fail/timeout why=%s", why ? why : "?");
@@ -856,8 +977,74 @@ void WriteAbsJmp(void* at, void* to) {
     p[11] = 0xE0;
 }
 
+// Il2CppString：length@0x10 chars@0x14（UTF-16）。纯内存读，可在 Notice 入口线程用。
+bool ReadNoticeMsgUtf8(void* str, char* out, size_t outCap) {
+    if (!str || !out || outCap < 2) return false;
+    __try {
+        const int32_t len = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(str) + 0x10);
+        if (len <= 0 || len > 512) return false;
+        const auto* chars =
+            reinterpret_cast<const wchar_t*>(reinterpret_cast<uint8_t*>(str) + 0x14);
+        const int n =
+            WideCharToMultiByte(CP_UTF8, 0, chars, len, out, static_cast<int>(outCap) - 1, nullptr,
+                                nullptr);
+        if (n <= 0) return false;
+        out[n] = 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool NoticeMsgLooksKickish(const char* msg) {
+    if (!msg || !msg[0]) return false;
+    // UTF-8 片段：登出 / 斷線|断线 / 踢 / 帳|賬
+    static const char* kNeedles[] = {
+        "\xE7\x99\xBB\xE5\x87\xBA",              // 登出
+        "\xE6\x96\xB7\xE7\xB7\x9A",              // 斷線
+        "\xE6\x96\xAD\xE7\xBA\xBF",              // 断线
+        "\xE8\xB8\xA2",                          // 踢
+        "\xE5\xB8\xB3\xE8\x99\x9F",              // 帳號
+        "\xE8\xB3\x87\xE8\x99\x9F",              // 賬號
+        "\xE7\x87\x9F\xE9\x81\x8B",              // 營運
+        "\xE9\x99\x90\xE5\x88\xB6",              // 限制
+        "\xE9\x81\x95\xE5\x8F\x8D",              // 違反
+        "\xE6\x94\xBF\xE7\xAD\x96",              // 政策
+        "logout",
+        "kick",
+        "disconnect",
+        "ban",
+    };
+    char low[520]{};
+    for (size_t i = 0; msg[i] && i + 1 < sizeof(low); ++i) {
+        const unsigned char c = static_cast<unsigned char>(msg[i]);
+        low[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : msg[i];
+    }
+    for (const char* n : kNeedles) {
+        if (strstr(low, n)) return true;
+    }
+    return false;
+}
+
+void LogCapturedDialog(const char* api, unsigned hit, void* dlg, const char* msg, const char* sub,
+                       int hold) {
+    const int kickish = NoticeMsgLooksKickish(msg) || NoticeMsgLooksKickish(sub) ? 1 : 0;
+    if (dlg && (hold || kickish)) {
+        gLastNoticeDlg.store(dlg, std::memory_order_release);
+    }
+    LogLine("%s Abs hit=%u dlg=%p hold=%d kickish=%d msg=%s sub=%s", api, hit, dlg, hold, kickish,
+            msg && msg[0] ? msg : "(unreadable)", sub && sub[0] ? sub : "(none)");
+    if (kickish || hold) {
+        KickLogLine("%s Abs hit=%u kickish=%d hold=%d msg=%s sub=%s", api, hit, kickish, hold,
+                    msg && msg[0] ? msg : "?", sub && sub[0] ? sub : "?");
+    }
+}
+
 void* __fastcall HookNoticeAbs(void* sMsg, void* sSub, uint8_t a, uint8_t b, uint8_t c, void* ok,
                                const void* method) {
+    (void)a;
+    (void)b;
+    (void)c;
     auto* orig = reinterpret_cast<FnNotice>(gNoticeAbs.trampoline);
     void* dlg = nullptr;
     if (orig) {
@@ -867,70 +1054,445 @@ void* __fastcall HookNoticeAbs(void* sMsg, void* sSub, uint8_t a, uint8_t b, uin
             dlg = nullptr;
         }
     }
-    // 软登录 hold 期才记；其它 Notice（旅行 tip 等）不冲断线窗指针。
-    if (dlg && gHold.load(std::memory_order_acquire)) {
-        gLastNoticeDlg.store(dlg, std::memory_order_release);
-        gNoticeAbsHits.fetch_add(1, std::memory_order_relaxed);
-    }
+    const unsigned hit = gNoticeAbsHits.fetch_add(1, std::memory_order_relaxed) + 1;
+    char msg[480]{};
+    char sub[240]{};
+    (void)ReadNoticeMsgUtf8(sMsg, msg, sizeof(msg));
+    (void)ReadNoticeMsgUtf8(sSub, sub, sizeof(sub));
+    LogCapturedDialog("Notice", hit, dlg, msg, sub,
+                      gHold.load(std::memory_order_acquire) ? 1 : 0);
     return dlg;
 }
 
-bool InstallNoticeAbs(void* target) {
-    if (gNoticeAbs.active) return true;
-    if (!target) return false;
+void* __fastcall HookYesNoAbs(void* sMsg, void* yes, void* no, void* sSnd, uint8_t a, uint8_t b,
+                              uint8_t c, uint8_t d, const void* method) {
+    (void)a;
+    (void)b;
+    (void)c;
+    (void)d;
+    auto* orig = reinterpret_cast<FnYesNo>(gYesNoAbs.trampoline);
+    void* dlg = nullptr;
+    if (orig) {
+        __try {
+            dlg = orig(sMsg, yes, no, sSnd, a, b, c, d, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            dlg = nullptr;
+        }
+    }
+    static std::atomic<unsigned> sHits{0};
+    const unsigned hit = sHits.fetch_add(1, std::memory_order_relaxed) + 1;
+    char msg[480]{};
+    char snd[120]{};
+    (void)ReadNoticeMsgUtf8(sMsg, msg, sizeof(msg));
+    (void)ReadNoticeMsgUtf8(sSnd, snd, sizeof(snd));
+    LogCapturedDialog("YesNo", hit, dlg, msg, snd,
+                      gHold.load(std::memory_order_acquire) ? 1 : 0);
+    return dlg;
+}
+
+void* __fastcall HookAltDlgAbs(void* a1, void* a2, void* a3, void* a4, uint8_t a5, uint8_t a6,
+                               uint8_t a7, const void* method) {
+    (void)a5;
+    (void)a6;
+    (void)a7;
+    auto* orig = reinterpret_cast<FnAltDlgOpen>(gAltDlgAbs.trampoline);
+    void* dlg = nullptr;
+    if (orig) {
+        __try {
+            dlg = orig(a1, a2, a3, a4, a5, a6, a7, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            dlg = nullptr;
+        }
+    }
+    static std::atomic<unsigned> sHits{0};
+    const unsigned hit = sHits.fetch_add(1, std::memory_order_relaxed) + 1;
+    char msg[480]{};
+    char sub[240]{};
+    (void)ReadNoticeMsgUtf8(a1, msg, sizeof(msg));
+    (void)ReadNoticeMsgUtf8(a2, sub, sizeof(sub));
+    // 有的重载 a1=this；再试 a2/a3
+    if (!msg[0]) (void)ReadNoticeMsgUtf8(a2, msg, sizeof(msg));
+    if (!sub[0]) (void)ReadNoticeMsgUtf8(a3, sub, sizeof(sub));
+    LogCapturedDialog("AltDlg", hit, dlg ? dlg : a1, msg, sub,
+                      gHold.load(std::memory_order_acquire) ? 1 : 0);
+    return dlg;
+}
+
+bool InstallAbsHook(AbsHook& hook, void* target, const uint8_t* sig, size_t steal, void* hookFn,
+                    const char* tag) {
+    if (hook.active) return true;
+    if (!target || !sig || steal < 12 || steal > sizeof(hook.saved)) return false;
     auto* bytes = reinterpret_cast<uint8_t*>(target);
-    for (size_t i = 0; i < kNoticeSteal; ++i) {
-        if (bytes[i] != kNoticeSig[i]) {
-            LogLine("Notice Abs refuse: sig mismatch @%p b0=%02X want=%02X", target, bytes[0],
-                    kNoticeSig[0]);
+    for (size_t i = 0; i < steal; ++i) {
+        if (bytes[i] != sig[i]) {
+            LogLine("%s Abs refuse: sig mismatch @%p b0=%02X want=%02X", tag, target, bytes[0],
+                    sig[0]);
             return false;
         }
     }
-    void* tramp =
-        VirtualAlloc(nullptr, kNoticeSteal + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    void* tramp = VirtualAlloc(nullptr, steal + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!tramp) return false;
-    memcpy(gNoticeAbs.saved, target, kNoticeSteal);
-    memcpy(tramp, target, kNoticeSteal);
-    WriteAbsJmp(reinterpret_cast<uint8_t*>(tramp) + kNoticeSteal,
-                reinterpret_cast<uint8_t*>(target) + kNoticeSteal);
+    memcpy(hook.saved, target, steal);
+    memcpy(tramp, target, steal);
+    WriteAbsJmp(reinterpret_cast<uint8_t*>(tramp) + steal,
+                reinterpret_cast<uint8_t*>(target) + steal);
     DWORD old = 0;
-    if (!VirtualProtect(target, kNoticeSteal, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!VirtualProtect(target, steal, PAGE_EXECUTE_READWRITE, &old)) {
         VirtualFree(tramp, 0, MEM_RELEASE);
         return false;
     }
-    WriteAbsJmp(target, reinterpret_cast<void*>(&HookNoticeAbs));
-    for (size_t i = 12; i < kNoticeSteal; ++i) reinterpret_cast<uint8_t*>(target)[i] = 0x90;
-    FlushInstructionCache(GetCurrentProcess(), target, kNoticeSteal);
-    VirtualProtect(target, kNoticeSteal, old, &old);
-    gNoticeAbs.target = target;
-    gNoticeAbs.trampoline = tramp;
-    gNoticeAbs.stolen = kNoticeSteal;
-    gNoticeAbs.active = true;
+    WriteAbsJmp(target, hookFn);
+    for (size_t i = 12; i < steal; ++i) reinterpret_cast<uint8_t*>(target)[i] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), target, steal);
+    VirtualProtect(target, steal, old, &old);
+    hook.target = target;
+    hook.trampoline = tramp;
+    hook.stolen = steal;
+    hook.active = true;
     return true;
 }
 
-// 进程级一次：直 call Notice 入口 Abs（对齐 travel_port Send Abs），截返回实例。
-// kNoticeAbsEnabled=false 时为空操作（实现保留，等测稳再开）。
+bool InstallNoticeAbs(void* target) {
+    return InstallAbsHook(gNoticeAbs, target, kNoticeSig, kNoticeSteal,
+                          reinterpret_cast<void*>(&HookNoticeAbs), "Notice");
+}
+
+// 进程级：Notice + YesNo + AltDlg Open；FindAll scrape 另走泵。
 void EnsureNoticeAbsHook() {
     if (!kNoticeAbsEnabled) return;
-    if (gNoticeAbs.active) {
-        gNoticeAbsInstall.store(1, std::memory_order_relaxed);
-        return;
-    }
-    const int st = gNoticeAbsInstall.load(std::memory_order_relaxed);
-    if (st == 2) return;  // 签名失败等硬拒，勿重试
     HMODULE ga = x::runtime::il2cpp::GameAssembly();
     if (!ga) ga = GetModuleHandleW(L"GameAssembly.dll");
-    if (!ga) return;  // 未加载：保持 st=0，下次再试
-    void* target = reinterpret_cast<uint8_t*>(ga) + kRvaNotice;
-    if (!InstallNoticeAbs(target)) {
-        gNoticeAbsInstall.store(2, std::memory_order_relaxed);
-        LogLine("Notice Abs install fail rva=0x%X", kRvaNotice);
+    if (!ga) return;
+
+    if (!gNoticeAbs.active) {
+        const int st = gNoticeAbsInstall.load(std::memory_order_relaxed);
+        if (st != 2) {
+            void* target = reinterpret_cast<uint8_t*>(ga) + kRvaNotice;
+            if (!InstallNoticeAbs(target)) {
+                gNoticeAbsInstall.store(2, std::memory_order_relaxed);
+                LogLine("Notice Abs install fail rva=0x%X", kRvaNotice);
+            } else {
+                gNoticeAbsInstall.store(1, std::memory_order_relaxed);
+                LogLine("Notice Abs install ok rva=0x%X steal=%zu", kRvaNotice, kNoticeSteal);
+            }
+        }
+    } else {
+        gNoticeAbsInstall.store(1, std::memory_order_relaxed);
+    }
+
+    if (!gYesNoAbs.active) {
+        const int st = gYesNoAbsInstall.load(std::memory_order_relaxed);
+        if (st != 2) {
+            void* target = reinterpret_cast<uint8_t*>(ga) + kRvaYesNo;
+            if (!InstallAbsHook(gYesNoAbs, target, kYesNoSig, kYesNoSteal,
+                                reinterpret_cast<void*>(&HookYesNoAbs), "YesNo")) {
+                gYesNoAbsInstall.store(2, std::memory_order_relaxed);
+                LogLine("YesNo Abs install fail rva=0x%X", kRvaYesNo);
+            } else {
+                gYesNoAbsInstall.store(1, std::memory_order_relaxed);
+                LogLine("YesNo Abs install ok rva=0x%X steal=%zu", kRvaYesNo, kYesNoSteal);
+            }
+        }
+    }
+
+    if (!gAltDlgAbs.active) {
+        const int st = gAltDlgAbsInstall.load(std::memory_order_relaxed);
+        if (st != 2) {
+            void* target = reinterpret_cast<uint8_t*>(ga) + kRvaAltDlgOpen;
+            if (!InstallAbsHook(gAltDlgAbs, target, kAltDlgSig, kAltDlgSteal,
+                                reinterpret_cast<void*>(&HookAltDlgAbs), "AltDlg")) {
+                gAltDlgAbsInstall.store(2, std::memory_order_relaxed);
+                LogLine("AltDlg Abs install fail rva=0x%X", kRvaAltDlgOpen);
+            } else {
+                gAltDlgAbsInstall.store(1, std::memory_order_relaxed);
+                LogLine("AltDlg Abs install ok rva=0x%X steal=%zu", kRvaAltDlgOpen, kAltDlgSteal);
+            }
+        }
+    }
+}
+
+void CacheDialogPtr(void* dlg) {
+    if (!dlg || !LooksLikeHeapPtr(dlg)) return;
+    const uintptr_t v = reinterpret_cast<uintptr_t>(dlg);
+    for (int i = 0; i < kDlgCacheCap; ++i) {
+        if (gDlgCache[i].load(std::memory_order_relaxed) == v) return;
+    }
+    for (int i = 0; i < kDlgCacheCap; ++i) {
+        uintptr_t expect = 0;
+        if (gDlgCache[i].compare_exchange_strong(expect, v, std::memory_order_relaxed)) return;
+    }
+    const int slot = gDlgCacheRr.fetch_add(1, std::memory_order_relaxed) % kDlgCacheCap;
+    gDlgCache[slot].store(v, std::memory_order_relaxed);
+}
+
+bool LooksLikeNoiseUiString(const char* s) {
+    if (!s || !s[0]) return true;
+    if (strstr(s, "Sound/") || strstr(s, "sound/") || strstr(s, "Mob/") || strstr(s, "Bgm/") ||
+        strstr(s, "Assets/") || strstr(s, ".prefab") || strstr(s, "UI/Atlas") ||
+        strstr(s, "Effect/") || strstr(s, "Npc/") || strstr(s, "Map/") ||
+        strstr(s, "Damage") || strstr(s, "/Die") || strstr(s, "Vuplex") ||
+        strstr(s, "StreamingAssets") || strstr(s, "UnityEngine.") || strstr(s, "G:\\") ||
+        strstr(s, "G:/") || strstr(s, "Maplestory_Classic_Data") ||
+        strstr(s, "Assembly-CSharp") || strstr(s, "ResourceManagement") ||
+        strstr(s, ".bundle") || strstr(s, ".pak") || strstr(s, ".dll")) {
+        return true;
+    }
+    return false;
+}
+
+bool HasCjkUtf8(const char* s) {
+    if (!s) return false;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(s); *p; ++p) {
+        if (*p >= 0x80) return true;
+    }
+    return false;
+}
+
+// 只打踢线/封禁类；同文案 15s 内只落盘一次（防刷爆 soft/kick）。
+constexpr DWORD kKickishLogGapMs = 15000;
+
+void EmitDialogScrape(const char* tag, size_t off, const char* buf, const char* via) {
+    if (!buf || !buf[0] || LooksLikeNoiseUiString(buf)) return;
+    if (!NoticeMsgLooksKickish(buf)) return;
+    const DWORD now = GetTickCount();
+    if (gLastScrapeMsg[0] && strcmp(gLastScrapeMsg, buf) == 0 &&
+        now - gLastScrapeLogMs < kKickishLogGapMs) {
         return;
     }
-    gNoticeAbsInstall.store(1, std::memory_order_relaxed);
-    LogLine("Notice Abs install ok rva=0x%X steal=%zu (direct-call capture)", kRvaNotice,
-            kNoticeSteal);
+    strncpy_s(gLastScrapeMsg, buf, _TRUNCATE);
+    gLastScrapeLogMs = now;
+    const unsigned seq = gDialogScrapeSeq.fetch_add(1, std::memory_order_relaxed) + 1;
+    LogLine("DialogScrape #%u tag=%s via=%s off=0x%zX kickish=1 msg=%s", seq, tag,
+            via ? via : "?", off, buf);
+    KickLogLine("DialogScrape #%u tag=%s via=%s msg=%s", seq, tag, via ? via : "?", buf);
+}
+
+void ScrapeObjectStrings(void* obj, const char* tag, const char* via, size_t offLo, size_t offHi) {
+    if (!obj || !LooksLikeHeapPtr(obj)) return;
+    for (size_t off = offLo; off < offHi; off += sizeof(void*)) {
+        void* p = ReadPtr(obj, off);
+        if (!p || !LooksLikeHeapPtr(p)) continue;
+        char buf[480]{};
+        if (!ReadNoticeMsgUtf8(p, buf, sizeof(buf)) || !buf[0]) continue;
+        EmitDialogScrape(tag, off, buf, via);
+    }
+}
+
+// 一层深扫：dialog 字段 → 子对象再扫 string（TMP/Label 常挂在字段上）。
+void ScrapeDlgFieldsDeep(void* dlg, const char* tag) {
+    if (!dlg || !LooksLikeHeapPtr(dlg)) return;
+    ScrapeObjectStrings(dlg, tag, "self", 0x18, 0x280);
+    int fan = 0;
+    for (size_t off = 0x18; off < 0x280 && fan < 12; off += sizeof(void*)) {
+        void* child = ReadPtr(dlg, off);
+        if (!child || !LooksLikeHeapPtr(child) || child == dlg) continue;
+        // 跳过明显是 string 的槽（已在 self 扫过）
+        char probe[8]{};
+        if (ReadNoticeMsgUtf8(child, probe, sizeof(probe))) continue;
+        ++fan;
+        ScrapeObjectStrings(child, tag, "child", 0x10, 0x120);
+    }
+}
+
+void ScrapeCachedDialogsOffPump() {
+    // 进图后封禁/踢登录窗不会再弹；停扫并清缓存，避免脏指针+刷盘。
+    if (x::features::ports::world::IsInMapScene()) {
+        for (int i = 0; i < kDlgCacheCap; ++i) {
+            if (gDlgCache[i].load(std::memory_order_relaxed))
+                gDlgCache[i].store(0, std::memory_order_relaxed);
+        }
+        return;
+    }
+    for (int i = 0; i < kDlgCacheCap; ++i) {
+        void* dlg = reinterpret_cast<void*>(gDlgCache[i].load(std::memory_order_relaxed));
+        if (!dlg || !LooksLikeHeapPtr(dlg)) continue;
+        ScrapeDlgFieldsDeep(dlg, "cached");
+    }
+}
+
+void ScrapeTmpTextsOnPump(MethodInfoHead* miGetGo, MethodInfoHead* miGetActive,
+                          MethodInfoHead* miGetHier) {
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.findAll) return;
+    struct TmpTry {
+        const char* ns;
+        const char* name;
+        const char* tag;
+    };
+    const TmpTry kTries[] = {
+        {"TMPro", "TextMeshProUGUI", "TMPUGUI"},
+        {"TMPro", "TextMeshPro", "TMP"},
+        {"UnityEngine.UI", "Text", "UiText"},
+    };
+    const size_t offLen = x::runtime::il2cpp_container::OffArrayMaxLength();
+    const size_t offData = x::runtime::il2cpp_container::OffArrayData();
+    for (const TmpTry& t : kTries) {
+        void* klass = x::runtime::il2cpp::FindClass(t.ns, t.name);
+        if (!klass) continue;
+        void* typeObj = ClassTypeObjectOnPump(klass);
+        if (!typeObj) continue;
+        void* getTextMi = x::runtime::il2cpp_method::FindMethodByName(klass, "get_text", 0, false);
+        MethodInfoHead* miText = AsMi(getTextMi);
+        void* arr = nullptr;
+        __try {
+            arr = e.findAll(typeObj, nullptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            arr = nullptr;
+        }
+        if (!arr || !LooksLikeHeapPtr(arr)) continue;
+        int n = 0;
+        __try {
+            n = static_cast<int>(
+                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + offLen));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            n = 0;
+        }
+        if (n <= 0) continue;
+        // 活跃 Text 很多；封禁正文走 UiText.get_text，不必扫满图。
+        if (n > 32) n = 32;
+        int seen = 0;
+        for (int i = 0; i < n && seen < 12; ++i) {
+            void* o = nullptr;
+            __try {
+                o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + offData +
+                                              static_cast<size_t>(i) * sizeof(void*));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                o = nullptr;
+            }
+            if (!o || !LooksLikeHeapPtr(o) || !UnityAlive(o)) continue;
+            void* go = nullptr;
+            if (miGetGo && miGetGo->methodPointer) {
+                __try {
+                    go = reinterpret_cast<FnGetGameObject>(miGetGo->methodPointer)(o, miGetGo);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    go = nullptr;
+                }
+            }
+            if (go && LooksLikeHeapPtr(go)) {
+                const bool selfOn = GoActiveSelf(go, miGetActive);
+                const bool hierOn = miGetHier ? GoActiveInHierarchy(go, miGetHier) : selfOn;
+                if (!selfOn && !hierOn) continue;
+            }
+            ++seen;
+            char buf[480]{};
+            if (miText && miText->methodPointer) {
+                void* str = nullptr;
+                __try {
+                    using FnGetText = void* (*)(void* self, const void* method);
+                    str = reinterpret_cast<FnGetText>(miText->methodPointer)(o, miText);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    str = nullptr;
+                }
+                if (ReadNoticeMsgUtf8(str, buf, sizeof(buf)) && buf[0]) {
+                    EmitDialogScrape(t.tag, 0, buf, "get_text");
+                    if (NoticeMsgLooksKickish(buf)) CacheDialogPtr(o);
+                    continue;
+                }
+            }
+            // get_text 失败：字段扫；仅 kickish 会 Emit / Cache
+            ScrapeObjectStrings(o, t.tag, "tmp_fields", 0x40, 0x180);
+        }
+    }
+}
+
+void ScrapeLoginDialogsOnPump(void* /*user*/) {
+    if (!x::runtime::main_thread::AssertOnPumpThread("SoftLoginDlgScrape")) return;
+    if (!x::runtime::il2cpp::Ensure()) return;
+    // 仅空闲大厅：进图 / 软重连 busy·hold 时不做 FindAll。
+    if (x::features::ports::world::IsInMapScene()) return;
+    if (gBusy.load(std::memory_order_acquire) || gHold.load(std::memory_order_acquire)) return;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.findAll) return;
+
+    struct Entry {
+        const char* hash;
+        const char* plain;
+        const char* tag;
+    };
+    const Entry kEntries[] = {
+        {kLoginUtilDialogClass, "UILoginUtilDialog", "LoginUtil"},
+        {kNoticeDialogClass, "UINoticeDialog", "NoticeDlg"},
+        {kUtilDialogClass, nullptr, "UtilDlg"},
+        {kUtilDialogExClass, nullptr, "UtilDlgEx"},
+        {kMultiLineNoticeClass, "UIMultiLineNotice", "MultiLine"},
+        {kSlideNoticeClass, "UISlideNotice", "Slide"},
+    };
+
+    MethodInfoHead* miGetGo = nullptr;
+    MethodInfoHead* miGetActive = nullptr;
+    MethodInfoHead* miGetHier = nullptr;
+    void* compKlass = x::runtime::il2cpp::FindClass("UnityEngine", "Component");
+    void* goKlass = x::runtime::il2cpp::FindClass("UnityEngine", "GameObject");
+    if (compKlass) {
+        using x::runtime::il2cpp_method::MethodShape;
+        using x::runtime::il2cpp_method::TypeKind;
+        constexpr MethodShape kGo{0, TypeKind::Ptr, true, true};
+        auto r = x::runtime::il2cpp_method::FindMethodResolved(compKlass, kRvaCompGetGo, kGo,
+                                                               "get_gameObject", nullptr);
+        miGetGo = AsMi(r.method);
+    }
+    if (goKlass) {
+        using x::runtime::il2cpp_method::MethodShape;
+        using x::runtime::il2cpp_method::TypeKind;
+        constexpr MethodShape kAct{0, TypeKind::Bool, true, true, {}};
+        auto ra = x::runtime::il2cpp_method::FindMethodResolved(goKlass, kRvaGoGetActiveSelf, kAct,
+                                                                "get_activeSelf", nullptr);
+        miGetActive = AsMi(ra.method);
+        void* byHier =
+            x::runtime::il2cpp_method::FindMethodByName(goKlass, "get_activeInHierarchy", 0, false);
+        miGetHier = AsMi(byHier);
+    }
+
+    const size_t offLen = x::runtime::il2cpp_container::OffArrayMaxLength();
+    const size_t offData = x::runtime::il2cpp_container::OffArrayData();
+    for (const Entry& ent : kEntries) {
+        void* klass = ResolveUiKlass(ent.hash, ent.plain);
+        if (!klass) continue;
+        void* typeObj = ClassTypeObjectOnPump(klass);
+        if (!typeObj) continue;
+        void* arr = nullptr;
+        __try {
+            arr = e.findAll(typeObj, nullptr);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            arr = nullptr;
+        }
+        if (!arr || !LooksLikeHeapPtr(arr)) continue;
+        int n = 0;
+        __try {
+            n = static_cast<int>(
+                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(arr) + offLen));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            n = 0;
+        }
+        if (n <= 0) continue;
+        if (n > 12) n = 12;
+        for (int i = 0; i < n; ++i) {
+            void* o = nullptr;
+            __try {
+                o = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(arr) + offData +
+                                              static_cast<size_t>(i) * sizeof(void*));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                o = nullptr;
+            }
+            if (!o || !LooksLikeHeapPtr(o) || !UnityAlive(o)) continue;
+            void* go = nullptr;
+            if (miGetGo && miGetGo->methodPointer) {
+                __try {
+                    go = reinterpret_cast<FnGetGameObject>(miGetGo->methodPointer)(o, miGetGo);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    go = nullptr;
+                }
+            }
+            if (go && LooksLikeHeapPtr(go)) {
+                const bool selfOn = GoActiveSelf(go, miGetActive);
+                const bool hierOn = miGetHier ? GoActiveInHierarchy(go, miGetHier) : selfOn;
+                if (!selfOn && !hierOn) continue;
+            }
+            CacheDialogPtr(o);
+            ScrapeDlgFieldsDeep(o, ent.tag);
+        }
+    }
+    ScrapeTmpTextsOnPump(miGetGo, miGetActive, miGetHier);
 }
 
 void DismissKickDialogOnPump(void* user) {
@@ -1110,6 +1672,71 @@ void ArmLandQuiet(DWORD ms) {
                 static_cast<unsigned>(airUntil - now));
 }
 
+// Finish 兑现最小 hold 时长期间静默窗会照常流逝；顺延同样时长，
+// 避免 hold 一落地就已经没有停刀/禁空中窗口。
+void ExtendQuietWindows(DWORD extraMs) {
+    if (!extraMs) return;
+    DWORD until = gLandQuietUntilMs.load(std::memory_order_acquire);
+    if (until) {
+        DWORD next = until + extraMs;
+        if (next == 0) next = 1;
+        gLandQuietUntilMs.store(next, std::memory_order_release);
+    }
+    DWORD air = gPostSoftAirUntilMs.load(std::memory_order_acquire);
+    if (air) {
+        DWORD next = air + extraMs;
+        if (next == 0) next = 1;
+        gPostSoftAirUntilMs.store(next, std::memory_order_release);
+    }
+}
+
+bool BreakerActive() {
+    DWORD until = gBreakerUntilMs.load(std::memory_order_acquire);
+    if (!until) return false;
+    const DWORD now = GetTickCount();
+    if (static_cast<int>(until - now) > 0) return true;
+    if (gBreakerUntilMs.compare_exchange_strong(until, 0, std::memory_order_acq_rel)) {
+        LogLine("breaker off — resume soft takeover");
+        KickLogLine("breaker off");
+    }
+    return false;
+}
+
+void NoteSoftSuccess() {
+    gFailStreak.store(0, std::memory_order_release);
+    gFailStreakFirstMs.store(0, std::memory_order_release);
+}
+
+void NoteSoftFailure() {
+    const DWORD now = GetTickCount();
+    DWORD first = gFailStreakFirstMs.load(std::memory_order_acquire);
+    if (!first || now - first > kSoftFailBreakerWindowMs) {
+        first = now ? now : 1;
+        gFailStreakFirstMs.store(first, std::memory_order_release);
+        gFailStreak.store(0, std::memory_order_release);
+    }
+    const int streak = gFailStreak.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (streak < kSoftFailBreakerMax) {
+        LogLine("fail_streak %d/%d window=%ums", streak, kSoftFailBreakerMax,
+                static_cast<unsigned>(now - first));
+        KickLogLine("fail_streak %d/%d", streak, kSoftFailBreakerMax);
+        return;
+    }
+    DWORD until = now + kSoftFailBreakerHoldOffMs;
+    if (until == 0) until = 1;
+    gBreakerUntilMs.store(until, std::memory_order_release);
+    gFailStreak.store(0, std::memory_order_release);
+    gFailStreakFirstMs.store(0, std::memory_order_release);
+    LogLine("breaker ON — %d fails in %ums; stop takeover for %us (guardian clean relaunch)",
+            streak, static_cast<unsigned>(now - first),
+            static_cast<unsigned>(kSoftFailBreakerHoldOffMs / 1000));
+    KickLogLine("breaker ON fails=%d holdoff=%us", streak,
+                static_cast<unsigned>(kSoftFailBreakerHoldOffMs / 1000));
+    x::features::notify::PublishNotification(x::features::notify::NotificationEvent{
+        x::features::notify::NotificationKind::Warning, "soft-login-breaker", "软重连暂停接管",
+        "连续失败已达上限 · 交守护干净重拉", 8000});
+}
+
 void PublishSoftLoginNotify(unsigned result, const char* line) {
     using x::features::notify::NotificationEvent;
     using x::features::notify::NotificationKind;
@@ -1143,8 +1770,177 @@ void Finish(unsigned result, const char* line) {
     // 成功/失败都解冻：失败若留 freeze=1，InterStage 不 quiesce、play 功能一直 defer，
     // 再叠 SoftPumpCall 会把已死泵打成 job timeout 螺旋（BIN 02:23）。
     x::runtime::managed_main::SetLoginFreeze(false);
+    // 成功：丢掉本轮 CloseSession / 进图 Session 抖动排进的 pending，避免
+    // RESULT 同毫秒立刻 attempt begin（BIN 02:11–02:12 无限软重连）。
+    if (result == 1) gPending.store(false, std::memory_order_release);
+    if (result == 1) {
+        NoteSoftSuccess();
+    } else if (result == 2) {
+        NoteSoftFailure();
+    }
+    gInMapRecoverSinceMs.store(0, std::memory_order_release);
+    // 守护 500ms 才采一拍 Status SHM：太短的 attempt 会让「result=0/hold=1」整拍消失，
+    // 上升沿吞 seq 与 hold 推迟两条判据同时落空 → 干净重拉杀进程（BIN 17:29）。
+    // 这里把 hold 按住到至少 kMinHoldMs，保证守护先采到观察窗、再采到 RESULT。
+    const DWORD began = gAttemptBeginMs.exchange(0, std::memory_order_acq_rel);
+    if (began && !gStop.load()) {
+        const DWORD elapsed = GetTickCount() - began;
+        if (elapsed < kMinHoldMs) {
+            const DWORD remain = kMinHoldMs - elapsed;
+            LogLine("min_hold keep hold=1 +%ums (attempt=%ums < %ums; guardian SHM 500ms/tick)",
+                    static_cast<unsigned>(remain), static_cast<unsigned>(elapsed),
+                    static_cast<unsigned>(kMinHoldMs));
+            KickLogLine("min_hold +%ums attempt=%ums", static_cast<unsigned>(remain),
+                        static_cast<unsigned>(elapsed));
+            Sleep(remain);
+            if (result == 1) ExtendQuietWindows(remain);
+        }
+    }
     SetHold(false);
     gBusy.store(false);
+}
+
+// BIN 02:11–02:12：进图后 SoftHall.WorldItems=0（不在登录 UI）被当成「空大厅」
+// → CloseSession → KickSniff RequestAttempt → 再软重连 → stickyCh+1 无限环。
+// 图内绝不硬拆；直接 RESULT success 解 hold。
+//
+// 返回：1=已 success 解 hold；0=确认不在图（可硬拆）；-1=未知/泵忙（禁止 CloseSession）。
+// BIN 15:38：play-boot 泵堵时 SoftPumpCall(SamplePlayReady) 失败被当成 !inMap，
+// 同时 WorldPort 已 inMap=1 — 误 SoftForceNmTeardown → job timeout 螺旋。
+//
+// BIN 17:29：Disconnected / close_session_inmap 时 MapScene 常短暂残留；
+// 若仍走 already_in_map → hold 仅十余 ms → 守护看不到 hold、吞不了 disconnectSeq → 干净重拉杀进程。
+// 真断线 why 禁止只凭场景判「已在图成功」；场景残留时返回 -1（勿硬拆），已离开图返回 0（走重连）。
+// 但残留与「游戏自己恢复了」必须能分开：后者由 InMapRecoverConfirmed 给出口
+//（playReady+挂台+Connected 稳住 8s），否则 connect-wait 会空耗 160 轮 × 10 cycle
+// ≈ 十分钟 hold 停打怪，最后 Finish(2) 把好端端在图里的客户端交给守护杀掉。
+bool WhyStringNeedsRealReconnect(const char* why) {
+    if (!why || !why[0]) return false;
+    return std::strcmp(why, "disconnected") == 0 || std::strcmp(why, "disconnecting") == 0 ||
+           std::strcmp(why, "close_session_inmap") == 0 || std::strcmp(why, "stuck_lobby") == 0;
+}
+
+std::atomic<DWORD> gLastRefuseLogMs{0};
+constexpr DWORD kRefuseLogGapMs = 3000;
+
+// 真断线 why 下的图内出口：playReady + 挂台（curFh≠0）+ NM Connected 连续
+// kInMapRecoverConfirmMs → 游戏已自行恢复（假断线边沿 / 客户端自连），可以认成功解 hold。
+// 条件不齐或未满窗则清零计时返回 false，调用方仍按「MapScene 残留」处理（禁止硬拆）。
+//
+// ★ fh-ban 武装时引擎故意 CurFh=0（F6 / F5 Impact / Travel）：不得当成「未恢复悬空」
+// 清掉计时，否则主城 soft hold 期间一开 F6 就永久卡 recover（BIN 2026-08-12 22:02）。
+bool InMapRecoverConfirmed(const PlayReadyCtx& play, const char* tag) {
+    const bool intentionalDetach = x::features::ports::fly_fh_ban::IsBanActive();
+    if (!play.ready || (play.curFh == 0 && !intentionalDetach)) {
+        if (gInMapRecoverSinceMs.exchange(0, std::memory_order_acq_rel)) {
+            LogLine("in_map_recover reset tag=%s ready=%d curFh=%u fhBan=%d", tag ? tag : "?",
+                    play.ready, static_cast<unsigned>(play.curFh), intentionalDetach ? 1 : 0);
+        }
+        return false;
+    }
+    SampleCtx s{};
+    if (!SoftPumpCall(&SampleNmOnPump, &s, kSoftSampleCallMs) || !s.nmOk ||
+        s.state != kStateConnected) {
+        if (gInMapRecoverSinceMs.exchange(0, std::memory_order_acq_rel)) {
+            LogLine("in_map_recover reset tag=%s nmOk=%d state=%s(%d)", tag ? tag : "?", s.nmOk,
+                    StateName(s.state), s.state);
+        }
+        return false;
+    }
+    const DWORD now = GetTickCount();
+    DWORD since = gInMapRecoverSinceMs.load(std::memory_order_acquire);
+    if (!since) {
+        since = now ? now : 1;
+        gInMapRecoverSinceMs.store(since, std::memory_order_release);
+        LogLine("in_map_recover watch tag=%s curFh=%u fhBan=%d Connected — confirm after %ums",
+                tag ? tag : "?", static_cast<unsigned>(play.curFh), intentionalDetach ? 1 : 0,
+                static_cast<unsigned>(kInMapRecoverConfirmMs));
+        KickLogLine("in_map_recover watch curFh=%u fhBan=%d", static_cast<unsigned>(play.curFh),
+                    intentionalDetach ? 1 : 0);
+        return false;
+    }
+    const DWORD held = now - since;
+    if (held < kInMapRecoverConfirmMs) return false;
+    LogLine("in_map_recover confirmed tag=%s held=%ums curFh=%u", tag ? tag : "?",
+            static_cast<unsigned>(held), static_cast<unsigned>(play.curFh));
+    KickLogLine("in_map_recover confirmed held=%ums", static_cast<unsigned>(held));
+    return true;
+}
+
+int SoftProbeInMapOrFinish(const char* tag) {
+    // gWhy 是裸缓冲；判定读原子量，避免 memset 中间态被读成空串又放开假成功。
+    const bool needReconnect = gWhyNeedsReconnect.load(std::memory_order_acquire);
+    // Off-pump：WorldPort 场景缓存（worker 其它路径已在用）；泵堵时仍能认出已进图。
+    // 真断线 why 不得只凭场景缓存判成功（MapScene 会残留）——落到下面泵采样做确认恢复。
+    if (!needReconnect && x::features::ports::world::IsInMapScene()) {
+        char ok[240]{};
+        snprintf(ok, sizeof(ok),
+                 "RESULT success already_in_map skip_teardown tag=%s via=off_pump why=%s",
+                 tag ? tag : "?", gWhy);
+        KickLogLine("already_in_map skip_teardown tag=%s via=off_pump", tag ? tag : "?");
+        ArmLandQuiet(kSoftLandQuietMs);
+        Finish(1, ok);
+        return 1;
+    }
+    if (SoftShouldDeferPumpWork()) {
+        LogLine("in_map_probe defer tag=%s pump_stale age=%ums", tag ? tag : "?",
+                static_cast<unsigned>(x::runtime::main_thread::LastRealTickAgeMs()));
+        KickLogLine("in_map_probe defer tag=%s pump_stale", tag ? tag : "?");
+        return -1;
+    }
+    PlayReadyCtx play{};
+    if (!SoftPumpCall(&SamplePlayReadyOnPump, &play, kPlayReadySampleMs)) {
+        LogLine("in_map_probe defer tag=%s sample_pump_fail", tag ? tag : "?");
+        KickLogLine("in_map_probe defer tag=%s sample_pump_fail", tag ? tag : "?");
+        return -1;
+    }
+    if (!play.sampled) {
+        KickLogLine("in_map_probe defer tag=%s not_sampled", tag ? tag : "?");
+        return -1;
+    }
+    if (!play.inMap) {
+        gInMapRecoverSinceMs.store(0, std::memory_order_release);
+        return 0;
+    }
+    if (needReconnect) {
+        if (!InMapRecoverConfirmed(play, tag)) {
+            // 每 250ms 一轮的 connect-wait 会刷爆日志；节流后仍保留可诊断节奏。
+            const DWORD now = GetTickCount();
+            const DWORD lastLog = gLastRefuseLogMs.load(std::memory_order_acquire);
+            if (!lastLog || now - lastLog >= kRefuseLogGapMs) {
+                gLastRefuseLogMs.store(now ? now : 1, std::memory_order_release);
+                LogLine("in_map_probe refuse already_in_map why=%s tag=%s curFh=%u ready=%d "
+                        "(MapScene linger / not recovered yet)",
+                        gWhy, tag ? tag : "?", static_cast<unsigned>(play.curFh), play.ready);
+                KickLogLine("in_map_probe refuse already_in_map why=%s tag=%s", gWhy,
+                            tag ? tag : "?");
+            }
+            return -1;
+        }
+        char ok[240]{};
+        snprintf(ok, sizeof(ok),
+                 "RESULT success in_map_recovered tag=%s curFh=%u confirm=%ums why=%s",
+                 tag ? tag : "?", static_cast<unsigned>(play.curFh),
+                 static_cast<unsigned>(kInMapRecoverConfirmMs), gWhy);
+        KickLogLine("RESULT success in_map_recovered tag=%s curFh=%u", tag ? tag : "?",
+                    static_cast<unsigned>(play.curFh));
+        ArmLandQuiet(kSoftLandQuietMs);
+        Finish(1, ok);
+        return 1;
+    }
+    char ok[240]{};
+    snprintf(ok, sizeof(ok),
+             "RESULT success already_in_map skip_teardown tag=%s curFh=%u why=%s",
+             tag ? tag : "?", static_cast<unsigned>(play.curFh), gWhy);
+    KickLogLine("already_in_map skip_teardown tag=%s curFh=%u", tag ? tag : "?",
+                static_cast<unsigned>(play.curFh));
+    ArmLandQuiet(kSoftLandQuietMs);
+    Finish(1, ok);
+    return 1;
+}
+
+bool SoftFinishIfAlreadyInMap(const char* tag) {
+    return SoftProbeInMapOrFinish(tag) == 1;
 }
 
 // 等 Unity drain-host 心跳；超时返回 false（hold 仍由调用方决定）。
@@ -1264,7 +2060,87 @@ bool DetailIsTransientConnectMiss(const char* detail) {
 
 DWORD WINAPI Worker(LPVOID) {
     LogLine("worker start");
+    DWORD lastDlgScrapeMs = 0;
+    DWORD lastOffScrapeMs = 0;
+    DWORD lastStuckLobbyMs = 0;
+    bool clearedCacheInMap = false;
     while (!gStop.load()) {
+        // GA 可能晚于 Init；武装后空闲也装 Abs，赶在登录封禁窗之前。
+        if (IsArmed()) {
+            EnsureNoticeAbsHook();
+            // 封禁/踢登录文案只出现在大厅；进图完全停 scrape。
+            // 软重连进行中（busy/hold）也停，避免和 ConnectLogin/dismiss 抢泵。
+            const bool inMap = x::features::ports::world::IsInMapScene();
+            const bool softBusy = gBusy.load(std::memory_order_acquire) ||
+                                  gHold.load(std::memory_order_acquire);
+            const DWORD now = GetTickCount();
+            // 图内 CloseSession 粘性：回大厅（!inMap）或大厅 UI 已 ready 时再武装。
+            if (gDeferred.load(std::memory_order_acquire) && !softBusy && !IsLandQuiet() &&
+                !gPending.load(std::memory_order_acquire)) {
+                const DWORD since = gDeferredSinceMs.load(std::memory_order_acquire);
+                if (since && now - since > kDeferredSoftMaxMs) {
+                    gDeferred.store(false, std::memory_order_release);
+                    LogLine("deferred soft expire why=%s", gDeferredWhy[0] ? gDeferredWhy : "?");
+                    KickLogLine("deferred soft expire");
+                } else {
+                    bool fire = !inMap;
+                    if (!fire && inMap && now - lastStuckLobbyMs >= 2000 &&
+                        !SoftShouldDeferPumpWork()) {
+                        lastStuckLobbyMs = now;
+                        x::features::auto_enter::SoftHallCtx hall{};
+                        if (SoftPumpCall(&x::features::auto_enter::SoftHallSampleOnPump, &hall,
+                                         kSoftSampleCallMs) &&
+                            hall.ok && hall.ready) {
+                            fire = true;
+                            LogLine("deferred soft hall-ready inMap=1 world=%d ch=%d items=%d",
+                                    hall.worldUi, hall.channelUi, hall.worldItems);
+                        }
+                    }
+                    if (fire) {
+                        char whyBuf[64]{};
+                        strncpy_s(whyBuf, gDeferredWhy[0] ? gDeferredWhy : "deferred", _TRUNCATE);
+                        gDeferred.store(false, std::memory_order_release);
+                        LogLine("deferred soft fire why=%s inMap=%d", whyBuf, inMap ? 1 : 0);
+                        KickLogLine("deferred soft fire why=%s inMap=%d", whyBuf, inMap ? 1 : 0);
+                        RequestAttempt(whyBuf);
+                    }
+                }
+            }
+            if (!inMap && !softBusy) {
+                clearedCacheInMap = false;
+                if (now - lastDlgScrapeMs >= 2500 && !SoftShouldDeferPumpWork()) {
+                    lastDlgScrapeMs = now;
+                    SoftPumpCall(&ScrapeLoginDialogsOnPump, nullptr, 600);
+                }
+                if (now - lastOffScrapeMs >= 1500) {
+                    lastOffScrapeMs = now;
+                    ScrapeCachedDialogsOffPump();
+                }
+                // BIN 15:20 兜底：安全强制关闭后已 Connected+大厅，但无 Disconnected 边沿 /
+                // lost_session 被吞 → auto_enter 仍 Done 停选区。闲置且 Done/Failed 时自拉 soft。
+                if (!IsLandQuiet() && !gPending.load(std::memory_order_acquire) &&
+                    x::features::auto_enter::IsDesired() &&
+                    (x::features::auto_enter::IsDone() || x::features::auto_enter::IsFailed()) &&
+                    now - lastStuckLobbyMs >= 2000 && !SoftShouldDeferPumpWork()) {
+                    lastStuckLobbyMs = now;
+                    x::features::auto_enter::SoftHallCtx hall{};
+                    if (SoftPumpCall(&x::features::auto_enter::SoftHallSampleOnPump, &hall,
+                                     kSoftSampleCallMs) &&
+                        hall.ok && hall.ready) {
+                        LogLine("stuck_lobby detect world=%d ch=%d items=%d done=%d fail=%d — "
+                                "RequestAttempt",
+                                hall.worldUi, hall.channelUi, hall.worldItems,
+                                x::features::auto_enter::IsDone() ? 1 : 0,
+                                x::features::auto_enter::IsFailed() ? 1 : 0);
+                        KickLogLine("stuck_lobby RequestAttempt items=%d", hall.worldItems);
+                        RequestAttempt("stuck_lobby");
+                    }
+                }
+            } else if (inMap && !clearedCacheInMap) {
+                ScrapeCachedDialogsOffPump();
+                clearedCacheInMap = true;
+            }
+        }
         if (!gPending.exchange(false)) {
             Sleep(50);
             continue;
@@ -1282,6 +2158,13 @@ DWORD WINAPI Worker(LPVOID) {
 
         gResult.store(0, std::memory_order_release);
         SetHold(true);
+        // Finish 用它兑现最小 hold 时长（守护 SHM 500ms/拍）。
+        {
+            const DWORD beginMs = GetTickCount();
+            gAttemptBeginMs.store(beginMs ? beginMs : 1, std::memory_order_release);
+        }
+        gInMapRecoverSinceMs.store(0, std::memory_order_release);
+        gLastRefuseLogMs.store(0, std::memory_order_release);
         EnsureNoticeAbsHook();
         LogLine("attempt begin why=%s settle=%ums hold=1 softCycles=%d doneRestarts=%d", gWhy,
                 static_cast<unsigned>(kSettleMs), kSoftCycleMax, kDoneNoPlayMaxRestarts);
@@ -1307,6 +2190,8 @@ DWORD WINAPI Worker(LPVOID) {
         bool sawConnecting = false;
         int hardMiss = 0;
         int connectPumpFail = 0;
+        int connectingStreak = 0;
+        int emptyHallConnect = 0;
         char lastDetail[160] = "none";
         if (!WaitPumpAlive(kPumpWaitBeforeSoftMs, "soft_cycle")) {
             char fail[200]{};
@@ -1320,6 +2205,9 @@ DWORD WINAPI Worker(LPVOID) {
             }
             goto next;
         }
+        // lost_session 图内 blip / 误武装：已在图则直接 success，勿拆大厅。
+        // disconnected / close_session_inmap：MapScene 残留也不得假成功（BIN 17:29 守护误杀）。
+        if (SoftFinishIfAlreadyInMap("cycle_begin")) goto next;
 
         // 断线 Notice 往往立刻弹出；勿等 Connected 才关。
         // 墙钟截止 + Connecting/Connected 早退（302081）。
@@ -1414,6 +2302,8 @@ DWORD WINAPI Worker(LPVOID) {
         }
 
         connectPumpFail = 0;
+        connectingStreak = 0;
+        emptyHallConnect = 0;
         for (int t = 0; t < kConnectWaitRounds && !gStop.load(); ++t) {
             // 泵 idle：禁止 Sample/Dismiss/ConnectLogin（BIN 02:30 空打 ~20s）。
             if (SoftShouldDeferPumpWork()) {
@@ -1498,13 +2388,46 @@ DWORD WINAPI Worker(LPVOID) {
                         goto connected_path;
                     }
                     // BIN 01:53：Connected+items=0 时 ConnectLogin 空转；Disconnect 只自连回
-                    // Connected。禁止在 Connected 上 ConnectLogin → CloseSession 等到掉线再连。
-                    LogLine("NM Connected but hall not ready world=%d ch=%d items=%d try=%d — "
-                            "CloseSession (no ConnectLogin while Connected)",
-                            sample.worldUi, sample.channelUi, sample.worldItems, t);
-                    KickLogLine("connect_wait Connected_close_session try=%d items=%d", t,
+                    // Connected。禁止在 Connected 上 ConnectLogin。
+                    // BIN 02:12：图内 SoftHall 也是 items=0 — 先认 inMap，绝不硬拆。
+                    // BIN 15:40：CloseSession 硬拆 →「已登出登入的帳號」；改等多等 / soft cycle。
+                    {
+                        const int im = SoftProbeInMapOrFinish("connected_empty_hall");
+                        if (im == 1) goto next;
+                        if (im < 0) {
+                            LogLine("NM Connected items=0 try=%d — defer (in_map unknown/pump)", t);
+                            KickLogLine("connect_wait empty_hall_defer try=%d", t);
+                            Sleep(kConnectWaitMs);
+                            continue;
+                        }
+                    }
+                    ++emptyHallConnect;
+                    if (emptyHallConnect >= kEmptyHallConnectWaitRounds) {
+                        LogLine("NM Connected hall empty streak=%d/%d try=%d items=%d — soft "
+                                "cycle (no CloseSession)",
+                                emptyHallConnect, kEmptyHallConnectWaitRounds, t,
                                 sample.worldItems);
-                    SoftForceNmTeardown("connected_empty_hall");
+                        KickLogLine("connect_wait empty_hall_soft_cycle try=%d items=%d", t,
+                                    sample.worldItems);
+                        char failHall[200]{};
+                        snprintf(failHall, sizeof(failHall),
+                                 "RESULT fail hall_world_items_empty why=%s where=connect_wait — "
+                                 "soft cycle or release hold",
+                                 gWhy);
+                        if (SoftFailOrRetry(softCycle, failHall, &emptyHallStreak)) {
+                            ++softCycle;
+                            goto soft_cycle_begin;
+                        }
+                        goto next;
+                    }
+                    if ((emptyHallConnect % 8) == 1) {
+                        LogLine("NM Connected hall not ready world=%d ch=%d items=%d try=%d "
+                                "empty=%d/%d — wait (no CloseSession)",
+                                sample.worldUi, sample.channelUi, sample.worldItems, t,
+                                emptyHallConnect, kEmptyHallConnectWaitRounds);
+                        KickLogLine("connect_wait empty_hall_wait try=%d empty=%d", t,
+                                    emptyHallConnect);
+                    }
                     invokeOk = false;
                     sawConnecting = false;
                     Sleep(kConnectWaitMs);
@@ -1516,10 +2439,19 @@ DWORD WINAPI Worker(LPVOID) {
                         LogLine("NM Connecting during connect-wait try=%d — hold, no dismiss", t);
                         KickLogLine("connect_wait Connecting try=%d", t);
                     }
+                    ++connectingStreak;
+                    if (connectingStreak >= kConnectingStallRounds) {
+                        // BIN 04:20：Connecting 空转数秒后仍 ConnectLogin 叠登 → 易变 Disconnected。
+                        LogLine("connect-wait Connecting stall try=%d streak=%d — poll early", t,
+                                connectingStreak);
+                        KickLogLine("connect_wait Connecting_stall try=%d", t);
+                        break;
+                    }
                     // Connecting：自连优先，不抢泵做 dismiss。
                     Sleep(kConnectWaitMs);
                     continue;
                 }
+                connectingStreak = 0;
             }
 
             // 每轮激进关窗：断线 Notice 单钮「確認」≠踢线 YesNo；Close+SetActive 安全。
@@ -1637,6 +2569,7 @@ DWORD WINAPI Worker(LPVOID) {
         int lastErr = -1;
         bool sawNm = false;
         int emptyHallPoll = 0;
+        int discPoll = 0;
         for (int i = 0; i < kPollRounds && !gStop.load(); ++i) {
             {
                 DismissCtx mid{};
@@ -1667,6 +2600,18 @@ DWORD WINAPI Worker(LPVOID) {
                 best = sample.state;
                 lastErr = sample.err;
             }
+            if (sample.state == kStateDisconnected || sample.state == kStateDisconnecting) {
+                ++discPoll;
+                emptyHallPoll = 0;
+                if (discPoll >= kDiscPollFailRounds) {
+                    LogLine("poll[%d] Disconnected streak=%d/%d — soft cycle early", i, discPoll,
+                            kDiscPollFailRounds);
+                    KickLogLine("poll_disc_early streak=%d", discPoll);
+                    break;
+                }
+                continue;
+            }
+            discPoll = 0;
             if (sample.state == kStateConnected) {
                 KickLogLine("RESULT connected rounds=%d world=%d ch=%d items=%d ready=%d", i + 1,
                             sample.worldUi, sample.channelUi, sample.worldItems, sample.hallReady);
@@ -1676,7 +2621,7 @@ DWORD WINAPI Worker(LPVOID) {
                             gWhy, i + 1, sample.worldUi, sample.channelUi, sample.worldItems);
                     goto connected_path;
                 }
-                // BIN 01:53：空等满 poll≈16s；满 kEmptyHallPollRounds 即 CloseSession soft cycle。
+                // BIN 01:53：空等满 poll；满 kEmptyHallPollRounds 后 soft cycle（不 CloseSession）。
                 ++emptyHallPoll;
                 if ((emptyHallPoll % 2) == 1) {
                     LogLine("poll[%d] Connected hall not ready items=%d empty=%d/%d", i,
@@ -1691,10 +2636,29 @@ DWORD WINAPI Worker(LPVOID) {
             SampleCtx last{};
             if (SoftPumpCall(&SampleNmOnPump, &last, kSoftSampleCallMs) && last.nmOk &&
                 last.state == kStateConnected && !LoginUiReady(last)) {
-                LogLine("poll end Connected items=%d — CloseSession then soft cycle",
+                const int im = SoftProbeInMapOrFinish("poll_empty_hall");
+                if (im == 1) goto next;
+                if (im < 0) {
+                    LogLine("poll end Connected items=%d — defer soft cycle (in_map unknown)",
+                            last.worldItems);
+                    KickLogLine("poll_end empty_hall_defer");
+                    Sleep(kConnectWaitMs);
+                    if (SoftProbeInMapOrFinish("poll_empty_hall_retry") == 1) goto next;
+                    char failDefer[200]{};
+                    snprintf(failDefer, sizeof(failDefer),
+                             "RESULT fail hall_world_items_empty why=%s where=poll_defer — soft "
+                             "cycle or release hold",
+                             gWhy);
+                    if (SoftFailOrRetry(softCycle, failDefer, &emptyHallStreak)) {
+                        ++softCycle;
+                        goto soft_cycle_begin;
+                    }
+                    goto next;
+                }
+                LogLine("poll end Connected items=%d — soft cycle (no CloseSession)",
                         last.worldItems);
-                KickLogLine("poll_end Connected_empty_hall close_session");
-                SoftForceNmTeardown("poll_empty_hall");
+                KickLogLine("poll_end Connected_empty_hall soft_cycle");
+                if (kAllowEmptyHallCloseSession) SoftForceNmTeardown("poll_empty_hall");
                 char failHall[200]{};
                 snprintf(failHall, sizeof(failHall),
                          "RESULT fail hall_world_items_empty why=%s where=poll — soft cycle "
@@ -1744,13 +2708,45 @@ DWORD WINAPI Worker(LPVOID) {
                     goto next;
                 }
                 if (dismissHits <= 0) {
-                    LogLine("dismiss_miss — no active UIUtilDialog; continue reenter anyway");
+                    LogLine("dismiss_miss — no active UIUtilDialog; retry LoginUtil/Notice once");
                     KickLogLine("dismiss_miss");
+                    // BIN 17:43：Util 已关/池实例 alreadyOff，真窗在 UILoginUtilDialog；补一枪白名单。
+                    DismissCtx again{};
+                    again.aggressive = 1;
+                    again.scanBase = 1;
+                    if (SoftPumpCall(&DismissKickDialogOnPump, &again, kDismissCallMs)) {
+                        LogLine("dismiss_retry %s", again.detail);
+                        KickLogLine("dismiss_retry %s", again.detail);
+                        dismissHits += again.scanned + again.inactivated + again.closed +
+                                       again.destroyed;
+                    }
+                    if (dismissHits <= 0)
+                        LogLine("dismiss_miss — continue reenter anyway");
                 }
 
                 // 分区列表未刷出就 RequestRestart → auto_enter 卡 waiting WorldItems?（BIN 21:44）。
                 if (!WaitHallPickReady(kHallReadyWaitMs)) {
-                    SoftForceNmTeardown("hall_wait_timeout");
+                    const int im = SoftProbeInMapOrFinish("hall_wait_timeout");
+                    if (im == 1) goto next;
+                    if (im < 0) {
+                        LogLine("hall_wait timeout — defer soft cycle (in_map unknown/pump)");
+                        KickLogLine("hall_wait empty_hall_defer");
+                        Sleep(kConnectWaitMs);
+                        if (SoftProbeInMapOrFinish("hall_wait_timeout_retry") == 1) goto next;
+                        char failDefer[200]{};
+                        snprintf(failDefer, sizeof(failDefer),
+                                 "RESULT fail hall_world_items_empty why=%s where=hall_defer — "
+                                 "soft cycle or release hold",
+                                 gWhy);
+                        if (SoftFailOrRetry(softCycle, failDefer, &emptyHallStreak)) {
+                            ++softCycle;
+                            goto soft_cycle_begin;
+                        }
+                        goto next;
+                    }
+                    LogLine("hall_wait timeout — soft cycle (no CloseSession)");
+                    KickLogLine("hall_wait empty_hall_soft_cycle");
+                    if (kAllowEmptyHallCloseSession) SoftForceNmTeardown("hall_wait_timeout");
                     char fail[200]{};
                     snprintf(fail, sizeof(fail),
                              "RESULT fail hall_world_items_empty why=%s wait=%ums — soft cycle "
@@ -1826,20 +2822,22 @@ DWORD WINAPI Worker(LPVOID) {
                             continue;
                         }
 
-                        // 大厅关窗仅重进首轮一枪；进图后禁止每轮 FindAll（E216）；勿再按 every-N 叠泵。
+                        // 大厅关窗：重进期间周期性扫 LoginUtil/Notice。
+                        // BIN 17:43：「已登出登入的帳號」挡选区；旧逻辑仅 r==0 且 scanBase=0，
+                        // 漏掉 UILoginUtilDialog，且窗晚于首枪弹出后永不补关。
                         const bool stillInHall = !x::features::auto_enter::IsDone() &&
                                                  !x::features::auto_enter::IsFailed();
-                        if (stillInHall && r == 0) {
+                        if (stillInHall && (r == 0 || (r % 10) == 0) &&
+                            !SoftShouldDeferPumpWork()) {
                             DismissCtx again{};
                             again.aggressive = 1;
-                            // 重进大厅只卸 Util/Ex；Notice 白名单已在 Connected 前扫过，勿再叠 FindAll。
-                            again.scanBase = 0;
+                            again.scanBase = 1;  // Util/Ex + UILoginUtilDialog / Notice 白名单
                             if (SoftPumpCall(&DismissKickDialogOnPump, &again,
-                                                               kDismissCallMs) &&
-                                (again.closed > 0 || again.inactivated > 0 || r == 0)) {
-                                LogLine("dismiss hall %s", again.detail);
-                                if (again.closed > 0 || again.inactivated > 0)
-                                    KickLogLine("dismiss hall %s", again.detail);
+                                                               kDismissCallMs)) {
+                                LogLine("dismiss hall r=%d %s", r, again.detail);
+                                if (again.closed > 0 || again.inactivated > 0 ||
+                                    again.destroyed > 0)
+                                    KickLogLine("dismiss hall r=%d %s", r, again.detail);
                             }
                         }
 
@@ -2147,6 +3145,7 @@ void Init() {
     if (IsArmed()) {
         LogLine("armed — will try SceneLogin ConnectLogin after disconnect (hold defers guardian)");
         KickLogLine("armed");
+        EnsureNoticeAbsHook();  // 登录即可能出封禁/踢线窗，勿等 RequestAttempt
     } else {
         LogLine("idle (home 「软重连试连」 / soft_login_probe.on / SOFT_LOGIN_PROBE=1)");
     }
@@ -2160,6 +3159,7 @@ void SetEnabled(bool on) {
     if (on) {
         LogLine("UI enable — try ConnectLogin after disconnect (hold defers guardian)");
         KickLogLine("armed ui");
+        EnsureNoticeAbsHook();
     } else if (!MarkerArmed() && !EnvOn("SOFT_LOGIN_PROBE")) {
         LogLine("UI disable — idle (marker/env still override if present)");
     }
@@ -2216,8 +3216,63 @@ bool IsGameplayQuiet() { return IsHoldActive() || IsLandQuiet(); }
 
 unsigned ResultCode() { return gResult.load(std::memory_order_acquire); }
 
+void RequestDeferredAttempt(const char* why) {
+    if (!IsArmed()) return;
+    if (BreakerActive()) {
+        LogLine("deferred skip breaker why=%s", why ? why : "?");
+        return;
+    }
+    if (gBusy.load(std::memory_order_acquire) || gPending.load(std::memory_order_acquire)) {
+        LogLine("deferred skip busy/pending why=%s", why ? why : "?");
+        return;
+    }
+    if (IsLandQuiet()) {
+        LogLine("deferred skip land_quiet why=%s", why ? why : "?");
+        return;
+    }
+    memset(gDeferredWhy, 0, sizeof(gDeferredWhy));
+    strncpy_s(gDeferredWhy, why ? why : "deferred", _TRUNCATE);
+    gDeferredSinceMs.store(GetTickCount(), std::memory_order_release);
+    gDeferred.store(true, std::memory_order_release);
+    LogLine("deferred soft arm why=%s (wait !inMap or hall)", gDeferredWhy);
+    KickLogLine("deferred soft arm why=%s", gDeferredWhy);
+}
+
 void RequestAttempt(const char* why) {
     if (!IsArmed()) return;
+    // 熔断期不接管：早退在 SetHold 之前，hold 保持 0，守护得以干净重拉。
+    if (BreakerActive()) {
+        LogLine("request skip breaker why=%s (guardian may clean relaunch)", why ? why : "?");
+        KickLogLine("request skip breaker why=%s", why ? why : "?");
+        return;
+    }
+    // BIN 16:05：图内药店 Session 空窗 why=lost_session → hold 闪一下像强制软重连。
+    // 真回大厅由 stuck_lobby / Disconnected 边沿 / RequestDeferredAttempt 处理；
+    // lost_session 在图内一律吞掉。
+    if (why && std::strcmp(why, "lost_session") == 0 &&
+        x::features::ports::world::IsInMapScene()) {
+        LogLine("request skip lost_session inMap");
+        KickLogLine("request skip lost_session inMap");
+        return;
+    }
+    // 正式 attempt 接管粘性票。
+    gDeferred.store(false, std::memory_order_release);
+    // 进行中的 soft 自拆 CloseSession / 进图 Session 抖动会再抬 Disconnected；
+    // 再排队 → RESULT 后立刻 attempt begin（BIN 02:12）。本轮 soft 自己会处理断线。
+    if (gBusy.load(std::memory_order_acquire)) {
+        LogLine("request skip busy why=%s", why ? why : "?");
+        KickLogLine("request skip busy why=%s", why ? why : "?");
+        return;
+    }
+    // Finish 已放 hold；落地静默期内吞掉进图后的 SessionTcpLayer blip。
+    if (IsLandQuiet()) {
+        LogLine("request skip land_quiet why=%s", why ? why : "?");
+        KickLogLine("request skip land_quiet why=%s", why ? why : "?");
+        return;
+    }
+    // 判定量先于裸缓冲落定：worker 只读 gWhyNeedsReconnect，不会撞上 memset 中间态。
+    gWhyNeedsReconnect.store(WhyStringNeedsRealReconnect(why ? why : "disconnect"),
+                             std::memory_order_release);
     memset(gWhy, 0, sizeof(gWhy));
     strncpy_s(gWhy, why ? why : "disconnect", _TRUNCATE);
     // 必须在 kick_sniff 抬 disconnectSeq / 宿主读 status 之前同步 hold。

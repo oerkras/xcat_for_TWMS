@@ -18,6 +18,7 @@
 #include "../features/invuln/invuln.h"
 #include "../features/attack_accel/attack_accel.h"
 #include "../features/final_attack_force/final_attack_force.h"
+#include "../features/melee_veto/melee_veto.h"
 #include "../features/skill_max_level/skill_max_level.h"
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/mob_scan/mob_scan.h"
@@ -30,9 +31,12 @@
 #include "../features/ports/keypad_walk_bin.h"
 #include "../features/ports/unity_kbd_port.h"
 #include "../features/ports/key_macro_bin.h"
+#include "../features/ports/curfh_gate_bypass.h"
 #include "../features/auto_lie/auto_lie.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
+#include "../features/rest_mp_accel/rest_mp_accel.h"
+#include "../features/infinite_stars/infinite_stars.h"
 #include "../features/ga_text_probe/ga_text_probe.h"
 #include "../features/galaxy_token_probe/galaxy_token_probe.h"
 #include "../features/soft_login_probe/soft_login_probe.h"
@@ -55,6 +59,7 @@
 #include "../ipc/payload_pet_loot.h"
 #include "../ipc/payload_status.h"
 #include "../ipc/payload_timed_keys.h"
+#include "xcat_payload_control.h"
 #include "../features/crash_upload_guard/crash_upload_guard.h"
 #include "../runtime/bin_dir.h"
 #include "../runtime/hang_autopsy.h"
@@ -138,6 +143,7 @@ void StopAllFeatureWorkers() {
     x::features::ga_text_probe::StopWorker();
     x::features::drop_alert_bypass::StopWorker();
     x::features::auction_town_bypass::StopWorker();
+    x::features::rest_mp_accel::StopWorker();
     x::features::auto_lie::StopWorker();
     xcat::sound::CancelPlayback();
     x::features::fly::StopWorker();
@@ -164,6 +170,14 @@ void StopAllFeatureWorkers() {
     x::features::auto_enter::StopWorker();
     x::features::skill_max_level::StopWorker();
     x::features::final_attack_force::StopWorker();
+    // Shutdown 而非只 StopWorker：这两个功能在 GameAssembly 函数头上写了 abs-jmp，
+    // 不摘掉的话卸载后游戏会跳进已释放内存。
+    x::features::infinite_stars::Shutdown();
+    x::features::melee_veto::Shutdown();
+    // 同样改了 GameAssembly .text（三处判空跳转）。它只在 GA 内部翻分支、不跳进 xcat.dll，
+    // 所以不会像上面那样卸载后跳进已释放内存；但不摘掉的话补丁会一直留在游戏里 ——
+    // 卸载后既关不掉也擦不掉，脏页还留给完整性校验。
+    x::features::ports::curfh_gate_bypass::SetEnabled(false);
     x::features::attack_accel::StopWorker();
     x::features::invuln::StopWorker();
     x::features::kick_sniff::StopWorker();
@@ -381,6 +395,8 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::attack_accel::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::final_attack_force::Init());
     XCAT_PLAY_BOOT_STEP(x::features::final_attack_force::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::melee_veto::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::melee_veto::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::skill_max_level::Init());
     XCAT_PLAY_BOOT_STEP(x::features::skill_max_level::StartWorker());
 
@@ -412,6 +428,13 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::fly::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::Init());
     XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::StartWorker());
+    if (xcat::kInfiniteStarsUserEnabled) {
+        XCAT_PLAY_BOOT_STEP(x::features::infinite_stars::Init());
+    }
+    // 入口关闭时只标灯 disabled，不 Init、不开线程。
+    XCAT_PLAY_BOOT_STEP(x::features::infinite_stars::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ga_text_probe::Init());
     XCAT_PLAY_BOOT_STEP(x::features::ga_text_probe::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::encounter::Init());

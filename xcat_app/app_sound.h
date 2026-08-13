@@ -23,5 +23,6 @@ void GameContextReady();
 void Notify();
 void Alarm();
 void RestrictionAlarm();
+void ScrollDrop();
 
 }  // namespace xcat::app::sound

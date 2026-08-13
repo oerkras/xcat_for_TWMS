@@ -9,11 +9,13 @@ namespace kick_sniff {
 // Data-plane only (no GameAssembly .text patch). Polls SessionTcpLayer → Session
 // for SessionState + _pendingErrorCode, and dumps a snapshot on disconnect / on demand.
 // Diagnostic probes default OFF（守护/换频只依赖轮询 disconnectSeq）:
-//   KICK_CALL_EDGE=1 → MethodInfo swap Close/Disconnect/OnDisconnect/set_SessionState (via=MI)
-//   KICK_HWBP=1      → DR execute/write on call-edge + SessionState (via=HWBP)
-//   KICK_SEND=1      → DR on SendPacket → send.log
-//                      （等价开关：把 send_probe.on 放在 kick.log 同目录或 DLL 同目录，
-//                        免设环境变量、不受启动顺序影响；删文件即关）
+//   KICK_CALL_EDGE=1 / kick_call_edge.on
+//                      → MethodInfo swap Close/Disconnect/OnDisconnect/set_SessionState (via=MI)
+//   KICK_HWBP=1 / kick_hwbp.on
+//                      → DR：a480 本地拆线 + CloseSession + SessionState write
+//   KICK_HWBP=2 / kick_teardown_hwbp.on
+//                      → DR：Nm.Disconnect + cs_caller_1CD5570 + CloseSession（状态错乱踢线归因）
+//   KICK_SEND=1 / send_probe.on → DR on SendPacket → send.log
 //   GALAXY_TOKEN_PROBE / galaxy_token_probe.on → 断线/连上时读 PlayerPrefs Galaxy_*（见 galaxy_token_probe）
 // No GameAssembly .text patch.
 //

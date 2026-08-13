@@ -26,6 +26,8 @@ void RequestRestart(const char* why);
 // 记下「当前应粘回」的 1-based 频道（与 UI ch.N / auto_enter Pick 同口径）。
 // channel_hop 成功后调用；软重连 PickSticky 只在 softFast 且 sticky 仍空闲时消费。
 void NoteStickyChannel(int channelId1Based, const char* why);
+// 当前 sticky（UI ch.N）；未设置返回 0。
+int StickyChannel1Based();
 
 // 当前是否停在 Failed（软重进可据此早退，不必空等到 play-ready 超时）。
 bool IsFailed();

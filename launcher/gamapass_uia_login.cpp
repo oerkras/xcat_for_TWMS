@@ -76,9 +76,30 @@ bool LaunchDailyBrowser(const std::wstring& exe, const std::wstring& url, DWORD*
     return true;
 }
 
+bool HwndWasBeforeLaunch(HWND hwnd, const std::vector<HWND>& beforeLaunch) {
+    for (HWND b : beforeLaunch) {
+        if (b == hwnd) return true;
+    }
+    return false;
+}
+
+bool TitleLooksLikeLoginFlow(HWND hwnd, const std::vector<std::wstring>& keys) {
+    if (!hwnd || !IsWindow(hwnd) || keys.empty()) return false;
+    wchar_t title[512]{};
+    GetWindowTextW(hwnd, title, 512);
+    if (!title[0]) return false;
+    for (const auto& k : keys) {
+        if (StrStrIW(title, k.c_str())) return true;
+    }
+    return false;
+}
+
+// outReusedExisting：挂到启动前已存在的窗（Chromium 单例把 Galaxy 开进旧窗）。
+// ★ 复用旧窗时禁止 SoftClose——WM_CLOSE 会关掉用户日常浏览器整窗。
 HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWORD* outAttachPid,
-                     const std::vector<HWND>& beforeLaunch) {
+                     const std::vector<HWND>& beforeLaunch, bool* outReusedExisting = nullptr) {
     if (outAttachPid) *outAttachPid = launchPid;
+    if (outReusedExisting) *outReusedExisting = false;
     const DWORD t0 = GetTickCount();
     const std::vector<std::wstring> keysPrimary = {
         L"galaxy.games.gamania",
@@ -91,6 +112,18 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
         L"select-account",
         L"OTT:",
     };
+    // 复用旧窗用更偏登录流的标题，降低误挂日常其它标签的概率
+    const std::vector<std::wstring> keysReuse = {
+        L"galaxy.games.gamania",
+        L"accounts.gamania",
+        L"Gama Pass",
+        L"login/mstc",
+        L"select-account",
+        L"maplestoryclassic.beanfun",
+        L"login.beanfun",
+        L"OTT:",
+    };
+    constexpr DWORD kReuseAfterMs = 4000;  // 先等新窗；单例开进旧窗时再兜底
 
     HANDLE hProc = nullptr;
     if (launchPid) {
@@ -102,29 +135,22 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
     }
 
     bool loggedNew = false;
+    bool loggedReuseHint = false;
     while ((int)(GetTickCount() - t0) < waitMs) {
         HWND h = nullptr;
+        bool reused = false;
 
-        // 0) 启动 pid 仍存活时：优先其顶层新窗（杀光旧 Chrome 后 CreateProcess pid 即主进程）
+        // 0) 启动 pid 仍存活时：优先其顶层新窗（CreateProcess pid 偶发即主进程）
         if (!h && launchPid) {
             HANDLE alive = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, launchPid);
             if (alive) {
                 CloseHandle(alive);
                 HWND cand = msc::uia::FindBrowserMainHwnd(launchPid, nullptr);
-                if (cand) {
-                    bool wasBefore = false;
-                    for (HWND b : beforeLaunch) {
-                        if (b == cand) {
-                            wasBefore = true;
-                            break;
-                        }
-                    }
-                    if (!wasBefore) {
-                        h = cand;
-                        if (!loggedNew) {
-                            loggedNew = true;
-                            Log(log, std::wstring(kLogTag) + L" 优先附着启动 pid 新窗");
-                        }
+                if (cand && !HwndWasBeforeLaunch(cand, beforeLaunch)) {
+                    h = cand;
+                    if (!loggedNew) {
+                        loggedNew = true;
+                        Log(log, std::wstring(kLogTag) + L" 优先附着启动 pid 新窗");
                     }
                 }
             }
@@ -139,24 +165,15 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
             }
         }
 
-        // 2) 强标题，但必须是启动后新窗（禁止挂到日常里已开着的 Galaxy 旧标签窗）
+        // 2) 强标题，但必须是启动后新窗
         if (!h) {
             HWND cand =
                 msc::uia::FindBrowserHwndByTitleKeywords(keysPrimary, nullptr, /*restrictPid=*/0);
-            if (cand) {
-                bool wasBefore = false;
-                for (HWND b : beforeLaunch) {
-                    if (b == cand) {
-                        wasBefore = true;
-                        break;
-                    }
-                }
-                if (!wasBefore) {
-                    h = cand;
-                    if (!loggedNew) {
-                        loggedNew = true;
-                        Log(log, std::wstring(kLogTag) + L" 优先附着启动后新窗（标题命中）");
-                    }
+            if (cand && !HwndWasBeforeLaunch(cand, beforeLaunch)) {
+                h = cand;
+                if (!loggedNew) {
+                    loggedNew = true;
+                    Log(log, std::wstring(kLogTag) + L" 优先附着启动后新窗（标题命中）");
                 }
             }
         }
@@ -166,14 +183,7 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
             const auto nowHwnds = msc::uia::EnumBrowserTopHwnds();
             std::vector<HWND> news;
             for (HWND c : nowHwnds) {
-                bool known = false;
-                for (HWND b : beforeLaunch) {
-                    if (b == c) {
-                        known = true;
-                        break;
-                    }
-                }
-                if (!known) news.push_back(c);
+                if (!HwndWasBeforeLaunch(c, beforeLaunch)) news.push_back(c);
             }
             HWND fg = GetForegroundWindow();
             for (HWND c : news) {
@@ -190,19 +200,13 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
             }
         }
 
-        // 3) 仅当新窗尚未出现时，才用 launchPid 顶层窗——且必须是「启动后新出现」的 hwnd
+        // 3) launchPid 顶层窗——仅「启动后新出现」
         if (!h && launchPid) {
             HWND cand = msc::uia::FindBrowserMainHwnd(launchPid, nullptr);
             if (cand) {
-                bool wasBefore = false;
-                for (HWND b : beforeLaunch) {
-                    if (b == cand) {
-                        wasBefore = true;
-                        break;
-                    }
-                }
-                if (!wasBefore) h = cand;
-                else if ((int)(GetTickCount() - t0) > 2000 && !loggedNew) {
+                if (!HwndWasBeforeLaunch(cand, beforeLaunch)) {
+                    h = cand;
+                } else if ((int)(GetTickCount() - t0) > 2000 && !loggedNew) {
                     Log(log, std::wstring(kLogTag) +
                                  L" 跳过 CreateProcess pid 上的旧日常窗，继续等 --new-window 新窗…");
                     loggedNew = true;  // 只打一次
@@ -210,16 +214,54 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
             }
         }
 
+        // 4) ★ 无新窗兜底：Chromium 单例常把 URL 开进已有窗标签 → HWND 不变、标题变登录流
+        if (!h && (int)(GetTickCount() - t0) >= (int)kReuseAfterMs) {
+            if (!loggedReuseHint) {
+                loggedReuseHint = true;
+                Log(log, std::wstring(kLogTag) +
+                             L" 未出现新顶层窗，尝试附着标题已是 Galaxy/登录流的已有窗"
+                             L"（单例开进旧窗；不会 WM_CLOSE 该窗）…");
+            }
+            HWND fg = GetForegroundWindow();
+            // 4a) 启动前已存在的窗，标题现已命中登录流（最像本轮导航）
+            if (fg && HwndWasBeforeLaunch(fg, beforeLaunch) &&
+                TitleLooksLikeLoginFlow(fg, keysReuse)) {
+                h = fg;
+            }
+            if (!h) {
+                for (HWND b : beforeLaunch) {
+                    if (!b || !IsWindow(b)) continue;
+                    if (!TitleLooksLikeLoginFlow(b, keysReuse)) continue;
+                    h = b;
+                    break;
+                }
+            }
+            // 4b) 全局标题命中（含 before 为空或标题晚到）
+            if (!h) {
+                HWND cand = msc::uia::FindBrowserHwndByTitleKeywords(keysReuse, nullptr,
+                                                                    /*restrictPid=*/0);
+                if (cand) h = cand;
+            }
+            if (h) {
+                // 启动前已存在的窗 → 复用；before 为空（中途重附着）→ 保守当复用，勿 SoftClose
+                reused = beforeLaunch.empty() || HwndWasBeforeLaunch(h, beforeLaunch);
+                Log(log, std::wstring(kLogTag) + L" 兜底附着已有登录窗" +
+                             (reused ? L"（复用；收票后不关该窗）" : L"（新窗晚到）"));
+            }
+        }
+
         if (h) {
             DWORD attachPid = 0;
             GetWindowThreadProcessId(h, &attachPid);
             if (outAttachPid && attachPid) *outAttachPid = attachPid;
+            if (outReusedExisting) *outReusedExisting = reused;
             wchar_t title[512]{};
             GetWindowTextW(h, title, 512);
             msc::uia::BringToForeground(h);
             Log(log, std::wstring(kLogTag) + L" 已附着浏览器窗 hwnd=" +
                          std::to_wstring((uintptr_t)h) + L" pid=" + std::to_wstring(attachPid) +
-                         L" title=" + std::wstring(title).substr(0, 80));
+                         L" title=" + std::wstring(title).substr(0, 80) +
+                         (reused ? L" reused=1" : L""));
             if (hProc) CloseHandle(hProc);
             return h;
         }
@@ -227,7 +269,7 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
     }
     if (hProc) CloseHandle(hProc);
     Log(log, std::wstring(kLogTag) +
-                 L" 等待浏览器窗口超时（未找到相对启动前的新 Chrome 窗 / Galaxy 标题）");
+                 L" 等待浏览器窗口超时（无新窗，且无 Galaxy/登录流标题可附着）");
     return nullptr;
 }
 
@@ -235,6 +277,16 @@ void SoftCloseHwnd(HWND hwnd, const HttpLoginLogFn& log) {
     if (!hwnd || !IsWindow(hwnd)) return;
     Log(log, std::wstring(kLogTag) + L" 关闭本轮登录窗（WM_CLOSE）…");
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
+}
+
+void SoftCloseLoginHwndIfOwned(HWND hwnd, bool reusedExisting, const HttpLoginLogFn& log) {
+    if (!hwnd || !IsWindow(hwnd)) return;
+    if (reusedExisting) {
+        Log(log, std::wstring(kLogTag) +
+                     L" 跳过关闭：本轮附着的是已有浏览器窗（避免关掉日常会话）");
+        return;
+    }
+    SoftCloseHwnd(hwnd, log);
 }
 
 enum class UiaStage : int {
@@ -491,10 +543,11 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     }
 
     DWORD attachPid = launchPid;
-    HWND hwnd = WaitBrowserHwnd(launchPid, 40000, log, &attachPid, beforeHwnds);
+    bool loginHwndReused = false;
+    HWND hwnd = WaitBrowserHwnd(launchPid, 40000, log, &attachPid, beforeHwnds, &loginHwndReused);
     if (!hwnd) {
         return Fail(HttpLoginError::Network,
-                    "未找到浏览器窗口（UIA 附着失败）。请确认 Edge/Chrome 能弹出新窗打开 Galaxy 后重试一键；"
+                    "未找到浏览器窗口（UIA 附着失败）。请确认 Edge/Chrome 能打开 Galaxy 后重试一键；"
                     "不会关闭已开浏览器。");
     }
     launchPid = attachPid ? attachPid : launchPid;
@@ -635,16 +688,18 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         {
             auto harvested = tryHarvest();
             if (harvested.ok && harvested.ticketFilled) {
-                SoftCloseHwnd(hwnd, log);
+                SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
                 return harvested;
             }
         }
 
         if (!IsWindow(hwnd)) {
             DWORD ap = launchPid;
-            // 中途丢窗：用空快照，避免误把「一直存在的日常窗」当新窗；仍优先强标题
-            hwnd = WaitBrowserHwnd(launchPid, 8000, log, &ap, std::vector<HWND>{});
+            bool reused = false;
+            // 中途丢窗：用空快照；命中日常唯一窗时 reused=1，避免误关
+            hwnd = WaitBrowserHwnd(launchPid, 8000, log, &ap, std::vector<HWND>{}, &reused);
             if (ap) launchPid = ap;
+            if (hwnd && reused) loginHwndReused = true;
             if (!hwnd) {
                 Sleep(kPollClickMs);
                 continue;
@@ -679,7 +734,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 LooksLikeAccountsOauthError(uia, root, hwnd)) {
                 Log(log, std::wstring(kLogTag) + L" 检测到 accounts/error（OAuth 失败），停止点选");
                 root->Release();
-                SoftCloseHwnd(hwnd, log);
+                SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
                 return FailOauth("Gama Pass OAuth 失败（accounts/error）。"
                                  "请重新一键；在日常浏览器窗口内登录并勾选记住（不会清 Cookie）。");
             }
@@ -1024,20 +1079,20 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     {
         auto harvested = tryHarvest();
         if (harvested.ok && harvested.ticketFilled) {
-            SoftCloseHwnd(hwnd, log);
+            SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
             return harvested;
         }
     }
 
     if (stage == UiaStage::ManualLogin) {
-        SoftCloseHwnd(hwnd, log);
+        SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
         return Fail(HttpLoginError::BadInput,
                     "Gama Pass 需要先在日常浏览器窗口内登录（勾选记住）。"
                     "程序没有调用 refresh、也没有清除 Cookie。请重新一键并在弹出窗完成登录。");
     }
 
     Log(log, std::wstring(kLogTag) + L" 超时 @" + UiaStageName(stage));
-    SoftCloseHwnd(hwnd, log);
+    SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
     return Fail(HttpLoginError::OttMissing, "UIA 点选超时，未捕获经典版 cmdline 票");
 }
 
@@ -1065,8 +1120,8 @@ HttpLoginResult HttpGamaPassUiaLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
                          L" 次），不再自动重试（请手动重新一键）");
             return last;
         }
-        // ★ SoftClose 已在 Once 内做过；下一轮 Once 会再结束已开主进程后重开 Galaxy。
-        // 不清 Cookie、不 refresh、不改 prompt。
+        // ★ SoftClose 已在 Once 内做过（复用旧窗则跳过）；下一轮再 CreateProcess Galaxy。
+        // 不清 Cookie、不 refresh、不改 prompt、不杀浏览器主进程。
         Log(log, std::wstring(kLogTag) + L" 失败收口：关闭登录窗后干净重开（uia-clean-restart " +
                      std::to_wstring(restart + 1) + L"/" + std::to_wstring(kMaxCleanRestart) +
                      L"）…");

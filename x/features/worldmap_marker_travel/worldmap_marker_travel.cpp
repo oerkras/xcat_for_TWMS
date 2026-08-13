@@ -196,9 +196,9 @@ SpotFieldOff gSpotOff{};
 void* gYesAction = nullptr;
 void* gNoAction = nullptr;
 void* gOkAction = nullptr;
-uint32_t gYesHandle = 0;
-uint32_t gNoHandle = 0;
-uint32_t gOkHandle = 0;
+uintptr_t gYesHandle = 0;
+uintptr_t gNoHandle = 0;
+uintptr_t gOkHandle = 0;
 
 using FnYesNo = void* (*)(void* sMsg, void* yes, void* no, void* sSndName, uint8_t autoSep,
                           uint8_t tightLine, uint8_t extraA, uint8_t extraB, const void* method);
@@ -971,19 +971,19 @@ bool EnsureConfirmActions() {
     WireActionTargets(no, reinterpret_cast<void*>(&OnConfirmNo));
     WireActionTargets(ok, reinterpret_cast<void*>(&OnNoticeOk));
     if (!gYesHandle) {
-        const uint32_t hy = e.gcHandleNew(yes, false);
+        const uintptr_t hy = e.gcHandleNew(yes, false);
         if (!hy) return false;
         gYesHandle = hy;
         gYesAction = yes;
     }
     if (!gNoHandle) {
-        const uint32_t hn = e.gcHandleNew(no, false);
+        const uintptr_t hn = e.gcHandleNew(no, false);
         if (!hn) return false;
         gNoHandle = hn;
         gNoAction = no;
     }
     if (!gOkHandle) {
-        const uint32_t ho = e.gcHandleNew(ok, false);
+        const uintptr_t ho = e.gcHandleNew(ok, false);
         if (!ho) return false;
         gOkHandle = ho;
         gOkAction = ok;

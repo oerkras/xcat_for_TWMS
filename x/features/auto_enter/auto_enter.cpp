@@ -1146,6 +1146,8 @@ bool TryMarkEnterDone(const char* why) {
         if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
         gSoftFastTrack.store(false, std::memory_order_release);
         SetPhase(Phase::Done);
+        if (gPickedChannelId > 0)
+            channel_hop::SyncKnownAfterEnter(gPickedChannelId, why ? why : "enter_done");
         Log("Done — latched until autoEnter off stickyCh=%d", gStickyChannelId);
         return true;
     }
@@ -1157,6 +1159,8 @@ bool TryMarkEnterDone(const char* why) {
         if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
         gSoftFastTrack.store(false, std::memory_order_release);
         SetPhase(Phase::Done);
+        if (gPickedChannelId > 0)
+            channel_hop::SyncKnownAfterEnter(gPickedChannelId, why ? why : "enter_done_left_char");
         Log("Done — latched until autoEnter off stickyCh=%d", gStickyChannelId);
         return true;
     }
@@ -1871,6 +1875,10 @@ void NoteStickyChannel(int channelId1Based, const char* why) {
     if (gStickyChannelId == channelId1Based) return;
     Log("stickyCh %d→%d (%s)", gStickyChannelId, channelId1Based, why ? why : "?");
     gStickyChannelId = channelId1Based;
+}
+
+int StickyChannel1Based() {
+    return (gStickyChannelId >= 1 && gStickyChannelId <= 64) ? gStickyChannelId : 0;
 }
 
 void RequestRestart(const char* why) {

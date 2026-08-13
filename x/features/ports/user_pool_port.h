@@ -40,4 +40,9 @@ void* PeekUserLocal();
 
 void* PeekUserPool();
 
+// 已绑定池上的纯内存快照（不 Resolve、不 InvokeAndWait）。
+// 热路径预筛用：池未绑定时返回 false，调用方 fail-open / 走其它口径。
+bool PeekRemoteUserCount(int* outCount);
+bool PeekEnumRemoteUsers(void** out, int cap, int* outCount);
+
 }  // namespace x::features::ports::user_pool

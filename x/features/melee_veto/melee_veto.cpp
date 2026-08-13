@@ -172,9 +172,20 @@ bool RectProbeRequested() {
 
 // 探针记账：只记「不同的」(kind, 框)，不按发计流水。
 std::atomic<uint32_t> gRectCalls{0};
-std::atomic<int> gRectKind{0};
-std::atomic<uint32_t> gRectF[4]{};
-std::atomic<bool> gRectFresh{false};
+
+// 放宽后的观测：按 (kind, 是否处在普攻近战帧) 分槽，每个组合只打印一行。
+// 要判断的就是「哪些 action id 是技能在用的」——只在普攻帧里出现过的 id 才可能可以归零，
+// 帧外（技能等其它调用方）出现过的一律不能动。分槽去重是为了看全又不按发刷屏。
+// 钩子跑在游戏线程上，里面只写原子，绝不写日志；由 worker 排空后打印。
+constexpr int kRectKindSlots = 64;
+struct RectSlot {
+    // 0=未见 1=待打印 2=已打印 3=正在填（worker 必须跳过，别读到半张框）
+    std::atomic<uint32_t> state{0};
+    std::atomic<uint32_t> f[4]{};
+    std::atomic<uint32_t> hits{0};
+};
+RectSlot gRectSlot[2][kRectKindSlots];  // [0]=非普攻帧  [1]=普攻帧内
+std::atomic<int> gRectKindWide{-1};     // kind 落在槽位外时留个样本，别静默丢掉
 
 // 普攻（skill==null）口径的计数器。技能攻击一律原样转发、不计数、不拦。
 std::atomic<uint32_t> gMCall{0};    // 近战被调用
@@ -188,7 +199,6 @@ std::atomic<int> gVerdict{static_cast<int>(Verdict::Measuring)};
 std::atomic<int> gLastWt{0};
 std::atomic<int> gLastJob{0};
 std::atomic<int> gVerdictWt{0};   // 判决是在哪把武器上做的；换武器要重测
-bool gWeSetPatchEnv = false;
 
 // 只在普攻的那一发近战里加深。技能路径不计，免得把技能的内部射击算成 nest。
 thread_local int gNormalMeleeDepth = 0;
@@ -450,8 +460,8 @@ uint8_t __fastcall HookShoot(void* self, void* skill, int32_t skillLevel, uint64
     }
 }
 
-// 纯观测：转发后把这一发实际拿到的框记下来。只在普攻的近战帧里记（gNormalMeleeDepth>0），
-// 别的调用方（另外两个函数也调它）一概不管。
+// 纯观测：转发后把这一发实际拿到的框记下来。全部调用方都记（另外两个函数也调它），
+// 靠 gNormalMeleeDepth 分成「普攻帧内 / 帧外」两组，这样技能占用了哪些 kind 一目了然。
 void* __fastcall HookRect(void* outRect, void* obj, void* a3, int32_t a4, int32_t a5) {
     const FnRect o = gRectTramp;
     if (!o) return outRect;
@@ -461,9 +471,20 @@ void* __fastcall HookRect(void* outRect, void* obj, void* a3, int32_t a4, int32_
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return outRect;
     }
-    if (gNormalMeleeDepth <= 0 || !outRect) return r;
-
+    if (!outRect) return r;
     gRectCalls.fetch_add(1, std::memory_order_relaxed);
+
+    const int ctx = gNormalMeleeDepth > 0 ? 1 : 0;
+    if (a4 < 0 || a4 >= kRectKindSlots) {
+        gRectKindWide.store(a4, std::memory_order_relaxed);
+        return r;
+    }
+    RectSlot& s = gRectSlot[ctx][a4];
+    s.hits.fetch_add(1, std::memory_order_relaxed);
+    uint32_t unseen = 0;
+    if (!s.state.compare_exchange_strong(unseen, 3, std::memory_order_acq_rel,
+                                         std::memory_order_relaxed))
+        return r;  // 这个组合记过了，只累 hits
     uint32_t f[4] = {0, 0, 0, 0};
     __try {
         const uint32_t* p = reinterpret_cast<const uint32_t*>(outRect);
@@ -472,16 +493,11 @@ void* __fastcall HookRect(void* outRect, void* obj, void* a3, int32_t a4, int32_
         f[2] = p[2];
         f[3] = p[3];
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        s.state.store(0, std::memory_order_release);  // 还回未见，下一发再试
         return r;
     }
-    bool same = gRectKind.load(std::memory_order_relaxed) == a4;
-    for (int i = 0; same && i < 4; ++i)
-        same = gRectF[i].load(std::memory_order_relaxed) == f[i];
-    if (same) return r;
-
-    gRectKind.store(a4, std::memory_order_relaxed);
-    for (int i = 0; i < 4; ++i) gRectF[i].store(f[i], std::memory_order_relaxed);
-    gRectFresh.store(true, std::memory_order_release);
+    for (int i = 0; i < 4; ++i) s.f[i].store(f[i], std::memory_order_relaxed);
+    s.state.store(1, std::memory_order_release);
     return r;
 }
 
@@ -574,14 +590,28 @@ bool TryArmOne(AbsHookState& st, std::atomic<bool>& refuse, uint32_t rva, void* 
 
 // ── 零钩子取框链路 ────────────────────────────────────────────────────────────
 //
-//   ActionManager : Singleton<ActionManager>                  // Msc.Game.Object.Avatar
-//     └─ _afterimageMap : Dictionary<string, MeleeAttackAfterImage>   @0x48
+//   ActionManager : Singleton<ActionManager>
+//     └─ _afterimageMap : Dictionary<string, MeleeAttackAfterImage>   @0x40
 //          └─ MeleeAttackAfterImage.Range : Dictionary<int, Rect>     @0x18
 //               └─ [动作 id] → Rect(16B)   ← 近战找怪用的就是这个框
 //
 // 关键是不用自己去构造泛型实例化：`Singleton<ActionManager>` 就是 `ActionManager` 的父类，
 // classParent 直接给出膨胀后的那个 klass，静态区随之可取。
-constexpr size_t kOffActionMgrAfterImageMap = 0x48;
+//
+// ★ 出货客户端的类名/字段名是 63 位十六进制哈希、命名空间为空，按友好名一律查不到。
+//   `Dumps/cms_cw/dump.cs` 只是未混淆参照，仅可用来认结构；名字与偏移必须取自运行时
+//   dump `Dumps/runtime/out/dump.cs`（2026-08-06）。两份的字段序还不一样：参照里
+//   _afterimageMap 在 0x48，实机在 0x40（参照在它前面多一个字段），照抄会读到隔壁指针。
+//
+// 以下哈希取自运行时 dump：
+//   L73846  ActionManager        TypeDefIndex 1653，父类 Singleton<ActionManager>
+//   L1065361 Singleton<T>._instance  static @0x0，类型 Lazy<T>
+//   L73512  MeleeAttackAfterImage TypeDefIndex 1634；L73516 Range: Dictionary<int,Rect> @0x18
+constexpr char kHashActionManager[] =
+    "f1275d524fe94bf7c441578d3d7c7bef9e1a0547cc23323474137e6bd93054d";
+constexpr char kHashSingletonInstance[] =
+    "b9143f0b097da8b3733c3286804b0dee7ab4ae8f39620354bc4817d33fe9a42";
+constexpr size_t kOffActionMgrAfterImageMap = 0x40;
 constexpr size_t kOffAfterImageRange = 0x18;
 
 // Dictionary<K,V> 固定布局：buckets@0x10 entries@0x18 count@0x20
@@ -597,7 +627,29 @@ constexpr size_t kEntryStrideStrRef = 24;
 constexpr size_t kEntryKeyOffStrRef = 8;
 constexpr size_t kEntryValOffStrRef = 16;
 
-bool gRangeDumped = false;
+std::atomic<bool> gRangeDumped{false};
+
+// il2cpp_bind 没绑 class_get_name，本地取一下就够，不去改共享运行时。
+// 只用于诊断日志：父类/Lazy 的真实类名能一眼看出走错没走错。
+using FnClassName = const char* (*)(void* klass);
+
+const char* ClassNameOf(void* klass) {
+    static FnClassName sFn = nullptr;
+    static bool sTried = false;
+    if (!sTried) {
+        sTried = true;
+        if (HMODULE ga = x::runtime::il2cpp::GameAssembly())
+            sFn = reinterpret_cast<FnClassName>(GetProcAddress(ga, "il2cpp_class_get_name"));
+    }
+    if (!klass || !sFn) return "?";
+    const char* s = nullptr;
+    __try {
+        s = sFn(klass);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "!";
+    }
+    return s ? s : "?";
+}
 
 void ManagedStringUtf8(void* str, char* out, size_t cap) {
     if (!out || !cap) return;
@@ -628,51 +680,84 @@ void ManagedStringUtf8(void* str, char* out, size_t cap) {
 }
 
 // 必须在泵上跑：FindClass / RuntimeClassInit 会触发元数据解析。
-void* ResolveAfterImageMap() {
-    if (!x::runtime::il2cpp::Ensure()) return nullptr;
-    const auto& api = x::runtime::il2cpp::Get();
-    if (!api.classParent || !api.classStaticData || !api.classGetFieldFromName ||
-        !api.fieldGetOffset || !api.fieldGetType || !api.classFromType)
-        return nullptr;
+//
+// 每一步失败都写进 why：这条链有七步，只报一句「解析失败」的话根本分不清是导出缺了、
+// 类找不到、还是单例没建成——19:42 那次就是这么白跑一轮的。
+void* ResolveAfterImageMap(char* why, size_t cap) {
+    if (why && cap) why[0] = '\0';
+    auto note = [&](const char* s) {
+        if (why && cap) _snprintf_s(why, cap, _TRUNCATE, "%s", s);
+    };
 
-    void* amKlass = x::runtime::il2cpp::FindClass("Msc.Game.Object.Avatar", "ActionManager");
-    if (!amKlass) return nullptr;
+    if (!x::runtime::il2cpp::Ensure()) return note("il2cpp 未就绪"), nullptr;
+    const auto& api = x::runtime::il2cpp::Get();
+    if (!api.classParent) return note("缺导出 class_get_parent"), nullptr;
+    if (!api.classStaticData) return note("缺导出 class_get_static_field_data"), nullptr;
+    if (!api.classGetFieldFromName) return note("缺导出 class_get_field_from_name"), nullptr;
+    if (!api.fieldGetOffset) return note("缺导出 field_get_offset"), nullptr;
+    if (!api.fieldGetType) return note("缺导出 field_get_type"), nullptr;
+    if (!api.classFromType) return note("缺导出 class_from_type"), nullptr;
+
+    void* amKlass = x::runtime::il2cpp::FindClass("", kHashActionManager);
+    if (!amKlass) return note("FindClass 找不到 ActionManager（哈希名对不上，客户端可能已更新）"), nullptr;
     void* singleton = api.classParent(amKlass);  // Singleton<ActionManager>（已膨胀）
-    if (!singleton) return nullptr;
+    if (!singleton) return note("ActionManager 取不到父类"), nullptr;
     x::runtime::il2cpp::RuntimeClassInit(singleton);
 
-    void* fInstance = api.classGetFieldFromName(singleton, "_instance");
+    void* fInstance = api.classGetFieldFromName(singleton, kHashSingletonInstance);
+    if (!fInstance) {
+        if (why && cap)
+            _snprintf_s(why, cap, _TRUNCATE, "父类 %s 里没有 _instance 字段",
+                        ClassNameOf(singleton));
+        return nullptr;
+    }
     void* statics = api.classStaticData(singleton);
-    if (!fInstance || !statics) return nullptr;
-    void* lazy = x::runtime::il2cpp::ReadPtr(statics, api.fieldGetOffset(fInstance));
-    if (!LooksLikeHeapPtr(lazy)) return nullptr;
+    if (!statics) return note("父类静态区为空（cctor 还没跑）"), nullptr;
+    const size_t offInst = api.fieldGetOffset(fInstance);
+    void* lazy = x::runtime::il2cpp::ReadPtr(statics, offInst);
+    if (!LooksLikeHeapPtr(lazy)) {
+        if (why && cap)
+            _snprintf_s(why, cap, _TRUNCATE, "父类 %s 的 _instance 为空 off=0x%zX",
+                        ClassNameOf(singleton), offInst);
+        return nullptr;
+    }
 
-    // Lazy<T> 的字段偏移在 dump 里全是 0（开放泛型没有固定布局），只能按名实解。
-    void* lazyKlass = api.classFromType(api.fieldGetType(fInstance));
-    if (!lazyKlass) return nullptr;
+    // Lazy<T> 的字段偏移在 dump 里全是 0（开放泛型没有固定布局），只能按名实解；
+    // 且必须落在「膨胀后」的 Lazy<ActionManager> 上。对象头里的 klass 一定是实例化过的，
+    // 比字段声明类型更可靠，取不到才退回声明类型。Lazy 来自 mscorlib，字段名没被混淆。
+    void* lazyKlass = x::runtime::il2cpp::ReadPtr(lazy, 0);
+    if (!LooksLikeHeapPtr(lazyKlass)) lazyKlass = api.classFromType(api.fieldGetType(fInstance));
+    if (!lazyKlass) return note("_instance 的类型取不到 klass"), nullptr;
     void* fValue = api.classGetFieldFromName(lazyKlass, "_value");
-    if (!fValue) return nullptr;
+    if (!fValue) {
+        if (why && cap)
+            _snprintf_s(why, cap, _TRUNCATE, "%s 里没有 _value 字段", ClassNameOf(lazyKlass));
+        return nullptr;
+    }
     void* mgr = x::runtime::il2cpp::ReadPtr(lazy, api.fieldGetOffset(fValue));
-    if (!LooksLikeHeapPtr(mgr)) return nullptr;
+    if (!LooksLikeHeapPtr(mgr)) return note("Lazy._value 为空（单例还没被取用）"), nullptr;
 
     void* map = x::runtime::il2cpp::ReadPtr(mgr, kOffActionMgrAfterImageMap);
-    return LooksLikeHeapPtr(map) ? map : nullptr;
+    if (!LooksLikeHeapPtr(map)) return note("ActionManager._afterimageMap 为空"), nullptr;
+    return map;
 }
 
 // 纯只读：把每把武器的 Range 表整张印出来，看清有哪些动作 id 再决定动谁。
-void DumpAfterImageTables() {
-    void* map = ResolveAfterImageMap();
+// 返回 false = 这轮还没取到，值得再试（单例/表都是懒建的）。
+bool DumpAfterImageTables() {
+    char why[192];
+    void* map = ResolveAfterImageMap(why, sizeof(why));
     if (!map) {
-        x::runtime::LogW("MeleeVeto", "afterimage map 解析失败（单例未建成 / 导出缺失）");
-        return;
+        x::runtime::LogW("MeleeVeto", "afterimage 解析失败：%s", why[0] ? why : "未知");
+        return false;
     }
     x::runtime::il2cpp_container::Ensure();
     const size_t offData = x::runtime::il2cpp_container::OffArrayData();
     void* entries = x::runtime::il2cpp::ReadPtr(map, kOffDictEntries);
     const int count = ReadI32(map, kOffDictCount);
     if (!LooksLikeHeapPtr(entries) || count <= 0 || count > 4096) {
-        x::runtime::LogW("MeleeVeto", "afterimage map 空或异常 count=%d", count);
-        return;
+        x::runtime::LogW("MeleeVeto", "afterimage map=%p 还没建表 count=%d", map, count);
+        return false;
     }
     x::runtime::LogI("MeleeVeto", "afterimage map=%p 武器数=%d", map, count);
 
@@ -717,6 +802,11 @@ void DumpAfterImageTables() {
         line[sizeof(line) - 1] = '\0';
         x::runtime::LogI("MeleeVeto", "afterimage[%d] uol=%s n=%d %s", i, uol, rCount, line);
     }
+    return true;
+}
+
+void PumpDumpRange(void*) {
+    if (DumpAfterImageTables()) gRangeDumped.store(true, std::memory_order_release);
 }
 
 void PumpApply(void*) {
@@ -761,11 +851,6 @@ void PumpApply(void*) {
                                  c[0], c[1], c[2], c[3], kRectKindConstPath);
             }
         }
-        // 零钩子那条路的第一段：只读印表。这里就在泵上，元数据解析是安全的。
-        if (!gRangeDumped && RectProbeRequested()) {
-            gRangeDumped = true;
-            DumpAfterImageTables();
-        }
 
         const bool ok = gMelee.active && gShoot.active;
         ReportLamp(ok ? x::runtime::anchor_lamps::AnchorLampCode::Ok
@@ -795,23 +880,15 @@ void PumpApply(void*) {
     }
 }
 
-bool EnsurePatchEnv(bool on) {
-    if (on) {
-        char env[8]{};
-        const DWORD n = GetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", env, sizeof(env));
-        if (!(n > 0 && env[0] == '1')) {
-            if (!SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", "1")) {
-                x::runtime::LogW("MeleeVeto", "无法设置 XCAT_ALLOW_TEXT_PATCH=1 err=%lu",
-                                 GetLastError());
-                return false;
-            }
-            gWeSetPatchEnv = true;
-        }
-        return true;
-    }
-    if (gWeSetPatchEnv) {
-        SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", nullptr);
-        gWeSetPatchEnv = false;
+// 勾上即自行放行 .text 补丁。关开关不撤环境变量：无限飞镖和近战不挥拳共用这根旗，
+// 一方关掉若清掉，另一方会整段拒绝下钩（01:17 BIN：两边同时「须先设 XCAT_ALLOW_TEXT_PATCH=1」）。
+bool EnsurePatchEnv() {
+    char env[8]{};
+    const DWORD n = GetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", env, sizeof(env));
+    if (n > 0 && env[0] == '1') return true;
+    if (!SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", "1")) {
+        x::runtime::LogW("MeleeVeto", "无法设置 XCAT_ALLOW_TEXT_PATCH=1 err=%lu", GetLastError());
+        return false;
     }
     return true;
 }
@@ -837,6 +914,9 @@ DWORD WINAPI Worker(LPVOID) {
     x::runtime::LogI("MeleeVeto", "worker start");
     DWORD lastHeart = 0;
     int lastNoticeWt = 0;
+    DWORD lastRangeTry = 0;
+    int rangeTries = 0;
+    constexpr int kRangeTryMax = 40;  // 3 秒一次，约两分钟；建不成就不再纠缠
     while (!gStop.load(std::memory_order_acquire)) {
         const bool want = gWant.load(std::memory_order_acquire);
         const bool need =
@@ -847,6 +927,15 @@ DWORD WINAPI Worker(LPVOID) {
               RectProbeRequested()));
         if (need) RequestApply();
         const DWORD now = GetTickCount();
+        // 印表单独投泵、自己控节奏：单例和 Range 都是懒建的，arm 那一瞬间往往还没建成，
+        // 只试一次必然空手而归。故意不塞进 PumpApply —— 那条路每跑一趟都会打 arm 行。
+        if (gRect.active && !gRangeDumped.load(std::memory_order_acquire) &&
+            rangeTries < kRangeTryMax && (!lastRangeTry || now - lastRangeTry >= 3000)) {
+            lastRangeTry = now ? now : 1;
+            ++rangeTries;
+            if (x::runtime::main_thread::WaitUntilInstalled(0))
+                (void)x::runtime::main_thread::InvokeAndWait(&PumpDumpRange, nullptr, 3000);
+        }
         if (want && (!lastHeart || now - lastHeart >= kHeartMs)) {
             lastHeart = now;
             // 换武器要重测：判决是「这把武器的普攻伤害走不走近战体内」，换把武器就不成立了。
@@ -881,20 +970,36 @@ DWORD WINAPI Worker(LPVOID) {
                              gVetoHits.load(std::memory_order_relaxed));
         }
         // 探针要在**开关关着**时用（得让近战真跑起来才看得到自然挥拳），所以不能挂在 heart
-        // 里面。只在取到新的 (kind, 框) 时打一行，不按发计流水。
-        if (gRectFresh.exchange(false, std::memory_order_acq_rel)) {
-            const int kind = gRectKind.load(std::memory_order_relaxed);
-            float f[4]{};
-            for (int i = 0; i < 4; ++i) {
-                const uint32_t bits = gRectF[i].load(std::memory_order_relaxed);
-                memcpy(&f[i], &bits, sizeof(bits));
+        // 里面。每个 (kind, 帧) 组合只打一行，不按发计流水。
+        for (int ctx = 0; ctx < 2; ++ctx) {
+            for (int k = 0; k < kRectKindSlots; ++k) {
+                RectSlot& s = gRectSlot[ctx][k];
+                if (s.state.load(std::memory_order_acquire) != 1) continue;
+                float f[4]{};
+                for (int i = 0; i < 4; ++i) {
+                    const uint32_t bits = s.f[i].load(std::memory_order_relaxed);
+                    memcpy(&f[i], &bits, sizeof(bits));
+                }
+                x::runtime::LogI("MeleeVeto",
+                                 "rect kind=%d 帧=%s src=%s rect=(%.1f, %.1f, %.1f, %.1f) "
+                                 "hits=%u calls=%u wt=%d",
+                                 k, ctx ? "普攻" : "非普攻",
+                                 k == kRectKindConstPath ? "rdata-const" : "managed-lookup",
+                                 f[0], f[1], f[2], f[3],
+                                 s.hits.load(std::memory_order_relaxed),
+                                 gRectCalls.load(std::memory_order_relaxed),
+                                 gLastWt.load(std::memory_order_relaxed));
+                s.state.store(2, std::memory_order_release);
             }
-            x::runtime::LogI("MeleeVeto",
-                             "rect kind=%d src=%s rect=(%.1f, %.1f, %.1f, %.1f) calls=%u wt=%d",
-                             kind, kind == kRectKindConstPath ? "rdata-const" : "managed-lookup",
-                             f[0], f[1], f[2], f[3],
-                             gRectCalls.load(std::memory_order_relaxed),
-                             gLastWt.load(std::memory_order_relaxed));
+        }
+        {
+            static int lastWide = -1;
+            const int wide = gRectKindWide.load(std::memory_order_relaxed);
+            if (wide >= 0 && wide != lastWide) {
+                lastWide = wide;
+                x::runtime::LogI("MeleeVeto", "rect kind=%d 落在槽位外（>=%d），只计不记框", wide,
+                                 kRectKindSlots);
+            }
         }
         Sleep(want ? 1000 : 2000);
     }
@@ -928,7 +1033,6 @@ void Shutdown() {
             gShootTramp = nullptr;
         }
     }
-    EnsurePatchEnv(false);
 }
 
 void StartWorker() {
@@ -953,7 +1057,7 @@ void StopWorker() {
 }
 
 void SetEnabled(bool on) {
-    if (on && !EnsurePatchEnv(true)) {
+    if (on && !EnsurePatchEnv()) {
         gWant.store(false, std::memory_order_release);
         return;
     }
@@ -967,7 +1071,6 @@ void SetEnabled(bool on) {
 
     if (!on) {
         // 钩子留着，只灭开关：VetoNow 下一发就放行，不走泵、不会失败。
-        EnsurePatchEnv(false);
         return;
     }
     gMeleeRefuse.store(false, std::memory_order_relaxed);

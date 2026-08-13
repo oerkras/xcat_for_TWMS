@@ -404,6 +404,77 @@ void* NewString(const char* utf8) {
     }
 }
 
+// __try 与需要展开的局部对象不能同处一函数（C2712），故三段各自成函数。
+void* GcThreadCurrentSeh(FnThreadCurrent fn) {
+    __try {
+        return fn();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+void* GcThreadAttachSeh(FnThreadAttach fn, void* domain) {
+    __try {
+        return fn(domain);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("threadAttach");
+        return nullptr;
+    }
+}
+
+void GcThreadDetachSeh(FnThreadDetach fn, void* thread) {
+    __try {
+        fn(thread);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("threadDetach");
+    }
+}
+
+GcThreadScope::GcThreadScope(bool enable) {
+    if (!enable) return;
+    HMODULE ga = GetModuleHandleW(L"GameAssembly.dll");
+    if (!ga) return;
+    auto threadCurrent =
+        reinterpret_cast<FnThreadCurrent>(GetProcAddress(ga, "il2cpp_thread_current"));
+    auto threadAttach = reinterpret_cast<FnThreadAttach>(GetProcAddress(ga, "il2cpp_thread_attach"));
+    auto threadDetach = reinterpret_cast<FnThreadDetach>(GetProcAddress(ga, "il2cpp_thread_detach"));
+    auto domainGet = reinterpret_cast<FnDomainGet>(GetProcAddress(ga, "il2cpp_domain_get"));
+    if (!threadCurrent || !threadAttach || !threadDetach || !domainGet) {
+        x::runtime::LogWThrottled(203, 60000, "Il2Cpp",
+                                  "GcThreadScope no-op: thread_current/attach/detach 未导出 —— "
+                                  "worker 查询期仍暴露在 GC unknown-thread 下");
+        return;
+    }
+    if (GcThreadCurrentSeh(threadCurrent)) {
+        visible_ = true;  // 泵线程 / 游戏自有线程：本就登记过，别碰
+        return;
+    }
+    void* domain = domainGet();
+    if (!domain) return;
+    detach_ = threadDetach;
+    thread_ = GcThreadAttachSeh(threadAttach, domain);
+    if (!thread_) {
+        detach_ = nullptr;
+        x::runtime::LogWThrottled(204, 10000, "Il2Cpp", "GcThreadScope attach 失败 tid=%lu",
+                                  GetCurrentThreadId());
+        return;
+    }
+    attached_ = true;
+    visible_ = true;
+    static std::atomic<bool> gAttachLogged{false};
+    if (!gAttachLogged.exchange(true)) {
+        x::runtime::LogI("Il2Cpp",
+                         "GcThreadScope attach tid=%lu —— 查询期登记进 GC，出作用域即摘除"
+                         "（防 Collecting from unknown thread）",
+                         GetCurrentThreadId());
+    }
+}
+
+GcThreadScope::~GcThreadScope() {
+    if (!attached_ || !thread_ || !detach_) return;
+    GcThreadDetachSeh(detach_, thread_);
+}
+
 bool RuntimeClassInit(void* klass) {
     if (!Ensure() || !klass || !gExp.runtimeClassInit) return false;
     if (!ManagedAllocSafe()) {

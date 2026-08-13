@@ -14,6 +14,7 @@ add_executable(xcat WIN32
     attach_inject.cpp
     hangup_schedule.cpp
     guardian_policy.cpp
+    game_exit_probe.cpp
     workspace_tabs.cpp
     tdr_tune.cpp
     runtime_leds.cpp
@@ -54,6 +55,7 @@ target_link_libraries(xcat PRIVATE
     winhttp
     bcrypt
     iphlpapi
+    wevtapi
 )
 
 add_dependencies(xcat xcat_probe)

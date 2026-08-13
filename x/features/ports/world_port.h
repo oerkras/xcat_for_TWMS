@@ -42,8 +42,14 @@ void* GetMapScene();
 int GetMapSceneKey();
 // MapData.Id（WM._currentMapData@+0x88 → Id@+0x10）；0=未知 / 非图内。
 int GetMapId();
-// WM._characterId @+0x98；0=未进角/未知。用于 DamageInfo.CharacterId 比对。
+// CharacterStat.CharacterID@+0x10（战斗/伤害等）；掉落归属请用 GetDropOwnerCharacterId。
 uint32_t GetCharacterId();
+// Drop.OwnerId 本地真源：BIN 钉 WM+0x114（+0x98 实为 CS 同值，不可用）。
+uint32_t GetDropOwnerCharacterId();
+// drop_pool 用地上 OwnerId 扫 WM 命中后钉死偏移
+void NoteDropOwnerWmFieldOff(size_t off);
+void ClearDropOwnerWmFieldOff();
+size_t PeekDropOwnerWmFieldOff();
 void* GetCharacterData();   // 转发 player::LocalCharacterData（防漂）
 void* GetCharacterStat();   // 转发 player::LocalCharacterStat
 int64_t ReadMoney();        // 转发 player::ReadMoney；失败 -1

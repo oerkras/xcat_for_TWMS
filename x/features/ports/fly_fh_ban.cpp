@@ -353,6 +353,11 @@ void SetSourceArmed(BanSource source, bool on) {
 
 void SetArmedBan(bool armed) { SetSourceArmed(BanSource::Fly, armed); }
 
+bool WarmInstall() {
+    // 与 SetSourceArmed 共用 EnsureInstalled：只改虚表，不碰 gBanMask / detach。
+    return EnsureInstalled();
+}
+
 bool IsBanActive() { return gBan.load(std::memory_order_acquire); }
 bool IsInstalled() { return gInstalled.load(std::memory_order_acquire); }
 unsigned ActiveMask() { return gBanMask.load(std::memory_order_acquire); }

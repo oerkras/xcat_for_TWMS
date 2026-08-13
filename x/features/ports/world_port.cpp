@@ -382,9 +382,83 @@ int GetMapId() {
 }
 
 uint32_t GetCharacterId() {
+    // CharacterStat.CharacterID@+0x10（CMS）——战斗/DamageInfo 等同槽。
+    // User.CharacterId 真源 +0x1B0（IDA mov eax,[rcx+1B0h]）；旧 0x198 是 Camera*。
+    constexpr size_t kFbCsCharacterId = 0x10;
+    constexpr size_t kFbUserCharacterId = 0x1B0;
+    constexpr uint32_t kCidPlausibleMax = 0x04000000u;
+
+    auto plausible = [](uint32_t id) { return id != 0 && id < kCidPlausibleMax; };
+
+    uint32_t csCid = 0;
+    void* cs = x::ui::player::LocalCharacterStat();
+    if (il2::LooksLikeHeapPtr(cs)) csCid = ReadU32(cs, kFbCsCharacterId);
+
+    uint32_t userCid = 0;
+    void* mu = x::ui::player::LocalMyUser();
+    if (il2::LooksLikeHeapPtr(mu)) userCid = ReadU32(mu, kFbUserCharacterId);
+
+    uint32_t wmCid = 0;
     void* wm = GetWorldManager();
+    if (il2::LooksLikeHeapPtr(wm)) {
+        // dump 把对象槽标成 CharacterId@0x90；uint getter 实读 +0x98
+        const uint32_t wm98 = ReadU32(wm, 0x98);
+        const uint32_t wmOff = ReadU32(wm, kOffWmCharacterId);
+        if (plausible(wm98))
+            wmCid = wm98;
+        else if (plausible(wmOff))
+            wmCid = wmOff;
+    }
+
+    if (plausible(csCid)) return csCid;
+    if (plausible(userCid)) return userCid;
+    if (plausible(wmCid)) return wmCid;
+    return csCid ? csCid : (userCid ? userCid : wmCid);
+}
+
+// 地上 Drop.OwnerId 在本地 WM 上扫到的字段（可能 ≠ get_CharacterId 的 +0x98）
+size_t gDropOwnerWmFieldOff = 0;
+
+void NoteDropOwnerWmFieldOff(size_t off) {
+    if (off < 0x10 || off >= 0x200) return;
+    if (gDropOwnerWmFieldOff == off) return;
+    gDropOwnerWmFieldOff = off;
+}
+
+void ClearDropOwnerWmFieldOff() { gDropOwnerWmFieldOff = 0; }
+
+size_t PeekDropOwnerWmFieldOff() { return gDropOwnerWmFieldOff; }
+
+uint32_t GetDropOwnerCharacterId() {
+    // Drop.OwnerId 工程真源（经典版 runtime IDB · imagebase 0x7FF848C80000）：
+    // 1) 进包：ReadInt → mov [Drop+34h], eax（服端）
+    // 2) ByPet/Near 反汇编 cmp [obj+98h]，但 BIN 实机：WM+0x98 == CS+0x10(194899)
+    //    地上 OwnerId=118536 落在 WM+0x114（2026-08-12 scan 钉死）
+    // 3) 优先钉死偏移；否则试 +0x114，再试 +0x98（仅当 ≠ CS）
+    // ★禁止 User+0x1B0 / CS+0x10
+    constexpr size_t kFbWmDropOwnerId = 0x114;  // BIN scan
+    constexpr size_t kFbWmUintCharacterId = 0x98;
+    constexpr uint32_t kCidPlausibleMax = 0x04000000u;
+    auto plausible = [](uint32_t id) { return id != 0 && id < kCidPlausibleMax; };
+
+    void* wm = PeekWorldManager();
+    if (!il2::LooksLikeHeapPtr(wm)) wm = GetWorldManager();
     if (!il2::LooksLikeHeapPtr(wm)) return 0;
-    return ReadU32(wm, kOffWmCharacterId);
+
+    if (gDropOwnerWmFieldOff) {
+        const uint32_t pinned = ReadU32(wm, gDropOwnerWmFieldOff);
+        if (plausible(pinned)) return pinned;
+    }
+
+    const uint32_t csCid = GetCharacterId();
+    const uint32_t at114 = ReadU32(wm, kFbWmDropOwnerId);
+    // +0x114 = Drop.OwnerId 槽：允许 ==CS（部分角两套 ID 合一，例 195466）
+    if (plausible(at114)) return at114;
+
+    // +0x98 = 战斗/CS 系；仅当 ≠CS 才当 Drop 归属用（防毒）
+    const uint32_t wm98 = ReadU32(wm, kFbWmUintCharacterId);
+    if (plausible(wm98) && !(csCid && wm98 == csCid)) return wm98;
+    return 0;
 }
 
 }  // namespace x::features::ports::world

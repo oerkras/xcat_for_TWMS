@@ -22,6 +22,7 @@ enum class Id : uint8_t {
     RestrictionAlarm, // 限制 Debuff 首次检出：短促双拍，区别于测谎四拍 Alarm
     LiePass,          // 测谎通过：明亮愉悦上行
     GameContextOk,
+    ScrollDrop,       // 卷軸掉落：连续三声叮咚
     Count
 };
 

@@ -8,6 +8,10 @@
 #include "kick_sniff.h"
 
 #include "../galaxy_token_probe/galaxy_token_probe.h"
+#include "../ports/fly_fh_ban.h"
+#include "../ports/foothold_port.h"
+#include "../ports/ground_spoof.h"
+#include "../ports/world_port.h"
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
@@ -103,6 +107,17 @@ constexpr char kOutPacketClass[] =
 constexpr uintptr_t kRvaA480TryLocalDisc = 0xDCD6C0;  // remounted 2026-08-06
 constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDDA277;  // remounted 2026-08-06
 constexpr uintptr_t kRvaA480DoLocalDisc = 0xDE2140;  // remounted 2026-08-06
+// CloseSession 直接调用方（runtime IDB 2026-08-12 · imagebase 0x7ff848c80000）
+constexpr uintptr_t kRvaCsCaller1CC5520 = 0x1CC5520;
+constexpr uintptr_t kRvaCsCaller1CD5570 = 0x1CD5570;  // MI/data only
+constexpr uintptr_t kRvaCsCaller1CD92A0 = 0x1CD92A0;
+constexpr uintptr_t kRvaCsParent1CC52C0 = 0x1CC52C0;
+constexpr uintptr_t kRvaCsParent1CC74C0 = 0x1CC74C0;
+constexpr uintptr_t kRvaCsParent1CD7870 = 0x1CD7870;
+constexpr uintptr_t kRvaCsParent1CDA040 = 0x1CDA040;
+// Session.CallbackRecv(IAsyncResult) — remount 后写 SessionState@+0x60=Disconnected
+// dump hash aff6dcff…；写点 mov [rcx+60h],eax @ 0x1CD7796（rip 后一条 0x1CD7799）
+constexpr uintptr_t kRvaSessionCallbackRecv = 0x1CD74A0;
 constexpr char kWorldManagerClass[] =
     "acda742ab51e7e2e3003fd2b44fbc00eababde4300ef17ac35b5f4fd01bee68";
 constexpr char kHashA480ForceDisc[] =
@@ -117,7 +132,7 @@ size_t gOffA480ForceDiscFlag = kFbA480ForceDiscFlag;
 size_t gOffA480DiscTimer = kFbA480DiscTimer;
 #define kOffA480ForceDiscFlag (gOffA480ForceDiscFlag)
 #define kOffA480DiscTimer (gOffA480DiscTimer)
-constexpr int kCallEdgeCap = 48;
+constexpr int kCallEdgeCap = 96;
 constexpr int kStackFrames = 16;
 
 #define kIl2cppArrayData (x::runtime::il2cpp_container::OffArrayData())
@@ -202,11 +217,38 @@ void EnsureKickFieldOff() {
 }
 
 
-// Names for the handful of opcodes we actually reason about, so a send.log trace reads without a
-// lookup table on the side. Values are CMS ClientPacket and have matched the wire every time we
-// have checked one (47 UserMove, 52 UserMagicAttack).
+// 出站 opcode 名字，只为让 send.log 不用另开对照表。
+//
+// 编号取自 CMS ClientPacket，但「TW == CMS 同编号」这个前提**只在 <= 53 站得住**。>= 180 段实测
+// 为 **+2 平移**，2026-08-12 用 IDA 逐个实读混淆常量钉死（runtime IDB `Dumps/runtime/
+// GameAssembly.dll.i64`，imagebase 0x7ff848c80000）。opcode 是「IMM ⊕/+ 运行时种子」，静态直读
+// 得不到，须实读种子——见 .cursor/rules/ga-const-obfuscation.mdc：
+//
+//   MovePath_Flush 的 4 个调用方（= 移动包家族，各带且仅带一个 opcode 常量）：
+//     sub_7FF849E671E0  0xEFB7 ^ seed@7FF84F4D90C4=0xEF98      = 47   UserMove      CMS 47  偏移 0
+//     sub_7FF849E5E810  0xFFFF958A + seed@7FF84F4D8E78=0x6B2C  = 182  PetMove       CMS 180  +2
+//     sub_7FF849E635C0  0xFFFFC626 + seed@7FF84F4D8FBC=0x3A98  = 190  SummonedMove  CMS 188  +2
+//     sub_7FF849C01030  0xD99C ^ seed@7FF84F4CEAE4=0xD945      = 217  NpcMove       CMS 215  +2
+//   我方吸物实际调用的两个原生入口（IDB 里已命名）：
+//     DropPool_SendDropPickUpRequest 0x1C4 ^ seed@7FF84F4CE31C=0x11A  = 222 CMS 220 +2
+//     Pet_SendDropPickUpRequest      0x7D45 ^ seed@7FF84F4CE434=0x7DFC = 185 CMS 183 +2
+//
+// 已知的 47 由同一套方法解出且完全吻合 → 方法可信；另五点一致 +2。旁证：出站流量里抓到过 CMS 的
+// 枚举块哨兵（222=BEGIN_REACTORPOOL 3207 次、217=END_NPC 231 次），哨兵不可能被发，独立证伪同编号。
+//
+// **207 仍是推论**（故带 `?`）：mob 移动不走 MovePath_Flush，没读到它的常量；但 CMS MobMove=205 属
+// 上述同一移动家族、家族内三个兄弟均为 +2，且 08-02 实解 207 包体为「mobId + 每怪 seq + 起点 xy +
+// 14 字节元素」= MovePath 形状（拾取请求没有元素数组）、速率随场上怪数走（我方是 mob 控制端）。
+//
+// 插入点落在 54..179 之间、具体位置未知，那一段的名字最多可能错 2 个号，一律带 `?`。反证信号：若
+// send.log 出现 op=205 / 220 / 223（+2 下对应 CMS 哨兵 BEGIN_LIFEPOOL / END_LIFEPOOL /
+// END_DROPPOOL，发不出来），说明 +2 模型不成立。复算脚本：Dumps/_opcode_name_audit*.py。
+//
+// 入站表（下方 CmsServerPacketHint）不受影响：41 项里 40 项与 CMS ServerPacket 精确同号，TW 只在尾部追加
+// （433 vs 420）。这个方向不对称正是长期误读的来源——别拿入站的准确率去信任出站。
 const char* OpName(int op) {
     switch (op) {
+        // <= 53：同编号已对线，可直接采信
         case 23: return "AliveAck";
         case 43: return "TransferField";
         case 47: return "UserMove";
@@ -214,15 +256,20 @@ const char* OpName(int op) {
         case 51: return "ShootAttack";
         case 52: return "MagicAttack";
         case 53: return "BodyAttack";
-        case 64: return "SelectNpc";
-        case 113: return "PortalScript";
-        case 114: return "PortalTeleport";
-        case 155: return "EnterTownPortal";
-        case 183: return "PetDropPickUp";
-        case 205: return "MobMove";
-        case 207: return "MobDropPickUp";
-        case 220: return "DropPickUp";
-        case 223: return "ReactorHit";
+        // 54..179：插入点在这一段内，名字可能整体错 2 个号
+        case 64: return "SelectNpc?";
+        case 113: return "PortalScript?";
+        case 114: return "PortalTeleport?";
+        case 155: return "EnterTownPortal?";
+        // >= 180：+2 平移。以下五个已 IDA 实读种子验明，可直接采信
+        case 182: return "PetMove";
+        case 185: return "PetDropPickUp";
+        case 190: return "SummonedMove";
+        case 217: return "NpcMove";
+        case 222: return "DropPickUp";
+        // 同段但未直读到常量，按移动家族 +2 推得
+        case 207: return "MobMove?";
+        case 225: return "ReactorHit?";
         default: return nullptr;
     }
 }
@@ -236,10 +283,11 @@ constexpr int kStateConnected = 3;
 constexpr int kRingCap = 64;
 constexpr int kScanPtrCap = 48;
 
-constexpr wchar_t kLogDirDev[] = L"C:\\Users\\kras\\Desktop\\xcat_for_TWMS\\Dumps\\runtime";
-
 // 放在 kick.log 同目录或 DLL 同目录即武装发包探针；见 InstallSendProbe。
 constexpr wchar_t kSendMarkerName[] = L"send_probe.on";
+constexpr wchar_t kHwbpMarkerName[] = L"kick_hwbp.on";
+constexpr wchar_t kTeardownHwbpMarkerName[] = L"kick_teardown_hwbp.on";
+constexpr wchar_t kCallEdgeMarkerName[] = L"kick_call_edge.on";
 
 HANDLE gLog = INVALID_HANDLE_VALUE;
 std::atomic<bool> gStop{false};
@@ -247,6 +295,8 @@ std::atomic<HANDLE> gThread{nullptr};
 std::atomic<int> gLastErr{-1};
 std::atomic<int> gLastState{-1};
 std::atomic<bool> gSawDisconnect{false};
+// Session 连续存活起点（tick，0=当前无会话）。DumpRing 用它区分进图 churn 与长命会话丢失。
+std::atomic<DWORD> gSessionAliveSince{0};
 std::atomic<uint32_t> gDisconnectSeq{0};
 void* gNmCached = nullptr;
 
@@ -292,8 +342,8 @@ std::atomic<bool> gInCallEdgeLog{false};
 PVOID gVehHandle = nullptr;
 HMODULE gSelfMod = nullptr;
 
-// DR0 = a480.TryLocalDisconnect (DC7E70)  — MethodInfo-only callers
-// DR1 = a480.Update @ call a480 (DD46B8) — Update timer/flag path
+// DR0 = a480.TryLocalDisconnect (default) 或 Nm.Disconnect（teardown 模式）
+// DR1 = a480.Update @ call a480 (default) 或 cs_caller_1CD5570（teardown）
 // DR2 = WRITE Session+0x60 (SessionState)
 // DR3 = Nm.CloseSession                  — teardown correlation
 struct HwbpTarget {
@@ -308,6 +358,7 @@ HwbpTarget gHwbpTargets[4] = {
     {"Session.SessionState@write", 0, true, false},
     {"Nm.CloseSession", kRvaNmCloseSession, false, false},
 };
+std::atomic<bool> gHwbpTeardownMode{false};
 uintptr_t gHwbpAddr[4]{};
 std::atomic<uintptr_t> gStateWatchAddr{0};
 std::atomic<void*> gStateWatchSession{nullptr};
@@ -329,7 +380,14 @@ constexpr int kDumpOpMax = 8;
 // 24 个 UserMove 只够覆盖开局约 12 秒，恰好是没用的那一头。放大到能覆盖整场：UserMove ~2/s、
 // 攻击 ~4/s，一场十分钟约 3600 个包，每行约 150B → send.log 几百 KB，可接受。
 constexpr int kDumpQuotaDefault = 4000;
+// 高频 opcode 单独给小配额。207 占了出站行数的 61%（89220/145118），按 4000 抓会把 send.log
+// 撑大、把轮转提前，反而先冲掉断线前那段 op=47。取 400 只为回答一个是非题：包体到底是
+// MovePath 形状（→ 确认 207=MobMove，+2 平移成立）还是拾取请求形状。拿到结论就该关掉。
+constexpr int kDumpQuotaHighRate = 400;
 constexpr int kDumpBodyBytes = 64;
+
+// 只对已知高频的 opcode 收窄配额，其余照 Default。
+int DumpQuotaForOp(int op) { return op == 207 ? kDumpQuotaHighRate : kDumpQuotaDefault; }
 int gDumpOp[kDumpOpMax]{};
 std::atomic<int> gDumpLeft[kDumpOpMax]{};
 int gDumpOpN = 0;
@@ -391,8 +449,10 @@ std::wstring ModuleDir() {
 }
 
 std::wstring ResolveLogDir() {
-    std::wstring dir = DirExists(kLogDirDev) ? kLogDirDev : ModuleDir();
-    if (!DirExists(kLogDirDev) && !dir.empty()) {
+    const std::wstring dev = x::runtime::OptionalRepoRuntimeDumpDir();
+    if (!dev.empty()) return dev;
+    std::wstring dir = ModuleDir();
+    if (!dir.empty()) {
         const std::wstring logs = dir + L"\\logs";
         CreateDirectoryW(logs.c_str(), nullptr);
         if (DirExists(logs)) dir = logs;
@@ -593,6 +653,10 @@ const char* HackingAutoBlockName(int code) {
 
 // CMS ServerPacket names for TW opcodes that share the same numeric table (0..432).
 // Used as hints only — TW numeric slots may drift; empty ring ≠ proof of local disconnect.
+//
+// 入站方向的同编号假设**已核过**（2026-08-12）：本表 41 项里 40 项与 CMS ServerPacket 精确同号，
+// 唯一例外 432 本就带 `?`（CMS 无此值，属 TW 尾部追加：TW 433 项 vs CMS 420 项）。所以这里不要
+// 套出站表那条 +2 平移——出站才有平移，入站没有（原因见 OpName 注释）。
 const char* CmsServerPacketHint(int op) {
     switch (op) {
     case 0:
@@ -1003,9 +1067,17 @@ void DumpRing(const char* why) {
     const bool lostSession = why && strcmp(why, "lost_session") == 0;
     const int kickHitsEarly = CountKickHintsInRing(now, 3000);
 
+    // churn 判据是「会话刚站起来就丢」：换图/迁频的空窗是秒级。站够 kChurnMaxAliveMs 再丢
+    // 就不是 churn —— 卡登录期尤其如此：那段全程没有 why=disconnect，这一次 lost_session
+    // 是唯一能拿到服务端到底回了什么的机会，精简掉就彻底没证据了。
+    constexpr DWORD kChurnMaxAliveMs = 60000;
+    const DWORD aliveSince = gSessionAliveSince.load();
+    const DWORD aliveMs = aliveSince ? (now - aliveSince) : 0;
+    const bool churnLike = aliveSince == 0 || aliveMs < kChurnMaxAliveMs;
+
     // 进图/迁频 churn：无踢线提示的 lost_session → 一行带过。不占用 full-dump 冷却，
     // 以免紧随其后的真踢（why=disconnect / 环内有 kick hint）被 15s 冷却误吞。
-    if (lostSession && kickHitsEarly == 0) {
+    if (lostSession && kickHitsEarly == 0 && churnLike) {
         if (s_lastSoftLost && now - s_lastSoftLost < kSoftLostCooldownMs) {
             return;  // 抖动窗口内静默去重（连 soft 一行也不再打）
         }
@@ -1028,8 +1100,8 @@ void DumpRing(const char* why) {
         s_lastWhy[0] = '\0';
     }
 
-    Log("RING why=%s count=%d (newest last; src L=recvList Q=nmQueue)", why ? why : "?",
-        gRingCount);
+    Log("RING why=%s count=%d aliveMs=%u (newest last; src L=recvList Q=nmQueue)", why ? why : "?",
+        gRingCount, (unsigned)aliveMs);
     if (gRingCount <= 0) {
         Log("  ring empty — S→C not sampled (consumed between polls) OR local self-disconnect");
         Log("  verdict=lean_local_or_missed (no kick-notice opcode in window)");
@@ -1074,8 +1146,108 @@ const char* BasenamePath(const char* path) {
     return slash;
 }
 
+// runtime IDB 2026-08-12：把栈帧 RVA 标成已知 CloseSession 链，方便 lean_local 一眼归因。
+const char* TagCloseSessionChainRva(uintptr_t rva) {
+    struct Range {
+        uintptr_t lo;
+        uintptr_t hi;  // exclusive
+        const char* tag;
+    };
+    static constexpr Range kRanges[] = {
+        {kRvaNmCloseSession, kRvaNmCloseSession + 0x334, "Nm.CloseSession"},
+        {kRvaNmDisconnect, kRvaNmDisconnect + 0xf6, "Nm.Disconnect"},
+        {kRvaSessionCallbackRecv, kRvaSessionCallbackRecv + 0x30f, "Session.CallbackRecv"},
+        {kRvaCsCaller1CC5520, kRvaCsCaller1CC5520 + 0x2fc, "cs_via_1CC5520"},
+        {kRvaCsCaller1CD5570, kRvaCsCaller1CD5570 + 0x584, "cs_via_1CD5570"},
+        {kRvaCsCaller1CD92A0, kRvaCsCaller1CD92A0 + 0xb0f, "cs_via_1CD92A0"},
+        {kRvaCsParent1CC52C0, kRvaCsParent1CC52C0 + 0x25b, "parent_1CC52C0"},
+        {kRvaCsParent1CC74C0, kRvaCsParent1CC74C0 + 0x39d, "parent_1CC74C0"},
+        {kRvaCsParent1CDA040, kRvaCsParent1CDA040 + 0x330, "parent_1CDA040"},
+        {kRvaCsParent1CD7870, kRvaCsParent1CD7870 + 0x193b, "parent_1CD7870"},
+    };
+    for (const Range& r : kRanges) {
+        if (rva >= r.lo && rva < r.hi) return r.tag;
+    }
+    return nullptr;
+}
+
+bool EdgeIsTeardown(const char* edge) {
+    if (!edge) return false;
+    return strstr(edge, "CloseSession") != nullptr || strstr(edge, "Disconnect") != nullptr ||
+           strstr(edge, "1CD5570") != nullptr || strstr(edge, "1CD92A0") != nullptr;
+}
+
+// 纯内存读：CurFh / ban / ground_spoof。worker 与 HWBP VEH 均可调（勿碰托管方法）。
+void LogTeardownPrestate() {
+    const uint32_t curFh = x::features::ports::foothold::PeekCurFhId();
+    const unsigned banMask = x::features::ports::fly_fh_ban::ActiveMask();
+    const int banOn = x::features::ports::fly_fh_ban::IsBanActive() ? 1 : 0;
+    const int spoofOn = x::features::ports::ground_spoof::IsEnabled() ? 1 : 0;
+    int fireSp = 0;
+    uint32_t fireFh = 0;
+    int castSp = 0;
+    uint32_t castFh = 0;
+    x::features::ports::ground_spoof::FireDebug(&fireSp, &fireFh);
+    x::features::ports::ground_spoof::CastDebug(&castSp, &castFh);
+    Log("  prestate curFh=%u banOn=%d banMask=0x%x spoofOn=%d fireSp=%d fireFh=%u castSp=%d "
+        "castFh=%u",
+        curFh, banOn, banMask, spoofOn, fireSp, fireFh, castSp, castFh);
+}
+
+bool MarkerPresent(const wchar_t* name) {
+    if (!name || !name[0]) return false;
+    const std::wstring logDir = ResolveLogDir();
+    const std::wstring modDir = ModuleDir();
+    return (!logDir.empty() && FileExists(logDir + L"\\" + name)) ||
+           (!modDir.empty() && FileExists(modDir + L"\\" + name));
+}
+
+// KICK_HWBP=1 / kick_hwbp.on → 默认 a480+CloseSession
+// KICK_HWBP=2 / kick_teardown_hwbp.on → Disconnect + 1CD5570 + CloseSession（状态错乱踢线）
+enum class HwbpWant : int { Off = 0, Default = 1, Teardown = 2 };
+
+HwbpWant ResolveHwbpWant(const char** outHow) {
+    char env[16]{};
+    const DWORD n = GetEnvironmentVariableA("KICK_HWBP", env, sizeof(env));
+    if (n > 0) {
+        if (env[0] == '2' || _stricmp(env, "teardown") == 0) {
+            if (outHow) *outHow = "KICK_HWBP=2";
+            return HwbpWant::Teardown;
+        }
+        if (env[0] == '1') {
+            if (outHow) *outHow = "KICK_HWBP=1";
+            return HwbpWant::Default;
+        }
+    }
+    if (MarkerPresent(kTeardownHwbpMarkerName)) {
+        if (outHow) *outHow = "marker kick_teardown_hwbp.on";
+        return HwbpWant::Teardown;
+    }
+    if (MarkerPresent(kHwbpMarkerName)) {
+        if (outHow) *outHow = "marker kick_hwbp.on";
+        return HwbpWant::Default;
+    }
+    if (outHow) *outHow = nullptr;
+    return HwbpWant::Off;
+}
+
+void ApplyTeardownHwbpTargets() {
+    gHwbpTargets[0] = {"Nm.Disconnect", kRvaNmDisconnect, false, false};
+    gHwbpTargets[1] = {"cs_caller_1CD5570", kRvaCsCaller1CD5570, false, false};
+    // [2] SessionState write + [3] CloseSession 不变
+}
+
 void LogCallEdge(const char* edge, void* self, bool selfIsSession, bool selfIsA480, int extraState,
                  const char* via) {
+    // BIN 17:08：图内战 CloseSession → lost_session 被 inMap 吞、无 Disconnected → soft 永不 attempt。
+    // 选角进图 CloseSession（!inMap）不粘；仅图内拆会话粘住，等回大厅再软重连。
+    // 必须在取证预算（kCallEdgeCap）与重入锁之前 —— 这是功能逻辑，不能随日志配额一起断供：
+    // 挂机数小时后 cap 耗尽，粘性武装会静默失效（连日志都没有）。
+    if (edge && strstr(edge, "CloseSession") != nullptr &&
+        x::features::ports::world::IsInMapScene()) {
+        x::features::soft_login_probe::RequestDeferredAttempt("close_session_inmap");
+    }
+
     if (gInCallEdgeLog.exchange(true)) return;
     const int n = gCallEdgeDumps.fetch_add(1) + 1;
     if (n > kCallEdgeCap) {
@@ -1108,6 +1280,8 @@ void LogCallEdge(const char* edge, void* self, bool selfIsSession, bool selfIsA4
         n, via ? via : "?", edge ? edge : "?", GetCurrentThreadId(), self, session, stNm, StateName(stNm),
         stSess, StateName(stSess), err, hack ? " hackHint=" : "", hack ? hack : "", closed, extraState);
 
+    if (EdgeIsTeardown(edge)) LogTeardownPrestate();
+
     if (selfIsA480 && self) {
         const int flag = ReadU8(self, kOffA480ForceDiscFlag);
         const float timer = ReadF32(self, kOffA480DiscTimer);
@@ -1131,7 +1305,12 @@ void LogCallEdge(const char* edge, void* self, bool selfIsSession, bool selfIsA4
         const char* name = BasenamePath(modPath[0] ? modPath : "?");
         const uintptr_t abs = reinterpret_cast<uintptr_t>(frames[i]);
         const uintptr_t rva = base ? (abs - base) : abs;
-        Log("  #%u %s+0x%llX", (unsigned)i, name, (unsigned long long)rva);
+        const char* tag = nullptr;
+        if (base && _stricmp(name, "GameAssembly.dll") == 0) tag = TagCloseSessionChainRva(rva);
+        if (tag)
+            Log("  #%u %s+0x%llX [%s]", (unsigned)i, name, (unsigned long long)rva, tag);
+        else
+            Log("  #%u %s+0x%llX", (unsigned)i, name, (unsigned long long)rva);
     }
     gInCallEdgeLog.store(false);
 }
@@ -1172,8 +1351,15 @@ void LogCallEdgeFromCtx(const char* edge, bool selfIsSession, bool selfIsA480, C
                 base = reinterpret_cast<uintptr_t>(mod);
                 GetModuleFileNameA(mod, modPath, MAX_PATH);
             }
-            Log("  rsp[%d] %s+0x%llX", i, BasenamePath(modPath[0] ? modPath : "?"),
-                (unsigned long long)(base ? (ret - base) : ret));
+            const char* name = BasenamePath(modPath[0] ? modPath : "?");
+            const uintptr_t rva = base ? (ret - base) : ret;
+            const char* tag =
+                (base && _stricmp(name, "GameAssembly.dll") == 0) ? TagCloseSessionChainRva(rva)
+                                                                  : nullptr;
+            if (tag)
+                Log("  rsp[%d] %s+0x%llX [%s]", i, name, (unsigned long long)rva, tag);
+            else
+                Log("  rsp[%d] %s+0x%llX", i, name, (unsigned long long)rva);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -1406,19 +1592,26 @@ void InstallHwbpCallEdge() {
     // Off by default: FillHwbpContext rewrites Dr0..Dr7 wholesale every 2s; keep call-edge DR
     // probes opt-in so other modules can share the register file. Session polling (STATE /
     // pendingError / RING) is unaffected.
-    char env[8]{};
-    if (!(GetEnvironmentVariableA("KICK_HWBP", env, sizeof(env)) > 0 && env[0] == '1')) {
-        Log("CALL_EDGE_HWBP skip: set KICK_HWBP=1 to enable call-edge DR probes");
+    const char* how = nullptr;
+    const HwbpWant want = ResolveHwbpWant(&how);
+    if (want == HwbpWant::Off) {
+        Log("CALL_EDGE_HWBP skip: set KICK_HWBP=1|2, or drop %ls / %ls", kHwbpMarkerName,
+            kTeardownHwbpMarkerName);
         return;
     }
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCWSTR>(&InstallHwbpCallEdge), &gSelfMod);
+
+    const bool teardown = (want == HwbpWant::Teardown);
+    gHwbpTeardownMode.store(teardown);
+    if (teardown) ApplyTeardownHwbpTargets();
 
     gHwbpAddr[0] = gGaBase + gHwbpTargets[0].rva;
     gHwbpAddr[1] = gGaBase + gHwbpTargets[1].rva;
     gHwbpAddr[kDrWriteSlot] = gStateWatchAddr.load();
     gHwbpAddr[3] = gGaBase + gHwbpTargets[3].rva;
     for (int i = 0; i < 4; ++i) gOwnSlot[i] = true;
+    Log("CALL_EDGE_HWBP mode=%s via=%s", teardown ? "teardown" : "default", how ? how : "?");
     Log("CALL_EDGE_HWBP arm[0] %s ga+0x%llX -> %p", gHwbpTargets[0].name,
         (unsigned long long)gHwbpTargets[0].rva, (void*)gHwbpAddr[0]);
     Log("CALL_EDGE_HWBP arm[1] %s ga+0x%llX -> %p", gHwbpTargets[1].name,
@@ -1495,11 +1688,17 @@ void InstallSendProbe() {
 
     // 47 是 UserMove——服端校验位移的真入口（见 docs/features/protocol/移动协议.md），排查
     // 「飞行被判位移外挂」时它是主证据，所以放在默认列表首位。50-53 是攻击族，用来对照攻击包
-    // 自报的坐标。207(MobMove) 服务的是另一条已结案的问题，且怪多时速率很高会淹掉 send.log，
-    // 默认不再抓；需要时用 KICK_SEND_DUMP 指定。该变量取逗号列表，填 "0" 表示只记 op 不抓体。
+    // 自报的坐标。
+    //
+    // 拾取洪泛（`xcat_pet_loot.h` 两个硬上限 burst 8 / 盒 1500 就是为「拾取洪泛 → 静默掐线
+    // verdict=lean_local_or_soft」这条实机事故设的）要看的是 **222 = DropPickUp 与 185 =
+    // PetDropPickUp**，不是 207。207 按 CMS 同编号读会读成 MobDropPickUp，但那个前提在 >53 段
+    // 已被证伪（见 OpName 注释），它实际是 MobMove——引擎作为 mob 控制端自发的，跟我方吸物无关。
+    // 207 仍留在名单里只为拿包体确认这一点（小配额，见 DumpQuotaForOp），确认完即可删。
+    // 该变量取逗号列表，填 "0" 表示只记 op 不抓体；上限 kDumpOpMax=8。
     char dumpEnv[64]{};
     if (GetEnvironmentVariableA("KICK_SEND_DUMP", dumpEnv, sizeof(dumpEnv)) == 0) {
-        strcpy_s(dumpEnv, "47,50,51,52,53");
+        strcpy_s(dumpEnv, "47,50,51,52,53,222,185,207");
     }
     if (dumpEnv[0] != '0' || dumpEnv[1] != '\0') {
         for (const char* s = dumpEnv; *s && gDumpOpN < kDumpOpMax;) {
@@ -1508,20 +1707,20 @@ void InstallSendProbe() {
             const int v = atoi(s);
             if (v > 0) {
                 gDumpOp[gDumpOpN] = v;
-                gDumpLeft[gDumpOpN].store(kDumpQuotaDefault);
+                gDumpLeft[gDumpOpN].store(DumpQuotaForOp(v));
                 ++gDumpOpN;
             }
             while (*s && *s != ',') ++s;
         }
     }
     if (gDumpOpN) {
-        char list[64];
+        char list[96];
         int ln = 0;
-        for (int i = 0; i < gDumpOpN && ln + 8 < (int)sizeof(list); ++i) {
-            ln += snprintf(list + ln, sizeof(list) - ln, i ? ",%d" : "%d", gDumpOp[i]);
+        for (int i = 0; i < gDumpOpN && ln + 12 < (int)sizeof(list); ++i) {
+            ln += snprintf(list + ln, sizeof(list) - ln, i ? ",%d:%d" : "%d:%d", gDumpOp[i],
+                           gDumpLeft[i].load());
         }
-        Log("SEND_PROBE body dump ops=%s quota=%d each (KICK_SEND_DUMP=0 disables)", list,
-            kDumpQuotaDefault);
+        Log("SEND_PROBE body dump op:quota=%s (KICK_SEND_DUMP=0 disables)", list);
     }
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCWSTR>(&InstallSendProbe), &gSelfMod);
@@ -1721,8 +1920,11 @@ void InstallCallEdgeHooks() {
     if (gCallEdgeInstalled.load()) return;
     // Default off: MethodInfo swap is kick attribution only; 守护用 Session 轮询 disconnectSeq。
     char env[8]{};
-    if (!(GetEnvironmentVariableA("KICK_CALL_EDGE", env, sizeof(env)) > 0 && env[0] == '1')) {
-        Log("CALL_EDGE skip: set KICK_CALL_EDGE=1 to enable MethodInfo swap (via=MI)");
+    const bool byEnv =
+        GetEnvironmentVariableA("KICK_CALL_EDGE", env, sizeof(env)) > 0 && env[0] == '1';
+    const bool byFile = MarkerPresent(kCallEdgeMarkerName);
+    if (!byEnv && !byFile) {
+        Log("CALL_EDGE skip: set KICK_CALL_EDGE=1, or drop %ls", kCallEdgeMarkerName);
         return;
     }
     if (!gClassGetMethods) {
@@ -1732,7 +1934,8 @@ void InstallCallEdgeHooks() {
     if (!gSessionKlass) gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
     // No RuntimeClassInit here (worker thread). MethodInfo walk/patch is data-plane;
     // class_init from worker caused user GC fatal (upload 6ee38d / CALL_EDGE 6/6 then die).
-    Log("CALL_EDGE install Session=%p (MethodInfo swap, no .text)", gSessionKlass);
+    Log("CALL_EDGE install Session=%p via=%s (MethodInfo swap, no .text)", gSessionKlass,
+        byEnv ? "KICK_CALL_EDGE=1" : "marker kick_call_edge.on");
 
     int ok = 0;
     int hashHits = 0;
@@ -1931,6 +2134,9 @@ DWORD WINAPI Worker(LPVOID) {
     InstallHwbpCallEdge();
     InstallSendProbe();  // after the call-edge set, so it only claims DR3 if that one passed
 
+    // 卡登录期一次性取证：auto_enter 的世界列表在 60s 超时，取 90s 保证落在其后。
+    constexpr DWORD kStallDumpAfterMs = 90000;
+    bool stallDumped = false;
     DWORD lastHb = GetTickCount();
     DWORD lastHwbp = GetTickCount();
     DWORD lastSend = GetTickCount();
@@ -1947,23 +2153,62 @@ DWORD WINAPI Worker(LPVOID) {
                                    : ReadI32(nm, kOffNmSessionState);
             const int err = session ? ReadI32(session, kOffSessionPendingError) : -1;
             if (st != lastState || (err != lastErr && err != 0 && err != -1)) {
-                if (lastState >= 0) OnStateChange(lastState, st, err);
-                else
+                if (lastState >= 0) {
+                    OnStateChange(lastState, st, err);
+                } else {
+                    gSessionAliveSince.store(GetTickCount());
                     Log("STATE initial %s(%d) pendingError=%d", StateName(st), st, err);
+                }
                 lastState = st;
                 lastErr = err;
                 gLastErr.store(err);
                 gLastState.store(st);
             }
         } else if (lastState >= 0) {
-            Log("STATE lost SessionTcpLayer (was %s)", StateName(lastState));
-            DumpRing("lost_session");
+            const int was = lastState;
+            Log("STATE lost SessionTcpLayer (was %s)", StateName(was));
+            // 清零前采样（与 DumpRing churn 同口径）；其后 store(0) 会抹掉 aliveSince。
+            const DWORD nowLost = GetTickCount();
+            const DWORD aliveSinceLost = gSessionAliveSince.load();
+            const DWORD aliveMsLost = aliveSinceLost ? (nowLost - aliveSinceLost) : 0;
+            const int kickHitsLost = CountKickHintsInRing(nowLost, 3000);
+            DumpRing("lost_session");  // 读 gSessionAliveSince，故清零必须在其后
+            gSessionAliveSince.store(0);
             lastState = -1;
             gNmCached = nullptr;
             gScanPrevN = 0;
             UpdateSessionStateWatch(nullptr);
+            // BIN 15:20：安全强制关闭 → layer 瞬失、无 Disconnected → 需软路径。
+            // BIN 15:49：冷启/进图秒级空窗 = soft churn，勿 RequestAttempt。
+            // BIN 16:05：药店图内长会话 Session 空窗 aliveMs>60s 仍武装 → hold 闪一下像「强制软重连」。
+            // 策略：图内一律不武装（安全踢回大厅靠 stuck_lobby）；仅 !inMap 且非短 churn 才 lost_session。
+            constexpr DWORD kChurnMaxAliveMs = 60000;
+            const bool churnLike =
+                aliveSinceLost == 0 || aliveMsLost < kChurnMaxAliveMs;
+            const bool inMapNow = x::features::ports::world::IsInMapScene();
+            if ((was == kStateConnected || was == kStateConnecting ||
+                 was == kStateDisconnecting) &&
+                !inMapNow && !(kickHitsLost == 0 && churnLike)) {
+                x::features::soft_login_probe::RequestAttempt("lost_session");
+            }
         }
         const DWORD now = GetTickCount();
+        // 卡登录期取证：会话连上却迟迟没有进图流量时，主动倒一次环。
+        // 不能只挂在拆除路径上 —— 实测 18 轮卡登录里只有 1 轮走到了 lost_session，
+        // 其余进程是被硬结束的，worker 根本没机会观察到会话消失。
+        // 判据用环饱和度而非 IsPlayReady()：后者会改 pump phase / map-transit-block，
+        // 探针不该有副作用；而在图里入站环一直是打满的（历次 dump 均为 count=64），
+        // 卡登录时 10 分钟才攒到十几条。
+        {
+            const DWORD aliveSince = gSessionAliveSince.load();
+            if (aliveSince == 0) {
+                stallDumped = false;
+            } else if (!stallDumped && now - aliveSince >= kStallDumpAfterMs &&
+                       gRingCount < kRingCap) {
+                stallDumped = true;
+                DumpRing("login_stall");
+            }
+        }
         if (gHwbpInstalled.load() && now - lastHwbp >= 2000) {
             lastHwbp = now;
             ApplyHwbpAllThreads(true);  // refresh DR on new threads

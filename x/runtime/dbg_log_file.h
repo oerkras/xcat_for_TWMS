@@ -108,6 +108,28 @@ inline bool EnsureFreshUnlocked(DbgLogSlot& slot, const std::wstring& full, int 
 
 }  // namespace detail
 
+// Optional repo dump dir for probe logs (kick / soft_login / galaxy_token).
+// Never hardcode a Windows username into the binary: resolve at runtime.
+// Priority: XCAT_DBG_LOG_DIR → %USERPROFILE%\Desktop\xcat_for_TWMS\Dumps\runtime (if present).
+inline std::wstring OptionalRepoRuntimeDumpDir() {
+    wchar_t env[MAX_PATH]{};
+    DWORD n = GetEnvironmentVariableW(L"XCAT_DBG_LOG_DIR", env, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        const std::wstring d(env, n);
+        const DWORD a = GetFileAttributesW(d.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0) return d;
+    }
+    wchar_t profile[MAX_PATH]{};
+    n = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        const std::wstring d =
+            std::wstring(profile, n) + L"\\Desktop\\xcat_for_TWMS\\Dumps\\runtime";
+        const DWORD a = GetFileAttributesW(d.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0) return d;
+    }
+    return {};
+}
+
 // Preferred write path: session-first rotation + mid-session size rotation, single HANDLE.
 inline bool AppendDbgLog(const std::wstring& full, const void* data, DWORD n,
                          int generations = kDbgLogGenerations) {

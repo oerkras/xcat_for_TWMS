@@ -24,6 +24,7 @@ add_library(xcat_probe SHARED
   ../features/invuln/invuln.cpp
   ../features/attack_accel/attack_accel.cpp
   ../features/final_attack_force/final_attack_force.cpp
+  ../features/melee_veto/melee_veto.cpp
   ../features/skill_max_level/skill_max_level.cpp
   ../features/kick_sniff/kick_sniff.cpp
   ../features/auto_enter/auto_enter.cpp
@@ -51,6 +52,7 @@ add_library(xcat_probe SHARED
   ../features/ports/teleport_port.cpp
   ../features/ports/fly_fh_ban.cpp
   ../features/ports/ground_spoof.cpp
+  ../features/ports/curfh_gate_bypass.cpp
   ../features/ports/foothold_port.cpp
   ../features/ports/foothold_path.cpp
   ../features/ports/map_bounds_port.cpp
@@ -76,6 +78,8 @@ add_library(xcat_probe SHARED
   ../features/fly/fly.cpp
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
   ../features/auction_town_bypass/auction_town_bypass.cpp
+  ../features/rest_mp_accel/rest_mp_accel.cpp
+  ../features/infinite_stars/infinite_stars.cpp
   ../features/ga_text_probe/ga_text_probe.cpp
   ../features/galaxy_token_probe/galaxy_token_probe.cpp
   ../features/soft_login_probe/soft_login_probe.cpp
@@ -104,6 +108,7 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/invuln
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/attack_accel
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/final_attack_force
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/melee_veto
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/skill_max_level
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/kick_sniff
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auto_enter
@@ -121,6 +126,8 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/fly
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/drop_alert_bypass
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auction_town_bypass
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/rest_mp_accel
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/infinite_stars
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/ga_text_probe
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/galaxy_token_probe
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/soft_login_probe
@@ -145,10 +152,13 @@ if (MSVC)
   target_compile_options(xcat_probe PRIVATE /utf-8 /EHsc)
   # 卡死取证（hang_autopsy）落盘的只有 `xcat.dll+0xRVA`。没有链接器 PDB 就永远翻不成函数名，
   # 2026-08-09 主线程死锁栈里那 6 帧 XCat 代码就因此只能靠猜。所有配置都产出 PDB。
+  # /PDBALTPATH: 只把文件名写进 PE 的 RSDS，避免本机绝对路径（含 Windows 用户名）随 DLL 外发。
+  # 磁盘上的真实 PDB 仍由 PDB_OUTPUT_DIRECTORY 决定，本地 hang 反查不受影响。
   # 显式补回 /OPT:REF /OPT:ICF：MSVC 在给了 /DEBUG 之后会把这两项默认关掉，不补就等于
   # 顺手改了 Release 的代码布局与体积，可能把要查的时序问题一起盖掉。
   target_link_options(xcat_probe PRIVATE
       /DEBUG
+      /PDBALTPATH:xcat.pdb
       $<$<NOT:$<CONFIG:Debug>>:/OPT:REF>
       $<$<NOT:$<CONFIG:Debug>>:/OPT:ICF>
   )

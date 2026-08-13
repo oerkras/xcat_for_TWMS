@@ -42,8 +42,10 @@ using FnObjectGetClass = void* (*)(void* obj);
 using FnObjectNew = void* (*)(void* klass);
 using FnArrayNew = void* (*)(void* elementKlass, uintptr_t length);
 using FnClassInstanceSize = int32_t (*)(void* klass);
-using FnGcHandleNew = uint32_t (*)(void* obj, bool pinned);
-using FnGcHandleFree = void (*)(uint32_t handle);
+// Classic TWMS GA：gchandle 是指针宽编码（IDA：free 对 handle & ~0x1FFF 取页），
+// 不是老 il2cpp 的 32 位槽号。截成 uint32_t 再 free → 主泵 AV（BIN 04:52 GA+0x3d9523）。
+using FnGcHandleNew = uintptr_t (*)(void* obj, bool pinned);
+using FnGcHandleFree = void (*)(uintptr_t handle);
 using FnGcHasStrictWbarriers = bool (*)();
 using FnGcWbarrierSetField = void (*)(void* obj, void** field, void* value);
 // Shape resolve (metadata) — soft exports; missing ⇒ hash-only path.
@@ -73,6 +75,10 @@ using FnCustomAttrsGetAttr = void* (*)(void* ainfo, void* attrKlass);
 using FnCustomAttrsFree = void (*)(void* ainfo);
 using FnStringLength = int32_t (*)(void* str);
 using FnStringChars = const wchar_t* (*)(void* str);
+// GC 线程登记（soft）——只给文末 GcThreadScope 用，它自持指针、不进 Exports（见那里的注释）。
+using FnThreadCurrent = void* (*)();
+using FnThreadAttach = void* (*)(void* domain);
+using FnThreadDetach = void (*)(void* thread);
 
 struct Exports {
     HMODULE ga = nullptr;
@@ -182,5 +188,33 @@ bool ManagedAllocSafe();
 void* AllocObject(void* klass);          // guarded il2cpp_object_new
 void* NewString(const char* utf8);       // guarded il2cpp_string_new
 bool RuntimeClassInit(void* klass);      // guarded il2cpp_runtime_class_init
+
+// 上面三个守卫只挡显式分配，挡不住 class_from_name / class_get_methods 这类**查询** API
+// 内部的隐式分配 —— 装泵前必须在 worker 上做这些查询，绕不开（泵没装好就没有主线程入口）。
+// 未向运行时登记的线程上一旦触发回收，GC 扫不到它的栈，Unity 直接 Abort 并写出
+// `<游戏名>.gc.log = Collecting from unknown thread`（2026-08-12 23:47:21 冷启动实测：
+// 装泵后 167 ms 命中，弹框中止，重开一次即恢复 —— 纯时序赌博）。
+//
+// 作用域内把本线程登记进 GC，出作用域立刻摘除（不常驻，少一份托管线程表里的痕迹）。
+// 泵线程与游戏自有线程本就已登记，构造时探到即整体 no-op：不重复 attach，更不误 detach。
+class GcThreadScope {
+public:
+    // enable=false 时整体 no-op（调用方没有查询要做时别白付一次托管分配）。
+    explicit GcThreadScope(bool enable = true);
+    ~GcThreadScope();
+    GcThreadScope(const GcThreadScope&) = delete;
+    GcThreadScope& operator=(const GcThreadScope&) = delete;
+
+    bool Attached() const { return attached_; }  // 本作用域真的做了 attach
+    bool Visible() const { return visible_; }    // 线程当前对 GC 可见（原本就在 或 刚 attach）
+
+private:
+    // 自持 detach 指针：本作用域刻意不走 Ensure()/Exports —— Ensure() 内部的
+    // UpgradeUnityManagedFns 自己就要做托管查询，那正是本作用域要保护的东西，顺序不能反。
+    FnThreadDetach detach_ = nullptr;
+    void* thread_ = nullptr;
+    bool attached_ = false;
+    bool visible_ = false;
+};
 
 }  // namespace x::runtime::il2cpp

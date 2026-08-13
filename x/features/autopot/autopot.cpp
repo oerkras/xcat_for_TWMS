@@ -310,11 +310,11 @@ void Tick(DWORD now) {
             if (countStreak) {
                 gHpLastEmptyStreakAt = now;
                 if (++gHpEmptyStreak >= config::kFailStreakLimit) {
-                    // empty = 游戏 CD/拒用：只软退避，不 heal-stuck（危急仍可破软退避）。
-                    gHpBackoffUntil = now + config::kEmptyPotBackoffMs;
+                    // 只加长 empty-CD（危急不可破）；不软退避/heal-stuck，避免非危急空窗 8s。
+                    gHpEmptyCdUntil = now + config::kEmptyStreakCooldownMs;
                     x::runtime::LogW("AutoPot",
-                                     "hp use empty streak → soft-backoff %us (no heal-stuck)",
-                                     config::kEmptyPotBackoffMs / 1000);
+                                     "hp use empty streak → empty-cd %ums (no soft-backoff)",
+                                     config::kEmptyStreakCooldownMs);
                     if (hpEmergency && hpPct > 1) FirePotionKeyFallback(true);
                     gHpEmptyStreak = 0;
                 } else {
@@ -366,11 +366,11 @@ void Tick(DWORD now) {
             if (countStreak) {
                 gMpLastEmptyStreakAt = now;
                 if (++gMpEmptyStreak >= config::kFailStreakLimit) {
-                    // empty = 游戏 CD/拒用：只软退避，不 heal-stuck（危急仍可破软退避）。
-                    gMpBackoffUntil = now + config::kEmptyPotBackoffMs;
+                    // 只加长 empty-CD（危急不可破）；不软退避/heal-stuck，避免非危急空窗 8s。
+                    gMpEmptyCdUntil = now + config::kEmptyStreakCooldownMs;
                     x::runtime::LogW("AutoPot",
-                                     "mp use empty streak → soft-backoff %us (no heal-stuck)",
-                                     config::kEmptyPotBackoffMs / 1000);
+                                     "mp use empty streak → empty-cd %ums (no soft-backoff)",
+                                     config::kEmptyStreakCooldownMs);
                     if (mpEmergency && mpPct > 1) FirePotionKeyFallback(false);
                     gMpEmptyStreak = 0;
                 } else {

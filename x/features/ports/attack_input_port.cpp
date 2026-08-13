@@ -20,6 +20,7 @@
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/il2cpp_bind.h"
+#include "../../runtime/il2cpp_metadata_lock.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
@@ -30,6 +31,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -225,7 +227,7 @@ MethodInfoHead* gMiFuncKeyCtor = nullptr;
 MethodInfoHead* gMiSetInput = nullptr;
 
 void* gAttackFk = nullptr;  // pinned FuncKey（优先 A 键绑定）
-uint32_t gAttackFkGc = 0;
+uintptr_t gAttackFkGc = 0;
 int32_t gResolvedUnityKey = 0;
 int32_t gResolvedFkType = -1;
 int32_t gResolvedFkValue = -1;
@@ -557,39 +559,43 @@ bool EnsureFkmOnMain() {
 }
 
 void ClearAttackFk() {
-    if (gAttackFkGc) {
-        const auto& e = x::runtime::il2cpp::Get();
-        if (e.gcHandleFree) {
-            __try {
-                e.gcHandleFree(gAttackFkGc);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-            }
-        }
-        gAttackFkGc = 0;
-    }
+    // 先摘句柄再 free，避免同泵重入 / SEH 路径二次 free。
+    const uintptr_t h = gAttackFkGc;
+    gAttackFkGc = 0;
     gAttackFk = nullptr;
     gResolvedUnityKey = 0;
     gResolvedFkType = -1;
     gResolvedFkValue = -1;
     gFkSynthetic = false;
     gLastFkResolveMs = 0;
+    if (!h) return;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.gcHandleFree) return;
+    __try {
+        e.gcHandleFree(h);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread("attack.gcHandleFree");
+    }
 }
 
 bool PinAttackFk(void* fk) {
     if (!LooksLikeHeapPtr(fk)) return false;
     const auto& e = x::runtime::il2cpp::Get();
     if (!e.gcHandleNew) {
+        ClearAttackFk();
         gAttackFk = fk;
         gAttackFkGc = 0;
         return true;
     }
-    uint32_t h = 0;
+    uintptr_t h = 0;
     __try {
         h = e.gcHandleNew(fk, false);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread("attack.gcHandleNew");
         h = 0;
     }
     if (!h) {
+        ClearAttackFk();
         gAttackFk = fk;
         gAttackFkGc = 0;
         return true;

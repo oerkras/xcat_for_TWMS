@@ -39,7 +39,7 @@
 | `DropPool._mapDrop` | `+0x20` | `fa870d8b…` |
 | `Drop.Pt1` | `+0x20` | `ccb092d6…` |
 | `Drop.Id` | `+0x30` | `daf6f448…` |
-| `Drop.OwnType` | `+0x3C` | `c73669eb…` |
+| `Drop.OwnType` | `+0x3C`（ByPetParity 死钉） | CMS `da3077a0…` 在 TW 易误钉 Id；`mov [rdi+3Ch]` cmp User=0 |
 | `Drop.IsMoney` | `+0x44` | `fd049595…` |
 | `Drop.Info` | `+0x48` | `b3fb2cdb…` |
 | `Drop.EndParabolicMotion` | `+0x7C` | `f24df618…` |

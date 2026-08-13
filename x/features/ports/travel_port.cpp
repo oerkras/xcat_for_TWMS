@@ -11,6 +11,7 @@
 #include "world_port.h"
 #include "../invuln/invuln.h"
 #include "../simple_combat/heli_rotor.h"
+#include "../soft_login_probe/soft_login_probe.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_mapdata.h"
@@ -343,6 +344,8 @@ constexpr float kStickNearR = 72.f;
 // 到位：Station → hold（停 Move + 卸 Travel ban 落地）→ ↑（禁止掠过即火）。
 constexpr DWORD kImpactStickMaxMs = 14000;  // 含 settle + hold + pre-fire land
 constexpr DWORD kImpactStickPollMs = 16;  // 对齐 combat tick；heli 内部 ~90ms 发射闸
+// 摘台前等 soft_login 静默闸放行的上限；到点仍未开就照旧起飞（宁可掉一下也别卡死行程）。
+constexpr DWORD kDetachQuietWaitMaxMs = 2000;
 constexpr float kHeliCruiseRadius = 140.f;  // 与 simple_combat PublishHeliSetpoint 同口径
 // Station 滞后：进入 ≤enter；退出须 >enter+slack（对齐打怪「一次运动到站」）。
 constexpr float kTravelStationEnterR = kHeliCruiseRadius;
@@ -352,10 +355,13 @@ constexpr float kPortalStationDy = 15.f;    // = simple_combat::kHeliStationDy
 // 贴门瞄准相对站立点再抬高（AbsPos：更大 Y = 更高，远离掉落方向）。
 // BIN：aimY-= 会把点压到台下 → 无限掉（east01 aim -389 / ap -735）。
 constexpr float kPortalAimLiftY = 24.f;
-constexpr float kPortalSettleSpeed = 80.f;  // 近站合速（进 hold 前还要过竖速/贴高）
+constexpr float kPortalSettleSpeed = 80.f;  // 近站合速（进 hold 前还要过横/竖速与贴高）
 constexpr DWORD kPortalSettleMaxMs = 2500;  // 进框后最多等多久；超时仍须 bleed 才卸推
 // 进 hold 前「门边刹住」：高门 BIN 常带 v.y=64~125 就 Disarm → 掉出框 abort×2~3。
-constexpr float kPortalHoldEnterVy = 35.f;  // 竖速硬门槛（对齐发门合速）
+constexpr float kPortalHoldEnterVy = 35.f;  // 竖速硬门槛
+// BIN 02:44：10X 贴门 hold 时仍 vx≈60 → Disarm 后甩上台。合速≤80 挡不住单轴横冲。
+// 横速也收干净再卸推；**不**开 hold zero-vel（kill-switch 仍在）。
+constexpr float kPortalHoldEnterVx = 30.f;
 // bleed 贴「台面 Y」(Snap/portal.y)，禁止对抬高后的 aimY。
 // BIN 07:09：aim=portal+24 / ap 在台下 → dy 对 aim 永远 >20 → 悬空掉落 NOT_STOOD。
 // 台下常见 |ap.y-landY|≈30~40，故带宽 > lift，避免永远进不了 hold。
@@ -1688,8 +1694,33 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                              ports::fly_fh_ban::ActiveMask());
         }
     } fhBan;
-    fhBan.Arm();
+    // 先拿旋翼、确认静默闸已放行，再摘台——反过来就是自由落体：
+    // soft_login 静默期 heli::Tick 整拍 return false（guard=soft_hold / soft_land_quiet），
+    // 而 fhBan.Arm() 的 detach=1 会立刻把人从台上摘下来，没人托就一路掉到底。
+    // BIN 2026-08-12 勇士之村 102000000：回城卷换图的 session churn 误触 soft hold，
+    // detach 后 ap 从 -1258 垂直掉到 -1588（330px，X 零位移），0.65s 后闸开才横飞贴门。
+    // 只等 IsHoldActive：真正整拍闸死 Travel 冲量的只有 soft_hold；land_quiet 那半段在
+    // 摘台后 onFh=0，heli::Tick 照常算冲量。BIN 2026-08-13 00:31:10 实测 quiet=1（仅
+    // land_quiet）时摘台，300ms 后就正常横飞到位——用 IsGameplayQuiet 会白等满 2000ms。
     (void)heli::TryAcquire(heli::Owner::Travel);
+    {
+        const DWORD gateT0 = GetTickCount();
+        bool waited = false;
+        while (x::features::soft_login_probe::IsHoldActive()) {
+            if (GetTickCount() - gateT0 >= kDetachQuietWaitMaxMs) break;
+            if (!world::IsInMapScene() || !world::IsPlayReady()) break;
+            waited = true;
+            Sleep(kImpactStickPollMs);
+        }
+        if (waited) {
+            x::runtime::LogI("Travel",
+                             "heli stick detach wait hold name=%s waited=%ums hold=%d",
+                             portal.name.c_str(),
+                             static_cast<unsigned>(GetTickCount() - gateT0),
+                             x::features::soft_login_probe::IsHoldActive() ? 1 : 0);
+        }
+    }
+    fhBan.Arm();
 
     const DWORD t0 = GetTickCount();
     DWORD settleSince = 0;
@@ -1835,7 +1866,9 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             const bool nearDeckY = std::fabs(py - landY) <= kPortalHoldEnterDy;
             // py >= landY - belowMax：禁止 hold@台下再卸推掉穿。
             const bool onOrAboveDeck = py >= (landY - kPortalHoldBelowMax);
-            const bool bleedOk = std::fabs(liveVy) <= kPortalHoldEnterVy && nearDeckY &&
+            // bleed：竖速 + 横速都收住再 Disarm（禁 hold 硬刹；横速门槛防 10X 甩台）。
+            const bool bleedOk = std::fabs(liveVy) <= kPortalHoldEnterVy &&
+                                 std::fabs(liveVx) <= kPortalHoldEnterVx && nearDeckY &&
                                  onOrAboveDeck;
             const bool settleTimeout =
                 settleSince != 0 && (now - settleSince) >= kPortalSettleMaxMs;
@@ -1866,11 +1899,11 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                     x::runtime::LogI(
                         "Travel",
                         "heli stick bleed wait name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
-                        "landY=%.0f v=(%.0f,%.0f) needVy<=%.0f |ap.y-landY|<=%.0f "
-                        "aboveDeck(py>=landY-%.0f)=%d (no zero-vel)",
+                        "landY=%.0f v=(%.0f,%.0f) need|vx|<=%.0f need|vy|<=%.0f "
+                        "|ap.y-landY|<=%.0f aboveDeck(py>=landY-%.0f)=%d (no zero-vel)",
                         portal.name.c_str(), px, py, aimX, aimY, landY, liveVx, liveVy,
-                        kPortalHoldEnterVy, kPortalHoldEnterDy, kPortalHoldBelowMax,
-                        onOrAboveDeck ? 1 : 0);
+                        kPortalHoldEnterVx, kPortalHoldEnterVy, kPortalHoldEnterDy,
+                        kPortalHoldBelowMax, onOrAboveDeck ? 1 : 0);
                 }
             } else if (!holdPhase && inTrigNow && settleTimeout && bleedOk && stOk) {
                 holdPhase = true;

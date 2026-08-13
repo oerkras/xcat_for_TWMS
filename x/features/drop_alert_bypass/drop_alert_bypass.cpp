@@ -49,10 +49,13 @@ size_t gOffAlertAt = kFbAlertAt;
 #define kOffAlertAt (gOffAlertAt)
 bool gAlertFieldTried = false;
 
-constexpr DWORD kTickMsOn = 32;   // dense like 枫星 gate4 maintain
+constexpr DWORD kTickMsApply = 32;   // 非 0 / 未攒够零拍：快清
+constexpr DWORD kTickMsHold = 1000;  // 连续多拍已是 0：慢校验（减挂机空转）
 constexpr DWORD kTickMsOff = 500;
 constexpr DWORD kInstallRetryMs = 5000;
 constexpr DWORD kLogClearMs = 3000;
+// 连续 before==0 达到此拍数才进入 1s hold，避免「刚清→hold→下一刀刷戳→最长 1s 拒丢」
+constexpr int kHoldAfterZeroStreak = 8;  // ~8×32ms ≈ 256ms 稳住后再慢扫
 
 // 短 IsAlertMode 机码结构指纹（防漂到 CFF 兄弟 / 字段改偏）
 //   B8 xx xx xx xx          mov eax, imm32（种子解混淆后语义常变，不钉死 IMM）
@@ -81,6 +84,9 @@ std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gWorker{nullptr};
 std::atomic<uint32_t> gMiHits{0};
 std::atomic<uint32_t> gClearHits{0};
+// Worker-only：连续多拍字段为 0 后才 hold；出刀刷戳立刻退回快拍。
+bool gHolding = false;
+int gZeroStreak = 0;
 
 MethodInfoHead* gMi = nullptr;
 MethodInfoHead* gMiIsAlertMode = nullptr;
@@ -457,14 +463,21 @@ void UninstallMi() {
 
 // Primary path: expire LocalUser+0x114 so thin IsAlertMode returns false.
 // Shape gate: 机码不像「mov+add eax,[rip] + cmp [rcx+alertOff]」则拒绝写字段（防漂）。
+// Hold：连续 kHoldAfterZeroStreak 拍已是 0 才慢扫；非 0 清零并重置 streak（防 1s 窗口拒丢）。
 bool MaintainAlertField(DWORD now) {
     ports::player_combat::CombatCtx ctx{};
-    if (!ports::player_combat::QueryCombatCtx(ctx) || !ctx.localUser) return false;
+    if (!ports::player_combat::QueryCombatCtx(ctx) || !ctx.localUser) {
+        gHolding = false;
+        gZeroStreak = 0;
+        return false;
+    }
 
     EnsureAlertFieldOff();
     (void)EnsureIsAlertModeMi();
     const AlertShape shape = RefreshAlertShape(false);
     if (shape != AlertShape::Ok) {
+        gHolding = false;
+        gZeroStreak = 0;
         if (!gLastClearLog || now - gLastClearLog >= kLogClearMs) {
             gLastClearLog = now;
             ReportDropAlertLamp();
@@ -475,20 +488,44 @@ bool MaintainAlertField(DWORD now) {
     int before = 0;
     __try {
         before = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ctx.localUser) + kOffAlertAt);
-        *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ctx.localUser) + kOffAlertAt) = 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        gHolding = false;
+        gZeroStreak = 0;
         return false;
     }
 
-    // 禁 worker 直调 IsAlertMode（托管入口 → GC unknown thread）。字段清零即主路径；
-    // 读回校验留给游戏主线程自己的 IsAlertMode。
+    if (before == 0) {
+        if (gZeroStreak < kHoldAfterZeroStreak) ++gZeroStreak;
+        gHolding = (gZeroStreak >= kHoldAfterZeroStreak);
+        if (!gLastClearLog || now - gLastClearLog >= kLogClearMs) {
+            gLastClearLog = now;
+            x::runtime::LogI("DropAlert",
+                             "hold-cand +0x%zX=0 streak=%d/%d holding=%d miHits=%u clears=%u "
+                             "shape=%u",
+                             kOffAlertAt, gZeroStreak, kHoldAfterZeroStreak, gHolding ? 1 : 0,
+                             gMiHits.load(), gClearHits.load(), static_cast<unsigned>(shape));
+            ReportDropAlertLamp();
+        }
+        return true;
+    }
+
+    gZeroStreak = 0;
+    __try {
+        *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ctx.localUser) + kOffAlertAt) = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        gHolding = false;
+        return false;
+    }
+
+    gHolding = false;
+    // 禁 worker 直调 IsAlertMode（托管入口 → GC unknown thread）。字段清零即主路径。
     gClearHits.fetch_add(1, std::memory_order_relaxed);
     if (!gLastClearLog || now - gLastClearLog >= kLogClearMs) {
         gLastClearLog = now;
         x::runtime::LogI("DropAlert",
-                         "field clear +0x114 was=%d miHits=%u clears=%u alertMi=%d shape=%u",
-                         before, gMiHits.load(), gClearHits.load(), gMiIsAlertMode ? 1 : 0,
-                         static_cast<unsigned>(shape));
+                         "field clear +0x%zX was=%d miHits=%u clears=%u alertMi=%d shape=%u",
+                         kOffAlertAt, before, gMiHits.load(), gClearHits.load(),
+                         gMiIsAlertMode ? 1 : 0, static_cast<unsigned>(shape));
         ReportDropAlertLamp();
     }
     return true;
@@ -496,16 +533,20 @@ bool MaintainAlertField(DWORD now) {
 
 DWORD WINAPI Worker(LPVOID) {
     x::runtime::LogI("DropAlert",
-                     "worker start — data-plane LocalUser+0x114 (IsAlertMode); MI secondary");
+                     "worker start — data-plane +0x%zX hold/apply; MI secondary", kOffAlertAt);
     for (int i = 0; i < 400 && !gStop.load() && !GetModuleHandleW(L"GameAssembly.dll"); ++i)
         Sleep(50);
     Tick(GetTickCount());
     while (!gStop.load()) {
         const bool on = gDesired.load();
         Tick(GetTickCount());
-        Sleep(on ? kTickMsOn : kTickMsOff);
+        DWORD sleepMs = kTickMsOff;
+        if (on) sleepMs = gHolding ? kTickMsHold : kTickMsApply;
+        Sleep(sleepMs);
     }
     UninstallMi();
+    gHolding = false;
+    gZeroStreak = 0;
     x::runtime::LogI("DropAlert", "worker stop miHits=%u clears=%u", gMiHits.load(),
                      gClearHits.load());
     return 0;
@@ -555,7 +596,11 @@ bool IsInstalled() {
 }
 
 void Tick(DWORD now) {
-    if (!gDesired.load()) return;
+    if (!gDesired.load()) {
+        gHolding = false;
+        gZeroStreak = 0;
+        return;
+    }
 
     (void)MaintainAlertField(now);
 

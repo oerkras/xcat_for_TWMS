@@ -10,14 +10,15 @@
 | 项 | 值 | 证据 |
 |---|---|---|
 | UI | `UIShopDialog` | 类哈希同 P0a |
-| 充值入口（产品） | `SendRechargeRequestPacket()` RVA **`0x54E1B0`** | dump 哈希 `c0afd922…4497`；IDA 内含 Create+Encode+Send |
+| 充值入口（产品） | `SendRechargeRequestPacket()` RVA **`0x54E1B0`** | dump 哈希 `c86e335c…743e`；IDA 内含 Create+Encode+Send |
 | 确认包装（不用） | `SendRechargeRequest()` RVA `0x549100` | 会弹 YesNo；自动化绕过，直调 Packet |
 | C→S | `UserShopRequest` **= 67** | 与买/卖同源 |
 | 操作码 | Recharge `Encode1(2)` | CMS `Shop.RequestRecharge=2`；IDA Packet 路径 Encode1 后 Encode2(pos) |
 | 选中 | `_sellSelectedIndex` @ **`+0x1AC`** | 与卖出共用卖栏选中 |
 | 卖栏 | `List<Item>` @ **`+0x198`** | 消耗 TAB + `CmpSellItem` 投影 |
 | 忙标记 | `_hasShopRequestSent` @ **`+0x1B4`** | 发包后写 1 |
-| Item DTO | `UintPrice` / `MaxSlotCount` / `Quantity`（明文；meta 解析） | dump TDI 435 |
+| Item DTO | `UintPrice` / `MaxSlotCount`（卖栏常 0）/ `Stock` / **`ItemSlot@0x48`→`nNumber`** | dump TDI 435；Charge 数量真源 = Bundle；`CmpSellItem` 比 `Stock@0x3C` |
+| 满格真源 | **`ItemBundle.nMaxPerSlot@0x4C`**（hash `bfe3de62…8820e`）；次选 `Info.slotMax@0x58`（hash `bca765ba…11322`） | 运行时 `dump.cs` TDI 2002/2031；IDM `_itemBundleItem@0x38` / `_dataTable@0x18`→`info@0x18`；按 itemId 各不相同 |
 | 字段防漂 | `EnsureShopFieldOffsets`：hash/明文 → `field_get_offset`；常量仅 fallback | 日志 `path=meta\|meta-partial\|fallback` |
 
 ## 充值包形（UI 路径；禁止手组旁路）
@@ -35,9 +36,9 @@ NetworkManager.Send        // UI 内发；禁止 Session.Send 旁路 HashSet
 
 1. `ShopReady`  
 2. 切角色区消耗 TAB → `CmpSellItem` 刷新 `_sellItemList@0x198`  
-3. 扫 `2070000…2079999` 且 `Quantity < MaxSlotCount` 且 `UintPrice > 0`  
-4. 估成本 `round(UintPrice * deficit)`；金币不够计入 `skipMeso`  
-5. 选赤字最大且买得起的一行，写 `_sellSelectedIndex` / lastSell  
+3. 扫 `2070000…2079999`：当前量 = `ItemSlot.nNumber`；满格优先 `Item.MaxSlotCount`，否则 **`ItemBundle.nMaxPerSlot@0x4C`**（`ItemDataManager._itemBundleItem`），再否则 `Info.slotMax@0x58`；仅查表失败才退回 500。需 `cur < max` 且 **`UintPrice > 0`**  
+4. 估成本 = **`UintPrice` 整格一口价**（不是 ×deficit；实机补满一堆 150）  
+5. 买得起则优先更便宜（同价取赤字更大），写 `_sellSelectedIndex` / lastSell  
 6. 若 busy → `SHOP_BUSY`（`auto_supply` 下拍重试）  
 7. 主线程调 `SendRechargeRequestPacket()`；每次最多 1 格，行程循环至 `NONE`/`NO_MESO`
 

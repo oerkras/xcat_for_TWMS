@@ -1,6 +1,5 @@
 #include "auto_supply.h"
 
-#include "../auction_town_bypass/auction_town_bypass.h"
 #include "../autopot/autopot.h"
 #include "../fly/fly.h"
 #include "../notify/notify.h"
@@ -35,6 +34,7 @@ std::atomic<bool> gAbortReq{false};
 char gAbortWhy[128]{};
 std::atomic<bool> gReturnReq{false};
 std::atomic<bool> gTripReq{false};
+std::atomic<bool> gRechargeReq{false};
 char gLastFarmMap[64]{};
 }  // namespace shared
 
@@ -47,6 +47,9 @@ std::atomic<bool> gDesired{false};
 char gShopMap[64]{};
 char gShopExclude[64]{};
 char gResolvedNpc[24]{};
+int gShopStockReroute = 0;  // 本趟因「店内无目标货」改道次数
+constexpr int kMaxShopStockReroute = 2;
+int gRefillStockMiss = 0;   // PlanRefills：需要补但店内无货/无价的条目数
 int gEquipTrigger = 0;
 xcat::AutoSupplyConfig gCfg{};
 uint64_t gSeenCfgTick = 0;
@@ -61,6 +64,7 @@ enum class Phase {
     OpeningShop,
     Selling,
     Buying,
+    Charging,  // 已开店：仅飞镖 Charge（一键充值，不关店、不回城）
     ClosingShop,
     Returning,
     Cooldown,
@@ -79,6 +83,7 @@ DWORD gLastCloseShopAttempt = 0;
 DWORD gShopReadySince = 0;
 int gCloseShopAttempts = 0;
 DWORD gScrollAttemptAt = 0;
+DWORD gScrollRetryAfter = 0;  // no_consume 等硬失败：到期前不重发卷
 int gScrollTries = 0;
 bool gTriedScroll = false;
 bool gScrollPendingLand = false;  // 已成功用卷，等换图后再结束用卷阶段
@@ -139,7 +144,8 @@ int gPlannedPrice[kBuySlotCount]{}; // 对应单价，买入时再按实时 meso
 std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gThread{nullptr};
 
-constexpr DWORD kBagPollMs = 2500;
+constexpr DWORD kBagPollMs = 2500;   // 缺药/自定义/饲料低库存监视（主线程扫栏，保持节流）
+constexpr DWORD kBoundPeekMs = 500;  // 绑定药 ID → status → 面板补红/蓝对齐（跟手）
 constexpr DWORD kGotoTimeoutMs = 180000;
 constexpr DWORD kWaitOpenTimeoutMs = 90000;
 constexpr DWORD kSellTimeoutMs = 120000;
@@ -156,10 +162,15 @@ constexpr DWORD kTalkRetryMs = 3500;
 constexpr DWORD kMenuConfirmMs = 900;  // 菜单/Say 推进节流，避免每 tick 连点确定
 constexpr DWORD kShopReadySettleMs = 700;  // 开窗后稍等再卖（BIN: 015D 后立刻卖 → 205）
 constexpr DWORD kBuyRetryMs = 400;
+constexpr DWORD kChargeRetryMs = 80;  // 飞镖 Charge 轻量；BIN 21:20 约 400ms/格偏慢
+// 行程补货内 Charge：LIST_STALE 死等上限（BIN 23:19 魔法森林店 sellListN=0 卡 ~50s）
+constexpr DWORD kBuyChargeStaleMaxMs = 8000;
 constexpr DWORD kCloseShopRetryMs = 400;
 constexpr int kMaxCloseShopAttempts = 8;
 constexpr DWORD kScrollWaitMs = 8000;
-constexpr int kMaxScrollTries = 2;
+// 用卷：最多 3 次（含首次）。no_consume 不立刻 walk，隔 ~1.6s 再试（BIN 23:18 落台后首发偶失败）。
+constexpr int kMaxScrollTries = 3;
+constexpr DWORD kScrollRetryGapMs = 1600;
 constexpr int kInvConsume = 2;
 
 std::mutex gTownMu;
@@ -195,13 +206,10 @@ void LoadTownIds() {
 
 bool IsTownMapIdHeuristic(int mapId) {
     if (mapId <= 0) return false;
-    // 当前图：优先原生 MapDataInfo.IsTown（室内城也准；拍卖绕过强制写时仍用备份原值）。
-    const int cur = ports::travel::CurrentMapId();
-    if (cur > 0 && cur == mapId) {
-        const int native = auction_town_bypass::QueryNativeIsTown();
-        if (native >= 0) return native != 0;
-    }
-    // 非当前图 / IsTown 未采到：室外主城规则 + map_info 城镇表。
+    // 挂机图禁记 / 城镇启发式：只用离线 map_info + 室外主城规则。
+    // 勿用 QueryNativeIsTown——拍卖绕过会把野图 IsTown 强制写成 1；且部分挂机图
+    //（如遺跡發掘地 10103010x）bak/活值也会长期为 1，导致 F5 RecordHangupFarmMap
+    // 误 skip town（BIN 2026-08-12）。
     if (mapId % 1000000 == 0) return true;
     LoadTownIds();
     std::lock_guard<std::mutex> lock(gTownMu);
@@ -232,6 +240,7 @@ void SyncStatus() {
     case Phase::OpeningShop: gStatus.state = TripState::OpeningShop; break;
     case Phase::Selling: gStatus.state = TripState::Selling; break;
     case Phase::Buying: gStatus.state = TripState::Buying; break;
+    case Phase::Charging: gStatus.state = TripState::Buying; break;  // 内部复用 Buying；落盘见 Recharging
     case Phase::ClosingShop:
     case Phase::Returning: gStatus.state = TripState::Returning; break;
     case Phase::Cooldown: gStatus.state = TripState::Cooldown; break;
@@ -249,6 +258,7 @@ void PublishStatusIni() {
     case Phase::OpeningShop: st.state = xcat::kAutoSupplyStateOpeningShop; break;
     case Phase::Selling: st.state = xcat::kAutoSupplyStateSelling; break;
     case Phase::Buying: st.state = xcat::kAutoSupplyStateBuying; break;
+    case Phase::Charging: st.state = xcat::kAutoSupplyStateRecharging; break;
     case Phase::ClosingShop:
     case Phase::Returning: st.state = xcat::kAutoSupplyStateReturning; break;
     case Phase::Cooldown: st.state = xcat::kAutoSupplyStateTripDone; break;
@@ -394,6 +404,7 @@ void FailTrip(const char* why) {
     sellbag::Abort(why);
     ResumeSystems();
     gManualTrip = false;
+    gRechargeReq.store(false, std::memory_order_release);
     gPendingReturnFarm = false;
     gReturnStableSince = 0;
     ClearTripTravelArm();
@@ -901,6 +912,7 @@ bool BeginBuying() {
 void PlanRefillsWithMeso() {
     memset(gPlannedNeed, 0, sizeof(gPlannedNeed));
     memset(gPlannedPrice, 0, sizeof(gPlannedPrice));
+    gRefillStockMiss = 0;
     struct Want {
         int slot = -1;
         int id = 0;
@@ -918,8 +930,11 @@ void PlanRefillsWithMeso() {
         bool inShop = false;
         int price = 0;
         if (!shop::QueryShopBuyOffer(id, inShop, price) || !inShop || price <= 0) {
-            runtime::LogW("AutoSupply", "补货跳过 slot=%d id=%d：店内无货或无价",
-                          static_cast<int>(slot), id);
+            ++gRefillStockMiss;
+            // 首次 miss：dump 买栏，区分「真没货」vs「读栏空/错价」
+            if (gRefillStockMiss == 1) (void)shop::LogBuyShelfSnapshot(id);
+            runtime::LogW("AutoSupply", "补货跳过 slot=%d id=%d：店内无货或无价 inShop=%d price=%d",
+                          static_cast<int>(slot), id, inShop ? 1 : 0, price);
             return;
         }
         wants[n].slot = static_cast<int>(slot);
@@ -1066,6 +1081,8 @@ void TickIdle(DWORD now) {
             return;
         }
         gTripReq.store(false, std::memory_order_release);
+        // 开趟优先：丢掉挂起的一键充，避免回 Idle 后迟到弹「请先开店」
+        gRechargeReq.store(false, std::memory_order_release);
         // 用户显式开趟：取消崩溃续跑，避免先回挂机再卖
         if (gPendingReturnFarm) {
             runtime::LogI("AutoSupply", "manual trip overrides pendingReturn farm=%s",
@@ -1075,12 +1092,33 @@ void TickIdle(DWORD now) {
         }
         gManualTrip = true;
         gShopExclude[0] = 0;
+        gShopStockReroute = 0;
         gCooldownUntil = 0;
         travel::RequestStop();  // 清掉上次 already_there 等陈旧 failKind
         runtime::LogI("AutoSupply", "手动一趟 shop=%s (%s)", gShopMap, msg);
         Publish(notify::NotificationKind::Info, "auto-supply-trip", "补给已接单",
                 "先开趟冷却，再赶路卖装");
         Enter(Phase::Pause, "手动补给：停手并记下挂机图…");
+        return;
+    }
+
+    // 一键充飞镖：需已开店；不赶路、不关店、不回城（与一键卖装同语义）。
+    if (gRechargeReq.load(std::memory_order_acquire)) {
+        if (!ports::world::IsPlayReady() || sellbag::IsBusy() || travel::IsActive()) return;
+        gRechargeReq.store(false, std::memory_order_release);
+        bool ready = false;
+        if (!shop::ShopReady(ready) || !ready) {
+            SetMsg("请先打开 NPC 商店");
+            Publish(notify::NotificationKind::Warning, "auto-supply-charge", "请先打开 NPC 商店",
+                    "打开杂货店后再点一键充值飞镖。");
+            PublishStatusIni();
+            runtime::LogW("AutoSupply", "一键充飞镖：未开店，拒绝");
+            return;
+        }
+        gLastBuyAttempt = 0;
+        runtime::LogI("AutoSupply", "一键充飞镖开始");
+        shop::ResetChargeSession();
+        Enter(Phase::Charging, "飞镖充值中…");
         return;
     }
 
@@ -1110,9 +1148,10 @@ void TickIdle(DWORD now) {
     }
 
     // 绑定药 ID 刷新不依赖补给开关：只要进图 Idle，就写 status 给 GUI 对齐补红/蓝。
+    // 与 kBagPollMs 拆开：面板跟手用短间隔；缺药开趟仍 2.5s 节流。
     if (ports::world::IsPlayReady()) {
         static DWORD sLastBoundPeek = 0;
-        if (!sLastBoundPeek || now - sLastBoundPeek >= kBagPollMs) {
+        if (!sLastBoundPeek || now - sLastBoundPeek >= kBoundPeekMs) {
             sLastBoundPeek = now;
             int hpId = 0, mpId = 0;
             const bool hpOk = consumable::PeekBoundPotionItemId(true, hpId);
@@ -1176,9 +1215,10 @@ void TickIdle(DWORD now) {
         SetMsg(msg[0] ? msg : "自动寻店失败");
         return;
     }
-    gShopExclude[0] = 0;
-    // 并发触发必须全部闭锁：旧 if/else 只关一路，另一路仍 armed 会冷却后空转第二趟。
-    const char* pauseMsg = "停手并记下挂机图…";
+        gShopExclude[0] = 0;
+        gShopStockReroute = 0;
+        // 并发触发必须全部闭锁：旧 if/else 只关一路，另一路仍 armed 会冷却后空转第二趟。
+        const char* pauseMsg = "停手并记下挂机图…";
     if (potionFire || customFire || custom2Fire || feedFire) {
         if (potionFire) {
             gPotionEmptyArmed = false;
@@ -1230,6 +1270,7 @@ void TickIdle(DWORD now) {
     sCustom2LowStreak = 0;
     sFeedLowStreak = 0;
     gManualTrip = false;
+    gRechargeReq.store(false, std::memory_order_release);
     PublishStatusIni();
     Enter(Phase::Pause, pauseMsg);
 }
@@ -1248,6 +1289,7 @@ void TickPause(DWORD now) {
     gTriedScroll = false;
     gScrollTries = 0;
     gScrollAttemptAt = 0;
+    gScrollRetryAfter = 0;
     gScrollPendingLand = false;
     gScrollMapAtUse[0] = 0;
     gPreferDirect = ShouldPreferDirectShop(gLastFarmMap, gShopMap);
@@ -1320,6 +1362,11 @@ void TickGoingTown(DWORD now) {
         }
 
         if (!gTriedScroll && !gScrollPendingLand && !travel::IsActive()) {
+            if (gScrollRetryAfter && static_cast<int>(now - gScrollRetryAfter) < 0) {
+                SetMsg("回城卷未生效，稍后重试…");
+                return;
+            }
+            gScrollRetryAfter = 0;
             // 必须在发包前记下地图：BIN 122ea3 里 ok 日志前 Fly 已到 102000000。
             char before[64]{};
             FillCurrentMapName(before, sizeof(before));
@@ -1359,6 +1406,17 @@ void TickGoingTown(DWORD now) {
                 ReplanAfterScrollLand(cur);
                 return;
             }
+            // no_consume / not_found：同码可再试（不立刻 walk）；耗尽才贴门。
+            ++gScrollTries;
+            if (gScrollTries < kMaxScrollTries) {
+                gScrollRetryAfter = now + kScrollRetryGapMs;
+                runtime::LogW("AutoSupply",
+                              "用回城卷硬失败，%ums 后重试 tries=%d/%d",
+                              (unsigned)kScrollRetryGapMs, gScrollTries, kMaxScrollTries);
+                SetMsg("回城卷未生效，稍后重试…");
+                return;
+            }
+            runtime::LogW("AutoSupply", "用回城卷重试耗尽 tries=%d → walk", gScrollTries);
             gTriedScroll = true;
             gPreferDirect = true;
         }
@@ -1393,6 +1451,30 @@ bool TryRerouteShopAfterOpenMiss(const char* why) {
     gTriedScroll = true;
     gPreferDirect = true;
     Enter(Phase::GoingTown, "改道其他杂货店…");
+    return true;
+}
+
+// 店已开但买栏没有目标药水/饲料：关店排除本店，改去下一家（BIN：勇士村店空计划空回）。
+bool TryRerouteShopAfterStockMiss(const char* why) {
+    if (!gShopMap[0] || gCfg.shopMapName[0]) return false;
+    if (gShopStockReroute >= kMaxShopStockReroute) return false;
+    strncpy_s(gShopExclude, gShopMap, _TRUNCATE);
+    char msg[96]{};
+    if (!ResolveShopTarget(msg, sizeof(msg)) || MapMatchesTarget(gShopMap)) return false;
+    ++gShopStockReroute;
+    runtime::LogW("AutoSupply", "%s（miss=%d reroute=%d），改道 %s npc=%s",
+                  why ? why : "店内无目标货", gRefillStockMiss, gShopStockReroute, gShopMap,
+                  gResolvedNpc);
+    (void)shop::CloseShop();
+    gTalkMissStreak = 0;
+    gWaitOpenNotified = 0;
+    gLastTalkAttempt = 0;
+    gLastMenuAttempt = 0;
+    gShopReadySince = 0;
+    gTriedScroll = true;
+    gPreferDirect = true;
+    gLastBuyAttempt = 0;
+    Enter(Phase::GoingTown, "店内无货，改道…");
     return true;
 }
 
@@ -1479,9 +1561,12 @@ void TickBuyingReal(DWORD now) {
         StartReturnOrDone();
         return;
     }
-    // ConfirmBuy 要轮询到账，不受买入间隔卡住；其它步进仍限频防刷包
-    if (gBuyStep != BuyStep::ConfirmBuy) {
+    // ConfirmBuy 要轮询到账；Charge 用更短间隔（见 Tick 内 kChargeRetryMs）
+    if (gBuyStep != BuyStep::ConfirmBuy && gBuyStep != BuyStep::Charge) {
         if (gLastBuyAttempt && now - gLastBuyAttempt < kBuyRetryMs) return;
+    }
+    if (gBuyStep == BuyStep::Charge) {
+        if (gLastBuyAttempt && now - gLastBuyAttempt < kChargeRetryMs) return;
     }
 
     bool ready = false;
@@ -1523,25 +1608,56 @@ void TickBuyingReal(DWORD now) {
     }
 
     if (gBuyStep == BuyStep::Charge) {
-        gLastBuyAttempt = now;
         if (!gCfg.rechargeStarsEnabled) {
             gBuyStep = BuyStep::PlanRefills;
             return;
+        }
+        static bool sChargeSessArmed = false;
+        static DWORD sChargeStaleSince = 0;
+        static DWORD sChargeArmPhase = 0;
+        if (sChargeArmPhase != gPhaseSince) {
+            sChargeArmPhase = gPhaseSince;
+            sChargeSessArmed = false;
+            sChargeStaleSince = 0;
+        }
+        if (!sChargeSessArmed) {
+            shop::ResetChargeSession();
+            sChargeSessArmed = true;
+            sChargeStaleSince = 0;
         }
         int charged = 0, skipMeso = 0, skipOther = 0;
         std::string err;
         (void)shop::RechargeShurikensInOpenShop(charged, skipMeso, skipOther, err);
         if (err == "SHOP_BUSY" || err == "LIST_STALE") {
+            if (!sChargeStaleSince) sChargeStaleSince = now;
+            if (now - sChargeStaleSince >= kBuyChargeStaleMaxMs) {
+                runtime::LogW("AutoSupply",
+                              "飞镖充值 LIST_STALE/BUSY 超时 %ums → 跳过继续补货",
+                              static_cast<unsigned>(now - sChargeStaleSince));
+                SetMsg("飞镖充值超时，继续补货");
+                Publish(notify::NotificationKind::Warning, "auto-supply-charge", "飞镖充值超时",
+                        "卖栏投影未就绪；已跳过充镖，继续买药。");
+                sChargeSessArmed = false;
+                sChargeStaleSince = 0;
+                gBuyStep = BuyStep::PlanRefills;
+                return;
+            }
+            // 不打节流戳：下拍立刻重试（切 TAB / 忙标记清）
             SetMsg("飞镖充值等待店务…");
             return;
         }
+        sChargeStaleSince = 0;
         if (charged > 0) {
+            gLastBuyAttempt = now;
             SetMsg("飞镖充值已发包，继续…");
             return;  // 下一拍再扫：忙清后充下一格 / 确认已满
         }
-        if (skipMeso > 0)
+        sChargeSessArmed = false;
+        if (skipMeso > 0) {
             SetMsg("飞镖充值金币不足，跳过");
-        else if (err == "NO_SHOP" || err == "UNBOUND" || err == "NO_RPC" || err == "MAIN_TIMEOUT")
+            Publish(notify::NotificationKind::Warning, "auto-supply-charge", "飞镖充值金币不足",
+                    "有未满飞镖但金币不够整格 Charge；继续补货。");
+        } else if (err == "NO_SHOP" || err == "UNBOUND" || err == "NO_RPC" || err == "MAIN_TIMEOUT")
             SetMsg("飞镖充值失败，跳过");
         else
             SetMsg("飞镖充值处理完毕");
@@ -1551,6 +1667,17 @@ void TickBuyingReal(DWORD now) {
 
     if (gBuyStep == BuyStep::PlanRefills) {
         PlanRefillsWithMeso();
+        // 需要补的药/饲料店里全没有 → 改道，勿空趟回挂机（本机 03:18 勇士村复现）
+        if (gRefillStockMiss > 0) {
+            bool anyPlanned = false;
+            for (int i = 0; i < kBuySlotCount; ++i) {
+                if (gPlannedNeed[i] > 0) {
+                    anyPlanned = true;
+                    break;
+                }
+            }
+            if (!anyPlanned && TryRerouteShopAfterStockMiss("补货规划店内无目标货")) return;
+        }
         gBuySlot = BuySlot::Hp;
         gActiveBuyId = 0;
         gBuyNeed = 0;
@@ -1683,6 +1810,85 @@ void TickBuyingReal(DWORD now) {
     StartReturnOrDone();
 }
 
+void TickCharging(DWORD now) {
+    // 一键充飞镖：店内循环 Charge，结束回 Idle（不关店、不回城）。
+    static int sFired = 0;
+    static DWORD sArmPhase = 0;
+    if (sArmPhase != gPhaseSince) {
+        sArmPhase = gPhaseSince;
+        sFired = 0;
+    }
+    if (now - gPhaseSince > 60000) {
+        if (sFired > 0) {
+            SetMsg("飞镖充值完成");
+            Publish(notify::NotificationKind::Info, "auto-supply-charge", "飞镖充值完成",
+                    "已充部分飞镖；余下格投影未刷新已跳过。");
+            Enter(Phase::Idle, "飞镖充值完成");
+        } else {
+            SetMsg("飞镖充值超时");
+            Publish(notify::NotificationKind::Warning, "auto-supply-charge", "飞镖充值超时",
+                    "商店可能卡住；可关店重开后再试。");
+            Enter(Phase::Idle, "飞镖充值超时");
+        }
+        sFired = 0;
+        return;
+    }
+    bool ready = false;
+    if (!shop::ShopReady(ready) || !ready) {
+        SetMsg("商店已关闭");
+        Publish(notify::NotificationKind::Warning, "auto-supply-charge", "商店已关闭",
+                "充飞镖中断；请重新开店后再点。");
+        Enter(Phase::Idle, "商店已关闭");
+        sFired = 0;
+        return;
+    }
+    // 仅成功发包后限频；BUSY/STALE 不打戳，下拍（~200ms）即可重试
+    if (gLastBuyAttempt && now - gLastBuyAttempt < kChargeRetryMs) return;
+
+    int charged = 0, skipMeso = 0, skipOther = 0;
+    std::string err;
+    // 首拍常 LIST_STALE（切消耗 TAB）：同 tick 立刻再扫一次，省掉一整拍空等
+    for (int pass = 0; pass < 2; ++pass) {
+        charged = 0;
+        skipMeso = 0;
+        skipOther = 0;
+        err.clear();
+        (void)shop::RechargeShurikensInOpenShop(charged, skipMeso, skipOther, err);
+        if (err == "LIST_STALE" && pass == 0) continue;
+        break;
+    }
+    if (err == "SHOP_BUSY" || err == "LIST_STALE") {
+        SetMsg("飞镖充值等待店务…");
+        return;
+    }
+    if (charged > 0) {
+        ++sFired;
+        gLastBuyAttempt = now;
+        SetMsg("飞镖充值已发包，继续…");
+        return;  // 下一拍再扫下一格
+    }
+    if (skipMeso > 0) {
+        SetMsg("飞镖充值金币不足");
+        Publish(notify::NotificationKind::Warning, "auto-supply-charge", "飞镖充值金币不足",
+                "有未满飞镖但金币不够 Charge。");
+    } else if (err == "NO_SHOP" || err == "UNBOUND" || err == "NO_RPC" || err == "MAIN_TIMEOUT" ||
+               err == "EXCEPTION") {
+        SetMsg("飞镖充值失败");
+        Publish(notify::NotificationKind::Warning, "auto-supply-charge", "飞镖充值失败",
+                err.c_str());
+    } else if (err == "NONE" || err.empty()) {
+        SetMsg("飞镖充值完成");
+        Publish(notify::NotificationKind::Info, "auto-supply-charge", "飞镖充值完成",
+                sFired > 0 ? "飞镖已充完。" : "无可充飞镖，或已全部充满。");
+    } else {
+        SetMsg("飞镖充值完成");
+        Publish(notify::NotificationKind::Info, "auto-supply-charge", "飞镖充值完成",
+                "消耗栏可充手里剑已处理。");
+    }
+    sFired = 0;
+    Enter(Phase::Idle, gStatus.message[0] ? gStatus.message : "飞镖充值完成");
+}
+
 void TickClosingShop(DWORD now) {
     if (now - gPhaseSince > 30000) {
         FailTrip("关店超时");
@@ -1784,8 +1990,9 @@ void TickReturning(DWORD now) {
 }
 
 void TickCooldown(DWORD now) {
-    // 冷却中点「立即一趟 / 回挂机」：立刻让出，勿干等 45s
-    if (gTripReq.load(std::memory_order_acquire) || gReturnReq.load(std::memory_order_acquire)) {
+    // 冷却中点「立即一趟 / 回挂机 / 一键充飞镖」：立刻让出，勿干等 45s
+    if (gTripReq.load(std::memory_order_acquire) || gReturnReq.load(std::memory_order_acquire) ||
+        gRechargeReq.load(std::memory_order_acquire)) {
         RearmLowStockLatchesAfterTrip("cooldown_abort");
         gCooldownUntil = 0;
         Enter(Phase::Idle, "空闲");
@@ -1801,6 +2008,12 @@ void TickCooldown(DWORD now) {
 
 void TickManualCmds() {
     if (gAbortReq.exchange(false, std::memory_order_acq_rel)) {
+        gRechargeReq.store(false, std::memory_order_release);
+        if (gPhase == Phase::Charging) {
+            // 一键充不关店、不进冷却；停手即回空闲
+            Enter(Phase::Idle, gAbortWhy[0] ? gAbortWhy : "已停止充飞镖");
+            return;
+        }
         if (gPhase != Phase::Idle && gPhase != Phase::Cooldown) {
             FailTrip(gAbortWhy[0] ? gAbortWhy : "用户中止行程");
             return;
@@ -1810,6 +2023,10 @@ void TickManualCmds() {
     }
 
     if (gReturnReq.exchange(false, std::memory_order_acq_rel)) {
+        if (gPhase == Phase::Charging) {
+            gRechargeReq.store(false, std::memory_order_release);
+            Enter(Phase::Idle, "已停止充飞镖");
+        }
         if (gPhase != Phase::Idle && gPhase != Phase::Cooldown) {
             // 打断当前行程，改回图
             travel::RequestStop();
@@ -1844,12 +2061,7 @@ void BootstrapManualSeq(uint32_t seqOnDisk, const char* via) {
                   gHandledManualSeq, via ? via : "?");
 }
 
-bool DiskBusyState(uint32_t state) {
-    return state == xcat::kAutoSupplyStateProbeShopUi || state == xcat::kAutoSupplyStateBuying ||
-           state == xcat::kAutoSupplyStateSelling || state == xcat::kAutoSupplyStateGoingTown ||
-           state == xcat::kAutoSupplyStateOpeningShop || state == xcat::kAutoSupplyStateTripTrading ||
-           state == xcat::kAutoSupplyStateReturning;
-}
+bool DiskBusyState(uint32_t state) { return xcat::AutoSupplyStateIsBusy(state); }
 
 void HotReadConfig() {
     xcat::AutoSupplyConfig cfg{};
@@ -1882,12 +2094,38 @@ void HotReadConfig() {
     if (gCfg.manualSeq != gHandledManualSeq) {
         gHandledManualSeq = gCfg.manualSeq;
         if (gCfg.manualKind == xcat::kAutoSupplyManualTrip) {
+            gRechargeReq.store(false, std::memory_order_release);
             gTripReq.store(true, std::memory_order_release);
             runtime::LogI("AutoSupply", "accept manualTrip seq=%u", gHandledManualSeq);
         } else if (gCfg.manualKind == xcat::kAutoSupplyManualReturnFarm) {
+            gRechargeReq.store(false, std::memory_order_release);
             gReturnReq.store(true, std::memory_order_release);
             runtime::LogI("AutoSupply", "accept manualReturn seq=%u", gHandledManualSeq);
+        } else if (gCfg.manualKind == xcat::kAutoSupplyManualRechargeStars) {
+            if (gPhase != Phase::Idle && gPhase != Phase::Cooldown) {
+                SetMsg("忙碌中，无法充飞镖");
+                Publish(notify::NotificationKind::Warning, "auto-supply-charge", "忙碌中",
+                        "请先等卖装/补给结束，或点「停止动作」。");
+                PublishStatusIni();
+                runtime::LogW("AutoSupply", "reject manualRechargeStars seq=%u phase busy",
+                              gHandledManualSeq);
+            } else if (gTripReq.load(std::memory_order_acquire) ||
+                       gReturnReq.load(std::memory_order_acquire)) {
+                // 已有更高优先级手动指令排队：勿挂起充值以免行程后迟到开火
+                SetMsg("已有其它补给指令，跳过充飞镖");
+                Publish(notify::NotificationKind::Warning, "auto-supply-charge", "已有其它指令",
+                        "请等当前一趟/回挂机完成后再充飞镖。");
+                PublishStatusIni();
+                runtime::LogW("AutoSupply",
+                              "reject manualRechargeStars seq=%u trip/return pending",
+                              gHandledManualSeq);
+            } else {
+                gRechargeReq.store(true, std::memory_order_release);
+                runtime::LogI("AutoSupply", "accept manualRechargeStars seq=%u",
+                              gHandledManualSeq);
+            }
         } else if (gCfg.manualKind == xcat::kAutoSupplyManualStop) {
+            gRechargeReq.store(false, std::memory_order_release);
             gDesired.store(false, std::memory_order_release);
             AbortTrip("用户停止动作");
             gCfg.enabled = 0;
@@ -1915,6 +2153,7 @@ void Tick(DWORD now) {
     case Phase::OpeningShop: TickOpeningShop(now); break;
     case Phase::Selling: TickSelling(now); break;
     case Phase::Buying: TickBuyingReal(now); break;
+    case Phase::Charging: TickCharging(now); break;
     case Phase::ClosingShop: TickClosingShop(now); break;
     case Phase::Returning: TickReturning(now); break;
     case Phase::Cooldown: TickCooldown(now); break;
@@ -1940,8 +2179,10 @@ void Init() {
     gSeenCfgTick = 0;
     gHandledManualSeq = 0;
     gManualSeqBootstrapped = false;
+    gRechargeReq.store(false, std::memory_order_release);
     gShopMap[0] = 0;
     gShopExclude[0] = 0;
+    gShopStockReroute = 0;
     gLastFarmMap[0] = 0;
     gAbortWhy[0] = 0;
     gPendingReturnFarm = false;

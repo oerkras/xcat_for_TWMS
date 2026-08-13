@@ -19,6 +19,10 @@ void SetSourceArmed(BanSource source, bool on);
 // 兼容：等价 SetSourceArmed(BanSource::Fly, armed)。
 void SetArmedBan(bool armed);
 
+// 仅装 CollisionDetect/Float 钩，不抬 BAN、不卸台。
+// 把「改虚表」从「0→开 detach」拆开，避免 F5 热开首刀与首次安装同拍崩窗。
+bool WarmInstall();
+
 bool IsBanActive();
 bool IsInstalled();
 unsigned ActiveMask();

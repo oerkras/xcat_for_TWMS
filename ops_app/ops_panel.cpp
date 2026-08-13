@@ -22,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -1106,6 +1107,46 @@ void FormatMesoDisplay(const std::string& mesoRaw, char* out, size_t outN) {
         std::snprintf(out, outN, "%s%.1f万", sign, scaled);
     else
         std::snprintf(out, outN, "%s%.2f万", sign, scaled);
+}
+
+// 组内背包金累加（十进制串 → ull；忽略空/非数字/负数；溢出夹到 ULLONG_MAX）。
+bool TryParseMesoUll(const std::string& mesoRaw, unsigned long long& outAbs, bool& outNeg) {
+    outAbs = 0;
+    outNeg = false;
+    if (mesoRaw.empty()) return false;
+    std::string digits;
+    digits.reserve(mesoRaw.size());
+    for (size_t i = 0; i < mesoRaw.size(); ++i) {
+        const char c = mesoRaw[i];
+        if (i == 0 && c == '-') {
+            outNeg = true;
+            continue;
+        }
+        if (c >= '0' && c <= '9') digits.push_back(c);
+    }
+    if (digits.empty() || digits.size() > 18) return false;
+    char* end = nullptr;
+    outAbs = std::strtoull(digits.c_str(), &end, 10);
+    return end && *end == '\0';
+}
+
+std::string SumGroupMeso(const OpsState& st, const std::vector<size_t>& members, int* outCounted) {
+    if (outCounted) *outCounted = 0;
+    unsigned long long sum = 0;
+    int counted = 0;
+    for (size_t mi : members) {
+        unsigned long long v = 0;
+        bool neg = false;
+        if (!TryParseMesoUll(st.clients[mi].charMeso, v, neg) || neg) continue;
+        if (sum > (std::numeric_limits<unsigned long long>::max)() - v)
+            sum = (std::numeric_limits<unsigned long long>::max)();
+        else
+            sum += v;
+        ++counted;
+    }
+    if (outCounted) *outCounted = counted;
+    if (counted <= 0) return {};
+    return std::to_string(sum);
 }
 
 ImVec4 AppVersionColor(const OpsState& st, const std::string& ver) {
@@ -2760,22 +2801,19 @@ void DrawClientsPanel(OpsState& st) {
                     for (int col = 6; col <= 8; ++col) {
                         ImGui::TableSetColumnIndex(col);
                         if (col == 6) {
-                            std::string mesos;
-                            int nShow = 0;
-                            for (size_t mi : g.members) {
-                                const auto& m = st.clients[mi];
-                                if (m.charMeso.empty()) continue;
-                                char mesoBuf[32]{};
-                                FormatMesoDisplay(m.charMeso, mesoBuf, sizeof(mesoBuf));
-                                if (nShow > 0) mesos += " / ";
-                                mesos += mesoBuf;
-                                if (++nShow >= 2) {
-                                    if (static_cast<int>(g.members.size()) > nShow) mesos += " …";
-                                    break;
+                            int counted = 0;
+                            const std::string sumRaw = SumGroupMeso(st, g.members, &counted);
+                            if (sumRaw.empty()) {
+                                ImGui::TextDisabled("—");
+                            } else {
+                                char mesoBuf[48]{};
+                                FormatMesoDisplay(sumRaw, mesoBuf, sizeof(mesoBuf));
+                                ImGui::TextUnformatted(mesoBuf);
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip("组内累计 %s\n%d/%zu 台上报", sumRaw.c_str(),
+                                                      counted, g.members.size());
                                 }
                             }
-                            if (mesos.empty()) ImGui::TextDisabled("—");
-                            else ImGui::TextUnformatted(mesos.c_str());
                         } else if (col == 7) {
                             std::string maps;
                             int nShow = 0;

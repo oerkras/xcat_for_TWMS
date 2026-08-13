@@ -11,7 +11,8 @@ namespace xcat {
 // 触发：装备栏达阈值 → 就近可卖店开店 → 先卖装/其他 → 可选补货（店内有则买、无则跳过）→ 回挂机图。
 // 寻店不关心货架内容；补给品类由用户自选（通常选挂机图附近店有的）。
 // 去店：优先回家卷軸 2030000（同名备用 2030059），无卷则 travel；shopMapName 非空则覆盖自动寻店。
-// 飞镖 Charge 字段保留兼容；经典版执行侧暂 stub（UIShop Charge CF 平坦化未钉入口）。
+// 飞镖 Charge：行程内可选（rechargeStarsEnabled）+ 手动「一键充值飞镖」
+// （kAutoSupplyManualRechargeStars，需已开 NPC 店）。
 
 constexpr uint32_t kAutoSupplyMagic   = 0x50555341u;  // 'ASUP'
 constexpr uint32_t kAutoSupplyVersion = 9u;
@@ -53,13 +54,14 @@ constexpr int kAutoSupplyCodeLen      = 24;
 constexpr int kAutoSupplyNameLen      = 64;
 constexpr int kAutoSupplyNameKeyLen   = 40;
 
-constexpr uint32_t kAutoSupplyManualNone       = 0u;
-constexpr uint32_t kAutoSupplyManualProbe      = 1u;  // 只探测当前商店 UI，不执行买卖
-constexpr uint32_t kAutoSupplyManualRun        = 2u;  // 执行一次 ShopUiOnly 买入最小闭环
-constexpr uint32_t kAutoSupplyManualSell       = 3u;  // 执行一次 ShopUiOnly 卖出最小闭环
-constexpr uint32_t kAutoSupplyManualTrip       = 4u;  // 完整一趟：回城→开店→先卖后买
-constexpr uint32_t kAutoSupplyManualReturnFarm = 5u;  // 只回挂机图（不卖不买）
-constexpr uint32_t kAutoSupplyManualStop       = 6u;  // 停止动作：关开关+中止行程/超级赶路/开店
+constexpr uint32_t kAutoSupplyManualNone           = 0u;
+constexpr uint32_t kAutoSupplyManualProbe          = 1u;  // 只探测当前商店 UI，不执行买卖
+constexpr uint32_t kAutoSupplyManualRun            = 2u;  // 执行一次 ShopUiOnly 买入最小闭环
+constexpr uint32_t kAutoSupplyManualSell           = 3u;  // 执行一次 ShopUiOnly 卖出最小闭环
+constexpr uint32_t kAutoSupplyManualTrip           = 4u;  // 完整一趟：回城→开店→先卖后买
+constexpr uint32_t kAutoSupplyManualReturnFarm     = 5u;  // 只回挂机图（不卖不买）
+constexpr uint32_t kAutoSupplyManualStop           = 6u;  // 停止动作：关开关+中止行程/超级赶路/开店
+constexpr uint32_t kAutoSupplyManualRechargeStars  = 7u;  // 已开店：消耗栏飞镖 Charge（不卖不买不回城）
 
 constexpr uint32_t kAutoSupplyOpenRequireAlreadyOpen = 0u;
 constexpr uint32_t kAutoSupplyOpenInteractNpc        = 1u;  // 预留：寻路到 NPC 后交互打开
@@ -90,7 +92,16 @@ constexpr uint32_t kAutoSupplyStateOpeningShop   = 21u;
 constexpr uint32_t kAutoSupplyStateTripTrading   = 22u;  // 本趟先卖后买
 constexpr uint32_t kAutoSupplyStateReturning     = 23u;
 constexpr uint32_t kAutoSupplyStateTripDone      = 24u;
+constexpr uint32_t kAutoSupplyStateRecharging    = 25u;  // 一键/行程内飞镖 Charge
 constexpr uint32_t kAutoSupplyStateError         = 100u;
+
+// GUI / 门禁：进行中不可再点手动卖/充（与 payload DiskBusyState 对齐）。
+inline bool AutoSupplyStateIsBusy(uint32_t state) {
+    return state == kAutoSupplyStateProbeShopUi || state == kAutoSupplyStateBuying ||
+           state == kAutoSupplyStateSelling || state == kAutoSupplyStateGoingTown ||
+           state == kAutoSupplyStateOpeningShop || state == kAutoSupplyStateTripTrading ||
+           state == kAutoSupplyStateReturning || state == kAutoSupplyStateRecharging;
+}
 
 #pragma pack(push, 1)
 struct AutoSupplyBuyRule {

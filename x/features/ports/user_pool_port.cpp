@@ -688,6 +688,31 @@ void* PeekUserLocal() {
 
 void* PeekUserPool() { return gPool; }
 
+bool PeekRemoteUserCount(int* outCount) {
+    if (!outCount) return false;
+    *outCount = 0;
+    // 与 PeekUserLocal 一致：冷路径也 Resolve，避免 gPool 未绑时误判 remotes 失败→独图放行。
+    void* pool = gPool;
+    if (!pool || !LooksLikeUserPool(pool)) pool = ResolveUserPool();
+    if (!pool || !LooksLikeUserPool(pool)) return false;
+    const int n = CountFromPool(pool);
+    if (n < 0) return false;
+    *outCount = n;
+    return true;
+}
+
+bool PeekEnumRemoteUsers(void** out, int cap, int* outCount) {
+    if (outCount) *outCount = 0;
+    if (!out || cap <= 0 || !outCount) return false;
+    void* pool = gPool;
+    if (!pool || !LooksLikeUserPool(pool)) pool = ResolveUserPool();
+    if (!pool || !LooksLikeUserPool(pool)) return false;
+    const int n = EnumFromPool(pool, out, cap);
+    if (n < 0) return false;
+    *outCount = n;
+    return true;
+}
+
 bool ReadUserCharacterName(void* user, char* out, int outSz) {
     return ReadUserCharacterNameLocked(user, out, outSz);
 }

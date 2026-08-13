@@ -223,6 +223,8 @@ constexpr NameEntry kNames[] = {
     {"lie-ok", Id::LiePass},
     {"game-context", Id::GameContextOk},
     {"gc-ok", Id::GameContextOk},
+    {"scroll-drop", Id::ScrollDrop},
+    {"scroll", Id::ScrollDrop},
 };
 
 Id IdFromName(const char* name) {
@@ -261,6 +263,7 @@ const char* IdName(Id id) {
     case Id::RestrictionAlarm: return "restriction-alarm";
     case Id::LiePass: return "lie-pass";
     case Id::GameContextOk: return "game-context";
+    case Id::ScrollDrop: return "scroll-drop";
     default: return "?";
     }
 }

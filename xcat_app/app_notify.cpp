@@ -84,6 +84,7 @@ std::vector<QueuedNotification> g_pending;
 std::mutex g_externalMtx;
 std::vector<QueuedNotification> g_external;
 uint32_t g_lastNotifySoundMs = 0;
+uint32_t g_lastScrollSoundMs = 0;
 uint32_t g_lastPayloadNotifySeq = 0;
 uint32_t g_lastPayloadNotifyEpoch = 0;
 bool g_notifyBacklogSkipped = false;
@@ -115,8 +116,14 @@ bool IsPayloadOwnedAlarmKey(const std::string& key) {
            key == "encounter-gm-threat" || key == "encounter-gm-hop";
 }
 
+bool IsHighValueDropNotifyKey(const std::string& key) {
+    return key.rfind("petloot-scroll", 0) == 0 || key.rfind("petloot-equip", 0) == 0;
+}
+
 bool IsUnmutableCriticalAlarmKey(const std::string& key) {
-    return IsPayloadOwnedAlarmKey(key) || key == "restriction-suspicious-debuff";
+    // 测谎/GM/限制 Debuff：强制响；装备/卷軸掉落叮咚同策略（不被通知静音关掉）
+    return IsPayloadOwnedAlarmKey(key) || key == "restriction-suspicious-debuff" ||
+           IsHighValueDropNotifyKey(key);
 }
 
 bool IsUserDismissSuppressed(const std::string& key, uint32_t now) {
@@ -205,6 +212,17 @@ void PlayNotifySound(uint32_t now, const std::string& key) {
     }
     // payload 已周期播 Alarm：面板侧跳过，只保留 restriction 等面板专责音。
     if (IsPayloadOwnedAlarmKey(key)) return;
+    if (IsHighValueDropNotifyKey(key)) {
+        // 独立节流，不与普通 Notify 抢 g_lastNotifySoundMs；静音开关管不住（见 Unmutable）
+        constexpr uint32_t kScrollThrottleMs = 220u;
+        if (g_lastScrollSoundMs != 0 &&
+            static_cast<int>(now - g_lastScrollSoundMs) < static_cast<int>(kScrollThrottleMs)) {
+            return;
+        }
+        g_lastScrollSoundMs = now;
+        sound::ScrollDrop();
+        return;
+    }
     if (g_lastNotifySoundMs != 0 &&
         static_cast<int>(now - g_lastNotifySoundMs) < static_cast<int>(kNotifySoundThrottleMs)) {
         return;
@@ -499,7 +517,7 @@ bool DrawTopBarMuteToggle(const std::string& prefsBinDir, float buttonH) {
     }
     if (!clicked) {
         ImGui::SetItemTooltip(muted ? "普通通知提示音已关闭；关键警报仍会响。"
-                                    : "点击关闭普通通知提示音；关键警报无法静音。");
+                                    : "点击关闭普通通知提示音；测谎/GM/限制 Debuff/卷軸掉落无法静音。");
         return false;
     }
     if (!SetNotifySoundMuted(prefsBinDir, !muted)) return false;
@@ -516,6 +534,7 @@ void Reset() {
         g_external.clear();
     }
     g_lastNotifySoundMs = 0;
+    g_lastScrollSoundMs = 0;
     g_lastPayloadNotifySeq = 0;
     g_lastPayloadNotifyEpoch = 0;
     g_notifyBacklogSkipped = false;

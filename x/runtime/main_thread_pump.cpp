@@ -539,6 +539,15 @@ bool TryInstallWmUpdate(MethodInfoHead* mi) {
 }
 
 bool InstallPump() {
+    // 下面的 FindClass / ResolveXxxKlass / ResolvePumpMi 全是 class_from_name、
+    // class_get_methods 一类**查询** API，内部会隐式分配；而 Ensure() 跑在 worker 上，
+    // 装泵前也没有主线程入口可用（鸡生蛋）。未登记线程上一旦触发回收就是
+    // "Collecting from unknown thread" 直接 Abort（2026-08-12 23:47:21 实测命中）。
+    // 四根针都到位后不再有查询，此时 no-op，不白付一次托管分配。
+    const bool needLookup =
+        !gMiSendWill || !gMiSceneUpdate || !gMiWmFixedUpdate || !gMiWmUpdate;
+    x::runtime::il2cpp::GcThreadScope gcScope(needLookup);
+
     if (!BindApis()) {
         FailLogThrottled("BindApis fail (wait GameAssembly)");
         return false;

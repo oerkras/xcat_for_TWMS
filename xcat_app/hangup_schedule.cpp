@@ -766,6 +766,7 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     // 契约：软重连已武装并进入观察窗时，守护不得因踢线/无经验/心跳等重拉；
     // 必须等 softLoginResult==2（路径完全失败）或进程已死，才允许干净重拉。
     // 成功上升沿吞掉本轮 disconnectSeq，避免 hold 结束后误重拉。
+    // 尚未进图（awaitingPlayable / !haveStatus）：吞掉选频选角 Session 闪断，勿硬杀。
     bool softHoldBlocksRelaunch = false;
     if (g.sessionArmed && stFresh) {
         const uint32_t softResult = (st.version >= 8u) ? st.softLoginResult : 0u;
@@ -801,8 +802,25 @@ void Tick(LaunchUiState& ui, bool appExiting) {
                         "soft_login hold — defer kick relaunch seq=%u state=%d err=%d",
                         st.disconnectSeq, st.sessionState, st.pendingErrorCode);
                 }
+            } else if ((g.awaitingPlayable || !g.runtime.haveStatus) && !playable &&
+                       !input.reloginHardFailed) {
+                // 尚未进图（选频/选角/加载）：AutoEnter 确认角色时常 Connected→Disconnected 闪断
+                // （upload caa553：verdict=lean_local_or_soft，软重连未开时被硬杀）。
+                // 吞掉本轮 seq；真卡死交给 prePlayableStuck / 冷启超时，不在此干净杀。
+                if (g.lastLoggedDisconnectSeq != st.disconnectSeq) {
+                    g.lastLoggedDisconnectSeq = st.disconnectSeq;
+                    xcat::log::Info(
+                        "Watchdog",
+                        "pre-playable absorb disconnectSeq %u->%u state=%d err=%d "
+                        "(await=%u haveStatus=%u — no clean relaunch)",
+                        g.lastConsumedDisconnectSeq, st.disconnectSeq, st.sessionState,
+                        st.pendingErrorCode, g.awaitingPlayable ? 1u : 0u,
+                        g.runtime.haveStatus ? 1u : 0u);
+                }
+                g.lastConsumedDisconnectSeq = st.disconnectSeq;
             } else if (!input.reloginHardFailed) {
-                // 软未 hold（未武装/未接管）：立即硬失败。已在 result=2 上升沿置位则勿重复刷日志。
+                // 软未 hold（未武装/未接管）且已进过图：立即硬失败。
+                // 已在 result=2 上升沿置位则勿重复刷日志。
                 input.reloginHardFailed = true;
                 input.hardFailCode = xcat::kHardFailServerKick;
                 if (g.lastLoggedDisconnectSeq != st.disconnectSeq) {

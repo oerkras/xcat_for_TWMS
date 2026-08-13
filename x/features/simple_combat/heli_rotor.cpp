@@ -256,6 +256,27 @@ constexpr bool kFullFireApproachBrake = true;
 // 0.15s：进站约多半秒减速尾巴，比撞墙 0.2s 少磨叽。改 0.10 更猛、0.20 更稳。
 constexpr float kFullFireApproachBrakeSec = 0.15f;
 
+// Combat 出刀末段预刹（**不限** 1000%）。满火力预刹只罩 FullFire；常态 Kp 仍会
+// 带着 |vy| 几百撞进紧出刀带。
+//
+// BIN 16:12 停机距仿真：跨层 hold 仍高；再加 safety×2 + 超速归零后，
+// BIN 17:05–17:07 进站/lie_safe_land（同走 Owner::Combat）竖直 des 对拉、体感降落狂抖
+// （ey 未到就 desiredVy=0 → 过冲 → 回拉）。回退为 **err/H 收油**（不归零），死区仍杀残速。
+//
+// BIN 17:09–17:18：抖没了，但 |ey|∈[30,220] 时 90% 的 des 顶在 err/H 上 → 跨层进站
+// p50≈0.66s。作用带 220→100→70：远处满 Kp，末段收油。
+// BIN 21:54–23:20（闸600+带70）：跨层 hold-then-fire≈15%；同层≈0。
+// BIN 00:02–00:18（带120）：跨层 hold 降到 4%，但进站 p50 509→667，体感首刀慢。
+// 折中 **90**：比 70 早收一点油，比 120 少磨末段。
+// ★ 回退整段：改 false。只动 Combat + Cruise/Station，不动 Travel/手动。
+constexpr bool kCombatStrikeApproachBrake = true;
+constexpr float kCombatStrikeBrakeBandY = 90.f;   // 开始收油的 |errY|（远处不咬合）
+constexpr float kCombatStrikeBrakeSec = 0.32f;    // |vy|≤|errY|/H；50px→156、90px→281
+// 死区内残速闸：|st.vy| 超过此值就意图=0（否则滑翔穿死区上下抖）。
+constexpr float kCombatDeadzoneCoastVy = 80.f;
+// Combat 到位软钉：水平窗放宽到站位环量级，避免「Y 已到、X 还差 20」进不了 settle。
+constexpr float kCombatSettleErrX = 40.f;
+
 // 当前持有者。语义见 heli_rotor.h 的 Owner 注释：抢占式，被抢者静默 no-op。
 std::atomic<unsigned> gOwner{static_cast<unsigned>(Owner::None)};
 
@@ -600,10 +621,13 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
         if (out) *out = tm;
         return false;
     }
-    // soft settle / land quiet / NM 已断：禁止任何 Owner 继续发 Impact（752824：settle 窗内仍 Firing
+    // soft settle / land quiet / NM 已断：禁止自动 Owner 继续发 Impact（752824：settle 窗内仍 Firing
     // + heli，约 1.2s 后 Classic 自退；SawDisconnect 粘性不能当闸，只用 GameplayQuiet + 当前态）。
     // BIN 681ebe：soft_land_quiet 已回图；若仍悬空则放行抗重力（落台 Station/Cruise），地上仍禁。
-    if (x::features::soft_login_probe::IsGameplayQuiet()) {
+    // BIN 2026-08-12 主城：soft close_session_inmap 空转 hold；F6 fh-ban 又把 curFh 清 0 →
+    // InMapRecoverConfirmed 永不可达 → soft_hold 永久挡旋翼 → vy=-670 自由落体。
+    // F6 是抢占手动驾驶：soft_hold / soft_land_quiet 不得停其抗重力（Combat/Travel 仍禁）。
+    if (x::features::soft_login_probe::IsGameplayQuiet() && o != Owner::Fly) {
         const bool softHold = x::features::soft_login_probe::IsHoldActive();
         if (softHold || st.onFh) {
             tm.guard = softHold ? "soft_hold" : "soft_land_quiet";
@@ -651,10 +675,13 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     const float errY = sp.y - st.y;
     // 提前判定「到位悬停」：改竖直律 + 节奏；emergency 稍后置位时再关掉加密。
     // 必须吃 SoftSettleEnabled：否则关防抖只拆钉点、软钉仍开 → ImGui 勾选体感无效。
+    // Combat：X 窗放到 kCombatSettleErrX，否则站位环内微调 X 时 Y 进不了软钉、死区对拉。
+    const float settleEx =
+        (o == Owner::Combat) ? kCombatSettleErrX : kSettleErrX;
     const bool settleHoverCand =
         gSoftSettleEnabled.load(std::memory_order_acquire) && !st.onFh &&
         (sp.mode == Mode::Station || sp.mode == Mode::Hold) &&
-        std::fabs(errX) <= kSettleErrX && std::fabs(errY) <= kSettleErrY;
+        std::fabs(errX) <= settleEx && std::fabs(errY) <= kSettleErrY;
 
     float desiredVx = sp.leadVx;
     if (settleHoverCand) {
@@ -722,6 +749,27 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
                     if (desiredVy < room) desiredVy = room;
                 }
             }
+        }
+    }
+
+    // ── Combat Y 进站预刹（全倍率 · err/H）────────────────────────────
+    // 见文件顶部 kCombatStrikeApproachBrake。在 FullFire 预刹之后再夹一次：
+    // 只收油、不把 desired 打成 0（停机距超速归零会进站/落地抖，BIN 17:07）。
+    if (kCombatStrikeApproachBrake && o == Owner::Combat &&
+        (sp.mode == Mode::Cruise || sp.mode == Mode::Station) && !st.onFh &&
+        !settleHoverCand && kCombatStrikeBrakeSec > 1e-4f) {
+        const float absEy = std::fabs(errY);
+        if (absEy > kDeadY && absEy <= kCombatStrikeBrakeBandY) {
+            const float room = errY / kCombatStrikeBrakeSec;  // 与误差同号
+            if (errY > 0.f) {
+                if (desiredVy > room) desiredVy = room;
+            } else {
+                if (desiredVy < room) desiredVy = room;
+            }
+        }
+        // 死区内杀残速（BIN 15:08 限位振荡）。
+        if (absEy <= kDeadY && std::fabs(st.vy) > kCombatDeadzoneCoastVy) {
+            desiredVy = 0.f;
         }
     }
 

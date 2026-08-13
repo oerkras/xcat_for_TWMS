@@ -49,4 +49,6 @@ void Alarm() { xcat::sound::PlayAsync(xcat::sound::Id::Alarm); }
 
 void RestrictionAlarm() { xcat::sound::PlayAsync(xcat::sound::Id::RestrictionAlarm); }
 
+void ScrollDrop() { xcat::sound::PlayAsync(xcat::sound::Id::ScrollDrop); }
+
 }  // namespace xcat::app::sound

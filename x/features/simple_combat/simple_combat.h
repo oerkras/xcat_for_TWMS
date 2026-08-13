@@ -86,11 +86,10 @@ void ReleaseExternalPause();
 // ExternalPause 永远进不去，定时键/BUFF 会 defer 到死（BIN 0.1.40）。
 // 注：现行 SettleMs*=0 时 TP 后进 Aim 不进 Settling，故运行时几乎只剩 map arm。
 bool IsTeleportTransit();
-// 吸物时分复用：未挂机恒 true；挂机中仅 Aim/Firing/Recover 为 false。
-// MoveTo（含拟人）/Settling/Acquire/Idle 放行（0b66c7：拟人禁吸会漏地上物）。
-// pet_loot 据此开门；勿与 IsTeleportTransit 混用。
+// 吸物时分复用：未挂机恒 true；挂机中仅 Firing 为 false（Aim/Recover 也吸）。
+// MoveTo（含拟人）/Settling/Acquire/Idle 放行。pet_loot 据此开门；勿与 IsTeleportTransit 混用。
 bool IsLootPulseActive();
-// 脉冲代数：pet_loot 边沿检测用（离开出刀链 / Settling 武装时递增）。
+// 脉冲代数：pet_loot 边沿检测用（进 Aim/Recover/Settling / 离开 Firing 时递增）。
 uint32_t LootPulseGeneration();
 // 多发：普攻 OnFuncKey 真正成功时再武装空刀观察（勿在 TryCast 排程时记账）。
 void NotifyMultiNormalAttackFired();
@@ -108,6 +107,10 @@ void RequestTeleportKickStressFine10();
 void RequestTeleportKickStressLocal();
 void StopTeleportKickStress();
 bool IsTeleportKickStressActive();
+
+void SetHighValueLootUrgent(bool on);
+// 高价值紧急拾取中：IsLootPulseActive 恒 true，并短暂停刀（ExternalPause）。
+bool IsHighValueLootUrgent();
 
 void Tick(DWORD nowMs);
 
