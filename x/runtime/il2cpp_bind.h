@@ -17,9 +17,9 @@
 namespace x::runtime::il2cpp {
 
 // UnityEngine.Object / Component — shared across ports (TW Classic dump).
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E4EF20;  // remounted 2026-08-06 Resources.FindObjectsOfTypeAll(Type)
-constexpr uint32_t kRvaCompGetGo = 0x4E57300;              // remounted 2026-08-06 Component.get_gameObject
-constexpr uint32_t kRvaObjGetName = 0x4E64260;             // remounted 2026-08-06 Object.get_name
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E889D0;  // remounted 2026-08-06 Resources.FindObjectsOfTypeAll(Type)
+constexpr uint32_t kRvaCompGetGo = 0x4E90DB0;              // remounted 2026-08-06 Component.get_gameObject
+constexpr uint32_t kRvaObjGetName = 0x4E9DD10;             // remounted 2026-08-06 Object.get_name
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
 using FnCompGo = void* (*)(void* comp, void* methodInfo);

@@ -268,6 +268,9 @@ std::atomic<uint32_t> gHardPauseMask{0};      // HardPauseHolder 位或
 std::atomic<int> gExternalPauseDepth{0};      // buffs / timed_keys 可重叠
 DWORD gMapArmUntilMs = 0;
 DWORD gEnableHoldUntilMs = 0;  // 0=无；与 TickImpl 同源 NowMs
+// F5 开后默认不武装旋翼。BIN 16:17:13：hold 300ms 后仍贴身 v=0 打 SetImpactNext(-160,80) 崩。
+// 要飞（MoveTo）或开 F5 时已经离台，才 latch；换怪不重置。
+bool gHeliLatchedThisEnable = false;
 int gLastMapId = -1;
 // encounter ResetForMapChange 与 combat mapId 边沿会各调一次 OnCombatMapChange；
 // 同图短窗内第二次会 RestartLieSafeLand 拆掉 catch → 旋翼抖振（review 686e3f）。
@@ -1728,10 +1731,32 @@ bool LandSafeForFill(float x, float y, uint32_t fhId = 0) {
     return true;
 }
 
+void LatchCombatHeli(const char* why) {
+    if (gHeliLatchedThisEnable) return;
+    gHeliLatchedThisEnable = true;
+    LogLine("heli latch why=%s (impact armed for this F5 session)", why ? why : "?");
+}
+
+bool MoveToShouldArmHeli(const char* why) {
+    if (!why || !*why) return false;
+    // 只在「真要飞」时 latch。纠位 why（heli_strike_close 等）不进：贴身站着再 BAN 会崩。
+    return std::strcmp(why, "impact_approach") == 0 || std::strcmp(why, "heli_cross") == 0 ||
+           std::strcmp(why, "heli_fire_gate") == 0 || std::strcmp(why, "need_approach") == 0 ||
+           std::strcmp(why, "heli_reapproach") == 0;
+}
+
 bool TryEnterMoveTo(DWORD now, const char* why) {
     // Impact / 拟人：不查瞬移 NativeCD（速率在 MoveTo 内自管）。
     if (gImpactApproachEnabled.load(std::memory_order_acquire) ||
         gHumanWalkEnabled.load(std::memory_order_acquire)) {
+        if (gImpactApproachEnabled.load(std::memory_order_acquire)) {
+            if (MoveToShouldArmHeli(why)) {
+                LatchCombatHeli(why ? why : "MoveTo");
+            } else if (!gHeliLatchedThisEnable) {
+                // 贴身地面快路径：够砍就不要为了纠位去武装旋翼（BIN 16:17:13）。
+                return false;
+            }
+        }
         EnterState(State::MoveTo, now, why);
         return true;
     }
@@ -2789,6 +2814,7 @@ bool InCombatEnableHold(DWORD now) {
 
 bool HeliBaseArmed() {
     if (InCombatEnableHold(x::runtime::NowMs())) return false;
+    if (!gHeliLatchedThisEnable) return false;
     return gEnabled.load(std::memory_order_acquire) &&
            gImpactApproachEnabled.load(std::memory_order_acquire) &&
            gHardPauseMask.load(std::memory_order_acquire) == 0 &&
@@ -4917,6 +4943,16 @@ void TickImpl(DWORD now) {
             if (impactOn) {
                 if (HeliStrikeOk(player.x, player.y, gLock.x, gLock.y,
                                  /*firstLock=*/gLock.lockFires == 0)) {
+                    ports::teleport::FlightState st{};
+                    const bool airborne = ports::teleport::QueryFlightState(st) && st.ok &&
+                                          !st.onFh;
+                    if (airborne) {
+                        LatchCombatHeli("airborne_strike");
+                    } else if (!gHeliLatchedThisEnable) {
+                        LogLine("ground melee skip heli id=%d d=(%.0f,%.0f) "
+                                "(no SetImpactNext until MoveTo)",
+                                gLock.id, gLock.x - player.x, gLock.y - player.y);
+                    }
                     EnterState(State::Aim, now, "heli_strike");
                     break;
                 }
@@ -5866,6 +5902,24 @@ void TickImpl(DWORD now) {
                 }
             }
 
+            // BIN edfbf1 / 16:17:13：CombatImpact 已卸 CurFh、ma 仍是 4/5 Stand 时
+            // 再 OnFuncKey → 引擎按站立解空台，约 300ms 停写。贴身不飞时 BAN 不应在；
+            // 这是漏 latch 时的硬闸。ma=6/7 空中或 BAN 已卸则放行。
+            if ((ports::fly_fh_ban::ActiveMask() &
+                 static_cast<unsigned>(ports::fly_fh_ban::BanSource::CombatImpact)) != 0) {
+                int standMa = -1, standWhy = -1;
+                ports::attack::FaceDebug(&standMa, &standWhy);
+                if (standMa == 4 || standMa == 5) {
+                    static DWORD sStandBan = 0;
+                    if (!sStandBan || now - sStandBan > 400) {
+                        sStandBan = now;
+                        LogLine("fire defer stand_fhban ma=%d (wait airborne or BAN off)",
+                                standMa);
+                    }
+                    break;
+                }
+            }
+
             const int hpBefore = gLock.lastHp;
             bool ok = false;
 
@@ -6249,6 +6303,7 @@ void SetEnabled(bool on) {
         gSettleUntil = 0;
         gNeedEnableFaceSettle.store(false, std::memory_order_release);
         gEnableHoldUntilMs = 0;
+        gHeliLatchedThisEnable = false;
         heli::Reset();
         gHeliAirborneUntilMs = 0;
         gHeliRtbLatched = false;
@@ -6262,6 +6317,10 @@ void SetEnabled(bool on) {
         gSettleUntil = 0;
         gNeedEnableFaceSettle.store(true, std::memory_order_release);
         gEnableHoldUntilMs = x::runtime::NowMs() + kCombatEnableHoldMs;
+        gHeliLatchedThisEnable = false;
+        // BIN edfbf1 16:35:48：lie_safe 20s 前 lastIssue 还在 → 热开首发 trim=800 cmdVy=430。
+        // 关 F5 会 Reset；测谎落台不走 SetEnabled(false)，开 F5 必须自己清。
+        heli::Reset();
         LogLine("enable hold %ums (first acquire/fire delayed; retarget unaffected)",
                 (unsigned)kCombatEnableHoldMs);
         // 同图 / 首次热开：人已站稳则不要空等 map arm（BIN：F5 后干等 1–2s）。

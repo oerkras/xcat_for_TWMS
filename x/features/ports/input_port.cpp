@@ -31,24 +31,24 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaOnKey = 0x1021520;  // remounted 2026-08-06 · UserLocal.OnKey (+0x1E70)
-constexpr uint32_t kRvaIsFocusedInputField = 0x166CFC0;  // remounted 2026-08-06 · IM IsFocusedInputField
+constexpr uint32_t kRvaOnKey = 0x103f170;  // remounted 2026-08-06 · UserLocal.OnKey (+0x1E70)
+constexpr uint32_t kRvaIsFocusedInputField = 0x167F210;  // remounted 2026-08-06 · IM IsFocusedInputField
 constexpr int32_t kKeyInputDown = 0;
 constexpr int32_t kKeyInputUp = 1;
 
 // Game InputManager（非 UnityEngine）。Remount 2026-08-06：TDI 2303 ACS 重哈希。
 constexpr char kInputManagerClass[] =
-    "ab1dbbc390881790e19a5b1557c84a32d8c2261a26e7e4eaaf8f02e6be32a99";
+    "e66efd3f47542bd1607f25bb25a70ae4b9fd397ef7a474b8ee6ebd82510786b";
 // remounted UserLocal class hash（与 il2cpp_shape::kHashUserLocal 同）
 constexpr char kUserLocalClass[] =
-    "d81db6fbb1dc9506e153d6ee92c803ded0eef9dd0bf5c0e2334f2a98cabf4b0";  // remounted 2026-08-06 UL
+    "bd8750e75b3d578990529f94a29b1f6ddd6233fbd7c6c5c0ddb1bdcd2c6fe7d";  // remounted 2026-08-06 UL
 constexpr char kHashOnKey[] =
-    "c9267edb5f4326ea327c145d59260ac5b26a09697b8e7ca18757436ed63ff52";
+    "fa640cb926b6d6f8fd1e4795a004ecb806680bcb51f33796e58bc8b8a0cc7e6";
 constexpr char kHashIsFocused[] =
-    "a36c99b43bc935805103a390ef12a527cf5d2a22830caa6501177adf2cd8601";
+    "da1f9513abc676965856ec386356ca62355817eddcd03fd911d99962219beb7";
 // TargetUser 字段防漂移：hash → field_get_offset；仍 @0x20
 constexpr char kHashTargetUser[] =
-    "<a5f06ffcd14e4475088ea9ac03212af97c74fd7aa80d2839f35c33b2bc91f8d>k__BackingField";
+    "<e05b947cf4c122e74bdc0976a9abb879c3db4e58114828e2f911851f49bbeea>k__BackingField";
 constexpr size_t kFbTargetUser = 0x20;
 
 constexpr DWORD kRebindMs = 3000;

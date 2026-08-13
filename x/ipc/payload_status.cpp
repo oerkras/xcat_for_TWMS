@@ -37,11 +37,11 @@ constexpr DWORD kPublishIntervalMs = 500;
 
 // docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-06（与 anti_macro_port 对齐）
 constexpr char kAntiMacroUtilClass[] =
-    "ec3b217aea4af2d5989a2428d24c7dd36a7bcaef541c9c40fa4c5eb46d1c0aa";
+    "db85bf94b41781c1a28efa19a10ec98eda78a02a25a3c54744ea0e6d580d412";
 constexpr char kAntiMacroNonFiniteClass[] =
-    "c102f2dcae27c38fdf35899451cc71c06a9d55efb9aaee885b3127c09b30e42";
+    "a5c44934a6b6ca1a047cf4adabbf74be1ad985ef6db74c0cfdddff3bb35b50e";
 constexpr char kAntiMacroTextCaptchaClass[] =
-    "fe6f28a2457d4914b37d8735f0bed623b33bc35d00af4a5c577418ffd436b1c";
+    "efba5610621bb4e48f76b652794ef0ee650966759e50b689197aada11b5ff75";
 constexpr char kPrefabNonFinite[] = "UIAntiMacroNonFinite";
 constexpr char kPrefabTextCaptcha[] = "UIAntiMacroTextCaptcha";
 

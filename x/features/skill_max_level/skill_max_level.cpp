@@ -34,25 +34,25 @@ using x::runtime::il2cpp::ReadPtr;
 
 constexpr size_t kFbLevelDataList = 0x120;
 // remounted 2026-08-06（与 skill_port 钉值一致；GetMaxLevel RVA 仍待 BIN 确认）
-constexpr uint32_t kRvaGetMaxLevel = 0x1563BD0;
-constexpr uint32_t kRvaUlGetSkillLevel = 0x106D470;
+constexpr uint32_t kRvaGetMaxLevel = 0x157FAA0;
+constexpr uint32_t kRvaUlGetSkillLevel = 0x108AE20;
 // SkillInfo.GetPureSkillLevel / GetSkillLevel(ref CD, id, ref SE)
 // 注意：同邻域 GetShootSkillRange(ref CD, skillId, weaponType) 返回射程——禁止当学级钩。
 // Pure 与 Level 一并抬满：本功能要客户端「已学即满级」；若需保留纯加点真值再拆。
-constexpr uint32_t kRvaSiGetPureSkillLevel = 0x1579560;
-constexpr uint32_t kRvaSiGetSkillLevel = 0x1579820;
+constexpr uint32_t kRvaSiGetPureSkillLevel = 0x15950e0;
+constexpr uint32_t kRvaSiGetSkillLevel = 0x1595570;
 constexpr char kHashGetMaxLevel[] =
-    "f353c9960f752b7026e569baad29cdf41deeddf7c47497dc199ce8aabe0c7d7";
+    "cae332d5066e02cab6aab6f8c6eded951e4188244121110d6a0e5f0fcb53f5d";
 constexpr char kHashSkillEntry[] =
-    "cf6d6169272f7c4a4dbb084cc7786a67fed9c03d7376babdcb5e5ecdde00eef";
+    "dd77d0e3689619aa2359bfe6fb722fbcc7128234f759b0d2c26dd2c6c2160e3";
 constexpr char kHashUlGetSkillLevel[] =
-    "e3f94beec124905fdceee7be877c5006e976256d338613487b632a8015ff251";
+    "e614fe2c625f54846298a7037bc6b2a17daff84cf16e0d1c3fc61378b64f97d";
 constexpr char kHashSiGetPureSkillLevel[] =
-    "adf769b01abe7aa717b10da02614e83f638bfb44f42495e4c2dc2bf9ea27aed";
+    "d5a13763d2ce735e0f53447cf6edb983911bbd931ba64a155b802c6a44e7a48";
 constexpr char kHashSiGetSkillLevel[] =
-    "b12045572f903e6050a9be87539beeb84cf880a1dae7f76e42e4444665ac201";
+    "cd3b976ae3b4f4c8c98679f23dcba6a7f8e68604b723e6f9f4c19da49ea9875";
 constexpr char kHashSkillInfoClass[] =
-    "e4c1bb085eea897cbd36c2ecc9a50b9316187a7ed2fbb7654ad8e162c289c39";
+    "eb096a44f2860acb21c8425d62c0afc986f631ff6bb825a2299db5e3dd9deae";
 
 constexpr DWORD kTickMsOn = 400;
 constexpr DWORD kTickMsOff = 900;

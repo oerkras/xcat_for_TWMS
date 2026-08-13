@@ -28,16 +28,16 @@ namespace il2 = x::runtime::il2cpp;
 // SceneState / Field / CharacterId / FieldKey：hash → field_get_offset（2026-08-06 remount）
 // CharacterData / CharacterStat：SSOT = x::ui::player
 constexpr char kWorldManagerClass[] =
-    "acda742ab51e7e2e3003fd2b44fbc00eababde4300ef17ac35b5f4fd01bee68";
+    "b8ea8013e52dada590b6003b130193bf382fb78e9581ae899270652538d4114";
 constexpr char kHashWmSceneState[] =
-    "d190e0af58c4288d25573fdf91171036e93c69653c7357f9a1e4c7b7efd0077";
+    "c2d6b1c2e942d8e3ef2c7fc48bdd1e38449ec42ef25deced80892b296b17f83";
 constexpr char kHashWmField[] =
-    "cd05676f83eff32a7a754d6c6287f124ca239987ddd9c57667f9cce26502a0e";
+    "d2876bc350bd665e58b3e300d3c3b5acb1c1d863c0e681cf8635e7b17788cc8";
 constexpr char kHashWmCharacterId[] =
-    "<b33ad98e8d2b26e76c74ed2a5a5fe8ca99561c5ac3fc68e2962ea770f11acdf>k__BackingField";
+    "<b0873781c51d27af60f8b7f72544603a47d7e82c75f710f06d6c60af308fb5d>k__BackingField";
 // FieldKey 现挂在 WM 本体（byte@_fieldKey），不再走 SceneField+0x98
 constexpr char kHashWmFieldKey[] =
-    "b4ba3b6c23175b5e7a2099cdc465f07c421273042694938c0193ea5be2a924c";
+    "e34ea295aedf05c677a37d0d529e69ea692edb8b1ad2225426ac9fe48b26102";
 
 constexpr size_t kFbWmSceneState = 0x34;
 constexpr size_t kFbWmField = 0x58;

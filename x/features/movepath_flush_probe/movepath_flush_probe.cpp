@@ -26,7 +26,7 @@ namespace {
 // MovePath.Flush 的 .text 入口 RVA。2026-08-06 晚 remount：旧 0x119F980 +0x1E70；
 // 当前 IDB imagebase 0x7FF848C80000 → VA 0x7FF849E217F0（序言已核对：8×push + sub rsp,4B8h）。
 // 字段偏移未漂；序言签名拒钩兜底，客户端再漂会 refuse 而不是瞎 patch。
-constexpr uint32_t kRvaMovePathFlush = 0x11A17F0;
+constexpr uint32_t kRvaMovePathFlush = 0x11B9B30;
 
 // 序言签名（前 15 字节，到 sub rsp 的 mod/rm+imm8 头）。客户端改版漂移即拒绝下钩，
 // 避免 RVA 对不上时把 abs-jmp 覆到随机 .text 上崩游戏。

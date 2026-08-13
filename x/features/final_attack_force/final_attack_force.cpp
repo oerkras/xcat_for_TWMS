@@ -47,7 +47,7 @@ constexpr int kSkillTypeFinalAttack = 3;
 constexpr int kPropForce = 100;
 
 // UserLocal.FinalAttack valuetype @ +0x3A4（restored dump；CMS 旧档曾为 +0x38C）
-constexpr size_t kFbFinalAttack = 0x3A4;
+constexpr size_t kFbFinalAttack = 0x36C;
 constexpr size_t kFaLastSkill = 0x0;
 constexpr size_t kFaSkillId = 0x4;
 constexpr size_t kFaWeaponType = 0x8;
@@ -59,41 +59,41 @@ constexpr size_t kFbCdEquipped = 0x28;   // CharacterData.Equipped[]
 constexpr size_t kFbCdEquipped2 = 0x30;  // CharacterData.Equipped2[]（现金）
 
 // GetLevelData(int level) → SkillLevelData*
-constexpr uint32_t kRvaGetLevelData = 0x1564A30;
+constexpr uint32_t kRvaGetLevelData = 0x15809F0;
 // UserLocal.TryDoingFinalAttack — remount 2026-08-06
-// 警告：0x1026050 / a42678b6… 是 TryDoingFallDown，勿再绑。
-constexpr uint32_t kRvaTryDoingFinalAttack = 0x109DBA0;
+// 警告：0x1043d10 / a42678b6… 是 TryDoingFallDown，勿再绑。
+constexpr uint32_t kRvaTryDoingFinalAttack = 0x10BB790;
 // ItemInfo.GetWeaponType(int) — 与 Doing 内比较同源（edx=MethodInfo 可为 null）
-constexpr uint32_t kRvaGetWeaponType = 0x1418B10;
+constexpr uint32_t kRvaGetWeaponType = 0x142A660;
 // CharacterData.GetItem(nTI, nPos)
-constexpr uint32_t kRvaCdGetItem = 0x12D9AF0;
+constexpr uint32_t kRvaCdGetItem = 0x12EC910;
 
 constexpr char kHashGetLevelData[] =
-    "f47191da3f08f5e8a7d4a64a286be8d40e43c4f3f66724aa962070342297d3e";
+    "ec7a33946139c210450e5b54e43fb2b71724fec661d2fa92470cf734cabb184";
 constexpr char kHashSkillEntry[] =
-    "cf6d6169272f7c4a4dbb084cc7786a67fed9c03d7376babdcb5e5ecdde00eef";
+    "dd77d0e3689619aa2359bfe6fb722fbcc7128234f759b0d2c26dd2c6c2160e3";
 constexpr char kHashSkillLevelData[] =
-    "f6b2dee44681627d86594e8da90980812d5ffc411c2f9cb20b03555deaace96";
+    "e954e78934c26a5a7432da95d3a36bfa41b1c66b39103def98a43ab8c76bc6b";
 constexpr char kHashProp[] =
-    "c91691ae992a129aa72666b399b168db898130e774088e51c3f65ff33e376e8";
+    "afcb7b5d239996bd1d1affc95e14ffd26e6921f6fdfee17d8427d20e09935d4";
 constexpr char kHashLevelDataList[] =
-    "aebdce14e3d6d5e71cf4c57d2ef33206875605936ef7f51deeb8fa3ad2db120";
+    "e99549d52997d891ced26d852f879cd34e6cead3af908305f606baee12f68b6";
 constexpr char kHashFinalAttackField[] =
-    "bf036898924d1d22c058f3aea8978fd90ad0214d60234d57dd243b750472c62";
+    "ac5db157cf70eb9261b6f8641851cdd2a19df4f536da6b5603594f84aa43a26";
 constexpr char kHashCdEquipped[] =
-    "b6730f554734a2d4bf2d0bfb383efce2305fd749cc5d2d00773f538566c6777";
+    "fd31912f0bf338a4f73ed50c15b7497c15c393fc5b61f667e600831ca83d564";
 constexpr char kHashCdEquipped2[] =
-    "bc5fe18e2648ed8fff901dd9541262015a345b2ef8c0ec0e4fec41b1d051b54";
+    "e1a5df4ea3a5b12352acfd62c399ee62c10a9d6ad463d33b9297738619e1e47";
 constexpr char kHashTryDoingFinalAttack[] =
-    "ab75154d87bf59e1cdecfd53266213dc2d2636dcc792c140eb13298dfcb5fb2";
+    "b52d50ad285924b057a9fd0c80d3177aa5374e7cdc952efd07ee54b87aa197e";
 constexpr char kHashGetWeaponType[] =
-    "f47003eeea3d63c00dae53d67da83598202c55d335a9e17fce3bd2cc9979241";
+    "d491da336a96a6aca7622940f9d594fa1a381e3b839aa8170ffaa6765ee5eab";
 constexpr char kHashCdGetItem[] =
-    "e5874bc52cb0f4b4f2e775ab6ef9d96f1196568394d2bff24e04a1d6ad2bc20";
+    "d5dc8721fabee7e45cd21b2655050c1521301e8a7218140dd4fa12ed17bcd1a";
 constexpr char kHashItemInfo[] =
-    "ab2ffe60bb8f8973293a005d0dc011dce59d8ace10e251ffc4bf48faecb43a9";
+    "c094608c1ad5b60973b00f0ca0c1ba6eb4784f8a1ef0d14180cfa810917b2a8";
 constexpr char kHashCharacterData[] =
-    "d5453e03707efd1001d8348a46ee270f8117468d2f1504fd0dadd0cc7c10468";
+    "a49dae5b55d4270768c375de143fbd802b4c903c6529f0921e6d8736655a348";
 
 // 经典版 Final Attack 技能表（狂战士剑/斧优先；同 prop 机制一并覆盖）
 constexpr int kFinalAttackIds[] = {

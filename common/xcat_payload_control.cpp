@@ -154,9 +154,9 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.impactHopDeltaX = kImpactHopDeltaXDefault;
     out.impactHopForce = 0;
     out.softLoginDismissSeq = 0;
-    out.autoRelogin = 0;
-    out.autoReloginStopCombat = 1;
-    out.autoReloginReconnect = 1;
+    out.autoRelogin = 1;
+    out.autoReloginStopCombat = 0;
+    out.autoReloginReconnect = 0;
     out.autoReloginGmEscalate = 1;
     out.hideOtherPlayers = 0;
     out.frameLock = 1;  // 默认开
@@ -369,6 +369,13 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.autoReloginReconnect = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoReloginGmEscalate", b))
         out.autoReloginGmEscalate = b ? 1u : 0u;
+    // v82: 旧厂默（关检测+开停手+开换频）→ 新厂默（开检测+关停手+关换频）；显式改过保留
+    if (out.autoRelogin == 0 && out.autoReloginStopCombat == 1 &&
+        out.autoReloginReconnect == 1) {
+        out.autoRelogin = 1;
+        out.autoReloginStopCombat = 0;
+        out.autoReloginReconnect = 0;
+    }
     if (IniGetBool(ini, "core", "hideOtherPlayers", b)) out.hideOtherPlayers = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "frameLock", b)) out.frameLock = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "frameLockFps", u)) out.frameLockFps = ClampFrameLockFps(u);

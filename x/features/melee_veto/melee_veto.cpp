@@ -4,10 +4,10 @@
 //
 // | RVA | 符号 | 托管参数 | 原生参数 |
 // |---|---|---|---|
-// | `0x103D2A0` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
-// | `0x1052690` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
+// | `0x105B0A0` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
+// | `0x10705f0` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
 //
-// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x103D2A0 上，
+// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x105B0A0 上，
 //   于是 `methodInfo` 被塞进第 7 参的位置、真 methodInfo 丢失，把射击路径整体打歪
 //   （体感「基本必挥弓」）。改这里之前先用 `Dumps/runtime/out/dump.cs` 按 RVA 复核形状。
 //
@@ -68,9 +68,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaTryDoingMeleeAttack = 0x103D2A0;
-constexpr uint32_t kRvaTryDoingShootAttack = 0x1052690;
-constexpr uint32_t kRvaGetWeaponType = 0x1418B10;
+constexpr uint32_t kRvaTryDoingMeleeAttack = 0x105B0A0;
+constexpr uint32_t kRvaTryDoingShootAttack = 0x10705f0;
+constexpr uint32_t kRvaGetWeaponType = 0x142A660;
 
 // ── 取框探针（一次性调研，`XCAT_MELEE_RECT_PROBE=1` 才挂）──────────────────────
 //
@@ -84,8 +84,8 @@ constexpr uint32_t kRvaGetWeaponType = 0x1418B10;
 // （按仓规逐处实读；这里按 0 读会把分支判反。它不是武器类型——枚举最大是 Gun=49。）
 //
 // 探针要回答的就一件事：飞镖普攻那一发走的是哪条、arg4 实际是几、框实际多大。
-constexpr uint32_t kRvaGetAttackRect = 0x1228290;  // sub_7FF849EA8290
-constexpr uint32_t kRvaConstRect = 0x561AF80;      // xmmword_7FF84E29AF80
+constexpr uint32_t kRvaGetAttackRect = 0x1239610;  // sub_7FF849EA8290
+constexpr uint32_t kRvaConstRect = 0x4654800;      // xmmword_7FF84E29AF80
 constexpr int kRectKindConstPath = 55;
 
 // 近战 / 射击开头一致：push rbp / r15 / r14 / r13 / r12 / rsi / rdi / rbx = 12 字节。
@@ -608,7 +608,7 @@ bool TryArmOne(AbsHookState& st, std::atomic<bool>& refuse, uint32_t rva, void* 
 //   L1065361 Singleton<T>._instance  static @0x0，类型 Lazy<T>
 //   L73512  MeleeAttackAfterImage TypeDefIndex 1634；L73516 Range: Dictionary<int,Rect> @0x18
 constexpr char kHashActionManager[] =
-    "f1275d524fe94bf7c441578d3d7c7bef9e1a0547cc23323474137e6bd93054d";
+    "c1a571fd586131c52f3a678bee953e76890f76d0729e198215a5239bc573442";
 constexpr char kHashSingletonInstance[] =
     "b9143f0b097da8b3733c3286804b0dee7ab4ae8f39620354bc4817d33fe9a42";
 constexpr size_t kOffActionMgrAfterImageMap = 0x40;

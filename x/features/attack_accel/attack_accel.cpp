@@ -1,18 +1,18 @@
 // TWMS Classic — attack_accel（攻击加速）
 //
 // 启用后周期：
-//   - LocalUser+0x118=-1（跳过动作等待；字段哈希 a55e80b9… 防漂移）
+//   - LocalUser+0x11C=-1（跳过动作等待；字段哈希 fc8efc5f… 防漂移）
 //   - CutLayerDelays（砍动作层 delay）
 // 出刀频率由 simpleCombatAttackIntervalMs（面板「间隔」，默认 123，下限 1）控制。
 // 禁止 GA .text E9。
 //
 // 2026-08-04 撤销「Prepare 绝对攻速」写入：SecondaryStat+0x1BC/0x1C4 经 IDA 实证
 // 是 nSlow_/tSlow_（减速 debuff），不是攻速槽。Prepare 内仍 `mov eax,[r14+1BCh]`
-//（remount 2026-08-06：RVA 0xFE06A0 @ imagebase 0x7ff848c80000 → 0x7FF849C60963），
+//（remount 2026-08-06：RVA 0xFFDB40 @ imagebase 0x7ff848c80000 → 0x7FF849C60963），
 // nSlow_ 非 0 即顶掉 GetSpeed()。两字段现仅作只读诊断。
 //
 // 2026-08-04 接入真攻速槽 nBooster_@0xBC（IDA 运行时 dump，imagebase 0x7FFB83A80000）：
-//   StatDetailAggregator.GetAttackSpeed(RVA 0xE78EB0) `mov rax,[rdi+8]`(=input.SecondaryStat)
+//   StatDetailAggregator.GetAttackSpeed(RVA 0xE93930) `mov rax,[rdi+8]`(=input.SecondaryStat)
 //     → `mov ebx,[rax+0BCh]` → 作 weaponBooster 传入 GetAttackSpeedDegree(0x7FFB850112B0)
 //   GetAttackSpeedDegree 去混淆后 = clamp(weaponDegree - (skill==4001334 ? 2:0)
 //                                          + weaponBooster + partyBooster, 2, 10)
@@ -35,7 +35,7 @@
 //   算单开 -8 约 68ms（×0.8）。要量它就必须能在 accel=0 时单独打开 —— 同一开关做不到，
 //   因为 attackAccel 还顺带下发 animBusyOverride=0 / immediateUp，会混进变量。
 //
-// 实验·跳过 Prepare：改 LocalUser 虚表槽（SetAttackAction @RVA 0x10FA090 虚调 Prepare），
+// 实验·跳过 Prepare：改 LocalUser 虚表槽（SetAttackAction @RVA 0x11171E0 虚调 Prepare），
 // 不碰 GA .text。关开关时 hook 仍在，走 orig 透传。
 // remount 2026-08-06：Prepare/哈希/字段名哈希已对 dump.cs.restored.C + 运行时 IDB。
 #ifndef WIN32_LEAN_AND_MEAN
@@ -76,7 +76,7 @@ namespace attack_accel {
 namespace {
 
 // 默认/兜底偏移（dump.cs.runtime + LocalUser_Prepare [r14+1BCh] 实锤；种子解出阈 0）
-constexpr size_t kOffActionBusyHint = 0x118;
+constexpr size_t kOffActionBusyHint = 0x11C;
 constexpr size_t kOffActionLayerAHint = 0x120;
 constexpr size_t kOffActionLayerBHint = 0x128;
 constexpr size_t kOffLayerDelay = 0x14;
@@ -120,7 +120,7 @@ constexpr size_t kOffLuWeaponDegree = 0x15C;
 // nBooster_ 仍写死 -8（用户入口已关）。
 constexpr int kBoosterValue = -8;
 constexpr int kPartyBoosterValueDefault = -8;
-// CalcWeaponAttackSpeedTier（RVA 0x15940F0 @ imagebase 0x7ff848c80000）：
+// CalcWeaponAttackSpeedTier（RVA 0x15B2510 @ imagebase 0x7ff848c80000）：
 //   lo = dword_7FF84F4E956C ^ 0xE95BBBB4  → 种子 0xE95BBBB6 解出 2（独占 xref）
 // 破限：写种子使 lo=滑条值（默认 -10）；不改 Party / nBooster_。
 // delay=(deg+10)/16；deg=-10 → ×0。
@@ -149,15 +149,15 @@ constexpr DWORD kLogIdleMs = 30000;   // 稳态心跳
 constexpr DWORD kLandGraceMs = 400;
 constexpr DWORD kSkipPrepareLandGraceMs = 1000;
 
-// LocalUser(TDI:1560) 覆写 Prepare @ 0xFE06A0；基类 User @ 0x1253CA0
+// LocalUser(TDI:1560) 覆写 Prepare @ 0xFFDB40；基类 User @ 0x1254DF0
 // UserLocal(TDI:1577) : LocalUser — 无再覆写；虚表槽仍在实例 klass 上。
 // dump Slot:32 · 哈希 f71637b0…（默认参 action=6,speed=100,bool=false）· remount 2026-08-06
-constexpr uint32_t kRvaUserPrepare = 0xFE06A0;
-constexpr uint32_t kRvaFbPrepare = 0x1253CA0;
+constexpr uint32_t kRvaUserPrepare = 0xFFDB40;
+constexpr uint32_t kRvaFbPrepare = 0x1254DF0;
 constexpr char kHashPrepareActionLayer[] =
-    "f71637b0493ae259de6c988fe81a1f3f12ae34a470fa02f641acfd67289f14c";
+    "b51120b2f87d106a80af8ae731f2e08adcc892553965092516e34dd4d58f68a";
 constexpr char kHashLocalUser[] =
-    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";
+    "c3c6ef70537e5a2c4026c37e65e0d0a8a5f756988f3f3ee148a568fb3176f96";
 // 声明 Prepare 的类（= LocalUser）；虚表补丁仍打在最末级 UserLocal 上
 constexpr const char* kHashLocalUserDecl = kHashLocalUser;
 constexpr int kPrepareVtableSlot = 32;
@@ -168,25 +168,25 @@ constexpr size_t kVtableScanHi = 0xC00;
 constexpr DWORD kSkipPrepareInstallRetryMs = 2000;
 
 // 字段防漂移（Il2CppDumper 哈希名 → field_get_offset；失败回退 Hint）
-// remount 2026-08-06：类/字段哈希全换；偏移仍 0x118/0x120/0x128 / SS 0xBC/0xC0/0xC4/0x1BC/0x1C4
+// remount 2026-08-13：ActionBusy 为 Avatar 上 protected int@0x11C（旧 0x118 已变成另一 private int）
 constexpr char kHashSecondaryStat[] =
-    "fda0a837975e9b385db9604d6689232d1f1783dcfafa16403a92309b5604df3";
+    "d9956bd3e4ad30494d9f3f9e03e182b5694ca75b20ab72b1caef67ca404c469";
 constexpr char kHashSlow[] =
-    "d5bf793df45a8f8ea38a2f408c8c5edb7c2122b92b34916cc914dede9354408";
+    "ff552eaf25db438528cb02c9f1d13795f6985876d358891dc89425f7c36a290";
 constexpr char kHashSlowExpire[] =
-    "cea518cf2cf239b37d86d7261b4ddeaadfb9595779b1caff529800831d86af7";
+    "a09d35b46fd8f57a67bd4a63dc90de4c6c5525c2f3adb916c18c3483c069596";
 constexpr char kHashBoost[] =
-    "c7a681d25ac765845bc7ee482fe7bfe78338e70e65456d3ee4302481dc4abe8";
+    "ec48d52359eb005b4fc62564fd18527e73b3fe6ac35fe8a2b0cd57dc9b958b3";
 constexpr char kHashBoostReason[] =
-    "ed17ce43efc6ed6c54ca965ef7b462c9f3a9ce27b3f5dde626373366abff984";
+    "d0f74b072c3792fe45b86921b71e605c48a602ba6d5e8832163343171ed7f4d";
 constexpr char kHashBoostExpire[] =
-    "abec342a6ade99d50a338ccb55acb7199a39ba031ec4626cb5da74d84ceb9dc";
+    "f6bca0634634e57f22f73386742feb20b75573ae46a05a34c994790c52b6976";
 constexpr char kHashActionBusy[] =
-    "a55e80b967beb6b3a4ae5af0e93a1e09293c74f5fe852a6f014dc917b55d926";
+    "fc8efc5fb49fbf51678746109c7e4a8f10f8296b33d3cb772c090fa9c8e0c95";
 constexpr char kHashActionLayerA[] =
-    "a8269a5fd552d9c18702bb17235ed49e9eb56e51b8f8967aea25944d48ee963";
+    "df7a8e418f0a50c2ae7168db150bf117a5ac1d90fd9f3772dddfe2da65f8d3b";
 constexpr char kHashActionLayerB[] =
-    "df44aea45566e5964a25045760965cbc2b54f42485f08b8fdc5752897abe6e8";
+    "daa43bef75379f947e46889fc68d8771b05e8493cbafdd9508c649ea9462b71";
 
 using FnPrepareActionLayer = void (*)(void* self, int32_t action, int32_t speed, uint8_t flag,
                                       const void* methodInfo);
@@ -506,7 +506,7 @@ void Hook_PrepareActionLayer(void* self, int32_t action, int32_t speed, uint8_t 
         return;
     }
     gSkipPrepareHits.fetch_add(1, std::memory_order_relaxed);
-    // 跳过攻击 Prepare：不建攻击层。自然解锁靠 Slot14 扣完 layer 才写 +0x118=-1；
+    // 跳过攻击 Prepare：不建攻击层。自然解锁靠 Slot14 扣完 layer 才写 +0x11C=-1；
     // 无层则忙锁永久卡在 actionIdx（BIN：只开 skip 出刀后卡住；开 accel 清忙锁则恢复）。
     // 立刻清忙锁，并透传 Idle Prepare 重建呼吸层（action==6 不会再进本分支）。
     WriteI32(self, gOffActionBusy, -1);
@@ -1472,7 +1472,7 @@ DWORD WINAPI Worker(LPVOID) {
                 continue;
             }
 
-            // SkipPrepare 单独开时也必须清忙锁：无攻击层则 Slot14 永不写 +0x118=-1。
+            // SkipPrepare 单独开时也必须清忙锁：无攻击层则 Slot14 永不写 +0x11C=-1。
             // SetAttackAction 可能在 Prepare 返回后仍写入 actionIdx，故 worker 周期兜底。
             if (accelOn || skipArmed) {
                 WriteI32(lu, gOffActionBusy, -1);

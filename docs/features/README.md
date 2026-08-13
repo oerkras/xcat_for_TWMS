@@ -81,7 +81,7 @@
 | [`soft_login/模块设计.md`](soft_login/模块设计.md) | 软重连试连：ConnectLogin→softFast 重进→playReady；Done≠playReady 闸 + 150s 墙钟 / 10 轮 soft cycle（✅ 默认关） |
 | [`ccu/模块设计.md`](ccu/模块设计.md) | 分区 CCU：登录频道页或 auto_enter 喂数一次 → SHM → 底栏（✅） |
 | [`channel_hop/模块设计.md`](channel_hop/模块设计.md) | 随机换频：挂机卡/F10 → `manualRejoinSeq` → **直调** `SendTransfer@0xBB5200`（无菜单；✅ 挂入；08-03 锚点已同步） |
-| [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：UserPool → 停手/换频；可勾选 GM/隐身升级 + 强制 Alarm（✅ 契约 v60） |
+| [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：默认只开检测+GM升级；普通停手/换频默认关（✅ 契约 v82） |
 | [`pet_feed/P0b_只读探针.md`](pet_feed/P0b_只读探针.md) | `ReadState` + `petfeed.log`；字段只读，未发包 |
 | [`pet_feed/P0c_自动召唤.md`](pet_feed/P0c_自动召唤.md) | `TryActivatePet` + `[core] petSummon`；喂食交官方 |
 | [`pet_loot/模块设计.md`](pet_loot/模块设计.md) | **拾物**：脚下 / 宠扩盒 / 人物直吸；黑名单默认箭矢·彈丸；归属预筛 |
@@ -92,8 +92,8 @@
 | [`auto_lie/P0a_锚点复核.md`](auto_lie/P0a_锚点复核.md) | **测谎数据源**：UIAntiMacro* Prefab、jpegData/path、WM+0x1D0、`IsOpenAntiMacro@0x936780` |
 | [`auto_supply/模块设计.md`](auto_supply/模块设计.md) | **自动回城卖/补给**：就近寻店卖装 + 去店用卷 `SendPortalScrollUseRequest`（2030000/2030059）+ 可选补货；Charge/回程用卷待验 |
 | [`auto_supply/P2_货架寻店.md`](auto_supply/P2_货架寻店.md) | 按货架/物品码全局寻店：**不做**（无 SetShopDlg Commodity 全表；产品语义为就近能卖） |
-| [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认开；服端断线+守护会干净重拉 |
-| [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ 数据面清 `LocalUser+0x114`；抑制客户端警戒；默认关 |
+| [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认开；apply-once+1s hold；`Init` 不清 desired + boot 末 ForceApply；服端断线+守护会干净重拉 |
+| [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ 数据面清 `LocalUser+0x118`；抑制客户端警戒；默认关 |
 
 ---
 

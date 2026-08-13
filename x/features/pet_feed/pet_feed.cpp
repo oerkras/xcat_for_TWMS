@@ -40,12 +40,12 @@ constexpr DWORD kPendingMs = 5000;
     // 预算从「打怪侧真正询问让路」起算；未落地/警戒 defer 会 PauseHoldBudget 清零。
     constexpr DWORD kHoldCombatMaxMs = 20000;
 // UserBase 短 IsAlertMode：LocalUser alert stamp > 0（与 drop_alert 同字段）
-// hash → field_get_offset；dump fallback 0x114
+// hash → field_get_offset；dump fallback 0x118（勿用 bac75f bool@0x114）
 constexpr char kUserAlertClass[] =
-    "c99c0bcb0549788a98e73a02acc1cf7e5476d3f920f9a4f5f69a76490798a16";
+    "d5a59751c9ecba4a21314526d7fbe8142abe3ee8b90e8d03a7fc2f80f669add";
 constexpr char kHashAlertAt[] =
-    "c469c323e5afda2bab68c386c87ea8b571b3fd726ece08d92aa459848a6d351";
-constexpr size_t kFbAlertAt = 0x114;
+    "a363a66e2ecf97c765a16a7d795ca7cf3416ee02804c5ae5305d1ebbace6e0f";
+constexpr size_t kFbAlertAt = 0x118;
 size_t gOffAlertAt = kFbAlertAt;
 bool gAlertFieldTried = false;
 

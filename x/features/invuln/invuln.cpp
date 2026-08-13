@@ -1,8 +1,8 @@
 // TWMS Classic — data-plane invuln v2.6.8 (land-pin after InterStage 2026-08-09).
 //
-// Hit gate: User+0x298 i-frame (~100ms worker top-up).
+// Hit gate: User+0x270 i-frame (~100ms worker top-up).
 // Anti-blink hybrid: MainPump frame tick (before+after SendWill) + worker 8ms backup.
-// Soft +0x228/+0x22C DISABLED. Optional layout probe: XCAT_INVULN_PROBE=1 (default off).
+// Soft +0x20C/+0x210 DISABLED. Optional layout probe: XCAT_INVULN_PROBE=1 (default off).
 // Bind SSOT: WM.MyUser@+0x28 first (same as Drop/Skill/Combat); FindAll fallback.
 // Rebind: WM path every tick when unbound; FindAll 仅 IsPlayReady（禁 InterStage/Login/
 // CashShop/GlobalMarket — BIN D217：拍卖 scene=5 时 80ms FindAll 堵 MainPump）。
@@ -60,34 +60,34 @@ using x::runtime::il2cpp::ReadPtr;
 // User / SecondaryStat：dump.cs 2026-08-06 字段哈希 → field_get_offset；失败回退下方 kFb*
 // User=b8c9aedb…（TDI 1560）；SS=fda0a837…（TDI 1329，WM+0xF0）
 constexpr char kSecondaryStatClass[] =
-    "fda0a837975e9b385db9604d6689232d1f1783dcfafa16403a92309b5604df3";
+    "d9956bd3e4ad30494d9f3f9e03e182b5694ca75b20ab72b1caef67ca404c469";
 constexpr char kUserClass[] =
-    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";
+    "c3c6ef70537e5a2c4026c37e65e0d0a8a5f756988f3f3ee148a568fb3176f96";
 constexpr char kHashNInv[] =
-    "e98b6e87685fc78c2f74b7dd85ca150b35bb9e550991d6264beaa67b9fe436d";
+    "ca4f86f8719615944dfbfacd302e5d6c5c4ee052fd17862d318c266b5523007";
 constexpr char kHashRInv[] =
-    "f2a5d68e49e9dd95a60a2f2abd5c8a4cb99a1f821f684b9cd84999f67019e19";
+    "a1b2c8b6be24ad184301860a535485b414bf50701b42edf8f76b17f6933ba26";
 constexpr char kHashTInv[] =
-    "e415d2cfd38e4437565e29ed1dd7bf5730cb3a05ac9d7ddfb96a5a91011e152";
+    "ca33dc2d1ea927eea2f3db43427a7b5ce13293ed48a800b9f63d268b34a62d7";
 constexpr char kHashNDojang[] =
-    "e99d3c3988e6da5a9f000c8151254c7a2c725abdb6820adfe4305356c8b0115";
+    "fca48f8520c62d919922f091859566e3994aba652cadf231f2e8c17fc78a55f";
 constexpr char kHashRDojang[] =
-    "e9965f4019fa98b9578015b1b2c6f936bc0f2c64cf2291ed77d025930c1bafb";
+    "c6b57dbf1d35a1f6db545af2e4efe9883b7e4ede4b64fec830ad07bcd270ce0";
 constexpr char kHashTDojang[] =
-    "af35c7201848a5c9ed7322b38d61307b0ebf11b91fedad529262798a08e08fa";
+    "bffaf223619f87b1498c0f4ef6747ea606da7f7e60b164dd1e10fe43b2df40c";
 constexpr char kHashHitPeriodRemain[] =
-    "cc208180bc674b16bc511bb007c0e67b6e31f0ed01e9175269b63691391a0c5";
+    "df55c26bcfa05869ebf6f9f93609d136cecc55dfc8eed89c812b05e85fb6175";
 constexpr char kHashLayerStateCounter[] =
-    "b3218357bb9d811b199fae891e9229947b4d4ebb124b0f50eca7898f4c167c5";
+    "f232f29505f66eec32dd3754b23dcffea15fe3744ac50ce0b95a727de9f343c";
 constexpr char kHashLogicalPos[] =
-    "c4adef19821f3737cd477a7840968c11697f4afd8eb8696cafb37d1c297b926";
+    "ccce125f69593bc9100a9b227cda0be73abc63fefc4b848f92efe9a72930859";
 // VisPos 在 User 祖先 edc85ce2…（MonoBehaviour 派生）@+0x64
 constexpr char kHashVisPos[] =
-    "cc96f38a9acbe6b4e8005a2d56a7846324bc67690c2059661962502f74b928a";
+    "c1792cf58ceda9b4f12cacf2746c06b70c90d516c43cbdf1fcea7c7b1bde37b";
 constexpr char kHashSoftTickA[] =
-    "e7012feca7a69005087bdbfbb3ced57be48c0bdd52b2457c415ef18af660c8c";
+    "af00d4c3a278b9a477457d2ce8dcaff9c5baeb22ab27e17d17dbc3f69521c42";
 constexpr char kHashSoftTickB[] =
-    "c966ad04198c567254ab6ecce269f4d4d2677bea40daf7b729675eae4250b81";
+    "bedbfb8334945d4125f681800f41250328f78fcb50d6f2356cd4b632791b777";
 
 constexpr size_t kFbWmSecondaryStat = 0xF0;
 
@@ -97,12 +97,12 @@ constexpr size_t kFbTInv = 0xF4;
 constexpr size_t kFbNDojang = 0x2C4;
 constexpr size_t kFbRDojang = 0x2C8;
 constexpr size_t kFbTDojang = 0x2CC;
-constexpr size_t kFbHitPeriodRemain = 0x298;
-constexpr size_t kFbLayerStateCounter = 0x2A8;
+constexpr size_t kFbHitPeriodRemain = 0x270;
+constexpr size_t kFbLayerStateCounter = 0x280;
 constexpr size_t kFbVisPos = 0x64;
-constexpr size_t kFbLogicalPos = 0x240;
-constexpr size_t kFbSoftTickA = 0x228;
-constexpr size_t kFbSoftTickB = 0x22C;
+constexpr size_t kFbLogicalPos = 0x2B0;
+constexpr size_t kFbSoftTickA = 0x20C;
+constexpr size_t kFbSoftTickB = 0x210;
 
 size_t gOffNInv = kFbNInv;
 size_t gOffRInv = kFbRInv;
@@ -784,7 +784,7 @@ bool ProbeEnabled() {
     return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
 }
 
-// Read-only: interpret +0x228/+0x22C as both int tick and float; compare CurPos@+0x240.
+// Read-only: interpret +0x20C/+0x210 as both int tick and float; compare CurPos@+0x2B0.
 void ProbeSoftSlots(const char* tag) {
     if (!gLocalUser || !LocalUserStillAlive()) return;
     static float sLastCx = 0.f, sLastCy = 0.f;
@@ -880,7 +880,7 @@ void EnsureBindings() {
 DWORD WINAPI InvulnThread(LPVOID) {
     Beep(740, 80);
     WarnIfSoftEnvRequested();
-    Log("Invuln worker v2.6.8 start (hit=+0x298; anti-blink=frame+backup8ms; "
+    Log("Invuln worker v2.6.8 start (hit=+0x270; anti-blink=frame+backup8ms; "
         "bind=wm.MyUser+FindAll; rebind=%ums/%ums grace=%ums; "
         "FindAll=PlayReady+TransitBlock; write=PlayReady-only; "
         "map_quiet=pre-InterStage-only; probe228 %s)",

@@ -1,14 +1,14 @@
 #pragma once
 // mob_pool_port — Classic TWMS 活怪只读快照 + 刷怪槽 M
 //
-// 真源：Dumps/runtime/out/dump.cs（2026-08-06 remount）
-//   MobPool(a1d83b2f…) / Mob(d8cb6fb7…) / MapData(a2eca01a…＝WM+0x88 字段类型)
+// 真源：Dumps/runtime/out/dump.cs（2026-08-13 remount）
+//   MobPool / Mob(d8d3c811…) / MapData（WM+0x88 字段类型）
 //   MapData.LifeList@+0x38 · MapLifeData.Type@+0x20 (1=Mob)
 //   WorldManager._currentMapData@+0x88
 // 禁止 INLINE HOOK；不调用游戏写接口。
 //
 // 绝对血：
-//   Mob 本体只有 HpPercentage@+0x240。
+//   Mob 本体只有 HpPercentage@+0x238（08-13：旧 0x240 已变成 bool）。
 //   包/UI 侧有绝对血（ShowMobHpTag → UIHpTag cur@+0xD4 max@+0xD8），但包路径为 E8 直调；
 //   不做 MI/trampoline 观察。ResolveAbsHp：可选 FindAll UIHpTag → 进程缓存 → hp%×表。
 

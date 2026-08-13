@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 81u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 82u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -449,10 +449,11 @@ struct PayloadControl {
     uint32_t softLoginProbe = 1;
     // v62: 调试 TAB「关闭断线弹窗」— bump 后载荷走 CloseDialog+SetActive（不点確認）
     uint32_t softLoginDismissSeq = 0;
-    // v20: 遇人策略 UX（UserPool + channel_hop，非 Reload）
-    uint32_t autoRelogin = 0;             // 检测同图玩家
-    uint32_t autoReloginStopCombat = 1;   // 先停手
-    uint32_t autoReloginReconnect = 1;    // 一直有人就换频
+    // v20/v82: 遇人策略 UX（UserPool + channel_hop，非 Reload）
+    // v82 厂默：检测开；普通停手/换频关；仅 GM/隐身升级开
+    uint32_t autoRelogin = 1;             // 检测同图玩家
+    uint32_t autoReloginStopCombat = 0;   // 先停手（普通遇人）
+    uint32_t autoReloginReconnect = 0;    // 一直有人就换频（普通遇人）
     // v60: GM/隐身升级（Admin·Manager 或客户端隐身 → 立刻停手/换频 + 强制 Alarm；默认开）
     uint32_t autoReloginGmEscalate = 1;
     // v46: 隐藏同图其他玩家（UserPool 远程 → AvatarRoot.SetActive；默认关）

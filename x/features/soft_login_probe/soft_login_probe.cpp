@@ -37,22 +37,22 @@ using x::runtime::il2cpp::ReadPtr;
 constexpr wchar_t kMarkerName[] = L"soft_login_probe.on";
 
 // SceneLogin public void() — starts ConnectLoginServer IEnumerator via StartCoroutine.
-constexpr uint32_t kRvaSceneLoginGet = 0xC02B40;
-constexpr uint32_t kRvaConnectLoginStart = 0xC039D0;
+constexpr uint32_t kRvaSceneLoginGet = 0xC19000;
+constexpr uint32_t kRvaConnectLoginStart = 0xC19EF0;
 constexpr char kHashSceneLoginGet[] =
-    "f93d472ee14aaf9f1bfe05c7a5a5a2ce4e2942a8fdca404defb5d1a1637ef88";
+    "f669df3e5e6ccbbc9e99ef50256f04e0fcacb85aca3ff5c606cebf17f9517f7";
 constexpr char kHashConnectLoginStart[] =
-    "df9624adb7823429c61a527eb2015ae2370ec841f8dafa9ec07c66edd732c9c";
+    "b10e8e96f362c4c920672764cc87917c6f2e32d3d250deea88c386904a49753";
 
 // Session.Disconnect / CloseSession（与 kick_sniff 同口径）。
 // BIN 01:53：Disconnect 只把 Connected→Connecting→Connected，WorldItems 仍空（书页大厅）。
 // 空大厅改 CloseSession 硬拆，再等 Disconnected 后才 ConnectLogin。
-constexpr uint32_t kRvaNmDisconnect = 0x1CC5F20;
-constexpr uint32_t kRvaNmCloseSession = 0x1CD50C0;
+constexpr uint32_t kRvaNmDisconnect = 0x1CED0A0;
+constexpr uint32_t kRvaNmCloseSession = 0x1CFC240;
 constexpr char kHashNmDisconnect[] =
-    "b1d93da68c582074d5f57c0f056b4c22c5eea30ac0d09059a55ed7d41021109";
+    "f92c6ead97c64b7cbec870270515e90f745d8b548483167233deebc597c08a7";
 constexpr char kHashNmCloseSession[] =
-    "c793578722e29984e2da932223b4d3f27403040237461ca3438083f0496b24d";
+    "fed8f544dea4ed36fab81fce8888ce4eae488356a66ecc94a554c1a91a0c4fc";
 
 // settle 用墙钟截止（见 Worker）：Call 耗时曾未计入 waited，实机 1500ms 常被拉成 2.5–3s+。
 // Notice 多在断线瞬间弹出；Connecting 早退即可，不必死等满窗。
@@ -135,56 +135,56 @@ constexpr size_t kOffSlWorldUi = 0xC8;
 
 // UIUtilDialog（非 Ex）— 与 worldmap_marker_travel 同源
 constexpr char kUtilDialogClass[] =
-    "b91dd9a7ee32ddf1538501f7a23119b0ad38634f3237d3dd148e6e986d70c69";
+    "af4513195ff1420653fa6fee21c3f81c0ada82cc231058d26da5e778a881d3d";
 // UIDialog 基类（仅解析 Close；禁止 FindAll 基类——子树含 UIMiniMap 等 HUD）
 constexpr char kUiDialogClass[] =
-    "b386e7e275c5b13fd8250c343b276b1f5e8854ca7084cf2927620d34ecff375";
+    "dbb161949c6a521f461ee66de79638267c63ea6f2bbfe0bcc2a496c6aba2156";
 // UIMiniMap : UIDialog — 纵深防护（白名单路径本不应扫到）
 constexpr char kMiniMapClass[] =
-    "a1fd496912b2f43c1899ca58048196eeff7df9cbd3c9af0bb88ee57d89ce6c8";
+    "bba16b96f80b69d1db213fdb00dc7a649ab639f1265f905d92c2a99e71ef873";
 // scanBase 白名单：断线/踢线 Notice 族（显式 FindAll 各类，永不扫 UIDialog 基类）
 constexpr char kNoticeDialogClass[] =
-    "b7a6a2bc4199c58a811194d6fc612b2bcc684255c179edacac286fc65bfcd33";
+    "ef9eb77e40dd59403dbe5979a0f01385a476b9f525a7e4f4db3c240bc936a34";
 constexpr char kLoginUtilDialogClass[] =
-    "da0d34cec7b10f6279cf26289e7b639b7cc86d345027040e15c9e6a56e71306";
+    "c3feafc71d506743f4c55f83a570066be10fdf2eb824ad2a71abb34dd69536e";
 constexpr char kSlideNoticeClass[] =
-    "a3475df7d8de1269027d99e86fe21ce66d847134c3f6ad5a2cedb9443e17f91";
+    "ddfd3bf94b772710f2c1807719976f9d830bc90c6e545544935db4b4f7c945b";
 constexpr char kMultiLineNoticeClass[] =
-    "a7beddf802ebba8f45f59c0e495e1175d084cf78b3f3d5a7fdf6b183202c1e4";
+    "a092cb87c0efbb792eb49e4032cc9103ba12a170b4fa4bf1e7a2af8d5bc80e1";
 constexpr char kAntiMacroNoticeClass[] =
-    "a1ed9cf37c8348c48b7e42018585f9e2a52d81d0ac86721244910465aa139fb";
+    "b721eb86664549bf2f1dce87c1ca29af8d21da3136b3f214e020e6b0f3370c1";
 // UIUtilDialogEx — 与 shop_port 同源
 constexpr char kUtilDialogExClass[] =
-    "f38993609fdcd5d4329046a4fea16805d838d5855315efe7fe2a8c5b05bc042";
+    "cfbd9dc56dec0865979fd0a033a6bade99d54ffd48316374e3ca479b9960731";
 // 官方关窗（CMS CloseDialog→UIDialog.Close）；不走 OnClickYes/Ok，避免踢线「確認」
-constexpr uint32_t kRvaCloseDialog = 0x778CC0;   // UIUtilDialog.CloseDialog
-constexpr uint32_t kRvaUiDialogClose = 0x117A290;  // UIDialog.Close（shop_port 同源）
+constexpr uint32_t kRvaCloseDialog = 0x788520;   // UIUtilDialog.CloseDialog
+constexpr uint32_t kRvaUiDialogClose = 0x14B9700;  // UIDialog.Close（shop_port 同源）
 constexpr char kHashCloseDialog[] =
-    "de9ac0fd03b2844bad25ca20166c27d327514761da7bc4b9dca3ba858666441";
+    "f3d91faf993c7a9e08c764f253ef738d635dcf738162cc917880306d266bf57";
 // UIUtilDialog.Notice — Abs trampoline 会 PATCH GA .text（NGS/GRAP 忌讳）。
 // BIN 16:xx：装 Abs 后反复「安全模組…強制關閉」；封禁/踢线文案改走 DialogScrape。
 // 开启：截 sMsg + 返回实例；dismiss 仍以 FindAll 为主。
 constexpr bool kNoticeAbsEnabled = false;
-constexpr uint32_t kRvaNotice = 0x74ACD0;
+constexpr uint32_t kRvaNotice = 0x75A7C0;
 // 序言：push r15/r14/r12/rsi/rdi/rbp/rbx ; sub rsp,80h（17B，指令边界；IDA 运行时 dump）
 constexpr size_t kNoticeSteal = 17;
 constexpr uint8_t kNoticeSig[kNoticeSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x56, 0x57,
                                               0x55, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00,
                                               0x00};
 // YesNo — 同表邻接；封禁单钮窗也可能不经 Notice
-constexpr uint32_t kRvaYesNo = 0x746B50;
+constexpr uint32_t kRvaYesNo = 0x756730;
 constexpr size_t kYesNoSteal = 19;
 constexpr uint8_t kYesNoSig[kYesNoSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                                             0x56, 0x57, 0x55, 0x53, 0x48, 0x81, 0xEC, 0x88,
                                             0x00, 0x00, 0x00};
 // UIUtilDialog 表邻接备用 Open（少 xref；登录封禁路径候选，callee of login packet handler）
-constexpr uint32_t kRvaAltDlgOpen = 0x77FCF0;
+constexpr uint32_t kRvaAltDlgOpen = 0x78F530;
 constexpr size_t kAltDlgSteal = 14;
 constexpr uint8_t kAltDlgSig[kAltDlgSteal] = {0x41, 0x57, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48,
                                               0x81, 0xEC, 0x90, 0x00, 0x00, 0x00};
 constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
-constexpr uint32_t kRvaGoSetActive = 0x4E5CAD0;
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4E5CC70;
+constexpr uint32_t kRvaGoSetActive = 0x4E96580;
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4E96720;
 constexpr size_t kOffCachedPtr = 0x10;  // UnityEngine.Object.m_CachedPtr
 constexpr int kDismissMissRetries = 2;
 constexpr DWORD kDismissMissGapMs = 80;

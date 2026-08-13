@@ -39,64 +39,64 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-// remount 纠偏 2026-08-06：消费 pending 的 Doing = 0x1027ED0（旧邻域 0x1026060），
-// 不是 dump 误标名的 0x10AB400。
-constexpr uint32_t kRvaTryDoingTeleport = 0x1027ED0;
-constexpr uint32_t kRvaVecCtrlSetForcedFlush = 0x11AA570;  // → Mp+0x48 := 1（seed^6）
-constexpr uint32_t kRvaMovePathSetForcedFlush = 0x11A1190;  // Mp+0x48 := 1（seed+0x6C）
+// remount 纠偏 2026-08-06：消费 pending 的 Doing = 0x1045B40（旧邻域 0x1026060），
+// 不是 dump 误标名的 0x10C89E0。
+constexpr uint32_t kRvaTryDoingTeleport = 0x1045B40;
+constexpr uint32_t kRvaVecCtrlSetForcedFlush = 0x11C2B00;  // → Mp+0x48 := 1（seed^6）
+constexpr uint32_t kRvaMovePathSetForcedFlush = 0x11B9520;  // Mp+0x48 := 1（seed+0x6C）
 // remount 2026-08-06：NockBack 内联写 impactNext；SetImpactNext CFA（IL2CPP xmm1/xmm2 ABI）
-constexpr uint32_t kRvaVecCtrlNockBack = 0x11BDE90;
-constexpr uint32_t kRvaVecCtrlSetImpactNext = 0x11AA5F0;
+constexpr uint32_t kRvaVecCtrlNockBack = 0x11D63C0;
+constexpr uint32_t kRvaVecCtrlSetImpactNext = 0x11C2BB0;
 constexpr char kHashTryDoingTeleport[] =
-    "af8e399020feab57b9618e03aa476b5fd41dab01d67a9c0184794a8fa823e74";
+    "f44d1eecad0e624b2077193a9c160b6f942a6b97ee4828a0c63b508d1ea35f9";
 constexpr char kHashVecCtrlSetForcedFlush[] =
-    "b9b4ff83cc6c06dd35af3749d73ef5a7c65d38e9a5af52530893bae2780d4b0";
+    "b953cfe471a1c87efe736e2ca98006d9c9da046ce90cb7ad581767cd33f4ac5";
 constexpr char kHashMovePathSetForcedFlush[] =
-    "bd22d20e9f838404e90eca003a298363f3811901d280ac6a687f35aac79f693";
+    "ababd40b68df4134f5696fd29cf0ebdfcec6a1a3c2ab3e2274e99d027792c15";
 constexpr char kVecCtrlClass[] =
-    "e0eb55b82f10cb9eeb9424eb3aadf1450a014afa564bc55c3739b2909abfbbc";
+    "b4117afc7f6f9c58587c528c3dec862d440e5d266ad70b764c0058566918784";
 constexpr char kMovePathClass[] =
-    "bf8877c4b6040ee2bbcd43dece8fa422d433874b58900fd618aad4f5b0309e7";
+    "d1f09fe38ae39103f66d292c00915a7b041c5bc8ff138566c3c8d7e6c2290bc";
 constexpr char kActorBaseClass[] =
-    "edc85ce203606bdb549e5fb94458b1d2d11ce78034d24d41e39a54c0288d38e";
+    "bef0eed02528709201717d93717a1904bfa2e850dfe1f5fadf473c0e9c78d9b";
 constexpr char kFhClass[] =
-    "efa6625ea3b04a69e7c5b850c9e7f5be45cc60edd0f20d9bd6cd400a4dcd51a";
+    "aa3d8db6b3f8e88e2163fa99baddd275f7dd95560a044f4fbf0d9f8f17ff067";
 // True TW UserLocal = User subclass with Teleport@0x3C8（resolve: il2cpp_shape）
 
 // hash → field_get_offset（与 foothold / attack / player_combat 同源）
 constexpr char kHashUserVecCtrl[] =
-    "<acb8946a384ed398c4ad9268349397cf4f6e65cf136078ebc9aa26a949efd41>k__BackingField";
+    "<bfd62ef3b3e356b3d554a10a21a0f46b1272d519b934db1a7c4df88a0adcd52>k__BackingField";
 constexpr char kHashVcCurFh[] =
-    "<ee95e4ea9526a8d5a2c0e38ae6b59726f52587018d82072a2020dc6ac5a2398>k__BackingField";
+    "<f191525b3e75203f83e8420264723f78754068945de8fb7c4c15e3a96c42d3b>k__BackingField";
 constexpr char kHashVcLastFh[] =
-    "<ea429355b0867d9d038619ab4f67f569951204a479856815af334e740450be2>k__BackingField";
+    "<abdbb8d9dbeb495459795b82b5d20e99e5254eff3ffc2cfd707e71d03dd981d>k__BackingField";
 constexpr char kHashVcMovePath[] =
-    "<f4ed2fef5fe256b1a408b40c57a5c59e4fff75169f423e0ecb1ccd062926bb0>k__BackingField";
+    "<c0fdbf0eba6eaeb006ca46c60f8e3b5a3016fd62c7d2e177b6b04f02fb73ae4>k__BackingField";
 constexpr char kHashVcRelPos[] =
-    "f9386810e222adacdfbd2e9232322d7cfcd301fa19b7734975ad616d30dfc0c";  // RelPos; V=+8
+    "bf593c8b8886d021b370e0ab3d9c8eb97bf29672db1114a1309edd63039ade7";  // RelPos; V=+8
 constexpr char kHashVcAp[] =
-    "e558fbd3da65bf13bea9360dfa61506af709ad89f925bc16b67e7e1cdb24107";  // AbsPos; Y=+8
+    "eeb6a8c060a20622eef369b184c450bad5515167fa2cb42392277c7b0cbfe7d";  // AbsPos; Y=+8
 constexpr char kHashVcApl[] =
-    "b5eb27f6f80eeaea51f811969e3c5bc8a7b73b19741a8cb481b29a0082c958d";  // Apl; Y=+8
+    "e5a40d07ca56525d5a34df38aaeadf1dc421da7a583f82a6b8a0e7736ebd8aa";  // Apl; Y=+8
 constexpr char kHashVcMoveAction[] =
-    "fa93e903eebde8b6fd77060143b0b2f1293e84eeba873dae2034090150daad4";
+    "e257ab165ebf2d62063ad865069ae4f986f2d4c9cebfe72bc845c9a08a29d5c";
 constexpr char kHashMpForcedFlush[] =
-    "daff0d0fb89c860e58ea67292ca7d7353f50a0d671b9433ca1bb57b85fc1488";
+    "e566e363f506f56669813f9ecdfc46d9a029cdd51876781cfbab33ded21662b";
 constexpr char kHashMpX[] =
-    "d99edd7ee4ef38e67d4d2e4868edde9a32596d6d3f968d070462878b120e0cf";
+    "c7f66440857b3e9b5fe23b65b29f4967f1c74fa47e8e9258247a6ab43547643";
 constexpr char kHashMpY[] =
-    "d79f3c9cbc0755e62cb2034e7e8876a529873e107c2d6a69ff5e6720db86fa9";
+    "a162f8fb3afb0fda6a70f8808702297324cab764f77dbc54e3959f36f1ddb5d";
 constexpr char kHashFhX1[] =
-    "<fb0267bbb0c9e644310fb7a85bb2de177d3efc8e9371567f0302ab754661f78>k__BackingField";
+    "<c6a6ce742c28ef65a0afa2499125148e3bd7817da1705d3f50af1c798de11a8>k__BackingField";
 constexpr char kHashFhY1[] =
-    "<f116f299fc84de052c922811e44d60e7d144d24e0494716e98c6c8027a340c1>k__BackingField";
+    "<b807c8a0c79daaaf1ae451d63d11c574255c3f6d63d1f72547dbf14c9019a8d>k__BackingField";
 constexpr char kHashFhX2[] =
-    "<f7e3a1cba4a600a510aa957c3ae5b7bee9fe6ac36d205bb6dc4a3c4b9563fdb>k__BackingField";
+    "<ce68abda8736616cc3d1d082b5e9693af0894e3cd235df3ae89dd53a1d5a301>k__BackingField";
 constexpr char kHashFhY2[] =
-    "<e5815a35031c0f19c85de13d144d3f905064d8edf6cf59601d743c1185aba4b>k__BackingField";
+    "<a870d7e91fbc29db3569a43c1434df44f15e61aad8df80aee2c1f831c65d383>k__BackingField";
 // UserLocal.Teleport valuetype block（嵌套相对：IsValid+0 / ByPortal+1 / Pos+4 / ticks+0xC/+0x10）
 constexpr char kHashTeleport[] =
-    "d3cfbaeeac1657b366daccedd1678e39163e53d47ef74f20cf2fceba1ca2750";
+    "e8578c1ebc93ea1edfe91c202652b1c954b9eefa5bbeb8bcfc12444975fbf3b";
 
 constexpr size_t kFbVecCtrl = 0x50, kFbVcCurFh = 0x28, kFbVcLastFh = 0x30, kFbVcMovePath = 0x78;
 // P0b：LadderOrRope@0x40（无稳定 hash 时钉 fb；点飞预清不用它，飞穿层要卸）
@@ -104,7 +104,7 @@ constexpr size_t kFbVcLadderOrRope = 0x40;
 constexpr size_t kFbVcRelPos = 0x88, kFbVcAp = 0x98, kFbVcApl = 0xB8, kFbVcMoveAction = 0x84;
 constexpr size_t kFbMpForcedFlush = 0x48, kFbMpX = 0x10, kFbMpY = 0x12;
 constexpr size_t kFbFhX1 = 0x14, kFbFhY1 = 0x18, kFbFhX2 = 0x1C, kFbFhY2 = 0x20;
-constexpr size_t kFbTeleport = 0x3C8;
+constexpr size_t kFbTeleport = 0x390;
 
 size_t gOffVecCtrl = kFbVecCtrl, gOffVcCurFh = kFbVcCurFh, gOffVcLastFh = kFbVcLastFh;
 size_t gOffVcLadderOrRope = kFbVcLadderOrRope;
@@ -486,7 +486,7 @@ bool BindFns() {
     // void() 在 UL 上极多 → unique=false，靠哈希/RVA。
     if (gLocalUserKlass) {
         constexpr MethodShape kDoing{0, TypeKind::Void, false, true, {}};
-        // 不传 plain「TryDoingTeleport」：dump C 误把该名贴到 0x10AB400，plain 会命中错桩。
+        // 不传 plain「TryDoingTeleport」：dump C 误把该名贴到 0x10C89E0，plain 会命中错桩。
         auto* mi = resolveMi(gLocalUserKlass, kRvaTryDoingTeleport, kDoing, nullptr,
                              kHashTryDoingTeleport, &pathDoing);
         gMiDoing = mi;
@@ -711,7 +711,7 @@ bool ApplyFillDoing(void* lu, void* vc, float tx, float ty, uint32_t fhId, const
         WriteI16(mp, kOffMpY, static_cast<int16_t>(static_cast<int>(std::lround(ty))));
     }
 
-    // 引擎原生瞬移体（VecCtrl RVA 0x11AA2D0，由 Doing@0x1027ED0 消费 pending 后调用）只做：
+    // 引擎原生瞬移体（VecCtrl RVA 0x11C2890，由 Doing@0x1045B40 消费 pending 后调用）只做：
     //   CurFh(vc+0x28)=null → LastFh(vc+0x30)=null → Ap/Apl ← (int)x,(int)y →
     //   Ap.V/Apl.V 归零 →（vc+0x80 置位时）MovePath_MakeMovePath 上报。
     // 它**不写 RelPos、不挂踏板**；踏板由下一物理帧 CollisionDetect 自行重挂。

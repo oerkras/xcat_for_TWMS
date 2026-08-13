@@ -214,7 +214,8 @@ void PauseExposure(const ports::user_pool::RemoteThreatSample& t, bool threat) {
 
     if (gPaused) {
         // 热保持：有人期间每拍再钉 Encounter 位（位掩码下测谎清不掉本模块位，仍防漏闸）。
-        if (gStopCombat.load() && !auto_lie::IsBusy())
+        // GM 升级：无视「先停手」勾选，一律硬闸。
+        if ((threat || gStopCombat.load()) && !auto_lie::IsBusy())
             simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, true);
         // 名单变化（新人进图）：日志 + 刷新通知，避免面板还挂着旧名。
         if (names[0] && std::strcmp(names, gLastNamesLog) != 0) {
@@ -225,7 +226,8 @@ void PauseExposure(const ports::user_pool::RemoteThreatSample& t, bool threat) {
         return;
     }
     gPaused = true;
-    if (gStopCombat.load())
+    // GM 升级：无视「先停手」勾选，一律硬闸；普通遇人跟 autoReloginStopCombat。
+    if (threat || gStopCombat.load())
         simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, true);
 
     std::snprintf(gLastNamesLog, sizeof(gLastNamesLog), "%s", names);
@@ -240,8 +242,8 @@ void ResumeExposure(bool townSkip = false) {
         Log("resume deferred (auto_lie busy)");
         return;
     }
-    if (gStopCombat.load())
-        simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, false);
+    // GM 升级也可能在未勾「先停手」时钉过硬闸——一律清 Encounter 位。
+    simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, false);
     gPaused = false;
     gLastNamesLog[0] = 0;
     StopGmAlarm();
@@ -424,7 +426,8 @@ int LastAdminLikeCount() { return gLastAdminLike.load(); }
 int LastHideSuspectCount() { return gLastHideSuspect.load(); }
 
 bool HoldsCombatPause() {
-    return gPaused && gStopCombat.load() && gEnabled.load();
+    // GM 升级可在未勾「先停手」时仍钉硬闸；有 Encounter pause 即勿被 channel_hop 抢清。
+    return gPaused && gEnabled.load();
 }
 
 void Tick(DWORD now) {
@@ -504,15 +507,11 @@ void Tick(DWORD now) {
                 (unsigned)threat.sampleAdminJob, other, names[0] ? names : "?",
                 player_hide::IsEnabled() ? 0 : 1);
         }
-        // GM/隐身：主城也处理；跳过进图宽限与 4s confirm，能 hop 就立刻 hop.
+        // GM/隐身：主城也处理；跳过进图宽限与 4s confirm；
+        // 立刻停手+换频（不依赖「先停手 / 一直有人就换频」——那两项只约束普通遇人）。
         gPostHopClearStreak = 0;
         PauseExposure(threat, true);
         PulseGmAlarm(now, /*force=*/false);  // 威胁持续期间强制续响（无视通知静音）
-        if (!gReconnect.load()) {
-            SetState(State::Watching);
-            gConfirmSince = 0;
-            return;
-        }
         if (channel_hop::HasPending() || channel_hop::CooldownRemainingMs() > 0 ||
             now < gHopGraceUntil) {
             SetState(State::Watching);
@@ -586,6 +585,12 @@ void Tick(DWORD now) {
 
     // other > 0（普通远程）
     gPostHopClearStreak = 0;
+    // 普通策略全关：只采样/记账，不停手、不通知、不换频（GM 升级已在上方 early return）。
+    if (!gStopCombat.load() && !gReconnect.load()) {
+        SetState(State::Idle);
+        gConfirmSince = 0;
+        return;
+    }
     PauseExposure(threat, false);
     if (!gReconnect.load()) {
         SetState(State::Watching);

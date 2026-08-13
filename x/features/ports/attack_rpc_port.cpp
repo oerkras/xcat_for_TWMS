@@ -31,58 +31,58 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Session 方法宿主 → ResolveNetworkManagerKlass；单例壳 → ResolveNetworkManagerFacadeKlass
 constexpr char kOutPacketClass[] =
-    "b2cb1e0adcf26c5021bc6b1880a32e838d1eb783e3880f4a70e70990079a04b";
+    "a4c316b8f6223d2bd94628c2cfcfa1d7440b044c6a7043355d2177c60cafb9f";
 constexpr char kHashUserClass[] =
-    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";
+    "c3c6ef70537e5a2c4026c37e65e0d0a8a5f756988f3f3ee148a568fb3176f96";
 constexpr char kHashSecurityClient[] =
-    "cf990184167a3debe30b85ee608efab18ffc750676a5f79617009d0f56bec8d";
+    "e2d19330a89af79ab653c49c1d3d4fc9e3eeb003a28cdd99c28f5a2d28eeb2b";
 
 // P0b / P0c RVAs — remounted 2026-08-04；解析优先 hash/plain（见下方 kHash*）
-constexpr uint32_t kRvaOutPacketCreate = 0x1CC63D0;
-constexpr uint32_t kRvaEncode1Byte = 0x1CD2AE0;
-constexpr uint32_t kRvaEncode1Bool = 0x1CD2BC0;
-constexpr uint32_t kRvaEncode2Ushort = 0x1CD2D50;
-constexpr uint32_t kRvaEncode2Short = 0x1CD2CD0;
-constexpr uint32_t kRvaEncode4Int = 0x1CD2DE0;
-constexpr uint32_t kRvaEncode4Uint = 0x1CD2E60;
-constexpr uint32_t kRvaEncodeVector2 = 0x1CD39B0;
+constexpr uint32_t kRvaOutPacketCreate = 0x1CED550;
+constexpr uint32_t kRvaEncode1Byte = 0x1CF9C60;
+constexpr uint32_t kRvaEncode1Bool = 0x1CF9D40;
+constexpr uint32_t kRvaEncode2Ushort = 0x1CF9ED0;
+constexpr uint32_t kRvaEncode2Short = 0x1CF9E50;
+constexpr uint32_t kRvaEncode4Int = 0x1CF9F60;
+constexpr uint32_t kRvaEncode4Uint = 0x1CF9FE0;
+constexpr uint32_t kRvaEncodeVector2 = 0x1CFAB30;
 // 官方门：Network_SendOutPacket（this=facade）
 //   → HashSet<ushort>.Contains(opcode@pkt+0x20) → Session.SendPacket（[facade+0x10]）
 // 2026-08-03 BIN：直调 Session.SendPacket 旁路 HashSet → 第 3 次 forge 后 ~109ms Disconnected
 // （与 sellbag「错包+Session.Send → 105ms」同型；KickSniff verdict=lean_local_or_soft）。
-constexpr uint32_t kRvaNmSendPacket = 0x1CC7FE0;  // remounted 2026-08-06 · Session.SendPacket
-constexpr uint32_t kRvaSendOutPacket = 0x1CC64D0;  // remounted 2026-08-06
-constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDC3D20;  // remounted 2026-08-06 get_GetUpdateTime
+constexpr uint32_t kRvaNmSendPacket = 0x1CEF160;  // remounted 2026-08-06 · Session.SendPacket
+constexpr uint32_t kRvaSendOutPacket = 0x1CED650;  // remounted 2026-08-06
+constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDDD2E0;  // remounted 2026-08-06 get_GetUpdateTime
 // 延后踢对策：对齐 TryDoingNormalAttack 发包前最小本地态
-//   SetAttackAction(lu, action, aux, skill=null, 0) @0xFDCD80
-//   CollectAttackPacket(50) @0x3C54070（Tap 旁路；SendOut 静态无直调）
-constexpr uint32_t kRvaSetAttackAction = 0xFDCD80;  // remounted 2026-08-04；旧 0xFD39C0
-constexpr uint32_t kRvaCollectAttackPacket = 0x3C54070;  // remounted 2026-08-04；旧 0x3C44C10
+//   SetAttackAction(lu, action, aux, skill=null, 0) @0xFFA520
+//   CollectAttackPacket(50) @0x3C8D740（Tap 旁路；SendOut 静态无直调）
+constexpr uint32_t kRvaSetAttackAction = 0xFFA520;  // remounted 2026-08-04；旧 0xFD39C0
+constexpr uint32_t kRvaCollectAttackPacket = 0x3C8D740;  // remounted 2026-08-04；旧 0x3C44C10
 
 constexpr char kHashOutCreate[] =
-    "d5cef5f625ea2385cd9eaaf8b9a49342353732f8534da040cfa123e58f0ed27";
+    "ce089bef45fbadefdda159818904a69fda050262deeb4713052599d62ec2477";
 constexpr char kHashEncode1Byte[] =
-    "e8c10cdad1bc8d76acb9eec60662b480fca2022b3f2e7c27220303c60151bde";
+    "c18881dcab5467292732314d1c1ec67108773018fb97d2774056f3726713ab8";
 constexpr char kHashEncode1Bool[] =
-    "e9dab7905d38fa77e77e87682f6e1b5ea8610234f29cf70c62c090597bd87c3";
+    "b2f3cd2e0164794c4a3cb115e6bdbe038efe272b6c08ff0d0ddd043ed3ec5ae";
 constexpr char kHashEncode2Ushort[] =
-    "f7190998e9e85f13d196eb32fd01836c30989dc882af38bed9a5edad6635109";
+    "e1f6fdb38625a15c5f98fef5170822dc029457bd377f2ad657c1534e47e5cdf";
 constexpr char kHashEncode2Short[] =
-    "df78a86c45219f32ebf721c10bf250e452884e246cc51e93a9f214c9336077a";
+    "af89a74ef19d9bfab31c353fbc86e47250eb588d4541c9b0704bba0c843b7de";
 constexpr char kHashEncode4Int[] =
-    "aef28919a960e8ea6d3123e94e8645acd249c41141b5432517483ebb8b8e794";
+    "e9254bf51dd92d2ed5929ed34855185afde930db1f9f5a0f150d04f64deb4da";
 constexpr char kHashEncode4Uint[] =
-    "c0b0cc4dd5d8f33ca2d216e88d4eb65e318ce5002c0bf1b77704fb49a681df2";
+    "b7ab6c57c88d64bd585811cfb9af86d091e1874ee52d6bada3f7dd2d890a100";
 constexpr char kHashEncodeVector2[] =
-    "a1c03b7e4f519c7ecc5077a51cbc6b8fc1b5ace2a4c3a09135f093ef547edaa";
+    "aa02fcedc61831df140737a7023dc48c1ee8d0a4c9ec1be62d1e84b2c6533fa";
 constexpr char kHashSendOutPacket[] =
-    "daa9638dc3f216de3f2938f7e4fc03075fba765187bfd400bec5119e32f53c9";
+    "a2d1a1d78686c977291091b4a40fc2e31fac668b1d69d500eeb42e89f58d3c3";
 constexpr char kHashGetUpdateTime[] =
-    "fef21c96e8a274f3b1aa04ac1c45bd9c6c4364275902033cf3906e5ffb72bfd";  // get_GetUpdateTime
+    "c4a3c12784fe612dfcf19c01d011ac9e7ac1a519b18b2c3b247c4e4a9dc2df6";  // get_GetUpdateTime
 constexpr char kHashSetAttackAction[] =
-    "c34710751a49f54b005e9b33044bd2b751e4babae00be95aa206196ee8fd890";
+    "e16230a9cbffdf43f241afaf6cf8f74676f81554fb6a70d7dd7082f9226b92d";
 constexpr char kHashCollectAttackPacket[] =
-    "ca3747b3c23c4547292001735f784296998b87743d2acb022a5ab7bdca851b3";
+    "d3637ed6c1ffc5bfdb234775678ec7dcbb805d3674c29bb6dd41c2d0e2935de";
 // 探针安全：单次勾选最多成功发包；5 刀后再开第 6 刀仍 ~0.9s 踢 → 先收到 2。
 // 每段开启最多 2 刀；进程内累计再硬封顶（BIN：重开 UI 清零后第 6 刀 ~111ms 静默断线）。
 constexpr int kAutoStopAfterOk = 2;

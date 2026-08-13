@@ -5,7 +5,7 @@ namespace x {
 namespace features {
 namespace attack_accel {
 
-// 攻击加速（SetDesired）：清忙锁 LocalUser+0x118=-1（字段哈希防漂移，hint 0x118）。
+// 攻击加速（SetDesired）：清忙锁 LocalUser+0x11C=-1（字段哈希防漂移，hint 0x11C）。
 // 出刀频率看面板「间隔」/ simpleCombatAttackIntervalMs（默认 123，下限 1）。
 // 非「技能无 CD」。禁止 GA .text hook。
 // 实验入口：PayloadControl.attackAccelClearBusy（实验 TAB）；首页 attackAccel 暂关。
@@ -20,7 +20,7 @@ namespace attack_accel {
 // 实验·跳过 PrepareActionLayer（默认关，独立开关；数据面改 LocalUser 虚表槽，禁 E9）：
 //   防漂移：方法哈希 → FindMethodCached(RVA→kind) → 扫 VirtualInvokeData；hint Slot32 仅末级。
 //   仅落地武装后才跳过攻击类 Prepare；action==6 Idle 永远透传。
-//   跳过时立刻 +0x118=-1 并改调 Idle Prepare（无攻击层则 Slot14 永不解锁，会卡刀）。
+//   跳过时立刻 +0x11C=-1 并改调 Idle Prepare（无攻击层则 Slot14 永不解锁，会卡刀）。
 //   SetAttackAction 仍可能事后写 actionIdx → worker 在 skipArmed 时周期清忙锁兜底。
 //
 // 实验·A 系 ActionSpeed（SetActionSpeedDesired，默认关）：写 SecondaryStat.nSpeed_@0x84=+40
@@ -35,7 +35,7 @@ namespace attack_accel {
 //   写 CalcWeaponAttackSpeedTier 独占种子 dword（GA .data，禁 E9）：lo 由滑条设定（默认 -10）。
 //   不开本项时引擎仍夹 [2,10]，PB=-8 顶格仍是 deg=2（×0.75）。
 //   开启后 PB=-8 可落到 deg<0（如 wpn4+(-8)→-4，×0.375）；lo=-10 时最快 deg=-10 → 延迟×0。
-// remount 2026-08-06：Prepare 0xFE06A0/0x1253CA0；字段位移未变，哈希已换；IDB imagebase 0x7ff848c80000。
+// remount 2026-08-06：Prepare 0xFFDB40/0x1254DF0；字段位移未变，哈希已换；IDB imagebase 0x7ff848c80000。
 void Init();
 void Shutdown();
 void StartWorker();

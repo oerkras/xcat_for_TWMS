@@ -43,24 +43,24 @@ constexpr uint32_t kUnableMigrateBit = 0x10u;
 
 // TypeDef hashes (dump.cs 2026-08-04).
 constexpr char kHashMapDataInfo[] =
-    "a5fbae684ca9f39b46ece8fc0599b711f8e42ceb90ae91f2c0c9d1e65c38710";
+    "ebca03204299a9ee59379b396a149be880454f2d9529bd8cdc13db169725a97";
 constexpr char kHashMapData[] =
-    "a2eca01ad670b3c4b4ba85636ed1dfa4dc01ac28c03a91163597f3e0c9f4cf1";
+    "ae73c6f358ac48dd9bdcadbff6e6bf7991739ace4c41cc7d43e49afa5020905";
 constexpr char kHashSceneMap[] =
-    "a0e81e802b84e652108c9ee7f8c05d725ea5198ae5b3ac01471779364217bfb";
+    "ceff58511b6d5b94f2dcb6275e2aa5e0b9fd07f96048876e0308b764b9e9880";
 // IsTown / Option / Info / MapData backing / WM._field / WM._currentMapData
 constexpr char kHashIsTown[] =
-    "a0b6dac350c4a664a60c84dc90562fc5e127ab592ec77dbd7f08b7a25ebfeb3";
+    "a12a1b7368e09ab6ab2039b3ceb9a6190d6d37617f8a5e922de5faa173e080e";
 constexpr char kHashOption[] =
-    "a47df7b10bff5609aa05203b6f844beb94245afcbb4a848e47c9e8d289e70b3";
+    "a849b53349910d68c6d3ce42915bea1b02cba87b06abd446c4fcd1b3568693d";
 constexpr char kHashMapDataInfoField[] =
-    "d08fedab3887df3ffd2354535aa3baa385c9e49c098e1911177ebe43144150b";
+    "b46b25a82499b380345f0ad34fa9bc31a76dd2737cb85f021bb9d8bd67c2333";
 constexpr char kHashSceneMapDataBacking[] =
-    "<bcab656236804c9b54d1bee33c5176eb9fa13c123b9787bd7ff0ae4903722ca>k__BackingField";
+    "<df56e48dce89e4e4aff29a6285c61e0ad40aaa1df185a69b96f3c7a90381da1>k__BackingField";
 constexpr char kHashWmField[] =
-    "cd05676f83eff32a7a754d6c6287f124ca239987ddd9c57667f9cce26502a0e";
+    "d2876bc350bd665e58b3e300d3c3b5acb1c1d863c0e681cf8635e7b17788cc8";
 constexpr char kHashWmCurrentMapData[] =
-    "ca7537d2fae3d15edc28a3fb9695328e94aedb3358c69a3c33807338687b5b9";
+    "c721e31af565a590a794bd25addb031bd407242fcb9348ce92e729fa8896427";
 
 constexpr DWORD kTickMsApply = 50;    // 未稳住 / 换图：快拍一次写到位
 constexpr DWORD kTickMsHold = 1000;   // 已稳住：慢校验（游戏一般不回写 IsTown）
@@ -398,7 +398,9 @@ DWORD WINAPI Worker(LPVOID) {
 }  // namespace
 
 void Init() {
-    gDesired.store(false);
+    // 禁止在此清 gDesired。BIN fff7af：play-boot settle 时 ApplyControl 已
+    // SetEnabled(1)，随后本 Init 把开关打回 0；Poll 见 writeTick 未变而跳过，
+    // 直到 IMGUI 再点一次才重新下发。静态默认已是 false。
     x::runtime::LogI("AuctionTown",
                      "init — field auction client bypass via MapDataInfo gates only "
                      "(no .text); migrate RVA 0xDDD620 / op 0x002E; "

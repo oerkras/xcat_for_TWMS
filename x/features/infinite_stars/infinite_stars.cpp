@@ -5,8 +5,8 @@
 // 勾上后自动维持该 BUFF：服端认了就不扣飞镖（耗蓝）。未学会只走下面的客户端冻数量。
 //
 // 辅路径（runtime dump `Dumps/runtime/GameAssembly.dll`）：
-//   ItemSlotBundle.SetItemNumber  RVA 0x12F0EA0  `mov [rcx+0x28], dx; ret` + NOP
-//   ItemSlotBundle.GetItemNumber  RVA 0x12F0EB0  `movzx eax, [rcx+0x28]; ret` + NOP
+//   ItemSlotBundle.SetItemNumber  RVA 0x1303C00  `mov [rcx+0x28], dx; ret` + NOP
+//   ItemSlotBundle.GetItemNumber  RVA 0x1303C10  `movzx eax, [rcx+0x28]; ret` + NOP
 //   ItemSlotBase.ItemId           @0x10
 //   ItemSlotBundle.nNumber        ushort @0x28
 // 虚调用走 vtable，PatchMethodInfo 拦不到；函数体只有 5 字节，靠 ret 后对齐 NOP
@@ -40,8 +40,8 @@ namespace {
 
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 
-constexpr uint32_t kRvaSetItemNumber = 0x12F0EA0;
-constexpr uint32_t kRvaGetItemNumber = 0x12F0EB0;
+constexpr uint32_t kRvaSetItemNumber = 0x1303C00;
+constexpr uint32_t kRvaGetItemNumber = 0x1303C10;
 constexpr int kSkillSpiritJavelin = 4121006;  // NightlordSpiritJavelin
 constexpr float kRenewRemainSec = 8.f;
 constexpr DWORD kCastGapMs = 3000;

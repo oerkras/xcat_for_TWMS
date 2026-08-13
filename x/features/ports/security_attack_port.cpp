@@ -35,11 +35,11 @@ int32_t ReadI32Local(void* obj, size_t off) {
 
 // Remount 2026-08-06：TDI 15147 字段 ACS 重哈希；偏移仍 0/8/0x10；klass cf990184… 未漂。
 constexpr char kHashPktDict[] =
-    "d87491da2374f815e43cf3ce5d21f637171b2bba55112b8d27d2ec8d2f84264";  // Dictionary<ushort,int>
+    "c0ca28597a5eb908915f00db20204b29878f4e2a0f210be4bafc703ecdda984";  // Dictionary<ushort,int>
 constexpr char kHashSkillDict[] =
-    "e2536ba7e6bd90ceb4e19ab119d02560d65bcf3200d03c48d3f150c3ccad735";  // Dictionary<int,int>
+    "f4bf6442b98e0fceba6b54850078eb35bedebc5f89350eaa0882e043a724383";  // Dictionary<int,int>
 constexpr char kHashDetectTime[] =
-    "c5c58d4820beefd3153ff06483d828a765e6261b45db32658bd1cc34090b1e4";
+    "e3a65623e6f1b5d8c222812fd065dc14b92abfcde3ec850064e840aeaee89e4";
 constexpr size_t kFbPktDict = 0x0;
 constexpr size_t kFbSkillDict = 0x8;
 constexpr size_t kFbDetectTime = 0x10;
@@ -108,7 +108,7 @@ void EnsureStaticFieldOff() {
         gKlass = x::runtime::il2cpp_shape::ResolveSecAttackKlass();
         if (!gKlass) {
             gKlass = x::runtime::il2cpp::FindClass(
-                "", "cf990184167a3debe30b85ee608efab18ffc750676a5f79617009d0f56bec8d");
+                "", "e2d19330a89af79ab653c49c1d3d4fc9e3eeb003a28cdd99c28f5a2d28eeb2b");
         }
     }
     if (!gKlass) return;

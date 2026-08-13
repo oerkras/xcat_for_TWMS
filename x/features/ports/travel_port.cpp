@@ -44,30 +44,30 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 constexpr char kPortalManagerClass[] =
-    "e67f9ad37cf404d09bae32979e6e59ad535a364232b52dcf9a1d59458a0ed91";  // remounted 2026-08-06
+    "e9b546b967ec6df510bfa47a9e6604b3551a412c124f7b956f603ef8878dede";  // remounted 2026-08-06
 // WM / UserLocal / NM → il2cpp_shape Resolve*Klass（hash + shape）
 // SEND OutPacket TypeDef 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "b2cb1e0adcf26c5021bc6b1880a32e838d1eb783e3880f4a70e70990079a04b";
+    "a4c316b8f6223d2bd94628c2cfcfa1d7440b044c6a7043355d2177c60cafb9f";
 // remounted 2026-08-06 · dump.cs / script.json
 constexpr char kHashCheckMovePortal[] =
-    "f480d61f81686460994a568f0a78aaf5e4ae9c12fe009658ba7af2517c58eb3";
+    "abd49e1635f6d50229751e202238f586c4da56d26891c3e5dec4467e59646b6";
 constexpr char kHashOutCreate[] =
-    "d5cef5f625ea2385cd9eaaf8b9a49342353732f8534da040cfa123e58f0ed27";
+    "ce089bef45fbadefdda159818904a69fda050262deeb4713052599d62ec2477";
 constexpr char kHashEncode1[] =
-    "e8c10cdad1bc8d76acb9eec60662b480fca2022b3f2e7c27220303c60151bde";  // Encode1(byte)
+    "c18881dcab5467292732314d1c1ec67108773018fb97d2774056f3726713ab8";  // Encode1(byte)
 constexpr char kHashEncodeStr[] =
-    "c9ea89f993b612dbfdc4fffe6486b28a58cfd581c4c3d2af5262c85dd5a4395";
+    "ad9d6fd40f896414df029a583ee0cd1db71fce156b76dc37f524810d33f1fa3";
 constexpr char kHashSendPacket[] =
-    "ddc1a3d2b1ecceba615002a4805504bc8dc6096ad3706c3d16a06875bd4de28";  // Session bool(OutPacket)
+    "f9741df05df4a514fa1c509b0d209d4b098e4e1df5d244c21a7059d63308199";  // Session bool(OutPacket)
 
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
-constexpr uint32_t kRvaCheckMovePortal = 0xDCC6D0;  // remounted 2026-08-06 WM.CheckMovePortal
-constexpr uint32_t kRvaOutPacketCreate = 0x1CC63D0;  // remounted 2026-08-06 OutPacket.Create
-constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CD2AE0;  // remounted 2026-08-06 Encode1(byte)
-constexpr uint32_t kRvaOutPacketEncodeStr = 0x1CD31F0;  // remounted 2026-08-06 EncodeStr
-constexpr uint32_t kRvaNmSend = 0x1CC7FE0;  // remounted 2026-08-06 Session.SendPacket bool
-constexpr uint32_t kRvaSendOutPacket = 0x1CC64D0;  // Network.SendOutPacket → 直调 SendPacket RVA
+constexpr uint32_t kRvaCheckMovePortal = 0xDE5BA0;  // remounted 2026-08-06 WM.CheckMovePortal
+constexpr uint32_t kRvaOutPacketCreate = 0x1CED550;  // remounted 2026-08-06 OutPacket.Create
+constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CF9C60;  // remounted 2026-08-06 Encode1(byte)
+constexpr uint32_t kRvaOutPacketEncodeStr = 0x1CFA370;  // remounted 2026-08-06 EncodeStr
+constexpr uint32_t kRvaNmSend = 0x1CEF160;  // remounted 2026-08-06 Session.SendPacket bool
+constexpr uint32_t kRvaSendOutPacket = 0x1CED650;  // Network.SendOutPacket → 直调 SendPacket RVA
 // CMS ClientPacket.UserPortalTeleportRequest = 114 · wire 0x0072（Rpc 伪造仍用 enum）
 constexpr int kClientPortalTeleport = 114;
 constexpr uint16_t kWirePortalTeleport = 0x0072;
@@ -90,58 +90,58 @@ constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 
 constexpr char kMapPortalDataClass[] =
-    "e33e43ed48276e30b1ffac1e543e2d7f439e5b5709b9e8b3140fdac25a6bb60";  // remounted 2026-08-06
+    "a7ad5278fa910d7f3696983244c7962a52026007d55fa34efee08ab5f8fa8ab";  // remounted 2026-08-06
 constexpr char kPortalClass[] =
-    "d0a22aa37d18c7ac1fb75be043fa2115169e2c7410e110876a1f5d34004f486";  // remounted 2026-08-06
+    "b8721472f37805f60a87f75aff0797603b337101b32a8f5a3d4e77a295c5cb6";  // remounted 2026-08-06
 constexpr char kActorBaseClass[] =
-    "edc85ce203606bdb549e5fb94458b1d2d11ce78034d24d41e39a54c0288d38e";  // = teleport_port
+    "bef0eed02528709201717d93717a1904bfa2e850dfe1f5fadf473c0e9c78d9b";  // = teleport_port
 constexpr char kVecCtrlClass[] =
-    "e0eb55b82f10cb9eeb9424eb3aadf1450a014afa564bc55c3739b2909abfbbc";  // = teleport_port
+    "b4117afc7f6f9c58587c528c3dec862d440e5d266ad70b764c0058566918784";  // = teleport_port
 constexpr char kPacketClass[] =
-    "b374f35823e074687fd2a9225e7738d9b8b664c18aed556fc7835da03f2bad1";  // Packet base 13773
+    "bc38a59f64514be05547df152fb147799b9b47be10556655fe15485379f79f8";  // Packet base 13773
 
 constexpr char kHashPortalData[] =
-    "bbe42ed7f0f97903601a2a6124e43ee9439f5966c25a7ddc7c9d0bfcb39ec1b";
+    "b255c1d29cbbabaf1d226048c605864fc9ccb8388bb7136db1dccf954420153";
 constexpr char kHashMpdId[] =
-    "<ad9a043484d1666fc6beef64680b7208afecfc60044e7bd92f4f2f85a72e174>k__BackingField";
+    "<c9d96405173ed03e6aa5b709481215e8a507a3d5d3affdafade7c349983557e>k__BackingField";
 constexpr char kHashMpdType[] =
-    "<c70d5285f0b73da84151d639d00281113d897c7a3b95716c045ae40c8a17345>k__BackingField";
+    "<e372f0e3b729d4ba5215988ced36ef6da9948aa0c935cf5a047723859769b5c>k__BackingField";
 constexpr char kHashMpdEnable[] =
-    "<a4289b27033bae7778f40426f264efb62d877cc244b3008a7c8ab0cd0cae7c5>k__BackingField";
+    "<b3c2792d0e0c3cdace23be96e37aa1d7c52ceff3c93481697327a7fdfc47b4e>k__BackingField";
 constexpr char kHashMpdPName[] =
-    "<ac7608e244c4a4ad5ab2c8f4ae620ce34c8fa3370f803a04a682dcbb0aa7dad>k__BackingField";
+    "<fd018601dd73a049f61141ab041106c81f8a4ffecc325eaa5851e2a1a79c4ee>k__BackingField";
 constexpr char kHashMpdX[] =
-    "<a6fcd2442fb866867177acd414a548e6a39cfe7b975d1fb4f3a8249ca499aa9>k__BackingField";
+    "<ae6f830f035271e5fd371229421326ba33d75ddb30882dd70d4f9a88351f140>k__BackingField";
 constexpr char kHashMpdY[] =
-    "<e6e9f7534c7873ef275b8322f860a8fab3fe54e149dfd0e968b8f8071778103>k__BackingField";
+    "<a7af28ab0c66db4be26ffc101b823d07a144b28321e77fc82f780e9ae9b9a9a>k__BackingField";
 constexpr char kHashMpdToMapId[] =
-    "<c752ecd5869737e7695b94c3efc683bbc4add8ab1a158fbf0134d1abdcd7ece>k__BackingField";
+    "<e4c64accf604fe41c540b6e624e2fd4c6e966275929a6c0c851dc8d3c234a8e>k__BackingField";
 // MapPortalData 字段偏移未漂；hash remount 2026-08-06 dump.cs TypeDef 2079
 constexpr char kHashMpdPortalRect[] =
-    "<b7eda6420d187bddc78bfa953700f2e07f13886728996dc99d8fa75b41d0a80>k__BackingField";
+    "<aff28280ae02aa54316fd8a1bdd51ae9ec7735c19cf8863eb71cf49226149ce>k__BackingField";
 constexpr char kHashMpdHRange[] =
-    "<ca5ca41653dfe9237dda1d3bae61d17374303c0ffc1fb14935cdfce335dbd6b>k__BackingField";
+    "<ab8241eafb22afe0fe80fc90cbb278efb0657313730de1b67a56360c498c8f1>k__BackingField";
 constexpr char kHashMpdVRange[] =
-    "<af31f84bba631be21538593d480729aae05f73bd1d4a159a52971b7d7cb49b5>k__BackingField";
+    "<f853ee5b888e0c610bd0f1e0864f053c238656a777bcd29164227da533ced3a>k__BackingField";
 constexpr char kHashMpdVImpact[] =
-    "<f7253c0afdbbb613471491479ebf75a254b7b4fd456edf4ee2096c4eb41f950>k__BackingField";
+    "<bcbcdada2c01972157c4f87fd0fe9f6b20ca59c158053ac6a2df9b549b1d2aa>k__BackingField";
 constexpr char kHashMpdHImpact[] =
-    "<a8112a6f65f4705a1c24feb059524b57d8932575337e639a021adb4adaeb348>k__BackingField";
+    "<b24d0a9fd4c0140274491fa7a381a9debdfe899b00463b42ec5473406d612ba>k__BackingField";
 constexpr char kHashWmFieldKey[] =
-    "b4ba3b6c23175b5e7a2099cdc465f07c421273042694938c0193ea5be2a924c";  // = world_port
+    "e34ea295aedf05c677a37d0d529e69ea692edb8b1ad2225426ac9fe48b26102";  // = world_port
 // Packet base 13773 buffer/offset；SEND OutPacket 13775 id@0x20（非 InPacket backing）
 constexpr char kHashPacketBuffer[] =
-    "<f144fe8dbde79dea20d46b23b481b820339104f066fb33eda5c77a04363b872>k__BackingField";
+    "<eecde9fde4e63139526bc79e3dd104f14ac5c22e5746466cc884323b208497f>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<a22ae0bd7de5fc24a4a31fea49b5261e154c755a12e02510fd592b6dc594841>k__BackingField";
+    "<fd14ad7f125e4854f90ee4410e2092e6dcc591f9489b916f3e9b396b0d3228f>k__BackingField";
 constexpr char kHashOutPacketId[] =
-    "e124ab3ffe08d49850755d299692770376cce0daf952029aeb0b5a6286398f2";
+    "eba7d73821df86e3effbf761193b7b47a15019971597c1886c88a21d6742e63";
 constexpr char kHashUserVecCtrl[] =
-    "<acb8946a384ed398c4ad9268349397cf4f6e65cf136078ebc9aa26a949efd41>k__BackingField";
+    "<bfd62ef3b3e356b3d554a10a21a0f46b1272d519b934db1a7c4df88a0adcd52>k__BackingField";
 constexpr char kHashVcAp[] =
-    "e558fbd3da65bf13bea9360dfa61506af709ad89f925bc16b67e7e1cdb24107";
+    "eeb6a8c060a20622eef369b184c450bad5515167fa2cb42392277c7b0cbfe7d";
 constexpr char kHashVcApl[] =
-    "b5eb27f6f80eeaea51f811969e3c5bc8a7b73b19741a8cb481b29a0082c958d";
+    "e5a40d07ca56525d5a34df38aaeadf1dc421da7a583f82a6b8a0e7736ebd8aa";
 
 constexpr size_t kFbPortalData = 0x10, kFbMpdId = 0x10, kFbMpdType = 0x14, kFbMpdEnable = 0x18;
 constexpr size_t kFbMpdPName = 0x20, kFbMpdX = 0x28, kFbMpdY = 0x2C, kFbMpdToMapId = 0x30;
@@ -226,7 +226,7 @@ void EnsureTravelFieldOff() {
     void* portal = x::runtime::il2cpp::FindClass("", kPortalClass);
     // WorldManager hash（与 il2cpp_shape / world_port 同源）
     constexpr char kWorldManagerClass[] =
-        "acda742ab51e7e2e3003fd2b44fbc00eababde4300ef17ac35b5f4fd01bee68";
+        "b8ea8013e52dada590b6003b130193bf382fb78e9581ae899270652538d4114";
     void* wm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
     if (!wm) wm = x::runtime::il2cpp::FindClass("", kWorldManagerClass);
     void* actor = x::runtime::il2cpp::FindClass("", kActorBaseClass);
@@ -371,6 +371,15 @@ constexpr float kPortalHoldEnterDy = 40.f;
 constexpr float kPortalHoldBelowMax = 12.f;
 // 末段（进圈/触发框）旋翼 Y 用 landY+该抬高，避免 +24 悬空再卸推掉穿。
 constexpr float kPortalFinalAimLiftY = 8.f;
+// BIN 2026-08-13 16:45 堕落 in02：回城后从门台下 10X 冲上 → Disarm 穿台 →
+// below-deck abort ↔ 满速重贴振荡（ap.y≈-50 vy≈-460 循环，终掉到 -1400）。
+// 台下恢复：限速重贴 + 必须明显爬回台面上方再卸推；穿台次数封顶。
+constexpr float kPortalBelowDeckRestickScale = 1.5f;
+constexpr float kPortalRecoverAboveDeck = 10.f;  // 再 hold 前 py >= landY+该值
+constexpr float kPortalRecoverVy = 20.f;
+constexpr float kPortalSoftCatchVy = -80.f;  // hold 未站稳且急坠 → 提前软接，勿等掉穿
+constexpr int kPortalBelowDeckAbortCap = 6;
+constexpr int kPortalBelowDeckSnapAimAfter = 2;  // 连续穿台后改瞄 Snap X（可站段）
 // hold 中短暂出框宽限；未挂上 FH 时另用 nearAim 保海岸（BIN 50000 west00：
 // hold≈500ms 出框 → abort → 10X Station 甩到 vy≈500 循环 → NOT_STOOD）。
 constexpr DWORD kPortalHoldLeaveGraceMs = 800;
@@ -1567,10 +1576,13 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     // 瞄准 X = 门心；Snap 只取可站 Y → landY（落地/bleed 真源）。
     // aimY = landY + lift（仅旋翼接近用）。禁止 bleed 对抬高 aim（台下悬空）。
     // AbsPos：更大 Y = 更高；抬高必须 +=，禁止减小 Y。
+    // snapStandX：默认识别可站 X；首轮仍瞄 portal.x（防假火），连续穿台后再切 snap。
     float aimX = portal.x;
     float landY = portal.y;
     float aimY = portal.y;
     uint32_t aimFh = 0;
+    float snapStandX = portal.x;
+    bool haveSnapStandX = false;
     {
         float sx = portal.x, sy = portal.y;
         uint32_t sfh = 0;
@@ -1578,12 +1590,14 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                                              portal.rectR, portal.rectB, portal.rectValid, &sx, &sy,
                                              &sfh) &&
             sfh != 0) {
-            // Y 须仍在触发框（抬高前）；X 一律 portal.x
+            // Y 须仍在触发框（抬高前）；X 一律 portal.x（穿台后再可选 snap）
             if (!portal.rectValid || PointInPortalRect(portal, portal.x, sy)) {
                 if (std::fabs(sx - portal.x) > 0.5f) {
+                    haveSnapStandX = true;
+                    snapStandX = sx;
                     x::runtime::LogI("Travel",
                                      "heli stick snapX ignored name=%s portalX=%.0f snap=(%.0f,%.0f) "
-                                     "→ aimX=portal",
+                                     "→ aimX=portal (fallback after below-deck)",
                                      portal.name.c_str(), portal.x, sx, sy);
                 }
                 landY = sy;
@@ -1734,11 +1748,23 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     bool stoodOnFh = false;   // CurFh 已挂上（日志/掉台提示）
     bool loggedBleedNudge = false;
     const float panelScale = speedGuard.prev;  // 面板滑翔速度（与打怪同）
-    bool softApproach = false;  // abort 后重贴标记（速度仍用 panelScale）
+    bool softApproach = false;  // abort 后重贴标记（速度仍用 panelScale，台下恢复另限速）
+    bool recoverAboveDeck = false;  // 穿台/急坠后：须明显爬回台面上方再 Disarm
+    int belowDeckAborts = 0;
     int tickN = 0;
     int fireN = 0;
     int failStreak = 0;
     heli::Telemetry tm{};
+    // 开局已在台下（回城落点偏低）：先当恢复态，禁止立刻 bleed→Disarm。
+    if (luY < (landY - kPortalHoldBelowMax)) {
+        recoverAboveDeck = true;
+        softApproach = true;
+        x::runtime::LogI("Travel",
+                         "heli stick start below deck name=%s ap=(%.0f,%.0f) landY=%.0f "
+                         "→ recover above+%.0f @<=%.2fX",
+                         portal.name.c_str(), luX, luY, landY, kPortalRecoverAboveDeck,
+                         kPortalBelowDeckRestickScale);
+    }
     for (;;) {
         const DWORD now = GetTickCount();
         if (!world::IsInMapScene() || !world::IsPlayReady()) {
@@ -1788,6 +1814,11 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                                  "ticks=%d",
                                  portal.name.c_str(), px, py, aimX, aimY, tickN);
             }
+            // 进框时已在台下：强制恢复态（BIN in02 settle@y=-26 后贴甲板就 Disarm）。
+            if (!holdPhase && py < (landY - kPortalHoldBelowMax)) {
+                recoverAboveDeck = true;
+                softApproach = true;
+            }
         } else if (holdPhase && leftTrigSince == 0) {
             leftTrigSince = now;
         }
@@ -1809,13 +1840,19 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         // hold 期必须停旋翼：Station/Impact 会把刚挂上的 CurFh 打掉 → 门前抖 10s+（BIN 11:51）。
         // 接近阶段才 Cruise/Station；hold 只靠重力落到 aimFh。
         if (!holdPhase) {
-            heli::SetSpeedScale(heli::Owner::Travel, panelScale);
+            const float useScale =
+                recoverAboveDeck ? (std::min)(panelScale, kPortalBelowDeckRestickScale)
+                                 : panelScale;
+            heli::SetSpeedScale(heli::Owner::Travel, useScale);
             // 末段贴台面飞：抬高过大 → hold 悬空卸推 → 掉穿（104000100 west00）。
+            // 台下恢复：目标抬到 landY+recover，避免贴着甲板就 Disarm 再穿。
             const bool finalApproach =
                 inTrigNow || distAim <= kTravelStationEnterR ||
                 std::fabs(px - aimX) <= kTravelStationEnterR;
-            const float heliY =
-                finalApproach ? (landY + kPortalFinalAimLiftY) : aimY;
+            float heliY = finalApproach ? (landY + kPortalFinalAimLiftY) : aimY;
+            if (recoverAboveDeck) {
+                heliY = landY + kPortalRecoverAboveDeck;
+            }
             const float dx = aimX - px;
             const float dy = heliY - py;
             const float dist = std::sqrt(dx * dx + dy * dy);
@@ -1872,7 +1909,13 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                                  onOrAboveDeck;
             const bool settleTimeout =
                 settleSince != 0 && (now - settleSince) >= kPortalSettleMaxMs;
-            const bool canHold = inTrigNow && stOk && settleSpdOk && bleedOk;
+            // 台下恢复：须爬到 landY+recover 且竖速收住，禁止贴甲板就 Disarm（BIN in02 穿台）。
+            const bool recoverOk =
+                !recoverAboveDeck ||
+                (py >= (landY + kPortalRecoverAboveDeck) &&
+                 std::fabs(liveVy) <= kPortalRecoverVy);
+            const bool canHold =
+                inTrigNow && stOk && settleSpdOk && bleedOk && recoverOk;
 
             if (!holdPhase && canHold) {
                 holdPhase = true;
@@ -1881,6 +1924,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                 stoodOnFh = false;
                 loggedBleedNudge = false;
                 softApproach = false;
+                recoverAboveDeck = false;
                 havePrevAp = false;
                 heli::SetSpeedScale(heli::Owner::Travel, panelScale);
                 heli::Disarm(heli::Owner::Travel);
@@ -1900,17 +1944,20 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                         "Travel",
                         "heli stick bleed wait name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
                         "landY=%.0f v=(%.0f,%.0f) need|vx|<=%.0f need|vy|<=%.0f "
-                        "|ap.y-landY|<=%.0f aboveDeck(py>=landY-%.0f)=%d (no zero-vel)",
+                        "|ap.y-landY|<=%.0f aboveDeck(py>=landY-%.0f)=%d recover=%d "
+                        "(no zero-vel)",
                         portal.name.c_str(), px, py, aimX, aimY, landY, liveVx, liveVy,
                         kPortalHoldEnterVx, kPortalHoldEnterVy, kPortalHoldEnterDy,
-                        kPortalHoldBelowMax, onOrAboveDeck ? 1 : 0);
+                        kPortalHoldBelowMax, onOrAboveDeck ? 1 : 0, recoverOk ? 1 : 0);
                 }
-            } else if (!holdPhase && inTrigNow && settleTimeout && bleedOk && stOk) {
+            } else if (!holdPhase && inTrigNow && settleTimeout && bleedOk && stOk &&
+                       recoverOk) {
                 holdPhase = true;
                 holdSince = now;
                 readySince = 0;
                 stoodOnFh = false;
                 softApproach = false;
+                recoverAboveDeck = false;
                 havePrevAp = false;
                 heli::SetSpeedScale(heli::Owner::Travel, panelScale);
                 heli::Disarm(heli::Owner::Travel);
@@ -1925,21 +1972,65 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                     stOk ? 1 : 0, settleSpdOk ? 1 : 0, (unsigned)kPortalReadyStableMs);
             }
 
+            // hold 未站稳急坠：提前软接，勿等掉到 landY-40 才 abort（BIN in02 vy≈-460）。
+            if (holdPhase && !stoodOnFh && liveVy < kPortalSoftCatchVy &&
+                py < (landY + kPortalFinalAimLiftY)) {
+                holdPhase = false;
+                leftTrigSince = 0;
+                readySince = 0;
+                softApproach = true;
+                recoverAboveDeck = true;
+                havePrevAp = false;
+                approachLatched = true;
+                fhBan.Arm();
+                heli::SetSpeedScale(heli::Owner::Travel,
+                                   (std::min)(panelScale, kPortalBelowDeckRestickScale));
+                x::runtime::LogI(
+                    "Travel",
+                    "heli stick soft catch name=%s ap=(%.0f,%.0f) landY=%.0f "
+                    "v=(%.0f,%.0f) onFh=%d → recover @<=%.2fX",
+                    portal.name.c_str(), px, py, landY, liveVx, liveVy, onFh ? 1 : 0,
+                    kPortalBelowDeckRestickScale);
+            }
+
             // hold 中掉到台下：立刻重贴，勿等掉到下层 FH 才 left-trigger abort。
             if (holdPhase && !stoodOnFh && py < (landY - kPortalHoldEnterDy)) {
                 holdPhase = false;
                 leftTrigSince = 0;
                 readySince = 0;
                 softApproach = true;
+                recoverAboveDeck = true;
                 havePrevAp = false;
                 approachLatched = true;
+                ++belowDeckAborts;
                 fhBan.Arm();
+                heli::SetSpeedScale(heli::Owner::Travel,
+                                   (std::min)(panelScale, kPortalBelowDeckRestickScale));
+                if (belowDeckAborts == kPortalBelowDeckSnapAimAfter && haveSnapStandX &&
+                    std::fabs(snapStandX - aimX) > 0.5f) {
+                    aimX = snapStandX;
+                    x::runtime::LogI(
+                        "Travel",
+                        "heli stick below-deck aimX→snap name=%s aimX=%.0f portalX=%.0f "
+                        "landY=%.0f aborts=%d",
+                        portal.name.c_str(), aimX, portal.x, landY, belowDeckAborts);
+                }
                 x::runtime::LogI(
                     "Travel",
                     "heli stick hold abort (below deck) name=%s ap=(%.0f,%.0f) landY=%.0f "
-                    "v=(%.0f,%.0f) onFh=%d speed=%.2fX",
+                    "v=(%.0f,%.0f) onFh=%d aborts=%d/%d speed=%.2fX (restick<=%.2fX)",
                     portal.name.c_str(), px, py, landY, liveVx, liveVy, onFh ? 1 : 0,
-                    panelScale);
+                    belowDeckAborts, kPortalBelowDeckAbortCap, panelScale,
+                    kPortalBelowDeckRestickScale);
+                if (belowDeckAborts >= kPortalBelowDeckAbortCap) {
+                    outResult = "NOT_STOOD";
+                    x::runtime::LogW(
+                        "Travel",
+                        "heli stick below-deck cap name=%s ap=(%.0f,%.0f) landY=%.0f "
+                        "aborts=%d → NOT_STOOD",
+                        portal.name.c_str(), px, py, landY, belowDeckAborts);
+                    return false;
+                }
             }
 
             if (holdPhase) {

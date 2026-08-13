@@ -44,25 +44,25 @@ using x::runtime::il2cpp::ReadPtr;
 
 // UIWorldMapItem（Prefab 字段形：三 string@0x70/78/80 + mapId@0x88）
 constexpr char kItemClass[] =
-    "e4ac10a1ed9577949c01931561cf9c65321af77fd1356562771160781becce5";
-constexpr uint32_t kRvaUpdateView = 0x7E4150;  // remounted 2026-08-06
-constexpr uint32_t kRvaOnPointerDown = 0x7E69A0;  // remounted 2026-08-06
+    "e35517cbf759f3a8e79e7e3d6a3881d8b6e9219d30204bbea832d76e66dea56";
+constexpr uint32_t kRvaUpdateView = 0x7F3CC0;  // remounted 2026-08-06
+constexpr uint32_t kRvaOnPointerDown = 0x7F65A0;  // remounted 2026-08-06
 // ExecuteEvents.Execute(IPointerDownHandler, BaseEventData) — script.json Address
-constexpr uint32_t kRvaExecutePointerDown = 0x528A500;  // remounted 2026-08-06
+constexpr uint32_t kRvaExecutePointerDown = 0x52C3FB0;  // remounted 2026-08-06
 constexpr size_t kFbSPointerDownHandler = 0x18;         // ExecuteEvents static field
 
 // UIUtilDialog（非 Ex）：YesNo(string,Action,Action,…) / Notice(string,string,bool…)
 constexpr char kUtilDialogClass[] =
-    "b91dd9a7ee32ddf1538501f7a23119b0ad38634f3237d3dd148e6e986d70c69";
-constexpr uint32_t kRvaYesNo = 0x746B50;  // remounted 2026-08-06
-constexpr uint32_t kRvaNotice = 0x74ACD0;  // remounted 2026-08-06
+    "af4513195ff1420653fa6fee21c3f81c0ada82cc231058d26da5e778a881d3d";
+constexpr uint32_t kRvaYesNo = 0x756730;  // remounted 2026-08-06
+constexpr uint32_t kRvaNotice = 0x75A7C0;  // remounted 2026-08-06
 
 constexpr char kHashUpdateView[] =
-    "d6a3eeccdda47a0d067153706d7c79f0fab97ec71e1dc9103a9a3b2c28112d6";
+    "f9e509b05943ebecf51c1fad24299b7d29bff10f6425b72b0d5772dd904cd1f";
 constexpr char kHashYesNo[] =
-    "e2171954053a45b70f57c4f9cc1c109bddd1e6622f8c1ee331eb67fc87ea660";
+    "bbe4a174b4a6f72743180ef051055a2cd70ece5a4a0397c695868a4125b184e";
 constexpr char kHashNotice[] =
-    "d4feba69a33277661e80299a381f8c87cd32e4c3cd2562115927043a50a0b5b";
+    "d5f51a96d1959fc5c6fe5389902ab1ce5a7498cfcd5f210ea1fbfe5950b6b89";
 
 // dump 验证 fallback（remount 2026-08-06；UpdateView 写回 +0x70/78/80；mapId@0x88）
 constexpr size_t kFbMapDesc = 0x70;
@@ -78,27 +78,27 @@ constexpr size_t kFbPointerClickCount = 0x178;
 
 // Spot 字段哈希（dump.cs TypeDefIndex 630）
 constexpr char kHashMapDesc[] =
-    "da15bd863a2d3e65472884e2163dbdc0485355b5979c1162afc54dc791bfad9";
+    "b19089d3378a3fcca69b5ca2a3c017164685087a731df376b64d450e5aca5d5";
 constexpr char kHashMapName[] =
-    "acdacc591b3698463d245b7b91b755ce40517569e77c8f2915697c95713aabd";
+    "acbf850452a2ba00aa730cf0855fea214a711b9610f4713413e3fea0c53e5fc";
 constexpr char kHashStreetName[] =
-    "fb7db7199da7c2f4689ed7f922e46950ec476718a463b2dce4c24ec84a21cc5";
+    "c7b33b72ef0b760e89e13c39a62337f6b69711033916406c5a1e4b79511cf96";
 constexpr char kHashCachedMapId[] =
-    "df24b2e1540cd0bd1de7ec5363bb20a604f3de4423b21d8d9de3f942b20647d";
+    "a7a26a8944d0f52d70d82ab8a0fa70cb35d0ba111d22d290d0c6ab45407fa81";
 
 // MapListData 嵌套类 + 属性 backing 字段（TypeDefIndex 2183）
 constexpr char kMapListDataClass[] =
-    "c59fb707f422534aca076a1e4dd8fe58806af7f5928b6338dc1aa6d9fa24ada."
-    "cc69e2b366b530163df7a1078338cfc42e26c2de471357abb17d9dc77f0d97d";
+    "ec6390a2730da3e23b77c06630718afaa95595c4714776c07fede9c3568261a."
+    "f2a417818e5e8fce882fd130ff21eb8de288f1233afb65a67442805bd8ab03e";
 constexpr char kMapListDataClassSlash[] =
-    "c59fb707f422534aca076a1e4dd8fe58806af7f5928b6338dc1aa6d9fa24ada/"
-    "cc69e2b366b530163df7a1078338cfc42e26c2de471357abb17d9dc77f0d97d";
+    "ec6390a2730da3e23b77c06630718afaa95595c4714776c07fede9c3568261a/"
+    "f2a417818e5e8fce882fd130ff21eb8de288f1233afb65a67442805bd8ab03e";
 constexpr char kMapListDataNested[] =
-    "cc69e2b366b530163df7a1078338cfc42e26c2de471357abb17d9dc77f0d97d";
+    "f2a417818e5e8fce882fd130ff21eb8de288f1233afb65a67442805bd8ab03e";
 constexpr char kHashMapNoList[] =
-    "<cc09f5b9f969bab96aabd023c70bf3715c236ebcb5ff9d389ad7b38e792cd9a>k__BackingField";
+    "<a59edbe2e87d29e01b92ff65301d14e8e4b4366ca686e509ad24e514fdad17b>k__BackingField";
 constexpr char kHashMapTitle[] =
-    "<c406f5d64d921a9b952c3eec60538913ea6a3d1726190f4e21699f0a6357ed2>k__BackingField";
+    "<b65eecf0263d2d6b1a5bee340ab829f8b9861cf3a1559d0887d3374e535b711>k__BackingField";
 constexpr char kHashClickCount[] = "<clickCount>k__BackingField";
 constexpr DWORD kDblClickMsMin = 400;
 constexpr DWORD kDblClickMsMax = 800;

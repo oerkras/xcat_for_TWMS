@@ -3270,9 +3270,9 @@ void DrawMultiSkillTab(LaunchUiState& ui) {
 void DrawReloginTab(LaunchUiState& ui) {
     DesignBanner();
 
-    static bool detect = false;
-    static bool stopCombat = true;
-    static bool channelHop = true;
+    static bool detect = true;
+    static bool stopCombat = false;
+    static bool channelHop = false;
     static bool gmEscalate = true;
     static bool hideOthers = false;
     static std::string s_loadedBin;
@@ -3281,9 +3281,9 @@ void DrawReloginTab(LaunchUiState& ui) {
 
     auto loadUi = [&]() {
         if (ui.prefsBinDir.empty()) {
-            detect = false;
-            stopCombat = true;
-            channelHop = true;
+            detect = true;
+            stopCombat = false;
+            channelHop = false;
             gmEscalate = true;
             hideOthers = false;
             s_lastTick = 0;
@@ -3346,8 +3346,8 @@ void DrawReloginTab(LaunchUiState& ui) {
     if (xcat::ui::OptionCheckbox("一直有人就换频", &channelHop)) trySaveOrRevert();
     if (xcat::ui::OptionCheckbox("GM/隐身立即处理", &gmEscalate)) trySaveOrRevert();
     ImGui::TextDisabled(
-        "Admin/Manager(800/900)或未藏人时的隐身实体 → 立刻停手/换频（跳过确认与主城豁免）+ 强制 Alarm。");
-    ImGui::TextDisabled("关则只走普通遇人确认窗（约 2s）；服务端不广播跟踪仍无法发现。");
+        "Admin/Manager(800/900)或未藏人时的隐身实体 → 立刻停手/换频 + 强制 Alarm（不依赖上方停手/换频勾选）。");
+    ImGui::TextDisabled("关则普通遇人仍跟「先停手 / 一直有人就换频」；服务端不广播跟踪仍无法发现。");
     ImGui::Separator();
     if (xcat::ui::OptionCheckbox("隐藏同图其他玩家", &hideOthers)) trySaveOrRevert();
     ImGui::TextDisabled("藏皮/伤字(DamageSkin)/技能特效；自己可见；不影响遇人人数检测。");
@@ -4028,12 +4028,29 @@ void DrawBetaTab(LaunchUiState& ui) {
         frameLockFps = (int)c.frameLockFps;
         c.writeTickMs = GetTickCount64();
         if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-            dropSeenTick = c.writeTickMs;
+            // WritePayloadControl 可能单调 +1 writeTickMs；必须回读，否则
+            // dropSeenTick 落后 → 下帧从盘把勾选冲回旧值（曾出现开 1 半秒后被写回 0）。
+            xcat::PayloadControl verify{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify)) {
+                dropSeenTick = verify.writeTickMs;
+                dropInCombat = verify.dropAlertBypass != 0;
+                auctionTownBypass = verify.auctionTownBypass != 0;
+                restMpAccel = verify.restMpAccel != 0;
+                restMpAccelIntervalMs = (int)xcat::ClampRestMpAccelIntervalMs(
+                    verify.restMpAccelIntervalMs ? verify.restMpAccelIntervalMs
+                                                 : xcat::kRestMpAccelIntervalDefaultMs);
+                frameLock = verify.frameLock != 0;
+                frameLockFps = (int)xcat::ClampFrameLockFps(
+                    verify.frameLockFps ? verify.frameLockFps : xcat::kFrameLockFpsDefault);
+            } else {
+                dropSeenTick = c.writeTickMs;
+            }
             xcat::log::Ok("App",
                           "已下发 core：战斗中可丢物=%d 野外可开拍卖=%d 坐下回蓝加速=%d "
                           "回蓝间隔=%ums 引擎帧率锁=%d fps=%u",
                           dropInCombat ? 1 : 0, auctionTownBypass ? 1 : 0, restMpAccel ? 1 : 0,
-                          c.restMpAccelIntervalMs, frameLock ? 1 : 0, c.frameLockFps);
+                          (uint32_t)restMpAccelIntervalMs, frameLock ? 1 : 0,
+                          (uint32_t)frameLockFps);
         } else {
             xcat::log::Warn("App", "写入 user.ini [core] drop/auction/restMp/frameLock 失败");
         }
@@ -4055,7 +4072,12 @@ void DrawBetaTab(LaunchUiState& ui) {
         gUiAttackRpcDamage = (int)c.attackRpcDamage;
         c.writeTickMs = GetTickCount64();
         if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-            dropSeenTick = c.writeTickMs;
+            xcat::PayloadControl verify{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify)) {
+                dropSeenTick = verify.writeTickMs;
+            } else {
+                dropSeenTick = c.writeTickMs;
+            }
             xcat::log::Ok("App", "已下发 core：attackRpc=%d mobs=%u ms=%u dmg=%u（实验）",
                           gUiAttackRpc ? 1 : 0, c.attackRpcMobs, c.attackRpcIntervalMs,
                           c.attackRpcDamage);
@@ -5335,7 +5357,6 @@ void DrawDebugTab(LaunchUiState& ui) {
                 notify::PushLocal(/*Danger*/ 3, "ops-token", "清空失败", "", 3500);
             }
         }
-        ImGui::TextDisabled("保存后写入本机 ProgramData（与设备 ID 同目录），换包/重装清目录后仍可自动找回。");
     }
     CardGap();
     {

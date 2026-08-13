@@ -45,14 +45,14 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
 // Remount 2026-08-06：方法 RVA 普遍 +0x1E70；字段 off 未漂；ACS 类/字段哈希全换
-constexpr uint32_t kRvaPetTryPickUpDrop = 0xF9EA50;  // remounted 2026-08-06 TDI:1516
-constexpr uint32_t kRvaDropTryPickUpDrop = 0xF59610;  // remounted 2026-08-06 DropPool.TryPickUpDrop(in Vector2)
-constexpr uint32_t kRvaDropTryPickUpDropByPet = 0xF5B7F0;  // remounted 2026-08-06
-constexpr uint32_t kRvaPetGetUpgradePetSkill = 0xF5ED80;  // remounted 2026-08-06
-constexpr uint32_t kRvaPetGetItemSlot = 0xF5DBC0;  // remounted 2026-08-06 · ByPet → ItemSlotPet
-constexpr uint32_t kRvaPetIsInExceptionList = 0xF53A90;  // remounted 2026-08-06
-constexpr uint32_t kRvaPetSendDropPickUp = 0xF5DF00;  // remounted 2026-08-06 Pet.SendDropPickUpRequest
-constexpr uint32_t kRvaPoolSendDropPickUp = 0xF5AF10;  // remounted 2026-08-06 DropPool.SendDropPickUpRequest
+constexpr uint32_t kRvaPetTryPickUpDrop = 0xFBBF40;  // remounted 2026-08-06 TDI:1516
+constexpr uint32_t kRvaDropTryPickUpDrop = 0xF76DC0;  // remounted 2026-08-06 DropPool.TryPickUpDrop(in Vector2)
+constexpr uint32_t kRvaDropTryPickUpDropByPet = 0xF78F20;  // remounted 2026-08-13
+constexpr uint32_t kRvaPetGetUpgradePetSkill = 0xF7C3D0;  // remounted 2026-08-06
+constexpr uint32_t kRvaPetGetItemSlot = 0xF7B2D0;  // remounted 2026-08-06 · ByPet → ItemSlotPet
+constexpr uint32_t kRvaPetIsInExceptionList = 0xF71280;  // remounted 2026-08-06
+constexpr uint32_t kRvaPetSendDropPickUp = 0xF7B700;  // remounted 2026-08-13 Pet.SendDropPickUpRequest
+constexpr uint32_t kRvaPoolSendDropPickUp = 0xF78640;  // remounted 2026-08-06 DropPool.SendDropPickUpRequest
 // ByPet Contains 真源（.rdata，非 CollisionCheck / _rcPet）：
 //   int32 offX,offY @ +0 ; float w,h @ +0x10
 //   rect = (petPos - (offX,offY), w, h)；原生 (25,10)+(50,60)
@@ -66,49 +66,49 @@ constexpr float kNativeRectH = 60.f;
 constexpr size_t kByPetScanMax = 0x2800;
 
 constexpr char kHashPetTryPickUp[] =
-    "bc8b8a65a5167d063b4d0ecd874e9b5b3cfd742f70f339e3a2aa468c13088ff";  // remounted 2026-08-06
+    "c0eff451522464ea9a3b4484242d873f42227fd9d4e8f3be001387456e8ce2d";  // remounted 2026-08-06
 constexpr char kHashDropTryPickUp[] =
-    "bd44bfbfd1e3659fc6b1b9ad32347f88ca8368838477b55e0b73c8f2d405adf";  // remounted 2026-08-06
+    "b79fd99e51b75b4cbb8f2f61d64bd57996b59d724ade840aec16d64a6669cf9";  // remounted 2026-08-06
 constexpr char kHashDropTryPickUpByPet[] =
-    "d14c4caca4f411b2afbaaff44ad6e04d6678b84cf7da0011b798472d6ba585e";  // remounted 2026-08-06
+    "db024fe0bacd51f103e6e7b4c6a47b6e82e5e97969044cdc3e3da6edb69b6a2";  // remounted 2026-08-13
 constexpr char kHashPetGetUpgradeSkill[] =
-    "abb76b81355615cded21efd89bdbc644f60b9e60d50f4eec97d6488c91417f5";  // remounted 2026-08-06
+    "c4f419232ad600203420ccc4a97991ea34f28605d7cc2949c4089c15b8c786b";  // remounted 2026-08-06
 constexpr char kHashPetGetItemSlot[] =
-    "a5a3afdba943de0eb68100717af64fdcf1cf85ce640a5b3d6f10ce97c9c8e34";  // remounted 2026-08-06
+    "f5f8090df94d939719635f783f7abae7c68a31d5f4a3b39be4a3dcdd7722ead";  // remounted 2026-08-06
 constexpr char kHashPetIsInException[] =
-    "e8a049a7ba742c0777d4d948205695c3068a6ef58f55707414015904d0a95a1";  // remounted 2026-08-06
+    "fda6563d679686e0da0ac2bd6419fc4082f2b1bcd5d9a4e1001871fb16f0426";  // remounted 2026-08-06
 constexpr char kHashPetSendDropPickUp[] =
-    "a6661ab1b790c8deb4cc26d667ab367d175ce45cc69c9c7a4318076a0105665";  // remounted 2026-08-06
+    "e042777c4298205524bb53e480e7005b6ac77e35c765a8637bf52c763132c3f";  // remounted 2026-08-13
 constexpr char kHashPoolSendDropPickUp[] =
-    "e928a49209b00a967822dfe207828bffd6ede1c4590c711f2e6c39e7cfeb327";  // remounted 2026-08-06
+    "b25bc88ac9e267a1b3f72caf3680c36617a0f8dad33e033856f5ae30c6be26c";  // remounted 2026-08-06
 
 constexpr char kDropPoolClass[] =
-    "c75c9e590ecff774417e635841d8b4c530112e2289e55763122899e775f045c";  // remounted 2026-08-06 TDI:1489
+    "ef4c309ed6caad3e53bdf3199b93f996388eb0eeb81c798604852c69148cafd";  // remounted 2026-08-06 TDI:1489
 constexpr char kDropClass[] =
-    "d20bf485543c953be99da021d3d6ead5488905d0a1791345812686ca0b23591";  // remounted 2026-08-06 TDI:1488
+    "d25f73fab3779aa67d7c23319664f7f4c443e68187978345a7777b7dd35ef83";  // remounted 2026-08-06 TDI:1488
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 constexpr char kCollisionCheckClass[] =
-    "ce5571fdd447d9de7395a41a89268b50d757cf9aa1dd8b20f07ee1f691276f2";  // remounted 2026-08-06 TDI:2446
+    "c887a7c8b11584f13efc813eb73b8c8f9be8f7e1dde53d21408714ba69dc8fa";  // remounted 2026-08-06 TDI:2446
 constexpr char kPetClass[] =
-    "f170c222994b5b5fa20c2a3c92fa28d6d8f6812c6955b27c6141300e37a575d";  // remounted 2026-08-06 TDI:1516
+    "a0b51c176c051ad0d1b79bcb44ee759cccdc6596114e8a70f68e6ecf89a1714";  // remounted 2026-08-06 TDI:1516
 constexpr char kUserClass[] =
-    "b8c9aedb2c800fa8ec9515b0f728235725989303f6bb609bafebeee4a902078";  // TDI:1560 User（m_apPet/CurPos）
+    "c3c6ef70537e5a2c4026c37e65e0d0a8a5f756988f3f3ee148a568fb3176f96";  // TDI:1560 User（m_apPet/CurPos）
 constexpr char kVecCtrlOwnerClass[] =
-    "edc85ce203606bdb549e5fb94458b1d2d11ce78034d24d41e39a54c0288d38e";  // TDI:1586
+    "bef0eed02528709201717d93717a1904bfa2e850dfe1f5fadf473c0e9c78d9b";  // TDI:1586
 constexpr char kVecCtrlClass[] =
-    "e0eb55b82f10cb9eeb9424eb3aadf1450a014afa564bc55c3739b2909abfbbc";
+    "b4117afc7f6f9c58587c528c3dec862d440e5d266ad70b764c0058566918784";
 constexpr char kItemSlotPetClass[] =
-    "bb1b627de814571bee19f0047969130afb63cd6cb00856136624230a9fbc30e";  // GetItemSlot 返回类型
+    "acaefdbcae2fab722b9f95f1ddcb8bc8cd6163747ef6ecb31c1972faba5cbe5";  // GetItemSlot 返回类型
 
 // —— 字段防漂移：hash + field_get_offset；下列常量仅 dump 验证 fallback（off 未漂）——
-constexpr size_t kFbApPet = 0x2B0;
+constexpr size_t kFbApPet = 0x288;  // 08-13：User Pet[]；0x2B0 已是 Vector2
 constexpr size_t kFbWmMyUser = 0x28;
 constexpr size_t kFbPoolDict = 0x20;
 constexpr size_t kFbPetRc = 0x100;
 constexpr size_t kFbPetExceptionList = 0x90;
 constexpr size_t kFbVecCtrl = 0x50;
 constexpr size_t kFbFieldPos = 0x64;
-constexpr size_t kFbCurPos = 0x240;
+constexpr size_t kFbCurPos = 0x2B0;  // 08-13：User Vector2；0x240 已是数组
 constexpr size_t kFbVcAp = 0x98;  // AbsPos 结构起点；Y = Ap+8
 constexpr size_t kFbDropId = 0x30;
 constexpr size_t kFbDropOwnerId = 0x34;  // CMS Drop.OwnerId
@@ -127,47 +127,47 @@ constexpr size_t kFbItemSlotPetSkill = 0x3C;
 constexpr size_t kFbCollisionRcPet = 0x20;
 
 constexpr char kHashFldApPet[] =
-    "b093d698bf1ad623c0b88a522673c36b6b8aa11110ccdcb5e36472da2e50906";
+    "c9f3a304082cf7806e647b39d83a48658d80691430a981edfd32ee48c1346bb";
 constexpr char kHashFldWmMyUser[] =
-    "<ef4652eaf850c6fcba53fee8385959f223111ee46e00417bb435eebc026d15e>k__BackingField";  // WM.MyUser@0x28
+    "<c1c262eeb2fd710395259b6a9ed860900becf2a5716099c31c863589707a7a0>k__BackingField";  // WM.MyUser@0x28
 constexpr char kHashFldPoolDict[] =
-    "f11e3abd2d55a7e7efeaf7787be0f3439360df65142fe78fad2455dd74ee2a5";
+    "b56d10b86a199566a2f8b162ee97a1bfbe20a1c80d1292964e415aa3467a77a";
 constexpr char kHashFldPetRc[] =
-    "e3f2d91c794cf4b07c22c83bfca96cff84ae49d0f2b52637b1a07121e5e57cb";
+    "e8b9ea658e5b9d86431a49d3e5cf91533d7ac9b920c3f24eeb7817cc9f9aac9";
 constexpr char kHashFldPetExceptionList[] =
-    "<ed9b360d6618f5c62618c05bf7e79921c0db4127eb748a4fa443ab619fb2e01>k__BackingField";
+    "<b15db6a05d60c99216bd230151a030d6b11a6e6a65f5dc1184ce2c56c1b39ce>k__BackingField";
 constexpr char kHashFldVecCtrl[] =
-    "<acb8946a384ed398c4ad9268349397cf4f6e65cf136078ebc9aa26a949efd41>k__BackingField";
+    "<bfd62ef3b3e356b3d554a10a21a0f46b1272d519b934db1a7c4df88a0adcd52>k__BackingField";
 constexpr char kHashFldFieldPos[] =
-    "cc96f38a9acbe6b4e8005a2d56a7846324bc67690c2059661962502f74b928a";
+    "c1792cf58ceda9b4f12cacf2746c06b70c90d516c43cbdf1fcea7c7b1bde37b";
 constexpr char kHashFldCurPos[] =
-    "c4adef19821f3737cd477a7840968c11697f4afd8eb8696cafb37d1c297b926";
+    "ccce125f69593bc9100a9b227cda0be73abc63fefc4b848f92efe9a72930859";
 constexpr char kHashFldVcAp[] =
-    "e558fbd3da65bf13bea9360dfa61506af709ad89f925bc16b67e7e1cdb24107";
+    "eeb6a8c060a20622eef369b184c450bad5515167fa2cb42392277c7b0cbfe7d";
 constexpr char kHashFldDropId[] =
-    "cd0df968addeeaf2958ad3cf9d93cfbfad8bbfe1887852bed9220643674cac1";
+    "b58c185ee8c98469a5cf9ff0f79da61a85fd1cb84082f0245f8fcacedbd51c4";
 constexpr char kHashFldDropOwnType[] =
-    "da3077a0c8458d43058c7356cb5a42132804698cdabe3f969fca5337cb5fa68";
+    "ff39e4c6862fdbbb20c6006c272534051fc7eac136c4292de5a2f330083df1e";
 constexpr char kHashFldDropIsMoney[] =
-    "d49606e6e2484b745ce3b360bfc5ec8e925772cd0c17785ad9f5ecbf141141a";
+    "fe12a3c796d59c57c0f4901477e144f4d87b111122a9503e2d8c56bbe59a7b5";
 constexpr char kHashFldDropInfo[] =
-    "d857faa67a6048709e02d88aeafd4e1890ddbb150e2972dd5d985449f8617c1";
+    "ada84a35e32ba3c3c385efcfebfa12e07018a5dc5f3aa94f54f81d179727935";
 constexpr char kHashFldDropPt1[] =
-    "a400df6c99ccac1ffa49ee8f242be7a0301f114f47c5af30069cbf0c9325efe";
+    "bae201598a705b7c1a780fea991ae978a42d727ab52fbe2d7799f7927cc416d";
 constexpr char kHashFldDropEndPara[] =
-    "a91a5f1789db1b1ce16909bb4a443f800d455f0dac3445ed44889d70ba60be9";
+    "a1eac728cb2b8c48067a46ff45ca853fd2f420f9910c541c783dc31077025b1";
 constexpr char kHashFldDropLastTry[] =
-    "bc43d5785808b3ede93ae6e2379f116edf30bd0d65a4b102ebc0f32a1a0eb2c";
+    "d3ec8ddea958a36e5081e24cda0e076ba50d3fdb019e9b49cbddda2858dd002";
 constexpr char kHashFldDropPickStamp[] =
-    "e381c2c7599f152c899872a0af9b13b7066a6774a185422501ebf26c36f32ac";
+    "c11188f537a410815a95da36a221be284d7eb52390850dc61e0395420ae355e";
 constexpr char kHashFldDropPickPt[] =
-    "f3710236c8f81a1d0353950d0d09c6c6134752ffdb6d07232d8985a30efaec0";
+    "efff49a8e01b1cdc961edb65e8e551e2dcdecefc6a53aad2e64063442cfb9b8";
 constexpr char kHashFldDropPickable[] =
-    "ea772e389eb98128fa6a41d6d1236265341d8538dca1d9b5f46874d5c67a311";
+    "a5ae3a3204e886538dd5d027433f90411a7f066256aabda0c1168930b0c5341";
 constexpr char kHashFldItemSlotPetSkill[] =
-    "a062fd375c28f78b5e031162b3955bc9d80395e0d9c3e3460b3ac6aefebd878";
+    "e3a0e195f75b7ae642ad7e9c06022b041a14a73b9c6d493d01e67aca7d65f95";
 constexpr char kHashFldCollisionRcPet[] =
-    "c9e0b4a2713b66aab3eb48f6cbcc87123ac8b666d485d5a35037130856f842f";
+    "ff117b02ce286b5b1afde556ec9dfe689561293aadeb7d9b241a06432ba87de";
 
 struct DropFieldOff {
     size_t apPet = kFbApPet;
@@ -249,8 +249,8 @@ constexpr int kEndParaReady = 3;
 constexpr int kEndParaSkipHold = 4;
 constexpr int kLastTrySkipStamp = 0x7FFFFFFF;
 
-// 人物直吸（不靠宠）：复刻官方 DropPool.TryPickUpDrop（RVA 0xF59610）的门禁语义，然后直接调
-// 它自己的 DropPool.SendDropPickUpRequest（RVA 0xF5AF10）。控制面与宠吸同构（清闸/退避盖戳/
+// 人物直吸（不靠宠）：复刻官方 DropPool.TryPickUpDrop（RVA 0xF76DC0）的门禁语义，然后直接调
+// 它自己的 DropPool.SendDropPickUpRequest（RVA 0xF78640）。控制面与宠吸同构（清闸/退避盖戳/
 // 黑名单盖戳/拒收即 AddStall/拍末还原），只是中心从宠坐标换成角色坐标、送包走人物入口。
 // 官方那条链逐指令实读所得：
 //   ① [drop+0x2D] 必须为真                       ② EndPara(0x7C) == 3

@@ -564,6 +564,17 @@ bool ReadMergePublish(bool setCombat, bool combatOn, bool setFly, bool flyOn) {
 
 }  // namespace
 
+void PayloadControl_ForceApply() {
+    const std::string bin = PayloadBinDir();
+    if (bin.empty()) return;
+    xcat::PayloadControl c{};
+    if (!xcat::ReadPayloadControl(bin.c_str(), c)) return;
+    gHaveApplied.store(false);
+    x::runtime::LogI("PayloadControl",
+                     "force-apply after play-boot (rebind; Init must not leave desired=0)");
+    ApplyControl(c);
+}
+
 void PayloadControl_Poll() {
     const std::string bin = PayloadBinDir();
     if (bin.empty()) return;

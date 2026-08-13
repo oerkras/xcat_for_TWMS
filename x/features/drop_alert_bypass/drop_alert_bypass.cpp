@@ -2,9 +2,9 @@
 //
 // Root cause (BIN): callers use direct `call CanPerformAction` (E8×8), so
 // MethodInfo swap never runs. Real drop gate calls thin IsAlertMode
-// (UserBase$$IsAlertMode @0x124C230) which reads +0x114 vs (0x41B001EF+global).
-// 2026-08-06 remount: RVA +0x1E70；ACS hash 全换；shape 已 IDA 复核。
-// While enabled, data-plane clear +0x114 — drop opens AND client alert suppressed.
+// (UserBase$$IsAlertMode @0x124DE70) which reads +0x118 vs (seed+global).
+// 2026-08-13 remount: 字段 0x114(bool 误锚)→0x118(int 警戒戳)；RVA 未漂。
+// While enabled, data-plane clear +0x118 — drop opens AND client alert suppressed.
 // No GA .text patch; no HWBP slot.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -28,23 +28,24 @@ namespace {
 using x::runtime::il2cpp::AtRva;
 
 // UserBase 父类. 短 IsAlertMode（CanPerformAction 真 callee）
-// IDA 2026-08-06: mov eax,imm; add eax,[rip]; cmp [rcx+0x114],eax; setnle — shape 只认 op 形态
-constexpr uint32_t kRvaIsAlertMode = 0x124C230;  // remounted 2026-08-06 (+0x1E70)
+// IDA 2026-08-13: mov eax,imm; add eax,[rip]; cmp [rcx+0x118],eax; setnle — shape 只认 op 形态
+constexpr uint32_t kRvaIsAlertMode = 0x124DE70;  // remounted 2026-08-06 (+0x1E70)；RVA 仍准
 
 // Secondary: MethodInfo on DragManager.CanPerformAction (rarely hit; keep for MI callers)
 constexpr char kDragManagerClass[] =
-    "ba465cb1604a35f2ddcdadef2886566cf002754c6835d5c19dd6103c4f54918";
-constexpr uint32_t kRvaCanPerformAction = 0x4C38F0;  // remounted 2026-08-06（RVA 未漂）
+    "d2290478242217849e81b25341e5981b7c5dc1bc6897c784b7fd2f5f3db8bee";
+constexpr uint32_t kRvaCanPerformAction = 0x4CFED0;  // remounted 2026-08-06（RVA 未漂）
 constexpr char kUserAlertClass[] =
-    "c99c0bcb0549788a98e73a02acc1cf7e5476d3f920f9a4f5f69a76490798a16";
+    "d5a59751c9ecba4a21314526d7fbe8142abe3ee8b90e8d03a7fc2f80f669add";
 constexpr char kHashIsAlertMode[] =
-    "be3a15053e494195afe88fe8bd86e598d6b62879c4d040d81a43e60441878f1";
+    "a9e101249890ed3f99c5e6a5d37bff8b74311409454a8a63b4f0acf2d18af77";
 constexpr char kHashCanPerformAction[] =
-    "cafb9d0be27704865bc1a01e2acd5896bfed4b15547331cf6c1f3c8043a72ae";
-// UserBase alert stamp：hash → field_get_offset（dump fallback 0x114）
+    "c9827716092b598b0c395c8455da154d17ed38264ae8c24068596ae83293827";
+// UserBase alert stamp（int）：hash → field_get_offset（dump fallback 0x118）
+// 勿用 bac75f…@0x114（bool）；IsAlertMode 读的是 a363…@0x118
 constexpr char kHashAlertAt[] =
-    "c469c323e5afda2bab68c386c87ea8b571b3fd726ece08d92aa459848a6d351";
-constexpr size_t kFbAlertAt = 0x114;
+    "a363a66e2ecf97c765a16a7d795ca7cf3416ee02804c5ae5305d1ebbace6e0f";
+constexpr size_t kFbAlertAt = 0x118;
 size_t gOffAlertAt = kFbAlertAt;
 #define kOffAlertAt (gOffAlertAt)
 bool gAlertFieldTried = false;
@@ -385,7 +386,7 @@ void ReportDropAlertLamp() {
     if (shape == AlertShape::Ok && gMiIsAlertMode) {
         x::runtime::anchor_lamps::Set(
             "DropAlert", x::runtime::anchor_lamps::AnchorLampCode::Ok,
-            gInstalled.load() ? "shape+114+secMI" : "shape+114");
+            gInstalled.load() ? "shape+118+secMI" : "shape+118");
         return;
     }
     if (shape == AlertShape::Ok) {
@@ -461,7 +462,7 @@ void UninstallMi() {
     gOrig = nullptr;
 }
 
-// Primary path: expire LocalUser+0x114 so thin IsAlertMode returns false.
+// Primary path: expire LocalUser+0x118 so thin IsAlertMode returns false.
 // Shape gate: 机码不像「mov+add eax,[rip] + cmp [rcx+alertOff]」则拒绝写字段（防漂）。
 // Hold：连续 kHoldAfterZeroStreak 拍已是 0 才慢扫；非 0 清零并重置 streak（防 1s 窗口拒丢）。
 bool MaintainAlertField(DWORD now) {

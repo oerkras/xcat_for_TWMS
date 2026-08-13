@@ -441,6 +441,9 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::encounter::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::player_hide::Init());
     XCAT_PLAY_BOOT_STEP(x::features::player_hide::StartWorker());
+    // settle 期 Poll 可能已 Apply；其后 Init 会把若干 gDesired 清 0，且 writeTick
+    // 未变导致 Poll 跳过（BIN：AuctionTown 须 IMGUI 再点一次）。进图后再灌一次。
+    XCAT_PLAY_BOOT_STEP(x::ipc::PayloadControl_ForceApply());
     if (AbortRequested()) {
         StopAllFeatureWorkers();
         return false;
