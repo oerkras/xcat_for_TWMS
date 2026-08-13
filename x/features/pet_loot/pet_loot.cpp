@@ -613,6 +613,7 @@ DWORD WINAPI Worker(LPVOID) {
     DWORD lastForceProbe = 0;
     uint32_t lastCfgSig = 0;
     uint32_t lastCfgSig2 = 0;
+    uint32_t lastCfgSigVac = 0;
 
     while (!gWorkerStop.load(std::memory_order_acquire)) {
         const DWORD now = GetTickCount();
@@ -625,9 +626,12 @@ DWORD WINAPI Worker(LPVOID) {
                                 (gCfg.highValuePriority ? 0x40000000u : 0) |
                                 (gCfg.scrollDropNotify ? 0x20000000u : 0);
         const uint32_t cfgSig2 = (gCfg.intervalMs & 0xFFFFu) | (gCfg.burstPerTick << 16);
-        if (cfgSig != lastCfgSig || cfgSig2 != lastCfgSig2) {
+        const uint32_t cfgSigVac = (static_cast<uint32_t>(gCfg.vacuumW + 0.5f) & 0xFFFFu) |
+                                   ((static_cast<uint32_t>(gCfg.vacuumH + 0.5f) & 0xFFFFu) << 16);
+        if (cfgSig != lastCfgSig || cfgSig2 != lastCfgSig2 || cfgSigVac != lastCfgSigVac) {
             lastCfgSig = cfgSig;
             lastCfgSig2 = cfgSig2;
+            lastCfgSigVac = cfgSigVac;
             float vacW = 0.f, vacH = 0.f;
             xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
             float charHW = 0.f, charHH = 0.f;

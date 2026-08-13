@@ -1247,6 +1247,22 @@ void RecoverMigrateTimeout(const char* why) {
            "黑屏未回图，已触发软重连试进");
 }
 
+void RequestNmGoneSoft() {
+    if (soft_login_probe::IsHoldActive()) return;
+    if (!soft_login_probe::IsArmed()) return;
+    Log("soft recover → RequestAttempt (nm_gone_inmap)");
+    soft_login_probe::RequestAttempt("nm_gone_inmap");
+}
+
+// A8 假置位 + 内存频道号抖动 ≠ 真迁频。无 Connecting / 离图且 NM 已空时禁止 settle。
+bool RejectDeadSessionSettle() {
+    if (gSawConnecting || gSawLeavePlay) return false;
+    if (kick_sniff::HasResolvedSession()) return false;
+    Fail("换频时会话已断（未见真实迁频）");
+    RequestNmGoneSoft();
+    return true;
+}
+
 void SettleOk(const char* how, int curIdx, DWORD now) {
     // 优先采信「已变化的内存 idx」；否则用目标（+0x68 常卡死）
     if (curIdx >= 0 && gFromChannel >= 0 && curIdx != gFromChannel) {
@@ -1498,6 +1514,13 @@ void TickConfirming(DWORD now) {
     }
     gExclNotified = false;
 
+    // BIN 19:38：NM 已空仍 SendTransfer → A8 假置位、27→28 假 settle、怪继续站桩。
+    if (!kick_sniff::HasResolvedSession()) {
+        Fail("会话已断，换频发不出");
+        RequestNmGoneSoft();
+        return;
+    }
+
     // 再收一次在途攻击键；settle 跟墙钟对齐，防末火刚过就叠 Transfer
     (void)ports::attack::WaitFireIdle(kFireIdleTimeoutMs, kFireIdleSettleMs);
 
@@ -1694,6 +1717,7 @@ void TickWaiting(DWORD now) {
                     gActiveSeq.load(), gTargetChannel, gExclArmed ? 1 : 0, gSawConnecting ? 1 : 0);
             }
             if (cur >= 0 && gFromChannel >= 0 && cur != gFromChannel) {
+                if (RejectDeadSessionSettle()) return;
                 SettleOk("alert_hold_channel_changed", cur, now);
                 return;
             }
@@ -1731,6 +1755,7 @@ void TickWaiting(DWORD now) {
     // 过晚窗仍 play：仅当内存频道已变才软成功；否则等到 migrate 窗 Fail。
     if (gSawConnecting || gExclArmed) {
         if (cur >= 0 && gFromChannel >= 0 && cur != gFromChannel) {
+            if (RejectDeadSessionSettle()) return;
             SettleOk(gSawConnecting ? "migrate_stable_channel_changed" : "armed_channel_changed",
                      cur, now);
             return;

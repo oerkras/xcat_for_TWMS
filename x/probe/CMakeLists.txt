@@ -67,6 +67,7 @@ add_library(xcat_probe SHARED
   ../features/auto_supply/auto_supply.cpp
   ../features/mob_scan/mob_scan.cpp
   ../features/autopot/autopot.cpp
+  ../features/auto_stat/auto_stat.cpp
   ../features/pet_feed/pet_feed.cpp
   ../features/pet_loot/pet_loot.cpp
   ../features/timed_keys/timed_keys.cpp
@@ -99,6 +100,7 @@ add_library(xcat_probe SHARED
   ../ipc/payload_control.cpp
   ../ipc/payload_timed_keys.cpp
   ../ipc/payload_pet_loot.cpp
+  ../ipc/payload_auto_stat.cpp
   ../ipc/payload_buffs.cpp
   ../ipc/payload_status.cpp
 )

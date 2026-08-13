@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace x::features::titlebar::game {
@@ -27,6 +28,10 @@ void* LocalCharacterStat();  // → x::ui::player（WM→CS）
 bool LocalUserLooksOk();
 void ClearLocalUser();
 bool ReadVitals(Vitals& out);  // → x::ui::player::Read
+
+// 消耗栏 204/234 高价值卷轴 → ASCII `id:qty,id:qty`（探活用；无 UI）。
+// 背包列表可读返回 true（无卷轴则 dst 空串）；列表不可读返回 false。
+bool FormatWealthScrolls(char* dst, size_t cap);
 
 // 返回本拍背包新增物品的卖价；countIntoRate 为 false 时仅建立基线。
 double UpdateLootDelta(bool countIntoRate, uint64_t* knownOut = nullptr,

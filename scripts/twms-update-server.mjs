@@ -35,7 +35,7 @@ import { createLogFetchQueue } from "./twms-log-fetch.mjs";
 import { createForceTargetQueue } from "./twms-force-target.mjs";
 import { createIpGeo } from "./twms-ip-geo.mjs";
 
-const SERVER_VERSION = "0.4.10";
+const SERVER_VERSION = "0.4.11";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
@@ -157,6 +157,19 @@ function decodeCharHeaderText(raw, maxChars) {
   return s.slice(0, maxChars);
 }
 
+/** 探活头 `2040001:3,2049100:1`；`-` 或空 = 已采到但身上无高价值卷轴。 */
+function parseWealthScrollsHeader(raw) {
+  const s = String(raw || "").trim();
+  if (!s || s === "-") return "";
+  const parts = [];
+  for (const piece of s.split(",")) {
+    const m = /^(\d{3,9}):(\d{1,8})$/.exec(String(piece || "").trim());
+    if (m) parts.push(`${m[1]}:${m[2]}`);
+    if (parts.join(",").length >= 360) break;
+  }
+  return parts.join(",").slice(0, 360);
+}
+
 function clientIdentityFromReq(req) {
   const macRaw = headerText(req, "x-xcat-mac");
   const macs = access.parseMacList(macRaw);
@@ -169,6 +182,13 @@ function clientIdentityFromReq(req) {
   const charLevel = /^-?\d+$/.test(charLevelRaw) ? Number(charLevelRaw) : null;
   const charJob = /^-?\d+$/.test(charJobRaw) ? Number(charJobRaw) : null;
   const charMeso = /^-?\d+$/.test(charMesoRaw) ? charMesoRaw : "";
+  const hasWealthHeader = Object.prototype.hasOwnProperty.call(
+    req.headers || {},
+    "x-xcat-wealth-scrolls",
+  );
+  const wealthScrolls = hasWealthHeader
+    ? parseWealthScrollsHeader(headerText(req, "x-xcat-wealth-scrolls"))
+    : "";
   const mapIdRaw = headerText(req, "x-xcat-map-id");
   const channelRaw = headerText(req, "x-xcat-channel");
   const mapName = decodeCharHeaderText(headerText(req, "x-xcat-map-name"), 64);
@@ -186,6 +206,8 @@ function clientIdentityFromReq(req) {
     charJob,
     charJobName,
     charMeso,
+    hasWealthHeader,
+    wealthScrolls,
     hasChar: !!(charName && charLevel != null && charLevel > 0),
     mapId,
     mapName,
@@ -330,6 +352,8 @@ function touchClient({
   charJobName,
   charMeso,
   hasChar,
+  hasWealthHeader,
+  wealthScrolls,
   mapId,
   mapName,
   channelId,
@@ -359,6 +383,8 @@ function touchClient({
       charJob: 0,
       charJobName: "",
       charMeso: "",
+      hasWealthScrolls: false,
+      wealthScrolls: "",
       mapId: 0,
       mapName: "",
       channelId: 0,
@@ -398,6 +424,10 @@ function touchClient({
     row.charJob = Number.isFinite(charJob) ? Math.floor(charJob) : 0;
     row.charJobName = String(charJobName || "").slice(0, 32);
     row.charMeso = String(charMeso || "").replace(/[^\d-]/g, "").slice(0, 24);
+    if (hasWealthHeader) {
+      row.hasWealthScrolls = true;
+      row.wealthScrolls = String(wealthScrolls || "").slice(0, 360);
+    }
   }
   // 地图/频道同口径：有新值才刷，未进图探活不抹掉上次。
   // mapName 勿在仅带 channel、mapId=0 时清空（否则 OPS 留下旧 mapId + 空名）。
@@ -591,6 +621,8 @@ function listActiveClients(activeSec) {
         charJob: row.charJob || 0,
         charJobName: row.charJobName || "",
         charMeso: row.charMeso || "",
+        hasWealthScrolls: !!row.hasWealthScrolls,
+        wealthScrolls: row.wealthScrolls || "",
         mapId: row.mapId || 0,
         mapName: row.mapName || "",
         channelId: row.channelId || 0,
@@ -758,6 +790,8 @@ function recordRequest({
   charJobName,
   charMeso,
   hasChar,
+  hasWealthHeader,
+  wealthScrolls,
   mapId,
   mapName,
   channelId,
@@ -791,6 +825,8 @@ function recordRequest({
     charJobName,
     charMeso,
     hasChar,
+    hasWealthHeader,
+    wealthScrolls,
     mapId,
     mapName,
     channelId,
@@ -838,6 +874,8 @@ function attachRequestRecorder(req, res, meta) {
       charJobName: id.charJobName,
       charMeso: id.charMeso,
       hasChar: id.hasChar,
+      hasWealthHeader: id.hasWealthHeader,
+      wealthScrolls: id.wealthScrolls,
       mapId: id.mapId,
       mapName: id.mapName,
       channelId: id.channelId,

@@ -137,6 +137,15 @@ constexpr int kLockKillTimeoutMinDropPct = 1;
 constexpr DWORD kDeadSoftBanMs = 300;
 // 早切（dealt/oneshot/abshp）：禁止当尸体软禁。BIN：600ms 禁锁 → 同 id 不再补刀 → 图上「杀不死」。
 constexpr DWORD kEarlyAbandonSoftBanMs = 0;
+// 打中换怪：刚打过的怪禁锁一会儿，避免投射物/回贴又打到同一只；也挡住 Acquire 回退最近。
+constexpr DWORD kHitRotateBanMs = 5000;
+constexpr int kHitRotateMinLive = 3;
+// lastHitted 出刀当帧写；窗要盖住 snap 龄（mob_scan ~20ms）+ 一两拍 tick。
+constexpr DWORD kHitRotateObserveMs = 220;
+// 刚满 N 的怪周围这一盒仍可能进下一刀攻击盒（BIN：叠怪 |dx|≈64 仍 off_lock）。
+// 数值对齐出刀带 kHeliFireMaxDx/Dy；盒外再按离玩家最近选，不再飞全图对角。
+constexpr float kHitRotateClearDx = 280.f;
+constexpr float kHitRotateClearDy = 220.f;
 constexpr DWORD kNoLandSoftBanMs = 200;
 // 分段贴台失败 / 硬帽：BIN map1020000 200ms 禁 → 两只远怪互抢 ≈100 fail/s。
 // 长禁 + Acquire 预检跳过，等同层清完再偶尔重试。
@@ -292,6 +301,24 @@ std::atomic<bool> gAntiHugEnabled{false};
 std::atomic<bool> gHumanWalkEnabled{true};  // 拟人；仅 Impact 关时生效
 std::atomic<bool> gLiveStepEnabled{false};  // 锁怪后同层微贴；默认关
 std::atomic<bool> gClusterPriority{false};  // 群怪优先；默认关
+std::atomic<bool> gHitRotateEnabled{false};  // 打中换怪；默认关
+std::atomic<int> gHitRotateN{static_cast<int>(xcat::kCombatHitRotateNDefault)};
+// 刚因确认命中满 N 弃锁：下一次 Acquire 按「离挨刀那只最远」选，禁止回退最近。
+bool gHitRotatePending = false;
+int gHitRotateFromId = 0;
+float gHitRotateFromX = 0.f;
+float gHitRotateFromY = 0.f;
+DWORD gHitRotateObserveUntil = 0;  // 我方刚出刀后的确认窗；窗外的 bump 不当自己的命中
+struct HitRotateWatch {
+    int id = 0;
+    int32_t lastHitted = 0;
+    int hits = 0;  // 本窗内对该 oid 的确认命中（空刀不计）
+    bool seeded = false;
+    bool seen = false;
+};
+constexpr int kHitRotateWatchCap = 64;
+HitRotateWatch gHitRotateWatch[kHitRotateWatchCap];
+int gHitRotateWatchN = 0;
 std::atomic<uint32_t> gTeleportStandOff{xcat::kCombatTeleportStandOffDefault};
 // 直升机自定义站距（面板「自定义站距」）。与上面那个 gTeleportStandOff **无关**：
 // 那个还乘进 InHitBand 等地面判定，动它会波及瞬移/拟人；这组只喂直升机。
@@ -507,6 +534,7 @@ enum SoftBanKind : uint8_t {
     kBanWhiff = 1,
     kBanUnreachable = 2,
     kBanDead = 3,
+    kBanHitRotate = 4,  // 打中换怪：确认命中满 N 后禁锁，DropSoftBanNonSticky 不得清
 };
 struct SoftBan {
     int id = 0;
@@ -989,6 +1017,9 @@ void SoftBanFor(int id, DWORD now, DWORD ms, SoftBanKind kind = kBanGeneric) {
             gSoftBan[i].kind = kBanUnreachable;
         } else if (kind == kBanDead && gSoftBan[i].kind == kBanGeneric) {
             gSoftBan[i].kind = kBanDead;
+        } else if (kind == kBanHitRotate && gSoftBan[i].kind != kBanWhiff &&
+                   gSoftBan[i].kind != kBanUnreachable) {
+            gSoftBan[i].kind = kBanHitRotate;
         }
         return;
     }
@@ -1078,12 +1109,14 @@ void SoftBanWhiff(int id, DWORD now) {
     LogLine("softBan whiff id=%d strikes=1 ms=%u", id, (unsigned)ms);
 }
 
-// acquire 全 miss：丢掉 generic/no_land 短禁；保留 whiff + 不可达 + dead，避免清禁后立刻鬼锁空转。
+// acquire 全 miss：丢掉 generic/no_land 短禁；保留 whiff + 不可达 + dead + 打中换怪，
+// 避免清禁后立刻鬼锁空转 / 又打回刚出满 N 刀的那只。
 void DropSoftBanNonSticky() {
     int w = 0;
     for (int i = 0; i < gSoftBanN; ++i) {
         const SoftBanKind k = gSoftBan[i].kind;
-        if (k == kBanWhiff || k == kBanUnreachable || k == kBanDead) gSoftBan[w++] = gSoftBan[i];
+        if (k == kBanWhiff || k == kBanUnreachable || k == kBanDead || k == kBanHitRotate)
+            gSoftBan[w++] = gSoftBan[i];
     }
     gSoftBanN = w;
 }
@@ -1198,6 +1231,9 @@ bool HandleTinyHopSticky(DWORD now, float playerX, float playerY, float standOff
 void ArmWhiffObserve(DWORD now, int hpAtFire, float absDx) {
     gLock.lockFires += 1;
     ReleaseKillTimeoutHold(now);
+    if (gHitRotateEnabled.load(std::memory_order_acquire)) {
+        gHitRotateObserveUntil = now + kHitRotateObserveMs;
+    }
     if (!gLock.firstFireMs) {
         gLock.firstFireMs = now;
         gLock.lastKillProgressMs = now;
@@ -1733,8 +1769,30 @@ bool LandSafeForFill(float x, float y, uint32_t fhId = 0) {
 
 void LatchCombatHeli(const char* why) {
     if (gHeliLatchedThisEnable) return;
+    if (travel::IsActive()) return;
     gHeliLatchedThisEnable = true;
     LogLine("heli latch why=%s (impact armed for this F5 session)", why ? why : "?");
+}
+
+// 站立 + CombatImpact 禁台：不能出刀（edfbf1），也不能干等 ma 变 6/7。
+// BIN 17:18:51 软重连后 station 贴地悬停，ma 一直是 4 → fire defer 无限不出刀。
+void UnlatchCombatHeli(const char* why) {
+    gHeliLatchedThisEnable = false;
+    // 赶路占着旋翼/禁台时只清 F5 latch，禁止 Disarm/卸 CombatImpact。
+    // BIN 17:36:08：贴门超时后换图 lost_session，unlatch 打进 Travel 窗口。
+    if (travel::IsActive() || heli::CurrentOwner() == heli::Owner::Travel ||
+        heli::CurrentOwner() == heli::Owner::Fly) {
+        LogLine("heli unlatch why=%s skip_rotor (travel/fly owns)", why ? why : "?");
+        return;
+    }
+    if ((ports::fly_fh_ban::ActiveMask() &
+         static_cast<unsigned>(ports::fly_fh_ban::BanSource::CombatImpact)) == 0) {
+        LogLine("heli unlatch why=%s (latch only)", why ? why : "?");
+        return;
+    }
+    ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::CombatImpact, false);
+    heli::Disarm(heli::Owner::Combat);
+    LogLine("heli unlatch why=%s (ground melee; BAN dropped before fire)", why ? why : "?");
 }
 
 bool MoveToShouldArmHeli(const char* why) {
@@ -2166,6 +2224,8 @@ void MaybeProbeUiHpTag(DWORD now) {
             (tplMax > 0 && abs.max == tplMax) ? 1 : 0, (tagPct == gLock.lastHp) ? 1 : 0);
 }
 
+bool TryAbandonHitRotate(DWORD now, const ports::mob::Snapshot& snap);
+
 bool RefreshLock(const ports::mob::Snapshot& snap) {
     if (!gLock.id || !gLock.ptr) return false;
     const DWORD now = GetTickCount();
@@ -2196,8 +2256,6 @@ bool RefreshLock(const ports::mob::Snapshot& snap) {
             gLock.absSrc = live.absSrc;
         }
     }
-    (void)snap;  // 选怪仍用缓存；锁存续以 live 为准
-
     NoteLockHpSample();
     NoteHittedForHitLag(now);
     MaybeProbeUiHpTag(now);
@@ -2206,6 +2264,7 @@ bool RefreshLock(const ports::mob::Snapshot& snap) {
     if (TryAbandonAbsHp(now)) return false;
     if (TryAbandonHitLag(now)) return false;
     if (TryAbandonLockKillTimeout(now)) return false;
+    if (TryAbandonHitRotate(now, snap)) return false;
 
     return ResolveWhiffArm(now);
 }
@@ -2217,6 +2276,153 @@ bool RefreshLock(const ports::mob::Snapshot& snap) {
 constexpr float kClusterRadiusPx = 250.f;
 // Denser pack may be up to sqrt(mul) farther (4 => 2x). Old 2.25 (~1.5x) felt like off.
 constexpr float kClusterDistMul = 4.f;
+
+bool MobIsLiveFarm(const ports::mob::MobLite& m) {
+    if (!m.ready || m.deadType != 0 || m.hpPct <= 0) return false;
+    if (m.templateId == kSpecialTplFilter) return false;
+    return true;
+}
+
+int CountLiveFarmMobs(const ports::mob::Snapshot& snap) {
+    int n = 0;
+    for (int i = 0; i < snap.count; ++i) {
+        if (MobIsLiveFarm(snap.mobs[i])) ++n;
+    }
+    return n;
+}
+
+void ClearHitRotatePending() {
+    gHitRotatePending = false;
+    gHitRotateFromId = 0;
+}
+
+void ClearHitRotateWatches() {
+    gHitRotateWatchN = 0;
+    gHitRotateObserveUntil = 0;
+    memset(gHitRotateWatch, 0, sizeof(gHitRotateWatch));
+}
+
+void ClearHitRotateState() {
+    ClearHitRotatePending();
+    ClearHitRotateWatches();
+}
+
+HitRotateWatch* HitRotateWatchOf(int id) {
+    if (id <= 0) return nullptr;
+    for (int i = 0; i < gHitRotateWatchN; ++i) {
+        if (gHitRotateWatch[i].id == id) return &gHitRotateWatch[i];
+    }
+    if (gHitRotateWatchN >= kHitRotateWatchCap) {
+        int vic = 0;
+        for (int i = 1; i < gHitRotateWatchN; ++i) {
+            if (gHitRotateWatch[i].hits < gHitRotateWatch[vic].hits) vic = i;
+        }
+        gHitRotateWatch[vic] = HitRotateWatch{};
+        gHitRotateWatch[vic].id = id;
+        return &gHitRotateWatch[vic];
+    }
+    HitRotateWatch& w = gHitRotateWatch[gHitRotateWatchN++];
+    w = HitRotateWatch{};
+    w.id = id;
+    return &w;
+}
+
+// lastHitted 上升对应最新一条 AddDamageInfo。只认末条 CharacterId==本角色；
+// 列表里残留的旧自己条目不算（否则别人刚打一刀也会被当成我们的）。
+bool HitRotateBumpIsOurs(void* mob, uint32_t me) {
+    if (!me || !mob) return false;
+    ports::mob::DamageInfoSnap di{};
+    if (!ports::mob::TryReadDamageInfoList(mob, di) || !di.ok || di.count <= 0) return false;
+    return di.items[di.count - 1].charId == me;
+}
+
+bool TriggerHitRotateFrom(int id, float x, float y, int hits, int live, DWORD now,
+                          const char* why) {
+    if (id <= 0) return false;
+    gHitRotateFromX = x;
+    gHitRotateFromY = y;
+    gHitRotateFromId = id;
+    gHitRotatePending = true;
+    gHitRotateObserveUntil = 0;
+    SoftBanFor(id, now, kHitRotateBanMs, kBanHitRotate);
+    if (HitRotateWatch* w = HitRotateWatchOf(id)) w->hits = 0;
+    LogLine("switch reason=hit_rotate id=%d hits=%d n=%d live=%d lock=%d pos=(%.0f,%.0f) why=%s",
+            id, hits, gHitRotateN.load(std::memory_order_acquire), live, gLock.id, x, y,
+            why ? why : "?");
+    gLastLockLostWhy = "hit_rotate";
+    ClearLockRetarget();
+    return true;
+}
+
+// 扫全场 lastHitted 上升沿。只认观察窗内、DamageInfo.charId==本角色 的 bump。
+bool NoteHitRotateBumps(DWORD now, const ports::mob::Snapshot& snap) {
+    if (!gHitRotateEnabled.load(std::memory_order_acquire)) return false;
+    const int nNeed = gHitRotateN.load(std::memory_order_acquire);
+    const uint32_t me = ports::world::GetCharacterId();
+    const bool inWin =
+        gHitRotateObserveUntil != 0 && static_cast<int>(now - gHitRotateObserveUntil) < 0;
+    for (int i = 0; i < gHitRotateWatchN; ++i) gHitRotateWatch[i].seen = false;
+
+    int rotateId = 0;
+    float rotateX = 0.f, rotateY = 0.f;
+    int rotateHits = 0;
+
+    for (int i = 0; i < snap.count; ++i) {
+        const auto& m = snap.mobs[i];
+        if (!MobIsLiveFarm(m) || m.id <= 0) continue;
+        HitRotateWatch* w = HitRotateWatchOf(m.id);
+        if (!w) continue;
+        w->seen = true;
+        int32_t hitted = m.lastHitted;
+        if (m.id == gLock.id) hitted = gLock.lastHitted;  // 锁怪用 live 直读，不吃 snap 龄
+        if (!w->seeded) {
+            w->lastHitted = hitted;
+            w->seeded = true;
+            continue;
+        }
+        const bool bump = hitted > w->lastHitted;
+        w->lastHitted = hitted;
+        if (!bump || !inWin) continue;
+        if (!HitRotateBumpIsOurs(m.ptr, me)) {
+            static DWORD sSkip = 0;
+            if (!sSkip || now - sSkip > 1000) {
+                sSkip = now;
+                LogLine("hit_rotate skip_foreign id=%d hitted=%d me=%u", m.id, hitted, me);
+            }
+            continue;
+        }
+        w->hits += 1;
+        LogLine("hit_rotate confirm id=%d hits=%d/%d lock=%d hitted=%d me=%u", m.id, w->hits, nNeed,
+                gLock.id, hitted, me);
+        if (w->hits >= nNeed && rotateId == 0) {
+            rotateId = m.id;
+            rotateX = m.x;
+            rotateY = m.y;
+            rotateHits = w->hits;
+        }
+    }
+
+    if (rotateId <= 0) return false;
+    const int live = CountLiveFarmMobs(snap);
+    return TriggerHitRotateFrom(rotateId, rotateX, rotateY, rotateHits, live, now,
+                                rotateId == gLock.id ? "lock" : "off_lock");
+}
+
+// 打中换怪：活怪 < 3 立刻停刀；同一 oid 确认命中满 N 则禁锁并改打最远。
+bool TryAbandonHitRotate(DWORD now, const ports::mob::Snapshot& snap) {
+    if (!gHitRotateEnabled.load(std::memory_order_acquire)) return false;
+    if (!snap.ok) return false;
+    const int live = CountLiveFarmMobs(snap);
+    if (live < kHitRotateMinLive) {
+        LogLine("switch reason=hit_rotate_low_live id=%d live=%d hits_armed=%d need>=%d", gLock.id,
+                live, gLock.hitBumpCount, kHitRotateMinLive);
+        ClearHitRotateState();
+        gLastLockLostWhy = "hit_rotate_low_live";
+        ClearLockRetarget();
+        return true;
+    }
+    return NoteHitRotateBumps(now, snap);
+}
 
 // Count = self + same-layer live mobs within 250px (min 1).
 int CountClusterNeighbors(const ports::mob::Snapshot& snap, const ports::mob::MobLite& center) {
@@ -2295,6 +2501,7 @@ void AssignLockFromMob(const ports::mob::MobLite& m, float px, float py) {
 // BIN：交手中 / 近距叠怪禁止再切；取消「任意已进带」回退，避免 182609↔657474 乒乓。
 bool TryHumanPassbyRetarget(const ports::mob::Snapshot& snap, float px, float py, float standOff,
                             DWORD now) {
+    if (gHitRotateEnabled.load(std::memory_order_acquire)) return false;
     if (!gLock.id) return false;
     if (LockHasEngaged() || gLock.lockFires > 0) return false;
     if (gLastHumanPassbyMs && now - gLastHumanPassbyMs < kHumanPassbyCooldownMs) return false;
@@ -2484,6 +2691,66 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             ports::mob::CtrlName(best->ctrl), bestCtrlRank, best->x, best->y, best->x - px,
             best->y - py, SameLayer(px, py, best->x, best->y) ? "same" : "cross", bestHop,
             gLandSide, clusterOn ? bestCluster : -1, looseLand ? 1 : 0, best->inView ? 1 : 0);
+    return true;
+}
+
+bool HitRotateOutsideClear(float mx, float my, float fromX, float fromY) {
+    return std::fabs(mx - fromX) >= kHitRotateClearDx ||
+           std::fabs(my - fromY) >= kHitRotateClearDy;
+}
+
+// 打中换怪：禁刚命中的 oid 后，选「攻击盒外、离玩家最近」的活怪。
+// 空中贴怪不跑 hop/落点过滤；拟人/站桩仍受同层与走路可达约束。
+// 盒内全挤在一起时才退回离 from 最远，避免下一刀还打进刚满 N 的那只。
+bool PickHitRotateTarget(const ports::mob::Snapshot& snap, float fromX, float fromY, int excludeId,
+                         float px, float py, DWORD now, bool allowCrossLayer) {
+    const ports::mob::MobLite* bestClear = nullptr;
+    float bestClearD2 = 0.f;
+    const ports::mob::MobLite* bestFar = nullptr;
+    float bestFarD2 = -1.f;
+    int32_t playerZm = 0;
+    const bool playerZmOk = TryPlayerZMass(px, py, &playerZm);
+    const bool humanPick =
+        !allowCrossLayer && gHumanWalkEnabled.load(std::memory_order_acquire);
+    uint32_t humanPlayerFh = 0;
+    if (humanPick) humanPlayerFh = ResolveHumanPlayerFh(px, py);
+
+    for (int i = 0; i < snap.count; ++i) {
+        const auto& m = snap.mobs[i];
+        if (!MobIsLiveFarm(m)) continue;
+        if (m.id == excludeId) continue;
+        if (IsSoftBanned(m.id, now)) continue;
+        if (!allowCrossLayer) {
+            if (!SameLayerZm(playerZm, playerZmOk, py, m.x, m.y, 0)) continue;
+            if (humanPick && !HumanWalkReachable(px, py, m.x, m.y, humanPlayerFh)) continue;
+        }
+        const float dxFrom = m.x - fromX;
+        const float dyFrom = m.y - fromY;
+        const float d2From = dxFrom * dxFrom + dyFrom * dyFrom;
+        if (!bestFar || d2From > bestFarD2) {
+            bestFar = &m;
+            bestFarD2 = d2From;
+        }
+        if (!HitRotateOutsideClear(m.x, m.y, fromX, fromY)) continue;
+        const float dxP = m.x - px;
+        const float dyP = m.y - py;
+        const float d2P = dxP * dxP + dyP * dyP;
+        if (!bestClear || d2P < bestClearD2) {
+            bestClear = &m;
+            bestClearD2 = d2P;
+        }
+    }
+    const ports::mob::MobLite* best = bestClear ? bestClear : bestFar;
+    if (!best) return false;
+    const char* via = bestClear ? "clear" : "fallback_far";
+    const float dFrom = std::sqrt((best->x - fromX) * (best->x - fromX) +
+                                  (best->y - fromY) * (best->y - fromY));
+
+    AssignLockFromMob(*best, px, py);
+    LogLine("acquire hit_rotate %s id=%d fromId=%d tpl=%d hp=%d%% pos=(%.0f,%.0f) "
+            "from=(%.0f,%.0f) distFrom=%.0f dPlayer=(%.0f,%.0f) live=%d",
+            via, best->id, excludeId, best->templateId, best->hpPct, best->x, best->y, fromX,
+            fromY, dFrom, best->x - px, best->y - py, CountLiveFarmMobs(snap));
     return true;
 }
 
@@ -2815,6 +3082,7 @@ bool InCombatEnableHold(DWORD now) {
 bool HeliBaseArmed() {
     if (InCombatEnableHold(x::runtime::NowMs())) return false;
     if (!gHeliLatchedThisEnable) return false;
+    if (travel::IsActive()) return false;
     return gEnabled.load(std::memory_order_acquire) &&
            gImpactApproachEnabled.load(std::memory_order_acquire) &&
            gHardPauseMask.load(std::memory_order_acquire) == 0 &&
@@ -4286,6 +4554,7 @@ void TickHeliRotor(DWORD now) {
 
 void GoIdle(DWORD now, const char* why) {
     ClearLock();
+    ClearHitRotateState();
     gSettleUntil = 0;
     gSettleNeedPosSane = false;
     gSettleEnteredAt = 0;
@@ -4350,6 +4619,7 @@ void BeginMapArmGraceMs(DWORD now, const char* why, DWORD graceMs) {
     const bool already =
         gMapArmUntilMs && static_cast<int>(now - gMapArmUntilMs) < 0;
     ClearLock();
+    ClearHitRotateState();
     ClearSoftBan();
     // land_miss 毒台 ban 跨过 arm 窗口；仅真换图才清（FH id 按图编号）。
     if (why && (!std::strcmp(why, "map_change") || !std::strcmp(why, "ResetForMapChange"))) {
@@ -4622,6 +4892,8 @@ void TickImpl(DWORD now) {
                 EndLieSafeLand("soft_or_net_quiet");
             }
             ReleaseMapArriveIfHeld();
+            // F5 还开着：软重连后人已落地。不把上一轮 latch 带过去，否则 BAN+ma=4 硬闸不出刀。
+            if (gHeliLatchedThisEnable) UnlatchCombatHeli(why);
             if (gState != State::Idle) GoIdle(now, why);
             else SyncImpactFhBan();
             ports::attack::ForceRelease();
@@ -4884,27 +5156,62 @@ void TickImpl(DWORD now) {
         case State::Acquire: {
             // Impact/瞬移：可跨层；纯拟人/站桩：仅同层。
             const bool allowCross = impactOn || tpOn;
+            const bool hitRotateOn = gHitRotateEnabled.load(std::memory_order_acquire);
+            if (hitRotateOn) {
+                const int live = CountLiveFarmMobs(snap);
+                if (live < kHitRotateMinLive) {
+                    if (gLock.id) ClearLockRetarget(/*forceLite=*/false);
+                    ClearHitRotateState();
+                    static DWORD sHold = 0;
+                    if (!sHold || now - sHold > 2000) {
+                        sHold = now;
+                        LogLine("hit_rotate hold live=%d need>=%d (boss-safe)", live,
+                                kHitRotateMinLive);
+                    }
+                    break;
+                }
+            }
             if (!RefreshLock(snap)) {
                 // 死怪/早切刚清锁：再刷一帧再选，避免同 tick 抱旧缓存空转。
                 (void)EnsureFreshMobSnap(snap, kMobCacheFreshMs);
                 static DWORD sMiss = 0;
-                bool got = PickNearestTarget(snap, player.x, player.y, now, allowCross,
-                                            /*looseLand=*/false);
-                if (!got) {
-                    // 先松落点再选；禁止立刻 ClearSoftBan——会把刚 dead 的鬼锁清掉同 tick 空转。
-                    got = PickNearestTarget(snap, player.x, player.y, now, allowCross,
-                                           /*looseLand=*/true);
-                }
-                if (!got && gSoftBanN > 0) {
-                    // 只清短禁；保留 whiff + 不可达，避免 BIN 清光后立刻重锁空转。
-                    const int before = gSoftBanN;
-                    DropSoftBanNonSticky();
-                    if (before != gSoftBanN) {
-                        LogLine("softBan keep_sticky dropped=%d keep=%d", before - gSoftBanN,
-                                gSoftBanN);
+                bool got = false;
+                // 无锁时仍扫确认命中（打偏记在真实 oid；刚死锁后观察窗还开着）。
+                if (hitRotateOn) (void)NoteHitRotateBumps(now, snap);
+                if (hitRotateOn && gHitRotatePending) {
+                    got = PickHitRotateTarget(snap, gHitRotateFromX, gHitRotateFromY,
+                                              gHitRotateFromId, player.x, player.y, now,
+                                              allowCross);
+                    if (got) {
+                        ClearHitRotatePending();
+                    } else {
+                        static DWORD sFarMiss = 0;
+                        if (!sFarMiss || now - sFarMiss > 1000) {
+                            sFarMiss = now;
+                            LogLine("hit_rotate clear miss fromId=%d live=%d", gHitRotateFromId,
+                                    CountLiveFarmMobs(snap));
+                        }
+                        break;
                     }
+                } else {
                     got = PickNearestTarget(snap, player.x, player.y, now, allowCross,
-                                           /*looseLand=*/true);
+                                            /*looseLand=*/false);
+                    if (!got) {
+                        // 先松落点再选；禁止立刻 ClearSoftBan——会把刚 dead 的鬼锁清掉同 tick 空转。
+                        got = PickNearestTarget(snap, player.x, player.y, now, allowCross,
+                                               /*looseLand=*/true);
+                    }
+                    if (!got && gSoftBanN > 0) {
+                        // 只清短禁；保留 whiff + 不可达 + 打中换怪禁，避免 BIN 清光后立刻重锁空转。
+                        const int before = gSoftBanN;
+                        DropSoftBanNonSticky();
+                        if (before != gSoftBanN) {
+                            LogLine("softBan keep_sticky dropped=%d keep=%d", before - gSoftBanN,
+                                    gSoftBanN);
+                        }
+                        got = PickNearestTarget(snap, player.x, player.y, now, allowCross,
+                                               /*looseLand=*/true);
+                    }
                 }
                 if (!got) {
                     if (!sMiss || now - sMiss > 1000) {
@@ -5706,11 +6013,20 @@ void TickImpl(DWORD now) {
                     break;
                 }
             }
-            // 左右可位移框外一律不出手（raw×0.95 的 L/R；Y 不闸）。必须放在出刀带判定**之前**。
-            // 回 Aim 让旋翼 RTB 把人拽回左右框内再打。
+            // 左右可位移框外：旋翼已武装才回 Aim 让 RTB 拉回。贴身地面砍未 latch
+            // 时没有旋翼，旧逻辑 Aim↔Firing oob_hold 空转（BIN 20:39:20 map=40002：
+            // 人 x≈1950，rawR=1980 的 0.95 右沿≈1933，skip heli → 7s 零出刀）。
             if (impactOn && PlayerOutOfPlayBounds(player.x, player.y)) {
-                EnterState(State::Aim, now, "oob_hold");
-                break;
+                if (gHeliLatchedThisEnable) {
+                    EnterState(State::Aim, now, "oob_hold");
+                    break;
+                }
+                static DWORD sOobGround = 0;
+                if (!sOobGround || now - sOobGround > 500) {
+                    sOobGround = now;
+                    LogLine("oob skip ground melee id=%d px=%.0f (no rotor RTB; fire on fh)",
+                            gLock.id, player.x);
+                }
             }
             // 防贴脸退避未退到干净位：本拍不出刀，原地等旋翼把人挪开。
             // 总闸未开时 DodgeHoldsFire 恒 false，这一行等于不存在。
@@ -5902,20 +6218,14 @@ void TickImpl(DWORD now) {
                 }
             }
 
-            // BIN edfbf1 / 16:17:13：CombatImpact 已卸 CurFh、ma 仍是 4/5 Stand 时
-            // 再 OnFuncKey → 引擎按站立解空台，约 300ms 停写。贴身不飞时 BAN 不应在；
-            // 这是漏 latch 时的硬闸。ma=6/7 空中或 BAN 已卸则放行。
+            // BIN edfbf1：BAN + ma=4 出刀会崩。BIN 17:18:51：软重连后贴地悬停 ma 不变 6/7，
+            // 干等 = 永远不出刀。已在出刀带则卸禁台改地面砍（下拍 CurFh 重挂后再火）。
             if ((ports::fly_fh_ban::ActiveMask() &
                  static_cast<unsigned>(ports::fly_fh_ban::BanSource::CombatImpact)) != 0) {
                 int standMa = -1, standWhy = -1;
                 ports::attack::FaceDebug(&standMa, &standWhy);
                 if (standMa == 4 || standMa == 5) {
-                    static DWORD sStandBan = 0;
-                    if (!sStandBan || now - sStandBan > 400) {
-                        sStandBan = now;
-                        LogLine("fire defer stand_fhban ma=%d (wait airborne or BAN off)",
-                                standMa);
-                    }
+                    UnlatchCombatHeli("stand_fhban");
                     break;
                 }
             }
@@ -6264,6 +6574,7 @@ void Init() {
     gHumanWalkEnabled.store(true);
     gState = State::Idle;
     ClearLock();
+    ClearHitRotateState();
     ClearSoftBan();
 }
 
@@ -6298,6 +6609,7 @@ void SetEnabled(bool on) {
     if (!on) {
         // 纯普攻：关 F5 = 松攻击键 + 停状态机 + 停旋翼（顺带卸 fh-ban 让人落地）。
         ClearLock();
+        ClearHitRotateState();
         ports::attack::ForceRelease();
         gState = State::Idle;
         gSettleUntil = 0;
@@ -6313,14 +6625,17 @@ void SetEnabled(bool on) {
     } else {
         ClearSoftBan();
         ClearLock();
+        ClearHitRotateState();
         gState = State::Idle;
         gSettleUntil = 0;
         gNeedEnableFaceSettle.store(true, std::memory_order_release);
         gEnableHoldUntilMs = x::runtime::NowMs() + kCombatEnableHoldMs;
         gHeliLatchedThisEnable = false;
-        // BIN edfbf1 16:35:48：lie_safe 20s 前 lastIssue 还在 → 热开首发 trim=800 cmdVy=430。
-        // 关 F5 会 Reset；测谎落台不走 SetEnabled(false)，开 F5 必须自己清。
-        heli::Reset();
+        // 赶路占旋翼时 Reset 会把 Travel 主人清掉（BIN 17:36 贴门）。只清 Combat 时钟不够，直接跳过。
+        if (heli::CurrentOwner() != heli::Owner::Travel &&
+            heli::CurrentOwner() != heli::Owner::Fly) {
+            heli::Reset();
+        }
         LogLine("enable hold %ums (first acquire/fire delayed; retarget unaffected)",
                 (unsigned)kCombatEnableHoldMs);
         // 同图 / 首次热开：人已站稳则不要空等 map arm（BIN：F5 后干等 1–2s）。
@@ -6425,6 +6740,26 @@ void SetClusterPriority(bool on) {
 }
 
 bool IsClusterPriority() { return gClusterPriority.load(std::memory_order_acquire); }
+
+void SetHitRotateEnabled(bool on) {
+    const bool prev = gHitRotateEnabled.exchange(on, std::memory_order_acq_rel);
+    if (prev == on) return;
+    if (!on) ClearHitRotateState();
+    LogLine("SetHitRotateEnabled %d (prev=%d)", on ? 1 : 0, prev ? 1 : 0);
+}
+
+bool IsHitRotateEnabled() { return gHitRotateEnabled.load(std::memory_order_acquire); }
+
+void SetHitRotateN(uint32_t n) {
+    n = xcat::ClampCombatHitRotateN(n);
+    const int prev = gHitRotateN.exchange(static_cast<int>(n), std::memory_order_acq_rel);
+    if (prev == static_cast<int>(n)) return;
+    LogLine("SetHitRotateN %u (prev=%d)", n, prev);
+}
+
+uint32_t HitRotateN() {
+    return static_cast<uint32_t>(gHitRotateN.load(std::memory_order_acquire));
+}
 
 void SetTeleportEnabled(bool on) {
     // 封禁风险：战斗 fill+Doing 回落永久关；忽略面板/ini 开启请求。

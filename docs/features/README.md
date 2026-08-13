@@ -104,6 +104,7 @@
 | [`security/ClientFileCRC.md`](security/ClientFileCRC.md) | 登录阶段客户端文件 CRC：**安装树完整性校验**，非 AppData 外挂扫描；附 154 条实抓清单 |
 | [`security/MscSecurity能力面.md`](security/MscSecurity能力面.md) | RawInput 反宏、窗口子类化、DriveType SSD IOCTL、MultiClient 单实例；与 BlackCat 边界 |
 | [`security/GRAP与枫星对齐.md`](security/GRAP与枫星对齐.md) | 同 MD5 套件；LoadLibrary 弱；**默认禁止 INLINE HOOK**；§4.1 NGS 单文件有条件例外 |
+| [`security/NGS模块与上报边界.md`](security/NGS模块与上报边界.md) | **会扫会报异常**；**未证实**全量内存 DLL 清单上报；BlackCat≠模块采集器 |
 | [`security/MemoryCrc派发与节奏.md`](security/MemoryCrc派发与节奏.md) | MemoryCrc RpmScan / vptr+8 / Init·Iter；**证伪**旧 DRBG→Virt30 链；周期派发未决 |
 | [`security/NGS补丁与CRC.md`](security/NGS补丁与CRC.md) | 同行单文件 `NGS.EXE.CRC`；ProgramData `NGService` patch 门禁；GA 写探针顺序 |
 | [`security/GA文本探针.md`](security/GA文本探针.md) | 2026-08-01：进程内 GA `.text` 填充探针 **PASS**；边界与开关；≠ 业务 E9 |

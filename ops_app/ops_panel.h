@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <set>
 #include <string>
@@ -51,7 +52,7 @@ struct OpsState {
     std::atomic<bool> shuttingDown{false};
     std::thread worker;
 
-    // Main panel tabs: 0=服务与日志, 1=连接列表
+    // Main panel tabs: 0=服务与日志, 1=连接与访问, 2=背包金大屏
     int mainTab = 0;
 
     // Log viewer
@@ -81,6 +82,8 @@ struct OpsState {
         std::string charName;
         std::string charJobName;
         std::string charMeso;  // 十进制字符串，避免大数精度问题
+        std::string wealthScrolls;  // ASCII id:qty,id:qty
+        bool hasWealthScrolls = false;
         int charLevel = 0;
         int charJob = 0;
         uint32_t mapId = 0;
@@ -130,6 +133,60 @@ struct OpsState {
     std::set<std::string> clientsGroupExpanded;
     // 展开中的 IP 组键：顶层为 IP；嵌套为 "token\\x1fip"
     std::set<std::string> clientsIpExpanded;
+
+    // 背包金 / 利润监控：TOKEN 曲线 + 角色流水（防转移）
+    struct MesoDashPoint {
+        ULONGLONG wallMs = 0;
+        unsigned long long meso = 0;
+    };
+    struct MesoDashSeries {
+        std::string token;
+        std::string chars;
+        int sessions = 0;
+        bool online = false;
+        bool visible = true;
+        unsigned long long lastMeso = 0;
+        ULONGLONG lastAlertMs = 0;
+        std::deque<MesoDashPoint> points;
+    };
+    struct MesoUnit {
+        std::string key;
+        std::string token;
+        std::string charName;
+        std::string deviceId;
+        std::string machine;
+        unsigned long long lastMeso = 0;
+        std::string lastScrolls;
+        ULONGLONG lastSeenMs = 0;
+        bool online = false;
+        bool sampled = false;
+        bool scrollsSampled = false;
+    };
+    struct MesoEvent {
+        ULONGLONG wallMs = 0;
+        std::string kind;  // outflow|token_xfer|char_move|reconnect_drop|inflow|scroll_*
+        std::string token;
+        std::string charName;
+        std::string peerToken;
+        std::string peerChar;
+        unsigned long long before = 0;
+        unsigned long long after = 0;
+        unsigned long long mag = 0;
+        std::string note;
+    };
+    std::vector<MesoDashSeries> mesoDashSeries;
+    std::deque<MesoDashPoint> mesoDashTotal;
+    std::vector<MesoUnit> mesoUnits;
+    std::deque<MesoEvent> mesoEvents;
+    int mesoDashWindowMin = 30;  // 10 / 30 / 60 / 180 / 1440 / 10080
+    char mesoDashFilter[64]{};
+    bool mesoDashShowTotal = true;
+    bool mesoDashShowOffline = true;
+    bool mesoDashYFromZero = true;
+    int mesoDashNoToken = 0;
+    int mesoDashHoverSeries = -1;  // legend 悬停高亮；-1 无
+    unsigned long long mesoAlertMin = 100000;  // 默认 10 万：低于此不记流水
+    int mesoEventView = 0;  // 0=异常 1=全部 2=进账
 
     struct ForceTargetPending {
         std::string id;

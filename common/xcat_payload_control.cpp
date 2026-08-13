@@ -104,6 +104,8 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobScanIntervalMs = kMobScanIntervalDefaultMs;
     out.simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     out.clusterWeight = kClusterWeightDefault;
+    out.simpleCombatHitRotate = kCombatHitRotateDefault;
+    out.simpleCombatHitRotateN = kCombatHitRotateNDefault;
     out.simpleCombatTeleport = 0;
     out.simpleCombatImpactApproach = 1;
     out.simpleCombatFlySpeedPct = kHeliSpeedPctDefault;
@@ -279,6 +281,12 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     else
         out.simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     if (IniGetU32(ini, "core", "clusterWeight", u)) out.clusterWeight = ClampClusterWeight(u);
+    if (IniGetBool(ini, "core", "simpleCombatHitRotate", b))
+        out.simpleCombatHitRotate = b ? 1u : 0u;
+    if (IniGetU32(ini, "core", "simpleCombatHitRotateN", u))
+        out.simpleCombatHitRotateN = ClampCombatHitRotateN(u);
+    else
+        out.simpleCombatHitRotateN = kCombatHitRotateNDefault;
     // fill+Doing 贴怪已禁用（封禁风险）：读盘亦强制关。
     out.simpleCombatTeleport = 0u;
     // 追怪位移：新键 simpleCombatAirApproach；旧键 simpleCombatImpactApproach 仅兜底。
@@ -544,6 +552,10 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         normalized.simpleCombatAttackHoldMs ? normalized.simpleCombatAttackHoldMs
                                             : kAttackHoldDefaultMs);
     normalized.clusterWeight = normalized.clusterWeight ? 1u : 0u;
+    normalized.simpleCombatHitRotate = normalized.simpleCombatHitRotate ? 1u : 0u;
+    normalized.simpleCombatHitRotateN = ClampCombatHitRotateN(
+        normalized.simpleCombatHitRotateN ? normalized.simpleCombatHitRotateN
+                                          : kCombatHitRotateNDefault);
     normalized.simpleCombatTeleport = 0u;
     normalized.simpleCombatImpactApproach = normalized.simpleCombatImpactApproach ? 1u : 0u;
     // 0 视为「旧盘没有这个键」，回默认 100 而非被 Clamp 抬到下限 25——
@@ -705,6 +717,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "mobScanIntervalMs", normalized.mobScanIntervalMs);
         IniSetU32(ini, "core", "simpleCombatAttackHoldMs", normalized.simpleCombatAttackHoldMs);
         IniSetU32(ini, "core", "clusterWeight", normalized.clusterWeight);
+        IniSetBool(ini, "core", "simpleCombatHitRotate", normalized.simpleCombatHitRotate != 0);
+        IniSetU32(ini, "core", "simpleCombatHitRotateN", normalized.simpleCombatHitRotateN);
         IniSetBool(ini, "core", "simpleCombatTeleport", normalized.simpleCombatTeleport != 0);
         // 落盘中性键；擦掉旧 Impact* 键名。
         IniSetBool(ini, "core", "simpleCombatAirApproach",

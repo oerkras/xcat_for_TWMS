@@ -9,6 +9,7 @@
 // v9：角色快照（名/等级/职业/背包金 → launcher 探活头 → 运维台）；
 // v10：当前频道（1-based ch.N）→ 探活头 → 运维台（地图 Id 已在 v2 mapId）。
 // v11：原生 MapDataInfo.IsTown（守护主城无经验豁免；绕过拍卖强制写前的真值）。
+// v12：高价值卷轴快照（消耗栏 204/234 → launcher 探活头 → 运维台；客户端无 UI）。
 
 #include <Windows.h>
 
@@ -18,7 +19,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 11u;
+constexpr uint32_t kPayloadStatusVersion = 12u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -89,6 +90,10 @@ struct PayloadStatus {
     // v11：原生 IsTown（拍卖绕过强制写 1 时仍报备份原值）。
     uint32_t mapIsTown = 0;       // 1=主城
     uint32_t mapIsTownValid = 0;  // 1=已采到；0=未知（读侧可回退 mapId 启发式）
+
+    // v12：高价值卷轴（ASCII `id:qty,id:qty`；valid=0 表示本拍未采到，探活勿覆盖服务端旧值）
+    uint32_t playerWealthScrollsValid = 0;
+    char playerWealthScrolls[384]{};
 };
 #pragma pack(pop)
 

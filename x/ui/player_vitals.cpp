@@ -76,6 +76,18 @@ constexpr char kHashSlotBundleNumber[] =
 constexpr char kFldSlotItemId[] = "ItemId";           // restored 明文兜底
 constexpr char kFldSlotBundleNumber[] = "nNumber";
 // CharacterStat（08-06 remount · TypeDef 1833）
+constexpr char kHashCsCharacterId[] =
+    "ce3c2f6f4d94ed1e0301d12d81c330e1eda0cdb8165420b89b8ac2ba7fc5be8";  // CharacterID @0x10
+constexpr char kHashCsStr[] =
+    "ff51aa75687abdaa4881235d913373e6d02c2b69aeea94a7e2fa99ab21be781";  // nSTR @0x3C
+constexpr char kHashCsDex[] =
+    "bd76edd42850f219f5c607133f060e8d0d9a54158b7540adb5d07379378eb56";  // nDEX @0x3E
+constexpr char kHashCsInt[] =
+    "d4f38671722275230846437d95dc3b404edcb730c0780eca8dfe9b6b06026d8";  // nINT @0x40
+constexpr char kHashCsLuk[] =
+    "aa971c2634bf520042761e1456feda07a589b60f669cd4a7b2125578f8276e0";  // nLUK @0x42
+constexpr char kHashCsAp[] =
+    "a8828b97f66f0a9eba6317ebf8016c5008bf33a360da9cbd896325384a97f0e";  // ap @0x4C
 constexpr char kHashCsName[] =
     "b02256291997e9e0ee635ebfe60659219c81d43db37ecaf35c18216605afd3b";  // CharacterName @0x18
 constexpr char kHashCsLevel[] =
@@ -119,6 +131,12 @@ constexpr size_t kFbCdSkillCoolTimeOver = 0x70;
 constexpr size_t kFbWmSecondaryStat = 0xF0;  // SecondaryStat*（08-06 dump；旧误标 0xB8 为嵌套 struct）
 constexpr size_t kFbSlotItemId = 0x10;
 constexpr size_t kFbSlotBundleNumber = 0x28;  // ItemSlotBundle.nNumber
+constexpr size_t kFbCsCharacterId = 0x10;
+constexpr size_t kFbCsStr = 0x3C;
+constexpr size_t kFbCsDex = 0x3E;
+constexpr size_t kFbCsInt = 0x40;
+constexpr size_t kFbCsLuk = 0x42;
+constexpr size_t kFbCsAp = 0x4C;
 constexpr size_t kFbCsName = 0x18;
 constexpr size_t kFbCsLevel = 0x38;
 constexpr size_t kFbCsJob = 0x3A;
@@ -147,6 +165,12 @@ size_t gOffCdSkillCoolTimeOver = kFbCdSkillCoolTimeOver;
 size_t gOffWmSecondaryStat = kFbWmSecondaryStat;
 size_t gOffSlotItemId = kFbSlotItemId;
 size_t gOffSlotBundleNumber = kFbSlotBundleNumber;
+size_t gOffCsCharacterId = kFbCsCharacterId;
+size_t gOffCsStr = kFbCsStr;
+size_t gOffCsDex = kFbCsDex;
+size_t gOffCsInt = kFbCsInt;
+size_t gOffCsLuk = kFbCsLuk;
+size_t gOffCsAp = kFbCsAp;
 size_t gOffCsName = kFbCsName;
 size_t gOffCsLevel = kFbCsLevel;
 size_t gOffCsJob = kFbCsJob;
@@ -293,6 +317,13 @@ void EnsureFieldOffsets() {
         gOffSlotBundleNumber = PickOff(got, kFbSlotBundleNumber, &slotH);
     }
     if (cs) {
+        gOffCsCharacterId =
+            PickOff(FieldOffsetByHash(cs, kHashCsCharacterId), kFbCsCharacterId, &csH);
+        gOffCsStr = PickOff(FieldOffsetByHash(cs, kHashCsStr), kFbCsStr, &csH);
+        gOffCsDex = PickOff(FieldOffsetByHash(cs, kHashCsDex), kFbCsDex, &csH);
+        gOffCsInt = PickOff(FieldOffsetByHash(cs, kHashCsInt), kFbCsInt, &csH);
+        gOffCsLuk = PickOff(FieldOffsetByHash(cs, kHashCsLuk), kFbCsLuk, &csH);
+        gOffCsAp = PickOff(FieldOffsetByHash(cs, kHashCsAp), kFbCsAp, &csH);
         gOffCsName = PickOff(FieldOffsetByHash(cs, kHashCsName), kFbCsName, &csH);
         gOffCsLevel = PickOff(FieldOffsetByHash(cs, kHashCsLevel), kFbCsLevel, &csH);
         gOffCsJob = PickOff(FieldOffsetByHash(cs, kHashCsJob), kFbCsJob, &csH);
@@ -355,6 +386,15 @@ uint8_t ReadU8(void* obj, size_t off) {
     if (!obj) return 0;
     __try {
         return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(obj) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+uint32_t ReadU32(void* obj, size_t off) {
+    if (!obj) return 0;
+    __try {
+        return *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(obj) + off);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
@@ -511,6 +551,21 @@ void* LocalCharacterStat() {
     if (!cd) return nullptr;
     void* cs = ReadPtr(cd, gOffCdCharacterStat);
     return LooksLikeHeapPtr(cs) ? cs : nullptr;
+}
+
+bool ReadBaseApStats(BaseApStats& out) {
+    out = {};
+    EnsureFieldOffsets();
+    void* cs = LocalCharacterStat();
+    if (!LooksLikeHeapPtr(cs)) return false;
+    out.characterId = ReadU32(cs, gOffCsCharacterId);
+    out.str = ReadI16(cs, gOffCsStr);
+    out.dex = ReadI16(cs, gOffCsDex);
+    out.intel = ReadI16(cs, gOffCsInt);
+    out.luk = ReadI16(cs, gOffCsLuk);
+    out.ap = ReadI16(cs, gOffCsAp);
+    out.ok = true;
+    return true;
 }
 
 int64_t ReadMoney() {

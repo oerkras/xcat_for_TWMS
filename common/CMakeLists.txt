@@ -27,6 +27,7 @@ add_library(xcat_common STATIC
     xcat_multiskill_select.cpp
     xcat_timed_keys.cpp
     xcat_pet_loot.cpp
+    xcat_auto_stat.cpp
     xcat_buffs.cpp
     xcat_worlds_cache.cpp
     xcat_world_names.cpp

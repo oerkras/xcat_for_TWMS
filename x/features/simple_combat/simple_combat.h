@@ -27,6 +27,11 @@ void SetTickIntervalMs(uint32_t ms);
 void SetSmartInterval(bool on);
 void SetClusterPriority(bool on);
 bool IsClusterPriority();
+// 打中换怪：本角色确认命中同一 oid N 次后改打攻击盒外最近活怪；空刀/他人伤害不计；活怪 < 3 停刀。
+void SetHitRotateEnabled(bool on);
+bool IsHitRotateEnabled();
+void SetHitRotateN(uint32_t n);
+uint32_t HitRotateN();
 void SetTeleportEnabled(bool on);  // 强制关：fill+Doing 战斗回落已禁用
 // Impact 贴怪（默认开）：近战直升机——旋翼环持续托举悬停在怪旁，空中出刀。
 // 优先于拟人。需无敌；交战期间自动挂 fh-ban（无怪超宽限则卸掉落地）。

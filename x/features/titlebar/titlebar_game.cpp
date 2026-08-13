@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 namespace x::features::titlebar::game {
 namespace {
@@ -348,6 +349,52 @@ bool SnapshotInventory(std::unordered_map<int, unsigned long long>& out) {
     return any;
 }
 
+bool IsWealthScrollItem(int itemId) {
+    if (itemId <= 0) return false;
+    const int fam = itemId / 10000;
+    return fam == 204 || fam == 234;
+}
+
+bool FormatWealthScrollsImpl(char* dst, size_t cap) {
+    if (!dst || cap < 2) return false;
+    dst[0] = 0;
+    if (x::runtime::managed_main::IsLoginFrozen()) return false;
+    std::unordered_map<int, unsigned long long> inv;
+    if (!SnapshotInventory(inv)) return false;
+
+    std::vector<std::pair<int, unsigned long long>> items;
+    items.reserve(inv.size());
+    for (const auto& kv : inv) {
+        if (!IsWealthScrollItem(kv.first) || kv.second == 0) continue;
+        items.push_back(kv);
+    }
+    auto rank = [](int id) {
+        if (id / 10000 == 234) return 0;
+        if (id / 100 == 20491) return 1;
+        return 2;
+    };
+    std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
+        const int ra = rank(a.first);
+        const int rb = rank(b.first);
+        if (ra != rb) return ra < rb;
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;
+    });
+
+    size_t used = 0;
+    for (const auto& it : items) {
+        char piece[48]{};
+        const int n = std::snprintf(piece, sizeof(piece), "%s%d:%llu", used ? "," : "", it.first,
+                                    it.second);
+        if (n <= 0) continue;
+        const size_t plen = static_cast<size_t>(n);
+        if (used + plen + 1 > cap) break;
+        std::memcpy(dst + used, piece, plen + 1);
+        used += plen;
+    }
+    return true;
+}
+
 int LookupOfflineSellPrice(int itemId) {
     char code[32]{};
     snprintf(code, sizeof(code), "%d", itemId);
@@ -493,6 +540,14 @@ bool TryResolveItemDataManager() {
                               "物价查询停用 hash=%s",
                               kItemDataManagerClass);
     return false;
+}
+
+bool FormatWealthScrolls(char* dst, size_t cap) {
+    if (!dst || cap < 2) {
+        return false;
+    }
+    dst[0] = 0;
+    return FormatWealthScrollsImpl(dst, cap);
 }
 
 bool ReadVitals(Vitals& out) {

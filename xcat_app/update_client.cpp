@@ -2281,6 +2281,16 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
                            nameW.c_str(), levelW.c_str(), jobW.c_str(), jobNameW.c_str(),
                            mesoW.c_str());
                 out += charHeaders;
+                if (st.playerWealthScrollsValid) {
+                    const char* wealthRaw =
+                        st.playerWealthScrolls[0] ? st.playerWealthScrolls : "-";
+                    const std::wstring wealthW =
+                        sanitizeHdrLen(xcat::Utf8ToWide(wealthRaw), 360);
+                    wchar_t wealthHeaders[420]{};
+                    _snwprintf(wealthHeaders, 420, L"X-XCat-Wealth-Scrolls: %s\r\n",
+                               wealthW.c_str());
+                    out += wealthHeaders;
+                }
             }
             if (st.mapId > 0 || st.channelId > 0) {
                 char mapIdBuf[16]{};

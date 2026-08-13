@@ -37,6 +37,9 @@ void DumpNow(const char* why);
 int LastPendingErrorCode();
 int LastSessionState();
 bool SawDisconnect();
+// Last poll found SessionTcpLayer facade (not a 150ms map-churn blip).
+// False after persistent in-map teardown with no Disconnected edge (zombie field).
+bool HasResolvedSession();
 // Monotonic: bumps on each Disconnecting/Disconnected edge (for launcher clean relaunch).
 uint32_t DisconnectSeq();
 

@@ -1817,7 +1817,8 @@ void Finish(unsigned result, const char* line) {
 bool WhyStringNeedsRealReconnect(const char* why) {
     if (!why || !why[0]) return false;
     return std::strcmp(why, "disconnected") == 0 || std::strcmp(why, "disconnecting") == 0 ||
-           std::strcmp(why, "close_session_inmap") == 0 || std::strcmp(why, "stuck_lobby") == 0;
+           std::strcmp(why, "close_session_inmap") == 0 || std::strcmp(why, "stuck_lobby") == 0 ||
+           std::strcmp(why, "nm_gone_inmap") == 0;
 }
 
 std::atomic<DWORD> gLastRefuseLogMs{0};
@@ -3248,7 +3249,7 @@ void RequestAttempt(const char* why) {
     }
     // BIN 16:05：图内药店 Session 空窗 why=lost_session → hold 闪一下像强制软重连。
     // 真回大厅由 stuck_lobby / Disconnected 边沿 / RequestDeferredAttempt 处理；
-    // lost_session 在图内一律吞掉。
+    // lost_session 在图内一律吞掉。nm_gone_inmap 是「丢失满 3s」的真死会话，不走这条吞。
     if (why && std::strcmp(why, "lost_session") == 0 &&
         x::features::ports::world::IsInMapScene()) {
         LogLine("request skip lost_session inMap");

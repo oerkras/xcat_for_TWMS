@@ -15,7 +15,7 @@ struct CombatCtx {
     float y = 0.f;
 };
 
-// 视觉层：Ap（魂）/ Apl（皮插值）/ Pos@0x64 / CurPos@0x240（镜头）/ CurFh。
+// 视觉层：Ap（魂）/ Apl（皮插值）/ Pos@0x64 / CurPos@0x2B0（镜头）/ CurFh。
 // HealVisualToAp：收 Apl/Pos；若 |Ap−CurPos| 僵死再按 restCam 收 CurPos/PrevPos（BIN：冻镜头）。
 struct VisualSnap {
     bool ok = false;

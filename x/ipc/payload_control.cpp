@@ -477,6 +477,8 @@ void ApplyControl(const xcat::PayloadControl& c) {
                                                           : xcat::kAttackHoldDefaultMs));
     x::features::simple_combat::SetSmartInterval(c.simpleCombatSmartInterval != 0);
     x::features::simple_combat::SetClusterPriority(c.clusterWeight != 0);
+    x::features::simple_combat::SetHitRotateEnabled(c.simpleCombatHitRotate != 0);
+    x::features::simple_combat::SetHitRotateN(c.simpleCombatHitRotateN);
     x::features::simple_combat::SetTeleportEnabled(false);  // fill+Doing 战斗回落已禁用
     x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
     x::features::simple_combat::SetAntiJitterEnabled(c.simpleCombatAntiJitter != 0);

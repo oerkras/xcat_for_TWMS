@@ -257,9 +257,8 @@ constexpr int kLastTrySkipStamp = 0x7FFFFFFF;
 //      （IMM 0x328634BB + seed@0x7FFB8A2C92A8=0xCD79CB48 → 3）
 //   ③ now - PickStamp(0x88) >= 3000（有符号）——宠吸同款拍前清闸后由官方 Send 再盖
 //   ④ 归属：客户端先跳过非己/非无主；服端仍裁决 + Stall 兜底
-//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用 vacuum 半盒枚举（默认 1000×1000）
-//      —— 送包坐标仍是角色位；服端距离校验 → EffectiveCharHalf 钳到 CharVacW/HMax=1500
-//         （上传汇总：1500 盒 abs/sent≈0.84；4000 盒≈0；Stall 挡不住远处 Ready 空 Send）
+//   ⑤ 矩形：宠吸扩 ByPet 包；人物直吸用 vacuum 半盒枚举（用户自调，默认 1000×1000）
+//      —— 送包坐标仍是角色位；服端距离校验失败则空 Send，不再代用户缩盒
 //   通过后 Point(角色 Maple 坐标) → Send(pt, Id, 0)
 //      （第 4 参 IMM 0x353E87DA + seed@…92B4=0xCAC17826 → 0，无需伪造 CRC）
 
@@ -2641,8 +2640,8 @@ void RunVacuumOnMain() {
     if (gJob.highValuePriority) {
         int hvN = 0, hvFull = 0;
         if (hvHaveUser) {
-            const float charHalfW = xcat::kPetLootCharVacWMax * 0.5f;
-            const float charHalfH = xcat::kPetLootCharVacHMax * 0.5f;
+            const float charHalfW = gJob.vacuumW * 0.5f;
+            const float charHalfH = gJob.vacuumH * 0.5f;
             ScanHighValueNear(pool, px, py, halfW, halfH, hvUx, hvUy, charHalfW, charHalfH,
                               skipPtr, hvN, hvFull, &r.highValueSampleDropId, &r.highValueSampleInfo,
                               &r.highValueSampleKind);
@@ -2662,14 +2661,12 @@ void RunVacuumOnMain() {
         return;
     }
 
-    // 按件 Pool.Send（禁大盒 ByPet）——触发：
+    // 按件 Pool.Send —— 仅宠吸路径上的安全阀，不用盒子尺寸切「人吸」：
     // 1) 混飞 flyNear>0：ByPet 会碰抛物中物
     // 2) 密堆 readyNear>ByPetReadyMax：ByPet 一拍连发 N 个 Pet.Send → BIN 静默 DC
-    // 3) 真空过大（>1000）：ByPet 扩矩形后人够不着 → 服端拒（BIN 含金币 sentSame，与背包无关）
-    // 4) 高价值紧急：必须按件选装备/卷軸（金币让路）
-    // 送包坐标必须用角色 Maple 位（与人物直吸同口径）；枚举仍按宠真空盒。
-    const bool largeVacByPetRisk = gJob.vacuumW > 1000.f || gJob.vacuumH > 1000.f;
-    const bool pacedSend = largeVacByPetRisk || r.highValueUrgent || pass.flyNear > 0 ||
+    // 3) 高价值紧急：必须按件选装备/卷軸（金币让路）
+    // 范围只扩 ByPet 矩形；人物直吸是面板另一档（TryCharVacuum），互不顶替。
+    const bool pacedSend = r.highValueUrgent || pass.flyNear > 0 ||
                            pass.readyNear > xcat::kPetLootByPetReadyMax;
     if (pacedSend) {
         if (!gJob.skip.empty()) (void)EnsureExceptionIdsIfNeeded(pet, gJob.skip);
@@ -2711,9 +2708,9 @@ void RunVacuumOnMain() {
             return;
         }
 
-        // 发包前整理：服端按角色距离验 DropPool.Send；宠盒内但人够不着 → 不送（BIN 空 Send/Stall 堆）
-        const float charHalfW = xcat::kPetLootCharVacWMax * 0.5f;
-        const float charHalfH = xcat::kPetLootCharVacHMax * 0.5f;
+        // 候选按用户真空盒；够不着由服端拒，不再代缩到 1500
+        const float charHalfW = gJob.vacuumW * 0.5f;
+        const float charHalfH = gJob.vacuumH * 0.5f;
 
         void* dict = ReadPtr(pool, kOffPoolDict);
         void* entries = LooksLikeHeapPtr(dict) ? ReadPtr(dict, kOffDictEntries) : nullptr;
@@ -2762,7 +2759,7 @@ void RunVacuumOnMain() {
                 // 高价值但对应栏满 → 跳过（用户要求：包满不吸）
                 if (hv != HvClass::None && !HighValueBagAllows(hv)) continue;
                 ++readyInPet;
-                // ★ 角色半盒闸（与人吸顶同 750）：够不着不进候选，避免空 Send
+                // 用户真空盒（角色中心）；超出由服端拒，不再另闸 750
                 if (std::fabs(dpx - ux) > charHalfW || std::fabs(dpy - uy) > charHalfH) continue;
                 const float dx = dpx - ux;
                 const float dy = dpy - uy;
@@ -3121,7 +3118,7 @@ void ScanHighValueNear(void* pool, float petX, float petY, float halfW, float ha
             ++outSkippedFull;
             continue;
         }
-        // 人够不着 → 不计入可吸（勿 urgent）；栏满已在上分支
+        // 人吸盒外 → 不计入可吸（勿 urgent）；栏满已在上分支
         if (std::fabs(dpx - ux) > charHalfW || std::fabs(dpy - uy) > charHalfH) continue;
         if (outNearHv == 0) {
             if (outSampleDropId) *outSampleDropId = ReadI32(drop, kOffDropId);
@@ -3472,14 +3469,9 @@ void RunCharVacOnMain() {
         }
     }
 
-    // 双保险：外层 PetLootEffectiveCharHalf 已钳；此处再顶，防直调/旧配置越界空 Send
-    // （与 common kPetLootCharVacW/HMax 对齐：全盒 1500×1500 → 半盒 750×750；上传实证）
-    constexpr float kCharHalfWCap = 750.f;
-    constexpr float kCharHalfHCap = 750.f;
+    // 半盒 = 用户真空 / 2，不再另顶 750
     float halfW = gCharVac.halfW;
     float halfH = gCharVac.halfH;
-    if (halfW > kCharHalfWCap) halfW = kCharHalfWCap;
-    if (halfH > kCharHalfHCap) halfH = kCharHalfHCap;
     const SkipIds* skip = gCharVac.skip.empty() ? nullptr : &gCharVac.skip;
 
     r.dropCount = ReadPoolDropCount(pool);
@@ -3770,8 +3762,8 @@ bool PeekHighValueActionable(float petX, float petY, float halfW, float halfH, c
     if (!ResolveLocalUser(GetTickCount())) return false;
     float ux = 0.f, uy = 0.f;
     if (!ReadUserPos(ux, uy)) return false;
-    const float charHalfW = xcat::kPetLootCharVacWMax * 0.5f;
-    const float charHalfH = xcat::kPetLootCharVacHMax * 0.5f;
+    const float charHalfW = halfW;
+    const float charHalfH = halfH;
     ScanHighValueNear(pool, petX, petY, halfW, halfH, ux, uy, charHalfW, charHalfH, skip,
                       outNearHv, outSkippedFull, outSampleDropId, outSampleInfo, outSampleKind);
     return true;

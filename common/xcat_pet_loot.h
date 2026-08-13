@@ -33,24 +33,21 @@ constexpr uint32_t kPetLootIntervalMaxMs = 2000u;
 constexpr uint32_t kPetLootBurstDefault = 5u;
 constexpr uint32_t kPetLootBurstMin = 1u;
 constexpr uint32_t kPetLootBurstHardCap = 8u;
-// 宠吸有效真空：人物/宠附近矩形（宽×高，默认 1000×1000）；用户可调，Clamp 到 Min..Max
+// 宠吸有效真空：人物/宠附近矩形（宽×高，默认 1000×1000）；用户自调。
+// Max 只挡面板拖条 / ini 垃圾，不是「服端能吸」顶。过大空 Send / 掐线自负。
 constexpr float kPetLootVacuumWDefault = 1000.f;
 constexpr float kPetLootVacuumHDefault = 1000.f;
 constexpr float kPetLootVacuumMin = 50.f;
 // 兼容旧名：现与 Near 默认同值（勿再当全图尺寸用）
 constexpr float kPetLootMapVacuumW = kPetLootVacuumWDefault;
 constexpr float kPetLootMapVacuumH = kPetLootVacuumHDefault;
-// 宠吸盒顶 = 人吸顶。BIN：4000×4000 + near≈38 → 约 0.6s 内 DC（kick verdict=lean_local_or_soft）
-constexpr float kPetLootVacuumMax = 1500.f;
-// 人物直吸：送包坐标仍是角色位，服端有距离校验；全盒另顶（与 VacuumMax 同值）。
-// 上传 petloot 实证（user_log_uploads · mode=charvac · abs/sent）：
-//   1500×1500 n=22206 uploads=49 → 0.844；400×320 → 0.544；300×200 → 0.208；
-//   4000×4000/3200×2400 → ≈0（空 Send）。故顶钉 1500（旧 charHalf 750 全盒）。
-constexpr float kPetLootCharVacWMax = 1500.f;
-constexpr float kPetLootCharVacHMax = 1500.f;
+constexpr float kPetLootVacuumMax = 20000.f;
+// 人物直吸与宠吸同一盒顶，不再另钳 1500。
+constexpr float kPetLootCharVacWMax = kPetLootVacuumMax;
+constexpr float kPetLootCharVacHMax = kPetLootVacuumMax;
 // 盒内 Ready 超过此数：禁大盒 ByPet（一拍可连发 N 个 Pet.Send），改按件 Pool.Send
 constexpr int kPetLootByPetReadyMax = 6;
-// 人物直吸半宽/半高：与 vacuumW/H 共用全盒语义（半盒 = 全盒/2）；Effective 再钳到 CharVac*Max
+// 人物直吸半宽/半高：与 vacuumW/H 共用全盒语义（半盒 = 全盒/2）
 constexpr float kPetLootCharHalfWDefault = kPetLootVacuumWDefault * 0.5f;
 constexpr float kPetLootCharHalfHDefault = kPetLootVacuumHDefault * 0.5f;
 constexpr float kPetLootCharHalfMax = kPetLootCharVacWMax * 0.5f;

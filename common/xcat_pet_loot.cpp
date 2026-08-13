@@ -16,10 +16,9 @@ bool EnsureStateDir(const char* binDir) {
 void ClampVacuum(PetLootConfig& cfg) {
     if (!(cfg.vacuumW >= kPetLootVacuumMin)) cfg.vacuumW = kPetLootVacuumWDefault;
     if (!(cfg.vacuumH >= kPetLootVacuumMin)) cfg.vacuumH = kPetLootVacuumHDefault;
-    // 超顶钳到 Max（旧 ini 4000 一次压回安全顶，勿整段打回默认丢用户意图）
+    // 只挡非数 / 极端垃圾，不按「能吸到」压用户意图
     if (cfg.vacuumW > kPetLootVacuumMax) cfg.vacuumW = kPetLootVacuumMax;
     if (cfg.vacuumH > kPetLootVacuumMax) cfg.vacuumH = kPetLootVacuumMax;
-    // 人物直吸与宠吸共用 vacuum*；半盒镜像写入以便旧读路径/ini 一致
     cfg.charHalfW = cfg.vacuumW * 0.5f;
     cfg.charHalfH = cfg.vacuumH * 0.5f;
 }
@@ -113,6 +112,7 @@ bool WritePetLootIni(const char* binDir, const PetLootConfig& cfg, uint64_t writ
         // 脚下已改原生盒：不再读写自定义半宽；擦掉旧键避免误导
         IniEraseKey(ini, "pet_loot", "footHalfW");
         IniEraseKey(ini, "pet_loot", "footHalfH");
+        IniEraseKey(ini, "pet_loot", "vacuumUserAdjusted");
         IniSetBool(ini, "pet_loot", "charVacEnabled", cfg.charVacEnabled != 0);
         IniSetFloat(ini, "pet_loot", "charHalfW", cfg.charHalfW);
         IniSetFloat(ini, "pet_loot", "charHalfH", cfg.charHalfH);
@@ -160,9 +160,6 @@ void PetLootEffectiveVacuum(const PetLootConfig& cfg, float& outW, float& outH) 
 void PetLootEffectiveCharHalf(const PetLootConfig& cfg, float& outHalfW, float& outHalfH) {
     float w = 0.f, h = 0.f;
     PetLootEffectiveVacuum(cfg, w, h);
-    // 人物直吸硬顶：与宠吸可共用 ini 大盒，但枚举/Send 不得超出服端可接受范围
-    if (w > kPetLootCharVacWMax) w = kPetLootCharVacWMax;
-    if (h > kPetLootCharVacHMax) h = kPetLootCharVacHMax;
     outHalfW = w * 0.5f;
     outHalfH = h * 0.5f;
 }
@@ -182,12 +179,6 @@ void PetLootNormalize(PetLootConfig& cfg) {
         cfg.footEnabled = 0;
     } else if (cfg.charVacEnabled) {
         cfg.footEnabled = 0;
-    }
-    // 宠吸/人物直吸共用 vacuumW/H；旧「全图」3200×2400 一次性压回默认
-    if (cfg.vacuumW >= 3199.f && cfg.vacuumW <= 3201.f && cfg.vacuumH >= 2399.f &&
-        cfg.vacuumH <= 2401.f) {
-        cfg.vacuumW = kPetLootVacuumWDefault;
-        cfg.vacuumH = kPetLootVacuumHDefault;
     }
     cfg.intervalMs = PetLootClampIntervalMs(cfg.intervalMs);
     cfg.burstPerTick = PetLootClampBurstPerTick(cfg.burstPerTick);

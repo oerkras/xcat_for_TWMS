@@ -22,11 +22,25 @@ struct Vitals {
     bool ok = false;
 };
 
+// 基础四维 + 未分配 AP。独立读路径：不要塞进 Read()（autopot/标题栏热路径）。
+struct BaseApStats {
+    uint32_t characterId = 0;
+    int16_t str = 0;
+    int16_t dex = 0;
+    int16_t intel = 0;
+    int16_t luk = 0;
+    int16_t ap = 0;
+    bool ok = false;
+};
+
 void Init();
 void Shutdown();
 
 // WM→CharacterData→CharacterStat（+ BasicStat）。无 FindAll，可在 worker 调。
 bool Read(Vitals& out);
+
+// 仅 auto_stat 等低频模块调用。worker 纯内存读；不含装备加成。
+bool ReadBaseApStats(BaseApStats& out);
 
 // 与 Read 相同（保留旧名；forceRebind 忽略）。
 bool ResolveAndRead(Vitals& out, DWORD now, bool forceRebind);

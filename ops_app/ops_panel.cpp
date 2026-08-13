@@ -8,6 +8,7 @@
 
 #include "../common/process_util.h"
 #include "../common/xcat_map_names.h"
+#include "../common/xcat_item_catalog.h"
 
 #include "imgui.h"
 
@@ -16,16 +17,22 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
 #include <sstream>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace xcat::ops {
 namespace {
@@ -34,6 +41,10 @@ constexpr ULONGLONG kWatchdogGraceMs = 8000;
 constexpr ULONGLONG kWatchdogMaxBackoffMs = 120000;
 constexpr ULONGLONG kHealthyResetMs = 60000;
 constexpr ULONGLONG kLogRotateBytes = 32ull * 1024ull * 1024ull;
+constexpr ULONGLONG kMesoDashKeepMs = 7ull * 24ull * 60ull * 60ull * 1000ull;
+constexpr ULONGLONG kMesoEventKeepMs = 30ull * 24ull * 60ull * 60ull * 1000ull;
+// 探活采样约 5s；相邻点超过此时长视为关服/API 断连，折线断开不连斜线。
+constexpr ULONGLONG kMesoDashGapMs = 30ull * 1000ull;
 
 std::wstring JoinPath(const std::wstring& a, const std::wstring& b) {
     if (a.empty()) return b;
@@ -66,6 +77,15 @@ std::wstring OpsLogHelper(const std::wstring& repo) {
 }
 std::wstring OpsLogAccess(const std::wstring& repo) {
     return JoinPath(repo, L"artifacts\\ops_logs\\twms_access.jsonl");
+}
+std::wstring OpsLogMesoDash(const std::wstring& repo) {
+    return JoinPath(repo, L"artifacts\\ops_logs\\meso_dash.jsonl");
+}
+std::wstring OpsLogMesoEvents(const std::wstring& repo) {
+    return JoinPath(repo, L"artifacts\\ops_logs\\meso_events.jsonl");
+}
+std::wstring OpsLogMesoUnits(const std::wstring& repo) {
+    return JoinPath(repo, L"artifacts\\ops_logs\\meso_units.json");
 }
 
 // 运维台语义色：按主题切换——暗夜用亮色字，白天用深色字，保证对比度。
@@ -546,6 +566,8 @@ void RunAsync(OpsState& st, Fn&& fn) {
 
 }  // namespace
 
+void MesoDashLoadFile(OpsState& st);
+
 void OpsState_Init(OpsState& st) {
     wchar_t exePath[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -557,6 +579,7 @@ void OpsState_Init(OpsState& st) {
     st.hasPython = FindOnPath(L"python", st.pythonPath);
     EnsureDirs(st.repoRoot);
     RefreshDiskFree(st);
+    MesoDashLoadFile(st);
 
     if (!st.hasNode) SetStatus(st, "未找到 node.exe（请安装 Node.js 并加入 PATH）");
     else if (!st.hasPython) SetStatus(st, "未找到 python.exe（请安装 Python 并加入 PATH）");
@@ -1024,14 +1047,17 @@ void FormatMapChannelCell(const OpsState& st, const OpsState::ConnectedClient& c
 
 void CopyClientSummary(const OpsState& st, const OpsState::ConnectedClient& c) {
     const std::string mapLabel = ClientMapLabel(st, c);
-    char buf[768]{};
+    char buf[1024]{};
     std::snprintf(buf, sizeof(buf),
-                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\tmap=%u\t%s\tch=%d\tgate=%s\tidle=%ds",
+                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\t%s\tmap=%u\t%s\tch=%d\tgate=%s\tidle=%ds",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
                   c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
                   c.charJobName.empty() ? "-" : c.charJobName.c_str(),
-                  c.charMeso.empty() ? "-" : c.charMeso.c_str(), c.mapId,
+                  c.charMeso.empty() ? "-" : c.charMeso.c_str(),
+                  c.hasWealthScrolls ? (c.wealthScrolls.empty() ? "-" : c.wealthScrolls.c_str())
+                                     : "-",
+                  c.mapId,
                   mapLabel.empty() ? "-" : mapLabel.c_str(), c.channelId,
                   c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec);
     CopyText(buf);
@@ -1039,13 +1065,16 @@ void CopyClientSummary(const OpsState& st, const OpsState::ConnectedClient& c) {
 
 void AppendClientSummaryLine(std::string& out, const OpsState& st, const OpsState::ConnectedClient& c) {
     const std::string mapLabel = ClientMapLabel(st, c);
-    char buf[768]{};
-    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%u\t%s\t%d\t%s\t%d\n",
+    char buf[1024]{};
+    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%u\t%s\t%d\t%s\t%d\n",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
                   c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
                   c.charJobName.empty() ? "-" : c.charJobName.c_str(),
-                  c.charMeso.empty() ? "-" : c.charMeso.c_str(), c.mapId,
+                  c.charMeso.empty() ? "-" : c.charMeso.c_str(),
+                  c.hasWealthScrolls ? (c.wealthScrolls.empty() ? "-" : c.wealthScrolls.c_str())
+                                     : "-",
+                  c.mapId,
                   mapLabel.empty() ? "-" : mapLabel.c_str(), c.channelId,
                   c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec);
     out += buf;
@@ -1147,6 +1176,571 @@ std::string SumGroupMeso(const OpsState& st, const std::vector<size_t>& members,
     if (outCounted) *outCounted = counted;
     if (counted <= 0) return {};
     return std::to_string(sum);
+}
+
+ULONGLONG MesoDashWallMs() {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u{};
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    constexpr ULONGLONG kUnixEpochFt = 116444736000000000ull;
+    if (u.QuadPart < kUnixEpochFt) return 0;
+    return (u.QuadPart - kUnixEpochFt) / 10000ull;
+}
+
+void MesoDashPrune(std::deque<OpsState::MesoDashPoint>& pts, ULONGLONG cutMs) {
+    while (!pts.empty() && pts.front().wallMs < cutMs) pts.pop_front();
+}
+
+void MesoDashPush(std::deque<OpsState::MesoDashPoint>& pts, ULONGLONG nowMs,
+                  unsigned long long meso) {
+    if (!pts.empty() && pts.back().wallMs == nowMs) {
+        pts.back().meso = meso;
+        return;
+    }
+    pts.push_back(OpsState::MesoDashPoint{nowMs, meso});
+}
+
+void MesoDashAppendFile(OpsState& st, ULONGLONG nowMs, unsigned long long total);
+void MesoDashLoadFile(OpsState& st);
+void MesoDashClearFile(OpsState& st);
+void MesoEventsAppend(OpsState& st, const OpsState::MesoEvent& ev);
+void MesoEventsLoad(OpsState& st);
+void MesoUnitsSave(OpsState& st);
+void MesoUnitsLoad(OpsState& st);
+
+std::string MesoUnitKey(const std::string& token, const std::string& charName,
+                        const std::string& deviceId) {
+    std::string k = token;
+    k.push_back('\x1f');
+    if (!charName.empty())
+        k += charName;
+    else {
+        k.push_back('#');
+        k += deviceId.empty() ? "?" : deviceId;
+    }
+    return k;
+}
+
+using WealthQtyMap = std::unordered_map<int, unsigned long long>;
+
+void ParseWealthScrolls(const std::string& s, WealthQtyMap& out) {
+    out.clear();
+    if (s.empty() || s == "-") return;
+    size_t i = 0;
+    while (i < s.size()) {
+        const size_t comma = s.find(',', i);
+        const std::string part =
+            s.substr(i, comma == std::string::npos ? std::string::npos : comma - i);
+        const size_t colon = part.find(':');
+        if (colon != std::string::npos && colon > 0) {
+            const long id = std::strtol(part.c_str(), nullptr, 10);
+            const unsigned long long qty = std::strtoull(part.c_str() + colon + 1, nullptr, 10);
+            if (id > 0 && qty > 0) out[static_cast<int>(id)] += qty;
+        }
+        if (comma == std::string::npos) break;
+        i = comma + 1;
+    }
+}
+
+std::string ScrollItemLabel(const OpsState& st, int itemId) {
+    char code[16]{};
+    std::snprintf(code, sizeof(code), "%d", itemId);
+    const char* name = xcat::ItemCatalogLookupName(
+        xcat::GetSharedItemCatalog(OpsMapNamesBinDir(st).c_str()), code);
+    if (name && name[0]) return name;
+    return code;
+}
+
+std::string FormatWealthScrollsHuman(const OpsState& st, const std::string& raw) {
+    WealthQtyMap m;
+    ParseWealthScrolls(raw, m);
+    if (m.empty()) return "无";
+    std::vector<std::pair<int, unsigned long long>> items(m.begin(), m.end());
+    std::sort(items.begin(), items.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::string out;
+    int n = 0;
+    for (const auto& it : items) {
+        if (n) out += "，";
+        out += ScrollItemLabel(st, it.first);
+        out += " ×";
+        out += std::to_string(it.second);
+        if (++n >= 8) {
+            if (static_cast<int>(items.size()) > n) out += "…";
+            break;
+        }
+    }
+    return out;
+}
+
+bool MesoKindScroll(const std::string& kind) {
+    return kind.size() >= 7 && kind.compare(0, 7, "scroll_") == 0;
+}
+
+bool MesoKindAlert(const std::string& kind) {
+    return kind == "outflow" || kind == "token_xfer" || kind == "reconnect_drop" ||
+           kind == "scroll_outflow" || kind == "scroll_xfer" || kind == "scroll_reconnect";
+}
+
+bool MesoKindAbnormal(const std::string& kind) {
+    return MesoKindAlert(kind) || kind == "char_move" || kind == "scroll_move";
+}
+
+int MesoCountEvents(const OpsState& st, ULONGLONG sinceMs, int mode) {
+    int n = 0;
+    for (const auto& e : st.mesoEvents) {
+        if (e.wallMs < sinceMs) continue;
+        if (mode == 0 && MesoKindAlert(e.kind)) ++n;
+        else if (mode == 1 && MesoKindAbnormal(e.kind)) ++n;
+        else if (mode == 2 && (e.kind == "inflow" || e.kind == "scroll_inflow")) ++n;
+    }
+    return n;
+}
+
+bool MesoAmtClose(unsigned long long a, unsigned long long b) {
+    const unsigned long long lo = (std::min)(a, b);
+    const unsigned long long hi = (std::max)(a, b);
+    if (hi == 0) return true;
+    if (hi - lo <= 50000ull) return true;
+    return lo * 5ull >= hi * 4ull;
+}
+
+OpsState::MesoDashSeries* MesoDashFindSeries(OpsState& st, const std::string& token) {
+    for (auto& s : st.mesoDashSeries) {
+        if (s.token == token) return &s;
+    }
+    return nullptr;
+}
+
+void MesoMarkSeriesAlert(OpsState& st, const std::string& token, ULONGLONG nowMs) {
+    auto* s = MesoDashFindSeries(st, token);
+    if (!s) {
+        OpsState::MesoDashSeries neu;
+        neu.token = token;
+        neu.visible = true;
+        st.mesoDashSeries.push_back(std::move(neu));
+        s = &st.mesoDashSeries.back();
+    }
+    s->lastAlertMs = nowMs;
+}
+
+void SampleMesoDash(OpsState& st) {
+    const ULONGLONG nowMs = MesoDashWallMs();
+    const ULONGLONG cutMs = nowMs > kMesoDashKeepMs ? nowMs - kMesoDashKeepMs : 0;
+    const unsigned long long alertMin = st.mesoAlertMin > 0 ? st.mesoAlertMin : 100000ull;
+
+    struct LiveUnit {
+        std::string key;
+        std::string token;
+        std::string charName;
+        std::string deviceId;
+        std::string machine;
+        unsigned long long meso = 0;
+        int sessions = 0;
+        bool hasWealth = false;
+        std::string wealth;
+    };
+    std::unordered_map<std::string, LiveUnit> live;
+    int noToken = 0;
+    for (const auto& c : st.clients) {
+        if (c.token.empty()) {
+            ++noToken;
+            continue;
+        }
+        const std::string key = MesoUnitKey(c.token, c.charName, c.deviceId);
+        LiveUnit& u = live[key];
+        if (u.key.empty()) {
+            u.key = key;
+            u.token = c.token;
+            u.charName = c.charName;
+            u.deviceId = c.deviceId;
+            u.machine = c.machine;
+        }
+        ++u.sessions;
+        unsigned long long v = 0;
+        bool neg = false;
+        if (TryParseMesoUll(c.charMeso, v, neg) && !neg) {
+            if (u.meso > (std::numeric_limits<unsigned long long>::max)() - v)
+                u.meso = (std::numeric_limits<unsigned long long>::max)();
+            else
+                u.meso += v;
+        }
+        if (c.hasWealthScrolls) {
+            u.hasWealth = true;
+            u.wealth = c.wealthScrolls;
+        }
+    }
+    st.mesoDashNoToken = noToken;
+
+    struct Delta {
+        std::string key;
+        std::string token;
+        std::string charName;
+        unsigned long long before = 0;
+        unsigned long long after = 0;
+        unsigned long long mag = 0;
+        bool down = false;
+        bool reconnect = false;
+        bool used = false;
+    };
+    std::vector<Delta> deltas;
+    struct ScrollDelta {
+        std::string token;
+        std::string charName;
+        int itemId = 0;
+        unsigned long long before = 0;
+        unsigned long long after = 0;
+        unsigned long long mag = 0;
+        bool down = false;
+        bool reconnect = false;
+        bool used = false;
+    };
+    std::vector<ScrollDelta> scrollDeltas;
+
+    for (auto& kv : live) {
+        LiveUnit& lu = kv.second;
+        OpsState::MesoUnit* pu = nullptr;
+        for (auto& x : st.mesoUnits) {
+            if (x.key == lu.key) {
+                pu = &x;
+                break;
+            }
+        }
+        if (!pu) {
+            OpsState::MesoUnit neu;
+            neu.key = lu.key;
+            neu.token = lu.token;
+            neu.charName = lu.charName;
+            neu.deviceId = lu.deviceId;
+            neu.machine = lu.machine;
+            st.mesoUnits.push_back(std::move(neu));
+            pu = &st.mesoUnits.back();
+        }
+        const bool wasOnline = pu->online;
+        const bool had = pu->sampled;
+        const unsigned long long before = pu->lastMeso;
+        pu->token = lu.token;
+        pu->charName = lu.charName;
+        pu->deviceId = lu.deviceId;
+        if (!lu.machine.empty()) pu->machine = lu.machine;
+        pu->online = true;
+        pu->lastSeenMs = nowMs;
+        if (!had) {
+            pu->lastMeso = lu.meso;
+            pu->sampled = true;
+            if (lu.hasWealth) {
+                pu->lastScrolls = lu.wealth;
+                pu->scrollsSampled = true;
+            }
+            continue;
+        }
+        const bool reconnect = !wasOnline;
+        unsigned long long mag = 0;
+        if (lu.meso >= before)
+            mag = lu.meso - before;
+        else
+            mag = before - lu.meso;
+        if (mag >= alertMin) {
+            Delta d;
+            d.key = lu.key;
+            d.token = lu.token;
+            d.charName = lu.charName;
+            d.before = before;
+            d.after = lu.meso;
+            d.mag = mag;
+            d.down = lu.meso < before;
+            d.reconnect = reconnect;
+            deltas.push_back(std::move(d));
+        }
+        pu->lastMeso = lu.meso;
+        pu->sampled = true;
+
+        if (lu.hasWealth) {
+            const bool hadSc = pu->scrollsSampled;
+            const std::string beforeSc = pu->lastScrolls;
+            pu->lastScrolls = lu.wealth;
+            pu->scrollsSampled = true;
+            if (hadSc) {
+                WealthQtyMap beforeM, afterM;
+                ParseWealthScrolls(beforeSc, beforeM);
+                ParseWealthScrolls(lu.wealth, afterM);
+                std::set<int> ids;
+                for (const auto& x : beforeM) ids.insert(x.first);
+                for (const auto& x : afterM) ids.insert(x.first);
+                auto qtyOf = [](const WealthQtyMap& m, int id) -> unsigned long long {
+                    const auto it = m.find(id);
+                    return it == m.end() ? 0ull : it->second;
+                };
+                for (int id : ids) {
+                    const unsigned long long b = qtyOf(beforeM, id);
+                    const unsigned long long a = qtyOf(afterM, id);
+                    if (a == b) continue;
+                    ScrollDelta sd;
+                    sd.token = lu.token;
+                    sd.charName = lu.charName;
+                    sd.itemId = id;
+                    sd.before = b;
+                    sd.after = a;
+                    sd.mag = a > b ? a - b : b - a;
+                    sd.down = a < b;
+                    sd.reconnect = reconnect;
+                    scrollDeltas.push_back(std::move(sd));
+                }
+            }
+        }
+    }
+
+    for (auto& u : st.mesoUnits) {
+        if (live.find(u.key) == live.end()) u.online = false;
+    }
+
+    auto emit = [&](OpsState::MesoEvent ev) {
+        ev.wallMs = nowMs;
+        if (ev.mag == 0) {
+            if (ev.after >= ev.before)
+                ev.mag = ev.after - ev.before;
+            else
+                ev.mag = ev.before - ev.after;
+        }
+        MesoMarkSeriesAlert(st, ev.token, nowMs);
+        if (!ev.peerToken.empty()) MesoMarkSeriesAlert(st, ev.peerToken, nowMs);
+        st.mesoEvents.push_back(ev);
+        MesoEventsAppend(st, ev);
+    };
+
+    for (size_t i = 0; i < deltas.size(); ++i) {
+        if (!deltas[i].down || deltas[i].used) continue;
+        for (size_t j = 0; j < deltas.size(); ++j) {
+            if (i == j || deltas[j].used || deltas[j].down) continue;
+            if (deltas[i].token != deltas[j].token) continue;
+            if (!MesoAmtClose(deltas[i].mag, deltas[j].mag)) continue;
+            OpsState::MesoEvent ev;
+            ev.kind = "char_move";
+            ev.token = deltas[i].token;
+            ev.charName = deltas[i].charName;
+            ev.peerToken = deltas[j].token;
+            ev.peerChar = deltas[j].charName;
+            ev.before = deltas[i].before;
+            ev.after = deltas[i].after;
+            ev.mag = deltas[i].mag;
+            ev.note = "同号搬仓 " + deltas[i].charName + " → " + deltas[j].charName;
+            emit(ev);
+            deltas[i].used = true;
+            deltas[j].used = true;
+            break;
+        }
+    }
+    for (size_t i = 0; i < deltas.size(); ++i) {
+        if (!deltas[i].down || deltas[i].used) continue;
+        for (size_t j = 0; j < deltas.size(); ++j) {
+            if (i == j || deltas[j].used || deltas[j].down) continue;
+            if (deltas[i].token == deltas[j].token) continue;
+            if (!MesoAmtClose(deltas[i].mag, deltas[j].mag)) continue;
+            OpsState::MesoEvent ev;
+            ev.kind = "token_xfer";
+            ev.token = deltas[i].token;
+            ev.charName = deltas[i].charName;
+            ev.peerToken = deltas[j].token;
+            ev.peerChar = deltas[j].charName;
+            ev.before = deltas[i].before;
+            ev.after = deltas[i].after;
+            ev.mag = deltas[i].mag;
+            ev.note = "跨号 " + deltas[i].token + " → " + deltas[j].token;
+            emit(ev);
+            deltas[i].used = true;
+            deltas[j].used = true;
+            break;
+        }
+    }
+
+    int nOut = 0;
+    std::string outHint;
+    for (auto& d : deltas) {
+        if (d.used) continue;
+        OpsState::MesoEvent ev;
+        ev.token = d.token;
+        ev.charName = d.charName;
+        ev.before = d.before;
+        ev.after = d.after;
+        ev.mag = d.mag;
+        if (d.down) {
+            ev.kind = d.reconnect ? "reconnect_drop" : "outflow";
+            ev.note = d.reconnect ? "离线后回来骤降，无对端进账" : "下降且无对端进账";
+            ++nOut;
+            if (outHint.empty()) outHint = d.token;
+        } else {
+            ev.kind = "inflow";
+            ev.note = "进账";
+        }
+        emit(ev);
+        d.used = true;
+    }
+
+    for (size_t i = 0; i < scrollDeltas.size(); ++i) {
+        if (!scrollDeltas[i].down || scrollDeltas[i].used) continue;
+        for (size_t j = 0; j < scrollDeltas.size(); ++j) {
+            if (i == j || scrollDeltas[j].used || scrollDeltas[j].down) continue;
+            if (scrollDeltas[i].itemId != scrollDeltas[j].itemId) continue;
+            if (scrollDeltas[i].mag != scrollDeltas[j].mag) continue;
+            if (scrollDeltas[i].token != scrollDeltas[j].token) continue;
+            OpsState::MesoEvent ev;
+            ev.kind = "scroll_move";
+            ev.token = scrollDeltas[i].token;
+            ev.charName = scrollDeltas[i].charName;
+            ev.peerToken = scrollDeltas[j].token;
+            ev.peerChar = scrollDeltas[j].charName;
+            ev.before = scrollDeltas[i].before;
+            ev.after = scrollDeltas[i].after;
+            ev.mag = scrollDeltas[i].mag;
+            ev.note = ScrollItemLabel(st, scrollDeltas[i].itemId) + " 同号 " +
+                      scrollDeltas[i].charName + " → " + scrollDeltas[j].charName;
+            emit(ev);
+            scrollDeltas[i].used = true;
+            scrollDeltas[j].used = true;
+            break;
+        }
+    }
+    for (size_t i = 0; i < scrollDeltas.size(); ++i) {
+        if (!scrollDeltas[i].down || scrollDeltas[i].used) continue;
+        for (size_t j = 0; j < scrollDeltas.size(); ++j) {
+            if (i == j || scrollDeltas[j].used || scrollDeltas[j].down) continue;
+            if (scrollDeltas[i].itemId != scrollDeltas[j].itemId) continue;
+            if (scrollDeltas[i].mag != scrollDeltas[j].mag) continue;
+            if (scrollDeltas[i].token == scrollDeltas[j].token) continue;
+            OpsState::MesoEvent ev;
+            ev.kind = "scroll_xfer";
+            ev.token = scrollDeltas[i].token;
+            ev.charName = scrollDeltas[i].charName;
+            ev.peerToken = scrollDeltas[j].token;
+            ev.peerChar = scrollDeltas[j].charName;
+            ev.before = scrollDeltas[i].before;
+            ev.after = scrollDeltas[i].after;
+            ev.mag = scrollDeltas[i].mag;
+            ev.note = ScrollItemLabel(st, scrollDeltas[i].itemId) + " 跨号 " +
+                      scrollDeltas[i].token + " → " + scrollDeltas[j].token;
+            emit(ev);
+            scrollDeltas[i].used = true;
+            scrollDeltas[j].used = true;
+            break;
+        }
+    }
+
+    int nScrollOut = 0;
+    std::string scrollHint;
+    for (auto& d : scrollDeltas) {
+        if (d.used) continue;
+        OpsState::MesoEvent ev;
+        ev.token = d.token;
+        ev.charName = d.charName;
+        ev.before = d.before;
+        ev.after = d.after;
+        ev.mag = d.mag;
+        const std::string item = ScrollItemLabel(st, d.itemId);
+        if (d.down) {
+            ev.kind = d.reconnect ? "scroll_reconnect" : "scroll_outflow";
+            ev.note = d.reconnect ? (item + " 离线后骤降，无对端进账")
+                                  : (item + " 减少且无对端进账");
+            ++nScrollOut;
+            if (scrollHint.empty()) scrollHint = d.token;
+        } else {
+            ev.kind = "scroll_inflow";
+            ev.note = item + " 增加";
+        }
+        emit(ev);
+        d.used = true;
+    }
+
+    if (nOut > 0 || nScrollOut > 0) {
+        std::string msg;
+        if (nOut > 0)
+            msg += "金币外转 " + std::to_string(nOut) + " 笔 · " + outHint;
+        if (nScrollOut > 0) {
+            if (!msg.empty()) msg += "；";
+            msg += "卷轴外转 " + std::to_string(nScrollOut) + " 笔 · " + scrollHint;
+        }
+        SetStatus(st, msg + "（利润监控流水已记）");
+    }
+
+    while (!st.mesoEvents.empty() &&
+           (st.mesoEvents.size() > 4000 ||
+            (st.mesoEvents.front().wallMs + kMesoEventKeepMs < nowMs))) {
+        st.mesoEvents.pop_front();
+    }
+
+    for (auto& s : st.mesoDashSeries) {
+        s.online = false;
+        s.sessions = 0;
+    }
+
+    auto addMeso = [](unsigned long long& acc, unsigned long long v) {
+        if (acc > (std::numeric_limits<unsigned long long>::max)() - v)
+            acc = (std::numeric_limits<unsigned long long>::max)();
+        else
+            acc += v;
+    };
+
+    // 折线用角色底账上次探活值（含当前不在线）。更新服务关服/重启时名单会空一截，
+    // 不能按「此刻还在 clients 里的人」加总，否则会整图悬崖再弹回来。
+    std::unordered_map<std::string, std::pair<unsigned long long, int>> byTok;
+    std::unordered_map<std::string, std::set<std::string>> tokChars;
+    std::unordered_map<std::string, int> tokLiveSessions;
+    unsigned long long total = 0;
+    for (const auto& u : st.mesoUnits) {
+        if (!u.sampled) continue;
+        auto& acc = byTok[u.token];
+        addMeso(acc.first, u.lastMeso);
+        addMeso(total, u.lastMeso);
+        if (!u.charName.empty()) tokChars[u.token].insert(u.charName);
+    }
+    for (const auto& kv : live) tokLiveSessions[kv.second.token] += kv.second.sessions;
+
+    for (auto& kv : byTok) {
+        OpsState::MesoDashSeries* ser = MesoDashFindSeries(st, kv.first);
+        if (!ser) {
+            OpsState::MesoDashSeries neu;
+            neu.token = kv.first;
+            neu.visible = true;
+            st.mesoDashSeries.push_back(std::move(neu));
+            ser = &st.mesoDashSeries.back();
+        }
+        ser->sessions = tokLiveSessions[kv.first];
+        ser->online = ser->sessions > 0;
+        ser->lastMeso = kv.second.first;
+        ser->chars.clear();
+        int n = 0;
+        for (const auto& name : tokChars[kv.first]) {
+            if (n > 0) ser->chars += "/";
+            ser->chars += name;
+            if (++n >= 3) {
+                if (static_cast<int>(tokChars[kv.first].size()) > n) ser->chars += "…";
+                break;
+            }
+        }
+        MesoDashPush(ser->points, nowMs, ser->lastMeso);
+        MesoDashPrune(ser->points, cutMs);
+    }
+
+    MesoDashPush(st.mesoDashTotal, nowMs, total);
+    MesoDashPrune(st.mesoDashTotal, cutMs);
+
+    st.mesoDashSeries.erase(
+        std::remove_if(st.mesoDashSeries.begin(), st.mesoDashSeries.end(),
+                       [&](const OpsState::MesoDashSeries& s) {
+                           return !s.online && s.points.empty();
+                       }),
+        st.mesoDashSeries.end());
+    for (auto& s : st.mesoDashSeries) MesoDashPrune(s.points, cutMs);
+
+    st.mesoUnits.erase(std::remove_if(st.mesoUnits.begin(), st.mesoUnits.end(),
+                                      [&](const OpsState::MesoUnit& u) {
+                                          return !u.online && u.lastSeenMs < cutMs;
+                                      }),
+                       st.mesoUnits.end());
+
+    MesoDashAppendFile(st, nowMs, total);
+    MesoUnitsSave(st);
 }
 
 ImVec4 AppVersionColor(const OpsState& st, const std::string& ver) {
@@ -1284,6 +1878,8 @@ bool ParseClientsPayload(const std::string& body, OpsState& st) {
         row.charName = FindJsonString(obj, "charName");
         row.charJobName = FindJsonString(obj, "charJobName");
         row.charMeso = FindJsonString(obj, "charMeso");
+        row.wealthScrolls = FindJsonString(obj, "wealthScrolls");
+        row.hasWealthScrolls = obj.find("\"hasWealthScrolls\":true") != std::string::npos;
         row.charLevel = JsonIntField(obj, "charLevel", 0);
         row.charJob = JsonIntField(obj, "charJob", 0);
         row.mapId = static_cast<uint32_t>(JsonIntField(obj, "mapId", 0));
@@ -1343,6 +1939,312 @@ std::string JsonEscapeLocal(const std::string& s) {
         }
     }
     return out;
+}
+
+unsigned long long MesoDashParseUll(const std::string& raw) {
+    if (raw.empty()) return 0;
+    char* end = nullptr;
+    const unsigned long long v = std::strtoull(raw.c_str(), &end, 10);
+    if (!end || *end != '\0') return 0;
+    return v;
+}
+
+OpsState::MesoDashSeries* MesoDashFindOrAdd(OpsState& st, const std::string& token) {
+    for (auto& s : st.mesoDashSeries) {
+        if (s.token == token) return &s;
+    }
+    OpsState::MesoDashSeries neu;
+    neu.token = token;
+    neu.visible = true;
+    st.mesoDashSeries.push_back(std::move(neu));
+    return &st.mesoDashSeries.back();
+}
+
+void MesoDashParseSeriesArray(OpsState& st, const std::string& line, ULONGLONG t) {
+    const size_t arrKey = line.find("\"s\":");
+    if (arrKey == std::string::npos) return;
+    size_t i = line.find('[', arrKey);
+    if (i == std::string::npos) return;
+    ++i;
+    while (i < line.size()) {
+        while (i < line.size() &&
+               (line[i] == ' ' || line[i] == '\t' || line[i] == ',' || line[i] == '\r'))
+            ++i;
+        if (i >= line.size() || line[i] == ']') break;
+        if (line[i] != '{') break;
+        int depth = 0;
+        const size_t start = i;
+        for (; i < line.size(); ++i) {
+            if (line[i] == '{') ++depth;
+            else if (line[i] == '}') {
+                --depth;
+                if (depth == 0) {
+                    ++i;
+                    break;
+                }
+            } else if (line[i] == '"') {
+                ++i;
+                while (i < line.size() && line[i] != '"') {
+                    if (line[i] == '\\' && i + 1 < line.size()) i += 2;
+                    else ++i;
+                }
+            }
+        }
+        const std::string obj = line.substr(start, i - start);
+        const std::string token = FindJsonString(obj, "k");
+        if (token.empty()) continue;
+        const unsigned long long meso = MesoDashParseUll(FindJsonNumber(obj, "m"));
+        auto* ser = MesoDashFindOrAdd(st, token);
+        MesoDashPush(ser->points, t, meso);
+        ser->lastMeso = meso;
+    }
+}
+
+void MesoDashRewriteFile(OpsState& st, ULONGLONG cutMs) {
+    if (st.repoRoot.empty()) return;
+    const std::wstring path = OpsLogMesoDash(st.repoRoot);
+    const std::wstring tmp = path + L".tmp";
+    std::ifstream in(std::filesystem::path(path), std::ios::binary);
+    if (!in) return;
+    std::ofstream out(std::filesystem::path(tmp), std::ios::binary | std::ios::trunc);
+    if (!out) return;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] != '{') continue;
+        const ULONGLONG t = MesoDashParseUll(FindJsonNumber(line, "t"));
+        if (t < cutMs) continue;
+        out << line << '\n';
+    }
+    out.close();
+    in.close();
+    std::error_code ec;
+    std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
+    if (ec) {
+        std::filesystem::remove(std::filesystem::path(path), ec);
+        std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
+    }
+}
+
+void MesoDashLoadFile(OpsState& st) {
+    if (st.repoRoot.empty()) return;
+    const std::wstring path = OpsLogMesoDash(st.repoRoot);
+    std::ifstream in(std::filesystem::path(path), std::ios::binary);
+    if (!in) return;
+    const ULONGLONG nowMs = MesoDashWallMs();
+    const ULONGLONG cutMs = nowMs > kMesoDashKeepMs ? nowMs - kMesoDashKeepMs : 0;
+    bool needCompact = false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] != '{') continue;
+        const ULONGLONG t = MesoDashParseUll(FindJsonNumber(line, "t"));
+        if (t == 0) continue;
+        if (t < cutMs) {
+            needCompact = true;
+            continue;
+        }
+        const unsigned long long tot = MesoDashParseUll(FindJsonNumber(line, "tot"));
+        MesoDashPush(st.mesoDashTotal, t, tot);
+        MesoDashParseSeriesArray(st, line, t);
+    }
+    in.close();
+    MesoDashPrune(st.mesoDashTotal, cutMs);
+    for (auto& s : st.mesoDashSeries) {
+        MesoDashPrune(s.points, cutMs);
+        if (!s.points.empty()) s.lastMeso = s.points.back().meso;
+        s.online = false;
+    }
+    if (needCompact) MesoDashRewriteFile(st, cutMs);
+    MesoUnitsLoad(st);
+    MesoEventsLoad(st);
+}
+
+void MesoDashAppendFile(OpsState& st, ULONGLONG nowMs, unsigned long long total) {
+    if (st.repoRoot.empty()) return;
+    EnsureDirs(st.repoRoot);
+    const std::wstring path = OpsLogMesoDash(st.repoRoot);
+    std::ofstream f(std::filesystem::path(path), std::ios::binary | std::ios::app);
+    if (!f) return;
+    std::string line = "{\"t\":" + std::to_string(nowMs) + ",\"tot\":" + std::to_string(total) +
+                       ",\"s\":[";
+    bool first = true;
+    for (const auto& s : st.mesoDashSeries) {
+        if (!s.online) continue;
+        if (!first) line += ',';
+        first = false;
+        line += "{\"k\":\"";
+        line += JsonEscapeLocal(s.token);
+        line += "\",\"m\":";
+        line += std::to_string(s.lastMeso);
+        line += '}';
+    }
+    line += "]}\n";
+    f << line;
+}
+
+void MesoDashClearFile(OpsState& st) {
+    if (st.repoRoot.empty()) return;
+    std::ofstream f(std::filesystem::path(OpsLogMesoDash(st.repoRoot)),
+                    std::ios::binary | std::ios::trunc);
+}
+
+void MesoEventsAppend(OpsState& st, const OpsState::MesoEvent& ev) {
+    if (st.repoRoot.empty()) return;
+    EnsureDirs(st.repoRoot);
+    std::ofstream f(std::filesystem::path(OpsLogMesoEvents(st.repoRoot)),
+                    std::ios::binary | std::ios::app);
+    if (!f) return;
+    f << "{\"t\":" << ev.wallMs << ",\"kind\":\"" << JsonEscapeLocal(ev.kind) << "\",\"k\":\""
+      << JsonEscapeLocal(ev.token) << "\",\"c\":\"" << JsonEscapeLocal(ev.charName)
+      << "\",\"pk\":\"" << JsonEscapeLocal(ev.peerToken) << "\",\"pc\":\""
+      << JsonEscapeLocal(ev.peerChar) << "\",\"b\":" << ev.before << ",\"a\":" << ev.after
+      << ",\"m\":" << ev.mag << ",\"n\":\"" << JsonEscapeLocal(ev.note) << "\"}\n";
+}
+
+void MesoEventsLoad(OpsState& st) {
+    if (st.repoRoot.empty()) return;
+    const std::wstring path = OpsLogMesoEvents(st.repoRoot);
+    std::ifstream in(std::filesystem::path(path), std::ios::binary);
+    if (!in) return;
+    const ULONGLONG nowMs = MesoDashWallMs();
+    const ULONGLONG cutMs = nowMs > kMesoEventKeepMs ? nowMs - kMesoEventKeepMs : 0;
+    bool needCompact = false;
+    std::string line;
+    std::deque<OpsState::MesoEvent> kept;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] != '{') continue;
+        const ULONGLONG t = MesoDashParseUll(FindJsonNumber(line, "t"));
+        if (t == 0) continue;
+        if (t < cutMs) {
+            needCompact = true;
+            continue;
+        }
+        OpsState::MesoEvent ev;
+        ev.wallMs = t;
+        ev.kind = FindJsonString(line, "kind");
+        ev.token = FindJsonString(line, "k");
+        ev.charName = FindJsonString(line, "c");
+        ev.peerToken = FindJsonString(line, "pk");
+        ev.peerChar = FindJsonString(line, "pc");
+        ev.before = MesoDashParseUll(FindJsonNumber(line, "b"));
+        ev.after = MesoDashParseUll(FindJsonNumber(line, "a"));
+        ev.mag = MesoDashParseUll(FindJsonNumber(line, "m"));
+        ev.note = FindJsonString(line, "n");
+        if (ev.kind.empty() || ev.token.empty()) continue;
+        kept.push_back(std::move(ev));
+        if (MesoKindAlert(kept.back().kind)) MesoMarkSeriesAlert(st, kept.back().token, t);
+    }
+    in.close();
+    st.mesoEvents = std::move(kept);
+    if (needCompact) {
+        const std::wstring tmp = path + L".tmp";
+        std::ofstream out(std::filesystem::path(tmp), std::ios::binary | std::ios::trunc);
+        if (out) {
+            for (const auto& ev : st.mesoEvents) {
+                out << "{\"t\":" << ev.wallMs << ",\"kind\":\"" << JsonEscapeLocal(ev.kind)
+                    << "\",\"k\":\"" << JsonEscapeLocal(ev.token) << "\",\"c\":\""
+                    << JsonEscapeLocal(ev.charName) << "\",\"pk\":\""
+                    << JsonEscapeLocal(ev.peerToken) << "\",\"pc\":\""
+                    << JsonEscapeLocal(ev.peerChar) << "\",\"b\":" << ev.before
+                    << ",\"a\":" << ev.after << ",\"m\":" << ev.mag << ",\"n\":\""
+                    << JsonEscapeLocal(ev.note) << "\"}\n";
+            }
+            out.close();
+            std::error_code ec;
+            std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
+            if (ec) {
+                std::filesystem::remove(std::filesystem::path(path), ec);
+                std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
+            }
+        }
+    }
+}
+
+void MesoUnitsSave(OpsState& st) {
+    if (st.repoRoot.empty()) return;
+    EnsureDirs(st.repoRoot);
+    std::ofstream f(std::filesystem::path(OpsLogMesoUnits(st.repoRoot)),
+                    std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << "{\"t\":" << MesoDashWallMs() << ",\"u\":[";
+    bool first = true;
+    for (const auto& u : st.mesoUnits) {
+        if (!u.sampled) continue;
+        if (!first) f << ',';
+        first = false;
+        f << "{\"k\":\"" << JsonEscapeLocal(u.token) << "\",\"c\":\""
+          << JsonEscapeLocal(u.charName) << "\",\"d\":\"" << JsonEscapeLocal(u.deviceId)
+          << "\",\"h\":\"" << JsonEscapeLocal(u.machine) << "\",\"m\":" << u.lastMeso
+          << ",\"w\":\"" << JsonEscapeLocal(u.lastScrolls) << "\",\"ws\":"
+          << (u.scrollsSampled ? 1 : 0) << ",\"s\":" << u.lastSeenMs << '}';
+    }
+    f << "]}\n";
+}
+
+void MesoUnitsLoad(OpsState& st) {
+    if (st.repoRoot.empty()) return;
+    std::ifstream in(std::filesystem::path(OpsLogMesoUnits(st.repoRoot)), std::ios::binary);
+    if (!in) return;
+    std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (body.empty()) return;
+    const ULONGLONG nowMs = MesoDashWallMs();
+    const ULONGLONG cutMs = nowMs > kMesoDashKeepMs ? nowMs - kMesoDashKeepMs : 0;
+    size_t i = body.find("\"u\":");
+    if (i == std::string::npos) return;
+    i = body.find('[', i);
+    if (i == std::string::npos) return;
+    ++i;
+    while (i < body.size()) {
+        while (i < body.size() &&
+               (body[i] == ' ' || body[i] == '\t' || body[i] == ',' || body[i] == '\r' ||
+                body[i] == '\n'))
+            ++i;
+        if (i >= body.size() || body[i] == ']') break;
+        if (body[i] != '{') break;
+        int depth = 0;
+        const size_t start = i;
+        for (; i < body.size(); ++i) {
+            if (body[i] == '{') ++depth;
+            else if (body[i] == '}') {
+                --depth;
+                if (depth == 0) {
+                    ++i;
+                    break;
+                }
+            } else if (body[i] == '"') {
+                ++i;
+                while (i < body.size() && body[i] != '"') {
+                    if (body[i] == '\\' && i + 1 < body.size()) i += 2;
+                    else ++i;
+                }
+            }
+        }
+        const std::string obj = body.substr(start, i - start);
+        OpsState::MesoUnit u;
+        u.token = FindJsonString(obj, "k");
+        u.charName = FindJsonString(obj, "c");
+        u.deviceId = FindJsonString(obj, "d");
+        u.machine = FindJsonString(obj, "h");
+        u.lastMeso = MesoDashParseUll(FindJsonNumber(obj, "m"));
+        u.lastScrolls = FindJsonString(obj, "w");
+        u.scrollsSampled = JsonIntField(obj, "ws", u.lastScrolls.empty() ? 0 : 1) != 0;
+        u.lastSeenMs = MesoDashParseUll(FindJsonNumber(obj, "s"));
+        if (u.token.empty()) continue;
+        if (u.lastSeenMs != 0 && u.lastSeenMs < cutMs) continue;
+        u.key = MesoUnitKey(u.token, u.charName, u.deviceId);
+        u.sampled = true;
+        u.online = false;
+        bool exists = false;
+        for (const auto& x : st.mesoUnits) {
+            if (x.key == u.key) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) st.mesoUnits.push_back(std::move(u));
+    }
 }
 
 bool ParseBansPayload(const std::string& body, OpsState& st) {
@@ -1724,6 +2626,7 @@ void RefreshClients(OpsState& st, bool force, bool refreshGeo) {
         return;
     }
     st.clientsError.clear();
+    SampleMesoDash(st);
     RefreshForceTargetQueue(st);
 }
 
@@ -1733,9 +2636,9 @@ void DrawMainTabButtons(OpsState& st) {
         if (selected) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
         if (ImGui::Button(label) && !selected) {
             st.mainTab = id;
-            if (id == 1) {
+            if (id == 1 || id == 2) {
                 RefreshClients(st, true);
-                RefreshBans(st, true);
+                if (id == 1) RefreshBans(st, true);
             }
         }
         if (selected) ImGui::PopStyleColor();
@@ -1761,6 +2664,28 @@ void DrawMainTabButtons(OpsState& st) {
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("当前访问策略：仅白名单（止血中）");
         } else {
             tabBtn(accessTab, 1);
+        }
+    }
+    ImGui::SameLine();
+    {
+        const ULONGLONG dayCut =
+            MesoDashWallMs() > 86400000ull ? MesoDashWallMs() - 86400000ull : 0;
+        const int nAlert = MesoCountEvents(st, dayCut, 0);
+        char mesoTab[80]{};
+        if (nAlert > 0)
+            std::snprintf(mesoTab, sizeof(mesoTab), "利润监控 (%d)##maintab", nAlert);
+        else
+            std::snprintf(mesoTab, sizeof(mesoTab), "利润监控##maintab");
+        if (nAlert > 0) {
+            ImGui::PushStyleColor(ImGuiCol_Text, OpsTone::Danger());
+            tabBtn(mesoTab, 2);
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("近 24h 外转/跨号/重连骤降 %d 笔\n背包金=利润，流水落盘 30 天", nAlert);
+        } else {
+            tabBtn(mesoTab, 2);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("监控用户背包金变化（利润）\n防偷偷转移 · 流水 30 天");
         }
     }
 }
@@ -3184,11 +4109,24 @@ void DrawClientsPanel(OpsState& st) {
                     if (ImGui::IsItemHovered()) {
                         char mesoTip[48]{};
                         FormatMesoDisplay(c.charMeso, mesoTip, sizeof(mesoTip));
-                        ImGui::SetTooltip("角色 %s\n等级 %d · 职业 %s (id=%d)\n背包金 %s（精确 %s）",
-                                          c.charName.c_str(), c.charLevel,
-                                          c.charJobName.empty() ? "—" : c.charJobName.c_str(),
-                                          c.charJob, mesoTip,
-                                          c.charMeso.empty() ? "—" : c.charMeso.c_str());
+                        std::string tip = "角色 ";
+                        tip += c.charName;
+                        tip += "\n等级 ";
+                        tip += std::to_string(c.charLevel);
+                        tip += " · 职业 ";
+                        tip += c.charJobName.empty() ? "—" : c.charJobName;
+                        tip += " (id=";
+                        tip += std::to_string(c.charJob);
+                        tip += ")\n背包金 ";
+                        tip += mesoTip;
+                        tip += "（精确 ";
+                        tip += c.charMeso.empty() ? "—" : c.charMeso;
+                        tip += "）";
+                        if (c.hasWealthScrolls) {
+                            tip += "\n卷轴 ";
+                            tip += FormatWealthScrollsHuman(st, c.wealthScrolls);
+                        }
+                        ImGui::SetTooltip("%s", tip.c_str());
                     }
                 }
                 ImGui::TableSetColumnIndex(4);
@@ -3987,6 +4925,803 @@ void DrawClientsPanel(OpsState& st) {
     ImGui::EndChild();
 }
 
+void FormatMesoUll(unsigned long long v, char* out, size_t n) {
+    FormatMesoDisplay(std::to_string(v), out, n);
+}
+
+void FormatMesoDelta(unsigned long long first, unsigned long long last, char* out, size_t n) {
+    if (last == first) {
+        std::snprintf(out, n, "持平");
+        return;
+    }
+    const bool up = last > first;
+    const unsigned long long mag = up ? (last - first) : (first - last);
+    char magBuf[48]{};
+    FormatMesoUll(mag, magBuf, sizeof(magBuf));
+    std::snprintf(out, n, "%s%s", up ? "+" : "-", magBuf);
+}
+
+const char* MesoKindLabel(const std::string& kind) {
+    if (kind == "outflow") return "外转嫌疑";
+    if (kind == "token_xfer") return "跨号转移";
+    if (kind == "char_move") return "同号搬仓";
+    if (kind == "reconnect_drop") return "重连骤降";
+    if (kind == "inflow") return "进账";
+    if (kind == "scroll_outflow") return "卷轴外转";
+    if (kind == "scroll_xfer") return "卷轴跨号";
+    if (kind == "scroll_move") return "卷轴搬仓";
+    if (kind == "scroll_reconnect") return "卷轴骤降";
+    if (kind == "scroll_inflow") return "卷轴进账";
+    return kind.c_str();
+}
+
+void FormatWallHms(ULONGLONG wallMs, char* buf, size_t n) {
+    const time_t sec = static_cast<time_t>(wallMs / 1000ull);
+    std::tm t{};
+    if (localtime_s(&t, &sec) != 0) {
+        std::snprintf(buf, n, "--:--:--");
+        return;
+    }
+    std::strftime(buf, n, "%H:%M:%S", &t);
+}
+
+void FormatWallTick(ULONGLONG wallMs, int windowMin, char* buf, size_t n) {
+    const time_t sec = static_cast<time_t>(wallMs / 1000ull);
+    std::tm t{};
+    if (localtime_s(&t, &sec) != 0) {
+        std::snprintf(buf, n, "--:--");
+        return;
+    }
+    if (windowMin >= 1440)
+        std::strftime(buf, n, "%m-%d %H:%M", &t);
+    else if (windowMin >= 180)
+        std::strftime(buf, n, "%H:%M", &t);
+    else
+        std::strftime(buf, n, "%H:%M:%S", &t);
+}
+
+ImU32 MesoSeriesColor(const std::string& token, bool online, float alpha = 1.f) {
+    uint32_t h = 2166136261u;
+    for (unsigned char c : token) {
+        h ^= c;
+        h *= 16777619u;
+    }
+    const float hue = (static_cast<int>(h % 330) + 15) / 360.f;
+    const float sat = online ? 0.70f : 0.22f;
+    const float val = OpsIsLight() ? (online ? 0.62f : 0.48f) : (online ? 0.92f : 0.55f);
+    float r = 0, g = 0, b = 0;
+    ImGui::ColorConvertHSVtoRGB(hue, sat, val, r, g, b);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, alpha));
+}
+
+ImU32 MesoTotalColor() {
+    const ImVec4 c = OpsTone::Warn();
+    return ImGui::ColorConvertFloat4ToU32(c);
+}
+
+double MesoNiceStep(double range, int ticks) {
+    if (range <= 0.0) return 1.0;
+    if (ticks < 2) ticks = 2;
+    const double raw = range / static_cast<double>(ticks);
+    const double mag = std::pow(10.0, std::floor(std::log10(raw)));
+    const double n = raw / mag;
+    if (n < 1.5) return mag;
+    if (n < 3.5) return 2.0 * mag;
+    if (n < 7.5) return 5.0 * mag;
+    return 10.0 * mag;
+}
+
+bool MesoPointInWindow(const OpsState::MesoDashPoint& p, ULONGLONG t0, ULONGLONG t1) {
+    return p.wallMs >= t0 && p.wallMs <= t1;
+}
+
+unsigned long long MesoAtOrBefore(const std::deque<OpsState::MesoDashPoint>& pts, ULONGLONG t,
+                                  bool* ok) {
+    if (ok) *ok = false;
+    unsigned long long v = 0;
+    for (const auto& p : pts) {
+        if (p.wallMs > t) break;
+        v = p.meso;
+        if (ok) *ok = true;
+    }
+    return v;
+}
+
+bool MesoSampleGap(ULONGLONG earlier, ULONGLONG later) {
+    return later > earlier && (later - earlier) > kMesoDashGapMs;
+}
+
+void MesoCollectGaps(const std::deque<OpsState::MesoDashPoint>& pts, ULONGLONG t0, ULONGLONG t1,
+                     std::vector<std::pair<ULONGLONG, ULONGLONG>>& gaps) {
+    gaps.clear();
+    const OpsState::MesoDashPoint* prev = nullptr;
+    for (const auto& p : pts) {
+        if (p.wallMs > t1) break;
+        if (prev && MesoSampleGap(prev->wallMs, p.wallMs)) {
+            const ULONGLONG a = (std::max)(prev->wallMs, t0);
+            const ULONGLONG b = (std::min)(p.wallMs, t1);
+            if (b > a) gaps.push_back({a, b});
+        }
+        prev = &p;
+    }
+    if (prev && MesoSampleGap(prev->wallMs, t1)) {
+        const ULONGLONG a = (std::max)(prev->wallMs, t0);
+        if (t1 > a) gaps.push_back({a, t1});
+    }
+}
+
+bool MesoTimeInGaps(ULONGLONG t, const std::vector<std::pair<ULONGLONG, ULONGLONG>>& gaps) {
+    for (const auto& g : gaps) {
+        if (t > g.first && t < g.second) return true;
+    }
+    return false;
+}
+
+void DrawMesoKpiCard(const char* title, const char* value, const char* sub, ImVec4 valueCol,
+                     float width) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, OpsIsLight()
+                                                ? ImVec4(1.f, 1.f, 1.f, 1.f)
+                                                : ImVec4(0.11f, 0.12f, 0.15f, 1.f));
+    ImGui::BeginChild(title, ImVec2(width, 72.f), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::TextDisabled("%s", title);
+    ImGui::PushStyleColor(ImGuiCol_Text, valueCol);
+    ImGui::TextUnformatted(value);
+    ImGui::PopStyleColor();
+    if (sub && sub[0]) ImGui::TextDisabled("%s", sub);
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+void DrawMesoSparkline(const std::deque<OpsState::MesoDashPoint>& pts, ULONGLONG t0, ULONGLONG t1,
+                       ImU32 col, ImVec2 size) {
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(size);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y),
+                      ImGui::GetColorU32(OpsIsLight() ? ImVec4(0.94f, 0.95f, 0.97f, 1.f)
+                                                      : ImVec4(0.08f, 0.09f, 0.11f, 1.f)),
+                      2.f);
+    if (pts.size() < 2 || t1 <= t0) return;
+    unsigned long long mn = (std::numeric_limits<unsigned long long>::max)();
+    unsigned long long mx = 0;
+    int n = 0;
+    for (const auto& pt : pts) {
+        if (!MesoPointInWindow(pt, t0, t1)) continue;
+        mn = (std::min)(mn, pt.meso);
+        mx = (std::max)(mx, pt.meso);
+        ++n;
+    }
+    if (n < 2) return;
+    if (mx <= mn) mx = mn + 1;
+    const int stride = n > 80 ? (n + 79) / 80 : 1;
+    ImVec2 prev{};
+    bool have = false;
+    int seen = 0;
+    const OpsState::MesoDashPoint* lastSrc = nullptr;
+    for (const auto& pt : pts) {
+        if (!MesoPointInWindow(pt, t0, t1)) continue;
+        if (lastSrc && MesoSampleGap(lastSrc->wallMs, pt.wallMs)) have = false;
+        lastSrc = &pt;
+        const bool take = (seen % stride == 0) || (seen + 1 == n);
+        ++seen;
+        if (!take) continue;
+        const float x = p.x + 1.f +
+                        static_cast<float>(static_cast<double>(pt.wallMs - t0) /
+                                           static_cast<double>(t1 - t0)) *
+                            (size.x - 2.f);
+        const float y = p.y + size.y - 2.f -
+                        static_cast<float>(pt.meso - mn) / static_cast<float>(mx - mn) * (size.y - 4.f);
+        const ImVec2 cur(x, y);
+        if (have) dl->AddLine(prev, cur, col, 1.4f);
+        prev = cur;
+        have = true;
+    }
+}
+
+void DrawMesoPlot(OpsState& st, const std::vector<size_t>& visIdx, ULONGLONG t0, ULONGLONG t1,
+                  ImVec2 size) {
+    ImGui::InvisibleButton("meso_plot_hit", size);
+    const ImVec2 r0 = ImGui::GetItemRectMin();
+    const ImVec2 r1 = ImGui::GetItemRectMax();
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    const ImU32 bg = ImGui::GetColorU32(OpsIsLight() ? ImVec4(0.97f, 0.98f, 0.99f, 1.f)
+                                                     : ImVec4(0.07f, 0.08f, 0.10f, 1.f));
+    const ImU32 grid = ImGui::GetColorU32(OpsIsLight() ? ImVec4(0.82f, 0.84f, 0.88f, 0.85f)
+                                                       : ImVec4(1.f, 1.f, 1.f, 0.08f));
+    const ImU32 axis = ImGui::GetColorU32(OpsTone::Muted());
+    dl->AddRectFilled(r0, r1, bg, 6.f);
+    dl->AddRect(r0, r1, ImGui::GetColorU32(ImGuiCol_Border), 6.f);
+
+    const float padL = 78.f, padR = 14.f, padT = 14.f, padB = 30.f;
+    const float x0 = r0.x + padL, x1 = r1.x - padR;
+    const float y0 = r0.y + padT, y1 = r1.y - padB;
+    if (x1 - x0 < 40.f || y1 - y0 < 40.f) return;
+
+    double yMin = 0.0, yMax = 1.0;
+    bool any = false;
+    unsigned long long dataMin = (std::numeric_limits<unsigned long long>::max)();
+    unsigned long long dataMax = 0;
+    auto consider = [&](const std::deque<OpsState::MesoDashPoint>& pts) {
+        for (const auto& p : pts) {
+            if (!MesoPointInWindow(p, t0, t1)) continue;
+            dataMin = (std::min)(dataMin, p.meso);
+            dataMax = (std::max)(dataMax, p.meso);
+            any = true;
+        }
+    };
+    if (st.mesoDashShowTotal) consider(st.mesoDashTotal);
+    for (size_t idx : visIdx) consider(st.mesoDashSeries[idx].points);
+
+    if (any) {
+        if (st.mesoDashYFromZero) {
+            yMin = 0.0;
+            yMax = static_cast<double>(dataMax);
+        } else {
+            yMin = static_cast<double>(dataMin);
+            yMax = static_cast<double>(dataMax);
+        }
+        if (yMax <= yMin) yMax = yMin + 1.0;
+        yMax *= 1.08;
+    }
+
+    const double step = MesoNiceStep(yMax - yMin, 5);
+    const double tick0 = std::floor(yMin / step) * step;
+    for (double tv = tick0; tv <= yMax + step * 0.01; tv += step) {
+        if (tv < yMin - step * 0.01) continue;
+        const float y = y1 - static_cast<float>((tv - yMin) / (yMax - yMin)) * (y1 - y0);
+        dl->AddLine(ImVec2(x0, y), ImVec2(x1, y), grid, 1.f);
+        char lab[48]{};
+        if (tv <= 0.0)
+            std::snprintf(lab, sizeof(lab), "0");
+        else
+            FormatMesoUll(static_cast<unsigned long long>(tv + 0.5), lab, sizeof(lab));
+        dl->AddText(ImVec2(r0.x + 6.f, y - ImGui::GetTextLineHeight() * 0.5f), axis, lab);
+    }
+
+    const int stepSec = st.mesoDashWindowMin <= 10     ? 60
+                        : st.mesoDashWindowMin <= 30   ? 300
+                        : st.mesoDashWindowMin <= 60   ? 600
+                        : st.mesoDashWindowMin <= 180  ? 1800
+                        : st.mesoDashWindowMin <= 1440 ? 7200
+                                                       : 43200;
+    const ULONGLONG stepMs = static_cast<ULONGLONG>(stepSec) * 1000ull;
+    ULONGLONG tick = ((t0 + stepMs - 1) / stepMs) * stepMs;
+    for (; tick <= t1; tick += stepMs) {
+        const float x = x0 + static_cast<float>(static_cast<double>(tick - t0) /
+                                               static_cast<double>(t1 - t0)) *
+                                 (x1 - x0);
+        dl->AddLine(ImVec2(x, y0), ImVec2(x, y1), grid, 1.f);
+        char lab[20]{};
+        FormatWallTick(tick, st.mesoDashWindowMin, lab, sizeof(lab));
+        const float tw = ImGui::CalcTextSize(lab).x;
+        dl->AddText(ImVec2(x - tw * 0.5f, y1 + 6.f), axis, lab);
+    }
+
+    dl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), axis, 1.2f);
+    dl->AddLine(ImVec2(x0, y0), ImVec2(x0, y1), axis, 1.2f);
+
+    auto xOf = [&](ULONGLONG t) -> float {
+        if (t <= t0) return x0;
+        if (t >= t1) return x1;
+        return x0 + static_cast<float>(static_cast<double>(t - t0) / static_cast<double>(t1 - t0)) *
+                        (x1 - x0);
+    };
+    auto yOf = [&](unsigned long long v) -> float {
+        const double u = (static_cast<double>(v) - yMin) / (yMax - yMin);
+        return y1 - static_cast<float>(u) * (y1 - y0);
+    };
+
+    const std::deque<OpsState::MesoDashPoint>* gapSrc = &st.mesoDashTotal;
+    if (gapSrc->empty() && !visIdx.empty()) gapSrc = &st.mesoDashSeries[visIdx[0]].points;
+    std::vector<std::pair<ULONGLONG, ULONGLONG>> gaps;
+    MesoCollectGaps(*gapSrc, t0, t1, gaps);
+
+    ImGui::PushClipRect(ImVec2(x0, y0), ImVec2(x1, y1), true);
+
+    const ImU32 gapBg = ImGui::GetColorU32(OpsIsLight() ? ImVec4(0.78f, 0.80f, 0.84f, 0.40f)
+                                                       : ImVec4(1.f, 1.f, 1.f, 0.055f));
+    const ImU32 gapTx = ImGui::GetColorU32(OpsTone::Muted());
+    for (const auto& g : gaps) {
+        const float xa = xOf(g.first);
+        const float xb = xOf(g.second);
+        if (xb - xa < 2.f) continue;
+        dl->AddRectFilled(ImVec2(xa, y0), ImVec2(xb, y1), gapBg);
+        if (xb - xa >= 40.f && (g.second - g.first) >= 60000ull) {
+            const char* gl = "断连";
+            const ImVec2 ts = ImGui::CalcTextSize(gl);
+            if (ts.x + 8.f < xb - xa)
+                dl->AddText(ImVec2((xa + xb - ts.x) * 0.5f, y0 + 6.f), gapTx, gl);
+        }
+    }
+
+    auto emitBroken = [&](const std::deque<OpsState::MesoDashPoint>& pts, ImU32 col, float thick,
+                          bool fillArea, bool endDot) {
+        int inN = 0;
+        for (const auto& p : pts) {
+            if (p.wallMs < t0) continue;
+            if (p.wallMs > t1) break;
+            ++inN;
+        }
+        if (inN < 1) return;
+        const int stride = inN > 1600 ? (inN + 1599) / 1600 : 1;
+        ImVector<ImVec2> poly;
+        ImVector<ImVec2> fill;
+        const OpsState::MesoDashPoint* prevP = nullptr;
+        const OpsState::MesoDashPoint* lastIn = nullptr;
+        int seen = 0;
+        auto flush = [&]() {
+            if (fillArea && poly.Size >= 2 && fill.Size >= 2) {
+                fill.push_back(ImVec2(fill.back().x, y1));
+                const ImU32 fillCol = ImGui::ColorConvertFloat4ToU32(
+                    OpsIsLight() ? ImVec4(0.85f, 0.62f, 0.18f, 0.16f)
+                                 : ImVec4(0.95f, 0.72f, 0.35f, 0.14f));
+                if (fill.Size >= 3) dl->AddConcavePolyFilled(fill.Data, fill.Size, fillCol);
+            }
+            if (poly.Size >= 2) dl->AddPolyline(poly.Data, poly.Size, col, 0, thick);
+            else if (poly.Size == 1) dl->AddCircleFilled(poly[0], 2.2f, col);
+            poly.clear();
+            fill.clear();
+        };
+        for (const auto& p : pts) {
+            if (p.wallMs > t1) break;
+            if (p.wallMs < t0) {
+                prevP = &p;
+                continue;
+            }
+            lastIn = &p;
+            if (prevP && MesoSampleGap(prevP->wallMs, p.wallMs)) flush();
+            prevP = &p;
+            const bool take = poly.empty() || (seen % stride == 0);
+            ++seen;
+            if (!take) continue;
+            const ImVec2 pt(xOf(p.wallMs), yOf(p.meso));
+            if (fillArea && poly.empty()) fill.push_back(ImVec2(pt.x, y1));
+            poly.push_back(pt);
+            if (fillArea) fill.push_back(pt);
+        }
+        if (lastIn) {
+            const ImVec2 pt(xOf(lastIn->wallMs), yOf(lastIn->meso));
+            if (poly.empty() || poly.back().x != pt.x || poly.back().y != pt.y) {
+                if (fillArea && poly.empty()) fill.push_back(ImVec2(pt.x, y1));
+                poly.push_back(pt);
+                if (fillArea) fill.push_back(pt);
+            }
+        }
+        flush();
+        if (endDot && lastIn)
+            dl->AddCircleFilled(ImVec2(xOf(lastIn->wallMs), yOf(lastIn->meso)),
+                                thick > 2.5f ? 3.6f : 2.4f, col);
+    };
+
+    if (st.mesoDashShowTotal && !st.mesoDashTotal.empty())
+        emitBroken(st.mesoDashTotal, MesoTotalColor(), 2.6f, true, false);
+
+    for (size_t n = 0; n < visIdx.size(); ++n) {
+        const auto& s = st.mesoDashSeries[visIdx[n]];
+        if (s.points.empty()) continue;
+        const bool hi = st.mesoDashHoverSeries == static_cast<int>(visIdx[n]);
+        const float thick = hi ? 3.2f : 1.8f;
+        const ImU32 col = MesoSeriesColor(s.token, s.online, hi ? 1.f : 0.92f);
+        emitBroken(s.points, col, thick, false, true);
+    }
+
+    ULONGLONG hoverT = 0;
+    if (hovered && t1 > t0) {
+        const float mx = ImGui::GetIO().MousePos.x;
+        float u = (mx - x0) / (x1 - x0);
+        if (u < 0.f) u = 0.f;
+        if (u > 1.f) u = 1.f;
+        hoverT = t0 + static_cast<ULONGLONG>(static_cast<double>(u) * static_cast<double>(t1 - t0));
+        const float hx = xOf(hoverT);
+        dl->AddLine(ImVec2(hx, y0), ImVec2(hx, y1),
+                    ImGui::GetColorU32(OpsIsLight() ? ImVec4(0.2f, 0.2f, 0.25f, 0.45f)
+                                                    : ImVec4(1.f, 1.f, 1.f, 0.28f)),
+                    1.f);
+    }
+    ImGui::PopClipRect();
+
+    if (!any) {
+        const char* empty = gaps.empty() ? "等待采样或历史为空。约 5 秒一点，已落盘 7 天。"
+                                         : "断连期间无采样。关服后折线留白，底账不掉。";
+        const ImVec2 ts = ImGui::CalcTextSize(empty);
+        dl->AddText(ImVec2((x0 + x1 - ts.x) * 0.5f, (y0 + y1 - ts.y) * 0.5f), axis, empty);
+        return;
+    }
+
+    if (hovered && hoverT != 0) {
+        char tlab[24]{};
+        FormatWallTick(hoverT, st.mesoDashWindowMin, tlab, sizeof(tlab));
+        ImGui::BeginTooltip();
+        ImGui::TextUnformatted(tlab);
+        ImGui::Separator();
+        if (MesoTimeInGaps(hoverT, gaps)) {
+            ImGui::TextDisabled("断连（更新服务未采样）");
+        } else {
+            if (st.mesoDashShowTotal) {
+                bool ok = false;
+                const unsigned long long v = MesoAtOrBefore(st.mesoDashTotal, hoverT, &ok);
+                if (ok) {
+                    char buf[48]{};
+                    FormatMesoUll(v, buf, sizeof(buf));
+                    ImGui::TextColored(OpsTone::Warn(), "合计  %s", buf);
+                }
+            }
+            for (size_t idx : visIdx) {
+                const auto& s = st.mesoDashSeries[idx];
+                bool ok = false;
+                const unsigned long long v = MesoAtOrBefore(s.points, hoverT, &ok);
+                if (!ok) continue;
+                char buf[48]{};
+                FormatMesoUll(v, buf, sizeof(buf));
+                ImVec4 col = ImGui::ColorConvertU32ToFloat4(MesoSeriesColor(s.token, s.online));
+                ImGui::TextColored(col, "%s  %s", s.token.c_str(), buf);
+            }
+        }
+        ImGui::EndTooltip();
+    }
+}
+
+void DrawMesoDashPanel(OpsState& st) {
+    RefreshClients(st, false);
+
+    const ULONGLONG nowMs = MesoDashWallMs();
+    const int winMin = (std::max)(1, st.mesoDashWindowMin);
+    const ULONGLONG winMs = static_cast<ULONGLONG>(winMin) * 60ull * 1000ull;
+    const ULONGLONG t0 = nowMs > winMs ? nowMs - winMs : 0;
+    const ULONGLONG t1 = nowMs;
+
+    int nOnline = 0;
+    unsigned long long bookTotal = 0;
+    for (const auto& s : st.mesoDashSeries) {
+        if (s.online) ++nOnline;
+        if (bookTotal > (std::numeric_limits<unsigned long long>::max)() - s.lastMeso)
+            bookTotal = (std::numeric_limits<unsigned long long>::max)();
+        else
+            bookTotal += s.lastMeso;
+    }
+    unsigned long long winFirst = 0, winLast = bookTotal;
+    bool haveFirst = false;
+    for (const auto& p : st.mesoDashTotal) {
+        if (p.wallMs < t0) continue;
+        if (!haveFirst) {
+            winFirst = p.meso;
+            haveFirst = true;
+        }
+        winLast = p.meso;
+    }
+
+    ImGui::TextUnformatted("利润监控");
+    ImGui::SameLine();
+    ImGui::TextDisabled("底账含离线 · 关服断线留白 · 流水 30 天");
+    ImGui::SameLine(0, 12.f);
+    ImGui::SetNextItemWidth(100.f);
+    const char* winLabs[] = {"10 分钟", "30 分钟", "1 小时", "3 小时", "24 小时", "7 天"};
+    const int winVals[] = {10, 30, 60, 180, 1440, 10080};
+    int winIdx = 1;
+    for (int i = 0; i < 6; ++i)
+        if (winVals[i] == st.mesoDashWindowMin) winIdx = i;
+    if (ImGui::Combo("##meso_win", &winIdx, winLabs, 6)) st.mesoDashWindowMin = winVals[winIdx];
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(88.f);
+    const char* thLabs[] = {"≥1万", "≥5万", "≥10万", "≥50万", "≥100万"};
+    const unsigned long long thVals[] = {10000ull, 50000ull, 100000ull, 500000ull, 1000000ull};
+    int thIdx = 2;
+    for (int i = 0; i < 5; ++i)
+        if (thVals[i] == st.mesoAlertMin) thIdx = i;
+    if (ImGui::Combo("##meso_th", &thIdx, thLabs, 5)) st.mesoAlertMin = thVals[thIdx];
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("金币变化达到此额度才记流水（过滤打怪小额抖动）\n卷轴数量变化 ≥1 即记，不受此门槛");
+    ImGui::SameLine();
+    ImGui::Checkbox("合计曲线", &st.mesoDashShowTotal);
+    ImGui::SameLine();
+    ImGui::Checkbox("离线样本", &st.mesoDashShowOffline);
+    ImGui::SameLine();
+    ImGui::Checkbox("Y 从 0", &st.mesoDashYFromZero);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("全显##meso")) {
+        for (auto& s : st.mesoDashSeries) s.visible = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("全隐##meso")) {
+        for (auto& s : st.mesoDashSeries) s.visible = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("清空曲线##meso")) {
+        for (auto& s : st.mesoDashSeries) s.points.clear();
+        st.mesoDashTotal.clear();
+        MesoDashClearFile(st);
+        SetStatus(st, "已清空曲线（流水与角色底账未动）");
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "只清折线缓存 meso_dash.jsonl\n"
+            "流水 meso_events.jsonl 与角色底账 meso_units.json 保留");
+
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float gap = 8.f;
+    const float cardW = (avail - gap * 3.f) / 4.f;
+    char v1[48]{}, v3[48]{}, sub3[64]{};
+    FormatMesoUll(bookTotal, v1, sizeof(v1));
+    FormatMesoDelta(haveFirst ? winFirst : bookTotal, winLast, v3, sizeof(v3));
+    std::snprintf(sub3, sizeof(sub3), "窗口 %d 分钟", winMin);
+    const ULONGLONG dayCut = nowMs > 86400000ull ? nowMs - 86400000ull : 0;
+    const int nOut24 = MesoCountEvents(st, dayCut, 0);
+    const int nAbn24 = MesoCountEvents(st, dayCut, 1);
+    char v4[48]{};
+    std::snprintf(v4, sizeof(v4), "%d", nOut24);
+    char sub4[80]{};
+    if (st.mesoDashNoToken > 0)
+        std::snprintf(sub4, sizeof(sub4), "%d 台无 TOKEN 未监控", st.mesoDashNoToken);
+    else
+        std::snprintf(sub4, sizeof(sub4), "24h 异常(含搬仓) %d · 流水 %zu", nAbn24,
+                      st.mesoEvents.size());
+
+    const ImVec4 deltaCol = (!haveFirst || winLast == winFirst) ? OpsTone::Muted()
+                            : (winLast > winFirst)                ? OpsTone::Ok()
+                                                                  : OpsTone::Danger();
+    DrawMesoKpiCard("底账合计##kpi1", v1, "含离线角色上次探活（关服不掉）", OpsTone::Warn(), cardW);
+    ImGui::SameLine(0, gap);
+    DrawMesoKpiCard("窗口净增##kpi2", v3, sub3, deltaCol, cardW);
+    ImGui::SameLine(0, gap);
+    DrawMesoKpiCard("外转嫌疑##kpi3", v4, sub4, nOut24 > 0 ? OpsTone::Danger() : OpsTone::Muted(),
+                    cardW);
+    ImGui::SameLine(0, gap);
+    {
+        char tokBuf[48]{};
+        std::snprintf(tokBuf, sizeof(tokBuf), "%d", nOnline);
+        DrawMesoKpiCard("在线 TOKEN##kpi4", tokBuf, "有唯一标识才入监控", OpsTone::Token(), cardW);
+    }
+
+    if (!st.clientsError.empty()) {
+        ImGui::TextColored(OpsTone::DangerSoft(), "%s", st.clientsError.c_str());
+    }
+
+    std::vector<size_t> listed;
+    listed.reserve(st.mesoDashSeries.size());
+    for (size_t i = 0; i < st.mesoDashSeries.size(); ++i) {
+        const auto& s = st.mesoDashSeries[i];
+        if (!st.mesoDashShowOffline && !s.online) continue;
+        if (st.mesoDashFilter[0] && !ContainsIgnoreCase(s.token, st.mesoDashFilter) &&
+            !ContainsIgnoreCase(s.chars, st.mesoDashFilter))
+            continue;
+        listed.push_back(i);
+    }
+    std::stable_sort(listed.begin(), listed.end(), [&](size_t a, size_t b) {
+        const auto& sa = st.mesoDashSeries[a];
+        const auto& sb = st.mesoDashSeries[b];
+        if (sa.online != sb.online) return sa.online && !sb.online;
+        if (sa.lastMeso != sb.lastMeso) return sa.lastMeso > sb.lastMeso;
+        return sa.token < sb.token;
+    });
+    std::vector<size_t> visIdx;
+    visIdx.reserve(listed.size());
+    for (size_t i : listed)
+        if (st.mesoDashSeries[i].visible) visIdx.push_back(i);
+
+    const float restH = (std::max)(280.f, ImGui::GetContentRegionAvail().y);
+    const float plotH = (std::max)(160.f, restH * 0.55f);
+    const float legendW = 320.f;
+    if (ImGui::BeginTable("meso_dash_split", 2, ImGuiTableFlags_SizingStretchProp,
+                          ImVec2(0, plotH))) {
+        ImGui::TableSetupColumn("plot", ImGuiTableColumnFlags_WidthStretch, 1.f);
+        ImGui::TableSetupColumn("legend", ImGuiTableColumnFlags_WidthFixed, legendW);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        DrawMesoPlot(st, visIdx, t0, t1, ImVec2(-FLT_MIN, plotH - 4.f));
+
+        ImGui::TableSetColumnIndex(1);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputTextWithHint("##meso_filter", "筛选 TOKEN / 角色", st.mesoDashFilter,
+                                 sizeof(st.mesoDashFilter));
+        ImGui::BeginChild("meso_legend", ImVec2(0, 0), true);
+        if (listed.empty()) {
+            ImGui::TextDisabled("暂无样本。连接列表有 TOKEN 的会话会出现在这里。");
+        } else if (ImGui::BeginTable("meso_leg_tbl", 5,
+                                     ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                                         ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("##vis", ImGuiTableColumnFlags_WidthFixed, 22.f);
+            ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+            ImGui::TableSetupColumn("实时", ImGuiTableColumnFlags_WidthFixed, 72.f);
+            ImGui::TableSetupColumn("Δ", ImGuiTableColumnFlags_WidthFixed, 64.f);
+            ImGui::TableSetupColumn("##sp", ImGuiTableColumnFlags_WidthFixed, 52.f);
+            ImGui::TableHeadersRow();
+            st.mesoDashHoverSeries = -1;
+            for (size_t idx : listed) {
+                auto& s = st.mesoDashSeries[idx];
+                ImGui::PushID(s.token.c_str());
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Checkbox("##v", &s.visible);
+                ImGui::TableSetColumnIndex(1);
+                const ImU32 col = MesoSeriesColor(s.token, s.online);
+                const bool hot = s.lastAlertMs >= dayCut && s.lastAlertMs != 0;
+                const ImVec4 col4 = hot ? OpsTone::Danger() : ImGui::ColorConvertU32ToFloat4(col);
+                ImGui::TextColored(col4, "%s", s.token.c_str());
+                if (ImGui::IsItemHovered()) {
+                    st.mesoDashHoverSeries = static_cast<int>(idx);
+                    ImGui::SetTooltip("%s\n%s\n%d 台 · %s%s", s.token.c_str(),
+                                      s.chars.empty() ? "—" : s.chars.c_str(), s.sessions,
+                                      s.online ? "在线" : "离线（保留轨迹）",
+                                      hot ? "\n近 24h 有外转/骤降告警" : "");
+                }
+                if (!s.chars.empty()) {
+                    ImGui::SameLine(0, 4.f);
+                    ImGui::TextDisabled("%s", s.chars.c_str());
+                }
+                ImGui::TableSetColumnIndex(2);
+                char mesoBuf[48]{};
+                FormatMesoUll(s.lastMeso, mesoBuf, sizeof(mesoBuf));
+                if (s.online)
+                    ImGui::TextUnformatted(mesoBuf);
+                else
+                    ImGui::TextDisabled("%s", mesoBuf);
+                ImGui::TableSetColumnIndex(3);
+                unsigned long long f = s.lastMeso, l = s.lastMeso;
+                bool hf = false;
+                for (const auto& p : s.points) {
+                    if (p.wallMs < t0) continue;
+                    if (!hf) {
+                        f = p.meso;
+                        hf = true;
+                    }
+                    l = p.meso;
+                }
+                char dBuf[48]{};
+                FormatMesoDelta(hf ? f : s.lastMeso, l, dBuf, sizeof(dBuf));
+                const ImVec4 dcol = (!hf || l == f) ? OpsTone::Muted()
+                                    : (l > f)         ? OpsTone::Ok()
+                                                      : OpsTone::Danger();
+                ImGui::TextColored(dcol, "%s", dBuf);
+                ImGui::TableSetColumnIndex(4);
+                DrawMesoSparkline(s.points, t0, t1, col, ImVec2(48.f, 16.f));
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::EndChild();
+        ImGui::EndTable();
+    }
+
+    ImGui::TextUnformatted("转移流水");
+    ImGui::SameLine();
+    ImGui::TextDisabled("artifacts\\ops_logs\\meso_events.jsonl");
+    ImGui::SameLine(0, 10.f);
+    if (ImGui::RadioButton("异常##ev", st.mesoEventView == 0)) st.mesoEventView = 0;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("全部##ev", st.mesoEventView == 1)) st.mesoEventView = 1;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("进账##ev", st.mesoEventView == 2)) st.mesoEventView = 2;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("复制流水##ev")) {
+        std::string out = "time\tkind\ttoken\tchar\tbefore\tafter\tdelta\tpeer\tnote\n";
+        int n = 0;
+        for (auto it = st.mesoEvents.rbegin(); it != st.mesoEvents.rend(); ++it) {
+            const auto& e = *it;
+            const bool ok = st.mesoEventView == 1 ||
+                            (st.mesoEventView == 2 &&
+                             (e.kind == "inflow" || e.kind == "scroll_inflow")) ||
+                            (st.mesoEventView == 0 && MesoKindAbnormal(e.kind));
+            if (!ok) continue;
+            if (st.mesoDashFilter[0] && !ContainsIgnoreCase(e.token, st.mesoDashFilter) &&
+                !ContainsIgnoreCase(e.charName, st.mesoDashFilter) &&
+                !ContainsIgnoreCase(e.peerToken, st.mesoDashFilter))
+                continue;
+            char tlab[24]{};
+            FormatWallTick(e.wallMs, 1440, tlab, sizeof(tlab));
+            out += tlab;
+            out += '\t';
+            out += MesoKindLabel(e.kind);
+            out += '\t';
+            out += e.token;
+            out += '\t';
+            out += e.charName;
+            out += '\t';
+            out += std::to_string(e.before);
+            out += '\t';
+            out += std::to_string(e.after);
+            out += '\t';
+            out += (e.after >= e.before ? "+" : "-");
+            out += std::to_string(e.mag);
+            out += '\t';
+            out += e.peerToken;
+            if (!e.peerChar.empty()) {
+                out += '/';
+                out += e.peerChar;
+            }
+            out += '\t';
+            out += e.note;
+            out += '\n';
+            ++n;
+        }
+        CopyText(out.c_str());
+        SetStatus(st, "已复制流水 " + std::to_string(n) + " 行");
+    }
+
+    const float evH = (std::max)(90.f, ImGui::GetContentRegionAvail().y);
+    if (ImGui::BeginTable("meso_ev_tbl", 7,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
+                          ImVec2(0, evH))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 108.f);
+        ImGui::TableSetupColumn("判定", ImGuiTableColumnFlags_WidthFixed, 80.f);
+        ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+        ImGui::TableSetupColumn("变化", ImGuiTableColumnFlags_WidthFixed, 88.f);
+        ImGui::TableSetupColumn("对端", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+        ImGui::TableSetupColumn("说明", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableHeadersRow();
+        int shown = 0;
+        for (auto it = st.mesoEvents.rbegin(); it != st.mesoEvents.rend(); ++it) {
+            const auto& e = *it;
+            const bool ok = st.mesoEventView == 1 ||
+                            (st.mesoEventView == 2 &&
+                             (e.kind == "inflow" || e.kind == "scroll_inflow")) ||
+                            (st.mesoEventView == 0 && MesoKindAbnormal(e.kind));
+            if (!ok) continue;
+            if (st.mesoDashFilter[0] && !ContainsIgnoreCase(e.token, st.mesoDashFilter) &&
+                !ContainsIgnoreCase(e.charName, st.mesoDashFilter) &&
+                !ContainsIgnoreCase(e.peerToken, st.mesoDashFilter))
+                continue;
+            if (++shown > 400) break;
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            char tlab[24]{};
+            FormatWallTick(e.wallMs, 1440, tlab, sizeof(tlab));
+            ImGui::TextUnformatted(tlab);
+            ImGui::TableSetColumnIndex(1);
+            const ImVec4 kcol = MesoKindAlert(e.kind)
+                                    ? OpsTone::Danger()
+                                : (e.kind == "char_move" || e.kind == "scroll_move")
+                                    ? OpsTone::Warn()
+                                : (e.kind == "inflow" || e.kind == "scroll_inflow")
+                                    ? OpsTone::Ok()
+                                    : OpsTone::Muted();
+            ImGui::TextColored(kcol, "%s", MesoKindLabel(e.kind));
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(e.token.c_str());
+            ImGui::TableSetColumnIndex(3);
+            ImGui::TextUnformatted(e.charName.empty() ? "—" : e.charName.c_str());
+            ImGui::TableSetColumnIndex(4);
+            char dBuf[48]{};
+            if (MesoKindScroll(e.kind)) {
+                std::snprintf(dBuf, sizeof(dBuf), "×%s%llu",
+                              e.after >= e.before ? "+" : "-", e.mag);
+            } else {
+                FormatMesoDelta(e.before, e.after, dBuf, sizeof(dBuf));
+            }
+            ImGui::TextColored(e.after >= e.before ? OpsTone::Ok() : OpsTone::Danger(), "%s", dBuf);
+            if (ImGui::IsItemHovered()) {
+                char bBuf[48]{}, aBuf[48]{};
+                FormatMesoUll(e.before, bBuf, sizeof(bBuf));
+                FormatMesoUll(e.after, aBuf, sizeof(aBuf));
+                ImGui::SetTooltip("%s → %s", bBuf, aBuf);
+            }
+            ImGui::TableSetColumnIndex(5);
+            if (e.peerToken.empty())
+                ImGui::TextDisabled("—");
+            else {
+                ImGui::TextUnformatted(e.peerToken.c_str());
+                if (!e.peerChar.empty()) {
+                    ImGui::SameLine(0, 4.f);
+                    ImGui::TextDisabled("%s", e.peerChar.c_str());
+                }
+            }
+            ImGui::TableSetColumnIndex(6);
+            ImGui::TextUnformatted(e.note.empty() ? "—" : e.note.c_str());
+        }
+        if (shown == 0) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("暂无流水。达到告警额度的涨跌会记在这里，重开 OPS 仍在。");
+        }
+        ImGui::EndTable();
+    }
+}
+
 void OpsPanel_Draw(OpsState& st) {
     if (st.mainTab == 0) RefreshLogViewer(st, false);
 
@@ -4000,7 +5735,7 @@ void OpsPanel_Draw(OpsState& st) {
     // ── Header（压成两行，把高度留给内容页） ──
     ImGui::TextUnformatted("XCat TWMS 运维控制台");
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("台服经典版 · bin_ops\n关窗即停 API(:18789) 与发布站(:52080)；勿与枫星 ops 混用");
+        ImGui::SetTooltip("台服经典版 · bin_ops\n关窗即停 API(:18789) 与发布站(:52080)");
     }
     ImGui::SameLine();
     ImGui::TextDisabled("经典版");
@@ -4095,6 +5830,9 @@ void OpsPanel_Draw(OpsState& st) {
             RefreshClients(st, true);
             RefreshBans(st, true);
             SetStatus(st, "已刷新连接列表");
+        } else if (st.mainTab == 2) {
+            RefreshClients(st, true);
+            SetStatus(st, "已刷新利润监控采样");
         } else {
             RefreshLogViewer(st, true);
             RefreshReleaseInfo(st);
@@ -4105,6 +5843,11 @@ void OpsPanel_Draw(OpsState& st) {
 
     if (st.mainTab == 1) {
         DrawClientsPanel(st);
+        ImGui::End();
+        return;
+    }
+    if (st.mainTab == 2) {
+        DrawMesoDashPanel(st);
         ImGui::End();
         return;
     }

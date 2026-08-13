@@ -15,6 +15,7 @@
 
 #include "../features/auto_enter/auto_enter.h"
 #include "../features/autopot/autopot.h"
+#include "../features/auto_stat/auto_stat.h"
 #include "../features/invuln/invuln.h"
 #include "../features/attack_accel/attack_accel.h"
 #include "../features/final_attack_force/final_attack_force.h"
@@ -57,6 +58,7 @@
 #include "../ipc/payload_buffs.h"
 #include "../ipc/payload_control.h"
 #include "../ipc/payload_pet_loot.h"
+#include "../ipc/payload_auto_stat.h"
 #include "../ipc/payload_status.h"
 #include "../ipc/payload_timed_keys.h"
 #include "xcat_payload_control.h"
@@ -163,6 +165,7 @@ void StopAllFeatureWorkers() {
     x::features::pet_loot::StopWorker();
     x::features::pet_feed::StopWorker();
     x::features::autopot::StopWorker();
+    x::features::auto_stat::StopWorker();
     x::features::mob_scan::StopWorker();
     x::features::titlebar::StopWorker();
     x::ipc::PayloadStatus_Stop();
@@ -388,6 +391,9 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
     XCAT_PLAY_BOOT_BATCH("survival-skills");
     XCAT_PLAY_BOOT_STEP(x::features::autopot::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::auto_stat::Init());
+    XCAT_PLAY_BOOT_STEP(x::ipc::PayloadAutoStat_ApplyInitial());
+    XCAT_PLAY_BOOT_STEP(x::features::auto_stat::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::timed_keys::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::buffs::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::multi_skill::StartWorker());

@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 82u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 83u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -41,6 +41,7 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 82u;
 // v79: curFhGateBypass — 实验·地面门旁路（改 GA CurFh 判空跳转；≠ 站立伪装）
 // v80: infiniteStars — 实验·无限飞镖：自动维持 4121006 无形镖 + 客户端冻 207xxxx 扣数；默认关
 // v81: kInfiniteStarsUserEnabled=false — 实验 TAB 不画入口；不启 worker / 不挂钩；代码保留
+// v83: simpleCombatHitRotate / HitRotateN — 「打中换怪」：同一 oid 确认命中 N 次后切攻击盒外最近活怪；活怪<3 停刀
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -192,6 +193,12 @@ constexpr bool kInfiniteStarsUserEnabled = false;
 // 群怪优先：落盘仍用 clusterWeight；0=关，非 0=开（旧 1–100 权重一律视为开）。
 constexpr uint32_t kClusterWeightDefault = 0u;
 constexpr uint32_t kClusterWeightMax = 100u;
+// 打中换怪：同一 oid 确认命中 N 次后改打攻击盒外最近活怪（空刀不计；打偏记真实 oid）。
+// 场上活怪 < 3 停刀（BOSS 图保护）。默认关。
+constexpr uint32_t kCombatHitRotateDefault = 0u;
+constexpr uint32_t kCombatHitRotateNDefault = 2u;
+constexpr uint32_t kCombatHitRotateNMin = 1u;
+constexpr uint32_t kCombatHitRotateNMax = 20u;
 // 同帧连打探针已关停（实测不增伤）；字段保留仅为清掉旧 ini 的 2/3。
 constexpr uint32_t kAttackSameFrameBurstDefault = 1u;
 constexpr uint32_t kAttackSameFrameBurstMin = 1u;
@@ -362,6 +369,9 @@ struct PayloadControl {
     // v40: 出刀按键 hold（调试 TAB）；默认 5，实际取 min(此值, 间隔)
     uint32_t simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     uint32_t clusterWeight = kClusterWeightDefault;  // 0=最近优先；非0=群怪优先
+    // v83: 打中换怪（默认关）。开：本角色对同一 oid 确认命中 N 次后改打攻击盒外最近活怪；活怪<3 停刀。
+    uint32_t simpleCombatHitRotate = kCombatHitRotateDefault;
+    uint32_t simpleCombatHitRotateN = kCombatHitRotateNDefault;
     // fill+Doing 已废：强制关。位移统一 Impact（F5）/ 拟人。
     uint32_t simpleCombatTeleport = 0;
     // 空中贴怪（ini: simpleCombatAirApproach；旧键 ImpactApproach 读盘兜底）。
@@ -575,6 +585,12 @@ inline uint32_t EffectiveAttackIntervalForApply(uint32_t panelMs, uint32_t attac
         if (v < floor) v = floor;
     }
     return v;
+}
+
+inline uint32_t ClampCombatHitRotateN(uint32_t n) {
+    if (n < kCombatHitRotateNMin) return kCombatHitRotateNMin;
+    if (n > kCombatHitRotateNMax) return kCombatHitRotateNMax;
+    return n;
 }
 
 inline uint32_t ClampClusterWeight(uint32_t w) {

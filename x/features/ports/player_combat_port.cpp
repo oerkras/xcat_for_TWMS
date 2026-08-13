@@ -28,7 +28,7 @@ using x::runtime::il2cpp::ReadPtr;
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
 
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
-// Remount 2026-08-06：ACS hash 全换；字段 off 未漂（与 drop_pool / mob_pool 同源）
+// Remount 2026-08-06：ACS hash 全换。08-13：CurPos 哈希从数组槽撕开（见 kHashLogicalPos）。
 constexpr char kActorBaseClass[] =
     "bef0eed02528709201717d93717a1904bfa2e850dfe1f5fadf473c0e9c78d9b";
 constexpr char kVecCtrlClass[] =
@@ -51,13 +51,14 @@ constexpr char kHashVcRelPos[] =
     "bf593c8b8886d021b370e0ab3d9c8eb97bf29672db1114a1309edd63039ade7";  // RelPos; V=+8
 constexpr char kHashFhId[] =
     "<ccb1e319bb15474d5f8226a83809805ed660d7d082d8423a4bf403493cce67f>k__BackingField";
-// LocalUser 镜头 CurPos@0x240（只读诊断）。
+// LocalUser 镜头 CurPos（只读诊断）。08-13：真 Vector2 是 ccce125f@0x2B0；
+// d6f3e65b@0x240 已是数组，equal-offset 会假命中。窗口 0x200–0x300 仍包住 0x2B0。
 // 2026-08-04 撤销「镜头自愈」：0.1.36 实测只读探针 dApCur 静息 27~53px、dApPos=0、
 // dAA=0.0，引擎跟随本就是活的；dApCur 变大只是因为贴怪每秒瞬移 ~6.7 次、每次几百像素，
 // 平滑跟随物理上无法收敛。自愈据此每 0.29s 硬拧一次镜头（中位 343px、峰值 1419px），
 // 反而成了撕裂源。原「镜头粘死」证据取自 nSlow_=140 污染动作层的旧局，根因已换，立论作废。
 constexpr char kHashLogicalPos[] =
-    "d6f3e65be93e7d14015b31c5a803f5f3983b487727c1bed47f9e6043c66d5e4";
+    "ccce125f69593bc9100a9b227cda0be73abc63fefc4b848f92efe9a72930859";
 // e2a28(Key) 键位移偏移对（IDA：mov [rsi+4B4h], rdx · 两 int32）
 constexpr char kHashKeyMoveDelta[] =
     "<ecb94eef01196b5d240f83e34f0a089e0add6fccc05c16832e9529227473449>k__BackingField";
@@ -73,7 +74,7 @@ constexpr size_t kFbPvcActive = 0xF0;
 size_t gOffPvcActive = kFbPvcActive;
 #define kOffPvcActive (gOffPvcActive)
 constexpr size_t kFbVecCtrl = 0x50, kFbPos = 0x64, kFbVcCurFh = 0x28, kFbVcAp = 0x98;
-constexpr size_t kFbVcApl = 0xB8, kFbVcRelPos = 0x88, kFbFhId = 0x10, kFbLogicalPos = 0x240;
+constexpr size_t kFbVcApl = 0xB8, kFbVcRelPos = 0x88, kFbFhId = 0x10, kFbLogicalPos = 0x2B0;
 constexpr size_t kFbKeyMoveDelta = 0x47C;
 size_t gOffVecCtrl = kFbVecCtrl, gOffPos = kFbPos, gOffVcCurFh = kFbVcCurFh, gOffVcAp = kFbVcAp;
 size_t gOffVcApl = kFbVcApl, gOffVcRelPos = kFbVcRelPos, gOffFhId = kFbFhId;

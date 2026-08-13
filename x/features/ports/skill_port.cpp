@@ -102,13 +102,13 @@ constexpr char kCharacterDataClass[] =
 
 // CharacterData / SkillRecord / Cooltime / SecondaryStat / MyUser → x::ui::player（hash 防漂）。
 // UserLocal 在身 / Prepare / Pos：EnsureSkillFieldOffsets（明文/hash → field_get_offset）。
-// remount 2026-08-06：字段哈希全换；偏移仍 0x330/0x398/0x64/0x240 / SE 0x10/0x18 / SI Dict 0x10
+// remount 2026-08-06：字段哈希全换；08-13 CurPos 改 0x2B0（0x240 已是数组）
 constexpr size_t kFbAffectedList = 0x330;
 constexpr size_t kFbPreparingSkillId = 0x360;  // valuetype.SkillID@+0
 constexpr size_t kFbAffSkillId = 0x10;         // User.AffectedSkillEntry.nSkillID
 constexpr size_t kFbAffStartTime = 0x14;       // tStart
 constexpr size_t kFbVisPos = 0x64;             // FieldActorBase.Pos
-constexpr size_t kFbLogicalPos = 0x240;        // LocalUser.CurPos
+constexpr size_t kFbLogicalPos = 0x2B0;        // 08-13：User Vector2 CurPos；0x240 已是数组
 constexpr size_t kFbSkillInfoDict = 0x10;      // SkillInfo 主技能字典
 constexpr size_t kFbSkillId = 0x10;            // SkillEntry
 constexpr size_t kFbSkillName = 0x18;
@@ -123,11 +123,11 @@ constexpr char kHashAffSkillId[] =
     "a2e3604e6c0f068d9374280b297fcf56890c27c08510320264aed05458df42d";
 constexpr char kHashAffStartTime[] =
     "b86076c46c051c8f22e35363cc02388952909bcba1ac077865d56519f3a36ed";
-// 与 invuln / shop_port 同 hash（运行时 meta；dump 或已还原明文 Pos/CurPos）
+// VisPos 与 invuln 同 hash；CurPos 与 invuln / pet_port 同 hash（08-13 Vector2@0x2B0）
 constexpr char kHashFldVisPos[] =
     "c1792cf58ceda9b4f12cacf2746c06b70c90d516c43cbdf1fcea7c7b1bde37b";
 constexpr char kHashFldLogicalPos[] =
-    "d6f3e65be93e7d14015b31c5a803f5f3983b487727c1bed47f9e6043c66d5e4";
+    "ccce125f69593bc9100a9b227cda0be73abc63fefc4b848f92efe9a72930859";
 constexpr char kFldVisPosPlain[] = "Pos";
 constexpr char kFldLogicalPosPlain[] = "CurPos";
 constexpr char kHashSkillInfoDict[] =

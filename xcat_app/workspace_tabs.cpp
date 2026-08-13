@@ -26,6 +26,7 @@
 #include "xcat_payload_status.h"
 #include "xcat_anchor_lamps.h"
 #include "xcat_pet_loot.h"
+#include "xcat_auto_stat.h"
 #include "xcat_sellbag.h"
 #include "xcat_auto_supply.h"
 #include "xcat_item_catalog.h"
@@ -205,7 +206,7 @@ std::string WorldComboDisplayName(const char* prefsBinDir, int32_t worldId, cons
 
 void DesignBanner() {
     ImGui::TextDisabled(
-        "对齐枫星布局；无敌/自动喝药接 [core]；"
+        "无敌/自动喝药接 [core]；"
         "宠吸 [pet_loot]；定时按键 [timed_keys]；BUFF [buffs] → payload");
     ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.35f));
 }
@@ -502,7 +503,8 @@ void DrawLaunchTab(LaunchUiState& ui) {
         if (!ui.status.empty()) {
             ImGui::Spacing();
             ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
-            ImGui::TextUnformatted(ui.status.c_str());
+            const std::string statusUi = SanitizeImGuiLogLine(ui.status);
+            ImGui::TextUnformatted(statusUi.c_str());
             ImGui::PopTextWrapPos();
         }
     }
@@ -550,6 +552,8 @@ static bool gUiFinalAttackForce = false;
 static int gUiCombatTickMs = (int)xcat::kSimpleCombatTickDefaultMs;
 // 出刀按键 hold：控件在调试 TAB，与 TICK 同卡片共用一次读盘。
 static int gUiAttackHoldMs = (int)xcat::kAttackHoldDefaultMs;
+// F5 追怪策略：首页落盘；控件在调试 TAB「打怪节奏」。
+static int gUiApproachMode = 0;  // 0=空中贴怪 / 1=拟人 / 2=关闭
 // attack_rpc：仅实验 TAB；与 payload core 同步。
 static bool gUiAttackRpc = false;
 static int gUiAttackRpcMobs = (int)xcat::kAttackRpcMobsDefault;
@@ -587,9 +591,14 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool petSummonRequireFood = false;
     static int hpThresholdPct = 50;
     static int mpThresholdPct = 30;
+    static bool autoStatEnabled = xcat::kAutoStatDefaultEnabled != 0;
+    static int autoStatStr = 0;
+    static int autoStatDex = 0;
+    static int autoStatInt = 0;
+    static int autoStatLuk = 0;
+    static uint64_t autoStatTick = 0;
+    static bool autoStatLoaded = false;
     static bool autoCombat = false;
-    // F5 追怪位移：单选 0=空中贴怪 / 1=拟人 / 2=关闭（站桩）
-    static int approachMode = 0;
     // 空中贴怪的自定义站距：关=用内置近战最优值；开=完全听用户的（远程职业）
     static bool standOffCustom = false;
     static int standOffX = (int)xcat::kCombatStandOffXDefault;
@@ -602,6 +611,8 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool groundSpoof = false;
     static bool smartInterval = false;
     static int clusterWeight = 0;  // 0/1：群怪优先（沿用 clusterWeight 落盘）
+    static bool hitRotateOn = false;
+    static int hitRotateN = (int)xcat::kCombatHitRotateNDefault;
     static int teleportMinDx = 220;
     static int teleportStandOff = (int)xcat::kCombatTeleportStandOffDefault;
     static int mobScanIntervalMs = (int)xcat::kMobScanIntervalDefaultMs;
@@ -687,11 +698,11 @@ void DrawHomeTab(LaunchUiState& ui) {
                 petSummonRequireFood = disk.petSummonRequireFood != 0;
                 autoCombat = disk.simpleCombat != 0;
                 if (disk.simpleCombatImpactApproach != 0)
-                    approachMode = 0;
+                    gUiApproachMode = 0;
                 else if (disk.simpleCombatHumanWalk != 0)
-                    approachMode = 1;
+                    gUiApproachMode = 1;
                 else
-                    approachMode = 2;
+                    gUiApproachMode = 2;
                 standOffCustom = disk.simpleCombatStandOffCustom != 0;
                 standOffX = (int)xcat::ClampCombatStandOffX(disk.simpleCombatStandOffX);
                 standOffY = (int)xcat::ClampCombatStandOffY(disk.simpleCombatStandOffY);
@@ -714,6 +725,10 @@ void DrawHomeTab(LaunchUiState& ui) {
                     disk.simpleCombatTickMs ? disk.simpleCombatTickMs
                                            : xcat::kSimpleCombatTickDefaultMs);
                 clusterWeight = disk.clusterWeight != 0 ? 1 : 0;
+                hitRotateOn = disk.simpleCombatHitRotate != 0;
+                hitRotateN = (int)xcat::ClampCombatHitRotateN(
+                    disk.simpleCombatHitRotateN ? disk.simpleCombatHitRotateN
+                                                : xcat::kCombatHitRotateNDefault);
                 // 贴怪瞬移已禁用；LiveStep / attack_rpc 仍默认关，仅实验 TAB 可勾。
                 gUiCombatLiveStep = disk.simpleCombatLiveStep != 0;
                 gUiAttackRpc = disk.attackRpc != 0;
@@ -810,6 +825,20 @@ void DrawHomeTab(LaunchUiState& ui) {
             asupTick = as.writeTickMs;
             asupLoaded = true;
         }
+        xcat::AutoStatConfig ast{};
+        if (xcat::ReadAutoStat(ui.prefsBinDir.c_str(), ast)) {
+            if (!autoStatLoaded || ast.writeTickMs != autoStatTick) {
+                autoStatEnabled = ast.enabled != 0;
+                autoStatStr = static_cast<int>(ast.str);
+                autoStatDex = static_cast<int>(ast.dex);
+                autoStatInt = static_cast<int>(ast.intel);
+                autoStatLuk = static_cast<int>(ast.luk);
+                autoStatTick = ast.writeTickMs;
+                autoStatLoaded = true;
+            }
+        } else if (!autoStatLoaded) {
+            autoStatLoaded = true;
+        }
     }
 
     auto persistCore = [&]() {
@@ -848,8 +877,8 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.petSummonRequireFood = petSummonRequireFood ? 1u : 0u;
         c.simpleCombat = autoCombat ? 1u : 0u;
         // 单选落盘：空中贴怪 / 拟人互斥；关闭则两者皆关。
-        c.simpleCombatImpactApproach = (approachMode == 0) ? 1u : 0u;
-        c.simpleCombatHumanWalk = (approachMode == 1) ? 1u : 0u;
+        c.simpleCombatImpactApproach = (gUiApproachMode == 0) ? 1u : 0u;
+        c.simpleCombatHumanWalk = (gUiApproachMode == 1) ? 1u : 0u;
         c.simpleCombatStandOffCustom = standOffCustom ? 1u : 0u;
         c.simpleCombatStandOffX =
             xcat::ClampCombatStandOffX(static_cast<uint32_t>(standOffX < 0 ? 0 : standOffX));
@@ -869,6 +898,9 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.simpleCombatTickMs = xcat::ClampSimpleCombatTickMs(
             static_cast<uint32_t>(gUiCombatTickMs < 0 ? 0 : gUiCombatTickMs));
         c.clusterWeight = clusterWeight ? 1u : 0u;
+        c.simpleCombatHitRotate = hitRotateOn ? 1u : 0u;
+        c.simpleCombatHitRotateN = xcat::ClampCombatHitRotateN(
+            static_cast<uint32_t>(hitRotateN < 1 ? 1 : hitRotateN));
         c.simpleCombatTeleport = 0u;  // 原生瞬移贴怪已禁用
         c.simpleCombatLiveStep = gUiCombatLiveStep ? 1u : 0u;
         c.attackRpc = gUiAttackRpc ? 1u : 0u;
@@ -918,22 +950,43 @@ void DrawHomeTab(LaunchUiState& ui) {
             lastSeenTick = c.writeTickMs;
             xcat::log::Ok("App",
                           "已下发 core：测谎=%d 无敌=%d 自动进=%d 加血=%d@%d 加蓝=%d@%d 召宠=%d "
-                          "有粮才召=%d 打怪=%d 追怪=%s 间隔=%d 群怪=%d 贴怪瞬移=0 LiveStep=%d "
+                          "有粮才召=%d 打怪=%d 追怪=%s 间隔=%d 群怪=%d 打中换怪=%d/%d 贴怪瞬移=0 LiveStep=%d "
                           "分区=%d 槽=%d 守护=%d softLogin=%d "
                           "读怪=%d 终极一击=%d 技能满级=%d 加速=%d",
                           autoLie ? 1 : 0, invincible ? 1 : 0, autoEnter ? 1 : 0,
                           hpPotion ? 1 : 0, hpThresholdPct, mpPotion ? 1 : 0, mpThresholdPct,
                           petSummon ? 1 : 0, petSummonRequireFood ? 1 : 0, autoCombat ? 1 : 0,
-                          approachMode == 0   ? "空中贴怪"
-                          : approachMode == 1 ? "拟人"
+                          gUiApproachMode == 0   ? "空中贴怪"
+                          : gUiApproachMode == 1 ? "拟人"
                                               : "关闭",
                           gUiSimpleCombatAttackIntervalMs, clusterWeight ? 1 : 0,
+                          hitRotateOn ? 1 : 0, hitRotateN,
                           gUiCombatLiveStep ? 1 : 0, worldId, charSlot, watchdog ? 1 : 0,
                           softLoginProbe ? 1 : 0,
                           mobScanIntervalMs, gUiFinalAttackForce ? 1 : 0, gUiSkillMaxLevel ? 1 : 0,
                           attackAccel ? 1 : 0);
         } else {
             xcat::log::Warn("App", "写入 user.ini [core] 失败");
+        }
+    };
+
+    auto persistAutoStat = [&]() {
+        if (ui.prefsBinDir.empty()) return;
+        xcat::AutoStatConfig cfg{};
+        (void)xcat::ReadAutoStat(ui.prefsBinDir.c_str(), cfg);
+        cfg.enabled = autoStatEnabled ? 1u : 0u;
+        cfg.str = autoStatStr < 0 ? 0u : static_cast<uint32_t>(autoStatStr);
+        cfg.dex = autoStatDex < 0 ? 0u : static_cast<uint32_t>(autoStatDex);
+        cfg.intel = autoStatInt < 0 ? 0u : static_cast<uint32_t>(autoStatInt);
+        cfg.luk = autoStatLuk < 0 ? 0u : static_cast<uint32_t>(autoStatLuk);
+        xcat::AutoStatNormalize(cfg);
+        cfg.writeTickMs = GetTickCount64();
+        if (xcat::WriteAutoStat(ui.prefsBinDir.c_str(), cfg)) {
+            autoStatTick = cfg.writeTickMs;
+            xcat::log::Ok("App", "已下发 auto_stat：开=%d STR=%u DEX=%u INT=%u LUK=%u",
+                          cfg.enabled ? 1 : 0, cfg.str, cfg.dex, cfg.intel, cfg.luk);
+        } else {
+            xcat::log::Warn("App", "写入 user.ini [auto_stat] 失败");
         }
     };
 
@@ -1249,29 +1302,19 @@ void DrawHomeTab(LaunchUiState& ui) {
         ImGui::SameLine();
         ImGui::TextDisabled("F5");
         ImGui::SameLine(0.f, ui::Gap() * 1.2f);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("追怪");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::SetNextItemWidth(AppDpi_Px(120.f));
-        {
-            const char* approachItems[] = {"空中贴怪", "拟人模式", "关闭"};
-            if (approachMode < 0 || approachMode > 2) approachMode = 0;
-            if (ImGui::Combo("##f5_approach_mode", &approachMode, approachItems,
-                             IM_ARRAYSIZE(approachItems))) {
-                persistCore();
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip(
-                    "单选追怪方式。\n"
-                    "· 空中贴怪：悬停在怪旁出刀，需无敌，可穿层；默认。\n"
-                    "· 拟人模式：同层走路贴近后 A 键出刀，不做跨层。\n"
-                    "· 关闭：不追怪（站桩，够得着才砍）。");
-            }
+        ImGui::TextDisabled("追怪策略 → 调试");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "追怪方式（空中贴怪 / 拟人 / 关闭）已挪到「调试」TAB · 打怪节奏。\n"
+                "当前：%s",
+                gUiApproachMode == 0   ? "空中贴怪"
+                : gUiApproachMode == 1 ? "拟人"
+                                       : "关闭");
         }
         // 倍率在下方「飞行速度」卡调。
 
         // 自定义站距：只对「空中贴怪」生效（拟人/关闭走的是地面落点，不归这套飞控管）。
-        ImGui::BeginDisabled(approachMode != 0);
+        ImGui::BeginDisabled(gUiApproachMode != 0);
         if (xcat::ui::OptionCheckbox("自定义站距", &standOffCustom)) persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
@@ -1282,7 +1325,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 (unsigned)xcat::kCombatStandOffXDefault, (int)xcat::kCombatStandOffYDefault);
         }
         ImGui::SameLine(0.f, ui::Gap() * 1.2f);
-        ImGui::BeginDisabled(approachMode != 0 || !standOffCustom);
+        ImGui::BeginDisabled(gUiApproachMode != 0 || !standOffCustom);
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("X");
         ImGui::SameLine(0.f, ui::Gap() * 0.45f);
@@ -1321,7 +1364,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         ImGui::EndDisabled();
 
         // 防贴脸退避：半径直接借上面那组 X/Y，所以必须先开自定义站距才有意义。
-        ImGui::BeginDisabled(approachMode != 0 || !standOffCustom);
+        ImGui::BeginDisabled(gUiApproachMode != 0 || !standOffCustom);
         if (xcat::ui::OptionCheckbox("防贴脸退避", &antiHug)) persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
@@ -1352,7 +1395,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
 
         // 站立伪装：同样只对「空中贴怪」有意义（地面追怪本来就站着，没什么好伪装的）。
-        ImGui::BeginDisabled(approachMode != 0);
+        ImGui::BeginDisabled(gUiApproachMode != 0);
         if (xcat::ui::OptionCheckbox("站立伪装", &groundSpoof)) persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
@@ -1402,6 +1445,49 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (ImGui::DragInt("##mpTh", &mpThresholdPct, 1, 1, 99)) persistCore();
         ImGui::SameLine();
         ImGui::TextUnformatted("%");
+
+        {
+            const int ratioSum = autoStatStr + autoStatDex + autoStatInt + autoStatLuk;
+            const bool canEnable = ratioSum == static_cast<int>(xcat::kAutoStatRatioSum);
+            ImGui::BeginDisabled(!autoStatEnabled && !canEnable);
+            if (xcat::ui::OptionCheckbox("自动加点", &autoStatEnabled)) persistAutoStat();
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "默认关闭，勾选后才按比例加点（无需打开属性窗）。\n"
+                    "STR/DEX/INT/LUK 合计必须为 5 才能开启。\n"
+                    "关闭时不读属性、不发包。");
+            }
+            ImGui::SameLine();
+            if (canEnable) {
+                ImGui::TextDisabled("总计 %d/%u", ratioSum, xcat::kAutoStatRatioSum);
+            } else {
+                ImGui::Text("总计 %d/%u", ratioSum, xcat::kAutoStatRatioSum);
+            }
+
+            auto clampStat = [&](int* v, int others) {
+                const int maxThis = static_cast<int>(xcat::kAutoStatRatioSum) - others;
+                if (*v < 0) *v = 0;
+                if (*v > maxThis) *v = maxThis < 0 ? 0 : maxThis;
+            };
+            auto drawStat = [&](const char* label, const char* id, int* v, int others) {
+                ImGui::TextUnformatted(label);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(AppDpi_Px(40.f));
+                const int maxThis = (std::max)(0, static_cast<int>(xcat::kAutoStatRatioSum) - others);
+                if (xcat::ui::DragIntClamped(id, v, 0, maxThis)) {
+                    clampStat(v, others);
+                    persistAutoStat();
+                }
+            };
+            drawStat("STR", "##asStr", &autoStatStr, autoStatDex + autoStatInt + autoStatLuk);
+            ImGui::SameLine(0.f, ui::Gap());
+            drawStat("DEX", "##asDex", &autoStatDex, autoStatStr + autoStatInt + autoStatLuk);
+            ImGui::SameLine(0.f, ui::Gap());
+            drawStat("INT", "##asInt", &autoStatInt, autoStatStr + autoStatDex + autoStatLuk);
+            ImGui::SameLine(0.f, ui::Gap());
+            drawStat("LUK", "##asLuk", &autoStatLuk, autoStatStr + autoStatDex + autoStatInt);
+        }
 
         if (xcat::ui::OptionCheckbox("自动召唤宠物", &petSummon)) persistCore();
         ImGui::SameLine();
@@ -1522,7 +1608,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         speedRow("F5 滑翔", "home_combat_speed", &gUiFlySpeedPct,
                  "F5 空中贴怪 + 自动赶路共用（都是「自动飞」）。\n"
                  "默认 1000%（满火力档）；仅「空中贴怪」模式下可调；拟人/关闭时置灰。",
-                 approachMode == 0);
+                 gUiApproachMode == 0);
         ImGui::TextDisabled(
             "范围 %u–%u%%。只放大「意图」速度；撞墙预刹 / 位置包线 / 坠落自救不跟着缩。\n"
             "实测已验到 5X；更高属外推。推进间隔仍在「调试 → 飞行调试」。",
@@ -1631,7 +1717,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 body = "已切换为脚下拾取（与宠吸/人物直吸互斥）。";
             } else if (next == kLootPet) {
                 kind = 2;
-                body = "已切换为宠吸（与人物直吸共用范围，尺寸可调；默认 1000×1000）。";
+                body = "已切换为宠吸（官方 ByPet 扩盒；范围与人物直吸共用，尺寸可调，不切路径）。";
             } else if (next == kLootChar) {
                 kind = 2;
                 body = xcat::kPetLootCharVacUserEnabled
@@ -1721,8 +1807,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (xcat::ui::OptionRadioButton("宠吸", &lootMode, kLootPet)) changed = true;
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "宠物官方吸物（扩 .rdata 矩形 → TryPickUpDrop）。\n"
-                    "范围见下方「吸物范围」（与人物直吸共用）；默认 %.0f×%.0f。",
+                    "宠物官方吸物（扩 .rdata 矩形 → TryPickUpDrop / ByPet）。\n"
+                    "范围只改盒子大小，不会改走人吸。默认 %.0f×%.0f。",
                     xcat::kPetLootVacuumWDefault, xcat::kPetLootVacuumHDefault);
             }
             ImGui::SameLine();
@@ -1736,9 +1822,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 } else {
                     ImGui::SetTooltip(
                         "官方 SendDropPickUpRequest（角色坐标，不靠宠）。\n"
-                        "范围见下方「吸物范围」；人物直吸上限 %.0f×%.0f（服端距离校验，\n"
-                        "再大只会空 Send）。默认 %.0f×%.0f。",
-                        xcat::kPetLootCharVacWMax, xcat::kPetLootCharVacHMax,
+                        "范围与宠吸共用、用户自调；过大可能空 Send，自负。默认 %.0f×%.0f。",
                         xcat::kPetLootVacuumWDefault, xcat::kPetLootVacuumHDefault);
                 }
             }
@@ -1792,20 +1876,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::TextUnformatted("吸物范围");
             ImGui::SameLine(0.f, ui::Gap() * 0.45f);
             ImGui::BeginDisabled(lootMode != kLootPet && lootMode != kLootChar);
-            const float vacMaxW =
-                (lootMode == kLootChar) ? xcat::kPetLootCharVacWMax : xcat::kPetLootVacuumMax;
-            const float vacMaxH =
-                (lootMode == kLootChar) ? xcat::kPetLootCharVacHMax : xcat::kPetLootVacuumMax;
-            if (lootMode == kLootChar) {
-                if (lootVacW > vacMaxW) {
-                    lootVacW = vacMaxW;
-                    persistPetLoot();
-                }
-                if (lootVacH > vacMaxH) {
-                    lootVacH = vacMaxH;
-                    persistPetLoot();
-                }
-            }
+            const float vacMaxW = xcat::kPetLootVacuumMax;
+            const float vacMaxH = xcat::kPetLootVacuumMax;
             ImGui::SetNextItemWidth(AppDpi_Px(72.f));
             if (ImGui::DragFloat("##loot_vac_w", &lootVacW, 1.f, xcat::kPetLootVacuumMin, vacMaxW,
                                  "%.0f"))
@@ -1813,14 +1885,12 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 if (lootMode == kLootChar) {
                     ImGui::SetTooltip(
-                        "人物直吸宽度（%.0f–%.0f，默认 %.0f）。\n"
-                        "送包用角色坐标，服端有距离校验；超过上限只空 Send。",
-                        xcat::kPetLootVacuumMin, xcat::kPetLootCharVacWMax,
+                        "人物直吸宽度（%.0f–%.0f，默认 %.0f）。用户自调；过大可能空 Send。",
+                        xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
                         xcat::kPetLootVacuumWDefault);
                 } else {
                     ImGui::SetTooltip(
-                        "宠吸真空宽度（%.0f–%.0f，默认 %.0f）。\n"
-                        "扩 ByPet 矩形；人物直吸另有更小上限。",
+                        "宠吸真空宽度（%.0f–%.0f，默认 %.0f）。只扩 ByPet 矩形。",
                         xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
                         xcat::kPetLootVacuumWDefault);
                 }
@@ -1835,12 +1905,14 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 if (lootMode == kLootChar) {
                     ImGui::SetTooltip(
-                        "人物直吸高度（%.0f–%.0f，默认 %.0f）。", xcat::kPetLootVacuumMin,
-                        xcat::kPetLootCharVacHMax, xcat::kPetLootVacuumHDefault);
+                        "人物直吸高度（%.0f–%.0f，默认 %.0f）。用户自调。",
+                        xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
+                        xcat::kPetLootVacuumHDefault);
                 } else {
                     ImGui::SetTooltip(
-                        "宠吸真空高度（%.0f–%.0f，默认 %.0f）。", xcat::kPetLootVacuumMin,
-                        xcat::kPetLootVacuumMax, xcat::kPetLootVacuumHDefault);
+                        "宠吸真空高度（%.0f–%.0f，默认 %.0f）。只扩 ByPet 矩形。",
+                        xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
+                        xcat::kPetLootVacuumHDefault);
                 }
             }
             ImGui::SameLine(0.f, ui::Gap() * 0.35f);
@@ -1982,6 +2054,43 @@ void DrawHomeTab(LaunchUiState& ui) {
                     "注意：已锁定交手中不会中途改锁去更密堆——只影响下一次选怪\n"
                     "生效核对：combat.log 出现 SetClusterPriority 1，acquire 的 cluster≥1");
             }
+        }
+
+        ImGui::Spacing();
+        {
+            if (xcat::ui::OptionCheckbox("打中换怪", &hitRotateOn)) persistCore();
+            ImGui::SameLine();
+            ImGui::TextDisabled("命中 N 次后躲开攻击盒再打");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "服务器短时间连续命中同一只怪会风控。开：确认自己打中同一只怪 N 次后，\n"
+                    "改打攻击盒外、离你最近的活怪（不飞全图）。空刀不计；别人的伤害不计；\n"
+                    "打偏算打在实际挨刀那只上。\n"
+                    "场上活怪少于 3 只时停刀——BOSS 图通常只有 1 只，避免误砍 BOSS。\n"
+                    "关：沿用原来的「打死 / 早切 / 空刀」才换怪。\n"
+                    "生效核对：combat.log 出现 hit_rotate confirm 与 acquire hit_rotate clear");
+            }
+            ImGui::BeginDisabled(!hitRotateOn);
+            ImGui::SameLine(0.f, ui::Gap());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("每怪命中");
+            ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+            ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+            if (ImGui::DragInt("##hit_rotate_n", &hitRotateN, 1,
+                               (int)xcat::kCombatHitRotateNMin,
+                               (int)xcat::kCombatHitRotateNMax)) {
+                hitRotateN = (int)xcat::ClampCombatHitRotateN(
+                    static_cast<uint32_t>(hitRotateN < 1 ? 1 : hitRotateN));
+                persistCore();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled |
+                                     ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "每只怪确认命中次数（%u–%u，默认 %u）。空刀不计。满次数即换攻击盒外最近目标。",
+                    (unsigned)xcat::kCombatHitRotateNMin, (unsigned)xcat::kCombatHitRotateNMax,
+                    (unsigned)xcat::kCombatHitRotateNDefault);
+            }
+            ImGui::EndDisabled();
         }
 
         ImGui::Spacing();
@@ -5373,6 +5482,12 @@ void DrawDebugTab(LaunchUiState& ui) {
                     gUiAttackHoldMs = (int)xcat::ClampAttackHoldMs(
                         disk.simpleCombatAttackHoldMs ? disk.simpleCombatAttackHoldMs
                                                       : xcat::kAttackHoldDefaultMs);
+                    if (disk.simpleCombatImpactApproach != 0)
+                        gUiApproachMode = 0;
+                    else if (disk.simpleCombatHumanWalk != 0)
+                        gUiApproachMode = 1;
+                    else
+                        gUiApproachMode = 2;
                     tickDbgSeen = disk.writeTickMs;
                     tickDbgLoaded = true;
                 }
@@ -5393,15 +5508,42 @@ void DrawDebugTab(LaunchUiState& ui) {
             c.simpleCombatAttackHoldMs = xcat::ClampAttackHoldMs(
                 static_cast<uint32_t>(gUiAttackHoldMs < 0 ? 0 : gUiAttackHoldMs));
             gUiAttackHoldMs = (int)c.simpleCombatAttackHoldMs;
+            if (gUiApproachMode < 0 || gUiApproachMode > 2) gUiApproachMode = 0;
+            c.simpleCombatImpactApproach = (gUiApproachMode == 0) ? 1u : 0u;
+            c.simpleCombatHumanWalk = (gUiApproachMode == 1) ? 1u : 0u;
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
                 tickDbgSeen = c.writeTickMs;
-                xcat::log::Ok("App", "已下发 core：simpleCombatTickMs=%u hold=%u（调试）",
-                              c.simpleCombatTickMs, c.simpleCombatAttackHoldMs);
+                xcat::log::Ok("App",
+                              "已下发 core：simpleCombatTickMs=%u hold=%u approach=%s（调试）",
+                              c.simpleCombatTickMs, c.simpleCombatAttackHoldMs,
+                              gUiApproachMode == 0   ? "空中贴怪"
+                              : gUiApproachMode == 1 ? "拟人"
+                                                     : "关闭");
             } else {
                 xcat::log::Warn("App", "写入 user.ini [core] 打怪节奏参数失败");
             }
         };
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("追怪");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(120.f));
+        {
+            const char* approachItems[] = {"空中贴怪", "拟人模式", "关闭"};
+            if (gUiApproachMode < 0 || gUiApproachMode > 2) gUiApproachMode = 0;
+            if (ImGui::Combo("##dbg_f5_approach_mode", &gUiApproachMode, approachItems,
+                             IM_ARRAYSIZE(approachItems))) {
+                persistTiming();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "单选追怪方式（原首页入口，已迁到本卡）。\n"
+                    "· 空中贴怪：悬停在怪旁出刀，需无敌，可穿层；默认。\n"
+                    "· 拟人模式：同层走路贴近后 A 键出刀，不做跨层。\n"
+                    "· 关闭：不追怪（站桩，够得着才砍）。");
+            }
+        }
 
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("TICK值");

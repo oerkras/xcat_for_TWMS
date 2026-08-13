@@ -11,6 +11,7 @@
 #include "../ports/fly_fh_ban.h"
 #include "../ports/foothold_port.h"
 #include "../ports/ground_spoof.h"
+#include "../channel_hop/channel_hop.h"
 #include "../ports/world_port.h"
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../../runtime/dbg_log_file.h"
@@ -2193,6 +2194,28 @@ DWORD WINAPI Worker(LPVOID) {
             }
         }
         const DWORD now = GetTickCount();
+        // BIN 19:38：图内 SessionTcpLayer 持久丢失、无 Disconnected 边沿 → 怪 AbsPos 钉死。
+        // lost_session 在 inMap 被吞；CALL_EDGE 默认关所以 CloseSession 粘性也不会武装。
+        // 换图 blip 通常 150ms 内重绑；满 3s 仍无 facade 且不在换频途中才软重连。
+        {
+            static DWORD sNmGoneSince = 0;
+            static bool sNmGoneFired = false;
+            if (nm) {
+                sNmGoneSince = 0;
+                sNmGoneFired = false;
+            } else {
+                if (!sNmGoneSince) sNmGoneSince = now ? now : 1;
+                constexpr DWORD kNmGonePersistMs = 3000;
+                const bool inMap = x::features::ports::world::IsInMapScene();
+                const bool hopBusy = x::features::channel_hop::HasPending();
+                if (!sNmGoneFired && inMap && !hopBusy && now - sNmGoneSince >= kNmGonePersistMs) {
+                    sNmGoneFired = true;
+                    Log("nm_gone_inmap persist=%ums — RequestAttempt",
+                        static_cast<unsigned>(now - sNmGoneSince));
+                    x::features::soft_login_probe::RequestAttempt("nm_gone_inmap");
+                }
+            }
+        }
         // 卡登录期取证：会话连上却迟迟没有进图流量时，主动倒一次环。
         // 不能只挂在拆除路径上 —— 实测 18 轮卡登录里只有 1 轮走到了 lost_session，
         // 其余进程是被硬结束的，worker 根本没机会观察到会话消失。
@@ -2286,6 +2309,7 @@ void DumpNow(const char* why) {
 int LastPendingErrorCode() { return gLastErr.load(); }
 int LastSessionState() { return gLastState.load(); }
 bool SawDisconnect() { return gSawDisconnect.load(); }
+bool HasResolvedSession() { return gNmCached != nullptr; }
 uint32_t DisconnectSeq() { return gDisconnectSeq.load(std::memory_order_relaxed); }
 
 }  // namespace kick_sniff

@@ -375,9 +375,12 @@ constexpr float kPortalFinalAimLiftY = 8.f;
 // below-deck abort ↔ 满速重贴振荡（ap.y≈-50 vy≈-460 循环，终掉到 -1400）。
 // 台下恢复：限速重贴 + 必须明显爬回台面上方再卸推；穿台次数封顶。
 constexpr float kPortalBelowDeckRestickScale = 1.5f;
+// 台下恢复：进此半径才 1.5X。Station 的 140 对 10X 只有 ~22ms，刹不住
+// （in02：门边 10X 冲上 Disarm 穿台）。远距仍用面板倍率，避免中间跳整图爬行。
+constexpr float kPortalRecoverSlowR = 400.f;
 constexpr float kPortalRecoverAboveDeck = 10.f;  // 再 hold 前 py >= landY+该值
 constexpr float kPortalRecoverVy = 20.f;
-constexpr float kPortalSoftCatchVy = -80.f;  // hold 未站稳且急坠 → 提前软接，勿等掉穿
+constexpr float kPortalSoftCatchVy = -80.f;  // hold 已穿台（py<landY）且急坠 → 软接；台上往下不算
 constexpr int kPortalBelowDeckAbortCap = 6;
 constexpr int kPortalBelowDeckSnapAimAfter = 2;  // 连续穿台后改瞄 Snap X（可站段）
 // hold 中短暂出框宽限；未挂上 FH 时另用 nearAim 保海岸（BIN 50000 west00：
@@ -1747,6 +1750,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     bool holdPhase = false;   // 已进 hold（卸 ban + 停旋翼）
     bool stoodOnFh = false;   // CurFh 已挂上（日志/掉台提示）
     bool loggedBleedNudge = false;
+    bool loggedRestickSlow = false;
     const float panelScale = speedGuard.prev;  // 面板滑翔速度（与打怪同）
     bool softApproach = false;  // abort 后重贴标记（速度仍用 panelScale，台下恢复另限速）
     bool recoverAboveDeck = false;  // 穿台/急坠后：须明显爬回台面上方再 Disarm
@@ -1761,9 +1765,9 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         softApproach = true;
         x::runtime::LogI("Travel",
                          "heli stick start below deck name=%s ap=(%.0f,%.0f) landY=%.0f "
-                         "→ recover above+%.0f @<=%.2fX",
+                         "→ recover above+%.0f; cruise=panel restick<=%.2fX within %.0f",
                          portal.name.c_str(), luX, luY, landY, kPortalRecoverAboveDeck,
-                         kPortalBelowDeckRestickScale);
+                         kPortalBelowDeckRestickScale, kPortalRecoverSlowR);
     }
     for (;;) {
         const DWORD now = GetTickCount();
@@ -1840,15 +1844,27 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         // hold 期必须停旋翼：Station/Impact 会把刚挂上的 CurFh 打掉 → 门前抖 10s+（BIN 11:51）。
         // 接近阶段才 Cruise/Station；hold 只靠重力落到 aimFh。
         if (!holdPhase) {
-            const float useScale =
-                recoverAboveDeck ? (std::min)(panelScale, kPortalBelowDeckRestickScale)
-                                 : panelScale;
-            heli::SetSpeedScale(heli::Owner::Travel, useScale);
             // 末段贴台面飞：抬高过大 → hold 悬空卸推 → 掉穿（104000100 west00）。
             // 台下恢复：目标抬到 landY+recover，避免贴着甲板就 Disarm 再穿。
             const bool finalApproach =
                 inTrigNow || distAim <= kTravelStationEnterR ||
                 std::fabs(px - aimX) <= kTravelStationEnterR;
+            // 1.5X 只按离瞄准点的二维距离收末段，半径用 recoverSlowR（不是 Station 140）。
+            // 禁止用 |dx|≤140：门在正上方时开局 |dx| 就很小，会整段爬行。
+            const bool restickSlow =
+                recoverAboveDeck && (inTrigNow || distAim <= kPortalRecoverSlowR);
+            const float useScale =
+                restickSlow ? (std::min)(panelScale, kPortalBelowDeckRestickScale)
+                            : panelScale;
+            heli::SetSpeedScale(heli::Owner::Travel, useScale);
+            if (restickSlow && !loggedRestickSlow) {
+                loggedRestickSlow = true;
+                x::runtime::LogI(
+                    "Travel",
+                    "heli stick restick slow name=%s dist=%.0f scale=%.2fX "
+                    "(within %.0f; cruise was panel)",
+                    portal.name.c_str(), distAim, useScale, kPortalRecoverSlowR);
+            }
             float heliY = finalApproach ? (landY + kPortalFinalAimLiftY) : aimY;
             if (recoverAboveDeck) {
                 heliY = landY + kPortalRecoverAboveDeck;
@@ -1900,7 +1916,12 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             const bool settleSpdOk =
                 speedLenOk(liveVx, liveVy, kPortalSettleSpeed) ||
                 (tm.guard && std::strcmp(tm.guard, "deadband") == 0);
-            const bool nearDeckY = std::fabs(py - landY) <= kPortalHoldEnterDy;
+            // 上方收到瞄准抬高（+24）。抖的根因是 soft catch 把台上往下当穿台，
+            // 不是 hold 点偏高。收成 +8 后 BIN 20:53:26 east00 停在 landY+12
+            // 进不了 hold → 14s NOT_STOOD。台上往下仍靠 py<landY 才 catch。
+            const float holdAboveMax = kPortalAimLiftY;
+            const bool nearDeckY = py <= (landY + holdAboveMax) &&
+                                   py >= (landY - kPortalHoldEnterDy);
             // py >= landY - belowMax：禁止 hold@台下再卸推掉穿。
             const bool onOrAboveDeck = py >= (landY - kPortalHoldBelowMax);
             // bleed：竖速 + 横速都收住再 Disarm（禁 hold 硬刹；横速门槛防 10X 甩台）。
@@ -1944,11 +1965,12 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                         "Travel",
                         "heli stick bleed wait name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
                         "landY=%.0f v=(%.0f,%.0f) need|vx|<=%.0f need|vy|<=%.0f "
-                        "|ap.y-landY|<=%.0f aboveDeck(py>=landY-%.0f)=%d recover=%d "
+                        "py<=landY+%.0f py>=landY-%.0f aboveDeck(py>=landY-%.0f)=%d recover=%d "
                         "(no zero-vel)",
                         portal.name.c_str(), px, py, aimX, aimY, landY, liveVx, liveVy,
-                        kPortalHoldEnterVx, kPortalHoldEnterVy, kPortalHoldEnterDy,
-                        kPortalHoldBelowMax, onOrAboveDeck ? 1 : 0, recoverOk ? 1 : 0);
+                        kPortalHoldEnterVx, kPortalHoldEnterVy, holdAboveMax,
+                        kPortalHoldEnterDy, kPortalHoldBelowMax, onOrAboveDeck ? 1 : 0,
+                        recoverOk ? 1 : 0);
                 }
             } else if (!holdPhase && inTrigNow && settleTimeout && bleedOk && stOk &&
                        recoverOk) {
@@ -1972,9 +1994,10 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                     stOk ? 1 : 0, settleSpdOk ? 1 : 0, (unsigned)kPortalReadyStableMs);
             }
 
-            // hold 未站稳急坠：提前软接，勿等掉到 landY-40 才 abort（BIN in02 vy≈-460）。
-            if (holdPhase && !stoodOnFh && liveVy < kPortalSoftCatchVy &&
-                py < (landY + kPortalFinalAimLiftY)) {
+            // hold 未站稳且已穿台急坠：软接。台上往下落台（py>=landY）是预期重力，等 onFh。
+            // 旧条件 py<landY+8 会把「还差几像素上台」当成穿台（BIN 18:37 in01_1：
+            // hold@-952 → 落到 -957 就 catch → recover 拉回 -953 → 14s 抖动）。
+            if (holdPhase && !stoodOnFh && liveVy < kPortalSoftCatchVy && py < landY) {
                 holdPhase = false;
                 leftTrigSince = 0;
                 readySince = 0;
