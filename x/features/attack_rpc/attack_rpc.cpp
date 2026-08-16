@@ -6,7 +6,9 @@
 
 #include "../ports/attack_rpc_port.h"
 #include "../ports/security_attack_port.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
+#include "../../../common/xcat_payload_control.h"
 
 #include <Windows.h>
 
@@ -31,7 +33,43 @@ bool EnvEnabled() {
 DWORD WINAPI WorkerMain(LPVOID) {
     runtime::LogI("AttackRpc", "worker start enabled=%d", ports::attack_rpc::IsEnabled() ? 1 : 0);
     ports::security_attack::Init();
+    bool seqBoot = false;
+    uint32_t lastSeq = 0;
+    bool resetBoot = false;
+    uint32_t lastReset = 0;
+    uint32_t lastStopGen = ports::attack_rpc::PeekStopGen();
     while (!gStop.load()) {
+        const uint32_t rseq = xcat::ReadAttackRpcResetSeq(runtime::GetBinDir());
+        if (!resetBoot) {
+            resetBoot = true;
+            lastReset = rseq;
+        } else if (rseq != 0 && rseq > lastReset) {
+            lastReset = rseq;
+            const bool ok = ports::attack_rpc::ResetSessionCap("panel");
+            runtime::LogI("AttackRpc", "session reset seq=%u ok=%d", rseq, ok ? 1 : 0);
+        }
+        const uint32_t sg = ports::attack_rpc::PeekStopGen();
+        if (sg != lastStopGen) {
+            lastStopGen = sg;
+            uint32_t stop = xcat::ReadAttackRpcStopSeq(runtime::GetBinDir());
+            stop = stop == 0 ? 1u : stop + 1u;
+            if (stop == 0) stop = 1u;
+            const bool wok = xcat::WriteAttackRpcStopSeq(runtime::GetBinDir(), stop);
+            runtime::LogI("AttackRpc", "auto_stop notify seq=%u write=%d gen=%u", stop,
+                          wok ? 1 : 0, sg);
+        }
+        const uint32_t seq = xcat::ReadAttackRpcFireSeq(runtime::GetBinDir());
+        if (!seqBoot) {
+            seqBoot = true;
+            lastSeq = seq;
+        } else if (seq != 0 && seq > lastSeq) {
+            lastSeq = seq;
+            ports::attack_rpc::FireResult r{};
+            const bool ok = ports::attack_rpc::TryFireOneshot(&r);
+            runtime::LogI("AttackRpc",
+                          "session oneshot seq=%u ok=%d err=%s mobs=%d op=%d body~%d",
+                          seq, ok ? 1 : 0, r.err ? r.err : "", r.mobs, r.opcode, r.bodyHint);
+        }
         ports::attack_rpc::Tick();
         const DWORD now = GetTickCount();
         if (ports::attack_rpc::IsEnabled() &&

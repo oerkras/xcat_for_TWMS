@@ -59,14 +59,14 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Packet / OutPacket fields：hash → field_get_offset（In/Out 同布局 · remount 2026-08-06）
 constexpr char kPacketBaseClass[] =
-    "bc38a59f64514be05547df152fb147799b9b47be10556655fe15485379f79f8";
+    "d04fa6aecc271eb36d049f6c9422e28025c1aa02128d608e6dd3addd9402f4e";
 constexpr char kHashPacketBuffer[] =
-    "<eecde9fde4e63139526bc79e3dd104f14ac5c22e5746466cc884323b208497f>k__BackingField";
+    "<c80e82272566f0050a426f923ba33bf491232354873be700b04b1ec9d4bdf24>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<fd14ad7f125e4854f90ee4410e2092e6dcc591f9489b916f3e9b396b0d3228f>k__BackingField";
+    "<a6a9d0e78ddfe79b0ada28f2fc0ee12b24818d9b56ec62abc8fe3dcea5e1fe6>k__BackingField";
 // OutPacket.id@0x20（TDI 13775）— 勿用 InPacket TDI 13774 的 f4e004d8… backing
 constexpr char kHashOutPacketId[] =
-    "eba7d73821df86e3effbf761193b7b47a15019971597c1886c88a21d6742e63";
+    "bb53a520d0cb431a8c0ba3e0f1510fdb7268c7c25ec4ec11685039ebec2f3de";
 constexpr size_t kFbOutPacketId = 0x20;
 constexpr size_t kFbPacketBuffer = 0x10;
 constexpr size_t kFbPacketOffset = 0x18;
@@ -82,51 +82,51 @@ int gPktFieldHits = -1;
 
 // TW dump.cs RVAs — call-edge targets（Session TDI 13797 · remount 2026-08-06 按方法序对齐）。
 // CloseSession=旧 CloseSocket；Disconnect=旧 Close；另挂 OnDisconnect / set_SessionState。
-constexpr uintptr_t kRvaNmCloseSession = 0x1CFC240;  // remounted 2026-08-06
-constexpr uintptr_t kRvaNmDisconnect = 0x1CED0A0;    // remounted 2026-08-06
-constexpr uintptr_t kRvaSessionSetState = 0x1CFBDC0;  // remounted 2026-08-06: set_SessionState
-constexpr uintptr_t kRvaSessionOnDisc = 0x1CFD410;  // remounted 2026-08-06: OnDisconnect
+constexpr uintptr_t kRvaNmCloseSession = 0x1CFB0E0;  // remounted 2026-08-06
+constexpr uintptr_t kRvaNmDisconnect = 0x1CEBF40;    // remounted 2026-08-06
+constexpr uintptr_t kRvaSessionSetState = 0x1CFAC60;  // remounted 2026-08-06: set_SessionState
+constexpr uintptr_t kRvaSessionOnDisc = 0x1CFC2B0;  // remounted 2026-08-06: OnDisconnect
 // Outbound funnel（Session.SendPacket）
-constexpr uintptr_t kRvaSessionSend = 0x1CEF160;  // remounted 2026-08-06
+constexpr uintptr_t kRvaSessionSend = 0x1CEE000;  // remounted 2026-08-06
 // 方法哈希（Session 上 void() 极多，kind 不唯一；哈希漂 RVA 时仍可活）
 constexpr char kHashCloseSession[] =
-    "fed8f544dea4ed36fab81fce8888ce4eae488356a66ecc94a554c1a91a0c4fc";
+    "a7ce69500f1733fa002681c8f5370df1a99e7b470cdc5d9c9cafa3aa7bd6925";
 constexpr char kHashDisconnect[] =
-    "f92c6ead97c64b7cbec870270515e90f745d8b548483167233deebc597c08a7";
+    "fd234700fd58eb37067c062e4fadffe5bd80eb5d733e5120939b8c1ce6848a9";
 constexpr char kHashOnDisconnect[] =
-    "ab1bcc45eefaa52c087210987a558fe4feb27ea2a0c472f3264314bd959a2aa";
+    "b30f98fb22e32dca10381e55b59e7dad0aa9a516144fed730ebee7eda36cf3f";
 constexpr char kHashSetSessionState[] =
-    "ec8270518da3e3a940e0e4686d3d014d197277c8ad8b173b165d7ce6669314a";
+    "c114003d6a17055e5c9d3cace1dacb316ac08e57de97993a4458b7b144b0485";
 constexpr char kHashSendPacket[] =
-    "f9741df05df4a514fa1c509b0d209d4b098e4e1df5d244c21a7059d63308199";
+    "dd3ebd84f1e0480d15640c97c2fe3a0f6b46e8a205f26311874a57c1e1a4520";
 // SEND OutPacket TDI 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "a4c316b8f6223d2bd94628c2cfcfa1d7440b044c6a7043355d2177c60cafb9f";
+    "e0c844c6ebe831431dd6925430869fed0b7b35b9fad5484c3f4d18ecb8f65c5";
 // a480 local-disconnect（WM）：TryLocal 写 bool@0x2A0 + float@0x2A4 后 call DoLocal。
 // 旁路 bool@0x290 仍在，HWBP 边沿以 0x2A0 为准。
-// 08-13：DoLocal 唯一 code xref 在 FixedUpdate@0xDEF220 内 call @0xDF0002（旧 0xDDA277 已废）。
-constexpr uintptr_t kRvaA480TryLocalDisc = 0xDE6BC0;  // remounted 2026-08-06
-constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDF0002;  // remounted 2026-08-13
-constexpr uintptr_t kRvaA480DoLocalDisc = 0xDF0D40;  // remounted 2026-08-06
+// 08-14：DoLocal 唯一 E8 在 FixedUpdate@0xDEEFB0 内 call @0xDEFD92（IDA 未分析完时显示成 db）。
+constexpr uintptr_t kRvaA480TryLocalDisc = 0xDE6950;  // remounted 2026-08-06
+constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDEFD92;  // remounted 2026-08-14
+constexpr uintptr_t kRvaA480DoLocalDisc = 0xDF0AD0;  // remounted 2026-08-06
 // CloseSession 直接调用方（runtime IDB 2026-08-12 · imagebase 0x7ff848c80000）
-constexpr uintptr_t kRvaCsCaller1CC5520 = 0x1CEC6A0;
-constexpr uintptr_t kRvaCsCaller1CD5570 = 0x1CFC6F0;  // MI/data only
-constexpr uintptr_t kRvaCsCaller1CD92A0 = 0x1D00420;
-constexpr uintptr_t kRvaCsParent1CC52C0 = 0x1CEC440;
-constexpr uintptr_t kRvaCsParent1CC74C0 = 0x1CEE640;
-constexpr uintptr_t kRvaCsParent1CD7870 = 0x1CFE9F0;
-constexpr uintptr_t kRvaCsParent1CDA040 = 0x1D011C0;
+constexpr uintptr_t kRvaCsCaller1CC5520 = 0x1CEB540;
+constexpr uintptr_t kRvaCsCaller1CD5570 = 0x1CFB590;  // MI/data only
+constexpr uintptr_t kRvaCsCaller1CD92A0 = 0x1CFF2C0;
+constexpr uintptr_t kRvaCsParent1CC52C0 = 0x1CEB2E0;
+constexpr uintptr_t kRvaCsParent1CC74C0 = 0x1CED4E0;
+constexpr uintptr_t kRvaCsParent1CD7870 = 0x1CFD890;
+constexpr uintptr_t kRvaCsParent1CDA040 = 0x1D00060;
 // Session.CallbackRecv(IAsyncResult) — remount 后写 SessionState@+0x60=Disconnected
 // dump hash aff6dcff…；写点 mov [rcx+60h],eax @ 0x1CD7796（rip 后一条 0x1CD7799）
-constexpr uintptr_t kRvaSessionCallbackRecv = 0x1CFE620;
+constexpr uintptr_t kRvaSessionCallbackRecv = 0x1CFD4C0;
 constexpr char kWorldManagerClass[] =
-    "b8ea8013e52dada590b6003b130193bf382fb78e9581ae899270652538d4114";
+    "f87be298afca3b6020c8f4695d83819fcc9a28877005b6a669187d33a0a2711";
 constexpr char kHashA480ForceDisc[] =
-    "a136e56515791b1482b6557868a420fba42c48e80e9784baa918078a349b24e";  // bool@0x2A0
+    "e324b08ab89a8e7b857fa4522cbaabd5c20829f58a21fd68b2b8c9a3bf3bd0f";  // bool@0x2A0
 constexpr char kHashA480ForceDiscAlt[] =
-    "b8d8e29dc27af963986f9b0fcd695b7e901685bb690164945e99a0525af6e74";  // bool@0x290 旁路
+    "f719e3e0fdbd47644a75f91a467a9b8343d48cbcaf82e8891d0162da29d6d46";  // bool@0x290 旁路
 constexpr char kHashA480DiscTimer[] =
-    "f52d4ee10cccc5eabe17b610f4ac9f9ccf0ceb008263864b7e7b0f34747e2a8";  // float@0x2A4
+    "bc593c6426c4d2e5335b1afde4117555b7d1d42c1ab35e22a714e1faa07d5bb";  // float@0x2A4
 constexpr size_t kFbA480ForceDiscFlag = 0x2A0;
 constexpr size_t kFbA480DiscTimer = 0x2A4;
 size_t gOffA480ForceDiscFlag = kFbA480ForceDiscFlag;
@@ -311,6 +311,8 @@ struct RingEntry {
 RingEntry gRing[kRingCap]{};
 int gRingCount = 0;
 int gRingNext = 0;
+// 最近一次真正推进入站环的 tick。heartbeat 的 ring=64 只是容量上限，不能当「还在进包」。
+std::atomic<DWORD> gLastInboundMs{0};
 
 void* gScanPrev[kScanPtrCap]{};
 int gScanPrevN = 0;
@@ -909,6 +911,7 @@ void RingPush(uint16_t op, int blen, const uint8_t head[4], char src) {
     e.src = src;
     gRingNext = (gRingNext + 1) % kRingCap;
     if (gRingCount < kRingCap) ++gRingCount;
+    gLastInboundMs.store(e.tick, std::memory_order_relaxed);
 }
 
 bool ScanHad(void* pkt) {
@@ -1157,7 +1160,7 @@ const char* TagCloseSessionChainRva(uintptr_t rva) {
     static constexpr Range kRanges[] = {
         {kRvaNmCloseSession, kRvaNmCloseSession + 0x334, "Nm.CloseSession"},
         {kRvaNmDisconnect, kRvaNmDisconnect + 0xf6, "Nm.Disconnect"},
-        {kRvaSessionCallbackRecv, kRvaSessionCallbackRecv + 0x30f, "Session.CallbackRecv"},
+        {kRvaSessionCallbackRecv, kRvaSessionCallbackRecv + 0x310, "Session.CallbackRecv"},
         {kRvaCsCaller1CC5520, kRvaCsCaller1CC5520 + 0x2fc, "cs_via_1CC5520"},
         {kRvaCsCaller1CD5570, kRvaCsCaller1CD5570 + 0x584, "cs_via_1CD5570"},
         {kRvaCsCaller1CD92A0, kRvaCsCaller1CD92A0 + 0xb0f, "cs_via_1CD92A0"},
@@ -2081,11 +2084,18 @@ void OnStateChange(int prev, int now, int err) {
         gSawDisconnect.store(true);
         // Soft-relogin：先 RequestAttempt（同步 softLoginHold），再 bump disconnectSeq，
         // 避免宿主读到「seq+1 且 hold=0」立刻干净重拉。
+        // land_quiet 期内 RequestAttempt 早退且 hold=0：再 bump 会让守护 1Hz 下一拍
+        // 把进图 Session 闪断当踢线硬杀（BIN 01:00:24 success → 01:00:25 kill）。
         x::features::galaxy_token_probe::RequestSample(
             now == kStateDisconnecting ? "disconnecting" : "disconnected");
         x::features::soft_login_probe::RequestAttempt(
             now == kStateDisconnecting ? "disconnecting" : "disconnected");
-        gDisconnectSeq.fetch_add(1, std::memory_order_relaxed);
+        if (x::features::soft_login_probe::IsLandQuiet() &&
+            !x::features::soft_login_probe::IsHoldActive()) {
+            Log("skip disconnectSeq bump (land_quiet hold=0)");
+        } else {
+            gDisconnectSeq.fetch_add(1, std::memory_order_relaxed);
+        }
         // Mark the drop inside the outbound trace too, so the last packets we sent before it
         // can be read off without cross-referencing timestamps against kick.log.
         SendLog("==== STATE %s(%d) pendingError=%d ====", StateName(now), now, err);
@@ -2143,6 +2153,19 @@ DWORD WINAPI Worker(LPVOID) {
     DWORD lastSend = GetTickCount();
     uint32_t lastSendHits = 0;
     uint32_t lastSeqSend = 0;
+    // lost_session 武装的持续性窗口（BIN 18:16 卖装换图误武装）。
+    // 换图 / 回城卷同时满足这条路的两个武装条件——离开 MapScene + 重建 Session 对象——
+    // 而长会话又让 churn 守卫（aliveMs<60s）整个失效，于是「久待一图后第一次换图」必误报。
+    // 实测 blip 只空 50ms（一个轮询周期）就重绑，40s 内 12 次全是这个量级；
+    // 同一份日志里真断线那次空了 1111ms。兄弟判据 nm_gone_inmap 早就要求 3s 持续性，
+    // 只有这条一直是零等待边沿触发。
+    //
+    // 推迟武装是安全的：lost_session **不碰** gDisconnectSeq（只有 OnStateChange 的
+    // Disconnected/Disconnecting 分支自增），故不存在「守护先读到 seq 涨了而 hold=0
+    // → 干净重拉」的竞态；那个坑只在主路径上。真·安全强制关闭（BIN 15:20）时 layer
+    // 不会自己回来，等满窗照样抓得到。
+    constexpr DWORD kLostSessionPersistMs = 1000;
+    DWORD lostPendingSince = 0;
     while (!gStop.load()) {
         void* nm = ResolveSessionTcpLayer();
         if (nm) {
@@ -2190,10 +2213,36 @@ DWORD WINAPI Worker(LPVOID) {
             if ((was == kStateConnected || was == kStateConnecting ||
                  was == kStateDisconnecting) &&
                 !inMapNow && !(kickHitsLost == 0 && churnLike)) {
-                x::features::soft_login_probe::RequestAttempt("lost_session");
+                // 判据只能在此刻算（下面已把 aliveSince 清零），但**不在此刻武装**：
+                // 记成待决，等 layer 持续消失满窗再定（见 kLostSessionPersistMs）。
+                lostPendingSince = nowLost ? nowLost : 1;
+                Log("lost_session pending aliveMs=%u kickHits=%d — wait %ums persist",
+                    static_cast<unsigned>(aliveMsLost), kickHitsLost,
+                    static_cast<unsigned>(kLostSessionPersistMs));
             }
         }
         const DWORD now = GetTickCount();
+        // lost_session 待决定夺：layer 回来了就吞掉，持续消失满窗才当真断线。
+        if (lostPendingSince) {
+            if (nm) {
+                Log("lost_session swallowed: layer back in %ums (< %ums persist) — no soft attempt",
+                    static_cast<unsigned>(now - lostPendingSince),
+                    static_cast<unsigned>(kLostSessionPersistMs));
+                lostPendingSince = 0;
+            } else if (now - lostPendingSince >= kLostSessionPersistMs) {
+                const DWORD held = now - lostPendingSince;
+                lostPendingSince = 0;
+                // 出图判据在丢失当刻已成立，此刻再要求一次：只会比旧逻辑更保守，
+                // 不会新增任何旧逻辑不会武装的场景。
+                if (!x::features::ports::world::IsInMapScene()) {
+                    Log("lost_session persist=%ums — RequestAttempt", static_cast<unsigned>(held));
+                    x::features::soft_login_probe::RequestAttempt("lost_session");
+                } else {
+                    Log("lost_session swallowed: back in map after %ums — no soft attempt",
+                        static_cast<unsigned>(held));
+                }
+            }
+        }
         // BIN 19:38：图内 SessionTcpLayer 持久丢失、无 Disconnected 边沿 → 怪 AbsPos 钉死。
         // lost_session 在 inMap 被吞；CALL_EDGE 默认关所以 CloseSession 粘性也不会武装。
         // 换图 blip 通常 150ms 内重绑；满 3s 仍无 facade 且不在换频途中才软重连。
@@ -2216,6 +2265,11 @@ DWORD WINAPI Worker(LPVOID) {
                 }
             }
         }
+        // 图内 Connected + RecvList 空：曾经当成 147「怪钉死」去 CloseSession。
+        // 传感器是 RecvList 轮询（无收包 hook）。字段列表被主泵抽空后 size 长期 0，
+        // gLastInboundMs 停在进图握手最后一包 → 落地满 8s 必误拆。
+        // BIN 20:00：游戏正常、MobScan 仍刷、SNAP recvList size=0、每 12s 软重连一圈。
+        // RecvList 空 ≠ 入站死。真死会话仍由 nm_gone_inmap / Disconnected 边沿收。
         // 卡登录期取证：会话连上却迟迟没有进图流量时，主动倒一次环。
         // 不能只挂在拆除路径上 —— 实测 18 轮卡登录里只有 1 轮走到了 lost_session，
         // 其余进程是被硬结束的，worker 根本没机会观察到会话消失。

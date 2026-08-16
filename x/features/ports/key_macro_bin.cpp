@@ -32,11 +32,11 @@ using x::runtime::il2cpp::ReadPtr;
 
 // remount 2026-08-06（旧 a408fa41…）
 constexpr char kHashKeyMacro[] =
-    "e50655f376c933df12c11b72581377c39f88a096125fd2ecd30887f36571ea1";
+    "fb8cf9664adee73858a7e49d52a9b8cf4ca5debd1de52261184e98750687fb3";
 
-constexpr uint32_t kRvaSetHunting = 0x3C64910;
-constexpr uint32_t kRvaHandleCheck = 0x3C69AC0;
-constexpr uint32_t kRvaIsSameHandle = 0x3C6AC40;
+constexpr uint32_t kRvaSetHunting = 0x3C63620;
+constexpr uint32_t kRvaHandleCheck = 0x3C687D0;
+constexpr uint32_t kRvaIsSameHandle = 0x3C69950;
 
 constexpr size_t kOffAntiHandle = 0x30;
 constexpr size_t kOffHuntHandle = 0x38;

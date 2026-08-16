@@ -14,6 +14,9 @@ enum class EdgeKind : uint8_t {
     FallDown = 3,    // ↓+Jump 穿台 / 落到下方 FH
 };
 
+// 构图 FallDown 边的官方一跳上限（像素）。所有图同一条引擎规则，不是某图出生坑 Y。
+constexpr int kFallMaxDyPx = 720;
+
 struct FirstAction {
     bool ok = false;
     EdgeKind kind = EdgeKind::Walk;
@@ -29,11 +32,12 @@ bool EnsureGraph();
 bool FindNearestFh(float x, float y, uint32_t* outId, float* outDist = nullptr);
 
 // 贴站立平台：优先同层(|fy-y|≤45)且覆盖 x → 同层 Y 带 → 宽松覆盖 → 最近点。
-// FH=Prev/Next 线段链；X 钳在「整条 Walk 链」安全带（链条端点内缩）。
-// avoidWalkJunction：战斗默认 true（再避开 Walk 段缝）；贴门路径传 false。
+// FH=Prev/Next 线段链。
+// avoidWalkJunction：战斗默认 true（再避开 Walk 段缝）。
+// cliffInset：战斗默认 true（链条端点内缩 36）。**F6 / 超级赶路必须 false**。
 // preferFlat：优先 |y1-y2|≤kFlatYTol 的平台段（全局搜；赶路贴门请用 SnapStandForPortal）。
 bool SnapStandAt(float x, float y, float* outX, float* outY, uint32_t* outFhId = nullptr,
-                 bool preferFlat = false, bool avoidWalkJunction = true);
+                 bool preferFlat = false, bool avoidWalkJunction = true, bool cliffInset = true);
 
 // 诊断：报「该点附近到底有没有台、为什么不可用」。Snap 贴到几百 px 外的远台时用它定位过滤器。
 // inBand = |段在该 X 处的 Y - y| ≤ 45 的段数（不过滤）；其余为其中各档。
@@ -62,18 +66,21 @@ struct ColumnHit {
 };
 int ProbeColumn(float x, float y, int yWindow, ColumnHit* out, int maxOut, int* outTotal = nullptr);
 
-// 赶路贴门：先定覆盖 (x,y) 的 Walk 链，再在链内选与触发框 X 相交的最平段。
-// 仅悬崖内缩（avoidWalkJunction=false）；失败回退 SnapStandAt(preferFlat, junction=false)。
-// rectValid=false 时用 x±20 作兴趣带。
+// 赶路贴门：在发门带 [portal.x±16] 里找可站点（X=带内离门心最近，Y=该处台面）。
+// 用本段原始 X（2px 边），**不用**战斗悬崖内缩 36（门口常在悬崖边）。
+// 门心底下可以是缝（BIN 18:27 top00：x=65 miss，x=72 可站且 |dx|≤16）。
+// **禁止**回退 SnapStandAt 的 band/any（BIN 138 沼泽远岸 Y 污染）。
+// 失败 = 发门带空集 → 调用方保持 portal.y，走悬停。
 bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR, float rectB,
                         bool rectValid, float* outX, float* outY, uint32_t* outFhId = nullptr);
 
-// 钉死在指定 FH 线段上：X = 本段 ∩ 链条安全带。
-// avoidWalkJunction 默认 true（战斗）；赶路贴门复钉请传 false（接合处可站）。
-bool SnapOnFh(uint32_t fhId, float x, float* outX, float* outY, bool avoidWalkJunction = true);
+// 钉死在指定 FH 线段上。
+// avoidWalkJunction / cliffInset 默认 true（战斗）。F6 / 赶路传 false。
+bool SnapOnFh(uint32_t fhId, float x, float* outX, float* outY, bool avoidWalkJunction = true,
+              bool cliffInset = true);
 
 // x 是否落在该 FH 安全站立带内（与 SnapOnFh 同一套链条规则）。
-bool IsXSafeOnFh(uint32_t fhId, float x, bool avoidWalkJunction = true);
+bool IsXSafeOnFh(uint32_t fhId, float x, bool avoidWalkJunction = true, bool cliffInset = true);
 
 // FH / 点附近站立台的 zMass（连通域键）。图未就绪或未命中台返回 false。
 bool ZMassOfFh(uint32_t fhId, int32_t* outZMass);
@@ -82,6 +89,16 @@ bool ZMassAt(float x, float y, int32_t* outZMass, uint32_t* outFhId = nullptr);
 // 仅 Prev/Next 步行边连通（不含绳/下跳）。拟人走路可达性；同台则 true。
 // 图未就绪 / 未知 FH → false（调用方决定是否退回纯 Y 带）。
 bool SameWalkComponent(uint32_t fhA, uint32_t fhB);
+
+// 步行连通域编号（构图时标好）。0 = 未知 / 图未就绪。同号 = SameWalkComponent。
+int WalkCompOf(uint32_t fh);
+
+// 从 fromFh 出发：Walk 不限跳、FallDown ≤ maxFallHops（不含绳；边按无向计跳）。
+// outMask[i]=1 表示构图节点 i 可达。返回节点数；图未就绪 / 未知 FH → 0。
+// outReachCnt 可选：mask 里标到的节点数（不是图总节点）。
+int MarkFallWalkReachable(uint32_t fromFh, int maxFallHops, uint8_t* outMask, int maxMask,
+                          int* outReachCnt = nullptr);
+bool MaskHasFh(const uint8_t* mask, int n, uint32_t fh);
 
 bool PlanFirst(uint32_t fromFh, uint32_t toFh, FirstAction* out);
 

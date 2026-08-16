@@ -3,8 +3,8 @@
 #include <Windows.h>
 
 #include <string>
-#include <string_view>
 
+#include "imgui_log_sanitize.h"
 #include "workspace_tabs.h"
 
 struct AppWindow;
@@ -13,6 +13,8 @@ namespace xcat::app {
 
 struct LaunchUiState {
     char accountLine[2048]{};
+    char gpLoginLine[2048]{};
+    int gpLoginBrowserKind = 0;  // 0 自动 / 1 Chrome++ / 2 Chrome / 3 Edge
     std::string status;
     std::string logTail;
     std::string prefsBinDir;
@@ -23,14 +25,13 @@ struct LaunchUiState {
     DWORD autoLaunchNotBeforeMs = 0;
 };
 
-// GAMA PASS 冷启/切模式自动换票准备窗（防误触；用户反馈 7s 过长）
-inline constexpr DWORD kGamaPassAutoPrepMs = 3000;
+// GAMA PASS 冷启/切模式/再次点击后的自动换票准备窗（防误触）
+inline constexpr DWORD kGamaPassAutoPrepMs = 5000;
+inline constexpr unsigned kGamaPassAutoPrepSec = kGamaPassAutoPrepMs / 1000u;
 
 void LaunchPanel_LoadAccount(LaunchUiState& ui);
 void LaunchPanel_SaveAccount(LaunchUiState& ui);
 void LaunchPanel_FormatAccountForUi(LaunchUiState& ui);  // 连续 '-' 处分行，便于换行显示
-// 仅上屏：剥 IP / 域名 / 登录 URL；落盘 JSONL 与 launcher.log 仍是原文。
-std::string SanitizeImGuiLogLine(std::string_view raw);
 void LaunchPanel_AppendLog(LaunchUiState& ui, const std::wstring& line);
 void LaunchPanel_OnWebLog(const std::wstring& line);
 bool LaunchPanel_AccountLooksValid(const LaunchUiState& ui, std::wstring* errOut = nullptr);
@@ -40,6 +41,8 @@ void LaunchPanel_ArmStrategyPrep(LaunchUiState& ui, DWORD ms = 7000);
 unsigned LaunchPanel_StrategyPrepLeftSec(LaunchUiState& ui);
 // 取消冷启/切模式留下的自动启动（准备窗一并清掉）。返回是否确实取消了待办。
 bool LaunchPanel_CancelPendingAutoLaunch(LaunchUiState& ui);
+// 进入 GAMA PASS 自动换票读秒（冷启/切模式/取消后再点同一入口）。
+void LaunchPanel_ArmGamaPassAutoLaunch(LaunchUiState& ui);
 bool LaunchPanel_StartOneClick(LaunchUiState& ui, bool honorStrategyPrep = true);
 void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui);
 void DrawMainShell(AppWindow& app, LaunchUiState& ui);

@@ -64,15 +64,18 @@ struct Engine {
             std::lock_guard lk(mtx);
             activeHwo = hwo;
         }
-        // LiePass ~1.5s；留足余量，中途可被 cancelPlay / waveOutReset 打断。
         DWORD waitMs = 0;
+        const DWORD maxWait =
+            static_cast<DWORD>(pcm.size() * 1000u / static_cast<unsigned>(presets::kSampleRate) +
+                               800u);
+        const DWORD cap = maxWait < 25000u ? (maxWait < 200u ? 200u : maxWait) : 25000u;
         while ((hdr.dwFlags & WHDR_DONE) == 0) {
             if (cancelPlay.load(std::memory_order_acquire) || stop.load(std::memory_order_acquire)) {
                 waveOutReset(hwo);
                 break;
             }
             Sleep(1);
-            if (++waitMs > 8000) break;
+            if (++waitMs > cap) break;
         }
         {
             std::lock_guard lk(mtx);
@@ -134,7 +137,7 @@ struct Engine {
         Start();
         {
             std::lock_guard lk(mtx);
-            if (queue.size() > 8) queue.pop_front();
+            if (queue.size() > 16) queue.pop_front();
             queue.push_back(std::move(pcm));
         }
         cv.notify_one();
@@ -305,6 +308,32 @@ bool PlayNamedBlocking(const char* name) {
     const Id id = IdFromName(name);
     if (id == Id::Count) return false;
     return PlayBlocking(id);
+}
+
+bool ScalePcmVolume(std::vector<int16_t>& pcm) {
+    const float vol = g_settings.enabled ? std::clamp(g_settings.volume, 0.f, 1.f) : 0.f;
+    if (vol <= 0.f) return false;
+    if (vol < 0.999f) {
+        for (auto& s : pcm) s = static_cast<int16_t>(static_cast<float>(s) * vol);
+    }
+    return true;
+}
+
+bool PlayPcmAsync(std::vector<int16_t> pcm) {
+    if (pcm.empty()) return false;
+    if (!ScalePcmVolume(pcm)) return !g_settings.enabled;
+    g_engine.Enqueue(std::move(pcm));
+    return true;
+}
+
+bool PlayPcmInterrupt(std::vector<int16_t> pcm) {
+    if (pcm.empty()) return false;
+    if (!ScalePcmVolume(pcm)) {
+        g_engine.CancelAndClear();
+        return !g_settings.enabled;
+    }
+    g_engine.InterruptAndEnqueue(std::move(pcm));
+    return true;
 }
 
 }  // namespace xcat::sound

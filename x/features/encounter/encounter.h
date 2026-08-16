@@ -24,13 +24,17 @@ void StartWorker();
 void StopWorker();
 
 void SetEnabled(bool on);
-void SetStrategies(bool stopCombat, bool reconnect, bool gmEscalate = true);
+void SetStrategies(bool stopCombat, bool reconnect, bool gmEscalate = true,
+                   bool stopGather = false);
 
 State GetState();
 const char* GetStateName();
 int LastOtherCount();
 int LastAdminLikeCount();     // JobCategory 8/9
 int LastHideSuspectCount();   // avatar 未激活嫌疑（藏人功能开时恒 0）
+// 吸怪刚开 / 换图：清掉旧人数并立刻再采，未采到前按「有人」处理。
+void InvalidateOccupancy();
+void RequestSampleNow();
 // 遇人仍钉着 simple_combat pause（channel_hop Fail/OK 结束时勿抢清）
 bool HoldsCombatPause();
 

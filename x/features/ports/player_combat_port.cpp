@@ -30,27 +30,27 @@ using x::runtime::il2cpp::ReadPtr;
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 // Remount 2026-08-06：ACS hash 全换。08-13：CurPos 哈希从数组槽撕开（见 kHashLogicalPos）。
 constexpr char kActorBaseClass[] =
-    "bef0eed02528709201717d93717a1904bfa2e850dfe1f5fadf473c0e9c78d9b";
+    "edca107f56b886052491eaa5c89b93e25d6f5f228bc505251f2d2060743b6cf";
 constexpr char kVecCtrlClass[] =
-    "b4117afc7f6f9c58587c528c3dec862d440e5d266ad70b764c0058566918784";
+    "fb50f6a1736ed7dc2ae31fe0164df2ac21372ae1ba8c5f346fa63e05fbeff6a";
 constexpr char kFhClass[] =
-    "aa3d8db6b3f8e88e2163fa99baddd275f7dd95560a044f4fbf0d9f8f17ff067";
+    "ef0fd40f4b4866446954602fb7078a6de85a0a29d3b54dc7eaf3cd6486794c3";
 
 // hash → field_get_offset（与 foothold / mob / invuln / skill 同源）
 constexpr char kHashUserVecCtrl[] =
-    "<bfd62ef3b3e356b3d554a10a21a0f46b1272d519b934db1a7c4df88a0adcd52>k__BackingField";
+    "<a53533cecb18cbe1cddb1ee6c9adf83e4397ed25de00154905063e15bc1d11f>k__BackingField";
 constexpr char kHashPos[] =
-    "c1792cf58ceda9b4f12cacf2746c06b70c90d516c43cbdf1fcea7c7b1bde37b";
+    "dfe2e5f14ea04b0ca19e131b66bb4d53e06ca0c22744c299a991cd322e915e4";
 constexpr char kHashVcCurFh[] =
-    "<f191525b3e75203f83e8420264723f78754068945de8fb7c4c15e3a96c42d3b>k__BackingField";
+    "<e4f5fa48c6b95f29ffb8fd7d33200d2b0bf86a61b9bc5aee62be0fd3dccf21f>k__BackingField";
 constexpr char kHashVcAp[] =
-    "eeb6a8c060a20622eef369b184c450bad5515167fa2cb42392277c7b0cbfe7d";  // AbsPos; Y=+8
+    "e399633b16dbf327df9b459015caf617aff8e505e4f1fb694acf87a011d4259";  // AbsPos; Y=+8
 constexpr char kHashVcApl[] =
-    "e5a40d07ca56525d5a34df38aaeadf1dc421da7a583f82a6b8a0e7736ebd8aa";  // Apl; Y=+8
+    "c49050214b60ed6c8a28b69ca35db5af10f706e3cbd653db9af0c290f425677";  // Apl; Y=+8
 constexpr char kHashVcRelPos[] =
-    "bf593c8b8886d021b370e0ab3d9c8eb97bf29672db1114a1309edd63039ade7";  // RelPos; V=+8
+    "e9fda3b93af7ac20fe33101668c21948ebb205fc4eee363494d58a626d0e7dc";  // RelPos; V=+8
 constexpr char kHashFhId[] =
-    "<ccb1e319bb15474d5f8226a83809805ed660d7d082d8423a4bf403493cce67f>k__BackingField";
+    "<dfbd6b62b964a50e3d54cdfd17b3a8b9eb95e389cb6cf140b8a0700b222c4de>k__BackingField";
 // LocalUser 镜头 CurPos（只读诊断）。08-13：真 Vector2 是 ccce125f@0x2B0；
 // d6f3e65b@0x240 已是数组，equal-offset 会假命中。窗口 0x200–0x300 仍包住 0x2B0。
 // 2026-08-04 撤销「镜头自愈」：0.1.36 实测只读探针 dApCur 静息 27~53px、dApPos=0、
@@ -58,18 +58,18 @@ constexpr char kHashFhId[] =
 // 平滑跟随物理上无法收敛。自愈据此每 0.29s 硬拧一次镜头（中位 343px、峰值 1419px），
 // 反而成了撕裂源。原「镜头粘死」证据取自 nSlow_=140 污染动作层的旧局，根因已换，立论作废。
 constexpr char kHashLogicalPos[] =
-    "ccce125f69593bc9100a9b227cda0be73abc63fefc4b848f92efe9a72930859";
+    "fbb96ebf96fbe214ee24fcbda14d147b6fe121817305ba2191c875f7367f88c";
 // e2a28(Key) 键位移偏移对（IDA：mov [rsi+4B4h], rdx · 两 int32）
 constexpr char kHashKeyMoveDelta[] =
-    "<ecb94eef01196b5d240f83e34f0a089e0add6fccc05c16832e9529227473449>k__BackingField";
+    "<a945b91dbb63347b0d4bafefe1734a805ba1b4f7f7a87333d6fc54d708ad3b8>k__BackingField";
 
 constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 // Mob 专属 PvcActive；LU 上无同名槽，保留软探针（LooksLikeHeapPtr 失败 → VecCtrl）
 constexpr char kHashPvcActive[] =
-    "dfdfb42a91b7e684e1007b0b0d20e9e301b977c437ce72241a81b78c18f960e";
+    "f9752616061ab01c21cd1ba0f5a74425326a63f722336107a3f40815af2da14";
 constexpr char kMobClass[] =
-    "d8d3c81101a6fa89d05fe89ac3cfe1b8801c9afd67abd392d5637681410b92f";
+    "dd472cd442d83d6a25198278fa3e0a09d3a98a6db2e05d1b12d508d43db4cb5";
 constexpr size_t kFbPvcActive = 0xF0;
 size_t gOffPvcActive = kFbPvcActive;
 #define kOffPvcActive (gOffPvcActive)
@@ -248,6 +248,21 @@ void WriteF64(void* obj, size_t off, double v) {
         *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(obj) + off) = v;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+void WritePtr(void* obj, size_t off, void* v) {
+    if (!obj) return;
+    __try {
+        *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(obj) + off) = v;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void* VecCtrlOfLu(void* lu) {
+    if (!LooksLikeHeapPtr(lu)) return nullptr;
+    void* vc = ReadPtr(lu, kOffVecCtrl);
+    if (!LooksLikeHeapPtr(vc)) vc = ReadPtr(lu, kOffPvcActive);
+    return LooksLikeHeapPtr(vc) ? vc : nullptr;
 }
 
 float Dist2(float ax, float ay, float bx, float by) {
@@ -757,6 +772,99 @@ bool HealVisualToAp(const char* why, bool force) {
         }
     }
     return wrote;
+}
+
+bool CaptureSoulBlink(void* localUser, SoulBlinkSnap& out) {
+    out = SoulBlinkSnap{};
+    (void)x::runtime::main_thread::AssertOnPumpThread("combat.CaptureSoulBlink");
+    if (!LooksLikeHeapPtr(localUser)) return false;
+    void* vc = VecCtrlOfLu(localUser);
+    if (!vc) return false;
+    out.vc = vc;
+    out.apX = ReadF64(vc, kOffVcApX);
+    out.apY = ReadF64(vc, kOffVcApY);
+    out.apVx = ReadF64(vc, kOffVcApX + 0x10);
+    out.apVy = ReadF64(vc, kOffVcApY + 0x10);
+    out.aplX = ReadF64(vc, kOffVcAplX);
+    out.aplY = ReadF64(vc, kOffVcAplY);
+    out.aplVx = ReadF64(vc, kOffVcAplX + 0x10);
+    out.aplVy = ReadF64(vc, kOffVcAplY + 0x10);
+    out.rpPos = ReadF64(vc, kOffVcRpPos);
+    out.rpV = ReadF64(vc, kOffVcRpV);
+    out.curFh = ReadPtr(vc, kOffVcCurFh);
+    out.lu = localUser;
+    out.posX = ReadF32(localUser, kOffPos);
+    out.posY = ReadF32(localUser, kOffPos + 4);
+    if (!PosSane(static_cast<float>(out.apX), static_cast<float>(out.apY))) return false;
+    out.ok = true;
+    return true;
+}
+
+bool ApplySoulBlinkAp(void* localUser, double x, double y) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("combat.ApplySoulBlinkAp");
+    if (!LooksLikeHeapPtr(localUser)) return false;
+    if (!PosSane(static_cast<float>(x), static_cast<float>(y))) return false;
+    void* vc = VecCtrlOfLu(localUser);
+    if (!vc) return false;
+    WriteF64(vc, kOffVcApX, x);
+    WriteF64(vc, kOffVcApY, y);
+    WriteF64(vc, kOffVcApX + 0x10, 0.0);
+    WriteF64(vc, kOffVcApY + 0x10, 0.0);
+    // GetPos = lerp(Ap, Apl, alpha)。只钉 Ap 时 alpha>0 → 盒/发包坐标仍靠近原点。
+    WriteF64(vc, kOffVcAplX, x);
+    WriteF64(vc, kOffVcAplY, y);
+    WriteF64(vc, kOffVcAplX + 0x10, 0.0);
+    WriteF64(vc, kOffVcAplY + 0x10, 0.0);
+    // 初期 HealVisualToAp / 闪魂：FindHit 盒原点有一条走 Pos@0x64（float），不跟 GetPos。
+    WriteF32(localUser, kOffPos, static_cast<float>(x));
+    WriteF32(localUser, kOffPos + 4, static_cast<float>(y));
+    return true;
+}
+
+bool RestoreSoulBlink(const SoulBlinkSnap& snap) {
+    (void)x::runtime::main_thread::AssertOnPumpThread("combat.RestoreSoulBlink");
+    if (!snap.ok || !LooksLikeHeapPtr(snap.vc)) return false;
+    void* vc = snap.vc;
+    WriteF64(vc, kOffVcApX, snap.apX);
+    WriteF64(vc, kOffVcApY, snap.apY);
+    WriteF64(vc, kOffVcApX + 0x10, snap.apVx);
+    WriteF64(vc, kOffVcApY + 0x10, snap.apVy);
+    WriteF64(vc, kOffVcAplX, snap.aplX);
+    WriteF64(vc, kOffVcAplY, snap.aplY);
+    WriteF64(vc, kOffVcAplX + 0x10, snap.aplVx);
+    WriteF64(vc, kOffVcAplY + 0x10, snap.aplVy);
+    WriteF64(vc, kOffVcRpPos, snap.rpPos);
+    WriteF64(vc, kOffVcRpV, snap.rpV);
+    WritePtr(vc, kOffVcCurFh, snap.curFh);
+    if (LooksLikeHeapPtr(snap.lu)) {
+        WriteF32(snap.lu, kOffPos, snap.posX);
+        WriteF32(snap.lu, kOffPos + 4, snap.posY);
+    }
+    return true;
+}
+
+bool PeekApApl(void* localUser, float* apx, float* apy, float* aplx, float* aply) {
+    if (apx) *apx = 0.f;
+    if (apy) *apy = 0.f;
+    if (aplx) *aplx = 0.f;
+    if (aply) *aply = 0.f;
+    if (!LooksLikeHeapPtr(localUser)) return false;
+    void* vc = VecCtrlOfLu(localUser);
+    if (!vc) return false;
+    if (apx) *apx = static_cast<float>(ReadF64(vc, kOffVcApX));
+    if (apy) *apy = static_cast<float>(ReadF64(vc, kOffVcApY));
+    if (aplx) *aplx = static_cast<float>(ReadF64(vc, kOffVcAplX));
+    if (aply) *aply = static_cast<float>(ReadF64(vc, kOffVcAplY));
+    return true;
+}
+
+bool PeekActorPos(void* localUser, float* posx, float* posy) {
+    if (posx) *posx = 0.f;
+    if (posy) *posy = 0.f;
+    if (!LooksLikeHeapPtr(localUser)) return false;
+    if (posx) *posx = ReadF32(localUser, kOffPos);
+    if (posy) *posy = ReadF32(localUser, kOffPos + 4);
+    return true;
 }
 
 }  // namespace x::features::ports::player_combat

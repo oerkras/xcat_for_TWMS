@@ -54,21 +54,31 @@ void LogE(const char* tag, const char* fmt, ...) {
     va_end(ap);
 }
 
+bool ThrottleSlot(std::array<DWORD, 256>& lastMs, std::mutex& mtx, uint32_t slot,
+                  DWORD intervalMs) {
+    const DWORD now = GetTickCount();
+    const uint32_t i = slot % static_cast<uint32_t>(lastMs.size());
+    std::lock_guard<std::mutex> lock(mtx);
+    if (lastMs[i] && static_cast<int>(now - lastMs[i]) < static_cast<int>(intervalMs)) return true;
+    lastMs[i] = now;
+    return false;
+}
+
+void LogIThrottled(uint32_t slot, DWORD intervalMs, const char* tag, const char* fmt, ...) {
+    static std::mutex mtx;
+    static std::array<DWORD, 256> lastMs{};
+    if (ThrottleSlot(lastMs, mtx, slot, intervalMs)) return;
+
+    va_list ap;
+    va_start(ap, fmt);
+    xcat::log::WriteV(xcat::log::Level::Info, tag, fmt, ap);
+    va_end(ap);
+}
+
 void LogWThrottled(uint32_t slot, DWORD intervalMs, const char* tag, const char* fmt, ...) {
     static std::mutex mtx;
     static std::array<DWORD, 256> lastMs{};
-
-    const DWORD now = GetTickCount();
-    const uint32_t i = slot % static_cast<uint32_t>(lastMs.size());
-    bool skip = false;
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        if (lastMs[i] && static_cast<int>(now - lastMs[i]) < static_cast<int>(intervalMs))
-            skip = true;
-        else
-            lastMs[i] = now;
-    }
-    if (skip) return;
+    if (ThrottleSlot(lastMs, mtx, slot, intervalMs)) return;
 
     va_list ap;
     va_start(ap, fmt);

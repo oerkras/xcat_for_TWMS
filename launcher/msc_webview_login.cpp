@@ -336,10 +336,10 @@ void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
         g.cred = {};
         SetBusy(true);
         QueueLog(std::wstring(kHttpBusyTag) + L" GAMA PASS 浏览器点选换票中…");
-        QueueLog(L"[…] GAMA PASS：日常浏览器 + Windows UI Automation 自动点选"
-                 L"（无 CDP 副本 / 无调试口；与日常同一登录态）");
-        QueueLog(L"[提示] 一键会新开登录窗（不结束已开浏览器、不清 Cookie）；"
-                 L"若出现完整登录页请在该窗登录并勾选记住。不调用 refresh。");
+        QueueLog(L"[…] GAMA PASS：UIA 点选换票（无调试口）。"
+                 L"始终走日常浏览器，不因账密助手 device_id 改道独立罐。不写回日常罐。");
+        QueueLog(L"[提示] 一键会新开登录窗。助手不会自动衔接换票；请先助手登完再点自动登录。"
+                 L"不调用 refresh。");
 
         std::thread([]() {
             const bool usable = msc::launcher::HttpGamaPassHasUsableSession();
@@ -362,8 +362,8 @@ void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
             QueueLog(L"[FAIL] 登录失败 [" +
                      WidenUtf8(msc::launcher::HttpLoginErrorName(lr.error)) + L"] " +
                      WidenUtf8(lr.message));
-            QueueLog(L"[提示] GAMA PASS UIA 未完成。请重新一键，在日常浏览器窗口内登录（勾选记住）；"
-                     L"不会调用 refresh/token。");
+            QueueLog(L"[提示] GAMA PASS UIA 未完成。请在弹出的日常浏览器窗口内登录并勾选记住。"
+                     L"不会调用 refresh/token，也不会改走账密助手独立罐。");
             PostMessageW(g.hwnd, kMsgIdle, 0, 0);
         }).detach();
         return;

@@ -21,10 +21,10 @@ namespace {
 
 constexpr int kQueueCap = 8;
 // RVA = 末级兜底；ResolvePumpMi：明文名 → unique void() kind → RVA（禁止 RVA-first）。
-constexpr uint32_t kRvaSendWillRenderCanvases = 0x5282A60;  // remounted 2026-08-06 Canvas.SendWillRenderCanvases
-constexpr uint32_t kRvaSceneLoginUpdate = 0xC19920;         // remounted 2026-08-06
-constexpr uint32_t kRvaWorldManagerFixedUpdate = 0xDEF220;  // remounted 2026-08-06
-constexpr uint32_t kRvaWorldManagerUpdate = 0xDF30A0;       // remounted 2026-08-06
+constexpr uint32_t kRvaSendWillRenderCanvases = 0x5281770;  // remounted 2026-08-06 Canvas.SendWillRenderCanvases
+constexpr uint32_t kRvaSceneLoginUpdate = 0xC196D0;         // remounted 2026-08-06
+constexpr uint32_t kRvaWorldManagerFixedUpdate = 0xDEEFB0;  // remounted 2026-08-06
+constexpr uint32_t kRvaWorldManagerUpdate = 0xDF2E30;       // remounted 2026-08-06
 
 // All pump hooks are parameterless void (instance or static).
 constexpr x::runtime::il2cpp_method::MethodShape kShapeVoid0{

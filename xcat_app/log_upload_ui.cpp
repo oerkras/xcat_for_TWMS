@@ -2,6 +2,7 @@
 
 #include "app_dpi.h"
 #include "app_sound.h"
+#include "imgui_log_sanitize.h"
 #include "imgui_shell.h"
 #include "log_upload.h"
 #include "update_client.h"
@@ -142,7 +143,8 @@ void DrawLogUploadPanel(const std::string& prefsBinDir) {
     if (!configured) {
         ImGui::TextDisabled("上报服务未就绪");
     } else if (!snap.message.empty()) {
-        ImGui::TextWrapped("%s", snap.message.c_str());
+        const std::string msgUi = SanitizeImGuiLogLine(snap.message);
+        ImGui::TextWrapped("%s", msgUi.c_str());
     } else {
         ImGui::TextDisabled("默认轻量；深排障再切全量。");
     }

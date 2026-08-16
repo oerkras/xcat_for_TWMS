@@ -33,7 +33,7 @@
 | `UserLocal_TryDoingShootAttack` | `0x1048F80` | `0x7FFB75A68F80` |
 | `UserLocal_TryDoingMagicAttack` | `0x1082020` | `0x7FFB75AA2020` |
 | `OutPacket_Create` | `0x1CB7BB0` | （P0b） |
-| `OutPacket_EncodeVector2` | `0x1CC5090` | `BitConverter.GetBytes`×2 + `BlockCopy`（线上各 2B＝i16） |
+| `OutPacket_EncodeVector2` | `0x1CC5090` | 线上各 2B＝i16；**Y 会 IEEE 翻号**（本 dump RVA；现网见 [`P2_物落脚下.md`](P2_物落脚下.md)） |
 | `Network_SendOutPacket` | `0x1CB7CE0` | → `NM.SendPacket` |
 | `User_SetAttackAction` | `0xFD39C0` | 两路径均先调 |
 
@@ -75,8 +75,8 @@ BODY≈23 → `DataPos off≈29`。
 | 3 | `Encode1_byte` | `+0x24` 与 bool 打包 | `ForeAction` + 谓词位 |
 | 4 | `Encode1_byte` | `AttackInfo+0x28` | `FrameIdx` |
 | 5 | `Encode1_byte` | Mob 朝向/状态打包 | （wire 独有） |
-| 6 | `EncodeVector2` | Mob 位置 | wire＝i16×2 |
-| 7 | `EncodeVector2` | `Mob+0x6C` | 第二点 |
+| 6 | `EncodeVector2` | Mob 位置（Unity） | wire＝i16(x), i16(**-y**)；见 [`P2`](P2_物落脚下.md) |
+| 7 | `EncodeVector2` | `Mob+0x6C` | 第二点，同样翻 Y |
 | 8 | `Encode1_byte` | `AttackInfo+0x30` | `AttackCount`（**IDA**；wire 见 §9） |
 | 9 | `Encode4_int` ×N | `Damages[i]` | `Damages[]` |
 | 10 | `Encode4_uint` | `UserLocal_GetFieldID` | 场 ID（真包常 **0**） |
@@ -167,3 +167,4 @@ BODY≈23 → `DataPos off≈29`。
 | `Encode1 AttackCount` 上线 | ⚠️ IDA 有；**wire 用 u16**，P1 跟 wire |
 | FieldID=`GetMapId()` | ❌ 真包 0 |
 | tOrKey=`GetTickCount` | ❌ 改 `GetUpdateTime` |
+| `Encode2S` 直写 AbsPos Y ⇔ `EncodeVector2` | ❌ 官方内部 `-Y`；漏翻则掉落在头顶。见 [`P2`](P2_物落脚下.md) |

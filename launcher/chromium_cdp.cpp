@@ -656,11 +656,15 @@ struct ConflictHit {
     std::wstring leaf;
 };
 
-bool IsGamaPassCdpCopyDir(const std::wstring& userData) {
+bool IsIsolatedXcatCdpUserData(const std::wstring& userData) {
     wchar_t localApp[MAX_PATH]{};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return false;
-    const std::wstring copy = std::wstring(localApp) + L"\\XCat\\GamaPassCdpProfile";
-    return PathKeysEqual(userData, copy);
+    const std::wstring root = std::wstring(localApp) + L"\\XCat\\";
+    if (PathKeysEqual(userData, root + L"GamaPassCdpProfile")) return true;
+    const std::wstring gp = NormalizePathKey(root + L"GpDeviceLoginProfile");
+    const std::wstring ud = NormalizePathKey(userData);
+    if (ud == gp) return true;
+    return ud.size() > gp.size() && ud.compare(0, gp.size(), gp) == 0 && ud[gp.size()] == L'\\';
 }
 
 void CollectConflictingBrowserHits(const BrowserProfile& profile, int debugPort,
@@ -668,8 +672,8 @@ void CollectConflictingBrowserHits(const BrowserProfile& profile, int debugPort,
     out.clear();
     if (profile.userData.empty()) return;
 
-    // 副本目录：只杀显式 --user-data-dir=副本 的实例，绝不按「同安装」误杀日常 Chrome。
-    const bool usingCdpCopy = IsGamaPassCdpCopyDir(profile.userData);
+    // 独立目录：只杀显式 --user-data-dir=该目录 的实例，绝不按「同安装」误杀日常 Chrome。
+    const bool usingCdpCopy = IsIsolatedXcatCdpUserData(profile.userData);
 
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return;
@@ -1024,6 +1028,11 @@ bool Session::Navigate(const std::wstring& url, const LogFn& log) {
     if (!SendRecv("Page.navigate", params, res, log)) return false;
     Sleep(1200);
     return true;
+}
+
+bool Session::Command(const std::string& method, const std::string& paramsJson,
+                      std::string& resultJson, const LogFn& log) {
+    return SendRecv(method, paramsJson, resultJson, log);
 }
 
 bool Session::Evaluate(const std::wstring& jsExpression, std::string& outResultJson,

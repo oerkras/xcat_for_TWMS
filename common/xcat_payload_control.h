@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 83u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 119u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -20,7 +20,7 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 83u;
 // v55: pumpDrainBudget — 主线程泵每 tick Drain 上限（调试 TAB）
 // v56: mobScanIntervalMs 默认 50→20；读盘迁旧默认 + 换怪按需刷新
 // v57: 位移试推 A/B oneshot；ini=moveProbe*（旧 impact* 读盘兜底、写盘擦除）
-// v59: simpleCombatAttackIntervalMs 默认 46→123；读盘迁旧默认 50/46
+// v59: simpleCombatAttackIntervalMs 出厂默认 123（v100 起不再读盘迁 50/46）
 // v64: simpleCombatStandOffCustom/X/Y — F5 空中贴怪自定义站距（远程职业）
 // v65: 攻击加速用户入口暂关（面板置灰；读盘/下发强制 attackAccel=0）
 // v66: simpleCombatGroundSpoof — 站立伪装（出刀瞬间种 CurFh；默认开）
@@ -33,6 +33,9 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 83u;
 // v73: attackAccelBreakDegreeFloorLo — 破限目标 lo 滑条（默认 -10，范围 [-10,0]）
 // v74: attackAccelClearBusy — 实验·清 ActionBusy 忙锁（与首页 attackAccel 入口独立）
 // v75: attackAccelClearBusyMinIntervalMs — 清忙锁开启时出刀间隔地板（默认 410）
+// v99: 清忙锁出刀地板解除 — Apply 不再 max 抬间隔；默认/下限 1；读盘迁旧默认 410
+// v100: 攻击间隔只保留出厂默认 123；取消读盘 50/46→123 迁移
+// v101: autoReloginStopGather — 遇人停吸（遇人策略；仅 WS888 解锁后露出）
 // v76: restMpAccel — 实验·坐下/椅子回蓝累加器加速（写 WM+0x17C/+0x180；默认关）
 // v77: restMpAccelIntervalMs — 写满间隔（默认 2500；过密会踢；BIN 已证真回蓝）
 // v78: meleeVeto — 「近战不挥拳」：让普攻那一发 TryDoingMeleeAttack 判负，落到兜底射击。
@@ -42,6 +45,42 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 83u;
 // v80: infiniteStars — 实验·无限飞镖：自动维持 4121006 无形镖 + 客户端冻 207xxxx 扣数；默认关
 // v81: kInfiniteStarsUserEnabled=false — 实验 TAB 不画入口；不启 worker / 不挂钩；代码保留
 // v83: simpleCombatHitRotate / HitRotateN — 「打中换怪」：同一 oid 确认命中 N 次后切攻击盒外最近活怪；活怪<3 停刀
+// v84: simpleCombatForgeHit — 打怪出刀自组攻包；落盘 user.ini
+// v85: mapAttack — 实验·全图攻击 P2 扩盒（FindHit Rect=本图 AABB，不抬 maxCount）；会话态默认关，不落盘
+// v86: 实验 TAB「发一刀伪造攻包」oneshot — 仅会话文件 state/attack_rpc_fire_seq，不写 user.ini，默认不发
+// v91: 实验 TAB「清零攻包探针计数」— state/attack_rpc_reset_seq，不写 user.ini；DLL 内 gOkSession 清零
+// v92: 实验 TAB 攻包探针 auto_stop 勾灭 — state/attack_rpc_stop_seq；DLL 写、面板读后把 attackRpc 勾掉
+// v87: simpleCombatHiraishin — F5 追怪「站桩输出」：原地出刀 + 吸怪；默认关，与空中贴怪/拟人互斥
+// v88: simpleCombatHiraishinLootHoldMs — 站桩输出开打前原地站给吸物（ms；0=不等；默认 3000）
+// v89: simpleCombatHiraishinRangePx — 站桩输出选怪 hypot（px；0=吸怪圈；现不挡刀）
+// v98: simpleCombatHiraishinFrontDx/Dy — 站桩输出面前攻击盒半宽/半高（px；0=该轴不限）
+// v90: mobGather — 吸怪（首页卡）；落盘 user.ini
+// v93: mobGatherSpeedPct / mobGatherAntiJitter — 吸怪倍率/防抖，与 F5 滑翔同构，落盘 user.ini
+// v94: 吸怪正式上首页（挂机卡下方）；不再当实验会话开关清零
+// v95: mobGatherMax / RadiusPx / HoldMs / IgnoreQuiet — BIN 硬编码旋钮上首页吸怪卡
+// v96: 吸怪独立 TAB；落点/作动器旋钮落盘，不再跟 F5 自定义站距绑死
+// v97: 曾删吸怪控权申请（calc_priority 钩 / 造包）
+// v99: 吸怪落点不贴台（删 mobGatherSnapXPad / SnapAbove）
+// v100: mobGatherApplyCtrl — TAB「申请控制权」；默认关；泵上调官方 ApplyControl
+// v101: mobGatherIntervalMs — 吸怪新收间隔（ms）；默认 40；已吸住的仍跟瞄准
+// v102: 吸怪自定义落点 X 改为有符号自填（±30000），不再套 F5 0–900
+// v103: 吸怪档速/到位/瞄准间隔上 TAB（巡航/进站/悬停档、到位圈、到位Kp、刹车、下滑切断、瞄准）
+// v104: mobGatherSoftReloginSec — 吸怪 TAB「X秒后触发软重连」；默认开、14s；仅吸怪开时拆会话
+// v105: mobGatherQuietDelayMs — 吸怪整模块延时启动（ms）；开吸怪 / hold 结束起表；与落地也吸独立
+// v106: mobGatherClearRelogin — 吸怪 TAB「清怪重连」；一轮白名单死干净才拆会话（v117 厂默改关）
+// v107: simpleCombatHiraishinFrontDx 厂默 280→110（站桩输出「横向」）
+// v108: mobGatherFarInFlight — 圈外同时在途上限；0=不限；吸怪 TAB「在途」
+// v109: simpleCombatHiraishinFrontDx/Dy 厂默 110×100→80×60（站桩输出面前盒）
+// v110: mobGatherSeekCluster — 吸怪 TAB「先飞到最密堆再吸」；默认关=站立吸怪
+// v111: mobGatherHomeReturn — 吸怪 TAB「软重连后返回原位」；与寻簇互斥；F5/按钮记 AbsPos
+// v112: mobGatherHomeReturn 厂默开；无首次记录（valid/hasMap）不飞
+// v113: travelPortalAimLiftY — 调试 TAB「超级赶路」贴门抬升（AbsPos 更大 Y=更高）
+// v114: mobGatherLayerYPx — 吸怪 TAB「竖层」；寻簇同层窗 |dY|，默认 200
+// v115: mobGatherDyLimPx — 吸怪 TAB「高度闸」；新收 |dY| 上限，默认 1200
+// v116: 站桩输出厂默 静止 0ms、面前盒 30×10（旧 3000 / 80×60 / 110×100 / 280 读盘迁）
+// v117: mobGatherWalkDx / mobGatherFeetExemptPx — 吸怪 TAB 履历横移/脚边；清怪重连厂默关
+// v118: mobGatherStandOffX/Y 厂默 40/10→29/9（吸怪自定义落点；旧 62/12 一并迁）
+// v119: 站桩输出面前盒厂默 30×10→60×10（横向；竖直仍 10）
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -109,19 +148,40 @@ constexpr uint32_t kMultiSkillGapMaxMs = 500u;
 // 多发普攻：冷启动地板（尚无 degree=6 基准样本时）。
 // 有样本后 = EstimateDamageDelayScaleMs(学到的 base@deg6)，随攻速档即时缩放。
 constexpr uint32_t kMultiSkillNativeNaFloorBootstrapMs = 600u;
-// 默认 123：面板「间隔」出厂值（约 8.1 刀/秒）。下限 1（用户自选；hold 地板同步）。
+// 默认 123：仅缺 key / 新装时的出厂值。已有 ini 数值原样保留（不迁 50/46）。
 constexpr uint32_t kSimpleCombatAttackIntervalDefaultMs = 123u;
 constexpr uint32_t kSimpleCombatAttackIntervalMinMs = 1u;
 constexpr uint32_t kSimpleCombatAttackIntervalMaxMs = 10000u;
-// 读盘迁移：旧默认 50 / 46 → 123；显式调过其它值保留。
-constexpr uint32_t kSimpleCombatAttackIntervalLegacyDefaultMs = 50u;
-constexpr uint32_t kSimpleCombatAttackIntervalLegacyDefaultMs46 = 46u;
 // 出刀按键 hold 时长（调试 TAB）：OnFuncKey Down→Up 的间隔。
 // 实际 hold = min(此值, 面板间隔)，hold ≥ 间隔会让 pendingUp 把下一刀锁死。
 // 注意：攻击加速开启时走 Down+Up 同泵的 pulse 路径（hold=0），此值不参与。
 constexpr uint32_t kAttackHoldDefaultMs = 5u;
 constexpr uint32_t kAttackHoldMinMs = 1u;
 constexpr uint32_t kAttackHoldMaxMs = 100u;
+// 站桩输出开打前 / 软重连回频落地后原地站（ms）。0=不等。换怪不站。
+// 厂默 0；旧厂默 3000 读盘迁过来（显式改过其它值保留）。
+constexpr uint32_t kHiraishinLootHoldDefaultMs = 0u;
+constexpr uint32_t kHiraishinLootHoldLegacyDefaultMs = 3000u;
+constexpr uint32_t kHiraishinLootHoldMinMs = 0u;
+constexpr uint32_t kHiraishinLootHoldMaxMs = 30000u;
+// 站桩输出人↔怪 hypot 上限（px）。0=不限（当前全图）。不是官方武器盒。
+constexpr uint32_t kHiraishinRangeDefaultPx = 0u;
+constexpr uint32_t kHiraishinRangeMinPx = 0u;
+constexpr uint32_t kHiraishinRangeMaxPx = 8000u;
+// 站桩输出面前攻击盒（AbsPos 半宽/半高，px）。0=该轴不限。
+// 厂默 60×10；旧横向 280 / 110 / 80 / 30 读盘迁过来（显式改过其它值保留）。
+constexpr uint32_t kHiraishinFrontDxDefault = 60u;
+constexpr uint32_t kHiraishinFrontDxLegacyDefault = 280u;
+constexpr uint32_t kHiraishinFrontDxLegacyDefaultV107 = 110u;
+constexpr uint32_t kHiraishinFrontDxLegacyDefaultV109 = 80u;
+constexpr uint32_t kHiraishinFrontDxLegacyDefaultV116 = 30u;
+constexpr uint32_t kHiraishinFrontDyDefault = 10u;
+constexpr uint32_t kHiraishinFrontDyLegacyDefault = 100u;
+constexpr uint32_t kHiraishinFrontDyLegacyDefaultV109 = 60u;
+constexpr uint32_t kHiraishinFrontDxMin = 0u;
+constexpr uint32_t kHiraishinFrontDyMin = 0u;
+constexpr uint32_t kHiraishinFrontDxMax = 4000u;
+constexpr uint32_t kHiraishinFrontDyMax = 2000u;
 // 简易战斗 worker 心跳（状态机 Tick）；越短出刀机会越多，CPU/主线程更忙。
 constexpr uint32_t kSimpleCombatTickDefaultMs = 16u;
 constexpr uint32_t kSimpleCombatTickMinMs = 1u;
@@ -159,17 +219,138 @@ constexpr uint32_t kHeliSpeedPctMax = 1000u;
 // F6 手动飞默认倍率 300%：换旋翼前开环等效约 1600 px/s ≈ 2.6X，
 // 直接给 1.0X（Cruise 620）会比旧版慢一大截；3X 开箱手感更接近旧手动飞。
 constexpr uint32_t kFlySpeedPctDefault = 300u;
+// 吸怪倍率：与 F5 滑翔同一套 100%=巡航 620、顶格 1000%、默认满火力。
+constexpr uint32_t kMobGatherSpeedPctDefault = kHeliSpeedPctDefault;
+constexpr uint32_t kMobGatherSpeedPctMin = kHeliSpeedPctMin;
+constexpr uint32_t kMobGatherSpeedPctMax = kHeliSpeedPctMax;
+constexpr uint32_t kMobGatherAntiJitterDefault = 1u;
+// 吸怪 BIN 旋钮：同时 / 收怪半径 / 白名单超时 / 落地静默是否继续吸。
+constexpr uint32_t kMobGatherMaxDefault = 64u;
+constexpr uint32_t kMobGatherMaxMin = 1u;
+constexpr uint32_t kMobGatherMaxMax = 64u;
+// 圈外（巡航圈外）同时在途上限。0=不限。已到脚边的不占这格。
+constexpr uint32_t kMobGatherFarInFlightDefault = 0u;
+constexpr uint32_t kMobGatherFarInFlightMin = 0u;
+constexpr uint32_t kMobGatherFarInFlightMax = 64u;
+constexpr uint32_t kMobGatherRadiusDefaultPx = 2800u;
+constexpr uint32_t kMobGatherRadiusMinPx = 200u;
+// 半径只防爆钳，不再业务封顶 8000（落点同款 ±30000）。
+constexpr uint32_t kMobGatherRadiusMaxPx = 30000u;
+constexpr uint32_t kMobGatherHoldMsDefault = 8000u;
+constexpr uint32_t kMobGatherHoldMsMin = 500u;
+constexpr uint32_t kMobGatherHoldMsMax = 30000u;
+// 新收/泵一批的间隔。默认 40 = 现状。已入白名单的怪仍按瞄准 VTOL，不跟这个闸。
+constexpr uint32_t kMobGatherIntervalDefaultMs = 40u;
+constexpr uint32_t kMobGatherIntervalMinMs = 40u;
+constexpr uint32_t kMobGatherIntervalMaxMs = 5000u;
+constexpr uint32_t kMobGatherIgnoreQuietDefault = 0u;
+// 延时启动：开吸怪 / 软重连 hold 结束进图后，整模块再等这么久才收怪。0=立刻。
+// 与「落地也吸」独立。hold 中硬停并清钟。用户自填，只防 ImGui int / DWORD 溢出。
+constexpr uint32_t kMobGatherQuietDelayMsDefault = 0u;
+constexpr uint32_t kMobGatherQuietDelayMsMin = 0u;
+constexpr uint32_t kMobGatherQuietDelayMsMax = 2147483647u;
+constexpr uint32_t kMobGatherStandOffCustomDefault = 1u;
+// 厂默 29/9；旧厂默 40/10、62/12 读盘迁过来（显式改过其它值保留）。
+constexpr int32_t kMobGatherStandOffXDefault = 29;
+constexpr int32_t kMobGatherStandOffYDefault = 9;
+constexpr int32_t kMobGatherStandOffXLegacyDefault = 40;
+constexpr int32_t kMobGatherStandOffXLegacyDefaultOld = 62;
+constexpr int32_t kMobGatherStandOffYLegacyDefault = 10;
+constexpr int32_t kMobGatherStandOffYLegacyDefaultOld = 12;
+// 自定义落点：用户自填。只留防爆钳，不再套 F5 站距 0–900 / ±600。
+constexpr int32_t kMobGatherStandOffXMin = -30000;
+constexpr int32_t kMobGatherStandOffXMax = 30000;
+constexpr int32_t kMobGatherStandOffYMin = -30000;
+constexpr int32_t kMobGatherStandOffYMax = 30000;
+constexpr uint32_t kMobGatherStickCreepDefault = 8u;
+constexpr uint32_t kMobGatherStickCreepMin = 1u;
+constexpr uint32_t kMobGatherStickCreepMax = 40u;
+constexpr uint32_t kMobGatherStickStillVDefault = 50u;
+constexpr uint32_t kMobGatherStickStillVMin = 0u;
+constexpr uint32_t kMobGatherStickStillVMax = 400u;
+constexpr uint32_t kMobGatherCruiseRDefault = 140u;
+constexpr uint32_t kMobGatherCruiseRMin = 40u;
+constexpr uint32_t kMobGatherCruiseRMax = 800u;
+constexpr uint32_t kMobGatherStationRDefault = 28u;
+constexpr uint32_t kMobGatherStationRMin = 8u;
+constexpr uint32_t kMobGatherStationRMax = 200u;
+constexpr uint32_t kMobGatherMaxCmdDefault = 4800u;
+constexpr uint32_t kMobGatherMaxCmdMin = 620u;
+constexpr uint32_t kMobGatherMaxCmdMax = 8000u;
+constexpr uint32_t kMobGatherKpDefault = 7u;
+constexpr uint32_t kMobGatherKpMin = 1u;
+constexpr uint32_t kMobGatherKpMax = 20u;
+constexpr uint32_t kMobGatherDeadDefault = 6u;
+constexpr uint32_t kMobGatherDeadMin = 1u;
+constexpr uint32_t kMobGatherDeadMax = 40u;
+constexpr uint32_t kMobGatherGravityDefault = 60u;
+constexpr uint32_t kMobGatherGravityMin = 0u;
+constexpr uint32_t kMobGatherGravityMax = 200u;
+// 1X 档速（px/s）。吸速% 再乘。默认抄现状 620 / 480 / 360。
+constexpr uint32_t kMobGatherCruiseVDefault = 620u;
+constexpr uint32_t kMobGatherCruiseVMin = 100u;
+constexpr uint32_t kMobGatherCruiseVMax = 4000u;
+constexpr uint32_t kMobGatherStationVDefault = 480u;
+constexpr uint32_t kMobGatherStationVMin = 50u;
+constexpr uint32_t kMobGatherStationVMax = 4000u;
+constexpr uint32_t kMobGatherHoldVDefault = 360u;
+constexpr uint32_t kMobGatherHoldVMin = 20u;
+constexpr uint32_t kMobGatherHoldVMax = 4000u;
+// 到位软钉：误差 ≤ 到位圈 且防抖开 → 改用到位 Kp。刹车只吃 ≥5X 死拍。
+constexpr uint32_t kMobGatherSettleErrDefault = 16u;
+constexpr uint32_t kMobGatherSettleErrMin = 1u;
+constexpr uint32_t kMobGatherSettleErrMax = 400u;
+constexpr uint32_t kMobGatherKpSettleDefault = 10u;
+constexpr uint32_t kMobGatherKpSettleMin = 1u;
+constexpr uint32_t kMobGatherKpSettleMax = 40u;
+constexpr uint32_t kMobGatherBrakeMsDefault = 150u;
+constexpr uint32_t kMobGatherBrakeMsMin = 20u;
+constexpr uint32_t kMobGatherBrakeMsMax = 1000u;
+constexpr uint32_t kMobGatherCoastVyDefault = 80u;
+constexpr uint32_t kMobGatherCoastVyMin = 0u;
+constexpr uint32_t kMobGatherCoastVyMax = 800u;
+constexpr uint32_t kMobGatherAimMsDefault = 17u;
+constexpr uint32_t kMobGatherAimMsMin = 8u;
+constexpr uint32_t kMobGatherAimMsMax = 100u;
+constexpr uint32_t kMobGatherSoftReloginDefault = 1u;
+constexpr uint32_t kMobGatherSoftReloginSecDefault = 14u;
+constexpr uint32_t kMobGatherSoftReloginSecMin = 10u;
+constexpr uint32_t kMobGatherSoftReloginSecMax = 3600u;
+// 清怪重连：吸怪开着才拆。默认关，与定时软重连独立。缺键走关；盘上已有键原样保留。
+constexpr uint32_t kMobGatherClearReloginDefault = 0u;
+// 先飞到最密堆再吸。默认关：站立吸怪（高度闸/履历闸/14s 照旧）。
+constexpr uint32_t kMobGatherSeekClusterDefault = 0u;
+// 软重连后飞回记录点再吸。默认开。无首次记录不飞。与寻簇互斥。
+constexpr uint32_t kMobGatherHomeReturnDefault = 1u;
+// 寻簇同层窗 |dY|（AbsPos）。默认 200。用户自填，只防爆钳 30000。0=合法。
+constexpr uint32_t kMobGatherLayerYPxDefault = 200u;
+constexpr uint32_t kMobGatherLayerYPxMin = 0u;
+constexpr uint32_t kMobGatherLayerYPxMax = 30000u;
+// 高度闸 |mobY-py|（AbsPos）。默认 1200。用户自填，只防爆钳 30000。0=合法。
+// 只挡新 Arm；已吸住的继续。距人 hypot≤脚边 不走这闸。
+constexpr uint32_t kMobGatherDyLimPxDefault = 1200u;
+constexpr uint32_t kMobGatherDyLimPxMin = 0u;
+constexpr uint32_t kMobGatherDyLimPxMax = 30000u;
+// 履历闸横移 |dx from first seen|。默认 96。用户自填，只防爆钳 30000。0=不挡横移。
+constexpr uint32_t kMobGatherWalkDxDefault = 96u;
+constexpr uint32_t kMobGatherWalkDxMin = 0u;
+constexpr uint32_t kMobGatherWalkDxMax = 30000u;
+// 脚边豁免 hypot。默认 320。用户自填，只防爆钳 30000。0=不开豁免。
+constexpr uint32_t kMobGatherFeetExemptPxDefault = 320u;
+constexpr uint32_t kMobGatherFeetExemptPxMin = 0u;
+constexpr uint32_t kMobGatherFeetExemptPxMax = 30000u;
 constexpr uint32_t kMobScanIntervalDefaultMs = 20u;
 constexpr uint32_t kMobScanIntervalLegacyDefaultMs = 50u;
 constexpr uint32_t kMobScanIntervalMinMs = 1u;
 constexpr uint32_t kMobScanIntervalMaxMs = 500u;
 // 与全局 Min 对齐；加速不另抬间隔。
 constexpr uint32_t kAttackAccelIntervalFloorMs = 1u;
-// 清忙锁专用出刀间隔地板：拆掉 ActionBusy 后防止贴着面板 1/70ms 狂射。
-// 只在 Apply→SetAttackIntervalMs 时抬有效间隔，不回写面板「间隔」落盘值。
-constexpr uint32_t kAttackAccelClearBusyMinIntervalDefaultMs = 410u;
-constexpr uint32_t kAttackAccelClearBusyMinIntervalMinMs = 50u;
+// 清忙锁专用出刀间隔字段（历史地板）。v99 起 Apply 不再用它抬有效间隔；
+// 默认/下限 1，与首页攻击间隔对齐；旧默认 410 读盘迁到 1。
+constexpr uint32_t kAttackAccelClearBusyMinIntervalDefaultMs = 1u;
+constexpr uint32_t kAttackAccelClearBusyMinIntervalMinMs = 1u;
 constexpr uint32_t kAttackAccelClearBusyMinIntervalMaxMs = 1000u;
+constexpr uint32_t kAttackAccelClearBusyMinIntervalLegacyDefaultMs = 410u;
 
 // PartyBooster（TempStats[4].Value）加数：越负越快，引擎 degree 夹 [2,10]；-8 已够顶格。
 constexpr int32_t kAttackAccelPartyBoosterValueDefault = -8;
@@ -300,6 +481,10 @@ constexpr uint32_t kPumpCongestionMax = 8u;
 constexpr uint32_t kPumpDrainBudgetDefault = 8u;
 constexpr uint32_t kPumpDrainBudgetMin = 1u;
 constexpr uint32_t kPumpDrainBudgetMax = 8u;
+// 超级赶路贴门抬升（AbsPos 更大 Y=更高）。末段 / recover / 发门带空悬停共用。
+constexpr uint32_t kTravelPortalAimLiftDefault = 16u;
+constexpr uint32_t kTravelPortalAimLiftMin = 4u;
+constexpr uint32_t kTravelPortalAimLiftMax = 64u;
 
 struct PayloadControl {
     uint32_t magic = kPayloadControlMagic;
@@ -372,6 +557,63 @@ struct PayloadControl {
     // v83: 打中换怪（默认关）。开：本角色对同一 oid 确认命中 N 次后改打攻击盒外最近活怪；活怪<3 停刀。
     uint32_t simpleCombatHitRotate = kCombatHitRotateDefault;
     uint32_t simpleCombatHitRotateN = kCombatHitRotateNDefault;
+    // v84: 出刀自组攻包。落盘 user.ini；会话文件只给面板↔DLL 热切换。
+    uint32_t simpleCombatForgeHit = 0;
+    // v85: 实验·全图攻击。会话态（state/map_attack_armed），不写入 user.ini；
+    // 重启 launcher 归零。P1 只打 MapAtk 日志，不改 Rect/maxCount。
+    uint32_t mapAttack = 0;
+    // v90/v94: 吸怪。落盘 user.ini；默认关。勾选后周期把本地模拟怪吸到面前空点（不贴台）。
+    uint32_t mobGather = 0;
+    uint32_t mobGatherSpeedPct = kMobGatherSpeedPctDefault;
+    uint32_t mobGatherAntiJitter = kMobGatherAntiJitterDefault;
+    uint32_t mobGatherMax = kMobGatherMaxDefault;
+    uint32_t mobGatherFarInFlight = kMobGatherFarInFlightDefault;
+    uint32_t mobGatherRadiusPx = kMobGatherRadiusDefaultPx;
+    uint32_t mobGatherHoldMs = kMobGatherHoldMsDefault;
+    uint32_t mobGatherIntervalMs = kMobGatherIntervalDefaultMs;
+    uint32_t mobGatherIgnoreQuiet = kMobGatherIgnoreQuietDefault;
+    uint32_t mobGatherQuietDelayMs = kMobGatherQuietDelayMsDefault;
+    uint32_t mobGatherStandOffCustom = kMobGatherStandOffCustomDefault;
+    int32_t mobGatherStandOffX = kMobGatherStandOffXDefault;
+    int32_t mobGatherStandOffY = kMobGatherStandOffYDefault;
+    uint32_t mobGatherStickCreepPx = kMobGatherStickCreepDefault;
+    uint32_t mobGatherStickStillV = kMobGatherStickStillVDefault;
+    uint32_t mobGatherCruiseR = kMobGatherCruiseRDefault;
+    uint32_t mobGatherStationR = kMobGatherStationRDefault;
+    uint32_t mobGatherMaxCmd = kMobGatherMaxCmdDefault;
+    uint32_t mobGatherKp = kMobGatherKpDefault;
+    uint32_t mobGatherDead = kMobGatherDeadDefault;
+    uint32_t mobGatherGravity = kMobGatherGravityDefault;
+    uint32_t mobGatherCruiseV = kMobGatherCruiseVDefault;
+    uint32_t mobGatherStationV = kMobGatherStationVDefault;
+    uint32_t mobGatherHoldV = kMobGatherHoldVDefault;
+    uint32_t mobGatherSettleErr = kMobGatherSettleErrDefault;
+    uint32_t mobGatherKpSettle = kMobGatherKpSettleDefault;
+    uint32_t mobGatherBrakeMs = kMobGatherBrakeMsDefault;
+    uint32_t mobGatherCoastVy = kMobGatherCoastVyDefault;
+    uint32_t mobGatherAimMs = kMobGatherAimMsDefault;
+    uint32_t mobGatherSoftRelogin = kMobGatherSoftReloginDefault;
+    uint32_t mobGatherSoftReloginSec = kMobGatherSoftReloginSecDefault;
+    uint32_t mobGatherClearRelogin = kMobGatherClearReloginDefault;
+    // v100: 申请控制权。默认关。开：吸怪持有期泵上调官方 ApplyControl（不造包）。
+    uint32_t mobGatherApplyCtrl = 0;
+    // v110: 先飞到最密堆再吸。默认关。开：人飞到簇质心后再 Arm，寻路冻 14s。
+    uint32_t mobGatherSeekCluster = kMobGatherSeekClusterDefault;
+    // v111: 软重连后返回原位。默认关。与 seekCluster 互斥。
+    uint32_t mobGatherHomeReturn = kMobGatherHomeReturnDefault;
+    int32_t mobGatherHomeX = 0;
+    int32_t mobGatherHomeY = 0;
+    int32_t mobGatherHomeMapId = 0;
+    uint32_t mobGatherHomeValid = 0;
+    uint32_t mobGatherHomeHasMap = 0;
+    // v114: 竖层 px。寻簇同层窗。用户自填；缺键走厂默。0=合法。
+    uint32_t mobGatherLayerYPx = kMobGatherLayerYPxDefault;
+    // v115: 高度闸 px。新收 |dY| 上限。用户自填；缺键走厂默。0=合法。
+    uint32_t mobGatherDyLimPx = kMobGatherDyLimPxDefault;
+    // v117: 履历横移 px。用户自填；缺键走厂默。0=不挡横移。
+    uint32_t mobGatherWalkDx = kMobGatherWalkDxDefault;
+    // v117: 脚边 hypot。用户自填；缺键走厂默。0=不开豁免。
+    uint32_t mobGatherFeetExemptPx = kMobGatherFeetExemptPxDefault;
     // fill+Doing 已废：强制关。位移统一 Impact（F5）/ 拟人。
     uint32_t simpleCombatTeleport = 0;
     // 空中贴怪（ini: simpleCombatAirApproach；旧键 ImpactApproach 读盘兜底）。
@@ -380,6 +622,15 @@ struct PayloadControl {
     uint32_t simpleCombatFlySpeedPct = kHeliSpeedPctDefault;
     // 拟人位移：同层走路贴近后 A 键出刀；与空中贴怪互斥（空中开时恒 0）。
     uint32_t simpleCombatHumanWalk = 0;
+    // 站桩输出：原地出刀 + 吸怪到身边。默认关；与空中贴怪/拟人互斥。
+    uint32_t simpleCombatHiraishin = 0;
+    // 站桩输出开打前原地站给吸物（ms）。0=不等（厂默）。缺键走 0；旧厂默 3000 读盘迁。
+    uint32_t simpleCombatHiraishinLootHoldMs = kHiraishinLootHoldDefaultMs;
+    // 站桩输出选怪距离上限（px，人↔怪 hypot）。0=吸怪圈。
+    uint32_t simpleCombatHiraishinRangePx = kHiraishinRangeDefaultPx;
+    // 站桩输出面前攻击盒半宽/半高（px）。0=该轴不限。
+    uint32_t simpleCombatHiraishinFrontDx = kHiraishinFrontDxDefault;
+    uint32_t simpleCombatHiraishinFrontDy = kHiraishinFrontDyDefault;
     uint32_t simpleCombatTeleportMinDx = kCombatTeleportMinDxDefault;
     uint32_t simpleCombatTeleportStandOff = kCombatTeleportStandOffDefault;
     // v64: F5 空中贴怪自定义站距（远程职业）；关则用内置近战最优值。见上方常量注释。
@@ -466,6 +717,8 @@ struct PayloadControl {
     uint32_t autoReloginReconnect = 0;    // 一直有人就换频（普通遇人）
     // v60: GM/隐身升级（Admin·Manager 或客户端隐身 → 立刻停手/换频 + 强制 Alarm；默认开）
     uint32_t autoReloginGmEscalate = 1;
+    // v101: 遇人停吸。默认关。吸怪开启时强制打开（连同检测/换频），避免别人看见吸怪。
+    uint32_t autoReloginStopGather = 0;
     // v46: 隐藏同图其他玩家（UserPool 远程 → AvatarRoot.SetActive；默认关）
     uint32_t hideOtherPlayers = 0;
     // v47: 引擎帧率锁（vSync=0 + Application.targetFrameRate；非显示器硬件刷新率）
@@ -478,7 +731,7 @@ struct PayloadControl {
     // 用户入口已关（kSkillMaxLevelUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t skillMaxLevel = 0;
     // ????????? DragManager.CanPerformAction ??????????
-    uint32_t dropAlertBypass = 0;  // 默认关：开着会抑制客户端警戒
+    uint32_t dropAlertBypass = 1;  // 默认开：开着会抑制客户端警戒
     // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认开）。
     // 服端可能断线；与挂机「守护模式」叠加会干净重拉——挂机/守护时建议关。
     uint32_t auctionTownBypass = 1;
@@ -501,8 +754,18 @@ struct PayloadControl {
     uint32_t launcherWatchdog = 1;
     uint32_t launcherWatchdogNoExpSec = kWatchdogNoExpSecDefault;
     uint32_t launcherWatchdogCooldownSec = kWatchdogCooldownSecDefault;
+    // v113: 贴门抬升 px（调试 TAB「超级赶路」）。0 读盘当缺省 → 默认 16。
+    uint32_t travelPortalAimLiftY = kTravelPortalAimLiftDefault;
     uint64_t writeTickMs = 0;
 };
+
+// 吸怪开着时强制：检测同图 + 遇人停吸 + 一直有人就换频。不改「先停手」。
+inline void ApplyMobGatherEncounterForce(PayloadControl& c) {
+    if (c.mobGather == 0) return;
+    c.autoRelogin = 1;
+    c.autoReloginReconnect = 1;
+    c.autoReloginStopGather = 1;
+}
 
 inline uint32_t ClampHangupScheduleMask(uint32_t mask) {
     return mask & kHangupScheduleMaskAll;
@@ -538,6 +801,26 @@ inline uint32_t ClampAttackHoldMs(uint32_t ms) {
     return ms;
 }
 
+inline uint32_t ClampHiraishinLootHoldMs(uint32_t ms) {
+    if (ms > kHiraishinLootHoldMaxMs) return kHiraishinLootHoldMaxMs;
+    return ms;
+}
+
+inline uint32_t ClampHiraishinRangePx(uint32_t px) {
+    if (px > kHiraishinRangeMaxPx) return kHiraishinRangeMaxPx;
+    return px;
+}
+
+inline uint32_t ClampHiraishinFrontDx(uint32_t px) {
+    if (px > kHiraishinFrontDxMax) return kHiraishinFrontDxMax;
+    return px;
+}
+
+inline uint32_t ClampHiraishinFrontDy(uint32_t px) {
+    if (px > kHiraishinFrontDyMax) return kHiraishinFrontDyMax;
+    return px;
+}
+
 inline uint32_t ClampAttackSameFrameBurst(uint32_t n) {
     if (n < kAttackSameFrameBurstMin) return kAttackSameFrameBurstMin;
     if (n > kAttackSameFrameBurstMax) return kAttackSameFrameBurstMax;
@@ -548,6 +831,130 @@ inline uint32_t ClampHeliSpeedPct(uint32_t pct) {
     if (pct < kHeliSpeedPctMin) return kHeliSpeedPctMin;
     if (pct > kHeliSpeedPctMax) return kHeliSpeedPctMax;
     return pct;
+}
+
+inline uint32_t ClampMobGatherSpeedPct(uint32_t pct) { return ClampHeliSpeedPct(pct); }
+
+inline uint32_t ClampMobGatherMax(uint32_t n) {
+    if (n < kMobGatherMaxMin) return kMobGatherMaxMin;
+    if (n > kMobGatherMaxMax) return kMobGatherMaxMax;
+    return n;
+}
+
+inline uint32_t ClampMobGatherFarInFlight(uint32_t n) {
+    if (n > kMobGatherFarInFlightMax) return kMobGatherFarInFlightMax;
+    return n;
+}
+
+inline uint32_t ClampMobGatherRadiusPx(uint32_t px) {
+    if (px < kMobGatherRadiusMinPx) return kMobGatherRadiusMinPx;
+    if (px > kMobGatherRadiusMaxPx) return kMobGatherRadiusMaxPx;
+    return px;
+}
+
+inline uint32_t ClampMobGatherLayerYPx(uint32_t px) {
+    if (px > kMobGatherLayerYPxMax) return kMobGatherLayerYPxMax;
+    return px;
+}
+
+inline uint32_t ClampMobGatherDyLimPx(uint32_t px) {
+    if (px > kMobGatherDyLimPxMax) return kMobGatherDyLimPxMax;
+    return px;
+}
+
+inline uint32_t ClampMobGatherWalkDx(uint32_t px) {
+    if (px > kMobGatherWalkDxMax) return kMobGatherWalkDxMax;
+    return px;
+}
+
+inline uint32_t ClampMobGatherFeetExemptPx(uint32_t px) {
+    if (px > kMobGatherFeetExemptPxMax) return kMobGatherFeetExemptPxMax;
+    return px;
+}
+
+inline uint32_t ClampMobGatherHoldMs(uint32_t ms) {
+    if (ms < kMobGatherHoldMsMin) return kMobGatherHoldMsMin;
+    if (ms > kMobGatherHoldMsMax) return kMobGatherHoldMsMax;
+    return ms;
+}
+
+inline uint32_t ClampMobGatherIntervalMs(uint32_t ms) {
+    if (ms < kMobGatherIntervalMinMs) return kMobGatherIntervalMinMs;
+    if (ms > kMobGatherIntervalMaxMs) return kMobGatherIntervalMaxMs;
+    return ms;
+}
+
+inline uint32_t ClampMobGatherQuietDelayMs(uint32_t ms) {
+    if (ms > kMobGatherQuietDelayMsMax) return kMobGatherQuietDelayMsMax;
+    return ms;
+}
+
+inline uint32_t ClampMobGatherU32(uint32_t v, uint32_t lo, uint32_t hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+inline uint32_t ClampMobGatherStickCreep(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherStickCreepMin, kMobGatherStickCreepMax);
+}
+inline uint32_t ClampMobGatherStickStillV(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherStickStillVMin, kMobGatherStickStillVMax);
+}
+inline uint32_t ClampMobGatherCruiseR(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherCruiseRMin, kMobGatherCruiseRMax);
+}
+inline uint32_t ClampMobGatherStationR(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherStationRMin, kMobGatherStationRMax);
+}
+inline uint32_t ClampMobGatherMaxCmd(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherMaxCmdMin, kMobGatherMaxCmdMax);
+}
+inline uint32_t ClampMobGatherKp(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherKpMin, kMobGatherKpMax);
+}
+inline uint32_t ClampMobGatherDead(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherDeadMin, kMobGatherDeadMax);
+}
+inline uint32_t ClampMobGatherGravity(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherGravityMin, kMobGatherGravityMax);
+}
+inline uint32_t ClampMobGatherCruiseV(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherCruiseVMin, kMobGatherCruiseVMax);
+}
+inline uint32_t ClampMobGatherStationV(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherStationVMin, kMobGatherStationVMax);
+}
+inline uint32_t ClampMobGatherHoldV(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherHoldVMin, kMobGatherHoldVMax);
+}
+inline uint32_t ClampMobGatherSettleErr(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherSettleErrMin, kMobGatherSettleErrMax);
+}
+inline uint32_t ClampMobGatherKpSettle(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherKpSettleMin, kMobGatherKpSettleMax);
+}
+inline uint32_t ClampMobGatherBrakeMs(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherBrakeMsMin, kMobGatherBrakeMsMax);
+}
+inline uint32_t ClampMobGatherCoastVy(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherCoastVyMin, kMobGatherCoastVyMax);
+}
+inline uint32_t ClampMobGatherAimMs(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherAimMsMin, kMobGatherAimMsMax);
+}
+inline uint32_t ClampMobGatherSoftReloginSec(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherSoftReloginSecMin, kMobGatherSoftReloginSecMax);
+}
+inline int32_t ClampMobGatherStandOffX(int32_t x) {
+    if (x < kMobGatherStandOffXMin) return kMobGatherStandOffXMin;
+    if (x > kMobGatherStandOffXMax) return kMobGatherStandOffXMax;
+    return x;
+}
+inline int32_t ClampMobGatherStandOffY(int32_t y) {
+    if (y < kMobGatherStandOffYMin) return kMobGatherStandOffYMin;
+    if (y > kMobGatherStandOffYMax) return kMobGatherStandOffYMax;
+    return y;
 }
 
 inline uint32_t ClampSimpleCombatTickMs(uint32_t ms) {
@@ -575,16 +982,11 @@ inline uint32_t ClampAttackAccelClearBusyMinIntervalMs(uint32_t ms) {
     return ms;
 }
 
-// Apply 用：面板间隔 +（可选）首页加速地板 + 清忙锁专用地板。不用于改写落盘间隔。
+// Apply 用：面板间隔 +（可选）首页加速地板。清忙锁不再另抬间隔（v99 解除）。
 inline uint32_t EffectiveAttackIntervalForApply(uint32_t panelMs, uint32_t attackAccel,
-                                               uint32_t clearBusy, uint32_t clearBusyMinMs) {
-    uint32_t v = EffectiveSimpleCombatAttackIntervalMs(panelMs, attackAccel);
-    if (clearBusy) {
-        const uint32_t floor = ClampAttackAccelClearBusyMinIntervalMs(
-            clearBusyMinMs ? clearBusyMinMs : kAttackAccelClearBusyMinIntervalDefaultMs);
-        if (v < floor) v = floor;
-    }
-    return v;
+                                               uint32_t /*clearBusy*/,
+                                               uint32_t /*clearBusyMinMs*/) {
+    return EffectiveSimpleCombatAttackIntervalMs(panelMs, attackAccel);
 }
 
 inline uint32_t ClampCombatHitRotateN(uint32_t n) {
@@ -707,6 +1109,12 @@ inline uint32_t ClampPumpDrainBudget(uint32_t v) {
     return v;
 }
 
+inline uint32_t ClampTravelPortalAimLiftY(uint32_t v) {
+    if (v < kTravelPortalAimLiftMin) return kTravelPortalAimLiftMin;
+    if (v > kTravelPortalAimLiftMax) return kTravelPortalAimLiftMax;
+    return v;
+}
+
 inline uint32_t ClampFlyMode(uint32_t v) {
     if (v > kFlyModeImpactSetNext) return kFlyModeDefault;
     return v;
@@ -746,5 +1154,35 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control);
 
 // 飞行开关会话态：清零（launcher 启动 / DLL Init）。不改 flyMode / hopCd。
 void ClearFlyArmedSession(const char* binDir);
+// 出刀自组攻包会话文件：兼容旧会话；正式开关已落盘 user.ini，启动不再清零。
+void ClearForgeHitSession(const char* binDir);
+// 全图攻击会话态：清零（launcher 启动）。不落盘。
+void ClearMapAttackSession(const char* binDir);
+// 吸怪会话文件：兼容旧会话；正式开关已落盘 user.ini，启动不再清零。
+void ClearMobGatherSession(const char* binDir);
+// 伪造攻包 oneshot seq：清零（launcher 启动）。不写 user.ini。
+void ClearAttackRpcFireSeq(const char* binDir);
+uint32_t ReadAttackRpcFireSeq(const char* binDir);
+bool WriteAttackRpcFireSeq(const char* binDir, uint32_t seq);
+// 清零攻包探针 session cap：bump seq；payload 读到后 ResetSessionCap。不写 user.ini。
+void ClearAttackRpcResetSeq(const char* binDir);
+uint32_t ReadAttackRpcResetSeq(const char* binDir);
+bool WriteAttackRpcResetSeq(const char* binDir, uint32_t seq);
+// auto_stop 勾灭：payload 写 seq，面板读到后把勾选关掉并写回 user.ini。
+void ClearAttackRpcStopSeq(const char* binDir);
+uint32_t ReadAttackRpcStopSeq(const char* binDir);
+bool WriteAttackRpcStopSeq(const char* binDir, uint32_t seq);
+// 吸怪 oneshot seq：清零（launcher 启动）。不写 user.ini。
+void ClearMobGatherFireSeq(const char* binDir);
+uint32_t ReadMobGatherFireSeq(const char* binDir);
+bool WriteMobGatherFireSeq(const char* binDir, uint32_t seq);
+// 吸怪高度闸扫描 seq：调试按钮 1→+100/s→2000。不写 user.ini。
+void ClearMobGatherDyRampSeq(const char* binDir);
+uint32_t ReadMobGatherDyRampSeq(const char* binDir);
+bool WriteMobGatherDyRampSeq(const char* binDir, uint32_t seq);
+// 吸怪「记录人物坐标」oneshot seq。不写 user.ini；DLL 记 AbsPos 后再落盘 home 字段。
+void ClearMobGatherHomeRecordSeq(const char* binDir);
+uint32_t ReadMobGatherHomeRecordSeq(const char* binDir);
+bool WriteMobGatherHomeRecordSeq(const char* binDir, uint32_t seq);
 
 }  // namespace xcat

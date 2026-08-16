@@ -8,7 +8,7 @@ namespace xcat {
 // 经典版宠物吸物：user.ini [pet_loot]。对照枫星 autopickup.fullMapEnabled 语义。
 // 正式吸物只走宠扩盒（Pet.TryPickUpDrop → ByPet → Pet.Send）。角色全图假位姿已移除。
 constexpr uint32_t kPetLootMagic = 0x5843504Cu;  // 'XCPL'
-constexpr uint32_t kPetLootVersion = 4u;  // v4：+scrollDropNotify（卷軸掉落提示音）
+constexpr uint32_t kPetLootVersion = 6u;  // v6：+nativeVacEnabled（变态宠吸：常驻扩盒）
 constexpr int kPetLootMaxSkipRules = 64;
 constexpr int kPetLootNameKeyLen = 64;
 
@@ -24,8 +24,8 @@ constexpr uint32_t kPetLootFilterDefault =
 // 高价值优先：装备栏 / 消耗栏（卷軸）有空位时打断出刀先吸
 constexpr uint32_t kPetLootHighValueIntervalMs = 100u;  // 紧急窗调度间隔顶
 
-// 默认调度 850ms × 5（可改；勿长期压到 50 / 过高 burst 拖死 MainPump）
-constexpr uint32_t kPetLootIntervalDefaultMs = 850u;
+// 默认调度 200ms × 5（可改；勿长期压到 50 / 过高 burst 拖死 MainPump）
+constexpr uint32_t kPetLootIntervalDefaultMs = 200u;
 constexpr uint32_t kPetLootCharVacIntervalMs = kPetLootIntervalDefaultMs;  // 语义别名
 constexpr uint32_t kPetLootIntervalMinMs = 50u;
 constexpr uint32_t kPetLootIntervalMaxMs = 2000u;
@@ -67,6 +67,7 @@ struct PetLootConfig {
     uint32_t version = kPetLootVersion;
     uint32_t enabled = 0;           // 宠吸（人物附近真空，尺寸见 vacuumW/H）
     uint32_t footEnabled = 0;       // 角色脚边（与宠吸互斥；默认关）
+    uint32_t nativeVacEnabled = 0;  // 变态宠吸：常驻扩 ByPet .rdata；与其它吸物互斥
     uint32_t mapVacuumEnabled = 0;  // 与 enabled 同开；保留键兼容旧 ini（不再表示全图）
     uint32_t intervalMs = kPetLootIntervalDefaultMs;
     uint32_t burstPerTick = kPetLootBurstDefault;  // 每拍连吸次数（自设；硬顶见 HardCap）
@@ -79,6 +80,8 @@ struct PetLootConfig {
     uint32_t skipFilterEnabled = 1;
     uint32_t highValuePriority = 1;  // 装备/卷軸优先；对应栏满则跳过该件
     uint32_t scrollDropNotify = 1;   // 新卷軸落地 → notify + 明亮叮咚（装备不提醒）
+    uint32_t dropSnapLand = 0;       // 飞行中 Pt1=PickPt、EndPara=3、LastTry=0（默认关）
+    uint32_t dropAccelFall = 0;      // 加大 LastTry / +0x90，抛物仍在只是更快（默认关）
     uint32_t skipRuleCount = 0;
     PetLootSkipRule skipRules[kPetLootMaxSkipRules]{};
     uint64_t writeTickMs = 0;

@@ -242,8 +242,8 @@ bool Bailed();
 void ClearBailed();
 
 // ── 所有权 ────────────────────────────────────────────────────────────
-// 旋翼是**单例**：一份 setpoint、一份发射时钟。而驱动方已经有三个（F5 打怪 /
-// 自动赶路 / F6 手动飞），三方各写各的就是抢方向盘。
+// 旋翼是**单例**：一份 setpoint、一份发射时钟。驱动方：F5 打怪 / 赶路 / F6 手动飞 /
+// 吸怪寻簇（可选，默认不占）。各方各写各的就是抢方向盘。
 //
 // ★ 为什么不能靠「把另一个暂停掉」解决：`simple_combat::Tick` 里 `TickHeliRotor(now)`
 //   刻意放在 `gExternalPause` 判断**之前**，因为 fh-ban 挂着时停一拍旋翼就是掉一段。
@@ -252,7 +252,7 @@ void ClearBailed();
 // 交接语义：`Acquire` 抢占式，后来者直接接管（手动 F6 压过自动，符合直觉）。被抢走的
 // 一方 `SetSetpoint`/`Tick` 静默变空操作，它自己的循环不用改，也不会把 fh-ban 拆掉。
 // 释放后下一个 `Acquire` 立刻能接回来，中间旋翼一拍没停。
-enum class Owner : unsigned { None = 0, Combat, Travel, Fly };
+enum class Owner : unsigned { None = 0, Combat, Travel, Fly, Gather };
 
 // 抢占式接管，恒成功。给**手动**入口用（F6）：人按了键就该立刻听人的。
 // 返回值只表示「是否发生了易主」，用于打日志。

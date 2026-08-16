@@ -14,10 +14,14 @@
 #include "../features/channel_hop/channel_hop.h"
 #include "../features/encounter/encounter.h"
 #include "../features/ports/attack_rpc_port.h"
+#include "../features/ports/map_attack_port.h"
+#include "../features/ports/mob_gather_port.h"
+#include "../features/ports/mob_fh_ban.h"
 #include "../features/ports/attack_input_port.h"
 #include "../features/ports/curfh_gate_bypass.h"
 #include "../features/ports/ground_spoof.h"
 #include "../features/ports/teleport_port.h"
+#include "../features/ports/travel_port.h"
 #include "../features/ports/world_port.h"
 #include "../features/melee_veto/melee_veto.h"
 #include "../features/simple_combat/simple_combat.h"
@@ -477,8 +481,71 @@ void ApplyControl(const xcat::PayloadControl& c) {
                                                           : xcat::kAttackHoldDefaultMs));
     x::features::simple_combat::SetSmartInterval(c.simpleCombatSmartInterval != 0);
     x::features::simple_combat::SetClusterPriority(c.clusterWeight != 0);
-    x::features::simple_combat::SetHitRotateEnabled(c.simpleCombatHitRotate != 0);
     x::features::simple_combat::SetHitRotateN(c.simpleCombatHitRotateN);
+    x::features::ports::map_attack::SetEnabled(c.mapAttack != 0);
+    // 吸怪只认首页勾；站桩输出不代开。
+    x::features::ports::mob_gather::SetEnabled(c.mobGather != 0);
+    x::features::ports::mob_gather::SetSpeedPct(c.mobGatherSpeedPct);
+    x::features::ports::mob_gather::SetAntiJitter(c.mobGatherAntiJitter != 0);
+    x::features::ports::mob_gather::SetMaxHold(c.mobGatherMax);
+    x::features::ports::mob_gather::SetFarInFlight(c.mobGatherFarInFlight);
+    x::features::ports::mob_gather::SetRadiusPx(c.mobGatherRadiusPx);
+    x::features::ports::mob_gather::SetLayerYPx(c.mobGatherLayerYPx);
+    x::features::ports::mob_gather::SetDyLimPx(c.mobGatherDyLimPx);
+    x::features::ports::mob_gather::SetWalkDx(c.mobGatherWalkDx);
+    x::features::ports::mob_gather::SetFeetExemptPx(c.mobGatherFeetExemptPx);
+    x::features::ports::mob_gather::SetHoldTimeoutMs(c.mobGatherHoldMs);
+    x::features::ports::mob_gather::SetRecruitIntervalMs(c.mobGatherIntervalMs);
+    x::features::ports::mob_gather::SetAimIntervalMs(c.mobGatherAimMs);
+    x::features::ports::mob_gather::SetIgnoreQuiet(c.mobGatherIgnoreQuiet != 0);
+    x::features::ports::mob_gather::SetQuietDelayMs(c.mobGatherQuietDelayMs);
+    x::features::ports::mob_gather::SetApplyCtrl(c.mobGatherApplyCtrl != 0);
+    x::features::ports::mob_gather::SetSoftRelogin(c.mobGatherSoftRelogin != 0,
+                                                  c.mobGatherSoftReloginSec);
+    x::features::ports::mob_gather::SetClearRelogin(c.mobGatherClearRelogin != 0);
+    x::features::ports::mob_gather::SetSeekCluster(c.mobGatherSeekCluster != 0);
+    x::features::ports::mob_gather::SetHomeReturn(c.mobGatherHomeReturn != 0);
+    x::features::ports::mob_gather::SetHomePos(
+        c.mobGatherHomeX, c.mobGatherHomeY, c.mobGatherHomeMapId, c.mobGatherHomeValid != 0,
+        c.mobGatherHomeHasMap != 0);
+    x::features::ports::mob_fh_ban::SetActuatorParams(
+        static_cast<float>(xcat::ClampMobGatherKp(c.mobGatherKp ? c.mobGatherKp
+                                                               : xcat::kMobGatherKpDefault)),
+        static_cast<float>(xcat::ClampMobGatherDead(c.mobGatherDead ? c.mobGatherDead
+                                                                   : xcat::kMobGatherDeadDefault)),
+        static_cast<float>(xcat::ClampMobGatherCruiseR(
+            c.mobGatherCruiseR ? c.mobGatherCruiseR : xcat::kMobGatherCruiseRDefault)),
+        static_cast<float>(xcat::ClampMobGatherStationR(
+            c.mobGatherStationR ? c.mobGatherStationR : xcat::kMobGatherStationRDefault)),
+        static_cast<float>(xcat::ClampMobGatherMaxCmd(
+            c.mobGatherMaxCmd ? c.mobGatherMaxCmd : xcat::kMobGatherMaxCmdDefault)),
+        static_cast<float>(xcat::ClampMobGatherGravity(c.mobGatherGravity)),
+        static_cast<float>(xcat::ClampMobGatherStickCreep(
+            c.mobGatherStickCreepPx ? c.mobGatherStickCreepPx : xcat::kMobGatherStickCreepDefault)),
+        static_cast<float>(xcat::ClampMobGatherStickStillV(c.mobGatherStickStillV)));
+    x::features::ports::mob_fh_ban::SetMotionTiers(
+        static_cast<float>(xcat::ClampMobGatherCruiseV(
+            c.mobGatherCruiseV ? c.mobGatherCruiseV : xcat::kMobGatherCruiseVDefault)),
+        static_cast<float>(xcat::ClampMobGatherStationV(
+            c.mobGatherStationV ? c.mobGatherStationV : xcat::kMobGatherStationVDefault)),
+        static_cast<float>(xcat::ClampMobGatherHoldV(
+            c.mobGatherHoldV ? c.mobGatherHoldV : xcat::kMobGatherHoldVDefault)));
+    x::features::ports::mob_fh_ban::SetSettleTune(
+        static_cast<float>(xcat::ClampMobGatherSettleErr(
+            c.mobGatherSettleErr ? c.mobGatherSettleErr : xcat::kMobGatherSettleErrDefault)),
+        static_cast<float>(xcat::ClampMobGatherKpSettle(
+            c.mobGatherKpSettle ? c.mobGatherKpSettle : xcat::kMobGatherKpSettleDefault)),
+        static_cast<float>(xcat::ClampMobGatherBrakeMs(
+            c.mobGatherBrakeMs ? c.mobGatherBrakeMs : xcat::kMobGatherBrakeMsDefault)),
+        static_cast<float>(xcat::ClampMobGatherCoastVy(c.mobGatherCoastVy)));
+    if (c.mapAttack != 0) {
+        // P1 互斥：组包 / 攻包探针绕过 FindHit；打中换怪会把名单滤成一只。
+        x::features::simple_combat::SetHitRotateEnabled(false);
+        x::features::simple_combat::SetForgeHitEnabled(false);
+    } else {
+        x::features::simple_combat::SetHitRotateEnabled(c.simpleCombatHitRotate != 0);
+        x::features::simple_combat::SetForgeHitEnabled(c.simpleCombatForgeHit != 0);
+    }
     x::features::simple_combat::SetTeleportEnabled(false);  // fill+Doing 战斗回落已禁用
     x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
     x::features::simple_combat::SetAntiJitterEnabled(c.simpleCombatAntiJitter != 0);
@@ -486,6 +553,11 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::melee_veto::SetEnabled(c.meleeVeto != 0);
     x::features::simple_combat::SetFlySpeedPct(c.simpleCombatFlySpeedPct);
     x::features::simple_combat::SetHumanWalkEnabled(c.simpleCombatHumanWalk != 0);
+    x::features::simple_combat::SetHiraishinEnabled(c.simpleCombatHiraishin != 0);
+    x::features::simple_combat::SetHiraishinLootHoldMs(c.simpleCombatHiraishinLootHoldMs);
+    x::features::simple_combat::SetHiraishinRangePx(c.simpleCombatHiraishinRangePx);
+    x::features::simple_combat::SetHiraishinFrontBox(c.simpleCombatHiraishinFrontDx,
+                                                    c.simpleCombatHiraishinFrontDy);
     x::features::simple_combat::SetLiveStepEnabled(c.simpleCombatLiveStep != 0);
     x::features::simple_combat::SetTeleportParams(
         c.simpleCombatTeleportMinDx, c.simpleCombatTeleportStandOff, c.simpleCombatTeleportCooldownMs,
@@ -495,6 +567,10 @@ void ApplyControl(const xcat::PayloadControl& c) {
         c.simpleCombatStandOffCustom != 0,
         xcat::ClampCombatStandOffX(c.simpleCombatStandOffX),
         xcat::ClampCombatStandOffY(c.simpleCombatStandOffY));
+    x::features::ports::mob_fh_ban::SetGatherStandOff(
+        c.mobGatherStandOffCustom != 0,
+        xcat::ClampMobGatherStandOffX(c.mobGatherStandOffX),
+        xcat::ClampMobGatherStandOffY(c.mobGatherStandOffY));
     x::features::ports::ground_spoof::SetEnabled(c.simpleCombatGroundSpoof != 0);
     x::features::simple_combat::SetOneshotParams(c.simpleCombatOneshotMaxHp,
                                                  c.simpleCombatOneshotMinBumps,
@@ -505,10 +581,14 @@ void ApplyControl(const xcat::PayloadControl& c) {
         static_cast<int>(xcat::ClampPumpCongestion(c.pumpCongestionThreshold)));
     x::runtime::main_thread::SetDrainBudget(
         static_cast<int>(xcat::ClampPumpDrainBudget(c.pumpDrainBudget)));
+    x::features::ports::travel::SetPortalAimLiftY(
+        xcat::ClampTravelPortalAimLiftY(
+            c.travelPortalAimLiftY ? c.travelPortalAimLiftY
+                                   : xcat::kTravelPortalAimLiftDefault));
     x::features::ports::attack_rpc::SetMaxMobs(static_cast<int>(c.attackRpcMobs));
     x::features::ports::attack_rpc::SetIntervalMs(c.attackRpcIntervalMs);
     x::features::ports::attack_rpc::SetDamage(static_cast<int>(c.attackRpcDamage));
-    x::features::ports::attack_rpc::SetEnabled(c.attackRpc != 0);
+    x::features::ports::attack_rpc::SetEnabled(c.mapAttack == 0 && c.attackRpc != 0);
     x::features::ports::curfh_gate_bypass::SetEnabled(c.curFhGateBypass != 0);
     x::features::auto_lie::SetEnabled(c.autoLie != 0);
     x::features::auto_lie::SetDryRun(c.autoLieDryRun != 0);
@@ -522,10 +602,11 @@ void ApplyControl(const xcat::PayloadControl& c) {
     if (xcat::kInfiniteStarsUserEnabled)
         x::features::infinite_stars::SetEnabled(c.infiniteStars != 0);
     // 自动补给真源：user.ini [auto_supply]（HotReadConfig）；勿再用 core.autoSell 灌开关。
-    x::features::encounter::SetEnabled(c.autoRelogin != 0);
+    x::features::encounter::SetEnabled(c.mobGather != 0 || c.autoRelogin != 0);
     x::features::encounter::SetStrategies(c.autoReloginStopCombat != 0,
-                                          c.autoReloginReconnect != 0,
-                                          c.autoReloginGmEscalate != 0);
+                                          c.mobGather != 0 || c.autoReloginReconnect != 0,
+                                          c.autoReloginGmEscalate != 0,
+                                          c.mobGather != 0 || c.autoReloginStopGather != 0);
     x::features::player_hide::SetEnabled(c.hideOtherPlayers != 0);
     x::features::frame_lock::SetTargetFps(c.frameLockFps);
     x::features::frame_lock::SetEnabled(c.frameLock != 0);
@@ -607,6 +688,21 @@ void PayloadControl_PublishSimpleCombat(bool on) {
 
 void PayloadControl_PublishFly(bool on) {
     (void)ReadMergePublish(false, false, true, on);
+}
+
+void PayloadControl_PublishHomePos(int32_t x, int32_t y, int32_t mapId, bool hasMap) {
+    const std::string bin = PayloadBinDir();
+    if (bin.empty()) return;
+    xcat::PayloadControl c{};
+    (void)xcat::ReadPayloadControl(bin.c_str(), c);
+    c.mobGatherHomeX = xcat::ClampMobGatherStandOffX(x);
+    c.mobGatherHomeY = xcat::ClampMobGatherStandOffY(y);
+    c.mobGatherHomeMapId = mapId;
+    c.mobGatherHomeValid = 1u;
+    c.mobGatherHomeHasMap = hasMap ? 1u : 0u;
+    c.writeTickMs = GetTickCount64();
+    if (!xcat::WritePayloadControl(bin.c_str(), c)) return;
+    ApplyControl(c);
 }
 
 }  // namespace x::ipc

@@ -22,6 +22,9 @@ bool SaveIniFile(const char* path, const IniStore& store);
 // 跨进程串行的读改写：持锁 → 载入（文件已存在但读失败则拒绝写，避免空表盖掉整份配置）→
 // mutate → 原子落盘。所有 user.ini section 写入都应走这条路径。
 bool UpdateIniFile(const char* path, const std::function<void(IniStore&)>& mutate);
+// lockTimeoutMs=0：锁被占立刻失败，给 ImGui 线程用，禁止在绘制帧里干等。
+bool UpdateIniFile(const char* path, const std::function<void(IniStore&)>& mutate,
+                   uint32_t lockTimeoutMs);
 
 bool IniGetString(const IniStore& ini, const char* section, const char* key, std::string& out);
 bool IniGetU64(const IniStore& ini, const char* section, const char* key, uint64_t& out);

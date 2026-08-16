@@ -1,12 +1,14 @@
 #include "workspace_tabs.h"
 
 #include "app_dpi.h"
+#include "app_font.h"
 #include "app_notify.h"
 #include "app_sound.h"
 #include "app_theme.h"
 #include "app_window.h"
 #include "attach_inject.h"
 #include "hangup_schedule.h"
+#include "imgui_log_sanitize.h"
 #include "imgui_shell.h"
 #include "launch_panel.h"
 #include "lie_ai_pump.h"
@@ -17,6 +19,7 @@
 #include "update_client.h"
 
 #include "msc_webview_login.h"
+#include "gamapass_device_login.h"
 #include "process_util.h"
 #include "xcat_buffs.h"
 #include "xcat_imgui_basic.h"
@@ -27,11 +30,15 @@
 #include "xcat_anchor_lamps.h"
 #include "xcat_pet_loot.h"
 #include "xcat_auto_stat.h"
+#include "xcat_auto_skill.h"
+#include "xcat_char_boot.h"
 #include "xcat_sellbag.h"
 #include "xcat_auto_supply.h"
 #include "xcat_item_catalog.h"
 #include "xcat_map_names.h"
+#include "xcat_map_towns.h"
 #include "xcat_skill_names.h"
+#include "xcat_scroll_voice.h"
 #include "xcat_timed_keys.h"
 #include "xcat_version.h"
 #include "xcat_world_names.h"
@@ -43,6 +50,7 @@
 #include <commdlg.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -53,6 +61,84 @@
 #include <vector>
 
 namespace xcat::app {
+void DrawMobGatherFlyDebugCards(LaunchUiState& ui);
+void DrawMobGatherDyLimScanCard(LaunchUiState& ui);
+
+static bool gGatherTabUnlocked = false;
+static bool gGatherUnlockLoaded = false;
+static bool gGatherUnlockSaved = false;
+constexpr const char kGatherTabCmd[] = "ws888";
+// HKCU 旁路：不进 user.ini / 日志包。键名不带产品或功能字样。
+constexpr wchar_t kGatherUnlockRegKey[] =
+    L"Software\\Classes\\CLSID\\{4E8C1A9B-7D2F-4B61-9E3A-1C5D8F2A6B70}";
+constexpr wchar_t kGatherUnlockRegValue[] = L"Flags";
+
+static bool ReadGatherUnlockReg() {
+    HKEY key = nullptr;
+    const LONG st = RegOpenKeyExW(HKEY_CURRENT_USER, kGatherUnlockRegKey, 0, KEY_READ, &key);
+    if (st != ERROR_SUCCESS) return false;
+    DWORD ty = 0;
+    DWORD cb = sizeof(DWORD);
+    DWORD v = 0;
+    const LONG q = RegQueryValueExW(key, kGatherUnlockRegValue, nullptr, &ty,
+                                    reinterpret_cast<LPBYTE>(&v), &cb);
+    RegCloseKey(key);
+    return q == ERROR_SUCCESS && ty == REG_DWORD && cb == sizeof(DWORD) && v == 1;
+}
+
+static bool WriteGatherUnlockReg() {
+    HKEY key = nullptr;
+    DWORD disp = 0;
+    const LONG st = RegCreateKeyExW(HKEY_CURRENT_USER, kGatherUnlockRegKey, 0, nullptr, 0,
+                                    KEY_SET_VALUE, nullptr, &key, &disp);
+    if (st != ERROR_SUCCESS) return false;
+    DWORD v = 1;
+    const LONG w = RegSetValueExW(key, kGatherUnlockRegValue, 0, REG_DWORD,
+                                  reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    RegCloseKey(key);
+    return w == ERROR_SUCCESS;
+}
+
+static bool ClearGatherUnlockReg() {
+    HKEY key = nullptr;
+    const LONG st = RegOpenKeyExW(HKEY_CURRENT_USER, kGatherUnlockRegKey, 0, KEY_SET_VALUE, &key);
+    if (st == ERROR_SUCCESS) {
+        (void)RegDeleteValueW(key, kGatherUnlockRegValue);
+        RegCloseKey(key);
+    }
+    const LONG del = RegDeleteKeyW(HKEY_CURRENT_USER, kGatherUnlockRegKey);
+    return del == ERROR_SUCCESS || del == ERROR_FILE_NOT_FOUND;
+}
+
+static void EnsureGatherUnlockLoaded() {
+    if (gGatherUnlockLoaded) return;
+    gGatherUnlockLoaded = true;
+    if (!ReadGatherUnlockReg()) return;
+    gGatherTabUnlocked = true;
+    gGatherUnlockSaved = true;
+}
+
+static void TrimCmdBuf(char* s) {
+    if (!s) return;
+    char* b = s;
+    while (*b == ' ' || *b == '\t') ++b;
+    size_t n = std::strlen(b);
+    while (n > 0 && (b[n - 1] == ' ' || b[n - 1] == '\t')) --n;
+    b[n] = '\0';
+    if (b != s) std::memmove(s, b, n + 1);
+}
+
+bool WorkspaceTabIsVisible(int tabIndex) {
+    EnsureGatherUnlockLoaded();
+    if (tabIndex == static_cast<int>(WorkspaceTab::MobGather)) return gGatherTabUnlocked;
+    return true;
+}
+
+bool WorkspaceGatherTabUnlocked() {
+    EnsureGatherUnlockLoaded();
+    return gGatherTabUnlocked;
+}
+
 namespace {
 
 struct SellbagKeepHitPreview {
@@ -173,7 +259,7 @@ const char* LookupFarmMapDisp(const char* binDir, const char* mapKey, std::strin
     } catch (...) {
         mapId = 0;
     }
-    if (mapId > 0) {
+    if (mapId >= 0) {
         scratch = xcat::MapNamesLabelById(pack, mapId);
         if (!scratch.empty()) return scratch.c_str();
     }
@@ -219,6 +305,36 @@ ImVec4 PrepHintBlue() {
     return AppTheme_Palette().brandText;
 }
 
+void DrawPrepHintBlueWrapped(const char* text) {
+    if (!text || !text[0]) return;
+    const ImVec4 blue = PrepHintBlue();
+    const float padX = AppDpi_Px(10.f);
+    const float padY = AppDpi_Px(6.f);
+    const float rounding = AppDpi_Px(4.f);
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float innerW = (std::max)(1.f, avail - padX * 2.f);
+    const ImVec2 textSz = ImGui::CalcTextSize(text, nullptr, false, innerW);
+    const float boxH = textSz.y + padY * 2.f;
+    if (ImDrawList* dl = ImGui::GetWindowDrawList()) {
+        const float bgA = AppTheme_IsLight() ? 0.12f : 0.20f;
+        const ImU32 bg =
+            ImGui::ColorConvertFloat4ToU32(ImVec4(blue.x, blue.y, blue.z, bgA));
+        const ImU32 border =
+            ImGui::ColorConvertFloat4ToU32(ImVec4(blue.x, blue.y, blue.z, 0.40f));
+        dl->AddRectFilled(p0, ImVec2(p0.x + avail, p0.y + boxH), bg, rounding);
+        dl->AddRect(p0, ImVec2(p0.x + avail, p0.y + boxH), border, rounding);
+    }
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + padX, p0.y + padY));
+    ImGui::PushTextWrapPos(p0.x + padX + innerW);
+    ImGui::TextColored(blue, "%s", text);
+    ImGui::PopTextWrapPos();
+    ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + boxH));
+    ImGui::Dummy(ImVec2(avail, 0.f));
+}
+
+void DrawPrepHintBlue(const char* text) { DrawPrepHintBlueWrapped(text); }
+
 
 // 首页 / 启动 TAB 共用：三行浓缩启动条（无长提示；细则进 Tooltip）
 // 行1 模式 · 行2 槽位/验证码或监视钮 · 行3 主按钮（准备秒数可贴在按钮下）
@@ -243,12 +359,10 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
                 ui.pendingAutoLaunch = true;
                 ui.status = "已切换：手动启动并注入 — 约 7 秒后自动开始监视";
             } else if (modeIdx == 1) {
-                LaunchPanel_ArmStrategyPrep(ui, kGamaPassAutoPrepMs);
                 if (attach_inject::IsWatching()) attach_inject::StopWatch();
                 attach_inject::SetLaunchMode(attach_inject::LaunchMode::GamaPassAuto);
                 msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
-                ui.pendingAutoLaunch = true;
-                ui.status = "已切换：GAMA PASS自动登录 — 约 3 秒后自动换票（可再点取消）";
+                LaunchPanel_ArmGamaPassAutoLaunch(ui);
             } else {
                 LaunchPanel_ArmStrategyPrep(ui, 7000);
                 if (attach_inject::IsWatching()) attach_inject::StopWatch();
@@ -263,7 +377,7 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
                 "手动：自行开游戏后监视注入。\n"
-                "GAMA PASS：日常浏览器 UIA 点选换票（无需账密）；切模式/冷启约 3 秒自动换票。\n"
+                "GAMA PASS：日常浏览器 UIA 点选换票（无需账密）；切模式/冷启约 5 秒自动换票。\n"
                 "gamania (HK)：账密 HTTP 换票。\n"
                 "写入 XCat_data/state/launch_mode.txt");
         }
@@ -365,6 +479,7 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
         if (msc::weblogin::GetAuthStrategy() != msc::weblogin::AuthStrategy::GamaPassAuto) {
             msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
         }
+        const bool autoPending = ui.pendingAutoLaunch;
         const float slotW = (std::max)(AppDpi_Px(88.f), (rowW - gap) * 0.5f - AppDpi_Px(36.f));
         int accountSlot = msc::weblogin::GetGamaPassAccountSlot();
         ImGui::TextUnformatted("账号");
@@ -379,7 +494,7 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
         }
         if (busy) ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Gama Pass 账号列表序号：1=第一个。换票中不可改。");
+            ImGui::SetTooltip("Gama Pass 账号列表序号：1=第一个。读秒中可改，换票开始后不可改。");
         }
         ImGui::SameLine(0.f, gap);
         int nickSlot = msc::weblogin::GetGamaPassNickSlot();
@@ -395,22 +510,23 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
         }
         if (busy) ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("游戏昵称列表序号：1=第一个（不含「建立暱稱」）。换票中不可改。");
+            ImGui::SetTooltip("游戏昵称列表序号：1=第一个（不含「建立暱稱」）。读秒中可改，换票开始后不可改。");
         }
 
         // —— 行 3：主按钮 ——
-        const bool autoPending = ui.pendingAutoLaunch;
         if (busy) ImGui::BeginDisabled();
-        const char* gpLabel = autoPending ? "取消自动换票" : "GAMA PASS 启动游戏";
+        const char* gpLabel = autoPending ? "取消自动登录" : "GAMA PASS自动登录";
         if (ImGui::Button(gpLabel, ImVec2(-1.f, btnH))) {
             if (autoPending) {
                 sound::UiClick();
                 LaunchPanel_CancelPendingAutoLaunch(ui);
-                ui.status = "已取消自动换票 — 需要时再点「GAMA PASS 启动游戏」";
+                ui.status = "已取消自动登录 — 可改账号/昵称槽，再点「GAMA PASS自动登录」重新读秒";
                 xcat::log::Info("App", "user cancelled pending GamaPass auto-launch");
             } else {
                 msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
-                LaunchPanel_StartOneClick(ui);
+                LaunchPanel_ArmGamaPassAutoLaunch(ui);
+                xcat::log::Info("App", "user re-armed GamaPass auto-launch (%us)",
+                                kGamaPassAutoPrepSec);
             }
         }
         if (busy) ImGui::EndDisabled();
@@ -465,10 +581,12 @@ void DrawUpdateControl() {
         }
         ImGui::ProgressBar(frac, ImVec2(-1.f, AppDpi_Px(4.f)));
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !snap.message.empty()) {
-            ImGui::SetTooltip("%s", snap.message.c_str());
+            const std::string msgUi = SanitizeImGuiLogLine(snap.message);
+            ImGui::SetTooltip("%s", msgUi.c_str());
         }
     } else if (!snap.message.empty()) {
-        ImGui::TextWrapped("%s", snap.message.c_str());
+        const std::string msgUi = SanitizeImGuiLogLine(snap.message);
+        ImGui::TextWrapped("%s", msgUi.c_str());
     }
     ImGui::PopID();
 }
@@ -511,6 +629,142 @@ void DrawLaunchTab(LaunchUiState& ui) {
 
     CardGap();
     {
+        // 功能未完成：整卡置灰，防止误点开独立罐。改 true 即恢复可点。
+        constexpr bool kGpDeviceLoginUiReady = false;
+        xcat::ui::CardGuard card("##tab_gp_device_login",
+                                 kGpDeviceLoginUiReady ? "Gama Pass 账密登录"
+                                                       : "Gama Pass 账密登录（未开放）");
+        static bool loaded = false;
+        if (kGpDeviceLoginUiReady && !loaded) {
+            loaded = true;
+            const std::wstring path =
+                msc::launcher::GamaPassDeviceLoginStorePath(xcat::Utf8ToWide(ui.prefsBinDir));
+            msc::launcher::GamaPassDeviceLoginAccount acc;
+            if (msc::launcher::LoadGamaPassDeviceLoginAccount(path, acc) && !acc.email.empty()) {
+                const std::string line = msc::launcher::FormatGamaPassDeviceLoginLine(acc);
+                std::snprintf(ui.gpLoginLine, sizeof(ui.gpLoginLine), "%s", line.c_str());
+                ui.gpLoginBrowserKind = static_cast<int>(acc.browserKind);
+            }
+        }
+
+        if (kGpDeviceLoginUiReady) {
+            ImGui::TextWrapped(
+                "独立模块：只帮你在专用浏览器窗口登 Gama Pass。"
+                "粘贴卖家整行：账号----密码----邮箱密码----device_id。"
+                "原样钉第 4 段 device_id（禁止自造、不加横线）。"
+                "不换票、不开游戏。登录成功后会关掉这扇独立窗，再点上面的「GAMA PASS自动登录」换票。"
+                "二次验证请在弹出窗里完成；失败则窗口保持打开。日常 Chrome/Edge 登录态不动。");
+        } else {
+            ImGui::TextWrapped("功能尚未开放，请用上面的「GAMA PASS自动登录」。");
+        }
+        if (!kGpDeviceLoginUiReady) ImGui::BeginDisabled();
+
+        const float btnH = ui::BtnH();
+        const bool gpBusy = msc::launcher::IsGamaPassDeviceLoginBusy();
+        if (gpBusy) ImGui::BeginDisabled();
+        ImGui::SetNextItemWidth(-1.f);
+        ImGui::InputTextWithHint(
+            "##gp_login_line",
+            "账号----密码----邮箱密码----device_id",
+            ui.gpLoginLine, sizeof(ui.gpLoginLine),
+            gpBusy ? ImGuiInputTextFlags_ReadOnly : 0);
+        if (gpBusy) ImGui::EndDisabled();
+
+        msc::launcher::GamaPassDeviceLoginAccount preview;
+        std::string parseErr;
+        const bool lineOk =
+            msc::launcher::ParseGamaPassDeviceLoginLine(ui.gpLoginLine, preview, parseErr);
+        if (lineOk) {
+            ImGui::TextDisabled("账号 %s  ·  device_id %s", preview.email.c_str(),
+                                preview.deviceId.c_str());
+        } else if (ui.gpLoginLine[0] != '\0') {
+            ImGui::TextDisabled("%s", parseErr.c_str());
+        }
+
+        {
+            if (!lineOk) ImGui::BeginDisabled();
+            if (ImGui::Button("复制 device_id", ImVec2(AppDpi_Px(120.f), btnH))) {
+                sound::UiClick();
+                ImGui::SetClipboardText(preview.deviceId.c_str());
+                ui.status = "已复制卖家 device_id";
+            }
+            if (!lineOk) ImGui::EndDisabled();
+        }
+
+        static std::string browserHint;
+        static DWORD lastProbe = 0;
+        if (kGpDeviceLoginUiReady && (lastProbe == 0 || GetTickCount() - lastProbe > 4000)) {
+            lastProbe = GetTickCount();
+            std::wstring exe, label;
+            const auto kind =
+                static_cast<msc::launcher::GpDeviceLoginBrowserKind>(ui.gpLoginBrowserKind);
+            if (msc::launcher::ResolveGamaPassDeviceLoginBrowser(exe, label, nullptr, kind)) {
+                browserHint = xcat::WideToUtf8(label) + " · 独立配置目录（非日常）";
+            } else {
+                browserHint = "未找到所选浏览器（支持 Chrome++ / Chrome / Edge，不支持 360）";
+            }
+        }
+        {
+            static const char* kBrowserItems[] = {
+                "自动（Chrome++ > Chrome > Edge）",
+                "Chrome++",
+                "Google Chrome",
+                "Microsoft Edge",
+            };
+            ImGui::SetNextItemWidth(-1.f);
+            if (gpBusy) ImGui::BeginDisabled();
+            if (ImGui::Combo("##gp_login_browser", &ui.gpLoginBrowserKind, kBrowserItems, 4)) {
+                lastProbe = 0;
+            }
+            if (gpBusy) ImGui::EndDisabled();
+        }
+        ImGui::TextDisabled("%s", browserHint.c_str());
+
+        if (gpBusy) ImGui::BeginDisabled();
+        if (ImGui::Button(gpBusy ? "登录中…" : "开始登录", ImVec2(-1.f, btnH))) {
+            sound::UiClick();
+            if (!kGpDeviceLoginUiReady) {
+                ui.status = "账密登录助手尚未开放";
+            } else {
+            msc::launcher::GamaPassDeviceLoginAccount acc;
+            std::string lineErr;
+            if (!msc::launcher::ParseGamaPassDeviceLoginLine(ui.gpLoginLine, acc, lineErr)) {
+                ui.status = lineErr.empty() ? "卖家账号行无法解析" : lineErr;
+                sound::UiError();
+            } else {
+                acc.browserKind =
+                    static_cast<msc::launcher::GpDeviceLoginBrowserKind>(ui.gpLoginBrowserKind);
+                const std::wstring path =
+                    msc::launcher::GamaPassDeviceLoginStorePath(xcat::Utf8ToWide(ui.prefsBinDir));
+                std::wstring err;
+                if (!msc::launcher::StartGamaPassDeviceLogin(
+                        acc, path, [](const std::wstring& line) { LaunchPanel_OnWebLog(line); },
+                        err)) {
+                    ui.status = err.empty() ? "无法开始账密登录" : xcat::WideToUtf8(err);
+                    sound::UiError();
+                } else {
+                    ui.status = "已打开独立登录窗口（钉卖家 device_id；成功后自动关窗，不换票）";
+                }
+            }
+            }
+        }
+        if (gpBusy) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (!kGpDeviceLoginUiReady) {
+                ImGui::SetTooltip("功能尚未开放，请用上面的 GAMA PASS自动登录。");
+            } else {
+                ImGui::SetTooltip(
+                    "浏览器：Chrome++ / Chrome / Edge（可选手选；360 不支持）。\n"
+                    "各浏览器独立配置目录，不开日常 User Data。\n"
+                    "accounts 页填第 2 段 Gama Pass 密码；第 3 段邮箱密码只保存不填。\n"
+                    "device_id 必须是 32 位 hex。二次验证请在弹出窗口里自己完成。");
+            }
+        }
+        if (!kGpDeviceLoginUiReady) ImGui::EndDisabled();
+    }
+
+    CardGap();
+    {
         xcat::ui::CardGuard card("##tab_launch_log", "登录日志", /*fillRemaining=*/true);
         ImGui::TextUnformatted(msc::weblogin::IsBusy() || attach_inject::IsInjectBusy()
                                    ? "进行中…"
@@ -527,13 +781,13 @@ void DrawLaunchTab(LaunchUiState& ui) {
 
 // LiveStep UI 状态：首页落盘与「实验」TAB 共用，避免两处 static 互相覆盖。
 static bool gUiCombatLiveStep = false;
-// 跳过攻击动画 / 砍动画倒计时 / 清忙锁：首页落盘；控件在实验 TAB 独立卡片。
+// 跳过攻击动画 / 砍动画倒计时 / 清忙锁：首页落盘字段保留；控件在实验 TAB。
 static bool gUiAttackAccelSkipPrepare = false;  // 与 PayloadControl 默认一致
-static bool gUiAttackAccelClearBusy = false;    // 实验·清 ActionBusy
-// 清忙锁开时的两刀地板（attackAccelClearBusyMinIntervalMs）。与首页「攻击间隔」独立。
+static bool gUiAttackAccelClearBusy = false;    // 清 ActionBusy（实验 TAB）
+// 历史字段，Apply 不再抬间隔；仍落盘兼容。
 static int gUiAttackAccelClearBusyMinIntervalMs =
     (int)xcat::kAttackAccelClearBusyMinIntervalDefaultMs;
-// 首页「攻击加速 → 间隔」= simpleCombatAttackIntervalMs（攻击间隔，不与清忙锁地板互写）。
+// 首页「挂机 → 出刀间隔」= simpleCombatAttackIntervalMs（与清忙锁开关无关）。
 static int gUiSimpleCombatAttackIntervalMs =
     (int)xcat::kSimpleCombatAttackIntervalDefaultMs;
 static bool gUiAttackAccelCutLayer = false;
@@ -548,17 +802,81 @@ static int gUiAttackAccelBreakDegreeFloorLo =
 // 技能满级 / 终极一击：首页落盘保留字段；控件在实验 TAB。
 static bool gUiSkillMaxLevel = false;
 static bool gUiFinalAttackForce = false;
+// 近战不挥拳：首页落盘保留；控件在实验 TAB。
+static bool gUiMeleeVeto = false;
 // 打怪 TICK：首页落盘；控件在调试 TAB。
 static int gUiCombatTickMs = (int)xcat::kSimpleCombatTickDefaultMs;
 // 出刀按键 hold：控件在调试 TAB，与 TICK 同卡片共用一次读盘。
 static int gUiAttackHoldMs = (int)xcat::kAttackHoldDefaultMs;
-// F5 追怪策略：首页落盘；控件在调试 TAB「打怪节奏」。
-static int gUiApproachMode = 0;  // 0=空中贴怪 / 1=拟人 / 2=关闭
+// F5 追怪策略：首页 Combo + persistCore 落盘。
+static int gUiApproachMode = 0;  // 0=空中贴怪 / 1=拟人 / 2=站桩输出 / 3=关闭
+static int gUiHiraishinLootHoldMs = (int)xcat::kHiraishinLootHoldDefaultMs;
+static int gUiHiraishinRangePx = (int)xcat::kHiraishinRangeDefaultPx;
+static int gUiHiraishinFrontDx = (int)xcat::kHiraishinFrontDxDefault;
+static int gUiHiraishinFrontDy = (int)xcat::kHiraishinFrontDyDefault;
+static const char* ApproachModeName(int m) {
+    switch (m) {
+        case 0:
+            return "空中贴怪";
+        case 1:
+            return "拟人";
+        case 2:
+            return "站桩输出";
+        default:
+            return "关闭";
+    }
+}
 // attack_rpc：仅实验 TAB；与 payload core 同步。
 static bool gUiAttackRpc = false;
 static int gUiAttackRpcMobs = (int)xcat::kAttackRpcMobsDefault;
 static int gUiAttackRpcIntervalMs = (int)xcat::kAttackRpcIntervalDefaultMs;
 static int gUiAttackRpcDamage = (int)xcat::kAttackRpcDamageDefault;
+static bool gUiCombatForgeHit = false;
+static bool gUiMapAttack = false;
+static bool gUiMobGather = false;
+static int gUiMobGatherSpeedPct = (int)xcat::kMobGatherSpeedPctDefault;
+static bool gUiMobGatherAntiJitter = xcat::kMobGatherAntiJitterDefault != 0;
+static int gUiMobGatherMax = (int)xcat::kMobGatherMaxDefault;
+static int gUiMobGatherFarInFlight = (int)xcat::kMobGatherFarInFlightDefault;
+static int gUiMobGatherRadiusPx = (int)xcat::kMobGatherRadiusDefaultPx;
+static int gUiMobGatherLayerYPx = (int)xcat::kMobGatherLayerYPxDefault;
+static int gUiMobGatherDyLimPx = (int)xcat::kMobGatherDyLimPxDefault;
+static int gUiMobGatherWalkDx = (int)xcat::kMobGatherWalkDxDefault;
+static int gUiMobGatherFeetExemptPx = (int)xcat::kMobGatherFeetExemptPxDefault;
+static int gUiMobGatherHoldMs = (int)xcat::kMobGatherHoldMsDefault;
+static int gUiMobGatherIntervalMs = (int)xcat::kMobGatherIntervalDefaultMs;
+static bool gUiMobGatherIgnoreQuiet = xcat::kMobGatherIgnoreQuietDefault != 0;
+static int gUiMobGatherQuietDelayMs = (int)xcat::kMobGatherQuietDelayMsDefault;
+static bool gUiMobGatherStandOffCustom = xcat::kMobGatherStandOffCustomDefault != 0;
+static int gUiMobGatherStandOffX = (int)xcat::kMobGatherStandOffXDefault;
+static int gUiMobGatherStandOffY = (int)xcat::kMobGatherStandOffYDefault;
+static int gUiMobGatherStickCreep = (int)xcat::kMobGatherStickCreepDefault;
+static int gUiMobGatherStickStillV = (int)xcat::kMobGatherStickStillVDefault;
+static int gUiMobGatherCruiseR = (int)xcat::kMobGatherCruiseRDefault;
+static int gUiMobGatherStationR = (int)xcat::kMobGatherStationRDefault;
+static int gUiMobGatherMaxCmd = (int)xcat::kMobGatherMaxCmdDefault;
+static int gUiMobGatherKp = (int)xcat::kMobGatherKpDefault;
+static int gUiMobGatherDead = (int)xcat::kMobGatherDeadDefault;
+static int gUiMobGatherGravity = (int)xcat::kMobGatherGravityDefault;
+static int gUiMobGatherCruiseV = (int)xcat::kMobGatherCruiseVDefault;
+static int gUiMobGatherStationV = (int)xcat::kMobGatherStationVDefault;
+static int gUiMobGatherHoldV = (int)xcat::kMobGatherHoldVDefault;
+static int gUiMobGatherSettleErr = (int)xcat::kMobGatherSettleErrDefault;
+static int gUiMobGatherKpSettle = (int)xcat::kMobGatherKpSettleDefault;
+static int gUiMobGatherBrakeMs = (int)xcat::kMobGatherBrakeMsDefault;
+static int gUiMobGatherCoastVy = (int)xcat::kMobGatherCoastVyDefault;
+static int gUiMobGatherAimMs = (int)xcat::kMobGatherAimMsDefault;
+static bool gUiMobGatherSoftRelogin = xcat::kMobGatherSoftReloginDefault != 0;
+static int gUiMobGatherSoftReloginSec = (int)xcat::kMobGatherSoftReloginSecDefault;
+static bool gUiMobGatherClearRelogin = xcat::kMobGatherClearReloginDefault != 0;
+static bool gUiMobGatherSeekCluster = xcat::kMobGatherSeekClusterDefault != 0;
+static bool gUiMobGatherHomeReturn = xcat::kMobGatherHomeReturnDefault != 0;
+static int gUiMobGatherHomeX = 0;
+static int gUiMobGatherHomeY = 0;
+static int gUiMobGatherHomeMapId = 0;
+static bool gUiMobGatherHomeValid = false;
+static bool gUiMobGatherHomeHasMap = false;
+static bool gUiMobGatherApplyCtrl = false;
 // 地面门旁路：仅实验 TAB；与站立伪装（simpleCombatGroundSpoof）独立。
 static bool gUiCurFhGateBypass = false;
 // F6 手动飞 / F5 滑翔倍率：首页「飞行速度」卡；调试 TAB 不再改这两项。
@@ -570,7 +888,8 @@ static bool gUiAntiJitter = xcat::kCombatAntiJitterDefault != 0;
 static int gUiPumpCongestion = (int)xcat::kPumpCongestionDefault;
 
 void DrawHomeTab(LaunchUiState& ui) {
-    // 首页卡片顺序：启动浓缩条 → 挂机 → 飞行速度 → 拾物 → 攻击加速 → 打怪设置 → 卖背包
+    // 首页卡片顺序：启动浓缩条 → 挂机 → 飞行速度 → 拾物 → 打怪设置
+    // 吸怪业务在「吸怪」TAB；飞控旋钮在「调试 → 吸怪飞控」。
     {
         xcat::ui::CardGuard card("##tab_home_launch", "启动");
         DrawLaunchCompactBar(ui);
@@ -583,7 +902,6 @@ void DrawHomeTab(LaunchUiState& ui) {
     static char worldName[64]{"雪吉拉"};
     static bool autoLie = true;  // 与 PayloadControl 默认一致；读盘后覆盖
     static bool invincible = true;  // 与 PayloadControl 默认一致
-    static bool attackAccel = false;
     static bool fly = false;
     static bool hpPotion = true;
     static bool mpPotion = true;
@@ -591,13 +909,6 @@ void DrawHomeTab(LaunchUiState& ui) {
     static bool petSummonRequireFood = false;
     static int hpThresholdPct = 50;
     static int mpThresholdPct = 30;
-    static bool autoStatEnabled = xcat::kAutoStatDefaultEnabled != 0;
-    static int autoStatStr = 0;
-    static int autoStatDex = 0;
-    static int autoStatInt = 0;
-    static int autoStatLuk = 0;
-    static uint64_t autoStatTick = 0;
-    static bool autoStatLoaded = false;
     static bool autoCombat = false;
     // 空中贴怪的自定义站距：关=用内置近战最优值；开=完全听用户的（远程职业）
     static bool standOffCustom = false;
@@ -605,8 +916,6 @@ void DrawHomeTab(LaunchUiState& ui) {
     static int standOffY = (int)xcat::kCombatStandOffYDefault;
     // 防贴脸退避：站距 X/Y 内有任何怪就把站位点推开；复用上面那组 X/Y 当半径；默认关
     static bool antiHug = false;
-    // 近战不挥拳：让普攻的近战那一发判负，落到兜底射击；模块内先测量再决定要不要真拦
-    static bool meleeVeto = false;
     // 站立伪装：出刀瞬间伪造踩台，给腾空放不出技能的职业用；默认关
     static bool groundSpoof = false;
     static bool smartInterval = false;
@@ -621,39 +930,6 @@ void DrawHomeTab(LaunchUiState& ui) {
     static int oneshotMinFires = (int)xcat::kCombatOneshotMinFiresDefault;
     static int oneshotMinLagMs = (int)xcat::kCombatOneshotMinLagMsDefault;
     static int oneshotFoxFillGapMs = (int)xcat::kCombatOneshotFoxFillGapDefaultMs;
-    static bool autoSell = false;
-    static bool tripOnPotionEmpty = false;
-    static int tripOnPotionBelow = 1;
-    static bool tripOnCustomLow = false;
-    static int tripOnCustomBelow = 0;
-    static bool tripOnCustom2Low = false;
-    static int tripOnCustom2Below = 0;
-    static bool tripOnFeedLow = false;
-    static int tripOnFeedBelow = 0;
-    static int sellEquipTrigger = 0;
-    static bool refillHp = false;
-    static bool refillMp = false;
-    static bool refillCustom = false;
-    static bool refillCustom2 = false;
-    static bool refillFeed = true;
-    static char refillHpName[64]{};
-    static char refillMpName[64]{};
-    static char refillCustomName[64]{};
-    static char refillCustom2Name[64]{};
-    static char refillFeedName[64]{};
-    static char refillHpCode[24]{};
-    static char refillMpCode[24]{};
-    static char refillCustomCode[24]{};
-    static char refillCustom2Code[24]{};
-    static char refillFeedCode[24]{};
-    static int refillHpBuyTo = 0;
-    static int refillMpBuyTo = (int)xcat::kAutoSupplyDefaultRefillMpBuyTo;
-    static int refillCustomBuyTo = (int)xcat::kAutoSupplyDefaultRefillCustomBuyTo;
-    static int refillCustom2BuyTo = 0;
-    static int refillFeedBuyTo = (int)xcat::kAutoSupplyDefaultRefillFeedBuyTo;
-    static bool rechargeStars = false;
-    static uint64_t asupTick = 0;
-    static bool asupLoaded = false;
     static bool watchdog = true;
     static int noExpSec = static_cast<int>(xcat::kWatchdogNoExpSecDefault);
     static int cooldownSec = static_cast<int>(xcat::kWatchdogCooldownSecDefault);
@@ -667,8 +943,6 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (!coreLoaded || disk.writeTickMs != lastSeenTick) {
                 autoLie = disk.autoLie != 0;
                 invincible = disk.invuln != 0;
-                attackAccel =
-                    xcat::kAttackAccelUserEnabled && disk.attackAccel != 0;
                 gUiFinalAttackForce =
                     xcat::kFinalAttackForceUserEnabled && disk.finalAttackForce != 0;
                 gUiSkillMaxLevel =
@@ -701,13 +975,23 @@ void DrawHomeTab(LaunchUiState& ui) {
                     gUiApproachMode = 0;
                 else if (disk.simpleCombatHumanWalk != 0)
                     gUiApproachMode = 1;
-                else
+                else if (disk.simpleCombatHiraishin != 0)
                     gUiApproachMode = 2;
+                else
+                    gUiApproachMode = 3;
+                gUiHiraishinLootHoldMs = (int)xcat::ClampHiraishinLootHoldMs(
+                    disk.simpleCombatHiraishinLootHoldMs);
+                gUiHiraishinRangePx = (int)xcat::ClampHiraishinRangePx(
+                    disk.simpleCombatHiraishinRangePx);
+                gUiHiraishinFrontDx = (int)xcat::ClampHiraishinFrontDx(
+                    disk.simpleCombatHiraishinFrontDx);
+                gUiHiraishinFrontDy = (int)xcat::ClampHiraishinFrontDy(
+                    disk.simpleCombatHiraishinFrontDy);
                 standOffCustom = disk.simpleCombatStandOffCustom != 0;
                 standOffX = (int)xcat::ClampCombatStandOffX(disk.simpleCombatStandOffX);
                 standOffY = (int)xcat::ClampCombatStandOffY(disk.simpleCombatStandOffY);
                 antiHug = disk.simpleCombatAntiHug != 0;
-                meleeVeto = disk.meleeVeto != 0;
+                gUiMeleeVeto = disk.meleeVeto != 0;
                 groundSpoof = disk.simpleCombatGroundSpoof != 0;
                 gUiAntiJitter = disk.simpleCombatAntiJitter != 0;
                 gUiFlySpeedPct = (int)xcat::ClampHeliSpeedPct(
@@ -740,6 +1024,85 @@ void DrawHomeTab(LaunchUiState& ui) {
                 gUiAttackRpcDamage = (int)xcat::ClampAttackRpcDamage(
                     disk.attackRpcDamage ? disk.attackRpcDamage
                                          : xcat::kAttackRpcDamageDefault);
+                gUiCombatForgeHit = disk.simpleCombatForgeHit != 0;
+                gUiMapAttack = disk.mapAttack != 0;
+                gUiMobGather = disk.mobGather != 0;
+                gUiMobGatherSpeedPct = (int)xcat::ClampMobGatherSpeedPct(
+                    disk.mobGatherSpeedPct ? disk.mobGatherSpeedPct
+                                           : xcat::kMobGatherSpeedPctDefault);
+                gUiMobGatherAntiJitter = disk.mobGatherAntiJitter != 0;
+                gUiMobGatherMax = (int)xcat::ClampMobGatherMax(
+                    disk.mobGatherMax ? disk.mobGatherMax : xcat::kMobGatherMaxDefault);
+                gUiMobGatherFarInFlight =
+                    (int)xcat::ClampMobGatherFarInFlight(disk.mobGatherFarInFlight);
+                gUiMobGatherRadiusPx = (int)xcat::ClampMobGatherRadiusPx(
+                    disk.mobGatherRadiusPx ? disk.mobGatherRadiusPx
+                                           : xcat::kMobGatherRadiusDefaultPx);
+                gUiMobGatherLayerYPx = (int)xcat::ClampMobGatherLayerYPx(disk.mobGatherLayerYPx);
+                gUiMobGatherDyLimPx = (int)xcat::ClampMobGatherDyLimPx(disk.mobGatherDyLimPx);
+                gUiMobGatherWalkDx = (int)xcat::ClampMobGatherWalkDx(disk.mobGatherWalkDx);
+                gUiMobGatherFeetExemptPx =
+                    (int)xcat::ClampMobGatherFeetExemptPx(disk.mobGatherFeetExemptPx);
+                gUiMobGatherHoldMs = (int)xcat::ClampMobGatherHoldMs(
+                    disk.mobGatherHoldMs ? disk.mobGatherHoldMs : xcat::kMobGatherHoldMsDefault);
+                gUiMobGatherIntervalMs = (int)xcat::ClampMobGatherIntervalMs(
+                    disk.mobGatherIntervalMs ? disk.mobGatherIntervalMs
+                                             : xcat::kMobGatherIntervalDefaultMs);
+                gUiMobGatherIgnoreQuiet = disk.mobGatherIgnoreQuiet != 0;
+                gUiMobGatherQuietDelayMs =
+                    (int)xcat::ClampMobGatherQuietDelayMs(disk.mobGatherQuietDelayMs);
+                gUiMobGatherStandOffCustom = disk.mobGatherStandOffCustom != 0;
+                gUiMobGatherStandOffX = (int)xcat::ClampMobGatherStandOffX(disk.mobGatherStandOffX);
+                gUiMobGatherStandOffY = (int)xcat::ClampMobGatherStandOffY(disk.mobGatherStandOffY);
+                gUiMobGatherStickCreep = (int)xcat::ClampMobGatherStickCreep(
+                    disk.mobGatherStickCreepPx ? disk.mobGatherStickCreepPx
+                                               : xcat::kMobGatherStickCreepDefault);
+                gUiMobGatherStickStillV =
+                    (int)xcat::ClampMobGatherStickStillV(disk.mobGatherStickStillV);
+                gUiMobGatherCruiseR = (int)xcat::ClampMobGatherCruiseR(
+                    disk.mobGatherCruiseR ? disk.mobGatherCruiseR : xcat::kMobGatherCruiseRDefault);
+                gUiMobGatherStationR = (int)xcat::ClampMobGatherStationR(
+                    disk.mobGatherStationR ? disk.mobGatherStationR
+                                           : xcat::kMobGatherStationRDefault);
+                gUiMobGatherMaxCmd = (int)xcat::ClampMobGatherMaxCmd(
+                    disk.mobGatherMaxCmd ? disk.mobGatherMaxCmd : xcat::kMobGatherMaxCmdDefault);
+                gUiMobGatherKp = (int)xcat::ClampMobGatherKp(
+                    disk.mobGatherKp ? disk.mobGatherKp : xcat::kMobGatherKpDefault);
+                gUiMobGatherDead = (int)xcat::ClampMobGatherDead(
+                    disk.mobGatherDead ? disk.mobGatherDead : xcat::kMobGatherDeadDefault);
+                gUiMobGatherGravity = (int)xcat::ClampMobGatherGravity(disk.mobGatherGravity);
+                gUiMobGatherCruiseV = (int)xcat::ClampMobGatherCruiseV(
+                    disk.mobGatherCruiseV ? disk.mobGatherCruiseV
+                                          : xcat::kMobGatherCruiseVDefault);
+                gUiMobGatherStationV = (int)xcat::ClampMobGatherStationV(
+                    disk.mobGatherStationV ? disk.mobGatherStationV
+                                           : xcat::kMobGatherStationVDefault);
+                gUiMobGatherHoldV = (int)xcat::ClampMobGatherHoldV(
+                    disk.mobGatherHoldV ? disk.mobGatherHoldV : xcat::kMobGatherHoldVDefault);
+                gUiMobGatherSettleErr = (int)xcat::ClampMobGatherSettleErr(
+                    disk.mobGatherSettleErr ? disk.mobGatherSettleErr
+                                            : xcat::kMobGatherSettleErrDefault);
+                gUiMobGatherKpSettle = (int)xcat::ClampMobGatherKpSettle(
+                    disk.mobGatherKpSettle ? disk.mobGatherKpSettle
+                                           : xcat::kMobGatherKpSettleDefault);
+                gUiMobGatherBrakeMs = (int)xcat::ClampMobGatherBrakeMs(
+                    disk.mobGatherBrakeMs ? disk.mobGatherBrakeMs : xcat::kMobGatherBrakeMsDefault);
+                gUiMobGatherCoastVy = (int)xcat::ClampMobGatherCoastVy(disk.mobGatherCoastVy);
+                gUiMobGatherAimMs = (int)xcat::ClampMobGatherAimMs(
+                    disk.mobGatherAimMs ? disk.mobGatherAimMs : xcat::kMobGatherAimMsDefault);
+                gUiMobGatherSoftRelogin = disk.mobGatherSoftRelogin != 0;
+                gUiMobGatherSoftReloginSec = (int)xcat::ClampMobGatherSoftReloginSec(
+                    disk.mobGatherSoftReloginSec ? disk.mobGatherSoftReloginSec
+                                                 : xcat::kMobGatherSoftReloginSecDefault);
+                gUiMobGatherClearRelogin = disk.mobGatherClearRelogin != 0;
+                gUiMobGatherSeekCluster = disk.mobGatherSeekCluster != 0;
+                gUiMobGatherHomeReturn = disk.mobGatherHomeReturn != 0;
+                gUiMobGatherHomeX = (int)xcat::ClampMobGatherStandOffX(disk.mobGatherHomeX);
+                gUiMobGatherHomeY = (int)xcat::ClampMobGatherStandOffY(disk.mobGatherHomeY);
+                gUiMobGatherHomeMapId = disk.mobGatherHomeMapId;
+                gUiMobGatherHomeValid = disk.mobGatherHomeValid != 0;
+                gUiMobGatherHomeHasMap = disk.mobGatherHomeHasMap != 0;
+                gUiMobGatherApplyCtrl = disk.mobGatherApplyCtrl != 0;
                 teleportMinDx = (int)xcat::ClampCombatTeleportMinDx(
                     disk.simpleCombatTeleportMinDx ? disk.simpleCombatTeleportMinDx
                                                    : xcat::kCombatTeleportMinDxDefault);
@@ -787,68 +1150,16 @@ void DrawHomeTab(LaunchUiState& ui) {
         } else if (!coreLoaded) {
             coreLoaded = true;
         }
-        if (!asupLoaded) {
-            xcat::AutoSupplyConfig as{};
-            if (!xcat::ReadAutoSupply(ui.prefsBinDir.c_str(), as))
-                xcat::AutoSupplySetDefaults(as);
-            autoSell = (as.enabled != 0) || (as.autoSellOnBagFullEnabled != 0);
-            tripOnPotionEmpty = as.tripOnPotionEmpty != 0;
-            tripOnPotionBelow = as.tripOnPotionBelow > 0 ? as.tripOnPotionBelow : 1;
-            tripOnCustomLow = as.tripOnCustomLow != 0;
-            tripOnCustomBelow = as.tripOnCustomBelow;
-            tripOnCustom2Low = as.tripOnCustom2Low != 0;
-            tripOnCustom2Below = as.tripOnCustom2Below;
-            tripOnFeedLow = as.tripOnFeedLow != 0;
-            tripOnFeedBelow = as.tripOnFeedBelow;
-            sellEquipTrigger = as.sellFreeSlotsAtOrBelow;
-            refillHp = as.refillHpEnabled != 0;
-            refillMp = as.refillMpEnabled != 0;
-            refillCustom = as.refillCustomEnabled != 0;
-            refillCustom2 = as.refillCustom2Enabled != 0;
-            refillFeed = as.refillFeedEnabled != 0;
-            strncpy_s(refillHpName, as.refillHpName, _TRUNCATE);
-            strncpy_s(refillMpName, as.refillMpName, _TRUNCATE);
-            strncpy_s(refillCustomName, as.refillCustomName, _TRUNCATE);
-            strncpy_s(refillCustom2Name, as.refillCustom2Name, _TRUNCATE);
-            strncpy_s(refillFeedName, as.refillFeedName, _TRUNCATE);
-            strncpy_s(refillHpCode, as.refillHpCode, _TRUNCATE);
-            strncpy_s(refillMpCode, as.refillMpCode, _TRUNCATE);
-            strncpy_s(refillCustomCode, as.refillCustomCode, _TRUNCATE);
-            strncpy_s(refillCustom2Code, as.refillCustom2Code, _TRUNCATE);
-            strncpy_s(refillFeedCode, as.refillFeedCode, _TRUNCATE);
-            refillHpBuyTo = as.refillHpBuyTo;
-            refillMpBuyTo = as.refillMpBuyTo;
-            refillCustomBuyTo = as.refillCustomBuyTo;
-            refillCustom2BuyTo = as.refillCustom2BuyTo;
-            refillFeedBuyTo = as.refillFeedBuyTo;
-            rechargeStars = as.rechargeStarsEnabled != 0;
-            asupTick = as.writeTickMs;
-            asupLoaded = true;
-        }
-        xcat::AutoStatConfig ast{};
-        if (xcat::ReadAutoStat(ui.prefsBinDir.c_str(), ast)) {
-            if (!autoStatLoaded || ast.writeTickMs != autoStatTick) {
-                autoStatEnabled = ast.enabled != 0;
-                autoStatStr = static_cast<int>(ast.str);
-                autoStatDex = static_cast<int>(ast.dex);
-                autoStatInt = static_cast<int>(ast.intel);
-                autoStatLuk = static_cast<int>(ast.luk);
-                autoStatTick = ast.writeTickMs;
-                autoStatLoaded = true;
-            }
-        } else if (!autoStatLoaded) {
-            autoStatLoaded = true;
-        }
     }
 
     auto persistCore = [&]() {
-        if (ui.prefsBinDir.empty()) return;
+        // 首页字段未从磁盘灌入前禁止写盘，避免 DragInt/勾选把静态默认值盖掉 user.ini。
+        if (ui.prefsBinDir.empty() || !coreLoaded) return;
         xcat::PayloadControl c{};
         (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
         c.autoLie = autoLie ? 1u : 0u;
         c.invuln = invincible ? 1u : 0u;
-        c.attackAccel =
-            (xcat::kAttackAccelUserEnabled && attackAccel) ? 1u : 0u;
+        c.attackAccel = 0;  // 首页入口已删；旧 attackAccel 包强制关
         c.finalAttackForce =
             (xcat::kFinalAttackForceUserEnabled && gUiFinalAttackForce) ? 1u : 0u;
         c.skillMaxLevel =
@@ -876,15 +1187,28 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.petSummon = petSummon ? 1u : 0u;
         c.petSummonRequireFood = petSummonRequireFood ? 1u : 0u;
         c.simpleCombat = autoCombat ? 1u : 0u;
-        // 单选落盘：空中贴怪 / 拟人互斥；关闭则两者皆关。
+        // 单选落盘：空中贴怪 / 拟人 / 站桩输出互斥；关闭则全关。
         c.simpleCombatImpactApproach = (gUiApproachMode == 0) ? 1u : 0u;
         c.simpleCombatHumanWalk = (gUiApproachMode == 1) ? 1u : 0u;
+        c.simpleCombatHiraishin = (gUiApproachMode == 2) ? 1u : 0u;
+        c.simpleCombatHiraishinLootHoldMs = xcat::ClampHiraishinLootHoldMs(
+            static_cast<uint32_t>(gUiHiraishinLootHoldMs < 0 ? 0 : gUiHiraishinLootHoldMs));
+        gUiHiraishinLootHoldMs = (int)c.simpleCombatHiraishinLootHoldMs;
+        c.simpleCombatHiraishinRangePx = xcat::ClampHiraishinRangePx(
+            static_cast<uint32_t>(gUiHiraishinRangePx < 0 ? 0 : gUiHiraishinRangePx));
+        gUiHiraishinRangePx = (int)c.simpleCombatHiraishinRangePx;
+        c.simpleCombatHiraishinFrontDx = xcat::ClampHiraishinFrontDx(
+            static_cast<uint32_t>(gUiHiraishinFrontDx < 0 ? 0 : gUiHiraishinFrontDx));
+        gUiHiraishinFrontDx = (int)c.simpleCombatHiraishinFrontDx;
+        c.simpleCombatHiraishinFrontDy = xcat::ClampHiraishinFrontDy(
+            static_cast<uint32_t>(gUiHiraishinFrontDy < 0 ? 0 : gUiHiraishinFrontDy));
+        gUiHiraishinFrontDy = (int)c.simpleCombatHiraishinFrontDy;
         c.simpleCombatStandOffCustom = standOffCustom ? 1u : 0u;
         c.simpleCombatStandOffX =
             xcat::ClampCombatStandOffX(static_cast<uint32_t>(standOffX < 0 ? 0 : standOffX));
         c.simpleCombatStandOffY = xcat::ClampCombatStandOffY(static_cast<int32_t>(standOffY));
         c.simpleCombatAntiHug = antiHug ? 1u : 0u;
-        c.meleeVeto = meleeVeto ? 1u : 0u;
+        c.meleeVeto = gUiMeleeVeto ? 1u : 0u;
         c.simpleCombatGroundSpoof = groundSpoof ? 1u : 0u;
         c.simpleCombatAntiJitter = gUiAntiJitter ? 1u : 0u;
         c.simpleCombatFlySpeedPct =
@@ -910,6 +1234,75 @@ void DrawHomeTab(LaunchUiState& ui) {
             static_cast<uint32_t>(gUiAttackRpcIntervalMs < 0 ? 0 : gUiAttackRpcIntervalMs));
         c.attackRpcDamage = xcat::ClampAttackRpcDamage(
             static_cast<uint32_t>(gUiAttackRpcDamage < 0 ? 0 : gUiAttackRpcDamage));
+        c.simpleCombatForgeHit = gUiCombatForgeHit ? 1u : 0u;
+        c.mapAttack = gUiMapAttack ? 1u : 0u;
+        c.mobGather = gUiMobGather ? 1u : 0u;
+        c.mobGatherSpeedPct = xcat::ClampMobGatherSpeedPct(
+            static_cast<uint32_t>(gUiMobGatherSpeedPct < 0 ? 0 : gUiMobGatherSpeedPct));
+        c.mobGatherAntiJitter = gUiMobGatherAntiJitter ? 1u : 0u;
+        c.mobGatherMax = xcat::ClampMobGatherMax(
+            static_cast<uint32_t>(gUiMobGatherMax < 0 ? 0 : gUiMobGatherMax));
+        c.mobGatherFarInFlight = xcat::ClampMobGatherFarInFlight(
+            static_cast<uint32_t>(gUiMobGatherFarInFlight < 0 ? 0 : gUiMobGatherFarInFlight));
+        c.mobGatherRadiusPx = xcat::ClampMobGatherRadiusPx(
+            static_cast<uint32_t>(gUiMobGatherRadiusPx < 0 ? 0 : gUiMobGatherRadiusPx));
+        c.mobGatherLayerYPx = xcat::ClampMobGatherLayerYPx(
+            static_cast<uint32_t>(gUiMobGatherLayerYPx < 0 ? 0 : gUiMobGatherLayerYPx));
+        c.mobGatherDyLimPx = xcat::ClampMobGatherDyLimPx(
+            static_cast<uint32_t>(gUiMobGatherDyLimPx < 0 ? 0 : gUiMobGatherDyLimPx));
+        c.mobGatherWalkDx = xcat::ClampMobGatherWalkDx(
+            static_cast<uint32_t>(gUiMobGatherWalkDx < 0 ? 0 : gUiMobGatherWalkDx));
+        c.mobGatherFeetExemptPx = xcat::ClampMobGatherFeetExemptPx(
+            static_cast<uint32_t>(gUiMobGatherFeetExemptPx < 0 ? 0 : gUiMobGatherFeetExemptPx));
+        c.mobGatherHoldMs = xcat::ClampMobGatherHoldMs(
+            static_cast<uint32_t>(gUiMobGatherHoldMs < 0 ? 0 : gUiMobGatherHoldMs));
+        c.mobGatherIntervalMs = xcat::ClampMobGatherIntervalMs(
+            static_cast<uint32_t>(gUiMobGatherIntervalMs < 0 ? 0 : gUiMobGatherIntervalMs));
+        c.mobGatherIgnoreQuiet = gUiMobGatherIgnoreQuiet ? 1u : 0u;
+        c.mobGatherQuietDelayMs = xcat::ClampMobGatherQuietDelayMs(
+            static_cast<uint32_t>(gUiMobGatherQuietDelayMs < 0 ? 0 : gUiMobGatherQuietDelayMs));
+        c.mobGatherStandOffCustom = gUiMobGatherStandOffCustom ? 1u : 0u;
+        c.mobGatherStandOffX = xcat::ClampMobGatherStandOffX(gUiMobGatherStandOffX);
+        c.mobGatherStandOffY = xcat::ClampMobGatherStandOffY(gUiMobGatherStandOffY);
+        c.mobGatherStickCreepPx = xcat::ClampMobGatherStickCreep(
+            static_cast<uint32_t>(gUiMobGatherStickCreep < 0 ? 0 : gUiMobGatherStickCreep));
+        c.mobGatherStickStillV = xcat::ClampMobGatherStickStillV(
+            static_cast<uint32_t>(gUiMobGatherStickStillV < 0 ? 0 : gUiMobGatherStickStillV));
+        c.mobGatherCruiseR = xcat::ClampMobGatherCruiseR(
+            static_cast<uint32_t>(gUiMobGatherCruiseR < 0 ? 0 : gUiMobGatherCruiseR));
+        c.mobGatherStationR = xcat::ClampMobGatherStationR(
+            static_cast<uint32_t>(gUiMobGatherStationR < 0 ? 0 : gUiMobGatherStationR));
+        c.mobGatherMaxCmd = xcat::ClampMobGatherMaxCmd(
+            static_cast<uint32_t>(gUiMobGatherMaxCmd < 0 ? 0 : gUiMobGatherMaxCmd));
+        c.mobGatherKp = xcat::ClampMobGatherKp(
+            static_cast<uint32_t>(gUiMobGatherKp < 0 ? 0 : gUiMobGatherKp));
+        c.mobGatherDead = xcat::ClampMobGatherDead(
+            static_cast<uint32_t>(gUiMobGatherDead < 0 ? 0 : gUiMobGatherDead));
+        c.mobGatherGravity = xcat::ClampMobGatherGravity(
+            static_cast<uint32_t>(gUiMobGatherGravity < 0 ? 0 : gUiMobGatherGravity));
+        c.mobGatherCruiseV = xcat::ClampMobGatherCruiseV(
+            static_cast<uint32_t>(gUiMobGatherCruiseV < 0 ? 0 : gUiMobGatherCruiseV));
+        c.mobGatherStationV = xcat::ClampMobGatherStationV(
+            static_cast<uint32_t>(gUiMobGatherStationV < 0 ? 0 : gUiMobGatherStationV));
+        c.mobGatherHoldV = xcat::ClampMobGatherHoldV(
+            static_cast<uint32_t>(gUiMobGatherHoldV < 0 ? 0 : gUiMobGatherHoldV));
+        c.mobGatherSettleErr = xcat::ClampMobGatherSettleErr(
+            static_cast<uint32_t>(gUiMobGatherSettleErr < 0 ? 0 : gUiMobGatherSettleErr));
+        c.mobGatherKpSettle = xcat::ClampMobGatherKpSettle(
+            static_cast<uint32_t>(gUiMobGatherKpSettle < 0 ? 0 : gUiMobGatherKpSettle));
+        c.mobGatherBrakeMs = xcat::ClampMobGatherBrakeMs(
+            static_cast<uint32_t>(gUiMobGatherBrakeMs < 0 ? 0 : gUiMobGatherBrakeMs));
+        c.mobGatherCoastVy = xcat::ClampMobGatherCoastVy(
+            static_cast<uint32_t>(gUiMobGatherCoastVy < 0 ? 0 : gUiMobGatherCoastVy));
+        c.mobGatherAimMs = xcat::ClampMobGatherAimMs(
+            static_cast<uint32_t>(gUiMobGatherAimMs < 0 ? 0 : gUiMobGatherAimMs));
+        c.mobGatherSoftRelogin = gUiMobGatherSoftRelogin ? 1u : 0u;
+        c.mobGatherSoftReloginSec = xcat::ClampMobGatherSoftReloginSec(
+            static_cast<uint32_t>(gUiMobGatherSoftReloginSec < 0 ? 0 : gUiMobGatherSoftReloginSec));
+        c.mobGatherClearRelogin = gUiMobGatherClearRelogin ? 1u : 0u;
+        c.mobGatherSeekCluster = gUiMobGatherSeekCluster ? 1u : 0u;
+        c.mobGatherHomeReturn = gUiMobGatherHomeReturn ? 1u : 0u;
+        c.mobGatherApplyCtrl = gUiMobGatherApplyCtrl ? 1u : 0u;
         c.simpleCombatTeleportMinDx =
             xcat::ClampCombatTeleportMinDx(static_cast<uint32_t>(teleportMinDx < 0 ? 0 : teleportMinDx));
         c.simpleCombatTeleportStandOff = xcat::ClampCombatTeleportStandOff(
@@ -944,7 +1337,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         // 仅采证不软重连：galaxy_token_probe.on / GALAXY_TOKEN_PROBE=1（不走本勾选）。
         c.softLoginProbe = softLoginProbe ? 1u : 0u;
         c.galaxyTokenProbe = softLoginProbe ? 1u : 0u;
-        // 补给开关/店图不写 core：真源 [auto_supply]（persistAsup）。
+        // 补给开关/店图不写 core：真源 [auto_supply]。
         c.writeTickMs = GetTickCount64();
         if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
             lastSeenTick = c.writeTickMs;
@@ -952,106 +1345,55 @@ void DrawHomeTab(LaunchUiState& ui) {
                           "已下发 core：测谎=%d 无敌=%d 自动进=%d 加血=%d@%d 加蓝=%d@%d 召宠=%d "
                           "有粮才召=%d 打怪=%d 追怪=%s 间隔=%d 群怪=%d 打中换怪=%d/%d 贴怪瞬移=0 LiveStep=%d "
                           "分区=%d 槽=%d 守护=%d softLogin=%d "
-                          "读怪=%d 终极一击=%d 技能满级=%d 加速=%d",
+                          "读怪=%d 终极一击=%d 技能满级=%d 清忙锁=%d 吸怪=%d/%u%% max=%u r=%u hold=%u iv=%u quiet=%d qdelay=%u",
                           autoLie ? 1 : 0, invincible ? 1 : 0, autoEnter ? 1 : 0,
                           hpPotion ? 1 : 0, hpThresholdPct, mpPotion ? 1 : 0, mpThresholdPct,
-                          petSummon ? 1 : 0, petSummonRequireFood ? 1 : 0, autoCombat ? 1 : 0,
-                          gUiApproachMode == 0   ? "空中贴怪"
-                          : gUiApproachMode == 1 ? "拟人"
-                                              : "关闭",
+                          petSummon ? 1 : 0, petSummonRequireFood ? 1 : 0,                           autoCombat ? 1 : 0, ApproachModeName(gUiApproachMode),
                           gUiSimpleCombatAttackIntervalMs, clusterWeight ? 1 : 0,
                           hitRotateOn ? 1 : 0, hitRotateN,
                           gUiCombatLiveStep ? 1 : 0, worldId, charSlot, watchdog ? 1 : 0,
                           softLoginProbe ? 1 : 0,
                           mobScanIntervalMs, gUiFinalAttackForce ? 1 : 0, gUiSkillMaxLevel ? 1 : 0,
-                          attackAccel ? 1 : 0);
+                          gUiAttackAccelClearBusy ? 1 : 0, gUiMobGather ? 1 : 0, c.mobGatherSpeedPct,
+                          c.mobGatherMax, c.mobGatherRadiusPx, c.mobGatherHoldMs,
+                          c.mobGatherIntervalMs, c.mobGatherIgnoreQuiet ? 1 : 0,
+                          c.mobGatherQuietDelayMs);
         } else {
             xcat::log::Warn("App", "写入 user.ini [core] 失败");
         }
     };
 
-    auto persistAutoStat = [&]() {
-        if (ui.prefsBinDir.empty()) return;
-        xcat::AutoStatConfig cfg{};
-        (void)xcat::ReadAutoStat(ui.prefsBinDir.c_str(), cfg);
-        cfg.enabled = autoStatEnabled ? 1u : 0u;
-        cfg.str = autoStatStr < 0 ? 0u : static_cast<uint32_t>(autoStatStr);
-        cfg.dex = autoStatDex < 0 ? 0u : static_cast<uint32_t>(autoStatDex);
-        cfg.intel = autoStatInt < 0 ? 0u : static_cast<uint32_t>(autoStatInt);
-        cfg.luk = autoStatLuk < 0 ? 0u : static_cast<uint32_t>(autoStatLuk);
-        xcat::AutoStatNormalize(cfg);
-        cfg.writeTickMs = GetTickCount64();
-        if (xcat::WriteAutoStat(ui.prefsBinDir.c_str(), cfg)) {
-            autoStatTick = cfg.writeTickMs;
-            xcat::log::Ok("App", "已下发 auto_stat：开=%d STR=%u DEX=%u INT=%u LUK=%u",
-                          cfg.enabled ? 1 : 0, cfg.str, cfg.dex, cfg.intel, cfg.luk);
-        } else {
-            xcat::log::Warn("App", "写入 user.ini [auto_stat] 失败");
+    // 吸怪 / F5 滑翔 / F6 手动飞共用：输入 + 巡航换算 + 快捷档。
+    // 1.0X 基准合速：巡航 620（heli_rotor.cpp kBase*）。
+    auto speedRow = [&](const char* label, const char* id, int* v, const char* tip,
+                        bool enabled) {
+        ImGui::BeginDisabled(!enabled);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
+        char inId[64]{};
+        snprintf(inId, sizeof(inId), "##%s_in", id);
+        if (ImGui::DragInt(inId, v, 5, (int)xcat::kHeliSpeedPctMin,
+                           (int)xcat::kHeliSpeedPctMax, "%d%%",
+                           ImGuiSliderFlags_AlwaysClamp)) {
+            persistCore();
         }
-    };
-
-    auto persistAsup = [&]() {
-        if (ui.prefsBinDir.empty()) return;
-        xcat::AutoSupplyConfig as{};
-        (void)xcat::ReadAutoSupply(ui.prefsBinDir.c_str(), as);
-        as.enabled = autoSell ? 1u : 0u;
-        as.autoSellOnBagFullEnabled = autoSell ? 1u : 0u;
-        as.tripOnPotionEmpty = tripOnPotionEmpty ? 1u : 0u;
-        as.tripOnPotionBelow = tripOnPotionBelow < 1 ? 1 : tripOnPotionBelow;
-        as.tripOnCustomLow = tripOnCustomLow ? 1u : 0u;
-        as.tripOnCustomBelow = tripOnCustomBelow < 0 ? 0 : tripOnCustomBelow;
-        as.tripOnCustom2Low = tripOnCustom2Low ? 1u : 0u;
-        as.tripOnCustom2Below = tripOnCustom2Below < 0 ? 0 : tripOnCustom2Below;
-        as.tripOnFeedLow = tripOnFeedLow ? 1u : 0u;
-        as.tripOnFeedBelow = tripOnFeedBelow < 0 ? 0 : tripOnFeedBelow;
-        as.shopMapName[0] = '\0';    // 经典版固定自动寻店，不暴露手填店图
-        as.returnMapName[0] = '\0';  // 挂机图由打怪/补给行程自动记录，不手填
-        as.sellFreeSlotsAtOrBelow = sellEquipTrigger < 0 ? 0 : sellEquipTrigger;
-        as.refillHpEnabled = refillHp ? 1u : 0u;
-        as.refillMpEnabled = refillMp ? 1u : 0u;
-        as.refillCustomEnabled = refillCustom ? 1u : 0u;
-        as.refillCustom2Enabled = refillCustom2 ? 1u : 0u;
-        as.refillFeedEnabled = refillFeed ? 1u : 0u;
-        strncpy_s(as.refillHpName, refillHpName, _TRUNCATE);
-        strncpy_s(as.refillMpName, refillMpName, _TRUNCATE);
-        strncpy_s(as.refillCustomName, refillCustomName, _TRUNCATE);
-        strncpy_s(as.refillCustom2Name, refillCustom2Name, _TRUNCATE);
-        strncpy_s(as.refillFeedName, refillFeedName, _TRUNCATE);
-        strncpy_s(as.refillHpCode, refillHpCode, _TRUNCATE);
-        strncpy_s(as.refillMpCode, refillMpCode, _TRUNCATE);
-        strncpy_s(as.refillCustomCode, refillCustomCode, _TRUNCATE);
-        strncpy_s(as.refillCustom2Code, refillCustom2Code, _TRUNCATE);
-        strncpy_s(as.refillFeedCode, refillFeedCode, _TRUNCATE);
-        as.refillHpBuyTo = refillHpBuyTo;
-        as.refillMpBuyTo = refillMpBuyTo;
-        as.refillCustomBuyTo = refillCustomBuyTo;
-        as.refillCustom2BuyTo = refillCustom2BuyTo;
-        as.refillFeedBuyTo = refillFeedBuyTo;
-        as.rechargeStarsEnabled = rechargeStars ? 1u : 0u;
-        as.writeTickMs = GetTickCount64();
-        if (xcat::WriteAutoSupply(ui.prefsBinDir.c_str(), as)) asupTick = as.writeTickMs;
-    };
-
-    auto writeAsupManual = [&](uint32_t kind) -> bool {
-        if (ui.prefsBinDir.empty()) return false;
-        xcat::AutoSupplyConfig as{};
-        (void)xcat::ReadAutoSupply(ui.prefsBinDir.c_str(), as);
-        as.manualSeq = as.manualSeq == 0 ? 1u : as.manualSeq + 1u;
-        as.manualKind = kind;
-        as.shopMapName[0] = '\0';
-        as.returnMapName[0] = '\0';
-        if (kind == xcat::kAutoSupplyManualStop) {
-            as.enabled = 0;
-            as.autoSellOnBagFullEnabled = 0;
-            as.tripOnPotionEmpty = 0;
-            as.tripOnCustomLow = 0;
-            as.tripOnCustom2Low = 0;
-            as.tripOnFeedLow = 0;
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", tip);
+        ImGui::SameLine(0.f, ui::Gap() * 0.5f);
+        ImGui::TextDisabled("= %.0f px/s 巡航", 620.f * (float)(*v) / 100.f);
+        const int presets[] = {100, 200, 300, 500};
+        for (int p : presets) {
+            char btnId[64]{};
+            snprintf(btnId, sizeof(btnId), "%dX##%s_p%d", p / 100, id, p);
+            ImGui::SameLine(0.f, ui::Gap() * 0.4f);
+            if (ImGui::Button(btnId)) {
+                *v = (int)xcat::ClampHeliSpeedPct(static_cast<uint32_t>(p));
+                persistCore();
+            }
         }
-        as.writeTickMs = GetTickCount64();
-        if (!xcat::WriteAutoSupply(ui.prefsBinDir.c_str(), as)) return false;
-        asupTick = as.writeTickMs;
-        return true;
+        ImGui::EndDisabled();
     };
 
     {
@@ -1258,10 +1600,11 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
             if (!lieErr.empty()) {
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.f, 0.35f, 0.35f, 1.f), "%s", lieErr.c_str());
+                const std::string lieErrUi = SanitizeImGuiLogLine(lieErr);
+                ImGui::TextColored(ImVec4(1.f, 0.35f, 0.35f, 1.f), "%s", lieErrUi.c_str());
             }
         }
-        // 对齐枫星：无敌 + 随机换频同行（攻击加速已挪到「打怪设置」上方独立卡）
+        // 对齐枫星：无敌 + 随机换频同行（清忙锁已迁到实验 TAB）
         if (xcat::ui::OptionCheckbox("无敌", &invincible)) persistCore();
         ImGui::SameLine();
         if (ImGui::Button("随机换频", ImVec2(AppDpi_Px(100.f), 0.f))) {
@@ -1301,31 +1644,121 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         ImGui::SameLine();
         ImGui::TextDisabled("F5");
-        ImGui::SameLine(0.f, ui::Gap() * 1.2f);
-        ImGui::TextDisabled("追怪策略 → 调试");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("出刀间隔");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(64.f));
+        if (ImGui::DragInt("##hangup_atk_ms", &gUiSimpleCombatAttackIntervalMs, 1,
+                           (int)xcat::kSimpleCombatAttackIntervalMinMs, 10000))
+            persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "追怪方式（空中贴怪 / 拟人 / 关闭）已挪到「调试」TAB · 打怪节奏。\n"
-                "当前：%s",
-                gUiApproachMode == 0   ? "空中贴怪"
-                : gUiApproachMode == 1 ? "拟人"
-                                       : "关闭");
+                "自动出刀间隔（%u–10000 ms，默认 %ums）。\n"
+                "清忙锁开/关都用这个值；下限 %u ms；过短易空砍/踢号。",
+                (unsigned)xcat::kSimpleCombatAttackIntervalMinMs,
+                (unsigned)xcat::kSimpleCombatAttackIntervalDefaultMs,
+                (unsigned)xcat::kSimpleCombatAttackIntervalMinMs);
         }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextUnformatted("ms");
+        ImGui::Indent(ui::Gap() * 1.2f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("追怪");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(120.f));
+        {
+            const char* approachItems[] = {"空中贴怪", "拟人模式", "站桩输出", "关闭"};
+            if (gUiApproachMode < 0 || gUiApproachMode > 3) gUiApproachMode = 0;
+            if (ImGui::Combo("##f5_approach_mode", &gUiApproachMode, approachItems,
+                             IM_ARRAYSIZE(approachItems))) {
+                persistCore();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "单选追怪方式。\n"
+                    "· 空中贴怪：悬停在怪旁出刀，需无敌，可穿层；默认。\n"
+                    "· 拟人模式：同层走路贴近后 A 键出刀，不做跨层。\n"
+                    "· 站桩输出：人原地砍。面前攻击盒（下方横向/竖直，默认 60×10）\n"
+                    "  里有活怪就一直 A，不等贴脸、不空砍换怪、不禁锁。\n"
+                    "  开打/切策略/换图/软重连后原地站「静止」ms 给吸物；0=不等；换怪不重新站。\n"
+                    "  不自动吸怪；要吸请自己开「吸怪」TAB。\n"
+                    "· 关闭：不追怪（站桩，够得着才砍）。");
+            }
+        }
+        if (gUiApproachMode == 2) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("静止");
+            ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+            ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+            if (ImGui::DragInt("##f5_hiraishin_loot_hold_ms", &gUiHiraishinLootHoldMs, 50,
+                               (int)xcat::kHiraishinLootHoldMinMs,
+                               (int)xcat::kHiraishinLootHoldMaxMs)) {
+                gUiHiraishinLootHoldMs = (int)xcat::ClampHiraishinLootHoldMs(
+                    static_cast<uint32_t>(gUiHiraishinLootHoldMs < 0 ? 0 : gUiHiraishinLootHoldMs));
+                persistCore();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "开打/切到站桩输出/换图/软重连后原地站这么久再出刀，给吸物。\n"
+                    "默认 0=不等。换怪不重新站。中途改滑条不会重开这段等待。");
+            }
+            ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+            ImGui::TextUnformatted("ms");
+            ImGui::SameLine(0.f, ui::Gap());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("横向");
+            ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+            ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+            if (ImGui::DragInt("##f5_hiraishin_front_dx", &gUiHiraishinFrontDx, 10,
+                               (int)xcat::kHiraishinFrontDxMin, (int)xcat::kHiraishinFrontDxMax)) {
+                gUiHiraishinFrontDx = (int)xcat::ClampHiraishinFrontDx(
+                    static_cast<uint32_t>(gUiHiraishinFrontDx < 0 ? 0 : gUiHiraishinFrontDx));
+                persistCore();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "人↔怪 AbsPos 横向半宽（px）。默认 60。0=该轴不限。\n"
+                    "叠怪吸过边会停刀，可加大。砍太远会空刀或踢。");
+            }
+            ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+            ImGui::TextUnformatted("px");
+            ImGui::SameLine(0.f, ui::Gap());
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("竖直");
+            ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+            ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+            if (ImGui::DragInt("##f5_hiraishin_front_dy", &gUiHiraishinFrontDy, 5,
+                               (int)xcat::kHiraishinFrontDyMin, (int)xcat::kHiraishinFrontDyMax)) {
+                gUiHiraishinFrontDy = (int)xcat::ClampHiraishinFrontDy(
+                    static_cast<uint32_t>(gUiHiraishinFrontDy < 0 ? 0 : gUiHiraishinFrontDy));
+                persistCore();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "人↔怪 AbsPos 竖直半高（px）。默认 10。0=该轴不限。\n"
+                    "AbsPos：更大 Y = 更高。叠怪吸过边会停刀，可加大。砍太远会空刀或踢。");
+            }
+            ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+            ImGui::TextUnformatted("px");
+        }
+        ImGui::Unindent(ui::Gap() * 1.2f);
         // 倍率在下方「飞行速度」卡调。
 
-        // 自定义站距：只对「空中贴怪」生效（拟人/关闭走的是地面落点，不归这套飞控管）。
-        ImGui::BeginDisabled(gUiApproachMode != 0);
+        // 自定义站距：只给空中贴怪。吸怪落点在「吸怪」TAB。
+        const bool standOffHost = (gUiApproachMode == 0);
+        ImGui::BeginDisabled(!standOffHost);
         if (xcat::ui::OptionCheckbox("自定义站距", &standOffCustom)) persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "自己指定悬停在怪的哪个方位，给远程职业用。\n"
-                "不勾 = 用内置近战最优值（X=%u，Y=%d），那是几千次出刀分桶实测出来的。\n"
-                "勾上后：用你设的 X/Y 在角色周围模拟攻击 AABB，框内有怪才出刀。\n"
-                "命中率归你调——站太远打不到，程序不会替你拦。",
+                "自己指定人↔怪的水平/垂直间距（空中贴怪悬停）。\n"
+                "吸怪落点请到「吸怪」TAB 调，两套互不影响。\n"
+                "不勾 = 用内置近战最优值（X=%u，Y=%d）。\n"
+                "勾上后：命中率归你调——站太远打不到，程序不会替你拦。",
                 (unsigned)xcat::kCombatStandOffXDefault, (int)xcat::kCombatStandOffYDefault);
         }
         ImGui::SameLine(0.f, ui::Gap() * 1.2f);
-        ImGui::BeginDisabled(gUiApproachMode != 0 || !standOffCustom);
+        ImGui::BeginDisabled(!standOffHost || !standOffCustom);
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("X");
         ImGui::SameLine(0.f, ui::Gap() * 0.45f);
@@ -1338,8 +1771,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "水平站距 / 攻击 AABB 半宽（px，%u–%u）。\n"
-                "站哪一侧由飞控自己选；出刀：|人↔怪|X ≤ 此值。\n"
+                "水平间距（px，%u–%u）。空中贴怪：人离怪心这么远。\n"
                 "近战 20–45 命中最好；弓/弩/法师按自己的射程填。",
                 (unsigned)xcat::kCombatStandOffXMin, (unsigned)xcat::kCombatStandOffXMax);
         }
@@ -1355,9 +1787,9 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "垂直站距：**正数悬在怪上方**，负数在怪下方（px，%d–%d）。\n"
-                "0 = 与怪同高，近战实测最优。\n"
-                "出刀 AABB 竖直中心按此偏置；半高至少为出刀容差。",
+                "垂直间距（px，%d–%d）。AbsPos：**更大 Y = 更高**。\n"
+                "空中贴怪：相对怪心；正数 = 人在怪上方。\n"
+                "0 = 与目标同高，近战实测最优。",
                 (int)xcat::kCombatStandOffYMin, (int)xcat::kCombatStandOffYMax);
         }
         ImGui::EndDisabled();
@@ -1378,32 +1810,16 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         ImGui::EndDisabled();
 
-        // 近战不挥拳：与站位无关，任何追怪模式下都能勾（它改的是普攻的分支，不是走位）。
-        if (xcat::ui::OptionCheckbox("近战不挥拳", &meleeVeto)) persistCore();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "把贴脸时那一发挥拳**取消掉**（实测是取消，不是改成远程那一发）。\n"
-                "只动普攻，技能攻击完全不碰 —— 靠技能键输出的循环不受影响。\n"
-                "\n"
-                "**只拦投掷飞镖**（武器类型 47），勾上即刻生效、不需要观测。\n"
-                "拿别的武器勾了普攻照旧，只会在日志里记一笔观测数据。弓尤其不能拦：\n"
-                "弓的普攻伤害本来就在近战分支里产生，拦了会变成「只飘伤害数字、\n"
-                "怪不掉血」，所以干脆不让它进这条路。\n"
-                "\n"
-                "判决只保证伤害源不在近战分支，服务端认不认还得看 combat.log 里\n"
-                "怪物血量有没有真的掉。发现只飘数字不掉血，立刻取消勾选。");
-        }
-
-        // 站立伪装：同样只对「空中贴怪」有意义（地面追怪本来就站着，没什么好伪装的）。
-        ImGui::BeginDisabled(gUiApproachMode != 0);
+        // 站立伪装：空中贴怪腾空出刀；站桩输出闪魂落点不一定有台。
+        ImGui::BeginDisabled(gUiApproachMode != 0 && gUiApproachMode != 2);
         if (xcat::ui::OptionCheckbox("站立伪装", &groundSpoof)) persistCore();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "出刀那一瞬让引擎以为你踩在台上，出完立刻还原。\n"
                 "给「腾空中放不出技能」的职业用（法师系一类技能会检查站立态）。\n"
-                "不改飞行本身，滑翔照旧；只有出刀的那几微秒生效。\n"
-                "默认关：它会让攻击包里的动作字段从腾空斩变成站立斩，\n"
-                "先开一小会儿对比 combat.log 的 act1 再决定长开。");
+                "空中贴怪应开。站桩输出闪到怪脚边时落点常无台，也建议开。\n"
+                "拟人地面追怪不需要。只有出刀那几微秒生效。\n"
+                "会让攻击包动作从腾空斩变成站立斩；先开一小会儿看 combat.log 的 sp/b1。");
         }
         ImGui::EndDisabled();
 
@@ -1445,49 +1861,6 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (ImGui::DragInt("##mpTh", &mpThresholdPct, 1, 1, 99)) persistCore();
         ImGui::SameLine();
         ImGui::TextUnformatted("%");
-
-        {
-            const int ratioSum = autoStatStr + autoStatDex + autoStatInt + autoStatLuk;
-            const bool canEnable = ratioSum == static_cast<int>(xcat::kAutoStatRatioSum);
-            ImGui::BeginDisabled(!autoStatEnabled && !canEnable);
-            if (xcat::ui::OptionCheckbox("自动加点", &autoStatEnabled)) persistAutoStat();
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip(
-                    "默认关闭，勾选后才按比例加点（无需打开属性窗）。\n"
-                    "STR/DEX/INT/LUK 合计必须为 5 才能开启。\n"
-                    "关闭时不读属性、不发包。");
-            }
-            ImGui::SameLine();
-            if (canEnable) {
-                ImGui::TextDisabled("总计 %d/%u", ratioSum, xcat::kAutoStatRatioSum);
-            } else {
-                ImGui::Text("总计 %d/%u", ratioSum, xcat::kAutoStatRatioSum);
-            }
-
-            auto clampStat = [&](int* v, int others) {
-                const int maxThis = static_cast<int>(xcat::kAutoStatRatioSum) - others;
-                if (*v < 0) *v = 0;
-                if (*v > maxThis) *v = maxThis < 0 ? 0 : maxThis;
-            };
-            auto drawStat = [&](const char* label, const char* id, int* v, int others) {
-                ImGui::TextUnformatted(label);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(AppDpi_Px(40.f));
-                const int maxThis = (std::max)(0, static_cast<int>(xcat::kAutoStatRatioSum) - others);
-                if (xcat::ui::DragIntClamped(id, v, 0, maxThis)) {
-                    clampStat(v, others);
-                    persistAutoStat();
-                }
-            };
-            drawStat("STR", "##asStr", &autoStatStr, autoStatDex + autoStatInt + autoStatLuk);
-            ImGui::SameLine(0.f, ui::Gap());
-            drawStat("DEX", "##asDex", &autoStatDex, autoStatStr + autoStatInt + autoStatLuk);
-            ImGui::SameLine(0.f, ui::Gap());
-            drawStat("INT", "##asInt", &autoStatInt, autoStatStr + autoStatDex + autoStatLuk);
-            ImGui::SameLine(0.f, ui::Gap());
-            drawStat("LUK", "##asLuk", &autoStatLuk, autoStatStr + autoStatDex + autoStatInt);
-        }
 
         if (xcat::ui::OptionCheckbox("自动召唤宠物", &petSummon)) persistCore();
         ImGui::SameLine();
@@ -1567,39 +1940,6 @@ void DrawHomeTab(LaunchUiState& ui) {
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_home_fly_speed", "飞行速度");
-        // 两档倍率共用控件：输入 + 巡航换算 + 快捷档（原调试 TAB「飞行调试」）。
-        // 1.0X 基准合速：巡航 620（heli_rotor.cpp kBase*）。
-        auto speedRow = [&](const char* label, const char* id, int* v, const char* tip,
-                            bool enabled) {
-            ImGui::BeginDisabled(!enabled);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(label);
-            ImGui::SameLine(0.f, ui::Gap());
-            ImGui::SetNextItemWidth(AppDpi_Px(72.f));
-            char inId[64]{};
-            snprintf(inId, sizeof(inId), "##%s_in", id);
-            if (ImGui::DragInt(inId, v, 5, (int)xcat::kHeliSpeedPctMin,
-                               (int)xcat::kHeliSpeedPctMax, "%d%%",
-                               ImGuiSliderFlags_AlwaysClamp)) {
-                persistCore();
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("%s", tip);
-            ImGui::SameLine(0.f, ui::Gap() * 0.5f);
-            ImGui::TextDisabled("= %.0f px/s 巡航", 620.f * (float)(*v) / 100.f);
-            const int presets[] = {100, 200, 300, 500};
-            for (int p : presets) {
-                char btnId[64]{};
-                snprintf(btnId, sizeof(btnId), "%dX##%s_p%d", p / 100, id, p);
-                ImGui::SameLine(0.f, ui::Gap() * 0.4f);
-                if (ImGui::Button(btnId)) {
-                    *v = (int)xcat::ClampHeliSpeedPct(static_cast<uint32_t>(p));
-                    persistCore();
-                }
-            }
-            ImGui::EndDisabled();
-        };
-
         speedRow("F6 手动飞", "home_fly_speed", &gUiManualFlySpeedPct,
                  "F6 手动飞的速度倍率，与 F5 那份各存各的。\n"
                  "100% = 巡航 620 px/s。换旋翼前的开环实现等效约 1600（≈2.6X），\n"
@@ -1607,7 +1947,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                  true);
         speedRow("F5 滑翔", "home_combat_speed", &gUiFlySpeedPct,
                  "F5 空中贴怪 + 自动赶路共用（都是「自动飞」）。\n"
-                 "默认 1000%（满火力档）；仅「空中贴怪」模式下可调；拟人/关闭时置灰。",
+                 "默认 1000%（满火力档）；拟人 / 站桩输出 / 关闭时置灰。",
                  gUiApproachMode == 0);
         ImGui::TextDisabled(
             "范围 %u–%u%%。只放大「意图」速度；撞墙预刹 / 位置包线 / 坠落自救不跟着缩。\n"
@@ -1617,12 +1957,14 @@ void DrawHomeTab(LaunchUiState& ui) {
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_home_pickup", "拾物");
-        // 0=关 1=脚下 2=宠吸 3=人物直吸（官方 Send，不靠宠；单选互斥；2/3 共用 vacuumW/H）
-        enum : int { kLootOff = 0, kLootFoot = 1, kLootPet = 2, kLootChar = 3 };
+        // 0=关 1=脚下 2=宠吸 3=人物直吸 4=变态宠吸（单选互斥；2/3/4 共用 vacuumW/H）
+        enum : int { kLootOff = 0, kLootFoot = 1, kLootPet = 2, kLootChar = 3, kLootNativeVac = 4 };
         static bool petLootLoaded = false;
         static int lootMode = kLootOff;
         static bool pickupBlacklist = false;
         static bool highValuePriority = true;
+        static bool dropSnapLand = false;
+        static bool dropAccelFall = false;
         static int lootIntervalMs = static_cast<int>(xcat::kPetLootIntervalDefaultMs);
         static int lootBurstPerTick = static_cast<int>(xcat::kPetLootBurstDefault);
         static float lootVacW = xcat::kPetLootVacuumWDefault;
@@ -1631,8 +1973,10 @@ void DrawHomeTab(LaunchUiState& ui) {
         static uint64_t petLootTick = 0;
         static bool petLootSaveFailed = false;
 
-        auto modeFromFlags = [](bool pet, bool foot, bool mapVac, bool charVac) -> int {
-            // 宠吸 > 人物直吸 > 脚边（与 PetLootNormalize 一致）
+        auto modeFromFlags = [](bool pet, bool foot, bool mapVac, bool charVac,
+                                bool nativeVac) -> int {
+            // 变态宠吸 > 宠吸 > 人物直吸 > 脚边（与 PetLootNormalize 一致）
+            if (nativeVac) return kLootNativeVac;
             if (pet || mapVac) return kLootPet;
             if (charVac) return kLootChar;
             if (foot) return kLootFoot;
@@ -1642,22 +1986,36 @@ void DrawHomeTab(LaunchUiState& ui) {
         auto parseBlacklistToCfg = [&](xcat::PetLootConfig& cfg) {
             // 开关只控 skipFilterEnabled；关键词始终落盘，避免取消勾选把输入框规则冲掉。
             cfg.skipFilterEnabled = pickupBlacklist ? 1u : 0u;
+            if (!blacklistKw[0]) {
+                // 空框：勿写 skipCount=0 冲掉盘上/默认「箭矢 彈丸」。
+                // 勾选启用时回填默认关键词；关闭过滤时保留 cfg 里 Read 到的规则。
+                if (pickupBlacklist) {
+                    cfg.skipRuleCount = 0;
+                    auto addKw = [&](const char* key) {
+                        if (cfg.skipRuleCount >= (uint32_t)xcat::kPetLootMaxSkipRules) return;
+                        xcat::PetLootSkipRule& r = cfg.skipRules[cfg.skipRuleCount++];
+                        r = {};
+                        r.enabled = 1;
+                        strncpy_s(r.nameKey, key, _TRUNCATE);
+                    };
+                    addKw("箭矢");
+                    addKw("彈丸");
+                    snprintf(blacklistKw, sizeof(blacklistKw), "箭矢 彈丸");
+                }
+                return;
+            }
             cfg.skipRuleCount = 0;
-            if (!blacklistKw[0]) return;
-            char buf[256]{};
-            strncpy_s(buf, blacklistKw, _TRUNCATE);
-            char* ctx = nullptr;
-            for (char* tok = strtok_s(buf, ",;| \t", &ctx); tok;
-                 tok = strtok_s(nullptr, ",;| \t", &ctx)) {
-                while (*tok == ' ' || *tok == '\t') ++tok;
-                if (!*tok) continue;
+            std::vector<std::string> toks;
+            xcat::SplitKeywordList(blacklistKw, toks);
+            for (const std::string& tok : toks) {
+                if (tok.empty()) continue;
                 if (cfg.skipRuleCount >= (uint32_t)xcat::kPetLootMaxSkipRules) break;
                 xcat::PetLootSkipRule& r = cfg.skipRules[cfg.skipRuleCount++];
                 r = {};
                 r.enabled = 1;
-                strncpy_s(r.nameKey, tok, _TRUNCATE);
+                strncpy_s(r.nameKey, tok.c_str(), _TRUNCATE);
                 char* end = nullptr;
-                const unsigned long v = strtoul(tok, &end, 10);
+                const unsigned long v = strtoul(tok.c_str(), &end, 10);
                 if (end && *end == '\0' && v > 0 && v < 0x7FFFFFFFul) r.itemId = (uint32_t)v;
             }
         };
@@ -1667,12 +2025,14 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (ui.prefsBinDir.empty()) return;
             const bool footLoot = (lootMode == kLootFoot);
             const bool petLoot = (lootMode == kLootPet);
+            const bool nativeVacLoot = (lootMode == kLootNativeVac);
             const bool charLoot =
                 xcat::kPetLootCharVacUserEnabled && (lootMode == kLootChar);
             xcat::PetLootConfig cfg{};
             (void)xcat::ReadPetLoot(ui.prefsBinDir.c_str(), cfg);
             cfg.enabled = petLoot ? 1u : 0u;
             cfg.footEnabled = footLoot ? 1u : 0u;
+            cfg.nativeVacEnabled = nativeVacLoot ? 1u : 0u;
             cfg.charVacEnabled = charLoot ? 1u : 0u;
             // 关宠时清 mapVacuum，避免旧 ini 残留误导；vacuumW/H 始终保留用户设定
             cfg.mapVacuumEnabled = petLoot ? 1u : 0u;
@@ -1689,6 +2049,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             lootVacH = cfg.vacuumH;
             parseBlacklistToCfg(cfg);
             cfg.highValuePriority = highValuePriority ? 1u : 0u;
+            cfg.dropSnapLand = dropSnapLand ? 1u : 0u;
+            cfg.dropAccelFall = dropAccelFall ? 1u : 0u;
             // scrollDropNotify：入口在调试 TAB，此处保留盘上值（Read 已载入）
             xcat::PetLootNormalize(cfg);
             // WritePetLoot 内部用新 tick 落盘，必须回写到 petLootTick，否则下帧误判
@@ -1697,11 +2059,14 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (xcat::WritePetLoot(ui.prefsBinDir.c_str(), cfg)) {
                 petLootTick = cfg.writeTickMs;
                 xcat::log::Ok("App",
-                              "已下发 pet_loot：脚边=%d 宠吸=%d 人物=%d 间隔=%ums 连吸=%u "
-                              "vac=%.0fx%.0f 黑名单=%d rules=%u highValue=%d",
-                              footLoot ? 1 : 0, petLoot ? 1 : 0, charLoot ? 1 : 0, cfg.intervalMs,
-                              cfg.burstPerTick, cfg.vacuumW, cfg.vacuumH, pickupBlacklist ? 1 : 0,
-                              cfg.skipRuleCount, cfg.highValuePriority ? 1 : 0);
+                              "已下发 pet_loot：脚边=%d 宠吸=%d 人物=%d 变态=%d 间隔=%ums 连吸=%u "
+                              "vac=%.0fx%.0f 黑名单=%d rules=%u highValue=%d snapLand=%d "
+                              "accelFall=%d",
+                              footLoot ? 1 : 0, petLoot ? 1 : 0, charLoot ? 1 : 0,
+                              nativeVacLoot ? 1 : 0, cfg.intervalMs, cfg.burstPerTick, cfg.vacuumW,
+                              cfg.vacuumH, pickupBlacklist ? 1 : 0, cfg.skipRuleCount,
+                              cfg.highValuePriority ? 1 : 0, cfg.dropSnapLand ? 1 : 0,
+                              cfg.dropAccelFall ? 1 : 0);
             } else {
                 petLootSaveFailed = true;
                 xcat::log::Warn("App", "写入 user.ini [pet_loot] 失败");
@@ -1718,6 +2083,9 @@ void DrawHomeTab(LaunchUiState& ui) {
             } else if (next == kLootPet) {
                 kind = 2;
                 body = "已切换为宠吸（官方 ByPet 扩盒；范围与人物直吸共用，尺寸可调，不切路径）。";
+            } else if (next == kLootNativeVac) {
+                kind = 2;
+                body = "已切换为变态宠吸（常驻扩盒，原生宠自己捡；不抢出刀）。";
             } else if (next == kLootChar) {
                 kind = 2;
                 body = xcat::kPetLootCharVacUserEnabled
@@ -1738,10 +2106,11 @@ void DrawHomeTab(LaunchUiState& ui) {
                     // ReadPetLoot 已 Normalize：用户面关闭时 diskChar 恒为 0
                     const bool diskChar =
                         xcat::kPetLootCharVacUserEnabled && disk.charVacEnabled != 0;
-                    const int activeModes =
-                        (diskPet || diskMap ? 1 : 0) + (diskChar ? 1 : 0) + (diskFoot ? 1 : 0);
+                    const bool diskNative = disk.nativeVacEnabled != 0;
+                    const int activeModes = (diskNative ? 1 : 0) + (diskPet || diskMap ? 1 : 0) +
+                                            (diskChar ? 1 : 0) + (diskFoot ? 1 : 0);
                     const bool conflict = activeModes > 1;
-                    lootMode = modeFromFlags(diskPet, diskFoot, diskMap, diskChar);
+                    lootMode = modeFromFlags(diskPet, diskFoot, diskMap, diskChar, diskNative);
                     lootIntervalMs = static_cast<int>(
                         xcat::PetLootClampIntervalMs(disk.intervalMs));
                     lootBurstPerTick = static_cast<int>(
@@ -1750,6 +2119,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                     lootVacH = disk.vacuumH;
                     pickupBlacklist = disk.skipFilterEnabled != 0;
                     highValuePriority = disk.highValuePriority != 0;
+                    dropSnapLand = disk.dropSnapLand != 0;
+                    dropAccelFall = disk.dropAccelFall != 0;
                     blacklistKw[0] = '\0';
                     size_t off = 0;
                     for (uint32_t i = 0; i < disk.skipRuleCount; ++i) {
@@ -1772,7 +2143,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                     petLootTick = disk.writeTickMs;
                     petLootLoaded = true;
                     // 冲突、或旧「小盒宠吸 / 近图缺 enabled」→ 统一落成宠吸=近图
-                    if (conflict || (diskPet && !diskMap) || (diskMap && !diskPet)) {
+                    if (conflict ||
+                        (!diskNative && ((diskPet && !diskMap) || (diskMap && !diskPet)))) {
                         if (conflict && wasLoaded) {
                             notify::PushLocal(/*Warning*/ 2, "petloot-mutex-disk", "拾物互斥",
                                              "配置里多种拾物模式冲突，已按优先级保留一种。", 5000);
@@ -1781,7 +2153,10 @@ void DrawHomeTab(LaunchUiState& ui) {
                     }
                 }
             } else if (!petLootLoaded) {
+                // 无盘 / 读失败：UI 也铺上默认黑名单，避免随后 persist 把 skipCount 写成 0
                 petLootLoaded = true;
+                pickupBlacklist = true;
+                snprintf(blacklistKw, sizeof(blacklistKw), "箭矢 彈丸");
             }
         }
 
@@ -1826,6 +2201,14 @@ void DrawHomeTab(LaunchUiState& ui) {
                         xcat::kPetLootVacuumWDefault, xcat::kPetLootVacuumHDefault);
                 }
             }
+            ImGui::SameLine();
+            if (xcat::ui::OptionRadioButton("变态宠吸", &lootMode, kLootNativeVac)) changed = true;
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "启用时按下面「吸物范围」写一次 ByPet 盒子，关掉还原 50×60。\n"
+                    "原生宠物自己捡，主线程不再调吸物，不挡 F5 出刀。\n"
+                    "与脚下 / 宠吸 / 人物直吸互斥。盒过大可能空 Send / 掐线。");
+            }
             if (changed) {
                 if (!xcat::kPetLootCharVacUserEnabled && lootMode == kLootChar)
                     lootMode = kLootOff;
@@ -1834,6 +2217,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
         }
         {
+            ImGui::BeginDisabled(lootMode == kLootNativeVac);
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("吸物间隔");
             ImGui::SameLine(0.f, ui::Gap() * 0.45f);
@@ -1870,12 +2254,14 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
             ImGui::SameLine(0.f, ui::Gap() * 0.35f);
             ImGui::TextUnformatted("次/拍");
+            ImGui::EndDisabled();
         }
         {
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("吸物范围");
             ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-            ImGui::BeginDisabled(lootMode != kLootPet && lootMode != kLootChar);
+            ImGui::BeginDisabled(lootMode != kLootPet && lootMode != kLootChar &&
+                                 lootMode != kLootNativeVac);
             const float vacMaxW = xcat::kPetLootVacuumMax;
             const float vacMaxH = xcat::kPetLootVacuumMax;
             ImGui::SetNextItemWidth(AppDpi_Px(72.f));
@@ -1924,60 +2310,33 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "地图出现装备 / 卷軸时优先拾取（可打断出刀）。\n"
                 "对应背包栏已满则跳过该件；栏未满则缩短吸物间隔尽快吸起。\n"
-                "仅宠吸路径生效；默认开启。");
+                "仅「宠吸」路径生效；变态宠吸不打断出刀。默认开启。");
+        }
+        if (xcat::ui::OptionCheckbox("掉落瞬落", &dropSnapLand)) persistPetLoot();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "飞行中的掉落立刻落到落点，可马上捡。\n"
+                "会把当前位置跟到落地坐标，不是只改状态。\n"
+                "黑名单件不碰；与拾物档位无关。默认关闭。");
+        }
+        ImGui::SameLine();
+        if (xcat::ui::OptionCheckbox("掉落加速", &dropAccelFall)) persistPetLoot();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "抛物线还在，只是更快落地（弧线更短）。\n"
+                "与「掉落瞬落」同时勾选时瞬落优先。\n"
+                "黑名单件不碰；与拾物档位无关。默认关闭。");
         }
         if (xcat::ui::OptionCheckbox("启用拾取黑名单", &pickupBlacklist)) persistPetLoot();
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputTextWithHint("##bl",
-                                     "itemId/关键词（逗号或空格分隔；金币填 2147483647；宠吸/人物共用；脚下走原生不读）",
+                                     "itemId/关键词（空格分隔；金币填 2147483647；原生宠也会拦，与拾物档位无关）",
                                      blacklistKw, sizeof(blacklistKw))) {
             // debounce on deactivate / checkbox
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) persistPetLoot();
         if (petLootSaveFailed)
             ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存 user.ini [pet_loot] 失败");
-    }
-    CardGap();
-    {
-        // 一行：启用 + 间隔；跳过动作等待随启用隐含开启，无单独入口
-        xcat::ui::CardGuard card("##tab_home_attack_accel", "攻击加速");
-        if (!xcat::kAttackAccelUserEnabled) {
-            attackAccel = false;
-            ImGui::BeginDisabled();
-        }
-        if (xcat::ui::OptionCheckbox("启用", &attackAccel)) persistCore();
-        if (!xcat::kAttackAccelUserEnabled) {
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::TextDisabled("当前暂不可用");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("攻击加速暂时关闭，防止误开；出刀仍可用右侧间隔。");
-            }
-        } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "开启后自动跳过动作等待（清忙锁）并抬动作攻速。\n"
-                "与是否开「自动打怪」无关——走路/落地也会生效。\n"
-                "出刀频率看右侧间隔；过短易空砍/踢号。\n"
-                "进图落地约 0.4s 内暂停写入，降低脱同步。");
-        }
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("间隔");
-        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-        ImGui::SetNextItemWidth(AppDpi_Px(64.f));
-        if (ImGui::DragInt("##atk_ms", &gUiSimpleCombatAttackIntervalMs, 1,
-                           (int)xcat::kSimpleCombatAttackIntervalMinMs, 10000))
-            persistCore();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "自动出刀间隔（%u–10000 ms，默认 %ums）。\n"
-                "下限 %u ms（与 hold 地板一致）；过短易空砍/踢号。",
-                (unsigned)xcat::kSimpleCombatAttackIntervalMinMs,
-                (unsigned)xcat::kSimpleCombatAttackIntervalDefaultMs,
-                (unsigned)xcat::kSimpleCombatAttackIntervalMinMs);
-        }
-        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
-        ImGui::TextUnformatted("ms");
     }
     CardGap();
     {
@@ -1990,7 +2349,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         ImGui::SameLine();
         ImGui::TextDisabled("当前暂不可用");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("智能间隔暂时未接入，先用上方攻击间隔固定值。");
+            ImGui::SetTooltip("智能间隔暂时未接入，先用「挂机 → 出刀间隔」固定值。");
         }
 
         ImGui::Spacing();
@@ -2018,7 +2377,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                     (unsigned)xcat::kCombatTeleportStandOffDefault);
             }
             ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-            ImGui::TextDisabled("px · 怪旁，禁叠怪心");
+            ImGui::TextDisabled("px · 怪旁，禁贴怪心");
             // 触发距离已不再参与选靶/贴怪门控，保留落盘字段但不展示，避免语义误导。
             (void)teleportMinDx;
         }
@@ -2043,24 +2402,21 @@ void DrawHomeTab(LaunchUiState& ui) {
                 }
             }
             ImGui::SameLine();
-            ImGui::TextDisabled("先打近堆；过远不跨追");
+            ImGui::TextDisabled("500px 内先打密堆");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "开：换锁时优先周围 250px 内活怪更多的目标；更密最多比当前近约 2 倍距，\n"
-                    "避免去追老远密堆发呆\n"
-                    "空中贴怪时仍可跨层，但同样受距离倍数限制\n"
+                    "开：500px 内先打周围更密的堆（密度看同层 250px 活怪数）。\n"
+                    "脚边独怪不会压过半径内的堆；超过 500px 仍打近的，不去追全图。\n"
+                    "空中贴怪时可跨层比密度；拟人/不跨层仍只在同层比\n"
                     "关：只按距离/hop 选最近可打怪（同层有怪就不跨层）\n"
-                    "密度相同仍打更近的；拟人/不跨层时仍只在同层比\n"
-                    "注意：已锁定交手中不会中途改锁去更密堆——只影响下一次选怪\n"
-                    "生效核对：combat.log 出现 SetClusterPriority 1，acquire 的 cluster≥1");
+                    "注意：已锁定交手中不会中途改锁——只影响下一次选怪\n"
+                    "生效核对：combat.log 出现 SetClusterPriority 1，acquire 的 cluster>=1");
             }
         }
 
         ImGui::Spacing();
         {
-            if (xcat::ui::OptionCheckbox("打中换怪", &hitRotateOn)) persistCore();
-            ImGui::SameLine();
-            ImGui::TextDisabled("命中 N 次后躲开攻击盒再打");
+            if (xcat::ui::OptionCheckbox("每只怪打几刀", &hitRotateOn)) persistCore();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
                     "服务器短时间连续命中同一只怪会风控。开：确认自己打中同一只怪 N 次后，\n"
@@ -2072,9 +2428,6 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
             ImGui::BeginDisabled(!hitRotateOn);
             ImGui::SameLine(0.f, ui::Gap());
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted("每怪命中");
-            ImGui::SameLine(0.f, ui::Gap() * 0.45f);
             ImGui::SetNextItemWidth(AppDpi_Px(56.f));
             if (ImGui::DragInt("##hit_rotate_n", &hitRotateN, 1,
                                (int)xcat::kCombatHitRotateNMin,
@@ -2091,6 +2444,17 @@ void DrawHomeTab(LaunchUiState& ui) {
                     (unsigned)xcat::kCombatHitRotateNDefault);
             }
             ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("满刀换盒外最近");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "服务器短时间连续命中同一只怪会风控。开：确认自己打中同一只怪 N 次后，\n"
+                    "改打攻击盒外、离你最近的活怪（不飞全图）。空刀不计；别人的伤害不计；\n"
+                    "打偏算打在实际挨刀那只上。\n"
+                    "场上活怪少于 3 只时停刀——BOSS 图通常只有 1 只，避免误砍 BOSS。\n"
+                    "关：沿用原来的「打死 / 早切 / 空刀」才换怪。\n"
+                    "生效核对：combat.log 出现 hit_rotate confirm 与 acquire hit_rotate clear");
+            }
         }
 
         ImGui::Spacing();
@@ -2115,7 +2479,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
                     "适合练级图小怪（表血大约几十～一百出头）。\n"
-                    "开着攻击加速时更有用：命中后提前切下一只，少站着干等。\n"
+                    "开着清忙锁时更有用：命中后提前切下一只，少站着干等。\n"
                     "关掉则等怪真正死掉再换（更稳、稍慢）。");
             }
 
@@ -2281,14 +2645,155 @@ void DrawHomeTab(LaunchUiState& ui) {
         ImGui::TextDisabled("粘怪 / 低血撤 / 限定区间：Classic 锚点确认后再接");
         ImGui::TextDisabled("装备/卷軸优先拾取：见上方「拾物 → 高价值优先吸」");
     }
-    CardGap();
-    {
-        // 布局对齐对照仓 xcat_for_fengxing「卖背包 / 自动补给」卡片分区与按钮几何；
-        // 产品语义：经典版手动卖 + 自动回城卖/补给（Il2Cpp 买卖）。
-        xcat::ui::CardGuard card("##tab_home_sell", "卖背包 / 自动补给");
-        ImGui::TextWrapped(
-            "上面填「不卖名单」；下面分手动卖/充飞镖、自动回城卖。两边共用同一份名单。");
 
+}
+
+
+void DrawAutoSellTab(LaunchUiState& ui) {
+    // 原首页「卖背包 / 自动补给」整卡迁入；拆成一键卖装 + 自动卖装两张卡。
+    static bool autoSell = false;
+    static bool tripOnPotionEmpty = false;
+    static int tripOnPotionBelow = 1;
+    static bool tripOnCustomLow = false;
+    static int tripOnCustomBelow = 0;
+    static bool tripOnCustom2Low = false;
+    static int tripOnCustom2Below = 0;
+    static bool tripOnFeedLow = false;
+    static int tripOnFeedBelow = 0;
+    static int sellEquipTrigger = 0;
+    static bool refillHp = false;
+    static bool refillMp = false;
+    static bool refillCustom = false;
+    static bool refillCustom2 = false;
+    static bool refillFeed = true;
+    static char refillHpName[64]{};
+    static char refillMpName[64]{};
+    static char refillCustomName[64]{};
+    static char refillCustom2Name[64]{};
+    static char refillFeedName[64]{};
+    static char refillHpCode[24]{};
+    static char refillMpCode[24]{};
+    static char refillCustomCode[24]{};
+    static char refillCustom2Code[24]{};
+    static char refillFeedCode[24]{};
+    static int refillHpBuyTo = 0;
+    static int refillMpBuyTo = (int)xcat::kAutoSupplyDefaultRefillMpBuyTo;
+    static int refillCustomBuyTo = (int)xcat::kAutoSupplyDefaultRefillCustomBuyTo;
+    static int refillCustom2BuyTo = 0;
+    static int refillFeedBuyTo = (int)xcat::kAutoSupplyDefaultRefillFeedBuyTo;
+    static bool rechargeStars = false;
+    static uint64_t asupTick = 0;
+    static bool asupLoaded = false;
+    static std::string asupLoadedBin;
+    if (!ui.prefsBinDir.empty() && asupLoadedBin != ui.prefsBinDir) {
+        asupLoaded = false;
+        asupLoadedBin = ui.prefsBinDir;
+    }
+    if (!ui.prefsBinDir.empty()) {
+        if (!asupLoaded) {
+            xcat::AutoSupplyConfig as{};
+            if (!xcat::ReadAutoSupply(ui.prefsBinDir.c_str(), as))
+                xcat::AutoSupplySetDefaults(as);
+            autoSell = (as.enabled != 0) || (as.autoSellOnBagFullEnabled != 0);
+            tripOnPotionEmpty = as.tripOnPotionEmpty != 0;
+            tripOnPotionBelow = as.tripOnPotionBelow > 0 ? as.tripOnPotionBelow : 1;
+            tripOnCustomLow = as.tripOnCustomLow != 0;
+            tripOnCustomBelow = as.tripOnCustomBelow;
+            tripOnCustom2Low = as.tripOnCustom2Low != 0;
+            tripOnCustom2Below = as.tripOnCustom2Below;
+            tripOnFeedLow = as.tripOnFeedLow != 0;
+            tripOnFeedBelow = as.tripOnFeedBelow;
+            sellEquipTrigger = as.sellFreeSlotsAtOrBelow;
+            refillHp = as.refillHpEnabled != 0;
+            refillMp = as.refillMpEnabled != 0;
+            refillCustom = as.refillCustomEnabled != 0;
+            refillCustom2 = as.refillCustom2Enabled != 0;
+            refillFeed = as.refillFeedEnabled != 0;
+            strncpy_s(refillHpName, as.refillHpName, _TRUNCATE);
+            strncpy_s(refillMpName, as.refillMpName, _TRUNCATE);
+            strncpy_s(refillCustomName, as.refillCustomName, _TRUNCATE);
+            strncpy_s(refillCustom2Name, as.refillCustom2Name, _TRUNCATE);
+            strncpy_s(refillFeedName, as.refillFeedName, _TRUNCATE);
+            strncpy_s(refillHpCode, as.refillHpCode, _TRUNCATE);
+            strncpy_s(refillMpCode, as.refillMpCode, _TRUNCATE);
+            strncpy_s(refillCustomCode, as.refillCustomCode, _TRUNCATE);
+            strncpy_s(refillCustom2Code, as.refillCustom2Code, _TRUNCATE);
+            strncpy_s(refillFeedCode, as.refillFeedCode, _TRUNCATE);
+            refillHpBuyTo = as.refillHpBuyTo;
+            refillMpBuyTo = as.refillMpBuyTo;
+            refillCustomBuyTo = as.refillCustomBuyTo;
+            refillCustom2BuyTo = as.refillCustom2BuyTo;
+            refillFeedBuyTo = as.refillFeedBuyTo;
+            rechargeStars = as.rechargeStarsEnabled != 0;
+            asupTick = as.writeTickMs;
+            asupLoaded = true;
+        }
+    }
+    auto persistAsup = [&]() {
+        if (ui.prefsBinDir.empty()) return;
+        xcat::AutoSupplyConfig as{};
+        (void)xcat::ReadAutoSupply(ui.prefsBinDir.c_str(), as);
+        as.enabled = autoSell ? 1u : 0u;
+        as.autoSellOnBagFullEnabled = autoSell ? 1u : 0u;
+        as.tripOnPotionEmpty = tripOnPotionEmpty ? 1u : 0u;
+        as.tripOnPotionBelow = tripOnPotionBelow < 1 ? 1 : tripOnPotionBelow;
+        as.tripOnCustomLow = tripOnCustomLow ? 1u : 0u;
+        as.tripOnCustomBelow = tripOnCustomBelow < 0 ? 0 : tripOnCustomBelow;
+        as.tripOnCustom2Low = tripOnCustom2Low ? 1u : 0u;
+        as.tripOnCustom2Below = tripOnCustom2Below < 0 ? 0 : tripOnCustom2Below;
+        as.tripOnFeedLow = tripOnFeedLow ? 1u : 0u;
+        as.tripOnFeedBelow = tripOnFeedBelow < 0 ? 0 : tripOnFeedBelow;
+        as.shopMapName[0] = '\0';    // 经典版固定自动寻店，不暴露手填店图
+        as.returnMapName[0] = '\0';  // 挂机图由打怪/补给行程自动记录，不手填
+        as.sellFreeSlotsAtOrBelow = sellEquipTrigger < 0 ? 0 : sellEquipTrigger;
+        as.refillHpEnabled = refillHp ? 1u : 0u;
+        as.refillMpEnabled = refillMp ? 1u : 0u;
+        as.refillCustomEnabled = refillCustom ? 1u : 0u;
+        as.refillCustom2Enabled = refillCustom2 ? 1u : 0u;
+        as.refillFeedEnabled = refillFeed ? 1u : 0u;
+        strncpy_s(as.refillHpName, refillHpName, _TRUNCATE);
+        strncpy_s(as.refillMpName, refillMpName, _TRUNCATE);
+        strncpy_s(as.refillCustomName, refillCustomName, _TRUNCATE);
+        strncpy_s(as.refillCustom2Name, refillCustom2Name, _TRUNCATE);
+        strncpy_s(as.refillFeedName, refillFeedName, _TRUNCATE);
+        strncpy_s(as.refillHpCode, refillHpCode, _TRUNCATE);
+        strncpy_s(as.refillMpCode, refillMpCode, _TRUNCATE);
+        strncpy_s(as.refillCustomCode, refillCustomCode, _TRUNCATE);
+        strncpy_s(as.refillCustom2Code, refillCustom2Code, _TRUNCATE);
+        strncpy_s(as.refillFeedCode, refillFeedCode, _TRUNCATE);
+        as.refillHpBuyTo = refillHpBuyTo;
+        as.refillMpBuyTo = refillMpBuyTo;
+        as.refillCustomBuyTo = refillCustomBuyTo;
+        as.refillCustom2BuyTo = refillCustom2BuyTo;
+        as.refillFeedBuyTo = refillFeedBuyTo;
+        as.rechargeStarsEnabled = rechargeStars ? 1u : 0u;
+        as.writeTickMs = GetTickCount64();
+        if (xcat::WriteAutoSupply(ui.prefsBinDir.c_str(), as)) asupTick = as.writeTickMs;
+    };
+
+    auto writeAsupManual = [&](uint32_t kind) -> bool {
+        if (ui.prefsBinDir.empty()) return false;
+        xcat::AutoSupplyConfig as{};
+        (void)xcat::ReadAutoSupply(ui.prefsBinDir.c_str(), as);
+        as.manualSeq = as.manualSeq == 0 ? 1u : as.manualSeq + 1u;
+        as.manualKind = kind;
+        as.shopMapName[0] = '\0';
+        as.returnMapName[0] = '\0';
+        if (kind == xcat::kAutoSupplyManualStop) {
+            as.enabled = 0;
+            as.autoSellOnBagFullEnabled = 0;
+            as.tripOnPotionEmpty = 0;
+            as.tripOnCustomLow = 0;
+            as.tripOnCustom2Low = 0;
+            as.tripOnFeedLow = 0;
+        }
+        as.writeTickMs = GetTickCount64();
+        if (!xcat::WriteAutoSupply(ui.prefsBinDir.c_str(), as)) return false;
+        asupTick = as.writeTickMs;
+        return true;
+    };
+
+    {
         static char keepRulesBuf[1024]{};
         static uint64_t keepRulesTick = 0;
         static bool keepRulesLoaded = false;
@@ -2382,13 +2887,19 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
         }
 
-        // —— 不卖名单（对照仓 DrawSellbagKeepRulesEditor）——
+
+        {
+            xcat::ui::CardGuard card("##tab_auto_sell_manual", "一键卖装");
+            ImGui::TextWrapped(
+                "填写「不卖名单」后点下方按钮；名单与「自动卖装」共用。需先打开 NPC 商店。");
+
+            // —— 不卖名单（对照仓 DrawSellbagKeepRulesEditor）——
         ImGui::TextUnformatted("不卖名单");
         ImGui::SameLine();
         ImGui::TextDisabled("（装备栏+其他栏共用；手动卖 / 自动卖共用）");
         ImGui::SetNextItemWidth(-1.f);
         ImGui::InputTextWithHint("##sellbag_keep_rules_quick",
-                                 "不卖关键词，逗号或空格分隔（默认：礦）", keepRulesBuf,
+                                 "不卖关键词，逗号或空格分隔（默认：礦 玻璃鞋）", keepRulesBuf,
                                  sizeof(keepRulesBuf));
         const bool keepRulesEditing = ImGui::IsItemActive();
         if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -2573,14 +3084,12 @@ void DrawHomeTab(LaunchUiState& ui) {
                 ImGui::TextDisabled("手动卖：payload 未在线，按钮会尝试写入兼容命令");
             }
         }
-
-        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.35f));
-        ImGui::Separator();
-        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.25f));
-
-        // —— 自动回城卖 / 补给（对照仓 DrawNativeHomeTab 同区）——
-        ImGui::TextUnformatted("自动回城卖 / 补给");
-        DrawAutoSupplyStatusLine(ui.prefsBinDir);
+        }
+        CardGap();
+        {
+            // —— 自动回城卖 / 补给 ——
+            xcat::ui::CardGuard card("##tab_auto_sell_auto", "自动卖装");
+            DrawAutoSupplyStatusLine(ui.prefsBinDir);
 
         {
             // 对照仓：只读展示 lastFarmMapName；开启自动打怪 / 跑补给时自动记野图。
@@ -2986,9 +3495,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                 "若已在用回城卷换图，客户端仍会卸图完成（我方不再追加动作）");
         }
     }
-
+    }
 }
-
 void DrawHangupScheduleTab(LaunchUiState& ui) {
     DesignBanner();
 
@@ -3381,9 +3889,11 @@ void DrawReloginTab(LaunchUiState& ui) {
 
     static bool detect = true;
     static bool stopCombat = false;
+    static bool stopGather = false;
     static bool channelHop = false;
     static bool gmEscalate = true;
     static bool hideOthers = false;
+    static bool gatherOn = false;
     static std::string s_loadedBin;
     static uint64_t s_lastTick = 0;
     static bool s_saveFailed = false;
@@ -3392,9 +3902,11 @@ void DrawReloginTab(LaunchUiState& ui) {
         if (ui.prefsBinDir.empty()) {
             detect = true;
             stopCombat = false;
+            stopGather = false;
             channelHop = false;
             gmEscalate = true;
             hideOthers = false;
+            gatherOn = false;
             s_lastTick = 0;
             return;
         }
@@ -3404,9 +3916,11 @@ void DrawReloginTab(LaunchUiState& ui) {
         }
         detect = c.autoRelogin != 0;
         stopCombat = c.autoReloginStopCombat != 0;
+        stopGather = c.autoReloginStopGather != 0;
         channelHop = c.autoReloginReconnect != 0;
         gmEscalate = c.autoReloginGmEscalate != 0;
         hideOthers = c.hideOtherPlayers != 0;
+        gatherOn = c.mobGather != 0;
         s_lastTick = c.writeTickMs;
     };
 
@@ -3416,9 +3930,11 @@ void DrawReloginTab(LaunchUiState& ui) {
         (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
         c.autoRelogin = detect ? 1u : 0u;
         c.autoReloginStopCombat = stopCombat ? 1u : 0u;
+        c.autoReloginStopGather = stopGather ? 1u : 0u;
         c.autoReloginReconnect = channelHop ? 1u : 0u;
         c.autoReloginGmEscalate = gmEscalate ? 1u : 0u;
         c.hideOtherPlayers = hideOthers ? 1u : 0u;
+        xcat::ApplyMobGatherEncounterForce(c);
         c.writeTickMs = GetTickCount64();
         if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
         s_lastTick = c.writeTickMs;
@@ -3447,16 +3963,38 @@ void DrawReloginTab(LaunchUiState& ui) {
         }
     }
 
+    const bool gatherForce = gatherOn || gUiMobGather;
+    if (gatherForce) {
+        detect = true;
+        stopGather = true;
+        channelHop = true;
+    }
+
     xcat::ui::CardGuard card("##tab_relogin", "有人来时怎么办");
+    ImGui::BeginDisabled(gatherForce);
     if (xcat::ui::OptionCheckbox("检测同图玩家", &detect)) trySaveOrRevert();
+    ImGui::EndDisabled();
     ImGui::Separator();
     ImGui::TextUnformatted("处理流程");
     if (xcat::ui::OptionCheckbox("先停手", &stopCombat)) trySaveOrRevert();
+    if (WorkspaceGatherTabUnlocked() || gatherForce) {
+        ImGui::BeginDisabled(gatherForce);
+        if (xcat::ui::OptionCheckbox("遇人停吸", &stopGather)) trySaveOrRevert();
+        ImGui::EndDisabled();
+        ImGui::TextDisabled(
+            gatherForce ? "吸怪开启时强制遇人停吸 + 换频，避免别人看见吸怪。"
+                        : "勾选后遇人（含 GM/隐身升级）会卸掉正在吸的怪，人走净再继续。不改吸怪 TAB 开关。");
+    }
+    ImGui::BeginDisabled(gatherForce);
     if (xcat::ui::OptionCheckbox("一直有人就换频", &channelHop)) trySaveOrRevert();
+    ImGui::EndDisabled();
+    if (gatherForce) {
+        ImGui::TextDisabled("吸怪开启时强制启用，关吸怪后才能改。");
+    }
     if (xcat::ui::OptionCheckbox("GM/隐身立即处理", &gmEscalate)) trySaveOrRevert();
     ImGui::TextDisabled(
         "Admin/Manager(800/900)或未藏人时的隐身实体 → 立刻停手/换频 + 强制 Alarm（不依赖上方停手/换频勾选）。");
-    ImGui::TextDisabled("关则普通遇人仍跟「先停手 / 一直有人就换频」；服务端不广播跟踪仍无法发现。");
+        ImGui::TextDisabled("关则普通遇人仍跟「先停手 / 遇人停吸 / 一直有人就换频」；服务端不广播跟踪仍无法发现。");
     ImGui::Separator();
     if (xcat::ui::OptionCheckbox("隐藏同图其他玩家", &hideOthers)) trySaveOrRevert();
     ImGui::TextDisabled("藏皮/伤字(DamageSkin)/技能特效；自己可见；不影响遇人人数检测。");
@@ -3847,6 +4385,7 @@ void DrawTravelTab(LaunchUiState& ui) {
     static std::string status;
     static std::string loadedBin;
     static uint32_t lastAutoSyncMapId = 0;  // 跟盘：mapId 变化时切板块+选中当前图（低频）
+    static bool lastAutoSyncHave = false;   // 出生图 mapId=0，不能用 0 当「从未跟盘」
     static bool scrollToSelected = false;
     static std::vector<std::string> regions{"全部大区"};
     struct MapItem {
@@ -3906,6 +4445,7 @@ void DrawTravelTab(LaunchUiState& ui) {
         regions = {"全部大区"};
         selected = -1;
         lastAutoSyncMapId = 0;  // 重载后按当前图再跟一次
+        lastAutoSyncHave = false;
         scrollToSelected = false;
         if (ui.prefsBinDir.empty()) return;
         const std::string path =
@@ -3930,7 +4470,7 @@ void DrawTravelTab(LaunchUiState& ui) {
             it.key = padKey(line);
             it.street = t0 + 1;
             it.name = t1 ? (t1 + 1) : "";
-            if (it.key.empty() || it.key == "000000000") continue;
+            if (it.key.empty()) continue;
             if (it.name.empty()) it.name = it.street;
             catalog.push_back(it);
             if (!it.street.empty() && seenStreet.insert(it.street).second)
@@ -3951,22 +4491,27 @@ void DrawTravelTab(LaunchUiState& ui) {
     }
 
     // 低频跟盘：仅 mapId 边沿；手选了其它图则不抢（仍跟上次自动选中的「当前图」）
+    // 出生图 Field 0：playReady + HasMapData 时 st.mapId=0 仍是合法图，禁止再用 mapId>0。
     if (!catalog.empty() && !ui.prefsBinDir.empty()) {
         xcat::PayloadStatus st{};
         if (xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) &&
-            xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000) && st.mapId > 0 &&
-            st.mapId != lastAutoSyncMapId) {
+            xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000) && st.playReady != 0 &&
+            (!lastAutoSyncHave || st.mapId != lastAutoSyncMapId)) {
             const std::string prevKey =
-                lastAutoSyncMapId ? padKey(std::to_string(lastAutoSyncMapId)) : std::string{};
+                lastAutoSyncHave ? padKey(std::to_string(lastAutoSyncMapId)) : std::string{};
             const bool follow =
                 selected < 0 ||
                 (!prevKey.empty() && selected < static_cast<int>(catalog.size()) &&
                  catalog[selected].key == prevKey);
             const std::string key = padKey(std::to_string(st.mapId));
             if (follow) {
-                if (syncCatalogToMapKey(key)) lastAutoSyncMapId = st.mapId;
+                if (syncCatalogToMapKey(key)) {
+                    lastAutoSyncMapId = st.mapId;
+                    lastAutoSyncHave = true;
+                }
             } else {
-                lastAutoSyncMapId = st.mapId;  // 只记边沿，不改手选
+                lastAutoSyncMapId = st.mapId;
+                lastAutoSyncHave = true;
             }
         }
     }
@@ -4074,7 +4619,7 @@ void DrawTravelTab(LaunchUiState& ui) {
 
 void DrawBetaTab(LaunchUiState& ui) {
     DesignBanner();
-    static bool dropInCombat = false;
+    static bool dropInCombat = true;
     static bool auctionTownBypass = true;
     static bool restMpAccel = false;
     static int restMpAccelIntervalMs = (int)xcat::kRestMpAccelIntervalDefaultMs;
@@ -4110,6 +4655,8 @@ void DrawBetaTab(LaunchUiState& ui) {
                 gUiAttackRpcDamage = (int)xcat::ClampAttackRpcDamage(
                     disk.attackRpcDamage ? disk.attackRpcDamage
                                          : xcat::kAttackRpcDamageDefault);
+                gUiCombatForgeHit = disk.simpleCombatForgeHit != 0;
+                gUiMapAttack = disk.mapAttack != 0;
                 dropSeenTick = disk.writeTickMs;
                 dropLoaded = true;
             }
@@ -4195,13 +4742,39 @@ void DrawBetaTab(LaunchUiState& ui) {
         }
     };
 
+    auto persistMapAttack = [&]() {
+        if (ui.prefsBinDir.empty()) return;
+        xcat::PayloadControl c{};
+        (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+        c.mapAttack = gUiMapAttack ? 1u : 0u;
+        if (gUiMapAttack) {
+            gUiCombatForgeHit = false;
+            gUiAttackRpc = false;
+            c.simpleCombatForgeHit = 0;
+            c.attackRpc = 0;
+        }
+        c.writeTickMs = GetTickCount64();
+        if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+            xcat::PayloadControl verify{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify)) {
+                dropSeenTick = verify.writeTickMs;
+            } else {
+                dropSeenTick = c.writeTickMs;
+            }
+            xcat::log::Ok("App", "已下发 core：mapAttack=%d（实验 P2 扩盒）",
+                          gUiMapAttack ? 1 : 0);
+        } else {
+            xcat::log::Warn("App", "写入 mapAttack 会话态失败");
+        }
+    };
+
     {
     xcat::ui::CardGuard card("##tab_beta", "实验功能");
         if (xcat::ui::OptionCheckbox("战斗中可丢物", &dropInCombat)) persistDrop();
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
-                "清 LocalUser 警戒时间戳：战斗中可丢物，并抑制客户端警戒\n"
-                "（打怪后警戒很快解除属预期）。仅客户端；服务端 Drop 权威不变。默认关。");
+                "改 IsAlertMode 比较阈值（装一次）：战斗中可丢物，并抑制客户端警戒\n"
+                "（出刀刷戳无空窗；打怪后警戒立不住属预期）。仅客户端；服务端 Drop 权威不变。默认开。");
         }
         if (xcat::ui::OptionCheckbox("野外可开拍卖（仅客户端）", &auctionTownBypass))
             persistDrop();
@@ -4339,20 +4912,15 @@ void DrawBetaTab(LaunchUiState& ui) {
 
     CardGap();
     {
+        // 清忙锁：从首页迁入；只留启用；出刀间隔仍在首页「挂机」。
         xcat::ui::CardGuard card("##tab_beta_clear_busy", "清忙锁");
         static bool clearBusyLoaded = false;
         static uint64_t clearBusySeen = 0;
-        static bool editingIv = false;
         if (!ui.prefsBinDir.empty()) {
             xcat::PayloadControl disk{};
             if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
-                if (!clearBusyLoaded || (!editingIv && disk.writeTickMs != clearBusySeen)) {
+                if (!clearBusyLoaded || disk.writeTickMs != clearBusySeen) {
                     gUiAttackAccelClearBusy = disk.attackAccelClearBusy != 0;
-                    gUiAttackAccelClearBusyMinIntervalMs =
-                        (int)xcat::ClampAttackAccelClearBusyMinIntervalMs(
-                            disk.attackAccelClearBusyMinIntervalMs
-                                ? disk.attackAccelClearBusyMinIntervalMs
-                                : xcat::kAttackAccelClearBusyMinIntervalDefaultMs);
                     clearBusySeen = disk.writeTickMs;
                     clearBusyLoaded = true;
                 }
@@ -4368,87 +4936,80 @@ void DrawBetaTab(LaunchUiState& ui) {
             xcat::PayloadControl c{};
             (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
             c.attackAccelClearBusy = gUiAttackAccelClearBusy ? 1u : 0u;
-            // 两刀间隔 ≡ 清忙锁地板；不改写首页「攻击间隔」simpleCombatAttackIntervalMs。
-            c.attackAccelClearBusyMinIntervalMs = xcat::ClampAttackAccelClearBusyMinIntervalMs(
-                (uint32_t)gUiAttackAccelClearBusyMinIntervalMs);
-            gUiAttackAccelClearBusyMinIntervalMs = (int)c.attackAccelClearBusyMinIntervalMs;
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-                xcat::PayloadControl verify{};
-                if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify)) {
-                    clearBusySeen = verify.writeTickMs;
-                    dropSeenTick = verify.writeTickMs;
-                    gUiAttackAccelClearBusy = verify.attackAccelClearBusy != 0;
-                    gUiAttackAccelClearBusyMinIntervalMs =
-                        (int)xcat::ClampAttackAccelClearBusyMinIntervalMs(
-                            verify.attackAccelClearBusyMinIntervalMs
-                                ? verify.attackAccelClearBusyMinIntervalMs
-                                : xcat::kAttackAccelClearBusyMinIntervalDefaultMs);
-                } else {
-                    clearBusySeen = c.writeTickMs;
-                    dropSeenTick = c.writeTickMs;
-                }
-                xcat::log::Ok("App",
-                              "已下发 core：attackAccelClearBusy=%d 两刀间隔=%dms（实验）",
-                              gUiAttackAccelClearBusy ? 1 : 0,
-                              gUiAttackAccelClearBusyMinIntervalMs);
+                clearBusySeen = c.writeTickMs;
+                dropSeenTick = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：attackAccelClearBusy=%d（实验）",
+                              gUiAttackAccelClearBusy ? 1 : 0);
             } else {
                 xcat::log::Warn("App", "写入 user.ini [core] attackAccelClearBusy 失败");
             }
         };
 
-        if (xcat::ui::OptionCheckbox("清忙锁", &gUiAttackAccelClearBusy)) persistClearBusy();
+        if (xcat::ui::OptionCheckbox("启用", &gUiAttackAccelClearBusy)) persistClearBusy();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "实验项（默认关）：周期写 LocalUser ActionBusy=+0x118=-1，\n"
+                "周期写 LocalUser ActionBusy=+0x118=-1，\n"
                 "清掉引擎「动作未完吞键」忙锁，出刀可更快再按。\n"
-                "不是技能无 CD。下方「两刀间隔」= 清忙锁开时的出刀地板。\n"
-                "与首页「攻击加速 → 间隔」相互独立（不互写）。");
+                "不是技能无 CD。与是否开「自动打怪」无关。\n"
+                "出刀频率在「首页 → 挂机 → 出刀间隔」。\n"
+                "进图落地约 0.4s 内暂停写入，降低脱同步。");
+        }
+        ImGui::TextDisabled("原首页入口；出刀间隔仍在首页挂机卡");
+    }
+
+    CardGap();
+    {
+        // 近战不挥拳：从首页迁入；普攻分支实验项。
+        xcat::ui::CardGuard card("##tab_beta_melee_veto", "近战不挥拳");
+        static bool meleeVetoLoaded = false;
+        static uint64_t meleeVetoSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!meleeVetoLoaded || disk.writeTickMs != meleeVetoSeen) {
+                    gUiMeleeVeto = disk.meleeVeto != 0;
+                    meleeVetoSeen = disk.writeTickMs;
+                    meleeVetoLoaded = true;
+                }
+            } else if (!meleeVetoLoaded) {
+                meleeVetoLoaded = true;
+            }
+        } else if (!meleeVetoLoaded) {
+            meleeVetoLoaded = true;
         }
 
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("两刀间隔");
+        auto persistMeleeVeto = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.meleeVeto = gUiMeleeVeto ? 1u : 0u;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                meleeVetoSeen = c.writeTickMs;
+                dropSeenTick = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：meleeVeto=%d（实验）", gUiMeleeVeto ? 1 : 0);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] meleeVeto 失败");
+            }
+        };
+
+        if (xcat::ui::OptionCheckbox("启用", &gUiMeleeVeto)) persistMeleeVeto();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "清忙锁开时的两刀地板（%u–%u ms，默认 %u）。\n"
-                "有效间隔 = max(首页攻击间隔, 本值)；清忙锁关则只用首页攻击间隔。\n"
-                "不改写首页「攻击加速 → 间隔」。",
-                (unsigned)xcat::kAttackAccelClearBusyMinIntervalMinMs,
-                (unsigned)xcat::kAttackAccelClearBusyMinIntervalMaxMs,
-                (unsigned)xcat::kAttackAccelClearBusyMinIntervalDefaultMs);
+                "把贴脸时那一发挥拳**取消掉**（实测是取消，不是改成远程那一发）。\n"
+                "只动普攻，技能攻击完全不碰 —— 靠技能键输出的循环不受影响。\n"
+                "\n"
+                "**只拦投掷飞镖**（武器类型 47），勾上即刻生效、不需要观测。\n"
+                "拿别的武器勾了普攻照旧，只会在日志里记一笔观测数据。弓尤其不能拦：\n"
+                "弓的普攻伤害本来就在近战分支里产生，拦了会变成「只飘伤害数字、\n"
+                "怪不掉血」，所以干脆不让它进这条路。\n"
+                "\n"
+                "判决只保证伤害源不在近战分支，服务端认不认还得看 combat.log 里\n"
+                "怪物血量有没有真的掉。发现只飘数字不掉血，立刻取消勾选。");
         }
-        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
-        if (ImGui::DragInt("##clear_busy_iv", &gUiAttackAccelClearBusyMinIntervalMs, 1,
-                           (int)xcat::kAttackAccelClearBusyMinIntervalMinMs,
-                           (int)xcat::kAttackAccelClearBusyMinIntervalMaxMs)) {
-            gUiAttackAccelClearBusyMinIntervalMs =
-                (int)xcat::ClampAttackAccelClearBusyMinIntervalMs(
-                    (uint32_t)gUiAttackAccelClearBusyMinIntervalMs);
-            persistClearBusy();
-        }
-        editingIv = ImGui::IsItemActive();
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            editingIv = false;
-            persistClearBusy();
-        }
-        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
-        ImGui::TextUnformatted("ms");
-        auto bumpIv = [&](int v) {
-            gUiAttackAccelClearBusyMinIntervalMs =
-                (int)xcat::ClampAttackAccelClearBusyMinIntervalMs((uint32_t)v);
-            persistClearBusy();
-        };
-        if (ImGui::Button("100##iv_100")) bumpIv(100);
-        ImGui::SameLine();
-        if (ImGui::Button("150##iv_150")) bumpIv(150);
-        ImGui::SameLine();
-        if (ImGui::Button("200##iv_200")) bumpIv(200);
-        ImGui::SameLine();
-        if (ImGui::Button("300##iv_300")) bumpIv(300);
-        ImGui::SameLine();
-        if (ImGui::Button("410##iv_410")) bumpIv(410);
-        ImGui::TextDisabled("仅清忙锁地板 · 首页攻击间隔另调");
+        ImGui::TextDisabled("原首页入口；仅飞镖（武器类型 47）生效");
     }
 
     CardGap();
@@ -5058,16 +5619,103 @@ void DrawBetaTab(LaunchUiState& ui) {
                 "改 .text 会留脏页，完整性校验可能扫到；建议短开对照 combat.log。");
         }
 
+        {
+            static bool sStopBoot = false;
+            static uint32_t sLastStop = 0;
+            if (!ui.prefsBinDir.empty()) {
+                const uint32_t stop = xcat::ReadAttackRpcStopSeq(ui.prefsBinDir.c_str());
+                if (!sStopBoot) {
+                    sStopBoot = true;
+                    sLastStop = stop;
+                } else if (stop != 0 && stop > sLastStop) {
+                    sLastStop = stop;
+                    if (gUiAttackRpc) {
+                        gUiAttackRpc = false;
+                        persistAttackRpc();
+                        notify::PushLocal(/*Info*/ 1, "attack-rpc", "探针已停",
+                                         "2刀已发完，勾选已关。贴脸后再勾选可再打2刀", 4000);
+                    }
+                }
+            }
+        }
+
         if (xcat::ui::OptionCheckbox("攻包伪造探针", &gUiAttackRpc)) persistAttackRpc();
         ImGui::SameLine();
-        ImGui::TextDisabled("伪造攻击事件 Create(50)；服端自算伤（默认关）");
+        ImGui::TextDisabled("仅近战 50；飞镖/弓/杖不发（默认关）");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
                 "实验项：伪造普通攻击出站包（事件），不是伪造伤害数字\n"
-                "opcode=50；先 SetAttackAction+Collect，再 SendOutPacket\n"
-                "成功标志：x.jsonl AttackRpc + SetAttackAction + forge BODY + normal ok\n"
-                "单次勾选满 2 次 ok 自动关（防延后踢）；间隔建议 ≥800ms\n"
+                "只组近战 opcode 50。飞镖/弓/弩/枪/杖（51/52）\n"
+                "无 send.log 真 BODY，手搓会拆线，本探针拒发。\n"
+                "先 SetAttackAction+Collect，再 SendOutPacket\n"
+                "成功标志：x.jsonl AttackRpc forge BODY op= / wt= / dist=\n"
+                "单次勾选满 2 次 ok 自动关勾选（防延后踢）；间隔建议 ≥800ms\n"
+                "只打贴脸 <=50px；更远会拒发（以前 180px 会 normal ok 但怪不死）\n"
+                "进程累计 20 刀后需点「清零探针计数」或取消勾选等 2.5s 再勾\n"
                 "也可设环境变量 ATTACK_RPC=1");
+        }
+        if (ImGui::Button("清零探针计数##arpc_reset", ImVec2(-1.f, 0.f))) {
+            if (ui.prefsBinDir.empty()) {
+                notify::PushLocal(/*Warning*/ 2, "attack-rpc", "下发失败", "无数据目录", 3000);
+            } else {
+                const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
+                if (leds.gamePid == 0) {
+                    notify::PushLocal(/*Warning*/ 2, "attack-rpc", "下发失败", "需已注入游戏",
+                                     3000);
+                } else {
+                    uint32_t seq = xcat::ReadAttackRpcResetSeq(ui.prefsBinDir.c_str());
+                    seq = seq == 0 ? 1u : seq + 1u;
+                    if (seq == 0) seq = 1u;
+                    if (xcat::WriteAttackRpcResetSeq(ui.prefsBinDir.c_str(), seq)) {
+                        xcat::log::Ok("App", "attackRpcResetSeq=%u（清零 session cap，不写 user.ini）",
+                                      seq);
+                        notify::PushLocal(/*Info*/ 1, "attack-rpc", "已下发清零",
+                                         "距上一刀<2.5s会排队，满闲置后自动清", 3500);
+                    } else {
+                        notify::PushLocal(/*Warning*/ 2, "attack-rpc", "下发失败",
+                                         "写会话 seq 失败", 3000);
+                    }
+                }
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "清零进程内伪造成功计数，不必重开游戏/重注 DLL。\n"
+                "距上一刀不足 2.5s 会排队，满闲置后自动清（按钮不是坏了）。\n"
+                "清零后：贴脸再勾选，又是 2 刀。累计 20 刀也会停，再点一次本按钮。\n"
+                "连发仍可能延后踢，贴脸、隔开看掉血。");
+        }
+        if (ImGui::Button("发一刀伪造攻包##arpc_oneshot", ImVec2(-1.f, 0.f))) {
+            if (ui.prefsBinDir.empty()) {
+                notify::PushLocal(/*Warning*/ 2, "attack-rpc", "下发失败", "无数据目录", 3000);
+            } else {
+                const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
+                if (leds.gamePid == 0) {
+                    notify::PushLocal(/*Warning*/ 2, "attack-rpc", "下发失败", "需已注入游戏",
+                                     3000);
+                } else {
+                    uint32_t seq = xcat::ReadAttackRpcFireSeq(ui.prefsBinDir.c_str());
+                    seq = seq == 0 ? 1u : seq + 1u;
+                    if (seq == 0) seq = 1u;
+                    if (xcat::WriteAttackRpcFireSeq(ui.prefsBinDir.c_str(), seq)) {
+                        xcat::log::Ok("App", "attackRpcFireSeq=%u（会话 oneshot，不写 user.ini）",
+                                      seq);
+                        notify::PushLocal(/*Info*/ 1, "attack-rpc", "已下发一刀",
+                                         "贴脸<=50px；不改业务开关", 3500);
+                    } else {
+                        notify::PushLocal(/*Warning*/ 2, "attack-rpc", "下发失败",
+                                         "写会话 seq 失败", 3000);
+                    }
+                }
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "点一下发一包完整普攻（P0c：头+命中环+包尾角色 XY）。\n"
+                "默认关：不勾探针、不写 user.ini、不改 F5。\n"
+                "贴脸 <=50px 即可，不强制抢控（Passive 蜗牛也能发）。\n"
+                "旁无 <=50px 的活怪会拒发 no_near_targets。\n"
+                "SendOutPacket；不绕 HashSet。连点容易踢，隔开看掉血/掉落。");
         }
         if (gUiAttackRpc) {
         ImGui::Indent(ui::Gap() * 1.2f);
@@ -5094,7 +5742,26 @@ void DrawBetaTab(LaunchUiState& ui) {
                 ImGui::SetTooltip("写入包内 Encode4 占位；正式服通常重算，改这个不会改实际伤害");
             }
         ImGui::Unindent(ui::Gap() * 1.2f);
-    }
+        }
+
+        if (xcat::ui::OptionCheckbox("全图攻击（P2 扩盒）", &gUiMapAttack))
+            persistMapAttack();
+        ImGui::SameLine();
+        ImGui::TextDisabled("FindHit 盒=本图 AABB；一刀仍一只（默认关，不落盘）");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "实验项（默认关，不写入 user.ini；重启面板即关）：\n"
+                "P2：FindHit 入参 Rect 换成当前图 foothold AABB。不抬 maxCount。\n"
+                "近战/射击普攻官方 mc=1，一刀仍一只；测的是这只能不能离角色很远。\n"
+                "看 x.jsonl tag=MapAtk：exp=1、xywh 变成上千、oid0 的 dx/dy。\n"
+                "combat.log 看远处怪 hp 是否下降。踢号或不掉血 = 结案，不改去造包。\n"
+                "\n"
+                "mc=1 时 FindHit 可能仍先扫到身边那只：走开近怪再打，看 dx 是否变大。\n"
+                "多目标仍要 A 槽绑 MobCount>=2 的技能（下一刀）。\n"
+                "\n"
+                "开此项时 DLL 会打下：打中换怪 / 出刀自组攻包 / 攻包伪造探针。\n"
+                "F5 出刀仍是 OnFuncKey。");
+        }
     }
 
     CardGap();
@@ -5192,6 +5859,75 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
+        xcat::ui::CardGuard card("##tab_dbg_cmd", "指令");
+        static char cmdBuf[32]{};
+        static const char* cmdMsg = "";
+        static bool cmdOk = false;
+
+        EnsureGatherUnlockLoaded();
+        if (gGatherUnlockSaved) ImGui::TextDisabled("已保存");
+        else if (gGatherTabUnlocked) ImGui::TextDisabled("已解锁（未保存）");
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("指令");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(160.f));
+        const bool enter = ImGui::InputText("##dbg_ws_cmd", cmdBuf, sizeof(cmdBuf),
+                                           ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        const bool click = ImGui::Button("确定##dbg_ws_cmd");
+        if (gGatherUnlockSaved) {
+            ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+            if (ImGui::Button("卸载##dbg_ws_cmd")) {
+                if (ClearGatherUnlockReg()) {
+                    gGatherTabUnlocked = false;
+                    gGatherUnlockSaved = false;
+                    cmdOk = true;
+                    cmdMsg = "已卸载";
+                    cmdBuf[0] = '\0';
+                    sound::UiClick();
+                    xcat::log::Ok("App", "workspace command cleared");
+                } else {
+                    cmdOk = false;
+                    cmdMsg = "卸载失败";
+                    sound::UiError();
+                }
+            }
+        }
+        if (enter || click) {
+            TrimCmdBuf(cmdBuf);
+            if (cmdBuf[0] == '\0') {
+                // 空提交不报错，避免点「确定」误伤已保存态。
+            } else if (std::strcmp(cmdBuf, kGatherTabCmd) == 0) {
+                gGatherTabUnlocked = true;
+                cmdBuf[0] = '\0';
+                if (WriteGatherUnlockReg()) {
+                    gGatherUnlockSaved = true;
+                    cmdOk = true;
+                    cmdMsg = "";
+                    sound::UiClick();
+                    xcat::log::Ok("App", "workspace command ok");
+                } else {
+                    gGatherUnlockSaved = false;
+                    cmdOk = false;
+                    cmdMsg = "已解锁（保存失败）";
+                    sound::UiError();
+                    xcat::log::Warn("App", "workspace command persist failed");
+                }
+            } else {
+                cmdOk = false;
+                cmdMsg = "无效指令";
+                cmdBuf[0] = '\0';
+                sound::UiError();
+            }
+        }
+        if (cmdMsg && cmdMsg[0]) {
+            if (cmdOk) ImGui::TextDisabled("%s", cmdMsg);
+            else ImGui::TextUnformatted(cmdMsg);
+        }
+    }
+    CardGap();
+    {
         // 卷軸掉落提示：从首页拾物迁到调试（日常挂机少碰；与测谎诊断同区）
         xcat::ui::CardGuard card("##tab_dbg_scroll_notify", "卷軸掉落提示");
         static bool scrollDbgLoaded = false;
@@ -5234,11 +5970,35 @@ void DrawDebugTab(LaunchUiState& ui) {
         if (xcat::ui::OptionCheckbox("卷軸掉落提示音", &scrollDropNotify)) persistScrollNotify();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "可捡卷軸新落地时弹出通知并播放明亮叮咚音效。\n"
-                "装备掉落不提醒。\n"
+                "可捡卷軸新落地时弹出通知，先叮咚再播报掉了什么（晓晓离线零件）。\n"
+                "捡进包后（掉落从池消失）再播「拾取成功」；雷之鏢播「雷之镖拾取成功」。\n"
+                "没听到就去现场看。\n"
+                "雷之鏢（2070005）同样提醒，整句「掉落雷之鏢」。其它装备不提醒。\n"
                 "不受「通知静音」影响（与测谎/限制警报同级）。\n"
-                "拾物关闭时也可单独开启；默认开启。\n"
+                "拾物关闭时也可单独开启叮咚；默认开启。拾取成功只在拾物开着时播。\n"
                 "写入 [pet_loot] scrollDropNotify。");
+        }
+        {
+            const float gap = ImGui::GetStyle().ItemSpacing.x;
+            const float halfW = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+            if (ImGui::Button("试播卷轴##dbg_scroll_voice", ImVec2(halfW, 0.f)))
+                xcat::sound::PlayScrollDropAnnounce(2040001);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("2040001 头盔防御卷轴60%。走正式口播，不经过掉落池。");
+            ImGui::SameLine();
+            if (ImGui::Button("试播雷之鏢##dbg_thunder_dart", ImVec2(halfW, 0.f)))
+                xcat::sound::PlayScrollDropAnnounce(2070005);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("2070005 整句「掉落雷之镖」。走正式口播，不经过掉落池。");
+            if (ImGui::Button("试播拾取成功##dbg_pick_ok", ImVec2(halfW, 0.f)))
+                xcat::sound::PlayPickupSuccessAnnounce(0);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("烘焙口播「拾取成功」。卷軸从池消失且拾物开着时自动播。");
+            ImGui::SameLine();
+            if (ImGui::Button("试播雷之鏢成功##dbg_pick_ok_dart", ImVec2(halfW, 0.f)))
+                xcat::sound::PlayPickupSuccessAnnounce(2070005);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("烘焙口播「雷之镖拾取成功」。2070005 从池消失且拾物开着时自动播。");
         }
         if (scrollSaveFailed)
             ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存 user.ini [pet_loot] 失败");
@@ -5405,7 +6165,8 @@ void DrawDebugTab(LaunchUiState& ui) {
         if (injBusy) {
             ImGui::TextColored(PrepHintBlue(), "注入进行中…");
         } else if (!lastStatus.empty()) {
-            ImGui::TextDisabled("%s", lastStatus.c_str());
+            const std::string lastStatusUi = SanitizeImGuiLogLine(lastStatus);
+            ImGui::TextDisabled("%s", lastStatusUi.c_str());
         }
         ImGui::TextDisabled("进度见面板日志 / bin/logs/launcher.jsonl（标签 Attach）");
     }
@@ -5427,46 +6188,8 @@ void DrawDebugTab(LaunchUiState& ui) {
         ImGui::Separator();
         DrawUpdateControl();
     }
-    CardGap();
-    {
-        xcat::ui::CardGuard card("##tab_dbg_token", "TOKEN");
-        static char passBuf[64]{};
-        static bool passLoaded = false;
-        static std::string passLoadedFor;
-        if (!ui.prefsBinDir.empty() && (!passLoaded || passLoadedFor != ui.prefsBinDir)) {
-            const std::string cur = xcat::app::LoadOpsToken(ui.prefsBinDir);
-            std::snprintf(passBuf, sizeof(passBuf), "%s", cur.c_str());
-            passLoaded = true;
-            passLoadedFor = ui.prefsBinDir;
-        }
-        ImGui::SetNextItemWidth(AppDpi_Px(220.f));
-        ImGui::InputTextWithHint("##ops_token", "TOKEN", passBuf, sizeof(passBuf),
-                                 ImGuiInputTextFlags_Password);
-        const bool passCommit = ImGui::IsItemDeactivatedAfterEdit();
-        ImGui::SameLine();
-        if (ImGui::Button("保存##ops_token") || passCommit) {
-            if (ui.prefsBinDir.empty()) {
-                notify::PushLocal(/*Warn*/ 2, "ops-token", "无法保存", "未定位数据目录", 3500);
-            } else if (xcat::app::SaveOpsToken(ui.prefsBinDir, passBuf)) {
-                const std::string norm = xcat::app::NormalizeOpsToken(passBuf);
-                std::snprintf(passBuf, sizeof(passBuf), "%s", norm.c_str());
-                notify::PushLocal(/*Ok*/ 1, "ops-token", "已保存", "", 2500);
-            } else {
-                notify::PushLocal(/*Danger*/ 3, "ops-token", "保存失败", "", 3500);
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("清空##ops_token_clr")) {
-            passBuf[0] = '\0';
-            if (ui.prefsBinDir.empty()) {
-                notify::PushLocal(/*Warn*/ 2, "ops-token", "无法清空", "未定位数据目录", 3500);
-            } else if (xcat::app::SaveOpsToken(ui.prefsBinDir, "")) {
-                notify::PushLocal(/*Ok*/ 1, "ops-token", "已清空", "", 2500);
-            } else {
-                notify::PushLocal(/*Danger*/ 3, "ops-token", "清空失败", "", 3500);
-            }
-        }
-    }
+    // 手填 OPS TOKEN 已退休：身份改由 gate/1 签名卡密（X-XCat-Gate-Token）提供可信 uid，
+    // 服务端验签后用于配额 / 吊销 / 运维认人，用户无需再填第二个标识串，故隐去该入口。
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_dbg_combat_tick", "打怪节奏");
@@ -5482,12 +6205,6 @@ void DrawDebugTab(LaunchUiState& ui) {
                     gUiAttackHoldMs = (int)xcat::ClampAttackHoldMs(
                         disk.simpleCombatAttackHoldMs ? disk.simpleCombatAttackHoldMs
                                                       : xcat::kAttackHoldDefaultMs);
-                    if (disk.simpleCombatImpactApproach != 0)
-                        gUiApproachMode = 0;
-                    else if (disk.simpleCombatHumanWalk != 0)
-                        gUiApproachMode = 1;
-                    else
-                        gUiApproachMode = 2;
                     tickDbgSeen = disk.writeTickMs;
                     tickDbgLoaded = true;
                 }
@@ -5508,42 +6225,16 @@ void DrawDebugTab(LaunchUiState& ui) {
             c.simpleCombatAttackHoldMs = xcat::ClampAttackHoldMs(
                 static_cast<uint32_t>(gUiAttackHoldMs < 0 ? 0 : gUiAttackHoldMs));
             gUiAttackHoldMs = (int)c.simpleCombatAttackHoldMs;
-            if (gUiApproachMode < 0 || gUiApproachMode > 2) gUiApproachMode = 0;
-            c.simpleCombatImpactApproach = (gUiApproachMode == 0) ? 1u : 0u;
-            c.simpleCombatHumanWalk = (gUiApproachMode == 1) ? 1u : 0u;
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
                 tickDbgSeen = c.writeTickMs;
                 xcat::log::Ok("App",
-                              "已下发 core：simpleCombatTickMs=%u hold=%u approach=%s（调试）",
-                              c.simpleCombatTickMs, c.simpleCombatAttackHoldMs,
-                              gUiApproachMode == 0   ? "空中贴怪"
-                              : gUiApproachMode == 1 ? "拟人"
-                                                     : "关闭");
+                              "已下发 core：simpleCombatTickMs=%u hold=%u（调试）",
+                              c.simpleCombatTickMs, c.simpleCombatAttackHoldMs);
             } else {
                 xcat::log::Warn("App", "写入 user.ini [core] 打怪节奏参数失败");
             }
         };
-
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("追怪");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::SetNextItemWidth(AppDpi_Px(120.f));
-        {
-            const char* approachItems[] = {"空中贴怪", "拟人模式", "关闭"};
-            if (gUiApproachMode < 0 || gUiApproachMode > 2) gUiApproachMode = 0;
-            if (ImGui::Combo("##dbg_f5_approach_mode", &gUiApproachMode, approachItems,
-                             IM_ARRAYSIZE(approachItems))) {
-                persistTiming();
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip(
-                    "单选追怪方式（原首页入口，已迁到本卡）。\n"
-                    "· 空中贴怪：悬停在怪旁出刀，需无敌，可穿层；默认。\n"
-                    "· 拟人模式：同层走路贴近后 A 键出刀，不做跨层。\n"
-                    "· 关闭：不追怪（站桩，够得着才砍）。");
-            }
-        }
 
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("TICK值");
@@ -5740,6 +6431,74 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
+        xcat::ui::CardGuard card("##tab_dbg_travel", "超级赶路");
+        static int portalAimLiftY = (int)xcat::kTravelPortalAimLiftDefault;
+        static bool travelDbgLoaded = false;
+        static uint64_t travelDbgSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!travelDbgLoaded || disk.writeTickMs != travelDbgSeen) {
+                    portalAimLiftY = (int)xcat::ClampTravelPortalAimLiftY(
+                        disk.travelPortalAimLiftY ? disk.travelPortalAimLiftY
+                                                 : xcat::kTravelPortalAimLiftDefault);
+                    travelDbgSeen = disk.writeTickMs;
+                    travelDbgLoaded = true;
+                }
+            } else if (!travelDbgLoaded) {
+                travelDbgLoaded = true;
+            }
+        } else if (!travelDbgLoaded) {
+            travelDbgLoaded = true;
+        }
+
+        auto persistTravelLift = [&]() {
+            if (ui.prefsBinDir.empty()) return;
+            xcat::PayloadControl c{};
+            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+            c.travelPortalAimLiftY = xcat::ClampTravelPortalAimLiftY(
+                static_cast<uint32_t>(portalAimLiftY < 0 ? 0 : portalAimLiftY));
+            portalAimLiftY = (int)c.travelPortalAimLiftY;
+            c.writeTickMs = GetTickCount64();
+            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                travelDbgSeen = c.writeTickMs;
+                xcat::log::Ok("App", "已下发 core：travelPortalAimLiftY=%u（调试）",
+                              c.travelPortalAimLiftY);
+            } else {
+                xcat::log::Warn("App", "写入 user.ini [core] travelPortalAimLiftY 失败");
+            }
+        };
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("贴门抬升");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+        if (ImGui::DragInt("##dbg_travel_aim_lift", &portalAimLiftY, 1,
+                           (int)xcat::kTravelPortalAimLiftMin,
+                           (int)xcat::kTravelPortalAimLiftMax)) {
+            portalAimLiftY = (int)xcat::ClampTravelPortalAimLiftY(
+                static_cast<uint32_t>(portalAimLiftY < 0 ? 0 : portalAimLiftY));
+            persistTravelLift();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "贴门旋翼相对台面再抬高多少（%u–%u px，默认 %u）。\n"
+                "AbsPos：更大 Y = 更高（远离掉落方向）。\n"
+                "末段 / 台下恢复用这个值。同层已挂台不抬，贴台滑。\n"
+                "只有门心±16 发门带里没台才悬停进门。\n"
+                "太小会贴台掉虚空；太大在门口晃一下再落。\n"
+                "写入 [core] travelPortalAimLiftY；已注入则即时生效。",
+                (unsigned)xcat::kTravelPortalAimLiftMin, (unsigned)xcat::kTravelPortalAimLiftMax,
+                (unsigned)xcat::kTravelPortalAimLiftDefault);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextUnformatted("px");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::TextDisabled("AbsPos 更大 Y=更高 · 默认 %u",
+                            (unsigned)xcat::kTravelPortalAimLiftDefault);
+    }
+    CardGap();
+    {
         xcat::ui::CardGuard card("##tab_dbg_miss", "锚点 MISS 灯");
         ImGui::TextDisabled("绿=OK · 黄=降级(shape/部分MI) · 红=MISS · 灰=pending(已占位未决)");
         ImGui::TextDisabled("注入后整表先灰后变色；某灯一直灰=对应 feature 尚未上报/卡在绑定前");
@@ -5925,6 +6684,12 @@ void DrawDebugTab(LaunchUiState& ui) {
                             xcat::kFlyHopCdDefaultMs);
         ImGui::TextDisabled("实测系统时钟一格 15.6ms：低于 16 的设定不会更跟手，走同一条路径。");
     }
+    if (gGatherTabUnlocked) {
+        CardGap();
+        DrawMobGatherDyLimScanCard(ui);
+        CardGap();
+        DrawMobGatherFlyDebugCards(ui);
+    }
     CardGap();
     {
         // MovePath.Flush 采证：inline hook 上报包，dump MoveElem → logs\movepath_flush.log。
@@ -5956,7 +6721,7 @@ void DrawDebugTab(LaunchUiState& ui) {
         if (xcat::ui::OptionCheckbox("采证上报包(测试专用·用完即关)", &mpFlush)) persistMpFlush();
         ImGui::SameLine();
         ImGui::TextDisabled("勾选自动允许.text钩");
-        ImGui::TextDisabled("进图后开→跑一段/点试推 A；对 logs\\movepath_flush.log");
+        ImGui::TextDisabled("进图后开→飞/跑一段；对 logs\\movepath_flush.log");
         ImGui::TextDisabled("标注：a=N!非Normal  fh=0*空中  err=..!!越包络(地>18/空>27)  头 maxErr/air/tel/over");
     }
     CardGap();
@@ -6166,184 +6931,7 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
-        // 位移试推：路线 A/B + 短推。无热键，仅按钮。
-        static int impactDir = (int)xcat::kImpactImpulseDirDefault;
-        static int impactVx = (int)xcat::kImpactImpulseVxDefault;
-        static int impactVy = (int)xcat::kImpactImpulseVyDefault;
-        static int impactHopDx = (int)xcat::kImpactHopDeltaXDefault;
-        static bool impactHopForce = false;
-        static bool impactLoaded = false;
-        static uint64_t impactTick = 0;
-        if (!ui.prefsBinDir.empty()) {
-            xcat::PayloadControl disk{};
-            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
-                if (!impactLoaded || disk.writeTickMs != impactTick) {
-                    impactDir = (int)xcat::ClampImpactImpulseDir(disk.impactImpulseDir);
-                    impactVx = (int)xcat::ClampImpactImpulseSpeed(disk.impactImpulseVx);
-                    impactVy = (int)xcat::ClampImpactImpulseSpeed(disk.impactImpulseVy);
-                    impactHopDx = (int)xcat::ClampImpactHopDeltaX(disk.impactHopDeltaX);
-                    impactHopForce = disk.impactHopForce != 0;
-                    impactTick = disk.writeTickMs;
-                    impactLoaded = true;
-                }
-            } else if (!impactLoaded) {
-                impactLoaded = true;
-            }
-        }
-        auto persistImpactParams = [&]() {
-            if (ui.prefsBinDir.empty()) return;
-            xcat::PayloadControl c{};
-            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-            c.impactImpulseDir = xcat::ClampImpactImpulseDir(impactDir);
-            c.impactImpulseVx =
-                xcat::ClampImpactImpulseSpeed(static_cast<uint32_t>(impactVx < 0 ? 0 : impactVx));
-            c.impactImpulseVy =
-                xcat::ClampImpactImpulseSpeed(static_cast<uint32_t>(impactVy < 0 ? 0 : impactVy));
-            c.impactHopDeltaX = xcat::ClampImpactHopDeltaX(impactHopDx);
-            c.impactHopForce = impactHopForce ? 1u : 0u;
-            impactDir = (int)c.impactImpulseDir;
-            impactVx = (int)c.impactImpulseVx;
-            impactVy = (int)c.impactImpulseVy;
-            impactHopDx = (int)c.impactHopDeltaX;
-            c.writeTickMs = GetTickCount64();
-            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) impactTick = c.writeTickMs;
-        };
-        auto bumpImpact = [&](bool nockBack) {
-            if (ui.prefsBinDir.empty()) {
-                notify::PushLocal(/*Warning*/ 2, "move-dbg", "下发失败", "无数据目录", 3000);
-                return;
-            }
-            const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
-            if (leds.gamePid == 0) {
-                notify::PushLocal(/*Warning*/ 2, "move-dbg", "下发失败", "需已注入游戏", 3000);
-                return;
-            }
-            xcat::PayloadControl c{};
-            if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) {
-                xcat::PayloadControlSetDefaults(c);
-            }
-            c.impactImpulseDir = xcat::ClampImpactImpulseDir(impactDir);
-            c.impactImpulseVx =
-                xcat::ClampImpactImpulseSpeed(static_cast<uint32_t>(impactVx < 0 ? 0 : impactVx));
-            c.impactImpulseVy =
-                xcat::ClampImpactImpulseSpeed(static_cast<uint32_t>(impactVy < 0 ? 0 : impactVy));
-            auto bump = [](uint32_t& seq) {
-                seq = seq == 0 ? 1u : seq + 1u;
-                if (seq == 0) seq = 1u;
-            };
-            if (nockBack) {
-                bump(c.impactNockBackTestSeq);
-                xcat::log::Ok("App", "impactNockBackTestSeq=%u dir=%d vx=%u vy=%u",
-                              c.impactNockBackTestSeq, (int)c.impactImpulseDir, c.impactImpulseVx,
-                              c.impactImpulseVy);
-            } else {
-                bump(c.impactSetNextTestSeq);
-                xcat::log::Ok("App", "impactSetNextTestSeq=%u dir=%d vx=%u vy=%u",
-                              c.impactSetNextTestSeq, (int)c.impactImpulseDir, c.impactImpulseVx,
-                              c.impactImpulseVy);
-            }
-            c.writeTickMs = GetTickCount64();
-            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-                impactTick = c.writeTickMs;
-                notify::PushLocal(/*Info*/ 0, "move-dbg",
-                                  nockBack ? "试推 A 已下发" : "试推 B 已下发",
-                                  "看运行日志确认是否生效", 4500);
-            } else {
-                notify::PushLocal(/*Warning*/ 2, "move-dbg", "写盘失败", "user.ini", 3000);
-            }
-        };
-        auto bumpImpactHop = [&]() {
-            if (ui.prefsBinDir.empty()) {
-                notify::PushLocal(/*Warning*/ 2, "move-hop", "下发失败", "无数据目录", 3000);
-                return;
-            }
-            const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
-            if (leds.gamePid == 0) {
-                notify::PushLocal(/*Warning*/ 2, "move-hop", "下发失败", "需已注入游戏", 3000);
-                return;
-            }
-            xcat::PayloadControl c{};
-            if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) {
-                xcat::PayloadControlSetDefaults(c);
-            }
-            c.impactHopDeltaX = xcat::ClampImpactHopDeltaX(impactHopDx);
-            c.impactHopForce = impactHopForce ? 1u : 0u;
-            impactHopDx = (int)c.impactHopDeltaX;
-            auto bump = [](uint32_t& seq) {
-                seq = seq == 0 ? 1u : seq + 1u;
-                if (seq == 0) seq = 1u;
-            };
-            bump(c.impactHopTestSeq);
-            xcat::log::Ok("App", "impactHopTestSeq=%u dx=%d force=%u", c.impactHopTestSeq,
-                          (int)c.impactHopDeltaX, c.impactHopForce);
-            c.writeTickMs = GetTickCount64();
-            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-                impactTick = c.writeTickMs;
-                notify::PushLocal(/*Info*/ 0, "move-hop", "短推已下发",
-                                  impactHopForce ? "强制旁路无敌 · 看运行日志"
-                                                 : "需无敌开 · 看运行日志",
-                                  4500);
-            } else {
-                notify::PushLocal(/*Warning*/ 2, "move-hop", "写盘失败", "user.ini", 3000);
-            }
-        };
-
-        xcat::ui::CardGuard card("##tab_dbg_move", "位移试推");
-        ImGui::TextDisabled("需开无敌；对照路线 A / B。");
-        ImGui::TextDisabled("参数：方向 · 水平速度 · 竖直速度（约 px/s）");
-        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
-        if (ImGui::DragInt("dir##dbg_move_dir", &impactDir, 1, -1, 1)) persistImpactParams();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip("±1=水平方向；0=A 跟朝向，B 用 +vx");
-        }
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
-        if (ImGui::DragInt("vx##dbg_move_vx", &impactVx, 1, 0, (int)xcat::kImpactImpulseVxMax))
-            persistImpactParams();
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(AppDpi_Px(72.f));
-        if (ImGui::DragInt("vy##dbg_move_vy", &impactVy, 1, 0, (int)xcat::kImpactImpulseVyMax))
-            persistImpactParams();
-        ImGui::TextDisabled("默认 dir=%d vx=%u vy=%u",
-                            (int)xcat::kImpactImpulseDirDefault, xcat::kImpactImpulseVxDefault,
-                            xcat::kImpactImpulseVyDefault);
-        {
-            const float gap = ImGui::GetStyle().ItemSpacing.x;
-            const float rowW = ImGui::GetContentRegionAvail().x;
-            const float btnW = (std::max)(1.f, (rowW - gap) * 0.5f);
-            if (ImGui::Button("试推 A", ImVec2(btnW, 0.f))) bumpImpact(true);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip("路线 A：按 dir×vx / vy 试推一次");
-            }
-            ImGui::SameLine(0.f, gap);
-            if (ImGui::Button("试推 B", ImVec2(btnW, 0.f))) bumpImpact(false);
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip("路线 B：按 ±vx / vy 试推一次");
-            }
-        }
-        ImGui::Separator();
-        ImGui::TextDisabled("短推：按水平距离估算一次推进（冷却约 400ms）");
-        ImGui::SetNextItemWidth(AppDpi_Px(88.f));
-        if (ImGui::DragInt("目标 Δx##dbg_move_hop_dx", &impactHopDx, 1,
-                           (int)xcat::kImpactHopDeltaXMin, (int)xcat::kImpactHopDeltaXMax))
-            persistImpactParams();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip("有符号 px；建议 ±80 / ±120 / ±160");
-        }
-        ImGui::SameLine();
-        if (ImGui::Checkbox("强制（无视无敌）##dbg_move_hop_force", &impactHopForce))
-            persistImpactParams();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip("仅调试；产品飞行默认要求无敌开");
-        }
-        if (ImGui::Button("短推试一次", ImVec2(-1.f, 0.f))) bumpImpactHop();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip("按目标 Δx 试推一次；需无敌（或勾强制）");
-        }
-    }
-    CardGap();
-    {
-        // 原生瞬移调试入口已禁用；位移试推见上一卡。
+        // 原生瞬移调试入口已关闭；不再对外展示试推控件。
         xcat::ui::CardGuard card("##tab_dbg_tp", "瞬移 / 踢号压测");
         ImGui::TextDisabled("原生瞬移调试按钮已关闭（测试贴怪 / 原生CALL / 踢号压测）。");
         ImGui::TextDisabled("旧 user.ini 的 teleport*Seq 会被 payload 拒发并写 Control 日志。");
@@ -6376,6 +6964,1246 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
 }
 
+void DrawSkillDragGrip(const ImVec2& size) {
+    ImGui::InvisibleButton("##grip", size);
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 b = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const bool hot = ImGui::IsItemActive() || ImGui::IsItemHovered();
+    const ImU32 col = ImGui::GetColorU32(hot ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+    const float cx = (a.x + b.x) * 0.5f;
+    const float cy = (a.y + b.y) * 0.5f;
+    const float w = AppDpi_Px(11.f);
+    const float thick = AppDpi_Px(1.6f);
+    const float gap = AppDpi_Px(3.6f);
+    for (int k = -1; k <= 1; ++k) {
+        const float y = cy + static_cast<float>(k) * gap;
+        dl->AddLine(ImVec2(cx - w * 0.5f, y), ImVec2(cx + w * 0.5f, y), col, thick);
+    }
+}
+
+struct SkillListAnim {
+    int dragId = 0;
+    int liftId = 0;
+    int insertAt = 0;
+    float grabOff = 0.f;
+    float lift = 0.f;
+    float y[xcat::kAutoSkillOrderMax]{};
+    float vy[xcat::kAutoSkillOrderMax]{};
+    int idAt[xcat::kAutoSkillOrderMax]{};
+    uint32_t n = 0;
+};
+
+void SkillListAnimSnap(SkillListAnim& a, const int* ids, uint32_t n, float rowH) {
+    a.dragId = 0;
+    a.liftId = 0;
+    a.insertAt = 0;
+    a.grabOff = 0.f;
+    a.lift = 0.f;
+    a.n = n;
+    for (uint32_t i = 0; i < xcat::kAutoSkillOrderMax; ++i) {
+        a.idAt[i] = (i < n) ? ids[i] : 0;
+        a.y[i] = static_cast<float>(i) * rowH;
+        a.vy[i] = 0.f;
+    }
+}
+
+void SkillListSpring(float& y, float& vy, float target, float dt) {
+    constexpr float kStiff = 420.f;
+    constexpr float kDamp = 30.f;
+    const float err = target - y;
+    vy += (kStiff * err - kDamp * vy) * dt;
+    y += vy * dt;
+    if (fabsf(err) < 0.45f && fabsf(vy) < 12.f) {
+        y = target;
+        vy = 0.f;
+    }
+}
+
+float SkillListRubber(float v, float lo, float hi) {
+    if (v < lo) return lo + (v - lo) * 0.22f;
+    if (v > hi) return hi + (v - hi) * 0.22f;
+    return v;
+}
+
+int SkillListInsertAt(SkillListAnim& a, int dragFrom, uint32_t n, float rowH) {
+    if (dragFrom < 0 || n == 0) return -1;
+    const float slot = (a.y[dragFrom] + rowH * 0.5f) / rowH;
+    int raw = static_cast<int>(floorf(slot));
+    if (raw < 0) raw = 0;
+    if (raw >= static_cast<int>(n)) raw = static_cast<int>(n) - 1;
+    int cur = a.insertAt;
+    if (cur < 0 || cur >= static_cast<int>(n)) cur = dragFrom;
+    if (raw > cur && slot > static_cast<float>(cur) + 0.62f) cur = raw;
+    else if (raw < cur && slot < static_cast<float>(cur) + 0.38f) cur = raw;
+    a.insertAt = cur;
+    return cur;
+}
+
+void SkillListReorder(int* ids, int* tgt, float* ys, float* vys, uint32_t n, int from, int to) {
+    if (from < 0 || to < 0 || from == to) return;
+    if (static_cast<uint32_t>(from) >= n || static_cast<uint32_t>(to) >= n) return;
+    const int id = ids[from];
+    const int t = tgt[from];
+    const float y = ys[from];
+    const float v = vys[from];
+    if (from < to) {
+        for (int k = from; k < to; ++k) {
+            ids[k] = ids[k + 1];
+            tgt[k] = tgt[k + 1];
+            ys[k] = ys[k + 1];
+            vys[k] = vys[k + 1];
+        }
+    } else {
+        for (int k = from; k > to; --k) {
+            ids[k] = ids[k - 1];
+            tgt[k] = tgt[k - 1];
+            ys[k] = ys[k - 1];
+            vys[k] = vys[k - 1];
+        }
+    }
+    ids[to] = id;
+    tgt[to] = t;
+    ys[to] = y;
+    vys[to] = v;
+}
+
+float SkillListTargetY(uint32_t index, int dragFrom, int insertAt, float rowH) {
+    if (dragFrom < 0) return static_cast<float>(index) * rowH;
+    if (static_cast<int>(index) == dragFrom) return -1.f;
+    int compact = static_cast<int>(index);
+    if (compact > dragFrom) compact -= 1;
+    if (compact >= insertAt) compact += 1;
+    return static_cast<float>(compact) * rowH;
+}
+
+struct SkillListCols {
+    float pad = 0.f;
+    float gap = 0.f;
+    float wGrip = 0.f;
+    float wIdx = 0.f;
+    float wName = 0.f;
+    float wTgt = 0.f;
+    float wMax = 0.f;
+    float wDel = 0.f;
+    float xGrip = 0.f;
+    float xIdx = 0.f;
+    float xName = 0.f;
+    float xTgt = 0.f;
+    float xMax = 0.f;
+    float xDel = 0.f;
+    float rowW = 0.f;
+};
+
+SkillListCols MakeSkillListCols(float avail) {
+    SkillListCols c{};
+    c.pad = AppDpi_Px(10.f);
+    c.gap = ImGui::GetStyle().ItemSpacing.x;
+    if (c.gap < AppDpi_Px(8.f)) c.gap = AppDpi_Px(8.f);
+    const float gripGap = AppDpi_Px(10.f);
+    c.wGrip = AppDpi_Px(28.f);
+    c.wIdx = (std::max)(ImGui::CalcTextSize("顺序").x + AppDpi_Px(6.f), AppDpi_Px(28.f));
+    c.wTgt = AppDpi_Px(56.f);
+    c.wMax = AppDpi_Px(40.f);
+    c.wDel = AppDpi_Px(28.f);
+    c.rowW = avail;
+    const float fixed = c.wGrip + c.wIdx + c.wTgt + c.wMax + c.wDel;
+    const float gaps = gripGap + c.gap * 4.f;
+    c.wName = avail - c.pad * 2.f - fixed - gaps;
+    if (c.wName < AppDpi_Px(72.f)) c.wName = AppDpi_Px(72.f);
+    c.xGrip = c.pad;
+    c.xIdx = c.xGrip + c.wGrip + gripGap;
+    c.xName = c.xIdx + c.wIdx + c.gap;
+    c.xTgt = c.xName + c.wName + c.gap;
+    c.xMax = c.xTgt + c.wTgt + c.gap;
+    c.xDel = c.xMax + c.wMax + c.gap;
+    return c;
+}
+
+void SkillListHeader(const SkillListCols& c) {
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float y = o.y;
+    const float h = ImGui::GetFrameHeight();
+    auto at = [&](float x, const char* s) {
+        ImGui::SetCursorScreenPos(ImVec2(o.x + x, y));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", s);
+    };
+    at(c.xIdx, "顺序");
+    at(c.xName, "技能");
+    at(c.xTgt, "目标");
+    at(c.xMax, "满级");
+    if (ImDrawList* dl = ImGui::GetWindowDrawList()) {
+        const ImU32 line = ImGui::GetColorU32(ImGuiCol_Border, 0.45f);
+        const float y1 = y + h - 1.f;
+        dl->AddLine(ImVec2(o.x + c.pad, y1), ImVec2(o.x + c.rowW - c.pad, y1), line);
+    }
+    ImGui::SetCursorScreenPos(ImVec2(o.x, y));
+    ImGui::Dummy(ImVec2(c.rowW, h));
+}
+
+bool SkillListPickAdd(const char* bin, int job, const int* ids, uint32_t n, int* outId) {
+    if (outId) *outId = 0;
+    if (!outId || job <= 0) return false;
+    int catalog[xcat::kAutoSkillOrderMax]{};
+    uint32_t nc = 0;
+    xcat::AutoSkillFillDefaultOrder(bin, job, catalog, &nc, nullptr);
+    int missing[xcat::kAutoSkillOrderMax]{};
+    uint32_t nm = 0;
+    for (uint32_t i = 0; i < nc; ++i) {
+        bool have = false;
+        for (uint32_t k = 0; k < n; ++k) {
+            if (ids[k] == catalog[i]) {
+                have = true;
+                break;
+            }
+        }
+        if (!have && nm < xcat::kAutoSkillOrderMax) missing[nm++] = catalog[i];
+    }
+    if (nm == 0) return false;
+    if (n >= xcat::kAutoSkillOrderMax) {
+        ImGui::TextDisabled("列表已满");
+        return false;
+    }
+    ImGui::SetNextItemWidth(-1.f);
+    bool picked = false;
+    if (ImGui::BeginCombo("##add", "添加技能…")) {
+        for (uint32_t i = 0; i < nm; ++i) {
+            const char* name = xcat::AutoSkillSkillName(bin, missing[i]);
+            char row[96]{};
+            if (name && name[0]) {
+                snprintf(row, sizeof(row), "%s", name);
+            } else {
+                snprintf(row, sizeof(row), "%d", missing[i]);
+            }
+            if (ImGui::Selectable(row)) {
+                *outId = missing[i];
+                picked = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return picked;
+}
+
+void DrawAutoSkillCard(LaunchUiState& ui) {
+    static bool enabled = false;
+    static bool en1 = false;
+    static bool en2 = false;
+    static int job1 = 0;
+    static int job2 = 0;
+    static int order1[xcat::kAutoSkillOrderMax]{};
+    static int order2[xcat::kAutoSkillOrderMax]{};
+    static int tgt1[xcat::kAutoSkillOrderMax]{};
+    static int tgt2[xcat::kAutoSkillOrderMax]{};
+    static uint32_t n1 = 0;
+    static uint32_t n2 = 0;
+    static uint64_t tick = 0;
+    static bool loaded = false;
+    static std::string s_loadedBin;
+    static bool s_saveFailed = false;
+    static uint64_t s_lastPollMs = 0;
+    static bool s_loggedShow = false;
+    static uint32_t s_pendingFillMask = 0;  // bit0=job1  bit1=job2；Combo 关闭后再填表写盘
+    static bool s_pendingPersist = false;
+    static bool s_needStub = true;
+    static bool s_orderDirty = false;
+    static SkillListAnim s_anim1{};
+    static SkillListAnim s_anim2{};
+
+    auto copyRows = [](int* dId, int* dT, uint32_t& dn, const int* sId, const int* sT, uint32_t sn) {
+        dn = 0;
+        for (uint32_t i = 0; i < xcat::kAutoSkillOrderMax; ++i) {
+            dId[i] = 0;
+            dT[i] = 0;
+        }
+        for (uint32_t i = 0; i < sn && i < xcat::kAutoSkillOrderMax; ++i) {
+            if (sId[i] <= 0) continue;
+            dId[dn] = sId[i];
+            int t = sT[i];
+            if (t < 0) t = 0;
+            if (t > xcat::kAutoSkillTargetMax) t = xcat::kAutoSkillTargetMax;
+            dT[dn] = t;
+            ++dn;
+        }
+    };
+
+    auto loadUi = [&]() {
+        enabled = false;
+        en1 = en2 = false;
+        job1 = job2 = 0;
+        n1 = n2 = 0;
+        tick = 0;
+        for (uint32_t i = 0; i < xcat::kAutoSkillOrderMax; ++i) {
+            order1[i] = 0;
+            order2[i] = 0;
+            tgt1[i] = 0;
+            tgt2[i] = 0;
+        }
+        s_anim1 = {};
+        s_anim2 = {};
+        if (ui.prefsBinDir.empty()) {
+            loaded = true;
+            return;
+        }
+        xcat::AutoSkillConfig cfg{};
+        if (xcat::ReadAutoSkill(ui.prefsBinDir.c_str(), cfg)) {
+            enabled = cfg.enabled != 0;
+            en1 = cfg.job1Enabled != 0;
+            en2 = cfg.job2Enabled != 0;
+            job1 = cfg.job1;
+            job2 = cfg.job2;
+            copyRows(order1, tgt1, n1, cfg.job1Order, cfg.job1Target, cfg.job1Count);
+            copyRows(order2, tgt2, n2, cfg.job2Order, cfg.job2Target, cfg.job2Count);
+            tick = cfg.writeTickMs;
+        }
+        loaded = true;
+    };
+
+    auto persist = [&]() {
+        if (ui.prefsBinDir.empty()) return;
+        xcat::AutoSkillConfig cfg{};
+        cfg.enabled = enabled ? 1u : 0u;
+        cfg.job1Enabled = en1 ? 1u : 0u;
+        cfg.job2Enabled = en2 ? 1u : 0u;
+        cfg.job1 = job1;
+        cfg.job2 = job2;
+        copyRows(cfg.job1Order, cfg.job1Target, cfg.job1Count, order1, tgt1, n1);
+        copyRows(cfg.job2Order, cfg.job2Target, cfg.job2Count, order2, tgt2, n2);
+        xcat::AutoSkillNormalize(cfg);
+        enabled = cfg.enabled != 0;
+        en1 = cfg.job1Enabled != 0;
+        en2 = cfg.job2Enabled != 0;
+        cfg.writeTickMs = GetTickCount64();
+        if (xcat::WriteAutoSkill(ui.prefsBinDir.c_str(), cfg, 0u)) {
+            tick = cfg.writeTickMs;
+            s_saveFailed = false;
+            s_pendingPersist = false;
+            xcat::log::Ok("App", "已下发 auto_skill：开=%d j1=%d/%d j2=%d/%d n1=%u n2=%u",
+                          cfg.enabled ? 1 : 0, cfg.job1, cfg.job1Enabled ? 1 : 0, cfg.job2,
+                          cfg.job2Enabled ? 1 : 0, cfg.job1Count, cfg.job2Count);
+        } else {
+            s_pendingPersist = true;
+        }
+    };
+
+    if (ui.prefsBinDir.empty()) {
+        ImGui::TextUnformatted("自动加技能点");
+        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [auto_skill]。");
+        return;
+    }
+
+    // 进 Tab 第一帧只出壳、立刻泵消息。读 ini / 解析 TSV / CardGuard 拉丝都放到下一帧，
+    // 否则 Debug 下 ChannelsSplit+fillRemaining 或抢 user.ini 锁会让窗口直接「未响应」。
+    if (s_needStub) {
+        s_needStub = false;
+        xcat::log::Ok("App", "auto_skill tab enter");
+        ImGui::TextUnformatted("自动加技能点");
+        ImGui::TextDisabled("正在读取配置…");
+        return;
+    }
+
+    xcat::AutoSkillWarmCatalogAsync(ui.prefsBinDir.c_str());
+
+    if (s_loadedBin != ui.prefsBinDir) {
+        s_loadedBin = ui.prefsBinDir;
+        loadUi();
+        s_saveFailed = false;
+        s_lastPollMs = GetTickCount64();
+    } else if (!loaded) {
+        loadUi();
+        s_lastPollMs = GetTickCount64();
+    } else if (s_pendingFillMask == 0 && !s_pendingPersist && !s_orderDirty &&
+               s_anim1.dragId == 0 && s_anim2.dragId == 0 && s_anim1.lift <= 0.02f &&
+               s_anim2.lift <= 0.02f && !ImGui::IsAnyItemActive() &&
+               ImGui::GetDragDropPayload() == nullptr && !s_saveFailed) {
+        // 禁止每帧 LoadIniFile：换票/注入时 payload 会占 user.ini 锁，UI 线程最多干等 5s/次。
+        // 有 pending 填表/写盘时不要先 loadUi，否则会把刚选的职业冲掉。
+        const uint64_t now = GetTickCount64();
+        if (now - s_lastPollMs >= 400ull) {
+            s_lastPollMs = now;
+            xcat::AutoSkillConfig disk{};
+            if (xcat::ReadAutoSkill(ui.prefsBinDir.c_str(), disk) && disk.writeTickMs != tick) {
+                loadUi();
+            }
+        }
+    }
+
+    if (s_pendingFillMask) {
+        const uint32_t mask = s_pendingFillMask;
+        s_pendingFillMask = 0;
+        const char* fillBin = ui.prefsBinDir.c_str();
+        xcat::log::Ok("App", "auto_skill fill start job1=%d job2=%d mask=%u", job1, job2, mask);
+        if (mask & 1u) {
+            if (job1 > 0) {
+                (void)xcat::AutoSkillFillDefaultOrder(fillBin, job1, order1, &n1, tgt1);
+                s_anim1 = {};
+            } else {
+                n1 = 0;
+                for (uint32_t i = 0; i < xcat::kAutoSkillOrderMax; ++i) {
+                    order1[i] = 0;
+                    tgt1[i] = 0;
+                }
+                s_anim1 = {};
+                en1 = false;
+            }
+        }
+        if (mask & 2u) {
+            if (job2 > 0) {
+                (void)xcat::AutoSkillFillDefaultOrder(fillBin, job2, order2, &n2, tgt2);
+                s_anim2 = {};
+            } else {
+                n2 = 0;
+                for (uint32_t i = 0; i < xcat::kAutoSkillOrderMax; ++i) {
+                    order2[i] = 0;
+                    tgt2[i] = 0;
+                }
+                s_anim2 = {};
+                en2 = false;
+            }
+        }
+        persist();
+        xcat::log::Ok("App", "auto_skill fill done n1=%u n2=%u", n1, n2);
+    }
+
+    if (!s_loggedShow) {
+        s_loggedShow = true;
+        xcat::log::Ok("App", "auto_skill card shown job1=%d job2=%d n1=%u n2=%u", job1, job2, n1,
+                      n2);
+    }
+
+    const char* bin = ui.prefsBinDir.c_str();
+
+    auto drawJobCombo = [&](const char* label, const char* id, int* job, const int* opts,
+                            uint32_t nOpts, bool isJob1, const char* restoreId, uint32_t fillBit) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine();
+        char preview[96]{};
+        if (*job <= 0) {
+            snprintf(preview, sizeof(preview), isJob1 ? "选择职业" : "不选");
+        } else {
+            const char* name = xcat::AutoSkillJobLabel(bin, *job);
+            if (name && name[0]) {
+                snprintf(preview, sizeof(preview), "%d  %s", *job, name);
+            } else {
+                snprintf(preview, sizeof(preview), "%d", *job);
+            }
+        }
+        const float restoreW =
+            restoreId ? (ImGui::CalcTextSize("恢复默认").x + ImGui::GetStyle().FramePadding.x * 2.f +
+                         AppDpi_Px(8.f))
+                      : 0.f;
+        const float gap = restoreId ? ImGui::GetStyle().ItemSpacing.x : 0.f;
+        ImGui::SetNextItemWidth((std::max)(AppDpi_Px(80.f), ImGui::GetContentRegionAvail().x - restoreW - gap));
+        if (ImGui::BeginCombo(id, preview)) {
+            if (!isJob1) {
+                const bool noneSel = (*job <= 0);
+                if (ImGui::Selectable("不选（不花 2 转技能点）", noneSel)) {
+                    if (*job != 0) {
+                        *job = 0;
+                        en2 = false;
+                        s_pendingFillMask |= 2u;
+                    }
+                }
+                if (noneSel) ImGui::SetItemDefaultFocus();
+            }
+            for (uint32_t i = 0; i < nOpts; ++i) {
+                const int j = opts[i];
+                const char* name = xcat::AutoSkillJobLabel(bin, j);
+                char row[96]{};
+                if (name && name[0]) {
+                    snprintf(row, sizeof(row), "%d  %s", j, name);
+                } else {
+                    snprintf(row, sizeof(row), "%d", j);
+                }
+                const bool sel = (*job == j);
+                if (ImGui::Selectable(row, sel)) {
+                    if (*job != j) {
+                        *job = j;
+                        if (isJob1) {
+                            int j2opts[16]{};
+                            uint32_t nj2sel = 0;
+                            xcat::AutoSkillListJob2(job1, j2opts, &nj2sel);
+                            bool keep = false;
+                            for (uint32_t k = 0; k < nj2sel; ++k) {
+                                if (j2opts[k] == job2) {
+                                    keep = true;
+                                    break;
+                                }
+                            }
+                            if (!keep) {
+                                job2 = 0;
+                                s_pendingFillMask |= 1u | 2u;
+                            } else {
+                                s_pendingFillMask |= 1u;
+                            }
+                        } else {
+                            if (job1 <= 0) {
+                                job1 = xcat::AutoSkillJob1OfJob2(j);
+                                s_pendingFillMask |= 1u | 2u;
+                            } else {
+                                s_pendingFillMask |= 2u;
+                            }
+                        }
+                    }
+                }
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        if (restoreId) {
+            ImGui::SameLine();
+            ImGui::BeginDisabled(*job <= 0);
+            if (ImGui::SmallButton(restoreId)) s_pendingFillMask |= fillBit;
+            ImGui::EndDisabled();
+        }
+    };
+
+    auto removeRow = [](int* ids, int* tgt, float* ys, float* vys, uint32_t& n, uint32_t i) {
+        if (i >= n) return;
+        for (uint32_t k = i; k + 1 < n; ++k) {
+            ids[k] = ids[k + 1];
+            tgt[k] = tgt[k + 1];
+            if (ys) ys[k] = ys[k + 1];
+            if (vys) vys[k] = vys[k + 1];
+        }
+        ids[n - 1] = 0;
+        tgt[n - 1] = 0;
+        if (ys) ys[n - 1] = 0.f;
+        if (vys) vys[n - 1] = 0.f;
+        --n;
+    };
+
+    auto drawOrder = [&](const char* listId, int* ids, int* tgt, uint32_t& n, SkillListAnim& anim,
+                         int job, uint32_t fillBit) {
+        ImGui::PushID(listId);
+        auto appendSkill = [&](int skillId) {
+            if (skillId <= 0 || n >= xcat::kAutoSkillOrderMax) return;
+            for (uint32_t k = 0; k < n; ++k) {
+                if (ids[k] == skillId) return;
+            }
+            ids[n] = skillId;
+            tgt[n] = 0;
+            ++n;
+            s_pendingPersist = true;
+        };
+        if (n == 0) {
+            anim = {};
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            if (job <= 0) {
+                if (fillBit == 2u) {
+                    ImGui::TextWrapped("未选 2 转：不会动 2 转技能点。需要时再选职业。");
+                } else {
+                    ImGui::TextWrapped("先在上面选 1 转职业。");
+                }
+            } else {
+                ImGui::TextWrapped("还没有技能。可填入该书默认顺序，或从下面挑着加。");
+            }
+            ImGui::PopStyleColor();
+            if (job > 0) {
+                if (ImGui::Button("填入默认")) s_pendingFillMask |= fillBit;
+                int addId = 0;
+                if (SkillListPickAdd(bin, job, ids, n, &addId)) appendSkill(addId);
+            }
+            ImGui::PopID();
+            return;
+        }
+        const float rowH = ImGui::GetFrameHeightWithSpacing();
+        const float avail = ImGui::GetContentRegionAvail().x;
+        const SkillListCols col = MakeSkillListCols(avail);
+
+        bool same = anim.n == n;
+        if (same) {
+            for (uint32_t i = 0; i < n; ++i) {
+                if (anim.idAt[i] != ids[i]) {
+                    same = false;
+                    break;
+                }
+            }
+        }
+        if (!same) SkillListAnimSnap(anim, ids, n, rowH);
+
+        int dragFrom = -1;
+        if (anim.dragId != 0) {
+            for (uint32_t i = 0; i < n; ++i) {
+                if (ids[i] == anim.dragId) {
+                    dragFrom = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (dragFrom < 0) anim.dragId = 0;
+        }
+
+        if (dragFrom >= 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            int insertAtDrop = anim.insertAt;
+            if (insertAtDrop < 0) insertAtDrop = 0;
+            if (insertAtDrop >= static_cast<int>(n)) insertAtDrop = static_cast<int>(n) - 1;
+            if (insertAtDrop != dragFrom) {
+                SkillListReorder(ids, tgt, anim.y, anim.vy, n, dragFrom, insertAtDrop);
+                s_orderDirty = true;
+            }
+            anim.dragId = 0;
+            dragFrom = -1;
+            for (uint32_t i = 0; i < n; ++i) anim.idAt[i] = ids[i];
+            anim.n = n;
+        }
+
+        float dt = ImGui::GetIO().DeltaTime;
+        if (dt < 0.001f) dt = 0.001f;
+        if (dt > 0.033f) dt = 0.033f;
+
+        const ImVec2 mouse = ImGui::GetMousePos();
+
+        SkillListHeader(col);
+
+        const ImVec2 bodyOrigin = ImGui::GetCursorScreenPos();
+        const float lo = 0.f;
+        const float hiY = static_cast<float>(n - 1) * rowH;
+        if (dragFrom >= 0) {
+            const float raw = mouse.y - bodyOrigin.y - anim.grabOff;
+            anim.y[dragFrom] = SkillListRubber(raw, lo, hiY);
+            anim.vy[dragFrom] = 0.f;
+        }
+        const int insertAt = SkillListInsertAt(anim, dragFrom, n, rowH);
+        const float liftTarget = (dragFrom >= 0) ? 1.f : 0.f;
+        anim.lift += (liftTarget - anim.lift) * (1.f - expf(-18.f * dt));
+        if (fabsf(liftTarget - anim.lift) < 0.003f) anim.lift = liftTarget;
+        if (anim.lift <= 0.003f) anim.liftId = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            if (static_cast<int>(i) == dragFrom) continue;
+            SkillListSpring(anim.y[i], anim.vy[i], SkillListTargetY(i, dragFrom, insertAt, rowH),
+                            dt);
+        }
+
+        ImGui::Dummy(ImVec2(avail, static_cast<float>(n) * rowH));
+        const ImVec2 after = ImGui::GetCursorScreenPos();
+        const float rnd = AppDpi_Px(4.f);
+        uint32_t removeAt = n;
+
+        auto drawRow = [&](uint32_t i) {
+            const float y = bodyOrigin.y + anim.y[i];
+            ImGui::SetCursorScreenPos(ImVec2(bodyOrigin.x, y));
+            ImGui::PushID(ids[i]);
+            const bool lifted = (ids[i] == anim.liftId && anim.lift > 0.02f) ||
+                                (static_cast<int>(i) == dragFrom);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const float innerH = ImGui::GetFrameHeight();
+            const float expand = anim.lift * AppDpi_Px(lifted ? 3.f : 0.f);
+            ImVec2 rmin(bodyOrigin.x - expand, y - expand * 0.35f);
+            ImVec2 rmax(bodyOrigin.x + avail + expand, y + innerH + expand * 0.55f);
+            if (lifted) {
+                const float sh = anim.lift;
+                for (int s = 3; s >= 1; --s) {
+                    const float o = sh * static_cast<float>(s) * AppDpi_Px(2.2f);
+                    const int alpha = static_cast<int>(14.f * static_cast<float>(s) * sh);
+                    dl->AddRectFilled(ImVec2(rmin.x, rmin.y + o), ImVec2(rmax.x, rmax.y + o),
+                                      IM_COL32(0, 0, 0, alpha), rnd);
+                }
+                dl->AddRectFilled(rmin, rmax, ImGui::GetColorU32(ImGuiCol_HeaderActive, 0.55f + 0.4f * sh),
+                                  rnd);
+                dl->AddRect(rmin, rmax, ImGui::GetColorU32(ImGuiCol_HeaderActive), rnd, 0,
+                            AppDpi_Px(1.2f + 0.8f * sh));
+            } else {
+                const bool rowHot =
+                    dragFrom < 0 &&
+                    ImGui::IsMouseHoveringRect(ImVec2(bodyOrigin.x, y),
+                                               ImVec2(bodyOrigin.x + avail, y + innerH), false);
+                const ImU32 bg = ImGui::GetColorU32(
+                    rowHot ? ImGuiCol_HeaderHovered
+                           : ((i % 2u) ? ImGuiCol_TableRowBgAlt : ImGuiCol_TableRowBg),
+                    rowHot ? 1.f : (1.f - 0.2f * anim.lift));
+                dl->AddRectFilled(ImVec2(bodyOrigin.x, y),
+                                  ImVec2(bodyOrigin.x + avail, y + innerH), bg);
+            }
+
+            const char* name = xcat::AutoSkillSkillName(bin, ids[i]);
+            char nameBuf[96]{};
+            if (name && name[0]) {
+                snprintf(nameBuf, sizeof(nameBuf), "%s", name);
+            } else {
+                snprintf(nameBuf, sizeof(nameBuf), "%d", ids[i]);
+            }
+            const int mx = xcat::AutoSkillMaxObserved(bin, ids[i]);
+            const int hiLv = mx > 0 ? mx : xcat::kAutoSkillTargetMax;
+            const bool followMax = tgt[i] <= 0;
+
+            auto tryBeginDrag = [&]() {
+                if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+                }
+                if (anim.dragId != 0) return;
+                if (!ImGui::IsItemActive()) return;
+                if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left, AppDpi_Px(2.f))) return;
+                anim.dragId = ids[i];
+                anim.liftId = ids[i];
+                anim.insertAt = static_cast<int>(i);
+                anim.grabOff = ImGui::GetMousePos().y - (bodyOrigin.y + anim.y[i]);
+                if (anim.lift < 0.4f) anim.lift = 0.4f;
+            };
+
+            auto at = [&](float x) {
+                ImGui::SetCursorScreenPos(ImVec2(bodyOrigin.x + x, y));
+            };
+
+            at(col.xGrip);
+            DrawSkillDragGrip(ImVec2(col.wGrip, ImGui::GetFrameHeight()));
+            tryBeginDrag();
+            int rank = static_cast<int>(i) + 1;
+            if (dragFrom >= 0) {
+                if (static_cast<int>(i) == dragFrom) {
+                    rank = insertAt + 1;
+                } else {
+                    rank = static_cast<int>(SkillListTargetY(i, dragFrom, insertAt, 1.f) + 0.1f) + 1;
+                }
+            }
+            at(col.xIdx);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%d", rank);
+            at(col.xName);
+            {
+                const ImVec2 np = ImGui::GetCursorScreenPos();
+                ImGui::PushClipRect(np, ImVec2(np.x + col.wName, np.y + innerH), true);
+                ImGui::Selectable(nameBuf, lifted, 0, ImVec2(col.wName, 0.f));
+                ImGui::PopClipRect();
+            }
+            tryBeginDrag();
+            const bool freeze = anim.dragId != 0;
+            if (freeze) ImGui::BeginDisabled();
+            int shown = followMax ? hiLv : tgt[i];
+            if (shown < 1) shown = 1;
+            if (shown > hiLv) shown = hiLv;
+            at(col.xTgt);
+            ImGui::SetNextItemWidth(col.wTgt);
+            if (xcat::ui::DragIntClamped("##tgt", &shown, 1, hiLv, "%d")) {
+                tgt[i] = shown;
+                s_pendingPersist = true;
+            }
+            at(col.xMax);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("/%d", hiLv);
+            at(col.xDel);
+            if (ImGui::SmallButton("x")) removeAt = i;
+            if (freeze) ImGui::EndDisabled();
+            ImGui::PopID();
+        };
+
+        const ImVec2 clipMax(bodyOrigin.x + avail, bodyOrigin.y + static_cast<float>(n) * rowH);
+        int liftIndex = -1;
+        ImGui::PushClipRect(bodyOrigin, clipMax, true);
+        for (uint32_t i = 0; i < n; ++i) {
+            if (ids[i] == anim.liftId || static_cast<int>(i) == dragFrom) {
+                liftIndex = static_cast<int>(i);
+                continue;
+            }
+            drawRow(i);
+        }
+        ImGui::PopClipRect();
+        if (liftIndex >= 0) drawRow(static_cast<uint32_t>(liftIndex));
+
+        ImGui::SetCursorScreenPos(after);
+        if (removeAt < n) {
+            removeRow(ids, tgt, anim.y, anim.vy, n, removeAt);
+            anim.dragId = 0;
+            anim.n = n;
+            for (uint32_t i = 0; i < xcat::kAutoSkillOrderMax; ++i) {
+                anim.idAt[i] = (i < n) ? ids[i] : 0;
+            }
+            s_pendingPersist = true;
+        }
+        ImGui::Dummy(ImVec2(0.f, AppDpi_Px(4.f)));
+        if (anim.dragId == 0) {
+            int addId = 0;
+            if (SkillListPickAdd(bin, job, ids, n, &addId)) appendSkill(addId);
+        }
+        ImGui::PopID();
+    };
+
+    auto drawEnableRow = [&](const char* id, bool* on, bool canOn, const char* idleHint) {
+        if (!canOn && *on) {
+            *on = false;
+            s_pendingPersist = true;
+        }
+        ImGui::BeginDisabled(!canOn);
+        if (xcat::ui::OptionCheckbox(id, on)) persist();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (!canOn) {
+            ImGui::TextDisabled("%s", idleHint);
+        } else if (*on) {
+            ImGui::TextDisabled("已开");
+        } else {
+            ImGui::TextDisabled("已关");
+        }
+    };
+
+    int j1[8]{};
+    uint32_t nj1 = 0;
+    xcat::AutoSkillListJob1(j1, &nj1);
+    int j2[16]{};
+    uint32_t nj2 = 0;
+    xcat::AutoSkillListJob2(job1, j2, &nj2);
+
+    {
+        xcat::ui::CardGuard card("##tab_auto_skill", "自动加技能点");
+        if (xcat::ui::OptionCheckbox("自动加技能点##ask_master", &enabled)) persist();
+        const bool masterHover = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+        ImGui::SameLine();
+        if (!enabled) {
+            ImGui::TextDisabled("已关，可先选职业和顺序");
+        } else if (!en1 && !en2) {
+            ImGui::TextDisabled("已开 · 再打开下面的 1 转 / 2 转");
+        } else {
+            ImGui::TextDisabled("已开");
+        }
+        if (masterHover) {
+            ImGui::SetTooltip(
+                "总闸。关掉后 1 转 / 2 转技能点都不加，勾选会留着。\n"
+                "1 转 / 2 转技能点分池，互不影响。这不是属性加点。");
+        }
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.35f));
+        DrawPrepHintBlueWrapped("从上到下按顺序加技能点。按住左边竖条拖动，即可调整顺序。");
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.25f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+        ImGui::TextWrapped(
+            "初心者不加。已转职后按 1/2 转技能点分池加。冒险家五职，不含双刀，不加 3 转书。"
+            "改顺序后需已注入当前 DLL。");
+        ImGui::PopStyleColor();
+    }
+
+    CardGap();
+    {
+        char title1[80]{};
+        const char* jl1 = (job1 > 0) ? xcat::AutoSkillJobLabel(bin, job1) : nullptr;
+        if (jl1 && jl1[0]) {
+            snprintf(title1, sizeof(title1), "1 转 · %s", jl1);
+        } else {
+            snprintf(title1, sizeof(title1), "1 转");
+        }
+        xcat::ui::CardGuard card("##tab_auto_skill_j1", title1);
+        drawEnableRow("1 转技能点##ask_j1", &en1, job1 > 0 && n1 > 0, "先选职业");
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.25f));
+        drawJobCombo("职业", "##ask_job1", &job1, j1, nj1, true, "恢复默认##j1", 1u);
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.35f));
+        drawOrder("j1", order1, tgt1, n1, s_anim1, job1, 1u);
+    }
+
+    CardGap();
+    {
+        char title2[80]{};
+        const char* jl2 = (job2 > 0) ? xcat::AutoSkillJobLabel(bin, job2) : nullptr;
+        if (jl2 && jl2[0]) {
+            snprintf(title2, sizeof(title2), "2 转 · %s", jl2);
+        } else {
+            snprintf(title2, sizeof(title2), "2 转");
+        }
+        xcat::ui::CardGuard card("##tab_auto_skill_j2", title2);
+        drawEnableRow("2 转技能点##ask_j2", &en2, job2 > 0 && n2 > 0,
+                      nj2 == 0 ? "先选 1 转" : "先选职业");
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.25f));
+        if (nj2 == 0) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("职业");
+            ImGui::SameLine();
+            ImGui::BeginDisabled(true);
+            ImGui::SetNextItemWidth(-1.f);
+            if (ImGui::BeginCombo("##ask_job2", "先选 1 转")) ImGui::EndCombo();
+            ImGui::EndDisabled();
+        } else {
+            drawJobCombo("职业", "##ask_job2", &job2, j2, nj2, false, "恢复默认##j2", 2u);
+        }
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.35f));
+        drawOrder("j2", order2, tgt2, n2, s_anim2, job2, 2u);
+    }
+
+    if (s_orderDirty && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        s_pendingPersist = true;
+        s_orderDirty = false;
+    }
+    if (s_pendingPersist) persist();
+
+    if (s_saveFailed) {
+        ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存 user.ini [auto_skill] 失败");
+    }
+}
+
+void DrawAutoStatTab(LaunchUiState& ui) {
+    static bool enabled = xcat::kAutoStatDefaultEnabled != 0;
+    static int str = 0;
+    static int dex = 0;
+    static int intel = 0;
+    static int luk = 0;
+    static uint64_t tick = 0;
+    static bool loaded = false;
+    static std::string s_loadedBin;
+    static bool s_saveFailed = false;
+    static uint64_t s_lastPollMs = 0;
+
+    auto loadUi = [&]() {
+        enabled = xcat::kAutoStatDefaultEnabled != 0;
+        str = dex = intel = luk = 0;
+        tick = 0;
+        if (ui.prefsBinDir.empty()) {
+            loaded = true;
+            return;
+        }
+        xcat::AutoStatConfig ast{};
+        if (xcat::ReadAutoStat(ui.prefsBinDir.c_str(), ast)) {
+            enabled = ast.enabled != 0;
+            str = static_cast<int>(ast.str);
+            dex = static_cast<int>(ast.dex);
+            intel = static_cast<int>(ast.intel);
+            luk = static_cast<int>(ast.luk);
+            tick = ast.writeTickMs;
+        }
+        loaded = true;
+    };
+
+    auto persist = [&]() {
+        if (ui.prefsBinDir.empty()) return;
+        xcat::AutoStatConfig cfg{};
+        (void)xcat::ReadAutoStat(ui.prefsBinDir.c_str(), cfg);
+        cfg.enabled = enabled ? 1u : 0u;
+        cfg.str = str < 0 ? 0u : static_cast<uint32_t>(str);
+        cfg.dex = dex < 0 ? 0u : static_cast<uint32_t>(dex);
+        cfg.intel = intel < 0 ? 0u : static_cast<uint32_t>(intel);
+        cfg.luk = luk < 0 ? 0u : static_cast<uint32_t>(luk);
+        xcat::AutoStatNormalize(cfg);
+        cfg.writeTickMs = GetTickCount64();
+        if (xcat::WriteAutoStat(ui.prefsBinDir.c_str(), cfg)) {
+            tick = cfg.writeTickMs;
+            s_saveFailed = false;
+            xcat::log::Ok("App", "已下发 auto_stat：开=%d 力量=%u 敏捷=%u 智力=%u 幸运=%u",
+                          cfg.enabled ? 1 : 0, cfg.str, cfg.dex, cfg.intel, cfg.luk);
+        } else {
+            s_saveFailed = true;
+            xcat::log::Warn("App", "写入 user.ini [auto_stat] 失败");
+        }
+    };
+
+    if (ui.prefsBinDir.empty()) {
+        xcat::ui::CardGuard card("##tab_auto_stat", "自动加点");
+        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [auto_stat]。");
+        return;
+    }
+
+    if (s_loadedBin != ui.prefsBinDir) {
+        s_loadedBin = ui.prefsBinDir;
+        loadUi();
+        s_saveFailed = false;
+        s_lastPollMs = GetTickCount64();
+    } else if (!loaded) {
+        loadUi();
+        s_lastPollMs = GetTickCount64();
+    } else if (!ImGui::IsAnyItemActive() && !s_saveFailed) {
+        const uint64_t now = GetTickCount64();
+        if (now - s_lastPollMs >= 400ull) {
+            s_lastPollMs = now;
+            xcat::AutoStatConfig disk{};
+            if (xcat::ReadAutoStat(ui.prefsBinDir.c_str(), disk) && disk.writeTickMs != tick) {
+                loadUi();
+            }
+        }
+    }
+
+    {
+        xcat::ui::CardGuard card("##tab_auto_stat", "自动加点");
+        const int ratioSum = str + dex + intel + luk;
+        const bool canEnable = ratioSum == static_cast<int>(xcat::kAutoStatRatioSum);
+        DrawPrepHintBlue("先分配好点数才允许勾选！！！");
+        ImGui::BeginDisabled(!enabled && !canEnable);
+        if (xcat::ui::OptionCheckbox("自动加点", &enabled)) persist();
+        ImGui::EndDisabled();
+        const bool autoStatHover = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+        ImGui::SameLine();
+        if (canEnable) {
+            ImGui::TextDisabled("配比 %d/%u", ratioSum, xcat::kAutoStatRatioSum);
+        } else {
+            ImGui::Text("配比 %d/%u", ratioSum, xcat::kAutoStatRatioSum);
+        }
+        if (autoStatHover) {
+            ImGui::SetTooltip(
+                "默认关闭。勾上后把身上剩余 AP 加完（不限 5 点）。\n"
+                "从勾上那一刻起，每 5 点按配比分，不追身上已有属性。\n"
+                "力量/敏捷/智力/幸运 合计必须为 5。关闭时不读属性、不发包。");
+        }
+
+        auto clampStat = [&](int* v, int others) {
+            const int maxThis = static_cast<int>(xcat::kAutoStatRatioSum) - others;
+            if (*v < 0) *v = 0;
+            if (*v > maxThis) *v = maxThis < 0 ? 0 : maxThis;
+        };
+        auto drawStat = [&](const char* label, const char* id, int* v, int others) {
+            ImGui::TextUnformatted(label);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(AppDpi_Px(40.f));
+            const int maxThis = (std::max)(0, static_cast<int>(xcat::kAutoStatRatioSum) - others);
+            if (xcat::ui::DragIntClamped(id, v, 0, maxThis)) {
+                clampStat(v, others);
+                persist();
+            }
+        };
+        drawStat("力量", "##asStr", &str, dex + intel + luk);
+        ImGui::SameLine(0.f, ui::Gap());
+        drawStat("敏捷", "##asDex", &dex, str + intel + luk);
+        ImGui::SameLine(0.f, ui::Gap());
+        drawStat("智力", "##asInt", &intel, str + dex + luk);
+        ImGui::SameLine(0.f, ui::Gap());
+        drawStat("幸运", "##asLuk", &luk, str + dex + intel);
+
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.4f));
+        ImGui::TextDisabled(
+            "仅 1 转后生效，0 转不加。从开启起每 5 点按配比分，不追已有属性。");
+    }
+
+    if (s_saveFailed) {
+        ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存 user.ini [auto_stat] 失败");
+    }
+}
+
+void DrawCharBootTab(LaunchUiState& ui) {
+    static int farmMap = static_cast<int>(xcat::kCharBootDefaultFarmMap);
+    static int hangupMap = static_cast<int>(xcat::kCharBootDefaultHangupMap);
+    static int departKind = static_cast<int>(xcat::kCharBootDepartLevel);
+    static int levelMin = static_cast<int>(xcat::kCharBootDefaultLevelMin);
+    static int mesoMin = static_cast<int>(xcat::kCharBootDefaultMesoMin);
+    static bool autoCreateChar = false;
+    static uint64_t tick = 0;
+    static bool loaded = false;
+    static std::string s_loadedBin;
+    static bool s_saveFailed = false;
+    static uint64_t s_lastPollMs = 0;
+    static xcat::CharBootStatus s_st{};
+    static std::string s_farmName;
+    static std::string s_hangupName;
+
+    auto loadUi = [&]() {
+        farmMap = static_cast<int>(xcat::kCharBootDefaultFarmMap);
+        hangupMap = static_cast<int>(xcat::kCharBootDefaultHangupMap);
+        departKind = static_cast<int>(xcat::kCharBootDepartLevel);
+        levelMin = static_cast<int>(xcat::kCharBootDefaultLevelMin);
+        mesoMin = static_cast<int>(xcat::kCharBootDefaultMesoMin);
+        autoCreateChar = false;
+        tick = 0;
+        if (ui.prefsBinDir.empty()) {
+            loaded = true;
+            return;
+        }
+        xcat::CharBootConfig cfg{};
+        if (xcat::ReadCharBoot(ui.prefsBinDir.c_str(), cfg)) {
+            farmMap = static_cast<int>(cfg.farmMap);
+            hangupMap = static_cast<int>(cfg.hangupMap);
+            departKind = static_cast<int>(cfg.departKind);
+            levelMin = static_cast<int>(cfg.levelMin);
+            mesoMin = static_cast<int>(cfg.mesoMin);
+            autoCreateChar = cfg.autoCreateChar != 0;
+            tick = cfg.writeTickMs;
+        }
+        (void)xcat::ReadCharBootStatus(ui.prefsBinDir.c_str(), s_st);
+        loaded = true;
+    };
+
+    auto persist = [&]() {
+        if (ui.prefsBinDir.empty()) return;
+        xcat::CharBootConfig cfg{};
+        (void)xcat::ReadCharBoot(ui.prefsBinDir.c_str(), cfg);
+        cfg.farmMap = farmMap > 0 ? static_cast<uint32_t>(farmMap) : xcat::kCharBootDefaultFarmMap;
+        cfg.hangupMap =
+            hangupMap > 0 ? static_cast<uint32_t>(hangupMap) : xcat::kCharBootDefaultHangupMap;
+        cfg.departKind = departKind == static_cast<int>(xcat::kCharBootDepartMeso)
+                             ? xcat::kCharBootDepartMeso
+                             : xcat::kCharBootDepartLevel;
+        cfg.levelMin = levelMin < 0 ? 0u : static_cast<uint32_t>(levelMin);
+        cfg.mesoMin = mesoMin < 0 ? 0u : static_cast<uint32_t>(mesoMin);
+        cfg.requireInt20 = 0;
+        cfg.autoCreateChar = autoCreateChar ? 1u : 0u;
+        xcat::CharBootNormalize(cfg);
+        cfg.writeTickMs = GetTickCount64();
+        if (xcat::WriteCharBoot(ui.prefsBinDir.c_str(), cfg)) {
+            tick = cfg.writeTickMs;
+            farmMap = static_cast<int>(cfg.farmMap);
+            hangupMap = static_cast<int>(cfg.hangupMap);
+            levelMin = static_cast<int>(cfg.levelMin);
+            mesoMin = static_cast<int>(cfg.mesoMin);
+            s_saveFailed = false;
+        } else {
+            s_saveFailed = true;
+        }
+    };
+
+    auto writeManual = [&](uint32_t kind) -> bool {
+        if (ui.prefsBinDir.empty()) return false;
+        xcat::CharBootConfig cfg{};
+        (void)xcat::ReadCharBoot(ui.prefsBinDir.c_str(), cfg);
+        cfg.farmMap = farmMap > 0 ? static_cast<uint32_t>(farmMap) : cfg.farmMap;
+        cfg.hangupMap = hangupMap > 0 ? static_cast<uint32_t>(hangupMap) : cfg.hangupMap;
+        cfg.departKind = departKind == static_cast<int>(xcat::kCharBootDepartMeso)
+                             ? xcat::kCharBootDepartMeso
+                             : xcat::kCharBootDepartLevel;
+        cfg.levelMin = levelMin < 0 ? 0u : static_cast<uint32_t>(levelMin);
+        cfg.mesoMin = mesoMin < 0 ? 0u : static_cast<uint32_t>(mesoMin);
+        cfg.requireInt20 = 0;
+        cfg.autoCreateChar = autoCreateChar ? 1u : 0u;
+        cfg.manualKind = kind;
+        cfg.manualSeq = cfg.manualSeq == 0 ? 1u : cfg.manualSeq + 1u;
+        xcat::CharBootNormalize(cfg);
+        cfg.writeTickMs = GetTickCount64();
+        if (!xcat::WriteCharBoot(ui.prefsBinDir.c_str(), cfg)) {
+            notify::PushLocal(/*Warning*/ 2, "char-boot-cmd", "一键起号失败", "写入命令失败",
+                              3500);
+            return false;
+        }
+        tick = cfg.writeTickMs;
+        return true;
+    };
+
+    auto fillCurrentMap = [&](int* dest, const char* id) {
+        (void)id;
+        xcat::PayloadStatus st{};
+        if (ui.prefsBinDir.empty() || !xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) ||
+            !xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000) || st.playReady == 0 ||
+            st.mapId == 0) {
+            notify::PushLocal(/*Warning*/ 2, "char-boot-map", "未进图",
+                              "心跳不新鲜或未进图，不能填入当前图", 3500);
+            return;
+        }
+        *dest = static_cast<int>(st.mapId);
+        persist();
+    };
+
+    if (ui.prefsBinDir.empty()) {
+        xcat::ui::CardGuard card("##tab_char_boot", "一键起号");
+        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [char_boot]。");
+        return;
+    }
+
+    if (s_loadedBin != ui.prefsBinDir) {
+        s_loadedBin = ui.prefsBinDir;
+        loadUi();
+        s_saveFailed = false;
+        s_lastPollMs = GetTickCount64();
+    } else if (!loaded) {
+        loadUi();
+        s_lastPollMs = GetTickCount64();
+    } else if (!ImGui::IsAnyItemActive() && !s_saveFailed) {
+        const uint64_t now = GetTickCount64();
+        if (now - s_lastPollMs >= 400ull) {
+            s_lastPollMs = now;
+            xcat::CharBootConfig disk{};
+            if (xcat::ReadCharBoot(ui.prefsBinDir.c_str(), disk) && disk.writeTickMs != tick) {
+                loadUi();
+            }
+            (void)xcat::ReadCharBootStatus(ui.prefsBinDir.c_str(), s_st);
+        }
+    }
+
+    const bool busy = xcat::CharBootStateIsBusy(s_st.state);
+    xcat::PayloadControl core{};
+    if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), core)) {
+        xcat::PayloadControlSetDefaults(core);
+    }
+
+    {
+        xcat::ui::CardGuard card("##tab_char_boot", "一键起号");
+        ImGui::TextDisabled("v1 只做法师 1 转。开始后会打开无敌和自动打怪，先赶到刷级图再出刀。");
+        ImGui::TextDisabled("加点建议 0/0/5/0。加技能选法师；8 级技能点要到 10 级才会加。");
+
+        if (busy) {
+            if (ImGui::Button("停止", ImVec2(AppDpi_Px(120.f), ui::BtnH()))) {
+                if (writeManual(xcat::kCharBootManualStop)) {
+                    strncpy_s(s_st.state, "Idle", _TRUNCATE);
+                    s_st.message[0] = 0;
+                    strncpy_s(s_st.lastWhy, "user_stop", _TRUNCATE);
+                }
+            }
+        } else {
+            if (ImGui::Button("开始", ImVec2(AppDpi_Px(120.f), ui::BtnH())))
+                (void)writeManual(xcat::kCharBootManualStart);
+        }
+
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.4f));
+        ImGui::TextUnformatted("起号刷级图");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(AppDpi_Px(110.f));
+        if (NativeInputIntClamped("##cb_farm", farmMap, 1, 999999999)) persist();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", LookupFarmMapDisp(ui.prefsBinDir.c_str(),
+                                                    std::to_string(farmMap).c_str(), s_farmName));
+        if (farmMap == static_cast<int>(xcat::kCharBootDefaultFarmMap)) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("嫩寶狩獵場Ⅰ");
+        }
+        if (ImGui::Button("填入当前图##cb_farm")) fillCurrentMap(&farmMap, "farm");
+
+        ImGui::TextUnformatted("转职后挂机图");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(AppDpi_Px(110.f));
+        if (NativeInputIntClamped("##cb_hangup", hangupMap, 1, 999999999)) persist();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", LookupFarmMapDisp(ui.prefsBinDir.c_str(),
+                                                    std::to_string(hangupMap).c_str(),
+                                                    s_hangupName));
+        if (ImGui::Button("填入当前图##cb_hangup")) fillCurrentMap(&hangupMap, "hangup");
+
+        if (ImGui::RadioButton("等级", departKind == 0)) {
+            departKind = 0;
+            persist();
+        }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("金币", departKind == 1)) {
+            departKind = 1;
+            persist();
+        }
+        if (departKind == 0) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(AppDpi_Px(70.f));
+            if (NativeInputIntClamped("##cb_lv", levelMin, static_cast<int>(xcat::kCharBootLevelMinLo),
+                                      static_cast<int>(xcat::kCharBootLevelMinHi)))
+                persist();
+        } else {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(AppDpi_Px(90.f));
+            if (NativeInputIntClamped("##cb_meso", mesoMin, static_cast<int>(xcat::kCharBootMesoMinLo),
+                                      2000000000))
+                persist();
+        }
+
+        if (xcat::ui::OptionCheckbox("自动创建角色", &autoCreateChar)) persist();
+        ImGui::SameLine();
+        ImGui::TextDisabled("仅空号、默认 1 槽、随机英文名");
+
+        if (departKind == 1 && farmMap >= 40000 && farmMap <= 40002) {
+            ImGui::TextColored(ImVec4(1.f, 0.82f, 0.2f, 1.f), "嫩寶几乎不掉钱");
+        }
+        if (hangupMap > 0 &&
+            xcat::IsMapInfoTown(ui.prefsBinDir.c_str(), static_cast<int>(hangupMap))) {
+            ImGui::TextColored(ImVec4(1.f, 0.82f, 0.2f, 1.f),
+                               "挂机图像城镇，开始时会拒绝");
+        }
+        if (autoCreateChar && core.charSlot != 1) {
+            ImGui::TextColored(ImVec4(1.f, 0.82f, 0.2f, 1.f),
+                               "空号建成只有 1 槽，与当前 charSlot 对不上");
+        }
+        if (autoCreateChar && core.autoEnter == 0) {
+            ImGui::TextColored(ImVec4(1.f, 0.82f, 0.2f, 1.f),
+                               "自动进游戏未开，勾了建角也不会建");
+        }
+
+        ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.4f));
+        ImGui::TextDisabled("态 %s  lv %d  INT %d  meso %lld  map %u  ready %u",
+                            s_st.state[0] ? s_st.state : "Idle", (int)s_st.level, (int)s_st.intel,
+                            static_cast<long long>(s_st.meso), s_st.mapId, s_st.ready);
+        if (s_st.message[0]) ImGui::TextUnformatted(s_st.message);
+        if (s_st.lastWhy[0]) {
+            ImGui::TextColored(ImVec4(1.f, 0.55f, 0.4f, 1.f), "上次：%s", s_st.lastWhy);
+        }
+    }
+
+    if (s_saveFailed) {
+        ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存 user.ini [char_boot] 失败");
+    }
+}
+
 }  // namespace
 
 bool TriggerManualRejoin(const std::string& prefsBinDir, bool requireInjected, std::string* outErr) {
@@ -6398,6 +8226,708 @@ bool TriggerManualRejoin(const std::string& prefsBinDir, bool requireInjected, s
     if (!xcat::WritePayloadControl(prefsBinDir.c_str(), c)) return fail("写盘失败");
     xcat::log::Ok("App", "随机换频 seq=%u", c.manualRejoinSeq);
     return true;
+}
+
+static std::string sMobGatherLoadedBin;
+static uint64_t sMobGatherLastTick = 0;
+static bool sMobGatherSaveFailed = false;
+
+static void MobGatherApplyDisk(const xcat::PayloadControl& c) {
+    gUiMobGather = c.mobGather != 0;
+    gUiMobGatherSpeedPct = (int)xcat::ClampMobGatherSpeedPct(
+        c.mobGatherSpeedPct ? c.mobGatherSpeedPct : xcat::kMobGatherSpeedPctDefault);
+    gUiMobGatherAntiJitter = c.mobGatherAntiJitter != 0;
+    gUiMobGatherMax = (int)xcat::ClampMobGatherMax(
+        c.mobGatherMax ? c.mobGatherMax : xcat::kMobGatherMaxDefault);
+    gUiMobGatherFarInFlight = (int)xcat::ClampMobGatherFarInFlight(c.mobGatherFarInFlight);
+    gUiMobGatherRadiusPx = (int)xcat::ClampMobGatherRadiusPx(
+        c.mobGatherRadiusPx ? c.mobGatherRadiusPx : xcat::kMobGatherRadiusDefaultPx);
+    gUiMobGatherLayerYPx = (int)xcat::ClampMobGatherLayerYPx(c.mobGatherLayerYPx);
+    gUiMobGatherDyLimPx = (int)xcat::ClampMobGatherDyLimPx(c.mobGatherDyLimPx);
+    gUiMobGatherWalkDx = (int)xcat::ClampMobGatherWalkDx(c.mobGatherWalkDx);
+    gUiMobGatherFeetExemptPx = (int)xcat::ClampMobGatherFeetExemptPx(c.mobGatherFeetExemptPx);
+    gUiMobGatherHoldMs = (int)xcat::ClampMobGatherHoldMs(
+        c.mobGatherHoldMs ? c.mobGatherHoldMs : xcat::kMobGatherHoldMsDefault);
+    gUiMobGatherIntervalMs = (int)xcat::ClampMobGatherIntervalMs(
+        c.mobGatherIntervalMs ? c.mobGatherIntervalMs : xcat::kMobGatherIntervalDefaultMs);
+    gUiMobGatherIgnoreQuiet = c.mobGatherIgnoreQuiet != 0;
+    gUiMobGatherQuietDelayMs = (int)xcat::ClampMobGatherQuietDelayMs(c.mobGatherQuietDelayMs);
+    gUiMobGatherStandOffCustom = c.mobGatherStandOffCustom != 0;
+    gUiMobGatherStandOffX = (int)xcat::ClampMobGatherStandOffX(c.mobGatherStandOffX);
+    gUiMobGatherStandOffY = (int)xcat::ClampMobGatherStandOffY(c.mobGatherStandOffY);
+    gUiMobGatherStickCreep = (int)xcat::ClampMobGatherStickCreep(
+        c.mobGatherStickCreepPx ? c.mobGatherStickCreepPx : xcat::kMobGatherStickCreepDefault);
+    gUiMobGatherStickStillV = (int)xcat::ClampMobGatherStickStillV(c.mobGatherStickStillV);
+    gUiMobGatherCruiseR = (int)xcat::ClampMobGatherCruiseR(
+        c.mobGatherCruiseR ? c.mobGatherCruiseR : xcat::kMobGatherCruiseRDefault);
+    gUiMobGatherStationR = (int)xcat::ClampMobGatherStationR(
+        c.mobGatherStationR ? c.mobGatherStationR : xcat::kMobGatherStationRDefault);
+    gUiMobGatherMaxCmd = (int)xcat::ClampMobGatherMaxCmd(
+        c.mobGatherMaxCmd ? c.mobGatherMaxCmd : xcat::kMobGatherMaxCmdDefault);
+    gUiMobGatherKp =
+        (int)xcat::ClampMobGatherKp(c.mobGatherKp ? c.mobGatherKp : xcat::kMobGatherKpDefault);
+    gUiMobGatherDead = (int)xcat::ClampMobGatherDead(
+        c.mobGatherDead ? c.mobGatherDead : xcat::kMobGatherDeadDefault);
+    gUiMobGatherGravity = (int)xcat::ClampMobGatherGravity(c.mobGatherGravity);
+    gUiMobGatherCruiseV = (int)xcat::ClampMobGatherCruiseV(
+        c.mobGatherCruiseV ? c.mobGatherCruiseV : xcat::kMobGatherCruiseVDefault);
+    gUiMobGatherStationV = (int)xcat::ClampMobGatherStationV(
+        c.mobGatherStationV ? c.mobGatherStationV : xcat::kMobGatherStationVDefault);
+    gUiMobGatherHoldV = (int)xcat::ClampMobGatherHoldV(
+        c.mobGatherHoldV ? c.mobGatherHoldV : xcat::kMobGatherHoldVDefault);
+    gUiMobGatherSettleErr = (int)xcat::ClampMobGatherSettleErr(
+        c.mobGatherSettleErr ? c.mobGatherSettleErr : xcat::kMobGatherSettleErrDefault);
+    gUiMobGatherKpSettle = (int)xcat::ClampMobGatherKpSettle(
+        c.mobGatherKpSettle ? c.mobGatherKpSettle : xcat::kMobGatherKpSettleDefault);
+    gUiMobGatherBrakeMs = (int)xcat::ClampMobGatherBrakeMs(
+        c.mobGatherBrakeMs ? c.mobGatherBrakeMs : xcat::kMobGatherBrakeMsDefault);
+    gUiMobGatherCoastVy = (int)xcat::ClampMobGatherCoastVy(c.mobGatherCoastVy);
+    gUiMobGatherAimMs = (int)xcat::ClampMobGatherAimMs(
+        c.mobGatherAimMs ? c.mobGatherAimMs : xcat::kMobGatherAimMsDefault);
+    gUiMobGatherSoftRelogin = c.mobGatherSoftRelogin != 0;
+    gUiMobGatherSoftReloginSec = (int)xcat::ClampMobGatherSoftReloginSec(
+        c.mobGatherSoftReloginSec ? c.mobGatherSoftReloginSec
+                                  : xcat::kMobGatherSoftReloginSecDefault);
+    gUiMobGatherClearRelogin = c.mobGatherClearRelogin != 0;
+    gUiMobGatherSeekCluster = c.mobGatherSeekCluster != 0;
+    gUiMobGatherHomeReturn = c.mobGatherHomeReturn != 0;
+    gUiMobGatherHomeX = (int)xcat::ClampMobGatherStandOffX(c.mobGatherHomeX);
+    gUiMobGatherHomeY = (int)xcat::ClampMobGatherStandOffY(c.mobGatherHomeY);
+    gUiMobGatherHomeMapId = c.mobGatherHomeMapId;
+    gUiMobGatherHomeValid = c.mobGatherHomeValid != 0;
+    gUiMobGatherHomeHasMap = c.mobGatherHomeHasMap != 0;
+    gUiMobGatherApplyCtrl = c.mobGatherApplyCtrl != 0;
+    gUiCombatForgeHit = c.simpleCombatForgeHit != 0;
+    sMobGatherLastTick = c.writeTickMs;
+}
+
+static void MobGatherLoadFromDisk(LaunchUiState& ui) {
+    if (ui.prefsBinDir.empty()) {
+        sMobGatherLastTick = 0;
+        return;
+    }
+    xcat::PayloadControl c{};
+    if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) {
+        xcat::PayloadControlSetDefaults(c);
+    }
+    MobGatherApplyDisk(c);
+}
+
+static bool MobGatherSaveUi(LaunchUiState& ui) {
+    if (ui.prefsBinDir.empty()) return false;
+    xcat::PayloadControl c{};
+    (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+    c.mobGather = gUiMobGather ? 1u : 0u;
+    c.mobGatherSpeedPct = xcat::ClampMobGatherSpeedPct(
+        static_cast<uint32_t>(gUiMobGatherSpeedPct < 0 ? 0 : gUiMobGatherSpeedPct));
+    c.mobGatherAntiJitter = gUiMobGatherAntiJitter ? 1u : 0u;
+    c.mobGatherMax = xcat::ClampMobGatherMax(
+        static_cast<uint32_t>(gUiMobGatherMax < 0 ? 0 : gUiMobGatherMax));
+    c.mobGatherFarInFlight = xcat::ClampMobGatherFarInFlight(
+        static_cast<uint32_t>(gUiMobGatherFarInFlight < 0 ? 0 : gUiMobGatherFarInFlight));
+    c.mobGatherRadiusPx = xcat::ClampMobGatherRadiusPx(
+        static_cast<uint32_t>(gUiMobGatherRadiusPx < 0 ? 0 : gUiMobGatherRadiusPx));
+    c.mobGatherLayerYPx = xcat::ClampMobGatherLayerYPx(
+        static_cast<uint32_t>(gUiMobGatherLayerYPx < 0 ? 0 : gUiMobGatherLayerYPx));
+    c.mobGatherDyLimPx = xcat::ClampMobGatherDyLimPx(
+        static_cast<uint32_t>(gUiMobGatherDyLimPx < 0 ? 0 : gUiMobGatherDyLimPx));
+    c.mobGatherWalkDx = xcat::ClampMobGatherWalkDx(
+        static_cast<uint32_t>(gUiMobGatherWalkDx < 0 ? 0 : gUiMobGatherWalkDx));
+    c.mobGatherFeetExemptPx = xcat::ClampMobGatherFeetExemptPx(
+        static_cast<uint32_t>(gUiMobGatherFeetExemptPx < 0 ? 0 : gUiMobGatherFeetExemptPx));
+    c.mobGatherHoldMs = xcat::ClampMobGatherHoldMs(
+        static_cast<uint32_t>(gUiMobGatherHoldMs < 0 ? 0 : gUiMobGatherHoldMs));
+    c.mobGatherIntervalMs = xcat::ClampMobGatherIntervalMs(
+        static_cast<uint32_t>(gUiMobGatherIntervalMs < 0 ? 0 : gUiMobGatherIntervalMs));
+    c.mobGatherIgnoreQuiet = gUiMobGatherIgnoreQuiet ? 1u : 0u;
+    c.mobGatherQuietDelayMs = xcat::ClampMobGatherQuietDelayMs(
+        static_cast<uint32_t>(gUiMobGatherQuietDelayMs < 0 ? 0 : gUiMobGatherQuietDelayMs));
+    c.mobGatherStandOffCustom = gUiMobGatherStandOffCustom ? 1u : 0u;
+    c.mobGatherStandOffX = xcat::ClampMobGatherStandOffX(gUiMobGatherStandOffX);
+    c.mobGatherStandOffY = xcat::ClampMobGatherStandOffY(gUiMobGatherStandOffY);
+    c.mobGatherStickCreepPx = xcat::ClampMobGatherStickCreep(
+        static_cast<uint32_t>(gUiMobGatherStickCreep < 0 ? 0 : gUiMobGatherStickCreep));
+    c.mobGatherStickStillV = xcat::ClampMobGatherStickStillV(
+        static_cast<uint32_t>(gUiMobGatherStickStillV < 0 ? 0 : gUiMobGatherStickStillV));
+    c.mobGatherCruiseR = xcat::ClampMobGatherCruiseR(
+        static_cast<uint32_t>(gUiMobGatherCruiseR < 0 ? 0 : gUiMobGatherCruiseR));
+    c.mobGatherStationR = xcat::ClampMobGatherStationR(
+        static_cast<uint32_t>(gUiMobGatherStationR < 0 ? 0 : gUiMobGatherStationR));
+    c.mobGatherMaxCmd = xcat::ClampMobGatherMaxCmd(
+        static_cast<uint32_t>(gUiMobGatherMaxCmd < 0 ? 0 : gUiMobGatherMaxCmd));
+    c.mobGatherKp = xcat::ClampMobGatherKp(
+        static_cast<uint32_t>(gUiMobGatherKp < 0 ? 0 : gUiMobGatherKp));
+    c.mobGatherDead = xcat::ClampMobGatherDead(
+        static_cast<uint32_t>(gUiMobGatherDead < 0 ? 0 : gUiMobGatherDead));
+    c.mobGatherGravity = xcat::ClampMobGatherGravity(
+        static_cast<uint32_t>(gUiMobGatherGravity < 0 ? 0 : gUiMobGatherGravity));
+    c.mobGatherCruiseV = xcat::ClampMobGatherCruiseV(
+        static_cast<uint32_t>(gUiMobGatherCruiseV < 0 ? 0 : gUiMobGatherCruiseV));
+    c.mobGatherStationV = xcat::ClampMobGatherStationV(
+        static_cast<uint32_t>(gUiMobGatherStationV < 0 ? 0 : gUiMobGatherStationV));
+    c.mobGatherHoldV = xcat::ClampMobGatherHoldV(
+        static_cast<uint32_t>(gUiMobGatherHoldV < 0 ? 0 : gUiMobGatherHoldV));
+    c.mobGatherSettleErr = xcat::ClampMobGatherSettleErr(
+        static_cast<uint32_t>(gUiMobGatherSettleErr < 0 ? 0 : gUiMobGatherSettleErr));
+    c.mobGatherKpSettle = xcat::ClampMobGatherKpSettle(
+        static_cast<uint32_t>(gUiMobGatherKpSettle < 0 ? 0 : gUiMobGatherKpSettle));
+    c.mobGatherBrakeMs = xcat::ClampMobGatherBrakeMs(
+        static_cast<uint32_t>(gUiMobGatherBrakeMs < 0 ? 0 : gUiMobGatherBrakeMs));
+    c.mobGatherCoastVy = xcat::ClampMobGatherCoastVy(
+        static_cast<uint32_t>(gUiMobGatherCoastVy < 0 ? 0 : gUiMobGatherCoastVy));
+    c.mobGatherAimMs = xcat::ClampMobGatherAimMs(
+        static_cast<uint32_t>(gUiMobGatherAimMs < 0 ? 0 : gUiMobGatherAimMs));
+    c.mobGatherSoftRelogin = gUiMobGatherSoftRelogin ? 1u : 0u;
+    c.mobGatherSoftReloginSec = xcat::ClampMobGatherSoftReloginSec(
+        static_cast<uint32_t>(gUiMobGatherSoftReloginSec < 0 ? 0 : gUiMobGatherSoftReloginSec));
+    c.mobGatherClearRelogin = gUiMobGatherClearRelogin ? 1u : 0u;
+    c.mobGatherSeekCluster = gUiMobGatherSeekCluster ? 1u : 0u;
+    c.mobGatherHomeReturn = gUiMobGatherHomeReturn ? 1u : 0u;
+    c.mobGatherHomeX = xcat::ClampMobGatherStandOffX(gUiMobGatherHomeX);
+    c.mobGatherHomeY = xcat::ClampMobGatherStandOffY(gUiMobGatherHomeY);
+    c.mobGatherHomeMapId = gUiMobGatherHomeMapId;
+    c.mobGatherHomeValid = gUiMobGatherHomeValid ? 1u : 0u;
+    c.mobGatherHomeHasMap = gUiMobGatherHomeHasMap ? 1u : 0u;
+    c.mobGatherApplyCtrl = gUiMobGatherApplyCtrl ? 1u : 0u;
+    c.simpleCombatForgeHit = gUiCombatForgeHit ? 1u : 0u;
+    c.writeTickMs = GetTickCount64();
+    if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
+    sMobGatherLastTick = c.writeTickMs;
+    return true;
+}
+
+static void MobGatherTrySaveOrRevert(LaunchUiState& ui) {
+    if (MobGatherSaveUi(ui)) {
+        sMobGatherSaveFailed = false;
+        return;
+    }
+    sMobGatherSaveFailed = true;
+    MobGatherLoadFromDisk(ui);
+}
+
+static void MobGatherSyncFromDisk(LaunchUiState& ui) {
+    if (sMobGatherLoadedBin != ui.prefsBinDir) {
+        sMobGatherLoadedBin = ui.prefsBinDir;
+        MobGatherLoadFromDisk(ui);
+        sMobGatherSaveFailed = false;
+    } else if (!ui.prefsBinDir.empty() && !ImGui::IsAnyItemActive() && !sMobGatherSaveFailed) {
+        xcat::PayloadControl disk{};
+        if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk) &&
+            disk.writeTickMs != sMobGatherLastTick) {
+            MobGatherApplyDisk(disk);
+        }
+    }
+}
+
+static void MobGatherDragU(LaunchUiState& ui, const char* label, const char* id, int* v, int lo,
+                          int hi, float speed, const char* unit, const char* tip) {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+    ImGui::SetNextItemWidth(AppDpi_Px(80.f));
+    char hid[64]{};
+    snprintf(hid, sizeof(hid), "##mg_%s", id);
+    if (ImGui::DragInt(hid, v, speed, lo, hi, "%d", ImGuiSliderFlags_AlwaysClamp)) {
+        MobGatherTrySaveOrRevert(ui);
+    }
+    if (tip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", tip);
+    if (unit && unit[0]) {
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextUnformatted(unit);
+    }
+}
+
+void DrawMobGatherTab(LaunchUiState& ui) {
+    if (!gGatherTabUnlocked) {
+        ImGui::TextDisabled("未解锁");
+        return;
+    }
+    MobGatherSyncFromDisk(ui);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                        ImVec2(ImGui::GetStyle().ItemSpacing.x, ui::Gap() * 0.85f));
+
+    {
+        xcat::ui::CardGuard card("##tab_gather_switch", "开关");
+        if (xcat::ui::OptionCheckbox("吸怪", &gUiMobGather)) MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "把这台客户端正在模拟的怪吸到角色朝向面前的落点，方便打。\n"
+                "不是防抢。追怪选「站桩输出」不会自动开本项。落盘 user.ini。");
+        }
+        if (xcat::ui::OptionCheckbox("申请控制权", &gUiMobGatherApplyCtrl))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认关。勾上后吸怪持有期每秒对半径内非 Active 怪走官方 ApplyControl。\n"
+                "客户端只能申请；服端批 280 才变你控。不改 0xE8、不造包、不谎报优先级。\n"
+                "贴脸更值钱。狂申帮不上忙，还可能踢。落盘 user.ini。");
+        }
+        MobGatherDragU(ui, "延时启动", "qdelay", &gUiMobGatherQuietDelayMs,
+                       (int)xcat::kMobGatherQuietDelayMsMin, (int)xcat::kMobGatherQuietDelayMsMax,
+                       50.f, "ms",
+                       "作用整模块：开吸怪或软重连 hold 结束进图后，再等这么久才收怪。0=立刻。\n"
+                       "与「落地也吸」无关。hold 中硬停并清钟。拖动或双击填。只防爆钳。\n"
+                       "BIN：tick qdelay= / skip why=quiet_delay left=。");
+        MobGatherDragU(ui, "同时", "max", &gUiMobGatherMax, (int)xcat::kMobGatherMaxMin,
+                       (int)xcat::kMobGatherMaxMax, 1.f, "只",
+                       "同时吸住的上限，默认 64。BIN：tick max=。调低立刻丢掉多出来的。\n"
+                       "BIN 里 pushed= 变小通常是活怪打完了，不是这个闸。");
+        MobGatherDragU(ui, "在途", "farin", &gUiMobGatherFarInFlight,
+                       (int)xcat::kMobGatherFarInFlightMin, (int)xcat::kMobGatherFarInFlightMax, 1.f,
+                       "只",
+                       "巡航圈外同时往回飞的上限。0=不限。脚边不占这格。\n"
+                       "BIN：tick skipFar= / farAdm=。远拉太多容易掐线。");
+        ImGui::TextDisabled("默认关 · 落盘");
+        ImGui::TextDisabled("吸速 / 防抖 / 作动器在「调试 → 吸怪飞控」");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_home", "归位");
+        if (xcat::ui::OptionCheckbox("软重连后返回原位", &gUiMobGatherHomeReturn)) {
+            if (gUiMobGatherHomeReturn) gUiMobGatherSeekCluster = false;
+            MobGatherTrySaveOrRevert(ui);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认开。没记过点不飞（F5 或点「记录人物坐标」才生效；再按 F5 会覆盖）。\n"
+                "与「先飞到最密堆再吸」互斥，两勾不能同时开。\n"
+                "F5 每次开/关打怪都会刷新记录，或点「记录人物坐标」（需站在台上；更大 Y = 更高）。\n"
+                "也可微调 X/Y。坐标落盘 user.ini：关启动器、游戏死了再开都还在。\n"
+                "软重连回图、或游戏重开后进到这张图，离记录点够远就飞回去，挂台站稳再吸。\n"
+                "没点过记录（没有图号）不飞。人在别的图就等进对的图再飞。");
+        }
+        ImGui::BeginDisabled(!gUiMobGatherHomeReturn);
+        if (ImGui::Button("记录人物坐标##mg_home_rec")) {
+            if (ui.prefsBinDir.empty()) {
+                notify::PushLocal(/*Warning*/ 2, "gather-home", "记录失败", "无数据目录", 3000);
+            } else {
+                const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
+                if (leds.gamePid == 0) {
+                    notify::PushLocal(/*Warning*/ 2, "gather-home", "记录失败", "需已注入游戏",
+                                     3000);
+                } else {
+                    uint32_t seq = xcat::ReadMobGatherHomeRecordSeq(ui.prefsBinDir.c_str());
+                    seq = seq == 0 ? 1u : seq + 1u;
+                    if (seq == 0) seq = 1u;
+                    if (xcat::WriteMobGatherHomeRecordSeq(ui.prefsBinDir.c_str(), seq)) {
+                        xcat::log::Ok("App", "mobGatherHomeRecordSeq=%u", seq);
+                        notify::PushLocal(/*Info*/ 1, "gather-home", "已下发记录",
+                                         "人物需站在台上；成功后 X/Y 会更新", 4000);
+                    } else {
+                        notify::PushLocal(/*Warning*/ 2, "gather-home", "记录失败",
+                                         "写指令失败", 3000);
+                    }
+                }
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "把当前人物 AbsPos 和图号写入原位。必须已注入、人站在台上。\n"
+                "F5 开/关打怪都会刷新（须站在台上）。落盘 user.ini。");
+        }
+        {
+            const int ox = gUiMobGatherHomeX;
+            const int oy = gUiMobGatherHomeY;
+            MobGatherDragU(ui, "原位X", "homex", &gUiMobGatherHomeX,
+                           (int)xcat::kMobGatherStandOffXMin, (int)xcat::kMobGatherStandOffXMax,
+                           1.f, "px",
+                           "AbsPos X。F5 或点「记录人物坐标」会覆盖。拖动或双击填。只防爆钳 ±30000。");
+            MobGatherDragU(ui, "原位Y", "homey", &gUiMobGatherHomeY,
+                           (int)xcat::kMobGatherStandOffYMin, (int)xcat::kMobGatherStandOffYMax,
+                           1.f, "px",
+                           "AbsPos Y。更大 = 更高。F5 或点「记录人物坐标」会覆盖。拖动或双击填。只防爆钳 ±30000。");
+            if (!gUiMobGatherHomeValid &&
+                (gUiMobGatherHomeX != ox || gUiMobGatherHomeY != oy)) {
+                gUiMobGatherHomeValid = true;
+                MobGatherTrySaveOrRevert(ui);
+            }
+        }
+        if (gUiMobGatherHomeValid && gUiMobGatherHomeHasMap) {
+            char mapKey[16];
+            snprintf(mapKey, sizeof(mapKey), "%d", gUiMobGatherHomeMapId);
+            std::string mapDisp;
+            const char* name = LookupFarmMapDisp(ui.prefsBinDir.c_str(), mapKey, mapDisp);
+            ImGui::TextDisabled("已记录 (%d, %d) %s · 再点按钮会覆盖", gUiMobGatherHomeX,
+                                gUiMobGatherHomeY, name);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("图号：%d", gUiMobGatherHomeMapId);
+            }
+        } else if (gUiMobGatherHomeValid) {
+            ImGui::TextDisabled("有坐标无图号 · 点「记录人物坐标」才会归位");
+        } else {
+            ImGui::TextDisabled("尚未记录 · 站到挂机点后点「记录人物坐标」");
+        }
+        ImGui::EndDisabled();
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_forge_hit", "出刀自组攻包");
+        if (xcat::ui::OptionCheckbox("出刀自组攻包（钉锁）", &gUiCombatForgeHit))
+            MobGatherTrySaveOrRevert(ui);
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextDisabled("仅近战 50；过远跟站桩输出面前盒 · 失败不出刀 · 落盘");
+        ImGui::PopTextWrapPos();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "落盘 user.ini。简单战斗普攻才自己组包。\n"
+                "发包走 Network.SendOutPacket（禁止 Session.Send 旁路）。\n"
+                "命中环只填当前锁 oid。只组近战 opcode 50。\n"
+                "过远（站桩输出面前盒）/ SendOut 失败 / 飞镖弓杖：这一刀作废，不退 OnFuncKey。\n"
+                "\n"
+                "和实验 TAB「攻包伪造探针」不是同一个勾：\n"
+                "· 探针 = 自己 Tick 扫近距怪，满 2 次自动关\n"
+                "· 本项 = 劫持打怪出刀，节奏跟面板间隔\n"
+                "\n"
+                "不要和瞬移聚怪一起开。多发手搓已证实踢号。");
+        }
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_aim", "落点");
+        if (xcat::ui::OptionCheckbox("自定义落点", &gUiMobGatherStandOffCustom))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "怪悬停在自定义空点，不贴台。跟首页空中贴怪站距各存各的。\n"
+                "不勾 = 近战默认 X=%d、Y=%d。拖动或双击填数。AbsPos：更大 Y = 更高。\n"
+                "BIN：tick off=X,Y。",
+                (int)xcat::kMobGatherStandOffXDefault, (int)xcat::kMobGatherStandOffYDefault);
+        }
+        ImGui::BeginDisabled(!gUiMobGatherStandOffCustom);
+        MobGatherDragU(ui, "X", "offx", &gUiMobGatherStandOffX, (int)xcat::kMobGatherStandOffXMin,
+                       (int)xcat::kMobGatherStandOffXMax, 1.f, "px",
+                       "相对朝向的水平偏移。正=面前，负=背后。拖动或双击填。只防爆钳 ±30000。\n"
+                       "BIN：tick off=。");
+        MobGatherDragU(ui, "Y", "offy", &gUiMobGatherStandOffY, (int)xcat::kMobGatherStandOffYMin,
+                       (int)xcat::kMobGatherStandOffYMax, 1.f, "px",
+                       "相对人 AbsPos 的垂直偏移。正数 = 更高。拖动或双击填。只防爆钳 ±30000。\n"
+                       "BIN：tick off=。");
+        ImGui::EndDisabled();
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_relogin", "重连");
+        if (xcat::ui::OptionCheckbox("X秒后触发软重连", &gUiMobGatherSoftRelogin))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认开。必须先开吸怪才会拆会话；关吸怪只停计时，不主动 CloseSession。\n"
+                "吸怪开着、进图站稳满 X 秒后，由我们主动 CloseSession 走软重连回图。\n"
+                "成功落地后再计时。首页「软重连试连」必须开，否则不会拆会话。\n"
+                "换图窗 / 商城拍卖 / 换频 / 测谎 / 补给途中不拆，赶路会先当空档再重规划，\n"
+                "不会卡在 wait_wm_field。不点確認、不清登录态。落盘 user.ini。");
+        }
+        ImGui::BeginDisabled(!gUiMobGatherSoftRelogin);
+        MobGatherDragU(ui, "秒数", "softsec", &gUiMobGatherSoftReloginSec,
+                       (int)xcat::kMobGatherSoftReloginSecMin,
+                       (int)xcat::kMobGatherSoftReloginSecMax, 5.f, "秒",
+                       "满这么多秒后触发。拖动或双击填。默认 14，范围 10–3600。关吸怪不拆。");
+        ImGui::EndDisabled();
+        if (xcat::ui::OptionCheckbox("清怪重连", &gUiMobGatherClearRelogin))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认关。独立于「X秒后触发软重连」。必须先开吸怪才会拆会话。\n"
+                "「同时」=N 时吸到第 N 只就冻结（同时=1 只吸 1 只，死了不补下一只）。\n"
+                "这批死光再 CloseSession。超时溜走、落地清空名单不拆。首页「软重连试连」必须开。");
+        }
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_range", "收怪");
+        MobGatherDragU(ui, "半径", "radius", &gUiMobGatherRadiusPx, (int)xcat::kMobGatherRadiusMinPx,
+                       (int)xcat::kMobGatherRadiusMaxPx, 50.f, "px",
+                       "新收半径，默认 2800。只防爆钳 30000，不再封 8000。\n"
+                       "已吸住的飞出仍维持，直到超时。BIN：tick r=。");
+        MobGatherDragU(ui, "超时", "hold", &gUiMobGatherHoldMs, (int)xcat::kMobGatherHoldMsMin,
+                       (int)xcat::kMobGatherHoldMsMax, 100.f, "ms",
+                       "白名单维持超时。人一直在吸会续期。BIN：tick hold=。");
+        MobGatherDragU(ui, "间隔", "iv", &gUiMobGatherIntervalMs, (int)xcat::kMobGatherIntervalMinMs,
+                       (int)xcat::kMobGatherIntervalMaxMs, 10.f, "ms",
+                       "新收一批的间隔，默认 40。已吸住的怪仍跟瞄准 VTOL，不会按这个停下来。\n"
+                       "加大=少扫图、少进泵。BIN：tick iv=。");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_gate", "闸门");
+        MobGatherDragU(ui, "高度闸", "dylim", &gUiMobGatherDyLimPx, (int)xcat::kMobGatherDyLimPxMin,
+                       (int)xcat::kMobGatherDyLimPxMax, 10.f, "px",
+                       "新收竖直上限 |mobY-人Y|，默认 1200。AbsPos 更大 Y = 更高。用户自填。\n"
+                       "站着吸时：距人 hypot 超过「脚边」且 |dY| 超过这个数 → 不新 Arm。已吸住的继续。\n"
+                       "0=任意高度差都不新收。只防爆钳 30000。不是「竖层」。\n"
+                       "调试 TAB「高度闸扫描」测极限；停扫恢复本滑条。\n"
+                       "BIN：tick skipDy= / dyLim=。");
+        MobGatherDragU(ui, "履历", "walkdx", &gUiMobGatherWalkDx, (int)xcat::kMobGatherWalkDxMin,
+                       (int)xcat::kMobGatherWalkDxMax, 1.f, "px",
+                       "履历闸横移。新 oid 相对第一次见到的 Ap，|dx| 小于此不 Arm。默认 96。用户自填。\n"
+                       "0=不挡横移。调小=更容易收补刷；调大=等巡逻走开。只防爆钳 30000。\n"
+                       "脚边以内不走这闸。BIN：dHome= / dHomeMax= / walkDx=。");
+        MobGatherDragU(ui, "脚边", "feet", &gUiMobGatherFeetExemptPx,
+                       (int)xcat::kMobGatherFeetExemptPxMin, (int)xcat::kMobGatherFeetExemptPxMax,
+                       10.f, "px",
+                       "距人 hypot ≤此不走履历闸和高度闸，照吸。默认 320。用户自填。\n"
+                       "0=不开豁免。只防爆钳 30000。BIN：tick feet=。");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_land", "落地");
+        if (xcat::ui::OptionCheckbox("落地也吸", &gUiMobGatherIgnoreQuiet))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认关：落地静默会清白名单并 skip land_quiet。\n"
+                "勾上：落地静默期也可以吸。换图 / 断线 / 软重连 hold 仍停。\n"
+                "「延时启动」在开关卡，作用整模块，不跟本勾绑。");
+        }
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_seek", "寻簇");
+        if (xcat::ui::OptionCheckbox("先飞到最密堆再吸", &gUiMobGatherSeekCluster)) {
+            if (gUiMobGatherSeekCluster) gUiMobGatherHomeReturn = false;
+            MobGatherTrySaveOrRevert(ui);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认关。关着就是原来的站立吸怪（高度闸、履历闸、14 秒照旧）。\n"
+                "勾上后：人先飞到当前层最密那堆（同层 |dY|≤竖层），到了挂台站稳再吸。\n"
+                "不跨层俯冲。寻路/落地静默期间冻 14 秒钟。F6 / 赶路占旋翼时不抢。\n"
+                "与「软重连后返回原位」互斥。不绑「群怪优先」。落盘 user.ini。");
+        }
+        MobGatherDragU(ui, "竖层", "layery", &gUiMobGatherLayerYPx,
+                       (int)xcat::kMobGatherLayerYPxMin, (int)xcat::kMobGatherLayerYPxMax, 10.f,
+                       "px",
+                       "寻簇同层窗 |dY|，默认 200。AbsPos 更大 Y = 更高。用户自填。\n"
+                       "只收人脚边这一层的堆；贴台 snap 跨层也用这个。\n"
+                       "0=只认同一高度。太大=跨层俯冲。关寻簇时仍影响归位贴台。\n"
+                       "只防爆钳 30000。BIN：tick layerY= / seek_cluster latch layerY=。");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_reset", "默认");
+        if (ImGui::Button("恢复默认##mg_biz_reset")) {
+            gUiMobGatherMax = (int)xcat::kMobGatherMaxDefault;
+            gUiMobGatherFarInFlight = (int)xcat::kMobGatherFarInFlightDefault;
+            gUiMobGatherRadiusPx = (int)xcat::kMobGatherRadiusDefaultPx;
+            gUiMobGatherLayerYPx = (int)xcat::kMobGatherLayerYPxDefault;
+            gUiMobGatherDyLimPx = (int)xcat::kMobGatherDyLimPxDefault;
+            gUiMobGatherWalkDx = (int)xcat::kMobGatherWalkDxDefault;
+            gUiMobGatherFeetExemptPx = (int)xcat::kMobGatherFeetExemptPxDefault;
+            gUiMobGatherHoldMs = (int)xcat::kMobGatherHoldMsDefault;
+            gUiMobGatherIntervalMs = (int)xcat::kMobGatherIntervalDefaultMs;
+            gUiMobGatherQuietDelayMs = (int)xcat::kMobGatherQuietDelayMsDefault;
+            gUiMobGatherStandOffX = (int)xcat::kMobGatherStandOffXDefault;
+            gUiMobGatherStandOffY = (int)xcat::kMobGatherStandOffYDefault;
+            gUiMobGatherSoftReloginSec = (int)xcat::kMobGatherSoftReloginSecDefault;
+            MobGatherTrySaveOrRevert(ui);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("业务旋钮回默认。开关本身不动。飞控默认在「调试 → 吸怪飞控」。");
+        }
+    }
+    ImGui::PopStyleVar();
+}
+
+void DrawMobGatherDyLimScanCard(LaunchUiState& ui) {
+    EnsureGatherUnlockLoaded();
+    if (!gGatherTabUnlocked) return;
+    xcat::ui::CardGuard card("##tab_dbg_gather_dylim", "高度闸扫描");
+    ImGui::PushTextWrapPos(0.f);
+    ImGui::TextDisabled(
+        "一键测竖直极限：自动开吸怪、关寻簇飞、半径 6000、冻结 14 秒软重连/清怪重连。"
+        "闸从 1 每秒 +100 到 2000。掐线看 x.jsonl：dylim_ramp KICK dyLim=。不写 user.ini。"
+        "停扫把闸改回吸怪 TAB「高度闸」，不是写死 1200。");
+    ImGui::PopTextWrapPos();
+    const uint32_t rampSeq =
+        ui.prefsBinDir.empty() ? 0u : xcat::ReadMobGatherDyRampSeq(ui.prefsBinDir.c_str());
+    ImGui::Text("seq=%u  %s", rampSeq, rampSeq ? "扫描中/待停" : "闲置（闸=面板高度闸）");
+    if (ImGui::Button("一键极限扫描##mg_dylim_go")) {
+        if (ui.prefsBinDir.empty()) {
+            notify::PushLocal(/*Warning*/ 2, "gather-dylim", "下发失败", "无数据目录", 3000);
+        } else {
+            const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
+            if (leds.gamePid == 0) {
+                notify::PushLocal(/*Warning*/ 2, "gather-dylim", "下发失败", "需已注入游戏",
+                                 3000);
+            } else {
+                uint32_t seq = xcat::ReadMobGatherDyRampSeq(ui.prefsBinDir.c_str());
+                seq = seq == 0 ? 1u : seq + 1u;
+                if (seq == 0) seq = 1u;
+                if (xcat::WriteMobGatherDyRampSeq(ui.prefsBinDir.c_str(), seq)) {
+                    xcat::log::Ok("App", "mobGatherDyRampSeq=%u（一键扫描，不写 user.ini）", seq);
+                    notify::PushLocal(/*Info*/ 1, "gather-dylim", "已开始一键扫描",
+                                     "不用先开吸怪；掐线看 KICK dyLim", 4000);
+                } else {
+                    notify::PushLocal(/*Warning*/ 2, "gather-dylim", "下发失败",
+                                     "写会话 seq 失败", 3000);
+                }
+            }
+        }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "点一下就测。不用先勾吸怪、不用关寻簇、不用改半径。\n"
+            "站上层即可。不落盘。");
+    }
+    ImGui::SameLine(0.f, ui::Gap());
+    if (ImGui::Button("停止并恢复面板高度闸##mg_dylim_stop")) {
+        if (ui.prefsBinDir.empty()) {
+            notify::PushLocal(/*Warning*/ 2, "gather-dylim", "停止失败", "无数据目录", 3000);
+        } else if (xcat::WriteMobGatherDyRampSeq(ui.prefsBinDir.c_str(), 0)) {
+            xcat::log::Ok("App", "mobGatherDyRampSeq=0（恢复面板高度闸）");
+            notify::PushLocal(/*Info*/ 1, "gather-dylim", "已停止", "高度闸恢复为面板值", 3000);
+        } else {
+            notify::PushLocal(/*Warning*/ 2, "gather-dylim", "停止失败", "写会话 seq 失败",
+                             3000);
+        }
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "停止扫描并把竖直闸改回吸怪 TAB「高度闸」。\n"
+            "开始扫描不会改半径、不落盘。");
+    }
+}
+
+void DrawMobGatherFlyDebugCards(LaunchUiState& ui) {
+    EnsureGatherUnlockLoaded();
+    if (!gGatherTabUnlocked) return;
+    MobGatherSyncFromDisk(ui);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                        ImVec2(ImGui::GetStyle().ItemSpacing.x, ui::Gap() * 0.85f));
+    {
+        xcat::ui::CardGuard card("##tab_dbg_gather_fly", "吸怪飞控");
+        ImGui::TextDisabled("怪侧 VTOL。人飞最密堆走 F5 滑翔（吸怪 TAB 勾选），本卡只拧怪侧。");
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("吸速");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SetNextItemWidth(AppDpi_Px(80.f));
+        if (ImGui::DragInt("##mg_speed", &gUiMobGatherSpeedPct, 5, (int)xcat::kHeliSpeedPctMin,
+                           (int)xcat::kHeliSpeedPctMax, "%d%%", ImGuiSliderFlags_AlwaysClamp)) {
+            MobGatherTrySaveOrRevert(ui);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "与 F5 滑翔同一套：到位软钉、进站收油、按真实间隔配平。\n"
+                "100%% = 巡航档 px/s（下面「档速」可改）。默认满火力档；≥5X 抄 F5 死拍。");
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.5f);
+        ImGui::TextDisabled("= %.0f px/s",
+                            (float)gUiMobGatherCruiseV * (float)gUiMobGatherSpeedPct / 100.f);
+        const int presets[] = {100, 200, 300, 500};
+        for (int i = 0; i < 4; ++i) {
+            const int p = presets[i];
+            char btnId[48]{};
+            snprintf(btnId, sizeof(btnId), "%dX##mg_p%d", p / 100, p);
+            if (i > 0) ImGui::SameLine(0.f, ui::Gap() * 0.4f);
+            if (ImGui::Button(btnId)) {
+                gUiMobGatherSpeedPct = (int)xcat::ClampHeliSpeedPct(static_cast<uint32_t>(p));
+                MobGatherTrySaveOrRevert(ui);
+            }
+        }
+        if (xcat::ui::OptionCheckbox("防抖", &gUiMobGatherAntiJitter)) MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "人微颤时钉住吸点（默认开）。\n"
+                "开：人速度 <「静止阈」且位移 ≤「钉住」时怪不跟着晃。\n"
+                "关：每拍跟角色朝向面前的站距落点。");
+        }
+        ImGui::BeginDisabled(!gUiMobGatherAntiJitter);
+        MobGatherDragU(ui, "钉住", "creep", &gUiMobGatherStickCreep,
+                       (int)xcat::kMobGatherStickCreepMin, (int)xcat::kMobGatherStickCreepMax, 1.f,
+                       "px", "人位移不超过这个数就钉住吸点（默认 8）。");
+        MobGatherDragU(ui, "静止阈", "stillv", &gUiMobGatherStickStillV,
+                       (int)xcat::kMobGatherStickStillVMin, (int)xcat::kMobGatherStickStillVMax, 1.f,
+                       "px/s", "人合速达到这个数就当在飞，每拍重算落点（默认 50）。");
+        ImGui::EndDisabled();
+        MobGatherDragU(ui, "瞄准", "aim", &gUiMobGatherAimMs, (int)xcat::kMobGatherAimMsMin,
+                       (int)xcat::kMobGatherAimMsMax, 1.f, "ms",
+                       "已吸住的怪刷新瞄准点的间隔，默认 17。跟新收间隔无关。\n"
+                       "加大=少算落点；太小 CPU 更忙。BIN：worker aim=。");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_gather_act", "作动器");
+        MobGatherDragU(ui, "Kp", "kp", &gUiMobGatherKp, (int)xcat::kMobGatherKpMin,
+                       (int)xcat::kMobGatherKpMax, 1.f, "",
+                       "比例增益（默认 7）。越大咬得越狠，也更容易抖。");
+        MobGatherDragU(ui, "死区", "dead", &gUiMobGatherDead, (int)xcat::kMobGatherDeadMin,
+                       (int)xcat::kMobGatherDeadMax, 1.f, "px",
+                       "误差小于这个数不再加力（默认 6）。");
+        MobGatherDragU(ui, "顶速", "maxcmd", &gUiMobGatherMaxCmd, (int)xcat::kMobGatherMaxCmdMin,
+                       (int)xcat::kMobGatherMaxCmdMax, 50.f, "px/s",
+                       "单轴速度顶格（默认 4800）。≥5X 死拍也吃这个顶。");
+        MobGatherDragU(ui, "巡航圈", "cruise", &gUiMobGatherCruiseR, (int)xcat::kMobGatherCruiseRMin,
+                       (int)xcat::kMobGatherCruiseRMax, 5.f, "px",
+                       "距落点超过这个数用巡航档（默认 140）。档速见下面「巡航档」。");
+        MobGatherDragU(ui, "进站圈", "station", &gUiMobGatherStationR,
+                       (int)xcat::kMobGatherStationRMin, (int)xcat::kMobGatherStationRMax, 1.f, "px",
+                       "距落点超过这个数用进站档（默认 28）。再近用悬停档。档速见下面。");
+        MobGatherDragU(ui, "重力", "grav", &gUiMobGatherGravity, (int)xcat::kMobGatherGravityMin,
+                       (int)xcat::kMobGatherGravityMax, 1.f, "",
+                       "每物理步重力补偿（默认 60）。BIN：gLoss=。0 = 不补。");
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextDisabled("只改怪侧 VTOL，不接 F5 旋翼。乱拧会抖或穿台。");
+        ImGui::PopTextWrapPos();
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_gather_tier", "档速");
+        MobGatherDragU(ui, "巡航档", "crv", &gUiMobGatherCruiseV, (int)xcat::kMobGatherCruiseVMin,
+                       (int)xcat::kMobGatherCruiseVMax, 10.f, "px/s",
+                       "距落点超过「巡航圈」时的 1X 合速（默认 620）。再乘吸速%。");
+        MobGatherDragU(ui, "进站档", "stv", &gUiMobGatherStationV, (int)xcat::kMobGatherStationVMin,
+                       (int)xcat::kMobGatherStationVMax, 10.f, "px/s",
+                       "进了巡航圈、还在进站圈外的 1X 合速（默认 480）。再乘吸速%。");
+        MobGatherDragU(ui, "悬停档", "hov", &gUiMobGatherHoldV, (int)xcat::kMobGatherHoldVMin,
+                       (int)xcat::kMobGatherHoldVMax, 10.f, "px/s",
+                       "进了进站圈后的 1X 合速（默认 360）。再乘吸速%。≥5X 死拍改吃顶速。");
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextDisabled("1X 数字 × 吸速%%。上面「吸速」旁的 px/s 跟巡航档走。");
+        ImGui::PopTextWrapPos();
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_gather_settle", "到位");
+        MobGatherDragU(ui, "到位圈", "serr", &gUiMobGatherSettleErr, (int)xcat::kMobGatherSettleErrMin,
+                       (int)xcat::kMobGatherSettleErrMax, 1.f, "px",
+                       "防抖开且误差小于这个数，改用到位 Kp 软钉（默认 16）。");
+        MobGatherDragU(ui, "到位Kp", "kps", &gUiMobGatherKpSettle, (int)xcat::kMobGatherKpSettleMin,
+                       (int)xcat::kMobGatherKpSettleMax, 1.f, "",
+                       "到位软钉的比例增益（默认 10）。比巡航 Kp 更狠、行程更短。");
+        MobGatherDragU(ui, "刹车", "brk", &gUiMobGatherBrakeMs, (int)xcat::kMobGatherBrakeMsMin,
+                       (int)xcat::kMobGatherBrakeMsMax, 5.f, "ms",
+                       "≥5X 死拍对站点预刹时间（默认 150）。越大越早收油。");
+        MobGatherDragU(ui, "下滑切断", "coast", &gUiMobGatherCoastVy, (int)xcat::kMobGatherCoastVyMin,
+                       (int)xcat::kMobGatherCoastVyMax, 5.f, "px/s",
+                       "Y 已在死区内但还在往下掉、合速超过这个数就切 Vy=0（默认 80）。0=不切。");
+        if (ImGui::Button("恢复默认##mg_fly_reset")) {
+            gUiMobGatherSpeedPct = (int)xcat::kMobGatherSpeedPctDefault;
+            gUiMobGatherAntiJitter = xcat::kMobGatherAntiJitterDefault != 0;
+            gUiMobGatherStickCreep = (int)xcat::kMobGatherStickCreepDefault;
+            gUiMobGatherStickStillV = (int)xcat::kMobGatherStickStillVDefault;
+            gUiMobGatherCruiseR = (int)xcat::kMobGatherCruiseRDefault;
+            gUiMobGatherStationR = (int)xcat::kMobGatherStationRDefault;
+            gUiMobGatherMaxCmd = (int)xcat::kMobGatherMaxCmdDefault;
+            gUiMobGatherKp = (int)xcat::kMobGatherKpDefault;
+            gUiMobGatherDead = (int)xcat::kMobGatherDeadDefault;
+            gUiMobGatherGravity = (int)xcat::kMobGatherGravityDefault;
+            gUiMobGatherCruiseV = (int)xcat::kMobGatherCruiseVDefault;
+            gUiMobGatherStationV = (int)xcat::kMobGatherStationVDefault;
+            gUiMobGatherHoldV = (int)xcat::kMobGatherHoldVDefault;
+            gUiMobGatherSettleErr = (int)xcat::kMobGatherSettleErrDefault;
+            gUiMobGatherKpSettle = (int)xcat::kMobGatherKpSettleDefault;
+            gUiMobGatherBrakeMs = (int)xcat::kMobGatherBrakeMsDefault;
+            gUiMobGatherCoastVy = (int)xcat::kMobGatherCoastVyDefault;
+            gUiMobGatherAimMs = (int)xcat::kMobGatherAimMsDefault;
+            MobGatherTrySaveOrRevert(ui);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("飞控旋钮回默认。吸怪开关不动。");
+        }
+    }
+    ImGui::PopStyleVar();
 }
 
 void DrawWorkspaceTabContent(AppWindow& /*app*/, LaunchUiState& ui, int tabIndex) {
@@ -6431,6 +8961,21 @@ void DrawWorkspaceTabContent(AppWindow& /*app*/, LaunchUiState& ui, int tabIndex
         break;
     case WorkspaceTab::Debug:
         DrawDebugTab(ui);
+        break;
+    case WorkspaceTab::MobGather:
+        DrawMobGatherTab(ui);
+        break;
+    case WorkspaceTab::AutoStat:
+        DrawAutoStatTab(ui);
+        break;
+    case WorkspaceTab::AutoSkill:
+        DrawAutoSkillCard(ui);
+        break;
+    case WorkspaceTab::CharBoot:
+        DrawCharBootTab(ui);
+        break;
+    case WorkspaceTab::AutoSell:
+        DrawAutoSellTab(ui);
         break;
     default:
         ImGui::TextDisabled("未知 TAB");

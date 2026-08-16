@@ -55,8 +55,9 @@ void StripBom(std::string& s) {
 }  // namespace
 
 bool Graph::IsBogusDest(const std::string& dest) {
+    // 只过滤门的 tm（未填 / 占位）。Field 0 是出生图，可以当 PathTo 的 src
+    //（CurrentMapKey → "000000000"）；WZ 里没有任何 tm=0 表示「去出生图」。
     if (dest == "0" || dest == "-1" || dest == "999999999") return true;
-    // PadMapKey("0") → "000000000" 等同假目标
     if (!dest.empty() && dest.find_first_not_of('0') == std::string::npos) return true;
     return false;
 }

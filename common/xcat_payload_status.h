@@ -10,6 +10,7 @@
 // v10：当前频道（1-based ch.N）→ 探活头 → 运维台（地图 Id 已在 v2 mapId）。
 // v11：原生 MapDataInfo.IsTown（守护主城无经验豁免；绕过拍卖强制写前的真值）。
 // v12：高价值卷轴快照（消耗栏 204/234 → launcher 探活头 → 运维台；客户端无 UI）。
+// v13：吸怪定时软重连倒计时 → ImGui 顶栏。
 
 #include <Windows.h>
 
@@ -19,7 +20,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 12u;
+constexpr uint32_t kPayloadStatusVersion = 13u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -88,12 +89,18 @@ struct PayloadStatus {
     int32_t channelId = 0;
 
     // v11：原生 IsTown（拍卖绕过强制写 1 时仍报备份原值）。
-    uint32_t mapIsTown = 0;       // 1=主城
-    uint32_t mapIsTownValid = 0;  // 1=已采到；0=未知（读侧可回退 mapId 启发式）
+    uint32_t mapIsTown = 0;       // 1=城镇（仅 map_info.town=1；非原生 IsTown / 非 %1000000）
+    uint32_t mapIsTownValid = 0;  // 1=已采到 mapId；0=未知
 
     // v12：高价值卷轴（ASCII `id:qty,id:qty`；valid=0 表示本拍未采到，探活勿覆盖服务端旧值）
     uint32_t playerWealthScrollsValid = 0;
     char playerWealthScrolls[384]{};
+
+    // v13：吸怪「X秒后触发软重连」墙钟（payload 写、顶栏读）
+    uint32_t softReloginOn = 0;        // 勾选
+    uint32_t softReloginPaused = 0;    // hold / 落地静默冻钟
+    uint32_t softReloginRemainMs = 0;  // 剩余；0xFFFFFFFF=勾了未起表
+    uint32_t softReloginNeedMs = 0;    // 间隔
 };
 #pragma pack(pop)
 

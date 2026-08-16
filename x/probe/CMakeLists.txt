@@ -34,6 +34,10 @@ add_library(xcat_probe SHARED
   ../features/titlebar/titlebar_win.cpp
   ../features/titlebar/titlebar_game.cpp
   ../features/ports/mob_pool_port.cpp
+  ../features/ports/hit_pin_port.cpp
+  ../features/ports/map_attack_port.cpp
+  ../features/ports/mob_gather_port.cpp
+  ../features/ports/mob_fh_ban.cpp
   ../features/ports/world_port.cpp
   ../features/ports/consumable_port.cpp
   ../features/ports/pet_port.cpp
@@ -65,9 +69,11 @@ add_library(xcat_probe SHARED
   ../features/worldmap_marker_travel/worldmap_marker_travel.cpp
   ../features/sellbag/sellbag.cpp
   ../features/auto_supply/auto_supply.cpp
+  ../features/char_boot/char_boot.cpp
   ../features/mob_scan/mob_scan.cpp
   ../features/autopot/autopot.cpp
   ../features/auto_stat/auto_stat.cpp
+  ../features/auto_skill/auto_skill.cpp
   ../features/pet_feed/pet_feed.cpp
   ../features/pet_loot/pet_loot.cpp
   ../features/timed_keys/timed_keys.cpp
@@ -76,6 +82,8 @@ add_library(xcat_probe SHARED
   ../features/simple_combat/simple_combat.cpp
   ../features/simple_combat/heli_rotor.cpp
   ../features/simple_combat/reach_cal.cpp
+  ../features/map_attack/map_attack.cpp
+  ../features/mob_gather/mob_gather.cpp
   ../features/fly/fly.cpp
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
   ../features/auction_town_bypass/auction_town_bypass.cpp
@@ -101,6 +109,7 @@ add_library(xcat_probe SHARED
   ../ipc/payload_timed_keys.cpp
   ../ipc/payload_pet_loot.cpp
   ../ipc/payload_auto_stat.cpp
+  ../ipc/payload_auto_skill.cpp
   ../ipc/payload_buffs.cpp
   ../ipc/payload_status.cpp
 )
@@ -125,6 +134,8 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/buffs
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/multi_skill
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/simple_combat
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/map_attack
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/mob_gather
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/fly
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/drop_alert_bypass
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auction_town_bypass
@@ -144,6 +155,7 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/sellbag
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/attack_rpc
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auto_supply
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/char_boot
   ${CMAKE_CURRENT_SOURCE_DIR}/../ui
   ${CMAKE_CURRENT_SOURCE_DIR}/../ipc
   ${CMAKE_SOURCE_DIR}/common

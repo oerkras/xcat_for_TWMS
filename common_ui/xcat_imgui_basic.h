@@ -99,8 +99,8 @@ inline void SectionHeader(const char* label) {
 }
 
 inline void HelpMarker(const char* desc) {
+    (void)desc;
     ImGui::TextDisabled("(?)");
-    if (ImGui::IsItemHovered() && desc && desc[0]) ImGui::SetTooltip("%s", desc);
 }
 
 inline bool BeginFields(const char* id, float labelFrac = 0.38f) {

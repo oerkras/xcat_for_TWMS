@@ -81,4 +81,27 @@ void LogBuffCamProbe(const char* note);
 // 须在主线程调用（fill+Doing job 或 pump FrameTick）。BUFF/定时键不要调——探针只读。
 bool HealVisualToAp(const char* why, bool force = false);
 
+// 站桩输出：同一主泵 job 内把 Ap+Apl+Pos 闪到落点，返回前 Restore。
+// 不让 BeginUpdateActive 在闪魂窗里跑（那才是「滚 Apl」）；Slot16 在 Restore 之后。
+struct SoulBlinkSnap {
+    bool ok = false;
+    void* vc = nullptr;
+    void* lu = nullptr;
+    double apX = 0, apY = 0, apVx = 0, apVy = 0;
+    double aplX = 0, aplY = 0, aplVx = 0, aplVy = 0;
+    double rpPos = 0, rpV = 0;
+    void* curFh = nullptr;
+    float posX = 0.f, posY = 0.f;
+};
+
+bool CaptureSoulBlink(void* localUser, SoulBlinkSnap& out);
+// 同泵写 Ap+Apl+Pos@0x64（初期 HealVisual / 闪魂同款）。
+// GetPos=lerp(Ap,Apl,alpha)；FindHit/Afterimage 另有一条读 Pos@0x64。
+// 不写 RelPos / CurFh。Restore 仍回写 RelPos/CurFh/Pos（OnFuncKey 窗口引擎可能改过）。
+// 返回前必须 Restore（下一帧 BeginUpdateActive 之前）。
+bool ApplySoulBlinkAp(void* localUser, double x, double y);
+bool RestoreSoulBlink(const SoulBlinkSnap& snap);
+bool PeekApApl(void* localUser, float* apx, float* apy, float* aplx, float* aply);
+bool PeekActorPos(void* localUser, float* posx, float* posy);
+
 }  // namespace x::features::ports::player_combat

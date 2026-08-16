@@ -31,6 +31,7 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -186,19 +187,22 @@ void OpenFolder(const std::wstring& path) {
 
 void CopyText(const char* text) {
     if (!text || !*text) return;
+    // 剪贴板文本必须用 CF_UNICODETEXT(UTF-16)：CF_TEXT 会被按系统 ANSI(本机 GBK)解读，
+    // UTF-8 中文塞进去到别处粘贴就成乱码（如「永不过期」变「姘镐笉杩囨湡」）。
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, text, -1, nullptr, 0);
+    if (wlen <= 0) return;
     if (!OpenClipboard(nullptr)) return;
     EmptyClipboard();
-    const size_t len = strlen(text) + 1;
-    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, len);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, static_cast<size_t>(wlen) * sizeof(wchar_t));
     if (!mem) {
         CloseClipboard();
         return;
     }
     void* dst = GlobalLock(mem);
     if (dst) {
-        memcpy(dst, text, len);
+        MultiByteToWideChar(CP_UTF8, 0, text, -1, static_cast<wchar_t*>(dst), wlen);
         GlobalUnlock(mem);
-        SetClipboardData(CF_TEXT, mem);
+        SetClipboardData(CF_UNICODETEXT, mem);
     }
     CloseClipboard();
 }
@@ -347,6 +351,7 @@ void RefreshReleaseInfo(OpsState& st) {
         st.forcedClientBuildId = 0;
     }
 }
+
 
 bool WriteForceUpdate(const OpsState& st, const ReleaseInfo& release, std::string& err) {
     const std::wstring zipPath = ReleasePath(st, xcat::Utf8ToWide(release.zipName).c_str());
@@ -758,6 +763,7 @@ void Ops_RequestStopAll(OpsState& st) {
 }
 
 void RefreshClients(OpsState& st, bool force, bool refreshGeo = false);
+void RefreshUpdateChannels(OpsState& st, bool force);
 
 void OpsState_Tick(OpsState& st) {
     if (st.autoStartPending) {
@@ -765,7 +771,19 @@ void OpsState_Tick(OpsState& st) {
         Ops_RequestStartAll(st);
     }
 
-    if (st.busy.load() || st.shuttingDown.load()) return;
+    if (st.shuttingDown.load()) return;
+
+    // 利润折线按墙钟采样，不能绑在「当前 Tab / 窗口是否在画」。
+    // 最小化时 main 仍会 Tick；忙于启停服务时也继续采，避免切走页面就断线。
+    if (TwmsRunning(st)) {
+        RefreshClients(st, false);
+    } else if (!st.clients.empty() || st.clientsCount != 0) {
+        st.clients.clear();
+        st.clientsCount = 0;
+        st.clientsTracked = 0;
+    }
+
+    if (st.busy.load()) return;
 
     const ULONGLONG now = GetTickCount64();
 
@@ -821,6 +839,7 @@ void OpsState_Tick(OpsState& st) {
     if (st.lastReleaseReadMs == 0 || now - st.lastReleaseReadMs >= 5000) {
         st.lastReleaseReadMs = now;
         RefreshReleaseInfo(st);
+        if (TwmsRunning(st)) RefreshUpdateChannels(st, false);
     }
 
     if (TwmsRunning(st)) {
@@ -889,15 +908,6 @@ void OpsState_Tick(OpsState& st) {
     } else {
         st.publishProbeOk = false;
         st.publishProbeText = "未运行";
-    }
-
-    // 服务页 Tab 角标 / 健康条需要在线数；RefreshClients 内部 5s 节流
-    if (TwmsRunning(st)) {
-        RefreshClients(st, false);
-    } else if (!st.clients.empty() || st.clientsCount != 0) {
-        st.clients.clear();
-        st.clientsCount = 0;
-        st.clientsTracked = 0;
     }
 }
 
@@ -1045,11 +1055,20 @@ void FormatMapChannelCell(const OpsState& st, const OpsState::ConnectedClient& c
     }
 }
 
+const char* ChannelOrDash(int ch, char* buf, size_t n) {
+    if (ch > 0 && buf && n > 0) {
+        std::snprintf(buf, n, "%d", ch);
+        return buf;
+    }
+    return "-";
+}
+
 void CopyClientSummary(const OpsState& st, const OpsState::ConnectedClient& c) {
     const std::string mapLabel = ClientMapLabel(st, c);
+    char chBuf[16]{};
     char buf[1024]{};
     std::snprintf(buf, sizeof(buf),
-                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\t%s\tmap=%u\t%s\tch=%d\tgate=%s\tidle=%ds",
+                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\t%s\tmap=%u\t%s\tch=%s\tgate=%s\tidle=%ds",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
                   c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
@@ -1058,15 +1077,16 @@ void CopyClientSummary(const OpsState& st, const OpsState::ConnectedClient& c) {
                   c.hasWealthScrolls ? (c.wealthScrolls.empty() ? "-" : c.wealthScrolls.c_str())
                                      : "-",
                   c.mapId,
-                  mapLabel.empty() ? "-" : mapLabel.c_str(), c.channelId,
+                  mapLabel.empty() ? "-" : mapLabel.c_str(), ChannelOrDash(c.channelId, chBuf, sizeof(chBuf)),
                   c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec);
     CopyText(buf);
 }
 
 void AppendClientSummaryLine(std::string& out, const OpsState& st, const OpsState::ConnectedClient& c) {
     const std::string mapLabel = ClientMapLabel(st, c);
+    char chBuf[16]{};
     char buf[1024]{};
-    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%u\t%s\t%d\t%s\t%d\n",
+    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%u\t%s\t%s\t%s\t%d\n",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
                   c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
@@ -1075,7 +1095,7 @@ void AppendClientSummaryLine(std::string& out, const OpsState& st, const OpsStat
                   c.hasWealthScrolls ? (c.wealthScrolls.empty() ? "-" : c.wealthScrolls.c_str())
                                      : "-",
                   c.mapId,
-                  mapLabel.empty() ? "-" : mapLabel.c_str(), c.channelId,
+                  mapLabel.empty() ? "-" : mapLabel.c_str(), ChannelOrDash(c.channelId, chBuf, sizeof(chBuf)),
                   c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec);
     out += buf;
 }
@@ -1209,6 +1229,7 @@ void MesoEventsAppend(OpsState& st, const OpsState::MesoEvent& ev);
 void MesoEventsLoad(OpsState& st);
 void MesoUnitsSave(OpsState& st);
 void MesoUnitsLoad(OpsState& st);
+void MesoMergeUidTokenAliases(OpsState& st);
 
 std::string MesoUnitKey(const std::string& token, const std::string& charName,
                         const std::string& deviceId) {
@@ -1221,6 +1242,12 @@ std::string MesoUnitKey(const std::string& token, const std::string& charName,
         k += deviceId.empty() ? "?" : deviceId;
     }
     return k;
+}
+
+// 利润监控分组键：已签卡用 uid（同人多机合并）；未激活才退回旧调试 TOKEN。
+std::string MesoPersonId(const std::string& uid, const std::string& token) {
+    if (!uid.empty()) return uid;
+    return token;
 }
 
 using WealthQtyMap = std::unordered_map<int, unsigned long long>;
@@ -1314,6 +1341,139 @@ OpsState::MesoDashSeries* MesoDashFindSeries(OpsState& st, const std::string& to
     return nullptr;
 }
 
+void MesoDashMergePoints(std::deque<OpsState::MesoDashPoint>& dst,
+                         const std::deque<OpsState::MesoDashPoint>& src) {
+    if (src.empty()) return;
+    if (dst.empty()) {
+        dst = src;
+        return;
+    }
+    std::deque<OpsState::MesoDashPoint> out;
+    size_t i = 0;
+    size_t j = 0;
+    while (i < dst.size() || j < src.size()) {
+        if (i < dst.size() && (j >= src.size() || dst[i].wallMs < src[j].wallMs)) {
+            out.push_back(dst[i++]);
+        } else if (j < src.size() && (i >= dst.size() || src[j].wallMs < dst[i].wallMs)) {
+            out.push_back(src[j++]);
+        } else {
+            out.push_back(dst[i]);
+            ++i;
+            ++j;
+        }
+    }
+    dst.swap(out);
+}
+
+void MesoCollectTokenUidAliases(const OpsState& st,
+                                std::unordered_map<std::string, std::string>& tokenToUid) {
+    std::unordered_set<std::string> amb;
+    auto consider = [&](const std::string& token, const std::string& uid) {
+        if (token.empty() || uid.empty() || token == uid) return;
+        if (amb.count(token)) return;
+        const auto it = tokenToUid.find(token);
+        if (it == tokenToUid.end())
+            tokenToUid.emplace(token, uid);
+        else if (it->second != uid) {
+            tokenToUid.erase(it);
+            amb.insert(token);
+        }
+    };
+    for (const auto& c : st.clients) consider(c.token, c.uid);
+    for (const auto& u : st.mesoUnits) consider(u.token, u.uid);
+}
+
+void MesoMergeUidTokenAliases(OpsState& st) {
+    std::unordered_map<std::string, std::string> tokenToUid;
+    MesoCollectTokenUidAliases(st, tokenToUid);
+
+    for (auto& u : st.mesoUnits) {
+        if (!u.uid.empty()) {
+            u.key = MesoUnitKey(u.uid, u.charName, u.deviceId);
+            continue;
+        }
+        const auto it = tokenToUid.find(u.token);
+        if (it == tokenToUid.end()) continue;
+        u.uid = it->second;
+        u.key = MesoUnitKey(u.uid, u.charName, u.deviceId);
+    }
+
+    {
+        std::vector<OpsState::MesoUnit> kept;
+        std::unordered_map<std::string, size_t> idx;
+        kept.reserve(st.mesoUnits.size());
+        for (auto& u : st.mesoUnits) {
+            if (u.key.empty()) continue;
+            const auto it = idx.find(u.key);
+            if (it == idx.end()) {
+                idx.emplace(u.key, kept.size());
+                kept.push_back(std::move(u));
+                continue;
+            }
+            OpsState::MesoUnit& a = kept[it->second];
+            const bool preferNew = u.lastSeenMs > a.lastSeenMs ||
+                                   (u.lastSeenMs == a.lastSeenMs && a.uid.empty() && !u.uid.empty());
+            OpsState::MesoUnit win = preferNew ? std::move(u) : std::move(a);
+            OpsState::MesoUnit& other = preferNew ? a : u;
+            if (win.uid.empty()) win.uid = other.uid;
+            if (win.token.empty()) win.token = other.token;
+            if (win.machine.empty()) win.machine = other.machine;
+            if (!win.scrollsSampled && other.scrollsSampled) {
+                win.lastScrolls = other.lastScrolls;
+                win.scrollsSampled = true;
+            }
+            win.sampled = win.sampled || other.sampled;
+            win.online = win.online || other.online;
+            a = std::move(win);
+        }
+        st.mesoUnits.swap(kept);
+    }
+
+    if (tokenToUid.empty()) return;
+
+    std::vector<size_t> drop;
+    for (size_t i = 0; i < st.mesoDashSeries.size(); ++i) {
+        auto& s = st.mesoDashSeries[i];
+        const auto it = tokenToUid.find(s.token);
+        if (it == tokenToUid.end()) continue;
+        const std::string& uid = it->second;
+        if (s.token == uid) {
+            s.uid = uid;
+            continue;
+        }
+        int dest = -1;
+        for (size_t j = 0; j < st.mesoDashSeries.size(); ++j) {
+            if (j == i) continue;
+            if (st.mesoDashSeries[j].token == uid) {
+                dest = static_cast<int>(j);
+                break;
+            }
+        }
+        if (dest < 0) {
+            s.token = uid;
+            s.uid = uid;
+            continue;
+        }
+        auto& d = st.mesoDashSeries[static_cast<size_t>(dest)];
+        MesoDashMergePoints(d.points, s.points);
+        d.uid = uid;
+        d.visible = d.visible || s.visible;
+        if (s.lastAlertMs > d.lastAlertMs) d.lastAlertMs = s.lastAlertMs;
+        if (!d.points.empty()) d.lastMeso = d.points.back().meso;
+        drop.push_back(i);
+    }
+    for (size_t n = drop.size(); n > 0; --n) {
+        st.mesoDashSeries.erase(st.mesoDashSeries.begin() +
+                                static_cast<std::ptrdiff_t>(drop[n - 1]));
+    }
+    for (auto& e : st.mesoEvents) {
+        const auto it = tokenToUid.find(e.token);
+        if (it != tokenToUid.end()) e.token = it->second;
+        const auto jt = tokenToUid.find(e.peerToken);
+        if (jt != tokenToUid.end()) e.peerToken = jt->second;
+    }
+}
+
 void MesoMarkSeriesAlert(OpsState& st, const std::string& token, ULONGLONG nowMs) {
     auto* s = MesoDashFindSeries(st, token);
     if (!s) {
@@ -1327,13 +1487,16 @@ void MesoMarkSeriesAlert(OpsState& st, const std::string& token, ULONGLONG nowMs
 }
 
 void SampleMesoDash(OpsState& st) {
+    MesoMergeUidTokenAliases(st);
     const ULONGLONG nowMs = MesoDashWallMs();
     const ULONGLONG cutMs = nowMs > kMesoDashKeepMs ? nowMs - kMesoDashKeepMs : 0;
     const unsigned long long alertMin = st.mesoAlertMin > 0 ? st.mesoAlertMin : 100000ull;
 
     struct LiveUnit {
         std::string key;
+        std::string personId;
         std::string token;
+        std::string uid;
         std::string charName;
         std::string deviceId;
         std::string machine;
@@ -1345,18 +1508,24 @@ void SampleMesoDash(OpsState& st) {
     std::unordered_map<std::string, LiveUnit> live;
     int noToken = 0;
     for (const auto& c : st.clients) {
-        if (c.token.empty()) {
+        const std::string personId = MesoPersonId(c.uid, c.token);
+        if (personId.empty()) {
             ++noToken;
             continue;
         }
-        const std::string key = MesoUnitKey(c.token, c.charName, c.deviceId);
+        const std::string key = MesoUnitKey(personId, c.charName, c.deviceId);
         LiveUnit& u = live[key];
         if (u.key.empty()) {
             u.key = key;
+            u.personId = personId;
             u.token = c.token;
+            u.uid = c.uid;
             u.charName = c.charName;
             u.deviceId = c.deviceId;
             u.machine = c.machine;
+        } else {
+            if (u.uid.empty() && !c.uid.empty()) u.uid = c.uid;
+            if (u.token.empty() && !c.token.empty()) u.token = c.token;
         }
         ++u.sessions;
         unsigned long long v = 0;
@@ -1408,10 +1577,26 @@ void SampleMesoDash(OpsState& st) {
                 break;
             }
         }
+        if (!pu && !lu.uid.empty()) {
+            for (auto& x : st.mesoUnits) {
+                if (!lu.deviceId.empty() && x.deviceId == lu.deviceId &&
+                    x.charName == lu.charName &&
+                    (x.uid.empty() || x.uid == lu.uid)) {
+                    pu = &x;
+                    break;
+                }
+                if (!lu.token.empty() && x.uid.empty() && x.token == lu.token &&
+                    x.charName == lu.charName) {
+                    pu = &x;
+                    break;
+                }
+            }
+        }
         if (!pu) {
             OpsState::MesoUnit neu;
             neu.key = lu.key;
             neu.token = lu.token;
+            neu.uid = lu.uid;
             neu.charName = lu.charName;
             neu.deviceId = lu.deviceId;
             neu.machine = lu.machine;
@@ -1421,7 +1606,9 @@ void SampleMesoDash(OpsState& st) {
         const bool wasOnline = pu->online;
         const bool had = pu->sampled;
         const unsigned long long before = pu->lastMeso;
+        pu->key = lu.key;
         pu->token = lu.token;
+        pu->uid = lu.uid.empty() ? pu->uid : lu.uid;
         pu->charName = lu.charName;
         pu->deviceId = lu.deviceId;
         if (!lu.machine.empty()) pu->machine = lu.machine;
@@ -1445,7 +1632,7 @@ void SampleMesoDash(OpsState& st) {
         if (mag >= alertMin) {
             Delta d;
             d.key = lu.key;
-            d.token = lu.token;
+            d.token = lu.personId;
             d.charName = lu.charName;
             d.before = before;
             d.after = lu.meso;
@@ -1478,7 +1665,7 @@ void SampleMesoDash(OpsState& st) {
                     const unsigned long long a = qtyOf(afterM, id);
                     if (a == b) continue;
                     ScrollDelta sd;
-                    sd.token = lu.token;
+                    sd.token = lu.personId;
                     sd.charName = lu.charName;
                     sd.itemId = id;
                     sd.before = b;
@@ -1686,15 +1873,19 @@ void SampleMesoDash(OpsState& st) {
     std::unordered_map<std::string, std::pair<unsigned long long, int>> byTok;
     std::unordered_map<std::string, std::set<std::string>> tokChars;
     std::unordered_map<std::string, int> tokLiveSessions;
+    std::unordered_map<std::string, std::string> tokUid;
     unsigned long long total = 0;
     for (const auto& u : st.mesoUnits) {
         if (!u.sampled) continue;
-        auto& acc = byTok[u.token];
+        const std::string pid = MesoPersonId(u.uid, u.token);
+        if (pid.empty()) continue;
+        auto& acc = byTok[pid];
         addMeso(acc.first, u.lastMeso);
         addMeso(total, u.lastMeso);
-        if (!u.charName.empty()) tokChars[u.token].insert(u.charName);
+        if (!u.charName.empty()) tokChars[pid].insert(u.charName);
+        if (!u.uid.empty()) tokUid[pid] = u.uid;
     }
-    for (const auto& kv : live) tokLiveSessions[kv.second.token] += kv.second.sessions;
+    for (const auto& kv : live) tokLiveSessions[kv.second.personId] += kv.second.sessions;
 
     for (auto& kv : byTok) {
         OpsState::MesoDashSeries* ser = MesoDashFindSeries(st, kv.first);
@@ -1705,6 +1896,7 @@ void SampleMesoDash(OpsState& st) {
             st.mesoDashSeries.push_back(std::move(neu));
             ser = &st.mesoDashSeries.back();
         }
+        ser->uid = tokUid[kv.first];
         ser->sessions = tokLiveSessions[kv.first];
         ser->online = ser->sessions > 0;
         ser->lastMeso = kv.second.first;
@@ -1720,6 +1912,14 @@ void SampleMesoDash(OpsState& st) {
         }
         MesoDashPush(ser->points, nowMs, ser->lastMeso);
         MesoDashPrune(ser->points, cutMs);
+    }
+    for (auto& s : st.mesoDashSeries) {
+        if (byTok.find(s.token) == byTok.end()) {
+            s.lastMeso = 0;
+            s.online = false;
+            s.sessions = 0;
+            s.chars.clear();
+        }
     }
 
     MesoDashPush(st.mesoDashTotal, nowMs, total);
@@ -1743,18 +1943,52 @@ void SampleMesoDash(OpsState& st) {
     MesoUnitsSave(st);
 }
 
+// 客户端上报 "0.1.149 build 149"；latest.json 的 version 是 "0.1.149"。
+// 只认 "build N"，避免把 0.1.149 的尾数当 build。
+uint32_t ParseAppVersionBuildId(const std::string& ver) {
+    for (size_t i = 0; i + 5 <= ver.size(); ++i) {
+        auto low = [](char c) {
+            return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        };
+        if (low(ver[i]) != 'b' || low(ver[i + 1]) != 'u' || low(ver[i + 2]) != 'i' ||
+            low(ver[i + 3]) != 'l' || low(ver[i + 4]) != 'd')
+            continue;
+        size_t j = i + 5;
+        while (j < ver.size() && (ver[j] == ' ' || ver[j] == '\t')) ++j;
+        if (j >= ver.size() || ver[j] < '0' || ver[j] > '9') continue;
+        char* end = nullptr;
+        const unsigned long v = std::strtoul(ver.c_str() + j, &end, 10);
+        if (end != ver.c_str() + j && v > 0 && v <= UINT32_MAX) return static_cast<uint32_t>(v);
+    }
+    return 0;
+}
+
+bool ClientVersionIsCurrent(const OpsState& st, const std::string& ver) {
+    if (ver.empty() || st.latestClientVersionText.empty()) return true;
+    const uint32_t bid = ParseAppVersionBuildId(ver);
+    if (bid > 0 && st.latestClientBuildId > 0) return bid >= st.latestClientBuildId;
+    if (ver == st.latestClientVersionText) return true;
+    return ver.find(st.latestClientVersionText) != std::string::npos;
+}
+
 ImVec4 AppVersionColor(const OpsState& st, const std::string& ver) {
     if (ver.empty()) return OpsTone::Muted();
-    if (!st.latestClientVersionText.empty() && ver == st.latestClientVersionText)
-        return OpsTone::Ok();
-    if (!st.latestClientVersionText.empty()) return OpsTone::Warn();
-    return ImVec4(0.78f, 0.80f, 0.84f, 1.f);
+    if (st.latestClientVersionText.empty() && st.latestClientBuildId == 0)
+        return ImVec4(0.78f, 0.80f, 0.84f, 1.f);
+    if (ClientVersionIsCurrent(st, ver)) return OpsTone::Ok();
+    return OpsTone::Warn();
 }
 
 int JsonIntField(const std::string& obj, const char* key, int fallback = 0) {
     const std::string raw = FindJsonNumber(obj, key);
     if (raw.empty()) return fallback;
     return static_cast<int>(std::strtol(raw.c_str(), nullptr, 10));
+}
+
+long long JsonInt64Field(const std::string& obj, const char* key, long long fallback = 0) {
+    const std::string raw = FindJsonNumber(obj, key);
+    if (raw.empty()) return fallback;
+    return std::strtoll(raw.c_str(), nullptr, 10);
 }
 
 bool ParseClientsPayload(const std::string& body, OpsState& st) {
@@ -1771,6 +2005,7 @@ bool ParseClientsPayload(const std::string& body, OpsState& st) {
         const std::string modeHdr = FindJsonString(body, "accessMode");
         if (modeHdr == "allow" || modeHdr == "deny") st.accessMode = modeHdr;
     }
+    st.clientsStrictToken = body.find("\"strictToken\":true") != std::string::npos;
 
     auto parseObjArray = [&](const char* key, auto&& onObj) {
         const size_t arrKey = body.find(std::string("\"") + key + "\"");
@@ -1874,6 +2109,8 @@ bool ParseClientsPayload(const std::string& body, OpsState& st) {
         row.device = FindJsonString(obj, "device");
         row.mac = FindJsonString(obj, "mac");
         row.token = FindJsonString(obj, "token");
+        row.uid = FindJsonString(obj, "uid");
+        row.gateExp = JsonInt64Field(obj, "gateExp", 0);
         row.appVersion = FindJsonString(obj, "appVersion");
         row.charName = FindJsonString(obj, "charName");
         row.charJobName = FindJsonString(obj, "charJobName");
@@ -1941,6 +2178,198 @@ std::string JsonEscapeLocal(const std::string& s) {
     return out;
 }
 
+bool ParseUpdateChannelsPayload(const std::string& body, OpsState& st) {
+    st.updatePackages.clear();
+    st.updateChannelGroups.clear();
+    st.updateChannelTokens.clear();
+    st.updateChannelsConfigured = body.find("\"configured\":true") != std::string::npos;
+    st.allowedClientBuildId = static_cast<uint32_t>(JsonIntField(body, "defaultBuildId", 0));
+    st.allowedClientVersionText.clear();
+    st.lastBuiltClientBuildId = 0;
+    st.lastBuiltClientVersionText.clear();
+
+    auto forEachObj = [](const std::string& text, const char* key, auto&& onObj) {
+        const size_t arrKey = text.find(std::string("\"") + key + "\"");
+        if (arrKey == std::string::npos) return;
+        size_t i = text.find('[', arrKey);
+        if (i == std::string::npos) return;
+        ++i;
+        while (i < text.size()) {
+            while (i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' ||
+                                       text[i] == '\n' || text[i] == ',')) {
+                ++i;
+            }
+            if (i >= text.size() || text[i] == ']') break;
+            if (text[i] != '{') break;
+            const size_t start = i;
+            int depth = 0;
+            bool inStr = false;
+            for (; i < text.size(); ++i) {
+                const char c = text[i];
+                if (inStr) {
+                    if (c == '\\' && i + 1 < text.size()) {
+                        ++i;
+                        continue;
+                    }
+                    if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"') inStr = true;
+                else if (c == '{') ++depth;
+                else if (c == '}') {
+                    --depth;
+                    if (depth == 0) {
+                        ++i;
+                        onObj(text.substr(start, i - start));
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    const std::string defObj = FindJsonObjectSlice(body, "default");
+    if (!defObj.empty()) {
+        st.allowedClientBuildId =
+            static_cast<uint32_t>(JsonIntField(defObj, "buildId", (int)st.allowedClientBuildId));
+        st.allowedClientVersionText = FindJsonString(defObj, "version");
+    }
+    const std::string lastObj = FindJsonObjectSlice(body, "lastBuilt");
+    if (!lastObj.empty()) {
+        st.lastBuiltClientBuildId = static_cast<uint32_t>(JsonIntField(lastObj, "buildId", 0));
+        st.lastBuiltClientVersionText = FindJsonString(lastObj, "version");
+    }
+
+    forEachObj(body, "packages", [&](const std::string& obj) {
+        OpsState::UpdatePackageRow row;
+        row.buildId = static_cast<uint32_t>(JsonIntField(obj, "buildId", 0));
+        row.version = FindJsonString(obj, "version");
+        row.zipName = FindJsonString(obj, "zipName");
+        if (row.buildId > 0) st.updatePackages.push_back(std::move(row));
+    });
+    forEachObj(body, "groups", [&](const std::string& obj) {
+        OpsState::UpdateChannelOverride row;
+        row.uid = FindJsonString(obj, "uid");
+        row.buildId = static_cast<uint32_t>(JsonIntField(obj, "buildId", 0));
+        row.version = FindJsonString(obj, "version");
+        if (!row.uid.empty() && row.buildId > 0) st.updateChannelGroups.push_back(std::move(row));
+    });
+    forEachObj(body, "tokens", [&](const std::string& obj) {
+        OpsState::UpdateChannelOverride row;
+        row.token = FindJsonString(obj, "token");
+        row.buildId = static_cast<uint32_t>(JsonIntField(obj, "buildId", 0));
+        row.version = FindJsonString(obj, "version");
+        if (!row.token.empty() && row.buildId > 0) st.updateChannelTokens.push_back(std::move(row));
+    });
+
+    st.updateChannelCombo = -1;
+    for (int i = 0; i < (int)st.updatePackages.size(); ++i) {
+        if (st.updatePackages[(size_t)i].buildId == st.allowedClientBuildId) {
+            st.updateChannelCombo = i;
+            break;
+        }
+    }
+    return true;
+}
+
+void RefreshUpdateChannels(OpsState& st, bool force) {
+    const ULONGLONG now = GetTickCount64();
+    if (!force && st.lastUpdateChannelsFetchMs != 0 && now - st.lastUpdateChannelsFetchMs < 4000) {
+        return;
+    }
+    st.lastUpdateChannelsFetchMs = now;
+    if (!TwmsRunning(st)) {
+        st.updateChannelsError = "TWMS API 未运行";
+        return;
+    }
+    const auto r = HttpGet(L"127.0.0.1", 18789, L"/twms/admin/update-channels", 2000, 512 * 1024);
+    if (!r.ok) {
+        st.updatePackages.clear();
+        if (r.status == 404)
+            st.updateChannelsError = "接口不存在：请重启 TWMS 更新服务（需含 update-channels）";
+        else
+            st.updateChannelsError = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        return;
+    }
+    if (!ParseUpdateChannelsPayload(r.body, st)) {
+        st.updateChannelsError = "解析 update-channels 失败";
+        return;
+    }
+    st.updateChannelsError.clear();
+}
+
+bool PostUpdateChannelDefault(OpsState& st, uint32_t buildId, std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    if (buildId == 0) {
+        err = "未选版本";
+        return false;
+    }
+    const std::string body = std::string("{\"action\":\"set-default\",\"buildId\":") +
+                             std::to_string(buildId) + "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/update-channels", body.c_str(), 2500, 256 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "设置对外允许版本失败";
+        return false;
+    }
+    ParseUpdateChannelsPayload(r.body, st);
+    return true;
+}
+
+bool PostUpdateChannelGroup(OpsState& st, const char* uid, const char* token, uint32_t buildId,
+                            bool clear, std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    std::string body = "{\"action\":\"";
+    body += clear ? "clear-group" : "set-group";
+    body += "\"";
+    if (uid && uid[0]) body += ",\"uid\":\"" + JsonEscapeLocal(uid) + "\"";
+    if (token && token[0]) body += ",\"token\":\"" + JsonEscapeLocal(token) + "\"";
+    if (!clear) body += ",\"buildId\":" + std::to_string(buildId);
+    body += "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/update-channels", body.c_str(), 2500, 256 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "设置分组允许版本失败";
+        return false;
+    }
+    ParseUpdateChannelsPayload(r.body, st);
+    return true;
+}
+
+uint32_t AllowedBuildForPerson(const OpsState& st, const std::string& personKey) {
+    if (personKey.size() >= 2 && personKey[1] == '\x1f') {
+        const char* who = personKey.c_str() + 2;
+        if (personKey[0] == 'u') {
+            for (const auto& g : st.updateChannelGroups) {
+                if (g.uid == who) return g.buildId;
+            }
+        } else if (personKey[0] == 't') {
+            for (const auto& g : st.updateChannelTokens) {
+                if (g.token == who) return g.buildId;
+            }
+        }
+    }
+    return st.allowedClientBuildId;
+}
+
 unsigned long long MesoDashParseUll(const std::string& raw) {
     if (raw.empty()) return 0;
     char* end = nullptr;
@@ -1995,6 +2424,8 @@ void MesoDashParseSeriesArray(OpsState& st, const std::string& line, ULONGLONG t
         if (token.empty()) continue;
         const unsigned long long meso = MesoDashParseUll(FindJsonNumber(obj, "m"));
         auto* ser = MesoDashFindOrAdd(st, token);
+        const std::string uid = FindJsonString(obj, "i");
+        if (!uid.empty()) ser->uid = uid;
         MesoDashPush(ser->points, t, meso);
         ser->lastMeso = meso;
     }
@@ -2058,6 +2489,7 @@ void MesoDashLoadFile(OpsState& st) {
     if (needCompact) MesoDashRewriteFile(st, cutMs);
     MesoUnitsLoad(st);
     MesoEventsLoad(st);
+    MesoMergeUidTokenAliases(st);
 }
 
 void MesoDashAppendFile(OpsState& st, ULONGLONG nowMs, unsigned long long total) {
@@ -2075,6 +2507,8 @@ void MesoDashAppendFile(OpsState& st, ULONGLONG nowMs, unsigned long long total)
         first = false;
         line += "{\"k\":\"";
         line += JsonEscapeLocal(s.token);
+        line += "\",\"i\":\"";
+        line += JsonEscapeLocal(s.uid);
         line += "\",\"m\":";
         line += std::to_string(s.lastMeso);
         line += '}';
@@ -2174,7 +2608,8 @@ void MesoUnitsSave(OpsState& st) {
         if (!u.sampled) continue;
         if (!first) f << ',';
         first = false;
-        f << "{\"k\":\"" << JsonEscapeLocal(u.token) << "\",\"c\":\""
+        f << "{\"k\":\"" << JsonEscapeLocal(u.token) << "\",\"i\":\""
+          << JsonEscapeLocal(u.uid) << "\",\"c\":\""
           << JsonEscapeLocal(u.charName) << "\",\"d\":\"" << JsonEscapeLocal(u.deviceId)
           << "\",\"h\":\"" << JsonEscapeLocal(u.machine) << "\",\"m\":" << u.lastMeso
           << ",\"w\":\"" << JsonEscapeLocal(u.lastScrolls) << "\",\"ws\":"
@@ -2224,6 +2659,7 @@ void MesoUnitsLoad(OpsState& st) {
         const std::string obj = body.substr(start, i - start);
         OpsState::MesoUnit u;
         u.token = FindJsonString(obj, "k");
+        u.uid = FindJsonString(obj, "i");
         u.charName = FindJsonString(obj, "c");
         u.deviceId = FindJsonString(obj, "d");
         u.machine = FindJsonString(obj, "h");
@@ -2231,9 +2667,10 @@ void MesoUnitsLoad(OpsState& st) {
         u.lastScrolls = FindJsonString(obj, "w");
         u.scrollsSampled = JsonIntField(obj, "ws", u.lastScrolls.empty() ? 0 : 1) != 0;
         u.lastSeenMs = MesoDashParseUll(FindJsonNumber(obj, "s"));
-        if (u.token.empty()) continue;
+        const std::string pid = MesoPersonId(u.uid, u.token);
+        if (pid.empty()) continue;
         if (u.lastSeenMs != 0 && u.lastSeenMs < cutMs) continue;
-        u.key = MesoUnitKey(u.token, u.charName, u.deviceId);
+        u.key = MesoUnitKey(pid, u.charName, u.deviceId);
         u.sampled = true;
         u.online = false;
         bool exists = false;
@@ -2316,6 +2753,31 @@ bool ParseBansPayload(const std::string& body, OpsState& st) {
     };
     parseList("bans", st.bans);
     parseList("allows", st.allows);
+
+    // 卡级吊销名单：只取每条的 jti，够用来给台账打「卡已废」。
+    // 用带右引号的键名精确定位，免得撞上同前缀的 "revokedJtiCount"。
+    st.revokedJti.clear();
+    {
+        const size_t arrKey = body.find("\"revokedJti\"");
+        if (arrKey != std::string::npos) {
+            const size_t lb = body.find('[', arrKey);
+            const size_t rb = (lb == std::string::npos) ? std::string::npos : body.find(']', lb);
+            if (lb != std::string::npos && rb != std::string::npos) {
+                const std::string arr = body.substr(lb, rb - lb + 1);
+                size_t p = 0;
+                while ((p = arr.find("\"jti\"", p)) != std::string::npos) {
+                    const size_t q1 = arr.find('"', arr.find(':', p) + 1);
+                    if (q1 == std::string::npos) break;
+                    const size_t q2 = arr.find('"', q1 + 1);
+                    if (q2 == std::string::npos) break;
+                    const std::string jti = arr.substr(q1 + 1, q2 - q1 - 1);
+                    if (!jti.empty()) st.revokedJti.insert(jti);
+                    p = q2 + 1;
+                }
+            }
+        }
+    }
+
     if (st.bansCount <= 0) st.bansCount = static_cast<int>(st.bans.size());
     if (st.allowsCount <= 0) st.allowsCount = static_cast<int>(st.allows.size());
     return body.find("\"ok\":true") != std::string::npos || !st.bans.empty() ||
@@ -2357,7 +2819,7 @@ void RefreshBans(OpsState& st, bool force) {
 bool PostBanAction(OpsState& st, const char* action, const std::string& machine,
                    const std::string& deviceId, const std::string& reason, const std::string& key,
                    std::string& err, const std::string& mac = {}, const std::string& mode = {},
-                   const std::string& token = {}) {
+                   const std::string& token = {}, const std::string& uid = {}) {
     if (!TwmsRunning(st)) {
         err = "TWMS API 未运行";
         return false;
@@ -2368,6 +2830,7 @@ bool PostBanAction(OpsState& st, const char* action, const std::string& machine,
     if (!deviceId.empty()) body += ",\"deviceId\":\"" + JsonEscapeLocal(deviceId) + "\"";
     if (!mac.empty()) body += ",\"mac\":\"" + JsonEscapeLocal(mac) + "\"";
     if (!token.empty()) body += ",\"token\":\"" + JsonEscapeLocal(token) + "\"";
+    if (!uid.empty()) body += ",\"uid\":\"" + JsonEscapeLocal(uid) + "\"";
     if (!reason.empty()) body += ",\"reason\":\"" + JsonEscapeLocal(reason) + "\"";
     if (!mode.empty()) body += ",\"mode\":\"" + JsonEscapeLocal(mode) + "\"";
     body += "}";
@@ -2384,6 +2847,497 @@ bool PostBanAction(OpsState& st, const char* action, const std::string& machine,
         return false;
     }
     ParseBansPayload(r.body, st);
+    return true;
+}
+
+// 严格模式开关（/twms/admin/access action=setstrict）：无有效签名 TOKEN 直接拒。
+bool PostSetStrictToken(OpsState& st, bool strict, std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    const std::string body =
+        std::string("{\"action\":\"setstrict\",\"strict\":") + (strict ? "true" : "false") + "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/access", body.c_str(), 2500, 64 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "严格模式切换失败";
+        return false;
+    }
+    st.clientsStrictToken = r.body.find("\"strictToken\":true") != std::string::npos;
+    return true;
+}
+
+bool ParseQuotaPayload(const std::string& body, OpsState& st) {
+    st.quotaUsers.clear();
+    st.quotaEnabled = body.find("\"enabled\":true") != std::string::npos;
+    st.quotaDefaultMax = JsonIntField(body, "defaultMax", 0);
+    st.quotaAgingDays = JsonIntField(body, "agingDays", 0);
+    st.quotaPathText = FindJsonString(body, "path");
+
+    // 从 text 的 "key":[ {..},{..} ] 逐个切出对象（按花括号深度，兼容嵌套 devices 数组）。
+    auto forEachObj = [](const std::string& text, const char* key, auto&& onObj) {
+        const size_t arrKey = text.find(std::string("\"") + key + "\"");
+        if (arrKey == std::string::npos) return;
+        size_t i = text.find('[', arrKey);
+        if (i == std::string::npos) return;
+        ++i;
+        while (i < text.size()) {
+            while (i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' ||
+                                       text[i] == '\n' || text[i] == ',')) {
+                ++i;
+            }
+            if (i >= text.size() || text[i] == ']') break;
+            if (text[i] != '{') break;
+            const size_t start = i;
+            int depth = 0;
+            bool inStr = false;
+            for (; i < text.size(); ++i) {
+                const char c = text[i];
+                if (inStr) {
+                    if (c == '\\' && i + 1 < text.size()) {
+                        ++i;
+                        continue;
+                    }
+                    if (c == '"') inStr = false;
+                    continue;
+                }
+                if (c == '"') {
+                    inStr = true;
+                    continue;
+                }
+                if (c == '{') {
+                    ++depth;
+                } else if (c == '}') {
+                    --depth;
+                    if (depth == 0) {
+                        ++i;
+                        break;
+                    }
+                }
+            }
+            if (depth != 0) break;
+            onObj(text.substr(start, i - start));
+        }
+    };
+
+    forEachObj(body, "users", [&](const std::string& uobj) {
+        OpsState::QuotaUserRow u;
+        u.uid = FindJsonString(uobj, "uid");
+        if (u.uid.empty()) return;
+        u.max = JsonIntField(uobj, "max", 0);
+        u.effectiveMax = JsonIntField(uobj, "effectiveMax", 0);
+        u.used = JsonIntField(uobj, "used", 0);
+        std::snprintf(u.maxInput, sizeof(u.maxInput), "%d", u.max);
+        forEachObj(uobj, "devices", [&](const std::string& dobj) {
+            OpsState::QuotaDeviceRow d;
+            d.deviceId = FindJsonString(dobj, "deviceId");
+            d.lastSeen = FindJsonString(dobj, "lastSeen");
+            d.idleSec = JsonInt64Field(dobj, "idleSec", -1);
+            if (!d.deviceId.empty()) u.devices.push_back(std::move(d));
+        });
+        // 最久没见的排最上：清僵尸名额时省得翻。
+        std::stable_sort(u.devices.begin(), u.devices.end(),
+                         [](const OpsState::QuotaDeviceRow& a, const OpsState::QuotaDeviceRow& b) {
+                             return a.idleSec > b.idleSec;
+                         });
+        st.quotaUsers.push_back(std::move(u));
+    });
+    return body.find("\"ok\":true") != std::string::npos ||
+           body.find("\"enabled\"") != std::string::npos;
+}
+
+void RefreshQuota(OpsState& st, bool force) {
+    const ULONGLONG now = GetTickCount64();
+    if (!force && st.lastQuotaFetchMs != 0 && now - st.lastQuotaFetchMs < 5000) return;
+    st.lastQuotaFetchMs = now;
+
+    if (!TwmsRunning(st)) {
+        st.quotaUsers.clear();
+        st.quotaError = "TWMS API 未运行";
+        return;
+    }
+    const auto r = HttpGet(L"127.0.0.1", 18789, L"/twms/admin/quota", 1500, 512 * 1024);
+    if (!r.ok) {
+        st.quotaUsers.clear();
+        if (r.status == 404) {
+            st.quotaError = "接口不存在：请重启 TWMS 更新服务以加载配额能力";
+        } else if (!r.error.empty()) {
+            st.quotaError = r.error;
+        } else {
+            st.quotaError = "HTTP " + std::to_string(r.status);
+        }
+        return;
+    }
+    if (!ParseQuotaPayload(r.body, st)) {
+        st.quotaError = "解析 quota 响应失败";
+        return;
+    }
+    st.quotaError.clear();
+}
+
+bool PostQuotaAction(OpsState& st, const std::string& body, std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/quota", body.c_str(), 2500, 512 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "配额操作失败";
+        return false;
+    }
+    ParseQuotaPayload(r.body, st);
+    return true;
+}
+
+bool PostQuotaSetMax(OpsState& st, const std::string& uid, int maxVal, std::string& err) {
+    if (uid.empty()) {
+        err = "需要 uid";
+        return false;
+    }
+    if (maxVal < 0) maxVal = 0;
+    const std::string body = "{\"action\":\"setMax\",\"uid\":\"" + JsonEscapeLocal(uid) +
+                             "\",\"max\":" + std::to_string(maxVal) + "}";
+    return PostQuotaAction(st, body, err);
+}
+
+bool PostQuotaRemoveDevice(OpsState& st, const std::string& uid, const std::string& deviceId,
+                           std::string& err) {
+    const std::string body = "{\"action\":\"removeDevice\",\"uid\":\"" + JsonEscapeLocal(uid) +
+                             "\",\"deviceId\":\"" + JsonEscapeLocal(deviceId) + "\"}";
+    return PostQuotaAction(st, body, err);
+}
+
+// 批量释放闲置设备；uid 空=全部用户。服务端只删 idle>=days 的，坏时间戳不动。
+bool PostQuotaReleaseIdle(OpsState& st, const std::string& uid, int days, std::string& err) {
+    if (days <= 0) {
+        err = "天数需大于 0";
+        return false;
+    }
+    std::string body = "{\"action\":\"releaseIdle\",\"days\":" + std::to_string(days);
+    if (!uid.empty()) body += ",\"uid\":\"" + JsonEscapeLocal(uid) + "\"";
+    body += "}";
+    return PostQuotaAction(st, body, err);
+}
+
+// 设备闲置文案：idleSec<0 表示台账时间戳坏了，别当成「刚见过」。
+std::string QuotaIdleText(long long idleSec) {
+    if (idleSec < 0) return "时间未知";
+    if (idleSec < 3600) return std::to_string(idleSec / 60) + " 分钟前";
+    if (idleSec < 86400) return std::to_string(idleSec / 3600) + " 小时前";
+    return std::to_string(idleSec / 86400) + " 天前";
+}
+
+// 闲置越久越可能是「重装系统换了 deviceId」的僵尸名额：>=阈值标红，>=1/4 阈值标黄。
+ImVec4 QuotaIdleColor(long long idleSec, int idleDaysThreshold) {
+    if (idleSec < 0) return OpsTone::Warn();
+    const long long days = idleSec / 86400;
+    const long long th = idleDaysThreshold > 0 ? idleDaysThreshold : 30;
+    if (days >= th) return OpsTone::Danger();
+    if (days >= th / 4) return OpsTone::Warn();
+    return OpsTone::Muted();
+}
+
+// 卡到期文案：exp<=0 永久；过期标红文案交给调用方，这里只给 "剩 N 天"/"已过期"/"永久"。
+std::string GateExpRemainText(long long exp) {
+    if (exp <= 0) return "永久";
+    const long long now = static_cast<long long>(::time(nullptr));
+    const long long left = exp - now;
+    if (left <= 0) return "已过期";
+    const long long days = left / 86400;
+    if (days >= 1) return "剩 " + std::to_string(days) + " 天";
+    const long long hours = left / 3600;
+    return "剩 " + std::to_string(hours > 0 ? hours : 1) + " 小时";
+}
+
+std::string GateExpAbsText(long long exp) {
+    if (exp <= 0) return "永不过期";
+    const time_t t = static_cast<time_t>(exp);
+    struct tm tmv{};
+    localtime_s(&tmv, &t);
+    char buf[32]{};
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
+    return buf;
+}
+
+// 签卡：请求服务端用本机离线私钥签一张启动 TOKEN；成功把 token/信息写入 st，失败填 err。
+bool PostGateSign(OpsState& st, const std::string& uid, int days, const std::string& note,
+                  std::string& err) {
+    if (uid.empty()) {
+        err = "需要 uid";
+        return false;
+    }
+    if (days < 0) days = 0;
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    std::string body = "{\"uid\":\"" + JsonEscapeLocal(uid) + "\",\"days\":" + std::to_string(days);
+    if (!note.empty()) body += ",\"note\":\"" + JsonEscapeLocal(note) + "\"";
+    body += "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/gate-sign", body.c_str(), 2500, 64 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务以加载签卡能力";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "签发失败";
+        return false;
+    }
+    const std::string token = FindJsonString(r.body, "token");
+    if (token.empty()) {
+        err = "服务端未返回 token";
+        return false;
+    }
+    long long exp = 0;
+    if (const size_t p = r.body.find("\"exp\":"); p != std::string::npos) {
+        exp = std::strtoll(r.body.c_str() + p + 6, nullptr, 10);
+    }
+    std::string expText;
+    if (exp <= 0) {
+        expText = "永不过期";
+    } else {
+        const time_t t = static_cast<time_t>(exp);
+        struct tm tmv{};
+        localtime_s(&tmv, &t);
+        char buf[32]{};
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
+        expText = buf;
+    }
+    st.gateSignToken = token;
+    st.gateSignInfo = "uid=" + uid + " · 到期 " + expText;
+    st.gateSignError.clear();
+    return true;
+}
+
+void ParseGateCardsPayload(const std::string& body, OpsState& st) {
+    st.gateCards.clear();
+    const size_t arrKey = body.find("\"cards\"");
+    if (arrKey == std::string::npos) return;
+    size_t i = body.find('[', arrKey);
+    if (i == std::string::npos) return;
+    ++i;
+    while (i < body.size()) {
+        while (i < body.size() && (body[i] == ' ' || body[i] == '\t' || body[i] == '\r' ||
+                                   body[i] == '\n' || body[i] == ','))
+            ++i;
+        if (i >= body.size() || body[i] == ']') break;
+        if (body[i] != '{') break;
+        int depth = 0;
+        const size_t start = i;
+        for (; i < body.size(); ++i) {
+            if (body[i] == '{') ++depth;
+            else if (body[i] == '}') {
+                --depth;
+                if (depth == 0) {
+                    ++i;
+                    break;
+                }
+            }
+        }
+        const std::string obj = body.substr(start, i - start);
+        OpsState::GateCardRow row;
+        row.id = FindJsonString(obj, "id");
+        row.jti = FindJsonString(obj, "jti");
+        row.uid = FindJsonString(obj, "uid");
+        row.iss = JsonInt64Field(obj, "iss", 0);
+        row.exp = JsonInt64Field(obj, "exp", 0);
+        row.days = JsonIntField(obj, "days", 0);
+        row.note = FindJsonString(obj, "note");
+        row.by = FindJsonString(obj, "by");
+        row.at = FindJsonString(obj, "at");
+        row.token = FindJsonString(obj, "token");
+        if (!row.uid.empty()) st.gateCards.push_back(std::move(row));
+    }
+    // 交叉 access bans：uid 封禁键 = "uid:<uid>" → 标注已吊销
+    for (auto& c : st.gateCards) {
+        const std::string key = "uid:" + c.uid;
+        c.banned = false;
+        for (const auto& b : st.bans) {
+            if (b.key == key) {
+                c.banned = true;
+                break;
+            }
+        }
+        // 只认 jti 字段：老台账行的 id 是随机生成的、并没签进卡里，拿它去废是废不掉的，
+        // 所以那些行不给「废卡」入口，只能按 uid 封整个人。
+        c.cardRevoked = !c.jti.empty() && st.revokedJti.count(c.jti) > 0;
+    }
+    // 标注被取代的旧卡：服务端已按签发倒序返回（listGateCards 有 rows.reverse()），
+    // 故同 uid 首次出现即最新一张，其后各行都是历史卡。
+    {
+        std::set<std::string> seenUid;
+        for (auto& c : st.gateCards) c.superseded = !seenUid.insert(c.uid).second;
+    }
+}
+
+void RefreshGateCards(OpsState& st, bool force) {
+    const ULONGLONG now = GetTickCount64();
+    if (!force && st.lastGateCardsFetchMs != 0 && now - st.lastGateCardsFetchMs < 4000) return;
+    st.lastGateCardsFetchMs = now;
+    if (!TwmsRunning(st)) {
+        st.gateCards.clear();
+        st.gateCardsError = "TWMS API 未运行";
+        return;
+    }
+    RefreshBans(st, false);  // 交叉标注“已吊销”需要 bans
+    const auto r = HttpGet(L"127.0.0.1", 18789, L"/twms/admin/cards", 1500, 1024 * 1024);
+    if (!r.ok) {
+        st.gateCards.clear();
+        if (r.status == 404)
+            st.gateCardsError = "接口不存在：请重启 TWMS 更新服务以加载台账";
+        else
+            st.gateCardsError = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        return;
+    }
+    ParseGateCardsPayload(r.body, st);
+    st.gateCardsError.clear();
+}
+
+void ParseClientHistoryPayload(const std::string& body, OpsState& st) {
+    st.clientHistory.clear();
+    st.clientHistoryTotal = JsonIntField(body, "total", 0);
+    const size_t arrKey = body.find("\"clients\"");
+    if (arrKey == std::string::npos) return;
+    size_t i = body.find('[', arrKey);
+    if (i == std::string::npos) return;
+    ++i;
+    while (i < body.size()) {
+        while (i < body.size() && (body[i] == ' ' || body[i] == '\t' || body[i] == '\r' ||
+                                   body[i] == '\n' || body[i] == ','))
+            ++i;
+        if (i >= body.size() || body[i] == ']') break;
+        if (body[i] != '{') break;
+        const size_t start = i;
+        int depth = 0;
+        bool inStr = false;
+        for (; i < body.size(); ++i) {
+            const char c = body[i];
+            if (inStr) {
+                if (c == '\\' && i + 1 < body.size()) {
+                    ++i;
+                    continue;
+                }
+                if (c == '"') inStr = false;
+                continue;
+            }
+            if (c == '"') {
+                inStr = true;
+                continue;
+            }
+            if (c == '{') ++depth;
+            else if (c == '}') {
+                --depth;
+                if (depth == 0) {
+                    ++i;
+                    break;
+                }
+            }
+        }
+        if (depth != 0) break;
+        const std::string obj = body.substr(start, i - start);
+        OpsState::ClientHistoryRow row;
+        row.ip = FindJsonString(obj, "ip");
+        row.machine = FindJsonString(obj, "machine");
+        row.deviceId = FindJsonString(obj, "deviceId");
+        row.uid = FindJsonString(obj, "uid");
+        row.appVersion = FindJsonString(obj, "appVersion");
+        row.charName = FindJsonString(obj, "charName");
+        row.lastSeenAt = FindJsonString(obj, "lastSeenAt");
+        row.lastAllowAt = FindJsonString(obj, "lastAllowAt");
+        row.lastDenyReason = FindJsonString(obj, "lastDenyReason");
+        row.lastDenyMatch = FindJsonString(obj, "lastDenyMatch");
+        row.lastSeenSec = JsonInt64Field(obj, "lastSeenSec", 0);
+        row.leaseRemainSec = JsonInt64Field(obj, "leaseRemainSec", 0);
+        row.online = obj.find("\"online\":true") != std::string::npos;
+        st.clientHistory.push_back(std::move(row));
+    }
+}
+
+void RefreshClientHistory(OpsState& st, bool force) {
+    const ULONGLONG now = GetTickCount64();
+    if (!force && st.lastClientHistoryFetchMs != 0 && now - st.lastClientHistoryFetchMs < 10000)
+        return;
+    st.lastClientHistoryFetchMs = now;
+    if (!TwmsRunning(st)) {
+        st.clientHistory.clear();
+        st.clientHistoryError = "TWMS API 未运行";
+        return;
+    }
+    const std::wstring q = L"/twms/admin/client-history?days=" +
+                           std::to_wstring(st.clientHistoryDays) + L"&limit=500";
+    const auto r = HttpGet(L"127.0.0.1", 18789, q.c_str(), 2000, 1024 * 1024);
+    if (!r.ok) {
+        st.clientHistory.clear();
+        if (r.status == 404)
+            st.clientHistoryError = "接口不存在：请重启 TWMS 更新服务以加载历史台账";
+        else
+            st.clientHistoryError =
+                !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        return;
+    }
+    ParseClientHistoryPayload(r.body, st);
+    st.clientHistoryError.clear();
+}
+
+// 租约剩余的人话。客户端每 64h 必须成功探活一次续约，否则租约过期时若正赶上服务没开，
+// 会被 gate/3 硬拒（1h 宽限是整机一次性的，老客户端早已用掉），表现为「莫名启动不了」。
+std::string LeaseRemainText(long long sec) {
+    if (sec <= 0) return "已过期";
+    if (sec < 3600) return std::to_string(sec / 60) + " 分";
+    const long long h = sec / 3600;
+    if (h < 48) return std::to_string(h) + " 小时";
+    return std::to_string(h / 24) + " 天 " + std::to_string(h % 24) + " 小时";
+}
+
+// 封人 = 对其 uid 加 uid 封禁：该 uid 名下所有卡一起拦（离线激活拦不住，联网探活即拦）。
+bool PostRevokeUid(OpsState& st, const std::string& uid, std::string& err) {
+    return PostBanAction(st, "ban", {}, {}, "ops 吊销卡", {}, err, {}, {}, {}, uid);
+}
+bool PostUnrevokeUid(OpsState& st, const std::string& uid, std::string& err) {
+    return PostBanAction(st, "unban", {}, {}, {}, {}, err, {}, {}, {}, uid);
+}
+
+// 废单张卡 = 按卡号 jti 吊销：同 uid 的其他卡不受影响（续签后可只废泄露的那张）。
+bool PostCardJtiAction(OpsState& st, const char* action, const std::string& jti,
+                       const std::string& uid, const std::string& reason, std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    std::string body = std::string("{\"action\":\"") + action + "\",\"jti\":\"" +
+                       JsonEscapeLocal(jti) + "\"";
+    if (!uid.empty()) body += ",\"uid\":\"" + JsonEscapeLocal(uid) + "\"";
+    if (!reason.empty()) body += ",\"reason\":\"" + JsonEscapeLocal(reason) + "\"";
+    body += "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/access", body.c_str(), 2500, 256 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务以加载卡级吊销";
+        if (r.status == 400) err = "服务端不认这个卡号（老版本服务端？请重启更新服务）";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = "服务端拒绝：" + r.body.substr(0, 160);
+        return false;
+    }
     return true;
 }
 
@@ -2640,6 +3594,8 @@ void DrawMainTabButtons(OpsState& st) {
                 RefreshClients(st, true);
                 if (id == 1) RefreshBans(st, true);
             }
+            if (id == 3) RefreshQuota(st, true);
+            if (id == 4) RefreshGateCards(st, true);
         }
         if (selected) ImGui::PopStyleColor();
     };
@@ -2687,6 +3643,24 @@ void DrawMainTabButtons(OpsState& st) {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("监控用户背包金变化（利润）\n防偷偷转移 · 流水 30 天");
         }
+    }
+    ImGui::SameLine();
+    {
+        char qtab[64]{};
+        const int nq = static_cast<int>(st.quotaUsers.size());
+        if (nq > 0)
+            std::snprintf(qtab, sizeof(qtab), "台数配额 (%d)##maintab", nq);
+        else
+            std::snprintf(qtab, sizeof(qtab), "台数配额##maintab");
+        tabBtn(qtab, 3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("按 uid（个人签名 TOKEN）限制可激活的设备台数");
+    }
+    ImGui::SameLine();
+    {
+        tabBtn("签卡##maintab", 4);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("给成员签发 gate/1 启动 TOKEN（本机私钥离线签）");
     }
 }
 
@@ -2846,6 +3820,17 @@ void DrawModeBadge(bool allowMode) {
     }
 }
 
+// uid 比对用：服务端 normalizeUid 会折大小写并去空白，台账/配额两侧的 uid 可能大小写不一致。
+bool EqualsIgnoreCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    }
+    return true;
+}
+
 bool ContainsIgnoreCase(const std::string& hay, const char* needle) {
     if (!needle || needle[0] == '\0') return true;
     auto lower = [](unsigned char c) -> char {
@@ -2871,7 +3856,7 @@ bool ClientMatchesFilter(const OpsState& st, const OpsState::ConnectedClient& c,
     if (st.clientsGateFilter[0] != '\0') {
         if (std::strcmp(st.clientsGateFilter, "__stale__") == 0) {
             if (st.latestClientVersionText.empty() || c.appVersion.empty() ||
-                c.appVersion == st.latestClientVersionText)
+                ClientVersionIsCurrent(st, c.appVersion))
                 return false;
         } else if (c.gate != st.clientsGateFilter) {
             return false;
@@ -2881,6 +3866,7 @@ bool ClientMatchesFilter(const OpsState& st, const OpsState::ConnectedClient& c,
     const std::string mapLabel = ClientMapLabel(st, c);
     return ContainsIgnoreCase(c.ip, filter) || ContainsIgnoreCase(c.machine, filter) ||
            ContainsIgnoreCase(c.mac, filter) || ContainsIgnoreCase(c.token, filter) ||
+           ContainsIgnoreCase(c.uid, filter) ||
            ContainsIgnoreCase(c.device, filter) || ContainsIgnoreCase(c.deviceId, filter) ||
            ContainsIgnoreCase(c.geo, filter) || ContainsIgnoreCase(c.gate, filter) ||
            ContainsIgnoreCase(c.appVersion, filter) || ContainsIgnoreCase(c.charName, filter) ||
@@ -2984,7 +3970,51 @@ int CompareConnectedClient(const OpsState::ConnectedClient& a, const OpsState::C
     }
 }
 
-// TOKEN 永远最高优先级：有值的排前，空 TOKEN 垫后；同 TOKEN 再比次级键。
+// 人的主键：签卡 uid（不可伪造）> 能对上的旧 TOKEN 并入该 uid > 其余旧 TOKEN > 无标识不合并。
+std::string ClientResolvedUid(const OpsState::ConnectedClient& c,
+                              const std::unordered_map<std::string, std::string>& tokenToUid) {
+    if (!c.uid.empty()) return c.uid;
+    if (c.token.empty()) return {};
+    const auto it = tokenToUid.find(c.token);
+    if (it != tokenToUid.end()) return it->second;
+    return {};
+}
+
+std::string ClientPersonKey(const OpsState::ConnectedClient& c, size_t idx,
+                            const std::unordered_map<std::string, std::string>& tokenToUid) {
+    const std::string uid = ClientResolvedUid(c, tokenToUid);
+    if (!uid.empty()) return std::string("u\x1f") + uid;
+    if (!c.token.empty()) return std::string("t\x1f") + c.token;
+    return std::string("\x01solo:") + std::to_string(idx);
+}
+
+int ClientPersonRank(const OpsState::ConnectedClient& c,
+                     const std::unordered_map<std::string, std::string>& tokenToUid) {
+    if (!ClientResolvedUid(c, tokenToUid).empty()) return 0;
+    if (!c.token.empty()) return 1;
+    return 2;
+}
+
+int CmpPersonPrimary(const OpsState::ConnectedClient& a, const OpsState::ConnectedClient& b,
+                     const std::unordered_map<std::string, std::string>& tokenToUid) {
+    const int ra = ClientPersonRank(a, tokenToUid);
+    const int rb = ClientPersonRank(b, tokenToUid);
+    if (ra != rb) return ra - rb;
+    if (ra == 0) return ClientResolvedUid(a, tokenToUid).compare(ClientResolvedUid(b, tokenToUid));
+    if (ra == 1) return a.token.compare(b.token);
+    return 0;
+}
+
+bool ClientPersonKeyIsUid(const std::string& key) {
+    return key.size() >= 2 && key[0] == 'u' && key[1] == '\x1f';
+}
+
+const char* ClientPersonKeyDisplay(const std::string& key) {
+    if (key.size() >= 2 && key[1] == '\x1f') return key.c_str() + 2;
+    return key.c_str();
+}
+
+// 旧调试 TOKEN 比较（连接表排序兜底；利润监控分组已改走 MesoPersonId）。
 int CmpTokenPrimary(const std::string& a, const std::string& b) {
     const bool ae = a.empty();
     const bool be = b.empty();
@@ -3008,13 +4038,14 @@ void StableSortByTableSpecs(std::vector<size_t>& order, const ImGuiTableSortSpec
     });
 }
 
-// 连接表专用：先 TOKEN，再列头（或空闲），保证同用户行聚在一起。
+// 连接表专用：先按人（uid > 旧 TOKEN），再列头（或空闲），保证同人行聚在一起。
 void SortClientIndices(OpsState& st, std::vector<size_t>& order, const ImGuiTableSortSpecs* specs,
-                       bool idleFirst) {
+                       bool idleFirst,
+                       const std::unordered_map<std::string, std::string>& tokenToUid) {
     if (order.size() < 2) return;
     const bool haveColSort = specs && specs->SpecsCount > 0;
     std::stable_sort(order.begin(), order.end(), [&](size_t ia, size_t ib) {
-        const int td = CmpTokenPrimary(st.clients[ia].token, st.clients[ib].token);
+        const int td = CmpPersonPrimary(st.clients[ia], st.clients[ib], tokenToUid);
         if (td != 0) return td < 0;
         if (haveColSort) {
             for (int n = 0; n < specs->SpecsCount; ++n) {
@@ -3077,12 +4108,14 @@ void DrawClientsPanel(OpsState& st) {
         else if (c.gate == "lease") ++nLease;
         else if (c.gate == "policy_deny") ++nPolicy;
         else if (c.gate == "denied") ++nDenied;
-        if (!st.latestClientVersionText.empty() && !c.appVersion.empty() &&
-            c.appVersion != st.latestClientVersionText)
+        if (!c.appVersion.empty() && !ClientVersionIsCurrent(st, c.appVersion))
             ++nStaleVer;
     }
     const int alertN =
         st.ipAlertCount > 0 ? st.ipAlertCount : static_cast<int>(st.ipAlerts.size());
+
+    std::unordered_map<std::string, std::string> tokenToUid;
+    MesoCollectTokenUidAliases(st, tokenToUid);
 
     // ── 策略条：模式徽章 + 切换 + 折叠说明 ──
     ImGui::TextUnformatted("访问策略");
@@ -3152,6 +4185,82 @@ void DrawClientsPanel(OpsState& st) {
             "「门禁」列为服务端按最近放行+64h 估算，与客户端本地租约文件可能有偏差。");
         ImGui::PopTextWrapPos();
         ImGui::EndPopup();
+    }
+    // ── 严格模式：无有效签名 TOKEN 直接拒（默认关，兼容老客户端） ──
+    ImGui::SameLine(0, 12.f);
+    ImGui::TextDisabled("|");
+    ImGui::SameLine(0, 8.f);
+    {
+        bool strict = st.clientsStrictToken;
+        if (ImGui::Checkbox("严格模式##strict_token", &strict)) {
+            if (strict) {
+                // 开启方向不可逆伤老客户端：严格模式拒绝走的是正式 Denied，客户端会写本地隐蔽粘性
+                // 并清租约；关回来也得让对方再探活成功一次才解得掉。先摆在线里没 uid 的台数再确认。
+                ImGui::OpenPopup("confirm_strict_token");
+            } else {
+                std::string err;
+                if (PostSetStrictToken(st, false, err)) {
+                    SetStatus(st, "已关闭严格模式：允许无 TOKEN 的老客户端（被写过粘性的需再探活一次才恢复）");
+                    RefreshClients(st, true);
+                } else {
+                    SetStatus(st, err);
+                }
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "开：只有带有效签名 TOKEN（gate/1 激活）的客户端才放行，改硬件码也蹭不进。\n"
+                "关：不检查 TOKEN，老客户端（无签名 TOKEN）也能连——仅黑/白名单拦截。\n"
+                "默认关；开启前确认在用客户端都已用签名 TOKEN 激活，否则会被挡在门外。");
+        }
+        if (ImGui::BeginPopupModal("confirm_strict_token", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            std::vector<const OpsState::ConnectedClient*> noUidList;
+            for (const auto& c : st.clients)
+                if (c.uid.empty()) noUidList.push_back(&c);
+            const int noUid = static_cast<int>(noUidList.size());
+            ImGui::TextUnformatted("确认开启「严格模式」？");
+            ImGui::Spacing();
+            if (noUid > 0) {
+                ImGui::TextColored(OpsTone::Danger(),
+                                   "当前在线 %d 台没有签名 TOKEN（老版本或未激活）：", noUid);
+                ImGui::BulletText("下一次探活即被拒并退出");
+                ImGui::BulletText("客户端会写本地封禁粘性、清掉在线租约");
+                ImGui::BulletText("关回严格模式后，它们还需联网探活成功一次才解得掉粘性");
+                ImGui::Spacing();
+                // 光给数字判断不了该不该开：列出具体是谁，认得出就是自己人还没换卡。
+                const int kShow = 8;
+                for (int i = 0; i < noUid && i < kShow; ++i) {
+                    const auto* c = noUidList[static_cast<size_t>(i)];
+                    std::string line = c->ip.empty() ? std::string("(无 IP)") : c->ip;
+                    if (!c->machine.empty()) line += "  " + c->machine;
+                    if (!c->charName.empty()) line += "  " + c->charName;
+                    if (!c->appVersion.empty()) line += "  v" + c->appVersion;
+                    ImGui::TextDisabled("    %s", line.c_str());
+                }
+                if (noUid > kShow) ImGui::TextDisabled("    …另有 %d 台", noUid - kShow);
+            } else {
+                ImGui::TextUnformatted("当前在线客户端都带签名 TOKEN，开启不影响它们。");
+                ImGui::TextDisabled("离线的老版本客户端仍会在下次上线时被拒。");
+            }
+            ImGui::Spacing();
+            ImGui::TextDisabled("在线口径：最近 %d 秒内探活过的客户端；离线机器数不进来。",
+                                st.clientsActiveSec);
+            ImGui::Spacing();
+            if (DangerButton("确认开启##strict_yes", ImVec2(120, 0))) {
+                std::string err;
+                if (PostSetStrictToken(st, true, err)) {
+                    SetStatus(st, "已开启严格模式：无有效签名 TOKEN 一律拒");
+                    RefreshClients(st, true);
+                } else {
+                    SetStatus(st, err);
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("取消##strict_no", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
     }
 
     // ── 一眼状态条 ──
@@ -3271,19 +4380,21 @@ void DrawClientsPanel(OpsState& st) {
     ImGui::Checkbox("空闲优先", &st.clientsSortIdleFirst);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
-            "未点列头时：同 TOKEN 内空闲秒数小的排前。\n"
-            "任意排序均以 TOKEN 为最高优先级（同用户聚在一起）");
+            "未点列头时：同人组内空闲秒数小的排前。\n"
+            "任意排序均以「人」为最高优先级（签卡 uid 优先，能对上的旧 TOKEN 并入）");
     ImGui::SameLine(0, 6.f);
-    ImGui::Checkbox("同TOKEN折叠", &st.clientsGroupByToken);
+    ImGui::Checkbox("同人折叠", &st.clientsGroupByToken);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
-            "同 TOKEN（用户唯一标识）多会话合并为一组，默认折叠\n"
-            "无 TOKEN 的行不按 TOKEN 合并\n点 [+] 展开；右键组操作");
+            "有签卡按 uid 合并；同一旧 TOKEN 能对上该 uid 的未签卡会话也并入\n"
+            "对不上的仍按旧 TOKEN 一组；无身份不合并\n点 [+] 展开；右键组操作");
     if (st.clientsGroupByToken) {
         ImGui::SameLine(0, 4.f);
         if (ImGui::SmallButton("全展##tok_expand_all")) {
-            for (const auto& c : st.clients) {
-                if (!c.token.empty()) st.clientsGroupExpanded.insert(c.token);
+            for (size_t i = 0; i < st.clients.size(); ++i) {
+                const auto& c = st.clients[i];
+                if (c.uid.empty() && c.token.empty()) continue;
+                st.clientsGroupExpanded.insert(ClientPersonKey(c, i, tokenToUid));
             }
         }
         ImGui::SameLine(0, 2.f);
@@ -3293,15 +4404,16 @@ void DrawClientsPanel(OpsState& st) {
     ImGui::Checkbox("同IP折叠", &st.clientsGroupByIp);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
-            "开 TOKEN 时：展开 TOKEN 后，同 IP 会话再折叠一层\n"
-            "关 TOKEN 时：顶层直接按公网 IP 折叠");
+            "开「同人」时：展开后同 IP 会话再折叠一层\n"
+            "关「同人」时：顶层直接按公网 IP 折叠");
     if (st.clientsGroupByIp) {
         ImGui::SameLine(0, 4.f);
         if (ImGui::SmallButton("全展##ip_expand_all")) {
             if (st.clientsGroupByToken) {
-                for (const auto& c : st.clients) {
-                    if (c.token.empty() || c.ip.empty()) continue;
-                    st.clientsIpExpanded.insert(c.token + "\x1f" + c.ip);
+                for (size_t i = 0; i < st.clients.size(); ++i) {
+                    const auto& c = st.clients[i];
+                    if (c.ip.empty() || (c.uid.empty() && c.token.empty())) continue;
+                    st.clientsIpExpanded.insert(ClientPersonKey(c, i, tokenToUid) + "\x1f" + c.ip);
                 }
             } else {
                 for (const auto& c : st.clients) {
@@ -3393,25 +4505,23 @@ void DrawClientsPanel(OpsState& st) {
                 return CompareConnectedClient(st.clients[ia], st.clients[ib], col);
             };
             auto sortMembers = [&](std::vector<size_t>& v) {
-                SortClientIndices(st, v, haveColSort ? sortSpecs : nullptr, st.clientsSortIdleFirst);
+                SortClientIndices(st, v, haveColSort ? sortSpecs : nullptr, st.clientsSortIdleFirst,
+                                  tokenToUid);
             };
 
             struct ClientGroup {
-                std::string key;  // TOKEN；无 TOKEN 的单机用内部 solo 键
+                std::string key;  // 人：uid（含并入的旧 TOKEN）或旧 TOKEN；无身份用 solo
                 std::vector<size_t> members;
             };
             std::vector<ClientGroup> groups;
             groups.reserve(order.size());
 
             auto groupKeyOf = [&](size_t idx) -> std::string {
-                const auto& c = st.clients[idx];
-                if (!c.token.empty()) return c.token;
-                // 无 TOKEN：不与他人合并
-                return std::string("\x01solo:") + std::to_string(idx);
+                return ClientPersonKey(st.clients[idx], idx, tokenToUid);
             };
 
             if (st.clientsGroupByToken) {
-                // 按 TOKEN 分桶（空 TOKEN 各成一组）
+                // 按人分桶（签卡 uid 优先；未激活仍按旧 TOKEN；都没有则各成一组）
                 std::map<std::string, std::vector<size_t>> byKey;
                 for (size_t idx : order) byKey[groupKeyOf(idx)].push_back(idx);
                 std::vector<std::string> keys;
@@ -3420,14 +4530,14 @@ void DrawClientsPanel(OpsState& st) {
                     sortMembers(kv.second);
                     keys.push_back(kv.first);
                 }
-                // 组序：TOKEN 最高；有 TOKEN 的组排前，再按列头/空闲
+                // 组序：有 uid 的人排前，其次旧 TOKEN，无标识垫后
                 std::stable_sort(keys.begin(), keys.end(), [&](const std::string& a, const std::string& b) {
-                    const int td = CmpTokenPrimary(a[0] == '\x01' ? std::string() : a,
-                                                   b[0] == '\x01' ? std::string() : b);
-                    if (td != 0) return td < 0;
                     const auto& ma = byKey[a];
                     const auto& mb = byKey[b];
                     if (ma.empty() || mb.empty()) return a < b;
+                    const int td = CmpPersonPrimary(st.clients[ma.front()], st.clients[mb.front()],
+                                                    tokenToUid);
+                    if (td != 0) return td < 0;
                     if (haveColSort) {
                         for (int n = 0; n < sortSpecs->SpecsCount; ++n) {
                             const ImGuiTableColumnSortSpecs& s = sortSpecs->Specs[n];
@@ -3471,8 +4581,8 @@ void DrawClientsPanel(OpsState& st) {
                     const auto& ma = byIp[a];
                     const auto& mb = byIp[b];
                     if (ma.empty() || mb.empty()) return a < b;
-                    const int td =
-                        CmpTokenPrimary(st.clients[ma.front()].token, st.clients[mb.front()].token);
+                    const int td = CmpPersonPrimary(st.clients[ma.front()], st.clients[mb.front()],
+                                                    tokenToUid);
                     if (td != 0) return td < 0;
                     if (haveColSort) {
                         for (int n = 0; n < sortSpecs->SpecsCount; ++n) {
@@ -3555,6 +4665,14 @@ void DrawClientsPanel(OpsState& st) {
                     char grpLabel[192]{};
                     std::snprintf(grpLabel, sizeof(grpLabel), "%s %s ·%zu台", open ? "[-]" : "[+]",
                                   ipSummary.c_str(), g.members.size());
+                    if (tokenGroup) {
+                        const uint32_t allowB = AllowedBuildForPerson(st, g.key);
+                        if (allowB > 0 && allowB != st.allowedClientBuildId) {
+                            std::snprintf(grpLabel, sizeof(grpLabel), "%s %s ·%zu台 ·允许#%u",
+                                          open ? "[-]" : "[+]", ipSummary.c_str(), g.members.size(),
+                                          allowB);
+                        }
+                    }
                     auto& expandSet = tokenGroup ? st.clientsGroupExpanded : st.clientsIpExpanded;
                     if (ImGui::Selectable(grpLabel, false,
                                           ImGuiSelectableFlags_SpanAllColumns |
@@ -3610,6 +4728,39 @@ void DrawClientsPanel(OpsState& st) {
                                 SetStatus(st, lastErr.empty() ? "本组无可识别设备" : lastErr);
                             if (ok) RefreshClients(st, true);
                         }
+                        if (tokenGroup && ImGui::BeginMenu("允许更新到")) {
+                            const uint32_t cur = AllowedBuildForPerson(st, g.key);
+                            const bool isUid = ClientPersonKeyIsUid(g.key);
+                            const char* who = ClientPersonKeyDisplay(g.key);
+                            const bool followDefault =
+                                st.allowedClientBuildId == 0 || cur == st.allowedClientBuildId;
+                            if (ImGui::MenuItem("跟随默认", nullptr, followDefault)) {
+                                std::string err;
+                                if (PostUpdateChannelGroup(st, isUid ? who : nullptr,
+                                                           isUid ? nullptr : who, 0, true, err))
+                                    SetStatus(st, std::string("已让 ") + who + " 跟随默认允许版本");
+                                else
+                                    SetStatus(st, err);
+                            }
+                            for (const auto& pkg : st.updatePackages) {
+                                char lab[80]{};
+                                std::snprintf(lab, sizeof(lab), "v%s #%u", pkg.version.c_str(),
+                                              pkg.buildId);
+                                if (ImGui::MenuItem(lab, nullptr, cur == pkg.buildId)) {
+                                    std::string err;
+                                    if (PostUpdateChannelGroup(st, isUid ? who : nullptr,
+                                                               isUid ? nullptr : who, pkg.buildId,
+                                                               false, err))
+                                        SetStatus(st, std::string(who) + " 允许更新到 #" +
+                                                          std::to_string(pkg.buildId));
+                                    else
+                                        SetStatus(st, err);
+                                }
+                            }
+                            if (st.updatePackages.empty())
+                                ImGui::TextDisabled("无可用包（重启更新服务）");
+                            ImGui::EndMenu();
+                        }
                         if (ImGui::MenuItem("本组指定推更", nullptr, false,
                                             st.latestClientBuildId > 0 &&
                                                 st.forcedClientBuildId == 0)) {
@@ -3633,10 +4784,30 @@ void DrawClientsPanel(OpsState& st) {
                     ImGui::PopStyleColor(3);
                     if (ImGui::IsItemHovered()) {
                         if (tokenGroup) {
-                            ImGui::SetTooltip(
-                                "同 TOKEN「%s」·%zu 会话（展开后可再按 IP 折叠）\n归属：%s",
-                                g.key.c_str(), g.members.size(),
-                                head.geo.empty() ? "—" : head.geo.c_str());
+                            const char* who = ClientPersonKeyDisplay(g.key);
+                            if (ClientPersonKeyIsUid(g.key)) {
+                                int nNoUid = 0;
+                                for (size_t mi : g.members)
+                                    if (st.clients[mi].uid.empty()) ++nNoUid;
+                                if (nNoUid > 0) {
+                                    ImGui::SetTooltip(
+                                        "同人 uid「%s」·%zu 会话（签卡验签）\n"
+                                        "其中 %d 台未上报 uid，已按同 TOKEN 并入\n"
+                                        "展开后可再按 IP 折叠\n归属：%s",
+                                        who, g.members.size(), nNoUid,
+                                        head.geo.empty() ? "—" : head.geo.c_str());
+                                } else {
+                                    ImGui::SetTooltip(
+                                        "同人 uid「%s」·%zu 会话（签卡验签）\n展开后可再按 IP 折叠\n归属：%s",
+                                        who, g.members.size(),
+                                        head.geo.empty() ? "—" : head.geo.c_str());
+                                }
+                            } else {
+                                ImGui::SetTooltip(
+                                    "同旧 TOKEN「%s」·%zu 会话（尚未签卡/未上报 uid）\n归属：%s",
+                                    who, g.members.size(),
+                                    head.geo.empty() ? "—" : head.geo.c_str());
+                            }
                         } else {
                             ImGui::SetTooltip(
                                 "同公网 IP「%s」·%zu 台\n归属：%s", g.key.c_str(),
@@ -3767,7 +4938,22 @@ void DrawClientsPanel(OpsState& st) {
                     ImGui::TableSetColumnIndex(9);
                     {
                         if (tokenGroup) {
-                            ImGui::TextColored(OpsTone::Warn(), "%s", g.key.c_str());
+                            const char* who = ClientPersonKeyDisplay(g.key);
+                            if (ClientPersonKeyIsUid(g.key)) {
+                                ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.f), "uid:%s", who);
+                                bool mergedTok = false;
+                                for (size_t mi : g.members) {
+                                    if (st.clients[mi].uid.empty()) {
+                                        mergedTok = true;
+                                        break;
+                                    }
+                                }
+                                if (mergedTok) {
+                                    ImGui::SameLine(0, 4.f);
+                                    ImGui::TextDisabled("含旧");
+                                }
+                            } else
+                                ImGui::TextColored(OpsTone::Warn(), "%s", who);
                         } else {
                             const std::string tokens = joinUnique(
                                 [](const OpsState::ConnectedClient& m) { return m.token; }, 3);
@@ -3914,7 +5100,13 @@ void DrawClientsPanel(OpsState& st) {
                             ImGui::TextDisabled(ipOpen ? "" : "—");
                         }
                         ImGui::TableSetColumnIndex(9);
-                        ImGui::TextColored(OpsTone::Warn(), "%s", g.key.c_str());
+                        {
+                            const char* who = ClientPersonKeyDisplay(g.key);
+                            if (ClientPersonKeyIsUid(g.key))
+                                ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.f), "uid:%s", who);
+                            else
+                                ImGui::TextColored(OpsTone::Warn(), "%s", who);
+                        }
                         for (int col = 10; col <= 15; ++col) {
                             ImGui::TableSetColumnIndex(col);
                             if (col == 13) {
@@ -4001,8 +5193,10 @@ void DrawClientsPanel(OpsState& st) {
                     if (!c.charName.empty() && ImGui::MenuItem("复制角色名")) CopyText(c.charName.c_str());
                     if ((c.mapId > 0 || c.channelId > 0) && ImGui::MenuItem("复制地图/频道")) {
                         const std::string label = ClientMapLabel(st, c);
+                        char chBuf[16]{};
                         char buf[192]{};
-                        std::snprintf(buf, sizeof(buf), "map=%u ch=%d %s", c.mapId, c.channelId,
+                        std::snprintf(buf, sizeof(buf), "map=%u ch=%s %s", c.mapId,
+                                      ChannelOrDash(c.channelId, chBuf, sizeof(chBuf)),
                                       label.c_str());
                         CopyText(buf);
                     }
@@ -4156,9 +5350,14 @@ void DrawClientsPanel(OpsState& st) {
                         ImGui::TextUnformatted(cell[0] ? cell : "—");
                         if (ImGui::IsItemHovered()) {
                             const std::string label = ClientMapLabel(st, c);
-                            ImGui::SetTooltip("地图 %s\nid=%u\n频道 ch.%d",
-                                              label.empty() ? "—" : label.c_str(), c.mapId,
-                                              c.channelId > 0 ? c.channelId : 0);
+                            if (c.channelId > 0) {
+                                ImGui::SetTooltip("地图 %s\nid=%u\n频道 ch.%d",
+                                                  label.empty() ? "—" : label.c_str(), c.mapId,
+                                                  c.channelId);
+                            } else {
+                                ImGui::SetTooltip("地图 %s\nid=%u\n频道 —",
+                                                  label.empty() ? "—" : label.c_str(), c.mapId);
+                            }
                         }
                     }
                 }
@@ -4170,6 +5369,21 @@ void DrawClientsPanel(OpsState& st) {
                 } else {
                     ImGui::TextColored(OpsTone::Token(), "%s", c.token.c_str());
                 }
+                if (!c.uid.empty()) {
+                    ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.55f, 1.f), "uid:%s", c.uid.c_str());
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "签名 TOKEN 的 uid（服务端验签，不可伪造）\n按此封禁：改硬件码也拦得住");
+                    }
+                    const std::string remain = GateExpRemainText(c.gateExp);
+                    ImGui::SameLine(0, 6.f);
+                    if (c.gateExp > 0 && remain == "已过期")
+                        ImGui::TextColored(OpsTone::Danger(), "(%s)", remain.c_str());
+                    else
+                        ImGui::TextDisabled("(%s)", remain.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("卡到期：%s", GateExpAbsText(c.gateExp).c_str());
+                }
                 ImGui::TableSetColumnIndex(10);
                 ImGui::TextUnformatted((!c.identified || c.device.empty()) ? "—" : c.device.c_str());
                 ImGui::TableSetColumnIndex(11);
@@ -4178,9 +5392,10 @@ void DrawClientsPanel(OpsState& st) {
                 } else {
                     ImGui::TextColored(AppVersionColor(st, c.appVersion), "%s", c.appVersion.c_str());
                     if (ImGui::IsItemHovered() && !st.latestClientVersionText.empty() &&
-                        c.appVersion != st.latestClientVersionText) {
-                        ImGui::SetTooltip("最新发布 v%s · 此客户端偏旧",
-                                          st.latestClientVersionText.c_str());
+                        !ClientVersionIsCurrent(st, c.appVersion)) {
+                        ImGui::SetTooltip("最新发布 v%s #%u · 此客户端偏旧",
+                                          st.latestClientVersionText.c_str(),
+                                          st.latestClientBuildId);
                     }
                 }
                 ImGui::TableSetColumnIndex(12);
@@ -4373,31 +5588,47 @@ void DrawClientsPanel(OpsState& st) {
                         if (NeutralSmallButton("解禁")) {
                             std::string err;
                             if (PostBanAction(st, "unban", c.machine, c.deviceId, {}, {}, err,
-                                              c.mac)) {
-                                SetStatus(st, "已解禁 " + (c.device.empty() ? c.machine : c.device));
+                                              c.mac, {}, {}, c.uid)) {
+                                SetStatus(st, "已解禁 " + (!c.uid.empty()
+                                                              ? ("uid " + c.uid)
+                                                              : (c.device.empty() ? c.machine
+                                                                                  : c.device)));
                                 RefreshBans(st, true);
                                 RefreshClients(st, true);
                             } else {
                                 SetStatus(st, err);
                             }
                         }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(!c.uid.empty()
+                                                  ? "按签名 uid 解禁（本人所有设备一起解）"
+                                                  : "按硬件解禁");
+                        }
                     } else if (DangerSmallButton("禁止")) {
                         std::string err;
                         if (PostBanAction(st, "ban", c.machine, c.deviceId, "ops ban", {}, err,
-                                          c.mac)) {
-                            SetStatus(st, "已禁止 " + (c.device.empty() ? c.machine : c.device));
+                                          c.mac, {}, {}, c.uid)) {
+                            SetStatus(st, "已禁止 " + (!c.uid.empty()
+                                                          ? ("uid " + c.uid)
+                                                          : (c.device.empty() ? c.machine
+                                                                              : c.device)));
                             RefreshBans(st, true);
                             RefreshClients(st, true);
                         } else {
                             SetStatus(st, err);
                         }
                     }
+                    if (ImGui::IsItemHovered() && !c.banned) {
+                        ImGui::SetTooltip(!c.uid.empty()
+                                              ? "按签名 uid 封禁：改硬件码/换 MAC/清目录都拦得住"
+                                              : "此端无签名 TOKEN，只能按硬件封（可被改码绕过）");
+                    }
                     ImGui::SameLine();
                     if (c.allowed) {
                         if (NeutralSmallButton("移出")) {
                             std::string err;
                             if (PostBanAction(st, "unallow", c.machine, c.deviceId, {}, {}, err,
-                                              c.mac)) {
+                                              c.mac, {}, {}, c.uid)) {
                                 SetStatus(st, "已移出白名单");
                                 RefreshBans(st, true);
                                 RefreshClients(st, true);
@@ -4409,7 +5640,7 @@ void DrawClientsPanel(OpsState& st) {
                     } else if (SafeSmallButton("加白")) {
                         std::string err;
                         if (PostBanAction(st, "allow", c.machine, c.deviceId, "ops allow", {}, err,
-                                          c.mac)) {
+                                          c.mac, {}, {}, c.uid)) {
                             SetStatus(st, "已加入白名单");
                             RefreshBans(st, true);
                             RefreshClients(st, true);
@@ -4541,6 +5772,127 @@ void DrawClientsPanel(OpsState& st) {
                     }
                     ImGui::EndTable();
                 }
+            }
+        }
+    }
+
+    // ── 历史客户端 / 租约预警：在线表只有「此刻在线」，掉租约的人恰恰是「没上线」的那批 ──
+    {
+        int riskN = 0;
+        for (const auto& h : st.clientHistory) {
+            if (!h.online && h.leaseRemainSec < 12 * 3600) ++riskN;
+        }
+        char histHdr[80]{};
+        if (riskN > 0)
+            std::snprintf(histHdr, sizeof(histHdr), "历史客户端 · 租约预警 %d##client_hist", riskN);
+        else
+            std::snprintf(histHdr, sizeof(histHdr), "历史客户端##client_hist");
+        ImGui::SetNextItemOpen(riskN > 0, ImGuiCond_Once);
+        if (ImGui::CollapsingHeader(histHdr)) {
+            if (st.lastClientHistoryFetchMs == 0) RefreshClientHistory(st, true);
+            ImGui::TextDisabled(
+                "落盘台账（跨重启保留）。客户端每 64h 需成功探活一次续租约；"
+                "租约过期时若正赶上服务没开，会被拒启且无宽限可用。");
+            if (ImGui::SmallButton("刷新##hist")) RefreshClientHistory(st, true);
+            ImGui::SameLine(0, 12.f);
+            ImGui::Checkbox("只看快掉租约的##hist_risk", &st.clientHistoryOnlyRisk);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("离线且租约剩余 <12 小时的：这些人下次启动最可能被拒。");
+            ImGui::SameLine(0, 12.f);
+            ImGui::SetNextItemWidth(90.f);
+            if (ImGui::InputInt("天##hist_days", &st.clientHistoryDays)) {
+                if (st.clientHistoryDays < 1) st.clientHistoryDays = 1;
+                if (st.clientHistoryDays > 365) st.clientHistoryDays = 365;
+                RefreshClientHistory(st, true);
+            }
+            ImGui::SameLine(0, 12.f);
+            ImGui::TextDisabled("共 %d 条", st.clientHistoryTotal);
+            if (!st.clientHistoryError.empty()) {
+                ImGui::SameLine(0, 12.f);
+                ImGui::TextColored(OpsTone::Danger(), "%s", st.clientHistoryError.c_str());
+            }
+
+            const float histH = (std::min)(180.f, belowH * 0.38f);
+            if (ImGui::BeginTable("client_hist", 7,
+                                  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
+                                  ImVec2(0, histH))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("uid", ImGuiTableColumnFlags_WidthFixed, 100.f);
+                ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthFixed, 90.f);
+                ImGui::TableSetupColumn("版本", ImGuiTableColumnFlags_WidthFixed, 70.f);
+                ImGui::TableSetupColumn("最后见到", ImGuiTableColumnFlags_WidthFixed, 130.f);
+                ImGui::TableSetupColumn("租约剩余", ImGuiTableColumnFlags_WidthFixed, 100.f);
+                ImGui::TableSetupColumn("最后拒绝", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableHeadersRow();
+
+                int shown = 0;
+                for (size_t hi = 0; hi < st.clientHistory.size(); ++hi) {
+                    const auto& h = st.clientHistory[hi];
+                    const bool risk = !h.online && h.leaseRemainSec < 12 * 3600;
+                    if (st.clientHistoryOnlyRisk && !risk) continue;
+                    ++shown;
+                    ImGui::TableNextRow();
+                    ImGui::PushID(static_cast<int>(hi));
+
+                    ImGui::TableSetColumnIndex(0);
+                    if (h.uid.empty())
+                        ImGui::TextDisabled("—");
+                    else if (h.online)
+                        ImGui::TextColored(OpsTone::Ok(), "%s", h.uid.c_str());
+                    else
+                        ImGui::TextUnformatted(h.uid.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s\ndeviceId=%s\nIP=%s",
+                                          h.online ? "此刻在线" : "当前离线",
+                                          h.deviceId.empty() ? "—" : h.deviceId.c_str(),
+                                          h.ip.empty() ? "—" : h.ip.c_str());
+
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(h.machine.empty() ? "—" : h.machine.c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(h.charName.empty() ? "—" : h.charName.c_str());
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::TextDisabled("%s", h.appVersion.empty() ? "—" : h.appVersion.c_str());
+
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TextDisabled("%s", h.lastSeenAt.empty()
+                                                  ? "—"
+                                                  : h.lastSeenAt.substr(0, 16).c_str());
+
+                    ImGui::TableSetColumnIndex(5);
+                    const std::string lease = LeaseRemainText(h.leaseRemainSec);
+                    if (h.online)
+                        ImGui::TextColored(OpsTone::Ok(), "%s", lease.c_str());
+                    else if (h.leaseRemainSec <= 0)
+                        ImGui::TextColored(OpsTone::Danger(), "%s", lease.c_str());
+                    else if (risk)
+                        ImGui::TextColored(OpsTone::Warn(), "%s", lease.c_str());
+                    else
+                        ImGui::TextUnformatted(lease.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("按最后一次放行 + 64h 估算。\n最后放行：%s",
+                                          h.lastAllowAt.empty() ? "（无记录）"
+                                                                : h.lastAllowAt.c_str());
+
+                    ImGui::TableSetColumnIndex(6);
+                    if (h.lastDenyMatch.empty() && h.lastDenyReason.empty()) {
+                        ImGui::TextDisabled("—");
+                    } else {
+                        ImGui::TextColored(OpsTone::Danger(), "%s %s", h.lastDenyMatch.c_str(),
+                                           h.lastDenyReason.c_str());
+                    }
+                    ImGui::PopID();
+                }
+                if (shown == 0) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextDisabled(st.clientHistoryOnlyRisk
+                                            ? "（没有快掉租约的客户端）"
+                                            : "（暂无历史；重启更新服务后开始积累）");
+                }
+                ImGui::EndTable();
             }
         }
     }
@@ -5057,17 +6409,65 @@ bool MesoTimeInGaps(ULONGLONG t, const std::vector<std::pair<ULONGLONG, ULONGLON
     return false;
 }
 
+void MesoDragSplitNS(const char* id, float* topH, float totalH, float minTop, float minBot) {
+    ImGui::PushID(id);
+    ImGui::InvisibleButton("##ns", ImVec2(-FLT_MIN, 8.f));
+    const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+    if (hot) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 b = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float midY = (a.y + b.y) * 0.5f;
+    dl->AddRectFilled(ImVec2(a.x + 24.f, midY - 1.f), ImVec2(b.x - 24.f, midY + 1.f),
+                      ImGui::GetColorU32(hot ? ImGuiCol_SeparatorActive : ImGuiCol_Separator));
+    if (ImGui::IsItemActive()) *topH += ImGui::GetIO().MouseDelta.y;
+    const float maxTop = totalH - minBot;
+    if (*topH < minTop) *topH = minTop;
+    if (*topH > maxTop) *topH = maxTop;
+    ImGui::PopID();
+}
+
+void MesoDragSplitEW(const char* id, float* rightW, float rowW, float rowH, float minLeft,
+                     float minRight) {
+    ImGui::PushID(id);
+    ImGui::InvisibleButton("##ew", ImVec2(8.f, rowH));
+    const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+    if (hot) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 b = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float midX = (a.x + b.x) * 0.5f;
+    dl->AddRectFilled(ImVec2(midX - 1.f, a.y + 16.f), ImVec2(midX + 1.f, b.y - 16.f),
+                      ImGui::GetColorU32(hot ? ImGuiCol_SeparatorActive : ImGuiCol_Separator));
+    if (ImGui::IsItemActive()) *rightW -= ImGui::GetIO().MouseDelta.x;
+    const float maxRight = rowW - minLeft;
+    if (*rightW < minRight) *rightW = minRight;
+    if (*rightW > maxRight) *rightW = maxRight;
+    ImGui::PopID();
+}
+
 void DrawMesoKpiCard(const char* title, const char* value, const char* sub, ImVec4 valueCol,
                      float width) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, OpsIsLight()
                                                 ? ImVec4(1.f, 1.f, 1.f, 1.f)
                                                 : ImVec4(0.11f, 0.12f, 0.15f, 1.f));
-    ImGui::BeginChild(title, ImVec2(width, 72.f), true, ImGuiWindowFlags_NoScrollbar);
-    ImGui::TextDisabled("%s", title);
+    ImGui::BeginChild(title, ImVec2(width, 92.f), true, ImGuiWindowFlags_NoScrollbar);
+    const char* hash = std::strstr(title, "##");
+    if (hash && hash != title) {
+        ImGui::TextDisabled("%.*s", static_cast<int>(hash - title), title);
+    } else {
+        ImGui::TextDisabled("%s", title);
+    }
+    ImGui::SetWindowFontScale(1.35f);
     ImGui::PushStyleColor(ImGuiCol_Text, valueCol);
     ImGui::TextUnformatted(value);
     ImGui::PopStyleColor();
-    if (sub && sub[0]) ImGui::TextDisabled("%s", sub);
+    ImGui::SetWindowFontScale(1.f);
+    if (sub && sub[0]) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + width - 16.f);
+        ImGui::TextDisabled("%s", sub);
+        ImGui::PopTextWrapPos();
+    }
     ImGui::EndChild();
     ImGui::PopStyleColor();
 }
@@ -5322,6 +6722,29 @@ void DrawMesoPlot(OpsState& st, const std::vector<size_t>& visIdx, ULONGLONG t0,
     }
     ImGui::PopClipRect();
 
+    {
+        float ax = x0;
+        const float ay = r0.y + 3.f;
+        if (st.mesoDashShowTotal) {
+            dl->AddCircleFilled(ImVec2(ax + 6.f, ay + ImGui::GetTextLineHeight() * 0.45f), 4.f,
+                                MesoTotalColor());
+            dl->AddText(ImVec2(ax + 14.f, ay), axis, "合计");
+        }
+        if (!st.mesoDashTotal.empty()) {
+            const ULONGLONG last = st.mesoDashTotal.back().wallMs;
+            const ULONGLONG age = t1 > last ? t1 - last : 0;
+            char ageLab[48]{};
+            if (age > kMesoDashGapMs)
+                std::snprintf(ageLab, sizeof(ageLab), "上次采样 %llu 秒前",
+                              static_cast<unsigned long long>(age / 1000ull));
+            else
+                std::snprintf(ageLab, sizeof(ageLab), "采样中");
+            const ImVec2 ts = ImGui::CalcTextSize(ageLab);
+            dl->AddText(ImVec2(r1.x - padR - ts.x, ay),
+                        age > kMesoDashGapMs ? ImGui::GetColorU32(OpsTone::Warn()) : axis, ageLab);
+        }
+    }
+
     if (!any) {
         const char* empty = gaps.empty() ? "等待采样或历史为空。约 5 秒一点，已落盘 7 天。"
                                          : "断连期间无采样。关服后折线留白，底账不掉。";
@@ -5394,8 +6817,10 @@ void DrawMesoDashPanel(OpsState& st) {
 
     ImGui::TextUnformatted("利润监控");
     ImGui::SameLine();
-    ImGui::TextDisabled("底账含离线 · 关服断线留白 · 流水 30 天");
+    ImGui::TextDisabled("按人分组 · 底账含离线 · 关服断线留白 · 流水 30 天");
     ImGui::SameLine(0, 12.f);
+    ImGui::TextDisabled("窗口");
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(100.f);
     const char* winLabs[] = {"10 分钟", "30 分钟", "1 小时", "3 小时", "24 小时", "7 天"};
     const int winVals[] = {10, 30, 60, 180, 1440, 10080};
@@ -5403,6 +6828,9 @@ void DrawMesoDashPanel(OpsState& st) {
     for (int i = 0; i < 6; ++i)
         if (winVals[i] == st.mesoDashWindowMin) winIdx = i;
     if (ImGui::Combo("##meso_win", &winIdx, winLabs, 6)) st.mesoDashWindowMin = winVals[winIdx];
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("折线与名单「增减」共用此时段");
+    ImGui::SameLine();
+    ImGui::TextDisabled("门槛");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(88.f);
     const char* thLabs[] = {"≥1万", "≥5万", "≥10万", "≥50万", "≥100万"};
@@ -5445,7 +6873,7 @@ void DrawMesoDashPanel(OpsState& st) {
     char v1[48]{}, v3[48]{}, sub3[64]{};
     FormatMesoUll(bookTotal, v1, sizeof(v1));
     FormatMesoDelta(haveFirst ? winFirst : bookTotal, winLast, v3, sizeof(v3));
-    std::snprintf(sub3, sizeof(sub3), "窗口 %d 分钟", winMin);
+    std::snprintf(sub3, sizeof(sub3), "近 %d 分钟折线净变化", winMin);
     const ULONGLONG dayCut = nowMs > 86400000ull ? nowMs - 86400000ull : 0;
     const int nOut24 = MesoCountEvents(st, dayCut, 0);
     const int nAbn24 = MesoCountEvents(st, dayCut, 1);
@@ -5453,15 +6881,15 @@ void DrawMesoDashPanel(OpsState& st) {
     std::snprintf(v4, sizeof(v4), "%d", nOut24);
     char sub4[80]{};
     if (st.mesoDashNoToken > 0)
-        std::snprintf(sub4, sizeof(sub4), "%d 台无 TOKEN 未监控", st.mesoDashNoToken);
+        std::snprintf(sub4, sizeof(sub4), "%d 台无身份未监控", st.mesoDashNoToken);
     else
-        std::snprintf(sub4, sizeof(sub4), "24h 异常(含搬仓) %d · 流水 %zu", nAbn24,
+        std::snprintf(sub4, sizeof(sub4), "近 24h 外转 %d · 异常 %d · 流水 %zu", nOut24, nAbn24,
                       st.mesoEvents.size());
 
     const ImVec4 deltaCol = (!haveFirst || winLast == winFirst) ? OpsTone::Muted()
                             : (winLast > winFirst)                ? OpsTone::Ok()
                                                                   : OpsTone::Danger();
-    DrawMesoKpiCard("底账合计##kpi1", v1, "含离线角色上次探活（关服不掉）", OpsTone::Warn(), cardW);
+    DrawMesoKpiCard("底账合计##kpi1", v1, "含离线角色上次探活，关服不掉", OpsTone::Warn(), cardW);
     ImGui::SameLine(0, gap);
     DrawMesoKpiCard("窗口净增##kpi2", v3, sub3, deltaCol, cardW);
     ImGui::SameLine(0, gap);
@@ -5470,8 +6898,10 @@ void DrawMesoDashPanel(OpsState& st) {
     ImGui::SameLine(0, gap);
     {
         char tokBuf[48]{};
-        std::snprintf(tokBuf, sizeof(tokBuf), "%d", nOnline);
-        DrawMesoKpiCard("在线 TOKEN##kpi4", tokBuf, "有唯一标识才入监控", OpsTone::Token(), cardW);
+        std::snprintf(tokBuf, sizeof(tokBuf), "%d / %d", nOnline,
+                      static_cast<int>(st.mesoDashSeries.size()));
+        DrawMesoKpiCard("在线人数##kpi4", tokBuf, "在线 / 已见过（签卡 uid 优先，否则旧 TOKEN）",
+                        OpsTone::Token(), cardW);
     }
 
     if (!st.clientsError.empty()) {
@@ -5484,6 +6914,7 @@ void DrawMesoDashPanel(OpsState& st) {
         const auto& s = st.mesoDashSeries[i];
         if (!st.mesoDashShowOffline && !s.online) continue;
         if (st.mesoDashFilter[0] && !ContainsIgnoreCase(s.token, st.mesoDashFilter) &&
+            !ContainsIgnoreCase(s.uid, st.mesoDashFilter) &&
             !ContainsIgnoreCase(s.chars, st.mesoDashFilter))
             continue;
         listed.push_back(i);
@@ -5500,34 +6931,94 @@ void DrawMesoDashPanel(OpsState& st) {
     for (size_t i : listed)
         if (st.mesoDashSeries[i].visible) visIdx.push_back(i);
 
-    const float restH = (std::max)(280.f, ImGui::GetContentRegionAvail().y);
-    const float plotH = (std::max)(160.f, restH * 0.55f);
-    const float legendW = 320.f;
-    if (ImGui::BeginTable("meso_dash_split", 2, ImGuiTableFlags_SizingStretchProp,
-                          ImVec2(0, plotH))) {
-        ImGui::TableSetupColumn("plot", ImGuiTableColumnFlags_WidthStretch, 1.f);
-        ImGui::TableSetupColumn("legend", ImGuiTableColumnFlags_WidthFixed, legendW);
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-        DrawMesoPlot(st, visIdx, t0, t1, ImVec2(-FLT_MIN, plotH - 4.f));
+    const float restH = (std::max)(1.f, ImGui::GetContentRegionAvail().y);
+    ImGui::BeginChild("meso_body", ImVec2(0, restH), false,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-        ImGui::TableSetColumnIndex(1);
-        ImGui::SetNextItemWidth(-FLT_MIN);
-        ImGui::InputTextWithHint("##meso_filter", "筛选 TOKEN / 角色", st.mesoDashFilter,
+    const float bodyH = ImGui::GetContentRegionAvail().y;
+    const float splitNs = 8.f;
+    const float evHdrH = ImGui::GetFrameHeightWithSpacing() + 4.f;
+    const float minPlot = 180.f;
+    const float minEv = 150.f;
+    if (st.mesoUiPlotH < minPlot)
+        st.mesoUiPlotH = (std::max)(minPlot, bodyH - evHdrH - 200.f - splitNs);
+    {
+        const float maxPlot = (std::max)(minPlot, bodyH - evHdrH - minEv - splitNs);
+        if (st.mesoUiPlotH > maxPlot) st.mesoUiPlotH = maxPlot;
+    }
+    const float plotH = st.mesoUiPlotH;
+
+    ImGui::BeginChild("meso_plot_row", ImVec2(0, plotH), false,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    {
+        const float rowH = ImGui::GetContentRegionAvail().y;
+        const float rowW = ImGui::GetContentRegionAvail().x;
+        const float minPlotW = 360.f;
+        const float minLegendW = 420.f;
+        if (st.mesoUiLegendW < minLegendW) {
+            st.mesoUiLegendW = rowW * 0.40f;
+            if (st.mesoUiLegendW < minLegendW) st.mesoUiLegendW = minLegendW;
+            if (st.mesoUiLegendW > 720.f) st.mesoUiLegendW = 720.f;
+        }
+        {
+            const float maxLeg = (std::max)(minLegendW, rowW - minPlotW - 8.f);
+            if (st.mesoUiLegendW > maxLeg) st.mesoUiLegendW = maxLeg;
+        }
+        const float plotW = (std::max)(80.f, rowW - st.mesoUiLegendW - 8.f);
+        ImGui::BeginChild("meso_plot_cell", ImVec2(plotW, rowH), false,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        {
+            const ImVec2 sz = ImGui::GetContentRegionAvail();
+            DrawMesoPlot(st, visIdx, t0, t1,
+                         ImVec2((std::max)(40.f, sz.x), (std::max)(40.f, sz.y)));
+        }
+        ImGui::EndChild();
+        ImGui::SameLine(0, 0);
+        MesoDragSplitEW("meso_leg_split", &st.mesoUiLegendW, rowW, rowH, minPlotW, minLegendW);
+        ImGui::SameLine(0, 0);
+        ImGui::BeginChild("meso_legend_cell", ImVec2(st.mesoUiLegendW, rowH), false,
+                          ImGuiWindowFlags_NoScrollbar);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 56.f);
+        ImGui::InputTextWithHint("##meso_filter", "筛选身份 / 角色", st.mesoDashFilter,
                                  sizeof(st.mesoDashFilter));
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d人", static_cast<int>(listed.size()));
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8.f, 6.f));
         ImGui::BeginChild("meso_legend", ImVec2(0, 0), true);
         if (listed.empty()) {
-            ImGui::TextDisabled("暂无样本。连接列表有 TOKEN 的会话会出现在这里。");
-        } else if (ImGui::BeginTable("meso_leg_tbl", 5,
+            ImGui::TextDisabled("暂无样本。有签卡 uid 或旧 TOKEN 的会话会出现在这里。");
+        } else if (ImGui::BeginTable("meso_leg_tbl", 7,
                                      ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
-                                         ImGuiTableFlags_SizingStretchProp)) {
+                                         ImGuiTableFlags_SizingStretchProp |
+                                         ImGuiTableFlags_PadOuterX)) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn("##vis", ImGuiTableColumnFlags_WidthFixed, 22.f);
-            ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthStretch, 1.1f);
-            ImGui::TableSetupColumn("实时", ImGuiTableColumnFlags_WidthFixed, 72.f);
-            ImGui::TableSetupColumn("Δ", ImGuiTableColumnFlags_WidthFixed, 64.f);
-            ImGui::TableSetupColumn("##sp", ImGuiTableColumnFlags_WidthFixed, 52.f);
-            ImGui::TableHeadersRow();
+            ImGui::TableSetupColumn("##vis", ImGuiTableColumnFlags_WidthFixed, 28.f);
+            ImGui::TableSetupColumn("身份", ImGuiTableColumnFlags_WidthStretch, 1.15f);
+            ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 1.05f);
+            ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthFixed, 52.f);
+            ImGui::TableSetupColumn("实时", ImGuiTableColumnFlags_WidthFixed, 100.f);
+            ImGui::TableSetupColumn("增减", ImGuiTableColumnFlags_WidthFixed, 88.f);
+            ImGui::TableSetupColumn("走势", ImGuiTableColumnFlags_WidthFixed, 100.f);
+            ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+            {
+                const char* tips[7] = {
+                    "勾选后左侧折线显示此人",
+                    "签卡 uid（绿）；未激活为旧 TOKEN",
+                    "该名下角色，斜杠分隔",
+                    "在线=当前探活到；离线保留底账与轨迹",
+                    "底账金币；离线为上次探活",
+                    "当前时间窗口净变化（与顶栏窗口一致）",
+                    "当前时间窗口迷你折线",
+                };
+                for (int col = 0; col < 7; ++col) {
+                    ImGui::TableSetColumnIndex(col);
+                    ImGui::PushID(col);
+                    ImGui::TableHeader(ImGui::TableGetColumnName(col));
+                    if (tips[col] && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", tips[col]);
+                    ImGui::PopID();
+                }
+            }
             st.mesoDashHoverSeries = -1;
             for (size_t idx : listed) {
                 auto& s = st.mesoDashSeries[idx];
@@ -5539,26 +7030,56 @@ void DrawMesoDashPanel(OpsState& st) {
                 const ImU32 col = MesoSeriesColor(s.token, s.online);
                 const bool hot = s.lastAlertMs >= dayCut && s.lastAlertMs != 0;
                 const ImVec4 col4 = hot ? OpsTone::Danger() : ImGui::ColorConvertU32ToFloat4(col);
-                ImGui::TextColored(col4, "%s", s.token.c_str());
+                {
+                    ImDrawList* ldl = ImGui::GetWindowDrawList();
+                    const ImVec2 p = ImGui::GetCursorScreenPos();
+                    const float y = p.y + ImGui::GetTextLineHeight() * 0.45f;
+                    ldl->AddCircleFilled(ImVec2(p.x + 5.f, y), 5.f, col);
+                    ImGui::Dummy(ImVec2(14.f, ImGui::GetTextLineHeight()));
+                    ImGui::SameLine(0, 4.f);
+                }
+                ImGui::BeginGroup();
+                if (!s.uid.empty()) {
+                    ImGui::TextColored(hot ? OpsTone::Danger()
+                                           : ImVec4(0.45f, 0.85f, 0.55f, 1.f),
+                                       "uid:%s", s.token.c_str());
+                } else {
+                    ImGui::TextColored(col4, "%s", s.token.c_str());
+                    ImGui::SameLine(0, 4.f);
+                    ImGui::TextDisabled("旧");
+                }
+                ImGui::EndGroup();
                 if (ImGui::IsItemHovered()) {
                     st.mesoDashHoverSeries = static_cast<int>(idx);
-                    ImGui::SetTooltip("%s\n%s\n%d 台 · %s%s", s.token.c_str(),
+                    ImGui::SetTooltip("%s%s\n%s\n%d 台 · %s%s\n双击只看此项", s.token.c_str(),
+                                      s.uid.empty() ? "（旧 TOKEN，尚未签卡）" : "（签卡 uid）",
                                       s.chars.empty() ? "—" : s.chars.c_str(), s.sessions,
                                       s.online ? "在线" : "离线（保留轨迹）",
                                       hot ? "\n近 24h 有外转/骤降告警" : "");
                 }
-                if (!s.chars.empty()) {
-                    ImGui::SameLine(0, 4.f);
-                    ImGui::TextDisabled("%s", s.chars.c_str());
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                    for (size_t j = 0; j < st.mesoDashSeries.size(); ++j)
+                        st.mesoDashSeries[j].visible = (j == idx);
                 }
                 ImGui::TableSetColumnIndex(2);
+                if (s.chars.empty())
+                    ImGui::TextDisabled("—");
+                else
+                    ImGui::TextUnformatted(s.chars.c_str());
+                if (ImGui::IsItemHovered()) st.mesoDashHoverSeries = static_cast<int>(idx);
+                ImGui::TableSetColumnIndex(3);
+                if (s.online)
+                    ImGui::TextColored(OpsTone::Ok(), "在线");
+                else
+                    ImGui::TextDisabled("离线");
+                ImGui::TableSetColumnIndex(4);
                 char mesoBuf[48]{};
                 FormatMesoUll(s.lastMeso, mesoBuf, sizeof(mesoBuf));
                 if (s.online)
                     ImGui::TextUnformatted(mesoBuf);
                 else
                     ImGui::TextDisabled("%s", mesoBuf);
-                ImGui::TableSetColumnIndex(3);
+                ImGui::TableSetColumnIndex(5);
                 unsigned long long f = s.lastMeso, l = s.lastMeso;
                 bool hf = false;
                 for (const auto& p : s.points) {
@@ -5575,19 +7096,39 @@ void DrawMesoDashPanel(OpsState& st) {
                                     : (l > f)         ? OpsTone::Ok()
                                                       : OpsTone::Danger();
                 ImGui::TextColored(dcol, "%s", dBuf);
-                ImGui::TableSetColumnIndex(4);
-                DrawMesoSparkline(s.points, t0, t1, col, ImVec2(48.f, 16.f));
+                ImGui::TableSetColumnIndex(6);
+                DrawMesoSparkline(s.points, t0, t1, col, ImVec2(92.f, 28.f));
+                if (ImGui::IsItemHovered()) st.mesoDashHoverSeries = static_cast<int>(idx);
                 ImGui::PopID();
             }
             ImGui::EndTable();
         }
         ImGui::EndChild();
-        ImGui::EndTable();
+        ImGui::PopStyleVar();
+        ImGui::EndChild();
     }
+    ImGui::EndChild();
 
+    MesoDragSplitNS("meso_plot_ev_split", &st.mesoUiPlotH, bodyH, minPlot, evHdrH + minEv);
+
+    int evMatch = 0;
+    for (const auto& e : st.mesoEvents) {
+        const bool ok = st.mesoEventView == 1 ||
+                        (st.mesoEventView == 2 &&
+                         (e.kind == "inflow" || e.kind == "scroll_inflow")) ||
+                        (st.mesoEventView == 0 && MesoKindAbnormal(e.kind));
+        if (!ok) continue;
+        if (st.mesoDashFilter[0] && !ContainsIgnoreCase(e.token, st.mesoDashFilter) &&
+            !ContainsIgnoreCase(e.charName, st.mesoDashFilter) &&
+            !ContainsIgnoreCase(e.peerToken, st.mesoDashFilter))
+            continue;
+        ++evMatch;
+    }
     ImGui::TextUnformatted("转移流水");
     ImGui::SameLine();
-    ImGui::TextDisabled("artifacts\\ops_logs\\meso_events.jsonl");
+    ImGui::TextDisabled("%d 条", evMatch);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("落盘 artifacts\\ops_logs\\meso_events.jsonl（最多 30 天）");
     ImGui::SameLine(0, 10.f);
     if (ImGui::RadioButton("异常##ev", st.mesoEventView == 0)) st.mesoEventView = 0;
     ImGui::SameLine();
@@ -5596,7 +7137,7 @@ void DrawMesoDashPanel(OpsState& st) {
     if (ImGui::RadioButton("进账##ev", st.mesoEventView == 2)) st.mesoEventView = 2;
     ImGui::SameLine();
     if (ImGui::SmallButton("复制流水##ev")) {
-        std::string out = "time\tkind\ttoken\tchar\tbefore\tafter\tdelta\tpeer\tnote\n";
+        std::string out = "time\tkind\tid\tchar\tbefore\tafter\tdelta\tpeer\tnote\n";
         int n = 0;
         for (auto it = st.mesoEvents.rbegin(); it != st.mesoEvents.rend(); ++it) {
             const auto& e = *it;
@@ -5646,13 +7187,13 @@ void DrawMesoDashPanel(OpsState& st) {
                               ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
                           ImVec2(0, evH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 108.f);
-        ImGui::TableSetupColumn("判定", ImGuiTableColumnFlags_WidthFixed, 80.f);
-        ImGui::TableSetupColumn("TOKEN", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 0.9f);
-        ImGui::TableSetupColumn("变化", ImGuiTableColumnFlags_WidthFixed, 88.f);
-        ImGui::TableSetupColumn("对端", ImGuiTableColumnFlags_WidthStretch, 1.1f);
-        ImGui::TableSetupColumn("说明", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 120.f);
+        ImGui::TableSetupColumn("判定", ImGuiTableColumnFlags_WidthFixed, 96.f);
+        ImGui::TableSetupColumn("身份", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 0.95f);
+        ImGui::TableSetupColumn("变化", ImGuiTableColumnFlags_WidthFixed, 108.f);
+        ImGui::TableSetupColumn("对端", ImGuiTableColumnFlags_WidthStretch, 1.15f);
+        ImGui::TableSetupColumn("说明", ImGuiTableColumnFlags_WidthStretch, 1.5f);
         ImGui::TableHeadersRow();
         int shown = 0;
         for (auto it = st.mesoEvents.rbegin(); it != st.mesoEvents.rend(); ++it) {
@@ -5720,6 +7261,681 @@ void DrawMesoDashPanel(OpsState& st) {
         }
         ImGui::EndTable();
     }
+    ImGui::EndChild();
+}
+
+void DrawQuotaPanel(OpsState& st) {
+    if (st.lastQuotaFetchMs == 0) RefreshQuota(st, true);
+
+    if (ImGui::Button("刷新##quota")) RefreshQuota(st, true);
+    ImGui::SameLine(0, 12.f);
+    if (st.quotaEnabled)
+        ImGui::TextColored(OpsTone::Ok(), "配额已启用");
+    else
+        ImGui::TextColored(OpsTone::Warn(), "配额未启用");
+    {
+        std::string sub = "默认上限 ";
+        sub += st.quotaDefaultMax > 0 ? std::to_string(st.quotaDefaultMax) : std::string("不限");
+        sub += " · 老化释放 ";
+        sub += st.quotaAgingDays > 0 ? (std::to_string(st.quotaAgingDays) + " 天") : std::string("关");
+        ImGui::SameLine(0, 12.f);
+        ImGui::TextDisabled("%s", sub.c_str());
+    }
+    if (!st.quotaEnabled) {
+        ImGui::TextColored(
+            OpsTone::Warn(),
+            "服务端缺公钥：跑 node scripts/xcat-gate-keygen.mjs 生成后重启 TWMS 更新服务即启用。");
+    }
+    if (!st.quotaError.empty()) {
+        ImGui::TextColored(OpsTone::Danger(), "%s", st.quotaError.c_str());
+    }
+
+    // 过滤 + 直接给某 uid 设上限（uid 不存在会自动建档）
+    ImGui::SetNextItemWidth(200.f);
+    ImGui::InputTextWithHint("##quota_filter", "筛选 uid…", st.quotaFilter, sizeof(st.quotaFilter));
+    ImGui::SameLine(0, 16.f);
+    ImGui::TextDisabled("设置上限：");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(150.f);
+    ImGui::InputTextWithHint("##quota_new_uid", "uid（如 张三）", st.quotaNewUidInput,
+                             sizeof(st.quotaNewUidInput));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70.f);
+    // 空态 hint 直接写「不限」：让「清空 = 不限」这条规则在界面上自明，不用记 tooltip。
+    ImGui::InputTextWithHint("##quota_new_max", "不限", st.quotaNewMaxInput,
+                             sizeof(st.quotaNewMaxInput), ImGuiInputTextFlags_CharsDecimal);
+    ImGui::SameLine();
+    if (ImGui::Button("保存##quota_new")) {
+        const std::string uid = st.quotaNewUidInput;
+        if (!uid.empty()) {
+            const int mv = std::atoi(st.quotaNewMaxInput);
+            std::string err;
+            if (PostQuotaSetMax(st, uid, mv, err)) {
+                SetStatus(st, mv > 0 ? ("已设置 " + uid + " 上限=" + std::to_string(mv))
+                                     : ("已设置 " + uid + " 为不限台数"));
+                st.quotaNewUidInput[0] = '\0';
+                // 台数恢复默认而非清空：清空的语义是「不限」，留在框里会让下一次操作误设成不限。
+                std::snprintf(st.quotaNewMaxInput, sizeof(st.quotaNewMaxInput), "100");
+            } else {
+                SetStatus(st, "设置失败：" + err);
+            }
+        }
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("留空或填 0 = 不限台数；uid 不存在会自动建档");
+
+    // 清僵尸名额：deviceId 存在 ProgramData，重装 XCat 不换，但重装系统会换 → 旧名额白占。
+    const int idleDays = std::atoi(st.quotaIdleDaysInput);
+    ImGui::TextDisabled("清僵尸名额：闲置超过");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(50.f);
+    ImGui::InputText("##quota_idle_days", st.quotaIdleDaysInput, sizeof(st.quotaIdleDaysInput),
+                     ImGuiInputTextFlags_CharsDecimal);
+    ImGui::SameLine();
+    ImGui::TextDisabled("天");
+    ImGui::SameLine(0, 10.f);
+    {
+        int total = 0;
+        if (idleDays > 0) {
+            const long long cut = static_cast<long long>(idleDays) * 86400;
+            for (const auto& u : st.quotaUsers)
+                for (const auto& d : u.devices)
+                    if (d.idleSec >= cut) ++total;
+        }
+        const bool can = idleDays > 0 && total > 0;
+        if (!can) ImGui::BeginDisabled();
+        const std::string label = "一键清理全部（" + std::to_string(total) + " 台）##quota_rel_all";
+        if (ImGui::Button(label.c_str())) {
+            st.quotaReleaseConfirmOpen = true;
+            st.quotaReleaseConfirmUid.clear();
+            st.quotaReleaseConfirmDays = idleDays;
+            st.quotaReleaseConfirmCount = total;
+        }
+        if (!can) ImGui::EndDisabled();
+        // AllowWhenDisabled：按钮灰着时最需要这段解释，默认的 IsItemHovered 恰好不上报。
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "释放这些设备占的名额。可逆：设备下次探活会重新登记（前提是那时没超上限）。\n"
+                "重装系统会换 deviceId，旧名额不会自己消失（老化释放当前为%s）。\n"
+                "%s",
+                st.quotaAgingDays > 0 ? "已开" : "关",
+                idleDays <= 0 ? "（当前不可用：天数需大于 0）"
+                              : (total <= 0 ? "（当前不可用：没有设备闲置到这个天数）" : ""));
+        }
+    }
+
+    ImGui::Separator();
+
+    // 待执行动作：遍历中不直接改 vector（POST 会重建 st.quotaUsers）。
+    bool doSet = false, doRemove = false;
+    std::string pendSetUid, pendRmUid, pendRmDev;
+    int pendSetMax = 0;
+
+    const std::string filter = st.quotaFilter;
+    const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                                  ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+    const float availY = ImGui::GetContentRegionAvail().y - 4.f;
+    if (ImGui::BeginTable("quota_table", 4, flags, ImVec2(0, availY > 120.f ? availY : 120.f))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("用户 uid", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+        ImGui::TableSetupColumn("已用 / 上限", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("上限", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthStretch, 1.8f);
+        ImGui::TableHeadersRow();
+
+        for (auto& u : st.quotaUsers) {
+            if (!filter.empty() && !ContainsIgnoreCase(u.uid, filter.c_str())) continue;
+            const bool over = u.effectiveMax > 0 && u.used >= u.effectiveMax;
+            const bool expanded = st.quotaExpanded.count(u.uid) > 0;
+            ImGui::TableNextRow();
+            ImGui::PushID(u.uid.c_str());
+
+            ImGui::TableSetColumnIndex(0);
+            std::string caption = (expanded ? "v  " : ">  ") + u.uid;
+            if (ImGui::Selectable(caption.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
+                if (expanded)
+                    st.quotaExpanded.erase(u.uid);
+                else
+                    st.quotaExpanded.insert(u.uid);
+            }
+
+            ImGui::TableSetColumnIndex(1);
+            std::string usage =
+                std::to_string(u.used) + " / " +
+                (u.effectiveMax > 0 ? std::to_string(u.effectiveMax) : std::string("不限"));
+            if (over)
+                ImGui::TextColored(OpsTone::Danger(), "%s", usage.c_str());
+            else
+                ImGui::TextUnformatted(usage.c_str());
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputText("##max", u.maxInput, sizeof(u.maxInput),
+                             ImGuiInputTextFlags_CharsDecimal);
+
+            ImGui::TableSetColumnIndex(3);
+            if (ImGui::SmallButton("保存##row")) {
+                doSet = true;
+                pendSetUid = u.uid;
+                pendSetMax = std::atoi(u.maxInput);
+            }
+            ImGui::SameLine();
+            {
+                // 本人的僵尸台数：本地按同一阈值算，不必再问服务端。
+                int stale = 0;
+                if (idleDays > 0) {
+                    const long long cut = static_cast<long long>(idleDays) * 86400;
+                    for (const auto& d : u.devices)
+                        if (d.idleSec >= cut) ++stale;
+                }
+                if (stale > 0) {
+                    const std::string label = "清僵尸(" + std::to_string(stale) + ")##row_rel";
+                    if (ImGui::SmallButton(label.c_str())) {
+                        st.quotaReleaseConfirmOpen = true;
+                        st.quotaReleaseConfirmUid = u.uid;
+                        st.quotaReleaseConfirmDays = idleDays;
+                        st.quotaReleaseConfirmCount = stale;
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("释放 %s 名下闲置超过 %d 天的 %d 台设备", u.uid.c_str(),
+                                          idleDays, stale);
+                } else {
+                    ImGui::TextDisabled("(0=不限)");
+                }
+            }
+
+            if (expanded) {
+                for (const auto& d : u.devices) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    const std::string shortId =
+                        d.deviceId.size() > 18 ? d.deviceId.substr(0, 18) + "…" : d.deviceId;
+                    ImGui::TextDisabled("      %s", shortId.c_str());
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", d.deviceId.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextColored(QuotaIdleColor(d.idleSec, idleDays), "%s",
+                                       QuotaIdleText(d.idleSec).c_str());
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("最后一次探活：%s",
+                                          d.lastSeen.empty() ? "—" : d.lastSeen.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::PushID(d.deviceId.c_str());
+                    if (NeutralSmallButton("释放")) {
+                        doRemove = true;
+                        pendRmUid = u.uid;
+                        pendRmDev = d.deviceId;
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("从该用户台账移除此设备（腾出一台名额）");
+                    ImGui::PopID();
+                }
+                if (u.devices.empty()) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextDisabled("      （暂无已登记设备）");
+                }
+            }
+            ImGui::PopID();
+        }
+        if (st.quotaUsers.empty()) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled(st.quotaEnabled
+                                    ? "暂无用户（客户端探活带签名 TOKEN 后自动出现）"
+                                    : "配额未启用");
+        }
+        ImGui::EndTable();
+    }
+
+    if (doSet) {
+        std::string err;
+        if (PostQuotaSetMax(st, pendSetUid, pendSetMax, err))
+            SetStatus(st, "已更新 " + pendSetUid + " 上限");
+        else
+            SetStatus(st, "设置失败：" + err);
+    }
+    if (doRemove) {
+        std::string err;
+        if (PostQuotaRemoveDevice(st, pendRmUid, pendRmDev, err))
+            SetStatus(st, "已释放一台设备（" + pendRmUid + "）");
+        else
+            SetStatus(st, "释放失败：" + err);
+    }
+
+    // 批量释放确认：按钮在表格内（PushID 层级里），弹窗统一放在函数顶层开。
+    if (st.quotaReleaseConfirmOpen) {
+        ImGui::OpenPopup("confirm_quota_release_idle");
+        st.quotaReleaseConfirmOpen = false;
+    }
+    if (ImGui::BeginPopupModal("confirm_quota_release_idle", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        const bool all = st.quotaReleaseConfirmUid.empty();
+        ImGui::TextUnformatted(all ? "确认清理全部用户的僵尸名额？" : "确认清理该用户的僵尸名额？");
+        ImGui::Spacing();
+        if (!all) ImGui::Text("用户：%s", st.quotaReleaseConfirmUid.c_str());
+        ImGui::Text("释放闲置超过 %d 天的设备，共 %d 台。", st.quotaReleaseConfirmDays,
+                    st.quotaReleaseConfirmCount);
+        ImGui::Spacing();
+        ImGui::TextDisabled("可逆：这些设备下次探活会重新登记并重新占名额。");
+        ImGui::TextDisabled("若某台其实还在用，只是这段时间没开服，清了也不影响它下次上线。");
+        ImGui::Spacing();
+        if (SafeButton("确认释放##quota_rel_yes", ImVec2(130, 0))) {
+            std::string err;
+            if (PostQuotaReleaseIdle(st, st.quotaReleaseConfirmUid, st.quotaReleaseConfirmDays,
+                                     err)) {
+                SetStatus(st, "已释放 " + std::to_string(st.quotaReleaseConfirmCount) + " 台设备名额");
+            } else {
+                SetStatus(st, "释放失败：" + err);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("取消##quota_rel_no", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
+void DrawGateSignPanel(OpsState& st) {
+    if (st.lastGateCardsFetchMs == 0) RefreshGateCards(st, true);
+    // 台数回显要用 quotaUsers；只在首次进页拉一次，避免每帧阻塞式 HTTP。
+    if (st.lastQuotaFetchMs == 0) RefreshQuota(st, true);
+
+    ImGui::TextDisabled(
+        "给成员签发启动 TOKEN：填 uid + 有效期 → 签发 → 复制发给他，启动 xcat.exe 时粘贴一次即激活。");
+    ImGui::TextDisabled("私钥离线保管在本机 secrets\\，只由本机更新服务读取，不入库、不外发。");
+
+    if (!TwmsRunning(st)) {
+        ImGui::TextColored(OpsTone::Warn(),
+                           "TWMS API 未运行：先到「服务与日志」启动更新服务，再来签卡。");
+        return;
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("uid（成员标识，如 张三）");
+    ImGui::SetNextItemWidth(200.f);
+    const bool uidEnter = ImGui::InputTextWithHint("##gate_sign_uid", "uid", st.gateSignUidInput,
+                                                   sizeof(st.gateSignUidInput),
+                                                   ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine(0, 14.f);
+    ImGui::TextUnformatted("有效期");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(70.f);
+    ImGui::InputTextWithHint("##gate_sign_days", "天数", st.gateSignDaysInput,
+                             sizeof(st.gateSignDaysInput), ImGuiInputTextFlags_CharsDecimal);
+    ImGui::SameLine();
+    ImGui::TextDisabled("天（0=永久）");
+    ImGui::SameLine(0, 14.f);
+    ImGui::TextUnformatted("台数");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(60.f);
+    ImGui::InputTextWithHint("##gate_sign_quota", "不改", st.gateSignQuotaInput,
+                             sizeof(st.gateSignQuotaInput), ImGuiInputTextFlags_CharsDecimal);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "签发同时给该 uid 设台数上限，默认 100。\n"
+            "留空 = 不动他现有上限（给老成员重签时清空，才不会把他已设好的上限抹掉）。\n"
+            "填 0 = 明确设成不限台数。");
+
+    // 填 uid 时先照一遍现状：他名下已有哪张有效卡、台数用了多少。
+    // 少了这一步很容易给同一个人重复签发（台账堆重复行），或把上限设成他早已超掉的数。
+    if (st.gateSignUidInput[0] != '\0') {
+        const std::string wantUid = st.gateSignUidInput;
+        const OpsState::GateCardRow* latest = nullptr;
+        for (const auto& c : st.gateCards) {
+            if (!EqualsIgnoreCase(c.uid, wantUid)) continue;
+            latest = &c;  // 台账按签发倒序，首个命中即最新
+            break;
+        }
+        if (latest) {
+            const std::string remain = GateExpRemainText(latest->exp);
+            if (latest->banned) {
+                ImGui::TextColored(OpsTone::Danger(),
+                                   "该 uid 已被吊销：重签新卡后仍会被联网拦截，需先在台账「解禁」。");
+            } else if (remain == "已过期") {
+                ImGui::TextColored(OpsTone::Warn(), "该 uid 上一张卡已过期（%s），本次签发相当于换新卡。",
+                                   GateExpAbsText(latest->exp).c_str());
+            } else {
+                ImGui::TextColored(OpsTone::Warn(),
+                                   "该 uid 已有有效卡（%s，%s）：再签发会多出一张，旧卡在到期前仍可用。",
+                                   GateExpAbsText(latest->exp).c_str(), remain.c_str());
+            }
+        } else {
+            ImGui::TextColored(OpsTone::Ok(), "新 uid：台账里还没有这个人的卡。");
+        }
+        const OpsState::QuotaUserRow* qu = nullptr;
+        for (const auto& u : st.quotaUsers) {
+            if (EqualsIgnoreCase(u.uid, wantUid)) {
+                qu = &u;
+                break;
+            }
+        }
+        if (qu) {
+            ImGui::SameLine(0, 10.f);
+            ImGui::TextDisabled("｜台数已用 %d / %s", qu->used,
+                                qu->effectiveMax > 0 ? std::to_string(qu->effectiveMax).c_str()
+                                                     : "不限");
+        }
+    }
+
+    ImGui::TextUnformatted("备注");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(300.f);
+    ImGui::InputTextWithHint("##gate_sign_note", "可选，落台账（如 部门/用途）", st.gateSignNoteInput,
+                             sizeof(st.gateSignNoteInput));
+    ImGui::SameLine(0, 14.f);
+    const bool doSign = ImGui::Button("签发##gate_sign") || uidEnter;
+    if (doSign) {
+        const std::string uid = st.gateSignUidInput;
+        const int days = std::atoi(st.gateSignDaysInput);
+        std::string err;
+        if (PostGateSign(st, uid, days, st.gateSignNoteInput, err)) {
+            std::string msg = "已签发 " + st.gateSignInfo;
+            if (st.gateSignQuotaInput[0] != '\0') {
+                const int mv = std::atoi(st.gateSignQuotaInput);
+                std::string qerr;
+                if (PostQuotaSetMax(st, uid, mv, qerr))
+                    msg += " · 台数上限=" + std::to_string(mv < 0 ? 0 : mv);
+                else
+                    msg += "（配额设置失败：" + qerr + "）";
+            }
+            SetStatus(st, msg);
+            RefreshGateCards(st, true);
+        } else {
+            st.gateSignToken.clear();
+            st.gateSignInfo.clear();
+            st.gateSignError = err;
+            SetStatus(st, "签发失败：" + err);
+        }
+    }
+
+    if (!st.gateSignError.empty()) {
+        ImGui::TextColored(OpsTone::Danger(), "%s", st.gateSignError.c_str());
+    }
+
+    if (!st.gateSignToken.empty()) {
+        ImGui::TextColored(OpsTone::Ok(), "%s", st.gateSignInfo.c_str());
+        ImGui::TextDisabled("TOKEN（整行发给成员，启动时粘贴）：");
+        ImGui::SetNextItemWidth(-1.f);
+        ImGui::InputText("##gate_sign_token_out", st.gateSignToken.data(),
+                         st.gateSignToken.size() + 1, ImGuiInputTextFlags_ReadOnly);
+        if (ImGui::Button("复制 TOKEN##gate_sign")) {
+            CopyText(st.gateSignToken.c_str());
+            SetStatus(st, "TOKEN 已复制到剪贴板");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("清空##gate_sign")) {
+            st.gateSignToken.clear();
+            st.gateSignInfo.clear();
+            st.gateSignError.clear();
+        }
+    }
+
+    // ── 签发台账 ──
+    ImGui::Separator();
+    ImGui::TextUnformatted("签发台账");
+    ImGui::SameLine(0, 12.f);
+    if (ImGui::Button("刷新##cards")) RefreshGateCards(st, true);
+    ImGui::SameLine(0, 12.f);
+    ImGui::SetNextItemWidth(200.f);
+    ImGui::InputTextWithHint("##cards_filter", "筛选 uid / 备注…", st.gateCardsFilter,
+                             sizeof(st.gateCardsFilter));
+    ImGui::SameLine(0, 12.f);
+    {
+        int histN = 0;
+        for (const auto& c : st.gateCards)
+            if (c.superseded) ++histN;
+        char label[48]{};
+        std::snprintf(label, sizeof(label), "显示历史卡 (%d)##cards_hist", histN);
+        ImGui::Checkbox(label, &st.gateCardsShowHistory);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "默认每个 uid 只显示最新一张卡。\n"
+                "续签/重签会给同一 uid 追加新卡，旧卡在到期前仍然可用；\n"
+                "发卡时只该发最新那张，故把历史卡折起来，免得复制到旧卡发错人。");
+    }
+    if (!st.gateCardsError.empty()) {
+        ImGui::SameLine(0, 12.f);
+        ImGui::TextColored(OpsTone::Danger(), "%s", st.gateCardsError.c_str());
+    }
+    ImGui::TextDisabled(
+        "废卡=只作废这一张（同 uid 的其他卡照用）；封人=封整个 uid（他所有卡一起拦）。"
+        "两者都只在客户端联网探活时生效，离线激活拦不住。");
+
+    const std::string filter = st.gateCardsFilter;
+    std::string pendRevoke, pendUnrevoke;
+    struct CardReq { std::string jti; std::string uid; };
+    CardReq pendCardKill, pendCardRestore;
+    struct RenewReq { std::string uid; int days; };
+    RenewReq pendRenew{"", -1};
+
+    // 台账是本页最后一个可见元素（EndTable 之后只有 POST 处理），吃满剩余高度别留半屏空白。
+    const float cardsH = (std::max)(200.f, ImGui::GetContentRegionAvail().y - 4.f);
+    if (ImGui::BeginTable("##gate_cards", 8,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
+                              ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+                          ImVec2(0.f, cardsH))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("uid", ImGuiTableColumnFlags_WidthFixed, 120.f);
+        ImGui::TableSetupColumn("签发时间", ImGuiTableColumnFlags_WidthFixed, 130.f);
+        ImGui::TableSetupColumn("有效期", ImGuiTableColumnFlags_WidthFixed, 150.f);
+        ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthFixed, 80.f);
+        ImGui::TableSetupColumn("备注", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("续期", ImGuiTableColumnFlags_WidthFixed, 130.f);
+        ImGui::TableSetupColumn("这张卡", ImGuiTableColumnFlags_WidthFixed, 92.f);
+        ImGui::TableSetupColumn("整个人", ImGuiTableColumnFlags_WidthFixed, 210.f);
+        ImGui::TableHeadersRow();
+
+        for (size_t idx = 0; idx < st.gateCards.size(); ++idx) {
+            auto& c = st.gateCards[idx];
+            if (c.superseded && !st.gateCardsShowHistory) continue;
+            if (!filter.empty() && !ContainsIgnoreCase(c.uid, filter.c_str()) &&
+                !ContainsIgnoreCase(c.note, filter.c_str()))
+                continue;
+            ImGui::TableNextRow();
+            ImGui::PushID(static_cast<int>(idx));
+
+            const std::string remain = GateExpRemainText(c.exp);
+            const bool expired = (c.exp > 0 && remain == "已过期");
+
+            ImGui::TableNextColumn();
+            const std::string rowStatus =
+                c.banned ? "人已封"
+                         : (c.cardRevoked
+                                ? "卡已废"
+                                : (c.superseded ? "已被取代" : (expired ? "已过期" : "有效")));
+            const std::string rowSummary = c.uid + "\t" + GateExpAbsText(c.exp) + "\t" + rowStatus +
+                                           (c.note.empty() ? "" : ("\t" + c.note));
+            if (ImGui::Selectable(c.uid.c_str(), false,
+                                  ImGuiSelectableFlags_AllowDoubleClick)) {
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    CopyText(c.uid.c_str());
+                    SetStatus(st, "已复制 uid：" + c.uid);
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("双击复制 uid；右键更多复制");
+            if (ImGui::BeginPopupContextItem("##card_copy_ctx")) {
+                if (ImGui::MenuItem("复制 uid")) {
+                    CopyText(c.uid.c_str());
+                    SetStatus(st, "已复制 uid：" + c.uid);
+                }
+                if (ImGui::MenuItem("复制整行摘要")) {
+                    CopyText(rowSummary.c_str());
+                    SetStatus(st, "已复制台账摘要");
+                }
+                if (!c.token.empty() &&
+                    ImGui::MenuItem(c.superseded ? "复制 TOKEN（旧卡）" : "复制 TOKEN")) {
+                    CopyText(c.token.c_str());
+                    SetStatus(st, c.superseded
+                                      ? ("已复制旧卡 TOKEN（uid=" + c.uid + "）：该 uid 已有更新的卡")
+                                      : ("已复制 TOKEN（uid=" + c.uid + "）"));
+                }
+                ImGui::EndPopup();
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", c.at.empty() ? "-" : c.at.substr(0, 16).c_str());
+
+            ImGui::TableNextColumn();
+            if (expired)
+                ImGui::TextColored(OpsTone::Danger(), "%s", GateExpAbsText(c.exp).c_str());
+            else
+                ImGui::Text("%s", GateExpAbsText(c.exp).c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", remain.c_str());
+
+            ImGui::TableNextColumn();
+            if (c.banned) {
+                ImGui::TextColored(OpsTone::Danger(), "人已封");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("整个 uid 被封：他名下每张卡都拦，包括之后新签的。");
+            } else if (c.cardRevoked) {
+                ImGui::TextColored(OpsTone::Danger(), "卡已废");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("只这一张作废；该 uid 的其他卡照常能用。");
+            } else if (c.superseded) {
+                ImGui::TextDisabled("已被取代");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("该 uid 之后又签了新卡；这张在到期前仍能用，但不该再发给成员。");
+            } else if (expired) {
+                ImGui::TextColored(OpsTone::Warn(), "已过期");
+            } else {
+                ImGui::TextColored(OpsTone::Ok(), "有效");
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(c.note.empty() ? "-" : c.note.c_str());
+
+            ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(56.f);
+            ImGui::InputTextWithHint("##renew_days", "天", c.renewInput, sizeof(c.renewInput),
+                                     ImGuiInputTextFlags_CharsDecimal);
+            ImGui::SameLine();
+            if (ImGui::Button("续签")) {
+                pendRenew.uid = c.uid;
+                pendRenew.days = std::atoi(c.renewInput);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "按天数给同一 uid 再签一张新卡。\n"
+                    "旧卡在有效期内仍可用；不想让它继续用，续签后在旧卡那行点「废卡」。");
+
+            // ── 这张卡：按卡号 jti 废/恢复，不牵连同 uid 的其他卡 ──
+            ImGui::TableNextColumn();
+            if (c.jti.empty()) {
+                ImGui::TextDisabled("无卡号");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "这张卡签发于卡号机制上线前，没有可吊销的卡号。\n"
+                        "要拦只能用右边「封人」封掉整个 uid，或让他换一张新卡后再废旧的。");
+            } else if (c.cardRevoked) {
+                if (ImGui::SmallButton("恢复卡")) {
+                    pendCardRestore.jti = c.jti;
+                    pendCardRestore.uid = c.uid;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("撤销这张卡的作废（卡号 %s）", c.jti.c_str());
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, OpsTone::Danger());
+                if (ImGui::SmallButton("废卡")) {
+                    pendCardKill.jti = c.jti;
+                    pendCardKill.uid = c.uid;
+                }
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(
+                        "只作废这一张（卡号 %s）：\n"
+                        "该 uid 的其他卡照常能用，适合「卡泄露了但人还要继续用」。\n"
+                        "客户端联网探活时生效。",
+                        c.jti.c_str());
+            }
+
+            // ── 整个人：按 uid 封禁，他名下所有卡（含之后新签的）一起拦 ──
+            ImGui::TableNextColumn();
+            if (c.banned) {
+                if (ImGui::Button("解禁")) pendUnrevoke = c.uid;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("解开对 uid %s 的封禁", c.uid.c_str());
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, OpsTone::Danger());
+                if (ImGui::Button("封人")) pendRevoke = c.uid;
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("封掉整个 uid %s：他名下每张卡都拦，之后新签的也拦。",
+                                      c.uid.c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("复制")) {
+                CopyText(rowSummary.c_str());
+                SetStatus(st, "已复制台账摘要（uid=" + c.uid + "）");
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("复制该行摘要（uid + 有效期 + 状态 + 备注）");
+            if (!c.token.empty()) {
+                ImGui::SameLine();
+                if (c.superseded) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("TOKEN")) {
+                    CopyText(c.token.c_str());
+                    SetStatus(st, "已复制 TOKEN（uid=" + c.uid + "），可直接发给成员");
+                }
+                if (c.superseded) ImGui::EndDisabled();
+                // 禁用态默认不算 hovered，须显式放开，否则解释不了「为什么这个按钮点不动」。
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip(c.superseded
+                                          ? "该 uid 已有更新的卡，此处不给一键复制；\n"
+                                            "真要发这张旧卡请用 uid 列右键菜单。"
+                                          : "复制该卡完整 TOKEN，发给成员启动时粘贴激活");
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    if (!pendCardKill.jti.empty()) {
+        std::string err;
+        if (PostCardJtiAction(st, "revokejti", pendCardKill.jti, pendCardKill.uid, "ops 废卡", err)) {
+            SetStatus(st, "已废掉这张卡（uid=" + pendCardKill.uid + " 卡号=" + pendCardKill.jti +
+                              "）；该 uid 的其他卡不受影响");
+            RefreshBans(st, true);
+            RefreshGateCards(st, true);
+        } else {
+            SetStatus(st, "废卡失败：" + err);
+        }
+    }
+    if (!pendCardRestore.jti.empty()) {
+        std::string err;
+        if (PostCardJtiAction(st, "unrevokejti", pendCardRestore.jti, {}, {}, err)) {
+            SetStatus(st, "已恢复这张卡（卡号=" + pendCardRestore.jti + "）");
+            RefreshBans(st, true);
+            RefreshGateCards(st, true);
+        } else {
+            SetStatus(st, "恢复失败：" + err);
+        }
+    }
+    if (!pendRevoke.empty()) {
+        std::string err;
+        if (PostRevokeUid(st, pendRevoke, err)) {
+            SetStatus(st, "已封掉 " + pendRevoke + "（名下所有卡联网探活即拦）");
+            RefreshGateCards(st, true);
+        } else {
+            SetStatus(st, "封人失败：" + err);
+        }
+    }
+    if (!pendUnrevoke.empty()) {
+        std::string err;
+        if (PostUnrevokeUid(st, pendUnrevoke, err)) {
+            SetStatus(st, "已解禁 " + pendUnrevoke);
+            RefreshGateCards(st, true);
+        } else {
+            SetStatus(st, "解禁失败：" + err);
+        }
+    }
+    if (!pendRenew.uid.empty()) {
+        std::string err;
+        if (PostGateSign(st, pendRenew.uid, pendRenew.days < 0 ? 0 : pendRenew.days, "续期", err)) {
+            SetStatus(st, "已续签 " + st.gateSignInfo + "（记得把新 TOKEN 复制发给成员）");
+            RefreshGateCards(st, true);
+        } else {
+            SetStatus(st, "续签失败：" + err);
+        }
+    }
 }
 
 void OpsPanel_Draw(OpsState& st) {
@@ -5728,9 +7944,12 @@ void OpsPanel_Draw(OpsState& st) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
-    ImGui::Begin("XCat TWMS Ops", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGuiWindowFlags hostFlags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (st.mainTab == 2)
+        hostFlags |= ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    ImGui::Begin("XCat TWMS Ops", nullptr, hostFlags);
 
     // ── Header（压成两行，把高度留给内容页） ──
     ImGui::TextUnformatted("XCat TWMS 运维控制台");
@@ -5752,7 +7971,7 @@ void OpsPanel_Draw(OpsState& st) {
             }
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("与启动器共用 user.ini [ui]（若找到 bin\\XCat_data）");
+            ImGui::SetTooltip("仅本运维台（bin_ops\\state\\user.ini）\n与启动器主题互不影响");
         }
     }
     if (!st.diskFreeText.empty()) {
@@ -5829,13 +8048,21 @@ void OpsPanel_Draw(OpsState& st) {
         if (st.mainTab == 1) {
             RefreshClients(st, true);
             RefreshBans(st, true);
+            if (st.lastClientHistoryFetchMs != 0) RefreshClientHistory(st, true);
             SetStatus(st, "已刷新连接列表");
         } else if (st.mainTab == 2) {
             RefreshClients(st, true);
             SetStatus(st, "已刷新利润监控采样");
+        } else if (st.mainTab == 3) {
+            RefreshQuota(st, true);
+            SetStatus(st, "已刷新台数配额");
+        } else if (st.mainTab == 4) {
+            RefreshGateCards(st, true);
+            SetStatus(st, "已刷新签发台账");
         } else {
             RefreshLogViewer(st, true);
             RefreshReleaseInfo(st);
+            RefreshUpdateChannels(st, true);
             SetStatus(st, "已刷新日志与发布信息");
         }
     }
@@ -5848,6 +8075,16 @@ void OpsPanel_Draw(OpsState& st) {
     }
     if (st.mainTab == 2) {
         DrawMesoDashPanel(st);
+        ImGui::End();
+        return;
+    }
+    if (st.mainTab == 3) {
+        DrawQuotaPanel(st);
+        ImGui::End();
+        return;
+    }
+    if (st.mainTab == 4) {
+        DrawGateSignPanel(st);
         ImGui::End();
         return;
     }
@@ -5889,7 +8126,7 @@ void OpsPanel_Draw(OpsState& st) {
     ImGui::PopStyleColor();
 
     // 压缩服务卡片，把高度留给日志
-    const float svcCardH = ImGui::GetTextLineHeightWithSpacing() * 7.6f;
+    const float svcCardH = ImGui::GetTextLineHeightWithSpacing() * 10.4f;
 
     if (ImGui::BeginTable("svc_table", 2,
                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame |
@@ -5964,11 +8201,31 @@ void OpsPanel_Draw(OpsState& st) {
             }
             ImGui::TextDisabled("%s", st.publishProbeText.c_str());
             if (st.latestClientBuildId > 0) {
-                ImGui::TextDisabled("最新 v%s #%u", st.latestClientVersionText.c_str(),
+                ImGui::TextDisabled("构建 v%s #%u", st.latestClientVersionText.c_str(),
                                     st.latestClientBuildId);
             } else {
-                ImGui::TextDisabled("最新客户端：未找到有效发布 manifest");
+                ImGui::TextDisabled("最新构建：未找到 latest.json");
             }
+            if (st.allowedClientBuildId > 0) {
+                ImGui::SameLine(0, 10.f);
+                if (st.latestClientBuildId != 0 &&
+                    st.allowedClientBuildId != st.latestClientBuildId)
+                    ImGui::TextColored(OpsTone::Warn(), "允许 v%s #%u",
+                                       st.allowedClientVersionText.c_str(), st.allowedClientBuildId);
+                else
+                    ImGui::TextDisabled("允许 v%s #%u", st.allowedClientVersionText.c_str(),
+                                        st.allowedClientBuildId);
+            } else if (!st.updateChannelsError.empty()) {
+                ImGui::SameLine(0, 10.f);
+                ImGui::TextColored(OpsTone::Warn(), "%s", st.updateChannelsError.c_str());
+            } else if (TwmsRunning(st)) {
+                ImGui::SameLine(0, 10.f);
+                ImGui::TextColored(OpsTone::Warn(), "允许=构建（未配置通道）");
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(
+                    "检查更新走「允许」版本，不是刚打的 latest.json。\n"
+                    "出新包不会自动放开；分组可在连接表右键单独指定。");
             if (st.forcedClientBuildId > 0) {
                 ImGui::SameLine(0, 10.f);
                 ImGui::TextColored(OpsTone::Warn(), "强制 v%s #%u",
@@ -5981,6 +8238,71 @@ void OpsPanel_Draw(OpsState& st) {
                 ImGui::TextDisabled("拉起 %d", st.publishRestartCount);
             }
             if (!st.hasPython) ImGui::TextColored(OpsTone::Danger(), "缺少 python.exe");
+
+            if (!st.updatePackages.empty()) {
+                ImGui::SetNextItemWidth(210.f);
+                const char* preview = "选择对外允许版本";
+                char previewBuf[80]{};
+                if (st.updateChannelCombo >= 0 &&
+                    st.updateChannelCombo < (int)st.updatePackages.size()) {
+                    const auto& p = st.updatePackages[(size_t)st.updateChannelCombo];
+                    std::snprintf(previewBuf, sizeof(previewBuf), "v%s #%u", p.version.c_str(),
+                                  p.buildId);
+                    preview = previewBuf;
+                }
+                if (ImGui::BeginCombo("##allow_build", preview)) {
+                    for (int i = 0; i < (int)st.updatePackages.size(); ++i) {
+                        const auto& p = st.updatePackages[(size_t)i];
+                        char lab[80]{};
+                        std::snprintf(lab, sizeof(lab), "v%s #%u", p.version.c_str(), p.buildId);
+                        const bool sel = (i == st.updateChannelCombo);
+                        if (ImGui::Selectable(lab, sel)) st.updateChannelCombo = i;
+                        if (sel) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::SameLine();
+                const bool canSet =
+                    st.updateChannelCombo >= 0 &&
+                    st.updateChannelCombo < (int)st.updatePackages.size();
+                if (!canSet) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("设为对外允许##p")) {
+                    st.updateChannelPendingBuildId =
+                        st.updatePackages[(size_t)st.updateChannelCombo].buildId;
+                    ImGui::OpenPopup("confirm_allow_channel");
+                }
+                if (!canSet) ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("全员检查更新升到此版；不影响磁盘上的最新构建。");
+                if (ImGui::BeginPopupModal("confirm_allow_channel", nullptr,
+                                           ImGuiWindowFlags_AlwaysAutoResize)) {
+                    uint32_t bid = st.updateChannelPendingBuildId;
+                    std::string ver;
+                    for (const auto& p : st.updatePackages) {
+                        if (p.buildId == bid) {
+                            ver = p.version;
+                            break;
+                        }
+                    }
+                    ImGui::TextUnformatted("设为对外允许版本？");
+                    ImGui::TextDisabled("目标：v%s  build %u", ver.c_str(), bid);
+                    ImGui::TextWrapped(
+                        "之后客户端检查更新默认升到这一版，刚打的包不会自动放开。"
+                        "个别分组可在「连接与访问」右键单独指定。");
+                    ImGui::Spacing();
+                    if (SafeButton("确认##allow_yes", ImVec2(120, 0))) {
+                        std::string err;
+                        if (PostUpdateChannelDefault(st, bid, err))
+                            SetStatus(st, "已设置对外允许 v" + ver + " #" + std::to_string(bid));
+                        else
+                            SetStatus(st, err);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("取消##allow_no", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+                    ImGui::EndPopup();
+                }
+            }
 
             ImGui::Spacing();
             if (ImGui::SmallButton("启动##p")) Ops_RequestStartPublish(st);

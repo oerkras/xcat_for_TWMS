@@ -12,10 +12,14 @@
 #include "app_theme.h"
 #include "app_window.h"
 #include "attach_inject.h"
+#include "gate_activation_ui.h"
 #include "hangup_schedule.h"
 #include "launch_panel.h"
+#include "log_upload.h"
+#include "net_path_probe.h"
 #include "single_instance.h"
 #include "update_client.h"
+#include "xcat_start_gate.h"
 
 #include "msc_webview_login.h"
 #include "process_util.h"
@@ -116,37 +120,25 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
                     xcat::kXcatVersionString, logOpts.filePath.c_str());
 
     const std::string prefsBin = binDir + "XCat_data";
-    // 飞行武装不持久化：每次启动 launcher 清会话态（mode/CD 仍在 user.ini）。
+    // 飞行武装不持久化：每次启动 launcher 清会话态。出刀自组已落盘 user.ini，不清。
     xcat::ClearFlyArmedSession(prefsBin.c_str());
-    // 被封粘性：进 UI 前先探活——解禁后必须能清粘性；服不可达才继续本地拦。
-    if (xcat::app::EnforceStickyDeviceAccessOnStartup(xcat::app::kDefaultUpdateServiceUrl,
-                                                      prefsBin)) {
-        const auto kind = xcat::app::ConsumeAccessGateExitRequest();
-        xcat::log::Warn("App", "exiting at startup: gate/2 code=%d",
-                        xcat::app::AccessGateExitCode(kind));
-        xcat::log::Shutdown();
-        CoUninitialize();
-        xcat::app::ReleaseXcatSingleInstance();
-        return xcat::app::AccessGateExitCode(kind) ? xcat::app::AccessGateExitCode(kind) : 2;
-    }
-    // 在线租约：无有效租约则同步探运维 access；掐网且租约失效则无法启动。
-    if (xcat::app::EnforceOnlineLeaseGateOnStartup(xcat::app::kDefaultUpdateServiceUrl, prefsBin)) {
-        const auto kind = xcat::app::ConsumeAccessGateExitRequest();
-        const int code = xcat::app::AccessGateExitCode(kind);
-        xcat::log::Warn("App", "exiting at startup: gate/%d code=%d",
-                        kind == xcat::app::AccessGateExitKind::AccessDeny ? 2 : 3,
-                        code ? code : 3);
-        xcat::log::Shutdown();
-        CoUninitialize();
-        xcat::app::ReleaseXcatSingleInstance();
-        return code ? code : 3;
-    }
+    xcat::ClearMapAttackSession(prefsBin.c_str());
+    xcat::ClearAttackRpcFireSeq(prefsBin.c_str());
+    xcat::ClearAttackRpcResetSeq(prefsBin.c_str());
+    xcat::ClearAttackRpcStopSeq(prefsBin.c_str());
+    xcat::ClearMobGatherFireSeq(prefsBin.c_str());
+    xcat::ClearMobGatherDyRampSeq(prefsBin.c_str());
+    // gate/1 启动激活门：纯本地校验个人签名 TOKEN（断网也拦），首次激活后按本机 deviceId 免输。
+    // 这里只做「无 UI 缓存检查」；无有效激活时不退出，延后到窗口建好后用 ImGui 白天样式弹激活框
+    // （见 AppTheme_Commit 之后）——避免再起一套 D3D11/字体，观感与主界面一致。
+    const std::string gateDeviceId = xcat::app::ResolveClientHostIdentity(prefsBin).deviceId;
+    const bool gateActivated = xcat::gate::HasValidActivation(prefsBin, gateDeviceId);
     xcat::app::AppTheme_Load(prefsBin.c_str());
     xcat::app::LoadAutoReceiveUpdates(prefsBin);
     xcat::app::notify::LoadNotifyPrefs(prefsBin);
     (void)xcat::app::ConsumeUpdateFailedNotify(prefsBin);
 
-    xcat::app::sound::Init();
+    xcat::app::sound::Init(prefsBin.c_str());
 
     AppWindow app{};
     // ImGui 全占客户区；高度对齐对照仓枫星 kLauncherOnlyDesignH。
@@ -161,6 +153,97 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     app.launchTickMs = GetTickCount64();
 
     xcat::app::AppTheme_Commit(app.hwnd);
+
+    // gate/1 交互激活：无有效缓存时，在真正进入面板前用 ImGui 白天样式弹激活框；
+    // 用户取消/关窗 → 视同拒启退出（退出码与旧 Win32 门一致 kStartGateExitCode）。
+    if (!gateActivated) {
+        if (!xcat::app::RunGateActivation(app, prefsBin, gateDeviceId)) {
+            xcat::log::Warn("App", "exiting at startup: gate/1 cancelled");
+            AppWindow_Destroy(app);
+            xcat::log::Shutdown();
+            CoUninitialize();
+            xcat::app::ReleaseXcatSingleInstance();
+            return xcat::gate::kStartGateExitCode;
+        }
+    }
+
+    // gate/2 / gate/3 在线门放在 gate/1 之后：保证「本地激活门绝对最先」——无有效 TOKEN
+    // 连在线门都不碰。此时窗口已建好，退出前先销毁窗口再清理。
+    // 被封粘性：进 UI 前先探活——解禁后必须能清粘性；服不可达才继续本地拦。
+    // 探活在运维不可达时会串行走完整回退（直连→代理→AliDNS→按 IP），耗时可达数十秒；
+    // 放后台线程跑并泵「正在检查授权…」帧，避免主线程被 WinHTTP 阻塞导致窗口白屏假死。
+    // 慢路径会把窗口临时缩成居中小对话框；这里先记住启动器原尺寸，放行进主面板前恢复。
+    RECT gateSavedRect{};
+    GetWindowRect(app.hwnd, &gateSavedRect);
+    const bool gate2Deny = xcat::app::RunStartupGateWithModal(app, "正在检查设备授权", [&] {
+        return xcat::app::EnforceStickyDeviceAccessOnStartup(xcat::app::kDefaultUpdateServiceUrl,
+                                                             prefsBin);
+    });
+    if (gate2Deny) {
+        const auto kind = xcat::app::ConsumeAccessGateExitRequest();
+        xcat::log::Warn("App", "exiting at startup: gate/2 code=%d",
+                        xcat::app::AccessGateExitCode(kind));
+        AppWindow_Destroy(app);
+        xcat::log::Shutdown();
+        CoUninitialize();
+        xcat::app::ReleaseXcatSingleInstance();
+        return xcat::app::AccessGateExitCode(kind) ? xcat::app::AccessGateExitCode(kind) : 2;
+    }
+    // 在线租约：无有效租约则同步探运维 access；掐网且租约失效则无法启动。
+    const bool gate3Deny = xcat::app::RunStartupGateWithModal(app, "正在检查在线授权", [&] {
+        return xcat::app::EnforceOnlineLeaseGateOnStartup(xcat::app::kDefaultUpdateServiceUrl,
+                                                          prefsBin);
+    });
+    if (gate3Deny) {
+        const auto kind = xcat::app::ConsumeAccessGateExitRequest();
+        const int code = xcat::app::AccessGateExitCode(kind);
+        xcat::log::Warn("App", "exiting at startup: gate/%d code=%d",
+                        kind == xcat::app::AccessGateExitKind::AccessDeny ? 2 : 3,
+                        code ? code : 3);
+        AppWindow_Destroy(app);
+        xcat::log::Shutdown();
+        CoUninitialize();
+        xcat::app::ReleaseXcatSingleInstance();
+        return code ? code : 3;
+    }
+
+    // 本地卡要让服务端拿出 uid，但只在本轮已经同步探到「放行却没人」且 proof 头确实发出时才弹框。
+    // 租约仍有效、服不可达、或派生凭证没带上：不清缓存（否则台账现卡也会被误杀）。
+    // 刚重贴完才 quick 探一次核对新卡，仍不走完整回退。
+    constexpr const char* kGateUnrecognizedHint =
+        "服务端无法识别此卡，请粘贴管理员发放的现卡。";
+    bool afterReactivate = false;
+    for (;;) {
+        if (!xcat::gate::HasValidActivation(prefsBin, gateDeviceId)) break;
+        bool unrecognized = false;
+        if (afterReactivate) {
+            (void)xcat::app::RunStartupGateWithModal(app, "正在检查授权", [&] {
+                unrecognized = xcat::app::StartupCardUnrecognizedByServer(
+                    xcat::app::kDefaultUpdateServiceUrl, prefsBin, true);
+                return false;
+            });
+        } else {
+            unrecognized = xcat::app::StartupCardUnrecognizedByServer(
+                xcat::app::kDefaultUpdateServiceUrl, prefsBin, false);
+        }
+        if (!unrecognized) break;
+        xcat::gate::InvalidateActivationCache(prefsBin);
+        xcat::app::ClearStartupAccessProbe();
+        if (!xcat::app::RunGateActivation(app, prefsBin, gateDeviceId, kGateUnrecognizedHint)) {
+            xcat::log::Warn("App", "exiting at startup: gate/1 re-activate cancelled");
+            AppWindow_Destroy(app);
+            xcat::log::Shutdown();
+            CoUninitialize();
+            xcat::app::ReleaseXcatSingleInstance();
+            return xcat::gate::kStartGateExitCode;
+        }
+        afterReactivate = true;
+    }
+
+    // 放行进主面板：若在线门慢路径把窗口缩成了对话框，恢复启动器原尺寸/位置。
+    SetWindowPos(app.hwnd, nullptr, gateSavedRect.left, gateSavedRect.top,
+                 gateSavedRect.right - gateSavedRect.left, gateSavedRect.bottom - gateSavedRect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
 
     xcat::app::LaunchUiState ui{};
     ui.prefsBinDir = prefsBin;
@@ -185,9 +268,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         xcat::log::Info("App", "pending auto gamania(HK) launch (defer 6s)");
     } else {
         msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
-        xcat::app::LaunchPanel_ArmStrategyPrep(ui, xcat::app::kGamaPassAutoPrepMs);
-        ui.status = "GAMA PASS：约 3 秒后自动换票（可先改成「手动启动并注入」）";
-        xcat::log::Info("App", "pending auto GamaPass launch (defer 3s)");
+        xcat::app::LaunchPanel_ArmGamaPassAutoLaunch(ui);
+        xcat::log::Info("App", "pending auto GamaPass launch (defer %us)",
+                        xcat::app::kGamaPassAutoPrepSec);
     }
 
     if (!msc::weblogin::Init(app.hwnd, &xcat::app::LaunchPanel_OnWebLog)) {
@@ -255,8 +338,13 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
             ExitProcess(static_cast<UINT>(code));
         }
         xcat::app::UpdateForcePollTick(xcat::app::kDefaultUpdateServiceUrl, prefsBin);
+        // 放在最小化 continue 之前：挂机时面板通常是最小化的，而那正是要取证的时段。
+        xcat::app::net_path::Tick();
 
         if (AppWindow_IsMinimized(app)) {
+            // F9 最小化跳过 Present；仍 Poll 以便卷軸叮咚等可播。
+            // 不自动 ShowWindow：避免桌面露出面板导致误触；气泡等用户自行还原再画。
+            xcat::app::notify::Poll(prefsBin);
             Sleep(50);
             continue;
         }

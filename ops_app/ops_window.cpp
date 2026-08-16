@@ -31,18 +31,8 @@ std::string ResolveOpsThemeBinDir() {
     wchar_t exe[MAX_PATH]{};
     const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
     if (!n || n >= MAX_PATH) return {};
-    std::wstring dir = xcat::ParentDirWithSlash(std::wstring(exe, exe + n));
-    // 优先与客户端共用 bin\XCat_data\state\user.ini
-    const std::wstring shared = dir + L"..\\bin\\XCat_data\\";
-    wchar_t full[MAX_PATH]{};
-    if (GetFullPathNameW(shared.c_str(), MAX_PATH, full, nullptr)) {
-        const DWORD attr = GetFileAttributesW(full);
-        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
-            return xcat::WideToUtf8(std::wstring(full));
-        }
-    }
-    // 回退：ops 自己的目录下 state\user.ini
-    return xcat::WideToUtf8(dir);
+    // OPS 主题独立落盘：bin_ops\state\user.ini，不读写客户端 bin\XCat_data。
+    return xcat::WideToUtf8(xcat::ParentDirWithSlash(std::wstring(exe, exe + n)));
 }
 
 void OpsRecaptureStyleBase() {
@@ -318,8 +308,7 @@ void OpsWindow_Destroy(OpsWindow& app) {
 }
 
 void OpsWindow_Show(OpsWindow& app) {
-    CenterWindowOnWorkArea(app.hwnd);
-    ShowWindow(app.hwnd, SW_SHOWDEFAULT);
+    ShowWindow(app.hwnd, SW_SHOWMAXIMIZED);
     UpdateWindow(app.hwnd);
 }
 

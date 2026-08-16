@@ -10,11 +10,13 @@
 #include "../ports/world_port.h"
 #include "../sellbag/sellbag.h"
 #include "../simple_combat/simple_combat.h"
+#include "../char_boot/char_boot.h"
 #include "../travel/travel.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
 #include "xcat_auto_supply.h"
 #include "xcat_item_catalog.h"
+#include "xcat_map_towns.h"
 #include "xcat_sellbag.h"
 
 #include <Windows.h>
@@ -22,10 +24,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <mutex>
 #include <string>
-#include <unordered_set>
 
 namespace x::features::auto_supply {
 
@@ -150,7 +150,8 @@ constexpr DWORD kGotoTimeoutMs = 180000;
 constexpr DWORD kWaitOpenTimeoutMs = 90000;
 constexpr DWORD kSellTimeoutMs = 120000;
 constexpr DWORD kBuyTimeoutMs = 120000;
-constexpr DWORD kReturnTimeoutMs = 180000;
+// 老机器 / 深洞多跳贴门慢；180s 易误熔断。回程不走卷，只赶路。
+constexpr DWORD kReturnTimeoutMs = 420000;
 constexpr DWORD kCooldownMs = 45000;
 // BIN 15:57：到站立刻 Resume，目标图仍 InterStage/lu=null → 黑屏卡住。
 constexpr DWORD kReturnStableMs = 2000;
@@ -173,47 +174,11 @@ constexpr int kMaxScrollTries = 3;
 constexpr DWORD kScrollRetryGapMs = 1600;
 constexpr int kInvConsume = 2;
 
-std::mutex gTownMu;
-std::unordered_set<int> gTownIds;
-bool gTownTried = false;
-
-void LoadTownIds() {
-    std::lock_guard<std::mutex> lock(gTownMu);
-    if (gTownTried) return;
-    gTownTried = true;
-    std::string path = runtime::GetBinDir() ? runtime::GetBinDir() : "";
-    if (!path.empty() && path.back() != '\\') path += '\\';
-    path += "dataservice\\map_info.tsv";
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return;
-    std::string line;
-    while (std::getline(f, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty() || line[0] == '#') continue;
-        const size_t t0 = line.find('\t');
-        if (t0 == std::string::npos) continue;
-        const int mapId = atoi(line.c_str());
-        const size_t t1 = line.find('\t', t0 + 1);
-        const size_t t2 = line.find('\t', t1 == std::string::npos ? line.size() : t1 + 1);
-        const size_t t3 = line.find('\t', t2 == std::string::npos ? line.size() : t2 + 1);
-        const size_t t4 = line.find('\t', t3 == std::string::npos ? line.size() : t3 + 1);
-        if (t3 == std::string::npos || t4 == std::string::npos) continue;
-        const int town = atoi(line.c_str() + t3 + 1);
-        if (town == 1 && mapId > 0) gTownIds.insert(mapId);
-    }
-    runtime::LogI("AutoSupply", "map_info towns loaded n=%zu", gTownIds.size());
-}
-
 bool IsTownMapIdHeuristic(int mapId) {
     if (mapId <= 0) return false;
-    // 挂机图禁记 / 城镇启发式：只用离线 map_info + 室外主城规则。
-    // 勿用 QueryNativeIsTown——拍卖绕过会把野图 IsTown 强制写成 1；且部分挂机图
-    //（如遺跡發掘地 10103010x）bak/活值也会长期为 1，导致 F5 RecordHangupFarmMap
-    // 误 skip town（BIN 2026-08-12）。
-    if (mapId % 1000000 == 0) return true;
-    LoadTownIds();
-    std::lock_guard<std::mutex> lock(gTownMu);
-    return gTownIds.count(mapId) != 0;
+    // 挂机图禁记 / 城镇判定：共用 common 真源（仅 map_info.town=1）。
+    // 勿用 QueryNativeIsTown / mapId%1000000==0（BIN 2026-08-15 沼澤地Ⅰ误判）。
+    return xcat::IsMapInfoTown(runtime::GetBinDir(), mapId);
 }
 
 bool IsTownMapName(const char* map) {
@@ -1072,6 +1037,12 @@ void TickIdle(DWORD now) {
     // 手动一趟必须优先于 pendingReturn：BIN「每次第一下无效」=
     // 续跑回挂机抢在卖装指令前，gTripReq 干等到回图结束才执行。
     if (gTripReq.load(std::memory_order_acquire)) {
+        if (char_boot::IsBusy()) {
+            gTripReq.store(false, std::memory_order_release);
+            Publish(notify::NotificationKind::Warning, "auto-supply-trip", "无法启动",
+                    "起号进行中");
+            return;
+        }
         if (!ports::world::IsPlayReady() || sellbag::IsBusy() || travel::IsActive()) return;
         char msg[96]{};
         if (!ResolveShopTarget(msg, sizeof(msg))) {
@@ -1174,6 +1145,7 @@ void TickIdle(DWORD now) {
     gLastBagPoll = now;
 
     if (!ports::world::IsPlayReady()) return;
+    if (char_boot::IsBusy()) return;
     if (sellbag::IsBusy() || travel::IsActive()) return;
 
     static int sPotionLowStreak = 0;
@@ -2277,6 +2249,11 @@ void RecordHangupFarmMap(const char* reason) {
     runtime::LogI("AutoSupply", "RecordHangupFarmMap %s (%s)", gLastFarmMap,
                   reason ? reason : "");
     PublishStatusIni();
+}
+
+bool IsTownMapIdHeuristic(int mapId) {
+    if (mapId <= 0) return false;
+    return xcat::IsMapInfoTown(runtime::GetBinDir(), mapId);
 }
 
 bool PeekLastFarmMap(char* out, size_t outCap) {

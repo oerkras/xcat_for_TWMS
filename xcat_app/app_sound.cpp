@@ -1,13 +1,17 @@
 #include "app_sound.h"
 
 #include "xcat_log.h"
+#include "xcat_scroll_voice.h"
 #include "xcat_sound.h"
 
 #include <thread>
 
 namespace xcat::app::sound {
 
-void Init() { xcat::sound::Init(); }
+void Init(const char* prefsBinDir) {
+    xcat::sound::Init();
+    xcat::sound::LoadScrollVoice(prefsBinDir);
+}
 
 void Shutdown() { xcat::sound::Shutdown(); }
 
@@ -47,7 +51,7 @@ void Notify() { xcat::sound::PlayAsync(xcat::sound::Id::Notify); }
 
 void Alarm() { xcat::sound::PlayAsync(xcat::sound::Id::Alarm); }
 
-void RestrictionAlarm() { xcat::sound::PlayAsync(xcat::sound::Id::RestrictionAlarm); }
+void RestrictionAlarm() { xcat::sound::PlayInterrupt(xcat::sound::Id::RestrictionAlarm); }
 
 void ScrollDrop() { xcat::sound::PlayAsync(xcat::sound::Id::ScrollDrop); }
 

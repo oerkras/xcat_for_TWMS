@@ -77,6 +77,7 @@ struct FlightState {
     float x = 0.f, y = 0.f;    // Ap
     float vx = 0.f, vy = 0.f;  // Ap.V（y 向下为正）
     bool onFh = false;         // CurFh 非空 = 仍挂台
+    int ma = -1;               // VecCtrl.MoveAction；4/5=站走，6/7=跳飞；读失败=-1
 };
 bool QueryFlightState(FlightState& out);
 
@@ -90,5 +91,9 @@ struct ImpactVelOpts {
     bool quietLog = true;
 };
 bool ImpactSetVelocity(float vx, float vy, ImpactRoute route, ImpactVelOpts opts = {});
+
+// 任意 VecCtrl（含怪）：直调 SetImpactNext。必须已在 MainPump 上。
+// 无 LocalUser、无无敌门，不走玩家 Impact 路径。
+bool SetImpactNextOnVc(void* vc, double vx, double vy);
 
 }  // namespace x::features::ports::teleport

@@ -1,5 +1,5 @@
 #pragma once
-// titlebar — Win32 标题栏显示角色 vitals + 金/经/物值每分钟收益（Classic TWMS）
+// titlebar — Win32 标题栏显示角色 vitals + 金/经/物值/MP/蓝瓶每分钟（Classic TWMS）
 //
 // 数据真源：DumpRestoredData B / runtime dump
 //   WorldManager → CharacterData(+0xE0).CharacterStat(+0x10) / BasicStat(+0xE8)

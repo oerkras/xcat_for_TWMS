@@ -4,12 +4,13 @@
 #endif
 #include "payload_status.h"
 
-#include "../features/auction_town_bypass/auction_town_bypass.h"
+#include "../features/auto_supply/auto_supply.h"
 #include "../features/ccu/ccu.h"
 #include "../features/channel_hop/channel_hop.h"
 #include "../features/frame_lock/frame_lock.h"
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/soft_login_probe/soft_login_probe.h"
+#include "../features/ports/mob_gather_port.h"
 #include "../features/ports/travel_port.h"
 #include "../features/ports/world_port.h"
 #include "../features/sellbag/sellbag.h"
@@ -37,11 +38,11 @@ constexpr DWORD kPublishIntervalMs = 500;
 
 // docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-06（与 anti_macro_port 对齐）
 constexpr char kAntiMacroUtilClass[] =
-    "db85bf94b41781c1a28efa19a10ec98eda78a02a25a3c54744ea0e6d580d412";
+    "a1ba7c522e1ab4ba635ab49512129c0b35ef7edbb6e2adbf5ea9cdf790f4f03";
 constexpr char kAntiMacroNonFiniteClass[] =
-    "a5c44934a6b6ca1a047cf4adabbf74be1ad985ef6db74c0cfdddff3bb35b50e";
+    "f97cd5fa9bd9845d8bef6a8a90ca5674c316f443c11982181d1b8d9ebdb668c";
 constexpr char kAntiMacroTextCaptchaClass[] =
-    "efba5610621bb4e48f76b652794ef0ee650966759e50b689197aada11b5ff75";
+    "ade4b2d0f8a10a31ab5f037bec1bd8e4787b39a9c0c43ffc4d9ddc533798be7";
 constexpr char kPrefabNonFinite[] = "UIAntiMacroNonFinite";
 constexpr char kPrefabTextCaptcha[] = "UIAntiMacroTextCaptcha";
 
@@ -94,21 +95,20 @@ void FillLeds(xcat::PayloadStatus& st) {
     const bool play = x::features::ports::world::IsPlayReady();
     st.playReady = play ? 1u : 0u;
 
-    int mapId = 0;
-    if (play) {
-        mapId = x::features::ports::world::GetMapId();
-        if (mapId <= 0) mapId = x::features::ports::travel::CurrentMapId();
+    int mapId = -1;
+    if (play && x::features::ports::world::HasMapData()) {
+        mapId = x::features::ports::travel::CurrentMapId();
     }
-    st.mapId = mapId > 0 ? static_cast<uint32_t>(mapId) : 0u;
+    st.mapId = mapId >= 0 ? static_cast<uint32_t>(mapId) : 0u;
     st.currentMapName[0] = '\0';
     st.channelId = 0;
     if (play) {
         const xcat::MapNamesPack& names = xcat::GetSharedMapNames(x::runtime::GetBinDir());
-        std::string label = xcat::MapNamesLabelById(names, mapId);
+        std::string label = mapId >= 0 ? xcat::MapNamesLabelById(names, mapId) : std::string{};
         if (label.empty()) label = "地圖";
         xcat::CopyUtf8Truncate(st.currentMapName, sizeof(st.currentMapName), label.c_str());
-        // 与 soft sticky / 官方 UI 观测同源：1-based ch.N；未知保持 0。
-        const int ch1 = x::features::channel_hop::LastKnownChannel1Based();
+        // 给人看的 ch.N（列表 id + 1）；未知保持 0，上报侧不得把 0 写成频道。
+        const int ch1 = x::features::channel_hop::DisplayChannel1Based();
         if (ch1 > 0) st.channelId = ch1;
     }
 
@@ -191,14 +191,22 @@ void PayloadStatus_Publish() {
     st.softLoginResult = x::features::soft_login_probe::ResultCode();
 
     {
-        const int town = x::features::auction_town_bypass::QueryNativeIsTown();
-        if (town >= 0) {
-            st.mapIsTownValid = 1u;
-            st.mapIsTown = town ? 1u : 0u;
-        } else {
-            st.mapIsTownValid = 0u;
-            st.mapIsTown = 0u;
-        }
+        unsigned on = 0, paused = 0, remainMs = 0, needMs = 0;
+        x::features::ports::mob_gather::QuerySoftReloginClock(&on, &paused, &remainMs, &needMs);
+        st.softReloginOn = on;
+        st.softReloginPaused = paused;
+        st.softReloginRemainMs = remainMs;
+        st.softReloginNeedMs = needMs;
+    }
+
+    // 与 auto_supply 同口径：仅 map_info.town=1（含药店室内；勿用 %1000000 / 原生 IsTown）。
+    if (st.mapId != 0u) {
+        st.mapIsTownValid = 1u;
+        st.mapIsTown =
+            x::features::auto_supply::IsTownMapIdHeuristic(static_cast<int>(st.mapId)) ? 1u : 0u;
+    } else {
+        st.mapIsTownValid = 0u;
+        st.mapIsTown = 0u;
     }
 
     st.writeTickMs = GetTickCount64();

@@ -8,10 +8,12 @@
 #include "../channel_hop/channel_hop.h"
 #include "../notify/notify.h"
 #include "../player_hide/player_hide.h"
+#include "../ports/mob_gather_port.h"
 #include "../ports/mob_pool_port.h"
 #include "../ports/user_pool_port.h"
 #include "../ports/world_port.h"
 #include "../simple_combat/simple_combat.h"
+#include "../travel/travel.h"
 #include "../../runtime/log.h"
 #include "xcat_sound.h"
 
@@ -26,9 +28,8 @@ namespace x::features::encounter {
 namespace {
 
 constexpr DWORD kTickMs = 200;
-constexpr DWORD kCheckIntervalMs = 1000;
-constexpr DWORD kConfirmMs = 1000;  // 再提速：2s→1s（采样约 1s，约一拍确认）
-constexpr DWORD kFirstLandGraceMs = 5000;
+constexpr DWORD kCheckIntervalMs = 200;  // 立马响应：采样跟 Tick（原 1s 最多空等一拍）
+constexpr DWORD kFirstLandGraceMs = 1000;  // 进图宽限缩短（原 5s；落地仍有人更快再 hop）
 // BIN：再 hop 宽限须 ≥ channel_hop 成功冷却，否则宽限一过就狂 RequestHop.
 // 停手恢复不绑这条：Hopping 在 !HasPending 后即可采样 Resume（出刀另受 hop 4s 静默）.
 constexpr DWORD kPostHopGraceMs = 0;  // 用户：遇人再 hop 不绑宽限（冷却已关；仅 HasPending 挡并发）
@@ -44,10 +45,12 @@ std::atomic<bool> gEnabled{false};
 std::atomic<bool> gStopCombat{true};
 std::atomic<bool> gReconnect{true};
 std::atomic<bool> gGmEscalate{true};
+std::atomic<bool> gStopGather{false};
 std::atomic<unsigned> gState{static_cast<unsigned>(State::Idle)};
 std::atomic<int> gLastOther{-1};
 std::atomic<int> gLastAdminLike{0};
 std::atomic<int> gLastHideSuspect{0};
+std::atomic<bool> gNeedSampleNow{false};
 
 DWORD gPhaseAt = 0;
 DWORD gLastSampleAt = 0;
@@ -193,6 +196,11 @@ bool IsTownLikeNoMobMap(int mapId, ports::mob::Snapshot* outSnap = nullptr,
     return n <= 0 && m == 0;
 }
 
+void SyncGatherPause() {
+    const bool want = gPaused && gStopGather.load();
+    x::features::ports::mob_gather::SetEncounterPause(want);
+}
+
 void PauseExposure(const ports::user_pool::RemoteThreatSample& t, bool threat) {
     const int other = t.remoteCount > 0 ? t.remoteCount : 1;
     char names[384]{};
@@ -217,6 +225,7 @@ void PauseExposure(const ports::user_pool::RemoteThreatSample& t, bool threat) {
         // GM 升级：无视「先停手」勾选，一律硬闸。
         if ((threat || gStopCombat.load()) && !auto_lie::IsBusy())
             simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, true);
+        SyncGatherPause();
         // 名单变化（新人进图）：日志 + 刷新通知，避免面板还挂着旧名。
         if (names[0] && std::strcmp(names, gLastNamesLog) != 0) {
             std::snprintf(gLastNamesLog, sizeof(gLastNamesLog), "%s", names);
@@ -229,11 +238,13 @@ void PauseExposure(const ports::user_pool::RemoteThreatSample& t, bool threat) {
     // GM 升级：无视「先停手」勾选，一律硬闸；普通遇人跟 autoReloginStopCombat。
     if (threat || gStopCombat.load())
         simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, true);
+    SyncGatherPause();
 
     std::snprintf(gLastNamesLog, sizeof(gLastNamesLog), "%s", names);
     publishPauseNotify(/*forceAlarm=*/true);
-    Log("pause other=%d names=[%s] threat=%d stopCombat=%d", other, names[0] ? names : "?",
-        threat ? 1 : 0, (int)gStopCombat.load());
+    Log("pause other=%d names=[%s] threat=%d stopCombat=%d stopGather=%d", other,
+        names[0] ? names : "?", threat ? 1 : 0, (int)gStopCombat.load(),
+        (int)gStopGather.load());
 }
 
 void ResumeExposure(bool townSkip = false) {
@@ -246,6 +257,7 @@ void ResumeExposure(bool townSkip = false) {
     simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, false);
     gPaused = false;
     gLastNamesLog[0] = 0;
+    SyncGatherPause();
     StopGmAlarm();
     if (townSkip) {
         Notify(notify::NotificationKind::Info, "encounter-town-skip", "无刷怪图已跳过遇人",
@@ -264,6 +276,7 @@ void ReleaseIfDisabled() {
             simple_combat::SetHardPause(simple_combat::HardPauseHolder::Encounter, false);
         gPaused = false;
         gLastNamesLog[0] = 0;
+        SyncGatherPause();
         StopGmAlarm();
         gHideSuspectStreak = 0;
         gPostHopClearStreak = 0;
@@ -299,6 +312,11 @@ void RequestHop(const ports::user_pool::RemoteThreatSample& t, bool threat) {
     const int other = t.remoteCount > 0 ? t.remoteCount : 1;
     char names[384]{};
     FormatRemoteNames(t, names, sizeof(names));
+    if (x::features::travel::IsActive()) {
+        Log("hop skip: travel active other=%d names=[%s] threat=%d", other,
+            names[0] ? names : "?", threat ? 1 : 0);
+        return;
+    }
     if (channel_hop::HasPending()) {
         Log("hop skip: channel_hop busy");
         return;
@@ -348,6 +366,8 @@ void OnMapChange(int mapId, DWORD now) {
     gConfirmSince = 0;
     gNotifyThreatKey = -1;
     gHideSuspectStreak = 0;
+    gLastOther.store(-1);
+    gNeedSampleNow.store(true);
     if (GetStateLocal() == State::Confirming) SetState(State::Watching);
     Log("map change id=%d grace=%ums", mapId, (unsigned)kFirstLandGraceMs);
     channel_hop::OnMapChanged(mapId);
@@ -373,6 +393,7 @@ void Init() {
     gHideSuspectStreak = 0;
     gPostHopClearStreak = 0;
     gLastNamesLog[0] = 0;
+    gNeedSampleNow.store(false);
     Log("Init (UserPool + optional GM/hide escalate + forced Alarm, no Reload)");
 }
 
@@ -391,9 +412,10 @@ void SetEnabled(bool on) {
     }
 }
 
-void SetStrategies(bool stopCombat, bool reconnect, bool gmEscalate) {
+void SetStrategies(bool stopCombat, bool reconnect, bool gmEscalate, bool stopGather) {
     gStopCombat.store(stopCombat);
     gReconnect.store(reconnect);
+    gStopGather.store(stopGather);
     const bool wasEscalate = gGmEscalate.exchange(gmEscalate);
     if (!reconnect && GetStateLocal() == State::Confirming) SetState(State::Watching);
     if (wasEscalate && !gmEscalate) {
@@ -401,6 +423,7 @@ void SetStrategies(bool stopCombat, bool reconnect, bool gmEscalate) {
         gNotifyThreatKey = -1;
         StopGmAlarm();
     }
+    SyncGatherPause();
 }
 
 State GetState() { return GetStateLocal(); }
@@ -425,6 +448,13 @@ int LastAdminLikeCount() { return gLastAdminLike.load(); }
 
 int LastHideSuspectCount() { return gLastHideSuspect.load(); }
 
+void InvalidateOccupancy() {
+    gLastOther.store(-1);
+    gNeedSampleNow.store(true);
+}
+
+void RequestSampleNow() { gNeedSampleNow.store(true); }
+
 bool HoldsCombatPause() {
     // GM 升级可在未勾「先停手」时仍钉硬闸；有 Encounter pause 即勿被 channel_hop 抢清。
     return gPaused && gEnabled.load();
@@ -447,6 +477,16 @@ void Tick(DWORD now) {
         gConfirmSince = 0;
         return;
     }
+    // 超级赶路途中不触发停手/换频（BIN 06:04：贴门中 hop 把行程截断）。
+    if (x::features::travel::IsActive()) {
+        if (GetStateLocal() == State::Confirming) SetState(State::Watching);
+        gConfirmSince = 0;
+        if (now - gLastHopDeferLog > kHopDeferLogMs) {
+            gLastHopDeferLog = now;
+            Log("defer travel active (no encounter hop/pause)");
+        }
+        return;
+    }
 
     const auto ss = ports::world::GetSceneState();
     if (ss == ports::world::SceneState::CashShop || ss == ports::world::SceneState::Login) {
@@ -455,7 +495,20 @@ void Tick(DWORD now) {
     }
 
     const int mapId = ports::world::GetMapId();
-    if (mapId > 0 && mapId != gLastMapId) OnMapChange(mapId, now);
+    if (mapId > 0 && mapId != gLastMapId) {
+        const int prev = gLastMapId;
+        if (prev <= 0) {
+            // 首次绑图不是换图。ResetForMapChange 会让 F5 交战被按回台上（BIN 16:22:39）。
+            gLastMapId = mapId;
+            gLandedAt = now;
+            Log("map bind id=%d (skip reset)", mapId);
+            channel_hop::OnMapChanged(mapId);
+            gLastOther.store(-1);
+            gNeedSampleNow.store(true);
+        } else {
+            OnMapChange(mapId, now);
+        }
+    }
     if (gLandedAt == 0) gLandedAt = now;
 
     if (GetStateLocal() == State::Hopping) {
@@ -480,7 +533,10 @@ void Tick(DWORD now) {
         // 宽限未满：保持 Hopping，落下去采样（可 ResumeExposure；再 hop 仍被下方门控拦住）.
     }
 
-    if (now - gLastSampleAt < kCheckIntervalMs) return;
+    const bool punch = gNeedSampleNow.exchange(false);
+    // 吸怪强制遇人停吸时把采样收到 worker 拍（200ms），缩短「有人进来还在吸」窗口。
+    const DWORD sampleIv = gStopGather.load() ? kTickMs : kCheckIntervalMs;
+    if (!punch && now - gLastSampleAt < sampleIv) return;
     gLastSampleAt = now;
 
     ports::user_pool::RemoteThreatSample threat{};
@@ -585,8 +641,8 @@ void Tick(DWORD now) {
 
     // other > 0（普通远程）
     gPostHopClearStreak = 0;
-    // 普通策略全关：只采样/记账，不停手、不通知、不换频（GM 升级已在上方 early return）。
-    if (!gStopCombat.load() && !gReconnect.load()) {
+    // 普通策略全关：只采样/记账，不停手、不停吸、不通知、不换频（GM 升级已在上方 early return）。
+    if (!gStopCombat.load() && !gReconnect.load() && !gStopGather.load()) {
         SetState(State::Idle);
         gConfirmSince = 0;
         return;
@@ -615,19 +671,8 @@ void Tick(DWORD now) {
         return;
     }
 
-    if (gConfirmSince == 0) {
-        gConfirmSince = now;
-        SetState(State::Confirming);
-        char names[384]{};
-        FormatRemoteNames(threat, names, sizeof(names));
-        Log("confirm start other=%d names=[%s]", other, names[0] ? names : "?");
-        return;
-    }
-    if (now - gConfirmSince >= kConfirmMs) {
-        RequestHop(threat, false);
-    } else {
-        SetState(State::Confirming);
-    }
+    // 用户：遇人立马换频——跳过 confirm 窗（与 GM 升级同拍 RequestHop）
+    RequestHop(threat, false);
 }
 
 void StartWorker() {

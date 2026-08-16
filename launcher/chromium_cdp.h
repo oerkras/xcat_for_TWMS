@@ -71,6 +71,10 @@ public:
     // Runtime.evaluate；outResultJson 为 CDP result.result.value 的 JSON 文本（字符串会带引号）
     bool Evaluate(const std::wstring& jsExpression, std::string& outResultJson,
                   const LogFn& log = nullptr);
+
+    // 任意 CDP 方法（Page / Runtime / DOMStorage / Input 等稳定域）
+    bool Command(const std::string& method, const std::string& paramsJson, std::string& resultJson,
+                 const LogFn& log = nullptr);
     // 当前页 URL
     bool GetUrl(std::wstring& outUrl, const LogFn& log = nullptr);
 

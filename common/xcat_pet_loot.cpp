@@ -49,6 +49,7 @@ bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTi
     bool b = false;
     if (IniGetBool(ini, "pet_loot", "enabled", b)) out.enabled = b ? 1u : 0u;
     if (IniGetBool(ini, "pet_loot", "footEnabled", b)) out.footEnabled = b ? 1u : 0u;
+    if (IniGetBool(ini, "pet_loot", "nativeVac", b)) out.nativeVacEnabled = b ? 1u : 0u;
     if (IniGetBool(ini, "pet_loot", "mapVacuumEnabled", b)) out.mapVacuumEnabled = b ? 1u : 0u;
     IniGetU32(ini, "pet_loot", "intervalMs", out.intervalMs);
     IniGetU32(ini, "pet_loot", "burstPerTick", out.burstPerTick);
@@ -61,33 +62,43 @@ bool ReadPetLootIni(const char* binDir, PetLootConfig& out, uint64_t* outWriteTi
     if (IniGetBool(ini, "pet_loot", "skipFilterEnabled", b)) out.skipFilterEnabled = b ? 1u : 0u;
     if (IniGetBool(ini, "pet_loot", "highValuePriority", b)) out.highValuePriority = b ? 1u : 0u;
     if (IniGetBool(ini, "pet_loot", "scrollDropNotify", b)) out.scrollDropNotify = b ? 1u : 0u;
+    if (IniGetBool(ini, "pet_loot", "dropSnapLand", b)) out.dropSnapLand = b ? 1u : 0u;
+    if (IniGetBool(ini, "pet_loot", "dropAccelFall", b)) out.dropAccelFall = b ? 1u : 0u;
     uint32_t skipCount = 0;
     const bool hadSkip = IniGetU32(ini, "pet_loot", "skipCount", skipCount);
     if (hadSkip) {
-        out.skipRuleCount = skipCount > static_cast<uint32_t>(kPetLootMaxSkipRules)
-                                ? static_cast<uint32_t>(kPetLootMaxSkipRules)
-                                : skipCount;
-        for (uint32_t i = 0; i < out.skipRuleCount; ++i) {
-            char prefix[32]{};
-            snprintf(prefix, sizeof(prefix), "skip.%u.", i + 1);
-            PetLootSkipRule& r = out.skipRules[i];
-            r = {};
-            r.enabled = 1;
-            bool en = true;
-            if (IniGetBool(ini, "pet_loot", (std::string(prefix) + "enabled").c_str(), en))
-                r.enabled = en ? 1u : 0u;
-            IniGetU32(ini, "pet_loot", (std::string(prefix) + "itemId").c_str(), r.itemId);
-            std::string name;
-            if (IniGetString(ini, "pet_loot", (std::string(prefix) + "nameKey").c_str(), name)) {
-                strncpy_s(r.nameKey, name.c_str(), _TRUNCATE);
-                if (r.itemId == 0 && !name.empty()) {
-                    char* end = nullptr;
-                    const unsigned long v = strtoul(name.c_str(), &end, 10);
-                    if (end && *end == '\0' && v > 0 && v < 0x7FFFFFFFul) r.itemId = (uint32_t)v;
+        // skipCount=0 且关过滤：多为面板空框误写盘（冲掉默认「箭矢/彈丸」）。
+        // 真想关黑名单：应保留关键词、只关 skipFilterEnabled（面板注释约定）。
+        if (skipCount == 0 && !out.skipFilterEnabled) {
+            ApplyDefaultSkipRules(out);
+            out.skipFilterEnabled = 1;
+        } else {
+            out.skipRuleCount = skipCount > static_cast<uint32_t>(kPetLootMaxSkipRules)
+                                    ? static_cast<uint32_t>(kPetLootMaxSkipRules)
+                                    : skipCount;
+            for (uint32_t i = 0; i < out.skipRuleCount; ++i) {
+                char prefix[32]{};
+                snprintf(prefix, sizeof(prefix), "skip.%u.", i + 1);
+                PetLootSkipRule& r = out.skipRules[i];
+                r = {};
+                r.enabled = 1;
+                bool en = true;
+                if (IniGetBool(ini, "pet_loot", (std::string(prefix) + "enabled").c_str(), en))
+                    r.enabled = en ? 1u : 0u;
+                IniGetU32(ini, "pet_loot", (std::string(prefix) + "itemId").c_str(), r.itemId);
+                std::string name;
+                if (IniGetString(ini, "pet_loot", (std::string(prefix) + "nameKey").c_str(), name)) {
+                    strncpy_s(r.nameKey, name.c_str(), _TRUNCATE);
+                    if (r.itemId == 0 && !name.empty()) {
+                        char* end = nullptr;
+                        const unsigned long v = strtoul(name.c_str(), &end, 10);
+                        if (end && *end == '\0' && v > 0 && v < 0x7FFFFFFFul)
+                            r.itemId = (uint32_t)v;
+                    }
                 }
             }
         }
-        // skipCount=0：尊重用户清空；缺键时保留 SetDefaults 的「箭矢/彈丸」
+        // skipCount 缺键：保留 SetDefaults 的「箭矢/彈丸」
     }
     PetLootNormalize(out);
     if (outWriteTick) IniGetU64(ini, "pet_loot", "writeTickMs", *outWriteTick);
@@ -104,6 +115,7 @@ bool WritePetLootIni(const char* binDir, const PetLootConfig& cfg, uint64_t writ
         IniSetU64(ini, "pet_loot", "writeTickMs", writeTickMs);
         IniSetBool(ini, "pet_loot", "enabled", cfg.enabled != 0);
         IniSetBool(ini, "pet_loot", "footEnabled", cfg.footEnabled != 0);
+        IniSetBool(ini, "pet_loot", "nativeVac", cfg.nativeVacEnabled != 0);
         IniSetBool(ini, "pet_loot", "mapVacuumEnabled", cfg.mapVacuumEnabled != 0);
         IniSetU32(ini, "pet_loot", "intervalMs", cfg.intervalMs);
         IniSetU32(ini, "pet_loot", "burstPerTick", cfg.burstPerTick);
@@ -120,6 +132,8 @@ bool WritePetLootIni(const char* binDir, const PetLootConfig& cfg, uint64_t writ
         IniSetBool(ini, "pet_loot", "skipFilterEnabled", cfg.skipFilterEnabled != 0);
         IniSetBool(ini, "pet_loot", "highValuePriority", cfg.highValuePriority != 0);
         IniSetBool(ini, "pet_loot", "scrollDropNotify", cfg.scrollDropNotify != 0);
+        IniSetBool(ini, "pet_loot", "dropSnapLand", cfg.dropSnapLand != 0);
+        IniSetBool(ini, "pet_loot", "dropAccelFall", cfg.dropAccelFall != 0);
         // 清理已删除的角色全图吸键（charDrop*）
         IniEraseKeysWithPrefix(ini, "pet_loot", "charDrop");
         IniEraseKeysWithPrefix(ini, "pet_loot", "skip.");
@@ -169,12 +183,18 @@ void PetLootNormalize(PetLootConfig& cfg) {
     cfg.version = kPetLootVersion;
     cfg.enabled = cfg.enabled ? 1u : 0u;
     cfg.footEnabled = cfg.footEnabled ? 1u : 0u;
+    cfg.nativeVacEnabled = cfg.nativeVacEnabled ? 1u : 0u;
     cfg.mapVacuumEnabled = cfg.mapVacuumEnabled ? 1u : 0u;
     cfg.charVacEnabled = cfg.charVacEnabled ? 1u : 0u;
     // 用户面禁用：配置层掐死，避免旧 ini / 面板残留仍驱动 payload。
     if (!kPetLootCharVacUserEnabled) cfg.charVacEnabled = 0;
-    // 三种吸物模式互斥：宠吸 > 人物直吸 > 脚边（脚下只触发原生口，仍与宠吸分时）
-    if (cfg.enabled) {
+    // 四种吸物互斥：变态宠吸 > 宠吸 > 人物直吸 > 脚边
+    if (cfg.nativeVacEnabled) {
+        cfg.enabled = 0;
+        cfg.mapVacuumEnabled = 0;
+        cfg.charVacEnabled = 0;
+        cfg.footEnabled = 0;
+    } else if (cfg.enabled) {
         cfg.charVacEnabled = 0;
         cfg.footEnabled = 0;
     } else if (cfg.charVacEnabled) {
@@ -187,6 +207,8 @@ void PetLootNormalize(PetLootConfig& cfg) {
     cfg.skipFilterEnabled = cfg.skipFilterEnabled ? 1u : 0u;
     cfg.highValuePriority = cfg.highValuePriority ? 1u : 0u;
     cfg.scrollDropNotify = cfg.scrollDropNotify ? 1u : 0u;
+    cfg.dropSnapLand = cfg.dropSnapLand ? 1u : 0u;
+    cfg.dropAccelFall = cfg.dropAccelFall ? 1u : 0u;
     if (cfg.skipRuleCount > static_cast<uint32_t>(kPetLootMaxSkipRules))
         cfg.skipRuleCount = static_cast<uint32_t>(kPetLootMaxSkipRules);
     for (uint32_t i = 0; i < cfg.skipRuleCount; ++i) {

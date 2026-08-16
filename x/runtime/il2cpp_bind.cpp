@@ -478,7 +478,7 @@ GcThreadScope::~GcThreadScope() {
 bool RuntimeClassInit(void* klass) {
     if (!Ensure() || !klass || !gExp.runtimeClassInit) return false;
     if (!ManagedAllocSafe()) {
-        x::runtime::LogWThrottled(202, 3000, "Il2Cpp",
+        x::runtime::LogWThrottled(202, 30000, "Il2Cpp",
                                   "skip runtimeClassInit off-pump — avoid GC unknown-thread");
         return false;
     }

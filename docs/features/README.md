@@ -16,6 +16,7 @@
 | [`ops/架构总览.md`](ops/架构总览.md) | TWMS 分层 DAG；`xcat_app` 内嵌 WebView / GamaPass 换票 |
 | [`ops/日志系统.md`](ops/日志系统.md) | 统一 `xcat_log`：launcher / inject / payload JSONL + GUI callback |
 | [`ops/il2cpp托管调用线程规约.md`](ops/il2cpp托管调用线程规约.md) | **托管调用必须在 MainPump 上**：换图黑屏根因（Class::Init 被打断）、故障链反汇编、`il2cpp_fault_probe` / `hang_autopsy` 排障手册 |
+| [`ops/GA-remount-Agent清单.md`](ops/GA-remount-Agent清单.md) | **客户端更新换 GA 偏移**：`ga_remount.py map/audit`；Agent 硬停（禁二次 `--apply`、禁盲搜体内点） |
 | [`unity_kbd/模块设计.md`](unity_kbd/模块设计.md) | **InputSystem 键盘真源** ✅：QueueEvent + 自管 Repush + `HoldUntil`；走路 / Travel ↑ / 定时键同路 |
 
 ---
@@ -48,6 +49,7 @@
 | [`attack_rpc/P0b_出站Encode与Send锚点.md`](attack_rpc/P0b_出站Encode与Send锚点.md) | OutPacket/NM.Send 新 RVA；复用 security/attack_speed/sellbag 研究 |
 | [`attack_rpc/P0c_攻包BODY布局.md`](attack_rpc/P0c_攻包BODY布局.md) | 现网 TryDoing* Encode 序；命中环；`Network_SendOutPacket@0x1CB7CE0` |
 | [`attack_rpc/P1_探针port.md`](attack_rpc/P1_探针port.md) | 攻包伪造探针；默认关；`ATTACK_RPC=1` |
+| [`attack_rpc/P2_物落脚下.md`](attack_rpc/P2_物落脚下.md) | **EncodeVector2 翻 Y**；命中环写角色脚下；探针直写 AbsPos Y 会把掉落抛到头顶 |
 | [`attack_speed/P0a_出刀忙锁与Prepare链.md`](attack_speed/P0a_出刀忙锁与Prepare链.md) | `SetAttackAction` → busy → Prepare → Slot14 解锁；排除 hitstun/AntiRepeat |
 | [`attack_speed/P0b_双速系统与字段表.md`](attack_speed/P0b_双速系统与字段表.md) | ActionSpeed vs 武器档/Booster；Forced→`+80`；CTS 7/11 表 |
 | [`attack_speed/P0c_TemporaryStat生命周期.md`](attack_speed/P0c_TemporaryStat生命周期.md) | Decode/Reset/CheckByTime；Speed 客户端不自清 |
@@ -61,6 +63,7 @@
 | [`teleport/P0c_视觉层同步链.md`](teleport/P0c_视觉层同步链.md) | **皮跟谁走**：`VecCtrl.GetPos()` = `round(lerp(Ap, Apl, alpha))`、`Apl` 由 `BeginUpdateActive` 每帧滚动、Slot 16 写 TRS 的三道门控与整数脏检查；实证 `Pos@0x64` 不参与视觉；「改坐标皮出错」逐症状机制对照 |
 | [`mob_pool/活怪n与刷怪槽M.md`](mob_pool/活怪n与刷怪槽M.md) | **n**=MobPool 活怪 / **M**=LifeList 刷怪槽；实现 +「为何 n≪M」官方引擎说明；BIN 自洽判据 |
 | [`mob_scan/模块设计.md`](mob_scan/模块设计.md) | ✅ 扫怪 worker：面板周期、事件唤醒、按需 Lite、MobCtrl、相对旧实现优势；消费端协作 |
+| [`mob_gather/模块设计.md`](mob_gather/模块设计.md) | 吸怪（首页卡）：本地模拟怪卸台 + F5 控制律吸到面前地面；默认关、落盘、**不承诺防抢** |
 | [`mob_pool/P0a_OnLocalMob与Init包体.md`](mob_pool/P0a_OnLocalMob与Init包体.md) | 🔍 Mob 包族：`EnterField`/`LeaveField`/`ChangeController`；`SetLocalMob`/`SetRemoteMob`；`Mob.Init` 包体；方案 ⑥ 观察点（已纠名） |
 | [`mob_pool/P0b_MI观察与按需Collect.md`](mob_pool/P0b_MI观察与按需Collect.md) | 📐 设计：MI 观察 Enter/Leave → `RequestImmediateScan`；SetRemote **条件踢池**；**未落码** |
 | [`mob_pool/P0c_Enter到开火时间线.md`](mob_pool/P0c_Enter到开火时间线.md) | 🔍 Enter→开火门控；**FindHit 要 inViewSplit、不要 MobCtrl/Active**；感知 vs 贴身/RTT |
@@ -91,9 +94,10 @@
 | [`auto_lie/基建与离线验收.md`](auto_lie/基建与离线验收.md) | 离线基建验收：就绪灯、本地/LLM 夹具泵（真 PNG）、报警·烟测、BIN 清单 |
 | [`auto_lie/P0a_锚点复核.md`](auto_lie/P0a_锚点复核.md) | **测谎数据源**：UIAntiMacro* Prefab、jpegData/path、WM+0x1D0、`IsOpenAntiMacro@0x936780` |
 | [`auto_supply/模块设计.md`](auto_supply/模块设计.md) | **自动回城卖/补给**：就近寻店卖装 + 去店用卷 `SendPortalScrollUseRequest`（2030000/2030059）+ 可选补货；Charge/回程用卷待验 |
+| [`char_boot/模块设计.md`](char_boot/模块设计.md) | **一键起号（v1 法师）** 📐 独立 TAB、未落码：岛上 `farmMap` + 转职后 `hangupMap`；船费 150；可选自动建角 |
 | [`auto_supply/P2_货架寻店.md`](auto_supply/P2_货架寻店.md) | 按货架/物品码全局寻店：**不做**（无 SetShopDlg Commodity 全表；产品语义为就近能卖） |
 | [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认开；apply-once+1s hold；`Init` 不清 desired + boot 末 ForceApply；服端断线+守护会干净重拉 |
-| [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ 数据面清 `LocalUser+0x118`；抑制客户端警戒；默认关 |
+| [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ IsAlertMode threshold global（装一次）；抑制客户端警戒；默认开 |
 
 ---
 
@@ -137,6 +141,7 @@
 | `x/features/ports/player_combat_port.*` | LocalUser 战斗坐标 |
 | `x/features/ports/attack_input_port.*` | 普攻键脉冲（InjectKeyHold） |
 | `x/features/mob_scan/` | 扫怪 worker → `[core] mobScanIntervalMs` · 事件唤醒 / 按需刷新；见 [`mob_scan/模块设计.md`](mob_scan/模块设计.md) · n/M 见 [`mob_pool/活怪n与刷怪槽M.md`](mob_pool/活怪n与刷怪槽M.md) |
+| `x/features/mob_gather/` + `ports/mob_gather_port.*` | 吸怪（首页）→ `[core] mobGather` + 倍率/防抖（与 F5 滑翔同构）；见 [`mob_gather/模块设计.md`](mob_gather/模块设计.md) |
 | `x/features/simple_combat/` | 状态机打怪 → `[core] simpleCombat` · F5 · Impact贴怪默认（含 `heli_rotor` 旋翼环）· **防抖** [`simple_combat/防抖.md`](simple_combat/防抖.md) · `logs/combat.log` |
 | `x/features/ports/teleport_port.*` | QueryFlightState / ImpactSetVelocity / ImpactImpulseToward + fill+Doing；见 [`teleport/模块设计.md`](teleport/模块设计.md) · [`P0d`](teleport/P0d_fill_slim软重载结案.md) |
 | `x/features/fly/` | F6 Impact 飞 + fh-ban；见 [`fly/模块设计.md`](fly/模块设计.md) |
@@ -152,6 +157,7 @@
 | `x/features/channel_hop/` | 随机换频 → `[core] manualRejoinSeq`；见 [`channel_hop/模块设计.md`](channel_hop/模块设计.md) |
 | `x/features/encounter/` | 遇人策略 → `[core] autoRelogin*`；见 [`encounter/模块设计.md`](encounter/模块设计.md) |
 | `x/features/auto_supply/` + `ports/shop_port.*` + `ports/consumable_port.*` | 自动回城卖/补给 → `[auto_supply]`；去店用卷 `PortalScroll`；见 [`auto_supply/模块设计.md`](auto_supply/模块设计.md) |
+| `x/features/char_boot/`（预定） | 一键起号编排 → `[char_boot]`；独立 TAB；v1 只做法师；见 [`char_boot/模块设计.md`](char_boot/模块设计.md) |
 | `x/features/auction_town_bypass/` | 野外开拍卖 → `[core] auctionTownBypass`；见 [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) |
 | `x/features/drop_alert_bypass/` | 战斗中可丢物 → `[core] dropAlertBypass`；见 [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) |
 | `DumpRestoredData/` | dump.cs 符号恢复分档（titlebar 偏移锚点） |

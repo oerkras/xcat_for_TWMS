@@ -12,6 +12,7 @@
 #include "xcat_imgui_theme.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -452,7 +453,17 @@ void AppWindow_DragFromLastItem(AppWindow& app) {
     SetWindowPos(app.hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+// 启动器不要 Tooltip 浮层（挡控件）。调用点可留着当注释；这里统一不画。
+static void SuppressImGuiTooltips() {
+    ImGuiContext* ctx = ImGui::GetCurrentContext();
+    if (!ctx) return;
+    for (ImGuiWindow* w : ctx->Windows) {
+        if (w && (w->Flags & ImGuiWindowFlags_Tooltip)) w->Hidden = true;
+    }
+}
+
 void AppWindow_EndFrame(AppWindow& app) {
+    SuppressImGuiTooltips();
     ImGui::Render();
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     const HRESULT hr = app.swapChain->Present(1, 0);

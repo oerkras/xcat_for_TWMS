@@ -23,10 +23,15 @@ export function createDeviceAccess(opts) {
 
   /** @type {"deny"|"allow"} */
   let mode = "deny";
+  // 严格模式：为 true 时，探活缺有效签名 TOKEN（无可信 uid）一律拒。默认关（不误伤未升级客户端）。
+  let strictToken = false;
   /** @type {Map<string, any>} */
   const bans = new Map();
   /** @type {Map<string, any>} */
   const allows = new Map();
+  // 卡级吊销名单：jti -> row。与 bans 分开——bans 封的是「人/设备」，这里废的是「某一张卡」。
+  /** @type {Map<string, any>} */
+  const revokedJti = new Map();
   let saveChain = Promise.resolve();
 
   function normalizePart(value, max = 80) {
@@ -74,11 +79,35 @@ export function createDeviceAccess(opts) {
       .slice(0, 48);
   }
 
+  function normalizeUid(value) {
+    // 个人签名 TOKEN 的 uid（来自验签，改硬件也改不掉）；去控制符/首尾空白，最长 64。
+    // 不做 lowercase：兼容中文名，且与配额面板显示的 uid 保持一致，便于按 uid 复制封禁。
+    return String(value || "")
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim()
+      .slice(0, 64);
+  }
+
+  function normalizeJti(value) {
+    // 卡号：签发时写进 TOKEN payload 的 jti（hex）。按 uid 封是封人，按 jti 废是废单张卡——
+    // 续签后可以只作废泄露的那张，人还能继续用新卡。老卡 payload 无 jti，取到空即跳过判定。
+    return String(value || "")
+      .replace(/[^0-9a-zA-Z_-]/g, "")
+      .toLowerCase()
+      .slice(0, 32);
+  }
+
   function tokenKey(tok) {
     return tok ? `tok:${tok}` : "";
   }
 
-  function makeEntryKey({ machine, deviceId, mac, token }) {
+  function uidKey(uid) {
+    return uid ? `uid:${uid}` : "";
+  }
+
+  function makeEntryKey({ machine, deviceId, mac, token, uid }) {
+    const u = normalizeUid(uid);
+    if (u) return uidKey(u); // uid 最可信（签名 TOKEN，改硬件也不变）→ 最高优先
     const tok = normalizeToken(token);
     if (tok) return tokenKey(tok);
     const macHex = normalizeMac(mac);
@@ -91,7 +120,12 @@ export function createDeviceAccess(opts) {
     return "";
   }
 
-  function findInMap(map, { machine, deviceId, macs, token }) {
+  function findInMap(map, { machine, deviceId, macs, token, uid }) {
+    const u = normalizeUid(uid);
+    if (u) {
+      const byUid = map.get(uidKey(u));
+      if (byUid) return byUid;
+    }
     const tok = normalizeToken(token);
     if (tok) {
       const byTok = map.get(tokenKey(tok));
@@ -112,7 +146,7 @@ export function createDeviceAccess(opts) {
       const byId = map.get(`id:${d}`);
       if (byId) return byId;
     }
-    // 故意不匹配 host: —— 仅计算机名会误伤同名机；须 MAC / deviceId / TOKEN。
+    // 故意不匹配 host: —— 仅计算机名会误伤同名机；须 uid / MAC / deviceId / TOKEN。
     return null;
   }
 
@@ -121,12 +155,16 @@ export function createDeviceAccess(opts) {
     const deviceId = String(row?.deviceId || "").trim().slice(0, 64);
     const macHex = normalizeMac(row?.mac || "");
     let token = normalizeToken(row?.token || "");
+    let uid = normalizeUid(row?.uid || "");
     let key = String(row?.key || "").trim();
     if (key.startsWith("host:")) key = ""; // 历史 host: 专条作废
-    if (!key) key = makeEntryKey({ machine, deviceId, mac: macHex, token });
+    if (!key) key = makeEntryKey({ machine, deviceId, mac: macHex, token, uid });
     if (!key) return null;
     if (!token && key.startsWith("tok:")) {
       token = normalizeToken(key.slice(4));
+    }
+    if (!uid && key.startsWith("uid:")) {
+      uid = normalizeUid(key.slice(4));
     }
     if (key.startsWith("pass:")) return null;
     return {
@@ -135,15 +173,18 @@ export function createDeviceAccess(opts) {
       deviceId,
       mac: formatMac(macHex),
       token,
+      uid,
       device:
         String(row?.device || "").slice(0, 96) ||
-        (token
-          ? `tok_${token.slice(0, 8)}`
-          : macHex
-            ? `mac_${macHex.slice(0, 8)}`
-            : machine && deviceId
-              ? `${machine}_${deviceId.slice(0, 8)}`
-              : machine || deviceId.slice(0, 16)),
+        (uid
+          ? `uid_${uid.slice(0, 12)}`
+          : token
+            ? `tok_${token.slice(0, 8)}`
+            : macHex
+              ? `mac_${macHex.slice(0, 8)}`
+              : machine && deviceId
+                ? `${machine}_${deviceId.slice(0, 8)}`
+                : machine || deviceId.slice(0, 16)),
       reason: String(row?.reason || fallbackReason).trim().slice(0, 200) || fallbackReason,
       at: String(row?.at || row?.bannedAt || row?.allowedAt || ""),
       by: String(row?.by || row?.bannedBy || row?.allowedBy || "ops").slice(0, 40),
@@ -157,6 +198,27 @@ export function createDeviceAccess(opts) {
       const row = rowFromRaw(raw, fallbackReason);
       if (!row) continue;
       map.set(row.key, row);
+    }
+  }
+
+  function jtiRowFromRaw(raw) {
+    const jti = normalizeJti(raw?.jti || raw?.id);
+    if (!jti) return null;
+    return {
+      jti,
+      uid: normalizeUid(raw?.uid || ""),
+      reason: String(raw?.reason || "ops 废卡").trim().slice(0, 200) || "ops 废卡",
+      at: String(raw?.at || ""),
+      by: String(raw?.by || "ops").slice(0, 40),
+    };
+  }
+
+  function loadJtiMap(list) {
+    revokedJti.clear();
+    if (!Array.isArray(list)) return;
+    for (const raw of list) {
+      const row = jtiRowFromRaw(raw);
+      if (row) revokedJti.set(row.jti, row);
     }
   }
 
@@ -183,10 +245,12 @@ export function createDeviceAccess(opts) {
     }
 
     mode = String(parsed?.mode || "deny").toLowerCase() === "allow" ? "allow" : "deny";
+    strictToken = parsed?.strictToken === true;
     loadMap(bans, parsed?.bans, "ops ban");
     loadMap(allows, parsed?.allows, "ops allow");
+    loadJtiMap(parsed?.revokedJti);
     logInfo(
-      `device access loaded mode=${mode} bans=${bans.size} allows=${allows.size} -> ${path.relative(repoRoot, accessPath)}`,
+      `device access loaded mode=${mode} strictToken=${strictToken} bans=${bans.size} allows=${allows.size} revokedCards=${revokedJti.size} -> ${path.relative(repoRoot, accessPath)}`,
     );
   }
 
@@ -198,9 +262,13 @@ export function createDeviceAccess(opts) {
           {
             version: 1,
             mode,
+            strictToken,
             updatedAt: ts(),
             bans: [...bans.values()].sort((a, b) => String(a.at).localeCompare(String(b.at))),
             allows: [...allows.values()].sort((a, b) => String(a.at).localeCompare(String(b.at))),
+            revokedJti: [...revokedJti.values()].sort((a, b) =>
+              String(a.at).localeCompare(String(b.at)),
+            ),
           },
           null,
           2,
@@ -213,20 +281,22 @@ export function createDeviceAccess(opts) {
     return saveChain;
   }
 
-  function upsert(map, { machine, deviceId, mac, token, reason, by }, fallbackReason) {
+  function upsert(map, { machine, deviceId, mac, token, uid, reason, by }, fallbackReason) {
     const macHex = normalizeMac(mac);
     const m = normalizePart(machine);
     const d = normalizePart(deviceId, 64);
     const tok = normalizeToken(token);
+    const u = normalizeUid(uid);
     const keys = [];
+    if (u) keys.push(uidKey(u));
     if (tok) keys.push(tokenKey(tok));
     if (macHex) keys.push(`mac:${macHex}`);
     if (m && d) keys.push(`dev:${m}:${d}`);
     else if (d) keys.push(`id:${d}`);
-    // 禁止仅 host:（同名机误伤）；TOKEN / deviceId / MAC 至少其一
+    // 禁止仅 host:（同名机误伤）；uid / TOKEN / deviceId / MAC 至少其一
     const uniq = [...new Set(keys)];
     if (!uniq.length) {
-      const err = new Error("deviceId / mac / token required (host-only not allowed)");
+      const err = new Error("uid / deviceId / mac / token required (host-only not allowed)");
       err.status = 400;
       throw err;
     }
@@ -239,6 +309,7 @@ export function createDeviceAccess(opts) {
           deviceId: String(deviceId || "").trim().slice(0, 64),
           mac: macHex,
           token: tok,
+          uid: u,
           reason: reason || fallbackReason,
           at: ts(),
           by: by || "ops",
@@ -250,14 +321,14 @@ export function createDeviceAccess(opts) {
       if (!primary) primary = row;
     }
     if (!primary) {
-      const err = new Error("deviceId / mac / token required");
+      const err = new Error("uid / deviceId / mac / token required");
       err.status = 400;
       throw err;
     }
     return primary;
   }
 
-  function remove(map, { key, machine, deviceId, mac, token }) {
+  function remove(map, { key, machine, deviceId, mac, token, uid }) {
     const explicit = String(key || "").trim();
     let seed = null;
     if (explicit) {
@@ -268,7 +339,9 @@ export function createDeviceAccess(opts) {
     const m = normalizePart(machine || seed?.machine || "");
     const d = normalizePart(deviceId || seed?.deviceId || "", 64);
     const tok = normalizeToken(token || seed?.token || "");
+    const u = normalizeUid(uid || seed?.uid || "");
     const candidates = [];
+    if (u) candidates.push(uidKey(u));
     if (tok) candidates.push(tokenKey(tok));
     if (macHex) candidates.push(`mac:${macHex}`);
     if (m && d) candidates.push(`dev:${m}:${d}`);
@@ -281,34 +354,36 @@ export function createDeviceAccess(opts) {
         map.delete(k);
       }
     }
-    // 扫全表：ban/unban 可能留下同机不同 key（tok/mac/dev）孤儿条，解禁后仍命中 evaluate。
-    if (tok || macHex || d || (m && d)) {
+    // 扫全表：ban/unban 可能留下同机不同 key（uid/tok/mac/dev）孤儿条，解禁后仍命中 evaluate。
+    if (u || tok || macHex || d || (m && d)) {
       for (const [k, row] of [...map.entries()]) {
         if (!row) continue;
+        const rowUid = normalizeUid(row.uid || (String(k).startsWith("uid:") ? k.slice(4) : ""));
         const rowTok = normalizeToken(row.token || (String(k).startsWith("tok:") ? k.slice(4) : ""));
         const rowMac = normalizeMac(row.mac || (String(k).startsWith("mac:") ? k.slice(4) : ""));
         const rowM = normalizePart(row.machine || "");
         const rowD = normalizePart(row.deviceId || "", 64);
+        const hitUid = u && rowUid && u === rowUid;
         const hitTok = tok && rowTok && tok === rowTok;
         const hitMac = macHex && rowMac && macHex === rowMac;
         const hitDev = d && rowD && d === rowD && (!m || !rowM || m === rowM);
-        if (hitTok || hitMac || hitDev) {
+        if (hitUid || hitTok || hitMac || hitDev) {
           last = row;
           map.delete(k);
         }
       }
     }
-    if (!explicit && !candidates.length && !tok && !macHex && !d) {
-      const err = new Error("key or machine/deviceId/mac/token required");
+    if (!explicit && !candidates.length && !u && !tok && !macHex && !d) {
+      const err = new Error("key or uid/machine/deviceId/mac/token required");
       err.status = 400;
       throw err;
     }
     return last;
   }
 
-  function evaluate({ machine, deviceId, macs, token }) {
+  function evaluate({ machine, deviceId, macs, token, uid }) {
     const macList = Array.isArray(macs) ? macs.map(normalizeMac).filter(Boolean) : parseMacList(macs);
-    const ban = findInMap(bans, { machine, deviceId, macs: macList, token });
+    const ban = findInMap(bans, { machine, deviceId, macs: macList, token, uid });
     if (ban) {
       return {
         allowed: false,
@@ -320,7 +395,7 @@ export function createDeviceAccess(opts) {
       };
     }
     if (mode === "allow") {
-      const allow = findInMap(allows, { machine, deviceId, macs: macList, token });
+      const allow = findInMap(allows, { machine, deviceId, macs: macList, token, uid });
       if (!allow) {
         return {
           allowed: false,
@@ -343,11 +418,52 @@ export function createDeviceAccess(opts) {
     return { allowed: true, mode, reason: "", key: "", match: "deny-pass", at: "" };
   }
 
+  // ── 卡级吊销（按 jti 废单张卡，不影响同 uid 的其他卡） ──
+  function revokeJti({ jti, uid, reason, by }) {
+    const j = normalizeJti(jti);
+    if (!j) {
+      const err = new Error("jti required (老卡未带卡号，只能按 uid 封人)");
+      err.status = 400;
+      throw err;
+    }
+    const row = {
+      jti: j,
+      uid: normalizeUid(uid || ""),
+      reason: String(reason || "ops 废卡").trim().slice(0, 200) || "ops 废卡",
+      at: ts(),
+      by: String(by || "ops").slice(0, 40),
+    };
+    revokedJti.set(j, row);
+    return row;
+  }
+
+  function unrevokeJti({ jti }) {
+    const j = normalizeJti(jti);
+    if (!j) {
+      const err = new Error("jti required");
+      err.status = 400;
+      throw err;
+    }
+    const existed = revokedJti.get(j) || null;
+    revokedJti.delete(j);
+    return existed;
+  }
+
+  function isJtiRevoked(jti) {
+    const j = normalizeJti(jti);
+    return !!j && revokedJti.has(j);
+  }
+
   function snapshot() {
     return {
       mode,
+      strictToken,
       banCount: bans.size,
       allowCount: allows.size,
+      revokedJtiCount: revokedJti.size,
+      revokedJti: [...revokedJti.values()].sort((a, b) =>
+        String(b.at || "").localeCompare(String(a.at || "")),
+      ),
       bans: [...bans.values()].sort((a, b) => String(b.at || "").localeCompare(String(a.at || ""))),
       allows: [...allows.values()].sort((a, b) =>
         String(b.at || "").localeCompare(String(a.at || "")),
@@ -363,6 +479,12 @@ export function createDeviceAccess(opts) {
     return mode;
   }
 
+  async function setStrictToken(next) {
+    strictToken = next === true || String(next).toLowerCase() === "true" || next === 1;
+    await persist();
+    return strictToken;
+  }
+
   return {
     load,
     persist,
@@ -370,10 +492,17 @@ export function createDeviceAccess(opts) {
     snapshot,
     setMode,
     getMode: () => mode,
+    setStrictToken,
+    getStrictToken: () => strictToken,
+    revokeJti,
+    unrevokeJti,
+    isJtiRevoked,
     parseMacList,
     normalizeMac,
     formatMac,
     normalizeToken,
+    normalizeUid,
+    normalizeJti,
     ban: (args) => upsert(bans, args, "ops ban"),
     unban: (args) => remove(bans, args),
     allow: (args) => upsert(allows, args, "ops allow"),

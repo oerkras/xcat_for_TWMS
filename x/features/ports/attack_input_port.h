@@ -56,6 +56,10 @@ void FaceDebug(int* maOut, int* whyOut);
 // 字段写 -1 清忙锁，一旦重开，busy1 就会被冲成 -1，"接了"会被误读成"被吞了"。
 void FireOutcomeDebug(int* busy0, int* busy1);
 
+// 站桩输出探针：Apply 后 / OnFuncKey 返回后（Restore 前）的 Ap、Apl。单位 px，取整。
+// 未闪时全 0。
+void BlinkDebug(int* apx, int* apy, int* aplx, int* aply, int* ap2x, int* ap2y);
+
 // 这一刀是否需要**反向**转身（而非同向重申）。
 // 反向会真下发 SetInput 触发转身动作，把同一拍的攻击顶掉——实证见 simple_combat.cpp
 // 出刀点的「转身与出刀必须分拍」注释。同向重申无害，故只认换向。
@@ -68,6 +72,13 @@ bool HoldWalk(int inputX);
 bool StopWalk();
 bool IsWalkHeld();
 
+// 站桩输出：同一泵 job 内把魂闪到 (x,y) 再 OnFuncKey，返回前 Restore。Up 不闪。
+struct FireBlink {
+    bool on = false;
+    float x = 0.f;
+    float y = 0.f;
+};
+
 // 间隔+松键门控后 OnFuncKey（A 槽绑定优先）。
 // 软拒绝（间隔未到 / pendingUp / FireSuppressed）返回 false 且不计 fail；仅 OnFuncKey Down 失败计 fail。
 bool TryFirePrimary();
@@ -75,10 +86,13 @@ bool TryFirePrimary();
 // ignoreCombatInterval=true：跳过面板间隔 SoftBlocked（仍受 pendingUp / suppressed / 泵拥堵）。
 // 换锁首刀用：BIN 22:41 近距已 Aim 仍 acq→fire≈240ms，几乎全是间隔残值。
 bool TryFirePrimaryEx(bool ignoreCombatInterval);
+bool TryFirePrimaryEx(bool ignoreCombatInterval, const FireBlink& blink);
 
 // 技能多发专用：跳过战斗面板间隔 SoftBlocked，改由 multi_skill 固定 NA 间隔门控。
 // 仍受 pendingUp / FireSuppressed / 泵拥堵约束；成功仍写入 gLastFireMs（与战斗路径共享冷却痕迹）。
 bool TryFirePrimaryForMultiSkill();
+
+void NoteLastFire();
 
 // 先泵松键，再看间隔/pending/suppressed。
 bool CanFirePrimary();
@@ -100,9 +114,15 @@ void SetAnimBusyOverrideMs(int ms);
 
 // 攻击加速：Down 后同主线程立刻 Up（无 pending 跨 tick）；关闭则恢复 hold 异步松键。
 void SetImmediateUp(bool on);
+// 遗留 pulse API。站桩输出不再开启。
+void SetBurstPulse(bool on);
 
 void TickReleases();
 void ForceRelease();
+
+// 泵上只读：攻击槽（默认 A）当前 FuncKey。失败返回 false。
+// type = FuncType（1=Skill 2=Item 5=BasicAction）；value = skillId 或 FkmType（普攻=52）。
+bool PeekAttackBinding(int32_t* type, int32_t* value);
 
 // 必须已在主线程泵上（禁止再 Invoke）。SetInput(0,0) 清走路锁存。
 // fill+Doing / Settling 自愈用；ForceRelease 会再包一层 Invoke。

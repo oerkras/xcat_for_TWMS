@@ -49,4 +49,9 @@ int ItemCatalogLookupShopPrice(const ItemCatalogPack& pack, const char* code);
 
 int ItemCatalogLookupSellPrice(const ItemCatalogPack& pack, const char* code);
 
+// 把用户输入的关键词列表拆成条目。ASCII 分隔：, ; | 空白；
+// 同时把全角 ；，、｜ 与 ideographic space 先换成 ASCII，再切。
+// 「箭矢；弩箭矢」必须变成两条，不能整段拿去子串匹配。
+void SplitKeywordList(const char* text, std::vector<std::string>& out);
+
 }  // namespace xcat

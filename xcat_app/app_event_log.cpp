@@ -3,6 +3,7 @@
 #include "app_dpi.h"
 #include "app_sound.h"
 #include "app_theme.h"
+#include "imgui_log_sanitize.h"
 
 #include "imgui.h"
 
@@ -235,15 +236,17 @@ void DrawWindow(float dpiScale) {
         // 标题行：[级别] 标题
         ImGui::TextColored(ImColor(accent).Value, "[%s]", LabelForLevel(ev.level));
         ImGui::SameLine(0.f, AppDpi_Px(6.f));
-        ImGui::TextUnformatted(ev.title.empty() ? "(无标题)" : ev.title.c_str());
+        const std::string titleUi = xcat::app::SanitizeImGuiLogLine(ev.title);
+        const std::string bodyUi = xcat::app::SanitizeImGuiLogLine(ev.body);
+        ImGui::TextUnformatted(titleUi.empty() ? "(无标题)" : titleUi.c_str());
 
         // 时间行
         ImGui::TextDisabled("%s", ev.timestamp.empty() ? "--" : ev.timestamp.c_str());
 
         // 详情
-        if (!ev.body.empty()) {
+        if (!bodyUi.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, xcat::app::AppTheme_Palette().mutedText);
-            ImGui::TextWrapped("%s", ev.body.c_str());
+            ImGui::TextWrapped("%s", bodyUi.c_str());
             ImGui::PopStyleColor();
         }
 

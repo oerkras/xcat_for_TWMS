@@ -61,7 +61,9 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         if (!window.running) break;
 
         if (OpsWindow_IsMinimized(window)) {
-            Sleep(50);
+            // 不 Present，避免 DXGI 在最小化时空转吃 GPU；但仍 Tick，利润监控继续采样。
+            xcat::ops::OpsState_Tick(state);
+            Sleep(200);
             continue;
         }
 

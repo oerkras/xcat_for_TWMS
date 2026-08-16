@@ -5,6 +5,7 @@
 #include "app_theme.h"
 #include "attach_inject.h"
 #include "hangup_schedule.h"
+#include "imgui_log_sanitize.h"
 #include "imgui_shell.h"
 #include "launch_panel.h"
 #include "update_client.h"
@@ -22,7 +23,7 @@
 namespace xcat::app {
 namespace {
 
-constexpr int kStatusRows = 4;
+constexpr int kStatusRows = 5;
 
 void FormatDurationHms(uint64_t sec, char* out, size_t outN) {
     if (!out || outN == 0) return;
@@ -65,9 +66,13 @@ void DrawUpdateProgressMini() {
     }
     ImGui::ProgressBar(frac, ImVec2(AppDpi_Px(140.f), AppDpi_Px(6.f)));
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !snap.message.empty()) {
-        ImGui::SetTooltip("%s", snap.message.c_str());
+        const std::string msgUi = SanitizeImGuiLogLine(snap.message);
+        ImGui::SetTooltip("%s", msgUi.c_str());
     }
 }
+
+ImVec4 StatusHintBlue();
+ImVec4 StatusAlertBlue();
 
 void DrawCompactWatchdogLine() {
     const hangup_schedule::Snapshot snap = hangup_schedule::GetSnapshot();
@@ -76,23 +81,29 @@ void DrawCompactWatchdogLine() {
         return;
     }
     const std::string timer = hangup_schedule::FormatWatchdogTimerText(snap);
+    const char* f5Pause = hangup_schedule::FormatWatchdogF5PauseReason(snap);
     if (!snap.scheduleActive) {
         ImGui::TextDisabled("守护：%s", timer.c_str());
         return;
     }
+    ImGui::TextUnformatted("守护：");
+    ImGui::SameLine(0.f, 0.f);
+    ImGui::TextUnformatted(hangup_schedule::WatchdogUiModeLabel(snap.watchdogMode));
+    ImGui::SameLine(0.f, ui::Gap());
+    if (f5Pause && f5Pause[0]) {
+        ImGui::TextColored(StatusHintBlue(), "%s", f5Pause);
+        return;
+    }
     if (snap.watchdogMode == hangup_schedule::WatchdogUiMode::Backoff &&
         snap.backoffRemainingSec > 0) {
-        ImGui::Text("守护：%s %s", hangup_schedule::WatchdogUiModeLabel(snap.watchdogMode),
-                    timer.c_str());
+        ImGui::TextUnformatted(timer.c_str());
         return;
     }
     if (snap.watchdogMode == hangup_schedule::WatchdogUiMode::Recovering) {
-        ImGui::Text("守护：%s %s", hangup_schedule::WatchdogUiModeLabel(snap.watchdogMode),
-                    timer.c_str());
+        ImGui::TextUnformatted(timer.c_str());
         return;
     }
-    ImGui::Text("守护：%s %s", hangup_schedule::WatchdogUiModeLabel(snap.watchdogMode),
-                timer.c_str());
+    ImGui::TextUnformatted(timer.c_str());
 }
 
 void DrawCcuText(const LaunchUiState& ui) {
@@ -112,6 +123,48 @@ void DrawCcuText(const LaunchUiState& ui) {
     } else {
         ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.22f, 1.0f), "实时在线人数 --");
     }
+}
+
+void DrawSoftReloginClock(const LaunchUiState& ui) {
+    if (ui.prefsBinDir.empty()) return;
+    xcat::PayloadStatus st{};
+    if (!xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) ||
+        !xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000)) {
+        return;
+    }
+    if (!st.softReloginOn) {
+        ImGui::TextDisabled("软重连 关");
+        return;
+    }
+    if (st.softReloginRemainMs == 0xFFFFFFFFu) {
+        ImGui::TextDisabled("软重连 --");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("已勾选定时软重连：进图后开始倒计时");
+        return;
+    }
+
+    unsigned remainMs = st.softReloginRemainMs;
+    if (!st.softReloginPaused && remainMs > 0 && st.writeTickMs) {
+        const uint64_t now = GetTickCount64();
+        if (now > st.writeTickMs) {
+            const uint64_t age = now - st.writeTickMs;
+            if (age >= remainMs)
+                remainMs = 0;
+            else
+                remainMs -= static_cast<unsigned>(age);
+        }
+    }
+    const unsigned sec = remainMs ? (remainMs + 999u) / 1000u : 0u;
+    char buf[48]{};
+    if (st.softReloginPaused) {
+        snprintf(buf, sizeof(buf), "软重连 暂停 %us", sec);
+        ImGui::TextColored(StatusHintBlue(), "%s", buf);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("软重连进行中 / 落地静默：倒计时冻结");
+        return;
+    }
+    snprintf(buf, sizeof(buf), "软重连 %us", sec);
+    ImGui::TextUnformatted(buf);
 }
 
 void BeginStatusRow(const ImVec2& origin, float rowH, int row) {
@@ -257,7 +310,7 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
                                        : (attach_inject::GetLaunchMode() ==
                                                   attach_inject::LaunchMode::OneClickLogin
                                               ? "已取消自动启动 — 需要时再点「启动」"
-                                              : "已取消自动换票 — 需要时再点「启动」");
+                                              : "已取消自动登录 — 可改槽位后再点「启动」重新读秒");
                 xcat::log::Info("App", "user cancelled pending auto-launch (status bar)");
             } else if (attachMode) {
                 if (!attach_inject::IsWatching()) {
@@ -271,11 +324,16 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
             } else {
                 if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto) {
                     msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
-                } else if (msc::weblogin::GetAuthStrategy() ==
-                           msc::weblogin::AuthStrategy::GamaPassAuto) {
-                    msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
+                    LaunchPanel_ArmGamaPassAutoLaunch(ui);
+                    xcat::log::Info("App", "status-bar re-armed GamaPass auto-launch (%us)",
+                                    kGamaPassAutoPrepSec);
+                } else {
+                    if (msc::weblogin::GetAuthStrategy() ==
+                        msc::weblogin::AuthStrategy::GamaPassAuto) {
+                        msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
+                    }
+                    LaunchPanel_StartOneClick(ui);
                 }
-                LaunchPanel_StartOneClick(ui);
             }
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -293,7 +351,7 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         }
         if (!canStart) ImGui::EndDisabled();
 
-        // —— 3/4 守护 + 在线 ——
+        // —— 3/5 守护 + 在线 ——
         BeginStatusRow(origin, rowH, 2);
         ImGui::AlignTextToFramePadding();
         DrawCompactWatchdogLine();
@@ -302,9 +360,14 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         ImGui::SameLine(0.f, ui::Gap());
         DrawCcuText(ui);
 
-        // —— 4/4 状态 / 更新 ——
-        // 用户默认停在首页 TAB，倒计时/自动登录/干净重拉必须在顶部可见。
+        // —— 4/5 定时软重连（单独一行，勿跟守护/在线挤）——
         BeginStatusRow(origin, rowH, 3);
+        ImGui::AlignTextToFramePadding();
+        DrawSoftReloginClock(ui);
+
+        // —— 5/5 状态 / 更新 ——
+        // 用户默认停在首页 TAB，倒计时/自动登录/干净重拉必须在顶部可见。
+        BeginStatusRow(origin, rowH, 4);
         ImGui::AlignTextToFramePadding();
         const hangup_schedule::Snapshot hs = hangup_schedule::GetSnapshot();
         const bool relaunching = hangup_schedule::IsCleanRelaunchInFlight();
@@ -320,12 +383,14 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         const bool showUpdate = UpdateShouldDrawProgressUi();
         // 自动登录提示优先于更新条：用户默认在首页，换票进度更紧急。
         if (showLoginHint) {
-            DrawStatusEllipsis(inFlight ? StatusHintBlue() : StatusAlertBlue(), ui.status);
+            DrawStatusEllipsis(inFlight ? StatusHintBlue() : StatusAlertBlue(),
+                               SanitizeImGuiLogLine(ui.status));
         } else if (showUpdate) {
             DrawUpdateProgressMini();
             if (!snap.message.empty()) {
                 ImGui::SameLine(0.f, ui::Gap());
-                ImGui::TextDisabled("%s", snap.message.c_str());
+                const std::string msgUi = SanitizeImGuiLogLine(snap.message);
+                ImGui::TextDisabled("%s", msgUi.c_str());
             }
         } else {
             ImGui::TextDisabled(" ");

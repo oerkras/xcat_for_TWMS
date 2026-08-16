@@ -16,10 +16,12 @@
 #include "../features/auto_enter/auto_enter.h"
 #include "../features/autopot/autopot.h"
 #include "../features/auto_stat/auto_stat.h"
+#include "../features/auto_skill/auto_skill.h"
 #include "../features/invuln/invuln.h"
 #include "../features/attack_accel/attack_accel.h"
 #include "../features/final_attack_force/final_attack_force.h"
 #include "../features/melee_veto/melee_veto.h"
+#include "../features/ports/hit_pin_port.h"
 #include "../features/skill_max_level/skill_max_level.h"
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/mob_scan/mob_scan.h"
@@ -29,6 +31,8 @@
 #include "../features/ccu/ccu.h"
 #include "../features/multi_skill/multi_skill.h"
 #include "../features/simple_combat/simple_combat.h"
+#include "../features/map_attack/map_attack.h"
+#include "../features/mob_gather/mob_gather.h"
 #include "../features/ports/keypad_walk_bin.h"
 #include "../features/ports/unity_kbd_port.h"
 #include "../features/ports/key_macro_bin.h"
@@ -55,10 +59,12 @@
 #include "../features/sellbag/sellbag.h"
 #include "../features/attack_rpc/attack_rpc.h"
 #include "../features/auto_supply/auto_supply.h"
+#include "../features/char_boot/char_boot.h"
 #include "../ipc/payload_buffs.h"
 #include "../ipc/payload_control.h"
 #include "../ipc/payload_pet_loot.h"
 #include "../ipc/payload_auto_stat.h"
+#include "../ipc/payload_auto_skill.h"
 #include "../ipc/payload_status.h"
 #include "../ipc/payload_timed_keys.h"
 #include "xcat_payload_control.h"
@@ -154,9 +160,11 @@ void StopAllFeatureWorkers() {
     x::features::ports::key_macro_bin::Shutdown();
     // 摘掉 Keyboard.PreProcessEvent 的 vtable 钩，否则卸载后游戏会调进已释放内存。
     x::features::ports::unity_kbd::Shutdown();
+    x::features::char_boot::StopWorker();
     x::features::auto_supply::StopWorker();
     x::features::sellbag::StopWorker();
     x::features::attack_rpc::StopWorker();
+    x::features::mob_gather::StopWorker();
     x::features::worldmap_marker_travel::Shutdown();
     x::features::travel::StopWorker();
     x::features::multi_skill::StopWorker();
@@ -166,6 +174,7 @@ void StopAllFeatureWorkers() {
     x::features::pet_feed::StopWorker();
     x::features::autopot::StopWorker();
     x::features::auto_stat::StopWorker();
+    x::features::auto_skill::StopWorker();
     x::features::mob_scan::StopWorker();
     x::features::titlebar::StopWorker();
     x::ipc::PayloadStatus_Stop();
@@ -177,6 +186,8 @@ void StopAllFeatureWorkers() {
     // 不摘掉的话卸载后游戏会跳进已释放内存。
     x::features::infinite_stars::Shutdown();
     x::features::melee_veto::Shutdown();
+    x::features::map_attack::Shutdown();
+    x::features::ports::hit_pin::Shutdown();
     // 同样改了 GameAssembly .text（三处判空跳转）。它只在 GA 内部翻分支、不跳进 xcat.dll，
     // 所以不会像上面那样卸载后跳进已释放内存；但不摘掉的话补丁会一直留在游戏里 ——
     // 卸载后既关不掉也擦不掉，脏页还留给完整性校验。
@@ -394,6 +405,9 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::auto_stat::Init());
     XCAT_PLAY_BOOT_STEP(x::ipc::PayloadAutoStat_ApplyInitial());
     XCAT_PLAY_BOOT_STEP(x::features::auto_stat::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::auto_skill::Init());
+    XCAT_PLAY_BOOT_STEP(x::ipc::PayloadAutoSkill_ApplyInitial());
+    XCAT_PLAY_BOOT_STEP(x::features::auto_skill::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::timed_keys::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::buffs::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::multi_skill::StartWorker());
@@ -403,6 +417,9 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::final_attack_force::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::melee_veto::Init());
     XCAT_PLAY_BOOT_STEP(x::features::melee_veto::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::ports::hit_pin::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::ports::hit_pin::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::map_attack::Init());
     XCAT_PLAY_BOOT_STEP(x::features::skill_max_level::Init());
     XCAT_PLAY_BOOT_STEP(x::features::skill_max_level::StartWorker());
 
@@ -410,6 +427,8 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_BATCH("scan+pets+travel");
     XCAT_PLAY_BOOT_STEP(x::features::mob_scan::Init());
     XCAT_PLAY_BOOT_STEP(x::features::mob_scan::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::mob_gather::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::mob_gather::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::pet_feed::Init());
     XCAT_PLAY_BOOT_STEP(x::features::pet_feed::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::pet_loot::Init());
@@ -424,6 +443,8 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::attack_rpc::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::auto_supply::Init());
     XCAT_PLAY_BOOT_STEP(x::features::auto_supply::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::char_boot::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::char_boot::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::simple_combat::Init());
     XCAT_PLAY_BOOT_STEP(x::features::simple_combat::StartWorker());
     // 走路只读采证（默认开；XCAT_WALK_BIN=0 关）。请关 F5/拟人后手按左右。

@@ -28,94 +28,96 @@ using x::runtime::il2cpp::ReadPtr;
 
 // --- dump.cs / restored TypeDef（2026-08-06）---
 constexpr char kHashWorldManager[] =
-    "b8ea8013e52dada590b6003b130193bf382fb78e9581ae899270652538d4114";
+    "f87be298afca3b6020c8f4695d83819fcc9a28877005b6a669187d33a0a2711";
 constexpr char kHashCharacterData[] =
-    "a49dae5b55d4270768c375de143fbd802b4c903c6529f0921e6d8736655a348";
+    "db37b8a1a37487837eec8bfad308ee5267bbe7c534c9aeb8472ae81878f78bf";
 constexpr char kHashCharacterStat[] =
-    "f82c863b4bb8d44337bded289f308bbb602a909ad603f79f5d89648aae571eb";
+    "e46d4c84b0d51379e9699bf9d1a9c2fff3a7e24510fccb1dd4d70c6526b37ef";
 constexpr char kHashBasicStat[] =
-    "f75a286efbb1904ed9d2de8547e25110a7dc5ba087e1750e5cbf8544569e187";
+    "bb5f0622c53eb82d174c79c9e67423204527372cbc07636e234364a45d58a55";
 constexpr char kHashNextLevel[] =
-    "c8d77805e4e24a8878c239a1d2a0095d3d0c4aa061bc50fe977e4699ab7d7cd";  // TypeDef 1834 Nextlevel
+    "e9f1372a40baf3d03cda3a83f7058c9200862b59b846d4b83be62a0d0f4cef1";  // TypeDef 1834 Nextlevel
 constexpr char kHashItemSlotBase[] =
-    "f9b53f2280c83a615300e6964838cc11928686fde46752d193222ca2428f4f2";  // TypeDef 1837
+    "c318a7313ffb8e812f6db10b4e98a91dcee0caf2c5b7feb48474d12a82677ac";  // TypeDef 1837
 constexpr char kHashItemSlotBundle[] =
-    "b81ce9aaf6724879d7997983bb9bcb454c20855511a8adc0e683852d2e8b065";  // TypeDef 1840
+    "cc245fb7362f275fd0b64547ac8be7835052db6f5d2fe78ca62a2b535227ad6";  // TypeDef 1840
 
 // WM
 constexpr char kHashWmMyUser[] =
-    "<c1c262eeb2fd710395259b6a9ed860900becf2a5716099c31c863589707a7a0>k__BackingField";
+    "<bb0c2e4b7d64301206ad5d9671295f9f6e2fbebb9d44f99243efc2c08d2a17c>k__BackingField";
 // 2026-08-06 BIN：旧哈希 c39c747b… 实为 WM+0xA8 的 bool；真 CharacterData* @0xE0。
 constexpr char kHashWmCharacterData[] =
-    "d0c7dbfd8113c5401c35c284cecd471297e1389c07cd988f8454e0dad2e8cd5";
+    "a3ce8101b83cba94f6794a29c5c6cfd17110bfc1ee2c4fc52f2b2cc0b8489d8";
 // BasicStat* @0xE8（旧 a96d3d20… 是 int[] @0xB0）
 constexpr char kHashWmBasicStat[] =
-    "d915e22b61883d43ab9019e8b31522087ef47aa0aed0db6d60f3497614f4732";
+    "d670f72d7307fa460ea7470dc330c8b20b6f9cbafbde2c23d9942c7759b6772";
 // CharacterData
 constexpr char kHashCdCharacterStat[] =
-    "ef74036091835e6779a41cd9810a1f2d8355d1f875397f09bb15146f8d96446";
+    "cd2cb76436925af2f81f0a581535ec69e759169adf6757684f9e3f93afa1c86";
 constexpr char kHashCdItemSlots[] =
-    "fde7df0fa7e3b0079835beca1b115d50a4ff109917a639e5ab969f439722cc5";  // List<ItemSlotBase>[]
+    "e7114fc3f4efdfbde38ae02b70058c8c5ed9004d854ce5b27e2093777da86ad";  // List<ItemSlotBase>[]
 constexpr char kHashCdSkillRecord[] =
-    "f87a083146ef2faab83b654647ff543f326c7571c335686a85fdc3a497d734b";  // Dict<int,int>
+    "eaeeff6f033fd68f39de6ebf08863fba4df64746038c2ba652bf2a3ff4118e6";  // Dict<int,int>
 constexpr char kHashCdSkillRecordEx[] =
-    "b9018481e4ef042c5bce0c7558c32923c944abedf61919e4bfc2e00a7ef28bc";
+    "d120bea4ed598f18eac4b89c3bb2ea2015997ff934ef4b4386354f2b8fd9b2c";
 constexpr char kHashCdSkillMasterLevel[] =
-    "cc86c31c8eded69a97ceb54b4e4489ebc69d00e1d398b2ba55fbd43ddf70dc1";  // Dict<int,int>
+    "fdd954ef74af8c1958b4394f1f4e0f3b46d915651bb1ec11ea15a9f1dfcdf6e";  // Dict<int,int>
 constexpr char kHashCdSkillCooltime[] =
-    "affe95a08c5e7e61cf4eb7738bb55c73df3d3609114a872ff0256606ee31616";  // Dict<int,ushort>
+    "c330906d7da3a4e4c8bfb7d02e10ae1482228f7b742457a7ce3df4d8d2b7f95";  // Dict<int,ushort>
 constexpr char kHashCdSkillCoolTimeOver[] =
-    "ce6f9f479c23d4d073018cfaa1893c1fe5ff2260565b489d52a4bd8f2ea6ca7";  // Dict<int,int>
+    "bd06b5d8f314d51d56b68fe5d69a21e21e30c92fa87378f7d7cac9296781d9d";  // Dict<int,int>
 constexpr char kHashWmSecondaryStat[] =
-    "c6b015fcb6ef4e81c41a704983383ca00063e895216255eb8b0c458396c07ab";  // WM+0xF0；勿用 +0xB8 嵌套 struct
+    "b40f35b074bf15b53ae8a67753fcfaa57552ca96cb904cd084b1d9247ec47d2";  // WM+0xF0；勿用 +0xB8 嵌套 struct
 // ItemSlotBase / ItemSlotBundle（08-06 remount：类名已哈希，字段亦哈希）
 constexpr char kHashSlotItemId[] =
-    "bc4ee7b098ef21ebc6d8cbab53c844b785a67be64bd506ad5b9ca22b39bbcf1";  // ItemId @0x10
+    "ba097becccd7cd2d15813c26f7095f13a3ae8a264032e79a2c58b7ab4f894d1";  // ItemId @0x10
 constexpr char kHashSlotBundleNumber[] =
-    "f1d9abc840c4778dff3213f94672f76cd6c17808032ab4c817f2c76bb0d9898";  // nNumber @0x28
+    "ea441e202ca6f266fc1e6597d68a8bc2cd041cd5c5ef845b96c1c7ebb4587ec";  // nNumber @0x28
 constexpr char kFldSlotItemId[] = "ItemId";           // restored 明文兜底
 constexpr char kFldSlotBundleNumber[] = "nNumber";
 // CharacterStat（08-06 remount · TypeDef 1833）
 constexpr char kHashCsCharacterId[] =
-    "ce3c2f6f4d94ed1e0301d12d81c330e1eda0cdb8165420b89b8ac2ba7fc5be8";  // CharacterID @0x10
+    "d9bcdc8d25f530cb5e395a90e649c2778f07051c96e893d4aae2427d40ef34c";  // CharacterID @0x10
 constexpr char kHashCsStr[] =
-    "ff51aa75687abdaa4881235d913373e6d02c2b69aeea94a7e2fa99ab21be781";  // nSTR @0x3C
+    "b8f285831effc10bd5d2ac6825ddd1c5e02f21c922e1d4150fab0b83b4266b8";  // nSTR @0x3C
 constexpr char kHashCsDex[] =
-    "bd76edd42850f219f5c607133f060e8d0d9a54158b7540adb5d07379378eb56";  // nDEX @0x3E
+    "a68fca4fcd3c8a6b2d3997a74c7c64a8a30f1f4784cd0804e8d375bda86b9e7";  // nDEX @0x3E
 constexpr char kHashCsInt[] =
-    "d4f38671722275230846437d95dc3b404edcb730c0780eca8dfe9b6b06026d8";  // nINT @0x40
+    "c73cabfbcf351c92bf4f81caf90d659c56114242ee459f078fe23fc14281113";  // nINT @0x40
 constexpr char kHashCsLuk[] =
-    "aa971c2634bf520042761e1456feda07a589b60f669cd4a7b2125578f8276e0";  // nLUK @0x42
+    "b493d9b70dd68d2b61f6bd0043366ff00508293f67bf44498a688475768c6dc";  // nLUK @0x42
 constexpr char kHashCsAp[] =
-    "a8828b97f66f0a9eba6317ebf8016c5008bf33a360da9cbd896325384a97f0e";  // ap @0x4C
+    "c7751ced7ccf0e1df26f7a0bf304d04c99d645d4a472ea4b0df4d1710416ba9";  // ap @0x4C
+constexpr char kHashCsSp[] =
+    "ca11124ca13e2a2ac2959c440185c111bcc8acd73d279b3189ee32ffc3befb2";  // sp @0x4E
 constexpr char kHashCsName[] =
-    "b02256291997e9e0ee635ebfe60659219c81d43db37ecaf35c18216605afd3b";  // CharacterName @0x18
+    "d27ce14909373238b96223c5278741da949523b4f41ad6629bd1a700133b7b7";  // CharacterName @0x18
 constexpr char kHashCsLevel[] =
-    "daa9c566a29098609e5d343022c8d4ce61f9b76c94b32ef479cd105d4062de8";  // level @0x38
+    "ba9fa222996dd715227551a5ca91bcb3e6e3607ab8bcb69d2ada80c2134b295";  // level @0x38
 constexpr char kHashCsJob[] =
-    "e3e9110dda0b4f67302711a94a07efe0066540d7e7a8b40b71ff6584e3a4881";  // job @0x3A
+    "ed62c47d53b52531c1369007bdf539bf7ad52ba71a14337cf35121ba932cc7c";  // job @0x3A
 constexpr char kHashCsHp[] =
-    "f00356efbd651633864826d8ea6f1641e88e3ecfe0dc5783e530393f4109337";  // hp @0x44
+    "d921ced6c46af15dd095d319a1449234d3f142ae228cb1d95082b33fe7323fa";  // hp @0x44
 constexpr char kHashCsMhp[] =
-    "f6988f2a9c7525f484446f08cdaba311bc15de960751c293a847b84c31318a8";  // mhp @0x46
+    "a2591f9183ff6f942f7a1904d11ef3afa9b6aba02d03e7089c1a6b13bb43e44";  // mhp @0x46
 constexpr char kHashCsMp[] =
-    "aa453079056071cd0ba4d13eb9a8ae1e030ad4a7bbf84420ea19c6e63836ffd";  // mp @0x48
+    "ca44d34605b9809db9a68fba47c9015369e57130fe4a4300cc179e92027917e";  // mp @0x48
 constexpr char kHashCsMmp[] =
-    "eafca1048523d42236e15c9e63af12894834cceed8e8517e850b476c7e9dd05";  // mmp @0x4A
+    "c4bbc733ca73a22a491da85b3ab29a73431e2829ec80d76d31bcffa0dd95b12";  // mmp @0x4A
 constexpr char kHashCsExp[] =
-    "bf87c6ebff59ebf6849cc2ec04ebda2cebeb17b0fe16d0697b8e1783af6a9cd";  // exp @0x50
+    "d528cec2976c7a9023116ec1d8bb44f90198057ce8ebb8cded500b6f0d00234";  // exp @0x50
 constexpr char kHashCsMoney[] =
-    "fb9dd268a3da559552c2dc82a2ac81dd3c7c483b025ab13a26f6c52e6b075f3";  // money @0x58
+    "c0b441b512364bf93ec255420685098dbcaccd5fe79c48bae0b59cb5358982c";  // money @0x58
 constexpr char kHashCsNextLevel[] =
-    "f79ea0f3a059a59ab0c1d3c5e82fa609a2e945d161aeb20da4f7fa6c061d196";  // Nextlevel* @0x80
+    "abf4ffc64cf70eea09f0081beb667c4c325cccdd688e11c3b4f27a9ec0c2e24";  // Nextlevel* @0x80
 // BasicStat（08-06 remount · TypeDef 1322）
 constexpr char kHashBsNmhp[] =
-    "a1253b618bba24d6e3b10d513891e0c78806d615d166bfd37bdd15a7b9ffbb8";  // nMHP @0x30
+    "a6b87c5d0776d7b49590c91e6d2be0c97e78c53da4ae60ba5a01d6b33fbdd89";  // nMHP @0x30
 constexpr char kHashBsNmmp[] =
-    "e1818fd7aea5d1efe30d6761e4a948badde01fd01f8cb1978c94b0bdb30776f";  // nMMP @0x34
+    "c3dfca6925888f2102fea6f4e89dc863df4cb4da2d9e04c26f28c84e6dfa5cd";  // nMMP @0x34
 // Nextlevel.int[]（08-06 remount）
 constexpr char kHashNextArr[] =
-    "aa8dd66a4c65b66a69ec9936d8d4690f2f0949c01064380639586fd5213d1fc";  // @0x10
+    "a6f21a4c01988f5e07d0a60ab231b8744ba395360cb11330c6c5ff17d864bcc";  // @0x10
 
 // Hint（dump 复核；hash 失败时回退）— remount 2026-08-06 晚间（CD@0xE0 / BS@0xE8）
 constexpr size_t kFbWmMyUser = 0x28;
@@ -137,6 +139,7 @@ constexpr size_t kFbCsDex = 0x3E;
 constexpr size_t kFbCsInt = 0x40;
 constexpr size_t kFbCsLuk = 0x42;
 constexpr size_t kFbCsAp = 0x4C;
+constexpr size_t kFbCsSp = 0x4E;
 constexpr size_t kFbCsName = 0x18;
 constexpr size_t kFbCsLevel = 0x38;
 constexpr size_t kFbCsJob = 0x3A;
@@ -171,6 +174,7 @@ size_t gOffCsDex = kFbCsDex;
 size_t gOffCsInt = kFbCsInt;
 size_t gOffCsLuk = kFbCsLuk;
 size_t gOffCsAp = kFbCsAp;
+size_t gOffCsSp = kFbCsSp;
 size_t gOffCsName = kFbCsName;
 size_t gOffCsLevel = kFbCsLevel;
 size_t gOffCsJob = kFbCsJob;
@@ -324,6 +328,7 @@ void EnsureFieldOffsets() {
         gOffCsInt = PickOff(FieldOffsetByHash(cs, kHashCsInt), kFbCsInt, &csH);
         gOffCsLuk = PickOff(FieldOffsetByHash(cs, kHashCsLuk), kFbCsLuk, &csH);
         gOffCsAp = PickOff(FieldOffsetByHash(cs, kHashCsAp), kFbCsAp, &csH);
+        gOffCsSp = PickOff(FieldOffsetByHash(cs, kHashCsSp), kFbCsSp, &csH);
         gOffCsName = PickOff(FieldOffsetByHash(cs, kHashCsName), kFbCsName, &csH);
         gOffCsLevel = PickOff(FieldOffsetByHash(cs, kHashCsLevel), kFbCsLevel, &csH);
         gOffCsJob = PickOff(FieldOffsetByHash(cs, kHashCsJob), kFbCsJob, &csH);
@@ -564,6 +569,20 @@ bool ReadBaseApStats(BaseApStats& out) {
     out.intel = ReadI16(cs, gOffCsInt);
     out.luk = ReadI16(cs, gOffCsLuk);
     out.ap = ReadI16(cs, gOffCsAp);
+    out.job = ReadI16(cs, gOffCsJob);
+    out.ok = true;
+    return true;
+}
+
+bool ReadBaseSpStats(BaseSpStats& out) {
+    out = {};
+    EnsureFieldOffsets();
+    void* cs = LocalCharacterStat();
+    if (!LooksLikeHeapPtr(cs)) return false;
+    out.characterId = ReadU32(cs, gOffCsCharacterId);
+    out.level = static_cast<int>(ReadU8(cs, gOffCsLevel));
+    out.job = static_cast<int>(ReadI16(cs, gOffCsJob));
+    out.sp = ReadI16(cs, gOffCsSp);
     out.ok = true;
     return true;
 }

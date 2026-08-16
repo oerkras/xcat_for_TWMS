@@ -1,7 +1,7 @@
 #pragma once
 // fly — Classic TWMS 鼠标飞：鼠标世界点 → 旋翼 setpoint（heli_rotor 闭环）→ Attr=2
 // 武装期：fly_fh_ban 禁挂台；ApplyImpact 必须放行（旁路已拆除）。
-// 旋翼所有权：F6 是**抢占**方（heli::Owner::Fly），压过 F5 打怪与自动赶路。
+// 旋翼所有权：F6 平时**抢占** F5 打怪；赶路 settle / 换图落地窗禁止武装（崩② 01:36:59）。
 
 namespace x::features::fly {
 
@@ -15,7 +15,7 @@ bool IsArmed();
 // 试修回退：XCAT_FLY_DISARM_ZERO=0 或 DLL 旁 fly_disarm_zero.off（见 fly.cpp）。
 void SetArmed(bool on);
 
-// 外部暂停（补给/测谎等）：不改 armed 开关，仅抑制 hop；解除后恢复。
+// 外部暂停（补给/测谎/起号贴 NPC）：不改 armed 开关，抑制 hop 与 DriveRotor；解除后恢复。
 void SetExternalPause(bool on);
 bool IsExternallyPaused();
 

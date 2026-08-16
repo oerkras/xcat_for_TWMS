@@ -28,6 +28,8 @@ void StartMouseSim(uint32_t seq);  // 内置对照仓 UV 轨迹 165+330@33Hz 模
 
 void Tick(DWORD now);
 
+// 知识题 / 轨迹题面板开着、正在跟光标、轨迹模拟中，或谓词快照已过期。
+// 快照过期时 IsNonFiniteOpen 会谎称没开；加点 / 加技能点必须让路。
 bool IsBusy();
 
 }  // namespace x::features::auto_lie

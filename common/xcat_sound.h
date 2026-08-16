@@ -2,6 +2,7 @@
 // xcat_sound.h — 自研 UI/事件音效（程序化 PCM + waveOut，不依赖 Windows 系统 wav）
 
 #include <cstdint>
+#include <vector>
 
 namespace xcat::sound {
 
@@ -58,5 +59,11 @@ bool PlaySilenceBlocking(int durationMs);
 // CLI：名称别名 success/fail/click/launch-ok/...
 bool PlayNamed(const char* name);
 bool PlayNamedBlocking(const char* name);
+
+// 自定义 PCM（44100 Hz / 16-bit / mono），走同一条异步队列。
+bool PlayPcmAsync(std::vector<int16_t> pcm);
+
+// 清空队列并打断当前播放，立刻播这段 PCM（卷轴口播只留最新一条）。
+bool PlayPcmInterrupt(std::vector<int16_t> pcm);
 
 }  // namespace xcat::sound

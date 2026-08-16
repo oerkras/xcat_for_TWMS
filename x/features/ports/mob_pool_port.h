@@ -4,6 +4,8 @@
 // 真源：Dumps/runtime/out/dump.cs（2026-08-13 remount）
 //   MobPool / Mob(d8d3c811…) / MapData（WM+0x88 字段类型）
 //   MapData.LifeList@+0x38 · MapLifeData.Type@+0x20 (1=Mob)
+//   MapLifeData.X@+0x24 Y@+0x28（ctor 把 WZ.y 存成 −WZ.y = AbsPos；更大 Y = 更高）
+//   Rx0@+0x38 Rx1@+0x3C（巡逻横区间，与 X 同号）
 //   WorldManager._currentMapData@+0x88
 // 禁止 INLINE HOOK；不调用游戏写接口。
 //
@@ -17,6 +19,15 @@
 namespace x::features::ports::mob {
 
 constexpr int kMaxLiteMobs = 128;
+constexpr int kMaxSpawnPoints = 256;
+
+// LifeList 里 Type==Mob 的刷怪槽几何（AbsPos）。
+struct SpawnPoint {
+    float x = 0.f;
+    float y = 0.f;  // AbsPos：更大 Y = 更高
+    int32_t rx0 = 0;
+    int32_t rx1 = 0;
+};
 
 // Mob.MobCtrlState@0xE8, typed MobCtrlType: negative = someone else drives this mob, positive =
 // we do. The controller is the client that runs the mob's AI and reports its movement, so this is
@@ -150,6 +161,8 @@ struct Snapshot {
     int mapId = 0;        // MapData.Id；0=未知
     int lifeMob = -1;     // LifeList 里 Type==Mob 条数（-1=未读到）
     int lifeAll = -1;     // LifeList 总条数
+    int spawnPointN = 0;  // 填入 spawnPoints 的槽数（可能 < lifeMob）
+    SpawnPoint spawnPoints[kMaxSpawnPoints]{};
     uint64_t tickMs = 0;
     MobLite mobs[kMaxLiteMobs]{};
     // 入榜但 FindHit 尚不可用的活怪数（inView=0）；不挡 n，供 BIN / 选怪软优先对照。
@@ -176,6 +189,8 @@ bool Collect(Snapshot& out, bool fillSpawnSlots = true);
 // 活着填 out 返回 true；尸体/空血/野指针返回 false。expectId!=0 时校验 id。
 // 绝对血：默认用缓存+%估计（不 FindAll）；需要新鲜 UI 时自行 ResolveAbsHp(..., refreshUi=true)。
 bool TryFillLive(void* mob, int32_t expectId, MobLite& out);
+// CDF / 作动器：不 EnsureBound。尸体、空血、未就绪、id 对不上（池槽复用）→ false。
+bool StillSameLiveMob(void* mob, int32_t expectId, const char** why = nullptr);
 
 // 最近一次成功快照（双缓冲只读）
 bool GetCached(Snapshot& out);
@@ -191,5 +206,10 @@ bool TryRefreshCacheLite(Snapshot& out);
 // 仅刷怪槽：优先 MapData.LifeList(Mob)；失败回退本图峰值（需先 Collect 过）
 int CountMapMobLifeSlots();
 int GetSpawnPeak();
+
+// Ap 是否距某条 Mob 槽 (X,Y) < nearPx。不管 Rx 巡逻带（走出台仍在 Rx 内，不能当「还在出生点」）。
+// spawnPointN==0（LifeList 未读到）→ false（放行，避免误杀全图）。
+bool NearMobLifeSlot(float x, float y, const Snapshot& snap, float nearPx,
+                     float* outDist = nullptr);
 
 }  // namespace x::features::ports::mob

@@ -15,11 +15,14 @@
 #include "../pet_feed/pet_feed.h"
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../ports/attack_input_port.h"
+#include "../ports/attack_rpc_port.h"
 #include "../ports/foothold_path.h"
 #include "../ports/foothold_port.h"
 #include "../ports/ground_spoof.h"
+#include "../ports/hit_pin_port.h"
 #include "../ports/input_port.h"
 #include "../ports/map_bounds_port.h"
+#include "../ports/mob_gather_port.h"
 #include "../ports/mob_pool_port.h"
 #include "../mob_scan/mob_scan.h"
 #include "../ports/multi_skill_port.h"
@@ -140,7 +143,8 @@ constexpr DWORD kEarlyAbandonSoftBanMs = 0;
 // 打中换怪：刚打过的怪禁锁一会儿，避免投射物/回贴又打到同一只；也挡住 Acquire 回退最近。
 constexpr DWORD kHitRotateBanMs = 5000;
 constexpr int kHitRotateMinLive = 3;
-// lastHitted 出刀当帧写；窗要盖住 snap 龄（mob_scan ~20ms）+ 一两拍 tick。
+// lastHitted 多数当帧写，但 DamageInfo 列表常晚一拍；窗只挡「确认命中」路径。
+// 锁怪换刀真源是 hitBumpCount（lastHitted 上升沿），不依赖这扇窗、也不依赖 DI.charId。
 constexpr DWORD kHitRotateObserveMs = 220;
 // 刚满 N 的怪周围这一盒仍可能进下一刀攻击盒（BIN：叠怪 |dx|≈64 仍 off_lock）。
 // 数值对齐出刀带 kHeliFireMaxDx/Dy；盒外再按离玩家最近选，不再飞全图对角。
@@ -277,10 +281,17 @@ std::atomic<uint32_t> gHardPauseMask{0};      // HardPauseHolder 位或
 std::atomic<int> gExternalPauseDepth{0};      // buffs / timed_keys 可重叠
 DWORD gMapArmUntilMs = 0;
 DWORD gEnableHoldUntilMs = 0;  // 0=无；与 TickImpl 同源 NowMs
+bool gHiraishinNeedLootHold = false;
+DWORD gHiraishinLootHoldUntilMs = 0;  // 0=时钟未起；与 TickImpl 同源 NowMs
+bool gHiraishinSawSoftQuiet = false;  // 软重连/断线静默边沿，落地后重新武装静止窗
 // F5 开后默认不武装旋翼。BIN 16:17:13：hold 300ms 后仍贴身 v=0 打 SetImpactNext(-160,80) 崩。
 // 要飞（MoveTo）或开 F5 时已经离台，才 latch；换怪不重置。
 bool gHeliLatchedThisEnable = false;
 int gLastMapId = -1;
+// 本图至少挂过一次台（CurFh!=0）。进图/注入瞬间 CurFh 常为 0：此时 BAN+detach
+// 会让人自由落体（BIN 15:46：footholds=426 仍 curFh=0，F5 已 BAN ON）。
+// 交战期 BAN 摘台后此标志保持，空中砍不受影响。
+bool gSawOnFhThisMap = false;
 // encounter ResetForMapChange 与 combat mapId 边沿会各调一次 OnCombatMapChange；
 // 同图短窗内第二次会 RestartLieSafeLand 拆掉 catch → 旋翼抖振（review 686e3f）。
 constexpr DWORD kMapChangeDedupeMs = 800;
@@ -294,6 +305,12 @@ std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
 std::atomic<bool> gTeleportEnabled{false};  // fill+Doing 贴怪已禁用（封禁风险）；强制保持关
 std::atomic<bool> gImpactApproachEnabled{true};  // Impact 贴怪默认开；优先于拟人/瞬移
+std::atomic<bool> gHiraishinEnabled{false};      // 站桩输出；与 Impact/拟人互斥，默认关
+std::atomic<DWORD> gHiraishinLootHoldMs{xcat::kHiraishinLootHoldDefaultMs};
+std::atomic<uint32_t> gHiraishinRangePx{xcat::kHiraishinRangeDefaultPx};
+std::atomic<uint32_t> gHiraishinFrontDx{xcat::kHiraishinFrontDxDefault};
+std::atomic<uint32_t> gHiraishinFrontDy{xcat::kHiraishinFrontDyDefault};
+// 选怪圈由范围滑条管，0=叠怪作动器半径。出刀等怪进近战带。
 std::atomic<bool> gAntiJitterEnabled{true};       // 空中贴怪防抖；可面板/ini 一键关
 // 防贴脸退避（LiveStep）；默认关。这是整套退避的**唯一总闸**：为 false 时 ComputeDodge
 // 立刻清零并返回，读 gDodge 的三处判据全部走原分支，行为与没有这个功能时逐位相同。
@@ -303,6 +320,7 @@ std::atomic<bool> gLiveStepEnabled{false};  // 锁怪后同层微贴；默认关
 std::atomic<bool> gClusterPriority{false};  // 群怪优先；默认关
 std::atomic<bool> gHitRotateEnabled{false};  // 打中换怪；默认关
 std::atomic<int> gHitRotateN{static_cast<int>(xcat::kCombatHitRotateNDefault)};
+std::atomic<bool> gForgeHitEnabled{false};  // 实验·出刀自组攻包；默认关
 // 刚因确认命中满 N 弃锁：下一次 Acquire 按「离挨刀那只最远」选，禁止回退最近。
 bool gHitRotatePending = false;
 int gHitRotateFromId = 0;
@@ -312,7 +330,8 @@ DWORD gHitRotateObserveUntil = 0;  // 我方刚出刀后的确认窗；窗外的
 struct HitRotateWatch {
     int id = 0;
     int32_t lastHitted = 0;
-    int hits = 0;  // 本窗内对该 oid 的确认命中（空刀不计）
+    int hits = 0;  // 对该 oid 的确认命中；满 N 后 spentUntil 内不清零（防贴身再开一轮）
+    DWORD spentUntil = 0;  // 满 N 后的冷却；到期才允许再计 N 刀（补残血）
     bool seeded = false;
     bool seen = false;
 };
@@ -641,6 +660,12 @@ void LogLine(const char* fmt, ...) {
     char dir[MAX_PATH]{};
     snprintf(dir, sizeof(dir), "%slogs", x::runtime::GetBinDir());
     (void)x::runtime::AppendDbgLogA(dir, "combat.log", buf, (DWORD)n);
+    // acquire miss / mob_cache 是选怪空转心跳，combat.log 留全量；x.jsonl 15s 一条。
+    if (std::strncmp(body, "acquire miss ", 13) == 0 ||
+        std::strncmp(body, "mob_cache refresh ", 18) == 0) {
+        x::runtime::LogIThrottled(1, 15000, "SimpleCombat", "%s", body);
+        return;
+    }
     x::runtime::LogI("SimpleCombat", "%s", body);
 }
 
@@ -1258,6 +1283,12 @@ void NoteHittedForHitLag(DWORD now) {
         gLock.prevHittedSample = gLock.lastHitted;
         return;
     }
+    // 出刀前 snap/live 龄差（BIN：acquire lastHitted=0，首帧 live 已经是 135415）
+    // 不能记成自己的一刀，否则 hitBumpCount 虚高、后面真命中反而不涨。
+    if (gLock.lockFires <= 0) {
+        gLock.prevHittedSample = gLock.lastHitted;
+        return;
+    }
     if (gLock.lastHitted > gLock.prevHittedSample) {
         gLock.hitBumpCount += 1;
         if (!gLock.firstBumpMs) gLock.firstBumpMs = now;
@@ -1504,6 +1535,13 @@ bool TryAbandonLockKillTimeout(DWORD now) {
 // 窗内掉血 → 清 whiff；窗满无掉血 → +1；满 N → 清锁并返回 false。
 // lastHitted 旁路：默认只探针；kWhiffClearOnLastHitted=true 时才参与清窗。
 bool ResolveWhiffArm(DWORD now) {
+    // 站桩输出：面前有怪就连砍。空砍 / 残血停滞一律不换锁、不 softBan。
+    if (gHiraishinEnabled.load(std::memory_order_acquire)) {
+        ClearWhiffArm();
+        gLock.whiff = 0;
+        gLock.needApproachCorrect = false;
+        return true;
+    }
     if (gLock.armUntil == 0) return true;
 
     const bool hpDrop =
@@ -1767,6 +1805,29 @@ bool LandSafeForFill(float x, float y, uint32_t fhId = 0) {
     return true;
 }
 
+bool HiraishinRangeOk(float px, float py, float mx, float my) {
+    if (!gHiraishinEnabled.load(std::memory_order_acquire)) return true;
+    const uint32_t r = gHiraishinRangePx.load(std::memory_order_acquire);
+    float lim = static_cast<float>(r);
+    const float cap = ports::mob_gather::GatherRadiusPx();
+    if (lim <= 0.f || lim > cap) lim = cap;
+    const float dx = mx - px;
+    const float dy = my - py;
+    return dx * dx + dy * dy <= lim * lim;
+}
+
+// 站桩输出「面前」：攻击盒（AbsPos 半宽/半高，面板横向/竖直滑条；0=该轴不限），含重叠。
+// 出刀前 FaceToward；这里不要求朝向已经摆正。
+bool HiraishinFrontOk(float px, float py, float mx, float my) {
+    const float maxDx =
+        static_cast<float>(gHiraishinFrontDx.load(std::memory_order_acquire));
+    const float maxDy =
+        static_cast<float>(gHiraishinFrontDy.load(std::memory_order_acquire));
+    if (maxDx > 0.f && std::fabs(mx - px) > maxDx) return false;
+    if (maxDy > 0.f && std::fabs(my - py) > maxDy) return false;
+    return true;
+}
+
 void LatchCombatHeli(const char* why) {
     if (gHeliLatchedThisEnable) return;
     if (travel::IsActive()) return;
@@ -1774,15 +1835,31 @@ void LatchCombatHeli(const char* why) {
     LogLine("heli latch why=%s (impact armed for this F5 session)", why ? why : "?");
 }
 
-// 站立 + CombatImpact 禁台：不能出刀（edfbf1），也不能干等 ma 变 6/7。
-// BIN 17:18:51 软重连后 station 贴地悬停，ma 一直是 4 → fire defer 无限不出刀。
+bool CombatStandMa(const ports::teleport::FlightState& st) {
+    return st.ok && (st.ma == 4 || st.ma == 5);
+}
+
+// BAN 会摘 CurFh，人还能是站立动作。进 Firing 必须已经是跳/飞，否则 BAN+ma=4 出刀会崩，
+// 只看 !onFh 会在台沿上空转 fire defer stand_fhban（BIN 15:24:51）。
+bool CombatHeliAirborne() {
+    ports::teleport::FlightState st{};
+    if (!(ports::teleport::QueryFlightState(st) && st.ok && !st.onFh)) return false;
+    if (CombatStandMa(st)) return false;
+    return true;
+}
+
+bool HeliHeldByPeer() {
+    const heli::Owner o = heli::CurrentOwner();
+    return o == heli::Owner::Travel || o == heli::Owner::Fly || o == heli::Owner::Gather;
+}
+
+// 关 F5 / 软静默 / 赶路抢主：卸 CombatImpact。交战期不走这里落地砍（build 132：空中砍）。
 void UnlatchCombatHeli(const char* why) {
     gHeliLatchedThisEnable = false;
-    // 赶路占着旋翼/禁台时只清 F5 latch，禁止 Disarm/卸 CombatImpact。
+    // 赶路/F6/吸怪寻簇占着旋翼时只清 F5 latch，禁止 Disarm/卸 CombatImpact。
     // BIN 17:36:08：贴门超时后换图 lost_session，unlatch 打进 Travel 窗口。
-    if (travel::IsActive() || heli::CurrentOwner() == heli::Owner::Travel ||
-        heli::CurrentOwner() == heli::Owner::Fly) {
-        LogLine("heli unlatch why=%s skip_rotor (travel/fly owns)", why ? why : "?");
+    if (travel::IsActive() || HeliHeldByPeer()) {
+        LogLine("heli unlatch why=%s skip_rotor (peer owns)", why ? why : "?");
         return;
     }
     if ((ports::fly_fh_ban::ActiveMask() &
@@ -1792,28 +1869,17 @@ void UnlatchCombatHeli(const char* why) {
     }
     ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::CombatImpact, false);
     heli::Disarm(heli::Owner::Combat);
-    LogLine("heli unlatch why=%s (ground melee; BAN dropped before fire)", why ? why : "?");
-}
-
-bool MoveToShouldArmHeli(const char* why) {
-    if (!why || !*why) return false;
-    // 只在「真要飞」时 latch。纠位 why（heli_strike_close 等）不进：贴身站着再 BAN 会崩。
-    return std::strcmp(why, "impact_approach") == 0 || std::strcmp(why, "heli_cross") == 0 ||
-           std::strcmp(why, "heli_fire_gate") == 0 || std::strcmp(why, "need_approach") == 0 ||
-           std::strcmp(why, "heli_reapproach") == 0;
+    LogLine("heli unlatch why=%s (session end; BAN dropped)", why ? why : "?");
 }
 
 bool TryEnterMoveTo(DWORD now, const char* why) {
+    // 站桩输出原地出刀，不走路、不滑翔；怪由叠怪吸过来。
+    if (gHiraishinEnabled.load(std::memory_order_acquire)) return false;
     // Impact / 拟人：不查瞬移 NativeCD（速率在 MoveTo 内自管）。
     if (gImpactApproachEnabled.load(std::memory_order_acquire) ||
         gHumanWalkEnabled.load(std::memory_order_acquire)) {
         if (gImpactApproachEnabled.load(std::memory_order_acquire)) {
-            if (MoveToShouldArmHeli(why)) {
-                LatchCombatHeli(why ? why : "MoveTo");
-            } else if (!gHeliLatchedThisEnable) {
-                // 贴身地面快路径：够砍就不要为了纠位去武装旋翼（BIN 16:17:13）。
-                return false;
-            }
+            LatchCombatHeli(why ? why : "MoveTo");
         }
         EnterState(State::MoveTo, now, why);
         return true;
@@ -1903,6 +1969,11 @@ bool TryConsumeWhiffApproachCorrect(DWORD now, float playerX, float playerY, flo
                                     bool canApproach, bool* outMoved) {
     if (outMoved) *outMoved = false;
     if (!gLock.needApproachCorrect) return false;
+    // 站桩输出下一刀会闪到怪脚边，禁止把纠偏走成 MoveTo 把出刀卡住。
+    if (gHiraishinEnabled.load(std::memory_order_acquire)) {
+        gLock.needApproachCorrect = false;
+        return false;
+    }
     // Impact：已在紧出刀带 → 清 flag，禁止假重贴。
     // BIN：Recover→MoveTo whiff_reapproach→Firing 再等 ~300ms 间隔，体感贴着愣一下。
     if (gImpactApproachEnabled.load(std::memory_order_acquire) &&
@@ -2259,23 +2330,26 @@ bool RefreshLock(const ports::mob::Snapshot& snap) {
     NoteLockHpSample();
     NoteHittedForHitLag(now);
     MaybeProbeUiHpTag(now);
+    if (gHiraishinEnabled.load(std::memory_order_acquire)) return true;
     if (TryAbandonDealtSum(now)) return false;
     if (TryAbandonOneshot(now)) return false;
     if (TryAbandonAbsHp(now)) return false;
     if (TryAbandonHitLag(now)) return false;
-    if (TryAbandonLockKillTimeout(now)) return false;
     if (TryAbandonHitRotate(now, snap)) return false;
+    if (TryAbandonLockKillTimeout(now)) return false;
 
     return ResolveWhiffArm(now);
 }
 
 // 贴怪关：只锁同层近怪。贴怪开：优先同 zMass 可落点；同层没有才跨 zMass（防飞怪物池）。
-// 群怪优先开：先比周围活怪密度，再比距离/hop；空中贴怪允许为了更密的堆跨层
-//（同密度仍偏近/同层，靠 score）。
-// MobCtrl：软优先我方控 > 中性 > 他人驱动；全员 Passive 时秩相同，行为与旧版一致。
+// 群怪优先开：500px 内先比密度（geoD2，不含 inView）；半径外仍按距离。
+// 空中贴怪允许为了半径内的密堆跨层。MobCtrl：软优先我方控 > 中性 > 他人驱动。
 constexpr float kClusterRadiusPx = 250.f;
-// Denser pack may be up to sqrt(mul) farther (4 => 2x). Old 2.25 (~1.5x) felt like off.
-constexpr float kClusterDistMul = 4.f;
+// 半径内密度优先：脚边独怪不得压过 500px 内的堆。
+// 旧 2x 相对距（score 含 inView=2.5e6）让 40px 独怪永远赢 200px 密堆，客户体感「勾了没用」。
+constexpr float kClusterPreferPx = 500.f;
+constexpr float kClusterPreferR2 = kClusterPreferPx * kClusterPreferPx;
+constexpr int kClusterPackMin = 3;
 
 bool MobIsLiveFarm(const ports::mob::MobLite& m) {
     if (!m.ready || m.deadType != 0 || m.hpPct <= 0) return false;
@@ -2307,6 +2381,12 @@ void ClearHitRotateState() {
     ClearHitRotateWatches();
 }
 
+void SyncHitPinWish() {
+    const int32_t oid =
+        (gHitRotateEnabled.load(std::memory_order_acquire) && gLock.id > 0) ? gLock.id : 0;
+    ports::hit_pin::SetWishOid(oid);
+}
+
 HitRotateWatch* HitRotateWatchOf(int id) {
     if (id <= 0) return nullptr;
     for (int i = 0; i < gHitRotateWatchN; ++i) {
@@ -2329,11 +2409,31 @@ HitRotateWatch* HitRotateWatchOf(int id) {
 
 // lastHitted 上升对应最新一条 AddDamageInfo。只认末条 CharacterId==本角色；
 // 列表里残留的旧自己条目不算（否则别人刚打一刀也会被当成我们的）。
-bool HitRotateBumpIsOurs(void* mob, uint32_t me) {
-    if (!me || !mob) return false;
+// Unknown：列表还没写上 / charId 读不到 —— 不得把 lastHitted 推上去，否则下一拍没 bump 可计。
+enum class HitRotateBumpKind : uint8_t { Ours, Foreign, Unknown };
+
+HitRotateBumpKind ClassifyHitRotateBump(void* mob, uint32_t me) {
+    if (!me || !mob) return HitRotateBumpKind::Unknown;
     ports::mob::DamageInfoSnap di{};
-    if (!ports::mob::TryReadDamageInfoList(mob, di) || !di.ok || di.count <= 0) return false;
-    return di.items[di.count - 1].charId == me;
+    if (!ports::mob::TryReadDamageInfoList(mob, di) || !di.ok || di.count <= 0) {
+        return HitRotateBumpKind::Unknown;
+    }
+    return di.items[di.count - 1].charId == me ? HitRotateBumpKind::Ours
+                                               : HitRotateBumpKind::Foreign;
+}
+
+bool HitRotateQuotaFull() {
+    if (!gHitRotateEnabled.load(std::memory_order_acquire)) return false;
+    const int nNeed = gHitRotateN.load(std::memory_order_acquire);
+    if (nNeed <= 0 || !gLock.id) return false;
+    // 出手硬顶：lastHitted 卡住时 confirm/bump 都不涨（BIN 3716395 lf=19 hp 钉死），
+    // 不按 lockFires 收闸就会在同一只上无限挥。
+    if (gLock.lockFires >= nNeed) return true;
+    if (gLock.hitBumpCount >= nNeed) return true;
+    for (int i = 0; i < gHitRotateWatchN; ++i) {
+        if (gHitRotateWatch[i].id == gLock.id && gHitRotateWatch[i].hits >= nNeed) return true;
+    }
+    return false;
 }
 
 bool TriggerHitRotateFrom(int id, float x, float y, int hits, int live, DWORD now,
@@ -2345,7 +2445,11 @@ bool TriggerHitRotateFrom(int id, float x, float y, int hits, int live, DWORD no
     gHitRotatePending = true;
     gHitRotateObserveUntil = 0;
     SoftBanFor(id, now, kHitRotateBanMs, kBanHitRotate);
-    if (HitRotateWatch* w = HitRotateWatchOf(id)) w->hits = 0;
+    if (HitRotateWatch* w = HitRotateWatchOf(id)) {
+        // 禁止清零：BIN 3883505 满 4 后贴身 off_lock 又从 1/4 再打一轮。
+        if (w->hits < hits) w->hits = hits;
+        w->spentUntil = now + kHitRotateBanMs;
+    }
     LogLine("switch reason=hit_rotate id=%d hits=%d n=%d live=%d lock=%d pos=(%.0f,%.0f) why=%s",
             id, hits, gHitRotateN.load(std::memory_order_acquire), live, gLock.id, x, y,
             why ? why : "?");
@@ -2354,7 +2458,8 @@ bool TriggerHitRotateFrom(int id, float x, float y, int hits, int live, DWORD no
     return true;
 }
 
-// 扫全场 lastHitted 上升沿。只认观察窗内、DamageInfo.charId==本角色 的 bump。
+// 扫全场 lastHitted 上升沿。确认命中仍要观察窗 + 末条 DI.charId==自己。
+// 窗外 / DI 未就绪：禁止把 watch.lastHitted 推上去，否则延迟命中被吃掉后永远不计刀。
 bool NoteHitRotateBumps(DWORD now, const ports::mob::Snapshot& snap) {
     if (!gHitRotateEnabled.load(std::memory_order_acquire)) return false;
     const int nNeed = gHitRotateN.load(std::memory_order_acquire);
@@ -2373,6 +2478,10 @@ bool NoteHitRotateBumps(DWORD now, const ports::mob::Snapshot& snap) {
         HitRotateWatch* w = HitRotateWatchOf(m.id);
         if (!w) continue;
         w->seen = true;
+        if (w->spentUntil != 0 && static_cast<int>(now - w->spentUntil) >= 0) {
+            w->hits = 0;
+            w->spentUntil = 0;
+        }
         int32_t hitted = m.lastHitted;
         if (m.id == gLock.id) hitted = gLock.lastHitted;  // 锁怪用 live 直读，不吃 snap 龄
         if (!w->seeded) {
@@ -2381,16 +2490,25 @@ bool NoteHitRotateBumps(DWORD now, const ports::mob::Snapshot& snap) {
             continue;
         }
         const bool bump = hitted > w->lastHitted;
-        w->lastHitted = hitted;
-        if (!bump || !inWin) continue;
-        if (!HitRotateBumpIsOurs(m.ptr, me)) {
+        if (!bump) continue;
+        // 已满 N 禁锁：迟到多段/投射物只吞掉 bump，禁止 spent_rehit 拆掉新锁。
+        if (w->spentUntil != 0 && static_cast<int>(now - w->spentUntil) < 0) {
+            w->lastHitted = hitted;
+            continue;
+        }
+        if (!inWin) continue;  // 保留旧 lastHitted，等窗开再计
+        const HitRotateBumpKind kind = ClassifyHitRotateBump(m.ptr, me);
+        if (kind != HitRotateBumpKind::Ours) {
+            if (kind == HitRotateBumpKind::Foreign) w->lastHitted = hitted;
             static DWORD sSkip = 0;
             if (!sSkip || now - sSkip > 1000) {
                 sSkip = now;
-                LogLine("hit_rotate skip_foreign id=%d hitted=%d me=%u", m.id, hitted, me);
+                LogLine("hit_rotate skip_%s id=%d hitted=%d me=%u",
+                        kind == HitRotateBumpKind::Foreign ? "foreign" : "di", m.id, hitted, me);
             }
             continue;
         }
+        w->lastHitted = hitted;
         w->hits += 1;
         LogLine("hit_rotate confirm id=%d hits=%d/%d lock=%d hitted=%d me=%u", m.id, w->hits, nNeed,
                 gLock.id, hitted, me);
@@ -2405,22 +2523,37 @@ bool NoteHitRotateBumps(DWORD now, const ports::mob::Snapshot& snap) {
     if (rotateId <= 0) return false;
     const int live = CountLiveFarmMobs(snap);
     return TriggerHitRotateFrom(rotateId, rotateX, rotateY, rotateHits, live, now,
-                                rotateId == gLock.id ? "lock" : "off_lock");
+                                rotateHits > nNeed ? "spent_rehit"
+                                : (rotateId == gLock.id ? "lock" : "off_lock"));
 }
 
-// 打中换怪：活怪 < 3 立刻停刀；同一 oid 确认命中满 N 则禁锁并改打最远。
+// 打中换怪：活怪 < 3 停刀；出手满 N / lastHitted 满 N / 确认命中满 N 则禁锁换盒外。
 bool TryAbandonHitRotate(DWORD now, const ports::mob::Snapshot& snap) {
     if (!gHitRotateEnabled.load(std::memory_order_acquire)) return false;
-    if (!snap.ok) return false;
-    const int live = CountLiveFarmMobs(snap);
-    if (live < kHitRotateMinLive) {
-        LogLine("switch reason=hit_rotate_low_live id=%d live=%d hits_armed=%d need>=%d", gLock.id,
-                live, gLock.hitBumpCount, kHitRotateMinLive);
-        ClearHitRotateState();
-        gLastLockLostWhy = "hit_rotate_low_live";
-        ClearLockRetarget();
-        return true;
+    const int nNeed = gHitRotateN.load(std::memory_order_acquire);
+    if (snap.ok) {
+        const int live = CountLiveFarmMobs(snap);
+        if (live < kHitRotateMinLive) {
+            LogLine("switch reason=hit_rotate_low_live id=%d live=%d hits_armed=%d need>=%d",
+                    gLock.id, live, gLock.hitBumpCount, kHitRotateMinLive);
+            ClearHitRotateState();
+            gLastLockLostWhy = "hit_rotate_low_live";
+            ClearLockRetarget();
+            return true;
+        }
     }
+    if (gLock.id > 0 && nNeed > 0) {
+        const int live = snap.ok ? CountLiveFarmMobs(snap) : 0;
+        if (gLock.hitBumpCount >= nNeed) {
+            return TriggerHitRotateFrom(gLock.id, gLock.x, gLock.y, gLock.hitBumpCount, live, now,
+                                        "lock_bumps");
+        }
+        if (gLock.lockFires >= nNeed) {
+            return TriggerHitRotateFrom(gLock.id, gLock.x, gLock.y, gLock.lockFires, live, now,
+                                        "lock_fires");
+        }
+    }
+    if (!snap.ok) return false;
     return NoteHitRotateBumps(now, snap);
 }
 
@@ -2552,6 +2685,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
     const bool clusterOn = gClusterPriority.load(std::memory_order_acquire);
     const ports::mob::MobLite* best = nullptr;
     float bestScore = 1e9f;
+    float bestGeoD2 = 1e9f;
     float bestHop = 0.f;
     int bestCluster = -1;
     int bestCtrlRank = -1;
@@ -2564,27 +2698,53 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
     uint32_t humanPlayerFh = 0;
     if (humanPick) humanPlayerFh = ResolveHumanPlayerFh(px, py);
 
-    // 群怪优先：更密者胜，但不得为了密度去追过远堆。
-    // BIN 22:47：86% 换锁走 MoveTo，acq→fire≈210ms；71/117 只 |dx|>160——体感「发呆一会
-    // 才打」。旧逻辑 clusterN 更大就无条件赢，50px 独怪会输给 600px 密堆。
-    // 现：更密最多比当前最佳远到 √kClusterDistMul 倍（4→2×）。
-    auto better = [&](int ctrlRank, int clusterN, float score) -> bool {
+    // 群怪优先：500px 内密度是第一键（geoD2，不含 inView/残血偏置）。
+    // 旧 2x 相对距把 score（含 inView=2.5e6）拿来比，40px 独怪永远压过 200px 堆。
+    // 半径外仍按距离，避免再出现 BIN 22:47 追 600px+ 密堆发呆。
+    auto better = [&](int ctrlRank, int clusterN, float geoD2, float score) -> bool {
         if (ctrlRank > bestCtrlRank) return true;
         if (ctrlRank < bestCtrlRank) return false;
         if (clusterOn && bestCluster >= 0) {
-            if (clusterN > bestCluster) return score <= bestScore * kClusterDistMul;
-            if (clusterN < bestCluster) return score * kClusterDistMul < bestScore;
+            const bool candIn = geoD2 <= kClusterPreferR2;
+            const bool bestIn = bestGeoD2 <= kClusterPreferR2;
+            if (candIn && bestIn) {
+                if (clusterN != bestCluster) return clusterN > bestCluster;
+                return score < bestScore;
+            }
+            if (candIn && clusterN >= kClusterPackMin && !bestIn) return true;
+            if (bestIn && bestCluster >= kClusterPackMin && !candIn) return false;
         }
         return score < bestScore;
     };
 
-    // 直贴：不分层、不跑 hop 分段可达性；有落点即可，按距离选。
-    if (kDirectTeleportNoLayerHop) {
+    const bool hirPick = gHiraishinEnabled.load(std::memory_order_acquire);
+    if (hirPick) {
+        (void)looseLand;
+        (void)allowCrossLayer;
+        (void)standOff;
+        (void)now;
+        for (int i = 0; i < snap.count; ++i) {
+            const auto& m = snap.mobs[i];
+            if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
+            if (m.templateId == kSpecialTplFilter) continue;
+            if (!HiraishinFrontOk(px, py, m.x, m.y)) continue;
+            const float dx = m.x - px;
+            const float dy = m.y - py;
+            const float geoD2 = dx * dx + dy * dy;
+            if (geoD2 >= bestGeoD2) continue;
+            bestGeoD2 = geoD2;
+            bestScore = geoD2;
+            best = &m;
+            bestHop = std::hypot(dx, dy);
+        }
+        if (!best) return false;
+    } else if (kDirectTeleportNoLayerHop) {
         for (int i = 0; i < snap.count; ++i) {
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
             if (m.templateId == kSpecialTplFilter) continue;
             if (IsSoftBanned(m.id, now)) continue;
+            if (!HiraishinRangeOk(px, py, m.x, m.y)) continue;
             float hop = 0, tx = 0, ty = 0;
             uint32_t fh = 0;
             const bool landOk =
@@ -2593,16 +2753,18 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             if (!landOk || !std::isfinite(hop) || hop < 0.f) continue;
             const float dx = m.x - px;
             const float dy = m.y - py;
+            const float geoD2 = dx * dx + dy * dy;
             const float woundBias = (m.hpPct > 0 && m.hpPct < 100) ? -80000.f : 0.f;
             // inView=0 仍可选（避免假空图），但有同距可命中怪时优先后者。
             const float inViewBias = m.inView ? 0.f : 2.5e6f;
-            const float score = dx * dx + dy * dy + woundBias + inViewBias;
+            const float score = geoD2 + woundBias + inViewBias;
             const int cn = clusterOn ? CountClusterNeighbors(snap, m) : 0;
             const int cr = ports::mob::CtrlPreferRank(m.ctrl);
-            if (!better(cr, cn, score)) continue;
+            if (!better(cr, cn, geoD2, score)) continue;
             bestCtrlRank = cr;
             bestCluster = cn;
             bestScore = score;
+            bestGeoD2 = geoD2;
             best = &m;
             bestHop = hop;
         }
@@ -2612,6 +2774,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) return;
             if (m.templateId == kSpecialTplFilter) return;
             if (IsSoftBanned(m.id, now)) return;
+            if (!HiraishinRangeOk(px, py, m.x, m.y)) return;
 
             if (!allowCrossLayer) {
                 if (!SameLayerZm(playerZm, playerZmOk, py, m.x, m.y, 0)) return;
@@ -2619,15 +2782,18 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
                 if (humanPick && !HumanWalkReachable(px, py, m.x, m.y, humanPlayerFh)) return;
                 if (!sameLayerPass) return;
                 const float dx = m.x - px;
+                const float dy = m.y - py;
+                const float geoD2 = dx * dx + dy * dy;
                 const float inViewBias = m.inView ? 0.f : 2.5e6f;
                 const float d2 =
-                    dx * dx + ((m.hpPct > 0 && m.hpPct < 100) ? -80000.f : 0.f) + inViewBias;
+                    geoD2 + ((m.hpPct > 0 && m.hpPct < 100) ? -80000.f : 0.f) + inViewBias;
                 const int cn = clusterOn ? CountClusterNeighbors(snap, m) : 0;
                 const int cr = ports::mob::CtrlPreferRank(m.ctrl);
-                if (!better(cr, cn, d2)) return;
+                if (!better(cr, cn, geoD2, d2)) return;
                 bestCtrlRank = cr;
                 bestCluster = cn;
                 bestScore = d2;
+                bestGeoD2 = geoD2;
                 best = &m;
                 bestHop = std::fabs(dx);
                 return;
@@ -2652,15 +2818,17 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
 
             const float dx = m.x - px;
             const float dy = m.y - py;
+            const float geoD2 = dx * dx + dy * dy;
             const float woundBias = (m.hpPct > 0 && m.hpPct < 100) ? -80000.f : 0.f;
             const float inViewBias = m.inView ? 0.f : 2.5e6f;
-            const float score = dx * dx + dy * dy + hop * hop * 0.35f + woundBias + inViewBias;
+            const float score = geoD2 + hop * hop * 0.35f + woundBias + inViewBias;
             const int cn = clusterOn ? CountClusterNeighbors(snap, m) : 0;
             const int cr = ports::mob::CtrlPreferRank(m.ctrl);
-            if (!better(cr, cn, score)) return;
+            if (!better(cr, cn, geoD2, score)) return;
             bestCtrlRank = cr;
             bestCluster = cn;
             bestScore = score;
+            bestGeoD2 = geoD2;
             best = &m;
             bestHop = hop;
         };
@@ -2673,6 +2841,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             if (clusterOn || !best) {
                 if (!clusterOn) {
                     bestScore = 1e9f;
+                    bestGeoD2 = 1e9f;
                     bestCluster = -1;
                     bestCtrlRank = -1;
                 }
@@ -2720,6 +2889,7 @@ bool PickHitRotateTarget(const ports::mob::Snapshot& snap, float fromX, float fr
         if (!MobIsLiveFarm(m)) continue;
         if (m.id == excludeId) continue;
         if (IsSoftBanned(m.id, now)) continue;
+        if (!HiraishinRangeOk(px, py, m.x, m.y)) continue;
         if (!allowCrossLayer) {
             if (!SameLayerZm(playerZm, playerZmOk, py, m.x, m.y, 0)) continue;
             if (humanPick && !HumanWalkReachable(px, py, m.x, m.y, humanPlayerFh)) continue;
@@ -2756,6 +2926,35 @@ bool PickHitRotateTarget(const ports::mob::Snapshot& snap, float fromX, float fr
 
 void ExplainAcquireMiss(const ports::mob::Snapshot& snap, float px, float py, DWORD now,
                         bool allowCrossLayer) {
+    if (gHiraishinEnabled.load(std::memory_order_acquire)) {
+        (void)now;
+        int nSpecial = 0, nDead = 0, nFront = 0, nSame = 0, nCross = 0, nOk = 0;
+        for (int i = 0; i < snap.count; ++i) {
+            const auto& m = snap.mobs[i];
+            if (!m.ready || m.deadType != 0 || m.hpPct <= 0) {
+                ++nDead;
+                continue;
+            }
+            if (m.templateId == kSpecialTplFilter) {
+                ++nSpecial;
+                continue;
+            }
+            if (!HiraishinFrontOk(px, py, m.x, m.y)) {
+                ++nFront;
+                continue;
+            }
+            if (SameLayer(px, py, m.x, m.y)) {
+                ++nSame;
+            } else {
+                ++nCross;
+            }
+            ++nOk;
+        }
+        LogLine("acquire miss count=%d py=%.0f mode=hiraishin-front frontOut=%d "
+                "same=%d cross=%d dead=%d special=%d ok=%d",
+                snap.count, py, nFront, nSame, nCross, nDead, nSpecial, nOk);
+        return;
+    }
     const float standOff = ClampStandOff();
     const bool humanOn = gHumanWalkEnabled.load(std::memory_order_acquire);
     int nBan = 0, nSpecial = 0, nDead = 0, nNoLand = 0, nHopFar = 0, nSame = 0, nCross = 0,
@@ -2872,6 +3071,7 @@ void PollF5() {
     }
     const bool down = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
     if (down && !gF5WasDown) {
+        x::features::ports::mob_gather::RecordHomeOnF5();
         const bool next = !gEnabled.load();
         SetEnabled(next);
         x::ipc::PayloadControl_PublishSimpleCombat(next);
@@ -2935,6 +3135,7 @@ constexpr float kHeliLiftPx = -4.f;
 // 还会乘进 InHitBand，动它会波及另外两条位移路径 —— 直升机想调站距就只能连累它们。
 //
 // 历史分桶（3,265 观察窗）曾推 28；现产品默认改为 60，与自定义站距开箱一致。
+// 28 是近战格。飞镖/弓这类远程开打中换怪也走 60——禁止按钉锁把人按进贴脸。
 constexpr float kHeliStandOffPx = 60.f;
 
 // 站距真源：勾了「自定义站距」就完全听用户的，否则用上面两个内置值。
@@ -3067,24 +3268,124 @@ constexpr float kLieSafeCatchLiftPx = 32.f;
 // 允许进 catch 的纵向窗口（台面上方 0..此值）。要盖得住 lift 后的悬停高度。
 constexpr float kLieSafeCatchBandPx = 96.f;
 
-// soft hold 或 NM Disconnecting/Disconnected：停战停旋翼（勿用粘性 SawDisconnect）。
-// soft 成功后 land quiet：hold 已放，仍压打怪/旋翼，错峰等官方切图帧。
+// NM 断开 / 落地静默：停战停旋翼（勿用粘性 SawDisconnect）。
+// hold 只留给守护 SHM（kMinHoldMs）。已经 PlayReady 且 NM Connected 时打怪不再认 hold，
+// 否则 Finish 里那 2s 最小 hold 会把软链后的刀再卡住（BIN 05:13 soft_hold 清不掉）。
 bool SoftOrNetQuiet() {
-    if (soft_login_probe::IsGameplayQuiet()) return true;
     const int nm = kick_sniff::LastSessionState();
-    return nm == 0 || nm == 1;
+    if (nm == 0 || nm == 1) return true;
+    if (soft_login_probe::IsLandQuiet()) return true;
+    if (!soft_login_probe::IsHoldActive()) return false;
+    if (ports::world::IsPlayReady()) return false;
+    return true;
 }
 
 bool InCombatEnableHold(DWORD now) {
     return gEnableHoldUntilMs != 0 && static_cast<int>(now - gEnableHoldUntilMs) < 0;
 }
 
+void ClearHiraishinLootHold() {
+    gHiraishinNeedLootHold = false;
+    gHiraishinLootHoldUntilMs = 0;
+}
+
+void ArmHiraishinLootHold(const char* why) {
+    if (!gHiraishinEnabled.load(std::memory_order_acquire)) {
+        ClearHiraishinLootHold();
+        return;
+    }
+    const DWORD holdMs = gHiraishinLootHoldMs.load(std::memory_order_acquire);
+    if (holdMs == 0) {
+        ClearHiraishinLootHold();
+        return;
+    }
+    gHiraishinNeedLootHold = true;
+    gHiraishinLootHoldUntilMs = 0;
+    LogLine("hiraishin loot hold arm %ums why=%s", (unsigned)holdMs,
+            why && why[0] ? why : "?");
+}
+
+// 能吸物才起钟：等宠 / 硬闸 / 未挂机 不算进静止窗。map arm 期间 Idle 已能吸，计入。
+void PumpHiraishinLootHoldClock(DWORD now) {
+    if (!gHiraishinNeedLootHold) return;
+    if (!gHiraishinEnabled.load(std::memory_order_acquire)) {
+        ClearHiraishinLootHold();
+        return;
+    }
+    const DWORD holdMs = gHiraishinLootHoldMs.load(std::memory_order_acquire);
+    if (holdMs == 0) {
+        ClearHiraishinLootHold();
+        return;
+    }
+    if (!gEnabled.load(std::memory_order_acquire)) return;
+    if (gHardPauseMask.load(std::memory_order_acquire) != 0) return;
+    if (x::features::pet_feed::ShouldHoldCombatForSummon()) return;
+    // 空中闸未放行前不起钟：别和 post_air_gate 重叠把静止窗吃掉。
+    if (soft_login_probe::IsPostSoftAirCombatBlocked()) return;
+    if (gHiraishinLootHoldUntilMs == 0) {
+        gHiraishinLootHoldUntilMs = now + holdMs;
+        gLootPulseGen.fetch_add(1u, std::memory_order_acq_rel);
+        LogLine("hiraishin loot hold start %ums", (unsigned)holdMs);
+    }
+}
+
+bool HiraishinLootHoldBlocksFire(DWORD now) {
+    PumpHiraishinLootHoldClock(now);
+    if (!gHiraishinNeedLootHold) return false;
+    if (!gHiraishinEnabled.load(std::memory_order_acquire)) return false;
+    if (gHiraishinLootHoldUntilMs == 0) return true;
+    if (static_cast<int>(now - gHiraishinLootHoldUntilMs) < 0) {
+        static DWORD sLootHoldLog = 0;
+        if (!sLootHoldLog || now - sLootHoldLog > 800) {
+            sLootHoldLog = now;
+            LogLine("hiraishin loot hold remain=%ums (stand / loot)",
+                    gHiraishinLootHoldUntilMs - now);
+        }
+        return true;
+    }
+    ClearHiraishinLootHold();
+    LogLine("hiraishin loot hold done");
+    return false;
+}
+
+bool CombatAlreadyAirborne() {
+    const DWORD now = x::runtime::NowMs();
+    if (gHeliAirborneUntilMs != 0 && static_cast<int>(now - gHeliAirborneUntilMs) < 0) {
+        return true;
+    }
+    if ((ports::fly_fh_ban::ActiveMask() &
+         static_cast<unsigned>(ports::fly_fh_ban::BanSource::CombatImpact)) != 0) {
+        return true;
+    }
+    return heli::CurrentOwner() == heli::Owner::Combat ||
+           heli::CurrentOwner() == heli::Owner::Gather;
+}
+
+bool CombatSpawnAllowsBan() {
+    if (!ports::world::IsPlayReady()) return false;
+    // 交战已起飞：CurFh=0 是 BAN 摘台，不是进图没台。同图误报 Reset 不得把人按下去。
+    if (CombatAlreadyAirborne()) return true;
+    const int mapId = ports::world::GetMapId();
+    if (mapId <= 0 || !ports::foothold::IsCacheReadyForMap(mapId)) return false;
+    if (gSawOnFhThisMap) return true;
+    ports::teleport::FlightState st{};
+    if (ports::teleport::QueryFlightState(st) && st.ok && st.onFh) {
+        gSawOnFhThisMap = true;
+        return true;
+    }
+    return false;
+}
+
+bool CombatGlideEnabled() {
+    return gImpactApproachEnabled.load(std::memory_order_acquire);
+}
+
 bool HeliBaseArmed() {
-    if (InCombatEnableHold(x::runtime::NowMs())) return false;
-    if (!gHeliLatchedThisEnable) return false;
+    // F5+空中贴怪即武装。站桩输出不滑翔，不进这里。
+    // Bootstrap / 非地图：禁止武装——payload 可在 worker 起来前 SetEnabled，BAN 会卡住整段换图。
     if (travel::IsActive()) return false;
-    return gEnabled.load(std::memory_order_acquire) &&
-           gImpactApproachEnabled.load(std::memory_order_acquire) &&
+    if (!ports::world::IsPlayReady()) return false;
+    return gEnabled.load(std::memory_order_acquire) && CombatGlideEnabled() &&
            gHardPauseMask.load(std::memory_order_acquire) == 0 &&
            !gKickStressActive.load(std::memory_order_acquire) &&
            !SoftOrNetQuiet() &&
@@ -3137,7 +3438,8 @@ constexpr uint32_t kSafeLandHoldersMask =
     static_cast<uint32_t>(HardPauseHolder::AutoLie) |
     static_cast<uint32_t>(HardPauseHolder::AutoSupply) |
     static_cast<uint32_t>(HardPauseHolder::Encounter) |
-    static_cast<uint32_t>(HardPauseHolder::MapArrive);
+    static_cast<uint32_t>(HardPauseHolder::MapArrive) |
+    static_cast<uint32_t>(HardPauseHolder::CharBoot);
 
 const char* SafeLandBeginWhy(HardPauseHolder holder) {
     switch (holder) {
@@ -3151,6 +3453,8 @@ const char* SafeLandBeginWhy(HardPauseHolder holder) {
         return "encounter_pause_on";
     case HardPauseHolder::MapArrive:
         return "map_arrive_pause_on";
+    case HardPauseHolder::CharBoot:
+        return "char_boot_pause_on";
     default:
         return "hard_pause_on";
     }
@@ -3168,6 +3472,8 @@ const char* SafeLandEndWhy(HardPauseHolder holder) {
         return "encounter_pause_off";
     case HardPauseHolder::MapArrive:
         return "map_arrive_pause_off";
+    case HardPauseHolder::CharBoot:
+        return "char_boot_pause_off";
     default:
         return "hard_pause_off";
     }
@@ -3615,7 +3921,20 @@ void SyncImpactFhBan() {
     const bool safeLand = gLieSafeLand.load(std::memory_order_acquire);
     const bool lieApproach = safeLand && gLieSafeHaveTarget && !gLieSafeCatching;
     const bool lieCatchHold = safeLand && gLieSafeHaveTarget && gLieSafeCatching && !gLieSafeCatchDrop;
-    bool wantBan = HeliBaseArmed() || lieApproach;
+    // 落台飞近仍可 BAN；交战 BAN 必须等人挂过台。否则首次进图 CurFh=0 被 detach 直坠。
+    bool wantBan = false;
+    if (lieApproach) {
+        wantBan = ports::world::IsPlayReady();
+    } else if (HeliBaseArmed() && CombatSpawnAllowsBan()) {
+        wantBan = true;
+    } else if (HeliBaseArmed()) {
+        static DWORD sSpawnBan = 0;
+        const DWORD nowLog = x::runtime::NowMs();
+        if (!sSpawnBan || nowLog - sSpawnBan > 800) {
+            sSpawnBan = nowLog;
+            LogLine("impact BAN defer spawn wait onFh (graph/play/curFh)");
+        }
+    }
     // 旋翼已判定不可救（状态停更 / 深度出界）：立刻卸禁挂台，让引擎按常规落地或复位。
     // 继续挂着 fh-ban 只会让角色永远接不住地板（bea1c3 就是这么一路掉到断线的）。
     // 测谎落台飞近阶段：不清 wantBan（否则图底 freefall → 重载关题）。
@@ -3673,6 +3992,8 @@ constexpr float kHeliStationSlack = 22.f;  // 相对站距的水平松弛，内�
 // 到位环半宽（自定义站距下沿 / HeliStationOk 共用；须在 InHeliHoverBand 之前可见）。
 constexpr float kHeliStationDy = 15.f;
 constexpr float kHeliStationDx = 40.f;
+// BAN+站立钉在台沿：站位点再抬高（AbsPos 更大 Y=更高），逼出跳/飞 ma 才能出刀。
+constexpr float kHeliStandTakeoffLiftY = 48.f;
 
 // ── 防贴脸退避（LiveStep）· 本拍解算结果 ───────────────────────────────────
 //
@@ -3758,11 +4079,9 @@ bool InHeliHoverBand(float px, float py, float mx, float my) {
 //       dy<15 & dx<40 → 96% ｜ dx 40~80 → 92% ｜ dx 80~120 → 60%
 //       dy 15~30      → 89% ｜ dy 30~45 → 53%
 //
-// ⚠️ **不要再据此收紧出刀闸**。曾按 lastHitted 推出的空刀率（口径更糙）把闸收到
-// dy24/dx60，实测 kills/min 119→109，因为它砍掉了全部命中的 17%。边际账是负的：
-// dx 80~100 那 1,772 刀虽只有 58% 命中，拦掉也只省 744 次空挥 ≈ 91s，而这 91s 按
-// 平均 86.4% 本能换 639 次命中，代价却是 1,028 次命中——净亏 389。
-// 正解是**不拦刀、只把站位往 96% 那格压**（见下方 kHeliStation*）。
+// ⚠️ **不要按近战格收紧远程出刀闸**。曾把闸收到 dy24/dx60，kills/min 119→109。
+// 钉锁空包 ≠ 站太远：飞镖盗贼站 60 本就在投掷盒里，再收到 28 是把远程按进贴脸
+// （和防贴脸退避对着干）。空包优先查朝向 / 竖直 / inView，不要改站距。
 //
 // 仍然成立的旧结论：速度不判别空刀。只取 |dy|<12 且 |dx|<40 的刀，合速 0~200/200~400/
 // 400~600 的空刀率是 5%/5%/2%；边际上「越快越空」是「飞得快时更常在框外出刀」的伪装。
@@ -4404,7 +4723,7 @@ bool PlayerOutOfPlayBounds(float px, float py) {
 
 // 把「打哪只、站哪儿」翻译成旋翼 setpoint。每 tick 可重复调，幂等。
 void PublishHeliSetpoint(DWORD now, float px, float py, bool haveLock) {
-    if (!HeliBaseArmed()) {
+    if (!HeliBaseArmed() || !CombatSpawnAllowsBan()) {
         heli::Disarm(heli::Owner::Combat);
         gHeliHoldValid = false;
         gHeliRtbLatched = false;
@@ -4444,7 +4763,23 @@ void PublishHeliSetpoint(DWORD now, float px, float py, bool haveLock) {
         BuildHeliStationPoint(px, py, gLock.x, gLock.y, &idealX, &idealY, &side);
         if (side != 0) gLandSide = side;
 
-        if (gAntiJitterEnabled.load(std::memory_order_acquire)) {
+        ports::teleport::FlightState standSt{};
+        const bool standMa =
+            ports::teleport::QueryFlightState(standSt) && CombatStandMa(standSt);
+        // 只从真挂台上抬飞。ma=4/5 且 CurFh=0 是进图真空站姿，+48 只会把人送进虚空。
+        const bool standTakeoff = standMa && standSt.onFh;
+        if (standTakeoff) {
+            idealY += kHeliStandTakeoffLiftY;
+            gStationStickValid = false;
+            static DWORD sTakeoff = 0;
+            if (!sTakeoff || now - sTakeoff > 400) {
+                sTakeoff = now;
+                LogLine("heli takeoff lift ma=%d +%.0f ap=(%.0f,%.0f) sp=(%.0f,%.0f)",
+                        standSt.ma, kHeliStandTakeoffLiftY, px, py, idealX, idealY);
+            }
+        }
+
+        if (gAntiJitterEnabled.load(std::memory_order_acquire) && !standTakeoff) {
             if (gStationStickLockId != gLock.id) {
                 gStationStickValid = false;
                 gStationStickLockId = gLock.id;
@@ -4867,6 +5202,7 @@ void TickImpl(DWORD now) {
     }
 
     if (!gEnabled.load(std::memory_order_acquire)) {
+        ports::hit_pin::SetWishOid(0);
         if (gState != State::Idle) GoIdle(now, "disabled");
         SyncImpactFhBan();
         if (gLieSafeLand.load(std::memory_order_acquire)) {
@@ -4879,6 +5215,7 @@ void TickImpl(DWORD now) {
     // 断线边沿 / soft settle：立刻 Idle + 卸刀；旋翼策略分 hold vs land quiet。
     // IsPlayReady 在 NM 断后仍常为真（InMap&&Alive），不能依赖 not_play（752824）。
     if (SoftOrNetQuiet()) {
+        ports::hit_pin::SetWishOid(0);
         gHeliAirborneUntilMs = 0;
         gHeliHoldValid = false;
         const bool softHold = soft_login_probe::IsHoldActive();
@@ -4892,7 +5229,7 @@ void TickImpl(DWORD now) {
                 EndLieSafeLand("soft_or_net_quiet");
             }
             ReleaseMapArriveIfHeld();
-            // F5 还开着：软重连后人已落地。不把上一轮 latch 带过去，否则 BAN+ma=4 硬闸不出刀。
+            // F5 还开着：软静默停飞。结束后 HeliBaseArmed 会再武装（build 132 先起飞）。
             if (gHeliLatchedThisEnable) UnlatchCombatHeli(why);
             if (gState != State::Idle) GoIdle(now, why);
             else SyncImpactFhBan();
@@ -4960,19 +5297,39 @@ void TickImpl(DWORD now) {
                     why, softHold ? 1 : 0, landQuiet ? 1 : 0, kick_sniff::LastSessionState(),
                     gLieSafeLand.load(std::memory_order_acquire) ? 1 : 0);
         }
+        gHiraishinSawSoftQuiet = true;
         return;
+    }
+    // 软重连/断线静默结束：丢掉换图清掉的 NM 缓存，下一刀才能 SendOut。
+    if (gHiraishinSawSoftQuiet) {
+        gHiraishinSawSoftQuiet = false;
+        ports::attack_rpc::InvalidateAfterMapChange();
+        ArmHiraishinLootHold("soft_resume");
+        LogLine("soft_hold released — combat resume (play-ready)");
     }
     // soft quiet 已过、post_air_gate 仍在：HeliBaseArmed=false，清宽免 BAN 拖尾。
     if (soft_login_probe::IsPostSoftAirCombatBlocked()) {
         gHeliAirborneUntilMs = 0;
         gHeliHoldValid = false;
     }
+    // map arm / 后面提前 return 也要走钟：那段 Idle 已经在吸物。
+    PumpHiraishinLootHoldClock(now);
     SyncImpactFhBan();
     // 测谎落台 setpoint 必须在旋翼 Tick 之前写好（同 PublishHeliSetpoint 约束）。
     TickLieSafeLand(now);
     // 旋翼必须在这里转：下面每一个提前 return（skill_prepare / arm_grace / 池未热身 /
     // bad_pos / wait_pet）都会跳过 FSM，而 fh-ban 仍挂着——停一拍就是掉一段。
     TickHeliRotor(now);
+    if (ports::mob_gather::IsSeekingCluster()) {
+        if (gState != State::Idle) GoIdle(now, "gather_seek");
+        ports::attack::ForceRelease();
+        static DWORD sGatherSeekLog = 0;
+        if (!sGatherSeekLog || now - sGatherSeekLog > 800) {
+            sGatherSeekLog = now;
+            LogLine("gather_seek yield (no fire while flying to pack/home)");
+        }
+        return;
+    }
     if (gExternalPause.load(std::memory_order_acquire)) {
         // 对照枫星：buffs/timed_keys 是高频短暂停 → 轻暂停只停出刀，保留 lock/FSM。
         // 旧实现 GoIdle("pause") 会 ClearLock → 补 BUFF 后丢锁重寻/乱跳，客户感知「打怪错乱」。
@@ -5026,6 +5383,10 @@ void TickImpl(DWORD now) {
     }
     if (!ports::world::IsPlayReady()) {
         if (gState != State::Idle) GoIdle(now, "not_play");
+        gSawOnFhThisMap = false;
+        gHeliAirborneUntilMs = 0;
+        gHeliHoldValid = false;
+        SyncImpactFhBan();
         if (gLastMapId >= 0) {
             gLastMapId = -1;  // 下一帧进图重新武装
             gMapArmUntilMs = 0;
@@ -5039,6 +5400,15 @@ void TickImpl(DWORD now) {
         gHeliRtbLatched = false;
         // 与 encounter::ResetForMapChange 同口径：空中进图要落台，勿只开 arm。
         OnCombatMapChange("map_change");
+    }
+    if (!CombatSpawnAllowsBan()) {
+        static DWORD sWaitFh = 0;
+        if (!sWaitFh || now - sWaitFh > 800) {
+            sWaitFh = now;
+            LogLine("combat wait onFh (no BAN/takeoff until foothold attach)");
+        }
+        if (gState != State::Idle) GoIdle(now, "wait_onFh");
+        return;
     }
     if (gMapArmUntilMs && static_cast<int>(now - gMapArmUntilMs) < 0) {
         static DWORD sArm = 0;
@@ -5054,11 +5424,10 @@ void TickImpl(DWORD now) {
         static DWORD sEnHold = 0;
         if (!sEnHold || now - sEnHold > 800) {
             sEnHold = now;
-            LogLine("enable hold remain=%ums (no heli/fire; first acquire delayed)",
+            LogLine("enable hold remain=%ums (heli on; first fire delayed)",
                     gEnableHoldUntilMs - now);
         }
-        if (gState != State::Idle) GoIdle(now, "enable_hold");
-        return;
+        // build 132：hold 只压首刀，不挡起飞。Acquire/MoveTo 照跑。
     }
 
     // 自动召唤开着且场上无宠：先让路召唤（警戒态会拒 ActivatePet →「现在无法进行」）。
@@ -5117,9 +5486,10 @@ void TickImpl(DWORD now) {
     }
 
     ports::mob::Snapshot snap{};
-    // Acquire / 无锁：要够新；有锁热路径仍可读略旧缓存（锁存续走 TryFillLive）。
+    // Acquire / 无锁：要够新；站桩输出扫掠每拍都要活怪坐标；有锁热路径仍可读略旧缓存。
     const bool needFreshPick =
-        gState == State::Acquire || gState == State::Idle || gLock.id == 0;
+        gHiraishinEnabled.load(std::memory_order_acquire) || gState == State::Acquire ||
+        gState == State::Idle || gLock.id == 0;
     if (needFreshPick) {
         if (!EnsureFreshMobSnap(snap, kMobCacheFreshMs)) {
             // 池未热身时只催 mob_scan；禁止在战斗线程完整 Collect。
@@ -5131,12 +5501,14 @@ void TickImpl(DWORD now) {
     TickMobSnapScope tickSnap(&snap);
 
     const float standOff = ClampStandOff();
-    // 优先级：Impact 贴怪 > 拟人走路；fill+Doing 瞬移已禁用。
-    const bool impactOn = gImpactApproachEnabled.load(std::memory_order_acquire);
+    // 优先级：站桩输出 > Impact 贴怪 > 拟人走路；fill+Doing 瞬移已禁用。
+    const bool hiraishinOn = gHiraishinEnabled.load(std::memory_order_acquire);
+    const bool impactOn =
+        !hiraishinOn && gImpactApproachEnabled.load(std::memory_order_acquire);
     const bool humanOn =
-        !impactOn && gHumanWalkEnabled.load(std::memory_order_acquire);
+        !hiraishinOn && !impactOn && gHumanWalkEnabled.load(std::memory_order_acquire);
     const bool tpOn =
-        !impactOn && !humanOn && gTeleportEnabled.load(std::memory_order_acquire);
+        !hiraishinOn && !impactOn && !humanOn && gTeleportEnabled.load(std::memory_order_acquire);
     const bool canApproach = impactOn || tpOn || humanOn;
 
     if (gState == State::Idle) EnterState(State::Acquire, now, "enabled");
@@ -5145,8 +5517,14 @@ void TickImpl(DWORD now) {
     // 循环里五个 pass 都会读它（站位点 + 四处距离判据），中途变值就是自己跟自己对推。
     ComputeDodge(now, player.x, player.y, snap);
 
+    if (hiraishinOn && heli::CurrentOwner() == heli::Owner::Combat) {
+        heli::Disarm(heli::Owner::Combat);
+        gHeliHoldValid = false;
+    }
+
     // Aim/Recover→Firing 同 tick 连跑；多给几拍让 dead→acquire→MoveTo 同轮完成。
     for (int pass = 0; pass < 5; ++pass) {
+        SyncHitPinWish();
         // 站位点每拍刷新：怪会动，出刀期间旋翼也要跟着它悬停（这才是「打完不掉」的关键）。
         if (impactOn) PublishHeliSetpoint(now, player.x, player.y, gLock.id != 0);
     switch (gState) {
@@ -5154,8 +5532,8 @@ void TickImpl(DWORD now) {
             break;
 
         case State::Acquire: {
-            // Impact/瞬移：可跨层；纯拟人/站桩：仅同层。
-            const bool allowCross = impactOn || tpOn;
+            // Impact/瞬移/站桩输出：可跨层；拟人/站桩：仅同层。
+            const bool allowCross = impactOn || tpOn || hiraishinOn;
             const bool hitRotateOn = gHitRotateEnabled.load(std::memory_order_acquire);
             if (hitRotateOn) {
                 const int live = CountLiveFarmMobs(snap);
@@ -5225,7 +5603,8 @@ void TickImpl(DWORD now) {
             if (!allowCross && !SameLayer(player.x, player.y, gLock.x, gLock.y)) {
                 SoftBanFor(gLock.id, now, kCrossLayerForbidSoftBanMs);
                 LogLine("acquire forbid cross_layer id=%d ban=%ums (%s)", gLock.id,
-                        (unsigned)kCrossLayerForbidSoftBanMs, humanOn ? "human" : "tp_off");
+                        (unsigned)kCrossLayerForbidSoftBanMs,
+                        hiraishinOn ? "hiraishin" : (humanOn ? "human" : "tp_off"));
                 ClearLockRetarget(/*forceLite=*/false);
                 break;
             }
@@ -5246,22 +5625,29 @@ void TickImpl(DWORD now) {
                     break;
                 }
             }
-            // 空中贴怪：Acquire 用紧出刀带进 Aim；换怪首刀更严（firstLock）。
+            // 站桩输出：面前盒（面板横向/竖直）里有怪就砍，不等叠怪。
+            if (hiraishinOn) {
+                if (!HiraishinFrontOk(player.x, player.y, gLock.x, gLock.y)) {
+                    LogLine("acquire skip front id=%d d=(%.0f,%.0f)", gLock.id,
+                            gLock.x - player.x, gLock.y - player.y);
+                    ClearLockRetarget(/*forceLite=*/false);
+                    break;
+                }
+                EnterState(State::Aim, now, "hiraishin");
+                break;
+            }
+            // 空中贴怪：build 132 先起飞再砍。已在空中且进出刀带才 Aim；地上一律 MoveTo。
             if (impactOn) {
+                LatchCombatHeli("impact_approach");
                 if (HeliStrikeOk(player.x, player.y, gLock.x, gLock.y,
                                  /*firstLock=*/gLock.lockFires == 0)) {
                     ports::teleport::FlightState st{};
                     const bool airborne = ports::teleport::QueryFlightState(st) && st.ok &&
                                           !st.onFh;
                     if (airborne) {
-                        LatchCombatHeli("airborne_strike");
-                    } else if (!gHeliLatchedThisEnable) {
-                        LogLine("ground melee skip heli id=%d d=(%.0f,%.0f) "
-                                "(no SetImpactNext until MoveTo)",
-                                gLock.id, gLock.x - player.x, gLock.y - player.y);
+                        EnterState(State::Aim, now, "heli_strike");
+                        break;
                     }
-                    EnterState(State::Aim, now, "heli_strike");
-                    break;
                 }
                 if (!TryEnterMoveTo(now, "impact_approach")) break;
                 continue;
@@ -5327,6 +5713,7 @@ void TickImpl(DWORD now) {
                 }
                 if (HeliStrikeOk(player.x, player.y, gLock.x, gLock.y,
                                  /*firstLock=*/gLock.lockFires == 0)) {
+                    if (!CombatHeliAirborne()) break;
                     ClearStickySpin();
                     ClearLootPulse();
                     EnterState(State::Firing, now, "heli_strike");
@@ -5899,6 +6286,17 @@ void TickImpl(DWORD now) {
                 EnterState(State::Acquire, now, gLastLockLostWhy);
                 break;
             }
+            if (hiraishinOn) {
+                const float faceDx = gLock.x - player.x;
+                (void)ports::attack::FaceToward(faceDx);
+                if (HiraishinLootHoldBlocksFire(now)) break;
+                if (!HiraishinFrontOk(player.x, player.y, gLock.x, gLock.y)) {
+                    EnterState(State::Acquire, now, "hiraishin_not_front");
+                    continue;
+                }
+                EnterState(State::Firing, now, "hiraishin_ready");
+                continue;
+            }
             // 无脑A：近距续砍；只有真远/跨层才重贴。禁止 aim_sticky 翻侧空转。
             // 残血纠偏：离开命中带即强制重贴（勿被 kReapproachMinDx 吞掉）。
             {
@@ -5929,9 +6327,13 @@ void TickImpl(DWORD now) {
                     gStandstillAnchorY = player.y;
                 }
             }
-            // Impact：紧带够砍才进 Firing；换怪首刀更严。
+            // Impact：空中紧带才进 Firing；还在台上先 MoveTo 起飞。
             if (impactOn && HeliStrikeOk(player.x, player.y, gLock.x, gLock.y,
                                          /*firstLock=*/gLock.lockFires == 0)) {
+                if (!CombatHeliAirborne()) {
+                    if (TryEnterMoveTo(now, "impact_approach")) break;
+                    break;
+                }
                 const float faceDx = gLock.x - player.x;
                 (void)ports::attack::FaceToward(faceDx);
                 EnterState(State::Firing, now, "heli_strike");
@@ -6001,9 +6403,23 @@ void TickImpl(DWORD now) {
         case State::Firing: {
             if (ports::attack::IsFireSuppressed()) break;  // buffs Hold：同拍已进 Firing 也停
             if (ports::skill::IsPreparingSkill()) break;   // 手搓/自动 Prepare：不出刀
+            if (!hiraishinOn && InCombatEnableHold(now)) break;  // 起飞中，压首刀
             if (!RefreshLock(snap)) {
                 EnterState(State::Acquire, now, gLastLockLostWhy);
                 continue;  // 同 tick 选下一只并贴
+            }
+            if (hiraishinOn && HiraishinLootHoldBlocksFire(now)) break;
+            if (hiraishinOn && !HiraishinFrontOk(player.x, player.y, gLock.x, gLock.y)) {
+                EnterState(State::Acquire, now, "hiraishin_not_front");
+                continue;
+            }
+            // 满 N 后禁止再 OnFuncKey：RefreshLock 里 TryAbandon 偶发没清锁时这里兜住。
+            if (HitRotateQuotaFull() && !hiraishinOn) {
+                const int live = snap.ok ? CountLiveFarmMobs(snap) : 0;
+                (void)TriggerHitRotateFrom(gLock.id, gLock.x, gLock.y, gLock.hitBumpCount, live, now,
+                                           "quota");
+                EnterState(State::Acquire, now, gLastLockLostWhy);
+                continue;
             }
             {
                 bool moved = false;
@@ -6013,20 +6429,10 @@ void TickImpl(DWORD now) {
                     break;
                 }
             }
-            // 左右可位移框外：旋翼已武装才回 Aim 让 RTB 拉回。贴身地面砍未 latch
-            // 时没有旋翼，旧逻辑 Aim↔Firing oob_hold 空转（BIN 20:39:20 map=40002：
-            // 人 x≈1950，rawR=1980 的 0.95 右沿≈1933，skip heli → 7s 零出刀）。
+            // 左右可位移框外：旋翼拉回（build 132 交战期一直飞，无地面 skip）。
             if (impactOn && PlayerOutOfPlayBounds(player.x, player.y)) {
-                if (gHeliLatchedThisEnable) {
-                    EnterState(State::Aim, now, "oob_hold");
-                    break;
-                }
-                static DWORD sOobGround = 0;
-                if (!sOobGround || now - sOobGround > 500) {
-                    sOobGround = now;
-                    LogLine("oob skip ground melee id=%d px=%.0f (no rotor RTB; fire on fh)",
-                            gLock.id, player.x);
-                }
+                EnterState(State::Aim, now, "oob_hold");
+                break;
             }
             // 防贴脸退避未退到干净位：本拍不出刀，原地等旋翼把人挪开。
             // 总闸未开时 DodgeHoldsFire 恒 false，这一行等于不存在。
@@ -6034,14 +6440,10 @@ void TickImpl(DWORD now) {
             // 换锁首刀不压：到位后 hold_fire 也是「怪旁边发呆」（BIN 23:01 held=67ms+）。
             if (impactOn && gLock.lockFires > 0 && DodgeHoldsFire(now)) break;
             // P0 出刀硬门：未进带绝不砍（含误入 Firing 的路径）。
-            // 直升机：出刀带放行（空中 SameLayer 常失败，FireGate/InHitBand 会误拒）；
-            // 反过来，出刀带的 dy/dx 一旦超了就**一票否决**——FireGateOk 用的是地面口径，
-            // 会把 dy=60 或 dx=90 这种够不到的位置判成可打。
-            const bool heliFireOk =
-                impactOn && InHeliFireBand(player.x, player.y, gLock.x, gLock.y);
-            const bool heliReachBlocked =
-                impactOn && !HeliReachOk(player.x, player.y, gLock.x, gLock.y);
-            if (!heliFireOk &&
+            // 站桩输出原地出刀，不走滑翔打击带。
+            const bool heliFireOk = impactOn && InHeliFireBand(player.x, player.y, gLock.x, gLock.y);
+            const bool heliReachBlocked = impactOn && !HeliReachOk(player.x, player.y, gLock.x, gLock.y);
+            if (!hiraishinOn && !heliFireOk &&
                 (heliReachBlocked ||
                  !FireGateOk(player.x, player.y, gLock.x, gLock.y, standOff, now, "Firing"))) {
                 if (impactOn && NeedsHeliStationKeep(player.x, player.y, gLock.x, gLock.y)) {
@@ -6056,8 +6458,7 @@ void TickImpl(DWORD now) {
             // 已进宽带但未进紧出刀带：留 Firing 持火（兜底；进火路径已改紧带）。
             // 换怪首刀用更严 dy（BIN 13:00 跨层首刀空近半）。
             const bool firstOfLockGeo = (gLock.lockFires == 0);
-            if (impactOn &&
-                !HeliStrikeOk(player.x, player.y, gLock.x, gLock.y, firstOfLockGeo)) {
+            if (impactOn && !HeliStrikeOk(player.x, player.y, gLock.x, gLock.y, firstOfLockGeo)) {
                 static DWORD sStrikeHold = 0;
                 if (!sStrikeHold || now - sStrikeHold > 500) {
                     sStrikeHold = now;
@@ -6115,10 +6516,12 @@ void TickImpl(DWORD now) {
             // Firing↔MoveTo 自激，体感「贴到怪身上呆住」。
             // · 已进带：禁止再进 MoveTo，原地持火等 inView（旋翼仍 Publish 收站）。
             // · 换锁首刀且已进带：直接放行（first_lock_fire forgive 兜空挥）。
-            if (!gLock.inView) {
+            // · 打中换怪：FindHit 硬拒 inView=0，宽带 forgive 必空，不放行。
+            if (!hiraishinOn && !gLock.inView) {
+                const bool hitRotateOn = gHitRotateEnabled.load(std::memory_order_acquire);
                 const bool heliInBand =
                     impactOn && InHeliFireBand(player.x, player.y, gLock.x, gLock.y);
-                if (!(heliInBand && gLock.lockFires == 0)) {
+                if (hitRotateOn || !(heliInBand && gLock.lockFires == 0)) {
                     if (impactOn && !heliInBand &&
                         NeedsHeliStationKeep(player.x, player.y, gLock.x, gLock.y)) {
                         gInViewHoldSince = 0;
@@ -6152,12 +6555,14 @@ void TickImpl(DWORD now) {
             (void)ports::attack::FaceToward(faceDx);
             const bool firstOfLock = (gLock.lockFires == 0);
 
-            // F5 刚开首刀：强制转身一拍再砍（仅一次）。
+            // F5 刚开首刀：强制转身一拍再砍（仅一次）。站桩输出 1s 窗不赔这一拍。
             // 热开时常已在出刀带 → Aim→火极快；去掉全局 face_settle 后朝向未落地就原地空挥。
             if (gNeedEnableFaceSettle.exchange(false, std::memory_order_acq_rel)) {
                 (void)ports::attack::ApplyFaceNow();
-                EnterState(State::Recover, now, "enable_face_settle");
-                break;
+                if (!hiraishinOn) {
+                    EnterState(State::Recover, now, "enable_face_settle");
+                    break;
+                }
             }
 
             // ── 换向：一律同拍转身+出刀，不再 face_settle Recover ────────────────
@@ -6218,14 +6623,23 @@ void TickImpl(DWORD now) {
                 }
             }
 
-            // BIN edfbf1：BAN + ma=4 出刀会崩。BIN 17:18:51：软重连后贴地悬停 ma 不变 6/7，
-            // 干等 = 永远不出刀。已在出刀带则卸禁台改地面砍（下拍 CurFh 重挂后再火）。
-            if ((ports::fly_fh_ban::ActiveMask() &
+            // build 132：BAN 交战期不卸。BAN+ma=4/5 出刀会崩（edfbf1），只压刀等跳/飞。
+            // FaceDebug 是上次 SetInput 的 ma，台沿钉死后不再转身 → 假 4 空转。
+            // 用 VecCtrl 实读；站着就回 MoveTo 抬飞，禁止在 Firing 里 break 死等。
+            // BAN+ma=4/5 出刀会崩。站桩输出站着砍，不抬飞。
+            if (!hiraishinOn &&
+                (ports::fly_fh_ban::ActiveMask() &
                  static_cast<unsigned>(ports::fly_fh_ban::BanSource::CombatImpact)) != 0) {
-                int standMa = -1, standWhy = -1;
-                ports::attack::FaceDebug(&standMa, &standWhy);
-                if (standMa == 4 || standMa == 5) {
-                    UnlatchCombatHeli("stand_fhban");
+                ports::teleport::FlightState standSt{};
+                if (ports::teleport::QueryFlightState(standSt) && CombatStandMa(standSt)) {
+                    static DWORD sStandBan = 0;
+                    if (!sStandBan || now - sStandBan > 400) {
+                        sStandBan = now;
+                        LogLine("fire defer stand_fhban ma=%d ap=(%.0f,%.0f) v=(%.0f,%.0f) "
+                                "(keep BAN; takeoff)",
+                                standSt.ma, player.x, player.y, gHeliLastVx, gHeliLastVy);
+                    }
+                    if (TryEnterMoveTo(now, "wait_air_ma")) continue;
                     break;
                 }
             }
@@ -6233,7 +6647,7 @@ void TickImpl(DWORD now) {
             const int hpBefore = gLock.lastHp;
             bool ok = false;
 
-            if (UseMulti()) {
+            if (UseMulti() && !hiraishinOn) {
                 if (multi_skill::IsBurstBusy()) break;
                 (void)ports::attack::ApplyFaceNow();
                 char reason[64]{};
@@ -6290,9 +6704,51 @@ void TickImpl(DWORD now) {
             } else {
                 // 仅换锁首刀跳过面板间隔（BIN：换锁后常卡在 ~400ms 残值）。
                 // 同锁第 2 刀起恢复面板节奏；pendingUp / 泵拥堵始终挡。
-                const bool ignoreInterval = firstOfLock;
+                // 站桩输出不走 ignore：换锁第一刀也等间隔 + 忙锁，禁止 18ms 空刷。
+                const bool ignoreInterval = firstOfLock && !hiraishinOn;
                 if (!ports::attack::CanFirePrimaryEx(ignoreInterval)) break;
-                ok = ports::attack::TryFirePrimaryEx(ignoreInterval);
+                const bool forgeOn = gForgeHitEnabled.load(std::memory_order_acquire);
+                bool forgedOk = false;
+                if (forgeOn) {
+                    // 开了自组就只发自组。过远 / SendOut false / 非近战：停这一刀，不退 OnFuncKey。
+                    ports::attack_rpc::FireResult fr{};
+                    if (gLock.id > 0) {
+                        ok = ports::attack_rpc::TryFireLockOid(gLock.id, &fr);
+                    } else {
+                        fr.err = "no_oid";
+                    }
+                    const char* ferr = fr.err && fr.err[0] ? fr.err : "?";
+                    if (ok) {
+                        forgedOk = true;
+                        NoteDodgeFire(now);
+                        ports::attack::NoteLastFire();
+                        int faceMa = -1, faceWhy = -1;
+                        ports::attack::FaceDebug(&faceMa, &faceWhy);
+                        LogToFile(
+                            "forge_hit ok id=%d mobs=%d body=%d op=%d wt=%d skill=%d fkT=%d fkV=%d "
+                            "dx=%.0f dy=%.0f hp=%d lf=%d ma=%d fw=%d err=%s",
+                            gLock.id, fr.mobs, fr.bodyHint, fr.opcode, fr.weaponType, fr.skillId,
+                            fr.fkType, fr.fkValue, faceDx,
+                            player.y - gLock.y, hpBefore, gLock.lockFires, faceMa, faceWhy,
+                            ferr);
+                        if (!gStandstillSince) {
+                            gStandstillSince = now;
+                            gStandstillAnchorX = player.x;
+                            gStandstillAnchorY = player.y;
+                        }
+                    } else {
+                        static DWORD sForgeFail = 0;
+                        if (!sForgeFail || now - sForgeFail > 2000) {
+                            sForgeFail = now;
+                            LogLine("forge_hit fail id=%d err=%s (no OnFuncKey)", gLock.id, ferr);
+                        }
+                        EnterState(State::Recover, now, "forge_fail");
+                        break;
+                    }
+                }
+                if (!forgedOk) {
+                ports::attack::FireBlink blink{};
+                ok = ports::attack::TryFirePrimaryEx(ignoreInterval, blink);
                 if (ok) {
                     NoteDodgeFire(now);
                     // dy / v 是为了判「空刀由什么决定」而补的：历史上这行只有 dx，
@@ -6319,12 +6775,16 @@ void TickImpl(DWORD now) {
                     uint32_t spFh = 0;
                     ports::ground_spoof::FireDebug(&spV, &spFh);
                     ports::attack::FireOutcomeDebug(&b0, &b1);
+                    int bapx = 0, bapy = 0, baplx = 0, baply = 0, bap2x = 0, bap2y = 0;
+                    if (blink.on) ports::attack::BlinkDebug(&bapx, &bapy, &baplx, &baply, &bap2x, &bap2y);
                     LogToFile(
                         "fire id=%d dx=%.0f dy=%.0f v=(%.0f,%.0f) hp=%d whiff=%d arm=%d lf=%d "
-                        "ma=%d fw=%d sp=%d spfh=%u b0=%d b1=%d",
+                        "ma=%d fw=%d sp=%d spfh=%u b0=%d b1=%d blink=%d aim=(%.0f,%.0f) "
+                        "ap=(%d,%d) apl=(%d,%d) ap2=(%d,%d)",
                         gLock.id, faceDx, player.y - gLock.y, gHeliLastVx, gHeliLastVy, hpBefore,
                         gLock.whiff, gLock.firesInArm, gLock.lockFires, faceMa, faceWhy, spV, spFh,
-                        b0, b1);
+                        b0, b1, blink.on ? 1 : 0, blink.x, blink.y, bapx, bapy, baplx, baply, bap2x,
+                        bap2y);
                     if (!gStandstillSince) {
                         gStandstillSince = now;
                         gStandstillAnchorX = player.x;
@@ -6339,6 +6799,7 @@ void TickImpl(DWORD now) {
                     }
                     EnterState(State::Recover, now, "fire_fail");
                     break;
+                }
                 }
             }
 
@@ -6358,7 +6819,8 @@ void TickImpl(DWORD now) {
                 }
             }
             // 射后不管：出刀当帧即可早切（不等 Recover 下一拍读 lastHitted）。
-            if (TryAbandonOneshot(now)) {
+            // 站桩输出不因 oneshot / 空刀观察换锁。
+            if (!hiraishinOn && TryAbandonOneshot(now)) {
                 EnterState(State::Acquire, now, gLastLockLostWhy);
                 continue;
             }
@@ -6381,12 +6843,27 @@ void TickImpl(DWORD now) {
                     break;
                 }
             }
+            // 站桩输出：面前有怪就点按续砍（等忙锁 / 间隔，换锁首刀也不 ignore）。
+            if (hiraishinOn) {
+                if (HiraishinLootHoldBlocksFire(now)) break;
+                if (!HiraishinFrontOk(player.x, player.y, gLock.x, gLock.y)) {
+                    EnterState(State::Acquire, now, "hiraishin_not_front");
+                    continue;
+                }
+                if (!ports::attack::CanFirePrimaryEx(/*ignoreCombatInterval=*/false)) break;
+                EnterState(State::Firing, now, "hiraishin_next");
+                continue;
+            }
             // 黏住无脑A：近距继续砍；跨层/真远才重贴。
             const float dx = std::fabs(gLock.x - player.x);
             const bool same = SameLayer(player.x, player.y, gLock.x, gLock.y);
             const bool firstOfLock = (gLock.lockFires == 0);
             // 直升机：悬停续砍；漂出站位才 MoveTo；怪死走 Acquire 换下一只。
             if (impactOn && !gLock.needApproachCorrect) {
+                if (!CombatHeliAirborne()) {
+                    if (!TryEnterMoveTo(now, "impact_approach")) break;
+                    continue;
+                }
                 // 出刀带续砍；仅换锁首刀放行间隔（与 Firing 一致）。
                 if (InHeliFireBand(player.x, player.y, gLock.x, gLock.y)) {
                     if (!ports::attack::CanFirePrimaryEx(firstOfLock)) break;
@@ -6498,6 +6975,8 @@ DWORD WINAPI Worker(LPVOID) {
 //   · 硬闸持有者仍在且无 Travel：本图重钉落点继续飞。
 //   · 空中换图（手动回城/F5 禁挂台）且无 Travel：MapArrive + 同测谎落台，站稳自清。
 void OnCombatMapChange(const char* why) {
+    // 换图 InterStage 会把 NM opcode HashSet 清空；丢掉 2s Rebind 缓存，下一刀才能看见空表。
+    ports::attack_rpc::InvalidateAfterMapChange();
     const int mapId = ports::world::GetMapId();
     const DWORD now = GetTickCount();
     // 双入口去重：同 mapId 在短窗内只处理一次（仍记日志便于 BIN）。
@@ -6507,11 +6986,17 @@ void OnCombatMapChange(const char* why) {
                 (unsigned)(now - gLastMapChangeHandledMs));
         return;
     }
+    // encounter 首次 0→图号会 ResetForMapChange；F5 已在本图起飞时不得清 saw / 强制落台
+    // （BIN 16:22:39：空中 ma=6 被 wait_onFh + lie_safe 按到 ma=5 站立）。
+    if (why && std::strcmp(why, "ResetForMapChange") == 0 && mapId > 0 && mapId == gLastMapId) {
+        LogLine("OnCombatMapChange skip same-map reset map=%d (keep fly)", mapId);
+        return;
+    }
     if (mapId > 0) {
         gLastMapChangeHandledId = mapId;
         gLastMapChangeHandledMs = now;
     }
-
+    gSawOnFhThisMap = false;
     gFoxFillGateUntil = 0;
     SetHighValueLootUrgent(false);
     // 上一图的退避 latch / 放弃闩 / 熄火状态一律不带过图：新图重新给它一次机会。
@@ -6522,6 +7007,7 @@ void OnCombatMapChange(const char* why) {
     // BIN 9d504e：卖装无卷改 stick 赶路，换图若 RestartLieSafeLand 会抢 Travel 旋翼。
     if (travel::IsActive()) {
         BeginMapArmGrace(now, why ? why : "map_change");
+        ArmHiraishinLootHold("map_change_travel");
         return;
     }
 
@@ -6559,6 +7045,7 @@ void OnCombatMapChange(const char* why) {
     }
 
     BeginMapArmGrace(now, why ? why : "map_change");
+    ArmHiraishinLootHold("map_change");
 }
 
 }  // namespace
@@ -6573,9 +7060,14 @@ void Init() {
     gTeleportEnabled.store(false);
     gHumanWalkEnabled.store(true);
     gState = State::Idle;
+    gHeliLatchedThisEnable = false;
+    gHeliAirborneUntilMs = 0;
+    gSawOnFhThisMap = false;
     ClearLock();
     ClearHitRotateState();
     ClearSoftBan();
+    // payload 可能在 Init/worker 之前 SetEnabled 抬过 BAN；此处必须卸掉，否则换图真空坠落。
+    ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::CombatImpact, false);
 }
 
 void Shutdown() {
@@ -6615,6 +7107,8 @@ void SetEnabled(bool on) {
         gSettleUntil = 0;
         gNeedEnableFaceSettle.store(false, std::memory_order_release);
         gEnableHoldUntilMs = 0;
+        ClearHiraishinLootHold();
+        ports::attack::SetBurstPulse(false);
         gHeliLatchedThisEnable = false;
         heli::Reset();
         gHeliAirborneUntilMs = 0;
@@ -6629,22 +7123,42 @@ void SetEnabled(bool on) {
         gState = State::Idle;
         gSettleUntil = 0;
         gNeedEnableFaceSettle.store(true, std::memory_order_release);
-        gEnableHoldUntilMs = x::runtime::NowMs() + kCombatEnableHoldMs;
-        gHeliLatchedThisEnable = false;
-        // 赶路占旋翼时 Reset 会把 Travel 主人清掉（BIN 17:36 贴门）。只清 Combat 时钟不够，直接跳过。
-        if (heli::CurrentOwner() != heli::Owner::Travel &&
-            heli::CurrentOwner() != heli::Owner::Fly) {
+        if (gHiraishinEnabled.load(std::memory_order_acquire)) {
+            // 站桩输出原地等叠怪，不起飞。点按出刀，不按住、不 burst pulse。
+            gEnableHoldUntilMs = 0;
+            gHeliAirborneUntilMs = 0;
+            gNeedEnableFaceSettle.store(false, std::memory_order_release);
+            ArmHiraishinLootHold("f5_enable");
+            LogLine("enable hiraishin (gather: no blink, melee tap)");
+        } else {
+            gEnableHoldUntilMs = x::runtime::NowMs() + kCombatEnableHoldMs;
+            LatchCombatHeli("f5_enable");
+            // 未挂台前禁止抬起飞宽限：Sync 会按宽限 BAN ON，进图 CurFh=0 时直接 detach。
+            if (CombatSpawnAllowsBan()) {
+                gHeliAirborneUntilMs = x::runtime::NowMs() + kHeliAirborneGraceMs;
+            } else {
+                gHeliAirborneUntilMs = 0;
+                LogLine("enable defer takeoff (wait foothold/onFh)");
+            }
+            LogLine("enable hold %ums (takeoff now; first fire delayed)",
+                    (unsigned)kCombatEnableHoldMs);
+        }
+        // 赶路/F6/吸怪寻簇占旋翼时 Reset 会把主人清掉。只清 Combat 时钟不够，直接跳过。
+        if (!HeliHeldByPeer()) {
             heli::Reset();
         }
-        LogLine("enable hold %ums (first acquire/fire delayed; retarget unaffected)",
-                (unsigned)kCombatEnableHoldMs);
-        // 同图 / 首次热开：人已站稳则不要空等 map arm（BIN：F5 后干等 1–2s）。
+        // 同图热开：人已挂台才清 arm。首次进图 CurFh=0 时若当热开，会跳过 OnCombatMapChange
+        // 和 lie_safe，BAN 把真空站姿摘台（BIN 15:46）。
         if (ports::world::IsPlayReady()) {
             const int mapId = ports::world::GetMapId();
             ports::player_combat::CombatCtx player{};
-            if (mapId > 0 && ports::player_combat::QueryCombatCtx(player) && player.ok) {
+            ports::teleport::FlightState st{};
+            const bool onFh =
+                ports::teleport::QueryFlightState(st) && st.ok && st.onFh;
+            if (mapId > 0 && ports::player_combat::QueryCombatCtx(player) && player.ok && onFh) {
                 if (gLastMapId == mapId || gLastMapId < 0) {
                     gLastMapId = mapId;
+                    gSawOnFhThisMap = true;
                     if (gMapArmUntilMs) {
                         LogLine("warm start clear arm map=%d", mapId);
                     }
@@ -6744,8 +7258,13 @@ bool IsClusterPriority() { return gClusterPriority.load(std::memory_order_acquir
 void SetHitRotateEnabled(bool on) {
     const bool prev = gHitRotateEnabled.exchange(on, std::memory_order_acq_rel);
     if (prev == on) return;
-    if (!on) ClearHitRotateState();
-    LogLine("SetHitRotateEnabled %d (prev=%d)", on ? 1 : 0, prev ? 1 : 0);
+    if (!on) {
+        ClearHitRotateState();
+        ports::hit_pin::SetWishOid(0);
+    }
+    ports::hit_pin::SetWanted(on);
+    LogLine("SetHitRotateEnabled %d (prev=%d) hit_pin_armed=%d", on ? 1 : 0, prev ? 1 : 0,
+            ports::hit_pin::IsArmed() ? 1 : 0);
 }
 
 bool IsHitRotateEnabled() { return gHitRotateEnabled.load(std::memory_order_acquire); }
@@ -6760,6 +7279,14 @@ void SetHitRotateN(uint32_t n) {
 uint32_t HitRotateN() {
     return static_cast<uint32_t>(gHitRotateN.load(std::memory_order_acquire));
 }
+
+void SetForgeHitEnabled(bool on) {
+    const bool prev = gForgeHitEnabled.exchange(on, std::memory_order_acq_rel);
+    if (prev == on) return;
+    LogLine("SetForgeHitEnabled %d (prev=%d)", on ? 1 : 0, prev ? 1 : 0);
+}
+
+bool IsForgeHitEnabled() { return gForgeHitEnabled.load(std::memory_order_acquire); }
 
 void SetTeleportEnabled(bool on) {
     // 封禁风险：战斗 fill+Doing 回落永久关；忽略面板/ini 开启请求。
@@ -6828,6 +7355,7 @@ void SetFlySpeedPct(unsigned pct) {
     // F6 手动飞另有自己的一份（heli::Owner::Fly），见 fly::SetSpeedPct。
     heli::SetSpeedScale(heli::Owner::Combat, scale);
     heli::SetSpeedScale(heli::Owner::Travel, scale);
+    heli::SetSpeedScale(heli::Owner::Gather, scale);
     const float now = heli::SpeedScale(heli::Owner::Combat);
     // Clamp 后仍相同就不刷日志：IPC 每次下发全量配置，否则每轮都打一行。
     if (std::fabs(now - prev) < 1e-3f) return;
@@ -6850,6 +7378,72 @@ void SetHumanWalkEnabled(bool on) {
 }
 
 bool IsHumanWalkEnabled() { return gHumanWalkEnabled.load(std::memory_order_acquire); }
+
+void SetHiraishinEnabled(bool on) {
+    const bool prev = gHiraishinEnabled.exchange(on, std::memory_order_acq_rel);
+    if (prev == on) return;
+    if (on) {
+        (void)ports::attack::StopWalk();
+        UnlatchCombatHeli("hiraishin_on");
+        if (!HeliHeldByPeer()) {
+            heli::Reset();
+        }
+        gHeliAirborneUntilMs = 0;
+        SyncImpactFhBan();
+        if (gEnabled.load(std::memory_order_acquire)) {
+            gNeedEnableFaceSettle.store(false, std::memory_order_release);
+            ArmHiraishinLootHold("mode_on");
+        }
+        LogLine("enable hiraishin (gather: no blink, melee tap)");
+    } else {
+        ClearHiraishinLootHold();
+        ports::attack::SetBurstPulse(false);
+    }
+    LogLine("SetHiraishinEnabled %d", on ? 1 : 0);
+}
+
+bool IsHiraishinEnabled() { return gHiraishinEnabled.load(std::memory_order_acquire); }
+
+void SetHiraishinLootHoldMs(uint32_t ms) {
+    ms = xcat::ClampHiraishinLootHoldMs(ms);
+    const DWORD prev = gHiraishinLootHoldMs.exchange(ms, std::memory_order_acq_rel);
+    if (prev == ms) return;
+    if (ms == 0) ClearHiraishinLootHold();
+    LogLine("SetHiraishinLootHoldMs %u (prev=%u)", ms, (unsigned)prev);
+}
+
+uint32_t HiraishinLootHoldMs() {
+    return gHiraishinLootHoldMs.load(std::memory_order_acquire);
+}
+
+void SetHiraishinRangePx(uint32_t px) {
+    px = xcat::ClampHiraishinRangePx(px);
+    const uint32_t prev = gHiraishinRangePx.exchange(px, std::memory_order_acq_rel);
+    if (prev == px) return;
+    LogLine("SetHiraishinRangePx %u (prev=%u)", px, prev);
+}
+
+uint32_t HiraishinRangePx() {
+    return gHiraishinRangePx.load(std::memory_order_acquire);
+}
+
+void SetHiraishinFrontBox(uint32_t dx, uint32_t dy) {
+    dx = xcat::ClampHiraishinFrontDx(dx);
+    dy = xcat::ClampHiraishinFrontDy(dy);
+    const uint32_t prevDx = gHiraishinFrontDx.exchange(dx, std::memory_order_acq_rel);
+    const uint32_t prevDy = gHiraishinFrontDy.exchange(dy, std::memory_order_acq_rel);
+    ports::attack_rpc::SetLockFrontBox(dx, dy);
+    if (prevDx == dx && prevDy == dy) return;
+    LogLine("SetHiraishinFrontBox dx=%u dy=%u (prev=%u,%u)", dx, dy, prevDx, prevDy);
+}
+
+uint32_t HiraishinFrontDx() {
+    return gHiraishinFrontDx.load(std::memory_order_acquire);
+}
+
+uint32_t HiraishinFrontDy() {
+    return gHiraishinFrontDy.load(std::memory_order_acquire);
+}
 
 void SetLiveStepEnabled(bool on) {
     const bool prev = gLiveStepEnabled.exchange(on, std::memory_order_acq_rel);
@@ -6927,12 +7521,21 @@ void SetHardPause(HardPauseHolder holder, bool on) {
     if ((bit & kSafeLandHoldersMask) != 0 && on) {
         const uint32_t cur = gHardPauseMask.load(std::memory_order_acquire);
         if ((cur & bit) == 0) {
-            // 已有其他安全落台持有者（如补给行程硬闸未放）：只钉位，勿再开一轮落台。
-            // BIN 10:55：回城后 Encounter 上升沿在 AutoSupply 仍 pause 时二次飞台。
-            if ((cur & kSafeLandHoldersMask) == 0) BeginLieSafeLand(SafeLandBeginWhy(holder));
-            else
+            // 赶路中遇人/换频硬闸：只钉位，禁止 BeginLieSafeLand 抢旋翼
+            // （RequestSafeLand 已对 travel 让路；本入口原先漏了）。
+            const bool travelSkipLand =
+                travel::IsActive() &&
+                (bit == static_cast<uint32_t>(HardPauseHolder::ChannelHop) ||
+                 bit == static_cast<uint32_t>(HardPauseHolder::Encounter));
+            if (travelSkipLand) {
+                LogLine("lie_safe_land skip begin why=%s (travel active)",
+                        SafeLandBeginWhy(holder));
+            } else if ((cur & kSafeLandHoldersMask) == 0) {
+                BeginLieSafeLand(SafeLandBeginWhy(holder));
+            } else {
                 LogLine("lie_safe_land skip begin why=%s (holder already mask=0x%x)",
                         SafeLandBeginWhy(holder), (unsigned)(cur & kSafeLandHoldersMask));
+            }
         }
     }
     uint32_t prev = gHardPauseMask.load(std::memory_order_acquire);
@@ -6965,6 +7568,12 @@ void RequestSafeLand(const char* why) {
     }
     // 无其它落台持有者时靠 MapArrive 保闸；AutoSupply 等已持有则升沿只钉位。
     SetHardPause(HardPauseHolder::MapArrive, true);
+}
+
+void CancelSafeLand(const char* why) {
+    if (!gLieSafeLand.load(std::memory_order_acquire)) return;
+    EndLieSafeLand(why && why[0] ? why : "cancel");
+    ReleaseMapArriveIfHeld();
 }
 
 void SetExternalPause(bool on) {

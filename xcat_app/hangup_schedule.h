@@ -36,6 +36,7 @@ struct Snapshot {
     bool launchBusy = false;
     bool combatHold = false;
     bool hasProgress = false;
+    bool combatEnabled = false;  // F5 / simpleCombat；停表原因高亮用
     uint32_t progressStaleSec = 0;
     uint32_t statusStaleSec = 0;
     uint32_t backoffRemainingSec = 0;
@@ -57,6 +58,9 @@ struct Snapshot {
     bool launchOwnedPendingPlayable = false;
     // 踢线后短等干净重拉剩余秒（0=无）。
     uint32_t kickRelaunchRemainSec = 0;
+    // ports::world::SceneState：4=CashShop 5=GlobalMarket；-1=未知。safe-zone 文案用。
+    int32_t sceneState = -1;
+    uint32_t currentMapId = 0;
 };
 
 uint32_t ClampScheduleMask(uint32_t mask);
@@ -70,6 +74,8 @@ Snapshot GetSnapshot();
 const char* UiModeLabel(UiMode mode);
 const char* WatchdogUiModeLabel(WatchdogUiMode mode);
 std::string FormatWatchdogTimerText(const Snapshot& snap);
+// F5 开着且经验表停走时的原因（主城/拍卖/商城/转职考验/赶路）；否则 nullptr。
+const char* FormatWatchdogF5PauseReason(const Snapshot& snap);
 
 // 1Hz: hangup kill/start + optional no-exp guardian restart.
 void Tick(LaunchUiState& ui, bool appExiting);

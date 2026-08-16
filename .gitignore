@@ -104,5 +104,17 @@ Desktop.ini
 *.p12
 credentials.json
 xcat_app/anti_bot_ai/llm_secrets.h
+# gate/1 授权敏感数据：签发台账（含成员 uid 清单）与私钥，禁止入库/外发。
+# （台账已被上面的 /artifacts/ 覆盖，这里显式再兜一层并标注意图。）
+artifacts/ops_logs/gate_cards.jsonl
+secrets/gate_ec_priv.pem
+# 运维台账：成员 uid / IP / 机名 / 角色名等可定位信息，同样禁止入库。
+artifacts/release/client-history.json
+artifacts/release/device-access.json
+artifacts/release/device-quota.json
+artifacts/release/update-channels.json
+
+# 卷轴语音烘培中间 mp3（入库只留 wav + tsv）
+/dumps/offline_tables/scroll_voice/*.mp3
 
 bin_ops_staging/

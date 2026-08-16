@@ -14,8 +14,13 @@ constexpr uint32_t kSellbagVersion = 2u;
 constexpr int kSellbagMaxKeepRules = 32;
 constexpr int kSellbagNameKeyLen   = 48;
 
-// 全新配置默认保留关键词（物品名包含匹配；繁中「礦」覆盖各类矿石/礦石名）。
-constexpr const char* kSellbagDefaultKeepNameKey = "礦";
+// 全新配置默认保留关键词（物品名包含匹配）。
+// 「礦」覆盖矿石/礦石；「玻璃鞋」= 艾溫任務道具 4001000（勿用过宽的「玻璃」）。
+constexpr const char* kSellbagDefaultKeepNameKeys[] = {"礦", "玻璃鞋"};
+constexpr int kSellbagDefaultKeepNameKeyCount =
+    static_cast<int>(sizeof(kSellbagDefaultKeepNameKeys) / sizeof(kSellbagDefaultKeepNameKeys[0]));
+// 兼容旧引用：首个默认关键词。
+constexpr const char* kSellbagDefaultKeepNameKey = kSellbagDefaultKeepNameKeys[0];
 
 // 卖出目标栏位掩码。
 constexpr uint32_t kSellbagBagEquip = 1u << 0;  // 装备栏

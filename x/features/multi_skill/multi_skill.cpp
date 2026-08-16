@@ -50,7 +50,14 @@ void RefreshLearnedSkills() {
         rows.push_back(r);
     }
     if (xcat::WriteLearnedSkillsTsv(runtime::GetBinDir(), rows)) {
-        runtime::LogI("MultiSkill", "learned_skills refreshed n=%d", n);
+        static int lastN = -1;
+        static DWORD lastLog = 0;
+        const DWORD now = GetTickCount();
+        if (n != lastN || !lastLog || now - lastLog >= 60000) {
+            lastN = n;
+            lastLog = now;
+            runtime::LogI("MultiSkill", "learned_skills refreshed n=%d", n);
+        }
     }
 }
 

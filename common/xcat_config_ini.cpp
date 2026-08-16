@@ -217,10 +217,15 @@ bool SaveIniFile(const char* path, const IniStore& store) {
 }
 
 bool UpdateIniFile(const char* path, const std::function<void(IniStore&)>& mutate) {
+    return UpdateIniFile(path, mutate, 8000);
+}
+
+bool UpdateIniFile(const char* path, const std::function<void(IniStore&)>& mutate,
+                   uint32_t lockTimeoutMs) {
     if (!path || !path[0] || !mutate) return false;
 
     IniPathMutex mu(path);
-    IniPathLockGuard guard(mu, 8000);
+    IniPathLockGuard guard(mu, lockTimeoutMs);
     if (!guard.locked()) return false;
 
     IniStore ini{};

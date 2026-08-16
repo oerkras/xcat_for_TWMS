@@ -1,0 +1,12 @@
+---
+description: 禁止擅自 bump 版本号；版本只在用户打包时由 package-release 提升
+alwaysApply: true
+---
+
+# 禁止擅自 bump 版本号
+
+- **禁止**主动修改 `common/xcat_version_rc.h`（及任何同步版本宏 / `XCAT_VERSION_STRING` / `XCAT_VER_PATCH` / `XCAT_VER_BUILD`）。
+- **禁止**在功能修复、小改、编译验证时「顺手」把 patch/build 加一。
+- 版本号提升的唯一常规入口是用户自己跑 **`package-release.bat`**（内部会调 `scripts/bump-version.mjs`）；Agent 未获明确要求时不得代跑 bump，也不得手改版本头。
+- 仅当用户**当轮明确说**「bump 版本 / 改成 x.y.z / 帮我打包并升版本」时才可改版本相关文件或执行 bump。
+- 交付说明里不要写「已 bump 到 0.1.xxx」除非用户当轮授权了 bump；功能改完用构建产物验证即可。

@@ -52,66 +52,75 @@ constexpr DWORD kSmartJitterMs = 40;
 // 动作占用（禁 TP）：只挡前摇，不当做出刀地板。
 constexpr DWORD kAttackAnimBusyMs = 220;
 constexpr float kFaceDeadzone = 8.f;
-// 已面向正确半场时，|dx| 未过此值不重 SetInput，减轻怪贴身穿过时的左右抽风。
-constexpr float kFaceStickyPx = 28.f;
 constexpr DWORD kRateWindowMs = 3000;
 constexpr DWORD kFireJobWaitMs = 800;
 constexpr DWORD kFaceJobWaitMs = 400;
 constexpr DWORD kFkmRebindMs = 3000;
 
-constexpr uint32_t kRvaOnFuncKey = 0x10A1BD0;  // remounted 2026-08-06
-constexpr uint32_t kRvaGetKeyByFunc = 0x1675870;  // remounted 2026-08-06
-constexpr uint32_t kRvaGetDataByKeyCode = 0x1674ad0;  // remounted 2026-08-06
-constexpr uint32_t kRvaFuncKeyCtor = 0x166CE80;  // remounted 2026-08-06: .ctor(FuncType,int)
+constexpr uint32_t kRvaOnFuncKey = 0x10A1970;  // remounted 2026-08-06
+constexpr uint32_t kRvaGetKeyByFunc = 0x1674730;  // remounted 2026-08-06
+constexpr uint32_t kRvaGetDataByKeyCode = 0x1673990;  // remounted 2026-08-06
+constexpr uint32_t kRvaFuncKeyCtor = 0x166BD40;  // remounted 2026-08-06: .ctor(FuncType,int)
 // 写 InputX/Y + 内联 OnResolveMoveAction（朝向）；见 docs/features/protocol/MoveElem字段.md
-constexpr uint32_t kRvaVecCtrlSetInput = 0x11D6820;  // remounted 2026-08-06
+constexpr uint32_t kRvaVecCtrlSetInput = 0x11D65C0;  // remounted 2026-08-06
 // KeyPad.SetFields / PackState（IDA 2026-08-07；keypad_walk_bin match BASE）。
-constexpr uint32_t kRvaKeyPadSetFields = 0x1AEC300;
-constexpr uint32_t kRvaKeyPadPackState = 0x1AEC320;
+constexpr uint32_t kRvaKeyPadSetFields = 0x1AEB1C0;
+constexpr uint32_t kRvaKeyPadPackState = 0x1AEB1E0;
 constexpr size_t kOffKeyPadSlot4 = 0x178;
 // Query 用 PackState 返回值 bit0：even→latchX=+1，odd→−1（MoveElem §11.10）。
 // 反了设 XCAT_KP_FLIP=1。
 
 // 方法哈希（dump.cs · remount 2026-08-06）
 constexpr char kHashOnFuncKey[] =
-    "d89fb7f60f999fa44496739c80c63812da003534e164fb7d8b3b0dad2995072";
+    "c63d9916f3afde5b0e57ab42b327050b6404d81759d37df2adf88ab55c32eaf";
 constexpr char kHashGetKeyByFunc[] =
-    "be7d03a7fb5ce8f9ff3b0d0f8538e6d047919aab17d74edd2940fda5a3a7261";
+    "f149cabbb9406639b28b9a98a7c6467e525def79d0d16843389e5a20024765f";
 constexpr char kHashGetDataByKeyCode[] =
-    "bfddb59588de1c6c683f60fbef4002c4b1d558cac69aedbad2c8c3399ab0fa3";
+    "cd8dee679c6dd6b485790cc165cb37356680d649280cca46ed8ec022e098d2e";
 constexpr char kHashVecCtrlSetInput[] =
-    "e01605b2ff8fae9e7d7565a4bfa5e1c07cc31f384bb1ebb68de0f428d1bdbd1";
+    "d2e0e8e0751601ed6880ab02bd58663c386f2b2eda47849990d438e4d74a0df";
 constexpr char kVecCtrlClass[] =
-    "b4117afc7f6f9c58587c528c3dec862d440e5d266ad70b764c0058566918784";
+    "fb50f6a1736ed7dc2ae31fe0164df2ac21372ae1ba8c5f346fa63e05fbeff6a";
 constexpr char kActorBaseClass[] =
-    "bef0eed02528709201717d93717a1904bfa2e850dfe1f5fadf473c0e9c78d9b";
+    "edca107f56b886052491eaa5c89b93e25d6f5f228bc505251f2d2060743b6cf";
 // FKM remounted 2026-08-06 (owns GetKeyByFunc / GetDataByKeyCode).
 constexpr char kFkmClass[] =
-    "a15aa35933c243d09fd430f5979b393084576d24f1a6de94e5d8999da7b321e";
+    "e74c74c72ef5a40cec5cedc318aa6ccef90f8df89f51b54a0cb199a1defd174";
 constexpr char kFuncKeyClass[] =
-    "cb6f3a4f37370d38a5ebbd228b5fa7890ff4b8fc5d9332a0434450f2f33f350";
+    "d545ecd5bc5f00ba7c3af10f829e0d98f2da062c63750606b992d34c0ddc016";
 // KeyPad 单例（与 keypad_walk_bin 同源；RO hook 已证 Slot4=PackState BASE）。
 constexpr char kHashKeyPadClass[] =
-    "d193aa6d20957fb0a38f8189469763371e72f04982c35534a7c6d2364d86bbe";
+    "d841520b8104ac8bd650ae878b712e4461956e96bf13ea6c0d2be4fa51baf50";
 
 // Actor.VecCtrl / VecCtrl.MoveAction / FuncKey.type|value：hash → field_get_offset
 constexpr char kHashUserVecCtrl[] =
-    "<bfd62ef3b3e356b3d554a10a21a0f46b1272d519b934db1a7c4df88a0adcd52>k__BackingField";
+    "<a53533cecb18cbe1cddb1ee6c9adf83e4397ed25de00154905063e15bc1d11f>k__BackingField";
 constexpr char kHashVcMoveAction[] =
-    "e257ab165ebf2d62063ad865069ae4f986f2d4c9cebfe72bc845c9a08a29d5c";
+    "bd5cde1e6b22e38ab6db3989c0bf8719fd16e9f900c4e6670fdac003a9bdd3d";
 constexpr char kHashFkType[] =
-    "e04c3fa00a35e61ac8ad519b91b3020710a8de781d707d086731584592d4f85";
+    "f29273c7f2c0090e47dd96db88f54b0a156fc9ab45e0b577a9fbbe91913b960";
 constexpr char kHashFkValue[] =
-    "b0d60f64f9083e8e96153d8c91c10f345af997cb7618aa6754d5b53ae6a5eee";
+    "b13615498bc8fd19ec966fd2ae3a988fa5b1a98c91205f33231b81435be63ba";
+// UserLocal._antiRepeat / AntiRepeat._repeatCount（dump.cs 0814；CountLimit=100）
+constexpr char kHashAntiRepeat[] =
+    "c9fd657af8bbe7a87c542d5510b3f1be1d687037d6967affdc699c36f99dcd2";
+constexpr char kHashRepeatCount[] =
+    "c4dc60ab98c0e46d2c566d7a6decb32c7f174af819f3e329eb22810a108ef90";
+constexpr char kAntiRepeatClass[] =
+    "e8aad65be889a447c97287dbf051c1525f2cc5ebbd3be72ccfa8d3dc912e278";
 
 constexpr size_t kFbVecCtrl = 0x50;
 constexpr size_t kFbVcMoveAction = 0x84;
 constexpr size_t kFbFkType = 0x10;
 constexpr size_t kFbFkValue = 0x14;
+constexpr size_t kFbAntiRepeat = 0x500;
+constexpr size_t kFbRepeatCount = 0x18;
 size_t gOffVecCtrl = kFbVecCtrl;
 size_t gOffVcMoveAction = kFbVcMoveAction;
 size_t gOffFkType = kFbFkType;
 size_t gOffFkValue = kFbFkValue;
+size_t gOffAntiRepeat = kFbAntiRepeat;
+size_t gOffRepeatCount = kFbRepeatCount;
 #define kOffVecCtrl (gOffVecCtrl)
 #define kOffVcMoveAction (gOffVcMoveAction)
 #define kOffFkType (gOffFkType)
@@ -167,10 +176,42 @@ void EnsureAttackFieldOff() {
         ++hits;
     if (AttackFieldOffHit(fk, kHashFkType, kFbFkType, &gOffFkType, 0x10, 0x40)) ++hits;
     if (AttackFieldOffHit(fk, kHashFkValue, kFbFkValue, &gOffFkValue, 0x10, 0x40)) ++hits;
+    void* ul = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
+    void* arKlass = x::runtime::il2cpp::FindClass("", kAntiRepeatClass);
+    int arHits = 0;
+    if (AttackFieldOffHit(ul, kHashAntiRepeat, kFbAntiRepeat, &gOffAntiRepeat, 0x3C0, 0x600))
+        ++arHits;
+    if (AttackFieldOffHit(arKlass, kHashRepeatCount, kFbRepeatCount, &gOffRepeatCount, 0x10, 0x20))
+        ++arHits;
     x::runtime::LogI("Attack",
-                     "attack slots path=%s hits=%d/4 vc=0x%zX move=0x%zX fkT=0x%zX fkV=0x%zX",
+                     "attack slots path=%s hits=%d/4 vc=0x%zX move=0x%zX fkT=0x%zX fkV=0x%zX "
+                     "antirepeat=%d/2 lu+0x%zX cnt+0x%zX",
                      hits == 4 ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffVecCtrl,
-                     gOffVcMoveAction, gOffFkType, gOffFkValue);
+                     gOffVcMoveAction, gOffFkType, gOffFkValue, arHits, gOffAntiRepeat,
+                     gOffRepeatCount);
+}
+
+void LogLine(const char* fmt, ...);
+
+// TryDoing* 入口会调 AntiRepeat.TryRepeat(x,y)：同像素累加 _repeatCount，超过 CountLimit=100
+// 就直接拒刀（SetAttackAction 都不进 → fire b1=-1）。站桩输出原地连砍必撞这条；造包绕过 TryDoing。
+// 出刀前把计数清零。只写 AntiRepeat 对象，不写人 AbsPos。
+void ResetAntiRepeat(void* localUser) {
+    if (!LooksLikeHeapPtr(localUser) || !gOffAntiRepeat) return;
+    void* ar = nullptr;
+    int prev = 0;
+    __try {
+        ar = ReadPtr(localUser, gOffAntiRepeat);
+        if (!LooksLikeHeapPtr(ar)) return;
+        prev = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ar) + gOffRepeatCount);
+        if (prev == 0) return;
+        *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ar) + gOffRepeatCount) = 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (prev >= 80) {
+        LogLine("antirepeat reset count=%d (limit=100)", prev);
+    }
 }
 
 constexpr int32_t kKeyInputDown = 0;
@@ -205,6 +246,7 @@ std::atomic<bool> gSmartInterval{false};
 std::atomic<DWORD> gLastFireMs{0};
 std::atomic<int> gAnimBusyOverrideMs{-1};  // <0 = kAttackAnimBusyMs
 std::atomic<bool> gImmediateUp{false};     // 攻击加速：Down+Up 同泵，无 pending
+std::atomic<bool> gBurstPulse{false};      // 遗留 pulse；站桩输出不再开
 std::atomic<uint32_t> gFireOk{0};
 std::atomic<uint32_t> gFireFail{0};   // 仅 OnFuncKey Down 硬失败
 std::atomic<uint32_t> gFireSoft{0};   // 间隔/pending 软拒绝（加速短间隔下同 tick 空点）
@@ -751,6 +793,12 @@ bool EnsureAttackFkOnMain() {
 constexpr int kBusyUnread = -2;
 std::atomic<int> gFireBusy0{kBusyUnread};
 std::atomic<int> gFireBusy1{kBusyUnread};
+std::atomic<int> gBlinkApX{0};
+std::atomic<int> gBlinkApY{0};
+std::atomic<int> gBlinkAplX{0};
+std::atomic<int> gBlinkAplY{0};
+std::atomic<int> gBlinkAp2X{0};
+std::atomic<int> gBlinkAp2Y{0};
 
 int ReadActionBusy(void* localUser) {
     int v = 0;
@@ -760,8 +808,24 @@ int ReadActionBusy(void* localUser) {
 struct FireJob {
     bool ok = false;
     bool isUp = false;
+    bool blink = false;
+    float blinkX = 0.f;
+    float blinkY = 0.f;
     const char* err = "?";
 };
+
+bool ArmSoulBlink(void* lu, bool want, float x, float y,
+                  ports::player_combat::SoulBlinkSnap* snap) {
+    if (!want || !snap) return false;
+    if (!ports::player_combat::CaptureSoulBlink(lu, *snap)) return false;
+    if (!ports::player_combat::ApplySoulBlinkAp(lu, static_cast<double>(x),
+                                                static_cast<double>(y))) {
+        (void)ports::player_combat::RestoreSoulBlink(*snap);
+        snap->ok = false;
+        return false;
+    }
+    return true;
+}
 
 void FireJobOnMain(void* user) {
     (void)x::runtime::main_thread::AssertOnPumpThread("attack.FireJob");
@@ -790,7 +854,23 @@ void FireJobOnMain(void* user) {
     // 只夹 Down：技能派发在 Down 那一拍，Up 种台既没用又白开一次窗口；而且异步 Up
     // 会把 Down 记下的忙位快照冲掉，抢在 combat.log 读之前 → 打点串味。
     const bool spoof = !job->isUp;
+    ports::player_combat::SoulBlinkSnap blinkSnap{};
+    const bool blinked =
+        !job->isUp && ArmSoulBlink(ctx.localUser, job->blink, job->blinkX, job->blinkY, &blinkSnap);
+    if (job->blink && !job->isUp && !blinked) {
+        job->err = "blink_fail";
+        return;
+    }
+    if (blinked) {
+        float apx = 0.f, apy = 0.f, aplx = 0.f, aply = 0.f;
+        (void)ports::player_combat::PeekApApl(ctx.localUser, &apx, &apy, &aplx, &aply);
+        gBlinkApX.store((int)apx, std::memory_order_relaxed);
+        gBlinkApY.store((int)apy, std::memory_order_relaxed);
+        gBlinkAplX.store((int)aplx, std::memory_order_relaxed);
+        gBlinkAplY.store((int)aply, std::memory_order_relaxed);
+    }
     if (spoof) {
+        ResetAntiRepeat(ctx.localUser);
         gFireBusy0.store(ReadActionBusy(ctx.localUser), std::memory_order_relaxed);
         (void)ground_spoof::PlantForFire(ctx.localUser);
     }
@@ -808,11 +888,27 @@ void FireJobOnMain(void* user) {
         gFireBusy1.store(ReadActionBusy(ctx.localUser), std::memory_order_relaxed);
         ground_spoof::UnplantAfterFire();
     }
+    if (blinked) {
+        float apx = 0.f, apy = 0.f, aplx = 0.f, aply = 0.f, posx = 0.f, posy = 0.f;
+        (void)ports::player_combat::PeekApApl(ctx.localUser, &apx, &apy, &aplx, &aply);
+        (void)ports::player_combat::PeekActorPos(ctx.localUser, &posx, &posy);
+        gBlinkAp2X.store((int)apx, std::memory_order_relaxed);
+        gBlinkAp2Y.store((int)apy, std::memory_order_relaxed);
+        LogLine("blink probe aim=(%.0f,%.0f) ap=(%.0f,%.0f) apl=(%.0f,%.0f) pos=(%.0f,%.0f) after=(%.0f,%.0f)",
+                job->blinkX, job->blinkY, (float)gBlinkApX.load(std::memory_order_relaxed),
+                (float)gBlinkApY.load(std::memory_order_relaxed), aplx, aply, posx, posy, apx, apy);
+        (void)ports::player_combat::RestoreSoulBlink(blinkSnap);
+    }
 }
 
-bool InvokeFire(bool isUp) {
+bool InvokeFire(bool isUp, const FireBlink* blink = nullptr) {
     FireJob job{};
     job.isUp = isUp;
+    if (!isUp && blink && blink->on) {
+        job.blink = true;
+        job.blinkX = blink->x;
+        job.blinkY = blink->y;
+    }
     if (!x::runtime::main_thread::InvokeAndWait(&FireJobOnMain, &job, kFireJobWaitMs,
                                                x::runtime::main_thread::JobPrio::High)) {
         LogLine("OnFuncKey pump timeout up=%d", isUp ? 1 : 0);
@@ -826,6 +922,9 @@ bool InvokeFire(bool isUp) {
 struct FirePulseJob {
     bool downOk = false;
     bool upOk = false;
+    bool blink = false;
+    float blinkX = 0.f;
+    float blinkY = 0.f;
     const char* err = "?";
 };
 
@@ -849,7 +948,24 @@ void FirePulseOnMain(void* user) {
         return;
     }
 
+    ports::player_combat::SoulBlinkSnap blinkSnap{};
+    const bool blinked =
+        ArmSoulBlink(ctx.localUser, job->blink, job->blinkX, job->blinkY, &blinkSnap);
+    if (job->blink && !blinked) {
+        job->err = "blink_fail";
+        return;
+    }
+    if (blinked) {
+        float apx = 0.f, apy = 0.f, aplx = 0.f, aply = 0.f;
+        (void)ports::player_combat::PeekApApl(ctx.localUser, &apx, &apy, &aplx, &aply);
+        gBlinkApX.store((int)apx, std::memory_order_relaxed);
+        gBlinkApY.store((int)apy, std::memory_order_relaxed);
+        gBlinkAplX.store((int)aplx, std::memory_order_relaxed);
+        gBlinkAplY.store((int)aply, std::memory_order_relaxed);
+    }
+
     // 站立伪装：Down/Up 同泵，整段夹在种台窗口内（理由同 FireJobOnMain）。
+    ResetAntiRepeat(ctx.localUser);
     gFireBusy0.store(ReadActionBusy(ctx.localUser), std::memory_order_relaxed);
     (void)ground_spoof::PlantForFire(ctx.localUser);
     __try {
@@ -864,10 +980,26 @@ void FirePulseOnMain(void* user) {
     }
     gFireBusy1.store(ReadActionBusy(ctx.localUser), std::memory_order_relaxed);
     ground_spoof::UnplantAfterFire();
+    if (blinked) {
+        float apx = 0.f, apy = 0.f, aplx = 0.f, aply = 0.f, posx = 0.f, posy = 0.f;
+        (void)ports::player_combat::PeekApApl(ctx.localUser, &apx, &apy, &aplx, &aply);
+        (void)ports::player_combat::PeekActorPos(ctx.localUser, &posx, &posy);
+        gBlinkAp2X.store((int)apx, std::memory_order_relaxed);
+        gBlinkAp2Y.store((int)apy, std::memory_order_relaxed);
+        LogLine("blink probe aim=(%.0f,%.0f) ap=(%.0f,%.0f) apl=(%.0f,%.0f) pos=(%.0f,%.0f) after=(%.0f,%.0f)",
+                job->blinkX, job->blinkY, (float)gBlinkApX.load(std::memory_order_relaxed),
+                (float)gBlinkApY.load(std::memory_order_relaxed), aplx, aply, posx, posy, apx, apy);
+        (void)ports::player_combat::RestoreSoulBlink(blinkSnap);
+    }
 }
 
-bool InvokeFirePulse() {
+bool InvokeFirePulse(const FireBlink* blink = nullptr) {
     FirePulseJob job{};
+    if (blink && blink->on) {
+        job.blink = true;
+        job.blinkX = blink->x;
+        job.blinkY = blink->y;
+    }
     if (!x::runtime::main_thread::InvokeAndWait(&FirePulseOnMain, &job, kFireJobWaitMs,
                                                x::runtime::main_thread::JobPrio::High)) {
         LogLine("OnFuncKey pulse pump timeout");
@@ -929,6 +1061,19 @@ void Shutdown() {
     ForceRelease();
     ClearAttackFk();
     gInited.store(false);
+}
+
+bool PeekAttackBinding(int32_t* type, int32_t* value) {
+    if (type) *type = -1;
+    if (value) *value = -1;
+    if (!x::runtime::main_thread::IsOnPumpThread()) return false;
+    if (!EnsureAttackFkOnMain()) return false;
+    int32_t t = -1;
+    int32_t v = -1;
+    if (!ReadFkFields(gAttackFk, &t, &v)) return false;
+    if (type) *type = t;
+    if (value) *value = v;
+    return true;
 }
 
 void SetAttackVk(WORD vk) {
@@ -1213,7 +1358,7 @@ uint32_t __fastcall PackStateDriveHook(void* self, const void* methodInfo) {
 
 bool InstallPackDriveHook() {
     // 已拆除：kOffKeyPadSlot4 所指的类**不是** KeyPad 而是 Rand32，slot4 = `Rand32.Random()`
-    // （运行期 origRva=0x1AEC320 与 dump 对上；反编译为 xorshift：三状态字、移位 13/19·4/25·8/11；
+    // （运行期 origRva=0x1AEB1E0 与 dump 对上；反编译为 xorshift：三状态字、移位 13/19·4/25·8/11；
     //  Random() 正是 Rand32 首个自有虚方法，恰落 slot4）。
     // 于是 PackStateDriveHook 那句 `r |= 1u / r &= ~1u` 不是「锁存方向」，而是把游戏伪随机数的
     // 最低位在走路期间钉成定值 —— 污染 RNG 流，且当初「PackBit 无效」根本没测到真的 PackState。
@@ -1541,8 +1686,10 @@ bool ApplyFaceNow() {
 
     const int want = (dx < 0.f) ? -1 : 1;
     const int last = gLastFaceSign.load(std::memory_order_relaxed);
-    // 怪贴身穿过：dx 在 ±20 间抖会每刀翻面；同号且未走出 sticky 则跳过。
-    if (last == want && std::fabs(dx) < kFaceStickyPx) {
+    // 朝向已经对：禁止再脉冲 SetInput(±1)→(0,0)。
+    // 旧逻辑只在 |dx|<28 才跳过；站桩输出 |dx|≈50 时每刀都脉冲走路，
+    // 引擎把挥砍掐掉——体感「A 几下就停，手动走一步才继续」（BIN 06:41 fw=0 dx=50）。
+    if (last == want) {
         gFaceLastWhy.store(2, std::memory_order_relaxed);
         return true;
     }
@@ -1590,6 +1737,15 @@ void FireOutcomeDebug(int* busy0, int* busy1) {
     if (busy1) *busy1 = gFireBusy1.load(std::memory_order_relaxed);
 }
 
+void BlinkDebug(int* apx, int* apy, int* aplx, int* aply, int* ap2x, int* ap2y) {
+    if (apx) *apx = gBlinkApX.load(std::memory_order_relaxed);
+    if (apy) *apy = gBlinkApY.load(std::memory_order_relaxed);
+    if (aplx) *aplx = gBlinkAplX.load(std::memory_order_relaxed);
+    if (aply) *aply = gBlinkAplY.load(std::memory_order_relaxed);
+    if (ap2x) *ap2x = gBlinkAp2X.load(std::memory_order_relaxed);
+    if (ap2y) *ap2y = gBlinkAp2Y.load(std::memory_order_relaxed);
+}
+
 bool FaceNeedsFlip(float dx) {
     if (!std::isfinite(dx) || std::fabs(dx) < kFaceDeadzone) return false;
     const int last = gLastFaceSign.load(std::memory_order_relaxed);
@@ -1635,6 +1791,19 @@ void SetImmediateUp(bool on) {
     }
 }
 
+void SetBurstPulse(bool on) {
+    const bool prev = gBurstPulse.exchange(on, std::memory_order_relaxed);
+    if (prev == on) return;
+    if (on) {
+        if (gPendingUp.exchange(false, std::memory_order_acq_rel)) {
+            (void)InvokeFire(true);
+        }
+        LogLine("burst pulse on (legacy Down+Up same pump)");
+    } else {
+        LogLine("burst pulse off");
+    }
+}
+
 bool CanFirePrimaryEx(bool ignoreCombatInterval) {
     if (gFireSuppressed.load(std::memory_order_acquire)) return false;
     if (x::runtime::main_thread::IsCongested()) return false;
@@ -1649,7 +1818,11 @@ bool CanFirePrimaryEx(bool ignoreCombatInterval) {
 
 bool CanFirePrimary() { return CanFirePrimaryEx(/*ignoreCombatInterval=*/false); }
 
-bool TryFirePrimaryEx(bool ignoreCombatInterval) {
+void NoteLastFire() {
+    gLastFireMs.store(NowMs(), std::memory_order_relaxed);
+}
+
+bool TryFirePrimaryEx(bool ignoreCombatInterval, const FireBlink& blink) {
     const DWORD now = NowMs();
     MaybeLogRate(now);
     FlushPendingUp(now);
@@ -1682,9 +1855,11 @@ bool TryFirePrimaryEx(bool ignoreCombatInterval) {
 
     (void)ApplyFaceNow();
 
-    const bool immediate = gImmediateUp.load(std::memory_order_relaxed);
+    const FireBlink* blinkPtr = blink.on ? &blink : nullptr;
+    const bool immediate = gImmediateUp.load(std::memory_order_relaxed) ||
+                           gBurstPulse.load(std::memory_order_relaxed);
     if (immediate) {
-        if (!InvokeFirePulse()) {
+        if (!InvokeFirePulse(blinkPtr)) {
             gFireFail.fetch_add(1, std::memory_order_relaxed);
             x::runtime::LogWThrottled(50, 3000, "Attack", "OnFuncKey pulse fail");
             return false;
@@ -1692,7 +1867,7 @@ bool TryFirePrimaryEx(bool ignoreCombatInterval) {
         // 无 pending：下一刀只受 interval 门控。
         gPendingUp.store(false, std::memory_order_release);
     } else {
-        if (!InvokeFire(false)) {
+        if (!InvokeFire(false, blinkPtr)) {
             gFireFail.fetch_add(1, std::memory_order_relaxed);
             x::runtime::LogWThrottled(50, 3000, "Attack", "OnFuncKey Down fail");
             return false;
@@ -1709,14 +1884,15 @@ bool TryFirePrimaryEx(bool ignoreCombatInterval) {
     if (sFaceLog < 12) {
         ++sFaceLog;
         if (immediate) {
-            LogLine("OnFuncKey pulse ok unityKey=%d t=%d v=%d syn=%d faceDx=%.0f hold=0",
+            LogLine("OnFuncKey pulse ok unityKey=%d t=%d v=%d syn=%d faceDx=%.0f hold=0 blink=%d",
                     (int)gResolvedUnityKey, (int)gResolvedFkType, (int)gResolvedFkValue,
-                    gFkSynthetic ? 1 : 0, gFaceDx.load());
+                    gFkSynthetic ? 1 : 0, gFaceDx.load(), blink.on ? 1 : 0);
         } else {
             const DWORD hold = AttackHoldMs();
-            LogLine("OnFuncKey ok unityKey=%d t=%d v=%d syn=%d faceDx=%.0f hold=%ums asyncUp=1",
+            LogLine("OnFuncKey ok unityKey=%d t=%d v=%d syn=%d faceDx=%.0f hold=%ums asyncUp=1 "
+                    "blink=%d",
                     (int)gResolvedUnityKey, (int)gResolvedFkType, (int)gResolvedFkValue,
-                    gFkSynthetic ? 1 : 0, gFaceDx.load(), (unsigned)hold);
+                    gFkSynthetic ? 1 : 0, gFaceDx.load(), (unsigned)hold, blink.on ? 1 : 0);
         }
     }
     if (gSmartInterval.load(std::memory_order_relaxed)) {
@@ -1725,6 +1901,11 @@ bool TryFirePrimaryEx(bool ignoreCombatInterval) {
             std::memory_order_relaxed);
     }
     return true;
+}
+
+bool TryFirePrimaryEx(bool ignoreCombatInterval) {
+    FireBlink off{};
+    return TryFirePrimaryEx(ignoreCombatInterval, off);
 }
 
 bool TryFirePrimary() { return TryFirePrimaryEx(/*ignoreCombatInterval=*/false); }

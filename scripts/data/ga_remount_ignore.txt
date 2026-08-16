@@ -1,0 +1,9 @@
+# 审计白名单：dump.cs 里不会出现、也不该当红灯的槽。
+# 哈希整串；RVA 写 0x...（小写也可）。
+#
+# WM 在 Action*@0xA0 与 bool@0xA8 之间没有字段；ce49f7df 是旧 ExclA4，读的是指针高 4 字节。
+ce49f7df7cdeaf874359c6a99dcc9b8aed11e4841a83c8a71e9889ed6392f7f
+#
+# grap-core64.dll（不是 GameAssembly / dump.cs 方法头）
+0x102d610
+0x1eccb00

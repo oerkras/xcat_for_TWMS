@@ -28,16 +28,16 @@ namespace il2 = x::runtime::il2cpp;
 // SceneState / Field / CharacterId / FieldKey：hash → field_get_offset（2026-08-06 remount）
 // CharacterData / CharacterStat：SSOT = x::ui::player
 constexpr char kWorldManagerClass[] =
-    "b8ea8013e52dada590b6003b130193bf382fb78e9581ae899270652538d4114";
+    "f87be298afca3b6020c8f4695d83819fcc9a28877005b6a669187d33a0a2711";
 constexpr char kHashWmSceneState[] =
-    "c2d6b1c2e942d8e3ef2c7fc48bdd1e38449ec42ef25deced80892b296b17f83";
+    "d8b5dff0a0af61e055b41b38ae55ed74e3d0894d1e95267bef40c8211daf72c";
 constexpr char kHashWmField[] =
-    "d2876bc350bd665e58b3e300d3c3b5acb1c1d863c0e681cf8635e7b17788cc8";
+    "e49eab153d65d07b844c538a3f86ad06d8b79866d8b88eb67ca5d6ab1b7ca3e";
 constexpr char kHashWmCharacterId[] =
-    "<b0873781c51d27af60f8b7f72544603a47d7e82c75f710f06d6c60af308fb5d>k__BackingField";
+    "<cc3fe56febb1e680e2abe4d5063a03774646184c152b63b5bae6aed87973689>k__BackingField";
 // FieldKey 现挂在 WM 本体（byte@_fieldKey），不再走 SceneField+0x98
 constexpr char kHashWmFieldKey[] =
-    "e34ea295aedf05c677a37d0d529e69ea692edb8b1ad2225426ac9fe48b26102";
+    "b6671f7d73d76016bbb92f58d78544eeeeb0fab19da581c695b47641673899c";
 
 constexpr size_t kFbWmSceneState = 0x34;
 constexpr size_t kFbWmField = 0x58;
@@ -372,13 +372,20 @@ int GetMapSceneKey() {
     return static_cast<int>(ReadU8(wm, kOffFieldKey));
 }
 
+bool HasMapData() {
+    void* wm = GetWorldManager();
+    if (!il2::LooksLikeHeapPtr(wm)) return false;
+    void* mapData = il2::ReadPtr(wm, kOffWmMapData);
+    return il2::LooksLikeHeapPtr(mapData);
+}
+
 int GetMapId() {
     void* wm = GetWorldManager();
     if (!il2::LooksLikeHeapPtr(wm)) return 0;
     void* mapData = il2::ReadPtr(wm, kOffWmMapData);
     if (!il2::LooksLikeHeapPtr(mapData)) return 0;
-    const int id = static_cast<int>(ReadU32(mapData, kOffMapDataId));
-    return id > 0 ? id : 0;
+    // 出生图 id=0（000000000 / 菇菇村訓練所入口）。禁止再写成 id>0 才返回。
+    return static_cast<int>(ReadU32(mapData, kOffMapDataId));
 }
 
 uint32_t GetCharacterId() {

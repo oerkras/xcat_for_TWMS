@@ -1,0 +1,7 @@
+tag	kind	rva	expect	target	source	note
+CurFhMagicCmov	text	0x10AF45D	48 0F 45 C1		x/features/ports/curfh_gate_bypass.cpp	TryDoingMagicAttack CurFh CONT (cmovnz rax,rcx)
+CurFhShootCmov	text	0x107730E	49 0F 45 C4		x/features/ports/curfh_gate_bypass.cpp	TryDoingShootAttack CurFh CONT (cmovnz rax,r12)
+CurFhPrepareJnz	text	0x10D06EA	75 07		x/features/ports/curfh_gate_bypass.cpp	DoActiveSkillPrepare CurFh jnz+7
+KickHwbpCall	call	0xDEFD92	E8	0xDF0AD0	x/features/kick_sniff/kick_sniff.cpp	FixedUpdate E8 -> DoLocal
+ByPetRectPack	data	0x55BFCD0	19 00 00 00 0A 00 00 00 00 00 00 00 00 00 00 00 00 00 48 42 00 00 70 42		x/features/ports/drop_pool_port.cpp	int32 25,10 + float 50,60
+MeleeConstRect	data	0x5656590	00 00 B0 C2 00 00 C0 C0 00 00 8C 42 00 00 60 42		x/features/melee_veto/melee_veto.cpp	float -88,-6,70,56

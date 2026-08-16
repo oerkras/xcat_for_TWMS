@@ -55,10 +55,13 @@ bool HasSnapshot() {
 
 int32_t SnapshotWorldId() { return Ccu_SnapshotWorldId(); }
 
-bool ShouldSkipFeed(int32_t worldId) { return Ccu_ShouldSkipFeed(worldId); }
+bool ShouldSkipFeed(int32_t worldId, bool allowRefresh) {
+    return Ccu_ShouldSkipFeed(worldId, allowRefresh);
+}
 
-bool NotifyWorldChannelSnapshot(long long sum, int channelCount, const char* src, int32_t worldId) {
-    return Ccu_NotifySnapshot(sum, channelCount, src, worldId);
+bool NotifyWorldChannelSnapshot(long long sum, int channelCount, const char* src, int32_t worldId,
+                                bool allowRefresh) {
+    return Ccu_NotifySnapshot(sum, channelCount, src, worldId, allowRefresh);
 }
 
 void NotifyChannelFillTable(const ChannelFillRow* rows, int n, const char* src, int32_t worldId) {

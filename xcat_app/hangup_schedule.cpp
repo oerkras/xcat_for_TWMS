@@ -2,6 +2,7 @@
 
 #include "app_notify.h"
 #include "attach_inject.h"
+#include "game_exit_probe.h"
 #include "guardian_policy.h"
 #include "launch_panel.h"
 #include "update_client.h"
@@ -29,6 +30,11 @@ constexpr uint32_t kHangupStartCooldownSec = 120;
 constexpr uint64_t kRelaunchGoneWaitMs = 15000;
 constexpr uint64_t kRelaunchRetryKillAtMs = 8000;
 constexpr uint64_t kRelaunchSettleMs = 2500;
+// soft RESULT success 后短窗：KickSniff 落地静默期内仍会 bump disconnectSeq，
+// 而 RequestAttempt 因 land_quiet 早退 hold=0。守护 Tick 1Hz，BIN 实测
+// success absorb 后约 1s 把下一跳 seq 当踢线硬杀。窗长须盖住 land_quiet(1.5s)
+// + 一拍 Tick；result==2 仍立刻硬杀。不得把 result==1 做成永久吞 seq。
+constexpr uint64_t kSoftSuccessGraceMs = 8000;
 
 enum class RelaunchPhase : uint8_t {
     None = 0,
@@ -54,6 +60,7 @@ struct State {
     bool launchBusy = false;
     bool hangupOn = false;
     bool watchdogOn = false;
+    bool combatEnabled = false;
     bool combatHold = false;
     uint32_t combatHoldHardLimitSec = 0;
     uint32_t noExpLimitSec = 0;
@@ -78,11 +85,16 @@ struct State {
     uint32_t lastConsumedDisconnectSeq = 0;
     uint32_t lastLoggedDisconnectSeq = 0;
     bool haveDisconnectBaseline = false;
-    // softLoginResult==1 只在上升沿吞 seq，避免成功后永久误吞后续断线。
+    // softLoginResult==1 上升沿武装短窗；窗内吞新 seq，窗后新 seq 仍当踢线。
     uint32_t lastSeenSoftLoginResult = 0;
+    uint64_t softSuccessGraceUntil = 0;
     // 最近一次新鲜 SHM 见到的 softLoginHold；进程已死后 stFresh 常假，靠 latch 说明 ProcessDead。
     bool softLoginHoldLatched = false;
+    // hold 上升沿墙钟；到期后不再挡无经验/状态停滞的干净重拉。
+    uint64_t softHoldSinceTick = 0;
     uint64_t lastCooldownBlockLogTick = 0;
+    int32_t sceneState = -1;  // PayloadStatus.sceneState；拍卖/商城停表用
+    uint32_t currentMapId = 0;
     RelaunchJob relaunch{};
     guardian_policy::RuntimeState runtime{};
 };
@@ -106,11 +118,6 @@ DWORD ClassicPid() { return xcat::FindProcessIdByName(kClassicExe); }
 bool ClassicPresent() { return ClassicPid() != 0; }
 bool NgmPresent() {
     return xcat::FindProcessIdByName(kNgmExe) != 0 || xcat::FindProcessIdByName(kNgm64Exe) != 0;
-}
-// 与 travel / auto_supply 一致：大区室外主城 mapId 后 6 位为 0（如 100000000 弓箭手村）。
-// 守护据此置 safeZonePause，避免主城挂机/补给时因无经验误杀（policy 门闩此前未接线）。
-bool IsOutdoorTownMapId(uint32_t mapId) {
-    return mapId >= 100000000u && (mapId % 1000000u) == 0u;
 }
 // 干净重拉须清掉 Classic + NGM：只杀游戏会留下旧 NGM，下一轮官网 Main 常不再拉新经典版。
 bool LaunchChainPresent() { return ClassicPresent() || NgmPresent(); }
@@ -162,7 +169,9 @@ void ClearSessionTrack() {
     g.lastLoggedDisconnectSeq = 0;
     g.haveDisconnectBaseline = false;
     g.lastSeenSoftLoginResult = 0;
+    g.softSuccessGraceUntil = 0;
     g.softLoginHoldLatched = false;
+    g.softHoldSinceTick = 0;
 }
 
 void ArmSessionIfLive(DWORD livePid, bool handshakeOk) {
@@ -364,6 +373,16 @@ bool AllowsLaunch(const std::string& prefsBinDir) {
                             CurrentLocalHourImpl());
 }
 
+// 2转考验场（map_names：弓/法/剑/盗 108000100-102 / 200-202 / 300-302 / 400-402）。
+// 怪无经验、掉任务道具；守护按主城同款停表，禁止 EXP 停滞倒计时。
+bool IsSecondJobTrialMap(uint32_t mapId) {
+    if (mapId < 108000100u || mapId > 108000402u) return false;
+    const uint32_t rem = mapId - 108000000u;
+    const uint32_t job = rem / 100u;
+    const uint32_t var = rem % 100u;
+    return job >= 1u && job <= 4u && var <= 2u;
+}
+
 Snapshot GetSnapshot() {
     Snapshot s{};
     s.mode = g.mode;
@@ -374,6 +393,7 @@ Snapshot GetSnapshot() {
     s.launchBusy = g.launchBusy || RelaunchInFlight();
     s.combatHold = g.combatHold;
     s.hasProgress = g.runtime.haveExp;
+    s.combatEnabled = g.combatEnabled;
     s.noExpLimitSec = g.noExpLimitSec;
     s.combatHoldHardLimitSec = g.combatHoldHardLimitSec;
     s.gate = g.gate ? g.gate : "none";
@@ -401,6 +421,8 @@ Snapshot GetSnapshot() {
     s.coldStartWaitingProcess = g.uiColdWaitingProcess;
     s.launchOwnedPendingPlayable = g.uiLaunchOwnedPendingPlayable;
     s.cleanRelaunchKillSettle = RelaunchInFlight();
+    s.sceneState = g.sceneState;
+    s.currentMapId = g.currentMapId;
     return s;
 }
 
@@ -423,6 +445,21 @@ const char* WatchdogUiModeLabel(WatchdogUiMode mode) {
     case WatchdogUiMode::Backoff: return "守护退避";
     }
     return "未知";
+}
+
+const char* WatchdogSafeZonePauseLabel(const Snapshot& snap) {
+    if (snap.sceneState == 5) return "拍卖行（暂停无经验）";
+    if (snap.sceneState == 4) return "商城（暂停无经验）";
+    if (IsSecondJobTrialMap(snap.currentMapId)) return "转职考验（暂停无经验）";
+    return "主城（暂停无经验）";
+}
+
+const char* FormatWatchdogF5PauseReason(const Snapshot& snap) {
+    if (!snap.watchdogOn || !snap.combatEnabled || !snap.scheduleActive) return nullptr;
+    if (!snap.gate) return nullptr;
+    if (std::strcmp(snap.gate, "safe-zone") == 0) return WatchdogSafeZonePauseLabel(snap);
+    if (std::strcmp(snap.gate, "travel") == 0) return "赶路（暂停无经验）";
+    return nullptr;
 }
 
 std::string FormatWatchdogTimerText(const Snapshot& snap) {
@@ -458,7 +495,10 @@ std::string FormatWatchdogTimerText(const Snapshot& snap) {
         snprintf(buf, sizeof(buf), "战斗暂缓 %u/%u秒", elapsed, holdLimit);
         return buf;
     }
-    if (snap.gate && std::strcmp(snap.gate, "safe-zone") == 0) return "主城（暂停无经验）";
+    if (snap.gate && std::strcmp(snap.gate, "safe-zone") == 0) {
+        return WatchdogSafeZonePauseLabel(snap);
+    }
+    if (snap.gate && std::strcmp(snap.gate, "travel") == 0) return "赶路（暂停无经验）";
     if (snap.gate && std::strcmp(snap.gate, "combat-off") == 0) return "战斗关闭（暂停无经验）";
     if (snap.watchdogMode == WatchdogUiMode::Healthy || snap.hasProgress) {
         snprintf(buf, sizeof(buf), "挂机中 %u/%u秒", elapsed, limit);
@@ -502,6 +542,7 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     const bool watchdogOn = cfg.launcherWatchdog != 0;
     g.hangupOn = hangupOn;
     g.watchdogOn = watchdogOn;
+    g.combatEnabled = cfg.simpleCombat != 0;
     g.launchBusy = msc::weblogin::IsBusy() || RelaunchInFlight();
     cfg.launcherHangupScheduleMask = ClampMaskImpl(cfg.launcherHangupScheduleMask);
     cfg.launcherWatchdogNoExpSec = xcat::ClampWatchdogNoExpSec(cfg.launcherWatchdogNoExpSec);
@@ -651,14 +692,46 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     }
 
     // ---- Guardian ----
-    const DWORD livePid = ClassicPid();
-    const bool processAlive = livePid != 0 && xcat::IsProcessAlive(livePid);
+    // 进程名快照偶发漏检：CreateToolhelp32Snapshot 空表会被当成 ProcessDead，
+    // 下一拍干净重拉（UI 写「正在杀死」），其实 TerminateProcess 一个都没杀到。
+    // 先信 trackedPid 的 OpenProcess，再信 payload SHM 心跳（DLL 还在写 = 进程还在）。
+    DWORD livePid = ClassicPid();
+    if (livePid == 0 && g.trackedPid != 0 && xcat::IsProcessAlive(g.trackedPid)) {
+        livePid = g.trackedPid;
+        static uint64_t sLastNameMissLog = 0;
+        if (sLastNameMissLog == 0 || now - sLastNameMissLog >= 5000u) {
+            sLastNameMissLog = now;
+            xcat::log::Warn(
+                "Watchdog",
+                "Classic name lookup miss — trackedPid=%u still alive (not process-dead)",
+                static_cast<unsigned>(g.trackedPid));
+        }
+    }
+    bool processAlive = livePid != 0 && xcat::IsProcessAlive(livePid);
 
     xcat::PayloadStatus st{};
     const bool stOk = xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st);
     const bool stFresh = stOk && xcat::PayloadStatusHeartbeatFresh(st, now, 5000);
     const bool handshakeOk = stFresh && st.ipcHandshake != 0;
+    if (!processAlive && stFresh && handshakeOk) {
+        processAlive = true;
+        if (livePid == 0) livePid = g.trackedPid;
+        static uint64_t sLastHbAliveLog = 0;
+        if (sLastHbAliveLog == 0 || now - sLastHbAliveLog >= 5000u) {
+            sLastHbAliveLog = now;
+            xcat::log::Warn(
+                "Watchdog",
+                "Classic pid empty but payload heartbeat fresh — skip process-dead pid=%u",
+                static_cast<unsigned>(livePid));
+        }
+    }
     const bool playable = stFresh && st.localPlayerOk != 0;
+    g.sceneState = stFresh ? st.sceneState : -1;
+    g.currentMapId = (stFresh && st.mapId != 0u) ? st.mapId : 0u;
+    // 拍卖 GlobalMarket=5 / 商城 CashShop=4：已离开挂机图，无经验是正常的。
+    // 若当 status-not-ready，会从进拍卖起计 180s 再干净重拉。
+    // InterStage(1) / Login(2) / None(0) 不停表：切图或选角卡死正是守护要抬的。
+    const bool inMarket = stFresh && (st.sceneState == 4 || st.sceneState == 5);
 
     ArmSessionIfLive(livePid, handshakeOk);
 
@@ -747,41 +820,62 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     input.injected = liveOwned || crashedArmed;
     input.combatEnabled = cfg.simpleCombat != 0;
     input.scheduleActive = scheduleActive;
-    input.statusReady = playable;
+    input.statusReady = playable || inMarket;
     input.progressGrace = progressGrace;
     input.payloadHeartbeatStale = payloadHeartbeatStale;
     input.prePlayableStuck = prePlayableStuck;
     input.playerExpValid = stFresh && st.playerExpValid != 0;
     input.playerExp = input.playerExpValid ? st.playerExp : 0;
+    // combatHold 要靠这戳：从未赋值时 CombatRecentlyActive 恒假，F5 打怪也会
+    // 按「EXP 停滞」180s 干净重拉（BIN 11:45:40 exp=9417、Classic x1）。
+    // 进图且自动打怪开着：每拍刷新活动戳，硬顶 noExp+60s；真有经验涨仍会清零。
+    if (input.combatEnabled && playable && processAlive) {
+        input.combatActivityTickMs = now;
+    }
     input.mapIdValid = stFresh && st.mapId != 0;
     input.mapId = input.mapIdValid ? st.mapId : 0;
-    // 主城暂停无经验：优先原生 IsTown（v11）；未采到时回退室外主城 mapId 启发式。
-    if (stFresh && st.version >= 11u && st.mapIsTownValid != 0) {
+    // 主城暂停无经验：仅信 payload mapIsTown（map_info.town=1，含药店室内）。
+    // 不信 mapId%1000000==0（107000000 沼澤地Ⅰ误判），也不信原生 IsTown。
+    // 2转考验场：无经验任务怪（BIN 108000400 盜賊2轉考驗場），按主城停表。
+    // 拍卖/商城：无 mapId，靠 sceneState 停表（勿走 status-not-ready 计时）。
+    if (inMarket) {
+        input.safeZonePause = true;
+    } else if (input.mapIdValid && IsSecondJobTrialMap(input.mapId)) {
+        input.safeZonePause = true;
+    } else if (stFresh && st.version >= 11u && st.mapIsTownValid != 0) {
         input.safeZonePause = st.mapIsTown != 0;
     } else {
-        input.safeZonePause = input.mapIdValid && IsOutdoorTownMapId(input.mapId);
+        input.safeZonePause = false;
     }
 
     // 服务器踢线/断线边沿 → hard-fail → 干净重拉（不依赖「自动打怪」）。
-    // 契约：软重连已武装并进入观察窗时，守护不得因踢线/无经验/心跳等重拉；
-    // 必须等 softLoginResult==2（路径完全失败）或进程已死，才允许干净重拉。
+    // 契约：hold 只挡踢线 seq 硬杀，让软路径先试。
+    // 不挡：进程已死；无经验/心跳停滞已满 noExpSec；hold 墙钟已满 noExpSec。
     // 成功上升沿吞掉本轮 disconnectSeq，避免 hold 结束后误重拉。
     // 尚未进图（awaitingPlayable / !haveStatus）：吞掉选频选角 Session 闪断，勿硬杀。
     bool softHoldBlocksRelaunch = false;
     if (g.sessionArmed && stFresh) {
         const uint32_t softResult = (st.version >= 8u) ? st.softLoginResult : 0u;
         g.softLoginHoldLatched = (st.version >= 8u && st.softLoginHold != 0u);
-        // 仅 result 0→1 上升沿吸收；result 一直为 1 时不得吞后续新 seq（否则二次断线失败也不重拉）。
-        if (softResult == 1u && g.lastSeenSoftLoginResult != 1u &&
-            st.disconnectSeq > g.lastConsumedDisconnectSeq) {
-            xcat::log::Info("Watchdog",
-                            "soft_login success — absorb disconnectSeq %u->%u (no clean relaunch)",
-                            g.lastConsumedDisconnectSeq, st.disconnectSeq);
-            g.lastConsumedDisconnectSeq = st.disconnectSeq;
-            g.lastLoggedDisconnectSeq = st.disconnectSeq;
+        if (g.softLoginHoldLatched) {
+            if (g.softHoldSinceTick == 0) g.softHoldSinceTick = now;
+        } else {
+            g.softHoldSinceTick = 0;
+        }
+        // 0→1 武装短窗（即使本拍 seq 没涨：下一跳闪断常落在 hold 已放之后）。
+        if (softResult == 1u && g.lastSeenSoftLoginResult != 1u) {
+            g.softSuccessGraceUntil = now + kSoftSuccessGraceMs;
+            if (st.disconnectSeq > g.lastConsumedDisconnectSeq) {
+                xcat::log::Info("Watchdog",
+                                "soft_login success — absorb disconnectSeq %u->%u (no clean relaunch)",
+                                g.lastConsumedDisconnectSeq, st.disconnectSeq);
+                g.lastConsumedDisconnectSeq = st.disconnectSeq;
+                g.lastLoggedDisconnectSeq = st.disconnectSeq;
+            }
         }
         // 软路径完全失败：显式放行踢线硬失败（不依赖 hold 已清的竞态）。
         if (softResult == 2u && g.lastSeenSoftLoginResult != 2u) {
+            g.softSuccessGraceUntil = 0;
             input.reloginHardFailed = true;
             input.hardFailCode = xcat::kHardFailServerKick;
             xcat::log::Warn(
@@ -818,6 +912,20 @@ void Tick(LaunchUiState& ui, bool appExiting) {
                         g.runtime.haveStatus ? 1u : 0u);
                 }
                 g.lastConsumedDisconnectSeq = st.disconnectSeq;
+            } else if (g.softSuccessGraceUntil != 0 && now < g.softSuccessGraceUntil &&
+                       !input.reloginHardFailed) {
+                // hold 已放、result 仍为 1：落地静默闪断不得硬杀（BIN 01:00:24→25 / 01:04:49→51）。
+                if (g.lastLoggedDisconnectSeq != st.disconnectSeq) {
+                    g.lastLoggedDisconnectSeq = st.disconnectSeq;
+                    xcat::log::Info(
+                        "Watchdog",
+                        "soft_login post-success absorb disconnectSeq %u->%u state=%d err=%d "
+                        "(grace remain=%llums — no clean relaunch)",
+                        g.lastConsumedDisconnectSeq, st.disconnectSeq, st.sessionState,
+                        st.pendingErrorCode,
+                        static_cast<unsigned long long>(g.softSuccessGraceUntil - now));
+                }
+                g.lastConsumedDisconnectSeq = st.disconnectSeq;
             } else if (!input.reloginHardFailed) {
                 // 软未 hold（未武装/未接管）且已进过图：立即硬失败。
                 // 已在 result=2 上升沿置位则勿重复刷日志。
@@ -836,11 +944,19 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     }
     // soft hold 期间心跳常不新鲜：勿因 !stFresh 清 latch，否则 ProcessDead 诊断 Warn 丢。
     // latch 只在：新鲜 SHM 写 hold=0/1、ProcessDead 打过日志、ClearSessionTrack。
-    // 进程仍在时：latch/hold 挡住一切守护干净重拉（含无经验），直到软路径失败或成功。
+    // 进程仍在时：latch/hold 默认挡住踢线干净重拉；到期的无经验/状态停滞见下方放行。
     softHoldBlocksRelaunch = processAlive && g.softLoginHoldLatched;
 
     const guardian_policy::RuntimeState runtimeBefore = g.runtime;
-    const guardian_policy::Decision decision = guardian_policy::Evaluate(g.runtime, input);
+    guardian_policy::Decision decision = guardian_policy::Evaluate(g.runtime, input);
+    if (decision.gate == guardian_policy::Gate::ProcessDead &&
+        decision.action == guardian_policy::Action::Restart) {
+        const auto probe = game_exit_probe::ProbeRecentClassicFault(
+            static_cast<uint32_t>(g.trackedPid), 180u);
+        decision.restartReason = game_exit_probe::ReasonLabel(probe.kind);
+        xcat::log::Info("Watchdog", "process-dead probe %s",
+                        probe.detail[0] ? probe.detail : decision.restartReason);
+    }
     g.runtime = decision.next;
     g.gate = guardian_policy::GateLabel(decision.gate);
     g.watchdogMode = ToWatchdogUi(g.runtime.mode, true);
@@ -860,6 +976,7 @@ void Tick(LaunchUiState& ui, bool appExiting) {
                 "process-dead during soft_login hold (Classic already gone — not kick-kill; "
                 "soft attempt aborted)");
             g.softLoginHoldLatched = false;
+            g.softHoldSinceTick = 0;
             softHoldBlocksRelaunch = false;
         }
         xcat::log::Info("Watchdog", "mode %s->%s gate=%s action=%s reason=%s stale=%u",
@@ -887,6 +1004,24 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     if (decision.action != guardian_policy::Action::Restart) return;
     if (!scheduleActive) return;
     if (RelaunchInFlight()) return;
+    if (softHoldBlocksRelaunch) {
+        const uint64_t holdMs =
+            (g.softHoldSinceTick != 0 && now >= g.softHoldSinceTick)
+                ? (now - g.softHoldSinceTick)
+                : 0;
+        const uint64_t capMs = static_cast<uint64_t>(noExp) * 1000u;
+        const bool staleDue = decision.staleSec >= noExp && !input.reloginHardFailed;
+        const bool holdDue = capMs > 0 && holdMs >= capMs;
+        if (staleDue || holdDue) {
+            xcat::log::Warn(
+                "Watchdog",
+                "soft_login hold expired — allow relaunch reason=%s stale=%us hold=%llums "
+                "cap=%us",
+                decision.restartReason ? decision.restartReason : "?", decision.staleSec,
+                static_cast<unsigned long long>(holdMs), noExp);
+            softHoldBlocksRelaunch = false;
+        }
+    }
     if (softHoldBlocksRelaunch) {
         // 丢弃本拍 Restart 状态推进，避免 restartInFlight 空转却不杀进程。
         g.runtime = runtimeBefore;

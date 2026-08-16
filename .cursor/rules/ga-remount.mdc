@@ -1,0 +1,24 @@
+---
+description: 经典版客户端更新后 GameAssembly remount（换 dump.cs 哈希/方法头 RVA）。触发词：remount、ga_remount、客户端更新、换偏移、dump.cs。
+globs: scripts/ga_remount.py,scripts/data/ga_patch_sites.tsv,scripts/data/ga_remount_ignore.txt
+alwaysApply: false
+---
+
+# GA remount（Agent 硬停）
+
+产品 = 经典版 / TWMS。接到本任务先读 [`docs/features/ops/GA-remount-Agent清单.md`](../../docs/features/ops/GA-remount-Agent清单.md)，或跑 `python scripts/ga_remount.py howto`。
+
+## 必须
+
+- 只换 dump 能证明的**类/字段/方法哈希**和**方法头 RVA**。
+- 体内点只核 `scripts/data/ga_patch_sites.tsv`；编码变了停，开 IDA，**禁止**在平坦化里盲搜 `75 07`。
+- `map` 默认 dry-run。`--apply` 仅当输出里 `on_old_map>0` **且用户当轮明确说 apply**。
+- 哈希已在新 dump 上（`already_on_new`、`on_old_map=0`）→ 脚本会 REFUSE；不要绕过。
+
+## 禁止
+
+- 改业务判定、补丁策略、if/else、默认开关。
+- 把源码里任意 `0xHEX` 当方法头替换（注释/种子/体内点/数字重用会改坏活函数）。
+- 杀用户进程、打包发布、清浏览器登录态。
+- 磁盘壳 `GameAssembly.dll`（~36MB）当 IDA 真源；必须用 `Dumps/runtime/` 运行时展开 dump。
+---

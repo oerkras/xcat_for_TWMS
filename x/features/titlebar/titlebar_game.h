@@ -34,8 +34,9 @@ bool ReadVitals(Vitals& out);  // → x::ui::player::Read
 bool FormatWealthScrolls(char* dst, size_t cap);
 
 // 返回本拍背包新增物品的卖价；countIntoRate 为 false 时仅建立基线。
+// mpPotConsumedOut：消耗栏蓝瓶数量下降（MpRank>=0）；买药/补货的增加不计。
 double UpdateLootDelta(bool countIntoRate, uint64_t* knownOut = nullptr,
-                       uint64_t* unknownOut = nullptr);
+                       uint64_t* unknownOut = nullptr, uint64_t* mpPotConsumedOut = nullptr);
 void ResetLootBaseline();
 
 const char* JobNameTw(int job);

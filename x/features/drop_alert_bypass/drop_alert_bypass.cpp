@@ -1,11 +1,13 @@
 // TWMS Classic — drop_alert_bypass.
 //
-// Root cause (BIN): callers use direct `call CanPerformAction` (E8×8), so
-// MethodInfo swap never runs. Real drop gate calls thin IsAlertMode
-// (UserBase$$IsAlertMode @0x124DE70) which reads +0x118 vs (seed+global).
-// 2026-08-13 remount: 字段 0x114(bool 误锚)→0x118(int 警戒戳)；RVA 未漂。
-// While enabled, data-plane clear +0x118 — drop opens AND client alert suppressed.
-// No GA .text patch; no HWBP slot.
+// Root cause (BIN): callers use direct `call CanPerformAction` (E8×N), so
+// MethodInfo swap never runs. Real drop gate calls thin IsAlertMode which is:
+//   mov eax,imm ; add eax,[global] ; cmp [rcx+0x118],eax ; setnle
+// File-time imm+global==0 ⇒ stamp>0. That global has a single xref.
+//
+// v3 primary: rewrite that dword so imm+global==INT_MAX → IsAlertMode always
+// false (出刀怎么刷 +0x118 都无空窗). Restore on disable. No GA .text / no HWBP.
+// Secondary: CanPerformAction MethodInfo (rarely hit).
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -28,44 +30,47 @@ namespace {
 using x::runtime::il2cpp::AtRva;
 
 // UserBase 父类. 短 IsAlertMode（CanPerformAction 真 callee）
-// IDA 2026-08-13: mov eax,imm; add eax,[rip]; cmp [rcx+0x118],eax; setnle — shape 只认 op 形态
-constexpr uint32_t kRvaIsAlertMode = 0x124DE70;  // remounted 2026-08-06 (+0x1E70)；RVA 仍准
+// IDA: mov eax,imm; add eax,[rip]; cmp [rcx+0x118],eax; setnle
+constexpr uint32_t kRvaIsAlertMode = 0x124DC50;
 
 // Secondary: MethodInfo on DragManager.CanPerformAction (rarely hit; keep for MI callers)
 constexpr char kDragManagerClass[] =
-    "d2290478242217849e81b25341e5981b7c5dc1bc6897c784b7fd2f5f3db8bee";
-constexpr uint32_t kRvaCanPerformAction = 0x4CFED0;  // remounted 2026-08-06（RVA 未漂）
+    "d2a817cd6c06f9ed6b47ff80270050e539859eebb678eb0b8209f2c08d925f2";
+constexpr uint32_t kRvaCanPerformAction = 0x4CFEC0;
 constexpr char kUserAlertClass[] =
-    "d5a59751c9ecba4a21314526d7fbe8142abe3ee8b90e8d03a7fc2f80f669add";
+    "a484ffac0ec2820f7d3cb62ddd233330e4c2613af7446a96b81d316db06bc44";
 constexpr char kHashIsAlertMode[] =
-    "a9e101249890ed3f99c5e6a5d37bff8b74311409454a8a63b4f0acf2d18af77";
+    "e757c4c413f82f697bee6ed0b780bbd3ef58512dbbec1f4f99ffd4cc759b1bf";
 constexpr char kHashCanPerformAction[] =
-    "c9827716092b598b0c395c8455da154d17ed38264ae8c24068596ae83293827";
-// UserBase alert stamp（int）：hash → field_get_offset（dump fallback 0x118）
-// 勿用 bac75f…@0x114（bool）；IsAlertMode 读的是 a363…@0x118
+    "cbe010af1c67e2ef6ff3c519ec3f00548ff5dd0cb906bac4148ed1dd8293b47";
+// UserBase alert stamp（int）：仅 shape 校验 cmp 偏移；主路径不再清字段
 constexpr char kHashAlertAt[] =
-    "a363a66e2ecf97c765a16a7d795ca7cf3416ee02804c5ae5305d1ebbace6e0f";
+    "ff6326189ddf2aa2850ea0cfbb0a37b162b8a1881f2dc5c6044bd1e93ca52b0";
 constexpr size_t kFbAlertAt = 0x118;
 size_t gOffAlertAt = kFbAlertAt;
 #define kOffAlertAt (gOffAlertAt)
 bool gAlertFieldTried = false;
 
-constexpr DWORD kTickMsApply = 32;   // 非 0 / 未攒够零拍：快清
-constexpr DWORD kTickMsHold = 1000;  // 连续多拍已是 0：慢校验（减挂机空转）
+constexpr DWORD kTickMsArmed = 1000;  // threshold 已装：慢校验是否被回写
 constexpr DWORD kTickMsOff = 500;
 constexpr DWORD kInstallRetryMs = 5000;
-constexpr DWORD kLogClearMs = 3000;
-// 连续 before==0 达到此拍数才进入 1s hold，避免「刚清→hold→下一刀刷戳→最长 1s 拒丢」
-constexpr int kHoldAfterZeroStreak = 8;  // ~8×32ms ≈ 256ms 稳住后再慢扫
+constexpr DWORD kLogMs = 15000;
+constexpr uint32_t kThreshTarget = 0x7FFFFFFFu;  // signed INT_MAX；stamp > INT_MAX 永不成立
 
-// 短 IsAlertMode 机码结构指纹（防漂到 CFF 兄弟 / 字段改偏）
-//   B8 xx xx xx xx          mov eax, imm32（种子解混淆后语义常变，不钉死 IMM）
+// 短 IsAlertMode 机码结构指纹
+//   B8 xx xx xx xx          mov eax, imm32
 //   03 05 xx xx xx xx       add eax, [rip+disp]
-//   39 81 dd dd dd dd       cmp [rcx+alertOff], eax  （alertOff 来自 field hash）
+//   39 81 dd dd dd dd       cmp [rcx+alertOff], eax
 //   0F 9F C0 / C3 …
 constexpr size_t kAlertShapeScan = 48;
 
 enum class AlertShape : uint8_t { Unknown = 0, Ok = 1, BadConst = 2, BadOff = 3, Unreadable = 4 };
+
+struct AlertShapeInfo {
+    AlertShape shape = AlertShape::Unknown;
+    uint32_t imm = 0;
+    uint32_t* global = nullptr;
+};
 
 std::atomic<AlertShape> gAlertShape{AlertShape::Unknown};
 std::atomic<bool> gShapeLogged{false};
@@ -84,17 +89,21 @@ std::atomic<bool> gInstalled{false};
 std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gWorker{nullptr};
 std::atomic<uint32_t> gMiHits{0};
-std::atomic<uint32_t> gClearHits{0};
-// Worker-only：连续多拍字段为 0 后才 hold；出刀刷戳立刻退回快拍。
-bool gHolding = false;
-int gZeroStreak = 0;
+std::atomic<uint32_t> gThreshHits{0};
+std::atomic<bool> gThreshArmed{false};
+
+// Worker/SetEnabled：threshold global 现场
+uint32_t* gThreshGlobal = nullptr;
+uint32_t gThreshOrig = 0;
+uint32_t gThreshImm = 0;
+bool gThreshSaved = false;
 
 MethodInfoHead* gMi = nullptr;
 MethodInfoHead* gMiIsAlertMode = nullptr;
 FnCanPerformAction gOrig = nullptr;
 void* gKlass = nullptr;
 DWORD gLastInstallTry = 0;
-DWORD gLastClearLog = 0;
+DWORD gLastLog = 0;
 
 uint8_t Hook_CanPerformAction(void* self, uint8_t bCheckAlert, void* methodInfo) {
     gMiHits.fetch_add(1, std::memory_order_relaxed);
@@ -108,73 +117,6 @@ uint8_t Hook_CanPerformAction(void* self, uint8_t bCheckAlert, void* methodInfo)
     }
 }
 
-MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
-    if (!klass) return nullptr;
-    const auto& e = x::runtime::il2cpp::Get();
-    if (!e.classGetMethods || !e.ga) return nullptr;
-    const uintptr_t want = reinterpret_cast<uintptr_t>(e.ga) + rva;
-    const uintptr_t hook = reinterpret_cast<uintptr_t>(&Hook_CanPerformAction);
-    void* iter = nullptr;
-    __try {
-        for (;;) {
-            void* miRaw = e.classGetMethods(klass, &iter);
-            if (!miRaw) break;
-            auto* mi = reinterpret_cast<MethodInfoHead*>(miRaw);
-            void* mp = nullptr;
-            __try {
-                mp = mi->methodPointer;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                continue;
-            }
-            const uintptr_t p = reinterpret_cast<uintptr_t>(mp);
-            if (p == want || p == hook) return mi;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-    }
-    return nullptr;
-}
-
-MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
-    if (!klass || !name) return nullptr;
-    const auto& e = x::runtime::il2cpp::Get();
-    MethodInfoHead* mi = nullptr;
-    if (e.classGetMethodFromName) {
-        __try {
-            mi = reinterpret_cast<MethodInfoHead*>(e.classGetMethodFromName(klass, name, argc));
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            mi = nullptr;
-        }
-    }
-    if (mi && mi->methodPointer) return mi;
-    if (!e.classGetMethods || !e.methodGetName) return nullptr;
-    void* cur = klass;
-    for (int depth = 0; cur && depth < 8; ++depth) {
-        void* iter = nullptr;
-        __try {
-            for (;;) {
-                void* raw = e.classGetMethods(cur, &iter);
-                if (!raw) break;
-                const char* nm = e.methodGetName(raw);
-                if (nm && strcmp(nm, name) == 0) {
-                    mi = reinterpret_cast<MethodInfoHead*>(raw);
-                    if (mi && mi->methodPointer) return mi;
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-        }
-        if (!e.classParent) break;
-        void* parent = nullptr;
-        __try {
-            parent = e.classParent(cur);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            parent = nullptr;
-        }
-        if (!parent || parent == cur) break;
-        cur = parent;
-    }
-    return nullptr;
-}
-
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
                           const char* plain, const char* hash,
@@ -185,12 +127,6 @@ MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
         x::runtime::il2cpp_method::FindMethodResolved(klass, rva, shape, plain, hash);
     if (outPath) *outPath = mr.path;
     return mr.method ? reinterpret_cast<MethodInfoHead*>(mr.method) : nullptr;
-}
-
-template <typename Fn>
-Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
-    if (mi && mi->methodPointer) return reinterpret_cast<Fn>(mi->methodPointer);
-    return AtRva<Fn>(rva);
 }
 
 bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
@@ -255,23 +191,39 @@ const void* AlertModeFnPtr() {
 
 void EnsureAlertFieldOff();
 
-AlertShape ProbeAlertShape(const void* fn) {
-    if (!fn) return AlertShape::Unreadable;
+AlertShapeInfo ProbeAlertShape(const void* fn) {
+    AlertShapeInfo out{};
+    if (!fn) {
+        out.shape = AlertShape::Unreadable;
+        return out;
+    }
     uint8_t buf[kAlertShapeScan]{};
     __try {
         memcpy(buf, fn, sizeof(buf));
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return AlertShape::Unreadable;
+        out.shape = AlertShape::Unreadable;
+        return out;
     }
-    // 结构：mov eax,imm32 ; add eax,[rip+rel32] —— IMM 随种子漂，只认操作码形态
-    bool constOk = false;
+
+    size_t movAt = static_cast<size_t>(-1);
     for (size_t i = 0; i + 11 <= sizeof(buf); ++i) {
         if (buf[i] == 0xB8 && buf[i + 5] == 0x03 && buf[i + 6] == 0x05) {
-            constOk = true;
+            movAt = i;
             break;
         }
     }
-    if (!constOk) return AlertShape::BadConst;
+    if (movAt == static_cast<size_t>(-1)) {
+        out.shape = AlertShape::BadConst;
+        return out;
+    }
+
+    uint32_t imm = 0;
+    int32_t disp = 0;
+    memcpy(&imm, buf + movAt + 1, 4);
+    memcpy(&disp, buf + movAt + 7, 4);
+    const auto rip = reinterpret_cast<uintptr_t>(fn) + movAt + 11;
+    out.imm = imm;
+    out.global = reinterpret_cast<uint32_t*>(rip + static_cast<intptr_t>(disp));
 
     const uint32_t wantOff = static_cast<uint32_t>(gOffAlertAt ? gOffAlertAt : kFbAlertAt);
     uint8_t wantCmp[6] = {0x39, 0x81, 0, 0, 0, 0};
@@ -283,26 +235,30 @@ AlertShape ProbeAlertShape(const void* fn) {
             break;
         }
     }
-    return foundOff ? AlertShape::Ok : AlertShape::BadOff;
+    out.shape = foundOff ? AlertShape::Ok : AlertShape::BadOff;
+    return out;
 }
 
-AlertShape RefreshAlertShape(bool forceLog) {
+AlertShapeInfo RefreshAlertShape(bool forceLog) {
     EnsureAlertFieldOff();
-    const AlertShape s = ProbeAlertShape(AlertModeFnPtr());
-    const AlertShape prev = gAlertShape.exchange(s);
-    if (forceLog || s != prev || (!gShapeLogged.load() && s != AlertShape::Unknown)) {
+    const AlertShapeInfo info = ProbeAlertShape(AlertModeFnPtr());
+    const AlertShape prev = gAlertShape.exchange(info.shape);
+    if (forceLog || info.shape != prev ||
+        (!gShapeLogged.load() && info.shape != AlertShape::Unknown)) {
         gShapeLogged.store(true);
-        if (s == AlertShape::Ok) {
-            x::runtime::LogI("DropAlert", "shape OK IsAlertMode cmp[rcx+0x%zX] (rva=0x%X)",
-                             gOffAlertAt, kRvaIsAlertMode);
+        if (info.shape == AlertShape::Ok) {
+            x::runtime::LogI("DropAlert",
+                             "shape OK IsAlertMode cmp[rcx+0x%zX] imm=0x%X global=%p (rva=0x%X)",
+                             gOffAlertAt, info.imm, reinterpret_cast<void*>(info.global),
+                             kRvaIsAlertMode);
         } else {
             x::runtime::LogW("DropAlert",
-                             "shape FAIL code=%u — refuse field clear (want mov+add eax,[rip] + "
+                             "shape FAIL code=%u — refuse threshold (want mov+add eax,[rip] + "
                              "cmp [rcx+0x%zX]) rva=0x%X",
-                             static_cast<unsigned>(s), gOffAlertAt, kRvaIsAlertMode);
+                             static_cast<unsigned>(info.shape), gOffAlertAt, kRvaIsAlertMode);
         }
     }
-    return s;
+    return info;
 }
 
 bool AlertFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
@@ -371,38 +327,127 @@ bool EnsureIsAlertModeMi() {
     return gMiIsAlertMode && gMiIsAlertMode->methodPointer;
 }
 
+bool WriteU32(uint32_t* p, uint32_t v) {
+    if (!p) return false;
+    DWORD old = 0;
+    if (!VirtualProtect(p, sizeof(uint32_t), PAGE_READWRITE, &old)) {
+        __try {
+            *p = v;
+            return true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+    bool ok = false;
+    __try {
+        *p = v;
+        ok = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    VirtualProtect(p, sizeof(uint32_t), old, &old);
+    return ok;
+}
+
+bool ReadU32(const uint32_t* p, uint32_t* out) {
+    if (!p || !out) return false;
+    __try {
+        *out = *p;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void RestoreThreshold() {
+    if (!gThreshSaved || !gThreshGlobal) {
+        gThreshArmed.store(false);
+        return;
+    }
+    uint32_t cur = 0;
+    if (ReadU32(gThreshGlobal, &cur) && cur == gThreshOrig) {
+        gThreshArmed.store(false);
+        return;
+    }
+    if (WriteU32(gThreshGlobal, gThreshOrig)) {
+        x::runtime::LogI("DropAlert", "threshold restore global=%p val=0x%X",
+                         reinterpret_cast<void*>(gThreshGlobal), gThreshOrig);
+    } else {
+        x::runtime::LogW("DropAlert", "threshold restore FAIL global=%p",
+                         reinterpret_cast<void*>(gThreshGlobal));
+    }
+    gThreshArmed.store(false);
+}
+
+bool ArmThreshold(const AlertShapeInfo& info, DWORD now) {
+    if (info.shape != AlertShape::Ok || !info.global) return false;
+
+    const uint32_t want = static_cast<uint32_t>((static_cast<uint64_t>(kThreshTarget) -
+                                                 static_cast<uint64_t>(info.imm)) &
+                                                0xffffffffu);
+
+    if (!gThreshSaved || gThreshGlobal != info.global || gThreshImm != info.imm) {
+        uint32_t cur = 0;
+        if (!ReadU32(info.global, &cur)) return false;
+        // 若已是我们写过的值，保留先前 orig；否则以当前为 orig
+        if (!(gThreshSaved && gThreshGlobal == info.global && cur == want)) {
+            gThreshOrig = cur;
+        }
+        gThreshGlobal = info.global;
+        gThreshImm = info.imm;
+        gThreshSaved = true;
+    }
+
+    uint32_t cur = 0;
+    if (!ReadU32(gThreshGlobal, &cur)) return false;
+    if (cur == want) {
+        gThreshArmed.store(true);
+        return true;
+    }
+
+    if (!WriteU32(gThreshGlobal, want)) {
+        gThreshArmed.store(false);
+        return false;
+    }
+    gThreshHits.fetch_add(1, std::memory_order_relaxed);
+    gThreshArmed.store(true);
+    if (!gLastLog || now - gLastLog >= kLogMs) {
+        gLastLog = now;
+        x::runtime::LogI("DropAlert",
+                         "threshold arm global=%p imm=0x%X orig=0x%X want=0x%X "
+                         "(imm+want=0x%X) hits=%u",
+                         reinterpret_cast<void*>(gThreshGlobal), gThreshImm, gThreshOrig, want,
+                         static_cast<uint32_t>(gThreshImm + want), gThreshHits.load());
+    }
+    return true;
+}
+
 void ReportDropAlertLamp() {
     (void)EnsureIsAlertModeMi();
-    const AlertShape shape = RefreshAlertShape(false);
-    if (shape == AlertShape::BadConst || shape == AlertShape::BadOff ||
-        shape == AlertShape::Unreadable) {
-        const char* d = shape == AlertShape::BadOff     ? "MISS off"
-                        : shape == AlertShape::BadConst ? "MISS const"
-                                                        : "MISS unreadable";
+    const AlertShapeInfo info = RefreshAlertShape(false);
+    if (info.shape == AlertShape::BadConst || info.shape == AlertShape::BadOff ||
+        info.shape == AlertShape::Unreadable) {
+        const char* d = info.shape == AlertShape::BadOff     ? "MISS off"
+                        : info.shape == AlertShape::BadConst ? "MISS const"
+                                                             : "MISS unreadable";
         x::runtime::anchor_lamps::Set("DropAlert", x::runtime::anchor_lamps::AnchorLampCode::Miss,
                                      d);
         return;
     }
-    if (shape == AlertShape::Ok && gMiIsAlertMode) {
+    if (info.shape == AlertShape::Ok && gThreshArmed.load()) {
         x::runtime::anchor_lamps::Set(
             "DropAlert", x::runtime::anchor_lamps::AnchorLampCode::Ok,
-            gInstalled.load() ? "shape+118+secMI" : "shape+118");
+            gInstalled.load() ? "thresh+secMI" : "thresh");
         return;
     }
-    if (shape == AlertShape::Ok) {
+    if (info.shape == AlertShape::Ok) {
         x::runtime::anchor_lamps::Set("DropAlert",
                                      x::runtime::anchor_lamps::AnchorLampCode::Degraded,
-                                     "shape ok, MI late");
+                                     "shape ok, thresh late");
         return;
     }
-    if (gClearHits.load() > 0) {
-        x::runtime::anchor_lamps::Set("DropAlert",
-                                     x::runtime::anchor_lamps::AnchorLampCode::Degraded,
-                                     "field only");
-    } else {
-        x::runtime::anchor_lamps::Set("DropAlert",
-                                     x::runtime::anchor_lamps::AnchorLampCode::Unknown, "pending");
-    }
+    x::runtime::anchor_lamps::Set("DropAlert", x::runtime::anchor_lamps::AnchorLampCode::Unknown,
+                                 "pending");
 }
 
 bool TryInstallMi() {
@@ -414,8 +459,6 @@ bool TryInstallMi() {
         if (!gKlass) gKlass = x::runtime::il2cpp::FindClass("", "DragManager");
     }
     if (!gKlass) return false;
-    // 禁 worker RuntimeClassInit（GC unknown thread）。游戏已用过 DragManager 则 cctor 已跑；
-    // 未初始化时 RuntimeClassInit 在泵外会被 ManagedAllocSafe 挡掉——MI 安装延后即可。
     (void)x::runtime::il2cpp::RuntimeClassInit(gKlass);
     MethodInfoHead* mi = nullptr;
     x::runtime::il2cpp_method::ResolvePath canPath =
@@ -447,7 +490,7 @@ bool TryInstallMi() {
     gMi = mi;
     gOrig = reinterpret_cast<FnCanPerformAction>(orig);
     gInstalled.store(true);
-    x::runtime::LogI("DropAlert", "MI secondary installed (direct-call paths use data-plane)");
+    x::runtime::LogI("DropAlert", "MI secondary installed (direct-call paths use threshold)");
     ReportDropAlertLamp();
     return true;
 }
@@ -462,94 +505,47 @@ void UninstallMi() {
     gOrig = nullptr;
 }
 
-// Primary path: expire LocalUser+0x118 so thin IsAlertMode returns false.
-// Shape gate: 机码不像「mov+add eax,[rip] + cmp [rcx+alertOff]」则拒绝写字段（防漂）。
-// Hold：连续 kHoldAfterZeroStreak 拍已是 0 才慢扫；非 0 清零并重置 streak（防 1s 窗口拒丢）。
-bool MaintainAlertField(DWORD now) {
-    ports::player_combat::CombatCtx ctx{};
-    if (!ports::player_combat::QueryCombatCtx(ctx) || !ctx.localUser) {
-        gHolding = false;
-        gZeroStreak = 0;
-        return false;
-    }
-
-    EnsureAlertFieldOff();
+// Primary: arm IsAlertMode threshold global (imm+global → INT_MAX).
+bool MaintainThreshold(DWORD now) {
     (void)EnsureIsAlertModeMi();
-    const AlertShape shape = RefreshAlertShape(false);
-    if (shape != AlertShape::Ok) {
-        gHolding = false;
-        gZeroStreak = 0;
-        if (!gLastClearLog || now - gLastClearLog >= kLogClearMs) {
-            gLastClearLog = now;
+    const AlertShapeInfo info = RefreshAlertShape(false);
+    if (info.shape != AlertShape::Ok) {
+        gThreshArmed.store(false);
+        if (!gLastLog || now - gLastLog >= kLogMs) {
+            gLastLog = now;
             ReportDropAlertLamp();
         }
         return false;
     }
-
-    int before = 0;
-    __try {
-        before = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ctx.localUser) + kOffAlertAt);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        gHolding = false;
-        gZeroStreak = 0;
-        return false;
-    }
-
-    if (before == 0) {
-        if (gZeroStreak < kHoldAfterZeroStreak) ++gZeroStreak;
-        gHolding = (gZeroStreak >= kHoldAfterZeroStreak);
-        if (!gLastClearLog || now - gLastClearLog >= kLogClearMs) {
-            gLastClearLog = now;
-            x::runtime::LogI("DropAlert",
-                             "hold-cand +0x%zX=0 streak=%d/%d holding=%d miHits=%u clears=%u "
-                             "shape=%u",
-                             kOffAlertAt, gZeroStreak, kHoldAfterZeroStreak, gHolding ? 1 : 0,
-                             gMiHits.load(), gClearHits.load(), static_cast<unsigned>(shape));
-            ReportDropAlertLamp();
-        }
-        return true;
-    }
-
-    gZeroStreak = 0;
-    __try {
-        *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ctx.localUser) + kOffAlertAt) = 0;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        gHolding = false;
-        return false;
-    }
-
-    gHolding = false;
-    // 禁 worker 直调 IsAlertMode（托管入口 → GC unknown thread）。字段清零即主路径。
-    gClearHits.fetch_add(1, std::memory_order_relaxed);
-    if (!gLastClearLog || now - gLastClearLog >= kLogClearMs) {
-        gLastClearLog = now;
+    const bool ok = ArmThreshold(info, now);
+    if (!gLastLog || now - gLastLog >= kLogMs) {
+        gLastLog = now;
+        uint32_t cur = 0;
+        (void)ReadU32(info.global, &cur);
         x::runtime::LogI("DropAlert",
-                         "field clear +0x%zX was=%d miHits=%u clears=%u alertMi=%d shape=%u",
-                         kOffAlertAt, before, gMiHits.load(), gClearHits.load(),
-                         gMiIsAlertMode ? 1 : 0, static_cast<unsigned>(shape));
+                         "threshold %s global=%p cur=0x%X armed=%d miHits=%u threshHits=%u",
+                         ok ? "ok" : "FAIL", reinterpret_cast<void*>(info.global), cur,
+                         gThreshArmed.load() ? 1 : 0, gMiHits.load(), gThreshHits.load());
         ReportDropAlertLamp();
     }
-    return true;
+    return ok;
 }
 
 DWORD WINAPI Worker(LPVOID) {
     x::runtime::LogI("DropAlert",
-                     "worker start — data-plane +0x%zX hold/apply; MI secondary", kOffAlertAt);
+                     "worker start — threshold global (IsAlertMode); MI secondary");
     for (int i = 0; i < 400 && !gStop.load() && !GetModuleHandleW(L"GameAssembly.dll"); ++i)
         Sleep(50);
     Tick(GetTickCount());
     while (!gStop.load()) {
         const bool on = gDesired.load();
         Tick(GetTickCount());
-        DWORD sleepMs = kTickMsOff;
-        if (on) sleepMs = gHolding ? kTickMsHold : kTickMsApply;
-        Sleep(sleepMs);
+        Sleep(on ? kTickMsArmed : kTickMsOff);
     }
+    RestoreThreshold();
     UninstallMi();
-    gHolding = false;
-    gZeroStreak = 0;
-    x::runtime::LogI("DropAlert", "worker stop miHits=%u clears=%u", gMiHits.load(),
-                     gClearHits.load());
+    x::runtime::LogI("DropAlert", "worker stop miHits=%u threshHits=%u", gMiHits.load(),
+                     gThreshHits.load());
     return 0;
 }
 
@@ -559,13 +555,15 @@ void Init() {
     gDesired.store(false);
     EnsureAlertFieldOff();
     x::runtime::LogI("DropAlert",
-                     "init — primary: LocalUser+0x%zX clear; IsAlertMode rva=0x%X; MI rva=0x%X "
-                     "secondary (default off)",
+                     "init — primary: IsAlertMode threshold global; field+0x%zX shape-only; "
+                     "IsAlertMode rva=0x%X; MI rva=0x%X secondary (default off)",
                      gOffAlertAt, kRvaIsAlertMode, kRvaCanPerformAction);
 }
 
 void Shutdown() {
+    gDesired.store(false);
     StopWorker();
+    RestoreThreshold();
     UninstallMi();
 }
 
@@ -587,25 +585,23 @@ void SetEnabled(bool on) {
     if (prev != on) {
         x::runtime::LogI("DropAlert", "SetEnabled %d", on ? 1 : 0);
     }
+    if (!on) RestoreThreshold();
 }
 
 bool IsEnabled() { return gDesired.load(); }
 
 bool IsInstalled() {
-    // "Installed" for UI/diag = data-plane path ready (GA + LocalUser resolvable) or MI on.
-    return gClearHits.load() > 0 || (gInstalled.load() && gOrig != nullptr);
+    return gThreshArmed.load() || (gInstalled.load() && gOrig != nullptr);
 }
 
 void Tick(DWORD now) {
     if (!gDesired.load()) {
-        gHolding = false;
-        gZeroStreak = 0;
+        RestoreThreshold();
         return;
     }
 
-    (void)MaintainAlertField(now);
+    (void)MaintainThreshold(now);
 
-    // Best-effort secondary MI (most drop paths never hit it).
     if (!(gInstalled.load() && HookStillOurs(gMi) && gOrig)) {
         if (!gLastInstallTry || now - gLastInstallTry >= kInstallRetryMs) {
             gLastInstallTry = now;

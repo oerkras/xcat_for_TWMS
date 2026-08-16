@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace x::ipc {
 
 // Poll user.ini [core] written by the launcher panel; apply invuln / combat / etc.
@@ -8,5 +10,6 @@ void PayloadControl_Poll();
 void PayloadControl_ForceApply();
 void PayloadControl_PublishSimpleCombat(bool on);
 void PayloadControl_PublishFly(bool on);
+void PayloadControl_PublishHomePos(int32_t x, int32_t y, int32_t mapId, bool hasMap);
 
 }  // namespace x::ipc

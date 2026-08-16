@@ -18,6 +18,7 @@
 #include "../ports/world_port.h"
 #include "../simple_combat/simple_combat.h"
 #include "../soft_login_probe/soft_login_probe.h"
+#include "../travel/travel.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
@@ -41,24 +42,24 @@ using x::runtime::il2cpp::FindClass;
 using x::runtime::il2cpp::ReadPtr;
 
 // Field.SendTransferChannelRequest(int) — remount 2026-08-04 dump.cs
-constexpr uint32_t kRvaSendTransferChannelRequest = 0xBCDA20;
+constexpr uint32_t kRvaSendTransferChannelRequest = 0xBCD7E0;
 // UserBase 短 IsAlertMode — CanPerformAction callee；读 LocalUser+0x118
-constexpr uint32_t kRvaIsAlertMode = 0x124DE70;
+constexpr uint32_t kRvaIsAlertMode = 0x124DC50;
 // WorldManager.CanSendExclRequest — SendTransfer 发包前门控（BIN：未过则无 op=44）
-constexpr uint32_t kRvaCanSendExclRequest = 0xDF8BF0;
+constexpr uint32_t kRvaCanSendExclRequest = 0xDF8980;
 constexpr int kExclTypeTransferChannel = 500;  // SendTransfer 传入的 type（常量解混淆）
 
 constexpr char kFieldClass[] =
-    "d429ae6163df40f44c0a05b47476a77d055cde7b46a34870d3911305a12fcab";
+    "abb895b02ae65d2a1aa33910b7c654d1137ec50f28de45896061822e7745311";
 // UserBase（短 IsAlertMode 宿主；非 UserLocal）
 constexpr char kUserAlertClass[] =
-    "d5a59751c9ecba4a21314526d7fbe8142abe3ee8b90e8d03a7fc2f80f669add";
+    "a484ffac0ec2820f7d3cb62ddd233330e4c2613af7446a96b81d316db06bc44";
 constexpr char kHashSendTransfer[] =
-    "edb251e3572c82452fadb3ecfcce16b1d2ccd7d4d9c1673087d0589ccff30bb";
+    "c6a800b39a433a273cfff7db8e992758cfc043f2fc057bf1865a56f5d311dd5";
 constexpr char kHashIsAlertMode[] =
-    "a9e101249890ed3f99c5e6a5d37bff8b74311409454a8a63b4f0acf2d18af77";
+    "e757c4c413f82f697bee6ed0b780bbd3ef58512dbbec1f4f99ffd4cc759b1bf";
 constexpr char kHashCanSendExcl[] =
-    "d6f814b77b2e585f9a5ab688f1de130f84393ddfaea7a0c4f5c664f21907941";
+    "dfd38249ceafcba4fdfb0a5ec33e43d27045e6fa44d4afee959f99c93f978d9";
 
 // WorldManager 字段 Hint（docs + 08-04 dump 复核）；运行时 field_hash 覆盖
 // SendTransferChannelRequest(int nIdx)：0-based；游戏 UI「ch.N」= nIdx+1。
@@ -77,21 +78,21 @@ constexpr size_t kOffWmExclACHint = 0xAC;
 
 // WM 字段哈希（08-04 dump；backing 用内嵌 hash，strstr 匹配）
 constexpr char kHashWmChannelId[] =
-    "<c51604054cc7ad76b6b2f590035bed0a0466be80bbc7db8c43e273170511a1b>k__BackingField";
+    "<b58795eccc13956bb4ded56c32c64ae90a654bc59ce192cf79b0330c7ebdf39>k__BackingField";
 constexpr char kHashWmChannelAlt[] =
-    "<f66bc3e68a4b2e2c339f81ef490d91330a62181e9809c84c9649e695e7e4ca3>k__BackingField";
+    "<fcd86899698d9aeacdf5f49df5392c0f00851ec7cb59f50dfc5b1f7fb938bbb>k__BackingField";
 constexpr char kHashWmAdultChannel[] =
-    "b15fa3c69f55f45cdece3e5dd589cd1bd37927ab3efb55d75ecc0559d11832e";
+    "de689693724d5df8f7332c53284fd4959b96adc893e091d3a0f5ee46d34473c";
 constexpr char kHashWmExclA0[] =
-    "d7de0008cca41bae9ab7d58195a0659b38558c4711977cf63866141cba011d5";
+    "f73a7e4220891ae9bba9a4bdbb80132082f0b9f30887313fc5e5341d46fa842";
 constexpr char kHashWmExclA4[] =
     "ce49f7df7cdeaf874359c6a99dcc9b8aed11e4841a83c8a71e9889ed6392f7f";
 constexpr char kHashWmExclA8[] =
-    "e21870ea78807678dd120b297761140bd30f97850abfc5173702fcf295a61fc";
+    "fb1b8b21ee9f55af591345f68ee7733de856b7a29f59d0fb702a0809f80f1a5";
 constexpr char kHashWmExclA9[] =
-    "e5d7f47071cd07a92575a209fbef80a8901d92d1bd1d05eec4bc708ad923c97";
+    "cdc289634221a09c24eaae2df778209d35e24c3e7a0f104556079fc47e7979b";
 constexpr char kHashWmExclAC[] =
-    "c978ce2e222619ab9bc95c7a064fe8d8ffccb783e0a4b77bd3b0135f45745f5";
+    "e52423b38196522663224e03ea790471e7c0df66c4af48f38bab145bb703ccc";
 
 size_t gOffWmChannelId = kOffWmChannelIdHint;
 size_t gOffWmChannelAlt = kOffWmChannelAltHint;
@@ -119,8 +120,8 @@ constexpr DWORD kObserveWmJobMs = 400;       // 仅两字段，短超时；失�
 constexpr DWORD kWaitMigrateMs = 12000;
 constexpr DWORD kWaitAlertMs = 20000;       // 警戒解除最长等待
 constexpr DWORD kWaitExclMs = 20000;        // excl 独占解除最长等待
-constexpr DWORD kPreFireSettleMs = 4000;    // 提速：6.5s→4s（BIN 0.1.39：3s 仍踢；介于 3～6.5）
-constexpr DWORD kPostAlertGraceMs = 1500;   // 脱战后额外稍等（与 PreFire 取较晚者）
+constexpr DWORD kPreFireSettleMs = 800;     // 立马响应：4s→0.8s（BIN 曾 3s 仍踢；脏断风险自负）
+constexpr DWORD kPostAlertGraceMs = 800;    // 与 PreFire 对齐，脱战后不另拖 1.5s
 constexpr DWORD kFireIdleTimeoutMs = 2000;  // WaitFireIdle 上限（排空在途攻击键）
 constexpr DWORD kFireIdleSettleMs = 400;    // 末次开火后再静默
 // 必须与 PreFire 同窗。BIN a164e3：settle=4s 但 ForceCd 仍 6.5s → tpCdRem≈2.5s 拖满旧体感。
@@ -218,8 +219,9 @@ int KnownDisp1Based() {
 
 // 把 known 推到 auto_enter sticky（遇人换频后 soft 必须粘新频，不能只靠进图 Done）。
 void PushStickyFromKnown(const char* why) {
-    const int ch1 = KnownDisp1Based();
-    if (ch1 > 0) auto_enter::NoteStickyChannel(ch1, why);
+    // sticky 与 SelectChannel / WM+0x6C 同口径（0-based 列表 id）。BIN 08-15：id=39 时 UI 为 40。
+    if (gKnownChannelIdx >= 1 && gKnownChannelIdx <= 64)
+        auto_enter::NoteStickyChannel(gKnownChannelIdx, why);
 }
 
 struct JobCtx {
@@ -900,31 +902,36 @@ void MaybeObserveNativeChannel(DWORD now) {
     if (!RunObserveJob(job)) return;  // 超时/失败：不重试刷泵
 
     if (job.channelId < 0) return;
-    const int sticky1 = auto_enter::StickyChannel1Based();
-    // BIN 02:30：Done sync known 后 Login 清 known；冷读 wm6c=N（与 sticky ch.N 同号）
-    // 被当成 0-based → DispCh → sticky N→N+1。raw==sticky 时按「进图回声/1-based」吞掉。
-    if (sticky1 > 0 && job.channelId == sticky1) {
-        gKnownChannelIdx = sticky1 - 1;
-        Log("native_wm keep sticky ch.%d (raw=%d==sticky src=%s raw6c=%d raw68=%d)", sticky1,
-            job.channelId, job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
+    const int stickyApi = auto_enter::StickyChannel1Based();
+    // BIN 08-15：sticky/raw6c=39，玩家 UI=40。两者都是 0-based 列表 id，不是 ch.N。
+    if (stickyApi > 0 && job.channelId == stickyApi) {
+        gKnownChannelIdx = job.channelId;
+        Log("native_wm keep sticky id=%d ui=%d (src=%s raw6c=%d raw68=%d)", stickyApi,
+            DispCh(stickyApi), job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
             job.channelRaw68);
         return;
     }
-    if (sticky1 > 0 && DispCh(job.channelId) == sticky1) {
-        gKnownChannelIdx = job.channelId;
+    if (gKnownChannelIdx == job.channelId) {
+        PushStickyFromKnown("native_wm");
         return;
     }
-    if (gKnownChannelIdx == job.channelId) {
-        // known 已对齐：仍推 sticky（进图 Done 后 known 可能晚于 sticky，或 sticky 被冷启覆盖）
-        PushStickyFromKnown("native_wm");
+    if (stickyApi <= 0) {
+        if (job.channelId >= 1 && job.channelId <= 64) {
+            gKnownChannelIdx = job.channelId;
+            Log("native_wm cold id=%d ui=%d (src=%s raw6c=%d raw68=%d)", job.channelId,
+                DispCh(job.channelId), job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
+                job.channelRaw68);
+            auto_enter::NoteStickyChannel(job.channelId, "native_wm_cold");
+        }
         return;
     }
     const int from = gKnownChannelIdx;
     gKnownChannelIdx = job.channelId;
-    Log("native_wm ch %d→%d (src=%s raw6c=%d raw68=%d) — sticky", DispCh(from),
-        DispCh(job.channelId), job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
+    Log("native_wm id %d→%d ui %d→%d (src=%s raw6c=%d raw68=%d) — sticky", from, job.channelId,
+        DispCh(from), DispCh(job.channelId), job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
         job.channelRaw68);
-    auto_enter::NoteStickyChannel(DispCh(job.channelId), "native_wm");
+    if (job.channelId >= 1 && job.channelId <= 64)
+        auto_enter::NoteStickyChannel(job.channelId, "native_wm");
 }
 
 bool SoftAvoidActive(int id, DWORD now) {
@@ -1229,8 +1236,8 @@ void Fail(const char* why) {
 // 迁频超时仍黑屏：粘 sticky + 拉 soft_login（已 Connected 则 dismiss+RequestRestart；
 // 仍不回图则 soft 失败交守护）。soft_login 未开则只记 sticky。
 void RecoverMigrateTimeout(const char* why) {
-    if (gTargetChannel >= 0) {
-        auto_enter::NoteStickyChannel(DispCh(gTargetChannel), why);
+    if (gTargetChannel >= 0 && gTargetChannel <= 64) {
+        auto_enter::NoteStickyChannel(gTargetChannel, why);
     }
     if (!soft_login_probe::IsArmed()) {
         Log("soft recover skip: soft_login not armed (%s)", why ? why : "?");
@@ -1293,10 +1300,10 @@ void SettleOk(const char* how, int curIdx, DWORD now) {
         snprintf(body, sizeof(body), "ch.%d → ch.%d", DispCh(gFromChannel), DispCh(shownToIdx));
     }
     Notify(notify::NotificationKind::Info, "manual-rejoin-ok", "随机换频成功", body);
-    // sticky 用 UI 口径 ch.N（1-based），与 auto_enter Pick 一致；仅 soft 重连时消费。
+    // sticky 与 SelectChannel 同口径（0-based 列表 id）；UI 显示再 +1。
     {
-        const int sticky1 = DispCh(gKnownChannelIdx >= 0 ? gKnownChannelIdx : shownToIdx);
-        if (sticky1 > 0) auto_enter::NoteStickyChannel(sticky1, "channel_hop");
+        const int api = gKnownChannelIdx >= 0 ? gKnownChannelIdx : shownToIdx;
+        if (api >= 1 && api <= 64) auto_enter::NoteStickyChannel(api, "channel_hop");
     }
     FinishActive(kCooldownAfterOkMs, now);
 }
@@ -1786,20 +1793,27 @@ void TickWaiting(DWORD now) {
 
 int LastKnownChannel1Based() { return KnownDisp1Based(); }
 
+int DisplayChannel1Based() {
+    // 玩家 UI = 列表 id / WM+0x6C + 1。BIN 08-15：sticky=39 raw6c=39 → 頻道 40。
+    const int api = auto_enter::StickyChannel1Based();
+    if (api > 0) return api + 1;
+    return KnownDisp1Based();
+}
+
 void SyncKnownAfterEnter(int channelId1Based, const char* why) {
     if (channelId1Based < 1 || channelId1Based > 64) return;
-    const int idx = channelId1Based - 1;
+    const int idx = channelId1Based;
     const int prev = gKnownChannelIdx;
     gKnownChannelIdx = idx;
     // 清前进基线：下一拍 ObserveWm 走 known，勿把进图后 +0x6C 抖动当 wm6c_adv。
     gLastRaw68 = -999;
     gLastRaw6c = -999;
     if (prev != idx) {
-        Log("sync known after enter %d→%d (ch.%d) why=%s — wm baseline reset", prev, idx,
-            channelId1Based, why ? why : "?");
+        Log("sync known after enter %d→%d (ui=%d) why=%s — wm baseline reset", prev, idx,
+            DispCh(idx), why ? why : "?");
     } else {
-        Log("sync known after enter keep idx=%d (ch.%d) why=%s — wm baseline reset", idx,
-            channelId1Based, why ? why : "?");
+        Log("sync known after enter keep idx=%d (ui=%d) why=%s — wm baseline reset", idx,
+            DispCh(idx), why ? why : "?");
     }
 }
 
@@ -1885,6 +1899,12 @@ void Shutdown() { StopWorker(); }
 
 void RequestManualRejoin(uint32_t seq) {
     if (seq == 0) return;
+    // 超级赶路中禁止新换频：PauseCombatForHop 会 ForceNativeCooldown 4s，贴门 ↑ 吃不到门
+    // （BIN 06:04：enter-armed 同拍 hop → kbd Up timeout + fake soft）。
+    if (x::features::travel::IsActive()) {
+        Log("request skip seq=%u travel active", seq);
+        return;
+    }
     // BIN 0.1.37：request→BeginActive 可隔数十 ms，其间仍 fire/MoveTo。边沿立刻硬闸停刀。
     // 无敌留到 BeginActive，避免 defer（测谎/进图）久等无无敌。
     PauseCombatForHop(/*holdInvuln=*/false);
@@ -1953,8 +1973,8 @@ void Tick(DWORD now) {
                 // 否则随后冷读 wm6c=sticky → DispCh 把 sticky +1（BIN 02:30 ch.6→7）。
                 const int st = auto_enter::StickyChannel1Based();
                 if (st > 0) {
-                    gKnownChannelIdx = st - 1;
-                    Log("login clear keep known from sticky ch.%d → idx=%d", st, gKnownChannelIdx);
+                    gKnownChannelIdx = st;
+                    Log("login clear keep known from sticky id=%d ui=%d", st, DispCh(st));
                 } else {
                     gKnownChannelIdx = -1;
                 }

@@ -9,6 +9,7 @@
 #include "../common/xcat_config_ini.h"
 #include "../common/xcat_log.h"
 #include "../common/xcat_payload_status.h"
+#include "../common/xcat_start_gate.h"
 #include "../common/xcat_version.h"
 
 #include <Windows.h>
@@ -148,6 +149,8 @@ struct HttpResult {
     DWORD status = 0;
     std::string body;
     std::string err;
+    // extraHeaders 整块或逐行都加上了才为 true；失败时请求仍会发出，只是身份头可能缺失。
+    bool headersOk = true;
 };
 
 struct Manifest {
@@ -337,6 +340,37 @@ std::string UrlWithHost(const ParsedUrl& url, const std::string& host) {
     return out;
 }
 
+// 先整块加头；失败再按行加。以前忽略返回值，加头失败时身份头（含派生凭证）会整段丢光。
+bool AddRequestHeadersBlock(HINTERNET req, const wchar_t* extraHeaders) {
+    if (!req || !extraHeaders || !extraHeaders[0]) return true;
+    if (WinHttpAddRequestHeaders(req, extraHeaders, static_cast<DWORD>(-1),
+                                 WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) {
+        return true;
+    }
+    const DWORD bulkGle = GetLastError();
+    xcat::log::Warn("Update", "WinHttpAddRequestHeaders bulk gle=%lu; retry per-line",
+                    static_cast<unsigned long>(bulkGle));
+    bool allOk = true;
+    const std::wstring all = extraHeaders;
+    size_t start = 0;
+    while (start < all.size()) {
+        size_t end = all.find(L"\r\n", start);
+        if (end == std::wstring::npos) end = all.size();
+        std::wstring line = all.substr(start, end - start);
+        start = (end == all.size()) ? end : end + 2;
+        while (!line.empty() && (line.back() == L'\r' || line.back() == L'\n')) line.pop_back();
+        if (line.empty()) continue;
+        line += L"\r\n";
+        if (!WinHttpAddRequestHeaders(req, line.c_str(), static_cast<DWORD>(-1),
+                                      WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE)) {
+            allOk = false;
+            xcat::log::Warn("Update", "WinHttpAddRequestHeaders line gle=%lu",
+                            static_cast<unsigned long>(GetLastError()));
+        }
+    }
+    return allOk;
+}
+
 HttpResult HttpGetTextOnce(const ParsedUrl& url, DWORD accessType, const char* mode,
                            const wchar_t* extraHeaders, int resolveMs = 8000, int connectMs = 8000,
                            int sendMs = 15000, int receiveMs = 20000) {
@@ -359,8 +393,7 @@ HttpResult HttpGetTextOnce(const ParsedUrl& url, DWORD accessType, const char* m
         result.err = WinHttpFailure("WinHttpOpenRequest", GetLastError(), mode);
     } else {
         if (extraHeaders && extraHeaders[0]) {
-            WinHttpAddRequestHeaders(req, extraHeaders, static_cast<DWORD>(-1),
-                                     WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+            result.headersOk = AddRequestHeadersBlock(req, extraHeaders);
         }
         if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
                                 0)) {
@@ -1500,12 +1533,33 @@ struct AccessContactResult {
     std::string mode;
     std::string key;
     std::string detail;
+    std::string uid;
+    // 本轮请求头里带上了 X-XCat-Gate-Proof，且 WinHTTP 加头成功。
+    // 没发出去时回包无 uid 不能当成「卡不在台账」。
+    bool sentGateProof = false;
     // OPS 下发的拉取日志命令（经 access.json 捎带）
     std::string pendingOp;
     std::string pendingId;
     std::string pendingMode;
     std::string pendingNote;
 };
+
+// 仅启动线程上的 gate/2、gate/3 同步探活写入。ForcePoll 不得碰：否则会和确认逻辑抢结果。
+struct StartupAccessProbe {
+    bool have = false;
+    AccessContactKind kind = AccessContactKind::Unreachable;
+    std::string uid;
+    bool sentGateProof = false;
+};
+StartupAccessProbe g_startupAccessProbe;
+
+void NoteStartupAccessProbe(const AccessContactResult& ac) {
+    g_startupAccessProbe.have = true;
+    g_startupAccessProbe.kind = ac.kind;
+    g_startupAccessProbe.uid = ac.uid;
+    g_startupAccessProbe.sentGateProof = ac.sentGateProof;
+}
+
 AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
                                         const std::string& payloadBinDir, bool quick);
 bool ClearAccessDenySticky(const std::string& payloadBinDir);
@@ -1515,6 +1569,9 @@ bool WriteOnlineLease(const std::string& payloadBinDir);
 bool ClearOnlineLease(const std::string& payloadBinDir);
 void RequestExitForDeviceAccessDeny(const std::string& reason, const std::string& mode,
                                     bool fromSticky);
+std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
+                                        const char* payloadBinDir,
+                                        bool* sentGateProofOut = nullptr);
 
 std::string ResolveDownloadUrl(const std::string& manifestUrl, const Manifest& m) {
     ParsedUrl parsed{};
@@ -1530,15 +1587,15 @@ std::string ResolveDownloadUrl(const std::string& manifestUrl, const Manifest& m
 
 void CheckWorker(std::string serviceUrl) {
     // 手动检查时顺带探活：解禁后清残留粘性；仍 Denied 则给明确文案（避免只看到「连不上更新口」）。
+    const std::string prefsHint = []() -> std::string {
+        // CheckWorker 无 payloadBinDir 参数；用 exe 旁 XCat_data（与主程序 prefs 一致）。
+        wchar_t mod[MAX_PATH]{};
+        if (!GetModuleFileNameW(nullptr, mod, MAX_PATH)) return {};
+        std::filesystem::path p(mod);
+        p = p.parent_path() / L"XCat_data";
+        return xcat::WideToUtf8(p.wstring());
+    }();
     {
-        const std::string prefsHint = []() -> std::string {
-            // CheckWorker 无 payloadBinDir 参数；用 exe 旁 XCat_data（与主程序 prefs 一致）。
-            wchar_t mod[MAX_PATH]{};
-            if (!GetModuleFileNameW(nullptr, mod, MAX_PATH)) return {};
-            std::filesystem::path p(mod);
-            p = p.parent_path() / L"XCat_data";
-            return xcat::WideToUtf8(p.wstring());
-        }();
         if (!serviceUrl.empty() && !prefsHint.empty()) {
             const AccessContactResult ac =
                 ContactDeviceAccess(serviceUrl, prefsHint, /*quick=*/true);
@@ -1562,7 +1619,9 @@ void CheckWorker(std::string serviceUrl) {
         return;
     }
     xcat::log::Info("Update", "check begin manifest=%s", manifestUrl.c_str());
-    const HttpResult resp = HttpGetText(manifestUrl);
+    const ClientHostIdentity id = ResolveClientHostIdentity(prefsHint);
+    const std::wstring identityHeaders = BuildClientIdentityHeaders(id, prefsHint.c_str());
+    const HttpResult resp = HttpGetText(manifestUrl, identityHeaders.c_str());
     if (!resp.err.empty()) {
         xcat::log::Warn("Update", "check failed manifest=%s err=%s", manifestUrl.c_str(),
                         resp.err.c_str());
@@ -2192,7 +2251,8 @@ void RequestExitForOnlineLeaseRequired(const char* detail) {
 }
 
 std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
-                                        const char* payloadBinDir) {
+                                        const char* payloadBinDir, bool* sentGateProofOut) {
+    if (sentGateProofOut) *sentGateProofOut = false;
     auto sanitizeHdrLen = [](std::wstring s, size_t maxLen) {
         for (wchar_t& ch : s) {
             if (ch == L'\r' || ch == L'\n' || ch == L'\0') ch = L'_';
@@ -2235,7 +2295,13 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
         }
         return xcat::Utf8ToWide(b64);
     };
-    wchar_t identityHeaders[1024]{};
+    auto appendHdr = [](std::wstring& dst, const wchar_t* name, const std::wstring& value) {
+        if (value.empty()) return;
+        dst += name;
+        dst += L": ";
+        dst += value;
+        dst += L"\r\n";
+    };
     char ver[64]{};
     std::snprintf(ver, sizeof(ver), "%s build %u", xcat::kXcatVersionString, xcat::kXcatBuildId);
     const std::wstring machineW = sanitizeHdr(xcat::Utf8ToWide(id.machine));
@@ -2249,11 +2315,38 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
     }
     const std::wstring macW = sanitizeHdr(xcat::Utf8ToWide(macJoined));
     const std::wstring passW = sanitizeHdr(xcat::Utf8ToWide(id.token));
-    _snwprintf(identityHeaders, 1024,
-               L"X-XCat-Machine: %s\r\nX-XCat-Device-Id: %s\r\nX-XCat-App-Version: %s\r\n"
-               L"X-XCat-Mac: %s\r\nX-XCat-Token: %s\r\n",
-               machineW.c_str(), deviceW.c_str(), verW.c_str(), macW.c_str(), passW.c_str());
-    std::wstring out = identityHeaders;
+    std::wstring out;
+    appendHdr(out, L"X-XCat-Machine", machineW);
+    appendHdr(out, L"X-XCat-Device-Id", deviceW);
+    appendHdr(out, L"X-XCat-App-Version", verW);
+    appendHdr(out, L"X-XCat-Mac", macW);
+    appendHdr(out, L"X-XCat-Token", passW);
+
+    // gate/1 激活凭证：供服务端取可信 uid，做台数配额 + 运维按人识别（背包金/运行）。
+    // 发派生凭证而非整张卡：更新口是明文 HTTP，整张卡一旦被抓包就等于把这个人的卡送出去。
+    // 派生凭证绑定 ts + 本机 deviceId，出窗即废；卡的签名段留在本机，永不上网。
+    if (payloadBinDir && payloadBinDir[0]) {
+        const long long nowSec = static_cast<long long>(::time(nullptr));
+        const std::string proof = xcat::gate::BuildGateProof(payloadBinDir, id.deviceId, nowSec);
+        // 算 mac 用的是原始 id.deviceId，服务端拿的是 X-XCat-Device-Id 头（清洗只动 \r\n\0、
+        // 上限 96/服务端 64）。deviceId 是 36 字符 UUID 故两边逐字节相同；若哪天改了 deviceId
+        // 格式（变长或掺入控制字符），mac 会静默验不过，表现为「这个成员莫名没 uid」。
+        //
+        // 凭证不能截断后再发：切掉尾巴的 mac 必然验不过，而客户端毫无察觉。宁可不发（降级为无 uid）。
+        if (proof.empty()) {
+            const std::string cached =
+                xcat::gate::LoadActivatedGateToken(payloadBinDir, id.deviceId);
+            if (!cached.empty()) {
+                xcat::log::Warn("Auth", "gate proof empty despite cached token");
+            }
+        } else if (proof.size() > 400) {
+            xcat::log::Warn("Auth", "gate proof too long n=%zu; not sending", proof.size());
+        } else {
+            appendHdr(out, L"X-XCat-Gate-Proof",
+                      sanitizeHdrLen(xcat::Utf8ToWide(proof), 400));
+            if (sentGateProofOut) *sentGateProofOut = true;
+        }
+    }
 
     // 角色/地图/频道：DLL→PayloadStatus SHM；新鲜才带上头（未进图不覆盖服务端旧值）。
     if (payloadBinDir && payloadBinDir[0]) {
@@ -2294,18 +2387,23 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
             }
             if (st.mapId > 0 || st.channelId > 0) {
                 char mapIdBuf[16]{};
-                char chBuf[16]{};
                 std::snprintf(mapIdBuf, sizeof(mapIdBuf), "%u", st.mapId);
-                std::snprintf(chBuf, sizeof(chBuf), "%d", st.channelId);
                 const std::wstring mapIdW = sanitizeHdr(xcat::Utf8ToWide(mapIdBuf));
-                const std::wstring chW = sanitizeHdr(xcat::Utf8ToWide(chBuf));
                 const std::wstring mapNameW =
                     sanitizeHdrLen(utf8ToB64Hdr(st.currentMapName), 160);
                 wchar_t mapHeaders[512]{};
-                _snwprintf(mapHeaders, 512,
-                           L"X-XCat-Map-Id: %s\r\nX-XCat-Map-Name: %s\r\n"
-                           L"X-XCat-Channel: %s\r\n",
-                           mapIdW.c_str(), mapNameW.c_str(), chW.c_str());
+                if (st.channelId > 0) {
+                    char chBuf[16]{};
+                    std::snprintf(chBuf, sizeof(chBuf), "%d", st.channelId);
+                    const std::wstring chW = sanitizeHdr(xcat::Utf8ToWide(chBuf));
+                    _snwprintf(mapHeaders, 512,
+                               L"X-XCat-Map-Id: %s\r\nX-XCat-Map-Name: %s\r\n"
+                               L"X-XCat-Channel: %s\r\n",
+                               mapIdW.c_str(), mapNameW.c_str(), chW.c_str());
+                } else {
+                    _snwprintf(mapHeaders, 512, L"X-XCat-Map-Id: %s\r\nX-XCat-Map-Name: %s\r\n",
+                               mapIdW.c_str(), mapNameW.c_str());
+                }
                 out += mapHeaders;
             }
         }
@@ -2342,7 +2440,9 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
     const std::string accessUrl =
         parsed.origin + UpdateAccessPathFromServicePath(xcat::WideToUtf8(parsed.path));
     const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
-    std::wstring headers = BuildClientIdentityHeaders(id, payloadBinDir.c_str());
+    bool sentGateProof = false;
+    std::wstring headers =
+        BuildClientIdentityHeaders(id, payloadBinDir.c_str(), &sentGateProof);
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
         if (!g_state.logFetchDoneId.empty()) {
@@ -2366,6 +2466,7 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
     }
     const HttpResult access =
         quick ? HttpGetTextQuick(accessUrl, headers.c_str()) : HttpGetText(accessUrl, headers.c_str());
+    out.sentGateProof = sentGateProof && access.headersOk;
     if (access.err.empty() && access.status == 200) {
         out.pendingOp = JsonString(access.body, "pendingOp");
         out.pendingId = JsonString(access.body, "pendingId");
@@ -2376,6 +2477,7 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
                             access.body.find("\"allowed\": false") != std::string::npos;
         const bool allowed = access.body.find("\"allowed\":true") != std::string::npos ||
                              access.body.find("\"allowed\": true") != std::string::npos;
+        out.uid = JsonString(access.body, "uid");
         if (denied) {
             out.kind = AccessContactKind::Denied;
             out.reason = JsonString(access.body, "reason");
@@ -2649,6 +2751,10 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
 }
 
 }  // namespace
+
+void ClearStartupAccessProbe() {
+    g_startupAccessProbe = {};
+}
 
 std::string UpdateManifestUrlFromServiceUrl(const std::string& serviceUrl) {
     ParsedUrl parsed{};
@@ -2933,6 +3039,7 @@ bool EnforceStickyDeviceAccessOnStartup(const std::string& serviceUrl,
             xcat::log::Warn("Update", "startup sticky netchk q miss; netchk full");
             ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
         }
+        NoteStartupAccessProbe(ac);
         if (ac.kind == AccessContactKind::Allowed) {
             g_sessionAccessDeny.store(false, std::memory_order_release);
             (void)ClearAccessDenySticky(payloadBinDir);
@@ -2991,6 +3098,7 @@ bool EnforceOnlineLeaseGateOnStartup(const std::string& serviceUrl,
         xcat::log::Warn("Update", "startup netchk q miss; netchk full");
         ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
     }
+    NoteStartupAccessProbe(ac);
     if (ac.kind == AccessContactKind::Denied) {
         (void)WriteAccessDenySticky(payloadBinDir, ac.reason, ac.mode, ac.key);
         (void)ClearOnlineLease(payloadBinDir);
@@ -3023,6 +3131,44 @@ bool EnforceOnlineLeaseGateOnStartup(const std::string& serviceUrl,
 
     RequestExitForOnlineLeaseRequired(ac.detail.empty() ? "net miss" : ac.detail.c_str());
     return true;
+}
+
+static bool MissingUidMeansBadCard(AccessContactKind kind, const std::string& uid,
+                                   bool sentGateProof) {
+    if (kind != AccessContactKind::Allowed) {
+        xcat::log::Info("Auth", "gate/1 skip uid confirm (sync probe not allowed)");
+        return false;
+    }
+    if (!uid.empty()) {
+        xcat::log::Info("Auth", "gate/1 server recognized uid=%s", uid.c_str());
+        return false;
+    }
+    if (!sentGateProof) {
+        // 头没发出去时回包本来就没有 uid，不能当成「卡不在台账」清缓存。
+        xcat::log::Warn("Auth", "gate/1 skip uid confirm (proof not sent)");
+        return false;
+    }
+    xcat::log::Warn("Auth", "gate/1 server did not recognize card; force re-activate");
+    return true;
+}
+
+bool StartupCardUnrecognizedByServer(const std::string& serviceUrl,
+                                     const std::string& payloadBinDir,
+                                     bool probeIfNoSnapshot) {
+    if (g_startupAccessProbe.have) {
+        return MissingUidMeansBadCard(g_startupAccessProbe.kind, g_startupAccessProbe.uid,
+                                      g_startupAccessProbe.sentGateProof);
+    }
+    // 租约仍有效：本轮没有同步探活。启动不额外堵网（服关掉时会卡在「确认激活」数十秒）。
+    if (!probeIfNoSnapshot) {
+        xcat::log::Info("Auth", "gate/1 skip uid confirm (lease, no sync probe)");
+        return false;
+    }
+    if (serviceUrl.empty() || payloadBinDir.empty()) return false;
+    const AccessContactResult ac =
+        ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/true);
+    NoteStartupAccessProbe(ac);
+    return MissingUidMeansBadCard(ac.kind, ac.uid, ac.sentGateProof);
 }
 
 UpdateSnapshot GetUpdateSnapshot() {

@@ -33,12 +33,13 @@ const char* GetStateName();
 bool HasPending();
 // 成功/失败冷却剩余 ms；0=可立刻再 hop（遇人策略对齐用）
 DWORD CooldownRemainingMs();
-// 上次成功换频 / 图内读到的频道（UI 口径 ch.N，1-based）；未知返回 0。
-// soft_login RequestRestart 前同步 sticky，避免遇人换频后仍粘进图旧频。
+// 上次成功换频 / 图内读到的频道（玩家 UI ch.N = 列表 id + 1）；未知返回 0。
 int LastKnownChannel1Based();
+// 给人看的 ch.N：sticky 列表 id + 1，否则 LastKnown；未知 0。禁止把 0 画成频道。
+int DisplayChannel1Based();
 
-// auto_enter 进图 Done：用选中频（1-based）写 known，并重置 WM 前进基线。
-// BIN 02:12：soft 进图后 ObserveWm 把 +0x6C 瞬态当成 wm6c_adv → sticky N→N+1。
+// auto_enter 进图 Done：参数是 SelectChannel / WM+0x6C 列表 id（不是 UI ch.N）。
+// 内部 known 与该 id 对齐；UI = id+1。BIN 08-15：id=39 → 頻道 40。
 void SyncKnownAfterEnter(int channelId1Based, const char* why);
 
 // 遇人策略即将换频：把当前频记入「本图短期软拉黑」（落地仍有人 → 优先别再抽回）。

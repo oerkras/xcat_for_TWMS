@@ -2,6 +2,7 @@
 // drop_pool_port — Classic TWMS DropPool 只读 + 宠物吸物 + 角色脚边拾取
 // 真源：docs/features/pet_loot/P0a_锚点复核.md
 // 宠吸：.rdata 矩形包 → Pet.TryPickUpDrop → ByPet → Pet.Send（禁止手组包 / 改 GA .text）
+// 变态宠吸：启用时写一次 .rdata 真空尺寸，关掉还原原生 50×60；不投泵调 ByPet
 // 脚下：只自动触发原生 DropPool.TryPickUpDrop(userPos)；不盖戳、不清闸、不扩盒
 
 #include <cstdint>
@@ -173,6 +174,29 @@ bool CollectProbe(ProbeSnapshot& out, float nearHalfW, float nearHalfH);
 bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumResult& out,
                   bool highValuePriority = false);
 
+// 变态宠吸：常驻写入 ByPet .rdata（GUI 真空宽高）。尺寸未变则 no-op。
+// 不调 TryPickUpDrop。失败（未定位矩形包 / VirtualProtect）返回 false。
+bool HoldByPetRectPack(float vacuumW, float vacuumH);
+// 还原原生 25/10 + 50×60 并恢复页保护。未 hold 则 no-op。
+void ReleaseByPetRectPack();
+
+// 出刀让路 / 堵泵时不调 ByPet，但仍盖黑名单戳（LastTry+EndPara）并尽量同步 ExceptionList。
+// 纯内存读写，worker 可调。挡住原生脚边 50x60 在真空暂停时把箭矢舔走。
+// 落地当帧：EnsureBound 会给 Pet.TryPickUpDrop 换 MI，原生宠 Tick 进钩后再盖戳（早于 E8 ByPet）。
+// 人吸/脚下/拾物关闭同样要 PublishLiveSkip；原生宠不看面板档位。
+// 返回本拍新盖戳数。
+int HoldSkipDrops(const SkipIds* skipIds, float halfW, float halfH);
+
+// 掉落落地加速（独立开关，默认关）。纯内存写，worker 可调。不改 GA .text。
+// snapLand：EndPara∈{0,1,2} 且 PickPt 非 (0,0) → Pt1=PickPt、EndPara=3、LastTry=0。
+//           必须跟位置；禁止只写 EndPara=3。禁写 EndPara=0。
+// accelFall：同态加大 LastTry（t=LastTry/1000）；两勾都开时瞬落优先。
+// skipIds：黑名单件禁止写成 Ready(3)。瞬落时跟位置并盖 SkipHold(4)+INT_MAX，
+//          否则原生宠 E8 不进 TryPick MI，40ms 盖戳来不及会把箭矢舔走。
+//          itemId 尚未写出的非金币件也不瞬落/加速（避免未识别箭矢被捡）。
+int BoostDropFall(bool snapLand, bool accelFall, const SkipIds* skipIds = nullptr,
+                  int* outSnap = nullptr, int* outAccel = nullptr, int* outSkipHold = nullptr);
+
 // 纯内存扫池：宠真空 ∩ 角色半盒内是否有「栏未满」的装备/卷軸（与 Send 同口径；worker 可调）
 // 失败 / 无角色位 → false（调用方应 fail-closed 清 urgent）
 // 可选 outSample*：首件可吸 HV 的 dropId/itemId/kind(1装备/2卷)
@@ -183,11 +207,17 @@ bool PeekHighValueActionable(float petX, float petY, float halfW, float halfH, c
 struct HighValueDropAlert {
     int dropId = 0;
     int itemId = 0;
-    int kind = 0;  // 1=装备 2=卷軸（与 ClassifyHighValueItem 一致）
+    int kind = 0;  // 1=装备 2=卷軸 3=雷之鏢（与 ClassifyHighValueItem 一致）
 };
 
-// 全图扫池：新出现的可捡卷軸（按 dropId 去重；换 DropPool 清空）。装备不进提示。
+// 雷之鏢 2070005：消耗栏飞镖；提醒 + 高价值优先吸。不是 1xxxxxx 装备，也不是 204 卷。
+constexpr int kThunderDartItemId = 2070005;
+
+// 全图扫池：新出现的可捡卷軸 / 雷之鏢（按 dropId 去重；换 DropPool 清空）。其它装备不进提示。
 int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut);
+
+// 已叮咚过的卷軸/雷之鏢从池里消失（换池不清，避免进图误报拾取成功）。
+int CollectGoneHighValueDrops(HighValueDropAlert* out, int maxOut);
 
 // 主线程：仅 DropPool.TryPickUpDrop(角色位)；范围/门禁全交给游戏原生
 bool TryFootPickup(FootResult& out);

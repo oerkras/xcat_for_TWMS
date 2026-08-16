@@ -47,4 +47,7 @@ bool FindAndUseByItemId(int itemId, FindResult& out);
 bool UseStatChangeItem(const FindResult& fr);
 bool UseStatChangeItem(int nPos);
 
+// 扫栏 FindPotion 同源：MpRank>=0（纯蓝 + 双回）。食物/杂项不算蓝瓶。
+bool IsMpPotionItem(int itemId);
+
 }  // namespace x::features::ports::consumable

@@ -4,6 +4,7 @@
 // fill+Doing 已废；远处贴门旋翼滑翔，站稳后再进门。
 // 调试旁路：Up / CheckMove / DirectEnter（贴门+CheckMove，易断线）/ Rpc。禁止 AbsPos/Transform 硬写坐标。
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -41,7 +42,9 @@ bool EnsureBound();
 // 急切绑定 CheckMove / Rpc 等进门 API（无硬写坐标）。
 void Init();
 
+// 9 位 mapId。出生图 0 → "000000000"。无 MapData → 空串（不是把 0 当没进图）。
 std::string CurrentMapKey();
+// 当前 Field id。无 MapData → -1；出生图 → 0。
 int CurrentMapId();
 
 bool EnumPortals(std::string& outMapKey, std::vector<PortalInfo>& out);
@@ -60,5 +63,12 @@ bool IsCaptureEnabled();
 // 不含 AbsPos 硬写；fill+Doing 不再使用。
 bool FirePortalByName(const std::string& portalName, std::string& outResult);
 bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string& outResult);
+
+// 贴到站立点（假门）：与超级赶路同一套 Cruise→Station→hold 落地，不按 ↑、不进门。
+// portal.x/y + 可选触发框；成功时 outResult="STOOD" / "ALREADY"。
+bool StickToStand(const PortalInfo& portal, std::string& outResult);
+
+// 贴门抬升 px（AbsPos 更大 Y=更高）。调试 TAB「超级赶路」下发；末段/台下恢复/发门带空悬停共用。
+void SetPortalAimLiftY(uint32_t liftPx);
 
 }  // namespace x::features::ports::travel

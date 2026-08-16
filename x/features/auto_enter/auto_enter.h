@@ -21,16 +21,21 @@ bool IsDesired();
 // **仅该轮**优先粘 sticky（不可用则候选池随机，不就近/不偏人少）；
 // 频道 UI 已武装到 sticky 则跳过 SelectChannel 直 GoWorld。
 // worker 可调；下一拍 Tick 会进 WaitWorldList。
+// 若选角页已在（avatars>0 且 loginPhase=2），跳过频道 resume/GoWorld，直进选角。
 void RequestRestart(const char* why);
 
-// 记下「当前应粘回」的 1-based 频道（与 UI ch.N / auto_enter Pick 同口径）。
-// channel_hop 成功后调用；软重连 PickSticky 只在 softFast 且 sticky 仍空闲时消费。
+// 记下应粘回的频道：SelectChannel / 登录列表 ChannelId / WM+0x6C 同口径（不是 UI ch.N）。
+// BIN 08-15：id=39 时玩家看到 頻道 40。软重连 PickSticky 用此 id 调 SelectChannel。
 void NoteStickyChannel(int channelId1Based, const char* why);
-// 当前 sticky（UI ch.N）；未设置返回 0。
+// 当前 sticky（列表 id）；未设置返回 0。标题栏显示须 +1。
 int StickyChannel1Based();
 
 // 当前是否停在 Failed（软重进可据此早退，不必空等到 play-ready 超时）。
 bool IsFailed();
+
+// WaitCharSelect 相位超时次数（跨 RequestRestart 保留；进图 Done / 关自动进 清零）。
+// 软路径满 2 次先 CloseSession 再连；已拆过仍超时才 Finish(2)。
+int CharSelectTimeoutStreak();
 
 // 选角链路已收尾（Done）。软重进用来发现「Done 了但迟迟不 play-ready」的卡死，
 // 避免空等到 reenter_timeout（dcaf08：Done@01:16:21 → 仍 playReady=0 直到 01:18:11 fail）。

@@ -34,21 +34,21 @@ using x::runtime::il2cpp::ReadPtr;
 // 交叉：Mob TDI:1507；MobPool→Dictionary<int,Mob>@+0x10；字段偏移未漂（deadType@0x1B4 等）。
 // 误用其它 Map* 壳会通过 FindClass 但 ObjKlassIs 失败 → M/mapId 全废。
 constexpr char kMobPoolClass[] =
-    "b7d7dbe5c2e9c52fc9e44cfdec217eaabd92fad1b5159579f8dea98d6aabeae";
+    "d7149fc16969fb71084fcbbf282b1165ef1778b86b8b5e0f2984145af2bcf9c";
 constexpr char kMobClass[] =
-    "d8d3c81101a6fa89d05fe89ac3cfe1b8801c9afd67abd392d5637681410b92f";
+    "dd472cd442d83d6a25198278fa3e0a09d3a98a6db2e05d1b12d508d43db4cb5";
 constexpr char kMapDataClass[] =
-    "ae73c6f358ac48dd9bdcadbff6e6bf7991739ace4c41cc7d43e49afa5020905";
+    "dd4cd32d9aef89b376fffeab50e0a12fd9bae83dbecfb9ee663b0962b06f87b";
 // UIHpTag（dump 属性 "UIHpTag"；绝对 cur/max 缓存）
 constexpr char kUiHpTagClass[] =
-    "f2c79d60a8c6356f3d9574eebe9709d28543f382c885471d048761ed5ce8e4d";
+    "d262ca123c6942dd62c6c8c153d7fdafcc54de8155ee30008182d4a81cdf441";
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
 
 // MobPool
 constexpr size_t kFbPoolDict = 0x10;  // Dictionary<int,Mob>
 constexpr char kHashPoolDict[] =
-    "c40714b64720c353d5738c85cef4b5bf983f9b5858ea278f6df224935b67f37";
+    "dc73f061c2088f396c4d4e145efecc56e03a47a2cf8692b559701b05d4aefd8";
 size_t gOffPoolDict = kFbPoolDict;
 #define kOffPoolDict (gOffPoolDict)
 
@@ -56,33 +56,33 @@ size_t gOffPoolDict = kFbPoolDict;
 constexpr size_t kOffCachedPtr = 0x10;  // UnityEngine.Object.m_CachedPtr
 
 constexpr char kHashVecCtrl[] =
-    "<bfd62ef3b3e356b3d554a10a21a0f46b1272d519b934db1a7c4df88a0adcd52>k__BackingField";
+    "<a53533cecb18cbe1cddb1ee6c9adf83e4397ed25de00154905063e15bc1d11f>k__BackingField";
 constexpr char kHashPos[] =
-    "c1792cf58ceda9b4f12cacf2746c06b70c90d516c43cbdf1fcea7c7b1bde37b";
+    "dfe2e5f14ea04b0ca19e131b66bb4d53e06ca0c22744c299a991cd322e915e4";
 constexpr char kHashTemplateId[] =
-    "b0490f375f5c05acd37b4a9102722627e742459cafc61d96d6d6b5d2083ce5c";
+    "bee51a176937269df4a90c615347dd2e18ef03f7c18eee84fe5bae831864aaa";
 constexpr char kHashIsReady[] =
-    "<cfbe0611e7884b5fb111d391cd7cf608f6cd2b29d363904402d18e2cc413d07>k__BackingField";
+    "<aace0a900d1fc1dcf8cb668ac52fea91c20518721e2d49c812f64e6f4f65459>k__BackingField";
 constexpr char kHashPvcActive[] =
-    "dfdfb42a91b7e684e1007b0b0d20e9e301b977c437ce72241a81b78c18f960e";
+    "f9752616061ab01c21cd1ba0f5a74425326a63f722336107a3f40815af2da14";
 constexpr char kHashMobId[] =
-    "baac3795546286edec7a3624046c1f8fada405823340f3e49847b1b1a148d59";
+    "b22341ca9332866c7c3e33e2065a3cb5a770b369cb30df35de9660865554c19";
 constexpr char kHashDeadType[] =
-    "bebd5f74b813546d9426dba46adfb859bc43b68bd259e68dca4ec5c51664b44";
+    "f39f5054cb70f572827ac8ec20afde4a3f1fba7e82ec349b450030ae698f3d4";
 constexpr char kHashDamageInfoList[] =
-    "f3e766635da16284d9d52ab651756c298a48de119b852a9842a7145b95bb480";
+    "eef68f7ad84fa5427a0d7ea541ddf37a6761761b2cffc02c12076f154756cb1";
 constexpr char kHashLastHitted[] =
-    "d124cae1607234026845c64e52f692cba7bea2a510c5a44edcb21c6d72990cc";
+    "e7785b4c36ce35d0d6583c62c95578e641043701649845d1fcc53383579d926";
 constexpr char kHashHpPct[] =
-    "<f12e45a9c30b7ee4a19ad9702f0c81dad353d018202303587d51955f82636db>k__BackingField";
+    "<b39844d84499f5c38f07790ddb72dcde756a83b054393a1fd1bb4cb123a1d81>k__BackingField";
 constexpr char kHashMobCtrlState[] =
-    "c533ec3bf94288b12ef28c56c70a7e2386cdef6af38ccf4f4005b0ba2843120";
+    "cbcb0a8a8c82850097efae235b269bd49aead8a604be412b785ea2850eded52";
 // FindHit 同构门参考：inViewSplit@0x100 / suspended@0x240（08-13：旧 0x1B8 bool 已搬走）。
 // suspended 仍挡入榜；inView 只写入 MobLite（出刀归 FindHit，不挡 n）。
 constexpr char kHashInViewSplit[] =
-    "e118b261d39b77532ee177ad376c1a015eb9d5fa39492437ba32f00329f66a7";
+    "ac5703a0e95cc0497f043bd6d0c9dbed9069c78afc6927facaff10bdf194665";
 constexpr char kHashSuspended[] =
-    "<ba640e91428a59868938f48e1172467584a782b5da66dc6e0e95a2b8f231b7a>k__BackingField";
+    "<a057b020e8767ff0a11a5eef0c39037f931b5946be6575015990d818c036edd>k__BackingField";
 
 constexpr size_t kFbVecCtrl = 0x50;
 constexpr size_t kFbPos = 0x64;
@@ -134,28 +134,28 @@ constexpr float kMaxPosAbs = 100000.f;
 // DamageInfo / VecCtrl.AbsPos：hash → field_get_offset
 // Remount 2026-08-06：VecCtrl TDI 1596 / AbsPos@0x98（与 drop/player_combat 同钉）
 constexpr char kDamageInfoClass[] =
-    "d873e179c7c5fb0f1dea254cb4a539d6d4edca64ae5ee013ba05d5b36f1a9b2";
+    "a59db15a033aca47e02b97b940cb3b342d965e1823605ee7cbc64c28febbf91";
 constexpr char kVecCtrlClass[] =
-    "b4117afc7f6f9c58587c528c3dec862d440e5d266ad70b764c0058566918784";
+    "fb50f6a1736ed7dc2ae31fe0164df2ac21372ae1ba8c5f346fa63e05fbeff6a";
 constexpr char kHashDiDelayed[] =
-    "f8137a5db766ca06b97ae4c2189689e161875a434e3301e2b5642fcf73d9f01";  // DelayedProcess@0x10
+    "cf46756b4be41d01e9eb7a90e08e876eda2962ba6a160540706f69d310be96d";  // DelayedProcess@0x10
 constexpr char kHashDiCharId[] =
-    "c5f4632a2e65874aa8f9a9b503f8624fe12c9b624c8c0fc13fb5fa3a063de87";
+    "d81a9f380c8367b4a5696857a282bdbdc8ab8fe00d445845739dde3f5fb7628";
 constexpr char kHashDiSkillId[] =
-    "bea94485119520b77115ba1cd4159c27fee640d59f642c01e529df748d0a198";
+    "dfd6ac61bac96dcf2698f7967b9845a1d8819c4036f67184b2d8a8f69eacaea";
 constexpr char kHashDiHitAction[] =
-    "d0259193b1e2afd3535205817029ada42401c913b2dab6120dfc957f321964c";
+    "e05ede9103a67e2dc106a20831196dafa9f1e64cae2a0dda8958f6c5f169c14";
 constexpr char kHashDiDamage[] =
-    "af5c12f8ed8f10dc099ba7a4ab41e55b95806aea3f7b65fddb7faca111e6df5";
+    "d08e7360c3c603d694bfa80d2b3896dd48a3a615bbb3006f61c8447ec94d799";
 constexpr char kHashDiAttackIdx[] =
-    "cddb7bf3355893e594bb34e57960fab9fe9d298c4b3db9ff7165af05110699e";
+    "e0e859e3cc84ba484063b21063dd0b83fda01c17c9cdd3ad8f6a09f360f9c6c";
 constexpr char kHashDiMoveType[] =
-    "b04f47fd9035d3884c40a8ef98191cb04e656f74ef83b874c103c85171706bc";
+    "f69eee43a6b1c55c7283e290c50d6a96d287c102b6c0113be4f4b60d58f3056";
 constexpr char kHashVcAp[] =
-    "eeb6a8c060a20622eef369b184c450bad5515167fa2cb42392277c7b0cbfe7d";  // AbsPos start; Y=+8
+    "e399633b16dbf327df9b459015caf617aff8e505e4f1fb694acf87a011d4259";  // AbsPos start; Y=+8
 // VecCtrl.Active@0x80：SetRemoteMob 置 false 后常留池（P0a §7.6）→ 不计入 n
 constexpr char kHashVcActive[] =
-    "<a67ad38db967d3d37563de6ebb699c05751e2aa424855ccb98f15ea58af96fd>k__BackingField";
+    "<af1b5b42e79782209fe4a1b3b8991c9ae2267caf27316a66d737327bd79f885>k__BackingField";
 
 constexpr size_t kFbDiDelayed = 0x10;
 constexpr size_t kFbDiCharId = 0x14;
@@ -194,11 +194,11 @@ constexpr size_t kFbUiHpTagMobId = 0xC8;
 constexpr size_t kFbUiHpTagCurHp = 0xD4;
 constexpr size_t kFbUiHpTagMaxHp = 0xD8;
 constexpr char kHashUiHpTagMobId[] =
-    "b05e8e71afa90158e1f2b246a7552aff3305a5b10ceb99e6a2bad107396c5e0";
+    "f76099fb060a861ce2ce12bf87902db6fc128180242bc587b374fabc763a2d4";
 constexpr char kHashUiHpTagCurHp[] =
-    "eb23320fdc3b7e539fb09edc3f002355b6e2a464b4547ddabe498d3a65f4cca";
+    "e7b0a907277feaa744ae7e1fdf6d3c47638643fca867e822b08bdba73564647";
 constexpr char kHashUiHpTagMaxHp[] =
-    "efce41508029fddc98dc5c2a93129465f94306506deb171be2fb881ddc88f2a";
+    "cc6b72b1c396041a5130a298db2c17508054d72ed7c4061ce9451cc4a04e923";
 size_t gOffUiHpTagMobId = kFbUiHpTagMobId;
 size_t gOffUiHpTagCurHp = kFbUiHpTagCurHp;
 size_t gOffUiHpTagMaxHp = kFbUiHpTagMaxHp;
@@ -223,12 +223,32 @@ size_t gOffUiHpTagMaxHp = kFbUiHpTagMaxHp;
 #define kOffListSize (x::runtime::il2cpp_container::OffListSize())
 // MapLifeData.LifeType（hash 防漂）；Mob=1（枚举 0/1/2）
 constexpr char kMapLifeClass[] =
-    "b1e0423affe5eccc53fd9643089ec5a2c222d9b0b41406aa3b0883b39a72255";
+    "cdb411df9e4657c68f35d2afebb2eb6a70a5de9eea5918aa7283a96a9cb648b";
 constexpr char kHashLifeType[] =
-    "<bca44b5a0c7b291c63b57093a6b251361c26ed1f344cb33d35572153691f8eb>k__BackingField";
+    "<bcb26b22743e85de9b74a2e293021d28c832a3443424f111c87072d3eee696d>k__BackingField";
+constexpr char kHashLifeX[] =
+    "<ad753db403be75d9d25ad7138c870e8b21da280deb86656ec689a588514e962>k__BackingField";
+constexpr char kHashLifeY[] =
+    "<c85b34c5582146bba4cb69bb9427d650605fddce25843184a17582d033a2ca5>k__BackingField";
+constexpr char kHashLifeRx0[] =
+    "<eeeb9e9bec1ee51b30e0755ff7f07719654e3cf1bad7579a4b7ffc05d3e9037>k__BackingField";
+constexpr char kHashLifeRx1[] =
+    "<ee556b7fdc58df031c19d9faf78cc766165de2bd4ffe07c528e640790c5f0db>k__BackingField";
 constexpr size_t kFbLifeType = 0x20;
+constexpr size_t kFbLifeX = 0x24;
+constexpr size_t kFbLifeY = 0x28;
+constexpr size_t kFbLifeRx0 = 0x38;
+constexpr size_t kFbLifeRx1 = 0x3C;
 size_t gOffLifeType = kFbLifeType;
+size_t gOffLifeX = kFbLifeX;
+size_t gOffLifeY = kFbLifeY;
+size_t gOffLifeRx0 = kFbLifeRx0;
+size_t gOffLifeRx1 = kFbLifeRx1;
 #define kOffLifeType (gOffLifeType)
+#define kOffLifeX (gOffLifeX)
+#define kOffLifeY (gOffLifeY)
+#define kOffLifeRx0 (gOffLifeRx0)
+#define kOffLifeRx1 (gOffLifeRx1)
 constexpr int kLifeTypeMob = 1;
 std::atomic<bool> gUiLifeFieldResolved{false};
 
@@ -795,12 +815,26 @@ int PeakForMap(int mapId) {
     return gPeakAlive;
 }
 
-// Count Mob entries in MapData.LifeList; -1 on failure.
-int CountLifeMobSlotsFromMapData(void* mapData, int* outAll, int* outMapId) {
+void CopySpawnMeta(Snapshot& dst, const Snapshot& src) {
+    dst.spawnSlots = src.spawnSlots;
+    dst.mapId = src.mapId;
+    dst.lifeMob = src.lifeMob;
+    dst.lifeAll = src.lifeAll;
+    dst.spawnPointN = src.spawnPointN;
+    if (src.spawnPointN > 0) {
+        const int n = src.spawnPointN < kMaxSpawnPoints ? src.spawnPointN : kMaxSpawnPoints;
+        std::memcpy(dst.spawnPoints, src.spawnPoints, sizeof(SpawnPoint) * static_cast<size_t>(n));
+        dst.spawnPointN = n;
+    }
+}
+
+// Count Mob entries in MapData.LifeList; optionally fill spawn XY/Rx. -1 on failure.
+int CountLifeMobSlotsFromMapData(void* mapData, int* outAll, int* outMapId, SpawnPoint* pts,
+                                 int cap, int* outPts) {
     if (outAll) *outAll = -1;
     if (outMapId) *outMapId = 0;
+    if (outPts) *outPts = 0;
     if (!LooksLikeHeapPtr(mapData)) return -1;
-    // klass ????????????????MapData
     if (gMapDataKlass && !ObjKlassIs(mapData, gMapDataKlass)) return -1;
 
     const int mapId = ReadI32(mapData, kOffMapId);
@@ -814,14 +848,23 @@ int CountLifeMobSlotsFromMapData(void* mapData, int* outAll, int* outMapId) {
 
     int mobN = 0;
     int allN = 0;
+    int filled = 0;
     for (int i = 0; i < size; ++i) {
         void* life = ArrayAt(items, (uintptr_t)i);
         if (!LooksLikeHeapPtr(life)) continue;
         ++allN;
         const int ty = ReadI32(life, kOffLifeType);
-        if (ty == kLifeTypeMob) ++mobN;
+        if (ty != kLifeTypeMob) continue;
+        ++mobN;
+        if (!pts || cap <= 0 || filled >= cap) continue;
+        pts[filled].x = static_cast<float>(ReadI32(life, kOffLifeX));
+        pts[filled].y = static_cast<float>(ReadI32(life, kOffLifeY));
+        pts[filled].rx0 = ReadI32(life, kOffLifeRx0);
+        pts[filled].rx1 = ReadI32(life, kOffLifeRx1);
+        ++filled;
     }
     if (outAll) *outAll = allN;
+    if (outPts) *outPts = filled;
     return mobN;
 }
 
@@ -840,12 +883,18 @@ void EnsureUiLifeFieldOffsets() {
     if (MobFieldOffHit(gUiHpTagKlass, kHashUiHpTagMaxHp, kFbUiHpTagMaxHp, &gOffUiHpTagMaxHp))
         ++hits;
     if (MobFieldOffHit(lifeKlass, kHashLifeType, kFbLifeType, &gOffLifeType)) ++hits;
-    constexpr int kExpect = 4;
+    if (MobFieldOffHit(lifeKlass, kHashLifeX, kFbLifeX, &gOffLifeX)) ++hits;
+    if (MobFieldOffHit(lifeKlass, kHashLifeY, kFbLifeY, &gOffLifeY)) ++hits;
+    if (MobFieldOffHit(lifeKlass, kHashLifeRx0, kFbLifeRx0, &gOffLifeRx0)) ++hits;
+    if (MobFieldOffHit(lifeKlass, kHashLifeRx1, kFbLifeRx1, &gOffLifeRx1)) ++hits;
+    constexpr int kExpect = 8;
     x::runtime::LogI(
         "MobPool",
-        "uiHp/life fields path=%s hits=%d/%d mobId=0x%zX cur=0x%zX max=0x%zX lifeTy=0x%zX",
+        "uiHp/life fields path=%s hits=%d/%d mobId=0x%zX cur=0x%zX max=0x%zX "
+        "lifeTy=0x%zX x=0x%zX y=0x%zX rx0=0x%zX rx1=0x%zX",
         hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits, kExpect,
-        gOffUiHpTagMobId, gOffUiHpTagCurHp, gOffUiHpTagMaxHp, gOffLifeType);
+        gOffUiHpTagMobId, gOffUiHpTagCurHp, gOffUiHpTagMaxHp, gOffLifeType, gOffLifeX, gOffLifeY,
+        gOffLifeRx0, gOffLifeRx1);
 }
 
 // Fill spawnSlots from LifeList; fallback to peak.
@@ -854,6 +903,7 @@ void FillSpawnSlots(Snapshot& out) {
     out.mapId = 0;
     out.lifeMob = -1;
     out.lifeAll = -1;
+    out.spawnPointN = 0;
 
     void* wm = world::GetWorldManager();
     if (!wm) return;
@@ -866,10 +916,14 @@ void FillSpawnSlots(Snapshot& out) {
 
     int lifeAll = -1;
     int mapId = 0;
-    const int lifeMob = CountLifeMobSlotsFromMapData(mapData, &lifeAll, &mapId);
+    int nPts = 0;
+    const int lifeMob =
+        CountLifeMobSlotsFromMapData(mapData, &lifeAll, &mapId, out.spawnPoints, kMaxSpawnPoints,
+                                     &nPts);
     out.mapId = mapId;
     out.lifeMob = lifeMob;
     out.lifeAll = lifeAll;
+    out.spawnPointN = nPts;
 
     UpdateSpawnPeak(mapId, out.count);
 
@@ -981,10 +1035,7 @@ bool Collect(Snapshot& out, bool fillSpawnSlots) {
         } else {
             Snapshot prev{};
             if (GetCached(prev) && prev.ok) {
-                out.spawnSlots = prev.spawnSlots;
-                out.mapId = prev.mapId;
-                out.lifeMob = prev.lifeMob;
-                out.lifeAll = prev.lifeAll;
+                CopySpawnMeta(out, prev);
             } else {
                 out.spawnSlots = gLastSpawnSlots.load(std::memory_order_acquire);
             }
@@ -1004,6 +1055,29 @@ bool TryFillLive(void* mob, int32_t expectId, MobLite& out) {
     // 热路径不 ResolveAbsHp（%×表 / 缓存）：出刀只靠 hpPct/lastHitted。
     // 脆皮早切需要 maxHP 时由 simple_combat 锁怪时按需查表。
     out = lite;
+    return true;
+}
+
+bool StillSameLiveMob(void* mob, int32_t expectId, const char** why) {
+    if (!LooksLikeHeapPtr(mob)) {
+        if (why) *why = "dead";
+        return false;
+    }
+    if (!gMobFieldResolved.load(std::memory_order_acquire)) {
+        if (why) *why = "dead";
+        return false;
+    }
+    MobLite lite{};
+    const LiteFail fail = FillLiteEx(mob, lite, nullptr);
+    if (fail != LiteFail::Ok) {
+        if (why) *why = "dead";
+        return false;
+    }
+    if (expectId != 0 && lite.id != expectId) {
+        if (why) *why = "pool";
+        return false;
+    }
+    if (why) *why = "";
     return true;
 }
 
@@ -1036,10 +1110,7 @@ bool TryRefreshCacheLite(Snapshot& out) {
     CollectFromDict(pool, out);
     out.ok = true;
     if (hadPrev) {
-        out.spawnSlots = prev.spawnSlots;
-        out.mapId = prev.mapId;
-        out.lifeMob = prev.lifeMob;
-        out.lifeAll = prev.lifeAll;
+        CopySpawnMeta(out, prev);
     } else {
         out.spawnSlots = gLastSpawnSlots.load(std::memory_order_acquire);
     }
@@ -1064,13 +1135,33 @@ int CountMapMobLifeSlots() {
     void* mapData = ReadPtr(wm, kOffWmCurrentMapData);
     int all = -1;
     int mapId = 0;
-    const int mobN = CountLifeMobSlotsFromMapData(mapData, &all, &mapId);
+    const int mobN = CountLifeMobSlotsFromMapData(mapData, &all, &mapId, nullptr, 0, nullptr);
     if (mobN >= 0) return mobN;
     return PeakForMap(mapId);
 }
 
 int GetSpawnPeak() {
     return gPeakAlive > 0 ? gPeakAlive : -1;
+}
+
+bool NearMobLifeSlot(float x, float y, const Snapshot& snap, float nearPx, float* outDist) {
+    if (outDist) *outDist = 1.e9f;
+    if (snap.spawnPointN <= 0) return false;
+    if (nearPx < 1.f) nearPx = 1.f;
+    const float nearSq = nearPx * nearPx;
+    bool hit = false;
+    float bestSq = 1.e30f;
+    const int n = snap.spawnPointN < kMaxSpawnPoints ? snap.spawnPointN : kMaxSpawnPoints;
+    for (int i = 0; i < n; ++i) {
+        const SpawnPoint& p = snap.spawnPoints[i];
+        const float dx = x - p.x;
+        const float dy = y - p.y;
+        const float dSq = dx * dx + dy * dy;
+        if (dSq < bestSq) bestSq = dSq;
+        if (dSq <= nearSq) hit = true;
+    }
+    if (outDist) *outDist = std::sqrt(bestSq);
+    return hit;
 }
 
 int64_t LookupTemplateMaxHp(int32_t templateId) {

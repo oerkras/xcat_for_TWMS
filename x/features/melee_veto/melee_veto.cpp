@@ -4,10 +4,10 @@
 //
 // | RVA | 符号 | 托管参数 | 原生参数 |
 // |---|---|---|---|
-// | `0x105B0A0` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
-// | `0x10705f0` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
+// | `0x105AE40` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
+// | `0x1070390` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
 //
-// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x105B0A0 上，
+// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x105AE40 上，
 //   于是 `methodInfo` 被塞进第 7 参的位置、真 methodInfo 丢失，把射击路径整体打歪
 //   （体感「基本必挥弓」）。改这里之前先用 `Dumps/runtime/out/dump.cs` 按 RVA 复核形状。
 //
@@ -59,6 +59,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -68,9 +69,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaTryDoingMeleeAttack = 0x105B0A0;
-constexpr uint32_t kRvaTryDoingShootAttack = 0x10705f0;
-constexpr uint32_t kRvaGetWeaponType = 0x142A660;
+constexpr uint32_t kRvaTryDoingMeleeAttack = 0x105AE40;
+constexpr uint32_t kRvaTryDoingShootAttack = 0x1070390;
+constexpr uint32_t kRvaGetWeaponType = 0x1429CE0;
 
 // ── 取框探针（一次性调研，`XCAT_MELEE_RECT_PROBE=1` 才挂）──────────────────────
 //
@@ -84,8 +85,8 @@ constexpr uint32_t kRvaGetWeaponType = 0x142A660;
 // （按仓规逐处实读；这里按 0 读会把分支判反。它不是武器类型——枚举最大是 Gun=49。）
 //
 // 探针要回答的就一件事：飞镖普攻那一发走的是哪条、arg4 实际是几、框实际多大。
-constexpr uint32_t kRvaGetAttackRect = 0x1239610;  // sub_7FF849EA8290
-constexpr uint32_t kRvaConstRect = 0x4654800;      // xmmword_7FF84E29AF80
+constexpr uint32_t kRvaGetAttackRect = 0x1239330;  // sub_7FF849EA8290
+constexpr uint32_t kRvaConstRect = 0x5656590;      // remounted 2026-08-14 GetAttackRect RIP → (-88,-6,70,56)
 constexpr int kRectKindConstPath = 55;
 
 // 近战 / 射击开头一致：push rbp / r15 / r14 / r13 / r12 / rsi / rdi / rbx = 12 字节。
@@ -600,18 +601,19 @@ bool TryArmOne(AbsHookState& st, std::atomic<bool>& refuse, uint32_t rva, void* 
 //
 // ★ 出货客户端的类名/字段名是 63 位十六进制哈希、命名空间为空，按友好名一律查不到。
 //   `Dumps/cms_cw/dump.cs` 只是未混淆参照，仅可用来认结构；名字与偏移必须取自运行时
-//   dump `Dumps/runtime/out/dump.cs`（2026-08-06）。两份的字段序还不一样：参照里
-//   _afterimageMap 在 0x48，实机在 0x40（参照在它前面多一个字段），照抄会读到隔壁指针。
+//   dump `Dumps/runtime/out/dump.cs`（2026-08-14）。两份的字段序还不一样：参照里
+//   _afterimageMap 在 0x48，08-14 实机在 0x20（08-13 曾在 0x40），照抄会读到隔壁指针。
 //
 // 以下哈希取自运行时 dump：
-//   L73846  ActionManager        TypeDefIndex 1653，父类 Singleton<ActionManager>
-//   L1065361 Singleton<T>._instance  static @0x0，类型 Lazy<T>
-//   L73512  MeleeAttackAfterImage TypeDefIndex 1634；L73516 Range: Dictionary<int,Rect> @0x18
+//   ActionManager TDI 1657，父类 Singleton<ActionManager>
+//   Singleton<T>._instance static Lazy<T> @0x0（08-14 hash c7bc0456…；旧 b9143f0b 从未进 dump）
+//   MeleeAttackAfterImage TDI 1644；Range: Dictionary<int,Rect> @0x18
+//   _afterimageMap: Dictionary<string, AfterImage> @0x20（08-13 在 0x40，0x40 现为另一张 Dictionary）
 constexpr char kHashActionManager[] =
-    "c1a571fd586131c52f3a678bee953e76890f76d0729e198215a5239bc573442";
+    "f4ce1b46b0eabc745ad8b2c9f0ee7ac5ac737e0c1172735dae0a7c367f52a71";
 constexpr char kHashSingletonInstance[] =
-    "b9143f0b097da8b3733c3286804b0dee7ab4ae8f39620354bc4817d33fe9a42";
-constexpr size_t kOffActionMgrAfterImageMap = 0x40;
+    "c7bc0456df619d6443dbf0aae84401cca7a600cbc416ab9ee4eb8fa433c36f3";
+constexpr size_t kOffActionMgrAfterImageMap = 0x20;
 constexpr size_t kOffAfterImageRange = 0x18;
 
 // Dictionary<K,V> 固定布局：buckets@0x10 entries@0x18 count@0x20
@@ -954,20 +956,32 @@ DWORD WINAPI Worker(LPVOID) {
                                  "只记 nest / top。", wt, kWtThrowingGlove);
             }
             // 这里只读原子计数，绝不去碰托管对象（worker 非泵线程）。
-            x::runtime::LogI("MeleeVeto",
-                             "heart melee=%d shoot=%d mode=%s verdict=%s wt=%d job=%d "
-                             "mCall=%u conc=%u mTrue=%u mFalse=%u nest=%u top=%u veto=%u",
-                             gMelee.active ? 1 : 0, gShoot.active ? 1 : 0,
-                             wt == kWtThrowingGlove ? "veto" : "observe",
-                             VerdictName(gVerdict.load(std::memory_order_relaxed)), wt,
-                             gLastJob.load(std::memory_order_relaxed),
-                             gMCall.load(std::memory_order_relaxed),
-                             gConclusive.load(std::memory_order_relaxed),
-                             gMTrue.load(std::memory_order_relaxed),
-                             gMFalse.load(std::memory_order_relaxed),
-                             gNest.load(std::memory_order_relaxed),
-                             gTop.load(std::memory_order_relaxed),
-                             gVetoHits.load(std::memory_order_relaxed));
+            char heartKey[96]{};
+            std::snprintf(heartKey, sizeof(heartKey), "%d%d%s%s%d%d", gMelee.active ? 1 : 0,
+                          gShoot.active ? 1 : 0, wt == kWtThrowingGlove ? "veto" : "observe",
+                          VerdictName(gVerdict.load(std::memory_order_relaxed)), wt,
+                          gLastJob.load(std::memory_order_relaxed));
+            static char lastHeartKey[96]{};
+            static DWORD lastHeartLog = 0;
+            if (std::strcmp(heartKey, lastHeartKey) != 0 || !lastHeartLog ||
+                now - lastHeartLog >= 30000) {
+                std::snprintf(lastHeartKey, sizeof(lastHeartKey), "%s", heartKey);
+                lastHeartLog = now;
+                x::runtime::LogI("MeleeVeto",
+                                 "heart melee=%d shoot=%d mode=%s verdict=%s wt=%d job=%d "
+                                 "mCall=%u conc=%u mTrue=%u mFalse=%u nest=%u top=%u veto=%u",
+                                 gMelee.active ? 1 : 0, gShoot.active ? 1 : 0,
+                                 wt == kWtThrowingGlove ? "veto" : "observe",
+                                 VerdictName(gVerdict.load(std::memory_order_relaxed)), wt,
+                                 gLastJob.load(std::memory_order_relaxed),
+                                 gMCall.load(std::memory_order_relaxed),
+                                 gConclusive.load(std::memory_order_relaxed),
+                                 gMTrue.load(std::memory_order_relaxed),
+                                 gMFalse.load(std::memory_order_relaxed),
+                                 gNest.load(std::memory_order_relaxed),
+                                 gTop.load(std::memory_order_relaxed),
+                                 gVetoHits.load(std::memory_order_relaxed));
+            }
         }
         // 探针要在**开关关着**时用（得让近战真跑起来才看得到自然挥拳），所以不能挂在 heart
         // 里面。每个 (kind, 帧) 组合只打一行，不按发计流水。

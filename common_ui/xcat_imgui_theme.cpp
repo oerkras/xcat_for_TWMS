@@ -775,6 +775,8 @@ void UiTheme_DrawRoughness(ImDrawList* dl, const ImVec2& rmin, const ImVec2& rma
     const float x1 = rmax.x - 1.f;
     const float y1 = rmax.y - 1.f;
     if (x1 <= x0 || y1 <= y0) return;
+    // AutoResizeY 卡片若把高度反馈到几千像素，2px 一行会把 UI 线程画死（窗口未响应）。
+    if (y1 - y0 > 4096.f) return;
 
     const bool brushed = (kind == RoughKind::Brushed || kind == RoughKind::Matte);
     const bool grain = (kind == RoughKind::Grain || kind == RoughKind::Matte);

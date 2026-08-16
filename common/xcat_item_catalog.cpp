@@ -239,6 +239,39 @@ size_t ItemCatalogCollectCodesByNameContains(const ItemCatalogPack& pack, const 
     return total;
 }
 
+void SplitKeywordList(const char* text, std::vector<std::string>& out) {
+    out.clear();
+    if (!text || !text[0]) return;
+
+    std::string s = text;
+    auto replaceAll = [](std::string& str, const char* from, const char* to) {
+        if (!from || !from[0] || !to) return;
+        const size_t fl = std::strlen(from);
+        const size_t tl = std::strlen(to);
+        size_t pos = 0;
+        while ((pos = str.find(from, pos)) != std::string::npos) {
+            str.replace(pos, fl, to);
+            pos += tl;
+        }
+    };
+    replaceAll(s, "\xEF\xBC\x9B", ";");  // ；
+    replaceAll(s, "\xEF\xBC\x8C", ",");  // ，
+    replaceAll(s, "\xE3\x80\x81", ",");  // 、
+    replaceAll(s, "\xEF\xBD\x9C", "|");  // ｜
+    replaceAll(s, "\xE3\x80\x80", " ");  // ideographic space
+
+    static const char kDelims[] = ",;| \t\r\n";
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && std::strchr(kDelims, static_cast<unsigned char>(s[i]))) ++i;
+        if (i >= s.size()) break;
+        size_t j = i;
+        while (j < s.size() && !std::strchr(kDelims, static_cast<unsigned char>(s[j]))) ++j;
+        out.emplace_back(s.substr(i, j - i));
+        i = j;
+    }
+}
+
 int ItemCatalogLookupShopPrice(const ItemCatalogPack& pack, const char* code) {
     if (!code || !code[0]) return 0;
     const auto it = pack.shopPriceByCode.find(code);

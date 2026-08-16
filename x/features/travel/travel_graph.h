@@ -111,7 +111,8 @@ public:
     // 当前只做行数诊断，严禁直接注入门图。UUID→韩 key 的有限锚点由 peer_planner 独立读取离线表。
     int ImportPeerEdges(const std::string& path);
 
-    // 有效过图目标（BFS/选门/建边）；排除占位 tm 与同图 script 假门残留。
+    // 有效过图目标（BFS/选门/建边）；排除占位 tm（0 / -1 / 999999999）。
+    // 出生图 Field 0 只作 src，不作 dest（WZ tm=0 = 未填，与出生图同号）。
     static bool IsBogusDest(const std::string& dest);
     static bool IsRealDest(const std::string& dest);
 

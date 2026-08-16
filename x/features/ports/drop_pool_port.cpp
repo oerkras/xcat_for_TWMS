@@ -45,19 +45,23 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
 // Remount 2026-08-06：方法 RVA 普遍 +0x1E70；字段 off 未漂；ACS 类/字段哈希全换
-constexpr uint32_t kRvaPetTryPickUpDrop = 0xFBBF40;  // remounted 2026-08-06 TDI:1516
-constexpr uint32_t kRvaDropTryPickUpDrop = 0xF76DC0;  // remounted 2026-08-06 DropPool.TryPickUpDrop(in Vector2)
-constexpr uint32_t kRvaDropTryPickUpDropByPet = 0xF78F20;  // remounted 2026-08-13
-constexpr uint32_t kRvaPetGetUpgradePetSkill = 0xF7C3D0;  // remounted 2026-08-06
-constexpr uint32_t kRvaPetGetItemSlot = 0xF7B2D0;  // remounted 2026-08-06 · ByPet → ItemSlotPet
-constexpr uint32_t kRvaPetIsInExceptionList = 0xF71280;  // remounted 2026-08-06
-constexpr uint32_t kRvaPetSendDropPickUp = 0xF7B700;  // remounted 2026-08-13 Pet.SendDropPickUpRequest
-constexpr uint32_t kRvaPoolSendDropPickUp = 0xF78640;  // remounted 2026-08-06 DropPool.SendDropPickUpRequest
+constexpr uint32_t kRvaPetTryPickUpDrop = 0xFBBCD0;  // remounted 2026-08-06 TDI:1516
+// IDA 2026-08-14：Pet.TryPickUpDrop 无外部 E8；桩/本体是两个 methodPointers 槽。
+// 原生宠 Tick 走 MI→桩(0xFB26F0) E8 本体(0xF9BA00)；Send/ByPet 仍是 E8，MI 钩打不中。
+constexpr uint32_t kRvaPetTryPickStub = 0xFB26F0;
+constexpr uint32_t kRvaPetTryPickBody = 0xF9BA00;
+constexpr uint32_t kRvaDropTryPickUpDrop = 0xF76B50;  // remounted 2026-08-06 DropPool.TryPickUpDrop(in Vector2)
+constexpr uint32_t kRvaDropTryPickUpDropByPet = 0xF78CB0;  // remounted 2026-08-13
+constexpr uint32_t kRvaPetGetUpgradePetSkill = 0xF7C160;  // remounted 2026-08-06
+constexpr uint32_t kRvaPetGetItemSlot = 0xF7B060;  // remounted 2026-08-06 · ByPet → ItemSlotPet
+constexpr uint32_t kRvaPetIsInExceptionList = 0xF71010;  // remounted 2026-08-06
+constexpr uint32_t kRvaPetSendDropPickUp = 0xF7B490;  // remounted 2026-08-13 Pet.SendDropPickUpRequest
+constexpr uint32_t kRvaPoolSendDropPickUp = 0xF783D0;  // remounted 2026-08-06 DropPool.SendDropPickUpRequest
 // ByPet Contains 真源（.rdata，非 CollisionCheck / _rcPet）：
 //   int32 offX,offY @ +0 ; float w,h @ +0x10
 //   rect = (petPos - (offX,offY), w, h)；原生 (25,10)+(50,60)
 //   IDA：ByPet → psubd xmm9,[rip+disp] / movsd xmm0,[rip+disp]；旧死钉仅作末级兜底
-constexpr uint32_t kRvaByPetRectPackFallback = 0x55832D0;  // remounted 2026-08-06 · runtime pattern bind
+constexpr uint32_t kRvaByPetRectPackFallback = 0x55BFCD0;  // remounted 2026-08-14 · ByPet RIP → 25/10/50/60
 constexpr int32_t kNativeRectOffX = 25;
 constexpr int32_t kNativeRectOffY = 10;
 constexpr float kNativeRectW = 50.f;
@@ -66,39 +70,39 @@ constexpr float kNativeRectH = 60.f;
 constexpr size_t kByPetScanMax = 0x2800;
 
 constexpr char kHashPetTryPickUp[] =
-    "c0eff451522464ea9a3b4484242d873f42227fd9d4e8f3be001387456e8ce2d";  // remounted 2026-08-06
+    "d41cb9e1169185ca8719ea0afa7d65002cc28b3ba64a5273b2bf30c490fda25";  // remounted 2026-08-06
 constexpr char kHashDropTryPickUp[] =
-    "b79fd99e51b75b4cbb8f2f61d64bd57996b59d724ade840aec16d64a6669cf9";  // remounted 2026-08-06
+    "d8f75a1a5a3eacaa78a7950e3ed8f37452c2d5b01173a7f7563d2ea467d8cb4";  // remounted 2026-08-06
 constexpr char kHashDropTryPickUpByPet[] =
-    "db024fe0bacd51f103e6e7b4c6a47b6e82e5e97969044cdc3e3da6edb69b6a2";  // remounted 2026-08-13
+    "ab08d567b64b1bdb0d4f0a41095e46a2fd35b7344f1cd7b62a3b195cb01725e";  // remounted 2026-08-13
 constexpr char kHashPetGetUpgradeSkill[] =
-    "c4f419232ad600203420ccc4a97991ea34f28605d7cc2949c4089c15b8c786b";  // remounted 2026-08-06
+    "fcae646e972c247c51a73b903f61718cde626be13816eb9ee036ca514ca4f50";  // remounted 2026-08-06
 constexpr char kHashPetGetItemSlot[] =
-    "f5f8090df94d939719635f783f7abae7c68a31d5f4a3b39be4a3dcdd7722ead";  // remounted 2026-08-06
+    "bf478348758c25c4107097885a0064960484f4dcf4a2447c3d4cb0a8b4e9c78";  // remounted 2026-08-06
 constexpr char kHashPetIsInException[] =
-    "fda6563d679686e0da0ac2bd6419fc4082f2b1bcd5d9a4e1001871fb16f0426";  // remounted 2026-08-06
+    "c19eda6bad70f7ba74cc1824882da1fdf9ba170833f142b28fa998ba1aa492a";  // remounted 2026-08-06
 constexpr char kHashPetSendDropPickUp[] =
-    "e042777c4298205524bb53e480e7005b6ac77e35c765a8637bf52c763132c3f";  // remounted 2026-08-13
+    "b4cfc0374fc5f6e45be1d88680efe07a935ff7a5bc8a4617cf928f3f50d40fb";  // remounted 2026-08-13
 constexpr char kHashPoolSendDropPickUp[] =
-    "b25bc88ac9e267a1b3f72caf3680c36617a0f8dad33e033856f5ae30c6be26c";  // remounted 2026-08-06
+    "b90d785e11731b89109ed757de999e9b80939c44fda44c8fc877d0a2b9a02b0";  // remounted 2026-08-06
 
 constexpr char kDropPoolClass[] =
-    "ef4c309ed6caad3e53bdf3199b93f996388eb0eeb81c798604852c69148cafd";  // remounted 2026-08-06 TDI:1489
+    "d5624b90fbe2628c8a2e2e397b9146801b69530845d6792088dd36295a3fa31";  // remounted 2026-08-06 TDI:1489
 constexpr char kDropClass[] =
-    "d25f73fab3779aa67d7c23319664f7f4c443e68187978345a7777b7dd35ef83";  // remounted 2026-08-06 TDI:1488
+    "b7c044e089ad8c73ab5849feb5522e30cae9e9baa1d8cab6f31664811670da6";  // remounted 2026-08-06 TDI:1488
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 constexpr char kCollisionCheckClass[] =
-    "c887a7c8b11584f13efc813eb73b8c8f9be8f7e1dde53d21408714ba69dc8fa";  // remounted 2026-08-06 TDI:2446
+    "bfd6f16d1572d41df5fbb47092eb5d832c71fd42c6f355bdedde861cac33998";  // remounted 2026-08-06 TDI:2446
 constexpr char kPetClass[] =
-    "a0b51c176c051ad0d1b79bcb44ee759cccdc6596114e8a70f68e6ecf89a1714";  // remounted 2026-08-06 TDI:1516
+    "c9d5e7a73b1137b6bbe92d7af4b1c0db7c29fe4970e0c237580a1ce71dbf049";  // remounted 2026-08-06 TDI:1516
 constexpr char kUserClass[] =
-    "c3c6ef70537e5a2c4026c37e65e0d0a8a5f756988f3f3ee148a568fb3176f96";  // TDI:1560 User（m_apPet/CurPos）
+    "ead9ab2e851cf06879704044ce549197d7fb5017ecb635104f7a6e366f9ac7a";  // TDI:1560 User（m_apPet/CurPos）
 constexpr char kVecCtrlOwnerClass[] =
-    "bef0eed02528709201717d93717a1904bfa2e850dfe1f5fadf473c0e9c78d9b";  // TDI:1586
+    "edca107f56b886052491eaa5c89b93e25d6f5f228bc505251f2d2060743b6cf";  // TDI:1586
 constexpr char kVecCtrlClass[] =
-    "b4117afc7f6f9c58587c528c3dec862d440e5d266ad70b764c0058566918784";
+    "fb50f6a1736ed7dc2ae31fe0164df2ac21372ae1ba8c5f346fa63e05fbeff6a";
 constexpr char kItemSlotPetClass[] =
-    "acaefdbcae2fab722b9f95f1ddcb8bc8cd6163747ef6ecb31c1972faba5cbe5";  // GetItemSlot 返回类型
+    "c8744da123efbcf1c25864e5cfd0ba33afd9ef69107341fa6eeee28788e04cd";  // GetItemSlot 返回类型
 
 // —— 字段防漂移：hash + field_get_offset；下列常量仅 dump 验证 fallback（off 未漂）——
 constexpr size_t kFbApPet = 0x288;  // 08-13：User Pet[]；0x2B0 已是 Vector2
@@ -127,47 +131,47 @@ constexpr size_t kFbItemSlotPetSkill = 0x3C;
 constexpr size_t kFbCollisionRcPet = 0x20;
 
 constexpr char kHashFldApPet[] =
-    "c9f3a304082cf7806e647b39d83a48658d80691430a981edfd32ee48c1346bb";
+    "a32dacc4100cf0c374d07e352a066c84fccb976e957f0a5596237cc88854e97";
 constexpr char kHashFldWmMyUser[] =
-    "<c1c262eeb2fd710395259b6a9ed860900becf2a5716099c31c863589707a7a0>k__BackingField";  // WM.MyUser@0x28
+    "<bb0c2e4b7d64301206ad5d9671295f9f6e2fbebb9d44f99243efc2c08d2a17c>k__BackingField";  // WM.MyUser@0x28
 constexpr char kHashFldPoolDict[] =
-    "b56d10b86a199566a2f8b162ee97a1bfbe20a1c80d1292964e415aa3467a77a";
+    "b75665e0faee2a28adedcd2661600a4db2d550361bebd0f8b13bb8bb32c4a1f";
 constexpr char kHashFldPetRc[] =
-    "e8b9ea658e5b9d86431a49d3e5cf91533d7ac9b920c3f24eeb7817cc9f9aac9";
+    "f75010e5431233a9f9cc8a0b060cd5d8b948bbf949eeca64c494165502652d9";
 constexpr char kHashFldPetExceptionList[] =
-    "<b15db6a05d60c99216bd230151a030d6b11a6e6a65f5dc1184ce2c56c1b39ce>k__BackingField";
+    "<e7f3c66c0b544afb6337f5dedb9a22f4a46fa18016879a1819a5b56b425063d>k__BackingField";
 constexpr char kHashFldVecCtrl[] =
-    "<bfd62ef3b3e356b3d554a10a21a0f46b1272d519b934db1a7c4df88a0adcd52>k__BackingField";
+    "<a53533cecb18cbe1cddb1ee6c9adf83e4397ed25de00154905063e15bc1d11f>k__BackingField";
 constexpr char kHashFldFieldPos[] =
-    "c1792cf58ceda9b4f12cacf2746c06b70c90d516c43cbdf1fcea7c7b1bde37b";
+    "dfe2e5f14ea04b0ca19e131b66bb4d53e06ca0c22744c299a991cd322e915e4";
 constexpr char kHashFldCurPos[] =
-    "ccce125f69593bc9100a9b227cda0be73abc63fefc4b848f92efe9a72930859";
+    "fbb96ebf96fbe214ee24fcbda14d147b6fe121817305ba2191c875f7367f88c";
 constexpr char kHashFldVcAp[] =
-    "eeb6a8c060a20622eef369b184c450bad5515167fa2cb42392277c7b0cbfe7d";
+    "e399633b16dbf327df9b459015caf617aff8e505e4f1fb694acf87a011d4259";
 constexpr char kHashFldDropId[] =
-    "b58c185ee8c98469a5cf9ff0f79da61a85fd1cb84082f0245f8fcacedbd51c4";
+    "ab3dcb191d84eccfe902a7fa6b558e3f6e54551df3b75ff512b503651a8c8fd";
 constexpr char kHashFldDropOwnType[] =
-    "ff39e4c6862fdbbb20c6006c272534051fc7eac136c4292de5a2f330083df1e";
+    "ba9c11c3f26c07b2d54ad71a14c85766c94f5f242655d1714140fc7d2c249b9";
 constexpr char kHashFldDropIsMoney[] =
-    "fe12a3c796d59c57c0f4901477e144f4d87b111122a9503e2d8c56bbe59a7b5";
+    "bbf96dd02ae0477e745bfa9071f5bb0fffd24bcb6bc233474521cf28daef93f";
 constexpr char kHashFldDropInfo[] =
-    "ada84a35e32ba3c3c385efcfebfa12e07018a5dc5f3aa94f54f81d179727935";
+    "f1522d196138debd17684b23c4a9f419bf9e79fba5e3a667dd08418c53403f8";
 constexpr char kHashFldDropPt1[] =
-    "bae201598a705b7c1a780fea991ae978a42d727ab52fbe2d7799f7927cc416d";
+    "a859e571991ebd01a270868d47213efd7bb67de0aa159f34b9c2ecbd4e6d4ad";
 constexpr char kHashFldDropEndPara[] =
-    "a1eac728cb2b8c48067a46ff45ca853fd2f420f9910c541c783dc31077025b1";
+    "eedc16b8e7b6814d48637a8cee0198cb3dba8a24c6c1e82f6abaa42dc7c1ff2";
 constexpr char kHashFldDropLastTry[] =
-    "d3ec8ddea958a36e5081e24cda0e076ba50d3fdb019e9b49cbddda2858dd002";
+    "b69adbb47a7803271e104385b836232c1301d09733943d57401ce17455d4a7b";
 constexpr char kHashFldDropPickStamp[] =
-    "c11188f537a410815a95da36a221be284d7eb52390850dc61e0395420ae355e";
+    "d6d0d5a3295f988960049e7d455ec8f6649a61e7a62bd6f7f4c5b026d621dbe";
 constexpr char kHashFldDropPickPt[] =
-    "efff49a8e01b1cdc961edb65e8e551e2dcdecefc6a53aad2e64063442cfb9b8";
+    "be77cdd14bcd51234266dd075ba9909cd80e1b64f432be0480bc2884bc7f206";
 constexpr char kHashFldDropPickable[] =
-    "a5ae3a3204e886538dd5d027433f90411a7f066256aabda0c1168930b0c5341";
+    "c6b4038548d567c81b5072a75d7975c6e8133cbf41dc23e949f50d917f5e764";
 constexpr char kHashFldItemSlotPetSkill[] =
-    "e3a0e195f75b7ae642ad7e9c06022b041a14a73b9c6d493d01e67aca7d65f95";
+    "d28422f656fc5094b3a5105727668a9b9e12d53b8e0b570ccbb6d002affb620";
 constexpr char kHashFldCollisionRcPet[] =
-    "ff117b02ce286b5b1afde556ec9dfe689561293aadeb7d9b241a06432ba87de";
+    "ec5f92b9c9b9faf74edd63c8ba70d2eb2a860427d371b5765b451beee2bac1b";
 
 struct DropFieldOff {
     size_t apPet = kFbApPet;
@@ -249,8 +253,8 @@ constexpr int kEndParaReady = 3;
 constexpr int kEndParaSkipHold = 4;
 constexpr int kLastTrySkipStamp = 0x7FFFFFFF;
 
-// 人物直吸（不靠宠）：复刻官方 DropPool.TryPickUpDrop（RVA 0xF76DC0）的门禁语义，然后直接调
-// 它自己的 DropPool.SendDropPickUpRequest（RVA 0xF78640）。控制面与宠吸同构（清闸/退避盖戳/
+// 人物直吸（不靠宠）：复刻官方 DropPool.TryPickUpDrop（RVA 0xF76B50）的门禁语义，然后直接调
+// 它自己的 DropPool.SendDropPickUpRequest（RVA 0xF783D0）。控制面与宠吸同构（清闸/退避盖戳/
 // 黑名单盖戳/拒收即 AddStall/拍末还原），只是中心从宠坐标换成角色坐标、送包走人物入口。
 // 官方那条链逐指令实读所得：
 //   ① [drop+0x2D] 必须为真                       ② EndPara(0x7C) == 3
@@ -401,19 +405,86 @@ MethodInfoHead* gMiPetSend = nullptr;
 MethodInfoHead* gMiPoolSend = nullptr;
 void* gOrigPetSend = nullptr;
 void* gOrigPoolSend = nullptr;
+void* gOrigTryPickUp = nullptr;  // ResolveMi 那份原生入口；真空直调，不进钩
+struct TryPickMiSlot {
+    MethodInfoHead* mi = nullptr;
+    void* orig = nullptr;
+};
+constexpr int kTryPickMiCap = 4;
+TryPickMiSlot gTryPickMi[kTryPickMiCap]{};
+int gTryPickMiN = 0;
+constexpr int kTryPickVtCap = 8;
+void** gTryPickVtSlot[kTryPickVtCap]{};
+void* gTryPickVtOrig[kTryPickVtCap]{};
+int gTryPickVtN = 0;
+std::atomic<bool> gTryPickProbeInstalled{false};
+std::atomic<uint32_t> gTryPickHookHits{0};
 // ByPet .rdata 矩形包：xref/特征定位缓存（拍内 patch 前必须已 resolve）
 uint8_t* gByPetRectPack = nullptr;
 const char* gByPetRectVia = nullptr;
+struct RectHoldState {
+    bool active = false;
+    uint8_t* base = nullptr;
+    DWORD oldProtect = 0;
+    float w = 0.f;
+    float h = 0.f;
+};
+RectHoldState gRectHold{};
 std::atomic<uint32_t> gPetSendHits{0};
 std::atomic<uint32_t> gPoolSendHits{0};
+std::atomic<uint32_t> gSkipSwallowHits{0};
 std::atomic<bool> gSendProbeInstalled{false};
-// 拒收连击整段休眠截止 tick（worker 侧可读，避免退避期仍排队 MainPump）
 std::atomic<DWORD> gRejectBackoffUntil{0};
+// 拒收连击整段休眠截止 tick（worker 侧可读，避免退避期仍排队 MainPump）
+SkipIds gLiveSkipA{};
+SkipIds gLiveSkipB{};
+std::atomic<int> gLiveSkipSel{0};
+
+void PublishLiveSkip(const SkipIds* skip) {
+    const int next = 1 - gLiveSkipSel.load(std::memory_order_relaxed);
+    SkipIds& dst = (next == 1) ? gLiveSkipB : gLiveSkipA;
+    if (skip)
+        dst = *skip;
+    else
+        dst.clear();
+    gLiveSkipSel.store(next, std::memory_order_release);
+}
+
+const SkipIds& LiveSkip() {
+    return gLiveSkipSel.load(std::memory_order_acquire) ? gLiveSkipB : gLiveSkipA;
+}
+
+bool StampOneSkipDrop(void* drop);
+void* FindDropById(void* pool, int dropId);
+bool DropMatchesSkip(void* drop, const SkipIds& skip);
+int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float halfH,
+                          const SkipIds& skip, int* outNear, int* outWant, int* outTotal);
+bool EnsureExceptionIdsIfNeeded(void* pet, const SkipIds& skip);
+void EnsureTryPickProbe();
+
+bool ShouldSwallowPickup(int dropId) {
+    const SkipIds& skip = LiveSkip();
+    if (skip.empty() || dropId <= 0) return false;
+    void* pool = gDropPool;
+    if (!pool) return false;
+    void* drop = FindDropById(pool, dropId);
+    if (!drop) return false;
+    if (!DropMatchesSkip(drop, skip)) return false;
+    StampOneSkipDrop(drop);
+    const uint32_t n = gSkipSwallowHits.fetch_add(1, std::memory_order_relaxed) + 1;
+    static DWORD sSwLog = 0;
+    const DWORD now = GetTickCount();
+    if (!sSwLog || now - sSwLog >= 2000u) {
+        sSwLog = now;
+        x::runtime::LogI("droppool", "skip-swallow send dropId=%d n=%u (land-frame gate)", dropId, n);
+    }
+    return true;
+}
 
 constexpr int kInvTiEquip = 1;
 constexpr int kInvTiConsume = 2;
 
-enum class HvClass : int { None = 0, Equip = 1, Scroll = 2 };
+enum class HvClass : int { None = 0, Equip = 1, Scroll = 2, Dart = 3 };
 
 bool InvHasFreeSlot(int invType);
 HvClass ClassifyHighValueItem(int info, bool isMoney);
@@ -431,6 +502,8 @@ const char* HvClassName(HvClass hv) {
         return "equip";
     case HvClass::Scroll:
         return "scroll";
+    case HvClass::Dart:
+        return "dart";
     default:
         return "none";
     }
@@ -536,12 +609,61 @@ void WriteF32(void* obj, size_t off, float v) {
     }
 }
 
+void WriteF64(void* obj, size_t off, double v) {
+    if (!obj) return;
+    __try {
+        *reinterpret_cast<double*>(reinterpret_cast<uint8_t*>(obj) + off) = v;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void WriteI32(void* obj, size_t off, int32_t v) {
     if (!obj) return;
     __try {
         *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + off) = v;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
+}
+
+void WriteU8(void* obj, size_t off, uint8_t v) {
+    if (!obj) return;
+    __try {
+        *(reinterpret_cast<uint8_t*>(obj) + off) = v;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// 黑名单长期戳。原生 TryPickUpDrop 看 Pickable@0x2D，不看 EndPara；
+// 只盖 LastTry/EndPara 拦不住原生宠。飞行中也写成 SkipHold(4)，禁止再变回 Ready(3)。
+// 禁写 EndPara=0。返回是否本拍新动过。
+bool StampOneSkipDrop(void* drop) {
+    if (!drop || !DropWritesAllowed()) return false;
+    bool touched = false;
+    if (ReadI32(drop, kOffDropLastTry) != kLastTrySkipStamp) {
+        WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
+        touched = true;
+    }
+    const int endp = ReadI32(drop, kOffDropEndPara);
+    if (endp != kEndParaSkipHold) {
+        WriteI32(drop, kOffDropEndPara, kEndParaSkipHold);
+        touched = true;
+    }
+    if (kOffDropPickable >= 0x10 && kOffDropPickable < 0x100 &&
+        ReadU8(drop, kOffDropPickable) != 0) {
+        WriteU8(drop, kOffDropPickable, 0);
+        touched = true;
+    }
+    if (touched) {
+        static DWORD sLog = 0;
+        const DWORD now = GetTickCount();
+        if (!sLog || now - sLog >= 2000u) {
+            sLog = now;
+            const int info = ReadI32(drop, kOffDropInfo);
+            x::runtime::LogI("droppool",
+                             "skip-stamp info=%d endp=%d→4 pickable=0 last=INT_MAX", info, endp);
+        }
+    }
+    return touched;
 }
 
 int RestoreOwnSkipStamps() {
@@ -1137,8 +1259,11 @@ bool PatchMethodInfo(MethodInfoHead* mi, void* hook, void** outOrig) {
     if (!mi || !hook || !outOrig) return false;
     DWORD old = 0;
     if (!VirtualProtect(mi, sizeof(MethodInfoHead), PAGE_READWRITE, &old)) return false;
-    *outOrig = mi->methodPointer;
+    *outOrig = mi->methodPointer ? mi->methodPointer : mi->virtualMethodPointer;
     mi->methodPointer = hook;
+    // 虚派发读 virtualMethodPointer；只换 methodPointer 时 ByPet 仍可能走原生。
+    if (mi->virtualMethodPointer == *outOrig || mi->virtualMethodPointer == nullptr)
+        mi->virtualMethodPointer = hook;
     VirtualProtect(mi, sizeof(MethodInfoHead), old, &old);
     return true;
 }
@@ -1147,12 +1272,210 @@ void RestoreMethodInfo(MethodInfoHead* mi, void* orig) {
     if (!mi || !orig) return;
     DWORD old = 0;
     if (!VirtualProtect(mi, sizeof(MethodInfoHead), PAGE_READWRITE, &old)) return;
+    void* cur = mi->methodPointer;
     mi->methodPointer = orig;
+    if (mi->virtualMethodPointer == cur) mi->virtualMethodPointer = orig;
     VirtualProtect(mi, sizeof(MethodInfoHead), old, &old);
+}
+
+void RestoreVtableMethodPtr(void** slot, void* orig) {
+    if (!slot || !orig) return;
+    DWORD old = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return;
+    __try {
+        *slot = orig;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    VirtualProtect(slot, sizeof(void*), old, &old);
+}
+
+bool PatchVtableMethodPtr(void** slot, void* hook, void** outOrig) {
+    if (!slot || !hook || !outOrig) return false;
+    void* orig = nullptr;
+    __try {
+        orig = *slot;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!orig || orig == hook) return false;
+    DWORD old = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
+    bool ok = false;
+    __try {
+        *slot = hook;
+        *outOrig = orig;
+        ok = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = false;
+    }
+    VirtualProtect(slot, sizeof(void*), old, &old);
+    return ok;
+}
+
+// 只认 VirtualInvokeData.method == 本 MI（unity_kbd：裸扫 methodPtr 会改到派发不读的格子）。
+int PatchTryPickVtable(void* klass, MethodInfoHead* mi, void* hook) {
+    if (!klass || !mi || !hook) return 0;
+    int n = 0;
+    constexpr size_t kLo = 0x80;
+    constexpr size_t kHi = 0xC00;
+    for (size_t off = kLo; off + 16 <= kHi; off += 8) {
+        void* p0 = nullptr;
+        void* p1 = nullptr;
+        __try {
+            p0 = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(klass) + off);
+            p1 = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(klass) + off + 8);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            continue;
+        }
+        (void)p0;
+        if (p1 != mi) continue;
+        if (p0 == hook) continue;
+        void** slot = reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(klass) + off);
+        bool seen = false;
+        for (int i = 0; i < gTryPickVtN; ++i) {
+            if (gTryPickVtSlot[i] == slot) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        void* orig = nullptr;
+        if (!PatchVtableMethodPtr(slot, hook, &orig)) continue;
+        if (gTryPickVtN < kTryPickVtCap) {
+            gTryPickVtSlot[gTryPickVtN] = slot;
+            gTryPickVtOrig[gTryPickVtN] = orig;
+            ++gTryPickVtN;
+        }
+        ++n;
+    }
+    return n;
+}
+
+void StampSkipBeforeNativePick(void* pet) {
+    const SkipIds& skip = LiveSkip();
+    if (skip.empty()) return;
+    if (!LooksLikeHeapPtr(pet)) return;
+    void* pool = gDropPool;
+    if (!LooksLikeHeapPtr(pool)) return;
+    (void)EnsureExceptionIdsIfNeeded(pet, skip);
+    const int n = StampSkippedDropsNear(pool, 0.f, 0.f, 1e9f, 1e9f, skip, nullptr, nullptr, nullptr);
+    if (n <= 0) return;
+    static DWORD sLog = 0;
+    const DWORD now = GetTickCount();
+    if (!sLog || now - sLog >= 2000u) {
+        sLog = now;
+        x::runtime::LogI("droppool",
+                         "skip-hold try-pick stamp=%d skipN=%d hits=%u (land-frame MI)", n,
+                         (int)skip.size(), gTryPickHookHits.load(std::memory_order_relaxed));
+    }
+}
+
+void HookPetTryPickUp(void* pet, const void* methodInfo) {
+    thread_local int depth = 0;
+    auto callOrig = [&]() {
+        void* orig = gOrigTryPickUp;
+        if (methodInfo) {
+            for (int i = 0; i < gTryPickMiN; ++i) {
+                if (gTryPickMi[i].mi == methodInfo && gTryPickMi[i].orig) {
+                    orig = gTryPickMi[i].orig;
+                    break;
+                }
+            }
+        }
+        auto* fn = reinterpret_cast<FnPetTryPickUp>(orig);
+        if (fn) fn(pet, methodInfo);
+    };
+    if (depth > 0) {
+        callOrig();
+        return;
+    }
+    ++depth;
+    StampSkipBeforeNativePick(pet);
+    gTryPickHookHits.fetch_add(1, std::memory_order_relaxed);
+    callOrig();
+    --depth;
+}
+
+bool PatchOneTryPickMi(MethodInfoHead* mi, void* hook) {
+    if (!mi || !hook) return false;
+    for (int i = 0; i < gTryPickMiN; ++i) {
+        if (gTryPickMi[i].mi == mi) return gTryPickMi[i].orig != nullptr;
+    }
+    void* orig = nullptr;
+    if (!PatchMethodInfo(mi, hook, &orig) || !orig) return false;
+    if (gTryPickMiN >= kTryPickMiCap) return true;
+    gTryPickMi[gTryPickMiN].mi = mi;
+    gTryPickMi[gTryPickMiN].orig = orig;
+    ++gTryPickMiN;
+    return true;
+}
+
+void EnsureTryPickProbe() {
+    if (gTryPickProbeInstalled.load(std::memory_order_acquire)) return;
+    if (!gGA || !gClassGetMethods) return;
+    if (!gPetKlass) gPetKlass = FindClass(kPetClass);
+    if (!gPetKlass) return;
+
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    constexpr MethodShape kTry{0, TypeKind::Void, true, false, {}};
+    if (!gMiTryPickUp) {
+        gMiTryPickUp = ResolveMi(gPetKlass, kRvaPetTryPickUpDrop, kTry, "TryPickUpDrop",
+                                 kHashPetTryPickUp);
+    }
+
+    MethodInfoHead* extra[4]{};
+    int extraN = 0;
+    auto pushMi = [&](MethodInfoHead* m) {
+        if (!m) return;
+        for (int i = 0; i < extraN; ++i) {
+            if (extra[i] == m) return;
+        }
+        if (extraN < 4) extra[extraN++] = m;
+    };
+    pushMi(gMiTryPickUp);
+    pushMi(FindMethodByRva(gPetKlass, kRvaPetTryPickStub));
+    pushMi(FindMethodByRva(gPetKlass, kRvaPetTryPickBody));
+    pushMi(FindMethodByRva(gPetKlass, kRvaPetTryPickUpDrop));
+
+    auto* hook = reinterpret_cast<void*>(&HookPetTryPickUp);
+    int patched = 0;
+    for (int i = 0; i < extraN; ++i) {
+        if (PatchOneTryPickMi(extra[i], hook)) ++patched;
+    }
+    if (gMiTryPickUp) {
+        for (int i = 0; i < gTryPickMiN; ++i) {
+            if (gTryPickMi[i].mi == gMiTryPickUp) {
+                gOrigTryPickUp = gTryPickMi[i].orig;
+                break;
+            }
+        }
+    }
+    if (!gOrigTryPickUp && gTryPickMiN > 0) gOrigTryPickUp = gTryPickMi[0].orig;
+
+    int vt = 0;
+    for (int i = 0; i < gTryPickMiN; ++i) {
+        vt += PatchTryPickVtable(gPetKlass, gTryPickMi[i].mi, hook);
+    }
+
+    if (patched <= 0) return;
+    gTryPickProbeInstalled.store(true, std::memory_order_release);
+    uint32_t origRva = 0;
+    if (gOrigTryPickUp && gGA) {
+        const auto a = reinterpret_cast<uintptr_t>(gOrigTryPickUp);
+        const auto b = reinterpret_cast<uintptr_t>(gGA);
+        if (a >= b) origRva = static_cast<uint32_t>(a - b);
+    }
+    x::runtime::LogI("DropPort",
+                     "TryPickProbe MI n=%d vt=%d origRva=0x%X (native pet tick; Send 仍是 E8)",
+                     patched, vt, origRva);
 }
 
 bool __fastcall HookPetSend(void* self, uint64_t ptPacked, int dropId, uint32_t crc1, uint32_t crc2,
                             const void* methodInfo) {
+    if (ShouldSwallowPickup(dropId)) {
+        return false;
+    }
     gPetSendHits.fetch_add(1, std::memory_order_relaxed);
     auto* fn = reinterpret_cast<FnPetSend>(gOrigPetSend);
     return fn ? fn(self, ptPacked, dropId, crc1, crc2, methodInfo) : false;
@@ -1160,55 +1483,64 @@ bool __fastcall HookPetSend(void* self, uint64_t ptPacked, int dropId, uint32_t 
 
 void __fastcall HookPoolSend(void* self, const void* ptIn, int dropId, uint32_t crc,
                              const void* methodInfo) {
+    if (ShouldSwallowPickup(dropId)) {
+        return;
+    }
     gPoolSendHits.fetch_add(1, std::memory_order_relaxed);
     auto* fn = reinterpret_cast<FnPoolSend>(gOrigPoolSend);
     if (fn) fn(self, ptIn, dropId, crc, methodInfo);
 }
 
 void EnsureSendProbe() {
-    if (gSendProbeInstalled.load(std::memory_order_acquire)) return;
-    if (!gGA || !gClassGetMethods) return;
-    if (!gPetKlass) gPetKlass = FindClass(kPetClass);
-    if (!gDropPoolKlass) gDropPoolKlass = FindClass(kDropPoolClass);
-    bool okPet = false;
-    bool okPool = false;
-    if (gPetKlass && !gMiPetSend) {
-        using x::runtime::il2cpp_method::MethodShape;
-        using x::runtime::il2cpp_method::TypeKind;
-        // bool(Point,int,uint,uint) 唯一。
-        constexpr MethodShape kPetSend{
-            4, TypeKind::Bool, true, false,
-            {TypeKind::Any, TypeKind::I32, TypeKind::U32, TypeKind::U32}};
-        gMiPetSend = ResolveMi(gPetKlass, kRvaPetSendDropPickUp, kPetSend, "SendDropPickUpRequest",
-                               kHashPetSendDropPickUp);
-        if (gMiPetSend &&
-            PatchMethodInfo(gMiPetSend, reinterpret_cast<void*>(&HookPetSend), &gOrigPetSend)) {
+    if (!gSendProbeInstalled.load(std::memory_order_acquire)) {
+        if (!gGA || !gClassGetMethods) {
+            EnsureTryPickProbe();
+            return;
+        }
+        if (!gPetKlass) gPetKlass = FindClass(kPetClass);
+        if (!gDropPoolKlass) gDropPoolKlass = FindClass(kDropPoolClass);
+        bool okPet = false;
+        bool okPool = false;
+        if (gPetKlass && !gMiPetSend) {
+            using x::runtime::il2cpp_method::MethodShape;
+            using x::runtime::il2cpp_method::TypeKind;
+            // bool(Point,int,uint,uint) 唯一。
+            constexpr MethodShape kPetSend{
+                4, TypeKind::Bool, true, false,
+                {TypeKind::Any, TypeKind::I32, TypeKind::U32, TypeKind::U32}};
+            gMiPetSend = ResolveMi(gPetKlass, kRvaPetSendDropPickUp, kPetSend, "SendDropPickUpRequest",
+                                   kHashPetSendDropPickUp);
+            if (gMiPetSend &&
+                PatchMethodInfo(gMiPetSend, reinterpret_cast<void*>(&HookPetSend), &gOrigPetSend)) {
+                okPet = true;
+            }
+        } else if (gMiPetSend && gOrigPetSend) {
             okPet = true;
         }
-    } else if (gMiPetSend && gOrigPetSend) {
-        okPet = true;
-    }
-    if (gDropPoolKlass && !gMiPoolSend) {
-        using x::runtime::il2cpp_method::MethodShape;
-        using x::runtime::il2cpp_method::TypeKind;
-        // void(in Point,int,uint) 唯一。
-        constexpr MethodShape kPoolSend{
-            3, TypeKind::Void, true, false, {TypeKind::Any, TypeKind::I32, TypeKind::U32}};
-        gMiPoolSend = ResolveMi(gDropPoolKlass, kRvaPoolSendDropPickUp, kPoolSend,
-                                "SendDropPickUpRequest", kHashPoolSendDropPickUp);
-        if (gMiPoolSend &&
-            PatchMethodInfo(gMiPoolSend, reinterpret_cast<void*>(&HookPoolSend), &gOrigPoolSend)) {
+        if (gDropPoolKlass && !gMiPoolSend) {
+            using x::runtime::il2cpp_method::MethodShape;
+            using x::runtime::il2cpp_method::TypeKind;
+            // void(in Point,int,uint) 唯一。
+            constexpr MethodShape kPoolSend{
+                3, TypeKind::Void, true, false, {TypeKind::Any, TypeKind::I32, TypeKind::U32}};
+            gMiPoolSend = ResolveMi(gDropPoolKlass, kRvaPoolSendDropPickUp, kPoolSend,
+                                    "SendDropPickUpRequest", kHashPoolSendDropPickUp);
+            if (gMiPoolSend &&
+                PatchMethodInfo(gMiPoolSend, reinterpret_cast<void*>(&HookPoolSend),
+                                &gOrigPoolSend)) {
+                okPool = true;
+            }
+        } else if (gMiPoolSend && gOrigPoolSend) {
             okPool = true;
         }
-    } else if (gMiPoolSend && gOrigPoolSend) {
-        okPool = true;
+        if (okPet || okPool) {
+            gSendProbeInstalled.store(true, std::memory_order_release);
+            x::runtime::LogI("DropPort",
+                             "SendProbe MI pet=%d pool=%d (ByPet/Send 是 E8；原生拦捡走 TryPickProbe)",
+                             okPet ? 1 : 0, okPool ? 1 : 0);
+        }
     }
-    if (okPet || okPool) {
-        gSendProbeInstalled.store(true, std::memory_order_release);
-        x::runtime::LogI("DropPort",
-                         "SendProbe MI pet=%d pool=%d (direct-call ByPet 可能不经 MI；以 dropsΔ 为准)",
-                         okPet ? 1 : 0, okPool ? 1 : 0);
-    }
+    EnsureTryPickProbe();
 }
 
 int ReadPoolDropCount(void* pool) {
@@ -1223,22 +1555,26 @@ int ReadPoolDropCount(void* pool) {
 }
 
 bool DropIdInPool(void* pool, int dropId) {
-    if (!pool || dropId == 0) return false;
+    return FindDropById(pool, dropId) != nullptr;
+}
+
+void* FindDropById(void* pool, int dropId) {
+    if (!pool || dropId == 0) return nullptr;
     void* dict = ReadPtr(pool, kOffPoolDict);
-    if (!LooksLikeHeapPtr(dict)) return false;
+    if (!LooksLikeHeapPtr(dict)) return nullptr;
     void* entries = ReadPtr(dict, kOffDictEntries);
     const int count = ReadI32(dict, kOffDictCount);
-    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return false;
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return nullptr;
     const uintptr_t arrLen = ArrayLen(entries);
-    if (arrLen == 0 || arrLen > 8192) return false;
+    if (arrLen == 0 || arrLen > 8192) return nullptr;
     for (uintptr_t i = 0; i < arrLen; ++i) {
         uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
         if (ReadI32(entry, kOffEntryHash) < 0) continue;
         void* drop = ReadPtr(entry, kOffEntryValue);
         if (!LooksLikeHeapPtr(drop)) continue;
-        if (ReadI32(drop, kOffDropId) == dropId) return true;
+        if (ReadI32(drop, kOffDropId) == dropId) return drop;
     }
-    return false;
+    return nullptr;
 }
 
 void* KlassStaticFields(void* klass) {
@@ -1468,6 +1804,7 @@ void* ResolveDropPool(DWORD now) {
     // 仅玩法就绪时的 miss 才短退避，避免 FindAll 空转；进图瞬间 gLast=0 可立刻重试。
     if (gLastPoolRebind && now - gLastPoolRebind < kRebindMs && !gDropPool) return nullptr;
     gLastPoolRebind = now;
+    void* prevPool = gDropPool;
     gDropPool = nullptr;
     if (!gDropPoolKlass) gDropPoolKlass = FindClass(kDropPoolClass);
     if (!gDropPoolKlass) {
@@ -1540,7 +1877,9 @@ void* ResolveDropPool(DWORD now) {
 
     if (best) {
         gDropPool = best;
-        x::runtime::LogI("DropPort", "DropPool bind %p score=%d", gDropPool, bestScore);
+        if (best != prevPool) {
+            x::runtime::LogI("DropPort", "DropPool bind %p score=%d", gDropPool, bestScore);
+        }
         return gDropPool;
     }
     // 玩法就绪仍扫不到才告警（真挂）；换图空窗已在入口 return。
@@ -1870,6 +2209,7 @@ uint8_t* ResolveByPetRectPack(bool force = false) {
 
 bool PatchByPetRectPack(float vacuumW, float vacuumH, ByPetRectBackup& bak) {
     bak = {};
+    if (gRectHold.active) return false;
     if (!gGA || vacuumW < 1.f || vacuumH < 1.f) return false;
     bak.base = ResolveByPetRectPack(false);
     if (!bak.base) return false;
@@ -1893,6 +2233,11 @@ bool PatchByPetRectPack(float vacuumW, float vacuumH, ByPetRectBackup& bak) {
 }
 
 void RestoreByPetRectPack(ByPetRectBackup& bak) {
+    if (gRectHold.active) {
+        bak.ok = false;
+        bak.base = nullptr;
+        return;
+    }
     if (!bak.ok || !bak.base) return;
     __try {
         *reinterpret_cast<int32_t*>(bak.base + 0) = bak.offX;
@@ -1904,6 +2249,70 @@ void RestoreByPetRectPack(ByPetRectBackup& bak) {
     DWORD tmp = 0;
     VirtualProtect(bak.base, 0x20, bak.oldProtect, &tmp);
     bak.ok = false;
+}
+
+void ReleaseByPetRectPackImpl();
+
+bool WriteRectPack(uint8_t* p, int32_t ox, int32_t oy, float w, float h) {
+    if (!p) return false;
+    __try {
+        *reinterpret_cast<int32_t*>(p + 0) = ox;
+        *reinterpret_cast<int32_t*>(p + 4) = oy;
+        *reinterpret_cast<float*>(p + 0x10) = w;
+        *reinterpret_cast<float*>(p + 0x14) = h;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool HoldByPetRectPackImpl(float vacuumW, float vacuumH) {
+    if (vacuumW < 1.f || vacuumH < 1.f) return false;
+    if (vacuumW < 50.f) vacuumW = 50.f;
+    if (vacuumH < 50.f) vacuumH = 50.f;
+    if (vacuumW > 20000.f) vacuumW = 20000.f;
+    if (vacuumH > 20000.f) vacuumH = 20000.f;
+    uint8_t* base = ResolveByPetRectPack(false);
+    if (!base) return false;
+    const int32_t offX = static_cast<int32_t>(vacuumW * 0.5f);
+    const int32_t offY = static_cast<int32_t>(vacuumH * 0.5f);
+    if (gRectHold.active && gRectHold.base == base && gRectHold.w == vacuumW &&
+        gRectHold.h == vacuumH) {
+        return true;
+    }
+    if (!gRectHold.active) {
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(base, 0x20, PAGE_READWRITE, &oldProtect)) return false;
+        gRectHold.base = base;
+        gRectHold.oldProtect = oldProtect;
+        gRectHold.active = true;
+    } else if (gRectHold.base != base) {
+        ReleaseByPetRectPackImpl();
+        DWORD oldProtect = 0;
+        if (!VirtualProtect(base, 0x20, PAGE_READWRITE, &oldProtect)) return false;
+        gRectHold.base = base;
+        gRectHold.oldProtect = oldProtect;
+        gRectHold.active = true;
+    }
+    if (!WriteRectPack(base, offX, offY, vacuumW, vacuumH)) return false;
+    gRectHold.w = vacuumW;
+    gRectHold.h = vacuumH;
+    x::runtime::LogI("DropPort", "native-vac hold %.0fx%.0f via=%s", vacuumW, vacuumH,
+                     gByPetRectVia ? gByPetRectVia : "?");
+    return true;
+}
+
+void ReleaseByPetRectPackImpl() {
+    if (!gRectHold.active || !gRectHold.base) {
+        gRectHold = {};
+        return;
+    }
+    (void)WriteRectPack(gRectHold.base, kNativeRectOffX, kNativeRectOffY, kNativeRectW,
+                        kNativeRectH);
+    DWORD tmp = 0;
+    VirtualProtect(gRectHold.base, 0x20, gRectHold.oldProtect, &tmp);
+    x::runtime::LogI("DropPort", "native-vac release (restore 50x60)");
+    gRectHold = {};
 }
 
 // 宠吸拍前门控（IDA ByPet 实锤）：
@@ -2312,20 +2721,7 @@ PetVacNearPass PreparePetVacNearPass(void* pool, float cx, float cy, float halfW
 
         // 黑名单：不碰清闸/Stall；有写权限才盖长期戳
         if (haveSkip && DropMatchesSkip(drop, *skip)) {
-            if (writesOk) {
-                const int last = ReadI32(drop, kOffDropLastTry);
-                const int endp = ReadI32(drop, kOffDropEndPara);
-                bool touched = false;
-                if (last != kLastTrySkipStamp) {
-                    WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
-                    touched = true;
-                }
-                if (endp == kEndParaReady) {
-                    WriteI32(drop, kOffDropEndPara, kEndParaSkipHold);
-                    touched = true;
-                }
-                if (touched) ++out.skipStamped;
-            }
+            if (writesOk && StampOneSkipDrop(drop)) ++out.skipStamped;
             continue;
         }
 
@@ -2913,21 +3309,16 @@ void RunVacuumOnMain() {
     // 日志 rc= 表示本拍意图真空尺寸（实际写入 .rdata 矩形包）
     r.afterRc = vacuum;
 
-    EnsureSendProbe();  // 仅即将调 ByPet 时装探针（空拍/无技能不再碰）
+    EnsureSendProbe();  // 顺带 EnsureTryPickProbe：原生宠 Tick 走 TryPick MI
+    EnsureTryPickProbe();
 
     r.flyHeld = 0;  // 能走到这里说明 flyNear==0
 
     ByPetRectBackup rectBak{};
     const bool rectPatched = PatchByPetRectPack(gJob.vacuumW, gJob.vacuumH, rectBak);
 
-    if (!gMiTryPickUp && gPetKlass) {
-        using x::runtime::il2cpp_method::MethodShape;
-        using x::runtime::il2cpp_method::TypeKind;
-        constexpr MethodShape kTry{0, TypeKind::Void, true, false, {}};
-        gMiTryPickUp = ResolveMi(gPetKlass, kRvaPetTryPickUpDrop, kTry, "TryPickUpDrop",
-                                 kHashPetTryPickUp);
-    }
-    auto fn = FnFromMi<FnPetTryPickUp>(gMiTryPickUp, kRvaPetTryPickUpDrop);
+    auto fn = reinterpret_cast<FnPetTryPickUp>(gOrigTryPickUp);
+    if (!fn) fn = FnFromMi<FnPetTryPickUp>(gMiTryPickUp, kRvaPetTryPickUpDrop);
     const uint32_t petHits0 = gPetSendHits.load(std::memory_order_relaxed);
     const uint32_t poolHits0 = gPoolSendHits.load(std::memory_order_relaxed);
     bool ok = false;
@@ -3063,19 +3454,16 @@ HvClass ClassifyHighValueItem(int info, bool isMoney) {
     if (isMoney || info <= 0) return HvClass::None;
     // 装备：经典版 itemId / 1e6 == 1
     if (info / 1000000 == 1) return HvClass::Equip;
-    // 装备卷常見段 204xxxx
+    // 只认 204 装备卷。回城/任务/洗点等品名带「卷轴」的消耗品不当高价值，也不叮咚。
     if (info >= 2040000 && info < 2050000) return HvClass::Scroll;
-    char code[16]{};
-    snprintf(code, sizeof(code), "%d", info);
-    const xcat::ItemCatalogPack& pack = xcat::GetSharedItemCatalog(x::runtime::GetBinDir());
-    const char* name = xcat::ItemCatalogLookupName(pack, code);
-    if (name && name[0] && (strstr(name, "卷軸") || strstr(name, "卷轴"))) return HvClass::Scroll;
+    // 雷之鏢：消耗栏飞镖，不是卷、也不是 1xxxxxx 装备。
+    if (info == kThunderDartItemId) return HvClass::Dart;
     return HvClass::None;
 }
 
 bool HighValueBagAllows(HvClass hv) {
     if (hv == HvClass::Equip) return InvHasFreeSlot(kInvTiEquip);
-    if (hv == HvClass::Scroll) return InvHasFreeSlot(kInvTiConsume);
+    if (hv == HvClass::Scroll || hv == HvClass::Dart) return InvHasFreeSlot(kInvTiConsume);
     return false;
 }
 
@@ -3209,7 +3597,6 @@ int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float hal
     if (arrLen == 0 || arrLen > 8192) return 0;
 
     int total = 0, nearN = 0, want = 0, stamped = 0;
-    const bool writesOk = DropWritesAllowed();
     for (uintptr_t i = 0; i < arrLen; ++i) {
         uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
         const int hash = ReadI32(entry, kOffEntryHash);
@@ -3224,20 +3611,7 @@ int StampSkippedDropsNear(void* pool, float cx, float cy, float halfW, float hal
         if (std::fabs(dx) > halfW || std::fabs(dy) > halfH) continue;
         ++nearN;
         if (DropMatchesSkip(drop, skip)) {
-            if (!writesOk) continue;
-            const int last = ReadI32(drop, kOffDropLastTry);
-            const int endp = ReadI32(drop, kOffDropEndPara);
-            bool touched = false;
-            if (last != kLastTrySkipStamp) {
-                WriteI32(drop, kOffDropLastTry, kLastTrySkipStamp);
-                touched = true;
-            }
-            // Ready(3) 会被 ByPet 吸入动画；改成 SkipHold，且绝不写 0
-            if (endp == kEndParaReady) {
-                WriteI32(drop, kOffDropEndPara, kEndParaSkipHold);
-                touched = true;
-            }
-            if (touched) ++stamped;
+            if (StampOneSkipDrop(drop)) ++stamped;
             continue;
         }
         ++want;
@@ -3652,16 +4026,37 @@ void Init() {
 }
 
 void Shutdown() {
+    ReleaseByPetRectPackImpl();
+    for (int i = 0; i < gTryPickVtN; ++i) {
+        RestoreVtableMethodPtr(gTryPickVtSlot[i], gTryPickVtOrig[i]);
+        gTryPickVtSlot[i] = nullptr;
+        gTryPickVtOrig[i] = nullptr;
+    }
+    gTryPickVtN = 0;
+    for (int i = 0; i < gTryPickMiN; ++i) {
+        RestoreMethodInfo(gTryPickMi[i].mi, gTryPickMi[i].orig);
+        gTryPickMi[i] = {};
+    }
+    gTryPickMiN = 0;
     if (gMiPetSend && gOrigPetSend) RestoreMethodInfo(gMiPetSend, gOrigPetSend);
     if (gMiPoolSend && gOrigPoolSend) RestoreMethodInfo(gMiPoolSend, gOrigPoolSend);
     gMiPetSend = nullptr;
     gMiPoolSend = nullptr;
+    gMiTryPickUp = nullptr;
     gOrigPetSend = nullptr;
     gOrigPoolSend = nullptr;
+    gOrigTryPickUp = nullptr;
     gSendProbeInstalled.store(false, std::memory_order_release);
+    gTryPickProbeInstalled.store(false, std::memory_order_release);
     gDropPool = nullptr;
     gLocalUser = nullptr;
 }
+
+bool HoldByPetRectPack(float vacuumW, float vacuumH) {
+    return HoldByPetRectPackImpl(vacuumW, vacuumH);
+}
+
+void ReleaseByPetRectPack() { ReleaseByPetRectPackImpl(); }
 
 bool EnsureBound() {
     if (!BindIl2Cpp()) return false;
@@ -3669,7 +4064,10 @@ bool EnsureBound() {
     const bool lu = ResolveLocalUser(now);
     void* pool = ResolveDropPool(now);
     if (!gPetKlass) gPetKlass = FindClass(kPetClass);
-    if (lu && pool) EnsureSendProbe();
+    if (lu && pool) {
+        EnsureSendProbe();
+        EnsureTryPickProbe();
+    }
     return lu && pool != nullptr;
 }
 
@@ -3706,6 +4104,116 @@ bool CollectProbe(ProbeSnapshot& out, float nearHalfW, float nearHalfH) {
     return true;
 }
 
+int BoostDropFall(bool snapLand, bool accelFall, const SkipIds* skipIds, int* outSnap,
+                  int* outAccel, int* outSkipHold) {
+    if (outSnap) *outSnap = 0;
+    if (outAccel) *outAccel = 0;
+    if (outSkipHold) *outSkipHold = 0;
+    if (!snapLand && !accelFall) return 0;
+    if (!EnsureBound() || !DropWritesAllowed()) return 0;
+    void* pool = ResolveDropPool(GetTickCount());
+    if (!pool) return 0;
+    void* dict = ReadPtr(pool, kOffPoolDict);
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    void* entries = ReadPtr(dict, kOffDictEntries);
+    const int count = ReadI32(dict, kOffDictCount);
+    if (!LooksLikeHeapPtr(entries) || count < 0 || count > 4096) return 0;
+    const uintptr_t arrLen = ArrayLen(entries);
+    if (arrLen == 0 || arrLen > 8192) return 0;
+
+    // Drop.Update：t = LastTry/1000；态1 每帧 +0x90 += 36。worker 约 40ms 一拍。
+    constexpr int kAccelStep = 200;
+    constexpr int kAccelCap = 1000;
+    constexpr double kSpinStep = 36.0;
+    constexpr int kSpinCopies = 5;
+    constexpr size_t kFbDropSpin = 0x90;
+    const bool spinOk =
+        kOffDropPickPt == kFbDropPickPt && kOffDropLastTry == kFbDropLastTry;
+    const bool haveSkip = skipIds && !skipIds->empty();
+
+    int snapN = 0;
+    int accelN = 0;
+    int skipHoldN = 0;
+    for (uintptr_t i = 0; i < arrLen; ++i) {
+        uint8_t* entry = x::runtime::il2cpp_container::DictEntryAt(entries, i, kEntrySize);
+        if (ReadI32(entry, kOffEntryHash) < 0) continue;
+        void* drop = ReadPtr(entry, kOffEntryValue);
+        if (!LooksLikeHeapPtr(drop)) continue;
+
+        const int last = ReadI32(drop, kOffDropLastTry);
+        const int endp = ReadI32(drop, kOffDropEndPara);
+        const int px = ReadI32(drop, kOffDropPickPt);
+        const int py = ReadI32(drop, kOffDropPickPt + 4);
+        const bool havePickPt = !(px == 0 && py == 0);
+        const bool skipHit = haveSkip && DropMatchesSkip(drop, *skipIds);
+        const bool money = ReadU8(drop, kOffDropIsMoney) != 0;
+        const int info = ReadI32(drop, kOffDropInfo);
+
+        if (skipHit) {
+            if (StampOneSkipDrop(drop)) ++skipHoldN;
+            if (snapLand && havePickPt) {
+                WriteI32(drop, kOffDropPt1, px);
+                WriteI32(drop, kOffDropPt1 + 4, py);
+            }
+            continue;
+        }
+
+        if (endp == kEndParaSkipHold) continue;
+        if (endp == kEndParaReady) continue;
+        if (endp < 0 || endp > 2) continue;
+        if (!money && info <= 0) continue;
+        if (last == kLastTrySkipStamp) continue;
+        if (!havePickPt) continue;
+
+        if (snapLand) {
+            WriteI32(drop, kOffDropPt1, px);
+            WriteI32(drop, kOffDropPt1 + 4, py);
+            WriteI32(drop, kOffDropEndPara, kEndParaReady);
+            WriteI32(drop, kOffDropLastTry, 0);
+            const int stamp = ReadI32(drop, kOffDropPickStamp);
+            if (stamp != 0) WriteI32(drop, kOffDropPickStamp, 0);
+            ++snapN;
+            continue;
+        }
+
+        if (!accelFall) continue;
+        if (last >= 0 && last < kAccelCap) {
+            int next = last + kAccelStep;
+            if (next > kAccelCap) next = kAccelCap;
+            if (next != last) WriteI32(drop, kOffDropLastTry, next);
+        }
+        if (spinOk) {
+            const double spin = ReadF64(drop, kFbDropSpin);
+            WriteF64(drop, kFbDropSpin, spin + kSpinStep * static_cast<double>(kSpinCopies));
+        }
+        ++accelN;
+    }
+    if (outSnap) *outSnap = snapN;
+    if (outAccel) *outAccel = accelN;
+    if (outSkipHold) *outSkipHold = skipHoldN;
+    return snapN + accelN + skipHoldN;
+}
+
+int HoldSkipDrops(const SkipIds* skipIds, float halfW, float halfH) {
+    if (!skipIds || skipIds->empty()) {
+        PublishLiveSkip(nullptr);
+        return 0;
+    }
+    PublishLiveSkip(skipIds);
+    (void)halfW;
+    (void)halfH;
+    if (!EnsureBound()) return 0;
+    EnsureSendProbe();
+    const DWORD now = GetTickCount();
+    void* pool = ResolveDropPool(now);
+    if (!pool) return 0;
+    // ExceptionList 需要宠对象；盖戳本身不依赖宠坐标——原生 50x60 在脚边，
+    // 只按宠真空盒盖会漏。全池盖，与 TryPick 钩 StampSkipBeforeNativePick 对齐。
+    void* pet = FirstActivePet();
+    if (pet) (void)EnsureExceptionIdsIfNeeded(pet, *skipIds);
+    return StampSkippedDropsNear(pool, 0.f, 0.f, 1e9f, 1e9f, *skipIds, nullptr, nullptr, nullptr);
+}
+
 bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumResult& out,
                   bool highValuePriority) {
     out = {};
@@ -3731,6 +4239,7 @@ bool TryPetVacuum(float vacuumW, float vacuumH, const SkipIds* skipIds, VacuumRe
     gJob.highValuePriority = highValuePriority;
     gJob.skip = {};
     if (skipIds) gJob.skip = *skipIds;
+    PublishLiveSkip(skipIds);
     gJob.result = {};
     gJob.done = false;
 
@@ -3769,6 +4278,43 @@ bool PeekHighValueActionable(float petX, float petY, float halfW, float halfH, c
     return true;
 }
 
+namespace {
+struct HighValueWatch {
+    int itemId = 0;
+    int kind = 0;
+    bool published = false;
+    DWORD publishedMs = 0;
+};
+
+void* gHvAlertPool = nullptr;
+std::unordered_map<int, HighValueWatch> gHvWatch;
+std::vector<HighValueDropAlert> gHvGone;
+bool gHvSeeded = false;
+constexpr DWORD kHvPickSuccessMaxAgeMs = 180000;
+constexpr size_t kHvGoneCap = 16;
+
+void ResetHighValueWatch(void* pool) {
+    gHvAlertPool = pool;
+    gHvWatch.clear();
+    gHvGone.clear();
+    gHvSeeded = false;
+}
+
+void PushGone(int dropId, const HighValueWatch& w) {
+    if (!w.published) return;
+    const DWORD now = GetTickCount();
+    if (w.publishedMs != 0 &&
+        static_cast<int>(now - w.publishedMs) > static_cast<int>(kHvPickSuccessMaxAgeMs))
+        return;
+    if (gHvGone.size() >= kHvGoneCap) return;
+    HighValueDropAlert a{};
+    a.dropId = dropId;
+    a.itemId = w.itemId;
+    a.kind = w.kind;
+    gHvGone.push_back(a);
+}
+}  // namespace
+
 int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut) {
     if (!out || maxOut <= 0) return 0;
     if (!EnsureBound()) return 0;
@@ -3776,13 +4322,8 @@ int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut) {
     if (!LooksLikeHeapPtr(pool)) pool = ResolveDropPool(GetTickCount());
     if (!LooksLikeHeapPtr(pool)) return 0;
 
-    static void* s_alertPool = nullptr;
-    static std::unordered_set<int> s_alerted;
-    static bool s_seeded = false;
-    if (pool != s_alertPool) {
-        s_alertPool = pool;
-        s_alerted.clear();
-        s_seeded = false;  // 换池先静默登记现有件，避免进图瞬间刷一串提示
+    if (pool != gHvAlertPool) {
+        ResetHighValueWatch(pool);  // 换池先静默登记现有件，避免进图瞬间刷一串提示
     }
 
     void* dict = ReadPtr(pool, kOffPoolDict);
@@ -3809,30 +4350,49 @@ int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut) {
         if (ReadU8(drop, kOffDropIsMoney) != 0) continue;
         const int info = ReadI32(drop, kOffDropInfo);
         const HvClass hv = ClassifyHighValueItem(info, false);
-        if (hv != HvClass::Scroll) continue;  // 仅卷軸提示音；装备不提醒
+        if (hv != HvClass::Scroll && hv != HvClass::Dart) continue;  // 卷軸 / 雷之鏢；其它装备不提醒
         if (!DropClientPickable(drop)) continue;
-        if (!s_seeded) {
-            s_alerted.insert(id);
+        if (!gHvSeeded) {
+            HighValueWatch w{};
+            w.itemId = info;
+            w.kind = static_cast<int>(hv);
+            gHvWatch.emplace(id, w);
             continue;
         }
-        if (s_alerted.contains(id)) continue;
+        if (gHvWatch.contains(id)) continue;
         // 本拍 out 已满：不要 insert，留给下一拍再吐，避免永久漏提示
         if (nOut >= maxOut) continue;
-        s_alerted.insert(id);
+        HighValueWatch w{};
+        w.itemId = info;
+        w.kind = static_cast<int>(hv);
+        w.published = true;
+        w.publishedMs = GetTickCount();
+        gHvWatch.emplace(id, w);
         out[nOut].dropId = id;
         out[nOut].itemId = info;
-        out[nOut].kind = static_cast<int>(HvClass::Scroll);
+        out[nOut].kind = static_cast<int>(hv);
         ++nOut;
     }
-    if (!s_seeded) s_seeded = true;
-    // 修剪：只保留仍在池的
-    for (auto it = s_alerted.begin(); it != s_alerted.end();) {
-        if (!live.contains(*it))
-            it = s_alerted.erase(it);
-        else
+    if (!gHvSeeded) gHvSeeded = true;
+    for (auto it = gHvWatch.begin(); it != gHvWatch.end();) {
+        if (!live.contains(it->first)) {
+            PushGone(it->first, it->second);
+            it = gHvWatch.erase(it);
+        } else {
             ++it;
+        }
     }
     return nOut;
+}
+
+int CollectGoneHighValueDrops(HighValueDropAlert* out, int maxOut) {
+    if (!out || maxOut <= 0) return 0;
+    int n = 0;
+    while (n < maxOut && !gHvGone.empty()) {
+        out[n++] = gHvGone.front();
+        gHvGone.erase(gHvGone.begin());
+    }
+    return n;
 }
 
 bool TryFootPickup(FootResult& out) {
@@ -3875,6 +4435,8 @@ bool TryCharVacuum(float halfW, float halfH, int maxSend, const SkipIds* skipIds
     gCharVac.maxSend = maxSend > 0 ? maxSend : 1;
     gCharVac.skip = {};
     if (skipIds) gCharVac.skip = *skipIds;
+    PublishLiveSkip(skipIds);
+    EnsureTryPickProbe();
     gCharVac.result = {};
     gCharVac.done = false;
 

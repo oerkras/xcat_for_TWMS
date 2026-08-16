@@ -8,6 +8,8 @@ namespace xcat {
 // 策略对照 Maplecat UseAP（四维权重总和=5，每次 +1）；发包走官方 UIStat.ed6479da。
 constexpr uint32_t kAutoStatMagic = 0x58434153u;  // 'XCAS'
 constexpr uint32_t kAutoStatVersion = 1u;
+// 四维配比权重合计必须等于此值（官方每次升级给 5 AP）。
+// 这是「从开启起每 5 点怎么分」，不追已有四维；身上剩多少 AP 加多少。
 constexpr uint32_t kAutoStatRatioSum = 5u;
 constexpr uint32_t kAutoStatRatioMax = 99u;
 // 缺 section / 新用户必须关。禁止改成 1（挂机卡其它项有默认开的先例）。
@@ -31,5 +33,12 @@ bool AutoStatRatioOk(const AutoStatConfig& cfg);
 
 bool ReadAutoStat(const char* binDir, AutoStatConfig& out);
 bool WriteAutoStat(const char* binDir, const AutoStatConfig& cfg);
+
+// 初心者 job<100（含 0）不加。1 转起（100/200/300/400/500 及后续 2/3/4 转、双刀 430–434）才加。
+inline bool AutoStatJobReady(int job) {
+    if (job < 100) return false;
+    if (job >= 430 && job <= 434) return true;
+    return job <= 522;
+}
 
 }  // namespace xcat

@@ -635,10 +635,16 @@ void TickImpl(DWORD now) {
             gAlarmSuppressedUntilUiGone = false;
         }
         ClearPending();
-        gBusy.store(false);
-        if (!IsInfraPhase(gPhase)) gPhase = "idle";
         anti_macro_follower::SetEnabled(false);
         anti_macro_follower::Tick(now);  // 题目区域显示可在 autoLie 关时独立刷新
+        // 关自动测谎也要让路：轨迹题/知识题面板开着时加点、加技能点不许抢独占包。
+        bool quizOpen = false;
+        if (anti_macro_port::Ensure()) {
+            quizOpen = anti_macro_port::IsOpenAntiMacro() || anti_macro_port::IsTextCaptchaOpen() ||
+                       anti_macro_port::IsNonFiniteOpen();
+        }
+        gBusy.store(quizOpen);
+        if (!gBusy.load() && !IsInfraPhase(gPhase)) gPhase = "idle";
         WriteStatus(now);
         return;
     }
@@ -901,7 +907,8 @@ void Tick(DWORD now) { TickImpl(now); }
 
 bool IsBusy() {
     return gBusy.load() || anti_macro_follower::IsFollowing() ||
-           mouse_trajectory_sim::IsRunning();
+           anti_macro_follower::IsUiVisible() || mouse_trajectory_sim::IsRunning() ||
+           anti_macro_port::IsPredStale();
 }
 
 }  // namespace x::features::auto_lie

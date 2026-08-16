@@ -23,25 +23,25 @@ constexpr size_t kFbSessionState = 0x60;
 
 // dump.cs 2026-08-06 · Facade / Session fields（TypeDef 13772 / 13797）
 constexpr char kHashNmSession[] =
-    "b4e056f1d9edd7ab57bc053981c46572b76c6e22cdb3c836ddaa9925769f2e4";
+    "ed95a3e4867cbeb7b8102ff8cf323e6bf0be7959cb05ed436cbf4177c93238a";
 constexpr char kHashNmSessionState[] =
-    "becdc971fdfeefa83f1b4ca5634437054dbf8924f1684269d1ca9719b37df3e";
+    "a1ae27c183e96ee962a1759fd9e0094347a58cddd6a546d377e2bf85a114b24";
 constexpr char kHashNmPacketQueue[] =
-    "f5628f0a87ce9e93100b1765bf66994147c47db2d2b014e8bfad32e42fe0446";
+    "b5295655411094b4f5aadb40be72a38a3732f1d0b31d32ff19dff8bf2a5e2a5";
 constexpr char kHashNmOpcodeHashSet[] =
-    "e3d261928af826fc4a0f1f89bb58317343034de4d7075f6cc66cfd2a50ce908";
+    "c836acd948f666ae7b707a262af0c53f9ed8ba69b4140d0646ea5c1e6e2ccd0";
 
 // Session fields
 constexpr char kHashSessionSeqSend[] =
-    "dc3c9be0a29281d99c0079672f5f5e24892ef92891c9a8ba6c3df29a8ed6cbd";
+    "a67bf0b2a958dadc91f9417055952de8401e89e0b1ceebfa42d4796fda7b647";
 constexpr char kHashSessionClosed[] =
-    "f7f1f2aa2ed5781656e990a71fe28af8eb8ae7f984e58b40b544e77d4254f61";
+    "b5590ac63ad2e23e1779bbac20debfd6160afd7743759dd8829987e1ca2302c";
 constexpr char kHashSessionPendingError[] =
-    "d2befc30695d5ab1bbbaa3b5388f076b00c304d3b3a37e3233c5df63a73cb84";
+    "abb185ff627e18077e7d01cc4e8135603bbca6543e03304162de48c6128bc43";
 constexpr char kHashSessionRecvList[] =
-    "b9e9c145d495288951456b12f6d3e6c24484c4de711c777888aea9d9f7487b1";
+    "c951628408ecfab930c5dbf063eac716ee5210dc5380bcc23e142f3c005be94";
 constexpr char kHashSessionState[] =
-    "<ce0882a4909cc68611d342759c8659d8375f7f22d69b04c0c7cbffa8d36f676>k__BackingField";
+    "<bfdc6828570217ce6a0999f1b1f30cdca098eabf6845b886da64a01d47d3672>k__BackingField";
 
 size_t gOffNmSession = kFbNmSession;
 size_t gOffNmSessionState = kFbNmSessionState;

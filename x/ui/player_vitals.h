@@ -30,6 +30,16 @@ struct BaseApStats {
     int16_t intel = 0;
     int16_t luk = 0;
     int16_t ap = 0;
+    int16_t job = 0;
+    bool ok = false;
+};
+
+// 未分配 SP + 等级/职业。独立读路径：不要塞进 Read()。
+struct BaseSpStats {
+    uint32_t characterId = 0;
+    int level = 0;
+    int job = 0;
+    int16_t sp = 0;
     bool ok = false;
 };
 
@@ -41,6 +51,7 @@ bool Read(Vitals& out);
 
 // 仅 auto_stat 等低频模块调用。worker 纯内存读；不含装备加成。
 bool ReadBaseApStats(BaseApStats& out);
+bool ReadBaseSpStats(BaseSpStats& out);
 
 // 与 Read 相同（保留旧名；forceRebind 忽略）。
 bool ResolveAndRead(Vitals& out, DWORD now, bool forceRebind);

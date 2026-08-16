@@ -28,17 +28,21 @@ add_library(xcat_common STATIC
     xcat_timed_keys.cpp
     xcat_pet_loot.cpp
     xcat_auto_stat.cpp
+    xcat_char_boot.cpp
+    xcat_auto_skill.cpp
     xcat_buffs.cpp
     xcat_worlds_cache.cpp
     xcat_world_names.cpp
     xcat_map_names.cpp
     xcat_map_bounds.cpp
+    xcat_map_towns.cpp
     xcat_item_catalog.cpp
     xcat_sellbag.cpp
     xcat_auto_supply.cpp
     xcat_skill_names.cpp
     xcat_sound.cpp
     xcat_sound_presets.cpp
+    xcat_scroll_voice.cpp
     xcat_payload_notify.cpp
 )
 

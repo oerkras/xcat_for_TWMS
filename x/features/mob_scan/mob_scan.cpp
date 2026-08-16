@@ -75,6 +75,7 @@ void OpenLog() {
 
 // 高频扫描摘要只写 mobscan.log；低频事件才 LogI→x.jsonl。
 void LogToFile(const char* fmt, ...) {
+    OpenLog();
     char body[1200];
     va_list ap;
     va_start(ap, fmt);
@@ -224,10 +225,11 @@ DWORD WINAPI Worker(LPVOID) {
         if (gForceScan.exchange(false, std::memory_order_acq_rel)) {
             lastScan = 0;
             static DWORD sForceLog = 0;
-            if (!sForceLog || now - sForceLog > 200) {
+            if (!sForceLog || now - sForceLog > 10000) {
                 sForceLog = now;
-                LogLine("mobscan force interval=%ums combat=%d", (unsigned)interval,
-                        combatOn ? 1 : 0);
+                // combat 每 tick RequestImmediateScan；这条不是事件。只进 mobscan.log。
+                LogToFile("mobscan force interval=%ums combat=%d", (unsigned)interval,
+                          combatOn ? 1 : 0);
             }
         }
         if (combatOn != lastCombat || (combatOn && combatInterval != lastCombatInterval)) {

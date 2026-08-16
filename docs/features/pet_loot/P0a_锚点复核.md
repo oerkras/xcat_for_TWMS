@@ -85,7 +85,8 @@
 
 ### 3.3 位姿空间（BIN 0.1.17 + 08-04 仍适用）
 
-`VecCtrl.Ap` = Unity Y-up；`Drop.Pt1` = 枫谷 Y-down → 门控/近距用 **`worldY = -Ap.Y`**。
+`VecCtrl.Ap` = Unity Y-up；`Drop.Pt1` = 枫谷 Y-down → 门控/近距用 **`worldY = -Ap.Y`**。  
+攻包出站同一变换发生在 `EncodeVector2` 内部（`i16(x), i16(-y)`）；探针直写 AbsPos Y 会把掉落抛到头顶。见 [`../attack_rpc/P2_物落脚下.md`](../attack_rpc/P2_物落脚下.md)。
 
 ---
 

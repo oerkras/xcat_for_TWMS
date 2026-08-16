@@ -32,6 +32,9 @@ void SetHitRotateEnabled(bool on);
 bool IsHitRotateEnabled();
 void SetHitRotateN(uint32_t n);
 uint32_t HitRotateN();
+// 实验：出刀改组包，名单只填当前锁 oid；opcode 跟装备。默认关 → OnFuncKey。
+void SetForgeHitEnabled(bool on);
+bool IsForgeHitEnabled();
 void SetTeleportEnabled(bool on);  // 强制关：fill+Doing 战斗回落已禁用
 // Impact 贴怪（默认开）：近战直升机——旋翼环持续托举悬停在怪旁，空中出刀。
 // 优先于拟人。需无敌；交战期间自动挂 fh-ban（无怪超宽限则卸掉落地）。
@@ -52,6 +55,20 @@ unsigned FlySpeedPct();
 // 拟人位移：同层走路贴近；仅当 Impact 贴怪关时生效。
 void SetHumanWalkEnabled(bool on);
 bool IsHumanWalkEnabled();
+// 站桩输出：原地出刀 + 叠怪吸到身边（不写人 Ap）。范围 0=叠怪圈。
+// 默认关；与空中贴怪/拟人互斥。不滑翔。
+void SetHiraishinEnabled(bool on);
+bool IsHiraishinEnabled();
+// 站桩输出静止窗（ms）。0=不等。只在 F5 / 切到本策略 / 换图 / 软重连武装一次，换怪不重新站。
+void SetHiraishinLootHoldMs(uint32_t ms);
+uint32_t HiraishinLootHoldMs();
+// 站桩输出选怪 hypot 上限（px）。0=叠怪圈（GatherRadiusPx）。当前不挡刀。
+void SetHiraishinRangePx(uint32_t px);
+uint32_t HiraishinRangePx();
+// 站桩输出面前攻击盒半宽/半高（px，AbsPos）。0=该轴不限。默认 60×10。
+void SetHiraishinFrontBox(uint32_t dx, uint32_t dy);
+uint32_t HiraishinFrontDx();
+uint32_t HiraishinFrontDy();
 void SetLiveStepEnabled(bool on);
 bool IsLiveStepEnabled();
 void SetTeleportParams(uint32_t minDx, uint32_t standOff, uint32_t cooldownMs, uint32_t maxHop);
@@ -72,6 +89,7 @@ enum class HardPauseHolder : uint32_t {
     AutoSupply = 1u << 3,
     // 空中换图（回城卷 / 手动回城 / 贴门过图）：进图后同测谎落台，站稳即自清。
     MapArrive = 1u << 4,
+    CharBoot = 1u << 5,
 };
 void SetHardPause(HardPauseHolder holder, bool on);
 // 硬闸安全落台进行中（测谎 / 自动补给 / 遇人 / 进图）：旋翼飞近可站台再卸禁挂台。
@@ -80,6 +98,8 @@ bool IsSafeLandActive();
 // 主动请求同款安全落台（开店前 / 赶路到站后仍悬空）。Travel 活跃时 no-op（由 Travel settle 托空）。
 // 已有落台则重钉本图落点；否则 Begin + MapArrive（无其它硬闸持有者时靠 MapArrive 保闸）。
 void RequestSafeLand(const char* why);
+// 拆掉进行中的安全落台（起号贴 NPC 时禁止把人拽回出生台）。
+void CancelSafeLand(const char* why);
 // 兼容旧调用：映射到 HardPauseHolder::AutoLie（仅 auto_lie 仍走此入口时）。
 // 新代码请用 SetHardPause。
 void SetExternalPause(bool on);

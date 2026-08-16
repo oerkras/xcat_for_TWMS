@@ -8,6 +8,7 @@
 
 #include "../ports/mob_pool_port.h"
 #include "../ports/world_port.h"
+#include "../channel_hop/channel_hop.h"
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
 
@@ -52,6 +53,8 @@ struct Sample {
     double expCum = 0.0;
     double meso = 0.0;
     double lootCum = 0.0;
+    double mpSpentCum = 0.0;
+    double mpPotCum = 0.0;
 };
 
 Sample gRing[kRingCap]{};
@@ -59,15 +62,22 @@ int gRingCount = 0;
 int gRingHead = 0;
 double gExpCum = 0.0;
 double gLootValueCum = 0.0;
+double gMpSpentCum = 0.0;
+double gMpPotCum = 0.0;
 double gLastExp = 0.0;
 double gLastMaxExp = 0.0;
+int gLastMp = 0;
+int gLastMmp = 0;
 bool gHaveLast = false;
+bool gHaveLastMp = false;
 bool gRateActive = false;
 DWORD gRateStartTick = 0;
 bool gHaveCachedRate = false;
 double gCachedExpPer = 0.0;
 double gCachedMesoPer = 0.0;
 double gCachedLootPer = 0.0;
+double gCachedMpPer = 0.0;
+double gCachedMpPotPer = 0.0;
 uint64_t gLootKnownCount = 0;
 uint64_t gLootUnknownCount = 0;
 
@@ -102,27 +112,35 @@ void ResetRates() {
     gRingHead = 0;
     gExpCum = 0.0;
     gLootValueCum = 0.0;
+    gMpSpentCum = 0.0;
+    gMpPotCum = 0.0;
     gLastExp = 0.0;
     gLastMaxExp = 0.0;
+    gLastMp = 0;
+    gLastMmp = 0;
     gHaveLast = false;
+    gHaveLastMp = false;
     gRateActive = false;
     gRateStartTick = 0;
     gHaveCachedRate = false;
     gCachedExpPer = 0.0;
     gCachedMesoPer = 0.0;
     gCachedLootPer = 0.0;
+    gCachedMpPer = 0.0;
+    gCachedMpPotPer = 0.0;
     gLootKnownCount = 0;
     gLootUnknownCount = 0;
     game::ResetLootBaseline();
 }
 
 void PushSample(DWORD now, double meso) {
-    gRing[gRingHead] = Sample{now, gExpCum, meso, gLootValueCum};
+    gRing[gRingHead] = Sample{now, gExpCum, meso, gLootValueCum, gMpSpentCum, gMpPotCum};
     gRingHead = (gRingHead + 1) % kRingCap;
     if (gRingCount < kRingCap) ++gRingCount;
 }
 
-bool ComputeRates(DWORD now, double& expPer, double& mesoPer, double& lootPer) {
+bool ComputeRates(DWORD now, double& expPer, double& mesoPer, double& lootPer, double& mpPer,
+                  double& mpPotPer) {
     if (gRingCount < 2) return false;
     const Sample& oldest = gRing[(gRingHead - gRingCount + kRingCap) % kRingCap];
     const DWORD elapsed = now - oldest.tick;
@@ -132,10 +150,34 @@ bool ComputeRates(DWORD now, double& expPer, double& mesoPer, double& lootPer) {
     expPer = (gExpCum - oldest.expCum) / elapsedMs * 60000.0;
     mesoPer = (newest.meso - oldest.meso) / elapsedMs * 60000.0;
     lootPer = (gLootValueCum - oldest.lootCum) / elapsedMs * 60000.0;
+    mpPer = (gMpSpentCum - oldest.mpSpentCum) / elapsedMs * 60000.0;
+    mpPotPer = (gMpPotCum - oldest.mpPotCum) / elapsedMs * 60000.0;
     if (expPer < 0.0) expPer = 0.0;
     if (mesoPer < 0.0) mesoPer = 0.0;
     if (lootPer < 0.0) lootPer = 0.0;
+    if (mpPer < 0.0) mpPer = 0.0;
+    if (mpPotPer < 0.0) mpPotPer = 0.0;
     return true;
+}
+
+void NoteMpSpend(const game::Vitals& vitals) {
+    if (!gHaveLastMp) {
+        gLastMp = vitals.mp;
+        gLastMmp = vitals.mmp;
+        gHaveLastMp = true;
+        return;
+    }
+    // 死亡/换装导致 MMP 跳变：只对齐，不当消耗。
+    if (vitals.hp <= 0 || (vitals.mmp != gLastMmp && gLastMmp > 0)) {
+        gLastMp = vitals.mp;
+        gLastMmp = vitals.mmp;
+        return;
+    }
+    if (vitals.mp < gLastMp) {
+        gMpSpentCum += static_cast<double>(gLastMp - vitals.mp);
+    }
+    gLastMp = vitals.mp;
+    gLastMmp = vitals.mmp;
 }
 
 void UpdateRates(DWORD now, const game::Vitals& vitals) {
@@ -152,6 +194,7 @@ void UpdateRates(DWORD now, const game::Vitals& vitals) {
         gLastExp = exp;
         gLastMaxExp = maxExp;
         gHaveLast = true;
+        NoteMpSpend(vitals);
         game::UpdateLootDelta(false);
         PushSample(now, meso);
         return;
@@ -165,9 +208,11 @@ void UpdateRates(DWORD now, const game::Vitals& vitals) {
     }
     gLastExp = exp;
     gLastMaxExp = maxExp;
-    uint64_t known = 0, unknown = 0;
-    const double lootDelta = game::UpdateLootDelta(true, &known, &unknown);
+    NoteMpSpend(vitals);
+    uint64_t known = 0, unknown = 0, mpPots = 0;
+    const double lootDelta = game::UpdateLootDelta(true, &known, &unknown, &mpPots);
     gLootValueCum += lootDelta;
+    gMpPotCum += static_cast<double>(mpPots);
     gLootKnownCount += known;
     gLootUnknownCount += unknown;
     if (known || unknown) {
@@ -175,12 +220,18 @@ void UpdateRates(DWORD now, const game::Vitals& vitals) {
                          lootDelta, static_cast<unsigned long long>(known),
                          static_cast<unsigned long long>(unknown), gLootValueCum);
     }
+    if (mpPots) {
+        x::runtime::LogI("Titlebar", "mp-pot consumed+=%llu total=%.0f",
+                         static_cast<unsigned long long>(mpPots), gMpPotCum);
+    }
     PushSample(now, meso);
-    double expPer = 0.0, mesoPer = 0.0, lootPer = 0.0;
-    if (ComputeRates(now, expPer, mesoPer, lootPer)) {
+    double expPer = 0.0, mesoPer = 0.0, lootPer = 0.0, mpPer = 0.0, mpPotPer = 0.0;
+    if (ComputeRates(now, expPer, mesoPer, lootPer, mpPer, mpPotPer)) {
         gCachedExpPer = expPer;
         gCachedMesoPer = mesoPer;
         gCachedLootPer = lootPer;
+        gCachedMpPer = mpPer;
+        gCachedMpPotPer = mpPotPer;
         gHaveCachedRate = true;
     }
 }
@@ -195,6 +246,15 @@ std::string BuildMobSegment() {
     return buffer;
 }
 
+std::string BuildChannelSegment() {
+    // Display = 列表 id + 1（sticky 优先）。未种上则省略。禁止把 0 画成频道。
+    const int ch = x::features::channel_hop::DisplayChannel1Based();
+    if (ch <= 0) return {};
+    char buffer[24]{};
+    snprintf(buffer, sizeof(buffer), "    頻道 %d", ch);
+    return buffer;
+}
+
 std::string BuildTitle(DWORD now, const game::Vitals& vitals) {
     char jobFallback[16]{};
     std::string who = vitals.name[0] ? vitals.name : "?";
@@ -204,7 +264,9 @@ std::string BuildTitle(DWORD now, const game::Vitals& vitals) {
     if (gHaveCachedRate) {
         rate = "    " + FormatSignedRate(gCachedMesoPer) + " 金/分    " +
                FormatSignedRate(gCachedExpPer) + " 经/分    " +
-               FormatSignedRate(gCachedLootPer) + " 物值/分";
+               FormatSignedRate(gCachedLootPer) + " 物值/分    " +
+               FormatCompactAbs(gCachedMpPer) + " MP/分    " +
+               FormatCompactAbs(gCachedMpPotPer) + " 藍瓶/分";
     } else if (gRateActive) {
         const DWORD elapsed = now - gRateStartTick;
         if (elapsed < kRateMinDtMs) {
@@ -219,10 +281,10 @@ std::string BuildTitle(DWORD now, const game::Vitals& vitals) {
     char title[768]{};
     const int written = snprintf(
         title, sizeof(title),
-        "Lv.%d %s    HP %d/%d    MP %d/%d    EXP %d/%d    背包金 %s%s%s",
+        "Lv.%d %s    HP %d/%d    MP %d/%d    EXP %d/%d    背包金 %s%s%s%s",
         vitals.level, who.c_str(), vitals.hp, vitals.mhp, vitals.mp, vitals.mmp, vitals.exp,
         vitals.maxExp, FormatCompactAbs(static_cast<double>(vitals.meso)).c_str(),
-        BuildMobSegment().c_str(), rate.c_str());
+        BuildChannelSegment().c_str(), BuildMobSegment().c_str(), rate.c_str());
     if (written < 0 || written >= static_cast<int>(sizeof(title))) {
         x::runtime::LogWThrottled(911, 30000, "Titlebar", "title overflow n=%d cap=%d", written,
                                   static_cast<int>(sizeof(title)));

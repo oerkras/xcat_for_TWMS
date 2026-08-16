@@ -15,6 +15,7 @@
 #include "worldmap_marker_travel.h"
 
 #include "../travel/travel.h"
+#include "../char_boot/char_boot.h"
 #include "../ports/travel_port.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -44,25 +45,25 @@ using x::runtime::il2cpp::ReadPtr;
 
 // UIWorldMapItem（Prefab 字段形：三 string@0x70/78/80 + mapId@0x88）
 constexpr char kItemClass[] =
-    "e35517cbf759f3a8e79e7e3d6a3881d8b6e9219d30204bbea832d76e66dea56";
-constexpr uint32_t kRvaUpdateView = 0x7F3CC0;  // remounted 2026-08-06
-constexpr uint32_t kRvaOnPointerDown = 0x7F65A0;  // remounted 2026-08-06
+    "b422f0c753fe4351f16aeb848282e3c0d73c58fa78ca85063ac02854f863b5b";
+constexpr uint32_t kRvaUpdateView = 0x7F3CF0;  // remounted 2026-08-06
+constexpr uint32_t kRvaOnPointerDown = 0x7F65D0;  // remounted 2026-08-06
 // ExecuteEvents.Execute(IPointerDownHandler, BaseEventData) — script.json Address
-constexpr uint32_t kRvaExecutePointerDown = 0x52C3FB0;  // remounted 2026-08-06
+constexpr uint32_t kRvaExecutePointerDown = 0x52C2CC0;  // remounted 2026-08-06
 constexpr size_t kFbSPointerDownHandler = 0x18;         // ExecuteEvents static field
 
 // UIUtilDialog（非 Ex）：YesNo(string,Action,Action,…) / Notice(string,string,bool…)
 constexpr char kUtilDialogClass[] =
-    "af4513195ff1420653fa6fee21c3f81c0ada82cc231058d26da5e778a881d3d";
-constexpr uint32_t kRvaYesNo = 0x756730;  // remounted 2026-08-06
-constexpr uint32_t kRvaNotice = 0x75A7C0;  // remounted 2026-08-06
+    "f989ca10968e30ab111eefff2f43ccf2222a97e6b274b980e61752bce1ac892";
+constexpr uint32_t kRvaYesNo = 0x756750;  // remounted 2026-08-06
+constexpr uint32_t kRvaNotice = 0x75A7E0;  // remounted 2026-08-06
 
 constexpr char kHashUpdateView[] =
-    "f9e509b05943ebecf51c1fad24299b7d29bff10f6425b72b0d5772dd904cd1f";
+    "b2d446be945aea1428c1ca5808cd8769ab653b1c87c3ba3a0d6ffb97b84e5ef";
 constexpr char kHashYesNo[] =
-    "bbe4a174b4a6f72743180ef051055a2cd70ece5a4a0397c695868a4125b184e";
+    "a85b564c7d266775a510a844ddd1ab27e963e874685cb299ef669e77c1ec4f1";
 constexpr char kHashNotice[] =
-    "d5f51a96d1959fc5c6fe5389902ab1ce5a7498cfcd5f210ea1fbfe5950b6b89";
+    "b5b7b89b2ee88bc66cf64e3fc03d985589b246eb98d83c4dabb1188ff95168a";
 
 // dump 验证 fallback（remount 2026-08-06；UpdateView 写回 +0x70/78/80；mapId@0x88）
 constexpr size_t kFbMapDesc = 0x70;
@@ -78,27 +79,27 @@ constexpr size_t kFbPointerClickCount = 0x178;
 
 // Spot 字段哈希（dump.cs TypeDefIndex 630）
 constexpr char kHashMapDesc[] =
-    "b19089d3378a3fcca69b5ca2a3c017164685087a731df376b64d450e5aca5d5";
+    "a09dc7eb65e0a3bed84a5f081fdd5fcbe3b7e73e4c237cbf1944b3981c227ff";
 constexpr char kHashMapName[] =
-    "acbf850452a2ba00aa730cf0855fea214a711b9610f4713413e3fea0c53e5fc";
+    "fd9474b6a47d7d3a06984f6327e2adce87fa80fcc1165f74253ff8185e1daf7";
 constexpr char kHashStreetName[] =
-    "c7b33b72ef0b760e89e13c39a62337f6b69711033916406c5a1e4b79511cf96";
+    "e40228986c2b42d562fdafb3de63658ecd06daeb4777e094496be6c30f1d282";
 constexpr char kHashCachedMapId[] =
-    "a7a26a8944d0f52d70d82ab8a0fa70cb35d0ba111d22d290d0c6ab45407fa81";
+    "f04fdb424f0d9e7a5bc064e9984ed9ae0b5ba8574af81b7ad44b3d522653ba3";
 
 // MapListData 嵌套类 + 属性 backing 字段（TypeDefIndex 2183）
 constexpr char kMapListDataClass[] =
-    "ec6390a2730da3e23b77c06630718afaa95595c4714776c07fede9c3568261a."
-    "f2a417818e5e8fce882fd130ff21eb8de288f1233afb65a67442805bd8ab03e";
+    "da60ab9a0a410d80c67b8ca759b21c567e9603c1992e89ff79960602221d963."
+    "a16adb8bbdba62f5638e7583a46c1a415ba1598026f0893bf0a5760a127601a";
 constexpr char kMapListDataClassSlash[] =
-    "ec6390a2730da3e23b77c06630718afaa95595c4714776c07fede9c3568261a/"
-    "f2a417818e5e8fce882fd130ff21eb8de288f1233afb65a67442805bd8ab03e";
+    "da60ab9a0a410d80c67b8ca759b21c567e9603c1992e89ff79960602221d963/"
+    "a16adb8bbdba62f5638e7583a46c1a415ba1598026f0893bf0a5760a127601a";
 constexpr char kMapListDataNested[] =
-    "f2a417818e5e8fce882fd130ff21eb8de288f1233afb65a67442805bd8ab03e";
+    "a16adb8bbdba62f5638e7583a46c1a415ba1598026f0893bf0a5760a127601a";
 constexpr char kHashMapNoList[] =
-    "<a59edbe2e87d29e01b92ff65301d14e8e4b4366ca686e509ad24e514fdad17b>k__BackingField";
+    "<d56d72fd94c0b1f0480a8bf90f25b0c281e9337aabdde97f8a041caaa14f55d>k__BackingField";
 constexpr char kHashMapTitle[] =
-    "<b65eecf0263d2d6b1a5bee340ab829f8b9861cf3a1559d0887d3374e535b711>k__BackingField";
+    "<d2306738430826ac82e9ebebb026a7763b580c002ff3096a9957290533b5e00>k__BackingField";
 constexpr char kHashClickCount[] = "<clickCount>k__BackingField";
 constexpr DWORD kDblClickMsMin = 400;
 constexpr DWORD kDblClickMsMax = 800;
@@ -674,6 +675,10 @@ void Hook_UpdateView(void* self, void* street, void* mapName, void* mapDesc, voi
 }
 
 void FireGotoFromItem(void* self) {
+    if (char_boot::IsBusy()) {
+        (void)ShowTravelNotice("起号进行中");
+        return;
+    }
     SpotInfo spot{};
     char nameBuf[160]{};
     char key[32]{};
@@ -935,6 +940,10 @@ void __fastcall OnConfirmYes(void*, void*) {
         ClearConfirmLocked();
     }
     if (!target[0]) return;
+    if (char_boot::IsBusy()) {
+        (void)ShowTravelNotice("起号进行中");
+        return;
+    }
     x::runtime::LogI("WorldMapTravel", "确认赶路 → RequestGoto [%s]%s%s", target,
                      label[0] ? " " : "", label[0] ? label : "");
     travel::RequestGoto(target);
@@ -1096,6 +1105,10 @@ bool ShowTravelConfirm(const char* target, const char* label, int hops) {
     if (!yesOk || !actOk) {
         x::runtime::LogW("WorldMapTravel", "确认框未就绪 yesNo=%p action=%d → 直通 goto",
                          (void*)gMiYesNo, actOk ? 1 : 0);
+        if (char_boot::IsBusy()) {
+            (void)ShowTravelNotice("起号进行中");
+            return false;
+        }
         travel::RequestGoto(target);
         return true;
     }
@@ -1144,6 +1157,10 @@ bool ShowTravelConfirm(const char* target, const char* label, int hops) {
     if (!CallYesNoSeh(msg, gYesAction, gNoAction, snd)) {
         ClearConfirm();
         x::runtime::LogW("WorldMapTravel", "UIUtilDialog.YesNo 调用失败 → 直通 goto");
+        if (char_boot::IsBusy()) {
+            (void)ShowTravelNotice("起号进行中");
+            return false;
+        }
         travel::RequestGoto(target);
         return false;
     }

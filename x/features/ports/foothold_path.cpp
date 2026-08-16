@@ -22,14 +22,15 @@ constexpr int kRopeXTol = 48;
 constexpr int kRopeYTol = 60;
 constexpr int kCoverYTol = 80;
 constexpr int kFallMinDy = 45;    // 目标必须在下方（MS +Y 向下）
-constexpr int kFallMaxDy = 720;
 constexpr int kFallMinSpanX = 16; // 过窄视为墙，不做下跳起点/落点
 constexpr int kFallXTol = 12;
 // 站立落点：FH 是 Prev/Next 连成的线段链，不是孤立板。
 // 内缩只作用在**整条 Walk 链的真正端点**（悬崖）；段与段接合处不内缩。
-constexpr int kEndInsetCliff = 36;  // 链条左右端点（无更外侧 Walk）
+// **仅战斗** fill+Doing。F6 / 超级赶路禁止（门口/台沿要能站，BIN 19:27 east00）。
+constexpr int kEndInsetCliff = 36;
+constexpr int kEndInsetFly = 2;  // F6 / 赶路：只躲开段端 1px
 // BIN d1a58e / 0.1.69：战斗落在段缝（fh5 右端=fh6 左端）→ RelPos.V=nan → Walk 滑链滑出图。
-// 仅战斗 Snap 开启：有 Walk 邻台的端点再缩一点；贴门 / 赶路 SnapOnFh 仍只做悬崖内缩。
+// 仅战斗 Snap 开启：有 Walk 邻台的端点再缩一点。
 // 1d2b0b：8px 不够——斜坡落点结算后横滑 16~17px 跨缝到邻段（doing_miss，服端位置违规源头），
 // 内缩必须盖过滑移量。极短段由 lo>hi 中点回退兜底。
 // a7dc3e：20px 仍漏——残余 miss 里 5/8 是跨一条缝、滑移 21~30px，曾抬到 32。
@@ -64,6 +65,9 @@ struct Graph {
     int climbEdges = 0;
     int fallEdges = 0;
     int ropeLinked = 0;
+    uint16_t walkComp[foothold::kMaxFootholds]{};
+    uint8_t revFallDeg[foothold::kMaxFootholds]{};
+    uint16_t revFall[foothold::kMaxFootholds][kMaxDeg]{};
     bool ok = false;
 };
 
@@ -101,9 +105,22 @@ void AddEdge(Graph& g, int from, int to, EdgeKind kind, int ropeIdx, int wx, int
     e.wy = wy;
     if (kind == EdgeKind::Walk)
         ++g.walkEdges;
-    else if (kind == EdgeKind::FallDown)
+    else if (kind == EdgeKind::FallDown) {
         ++g.fallEdges;
-    else
+        if (g.revFallDeg[to] < kMaxDeg) {
+            bool dup = false;
+            for (int i = 0; i < g.revFallDeg[to]; ++i) {
+                if (g.revFall[to][i] == static_cast<uint16_t>(from)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                g.revFall[to][g.revFallDeg[to]] = static_cast<uint16_t>(from);
+                ++g.revFallDeg[to];
+            }
+        }
+    } else
         ++g.climbEdges;
 }
 
@@ -115,7 +132,8 @@ bool IsWallFh(const Graph& g, int idx) { return SpanX(g, idx) < kFallMinSpanX; }
 
 // 沿 Walk（Prev/Next）展开整条连续台面，得到链条 X 范围；仅链条端点做悬崖内缩。
 // 段间接合处不内缩——那是链表节点缝，不是掉落边。
-bool ChainSafeXRange(const Graph& g, int seed, int* outLo, int* outHi) {
+bool ChainSafeXRange(const Graph& g, int seed, int* outLo, int* outHi,
+                     int endInset = kEndInsetCliff) {
     if (!outLo || !outHi || seed < 0 || seed >= g.n || IsWallFh(g, seed)) return false;
 
     bool seen[foothold::kMaxFootholds]{};
@@ -146,8 +164,9 @@ bool ChainSafeXRange(const Graph& g, int seed, int* outLo, int* outHi) {
     if (visited <= 0 || chainMax < chainMin) return false;
 
     // 链条左右端 = 真正可能掉下去的地方；中间节点缝不缩。
-    int lo = chainMin + kEndInsetCliff;
-    int hi = chainMax - kEndInsetCliff;
+    if (endInset < 0) endInset = 0;
+    int lo = chainMin + endInset;
+    int hi = chainMax - endInset;
     if (lo > hi) {
         const int mid = (chainMin + chainMax) / 2;
         *outLo = mid;
@@ -172,14 +191,15 @@ bool HasWalkNeighborAtX(const Graph& g, int idx, int edgeX) {
 
 // 指定 FH 线段上可站的 X = 本段 ∩ 链条安全带。
 // avoidWalkJunction：战斗用，再避开 Walk 段缝；贴门/赶路传 false（接合处可站）。
-bool SafeStandXRange(const Graph& g, int idx, int* outLo, int* outHi, bool avoidWalkJunction) {
+bool SafeStandXRange(const Graph& g, int idx, int* outLo, int* outHi, bool avoidWalkJunction,
+                     int endInset = kEndInsetCliff) {
     if (!outLo || !outHi || idx < 0 || idx >= g.n || IsWallFh(g, idx)) return false;
     const int xmin = (std::min)(g.x1[idx], g.x2[idx]);
     const int xmax = (std::max)(g.x1[idx], g.x2[idx]);
     if (xmax - xmin < kFallMinSpanX) return false;
 
     int chainLo = 0, chainHi = 0;
-    if (!ChainSafeXRange(g, idx, &chainLo, &chainHi)) return false;
+    if (!ChainSafeXRange(g, idx, &chainLo, &chainHi, endInset)) return false;
 
     int lo = (std::max)(xmin, chainLo);
     int hi = (std::min)(xmax, chainHi);
@@ -200,16 +220,17 @@ bool SafeStandXRange(const Graph& g, int idx, int* outLo, int* outHi, bool avoid
     return true;
 }
 
-int ClampToSafeStandX(const Graph& g, int idx, int ix, bool avoidWalkJunction) {
+int ClampToSafeStandX(const Graph& g, int idx, int ix, bool avoidWalkJunction,
+                      int endInset = kEndInsetCliff) {
     int lo = 0, hi = 0;
-    if (!SafeStandXRange(g, idx, &lo, &hi, avoidWalkJunction)) {
+    if (!SafeStandXRange(g, idx, &lo, &hi, avoidWalkJunction, endInset)) {
         const int xmin = (std::min)(g.x1[idx], g.x2[idx]);
         const int xmax = (std::max)(g.x1[idx], g.x2[idx]);
         return (xmin + xmax) / 2;
     }
     int cx = (std::max)(lo, (std::min)(hi, ix));
-    // 宽段才偏置：贴 lo/hi 时往段内收，躲开接缝刀刃（赶路 avoidWalkJunction=false 同样受益）。
-    if (hi - lo >= kEdgeBiasMinSpan) {
+    // 宽段才偏置：贴 lo/hi 时往段内收。仅战斗；F6 / 赶路禁止再往里推。
+    if (endInset >= kEndInsetCliff && hi - lo >= kEdgeBiasMinSpan) {
         if (cx == lo) cx = lo + kEdgeBiasPx;
         else if (cx == hi) cx = hi - kEdgeBiasPx;
     }
@@ -217,9 +238,9 @@ int ClampToSafeStandX(const Graph& g, int idx, int ix, bool avoidWalkJunction) {
 }
 
 // 同 z 链被端点内缩压成单点 = 台面过短，fill+Doing 易滑落（勿当战斗落点）。
-bool ChainTooNarrowToStand(const Graph& g, int idx) {
+bool ChainTooNarrowToStand(const Graph& g, int idx, int endInset = kEndInsetCliff) {
     int lo = 0, hi = 0;
-    if (!ChainSafeXRange(g, idx, &lo, &hi)) return true;
+    if (!ChainSafeXRange(g, idx, &lo, &hi, endInset)) return true;
     return lo >= hi;
 }
 
@@ -275,7 +296,7 @@ void AddFallDownEdges(Graph& g) {
                 if (x < jmin || x > jmax) continue;
                 const int yTo = FhYAtX(g.x1[j], g.y1[j], g.x2[j], g.y2[j], x);
                 const int dy = yTo - yFrom;  // >0 = 下方
-                if (dy < kFallMinDy || dy > kFallMaxDy) continue;
+                if (dy < kFallMinDy || dy > kFallMaxDyPx) continue;
                 if (dy < bestDy) {
                     bestDy = dy;
                     best = j;
@@ -289,6 +310,30 @@ void AddFallDownEdges(Graph& g) {
 void Mid(const Graph& g, int idx, int& ox, int& oy) {
     ox = (static_cast<int>(g.x1[idx]) + static_cast<int>(g.x2[idx])) / 2;
     oy = (static_cast<int>(g.y1[idx]) + static_cast<int>(g.y2[idx])) / 2;
+}
+
+void LabelWalkComps(Graph& g) {
+    std::memset(g.walkComp, 0, sizeof(g.walkComp));
+    uint16_t q[foothold::kMaxFootholds];
+    uint16_t label = 0;
+    for (int s = 0; s < g.n; ++s) {
+        if (g.walkComp[s] != 0) continue;
+        ++label;
+        int qh = 0;
+        int qt = 0;
+        q[qt++] = static_cast<uint16_t>(s);
+        g.walkComp[s] = label;
+        while (qh < qt) {
+            const int u = q[qh++];
+            for (int ei = 0; ei < g.deg[u]; ++ei) {
+                if (g.adj[u][ei].kind != EdgeKind::Walk) continue;
+                const int v = g.adj[u][ei].to;
+                if (g.walkComp[v] != 0) continue;
+                g.walkComp[v] = label;
+                q[qt++] = static_cast<uint16_t>(v);
+            }
+        }
+    }
 }
 
 void BuildUnlocked(const foothold::Snapshot& snap) {
@@ -352,6 +397,7 @@ void BuildUnlocked(const foothold::Snapshot& snap) {
     }
 
     AddFallDownEdges(*g);
+    LabelWalkComps(*g);
 
     g->ok = g->n > 0;
 }
@@ -439,7 +485,7 @@ bool FindNearestFh(float x, float y, uint32_t* outId, float* outDist) {
 }
 
 bool SnapStandAt(float x, float y, float* outX, float* outY, uint32_t* outFhId, bool preferFlat,
-                 bool avoidWalkJunction) {
+                 bool avoidWalkJunction, bool cliffInset) {
     if (outX) *outX = x;
     if (outY) *outY = y;
     if (outFhId) *outFhId = 0;
@@ -451,6 +497,7 @@ bool SnapStandAt(float x, float y, float* outX, float* outY, uint32_t* outFhId, 
     const Graph& g = *gGraph;
     const int ix = static_cast<int>(std::lround(x));
     const int iy = static_cast<int>(std::lround(y));
+    const int endInset = cliffInset ? kEndInsetCliff : kEndInsetFly;
     constexpr int kXPad = 10;
     // 同层带宽：优先 |fy-y| 落在此内，避免 BIN「怪 Y=-215 却落到 -155」窜层。
     constexpr int kStandYBand = 45;  // 与 simple_combat kSameLayerY 对齐
@@ -478,7 +525,7 @@ bool SnapStandAt(float x, float y, float* outX, float* outY, uint32_t* outFhId, 
 
         for (int i = 0; i < g.n; ++i) {
             if (IsWallFh(g, i)) continue;
-            if (!allowNarrow && ChainTooNarrowToStand(g, i)) continue;
+            if (!allowNarrow && ChainTooNarrowToStand(g, i, endInset)) continue;
             if (flatOnly && std::abs(g.y1[i] - g.y2[i]) > kFlatYTol) continue;
             const int xa = g.x1[i], xb = g.x2[i];
             const int xmin = (std::min)(xa, xb);
@@ -580,7 +627,7 @@ bool SnapStandAt(float x, float y, float* outX, float* outY, uint32_t* outFhId, 
     const int xmax = (std::max)(xa, xb);
     // 一律以 ix 为期望 X：退化档下 ix 可能在段外，由 ClampToSafeStandX 收进段内安全区间。
     const int wishX = ix;
-    const int cx = ClampToSafeStandX(g, pick, wishX, avoidWalkJunction);
+    const int cx = ClampToSafeStandX(g, pick, wishX, avoidWalkJunction, endInset);
     const int fy = FhYAtX(xa, g.y1[pick], xb, g.y2[pick], cx);
     *outX = static_cast<float>(cx);
     *outY = static_cast<float>(fy);
@@ -693,19 +740,30 @@ bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR,
     if (outY) *outY = y;
     if (outFhId) *outFhId = 0;
     if (!outX || !outY) return false;
-    // 贴门：只做悬崖内缩，不用段缝内缩（避免站位被挪出触发框）。
-    constexpr bool kPortalAvoidJunction = false;
-    if (!EnsureGraph()) {
-        return SnapStandAt(x, y, outX, outY, outFhId, /*preferFlat=*/true, kPortalAvoidJunction);
-    }
+    // 发门带 = travel kPortalFireMaxDx。门心可以无 cover（top00 x=65 缝，x=72 可站）。
+    // 带宽外的台（沼泽远岸）进不了这个集合。
+    // 门常在悬崖边：禁止套战斗 kEndInsetCliff=36（BIN 19:27 105050400 east00
+    // portal=2881 被内缩出发门带 → 假空集悬停 → 合速永远 >18）。
+    constexpr int kFireBandDx = 16;
+    constexpr int kSeedYBand = 72;
+    constexpr int kFlatYTol = 3;
+    constexpr int kPortalEdgePad = kEndInsetFly;
+
+    if (!EnsureGraph()) return false;
 
     const int ix = static_cast<int>(std::lround(x));
     const int iy = static_cast<int>(std::lround(y));
-    int iLo = ix - 20;
-    int iHi = ix + 20;
+    int fireLo = ix - kFireBandDx;
+    int fireHi = ix + kFireBandDx;
     if (rectValid && std::isfinite(rectL) && std::isfinite(rectR) && rectR >= rectL) {
-        iLo = static_cast<int>(std::floor(rectL));
-        iHi = static_cast<int>(std::ceil(rectR));
+        const int rLo = static_cast<int>(std::floor(rectL));
+        const int rHi = static_cast<int>(std::ceil(rectR));
+        fireLo = (std::max)(fireLo, rLo);
+        fireHi = (std::min)(fireHi, rHi);
+        if (fireLo > fireHi) {
+            fireLo = ix - kFireBandDx;
+            fireHi = ix + kFireBandDx;
+        }
     }
     int yLo = iy - 80;
     int yHi = iy + 80;
@@ -713,131 +771,102 @@ bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR,
         yLo = static_cast<int>(std::floor(rectT));
         yHi = static_cast<int>(std::ceil(rectB));
     }
-    constexpr int kSeedYBand = 72;
-    constexpr int kXPad = 10;
+
+    auto emitPick = [&](const Graph& g, int pick, int wish, const char* via) -> bool {
+        if (pick < 0) return false;
+        if (std::abs(wish - ix) > kFireBandDx) return false;
+        const int xa = g.x1[pick], xb = g.x2[pick];
+        const int fy = FhYAtX(xa, g.y1[pick], xb, g.y2[pick], wish);
+        *outX = static_cast<float>(wish);
+        *outY = static_cast<float>(fy);
+        if (outFhId) *outFhId = g.ids[pick];
+        x::runtime::LogI("FhPath",
+                         "portalSnap via=%s pickFh=%u wish=%d -> (%.0f,%.0f) "
+                         "portal=(%d,%d) fireBand=1",
+                         via ? via : "?", g.ids[pick], wish, *outX, *outY, ix, iy);
+        return true;
+    };
+
+    // 本段原始 X（只留 2px 边）与发门带有交集。不用战斗悬崖/段缝内缩。
+    auto pickInFireBand = [&](const Graph& g, bool flatOnly, int* outWish) -> int {
+        int best = -1, bestDy = 0x7fffffff, bestSlope = 0x7fffffff, bestDx = 0x7fffffff;
+        int bestWish = ix;
+        bool bestInY = false;
+        for (int i = 0; i < g.n; ++i) {
+            if (IsWallFh(g, i)) continue;
+            if (flatOnly && std::abs(g.y1[i] - g.y2[i]) > kFlatYTol) continue;
+            const int xmin = (std::min)(g.x1[i], g.x2[i]);
+            const int xmax = (std::max)(g.x1[i], g.x2[i]);
+            int sLo = xmin + kPortalEdgePad;
+            int sHi = xmax - kPortalEdgePad;
+            if (sLo > sHi) {
+                sLo = (xmin + xmax) / 2;
+                sHi = sLo;
+            }
+            int oLo = (std::max)(sLo, fireLo);
+            int oHi = (std::min)(sHi, fireHi);
+            if (oLo > oHi) {
+                if (ix < xmin || ix > xmax) continue;
+                oLo = ix;
+                oHi = ix;
+            }
+            const int wish = (std::max)(oLo, (std::min)(oHi, ix));
+            const int fy = FhYAtX(g.x1[i], g.y1[i], g.x2[i], g.y2[i], wish);
+            const int dy = std::abs(fy - iy);
+            if (dy > kSeedYBand) continue;
+            const int slope = std::abs(g.y1[i] - g.y2[i]);
+            const int dx = std::abs(wish - ix);
+            const bool inY = (fy >= yLo && fy <= yHi);
+            const bool better = (best < 0) || (inY != bestInY && inY) ||
+                                (inY == bestInY && dy < bestDy) ||
+                                (inY == bestInY && dy == bestDy && slope < bestSlope) ||
+                                (inY == bestInY && dy == bestDy && slope == bestSlope &&
+                                 dx < bestDx);
+            if (!better) continue;
+            best = i;
+            bestDy = dy;
+            bestSlope = slope;
+            bestDx = dx;
+            bestWish = wish;
+            bestInY = inY;
+        }
+        if (outWish) *outWish = bestWish;
+        return best;
+    };
 
     {
         std::lock_guard<std::mutex> lock(gMu);
-        if (!gGraph || !gGraph->ok) {
-            // fall through
-        } else {
-            const Graph& g = *gGraph;
+        if (!gGraph || !gGraph->ok) return false;
+        const Graph& g = *gGraph;
+        int wish = ix;
+        int pick = pickInFireBand(g, /*flatOnly=*/true, &wish);
+        if (pick < 0) pick = pickInFireBand(g, /*flatOnly=*/false, &wish);
+        if (emitPick(g, pick, wish, pick >= 0 ? "fireBand" : "none")) return true;
 
-            // 1) 种子：覆盖 portal.x、同层最近的 Walk 台（定链用）。
-            int seed = -1;
-            int bestSeedDy = 0x7fffffff;
-            int bestSeedFy = 0x7fffffff;
-            float bestSeedAny = 1e9f;
-            int seedAny = -1;
-            for (int i = 0; i < g.n; ++i) {
-                if (IsWallFh(g, i) || ChainTooNarrowToStand(g, i)) continue;
-                const int xa = g.x1[i], xb = g.x2[i];
-                const int xmin = (std::min)(xa, xb);
-                const int xmax = (std::max)(xa, xb);
-                const int cx = (std::max)(xmin, (std::min)(xmax, ix));
-                const int fy = FhYAtX(xa, g.y1[i], xb, g.y2[i], cx);
-                const int dy = std::abs(fy - iy);
-                int mx, my;
-                Mid(g, i, mx, my);
-                const float dAny = std::sqrt(static_cast<float>((mx - ix) * (mx - ix) +
-                                                                (my - iy) * (my - iy)));
-                if (dAny < bestSeedAny) {
-                    bestSeedAny = dAny;
-                    seedAny = i;
-                }
-                const bool cover = (ix >= xmin - kXPad && ix <= xmax + kXPad);
-                if (!cover || dy > kSeedYBand) continue;
-                if (dy < bestSeedDy || (dy == bestSeedDy && fy < bestSeedFy)) {
-                    bestSeedDy = dy;
-                    bestSeedFy = fy;
-                    seed = i;
-                }
+        int rawX = 0, rawY = 0, wallN = 0;
+        for (int i = 0; i < g.n; ++i) {
+            const int xmin = (std::min)(g.x1[i], g.x2[i]);
+            const int xmax = (std::max)(g.x1[i], g.x2[i]);
+            if (xmax < fireLo || xmin > fireHi) continue;
+            if (IsWallFh(g, i)) {
+                ++wallN;
+                continue;
             }
-            if (seed < 0) seed = seedAny;
-            if (seed >= 0) {
-                // 2) 展开覆盖门的整条 Walk 链。
-                bool seen[foothold::kMaxFootholds]{};
-                int stack[foothold::kMaxFootholds];
-                int chain[foothold::kMaxFootholds];
-                int sn = 0, cn = 0;
-                stack[sn++] = seed;
-                seen[seed] = true;
-                while (sn > 0) {
-                    const int u = stack[--sn];
-                    chain[cn++] = u;
-                    for (int e = 0; e < g.deg[u]; ++e) {
-                        if (g.adj[u][e].kind != EdgeKind::Walk) continue;
-                        const int v = static_cast<int>(g.adj[u][e].to);
-                        if (v < 0 || v >= g.n || IsWallFh(g, v) || seen[v]) continue;
-                        seen[v] = true;
-                        stack[sn++] = v;
-                    }
-                }
-
-                // 3) 链内：与触发框 X 相交 → 最平；Y 落在框内优先。
-                int best = -1;
-                int bestSlope = 0x7fffffff;
-                int bestDy = 0x7fffffff;
-                int bestWish = ix;
-                bool bestInY = false;
-                bool bestCoverX = false;
-                for (int ci = 0; ci < cn; ++ci) {
-                    const int i = chain[ci];
-                    if (IsWallFh(g, i) || ChainTooNarrowToStand(g, i)) continue;
-                    const int xa = g.x1[i], xb = g.x2[i];
-                    const int xmin = (std::min)(xa, xb);
-                    const int xmax = (std::max)(xa, xb);
-                    if (xmax < iLo || xmin > iHi) continue;  // 与兴趣带无交
-                    int sLo = 0, sHi = 0;
-                    if (!SafeStandXRange(g, i, &sLo, &sHi, kPortalAvoidJunction)) continue;
-                    const int oLo = (std::max)(sLo, iLo);
-                    const int oHi = (std::min)(sHi, iHi);
-                    if (oLo > oHi) continue;
-                    const int wish = (std::max)(oLo, (std::min)(oHi, ix));
-                    const int fy = FhYAtX(xa, g.y1[i], xb, g.y2[i], wish);
-                    const int slope = std::abs(g.y1[i] - g.y2[i]);
-                    const int dy = std::abs(fy - iy);
-                    const bool inY = (fy >= yLo && fy <= yHi);
-                    const bool coverX = (ix >= xmin && ix <= xmax);
-                    auto better = [&]() -> bool {
-                        if (best < 0) return true;
-                        if (inY != bestInY) return inY;
-                        if (slope != bestSlope) return slope < bestSlope;
-                        if (coverX != bestCoverX) return coverX;
-                        if (dy != bestDy) return dy < bestDy;
-                        return false;
-                    };
-                    if (!better()) continue;
-                    best = i;
-                    bestSlope = slope;
-                    bestDy = dy;
-                    bestWish = wish;
-                    bestInY = inY;
-                    bestCoverX = coverX;
-                }
-
-                if (best >= 0) {
-                    const int xa = g.x1[best], xb = g.x2[best];
-                    const int cx = ClampToSafeStandX(g, best, bestWish, kPortalAvoidJunction);
-                    const int fy = FhYAtX(xa, g.y1[best], xb, g.y2[best], cx);
-                    *outX = static_cast<float>(cx);
-                    *outY = static_cast<float>(fy);
-                    if (outFhId) *outFhId = g.ids[best];
-                    x::runtime::LogI("FhPath",
-                                     "portalSnap seedFh=%u pickFh=%u slope=%d wish=%d -> "
-                                     "(%.0f,%.0f) rectX=%d..%d inY=%d",
-                                     g.ids[seed], g.ids[best], bestSlope, bestWish, *outX, *outY,
-                                     iLo, iHi, bestInY ? 1 : 0);
-                    return true;
-                }
-            }
+            ++rawX;
+            const int fy = FhYAtX(g.x1[i], g.y1[i], g.x2[i], g.y2[i],
+                                  (std::max)(xmin, (std::min)(xmax, ix)));
+            if (std::abs(fy - iy) <= kSeedYBand) ++rawY;
         }
+        x::runtime::LogI("FhPath",
+                         "portalSnap miss portal=(%d,%d) fire-band empty "
+                         "rawX=%d inY=%d wall=%d (no cliff-inset, no far-band)",
+                         ix, iy, rawX, rawY, wallN);
     }
-
-    return SnapStandAt(x, y, outX, outY, outFhId, /*preferFlat=*/true, kPortalAvoidJunction);
+    return false;
 }
 
-bool SnapOnFh(uint32_t fhId, float x, float* outX, float* outY, bool avoidWalkJunction) {
+bool SnapOnFh(uint32_t fhId, float x, float* outX, float* outY, bool avoidWalkJunction,
+              bool cliffInset) {
     if (outX) *outX = x;
     if (outY) *outY = 0.f;
     if (!outX || !outY || fhId == 0) return false;
@@ -850,11 +879,11 @@ bool SnapOnFh(uint32_t fhId, float x, float* outX, float* outY, bool avoidWalkJu
     if (idx < 0 || IsWallFh(g, idx)) return false;
 
     const int xa = g.x1[idx], xb = g.x2[idx];
-    // 钳进本段∩链条安全带；avoidWalkJunction 仅战斗侧开启。
+    const int endInset = cliffInset ? kEndInsetCliff : kEndInsetFly;
     const int ix = static_cast<int>(std::lround(x));
-    const int cx = ClampToSafeStandX(g, idx, ix, avoidWalkJunction);
+    const int cx = ClampToSafeStandX(g, idx, ix, avoidWalkJunction, endInset);
     int lo = 0, hi = 0;
-    if (!SafeStandXRange(g, idx, &lo, &hi, avoidWalkJunction)) return false;
+    if (!SafeStandXRange(g, idx, &lo, &hi, avoidWalkJunction, endInset)) return false;
     (void)lo;
     (void)hi;
     const int fy = FhYAtX(xa, g.y1[idx], xb, g.y2[idx], cx);
@@ -863,7 +892,7 @@ bool SnapOnFh(uint32_t fhId, float x, float* outX, float* outY, bool avoidWalkJu
     return true;
 }
 
-bool IsXSafeOnFh(uint32_t fhId, float x, bool avoidWalkJunction) {
+bool IsXSafeOnFh(uint32_t fhId, float x, bool avoidWalkJunction, bool cliffInset) {
     if (fhId == 0 || !std::isfinite(x)) return false;
     if (!EnsureGraph()) return false;
     std::lock_guard<std::mutex> lock(gMu);
@@ -871,9 +900,10 @@ bool IsXSafeOnFh(uint32_t fhId, float x, bool avoidWalkJunction) {
     const Graph& g = *gGraph;
     const int idx = IndexOf(g, fhId);
     if (idx < 0 || IsWallFh(g, idx)) return false;
-    if (ChainTooNarrowToStand(g, idx)) return false;
+    const int endInset = cliffInset ? kEndInsetCliff : kEndInsetFly;
+    if (ChainTooNarrowToStand(g, idx, endInset)) return false;
     int lo = 0, hi = 0;
-    if (!SafeStandXRange(g, idx, &lo, &hi, avoidWalkJunction)) return false;
+    if (!SafeStandXRange(g, idx, &lo, &hi, avoidWalkJunction, endInset)) return false;
     const int ix = static_cast<int>(std::lround(x));
     return ix >= lo && ix <= hi;
 }
@@ -901,38 +931,109 @@ bool ZMassAt(float x, float y, int32_t* outZMass, uint32_t* outFhId) {
     return ZMassOfFh(fh, outZMass);
 }
 
+int WalkCompOf(uint32_t fh) {
+    if (!fh) return 0;
+    if (!EnsureGraph()) return 0;
+
+    std::lock_guard<std::mutex> lock(gMu);
+    if (!gGraph || !gGraph->ok) return 0;
+    const int i = IndexOf(*gGraph, fh);
+    if (i < 0) return 0;
+    return static_cast<int>(gGraph->walkComp[i]);
+}
+
 bool SameWalkComponent(uint32_t fhA, uint32_t fhB) {
     if (!fhA || !fhB) return false;
     if (fhA == fhB) return true;
+    const int a = WalkCompOf(fhA);
+    const int b = WalkCompOf(fhB);
+    return a > 0 && a == b;
+}
+
+int MarkFallWalkReachable(uint32_t fromFh, int maxFallHops, uint8_t* outMask, int maxMask,
+                          int* outReachCnt) {
+    if (outReachCnt) *outReachCnt = 0;
+    if (!outMask || maxMask <= 0) return 0;
+    std::memset(outMask, 0, static_cast<size_t>(maxMask));
+    if (!fromFh) return 0;
+    if (maxFallHops < 0) maxFallHops = 0;
+    if (maxFallHops > 4) maxFallHops = 4;
+    if (!EnsureGraph()) return 0;
+
+    std::lock_guard<std::mutex> lock(gMu);
+    if (!gGraph || !gGraph->ok) return 0;
+    const Graph& g = *gGraph;
+    const int n = (g.n < maxMask) ? g.n : maxMask;
+    const int src = IndexOf(g, fromFh);
+    if (src < 0 || src >= n) return 0;
+
+    static uint8_t best[foothold::kMaxFootholds];
+    static uint16_t qn[foothold::kMaxFootholds * 5];
+    static uint8_t qf[foothold::kMaxFootholds * 5];
+    std::memset(best, 0xFF, static_cast<size_t>(n));
+    int qh = 0;
+    int qt = 0;
+    qn[qt] = static_cast<uint16_t>(src);
+    qf[qt] = 0;
+    ++qt;
+    best[src] = 0;
+
+    const int qCap = foothold::kMaxFootholds * 5;
+    while (qh < qt) {
+        const int u = qn[qh];
+        const int f = qf[qh];
+        ++qh;
+        outMask[u] = 1;
+        for (int ei = 0; ei < g.deg[u]; ++ei) {
+            const EdgeKind kind = g.adj[u][ei].kind;
+            const int v = g.adj[u][ei].to;
+            if (v < 0 || v >= n) continue;
+            int nf = -1;
+            if (kind == EdgeKind::Walk) {
+                nf = f;
+            } else if (kind == EdgeKind::FallDown && f < maxFallHops) {
+                nf = f + 1;
+            }
+            if (nf < 0) continue;
+            if (nf >= static_cast<int>(best[v])) continue;
+            if (qt >= qCap) break;
+            best[v] = static_cast<uint8_t>(nf);
+            qn[qt] = static_cast<uint16_t>(v);
+            qf[qt] = static_cast<uint8_t>(nf);
+            ++qt;
+        }
+        if (f >= maxFallHops) continue;
+        for (int ri = 0; ri < g.revFallDeg[u]; ++ri) {
+            const int v = g.revFall[u][ri];
+            if (v < 0 || v >= n) continue;
+            const int nf = f + 1;
+            if (nf >= static_cast<int>(best[v])) continue;
+            if (qt >= qCap) break;
+            best[v] = static_cast<uint8_t>(nf);
+            qn[qt] = static_cast<uint16_t>(v);
+            qf[qt] = static_cast<uint8_t>(nf);
+            ++qt;
+        }
+    }
+    if (outReachCnt) {
+        int c = 0;
+        for (int i = 0; i < n; ++i) {
+            if (outMask[i]) ++c;
+        }
+        *outReachCnt = c;
+    }
+    return n;
+}
+
+bool MaskHasFh(const uint8_t* mask, int n, uint32_t fh) {
+    if (!mask || n <= 0 || !fh) return false;
     if (!EnsureGraph()) return false;
 
     std::lock_guard<std::mutex> lock(gMu);
     if (!gGraph || !gGraph->ok) return false;
-    const Graph& g = *gGraph;
-    const int src = IndexOf(g, fhA);
-    const int dst = IndexOf(g, fhB);
-    if (src < 0 || dst < 0) return false;
-    if (src == dst) return true;
-
-    // 仅 Walk 边 BFS（绳/下跳不算拟人可走）。
-    static uint16_t q[foothold::kMaxFootholds];
-    static uint8_t seen[foothold::kMaxFootholds];
-    std::memset(seen, 0, g.n);
-    int qh = 0, qt = 0;
-    q[qt++] = static_cast<uint16_t>(src);
-    seen[src] = 1;
-    while (qh < qt) {
-        const int u = q[qh++];
-        if (u == dst) return true;
-        for (int ei = 0; ei < g.deg[u]; ++ei) {
-            if (g.adj[u][ei].kind != EdgeKind::Walk) continue;
-            const int v = g.adj[u][ei].to;
-            if (seen[v]) continue;
-            seen[v] = 1;
-            q[qt++] = static_cast<uint16_t>(v);
-        }
-    }
-    return false;
+    const int i = IndexOf(*gGraph, fh);
+    if (i < 0 || i >= n) return false;
+    return mask[i] != 0;
 }
 
 bool PlanFirst(uint32_t fromFh, uint32_t toFh, FirstAction* out) {

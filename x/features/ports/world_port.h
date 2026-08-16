@@ -40,7 +40,11 @@ bool IsInMapScene();
 bool IsPlayReady();
 void* GetMapScene();
 int GetMapSceneKey();
-// MapData.Id（WM._currentMapData@+0x88 → Id@+0x10）；0=未知 / 非图内。
+// MapData 指针是否有效。出生图 Field id=0（菇菇村訓練所入口）也算有图；
+// 禁止用 GetMapId()==0 当「没进图」——那是合法图号，没图请看 HasMapData。
+bool HasMapData();
+// MapData.Id（WM._currentMapData@+0x88 → Id@+0x10）。
+// 无 MapData → 0（兼容旧调用）；有 MapData 时 0 是出生图，不是哨兵。
 int GetMapId();
 // CharacterStat.CharacterID@+0x10（战斗/伤害等）；掉落归属请用 GetDropOwnerCharacterId。
 uint32_t GetCharacterId();

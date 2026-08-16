@@ -1927,7 +1927,8 @@ HttpLoginResult HttpGamaPassLoginToOtt(const std::wstring& /*user*/, const std::
         TicketFetchOptions fo;
         fo.ott = ott;
         fo.timeoutMs = timeoutMs;
-        auto fr = FetchGalaxyTicketFromOtt(fo);
+        auto fr = FetchGalaxyTicketFromOttWithRetry(
+            fo, 4, [&](const std::wstring& s) { Log(log, s); });
         HttpLoginResult out;
         out.ott = ott;
         if (!fr.ok) {

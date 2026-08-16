@@ -17,6 +17,10 @@ void SetDesired(bool on);
 bool IsDesired();
 bool IsBusy();
 
+// 城镇判定：仅 map_info.tsv town=1。不用原生 IsTown，也不用 %1000000==0
+//（野外入口如 107000000 沼澤地Ⅰ 也会整除，误禁记挂机图）。
+bool IsTownMapIdHeuristic(int mapId);
+
 // F5/挂机开启时调用：把当前野图记为挂机图；城镇不写入/不覆盖。
 void RecordHangupFarmMap(const char* reason = nullptr);
 

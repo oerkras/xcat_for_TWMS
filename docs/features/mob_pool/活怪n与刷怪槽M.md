@@ -76,9 +76,11 @@ mobscan n=…/M=… map=… lifeMob=… lifeAll=… raw=… trunc=… mapKey=…
 
 | 字段 | off | 用途 |
 |------|-----|------|
-| ID | +0x1C | 模板 id |
+| X,Y | +0x24 / +0x28 | 槽位 AbsPos（Y 已是 −WZ.y；更大 Y = 更高） |
 | Type | +0x20 | 0 Unknown / **1 Mob** / 2 Npc |
-| X,Y / MobTime / Fh | +0x24… | 点位与重生间隔 |
+| Rx0,Rx1 | +0x38 / +0x3C | 巡逻横区间（与 X 同号） |
+| ID | +0x1C | 模板 id |
+| MobTime / Fh | +0x2C… | 重生间隔 / 台 |
 
 类哈希锚点见 `mob_pool_port.cpp` 头注释（MobPool / Mob / MapData）。
 

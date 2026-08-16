@@ -32,11 +32,26 @@ bool ShopReady(bool& outReady);
 // ShopReady 看 Unity 存活 + activeSelf（FindAll 残留不算开店）。
 bool CloseShop();
 
+struct NpcLocate {
+    bool ok = false;
+    int oid = 0;
+    int tpl = 0;
+    float dist = 0.f;
+    float x = 0.f;
+    float y = 0.f;
+    float playerX = 0.f;
+    float playerY = 0.f;
+};
+
+// 只定位、不 TalkToNpc。preferTemplateId>0 全图找该 tpl。
+bool LocateNpcByTemplate(int templateId, NpcLocate& out);
+
 // 找近距 NPC 并调 UserLocal.TalkToNpc（C→S UserSelectNpc=64）。
 // 成功仅表示已发起对话；是否弹出商店 / 菜单由服端与脚本决定。
 // maxDist：世界坐标欧氏距离上限；<=0 用默认 220。
 // preferTemplateId：>0 时优先匹配 NpcData.Id（grocery 种子 npc_id）；找不到再退近距。
-bool TryTalkNearestNpc(float maxDist = 0.f, int preferTemplateId = 0);
+// inRangeOnly：true 时 dist>maxDist 不发包（船/转职 NPC 远距 Talk 会被服端踢）。
+bool TryTalkNearestNpc(float maxDist = 0.f, int preferTemplateId = 0, bool inRangeOnly = false);
 
 // 备用开对话：UserLocal.OnFuncKey(BasicAction=5, NpcTalk=54) Down+Up。
 bool TryNpcTalkFuncKey();

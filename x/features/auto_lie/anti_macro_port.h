@@ -90,6 +90,8 @@ int ReadNonFiniteIsSuccess(void* instance);
 // 600 ms+（同期采样掉到 27.7Hz），follower 把降级当成面板关闭，Abort 把光标弹回答题前的位置，
 // 游戏那几帧照采，轨迹里就留下一段人为瞬移。
 bool IsPredFresh();
+// 曾经刷过快照且已超过新鲜窗。从未刷新不算过期（与「取不到就当没开」区分）。
+bool IsPredStale();
 // mousePosList 对象指针（供 SendWill 帧脉冲无锁读 Count；勿跨题缓存）。
 void* PeekNonFiniteMouseList(void* instance);
 bool ReadRawPosList(void* instance, std::vector<Vec2>& out);

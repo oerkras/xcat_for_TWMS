@@ -26,7 +26,7 @@
 | `WM+0x98`（`get_CharacterId`） | ≈194899 | 与 CS 同值；**≠** Drop.OwnerId |
 | **`WM+0x114`** | **118536** | **本地 Drop 归属真源**（与地上 OwnerId 对齐） |
 
-> **勿混**：[`drop_alert_bypass`](../drop_alert_bypass/模块设计.md) 的警戒字段是 **`LocalUser+0x114`**（另一对象同偏移数字）。本条是 **`WorldManager+0x114`**。
+> **勿混**：[`drop_alert_bypass`](../drop_alert_bypass/模块设计.md) 的警戒戳是 **`LocalUser+0x118`（int）**；`+0x114` 是旁边的 bool（误锚）。v3 改的是 `IsAlertMode` 专用 threshold global，**不清**这个戳。本条是 **`WorldManager+0x114`（Drop.OwnerId）**。
 
 ---
 

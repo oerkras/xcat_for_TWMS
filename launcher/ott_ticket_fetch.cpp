@@ -385,4 +385,54 @@ TicketFetchResult FetchGalaxyTicketFromOtt(const TicketFetchOptions& opts) {
     return parsed;
 }
 
+bool TicketFetchLooksFatal(const TicketFetchResult& r) {
+    if (r.message.find("未能解析") != std::string::npos) return true;
+    if (r.message.find("Galaxy 登录页") != std::string::npos) return true;
+    if (r.message.find("baseUrl") != std::string::npos) return true;
+    if (r.message.find("WinHttpOpen") != std::string::npos) return true;
+    if (r.message.find("WinHttpOpenRequest") != std::string::npos) return true;
+    return false;
+}
+
+bool TicketFetchShouldRetry(const TicketFetchResult& r) {
+    if (r.ok) return false;
+    if (TicketFetchLooksFatal(r)) return false;
+    if (r.httpStatus == 429) return true;
+    if (r.httpStatus >= 500) return true;
+    if (r.httpStatus == 0) return true;  // 发送/接收失败
+    // 登录已成功但橘子业务码失败（成功期望 code==1）
+    if (r.apiCode != 0 && r.apiCode != 1) return true;
+    if (r.httpStatus >= 200 && r.httpStatus < 300 && r.apiCode != 1) return true;
+    return false;
+}
+
+TicketFetchResult FetchGalaxyTicketFromOttWithRetry(const TicketFetchOptions& opts, int maxAttempts,
+                                                    TicketFetchLogFn log) {
+    if (maxAttempts < 1) maxAttempts = 1;
+    TicketFetchResult last;
+    for (int i = 1; i <= maxAttempts; ++i) {
+        last = FetchGalaxyTicketFromOtt(opts);
+        if (last.ok) {
+            if (i > 1 && log) {
+                log(L"[ott] GetOneTimeWebInfo 重试成功 attempt=" + std::to_wstring(i) +
+                    L"/" + std::to_wstring(maxAttempts));
+            }
+            return last;
+        }
+        const bool more = (i < maxAttempts) && TicketFetchShouldRetry(last);
+        if (log) {
+            std::wstring line = L"[ott] GetOneTimeWebInfo 失败 attempt=" + std::to_wstring(i) +
+                                L"/" + std::to_wstring(maxAttempts) + L" http=" +
+                                std::to_wstring(last.httpStatus) + L" apiCode=" +
+                                std::to_wstring(last.apiCode);
+            if (!last.message.empty()) line += L" msg=" + WidenUtf8(last.message);
+            line += more ? L" → 将重试" : L" → 不再重试";
+            log(line);
+        }
+        if (!more) return last;
+        Sleep(700 * i);
+    }
+    return last;
+}
+
 }  // namespace msc::launcher

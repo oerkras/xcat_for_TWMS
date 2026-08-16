@@ -4,6 +4,7 @@ add_executable(xcat WIN32
     app_dpi.cpp
     app_font.cpp
     app_theme.cpp
+    gate_activation_ui.cpp
     app_sound.cpp
     app_notify.cpp
     app_event_log.cpp
@@ -11,16 +12,19 @@ add_executable(xcat WIN32
     log_upload_ui.cpp
     log_tail.cpp
     launch_panel.cpp
+    imgui_log_sanitize.cpp
     attach_inject.cpp
     hangup_schedule.cpp
     guardian_policy.cpp
     game_exit_probe.cpp
+    net_path_probe.cpp
     workspace_tabs.cpp
     tdr_tune.cpp
     runtime_leds.cpp
     status_bar.cpp
     single_instance.cpp
     update_client.cpp
+    ${CMAKE_SOURCE_DIR}/common/xcat_start_gate.cpp
     lie_ai_pump.cpp
     anti_bot_ai/lie_ai_config.cpp
     anti_bot_ai/llm_http.cpp
@@ -99,6 +103,10 @@ add_custom_command(TARGET xcat POST_BUILD
             -DSRC="${CMAKE_SOURCE_DIR}/dumps/offline_tables/tsv/skill_catalog_full.tsv"
             -DDST="$<TARGET_FILE_DIR:xcat>/XCat_data/skill_catalog/skill_catalog_full.tsv"
             -P "${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake"
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC_DIR="${CMAKE_SOURCE_DIR}/dumps/offline_tables/scroll_voice"
+            -DDST_DIR="$<TARGET_FILE_DIR:xcat>/XCat_data/dataservice/scroll_voice"
+            -P "${CMAKE_SOURCE_DIR}/cmake/sync_dir_if_exists.cmake"
     COMMAND ${CMAKE_COMMAND}
             -DSRC="${CMAKE_SOURCE_DIR}/dumps/offline_tables/SOURCE.md"
             -DDST="$<TARGET_FILE_DIR:xcat>/XCat_data/dataservice/SOURCE.md"

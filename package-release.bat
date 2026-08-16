@@ -87,6 +87,27 @@ if errorlevel 1 (
 )
 
 echo [package-release] Packing zip...
+if not exist "dumps\offline_tables\scroll_voice\map.tsv" (
+    echo !C_RED!FAILED: missing dumps\offline_tables\scroll_voice\map.tsv!C_RESET!
+    echo !C_YELLOW!HINT: python scripts\bake_scroll_voice.py --jobs 10!C_RESET!
+    copy /Y "%VERSION_BACKUP%" "%VERSION_FILE%" >nul
+    del "%VERSION_BACKUP%" >nul 2>&1
+    exit /b 1
+)
+if not exist "dumps\offline_tables\scroll_voice\pick_ok.wav" (
+    echo !C_RED!FAILED: missing dumps\offline_tables\scroll_voice\pick_ok.wav!C_RESET!
+    echo !C_YELLOW!HINT: python scripts\bake_scroll_voice.py --jobs 10!C_RESET!
+    copy /Y "%VERSION_BACKUP%" "%VERSION_FILE%" >nul
+    del "%VERSION_BACKUP%" >nul 2>&1
+    exit /b 1
+)
+if not exist "dumps\offline_tables\scroll_voice\pick_ok_dart.wav" (
+    echo !C_RED!FAILED: missing dumps\offline_tables\scroll_voice\pick_ok_dart.wav!C_RESET!
+    echo !C_YELLOW!HINT: python scripts\bake_scroll_voice.py --jobs 10!C_RESET!
+    copy /Y "%VERSION_BACKUP%" "%VERSION_FILE%" >nul
+    del "%VERSION_BACKUP%" >nul 2>&1
+    exit /b 1
+)
 node "%~dp0scripts\package-release.mjs"
 if errorlevel 1 (
     echo !C_RED!FAILED: package script error.!C_RESET!

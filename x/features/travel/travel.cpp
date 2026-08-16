@@ -14,12 +14,14 @@
 #include "../invuln/invuln.h"
 #include "../simple_combat/heli_rotor.h"
 #include "../soft_login_probe/soft_login_probe.h"
+#include "../kick_sniff/kick_sniff.h"
 #include "../notify/notify.h"
 #include "../simple_combat/simple_combat.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
 
 #include "../../../common/xcat_map_names.h"
+#include "../../../common/xcat_map_towns.h"
 
 #include <Windows.h>
 #include <timeapi.h>
@@ -121,6 +123,9 @@ struct LateWait {
 LateWait gUniqueLate;
 
 std::string gPendingGoto;  // no_map 时暂存，稳图后再启动
+// 断线 / 软重连 / 落地静默：Goto 只暂停，禁止假火/InterStage 墙钟把剩余跳熔断。
+bool gGapPause = false;
+bool gKeepGotoOverFarm = false;  // 重连后 F5 仍勾选时，在途赶路优先于 combat_on
 std::string gLastMsg;
 FailKind gFailKind = FailKind::None;
 DWORD gLastSnapMs = 0;
@@ -253,7 +258,9 @@ void TickSettleHover(DWORD now, const char* phase) {
         float sy = st.y;
         uint32_t fh = 0;
         bool got = ports::foothold_path::SnapStandAt(st.x, st.y, &sx, &sy, &fh,
-                                                     /*preferFlat=*/false) &&
+                                                     /*preferFlat=*/false,
+                                                     /*avoidWalkJunction=*/false,
+                                                     /*cliffInset=*/false) &&
                    fh != 0;
         if (got) {
             const float sdx = sx - st.x;
@@ -304,6 +311,25 @@ void TickSettleHover(DWORD now, const char* phase) {
     const float dy = st.y - gSettleSy;
     const float d = std::sqrt(dx * dx + dy * dy);
     const float spd = std::sqrt(st.vx * st.vx + st.vy * st.vy);
+    // 崩② 01:36:57：F6 3X 甩开 v≈-1093 后旧 snap d=334，BAN ON Cruise 追 → 进图 AV。
+    // 高速时丢 snap、卸 Travel 旋翼，等引擎消速再托台（自然掉落 vy≈90 远低于此阈）。
+    constexpr float kSettleBleedSpeed = 800.f;
+    if (spd > kSettleBleedSpeed) {
+        ClearSettleHoverState();
+        if (heli::CurrentOwner() == heli::Owner::Travel) {
+            heli::Disarm(heli::Owner::Travel);
+            heli::Release(heli::Owner::Travel);
+        }
+        ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+        static DWORD sBleed = 0;
+        if (!sBleed || now - sBleed >= 400) {
+            sBleed = now;
+            x::runtime::LogI("Travel",
+                             "settle hover bleed spd=%.0f phase=%s ap=(%.0f,%.0f) — no approach",
+                             spd, phase ? phase : "?", st.x, st.y);
+        }
+        return;
+    }
     // 近台：禁止 approach 的 BAN ON（换图「起飞又落地」体感）。直接卸 ban 等挂台。
     const bool softNear =
         d <= kSettleSoftCatchPx && spd <= kSettleSoftMaxSpeed;
@@ -501,6 +527,8 @@ void SetIdle(const char* msg, FailKind fail = FailKind::None) {
     gArriveReadyAt = 0;
     gGotoAtMs = 0;
     gPendingGoto.clear();
+    gGapPause = false;
+    gKeepGotoOverFarm = false;
     ClearTransferWatch();
     ClearFakeFire();
     ClearTransientFire();
@@ -621,6 +649,8 @@ bool StartGotoResolved(const std::string& src, const std::string& dst, const std
         return false;
     }
     gPendingGoto.clear();
+    gGapPause = false;
+    gKeepGotoOverFarm = false;
     gMode = Mode::Goto;
     ++gFireEpoch;
     ClearFakeFire();
@@ -934,6 +964,73 @@ bool NoteNoMapChangeTimeout(DWORD now) {
     return true;
 }
 
+bool ReplanOrStop(const std::string& cur);
+
+bool InTravelGapPause() {
+    if (x::features::soft_login_probe::IsReconnectInFlight()) return true;
+    const int nm = x::features::kick_sniff::LastSessionState();
+    // Disconnecting=0 Disconnected=1 Connecting=2 Connected=3；-1=尚未采到，不得当空档。
+    if (nm == 0 || nm == 1 || nm == 2) return true;
+    const auto scene = ports::world::GetSceneState();
+    if (scene == ports::world::SceneState::Login || scene == ports::world::SceneState::None ||
+        scene == ports::world::SceneState::CashShop ||
+        scene == ports::world::SceneState::GlobalMarket ||
+        scene == ports::world::SceneState::Unknown)
+        return true;
+    // InterStage / Field：真换图等待，不是断线空档。
+    return false;
+}
+
+void NoteGotoGapPause(DWORD now) {
+    if (gGapPause) return;
+    gGapPause = true;
+    gKeepGotoOverFarm = true;
+    x::runtime::LogW("Travel",
+                     "goto pause (disconnect/soft_login) target=%s hop=%d/%d expect=%s",
+                     gTarget.c_str(), (int)gHopIdx, (int)gHops.size(),
+                     gExpectMap.empty() ? "-" : gExpectMap.c_str());
+    (void)now;
+}
+
+// 重连落地：丢弃在途发门等待（不是真进门），按当前图重规划剩余跳。禁止把重连当实测边。
+bool ResumeGotoAfterGap(DWORD now) {
+    ClearTransferWatch();
+    ClearLateWait();
+    ClearFakeFire();
+    ClearTransientFire();
+    gExpectMap.clear();
+    gFiredPortal.clear();
+    gPendingFrom.clear();
+    gPendingSeedId.clear();
+    gPendingName.clear();
+    gHopStartedMs = 0;
+    gArriveReadyAt = 0;
+    ReleaseTravelFhBan();
+    ClearSettleHoverState();
+
+    const std::string cur = ports::travel::CurrentMapKey();
+    if (cur.empty()) {
+        gLastMsg = "wait_resume";
+        x::runtime::LogW("Travel", "resume deferred (no CurrentMapKey) target=%s",
+                         gTarget.c_str());
+        return false;
+    }
+    gGapPause = false;
+    NoteMapKeyForStable(cur, now);
+    if (cur == gTarget) {
+        gArriveReadyAt = now + kArriveStableMs;
+        gLastMsg = "arrive_settle";
+        x::runtime::LogI("Travel", "resume after gap already at target %s", cur.c_str());
+        return true;
+    }
+    if (!ReplanOrStop(cur)) return false;
+    gNextHopReadyAt = now + kMidHopSettleMs;
+    gLastMsg = "resume settle -> next";
+    x::runtime::LogI("Travel", "resume after gap %s -> %s hops=%d (replan, no measured edge)",
+                     cur.c_str(), gTarget.c_str(), (int)gHops.size());
+    return true;
+}
+
 bool ReplanOrStop(const std::string& cur) {
     gHops = gGraph.PathTo(cur, gTarget);
     gHopIdx = 0;
@@ -1064,6 +1161,7 @@ void HandleCmd(const std::string& cmd) {
 
 void TryFlushPendingGoto() {
     if (gPendingGoto.empty() || gMode != Mode::Idle) return;
+    if (InTravelGapPause()) return;
     if (!ports::world::IsPlayReady()) return;
     const std::string src = ports::travel::CurrentMapKey();
     if (src.empty()) return;
@@ -1129,8 +1227,26 @@ void OnMapEnterConfirmed(const std::string& cur, DWORD now) {
 }
 
 void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
+    // 断线 / 软重连 / 落地静默：先于 F5 互斥。墙钟停走，落地后 Resume 重规划。
+    if (InTravelGapPause()) {
+        NoteGotoGapPause(now);
+        gLastMsg = "wait_resume";
+        if (gNextHopReadyAt) gNextHopReadyAt = now + kMidHopSettleMs;
+        if (ports::world::IsInMapScene() && ports::world::IsPlayReady())
+            TickSettleHover(now, "wait_resume");
+        return;
+    }
+    if (gGapPause) {
+        if (!ResumeGotoAfterGap(now)) {
+            if (gMode != Mode::Goto) return;
+            gLastMsg = "wait_resume";
+            return;
+        }
+    }
+
     // F5 真正在打怪时不赶路（HardPause 如 AutoSupply 开趟不算；中途再开 F5 立刻停）
-    if (simple_combat::IsFarmingActive()) {
+    // 重连后 F5 仍勾选：在途 Goto 优先，Combat 已对 IsActive 让路。
+    if (simple_combat::IsFarmingActive() && !gKeepGotoOverFarm) {
         const std::string cur = ports::travel::CurrentMapKey();
         SetIdle("combat_on", FailKind::CombatOn);
         x::runtime::LogW("Travel", "stop: F5 farming active during goto @%s -> %s",
@@ -1554,13 +1670,10 @@ bool PrefixTownOutdoor(const char* fromMap, char* out, size_t outSz) {
     if (!fromMap || !fromMap[0] || !out || outSz < 10) return false;
     const int id = atoi(fromMap);
     if (id < 100000000) return false;
+    // 仅作「同大区前缀」候选种子；是否真城镇由 IsMapInfoTown 再筛。
     const int town = (id / 1000000) * 1000000;
     snprintf(out, outSz, "%d", town);
     return true;
-}
-
-bool IsOutdoorTownMapId(int mapId) {
-    return mapId >= 100000000 && (mapId % 1000000) == 0;
 }
 
 }  // namespace
@@ -1571,6 +1684,7 @@ bool PredictReturnScrollTownOutdoor(const char* fromMap, char* out, size_t outSz
 
     char prefix[16]{};
     const bool havePrefix = PrefixTownOutdoor(fromMap, prefix, sizeof(prefix));
+    const char* bin = x::runtime::GetBinDir();
 
     EnsureGraphLoaded();
     std::vector<std::string> maps;
@@ -1584,7 +1698,7 @@ bool PredictReturnScrollTownOutdoor(const char* fromMap, char* out, size_t outSz
     auto consider = [&](const char* cand) {
         if (!cand || !cand[0]) return;
         const int id = atoi(cand);
-        if (!IsOutdoorTownMapId(id)) return;
+        if (!xcat::IsMapInfoTown(bin, id)) return;
         const int hops = PathHopCount(fromMap, cand);
         if (hops < 0) return;
         if (hops < bestHops) {
@@ -1602,7 +1716,7 @@ bool PredictReturnScrollTownOutdoor(const char* fromMap, char* out, size_t outSz
                          out, bestHops, havePrefix ? prefix : "-");
         return true;
     }
-    if (havePrefix) {
+    if (havePrefix && xcat::IsMapInfoTown(bin, atoi(prefix))) {
         strncpy_s(out, outSz, prefix, _TRUNCATE);
         x::runtime::LogW("Travel", "predictScrollTown from=%s fallback prefix=%s (no hop town)",
                          fromMap, out);

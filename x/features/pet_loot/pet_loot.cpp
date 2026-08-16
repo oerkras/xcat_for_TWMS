@@ -162,34 +162,57 @@ void RebuildSkipIds() {
             continue;
         }
 
-        std::vector<std::string> codes;
-        const size_t total =
-            xcat::ItemCatalogCollectCodesByNameContains(pack, r.nameKey, codes, kMaxIdsPerNameKey);
-        if (total == 0) {
+        std::vector<std::string> keys;
+        xcat::SplitKeywordList(r.nameKey, keys);
+        if (keys.empty()) {
             ++missName;
             LogLine("skip miss key=\"%s\"", r.nameKey);
             continue;
         }
 
-        const bool exactOne = (total == 1 && codes.size() == 1 &&
-                               xcat::ItemCatalogLookupCodeByExactName(pack, r.nameKey)[0] != '\0');
-        for (const std::string& code : codes) {
-            char* end = nullptr;
-            const long v = strtol(code.c_str(), &end, 10);
-            if (!end || *end != '\0' || v <= 0) continue;
-            if (!SkipPush(gSkipResolved, static_cast<int>(v))) continue;
-            if (exactOne)
-                ++fromExact;
-            else
-                ++fromSub;
+        for (const std::string& key : keys) {
+            std::vector<std::string> codes;
+            const size_t total = xcat::ItemCatalogCollectCodesByNameContains(
+                pack, key.c_str(), codes, kMaxIdsPerNameKey);
+            if (total == 0) {
+                ++missName;
+                LogLine("skip miss key=\"%s\"", key.c_str());
+                continue;
+            }
+
+            const bool exactOne =
+                (total == 1 && codes.size() == 1 &&
+                 xcat::ItemCatalogLookupCodeByExactName(pack, key.c_str())[0] != '\0');
+            for (const std::string& code : codes) {
+                char* end = nullptr;
+                const long v = strtol(code.c_str(), &end, 10);
+                if (!end || *end != '\0' || v <= 0) continue;
+                if (!SkipPush(gSkipResolved, static_cast<int>(v))) continue;
+                if (exactOne)
+                    ++fromExact;
+                else
+                    ++fromSub;
+            }
         }
     }
 
     gSkipDirty = false;
+    char idBuf[160]{};
+    size_t idOff = 0;
+    int shown = 0;
+    for (int id : gSkipResolved.ids) {
+        if (shown >= 8) break;
+        const int n = snprintf(idBuf + idOff, sizeof(idBuf) - idOff, "%s%d", shown ? "," : "", id);
+        if (n < 0) break;
+        idOff += (size_t)n;
+        if (idOff >= sizeof(idBuf)) break;
+        ++shown;
+    }
     LogLine(
-        "skip resolve filter=1 catalog=%d rules=%u → ids=%zu (itemId=%d exact=%d substr=%d miss=%d)",
-        pack.loaded ? 1 : 0, gCfg.skipRuleCount, gSkipResolved.size(), fromId, fromExact, fromSub,
-        missName);
+        "skip resolve filter=1 catalog=%d rules=%u → ids=%zu [%s%s] (itemId=%d exact=%d substr=%d "
+        "miss=%d)",
+        pack.loaded ? 1 : 0, gCfg.skipRuleCount, gSkipResolved.size(), idBuf,
+        gSkipResolved.size() > 8 ? ",..." : "", fromId, fromExact, fromSub, missName);
 }
 
 const ports::drop::SkipIds* CurrentSkipIds() {
@@ -205,7 +228,6 @@ void TickHighValueDropNotify(DWORD now) {
 
     ports::drop::HighValueDropAlert hits[8]{};
     const int n = ports::drop::CollectNewHighValueDropAlerts(hits, 8);
-    if (n <= 0) return;
 
     const xcat::ItemCatalogPack& pack = xcat::GetSharedItemCatalog(x::runtime::GetBinDir());
     auto fillName = [&](int itemId, char* buf, size_t buflen) {
@@ -218,6 +240,7 @@ void TickHighValueDropNotify(DWORD now) {
             snprintf(buf, buflen, "itemId=%d", itemId);
     };
 
+    if (n > 0) {
     auto publishGroup = [&](int kind, const char* keyPrefix, const char* title,
                             const char* logTag) {
         ports::drop::HighValueDropAlert group[8]{};
@@ -255,11 +278,127 @@ void TickHighValueDropNotify(DWORD now) {
         LogLineOd("%s notify batch n=%d", logTag, gn);
     };
 
-    // 仅卷軸：装备已取消音效提醒
+    // 雷之鏢单独气泡（kind=3）；204 卷走「掉落卷軸」
+    publishGroup(3, "petloot-scroll", "掉落雷之鏢", "thunderDart");
     publishGroup(2, "petloot-scroll", "掉落卷軸", "scrollDrop");
+    }
+
+    ports::drop::HighValueDropAlert gone[8]{};
+    const int gn = ports::drop::CollectGoneHighValueDrops(gone, 8);
+    if (gn <= 0) return;
+    const bool lootOn = gCfg.enabled || gCfg.footEnabled || gCfg.charVacEnabled ||
+                        gCfg.nativeVacEnabled;
+    if (!lootOn) return;
+
+    auto publishPicked = [&]() {
+        const bool dartOnly = [&]() {
+            for (int i = 0; i < gn; ++i) {
+                if (gone[i].kind != 3) return false;
+            }
+            return gn > 0;
+        }();
+        const char* title = dartOnly ? "拾取雷之鏢" : "拾取成功";
+        const char* logTag = dartOnly ? "dartPick" : "scrollPick";
+        if (gn == 1) {
+            char key[48]{};
+            snprintf(key, sizeof(key), dartOnly ? "petloot-picked-dart-%d" : "petloot-picked-%d",
+                     gone[0].dropId);
+            char body[128]{};
+            fillName(gone[0].itemId, body, sizeof(body));
+            notify::PublishNotification(notify::NotificationEvent{
+                notify::NotificationKind::Success, key, title, body, 3500});
+            LogLineOd("%s ok dropId=%d itemId=%d", logTag, gone[0].dropId, gone[0].itemId);
+            return;
+        }
+        char key[48]{};
+        snprintf(key, sizeof(key), dartOnly ? "petloot-picked-dart-batch-%u" : "petloot-picked-batch-%u",
+                 (unsigned)now);
+        char body[256]{};
+        size_t off = 0;
+        off += (size_t)snprintf(body + off, sizeof(body) - off, "×%d　", gn);
+        for (int i = 0; i < gn && off + 8 < sizeof(body); ++i) {
+            char piece[96]{};
+            fillName(gone[i].itemId, piece, sizeof(piece));
+            const int wrote =
+                snprintf(body + off, sizeof(body) - off, "%s%s", i ? "、" : "", piece);
+            if (wrote < 0) break;
+            off += (size_t)wrote;
+        }
+        notify::PublishNotification(notify::NotificationEvent{
+            notify::NotificationKind::Success, key, title, body, 4000});
+        LogLineOd("%s ok batch n=%d", logTag, gn);
+    };
+    publishPicked();
+}
+
+void HoldSkipWhileYielding() {
+    // 原生宠 50x60 不看面板档位。拾物 Radio=关闭时 enabled/charVac/foot 全 0，
+    // 这里再 return 会把 LiveSkip 留空：TryPick MI 钩装着也不会盖戳，箭矢照舔。
+    if (!gCfg.skipFilterEnabled && !gCfg.enabled && !gCfg.charVacEnabled && !gCfg.footEnabled &&
+        !gCfg.nativeVacEnabled)
+        return;
+    const ports::drop::SkipIds* skip = CurrentSkipIds();
+    if (!gCfg.skipFilterEnabled || !skip || skip->empty()) {
+        (void)ports::drop::HoldSkipDrops(nullptr, 2.f, 2.f);
+        return;
+    }
+    float vacW = 0.f, vacH = 0.f;
+    xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
+    const int n = ports::drop::HoldSkipDrops(skip, vacW * 0.5f, vacH * 0.5f);
+    if (n <= 0) return;
+    static DWORD sHoldLog = 0;
+    const DWORD now = GetTickCount();
+    if (!sHoldLog || now - sHoldLog > 2000) {
+        sHoldLog = now;
+        LogLineOd("skip-hold native-foot stamp=%d skipN=%d pet=%d charVac=%d foot=%d nativeVac=%d "
+                  "(block 50x60)",
+                  n, (int)skip->size(), gCfg.enabled ? 1 : 0, gCfg.charVacEnabled ? 1 : 0,
+                  gCfg.footEnabled ? 1 : 0, gCfg.nativeVacEnabled ? 1 : 0);
+    }
+}
+
+void TickDropFallBoost() {
+    if (!gCfg.dropSnapLand && !gCfg.dropAccelFall) return;
+    int snapN = 0;
+    int accelN = 0;
+    int skipHoldN = 0;
+    const ports::drop::SkipIds* skip =
+        gCfg.skipFilterEnabled ? CurrentSkipIds() : nullptr;
+    const int n = ports::drop::BoostDropFall(gCfg.dropSnapLand != 0, gCfg.dropAccelFall != 0, skip,
+                                            &snapN, &accelN, &skipHoldN);
+    if (n <= 0) return;
+    static DWORD sFallLog = 0;
+    const DWORD now = GetTickCount();
+    if (!sFallLog || now - sFallLog > 2000) {
+        sFallLog = now;
+        LogLineOd("drop-fall snap=%d accel=%d skipHold=%d flags(snap=%d accel=%d skip=%d)", snapN,
+                  accelN, skipHoldN, gCfg.dropSnapLand ? 1 : 0, gCfg.dropAccelFall ? 1 : 0,
+                  skip ? (int)skip->size() : 0);
+    }
+}
+
+void TickNativeVacHold() {
+    if (!gCfg.nativeVacEnabled) {
+        ports::drop::ReleaseByPetRectPack();
+        return;
+    }
+    float vacW = 0.f, vacH = 0.f;
+    xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
+    static DWORD sMiss = 0;
+    if (ports::drop::HoldByPetRectPack(vacW, vacH)) return;
+    const DWORD now = GetTickCount();
+    if (!sMiss || now - sMiss > 2000) {
+        sMiss = now;
+        LogLineOd("native-vac hold miss box=%.0fx%.0f", vacW, vacH);
+    }
 }
 
 void Tick(DWORD now) {
+    if (gCfg.nativeVacEnabled) {
+        simple_combat::SetHighValueLootUrgent(false);
+        TickNativeVacHold();
+        return;
+    }
     if (!gCfg.enabled && !gCfg.footEnabled && !gCfg.charVacEnabled) {
         simple_combat::SetHighValueLootUrgent(false);
         return;
@@ -268,12 +407,14 @@ void Tick(DWORD now) {
     // 与自动打怪/瞬移共用 MainPump（drainBudget=2 + JobPrio）。泵拥堵时让路，否则吸物会把出刀饿死
     // （upload 211841：interval=50 + 全盒清闸 → combat fires 连续 40s 归零）。
     if (x::runtime::main_thread::IsCongested()) {
-        // 堵泵时吸不到：fail-closed 清紧急，避免 ExternalPause 空挂
+        // 堵泵时吸不到：fail-closed 清紧急，避免 ExternalPause 空挂。
+        // 仍盖黑名单戳，否则原生脚边 50x60 会把箭矢舔走。
         simple_combat::SetHighValueLootUrgent(false);
+        HoldSkipWhileYielding();
         static DWORD sCongLog = 0;
         if (!sCongLog || now - sCongLog > 2000) {
             sCongLog = now;
-            LogLineOd("yield pump_congested q=%d (defer loot for combat)",
+            LogLineOd("yield pump_congested q=%d (defer loot for combat; skip-hold on)",
                       x::runtime::main_thread::QueuedJobCount());
         }
         return;
@@ -302,8 +443,10 @@ void Tick(DWORD now) {
                 static DWORD sHvLog = 0;
                 if (!sHvLog || now - sHvLog > 2000) {
                     sHvLog = now;
-                    const char* kind =
-                        hvKind == 1 ? "equip" : (hvKind == 2 ? "scroll" : "?");
+                    const char* kind = hvKind == 1   ? "equip"
+                                       : hvKind == 2 ? "scroll"
+                                       : hvKind == 3 ? "dart"
+                                                     : "?";
                     LogLineOd("highValue urgent near=%d skippedFull=%d dropId=%d itemId=%d "
                               "kind=%s (interrupt fire)",
                               hvN, hvFull, hvDrop, hvInfo, kind);
@@ -315,13 +458,17 @@ void Tick(DWORD now) {
     }
 
     if (!simple_combat::IsLootPulseActive()) {
+        HoldSkipWhileYielding();
         static DWORD sFireLog = 0;
         if (!sFireLog || now - sFireLog > 2000) {
             sFireLog = now;
-            LogLineOd("yield combat_fire_window (defer loot for Firing only)");
+            LogLineOd("yield combat_fire_window (defer loot for Firing only; skip-hold on)");
         }
         return;
     }
+
+    // 人吸/脚下 due 拍也要喂 LiveSkip + 盖戳；原生宠 Tick 不跟面板档位走。
+    HoldSkipWhileYielding();
 
     // 人物直吸 = 宠吸控制面，主体换成角色；半盒 = vacuumW/H / 2（与宠吸共用全盒）；
     // 官方 Send 不写 LastTry，拒收必须靠 sentDropId AddStall；burst 跟面板（自设，硬顶 HardCap）。
@@ -621,10 +768,13 @@ DWORD WINAPI Worker(LPVOID) {
 
         const uint32_t cfgSig = (gCfg.enabled ? 1u : 0u) | (gCfg.footEnabled ? 2u : 0u) |
                                 (gCfg.mapVacuumEnabled ? 4u : 0u) |
-                                (gCfg.charVacEnabled ? 8u : 0u) | (gCfg.skipRuleCount << 8) |
+                                (gCfg.charVacEnabled ? 8u : 0u) |
+                                (gCfg.nativeVacEnabled ? 0x10u : 0) | (gCfg.skipRuleCount << 8) |
                                 (gCfg.skipFilterEnabled ? 0x80000000u : 0) |
                                 (gCfg.highValuePriority ? 0x40000000u : 0) |
-                                (gCfg.scrollDropNotify ? 0x20000000u : 0);
+                                (gCfg.scrollDropNotify ? 0x20000000u : 0) |
+                                (gCfg.dropSnapLand ? 0x10000000u : 0) |
+                                (gCfg.dropAccelFall ? 0x08000000u : 0);
         const uint32_t cfgSig2 = (gCfg.intervalMs & 0xFFFFu) | (gCfg.burstPerTick << 16);
         const uint32_t cfgSigVac = (static_cast<uint32_t>(gCfg.vacuumW + 0.5f) & 0xFFFFu) |
                                    ((static_cast<uint32_t>(gCfg.vacuumH + 0.5f) & 0xFFFFu) << 16);
@@ -636,23 +786,30 @@ DWORD WINAPI Worker(LPVOID) {
             xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
             float charHW = 0.f, charHH = 0.f;
             xcat::PetLootEffectiveCharHalf(gCfg, charHW, charHH);
-            LogLineOd("config pet=%d foot=%d charVac=%d mapVac=%d interval=%u burst=%u "
+            LogLineOd("config pet=%d foot=%d charVac=%d nativeVac=%d mapVac=%d interval=%u burst=%u "
                       "box=%.0fx%.0f(near) footBox=50x60(native) charBox=%.0fx%.0f filters=0x%X "
-                      "skipFilter=%d skipRules=%u highValue=%d scrollNotify=%d",
+                      "skipFilter=%d skipRules=%u highValue=%d scrollNotify=%d snapLand=%d "
+                      "accelFall=%d",
                     gCfg.enabled ? 1 : 0, gCfg.footEnabled ? 1 : 0, gCfg.charVacEnabled ? 1 : 0,
-                    gCfg.mapVacuumEnabled ? 1 : 0, gCfg.intervalMs, gCfg.burstPerTick, vacW, vacH,
-                    charHW * 2.f, charHH * 2.f, gCfg.filterFlags, gCfg.skipFilterEnabled ? 1 : 0,
-                    gCfg.skipRuleCount, gCfg.highValuePriority ? 1 : 0,
-                    gCfg.scrollDropNotify ? 1 : 0);
+                    gCfg.nativeVacEnabled ? 1 : 0, gCfg.mapVacuumEnabled ? 1 : 0, gCfg.intervalMs,
+                    gCfg.burstPerTick, vacW, vacH, charHW * 2.f, charHH * 2.f, gCfg.filterFlags,
+                    gCfg.skipFilterEnabled ? 1 : 0, gCfg.skipRuleCount,
+                    gCfg.highValuePriority ? 1 : 0, gCfg.scrollDropNotify ? 1 : 0,
+                    gCfg.dropSnapLand ? 1 : 0, gCfg.dropAccelFall ? 1 : 0);
         }
 
         // 脚边 / 人物直吸：DropPool+MyUser；宠吸：额外 pet_port
-        // 卷軸提示音可在「拾物全关」时单独跑（挂机出刀仍能听见掉卷）
+        // 卷軸提示音、黑名单可在「拾物全关」时单独跑（原生宠 50x60 仍会舔）
         const bool wantFoot = gCfg.footEnabled != 0;
         const bool wantPet = gCfg.enabled != 0;
         const bool wantChar = gCfg.charVacEnabled != 0;
+        const bool wantNativeVac = gCfg.nativeVacEnabled != 0;
         const bool wantScrollNotify = gCfg.scrollDropNotify != 0;
-        if (!wantFoot && !wantPet && !wantChar && !wantScrollNotify) {
+        const bool wantSkip = gCfg.skipFilterEnabled != 0;
+        const bool wantFall = gCfg.dropSnapLand != 0 || gCfg.dropAccelFall != 0;
+        if (!wantFoot && !wantPet && !wantChar && !wantNativeVac && !wantScrollNotify &&
+            !wantSkip && !wantFall) {
+            ports::drop::ReleaseByPetRectPack();
             Sleep(kIdleSleepMs);
             continue;
         }
@@ -660,9 +817,32 @@ DWORD WINAPI Worker(LPVOID) {
         const bool dropOk = ports::drop::EnsureBound();
         if (wantScrollNotify && dropOk) TickHighValueDropNotify(now);
 
+        if (wantNativeVac) {
+            if (dropOk) {
+                HoldSkipWhileYielding();
+                if (wantFall) TickDropFallBoost();
+                TickNativeVacHold();
+                static DWORD sNvLog = 0;
+                if (!sNvLog || now - sNvLog > 2000) {
+                    sNvLog = now;
+                    float vacW = 0.f, vacH = 0.f;
+                    xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
+                    LogLineOd("mode=nativeVac hold box=%.0fx%.0f skip=%d fall=%d", vacW, vacH,
+                              wantSkip ? 1 : 0, wantFall ? 1 : 0);
+                }
+            }
+            Sleep(kIdleSleepMs);
+            continue;
+        }
+        ports::drop::ReleaseByPetRectPack();
+
         const bool petOk = !wantPet || ports::pet::EnsureBound();
         const bool anyReady = dropOk && (wantFoot || wantChar || (wantPet && petOk));
         if (!wantFoot && !wantPet && !wantChar) {
+            // 拾物关闭：仍喂 LiveSkip，否则 TryPick 钩空转、原生宠照捡箭矢。
+            // 落地加速与档位无关：先盖戳再加速，避免把黑名单 INT_MAX 冲成 LastTry=0。
+            if (wantSkip && dropOk) HoldSkipWhileYielding();
+            if (wantFall && dropOk) TickDropFallBoost();
             Sleep(kIdleSleepMs);
             continue;
         }
@@ -680,6 +860,7 @@ DWORD WINAPI Worker(LPVOID) {
                     auto_enter::IsDesired() ? 1 : 0,
                     ports::drop::PeekLocalUser(), ports::drop::PeekDropPool());
             }
+            if (wantFall && dropOk) TickDropFallBoost();
             Sleep(kIdleSleepMs);
             continue;
         }
@@ -746,7 +927,14 @@ DWORD WINAPI Worker(LPVOID) {
                          simple_combat::IsHighValueLootUrgent();
         if (due) {
             lastTick = now;
+            // 先盖戳再加速再吸：瞬落会写 LastTry=0，必须避开已盖的 INT_MAX。
+            HoldSkipWhileYielding();
+            TickDropFallBoost();
             Tick(now);
+        } else {
+            // 真空间隔内原生 50x60 仍在跑；每 40ms 盖戳，不把拦截缩成「只在出刀让路」。
+            HoldSkipWhileYielding();
+            TickDropFallBoost();
         }
         Sleep(kIdleSleepMs);
     }
@@ -772,6 +960,7 @@ void ApplyConfig(const xcat::PetLootConfig& cfg) {
     gCfg = cfg;
     xcat::PetLootNormalize(gCfg);
     gSkipDirty = true;
+    if (!gCfg.nativeVacEnabled) ports::drop::ReleaseByPetRectPack();
 }
 
 void StartWorker() {

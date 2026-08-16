@@ -64,11 +64,13 @@ void SellbagSetDefaults(SellbagConfig& out) {
     out = {};
     out.magic = kSellbagMagic;
     out.version = kSellbagVersion;
-    // 默认保留「礦」（矿石等）；用户可清空或改关键词。
-    out.keepRuleCount = 1;
-    out.keepRules[0].enabled = 1;
-    out.keepRules[0].targetMask = kSellbagBagAll;
-    strncpy_s(out.keepRules[0].nameKey, kSellbagDefaultKeepNameKey, _TRUNCATE);
+    // 默认保留「礦」「玻璃鞋」（艾溫任務）；用户可清空或改关键词。
+    out.keepRuleCount = static_cast<uint32_t>(kSellbagDefaultKeepNameKeyCount);
+    for (int i = 0; i < kSellbagDefaultKeepNameKeyCount; ++i) {
+        out.keepRules[i].enabled = 1;
+        out.keepRules[i].targetMask = kSellbagBagAll;
+        strncpy_s(out.keepRules[i].nameKey, kSellbagDefaultKeepNameKeys[i], _TRUNCATE);
+    }
 }
 
 std::string SellbagRelPath() { return "state\\sellbag.bin"; }

@@ -1211,6 +1211,7 @@ std::wstring Session::ReadUrlHint(IUIAutomationElement* root, HWND hwnd) const {
     auto looksUrl = [](const std::wstring& s) -> bool {
         if (s.size() < 8) return false;
         return StrStrIW(s.c_str(), L"https://") || StrStrIW(s.c_str(), L"http://") ||
+               StrStrIW(s.c_str(), L"chrome-error") ||
                StrStrIW(s.c_str(), L"galaxy.games.gamania") ||
                StrStrIW(s.c_str(), L"accounts.gamania") ||
                StrStrIW(s.c_str(), L"beanfun.com") ||

@@ -21,9 +21,9 @@ namespace {
 using x::runtime::il2cpp::AtRva;
 
 // remount 2026-08-06 dump.cs.runtime（相对 08-04 统一 +0x3FD0）
-constexpr uint32_t kRvaSetTargetFps = 0x4E207F0;  // Application.set_targetFrameRate
-constexpr uint32_t kRvaGetTargetFps = 0x4E207B0;  // Application.get_targetFrameRate
-constexpr uint32_t kRvaSetVSync = 0x4E3BB50;      // QualitySettings.set_vSyncCount
+constexpr uint32_t kRvaSetTargetFps = 0x4E1F500;  // Application.set_targetFrameRate
+constexpr uint32_t kRvaGetTargetFps = 0x4E1F4C0;  // Application.get_targetFrameRate
+constexpr uint32_t kRvaSetVSync = 0x4E3A860;      // QualitySettings.set_vSyncCount
 
 constexpr DWORD kTickMsOn = 200;      // 轮询；真正重刷见 kReapplyMs / gApplyNow
 constexpr DWORD kTickMsOff = 2000;
@@ -31,7 +31,7 @@ constexpr DWORD kReapplyMs = 1000;    // 开启态周期性再刷（防引擎重
 constexpr DWORD kFailBackoffMs = 400; // Apply 失败退避，避免 10ms 打满主线程泵
 constexpr DWORD kBindRetryMs = 1000;  // Bind 失败节流；methodPointer 空时允许重试
 constexpr DWORD kJobWaitMs = 800;
-constexpr DWORD kLogMs = 8000;
+constexpr DWORD kLogMs = 30000;
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -41,7 +41,7 @@ struct MethodInfoHead {
 };
 
 // IL2CPP FreeFunction icall（IDA 实锤）：仅 rcx=int / 无 MethodInfo 末参。
-// set_targetFrameRate@0x4E207F0 / set_vSyncCount@0x4E3BB50：保存 ecx → resolve → jmp icall。
+// set_targetFrameRate@0x4E1F500 / set_vSyncCount@0x4E3A860：保存 ecx → resolve → jmp icall。
 using FnSetInt = void (*)(int value);
 using FnGetInt = int (*)();
 
@@ -68,6 +68,8 @@ constexpr int kRestoreVSync = 1;
 
 DWORD gLastLog = 0;
 DWORD gLastMismatchLog = 0;
+int gLastLogFps = -1;
+int gLastLogRb = -999;
 
 template <typename Fn>
 Fn FnFromMi(MethodInfoHead* mi, uint32_t rva) {
@@ -258,8 +260,10 @@ void TickOnce(DWORD now) {
         }
     }
 
-    if (force || gLastLog == 0 || now - gLastLog >= kLogMs) {
+    if (fps != gLastLogFps || rb != gLastLogRb || gLastLog == 0 || now - gLastLog >= kLogMs) {
         gLastLog = now;
+        gLastLogFps = fps;
+        gLastLogRb = rb;
         x::runtime::LogI("FrameLock", "lock fps=%d readback=%d (engine, not monitor Hz)", fps,
                          rb);
     }
@@ -318,6 +322,8 @@ void Init() {
     gOrigTargetFps = -1;
     gLastLog = 0;
     gLastMismatchLog = 0;
+    gLastLogFps = -1;
+    gLastLogRb = -999;
     x::runtime::LogI("FrameLock",
                      "Init (vSync=0 + Application.targetFrameRate; not monitor Hz)");
 }

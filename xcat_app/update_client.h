@@ -89,6 +89,14 @@ bool           EnforceStickyDeviceAccessOnStartup(const std::string& serviceUrl,
 // 启动先 Quick 再（仅不可达时）补完整探活；宽限先写租约再打标，读租约取双副本 max(until)。
 bool           EnforceOnlineLeaseGateOnStartup(const std::string& serviceUrl,
                                               const std::string& payloadBinDir);
+// 本地已有激活缓存时：只根据本轮 gate/2、gate/3 的同步探活判断。
+// 放行却无 uid，且本轮确实发出了派生凭证 → true（弹框，卡不在台账）。
+// 服不可达 / 已认出 / 本轮没同步探（租约仍有效）/ proof 头没发出去 → false，不清缓存。
+// probeIfNoSnapshot：刚重贴完时为 true，只做一次 quick 探活核对新卡（仍不走完整回退）。
+bool           StartupCardUnrecognizedByServer(const std::string& serviceUrl,
+                                               const std::string& payloadBinDir,
+                                               bool probeIfNoSnapshot = false);
+void           ClearStartupAccessProbe();
 UpdateSnapshot GetUpdateSnapshot();
 // 更新脚本落盘的启动器冷启标记：存在则返回 true；必须在完整冷启成功后才清除。
 bool           ConsumePostUpdateColdStartRequest(const std::string& payloadBinDir);

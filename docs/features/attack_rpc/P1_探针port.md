@@ -2,7 +2,7 @@
 
 > **状态**：✅ 代码已落地 · 默认关 · 出站路径已 BIN（`normal ok`）· 掉血待勾选验收  
 > **产品**：经典版 TWMS · **不是**枫星  
-> **上级**：[`模块设计.md`](模块设计.md) · [`P0c_攻包BODY布局.md`](P0c_攻包BODY布局.md)
+> **上级**：[`模块设计.md`](模块设计.md) · [`P0c_攻包BODY布局.md`](P0c_攻包BODY布局.md) · [`P2_物落脚下.md`](P2_物落脚下.md) · [`P3_近战武器族组包.md`](P3_近战武器族组包.md)
 
 ---
 
@@ -54,6 +54,8 @@ SendOut 后可连打 5 刀；再开第 6 刀 ~0.9s 延后踢 → 缺本地动作
 
 ---
 
+近战头/动作/环/Delay **按武器族填**，不再写死 action=5 / 武器字节=5。见 [`P3_近战武器族组包.md`](P3_近战武器族组包.md)。下表是 2026-08-03 短刀向初版，仅作历史对照。
+
 ## 3. Encode / Send 现状（2026-08-03 BIN 对齐后）
 
 | 项 | 取值 |
@@ -68,7 +70,7 @@ SendOut 后可连打 5 刀；再开第 6 刀 ~0.9s 延后踢 → 缺本地动作
 | 武器字节 | `5` |
 | **tOrKey** | **`WorldManager.GetUpdateTime`**（禁止 `GetTickCount` 当钟） |
 | HitAction / ForeAction / Frame | `06` / `0x80` / `0` |
-| 两 XY | `Encode2` i16（等价线上 EncodeVector2） |
+| 两 XY | `Encode2S(x, -y)`：源 AbsPos，**必须翻 Y** 才等价 `EncodeVector2`（[`P2`](P2_物落脚下.md)）；环内点 = 角色脚下，oid 仍是怪 |
 | dmg 前 | `u16 0x01A5`（真包；非 IDA 的 Encode1 AttackCount） |
 | fieldId | `0` |
 | Session | facade 单例 / FindAll；`+0x10` Session；klass 漂移不硬拒 |

@@ -7,7 +7,7 @@
 
 namespace xcat::app::sound {
 
-void Init();
+void Init(const char* prefsBinDir = nullptr);
 void Shutdown();
 
 void UiClick();

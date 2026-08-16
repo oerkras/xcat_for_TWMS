@@ -147,7 +147,7 @@ const MapNamesPack& GetSharedMapNames(const char* payloadBinDir) {
 }
 
 std::string MapNamesLabelById(const MapNamesPack& pack, int mapId) {
-    if (mapId <= 0) return {};
+    if (mapId < 0) return {};
     const auto it = pack.labelById.find(mapId);
     if (it != pack.labelById.end() && !it->second.empty()) return it->second;
     return std::string("圖") + std::to_string(mapId);

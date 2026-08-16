@@ -4,10 +4,12 @@
 #include "app_event_log.h"
 #include "app_sound.h"
 #include "app_theme.h"
+#include "imgui_log_sanitize.h"
 
 #include "process_util.h"
 #include "xcat_config_ini.h"
 #include "xcat_payload_notify.h"
+#include "xcat_scroll_voice.h"
 
 #include "imgui.h"
 
@@ -84,7 +86,6 @@ std::vector<QueuedNotification> g_pending;
 std::mutex g_externalMtx;
 std::vector<QueuedNotification> g_external;
 uint32_t g_lastNotifySoundMs = 0;
-uint32_t g_lastScrollSoundMs = 0;
 uint32_t g_lastPayloadNotifySeq = 0;
 uint32_t g_lastPayloadNotifyEpoch = 0;
 bool g_notifyBacklogSkipped = false;
@@ -116,8 +117,22 @@ bool IsPayloadOwnedAlarmKey(const std::string& key) {
            key == "encounter-gm-threat" || key == "encounter-gm-hop";
 }
 
+bool IsRepeatExemptNotifyKey(const std::string& key) {
+    // 清怪/定时软重连一轮 15–20s，短于 30s 签名去重；不豁免则第二轮 fire 有日志没气泡。
+    return key == "mob-gather-clear" || key == "mob-gather-soft" || key == "soft-login-ok";
+}
+
+bool IsScrollDropNotifyKey(const std::string& key) {
+    return key.rfind("petloot-scroll", 0) == 0;
+}
+
+bool IsPickupSuccessNotifyKey(const std::string& key) {
+    return key.rfind("petloot-picked", 0) == 0;
+}
+
 bool IsHighValueDropNotifyKey(const std::string& key) {
-    return key.rfind("petloot-scroll", 0) == 0 || key.rfind("petloot-equip", 0) == 0;
+    return IsScrollDropNotifyKey(key) || key.rfind("petloot-equip", 0) == 0 ||
+           IsPickupSuccessNotifyKey(key);
 }
 
 bool IsUnmutableCriticalAlarmKey(const std::string& key) {
@@ -205,22 +220,40 @@ void RememberShown(Kind kind, const std::string& key, const std::string& title,
     g_recentSignatures.emplace_back(std::move(recent));
 }
 
-void PlayNotifySound(uint32_t now, const std::string& key) {
+int ParseScrollItemIdFromBody(const std::string& body) {
+    // fillName: "品名（2040001）"；批量取第一只。
+    const std::string lp = "\xEF\xBC\x88";
+    const std::string rp = "\xEF\xBC\x89";
+    const size_t a = body.find(lp);
+    if (a == std::string::npos) return 0;
+    const size_t b = body.find(rp, a + lp.size());
+    if (b == std::string::npos || b <= a + lp.size()) return 0;
+    const std::string num = body.substr(a + lp.size(), b - (a + lp.size()));
+    int id = 0;
+    for (char c : num) {
+        if (c < '0' || c > '9') return 0;
+        id = id * 10 + (c - '0');
+        if (id > 99999999) return 0;
+    }
+    return id;
+}
+
+void PlayNotifySound(uint32_t now, const std::string& key, const std::string& body) {
     if (g_notifySoundMuted.load(std::memory_order_acquire) &&
         !IsUnmutableCriticalAlarmKey(key)) {
         return;
     }
     // payload 已周期播 Alarm：面板侧跳过，只保留 restriction 等面板专责音。
     if (IsPayloadOwnedAlarmKey(key)) return;
-    if (IsHighValueDropNotifyKey(key)) {
-        // 独立节流，不与普通 Notify 抢 g_lastNotifySoundMs；静音开关管不住（见 Unmutable）
-        constexpr uint32_t kScrollThrottleMs = 220u;
-        if (g_lastScrollSoundMs != 0 &&
-            static_cast<int>(now - g_lastScrollSoundMs) < static_cast<int>(kScrollThrottleMs)) {
-            return;
-        }
-        g_lastScrollSoundMs = now;
-        sound::ScrollDrop();
+    if (IsPickupSuccessNotifyKey(key)) {
+        const int itemId = ParseScrollItemIdFromBody(body);
+        xcat::sound::PlayPickupSuccessAnnounce(itemId);
+        return;
+    }
+    if (IsScrollDropNotifyKey(key) || key.rfind("petloot-equip", 0) == 0) {
+        // 不节流丢弃：口播走 Interrupt，密掉只留最新一条。静音开关管不住（见 Unmutable）。
+        const int itemId = ParseScrollItemIdFromBody(body);
+        xcat::sound::PlayScrollDropAnnounce(itemId);
         return;
     }
     if (g_lastNotifySoundMs != 0 &&
@@ -272,7 +305,7 @@ void EnqueueNotification(const QueuedNotification& queued) {
             item.ttlMs = ttlMs;
             RememberShown(item.kind, item.key, item.title, item.body, now);
             eventlog::Record(static_cast<uint32_t>(item.kind), item.key, item.title, item.body);
-            PlayNotifySound(now, item.key);
+            PlayNotifySound(now, item.key, item.body);
             if (i != 0) {
                 NotifyItem updated = std::move(item);
                 g_items.erase(g_items.begin() + static_cast<std::ptrdiff_t>(i));
@@ -283,7 +316,8 @@ void EnqueueNotification(const QueuedNotification& queued) {
     }
 
     // 持续刷新的测谎关键气泡：不走 30s 签名去重（否则点关后长时间无法再亮）。
-    if (!IsPayloadOwnedAlarmKey(key) &&
+    // 清怪/定时软重连：轮次短于 30s，同样必须每轮都能亮。
+    if (!IsPayloadOwnedAlarmKey(key) && !IsRepeatExemptNotifyKey(key) &&
         WasRecentlyShown(queued.kind, key, queued.title, queued.body, now)) {
         return;
     }
@@ -298,7 +332,7 @@ void EnqueueNotification(const QueuedNotification& queued) {
     item.ttlMs = ttlMs;
     RememberShown(item.kind, item.key, item.title, item.body, now);
     eventlog::Record(static_cast<uint32_t>(item.kind), item.key, item.title, item.body);
-    PlayNotifySound(now, item.key);
+    PlayNotifySound(now, item.key, item.body);
     g_items.insert(g_items.begin(), std::move(item));
     if (g_items.size() > kMaxNotifications) g_items.resize(kMaxNotifications);
 }
@@ -534,7 +568,6 @@ void Reset() {
         g_external.clear();
     }
     g_lastNotifySoundMs = 0;
-    g_lastScrollSoundMs = 0;
     g_lastPayloadNotifySeq = 0;
     g_lastPayloadNotifyEpoch = 0;
     g_notifyBacklogSkipped = false;
@@ -591,12 +624,15 @@ void Draw(float dpiScale) {
         const float alpha = NotifyAlpha(item, now);
         if (alpha <= 0.01f) continue;
 
+        NotifyItem vis = item;
+        vis.title = xcat::app::SanitizeImGuiLogLine(item.title);
+        vis.body = xcat::app::SanitizeImGuiLogLine(item.body);
         const NotifyLayout layout =
-            ComputeNotifyLayout(item, display, s, false, displayMaxW, font, fontSize);
+            ComputeNotifyLayout(vis, display, s, false, displayMaxW, font, fontSize);
         const uint32_t age = now - item.updatedMs;
         const float inT = EaseOutCubic(std::min(age / 220.f, 1.f));
         const float drawY = y - (1.f - inT) * 18.f * s;
-        DrawOne(dl, item, layout, drawY, alpha, s, font, fontSize);
+        DrawOne(dl, vis, layout, drawY, alpha, s, font, fontSize);
 
         // 透明命中窗：TTL 自动消失之外，点击气泡也可关掉。
         char wndId[64]{};

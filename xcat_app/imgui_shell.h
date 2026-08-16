@@ -347,11 +347,20 @@ inline bool DrawWorkspaceTabButton(const char* label, int tabIndex, int activeTa
     return clicked;
 }
 
-inline int DrawWorkspaceTabStrip(int activeTab, const char* const* labels, int count) {
+inline int DrawWorkspaceTabStrip(int activeTab, const char* const* labels, int count,
+                                 bool (*visibleFn)(int) = nullptr) {
     if (!labels || count <= 0) return activeTab;
     const float spacing = AppDpi_Px(3.f);
     const float padX = AppDpi_Px(5.f);
     const float rowGap = AppDpi_Px(5.f);
+
+    int vis[32]{};
+    int nVis = 0;
+    for (int i = 0; i < count && nVis < 32; ++i) {
+        if (visibleFn && !visibleFn(i)) continue;
+        vis[nVis++] = i;
+    }
+    if (nVis <= 0) return activeTab;
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, AppTheme_Palette().tabStripBg);
     ImGui::PushStyleColor(ImGuiCol_Border, AppTheme_Palette().tabStripBorder);
@@ -365,21 +374,29 @@ inline int DrawWorkspaceTabStrip(int activeTab, const char* const* labels, int c
                             AppTheme_IsLight() ? AppDpi_Px(2.f) : AppDpi_Px(5.f));
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(padX, AppDpi_Px(3.f)));
 
-        const int row1Count = SplitTabRows(count);
-        const int row2Count = count - row1Count;
-        auto drawRow = [&](int start, int rowCount) {
+        auto drawRow = [&](int visStart, int rowCount) {
             if (rowCount <= 0) return;
             const float btnW =
                 (stripW - spacing * static_cast<float>(rowCount - 1)) / static_cast<float>(rowCount);
             for (int i = 0; i < rowCount; ++i) {
                 if (i > 0) ImGui::SameLine(0.f, spacing);
-                const int tabIndex = start + i;
+                const int tabIndex = vis[visStart + i];
                 if (DrawWorkspaceTabButton(labels[tabIndex], tabIndex, activeTab, btnW))
                     activeTab = tabIndex;
             }
         };
-        drawRow(0, row1Count);
-        if (row2Count > 0) drawRow(row1Count, row2Count);
+        // 前两排各最多 5 个（对齐既有 10 个 TAB）；多出来的进第三排。
+        constexpr int kRowCap = 5;
+        if (nVis <= kRowCap * 2) {
+            const int row1Count = SplitTabRows(nVis);
+            const int row2Count = nVis - row1Count;
+            drawRow(0, row1Count);
+            if (row2Count > 0) drawRow(row1Count, row2Count);
+        } else {
+            drawRow(0, kRowCap);
+            drawRow(kRowCap, kRowCap);
+            drawRow(kRowCap * 2, nVis - kRowCap * 2);
+        }
 
         ImGui::PopStyleVar(3);
     }

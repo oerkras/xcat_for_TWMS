@@ -38,6 +38,8 @@ inline const ImWchar* CjkGuiGlyphRanges(ImFontAtlas* fonts) {
     // ≈ ≤ ≥ ≠ ± 等：UI 文案常见，不在 ChineseFull 内，缺了就会显示 '?'
     static const ImWchar kMathOps[] = {0x2200, 0x22FF, 0};
     b.AddRanges(kMathOps);
+    static const ImWchar kGreek[] = {0x0391, 0x03C9, 0};  // Δ 等；微软雅黑通常没有
+    b.AddRanges(kGreek);
     static const ImWchar kBoxDrawing[] = {0x2500, 0x257F, 0};
     b.AddRanges(kBoxDrawing);
     static const ImWchar kGeometric[] = {0x25A0, 0x25FF, 0};
@@ -62,6 +64,8 @@ inline const ImWchar* UiSymbolFallbackRanges() {
     b.AddRanges(kArrows);
     static const ImWchar kMathOps[] = {0x2200, 0x22FF, 0};
     b.AddRanges(kMathOps);
+    static const ImWchar kGreek[] = {0x0391, 0x03C9, 0};
+    b.AddRanges(kGreek);
     static const ImWchar kBoxDrawing[] = {0x2500, 0x257F, 0};
     b.AddRanges(kBoxDrawing);
     static const ImWchar kGeometric[] = {0x25A0, 0x25FF, 0};
@@ -85,6 +89,8 @@ inline const ImWchar* UiSymbolFallbackRanges() {
         0x2260,  // ≠
         0x2264,  // ≤
         0x2265,  // ≥
+        0x0394,  // Δ  希腊；未钉会死成 '?'
+        0x03B4,  // δ
         0x25B6,  // ▶ 同 IP 折叠展开
         0x25BC,  // ▼
         0x2514,  // └ 子行缩进

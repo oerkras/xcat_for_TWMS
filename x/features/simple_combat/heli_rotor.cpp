@@ -286,8 +286,8 @@ bool Owns(Owner o) {
 
 // 用户可调倍率，基准 1.0，**按 Owner 各存一份**（手动飞与自动打怪的手感诉求不同）。
 // 语义与边界见 heli_rotor.h 的 SetSpeedScale 注释。
-constexpr size_t kOwnerCount = 4;  // None / Combat / Travel / Fly
-std::atomic<float> gSpeedScale[kOwnerCount] = {{1.0f}, {1.0f}, {1.0f}, {1.0f}};
+constexpr size_t kOwnerCount = 5;  // None / Combat / Travel / Fly / Gather
+std::atomic<float> gSpeedScale[kOwnerCount] = {{1.0f}, {1.0f}, {1.0f}, {1.0f}, {1.0f}};
 
 // 生效的是**当前持有者**那一份：交接时自动跟着换，不需要谁存档/恢复。
 float ActiveSpeedScale() {
@@ -475,6 +475,8 @@ const char* OwnerName(Owner o) {
             return "travel";
         case Owner::Fly:
             return "fly";
+        case Owner::Gather:
+            return "gather";
         default:
             return "none";
     }
@@ -677,7 +679,7 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // 必须吃 SoftSettleEnabled：否则关防抖只拆钉点、软钉仍开 → ImGui 勾选体感无效。
     // Combat：X 窗放到 kCombatSettleErrX，否则站位环内微调 X 时 Y 进不了软钉、死区对拉。
     const float settleEx =
-        (o == Owner::Combat) ? kCombatSettleErrX : kSettleErrX;
+        (o == Owner::Combat || o == Owner::Gather) ? kCombatSettleErrX : kSettleErrX;
     const bool settleHoverCand =
         gSoftSettleEnabled.load(std::memory_order_acquire) && !st.onFh &&
         (sp.mode == Mode::Station || sp.mode == Mode::Hold) &&
@@ -755,7 +757,7 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // ── Combat Y 进站预刹（全倍率 · err/H）────────────────────────────
     // 见文件顶部 kCombatStrikeApproachBrake。在 FullFire 预刹之后再夹一次：
     // 只收油、不把 desired 打成 0（停机距超速归零会进站/落地抖，BIN 17:07）。
-    if (kCombatStrikeApproachBrake && o == Owner::Combat &&
+    if (kCombatStrikeApproachBrake && (o == Owner::Combat || o == Owner::Gather) &&
         (sp.mode == Mode::Cruise || sp.mode == Mode::Station) && !st.onFh &&
         !settleHoverCand && kCombatStrikeBrakeSec > 1e-4f) {
         const float absEy = std::fabs(errY);
@@ -785,7 +787,7 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
         const float rawR = static_cast<float>(r.right);
         // 仅 F5 Combat：左右可位移 = raw×0.95；竖直仍用 raw±slack（真下穿图底才上拉）。
         // 若把 t/b 也换成 0.95，站位/包线会把人钉在「假下界」（BIN 10:24 sp.y=-607）。
-        const bool combatMove = (o == Owner::Combat);
+        const bool combatMove = (o == Owner::Combat || o == Owner::Gather);
         float l = rawL - kEnvSlackXPx;
         float ri = rawR + kEnvSlackXPx;
         float t = static_cast<float>(r.top) - kEnvSlackYPx;

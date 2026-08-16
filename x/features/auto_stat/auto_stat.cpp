@@ -1,5 +1,6 @@
 // auto_stat — Classic TWMS 自动加点。
 // 策略对照 Maplecat UseAP（权重总和=5、贪心每次 +1、属性 +1 确认）。
+// 「5」是从开启起每 5 点的配比权重，不追身上已有四维；身上剩多少 AP 加多少。
 // 发包：泵上直调官方 UIStat.ed6479da(uint flag)，不造包、不开属性窗。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -28,18 +29,30 @@
 namespace x::features::auto_stat {
 namespace {
 
-constexpr DWORD kCooldownMs = 900;
-constexpr DWORD kPollMs = 400;
+constexpr DWORD kMinSendGapMs = 200;       // 确认后最短间隔。官方 SendAp 无 Sleep；900 是抄技能点的保守值。
+constexpr DWORD kConfirmTimeoutMs = 1500;  // 属性一直不 +1 才计一次失败（避免 50ms 连加停机）
+constexpr DWORD kPollMs = 50;
+constexpr DWORD kPollIdleMs = 400;
+constexpr DWORD kCfgPollMs = 400;
 constexpr DWORD kIdleSleepMs = 500;
 constexpr DWORD kActiveSleepMs = 50;
 constexpr DWORD kJobWaitMs = 800;
 constexpr int kMaxFail = 5;
 
 constexpr char kUiStatClassHash[] =
-    "d66bc81d6a7f262b21a014fb50217f67d576c23fb110baecd6a2be282380705";
+    "ced1e8945281777f4874208c7b3883872f22dd7fb90a155f2d118436e704809";
 constexpr char kSendApMethodHash[] =
-    "ed6479da555ecd19988ffcc43eaffa328cfdb7cba294ce4da2f95c668b4f236";
-constexpr uint32_t kRvaSendAp = 0x64A200;
+    "e469a254e86c1709ddfcfd645c7fe2ef203a2a2fbf63246f9cb232add54b2af";
+constexpr uint32_t kRvaSendAp = 0x64A230;
+
+constexpr char kWmClassHash[] =
+    "f87be298afca3b6020c8f4695d83819fcc9a28877005b6a669187d33a0a2711";
+constexpr char kCanSendExclHash[] =
+    "dfd38249ceafcba4fdfb0a5ec33e43d27045e6fa44d4afee959f99c93f978d9";
+constexpr uint32_t kRvaCanSendExcl = 0xDF8980;
+// UIStat.b6a2d557 VA 0x7FFD60EC668A：mov edx, 3BAFE07Eh; xor edx, dword_7FFD670F3158
+// 运行时 dump 种子 0x3BAFE18A → type=500。与换频 SendTransfer 同一把独占锁（不是抄错 type）。
+constexpr int kExclTypeStatUp = 500;
 
 // CharacterStatFlag（UIStat.OnButtonClicked 立即数）
 constexpr uint32_t kFlagStr = 0x40;
@@ -48,10 +61,12 @@ constexpr uint32_t kFlagInt = 0x100;
 constexpr uint32_t kFlagLuk = 0x200;
 
 constexpr int kStatCount = 4;
-constexpr const char* kStatName[kStatCount] = {"STR", "DEX", "INT", "LUK"};
+constexpr const char* kStatName[kStatCount] = {"力量", "敏捷", "智力", "幸运"};
 constexpr uint32_t kStatFlag[kStatCount] = {kFlagStr, kFlagDex, kFlagInt, kFlagLuk};
 
 using FnSendAp = void (*)(void* self, uint32_t flag, const void* methodInfo);
+// WM.CanSendExclRequest(int type, bool) — 官方按钮 r8=0 r9=0
+using FnCanSendExcl = uint8_t (*)(void* wm, int type, const void* a, const void* b);
 
 struct MethodInfoHead {
     void* methodPointer = nullptr;
@@ -65,6 +80,10 @@ std::atomic<HANDLE> gWorkerThread{nullptr};
 void* gKlassUiStat = nullptr;
 MethodInfoHead* gMiSendAp = nullptr;
 FnSendAp gFnSendAp = nullptr;
+MethodInfoHead* gMiCanSendExcl = nullptr;
+FnCanSendExcl gFnCanSendExcl = nullptr;
+bool gNeedPersistOff = false;
+uint64_t gPersistOffTick = 0;
 
 int64_t gAlloc[kStatCount]{};
 uint32_t gLastCharId = 0;
@@ -75,13 +94,16 @@ bool gPendingVerify = false;
 int gLastPick = -1;
 int64_t gStatBefore = 0;
 bool gLoggedResolve = false;
+bool gLoggedExcl = false;
 bool gLoggedOffs = false;
+bool gLoggedSkipJob = false;
 bool gLieBusy = false;
 
 struct SendJobCtx {
     uint32_t flag = 0;
-    bool invoked = false;  // 已真正调到官方函数（不含泵拒/解析失败）
+    bool invoked = false;  // 已真正调到官方函数（不含泵拒/解析失败/独占忙）
     bool seh = false;
+    bool exclBusy = false;
 };
 
 enum class SendResult { Transient = 0, HardFail = 1, Ok = 2 };
@@ -128,15 +150,30 @@ void ResetAlloc() {
     for (int i = 0; i < kStatCount; ++i) gAlloc[i] = 0;
 }
 
+void TryPersistOff(const char* why) {
+    if (!gNeedPersistOff) return;
+    xcat::AutoStatConfig disk{};
+    if (xcat::ReadAutoStat(x::runtime::GetBinDir(), disk) && disk.writeTickMs > gPersistOffTick) {
+        gNeedPersistOff = false;  // 盘上有更新写入（用户重开）
+        return;
+    }
+    gCfg.enabled = 0;
+    gCfg.writeTickMs = GetTickCount64();
+    gPersistOffTick = gCfg.writeTickMs;
+    if (!xcat::WriteAutoStat(x::runtime::GetBinDir(), gCfg)) {
+        x::runtime::LogW("AutoStat", "停机写盘失败 (%s)，将重试", why ? why : "?");
+        return;
+    }
+    gNeedPersistOff = false;
+    x::runtime::LogW("AutoStat", "已停机并写回 ini (%s)", why ? why : "?");
+}
+
 void PersistDisabled(const char* why) {
     gCfg.enabled = 0;
     ResetPending();
-    gCfg.writeTickMs = GetTickCount64();
-    if (!xcat::WriteAutoStat(x::runtime::GetBinDir(), gCfg)) {
-        x::runtime::LogW("AutoStat", "停机写盘失败 (%s)", why ? why : "?");
-    } else {
-        x::runtime::LogW("AutoStat", "已停机并写回 ini (%s)", why ? why : "?");
-    }
+    gNeedPersistOff = true;
+    gPersistOffTick = 0;  // 允许覆盖盘上旧的 enabled=1
+    TryPersistOff(why);
 }
 
 bool ResolveSendOnMain() {
@@ -174,12 +211,55 @@ bool ResolveSendOnMain() {
     return gFnSendAp != nullptr;
 }
 
+bool ResolveExclOnMain() {
+    if (gFnCanSendExcl) return true;
+    if (!x::runtime::il2cpp::Ensure()) return false;
+
+    void* wmKlass = x::runtime::il2cpp::FindClass("", kWmClassHash);
+    if (!wmKlass) wmKlass = x::runtime::il2cpp::FindClass("", "WorldManager");
+
+    using x::runtime::il2cpp_method::MethodShape;
+    using x::runtime::il2cpp_method::TypeKind;
+    constexpr MethodShape kEx{2, TypeKind::Bool, true, true, {TypeKind::I32, TypeKind::Any}};
+
+    if (wmKlass) {
+        const auto mr = x::runtime::il2cpp_method::FindMethodResolved(
+            wmKlass, kRvaCanSendExcl, kEx, "CanSendExclRequest", kCanSendExclHash);
+        if (mr.method) {
+            gMiCanSendExcl = reinterpret_cast<MethodInfoHead*>(mr.method);
+            if (gMiCanSendExcl && gMiCanSendExcl->methodPointer) {
+                gFnCanSendExcl = reinterpret_cast<FnCanSendExcl>(gMiCanSendExcl->methodPointer);
+            }
+        }
+    }
+    if (!gFnCanSendExcl) {
+        gFnCanSendExcl = x::runtime::il2cpp::AtRva<FnCanSendExcl>(kRvaCanSendExcl);
+    }
+    if (gFnCanSendExcl && !gLoggedExcl) {
+        gLoggedExcl = true;
+        x::runtime::LogI("AutoStat", "CanSendExcl fn=%p MI=%p type=%d rva=0x%X",
+                         reinterpret_cast<void*>(gFnCanSendExcl), static_cast<void*>(gMiCanSendExcl),
+                         kExclTypeStatUp, kRvaCanSendExcl);
+    }
+    return gFnCanSendExcl != nullptr;
+}
+
 void SendJobOnMain(void* user) {
     auto* ctx = reinterpret_cast<SendJobCtx*>(user);
     if (!ctx) return;
     ctx->invoked = false;
     ctx->seh = false;
+    ctx->exclBusy = false;
     __try {
+        if (!ResolveExclOnMain() || !gFnCanSendExcl) return;
+        void* wm = ports::world::PeekWorldManager();
+        if (!wm) wm = ports::world::GetWorldManager();
+        if (!wm) return;
+        // 官方按钮：r8=false r9=null。busy 则不调 ed6479da（避免抢锁/尾跳落锁）。
+        if (gFnCanSendExcl(wm, kExclTypeStatUp, nullptr, nullptr) == 0) {
+            ctx->exclBusy = true;
+            return;
+        }
         if (!ResolveSendOnMain() || !gFnSendAp) return;
         // 组包不用 this；官方 OnButtonClicked 也只把 flag 传下去。MI 与喝药一致传 null。
         gFnSendAp(nullptr, ctx->flag, nullptr);
@@ -203,6 +283,10 @@ SendResult SendAp(int idx) {
         return SendResult::Transient;
     }
     if (ctx.seh) return SendResult::HardFail;
+    if (ctx.exclBusy) {
+        x::runtime::LogWThrottled(232, 3000, "AutoStat", "独占忙，推迟 +%s", kStatName[idx]);
+        return SendResult::Transient;
+    }
     if (!ctx.invoked) {
         x::runtime::LogWThrottled(231, 3000, "AutoStat", "SendAp resolve miss %s", kStatName[idx]);
         return SendResult::Transient;
@@ -226,36 +310,69 @@ void Tick(DWORD now) {
         gLieBusy = false;
         x::runtime::LogI("AutoStat", "测谎结束，恢复加点");
     }
-    if (gLastPoll && static_cast<int>(now - gLastPoll) < static_cast<int>(kPollMs)) return;
+    const DWORD pollGap =
+        (gPendingVerify || (gLastUseMs && static_cast<int>(now - gLastUseMs) < 3000))
+            ? kPollMs
+            : kPollIdleMs;
+    if (gLastPoll && static_cast<int>(now - gLastPoll) < static_cast<int>(pollGap)) return;
     gLastPoll = now;
-    if (gLastUseMs && static_cast<int>(now - gLastUseMs) < static_cast<int>(kCooldownMs)) return;
 
     x::ui::player::BaseApStats st{};
     if (!x::ui::player::ReadBaseApStats(st) || !st.ok) return;
 
     if (!gLoggedOffs) {
         gLoggedOffs = true;
-        x::runtime::LogI("AutoStat", "read ok cid=%u ap=%d STR=%d DEX=%d INT=%d LUK=%d",
-                         st.characterId, st.ap, st.str, st.dex, st.intel, st.luk);
+        x::runtime::LogI("AutoStat", "read ok cid=%u job=%d 剩余AP=%d 力量=%d 敏捷=%d 智力=%d 幸运=%d",
+                         st.characterId, st.job, st.ap, st.str, st.dex, st.intel, st.luk);
     }
 
     if (st.characterId != 0 && gLastCharId != 0 && st.characterId != gLastCharId) {
         ResetAlloc();
         ResetPending();
         ResetFail();
-        x::runtime::LogI("AutoStat", "换角色 cid %u → %u，配比计数清零", gLastCharId,
+        gLoggedSkipJob = false;
+        gLoggedOffs = false;
+        x::runtime::LogI("AutoStat", "换角色 cid %u → %u，本会话配比计数清零", gLastCharId,
                          st.characterId);
     }
     if (st.characterId != 0) gLastCharId = st.characterId;
 
+    if (!xcat::AutoStatJobReady(st.job)) {
+        ResetPending();
+        if (!gLoggedSkipJob) {
+            gLoggedSkipJob = true;
+            ResetAlloc();
+            ResetFail();
+            x::runtime::LogI("AutoStat", "0转不加 job=%d cid=%u，1转后才加点", st.job,
+                             st.characterId);
+        }
+        return;
+    }
+    if (gLoggedSkipJob) {
+        gLoggedSkipJob = false;
+        x::runtime::LogI("AutoStat", "已转职 job=%d，开始加点", st.job);
+    }
+
     if (gPendingVerify) {
         const int64_t cur = BaseStatByIdx(st, gLastPick);
         if (cur > gStatBefore) {
+            if (gLastPick >= 0 && gLastPick < kStatCount) ++gAlloc[gLastPick];
             gPendingVerify = false;
             ResetFail();
+            x::runtime::LogI("AutoStat",
+                             "确认 +1 %s（剩余AP=%d 身上 力量%d/敏捷%d/智力%d/幸运%d 本会话 +%lld/+%lld/+%lld/+%lld）",
+                             (gLastPick >= 0 && gLastPick < kStatCount) ? kStatName[gLastPick] : "?",
+                             st.ap, st.str, st.dex, st.intel, st.luk,
+                             static_cast<long long>(gAlloc[0]),
+                             static_cast<long long>(gAlloc[1]), static_cast<long long>(gAlloc[2]),
+                             static_cast<long long>(gAlloc[3]));
         } else {
+            if (gLastUseMs &&
+                static_cast<int>(now - gLastUseMs) < static_cast<int>(kConfirmTimeoutMs)) {
+                return;
+            }
             ++gFailStreak;
-            gLastUseMs = now;  // 确认失败也走 900ms，避免 400ms 连加停机
+            gLastUseMs = now;
             x::runtime::LogW("AutoStat", "上次 +%s 后属性未 +1（%lld→%lld）streak=%d",
                              (gLastPick >= 0 && gLastPick < kStatCount) ? kStatName[gLastPick] : "?",
                              static_cast<long long>(gStatBefore), static_cast<long long>(cur),
@@ -266,7 +383,10 @@ void Tick(DWORD now) {
     }
 
     if (st.ap <= 0) return;
+    if (gLastUseMs && static_cast<int>(now - gLastUseMs) < static_cast<int>(kMinSendGapMs)) return;
 
+    // 贪心：score = 本会话已加 / 权重。权重 0 不参与。
+    // 从开启（或换角色）起每 5 点按配比分，不追身上已有四维。
     int pick = -1;
     double best = 0.0;
     for (int i = 0; i < kStatCount; ++i) {
@@ -280,17 +400,19 @@ void Tick(DWORD now) {
     }
     if (pick < 0) return;
 
+    if (x::runtime::main_thread::IsCongested()) {
+        x::runtime::LogWThrottled(234, 3000, "AutoStat", "泵拥堵，推迟加点 q=%d",
+                                  x::runtime::main_thread::QueuedJobCount());
+        return;
+    }
+
     gLastUseMs = now;  // 含瞬时失败：避免泵堵时 400ms 连打 InvokeAndWait
     gLastPick = pick;
     gStatBefore = BaseStatByIdx(st, pick);
     const SendResult sent = SendAp(pick);
     if (sent == SendResult::Ok) {
-        ++gAlloc[pick];
         gPendingVerify = true;
-        x::runtime::LogI("AutoStat",
-                         "+1 %s（ap=%d 累计 S%lld/D%lld/I%lld/L%lld）", kStatName[pick], st.ap,
-                         static_cast<long long>(gAlloc[0]), static_cast<long long>(gAlloc[1]),
-                         static_cast<long long>(gAlloc[2]), static_cast<long long>(gAlloc[3]));
+        x::runtime::LogI("AutoStat", "已发 +1 %s（剩余AP=%d 等待回写）", kStatName[pick], st.ap);
         return;
     }
     ResetPending();
@@ -306,10 +428,11 @@ DWORD WINAPI WorkerProc(void*) {
     while (!gWorkerStop.load(std::memory_order_acquire)) {
         const DWORD now = GetTickCount();
         const bool want = gCfg.enabled != 0 && xcat::AutoStatRatioOk(gCfg);
-        const DWORD cfgGap = want ? kPollMs : kIdleSleepMs;
+        const DWORD cfgGap = want ? kCfgPollMs : kIdleSleepMs;
         if (!lastCfgPoll || static_cast<int>(now - lastCfgPoll) >= static_cast<int>(cfgGap)) {
             lastCfgPoll = now;
-            x::ipc::PayloadAutoStat_Poll();
+            TryPersistOff("重试");
+            if (!gNeedPersistOff) x::ipc::PayloadAutoStat_Poll();
         }
         if (!(gCfg.enabled != 0 && xcat::AutoStatRatioOk(gCfg))) {
             Sleep(kIdleSleepMs);
@@ -335,24 +458,38 @@ void Init() {
     gKlassUiStat = nullptr;
     gMiSendAp = nullptr;
     gFnSendAp = nullptr;
+    gMiCanSendExcl = nullptr;
+    gFnCanSendExcl = nullptr;
+    gNeedPersistOff = false;
+    gPersistOffTick = 0;
     gLoggedResolve = false;
+    gLoggedExcl = false;
     gLoggedOffs = false;
+    gLoggedSkipJob = false;
     gLieBusy = false;
-    x::runtime::LogI("Feature", "auto_stat ready (off until [auto_stat] enabled + ratio=5)");
+    x::runtime::LogI("Feature", "auto_stat ready (off until [auto_stat] enabled + ratio=5; leftover AP 不限 5)");
 }
 
 void Shutdown() { StopWorker(); }
 
 void ApplyConfig(const xcat::AutoStatConfig& cfg) {
     const bool was = gCfg.enabled != 0;
+    const bool ratioChanged = gCfg.str != cfg.str || gCfg.dex != cfg.dex || gCfg.intel != cfg.intel ||
+                              gCfg.luk != cfg.luk;
     gCfg = cfg;
     xcat::AutoStatNormalize(gCfg);
     const bool on = gCfg.enabled != 0;
+    if (on) gNeedPersistOff = false;
     if (was != on) {
         ResetPending();
         ResetFail();
-        x::runtime::LogI("AutoStat", "开关=%s 比例 STR=%u DEX=%u INT=%u LUK=%u",
+        if (on) ResetAlloc();
+        x::runtime::LogI("AutoStat", "开关=%s 配比 力量=%u 敏捷=%u 智力=%u 幸运=%u",
                          on ? "开" : "关", gCfg.str, gCfg.dex, gCfg.intel, gCfg.luk);
+    } else if (on && ratioChanged) {
+        ResetAlloc();
+        x::runtime::LogI("AutoStat", "配比已改，从现在起重计 力量=%u 敏捷=%u 智力=%u 幸运=%u",
+                         gCfg.str, gCfg.dex, gCfg.intel, gCfg.luk);
     }
 }
 
@@ -366,7 +503,10 @@ void StartWorker() {
 void StopWorker() {
     gWorkerStop.store(true, std::memory_order_release);
     HANDLE th = gWorkerThread.exchange(nullptr, std::memory_order_acq_rel);
-    if (th) CloseHandle(th);
+    if (th) {
+        WaitForSingleObject(th, 3000);
+        CloseHandle(th);
+    }
 }
 
 }  // namespace x::features::auto_stat

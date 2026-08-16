@@ -1,8 +1,11 @@
 #include "gamapass_uia_login.h"
 
 #include "gamapass_cdp_login.h"
+#include "gamapass_device_login.h"
 #include "gamapass_ticket_harvest.h"
+#include "http_beanfun_login.h"
 #include "http_gamapass_login.h"
+#include "ott_ticket_fetch.h"
 #include "win_uia.h"
 
 #include <Shlwapi.h>
@@ -42,7 +45,8 @@ void Log(const HttpLoginLogFn& log, const std::wstring& s) {
 }
 
 bool LaunchDailyBrowser(const std::wstring& exe, const std::wstring& url, DWORD* outPid,
-                        const HttpLoginLogFn& log, std::vector<HWND>* outBeforeHwnds) {
+                        const HttpLoginLogFn& log, std::vector<HWND>* outBeforeHwnds,
+                        const std::wstring& userDataDir = {}) {
     if (outPid) *outPid = 0;
     if (exe.empty() || url.empty()) return false;
 
@@ -51,7 +55,13 @@ bool LaunchDailyBrowser(const std::wstring& exe, const std::wstring& url, DWORD*
 
     std::wstring cmd = L"\"";
     cmd += exe;
-    cmd += L"\" --force-renderer-accessibility --new-window \"";
+    cmd += L"\" --force-renderer-accessibility";
+    if (!userDataDir.empty()) {
+        cmd += L" --user-data-dir=\"";
+        cmd += userDataDir;
+        cmd += L"\"";
+    }
+    cmd += L" --new-window \"";
     cmd += url;
     cmd += L"\"";
 
@@ -61,8 +71,13 @@ bool LaunchDailyBrowser(const std::wstring& exe, const std::wstring& url, DWORD*
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
 
-    Log(log, std::wstring(kLogTag) + L" 启动日常浏览器（无调试口、无副本）… beforeWindows=" +
+    Log(log, std::wstring(kLogTag) +
+                 (userDataDir.empty() ? L" 启动日常浏览器（无调试口、无副本）… beforeWindows="
+                                      : L" 启动账密助手独立目录（无调试口、不碰日常罐）… beforeWindows=") +
                  std::to_wstring(outBeforeHwnds ? outBeforeHwnds->size() : 0));
+    if (!userDataDir.empty()) {
+        Log(log, std::wstring(kLogTag) + L" user-data-dir=" + userDataDir);
+    }
     if (!CreateProcessW(exe.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
                         nullptr, &si, &pi)) {
         Log(log, std::wstring(kLogTag) + L" CreateProcess 失败 err=" +
@@ -94,6 +109,43 @@ bool TitleLooksLikeLoginFlow(HWND hwnd, const std::vector<std::wstring>& keys) {
     return false;
 }
 
+// Electron（Cursor / VS Code）与 Chrome 同属 Chrome_WidgetWin_1，标题兜底会误挂。
+bool TitleLooksLikeForeignApp(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    wchar_t title[512]{};
+    GetWindowTextW(hwnd, title, 512);
+    if (!title[0]) return false;
+    const wchar_t* bad[] = {L"Cursor", L"Visual Studio Code", L"YouTube", L"Discord", L"Slack"};
+    for (const wchar_t* b : bad) {
+        if (StrStrIW(title, b)) return true;
+    }
+    return false;
+}
+
+bool PidLooksLikeForeignApp(DWORD pid) {
+    if (!pid) return false;
+    HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!p) return false;
+    wchar_t path[MAX_PATH]{};
+    DWORD n = MAX_PATH;
+    bool bad = false;
+    if (QueryFullProcessImageNameW(p, 0, path, &n) && path[0]) {
+        const wchar_t* base = PathFindFileNameW(path);
+        if (base && (_wcsicmp(base, L"Cursor.exe") == 0 || _wcsicmp(base, L"Code.exe") == 0 ||
+                     _wcsicmp(base, L"Discord.exe") == 0 || _wcsicmp(base, L"Slack.exe") == 0))
+            bad = true;
+    }
+    CloseHandle(p);
+    return bad;
+}
+
+bool HwndLooksLikeForeignApp(HWND hwnd) {
+    if (TitleLooksLikeForeignApp(hwnd)) return true;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    return PidLooksLikeForeignApp(pid);
+}
+
 // outReusedExisting：挂到启动前已存在的窗（Chromium 单例把 Galaxy 开进旧窗）。
 // ★ 复用旧窗时禁止 SoftClose——WM_CLOSE 会关掉用户日常浏览器整窗。
 HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWORD* outAttachPid,
@@ -105,6 +157,7 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
         L"galaxy.games.gamania",
         L"accounts.gamania",
         L"login.beanfun",
+        L"openid.beanfun",
         L"maplestoryclassic.beanfun",
         L"Gama Pass",
         L"login/init",
@@ -121,6 +174,7 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
         L"select-account",
         L"maplestoryclassic.beanfun",
         L"login.beanfun",
+        L"openid.beanfun",
         L"OTT:",
     };
     constexpr DWORD kReuseAfterMs = 4000;  // 先等新窗；单例开进旧窗时再兜底
@@ -136,6 +190,7 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
 
     bool loggedNew = false;
     bool loggedReuseHint = false;
+    bool loggedSkipForeign = false;
     while ((int)(GetTickCount() - t0) < waitMs) {
         HWND h = nullptr;
         bool reused = false;
@@ -248,6 +303,17 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
                 Log(log, std::wstring(kLogTag) + L" 兜底附着已有登录窗" +
                              (reused ? L"（复用；收票后不关该窗）" : L"（新窗晚到）"));
             }
+        }
+
+        if (h && HwndLooksLikeForeignApp(h)) {
+            if (!loggedSkipForeign) {
+                loggedSkipForeign = true;
+                wchar_t skipTitle[512]{};
+                GetWindowTextW(h, skipTitle, 512);
+                Log(log, std::wstring(kLogTag) + L" 跳过非登录窗 title=" +
+                             std::wstring(skipTitle).substr(0, 80));
+            }
+            h = nullptr;
         }
 
         if (h) {
@@ -420,6 +486,7 @@ enum class UrlKind : int {
     OauthError,      // accounts … /error
     ResultOrMain,    // result/mstc 或经典官网 Main
     OtherAuth,       // 其它 gamania/beanfun 过渡页
+    NetError,        // Chrome 连不上 / 无法访问
 };
 
 const wchar_t* UrlKindName(UrlKind k) {
@@ -430,6 +497,7 @@ const wchar_t* UrlKindName(UrlKind k) {
         case UrlKind::OauthError: return L"OauthError";
         case UrlKind::ResultOrMain: return L"ResultOrMain";
         case UrlKind::OtherAuth: return L"OtherAuth";
+        case UrlKind::NetError: return L"NetError";
         default: return L"Unknown";
     }
 }
@@ -450,8 +518,77 @@ bool MapleIsDocumentHost(const std::wstring& uLower) {
     return true;
 }
 
+bool TokenAppearsBefore(const std::wstring& u, const wchar_t* token, size_t pos) {
+    const size_t p = u.find(token);
+    return p != std::wstring::npos && p < pos;
+}
+
+// galaxy 仅在「当前页主机」时算 GalaxyLogin；openid 的 redirectUri=galaxy 不算
+bool GalaxyIsDocumentHost(const std::wstring& uLower) {
+    const size_t posGalaxy = uLower.find(L"galaxy.games.gamania");
+    if (posGalaxy == std::wstring::npos) return false;
+    if (TokenAppearsBefore(uLower, L"openid.beanfun", posGalaxy)) return false;
+    if (TokenAppearsBefore(uLower, L"accounts.gamania", posGalaxy)) return false;
+    if (TokenAppearsBefore(uLower, L"login.beanfun", posGalaxy)) return false;
+    if (TokenAppearsBefore(uLower, L"redirect_url", posGalaxy)) return false;
+    if (TokenAppearsBefore(uLower, L"redirecturi", posGalaxy)) return false;
+    if (TokenAppearsBefore(uLower, L"redirect_uri", posGalaxy)) return false;
+    return true;
+}
+
+bool HintLooksLikeNetError(const std::wstring& hint) {
+    if (hint.empty()) return false;
+    const std::wstring u = ToLowerCopy(hint);
+    auto has = [&](const wchar_t* p) { return u.find(p) != std::wstring::npos; };
+    return has(L"chrome-error") || has(L"chrome://network") || has(L"err_connection") ||
+           has(L"err_timed_out") || has(L"err_name_not_resolved") ||
+           has(L"err_internet_disconnected") || has(L"err_address_unreachable") ||
+           has(L"err_empty_response") || has(L"err_network") || has(L"err_ssl") ||
+           has(L"dns_probe") || has(L"无法访问此网站") || has(L"無法連上這個網站") ||
+           has(L"無法访问") || has(L"无法连上") || has(L"无法提供安全连接") ||
+           has(L"無法提供安全連線") || has(L"不受支持的协议") || has(L"不支援的通訊協定") ||
+           has(L"this site can't be reached") || has(L"this site can’t be reached") ||
+           has(L"can't provide a secure connection") ||
+           has(L"cannot provide a secure connection") || has(L"unsupported protocol") ||
+           has(L"webpage is not available") || has(L"网页无法打开") || has(L"網頁無法開啟") ||
+           has(L"没有互联网") || has(L"沒有網際網路");
+}
+
+bool LooksLikeNetErrorPage(msc::uia::Session& uia, IUIAutomationElement* root, HWND hwnd,
+                           const std::wstring& urlHint, bool scanDom) {
+    if (HintLooksLikeNetError(urlHint)) return true;
+    wchar_t title[512]{};
+    if (hwnd && IsWindow(hwnd)) GetWindowTextW(hwnd, title, 512);
+    if (title[0] && HintLooksLikeNetError(title)) return true;
+    if (!scanDom || !root) return false;
+    const wchar_t* parts[] = {
+        L"无法访问此网站",
+        L"無法連上這個網站",
+        L"无法提供安全连接",
+        L"無法提供安全連線",
+        L"不受支持的协议",
+        L"不支援的通訊協定",
+        L"This site can’t be reached",
+        L"This site can't be reached",
+        L"ERR_CONNECTION",
+        L"ERR_TIMED_OUT",
+        L"ERR_NAME_NOT_RESOLVED",
+        L"ERR_INTERNET_DISCONNECTED",
+        L"ERR_EMPTY_RESPONSE",
+        L"ERR_SSL",
+        L"DNS_PROBE_FINISHED",
+        L"网页无法打开",
+        L"網頁無法開啟",
+    };
+    for (const wchar_t* p : parts) {
+        if (uia.NameContains(root, p, true)) return true;
+    }
+    return false;
+}
+
 UrlKind ClassifyUrlHint(const std::wstring& hint) {
     if (hint.empty()) return UrlKind::Unknown;
+    if (HintLooksLikeNetError(hint)) return UrlKind::NetError;
     const std::wstring u = ToLowerCopy(hint);
     auto has = [&](const wchar_t* p) { return u.find(p) != std::wstring::npos; };
 
@@ -462,7 +599,8 @@ UrlKind ClassifyUrlHint(const std::wstring& hint) {
 
     // Galaxy 启动页常带 ?redirect_url=https://maplestoryclassic.beanfun...
     // BIN 01:09：若先匹配 maplestoryclassic → 误判 ResultOrMain → 跳过点 Gama Pass
-    if (has(L"galaxy.games.gamania")) {
+    // BIN 12:26：openid?redirectUri=galaxy 不能当 GalaxyLogin，否则死等 GP 按钮
+    if (GalaxyIsDocumentHost(u)) {
         if (has(L"login/result") || has(L"access_token=")) return UrlKind::ResultOrMain;
         return UrlKind::GalaxyLogin;
     }
@@ -473,6 +611,50 @@ UrlKind ClassifyUrlHint(const std::wstring& hint) {
     if (has(L"accounts.gamania") || has(L"openid.beanfun") || has(L"login.beanfun"))
         return UrlKind::OtherAuth;
     return UrlKind::Unknown;
+}
+
+bool UrlStuckOnGalaxyResult(const std::wstring& url) {
+    if (url.empty()) return false;
+    const std::wstring u = ToLowerCopy(url);
+    if (!GalaxyIsDocumentHost(u)) return false;
+    if (u.find(L"login/result") == std::wstring::npos && u.find(L"access_token=") == std::wstring::npos)
+        return false;
+    return !MapleIsDocumentHost(u);
+}
+
+// 实机：卡在 Galaxy result 时手刷几次页面就会回跳 Main。对登录窗发 F5（不清 Cookie）。
+bool ReloadLoginBrowser(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    msc::uia::BringToForeground(hwnd);
+    Sleep(40);
+    INPUT k[2]{};
+    k[0].type = INPUT_KEYBOARD;
+    k[0].ki.wVk = VK_F5;
+    k[1] = k[0];
+    k[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    return SendInput(2, k, sizeof(INPUT)) == 2;
+}
+
+HttpLoginResult FetchTicketFromOttOrFail(const std::wstring& ott, const HttpLoginLogFn& log,
+                                         const char* via) {
+    TicketFetchOptions fo;
+    fo.ott = ott;
+    fo.timeoutMs = 15000;
+    auto fr = FetchGalaxyTicketFromOttWithRetry(fo, 4, [&](const std::wstring& s) { Log(log, s); });
+    if (fr.ok) {
+        HttpLoginResult out;
+        out.ok = true;
+        out.error = HttpLoginError::Ok;
+        out.message = via ? via : "getonetimewebinfo-retry";
+        out.ott = ott;
+        out.ticket = std::move(fr.ticket);
+        out.ticketFilled = true;
+        return out;
+    }
+    Log(log, std::wstring(kLogTag) + L" GetOneTimeWebInfo 仍失败 http=" +
+                 std::to_wstring(fr.httpStatus) + L" apiCode=" + std::to_wstring(fr.apiCode) +
+                 L"，结束本轮并干净重开 Galaxy 换新 OTT");
+    return Fail(HttpLoginError::Protocol, fr.message.empty() ? "GetOneTimeWebInfo 失败" : fr.message);
 }
 
 // 自动登录全程保前台+最大化：每轮轮询强制还原/最大化+置顶（ClickPoint 依赖屏幕坐标）
@@ -517,7 +699,7 @@ bool KeepLoginBrowserForeground(HWND hwnd, const HttpLoginLogFn& log, DWORD* las
 static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int timeoutMs) {
     const int nickSlot = GetGamaPassNickSlot();
     const int accountSlot = GetGamaPassAccountSlot();
-    Log(log, std::wstring(kLogTag) + L" 开始：日常浏览器 UIA 点选（不调用 refresh/token）；账号=" +
+    Log(log, std::wstring(kLogTag) + L" 开始：浏览器 UIA 点选（不调用 refresh/token）；账号=" +
                  std::to_wstring(accountSlot) + L" 昵称=" + std::to_wstring(nickSlot));
     Log(log, std::wstring(kLogTag) +
                  L" 自动登录期间将强制保持浏览器登录窗最大化并在前台（最小化/窗口化/被挡都会自动拉回）。");
@@ -525,16 +707,20 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                  L" 快轮询+兜底：clickPoll=40ms cooldown=150ms；GP/账号卡/昵称/繼續均可重试；"
                  L"校验地址栏/标题阶段");
 
+    if (IsGamaPassDeviceLoginBusy()) {
+        return Fail(HttpLoginError::BadInput,
+                    "账密登录助手正在运行。请等它完成后再点 GAMA PASS自动登录（不会自动衔接）。");
+    }
+
     std::wstring exe;
     if (!HttpGamaPassPreferredBrowserExe(exe) || exe.empty()) {
         return Fail(HttpLoginError::BadInput,
                     "未找到 Chrome/Edge。请安装官方 Chrome、Edge 或 Chrome++ 后再试。");
     }
     Log(log, std::wstring(kLogTag) + L" 浏览器=" + exe);
-
-    // ★ 不结束日常浏览器：靠启动前 hwnd 快照 + --new-window 只附着本轮新窗，避免误杀会话 Cookie。
     Log(log, std::wstring(kLogTag) +
-                 L" 启动前不结束已开浏览器；用 --new-window + 快照只挂本轮登录窗（不清 Cookie）");
+                 L" 启动前不结束已开浏览器；用 --new-window + 快照只挂本轮登录窗（不清 Cookie；"
+                 L"不因账密助手 device_id 改道独立罐）");
 
     DWORD launchPid = 0;
     std::vector<HWND> beforeHwnds;
@@ -594,6 +780,16 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     bool accNoCardLogged = false;  // 一次性：选账号页上没解析出卡
     DWORD lastNickClickAt = 0;
     DWORD lastContinueClickAt = 0;
+    DWORD resultOrMainSeenAt = 0;  // 首次到 result/Main：给官网 JS 兑票拉 NGM 的宽限
+    bool ottHttpTried = false;     // 地址栏已有 ticket OTT 时改走 GetOneTimeWebInfo
+    int resultReloadCount = 0;     // 卡在 Galaxy result 时 F5 重跑回跳
+    DWORD lastResultReloadAt = 0;
+    int pageReloadCount = 0;       // 登录页连不上 / 卡在 openid 过渡：F5
+    DWORD lastPageReloadAt = 0;
+    DWORD netErrorSeenAt = 0;
+    DWORD otherAuthStuckAt = 0;
+    DWORD lastNetErrScan = 0;
+    bool sawNetErrPage = false;
     int gpRetryCount = 0;
     int accRetryCount = 0;
     int nickRetryCount = 0;
@@ -607,7 +803,6 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     constexpr DWORD kPollTicketMs = 100;
     constexpr DWORD kGpRetryMs = 900;         // BIN 02:54：仍停 Galaxy 时旧值 2.2s 空等偏慢
     constexpr DWORD kGpRetryTransitMs = 1800; // 已离开 Galaxy、过渡页稍宽
-    constexpr DWORD kGpForceRetryMs = 4000;
     constexpr DWORD kUrlGalaxyGraceMs = 5500;  // 点 GP 后地址栏仍短暂 Galaxy，禁止误纠偏回 WaitGp
     constexpr DWORD kUrlNickGraceMs = 5500;    // 点繼續后地址栏仍短暂 SelectGameAccount
     constexpr DWORD kAccRetryMs = 2500;       // 点卡后仍停选账号页 → 重点卡
@@ -696,8 +891,8 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         if (!IsWindow(hwnd)) {
             DWORD ap = launchPid;
             bool reused = false;
-            // 中途丢窗：用空快照；命中日常唯一窗时 reused=1，避免误关
-            hwnd = WaitBrowserHwnd(launchPid, 8000, log, &ap, std::vector<HWND>{}, &reused);
+            // 中途丢窗：仍用启动前快照，避免把 Cursor/日常旧窗当成「新窗」
+            hwnd = WaitBrowserHwnd(launchPid, 8000, log, &ap, beforeHwnds, &reused);
             if (ap) launchPid = ap;
             if (hwnd && reused) loginHwndReused = true;
             if (!hwnd) {
@@ -723,13 +918,6 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         {
             const std::wstring urlHint = uia.ReadUrlHint(root, hwnd);
             const UrlKind urlKind = ClassifyUrlHint(urlHint);
-            if ((!urlHint.empty() && urlHint != lastUrlHint) || now - lastUrlLog > 3000) {
-                lastUrlLog = now;
-                if (!urlHint.empty()) lastUrlHint = urlHint;
-                Log(log, std::wstring(kLogTag) + L" 页面|" + UrlKindName(urlKind) + L"|@" +
-                             UiaStageName(stage) + L"| " +
-                             (urlHint.empty() ? L"(无URL)" : urlHint.substr(0, 96)));
-            }
             if (urlKind == UrlKind::OauthError ||
                 LooksLikeAccountsOauthError(uia, root, hwnd)) {
                 Log(log, std::wstring(kLogTag) + L" 检测到 accounts/error（OAuth 失败），停止点选");
@@ -738,6 +926,82 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 return FailOauth("Gama Pass OAuth 失败（accounts/error）。"
                                  "请重新一键；在日常浏览器窗口内登录并勾选记住（不会清 Cookie）。");
             }
+
+            // 网页连不上：F5 重试，不要死等 GP 按钮（BIN 12:26 点 GP 后卡 openid / 错误页）
+            constexpr DWORD kNetErrorGraceMs = 2000;
+            constexpr DWORD kPageReloadGapMs = 3500;
+            constexpr DWORD kOtherAuthStuckMs = 6000;
+            constexpr int kMaxPageReload = 6;
+            const bool onGoodLoginUi = LooksLikeSelectAccountPage(uia, root) ||
+                                       LooksLikeNickPage(uia, root) ||
+                                       LooksLikeLoginForm(uia, root) ||
+                                       LooksLikeGalaxyReady(uia, root);
+            // WaitTicket 也要扫：BIN 13:27 地址栏仍是 result，页已是 SSL 错误页
+            const bool scanDom = !onGoodLoginUi && (now - lastNetErrScan) >= 400;
+            if (scanDom) lastNetErrScan = now;
+            const bool netErr =
+                urlKind == UrlKind::NetError ||
+                LooksLikeNetErrorPage(uia, root, hwnd, urlHint, scanDom);
+            sawNetErrPage = netErr;
+            if ((!urlHint.empty() && urlHint != lastUrlHint) || now - lastUrlLog > 3000) {
+                lastUrlLog = now;
+                if (!urlHint.empty()) lastUrlHint = urlHint;
+                const wchar_t* kindName =
+                    (netErr && urlKind != UrlKind::NetError) ? L"NetError" : UrlKindName(urlKind);
+                Log(log, std::wstring(kLogTag) + L" 页面|" + kindName + L"|@" +
+                             UiaStageName(stage) + L"| " +
+                             (urlHint.empty() ? L"(无URL)" : urlHint.substr(0, 96)));
+            }
+            if (netErr) {
+                if (!netErrorSeenAt) netErrorSeenAt = now;
+            } else {
+                netErrorSeenAt = 0;
+            }
+            bool hungTransit = false;
+            if (!netErr && !onGoodLoginUi &&
+                (stage == UiaStage::WaitGp || stage == UiaStage::WaitAcc) &&
+                (urlKind == UrlKind::OtherAuth || urlKind == UrlKind::Unknown)) {
+                if (!otherAuthStuckAt) otherAuthStuckAt = now;
+                hungTransit = (now - otherAuthStuckAt) >= kOtherAuthStuckMs;
+            } else {
+                otherAuthStuckAt = 0;
+            }
+            // SSL 错误页 F5 同一条 URL 多半仍死（BIN 13:27 F5×3 仍 ERR_SSL）；WaitTicket 最多 2 次就重开
+            const int pageReloadCap =
+                (netErr && stage == UiaStage::WaitTicket) ? 2 : kMaxPageReload;
+            if ((netErr || hungTransit) && stage != UiaStage::ManualLogin) {
+                const bool reloadGapOk =
+                    lastPageReloadAt && (now - lastPageReloadAt) >= kPageReloadGapMs;
+                const bool firstDue =
+                    pageReloadCount == 0 &&
+                    (netErr ? (now - netErrorSeenAt) >= kNetErrorGraceMs : hungTransit);
+                const bool againDue = pageReloadCount > 0 && reloadGapOk;
+                if (pageReloadCount < pageReloadCap && (firstDue || againDue)) {
+                    ++pageReloadCount;
+                    lastPageReloadAt = now;
+                    Log(log, std::wstring(kLogTag) +
+                                 (netErr ? L" 登录页连接失败，刷新重试 #"
+                                         : L" 点 GP 后卡在过渡页，刷新重试 #") +
+                                 std::to_wstring(pageReloadCount) + L"/" +
+                                 std::to_wstring(pageReloadCap));
+                    if (!ReloadLoginBrowser(hwnd)) {
+                        Log(log, std::wstring(kLogTag) + L" F5 发送失败，仍继续等页面");
+                    }
+                    root->Release();
+                    Sleep(stagePollMs());
+                    continue;
+                }
+                if (pageReloadCount >= pageReloadCap && reloadGapOk) {
+                    Log(log, std::wstring(kLogTag) + L" 刷新 " +
+                                 std::to_wstring(pageReloadCap) +
+                                 L" 次仍连不上登录页，结束本轮并干净重开 Galaxy");
+                    SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                    root->Release();
+                    return Fail(HttpLoginError::Protocol,
+                                "登录页连接失败，刷新后仍无法打开");
+                }
+            }
+
             // URL 纠偏：阶段与真实页不一致时拉回
             // BIN 23:09：点 GP 后地址栏仍短暂 GalaxyLogin，立刻纠偏→WaitGp 会误再点一次 GP
             // BIN 01:37：点繼續后地址栏仍短暂 NickOrGame，纠偏→WaitNick 会卡死
@@ -775,10 +1039,13 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 accClicked = true;
                 gpClicked = true;
                 Log(log, std::wstring(kLogTag) + L" URL=NickOrGame，纠偏→WaitNick");
-            } else if (urlKind == UrlKind::ResultOrMain && stage != UiaStage::WaitTicket) {
-                stage = UiaStage::WaitTicket;
-                continueClicked = true;
-                Log(log, std::wstring(kLogTag) + L" URL=ResultOrMain，纠偏→WaitTicket");
+            } else if (urlKind == UrlKind::ResultOrMain) {
+                if (!resultOrMainSeenAt) resultOrMainSeenAt = now;
+                if (stage != UiaStage::WaitTicket) {
+                    stage = UiaStage::WaitTicket;
+                    continueClicked = true;
+                    Log(log, std::wstring(kLogTag) + L" URL=ResultOrMain，纠偏→WaitTicket");
+                }
             }
         }
 
@@ -865,11 +1132,12 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
             const DWORD gpRetryNeed = urlStillGalaxy ? kGpRetryMs : kGpRetryTransitMs;
 
             // BIN：最小化打断 / 首点无效后仍停 Galaxy → 尽快重试 GP
+            // 已离开 Galaxy（openid / 错误页）不要再盲点 GP；连不上走上方 F5
             if (!onSelect && !onNick && sinceGp >= gpRetryNeed) {
                 const bool stillOnGalaxy =
                     urlStillGalaxy || LooksLikeGalaxyReady(uia, root) ||
                     uia.NameContains(root, L"Sign in with", true);
-                if (stillOnGalaxy || sinceGp >= kGpForceRetryMs) {
+                if (stillOnGalaxy) {
                     if (gpRetryCount >= kMaxGpRetry) {
                         if (now - lastStageLog > 4000) {
                             lastStageLog = now;
@@ -1065,10 +1333,70 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                              std::to_wstring(now - lastContinueClickAt) + L"ms）");
                 continueClicked = false;
                 stage = UiaStage::WaitContinue;
-            } else if (now - lastStageLog > 8000) {
-                lastStageLog = now;
-                Log(log, sawNgmHint ? std::wstring(kLogTag) + L" TokenWait：已见 NGM，仍等经典版…"
-                                    : std::wstring(kLogTag) + L" TokenWait：等待官网拉起经典版…");
+            } else {
+                // 官网 JS 兑票失败时不拉 NGM。实机：卡在 result 时 F5 会重跑页内 POST 回跳。
+                // 顺序：宽限 → F5（最多 10 次）→ 仍卡则干净重开 Galaxy。不走地址栏、不走空罐 HTTP。
+                // BIN：成功回跳 1–2s；result 脚本 fetch 后再 setTimeout 700ms。3s 够等完，10s 空等过久。
+                constexpr DWORD kOfficialLaunchGraceMs = 3000;
+                constexpr DWORD kResultReloadGapMs = 4000;
+                constexpr int kMaxResultReload = 10;
+                const std::wstring ottSrc =
+                    lastUrlHint.empty() ? uia.ReadUrlHint(root, hwnd) : lastUrlHint;
+                const std::wstring ottOnUrl = ExtractOttToken(ottSrc);
+                const bool haveTicketOtt =
+                    HttpIsTicketOtt(ottOnUrl) && !IsGalaxyLoginInitUrl(ottSrc);
+                const bool stuckResult = UrlStuckOnGalaxyResult(ottSrc);
+                const bool reloadGapOk =
+                    lastResultReloadAt && (now - lastResultReloadAt) >= kResultReloadGapMs;
+
+                if (!sawNetErrPage && !sawNgmHint && stuckResult && !haveTicketOtt &&
+                    resultOrMainSeenAt) {
+                    const bool firstDue = resultReloadCount == 0 &&
+                                          (now - resultOrMainSeenAt) >= kOfficialLaunchGraceMs;
+                    const bool againDue = resultReloadCount > 0 && reloadGapOk;
+                    if (resultReloadCount < kMaxResultReload && (firstDue || againDue)) {
+                        ++resultReloadCount;
+                        lastResultReloadAt = now;
+                        Log(log, std::wstring(kLogTag) +
+                                     L" 官网卡在 Galaxy result，刷新页面重跑回跳 #" +
+                                     std::to_wstring(resultReloadCount) + L"/" +
+                                     std::to_wstring(kMaxResultReload));
+                        if (!ReloadLoginBrowser(hwnd)) {
+                            Log(log, std::wstring(kLogTag) + L" F5 发送失败，仍继续等回跳");
+                        }
+                    } else if (resultReloadCount >= kMaxResultReload && reloadGapOk) {
+                        Log(log, std::wstring(kLogTag) + L" 刷新 " +
+                                     std::to_wstring(kMaxResultReload) +
+                                     L" 次仍卡在 Galaxy result，结束本轮并干净重开 Galaxy");
+                        SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                        root->Release();
+                        return Fail(HttpLoginError::Protocol,
+                                    "官网卡在 Galaxy result，刷新后仍未回跳 Main");
+                    }
+                }
+
+                if (!ottHttpTried && !sawNgmHint && haveTicketOtt && resultOrMainSeenAt &&
+                    (now - resultOrMainSeenAt) >= kOfficialLaunchGraceMs) {
+                    ottHttpTried = true;
+                    Log(log, std::wstring(kLogTag) +
+                                 L" 官网宽限内未拉起经典版，改走 GetOneTimeWebInfo 重试换票"
+                                 L"（地址栏已有 OTT）…");
+                    auto fetched = FetchTicketFromOttOrFail(ottOnUrl, log, "getonetimewebinfo-retry");
+                    if (fetched.ok && fetched.ticketFilled) {
+                        SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                        root->Release();
+                        return fetched;
+                    }
+                    SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                    root->Release();
+                    return fetched;
+                }
+                if (now - lastStageLog > 8000) {
+                    lastStageLog = now;
+                    Log(log, sawNgmHint
+                                 ? std::wstring(kLogTag) + L" TokenWait：已见 NGM，仍等经典版…"
+                                 : std::wstring(kLogTag) + L" TokenWait：等待官网拉起经典版…");
+                }
             }
         }
 
@@ -1101,6 +1429,7 @@ bool ShouldUiaCleanRestart(const HttpLoginResult& r) {
     // accounts/error、点选超时、附着失败（日常已开 Chrome 单例移交常见）→ 关窗/重开 Galaxy
     if (r.accountsOauthError) return true;
     if (r.error == HttpLoginError::OttMissing) return true;
+    if (r.error == HttpLoginError::Protocol) return true;  // 橘子兑票失败码 → 重开拿新 OTT
     if (r.error == HttpLoginError::Network &&
         (r.message.find("UIA") != std::string::npos ||
          r.message.find("附着") != std::string::npos))
@@ -1109,7 +1438,7 @@ bool ShouldUiaCleanRestart(const HttpLoginResult& r) {
 }
 
 HttpLoginResult HttpGamaPassUiaLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
-    constexpr int kMaxCleanRestart = 3;  // 关登录窗后重开 Galaxy，最多 3 次
+    constexpr int kMaxCleanRestart = 10;  // 关登录窗后重开 Galaxy，最多 10 次
     HttpLoginResult last;
     for (int restart = 0;; ++restart) {
         last = HttpGamaPassUiaLoginToOttOnce(log, timeoutMs);

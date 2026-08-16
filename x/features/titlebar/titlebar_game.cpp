@@ -3,6 +3,7 @@
 #endif
 #include "titlebar_game.h"
 
+#include "../ports/consumable_port.h"
 #include "../ports/world_port.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -33,28 +34,28 @@ using x::runtime::il2cpp::ReadPtr;
 // HP/MP 真源在 x::ui::player（WM→CS）；LocalUser → il2cpp_shape::ResolveUserLocalKlass
 // ItemDataManager：08-06 remount（TypeDef 2027；dataTable@+0x18 / bundleMap@+0x38）
 constexpr char kItemDataManagerClass[] =
-    "c54ee3e67d9b34bf0119703c3c5a186630d83930863fb719415d81738cf8e4f";
+    "ca7f37529811b365ef5b590d39b1054d1eeee494bb809e4deda8c71b4fac920";
 constexpr char kItemDataClass[] =
-    "a54e2a43c7e094f0bcec26c6f7ccdf882088aa33c7fa3f6b8157dbad03c47be";
+    "bb07d2b369cb617886ecc9cf2ffee46fdb6b990067e423988e8a7c810711c18";
 constexpr char kItemBundleClass[] =
-    "c06021a6ea657f1df1e88562030458a63aa0c3bf5732b713117e34822e87d00";
+    "c1210f4fcb03a5f9849e521ae02597a715a1719e67a185a1320d3e41101f1f9";
 // ItemData.info 实际类型（restored Info · TypeDef 2031），不是旧 ItemInfo 名
 constexpr char kItemInfoClass[] =
-    "c826e2901e5bc869dbd4298bda79f2f473d20f48c047008dcb25b0083d953a2";
+    "ccdd62159a3e45b20f8b237cb94fd57ddebe951976a69f11df85388b6fb534a";
 
 // IDM / ItemData / Bundle / Info 价位：hash → field_get_offset（dump fallback）
 constexpr char kHashIdmDataTable[] =
-    "ddf51b093210858b74709211eab76d0ec248318e46dc4bc0b5bc0f6a36daba6";
+    "d355879b9857976e58075b44e5a3dec29807a826d9face8d43d21d0149e4eb0";
 constexpr char kHashIdmBundleMap[] =
-    "c1aabaed608d4408ee01a9dc23567959d826cb32d545edc0bd300b8ab282112";
+    "be7e2c63cf5eb9a0e2fb09bd6145204bef1a473ced20475f967658344006e9c";
 constexpr char kHashBundleSellPrice[] =
-    "b7d5d60ce7ce1370076b78024470c39ab92f2ad55c6cc42591015d7c2194835";
+    "cb0bc82d2b8552d18bb314b27208b3d8383a8bd83d9397b087bd4eff6375420";
 constexpr char kHashItemDataInfo[] =
-    "bbfa5f354d842c50ecd21f26e00d75426a31d2b1c03315b82baa906db2738ad";
+    "eda0d7d19f8d6e97ff7643d66b8df253b5bcb63e620f7adef4ff26903fabaaf";
 constexpr char kHashInfoPrice[] =
-    "bf45a71863647457c358f9632ea7a1072f35799c6af4b191b4aaf9061ce23a2";
+    "afeb763886b74509f86ea00524d173debffcaf40cc5a14124d5044841e93244";
 constexpr char kHashInfoNotSale[] =
-    "d0cf7e402a48412faf1da0d7ba6d960a84ff361056148c67d822e938f418ae0";
+    "d4b50a17b0b16dfaf3a14a4dbb6c81bc6ee3b1285a351538d99d2e2bb8155fb";
 
 constexpr size_t kFbIdmDataTable = 0x18;
 constexpr size_t kFbIdmBundleMap = 0x38;
@@ -568,9 +569,11 @@ bool ReadVitals(Vitals& out) {
     return true;
 }
 
-double UpdateLootDelta(bool countIntoRate, uint64_t* knownOut, uint64_t* unknownOut) {
+double UpdateLootDelta(bool countIntoRate, uint64_t* knownOut, uint64_t* unknownOut,
+                       uint64_t* mpPotConsumedOut) {
     if (knownOut) *knownOut = 0;
     if (unknownOut) *unknownOut = 0;
+    if (mpPotConsumedOut) *mpPotConsumedOut = 0;
     std::unordered_map<int, unsigned long long> current;
     if (!SnapshotInventory(current)) return 0.0;
     if (!gHaveLootBaseline) {
@@ -579,7 +582,7 @@ double UpdateLootDelta(bool countIntoRate, uint64_t* knownOut, uint64_t* unknown
         return 0.0;
     }
     double value = 0.0;
-    uint64_t known = 0, unknown = 0;
+    uint64_t known = 0, unknown = 0, mpPots = 0;
     for (const auto& [itemId, quantity] : current) {
         const auto previous = gLootBaseline.find(itemId);
         const unsigned long long before = previous == gLootBaseline.end() ? 0ull : previous->second;
@@ -589,9 +592,16 @@ double UpdateLootDelta(bool countIntoRate, uint64_t* knownOut, uint64_t* unknown
         if (price > 0) { value += static_cast<double>(delta) * price; known += delta; }
         else { unknown += delta; }
     }
+    for (const auto& [itemId, beforeQty] : gLootBaseline) {
+        if (!x::features::ports::consumable::IsMpPotionItem(itemId) || beforeQty == 0) continue;
+        const auto it = current.find(itemId);
+        const unsigned long long after = it == current.end() ? 0ull : it->second;
+        if (after < beforeQty) mpPots += beforeQty - after;
+    }
     gLootBaseline = std::move(current);
     if (knownOut) *knownOut = known;
     if (unknownOut) *unknownOut = unknown;
+    if (mpPotConsumedOut) *mpPotConsumedOut = countIntoRate ? mpPots : 0;
     return countIntoRate ? value : 0.0;
 }
 

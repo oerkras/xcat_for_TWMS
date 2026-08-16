@@ -59,7 +59,7 @@ function copyRequired(srcRel, dstRel) {
   cpSync(src, dst);
 }
 
-/** 与 xcat POST_BUILD 对齐：dumps → 发布包 XCat_data（dataservice / skill_catalog / travel seed）。 */
+/** 与 xcat POST_BUILD 对齐：dumps → 发布包 XCat_data（dataservice / skill_catalog / travel seed / scroll_voice）。 */
 function copyOfflineDataservice() {
   const tsvSrc = join(repo, "dumps", "offline_tables", "tsv");
   if (!existsSync(tsvSrc)) die("缺少 dumps/offline_tables/tsv");
@@ -71,7 +71,6 @@ function copyOfflineDataservice() {
   for (const name of tsvFiles) {
     cpSync(join(tsvSrc, name), join(dsDst, name));
   }
-  copyRequired("dumps/offline_tables/SOURCE.md", "XCat_data/dataservice/SOURCE.md");
 
   copyRequired(
     "dumps/offline_tables/tsv/skill_catalog_full.tsv",
@@ -88,9 +87,53 @@ function copyOfflineDataservice() {
     copyRequired(`dumps/twms_routes/${name}`, `XCat_data/state/${name}`);
   }
 
+  const voiceWavs = copyScrollVoice();
   console.log(
-    `[package-release] offline data: dataservice=${tsvFiles.length} tsv + skill_catalog + ${travelSeeds.length} travel seeds`,
+    `[package-release] offline data: dataservice=${tsvFiles.length} tsv + skill_catalog + ${travelSeeds.length} travel seeds + scroll_voice=${voiceWavs} wav`,
   );
+}
+
+function copyScrollVoice() {
+  const src = join(repo, "dumps", "offline_tables", "scroll_voice");
+  const mapPath = join(src, "map.tsv");
+  const fragPath = join(src, "fragments.tsv");
+  if (!existsSync(mapPath) || !existsSync(fragPath)) {
+    die(
+      "缺少 dumps/offline_tables/scroll_voice/{map,fragments}.tsv；先跑 python scripts/bake_scroll_voice.py",
+    );
+  }
+
+  const dst = join(outDir, "XCat_data", "dataservice", "scroll_voice");
+  mkdirSync(dst, { recursive: true });
+
+  let wavs = 0;
+  for (const name of readdirSync(src)) {
+    const lower = name.toLowerCase();
+    if (lower.endsWith(".mp3")) continue;
+    if (!lower.endsWith(".wav") && !lower.endsWith(".tsv")) continue;
+    cpSync(join(src, name), join(dst, name));
+    if (lower.endsWith(".wav")) wavs += 1;
+  }
+
+  const needed = new Set();
+  for (const line of readFileSync(mapPath, "utf8").split(/\r?\n/)) {
+    if (!line || line.startsWith("#")) continue;
+    const tab = line.indexOf("\t");
+    if (tab < 0) continue;
+    for (const frag of line.slice(tab + 1).split(",")) {
+      const id = frag.trim();
+      if (id) needed.add(id);
+    }
+  }
+  if (needed.size === 0) die("scroll_voice/map.tsv 没有条目");
+  needed.add("pick_ok");
+  needed.add("pick_ok_dart");
+  const missing = [...needed].filter((id) => !existsSync(join(dst, `${id}.wav`)));
+  if (missing.length) {
+    const head = missing.slice(0, 8).join(", ");
+    die(`scroll_voice 缺 wav（${missing.length}）：${head}${missing.length > 8 ? "..." : ""}`);
+  }
+  return wavs;
 }
 
 const args = parseArgs(process.argv.slice(2));
@@ -131,7 +174,7 @@ writeFileSync(
 3. 客户端更新检查默认：http://xcat.work:18789/twms/update/latest.json
    （网页下载站：http://xcat.work:52080/；本机探活可用 127.0.0.1）
 
-内含：xcat.exe、XCat_data\\xcat.dll、离线 dataservice / 赶路 seed。
+内含：xcat.exe、XCat_data\\xcat.dll、离线 dataservice / 卷轴语音 / 赶路 seed。
 换票：GAMA PASS（浏览器 CDP）或 gamania (HK) HTTP，无需 WebView2 Runtime。
 
 构建时间：${new Date().toISOString().replace("T", " ").slice(0, 19)}
@@ -169,3 +212,6 @@ writeFileSync(join(releaseDir, "latest.json"), `${JSON.stringify(manifest, null,
 console.log(`[package-release] wrote ${outDir}`);
 console.log(`[package-release] wrote ${zipPath}`);
 console.log(`[package-release] wrote ${join(releaseDir, "latest.json")}`);
+console.log(
+  "[package-release] note: latest.json is last-built only; clients follow update-channels.json (ops 对外允许版本). Packaging does not change the allowed channel.",
+);

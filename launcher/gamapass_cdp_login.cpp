@@ -470,7 +470,7 @@ HttpLoginResult TryFetchFromOtt(const std::wstring& ott, const HttpLoginLogFn& l
     TicketFetchOptions fo;
     fo.ott = ott;
     fo.timeoutMs = 20000;
-    auto fr = FetchGalaxyTicketFromOtt(fo);
+    auto fr = FetchGalaxyTicketFromOttWithRetry(fo, 4, log);
     HttpLoginResult out;
     out.ok = fr.ok;
     out.error = fr.ok ? HttpLoginError::Ok : HttpLoginError::OttMissing;

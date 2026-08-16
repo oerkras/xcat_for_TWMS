@@ -18,8 +18,11 @@
 #include "../ports/action_gate.h"
 #include "../ports/world_port.h"
 #include "../simple_combat/heli_rotor.h"
+#include "../simple_combat/simple_combat.h"
 #include "../invuln/invuln.h"
+#include "../travel/travel.h"
 #include "../../ipc/payload_control.h"
+#include "../../runtime/managed_main.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_method.h"
@@ -43,14 +46,14 @@ namespace {
 namespace heli = x::features::simple_combat::heli;
 
 // 屏→世界：回归更新前 `ScreenToWorldPoint(Vector3)` 三参重载。
-// 2026-08-03 误把旧 0x4DDEF70 映到四参版 0x4E16DF0，且 eye 误用 Mono=0
+// 2026-08-03 误把旧 0x4DDEF70 映到四参版 0x4E15B00，且 eye 误用 Mono=0
 //（Unity 枚举：Left=0 Right=1 Mono=2）。三参包装在 IDA 内硬编码 eye=2。
-// 正确孪生：ScreenToWorldPoint_…824 @ 0x4E170A0。
+// 正确孪生：ScreenToWorldPoint_…824 @ 0x4E15DB0。
 // get_position 走包装（Injected 桩不转发参数）；STW 必须 arity=1 三参重载。
-constexpr uint32_t kRvaCamGetMain = 0x4E26A70;         // remounted 2026-08-06 Camera.get_main
-constexpr uint32_t kRvaCamScreenToWorld = 0x4E265A0;  // remounted 2026-08-06 Camera.ScreenToWorldPoint(Vector3)
-constexpr uint32_t kRvaCompGetTransform = 0x4E90CD0;  // remounted 2026-08-06 Component.get_transform
-constexpr uint32_t kRvaTfGetPos = 0x4EAB740;          // remounted 2026-08-06 Transform.get_position
+constexpr uint32_t kRvaCamGetMain = 0x4E25780;         // remounted 2026-08-06 Camera.get_main
+constexpr uint32_t kRvaCamScreenToWorld = 0x4E252B0;  // remounted 2026-08-06 Camera.ScreenToWorldPoint(Vector3)
+constexpr uint32_t kRvaCompGetTransform = 0x4E8F9E0;  // remounted 2026-08-06 Component.get_transform
+constexpr uint32_t kRvaTfGetPos = 0x4EAA450;          // remounted 2026-08-06 Transform.get_position
 
 // 1ms 空转会放大 F6 跟飞对主泵的压力；8ms 足够跟手且显著减负。
 constexpr DWORD kWorkerSleepMs = 8;
@@ -115,6 +118,12 @@ long gLastClientY = 0;
 bool gHaveLastClient = false;
 bool gWasPlayReady = false;
 int gLastMapId = -1;
+// 换图 PlayReady 升起后短窗：只盖引擎/InterStage 半截（≈ Travel 的 PlayReadyStable 500）。
+// Travel settle / 到站 SafeLand 另由 IsActive / IsSafeLandActive 挡——不再 2.5s 死等。
+// 崩② DESKTOP-2ULDUOB 01:36:55：进图 ~1.8s F6 被 settle BAN 追，根因是 settle 未完。
+constexpr DWORD kMapLandBlockMs = 500;
+DWORD gLandBlockUntil = 0;
+DWORD gBlockLogMs = 0;
 // 因旋翼判死而临时卸掉禁挂台的闩，仅用于去抖，真值以 fly_fh_ban 为准。
 bool gBailBanReleased = false;
 // 断供探针状态（见 DriveRotor）。发射间隔超过阈值就记一行，正常节拍是 ~90ms。
@@ -196,6 +205,27 @@ void ClearLead() {
     gPrevTgtMs = 0;
 }
 
+bool ManualFlyBlocked(DWORD now) {
+    if (x::runtime::managed_main::IsMapTransitBlocked()) return true;
+    if (!ports::world::IsPlayReady()) return true;
+    if (gLandBlockUntil && static_cast<int>(now - gLandBlockUntil) < 0) return true;
+    if (x::features::travel::IsActive()) return true;
+    // Travel 已 Idle 后仍可能 RequestSafeLand 托台（同崩② settle BAN 追 F6）。
+    if (x::features::simple_combat::IsSafeLandActive()) return true;
+    return false;
+}
+
+void LogFlyBlocked(DWORD now, const char* why) {
+    if (gBlockLogMs && now - gBlockLogMs < 1000) return;
+    gBlockLogMs = now;
+    x::runtime::LogI("Fly", "arm blocked (%s) travel=%d safeLand=%d landRemain=%dms",
+                     why ? why : "?", x::features::travel::IsActive() ? 1 : 0,
+                     x::features::simple_combat::IsSafeLandActive() ? 1 : 0,
+                     gLandBlockUntil && static_cast<int>(now - gLandBlockUntil) < 0
+                         ? static_cast<int>(gLandBlockUntil - now)
+                         : 0);
+}
+
 void ClearFollowTrack() {
     gHaveTgt = false;
     gHaveLastClient = false;
@@ -221,8 +251,15 @@ void NoteMapLandGate(DWORD now) {
         // ★ 必须先确认自己是持有者：Reset 是全局复位（连所有权一起清），F6 没武装时
         //   在这里无条件复位会把正在打怪的 F5 一起掀翻。
         if (heli::CurrentOwner() == heli::Owner::Fly) heli::Reset();
-        x::runtime::LogI("Fly", "map land gate open why=%s map=%d", rose ? "play_ready" : "map_id",
-                         mapId);
+        gLandBlockUntil = now + kMapLandBlockMs;
+        // 飞着进门：落地窗禁止继续 DriveRotor / 抢 Travel settle。
+        if (gArmed.load(std::memory_order_acquire)) {
+            SetArmed(false);
+            x::ipc::PayloadControl_PublishFly(false);
+        }
+        x::runtime::LogI("Fly", "map land gate open why=%s map=%d block=%ums",
+                         rose ? "play_ready" : "map_id", mapId,
+                         (unsigned)kMapLandBlockMs);
     }
     if (play && mapId > 0) gLastMapId = mapId;
     if (!play) {
@@ -231,7 +268,6 @@ void NoteMapLandGate(DWORD now) {
         gLastMapId = -1;
     }
     gWasPlayReady = play;
-    (void)now;
 }
 
 // ⚠️ 换旋翼后这个 mode 对**飞行**已不再起作用：冲量路由由 A 层内部的 ImpactSetVelocity
@@ -595,6 +631,12 @@ void PollF6() {
     const bool down = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
     if (down && !gF6WasDown) {
         const bool next = !gArmed.load(std::memory_order_acquire);
+        const DWORD now = GetTickCount();
+        if (next && ManualFlyBlocked(now)) {
+            LogFlyBlocked(now, "F6");
+            gF6WasDown = down;
+            return;
+        }
         x::ipc::PayloadControl_PublishFly(next);
         gLmbWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         const unsigned mode = gMode.load(std::memory_order_acquire);
@@ -850,8 +892,16 @@ DWORD WINAPI Worker(LPVOID) {
     while (!gWorkerStop.load(std::memory_order_acquire)) {
         const DWORD now = GetTickCount();
         NoteMapLandGate(now);
+        if (gArmed.load(std::memory_order_acquire) && ManualFlyBlocked(now)) {
+            LogFlyBlocked(now, "force-disarm");
+            SetArmed(false);
+            x::ipc::PayloadControl_PublishFly(false);
+        }
         PollF6();
-        if (gArmed.load(std::memory_order_acquire)) {
+        // ExternalPause 必须把 DriveRotor 一起停掉。只停 hop 的话，armed 时仍会每拍
+        // 把鼠标 setpoint 写进 Owner::Fly——CharBoot 贴 NPC 抢到 Fly 旋翼后会被对拽。
+        if (gArmed.load(std::memory_order_acquire) &&
+            !gExternalPause.load(std::memory_order_acquire)) {
             // F6 自由飞：不因近门自动卸飞。发门/贴门进门由超级赶路 travel 管。
             PollAimFollow();
             PollLmbHop();
@@ -881,17 +931,11 @@ void Init() {
     ClearFollowTrack();
     gWasPlayReady = false;
     gLastMapId = -1;
+    gLandBlockUntil = 0;
+    // 飞行武装是会话态（state/fly_armed），禁止 WritePayloadControl 整包重写 user.ini：
+    // 那会抬 writeTick、触发面板按默认值回灌，把二踢脚/间隔/守护等盖掉。
     const char* bin = x::runtime::GetBinDir();
-    if (bin && bin[0]) {
-        xcat::PayloadControl c{};
-        if (xcat::ReadPayloadControl(bin, c)) {
-            c.fly = 0;
-            c.writeTickMs = GetTickCount64();
-            (void)xcat::WritePayloadControl(bin, c);
-        } else {
-            xcat::ClearFlyArmedSession(bin);
-        }
-    }
+    if (bin && bin[0]) xcat::ClearFlyArmedSession(bin);
     x::runtime::LogI("Fly", "init drive=heli (closed-loop rotor; open-loop impact removed)");
 }
 
@@ -936,6 +980,13 @@ void SetExternalPause(bool on) {
 bool IsExternallyPaused() { return gExternalPause.load(std::memory_order_acquire); }
 
 void SetArmed(bool on) {
+    if (on) {
+        const DWORD now = GetTickCount();
+        if (ManualFlyBlocked(now)) {
+            LogFlyBlocked(now, "SetArmed");
+            return;
+        }
+    }
     const bool prev = gArmed.exchange(on, std::memory_order_acq_rel);
     if (prev == on) return;
     gLmbWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
@@ -944,8 +995,7 @@ void SetArmed(bool on) {
     if (on) {
         // 武装：禁挂台；ApplyImpact 放行（Impact 消费 → Attr=2）。
         ports::fly_fh_ban::SetArmedBan(true);
-        // 手动入口用**抢占式** Acquire：人按了 F6 就该立刻听人的，哪怕 F5 正在打怪。
-        // 被抢的一方 SetSetpoint/Tick 静默 no-op，它自己的循环不用改；旋翼一拍没停。
+        // 手动入口平时抢占 F5；赶路 settle / SafeLand / 短落地窗已在 ManualFlyBlocked 拒掉。
         (void)heli::Acquire(heli::Owner::Fly);
     } else {
         // 卸飞：停推 → 放挂台 → 交还所有权（不再写 Impact 对冲刹速）。

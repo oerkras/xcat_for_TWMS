@@ -17,22 +17,25 @@
 namespace x::features::ports::curfh_gate_bypass {
 namespace {
 
-// remounted 2026-08-06 GA；与 dump.cs.restored / IDA 实锤一致。
-constexpr uint32_t kRvaMagicJnz = 0x1091E42;      // 75 07 → EB 07
-constexpr uint32_t kRvaShootJnz = 0x10599F0;      // 75 07 → EB 07
-constexpr uint32_t kRvaPrepareSetnz = 0x10B353B;  // 0F 95 C2 → B2 01 90
+// remounted 2026-08-14。CurFh 门：User+0x50 -> VecCtrl+0x28 -> test -> CONT/FAIL。
+// Magic/Shoot 收成 cmovnz dispatcher；Prepare 仍是 75 07 跳过 FAIL 槽。
+constexpr uint32_t kRvaMagicCmov = 0x10AF45D;   // cmovnz rax,rcx -> mov rax,rcx; nop
+constexpr uint32_t kRvaShootCmov = 0x107730E;   // cmovnz rax,r12 -> mov rax,r12; nop
+constexpr uint32_t kRvaPrepareJnz = 0x10D06EA;  // 75 07 -> EB 07
 
+constexpr uint8_t kMagicExpect[] = {0x48, 0x0F, 0x45, 0xC1};
+constexpr uint8_t kMagicPatch[] = {0x48, 0x8B, 0xC1, 0x90};
+constexpr uint8_t kShootExpect[] = {0x49, 0x0F, 0x45, 0xC4};
+constexpr uint8_t kShootPatch[] = {0x49, 0x8B, 0xC4, 0x90};
 constexpr uint8_t kJnzExpect[] = {0x75, 0x07};
 constexpr uint8_t kJmpPatch[] = {0xEB, 0x07};
-constexpr uint8_t kSetnzExpect[] = {0x0F, 0x95, 0xC2};
-constexpr uint8_t kSetnzPatch[] = {0xB2, 0x01, 0x90};  // mov dl,1 ; nop
 
 std::atomic<bool> gWant{false};
 std::atomic<bool> gInstalled{false};
 
-uint8_t gBakMagic[sizeof(kJmpPatch)]{};
-uint8_t gBakShoot[sizeof(kJmpPatch)]{};
-uint8_t gBakPrepare[sizeof(kSetnzPatch)]{};
+uint8_t gBakMagic[sizeof(kMagicPatch)]{};
+uint8_t gBakShoot[sizeof(kShootPatch)]{};
+uint8_t gBakPrepare[sizeof(kJmpPatch)]{};
 bool gHaveBakMagic = false;
 bool gHaveBakShoot = false;
 bool gHaveBakPrepare = false;
@@ -110,12 +113,12 @@ void Uninstall() {
         !gHaveBakPrepare) {
         return;
     }
-    (void)RestoreOne(kRvaMagicJnz, kJmpPatch, gBakMagic, sizeof(kJmpPatch), gHaveBakMagic,
+    (void)RestoreOne(kRvaMagicCmov, kMagicPatch, gBakMagic, sizeof(kMagicPatch), gHaveBakMagic,
                      "Magic");
-    (void)RestoreOne(kRvaShootJnz, kJmpPatch, gBakShoot, sizeof(kJmpPatch), gHaveBakShoot,
+    (void)RestoreOne(kRvaShootCmov, kShootPatch, gBakShoot, sizeof(kShootPatch), gHaveBakShoot,
                      "Shoot");
-    (void)RestoreOne(kRvaPrepareSetnz, kSetnzPatch, gBakPrepare, sizeof(kSetnzPatch),
-                     gHaveBakPrepare, "Prepare");
+    (void)RestoreOne(kRvaPrepareJnz, kJmpPatch, gBakPrepare, sizeof(kJmpPatch), gHaveBakPrepare,
+                     "Prepare");
     gHaveBakMagic = gHaveBakShoot = gHaveBakPrepare = false;
     gInstalled.store(false, std::memory_order_release);
     x::runtime::LogI("CurFhGateBypass", "uninstalled");
@@ -124,13 +127,13 @@ void Uninstall() {
 bool TryInstall() {
     if (!x::runtime::il2cpp::GaBase()) return false;
     const bool m =
-        PatchOne(kRvaMagicJnz, kJnzExpect, kJmpPatch, sizeof(kJmpPatch), gBakMagic,
+        PatchOne(kRvaMagicCmov, kMagicExpect, kMagicPatch, sizeof(kMagicPatch), gBakMagic,
                  &gHaveBakMagic, "Magic");
     const bool s =
-        PatchOne(kRvaShootJnz, kJnzExpect, kJmpPatch, sizeof(kJmpPatch), gBakShoot,
+        PatchOne(kRvaShootCmov, kShootExpect, kShootPatch, sizeof(kShootPatch), gBakShoot,
                  &gHaveBakShoot, "Shoot");
     const bool p =
-        PatchOne(kRvaPrepareSetnz, kSetnzExpect, kSetnzPatch, sizeof(kSetnzPatch), gBakPrepare,
+        PatchOne(kRvaPrepareJnz, kJnzExpect, kJmpPatch, sizeof(kJmpPatch), gBakPrepare,
                  &gHaveBakPrepare, "Prepare");
     const bool ok = m && s && p;
     gInstalled.store(ok, std::memory_order_release);

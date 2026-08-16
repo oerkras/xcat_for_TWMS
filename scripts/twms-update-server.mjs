@@ -7,7 +7,7 @@
  * 客户端默认：http://xcat.work:18789/twms
  *   GET  /twms/health
  *   GET  /twms/ready
- *   GET  /twms/update/latest.json
+ *   GET  /twms/update/latest.json  (按 update-channels.json：默认版 + uid/TOKEN 分组覆盖)
  *   GET  /twms/update/force.json   (无 force-update.json → 404)
  *   GET  /twms/update/access.json  (按 X-XCat-* 头查是否禁止使用)
  *   GET  /twms/update/<zip>
@@ -15,29 +15,163 @@
  *   POST /twms/v1/logs            (legacy JSON)
  *   POST /twms/admin/shutdown      (loopback)
  *   GET  /twms/admin/stats         (loopback)
- *   GET  /twms/admin/clients       (loopback；按 X-XCat-* 头追踪)
+ *   GET  /twms/admin/clients       (loopback；按 X-XCat-* 头追踪，仅「此刻在线」)
+ *   GET  /twms/admin/client-history(loopback；落盘历史 ?days=&limit=，含租约剩余估算)
  *   GET  /twms/admin/bans          (loopback；封禁清单，兼容)
- *   POST /twms/admin/bans          (loopback；action=ban|unban|allow|unallow|setMode)
+ *   POST /twms/admin/bans          (loopback；action=ban|unban|allow|unallow|setMode|setStrict
+ *                                            |revokeJti|unrevokeJti —— 后两个按卡号废单张卡)
  *   GET  /twms/admin/access        (loopback；mode+黑白名单)
  *   POST /twms/admin/log-fetch     (loopback；action=enqueue|cancel；mode=light|full)
  *   GET  /twms/admin/log-fetch     (loopback；待拉取队列)
  *   POST /twms/admin/force-target  (loopback；指定设备强更 enqueue|cancel)
  *   GET  /twms/admin/force-target  (loopback；指定强更队列)
+ *   GET  /twms/admin/update-channels (loopback；对外允许版本 + 分组覆盖)
+ *   POST /twms/admin/update-channels (loopback；set-default|set-group|clear-group)
  */
 import http from "node:http";
+import crypto from "node:crypto";
 import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLogUpload } from "./twms-log-upload.mjs";
 import { createDeviceAccess } from "./twms-device-access.mjs";
+import { createDeviceQuota } from "./twms-device-quota.mjs";
+import { createClientHistory } from "./twms-client-history.mjs";
 import { createLogFetchQueue } from "./twms-log-fetch.mjs";
 import { createForceTargetQueue } from "./twms-force-target.mjs";
 import { createIpGeo } from "./twms-ip-geo.mjs";
+import { createUpdateChannels } from "./twms-update-channels.mjs";
 
-const SERVER_VERSION = "0.4.11";
+const SERVER_VERSION = "0.4.12";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+
+// gate/1 启动 TOKEN 离线签发（供 OPS「签卡」页调用）。私钥只在本机 secrets 下，
+// 不入库、不外发；接口仅 loopback 可达（见 handleAdmin 的 isLoopback 守卫）。
+const gatePrivPath = path.join(repoRoot, "secrets", "gate_ec_priv.pem");
+const gateCardsPath = path.join(repoRoot, "artifacts", "ops_logs", "gate_cards.jsonl");
+
+// jti → 台账行 的内存索引。派生凭证（X-XCat-Gate-Proof）验 HMAC 需要卡的签名段，
+// 而签名段只存在台账里；探活是热路径，不能每次读盘解析整个 jsonl。
+// 卡都由本服务签发（签发时同步入索引），故启动 load 一次即够；手工编辑台账需重启服务。
+const gateCardIndex = new Map();
+
+// 索引键用 payload 段而非 jti：proof 里天然带着完整 payload，命中即证明这个 payload 就是
+// 台账里某张卡的原文（自编 payload 必然 miss），不必再单独比对一次。
+// 更重要的是 jti 上线前签发的老卡 payload 里没有 jti，用 jti 当键会让它们永远查不到。
+function indexGateCard(entry) {
+  const token = String(entry?.token || "");
+  const dot = token.indexOf(".");
+  if (dot <= 0 || dot + 1 >= token.length) return;
+  gateCardIndex.set(token.slice(0, dot), {
+    token,
+    uid: String(entry.uid || ""),
+  });
+}
+
+function lookupGateCardByPayload(payloadB64) {
+  return gateCardIndex.get(String(payloadB64 || "")) || null;
+}
+
+async function loadGateCardIndex() {
+  const cards = await listGateCards(100000);
+  gateCardIndex.clear();
+  for (const c of cards) indexGateCard(c);
+  logInfo(
+    `gate-card index loaded ${gateCardIndex.size} cards (派生凭证校验依赖它；台账丢失=新客户端认不出 uid)`,
+  );
+}
+
+async function appendGateCard(entry) {
+  try {
+    await fs.mkdir(path.dirname(gateCardsPath), { recursive: true });
+    await fs.appendFile(gateCardsPath, JSON.stringify(entry) + "\n", "utf8");
+    indexGateCard(entry);
+    return true;
+  } catch (e) {
+    logWarn?.(`gate-card ledger append failed: ${e?.message || e}`);
+    return false;
+  }
+}
+
+async function listGateCards(limit = 500) {
+  let raw;
+  try {
+    raw = await fs.readFile(gateCardsPath, "utf8");
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const s = line.trim();
+    if (!s) continue;
+    try {
+      const o = JSON.parse(s);
+      if (o && o.uid) rows.push(o);
+    } catch {
+      /* skip corrupt line */
+    }
+  }
+  // 最近签发在前；限制条数。
+  rows.reverse();
+  return rows.slice(0, Math.max(1, limit));
+}
+
+async function signGateToken(uid, days, note, by) {
+  const u = String(uid || "").trim();
+  if (!u) return { ok: false, error: "uid 必填" };
+  if (u.length > 64) return { ok: false, error: "uid 过长（<=64）" };
+  const d = Math.max(0, Math.floor(Number(days) || 0));
+  let pem;
+  try {
+    pem = await fs.readFile(gatePrivPath, "utf8");
+  } catch {
+    return {
+      ok: false,
+      error: "未找到私钥 secrets/gate_ec_priv.pem；先跑 node scripts/xcat-gate-keygen.mjs",
+    };
+  }
+  try {
+    const privateKey = crypto.createPrivateKey(pem);
+    const now = Math.floor(Date.now() / 1000);
+    // jti = 卡号，签进 payload 才能做卡级吊销（只废这一张，同 uid 的新卡不受影响）。
+    // 台账 id 复用同一个值，台账行与卡一一对应；客户端验签按字段取值，多这个字段不影响老客户端。
+    const jti = crypto.randomBytes(6).toString("hex");
+    const payload = { uid: u, iss: now, exp: d > 0 ? now + d * 86400 : 0, jti };
+    const payloadB64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+    const sig = crypto.sign("sha256", Buffer.from(payloadB64, "utf8"), {
+      key: privateKey,
+      dsaEncoding: "ieee-p1363",
+    });
+    const token = `${payloadB64}.${sig.toString("base64url")}`;
+    // 台账已进入派生凭证的验证链路（verifyGateProof 要靠它取签名段算 mac）：写不进去就等于
+    // 签了一张注定验不过的卡，运维照常发出去、成员永远「无 uid」。宁可签发失败让人当场修盘。
+    const ledgerOk = await appendGateCard({
+      id: jti,
+      jti,
+      uid: u,
+      iss: now,
+      exp: payload.exp,
+      days: d,
+      note: String(note || "").slice(0, 200),
+      by: String(by || "ops").slice(0, 40),
+      at: new Date(now * 1000).toISOString(),
+      token,
+    });
+    if (!ledgerOk) {
+      return {
+        ok: false,
+        error:
+          "台账写入失败（artifacts/ops_logs/gate_cards.jsonl）；卡已废弃未发出。" +
+          "派生凭证校验依赖台账，先修磁盘/权限再重签",
+      };
+    }
+    return { ok: true, id: jti, jti, token, uid: u, iss: now, exp: payload.exp, days: d };
+  } catch (e) {
+    return { ok: false, error: `签发失败: ${e?.message || e}` };
+  }
+}
 
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 1) {
@@ -119,6 +253,27 @@ const access = createDeviceAccess({
   ts,
 });
 
+const quota = createDeviceQuota({
+  releaseRoot,
+  repoRoot,
+  defaultMax: Number(process.env.XCAT_TWMS_QUOTA_DEFAULT || 0) || 0,
+  agingDays: Number(process.env.XCAT_TWMS_QUOTA_AGING_DAYS || 0) || 0,
+  lookupCardByPayload: lookupGateCardByPayload,
+  proofSkewSec: Number(process.env.XCAT_TWMS_GATE_PROOF_SKEW_SEC || 0) || 900,
+  logInfo,
+  logWarn,
+  ts,
+});
+
+const clientHistory = createClientHistory({
+  releaseRoot,
+  repoRoot,
+  logInfo,
+  logWarn,
+  ts,
+  keepDays: Number(process.env.XCAT_TWMS_CLIENT_HISTORY_DAYS || 0) || 30,
+});
+
 const logFetch = createLogFetchQueue({
   logInfo,
   logWarn,
@@ -134,6 +289,15 @@ const forceTarget = createForceTargetQueue({
   logInfo,
   ts,
   parseMacList: (v) => access.parseMacList(v),
+});
+
+const updateChannels = createUpdateChannels({
+  releaseRoot,
+  logInfo,
+  logWarn,
+  ts,
+  normalizeUid: (v) => access.normalizeUid(v),
+  normalizeToken: (v) => access.normalizeToken(v),
 });
 
 function headerText(req, name) {
@@ -194,10 +358,21 @@ function clientIdentityFromReq(req) {
   const mapName = decodeCharHeaderText(headerText(req, "x-xcat-map-name"), 64);
   const mapId = /^\d+$/.test(mapIdRaw) ? Number(mapIdRaw) : null;
   const channelId = /^-?\d+$/.test(channelRaw) ? Number(channelRaw) : null;
+  const deviceId = headerText(req, "x-xcat-device-id").slice(0, 64);
+  // 新客户端发派生凭证（整张卡不上网）；老客户端仍发整张卡，两者都认，优先前者。
+  const gateProof = headerText(req, "x-xcat-gate-proof").slice(0, 400);
+  const gateToken = headerText(req, "x-xcat-gate-token").slice(0, 400);
+  const gateClaims =
+    quota.verifyGateProof(gateProof, deviceId) || quota.verifyGateToken(gateToken);
   return {
     machine: headerText(req, "x-xcat-machine").slice(0, 80),
-    deviceId: headerText(req, "x-xcat-device-id").slice(0, 64),
+    deviceId,
     appVersion: headerText(req, "x-xcat-app-version").slice(0, 64),
+    gateToken,
+    gateProof,
+    gateClaims,
+    gateUid: gateClaims ? access.normalizeUid(gateClaims.uid) : "",
+    gateExp: gateClaims ? gateClaims.exp || 0 : 0,
     macs,
     mac: macs[0] ? access.formatMac(macs[0]) : "",
     token,
@@ -334,6 +509,29 @@ function listIpMultiDeviceAlerts({ limit = kIpAlertListCap } = {}) {
   return { alerts: capped, total };
 }
 
+function clientHasIdentity({ machine, deviceId, macs, mac, token }) {
+  return !!(machine || deviceId || (macs && macs.length) || mac || token);
+}
+
+function hydrateCharFromHistory(row) {
+  if (!row || row.charName) return;
+  const prev =
+    clientHistory.get(row.key) ||
+    (row.deviceId ? clientHistory.getByDeviceId(row.deviceId) : null);
+  if (!prev?.charName) return;
+  row.charName = String(prev.charName).slice(0, 48);
+  if (!row.charLevel && prev.charLevel) row.charLevel = prev.charLevel;
+  if (!row.charJobName && prev.charJobName) row.charJobName = String(prev.charJobName).slice(0, 32);
+}
+
+function pruneActiveClients(now = Date.now()) {
+  for (const [k, v] of activeClients) {
+    // 下包 / latest.json 不带头，曾经按 ip: 建过空壳行。那些行没有身份，运维台看起来像「无名氏探活」。
+    const ghost = !clientHasIdentity(v);
+    if (ghost || now - v.lastSeenMs > kClientPruneSec * 1000) activeClients.delete(k);
+  }
+}
+
 function touchClient({
   ip,
   kind,
@@ -346,6 +544,8 @@ function touchClient({
   macs,
   mac,
   token,
+  uid,
+  gateExp,
   charName,
   charLevel,
   charJob,
@@ -360,11 +560,13 @@ function touchClient({
   hasMap,
 }) {
   if (!ip || ip === "unknown") return;
-  const identified = !!(machine || deviceId || (macs && macs.length) || mac || token);
-  const key = identified
-    ? `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || (macs && macs[0]) || mac || token || "na"}`
-    : `ip:${ip}`;
   const now = Date.now();
+  // 没身份的请求（拉 latest.json、下 zip）不算探活：进表只会多出「未识别 / 角色全空」的幽灵行。
+  if (!clientHasIdentity({ machine, deviceId, macs, mac, token })) {
+    pruneActiveClients(now);
+    return;
+  }
+  const key = `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || (macs && macs[0]) || mac || token || "na"}`;
   let row = activeClients.get(key);
   if (!row) {
     row = {
@@ -377,6 +579,8 @@ function touchClient({
       mac: "",
       macs: [],
       token: "",
+      uid: "",
+      gateExp: 0,
       identified: false,
       charName: "",
       charLevel: 0,
@@ -399,6 +603,7 @@ function touchClient({
       geoStatus: "",
     };
     activeClients.set(key, row);
+    hydrateCharFromHistory(row);
   }
   row.ip = ip;
   row.lastSeenMs = now;
@@ -411,6 +616,8 @@ function touchClient({
   if (deviceId) row.deviceId = deviceId;
   if (appVersion) row.appVersion = appVersion;
   if (token) row.token = access.normalizeToken(token);
+  if (uid) row.uid = access.normalizeUid(uid);
+  if (gateExp) row.gateExp = gateExp;
   if (Array.isArray(macs) && macs.length) {
     row.macs = macs.slice(0, 8);
     row.mac = mac || access.formatMac(macs[0]);
@@ -428,6 +635,9 @@ function touchClient({
       row.hasWealthScrolls = true;
       row.wealthScrolls = String(wealthScrolls || "").slice(0, 360);
     }
+  } else {
+    // 重启 / 更新后第一轮探活常不带角色（游戏还没进）。内存快照没了，从落盘历史补回名字。
+    hydrateCharFromHistory(row);
   }
   // 地图/频道同口径：有新值才刷，未进图探活不抹掉上次。
   // mapName 勿在仅带 channel、mapId=0 时清空（否则 OPS 留下旧 mapId + 空名）。
@@ -466,10 +676,10 @@ function touchClient({
     ipGeo.scheduleGeoLookup(ip);
   }
 
-  // prune stale
-  for (const [k, v] of activeClients) {
-    if (now - v.lastSeenMs > kClientPruneSec * 1000) activeClients.delete(k);
-  }
+  // 落历史台账：activeClients 到点就 prune、重启即清空，长期可追溯靠这一份（节流写盘）。
+  clientHistory.touch(row);
+
+  pruneActiveClients(now);
 }
 
 function noteAccessDeny({ ip, machine, deviceId, mac, macs, token, decision }) {
@@ -490,12 +700,12 @@ function noteAccessDeny({ ip, machine, deviceId, mac, macs, token, decision }) {
   recentAccessDenies.unshift(entry);
   if (recentAccessDenies.length > kRecentDenyMax) recentAccessDenies.length = kRecentDenyMax;
 
-  const identified = !!(machine || deviceId || (macs && macs.length) || token);
+  const identified = clientHasIdentity({ machine, deviceId, macs, mac, token });
   const clientKey = identified
     ? `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || (macs && macs[0]) || mac || token || "na"}`
-    : `ip:${ip}`;
-  let row = activeClients.get(clientKey);
-  if (!row) {
+    : "";
+  let row = identified ? activeClients.get(clientKey) : null;
+  if (identified && !row) {
     touchClient({
       ip,
       kind: "update",
@@ -516,6 +726,8 @@ function noteAccessDeny({ ip, machine, deviceId, mac, macs, token, decision }) {
     row.lastDenyMatch = entry.match;
     row.lastAccessAllowed = false;
     row.lastAccessAtMs = now;
+    // 拒绝原因要落历史：事后查「他为什么用不了」全靠这条（内存 row 一小时后就没了）。
+    clientHistory.touch(row);
   }
   logWarn(
     `access deny ip=${entry.ip} match=${entry.match} mode=${entry.mode} machine=${entry.machine || "-"} device=${entry.deviceId || "-"} token=${entry.token ? "yes" : "no"} reason=${entry.reason}`,
@@ -524,10 +736,8 @@ function noteAccessDeny({ ip, machine, deviceId, mac, macs, token, decision }) {
 
 function noteAccessAllow({ ip, machine, deviceId, mac, macs, token }) {
   const now = Date.now();
-  const identified = !!(machine || deviceId || (macs && macs.length) || mac || token);
-  const clientKey = identified
-    ? `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || (macs && macs[0]) || mac || token || "na"}`
-    : `ip:${ip}`;
+  if (!clientHasIdentity({ machine, deviceId, macs, mac, token })) return;
+  const clientKey = `dev:${(machine || "host").toLowerCase()}:${(deviceId || "").toLowerCase() || (macs && macs[0]) || mac || token || "na"}`;
   let row = activeClients.get(clientKey);
   if (!row) {
     // touchClient 通常已在 finish 时创建；此处兜底，避免竞态丢 lastAllow。
@@ -549,6 +759,8 @@ function noteAccessAllow({ ip, machine, deviceId, mac, macs, token }) {
   row.lastAllowAtMs = now;
   row.lastAccessAllowed = true;
   row.lastAccessAtMs = now;
+  // 落历史：租约剩余按 lastAllowAtMs + 64h 估算，这一笔就是「他的租约续到什么时候」。
+  clientHistory.touch(row);
 }
 
 /** 运维台门禁/租约一眼状态（服务端估算，非客户端本地真相）。 */
@@ -584,8 +796,10 @@ function gateViewForRow(row, now, activeSec, banned, allowed, accessMode) {
 
 function listActiveClients(activeSec) {
   const now = Date.now();
+  pruneActiveClients(now);
   const cutoff = now - activeSec * 1000;
   const online = [...activeClients.values()].filter((r) => r.lastSeenMs >= cutoff);
+  for (const row of online) hydrateCharFromHistory(row);
   const byIp = new Map();
   for (const row of online) byIp.set(row.ip, (byIp.get(row.ip) || 0) + 1);
   const accessMode = access.getMode();
@@ -596,12 +810,14 @@ function listActiveClients(activeSec) {
         deviceId: row.deviceId,
         macs: row.macs,
         token: row.token,
+        uid: row.uid,
       });
       const allowed = access.isAllowed({
         machine: row.machine,
         deviceId: row.deviceId,
         macs: row.macs,
         token: row.token,
+        uid: row.uid,
       });
       const gv = gateViewForRow(row, now, activeSec, banned, allowed, accessMode);
       return {
@@ -615,6 +831,8 @@ function listActiveClients(activeSec) {
         mac: row.identified ? row.mac || "" : "",
         macs: row.identified ? row.macs || [] : [],
         token: row.identified ? row.token || "" : "",
+        uid: row.uid || "",
+        gateExp: row.gateExp || 0,
         appVersion: row.appVersion || "",
         charName: row.charName || "",
         charLevel: row.charLevel || 0,
@@ -784,6 +1002,8 @@ function recordRequest({
   macs,
   mac,
   token,
+  uid,
+  gateExp,
   charName,
   charLevel,
   charJob,
@@ -819,6 +1039,8 @@ function recordRequest({
     macs,
     mac,
     token,
+    uid,
+    gateExp,
     charName,
     charLevel,
     charJob,
@@ -868,6 +1090,8 @@ function attachRequestRecorder(req, res, meta) {
       macs: id.macs,
       mac: id.mac,
       token: id.token,
+      uid: id.gateUid,
+      gateExp: id.gateExp,
       charName: id.charName,
       charLevel: id.charLevel,
       charJob: id.charJob,
@@ -924,12 +1148,53 @@ async function handleUpdate(req, res, routedPath) {
   }
   if (routedPath === "/update/access.json") {
     const id = clientIdentityFromReq(req);
-    const decision = access.evaluate({
-      machine: id.machine,
-      deviceId: id.deviceId,
-      macs: id.macs,
-      token: id.token,
-    });
+    // 可信 uid 已在 clientIdentityFromReq 里验好（派生凭证优先，老客户端整张卡回退）：
+    // 按 uid 封禁 + 严格模式 + 台数配额共用；改硬件也改不掉。
+    const gateClaims = id.gateClaims;
+    const gateUid = id.gateUid;
+    const gateJti = gateClaims?.jti || "";
+    let decision;
+    if (access.getStrictToken() && !gateUid) {
+      // 严格模式：缺有效签名 TOKEN（老客户端 / 被 patch 绕过）直接拒。默认关。
+      decision = {
+        allowed: false,
+        mode: access.getMode(),
+        reason: "need signed token",
+        key: "",
+        match: "strict",
+        at: "",
+      };
+    } else if (gateJti && access.isJtiRevoked(gateJti)) {
+      // 卡级吊销：只废这一张卡（泄露/作废），同 uid 的新卡照常放行。
+      // 老卡 payload 无 jti → gateJti 为空，不进这一支，行为与上线前一致。
+      decision = {
+        allowed: false,
+        mode: access.getMode(),
+        reason: "card revoked",
+        key: `jti:${gateJti}`,
+        match: "jti",
+        at: "",
+      };
+    } else {
+      decision = access.evaluate({
+        machine: id.machine,
+        deviceId: id.deviceId,
+        macs: id.macs,
+        token: id.token,
+        uid: gateUid,
+      });
+    }
+    // 台数配额：黑白名单放行后再叠加。gateToken 验签取可信 uid，超额则改判拒。
+    let quotaInfo = null;
+    if (decision.allowed) {
+      const q = quota.evaluate({ claims: gateClaims, deviceId: id.deviceId });
+      if (q.enabled && q.uid) quotaInfo = q;
+      if (q.enabled && !q.allowed) {
+        decision.allowed = false;
+        decision.reason = q.reason || "quota";
+        decision.match = "quota";
+      }
+    }
     if (!decision.allowed) {
       noteAccessDeny({
         ip: clientIp(req),
@@ -972,6 +1237,13 @@ async function handleUpdate(req, res, routedPath) {
       match: decision.match || "",
       at: decision.at || "",
     };
+    // uid 必须在配额之外单独回：客户端靠它判断「这张本地卡服务端认不认」，
+    // 认不出才弹重贴。以前只在 quotaInfo 里带 uid，配额关掉时已激活的人会被误判成没卡。
+    if (gateUid) payload.uid = gateUid;
+    if (quotaInfo) {
+      payload.quotaUsed = quotaInfo.used;
+      payload.quotaMax = quotaInfo.max;
+    }
     if (pending) {
       payload.pendingOp = pending.op;
       payload.pendingId = pending.id;
@@ -983,8 +1255,24 @@ async function handleUpdate(req, res, routedPath) {
     return;
   }
   if (routedPath === "/update/latest.json") {
-    await sendFile(req, res, path.join(releaseRoot, "latest.json"), "application/json; charset=utf-8", {
-      cacheSeconds: 30,
+    const id = clientIdentityFromReq(req);
+    const manifest = await updateChannels.resolveManifest({
+      uid: id.gateUid,
+      token: id.token,
+    });
+    if (!manifest) {
+      sendJson(res, 404, { ok: false, error: "no release manifest" });
+      return;
+    }
+    sendJson(res, 200, {
+      version: manifest.version,
+      buildId: manifest.buildId,
+      name: manifest.name,
+      zipName: manifest.zipName,
+      downloadUrl: manifest.downloadUrl || manifest.zipName,
+      sha256: manifest.sha256,
+      size: manifest.size,
+      channel: manifest.channel,
     });
     return;
   }
@@ -1036,6 +1324,20 @@ async function handleUpdate(req, res, routedPath) {
   }
   const zipName = path.basename(decodeURIComponent(routedPath.slice(prefix.length)));
   if (!zipName.endsWith(".zip") || zipName.includes("..")) {
+    sendJson(res, 404, { ok: false, error: "not found" });
+    return;
+  }
+  const extraZips = [];
+  try {
+    const forced = JSON.parse(await fs.readFile(path.join(releaseRoot, "force-update.json"), "utf8"));
+    if (forced?.zipName) extraZips.push(forced.zipName);
+  } catch {
+    /* no global force */
+  }
+  for (const row of forceTarget.list()) {
+    if (row?.zipName) extraZips.push(row.zipName);
+  }
+  if (!(await updateChannels.zipAllowed(zipName, extraZips))) {
     sendJson(res, 404, { ok: false, error: "not found" });
     return;
   }
@@ -1097,6 +1399,8 @@ async function handleAdmin(req, res, routedPath) {
   if (routedPath === "/admin/shutdown" && req.method === "POST") {
     sendJson(res, 200, { ok: true, shuttingDown: true });
     shuttingDown = true;
+    // 退出前把节流中的历史落盘，别把最后 20s 的在线记录丢掉。
+    void clientHistory.flush();
     setTimeout(() => process.exit(0), 200);
     return;
   }
@@ -1135,6 +1439,7 @@ async function handleAdmin(req, res, routedPath) {
       geoProvider: ipGeo.provider,
       tracked: activeClients.size,
       accessMode: snap.mode,
+      strictToken: snap.strictToken,
       banCount: snap.banCount,
       allowCount: snap.allowCount,
       clients,
@@ -1142,6 +1447,113 @@ async function handleAdmin(req, res, routedPath) {
       ipMultiDeviceAlerts: ipAlerts,
       ipMultiDeviceAlertCount: ipAlertTotal,
       ipMultiDeviceAlertListed: ipAlerts.length,
+    });
+    return;
+  }
+  if (routedPath === "/admin/quota" && req.method === "GET") {
+    sendJson(res, 200, { ok: true, ...quota.snapshot() });
+    return;
+  }
+  if (routedPath === "/admin/update-channels" && req.method === "GET") {
+    sendJson(res, 200, { ok: true, ...(await updateChannels.snapshot()) });
+    return;
+  }
+  if (routedPath === "/admin/update-channels" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const action = String(body?.action || "").trim().toLowerCase();
+    try {
+      if (action === "set-default" || action === "setdefault" || action === "default") {
+        const r = await updateChannels.setDefault(body?.buildId);
+        sendJson(res, 200, { ok: true, action: "set-default", ...r, ...(await updateChannels.snapshot()) });
+        return;
+      }
+      if (action === "set-group" || action === "setgroup" || action === "group") {
+        const r = await updateChannels.setGroup({
+          uid: body?.uid,
+          token: body?.token,
+          buildId: body?.buildId,
+          note: body?.note,
+        });
+        sendJson(res, 200, { ok: true, action: "set-group", ...r, ...(await updateChannels.snapshot()) });
+        return;
+      }
+      if (action === "clear-group" || action === "cleargroup") {
+        const r = await updateChannels.clearGroup({ uid: body?.uid, token: body?.token });
+        sendJson(res, 200, { ok: true, action: "clear-group", ...r, ...(await updateChannels.snapshot()) });
+        return;
+      }
+      sendJson(res, 400, { ok: false, error: "action must be set-default|set-group|clear-group" });
+    } catch (err) {
+      sendJson(res, err?.status || 400, { ok: false, error: err?.message || "update-channels failed" });
+    }
+    return;
+  }
+  if (routedPath === "/admin/gate-sign" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const r = await signGateToken(body?.uid, body?.days, body?.note, body?.by);
+    if (r.ok) logInfo(`gate-sign uid=${r.uid} days=${r.days} exp=${r.exp} id=${r.id}`);
+    else logInfo(`gate-sign failed: ${r.error}`);
+    sendJson(res, r.ok ? 200 : 400, r);
+    return;
+  }
+  if (routedPath === "/admin/cards" && req.method === "GET") {
+    const cards = await listGateCards(500);
+    sendJson(res, 200, { ok: true, count: cards.length, cards });
+    return;
+  }
+  if (routedPath === "/admin/quota" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const action = String(body?.action || "setmax").trim().toLowerCase();
+    if (action === "setmax" || action === "set_max" || action === "max") {
+      const r = await quota.setMax(body?.uid, body?.max);
+      logInfo(`quota setMax uid=${r.uid} max=${r.max}`);
+      sendJson(res, 200, { ok: true, action: "setMax", ...r, ...quota.snapshot() });
+      return;
+    }
+    if (action === "removedevice" || action === "remove_device" || action === "release") {
+      const r = await quota.removeDevice(body?.uid, body?.deviceId);
+      logInfo(`quota removeDevice uid=${r.uid} device=${String(body?.deviceId || "").slice(0, 16)}`);
+      sendJson(res, 200, { ok: true, action: "removeDevice", ...r, ...quota.snapshot() });
+      return;
+    }
+    if (action === "releaseidle" || action === "release_idle") {
+      const r = await quota.releaseIdle(body?.uid, body?.days);
+      logInfo(
+        `quota releaseIdle uid=${r.uid || "*"} days=${r.days} released=${r.released}`,
+      );
+      sendJson(res, 200, { ok: true, action: "releaseIdle", ...r, ...quota.snapshot() });
+      return;
+    }
+    sendJson(res, 400, { ok: false, error: "unknown action" });
+    return;
+  }
+  if (routedPath === "/admin/client-history" && req.method === "GET") {
+    let days = 30;
+    let limit = 500;
+    try {
+      const u = new URL(req.url, "http://127.0.0.1");
+      const d = Number(u.searchParams.get("days"));
+      if (Number.isFinite(d) && d > 0) days = Math.min(3650, Math.floor(d));
+      const l = Number(u.searchParams.get("limit"));
+      if (Number.isFinite(l) && l > 0) limit = Math.min(5000, Math.floor(l));
+    } catch {
+      /* 用默认值 */
+    }
+    // 标注哪些此刻还在线：历史是落盘的，在线与否得问内存里的 activeClients。
+    const onlineCutoff = Date.now() - kClientActiveDefaultSec * 1000;
+    const onlineKeys = new Set();
+    for (const row of activeClients.values()) {
+      if (row.lastSeenMs >= onlineCutoff) onlineKeys.add(row.key);
+    }
+    const list = clientHistory.list({ days, limit, onlineKeys });
+    sendJson(res, 200, {
+      ok: true,
+      days,
+      count: list.length,
+      total: clientHistory.count(),
+      leaseTtlHours: 64,
+      path: clientHistory.path(),
+      clients: list,
     });
     return;
   }
@@ -1155,6 +1567,8 @@ async function handleAdmin(req, res, routedPath) {
       allowCount: snap.allowCount,
       bans: snap.bans,
       allows: snap.allows,
+      revokedJtiCount: snap.revokedJtiCount,
+      revokedJti: snap.revokedJti,
       path: snap.path,
     });
     return;
@@ -1167,6 +1581,7 @@ async function handleAdmin(req, res, routedPath) {
       deviceId: body?.deviceId,
       mac: body?.mac,
       token: body?.token,
+      uid: body?.uid,
       key: body?.key,
       reason: body?.reason,
       by: body?.bannedBy || body?.allowedBy || body?.by || "ops",
@@ -1175,6 +1590,14 @@ async function handleAdmin(req, res, routedPath) {
       const next = await access.setMode(body?.mode);
       logInfo(`device access mode -> ${next}`);
       sendJson(res, 200, { ok: true, action: "setMode", mode: next, ...access.snapshot() });
+      return;
+    }
+    if (action === "setstrict" || action === "set_strict" || action === "strict") {
+      const next = await access.setStrictToken(
+        body?.strict ?? body?.strictToken ?? body?.enabled,
+      );
+      logInfo(`device access strictToken -> ${next}`);
+      sendJson(res, 200, { ok: true, action: "setStrict", strictToken: next, ...access.snapshot() });
       return;
     }
     if (action === "ban") {
@@ -1204,6 +1627,31 @@ async function handleAdmin(req, res, routedPath) {
       sendJson(res, 200, { ok: true, action: "allow", allow: row, ...access.snapshot() });
       return;
     }
+    if (action === "revokejti" || action === "revoke_card" || action === "revokecard") {
+      const row = access.revokeJti({
+        jti: body?.jti ?? body?.id,
+        uid: body?.uid,
+        reason: body?.reason,
+        by: body?.by,
+      });
+      await access.persist();
+      logInfo(`gate card revoked jti=${row.jti} uid=${row.uid || "-"}`);
+      sendJson(res, 200, { ok: true, action: "revokeJti", card: row, ...access.snapshot() });
+      return;
+    }
+    if (action === "unrevokejti" || action === "unrevoke_card" || action === "unrevokecard") {
+      const existed = access.unrevokeJti({ jti: body?.jti ?? body?.id });
+      await access.persist();
+      logInfo(`gate card unrevoked jti=${body?.jti || body?.id || ""} found=${!!existed}`);
+      sendJson(res, 200, {
+        ok: true,
+        action: "unrevokeJti",
+        removed: !!existed,
+        card: existed,
+        ...access.snapshot(),
+      });
+      return;
+    }
     if (action === "unallow" || action === "deny-allow" || action === "revoke") {
       const existed = access.unallow(identity);
       await access.persist();
@@ -1219,7 +1667,7 @@ async function handleAdmin(req, res, routedPath) {
     }
     sendJson(res, 400, {
       ok: false,
-      error: "action must be ban|unban|allow|unallow|setMode",
+      error: "action must be ban|unban|allow|unallow|setMode|setStrict|revokeJti|unrevokeJti",
     });
     return;
   }
@@ -1308,7 +1756,19 @@ async function handleAdmin(req, res, routedPath) {
         let buildId = body?.buildId;
         let zipName = body?.zipName;
         let sha256 = body?.sha256;
-        // 未带包信息时默认用当前 latest.json
+        // 未带包信息：先走该身份的允许通道，再回落 latest.json
+        if (!zipName || !sha256 || !buildId) {
+          const ch = await updateChannels.resolveManifest({
+            uid: body?.uid,
+            token: body?.token,
+          });
+          if (ch) {
+            version = version || ch.version;
+            buildId = buildId || ch.buildId;
+            zipName = zipName || ch.zipName;
+            sha256 = sha256 || ch.sha256;
+          }
+        }
         if (!zipName || !sha256 || !buildId) {
           const latestPath = path.join(releaseRoot, "latest.json");
           const latest = JSON.parse(await fs.readFile(latestPath, "utf8"));
@@ -1454,12 +1914,14 @@ server.keepAliveTimeout = 10_000;
 process.on("SIGINT", () => {
   shuttingDown = true;
   logInfo("SIGINT, closing");
+  void clientHistory.flush();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500);
 });
 process.on("SIGTERM", () => {
   shuttingDown = true;
   logInfo("SIGTERM, closing");
+  void clientHistory.flush();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500);
 });
@@ -1468,6 +1930,10 @@ await fs.mkdir(releaseRoot, { recursive: true });
 await fs.mkdir(path.dirname(accessLogPath), { recursive: true });
 await logUpload.ensureDirs();
 await access.load();
+await loadGateCardIndex();
+await quota.load();
+await clientHistory.load();
+await updateChannels.load();
 
 server.listen(port, host, () => {
   logInfo(`xcat twms update server v${SERVER_VERSION} listening on http://${host}:${port}`);
@@ -1485,6 +1951,7 @@ server.listen(port, host, () => {
   logInfo(`admin: POST ${basePath}/admin/shutdown (loopback only)`);
   logInfo(`admin: POST ${basePath}/admin/log-fetch (enqueue light|full)`);
   logInfo(`admin: POST ${basePath}/admin/force-target (per-device force update)`);
+  logInfo(`admin: GET/POST ${basePath}/admin/update-channels (allowed update version)`);
 });
 
 server.on("error", (err) => {

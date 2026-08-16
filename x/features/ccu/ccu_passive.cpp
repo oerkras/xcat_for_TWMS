@@ -1,5 +1,5 @@
 // TWMS Classic CCU — latch 当前所选分区在线人数（login idle 或 auto_enter 喂数）。
-// 不在本模块 FindAll；换分区可覆盖快照，同分区不重复写。
+// 不在本模块 FindAll；换分区可覆盖快照，同分区默认不重复写（软重连 allowRefresh 例外）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -84,31 +84,34 @@ void LogLine(const char* fmt, ...) {
     x::runtime::LogI("CCU", "%s", body);
 }
 
-// worldId：0 = 未知分区（仅首次可写）；非 0 时同分区拒覆盖，换分区允许更新。
-bool ApplyTotals(long long sum, int count, const char* src, int32_t worldId) {
+// worldId：0 = 未知分区（仅首次可写）；非 0 时同分区默认拒覆盖，allowRefresh 时同区可刷新。
+bool ApplyTotals(long long sum, int count, const char* src, int32_t worldId, bool allowRefresh) {
     if (count <= 0 || sum < 0) return false;
     const DWORD now = GetTickCount();
     EnsureCs();
     EnterCriticalSection(&gStoreCs);
     const bool had = gDone && gStore.sum >= 0;
     if (had) {
-        if (worldId != 0 && gStore.worldId != 0 && worldId == gStore.worldId) {
-            LeaveCriticalSection(&gStoreCs);
-            return false;  // 同分区已采过
-        }
         if (worldId == 0) {
             LeaveCriticalSection(&gStoreCs);
             return false;  // 无分区 id 时不覆盖已有快照
         }
+        if (gStore.worldId != 0 && worldId == gStore.worldId && !allowRefresh) {
+            LeaveCriticalSection(&gStoreCs);
+            return false;  // 同分区已采过
+        }
     }
     const int32_t prevWorld = gStore.worldId;
+    const long long prevSum = gStore.sum;
     const bool worldChanged = (had && worldId != 0 && prevWorld != 0 && prevWorld != worldId);
+    const bool sameWorldRefresh =
+        (had && allowRefresh && worldId != 0 && prevWorld == worldId);
     gStore.sum = sum;
     gStore.count = count;
     gStore.worldId = worldId;
     gStore.updateTick = now;
     gDone = true;
-    // 换分区：旧分区的拒收标记对新 ci 无意义。
+    // 换分区：旧分区的拒收标记对新 ci 无意义。同区刷新保留拒收。
     if (worldChanged) {
         for (int i = 0; i < kFillSlots; ++i) gStore.fill[i].rejected = 0;
     }
@@ -116,6 +119,9 @@ bool ApplyTotals(long long sum, int count, const char* src, int32_t worldId) {
     if (worldChanged) {
         LogLine("频道快照[%s]: 换分区 %d→%d 在线=%lld channels=%d", src ? src : "?", prevWorld,
                 worldId, sum, count);
+    } else if (sameWorldRefresh) {
+        LogLine("频道快照[%s]: 刷新 在线=%lld (was %lld) channels=%d worldId=%d",
+                src ? src : "?", sum, prevSum, count, worldId);
     } else {
         LogLine("频道快照[%s]: 分区在线=%lld channels=%d worldId=%d", src ? src : "?", sum, count,
                 worldId);
@@ -134,21 +140,22 @@ bool AlreadyLatched() {
 
 }  // namespace
 
-bool Ccu_ShouldSkipFeed(int32_t worldId) {
+bool Ccu_ShouldSkipFeed(int32_t worldId, bool allowRefresh) {
     EnsureCs();
     EnterCriticalSection(&gStoreCs);
     const bool had = gDone && gStore.sum >= 0;
     const int32_t latched = gStore.worldId;
     LeaveCriticalSection(&gStoreCs);
     if (!had) return false;
-    if (worldId == 0) return true;          // 无 id：不能换区/升级，防空刷
-    if (latched == worldId) return true;    // 同分区
-    return false;                           // 换区或 0→真 id 升级
+    if (worldId == 0) return true;  // 无 id：不能换区/升级，防空刷
+    if (latched == worldId && !allowRefresh) return true;  // 同分区默认 latch
+    return false;                                          // 换区、0→真 id，或软重连刷新
 }
 
-bool Ccu_NotifySnapshot(long long sum, int channelCount, const char* src, int32_t worldId) {
+bool Ccu_NotifySnapshot(long long sum, int channelCount, const char* src, int32_t worldId,
+                        bool allowRefresh) {
     OpenLog();
-    return ApplyTotals(sum, channelCount, src && src[0] ? src : "feed", worldId);
+    return ApplyTotals(sum, channelCount, src && src[0] ? src : "feed", worldId, allowRefresh);
 }
 
 void Ccu_NotifyFillTable(const ChannelFillRow* rows, int n, const char* src, int32_t worldId) {
