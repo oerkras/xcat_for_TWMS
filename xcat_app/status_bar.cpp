@@ -133,13 +133,13 @@ void DrawSoftReloginClock(const LaunchUiState& ui) {
         return;
     }
     if (!st.softReloginOn) {
-        ImGui::TextDisabled("软重连 关");
+        ImGui::TextDisabled("主动软重连 关");
         return;
     }
     if (st.softReloginRemainMs == 0xFFFFFFFFu) {
-        ImGui::TextDisabled("软重连 --");
+        ImGui::TextDisabled("主动软重连 --");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("已勾选定时软重连：进图后开始倒计时");
+            ImGui::SetTooltip("已勾选主动软重连：进图后开始倒计时");
         return;
     }
 
@@ -157,13 +157,13 @@ void DrawSoftReloginClock(const LaunchUiState& ui) {
     const unsigned sec = remainMs ? (remainMs + 999u) / 1000u : 0u;
     char buf[48]{};
     if (st.softReloginPaused) {
-        snprintf(buf, sizeof(buf), "软重连 暂停 %us", sec);
+        snprintf(buf, sizeof(buf), "主动软重连 暂停 %us", sec);
         ImGui::TextColored(StatusHintBlue(), "%s", buf);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("软重连进行中 / 落地静默：倒计时冻结");
+            ImGui::SetTooltip("主动软重连进行中 / 落地静默：倒计时冻结");
         return;
     }
-    snprintf(buf, sizeof(buf), "软重连 %us", sec);
+    snprintf(buf, sizeof(buf), "主动软重连 %us", sec);
     ImGui::TextUnformatted(buf);
 }
 
@@ -360,7 +360,7 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         ImGui::SameLine(0.f, ui::Gap());
         DrawCcuText(ui);
 
-        // —— 4/5 定时软重连（单独一行，勿跟守护/在线挤）——
+        // —— 4/5 主动软重连（单独一行，勿跟守护/在线挤）——
         BeginStatusRow(origin, rowH, 3);
         ImGui::AlignTextToFramePadding();
         DrawSoftReloginClock(ui);

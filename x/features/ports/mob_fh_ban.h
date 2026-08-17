@@ -33,6 +33,8 @@ void SetPlayerLead(float vx, float vy);
 // 聚拢偏移：吸怪 TAB 自定义落点。custom 关时用同一组默认（X=29，Y=9）。
 // X 有符号：正=朝向面前，负=背后。Y = 相对人 AbsPos（更大 Y = 更高）。不贴台。
 void SetGatherStandOff(bool custom, int32_t x, int32_t y);
+void SetAimJitterPx(float px);
+float AimJitterPx();
 void QueryGatherStandOff(float* outX, float* outY);
 void SetMaxArmed(int n);
 void SetArmTimeoutMs(unsigned ms);

@@ -1630,8 +1630,15 @@ void RequestSave() { EnqueueCmd("save"); }
 bool IsFeatureEnabled() { return kEnabled; }
 
 bool IsActive() {
+    // 排队中的 goto 也算在途：遇人/换频必须让路，不能等 worker 50ms 才置 Goto。
+    std::string queued;
+    {
+        std::lock_guard<std::mutex> lock(gCmdMu);
+        queued = gPendingCmd;
+    }
+    if (queued.rfind("goto", 0) == 0) return true;
     std::lock_guard<std::mutex> lock(gMu);
-    return gMode != Mode::Idle;
+    return gMode != Mode::Idle || !gPendingGoto.empty();
 }
 
 bool QuerySnapshot(Snapshot& out) {

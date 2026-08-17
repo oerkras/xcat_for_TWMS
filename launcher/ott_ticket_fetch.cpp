@@ -391,6 +391,9 @@ bool TicketFetchLooksFatal(const TicketFetchResult& r) {
     if (r.message.find("baseUrl") != std::string::npos) return true;
     if (r.message.find("WinHttpOpen") != std::string::npos) return true;
     if (r.message.find("WinHttpOpenRequest") != std::string::npos) return true;
+    // BIN 22:21：OTT 已被官网拉游戏用掉 → 鎖定。再重试只会空转、耽误 cmdline 接管。
+    if (r.message.find("鎖定") != std::string::npos) return true;
+    if (r.message.find("锁定") != std::string::npos) return true;
     return false;
 }
 

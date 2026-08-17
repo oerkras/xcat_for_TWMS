@@ -652,8 +652,7 @@ HttpLoginResult FetchTicketFromOttOrFail(const std::wstring& ott, const HttpLogi
         return out;
     }
     Log(log, std::wstring(kLogTag) + L" GetOneTimeWebInfo 仍失败 http=" +
-                 std::to_wstring(fr.httpStatus) + L" apiCode=" + std::to_wstring(fr.apiCode) +
-                 L"，结束本轮并干净重开 Galaxy 换新 OTT");
+                 std::to_wstring(fr.httpStatus) + L" apiCode=" + std::to_wstring(fr.apiCode));
     return Fail(HttpLoginError::Protocol, fr.message.empty() ? "GetOneTimeWebInfo 失败" : fr.message);
 }
 
@@ -781,6 +780,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     DWORD lastNickClickAt = 0;
     DWORD lastContinueClickAt = 0;
     DWORD resultOrMainSeenAt = 0;  // 首次到 result/Main：给官网 JS 兑票拉 NGM 的宽限
+    DWORD mainTicketOttSeenAt = 0; // 地址栏出现 Main?OTT= 才开始等官网拉游戏（不要从 result 页起算）
     bool ottHttpTried = false;     // 地址栏已有 ticket OTT 时改走 GetOneTimeWebInfo
     int resultReloadCount = 0;     // 卡在 Galaxy result 时 F5 重跑回跳
     DWORD lastResultReloadAt = 0;
@@ -1345,6 +1345,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 const std::wstring ottOnUrl = ExtractOttToken(ottSrc);
                 const bool haveTicketOtt =
                     HttpIsTicketOtt(ottOnUrl) && !IsGalaxyLoginInitUrl(ottSrc);
+                if (haveTicketOtt && !mainTicketOttSeenAt) mainTicketOttSeenAt = now;
                 const bool stuckResult = UrlStuckOnGalaxyResult(ottSrc);
                 const bool reloadGapOk =
                     lastResultReloadAt && (now - lastResultReloadAt) >= kResultReloadGapMs;
@@ -1375,21 +1376,43 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                     }
                 }
 
-                if (!ottHttpTried && !sawNgmHint && haveTicketOtt && resultOrMainSeenAt &&
-                    (now - resultOrMainSeenAt) >= kOfficialLaunchGraceMs) {
+                // BIN 22:21：result 页起算 3s 就 GetOneTimeWebInfo，和官网抢同一条 OTT
+                // → apiCode=-1 帳號已被鎖定，游戏其实已经起来，UIA 还在浏览器阶段干净重开。
+                // Main?OTT= 后先让官网 JS 拉 NGM/经典版；HTTP 只是官网没拉起来时的退路。
+                constexpr DWORD kWaitOfficialAfterOttMs = 15000;
+                if (!ottHttpTried && !sawNgmHint && haveTicketOtt && mainTicketOttSeenAt &&
+                    (now - mainTicketOttSeenAt) >= kWaitOfficialAfterOttMs) {
+                    {
+                        auto harvested = tryHarvest();
+                        if (harvested.ok && harvested.ticketFilled) {
+                            SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                            root->Release();
+                            return harvested;
+                        }
+                    }
                     ottHttpTried = true;
                     Log(log, std::wstring(kLogTag) +
-                                 L" 官网宽限内未拉起经典版，改走 GetOneTimeWebInfo 重试换票"
-                                 L"（地址栏已有 OTT）…");
+                                 L" 官网未拉起经典版，改走 GetOneTimeWebInfo 换票"
+                                 L"（地址栏已有 OTT，已等" +
+                                 std::to_wstring(now - mainTicketOttSeenAt) + L"ms）…");
                     auto fetched = FetchTicketFromOttOrFail(ottOnUrl, log, "getonetimewebinfo-retry");
                     if (fetched.ok && fetched.ticketFilled) {
                         SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
                         root->Release();
                         return fetched;
                     }
-                    SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
-                    root->Release();
-                    return fetched;
+                    {
+                        auto harvested = tryHarvest();
+                        if (harvested.ok && harvested.ticketFilled) {
+                            Log(log, std::wstring(kLogTag) +
+                                         L" GetOneTimeWebInfo 失败，但已从经典版 cmdline 接管票");
+                            SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                            root->Release();
+                            return harvested;
+                        }
+                    }
+                    Log(log, std::wstring(kLogTag) +
+                                 L" GetOneTimeWebInfo 失败，继续等官网拉起经典版（不干净重开）");
                 }
                 if (now - lastStageLog > 8000) {
                     lastStageLog = now;

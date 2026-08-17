@@ -1,7 +1,6 @@
-// Classic TWMS — 位移端口：产品统一走 Impact（F5/F6）；fill+Doing 已失效。
+// Classic TWMS — 位移端口：Impact（F5 空中贴怪 / F6）+ fill+Doing（F5 瞬移找怪）。
 // Impact：NockBack / SetImpactNext / ImpactHop / ImpactImpulseToward（Attr=2）。
-// TeleportNativeSkillCall / TryDoingTeleport：入口硬拒，禁止再接入。
-// Doing 绑桩代码暂留（EnsureBound 仍解析 RVA，供诊断灯）；不得再当产品扳机。
+// TeleportNativeSkillCall：手填 Teleport + Mp + 官方 TryDoingTeleport。
 // IDB imagebase 见 Dumps/runtime/GameAssembly.dll。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -840,11 +839,32 @@ void NativeTeleportJobFn(void* user) {
         }
         if (job->snapStand) {
             float sx = tx, sy = ty;
-            uint32_t sfh = 0;
-            if (foothold_path::SnapStandAt(tx, ty, &sx, &sy, &sfh)) {
-                tx = sx;
-                ty = sy;
-                if (sfh != 0) fh = sfh;
+            if (fh != 0) {
+                // 钉死目标台。禁止再 SnapStandAt（默认 preferFlat=false）换邻段：
+                // EstimateLand 已 preferFlat 贴台；二次 Snap 会把人甩到邻段/空中。
+                // BIN 00:03 combat：want (115,50) fh=568(span=17) → Ap (136,47)
+                // curFh=0 → AbsPos Y 减小掉落 → skate_toxic。
+                if (foothold_path::SnapOnFh(fh, tx, &sx, &sy)) {
+                    if (sx != tx || sy != ty) {
+                        x::runtime::LogI("Teleport",
+                                         "snap_on_fh fh=%u (%.0f,%.0f)→(%.0f,%.0f)",
+                                         (unsigned)fh, tx, ty, sx, sy);
+                    }
+                    tx = sx;
+                    ty = sy;
+                } else {
+                    x::runtime::LogW("Teleport",
+                                     "snap_on_fh miss fh=%u keep land=(%.0f,%.0f)",
+                                     (unsigned)fh, tx, ty);
+                }
+            } else {
+                uint32_t sfh = 0;
+                if (foothold_path::SnapStandAt(tx, ty, &sx, &sy, &sfh,
+                                               /*preferFlat=*/true)) {
+                    tx = sx;
+                    ty = sy;
+                    if (sfh != 0) fh = sfh;
+                }
             }
         }
     }
@@ -915,20 +935,146 @@ uint32_t NativeCooldownRemainingMs() {
 }
 
 bool TeleportNativeSkillCall() {
-    // 产品已统一 Impact（F5/F6）；fill+Doing 失效。
-    x::runtime::LogWThrottled(91, 2000, "Teleport",
-                              "TeleportNativeSkillCall refused (fill+Doing retired; use Impact)");
-    return false;
+    if (action_gate::IsTeleportForbidden()) {
+        x::runtime::LogWThrottled(77, 500, "Teleport", "native short reject skill_prepare_or_busy");
+        return false;
+    }
+    if (!world::IsInMapScene() || !world::IsPlayReady()) {
+        x::runtime::LogW("Teleport", "native short reject not_play_ready scene=%d",
+                         static_cast<int>(world::GetSceneState()));
+        return false;
+    }
+    {
+        char why[48]{};
+        if (!CheckPhysicsReadyUnlocked(/*requireFh=*/true, why, sizeof(why))) {
+            x::runtime::LogW("Teleport", "native short reject phys=%s", why[0] ? why : "?");
+            return false;
+        }
+    }
+    if (!BindFns() || !gDoing) {
+        x::runtime::LogW("Teleport", "native bind fail Doing=%p", gDoing);
+        return false;
+    }
+
+    const DWORD now = GetTickCount();
+    const DWORD cd = gNativeCdMs.load(std::memory_order_acquire);
+    if (gLastNativeMs && now - gLastNativeMs < cd) {
+        x::runtime::LogW("Teleport", "native self-cd remain=%ums", cd - (now - gLastNativeMs));
+        return false;
+    }
+
+    NativeJob job{};
+    job.overrideLand = false;
+    if (runtime::main_thread::IsOnPumpThread()) {
+        NativeTeleportJobFn(&job);
+    } else {
+        if (!runtime::main_thread::Ensure()) {
+            x::runtime::LogW("Teleport", "native main pump missing");
+            return false;
+        }
+        if (!runtime::main_thread::InvokeAndWait(&NativeTeleportJobFn, &job, kJobWaitMs,
+                                                runtime::main_thread::JobPrio::High)) {
+            x::runtime::LogW("Teleport", "native main-thread timeout");
+            return false;
+        }
+    }
+    if (!job.ok) {
+        x::runtime::LogW("Teleport", "native fail=%s", job.fail[0] ? job.fail : "?");
+        return false;
+    }
+    MarkNativeOk(now);
+    x::runtime::LogI("Teleport", "native ok tag=%s land=(%.0f,%.0f) fh=%u", job.fail, job.landX,
+                     job.landY, (unsigned)job.plantFhId);
+    return true;
 }
 
-bool TeleportNativeSkillCall(float landX, float landY, uint32_t plantFhId, bool snapStand) {
-    (void)landX;
-    (void)landY;
-    (void)plantFhId;
-    (void)snapStand;
-    x::runtime::LogWThrottled(92, 2000, "Teleport",
-                              "TeleportNativeSkillCall(land) refused (fill+Doing retired; use Impact)");
-    return false;
+bool TeleportNativeSkillCall(float landX, float landY, uint32_t plantFhId, bool snapStand,
+                             float* outLandX, float* outLandY, uint32_t* outFhId) {
+    if (!std::isfinite(landX) || !std::isfinite(landY)) {
+        x::runtime::LogW("Teleport", "native land reject non-finite");
+        return false;
+    }
+    if (std::fabs(landX) < 8.f && std::fabs(landY) < 8.f) {
+        x::runtime::LogW("Teleport", "native land reject origin land=(%.0f,%.0f) fh=%u", landX,
+                         landY, (unsigned)plantFhId);
+        return false;
+    }
+    // 贴地路径拒 |x|<8（分段曾落到 to=(0,y)，Ap 随后归零）。点飞 snapStand=false 不卡。
+    if (snapStand && std::fabs(landX) < 8.f) {
+        x::runtime::LogW("Teleport", "native land reject axis_x land=(%.0f,%.0f) fh=%u", landX,
+                         landY, (unsigned)plantFhId);
+        return false;
+    }
+    // 贴地 + 已种 fh → margin=0（24px 内缩会误杀外沿台，赶路 TELEPORT_FAIL）。
+    if (snapStand) {
+        const int margin = plantFhId != 0 ? 0 : map_bounds::kLandMarginPx;
+        if (!map_bounds::PointInPlayBounds(landX, landY, /*mapId=*/0, margin)) {
+            x::runtime::LogW("Teleport",
+                             "native land reject out_of_bounds land=(%.0f,%.0f) fh=%u margin=%d",
+                             landX, landY, (unsigned)plantFhId, margin);
+            return false;
+        }
+    }
+    if (action_gate::IsTeleportForbidden()) {
+        x::runtime::LogWThrottled(77, 500, "Teleport", "native reject skill_prepare_or_busy");
+        return false;
+    }
+    if (!world::IsInMapScene() || !world::IsPlayReady()) {
+        x::runtime::LogW("Teleport", "native reject not_play_ready scene=%d",
+                         static_cast<int>(world::GetSceneState()));
+        return false;
+    }
+    {
+        char why[48]{};
+        if (!CheckPhysicsReadyUnlocked(/*requireFh=*/snapStand, why, sizeof(why))) {
+            x::runtime::LogW("Teleport", "native reject phys=%s", why[0] ? why : "?");
+            return false;
+        }
+    }
+    if (!BindFns() || !gDoing) {
+        x::runtime::LogW("Teleport", "native bind fail Doing=%p", gDoing);
+        return false;
+    }
+
+    const DWORD now = GetTickCount();
+    const DWORD cd = gNativeCdMs.load(std::memory_order_acquire);
+    if (gLastNativeMs && now - gLastNativeMs < cd) {
+        x::runtime::LogW("Teleport", "native self-cd remain=%ums", cd - (now - gLastNativeMs));
+        return false;
+    }
+
+    NativeJob job{};
+    job.overrideLand = true;
+    job.snapStand = snapStand;
+    job.landX = landX;
+    job.landY = landY;
+    job.plantFhId = plantFhId;
+    if (runtime::main_thread::IsOnPumpThread()) {
+        NativeTeleportJobFn(&job);
+    } else {
+        if (!runtime::main_thread::Ensure()) {
+            x::runtime::LogW("Teleport", "native main pump missing");
+            return false;
+        }
+        if (!runtime::main_thread::InvokeAndWait(&NativeTeleportJobFn, &job, kJobWaitMs,
+                                                runtime::main_thread::JobPrio::High)) {
+            x::runtime::LogW("Teleport", "native main-thread timeout");
+            return false;
+        }
+    }
+    if (!job.ok) {
+        x::runtime::LogW("Teleport", "native fail=%s land=(%.0f,%.0f) fh=%u snap=%d",
+                         job.fail[0] ? job.fail : "?", landX, landY, (unsigned)plantFhId,
+                         snapStand ? 1 : 0);
+        return false;
+    }
+    MarkNativeOk(now);
+    if (outLandX) *outLandX = job.landX;
+    if (outLandY) *outLandY = job.landY;
+    if (outFhId) *outFhId = job.plantFhId;
+    x::runtime::LogI("Teleport", "native ok tag=%s land=(%.0f,%.0f) fh=%u snap=%d", job.fail,
+                     job.landX, job.landY, (unsigned)job.plantFhId, snapStand ? 1 : 0);
+    return true;
 }
 
 bool IsPostTeleportQuiet(uint32_t quietMs) {

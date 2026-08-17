@@ -5,6 +5,7 @@
 #include "soft_login_probe.h"
 
 #include "../auto_enter/auto_enter.h"
+#include "../channel_hop/channel_hop.h"
 #include "../galaxy_token_probe/galaxy_token_probe.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../notify/notify.h"
@@ -71,7 +72,7 @@ constexpr int kEmptyHallConnectWaitRounds = 40;  // ~10s @ kConnectWaitMs
 constexpr int kDiscPollFailRounds = 4;
 constexpr DWORD kWaitDiscAfterCloseMs = 4000;
 constexpr int kEmptyHallSoftCycleMax = 3;  // 连续空大厅满额放 hold → 守护干净重拉
-constexpr int kCharSelectStuckMax = 2;  // WaitCharSelect 超时两次 → CloseSession 再连；已拆过则 Finish(2)
+constexpr int kCharSelectStuckMax = 2;  // avatars>0 超时两次 → CloseSession；avatars=0 直接 Finish(2)
 // 空大厅 CloseSession：默认关。仅调试「真·书页死锁且确认非登录竞态」时可临时开。
 constexpr bool kAllowEmptyHallCloseSession = false;
 constexpr DWORD kReenterPollMs = 350;
@@ -281,6 +282,9 @@ constexpr DWORD kMinHoldMs = 2000;
 // BIN 8cab31：8s 确认叠在 12s 空大厅等待上，角色早已挂台 curFh=47 才弹「软重连成功」。
 // 守护误杀根因是 hold 只闪 13ms（kMinHoldMs=2s 已盖住），不是需要再盯 8s。
 constexpr DWORD kInMapRecoverConfirmMs = 2000;
+// 真断线 + MapScene 残留：必须先出图再 ConnectLogin / 进大厅。BIN 00:14:59
+// curFh=307 + Disconnected 立刻 login_ui_ready → 叠登「已登出登入的帳號」+ avatars=0。
+constexpr DWORD kLeaveMapBeforeConnectMs = 10000;
 // 热重载 / 选角会闪一拍 !inMap；立刻清钟会让 cycle_begin 刚起的确认被下一轮重置，
 // 再空耗 kHallReadyWaitMs（BIN 8cab31：04:43:01 起表 → 04:43:09 !inMap 清钟 → 12s hall）。
 constexpr DWORD kInMapRecoverDropGraceMs = 500;
@@ -2042,7 +2046,7 @@ void Finish(unsigned result, const char* line, bool suppressNotify = false) {
 // 若仍走 already_in_map → hold 仅十余 ms → 守护看不到 hold、吞不了 disconnectSeq → 干净重拉杀进程。
 // 真断线 why 禁止只凭场景判「已在图成功」；场景残留时返回 -1（勿硬拆），已离开图返回 0（走重连）。
 // 但残留与「游戏自己恢复了」必须能分开：后者由 InMapRecoverConfirmed 给出口
-//（playReady+挂台+Connected 稳住 8s），否则 connect-wait 会空耗 160 轮 × 10 cycle
+//（playReady+挂台+Connected 稳住 2s），否则 connect-wait 会空耗 160 轮 × 10 cycle
 // ≈ 十分钟 hold 停打怪，最后 Finish(2) 把好端端在图里的客户端交给守护杀掉。
 bool WhyStringNeedsRealReconnect(const char* why) {
     if (!why || !why[0]) return false;
@@ -2051,7 +2055,9 @@ bool WhyStringNeedsRealReconnect(const char* why) {
            std::strcmp(why, "dialog_linger") == 0 ||
            std::strcmp(why, "nm_gone_inmap") == 0 || std::strcmp(why, "inbound_dead_inmap") == 0 ||
            std::strcmp(why, "mob_gather_timer") == 0 ||
-           std::strcmp(why, "mob_gather_clear") == 0;
+           std::strcmp(why, "hangup_timer") == 0 ||
+           std::strcmp(why, "mob_gather_clear") == 0 ||
+           std::strncmp(why, "channel_hop", 11) == 0;
 }
 
 std::atomic<DWORD> gLastRefuseLogMs{0};
@@ -2262,6 +2268,39 @@ bool WaitInMapRecoverIfPending(const char* tag) {
     return false;
 }
 
+// 1=已 Finish 成功（图内自愈）；0=已出图，允许 ConnectLogin；-1=仍图内超时，禁止叠登。
+int WaitLeaveMapOrRecover(const char* tag) {
+    if (!gWhyNeedsReconnect.load(std::memory_order_acquire)) return 0;
+    const DWORD deadline = GetTickCount() + kLeaveMapBeforeConnectMs;
+    bool logged = false;
+    while (!gStop.load()) {
+        const int im = SoftProbeInMapOrFinish(tag);
+        if (im == 1) return 1;
+        if (im == 0) {
+            if (logged) {
+                LogLine("leave_map ok tag=%s — ConnectLogin allowed", tag ? tag : "?");
+                KickLogLine("leave_map ok tag=%s", tag ? tag : "?");
+            }
+            return 0;
+        }
+        if (WaitInMapRecoverIfPending(tag)) return 1;
+        if (!logged) {
+            logged = true;
+            LogLine("leave_map wait tag=%s max=%ums — no ConnectLogin while MapScene linger",
+                    tag ? tag : "?", static_cast<unsigned>(kLeaveMapBeforeConnectMs));
+            KickLogLine("leave_map wait tag=%s", tag ? tag : "?");
+        }
+        if (static_cast<int>(deadline - GetTickCount()) <= 0) {
+            LogLine("leave_map timeout tag=%s — skip ConnectLogin (avoid 叠登)",
+                    tag ? tag : "?");
+            KickLogLine("leave_map timeout tag=%s", tag ? tag : "?");
+            return -1;
+        }
+        Sleep(200);
+    }
+    return -1;
+}
+
 // 等 Unity drain-host 心跳；超时返回 false（hold 仍由调用方决定）。
 bool WaitPumpAlive(DWORD waitMs, const char* tag) {
     const DWORD deadline = GetTickCount() + waitMs;
@@ -2312,9 +2351,19 @@ int WaitHallPickReady(DWORD waitMs) {
                 lastReady = hall.ready;
             }
             if (hall.ready) {
-                KickLogLine("hall_ready ok items=%d selWorld=%d", hall.worldItems,
-                            hall.selectedWorld);
-                return 1;
+                // SoftHall ready 时 MapScene 仍可能残留（BIN 00:14:59）；先探图再放行进大厅。
+                const int im = SoftProbeInMapOrFinish("hall_ready");
+                if (im == 1) return -1;
+                if (im < 0) {
+                    if (WaitInMapRecoverIfPending("hall_ready")) return -1;
+                    LogLine("hall_ready blocked inMap linger items=%d — keep waiting",
+                            hall.worldItems);
+                    KickLogLine("hall_ready blocked inMap items=%d", hall.worldItems);
+                } else {
+                    KickLogLine("hall_ready ok items=%d selWorld=%d", hall.worldItems,
+                                hall.selectedWorld);
+                    return 1;
+                }
             }
         }
         // 空大厅等待中人已经挂台：立刻走确认恢复，禁止再空耗剩余 12s。
@@ -2432,7 +2481,7 @@ DWORD WINAPI Worker(LPVOID) {
             const bool softBusy = gBusy.load(std::memory_order_acquire) ||
                                   gHold.load(std::memory_order_acquire);
             const DWORD now = GetTickCount();
-            // 图内 CloseSession 粘性：回大厅（!inMap）或大厅 UI 已 ready 时再武装。
+            // 图内 CloseSession 粘性：必须真出图再武装。大厅壳残留 + inMap=1 开火 = 叠登。
             if (gDeferred.load(std::memory_order_acquire) && !softBusy && !IsLandQuiet() &&
                 !gPending.load(std::memory_order_acquire)) {
                 const DWORD since = gDeferredSinceMs.load(std::memory_order_acquire);
@@ -2440,28 +2489,13 @@ DWORD WINAPI Worker(LPVOID) {
                     gDeferred.store(false, std::memory_order_release);
                     LogLine("deferred soft expire why=%s", gDeferredWhy[0] ? gDeferredWhy : "?");
                     KickLogLine("deferred soft expire");
-                } else {
-                    bool fire = !inMap || scene == x::features::ports::world::SceneState::Login;
-                    if (!fire && inMap && now - lastStuckLobbyMs >= 2000 &&
-                        !SoftShouldDeferPumpWork()) {
-                        lastStuckLobbyMs = now;
-                        x::features::auto_enter::SoftHallCtx hall{};
-                        if (SoftPumpCall(&x::features::auto_enter::SoftHallSampleOnPump, &hall,
-                                         kSoftSampleCallMs) &&
-                            hall.ok && hall.ready) {
-                            fire = true;
-                            LogLine("deferred soft hall-ready inMap=1 world=%d ch=%d items=%d",
-                                    hall.worldUi, hall.channelUi, hall.worldItems);
-                        }
-                    }
-                    if (fire) {
-                        char whyBuf[64]{};
-                        strncpy_s(whyBuf, gDeferredWhy[0] ? gDeferredWhy : "deferred", _TRUNCATE);
-                        gDeferred.store(false, std::memory_order_release);
-                        LogLine("deferred soft fire why=%s inMap=%d", whyBuf, inMap ? 1 : 0);
-                        KickLogLine("deferred soft fire why=%s inMap=%d", whyBuf, inMap ? 1 : 0);
-                        RequestAttempt(whyBuf);
-                    }
+                } else if (!inMap) {
+                    char whyBuf[64]{};
+                    strncpy_s(whyBuf, gDeferredWhy[0] ? gDeferredWhy : "deferred", _TRUNCATE);
+                    gDeferred.store(false, std::memory_order_release);
+                    LogLine("deferred soft fire why=%s inMap=0", whyBuf);
+                    KickLogLine("deferred soft fire why=%s inMap=0", whyBuf);
+                    RequestAttempt(whyBuf);
                 }
             }
             if (!inMap && !softBusy) {
@@ -2496,7 +2530,7 @@ DWORD WINAPI Worker(LPVOID) {
                         KickLogLine("dialog_poll %s scene=%d", probe.detail,
                                     static_cast<int>(scene));
                     }
-                    if (healHint && !IsLandQuiet() &&
+                    if (healHint && !inMap && !IsLandQuiet() &&
                         !gDeferred.load(std::memory_order_acquire) &&
                         x::features::auto_enter::IsDesired() &&
                         (x::features::auto_enter::IsDone() ||
@@ -2615,8 +2649,18 @@ DWORD WINAPI Worker(LPVOID) {
         }
         // lost_session 图内 blip / 误武装：已在图则直接 success，勿拆大厅。
         // disconnected / close_session_inmap：MapScene 残留也不得假成功（BIN 17:29 守护误杀）。
+        // 残留期间禁止 ConnectLogin / 进大厅（BIN 00:14:59 叠登 → 已登出 + avatars=0）。
         if (SoftFinishIfAlreadyInMap("cycle_begin")) goto next;
         if (WaitInMapRecoverIfPending("cycle_begin")) goto next;
+        {
+            const int left = WaitLeaveMapOrRecover("cycle_begin");
+            if (left == 1) goto next;
+            if (left < 0) {
+                Finish(2,
+                       "RESULT fail inmap_linger_no_connect — guardian relaunch (avoid 叠登)");
+                goto next;
+            }
+        }
 
         // 断线 Notice 往往立刻弹出；勿等 Connected 才关。
         // 墙钟截止 + Connecting/Connected 早退（302081）。
@@ -2700,13 +2744,21 @@ DWORD WINAPI Worker(LPVOID) {
         if (!SoftShouldDeferPumpWork()) {
             SampleCtx peek{};
             if (SoftPumpCall(&SampleNmOnPump, &peek, kSoftSampleCallMs) && LoginUiReady(peek)) {
-                LogLine("login_ui_ready post-settle world=%d ch=%d items=%d — skip ConnectLogin "
-                        "arm reenter",
-                        peek.worldUi, peek.channelUi, peek.worldItems);
-                KickLogLine("resume_login_ui skip_connect world=%d ch=%d items=%d where=post_settle",
+                const int im = SoftProbeInMapOrFinish("login_ui_ready_post_settle");
+                if (im == 1) goto next;
+                if (im < 0) {
+                    if (WaitInMapRecoverIfPending("login_ui_ready_post_settle")) goto next;
+                    LogLine("login_ui_ready post-settle blocked inMap linger — no auto_enter");
+                    KickLogLine("login_ui_ready blocked inMap where=post_settle");
+                } else {
+                    LogLine("login_ui_ready post-settle world=%d ch=%d items=%d — skip ConnectLogin "
+                            "arm reenter",
                             peek.worldUi, peek.channelUi, peek.worldItems);
-                invokeOk = true;
-                goto connected_path;
+                    KickLogLine("resume_login_ui skip_connect world=%d ch=%d items=%d where=post_settle",
+                                peek.worldUi, peek.channelUi, peek.worldItems);
+                    invokeOk = true;
+                    goto connected_path;
+                }
             }
         }
 
@@ -2801,6 +2853,16 @@ DWORD WINAPI Worker(LPVOID) {
                 }
                 if (sample.state == kStateConnected) {
                     if (LoginUiReady(sample)) {
+                        const int im = SoftProbeInMapOrFinish("login_ui_ready");
+                        if (im == 1) goto next;
+                        if (im < 0) {
+                            if (WaitInMapRecoverIfPending("login_ui_ready")) goto next;
+                            LogLine("login_ui_ready blocked inMap linger try=%d — no auto_enter",
+                                    t);
+                            KickLogLine("login_ui_ready blocked inMap try=%d", t);
+                            Sleep(kConnectWaitMs);
+                            continue;
+                        }
                         LogLine("login_ui_ready world=%d ch=%d items=%d try=%d — skip ConnectLogin",
                                 sample.worldUi, sample.channelUi, sample.worldItems, t);
                         KickLogLine("resume_login_ui skip_connect world=%d ch=%d items=%d try=%d",
@@ -3077,6 +3139,15 @@ DWORD WINAPI Worker(LPVOID) {
                 KickLogLine("RESULT connected rounds=%d world=%d ch=%d items=%d ready=%d", i + 1,
                             sample.worldUi, sample.channelUi, sample.worldItems, sample.hallReady);
                 if (LoginUiReady(sample)) {
+                    const int im = SoftProbeInMapOrFinish("poll_login_ui");
+                    if (im == 1) goto next;
+                    if (im < 0) {
+                        if (WaitInMapRecoverIfPending("poll_login_ui")) goto next;
+                        LogLine("poll login_ui blocked inMap linger rounds=%d — no auto_enter",
+                                i + 1);
+                        KickLogLine("poll login_ui blocked inMap rounds=%d", i + 1);
+                        continue;
+                    }
                     LogLine("NM Connected+login_ui after soft path why=%s rounds=%d world=%d ch=%d "
                             "items=%d hallReady=1",
                             gWhy, i + 1, sample.worldUi, sample.channelUi, sample.worldItems);
@@ -3146,6 +3217,23 @@ DWORD WINAPI Worker(LPVOID) {
         }
 
     connected_path: {
+                {
+                    const int im = SoftProbeInMapOrFinish("connected_path");
+                    if (im == 1) goto next;
+                    if (im < 0) {
+                        if (WaitInMapRecoverIfPending("connected_path")) goto next;
+                        LogLine("connected_path blocked inMap linger — no auto_enter");
+                        KickLogLine("connected_path blocked inMap");
+                        ++softCycle;
+                        if (softCycle > kSoftCycleMax) {
+                            Finish(2,
+                                   "RESULT fail inmap_linger_no_connect — guardian relaunch "
+                                   "(avoid 叠登)");
+                            goto next;
+                        }
+                        goto soft_cycle_begin;
+                    }
+                }
                 DismissCtx dismiss{};
                 int dismissHits = 0;
                 for (int d = 0; d < kDismissMissRetries && !gStop.load(); ++d) {
@@ -3328,6 +3416,19 @@ DWORD WINAPI Worker(LPVOID) {
                         if (x::features::auto_enter::IsFailed()) {
                             const int charStreak =
                                 x::features::auto_enter::CharSelectTimeoutStreak();
+                            const int avatars =
+                                x::features::auto_enter::LastCharAvatarCount();
+                            if (charStreak >= 1 && avatars <= 0) {
+                                LogLine("logged_out empty avatars streak=%d — no CloseSession",
+                                        charStreak);
+                                KickLogLine("RESULT fail logged_out_empty_avatars streak=%d",
+                                            charStreak);
+                                Finish(2,
+                                       "RESULT fail logged_out_empty_avatars — guardian "
+                                       "relaunch (no CloseSession)");
+                                earlyFail = true;
+                                break;
+                            }
                             if (charStreak >= kCharSelectStuckMax) {
                                 const int im =
                                     SoftProbeInMapOrFinish("char_select_stuck");
@@ -3773,6 +3874,11 @@ void RequestDeferredAttempt(const char* why) {
         LogLine("deferred skip busy/pending why=%s", why ? why : "?");
         return;
     }
+    if (x::features::channel_hop::IsMigrateInFlight()) {
+        LogLine("deferred skip hop migrate why=%s", why ? why : "?");
+        KickLogLine("deferred skip hop migrate why=%s", why ? why : "?");
+        return;
+    }
     // land_quiet 期间也允许武装：worker 仍等 quiet 结束才 fire。
     // 本机 BIN 01:23:52：RESULT success 后 680ms 真 Disconnected，MapScene 还残留，
     // 旧逻辑整票丢掉；400ms 后已是 InterStage 大厅，没人再拉。
@@ -3837,6 +3943,17 @@ void RequestAttempt(const char* why) {
         KickLogLine("request skip breaker why=%s", why ? why : "?");
         return;
     }
+    // hop 已发包：KickSniff / CloseSession / stuck_lobby 边沿交给 hop Fail 后再拉。
+    // channel_hop_timeout / FailThenSoft（已 Idle）不会命中。
+    if (why && x::features::channel_hop::IsMigrateInFlight() &&
+        (std::strcmp(why, "disconnected") == 0 || std::strcmp(why, "disconnecting") == 0 ||
+         std::strcmp(why, "lost_session") == 0 || std::strcmp(why, "close_session_inmap") == 0 ||
+         std::strcmp(why, "stuck_lobby") == 0 || std::strcmp(why, "dialog_linger") == 0 ||
+         std::strcmp(why, "nm_gone_inmap") == 0)) {
+        LogLine("request skip hop migrate in flight why=%s", why);
+        KickLogLine("request skip hop migrate why=%s", why);
+        return;
+    }
     // BIN 16:05：图内药店 Session 空窗 why=lost_session → hold 闪一下像强制软重连。
     // 真回大厅由 stuck_lobby / Disconnected 边沿 / RequestDeferredAttempt 处理；
     // lost_session 在图内一律吞掉。nm_gone_inmap 是「丢失满 3s」的真死会话，不走这条吞。
@@ -3859,11 +3976,8 @@ void RequestAttempt(const char* why) {
     // 常还带着 MapScene 残留，400ms 后才变 InterStage——整票 skip 会把人扔在大厅
     //（本机 BIN 01:23:51 success → 01:23:52 skip land_quiet → 再无 attempt）。
     if (IsLandQuiet()) {
-        const bool hardDc = why && (std::strcmp(why, "disconnected") == 0 ||
-                                    std::strcmp(why, "disconnecting") == 0 ||
-                                    std::strcmp(why, "stuck_lobby") == 0 ||
-                                    std::strcmp(why, "dialog_linger") == 0);
-        if (hardDc) {
+        // 与 WaitLeaveMap 同一张 why 表：漏一项就会在落地静默里 skip，叠登窗口重开。
+        if (WhyStringNeedsRealReconnect(why)) {
             RequestDeferredAttempt(why);
             LogLine("request defer land_quiet why=%s (wait leave-map / quiet end)", why);
             KickLogLine("request defer land_quiet why=%s", why);

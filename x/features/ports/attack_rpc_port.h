@@ -1,9 +1,9 @@
 #pragma once
 // attack_rpc_port — Classic TWMS 攻包伪造探针（Create opcode + Encode + Network_SendOutPacket）
 //
-// opcode 不手选。组包只打近战普攻（A 空 / BasicAction Attack，opcode 50）。
-// 飞镖/弓/弩/枪（51）与杖（52）：send.log 无真 BODY，手搓会拆线；不组包，调用方 OnFuncKey。
-// A 槽绑了技能：不组包，调用方走 OnFuncKey（引擎自己进 TryDoing*）。
+// opcode 不手选。近战普攻（A 空 / BasicAction Attack）与 A 槽近战攻击技（opcode 50 + skillId）。
+// A 槽魔法攻击技（attackCount≥1，如魔力爪）组 opcode 52。飞镖/弓/弩/枪（51）、杖普攻 NA、蓄力技：不组包。
+// 双飞斩 / BUFF / 宏：不组包。
 // 空绑回退普攻在 attack_input_port（合成 5/52），此处不再发明一条。
 // 真源：docs/features/attack_rpc/P0c_攻包BODY布局.md
 // 默认关；禁止 GA .text E9；禁止 Session.Send 旁路。
@@ -20,7 +20,7 @@ struct FireResult {
     int bodyHint = 0;  // 粗算 BODY 字节（不含 6B 头）
     int opcode = 0;      // 50/51/52，由装备决定（仅普攻组包）
     int weaponType = 0;  // 当前装备 MapleWeaponType
-    int skillId = 0;     // 组包恒 0；拒发技能时带 A 槽 skillId 供日志
+    int skillId = 0;     // 普攻 0；A 槽近战技为技能 id
     int fkType = -1;     // FuncType；读失败 -1
     int fkValue = -1;
     const char* err = "";
@@ -44,10 +44,10 @@ DWORD GetIntervalMs();
 void SetDamage(int dmg);  // 每 hit Encode4；默认 1
 int GetDamage();
 
-void SetSkillId(int skillId);  // 忽略：组包只打普攻 skill=0
+void SetSkillId(int skillId);  // 忽略：skillId 由 A 槽决定
 int GetSkillId();              // 最近一次组包写入的 skillId（普攻为 0）
 
-// 主线程组包发送（managed_main）。需 IsEnabled()。仅普攻；A 槽技能请走 OnFuncKey。
+// 主线程组包发送（managed_main）。需 IsEnabled()。近战普攻、A 槽近战攻击技、或 A 槽魔法攻击技。
 bool TryFireNormal(FireResult* out = nullptr);
 bool TryFireMelee(FireResult* out = nullptr);  // 兼容旧名 → TryFireNormal
 
@@ -62,7 +62,7 @@ bool TryFireOneshot(FireResult* out = nullptr);
 // 打怪实验：SendOutPacket，命中环只填 lockOid（须在 snap 且活着）。
 // 不看 gEnabled（与「攻包伪造探针」Tick 独立）；不走 Session.Send。
 // 多发已证实踢号——调用方短开。oid<=0 直接拒绝。
-// 过远（站桩输出面前盒 |dx|/|dy|）/ SendOut false / 非近战：拒发。调用方不得退回 OnFuncKey。
+// 过远（站桩输出面前盒 |dx|/|dy|）/ SendOut false / 非近战且非 A 槽魔法技：拒发。调用方不得退回 OnFuncKey。
 bool TryFireLockOid(int32_t oid, FireResult* out = nullptr);
 
 // 钉锁过远尺：与 simple_combat 站桩输出面前盒同一套（AbsPos 半宽/半高；0=该轴不限）。

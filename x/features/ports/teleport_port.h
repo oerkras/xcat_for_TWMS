@@ -1,10 +1,11 @@
 #pragma once
 // teleport_port — Classic TWMS 位移端口
 //
-// 产品路径（统一）：Impact（F5 贴怪 / F6 飞）—— NockBack / SetImpactNext / ImpactHop /
-// ImpactImpulseToward / ImpactSetVelocity。Attr=2。
+// 产品路径：
+//   Impact（F5 空中贴怪 / F6 飞）—— NockBack / SetImpactNext / ImpactHop /
+//   ImpactImpulseToward / ImpactSetVelocity。Attr=2。
+//   fill+Doing（F5 追怪「瞬移找怪」）—— TeleportNativeSkillCall / TryDoingTeleport。
 //
-// fill+Doing（TeleportNativeSkillCall / TryDoingTeleport）已失效：入口硬拒，禁止再接入。
 // 禁止再引入：Attr=4 旁路 / SyncRelPosOnly settle / RestoreWalkable / Register 技能包 /
 // 钉 Transform / VisualLeash。
 
@@ -17,18 +18,20 @@ bool EnsureBound();
 // 进图物理就绪（Impact / 旧 native 共用探测）。
 bool IsPhysicsReadyForNative();
 
-// fill+Doing 已禁用：一律 false（保留符号防旧调用链链接）。
 bool TeleportNativeSkillCall();
-bool TeleportNativeSkillCall(float landX, float landY, uint32_t plantFhId, bool snapStand = true);
+// snapStand=true 且 plantFhId≠0：只 SnapOnFh 钉死该台，禁止再 SnapStandAt 换邻段。
+// out*：Doing 实际写入的 land（二次钉台后可能与入参不同）；失败不写。
+bool TeleportNativeSkillCall(float landX, float landY, uint32_t plantFhId, bool snapStand = true,
+                             float* outLandX = nullptr, float* outLandY = nullptr,
+                             uint32_t* outFhId = nullptr);
 void SetNativeCooldownMs(uint32_t ms);
 // 从「现在」起强制自冷 ms（写入 lastOk=now）。补给开趟冷却窗用。
 void ForceNativeCooldownMs(uint32_t ms);
 void ClearNativeSelfCd();
 
-// 距下次可 native 的剩余 ms；fill+Doing 已废，调用方勿再依赖此门开瞬移。
 uint32_t NativeCooldownRemainingMs();
 
-// 最近一次 native ok 后的收态窗（历史互斥；fill+Doing 停用后通常恒 false）。
+// 最近一次 native ok 后的收态窗（贴怪 Settling / 互斥用）。
 bool IsPostTeleportQuiet(uint32_t quietMs = 220);
 
 // 必须已在主线程泵上。拆 CurFh/LastFh + 清 InputX/Ap.V/Rp.V（land/fh 仅日志上下文）。

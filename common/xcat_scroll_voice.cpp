@@ -298,7 +298,8 @@ bool PlayPickupSuccessAnnounce(int itemId) {
         AppendPcm(out, it->second);
     }
     if (out.empty()) return false;
-    return PlayPcmInterrupt(std::move(out));
+    // 排队接在掉落口播后面，禁止 Interrupt：否则会把「掉落 披风 …」砍半再接「拾取成功」。
+    return PlayPcmAsync(std::move(out));
 }
 
 }  // namespace xcat::sound

@@ -31,6 +31,8 @@ void RequestManualRejoin(uint32_t seq);
 State GetState();
 const char* GetStateName();
 bool HasPending();
+// Waiting 且已发包：KickSniff 不得把迁频抖的 Disconnected 交给 soft（BIN 13:59 抢会话）。
+bool IsMigrateInFlight();
 // 成功/失败冷却剩余 ms；0=可立刻再 hop（遇人策略对齐用）
 DWORD CooldownRemainingMs();
 // 上次成功换频 / 图内读到的频道（玩家 UI ch.N = 列表 id + 1）；未知返回 0。

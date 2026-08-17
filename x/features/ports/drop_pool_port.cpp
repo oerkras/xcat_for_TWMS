@@ -483,10 +483,13 @@ bool ShouldSwallowPickup(int dropId) {
 
 constexpr int kInvTiEquip = 1;
 constexpr int kInvTiConsume = 2;
+constexpr int kInvTiInstall = 3;
+constexpr int kInvTiEtc = 4;
 
 enum class HvClass : int { None = 0, Equip = 1, Scroll = 2, Dart = 3 };
 
 bool InvHasFreeSlot(int invType);
+bool CountBagItem(int itemId, unsigned long long& out);
 HvClass ClassifyHighValueItem(int info, bool isMoney);
 bool HighValueBagAllows(HvClass hv);
 bool ReadUserPos(float& x, float& y);
@@ -3450,6 +3453,35 @@ bool InvHasFreeSlot(int invType) {
     return used < n;
 }
 
+// 消耗/装饰/其他栏里某 itemId 的堆叠合计。纯字段读，worker 可调。
+// 读不到栏表 → false（调用方不得把 0 当成「包里没有」）。
+bool CountBagItem(int itemId, unsigned long long& out) {
+    out = 0;
+    if (itemId <= 0) return false;
+    const size_t idOff = x::ui::player::OffSlotItemId();
+    const size_t numOff = x::ui::player::OffSlotBundleNumber();
+    if (!idOff) return false;
+    bool any = false;
+    for (const int type : {kInvTiConsume, kInvTiInstall, kInvTiEtc}) {
+        void* list = x::ui::player::GetItemSlotList(type);
+        if (!LooksLikeHeapPtr(list)) continue;
+        const int n = ReadI32(list, kOffListSize);
+        if (n <= 0 || n > 512) continue;
+        void* items = ReadPtr(list, kOffListItems);
+        if (!LooksLikeHeapPtr(items)) continue;
+        any = true;
+        const uintptr_t cap = ArrayLen(items);
+        for (int i = 0; i < n && static_cast<uintptr_t>(i) < cap; ++i) {
+            void* slot = ArrayAt(items, static_cast<uintptr_t>(i));
+            if (!LooksLikeHeapPtr(slot)) continue;
+            if (ReadI32(slot, idOff) != itemId) continue;
+            const unsigned long long q = ReadU16(slot, numOff);
+            out += q ? q : 1ull;
+        }
+    }
+    return any;
+}
+
 HvClass ClassifyHighValueItem(int info, bool isMoney) {
     if (isMoney || info <= 0) return HvClass::None;
     // 装备：经典版 itemId / 1e6 == 1
@@ -4283,7 +4315,10 @@ struct HighValueWatch {
     int itemId = 0;
     int kind = 0;
     bool published = false;
+    bool bagKnown = false;
     DWORD publishedMs = 0;
+    DWORD missingSince = 0;  // 0=本拍仍在池里
+    unsigned long long bagAtPublish = 0;
 };
 
 void* gHvAlertPool = nullptr;
@@ -4291,6 +4326,8 @@ std::unordered_map<int, HighValueWatch> gHvWatch;
 std::vector<HighValueDropAlert> gHvGone;
 bool gHvSeeded = false;
 constexpr DWORD kHvPickSuccessMaxAgeMs = 180000;
+constexpr DWORD kHvGoneDebounceMs = 400;   // 字典闪漏 / 瞬落改写不稳
+constexpr DWORD kHvGoneGiveUpMs = 15000;   // 没进包：别人捡了或过期，静默丢掉
 constexpr size_t kHvGoneCap = 16;
 
 void ResetHighValueWatch(void* pool) {
@@ -4312,6 +4349,49 @@ void PushGone(int dropId, const HighValueWatch& w) {
     a.itemId = w.itemId;
     a.kind = w.kind;
     gHvGone.push_back(a);
+}
+
+void FillWatchBag(HighValueWatch& w, int itemId) {
+    unsigned long long bag = 0;
+    w.bagKnown = CountBagItem(itemId, bag);
+    w.bagAtPublish = w.bagKnown ? bag : 0;
+}
+
+void BumpBagBaseline(int itemId, unsigned long long bagNow) {
+    if (itemId <= 0) return;
+    for (auto& kv : gHvWatch) {
+        if (kv.second.itemId != itemId) continue;
+        if (!kv.second.bagKnown) continue;
+        if (kv.second.bagAtPublish < bagNow)
+            kv.second.bagAtPublish = bagNow;
+    }
+}
+
+// 池里暂时看不到：要消耗栏数量增加才报成功。iterator 被 erase 时返回 true。
+bool FinishMissingWatch(std::unordered_map<int, HighValueWatch>::iterator& it, DWORD now) {
+    HighValueWatch& w = it->second;
+    const DWORD goneMs = now - w.missingSince;
+    if (goneMs < kHvGoneDebounceMs) return false;
+    unsigned long long bagNow = 0;
+    const bool bagOk = CountBagItem(w.itemId, bagNow);
+    if (w.bagKnown && bagOk && bagNow > w.bagAtPublish) {
+        const int dropId = it->first;
+        const int itemId = w.itemId;
+        const unsigned long long bagWas = w.bagAtPublish;
+        PushGone(dropId, w);
+        BumpBagBaseline(itemId, bagNow);
+        it = gHvWatch.erase(it);
+        x::runtime::LogI("droppool", "hvPick bag dropId=%d itemId=%d %llu→%llu", dropId, itemId,
+                         bagWas, bagNow);
+        return true;
+    }
+    if (goneMs >= kHvGoneGiveUpMs) {
+        x::runtime::LogI("droppool", "hvPick silent dropId=%d itemId=%d bag=%llu goneMs=%u",
+                         it->first, w.itemId, bagNow, (unsigned)goneMs);
+        it = gHvWatch.erase(it);
+        return true;
+    }
+    return false;
 }
 }  // namespace
 
@@ -4356,6 +4436,7 @@ int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut) {
             HighValueWatch w{};
             w.itemId = info;
             w.kind = static_cast<int>(hv);
+            FillWatchBag(w, info);
             gHvWatch.emplace(id, w);
             continue;
         }
@@ -4367,6 +4448,7 @@ int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut) {
         w.kind = static_cast<int>(hv);
         w.published = true;
         w.publishedMs = GetTickCount();
+        FillWatchBag(w, info);
         gHvWatch.emplace(id, w);
         out[nOut].dropId = id;
         out[nOut].itemId = info;
@@ -4374,13 +4456,27 @@ int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut) {
         ++nOut;
     }
     if (!gHvSeeded) gHvSeeded = true;
+    const DWORD now = GetTickCount();
     for (auto it = gHvWatch.begin(); it != gHvWatch.end();) {
-        if (!live.contains(it->first)) {
-            PushGone(it->first, it->second);
-            it = gHvWatch.erase(it);
-        } else {
+        if (live.contains(it->first)) {
+            if (it->second.missingSince != 0) {
+                const DWORD goneMs = now - it->second.missingSince;
+                if (goneMs >= kHvGoneDebounceMs)
+                    x::runtime::LogI("droppool", "hvPick revive dropId=%d itemId=%d goneMs=%u",
+                                     it->first, it->second.itemId, (unsigned)goneMs);
+                it->second.missingSince = 0;
+            }
             ++it;
+            continue;
         }
+        // 进图静默登记的件：从池消失不报成功
+        if (!it->second.published) {
+            it = gHvWatch.erase(it);
+            continue;
+        }
+        if (it->second.missingSince == 0) it->second.missingSince = now;
+        if (FinishMissingWatch(it, now)) continue;
+        ++it;
     }
     return nOut;
 }

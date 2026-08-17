@@ -434,7 +434,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     const bool attackAccelOn =
         xcat::kAttackAccelUserEnabled && c.attackAccel != 0;
     const bool clearBusyOn = c.attackAccelClearBusy != 0;
-    // 首页 attackAccel（暂关）或实验·清忙锁 → worker 写 ActionBusy=-1。
+    // 首页 attackAccel（暂关）或「攻击无CD」/attackAccelClearBusy → worker 写 ActionBusy=-1。
     x::features::attack_accel::SetDesired(attackAccelOn || clearBusyOn);
     x::features::attack_accel::SetBoosterDesired(
         xcat::kAttackAccelBoosterUserEnabled && c.attackAccelBooster != 0);
@@ -449,7 +449,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
                                                 c.finalAttackForce != 0);
     x::features::skill_max_level::SetDesired(xcat::kSkillMaxLevelUserEnabled &&
                                              c.skillMaxLevel != 0);
-    // 下列副作用只跟首页 attackAccel 包；实验清忙锁只写 ActionBusy。
+    // 下列副作用只跟首页 attackAccel 包；「攻击无CD」只写 ActionBusy。
     x::features::ports::attack::SetAnimBusyOverrideMs(attackAccelOn ? 0 : -1);
     x::features::ports::attack::SetImmediateUp(attackAccelOn);
     x::features::fly::SetMode(c.flyMode);
@@ -509,35 +509,23 @@ void ApplyControl(const xcat::PayloadControl& c) {
         c.mobGatherHomeX, c.mobGatherHomeY, c.mobGatherHomeMapId, c.mobGatherHomeValid != 0,
         c.mobGatherHomeHasMap != 0);
     x::features::ports::mob_fh_ban::SetActuatorParams(
-        static_cast<float>(xcat::ClampMobGatherKp(c.mobGatherKp ? c.mobGatherKp
-                                                               : xcat::kMobGatherKpDefault)),
-        static_cast<float>(xcat::ClampMobGatherDead(c.mobGatherDead ? c.mobGatherDead
-                                                                   : xcat::kMobGatherDeadDefault)),
-        static_cast<float>(xcat::ClampMobGatherCruiseR(
-            c.mobGatherCruiseR ? c.mobGatherCruiseR : xcat::kMobGatherCruiseRDefault)),
-        static_cast<float>(xcat::ClampMobGatherStationR(
-            c.mobGatherStationR ? c.mobGatherStationR : xcat::kMobGatherStationRDefault)),
-        static_cast<float>(xcat::ClampMobGatherMaxCmd(
-            c.mobGatherMaxCmd ? c.mobGatherMaxCmd : xcat::kMobGatherMaxCmdDefault)),
-        static_cast<float>(xcat::ClampMobGatherGravity(c.mobGatherGravity)),
-        static_cast<float>(xcat::ClampMobGatherStickCreep(
-            c.mobGatherStickCreepPx ? c.mobGatherStickCreepPx : xcat::kMobGatherStickCreepDefault)),
-        static_cast<float>(xcat::ClampMobGatherStickStillV(c.mobGatherStickStillV)));
+        static_cast<float>(c.mobGatherKp),
+        static_cast<float>(c.mobGatherDead),
+        static_cast<float>(c.mobGatherCruiseR),
+        static_cast<float>(c.mobGatherStationR),
+        static_cast<float>(c.mobGatherMaxCmd),
+        static_cast<float>(c.mobGatherGravity),
+        static_cast<float>(c.mobGatherStickCreepPx),
+        static_cast<float>(c.mobGatherStickStillV));
     x::features::ports::mob_fh_ban::SetMotionTiers(
-        static_cast<float>(xcat::ClampMobGatherCruiseV(
-            c.mobGatherCruiseV ? c.mobGatherCruiseV : xcat::kMobGatherCruiseVDefault)),
-        static_cast<float>(xcat::ClampMobGatherStationV(
-            c.mobGatherStationV ? c.mobGatherStationV : xcat::kMobGatherStationVDefault)),
-        static_cast<float>(xcat::ClampMobGatherHoldV(
-            c.mobGatherHoldV ? c.mobGatherHoldV : xcat::kMobGatherHoldVDefault)));
+        static_cast<float>(c.mobGatherCruiseV),
+        static_cast<float>(c.mobGatherStationV),
+        static_cast<float>(c.mobGatherHoldV));
     x::features::ports::mob_fh_ban::SetSettleTune(
-        static_cast<float>(xcat::ClampMobGatherSettleErr(
-            c.mobGatherSettleErr ? c.mobGatherSettleErr : xcat::kMobGatherSettleErrDefault)),
-        static_cast<float>(xcat::ClampMobGatherKpSettle(
-            c.mobGatherKpSettle ? c.mobGatherKpSettle : xcat::kMobGatherKpSettleDefault)),
-        static_cast<float>(xcat::ClampMobGatherBrakeMs(
-            c.mobGatherBrakeMs ? c.mobGatherBrakeMs : xcat::kMobGatherBrakeMsDefault)),
-        static_cast<float>(xcat::ClampMobGatherCoastVy(c.mobGatherCoastVy)));
+        static_cast<float>(c.mobGatherSettleErr),
+        static_cast<float>(c.mobGatherKpSettle),
+        static_cast<float>(c.mobGatherBrakeMs),
+        static_cast<float>(c.mobGatherCoastVy));
     if (c.mapAttack != 0) {
         // P1 互斥：组包 / 攻包探针绕过 FindHit；打中换怪会把名单滤成一只。
         x::features::simple_combat::SetHitRotateEnabled(false);
@@ -546,7 +534,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
         x::features::simple_combat::SetHitRotateEnabled(c.simpleCombatHitRotate != 0);
         x::features::simple_combat::SetForgeHitEnabled(c.simpleCombatForgeHit != 0);
     }
-    x::features::simple_combat::SetTeleportEnabled(false);  // fill+Doing 战斗回落已禁用
+    x::features::simple_combat::SetTeleportEnabled(c.simpleCombatTeleport != 0);
     x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
     x::features::simple_combat::SetAntiJitterEnabled(c.simpleCombatAntiJitter != 0);
     x::features::simple_combat::SetAntiHugEnabled(c.simpleCombatAntiHug != 0);
@@ -571,6 +559,8 @@ void ApplyControl(const xcat::PayloadControl& c) {
         c.mobGatherStandOffCustom != 0,
         xcat::ClampMobGatherStandOffX(c.mobGatherStandOffX),
         xcat::ClampMobGatherStandOffY(c.mobGatherStandOffY));
+    x::features::ports::mob_fh_ban::SetAimJitterPx(
+        static_cast<float>(xcat::ClampMobGatherAimJitter(c.mobGatherAimJitterPx)));
     x::features::ports::ground_spoof::SetEnabled(c.simpleCombatGroundSpoof != 0);
     x::features::simple_combat::SetOneshotParams(c.simpleCombatOneshotMaxHp,
                                                  c.simpleCombatOneshotMinBumps,

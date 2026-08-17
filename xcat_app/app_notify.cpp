@@ -118,7 +118,7 @@ bool IsPayloadOwnedAlarmKey(const std::string& key) {
 }
 
 bool IsRepeatExemptNotifyKey(const std::string& key) {
-    // 清怪/定时软重连一轮 15–20s，短于 30s 签名去重；不豁免则第二轮 fire 有日志没气泡。
+    // 清怪/主动软重连一轮 15–20s，短于 30s 签名去重；不豁免则第二轮 fire 有日志没气泡。
     return key == "mob-gather-clear" || key == "mob-gather-soft" || key == "soft-login-ok";
 }
 
@@ -316,7 +316,7 @@ void EnqueueNotification(const QueuedNotification& queued) {
     }
 
     // 持续刷新的测谎关键气泡：不走 30s 签名去重（否则点关后长时间无法再亮）。
-    // 清怪/定时软重连：轮次短于 30s，同样必须每轮都能亮。
+    // 清怪/主动软重连：轮次短于 30s，同样必须每轮都能亮。
     if (!IsPayloadOwnedAlarmKey(key) && !IsRepeatExemptNotifyKey(key) &&
         WasRecentlyShown(queued.kind, key, queued.title, queued.body, now)) {
         return;

@@ -22,6 +22,7 @@ void RequestStop();
 void RequestSave();
 
 bool IsFeatureEnabled();
+// 含 Goto / 已排队的 goto / no_map 暂存。遇人、换频、打怪让路都看这个，勿只看 UiMode。
 bool IsActive();
 
 enum class UiMode { Idle, Goto };

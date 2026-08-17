@@ -2088,13 +2088,21 @@ void OnStateChange(int prev, int now, int err) {
         // 把进图 Session 闪断当踢线硬杀（BIN 01:00:24 success → 01:00:25 kill）。
         x::features::galaxy_token_probe::RequestSample(
             now == kStateDisconnecting ? "disconnecting" : "disconnected");
-        x::features::soft_login_probe::RequestAttempt(
-            now == kStateDisconnecting ? "disconnecting" : "disconnected");
-        if (x::features::soft_login_probe::IsLandQuiet() &&
-            !x::features::soft_login_probe::IsHoldActive()) {
-            Log("skip disconnectSeq bump (land_quiet hold=0)");
+        // hop 已发包：Disconnected 是迁频抖。KickSniff 抢 RequestAttempt 会与 Waiting Fail 双主
+        //（BIN 13:59：fire→117ms Disc→soft→hop Fail「会话已断开」）。seq 也不 bump：
+        // 无 hold 时 bump 会让守护干净重拉。hop Fail 后再 RequestAttempt。
+        if (x::features::channel_hop::IsMigrateInFlight() &&
+            x::features::soft_login_probe::IsArmed()) {
+            Log("skip disconnect soft: hop migrate in flight (seq not bumped)");
         } else {
-            gDisconnectSeq.fetch_add(1, std::memory_order_relaxed);
+            x::features::soft_login_probe::RequestAttempt(
+                now == kStateDisconnecting ? "disconnecting" : "disconnected");
+            if (x::features::soft_login_probe::IsLandQuiet() &&
+                !x::features::soft_login_probe::IsHoldActive()) {
+                Log("skip disconnectSeq bump (land_quiet hold=0)");
+            } else {
+                gDisconnectSeq.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         // Mark the drop inside the outbound trace too, so the last packets we sent before it
         // can be read off without cross-referencing timestamps against kick.log.
@@ -2235,8 +2243,14 @@ DWORD WINAPI Worker(LPVOID) {
                 // 出图判据在丢失当刻已成立，此刻再要求一次：只会比旧逻辑更保守，
                 // 不会新增任何旧逻辑不会武装的场景。
                 if (!x::features::ports::world::IsInMapScene()) {
-                    Log("lost_session persist=%ums — RequestAttempt", static_cast<unsigned>(held));
-                    x::features::soft_login_probe::RequestAttempt("lost_session");
+                    if (x::features::channel_hop::IsMigrateInFlight()) {
+                        Log("lost_session persist=%ums — skip hop migrate in flight",
+                            static_cast<unsigned>(held));
+                    } else {
+                        Log("lost_session persist=%ums — RequestAttempt",
+                            static_cast<unsigned>(held));
+                        x::features::soft_login_probe::RequestAttempt("lost_session");
+                    }
                 } else {
                     Log("lost_session swallowed: back in map after %ums — no soft attempt",
                         static_cast<unsigned>(held));
@@ -2365,6 +2379,8 @@ int LastSessionState() { return gLastState.load(); }
 bool SawDisconnect() { return gSawDisconnect.load(); }
 bool HasResolvedSession() { return gNmCached != nullptr; }
 uint32_t DisconnectSeq() { return gDisconnectSeq.load(std::memory_order_relaxed); }
+
+void BumpDisconnectSeq() { gDisconnectSeq.fetch_add(1, std::memory_order_relaxed); }
 
 }  // namespace kick_sniff
 }  // namespace features

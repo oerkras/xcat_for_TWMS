@@ -1,8 +1,8 @@
 #pragma once
 // simple_combat — Classic TWMS 自动打怪（状态机）
 //
-// Idle → Acquire → [MoveTo→Impact|human] → Aim → Firing → Recover → …
-// 位移：Impact 贴怪（默认，同 F6 Impact）> 拟人走路。fill+Doing 已废。
+// Idle → Acquire → [MoveTo→Impact|human|teleport] → Aim → Firing → Recover → …
+// 位移：Impact 贴怪（默认）> 拟人走路 > fill+Doing 瞬移找怪（面板单选）。
 // Impact 与出刀互斥；F5 / 面板启停。
 
 #include <Windows.h>
@@ -35,7 +35,7 @@ uint32_t HitRotateN();
 // 实验：出刀改组包，名单只填当前锁 oid；opcode 跟装备。默认关 → OnFuncKey。
 void SetForgeHitEnabled(bool on);
 bool IsForgeHitEnabled();
-void SetTeleportEnabled(bool on);  // 强制关：fill+Doing 战斗回落已禁用
+void SetTeleportEnabled(bool on);
 // Impact 贴怪（默认开）：近战直升机——旋翼环持续托举悬停在怪旁，空中出刀。
 // 优先于拟人。需无敌；交战期间自动挂 fh-ban（无怪超宽限则卸掉落地）。
 void SetImpactApproachEnabled(bool on);
@@ -72,10 +72,9 @@ uint32_t HiraishinFrontDy();
 void SetLiveStepEnabled(bool on);
 bool IsLiveStepEnabled();
 void SetTeleportParams(uint32_t minDx, uint32_t standOff, uint32_t cooldownMs, uint32_t maxHop);
-// F5 空中贴怪的**自定义站距**（远程职业用）。与上面 SetTeleportParams 的 standOff 无关：
-// 那个还乘进 InHitBand 等地面判定，这个只喂直升机悬停点与它自己的闸门。
-// custom=false → 用内置近战最优值（kHeliStandOffPx / kHeliLiftPx，实测最优，别乱调）。
-// custom=true  → x/y 原样生效，且出刀闸与到位判据随之放大；命中率由用户自行负责。
+// 自定义站距：水平 X 空中贴怪 / 拟人 / 瞬移找怪共用；Y 只给空中贴怪。
+// custom=false → X 用内置 kCombatStandOffXDefault（60）；Y 用 kHeliLiftPx。
+// custom=true  → x/y 原样生效（地面 ClampStandOff 再把 X 夹进 12–200）。
 // y 带符号：+Y 向上 ⇒ 正数 = 站在怪上方。
 void SetStandOffParams(bool custom, uint32_t x, int32_t y);
 // 加速秒杀早切：maxHp=0 关闭此道；其余见 common/xcat_payload_control.h 默认值。

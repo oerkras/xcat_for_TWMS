@@ -142,7 +142,7 @@ std::atomic<uint8_t> gIgnoreQuiet{0};
 std::atomic<unsigned> gQuietDelayMs{0};
 std::atomic<DWORD> gQuietSinceMs{0};
 std::atomic<uint8_t> gApplyCtrl{0};
-std::atomic<uint8_t> gSoftRelogin{1};
+std::atomic<uint8_t> gSoftRelogin{0};
 std::atomic<unsigned> gSoftReloginSec{14};
 std::atomic<uint8_t> gClearRelogin{0};
 std::atomic<uint8_t> gSeekClusterOn{0};
@@ -1365,8 +1365,7 @@ void SetRecruitIntervalMs(unsigned ms) {
 unsigned RecruitIntervalMs() { return gRecruitMs.load(std::memory_order_acquire); }
 
 void SetAimIntervalMs(unsigned ms) {
-    const unsigned c = xcat::ClampMobGatherAimMs(ms ? ms : xcat::kMobGatherAimMsDefault);
-    gAimMs.store(c, std::memory_order_release);
+    gAimMs.store(ms, std::memory_order_release);
 }
 
 unsigned AimIntervalMs() { return gAimMs.load(std::memory_order_acquire); }
@@ -1406,9 +1405,8 @@ void TickSoftRelogin() {
     using x::features::soft_login_probe::IsReconnectInFlight;
     using x::features::soft_login_probe::RequestProactiveReconnect;
 
-    // 计时：勾了 + 吸怪开着 + 在图里才起表。关着吸怪不起钟，避免一点开就拆会话。
-    if (gSoftRelogin.load(std::memory_order_acquire) == 0 || !IsEnabled() ||
-        IsEncounterPaused()) {
+    // 计时：勾了 + 在图里才起表。不绑吸怪（首页挂机卡可单独开）。
+    if (gSoftRelogin.load(std::memory_order_acquire) == 0) {
         gSoftArmMs = 0;
         gSoftPauseMs = 0;
         return;
@@ -1442,7 +1440,6 @@ void TickSoftRelogin() {
         1000u;
     if (now - gSoftArmMs < needMs) return;
 
-    if (!IsEnabled() || IsEncounterPaused()) return;
     if (GetSceneState() != SceneState::Field || !IsPlayReady()) return;
     if (x::features::channel_hop::GetState() != x::features::channel_hop::State::Idle ||
         x::features::channel_hop::HasPending())
@@ -1462,11 +1459,11 @@ void TickSoftRelogin() {
     }
 
     x::runtime::LogI("MobGather", "soft relogin fire after %us", needMs / 1000u);
-    if (RequestProactiveReconnect("mob_gather_timer")) {
+    if (RequestProactiveReconnect("hangup_timer")) {
         gSoftArmMs = 0;
         gSoftPauseMs = 0;
         x::features::notify::PublishNotification(x::features::notify::NotificationEvent{
-            x::features::notify::NotificationKind::Info, "mob-gather-soft", "吸怪定时软重连",
+            x::features::notify::NotificationKind::Info, "mob-gather-soft", "主动软重连",
             "已主动拆会话，走软重连回图", 5000});
     } else {
         gSoftArmMs = now - needMs + 5000;
@@ -2573,7 +2570,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
                          "aim=%.1f,%.1f faceL=%d scale=%.2f jitter=%d max=%d r=%.0f hold=%u "
                          "iv=%u quiet=%d qdelay=%u apply=%d/%d seh=%d tCur=%d "
                          "waveHold=%d waveN=%d dyLim=%.0f packN=%d packY=%.0f layerY=%.0f "
-                         "walkDx=%.0f feet=%.0f off=%.0f,%.0f "
+                         "walkDx=%.0f feet=%.0f off=%.0f,%.0f spread=%.0f "
                          "sample id=%d ctrl=%d(%s) cmd=(%.0f,%.0f) ap=%.1f,%.1f vy=%.0f "
                          "maxAd=%.0f maxCmd=%.0f",
                          kind, out->considered, nNew, nSta, nFar, nSkipFar, nFarAdmit, skippedSpawn,
@@ -2599,6 +2596,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
                          gWalkReadyDx.load(std::memory_order_relaxed),
                          gFeetExemptPx.load(std::memory_order_relaxed),
                          offX, offY,
+                         x::features::ports::mob_fh_ban::AimJitterPx(),
                          s ? s->id : 0,
                          s ? s->ctrl : 0, mob::CtrlName(s ? s->ctrl : 0), s ? s->cmdVx : 0.f,
                          s ? s->cmdVy : 0.f, s ? s->ap0x : 0.f, s ? s->ap0y : 0.f,

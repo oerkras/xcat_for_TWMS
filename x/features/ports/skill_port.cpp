@@ -59,16 +59,24 @@ constexpr uint32_t kRvaGetSkillCoolTimeOver = 0x12F9930;
 constexpr uint32_t kRvaIsExistSkillCoolTimeOver = 0x12FB1E0;
 // SkillEntry.GetLevelData(int level) → SkillLevelData*（与 final_attack_force 同锚）
 constexpr uint32_t kRvaGetLevelData = 0x157F8B0;
+// SkillLevelData.GetCrc()：IsCalcCrc@+0xDC 为 0 时先 CalcCrc，再返回 Crc@+0xD8。
+constexpr uint32_t kRvaGetCrc = 0x157D2C0;
 // CMS/TW SkillLevelData：Prop@0x84 已证实同布局 → MPCon@0x68
 constexpr size_t kFbMpCon = 0x68;
 // CMS/TW SkillLevelData.Cooltime@0xD4（秒；与 Prop@0x84 同布局已证实）
 constexpr size_t kFbCooltime = 0xD4;
+constexpr size_t kFbAttackCount = 0x88;
+constexpr size_t kFbBulletCount = 0x8C;
+constexpr size_t kFbCrc = 0xD8;
 
 // 方法哈希（dump 名；RVA 漂时优先）
 constexpr char kHashGetSkillLevel[] =
     "b9b908c11371ad07554cc085bcba9fa71c8ee78cf1515d88a9ff1a8b24edfeb";
 constexpr char kHashGetLevelData[] =
     "fd11d0f7e0ef5ae5e998e798089afd62d31cc49e04e21476b65d98334a4f6ca";
+// SkillLevelData klass（与 final_attack_force 同 hash）
+constexpr char kHashSkillLevelData[] =
+    "bcaad229d4c239cd8c819c8b29c4af6d1fc054315f242b5ab83f132b9557c3c";
 constexpr char kHashDoActiveSkill[] =
     "e827f849fe6559e2561f280b00cb6221bd51baf987add4903153bd339645ef7";
 constexpr char kHashDoActiveSkillPrepare[] =
@@ -171,6 +179,7 @@ using FnGetUpdateTime = int (*)(const void* methodInfo);
 using FnGetSkillCoolTimeOver = int (*)(void* self, int skillId, const void* methodInfo);
 using FnIsExistSkillCoolTimeOver = bool (*)(void* self, int skillId, const void* methodInfo);
 using FnGetLevelData = void* (*)(void* self, int level, const void* methodInfo);
+using FnGetCrc = uint32_t (*)(void* self, const void* methodInfo);
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -194,7 +203,9 @@ FnGetUpdateTime gGetUpdateTime = nullptr;
 FnGetSkillCoolTimeOver gGetSkillCoolTimeOver = nullptr;
 FnIsExistSkillCoolTimeOver gIsExistSkillCoolTimeOver = nullptr;
 FnGetLevelData gGetLevelData = nullptr;
+FnGetCrc gGetCrc = nullptr;
 MethodInfoHead* gMiGetLevelData = nullptr;
+MethodInfoHead* gMiGetCrc = nullptr;
 size_t gOffMpCon = kFbMpCon;
 size_t gOffCooltime = kFbCooltime;
 
@@ -268,6 +279,15 @@ int32_t ReadI32(void* obj, size_t off) {
     if (!obj) return 0;
     __try {
         return *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+uint32_t ReadU32(void* obj, size_t off) {
+    if (!obj) return 0;
+    __try {
+        return *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(obj) + off);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
@@ -968,6 +988,15 @@ void EnsureMethodInfos() {
             gGetLevelData = FnFromMi<FnGetLevelData>(gMiGetLevelData, kRvaGetLevelData);
         if (!gGetLevelData) gGetLevelData = AtRva<FnGetLevelData>(kRvaGetLevelData);
     }
+    // SkillLevelData.GetCrc —— 魔法攻包第二枚 Encode4（禁止写死 BIN 常数）
+    {
+        void* sldKlass = FindClass(kHashSkillLevelData);
+        constexpr MethodShape kCrc{0, TypeKind::U32, true, false};
+        fill(gMiGetCrc, sldKlass, kRvaGetCrc, kCrc, "GetCrc", nullptr);
+        if (!gMiGetCrc && sldKlass) gMiGetCrc = FindMethodByRva(sldKlass, kRvaGetCrc);
+        if (gMiGetCrc) gGetCrc = FnFromMi<FnGetCrc>(gMiGetCrc, kRvaGetCrc);
+        if (!gGetCrc) gGetCrc = AtRva<FnGetCrc>(kRvaGetCrc);
+    }
 
     static bool sLogged = false;
     const int hits = (gMiGetSkillLevel ? 1 : 0) + (gMiDoActiveSkill ? 1 : 0) + (gMiPrepare ? 1 : 0) +
@@ -990,6 +1019,27 @@ void EnsureMethodInfos() {
 void SetJobReason(CastJob* job, const char* why) {
     if (!job) return;
     strncpy_s(job->reason, why ? why : "fail", _TRUNCATE);
+}
+
+int PeekSkillLevelI32(int skillId, void* entryOpt, int levelOpt, size_t off) {
+    EnsureMethodInfos();
+    if (!gGetLevelData) return 0;
+    void* entry = entryOpt;
+    int level = levelOpt;
+    if (!LooksLikeHeapPtr(entry) || level <= 0) {
+        if (skillId <= 0) return 0;
+        entry = GetSkillEntry(skillId);
+        level = GetSkillLevel(skillId);
+    }
+    if (!LooksLikeHeapPtr(entry) || level <= 0) return 0;
+    void* ld = nullptr;
+    __try {
+        ld = gGetLevelData(entry, level, gMiGetLevelData);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    if (!LooksLikeHeapPtr(ld)) return 0;
+    return ReadI32(ld, off);
 }
 
 // 当前等级 SkillLevelData.MPCon；读失败返回 -1（SendUse 门禁 fail-closed）。
@@ -1757,11 +1807,13 @@ void Shutdown() {
     gMiGetSkillCoolTimeOver = nullptr;
     gMiIsExistSkillCoolTimeOver = nullptr;
     gMiGetLevelData = nullptr;
+    gMiGetCrc = nullptr;
     gGetRemainTime = nullptr;
     gGetUpdateTime = nullptr;
     gGetSkillCoolTimeOver = nullptr;
     gIsExistSkillCoolTimeOver = nullptr;
     gGetLevelData = nullptr;
+    gGetCrc = nullptr;
     gCharacterDataKlass = nullptr;
     gWorldManagerKlass = nullptr;
     {
@@ -1981,6 +2033,47 @@ void* GetSkillEntry(int skillId) {
 int GetSkillMpCon(int skillId) {
     if (skillId <= 0 || !EnsureBound()) return -1;
     return PeekSkillMpCon(skillId, nullptr, 0);
+}
+
+int GetSkillAttackCount(int skillId) {
+    if (skillId <= 0 || !EnsureBound()) return 0;
+    const int n = PeekSkillLevelI32(skillId, nullptr, 0, kFbAttackCount);
+    if (n < 1 || n > 15) return 0;
+    return n;
+}
+
+int GetSkillBulletCount(int skillId) {
+    if (skillId <= 0 || !EnsureBound()) return 0;
+    const int n = PeekSkillLevelI32(skillId, nullptr, 0, kFbBulletCount);
+    if (n < 1 || n > 15) return 0;
+    return n;
+}
+
+uint32_t GetSkillCrc(int skillId) {
+    if (skillId <= 0 || !EnsureBound()) return 0;
+    EnsureMethodInfos();
+    if (!gGetLevelData) return 0;
+    void* entry = GetSkillEntry(skillId);
+    const int level = GetSkillLevel(skillId);
+    if (!LooksLikeHeapPtr(entry) || level <= 0) return 0;
+    void* ld = nullptr;
+    __try {
+        ld = gGetLevelData(entry, level, gMiGetLevelData);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread("skill.GetLevelData.crc");
+        return 0;
+    }
+    if (!LooksLikeHeapPtr(ld)) return 0;
+    uint32_t crc = ReadU32(ld, kFbCrc);
+    if (crc != 0) return crc;
+    if (!gGetCrc) return 0;
+    __try {
+        crc = gGetCrc(ld, gMiGetCrc);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread("skill.GetCrc");
+        return 0;
+    }
+    return crc;
 }
 
 bool ResolveSkillName(int skillId, char* out, int outSz) {

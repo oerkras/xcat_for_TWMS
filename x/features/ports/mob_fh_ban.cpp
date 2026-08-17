@@ -83,8 +83,6 @@ constexpr float kFullFireApproachBrakeSec = 0.15f;
 constexpr float kDeadzoneCoastVy = 80.f;
 constexpr float kIntentCeil = 4800.f;
 constexpr float kMaxCmd = 4800.f;
-constexpr float kScaleMin = 0.25f;
-constexpr float kScaleMax = 10.f;
 // 聚拢点：朝向面前站距 X + 相对人 AbsPos 的 Y（更大 Y = 更高）。悬停不贴台。
 // 未下发前与面板默认一致（自定义落点 29 / 9）。
 constexpr float kGatherDefaultOffX = static_cast<float>(xcat::kMobGatherStandOffXDefault);
@@ -165,6 +163,7 @@ std::atomic<uint32_t> gLeadVxBits{0};
 std::atomic<uint32_t> gLeadVyBits{0};
 std::atomic<float> gOffX{kGatherDefaultOffX};
 std::atomic<float> gOffY{kGatherDefaultOffY};
+std::atomic<float> gAimJitterPx{static_cast<float>(xcat::kMobGatherAimJitterDefault)};
 std::atomic<uint32_t> gOffGen{0};
 std::atomic<int> gMaxArmed{kMaxBan};
 std::atomic<uint32_t> gWipeGen{0};
@@ -474,7 +473,7 @@ void BrakeToRoom(float err, float dead, float H, float* desired) {
 void ComputeSetVelocityImpl(float x, float y, float vx, float vy, float aimX, float aimY,
                             unsigned sinceMs, float* setVx, float* setVy) {
     const bool jitter = gAntiJitter.load(std::memory_order_acquire) != 0;
-    const float scale = ClampF(gSpeedScale.load(std::memory_order_acquire), kScaleMin, kScaleMax);
+    const float scale = gSpeedScale.load(std::memory_order_acquire);
     const float leadVx = BitsToF(gLeadVxBits.load(std::memory_order_acquire));
     const float leadVy = BitsToF(gLeadVyBits.load(std::memory_order_acquire));
     const float errX = aimX - x;
@@ -523,7 +522,6 @@ void ComputeSetVelocityImpl(float x, float y, float vx, float vy, float aimX, fl
         cap = gStationV.load(std::memory_order_acquire) * scale;
     }
     if (fullFire) cap = kIntentCeil;
-    if (cap > kIntentCeil) cap = kIntentCeil;
     const float mag = std::sqrt(desiredVx * desiredVx + desiredVy * desiredVy);
     if (mag > cap && mag > 1e-3f) {
         desiredVx *= cap / mag;
@@ -538,6 +536,21 @@ void ComputeSetVelocityImpl(float x, float y, float vx, float vy, float aimX, fl
     desiredVy = ReachableV(desiredVy, vy, ff, cmd);
     if (setVx) *setVx = desiredVx;
     if (setVy) *setVy = desiredVy + ff;
+}
+
+void ApplyAimJitter(int32_t id, float* x, float* y) {
+    if (!x || !y) return;
+    const float r = gAimJitterPx.load(std::memory_order_acquire);
+    const int ir = static_cast<int>(r);
+    if (ir <= 0) return;
+    uint32_t h = static_cast<uint32_t>(id) * 0x9E3779B9u;
+    h ^= 0x85EBCA6Bu;
+    const uint32_t span = static_cast<uint32_t>(ir) * 2u + 1u;
+    const float dx = static_cast<float>(static_cast<int>(h % span) - ir);
+    h = h * 1664525u + 1013904223u;
+    const float dy = static_cast<float>(static_cast<int>(h % span) - ir);
+    *x += dx;
+    *y += dy;
 }
 
 void ResolveGatherStand(float px, float py, int ma, float* outX, float* outY) {
@@ -598,13 +611,14 @@ void TickPlayerAimImpl(float x, float y, float vx, float vy, int ma, float* outX
     ResolveGatherStandCached(px, py, ma, &ax, &ay);
     gLeadVxBits.store(FToBits(vx), std::memory_order_release);
     gLeadVyBits.store(FToBits(vy), std::memory_order_release);
-    const uint32_t bx = FToBits(ax);
-    const uint32_t by = FToBits(ay);
     for (int i = 0; i < kMaxBan; ++i) {
         if (!gBanVc[i].load(std::memory_order_acquire)) continue;
         if (!gBanAim[i].load(std::memory_order_acquire)) continue;
-        gBanTx[i].store(bx, std::memory_order_release);
-        gBanTy[i].store(by, std::memory_order_release);
+        float jx = ax;
+        float jy = ay;
+        ApplyAimJitter(gBanId[i].load(std::memory_order_acquire), &jx, &jy);
+        gBanTx[i].store(FToBits(jx), std::memory_order_release);
+        gBanTy[i].store(FToBits(jy), std::memory_order_release);
     }
     const DWORD now = GetTickCount();
     const DWORD prev = gLastAimMs.exchange(now, std::memory_order_acq_rel);
@@ -849,6 +863,7 @@ bool Arm(void* vc, void* mob, int32_t id, float tx, float ty) {
     const uintptr_t p = reinterpret_cast<uintptr_t>(vc);
     const uintptr_t mp = reinterpret_cast<uintptr_t>(mob);
     const DWORD now = GetTickCount();
+    ApplyAimJitter(id, &tx, &ty);
     const uint32_t bx = FToBits(tx);
     const uint32_t by = FToBits(ty);
     int empty = -1;
@@ -989,7 +1004,7 @@ void SweepStale(float playerY, const int32_t* liveIds, int nLive) {
 void SweepLand(float playerY) { SweepStale(playerY); }
 
 void SetSpeedScale(float scale) {
-    gSpeedScale.store(ClampF(scale, kScaleMin, kScaleMax), std::memory_order_release);
+    gSpeedScale.store(scale, std::memory_order_release);
 }
 
 float SpeedScale() { return gSpeedScale.load(std::memory_order_acquire); }
@@ -1025,48 +1040,30 @@ void SetArmTimeoutMs(unsigned ms) {
 
 void SetActuatorParams(float kp, float dead, float cruiseR, float stationR, float maxCmd,
                        float gravity, float stickCreep, float stickStillV) {
-    gKp.store(ClampF(kp, 1.f, 20.f), std::memory_order_release);
-    gDead.store(ClampF(dead, 1.f, 40.f), std::memory_order_release);
-    gCruiseR.store(ClampF(cruiseR, 40.f, 800.f), std::memory_order_release);
-    gStationR.store(ClampF(stationR, 8.f, 200.f), std::memory_order_release);
-    gMaxCmdLive.store(ClampF(maxCmd, 620.f, 8000.f), std::memory_order_release);
-    gGravity.store(ClampF(gravity, 0.f, 200.f), std::memory_order_release);
-    gStickCreep.store(ClampF(stickCreep, 1.f, 40.f), std::memory_order_release);
-    gStickStillV.store(ClampF(stickStillV, 0.f, 400.f), std::memory_order_release);
+    gKp.store(kp, std::memory_order_release);
+    gDead.store(dead, std::memory_order_release);
+    gCruiseR.store(cruiseR, std::memory_order_release);
+    gStationR.store(stationR, std::memory_order_release);
+    gMaxCmdLive.store(maxCmd, std::memory_order_release);
+    gGravity.store(gravity, std::memory_order_release);
+    gStickCreep.store(stickCreep, std::memory_order_release);
+    gStickStillV.store(stickStillV, std::memory_order_release);
 }
 
 float CruiseRadius() { return gCruiseR.load(std::memory_order_acquire); }
 float StationRadius() { return gStationR.load(std::memory_order_acquire); }
 
 void SetMotionTiers(float cruiseV, float stationV, float holdV) {
-    gCruiseV.store(static_cast<float>(xcat::ClampMobGatherCruiseV(
-                       cruiseV > 0.f ? static_cast<uint32_t>(cruiseV)
-                                     : xcat::kMobGatherCruiseVDefault)),
-                   std::memory_order_release);
-    gStationV.store(static_cast<float>(xcat::ClampMobGatherStationV(
-                        stationV > 0.f ? static_cast<uint32_t>(stationV)
-                                       : xcat::kMobGatherStationVDefault)),
-                    std::memory_order_release);
-    gHoldV.store(static_cast<float>(xcat::ClampMobGatherHoldV(
-                     holdV > 0.f ? static_cast<uint32_t>(holdV) : xcat::kMobGatherHoldVDefault)),
-                 std::memory_order_release);
+    gCruiseV.store(cruiseV, std::memory_order_release);
+    gStationV.store(stationV, std::memory_order_release);
+    gHoldV.store(holdV, std::memory_order_release);
 }
 
 void SetSettleTune(float settleErr, float kpSettle, float brakeMs, float coastVy) {
-    gSettleErr.store(static_cast<float>(xcat::ClampMobGatherSettleErr(
-                         settleErr > 0.f ? static_cast<uint32_t>(settleErr)
-                                         : xcat::kMobGatherSettleErrDefault)),
-                     std::memory_order_release);
-    gKpSettle.store(static_cast<float>(xcat::ClampMobGatherKpSettle(
-                        kpSettle > 0.f ? static_cast<uint32_t>(kpSettle)
-                                       : xcat::kMobGatherKpSettleDefault)),
-                    std::memory_order_release);
-    const unsigned bms = xcat::ClampMobGatherBrakeMs(
-        brakeMs > 0.f ? static_cast<uint32_t>(brakeMs) : xcat::kMobGatherBrakeMsDefault);
-    gBrakeSec.store(static_cast<float>(bms) * 0.001f, std::memory_order_release);
-    gCoastVy.store(static_cast<float>(xcat::ClampMobGatherCoastVy(
-                       static_cast<uint32_t>(coastVy > 0.f ? coastVy : 0.f))),
-                   std::memory_order_release);
+    gSettleErr.store(settleErr, std::memory_order_release);
+    gKpSettle.store(kpSettle, std::memory_order_release);
+    gBrakeSec.store(brakeMs * 0.001f, std::memory_order_release);
+    gCoastVy.store(coastVy, std::memory_order_release);
 }
 
 void SetGatherStandOff(bool custom, int32_t x, int32_t y) {
@@ -1079,6 +1076,13 @@ void SetGatherStandOff(bool custom, int32_t x, int32_t y) {
     if (prevX == ox && prevY == oy) return;
     gOffGen.fetch_add(1, std::memory_order_acq_rel);
 }
+
+void SetAimJitterPx(float px) {
+    if (px < 0.f) px = 0.f;
+    gAimJitterPx.store(px, std::memory_order_release);
+}
+
+float AimJitterPx() { return gAimJitterPx.load(std::memory_order_acquire); }
 
 void QueryGatherStandOff(float* outX, float* outY) {
     if (outX) *outX = gOffX.load(std::memory_order_acquire);

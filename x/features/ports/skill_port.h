@@ -61,6 +61,14 @@ void* GetSkillEntry(int skillId);
 // 当前等级表内 MP 消耗（SkillLevelData.MPCon）。读失败返回 -1（SendUse 会 fail-closed）。
 int GetSkillMpCon(int skillId);
 
+// 当前等级表内 attackCount。非攻击技 / 读失败返回 0。
+int GetSkillAttackCount(int skillId);
+// 当前等级表内 bulletCount（双飞斩等）。读失败返回 0。
+int GetSkillBulletCount(int skillId);
+// 当前等级 SkillLevelData.GetCrc()（Crc@+0xD8）。未 CalcCrc 时泵上调 GetCrc。
+// 必须在 MainPump 上调。读失败返回 0。禁止写死 send.log 里的常数。
+uint32_t GetSkillCrc(int skillId);
+
 // heavy：SkillRecord(+Ex) 优先；条目过少时回退扫 SkillInfo._dictionarySkill + GetSkillLevel。
 int ListLearnedSkills(SkillInfoLite* out, int cap);
 

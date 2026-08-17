@@ -303,7 +303,7 @@ DWORD gPostExtResumeUntil = 0;
 bool gResumeRelockPending = false;
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
-std::atomic<bool> gTeleportEnabled{false};  // fill+Doing 贴怪已禁用（封禁风险）；强制保持关
+std::atomic<bool> gTeleportEnabled{false};  // fill+Doing 瞬移找怪；面板单选，默认关
 std::atomic<bool> gImpactApproachEnabled{true};  // Impact 贴怪默认开；优先于拟人/瞬移
 std::atomic<bool> gHiraishinEnabled{false};      // 站桩输出；与 Impact/拟人互斥，默认关
 std::atomic<DWORD> gHiraishinLootHoldMs{xcat::kHiraishinLootHoldDefaultMs};
@@ -339,8 +339,7 @@ constexpr int kHitRotateWatchCap = 64;
 HitRotateWatch gHitRotateWatch[kHitRotateWatchCap];
 int gHitRotateWatchN = 0;
 std::atomic<uint32_t> gTeleportStandOff{xcat::kCombatTeleportStandOffDefault};
-// 直升机自定义站距（面板「自定义站距」）。与上面那个 gTeleportStandOff **无关**：
-// 那个还乘进 InHitBand 等地面判定，动它会波及瞬移/拟人；这组只喂直升机。
+// 自定义站距：水平 X 与瞬移/拟人 ClampStandOff 共用；Y 只喂直升机。
 std::atomic<bool> gStandOffCustom{false};
 std::atomic<uint32_t> gStandOffX{xcat::kCombatStandOffXDefault};
 std::atomic<int32_t> gStandOffY{xcat::kCombatStandOffYDefault};
@@ -1755,7 +1754,15 @@ bool SameLayerZm(int32_t playerZm, bool playerZmOk, float py, float mx, float my
 }
 
 float ClampStandOff() {
-    float s = static_cast<float>(gTeleportStandOff.load(std::memory_order_acquire));
+    // 与空中贴怪共用水平 X：勾「自定义站距」听用户；不勾用内置 60。
+    // 地面落点再夹进 12–200，避免贴怪心或 hop 过远。
+    float s;
+    if (gStandOffCustom.load(std::memory_order_acquire)) {
+        s = static_cast<float>(
+            xcat::ClampCombatStandOffX(gStandOffX.load(std::memory_order_acquire)));
+    } else {
+        s = static_cast<float>(xcat::kCombatStandOffXDefault);
+    }
     if (s < static_cast<float>(xcat::kCombatTeleportStandOffMin))
         s = static_cast<float>(xcat::kCombatTeleportStandOffMin);
     if (s > static_cast<float>(xcat::kCombatTeleportStandOffMax))
@@ -3131,8 +3138,8 @@ void PollF11NativeMob() {
 // 现与面板「自定义站距」开箱默认对齐：X=60 / Y=-4。
 constexpr float kHeliLiftPx = -4.f;
 
-// 水平站距。**不再共用 ClampStandOff()**：那是瞬移/拟人的落点偏移，下限被钉在 12，
-// 还会乘进 InHitBand，动它会波及另外两条位移路径 —— 直升机想调站距就只能连累它们。
+// 水平站距。地面 ClampStandOff() 已与自定义站距 X 共用；此处仍用同一组 X，
+// 但不套 12–200 的地面夹（弓/弩空中可以更远）。
 //
 // 历史分桶（3,265 观察窗）曾推 28；现产品默认改为 60，与自定义站距开箱一致。
 // 28 是近战格。飞镖/弓这类远程开打中换怪也走 60——禁止按钉锁把人按进贴脸。
@@ -5501,7 +5508,7 @@ void TickImpl(DWORD now) {
     TickMobSnapScope tickSnap(&snap);
 
     const float standOff = ClampStandOff();
-    // 优先级：站桩输出 > Impact 贴怪 > 拟人走路；fill+Doing 瞬移已禁用。
+    // 优先级：站桩输出 > Impact 贴怪 > 拟人走路 > fill+Doing 瞬移找怪。
     const bool hiraishinOn = gHiraishinEnabled.load(std::memory_order_acquire);
     const bool impactOn =
         !hiraishinOn && gImpactApproachEnabled.load(std::memory_order_acquire);
@@ -6008,17 +6015,50 @@ void TickImpl(DWORD now) {
                 EnterState(State::Acquire, now, "land_unsafe");
                 continue;
             }
-            // 封禁风险：战斗回落 fill+Doing 硬拒（即便 gTeleportEnabled 被误开）。
-            (void)cd;
-            (void)fh;
-            (void)hug;
-            (void)didChunk;
+            ports::teleport::SetNativeCooldownMs(cd);
+            // snapStand=true：NativeJob 用 SnapOnFh 钉死 EstimateLand 的台，不再 SnapStandAt 换邻段。
+            if (!ports::teleport::TeleportNativeSkillCall(tx, ty, fh, /*snapStand=*/true, &tx, &ty,
+                                                          &fh)) {
+                static DWORD sFail = 0;
+                if (!sFail || now - sFail > 1500) {
+                    sFail = now;
+                    LogLine("MoveTo teleport fail id=%d want=(%.0f,%.0f) hop=%.0f cd=%ums hug=%d",
+                            gLock.id, tx, ty, hop, cd, hug ? 1 : 0);
+                }
+                RenewLootPulseHold(now);
+                break;
+            }
+            ClearStickySpin();
+            const DWORD minSettle = same ? kPostDoingMinSettleMs : kPostDoingCrossLayerMinSettleMs;
+            const DWORD posGate = same ? kPostDoingPosSaneMaxMs : kPostDoingCrossPosSaneMaxMs;
+            LogLine(
+                "MoveTo fill+Doing id=%d to=(%.0f,%.0f) from=(%.0f,%.0f) hop=%.0f fh=%u cd=%ums "
+                "panelCd=%ums side=%d hug=%d settle=%ums posGate=%ums minSettle=%ums cross=%d chunk=%d",
+                gLock.id, tx, ty, player.x, player.y, hop, fh, cd, panelCd, gLandSide, hug ? 1 : 0,
+                SettleMsForHop(hop, hug), (unsigned)posGate, (unsigned)minSettle, same ? 0 : 1,
+                didChunk ? 1 : 0);
+            gSettleX = tx;
+            gSettleY = ty;
+            gSettleFh = fh;
+            gStandstillSince = now;
+            gStandstillAnchorX = tx;
+            gStandstillAnchorY = ty;
+            const DWORD settle = SettleMsForHop(hop, hug);
+            DWORD gate = settle;
+            if (gate < minSettle) gate = minSettle;
+            if (gate < posGate) gate = posGate;
+            gSettleNeedPosSane = true;
+            gSettleEnteredAt = now;
+            gSettleMinMs = minSettle;
+            gSettleWasCross = !same;
+            gSettleDiagLastMs = 0;
+            gSettleDidStabilize = false;
+            gSettleSawRpBad = false;
+            gSettleUntil = now + gate;
             (void)crossHop;
-            (void)panelCd;
-            LogLine("MoveTo teleport refused (native fill+Doing disabled) id=%d want=(%.0f,%.0f) hop=%.0f",
-                    gLock.id, tx, ty, hop);
-            RenewLootPulseHold(now);
-            break;
+            LogSettleDiag("enter", now, 0, 0.f);
+            EnterState(State::Settling, now, hug ? "tp_ok_hug" : "tp_ok");
+            break;  // 禁止同 tick Settling→Aim→Fire（Doing 刚写完的 Ap 不可信）
         }
 
         case State::Settling: {
@@ -7289,17 +7329,9 @@ void SetForgeHitEnabled(bool on) {
 bool IsForgeHitEnabled() { return gForgeHitEnabled.load(std::memory_order_acquire); }
 
 void SetTeleportEnabled(bool on) {
-    // 封禁风险：战斗 fill+Doing 回落永久关；忽略面板/ini 开启请求。
-    if (on) {
-        static DWORD sLast = 0;
-        const DWORD now = GetTickCount();
-        if (!sLast || now - sLast > 3000) {
-            sLast = now;
-            LogLine("SetTeleportEnabled refused (native fill+Doing disabled)");
-        }
-    }
-    const bool prev = gTeleportEnabled.exchange(false, std::memory_order_acq_rel);
-    if (prev) LogLine("SetTeleportEnabled forced off");
+    const bool prev = gTeleportEnabled.exchange(on, std::memory_order_acq_rel);
+    if (prev == on) return;
+    LogLine("SetTeleportEnabled %d", on ? 1 : 0);
 }
 
 void SetImpactApproachEnabled(bool on) {

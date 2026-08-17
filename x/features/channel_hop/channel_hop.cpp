@@ -798,6 +798,11 @@ void JobFn(void* user) {
         break;
     }
     case JobCtx::Kind::FireTransfer: {
+        // WaitFireIdle 可堵 2s，其间赶路可能已开工——发包前再挡一次。
+        if (x::features::travel::IsActive()) {
+            strncpy_s(job->err, "travel active", _TRUNCATE);
+            return;
+        }
         void* field = ports::world::GetMapScene();
         if (!field) {
             strncpy_s(job->err, "no Field", _TRUNCATE);
@@ -891,8 +896,8 @@ bool RunObserveJob(JobCtx& job) {
 void MaybeObserveNativeChannel(DWORD now) {
     if (GetStateLocal() != State::Idle) return;
     if (!ports::world::IsPlayReady()) return;
-    // soft 重进 / 落地静默：WM+0x6C 会抖，勿当官方换频推 sticky（BIN soft N→N+1）。
-    if (soft_login_probe::IsHoldActive() || soft_login_probe::IsLandQuiet()) return;
+    // soft 重进 / 落地静默 / deferred：WM+0x6C 会抖，勿当官方换频推 sticky。
+    if (soft_login_probe::IsReconnectInFlight()) return;
     static DWORD sLastObserveMs = 0;
     if (sLastObserveMs && now - sLastObserveMs < kObserveWmIntervalMs) return;
     sLastObserveMs = now;
@@ -1209,6 +1214,30 @@ void FinishActive(DWORD cooldownMs, DWORD now) {
         static_cast<unsigned>(kPostHopQuietMs), static_cast<unsigned>(cooldownMs));
 }
 
+// 超级赶路：整段停换频（含 Waiting）。
+// 不走 Fail：会 toast「换频失败」并可能 RequestAttempt 软重连，把赶路截断。
+// Waiting 包若已出门撤不回，只停本地结算——避免把赶路换图当成迁频 SettleOk。
+void AbortHopForTravel() {
+    if (!x::features::travel::IsActive()) return;
+    const State st = GetStateLocal();
+    const uint32_t pend = gPendingSeq.exchange(0);
+    const uint32_t active = gActiveSeq.load();
+    const bool held = gCombatPaused.load(std::memory_order_acquire) || gResumeAt != 0;
+    if (st == State::Idle && pend == 0 && !held) return;
+    if (st != State::Idle) {
+        gActiveSeq.store(0);
+        ClearAttemptState();
+        SetState(State::Idle);
+        Log("abort travel seq=%u was=%u (no more transfer)", active,
+            static_cast<unsigned>(st));
+    }
+    gResumeAt = 0;
+    gEarlyHoldFromRequest.store(false, std::memory_order_release);
+    ResumeCombatAfterHop();
+    ports::teleport::ClearNativeSelfCd();
+    if (pend) Log("drop pending seq=%u travel active", pend);
+}
+
 void TickPostHopResume(DWORD now) {
     if (gResumeAt == 0 || now < gResumeAt) return;
     // settle 后晚到的 InterStage：静默期满仍勿 resume，等回图再放刀。
@@ -1225,12 +1254,24 @@ void TickPostHopResume(DWORD now) {
     ResumeCombatAfterHop();
 }
 
-void Fail(const char* why) {
-    Log("fail seq=%u why=%s pending=%u attempts=%d", gActiveSeq.load(), why ? why : "?",
-        gPendingSeq.load(), gFireAttempt);
+void Fail(const char* why, bool recoverSoft = false) {
+    Log("fail seq=%u why=%s pending=%u attempts=%d recoverSoft=%d", gActiveSeq.load(),
+        why ? why : "?", gPendingSeq.load(), gFireAttempt, recoverSoft ? 1 : 0);
     Notify(notify::NotificationKind::Warning, "manual-rejoin-fail", "随机换频失败",
            why ? why : "未知错误");
     FinishActive(kCooldownAfterFailMs, GetTickCount());
+    // KickSniff 在 IsMigrateInFlight 时不抢 RequestAttempt。Fail 先 Idle 再拉 soft，
+    // 避免与 hop Waiting 双主（BIN 13:59：transfer→117ms Disc→soft 抢跑→hop Fail）。
+    // 不改 sticky 到目标频：脏断时包多半没落地，粘回当前 known。
+    if (!recoverSoft) return;
+    if (!soft_login_probe::IsArmed()) return;
+    if (soft_login_probe::IsHoldActive() || soft_login_probe::IsAttemptBusy()) {
+        Log("soft recover skip after fail: already hold/busy (%s)", why ? why : "?");
+        return;
+    }
+    Log("soft recover after hop fail (%s)", why ? why : "?");
+    soft_login_probe::RequestAttempt("disconnected");
+    kick_sniff::BumpDisconnectSeq();
 }
 
 // 迁频超时仍黑屏：粘 sticky + 拉 soft_login（已 Connected 则 dismiss+RequestRestart；
@@ -1265,7 +1306,7 @@ void RequestNmGoneSoft() {
 bool RejectDeadSessionSettle() {
     if (gSawConnecting || gSawLeavePlay) return false;
     if (kick_sniff::HasResolvedSession()) return false;
-    Fail("换频时会话已断（未见真实迁频）");
+    Fail("换频时会话已断（未见真实迁频）", /*recoverSoft=*/true);
     RequestNmGoneSoft();
     return true;
 }
@@ -1371,7 +1412,10 @@ void SucceedQueued() {
 // 每 Tick 更新：进图冷却只约束「刚进图 / 刚落地」窗口，不是「点 F10 才开始计时」。
 // BIN：Idle 无 pending 时早期 return，若不持续记时，图里挂很久再 hop 也会误报「进图冷却」。
 void UpdatePlayReadyClock(DWORD now) {
-    if (!ports::world::IsPlayReady()) {
+    // soft hold / land_quiet / attempt / deferred：PlayReady 可能已真，但会话未稳。
+    // 冻结进图时钟，等 IsReconnectInFlight 结束后再起算满 kLandGraceMs（BIN 23:48：
+    // soft 途中 playReadySince 已走过，land_quiet 一结束立刻 BeginActive）。
+    if (!ports::world::IsPlayReady() || soft_login_probe::IsReconnectInFlight()) {
         gPlayReadySince = 0;
         return;
     }
@@ -1379,6 +1423,7 @@ void UpdatePlayReadyClock(DWORD now) {
 }
 
 const char* DeferReason() {
+    if (soft_login_probe::IsReconnectInFlight()) return "软重连中";
     if (!ports::world::IsPlayReady() || gPlayReadySince == 0) return "未进图";
     const DWORD now = GetTickCount();
     // 换频静默只挡自动 resume 出刀，不挡立刻再 hop（BeginActive 会清 gResumeAt 并续持闸）
@@ -1411,6 +1456,10 @@ void MaybeNotifyDefer(uint32_t seq, const char* reason, DWORD now) {
 }
 
 void BeginActive(uint32_t seq, DWORD now) {
+    if (x::features::travel::IsActive()) {
+        Log("begin skip seq=%u travel active", seq);
+        return;
+    }
     gActiveSeq.store(seq);
     // Consume only this seq; keep a newer pending that raced in after Idle check.
     uint32_t expected = seq;
@@ -1433,6 +1482,7 @@ void BeginActive(uint32_t seq, DWORD now) {
 }
 
 void TickSelecting(DWORD now) {
+    if (x::features::travel::IsActive()) return;
     (void)now;
     JobCtx info{};
     info.kind = JobCtx::Kind::ReadInfo;
@@ -1456,6 +1506,7 @@ void TickSelecting(DWORD now) {
 }
 
 void TickConfirming(DWORD now) {
+    if (x::features::travel::IsActive()) return;
     if (gTargetChannel < 0) {
         Fail("无目标频道");
         return;
@@ -1522,14 +1573,18 @@ void TickConfirming(DWORD now) {
     gExclNotified = false;
 
     // BIN 19:38：NM 已空仍 SendTransfer → A8 假置位、27→28 假 settle、怪继续站桩。
-    if (!kick_sniff::HasResolvedSession()) {
-        Fail("会话已断，换频发不出");
-        RequestNmGoneSoft();
-        return;
-    }
+        if (!kick_sniff::HasResolvedSession()) {
+            Fail("会话已断，换频发不出", /*recoverSoft=*/true);
+            RequestNmGoneSoft();
+            return;
+        }
 
     // 再收一次在途攻击键；settle 跟墙钟对齐，防末火刚过就叠 Transfer
     (void)ports::attack::WaitFireIdle(kFireIdleTimeoutMs, kFireIdleSettleMs);
+    if (x::features::travel::IsActive()) {
+        Log("confirm skip transfer travel seq=%u", gActiveSeq.load());
+        return;
+    }
 
     JobCtx fire{};
     fire.kind = JobCtx::Kind::FireTransfer;
@@ -1539,6 +1594,10 @@ void TickConfirming(DWORD now) {
         Log("transfer blocked/fail seq=%u targetIdx=%d err=%s A8=%u→%u canSend=%d",
             gActiveSeq.load(), gTargetChannel, fire.err[0] ? fire.err : "?", fire.exclFlagA8,
             fire.exclFlagA8After, fire.exclOk ? 1 : 0);
+        if (std::strcmp(fire.err, "travel active") == 0) {
+            --gFireAttempt;
+            return;
+        }
         // excl busy 不应烧满人重试；回 Confirming 同目标等（attempt 已+1，用下一轮 Sample 挡）
         if (std::strcmp(fire.err, "excl busy") == 0) {
             --gFireAttempt;
@@ -1605,21 +1664,21 @@ void TickWaiting(DWORD now) {
         } else if (sess == kSessDisconnected) {
             char why[96]{};
             snprintf(why, sizeof(why), "会话已断开 sess=%d（换频未完成）", sess);
-            Fail(why);
+            Fail(why, /*recoverSoft=*/true);
             return;
         } else if (sess == kSessDisconnecting) {
             if (gDisconnectingSince == 0) gDisconnectingSince = now;
             if (now - gDisconnectingSince >= kDisconnectingGraceMs) {
                 char why[96]{};
                 snprintf(why, sizeof(why), "会话断开中超时 sess=%d（换频未完成）", sess);
-                Fail(why);
+                Fail(why, /*recoverSoft=*/true);
                 return;
             }
         } else {
             gDisconnectingSince = 0;
         }
         if (ss == ports::world::SceneState::Login) {
-            Fail("回到登录（换频断线）");
+            Fail("回到登录（换频断线）", /*recoverSoft=*/true);
             return;
         }
     }
@@ -1941,6 +2000,14 @@ bool HasPending() {
     return gPendingSeq.load() != 0 || GetStateLocal() != State::Idle;
 }
 
+bool IsMigrateInFlight() {
+    const State st = GetStateLocal();
+    if (st == State::Waiting && gWatchDisconnect) return true;
+    // A8=0 仍停 Confirming：包可能已出门、会话已抖，KickSniff 同样不得抢 soft。
+    if (st == State::Confirming && gFireAttempt > 0) return true;
+    return false;
+}
+
 DWORD CooldownRemainingMs() {
     const DWORD now = GetTickCount();
     if (now >= gCooldownUntil) return 0;
@@ -1949,6 +2016,10 @@ DWORD CooldownRemainingMs() {
 
 void Tick(DWORD now) {
     UpdatePlayReadyClock(now);
+    if (x::features::travel::IsActive()) {
+        AbortHopForTravel();
+        return;
+    }
     TickPostHopResume(now);
 
     // 持闸整段（活跃换频 / 换后静默 / Request 边沿）每拍重钉，防其它模块误清位后重新出刀。
@@ -2006,6 +2077,11 @@ void Tick(DWORD now) {
                 ResumeCombatAfterHop();
                 Log("hold pending seq=%u during %s (combat resume, fire after cool)", seq, defer);
             }
+        } else if (x::features::travel::IsActive()) {
+            gPendingSeq.store(0);
+            ResumeCombatAfterHop();
+            ports::teleport::ClearNativeSelfCd();
+            Log("begin skip seq=%u travel active", seq);
         } else {
             BeginActive(seq, now);
         }

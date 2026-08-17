@@ -43,9 +43,10 @@ unsigned AimIntervalMs();
 void SetIgnoreQuiet(bool on);
 void SetQuietDelayMs(unsigned ms);
 void SetApplyCtrl(bool on);
+// 首页挂机「主动软重连」。不绑吸怪；试连未开则只起表不拆会话。
 void SetSoftRelogin(bool on, unsigned sec);
 void TickSoftRelogin();
-// 顶栏倒计时：on=勾选；paused=hold/静默冻钟；remainMs=剩余（未起表 0）。
+// 顶栏倒计时：on=勾选；paused=hold/静默冻钟；remainMs=剩余（未起表 0xFFFFFFFF）。
 void QuerySoftReloginClock(unsigned* on, unsigned* paused, unsigned* remainMs, unsigned* needMs);
 void SetClearRelogin(bool on);
 void TickClearRelogin();

@@ -7,6 +7,7 @@
 #include "attack_input_port.h"
 #include "mob_pool_port.h"
 #include "player_combat_port.h"
+#include "skill_port.h"
 #include "world_port.h"
 #include "../final_attack_force/final_attack_force.h"
 #include "../../ui/player_vitals.h"
@@ -47,6 +48,8 @@ constexpr char kSkillInfoClass[] =
 constexpr char kHashMeleeAttackAction[] =
     "b3cf40917063e9f71eb5e5ddb56577f094998a0fa55e297bebdf2afdde085f2";
 constexpr size_t kOffMeleeAttackActionFb = 0x118;
+// SkillInfo.MagicAttackAction = Dictionary<int, List<ActionType>> @ static 0x128（CMS；无现成 hash）
+constexpr size_t kOffMagicAttackActionFb = 0x128;
 
 // P0b / P0c RVAs — remounted 2026-08-04；解析优先 hash/plain（见下方 kHash*）
 constexpr uint32_t kRvaOutPacketCreate = 0x1CEC3F0;
@@ -109,6 +112,7 @@ constexpr float kDropFootReachX = 0.f;
 
 // Create opcode 跟装备，不手选。射击 Create 种子已实算：word_7FFD6711C344=0xBABC
 // + 0x4577 → 0x10033 → u16 51（TryDoingShootAttack @ RVA 0x1070390）。
+// 魔法 Create 种子：word_7FFD790BB4E8(0x77FF)+0xFFFF8835 → 52（TryDoingMagicAttack @ RVA 0x10A9260）。
 constexpr int kOpcodeMeleeAttack = 50;
 constexpr int kOpcodeShootAttack = 51;
 constexpr int kOpcodeMagicAttack = 52;
@@ -142,7 +146,8 @@ constexpr int32_t kFkmBasicActionAttack = 52;
 #define kOffNmOpcodeHashSet (x::runtime::il2cpp_network::OffNmOpcodeHashSet())
 #define kOffSessionState (x::runtime::il2cpp_network::OffSessionState())
 constexpr int kSessionStateConnected = 3;
-constexpr size_t kOffMobPos = 0x64;  // FieldActorBase Pos (Vector2)
+constexpr size_t kOffMobPos = 0x64;  // FieldActorBase / VecCtrlOwner Pos (Vector2)
+constexpr size_t kOffMobPosPrev = 0x6C;  // VecCtrlOwner.PosPrev；官方命中环第二点
 constexpr size_t kOffMobData = 0x138;
 constexpr size_t kOffMobDataMoveAbility = 0x2C;  // TW MobData；CMS 在 0x34
 // MobMoveAbility：Stop=0 Walk=1 Jump=2 Fly=3 FlyRandom=4
@@ -162,6 +167,7 @@ constexpr int kPacketDataPos = 6;
 constexpr DWORD kRebindMs = 2000;
 constexpr DWORD kJobWaitMs = 2500;
 constexpr int kMaxMobsHard = 15;
+constexpr int kSkillDoubleStab = 4001334;  // 劈空斬：GetAttackSpeedDegree 再 -2
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -207,6 +213,13 @@ int gMeleeActN = 0;
 int gMeleeSeq = 0;
 DWORD gCachedMeleeMs = 0;
 const char* gCachedMeleeVia = "none";
+size_t gOffMagicAttackAction = 0;
+int gCachedMagicWt = -1;
+int gMagicActs[4]{};
+int gMagicActN = 0;
+int gMagicSeq = 0;
+DWORD gCachedMagicMs = 0;
+const char* gCachedMagicVia = "none";
 FnGetUpdateTime gGetUpdateTime = nullptr;
 MethodInfoHead* gMiGetUpdateTime = nullptr;
 
@@ -270,12 +283,47 @@ float ReadF32(void* obj, size_t off) {
 }
 
 // 飞行怪：短刀脚下环对不上判定盒（BIN 蝙蝠 38 包 hp=100；不勾造包走官方怪坐标有伤）。
+// 识别：Mob+0x138 → MobData，TW MoveAbility@+0x2C（CMS 0x34）。3=Fly 4=FlyRandom。
 bool MobIsFlyFamily(void* mob) {
     if (!LooksLikeHeapPtr(mob)) return false;
     void* data = ReadPtr(mob, kOffMobData);
     if (!LooksLikeHeapPtr(data)) return false;
     const int ma = ReadI32(data, kOffMobDataMoveAbility);
     return ma == kMoveAbilityFly || ma == kMoveAbilityFlyRandom;
+}
+
+// 当前 Pos@0x64 + PosPrev@0x6C。snap 是池里的坐标，堆指针有效时覆盖。
+// PosPrev 读成原点时退回当前点，飞行怪不要写人脚下。
+void FillMobAbsPos(void* mob, float snapX, float snapY, float* outX, float* outY, float* outPrevX,
+                   float* outPrevY, bool* outFly) {
+    float mx = snapX;
+    float my = snapY;
+    float prevX = snapX;
+    float prevY = snapY;
+    bool fly = false;
+    if (LooksLikeHeapPtr(mob)) {
+        const float cx = ReadF32(mob, kOffMobPos);
+        const float cy = ReadF32(mob, kOffMobPos + 4);
+        if (std::fabs(cx) > 0.5f || std::fabs(cy) > 0.5f) {
+            mx = cx;
+            my = cy;
+        }
+        const float vx = ReadF32(mob, kOffMobPosPrev);
+        const float vy = ReadF32(mob, kOffMobPosPrev + 4);
+        if (std::fabs(vx) > 0.5f || std::fabs(vy) > 0.5f) {
+            prevX = vx;
+            prevY = vy;
+        } else {
+            prevX = mx;
+            prevY = my;
+        }
+        fly = MobIsFlyFamily(mob);
+    }
+    *outX = mx;
+    *outY = my;
+    *outPrevX = prevX;
+    *outPrevY = prevY;
+    *outFly = fly;
 }
 
 void* FindClass(const char* name) { return x::runtime::il2cpp::FindClass("", name); }
@@ -488,6 +536,9 @@ int OpcodeFromWeaponType(int wt) {
 // CMS ActionType：SwingO1=5 单手/短刀；SwingT1=9 双手；SwingP1=13 枪矛。
 bool ActionLooksMelee(int a) { return (a >= 5 && a <= 21) || a == 32; }
 
+// CMS ActionType：MagicAttack1=28 MagicAttack2=29 MagicAttackF=30。
+bool ActionLooksMagic(int a) { return a == 28 || a == 29 || a == 30; }
+
 int FallbackMeleeAction(int wt) {
     if (wt >= kWtTwoHandSword && wt <= kWtTwoHandMace) return 9;
     if (wt == kWtSpear || wt == kWtPoleArm) return 13;
@@ -552,6 +603,13 @@ bool WeaponIsTwoHandFamily(int wt) { return wt >= kWtTwoHandSword && wt <= kWtPo
 
 bool WeaponIsDagger(int wt) { return wt == kWtDagger; }
 
+bool WeaponIsMagic(int wt) { return wt == kWtWand || wt == kWtStaff; }
+
+// 核爆术等蓄力技头里多一枚 tKeyDown Encode4。魔力爪没有。未适配前拒组。
+bool SkillIsMagicCharge(int skillId) {
+    return skillId == 2121001 || skillId == 2321001;
+}
+
 // 单手剑/斧/钝、徒手、指节：SwingO。短刀「WAS + 恒 05」在单手会写成 `05 05` 空挥。
 // 头必须 AttackType + 真 degree。P0c `01 05` 是 WAS=5 的剑；新手剑 1302000 WAS=4 → `01 04`。
 bool WeaponIsOneHandSwing(int wt) {
@@ -570,16 +628,27 @@ int FallbackAttackType(int wt) {
     if (wt == kWtTwoHandMace) return 7;
     if (wt == kWtSpear) return 8;
     if (wt == kWtPoleArm) return 9;
+    if (wt == kWtWand || wt == kWtStaff) return 6;
     if (wt == kWtKnuckle) return 13;
     return 1;
 }
 
-// 地面近战线。飞行怪环先搁置：不再用 fly 改 XY。
+// 地面近战线（飞行怪走另一套：当前 Pos + PosPrev，见组包循环）。
 // 短兵器（短刀/单手/徒手/指节）：脚下 + ForeAction 0x81。
 // 长兵器（双手剑/斧/钝 + 枪矛）：怪坐标 + ForeAction 0 + Delay 450（双手剑 send.log）。
 bool WeaponRingAtMob(int wt) { return WeaponIsTwoHandFamily(wt); }
 
-uint8_t WeaponForeAction(int wt) { return WeaponIsTwoHandFamily(wt) ? 0 : 0x81; }
+const char* MeleeRingName(bool fly, bool ringAtMob, bool magic) {
+    if (magic) return "magic";
+    if (fly) return "fly";
+    if (ringAtMob) return "mob";
+    return "feet";
+}
+
+uint8_t WeaponForeAction(int wt) {
+    if (WeaponIsTwoHandFamily(wt) || WeaponIsMagic(wt)) return 0;
+    return 0x81;
+}
 
 // 短刀 BIN 钉死 A5（WAS=3 也写 421，不跟公式）。双手剑钉死 C2。
 // 单手：P0b (tier+10)*450>>4。WZJS 1302000 WAS=4 → 393；WAS=5 → 421=A5（P0c）。
@@ -605,6 +674,7 @@ const char* MeleeFamilyName(int wt) {
     if (wt == kWtKnuckle) return "knuckle";
     if (wt >= kWtTwoHandSword && wt <= kWtTwoHandMace) return "2h";
     if (wt == kWtSpear || wt == kWtPoleArm) return "pole";
+    if (wt == kWtWand || wt == kWtStaff) return "magic";
     return "other";
 }
 
@@ -632,7 +702,7 @@ int ReadAvatarAttackType(void* localUser) {
     return ReadI32(localUser, kOffAvatarAttackType);
 }
 
-int FillActionsFromList(void* list, int* out, int cap) {
+int FillActionsFromList(void* list, int* out, int cap, bool magic) {
     if (!LooksLikeHeapPtr(list) || !out || cap <= 0) return 0;
     x::runtime::il2cpp_container::Ensure();
     x::runtime::il2cpp_container::RefineFromListInstance(list);
@@ -650,7 +720,11 @@ int FillActionsFromList(void* list, int* out, int cap) {
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             break;
         }
-        if (!ActionLooksMelee(v)) continue;
+        if (magic) {
+            if (!ActionLooksMagic(v)) continue;
+        } else {
+            if (!ActionLooksMelee(v)) continue;
+        }
         out[wrote++] = v;
     }
     return wrote;
@@ -710,7 +784,7 @@ int TryDictMeleeActions(int wt, int* out, int cap) {
         dict = sf ? ReadPtr(sf, gOffMeleeAttackAction) : nullptr;
     }
     if (!LooksLikeHeapPtr(dict)) return 0;
-    return FillActionsFromList(DictGetIntPtr(dict, wt), out, cap);
+    return FillActionsFromList(DictGetIntPtr(dict, wt), out, cap, false);
 }
 
 int PickMeleeAttackAction(int wt) {
@@ -747,6 +821,63 @@ int PickMeleeAttackAction(int wt) {
     return act;
 }
 
+int TryDictMagicActions(int key, int* out, int cap) {
+    if (key <= 0 || !out || cap <= 0 || !x::runtime::il2cpp::Ensure()) return 0;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!gSkillInfoKlass) gSkillInfoKlass = FindClass(kSkillInfoClass);
+    if (!gSkillInfoKlass) return 0;
+    if (!gOffMagicAttackAction) gOffMagicAttackAction = kOffMagicAttackActionFb;
+    auto staticsOf = [&]() -> void* {
+        if (!e.classStaticData) return nullptr;
+        void* sf = nullptr;
+        __try {
+            sf = e.classStaticData(gSkillInfoKlass);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            sf = nullptr;
+        }
+        return LooksLikeHeapPtr(sf) ? sf : nullptr;
+    };
+    void* sf = staticsOf();
+    void* dict = sf ? ReadPtr(sf, gOffMagicAttackAction) : nullptr;
+    if (!LooksLikeHeapPtr(dict)) {
+        x::runtime::il2cpp::RuntimeClassInit(gSkillInfoKlass);
+        sf = staticsOf();
+        dict = sf ? ReadPtr(sf, gOffMagicAttackAction) : nullptr;
+    }
+    if (!LooksLikeHeapPtr(dict)) return 0;
+    return FillActionsFromList(DictGetIntPtr(dict, key), out, cap, true);
+}
+
+int PickMagicAttackAction(int wt) {
+    const DWORD now = GetTickCount();
+    if (wt != gCachedMagicWt || gMagicActN <= 0 || now - gCachedMagicMs >= 8000) {
+        int n = TryDictMagicActions(wt, gMagicActs, 4);
+        const char* via = "dict";
+        if (n <= 0 && wt != 6) {
+            n = TryDictMagicActions(6, gMagicActs, 4);
+            via = "dict.at";
+        }
+        if (n <= 0) {
+            gMagicActs[0] = 28;
+            gMagicActs[1] = 29;
+            n = 2;
+            via = "fb";
+        }
+        gCachedMagicWt = wt;
+        gMagicActN = n;
+        gMagicSeq = 0;
+        gCachedMagicMs = now;
+        gCachedMagicVia = via;
+        x::runtime::LogI("AttackRpc", "magic action wt=%d n=%d a0=%d a1=%d a2=%d via=%s", wt, n,
+                         n > 0 ? gMagicActs[0] : 0, n > 1 ? gMagicActs[1] : 0,
+                         n > 2 ? gMagicActs[2] : 0, via);
+    }
+    if (gMagicActN <= 0) return 28;
+    const int act = gMagicActs[gMagicSeq % gMagicActN];
+    if (gMagicActN > 1) ++gMagicSeq;
+    return act;
+}
+
 int ReadWeaponTypeOnPump() {
     int wt = 0;
     __try {
@@ -757,8 +888,8 @@ int ReadWeaponTypeOnPump() {
     return wt;
 }
 
-// 组包只覆盖普攻。A 槽是技能 / 宏 / 非出刀绑定 → err，调用方改走 OnFuncKey。
-// 空绑由 attack_input 合成 5/52，这里看成普攻。
+// A 空 / BasicAction Attack → 近战普攻。A 槽近战攻击技 → opcode 50；A 槽魔法攻击技 → 52。
+// 飞镖/弓/杖普攻 NA、双飞斩（bulletCount）、蓄力技、BUFF/宏：不组包。
 bool ResolveASlotAttackOnPump(int* outSkill, int* outOp, int* outWt, int* outFkT, int* outFkV,
                               const char** outSrc, const char** outErr) {
     const int wt = ReadWeaponTypeOnPump();
@@ -772,7 +903,15 @@ bool ResolveASlotAttackOnPump(int* outSkill, int* outOp, int* outWt, int* outFkT
         if (fkT == kFuncTypeSkill && fkV > 0) {
             skillId = fkV;
             src = "a_skill";
-            err = "a_slot_skill";
+            if (opcode == kOpcodeShootAttack) {
+                err = "op_not_melee";
+            } else if (x::features::ports::skill::GetSkillBulletCount(skillId) > 0) {
+                err = "a_slot_shoot";
+            } else if (opcode == kOpcodeMagicAttack && SkillIsMagicCharge(skillId)) {
+                err = "a_slot_charge";
+            } else if (x::features::ports::skill::GetSkillAttackCount(skillId) <= 0) {
+                err = "a_slot_skill";
+            }
         } else if (fkT == kFuncTypeMacroSkill) {
             src = "a_macro";
             err = "a_slot_skill";
@@ -783,10 +922,14 @@ bool ResolveASlotAttackOnPump(int* outSkill, int* outOp, int* outWt, int* outFkT
             err = "use_onfunckey";
         }
     }
-    // 现网 send.log 无 op=51 BODY；51/52 头字段补 0 已 BIN 踢号（盗贼飞镖 wt=47）。
-    if (!err && (opcode == kOpcodeShootAttack || opcode == kOpcodeMagicAttack)) {
+    // 51 无真 BODY 仍拒。52 只组 A 槽魔法攻击技；杖 NA 无 BIN。
+    if (!err && opcode == kOpcodeShootAttack) {
         err = "op_not_melee";
-        src = opcode == kOpcodeShootAttack ? "a_na.shoot" : "a_na.magic";
+        src = "a_na.shoot";
+    }
+    if (!err && opcode == kOpcodeMagicAttack && skillId <= 0) {
+        err = "op_not_melee";
+        src = "a_na.magic";
     }
     if (outSkill) *outSkill = skillId;
     if (outOp) *outOp = opcode;
@@ -801,7 +944,8 @@ bool ResolveASlotAttackOnPump(int* outSkill, int* outOp, int* outWt, int* outFkT
 // TryDoingNormalAttack 在 Create 前：SetAttackAction(lu, action, nAttackSpeed, null, 0)；
 // Collect 在出站 Tap（SendOut 不直调）——探针显式补一刀，避免本地窗与出站脱节。
 // 失败只打日志，不阻断 forge（避免 SetAttackAction 参数漂导致探针哑火）。
-void TryLocalAttackPrereq(void* localUser, int32_t actionId, int32_t attackSpeed, int opcode) {
+void TryLocalAttackPrereq(void* localUser, int32_t actionId, int32_t attackSpeed, int opcode,
+                          void* skillEntry, int slv) {
     if (!gGA) return;
     if (!gSetAttackAction) {
         void* userKlass = x::runtime::il2cpp::FindClass("", kHashUserClass);
@@ -823,14 +967,17 @@ void TryLocalAttackPrereq(void* localUser, int32_t actionId, int32_t attackSpeed
     }
     if (LooksLikeHeapPtr(localUser) && gSetAttackAction) {
         bool ok = false;
+        void* skillArg = LooksLikeHeapPtr(skillEntry) ? skillEntry : nullptr;
+        const int slvArg = skillArg ? slv : 0;
         __try {
-            // CMS：SetAttackAction(nAttackAction, nAttackSpeed, skill=null, nSLV=0)
-            ok = gSetAttackAction(localUser, actionId, attackSpeed, nullptr, 0, gMiSetAttackAction);
+            // CMS：SetAttackAction(nAttackAction, nAttackSpeed, skill, nSLV)
+            ok = gSetAttackAction(localUser, actionId, attackSpeed, skillArg, slvArg,
+                                  gMiSetAttackAction);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             ok = false;
         }
-        x::runtime::LogI("AttackRpc", "SetAttackAction action=%d spd=%d ok=%d", actionId,
-                         attackSpeed, ok ? 1 : 0);
+        x::runtime::LogI("AttackRpc", "SetAttackAction action=%d spd=%d skill=%p slv=%d ok=%d",
+                         actionId, attackSpeed, skillArg, slvArg, ok ? 1 : 0);
     }
     if (gCollectAttackPacket) {
         __try {
@@ -1177,6 +1324,8 @@ void FireJobOnMain(void* user) {
         int32_t oid = 0;
         float x = 0.f;
         float y = 0.f;
+        float px = 0.f;
+        float py = 0.f;
         int32_t ctrl = 0;
         bool fly = false;
     };
@@ -1191,19 +1340,17 @@ void FireJobOnMain(void* user) {
             if (m.hpPct <= 0) continue;
             float mx = m.x;
             float my = m.y;
-            if (LooksLikeHeapPtr(m.ptr)) {
-                const float px = ReadF32(m.ptr, kOffMobPos);
-                const float py = ReadF32(m.ptr, kOffMobPos + 4);
-                if (std::fabs(px) > 0.5f || std::fabs(py) > 0.5f) {
-                    mx = px;
-                    my = py;
-                }
-            }
+            float prevX = m.x;
+            float prevY = m.y;
+            bool fly = false;
+            FillMobAbsPos(m.ptr, m.x, m.y, &mx, &my, &prevX, &prevY, &fly);
             hits[0].oid = m.id;
             hits[0].x = mx;
             hits[0].y = my;
+            hits[0].px = prevX;
+            hits[0].py = prevY;
             hits[0].ctrl = m.ctrl;
-            hits[0].fly = MobIsFlyFamily(m.ptr);
+            hits[0].fly = fly;
             nHit = 1;
             break;
         }
@@ -1240,6 +1387,8 @@ void FireJobOnMain(void* user) {
         int32_t oid = 0;
         float x = 0.f;
         float y = 0.f;
+        float px = 0.f;
+        float py = 0.f;
         float dist = 0.f;
         int32_t ctrl = 0;
         bool fly = false;
@@ -1257,14 +1406,10 @@ void FireJobOnMain(void* user) {
         if (m.hpPct <= 0) continue;
         float mx = m.x;
         float my = m.y;
-        if (LooksLikeHeapPtr(m.ptr)) {
-            const float px = ReadF32(m.ptr, kOffMobPos);
-            const float py = ReadF32(m.ptr, kOffMobPos + 4);
-            if (std::fabs(px) > 0.5f || std::fabs(py) > 0.5f) {
-                mx = px;
-                my = py;
-            }
-        }
+        float prevX = m.x;
+        float prevY = m.y;
+        bool fly = false;
+        FillMobAbsPos(m.ptr, m.x, m.y, &mx, &my, &prevX, &prevY, &fly);
         const float dx = mx - ctx.x;
         const float dy = my - ctx.y;
         const float dist = std::sqrt(dx * dx + dy * dy);
@@ -1279,9 +1424,11 @@ void FireJobOnMain(void* user) {
         cands[nCand].oid = m.id;
         cands[nCand].x = mx;
         cands[nCand].y = my;
+        cands[nCand].px = prevX;
+        cands[nCand].py = prevY;
         cands[nCand].dist = dist;
         cands[nCand].ctrl = m.ctrl;
-        cands[nCand].fly = MobIsFlyFamily(m.ptr);
+        cands[nCand].fly = fly;
         ++nCand;
     }
     // 排序：我控优先，同档按距升序
@@ -1301,6 +1448,8 @@ void FireJobOnMain(void* user) {
         hits[nHit].oid = cands[i].oid;
         hits[nHit].x = cands[i].x;
         hits[nHit].y = cands[i].y;
+        hits[nHit].px = cands[i].px;
+        hits[nHit].py = cands[i].py;
         hits[nHit].ctrl = cands[i].ctrl;
         hits[nHit].fly = cands[i].fly;
         ++nHit;
@@ -1348,10 +1497,10 @@ void FireJobOnMain(void* user) {
     job->skillId = skillId;
     job->fkType = fkT;
     job->fkValue = fkV;
-    if (opcode != kOpcodeMeleeAttack) {
+    if (opcode != kOpcodeMeleeAttack && !(opcode == kOpcodeMagicAttack && skillId > 0)) {
         job->err = "op_not_melee";
-        x::runtime::LogI("AttackRpc", "skip forge err=op_not_melee op=%d wt=%d src=%s", opcode,
-                         weaponType, opSrc);
+        x::runtime::LogI("AttackRpc", "skip forge err=op_not_melee op=%d wt=%d src=%s skill=%d",
+                         opcode, weaponType, opSrc, skillId);
         return;
     }
     if (weaponType == 0) {
@@ -1372,21 +1521,33 @@ void FireJobOnMain(void* user) {
 
     int was = 0;
     int boost = 0;
-    const int attackSpeed = ReadAvatarAttackSpeed(ctx.localUser, &was, &boost);
+    const int attackSpeedRaw = ReadAvatarAttackSpeed(ctx.localUser, &was, &boost);
+    int attackSpeed = attackSpeedRaw;
+    if (skillId == kSkillDoubleStab) {
+        attackSpeed = ClampDegree(attackSpeedRaw - 2);
+    }
     const bool twoHand = WeaponIsTwoHandFamily(weaponType);
     const bool oneHand = WeaponIsOneHandSwing(weaponType);
     const bool dagger = WeaponIsDagger(weaponType);
+    const bool magic = opcode == kOpcodeMagicAttack;
     const bool typeThenSpeed = twoHand || oneHand;
     const bool ringAtMob = WeaponRingAtMob(weaponType);
     const uint8_t foreAction = WeaponForeAction(weaponType);
     const uint16_t hitDelay = WeaponHitDelay(weaponType, attackSpeed);
+    int hitDmgN = 1;
+    if (skillId > 0) {
+        const int ac = x::features::ports::skill::GetSkillAttackCount(skillId);
+        if (ac > 1) hitDmgN = ac;
+        if (hitDmgN > 15) hitDmgN = 15;
+    }
     const char* fam = MeleeFamilyName(weaponType);
     // 本地挥砍动画用 3，看起来快。线上速度字节必须写真 degree：
     // 双手剑 BIN 把第二字节改成 3 → 100→99 磨血。
     constexpr int kForgeFastDegree = 3;
-    const int animSpd = typeThenSpeed ? kForgeFastDegree : attackSpeed;
+    const int animSpd = skillId > 0 ? attackSpeed : (typeThenSpeed ? kForgeFastDegree : attackSpeed);
 
-    uint16_t action = static_cast<uint16_t>(PickMeleeAttackAction(weaponType) & 0x7FFF);
+    uint16_t action = static_cast<uint16_t>(
+        (magic ? PickMagicAttackAction(weaponType) : PickMeleeAttackAction(weaponType)) & 0x7FFF);
     if (faceLeft) action = static_cast<uint16_t>(action | 0x8000u);
     const int attackTypeRaw = ReadAvatarAttackType(ctx.localUser);
     const int attackType = ResolveWireAttackType(weaponType, attackTypeRaw, was);
@@ -1396,15 +1557,35 @@ void FireJobOnMain(void* user) {
     if (sSpdLogs < 16) {
         x::runtime::LogI("AttackRpc",
                          "melee encode fam=%s wt=%d action=%d spd=%d was=%d boost=%d "
-                         "atkType=%d rawAt=%d seq=%d n=%d ring=%s delay=%u fa=0x%02X",
+                         "atkType=%d rawAt=%d skill=%d hitN=%d seq=%d n=%d ring=%s delay=%u "
+                         "fa=0x%02X",
                          fam, weaponType, action & 0x7FFF, animSpd, was, boost, attackType,
-                         attackTypeRaw, gMeleeSeq, gMeleeActN, ringAtMob ? "mob" : "feet",
+                         attackTypeRaw, skillId, hitDmgN, magic ? gMagicSeq : gMeleeSeq,
+                         magic ? gMagicActN : gMeleeActN,
+                         MeleeRingName(nHit > 0 && hits[0].fly, ringAtMob, magic),
                          static_cast<unsigned>(hitDelay), foreAction);
         ++sSpdLogs;
     }
 
-    // 对齐正路：Create 前先 SetAttackAction(action, nAttackSpeed) + Collect
-    TryLocalAttackPrereq(ctx.localUser, static_cast<int32_t>(action & 0x7FFF), animSpd, opcode);
+    void* skillEntry = nullptr;
+    int slv = 0;
+    if (skillId > 0) {
+        skillEntry = x::features::ports::skill::GetSkillEntry(skillId);
+        slv = x::features::ports::skill::GetSkillLevel(skillId);
+    }
+    TryLocalAttackPrereq(ctx.localUser, static_cast<int32_t>(action & 0x7FFF), animSpd, opcode,
+                         skillEntry, slv);
+
+    uint32_t skillCrc = 0;
+    if (magic) {
+        skillCrc = x::features::ports::skill::GetSkillCrc(skillId);
+        if (skillCrc == 0) {
+            job->err = "no_skill_crc";
+            x::runtime::LogW("AttackRpc", "skip forge err=no_skill_crc skill=%d lv=%d", skillId,
+                             slv);
+            return;
+        }
+    }
 
     auto* create = reinterpret_cast<FnOutCreate>(
         gMiCreate && gMiCreate->methodPointer ? gMiCreate->methodPointer
@@ -1426,21 +1607,32 @@ void FireJobOnMain(void* user) {
     }
 
     // Header：对齐 send.log 真包（portal 恒 0x01；flags 高 nibble = mobCount）
-    // off=55：01 11 | skill0×2 | bool0 | action | 01 05 | tOrKey | 命中环 | 玩家i16
+    // 近战 flags 低 nibble 钉 1；52 魔力爪真包 = attackCount | (mobCount<<4) → 单怪 2 段 = 0x12。
+    const uint8_t flagsNibble =
+        magic ? static_cast<uint8_t>(hitDmgN & 0xF) : static_cast<uint8_t>(1u);
     const uint8_t flags =
-        static_cast<uint8_t>((1u & 0xFu) | (static_cast<uint32_t>(nHit) << 4));
+        static_cast<uint8_t>(flagsNibble | (static_cast<uint32_t>(nHit) << 4));
     Encode1(pkt, 1);  // portal：真包一律 0x01
     Encode1(pkt, flags);
     Encode4(pkt, skillId);
-    Encode4(pkt, kSkillExtra);
-    // P0c：Shoot 头比 Melee 多 Encode4；Magic 多 Encode4。占位 0，等 51/52 wire BIN。
-    if (opcode == kOpcodeShootAttack || opcode == kOpcodeMagicAttack) Encode4(pkt, 0);
+    if (magic)
+        Encode4U(pkt, skillCrc);
+    else
+        Encode4(pkt, kSkillExtra);
+    // P0c：Shoot 头比 Melee 多 Encode4。Magic 蓄力技才多 Encode4；魔力爪跳过。
+    if (opcode == kOpcodeShootAttack) Encode4(pkt, 0);
     Encode1Bool(pkt, false);
 
     Encode2U(pkt, action);
-    // 短刀 BIN：WAS + 恒 05（`03 05`）。其余近战：AttackType + 真 degree。
-    // 单手剑：1302000 WAS=4 → `01 04`；WAS=5 剑才是 P0c `01 05`。双手剑真包 `05 06`。
-    if (dagger) {
+    // 地面短刀普攻 BIN：WAS + 恒 05。飞行 / 技能走官方 AttackType + degree。
+    bool anyFly = false;
+    for (int i = 0; i < nHit; ++i) {
+        if (hits[i].fly) {
+            anyFly = true;
+            break;
+        }
+    }
+    if (dagger && !anyFly && skillId <= 0) {
         hdr0 = static_cast<uint8_t>(ClampAttackSpeed(attackSpeed));
         hdr1 = 5;
     } else {
@@ -1478,27 +1670,46 @@ void FireJobOnMain(void* user) {
     const float dropAimY = ctx.y;
     int body = 19;
     if (opcode == kOpcodeShootAttack) body += 8;  // extra Encode4 + Encode2×2
-    if (opcode == kOpcodeMagicAttack) body += 4;
+    if (magic) body += 1;                         // 尾巴龙 bool；头不再多 Encode4
     for (int i = 0; i < nHit; ++i) {
         Encode4(pkt, hits[i].oid);
-        Encode1(pkt, 6);  // HitAction：双手剑/短刀真包都是 06
-        // 短刀 P0c：ForeAction 0x81。双手剑 send.log：00/06，从不是 0x81。
+        Encode1(pkt, 6);  // HitAction：双手剑/短刀/魔力爪真包都是 06
+        // 短刀 P0c：ForeAction 0x81。双手剑 send.log：00/06，从不是 0x81。52 钉 0。
         Encode1(pkt, foreAction);
         Encode1(pkt, 0);
         Encode1(pkt, 1);
-        // 短兵器写脚下（落物）。长兵器写怪坐标。飞行怪先不改环。
-        const float ringX = ringAtMob ? hits[i].x : dropAimX;
-        const float ringY = ringAtMob ? hits[i].y : dropAimY;
-        encXY(ringX, ringY);
-        encXY(ringX, ringY);
+        // 地面：短兵器脚下、长兵器怪坐标（两枚同点）。
+        // 飞行 / 52：官方两点 = 当前 Pos + PosPrev@0x6C。52 不要写脚下。
+        float ringX1 = dropAimX;
+        float ringY1 = dropAimY;
+        float ringX2 = dropAimX;
+        float ringY2 = dropAimY;
+        if (hits[i].fly || magic) {
+            ringX1 = hits[i].x;
+            ringY1 = hits[i].y;
+            ringX2 = hits[i].px;
+            ringY2 = hits[i].py;
+        } else if (ringAtMob) {
+            ringX1 = hits[i].x;
+            ringY1 = hits[i].y;
+            ringX2 = hits[i].x;
+            ringY2 = hits[i].y;
+        }
+        encXY(ringX1, ringY1);
+        encXY(ringX2, ringY2);
         // AttackInfo.Delay 上线成 u16。短刀钉 A5；双手剑钉 C2；单手按 degree 算。
+        // 技能：表内 attackCount 段伤害（劈空斬 2、迴旋斬 4–6）。普攻 1 段。
         Encode2U(pkt, hitDelay);
-        Encode4(pkt, dmg);
+        for (int h = 0; h < hitDmgN; ++h) Encode4(pkt, dmg);
         Encode4U(pkt, 0);  // fieldId 真包 = 0（勿塞 mapId）
-        body += 30;
+        body += 26 + 4 * hitDmgN;
     }
     encXY(ctx.x, ctx.y);
     body += 4;
+    if (magic) {
+        Encode1Bool(pkt, false);
+        body += 1;
+    }
 
     int off = 0;
     const uint8_t* bufObj = nullptr;
@@ -1530,18 +1741,18 @@ void FireJobOnMain(void* user) {
             if (i + 1 < n) hp += snprintf(hex + hp, sizeof(hex) - hp, " ");
         }
         x::runtime::LogI("AttackRpc",
-                         "forge BODY off=%d op=%d fam=%s wt=%d skill=%d fkT=%d fkV=%d src=%s mobs=%d "
-                         "tOrKey=%d action=0x%04X hdr=%02X %02X oid=%d ctrl=%d(%s) dist=%.0f "
-                         "player=(%.0f,%.0f) mob=(%.0f,%.0f) dropAimAp=(%.0f,%.0f) "
-                         "wireY=%d fly=%d ring=%s hex=%s%s",
-                         off, opcode, fam, weaponType, skillId, fkT, fkV, opSrc, nHit, tOrKey,
-                         static_cast<unsigned>(action), hdr0, hdr1, hits[0].oid, hits[0].ctrl,
-                         mob::CtrlName(hits[0].ctrl),
+                         "forge BODY off=%d op=%d fam=%s wt=%d skill=%d crc=0x%08X fkT=%d fkV=%d "
+                         "src=%s mobs=%d tOrKey=%d action=0x%04X hdr=%02X %02X oid=%d ctrl=%d(%s) "
+                         "dist=%.0f player=(%.0f,%.0f) mob=(%.0f,%.0f) prev=(%.0f,%.0f) "
+                         "dropAimAp=(%.0f,%.0f) wireY=%d fly=%d ring=%s hex=%s%s",
+                         off, opcode, fam, weaponType, skillId, skillCrc, fkT, fkV, opSrc, nHit,
+                         tOrKey, static_cast<unsigned>(action), hdr0, hdr1, hits[0].oid,
+                         hits[0].ctrl, mob::CtrlName(hits[0].ctrl),
                          std::sqrt((hits[0].x - ctx.x) * (hits[0].x - ctx.x) +
                                    (hits[0].y - ctx.y) * (hits[0].y - ctx.y)),
-                         ctx.x, ctx.y, hits[0].x, hits[0].y, dropAimX, dropAimY,
-                         static_cast<int>(-dropAimY), hits[0].fly ? 1 : 0,
-                         ringAtMob ? "mob" : "feet", hex,
+                         ctx.x, ctx.y, hits[0].x, hits[0].y, hits[0].px, hits[0].py, dropAimX,
+                         dropAimY, static_cast<int>(-dropAimY), hits[0].fly ? 1 : 0,
+                         MeleeRingName(hits[0].fly, ringAtMob, magic), hex,
                          nBody > 96 ? " ..." : "");
         ++sHexLogs;
         sLastHexMs = nowHex;
@@ -1588,11 +1799,13 @@ void FireJobOnMain(void* user) {
     if (lockOid > 0) {
         x::runtime::LogI("AttackRpc",
                          "forge_lock sent oid=%d nHit=%d op=%d wt=%d skill=%d fkT=%d fkV=%d "
-                         "src=%s body~%d dist=%.0f player=(%.0f,%.0f) mob=(%.0f,%.0f)",
+                         "src=%s body~%d dist=%.0f player=(%.0f,%.0f) mob=(%.0f,%.0f) "
+                         "prev=(%.0f,%.0f) fly=%d ring=%s",
                          lockOid, nHit, opcode, weaponType, skillId, fkT, fkV, opSrc, body,
                          std::sqrt((hits[0].x - ctx.x) * (hits[0].x - ctx.x) +
                                    (hits[0].y - ctx.y) * (hits[0].y - ctx.y)),
-                         ctx.x, ctx.y, hits[0].x, hits[0].y);
+                         ctx.x, ctx.y, hits[0].x, hits[0].y, hits[0].px, hits[0].py,
+                         hits[0].fly ? 1 : 0, MeleeRingName(hits[0].fly, ringAtMob, magic));
     }
 }
 

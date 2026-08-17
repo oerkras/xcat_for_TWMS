@@ -10,7 +10,7 @@
 // v10：当前频道（1-based ch.N）→ 探活头 → 运维台（地图 Id 已在 v2 mapId）。
 // v11：原生 MapDataInfo.IsTown（守护主城无经验豁免；绕过拍卖强制写前的真值）。
 // v12：高价值卷轴快照（消耗栏 204/234 → launcher 探活头 → 运维台；客户端无 UI）。
-// v13：吸怪定时软重连倒计时 → ImGui 顶栏。
+// v13：主动软重连倒计时 → ImGui 顶栏。
 
 #include <Windows.h>
 
@@ -96,7 +96,7 @@ struct PayloadStatus {
     uint32_t playerWealthScrollsValid = 0;
     char playerWealthScrolls[384]{};
 
-    // v13：吸怪「X秒后触发软重连」墙钟（payload 写、顶栏读）
+    // v13：首页「主动软重连」墙钟（payload 写、顶栏读）
     uint32_t softReloginOn = 0;        // 勾选
     uint32_t softReloginPaused = 0;    // hold / 落地静默冻钟
     uint32_t softReloginRemainMs = 0;  // 剩余；0xFFFFFFFF=勾了未起表

@@ -216,7 +216,8 @@ constexpr int kThunderDartItemId = 2070005;
 // 全图扫池：新出现的可捡卷軸 / 雷之鏢（按 dropId 去重；换 DropPool 清空）。其它装备不进提示。
 int CollectNewHighValueDropAlerts(HighValueDropAlert* out, int maxOut);
 
-// 已叮咚过的卷軸/雷之鏢从池里消失（换池不清，避免进图误报拾取成功）。
+// 已叮咚过的卷軸/雷之鏢从池里消失，且消耗栏该 itemId 数量增加，才报拾取成功。
+// 仅从池消失（空吸/闪漏/别人捡）不报；同一 dropId 再出现不重复叮咚。换池不清。
 int CollectGoneHighValueDrops(HighValueDropAlert* out, int maxOut);
 
 // 主线程：仅 DropPool.TryPickUpDrop(角色位)；范围/门禁全交给游戏原生

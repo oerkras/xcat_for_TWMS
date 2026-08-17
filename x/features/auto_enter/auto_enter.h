@@ -34,8 +34,11 @@ int StickyChannel1Based();
 bool IsFailed();
 
 // WaitCharSelect 相位超时次数（跨 RequestRestart 保留；进图 Done / 关自动进 清零）。
-// 软路径满 2 次先 CloseSession 再连；已拆过仍超时才 Finish(2)。
+// 软路径：avatars>0 满 2 次先 CloseSession 再连；avatars=0 视为登录作废，禁止再拆。
 int CharSelectTimeoutStreak();
+
+// 最近一次选角页快照的角色数。avatars=0 + Notice =「已登出登入的帳號」。
+int LastCharAvatarCount();
 
 // 选角链路已收尾（Done）。软重进用来发现「Done 了但迟迟不 play-ready」的卡死，
 // 避免空等到 reenter_timeout（dcaf08：Done@01:16:21 → 仍 playReady=0 直到 01:18:11 fail）。

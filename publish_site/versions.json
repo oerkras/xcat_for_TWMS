@@ -1,14 +1,38 @@
 {
-    "updatedAt":  "2026-08-16 21:03:52",
-    "latest":  "xcat_for_twms_0816_0.1.154_build154.zip",
+    "updatedAt":  "2026-08-17 17:00:39",
+    "latest":  "xcat_for_twms_0817_0.1.157_build157.zip",
     "versions":  [
+                     {
+                         "name":  "xcat_for_twms_0817_0.1.157_build157.zip",
+                         "file":  "/downloads/xcat_for_twms_0817_0.1.157_build157.zip",
+                         "publishedAt":  "2026-08-17 17:00:39",
+                         "sizeBytes":  6542180,
+                         "sizeText":  "6.24 MB",
+                         "isLatest":  true
+                     },
+                     {
+                         "name":  "xcat_for_twms_0816_0.1.156_build156.zip",
+                         "file":  "/downloads/xcat_for_twms_0816_0.1.156_build156.zip",
+                         "publishedAt":  "2026-08-16 22:26:20",
+                         "sizeBytes":  6536698,
+                         "sizeText":  "6.23 MB",
+                         "isLatest":  false
+                     },
+                     {
+                         "name":  "xcat_for_twms_0816_0.1.155_build155.zip",
+                         "file":  "/downloads/xcat_for_twms_0816_0.1.155_build155.zip",
+                         "publishedAt":  "2026-08-16 22:19:39",
+                         "sizeBytes":  6536191,
+                         "sizeText":  "6.23 MB",
+                         "isLatest":  false
+                     },
                      {
                          "name":  "xcat_for_twms_0816_0.1.154_build154.zip",
                          "file":  "/downloads/xcat_for_twms_0816_0.1.154_build154.zip",
                          "publishedAt":  "2026-08-16 21:03:52",
                          "sizeBytes":  6533755,
                          "sizeText":  "6.23 MB",
-                         "isLatest":  true
+                         "isLatest":  false
                      },
                      {
                          "name":  "xcat_for_twms_0816_0.1.153_build153.zip",

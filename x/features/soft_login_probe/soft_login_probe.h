@@ -16,7 +16,8 @@
 //   kMinHoldMs(2s)；land_quiet 期内 KickSniff 不得 bump disconnectSeq。否则观察窗
 //   在两拍之间消失，守护看到「seq 涨了且 hold=0」就杀进程（BIN 17:29 / 01:00:25）。
 // - 真断线 why 下 MapScene 残留不判 already_in_map 成功；但 playReady+挂台+Connected
-//   稳住 kInMapRecoverConfirmMs(8s) 认「游戏自己恢复」，避免十分钟空 hold 后误杀。
+//   稳住 kInMapRecoverConfirmMs(2s) 认「游戏自己恢复」。残留期间禁止 ConnectLogin / 进大厅
+//   （BIN 00:14:59 叠登 →「已登出登入的帳號」+ avatars=0）。
 // - 窗口内连续失败满额则暂停接管（熔断），把干净重拉交回守护，防止 hold 无限架空守护。
 //
 // SceneLogin 进图后可能暂为空（sl_null）：hold 内重试 ~20s，并接受游戏自连 Connecting；

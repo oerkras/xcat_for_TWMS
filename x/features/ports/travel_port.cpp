@@ -393,10 +393,13 @@ constexpr float kPortalBelowDeckRestickScale = 1.5f;
 // 台下恢复：进此半径才 1.5X。Station 的 140 对 10X 只有 ~22ms，刹不住
 // （in02：门边 10X 冲上 Disarm 穿台）。远距仍用面板倍率，避免中间跳整图爬行。
 constexpr float kPortalRecoverSlowR = 400.f;
-// 台下爬升 / 再 hold 前须 py >= landY+抬升 且竖速收住。禁止贴 landY 就 Disarm
-// （BIN 18:00：recover done@landY ↔ soft catch 死循环，onFh 永远 0）。
+// 台下爬升：到 landY+抬升 就清 recover latch。禁止再用 Station 悬停竖速卡门
+// （BIN 101030000 west00：已在 aim，vy=-37，|vy|≤20 永不亮 → 空转 14s）。
+// 禁止贴 landY 就 Disarm（BIN 18:00：recover done@landY ↔ soft catch 死循环）。
 // 运行时值见 SetPortalAimLiftY（调试 TAB「超级赶路」）。
 constexpr float kPortalRecoverVy = 20.f;
+// Station 悬停抗重力竖速常 35~64。已到瞄准且在台面上空时用此上限，勿被 35 卡死。
+constexpr float kPortalHoldStationVy = 64.f;
 
 float PortalFinalLiftY() {
     return gPortalFinalLiftY.load(std::memory_order_relaxed);
@@ -430,6 +433,9 @@ constexpr float kPortalFireSpeed = 18.f;
 // 发门前 |ap.x-portal.x|：Snap 内缩曾把 aim 挪离门心（BIN 100040000 east00：
 // portal=1120 aim=1096 ap=1090 → 站门左假火）。瞄准锁门 X；开火也卡门 X。
 constexpr float kPortalFireMaxDx = 16.f;
+// 旋翼 Station 水平死区（heli_rotor kDeadX=12）。可站点贴在发门带边时，人滑出 1px
+// 后 |ap-aim| 仍在死区内，Station 不纠 X（BIN 107000200 west00：-1450 → -1451）。
+constexpr float kPortalHeliDeadX = 12.f;
 // FindMovePortal 触发框松弛（pre-fire / PointInPortalRect）
 constexpr float kPortalRectSlop = 12.f;
 std::atomic<bool> gCaptureOn{false};
@@ -1646,6 +1652,8 @@ bool InPortalTrigger(const PortalInfo& portal) {
 // Impact 贴门：对齐 F5 旋翼「滑翔到站位点再干活」。
 //   瞄准 SnapStandForPortal → 全程面板倍率 Cruise → Station（滞后）→ hold → ↑。
 // hold 期禁止再 Station（会打掉 CurFh 门前抖）。
+// 卸推须已在发门带且残留 vx 不会滑出带；飞落惯性未刹住就 holdZero 会停在带外
+// （BIN 107000200 west00：hold@-1449 vx=-13 onFh=0 → 停在 -1451 空等 portal-x）。
 bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::string& outResult,
                          float* outSx, float* outSy, bool fireEnter = true) {
     namespace heli = x::features::simple_combat::heli;
@@ -1902,6 +1910,8 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     bool stoodOnFh = false;   // CurFh 已挂上（日志/掉台提示）
     bool loggedBleedNudge = false;
     bool loggedRestickSlow = false;
+    bool loggedDeadXNudge = false;
+    bool loggedRecoverDone = false;
     const float panelScale = speedGuard.prev;  // 面板滑翔速度（与打怪同）
     int belowDeckAborts = 0;
     int tickN = 0;
@@ -1979,6 +1989,15 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         const float liveVx = haveFs ? fs.vx : tm.vx;
         const float liveVy = haveFs ? fs.vy : tm.vy;
         const bool onFh = haveFs && fs.onFh;
+        const bool onPortalX = std::fabs(px - portal.x) <= kPortalFireMaxDx;
+        // 飞落残留 vx 会沿惯性滑出发门带。卸推前估算 coast 是否还留在 ±16 内。
+        const bool vxOutOfBand = (px - portal.x) * liveVx > 0.f;
+        const float fireInside = kPortalFireMaxDx - std::fabs(px - portal.x);
+        const float coastPx =
+            std::fabs(liveVx) *
+            (static_cast<float>(kPortalReadyStableMs + kPortalPreFireLandMs) * 0.001f);
+        const bool coastOutOfBand =
+            vxOutOfBand && coastPx > (std::max)(0.f, fireInside) - 0.5f;
         if (nearDeckWalk && haveFs && !onFh) {
             nearDeckWalk = false;
             fhBan.Arm();
@@ -2002,8 +2021,11 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             const bool restickSlow =
                 recoverAboveDeck && (inTrigNow || distAim <= kPortalRecoverSlowR);
             const bool nearDeckSlow = nearDeckWalk && onFh;
+            const bool fireBandNudge =
+                !hoverEnter && onFh && !onPortalX &&
+                std::fabs(px - aimX) <= (kPortalHeliDeadX + 4.f);
             const float useScale =
-                (restickSlow || nearDeckSlow)
+                (restickSlow || nearDeckSlow || fireBandNudge)
                     ? (std::min)(panelScale, kPortalBelowDeckRestickScale)
                     : panelScale;
             heli::SetSpeedScale(heli::Owner::Travel, useScale);
@@ -2019,9 +2041,23 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             if (recoverAboveDeck) {
                 heliY = landY + PortalFinalLiftY();
             }
-            if (nearDeckSlow) heliY = landY;  // 已挂台：不抬，旋翼 onFh 时 cmdVy 本就为 0
+            if (nearDeckSlow || fireBandNudge) heliY = landY;  // 已挂台：不抬，旋翼 onFh 时 cmdVy 本就为 0
             if (hoverEnter) heliY = landY + PortalFinalLiftY();
-            const float dx = aimX - px;
+            // 可站点贴在发门带边：滑出 1px 后 |ap-aim| 落在旋翼死区里，瞄 aimX 拉不回来。
+            // 改瞄门心只为打出 cmdVx；onPortalX 立刻 hold，禁止走进门心缝。
+            float stationX = aimX;
+            if (fireBandNudge) {
+                stationX = portal.x;
+                if (!loggedDeadXNudge) {
+                    loggedDeadXNudge = true;
+                    x::runtime::LogI(
+                        "Travel",
+                        "heli stick fire-band deadX nudge name=%s ap=(%.0f,%.0f) "
+                        "aimX=%.0f portalX=%.0f v=(%.0f,%.0f) onFh=1",
+                        portal.name.c_str(), px, py, aimX, portal.x, liveVx, liveVy);
+                }
+            }
+            const float dx = stationX - px;
             const float dy = heliY - py;
             const float dist = std::sqrt(dx * dx + dy * dy);
             const bool wasApproach = approachLatched;
@@ -2033,7 +2069,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                                  softApproach ? " restick=1" : " (latched)");
             }
             heli::Setpoint sp{};
-            sp.x = aimX;
+            sp.x = stationX;
             sp.y = heliY;
             sp.mode = station ? heli::Mode::Station : heli::Mode::Cruise;
             heli::SetSetpoint(heli::Owner::Travel, sp);
@@ -2063,7 +2099,8 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         }
 
         if (holdInZone) {
-            // hold 入场：水平对门心；竖直贴台面且不得已在台下（AbsPos 更大 Y=更高）。
+            // hold 入场：须在发门带内；竖直贴台面且不得已在台下（AbsPos 更大 Y=更高）。
+            // 有台仍允许空中 bleed 后卸推落地（BAN 开着本来就不会 onFh）。
             const bool stOk = std::fabs(px - aimX) <= kPortalStationDx;
             const bool settleSpdOk =
                 speedLenOk(liveVx, liveVy, kPortalSettleSpeed) ||
@@ -2074,19 +2111,35 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                                    py >= (landY - kPortalHoldEnterDy);
             // py >= landY - belowMax：禁止 hold@台下再卸推掉穿。
             const bool onOrAboveDeck = py >= (landY - kPortalHoldBelowMax);
-            // bleed：竖速 + 横速都收住再 Disarm（禁 hold 硬刹；横速门槛防 10X 甩台）。
-            const bool bleedOk = std::fabs(liveVy) <= kPortalHoldEnterVy &&
-                                 std::fabs(liveVx) <= kPortalHoldEnterVx && nearDeckY &&
-                                 onOrAboveDeck;
+            // 已爬到 recover 高度：清 latch。Station 还在抗重力，|vy|≤20 等不到。
+            if (recoverAboveDeck && !holdPhase && onOrAboveDeck &&
+                py >= (landY + PortalFinalLiftY())) {
+                recoverAboveDeck = false;
+                if (!loggedRecoverDone) {
+                    loggedRecoverDone = true;
+                    x::runtime::LogI(
+                        "Travel",
+                        "heli stick recover done (above deck) name=%s ap=(%.0f,%.0f) "
+                        "landY=%.0f v=(%.0f,%.0f) → normal hold",
+                        portal.name.c_str(), px, py, landY, liveVx, liveVy);
+                }
+            }
+            // bleed：横速收住再 Disarm。已到瞄准且在台面上空：Station 竖速 35~64 也算过
+            // （BIN west00 vy=-37 卡 |vy|≤35 → 14s NOT_STOOD）。急坠仍挡。
+            const bool vyBleedOk =
+                std::fabs(liveVy) <= kPortalHoldEnterVy ||
+                (stOk && onOrAboveDeck && liveVy > kPortalSoftCatchVy &&
+                 std::fabs(liveVy) <= kPortalHoldStationVy);
+            const bool bleedOk = vyBleedOk && std::fabs(liveVx) <= kPortalHoldEnterVx &&
+                                 nearDeckY && onOrAboveDeck;
             const bool settleTimeout =
                 settleSince != 0 && (now - settleSince) >= kPortalSettleMaxMs;
-            // 台下爬升期须 landY+recover 且竖速收住，禁止贴 landY 就 Disarm。
-            const bool recoverOk =
-                !recoverAboveDeck ||
-                (py >= (landY + PortalFinalLiftY()) &&
-                 std::fabs(liveVy) <= kPortalRecoverVy);
+            const bool recoverOk = !recoverAboveDeck;
+            // 空中 hold 瞄可站点再落地；挂台后才卡门 X（贴边 1px 空中过不了 ±16）。
+            const bool fireBandOk = (hoverEnter || onFh) ? onPortalX : true;
             const bool canHold =
-                inTrigNow && stOk && settleSpdOk && bleedOk && recoverOk;
+                inTrigNow && stOk && settleSpdOk && bleedOk && recoverOk && fireBandOk &&
+                !coastOutOfBand;
 
             if (!holdPhase && canHold) {
                 holdPhase = true;
@@ -2132,7 +2185,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                         recoverOk ? 1 : 0);
                 }
             } else if (!holdPhase && inTrigNow && settleTimeout && bleedOk && stOk &&
-                       recoverOk) {
+                       recoverOk && fireBandOk && !coastOutOfBand) {
                 holdPhase = true;
                 holdSince = now;
                 readySince = 0;
@@ -2225,6 +2278,34 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                 }
             }
 
+            // 残留惯性滑出发门带：立刻恢复贴台滑，禁止 holdZero 空等 14s。
+            // BIN 107000200 west00：hold@-1449 vx=-13 → 钉在 -1451，|dx|=17。
+            if (holdPhase && !hoverEnter && !onPortalX) {
+                holdPhase = false;
+                holdSince = 0;
+                leftTrigSince = 0;
+                readySince = 0;
+                stoodOnFh = false;
+                havePrevAp = false;
+                approachLatched = true;
+                loggedDeadXNudge = false;
+                if (onFh) {
+                    nearDeckWalk = true;
+                } else if (!nearDeckWalk) {
+                    fhBan.Arm();
+                }
+                const float restickScale =
+                    onFh ? (std::min)(panelScale, kPortalBelowDeckRestickScale) : panelScale;
+                heli::SetSpeedScale(heli::Owner::Travel, restickScale);
+                (void)heli::TryAcquire(heli::Owner::Travel);
+                x::runtime::LogI(
+                    "Travel",
+                    "heli stick hold abort (portal-x inertia) name=%s ap=(%.0f,%.0f) "
+                    "portalX=%.0f aimX=%.0f v=(%.0f,%.0f) onFh=%d → restick fire-band",
+                    portal.name.c_str(), px, py, portal.x, aimX, liveVx, liveVy,
+                    onFh ? 1 : 0);
+            }
+
             if (holdPhase) {
                 // 残留 → 等站稳再进门。停推后靠自然衰减 + AbsPos 静止；不硬写 (0,0)。
                 // 发门带空集：不要求 onFh；Station 纹波用 drift(8) 不用邻步 4（否则 30ms 清 ready）。
@@ -2232,7 +2313,6 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                 const bool fireSpdOk =
                     hoverEnter ? (std::fabs(liveVx) <= kPortalHoldEnterVx)
                                : speedLenOk(liveVx, liveVy, kPortalFireSpeed);
-                const bool onPortalX = std::fabs(px - portal.x) <= kPortalFireMaxDx;
                 const bool apStepOk =
                     hoverEnter
                         ? (!havePrevAp || (std::fabs(px - prevApX) <= kPortalReadyApDrift &&

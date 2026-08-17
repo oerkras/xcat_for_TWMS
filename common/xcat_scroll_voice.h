@@ -12,6 +12,7 @@ void LoadScrollVoice(const char* prefsBinDir);
 bool PlayScrollDropAnnounce(int itemId);
 
 // 烘焙口播。itemId=2070005 播「雷之镖拾取成功」，其余「拾取成功」。缺文件则 false。
+// 排队接在当前口播之后，不打断「掉落+部位+…」。
 bool PlayPickupSuccessAnnounce(int itemId = 0);
 
 }  // namespace xcat::sound

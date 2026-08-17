@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 119u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 122u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -31,7 +31,7 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 119u;
 // v71: attackAccelPartyBoosterValue — PartyBooster TempStats[4] 加数滑条（默认 -8，范围 [-8,0]）
 // v72: attackAccelBreakDegreeFloor — 破 B 系 degree 下限（改 GA 种子；与 Party 独立）
 // v73: attackAccelBreakDegreeFloorLo — 破限目标 lo 滑条（默认 -10，范围 [-10,0]）
-// v74: attackAccelClearBusy — 实验·清 ActionBusy 忙锁（与首页 attackAccel 入口独立）
+// v74: attackAccelClearBusy — 清 ActionBusy（产品文案「攻击无CD」，与首页 attackAccel 入口独立）
 // v75: attackAccelClearBusyMinIntervalMs — 清忙锁开启时出刀间隔地板（默认 410）
 // v99: 清忙锁出刀地板解除 — Apply 不再 max 抬间隔；默认/下限 1；读盘迁旧默认 410
 // v100: 攻击间隔只保留出厂默认 123；取消读盘 50/46→123 迁移
@@ -65,7 +65,8 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 119u;
 // v101: mobGatherIntervalMs — 吸怪新收间隔（ms）；默认 40；已吸住的仍跟瞄准
 // v102: 吸怪自定义落点 X 改为有符号自填（±30000），不再套 F5 0–900
 // v103: 吸怪档速/到位/瞄准间隔上 TAB（巡航/进站/悬停档、到位圈、到位Kp、刹车、下滑切断、瞄准）
-// v104: mobGatherSoftReloginSec — 吸怪 TAB「X秒后触发软重连」；默认开、14s；仅吸怪开时拆会话
+// v104: mobGatherSoftReloginSec — 「X秒后触发软重连」；厂默关（叠登会「已登出」）；勾了才拆
+// v122: 主动软重连从吸怪 TAB 挪到首页挂机卡；不再绑吸怪；ini 键仍 mobGatherSoftRelogin*
 // v105: mobGatherQuietDelayMs — 吸怪整模块延时启动（ms）；开吸怪 / hold 结束起表；与落地也吸独立
 // v106: mobGatherClearRelogin — 吸怪 TAB「清怪重连」；一轮白名单死干净才拆会话（v117 厂默改关）
 // v107: simpleCombatHiraishinFrontDx 厂默 280→110（站桩输出「横向」）
@@ -81,6 +82,9 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 119u;
 // v117: mobGatherWalkDx / mobGatherFeetExemptPx — 吸怪 TAB 履历横移/脚边；清怪重连厂默关
 // v118: mobGatherStandOffX/Y 厂默 40/10→29/9（吸怪自定义落点；旧 62/12 一并迁）
 // v119: 站桩输出面前盒厂默 30×10→60×10（横向；竖直仍 10）
+// v120: mobGatherHomeReturn 厂默改关（旧盘已有键原样保留）
+// v121: mobGatherAimJitterPx — 吸怪 TAB 落点「抖动」；按 oid 稳定散开，0=叠点
+// v122: 主动软重连入口改首页挂机卡，不再要求先开吸怪（键名不变）
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -262,6 +266,10 @@ constexpr int32_t kMobGatherStandOffXMin = -30000;
 constexpr int32_t kMobGatherStandOffXMax = 30000;
 constexpr int32_t kMobGatherStandOffYMin = -30000;
 constexpr int32_t kMobGatherStandOffYMax = 30000;
+// 落点抖动半径。每只怪用 oid 哈希出固定偏移，避免全叠一点。0=不散。
+constexpr uint32_t kMobGatherAimJitterDefault = 24u;
+constexpr uint32_t kMobGatherAimJitterMin = 0u;
+constexpr uint32_t kMobGatherAimJitterMax = 30000u;
 constexpr uint32_t kMobGatherStickCreepDefault = 8u;
 constexpr uint32_t kMobGatherStickCreepMin = 1u;
 constexpr uint32_t kMobGatherStickCreepMax = 40u;
@@ -312,16 +320,16 @@ constexpr uint32_t kMobGatherCoastVyMax = 800u;
 constexpr uint32_t kMobGatherAimMsDefault = 17u;
 constexpr uint32_t kMobGatherAimMsMin = 8u;
 constexpr uint32_t kMobGatherAimMsMax = 100u;
-constexpr uint32_t kMobGatherSoftReloginDefault = 1u;
+constexpr uint32_t kMobGatherSoftReloginDefault = 0u;
 constexpr uint32_t kMobGatherSoftReloginSecDefault = 14u;
 constexpr uint32_t kMobGatherSoftReloginSecMin = 10u;
 constexpr uint32_t kMobGatherSoftReloginSecMax = 3600u;
-// 清怪重连：吸怪开着才拆。默认关，与定时软重连独立。缺键走关；盘上已有键原样保留。
+// 清怪重连：吸怪开着才拆。默认关，与首页主动软重连独立。缺键走关；盘上已有键原样保留。
 constexpr uint32_t kMobGatherClearReloginDefault = 0u;
 // 先飞到最密堆再吸。默认关：站立吸怪（高度闸/履历闸/14s 照旧）。
 constexpr uint32_t kMobGatherSeekClusterDefault = 0u;
-// 软重连后飞回记录点再吸。默认开。无首次记录不飞。与寻簇互斥。
-constexpr uint32_t kMobGatherHomeReturnDefault = 1u;
+// 软重连后飞回记录点再吸。默认关。无首次记录不飞。与寻簇互斥。
+constexpr uint32_t kMobGatherHomeReturnDefault = 0u;
 // 寻簇同层窗 |dY|（AbsPos）。默认 200。用户自填，只防爆钳 30000。0=合法。
 constexpr uint32_t kMobGatherLayerYPxDefault = 200u;
 constexpr uint32_t kMobGatherLayerYPxMin = 0u;
@@ -411,14 +419,14 @@ constexpr uint32_t kCombatTeleportStandOffLegacyDefault = 25u;
 // UI / simple_combat 上界；过大无意义
 constexpr uint32_t kCombatTeleportStandOffMax = 200u;
 
-// ── F5 空中贴怪：自定义站距（面板「自定义站距」勾选） ──────────────────
-// 与上面那组 kCombatTeleportStandOff* **无关**：那组是瞬移/拟人落点用的，还会乘进
-// InHitBand（×1.55）等地面判定；这组只喂直升机悬停点与它自己的闸门。
+// ── F5 自定义站距（面板「自定义站距」勾选） ──────────────────────────
+// 水平 X：空中贴怪 / 拟人 / 瞬移找怪共用。地面 ClampStandOff 再夹进
+// kCombatTeleportStandOffMin/Max（12–200），避免贴怪心或 hop 过远。
+// 垂直 Y：只给空中贴怪悬停；拟人/瞬移贴台，不吃 Y。
 //
-// 关：用内置近战最优值（simple_combat::kHeliStandOffPx / kHeliLiftPx），
-//     那是 3,265 个观察窗实测出来的（见模块设计文档「站距」节）。
+// 关：X 用 kCombatStandOffXDefault（60），Y 用内置 kHeliLiftPx。
 // 开：完全听用户的 —— 远程职业站在自己的射程上打，命中率由用户自己调。
-//     ⚠️ 出刀闸与到位判据会**跟着放大**，否则站到 250px 会被 |dx|<=120 的硬闸一票否决。
+//     ⚠️ 空中出刀闸与到位判据会**跟着放大**，否则站到 250px 会被 |dx|<=120 的硬闸一票否决。
 constexpr uint32_t kCombatStandOffCustomDefault = 0u;
 // X = 人↔怪心的水平目标距离（px，恒正；左右哪一侧由飞控自己选）。
 // 自定义开箱默认 60/-4（与内置空中站位一致）；关勾选仍走同一组内置值。
@@ -491,7 +499,7 @@ struct PayloadControl {
     uint32_t version = kPayloadControlVersion;
     uint32_t invuln = 1;  // 默认开
     // v27/v38: 攻击加速（开=跳过动作等待；间隔默认见 kSimpleCombatAttackIntervalDefaultMs）
-    // 首页入口已关（kAttackAccelUserEnabled）；实验清忙锁见 attackAccelClearBusy。
+    // 首页入口已关（kAttackAccelUserEnabled）；「攻击无CD」见 attackAccelClearBusy。
     uint32_t attackAccel = 0;
     // 实验：周期写 LocalUser ActionBusy=-1（清引擎忙锁）；默认关。不绑首页 attackAccel。
     // 不是技能无 CD；仍受面板间隔 / 服端校验约束。
@@ -576,6 +584,7 @@ struct PayloadControl {
     uint32_t mobGatherStandOffCustom = kMobGatherStandOffCustomDefault;
     int32_t mobGatherStandOffX = kMobGatherStandOffXDefault;
     int32_t mobGatherStandOffY = kMobGatherStandOffYDefault;
+    uint32_t mobGatherAimJitterPx = kMobGatherAimJitterDefault;
     uint32_t mobGatherStickCreepPx = kMobGatherStickCreepDefault;
     uint32_t mobGatherStickStillV = kMobGatherStickStillVDefault;
     uint32_t mobGatherCruiseR = kMobGatherCruiseRDefault;
@@ -592,6 +601,7 @@ struct PayloadControl {
     uint32_t mobGatherBrakeMs = kMobGatherBrakeMsDefault;
     uint32_t mobGatherCoastVy = kMobGatherCoastVyDefault;
     uint32_t mobGatherAimMs = kMobGatherAimMsDefault;
+    // v104/v122: 主动软重连（首页挂机卡）。ini 键仍 mobGatherSoftRelogin*。不绑吸怪。
     uint32_t mobGatherSoftRelogin = kMobGatherSoftReloginDefault;
     uint32_t mobGatherSoftReloginSec = kMobGatherSoftReloginSecDefault;
     uint32_t mobGatherClearRelogin = kMobGatherClearReloginDefault;
@@ -614,7 +624,7 @@ struct PayloadControl {
     uint32_t mobGatherWalkDx = kMobGatherWalkDxDefault;
     // v117: 脚边 hypot。用户自填；缺键走厂默。0=不开豁免。
     uint32_t mobGatherFeetExemptPx = kMobGatherFeetExemptPxDefault;
-    // fill+Doing 已废：强制关。位移统一 Impact（F5）/ 拟人。
+    // fill+Doing 贴怪：F5 追怪「瞬移找怪」；默认关。
     uint32_t simpleCombatTeleport = 0;
     // 空中贴怪（ini: simpleCombatAirApproach；旧键 ImpactApproach 读盘兜底）。
     uint32_t simpleCombatImpactApproach = 1;
@@ -955,6 +965,11 @@ inline int32_t ClampMobGatherStandOffY(int32_t y) {
     if (y < kMobGatherStandOffYMin) return kMobGatherStandOffYMin;
     if (y > kMobGatherStandOffYMax) return kMobGatherStandOffYMax;
     return y;
+}
+
+inline uint32_t ClampMobGatherAimJitter(uint32_t px) {
+    if (px > kMobGatherAimJitterMax) return kMobGatherAimJitterMax;
+    return px;
 }
 
 inline uint32_t ClampSimpleCombatTickMs(uint32_t ms) {

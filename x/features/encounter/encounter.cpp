@@ -13,6 +13,7 @@
 #include "../ports/user_pool_port.h"
 #include "../ports/world_port.h"
 #include "../simple_combat/simple_combat.h"
+#include "../soft_login_probe/soft_login_probe.h"
 #include "../travel/travel.h"
 #include "../../runtime/log.h"
 #include "xcat_sound.h"
@@ -247,7 +248,7 @@ void PauseExposure(const ports::user_pool::RemoteThreatSample& t, bool threat) {
         (int)gStopGather.load());
 }
 
-void ResumeExposure(bool townSkip = false) {
+void ResumeExposure(bool townSkip = false, bool silent = false) {
     if (!gPaused) return;
     if (auto_lie::IsBusy()) {
         Log("resume deferred (auto_lie busy)");
@@ -259,6 +260,10 @@ void ResumeExposure(bool townSkip = false) {
     gLastNamesLog[0] = 0;
     SyncGatherPause();
     StopGmAlarm();
+    if (silent) {
+        Log("resume silent (travel)");
+        return;
+    }
     if (townSkip) {
         Notify(notify::NotificationKind::Info, "encounter-town-skip", "无刷怪图已跳过遇人",
                "当前图不刷怪（怪 0/0），遇人停手已解除。");
@@ -267,6 +272,20 @@ void ResumeExposure(bool townSkip = false) {
         Notify(notify::NotificationKind::Info, "encounter-restored", "遇人后已恢复",
                "同图已无其他玩家，挂机策略已恢复。");
         Log("resume");
+    }
+}
+
+// 超级赶路：整段冻结遇人（含已停手 / 已 Hopping）。
+// 旧实现只 return 不 Resume → 落台/停吸/换频排队继续抢旋翼和瞬移冷却。
+void SuspendForTravel(DWORD now) {
+    if (GetStateLocal() != State::Idle) SetState(State::Idle);
+    gConfirmSince = 0;
+    gHopGraceUntil = 0;
+    gPostHopClearStreak = 0;
+    if (gPaused) ResumeExposure(/*townSkip=*/false, /*silent=*/true);
+    if (now - gLastHopDeferLog > kHopDeferLogMs) {
+        gLastHopDeferLog = now;
+        Log("suspend travel (no encounter hop/pause)");
     }
 }
 
@@ -314,6 +333,13 @@ void RequestHop(const ports::user_pool::RemoteThreatSample& t, bool threat) {
     FormatRemoteNames(t, names, sizeof(names));
     if (x::features::travel::IsActive()) {
         Log("hop skip: travel active other=%d names=[%s] threat=%d", other,
+            names[0] ? names : "?", threat ? 1 : 0);
+        return;
+    }
+    // SoftOrNetQuiet 会在 PlayReady 时提前放刀，但 soft hold/land_quiet 仍在飞——
+    // 此时遇人 hop 会与软重连抢会话（BIN 23:48:01 request 早于 RESULT success）。
+    if (soft_login_probe::IsReconnectInFlight()) {
+        Log("hop skip: soft reconnect in flight other=%d names=[%s] threat=%d", other,
             names[0] ? names : "?", threat ? 1 : 0);
         return;
     }
@@ -465,6 +491,11 @@ void Tick(DWORD now) {
         ReleaseIfDisabled();
         return;
     }
+    // 必须先于 !PlayReady：赶路换图时 PlayReady 会掉，旧 Hopping 会被当成换频空窗。
+    if (x::features::travel::IsActive()) {
+        SuspendForTravel(now);
+        return;
+    }
     if (!ports::world::IsPlayReady()) {
         if (GetStateLocal() == State::Hopping) {
             // 换频迁频空窗：保持 Hopping，等回图.
@@ -475,16 +506,6 @@ void Tick(DWORD now) {
     }
     if (auto_lie::IsBusy()) {
         gConfirmSince = 0;
-        return;
-    }
-    // 超级赶路途中不触发停手/换频（BIN 06:04：贴门中 hop 把行程截断）。
-    if (x::features::travel::IsActive()) {
-        if (GetStateLocal() == State::Confirming) SetState(State::Watching);
-        gConfirmSince = 0;
-        if (now - gLastHopDeferLog > kHopDeferLogMs) {
-            gLastHopDeferLog = now;
-            Log("defer travel active (no encounter hop/pause)");
-        }
         return;
     }
 
@@ -568,8 +589,8 @@ void Tick(DWORD now) {
         gPostHopClearStreak = 0;
         PauseExposure(threat, true);
         PulseGmAlarm(now, /*force=*/false);  // 威胁持续期间强制续响（无视通知静音）
-        if (channel_hop::HasPending() || channel_hop::CooldownRemainingMs() > 0 ||
-            now < gHopGraceUntil) {
+        if (soft_login_probe::IsReconnectInFlight() || channel_hop::HasPending() ||
+            channel_hop::CooldownRemainingMs() > 0 || now < gHopGraceUntil) {
             SetState(State::Watching);
             gConfirmSince = 0;
             return;
@@ -659,8 +680,9 @@ void Tick(DWORD now) {
         return;
     }
 
-    // channel_hop 忙/冷却中：只 Watching，不启动 confirm（防警戒超时后连烧 seq）
-    if (channel_hop::HasPending() || channel_hop::CooldownRemainingMs() > 0) {
+    // soft 重连中 / channel_hop 忙/冷却中：只 Watching，不烧 seq
+    if (soft_login_probe::IsReconnectInFlight() || channel_hop::HasPending() ||
+        channel_hop::CooldownRemainingMs() > 0) {
         SetState(State::Watching);
         gConfirmSince = 0;
         return;

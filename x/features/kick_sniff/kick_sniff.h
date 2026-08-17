@@ -42,6 +42,8 @@ bool SawDisconnect();
 bool HasResolvedSession();
 // Monotonic: bumps on each Disconnecting/Disconnected edge (for launcher clean relaunch).
 uint32_t DisconnectSeq();
+// hop Fail 自己拉 soft 之后补 bump（OnStateChange 在 migrate 中跳过了）。须先 SetHold。
+void BumpDisconnectSeq();
 
 }  // namespace kick_sniff
 }  // namespace features

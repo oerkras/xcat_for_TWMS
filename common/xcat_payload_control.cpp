@@ -148,7 +148,7 @@ void ReadMobGatherTune(const char* binDir, uint32_t* speedPct, uint32_t* antiJit
     unsigned long aj = kMobGatherAntiJitterDefault;
     while (end && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) ++end;
     if (end && *end >= '0' && *end <= '9') aj = strtoul(end, nullptr, 10);
-    if (speedPct) *speedPct = ClampMobGatherSpeedPct(static_cast<uint32_t>(sp));
+    if (speedPct) *speedPct = static_cast<uint32_t>(sp);
     if (antiJitter) *antiJitter = aj ? 1u : 0u;
 }
 
@@ -158,7 +158,7 @@ bool WriteMobGatherTune(const char* binDir, uint32_t speedPct, uint32_t antiJitt
     const std::string path = MobGatherTunePath(binDir);
     FILE* fp = nullptr;
     if (FopenUtf8(&fp, path, L"wb") != 0 || !fp) return false;
-    const int rc = fprintf(fp, "%u %u\n", ClampMobGatherSpeedPct(speedPct), antiJitter ? 1u : 0u);
+    const int rc = fprintf(fp, "%u %u\n", speedPct, antiJitter ? 1u : 0u);
     const int flushRc = fflush(fp);
     fclose(fp);
     return rc > 0 && flushRc == 0;
@@ -440,7 +440,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.version = kPayloadControlVersion;
     out.invuln = 1;  // 默认开；ini 显式 0 仍可关
     out.attackAccel = 0;
-    out.attackAccelClearBusy = 0;  // 默认关（实验·清忙锁）
+    out.attackAccelClearBusy = 0;  // 默认关（首页挂机「攻击无CD」）
     out.attackAccelClearBusyMinIntervalMs = kAttackAccelClearBusyMinIntervalDefaultMs;
     out.attackAccelCutLayer = 0;
     out.attackAccelSkipPrepare = 0;  // 默认关
@@ -493,6 +493,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherStandOffCustom = kMobGatherStandOffCustomDefault;
     out.mobGatherStandOffX = kMobGatherStandOffXDefault;
     out.mobGatherStandOffY = kMobGatherStandOffYDefault;
+    out.mobGatherAimJitterPx = kMobGatherAimJitterDefault;
     out.mobGatherStickCreepPx = kMobGatherStickCreepDefault;
     out.mobGatherStickStillV = kMobGatherStickStillVDefault;
     out.mobGatherCruiseR = kMobGatherCruiseRDefault;
@@ -618,7 +619,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "invuln", b)) out.invuln = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "attackAccel", b)) out.attackAccel = b ? 1u : 0u;
     if (!kAttackAccelUserEnabled) out.attackAccel = 0;
-    // 实验清忙锁（独立字段）。旧版曾把本 key 误并进 attackAccel；现各自读写。
+    // 「攻击无CD」/清忙锁（独立字段）。旧版曾把本 key 误并进 attackAccel；现各自读写。
     if (IniGetBool(ini, "core", "attackAccelClearBusy", b))
         out.attackAccelClearBusy = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "attackAccelClearBusyMinIntervalMs", u)) {
@@ -724,7 +725,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGather = ReadMobGatherSession(binDir) ? 1u : 0u;
     ReadMobGatherTune(binDir, &out.mobGatherSpeedPct, &out.mobGatherAntiJitter);
     if (IniGetU32(ini, "core", "mobGatherSpeedPct", u))
-        out.mobGatherSpeedPct = ClampMobGatherSpeedPct(u);
+        out.mobGatherSpeedPct = u;
     if (IniGetBool(ini, "core", "mobGatherAntiJitter", b))
         out.mobGatherAntiJitter = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "mobGatherMax", u))
@@ -766,36 +767,38 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         } else
             out.mobGatherStandOffY = kMobGatherStandOffYDefault;
     }
+    if (IniGetU32(ini, "core", "mobGatherAimJitterPx", u))
+        out.mobGatherAimJitterPx = ClampMobGatherAimJitter(u);
     if (IniGetU32(ini, "core", "mobGatherStickCreepPx", u))
-        out.mobGatherStickCreepPx = ClampMobGatherStickCreep(u);
+        out.mobGatherStickCreepPx = u;
     if (IniGetU32(ini, "core", "mobGatherStickStillV", u))
-        out.mobGatherStickStillV = ClampMobGatherStickStillV(u);
+        out.mobGatherStickStillV = u;
     if (IniGetU32(ini, "core", "mobGatherCruiseR", u))
-        out.mobGatherCruiseR = ClampMobGatherCruiseR(u);
+        out.mobGatherCruiseR = u;
     if (IniGetU32(ini, "core", "mobGatherStationR", u))
-        out.mobGatherStationR = ClampMobGatherStationR(u);
+        out.mobGatherStationR = u;
     if (IniGetU32(ini, "core", "mobGatherMaxCmd", u))
-        out.mobGatherMaxCmd = ClampMobGatherMaxCmd(u);
-    if (IniGetU32(ini, "core", "mobGatherKp", u)) out.mobGatherKp = ClampMobGatherKp(u);
-    if (IniGetU32(ini, "core", "mobGatherDead", u)) out.mobGatherDead = ClampMobGatherDead(u);
+        out.mobGatherMaxCmd = u;
+    if (IniGetU32(ini, "core", "mobGatherKp", u)) out.mobGatherKp = u;
+    if (IniGetU32(ini, "core", "mobGatherDead", u)) out.mobGatherDead = u;
     if (IniGetU32(ini, "core", "mobGatherGravity", u))
-        out.mobGatherGravity = ClampMobGatherGravity(u);
+        out.mobGatherGravity = u;
     if (IniGetU32(ini, "core", "mobGatherCruiseV", u))
-        out.mobGatherCruiseV = ClampMobGatherCruiseV(u);
+        out.mobGatherCruiseV = u;
     if (IniGetU32(ini, "core", "mobGatherStationV", u))
-        out.mobGatherStationV = ClampMobGatherStationV(u);
+        out.mobGatherStationV = u;
     if (IniGetU32(ini, "core", "mobGatherHoldV", u))
-        out.mobGatherHoldV = ClampMobGatherHoldV(u);
+        out.mobGatherHoldV = u;
     if (IniGetU32(ini, "core", "mobGatherSettleErr", u))
-        out.mobGatherSettleErr = ClampMobGatherSettleErr(u);
+        out.mobGatherSettleErr = u;
     if (IniGetU32(ini, "core", "mobGatherKpSettle", u))
-        out.mobGatherKpSettle = ClampMobGatherKpSettle(u);
+        out.mobGatherKpSettle = u;
     if (IniGetU32(ini, "core", "mobGatherBrakeMs", u))
-        out.mobGatherBrakeMs = ClampMobGatherBrakeMs(u);
+        out.mobGatherBrakeMs = u;
     if (IniGetU32(ini, "core", "mobGatherCoastVy", u))
-        out.mobGatherCoastVy = ClampMobGatherCoastVy(u);
+        out.mobGatherCoastVy = u;
     if (IniGetU32(ini, "core", "mobGatherAimMs", u))
-        out.mobGatherAimMs = ClampMobGatherAimMs(u);
+        out.mobGatherAimMs = u;
     if (IniGetBool(ini, "core", "mobGatherSoftRelogin", b))
         out.mobGatherSoftRelogin = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "mobGatherSoftReloginSec", u))
@@ -834,15 +837,8 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherWalkDx = ClampMobGatherWalkDx(u);
     if (IniGetU32(ini, "core", "mobGatherFeetExemptPx", u))
         out.mobGatherFeetExemptPx = ClampMobGatherFeetExemptPx(u);
-    {
-        uint32_t coreVer = 0;
-        (void)IniGetU32(ini, "core", "version", coreVer);
-        if (coreVer < 112u && out.mobGatherHomeValid == 0 && out.mobGatherHomeHasMap == 0 &&
-            out.mobGatherSeekCluster == 0)
-            out.mobGatherHomeReturn = kMobGatherHomeReturnDefault;
-    }
-    // fill+Doing 贴怪已禁用（封禁风险）：读盘亦强制关。
-    out.simpleCombatTeleport = 0u;
+    if (IniGetBool(ini, "core", "simpleCombatTeleport", b))
+        out.simpleCombatTeleport = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "simpleCombatFlySpeedPct", u))
         out.simpleCombatFlySpeedPct = ClampHeliSpeedPct(u);
     else
@@ -857,13 +853,13 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     else
         out.simpleCombatHiraishin = 0u;
     // 追怪位移：新键 simpleCombatAirApproach；旧键 simpleCombatImpactApproach 仅兜底。
-    // 缺键时不要无脑默认空中贴怪=开——Write 的 Normalize 会把站桩/拟人压掉，
-    // 重启后二踢脚就丢了。有站桩或拟人则空中关；三者都没有才默认空中。
+    // 缺键时不要无脑默认空中贴怪=开——Write 的 Normalize 会把站桩/拟人/瞬移压掉，
+    // 重启后二踢脚就丢了。有站桩、拟人或瞬移则空中关；都没有才默认空中。
     if (IniGetBool(ini, "core", "simpleCombatAirApproach", b))
         out.simpleCombatImpactApproach = b ? 1u : 0u;
     else if (IniGetBool(ini, "core", "simpleCombatImpactApproach", b))
         out.simpleCombatImpactApproach = b ? 1u : 0u;
-    else if (out.simpleCombatHiraishin || out.simpleCombatHumanWalk)
+    else if (out.simpleCombatHiraishin || out.simpleCombatHumanWalk || out.simpleCombatTeleport)
         out.simpleCombatImpactApproach = 0u;
     else
         out.simpleCombatImpactApproach = 1u;
@@ -1149,8 +1145,6 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mapAttack = normalized.mapAttack ? 1u : 0u;
     normalized.mobGather = normalized.mobGather ? 1u : 0u;
     ApplyMobGatherEncounterForce(normalized);
-    normalized.mobGatherSpeedPct = ClampMobGatherSpeedPct(
-        normalized.mobGatherSpeedPct ? normalized.mobGatherSpeedPct : kMobGatherSpeedPctDefault);
     normalized.mobGatherAntiJitter = normalized.mobGatherAntiJitter ? 1u : 0u;
     normalized.mobGatherMax = ClampMobGatherMax(
         normalized.mobGatherMax ? normalized.mobGatherMax : kMobGatherMaxDefault);
@@ -1172,36 +1166,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherStandOffCustom = normalized.mobGatherStandOffCustom ? 1u : 0u;
     normalized.mobGatherStandOffX = ClampMobGatherStandOffX(normalized.mobGatherStandOffX);
     normalized.mobGatherStandOffY = ClampMobGatherStandOffY(normalized.mobGatherStandOffY);
-    normalized.mobGatherStickCreepPx = ClampMobGatherStickCreep(
-        normalized.mobGatherStickCreepPx ? normalized.mobGatherStickCreepPx
-                                         : kMobGatherStickCreepDefault);
-    normalized.mobGatherStickStillV = ClampMobGatherStickStillV(normalized.mobGatherStickStillV);
-    normalized.mobGatherCruiseR = ClampMobGatherCruiseR(
-        normalized.mobGatherCruiseR ? normalized.mobGatherCruiseR : kMobGatherCruiseRDefault);
-    normalized.mobGatherStationR = ClampMobGatherStationR(
-        normalized.mobGatherStationR ? normalized.mobGatherStationR : kMobGatherStationRDefault);
-    normalized.mobGatherMaxCmd = ClampMobGatherMaxCmd(
-        normalized.mobGatherMaxCmd ? normalized.mobGatherMaxCmd : kMobGatherMaxCmdDefault);
-    normalized.mobGatherKp =
-        ClampMobGatherKp(normalized.mobGatherKp ? normalized.mobGatherKp : kMobGatherKpDefault);
-    normalized.mobGatherDead =
-        ClampMobGatherDead(normalized.mobGatherDead ? normalized.mobGatherDead : kMobGatherDeadDefault);
-    normalized.mobGatherGravity = ClampMobGatherGravity(normalized.mobGatherGravity);
-    normalized.mobGatherCruiseV = ClampMobGatherCruiseV(
-        normalized.mobGatherCruiseV ? normalized.mobGatherCruiseV : kMobGatherCruiseVDefault);
-    normalized.mobGatherStationV = ClampMobGatherStationV(
-        normalized.mobGatherStationV ? normalized.mobGatherStationV : kMobGatherStationVDefault);
-    normalized.mobGatherHoldV = ClampMobGatherHoldV(
-        normalized.mobGatherHoldV ? normalized.mobGatherHoldV : kMobGatherHoldVDefault);
-    normalized.mobGatherSettleErr = ClampMobGatherSettleErr(
-        normalized.mobGatherSettleErr ? normalized.mobGatherSettleErr : kMobGatherSettleErrDefault);
-    normalized.mobGatherKpSettle = ClampMobGatherKpSettle(
-        normalized.mobGatherKpSettle ? normalized.mobGatherKpSettle : kMobGatherKpSettleDefault);
-    normalized.mobGatherBrakeMs = ClampMobGatherBrakeMs(
-        normalized.mobGatherBrakeMs ? normalized.mobGatherBrakeMs : kMobGatherBrakeMsDefault);
-    normalized.mobGatherCoastVy = ClampMobGatherCoastVy(normalized.mobGatherCoastVy);
-    normalized.mobGatherAimMs = ClampMobGatherAimMs(
-        normalized.mobGatherAimMs ? normalized.mobGatherAimMs : kMobGatherAimMsDefault);
+    normalized.mobGatherAimJitterPx = ClampMobGatherAimJitter(normalized.mobGatherAimJitterPx);
     normalized.mobGatherSoftRelogin = normalized.mobGatherSoftRelogin ? 1u : 0u;
     normalized.mobGatherSoftReloginSec = ClampMobGatherSoftReloginSec(
         normalized.mobGatherSoftReloginSec ? normalized.mobGatherSoftReloginSec
@@ -1216,7 +1181,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherHomeY = ClampMobGatherStandOffY(normalized.mobGatherHomeY);
     normalized.mobGatherHomeValid = normalized.mobGatherHomeValid ? 1u : 0u;
     normalized.mobGatherHomeHasMap = normalized.mobGatherHomeHasMap ? 1u : 0u;
-    normalized.simpleCombatTeleport = 0u;
+    normalized.simpleCombatTeleport = normalized.simpleCombatTeleport ? 1u : 0u;
     normalized.simpleCombatImpactApproach = normalized.simpleCombatImpactApproach ? 1u : 0u;
     // 0 视为「旧盘没有这个键」，回默认 100 而非被 Clamp 抬到下限 25——
     // 后者会让老配置一升级就悄悄变成 0.25X。
@@ -1233,12 +1198,16 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         ClampHiraishinFrontDx(normalized.simpleCombatHiraishinFrontDx);
     normalized.simpleCombatHiraishinFrontDy =
         ClampHiraishinFrontDy(normalized.simpleCombatHiraishinFrontDy);
-    // 追怪位移单选：空中贴怪开则压掉拟人与站桩输出（旧盘两者同开时等价于仅空中）。
+    // 追怪位移单选：空中贴怪开则压掉拟人、站桩、瞬移（旧盘两者同开时等价于仅空中）。
     if (normalized.simpleCombatImpactApproach) {
         normalized.simpleCombatHumanWalk = 0u;
         normalized.simpleCombatHiraishin = 0u;
+        normalized.simpleCombatTeleport = 0u;
     } else if (normalized.simpleCombatHiraishin) {
         normalized.simpleCombatHumanWalk = 0u;
+        normalized.simpleCombatTeleport = 0u;
+    } else if (normalized.simpleCombatHumanWalk) {
+        normalized.simpleCombatTeleport = 0u;
     }
     normalized.simpleCombatLiveStep = normalized.simpleCombatLiveStep ? 1u : 0u;
     normalized.attackRpc = normalized.attackRpc ? 1u : 0u;
@@ -1281,15 +1250,15 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         ClampCombatTeleportMinDx(normalized.simpleCombatTeleportMinDx
                                      ? normalized.simpleCombatTeleportMinDx
                                      : kCombatTeleportMinDxDefault);
-    {
-        uint32_t off = normalized.simpleCombatTeleportStandOff;
-        if (!off || off == kCombatTeleportStandOffLegacyDefault)
-            off = kCombatTeleportStandOffDefault;
-        normalized.simpleCombatTeleportStandOff = ClampCombatTeleportStandOff(off);
-    }
     normalized.simpleCombatStandOffCustom = normalized.simpleCombatStandOffCustom ? 1u : 0u;
     normalized.simpleCombatStandOffX = ClampCombatStandOffX(normalized.simpleCombatStandOffX);
     normalized.simpleCombatStandOffY = ClampCombatStandOffY(normalized.simpleCombatStandOffY);
+    {
+        const uint32_t sharedX = normalized.simpleCombatStandOffCustom
+                                     ? normalized.simpleCombatStandOffX
+                                     : kCombatStandOffXDefault;
+        normalized.simpleCombatTeleportStandOff = ClampCombatTeleportStandOff(sharedX);
+    }
     normalized.simpleCombatGroundSpoof = normalized.simpleCombatGroundSpoof ? 1u : 0u;
     normalized.simpleCombatAntiJitter = normalized.simpleCombatAntiJitter ? 1u : 0u;
     normalized.simpleCombatAntiHug = normalized.simpleCombatAntiHug ? 1u : 0u;
@@ -1412,6 +1381,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                    normalized.mobGatherStandOffCustom != 0);
         IniSetI32(ini, "core", "mobGatherStandOffX", normalized.mobGatherStandOffX);
         IniSetI32(ini, "core", "mobGatherStandOffY", normalized.mobGatherStandOffY);
+        IniSetU32(ini, "core", "mobGatherAimJitterPx", normalized.mobGatherAimJitterPx);
         IniEraseKey(ini, "core", "mobGatherSnapXPad");
         IniEraseKey(ini, "core", "mobGatherSnapAbove");
         IniSetU32(ini, "core", "mobGatherStickCreepPx", normalized.mobGatherStickCreepPx);

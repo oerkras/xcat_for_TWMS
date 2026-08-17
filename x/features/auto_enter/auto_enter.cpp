@@ -1960,6 +1960,8 @@ bool IsFailed() { return gPhase == Phase::Failed; }
 
 int CharSelectTimeoutStreak() { return gCharSelectTimeoutStreak; }
 
+int LastCharAvatarCount() { return gSnap.avatarCount; }
+
 bool IsDone() { return gPhase == Phase::Done; }
 
 void SoftHallSampleOnPump(void* user) {
