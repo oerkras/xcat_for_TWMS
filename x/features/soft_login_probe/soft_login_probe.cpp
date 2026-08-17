@@ -59,6 +59,9 @@ constexpr char kHashNmCloseSession[] =
 // settle 用墙钟截止（见 Worker）：Call 耗时曾未计入 waited，实机 1500ms 常被拉成 2.5–3s+。
 // Notice 多在断线瞬间弹出；Connecting 早退即可，不必死等满窗。
 constexpr DWORD kSettleMs = 600;
+// 主动 CloseSession（hangup_timer）：BIN 05:12 Notice 在 dismiss 后 +132ms 才关到；
+// 满 600ms 是空等。关到窗即走，空枪最多再等这么久吃晚到的窗。踢线仍用 kSettleMs。
+constexpr DWORD kSettleProactiveMs = 200;
 constexpr DWORD kPollMs = 400;
 // BIN 04:20：Disconnected 空耗满 40 轮≈16s 才 soft cycle；总 cap 须盖住 empty-hall 等待窗。
 constexpr int kPollRounds = 36;  // ≥ kEmptyHallPollRounds；~14s @ kPollMs
@@ -73,6 +76,10 @@ constexpr int kDiscPollFailRounds = 4;
 constexpr DWORD kWaitDiscAfterCloseMs = 4000;
 constexpr int kEmptyHallSoftCycleMax = 3;  // 连续空大厅满额放 hold → 守护干净重拉
 constexpr int kCharSelectStuckMax = 2;  // avatars>0 超时两次 → CloseSession；avatars=0 直接 Finish(2)
+// skip/GoWorld 前：活 Notice 再探一次；仍在则禁止进世界（BIN 22:47:45 noticeKinds=1 → avatars=0）。
+constexpr DWORD kDirtyHallNoticeRecheckMs = 250;
+// 选角页连续空头像（busy 已刷完仍 0）→ 已登出；冷启 3s 内会刷出头像，满 5s 才交守护。
+constexpr DWORD kEmptyAvatarFailMs = 5000;
 // 空大厅 CloseSession：默认关。仅调试「真·书页死锁且确认非登录竞态」时可临时开。
 constexpr bool kAllowEmptyHallCloseSession = false;
 constexpr DWORD kReenterPollMs = 350;
@@ -110,9 +117,10 @@ constexpr DWORD kSoftSampleCallMs = 400;  // 对齐 kTransitInvokeCapMs；勿再
 // 成功进图后玩法错峰：Finish 放 hold，但仍压 Combat/Invuln 急钉，避免 q=8 齐开（B9B）。
 // ce6797：quiet 一结束立刻 BAN ON + |v|~7k Impact → 再软断。
 // land quiet = 整段停刀/停旋翼；post_air_gate ≥ quiet，防 quiet 被提前清掉后仍空中开打。
-// BIN 01:17：arm=3s/air=4.5s → RESULT 后 ~4.7s 才首刀，体感静默偏长；无敌已 hold/quiet 急钉，压到 1.5s/2.5s。
-constexpr DWORD kSoftLandQuietMs = 1500;
-constexpr DWORD kSoftPostAirGateMs = 2500;
+// RESULT 本身已等 curFh≠0；主动软重连落地后再套 300–600ms 是空等。
+// 挂台：Arm 时直接 skip；未挂台才走 cap，PeekCurFh 一到即早释（wait_onFh 仍挡没台）。
+constexpr DWORD kSoftLandQuietMs = 250;
+constexpr DWORD kSoftPostAirGateMs = 400;
 // Connected 后等分区列表刷出再 RequestRestart（BIN 21:44：壳指针先到、WorldItems=0）。
 // 空列表靠加长等待 + soft cycle；勿 CloseSession 刷新（会登出登录会话）。
 constexpr DWORD kHallReadyWaitMs = 12000;
@@ -254,6 +262,7 @@ std::atomic<bool> gBusy{false};
 std::atomic<bool> gHold{false};
 std::atomic<DWORD> gLandQuietUntilMs{0};     // GetTickCount 截止；0=无静默
 std::atomic<DWORD> gPostSoftAirUntilMs{0};  // 禁止 F5 空中；≥ land quiet
+std::atomic<DWORD> gLandQuietArmedAtMs{0};   // Arm 墙钟；早释算 elapsed
 std::atomic<unsigned> gResult{0};  // 0 none 1 ok 2 fail
 std::atomic<bool> gUiEnabled{false};
 char gWhy[64]{};
@@ -267,6 +276,8 @@ constexpr DWORD kDeferredSoftMaxMs = 120000;
 // 读侧撞上中间态会拿到空串 → 判成「非真断线」→ 又放开假 already_in_map（BIN 17:29 误杀）。
 // 判定只读这个原子量；gWhy 退化为纯日志用途。
 std::atomic<bool> gWhyNeedsReconnect{false};
+// RequestProactiveReconnect 置位；KickSniff 会把 gWhy 改成 disconnected，settle 用这个认主动关窗。
+std::atomic<bool> gSettleProactiveFast{false};
 
 // attempt 起点（GetTickCount，0=无）；Finish 用它兑现最小 hold 时长。
 std::atomic<DWORD> gAttemptBeginMs{0};
@@ -365,6 +376,7 @@ struct DismissCtx {
     int destroyed = 0;
     int skippedHud = 0;  // UIMiniMap 等图内 HUD（UIDialog 子类，禁止 Close）
     int cacheTried = 0;  // Abs 捕获实例本枪尝试关
+    int noticeKinds = 0;  // 本枪扫到的 Notice 白名单类（settle 的 1 是断线窗，skip 时仍 1 才脏）
     char detail[224]{};
 };
 
@@ -1726,6 +1738,26 @@ void ProbeLiveKickDialogOnPump(void* user) {
              ctx->kickish, ctx->notice);
 }
 
+// BIN 22:47:45：skip 时 Notice 仍在 → GoWorld → avatars=0。
+// 00:03/00:16 成功轮 skip 时 noticeKinds=0；settle 那枪的 1 不在这里判。
+bool DirtyHallNoticeBlocksEnter(const char* tag) {
+    ProbeDlgCtx probe{};
+    if (!SoftPumpCall(&ProbeLiveKickDialogOnPump, &probe, kDismissCallMs)) return false;
+    if (probe.kickish <= 0 && probe.notice <= 0) return false;
+    LogLine("hall_notice dirty tag=%s %s — recheck %ums", tag ? tag : "?", probe.detail,
+            static_cast<unsigned>(kDirtyHallNoticeRecheckMs));
+    KickLogLine("hall_notice dirty tag=%s %s", tag ? tag : "?", probe.detail);
+    Sleep(kDirtyHallNoticeRecheckMs);
+    if (gStop.load()) return true;
+    ProbeDlgCtx again{};
+    if (!SoftPumpCall(&ProbeLiveKickDialogOnPump, &again, kDismissCallMs)) return false;
+    if (again.kickish <= 0 && again.notice <= 0) return false;
+    LogLine("hall_notice persist tag=%s %s — no GoWorld (avoid 叠登)", tag ? tag : "?",
+            again.detail);
+    KickLogLine("hall_notice persist tag=%s", tag ? tag : "?");
+    return true;
+}
+
 void DismissKickDialogOnPump(void* user) {
     auto* ctx = static_cast<DismissCtx*>(user);
     if (!ctx) return;
@@ -1852,6 +1884,7 @@ void DismissKickDialogOnPump(void* user) {
             if (ctx->scanned + ctx->closed + ctx->inactivated > before) ++noticeHits;
         }
     }
+    ctx->noticeKinds = noticeHits;
 
     snprintf(ctx->detail, sizeof(ctx->detail),
              "agg=%d notices=%d noticeKinds=%d cache=%d abs=%d hits=%u scan=%d close=%d ok=0 "
@@ -1887,8 +1920,21 @@ void SamplePlayReadyOnPump(void* user) {
 void SetHold(bool on) { gHold.store(on, std::memory_order_release); }
 
 void ArmLandQuiet(DWORD ms) {
-    const DWORD dur = ms ? ms : kSoftLandQuietMs;
     const DWORD now = GetTickCount();
+    DWORD armed = now ? now : 1;
+    gLandQuietArmedAtMs.store(armed, std::memory_order_release);
+
+    // RESULT 已等挂台：再套 quiet 是落地后空等。Impact 起飞仍有 wait_onFh。
+    if (x::features::ports::world::IsPlayReady() &&
+        x::features::ports::foothold::PeekCurFhId() != 0) {
+        gLandQuietUntilMs.store(0, std::memory_order_release);
+        gPostSoftAirUntilMs.store(0, std::memory_order_release);
+        LogLine("land_quiet skip stood (already onFh)");
+        KickLogLine("land_quiet skip stood");
+        return;
+    }
+
+    const DWORD dur = ms ? ms : kSoftLandQuietMs;
     DWORD until = now + dur;
     if (until == 0) until = 1;
     gLandQuietUntilMs.store(until, std::memory_order_release);
@@ -1897,7 +1943,7 @@ void ArmLandQuiet(DWORD ms) {
     // 若调用方传入更长 quiet，空中闸至少盖住 quiet。
     if (static_cast<int>(airUntil - until) < 0) airUntil = until;
     gPostSoftAirUntilMs.store(airUntil, std::memory_order_release);
-    LogLine("land_quiet arm=%ums post_air_gate=%ums", static_cast<unsigned>(dur),
+    LogLine("land_quiet arm=%ums post_air_gate=%ums (not onFh)", static_cast<unsigned>(dur),
             static_cast<unsigned>(airUntil - now));
     KickLogLine("land_quiet arm=%ums post_air=%ums", static_cast<unsigned>(dur),
                 static_cast<unsigned>(airUntil - now));
@@ -2013,6 +2059,7 @@ void Finish(unsigned result, const char* line, bool suppressNotify = false) {
     }
     gInMapRecoverSinceMs.store(0, std::memory_order_release);
     gInMapRecoverDropSinceMs.store(0, std::memory_order_release);
+    gSettleProactiveFast.store(false, std::memory_order_release);
     // 守护 500ms 才采一拍 Status SHM：太短的 attempt 会让「result=0/hold=1」整拍消失，
     // 上升沿吞 seq 与 hold 推迟两条判据同时落空 → 干净重拉杀进程（BIN 17:29）。
     // 这里把 hold 按住到至少 kMinHoldMs，保证守护先采到观察窗、再采到 RESULT。
@@ -2603,8 +2650,11 @@ DWORD WINAPI Worker(LPVOID) {
         gInMapRecoverDropSinceMs.store(0, std::memory_order_release);
         gLastRefuseLogMs.store(0, std::memory_order_release);
         EnsureNoticeAbsHook();
-        LogLine("attempt begin why=%s settle=%ums hold=1 softCycles=%d doneRestarts=%d", gWhy,
-                static_cast<unsigned>(kSettleMs), kSoftCycleMax, kDoneNoPlayMaxRestarts);
+        const bool settleFast = gSettleProactiveFast.load(std::memory_order_acquire);
+        const DWORD settleMs = settleFast ? kSettleProactiveMs : kSettleMs;
+        LogLine("attempt begin why=%s settle=%ums proactive=%d hold=1 softCycles=%d doneRestarts=%d",
+                gWhy, static_cast<unsigned>(settleMs), settleFast ? 1 : 0, kSoftCycleMax,
+                kDoneNoPlayMaxRestarts);
         KickLogLine("attempt begin why=%s hold=1 softCycles=%d", gWhy, kSoftCycleMax);
         // 拍卖/商城迁服照样要接下 hold（否则守护按踢线干净重拉），但别弹「试连中」——
         // 用户只是点了拍卖，没被踢。收尾那条 in_market 气泡会把原委讲清楚。
@@ -2668,7 +2718,9 @@ DWORD WINAPI Worker(LPVOID) {
         // 勿每 120ms 叠 Util/Ex/Notice（Bootstrap 半死时易挤 ConnectLogin）。
         // scanBase=1：Notice 白名单；永不 FindAll(UIDialog 基类)。
         {
-            const DWORD settleDeadline = GetTickCount() + kSettleMs;
+            const bool proactiveFast = gSettleProactiveFast.load(std::memory_order_acquire);
+            const DWORD settleCap = proactiveFast ? kSettleProactiveMs : kSettleMs;
+            const DWORD settleDeadline = GetTickCount() + settleCap;
             bool settleDismissDone = false;
             while (!gStop.load() && static_cast<int>(settleDeadline - GetTickCount()) > 0) {
                 const int remain0 = static_cast<int>(settleDeadline - GetTickCount());
@@ -2689,7 +2741,15 @@ DWORD WINAPI Worker(LPVOID) {
                         LogLine("settle_dismiss %s", early.detail);
                         KickLogLine("settle_dismiss %s", early.detail);
                         // 关到窗才收工；空枪保留机会吃晚到的 Notice。
-                        if (early.closed > 0 || early.inactivated > 0) settleDismissDone = true;
+                        if (early.closed > 0 || early.inactivated > 0) {
+                            settleDismissDone = true;
+                            if (proactiveFast) {
+                                LogLine("settle early-exit proactive dismiss_done remain≈%dms",
+                                        static_cast<int>(settleDeadline - GetTickCount()));
+                                KickLogLine("settle early_proactive dismiss_done");
+                                break;
+                            }
+                        }
                     }
                 }
                 const int remainBeforeSample = static_cast<int>(settleDeadline - GetTickCount());
@@ -3274,6 +3334,13 @@ DWORD WINAPI Worker(LPVOID) {
                         LogLine("dismiss_miss — continue reenter anyway");
                 }
 
+                // BIN 22:47:45 skip 时 Notice 仍在就 GoWorld → avatars=0；成功轮此时 notice=0。
+                if (DirtyHallNoticeBlocksEnter("connected_path")) {
+                    Finish(2,
+                           "RESULT fail logged_out_hall_notice — guardian relaunch (no GoWorld)");
+                    goto next;
+                }
+
                 // 分区列表未刷出就 RequestRestart → auto_enter 卡 waiting WorldItems?（BIN 21:44）。
                 const int hallPick = WaitHallPickReady(kHallReadyWaitMs);
                 if (hallPick < 0) goto next;
@@ -3330,6 +3397,7 @@ DWORD WINAPI Worker(LPVOID) {
                     DWORD standLeftMapSinceMs = 0;
                     bool lastSampleInMap = false;
                     int pumpFailStreak = 0;
+                    DWORD emptyAvatarSinceMs = 0;
                     DWORD budgetStartMs = GetTickCount();
                     DWORD budgetMs = kReenterBudgetMs;
                     for (int r = 0; !gStop.load(); ++r) {
@@ -3411,6 +3479,34 @@ DWORD WINAPI Worker(LPVOID) {
                                     again.destroyed > 0)
                                     KickLogLine("dismiss hall r=%d %s", r, again.detail);
                             }
+                            if (DirtyHallNoticeBlocksEnter("reenter_hall")) {
+                                Finish(2,
+                                       "RESULT fail logged_out_hall_notice — guardian "
+                                       "relaunch (no GoWorld)");
+                                earlyFail = true;
+                                break;
+                            }
+                        }
+
+                        if (!x::features::auto_enter::IsDone() &&
+                            x::features::auto_enter::CharUiVisible() &&
+                            x::features::auto_enter::LastCharAvatarCount() <= 0) {
+                            const DWORD nowAv = GetTickCount();
+                            if (!emptyAvatarSinceMs) emptyAvatarSinceMs = nowAv ? nowAv : 1;
+                            if (emptyAvatarSinceMs &&
+                                nowAv - emptyAvatarSinceMs >= kEmptyAvatarFailMs) {
+                                LogLine("logged_out empty avatars held=%ums — no CloseSession",
+                                        static_cast<unsigned>(nowAv - emptyAvatarSinceMs));
+                                KickLogLine("RESULT fail logged_out_empty_avatars held=%ums",
+                                            static_cast<unsigned>(nowAv - emptyAvatarSinceMs));
+                                Finish(2,
+                                       "RESULT fail logged_out_empty_avatars — guardian "
+                                       "relaunch (no CloseSession)");
+                                earlyFail = true;
+                                break;
+                            }
+                        } else {
+                            emptyAvatarSinceMs = 0;
                         }
 
                         if (x::features::auto_enter::IsFailed()) {
@@ -3842,7 +3938,24 @@ bool IsArmed() {
 
 bool IsHoldActive() { return gHold.load(std::memory_order_acquire); }
 
+// 已 PlayReady 且 CurFh≠0：立刻早释 quiet/air。未挂台仍走 cap。
+static void MaybeEarlyReleaseQuietOnFh() {
+    const DWORD until = gLandQuietUntilMs.load(std::memory_order_acquire);
+    const DWORD air = gPostSoftAirUntilMs.load(std::memory_order_acquire);
+    if (!until && !air) return;
+    if (!x::features::ports::world::IsPlayReady()) return;
+    if (x::features::ports::foothold::PeekCurFhId() == 0) return;
+    const DWORD armed = gLandQuietArmedAtMs.load(std::memory_order_acquire);
+    const DWORD now = GetTickCount();
+    const DWORD elapsed = armed ? (now - armed) : 0;
+    if (until) gLandQuietUntilMs.store(0, std::memory_order_release);
+    if (air) gPostSoftAirUntilMs.store(0, std::memory_order_release);
+    LogLine("land_quiet early_release onFh elapsed=%ums", static_cast<unsigned>(elapsed));
+    KickLogLine("land_quiet early_release onFh elapsed=%ums", static_cast<unsigned>(elapsed));
+}
+
 bool IsLandQuiet() {
+    MaybeEarlyReleaseQuietOnFh();
     DWORD until = gLandQuietUntilMs.load(std::memory_order_acquire);
     if (!until) return false;
     const DWORD now = GetTickCount();
@@ -3852,6 +3965,7 @@ bool IsLandQuiet() {
 }
 
 bool IsPostSoftAirCombatBlocked() {
+    MaybeEarlyReleaseQuietOnFh();
     DWORD until = gPostSoftAirUntilMs.load(std::memory_order_acquire);
     if (!until) return false;
     const DWORD now = GetTickCount();
@@ -3930,6 +4044,7 @@ bool RequestProactiveReconnect(const char* why) {
         }
         return false;
     }
+    gSettleProactiveFast.store(true, std::memory_order_release);
     LogLine("proactive close issued why=%s (deferred, wait !inMap)", why ? why : "?");
     KickLogLine("proactive close issued why=%s", why ? why : "?");
     return true;

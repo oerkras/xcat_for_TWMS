@@ -218,13 +218,23 @@ constexpr DWORD kNativeSelfCdMaxMs = 8000;
 constexpr float kNativeShortHopPx = 140.f;
 constexpr DWORD kJobWaitMs = 2000;
 
+// hop 间距不再走自冷：Doing 后 Ap 回稳由 combat Settling/PosSane 管。
+// 这里只留 ForceNativeCooldown（换频 settle / 补给开趟）——墙钟到期前拒下一发。
 std::atomic<uint32_t> gNativeCdMs{kNativeSelfCdMinMs};
 DWORD gLastNativeMs = 0;
+DWORD gForceCdUntil = 0;
 std::atomic<DWORD> gLastNativeOkMs{0};
 
 void MarkNativeOk(DWORD now) {
     gLastNativeMs = now;
     gLastNativeOkMs.store(now, std::memory_order_release);
+}
+
+bool RejectIfForceCd() {
+    const DWORD rem = NativeCooldownRemainingMs();
+    if (!rem) return false;
+    x::runtime::LogW("Teleport", "native force-cd remain=%ums", rem);
+    return true;
 }
 
 using FnTryDoingTeleport = void (*)(void* self, const void* method);
@@ -866,6 +876,14 @@ void NativeTeleportJobFn(void* user) {
                     if (sfh != 0) fh = sfh;
                 }
             }
+            // AbsPos：更大 Y = 更高。Doing 清 CurFh 后走空中 CollisionDetectFloat，
+            // 要从台上方落上去才挂得住。FhYAtX 整数截断（尤其斜坡）会把人放在台面
+            // 里/下，Float 视为已穿过 → curFh 一直 0，Y 减小掉穿。
+            // BIN 00:16：(593,47) fh=587 sl=8、(133,197) fh=562 sl=11，ap==land 仍掉。
+            constexpr float kTeleportStandLiftY = 12.f;
+            ty += kTeleportStandLiftY;
+            x::runtime::LogI("Teleport", "stand_lift fh=%u land=(%.0f,%.0f) lift=%.0f",
+                             (unsigned)fh, tx, ty, kTeleportStandLiftY);
         }
     }
 
@@ -917,21 +935,23 @@ void SetNativeCooldownMs(uint32_t ms) {
 }
 
 void ForceNativeCooldownMs(uint32_t ms) {
-    SetNativeCooldownMs(ms);
-    gLastNativeMs = GetTickCount();
-    x::runtime::LogI("Teleport", "force self-cd %ums (trip arm)",
-                     gNativeCdMs.load(std::memory_order_acquire));
+    if (ms < kNativeSelfCdMinMs) ms = kNativeSelfCdMinMs;
+    if (ms > kNativeSelfCdMaxMs) ms = kNativeSelfCdMaxMs;
+    const DWORD now = GetTickCount();
+    gForceCdUntil = now + ms;
+    x::runtime::LogI("Teleport", "force-cd %ums (trip/hop arm)", (unsigned)ms);
 }
 
-void ClearNativeSelfCd() { gLastNativeMs = 0; }
+void ClearNativeSelfCd() {
+    gLastNativeMs = 0;
+    gForceCdUntil = 0;
+}
 
 uint32_t NativeCooldownRemainingMs() {
+    if (!gForceCdUntil) return 0;
     const DWORD now = GetTickCount();
-    const DWORD cd = gNativeCdMs.load(std::memory_order_acquire);
-    if (!gLastNativeMs || !cd) return 0;
-    const DWORD elapsed = now - gLastNativeMs;
-    if (elapsed >= cd) return 0;
-    return static_cast<uint32_t>(cd - elapsed);
+    if (static_cast<int>(now - gForceCdUntil) >= 0) return 0;
+    return gForceCdUntil - now;
 }
 
 bool TeleportNativeSkillCall() {
@@ -957,11 +977,7 @@ bool TeleportNativeSkillCall() {
     }
 
     const DWORD now = GetTickCount();
-    const DWORD cd = gNativeCdMs.load(std::memory_order_acquire);
-    if (gLastNativeMs && now - gLastNativeMs < cd) {
-        x::runtime::LogW("Teleport", "native self-cd remain=%ums", cd - (now - gLastNativeMs));
-        return false;
-    }
+    if (RejectIfForceCd()) return false;
 
     NativeJob job{};
     job.overrideLand = false;
@@ -1037,11 +1053,7 @@ bool TeleportNativeSkillCall(float landX, float landY, uint32_t plantFhId, bool 
     }
 
     const DWORD now = GetTickCount();
-    const DWORD cd = gNativeCdMs.load(std::memory_order_acquire);
-    if (gLastNativeMs && now - gLastNativeMs < cd) {
-        x::runtime::LogW("Teleport", "native self-cd remain=%ums", cd - (now - gLastNativeMs));
-        return false;
-    }
+    if (RejectIfForceCd()) return false;
 
     NativeJob job{};
     job.overrideLand = true;

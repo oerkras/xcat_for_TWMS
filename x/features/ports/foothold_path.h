@@ -69,7 +69,8 @@ int ProbeColumn(float x, float y, int yWindow, ColumnHit* out, int maxOut, int* 
 // 赶路贴门：在发门带 [portal.x±16] 里找可站点（X=带内离门心最近，Y=该处台面）。
 // 用本段原始 X（2px 边），**不用**战斗悬崖内缩 36（门口常在悬崖边）。
 // 门心底下可以是缝（BIN 18:27 top00：x=65 miss，x=72 可站且 |dx|≤16）。
-// **禁止**回退 SnapStandAt 的 band/any（BIN 138 沼泽远岸 Y 污染）。
+// 门口 SpanX<16 的近水平短台算可站（BIN 107000000 east00：12 段短台被当墙 → 假空集悬停）。
+// 竖墙 / 错层短台（|fy-portal.y|>24）仍拒。禁止回退 SnapStandAt 的 band/any（远岸 Y 污染）。
 // 失败 = 发门带空集 → 调用方保持 portal.y，走悬停。
 bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR, float rectB,
                         bool rectValid, float* outX, float* outY, uint32_t* outFhId = nullptr);

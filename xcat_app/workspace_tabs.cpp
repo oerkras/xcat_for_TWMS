@@ -805,6 +805,8 @@ static bool gUiSkillMaxLevel = false;
 static bool gUiFinalAttackForce = false;
 // 近战不挥拳：首页落盘保留；控件在实验 TAB。
 static bool gUiMeleeVeto = false;
+// 怪物刷新感知：首页落盘保留；控件在实验 TAB（1ms 热扫下无体感）。
+static bool gUiMobPoolObserve = false;
 // 打怪 TICK：首页落盘；控件在调试 TAB。
 static int gUiCombatTickMs = (int)xcat::kSimpleCombatTickDefaultMs;
 // 出刀按键 hold：控件在调试 TAB，与 TICK 同卡片共用一次读盘。
@@ -835,6 +837,8 @@ static int gUiAttackRpcMobs = (int)xcat::kAttackRpcMobsDefault;
 static int gUiAttackRpcIntervalMs = (int)xcat::kAttackRpcIntervalDefaultMs;
 static int gUiAttackRpcDamage = (int)xcat::kAttackRpcDamageDefault;
 static bool gUiCombatForgeHit = false;
+static int gUiForgeHitFrontDx = (int)xcat::kForgeHitFrontDxDefault;
+static int gUiForgeHitFrontDy = (int)xcat::kForgeHitFrontDyDefault;
 static bool gUiMapAttack = false;
 static bool gUiMobGather = false;
 static int gUiMobGatherSpeedPct = (int)xcat::kMobGatherSpeedPctDefault;
@@ -931,6 +935,7 @@ void DrawHomeTab(LaunchUiState& ui) {
     static int clusterWeight = 0;  // 0/1：群怪优先（沿用 clusterWeight 落盘）
     static bool hitRotateOn = false;
     static int hitRotateN = (int)xcat::kCombatHitRotateNDefault;
+    static bool teleportOneHit = false;
     static int teleportMinDx = 220;
     static int teleportStandOff = (int)xcat::kCombatTeleportStandOffDefault;
     static int mobScanIntervalMs = (int)xcat::kMobScanIntervalDefaultMs;
@@ -1024,6 +1029,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 hitRotateN = (int)xcat::ClampCombatHitRotateN(
                     disk.simpleCombatHitRotateN ? disk.simpleCombatHitRotateN
                                                 : xcat::kCombatHitRotateNDefault);
+                teleportOneHit = disk.simpleCombatTeleportOneHit != 0;
                 // LiveStep / attack_rpc 仍默认关，仅实验 TAB 可勾。
                 gUiCombatLiveStep = disk.simpleCombatLiveStep != 0;
                 gUiAttackRpc = disk.attackRpc != 0;
@@ -1036,6 +1042,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                     disk.attackRpcDamage ? disk.attackRpcDamage
                                          : xcat::kAttackRpcDamageDefault);
                 gUiCombatForgeHit = disk.simpleCombatForgeHit != 0;
+                gUiForgeHitFrontDx = (int)xcat::ClampForgeHitFrontDx(disk.simpleCombatForgeHitFrontDx);
+                gUiForgeHitFrontDy = (int)xcat::ClampForgeHitFrontDy(disk.simpleCombatForgeHitFrontDy);
                 gUiMapAttack = disk.mapAttack != 0;
                 gUiMobGather = disk.mobGather != 0;
                 gUiMobGatherSpeedPct = (int)disk.mobGatherSpeedPct;
@@ -1102,6 +1110,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 mobScanIntervalMs = (int)xcat::ClampMobScanIntervalMs(
                     disk.mobScanIntervalMs ? disk.mobScanIntervalMs
                                            : xcat::kMobScanIntervalDefaultMs);
+                gUiMobPoolObserve = disk.mobPoolObserve != 0;
                 oneshotMaxHp = (int)xcat::ClampCombatOneshotMaxHp(disk.simpleCombatOneshotMaxHp);
                 oneshotMinBumps =
                     (int)xcat::ClampCombatOneshotMinBumps(disk.simpleCombatOneshotMinBumps);
@@ -1223,6 +1232,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.simpleCombatHitRotateN = xcat::ClampCombatHitRotateN(
             static_cast<uint32_t>(hitRotateN < 1 ? 1 : hitRotateN));
         c.simpleCombatTeleport = (gUiApproachMode == 3) ? 1u : 0u;
+        c.simpleCombatTeleportOneHit = teleportOneHit ? 1u : 0u;
         c.simpleCombatLiveStep = gUiCombatLiveStep ? 1u : 0u;
         c.attackRpc = gUiAttackRpc ? 1u : 0u;
         c.attackRpcMobs = xcat::ClampAttackRpcMobs(
@@ -1232,6 +1242,12 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.attackRpcDamage = xcat::ClampAttackRpcDamage(
             static_cast<uint32_t>(gUiAttackRpcDamage < 0 ? 0 : gUiAttackRpcDamage));
         c.simpleCombatForgeHit = gUiCombatForgeHit ? 1u : 0u;
+        c.simpleCombatForgeHitFrontDx = xcat::ClampForgeHitFrontDx(
+            static_cast<uint32_t>(gUiForgeHitFrontDx < 0 ? 0 : gUiForgeHitFrontDx));
+        c.simpleCombatForgeHitFrontDy = xcat::ClampForgeHitFrontDy(
+            static_cast<uint32_t>(gUiForgeHitFrontDy < 0 ? 0 : gUiForgeHitFrontDy));
+        gUiForgeHitFrontDx = (int)c.simpleCombatForgeHitFrontDx;
+        gUiForgeHitFrontDy = (int)c.simpleCombatForgeHitFrontDy;
         c.mapAttack = gUiMapAttack ? 1u : 0u;
         c.mobGather = gUiMobGather ? 1u : 0u;
         c.mobGatherSpeedPct = MobGatherUiU32(gUiMobGatherSpeedPct);
@@ -1292,6 +1308,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.simpleCombatTeleportCooldownMs = xcat::kCombatTeleportCooldownDefaultMs;
         c.mobScanIntervalMs = xcat::ClampMobScanIntervalMs(
             static_cast<uint32_t>(mobScanIntervalMs < 0 ? 0 : mobScanIntervalMs));
+        c.mobPoolObserve = gUiMobPoolObserve ? 1u : 0u;
         c.simpleCombatOneshotMaxHp = xcat::ClampCombatOneshotMaxHp(
             static_cast<uint32_t>(oneshotMaxHp < 0 ? 0 : oneshotMaxHp));
         c.simpleCombatOneshotMinBumps = xcat::ClampCombatOneshotMinBumps(
@@ -1676,6 +1693,9 @@ void DrawHomeTab(LaunchUiState& ui) {
                     "  开打/切策略/换图/软重连后原地站「静止」ms 给吸物；0=不等；换怪不重新站。\n"
                     "  不自动吸怪；要吸请自己开「吸怪」TAB。\n"
                     "· 瞬移找怪：fill+Doing 贴到怪旁再出刀，可跨层。水平站距 X 与空中/拟人共用。\n"
+                    "  可勾「每只怪打一下」：出一刀就切下一只（默认关）。\n"
+                    "  选此项：出过刀后强制「主动软重连」清加速 FLAG（出刀后关 F5 仍走完这一轮；\n"
+                    "  没出过刀才不计时，满包可直接卖）。\n"
                     "· 关闭：不追怪（站桩，够得着才砍）。");
             }
         }
@@ -1734,6 +1754,18 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
             ImGui::SameLine(0.f, ui::Gap() * 0.35f);
             ImGui::TextUnformatted("px");
+        }
+        if (gUiApproachMode == 3) {
+            if (xcat::ui::OptionCheckbox("每只怪打一下", &teleportOneHit)) persistCore();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "仅「瞬移找怪」生效。默认关。\n"
+                    "开：当前这只出一刀就禁锁，按原来的选怪（可跨层瞬移）切下一只。\n"
+                    "不走「每只怪打几刀」的攻击盒外换怪，也不因活怪少于 3 只停刀。\n"
+                    "关：沿用打死 / 早切 / 空刀才换怪。\n"
+                    "与「每只怪打几刀」同时开时本项优先。\n"
+                    "生效核对：combat.log 出现 SetTeleportOneHit 1 与 switch reason=tp_one_hit");
+            }
         }
         ImGui::Unindent(ui::Gap() * 1.2f);
         // 倍率在下方「飞行速度」卡调。
@@ -1940,16 +1972,30 @@ void DrawHomeTab(LaunchUiState& ui) {
             "亦可用 soft_login_probe.on / SOFT_LOGIN_PROBE=1\n"
             "（或旧 marker galaxy_token_probe.on 仅采证）。");
 
-        if (xcat::ui::OptionCheckbox("主动软重连", &gUiMobGatherSoftRelogin)) persistCore();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(
-                "默认关。不绑吸怪，可单独开。勾了且进图站稳满 X 秒后，\n"
-                "由我们主动 CloseSession 走软重连回图。成功落地后再计时。\n"
-                "「软重连试连」必须开，否则不会拆会话。\n"
-                "换图窗 / 商城拍卖 / 换频 / 测谎 / 补给途中不拆。\n"
-                "不点確認、不清登录态。落盘 user.ini。");
-        }
-        ImGui::BeginDisabled(!gUiMobGatherSoftRelogin);
+        {
+            const bool forceByTeleport = (gUiApproachMode == 3 && autoCombat);
+            bool shownSoftRelogin = gUiMobGatherSoftRelogin || forceByTeleport;
+            ImGui::BeginDisabled(forceByTeleport);
+            if (xcat::ui::OptionCheckbox("主动软重连", &shownSoftRelogin)) {
+                if (!forceByTeleport) {
+                    gUiMobGatherSoftRelogin = shownSoftRelogin;
+                    persistCore();
+                }
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "默认关。不绑吸怪，可单独开。勾了且进图站稳满 X 秒后，\n"
+                    "由我们主动 CloseSession 走软重连回图。成功落地后再计时。\n"
+                    "「软重连试连」必须开，否则不会拆会话。\n"
+                    "核心：出过刀必须 hangup 清加速 FLAG（配合攻击加速规避检测）。\n"
+                    "第一刀才起表；出刀后关 F5 仍走完这一轮。没出过刀才不计时，满包可直接卖。\n"
+                    "追怪选「瞬移找怪」且 F5 开着时面板强制显示（切走瞬移恢复勾选，不改落盘）。\n"
+                    "自动卖装 / 补给赶路 / Travel 途中暂停倒计时，回挂机图再继续。\n"
+                    "换图窗 / 商城拍卖 / 换频 / 测谎途中不拆。\n"
+                    "不点確認、不清登录态。落盘 user.ini。");
+            }
+            ImGui::BeginDisabled(!gUiMobGatherSoftRelogin && !forceByTeleport);
         ImGui::SameLine();
         ImGui::TextDisabled("间隔");
         ImGui::SameLine();
@@ -1964,11 +2010,12 @@ void DrawHomeTab(LaunchUiState& ui) {
             persistCore();
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("满这么多秒后触发。拖动或双击填。默认 14，范围 10–3600。");
+            ImGui::SetTooltip("满这么多秒后触发。拖动或双击填。默认 20，范围 10–3600。");
         }
         ImGui::SameLine();
         ImGui::TextDisabled("秒");
         ImGui::EndDisabled();
+        }
     }
     CardGap();
     {
@@ -1996,7 +2043,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         static int lootMode = kLootOff;
         static bool pickupBlacklist = false;
         static bool highValuePriority = true;
-        static bool dropSnapLand = false;
+        static bool dropSnapLand = true;
         static bool dropAccelFall = false;
         static int lootIntervalMs = static_cast<int>(xcat::kPetLootIntervalDefaultMs);
         static int lootBurstPerTick = static_cast<int>(xcat::kPetLootBurstDefault);
@@ -2350,7 +2397,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "飞行中的掉落立刻落到落点，可马上捡。\n"
                 "会把当前位置跟到落地坐标，不是只改状态。\n"
-                "黑名单件不碰；与拾物档位无关。默认关闭。");
+                "黑名单件不碰；与拾物档位无关。默认开启。");
         }
         ImGui::SameLine();
         if (xcat::ui::OptionCheckbox("掉落加速", &dropAccelFall)) persistPetLoot();
@@ -2438,8 +2485,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                 ImGui::SetTooltip(
                     "开：500px 内先打周围更密的堆（密度看同层 250px 活怪数）。\n"
                     "脚边独怪不会压过半径内的堆；超过 500px 仍打近的，不去追全图。\n"
-                    "空中贴怪时可跨层比密度；拟人/不跨层仍只在同层比\n"
-                    "关：只按距离/hop 选最近可打怪（同层有怪就不跨层）\n"
+                    "空中贴怪/瞬移找怪可跨层比密度；拟人仍只在同层比。\n"
+                    "关：只按距离选最近可打怪（同层有怪就不跨层）\n"
                     "注意：已锁定交手中不会中途改锁——只影响下一次选怪\n"
                     "生效核对：combat.log 出现 SetClusterPriority 1，acquire 的 cluster>=1");
             }
@@ -3158,6 +3205,9 @@ void DrawAutoSellTab(LaunchUiState& ui) {
                 "按装备栏件数自动回城卖装（其他栏不计数）\n"
                 "自动寻最近可卖店；进城先卖装再卖其他，并补 1 张回城卷\n"
                 "可选充飞镖 / 补红蓝自定义饲料：店有则买\n"
+                "出过刀必须先 hangup 清 FLAG 再卖；没出过刀满包可直接出门。\n"
+                "重连途中不卖；倒计时将尽也推迟到下一轮落地。\n"
+                "落地之后到下一轮出刀前，冷却一过就可以卖。\n"
                 "不卖名单与上方手动卖共用");
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.55f);
@@ -4687,6 +4737,8 @@ void DrawBetaTab(LaunchUiState& ui) {
                     disk.attackRpcDamage ? disk.attackRpcDamage
                                          : xcat::kAttackRpcDamageDefault);
                 gUiCombatForgeHit = disk.simpleCombatForgeHit != 0;
+                gUiForgeHitFrontDx = (int)xcat::ClampForgeHitFrontDx(disk.simpleCombatForgeHitFrontDx);
+                gUiForgeHitFrontDy = (int)xcat::ClampForgeHitFrontDy(disk.simpleCombatForgeHitFrontDy);
                 gUiMapAttack = disk.mapAttack != 0;
                 dropSeenTick = disk.writeTickMs;
                 dropLoaded = true;
@@ -4773,6 +4825,33 @@ void DrawBetaTab(LaunchUiState& ui) {
         }
     };
 
+    auto persistForgeHit = [&]() {
+        if (ui.prefsBinDir.empty()) return;
+        xcat::PayloadControl c{};
+        (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+        c.simpleCombatForgeHit = gUiCombatForgeHit ? 1u : 0u;
+        c.simpleCombatForgeHitFrontDx = xcat::ClampForgeHitFrontDx(
+            static_cast<uint32_t>(gUiForgeHitFrontDx < 0 ? 0 : gUiForgeHitFrontDx));
+        c.simpleCombatForgeHitFrontDy = xcat::ClampForgeHitFrontDy(
+            static_cast<uint32_t>(gUiForgeHitFrontDy < 0 ? 0 : gUiForgeHitFrontDy));
+        gUiForgeHitFrontDx = (int)c.simpleCombatForgeHitFrontDx;
+        gUiForgeHitFrontDy = (int)c.simpleCombatForgeHitFrontDy;
+        c.writeTickMs = GetTickCount64();
+        if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+            xcat::PayloadControl verify{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify)) {
+                dropSeenTick = verify.writeTickMs;
+            } else {
+                dropSeenTick = c.writeTickMs;
+            }
+            xcat::log::Ok("App", "已下发 core：forgeHit=%d box=%u×%u（实验）",
+                          gUiCombatForgeHit ? 1 : 0, c.simpleCombatForgeHitFrontDx,
+                          c.simpleCombatForgeHitFrontDy);
+        } else {
+            xcat::log::Warn("App", "写入 user.ini [core] simpleCombatForgeHit 失败");
+        }
+    };
+
     auto persistMapAttack = [&]() {
         if (ui.prefsBinDir.empty()) return;
         xcat::PayloadControl c{};
@@ -4799,6 +4878,66 @@ void DrawBetaTab(LaunchUiState& ui) {
         }
     };
 
+    {
+        xcat::ui::CardGuard card("##tab_beta_forge_hit", "出刀自组攻包");
+        if (xcat::ui::OptionCheckbox("出刀自组攻包（钉锁）", &gUiCombatForgeHit)) persistForgeHit();
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextDisabled("近战 50 / A槽魔法 52；过远看下方攻击盒 · 失败不出刀 · 落盘");
+        ImGui::PopTextWrapPos();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "实验项。落盘 user.ini。简单战斗普攻才自己组包。\n"
+                "发包走 Network.SendOutPacket（禁止 Session.Send 旁路）。\n"
+                "命中环只填当前锁 oid。近战 50；A 槽魔法攻击技 52。\n"
+                "过远（本卡攻击盒）/ SendOut 失败 / 射击 51：这一刀作废，不退 OnFuncKey。\n"
+                "\n"
+                "和「打怪实验」里的「攻包伪造探针」不是同一个勾：\n"
+                "· 探针 = 自己 Tick 扫近距怪，满 2 次自动关\n"
+                "· 本项 = 劫持打怪出刀，节奏跟面板间隔\n"
+                "\n"
+                "攻击盒与首页「站桩输出」横向/竖直各存各的。\n"
+                "不要和瞬移聚怪一起开。多发手搓已证实踢号。");
+        }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("X");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+        if (ImGui::DragInt("##forge_hit_front_dx", &gUiForgeHitFrontDx, 10,
+                           (int)xcat::kForgeHitFrontDxMin, (int)xcat::kForgeHitFrontDxMax)) {
+            gUiForgeHitFrontDx = (int)xcat::ClampForgeHitFrontDx(
+                static_cast<uint32_t>(gUiForgeHitFrontDx < 0 ? 0 : gUiForgeHitFrontDx));
+            persistForgeHit();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "人↔怪 AbsPos 横向半宽（px）。默认 %u。0=该轴不限。\n"
+                "只挡自组攻包钉锁，不影响站桩输出面前盒。",
+                (unsigned)xcat::kForgeHitFrontDxDefault);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextUnformatted("px");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Y");
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+        if (ImGui::DragInt("##forge_hit_front_dy", &gUiForgeHitFrontDy, 5,
+                           (int)xcat::kForgeHitFrontDyMin, (int)xcat::kForgeHitFrontDyMax)) {
+            gUiForgeHitFrontDy = (int)xcat::ClampForgeHitFrontDy(
+                static_cast<uint32_t>(gUiForgeHitFrontDy < 0 ? 0 : gUiForgeHitFrontDy));
+            persistForgeHit();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "人↔怪 AbsPos 竖直半高（px）。默认 %u。0=该轴不限。\n"
+                "AbsPos：更大 Y = 更高。只挡自组攻包钉锁。",
+                (unsigned)xcat::kForgeHitFrontDyDefault);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        ImGui::TextUnformatted("px");
+    }
+
+    CardGap();
     {
     xcat::ui::CardGuard card("##tab_beta", "实验功能");
         if (xcat::ui::OptionCheckbox("战斗中可丢物", &dropInCombat)) persistDrop();
@@ -5543,6 +5682,30 @@ void DrawBetaTab(LaunchUiState& ui) {
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_beta_combat_exp", "打怪实验");
+        if (xcat::ui::OptionCheckbox("怪物刷新感知增强", &gUiMobPoolObserve)) {
+            if (!ui.prefsBinDir.empty()) {
+                xcat::PayloadControl c{};
+                (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+                c.mobPoolObserve = gUiMobPoolObserve ? 1u : 0u;
+                c.writeTickMs = GetTickCount64();
+                if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                    dropSeenTick = c.writeTickMs;
+                    xcat::log::Ok("App", "已下发 core：mobPoolObserve=%d（实验）",
+                                  gUiMobPoolObserve ? 1 : 0);
+                } else {
+                    xcat::log::Warn("App", "写入 user.ini [core] mobPoolObserve 失败");
+                }
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("进/离场立刻读怪（默认关；1ms 热扫下无体感）");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "实验项：怪进场/离场时立刻唤醒读怪（MethodInfo 观察，不改 .text）。\n"
+                "只吃掉「最多等一个读取周期」；读取速度已是 1ms 时开不开都一样。\n"
+                "钩子尚未打穿进出场包，打开后写 mobpool_obs.log 供对照。");
+        }
+
         if (xcat::ui::OptionCheckbox("LiveStep 跟位", &gUiCombatLiveStep)) {
             if (ui.prefsBinDir.empty()) {
                 // no-op
@@ -6390,23 +6553,23 @@ void DrawDebugTab(LaunchUiState& ui) {
         ImGui::SameLine(0.f, ui::Gap() * 0.45f);
         ImGui::SetNextItemWidth(AppDpi_Px(64.f));
         if (ImGui::DragInt("##dbg_tp_max_hop", &teleportMaxHop, 1,
-                           (int)xcat::kCombatTeleportMaxHopMin,
-                           (int)xcat::kCombatTeleportMaxHopMax)) {
+                           (int)xcat::kCombatTeleportMaxHopMin, INT_MAX)) {
             teleportMaxHop = (int)xcat::ClampCombatTeleportMaxHop(
                 static_cast<uint32_t>(teleportMaxHop < 0 ? 0 : teleportMaxHop));
             persistHop();
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "贴怪单次瞬移最大距离（%u–%u px，默认 %u）。\n"
+                "贴怪单次瞬移最大距离（下限 %u px，默认 %u，无上限）。\n"
                 "更远会分段贴近；过大易软断（lean_local_or_soft）。",
-                (unsigned)xcat::kCombatTeleportMaxHopMin, (unsigned)xcat::kCombatTeleportMaxHopMax,
+                (unsigned)xcat::kCombatTeleportMaxHopMin,
                 (unsigned)xcat::kCombatTeleportMaxHopDefault);
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.35f);
         ImGui::TextUnformatted("px");
         ImGui::SameLine(0.f, ui::Gap());
-        ImGui::TextDisabled("建议 350–550 · 默认 %u（盖中→顶层）",
+        ImGui::TextDisabled("下限 %u · 默认 %u · 无上限",
+                            (unsigned)xcat::kCombatTeleportMaxHopMin,
                             (unsigned)xcat::kCombatTeleportMaxHopDefault);
     }
     CardGap();
@@ -8264,7 +8427,6 @@ static void MobGatherApplyDisk(const xcat::PayloadControl& c) {
     gUiMobGatherHomeValid = c.mobGatherHomeValid != 0;
     gUiMobGatherHomeHasMap = c.mobGatherHomeHasMap != 0;
     gUiMobGatherApplyCtrl = c.mobGatherApplyCtrl != 0;
-    gUiCombatForgeHit = c.simpleCombatForgeHit != 0;
     sMobGatherLastTick = c.writeTickMs;
 }
 
@@ -8341,7 +8503,6 @@ static bool MobGatherSaveUi(LaunchUiState& ui) {
     c.mobGatherHomeValid = gUiMobGatherHomeValid ? 1u : 0u;
     c.mobGatherHomeHasMap = gUiMobGatherHomeHasMap ? 1u : 0u;
     c.mobGatherApplyCtrl = gUiMobGatherApplyCtrl ? 1u : 0u;
-    c.simpleCombatForgeHit = gUiCombatForgeHit ? 1u : 0u;
     c.writeTickMs = GetTickCount64();
     if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
     sMobGatherLastTick = c.writeTickMs;
@@ -8531,28 +8692,6 @@ void DrawMobGatherTab(LaunchUiState& ui) {
             ImGui::TextDisabled("尚未记录 · 站到挂机点后点「记录人物坐标」");
         }
         ImGui::EndDisabled();
-    }
-    CardGap();
-    {
-        xcat::ui::CardGuard card("##tab_gather_forge_hit", "出刀自组攻包");
-        if (xcat::ui::OptionCheckbox("出刀自组攻包（钉锁）", &gUiCombatForgeHit))
-            MobGatherTrySaveOrRevert(ui);
-        ImGui::PushTextWrapPos(0.f);
-        ImGui::TextDisabled("近战 50 / A槽魔法 52；过远跟站桩输出面前盒 · 失败不出刀 · 落盘");
-        ImGui::PopTextWrapPos();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(
-                "落盘 user.ini。简单战斗普攻才自己组包。\n"
-                "发包走 Network.SendOutPacket（禁止 Session.Send 旁路）。\n"
-                "命中环只填当前锁 oid。近战 50；A 槽魔法攻击技 52。\n"
-                "过远（站桩输出面前盒）/ SendOut 失败 / 射击 51：这一刀作废，不退 OnFuncKey。\n"
-                "\n"
-                "和实验 TAB「攻包伪造探针」不是同一个勾：\n"
-                "· 探针 = 自己 Tick 扫近距怪，满 2 次自动关\n"
-                "· 本项 = 劫持打怪出刀，节奏跟面板间隔\n"
-                "\n"
-                "不要和瞬移聚怪一起开。多发手搓已证实踢号。");
-        }
     }
     CardGap();
     {

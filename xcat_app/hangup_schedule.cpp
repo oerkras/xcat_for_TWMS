@@ -32,7 +32,7 @@ constexpr uint64_t kRelaunchRetryKillAtMs = 8000;
 constexpr uint64_t kRelaunchSettleMs = 2500;
 // soft RESULT success 后短窗：KickSniff 落地静默期内仍会 bump disconnectSeq，
 // 而 RequestAttempt 因 land_quiet 早退 hold=0。守护 Tick 1Hz，BIN 实测
-// success absorb 后约 1s 把下一跳 seq 当踢线硬杀。窗长须盖住 land_quiet(1.5s)
+// success absorb 后约 1s 把下一跳 seq 当踢线硬杀。窗长须盖住 land_quiet
 // + 一拍 Tick；result==2 仍立刻硬杀。不得把 result==1 做成永久吞 seq。
 constexpr uint64_t kSoftSuccessGraceMs = 8000;
 

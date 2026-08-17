@@ -15,6 +15,8 @@ void StopWorker();
 
 void SetDesired(bool on);
 bool IsDesired();
+// 开趟中（含排队的卖装/回挂机）。Cooldown / 纯 Idle 不算。
+// 主动软重连据此冻钟，避免赶路途中 hangup_timer 拆会话。
 bool IsBusy();
 
 // 城镇判定：仅 map_info.tsv town=1。不用原生 IsTown，也不用 %1000000==0

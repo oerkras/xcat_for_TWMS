@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 122u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 126u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -65,8 +65,9 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 122u;
 // v101: mobGatherIntervalMs — 吸怪新收间隔（ms）；默认 40；已吸住的仍跟瞄准
 // v102: 吸怪自定义落点 X 改为有符号自填（±30000），不再套 F5 0–900
 // v103: 吸怪档速/到位/瞄准间隔上 TAB（巡航/进站/悬停档、到位圈、到位Kp、刹车、下滑切断、瞄准）
-// v104: mobGatherSoftReloginSec — 「X秒后触发软重连」；厂默关（叠登会「已登出」）；勾了才拆
-// v122: 主动软重连从吸怪 TAB 挪到首页挂机卡；不再绑吸怪；ini 键仍 mobGatherSoftRelogin*
+    // v104: mobGatherSoftReloginSec — 「X秒后触发软重连」；厂默关（叠登会「已登出」）；勾了才拆
+    // v122: 主动软重连从吸怪 TAB 挪到首页挂机卡；不再绑吸怪；ini 键仍 mobGatherSoftRelogin*
+    // 出过刀才起表 hangup 清 FLAG；出刀后关 F5 仍走完。没出过刀才不计时。卖装/Travel 冻钟。
 // v105: mobGatherQuietDelayMs — 吸怪整模块延时启动（ms）；开吸怪 / hold 结束起表；与落地也吸独立
 // v106: mobGatherClearRelogin — 吸怪 TAB「清怪重连」；一轮白名单死干净才拆会话（v117 厂默改关）
 // v107: simpleCombatHiraishinFrontDx 厂默 280→110（站桩输出「横向」）
@@ -85,6 +86,12 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 122u;
 // v120: mobGatherHomeReturn 厂默改关（旧盘已有键原样保留）
 // v121: mobGatherAimJitterPx — 吸怪 TAB 落点「抖动」；按 oid 稳定散开，0=叠点
 // v122: 主动软重连入口改首页挂机卡，不再要求先开吸怪（键名不变）
+// v123: simpleCombatTeleportOneHit — 瞬移找怪「每只怪打一下」；默认关
+// v124: mobPoolObserve — 怪物刷新感知增强（MI Enter/Leave → ImmediateScan；默认关）
+// v125: simpleCombatTeleportMaxHop 厂默 400/520/550→3000（远图一次到位；手改保留）
+// v126: simpleCombatTeleportCooldownMs 厂默 200→80；读盘迁旧默认 200
+// v127: simpleCombatForgeHitFrontDx/Dy — 出刀自组攻包独立攻击盒；不与站桩面前盒共用
+// v128: 自组攻包攻击盒厂默 60×10→480×420；缺键不再抄站桩盒
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -186,6 +193,15 @@ constexpr uint32_t kHiraishinFrontDxMin = 0u;
 constexpr uint32_t kHiraishinFrontDyMin = 0u;
 constexpr uint32_t kHiraishinFrontDxMax = 4000u;
 constexpr uint32_t kHiraishinFrontDyMax = 2000u;
+// 出刀自组攻包钉锁过远尺（与站桩面前盒同钳、不同键）。厂默 480×420。
+constexpr uint32_t kForgeHitFrontDxDefault = 480u;
+constexpr uint32_t kForgeHitFrontDyDefault = 420u;
+constexpr uint32_t kForgeHitFrontDxLegacyDefault = 60u;
+constexpr uint32_t kForgeHitFrontDyLegacyDefault = 10u;
+constexpr uint32_t kForgeHitFrontDxMin = kHiraishinFrontDxMin;
+constexpr uint32_t kForgeHitFrontDyMin = kHiraishinFrontDyMin;
+constexpr uint32_t kForgeHitFrontDxMax = kHiraishinFrontDxMax;
+constexpr uint32_t kForgeHitFrontDyMax = kHiraishinFrontDyMax;
 // 简易战斗 worker 心跳（状态机 Tick）；越短出刀机会越多，CPU/主线程更忙。
 constexpr uint32_t kSimpleCombatTickDefaultMs = 16u;
 constexpr uint32_t kSimpleCombatTickMinMs = 1u;
@@ -321,7 +337,7 @@ constexpr uint32_t kMobGatherAimMsDefault = 17u;
 constexpr uint32_t kMobGatherAimMsMin = 8u;
 constexpr uint32_t kMobGatherAimMsMax = 100u;
 constexpr uint32_t kMobGatherSoftReloginDefault = 0u;
-constexpr uint32_t kMobGatherSoftReloginSecDefault = 14u;
+constexpr uint32_t kMobGatherSoftReloginSecDefault = 20u;
 constexpr uint32_t kMobGatherSoftReloginSecMin = 10u;
 constexpr uint32_t kMobGatherSoftReloginSecMax = 3600u;
 // 清怪重连：吸怪开着才拆。默认关，与首页主动软重连独立。缺键走关；盘上已有键原样保留。
@@ -388,6 +404,8 @@ constexpr uint32_t kCombatHitRotateDefault = 0u;
 constexpr uint32_t kCombatHitRotateNDefault = 2u;
 constexpr uint32_t kCombatHitRotateNMin = 1u;
 constexpr uint32_t kCombatHitRotateNMax = 20u;
+// 瞬移找怪「每只怪打一下」：出一刀后切下一只（走原选怪）。默认关。
+constexpr uint32_t kCombatTeleportOneHitDefault = 0u;
 // 同帧连打探针已关停（实测不增伤）；字段保留仅为清掉旧 ini 的 2/3。
 constexpr uint32_t kAttackSameFrameBurstDefault = 1u;
 constexpr uint32_t kAttackSameFrameBurstMin = 1u;
@@ -445,18 +463,20 @@ constexpr int32_t kCombatStandOffYMax = 600;
 constexpr uint32_t kCombatGroundSpoofDefault = 1u;
 // F5 空中贴怪「防抖」：到位后钉住站位点（仍 Station，不改 Hold）。关=立即回退旧跟点行为。
 constexpr uint32_t kCombatAntiJitterDefault = 1u;
-// 贴怪/LiveStep 共用面板冷却；默认 200；下限 5（大 hop 另有 80/120 地板）。
-constexpr uint32_t kCombatTeleportCooldownDefaultMs = 200u;
+// 历史「贴怪 Native 自冷」落盘字段；hop 间距已改认 Settling/PosSane，此值不再下发 Native。
+// 下限 5 仅防离谱读盘。换频/开趟暂停走 ForceNativeCooldown，与本字段无关。
+constexpr uint32_t kCombatTeleportCooldownDefaultMs = 80u;
 constexpr uint32_t kCombatTeleportCooldownMinMs = 5u;
 constexpr uint32_t kCombatTeleportCooldownMaxMs = 8000u;
-// 单次贴怪 hop 上限（px）；更远分段贴近。调试 TAB 可调。
-// 默认 550（=上限）：盖住常见中台→顶台垂直落差。
-constexpr uint32_t kCombatTeleportMaxHopDefault = 550u;
+constexpr uint32_t kCombatTeleportCooldownLegacyDefaultMs = 200u;
+// 单次贴怪 hop（px）；更远分段贴近。调试 TAB 可调。
+// 默认 3000：远图（鱷魚潭Ⅰ hopFar≈2375）一次到位。只夹下限，无上限。
+constexpr uint32_t kCombatTeleportMaxHopDefault = 3000u;
 constexpr uint32_t kCombatTeleportMaxHopMin = 350u;
-constexpr uint32_t kCombatTeleportMaxHopMax = 550u;
-// 旧默认迁移：400→520→550；显式调过其它值保留。
+// 旧默认迁移：400→520→550→3000；显式调过其它值保留。
 constexpr uint32_t kCombatTeleportMaxHopLegacyDefault = 400u;
 constexpr uint32_t kCombatTeleportMaxHopPrevDefault = 520u;
+constexpr uint32_t kCombatTeleportMaxHopPrevDefault2 = 550u;
 // 加速秒杀早切（lastHitted 确认后切怪；0 maxHp = 关此道；默认关）
 constexpr uint32_t kCombatOneshotMaxHpDefault = 0u;
 // 勾选启用 /「均衡」档回填的表血上限（非落盘缺省）
@@ -559,6 +579,8 @@ struct PayloadControl {
     uint32_t simpleCombatTickMs = kSimpleCombatTickDefaultMs;
     // v51: 打怪开时 MobPool 扫描周期（首页「怪物读取速度」）；默认 20
     uint32_t mobScanIntervalMs = kMobScanIntervalDefaultMs;
+    // v124: 怪物刷新感知增强（实验 TAB）。MI 观察进/离场 → RequestImmediateScan；默认关。
+    uint32_t mobPoolObserve = 0;
     // v40: 出刀按键 hold（调试 TAB）；默认 5，实际取 min(此值, 间隔)
     uint32_t simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     uint32_t clusterWeight = kClusterWeightDefault;  // 0=最近优先；非0=群怪优先
@@ -567,6 +589,9 @@ struct PayloadControl {
     uint32_t simpleCombatHitRotateN = kCombatHitRotateNDefault;
     // v84: 出刀自组攻包。落盘 user.ini；会话文件只给面板↔DLL 热切换。
     uint32_t simpleCombatForgeHit = 0;
+    // v127: 自组攻包钉锁攻击盒半宽/半高（AbsPos px；0=该轴不限）。不与站桩面前盒共用。
+    uint32_t simpleCombatForgeHitFrontDx = kForgeHitFrontDxDefault;
+    uint32_t simpleCombatForgeHitFrontDy = kForgeHitFrontDyDefault;
     // v85: 实验·全图攻击。会话态（state/map_attack_armed），不写入 user.ini；
     // 重启 launcher 归零。P1 只打 MapAtk 日志，不改 Rect/maxCount。
     uint32_t mapAttack = 0;
@@ -602,6 +627,7 @@ struct PayloadControl {
     uint32_t mobGatherCoastVy = kMobGatherCoastVyDefault;
     uint32_t mobGatherAimMs = kMobGatherAimMsDefault;
     // v104/v122: 主动软重连（首页挂机卡）。ini 键仍 mobGatherSoftRelogin*。不绑吸怪。
+    // 追怪=瞬移找怪且 F5 开着时强制起表（不改本字段落盘）；卖装/赶路冻钟。
     uint32_t mobGatherSoftRelogin = kMobGatherSoftReloginDefault;
     uint32_t mobGatherSoftReloginSec = kMobGatherSoftReloginSecDefault;
     uint32_t mobGatherClearRelogin = kMobGatherClearReloginDefault;
@@ -626,6 +652,8 @@ struct PayloadControl {
     uint32_t mobGatherFeetExemptPx = kMobGatherFeetExemptPxDefault;
     // fill+Doing 贴怪：F5 追怪「瞬移找怪」；默认关。
     uint32_t simpleCombatTeleport = 0;
+    // v123: 瞬移找怪「每只怪打一下」。仅瞬移模式生效；默认关。
+    uint32_t simpleCombatTeleportOneHit = kCombatTeleportOneHitDefault;
     // 空中贴怪（ini: simpleCombatAirApproach；旧键 ImpactApproach 读盘兜底）。
     uint32_t simpleCombatImpactApproach = 1;
     // v52: 空中贴怪飞行速度倍率（%）。100 = 基准 1.0X。仅在空中贴怪开启时生效。
@@ -830,6 +858,9 @@ inline uint32_t ClampHiraishinFrontDy(uint32_t px) {
     if (px > kHiraishinFrontDyMax) return kHiraishinFrontDyMax;
     return px;
 }
+
+inline uint32_t ClampForgeHitFrontDx(uint32_t px) { return ClampHiraishinFrontDx(px); }
+inline uint32_t ClampForgeHitFrontDy(uint32_t px) { return ClampHiraishinFrontDy(px); }
 
 inline uint32_t ClampAttackSameFrameBurst(uint32_t n) {
     if (n < kAttackSameFrameBurstMin) return kAttackSameFrameBurstMin;
@@ -1082,8 +1113,11 @@ inline uint32_t ClampCombatTeleportCooldownMs(uint32_t v) {
 }
 inline uint32_t ClampCombatTeleportMaxHop(uint32_t v) {
     if (v < kCombatTeleportMaxHopMin) return kCombatTeleportMaxHopMin;
-    if (v > kCombatTeleportMaxHopMax) return kCombatTeleportMaxHopMax;
     return v;
+}
+inline bool IsRetiredCombatTeleportMaxHopDefault(uint32_t v) {
+    return v == kCombatTeleportMaxHopLegacyDefault || v == kCombatTeleportMaxHopPrevDefault ||
+           v == kCombatTeleportMaxHopPrevDefault2;
 }
 
 inline uint32_t ClampCombatOneshotMaxHp(uint32_t v) {

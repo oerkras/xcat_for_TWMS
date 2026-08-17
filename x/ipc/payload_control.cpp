@@ -26,6 +26,7 @@
 #include "../features/melee_veto/melee_veto.h"
 #include "../features/simple_combat/simple_combat.h"
 #include "../features/mob_scan/mob_scan.h"
+#include "../features/mob_pool_observe/mob_pool_observe.h"
 #include "../features/fly/fly.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
@@ -476,6 +477,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::mob_scan::SetCombatIntervalMs(
         xcat::ClampMobScanIntervalMs(c.mobScanIntervalMs ? c.mobScanIntervalMs
                                                          : xcat::kMobScanIntervalDefaultMs));
+    x::features::mob_pool_observe::SetEnabled(c.mobPoolObserve != 0);
     x::features::ports::attack::SetAttackHoldMs(
         xcat::ClampAttackHoldMs(c.simpleCombatAttackHoldMs ? c.simpleCombatAttackHoldMs
                                                           : xcat::kAttackHoldDefaultMs));
@@ -535,6 +537,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
         x::features::simple_combat::SetForgeHitEnabled(c.simpleCombatForgeHit != 0);
     }
     x::features::simple_combat::SetTeleportEnabled(c.simpleCombatTeleport != 0);
+    x::features::simple_combat::SetTeleportOneHit(c.simpleCombatTeleportOneHit != 0);
     x::features::simple_combat::SetImpactApproachEnabled(c.simpleCombatImpactApproach != 0);
     x::features::simple_combat::SetAntiJitterEnabled(c.simpleCombatAntiJitter != 0);
     x::features::simple_combat::SetAntiHugEnabled(c.simpleCombatAntiHug != 0);
@@ -546,6 +549,8 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::simple_combat::SetHiraishinRangePx(c.simpleCombatHiraishinRangePx);
     x::features::simple_combat::SetHiraishinFrontBox(c.simpleCombatHiraishinFrontDx,
                                                     c.simpleCombatHiraishinFrontDy);
+    x::features::simple_combat::SetForgeHitFrontBox(c.simpleCombatForgeHitFrontDx,
+                                                   c.simpleCombatForgeHitFrontDy);
     x::features::simple_combat::SetLiveStepEnabled(c.simpleCombatLiveStep != 0);
     x::features::simple_combat::SetTeleportParams(
         c.simpleCombatTeleportMinDx, c.simpleCombatTeleportStandOff, c.simpleCombatTeleportCooldownMs,

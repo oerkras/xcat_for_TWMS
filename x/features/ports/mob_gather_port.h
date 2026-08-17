@@ -44,9 +44,24 @@ void SetIgnoreQuiet(bool on);
 void SetQuietDelayMs(unsigned ms);
 void SetApplyCtrl(bool on);
 // 首页挂机「主动软重连」。不绑吸怪；试连未开则只起表不拆会话。
+// 出过刀 = 欠一次 hangup 清加速 FLAG：第一刀才起表；出刀后关 F5 仍走完这一轮。
+// 没出过刀：关 F5 不计时，满包可直接卖。勾选可单独开（不绑出刀）。
+// freeze 临时关 F5 只停表（未出刀时），不清落地闸 / 不清欠 hangup。
+// 卖装/赶路冻钟。重连在途 / AwaitLand / 卖装优先 hold 不起下一轮表。
+// 重连在途 / 出过刀未 hangup 禁自动卖装。
 void SetSoftRelogin(bool on, unsigned sec);
 void TickSoftRelogin();
-// 顶栏倒计时：on=勾选；paused=hold/静默冻钟；remainMs=剩余（未起表 0xFFFFFFFF）。
+bool IsSoftReloginWanted();
+// 成功出刀：钉「欠 hangup」。TryFirePrimaryEx / NoteLastFire（forge）调用。
+void NoteAttackDirty();
+// 重连在途 / AwaitLand / 出过刀未落地 禁卖。没出过刀、人已在图里：满包可直接出门。
+// 倒计时将尽也推迟，避免出门撞上下一轮拆会话。
+bool SoftReloginAllowsAutoSell();
+// hangup 已开火、补给还没拍板：F5 不准恢复出刀（卖装优先于打怪）。
+bool HangupCombatHold();
+void ReleaseHangupCombatHold(const char* why);
+// 顶栏倒计时：on=勾选 / 出过刀欠 hangup / 瞬移找怪+F5；paused=hold/卖装赶路/静默冻钟；
+// remainMs=剩余（未起表 0xFFFFFFFF）。
 void QuerySoftReloginClock(unsigned* on, unsigned* paused, unsigned* remainMs, unsigned* needMs);
 void SetClearRelogin(bool on);
 void TickClearRelogin();

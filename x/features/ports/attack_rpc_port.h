@@ -62,10 +62,10 @@ bool TryFireOneshot(FireResult* out = nullptr);
 // 打怪实验：SendOutPacket，命中环只填 lockOid（须在 snap 且活着）。
 // 不看 gEnabled（与「攻包伪造探针」Tick 独立）；不走 Session.Send。
 // 多发已证实踢号——调用方短开。oid<=0 直接拒绝。
-// 过远（站桩输出面前盒 |dx|/|dy|）/ SendOut false / 非近战且非 A 槽魔法技：拒发。调用方不得退回 OnFuncKey。
+// 过远（自组攻包攻击盒 |dx|/|dy|）/ SendOut false / 非近战且非 A 槽魔法技：拒发。调用方不得退回 OnFuncKey。
 bool TryFireLockOid(int32_t oid, FireResult* out = nullptr);
 
-// 钉锁过远尺：与 simple_combat 站桩输出面前盒同一套（AbsPos 半宽/半高；0=该轴不限）。
+// 钉锁过远尺：出刀自组攻包自己的攻击盒（AbsPos 半宽/半高；0=该轴不限）。不与站桩面前盒共用。
 void SetLockFrontBox(uint32_t dx, uint32_t dy);
 
 // 换图：丢掉 2s Rebind 缓存。InterStage 时 opcode HashSet 会被清空。

@@ -1669,7 +1669,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     // landY = 该处台面。aimY = landY + lift（仅空中接近）。禁止 bleed 对抬高 aim。
     // AbsPos：更大 Y = 更高；抬高必须 +=。
     // 发门带空集 → aimX 仍门心，hoverEnter（悬停进门，ready 不要求 onFh）。
-    // BIN 138 沼泽：远岸不在 ±16，进不了候选。
+    // BIN 138 沼泽：远岸不在 ±16，进不了候选。门口短台不算空集（走普通 hold 落地）。
     float aimX = portal.x;
     float landY = portal.y;
     float aimY = portal.y;

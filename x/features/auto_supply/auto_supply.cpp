@@ -11,6 +11,8 @@
 #include "../sellbag/sellbag.h"
 #include "../simple_combat/simple_combat.h"
 #include "../char_boot/char_boot.h"
+#include "../ports/mob_gather_port.h"
+#include "../soft_login_probe/soft_login_probe.h"
 #include "../travel/travel.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
@@ -106,6 +108,10 @@ int gWatchPotHpHave = -1, gWatchPotMpHave = -1, gWatchPotBelow = 1;
 DWORD gReturnStableSince = 0;
 DWORD gTripTravelArmAt = 0;  // 非 0：此前禁止 RequestGoto（开趟冷却窗）
 Status gStatus{};
+int sPotionLowStreak = 0;
+int sCustomLowStreak = 0;
+int sCustom2LowStreak = 0;
+int sFeedLowStreak = 0;
 
 enum class BuyStep : int {
     ReturnScroll = 0,
@@ -1032,6 +1038,77 @@ bool NextBuyTarget(int& outId, int& outNeed, const char*& outLabel) {
     return false;
 }
 
+bool FireAutoTrip(bool potionFire, bool customFire, bool custom2Fire, bool feedFire, bool equipMet,
+                  int used, int cap, const char* potionWhy, const char* customWhy,
+                  const char* custom2Why, const char* feedWhy) {
+    if (gPhase != Phase::Idle) return false;
+    char msg[96]{};
+    if (!ResolveShopTarget(msg, sizeof(msg))) {
+        SetMsg(msg[0] ? msg : "自动寻店失败");
+        return false;
+    }
+    gShopExclude[0] = 0;
+    gShopStockReroute = 0;
+    const char* pauseMsg = "停手并记下挂机图…";
+    if (potionFire || customFire || custom2Fire || feedFire) {
+        if (potionFire) {
+            gPotionEmptyArmed = false;
+            runtime::LogI("AutoSupply", "缺药触发 %s → shop=%s（已闭锁）",
+                          potionWhy && potionWhy[0] ? potionWhy : "-", gShopMap);
+        }
+        if (customFire) {
+            gCustomLowArmed = false;
+            runtime::LogI("AutoSupply", "自定义低库存触发 %s → shop=%s（已闭锁）",
+                          customWhy && customWhy[0] ? customWhy : "-", gShopMap);
+        }
+        if (custom2Fire) {
+            gCustom2LowArmed = false;
+            runtime::LogI("AutoSupply", "自定义2低库存触发 %s → shop=%s（已闭锁）",
+                          custom2Why && custom2Why[0] ? custom2Why : "-", gShopMap);
+        }
+        if (feedFire) {
+            gFeedLowArmed = false;
+            runtime::LogI("AutoSupply", "饲料低库存触发 %s → shop=%s（已闭锁）",
+                          feedWhy && feedWhy[0] ? feedWhy : "-", gShopMap);
+        }
+        if (potionFire && !customFire && !custom2Fire && !feedFire) {
+            Publish(notify::NotificationKind::Info, "auto-supply-potion", "缺药自动补",
+                    "绑定药水偏低，开始回城补给");
+            pauseMsg = "缺药补给：停手并记下挂机图…";
+        } else if (customFire && !potionFire && !custom2Fire && !feedFire) {
+            Publish(notify::NotificationKind::Info, "auto-supply-custom", "自定义物品补给",
+                    "自定义物品数量过低，开始回城补给");
+            pauseMsg = "自定义低库存：停手并记下挂机图…";
+        } else if (custom2Fire && !potionFire && !customFire && !feedFire) {
+            Publish(notify::NotificationKind::Info, "auto-supply-custom2", "自定义2补给",
+                    "自定义2数量过低，开始回城补给");
+            pauseMsg = "自定义2低库存：停手并记下挂机图…";
+        } else if (feedFire && !potionFire && !customFire && !custom2Fire) {
+            Publish(notify::NotificationKind::Info, "auto-supply-feed", "饲料补给",
+                    "饲料数量过低，开始回城补给");
+            pauseMsg = "饲料低库存：停手并记下挂机图…";
+        } else {
+            Publish(notify::NotificationKind::Info, "auto-supply-multi", "低库存补给",
+                    "多项库存偏低，开始回城补给");
+            pauseMsg = "低库存补给：停手并记下挂机图…";
+        }
+    } else if (equipMet) {
+        runtime::LogI("AutoSupply", "装备触发 %d/%d thr=%d → shop=%s", used, cap, gEquipTrigger,
+                      gShopMap);
+    } else {
+        return false;
+    }
+    sPotionLowStreak = 0;
+    sCustomLowStreak = 0;
+    sCustom2LowStreak = 0;
+    sFeedLowStreak = 0;
+    gManualTrip = false;
+    gRechargeReq.store(false, std::memory_order_release);
+    PublishStatusIni();
+    Enter(Phase::Pause, pauseMsg);
+    return true;
+}
+
 void TickIdle(DWORD now) {
     // 未就绪时保留 gTripReq，勿 exchange 丢单（BIN：点「立即一趟」被吃掉）
     // 手动一趟必须优先于 pendingReturn：BIN「每次第一下无效」=
@@ -1041,6 +1118,10 @@ void TickIdle(DWORD now) {
             gTripReq.store(false, std::memory_order_release);
             Publish(notify::NotificationKind::Warning, "auto-supply-trip", "无法启动",
                     "起号进行中");
+            return;
+        }
+        if (soft_login_probe::IsReconnectInFlight()) {
+            SetMsg("等软重连落地后再开趟…");
             return;
         }
         if (!ports::world::IsPlayReady() || sellbag::IsBusy() || travel::IsActive()) return;
@@ -1096,7 +1177,8 @@ void TickIdle(DWORD now) {
     // 崩溃/踢线后续：优先回挂机图（无手动指令时）。
     // BIN 16:11：enabled=0 时仍恢复 pendingReturn；续跑不依赖自动补给开关。
     if (gPendingReturnFarm && gLastFarmMap[0]) {
-        if (!ports::world::IsPlayReady() || sellbag::IsBusy() || travel::IsActive()) {
+        if (!ports::world::IsPlayReady() || sellbag::IsBusy() || travel::IsActive() ||
+            soft_login_probe::IsReconnectInFlight()) {
             static DWORD sLastPendingWaitLog = 0;
             if (!sLastPendingWaitLog || now - sLastPendingWaitLog >= 5000) {
                 sLastPendingWaitLog = now;
@@ -1148,10 +1230,6 @@ void TickIdle(DWORD now) {
     if (char_boot::IsBusy()) return;
     if (sellbag::IsBusy() || travel::IsActive()) return;
 
-    static int sPotionLowStreak = 0;
-    static int sCustomLowStreak = 0;
-    static int sCustom2LowStreak = 0;
-    static int sFeedLowStreak = 0;
     char potionWhy[96]{};
     char customWhy[96]{};
     char custom2Why[96]{};
@@ -1182,69 +1260,18 @@ void TickIdle(DWORD now) {
     const bool equipMet = sellTriggerOn && EquipTriggerMet(used, cap);
     if (!potionFire && !customFire && !custom2Fire && !feedFire && !equipMet) return;
 
-    char msg[96]{};
-    if (!ResolveShopTarget(msg, sizeof(msg))) {
-        SetMsg(msg[0] ? msg : "自动寻店失败");
+    if (!ports::mob_gather::SoftReloginAllowsAutoSell()) {
+        static DWORD sDeferLog = 0;
+        if (!sDeferLog || now - sDeferLog >= 4000) {
+            sDeferLog = now;
+            runtime::LogI("AutoSupply", "defer trip until hangup soft-relogin land");
+        }
+        SetMsg("等主动软重连落地后再卖装…");
         return;
     }
-        gShopExclude[0] = 0;
-        gShopStockReroute = 0;
-        // 并发触发必须全部闭锁：旧 if/else 只关一路，另一路仍 armed 会冷却后空转第二趟。
-        const char* pauseMsg = "停手并记下挂机图…";
-    if (potionFire || customFire || custom2Fire || feedFire) {
-        if (potionFire) {
-            gPotionEmptyArmed = false;
-            runtime::LogI("AutoSupply", "缺药触发 %s → shop=%s（已闭锁）",
-                          potionWhy[0] ? potionWhy : "-", gShopMap);
-        }
-        if (customFire) {
-            gCustomLowArmed = false;
-            runtime::LogI("AutoSupply", "自定义低库存触发 %s → shop=%s（已闭锁）",
-                          customWhy[0] ? customWhy : "-", gShopMap);
-        }
-        if (custom2Fire) {
-            gCustom2LowArmed = false;
-            runtime::LogI("AutoSupply", "自定义2低库存触发 %s → shop=%s（已闭锁）",
-                          custom2Why[0] ? custom2Why : "-", gShopMap);
-        }
-        if (feedFire) {
-            gFeedLowArmed = false;
-            runtime::LogI("AutoSupply", "饲料低库存触发 %s → shop=%s（已闭锁）",
-                          feedWhy[0] ? feedWhy : "-", gShopMap);
-        }
-        if (potionFire && !customFire && !custom2Fire && !feedFire) {
-            Publish(notify::NotificationKind::Info, "auto-supply-potion", "缺药自动补",
-                    "绑定药水偏低，开始回城补给");
-            pauseMsg = "缺药补给：停手并记下挂机图…";
-        } else if (customFire && !potionFire && !custom2Fire && !feedFire) {
-            Publish(notify::NotificationKind::Info, "auto-supply-custom", "自定义物品补给",
-                    "自定义物品数量过低，开始回城补给");
-            pauseMsg = "自定义低库存：停手并记下挂机图…";
-        } else if (custom2Fire && !potionFire && !customFire && !feedFire) {
-            Publish(notify::NotificationKind::Info, "auto-supply-custom2", "自定义2补给",
-                    "自定义2数量过低，开始回城补给");
-            pauseMsg = "自定义2低库存：停手并记下挂机图…";
-        } else if (feedFire && !potionFire && !customFire && !custom2Fire) {
-            Publish(notify::NotificationKind::Info, "auto-supply-feed", "饲料补给",
-                    "饲料数量过低，开始回城补给");
-            pauseMsg = "饲料低库存：停手并记下挂机图…";
-        } else {
-            Publish(notify::NotificationKind::Info, "auto-supply-multi", "低库存补给",
-                    "多项库存偏低，开始回城补给");
-            pauseMsg = "低库存补给：停手并记下挂机图…";
-        }
-    } else {
-        runtime::LogI("AutoSupply", "装备触发 %d/%d thr=%d → shop=%s", used, cap, gEquipTrigger,
-                      gShopMap);
-    }
-    sPotionLowStreak = 0;
-    sCustomLowStreak = 0;
-    sCustom2LowStreak = 0;
-    sFeedLowStreak = 0;
-    gManualTrip = false;
-    gRechargeReq.store(false, std::memory_order_release);
-    PublishStatusIni();
-    Enter(Phase::Pause, pauseMsg);
+
+    (void)FireAutoTrip(potionFire, customFire, custom2Fire, feedFire, equipMet, used, cap,
+                       potionWhy, customWhy, custom2Why, feedWhy);
 }
 
 void TickPause(DWORD now) {
@@ -1282,6 +1309,10 @@ void TickPause(DWORD now) {
 void TickGoingTown(DWORD now) {
     if (now - gPhaseSince > kGotoTimeoutMs) {
         FailTrip("前往店图超时");
+        return;
+    }
+    if (soft_login_probe::IsReconnectInFlight()) {
+        SetMsg("等软重连落地…");
         return;
     }
     if (MapMatchesTarget(gShopMap) && !travel::IsActive()) {
@@ -2113,10 +2144,41 @@ void HotReadConfig() {
     }
 }
 
+void TickHangupSupplyFirst(DWORD now) {
+    if (!ports::mob_gather::HangupCombatHold()) return;
+    if (!ports::mob_gather::SoftReloginAllowsAutoSell()) return;
+    if (gPhase != Phase::Idle) return;
+    if (!gDesired.load()) return;
+    if (now < gCooldownUntil) return;
+    if (!ports::world::IsPlayReady()) return;
+    if (char_boot::IsBusy() || sellbag::IsBusy() || travel::IsActive()) return;
+
+    char potionWhy[96]{};
+    char customWhy[96]{};
+    char custom2Why[96]{};
+    char feedWhy[96]{};
+    const bool potionFire = PotionLowTriggerMet(potionWhy, sizeof(potionWhy));
+    const bool customFire = CustomLowTriggerMet(customWhy, sizeof(customWhy));
+    const bool custom2Fire = Custom2LowTriggerMet(custom2Why, sizeof(custom2Why));
+    const bool feedFire = FeedLowTriggerMet(feedWhy, sizeof(feedWhy));
+    const bool sellTriggerOn =
+        (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0);
+    int used = 0, cap = 0;
+    const bool equipMet = sellTriggerOn && EquipTriggerMet(used, cap);
+    if (!potionFire && !customFire && !custom2Fire && !feedFire && !equipMet) return;
+    if (FireAutoTrip(potionFire, customFire, custom2Fire, feedFire, equipMet, used, cap,
+                     potionWhy, customWhy, custom2Why, feedWhy)) {
+        runtime::LogI("AutoSupply", "hangup land — trip before combat");
+        gLastBagPoll = now;
+    }
+}
+
 void Tick(DWORD now) {
     HotReadConfig();
     TickManualCmds();
     SyncStatus();
+    const bool hadHold = ports::mob_gather::HangupCombatHold();
+    TickHangupSupplyFirst(now);
 
     switch (gPhase) {
     case Phase::Idle: TickIdle(now); break;
@@ -2129,6 +2191,14 @@ void Tick(DWORD now) {
     case Phase::ClosingShop: TickClosingShop(now); break;
     case Phase::Returning: TickReturning(now); break;
     case Phase::Cooldown: TickCooldown(now); break;
+    }
+
+    if (hadHold && ports::mob_gather::HangupCombatHold() &&
+        ports::mob_gather::SoftReloginAllowsAutoSell()) {
+        if (IsBusy())
+            ports::mob_gather::ReleaseHangupCombatHold("trip");
+        else
+            ports::mob_gather::ReleaseHangupCombatHold("no_trip");
     }
 }
 
@@ -2229,7 +2299,12 @@ void SetDesired(bool on) {
 
 bool IsDesired() { return gDesired.load(std::memory_order_acquire); }
 
-bool IsBusy() { return gPhase != Phase::Idle && gPhase != Phase::Cooldown; }
+bool IsBusy() {
+    if (gTripReq.load(std::memory_order_acquire) ||
+        gReturnReq.load(std::memory_order_acquire))
+        return true;
+    return gPhase != Phase::Idle && gPhase != Phase::Cooldown;
+}
 
 void RecordHangupFarmMap(const char* reason) {
     const int id = ports::travel::CurrentMapId();

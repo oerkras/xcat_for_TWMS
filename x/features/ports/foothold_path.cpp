@@ -748,6 +748,18 @@ bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR,
     constexpr int kSeedYBand = 72;
     constexpr int kFlatYTol = 3;
     constexpr int kPortalEdgePad = kEndInsetFly;
+    // 沼泽门口台常被切成 SpanX<16 的短节（BIN 107000000 east00：wall=12 假空集
+    // → keep-station 浮空）。战斗/下落仍把它们当墙；贴门只收近水平短台。
+    // 竖线 / rise>run 仍是墙。短台 Y 只认门心同层（-81 vs -122 是远岸错层，禁）。
+    constexpr int kShortDeckDy = 24;
+
+    auto portalFhCanStand = [](const Graph& g, int i) -> bool {
+        const int span = SpanX(g, i);
+        if (span <= 0) return false;
+        const int slope = std::abs(g.y1[i] - g.y2[i]);
+        if (span < kFallMinSpanX && slope > span) return false;
+        return true;
+    };
 
     if (!EnsureGraph()) return false;
 
@@ -790,11 +802,13 @@ bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR,
     // 本段原始 X（只留 2px 边）与发门带有交集。不用战斗悬崖/段缝内缩。
     auto pickInFireBand = [&](const Graph& g, bool flatOnly, int* outWish) -> int {
         int best = -1, bestDy = 0x7fffffff, bestSlope = 0x7fffffff, bestDx = 0x7fffffff;
+        int bestSpan = -1;
         int bestWish = ix;
         bool bestInY = false;
         for (int i = 0; i < g.n; ++i) {
-            if (IsWallFh(g, i)) continue;
+            if (!portalFhCanStand(g, i)) continue;
             if (flatOnly && std::abs(g.y1[i] - g.y2[i]) > kFlatYTol) continue;
+            const int span = SpanX(g, i);
             const int xmin = (std::min)(g.x1[i], g.x2[i]);
             const int xmax = (std::max)(g.x1[i], g.x2[i]);
             int sLo = xmin + kPortalEdgePad;
@@ -814,6 +828,7 @@ bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR,
             const int fy = FhYAtX(g.x1[i], g.y1[i], g.x2[i], g.y2[i], wish);
             const int dy = std::abs(fy - iy);
             if (dy > kSeedYBand) continue;
+            if (span < kFallMinSpanX && dy > kShortDeckDy) continue;
             const int slope = std::abs(g.y1[i] - g.y2[i]);
             const int dx = std::abs(wish - ix);
             const bool inY = (fy >= yLo && fy <= yHi);
@@ -821,11 +836,14 @@ bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR,
                                 (inY == bestInY && dy < bestDy) ||
                                 (inY == bestInY && dy == bestDy && slope < bestSlope) ||
                                 (inY == bestInY && dy == bestDy && slope == bestSlope &&
-                                 dx < bestDx);
+                                 span > bestSpan) ||
+                                (inY == bestInY && dy == bestDy && slope == bestSlope &&
+                                 span == bestSpan && dx < bestDx);
             if (!better) continue;
             best = i;
             bestDy = dy;
             bestSlope = slope;
+            bestSpan = span;
             bestDx = dx;
             bestWish = wish;
             bestInY = inY;
@@ -841,26 +859,35 @@ bool SnapStandForPortal(float x, float y, float rectL, float rectT, float rectR,
         int wish = ix;
         int pick = pickInFireBand(g, /*flatOnly=*/true, &wish);
         if (pick < 0) pick = pickInFireBand(g, /*flatOnly=*/false, &wish);
-        if (emitPick(g, pick, wish, pick >= 0 ? "fireBand" : "none")) return true;
+        const char* via = "none";
+        if (pick >= 0) via = IsWallFh(g, pick) ? "fireBandShort" : "fireBand";
+        if (emitPick(g, pick, wish, via)) return true;
 
-        int rawX = 0, rawY = 0, wallN = 0;
+        int rawX = 0, rawY = 0, wallN = 0, shortN = 0, vertN = 0;
         for (int i = 0; i < g.n; ++i) {
             const int xmin = (std::min)(g.x1[i], g.x2[i]);
             const int xmax = (std::max)(g.x1[i], g.x2[i]);
             if (xmax < fireLo || xmin > fireHi) continue;
-            if (IsWallFh(g, i)) {
+            if (!portalFhCanStand(g, i)) {
+                ++vertN;
                 ++wallN;
                 continue;
             }
-            ++rawX;
+            if (IsWallFh(g, i)) {
+                ++shortN;
+                ++wallN;
+            } else {
+                ++rawX;
+            }
             const int fy = FhYAtX(g.x1[i], g.y1[i], g.x2[i], g.y2[i],
                                   (std::max)(xmin, (std::min)(xmax, ix)));
             if (std::abs(fy - iy) <= kSeedYBand) ++rawY;
         }
         x::runtime::LogI("FhPath",
                          "portalSnap miss portal=(%d,%d) fire-band empty "
-                         "rawX=%d inY=%d wall=%d (no cliff-inset, no far-band)",
-                         ix, iy, rawX, rawY, wallN);
+                         "rawX=%d inY=%d wall=%d short=%d vert=%d "
+                         "(no cliff-inset, no far-band)",
+                         ix, iy, rawX, rawY, wallN, shortN, vertN);
     }
     return false;
 }

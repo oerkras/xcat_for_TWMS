@@ -25,7 +25,7 @@ bool TeleportNativeSkillCall(float landX, float landY, uint32_t plantFhId, bool 
                              float* outLandX = nullptr, float* outLandY = nullptr,
                              uint32_t* outFhId = nullptr);
 void SetNativeCooldownMs(uint32_t ms);
-// 从「现在」起强制自冷 ms（写入 lastOk=now）。补给开趟冷却窗用。
+// 从「现在」起强制暂停 Native ms。换频 settle / 补给开趟用。贴怪 hop 间距不走这条。
 void ForceNativeCooldownMs(uint32_t ms);
 void ClearNativeSelfCd();
 

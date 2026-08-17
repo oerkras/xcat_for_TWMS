@@ -80,7 +80,7 @@ struct PetLootConfig {
     uint32_t skipFilterEnabled = 1;
     uint32_t highValuePriority = 1;  // 装备/卷軸优先；对应栏满则跳过该件
     uint32_t scrollDropNotify = 1;   // 新卷軸落地 → notify + 明亮叮咚（装备不提醒）
-    uint32_t dropSnapLand = 0;       // 飞行中 Pt1=PickPt、EndPara=3、LastTry=0（默认关）
+    uint32_t dropSnapLand = 1;       // 飞行中 Pt1=PickPt、EndPara=3、LastTry=0（默认开）
     uint32_t dropAccelFall = 0;      // 加大 LastTry / +0x90，抛物仍在只是更快（默认关）
     uint32_t skipRuleCount = 0;
     PetLootSkipRule skipRules[kPetLootMaxSkipRules]{};

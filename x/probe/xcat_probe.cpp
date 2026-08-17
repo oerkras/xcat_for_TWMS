@@ -25,6 +25,7 @@
 #include "../features/skill_max_level/skill_max_level.h"
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/mob_scan/mob_scan.h"
+#include "../features/mob_pool_observe/mob_pool_observe.h"
 #include "../features/pet_feed/pet_feed.h"
 #include "../features/pet_loot/pet_loot.h"
 #include "../features/buffs/buffs.h"
@@ -175,6 +176,7 @@ void StopAllFeatureWorkers() {
     x::features::autopot::StopWorker();
     x::features::auto_stat::StopWorker();
     x::features::auto_skill::StopWorker();
+    x::features::mob_pool_observe::StopWorker();
     x::features::mob_scan::StopWorker();
     x::features::titlebar::StopWorker();
     x::ipc::PayloadStatus_Stop();
@@ -427,6 +429,9 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_BATCH("scan+pets+travel");
     XCAT_PLAY_BOOT_STEP(x::features::mob_scan::Init());
     XCAT_PLAY_BOOT_STEP(x::features::mob_scan::StartWorker());
+    // 刷怪感知：依赖 mob_scan::RequestImmediateScan；默认关，由 core.mobPoolObserve 武装
+    XCAT_PLAY_BOOT_STEP(x::features::mob_pool_observe::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::mob_pool_observe::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::mob_gather::Init());
     XCAT_PLAY_BOOT_STEP(x::features::mob_gather::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::pet_feed::Init());

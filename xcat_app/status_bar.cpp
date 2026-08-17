@@ -139,7 +139,7 @@ void DrawSoftReloginClock(const LaunchUiState& ui) {
     if (st.softReloginRemainMs == 0xFFFFFFFFu) {
         ImGui::TextDisabled("主动软重连 --");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("已勾选主动软重连：进图后开始倒计时");
+            ImGui::SetTooltip("出过刀或已勾选后，进图才开始倒计时");
         return;
     }
 
@@ -160,7 +160,8 @@ void DrawSoftReloginClock(const LaunchUiState& ui) {
         snprintf(buf, sizeof(buf), "主动软重连 暂停 %us", sec);
         ImGui::TextColored(StatusHintBlue(), "%s", buf);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("主动软重连进行中 / 落地静默：倒计时冻结");
+            ImGui::SetTooltip(
+                "倒计时冻结：软重连进行中 / 落地静默 / 卖装补给赶路 / 寻簇飞行");
         return;
     }
     snprintf(buf, sizeof(buf), "主动软重连 %us", sec);

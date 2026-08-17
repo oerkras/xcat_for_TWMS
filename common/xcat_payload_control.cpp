@@ -474,11 +474,14 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.simpleCombatAttackIntervalMs = kSimpleCombatAttackIntervalDefaultMs;
     out.simpleCombatTickMs = kSimpleCombatTickDefaultMs;
     out.mobScanIntervalMs = kMobScanIntervalDefaultMs;
+    out.mobPoolObserve = 0;
     out.simpleCombatAttackHoldMs = kAttackHoldDefaultMs;
     out.clusterWeight = kClusterWeightDefault;
     out.simpleCombatHitRotate = kCombatHitRotateDefault;
     out.simpleCombatHitRotateN = kCombatHitRotateNDefault;
     out.simpleCombatForgeHit = 0;
+    out.simpleCombatForgeHitFrontDx = kForgeHitFrontDxDefault;
+    out.simpleCombatForgeHitFrontDy = kForgeHitFrontDyDefault;
     out.mapAttack = 0;
     out.mobGather = 0;
     out.mobGatherSpeedPct = kMobGatherSpeedPctDefault;
@@ -526,6 +529,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherWalkDx = kMobGatherWalkDxDefault;
     out.mobGatherFeetExemptPx = kMobGatherFeetExemptPxDefault;
     out.simpleCombatTeleport = 0;
+    out.simpleCombatTeleportOneHit = kCombatTeleportOneHitDefault;
     out.simpleCombatImpactApproach = 1;
     out.simpleCombatFlySpeedPct = kHeliSpeedPctDefault;
     out.simpleCombatHumanWalk = 0;  // 与 Impact 互斥；面板单选
@@ -701,6 +705,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     } else
         out.mobScanIntervalMs = kMobScanIntervalDefaultMs;
     out.mobScanIntervalMs = ClampMobScanIntervalMs(out.mobScanIntervalMs);
+    if (IniGetBool(ini, "core", "mobPoolObserve", b)) out.mobPoolObserve = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "simpleCombatAttackHoldMs", u))
         out.simpleCombatAttackHoldMs = ClampAttackHoldMs(u);
     else
@@ -839,6 +844,8 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherFeetExemptPx = ClampMobGatherFeetExemptPx(u);
     if (IniGetBool(ini, "core", "simpleCombatTeleport", b))
         out.simpleCombatTeleport = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "simpleCombatTeleportOneHit", b))
+        out.simpleCombatTeleportOneHit = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "simpleCombatFlySpeedPct", u))
         out.simpleCombatFlySpeedPct = ClampHeliSpeedPct(u);
     else
@@ -885,6 +892,16 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.simpleCombatHiraishinFrontDy = ClampHiraishinFrontDy(u);
     } else
         out.simpleCombatHiraishinFrontDy = kHiraishinFrontDyDefault;
+    if (IniGetU32(ini, "core", "simpleCombatForgeHitFrontDx", u)) {
+        if (u == kForgeHitFrontDxLegacyDefault) u = kForgeHitFrontDxDefault;
+        out.simpleCombatForgeHitFrontDx = ClampForgeHitFrontDx(u);
+    } else
+        out.simpleCombatForgeHitFrontDx = kForgeHitFrontDxDefault;
+    if (IniGetU32(ini, "core", "simpleCombatForgeHitFrontDy", u)) {
+        if (u == kForgeHitFrontDyLegacyDefault) u = kForgeHitFrontDyDefault;
+        out.simpleCombatForgeHitFrontDy = ClampForgeHitFrontDy(u);
+    } else
+        out.simpleCombatForgeHitFrontDy = kForgeHitFrontDyDefault;
     if (IniGetBool(ini, "core", "simpleCombatLiveStep", b))
         out.simpleCombatLiveStep = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "attackRpc", b)) out.attackRpc = b ? 1u : 0u;
@@ -1021,12 +1038,13 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "simpleCombatAntiHug", b))
         out.simpleCombatAntiHug = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "meleeVeto", b)) out.meleeVeto = b ? 1u : 0u;
-    if (IniGetU32(ini, "core", "simpleCombatTeleportCooldownMs", u))
+    if (IniGetU32(ini, "core", "simpleCombatTeleportCooldownMs", u)) {
+        if (u == kCombatTeleportCooldownLegacyDefaultMs) u = kCombatTeleportCooldownDefaultMs;
         out.simpleCombatTeleportCooldownMs = ClampCombatTeleportCooldownMs(u);
+    }
     if (IniGetU32(ini, "core", "simpleCombatTeleportMaxHop", u)) {
-        // 旧默认 400 / 520 → 550；显式调过其它值保留。
-        if (u == kCombatTeleportMaxHopLegacyDefault || u == kCombatTeleportMaxHopPrevDefault)
-            u = kCombatTeleportMaxHopDefault;
+        // 旧默认 400 / 520 / 550 → 3000；显式调过其它值保留。
+        if (IsRetiredCombatTeleportMaxHopDefault(u)) u = kCombatTeleportMaxHopDefault;
         out.simpleCombatTeleportMaxHop = ClampCombatTeleportMaxHop(u);
     }
     if (IniGetU32(ini, "core", "simpleCombatOneshotMaxHp", u))
@@ -1133,6 +1151,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
             : (normalized.mobScanIntervalMs == kMobScanIntervalLegacyDefaultMs
                    ? kMobScanIntervalDefaultMs
                    : normalized.mobScanIntervalMs));
+    normalized.mobPoolObserve = normalized.mobPoolObserve ? 1u : 0u;
     normalized.simpleCombatAttackHoldMs = ClampAttackHoldMs(
         normalized.simpleCombatAttackHoldMs ? normalized.simpleCombatAttackHoldMs
                                             : kAttackHoldDefaultMs);
@@ -1142,6 +1161,10 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         normalized.simpleCombatHitRotateN ? normalized.simpleCombatHitRotateN
                                           : kCombatHitRotateNDefault);
     normalized.simpleCombatForgeHit = normalized.simpleCombatForgeHit ? 1u : 0u;
+    normalized.simpleCombatForgeHitFrontDx =
+        ClampForgeHitFrontDx(normalized.simpleCombatForgeHitFrontDx);
+    normalized.simpleCombatForgeHitFrontDy =
+        ClampForgeHitFrontDy(normalized.simpleCombatForgeHitFrontDy);
     normalized.mapAttack = normalized.mapAttack ? 1u : 0u;
     normalized.mobGather = normalized.mobGather ? 1u : 0u;
     ApplyMobGatherEncounterForce(normalized);
@@ -1182,6 +1205,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherHomeValid = normalized.mobGatherHomeValid ? 1u : 0u;
     normalized.mobGatherHomeHasMap = normalized.mobGatherHomeHasMap ? 1u : 0u;
     normalized.simpleCombatTeleport = normalized.simpleCombatTeleport ? 1u : 0u;
+    normalized.simpleCombatTeleportOneHit = normalized.simpleCombatTeleportOneHit ? 1u : 0u;
     normalized.simpleCombatImpactApproach = normalized.simpleCombatImpactApproach ? 1u : 0u;
     // 0 视为「旧盘没有这个键」，回默认 100 而非被 Clamp 抬到下限 25——
     // 后者会让老配置一升级就悄悄变成 0.25X。
@@ -1263,17 +1287,17 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.simpleCombatAntiJitter = normalized.simpleCombatAntiJitter ? 1u : 0u;
     normalized.simpleCombatAntiHug = normalized.simpleCombatAntiHug ? 1u : 0u;
     normalized.meleeVeto = normalized.meleeVeto ? 1u : 0u;
-    normalized.simpleCombatTeleportCooldownMs =
-        ClampCombatTeleportCooldownMs(normalized.simpleCombatTeleportCooldownMs
-                                         ? normalized.simpleCombatTeleportCooldownMs
-                                         : kCombatTeleportCooldownDefaultMs);
+    {
+        uint32_t cd = normalized.simpleCombatTeleportCooldownMs;
+        if (!cd || cd == kCombatTeleportCooldownLegacyDefaultMs)
+            cd = kCombatTeleportCooldownDefaultMs;
+        normalized.simpleCombatTeleportCooldownMs = ClampCombatTeleportCooldownMs(cd);
+    }
     // 0 合法（关门控）；勿把 0 当成缺省。
-    // 旧默认 400/520：抬到 550（=上限）。显式调过其它值保留。
+    // 旧默认 400/520/550：抬到 3000。显式调过其它值保留。
     {
         uint32_t hop = normalized.simpleCombatTeleportMaxHop;
-        if (!hop || hop == kCombatTeleportMaxHopLegacyDefault ||
-            hop == kCombatTeleportMaxHopPrevDefault)
-            hop = kCombatTeleportMaxHopDefault;
+        if (!hop || IsRetiredCombatTeleportMaxHopDefault(hop)) hop = kCombatTeleportMaxHopDefault;
         normalized.simpleCombatTeleportMaxHop = ClampCombatTeleportMaxHop(hop);
     }
     // oneshotMaxHp 允许 0（关秒杀道）；缺省用默认，勿把 0 当成缺 key。
@@ -1361,11 +1385,16 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                   normalized.simpleCombatAttackIntervalMs);
         IniSetU32(ini, "core", "simpleCombatTickMs", normalized.simpleCombatTickMs);
         IniSetU32(ini, "core", "mobScanIntervalMs", normalized.mobScanIntervalMs);
+        IniSetBool(ini, "core", "mobPoolObserve", normalized.mobPoolObserve != 0);
         IniSetU32(ini, "core", "simpleCombatAttackHoldMs", normalized.simpleCombatAttackHoldMs);
         IniSetU32(ini, "core", "clusterWeight", normalized.clusterWeight);
         IniSetBool(ini, "core", "simpleCombatHitRotate", normalized.simpleCombatHitRotate != 0);
         IniSetU32(ini, "core", "simpleCombatHitRotateN", normalized.simpleCombatHitRotateN);
         IniSetBool(ini, "core", "simpleCombatForgeHit", normalized.simpleCombatForgeHit != 0);
+        IniSetU32(ini, "core", "simpleCombatForgeHitFrontDx",
+                  normalized.simpleCombatForgeHitFrontDx);
+        IniSetU32(ini, "core", "simpleCombatForgeHitFrontDy",
+                  normalized.simpleCombatForgeHitFrontDy);
         IniSetBool(ini, "core", "mapAttack", false);
         IniSetBool(ini, "core", "mobGather", normalized.mobGather != 0);
         IniSetU32(ini, "core", "mobGatherSpeedPct", normalized.mobGatherSpeedPct);
@@ -1417,6 +1446,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "mobGatherFeetExemptPx", normalized.mobGatherFeetExemptPx);
         IniEraseKey(ini, "core", "mobGatherApplyPeriodMs");
         IniSetBool(ini, "core", "simpleCombatTeleport", normalized.simpleCombatTeleport != 0);
+        IniSetBool(ini, "core", "simpleCombatTeleportOneHit",
+                   normalized.simpleCombatTeleportOneHit != 0);
         // 落盘中性键；擦掉旧 Impact* 键名。
         IniSetBool(ini, "core", "simpleCombatAirApproach",
                    normalized.simpleCombatImpactApproach != 0);

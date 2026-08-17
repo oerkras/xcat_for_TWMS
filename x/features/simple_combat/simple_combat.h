@@ -35,7 +35,16 @@ uint32_t HitRotateN();
 // 实验：出刀改组包，名单只填当前锁 oid；opcode 跟装备。默认关 → OnFuncKey。
 void SetForgeHitEnabled(bool on);
 bool IsForgeHitEnabled();
+// 自组攻包钉锁过远尺（AbsPos 半宽/半高）。不与站桩面前盒共用。
+void SetForgeHitFrontBox(uint32_t dx, uint32_t dy);
+uint32_t ForgeHitFrontDx();
+uint32_t ForgeHitFrontDy();
 void SetTeleportEnabled(bool on);
+bool IsTeleportEnabled();
+// 瞬移找怪「每只怪打一下」：当前锁出一刀后禁锁，走原选怪（可跨层瞬移）。
+// 默认关。不走「打几刀」的盒外换怪，无活怪<3停刀。仅瞬移模式生效。
+void SetTeleportOneHit(bool on);
+bool IsTeleportOneHit();
 // Impact 贴怪（默认开）：近战直升机——旋翼环持续托举悬停在怪旁，空中出刀。
 // 优先于拟人。需无敌；交战期间自动挂 fh-ban（无怪超宽限则卸掉落地）。
 void SetImpactApproachEnabled(bool on);

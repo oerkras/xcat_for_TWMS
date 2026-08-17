@@ -418,7 +418,7 @@ void SetRequireFood(bool on) { gRequireFood.store(on, std::memory_order_relaxed)
 
 bool IsDesired() { return gDesired.load(std::memory_order_relaxed); }
 
-bool ShouldHoldCombatForSummon() {
+bool ShouldHoldCombatForSummon(bool armBudget) {
     if (!gDesired.load(std::memory_order_relaxed)) return false;
     if (!ports::world::IsPlayReady()) return false;
 
@@ -430,6 +430,8 @@ bool ShouldHoldCombatForSummon() {
     const bool shouldHold =
         (act < 0) || (gCanSummonNow.load(std::memory_order_relaxed) != 0);
     if (!shouldHold) return false;
+
+    if (!armBudget) return true;
 
     // 预算仅在打怪侧真正询问让路时起算（F5 关着不空耗）。
     const DWORD now = GetTickCount();

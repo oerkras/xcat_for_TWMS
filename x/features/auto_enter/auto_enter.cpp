@@ -1962,6 +1962,8 @@ int CharSelectTimeoutStreak() { return gCharSelectTimeoutStreak; }
 
 int LastCharAvatarCount() { return gSnap.avatarCount; }
 
+bool CharUiVisible() { return gSnap.charUi != nullptr; }
+
 bool IsDone() { return gPhase == Phase::Done; }
 
 void SoftHallSampleOnPump(void* user) {

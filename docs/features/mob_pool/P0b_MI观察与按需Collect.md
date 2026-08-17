@@ -1,10 +1,11 @@
 # mob_pool P0b · MI 观察刷怪 → 按需 Collect（设计 · 未实现）
 
-> **状态**：📐 设计稿 · **本轮不改产品代码**  
+> **状态**：✅ 已落码（`mob_pool_observe` · 默认关 · 首页「怪物刷新感知增强」）  
 > **产品**：经典版 TWMS · **不是**枫星  
 > **约束**：**禁止** INLINE HOOK（E9 / `.text`）；只允许 **MethodInfo.methodPointer 换针** + 已有 `mob_scan::RequestImmediateScan`  
 > **语义真源**：[`P0a_OnLocalMob与Init包体.md`](P0a_OnLocalMob与Init包体.md)（含 §7.6 SetRemote 条件踢池）  
-> **现成 API**：`x/features/mob_scan/mob_scan.h` → `RequestImmediateScan()`（`simple_combat` 已在用）
+> **现成 API**：`x/features/mob_scan/mob_scan.h` → `RequestImmediateScan()`（`simple_combat` 已在用）  
+> **实现**：`x/features/mob_pool_observe/` · ini `core.mobPoolObserve` · 当前 RVA Enter=`0xF951D0` Leave=`0xF957F0`（dump 位序钉）
 
 ---
 
@@ -211,3 +212,4 @@ obs scan wake reason=enter|leave|combat|force
 | 日期 | 内容 |
 |---|---|
 | 2026-08-06 | 初稿：P0 Enter/Leave MI → RequestImmediateScan；SetRemote 条件踢池结论并入；明确不改代码 |
+| 2026-08-18 | **阶段 C 落码**：`mob_pool_observe` + 挂机卡「怪物刷新感知增强」；默认关；锚点改当前 dump RVA |

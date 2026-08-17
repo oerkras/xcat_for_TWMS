@@ -251,9 +251,9 @@ std::atomic<DWORD> gFailBackoffUntilMs{0};
 std::atomic<int> gConsecutiveFails{0};
 std::atomic<int> gOkSinceEnable{0};   // 本段开启计数（SetEnabled(true) 清零）
 std::atomic<int> gOkSession{0};       // 进程内累计成功伪造；ResetSessionCap 可清
-// 钉锁过远：与站桩输出面前盒同一把尺（HiraishinFrontOk）。0=该轴不限。
-std::atomic<uint32_t> gLockFrontDx{xcat::kHiraishinFrontDxDefault};
-std::atomic<uint32_t> gLockFrontDy{xcat::kHiraishinFrontDyDefault};
+// 钉锁过远：出刀自组攻包自己的攻击盒。0=该轴不限。
+std::atomic<uint32_t> gLockFrontDx{xcat::kForgeHitFrontDxDefault};
+std::atomic<uint32_t> gLockFrontDy{xcat::kForgeHitFrontDyDefault};
 DWORD gLastRebindMs = 0;
 DWORD gLastFireMs = 0;
 DWORD gLastNmFindAllMs = 0;
@@ -1365,7 +1365,7 @@ void FireJobOnMain(void* user) {
         const float ady = std::fabs(ldy);
         const float maxDx = static_cast<float>(gLockFrontDx.load(std::memory_order_acquire));
         const float maxDy = static_cast<float>(gLockFrontDy.load(std::memory_order_acquire));
-        // 与 HiraishinFrontOk 同一把尺：轴对齐盒，不是 hypot。0=该轴不限。
+        // 轴对齐盒，不是 hypot。0=该轴不限。尺来自自组攻包 X/Y，不跟站桩面前盒。
         if ((maxDx > 0.f && adx > maxDx) || (maxDy > 0.f && ady > maxDy)) {
             job->err = "too_far";
             static DWORD sFar = 0;
@@ -1825,8 +1825,8 @@ void CopyJobToResult(const FireJob& job, FireResult* r) {
 }  // namespace
 
 void SetLockFrontBox(uint32_t dx, uint32_t dy) {
-    dx = xcat::ClampHiraishinFrontDx(dx);
-    dy = xcat::ClampHiraishinFrontDy(dy);
+    dx = xcat::ClampForgeHitFrontDx(dx);
+    dy = xcat::ClampForgeHitFrontDy(dy);
     gLockFrontDx.store(dx, std::memory_order_release);
     gLockFrontDy.store(dy, std::memory_order_release);
 }

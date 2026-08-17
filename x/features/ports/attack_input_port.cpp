@@ -14,6 +14,7 @@
 #include "ground_spoof.h"
 #include "input_port.h"
 #include "key_macro_bin.h"
+#include "mob_gather_port.h"
 #include "player_combat_port.h"
 #include "unity_kbd_port.h"
 #include "../attack_accel/attack_accel.h"
@@ -1820,6 +1821,7 @@ bool CanFirePrimary() { return CanFirePrimaryEx(/*ignoreCombatInterval=*/false);
 
 void NoteLastFire() {
     gLastFireMs.store(NowMs(), std::memory_order_relaxed);
+    x::features::ports::mob_gather::NoteAttackDirty();
 }
 
 bool TryFirePrimaryEx(bool ignoreCombatInterval, const FireBlink& blink) {
@@ -1879,6 +1881,7 @@ bool TryFirePrimaryEx(bool ignoreCombatInterval, const FireBlink& blink) {
 
     gLastFireMs.store(now, std::memory_order_relaxed);
     gFireOk.fetch_add(1, std::memory_order_relaxed);
+    x::features::ports::mob_gather::NoteAttackDirty();
 
     static uint32_t sFaceLog = 0;
     if (sFaceLog < 12) {

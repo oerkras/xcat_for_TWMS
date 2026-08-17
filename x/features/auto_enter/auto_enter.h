@@ -39,6 +39,8 @@ int CharSelectTimeoutStreak();
 
 // 最近一次选角页快照的角色数。avatars=0 + Notice =「已登出登入的帳號」。
 int LastCharAvatarCount();
+// 选角 UI 是否在（世界/频道页 avatarCount 也是 0，不能单凭头像数判登出）。
+bool CharUiVisible();
 
 // 选角链路已收尾（Done）。软重进用来发现「Done 了但迟迟不 play-ready」的卡死，
 // 避免空等到 reenter_timeout（dcaf08：Done@01:16:21 → 仍 playReady=0 直到 01:18:11 fail）。

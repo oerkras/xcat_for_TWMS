@@ -71,6 +71,7 @@ add_library(xcat_probe SHARED
   ../features/auto_supply/auto_supply.cpp
   ../features/char_boot/char_boot.cpp
   ../features/mob_scan/mob_scan.cpp
+  ../features/mob_pool_observe/mob_pool_observe.cpp
   ../features/autopot/autopot.cpp
   ../features/auto_stat/auto_stat.cpp
   ../features/auto_skill/auto_skill.cpp
@@ -128,6 +129,7 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/autopot
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/ports
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/mob_scan
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/mob_pool_observe
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/pet_feed
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/pet_loot
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/timed_keys

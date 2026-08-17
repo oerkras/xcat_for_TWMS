@@ -15,9 +15,11 @@ void SetDesired(bool on);
 void SetRequireFood(bool on);
 
 bool IsDesired();
-// 自动召唤开、场上无宠、且仍在尝试时：打怪应先等（防开打进警戒后召唤被拒）。
+// 自动召唤开、场上无宠、且仍在尝试时：走路/旋翼打怪应先等（防开打进警戒后召唤被拒）。
+// 瞬移找怪由 simple_combat 跳过此门；召唤仍在后台跑。
+// armBudget=false：只探询、不起 20s 让路钟（瞬移跳过时用）。
 // 永久不可召（无宠/无粮）或超时后返回 false，避免卡死挂机。
-bool ShouldHoldCombatForSummon();
+bool ShouldHoldCombatForSummon(bool armBudget = true);
 
 }  // namespace pet_feed
 }  // namespace features
