@@ -7159,9 +7159,16 @@ void Init() {
     OpenLog();
     LogLine("Init");
     gEnabled.store(false);
-    gHardPauseMask.store(0, std::memory_order_release);
+    // 禁止无条件清 HardPause：进图冷启时 AutoSupply worker 可能已 PauseSystems。
+    // BIN 14:50:54 Init 抹闸后 ForceApply 再开 F5 → Travel combat_on 刷屏。
     gExternalPauseDepth.store(0);
-    gExternalPause.store(false);
+    const uint32_t keepPause = gHardPauseMask.load(std::memory_order_acquire);
+    const bool hard = keepPause != 0;
+    gExternalPause.store(hard, std::memory_order_release);
+    ports::attack::SetFireSuppressed(hard);
+    if (hard) {
+        LogLine("Init keep HardPause mask=0x%x (already latched)", (unsigned)keepPause);
+    }
     gTeleportEnabled.store(false);
     gHumanWalkEnabled.store(true);
     gState = State::Idle;

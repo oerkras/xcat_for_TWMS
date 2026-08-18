@@ -127,6 +127,9 @@ std::string gPendingGoto;  // no_map 时暂存，稳图后再启动
 bool gGapPause = false;
 bool gKeepGotoOverFarm = false;  // 重连后 F5 仍勾选时，在途赶路优先于 combat_on
 std::string gLastMsg;
+DWORD gLastCombatOnNotifyMs = 0;
+std::string gLastCombatOnDst;
+DWORD gLastCombatOnLogMs = 0;
 FailKind gFailKind = FailKind::None;
 DWORD gLastSnapMs = 0;
 std::mutex gCmdMu;
@@ -474,11 +477,19 @@ void NotifyTravelOutcome(FailKind kind, const std::string& src, const std::strin
                  (raw && raw[0]) ? raw : "?", src.empty() ? "?" : src.c_str(),
                  dst.empty() ? "?" : dst.c_str());
         break;
-    case FailKind::CombatOn:
+    case FailKind::CombatOn: {
         key = "travel.combat_on";
         nk = NotificationKind::Warning;
         snprintf(body, sizeof(body), "请先关闭 F5 自动打怪再赶路");
+        // AutoSupply 续跑每 200ms 重试 RequestGoto；同目标 5s 内只弹一次。
+        const DWORD now = GetTickCount();
+        if (gLastCombatOnNotifyMs && now - gLastCombatOnNotifyMs < 5000 &&
+            gLastCombatOnDst == dst)
+            return;
+        gLastCombatOnNotifyMs = now;
+        gLastCombatOnDst = dst;
         break;
+    }
     default:
         return;
     }
@@ -615,7 +626,12 @@ bool NoteInterStageStuck(DWORD now, const std::string& curHint) {
 bool StartGotoResolved(const std::string& src, const std::string& dst, const std::string& rawArg) {
     if (simple_combat::IsFarmingActive()) {
         SetIdle("combat_on", FailKind::CombatOn);
-        x::runtime::LogW("Travel", "goto blocked: F5 farming still active dst=%s", dst.c_str());
+        const DWORD now = GetTickCount();
+        if (!gLastCombatOnLogMs || now - gLastCombatOnLogMs >= 2000) {
+            gLastCombatOnLogMs = now;
+            x::runtime::LogW("Travel", "goto blocked: F5 farming still active dst=%s",
+                             dst.c_str());
+        }
         NotifyTravelOutcome(FailKind::CombatOn, src, dst);
         return false;
     }
@@ -1249,8 +1265,11 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
     if (simple_combat::IsFarmingActive() && !gKeepGotoOverFarm) {
         const std::string cur = ports::travel::CurrentMapKey();
         SetIdle("combat_on", FailKind::CombatOn);
-        x::runtime::LogW("Travel", "stop: F5 farming active during goto @%s -> %s",
-                         cur.c_str(), gTarget.c_str());
+        if (!gLastCombatOnLogMs || now - gLastCombatOnLogMs >= 2000) {
+            gLastCombatOnLogMs = now;
+            x::runtime::LogW("Travel", "stop: F5 farming active during goto @%s -> %s",
+                             cur.c_str(), gTarget.c_str());
+        }
         NotifyTravelOutcome(FailKind::CombatOn, cur, gTarget);
         return;
     }

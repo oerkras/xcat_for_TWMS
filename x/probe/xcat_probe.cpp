@@ -446,12 +446,15 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_BATCH("combat+misc");
     XCAT_PLAY_BOOT_STEP(x::features::attack_rpc::Init());
     XCAT_PLAY_BOOT_STEP(x::features::attack_rpc::StartWorker());
+    // 战斗必须先 Init：AutoSupply worker 一起来就会 PauseSystems。
+    // BIN 14:50:54 旧序 = 补给先硬闸 → combat Init 把 mask 清 0 → ForceApply 再开 F5
+    // → 续跑回图被 Travel combat_on 每 200ms 刷「请先关闭 F5」。
+    XCAT_PLAY_BOOT_STEP(x::features::simple_combat::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::simple_combat::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::auto_supply::Init());
     XCAT_PLAY_BOOT_STEP(x::features::auto_supply::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::char_boot::Init());
     XCAT_PLAY_BOOT_STEP(x::features::char_boot::StartWorker());
-    XCAT_PLAY_BOOT_STEP(x::features::simple_combat::Init());
-    XCAT_PLAY_BOOT_STEP(x::features::simple_combat::StartWorker());
     // 走路只读采证（默认开；XCAT_WALK_BIN=0 关）。请关 F5/拟人后手按左右。
     XCAT_PLAY_BOOT_STEP(x::features::ports::keypad_walk_bin::Init());
     // KeyMacroAnalyzer Put/句柄 BIN（默认开；XCAT_KEYMACRO_BIN=0 关）→ key_macro_bin.log

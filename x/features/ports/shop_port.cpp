@@ -2697,9 +2697,13 @@ void UsageJobOnMain(void* user) {
     if (!list) return;
     const int n = ListSize(list);
     if (n <= 0 || n > 512) return;
-    job->cap = n;
+    // 与 ScanJob 同口径：TWMS 栏表常 1-based，[0]=空垫。把垫格算进 cap 会永远 used<cap，
+    // 满栏自动卖判不满（BIN 14:31 hangup 每轮 no_trip，人眼已满）。
+    const bool oneBased = (n > 1 && ListAt(list, 0) == nullptr && ListAt(list, 1) != nullptr);
+    const int start = oneBased ? 1 : 0;
+    job->cap = n - start;
     int used = 0;
-    for (int i = 0; i < n; ++i) {
+    for (int i = start; i < n; ++i) {
         void* slot = ListAt(list, i);
         if (!LooksLikeHeapPtr(slot)) continue;
         if (ReadI32(slot, x::ui::player::OffSlotItemId()) > 0) ++used;

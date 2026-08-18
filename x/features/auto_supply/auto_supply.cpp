@@ -284,6 +284,15 @@ void ResumeSystems() {
     }
 }
 
+// 赶路前再钉一次硬闸：combat Init / ForceApply 可能把 F5 抢回来（BIN 14:50 combat_on）。
+bool EnsureCombatPausedForTravel() {
+    if (!simple_combat::IsFarmingActive()) return true;
+    PauseSystems();
+    SetMsg("已暂停打怪，准备赶路…");
+    runtime::LogI("AutoSupply", "re-pause F5 before travel (IsFarmingActive)");
+    return false;
+}
+
 // 开趟冷却：停手后强制瞬移自冷，并设墙钟；到期前禁止 RequestGoto。
 void ArmTripStartCool(DWORD now, const char* why) {
     PauseSystems();
@@ -1435,7 +1444,10 @@ void TickGoingTown(DWORD now) {
         }
         // AlreadyThere 等软终态：忽略并重新 goto（对照枫星不把 already 当 EndTrip）
         // 冷却窗已过才 goto；用 phaseSince 相对时间会在冷却期误判，改看 arm 已清
-        if (now - gPhaseSince > 400) travel::RequestGoto(gShopMap);
+        if (now - gPhaseSince > 400) {
+            if (!EnsureCombatPausedForTravel()) return;
+            travel::RequestGoto(gShopMap);
+        }
     }
 }
 
@@ -1987,8 +1999,10 @@ void TickReturning(DWORD now) {
                 return;
             }
         }
-        if (!MapMatchesTarget(gLastFarmMap) && now - gPhaseSince > 800)
+        if (!MapMatchesTarget(gLastFarmMap) && now - gPhaseSince > 800) {
+            if (!EnsureCombatPausedForTravel()) return;
             travel::RequestGoto(gLastFarmMap);
+        }
     }
 }
 
@@ -2165,6 +2179,8 @@ void TickHangupSupplyFirst(DWORD now) {
         (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0);
     int used = 0, cap = 0;
     const bool equipMet = sellTriggerOn && EquipTriggerMet(used, cap);
+    runtime::LogI("AutoSupply", "hangup sell-check on=%d equip=%d/%d thr=%d met=%d",
+                  sellTriggerOn ? 1 : 0, used, cap, gEquipTrigger, equipMet ? 1 : 0);
     if (!potionFire && !customFire && !custom2Fire && !feedFire && !equipMet) return;
     if (FireAutoTrip(potionFire, customFire, custom2Fire, feedFire, equipMet, used, cap,
                      potionWhy, customWhy, custom2Why, feedWhy)) {

@@ -142,7 +142,7 @@ constexpr uint32_t kFlyHopCdMaxMs = 2000u;
 // hangup hour mask: bit0=00:00 .. bit23=23:00 (local time).
 constexpr uint32_t kHangupScheduleMaskAll = 0x00FFFFFFu;
 constexpr uint32_t kWatchdogNoExpSecDefault = 180u;
-constexpr uint32_t kWatchdogNoExpSecMin = 30u;
+constexpr uint32_t kWatchdogNoExpSecMin = 10u;
 constexpr uint32_t kWatchdogNoExpSecMax = 3600u;
 // 冷启未进图最坏约 4×N+确认：主门 2N（进程起后）+次门 N+未进图计时 N+确认。
 // 进图后经验/状态停滞门槛为 N（+确认）。踢线武装后立刻重拉。
@@ -519,7 +519,7 @@ struct PayloadControl {
     uint32_t version = kPayloadControlVersion;
     uint32_t invuln = 1;  // 默认开
     // v27/v38: 攻击加速（开=跳过动作等待；间隔默认见 kSimpleCombatAttackIntervalDefaultMs）
-    // 首页入口已关（kAttackAccelUserEnabled）；「攻击无CD」见 attackAccelClearBusy。
+    // 首页入口已关（kAttackAccelUserEnabled）；「攻击无CD」见 attackAccelClearBusy（吸怪 TAB，未解锁不可用）。
     uint32_t attackAccel = 0;
     // 实验：周期写 LocalUser ActionBusy=-1（清引擎忙锁）；默认关。不绑首页 attackAccel。
     // 不是技能无 CD；仍受面板间隔 / 服端校验约束。

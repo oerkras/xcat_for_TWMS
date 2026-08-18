@@ -440,7 +440,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.version = kPayloadControlVersion;
     out.invuln = 1;  // 默认开；ini 显式 0 仍可关
     out.attackAccel = 0;
-    out.attackAccelClearBusy = 0;  // 默认关（首页挂机「攻击无CD」）
+    out.attackAccelClearBusy = 0;  // 默认关（吸怪 TAB「攻击无CD」）
     out.attackAccelClearBusyMinIntervalMs = kAttackAccelClearBusyMinIntervalDefaultMs;
     out.attackAccelCutLayer = 0;
     out.attackAccelSkipPrepare = 0;  // 默认关

@@ -8,7 +8,7 @@ namespace attack_accel {
 // 攻击加速（SetDesired）：清忙锁 LocalUser+0x11C=-1（字段哈希防漂移，hint 0x11C）。
 // 出刀频率看面板「间隔」/ simpleCombatAttackIntervalMs（默认 123，下限 1）。
 // 非「技能无 CD」。禁止 GA .text hook。
-// 用户入口：PayloadControl.attackAccelClearBusy（首页挂机「攻击无CD」）；首页 attackAccel 暂关。
+// 用户入口：PayloadControl.attackAccelClearBusy（吸怪 TAB「攻击无CD」，未解锁不可用）；首页 attackAccel 暂关。
 //
 // 攻速槽（SetBoosterDesired，独立开关，默认关）：写 SecondaryStat.nBooster_@0xBC = -8
 //   并按游戏钟续 tBooster_@0xC4。与清忙锁**刻意不共用开关**。

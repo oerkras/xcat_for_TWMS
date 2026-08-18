@@ -781,17 +781,16 @@ void DrawLaunchTab(LaunchUiState& ui) {
 
 // LiveStep UI 状态：首页落盘与「实验」TAB 共用，避免两处 static 互相覆盖。
 static bool gUiCombatLiveStep = false;
-// 跳过攻击动画 / 砍动画倒计时：首页落盘字段保留；控件在实验 TAB。
-// 「攻击无CD」= 清 ActionBusy（首页挂机卡）；落盘 attackAccelClearBusy。
-static bool gUiAttackAccelSkipPrepare = false;  // 与 PayloadControl 默认一致
-static bool gUiAttackAccelClearBusy = false;    // 首页「攻击无CD」
+// 跳过攻击动画 / 「攻击无CD」/ 砍动画倒计时：吸怪 TAB；未解锁不可用。
+static bool gUiAttackAccelSkipPrepare = false;  // 吸怪 TAB「跳过攻击动画」
+static bool gUiAttackAccelClearBusy = false;    // 吸怪 TAB「攻击无CD」
 // 历史字段，Apply 不再抬间隔；仍落盘兼容。
 static int gUiAttackAccelClearBusyMinIntervalMs =
     (int)xcat::kAttackAccelClearBusyMinIntervalDefaultMs;
 // 首页「挂机 → 出刀间隔」= simpleCombatAttackIntervalMs（与「攻击无CD」开关无关）。
 static int gUiSimpleCombatAttackIntervalMs =
     (int)xcat::kSimpleCombatAttackIntervalDefaultMs;
-static bool gUiAttackAccelCutLayer = false;
+static bool gUiAttackAccelCutLayer = false;  // 吸怪 TAB「砍动画倒计时」
 static bool gUiAttackAccelBooster = false;
 static bool gUiAttackAccelActionSpeed = false;   // A 系 nSpeed_
 static bool gUiAttackAccelPartyBooster = false;  // TempStats[4] PartyBooster
@@ -900,9 +899,30 @@ static uint32_t MobGatherUiU32(int v) {
     return static_cast<uint32_t>(v);
 }
 
+// 吸怪 TAB 未解锁时：关掉附属能力 UI，并把 user.ini 里仍为开的位强制清掉。
+static void EnforceGatherTabExclusiveGates(LaunchUiState& ui) {
+    EnsureGatherUnlockLoaded();
+    if (gGatherTabUnlocked) return;
+    gUiAttackAccelClearBusy = false;
+    gUiAttackAccelSkipPrepare = false;
+    gUiAttackAccelCutLayer = false;
+    if (ui.prefsBinDir.empty()) return;
+    xcat::PayloadControl c{};
+    if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) return;
+    if (c.attackAccelClearBusy == 0 && c.attackAccelSkipPrepare == 0 &&
+        c.attackAccelCutLayer == 0)
+        return;
+    c.attackAccelClearBusy = 0;
+    c.attackAccelSkipPrepare = 0;
+    c.attackAccelCutLayer = 0;
+    c.writeTickMs = GetTickCount64();
+    (void)xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c);
+}
+
 void DrawHomeTab(LaunchUiState& ui) {
     // 首页卡片顺序：启动浓缩条 → 挂机 → 飞行速度 → 拾物 → 打怪设置
     // 吸怪业务在「吸怪」TAB；飞控旋钮在「调试 → 吸怪飞控」。
+    EnforceGatherTabExclusiveGates(ui);
     {
         xcat::ui::CardGuard card("##tab_home_launch", "启动");
         DrawLaunchCompactBar(ui);
@@ -1163,6 +1183,12 @@ void DrawHomeTab(LaunchUiState& ui) {
             (xcat::kFinalAttackForceUserEnabled && gUiFinalAttackForce) ? 1u : 0u;
         c.skillMaxLevel =
             (xcat::kSkillMaxLevelUserEnabled && gUiSkillMaxLevel) ? 1u : 0u;
+        // 吸怪 TAB 附属：未解锁强制关，避免旧 ini 仍生效。
+        if (!WorkspaceGatherTabUnlocked()) {
+            gUiAttackAccelClearBusy = false;
+            gUiAttackAccelSkipPrepare = false;
+            gUiAttackAccelCutLayer = false;
+        }
         c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
         c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
         c.attackAccelClearBusy = gUiAttackAccelClearBusy ? 1u : 0u;
@@ -1603,7 +1629,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 ImGui::TextColored(ImVec4(1.f, 0.35f, 0.35f, 1.f), "%s", lieErrUi.c_str());
             }
         }
-        // 对齐枫星：无敌 + 随机换频同行（「攻击无CD」在挂机卡自动打怪旁）
+        // 对齐枫星：无敌 + 随机换频同行（「攻击无CD」在吸怪 TAB）
         if (xcat::ui::OptionCheckbox("无敌", &invincible)) persistCore();
         ImGui::SameLine();
         if (ImGui::Button("随机换频", ImVec2(AppDpi_Px(100.f), 0.f))) {
@@ -1654,23 +1680,14 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "自动出刀间隔（%u–10000 ms，默认 %ums）。\n"
-                "「攻击无CD」开/关都用这个值；下限 %u ms；过短易空砍/踢号。",
+                "「攻击无CD」开/关都用这个值；下限 %u ms；过短易空砍/踢号。\n"
+                "「攻击无CD」开关在「吸怪」TAB（需解锁）。",
                 (unsigned)xcat::kSimpleCombatAttackIntervalMinMs,
                 (unsigned)xcat::kSimpleCombatAttackIntervalDefaultMs,
                 (unsigned)xcat::kSimpleCombatAttackIntervalMinMs);
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.35f);
         ImGui::TextUnformatted("ms");
-        ImGui::SameLine(0.f, ui::Gap());
-        if (xcat::ui::OptionCheckbox("攻击无CD", &gUiAttackAccelClearBusy)) persistCore();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "周期写 LocalUser ActionBusy=+0x118=-1，\n"
-                "清掉引擎「动作未完吞键」忙锁，出刀可更快再按。\n"
-                "产品名「攻击无CD」；不是技能服端 CD。\n"
-                "与是否开「自动打怪」无关。出刀频率看左侧「出刀间隔」。\n"
-                "进图落地约 0.4s 内暂停写入，降低脱同步。");
-        }
         ImGui::Indent(ui::Gap() * 1.2f);
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("追怪");
@@ -5135,105 +5152,6 @@ void DrawBetaTab(LaunchUiState& ui) {
 
     CardGap();
     {
-        xcat::ui::CardGuard card("##tab_beta_skip_prepare", "跳过攻击动画");
-        static bool skipPrepLoaded = false;
-        static uint64_t skipPrepSeen = 0;
-        if (!ui.prefsBinDir.empty()) {
-            xcat::PayloadControl disk{};
-            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
-                if (!skipPrepLoaded || disk.writeTickMs != skipPrepSeen) {
-                    gUiAttackAccelSkipPrepare = disk.attackAccelSkipPrepare != 0;
-                    skipPrepSeen = disk.writeTickMs;
-                    skipPrepLoaded = true;
-                }
-            } else if (!skipPrepLoaded) {
-                skipPrepLoaded = true;
-            }
-        } else if (!skipPrepLoaded) {
-            skipPrepLoaded = true;
-        }
-
-        auto persistSkipPrep = [&]() {
-            if (ui.prefsBinDir.empty()) return;
-            xcat::PayloadControl c{};
-            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-            c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
-            c.writeTickMs = GetTickCount64();
-            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-                skipPrepSeen = c.writeTickMs;
-                dropSeenTick = c.writeTickMs;
-                xcat::log::Ok("App", "已下发 core：attackAccelSkipPrepare=%d（实验）",
-                              gUiAttackAccelSkipPrepare ? 1 : 0);
-            } else {
-                xcat::log::Warn("App", "写入 user.ini [core] attackAccelSkipPrepare 失败");
-            }
-        };
-
-        if (xcat::ui::OptionCheckbox("跳过攻击动画", &gUiAttackAccelSkipPrepare))
-            persistSkipPrep();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "实验项（默认关）：出刀时不播攻击抬手/挥砍动作，减轻动画堆积。\n"
-                "站立呼吸等待机动作仍保留；进图/换图落地约 1 秒内暂不生效。\n"
-                "从关→开也会重新等落地。不影响攻击加速的出刀间隔。\n"
-                "与下方「砍动画倒计时」不要同时开（开本项则不砍倒计时）。\n"
-                "可能皮错/偶发卡刀，出问题先关掉。");
-        }
-        ImGui::TextDisabled("保留待机动作；落地后才跳过攻击抬手");
-    }
-
-    CardGap();
-    {
-        xcat::ui::CardGuard card("##tab_beta_cut_layer", "砍动画倒计时");
-        static bool cutLayerLoaded = false;
-        static uint64_t cutLayerSeen = 0;
-        if (!ui.prefsBinDir.empty()) {
-            xcat::PayloadControl disk{};
-            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
-                if (!cutLayerLoaded || disk.writeTickMs != cutLayerSeen) {
-                    gUiAttackAccelCutLayer = disk.attackAccelCutLayer != 0;
-                    cutLayerSeen = disk.writeTickMs;
-                    cutLayerLoaded = true;
-                }
-            } else if (!cutLayerLoaded) {
-                cutLayerLoaded = true;
-            }
-        } else if (!cutLayerLoaded) {
-            cutLayerLoaded = true;
-        }
-
-        auto persistCutLayer = [&]() {
-            if (ui.prefsBinDir.empty()) return;
-            xcat::PayloadControl c{};
-            (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-            c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
-            c.writeTickMs = GetTickCount64();
-            if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-                cutLayerSeen = c.writeTickMs;
-                dropSeenTick = c.writeTickMs;
-                xcat::log::Ok("App", "已下发 core：attackAccelCutLayer=%d（实验）",
-                              gUiAttackAccelCutLayer ? 1 : 0);
-            } else {
-                xcat::log::Warn("App", "写入 user.ini [core] attackAccelCutLayer 失败");
-            }
-        };
-
-        if (xcat::ui::OptionCheckbox("砍动画倒计时", &gUiAttackAccelCutLayer))
-            persistCutLayer();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "实验项（默认关）：周期把动作层 layer+0x14 倒计时置 0，\n"
-                "逼动画帧尽快推进，减轻连挥堆叠（偏视觉）。\n"
-                "不改攻击加速的清忙锁/攻速逻辑。\n"
-                "可能空砍/皮抽；可单独开，不依赖攻击加速「启用」。\n"
-                "会连带催快待机呼吸——更想少抬手请用上方「跳过攻击动画」。\n"
-                "与「跳过攻击动画」互斥（开跳过则不砍层）。");
-        }
-        ImGui::TextDisabled("默认关；与「跳过攻击动画」勿同时开");
-    }
-
-    CardGap();
-    {
         xcat::ui::CardGuard card("##tab_beta_booster", "攻速槽 nBooster_");
         static bool boosterLoaded = false;
         static uint64_t boosterSeen = 0;
@@ -5289,7 +5207,7 @@ void DrawBetaTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "实验项（默认关）：写 SecondaryStat.nBooster_=-8，把攻速 degree 夹到最快的 2，\n"
                 "攻击延迟 ×0.75；到期时间按游戏钟每拍续 60s，关勾选时原值奉还。\n"
-                "与首页「攻击无CD」完全独立，就是为了能分别开来做对照：\n"
+                "与吸怪 TAB「攻击无CD」完全独立，就是为了能分别开来做对照：\n"
                 "实测「攻击无CD」开着时本项净收益为 0 —— 忙锁一清，引擎那道延迟闸就没了。\n"
                 "它真正的用法是**替掉**「攻击无CD」：只开本项，不碰动作忙锁，约慢 5ms 但更干净。\n"
                 "注意 -8 超出合法 booster 值域（正常只有 -1/-2），存在被识别的风险。");
@@ -6025,6 +5943,22 @@ void DrawDebugTab(LaunchUiState& ui) {
                 if (ClearGatherUnlockReg()) {
                     gGatherTabUnlocked = false;
                     gGatherUnlockSaved = false;
+                    // 吸怪 TAB 附属能力一并关掉，避免未解锁仍下发。
+                    gUiAttackAccelClearBusy = false;
+                    gUiAttackAccelSkipPrepare = false;
+                    gUiAttackAccelCutLayer = false;
+                    if (!ui.prefsBinDir.empty()) {
+                        xcat::PayloadControl c{};
+                        if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c) &&
+                            (c.attackAccelClearBusy != 0 || c.attackAccelSkipPrepare != 0 ||
+                             c.attackAccelCutLayer != 0)) {
+                            c.attackAccelClearBusy = 0;
+                            c.attackAccelSkipPrepare = 0;
+                            c.attackAccelCutLayer = 0;
+                            c.writeTickMs = GetTickCount64();
+                            (void)xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c);
+                        }
+                    }
                     cmdOk = true;
                     cmdMsg = "已卸载";
                     cmdBuf[0] = '\0';
@@ -8427,6 +8361,9 @@ static void MobGatherApplyDisk(const xcat::PayloadControl& c) {
     gUiMobGatherHomeValid = c.mobGatherHomeValid != 0;
     gUiMobGatherHomeHasMap = c.mobGatherHomeHasMap != 0;
     gUiMobGatherApplyCtrl = c.mobGatherApplyCtrl != 0;
+    gUiAttackAccelClearBusy = c.attackAccelClearBusy != 0;
+    gUiAttackAccelSkipPrepare = c.attackAccelSkipPrepare != 0;
+    gUiAttackAccelCutLayer = c.attackAccelCutLayer != 0;
     sMobGatherLastTick = c.writeTickMs;
 }
 
@@ -8503,6 +8440,9 @@ static bool MobGatherSaveUi(LaunchUiState& ui) {
     c.mobGatherHomeValid = gUiMobGatherHomeValid ? 1u : 0u;
     c.mobGatherHomeHasMap = gUiMobGatherHomeHasMap ? 1u : 0u;
     c.mobGatherApplyCtrl = gUiMobGatherApplyCtrl ? 1u : 0u;
+    c.attackAccelClearBusy = gUiAttackAccelClearBusy ? 1u : 0u;
+    c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
+    c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
     c.writeTickMs = GetTickCount64();
     if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
     sMobGatherLastTick = c.writeTickMs;
@@ -8587,6 +8527,40 @@ void DrawMobGatherTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "把这台客户端正在模拟的怪吸到角色朝向面前的落点，方便打。\n"
                 "不是防抢。追怪选「站桩输出」不会自动开本项。落盘 user.ini。");
+        }
+        if (xcat::ui::OptionCheckbox("攻击无CD", &gUiAttackAccelClearBusy))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "周期写 LocalUser ActionBusy=+0x118=-1，\n"
+                "清掉引擎「动作未完吞键」忙锁，出刀可更快再按。\n"
+                "产品名「攻击无CD」；不是技能服端 CD。\n"
+                "出刀频率看「首页 → 挂机 → 出刀间隔」。\n"
+                "进图落地约 0.4s 内暂停写入，降低脱同步。\n"
+                "本 TAB 未解锁时不可用，也会强制关掉下发。");
+        }
+        if (xcat::ui::OptionCheckbox("跳过攻击动画", &gUiAttackAccelSkipPrepare))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "出刀时不播攻击抬手/挥砍动作，减轻动画堆积。\n"
+                "站立呼吸等待机动作仍保留；进图/换图落地约 1 秒内暂不生效。\n"
+                "从关→开也会重新等落地。不影响出刀间隔。\n"
+                "与下方「砍动画倒计时」不要同时开（开本项则不砍倒计时）。\n"
+                "可能皮错/偶发卡刀，出问题先关掉。\n"
+                "本 TAB 未解锁时不可用，也会强制关掉下发。");
+        }
+        if (xcat::ui::OptionCheckbox("砍动画倒计时", &gUiAttackAccelCutLayer))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "周期把动作层 layer+0x14 倒计时置 0，\n"
+                "逼动画帧尽快推进，减轻连挥堆叠（偏视觉）。\n"
+                "不改「攻击无CD」/攻速逻辑。\n"
+                "可能空砍/皮抽；可单独开。\n"
+                "会连带催快待机呼吸——更想少抬手请用上方「跳过攻击动画」。\n"
+                "与「跳过攻击动画」互斥（开跳过则不砍层）。\n"
+                "本 TAB 未解锁时不可用，也会强制关掉下发。");
         }
         if (xcat::ui::OptionCheckbox("申请控制权", &gUiMobGatherApplyCtrl))
             MobGatherTrySaveOrRevert(ui);
