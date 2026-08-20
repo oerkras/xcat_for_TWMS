@@ -26,10 +26,10 @@ struct BagItem {
 bool EnsureBound();
 
 // 当前是否有 UIShopDialog 实例（用户已开 NPC 店）。
+// 须 Unity 存活且 GameObject.activeSelf；getGo/getActive 失败当作未开（勿保守当开着）。
 bool ShopReady(bool& outReady);
 
 // 关店：buttonExit.Press → SetRet → Close；仍开着则 GameObject.SetActive(false)。
-// ShopReady 看 Unity 存活 + activeSelf（FindAll 残留不算开店）。
 bool CloseShop();
 
 struct NpcLocate {
@@ -48,8 +48,8 @@ bool LocateNpcByTemplate(int templateId, NpcLocate& out);
 
 // 找近距 NPC 并调 UserLocal.TalkToNpc（C→S UserSelectNpc=64）。
 // 成功仅表示已发起对话；是否弹出商店 / 菜单由服端与脚本决定。
-// maxDist：世界坐标欧氏距离上限；<=0 用默认 220。
-// preferTemplateId：>0 时优先匹配 NpcData.Id（grocery 种子 npc_id）；找不到再退近距。
+// maxDist：世界坐标欧氏距离上限；<=0 用默认 220（无 tpl 时）。
+// preferTemplateId：>0 时全图只对该 NpcData.Id Talk；找不到不退近距乱点。
 // inRangeOnly：true 时 dist>maxDist 不发包（船/转职 NPC 远距 Talk 会被服端踢）。
 bool TryTalkNearestNpc(float maxDist = 0.f, int preferTemplateId = 0, bool inRangeOnly = false);
 

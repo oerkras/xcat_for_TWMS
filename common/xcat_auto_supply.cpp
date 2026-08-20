@@ -640,7 +640,7 @@ void AutoSupplySetDefaults(AutoSupplyConfig& out) {
     out.refillMpEnabled = 0;
     out.refillCustomEnabled = 0;
     out.refillCustom2Enabled = 0;
-    out.refillFeedEnabled = 1;
+    out.refillFeedEnabled = 0;
     out.refillFeedBuyTo = kAutoSupplyDefaultRefillFeedBuyTo;
     out.refillMpBuyTo = kAutoSupplyDefaultRefillMpBuyTo;
     out.refillCustomBuyTo = kAutoSupplyDefaultRefillCustomBuyTo;

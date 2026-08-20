@@ -11,6 +11,11 @@
 // v11：原生 MapDataInfo.IsTown（守护主城无经验豁免；绕过拍卖强制写前的真值）。
 // v12：高价值卷轴快照（消耗栏 204/234 → launcher 探活头 → 运维台；客户端无 UI）。
 // v13：主动软重连倒计时 → ImGui 顶栏。
+// v14：落地后累计出刀 hangup（吸怪 TAB「出刀」）。
+// v15：SecurityClient 攻包窗只读峰值（吸怪 TAB type20）。
+// v16：攻包窗 detectTime 窗内最高（峰值/包合计/技能合计）。
+// v17：secAttackTextHookOn 保留布局，恒 0（.text AB 已拆除）。
+// v18：攻包/技能分表单键峰值 + 峰值键（吸怪 TAB type20 观测）。
 
 #include <Windows.h>
 
@@ -20,7 +25,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 13u;
+constexpr uint32_t kPayloadStatusVersion = 18u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -101,6 +106,26 @@ struct PayloadStatus {
     uint32_t softReloginPaused = 0;    // hold / 落地静默冻钟
     uint32_t softReloginRemainMs = 0;  // 剩余；0xFFFFFFFF=勾了未起表
     uint32_t softReloginNeedMs = 0;    // 间隔
+    uint32_t hangupFires = 0;          // 本轮已出刀
+    uint32_t hangupFiresNeed = 0;      // 阈值；0=走秒数
+
+    // v15：SecurityClient 攻包窗（type20）只读
+    uint32_t secAttackOk = 0;
+    uint32_t secAttackInterceptOn = 0;  // 保留布局，恒 0
+    int32_t secAttackPeak = 0;         // 当前单键峰值
+    int32_t secAttackPktSum = 0;
+    int32_t secAttackSkillSum = 0;
+    int32_t secAttackPct = 0;          // peak * 100 / 2000
+    int32_t secAttackWipePeak = 0;     // 保留布局，恒 0
+    int32_t secAttackWindowPeak = 0;   // 本窗/本局单键最高（60s 清窗或挂机落地重置）
+    int32_t secAttackWindowPktSum = 0;
+    int32_t secAttackWindowSkillSum = 0;
+    uint32_t secAttackTextHookOn = 0;  // 保留布局，恒 0
+    int32_t secAttackPktPeak = 0;      // v18：攻包表单键最高
+    int32_t secAttackSkillPeak = 0;    // v18：技能表单键最高
+    int32_t secAttackPktPeakId = 0;    // v18：攻包峰值 opcode
+    int32_t secAttackSkillPeakId = 0;  // v18：技能峰值 skillId
+    int32_t secAttackDetectTime = 0;   // v18：窗起点（游戏 tCur）
 };
 #pragma pack(pop)
 

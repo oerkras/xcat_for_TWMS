@@ -136,10 +136,20 @@ void DrawSoftReloginClock(const LaunchUiState& ui) {
         ImGui::TextDisabled("主动软重连 关");
         return;
     }
-    if (st.softReloginRemainMs == 0xFFFFFFFFu) {
-        ImGui::TextDisabled("主动软重连 --");
+
+    const bool firesOn = WorkspaceGatherTabUnlocked() && st.hangupFiresNeed > 0;
+    const bool clockArmed = st.softReloginRemainMs != 0xFFFFFFFFu;
+    if (!clockArmed) {
+        if (firesOn) {
+            char buf[56]{};
+            snprintf(buf, sizeof(buf), "主动软重连 -- 刀 %u/%u", st.hangupFires,
+                     st.hangupFiresNeed);
+            ImGui::TextDisabled("%s", buf);
+        } else {
+            ImGui::TextDisabled("主动软重连 --");
+        }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("出过刀或已勾选后，进图才开始倒计时");
+            ImGui::SetTooltip("第一刀才起表。换图不重置。秒数与累计出刀先到先拆。");
         return;
     }
 
@@ -155,17 +165,32 @@ void DrawSoftReloginClock(const LaunchUiState& ui) {
         }
     }
     const unsigned sec = remainMs ? (remainMs + 999u) / 1000u : 0u;
-    char buf[48]{};
+    char buf[64]{};
     if (st.softReloginPaused) {
-        snprintf(buf, sizeof(buf), "主动软重连 暂停 %us", sec);
+        if (firesOn) {
+            snprintf(buf, sizeof(buf), "主动软重连 暂停 %us 刀 %u/%u", sec, st.hangupFires,
+                     st.hangupFiresNeed);
+        } else {
+            snprintf(buf, sizeof(buf), "主动软重连 暂停 %us", sec);
+        }
         ImGui::TextColored(StatusHintBlue(), "%s", buf);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip(
                 "倒计时冻结：软重连进行中 / 落地静默 / 卖装补给赶路 / 寻簇飞行");
         return;
     }
-    snprintf(buf, sizeof(buf), "主动软重连 %us", sec);
+    if (firesOn) {
+        snprintf(buf, sizeof(buf), "主动软重连 %us 刀 %u/%u", sec, st.hangupFires,
+                 st.hangupFiresNeed);
+    } else {
+        snprintf(buf, sizeof(buf), "主动软重连 %us", sec);
+    }
     ImGui::TextUnformatted(buf);
+    if (firesOn && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "秒数与累计出刀可单独勾选，都开则先到先拆。与「fire id=」同拍 +1，落地清零。\n"
+            "秒数：「吸怪 快攻」TAB「快攻」卡「主动软重连」。出刀：同卡「出刀软重连」。");
+    }
 }
 
 void BeginStatusRow(const ImVec2& origin, float rowH, int row) {

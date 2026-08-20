@@ -29,9 +29,7 @@ namespace {
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
 DWORD gLastSkillRefreshMs = 0;
-DWORD gLastSecAttackProbeMs = 0;
 constexpr DWORD kSkillRefreshMs = 3000;
-constexpr DWORD kSecAttackProbeMs = 15000;
 constexpr DWORD kTickMs = 30;
 constexpr DWORD kIdleTickMs = 200;  // 多发关闭：降唤醒频率（仍要 Poll IPC / 学技刷新）
 
@@ -85,17 +83,11 @@ DWORD WINAPI WorkerMain(LPVOID) {
         }
 
         const DWORD now = GetTickCount();
-        // 已学技能表给面板用：关多发也要刷；SecAttack 周期探针仅开启时做。
+        // 已学技能表给面板用：关多发也要刷。攻包窗密采改走 security_attack worker。
         if (!gLastSkillRefreshMs ||
             static_cast<DWORD>(now - gLastSkillRefreshMs) >= kSkillRefreshMs) {
             gLastSkillRefreshMs = now;
             RefreshLearnedSkills();
-        }
-        if (enabled &&
-            (!gLastSecAttackProbeMs ||
-             static_cast<DWORD>(now - gLastSecAttackProbeMs) >= kSecAttackProbeMs)) {
-            gLastSecAttackProbeMs = now;
-            ports::security_attack::ProbeWindow();
         }
 
         // Tick：关闭时内部早退（只泵 TickReleases）；开启才跑队列/忙锁。

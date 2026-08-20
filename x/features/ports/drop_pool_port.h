@@ -191,8 +191,8 @@ int HoldSkipDrops(const SkipIds* skipIds, float halfW, float halfH);
 // snapLand：EndPara∈{0,1,2} 且 PickPt 非 (0,0) → Pt1=PickPt、EndPara=3、LastTry=0。
 //           必须跟位置；禁止只写 EndPara=3。禁写 EndPara=0。
 // accelFall：同态加大 LastTry（t=LastTry/1000）；两勾都开时瞬落优先。
-// skipIds：黑名单件禁止写成 Ready(3)。瞬落时跟位置并盖 SkipHold(4)+INT_MAX，
-//          否则原生宠 E8 不进 TryPick MI，40ms 盖戳来不及会把箭矢舔走。
+// skipIds：黑名单件禁止写成 Ready(3)，也禁止跟位置（跟位置会让游戏把态写回 3）。
+//          只盖 SkipHold(4)+INT_MAX+Pickable=0。
 //          itemId 尚未写出的非金币件也不瞬落/加速（避免未识别箭矢被捡）。
 int BoostDropFall(bool snapLand, bool accelFall, const SkipIds* skipIds = nullptr,
                   int* outSnap = nullptr, int* outAccel = nullptr, int* outSkipHold = nullptr);

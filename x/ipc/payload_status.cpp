@@ -11,6 +11,7 @@
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/soft_login_probe/soft_login_probe.h"
 #include "../features/ports/mob_gather_port.h"
+#include "../features/ports/security_attack_port.h"
 #include "../features/ports/travel_port.h"
 #include "../features/ports/world_port.h"
 #include "../features/sellbag/sellbag.h"
@@ -197,6 +198,31 @@ void PayloadStatus_Publish() {
         st.softReloginPaused = paused;
         st.softReloginRemainMs = remainMs;
         st.softReloginNeedMs = needMs;
+        unsigned fires = 0, firesNeed = 0;
+        x::features::ports::mob_gather::QueryHangupFires(&fires, &firesNeed);
+        st.hangupFires = fires;
+        st.hangupFiresNeed = firesNeed;
+    }
+
+    {
+        x::features::ports::security_attack::WindowSnapshot w{};
+        const bool ok = x::features::ports::security_attack::PeekWindow(&w);
+        st.secAttackOk = ok ? 1u : 0u;
+        st.secAttackInterceptOn = 0;
+        st.secAttackTextHookOn = 0;
+        st.secAttackPeak = w.peakKey;
+        st.secAttackPktSum = w.pktSum;
+        st.secAttackSkillSum = w.skillSum;
+        st.secAttackPct = w.pctOfCheck;
+        st.secAttackWipePeak = 0;
+        st.secAttackWindowPeak = w.windowPeak;
+        st.secAttackWindowPktSum = w.windowPktSum;
+        st.secAttackWindowSkillSum = w.windowSkillSum;
+        st.secAttackPktPeak = w.pktPeak;
+        st.secAttackSkillPeak = w.skillPeak;
+        st.secAttackPktPeakId = w.pktPeakId;
+        st.secAttackSkillPeakId = w.skillPeakId;
+        st.secAttackDetectTime = w.detectTime;
     }
 
     // 与 auto_supply 同口径：仅 map_info.town=1（含药店室内；勿用 %1000000 / 原生 IsTown）。

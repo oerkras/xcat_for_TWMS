@@ -69,10 +69,111 @@ bool RectLooksLikeCta(const RECT& r) {
     return true;
 }
 
+std::wstring FlattenWs(std::wstring s) {
+    std::wstring o;
+    o.reserve(s.size());
+    bool sp = false;
+    for (wchar_t c : s) {
+        if (c == L'\r' || c == L'\n' || c == L'\t' || c == L' ') {
+            if (!o.empty()) sp = true;
+            continue;
+        }
+        if (sp) {
+            o.push_back(L' ');
+            sp = false;
+        }
+        o.push_back(c);
+    }
+    return o;
+}
+
+std::wstring ElemValue(IUIAutomationElement* el) {
+    if (!el) return {};
+    IUIAutomationValuePattern* vp = nullptr;
+    if (FAILED(el->GetCurrentPatternAs(UIA_ValuePatternId, IID_IUIAutomationValuePattern,
+                                       (void**)&vp)) ||
+        !vp)
+        return {};
+    BSTR b = nullptr;
+    std::wstring s;
+    if (SUCCEEDED(vp->get_CurrentValue(&b)) && b) {
+        s = BstrToW(b);
+        SysFreeString(b);
+    }
+    vp->Release();
+    return s;
+}
+
+std::wstring ElemLegacyName(IUIAutomationElement* el) {
+    if (!el) return {};
+    IUIAutomationLegacyIAccessiblePattern* p = nullptr;
+    if (FAILED(el->GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId,
+                                       IID_IUIAutomationLegacyIAccessiblePattern, (void**)&p)) ||
+        !p)
+        return {};
+    BSTR b = nullptr;
+    std::wstring s;
+    if (SUCCEEDED(p->get_CurrentName(&b)) && b) {
+        s = BstrToW(b);
+        SysFreeString(b);
+    }
+    p->Release();
+    return s;
+}
+
+std::wstring ElemAnyName(IUIAutomationElement* el) {
+    std::wstring n = FlattenWs(ElemName(el));
+    if (!n.empty()) return n;
+    n = FlattenWs(ElemLegacyName(el));
+    if (!n.empty()) return n;
+    return FlattenWs(ElemValue(el));
+}
+
+bool NameLooksLikeGpCta(const std::wstring& n) {
+    if (n.empty()) return false;
+    return StrStrIW(n.c_str(), L"Gama") || StrStrIW(n.c_str(), L"GAMAPASS") ||
+           StrStrIW(n.c_str(), L"Sign in with") || StrStrIW(n.c_str(), L"使用 Gama") ||
+           (StrStrIW(n.c_str(), L"登入") && n.size() < 40) ||
+           (StrStrIW(n.c_str(), L"登录") && n.size() < 40);
+}
+
+bool NameLooksLikeBrowserChrome(const std::wstring& n) {
+    if (n.empty()) return false;
+    const wchar_t* junk[] = {
+        L"Google", L"Chrome", L"關閉", L"关闭", L"Close", L"最小化", L"最大化", L"還原", L"还原",
+        L"新分頁", L"新标签", L"New tab", L"設定", L"设置", L"Settings", L"擴充", L"扩展",
+        L"書籤", L"书签", L"網址", L"位址", L"地址", L"搜尋", L"搜索", L"Address", L"Omnibox",
+        L"重新載入", L"重新加载", L"Reload", L"上一頁", L"下一頁", L"Back", L"Forward",
+    };
+    for (const wchar_t* j : junk) {
+        if (StrStrIW(n.c_str(), j)) return true;
+    }
+    return false;
+}
+
+bool RectInContentArea(const RECT& r, const RECT& wr) {
+    if (!RectVisible(r) || !RectVisible(wr)) return false;
+    const long topBar = wr.top + 120;
+    const long bottomBar = wr.bottom - 36;
+    return r.top >= topBar && r.bottom <= bottomBar && r.left >= wr.left + 8 &&
+           r.right <= wr.right - 8;
+}
+
+bool RectLooksLikeLooseCta(const RECT& r) {
+    const long w = r.right - r.left;
+    const long h = r.bottom - r.top;
+    if (w < 36 || h < 14) return false;
+    if (h > 220 || w > 1400) return false;
+    return true;
+}
+
 bool NameMatch(const std::wstring& name, const wchar_t* part, bool substring) {
     if (!part || !*part) return false;
-    if (!substring) return _wcsicmp(name.c_str(), part) == 0;
-    return StrStrIW(name.c_str(), part) != nullptr;
+    const std::wstring a = FlattenWs(name);
+    const std::wstring b = FlattenWs(part);
+    if (a.empty() || b.empty()) return false;
+    if (!substring) return _wcsicmp(a.c_str(), b.c_str()) == 0;
+    return StrStrIW(a.c_str(), b.c_str()) != nullptr;
 }
 
 bool NameMatchAny(const std::wstring& name, const std::vector<std::wstring>& parts, bool substring) {
@@ -140,6 +241,132 @@ bool BadAccountCardName(const std::wstring& t) {
         StrStrIW(t.c_str(), L"使用 Gama Pass") || StrStrIW(t.c_str(), L"使用 Gama"))
         return true;
     return false;
+}
+
+// Chrome 整窗无障碍树含标签栏/扩展/设置，FindAll(True) 一次可数秒。
+// 点选与文案探测只进当前页 Document；地址栏仍走窗口根。
+bool DocLooksLikeLoginHost(const std::wstring& name) {
+    if (name.empty()) return false;
+    return StrStrIW(name.c_str(), L"galaxy") || StrStrIW(name.c_str(), L"beanfun") ||
+           StrStrIW(name.c_str(), L"gamania") || StrStrIW(name.c_str(), L"accounts") ||
+           StrStrIW(name.c_str(), L"maplestoryclassic") || StrStrIW(name.c_str(), L"maplestory") ||
+           StrStrIW(name.c_str(), L"gamapass") || StrStrIW(name.c_str(), L"gama pass") ||
+           StrStrIW(name.c_str(), L"openid") || StrStrIW(name.c_str(), L"楓之谷") ||
+           StrStrIW(name.c_str(), L"枫之谷");
+}
+
+// 不要 FindFirst：Chrome++ 扩展/iframe 的 Document 常排在登录页前面。
+// 优先 Name/Value 带 galaxy/beanfun/gamania 的可见块，否则取面积最大的可见 Document。
+IUIAutomationElement* FindPageDocument(IUIAutomation* uia, IUIAutomationElement* root) {
+    if (!uia || !root) return nullptr;
+    VARIANT v{};
+    v.vt = VT_I4;
+    v.lVal = UIA_DocumentControlTypeId;
+    IUIAutomationCondition* cond = nullptr;
+    if (FAILED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &cond)) || !cond)
+        return nullptr;
+    IUIAutomationElementArray* arr = nullptr;
+    HRESULT hr = root->FindAll(TreeScope_Descendants, cond, &arr);
+    cond->Release();
+    if (FAILED(hr) || !arr) return nullptr;
+
+    int len = 0;
+    arr->get_Length(&len);
+    IUIAutomationElement* bestHost = nullptr;
+    IUIAutomationElement* bestArea = nullptr;
+    long bestHostArea = -1;
+    long bestVisArea = -1;
+    for (int i = 0; i < len; ++i) {
+        IUIAutomationElement* el = nullptr;
+        if (FAILED(arr->GetElement(i, &el)) || !el) continue;
+        const RECT r = ElemRect(el);
+        if (!RectVisible(r)) {
+            el->Release();
+            continue;
+        }
+        const long area = (r.right - r.left) * (r.bottom - r.top);
+        const std::wstring n = ElemName(el);
+        std::wstring val;
+        IUIAutomationValuePattern* vp = nullptr;
+        if (SUCCEEDED(el->GetCurrentPatternAs(UIA_ValuePatternId, IID_IUIAutomationValuePattern,
+                                              (void**)&vp)) &&
+            vp) {
+            BSTR b = nullptr;
+            if (SUCCEEDED(vp->get_CurrentValue(&b)) && b) {
+                val.assign(b, SysStringLen(b));
+                SysFreeString(b);
+            }
+            vp->Release();
+        }
+        if ((DocLooksLikeLoginHost(n) || DocLooksLikeLoginHost(val)) && area > bestHostArea) {
+            if (bestHost) bestHost->Release();
+            bestHost = el;
+            bestHost->AddRef();
+            bestHostArea = area;
+        }
+        if (area > bestVisArea) {
+            if (bestArea) bestArea->Release();
+            bestArea = el;
+            bestArea->AddRef();
+            bestVisArea = area;
+        }
+        el->Release();
+    }
+    arr->Release();
+    if (bestHost) {
+        if (bestArea) bestArea->Release();
+        return bestHost;
+    }
+    return bestArea;
+}
+
+constexpr int kNameWalkBudget = 1600;
+
+IUIAutomationElement* WalkFindName(IUIAutomation* uia, IUIAutomationElement* scope,
+                                   const wchar_t* namePart, bool substring, bool preferInvokeable) {
+    if (!uia || !scope || !namePart || !*namePart) return nullptr;
+    IUIAutomationTreeWalker* walker = nullptr;
+    if (FAILED(uia->get_ControlViewWalker(&walker)) || !walker) return nullptr;
+
+    std::vector<IUIAutomationElement*> st;
+    IUIAutomationElement* first = nullptr;
+    if (SUCCEEDED(walker->GetFirstChildElement(scope, &first)) && first) st.push_back(first);
+
+    IUIAutomationElement* fallback = nullptr;
+    int n = 0;
+    while (!st.empty() && n < kNameWalkBudget) {
+        IUIAutomationElement* cur = st.back();
+        st.pop_back();
+        ++n;
+
+        const std::wstring name = ElemName(cur);
+        const RECT r = ElemRect(cur);
+        const bool hit = NameMatch(name, namePart, substring) && RectVisible(r);
+        if (hit && (!preferInvokeable || IsInvokePreferType(ElemType(cur)))) {
+            for (auto* x : st) x->Release();
+            if (fallback) fallback->Release();
+            walker->Release();
+            return cur;
+        }
+        if (hit && !fallback) {
+            fallback = cur;
+            fallback->AddRef();
+        }
+
+        IUIAutomationElement* ch = nullptr;
+        if (SUCCEEDED(walker->GetFirstChildElement(cur, &ch)) && ch) {
+            while (ch) {
+                IUIAutomationElement* next = nullptr;
+                (void)walker->GetNextSiblingElement(ch, &next);
+                st.push_back(ch);
+                ch = next;
+            }
+        }
+        cur->Release();
+    }
+    for (auto* x : st) x->Release();
+    walker->Release();
+    return fallback;
 }
 
 bool LooksLikeAccountSeedName(const std::wstring& t) {
@@ -521,6 +748,8 @@ IUIAutomationElement* Session::FindByName(IUIAutomationElement* root, const wcha
                                           bool substring, bool preferInvokeable) const {
     if (!uia_ || !root || !namePart || !*namePart) return nullptr;
 
+    // 与 161 相同：整窗 FindAll。C2799 曾改成只搜 FindPageDocument，
+    // 官方 Chrome 会搜错 Document，点选全部落空（4E82 164/165）。
     IUIAutomationCondition* cond = nullptr;
     HRESULT hr;
     if (substring) {
@@ -559,7 +788,6 @@ IUIAutomationElement* Session::FindByName(IUIAutomationElement* root, const wcha
         if (preferInvokeable && IsInvokePreferType(ElemType(el))) {
             if (best) best->Release();
             best = el;
-            // keep scanning for first preferred in document order is ok; break for speed
             break;
         }
         if (!fallback) fallback = el;
@@ -842,6 +1070,8 @@ bool Session::ClickLargestExactName(IUIAutomationElement* root, const wchar_t* e
                                     bool forceMouse) const {
     if (!uia_ || !root || !exactName || !*exactName) return false;
 
+    // 与 161 相同：整窗 FindAll(True) + get_CurrentName 精确比对。
+    // Name PropertyCondition 在官方 Chrome 上会漏掉实际 Name 能读到的按钮（4E82）。
     IUIAutomationCondition* trueCond = nullptr;
     if (FAILED(uia_->CreateTrueCondition(&trueCond)) || !trueCond) return false;
     IUIAutomationElementArray* arr = nullptr;
@@ -851,7 +1081,6 @@ bool Session::ClickLargestExactName(IUIAutomationElement* root, const wchar_t* e
 
     int len = 0;
     arr->get_Length(&len);
-    // 优先 Button/链接（tier 高）；同 tier 取面积最大；拒绝过大外框（BIN 繼續假成功）
     IUIAutomationElement* best = nullptr;
     int bestTier = -1;
     long bestArea = -1;
@@ -890,12 +1119,147 @@ bool Session::ClickLargestExactName(IUIAutomationElement* root, const wchar_t* e
 
     IUIAutomationElement* target = PreferClickableAncestor(uia_, best);
     IUIAutomationElement* use = target ? target : best;
-    // 默认 Invoke；forceMouse=重试时才动真鼠标
     bool ok = InvokeOrClick(use, forceMouse);
     if (!ok && use != best) ok = InvokeOrClick(best, forceMouse);
     if (target) target->Release();
     best->Release();
     return ok;
+}
+
+bool Session::ClickLargestContentCta(IUIAutomationElement* root, HWND hwnd, std::wstring* outName,
+                                     bool forceMouse) const {
+    if (!uia_ || !root) return false;
+    RECT wr{};
+    if (hwnd && IsWindow(hwnd)) GetWindowRect(hwnd, &wr);
+    if (!RectVisible(wr)) return false;
+
+    IUIAutomationElement* bestGp = nullptr;
+    IUIAutomationElement* bestLoose = nullptr;
+    long bestGpArea = -1;
+    long bestLooseArea = -1;
+    std::wstring bestGpName;
+    std::wstring bestLooseName;
+
+    auto considerType = [&](long typeId) {
+        VARIANT v{};
+        v.vt = VT_I4;
+        v.lVal = typeId;
+        IUIAutomationCondition* cond = nullptr;
+        if (FAILED(uia_->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &cond)) || !cond)
+            return;
+        IUIAutomationElementArray* arr = nullptr;
+        if (FAILED(root->FindAll(TreeScope_Descendants, cond, &arr)) || !arr) {
+            cond->Release();
+            return;
+        }
+        cond->Release();
+        int len = 0;
+        arr->get_Length(&len);
+        if (len > 120) len = 120;
+        for (int i = 0; i < len; ++i) {
+            IUIAutomationElement* el = nullptr;
+            if (FAILED(arr->GetElement(i, &el)) || !el) continue;
+            const RECT r = ElemRect(el);
+            if (!RectInContentArea(r, wr) || !RectLooksLikeLooseCta(r) || !ElemEnabled(el)) {
+                el->Release();
+                continue;
+            }
+            const std::wstring n = ElemAnyName(el);
+            if (NameLooksLikeBrowserChrome(n) && !NameLooksLikeGpCta(n)) {
+                el->Release();
+                continue;
+            }
+            const long a = (r.right - r.left) * (r.bottom - r.top);
+            if (NameLooksLikeGpCta(n)) {
+                if (a > bestGpArea) {
+                    if (bestGp) bestGp->Release();
+                    bestGp = el;
+                    bestGpArea = a;
+                    bestGpName = n;
+                    continue;
+                }
+            } else if (a > bestLooseArea) {
+                if (bestLoose) bestLoose->Release();
+                bestLoose = el;
+                bestLooseArea = a;
+                bestLooseName = n.empty() ? L"(empty)" : n;
+                continue;
+            }
+            el->Release();
+        }
+        arr->Release();
+    };
+    considerType(UIA_ButtonControlTypeId);
+    considerType(UIA_HyperlinkControlTypeId);
+
+    IUIAutomationElement* use = bestGp ? bestGp : bestLoose;
+    const std::wstring hit = bestGp ? bestGpName : bestLooseName;
+    if (bestGp && bestLoose && bestGp != bestLoose) bestLoose->Release();
+    if (!use) return false;
+    if (outName) *outName = hit.substr(0, 80);
+    bool ok = InvokeOrClick(use, forceMouse);
+    use->Release();
+    return ok;
+}
+
+std::wstring Session::DumpVisibleCtas(IUIAutomationElement* root, HWND hwnd, int maxItems) const {
+    if (!uia_ || !root) return L"cta-dump|no-root";
+    RECT wr{};
+    if (hwnd && IsWindow(hwnd)) GetWindowRect(hwnd, &wr);
+    int content = 0;
+    int bar = 0;
+    int shown = 0;
+    std::wstring bits;
+    auto dumpType = [&](long typeId) {
+        VARIANT v{};
+        v.vt = VT_I4;
+        v.lVal = typeId;
+        IUIAutomationCondition* cond = nullptr;
+        if (FAILED(uia_->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &cond)) || !cond)
+            return;
+        IUIAutomationElementArray* arr = nullptr;
+        if (FAILED(root->FindAll(TreeScope_Descendants, cond, &arr)) || !arr) {
+            cond->Release();
+            return;
+        }
+        cond->Release();
+        int len = 0;
+        arr->get_Length(&len);
+        if (len > 120) len = 120;
+        for (int i = 0; i < len; ++i) {
+            IUIAutomationElement* el = nullptr;
+            if (FAILED(arr->GetElement(i, &el)) || !el) continue;
+            const RECT r = ElemRect(el);
+            if (!RectVisible(r)) {
+                el->Release();
+                continue;
+            }
+            const std::wstring n = ElemAnyName(el);
+            const bool inC = RectInContentArea(r, wr);
+            if (inC) ++content;
+            else ++bar;
+            if (inC && shown < maxItems) {
+                ++shown;
+                bits += L" [";
+                bits += n.empty() ? L"?" : n.substr(0, 28);
+                bits += L"|";
+                bits += std::to_wstring(r.right - r.left);
+                bits += L"x";
+                bits += std::to_wstring(r.bottom - r.top);
+                bits += L"]";
+            }
+            el->Release();
+        }
+        arr->Release();
+    };
+    dumpType(UIA_ButtonControlTypeId);
+    dumpType(UIA_HyperlinkControlTypeId);
+    std::wstring out = L"cta-dump|content=";
+    out += std::to_wstring(content);
+    out += L"|chrome=";
+    out += std::to_wstring(bar);
+    out += bits.empty() ? L"| (内容区无 Button/链接)" : bits;
+    return out;
 }
 
 bool Session::ClickNamedIndex(IUIAutomationElement* root, const std::vector<std::wstring>& nameParts,

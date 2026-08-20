@@ -183,6 +183,46 @@ std::string MapNamesResolveQuery(const MapNamesPack& pack, const std::string& ra
     return {};
 }
 
+std::string MapNamesResolveExact(const MapNamesPack& pack, const std::string& rawIn) {
+    std::string s = rawIn;
+    TrimLeading(s);
+    TrimTrailing(s);
+    if (s.empty() || !pack.loaded) return {};
+
+    bool digits = true;
+    for (char c : s) {
+        if (c < '0' || c > '9') {
+            digits = false;
+            break;
+        }
+    }
+    if (digits) {
+        const std::string key = MapNamesPadKey(s);
+        if (key.empty()) return {};
+        int id = 0;
+        try {
+            id = std::stoi(key);
+        } catch (...) {
+            id = 0;
+        }
+        if (id > 0 && MapNamesHasId(pack, id)) return key;
+        if (pack.nameByKey.find(key) != pack.nameByKey.end()) return key;
+        return {};
+    }
+
+    auto it = pack.keyByName.find(s);
+    if (it != pack.keyByName.end()) return it->second;
+    auto id = pack.keyByDesc.find(s);
+    if (id != pack.keyByDesc.end()) return id->second;
+    return {};
+}
+
+bool MapNamesHasId(const MapNamesPack& pack, int mapId) {
+    if (mapId <= 0 || !pack.loaded) return false;
+    const auto it = pack.labelById.find(mapId);
+    return it != pack.labelById.end() && !it->second.empty();
+}
+
 void CopyUtf8Truncate(char* dst, size_t dstCap, const char* src) {
     if (!dst || dstCap == 0) return;
     dst[0] = '\0';

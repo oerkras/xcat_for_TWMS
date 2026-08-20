@@ -176,6 +176,7 @@ SendAttackPacketCountCheck(now)：
 | 代码 | `x/features/ports/security_attack_port.{h,cpp}` |
 | 绑定 | Il2Cpp `FindClass(d9ef28f1…)` → `static_fields`（旧 `ba499947…` 作废） |
 | 采样 | `multi_skill` worker **每 15s** + 测试前一拍；tag=`SecAttack` |
+| BIN | `bin/XCat_data/logs/sec_attack.log`：`INIT` / `ZERO`（每次置零）/ `IDLE` / `SKIP` / `PROBE` |
 | 不做 | 不 Hook、不调用 `SendAttackPacketCountCheck` |
 
 ### 6.1 Dictionary 布局（踩过的坑）
@@ -231,7 +232,7 @@ IL2CPP `Dictionary`：`entries@0x18` / `count@0x20` / **`freeCount@0x28`** / **`
 
 | 路径 | 说明 |
 |------|------|
-| `x/features/ports/security_attack_port.*` | type20 计数窗只读探针 |
+| `x/features/ports/security_attack_port.*` | type20 计数窗只读探针 + 数据面拦截；BIN `logs/sec_attack.log` |
 | `x/features/multi_skill/multi_skill.cpp` | SecAttack 15s + 出刀前采样 |
 | `Dumps/runtime/_dig_securityclient_attack_window.md` | 工作挖空 |
 | `Dumps/runtime/_dig_livevalue_probe_结论.md` | LiveValue 430/557/558 空表结论（运行时探针已拆除） |

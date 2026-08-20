@@ -43,26 +43,50 @@ unsigned AimIntervalMs();
 void SetIgnoreQuiet(bool on);
 void SetQuietDelayMs(unsigned ms);
 void SetApplyCtrl(bool on);
-// 首页挂机「主动软重连」。不绑吸怪；试连未开则只起表不拆会话。
+// 「吸怪 快攻」TAB「快攻」卡「主动软重连」。不绑吸怪；试连未开则只起表不拆会话。
 // 出过刀 = 欠一次 hangup 清加速 FLAG：第一刀才起表；出刀后关 F5 仍走完这一轮。
 // 没出过刀：关 F5 不计时，满包可直接卖。勾选可单独开（不绑出刀）。
 // freeze 临时关 F5 只停表（未出刀时），不清落地闸 / 不清欠 hangup。
-// 卖装/赶路冻钟。重连在途 / AwaitLand / 卖装优先 hold 不起下一轮表。
-// 重连在途 / 出过刀未 hangup 禁自动卖装。
+// 脏会话到点必须洗：卖装/赶路/换图/开店不得清钟、不得冻秒数闸。重连在途 / AwaitLand /
+// 卖装优先 hold 不起下一轮表。测谎 / 起号仍冻（拆会话会毁答题或起号）。
+// F5 出过刀后 hangup 窗口硬期限：遇人换频 / 寻簇飞不冻钟，到点中止 hop 再拆。
+// 「吸怪 快攻」TAB「快攻」卡「主动软重连」= 秒数闸。瞬移找怪+F5 默认强制开秒数（面板置灰，不改落盘）。
+// 调试 TAB hangupUnbindF5 可解除该防呆，秒数闸只跟该勾选。
 void SetSoftRelogin(bool on, unsigned sec);
+void SetHangupUnbindF5(bool on);
+// 同卡「出刀软重连」= 累计出刀闸。两勾独立；都开则先到先拆。
+void SetHangupFires(bool on, unsigned n);
+// 调试 TAB ws888 解锁后才给标题/顶栏报刀数；不影响出刀闸本身。
+void SetHangupFiresUiUnlocked(bool on);
 void TickSoftRelogin();
 bool IsSoftReloginWanted();
-// 成功出刀：钉「欠 hangup」。TryFirePrimaryEx / NoteLastFire（forge）调用。
+// 立刻走主动软重连（遇人换新频 / 到点 hangup）。成功则欠落地清 FLAG。
+bool FireProactiveHangup(const char* why);
+// 卖装/补给等要出门：若本轮出过刀或刀数已到期，立刻软重连清 FLAG，调用方必须等落地。
+// 已在拆/未出过刀：不重复拆。返回 true=先等 hangup，false=可以出门。
+bool HangupBeforeOtherAction(const char* why);
+// 与 combat.log「fire id=」同一拍 +1（那次峰值 2030 就是按分钟数这些行）。
+// 自组发出 / 多发 NA 真正挥出同样 +1。不看 ActionBusy、不看命中。
+void NoteHangupFire();
+// 成功出刀：钉「欠 hangup」清加速 FLAG。TryFirePrimaryEx / NoteLastFire（forge）调用。
 void NoteAttackDirty();
+// 落地后累计出刀已到阈值：必须先拆会话清 FLAG，卖装/赶路/补给不得插队。
+bool HangupFiresDue();
 // 重连在途 / AwaitLand / 出过刀未落地 禁卖。没出过刀、人已在图里：满包可直接出门。
 // 倒计时将尽也推迟，避免出门撞上下一轮拆会话。
 bool SoftReloginAllowsAutoSell();
+// 已拆未落地或软重连在途：卖装必须让路，落地再开趟。
+bool HangupWashInFlight();
 // hangup 已开火、补给还没拍板：F5 不准恢复出刀（卖装优先于打怪）。
 bool HangupCombatHold();
 void ReleaseHangupCombatHold(const char* why);
-// 顶栏倒计时：on=勾选 / 出过刀欠 hangup / 瞬移找怪+F5；paused=hold/卖装赶路/静默冻钟；
+// 顶栏倒计时：on=勾选 / 出过刀欠 hangup / 瞬移找怪+F5；paused=重连/测谎/起号冻钟；
 // remainMs=剩余（未起表 0xFFFFFFFF）。
 void QuerySoftReloginClock(unsigned* on, unsigned* paused, unsigned* remainMs, unsigned* needMs);
+// 落地后累计出刀：count=本轮已出；need=阈值（0=关/未解锁，不画刀数）。
+void QueryHangupFires(unsigned* count, unsigned* need);
+// BIN/观测：累计与阈值，不因标题解锁而把 need 藏成 0。闸关则 need=0。
+void QueryHangupFiresRaw(unsigned* count, unsigned* need);
 void SetClearRelogin(bool on);
 void TickClearRelogin();
 // 「先飞到最密堆再吸」：默认关。关=站立吸怪；开=人飞到簇后再 Arm。

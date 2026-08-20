@@ -13,6 +13,7 @@
 #include "mob_pool_port.h"
 #include "skill_port.h"
 #include "teleport_port.h"
+#include "security_attack_port.h"
 #include "world_port.h"
 #include "fly_fh_ban.h"
 #include "../auto_lie/auto_lie.h"
@@ -144,6 +145,12 @@ std::atomic<DWORD> gQuietSinceMs{0};
 std::atomic<uint8_t> gApplyCtrl{0};
 std::atomic<uint8_t> gSoftRelogin{0};
 std::atomic<unsigned> gSoftReloginSec{xcat::kMobGatherSoftReloginSecDefault};
+std::atomic<unsigned> gHangupFiresNeed{xcat::kMobGatherHangupFiresDefault};
+std::atomic<uint8_t> gHangupFiresOn{xcat::kMobGatherHangupFiresOnDefault != 0 ? 1 : 0};
+std::atomic<uint8_t> gHangupFiresUiUnlocked{0};
+std::atomic<uint8_t> gHangupUnbindF5{0};
+std::atomic<unsigned> gHangupFires{0};
+std::atomic<DWORD> gHangupRetryUntil{0};
 std::atomic<uint8_t> gHangupAwaitLand{0};
 std::atomic<uint8_t> gHangupLandedOk{0};
 std::atomic<uint8_t> gHangupCombatHold{0};
@@ -176,6 +183,7 @@ DWORD gSeekNearMs = 0;
 DWORD gSoftArmMs = 0;
 DWORD gSoftPauseMs = 0;
 DWORD gSoftSkipLogMs = 0;
+DWORD gSoftKeepOffMapLogMs = 0;
 constexpr unsigned kHangupSellDeferSoonMs = 2500;
 DWORD gClearWaitReadyMs = 0;
 DWORD gClearSkipLogMs = 0;
@@ -1251,6 +1259,10 @@ void Init() {
     gHomeLastMapId = 0;
     gSeeking.store(0, std::memory_order_release);
     gAttackDirty.store(0, std::memory_order_release);
+    gHangupFires.store(0, std::memory_order_release);
+    gHangupFiresUiUnlocked.store(0, std::memory_order_release);
+    gHangupUnbindF5.store(0, std::memory_order_release);
+    gHangupRetryUntil.store(0, std::memory_order_release);
     x::features::ports::mob_fh_ban::Init();
     x::runtime::LogI("MobGather", "port init (OFF; live-sim hold; apply-ctrl opt-in)");
 }
@@ -1397,23 +1409,52 @@ void SetApplyCtrl(bool on) {
     }
 }
 
-bool SoftReloginWanted() {
-    // 勾选可单独开。出过刀 = 欠 hangup，关 F5 也要走完这一轮清 FLAG。
+bool HangupSecondsOn() {
     if (gSoftRelogin.load(std::memory_order_acquire) != 0) return true;
-    return gAttackDirty.load(std::memory_order_acquire) != 0;
+    if (gHangupUnbindF5.load(std::memory_order_acquire) != 0) return false;
+    return x::features::simple_combat::IsTeleportEnabled() &&
+           x::features::simple_combat::IsEnabled();
+}
+
+bool HangupFiresEnabled() {
+    return gHangupFiresOn.load(std::memory_order_acquire) != 0;
+}
+
+bool HangupFiresDue() {
+    if (!HangupFiresEnabled()) return false;
+    const unsigned need = gHangupFiresNeed.load(std::memory_order_acquire);
+    if (!need) return false;
+    return gHangupFires.load(std::memory_order_acquire) >= need;
+}
+
+bool SoftReloginWanted() {
+    return HangupSecondsOn() || HangupFiresEnabled();
 }
 
 // 策略还在：勾选 / 欠 hangup / 已拆未落地 / 卖装优先 hold / 追怪仍是瞬移找怪。
 // login-freeze / soft_hold 会临时 SetEnabled(0)，不能当成用户关掉 hangup。
 bool HangupPolicyActive() {
-    if (gSoftRelogin.load(std::memory_order_acquire) != 0) return true;
+    if (HangupSecondsOn() || HangupFiresEnabled()) return true;
     if (gAttackDirty.load(std::memory_order_acquire) != 0) return true;
     if (gHangupAwaitLand.load(std::memory_order_acquire) != 0) return true;
     if (gHangupCombatHold.load(std::memory_order_acquire) != 0) return true;
+    if (gHangupUnbindF5.load(std::memory_order_acquire) != 0) return false;
     return x::features::simple_combat::IsTeleportEnabled();
 }
 
+bool HangupDeferNextClock();
+
+void NoteHangupFire() {
+    if (!HangupFiresEnabled()) return;
+    const unsigned n = gHangupFires.fetch_add(1, std::memory_order_relaxed) + 1u;
+    const unsigned need = gHangupFiresNeed.load(std::memory_order_acquire);
+    if (need && (n == need || (n % 500u) == 0u)) {
+        x::runtime::LogI("MobGather", "hangup fires %u/%u", n, need);
+    }
+}
+
 void NoteAttackDirty() {
+    if (!SoftReloginWanted()) return;
     if (gAttackDirty.exchange(1, std::memory_order_acq_rel) != 0) return;
     x::runtime::LogI("MobGather", "attack dirty — hangup owed to clear accel flags");
 }
@@ -1447,6 +1488,9 @@ void NoteHangupLandIfReady() {
     gHangupAwaitLand.store(0, std::memory_order_release);
     gHangupLandedOk.store(1, std::memory_order_release);
     gAttackDirty.store(0, std::memory_order_release);
+    gHangupFires.store(0, std::memory_order_release);
+    x::features::ports::security_attack::NoteHangupSession("hangup_land");
+    gHangupRetryUntil.store(0, std::memory_order_release);
     const DWORD t = GetTickCount();
     if (!gHangupLandOkMs.load(std::memory_order_acquire))
         gHangupLandOkMs.store(t ? t : 1, std::memory_order_release);
@@ -1456,12 +1500,15 @@ void NoteHangupLandIfReady() {
 
 bool SoftReloginHoldClock() {
     using x::features::soft_login_probe::IsReconnectInFlight;
-    // 卖装/补给开趟（含排队）与 Travel 赶路冻钟：只跳过开火会让间隔在途中走完，回图立刻再拆。
-    return IsReconnectInFlight() || PersonFlyBusy() ||
-           gDyRampOn.load(std::memory_order_acquire) != 0 ||
-           x::features::travel::IsActive() || x::features::auto_supply::IsBusy() ||
-           x::features::sellbag::IsBusy() || x::features::char_boot::IsBusy() ||
+    // 脏会话到点必须洗：卖装/赶路/开店不得冻秒数闸（补给应让路，落地再卖）。
+    // 重连在途冻的是这一轮自己。测谎/起号仍冻，避免拆会话毁掉答题或起号。
+    return IsReconnectInFlight() || x::features::char_boot::IsBusy() ||
            x::features::auto_lie::IsBusy();
+}
+
+bool HangupWashInFlight() {
+    using x::features::soft_login_probe::IsReconnectInFlight;
+    return gHangupAwaitLand.load(std::memory_order_acquire) != 0 || IsReconnectInFlight();
 }
 
 // hangup 已拆还没落地 / 卖装优先未拍板：dirty 还在也不能起下一轮表。
@@ -1479,15 +1526,64 @@ void SetSoftRelogin(bool on, unsigned sec) {
                           std::memory_order_release);
 }
 
+void SetHangupUnbindF5(bool on) {
+    gHangupUnbindF5.store(on ? 1 : 0, std::memory_order_release);
+}
+
+void SetHangupFires(bool on, unsigned n) {
+    gHangupFiresOn.store(on ? 1 : 0, std::memory_order_release);
+    gHangupFiresNeed.store(xcat::ClampMobGatherHangupFires(n), std::memory_order_release);
+}
+
+void SetHangupFiresUiUnlocked(bool on) {
+    gHangupFiresUiUnlocked.store(on ? 1 : 0, std::memory_order_release);
+}
+
+bool FireProactiveHangup(const char* why) {
+    using x::features::soft_login_probe::RequestProactiveReconnect;
+    if (!RequestProactiveReconnect(why ? why : "hangup")) return false;
+    gSoftArmMs = 0;
+    gSoftPauseMs = 0;
+    gHangupAwaitLand.store(1, std::memory_order_release);
+    gHangupLandedOk.store(0, std::memory_order_release);
+    gHangupLandOkMs.store(0, std::memory_order_release);
+    const bool encounterHop =
+        why && (std::strcmp(why, "encounter_soft_hop") == 0 ||
+                std::strcmp(why, "encounter_hop_fail") == 0);
+    // 到点 hangup：落地先卖装。遇人换频只清 FLAG，不卡 8s 出刀。
+    if (!encounterHop) {
+        gHangupCombatHold.store(1, std::memory_order_release);
+        x::runtime::LogI("MobGather", "hangup combat hold on why=%s — sell-first after land",
+                         why ? why : "?");
+        x::features::notify::PublishNotification(x::features::notify::NotificationEvent{
+            x::features::notify::NotificationKind::Info, "mob-gather-soft", "主动软重连",
+            "已主动拆会话，走软重连回图", 5000});
+    } else {
+        x::runtime::LogI("MobGather", "hangup await land why=%s (no sell hold)", why);
+    }
+    return true;
+}
+
+bool HangupBeforeOtherAction(const char* why) {
+    using x::features::soft_login_probe::IsReconnectInFlight;
+    using x::features::soft_login_probe::IsArmed;
+    if (IsReconnectInFlight() || gHangupAwaitLand.load(std::memory_order_acquire) != 0)
+        return true;
+    if (!gAttackDirty.load(std::memory_order_acquire) && !HangupFiresDue()) return false;
+    if (!SoftReloginWanted() || !IsArmed()) return true;
+    FireProactiveHangup(why && why[0] ? why : "pre_action");
+    return true;
+}
+
 void TickSoftRelogin() {
     using x::features::ports::world::GetSceneState;
     using x::features::ports::world::IsInMapScene;
     using x::features::ports::world::IsPlayReady;
     using x::features::ports::world::SceneState;
     using x::features::soft_login_probe::IsArmed;
-    using x::features::soft_login_probe::RequestProactiveReconnect;
 
-    // 计时：勾了或出过刀欠 hangup + 在图里才起表。第一刀之前不起表。
+    // 计时：会话脏了才起表。换图 / Travel / InterStage 短离图不得清钟。
+    // 只有这一轮已经拆（HangupDefer / 落地洗 FLAG）才开下一轮。
     if (!SoftReloginWanted()) {
         gSoftArmMs = 0;
         gSoftPauseMs = 0;
@@ -1508,9 +1604,17 @@ void TickSoftRelogin() {
 
     const DWORD now = GetTickCount();
     if (!IsInMapScene()) {
-        if (!HangupDeferNextClock()) {
+        // 离图只在本轮已拆时清钟。Travel 贴门 / 遇人 hop 都继续走。
+        if (HangupDeferNextClock()) {
             gSoftArmMs = 0;
             gSoftPauseMs = 0;
+        } else if (gSoftArmMs &&
+                   (!gSoftKeepOffMapLogMs || now - gSoftKeepOffMapLogMs > 2000)) {
+            gSoftKeepOffMapLogMs = now;
+            x::runtime::LogI("MobGather",
+                             "soft relogin clock keep off-map dirty=%d age=%ums",
+                             gAttackDirty.load(std::memory_order_acquire) ? 1 : 0,
+                             (unsigned)(now - gSoftArmMs));
         }
         return;
     }
@@ -1525,36 +1629,56 @@ void TickSoftRelogin() {
         gSoftPauseMs = 0;
         return;
     }
-    if (!gSoftArmMs) {
-        gSoftArmMs = now ? now : 1;
-        x::runtime::LogI("MobGather",
-                         "soft relogin clock start inMap dirty=%d check=%d forceTp=%d f5=%d",
-                         gAttackDirty.load(std::memory_order_acquire) ? 1 : 0,
-                         gSoftRelogin.load(std::memory_order_acquire) ? 1 : 0,
-                         x::features::simple_combat::IsTeleportEnabled() ? 1 : 0,
-                         x::features::simple_combat::IsEnabled() ? 1 : 0);
-    }
-
-    // hold 期间冻结已走的秒数，避免间隔叠上重连墙钟、一落地立刻再拆。
-    // 寻簇飞行 / 高度闸 / 卖装赶路 / Travel 同套：这段不吃间隔。
-    if (SoftReloginHoldClock()) {
-        if (!gSoftPauseMs) gSoftPauseMs = now ? now : 1;
-        return;
-    }
-    if (gSoftPauseMs) {
-        if (gSoftArmMs) gSoftArmMs += (now - gSoftPauseMs);
+    const bool dueFiresNow = HangupFiresDue();
+    const bool dirty = gAttackDirty.load(std::memory_order_acquire) != 0;
+    if (HangupSecondsOn()) {
+        if (!gSoftArmMs && dirty) {
+            gSoftArmMs = now ? now : 1;
+            x::runtime::LogI("MobGather",
+                             "soft relogin clock start inMap dirty=%d check=%d firesOn=%d "
+                             "forceTp=%d f5=%d unbind=%d",
+                             1,
+                             gSoftRelogin.load(std::memory_order_acquire) ? 1 : 0,
+                             HangupFiresEnabled() ? 1 : 0,
+                             x::features::simple_combat::IsTeleportEnabled() ? 1 : 0,
+                             x::features::simple_combat::IsEnabled() ? 1 : 0,
+                             gHangupUnbindF5.load(std::memory_order_acquire) ? 1 : 0);
+        }
+        // 出刀闸、秒数闸到点都要拆。HoldClock 只剩重连/起号/测谎。
+        if (SoftReloginHoldClock() && !dueFiresNow) {
+            if (!gSoftPauseMs) gSoftPauseMs = now ? now : 1;
+            return;
+        }
+        if (gSoftPauseMs) {
+            if (gSoftArmMs) gSoftArmMs += (now - gSoftPauseMs);
+            gSoftPauseMs = 0;
+        }
+    } else if (!dirty) {
+        gSoftArmMs = 0;
         gSoftPauseMs = 0;
+        if (SoftReloginHoldClock() && !dueFiresNow) return;
     }
 
+    const unsigned needFires = gHangupFiresNeed.load(std::memory_order_acquire);
+    const unsigned fires = gHangupFires.load(std::memory_order_acquire);
     const unsigned needMs =
         xcat::ClampMobGatherSoftReloginSec(gSoftReloginSec.load(std::memory_order_acquire)) *
         1000u;
-    if (now - gSoftArmMs < needMs) return;
+    const DWORD retryUntil = gHangupRetryUntil.load(std::memory_order_acquire);
+    if (retryUntil && now < retryUntil) return;
+    const bool dueFires = dueFiresNow;
+    const bool dueTime = gSoftArmMs && (now - gSoftArmMs) >= needMs &&
+                         (HangupSecondsOn() || dirty);
+    if (!dueFires && !dueTime) return;
 
     if (GetSceneState() != SceneState::Field || !IsPlayReady()) return;
+    // 遇人软重连正在选新频：让它拆，到点 hangup 不抢、不中止成回原频。
+    if (x::features::channel_hop::IsEncounterSoftHop()) return;
     if (x::features::channel_hop::GetState() != x::features::channel_hop::State::Idle ||
-        x::features::channel_hop::HasPending())
-        return;
+        x::features::channel_hop::HasPending()) {
+        x::runtime::LogI("MobGather", "soft relogin preempt hop (window due)");
+        x::features::channel_hop::AbortHopForHangup();
+    }
 
     if (!IsArmed()) {
         if (!gSoftSkipLogMs || now - gSoftSkipLogMs > 10000) {
@@ -1566,20 +1690,18 @@ void TickSoftRelogin() {
         return;
     }
 
-    x::runtime::LogI("MobGather", "soft relogin fire after %us", needMs / 1000u);
-    if (RequestProactiveReconnect("hangup_timer")) {
-        gSoftArmMs = 0;
-        gSoftPauseMs = 0;
-        gHangupAwaitLand.store(1, std::memory_order_release);
-        gHangupLandedOk.store(0, std::memory_order_release);
-        gHangupLandOkMs.store(0, std::memory_order_release);
-        gHangupCombatHold.store(1, std::memory_order_release);
-        x::runtime::LogI("MobGather", "hangup combat hold on — sell-first after land");
-        x::features::notify::PublishNotification(x::features::notify::NotificationEvent{
-            x::features::notify::NotificationKind::Info, "mob-gather-soft", "主动软重连",
-            "已主动拆会话，走软重连回图", 5000});
-    } else {
-        gSoftArmMs = now - needMs + 5000;
+    if (x::features::travel::IsActive()) {
+        x::runtime::LogI("MobGather", "hangup due — stop travel, CloseSession first why=%s",
+                         dueFires ? "hangup_fires" : "hangup_timer");
+        x::features::travel::RequestStop();
+    }
+
+    const char* why = dueFires ? "hangup_fires" : "hangup_timer";
+    x::runtime::LogI("MobGather", "soft relogin fire why=%s fires=%u/%u age=%us need=%us", why,
+                     fires, needFires, (unsigned)((now - gSoftArmMs) / 1000u), needMs / 1000u);
+    if (!FireProactiveHangup(why)) {
+        gHangupRetryUntil.store(now + 5000, std::memory_order_release);
+        if (dueTime && !dueFires) gSoftArmMs = now - needMs + 5000;
     }
 }
 
@@ -1587,12 +1709,7 @@ void QuerySoftReloginClock(unsigned* on, unsigned* paused, unsigned* remainMs, u
     const unsigned need =
         xcat::ClampMobGatherSoftReloginSec(gSoftReloginSec.load(std::memory_order_acquire)) *
         1000u;
-    const unsigned enabled =
-        (SoftReloginWanted() ||
-         (x::features::simple_combat::IsTeleportEnabled() &&
-          x::features::simple_combat::IsEnabled()))
-            ? 1u
-            : 0u;
+    const unsigned enabled = SoftReloginWanted() ? 1u : 0u;
     if (on) *on = enabled;
     if (needMs) *needMs = need;
     if (!enabled || !gSoftArmMs) {
@@ -1610,6 +1727,22 @@ void QuerySoftReloginClock(unsigned* on, unsigned* paused, unsigned* remainMs, u
     if (remainMs) *remainMs = remain;
 }
 
+void QueryHangupFires(unsigned* count, unsigned* need) {
+    if (count) count[0] = gHangupFires.load(std::memory_order_acquire);
+    if (need) {
+        const bool show = HangupFiresEnabled() &&
+                          gHangupFiresUiUnlocked.load(std::memory_order_acquire) != 0;
+        need[0] = show ? gHangupFiresNeed.load(std::memory_order_acquire) : 0u;
+    }
+}
+
+void QueryHangupFiresRaw(unsigned* count, unsigned* need) {
+    if (count) count[0] = gHangupFires.load(std::memory_order_acquire);
+    if (need) {
+        need[0] = HangupFiresEnabled() ? gHangupFiresNeed.load(std::memory_order_acquire) : 0u;
+    }
+}
+
 bool IsSoftReloginWanted() { return SoftReloginWanted(); }
 
 bool SoftReloginAllowsAutoSell() {
@@ -1617,7 +1750,8 @@ bool SoftReloginAllowsAutoSell() {
     // 出过刀必须 hangup 清 FLAG 才准卖。没出过刀、未拆会话：满包可直接出门。
     if (IsReconnectInFlight() || PersonFlyBusy()) return false;
     if (gHangupAwaitLand.load(std::memory_order_acquire) != 0) return false;
-    if (gAttackDirty.load(std::memory_order_acquire) != 0) return false;
+    if (HangupFiresDue()) return false;
+    if (gAttackDirty.load(std::memory_order_acquire) != 0 && SoftReloginWanted()) return false;
     if (!SoftReloginWanted()) return true;
     unsigned remain = 0xFFFFFFFFu;
     QuerySoftReloginClock(nullptr, nullptr, &remain, nullptr);

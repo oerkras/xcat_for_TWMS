@@ -60,6 +60,9 @@ bool IsReconnectInFlight();
 // 仅 Field+playReady；商城/拍卖/InterStage 拒绝。首页「软重连试连」未开则拒绝（禁止裸拆）。
 bool RequestProactiveReconnect(const char* why);
 
+// 遇人换频失败仍在图内：抬掉连续失败熔断，允许 CloseSession + 软重连清脏（否则会原地出刀）。
+void ClearBreaker(const char* why);
+
 // 调试 / 手动：安全关断线弹窗（CloseDialog + SetActive，绝不点確認/Yes）。
 // 不依赖软重连是否武装；须在已注入且泵可用时调用。
 void RequestManualDismiss();

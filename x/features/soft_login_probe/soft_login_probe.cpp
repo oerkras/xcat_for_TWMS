@@ -1979,6 +1979,15 @@ bool BreakerActive() {
     return false;
 }
 
+void ClearBreakerLocked(const char* why) {
+    const DWORD until = gBreakerUntilMs.exchange(0, std::memory_order_acq_rel);
+    gFailStreak.store(0, std::memory_order_release);
+    gFailStreakFirstMs.store(0, std::memory_order_release);
+    if (!until) return;
+    LogLine("breaker cleared why=%s (allow hop-fail CloseSession)", why ? why : "?");
+    KickLogLine("breaker cleared why=%s", why ? why : "?");
+}
+
 void NoteSoftSuccess() {
     gFailStreak.store(0, std::memory_order_release);
     gFailStreakFirstMs.store(0, std::memory_order_release);
@@ -3884,6 +3893,8 @@ DWORD WINAPI Worker(LPVOID) {
 }
 
 }  // namespace
+
+void ClearBreaker(const char* why) { ClearBreakerLocked(why); }
 
 void Init() {
     if (IsArmed()) {

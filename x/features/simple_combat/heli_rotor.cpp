@@ -4,6 +4,7 @@
 #endif
 #include "heli_rotor.h"
 
+#include "simple_combat.h"
 #include "../invuln/invuln.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../ports/map_bounds_port.h"
@@ -628,16 +629,22 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // BIN 681ebe：soft_land_quiet 已回图；若仍悬空则放行抗重力（落台 Station/Cruise），地上仍禁。
     // BIN 2026-08-12 主城：soft close_session_inmap 空转 hold；F6 fh-ban 又把 curFh 清 0 →
     // InMapRecoverConfirmed 永不可达 → soft_hold 永久挡旋翼 → vy=-670 自由落体。
-    // F6 是抢占手动驾驶：soft_hold / soft_land_quiet 不得停其抗重力（Combat/Travel 仍禁）。
+    // F6 是抢占手动驾驶：soft_hold / soft_land_quiet 不得停其抗重力。
+    // C2799 22:11：PlayReady 后 SoftOrNetQuiet 已放行（hold+ready=false），但 IsHoldActive
+    // 仍真 → Combat 旋翼被挡；同时 lie_safe_land 的 CombatImpact BAN detach 把台摘了
+    // → cmd=0 vy=-670 卸台。安全落台空中必须抗重力；仍禁止出刀（TickImpl 硬闸/hold 另挡）。
     if (x::features::soft_login_probe::IsGameplayQuiet() && o != Owner::Fly) {
         const bool softHold = x::features::soft_login_probe::IsHoldActive();
-        if (softHold || st.onFh) {
+        const bool safeLandAir =
+            !st.onFh && o == Owner::Combat &&
+            x::features::simple_combat::IsSafeLandActive();
+        if (!safeLandAir && (softHold || st.onFh)) {
             tm.guard = softHold ? "soft_hold" : "soft_land_quiet";
             gLastTickFired = false;
             if (out) *out = tm;
             return false;
         }
-        // soft_land_quiet + !onFh：落下继续算冲量。
+        // soft_land_quiet / 安全落台 + !onFh：落下继续算冲量。
     }
     {
         const int nm = kick_sniff::LastSessionState();

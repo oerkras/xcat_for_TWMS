@@ -42,6 +42,7 @@
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/rest_mp_accel/rest_mp_accel.h"
+#include "../features/ports/security_attack_port.h"
 #include "../features/infinite_stars/infinite_stars.h"
 #include "../features/ga_text_probe/ga_text_probe.h"
 #include "../features/galaxy_token_probe/galaxy_token_probe.h"
@@ -153,6 +154,7 @@ void StopAllFeatureWorkers() {
     x::features::drop_alert_bypass::StopWorker();
     x::features::auction_town_bypass::StopWorker();
     x::features::rest_mp_accel::StopWorker();
+    x::features::ports::security_attack::StopWorker();
     x::features::auto_lie::StopWorker();
     xcat::sound::CancelPlayback();
     x::features::fly::StopWorker();
@@ -465,6 +467,8 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::Init());
     XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::ports::security_attack::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::ports::security_attack::StartWorker());
     if (xcat::kInfiniteStarsUserEnabled) {
         XCAT_PLAY_BOOT_STEP(x::features::infinite_stars::Init());
     }

@@ -484,6 +484,8 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::simple_combat::SetSmartInterval(c.simpleCombatSmartInterval != 0);
     x::features::simple_combat::SetClusterPriority(c.clusterWeight != 0);
     x::features::simple_combat::SetHitRotateN(c.simpleCombatHitRotateN);
+    x::features::simple_combat::SetSkipAccMissN(c.simpleCombatSkipAccMissN);
+    x::features::simple_combat::SetSkipAccMissEnabled(c.simpleCombatSkipAccMiss != 0);
     x::features::ports::map_attack::SetEnabled(c.mapAttack != 0);
     // 吸怪只认首页勾；站桩输出不代开。
     x::features::ports::mob_gather::SetEnabled(c.mobGather != 0);
@@ -504,6 +506,10 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::mob_gather::SetApplyCtrl(c.mobGatherApplyCtrl != 0);
     x::features::ports::mob_gather::SetSoftRelogin(c.mobGatherSoftRelogin != 0,
                                                   c.mobGatherSoftReloginSec);
+    x::features::ports::mob_gather::SetHangupUnbindF5(c.mobGatherHangupUnbindF5 != 0);
+    x::features::ports::mob_gather::SetHangupFires(c.mobGatherHangupFiresOn != 0,
+                                                   c.mobGatherHangupFires);
+    x::features::ports::mob_gather::SetHangupFiresUiUnlocked(c.gatherTabUnlocked != 0);
     x::features::ports::mob_gather::SetClearRelogin(c.mobGatherClearRelogin != 0);
     x::features::ports::mob_gather::SetSeekCluster(c.mobGatherSeekCluster != 0);
     x::features::ports::mob_gather::SetHomeReturn(c.mobGatherHomeReturn != 0);

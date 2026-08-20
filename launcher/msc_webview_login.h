@@ -70,7 +70,7 @@ void SaveAccountLine(const std::wstring& line);
 constexpr UINT kMsgFlushLogs = WM_APP + 1;
 constexpr UINT kMsgIdle = WM_APP + 2;
 constexpr UINT_PTR kHttpBusyTimerId = 45;
-constexpr UINT kHttpBusyTimeoutMs = 300000;  // HTTP / GamaPass 换票看门狗约 5 分钟
+constexpr UINT kHttpBusyTimeoutMs = 300000;  // 看门狗 5 分钟：只续期提示，不把还在跑的换票打成失败
 
 inline constexpr wchar_t kNeedWebVerifyTag[] = L"[提示][需网页验证]";
 inline constexpr wchar_t kHttpBusyTag[] = L"[状态][HTTP换票中]";

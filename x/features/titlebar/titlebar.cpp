@@ -8,6 +8,7 @@
 
 #include "../ports/mob_pool_port.h"
 #include "../ports/world_port.h"
+#include "../ports/mob_gather_port.h"
 #include "../channel_hop/channel_hop.h"
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
@@ -246,6 +247,15 @@ std::string BuildMobSegment() {
     return buffer;
 }
 
+std::string BuildFireSegment() {
+    unsigned count = 0, need = 0;
+    ports::mob_gather::QueryHangupFires(&count, &need);
+    if (need == 0) return {};
+    char buffer[40]{};
+    snprintf(buffer, sizeof(buffer), "    刀 %u/%u", count, need);
+    return buffer;
+}
+
 std::string BuildChannelSegment() {
     // Display = 列表 id + 1（sticky 优先）。未种上则省略。禁止把 0 画成频道。
     const int ch = x::features::channel_hop::DisplayChannel1Based();
@@ -281,10 +291,11 @@ std::string BuildTitle(DWORD now, const game::Vitals& vitals) {
     char title[768]{};
     const int written = snprintf(
         title, sizeof(title),
-        "Lv.%d %s    HP %d/%d    MP %d/%d    EXP %d/%d    背包金 %s%s%s%s",
+        "Lv.%d %s    HP %d/%d    MP %d/%d    EXP %d/%d    背包金 %s%s%s%s%s",
         vitals.level, who.c_str(), vitals.hp, vitals.mhp, vitals.mp, vitals.mmp, vitals.exp,
         vitals.maxExp, FormatCompactAbs(static_cast<double>(vitals.meso)).c_str(),
-        BuildChannelSegment().c_str(), BuildMobSegment().c_str(), rate.c_str());
+        BuildChannelSegment().c_str(), BuildMobSegment().c_str(), BuildFireSegment().c_str(),
+        rate.c_str());
     if (written < 0 || written >= static_cast<int>(sizeof(title))) {
         x::runtime::LogWThrottled(911, 30000, "Titlebar", "title overflow n=%d cap=%d", written,
                                   static_cast<int>(sizeof(title)));

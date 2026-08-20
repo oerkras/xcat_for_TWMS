@@ -470,11 +470,13 @@ bool IsJunkClickName(const std::wstring& name) {
 
 bool LooksLikeGalaxyReady(msc::uia::Session& uia, IUIAutomationElement* root) {
     if (!root) return false;
-    // 优先完整 CTA；仅有文案「Gama Pass」时按钮可能尚未可点（BIN 02:54 首点空枪）
+    // 4E82：官方 Chrome Galaxy 按钮 Name 常是「Gama Pass」/「GAMA PASS」，
+    // 旧逻辑只认 "Sign in with Gama Pass" → 永远「等待按钮就绪」从不点。
     if (uia.NameContains(root, L"Sign in with Gama Pass", true)) return true;
-    if (uia.NameContains(root, L"Sign in with", true) &&
-        (uia.NameContains(root, L"Gama Pass", true) || uia.NameContains(root, L"GamaPass", true)))
+    if (uia.NameContains(root, L"Gama Pass", true) || uia.NameContains(root, L"GamaPass", true) ||
+        uia.NameContains(root, L"GAMA PASS", true) || uia.NameContains(root, L"GAMAPASS", true))
         return true;
+    if (uia.NameContains(root, L"Sign in with", true)) return true;
     return false;
 }
 
@@ -487,6 +489,7 @@ enum class UrlKind : int {
     ResultOrMain,    // result/mstc 或经典官网 Main
     OtherAuth,       // 其它 gamania/beanfun 过渡页
     NetError,        // Chrome 连不上 / 无法访问
+    BeanfunError,    // ErrorHandler / SPGA0001 閒置過久
 };
 
 const wchar_t* UrlKindName(UrlKind k) {
@@ -498,6 +501,7 @@ const wchar_t* UrlKindName(UrlKind k) {
         case UrlKind::ResultOrMain: return L"ResultOrMain";
         case UrlKind::OtherAuth: return L"OtherAuth";
         case UrlKind::NetError: return L"NetError";
+        case UrlKind::BeanfunError: return L"BeanfunError";
         default: return L"Unknown";
     }
 }
@@ -593,6 +597,11 @@ UrlKind ClassifyUrlHint(const std::wstring& hint) {
     auto has = [&](const wchar_t* p) { return u.find(p) != std::wstring::npos; };
 
     if (has(L"accounts.gamania") && (has(L"/error") || has(L"error?"))) return UrlKind::OauthError;
+    // C2799：login.beanfun.com/ErrorHandler?ErrorMessage=[SPGA0001]閒置過久
+    // 只认 ErrorHandler 路径或 SPGA0001，避免标题/查询串里的「閒置」误杀
+    if (has(L"/errorhandler") || has(L"errorhandler/index") || has(L"spga0001") ||
+        has(L"%e9%96%92%e7%bd%ae"))
+        return UrlKind::BeanfunError;
     if (has(L"select-account") || has(L"selectaccount")) return UrlKind::SelectAccount;
     // 禁用裸 nickname/gamename/gameaccount：标题/隐私文案易误伤 → 假 NickOrGame
     if (has(L"selectgameaccount") || has(L"gamapasslogin/select")) return UrlKind::NickOrGame;
@@ -610,7 +619,18 @@ UrlKind ClassifyUrlHint(const std::wstring& hint) {
     if (has(L"遊戲暱稱") || has(L"選擇遊戲暱稱") || has(L"游戏昵称")) return UrlKind::NickOrGame;
     if (has(L"accounts.gamania") || has(L"openid.beanfun") || has(L"login.beanfun"))
         return UrlKind::OtherAuth;
+    // C2735 Chrome++：点账号卡后地址栏读失败，ReadUrlHint 退回窗口标题
+    // 「遊戲橘子 - Google Chrome」。按 Unknown 会整树 LooksLike*，一轮堵 18–40s。
+    if (has(L"遊戲橘子")) return UrlKind::OtherAuth;
     return UrlKind::Unknown;
+}
+
+bool HintLooksLikeWindowTitleOnly(const std::wstring& hint) {
+    if (hint.empty()) return false;
+    const std::wstring u = ToLowerCopy(hint);
+    return u.find(L" - google chrome") != std::wstring::npos ||
+           u.find(L" - microsoft edge") != std::wstring::npos ||
+           u.find(L"遊戲橘子") != std::wstring::npos;
 }
 
 bool UrlStuckOnGalaxyResult(const std::wstring& url) {
@@ -703,8 +723,8 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     Log(log, std::wstring(kLogTag) +
                  L" 自动登录期间将强制保持浏览器登录窗最大化并在前台（最小化/窗口化/被挡都会自动拉回）。");
     Log(log, std::wstring(kLogTag) +
-                 L" 快轮询+兜底：clickPoll=40ms cooldown=150ms；GP/账号卡/昵称/繼續均可重试；"
-                 L"校验地址栏/标题阶段");
+                 L" 快轮询+兜底：clickPoll=40ms cooldown=150ms；GP/账号卡/昵称可重试；"
+                 L"繼續只点一次（防 SPGA0001）；校验地址栏/标题阶段");
 
     if (IsGamaPassDeviceLoginBusy()) {
         return Fail(HttpLoginError::BadInput,
@@ -810,13 +830,13 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     constexpr DWORD kAccSettleMs = 320;       // 地址栏到 select-account 后再等一拍才首点
     constexpr DWORD kAccStarveMs = 1200;      // 地址栏读数抖动时的兜底：见页 1.2s 必点
     constexpr DWORD kNickRetryMs = 3000;      // 点昵称后未到繼續/跳转 → 重选
-    constexpr DWORD kContinueRetryMs = 5000;  // BIN 03:14/03:23：首点后 2.5s 仍 Nick 多为跳转中，误重试
-    constexpr DWORD kContinueRetryMsAgain = 2800;  // 第 2 次及以后仍未离开再重点
     constexpr DWORD kContinueReadyMs = 400;   // 选昵称后等按钮启用再点（BIN：同秒點繼續空成功）
+    // C2735 第二轮：首点繼續后 5s 仍停 SelectGameAccount，旧逻辑连点 #2/#3/#4 mouse
+    // → beanfun ErrorHandler SPGA0001。与 CDP AwaitLeaveNick 一致：绝不再点繼續。
+    constexpr DWORD kContinueStuckMs = 15000;
     constexpr int kMaxGpRetry = 4;
     constexpr int kMaxAccRetry = 5;
     constexpr int kMaxNickRetry = 4;
-    constexpr int kMaxContinueRetry = 4;
 
     auto tryHarvest = [&]() -> HttpLoginResult {
         return GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgmHint, log, kLogTag);
@@ -830,7 +850,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         // 首点：UIA Invoke；重试：forceMouse 真鼠标兜底
         const bool forceMouse = retry;
         const wchar_t* exacts[] = {L"Sign in with Gama Pass", L"Gama Pass", L"GamaPass",
-                                   L"GAMA PASS"};
+                                   L"GAMA PASS", L"GAMAPASS", L"使用 Gama Pass 登入"};
         for (const wchar_t* n : exacts) {
             if (!uia.ClickLargestExactName(rootEl, n, forceMouse)) continue;
             // 首点再 Invoke 一次压偶发空枪（仍不动鼠标）
@@ -852,7 +872,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
             return true;
         }
         const wchar_t* fuzzy[] = {L"Sign in with Gama Pass", L"Gama Pass", L"GamaPass", L"GAMAPASS",
-                                  L"Gama pass", L"GAMA PASS"};
+                                  L"Gama pass", L"GAMA PASS", L"使用 Gama Pass"};
         for (const wchar_t* n : fuzzy) {
             if (!uia.ClickName(rootEl, n, true, forceMouse)) continue;
             if (!retry) {
@@ -872,6 +892,20 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                                 : L" 状态→WaitAcc（clicked-gp）"));
             return true;
         }
+        std::wstring hitName;
+        if (uia.ClickLargestContentCta(rootEl, hwnd, &hitName, /*forceMouse=*/true)) {
+            gpClicked = true;
+            lastClickAt = GetTickCount();
+            lastGpClickAt = lastClickAt;
+            if (retry) ++gpRetryCount;
+            stage = UiaStage::WaitAcc;
+            Log(log, std::wstring(kLogTag) + (retry ? L" click-gamapass|retry|content|" : L" click-gamapass|content|") +
+                         hitName + (retry ? (L"#" + std::to_wstring(gpRetryCount)) : L"") + L"|mouse");
+            Log(log, std::wstring(kLogTag) +
+                         (retry ? L" 状态→WaitAcc（retry-gp，选账号未出现）"
+                                : L" 状态→WaitAcc（clicked-gp）"));
+            return true;
+        }
         return false;
     };
 
@@ -880,7 +914,8 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     };
 
     while ((int)(GetTickCount() - t0) < timeoutMs) {
-        {
+        // 点选阶段不必每 40ms 扫一遍进程表；等票阶段才 harvest
+        if (stage == UiaStage::WaitTicket || continueClicked) {
             auto harvested = tryHarvest();
             if (harvested.ok && harvested.ticketFilled) {
                 SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
@@ -913,18 +948,50 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
 
         const DWORD now = GetTickCount();
         const bool canClick = ready && (now - lastClickAt) >= kClickCooldownMs;
+        UrlKind thisUrlKind = UrlKind::Unknown;
+        bool skipPostAccTitleDom = false;
 
         // 地址栏 / 标题阶段校验（与无障碍文案双保险）
         {
             const std::wstring urlHint = uia.ReadUrlHint(root, hwnd);
             const UrlKind urlKind = ClassifyUrlHint(urlHint);
+            thisUrlKind = urlKind;
+            // 只在点卡后的标题兜底（遊戲橘子 / Chrome 窗标题）跳过 OAuth DOM；
+            // 账密页 accounts.gamania/login 仍要扫，不能凭「 - Google Chrome」一律放行。
+            const bool postAccTitleOnly =
+                lastAccClickAt &&
+                (urlKind == UrlKind::Unknown || urlKind == UrlKind::OtherAuth ||
+                 HintLooksLikeWindowTitleOnly(urlHint));
+            skipPostAccTitleDom = postAccTitleOnly;
             if (urlKind == UrlKind::OauthError ||
-                LooksLikeAccountsOauthError(uia, root, hwnd)) {
+                ((urlKind == UrlKind::Unknown || urlKind == UrlKind::OtherAuth) &&
+                 !postAccTitleOnly &&
+                 LooksLikeAccountsOauthError(uia, root, hwnd))) {
                 Log(log, std::wstring(kLogTag) + L" 检测到 accounts/error（OAuth 失败），停止点选");
                 root->Release();
                 SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
                 return FailOauth("Gama Pass OAuth 失败（accounts/error）。"
                                  "请重新一键；在日常浏览器窗口内登录并勾选记住（不会清 Cookie）。");
+            }
+            if (urlKind == UrlKind::BeanfunError) {
+                Log(log, std::wstring(kLogTag) + L" 页面|BeanfunError|@" + UiaStageName(stage) +
+                             L"| " + (urlHint.empty() ? L"(无URL)" : urlHint.substr(0, 96)));
+                {
+                    auto harvested = tryHarvest();
+                    if (harvested.ok && harvested.ticketFilled) {
+                        Log(log, std::wstring(kLogTag) +
+                                     L" beanfun 闲置错误页，但已从经典版 cmdline 接管票");
+                        SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                        root->Release();
+                        return harvested;
+                    }
+                }
+                Log(log, std::wstring(kLogTag) +
+                             L" 检测到 beanfun ErrorHandler/SPGA0001 閒置過久，结束本轮并干净重开 Galaxy");
+                SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                root->Release();
+                return Fail(HttpLoginError::Protocol,
+                            "Gama Pass 选号失败（SPGA0001 閒置過久）。将重开 Galaxy 换新 OTT。");
             }
 
             // 网页连不上：F5 重试，不要死等 GP 按钮（BIN 12:26 点 GP 后卡 openid / 错误页）
@@ -932,10 +999,17 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
             constexpr DWORD kPageReloadGapMs = 3500;
             constexpr DWORD kOtherAuthStuckMs = 6000;
             constexpr int kMaxPageReload = 6;
-            const bool onGoodLoginUi = LooksLikeSelectAccountPage(uia, root) ||
-                                       LooksLikeNickPage(uia, root) ||
-                                       LooksLikeLoginForm(uia, root) ||
-                                       LooksLikeGalaxyReady(uia, root);
+            const bool urlGoodUi = urlKind == UrlKind::GalaxyLogin ||
+                                   urlKind == UrlKind::SelectAccount ||
+                                   urlKind == UrlKind::NickOrGame ||
+                                   urlKind == UrlKind::ResultOrMain;
+            // 点卡后标题兜底才跳过 LooksLike*（C2735 遊戲橘子 18–40s）。
+            // 点 GP 后的 accounts 账密页必须还能 LooksLikeLoginForm → ManualLogin。
+            const bool onGoodLoginUi =
+                urlGoodUi ||
+                (!postAccTitleOnly &&
+                 (LooksLikeSelectAccountPage(uia, root) || LooksLikeNickPage(uia, root) ||
+                  LooksLikeLoginForm(uia, root) || LooksLikeGalaxyReady(uia, root)));
             // WaitTicket 也要扫：BIN 13:27 地址栏仍是 result，页已是 SSL 错误页
             const bool scanDom = !onGoodLoginUi && (now - lastNetErrScan) >= 400;
             if (scanDom) lastNetErrScan = now;
@@ -958,7 +1032,9 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 netErrorSeenAt = 0;
             }
             bool hungTransit = false;
-            if (!netErr && !onGoodLoginUi &&
+            // 点 GP 后卡在无法识别的过渡页才 F5；账密页 onGoodLoginUi=true 不会进这里。
+            // 点卡后 lastAccClickAt 已置：遊戲橘子标题等昵称，禁止 6s F5。
+            if (!netErr && !onGoodLoginUi && lastGpClickAt && !lastAccClickAt &&
                 (stage == UiaStage::WaitGp || stage == UiaStage::WaitAcc) &&
                 (urlKind == UrlKind::OtherAuth || urlKind == UrlKind::Unknown)) {
                 if (!otherAuthStuckAt) otherAuthStuckAt = now;
@@ -1050,13 +1126,30 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         }
 
         // 硬门禁：选账号页优先于昵称页（禁止未离卡就进 WaitNick）
-        if (LooksLikeLoginForm(uia, root) && !LooksLikeSelectAccountPage(uia, root) &&
+        // URL 已能定阶段时不要扫整棵 DOM：C2799 每轮 LooksLike* 十多次 FindAll(True)
+        // 把「繼續」点选拖到 18s，beanfun 直接 SPGA0001。
+        const bool urlIsAcc = thisUrlKind == UrlKind::SelectAccount;
+        const bool urlIsNick = thisUrlKind == UrlKind::NickOrGame;
+        const bool urlIsResult = thisUrlKind == UrlKind::ResultOrMain;
+        const bool urlIsGalaxy = thisUrlKind == UrlKind::GalaxyLogin;
+        const bool skipDomKind = urlIsAcc || urlIsNick || urlIsResult || urlIsGalaxy ||
+                                 thisUrlKind == UrlKind::BeanfunError ||
+                                 thisUrlKind == UrlKind::OauthError ||
+                                 thisUrlKind == UrlKind::NetError ||
+                                 skipPostAccTitleDom;
+        // 点 GP 后地址栏常仍停 Galaxy，页已是选账号：只在这一窗允许 DOM 纠偏
+        // authorize/OtherAuth 上卡片可见但点了必废（BIN 06:15）；点卡后标题兜底也不扫卡
+        const bool mayDomAcc = !urlIsNick && !urlIsResult && !urlIsAcc &&
+                               thisUrlKind != UrlKind::OtherAuth &&
+                               !skipPostAccTitleDom &&
+                               (!urlIsGalaxy || lastGpClickAt != 0);
+        if (!skipDomKind && LooksLikeLoginForm(uia, root) && !LooksLikeSelectAccountPage(uia, root) &&
             !LooksLikeNickPage(uia, root)) {
             if (stage != UiaStage::ManualLogin && stage != UiaStage::WaitTicket) {
                 stage = UiaStage::ManualLogin;
                 Log(log, std::wstring(kLogTag) + L" 状态→ManualLogin");
             }
-        } else if (LooksLikeSelectAccountPage(uia, root) &&
+        } else if ((urlIsAcc || (mayDomAcc && LooksLikeSelectAccountPage(uia, root))) &&
                    (stage == UiaStage::WaitGp || stage == UiaStage::WaitAcc ||
                     stage == UiaStage::WaitNick || stage == UiaStage::ManualLogin)) {
             if (stage != UiaStage::WaitAcc) {
@@ -1069,7 +1162,9 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 accClicked = false;
                 Log(log, std::wstring(kLogTag) + L" 仍在选账号页，撤回 accClicked，重试点卡");
             }
-        } else if (LooksLikeNickPage(uia, root)) {
+        } else if (urlIsNick ||
+                   (!urlIsAcc && !urlIsResult && !urlIsGalaxy && !skipPostAccTitleDom &&
+                    LooksLikeNickPage(uia, root))) {
             if (!accClicked) {
                 accClicked = true;
                 gpClicked = true;
@@ -1104,36 +1199,41 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         }
 
         if (canClick && stage == UiaStage::WaitGp && !gpClicked) {
-            if (LooksLikeSelectAccountPage(uia, root)) {
+            // 地址栏已是 Galaxy 时不要死等 LooksLikeGalaxyReady：4E82 官方 Chrome
+            // 按钮进树但 Name 不是 "Sign in with Gama Pass"，空等 40s+ 从不点。
+            if (!urlIsGalaxy && LooksLikeSelectAccountPage(uia, root)) {
                 gpClicked = true;
                 lastGpClickAt = now;
                 stage = UiaStage::WaitAcc;
                 Log(log, std::wstring(kLogTag) + L" 已在选账号页，跳过 GP 点击 →WaitAcc");
-            } else if (!LooksLikeGalaxyReady(uia, root)) {
-                // 页面 URL 到了但按钮未进树：空点会「成功」却不跳转，再空等重试（BIN 02:17）
-                if (now - lastStageLog > 1500) {
-                    lastStageLog = now;
-                    Log(log, std::wstring(kLogTag) + L" 等待 Gama Pass 按钮就绪…");
+            } else if (urlIsGalaxy || LooksLikeGalaxyReady(uia, root)) {
+                if (!clickGamaPassButton(root, /*retry=*/false)) {
+                    if (now - lastStageLog > 2500) {
+                        lastStageLog = now;
+                        Log(log, std::wstring(kLogTag) + L" 等待 Gama Pass 按钮就绪… " +
+                                     uia.DumpVisibleCtas(root, hwnd));
+                    }
                 }
-            } else if (!clickGamaPassButton(root, /*retry=*/false)) {
-                if (now - lastStageLog > 2000) {
-                    lastStageLog = now;
-                    Log(log, std::wstring(kLogTag) + L" 等待 Gama Pass 按钮… @" +
-                                 UiaStageName(stage));
-                }
+            } else if (now - lastStageLog > 1500) {
+                lastStageLog = now;
+                Log(log, std::wstring(kLogTag) + L" 等待 Gama Pass 按钮就绪…");
             }
         } else if (canClick && stage == UiaStage::WaitAcc && !accClicked) {
-            const bool onSelect = LooksLikeSelectAccountPage(uia, root);
-            const bool onNick = LooksLikeNickPage(uia, root);
+            const bool onSelect = urlIsAcc || (mayDomAcc && LooksLikeSelectAccountPage(uia, root));
+            const bool onNick =
+                urlIsNick ||
+                (!urlIsAcc && !urlIsResult && !urlIsGalaxy && !skipPostAccTitleDom &&
+                 LooksLikeNickPage(uia, root));
             const DWORD sinceGp = lastGpClickAt ? (now - lastGpClickAt) : (now - lastClickAt);
-            const UrlKind urlNow = ClassifyUrlHint(uia.ReadUrlHint(root, hwnd));
+            const UrlKind urlNow = thisUrlKind;
             const bool urlStillGalaxy = (urlNow == UrlKind::GalaxyLogin);
             // URL 仍 Galaxy 时尽快重试；其它过渡页稍宽
             const DWORD gpRetryNeed = urlStillGalaxy ? kGpRetryMs : kGpRetryTransitMs;
 
             // BIN：最小化打断 / 首点无效后仍停 Galaxy → 尽快重试 GP
             // 已离开 Galaxy（openid / 错误页）不要再盲点 GP；连不上走上方 F5
-            if (!onSelect && !onNick && sinceGp >= gpRetryNeed) {
+            // 点账号卡后等昵称：标题常是「遊戲橘子」，不要当 GP 失败再点
+            if (!onSelect && !onNick && !lastAccClickAt && sinceGp >= gpRetryNeed) {
                 const bool stillOnGalaxy =
                     urlStillGalaxy || LooksLikeGalaxyReady(uia, root) ||
                     uia.NameContains(root, L"Sign in with", true);
@@ -1251,19 +1351,6 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
             stage = continueClicked ? UiaStage::WaitTicket : UiaStage::WaitContinue;
             Log(log, std::wstring(kLogTag) + L" WaitNick 已选昵称，纠偏→" + UiaStageName(stage));
         } else if (canClick && stage == UiaStage::WaitContinue) {
-            // 點繼續后仍停昵称页 → 撤回再点（首点宽限更长，避免跳转中误重试）
-            const DWORD contNeed = (continueRetryCount <= 1) ? kContinueRetryMs : kContinueRetryMsAgain;
-            if (continueClicked && LooksLikeNickPage(uia, root) && lastContinueClickAt &&
-                (now - lastContinueClickAt) >= contNeed &&
-                continueRetryCount < kMaxContinueRetry) {
-                Log(log, std::wstring(kLogTag) + L" 繼續后未跳转，重试繼續 #" +
-                             std::to_wstring(continueRetryCount + 1) + L"（已等" +
-                             std::to_wstring(now - lastContinueClickAt) + L"ms）");
-                continueClicked = false;
-                stage = UiaStage::WaitContinue;
-                // 勿刷新 lastNickClickAt：否则又卡 kContinueReadyMs，且易打断进行中提交
-            }
-
             if (!continueClicked) {
                 // 选昵称后短暂等待「繼續」启用；过早点会假成功（BIN 01:43/02:05）
                 if (lastNickClickAt && (now - lastNickClickAt) < kContinueReadyMs) {
@@ -1272,18 +1359,10 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                     continue;
                 }
 
-                // 仅多次失败后再勾昵称；每次重试都重选可能打断首点已提交的跳转（BIN 03:23）
-                if (continueRetryCount >= 2 && LooksLikeNickPage(uia, root)) {
-                    const int idx = (std::max)(0, nickSlot - 1);
-                    std::wstring ignore;
-                    (void)uia.ClickTypeIndex(root, UIA_RadioButtonControlTypeId, idx, &ignore);
-                    Sleep(150);
-                }
-
                 // 点前再置前
                 msc::uia::BringToForeground(hwnd);
 
-                const bool forceMouse = continueRetryCount > 0;
+                const bool forceMouse = false;
                 auto clickContinueBtn = [&]() -> bool {
                     if (uia.ClickLargestExactName(root, L"繼續", forceMouse)) return true;
                     if (uia.ClickLargestExactName(root, L"Continue", forceMouse)) return true;
@@ -1322,24 +1401,32 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 }
             }
         } else if (stage == UiaStage::WaitTicket) {
-            // WaitTicket 但 URL/文案仍像昵称页 → 拉回重试繼續（不要重选昵称）
-            const DWORD contNeed = (continueRetryCount <= 1) ? kContinueRetryMs : kContinueRetryMsAgain;
-            if ((LooksLikeNickPage(uia, root) ||
-                 ClassifyUrlHint(uia.ReadUrlHint(root, hwnd)) == UrlKind::NickOrGame) &&
-                continueClicked && lastContinueClickAt &&
-                (now - lastContinueClickAt) >= contNeed &&
-                continueRetryCount < kMaxContinueRetry) {
-                Log(log, std::wstring(kLogTag) + L" WaitTicket 仍在昵称页，撤回繼續重试（已等" +
+            // C2735：首点繼續后仍停 SelectGameAccount 时绝不再点（CDP 同口径，防 SPGA0001）
+            const bool stillOnNick =
+                thisUrlKind == UrlKind::NickOrGame ||
+                (thisUrlKind != UrlKind::ResultOrMain &&
+                 thisUrlKind != UrlKind::BeanfunError &&
+                 thisUrlKind != UrlKind::SelectAccount &&
+                 thisUrlKind != UrlKind::OtherAuth && thisUrlKind != UrlKind::Unknown &&
+                 LooksLikeNickPage(uia, root));
+            if (continueClicked && lastContinueClickAt && stillOnNick &&
+                (now - lastContinueClickAt) >= kContinueStuckMs) {
+                Log(log, std::wstring(kLogTag) +
+                             L" 點繼續后仍停昵称页，结束本轮并干净重开 Galaxy（不再连点繼續，防 SPGA0001；已等" +
                              std::to_wstring(now - lastContinueClickAt) + L"ms）");
-                continueClicked = false;
-                stage = UiaStage::WaitContinue;
-            } else {
+                SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                root->Release();
+                return Fail(HttpLoginError::Protocol,
+                            "點繼續后仍停昵称页。将重开 Galaxy 换新 OTT（不再连点繼續）。");
+            }
+            if (continueClicked) {
                 // 官网 JS 兑票失败时不拉 NGM。实机：卡在 result 时 F5 会重跑页内 POST 回跳。
                 // 顺序：宽限 → F5（最多 10 次）→ 仍卡则干净重开 Galaxy。不走地址栏、不走空罐 HTTP。
                 // BIN：成功回跳 1–2s；result 脚本 fetch 后再 setTimeout 700ms。3s 够等完，10s 空等过久。
                 constexpr DWORD kOfficialLaunchGraceMs = 3000;
                 constexpr DWORD kResultReloadGapMs = 4000;
-                constexpr int kMaxResultReload = 10;
+                // C2799：UIA 一轮约 10–15s，10 次 F5 会撞上 Once 4min / UI 5min 看门狗
+                constexpr int kMaxResultReload = 4;
                 const std::wstring ottSrc =
                     lastUrlHint.empty() ? uia.ReadUrlHint(root, hwnd) : lastUrlHint;
                 const std::wstring ottOnUrl = ExtractOttToken(ottSrc);

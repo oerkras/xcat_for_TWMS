@@ -4182,11 +4182,9 @@ int BoostDropFall(bool snapLand, bool accelFall, const SkipIds* skipIds, int* ou
         const int info = ReadI32(drop, kOffDropInfo);
 
         if (skipHit) {
+            // 禁止跟位置。A124：info=2060000 已匹配并盖 EndPara=4，再写 Pt1=PickPt
+            // 会让 Drop.Update 把态写回 Ready(3)+可捡，下一拍再 3→4，瞬落空档被原生宠舔走。
             if (StampOneSkipDrop(drop)) ++skipHoldN;
-            if (snapLand && havePickPt) {
-                WriteI32(drop, kOffDropPt1, px);
-                WriteI32(drop, kOffDropPt1 + 4, py);
-            }
             continue;
         }
 

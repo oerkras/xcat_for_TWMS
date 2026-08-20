@@ -293,6 +293,8 @@ int gPickedChannelId = -1;
 std::atomic<bool> gSoftFastTrack{false};
 // 上次成功进图的列表 id（SelectChannel 参数，非 UI ch.N）；跨 soft Restart 保留。
 int gStickyChannelId = -1;
+// NoteSticky 前一次 id。PickSticky 未命中时从随机池排除，避免遇人软重连又抽回原频。
+int gStickyPrevId = -1;
 DWORD gLastLogMs = 0;
 DWORD gWorldClickedAt = 0;
 DWORD gChannelSelectedAt = 0;
@@ -1337,7 +1339,27 @@ int PickOpenChannelId(void* worldItem) {
             }
         }
         const uint32_t seedMiss = ChannelPickSeed(candN);
-        const int pickMiss = static_cast<int>(seedMiss % static_cast<uint32_t>(candN));
+        int pickMiss = static_cast<int>(seedMiss % static_cast<uint32_t>(candN));
+        const int avoid = gStickyPrevId;
+        if (avoid >= 1 && avoid != sticky && candN > 1) {
+            int filtered[64];
+            int filteredUsers[64];
+            int nF = 0;
+            for (int i = 0; i < candN && nF < 64; ++i) {
+                if (candId[i] == avoid) continue;
+                filtered[nF] = candId[i];
+                filteredUsers[nF] = candUsers[i];
+                ++nF;
+            }
+            if (nF > 0) {
+                pickMiss = static_cast<int>(seedMiss % static_cast<uint32_t>(nF));
+                Log("PickSticky miss id=%d avoidPrev=%d → random open id=%d users=%d pool=%d/%d "
+                    "(softFast full/adult/absent seed=0x%08X)",
+                    sticky, avoid, filtered[pickMiss], filteredUsers[pickMiss], pickMiss + 1, nF,
+                    seedMiss);
+                return filtered[pickMiss];
+            }
+        }
         Log("PickSticky miss id=%d → random open id=%d users=%d pool=%d/%d "
             "(softFast full/adult/absent seed=0x%08X)",
             sticky, candId[pickMiss], candUsers[pickMiss], pickMiss + 1, candN, seedMiss);
@@ -1931,6 +1953,7 @@ bool IsDesired() { return gDesired.load(); }
 void NoteStickyChannel(int channelId1Based, const char* why) {
     if (channelId1Based < 1 || channelId1Based > 64) return;
     if (gStickyChannelId == channelId1Based) return;
+    if (gStickyChannelId >= 1 && gStickyChannelId <= 64) gStickyPrevId = gStickyChannelId;
     Log("stickyCh %d→%d (%s)", gStickyChannelId, channelId1Based, why ? why : "?");
     gStickyChannelId = channelId1Based;
 }

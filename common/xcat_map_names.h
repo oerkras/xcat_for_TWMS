@@ -33,6 +33,12 @@ std::string MapNamesLabelById(const MapNamesPack& pack, int mapId);
 // 返回 9 位 key；失败空。
 std::string MapNamesResolveQuery(const MapNamesPack& pack, const std::string& raw);
 
+// 只认图号 / 短名精确 / 简介精确，**不做子串**。世界地图空 Spot 兜底用，防点到「冰」误撞。
+std::string MapNamesResolveExact(const MapNamesPack& pack, const std::string& raw);
+
+// labelById 是否有这条图号（排除「圖{id}」占位）。
+bool MapNamesHasId(const MapNamesPack& pack, int mapId);
+
 // UTF-8 安全截断写入（保证 dst 以 '\\0' 结尾且不切断多字节字符）。
 void CopyUtf8Truncate(char* dst, size_t dstCap, const char* src);
 

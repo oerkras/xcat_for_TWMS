@@ -5,6 +5,7 @@
 //   - UIWorldMapItem 无原生 OnDoubleClick；OnPointerDown 用 clickCount / 系统双击间隔自检。
 //   - UpdateView 缓存 Spot 的 MapNo[0] + 地图名，双击时优先用图号 goto。
 //   - 确认：UIUtilDialog.YesNo + 原生 System.Action（对照枫星 TextConfirm）。
+//   - Yes / 直通 goto 前先调 UIWorldMap.Close（基类对话框），避免全屏图吞掉首跳 ↑。
 //   - 瞬移石开的是 UIMapTransferDialog，不是 UIWorldMap → 无需石头/非石头门控。
 // 防漂移：Spot/MapListData/clickCount 字段走 hash + field_get_offset；dump 常量仅 fallback。
 // OnPointerDown 是 override：热路径 = ExecuteEvents 委托 method_ptr → 接口 VirtualInvokeData。
@@ -23,6 +24,7 @@
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/log.h"
 #include "../../runtime/anchor_lamps.h"
+#include "../../runtime/main_thread_pump.h"
 
 #include "../../../common/xcat_map_names.h"
 
@@ -48,6 +50,45 @@ constexpr char kItemClass[] =
     "b422f0c753fe4351f16aeb848282e3c0d73c58fa78ca85063ac02854f863b5b";
 constexpr uint32_t kRvaUpdateView = 0x7F3CF0;  // remounted 2026-08-06
 constexpr uint32_t kRvaOnPointerDown = 0x7F65D0;  // remounted 2026-08-06
+// 世界地图标题点（TypeDef 636）：有 Title/坐标，无 UIWorldMapItem.UpdateView。
+constexpr char kLabelClass[] =
+    "efa05c19a1b710d12d65f45c272376bdb8f7dc584aff3124e1ac941be98619c";
+constexpr uint32_t kRvaLabelBind = 0x7F4990;
+constexpr uint32_t kRvaLabelClick = 0x7F6800;
+constexpr char kHashLabelBind[] =
+    "cc6094fbed75b773566992f447d644002f18d92669eb2764b914191f91d3c71";
+// UIWorldMap / WorldMap：空 Spot 兜底只读列表，装不上不得卸主功能。
+constexpr char kUiWorldMapClass[] =
+    "e5e380b13d8772b1e582c1ecd31fa318032a59a6c524d4b80c092e6d7ced261";
+constexpr char kWorldMapDataClass[] =
+    "da60ab9a0a410d80c67b8ca759b21c567e9603c1992e89ff79960602221d963";
+constexpr char kLabelDataClass[] =
+    "da60ab9a0a410d80c67b8ca759b21c567e9603c1992e89ff79960602221d963."
+    "b67d2450f599c259d7d0ea81b51c3a5db7663547e096efc4dbb3d39cf4a278e";
+constexpr char kLabelDataClassSlash[] =
+    "da60ab9a0a410d80c67b8ca759b21c567e9603c1992e89ff79960602221d963/"
+    "b67d2450f599c259d7d0ea81b51c3a5db7663547e096efc4dbb3d39cf4a278e";
+constexpr char kHashWmItems[] =
+    "a08c5b3c0cf1666e236c1cf709ea33c0bcf674e495a719e4be32ad04068a12d";
+constexpr char kHashWmLabels[] =
+    "d00fda63c17b244e6bd73e0aecdd001e599142856d979f835e64174e0b5bde2";
+constexpr char kHashWmWorldMap[] =
+    "e73abc6b391ee43ec7b8cbcabb80c0ee3d6e4a16945c560af1629cb218fe402";
+constexpr char kHashLabelDataList[] =
+    "a47a9569af4d7879f6a947a73f026ef02d3eda8399d92cad5c340813d6b0d90";
+constexpr char kHashLabelTitle[] =
+    "a1b36306ac3bdcd636bb6b645a0759d4e5d0e64ba255718b2c9319653c6c6f1";
+constexpr char kHashLabelIdx[] =
+    "c2e1e4649fc96a5e6bbea80e07a8a6ed03f9f969b83d662e3ff70da39f45629";
+constexpr char kHashLabelIdxU[] =
+    "f0c285504f349457ce25ac14170d2804c70211ddd6ff9e3f148d5bf10564e57";
+constexpr size_t kFbWmItems = 0xE0;
+constexpr size_t kFbWmLabels = 0xE8;
+constexpr size_t kFbWmWorldMap = 0x110;
+constexpr size_t kFbLabelDataList = 0x30;
+constexpr size_t kFbLabelTitle = 0x18;
+constexpr size_t kFbLabelIdx = 0x20;
+constexpr size_t kFbLabelIdxU = 0x38;
 // ExecuteEvents.Execute(IPointerDownHandler, BaseEventData) — script.json Address
 constexpr uint32_t kRvaExecutePointerDown = 0x52C2CC0;  // remounted 2026-08-06
 constexpr size_t kFbSPointerDownHandler = 0x18;         // ExecuteEvents static field
@@ -72,6 +113,7 @@ constexpr size_t kFbStreetName = 0x80;
 constexpr size_t kFbCachedMapId = 0x88;
 constexpr size_t kFbMapNoList = 0x20;   // List<int> MapNo
 constexpr size_t kFbMapTitle = 0x28;    // string Title
+constexpr size_t kFbMapListDesc = 0x30; // string Desc（MapListData）
 constexpr size_t kFbListItems = 0x10;   // List._items（BCL，通常不漂）
 constexpr size_t kFbListSize = 0x18;    // List._size
 constexpr size_t kFbArrayFirst = 0x20;  // Il2CppArray first element
@@ -100,6 +142,8 @@ constexpr char kHashMapNoList[] =
     "<d56d72fd94c0b1f0480a8bf90f25b0c281e9337aabdde97f8a041caaa14f55d>k__BackingField";
 constexpr char kHashMapTitle[] =
     "<d2306738430826ac82e9ebebb026a7763b580c002ff3096a9957290533b5e00>k__BackingField";
+constexpr char kHashMapListDesc[] =
+    "<ca7f48cdce749d391e2fc28bae48f7d5b1af0851c792b4a9bf70ecec8a7cd46>k__BackingField";
 constexpr char kHashClickCount[] = "<clickCount>k__BackingField";
 constexpr DWORD kDblClickMsMin = 400;
 constexpr DWORD kDblClickMsMax = 800;
@@ -121,16 +165,26 @@ using FnUpdateView = void (*)(void* self, void* street, void* mapName, void* map
                               void* outVec2, const void* method);
 using FnOnPointerDown = void (*)(void* self, void* eventData, const void* method);
 using FnExecutePointerDown = void (*)(void* handler, void* eventData, const void* method);
+using FnLabelBind = void (*)(void* self, void* data, void* action, const void* method);
+using FnLabelClick = void (*)(void* self, void* eventData, const void* method);
+using FnWmEnable = void (*)(void* self, const void* method);
+using FnWmClose = void (*)(void* self, const void* method);
 void Hook_OnPointerDown(void* self, void* eventData, const void* method);
 void Hook_ExecutePointerDown(void* handler, void* eventData, const void* method);
+void Hook_LabelBind(void* self, void* data, void* action, const void* method);
+void Hook_LabelClick(void* self, void* eventData, const void* method);
+void Hook_WmOnEnable(void* self, const void* method);
+void Hook_WmOnDisable(void* self, const void* method);
 
 struct SpotInfo {
     int mapId = 0;
     char label[160]{};  // 短名优先；也可能暂存简介供反查
+    void* mapListData = nullptr;
 };
 
 std::mutex gMu;
 std::unordered_map<void*, SpotInfo> gSpotByItem;
+std::unordered_map<void*, void*> gItemByGo;  // GameObject* → UIWorldMapItem / label widget
 std::unordered_map<void*, DWORD> gLastClickMs;
 
 std::atomic<bool> gInstalled{false};
@@ -138,15 +192,28 @@ std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gWorker{nullptr};
 
 void* gItemKlass = nullptr;
+void* gLabelKlass = nullptr;
+void* gUiWmKlass = nullptr;
 void* gUtilDlgKlass = nullptr;
 void* gActionKlass = nullptr;
+void* gWorldMapUi = nullptr;  // 当前打开的 UIWorldMap；OnEnable 记录
 MethodInfoHead* gMiUpdate = nullptr;
 MethodInfoHead* gMiDown = nullptr;
 MethodInfoHead* gMiYesNo = nullptr;
 MethodInfoHead* gMiNotice = nullptr;
+MethodInfoHead* gMiLabelBind = nullptr;
+MethodInfoHead* gMiLabelClick = nullptr;
+MethodInfoHead* gMiGetGameObject = nullptr;
+MethodInfoHead* gMiWmEnable = nullptr;
+MethodInfoHead* gMiWmDisable = nullptr;
+MethodInfoHead* gMiWmClose = nullptr;
 FnUpdateView gOrigUpdate = nullptr;
 FnOnPointerDown gOrigDown = nullptr;
 FnExecutePointerDown gOrigExecuteDown = nullptr;
+FnLabelBind gOrigLabelBind = nullptr;
+FnLabelClick gOrigLabelClick = nullptr;
+FnWmEnable gOrigWmEnable = nullptr;
+FnWmEnable gOrigWmDisable = nullptr;
 DWORD gLastInstallTry = 0;
 
 // 数据面钩：vtable 槽 + ExecuteEvents 委托；禁止 abs/.text。
@@ -164,6 +231,12 @@ void* gDelegateMpSaved = nullptr;
 void* gDelegateInvSaved = nullptr;
 char gDownPath[96]{};
 
+// 标题点 / UIWorldMap OnEnable：与 Spot Down 槽隔离，卸主功能时一并还原。
+constexpr int kAuxSlotCap = 8;
+void** gAuxSlots[kAuxSlotCap]{};
+void* gAuxOrigs[kAuxSlotCap]{};
+int gAuxSlotCount = 0;
+
 using FnFieldFromName = void* (*)(void* klass, const char* name);
 using FnFieldGetOffset = size_t (*)(void* field);
 FnFieldFromName gFieldFromName = nullptr;
@@ -176,7 +249,17 @@ bool gDelegateOffOk = false;
 
 void WritePtrField(void* obj, size_t off, void* v);
 bool ResolveDelegateOffsets();
+void CacheSpot(void* item, int mapId, const char* label, void* mapListData = nullptr);
+bool LookupSpot(void* item, SpotInfo* out);
 bool IsWorldMapSpotItem(void* obj);
+bool IsWorldMapLabelItem(void* obj);
+void* TryCompGameObject(void* comp);
+void EnsureWmFieldOffsets(void* uiKlass);
+void CloseWorldMapUi();
+MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
+                          const x::runtime::il2cpp_method::MethodShape& shape,
+                          const char* plain, const char* hash,
+                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr);
 
 struct SpotFieldOff {
     size_t mapDesc = kFbMapDesc;
@@ -185,6 +268,7 @@ struct SpotFieldOff {
     size_t cachedMapId = kFbCachedMapId;
     size_t mapNoList = kFbMapNoList;
     size_t mapTitle = kFbMapTitle;
+    size_t mapListDesc = kFbMapListDesc;
     size_t listItems = kFbListItems;
     size_t listSize = kFbListSize;
     size_t arrayFirst = kFbArrayFirst;
@@ -193,6 +277,19 @@ struct SpotFieldOff {
     const char* path = "fallback";  // meta | meta-partial | fallback
 };
 SpotFieldOff gSpotOff{};
+
+struct WmFieldOff {
+    size_t items = kFbWmItems;
+    size_t labels = kFbWmLabels;
+    size_t worldMap = kFbWmWorldMap;
+    size_t labelDataList = kFbLabelDataList;
+    size_t labelTitle = kFbLabelTitle;
+    size_t labelIdx = kFbLabelIdx;
+    size_t labelIdxU = kFbLabelIdxU;
+    bool tried = false;
+    const char* path = "fallback";
+};
+WmFieldOff gWmOff{};
 
 void* gYesAction = nullptr;
 void* gNoAction = nullptr;
@@ -317,11 +414,36 @@ void PickLabel(void* mapNameStr, void* mapListData, void* self, char* out, int o
     }
 }
 
-void CacheSpot(void* item, int mapId, const char* label) {
+void* TryCompGameObject(void* comp) {
+    if (!LooksLikeHeapPtr(comp)) return nullptr;
+    if (!gMiGetGameObject) {
+        void* ck = FindClass("UnityEngine", "Component");
+        if (!ck) return nullptr;
+        using x::runtime::il2cpp_method::MethodShape;
+        using x::runtime::il2cpp_method::TypeKind;
+        constexpr MethodShape kGo{0, TypeKind::Ptr, true, true};
+        gMiGetGameObject =
+            ResolveMi(ck, x::runtime::il2cpp::kRvaCompGetGo, kGo, "get_gameObject", nullptr);
+        if (!gMiGetGameObject) return nullptr;
+    }
+    auto fn = x::runtime::il2cpp::AtRva<x::runtime::il2cpp::FnCompGo>(x::runtime::il2cpp::kRvaCompGetGo);
+    if (!fn) return nullptr;
+    void* go = nullptr;
+    __try {
+        go = fn(comp, gMiGetGameObject);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        go = nullptr;
+    }
+    return LooksLikeHeapPtr(go) ? go : nullptr;
+}
+
+void CacheSpot(void* item, int mapId, const char* label, void* mapListData) {
     if (!item) return;
+    void* go = TryCompGameObject(item);
     std::lock_guard<std::mutex> lock(gMu);
     if (gSpotByItem.size() >= kSpotCacheMax && !gSpotByItem.count(item)) {
         gSpotByItem.clear();
+        gItemByGo.clear();
         gLastClickMs.clear();
     }
     SpotInfo& s = gSpotByItem[item];
@@ -329,6 +451,8 @@ void CacheSpot(void* item, int mapId, const char* label) {
     if (label && label[0]) {
         strncpy_s(s.label, label, _TRUNCATE);
     }
+    if (LooksLikeHeapPtr(mapListData)) s.mapListData = mapListData;
+    if (LooksLikeHeapPtr(go)) gItemByGo[go] = item;
 }
 
 bool LookupSpot(void* item, SpotInfo* out) {
@@ -337,7 +461,7 @@ bool LookupSpot(void* item, SpotInfo* out) {
     auto it = gSpotByItem.find(item);
     if (it == gSpotByItem.end()) return false;
     *out = it->second;
-    return out->mapId > 0 || out->label[0] != '\0';
+    return out->mapId > 0 || out->label[0] != '\0' || out->mapListData != nullptr;
 }
 
 MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
@@ -393,10 +517,30 @@ MethodInfoHead* FindMethodByName(void* klass, const char* name, int argc) {
     return nullptr;
 }
 
+MethodInfoHead* FindDeclaredMethod(void* klass, const char* name) {
+    if (!klass || !name) return nullptr;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.classGetMethods) return nullptr;
+    void* iter = nullptr;
+    __try {
+        for (;;) {
+            void* raw = e.classGetMethods(klass, &iter);
+            if (!raw) break;
+            const char* nm = e.methodGetName ? e.methodGetName(raw) : nullptr;
+            if (nm && strcmp(nm, name) == 0) {
+                auto* mi = reinterpret_cast<MethodInfoHead*>(raw);
+                if (mi && mi->methodPointer) return mi;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return nullptr;
+}
+
 MethodInfoHead* ResolveMi(void* klass, uint32_t rva,
                           const x::runtime::il2cpp_method::MethodShape& shape,
                           const char* plain, const char* hash,
-                          x::runtime::il2cpp_method::ResolvePath* outPath = nullptr) {
+                          x::runtime::il2cpp_method::ResolvePath* outPath) {
     if (outPath) *outPath = x::runtime::il2cpp_method::ResolvePath::Miss;
     if (!klass) return nullptr;
     const auto mr =
@@ -661,7 +805,7 @@ void Hook_UpdateView(void* self, void* street, void* mapName, void* mapDesc, voi
         if (!ReadIl2CppString(mapDesc, label, sizeof(label)))
             (void)ReadIl2CppString(ReadPtr(self, gSpotOff.mapDesc), label, sizeof(label));
     }
-    CacheSpot(self, spotMap, label);
+    CacheSpot(self, spotMap, label, mapListData);
 
     static DWORD s_lastUv = 0;
     static uint32_t s_uvN = 0;
@@ -674,7 +818,242 @@ void Hook_UpdateView(void* self, void* street, void* mapName, void* mapDesc, voi
     }
 }
 
-void FireGotoFromItem(void* self) {
+bool TryAcceptMapId(int id, int* mapId, char* key, size_t keySz, const char* via) {
+    if (id <= 0 || !mapId || !key) return false;
+    const auto& pack = xcat::GetSharedMapNames(x::runtime::GetBinDir());
+    if (!xcat::MapNamesHasId(pack, id)) return false;
+    *mapId = id;
+    snprintf(key, keySz, "%d", id);
+    x::runtime::LogI("WorldMapTravel", "empty-spot resolve via=%s mapId=%d", via ? via : "?", id);
+    return true;
+}
+
+bool TryAcceptExactName(const char* name, int* mapId, char* key, size_t keySz, char* nameBuf,
+                        size_t nameSz, const char* via) {
+    if (!name || !name[0] || !mapId || !key) return false;
+    const auto& pack = xcat::GetSharedMapNames(x::runtime::GetBinDir());
+    const std::string resolved = xcat::MapNamesResolveExact(pack, name);
+    if (resolved.empty()) return false;
+    int id = 0;
+    try {
+        id = std::stoi(resolved);
+    } catch (...) {
+        id = 0;
+    }
+    if (id <= 0) return false;
+    *mapId = id;
+    snprintf(key, keySz, "%d", id);
+    if (nameBuf && nameSz && !LooksLikeMapDesc(name)) strncpy_s(nameBuf, nameSz, name, _TRUNCATE);
+    x::runtime::LogI("WorldMapTravel", "empty-spot resolve via=%s name=%s mapId=%d",
+                     via ? via : "?", name, id);
+    return true;
+}
+
+void FillFromMapListData(void* mld, int* mapId, char* nameBuf, size_t nameSz) {
+    if (!LooksLikeHeapPtr(mld) || !mapId) return;
+    if (*mapId <= 0) {
+        const int id = FirstMapNo(mld);
+        if (id > 0) *mapId = id;
+    }
+    if (!nameBuf || !nameSz || nameBuf[0]) return;
+    char tmp[160]{};
+    if (ReadIl2CppString(ReadPtr(mld, gSpotOff.mapTitle), tmp, sizeof(tmp)) && tmp[0]) {
+        strncpy_s(nameBuf, nameSz, tmp, _TRUNCATE);
+        return;
+    }
+    (void)ReadIl2CppString(ReadPtr(mld, gSpotOff.mapListDesc), nameBuf, static_cast<int>(nameSz));
+}
+
+void CacheLabelData(void* widget, void* data) {
+    if (!LooksLikeHeapPtr(widget) || !LooksLikeHeapPtr(data)) return;
+    const int idA = ReadI32(data, 0x20);
+    const int idB = ReadI32(data, 0x38);
+    char title[160]{};
+    if (!ReadIl2CppString(ReadPtr(data, 0x18), title, sizeof(title))) title[0] = 0;
+    if (!title[0]) (void)ReadIl2CppString(ReadPtr(data, 0x28), title, sizeof(title));
+    if (!title[0]) (void)ReadIl2CppString(ReadPtr(data, gWmOff.labelTitle), title, sizeof(title));
+    if (!title[0]) (void)ReadIl2CppString(ReadPtr(data, 0x30), title, sizeof(title));
+    const auto& pack = xcat::GetSharedMapNames(x::runtime::GetBinDir());
+    int mapId = 0;
+    if (xcat::MapNamesHasId(pack, idA)) mapId = idA;
+    else if (xcat::MapNamesHasId(pack, idB)) mapId = idB;
+    CacheSpot(widget, mapId, title[0] ? title : nullptr, nullptr);
+}
+
+bool TryResolveFromCachedItem(void* item, int* mapId, char* key, size_t keySz, char* nameBuf,
+                              size_t nameSz, const char* via) {
+    if (!item) return false;
+    SpotInfo spot{};
+    if (!LookupSpot(item, &spot)) return false;
+    FillFromMapListData(spot.mapListData, &spot.mapId, spot.label, sizeof(spot.label));
+    if (spot.mapId > 0 && TryAcceptMapId(spot.mapId, mapId, key, keySz, via)) {
+        if (nameBuf && nameSz && spot.label[0] && !LooksLikeMapDesc(spot.label))
+            strncpy_s(nameBuf, nameSz, spot.label, _TRUNCATE);
+        return true;
+    }
+    if (spot.label[0] &&
+        TryAcceptExactName(spot.label, mapId, key, keySz, nameBuf, nameSz, via)) {
+        return true;
+    }
+    return false;
+}
+
+bool TryResolveFromEvent(void* eventData, int* mapId, char* key, size_t keySz, char* nameBuf,
+                         size_t nameSz) {
+    if (!LooksLikeHeapPtr(eventData)) return false;
+    void* gos[12]{};
+    int n = 0;
+    auto pushGo = [&](void* p) {
+        if (!LooksLikeHeapPtr(p) || n >= 12) return;
+        for (int i = 0; i < n; ++i)
+            if (gos[i] == p) return;
+        gos[n++] = p;
+    };
+    pushGo(ReadPtr(eventData, 0x20));  // pointerEnter
+    pushGo(ReadPtr(eventData, 0x28));  // pointerPress
+    pushGo(ReadPtr(eventData, 0x30));  // lastPress
+    pushGo(ReadPtr(eventData, 0x38));  // rawPointerPress
+    pushGo(ReadPtr(eventData, 0x48));  // pointerClick
+    pushGo(ReadPtr(eventData, 0x50));  // RaycastResult.m_GameObject
+    void* hovered = ReadPtr(eventData, 0x130);
+    if (LooksLikeHeapPtr(hovered)) {
+        const int hn = ReadI32(hovered, gSpotOff.listSize);
+        void* items = ReadPtr(hovered, gSpotOff.listItems);
+        if (LooksLikeHeapPtr(items) && hn > 0 && hn <= 32) {
+            for (int i = 0; i < hn && n < 12; ++i) {
+                pushGo(ReadPtr(items, gSpotOff.arrayFirst + static_cast<size_t>(i) * sizeof(void*)));
+            }
+        }
+    }
+
+    int foundId = 0;
+    char foundName[160]{};
+    int hits = 0;
+    for (int i = 0; i < n; ++i) {
+        void* widget = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(gMu);
+            auto it = gItemByGo.find(gos[i]);
+            if (it != gItemByGo.end()) widget = it->second;
+        }
+        if (!widget) continue;
+        int id = 0;
+        char kbuf[32]{};
+        char nbuf[160]{};
+        if (!TryResolveFromCachedItem(widget, &id, kbuf, sizeof(kbuf), nbuf, sizeof(nbuf),
+                                      "hovered")) {
+            continue;
+        }
+        if (hits == 0) {
+            foundId = id;
+            if (nbuf[0]) strncpy_s(foundName, nbuf, _TRUNCATE);
+        } else if (foundId != id) {
+            x::runtime::LogW("WorldMapTravel", "empty-spot hovered 多图号 %d vs %d，放弃兜底",
+                             foundId, id);
+            return false;
+        }
+        ++hits;
+    }
+    if (hits == 1) {
+        if (!TryAcceptMapId(foundId, mapId, key, keySz, "hovered-unique")) return false;
+        if (foundName[0] && nameBuf && nameSz)
+            strncpy_s(nameBuf, nameSz, foundName, _TRUNCATE);
+        return true;
+    }
+    return false;
+}
+
+void* ListAt(void* list, int i) {
+    if (!LooksLikeHeapPtr(list) || i < 0) return nullptr;
+    const int n = ReadI32(list, gSpotOff.listSize);
+    if (i >= n || n > 256) return nullptr;
+    void* items = ReadPtr(list, gSpotOff.listItems);
+    if (!LooksLikeHeapPtr(items)) return nullptr;
+    return ReadPtr(items, gSpotOff.arrayFirst + static_cast<size_t>(i) * sizeof(void*));
+}
+
+int ListCount(void* list) {
+    if (!LooksLikeHeapPtr(list)) return 0;
+    const int n = ReadI32(list, gSpotOff.listSize);
+    return (n > 0 && n <= 256) ? n : 0;
+}
+
+void CacheFromWorldMapUi(void* ui) {
+    if (!LooksLikeHeapPtr(ui)) return;
+    if (gUiWmKlass) EnsureWmFieldOffsets(gUiWmKlass);
+    void* labels = ReadPtr(ui, gWmOff.labels);
+    void* wm = ReadPtr(ui, gWmOff.worldMap);
+    void* dataList = LooksLikeHeapPtr(wm) ? ReadPtr(wm, gWmOff.labelDataList) : nullptr;
+    const int nLabel = ListCount(labels);
+    const int nData = ListCount(dataList);
+    const int n = nLabel < nData ? nLabel : nData;
+    int cached = 0;
+    for (int i = 0; i < n; ++i) {
+        void* widget = ListAt(labels, i);
+        void* data = ListAt(dataList, i);
+        if (!LooksLikeHeapPtr(widget) || !LooksLikeHeapPtr(data)) continue;
+        CacheLabelData(widget, data);
+        ++cached;
+    }
+    if (cached > 0) {
+        static DWORD s_last = 0;
+        const DWORD now = GetTickCount();
+        if (now - s_last >= 2000) {
+            s_last = now;
+            x::runtime::LogI("WorldMapTravel", "empty-spot 缓存标题点 n=%d ui=%p", cached, ui);
+        }
+    }
+}
+
+bool TryResolveFromWorldMap(void* self, int* mapId, char* key, size_t keySz, char* nameBuf,
+                            size_t nameSz) {
+    void* ui = gWorldMapUi;
+    if (!LooksLikeHeapPtr(ui) || !self) return false;
+    CacheFromWorldMapUi(ui);
+    const int fieldId = ReadI32(self, gSpotOff.cachedMapId);
+    if (fieldId <= 0) return false;
+    const auto& pack = xcat::GetSharedMapNames(x::runtime::GetBinDir());
+    if (xcat::MapNamesHasId(pack, fieldId)) return false;
+
+    void* wm = ReadPtr(ui, gWmOff.worldMap);
+    void* dataList = LooksLikeHeapPtr(wm) ? ReadPtr(wm, gWmOff.labelDataList) : nullptr;
+    const int n = ListCount(dataList);
+    int foundId = 0;
+    char foundName[160]{};
+    int hits = 0;
+    for (int i = 0; i < n; ++i) {
+        void* data = ListAt(dataList, i);
+        if (!LooksLikeHeapPtr(data)) continue;
+        const int idA = ReadI32(data, gWmOff.labelIdx);
+        const int idB = ReadI32(data, gWmOff.labelIdxU);
+        if (idA != fieldId && idB != fieldId) continue;
+        char title[160]{};
+        if (!ReadIl2CppString(ReadPtr(data, gWmOff.labelTitle), title, sizeof(title))) title[0] = 0;
+        if (!title[0]) (void)ReadIl2CppString(ReadPtr(data, 0x18), title, sizeof(title));
+        if (!title[0] || LooksLikeMapDesc(title)) continue;
+        int id = 0;
+        char kbuf[32]{};
+        char nbuf[160]{};
+        if (!TryAcceptExactName(title, &id, kbuf, sizeof(kbuf), nbuf, sizeof(nbuf), "wm-index")) {
+            continue;
+        }
+        if (hits == 0) {
+            foundId = id;
+            if (nbuf[0]) strncpy_s(foundName, nbuf, _TRUNCATE);
+        } else if (foundId != id) {
+            x::runtime::LogW("WorldMapTravel", "empty-spot wm-index 多图号 %d vs %d fieldId=%d，放弃",
+                             foundId, id, fieldId);
+            return false;
+        }
+        ++hits;
+    }
+    if (hits != 1) return false;
+    if (!TryAcceptMapId(foundId, mapId, key, keySz, "wm-index-unique")) return false;
+    if (foundName[0] && nameBuf && nameSz) strncpy_s(nameBuf, nameSz, foundName, _TRUNCATE);
+    return true;
+}
+
+void FireGotoFromItem(void* self, void* eventData = nullptr) {
     if (char_boot::IsBusy()) {
         (void)ShowTravelNotice("起号进行中");
         return;
@@ -683,27 +1062,37 @@ void FireGotoFromItem(void* self) {
     char nameBuf[160]{};
     char key[32]{};
     int mapId = 0;
+    void* mld = nullptr;
 
     if (LookupSpot(self, &spot)) {
         mapId = spot.mapId;
+        mld = spot.mapListData;
         if (spot.label[0]) strncpy_s(nameBuf, spot.label, _TRUNCATE);
     }
+    FillFromMapListData(mld, &mapId, nameBuf, sizeof(nameBuf));
     if (mapId <= 0) {
-        // 缓存未命中：再试字段侧无法可靠读图号时，靠 label→map_names
-        mapId = PickMapId(0, nullptr, self);
+        mapId = PickMapId(0, mld, self);
+    }
+    if (mapId <= 0) {
+        const int fieldId = ReadI32(self, gSpotOff.cachedMapId);
+        const auto& pack = xcat::GetSharedMapNames(x::runtime::GetBinDir());
+        if (xcat::MapNamesHasId(pack, fieldId)) mapId = fieldId;
     }
     if (!nameBuf[0] || LooksLikeMapDesc(nameBuf)) {
         char fresh[160]{};
-        PickLabel(nullptr, nullptr, self, fresh, sizeof(fresh));
+        PickLabel(nullptr, mld, self, fresh, sizeof(fresh));
         if (fresh[0]) {
             if (!LooksLikeMapDesc(fresh) || !nameBuf[0]) strncpy_s(nameBuf, fresh, _TRUNCATE);
         } else if (!nameBuf[0]) {
             (void)ReadIl2CppString(ReadPtr(self, gSpotOff.mapDesc), nameBuf, sizeof(nameBuf));
         }
     }
+    if (!nameBuf[0]) {
+        (void)ReadIl2CppString(ReadPtr(self, gSpotOff.streetName), nameBuf, sizeof(nameBuf));
+    }
     if (mapId > 0) snprintf(key, sizeof(key), "%d", mapId);
 
-    // 无图号时：用简介/名经 map_names 反查（禁止把简介原文直接 RequestGoto）
+    // 有图号的旧路径保持 MapNamesResolveQuery（短名子串仍给目录/正常 Spot）。
     if (!key[0] && nameBuf[0]) {
         const auto& pack = xcat::GetSharedMapNames(x::runtime::GetBinDir());
         const std::string resolved = xcat::MapNamesResolveQuery(pack, nameBuf);
@@ -721,10 +1110,25 @@ void FireGotoFromItem(void* self) {
         }
     }
 
+    // 仅失败路径：精确名 / 悬停栈里唯一已缓存点 / 世界地图标题表按下标。禁止子串、禁止多命中猜图。
     if (!key[0]) {
+        if (nameBuf[0]) {
+            (void)TryAcceptExactName(nameBuf, &mapId, key, sizeof(key), nameBuf, sizeof(nameBuf),
+                                     "self-exact");
+        }
+    }
+    if (!key[0]) {
+        (void)TryResolveFromWorldMap(self, &mapId, key, sizeof(key), nameBuf, sizeof(nameBuf));
+    }
+    if (!key[0]) {
+        (void)TryResolveFromEvent(eventData, &mapId, key, sizeof(key), nameBuf, sizeof(nameBuf));
+    }
+
+    if (!key[0]) {
+        const int fieldId = self ? ReadI32(self, gSpotOff.cachedMapId) : 0;
         x::runtime::LogW("WorldMapTravel",
-                         "双击 Spot 无法解析图号 mapId=%d label=%s，跳过", mapId,
-                         nameBuf[0] ? nameBuf : "-");
+                         "双击 Spot 无法解析图号 mapId=%d fieldId=%d label=%s mld=%p，跳过", mapId,
+                         fieldId, nameBuf[0] ? nameBuf : "-", mld);
         char tip[192]{};
         if (nameBuf[0])
             snprintf(tip, sizeof(tip), "【超级赶路】\n无法解析地图编号\n（%s）", nameBuf);
@@ -870,9 +1274,10 @@ void EnsureSpotFieldOffsets(void* itemKlass) {
     void* mldKlass = FindMapListDataKlass();
 
     int hits = 0;
-    const int want = 7;  // Spot×4 + MapList×2 + clickCount（BCL List 偏移不计入）
+    const int want = 8;  // Spot×4 + MapList×3 + clickCount（BCL List 偏移不计入）
     size_t oDesc = kFbMapDesc, oName = kFbMapName, oStreet = kFbStreetName, oId = kFbCachedMapId;
-    size_t oList = kFbMapNoList, oTitle = kFbMapTitle, oClick = kFbPointerClickCount;
+    size_t oList = kFbMapNoList, oTitle = kFbMapTitle, oListDesc = kFbMapListDesc;
+    size_t oClick = kFbPointerClickCount;
 
     if (FieldOffOrFb(itemKlass, kHashMapDesc, kFbMapDesc, &oDesc)) ++hits;
     if (FieldOffOrFb(itemKlass, kHashMapName, kFbMapName, &oName)) ++hits;
@@ -880,6 +1285,7 @@ void EnsureSpotFieldOffsets(void* itemKlass) {
     if (FieldOffOrFb(itemKlass, kHashCachedMapId, kFbCachedMapId, &oId)) ++hits;
     if (FieldOffOrFb(mldKlass, kHashMapNoList, kFbMapNoList, &oList)) ++hits;
     if (FieldOffOrFb(mldKlass, kHashMapTitle, kFbMapTitle, &oTitle)) ++hits;
+    if (FieldOffOrFb(mldKlass, kHashMapListDesc, kFbMapListDesc, &oListDesc)) ++hits;
     if (FieldOffOrFb(pedKlass, kHashClickCount, kFbPointerClickCount, &oClick)) ++hits;
 
     gSpotOff.mapDesc = oDesc;
@@ -888,6 +1294,7 @@ void EnsureSpotFieldOffsets(void* itemKlass) {
     gSpotOff.cachedMapId = oId;
     gSpotOff.mapNoList = oList;
     gSpotOff.mapTitle = oTitle;
+    gSpotOff.mapListDesc = oListDesc;
     gSpotOff.pointerClickCount = oClick;
     gSpotOff.listItems = x::runtime::il2cpp_container::OffListItems();
     gSpotOff.listSize = x::runtime::il2cpp_container::OffListSize();
@@ -897,9 +1304,47 @@ void EnsureSpotFieldOffsets(void* itemKlass) {
     x::runtime::LogI(
         "WorldMapTravel",
         "offsets path=%s hits=%d/%d desc=0x%zx name=0x%zx street=0x%zx id=0x%zx "
-        "mapNo=0x%zx title=0x%zx click=0x%zx",
+        "mapNo=0x%zx title=0x%zx listDesc=0x%zx click=0x%zx",
         gSpotOff.path, hits, want, gSpotOff.mapDesc, gSpotOff.mapName, gSpotOff.streetName,
-        gSpotOff.cachedMapId, gSpotOff.mapNoList, gSpotOff.mapTitle, gSpotOff.pointerClickCount);
+        gSpotOff.cachedMapId, gSpotOff.mapNoList, gSpotOff.mapTitle, gSpotOff.mapListDesc,
+        gSpotOff.pointerClickCount);
+}
+
+void* FindLabelDataKlass() {
+    void* k = FindClass("", kLabelDataClass);
+    if (!k) k = FindClass("", kLabelDataClassSlash);
+    return k;
+}
+
+void EnsureWmFieldOffsets(void* uiKlass) {
+    if (gWmOff.tried) return;
+    gWmOff.tried = true;
+    void* wmKlass = FindClass("", kWorldMapDataClass);
+    void* ldKlass = FindLabelDataKlass();
+    int hits = 0;
+    const int want = 7;
+    size_t oItems = kFbWmItems, oLabels = kFbWmLabels, oWm = kFbWmWorldMap;
+    size_t oLd = kFbLabelDataList, oTitle = kFbLabelTitle, oIdx = kFbLabelIdx, oIdxU = kFbLabelIdxU;
+    if (FieldOffOrFb(uiKlass, kHashWmItems, kFbWmItems, &oItems)) ++hits;
+    if (FieldOffOrFb(uiKlass, kHashWmLabels, kFbWmLabels, &oLabels)) ++hits;
+    if (FieldOffOrFb(uiKlass, kHashWmWorldMap, kFbWmWorldMap, &oWm)) ++hits;
+    if (FieldOffOrFb(wmKlass, kHashLabelDataList, kFbLabelDataList, &oLd)) ++hits;
+    if (FieldOffOrFb(ldKlass, kHashLabelTitle, kFbLabelTitle, &oTitle)) ++hits;
+    if (FieldOffOrFb(ldKlass, kHashLabelIdx, kFbLabelIdx, &oIdx)) ++hits;
+    if (FieldOffOrFb(ldKlass, kHashLabelIdxU, kFbLabelIdxU, &oIdxU)) ++hits;
+    gWmOff.items = oItems;
+    gWmOff.labels = oLabels;
+    gWmOff.worldMap = oWm;
+    gWmOff.labelDataList = oLd;
+    gWmOff.labelTitle = oTitle;
+    gWmOff.labelIdx = oIdx;
+    gWmOff.labelIdxU = oIdxU;
+    gWmOff.path = hits == want ? "meta" : (hits ? "meta-partial" : "fallback");
+    x::runtime::LogI("WorldMapTravel",
+                     "wm-off path=%s hits=%d/%d items=0x%zx labels=0x%zx wm=0x%zx "
+                     "ldList=0x%zx title=0x%zx idx=0x%zx idxU=0x%zx",
+                     gWmOff.path, hits, want, gWmOff.items, gWmOff.labels, gWmOff.worldMap,
+                     gWmOff.labelDataList, gWmOff.labelTitle, gWmOff.labelIdx, gWmOff.labelIdxU);
 }
 
 bool ResolveDelegateOffsets() {
@@ -929,6 +1374,75 @@ void WireActionTargets(void* action, void* nativeFn) {
     WritePtrField(action, gOffMethodCode, nativeFn);
 }
 
+bool EnsureWmCloseMi() {
+    if (gMiWmClose && gMiWmClose->methodPointer) return true;
+    if (!gUiWmKlass) gUiWmKlass = FindClass("", kUiWorldMapClass);
+    if (!gUiWmKlass) return false;
+    gMiWmClose = FindDeclaredMethod(gUiWmKlass, "Close");
+    if (!gMiWmClose) gMiWmClose = FindMethodByName(gUiWmKlass, "Close", 0);
+    if (!gMiWmClose) {
+        const auto& e = x::runtime::il2cpp::Get();
+        void* parent = nullptr;
+        if (e.classParent) {
+            __try {
+                parent = e.classParent(gUiWmKlass);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                parent = nullptr;
+            }
+        }
+        if (parent && parent != gUiWmKlass) gMiWmClose = FindMethodByName(parent, "Close", 0);
+    }
+    return gMiWmClose && gMiWmClose->methodPointer;
+}
+
+void CloseWorldMapUiNow() {
+    void* ui = gWorldMapUi;
+    if (!LooksLikeHeapPtr(ui)) {
+        x::runtime::LogI("WorldMapTravel", "确认赶路：世界地图指针空，跳过 Close");
+        return;
+    }
+    if (!EnsureWmCloseMi()) {
+        x::runtime::LogW("WorldMapTravel", "确认赶路：UIWorldMap.Close MethodInfo 未找到 ui=%p", ui);
+        return;
+    }
+    auto fn = reinterpret_cast<FnWmClose>(gMiWmClose->methodPointer);
+    bool seh = false;
+    __try {
+        fn(ui, gMiWmClose);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        seh = true;
+    }
+    if (seh) {
+        x::runtime::LogW("WorldMapTravel", "确认赶路：UIWorldMap.Close SEH ui=%p", ui);
+        return;
+    }
+    x::runtime::LogI("WorldMapTravel", "确认赶路：已 Close 世界地图 ui=%p", ui);
+}
+
+void CloseWorldMapJob(void*) {
+    CloseWorldMapUiNow();
+}
+
+void CloseWorldMapUi() {
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        CloseWorldMapUiNow();
+        return;
+    }
+    if (!x::runtime::main_thread::Ensure()) {
+        x::runtime::LogW("WorldMapTravel", "确认赶路：泵未就绪，跳过 Close 世界地图");
+        return;
+    }
+    if (!x::runtime::main_thread::InvokeAndWait(&CloseWorldMapJob, nullptr, 1500,
+                                                x::runtime::main_thread::JobPrio::High)) {
+        x::runtime::LogW("WorldMapTravel", "确认赶路：Close 世界地图投泵失败，仍继续 goto");
+    }
+}
+
+void StartGotoFromWorldMap(const char* target) {
+    CloseWorldMapUi();
+    travel::RequestGoto(target);
+}
+
 void __fastcall OnConfirmYes(void*, void*) {
     char target[96]{};
     char label[96]{};
@@ -944,9 +1458,9 @@ void __fastcall OnConfirmYes(void*, void*) {
         (void)ShowTravelNotice("起号进行中");
         return;
     }
-    x::runtime::LogI("WorldMapTravel", "确认赶路 → RequestGoto [%s]%s%s", target,
+    x::runtime::LogI("WorldMapTravel", "确认赶路 → Close世界地图 → RequestGoto [%s]%s%s", target,
                      label[0] ? " " : "", label[0] ? label : "");
-    travel::RequestGoto(target);
+    StartGotoFromWorldMap(target);
 }
 
 void __fastcall OnConfirmNo(void*, void*) {
@@ -1109,7 +1623,7 @@ bool ShowTravelConfirm(const char* target, const char* label, int hops) {
             (void)ShowTravelNotice("起号进行中");
             return false;
         }
-        travel::RequestGoto(target);
+        StartGotoFromWorldMap(target);
         return true;
     }
 
@@ -1161,7 +1675,7 @@ bool ShowTravelConfirm(const char* target, const char* label, int hops) {
             (void)ShowTravelNotice("起号进行中");
             return false;
         }
-        travel::RequestGoto(target);
+        StartGotoFromWorldMap(target);
         return false;
     }
     x::runtime::LogI("WorldMapTravel", "已弹出确认 [%s] hops=%d", target, hops);
@@ -1231,6 +1745,81 @@ bool IsWorldMapSpotItem(void* obj) {
     return false;
 }
 
+bool IsWorldMapLabelItem(void* obj) {
+    if (!obj || !gLabelKlass) return false;
+    const auto& e = x::runtime::il2cpp::Get();
+    if (!e.objectGetClass) return false;
+    void* k = nullptr;
+    __try {
+        k = e.objectGetClass(obj);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    for (int depth = 0; k && depth < 8; ++depth) {
+        if (k == gLabelKlass) return true;
+        if (!e.classParent) break;
+        void* p = nullptr;
+        __try {
+            p = e.classParent(k);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            p = nullptr;
+        }
+        k = p;
+    }
+    return false;
+}
+
+void Hook_LabelBind(void* self, void* data, void* action, const void* method) {
+    FnLabelBind orig = gOrigLabelBind;
+    if (orig) {
+        __try {
+            orig(self, data, action, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    CacheLabelData(self, data);
+}
+
+void Hook_LabelClick(void* self, void* eventData, const void* method) {
+    int clickCount = 0;
+    const bool dbl = NoteClickAndIsDouble(self, eventData, &clickCount);
+    FnLabelClick orig = gOrigLabelClick;
+    if (orig) {
+        __try {
+            orig(self, eventData, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (!dbl) return;
+    x::runtime::LogI("WorldMapTravel", "标题点双击 self=%p clickCount=%d", self, clickCount);
+    FireGotoFromItem(self, eventData);
+}
+
+void Hook_WmOnEnable(void* self, const void* method) {
+    FnWmEnable orig = gOrigWmEnable;
+    if (orig) {
+        __try {
+            orig(self, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (LooksLikeHeapPtr(self)) {
+        gWorldMapUi = self;
+        CacheFromWorldMapUi(self);
+    }
+}
+
+void Hook_WmOnDisable(void* self, const void* method) {
+    FnWmEnable orig = gOrigWmDisable;
+    if (orig) {
+        __try {
+            orig(self, method);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (self && self == gWorldMapUi) gWorldMapUi = nullptr;
+}
+
 void Hook_OnPointerDown(void* self, void* eventData, const void* method) {
     // 仅 vtable 单路径时在此处理；ExecuteEvents 路径已在 Hook_ExecutePointerDown 处理。
     int clickCount = 0;
@@ -1238,7 +1827,7 @@ void Hook_OnPointerDown(void* self, void* eventData, const void* method) {
     CallOrigDown(self, eventData, method);
     if (dbl) {
         x::runtime::LogI("WorldMapTravel", "Spot 双击判定 self=%p clickCount=%d", self, clickCount);
-        FireGotoFromItem(self);
+        FireGotoFromItem(self, eventData);
         return;
     }
     static DWORD s_lastProbe = 0;
@@ -1268,7 +1857,7 @@ void Hook_ExecutePointerDown(void* handler, void* eventData, const void* method)
     if (dbl) {
         x::runtime::LogI("WorldMapTravel", "Spot 双击判定(ee) self=%p clickCount=%d", handler,
                          clickCount);
-        FireGotoFromItem(handler);
+        FireGotoFromItem(handler, eventData);
         return;
     }
     static DWORD s_lastProbe = 0;
@@ -1420,6 +2009,144 @@ bool TryInstallItemVtableDown() {
     return true;
 }
 
+void RememberAuxSlot(void** slot, void* orig) {
+    if (!slot || !orig || gAuxSlotCount >= kAuxSlotCap) return;
+    gAuxSlots[gAuxSlotCount] = slot;
+    gAuxOrigs[gAuxSlotCount] = orig;
+    ++gAuxSlotCount;
+}
+
+void PatchDeclaredVtable(void* klass, MethodInfoHead* mi, void* nativeOrig, void* hook) {
+    if (!klass || !hook) return;
+    const char* path = "miss";
+    void** slots[kDownSlotCap]{};
+    size_t offs[kDownSlotCap]{};
+    const uint32_t rva = PtrRva(nativeOrig);
+    const int n =
+        FindDownVtableSlots(klass, mi, nativeOrig, rva, slots, offs, kDownSlotCap, &path);
+    (void)path;
+    for (int i = 0; i < n; ++i) {
+        void* orig = nullptr;
+        if (!PatchVtableMethodPtr(slots[i], hook, &orig)) continue;
+        RememberAuxSlot(slots[i], orig);
+    }
+}
+
+void ClearAuxHooks() {
+    void* labelClickHook = reinterpret_cast<void*>(&Hook_LabelClick);
+    void* enableHook = reinterpret_cast<void*>(&Hook_WmOnEnable);
+    void* disableHook = reinterpret_cast<void*>(&Hook_WmOnDisable);
+    void* bindHook = reinterpret_cast<void*>(&Hook_LabelBind);
+    for (int i = 0; i < gAuxSlotCount; ++i) {
+        if (!gAuxSlots[i] || !gAuxOrigs[i]) continue;
+        void* cur = nullptr;
+        __try {
+            cur = *gAuxSlots[i];
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            cur = nullptr;
+        }
+        if (cur == labelClickHook || cur == enableHook || cur == disableHook || cur == bindHook)
+            RestoreVtableMethodPtr(gAuxSlots[i], gAuxOrigs[i]);
+        gAuxSlots[i] = nullptr;
+        gAuxOrigs[i] = nullptr;
+    }
+    gAuxSlotCount = 0;
+
+    if (gMiLabelBind && gOrigLabelBind)
+        RestoreMethodInfo(gMiLabelBind, reinterpret_cast<void*>(gOrigLabelBind));
+    if (gMiLabelClick && gOrigLabelClick)
+        RestoreMethodInfo(gMiLabelClick, reinterpret_cast<void*>(gOrigLabelClick));
+    if (gMiWmEnable && gOrigWmEnable)
+        RestoreMethodInfo(gMiWmEnable, reinterpret_cast<void*>(gOrigWmEnable));
+    if (gMiWmDisable && gOrigWmDisable)
+        RestoreMethodInfo(gMiWmDisable, reinterpret_cast<void*>(gOrigWmDisable));
+    gMiLabelBind = nullptr;
+    gOrigLabelBind = nullptr;
+    gMiLabelClick = nullptr;
+    gOrigLabelClick = nullptr;
+    gMiWmEnable = nullptr;
+    gOrigWmEnable = nullptr;
+    gMiWmDisable = nullptr;
+    gOrigWmDisable = nullptr;
+    gMiWmClose = nullptr;
+    gWorldMapUi = nullptr;
+}
+
+bool TryInstallAuxHooks() {
+    int n = 0;
+    if (!gUiWmKlass) gUiWmKlass = FindClass("", kUiWorldMapClass);
+    if (gUiWmKlass) {
+        SafeRuntimeClassInit(gUiWmKlass);
+        EnsureWmFieldOffsets(gUiWmKlass);
+        gMiWmEnable = FindDeclaredMethod(gUiWmKlass, "OnEnable");
+        gMiWmDisable = FindDeclaredMethod(gUiWmKlass, "OnDisable");
+        void* origEn = nullptr;
+        if (gMiWmEnable &&
+            PatchMethodInfo(gMiWmEnable, reinterpret_cast<void*>(&Hook_WmOnEnable), &origEn)) {
+            gOrigWmEnable = reinterpret_cast<FnWmEnable>(origEn);
+            PatchDeclaredVtable(gUiWmKlass, gMiWmEnable, origEn,
+                                reinterpret_cast<void*>(&Hook_WmOnEnable));
+            ++n;
+        } else {
+            x::runtime::LogW("WorldMapTravel", "UIWorldMap.OnEnable 未装上（空 Spot 标题兜底可能失效）");
+        }
+        if (EnsureWmCloseMi()) {
+            x::runtime::LogI("WorldMapTravel", "UIWorldMap.Close 已解析 mi=%p mp=%p（确认赶路时调用，不换桩）",
+                             (void*)gMiWmClose, gMiWmClose->methodPointer);
+        } else {
+            x::runtime::LogW("WorldMapTravel",
+                             "UIWorldMap.Close 未找到（确认赶路时跳过关地图，仍会 RequestGoto）");
+        }
+        void* origDis = nullptr;
+        if (gMiWmDisable &&
+            PatchMethodInfo(gMiWmDisable, reinterpret_cast<void*>(&Hook_WmOnDisable), &origDis)) {
+            gOrigWmDisable = reinterpret_cast<FnWmEnable>(origDis);
+            PatchDeclaredVtable(gUiWmKlass, gMiWmDisable, origDis,
+                                reinterpret_cast<void*>(&Hook_WmOnDisable));
+            ++n;
+        }
+    } else {
+        x::runtime::LogW("WorldMapTravel", "UIWorldMap klass 未找到，跳过标题兜底钩");
+    }
+
+    if (!gLabelKlass) gLabelKlass = FindClass("", kLabelClass);
+    if (gLabelKlass) {
+        SafeRuntimeClassInit(gLabelKlass);
+        using x::runtime::il2cpp_method::MethodShape;
+        using x::runtime::il2cpp_method::TypeKind;
+        constexpr MethodShape kBind{2, TypeKind::Void, true, false, {TypeKind::Ptr, TypeKind::Ptr}};
+        if (!gMiLabelBind)
+            gMiLabelBind =
+                ResolveMi(gLabelKlass, kRvaLabelBind, kBind, nullptr, kHashLabelBind);
+        if (!gMiLabelBind) gMiLabelBind = FindMethodByRva(gLabelKlass, kRvaLabelBind);
+        void* origBind = nullptr;
+        if (gMiLabelBind &&
+            PatchMethodInfo(gMiLabelBind, reinterpret_cast<void*>(&Hook_LabelBind), &origBind)) {
+            gOrigLabelBind = reinterpret_cast<FnLabelBind>(origBind);
+            ++n;
+        }
+
+        if (!gMiLabelClick) gMiLabelClick = FindDeclaredMethod(gLabelKlass, "OnPointerClick");
+        if (!gMiLabelClick) gMiLabelClick = FindMethodByRva(gLabelKlass, kRvaLabelClick);
+        void* origClick = nullptr;
+        if (gMiLabelClick &&
+            PatchMethodInfo(gMiLabelClick, reinterpret_cast<void*>(&Hook_LabelClick), &origClick)) {
+            gOrigLabelClick = reinterpret_cast<FnLabelClick>(origClick);
+            PatchDeclaredVtable(gLabelKlass, gMiLabelClick, origClick,
+                                reinterpret_cast<void*>(&Hook_LabelClick));
+            ++n;
+        } else {
+            x::runtime::LogW("WorldMapTravel", "标题点 OnPointerClick 未装上（点文字可能仍无赶路）");
+        }
+    } else {
+        x::runtime::LogW("WorldMapTravel", "标题点 klass 未找到，跳过 Label 钩");
+    }
+
+    x::runtime::LogI("WorldMapTravel", "aux hooks n=%d uiWm=%p label=%p enable=%d click=%d", n,
+                     gUiWmKlass, gLabelKlass, gOrigWmEnable ? 1 : 0, gOrigLabelClick ? 1 : 0);
+    return n > 0;
+}
+
 bool TryInstall() {
     if (gInstalled.load()) return true;
     if (!travel::IsFeatureEnabled()) return false;
@@ -1481,9 +2208,10 @@ bool TryInstall() {
 
     snprintf(gDownPath, sizeof(gDownPath), "ee=%d vt=%d", eeOk ? 1 : 0, vtOk ? 1 : 0);
     gInstalled.store(true);
+    (void)TryInstallAuxHooks();
     x::runtime::LogI("WorldMapTravel",
                      "init[经典版]：UpdateView(MI)+OnPointerDown(%s) 无.text；"
-                     "双击 Spot → YesNo → RequestGoto",
+                     "双击 Spot → YesNo → Close世界地图 → RequestGoto；空 Spot 仅失败路径兜底",
                      gDownPath);
     x::runtime::anchor_lamps::Set("WorldMap", x::runtime::anchor_lamps::AnchorLampCode::Ok,
                                  gDownPath);
@@ -1492,6 +2220,7 @@ bool TryInstall() {
 
 void Uninstall() {
     if (!gInstalled.exchange(false)) return;
+    ClearAuxHooks();
     ClearDownHooks();
     if (gMiUpdate && gOrigUpdate) RestoreMethodInfo(gMiUpdate, reinterpret_cast<void*>(gOrigUpdate));
     gOrigUpdate = nullptr;
@@ -1499,6 +2228,7 @@ void Uninstall() {
     {
         std::lock_guard<std::mutex> lock(gMu);
         gSpotByItem.clear();
+        gItemByGo.clear();
         gLastClickMs.clear();
     }
 }

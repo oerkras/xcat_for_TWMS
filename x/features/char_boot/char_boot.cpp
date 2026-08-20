@@ -1380,7 +1380,10 @@ void JumpAfterArm(const VitalsSnap& s) {
 bool EnsureCombatOn(char* why, size_t whyCap) {
     if (!invuln::IsDesired()) {
         xcat::PayloadControl c{};
-        if (!xcat::ReadPayloadControl(runtime::GetBinDir(), c)) xcat::PayloadControlSetDefaults(c);
+        if (!xcat::ReadPayloadControl(runtime::GetBinDir(), c)) {
+            snprintf(why, whyCap, "无法打开无敌");
+            return false;
+        }
         c.invuln = 1;
         c.writeTickMs = GetTickCount64();
         if (!xcat::WritePayloadControl(runtime::GetBinDir(), c)) {

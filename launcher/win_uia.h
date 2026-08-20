@@ -70,6 +70,11 @@ public:
     bool ClickLargestExactName(IUIAutomationElement* root, const wchar_t* exactName,
                                bool forceMouse = false) const;
 
+    // Galaxy 页：内容区最大可点块（优先 Name 含 Gama Pass）；默认真鼠标
+    bool ClickLargestContentCta(IUIAutomationElement* root, HWND hwnd, std::wstring* outName,
+                                bool forceMouse = true) const;
+    std::wstring DumpVisibleCtas(IUIAutomationElement* root, HWND hwnd, int maxItems = 10) const;
+
     bool ClickNamedIndex(IUIAutomationElement* root, const std::vector<std::wstring>& nameParts,
                          int index0, bool substring, std::wstring* outName = nullptr,
                          bool forceMouse = false) const;

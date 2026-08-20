@@ -83,6 +83,7 @@ DWORD gLastMenuAttempt = 0;
 DWORD gLastBuyAttempt = 0;
 DWORD gLastCloseShopAttempt = 0;
 DWORD gShopReadySince = 0;
+bool gTalkedThisOpen = false;  // 本段 OpeningShop 已对目标 tpl Talk；未 Talk 不信 ShopReady
 int gCloseShopAttempts = 0;
 DWORD gScrollAttemptAt = 0;
 DWORD gScrollRetryAfter = 0;  // no_consume 等硬失败：到期前不重发卷
@@ -258,6 +259,10 @@ void PublishStatusIni() {
 }
 
 void Enter(Phase p, const char* msg) {
+    if (p == Phase::OpeningShop) {
+        gTalkedThisOpen = false;
+        gShopReadySince = 0;
+    }
     gPhase = p;
     gPhaseSince = GetTickCount();
     SetMsg(msg);
@@ -1129,8 +1134,19 @@ void TickIdle(DWORD now) {
                     "起号进行中");
             return;
         }
-        if (soft_login_probe::IsReconnectInFlight()) {
+        if (soft_login_probe::IsReconnectInFlight() ||
+            ports::mob_gather::HangupWashInFlight()) {
             SetMsg("等软重连落地后再开趟…");
+            return;
+        }
+        if (!ports::mob_gather::SoftReloginAllowsAutoSell()) {
+            (void)ports::mob_gather::HangupBeforeOtherAction("pre_supply_manual");
+            static DWORD sManualDeferLog = 0;
+            if (!sManualDeferLog || now - sManualDeferLog >= 4000) {
+                sManualDeferLog = now;
+                runtime::LogI("AutoSupply", "manual trip — hangup first to clear flags");
+            }
+            SetMsg("先软重连清状态，落地后再卖装…");
             return;
         }
         if (!ports::world::IsPlayReady() || sellbag::IsBusy() || travel::IsActive()) return;
@@ -1187,7 +1203,8 @@ void TickIdle(DWORD now) {
     // BIN 16:11：enabled=0 时仍恢复 pendingReturn；续跑不依赖自动补给开关。
     if (gPendingReturnFarm && gLastFarmMap[0]) {
         if (!ports::world::IsPlayReady() || sellbag::IsBusy() || travel::IsActive() ||
-            soft_login_probe::IsReconnectInFlight()) {
+            soft_login_probe::IsReconnectInFlight() ||
+            ports::mob_gather::HangupWashInFlight()) {
             static DWORD sLastPendingWaitLog = 0;
             if (!sLastPendingWaitLog || now - sLastPendingWaitLog >= 5000) {
                 sLastPendingWaitLog = now;
@@ -1270,12 +1287,13 @@ void TickIdle(DWORD now) {
     if (!potionFire && !customFire && !custom2Fire && !feedFire && !equipMet) return;
 
     if (!ports::mob_gather::SoftReloginAllowsAutoSell()) {
+        (void)ports::mob_gather::HangupBeforeOtherAction("pre_supply");
         static DWORD sDeferLog = 0;
         if (!sDeferLog || now - sDeferLog >= 4000) {
             sDeferLog = now;
-            runtime::LogI("AutoSupply", "defer trip until hangup soft-relogin land");
+            runtime::LogI("AutoSupply", "defer trip — hangup first to clear flags");
         }
-        SetMsg("等主动软重连落地后再卖装…");
+        SetMsg("先软重连清状态，落地后再卖装…");
         return;
     }
 
@@ -1284,6 +1302,10 @@ void TickIdle(DWORD now) {
 }
 
 void TickPause(DWORD now) {
+    if (ports::mob_gather::HangupWashInFlight()) {
+        SetMsg("等软重连落地…");
+        return;
+    }
     RememberFarmMapInternal(/*allowTown=*/false);
     if (!gLastFarmMap[0]) {
         // 已在城镇触发时允许记下当前图以免卡死
@@ -1316,12 +1338,12 @@ void TickPause(DWORD now) {
 }
 
 void TickGoingTown(DWORD now) {
-    if (now - gPhaseSince > kGotoTimeoutMs) {
-        FailTrip("前往店图超时");
+    if (ports::mob_gather::HangupWashInFlight()) {
+        SetMsg("等软重连落地…");
         return;
     }
-    if (soft_login_probe::IsReconnectInFlight()) {
-        SetMsg("等软重连落地…");
+    if (now - gPhaseSince > kGotoTimeoutMs) {
+        FailTrip("前往店图超时");
         return;
     }
     if (MapMatchesTarget(gShopMap) && !travel::IsActive()) {
@@ -1445,6 +1467,10 @@ void TickGoingTown(DWORD now) {
         // AlreadyThere 等软终态：忽略并重新 goto（对照枫星不把 already 当 EndTrip）
         // 冷却窗已过才 goto；用 phaseSince 相对时间会在冷却期误判，改看 arm 已清
         if (now - gPhaseSince > 400) {
+            if (ports::mob_gather::HangupWashInFlight()) {
+                SetMsg("等软重连落地…");
+                return;
+            }
             if (!EnsureCombatPausedForTravel()) return;
             travel::RequestGoto(gShopMap);
         }
@@ -1494,6 +1520,10 @@ bool TryRerouteShopAfterStockMiss(const char* why) {
 }
 
 void TickOpeningShop(DWORD now) {
+    if (ports::mob_gather::HangupWashInFlight()) {
+        SetMsg("等软重连落地…");
+        return;
+    }
     // 已在店图开趟：Travel 到站后仍可能悬空；先请求落台再等站稳。
     EnsureSafeLandIfAirborne(now);
     if (!WaitSafeLand(now)) return;
@@ -1509,7 +1539,42 @@ void TickOpeningShop(DWORD now) {
         SetMsg("尝试对话开店…");
     }
 
-    // 已有对话框时优先推进/点菜单（节流，避免每 tick 连点 Say）
+    // 必须先对目标 NPC Talk，再信 ShopReady / 点残留 Say。
+    // BIN 2026-08-20：市集落地未对话，TryConfirmShopScriptMenu ok-advance + ShopReady 假阳，
+    // 1s 后进 Selling，卖栏 listN=0。
+    if (!gLastTalkAttempt || now - gLastTalkAttempt >= kTalkRetryMs) {
+        gLastTalkAttempt = now;
+        const int tpl = gResolvedNpc[0] ? atoi(gResolvedNpc) : 0;
+        const bool talked = shop::TryTalkNearestNpc(0.f, tpl);
+        if (!talked) {
+            ++gTalkMissStreak;
+            (void)shop::TryNpcTalkFuncKey();
+            if (tpl > 0 && gTalkMissStreak >= kTalkMissReroute &&
+                TryRerouteShopAfterOpenMiss("开店找不到目标NPC")) {
+                return;
+            }
+        } else {
+            gTalkMissStreak = 0;
+            gTalkedThisOpen = true;
+        }
+        gLastMenuAttempt = now;
+        if (gTalkedThisOpen) (void)shop::TryConfirmShopScriptMenu();
+    }
+
+    if (!gTalkedThisOpen) {
+        bool readyEarly = false;
+        if (shop::ShopReady(readyEarly) && readyEarly) {
+            static DWORD sFakeReadyLog = 0;
+            if (!sFakeReadyLog || now - sFakeReadyLog >= 4000) {
+                sFakeReadyLog = now;
+                runtime::LogW("AutoSupply",
+                              "ShopReady=1 before Talk — ignore (need npc=%s)", gResolvedNpc);
+            }
+            SetMsg("先对话目标 NPC…");
+        }
+        return;
+    }
+
     if (!gLastMenuAttempt || now - gLastMenuAttempt >= kMenuConfirmMs) {
         gLastMenuAttempt = now;
         (void)shop::TryConfirmShopScriptMenu();
@@ -1531,30 +1596,13 @@ void TickOpeningShop(DWORD now) {
         return;
     }
     gShopReadySince = 0;
-
-    if (!gLastTalkAttempt || now - gLastTalkAttempt >= kTalkRetryMs) {
-        gLastTalkAttempt = now;
-        const int tpl = gResolvedNpc[0] ? atoi(gResolvedNpc) : 0;
-        const bool talked = shop::TryTalkNearestNpc(0.f, tpl);
-        if (!talked) {
-            ++gTalkMissStreak;
-            // 与改版前一致：Talk 失败再用 FuncKey 兜底（经典版可远距开店）
-            (void)shop::TryNpcTalkFuncKey();
-            // BIN 4bb7ea：戶外吉姆卷落點對不上 → 勿乾等 90s，連 miss 後排除改道室內藥店
-            if (tpl > 0 && gTalkMissStreak >= kTalkMissReroute &&
-                TryRerouteShopAfterOpenMiss("开店找不到目标NPC")) {
-                return;
-            }
-        } else {
-            gTalkMissStreak = 0;
-        }
-        // Talk 后立刻再扫一次菜单（服端回包稍后；节流由 gLastMenuAttempt 管）
-        gLastMenuAttempt = now;
-        (void)shop::TryConfirmShopScriptMenu();
-    }
 }
 
 void TickSelling(DWORD now) {
+    if (ports::mob_gather::HangupWashInFlight()) {
+        SetMsg("等软重连落地…");
+        return;
+    }
     if (now - gPhaseSince > kSellTimeoutMs) {
         FailTrip("自动卖出超时");
         return;
@@ -1567,10 +1615,35 @@ void TickSelling(DWORD now) {
         FailTrip(st.message[0] ? st.message : "卖出失败");
         return;
     }
+    // 开错店：卖栏投影空，背包物全记「店不可卖」（BIN 2026-08-20 科爾）。
+    if (st.state == 2u && (st.equipSold + st.etcSold) == 0 && st.kept > 0) {
+        (void)shop::CloseShop();
+        if (TryRerouteShopAfterOpenMiss("卖栏空/店不可卖（未开对店）")) return;
+        FailTrip("商店货架对不上，无法卖出");
+        return;
+    }
+    bool ready = false;
+    if (!shop::ShopReady(ready) || !ready) {
+        runtime::LogW("AutoSupply", "sell phase shop closed — reopen, do not buy on air");
+        gWaitOpenNotified = 0;
+        gLastTalkAttempt = 0;
+        gTalkMissStreak = 0;
+        gLastMenuAttempt = 0;
+        gShopReadySince = 0;
+        if (MapMatchesTarget(gShopMap))
+            Enter(Phase::OpeningShop, "店窗已关，重新开店…");
+        else
+            Enter(Phase::GoingTown, "店窗已关，回店图再开…");
+        return;
+    }
     BeginBuying();
 }
 
 void TickBuyingReal(DWORD now) {
+    if (ports::mob_gather::HangupWashInFlight()) {
+        SetMsg("等软重连落地…");
+        return;
+    }
     if (now - gPhaseSince > kBuyTimeoutMs) {
         runtime::LogW("AutoSupply", "buy phase timeout → return");
         StartReturnOrDone();
@@ -1826,6 +1899,10 @@ void TickBuyingReal(DWORD now) {
 }
 
 void TickCharging(DWORD now) {
+    if (ports::mob_gather::HangupWashInFlight()) {
+        SetMsg("等软重连落地…");
+        return;
+    }
     // 一键充飞镖：店内循环 Charge，结束回 Idle（不关店、不回城）。
     static int sFired = 0;
     static DWORD sArmPhase = 0;
@@ -1905,6 +1982,10 @@ void TickCharging(DWORD now) {
 }
 
 void TickClosingShop(DWORD now) {
+    if (ports::mob_gather::HangupWashInFlight()) {
+        SetMsg("等软重连落地…");
+        return;
+    }
     if (now - gPhaseSince > 30000) {
         FailTrip("关店超时");
         return;
@@ -1970,6 +2051,10 @@ bool ReturnMapStable(DWORD now) {
 }
 
 void TickReturning(DWORD now) {
+    if (ports::mob_gather::HangupWashInFlight()) {
+        SetMsg("等软重连落地…");
+        return;
+    }
     if (now - gPhaseSince > kReturnTimeoutMs) {
         FailTrip("返回挂机图超时");
         return;
@@ -2000,6 +2085,10 @@ void TickReturning(DWORD now) {
             }
         }
         if (!MapMatchesTarget(gLastFarmMap) && now - gPhaseSince > 800) {
+            if (ports::mob_gather::HangupWashInFlight()) {
+                SetMsg("等软重连落地…");
+                return;
+            }
             if (!EnsureCombatPausedForTravel()) return;
             travel::RequestGoto(gLastFarmMap);
         }
@@ -2158,10 +2247,41 @@ void HotReadConfig() {
     }
 }
 
+void YieldTripForSessionWash() {
+    if (gPhase == Phase::Idle || gPhase == Phase::Cooldown) return;
+    if (!ports::mob_gather::HangupWashInFlight()) return;
+
+    const bool resumeSell = gPhase == Phase::Pause || gPhase == Phase::GoingTown ||
+                            gPhase == Phase::OpeningShop || gPhase == Phase::Selling ||
+                            gPhase == Phase::Buying;
+    const bool resumeFarm =
+        (gPhase == Phase::ClosingShop || gPhase == Phase::Returning) && gLastFarmMap[0];
+
+    travel::RequestStop();
+    sellbag::Abort("session_wash");
+    ResumeSystems();
+    ClearTripTravelArm();
+    gCooldownUntil = 0;
+    gScrollPendingLand = false;
+    if (resumeSell) {
+        gTripReq.store(true, std::memory_order_release);
+        runtime::LogI("AutoSupply", "yield trip for hangup wash — resume sell after land");
+    } else if (resumeFarm) {
+        gPendingReturnFarm = true;
+        PublishStatusIni();
+        runtime::LogI("AutoSupply", "yield return for hangup wash — resume farm after land");
+    } else {
+        runtime::LogI("AutoSupply", "yield phase=%d for hangup wash", static_cast<int>(gPhase));
+    }
+    Enter(Phase::Idle, "先软重连清洗，落地后再继续…");
+}
+
 void TickHangupSupplyFirst(DWORD now) {
     if (!ports::mob_gather::HangupCombatHold()) return;
     if (!ports::mob_gather::SoftReloginAllowsAutoSell()) return;
     if (gPhase != Phase::Idle) return;
+    // 行程被清洗中止后用 gTripReq 续卖：交给 TickIdle，避免双开趟。
+    if (gTripReq.load(std::memory_order_acquire)) return;
     if (!gDesired.load()) return;
     if (now < gCooldownUntil) return;
     if (!ports::world::IsPlayReady()) return;
@@ -2192,6 +2312,7 @@ void TickHangupSupplyFirst(DWORD now) {
 void Tick(DWORD now) {
     HotReadConfig();
     TickManualCmds();
+    YieldTripForSessionWash();
     SyncStatus();
     const bool hadHold = ports::mob_gather::HangupCombatHold();
     TickHangupSupplyFirst(now);

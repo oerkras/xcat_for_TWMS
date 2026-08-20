@@ -1160,7 +1160,7 @@ struct FireJob {
     FireResult* out = nullptr;
     bool allowDirect = false;  // 多发直发 / 打怪自组包：跳过 gEnabled
     bool oneshot = false;      // 面板按钮：命中环最多 1
-    int32_t lockOid = 0;       // >0：命中环只填此 oid（须在 snap）
+    int32_t lockOid = 0;       // >0：hits[0] 钉此 oid；命中环只这一只
     bool ok = false;
     const char* err = "init";
     int mobs = 0;
@@ -1380,6 +1380,7 @@ void FireJobOnMain(void* user) {
             }
             return;
         }
+        // 出刀自组攻包：命中环只填当前锁。填充列表 / 同拍多包已删（踢号）。
     } else {
     // 候选：贴脸优先。我控只是排序加分，不挡 Passive（2026-08-15 蜗牛 Passive dist=17 已打死）。
     const int want = job->oneshot ? 1 : gMaxMobs.load();
@@ -1801,7 +1802,8 @@ void FireJobOnMain(void* user) {
                          "forge_lock sent oid=%d nHit=%d op=%d wt=%d skill=%d fkT=%d fkV=%d "
                          "src=%s body~%d dist=%.0f player=(%.0f,%.0f) mob=(%.0f,%.0f) "
                          "prev=(%.0f,%.0f) fly=%d ring=%s",
-                         lockOid, nHit, opcode, weaponType, skillId, fkT, fkV, opSrc, body,
+                         lockOid, nHit, opcode,
+                         weaponType, skillId, fkT, fkV, opSrc, body,
                          std::sqrt((hits[0].x - ctx.x) * (hits[0].x - ctx.x) +
                                    (hits[0].y - ctx.y) * (hits[0].y - ctx.y)),
                          ctx.x, ctx.y, hits[0].x, hits[0].y, hits[0].px, hits[0].py,

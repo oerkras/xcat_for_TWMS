@@ -84,7 +84,7 @@
 | [`soft_login/模块设计.md`](soft_login/模块设计.md) | 软重连试连：ConnectLogin→softFast 重进→playReady；Done≠playReady 闸 + 150s 墙钟 / 10 轮 soft cycle（✅ 默认关） |
 | [`ccu/模块设计.md`](ccu/模块设计.md) | 分区 CCU：登录频道页或 auto_enter 喂数一次 → SHM → 底栏（✅） |
 | [`channel_hop/模块设计.md`](channel_hop/模块设计.md) | 随机换频：挂机卡/F10 → `manualRejoinSeq` → **直调** `SendTransfer@0xBB5200`（无菜单；✅ 挂入；08-03 锚点已同步） |
-| [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：默认只开检测+GM升级；普通停手/换频默认关（✅ 契约 v82） |
+| [`encounter/模块设计.md`](encounter/模块设计.md) | 遇人策略：默认检测+换频+GM升级；普通先停手默认关（✅ 契约 v133） |
 | [`pet_feed/P0b_只读探针.md`](pet_feed/P0b_只读探针.md) | `ReadState` + `petfeed.log`；字段只读，未发包 |
 | [`pet_feed/P0c_自动召唤.md`](pet_feed/P0c_自动召唤.md) | `TryActivatePet` + `[core] petSummon`；喂食交官方 |
 | [`pet_loot/模块设计.md`](pet_loot/模块设计.md) | **拾物**：脚下 / 宠扩盒 / 人物直吸；黑名单默认箭矢·彈丸；归属预筛 |

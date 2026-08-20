@@ -128,7 +128,8 @@ constexpr int kWoundedStallAbandonMinFires = 5;
 constexpr DWORD kWhiffSoftBanMs = 600;
 constexpr DWORD kWhiffSoftBanMaxMs = 3000;
 constexpr int kWhiffSoftBanMaxStrikes = 6;
-// 命中盒接上但 ACC 不够 → 飘 MISS / 极低伤：lastHitted 仍 bump，whiff 清窗当「打中」，
+// 命中盒接上但 ACC 不够 → 飘 MISS / 极低伤：lastHitted 仍 bump，whiff 清窗当「打中」。
+// ACC MISS 另打 combat.log `acc_miss`（末条 DamageInfo.Damage=0 且 CharacterId=自己）。
 // engaged 纠偏永不换怪。自上次有效掉血起墙钟限时无进展 → softBan 换靶。
 // 轻暂停/prepare 冻钟（见 Note/ReleaseKillTimeoutHold），避免补 BUFF 误弃锁。
 constexpr DWORD kLockKillTimeoutMs = 3000;
@@ -141,6 +142,9 @@ constexpr DWORD kEarlyAbandonSoftBanMs = 0;
 // 打中换怪：刚打过的怪禁锁一会儿，避免投射物/回贴又打到同一只；也挡住 Acquire 回退最近。
 constexpr DWORD kHitRotateBanMs = 5000;
 constexpr int kHitRotateMinLive = 3;
+// 不打 MISS 怪：连续 ACC MISS 满 N 后禁锁。sticky（kBanHitRotate）防同 tick 重选。
+// 比 hit_rotate 稍长：高 EVA 怪会一直飘字，短禁立刻被最近选回来。
+constexpr DWORD kSkipAccMissBanMs = 8000;
 constexpr DWORD kTeleportOneHitBanMs = 2500;
 // lastHitted 多数当帧写，但 DamageInfo 列表常晚一拍；窗只挡「确认命中」路径。
 // 锁怪换刀真源是 hitBumpCount（lastHitted 上升沿），不依赖这扇窗、也不依赖 DI.charId。
@@ -306,6 +310,8 @@ std::atomic<bool> gLiveStepEnabled{false};  // 锁怪后同层微贴；默认关
 std::atomic<bool> gClusterPriority{false};  // 群怪优先；默认关
 std::atomic<bool> gHitRotateEnabled{false};  // 打中换怪；默认关
 std::atomic<int> gHitRotateN{static_cast<int>(xcat::kCombatHitRotateNDefault)};
+std::atomic<bool> gSkipAccMissEnabled{true};  // 不打 MISS 怪；厂默开 / N=1
+std::atomic<int> gSkipAccMissN{static_cast<int>(xcat::kCombatSkipAccMissNDefault)};
 std::atomic<bool> gForgeHitEnabled{false};  // 实验·出刀自组攻包；默认关
 std::atomic<uint32_t> gForgeHitFrontDx{xcat::kForgeHitFrontDxDefault};
 std::atomic<uint32_t> gForgeHitFrontDy{xcat::kForgeHitFrontDyDefault};
@@ -494,6 +500,9 @@ struct LockState {
     float armDx = -1.f;
     int firesInArm = 0;
     bool hitProbeLogged = false;  // 本观察窗内 hit_probe 只打一次，防刷屏
+    int32_t accMissWaitHitted = -1;  // lastHitted 上升后等 DamageInfo；-1=无待判
+    int accMissCount = 0;            // 本锁确认的 ACC MISS 次数（Damage=0）
+    int accMissStreak = 0;           // 连续 ACC MISS；真伤/掉血清零
     float x = 0.f;
     float y = 0.f;
     // 攻击加速·够死预测。
@@ -751,6 +760,7 @@ void ClearWhiffArm() {
     gLock.armDx = -1.f;
     gLock.firesInArm = 0;
     gLock.hitProbeLogged = false;
+    gLock.accMissWaitHitted = -1;
 }
 
 // 轻暂停 / skill_prepare：停刀期间 KillTimeout 不计墙钟（与 SoftResetWhiff 同因）。
@@ -1254,6 +1264,57 @@ bool HandleTinyHopSticky(DWORD now, float playerX, float playerY, float standOff
     return true;  // break 等
 }
 
+// 进盒后 ACC 不够：AddDamageInfo 仍写 lastHitted，但 Damage@+0x24=0（飘 MISS）。
+// 列表偶发晚一拍 → 上升沿先记下 lastHitted，窗内再读。血条已掉不当 MISS。
+void ResolveAccMissAfterBump(DWORD now, const char* when) {
+    if (gLock.accMissWaitHitted < 0) return;
+    if (gLock.armHp >= 0 && gLock.lastHp >= 0 && gLock.lastHp < gLock.armHp) {
+        gLock.accMissWaitHitted = -1;
+        gLock.accMissStreak = 0;
+        return;
+    }
+    if (!gLock.ptr) return;
+    const uint32_t me = ports::world::GetCharacterId();
+    if (!me) return;
+    ports::mob::DamageInfoSnap di{};
+    if (!ports::mob::TryReadDamageInfoList(gLock.ptr, di) || !di.ok || di.count <= 0) return;
+    const ports::mob::DamageInfoLite& last = di.items[di.count - 1];
+    if (last.charId == 0) return;
+    if (last.charId != me) {
+        gLock.accMissWaitHitted = -1;
+        return;
+    }
+    gLock.accMissWaitHitted = -1;
+    if (last.damage > 0) {
+        gLock.accMissStreak = 0;
+        return;
+    }
+    gLock.accMissStreak += 1;
+    gLock.accMissCount += 1;
+    LogLine("acc_miss id=%d hit=%d dmg=0 char=%u skill=%d act=%d idx=%d hp=%d lf=%d fires=%d "
+            "lat=%ums n=%d streak=%d when=%s",
+            gLock.id, gLock.lastHitted, last.charId, last.skillId, last.hitAction, last.attackIdx,
+            gLock.lastHp, gLock.lockFires, gLock.firesInArm,
+            (unsigned)(gLock.armAtMs ? now - gLock.armAtMs : 0), gLock.accMissCount,
+            gLock.accMissStreak, when && when[0] ? when : "?");
+}
+
+// CMS CheckPDamageMiss 吃 Rand32，禁止预调。进盒连续 Damage=0 满 N 再禁锁。
+bool TryAbandonAccMiss(DWORD now) {
+    if (!gSkipAccMissEnabled.load(std::memory_order_acquire)) return false;
+    if (!gLock.id) return false;
+    const int need = gSkipAccMissN.load(std::memory_order_acquire);
+    if (need <= 0 || gLock.accMissStreak < need) return false;
+    LogLine("switch reason=skip_acc_miss id=%d streak=%d need=%d n=%d hp=%d hit=%d fires=%d "
+            "ban=%ums",
+            gLock.id, gLock.accMissStreak, need, gLock.accMissCount, gLock.lastHp, gLock.lastHitted,
+            gLock.lockFires, (unsigned)kSkipAccMissBanMs);
+    SoftBanFor(gLock.id, now, kSkipAccMissBanMs, kBanHitRotate);
+    gLastLockLostWhy = "skip_acc_miss";
+    ClearLockRetarget();
+    return true;
+}
+
 void ArmWhiffObserve(DWORD now, int hpAtFire, float absDx) {
     gLock.lockFires += 1;
     ReleaseKillTimeoutHold(now);
@@ -1294,6 +1355,8 @@ void NoteHittedForHitLag(DWORD now) {
         gLock.hitBumpCount += 1;
         if (!gLock.firstBumpMs) gLock.firstBumpMs = now;
         gLock.prevHittedSample = gLock.lastHitted;
+        gLock.accMissWaitHitted = gLock.lastHitted;
+        ResolveAccMissAfterBump(now, "bump");
 
         // 列表多半只留末条：bump 时读 +0x24 累加到 dealtSum（零参数够死）。
         // 脆皮早切关着时不读 DamageInfo 列表。
@@ -1536,6 +1599,7 @@ bool TryAbandonLockKillTimeout(DWORD now) {
 // 窗内掉血 → 清 whiff；窗满无掉血 → +1；满 N → 清锁并返回 false。
 // lastHitted 旁路：默认只探针；kWhiffClearOnLastHitted=true 时才参与清窗。
 bool ResolveWhiffArm(DWORD now) {
+    ResolveAccMissAfterBump(now, "arm");
     // 站桩输出：面前有怪就连砍。空砍 / 残血停滞一律不换锁、不 softBan。
     if (gHiraishinEnabled.load(std::memory_order_acquire)) {
         ClearWhiffArm();
@@ -1575,6 +1639,7 @@ bool ResolveWhiffArm(DWORD now) {
                     hpDrop ? "hp" : "lastHitted", gLock.armHp, gLock.lastHp, gLock.armHitted,
                     gLock.lastHitted, gLock.firesInArm);
         }
+        if (hpDrop) gLock.accMissStreak = 0;
         gLock.whiff = 0;
         ClearWhiffArm();
         return true;
@@ -2340,6 +2405,9 @@ bool RefreshLock(const ports::mob::Snapshot& snap) {
     NoteLockHpSample();
     NoteHittedForHitLag(now);
     MaybeProbeUiHpTag(now);
+    // DI 偶发晚一拍：bump 当帧没读到，锁刷新再试。站桩也要跳过 MISS 怪。
+    ResolveAccMissAfterBump(now, "lock");
+    if (TryAbandonAccMiss(now)) return false;
     if (gHiraishinEnabled.load(std::memory_order_acquire)) return true;
     if (TryAbandonDealtSum(now)) return false;
     if (TryAbandonOneshot(now)) return false;
@@ -2349,7 +2417,8 @@ bool RefreshLock(const ports::mob::Snapshot& snap) {
     if (TryAbandonHitRotate(now, snap)) return false;
     if (TryAbandonLockKillTimeout(now)) return false;
 
-    return ResolveWhiffArm(now);
+    if (!ResolveWhiffArm(now)) return false;
+    return !TryAbandonAccMiss(now);
 }
 
 // 贴怪关：只锁同层近怪。贴怪开：优先同 zMass 可落点；同层没有才跨 zMass（防飞怪物池）。
@@ -5362,6 +5431,16 @@ void TickImpl(DWORD now) {
         }
         return;
     }
+    if (ports::mob_gather::HangupFiresDue()) {
+        if (gState != State::Idle) GoIdle(now, "hangup_fires_due");
+        ports::attack::ForceRelease();
+        static DWORD sHangupFiresDueLog = 0;
+        if (!sHangupFiresDueLog || now - sHangupFiresDueLog > 800) {
+            sHangupFiresDueLog = now;
+            LogLine("hangup fires due (no fire until CloseSession clears flags)");
+        }
+        return;
+    }
     if (ports::mob_gather::HangupCombatHold()) {
         if (gState != State::Idle) GoIdle(now, "hangup_sell_first");
         ports::attack::ForceRelease();
@@ -6364,6 +6443,26 @@ void TickImpl(DWORD now) {
                 EnterState(State::Acquire, now, "lost_after_settle");
                 break;
             }
+            // hop 后引擎朝向跟跳跃走，gLastFaceSign 仍是上一只怪。
+            // 挂台后再对齐：已对只同步缓存；不一致才 SetInput。仍 break，下一拍才 Aim/Fire。
+            {
+                const float px = posOk ? landCtx.x : player.x;
+                float faceDx = gLock.x - px;
+                // |dx|<死区时 AlignFace 不转。贴脸 hop BIN 第一刀大量 fw=1；用落点侧合成朝向。
+                // gLandSide：-1=站怪左（应对右）/ +1=站怪右（应对左）。
+                if (std::fabs(faceDx) < 8.f && gLandSide != 0)
+                    faceDx = static_cast<float>(-gLandSide) * 16.f;
+                ports::teleport::FlightState st{};
+                const int ma =
+                    (ports::teleport::QueryFlightState(st) && st.ok) ? st.ma : -1;
+                const int want = (std::isfinite(faceDx) && std::fabs(faceDx) >= 8.f)
+                                     ? (faceDx < 0.f ? -1 : 1)
+                                     : 0;
+                const int eng = (ma >= 0) ? ((ma & 1) ? -1 : 1) : 0;
+                const bool pulsed = ports::attack::AlignFaceToEngine(faceDx, ma);
+                LogLine("settle face dx=%.0f ma=%d want=%d eng=%d pulsed=%d", faceDx, ma, want,
+                        eng, pulsed ? 1 : 0);
+            }
             EnterState(State::Aim, now, "settle_ok");
             break;  // 下一 worker tick 再 Aim/Fire，给主线程一帧消化 Doing
         }
@@ -6872,6 +6971,8 @@ void TickImpl(DWORD now) {
                         gLock.whiff, gLock.firesInArm, gLock.lockFires, faceMa, faceWhy, spV, spFh,
                         b0, b1, blink.on ? 1 : 0, blink.x, blink.y, bapx, bapy, baplx, baply, bap2x,
                         bap2y);
+                    // 与 BIN「fire id=」同一拍：墙钟分钟加总就是那次 2030。不看 b1/命中。
+                    x::features::ports::mob_gather::NoteHangupFire();
                     if (!gStandstillSince) {
                         gStandstillSince = now;
                         gStandstillAnchorX = player.x;
@@ -7304,6 +7405,7 @@ void NotifyMultiNormalAttackFired() {
         absDx = std::fabs(gLock.x - player.x);
     }
     ArmWhiffObserve(now, gLock.lastHp, absDx);
+    x::features::ports::mob_gather::NoteHangupFire();
 }
 
 bool IsFarmingActive() {
@@ -7390,6 +7492,25 @@ void SetHitRotateN(uint32_t n) {
 
 uint32_t HitRotateN() {
     return static_cast<uint32_t>(gHitRotateN.load(std::memory_order_acquire));
+}
+
+void SetSkipAccMissEnabled(bool on) {
+    const bool prev = gSkipAccMissEnabled.exchange(on, std::memory_order_acq_rel);
+    if (prev == on) return;
+    LogLine("SetSkipAccMissEnabled %d (prev=%d)", on ? 1 : 0, prev ? 1 : 0);
+}
+
+bool IsSkipAccMissEnabled() { return gSkipAccMissEnabled.load(std::memory_order_acquire); }
+
+void SetSkipAccMissN(uint32_t n) {
+    n = xcat::ClampCombatSkipAccMissN(n);
+    const int prev = gSkipAccMissN.exchange(static_cast<int>(n), std::memory_order_acq_rel);
+    if (prev == static_cast<int>(n)) return;
+    LogLine("SetSkipAccMissN %u (prev=%d)", n, prev);
+}
+
+uint32_t SkipAccMissN() {
+    return static_cast<uint32_t>(gSkipAccMissN.load(std::memory_order_acquire));
 }
 
 void SetForgeHitEnabled(bool on) {

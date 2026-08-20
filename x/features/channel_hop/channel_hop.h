@@ -27,12 +27,22 @@ void StopWorker();
 
 // Edge-triggered from payload_control (manualRejoinSeq).
 void RequestManualRejoin(uint32_t seq);
+// 遇人：选新频写入 sticky 后 CloseSession 软重连进该频（禁止 SendTransfer，不回原频）。
+// seq 须 ≥ kEncounterHopSeqBase（encounter 侧 gHopSeq）。
+void RequestEncounterSoftHop(uint32_t seq);
+bool IsEncounterSoftHop();
+
+// 与 encounter.cpp gHopSeq 同基址；此范围一律走软重连，禁止官方 SendTransfer。
+constexpr uint32_t kEncounterHopSeqBase = 0xE1000000u;
 
 State GetState();
 const char* GetStateName();
 bool HasPending();
 // Waiting 且已发包：KickSniff 不得把迁频抖的 Disconnected 交给 soft（BIN 13:59 抢会话）。
 bool IsMigrateInFlight();
+// 主动 hangup 到点：丢掉 pending / 未发包的 hop；已发包则 sticky 目标频再 Idle。
+// 不 RequestAttempt——由 hangup_timer 自己 CloseSession。
+void AbortHopForHangup();
 // 成功/失败冷却剩余 ms；0=可立刻再 hop（遇人策略对齐用）
 DWORD CooldownRemainingMs();
 // 上次成功换频 / 图内读到的频道（玩家 UI ch.N = 列表 id + 1）；未知返回 0。

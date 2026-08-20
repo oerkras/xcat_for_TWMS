@@ -59,10 +59,10 @@ bool TryFireNormalDirect(FireResult* out = nullptr);
 // 贴脸 ~50px 即可，不强制 MobCtrlState>0（Passive 贴脸 BIN 已打死）。
 bool TryFireOneshot(FireResult* out = nullptr);
 
-// 打怪实验：SendOutPacket，命中环只填 lockOid（须在 snap 且活着）。
-// 不看 gEnabled（与「攻包伪造探针」Tick 独立）；不走 Session.Send。
-// 多发已证实踢号——调用方短开。oid<=0 直接拒绝。
-// 过远（自组攻包攻击盒 |dx|/|dy|）/ SendOut false / 非近战且非 A 槽魔法技：拒发。调用方不得退回 OnFuncKey。
+// 打怪实验：SendOutPacket。hits[0] 必为 lockOid（须在 snap、活着、且在攻击盒内）。
+// 命中环只填这一只锁（nHit=1）。不看 gEnabled（与「攻包伪造探针」Tick 独立）；不走 Session.Send。
+// oid<=0 直接拒绝。过远（自组攻包攻击盒 |dx|/|dy|）/ SendOut false / 非近战且非 A 槽魔法技：拒发。
+// 调用方不得退回 OnFuncKey。
 bool TryFireLockOid(int32_t oid, FireResult* out = nullptr);
 
 // 钉锁过远尺：出刀自组攻包自己的攻击盒（AbsPos 半宽/半高；0=该轴不限）。不与站桩面前盒共用。

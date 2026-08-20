@@ -38,7 +38,7 @@ constexpr DWORD kHopDeferLogMs = 4000;
 constexpr DWORD kGmAlarmPulseMs = 3000;  // 对齐 auto_lie：威胁期间每 3s 强制 Alarm
 constexpr int kHideSuspectConfirmSamples = 2;  // 连续 N 拍才认隐身，压进图/加载假阳
 constexpr int kPostHopClearSamples = 2;  // 宽限内连续无人确认，压落地 UserPool 假空
-constexpr uint32_t kHopSeqBase = 0xE1000000u;
+constexpr uint32_t kHopSeqBase = x::features::channel_hop::kEncounterHopSeqBase;
 
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
@@ -365,17 +365,17 @@ void RequestHop(const ports::user_pool::RemoteThreatSample& t, bool threat) {
     if (gHopSeq < kHopSeqBase) gHopSeq = kHopSeqBase + 1;
     // 离开当前挤频前软拉黑，下一次选池优先避开（本图 TTL）
     channel_hop::NoteCrowdedChannel();
-    channel_hop::RequestManualRejoin(gHopSeq);
+    channel_hop::RequestEncounterSoftHop(gHopSeq);
     char body[256]{};
     if (threat) {
-        snprintf(body, sizeof(body), "疑似 GM/隐身（远程 %d：%s），已立即换频。", other,
+        snprintf(body, sizeof(body), "疑似 GM/隐身（远程 %d：%s），软重连进新频。", other,
                  names[0] ? names : "?");
-        Notify(notify::NotificationKind::Danger, "encounter-gm-hop", "疑似 GM 立即换频", body);
+        Notify(notify::NotificationKind::Danger, "encounter-gm-hop", "疑似 GM 软重连换频", body);
         // Alarm 已由 PauseExposure / Tick Pulse 负责，此处不再 force，避免同拍双响。
     } else {
-        snprintf(body, sizeof(body), "检测到同图其他玩家 %d 人（%s），已立即换频。", other,
-                 names[0] ? names : "?");
-        Notify(notify::NotificationKind::Warning, "encounter-hop", "遇人立即换频", body);
+        snprintf(body, sizeof(body), "检测到同图其他玩家 %d 人（%s），软重连进新频（不回原频）。",
+                 other, names[0] ? names : "?");
+        Notify(notify::NotificationKind::Warning, "encounter-hop", "遇人软重连换频", body);
     }
     Log("hop seq=%u other=%d names=[%s] threat=%d", gHopSeq, other, names[0] ? names : "?",
         threat ? 1 : 0);

@@ -806,9 +806,12 @@ static bool gUiFinalAttackForce = false;
 static bool gUiMeleeVeto = false;
 // 怪物刷新感知：首页落盘保留；控件在实验 TAB（1ms 热扫下无体感）。
 static bool gUiMobPoolObserve = false;
-// 打怪 TICK：首页落盘；控件在调试 TAB。
+// 打怪 TICK：落盘 [core]；控件在「吸怪 快攻」TAB「快攻」卡。
 static int gUiCombatTickMs = (int)xcat::kSimpleCombatTickDefaultMs;
-// 出刀按键 hold：控件在调试 TAB，与 TICK 同卡片共用一次读盘。
+// 不打 MISS 怪：落盘 [core]；控件在「吸怪 快攻」TAB「快攻」卡。
+static bool gUiSkipAccMissOn = xcat::kCombatSkipAccMissDefault != 0;
+static int gUiSkipAccMissN = (int)xcat::kCombatSkipAccMissNDefault;
+// 出刀按键 hold：控件在调试 TAB。
 static int gUiAttackHoldMs = (int)xcat::kAttackHoldDefaultMs;
 // F5 追怪策略：首页 Combo + persistCore 落盘。
 static int gUiApproachMode = 0;  // 0=空中贴怪 / 1=拟人 / 2=站桩输出 / 3=瞬移找怪 / 4=关闭
@@ -875,6 +878,9 @@ static int gUiMobGatherCoastVy = (int)xcat::kMobGatherCoastVyDefault;
 static int gUiMobGatherAimMs = (int)xcat::kMobGatherAimMsDefault;
 static bool gUiMobGatherSoftRelogin = xcat::kMobGatherSoftReloginDefault != 0;
 static int gUiMobGatherSoftReloginSec = (int)xcat::kMobGatherSoftReloginSecDefault;
+static int gUiMobGatherHangupFires = (int)xcat::kMobGatherHangupFiresDefault;
+static bool gUiMobGatherHangupFiresOn = xcat::kMobGatherHangupFiresOnDefault != 0;
+static bool gUiMobGatherHangupUnbindF5 = xcat::kMobGatherHangupUnbindF5Default != 0;
 static bool gUiMobGatherClearRelogin = xcat::kMobGatherClearReloginDefault != 0;
 static bool gUiMobGatherSeekCluster = xcat::kMobGatherSeekClusterDefault != 0;
 static bool gUiMobGatherHomeReturn = xcat::kMobGatherHomeReturnDefault != 0;
@@ -899,9 +905,29 @@ static uint32_t MobGatherUiU32(int v) {
     return static_cast<uint32_t>(v);
 }
 
+static uint32_t gSyncedGatherUnlockWant = 0xFFFFFFFFu;
+
+// 把 ws888 解锁镜像写进 payload，让 DLL 标题栏知道能不能画刀数。
+static void SyncGatherUnlockToPayload(LaunchUiState& ui) {
+    EnsureGatherUnlockLoaded();
+    if (ui.prefsBinDir.empty()) return;
+    const uint32_t want = gGatherTabUnlocked ? 1u : 0u;
+    if (gSyncedGatherUnlockWant == want) return;
+    xcat::PayloadControl c{};
+    if (!xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c)) return;
+    if (c.gatherTabUnlocked == want) {
+        gSyncedGatherUnlockWant = want;
+        return;
+    }
+    c.gatherTabUnlocked = want;
+    c.writeTickMs = GetTickCount64();
+    if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) gSyncedGatherUnlockWant = want;
+}
+
 // 吸怪 TAB 未解锁时：关掉附属能力 UI，并把 user.ini 里仍为开的位强制清掉。
 static void EnforceGatherTabExclusiveGates(LaunchUiState& ui) {
     EnsureGatherUnlockLoaded();
+    SyncGatherUnlockToPayload(ui);
     if (gGatherTabUnlocked) return;
     gUiAttackAccelClearBusy = false;
     gUiAttackAccelSkipPrepare = false;
@@ -915,6 +941,7 @@ static void EnforceGatherTabExclusiveGates(LaunchUiState& ui) {
     c.attackAccelClearBusy = 0;
     c.attackAccelSkipPrepare = 0;
     c.attackAccelCutLayer = 0;
+    c.gatherTabUnlocked = 0;
     c.writeTickMs = GetTickCount64();
     (void)xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c);
 }
@@ -1049,6 +1076,10 @@ void DrawHomeTab(LaunchUiState& ui) {
                 hitRotateN = (int)xcat::ClampCombatHitRotateN(
                     disk.simpleCombatHitRotateN ? disk.simpleCombatHitRotateN
                                                 : xcat::kCombatHitRotateNDefault);
+                gUiSkipAccMissOn = disk.simpleCombatSkipAccMiss != 0;
+                gUiSkipAccMissN = (int)xcat::ClampCombatSkipAccMissN(
+                    disk.simpleCombatSkipAccMissN ? disk.simpleCombatSkipAccMissN
+                                                  : xcat::kCombatSkipAccMissNDefault);
                 teleportOneHit = disk.simpleCombatTeleportOneHit != 0;
                 // LiveStep / attack_rpc 仍默认关，仅实验 TAB 可勾。
                 gUiCombatLiveStep = disk.simpleCombatLiveStep != 0;
@@ -1112,6 +1143,10 @@ void DrawHomeTab(LaunchUiState& ui) {
                 gUiMobGatherSoftReloginSec = (int)xcat::ClampMobGatherSoftReloginSec(
                     disk.mobGatherSoftReloginSec ? disk.mobGatherSoftReloginSec
                                                  : xcat::kMobGatherSoftReloginSecDefault);
+                gUiMobGatherHangupFires =
+                    (int)xcat::ClampMobGatherHangupFires(disk.mobGatherHangupFires);
+                gUiMobGatherHangupFiresOn = disk.mobGatherHangupFiresOn != 0;
+                gUiMobGatherHangupUnbindF5 = disk.mobGatherHangupUnbindF5 != 0;
                 gUiMobGatherClearRelogin = disk.mobGatherClearRelogin != 0;
                 gUiMobGatherSeekCluster = disk.mobGatherSeekCluster != 0;
                 gUiMobGatherHomeReturn = disk.mobGatherHomeReturn != 0;
@@ -1257,6 +1292,9 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.simpleCombatHitRotate = hitRotateOn ? 1u : 0u;
         c.simpleCombatHitRotateN = xcat::ClampCombatHitRotateN(
             static_cast<uint32_t>(hitRotateN < 1 ? 1 : hitRotateN));
+        c.simpleCombatSkipAccMiss = gUiSkipAccMissOn ? 1u : 0u;
+        c.simpleCombatSkipAccMissN = xcat::ClampCombatSkipAccMissN(
+            static_cast<uint32_t>(gUiSkipAccMissN < 1 ? 1 : gUiSkipAccMissN));
         c.simpleCombatTeleport = (gUiApproachMode == 3) ? 1u : 0u;
         c.simpleCombatTeleportOneHit = teleportOneHit ? 1u : 0u;
         c.simpleCombatLiveStep = gUiCombatLiveStep ? 1u : 0u;
@@ -1272,6 +1310,9 @@ void DrawHomeTab(LaunchUiState& ui) {
             static_cast<uint32_t>(gUiForgeHitFrontDx < 0 ? 0 : gUiForgeHitFrontDx));
         c.simpleCombatForgeHitFrontDy = xcat::ClampForgeHitFrontDy(
             static_cast<uint32_t>(gUiForgeHitFrontDy < 0 ? 0 : gUiForgeHitFrontDy));
+        c.simpleCombatForgeHitMobs = xcat::kForgeHitMobsDefault;
+        c.simpleCombatForgeHitFillList = 0;
+        c.simpleCombatForgeHitMultiPkt = 0;
         gUiForgeHitFrontDx = (int)c.simpleCombatForgeHitFrontDx;
         gUiForgeHitFrontDy = (int)c.simpleCombatForgeHitFrontDy;
         c.mapAttack = gUiMapAttack ? 1u : 0u;
@@ -1323,6 +1364,11 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.mobGatherSoftRelogin = gUiMobGatherSoftRelogin ? 1u : 0u;
         c.mobGatherSoftReloginSec = xcat::ClampMobGatherSoftReloginSec(
             static_cast<uint32_t>(gUiMobGatherSoftReloginSec < 0 ? 0 : gUiMobGatherSoftReloginSec));
+        c.mobGatherHangupFires = xcat::ClampMobGatherHangupFires(
+            static_cast<uint32_t>(gUiMobGatherHangupFires < 0 ? 0 : gUiMobGatherHangupFires));
+        c.mobGatherHangupFiresOn = gUiMobGatherHangupFiresOn ? 1u : 0u;
+        c.mobGatherHangupUnbindF5 = gUiMobGatherHangupUnbindF5 ? 1u : 0u;
+        c.gatherTabUnlocked = WorkspaceGatherTabUnlocked() ? 1u : 0u;
         c.mobGatherClearRelogin = gUiMobGatherClearRelogin ? 1u : 0u;
         c.mobGatherSeekCluster = gUiMobGatherSeekCluster ? 1u : 0u;
         c.mobGatherHomeReturn = gUiMobGatherHomeReturn ? 1u : 0u;
@@ -1681,7 +1727,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "自动出刀间隔（%u–10000 ms，默认 %ums）。\n"
                 "「攻击无CD」开/关都用这个值；下限 %u ms；过短易空砍/踢号。\n"
-                "「攻击无CD」开关在「吸怪」TAB（需解锁）。",
+                "「攻击无CD」开关在「吸怪 快攻」TAB（需解锁）。",
                 (unsigned)xcat::kSimpleCombatAttackIntervalMinMs,
                 (unsigned)xcat::kSimpleCombatAttackIntervalDefaultMs,
                 (unsigned)xcat::kSimpleCombatAttackIntervalMinMs);
@@ -1708,7 +1754,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                     "· 站桩输出：人原地砍。面前攻击盒（下方横向/竖直，默认 60×10）\n"
                     "  里有活怪就一直 A，不等贴脸、不空砍换怪、不禁锁。\n"
                     "  开打/切策略/换图/软重连后原地站「静止」ms 给吸物；0=不等；换怪不重新站。\n"
-                    "  不自动吸怪；要吸请自己开「吸怪」TAB。\n"
+                    "  不自动吸怪；要吸请自己开「吸怪 快攻」TAB。\n"
                     "· 瞬移找怪：fill+Doing 贴到怪旁再出刀，可跨层。水平站距 X 与空中/拟人共用。\n"
                     "  可勾「每只怪打一下」：出一刀就切下一只（默认关）。\n"
                     "  选此项：出过刀后强制「主动软重连」清加速 FLAG（出刀后关 F5 仍走完这一轮；\n"
@@ -1798,7 +1844,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "自己指定人↔怪的水平间距 X（空中贴怪 / 拟人 / 瞬移找怪共用）。\n"
                 "垂直 Y 只给空中贴怪悬停；拟人/瞬移贴台，不吃 Y。\n"
-                "吸怪落点请到「吸怪」TAB 调，两套互不影响。\n"
+                "吸怪落点请到「吸怪 快攻」TAB 调，两套互不影响。\n"
                 "不勾 = 用内置近战最优值（X=%u，Y=%d）。\n"
                 "勾上后：命中率归你调——站太远打不到，程序不会替你拦。",
                 (unsigned)xcat::kCombatStandOffXDefault, (int)xcat::kCombatStandOffYDefault);
@@ -1987,52 +2033,8 @@ void DrawHomeTab(LaunchUiState& ui) {
             "同时只读采样 Galaxy_* 写 galaxy_token.log（仅 len+前缀，不清登录态）。\n"
             "日志 soft_login.log / galaxy_token.log。\n"
             "亦可用 soft_login_probe.on / SOFT_LOGIN_PROBE=1\n"
-            "（或旧 marker galaxy_token_probe.on 仅采证）。");
-
-        {
-            const bool forceByTeleport = (gUiApproachMode == 3 && autoCombat);
-            bool shownSoftRelogin = gUiMobGatherSoftRelogin || forceByTeleport;
-            ImGui::BeginDisabled(forceByTeleport);
-            if (xcat::ui::OptionCheckbox("主动软重连", &shownSoftRelogin)) {
-                if (!forceByTeleport) {
-                    gUiMobGatherSoftRelogin = shownSoftRelogin;
-                    persistCore();
-                }
-            }
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip(
-                    "默认关。不绑吸怪，可单独开。勾了且进图站稳满 X 秒后，\n"
-                    "由我们主动 CloseSession 走软重连回图。成功落地后再计时。\n"
-                    "「软重连试连」必须开，否则不会拆会话。\n"
-                    "核心：出过刀必须 hangup 清加速 FLAG（配合攻击加速规避检测）。\n"
-                    "第一刀才起表；出刀后关 F5 仍走完这一轮。没出过刀才不计时，满包可直接卖。\n"
-                    "追怪选「瞬移找怪」且 F5 开着时面板强制显示（切走瞬移恢复勾选，不改落盘）。\n"
-                    "自动卖装 / 补给赶路 / Travel 途中暂停倒计时，回挂机图再继续。\n"
-                    "换图窗 / 商城拍卖 / 换频 / 测谎途中不拆。\n"
-                    "不点確認、不清登录态。落盘 user.ini。");
-            }
-            ImGui::BeginDisabled(!gUiMobGatherSoftRelogin && !forceByTeleport);
-        ImGui::SameLine();
-        ImGui::TextDisabled("间隔");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
-        if (ImGui::DragInt("##hangup_soft_sec", &gUiMobGatherSoftReloginSec, 1,
-                           static_cast<int>(xcat::kMobGatherSoftReloginSecMin),
-                           static_cast<int>(xcat::kMobGatherSoftReloginSecMax))) {
-            gUiMobGatherSoftReloginSec = static_cast<int>(xcat::ClampMobGatherSoftReloginSec(
-                static_cast<uint32_t>(gUiMobGatherSoftReloginSec < 0
-                                          ? 0
-                                          : gUiMobGatherSoftReloginSec)));
-            persistCore();
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("满这么多秒后触发。拖动或双击填。默认 20，范围 10–3600。");
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("秒");
-        ImGui::EndDisabled();
-        }
+            "（或旧 marker galaxy_token_probe.on 仅采证）。\n"
+            "秒数/出刀闸在「吸怪 快攻」TAB「快攻」卡「主动软重连」「出刀软重连」。");
     }
     CardGap();
     {
@@ -2760,7 +2762,7 @@ void DrawAutoSellTab(LaunchUiState& ui) {
     static bool refillMp = false;
     static bool refillCustom = false;
     static bool refillCustom2 = false;
-    static bool refillFeed = true;
+    static bool refillFeed = false;
     static char refillHpName[64]{};
     static char refillMpName[64]{};
     static char refillCustomName[64]{};
@@ -3988,7 +3990,7 @@ void DrawReloginTab(LaunchUiState& ui) {
     static bool detect = true;
     static bool stopCombat = false;
     static bool stopGather = false;
-    static bool channelHop = false;
+    static bool channelHop = true;
     static bool gmEscalate = true;
     static bool hideOthers = false;
     static bool gatherOn = false;
@@ -4001,7 +4003,7 @@ void DrawReloginTab(LaunchUiState& ui) {
             detect = true;
             stopCombat = false;
             stopGather = false;
-            channelHop = false;
+            channelHop = true;
             gmEscalate = true;
             hideOthers = false;
             gatherOn = false;
@@ -4080,18 +4082,19 @@ void DrawReloginTab(LaunchUiState& ui) {
         if (xcat::ui::OptionCheckbox("遇人停吸", &stopGather)) trySaveOrRevert();
         ImGui::EndDisabled();
         ImGui::TextDisabled(
-            gatherForce ? "吸怪开启时强制遇人停吸 + 换频，避免别人看见吸怪。"
-                        : "勾选后遇人（含 GM/隐身升级）会卸掉正在吸的怪，人走净再继续。不改吸怪 TAB 开关。");
+            gatherForce ? "吸怪开启时强制遇人停吸 + 软重连进新频，避免别人看见吸怪。"
+                        : "勾选后遇人（含 GM/隐身升级）会卸掉正在吸的怪，人走净再继续。不改「吸怪 快攻」TAB 开关。");
     }
     ImGui::BeginDisabled(gatherForce);
     if (xcat::ui::OptionCheckbox("一直有人就换频", &channelHop)) trySaveOrRevert();
     ImGui::EndDisabled();
+    ImGui::TextDisabled("勾上：遇人则软重连进随机新频，不回原频道。首页「软重连试连」须开。F10 手动仍走游戏换频。");
     if (gatherForce) {
         ImGui::TextDisabled("吸怪开启时强制启用，关吸怪后才能改。");
     }
     if (xcat::ui::OptionCheckbox("GM/隐身立即处理", &gmEscalate)) trySaveOrRevert();
     ImGui::TextDisabled(
-        "Admin/Manager(800/900)或未藏人时的隐身实体 → 立刻停手/换频 + 强制 Alarm（不依赖上方停手/换频勾选）。");
+        "Admin/Manager(800/900)或未藏人时的隐身实体 → 立刻停手/软重连进新频 + 强制 Alarm（不依赖上方停手/换频勾选）。");
         ImGui::TextDisabled("关则普通遇人仍跟「先停手 / 遇人停吸 / 一直有人就换频」；服务端不广播跟踪仍无法发现。");
     ImGui::Separator();
     if (xcat::ui::OptionCheckbox("隐藏同图其他玩家", &hideOthers)) trySaveOrRevert();
@@ -4851,6 +4854,9 @@ void DrawBetaTab(LaunchUiState& ui) {
             static_cast<uint32_t>(gUiForgeHitFrontDx < 0 ? 0 : gUiForgeHitFrontDx));
         c.simpleCombatForgeHitFrontDy = xcat::ClampForgeHitFrontDy(
             static_cast<uint32_t>(gUiForgeHitFrontDy < 0 ? 0 : gUiForgeHitFrontDy));
+        c.simpleCombatForgeHitMobs = xcat::kForgeHitMobsDefault;
+        c.simpleCombatForgeHitFillList = 0;
+        c.simpleCombatForgeHitMultiPkt = 0;
         gUiForgeHitFrontDx = (int)c.simpleCombatForgeHitFrontDx;
         gUiForgeHitFrontDy = (int)c.simpleCombatForgeHitFrontDy;
         c.writeTickMs = GetTickCount64();
@@ -4905,15 +4911,14 @@ void DrawBetaTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "实验项。落盘 user.ini。简单战斗普攻才自己组包。\n"
                 "发包走 Network.SendOutPacket（禁止 Session.Send 旁路）。\n"
-                "命中环只填当前锁 oid。近战 50；A 槽魔法攻击技 52。\n"
+                "默认：命中环只填当前锁 oid。近战 50；A 槽魔法攻击技 52。\n"
                 "过远（本卡攻击盒）/ SendOut 失败 / 射击 51：这一刀作废，不退 OnFuncKey。\n"
                 "\n"
                 "和「打怪实验」里的「攻包伪造探针」不是同一个勾：\n"
                 "· 探针 = 自己 Tick 扫近距怪，满 2 次自动关\n"
                 "· 本项 = 劫持打怪出刀，节奏跟面板间隔\n"
                 "\n"
-                "攻击盒与首页「站桩输出」横向/竖直各存各的。\n"
-                "不要和瞬移聚怪一起开。多发手搓已证实踢号。");
+                "攻击盒与探针「多怪数」、首页「站桩输出」横向/竖直各存各的。");
         }
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("X");
@@ -5207,7 +5212,7 @@ void DrawBetaTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "实验项（默认关）：写 SecondaryStat.nBooster_=-8，把攻速 degree 夹到最快的 2，\n"
                 "攻击延迟 ×0.75；到期时间按游戏钟每拍续 60s，关勾选时原值奉还。\n"
-                "与吸怪 TAB「攻击无CD」完全独立，就是为了能分别开来做对照：\n"
+                "与「吸怪 快攻」TAB「攻击无CD」完全独立，就是为了能分别开来做对照：\n"
                 "实测「攻击无CD」开着时本项净收益为 0 —— 忙锁一清，引擎那道延迟闸就没了。\n"
                 "它真正的用法是**替掉**「攻击无CD」：只开本项，不碰动作忙锁，约慢 5ms 但更干净。\n"
                 "注意 -8 超出合法 booster 值域（正常只有 -1/-2），存在被识别的风险。");
@@ -5943,10 +5948,12 @@ void DrawDebugTab(LaunchUiState& ui) {
                 if (ClearGatherUnlockReg()) {
                     gGatherTabUnlocked = false;
                     gGatherUnlockSaved = false;
+                    gSyncedGatherUnlockWant = 0xFFFFFFFFu;
                     // 吸怪 TAB 附属能力一并关掉，避免未解锁仍下发。
                     gUiAttackAccelClearBusy = false;
                     gUiAttackAccelSkipPrepare = false;
                     gUiAttackAccelCutLayer = false;
+                    SyncGatherUnlockToPayload(ui);
                     if (!ui.prefsBinDir.empty()) {
                         xcat::PayloadControl c{};
                         if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c) &&
@@ -5955,6 +5962,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                             c.attackAccelClearBusy = 0;
                             c.attackAccelSkipPrepare = 0;
                             c.attackAccelCutLayer = 0;
+                            c.gatherTabUnlocked = 0;
                             c.writeTickMs = GetTickCount64();
                             (void)xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c);
                         }
@@ -5991,6 +5999,8 @@ void DrawDebugTab(LaunchUiState& ui) {
                     sound::UiError();
                     xcat::log::Warn("App", "workspace command persist failed");
                 }
+                gSyncedGatherUnlockWant = 0xFFFFFFFFu;
+                SyncGatherUnlockToPayload(ui);
             } else {
                 cmdOk = false;
                 cmdMsg = "无效指令";
@@ -6276,9 +6286,6 @@ void DrawDebugTab(LaunchUiState& ui) {
             xcat::PayloadControl disk{};
             if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
                 if (!tickDbgLoaded || disk.writeTickMs != tickDbgSeen) {
-                    gUiCombatTickMs = (int)xcat::ClampSimpleCombatTickMs(
-                        disk.simpleCombatTickMs ? disk.simpleCombatTickMs
-                                               : xcat::kSimpleCombatTickDefaultMs);
                     gUiAttackHoldMs = (int)xcat::ClampAttackHoldMs(
                         disk.simpleCombatAttackHoldMs ? disk.simpleCombatAttackHoldMs
                                                       : xcat::kAttackHoldDefaultMs);
@@ -6292,46 +6299,21 @@ void DrawDebugTab(LaunchUiState& ui) {
             tickDbgLoaded = true;
         }
 
-        auto persistTiming = [&]() {
+        auto persistHold = [&]() {
             if (ui.prefsBinDir.empty()) return;
             xcat::PayloadControl c{};
             (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-            c.simpleCombatTickMs = xcat::ClampSimpleCombatTickMs(
-                static_cast<uint32_t>(gUiCombatTickMs < 0 ? 0 : gUiCombatTickMs));
-            gUiCombatTickMs = (int)c.simpleCombatTickMs;
             c.simpleCombatAttackHoldMs = xcat::ClampAttackHoldMs(
                 static_cast<uint32_t>(gUiAttackHoldMs < 0 ? 0 : gUiAttackHoldMs));
             gUiAttackHoldMs = (int)c.simpleCombatAttackHoldMs;
             c.writeTickMs = GetTickCount64();
             if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
                 tickDbgSeen = c.writeTickMs;
-                xcat::log::Ok("App",
-                              "已下发 core：simpleCombatTickMs=%u hold=%u（调试）",
-                              c.simpleCombatTickMs, c.simpleCombatAttackHoldMs);
+                xcat::log::Ok("App", "已下发 core：hold=%u（调试）", c.simpleCombatAttackHoldMs);
             } else {
                 xcat::log::Warn("App", "写入 user.ini [core] 打怪节奏参数失败");
             }
         };
-
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("TICK值");
-        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
-        ImGui::SetNextItemWidth(AppDpi_Px(56.f));
-        if (ImGui::DragInt("##dbg_combat_tick_ms", &gUiCombatTickMs, 1,
-                           (int)xcat::kSimpleCombatTickMinMs, (int)xcat::kSimpleCombatTickMaxMs))
-            persistTiming();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip(
-                "打怪状态机心跳（%u–%u ms，默认 %u）。\n"
-                "与是否开攻击加速无关；越短出刀机会越多。\n"
-                "下限 %u ms；过短更吃 CPU/主线程。",
-                (unsigned)xcat::kSimpleCombatTickMinMs, (unsigned)xcat::kSimpleCombatTickMaxMs,
-                (unsigned)xcat::kSimpleCombatTickDefaultMs, (unsigned)xcat::kSimpleCombatTickMinMs);
-        }
-        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
-        ImGui::TextUnformatted("ms");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::TextDisabled("全局心跳 · 非仅加速");
 
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("按键hold");
@@ -6339,14 +6321,15 @@ void DrawDebugTab(LaunchUiState& ui) {
         ImGui::SetNextItemWidth(AppDpi_Px(56.f));
         if (ImGui::DragInt("##dbg_attack_hold_ms", &gUiAttackHoldMs, 1,
                            (int)xcat::kAttackHoldMinMs, (int)xcat::kAttackHoldMaxMs))
-            persistTiming();
+            persistHold();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "出刀按键按下到松开的时长（%u–%u ms，默认 %u）。\n"
                 "实际取 min(此值, 出刀间隔)：hold ≥ 间隔会把下一刀锁死。\n"
                 "注意：开着「攻击加速」时走 Down+Up 同泵的 pulse 路径，hold=0，此项不参与；\n"
                 "只有关掉加速、走异步松键时才有效。\n"
-                "调太小可能个别刀不被引擎识别（看日志 whiff 是否变多）。",
+                "调太小可能个别刀不被引擎识别（看日志 whiff 是否变多）。\n"
+                "TICK 心跳已迁到「吸怪 快攻」TAB「快攻」卡。",
                 (unsigned)xcat::kAttackHoldMinMs, (unsigned)xcat::kAttackHoldMaxMs,
                 (unsigned)xcat::kAttackHoldDefaultMs);
         }
@@ -6354,6 +6337,47 @@ void DrawDebugTab(LaunchUiState& ui) {
         ImGui::TextUnformatted("ms");
         ImGui::SameLine(0.f, ui::Gap());
         ImGui::TextDisabled("加速开启时不参与");
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_dbg_hangup_unbind", "主动软重连");
+        static bool unbindDbgLoaded = false;
+        static uint64_t unbindDbgSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!unbindDbgLoaded || disk.writeTickMs != unbindDbgSeen) {
+                    gUiMobGatherHangupUnbindF5 = disk.mobGatherHangupUnbindF5 != 0;
+                    unbindDbgSeen = disk.writeTickMs;
+                    unbindDbgLoaded = true;
+                }
+            } else if (!unbindDbgLoaded) {
+                unbindDbgLoaded = true;
+            }
+        } else if (!unbindDbgLoaded) {
+            unbindDbgLoaded = true;
+        }
+        if (xcat::ui::OptionCheckbox("解除主动软重连绑定F5", &gUiMobGatherHangupUnbindF5)) {
+            if (!ui.prefsBinDir.empty()) {
+                xcat::PayloadControl c{};
+                (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+                c.mobGatherHangupUnbindF5 = gUiMobGatherHangupUnbindF5 ? 1u : 0u;
+                c.writeTickMs = GetTickCount64();
+                if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                    unbindDbgSeen = c.writeTickMs;
+                    xcat::log::Ok("App", "已下发 core：mobGatherHangupUnbindF5=%d（调试）",
+                                  gUiMobGatherHangupUnbindF5 ? 1 : 0);
+                } else {
+                    xcat::log::Warn("App", "写入 user.ini [core] 解除绑定F5 失败");
+                }
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认关。关着：追怪选「瞬移找怪」且 F5 开着时，「吸怪 快攻」TAB「快攻」卡「主动软重连」秒数闸强制开（面板置灰，不改落盘）。\n"
+                "勾上：不再强制，秒数闸只跟该勾选。出刀累计闸不受影响。\n"
+                "「软重连试连」仍须开才会拆会话。");
+        }
     }
     CardGap();
     {
@@ -8308,6 +8332,7 @@ bool TriggerManualRejoin(const std::string& prefsBinDir, bool requireInjected, s
 static std::string sMobGatherLoadedBin;
 static uint64_t sMobGatherLastTick = 0;
 static bool sMobGatherSaveFailed = false;
+static bool sMobGatherAutoCombat = false;
 
 static void MobGatherApplyDisk(const xcat::PayloadControl& c) {
     gUiMobGather = c.mobGather != 0;
@@ -8348,10 +8373,14 @@ static void MobGatherApplyDisk(const xcat::PayloadControl& c) {
     gUiMobGatherBrakeMs = (int)c.mobGatherBrakeMs;
     gUiMobGatherCoastVy = (int)c.mobGatherCoastVy;
     gUiMobGatherAimMs = (int)c.mobGatherAimMs;
+    sMobGatherAutoCombat = c.simpleCombat != 0;
     gUiMobGatherSoftRelogin = c.mobGatherSoftRelogin != 0;
     gUiMobGatherSoftReloginSec = (int)xcat::ClampMobGatherSoftReloginSec(
         c.mobGatherSoftReloginSec ? c.mobGatherSoftReloginSec
                                   : xcat::kMobGatherSoftReloginSecDefault);
+    gUiMobGatherHangupFires = (int)xcat::ClampMobGatherHangupFires(c.mobGatherHangupFires);
+    gUiMobGatherHangupFiresOn = c.mobGatherHangupFiresOn != 0;
+    gUiMobGatherHangupUnbindF5 = c.mobGatherHangupUnbindF5 != 0;
     gUiMobGatherClearRelogin = c.mobGatherClearRelogin != 0;
     gUiMobGatherSeekCluster = c.mobGatherSeekCluster != 0;
     gUiMobGatherHomeReturn = c.mobGatherHomeReturn != 0;
@@ -8364,6 +8393,12 @@ static void MobGatherApplyDisk(const xcat::PayloadControl& c) {
     gUiAttackAccelClearBusy = c.attackAccelClearBusy != 0;
     gUiAttackAccelSkipPrepare = c.attackAccelSkipPrepare != 0;
     gUiAttackAccelCutLayer = c.attackAccelCutLayer != 0;
+    gUiCombatTickMs = (int)xcat::ClampSimpleCombatTickMs(
+        c.simpleCombatTickMs ? c.simpleCombatTickMs : xcat::kSimpleCombatTickDefaultMs);
+    gUiSkipAccMissOn = c.simpleCombatSkipAccMiss != 0;
+    gUiSkipAccMissN = (int)xcat::ClampCombatSkipAccMissN(
+        c.simpleCombatSkipAccMissN ? c.simpleCombatSkipAccMissN
+                                   : xcat::kCombatSkipAccMissNDefault);
     sMobGatherLastTick = c.writeTickMs;
 }
 
@@ -8431,6 +8466,11 @@ static bool MobGatherSaveUi(LaunchUiState& ui) {
     c.mobGatherSoftRelogin = gUiMobGatherSoftRelogin ? 1u : 0u;
     c.mobGatherSoftReloginSec = xcat::ClampMobGatherSoftReloginSec(
         static_cast<uint32_t>(gUiMobGatherSoftReloginSec < 0 ? 0 : gUiMobGatherSoftReloginSec));
+    c.mobGatherHangupFires = xcat::ClampMobGatherHangupFires(
+        static_cast<uint32_t>(gUiMobGatherHangupFires < 0 ? 0 : gUiMobGatherHangupFires));
+    c.mobGatherHangupFiresOn = gUiMobGatherHangupFiresOn ? 1u : 0u;
+    c.mobGatherHangupUnbindF5 = gUiMobGatherHangupUnbindF5 ? 1u : 0u;
+    c.gatherTabUnlocked = WorkspaceGatherTabUnlocked() ? 1u : 0u;
     c.mobGatherClearRelogin = gUiMobGatherClearRelogin ? 1u : 0u;
     c.mobGatherSeekCluster = gUiMobGatherSeekCluster ? 1u : 0u;
     c.mobGatherHomeReturn = gUiMobGatherHomeReturn ? 1u : 0u;
@@ -8443,6 +8483,15 @@ static bool MobGatherSaveUi(LaunchUiState& ui) {
     c.attackAccelClearBusy = gUiAttackAccelClearBusy ? 1u : 0u;
     c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
     c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
+    c.simpleCombatTickMs = xcat::ClampSimpleCombatTickMs(
+        static_cast<uint32_t>(gUiCombatTickMs < 0 ? 0 : gUiCombatTickMs));
+    gUiCombatTickMs = (int)c.simpleCombatTickMs;
+    c.simpleCombatSkipAccMiss = gUiSkipAccMissOn ? 1u : 0u;
+    c.simpleCombatSkipAccMissN = xcat::ClampCombatSkipAccMissN(
+        static_cast<uint32_t>(gUiSkipAccMissN < 1 ? 1 : gUiSkipAccMissN));
+    gUiSkipAccMissN = (int)c.simpleCombatSkipAccMissN;
+    c.secAttackIntercept = 0;
+    c.secAttackTextHook = 0;
     c.writeTickMs = GetTickCount64();
     if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
     sMobGatherLastTick = c.writeTickMs;
@@ -8510,6 +8559,83 @@ static void MobGatherDragFree(LaunchUiState& ui, const char* label, const char* 
     }
 }
 
+static const char* SecAttackPktOpcodeName(int opcode) {
+    switch (opcode) {
+        case 50:
+            return "近战";
+        case 51:
+            return "射击";
+        case 52:
+            return "魔法";
+        case 53:
+            return "身体";
+        case 191:
+            return "召唤";
+        default:
+            return nullptr;
+    }
+}
+
+void DrawMobGatherType20ProbeCard(LaunchUiState& ui) {
+    xcat::ui::CardGuard card("##tab_gather_type20", "type20 观测");
+    ImGui::TextDisabled("只读原生 SecurityClient 字典 peakKey，不出刀闸。约 0.5s 刷新。");
+    ImGui::TextDisabled("BIN：XCat_data/logs/sec_attack.log  ·  grep PROBE");
+    xcat::PayloadStatus st{};
+    const bool fresh = !ui.prefsBinDir.empty() &&
+                       xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) &&
+                       xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000);
+    if (!fresh) {
+        ImGui::TextDisabled("未读到载荷状态（注入后进图）");
+        return;
+    }
+    if (st.playReady == 0) {
+        ImGui::TextDisabled("未进图");
+        return;
+    }
+    if (st.secAttackOk == 0) {
+        ImGui::TextDisabled("字典未绑上（进图打几下再看）");
+        return;
+    }
+
+    const int peak = (int)st.secAttackPeak;
+    const int pct = (int)st.secAttackPct;
+    ImVec4 peakCol = ImVec4(0.35f, 0.85f, 0.45f, 1.f);
+    if (peak >= 1900)
+        peakCol = ImVec4(1.f, 0.35f, 0.35f, 1.f);
+    else if (peak >= 1500)
+        peakCol = ImVec4(1.f, 0.75f, 0.2f, 1.f);
+    ImGui::TextUnformatted("peakKey");
+    ImGui::SameLine();
+    ImGui::TextColored(peakCol, "%d / 2000 (%d%%)", peak, pct);
+    ImGui::SameLine();
+    ImGui::TextDisabled("窗内最高 %d", (int)st.secAttackWindowPeak);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "type20 按两本字典里某一个键的当前计数是否超过 2000。\n"
+            "不是出刀次数，也不是包合计。原生约 60s 清窗；落地也会把字典置 0。");
+    }
+
+    const char* pktName = SecAttackPktOpcodeName((int)st.secAttackPktPeakId);
+    if (pktName) {
+        ImGui::Text("攻包单键  %d  opcode=%d %s    合计 %d", (int)st.secAttackPktPeak,
+                    (int)st.secAttackPktPeakId, pktName, (int)st.secAttackPktSum);
+    } else {
+        ImGui::Text("攻包单键  %d  opcode=%d    合计 %d", (int)st.secAttackPktPeak,
+                    (int)st.secAttackPktPeakId, (int)st.secAttackPktSum);
+    }
+    ImGui::Text("技能单键  %d  skillId=%d    合计 %d", (int)st.secAttackSkillPeak,
+                (int)st.secAttackSkillPeakId, (int)st.secAttackSkillSum);
+
+    if (st.hangupFiresNeed > 0) {
+        ImGui::Text("出刀闸    %u / %u    （对照，不是同一把尺）", st.hangupFires,
+                    st.hangupFiresNeed);
+    } else {
+        ImGui::TextDisabled("出刀闸    关    本轮计数 %u", st.hangupFires);
+    }
+
+    ImGui::TextDisabled("detectTime %d", (int)st.secAttackDetectTime);
+}
+
 void DrawMobGatherTab(LaunchUiState& ui) {
     if (!gGatherTabUnlocked) {
         ImGui::TextDisabled("未解锁");
@@ -8521,12 +8647,22 @@ void DrawMobGatherTab(LaunchUiState& ui) {
                         ImVec2(ImGui::GetStyle().ItemSpacing.x, ui::Gap() * 0.85f));
 
     {
-        xcat::ui::CardGuard card("##tab_gather_switch", "开关");
-        if (xcat::ui::OptionCheckbox("吸怪", &gUiMobGather)) MobGatherTrySaveOrRevert(ui);
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(
-                "把这台客户端正在模拟的怪吸到角色朝向面前的落点，方便打。\n"
-                "不是防抢。追怪选「站桩输出」不会自动开本项。落盘 user.ini。");
+        xcat::ui::CardGuard card("##tab_gather_accel", "快攻");
+        {
+            char tip[320]{};
+            snprintf(tip, sizeof(tip),
+                     "打怪状态机心跳（%u–%u ms，默认 %u）。\n"
+                     "与是否开攻击加速无关；越短出刀机会越多。\n"
+                     "下限 %u ms；过短更吃 CPU/主线程。",
+                     (unsigned)xcat::kSimpleCombatTickMinMs,
+                     (unsigned)xcat::kSimpleCombatTickMaxMs,
+                     (unsigned)xcat::kSimpleCombatTickDefaultMs,
+                     (unsigned)xcat::kSimpleCombatTickMinMs);
+            MobGatherDragU(ui, "TICK值", "combat_tick", &gUiCombatTickMs,
+                           (int)xcat::kSimpleCombatTickMinMs, (int)xcat::kSimpleCombatTickMaxMs,
+                           1.f, "ms", tip);
+            ImGui::SameLine(0.f, ui::Gap());
+            ImGui::TextDisabled("全局心跳 · 非仅加速");
         }
         if (xcat::ui::OptionCheckbox("攻击无CD", &gUiAttackAccelClearBusy))
             MobGatherTrySaveOrRevert(ui);
@@ -8538,6 +8674,137 @@ void DrawMobGatherTab(LaunchUiState& ui) {
                 "出刀频率看「首页 → 挂机 → 出刀间隔」。\n"
                 "进图落地约 0.4s 内暂停写入，降低脱同步。\n"
                 "本 TAB 未解锁时不可用，也会强制关掉下发。");
+        }
+        {
+            if (xcat::ui::OptionCheckbox("不打MISS怪", &gUiSkipAccMissOn))
+                MobGatherTrySaveOrRevert(ui);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled |
+                                     ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "打进攻击盒但 ACC 不够、飘 MISS 时换下一只。盒外空刀不算。\n"
+                    "连续 N 次（默认 1）才换。\n"
+                    "不预判 ACC/EVA——客户端 CheckPDamageMiss 吃随机数，乱调会搅 RNG。\n"
+                    "免疫等其它 0 伤也可能被当成 MISS。\n"
+                    "生效核对：combat.log 出现 acc_miss 与 switch reason=skip_acc_miss");
+            }
+            ImGui::BeginDisabled(!gUiSkipAccMissOn);
+            ImGui::SameLine(0.f, ui::Gap());
+            ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+            if (ImGui::DragInt("##skip_acc_miss_n", &gUiSkipAccMissN, 1,
+                               (int)xcat::kCombatSkipAccMissNMin,
+                               (int)xcat::kCombatSkipAccMissNMax)) {
+                gUiSkipAccMissN = (int)xcat::ClampCombatSkipAccMissN(
+                    static_cast<uint32_t>(gUiSkipAccMissN < 1 ? 1 : gUiSkipAccMissN));
+                MobGatherTrySaveOrRevert(ui);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled |
+                                     ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "连续 ACC MISS 次数（%u–%u，默认 %u）。满次数即禁锁换下一只。",
+                    (unsigned)xcat::kCombatSkipAccMissNMin,
+                    (unsigned)xcat::kCombatSkipAccMissNMax,
+                    (unsigned)xcat::kCombatSkipAccMissNDefault);
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("连续MISS换下一只");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "进盒 ACC 不够才算。连续飘字满 N 次后 8 秒内不打这只。");
+            }
+        }
+        if (xcat::ui::OptionCheckbox("出刀软重连", &gUiMobGatherHangupFiresOn))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认开。本勾选只开累计出刀闸，与同卡「主动软重连」秒数闸互不绑架。\n"
+                "调用出刀成功即 +1。到阈值必须先拆清 FLAG，卖装/赶路不得插队。落地清零。\n"
+                "两勾都开则先到先拆。首页「软重连试连」必须开。上限 1900。");
+        }
+        ImGui::BeginDisabled(!gUiMobGatherHangupFiresOn);
+        MobGatherDragU(ui, "出刀", "hangup_fires", &gUiMobGatherHangupFires,
+                       (int)xcat::kMobGatherHangupFiresMin, (int)xcat::kMobGatherHangupFiresMax,
+                       10.f, "刀",
+                       "落地后累计出刀达此主动软重连。与 combat.log「fire id=」同拍 +1（不看忙位/命中）。换怪不清。\n"
+                       "默认 1900，上限 1900。须勾上方「出刀软重连」。与秒数闸先到先拆。");
+        ImGui::EndDisabled();
+        {
+            const bool forceByTeleport =
+                (gUiApproachMode == 3 && sMobGatherAutoCombat && !gUiMobGatherHangupUnbindF5);
+            bool shownSoftRelogin = gUiMobGatherSoftRelogin || forceByTeleport;
+            ImGui::BeginDisabled(forceByTeleport);
+            if (xcat::ui::OptionCheckbox("主动软重连", &shownSoftRelogin)) {
+                if (!forceByTeleport) {
+                    gUiMobGatherSoftRelogin = shownSoftRelogin;
+                    MobGatherTrySaveOrRevert(ui);
+                }
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "默认关。本勾选只开秒数闸。第一刀起表，满 X 秒后拆会话。\n"
+                    "同卡「出刀软重连」是累计出刀闸，可单独勾选。两勾都开则先到先拆。\n"
+                    "首页「软重连试连」必须开，否则不会拆会话。\n"
+                    "核心：勾了且出过刀必须 hangup 清加速 FLAG（配合攻击加速规避检测）。\n"
+                    "会话脏了换图/赶路不重置倒计时。出刀后关 F5 仍走完这一轮。没出过刀才不计时，满包可直接卖。\n"
+                    "追怪选「瞬移找怪」且 F5 开着时默认强制开秒数闸（切走瞬移恢复勾选，不改落盘）。\n"
+                    "调试 TAB「打怪节奏」下「解除主动软重连绑定F5」打开后不再强制，只跟本勾选。\n"
+                    "F5 开打后到点必拆。遇人（勾了换频）改为软重连进新频，不回原频，并算一次 hangup。\n"
+                    "自动卖装 / 补给赶路 / Travel / 测谎途中暂停倒计时，回挂机图再继续。\n"
+                    "不点確認、不清登录态。落盘 user.ini。");
+            }
+            ImGui::BeginDisabled(!gUiMobGatherSoftRelogin && !forceByTeleport);
+            ImGui::SameLine();
+            ImGui::TextDisabled("间隔");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(AppDpi_Px(56.f));
+            if (xcat::ui::DragIntClamped("##hangup_soft_sec", &gUiMobGatherSoftReloginSec,
+                                         static_cast<int>(xcat::kMobGatherSoftReloginSecMin),
+                                         static_cast<int>(xcat::kMobGatherSoftReloginSecMax))) {
+                gUiMobGatherSoftReloginSec = static_cast<int>(xcat::ClampMobGatherSoftReloginSec(
+                    static_cast<uint32_t>(gUiMobGatherSoftReloginSec < 0
+                                              ? 0
+                                              : gUiMobGatherSoftReloginSec)));
+                MobGatherTrySaveOrRevert(ui);
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "满这么多秒后触发。拖动松手或双击填写后失焦才生效。默认 20，范围 10–3600。\n"
+                    "只随同排「主动软重连」勾选。出刀闸在同卡「出刀软重连」，可单独勾。");
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("秒");
+            ImGui::EndDisabled();
+        }
+    }
+    CardGap();
+    {
+        xcat::ui::CardGuard card("##tab_gather_switch", "开关");
+        if (xcat::ui::OptionCheckbox("吸怪", &gUiMobGather)) MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "把这台客户端正在模拟的怪吸到角色朝向面前的落点，方便打。\n"
+                "不是防抢。追怪选「站桩输出」不会自动开本项。落盘 user.ini。");
+        }
+        {
+            xcat::PayloadStatus st{};
+            const bool fresh = !ui.prefsBinDir.empty() &&
+                               xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) &&
+                               xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000);
+            if (!fresh || st.playReady == 0 || st.secAttackOk == 0) {
+                ImGui::TextDisabled("攻包窗  未读到（进图后刷新）");
+            } else {
+                ImGui::Text("peakKey  %d / 2000 (%d%%)    窗内最高 %d",
+                            (int)st.secAttackPeak, (int)st.secAttackPct, (int)st.secAttackWindowPeak);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "窗内最高跟本局出刀同一拍起算：软重连落地清零观测高水位，原生 60s 到期也会清。\n"
+                        "只读 SecurityClient 本地窗；服端若自己数线上攻包，这里看不到。");
+                }
+                ImGui::TextDisabled("包合计 %d / 最高 %d    技能合计 %d / 最高 %d",
+                                    (int)st.secAttackPktSum, (int)st.secAttackWindowPktSum,
+                                    (int)st.secAttackSkillSum, (int)st.secAttackWindowSkillSum);
+            }
         }
         if (xcat::ui::OptionCheckbox("跳过攻击动画", &gUiAttackAccelSkipPrepare))
             MobGatherTrySaveOrRevert(ui);
@@ -8703,7 +8970,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
             MobGatherTrySaveOrRevert(ui);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "默认关。独立于首页「主动软重连」。必须先开吸怪才会拆会话。\n"
+                "默认关。独立于「快攻」卡「主动软重连」。必须先开吸怪才会拆会话。\n"
                 "「同时」=N 时吸到第 N 只就冻结（同时=1 只吸 1 只，死了不补下一只）。\n"
                 "这批死光再 CloseSession。超时溜走、落地清空名单不拆。首页「软重连试连」必须开。");
         }
@@ -8795,12 +9062,15 @@ void DrawMobGatherTab(LaunchUiState& ui) {
             gUiMobGatherStandOffX = (int)xcat::kMobGatherStandOffXDefault;
             gUiMobGatherStandOffY = (int)xcat::kMobGatherStandOffYDefault;
             gUiMobGatherAimJitter = (int)xcat::kMobGatherAimJitterDefault;
+            gUiMobGatherHangupFires = (int)xcat::kMobGatherHangupFiresDefault;
             MobGatherTrySaveOrRevert(ui);
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip("业务旋钮回默认。开关本身不动。飞控默认在「调试 → 吸怪飞控」。");
         }
     }
+    CardGap();
+    DrawMobGatherType20ProbeCard(ui);
     ImGui::PopStyleVar();
 }
 
@@ -8812,7 +9082,7 @@ void DrawMobGatherDyLimScanCard(LaunchUiState& ui) {
     ImGui::TextDisabled(
         "一键测竖直极限：自动开吸怪、关寻簇飞、半径 6000、冻结 14 秒软重连/清怪重连。"
         "闸从 1 每秒 +100 到 2000。掐线看 x.jsonl：dylim_ramp KICK dyLim=。不写 user.ini。"
-        "停扫把闸改回吸怪 TAB「高度闸」，不是写死 1200。");
+        "停扫把闸改回「吸怪 快攻」TAB「高度闸」，不是写死 1200。");
     ImGui::PopTextWrapPos();
     const uint32_t rampSeq =
         ui.prefsBinDir.empty() ? 0u : xcat::ReadMobGatherDyRampSeq(ui.prefsBinDir.c_str());
@@ -8859,7 +9129,7 @@ void DrawMobGatherDyLimScanCard(LaunchUiState& ui) {
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip(
-            "停止扫描并把竖直闸改回吸怪 TAB「高度闸」。\n"
+            "停止扫描并把竖直闸改回「吸怪 快攻」TAB「高度闸」。\n"
             "开始扫描不会改半径、不落盘。");
     }
 }
@@ -8872,7 +9142,7 @@ void DrawMobGatherFlyDebugCards(LaunchUiState& ui) {
                         ImVec2(ImGui::GetStyle().ItemSpacing.x, ui::Gap() * 0.85f));
     {
         xcat::ui::CardGuard card("##tab_dbg_gather_fly", "吸怪飞控");
-        ImGui::TextDisabled("怪侧 VTOL。人飞最密堆走 F5 滑翔（吸怪 TAB 勾选），本卡只拧怪侧。");
+        ImGui::TextDisabled("怪侧 VTOL。人飞最密堆走 F5 滑翔（「吸怪 快攻」TAB 勾选），本卡只拧怪侧。");
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("吸速");
         ImGui::SameLine(0.f, ui::Gap());

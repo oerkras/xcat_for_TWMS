@@ -155,7 +155,7 @@ struct AutoSupplyConfig {
     uint32_t refillMpEnabled = 0;
     uint32_t refillCustomEnabled = 0;   // 默认关：自定义消耗品槽1
     uint32_t refillCustom2Enabled = 0;  // 默认关：自定义消耗品槽2
-    uint32_t refillFeedEnabled = 1;     // 默认开：补美味飼料
+    uint32_t refillFeedEnabled = 0;     // 默认关：补美味飼料
     char     refillHpName[kAutoSupplyNameLen] = {};
     char     refillMpName[kAutoSupplyNameLen] = {};
     char     refillCustomName[kAutoSupplyNameLen] = {};

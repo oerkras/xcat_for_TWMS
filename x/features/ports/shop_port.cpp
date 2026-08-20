@@ -1339,19 +1339,21 @@ bool ShopDlgLooksOpen(void* dlg) {
     BindUnityHelpers();
     auto getGo = FnFromMi<FnGetGameObject>(gMiGetGameObject, kRvaGetGameObject);
     auto getActive = FnFromMi<FnGoGetActiveSelf>(gMiGoGetActiveSelf, kRvaGoGetActiveSelf);
-    if (!getGo || !getActive) return true;  // 无法校验时保守当作仍开着
+    // 校验失败当未开。BIN 2026-08-20：getGo 未绑时保守 true → 落地未 Talk 就 ShopReady，
+    // 卖栏 listN=0、全是「店不可卖」。
+    if (!getGo || !getActive) return false;
     void* go = nullptr;
     __try {
         go = getGo(dlg, gMiGetGameObject);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         go = nullptr;
     }
-    if (!go) return true;
-    bool active = true;
+    if (!go) return false;
+    bool active = false;
     __try {
         active = getActive(go, gMiGoGetActiveSelf);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        active = true;
+        active = false;
     }
     return active;
 }
@@ -1671,9 +1673,9 @@ void TalkJobOnMain(void* user) {
 
     const float maxD = job->maxDist > 1.f ? job->maxDist : kDefaultTalkDist;
     const float maxD2 = maxD * maxD;
-    // 经典版 NPC 对话本身可远距开店（玩家手玩也不必贴脸）。指定模板时全图找该 tpl，
-    // 勿用 tight 距离门禁——BIN 误杀后改 300 导致店图内 no target。
-    // 无模板时仍用 maxD，避免乱点远处无关 NPC。
+    // 指定模板时全图找该 tpl（BIN 误杀后改 300 导致店图内 no target）。
+    // 杂货/药店：玩家双击 NPC 无距离门，TalkToNpc 同样远距可开店（BIN 18:00 銘仁 dist=584 开成）。
+    // inRangeOnly 只给船/转职：那些远距 Talk 会被服端踢。无模板时仍用 maxD，避免乱点远处无关 NPC。
     constexpr float kTplMapWide = 8000.f;
     const float tplMaxD2 =
         job->preferTemplateId > 0 ? (kTplMapWide * kTplMapWide) : maxD2;
@@ -1709,6 +1711,11 @@ void TalkJobOnMain(void* user) {
         }
     }
 
+    // 指定杂货 tpl 时只对该人 Talk（BIN 2026-08-20：市集落地左侧勿退近距乱点）。
+    if (job->preferTemplateId > 0 && !bestTpl) {
+        job->err = "no target npc";
+        return;
+    }
     void* best = bestTpl ? bestTpl : bestNear;
     float bestD2 = bestTpl ? bestTplD2 : bestNearD2;
     int bestOid = bestTpl ? bestTplOid : bestNearOid;
@@ -3030,10 +3037,11 @@ struct GrocerySeed {
     char npcId[24]{};
     char mapId[16]{};
     uint32_t tags = 0;  // 1=sell 2=potion 4=feed
+    bool petFeedMerchant = false;  // 寵物飼料/寵物商人：货架不能卖普通装备
 };
 
 constexpr uint32_t kTagSell = 1u;
-constexpr uint32_t kTagPotion = 2u;  // 表字段保留；寻店不再按 potion/feed 选型
+constexpr uint32_t kTagPotion = 2u;
 constexpr uint32_t kTagFeed = 4u;
 
 std::mutex gSeedMu;
@@ -3079,6 +3087,8 @@ void EnsureGrocerySeeds() {
         strncpy_s(s.npcId, npc, _TRUNCATE);
         strncpy_s(s.mapId, map, _TRUNCATE);
         s.tags = ParseTags(tags);
+        s.petFeedMerchant = line.find("寵物飼料商人") != std::string::npos ||
+                            line.find("寵物商人") != std::string::npos;
         gSeeds.push_back(s);
     }
     x::runtime::LogI("Shop", "grocery seed loaded n=%zu path=%s", gSeeds.size(), path.c_str());
@@ -3148,6 +3158,8 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
 
     for (const auto& s : gSeeds) {
         if (excludeMap && excludeMap[0] && MapEqualsLoose(s.mapId, excludeMap)) continue;
+        // 科爾等寵物飼料店：BIN 2026-08-20 hops=7 压过露娜雜貨，落地 listN=0 全不可卖。
+        if (s.petFeedMerchant) continue;
         int direct = -1;
         int via = -1;
         if (!cur.empty() && cur != "?") {
@@ -3168,7 +3180,7 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
         } else {
             hops = 9999;  // unreachable → last resort
         }
-        // hops 优先；户外主城加罚（BIN 4bb7ea）；同 hops 偏好 potion
+        // hops 优先；户外主城加罚（BIN 4bb7ea）；同 hops 偏好雜貨/药（potion）压过武器店
         const int mapIdNum = atoi(s.mapId);
         const int outdoorPen = LooksLikeTownOutdoorMap(mapIdNum) ? 15000 : 0;
         const int score = hops * 10000 + outdoorPen + ((s.tags & kTagPotion) ? 0 : 1000) +

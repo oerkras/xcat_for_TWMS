@@ -32,7 +32,12 @@ void SetHitRotateEnabled(bool on);
 bool IsHitRotateEnabled();
 void SetHitRotateN(uint32_t n);
 uint32_t HitRotateN();
-// 实验：出刀改组包，名单只填当前锁 oid；opcode 跟装备。默认关 → OnFuncKey。
+// 不打 MISS 怪：进盒 ACC 不够、连续 N 次 Damage=0 后禁锁换靶。默认关。盒外空刀不算。
+void SetSkipAccMissEnabled(bool on);
+bool IsSkipAccMissEnabled();
+void SetSkipAccMissN(uint32_t n);
+uint32_t SkipAccMissN();
+// 实验：出刀改组包；一包只打当前锁。opcode 跟装备。默认关 → OnFuncKey。
 void SetForgeHitEnabled(bool on);
 bool IsForgeHitEnabled();
 // 自组攻包钉锁过远尺（AbsPos 半宽/半高）。不与站桩面前盒共用。

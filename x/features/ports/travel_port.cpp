@@ -393,6 +393,9 @@ constexpr float kPortalBelowDeckRestickScale = 1.5f;
 // 台下恢复：进此半径才 1.5X。Station 的 140 对 10X 只有 ~22ms，刹不住
 // （in02：门边 10X 冲上 Disarm 穿台）。远距仍用面板倍率，避免中间跳整图爬行。
 constexpr float kPortalRecoverSlowR = 400.f;
+// 同层贴台滑倍率。BIN 03:32：1.5X 时 657px≈2.3s，空中 10X 的 2900px≈2s；用户定 3X。
+// 与台下恢复 1.5X 分开：不抬、不 BAN，只推 X。
+constexpr float kPortalNearDeckWalkScale = 3.f;
 // 台下爬升：到 landY+抬升 就清 recover latch。禁止再用 Station 悬停竖速卡门
 // （BIN 101030000 west00：已在 aim，vy=-37，|vy|≤20 永不亮 → 空转 14s）。
 // 禁止贴 landY 就 Disarm（BIN 18:00：recover done@landY ↔ soft catch 死循环）。
@@ -1788,8 +1791,8 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             x::runtime::LogI(
                 "Travel",
                 "heli stick near-deck skip detach name=%s ap=(%.0f,%.0f) landY=%.0f "
-                "dist=%.0f onFh=1 (no lift/ban; same-deck slide)",
-                portal.name.c_str(), luX, luY, landY, deckDist);
+                "dist=%.0f onFh=1 scale=%.2fX (no lift/ban; same-deck slide)",
+                portal.name.c_str(), luX, luY, landY, deckDist, kPortalNearDeckWalkScale);
         }
     }
 
@@ -1816,11 +1819,14 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         const bool st0 = wantStation(d0, InPortalTrigger(portal));
         x::runtime::LogI("Travel",
                          "heli stick aim name=%s portal=(%.0f,%.0f) aim=(%.0f,%.0f) landY=%.0f "
-                         "ap=(%.0f,%.0f) rect=%d aimFh=%u hover=%d liftY=%.0f speed=%.2fX (panel) "
+                         "ap=(%.0f,%.0f) rect=%d aimFh=%u hover=%d liftY=%.0f speed=%.2fX (%s) "
                          "mode=%s enterR=%.0f exitR=%.0f dist=%.0f skipDetach=%d",
                          portal.name.c_str(), portal.x, portal.y, aimX, aimY, landY, luX, luY,
                          portal.rectValid ? 1 : 0, aimFh, hoverEnter ? 1 : 0,
-                         nearDeckWalk ? 0.f : PortalCruiseLiftY(), speedGuard.prev,
+                         nearDeckWalk ? 0.f : PortalCruiseLiftY(),
+                         nearDeckWalk ? (std::min)(speedGuard.prev, kPortalNearDeckWalkScale)
+                                      : speedGuard.prev,
+                         nearDeckWalk ? "near-deck" : "panel",
                          st0 ? "approach" : "cruise", kTravelStationEnterR,
                          kTravelStationEnterR + kTravelStationExitSlack, d0,
                          nearDeckWalk ? 1 : 0);
@@ -1910,6 +1916,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     bool stoodOnFh = false;   // CurFh 已挂上（日志/掉台提示）
     bool loggedBleedNudge = false;
     bool loggedRestickSlow = false;
+    bool loggedNearDeckScale = false;
     bool loggedDeadXNudge = false;
     bool loggedRecoverDone = false;
     const float panelScale = speedGuard.prev;  // 面板滑翔速度（与打怪同）
@@ -2024,10 +2031,11 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             const bool fireBandNudge =
                 !hoverEnter && onFh && !onPortalX &&
                 std::fabs(px - aimX) <= (kPortalHeliDeadX + 4.f);
-            const float useScale =
-                (restickSlow || nearDeckSlow || fireBandNudge)
-                    ? (std::min)(panelScale, kPortalBelowDeckRestickScale)
-                    : panelScale;
+            float useScale = panelScale;
+            if (restickSlow || fireBandNudge)
+                useScale = (std::min)(panelScale, kPortalBelowDeckRestickScale);
+            else if (nearDeckSlow)
+                useScale = (std::min)(panelScale, kPortalNearDeckWalkScale);
             heli::SetSpeedScale(heli::Owner::Travel, useScale);
             if (restickSlow && !loggedRestickSlow) {
                 loggedRestickSlow = true;
@@ -2036,6 +2044,13 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                     "heli stick restick slow name=%s dist=%.0f scale=%.2fX "
                     "(within %.0f; cruise was panel)",
                     portal.name.c_str(), distAim, useScale, kPortalRecoverSlowR);
+            }
+            if (nearDeckSlow && !loggedNearDeckScale) {
+                loggedNearDeckScale = true;
+                x::runtime::LogI(
+                    "Travel",
+                    "heli stick near-deck scale name=%s dist=%.0f scale=%.2fX (panel=%.2fX)",
+                    portal.name.c_str(), distAim, useScale, panelScale);
             }
             float heliY = finalApproach ? (landY + PortalFinalLiftY()) : aimY;
             if (recoverAboveDeck) {

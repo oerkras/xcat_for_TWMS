@@ -1728,6 +1728,33 @@ bool ApplyFaceNow() {
     return true;
 }
 
+bool AlignFaceToEngine(float dx, int engineMa) {
+    gFaceDx.store(dx, std::memory_order_relaxed);
+    if (!std::isfinite(dx) || std::fabs(dx) < kFaceDeadzone) {
+        gFaceLastWhy.store(1, std::memory_order_relaxed);
+        return false;
+    }
+    if (engineMa < 0) return false;
+    const int want = (dx < 0.f) ? -1 : 1;
+    const int eng = (engineMa & 1) ? -1 : 1;
+    if (eng == want) {
+        gLastFaceSign.store(want, std::memory_order_relaxed);
+        gFaceLastMa.store(engineMa, std::memory_order_relaxed);
+        gFaceLastWhy.store(2, std::memory_order_relaxed);
+        return false;
+    }
+    // 引擎面和 dx 不一致：缓存常仍是上一只怪的号，ApplyFaceNow 会 sticky 跳过。
+    // 失败必须还原 last：留 0 会让下一刀 FaceNeedsFlip 同拍翻面+挥（BIN 21:42 必空）。
+    const int prev = gLastFaceSign.load(std::memory_order_relaxed);
+    gLastFaceSign.store(0, std::memory_order_relaxed);
+    (void)ApplyFaceNow();
+    if (gFaceLastWhy.load(std::memory_order_relaxed) != 0) {
+        gLastFaceSign.store(prev, std::memory_order_relaxed);
+        return false;
+    }
+    return true;
+}
+
 void FaceDebug(int* maOut, int* whyOut) {
     if (maOut) *maOut = gFaceLastMa.load(std::memory_order_relaxed);
     if (whyOut) *whyOut = gFaceLastWhy.load(std::memory_order_relaxed);
@@ -1821,6 +1848,8 @@ bool CanFirePrimary() { return CanFirePrimaryEx(/*ignoreCombatInterval=*/false);
 
 void NoteLastFire() {
     gLastFireMs.store(NowMs(), std::memory_order_relaxed);
+    // 自组攻包发出 ≈ 一次出刀。不看 ActionBusy（攻击无CD 会清忙位）。
+    x::features::ports::mob_gather::NoteHangupFire();
     x::features::ports::mob_gather::NoteAttackDirty();
 }
 

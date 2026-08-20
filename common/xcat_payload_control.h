@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 126u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 138u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -90,8 +90,20 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 126u;
 // v124: mobPoolObserve — 怪物刷新感知增强（MI Enter/Leave → ImmediateScan；默认关）
 // v125: simpleCombatTeleportMaxHop 厂默 400/520/550→3000（远图一次到位；手改保留）
 // v126: simpleCombatTeleportCooldownMs 厂默 200→80；读盘迁旧默认 200
-// v127: simpleCombatForgeHitFrontDx/Dy — 出刀自组攻包独立攻击盒；不与站桩面前盒共用
+// v127: mobGatherHangupFires — 落地后累计出刀达此主动软重连；与首页秒数先到先拆；厂默 1900
+//       simpleCombatForgeHitFrontDx/Dy — 出刀自组攻包独立攻击盒；不与站桩面前盒共用
 // v128: 自组攻包攻击盒厂默 60×10→480×420；缺键不再抄站桩盒
+//       mobGatherHangupFiresOn — 出刀累计软重连独立勾选；与秒数勾选互不绑架；厂默开
+// v129: gatherTabUnlocked — 调试 TAB ws888 解锁镜像；标题/顶栏「刀 n/阈值」显示门控（缺键关）
+// v130: secAttackIntercept — 已移除（服端自有计数；字段保留布局，恒 0）
+// v131: mobGatherHangupUnbindF5 — 调试 TAB：解除瞬移找怪+F5 强制开秒数闸；缺键关
+// v132: secAttackTextHook — 已移除（服端自有计数；字段保留布局，恒 0）
+// v133: autoReloginReconnect — 遇人「一直有人就换频」厂默开；旧厂默换频关读盘迁一次
+// v134: simpleCombatSkipAccMiss / SkipAccMissN — 「不打MISS怪」：进盒 ACC 不够连续 N 次后换怪
+// v135: simpleCombatForgeHitMobs — 已移除（填充列表/同拍多包踢号；字段保留布局，恒 1）
+// v136: simpleCombatForgeHitFillList / MultiPkt — 已移除（已证实踢号；字段保留布局，恒 0）
+// v137: simpleCombatSkipAccMiss 厂默关→开（当时 N=2）；旧盘仍为关迁一次。升 version 后用户可再关掉
+// v138: simpleCombatSkipAccMissN 厂默 2→1；旧盘仍为 2 迁一次。升 version 后用户可再改
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -202,6 +214,12 @@ constexpr uint32_t kForgeHitFrontDxMin = kHiraishinFrontDxMin;
 constexpr uint32_t kForgeHitFrontDyMin = kHiraishinFrontDyMin;
 constexpr uint32_t kForgeHitFrontDxMax = kHiraishinFrontDxMax;
 constexpr uint32_t kForgeHitFrontDyMax = kHiraishinFrontDyMax;
+// 已移除：填充列表 / 同拍多包 / 多怪数。布局占位，恒 1 / 0 / 0。
+constexpr uint32_t kForgeHitMobsDefault = 1u;
+constexpr uint32_t kForgeHitMobsMin = 1u;
+constexpr uint32_t kForgeHitMobsMax = 15u;
+constexpr uint32_t kForgeHitFillListDefault = 0u;
+constexpr uint32_t kForgeHitMultiPktDefault = 0u;
 // 简易战斗 worker 心跳（状态机 Tick）；越短出刀机会越多，CPU/主线程更忙。
 constexpr uint32_t kSimpleCombatTickDefaultMs = 16u;
 constexpr uint32_t kSimpleCombatTickMinMs = 1u;
@@ -340,6 +358,12 @@ constexpr uint32_t kMobGatherSoftReloginDefault = 0u;
 constexpr uint32_t kMobGatherSoftReloginSecDefault = 20u;
 constexpr uint32_t kMobGatherSoftReloginSecMin = 10u;
 constexpr uint32_t kMobGatherSoftReloginSecMax = 3600u;
+// 落地后累计出刀（与 combat.log「fire id=」同拍 +1）达此主动软重连；与首页秒数先到先拆。勾选独立。
+constexpr uint32_t kMobGatherHangupFiresDefault = 1900u;
+constexpr uint32_t kMobGatherHangupFiresMin = 0u;
+constexpr uint32_t kMobGatherHangupFiresMax = 1900u;
+constexpr uint32_t kMobGatherHangupFiresOnDefault = 1u;
+constexpr uint32_t kMobGatherHangupUnbindF5Default = 0u;
 // 清怪重连：吸怪开着才拆。默认关，与首页主动软重连独立。缺键走关；盘上已有键原样保留。
 constexpr uint32_t kMobGatherClearReloginDefault = 0u;
 // 先飞到最密堆再吸。默认关：站立吸怪（高度闸/履历闸/14s 照旧）。
@@ -404,6 +428,12 @@ constexpr uint32_t kCombatHitRotateDefault = 0u;
 constexpr uint32_t kCombatHitRotateNDefault = 2u;
 constexpr uint32_t kCombatHitRotateNMin = 1u;
 constexpr uint32_t kCombatHitRotateNMax = 20u;
+// 不打 MISS 怪：进盒但 ACC 不够、连续 N 次 Damage=0 后禁锁换靶。默认开 / N=1。
+// 不预调 CheckPDamageMiss（吃 Rand32）。
+constexpr uint32_t kCombatSkipAccMissDefault = 1u;
+constexpr uint32_t kCombatSkipAccMissNDefault = 1u;
+constexpr uint32_t kCombatSkipAccMissNMin = 1u;
+constexpr uint32_t kCombatSkipAccMissNMax = 5u;
 // 瞬移找怪「每只怪打一下」：出一刀后切下一只（走原选怪）。默认关。
 constexpr uint32_t kCombatTeleportOneHitDefault = 0u;
 // 同帧连打探针已关停（实测不增伤）；字段保留仅为清掉旧 ini 的 2/3。
@@ -587,11 +617,18 @@ struct PayloadControl {
     // v83: 打中换怪（默认关）。开：本角色对同一 oid 确认命中 N 次后改打攻击盒外最近活怪；活怪<3 停刀。
     uint32_t simpleCombatHitRotate = kCombatHitRotateDefault;
     uint32_t simpleCombatHitRotateN = kCombatHitRotateNDefault;
+    // v134/v137/v138: 不打 MISS 怪（默认开 / N=1）。开：本角色进盒连续 N 次 Damage=0 后换靶。
+    uint32_t simpleCombatSkipAccMiss = kCombatSkipAccMissDefault;
+    uint32_t simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
     // v84: 出刀自组攻包。落盘 user.ini；会话文件只给面板↔DLL 热切换。
     uint32_t simpleCombatForgeHit = 0;
     // v127: 自组攻包钉锁攻击盒半宽/半高（AbsPos px；0=该轴不限）。不与站桩面前盒共用。
     uint32_t simpleCombatForgeHitFrontDx = kForgeHitFrontDxDefault;
     uint32_t simpleCombatForgeHitFrontDy = kForgeHitFrontDyDefault;
+    // 已移除：填充列表 / 同拍多包 / 多怪。保留布局；读盘恒 1 / 0 / 0。
+    uint32_t simpleCombatForgeHitMobs = kForgeHitMobsDefault;
+    uint32_t simpleCombatForgeHitFillList = kForgeHitFillListDefault;
+    uint32_t simpleCombatForgeHitMultiPkt = kForgeHitMultiPktDefault;
     // v85: 实验·全图攻击。会话态（state/map_attack_armed），不写入 user.ini；
     // 重启 launcher 归零。P1 只打 MapAtk 日志，不改 Rect/maxCount。
     uint32_t mapAttack = 0;
@@ -630,6 +667,14 @@ struct PayloadControl {
     // 追怪=瞬移找怪且 F5 开着时强制起表（不改本字段落盘）；卖装/赶路冻钟。
     uint32_t mobGatherSoftRelogin = kMobGatherSoftReloginDefault;
     uint32_t mobGatherSoftReloginSec = kMobGatherSoftReloginSecDefault;
+    // v127: 落地后累计出刀阈值。0=关（只用首页秒数）；与秒数先到先拆。缺键厂默 1900。
+    uint32_t mobGatherHangupFires = kMobGatherHangupFiresDefault;
+    // v128: 出刀累计软重连独立勾选。0=关（秒数勾选仍可拆）。缺键厂默开。
+    uint32_t mobGatherHangupFiresOn = kMobGatherHangupFiresOnDefault;
+    // v131: 解除瞬移找怪+F5 强制开秒数闸。缺键关。秒数闸只跟首页勾选。
+    uint32_t mobGatherHangupUnbindF5 = kMobGatherHangupUnbindF5Default;
+    // v129: 启动器调试 TAB ws888 解锁。0=标题/顶栏不画刀数。不替代注册表真源。
+    uint32_t gatherTabUnlocked = 0;
     uint32_t mobGatherClearRelogin = kMobGatherClearReloginDefault;
     // v100: 申请控制权。默认关。开：吸怪持有期泵上调官方 ApplyControl（不造包）。
     uint32_t mobGatherApplyCtrl = 0;
@@ -748,11 +793,11 @@ struct PayloadControl {
     uint32_t softLoginProbe = 1;
     // v62: 调试 TAB「关闭断线弹窗」— bump 后载荷走 CloseDialog+SetActive（不点確認）
     uint32_t softLoginDismissSeq = 0;
-    // v20/v82: 遇人策略 UX（UserPool + channel_hop，非 Reload）
-    // v82 厂默：检测开；普通停手/换频关；仅 GM/隐身升级开
+    // v20/v82/v133: 遇人策略 UX（UserPool + channel_hop，非 Reload）
+    // v133 厂默：检测开；普通停手关；一直有人就换频开；GM/隐身升级开
     uint32_t autoRelogin = 1;             // 检测同图玩家
     uint32_t autoReloginStopCombat = 0;   // 先停手（普通遇人）
-    uint32_t autoReloginReconnect = 0;    // 一直有人就换频（普通遇人）
+    uint32_t autoReloginReconnect = 1;    // 一直有人就换频（普通遇人）
     // v60: GM/隐身升级（Admin·Manager 或客户端隐身 → 立刻停手/换频 + 强制 Alarm；默认开）
     uint32_t autoReloginGmEscalate = 1;
     // v101: 遇人停吸。默认关。吸怪开启时强制打开（连同检测/换频），避免别人看见吸怪。
@@ -776,6 +821,9 @@ struct PayloadControl {
     // v76/v77: 实验·坐下/椅子回蓝（刷 WM 累加器；默认关）。BIN 已证真蓝会动；过密踢。
     uint32_t restMpAccel = 0;
     uint32_t restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
+    // v130/v132：拦截 / .text 已移除。字段保留布局，恒 0。
+    uint32_t secAttackIntercept = 0;
+    uint32_t secAttackTextHook = 0;
     // v80/v81: 实验·无限飞镖。用户入口已关（kInfiniteStarsUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t infiniteStars = 0;
     // Deprecated（经典版）：补给真源为 user.ini [auto_supply]。
@@ -861,6 +909,12 @@ inline uint32_t ClampHiraishinFrontDy(uint32_t px) {
 
 inline uint32_t ClampForgeHitFrontDx(uint32_t px) { return ClampHiraishinFrontDx(px); }
 inline uint32_t ClampForgeHitFrontDy(uint32_t px) { return ClampHiraishinFrontDy(px); }
+
+inline uint32_t ClampForgeHitMobs(uint32_t n) {
+    if (n < kForgeHitMobsMin) return kForgeHitMobsMin;
+    if (n > kForgeHitMobsMax) return kForgeHitMobsMax;
+    return n;
+}
 
 inline uint32_t ClampAttackSameFrameBurst(uint32_t n) {
     if (n < kAttackSameFrameBurstMin) return kAttackSameFrameBurstMin;
@@ -987,6 +1041,9 @@ inline uint32_t ClampMobGatherAimMs(uint32_t v) {
 inline uint32_t ClampMobGatherSoftReloginSec(uint32_t v) {
     return ClampMobGatherU32(v, kMobGatherSoftReloginSecMin, kMobGatherSoftReloginSecMax);
 }
+inline uint32_t ClampMobGatherHangupFires(uint32_t v) {
+    return ClampMobGatherU32(v, kMobGatherHangupFiresMin, kMobGatherHangupFiresMax);
+}
 inline int32_t ClampMobGatherStandOffX(int32_t x) {
     if (x < kMobGatherStandOffXMin) return kMobGatherStandOffXMin;
     if (x > kMobGatherStandOffXMax) return kMobGatherStandOffXMax;
@@ -1038,6 +1095,12 @@ inline uint32_t EffectiveAttackIntervalForApply(uint32_t panelMs, uint32_t attac
 inline uint32_t ClampCombatHitRotateN(uint32_t n) {
     if (n < kCombatHitRotateNMin) return kCombatHitRotateNMin;
     if (n > kCombatHitRotateNMax) return kCombatHitRotateNMax;
+    return n;
+}
+
+inline uint32_t ClampCombatSkipAccMissN(uint32_t n) {
+    if (n < kCombatSkipAccMissNMin) return kCombatSkipAccMissNMin;
+    if (n > kCombatSkipAccMissNMax) return kCombatSkipAccMissNMax;
     return n;
 }
 

@@ -506,10 +506,12 @@ bool TryParseAccountLine(const std::wstring& accountLine, std::wstring& err) {
 
 void OnTimer(UINT_PTR id) {
     if (id == kHttpBusyTimerId && g.busy) {
+        // C2799 22:08：UIA 干净重开仍在跑，看门狗先打 FAIL 并 SetBusy(false)，
+        // 线程随后 cmdline 接管并注入——界面已显示失败，且可再点一键开第二路。
+        // 看门狗不取消 worker，因此只续期，真正收口仍走成功/失败的 kMsgIdle。
         QueueLog(std::wstring(kHttpTimeoutTag) +
-                 L" 换票超时（约5分钟）。请检查网络/账号后重试。");
-        QueueLog(L"[FAIL] 登录失败 [Timeout] 换票超时");
-        SetBusy(false);
+                 L" 换票已超过5分钟仍在进行，继续等（不中断、不改忙碌态）…");
+        SetTimer(g.hwnd, kHttpBusyTimerId, kHttpBusyTimeoutMs, nullptr);
     }
 }
 

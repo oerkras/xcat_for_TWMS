@@ -479,9 +479,14 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.clusterWeight = kClusterWeightDefault;
     out.simpleCombatHitRotate = kCombatHitRotateDefault;
     out.simpleCombatHitRotateN = kCombatHitRotateNDefault;
+    out.simpleCombatSkipAccMiss = kCombatSkipAccMissDefault;
+    out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
     out.simpleCombatForgeHit = 0;
     out.simpleCombatForgeHitFrontDx = kForgeHitFrontDxDefault;
     out.simpleCombatForgeHitFrontDy = kForgeHitFrontDyDefault;
+    out.simpleCombatForgeHitMobs = kForgeHitMobsDefault;
+    out.simpleCombatForgeHitFillList = kForgeHitFillListDefault;
+    out.simpleCombatForgeHitMultiPkt = kForgeHitMultiPktDefault;
     out.mapAttack = 0;
     out.mobGather = 0;
     out.mobGatherSpeedPct = kMobGatherSpeedPctDefault;
@@ -515,6 +520,10 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherAimMs = kMobGatherAimMsDefault;
     out.mobGatherSoftRelogin = kMobGatherSoftReloginDefault;
     out.mobGatherSoftReloginSec = kMobGatherSoftReloginSecDefault;
+    out.mobGatherHangupFires = kMobGatherHangupFiresDefault;
+    out.mobGatherHangupFiresOn = kMobGatherHangupFiresOnDefault;
+    out.mobGatherHangupUnbindF5 = kMobGatherHangupUnbindF5Default;
+    out.gatherTabUnlocked = 0;
     out.mobGatherClearRelogin = kMobGatherClearReloginDefault;
     out.mobGatherApplyCtrl = 0;
     out.mobGatherSeekCluster = kMobGatherSeekClusterDefault;
@@ -586,7 +595,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.softLoginDismissSeq = 0;
     out.autoRelogin = 1;
     out.autoReloginStopCombat = 0;
-    out.autoReloginReconnect = 0;
+    out.autoReloginReconnect = 1;
     out.autoReloginGmEscalate = 1;
     out.autoReloginStopGather = 0;
     out.hideOtherPlayers = 0;
@@ -596,6 +605,8 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.auctionTownBypass = 1;  // 默认开
     out.restMpAccel = 0;  // 实验·默认关
     out.restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
+    out.secAttackIntercept = 0;  // 已移除；布局占位
+    out.secAttackTextHook = 0;  // 已移除；布局占位
     out.infiniteStars = 0;  // 实验·默认关
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
@@ -717,6 +728,23 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.simpleCombatHitRotateN = ClampCombatHitRotateN(u);
     else
         out.simpleCombatHitRotateN = kCombatHitRotateNDefault;
+    if (IniGetBool(ini, "core", "simpleCombatSkipAccMiss", b))
+        out.simpleCombatSkipAccMiss = b ? 1u : 0u;
+    if (IniGetU32(ini, "core", "simpleCombatSkipAccMissN", u))
+        out.simpleCombatSkipAccMissN = ClampCombatSkipAccMissN(u);
+    else
+        out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
+    // v137: 旧厂默关迁一次开。升 version 后用户可再关掉。
+    // v138: 旧厂默 N=2 迁一次 N=1。升 version 后用户可再改。
+    {
+        uint32_t coreIniVer = 0;
+        const bool hasCoreVer = IniGetU32(ini, "core", "version", coreIniVer);
+        if ((!hasCoreVer || coreIniVer < 137u) && out.simpleCombatSkipAccMiss == 0)
+            out.simpleCombatSkipAccMiss = 1;
+        if ((!hasCoreVer || coreIniVer < 138u) &&
+            out.simpleCombatSkipAccMissN == 2u)
+            out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
+    }
     {
         bool fromIni = false;
         if (IniGetBool(ini, "core", "simpleCombatForgeHit", b)) fromIni = b;
@@ -808,6 +836,14 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherSoftRelogin = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "mobGatherSoftReloginSec", u))
         out.mobGatherSoftReloginSec = ClampMobGatherSoftReloginSec(u);
+    if (IniGetU32(ini, "core", "mobGatherHangupFires", u))
+        out.mobGatherHangupFires = ClampMobGatherHangupFires(u);
+    if (IniGetBool(ini, "core", "mobGatherHangupFiresOn", b))
+        out.mobGatherHangupFiresOn = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "mobGatherHangupUnbindF5", b))
+        out.mobGatherHangupUnbindF5 = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "gatherTabUnlocked", b))
+        out.gatherTabUnlocked = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mobGatherClearRelogin", b))
         out.mobGatherClearRelogin = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mobGatherApplyCtrl", b))
@@ -902,6 +938,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.simpleCombatForgeHitFrontDy = ClampForgeHitFrontDy(u);
     } else
         out.simpleCombatForgeHitFrontDy = kForgeHitFrontDyDefault;
+    // 填充列表 / 同拍多包 / 多怪已移除：不读旧键，恒一包一只锁。
+    out.simpleCombatForgeHitMobs = kForgeHitMobsDefault;
+    out.simpleCombatForgeHitFillList = kForgeHitFillListDefault;
+    out.simpleCombatForgeHitMultiPkt = kForgeHitMultiPktDefault;
     if (IniGetBool(ini, "core", "simpleCombatLiveStep", b))
         out.simpleCombatLiveStep = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "attackRpc", b)) out.attackRpc = b ? 1u : 0u;
@@ -977,12 +1017,21 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.autoReloginGmEscalate = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoReloginStopGather", b))
         out.autoReloginStopGather = b ? 1u : 0u;
-    // v82: 旧厂默（关检测+开停手+开换频）→ 新厂默（开检测+关停手+关换频）；显式改过保留
+    // v82: 旧厂默（关检测+开停手+开换频）→ 检测开、停手关；换频跟现行厂默（v133 开）。
     if (out.autoRelogin == 0 && out.autoReloginStopCombat == 1 &&
         out.autoReloginReconnect == 1) {
         out.autoRelogin = 1;
         out.autoReloginStopCombat = 0;
-        out.autoReloginReconnect = 0;
+        out.autoReloginReconnect = 1;
+    }
+    // v133: 旧厂默换频关迁一次「一直有人就换频」开。升 version 后用户可再关掉。
+    {
+        uint32_t coreIniVer = 0;
+        const bool hasCoreVer = IniGetU32(ini, "core", "version", coreIniVer);
+        if ((!hasCoreVer || coreIniVer < 133u) && out.autoRelogin == 1 &&
+            out.autoReloginReconnect == 0) {
+            out.autoReloginReconnect = 1;
+        }
     }
     if (IniGetBool(ini, "core", "hideOtherPlayers", b)) out.hideOtherPlayers = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "frameLock", b)) out.frameLock = b ? 1u : 0u;
@@ -992,6 +1041,8 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "restMpAccel", b)) out.restMpAccel = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "restMpAccelIntervalMs", u))
         out.restMpAccelIntervalMs = ClampRestMpAccelIntervalMs(u);
+    out.secAttackIntercept = 0;
+    out.secAttackTextHook = 0;
     if (IniGetBool(ini, "core", "infiniteStars", b)) out.infiniteStars = b ? 1u : 0u;
     if (!kInfiniteStarsUserEnabled) out.infiniteStars = 0;
     // core.autoSell* 已废弃：真源 [auto_supply]；此处强制清零，避免旧 key 干扰。
@@ -1160,11 +1211,18 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.simpleCombatHitRotateN = ClampCombatHitRotateN(
         normalized.simpleCombatHitRotateN ? normalized.simpleCombatHitRotateN
                                           : kCombatHitRotateNDefault);
+    normalized.simpleCombatSkipAccMiss = normalized.simpleCombatSkipAccMiss ? 1u : 0u;
+    normalized.simpleCombatSkipAccMissN = ClampCombatSkipAccMissN(
+        normalized.simpleCombatSkipAccMissN ? normalized.simpleCombatSkipAccMissN
+                                            : kCombatSkipAccMissNDefault);
     normalized.simpleCombatForgeHit = normalized.simpleCombatForgeHit ? 1u : 0u;
     normalized.simpleCombatForgeHitFrontDx =
         ClampForgeHitFrontDx(normalized.simpleCombatForgeHitFrontDx);
     normalized.simpleCombatForgeHitFrontDy =
         ClampForgeHitFrontDy(normalized.simpleCombatForgeHitFrontDy);
+    normalized.simpleCombatForgeHitMobs = kForgeHitMobsDefault;
+    normalized.simpleCombatForgeHitFillList = 0;
+    normalized.simpleCombatForgeHitMultiPkt = 0;
     normalized.mapAttack = normalized.mapAttack ? 1u : 0u;
     normalized.mobGather = normalized.mobGather ? 1u : 0u;
     ApplyMobGatherEncounterForce(normalized);
@@ -1194,6 +1252,10 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherSoftReloginSec = ClampMobGatherSoftReloginSec(
         normalized.mobGatherSoftReloginSec ? normalized.mobGatherSoftReloginSec
                                            : kMobGatherSoftReloginSecDefault);
+    normalized.mobGatherHangupFires = ClampMobGatherHangupFires(normalized.mobGatherHangupFires);
+    normalized.mobGatherHangupFiresOn = normalized.mobGatherHangupFiresOn ? 1u : 0u;
+    normalized.mobGatherHangupUnbindF5 = normalized.mobGatherHangupUnbindF5 ? 1u : 0u;
+    normalized.gatherTabUnlocked = normalized.gatherTabUnlocked ? 1u : 0u;
     normalized.mobGatherClearRelogin = normalized.mobGatherClearRelogin ? 1u : 0u;
     normalized.mobGatherApplyCtrl = normalized.mobGatherApplyCtrl ? 1u : 0u;
     normalized.mobGatherSeekCluster = normalized.mobGatherSeekCluster ? 1u : 0u;
@@ -1252,6 +1314,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.restMpAccelIntervalMs = ClampRestMpAccelIntervalMs(
         normalized.restMpAccelIntervalMs ? normalized.restMpAccelIntervalMs
                                          : kRestMpAccelIntervalDefaultMs);
+    normalized.secAttackIntercept = 0;
+    normalized.secAttackTextHook = 0;
     normalized.infiniteStars =
         (kInfiniteStarsUserEnabled && normalized.infiniteStars) ? 1u : 0u;
     normalized.autoSell = normalized.autoSell ? 1u : 0u;
@@ -1390,11 +1454,16 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "clusterWeight", normalized.clusterWeight);
         IniSetBool(ini, "core", "simpleCombatHitRotate", normalized.simpleCombatHitRotate != 0);
         IniSetU32(ini, "core", "simpleCombatHitRotateN", normalized.simpleCombatHitRotateN);
+        IniSetBool(ini, "core", "simpleCombatSkipAccMiss", normalized.simpleCombatSkipAccMiss != 0);
+        IniSetU32(ini, "core", "simpleCombatSkipAccMissN", normalized.simpleCombatSkipAccMissN);
         IniSetBool(ini, "core", "simpleCombatForgeHit", normalized.simpleCombatForgeHit != 0);
         IniSetU32(ini, "core", "simpleCombatForgeHitFrontDx",
                   normalized.simpleCombatForgeHitFrontDx);
         IniSetU32(ini, "core", "simpleCombatForgeHitFrontDy",
                   normalized.simpleCombatForgeHitFrontDy);
+        IniEraseKey(ini, "core", "simpleCombatForgeHitMobs");
+        IniEraseKey(ini, "core", "simpleCombatForgeHitFillList");
+        IniEraseKey(ini, "core", "simpleCombatForgeHitMultiPkt");
         IniSetBool(ini, "core", "mapAttack", false);
         IniSetBool(ini, "core", "mobGather", normalized.mobGather != 0);
         IniSetU32(ini, "core", "mobGatherSpeedPct", normalized.mobGatherSpeedPct);
@@ -1431,6 +1500,10 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "mobGatherAimMs", normalized.mobGatherAimMs);
         IniSetBool(ini, "core", "mobGatherSoftRelogin", normalized.mobGatherSoftRelogin != 0);
         IniSetU32(ini, "core", "mobGatherSoftReloginSec", normalized.mobGatherSoftReloginSec);
+        IniSetU32(ini, "core", "mobGatherHangupFires", normalized.mobGatherHangupFires);
+        IniSetBool(ini, "core", "mobGatherHangupFiresOn", normalized.mobGatherHangupFiresOn != 0);
+        IniSetBool(ini, "core", "mobGatherHangupUnbindF5", normalized.mobGatherHangupUnbindF5 != 0);
+        IniSetBool(ini, "core", "gatherTabUnlocked", normalized.gatherTabUnlocked != 0);
         IniSetBool(ini, "core", "mobGatherClearRelogin", normalized.mobGatherClearRelogin != 0);
         IniSetBool(ini, "core", "mobGatherApplyCtrl", normalized.mobGatherApplyCtrl != 0);
         IniSetBool(ini, "core", "mobGatherSeekCluster", normalized.mobGatherSeekCluster != 0);
@@ -1535,6 +1608,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
                   ClampRestMpAccelIntervalMs(normalized.restMpAccelIntervalMs
                                                  ? normalized.restMpAccelIntervalMs
                                                  : kRestMpAccelIntervalDefaultMs));
+        IniEraseKey(ini, "core", "secAttackIntercept");
+        IniEraseKey(ini, "core", "secAttackTextHook");
         IniSetBool(ini, "core", "infiniteStars", normalized.infiniteStars != 0);
         // 剥离双轨：不再写 core.autoSell*，并清掉历史 key。
         IniEraseKeysWithPrefix(ini, "core", "autoSell");

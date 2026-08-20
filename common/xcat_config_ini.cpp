@@ -1,5 +1,8 @@
 #include "xcat_config_ini.h"
 
+#include "process_util.h"
+#include "xcat_log.h"
+
 #include <Windows.h>
 
 #include <cctype>
@@ -31,10 +34,23 @@ bool EnsureStateDir(const char* binDir) {
     return true;
 }
 
-bool FileExistsA(const char* path) {
+bool FileExistsUtf8(const char* path) {
     if (!path || !path[0]) return false;
-    const DWORD attr = GetFileAttributesA(path);
+    const std::wstring w = Utf8ToWide(path);
+    if (w.empty()) return false;
+    const DWORD attr = GetFileAttributesW(w.c_str());
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+std::string IniBackupPath(const char* path) {
+    std::string bak = path ? path : "";
+    bak += ".bak";
+    return bak;
+}
+
+bool IniHasSection(const IniStore& ini, const char* section) {
+    if (!section || !section[0]) return false;
+    return ini.find(section) != ini.end();
 }
 
 // 互斥量名只认规范化路径，避免 XCat_data\ vs XCat_data/ 拆成两把锁。
@@ -125,7 +141,9 @@ bool LoadIniFileUnlocked(const char* path, IniStore& out) {
     out.clear();
     if (!path || !path[0]) return false;
 
-    std::ifstream in(path, std::ios::binary);
+    const std::wstring wide = Utf8ToWide(path);
+    if (wide.empty()) return false;
+    std::ifstream in(wide.c_str(), std::ios::binary);
     if (!in) return false;
 
     std::string section;
@@ -148,34 +166,75 @@ bool LoadIniFileUnlocked(const char* path, IniStore& out) {
     return true;
 }
 
+bool WriteUtf8FileThrough(const std::string& path, const std::string& body) {
+    const std::wstring w = Utf8ToWide(path);
+    if (w.empty()) return false;
+    HANDLE h = CreateFileW(w.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    const DWORD n = static_cast<DWORD>(body.size());
+    const BOOL ok = (n == 0) ? TRUE : WriteFile(h, body.data(), n, &wrote, nullptr);
+    const BOOL flushed = FlushFileBuffers(h);
+    CloseHandle(h);
+    return ok && flushed && wrote == n;
+}
+
 bool SaveIniFileUnlocked(const char* path, const IniStore& store) {
     if (!path || !path[0]) return false;
+
+    std::string body;
+    body.reserve(4096);
+    for (const auto& sec : store) {
+        body += '[';
+        body += sec.first;
+        body += "]\n";
+        for (const auto& kv : sec.second) {
+            body += kv.first;
+            body += '=';
+            body += kv.second;
+            body += '\n';
+        }
+        body += '\n';
+    }
 
     std::string tmp = path;
     tmp += ".tmp.";
     tmp += std::to_string(GetCurrentProcessId());
-
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) return false;
-        for (const auto& sec : store) {
-            out << '[' << sec.first << "]\n";
-            for (const auto& kv : sec.second) {
-                out << kv.first << '=' << kv.second << '\n';
-            }
-            out << '\n';
-        }
-        out.flush();
-        if (!out) {
-            DeleteFileA(tmp.c_str());
-            return false;
-        }
-    }
-
-    if (!MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DeleteFileA(tmp.c_str());
+    if (!WriteUtf8FileThrough(tmp, body)) {
+        DeleteFileUtf8(tmp);
         return false;
     }
+
+    // 完整 user.ini 才刷新 .bak；截断/空文件不得把好备份盖掉。
+    if (FileExistsUtf8(path)) {
+        IniStore cur{};
+        if (LoadIniFileUnlocked(path, cur) && IniHasSection(cur, "core")) {
+            const std::string bak = IniBackupPath(path);
+            (void)CopyFileUtf8(path, bak, false);
+        }
+    }
+
+    if (!MoveFileExUtf8(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileUtf8(tmp);
+        return false;
+    }
+    return true;
+}
+
+// 主文件缺 [core] 而 .bak 有：断电替换窗口留下的空/半截 user.ini。写回主文件再给调用方。
+bool TryHealMissingCore(const char* path, IniStore& io) {
+    if (!path || !path[0] || IniHasSection(io, "core")) return false;
+    IniStore bak{};
+    const std::string bakPath = IniBackupPath(path);
+    if (!LoadIniFileUnlocked(bakPath.c_str(), bak) || !IniHasSection(bak, "core")) return false;
+    if (!SaveIniFileUnlocked(path, bak)) {
+        log::Warn("Ini", "user.ini missing [core]; .bak restore write failed path=%s", path);
+        io = std::move(bak);
+        return true;
+    }
+    log::Warn("Ini", "user.ini missing [core]; restored from .bak path=%s", path);
+    io = std::move(bak);
     return true;
 }
 
@@ -201,11 +260,13 @@ bool LoadIniFile(const char* path, IniStore& out) {
             Sleep(30u * static_cast<DWORD>(attempt + 1));
             continue;
         }
-        return LoadIniFileUnlocked(path, out);
+        return LoadIniFileUnlocked(path, out) && (TryHealMissingCore(path, out), true);
     }
 
     // 最后兜底：热路径不能因锁饿死；可能读到略旧值。
-    return LoadIniFileUnlocked(path, out);
+    if (!LoadIniFileUnlocked(path, out)) return false;
+    (void)TryHealMissingCore(path, out);
+    return true;
 }
 
 bool SaveIniFile(const char* path, const IniStore& store) {
@@ -229,11 +290,12 @@ bool UpdateIniFile(const char* path, const std::function<void(IniStore&)>& mutat
     if (!guard.locked()) return false;
 
     IniStore ini{};
-    const bool existed = FileExistsA(path);
+    const bool existed = FileExistsUtf8(path);
     if (existed) {
         // 文件已在盘上却读失败时绝不能用空表落盘——那会抹掉 [core]/其它 section，
         // 下一轮 ReadPayloadControl 失败后再被 PushPersisted 写成整包默认值。
         if (!LoadIniFileUnlocked(path, ini)) return false;
+        (void)TryHealMissingCore(path, ini);
     }
 
     mutate(ini);

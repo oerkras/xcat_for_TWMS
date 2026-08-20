@@ -343,8 +343,12 @@ void Tick(DWORD now) {
             gLoggedSkipJob = true;
             ResetAlloc();
             ResetFail();
-            x::runtime::LogI("AutoStat", "0转不加 job=%d cid=%u，1转后才加点", st.job,
-                             st.characterId);
+            x::runtime::LogI("AutoStat", "0转不加 job=%d cid=%u 剩余AP=%d，1转后才加点", st.job,
+                             st.characterId, st.ap);
+        } else if (st.ap > 0) {
+            x::runtime::LogIThrottled(233, 15000, "AutoStat",
+                                      "0转跳过 job=%d cid=%u 剩余AP=%d，转职后才加", st.job,
+                                      st.characterId, st.ap);
         }
         return;
     }
@@ -483,7 +487,11 @@ void ApplyConfig(const xcat::AutoStatConfig& cfg) {
     if (was != on) {
         ResetPending();
         ResetFail();
-        if (on) ResetAlloc();
+        if (on) {
+            ResetAlloc();
+            gLoggedSkipJob = false;
+            gLoggedOffs = false;
+        }
         x::runtime::LogI("AutoStat", "开关=%s 配比 力量=%u 敏捷=%u 智力=%u 幸运=%u",
                          on ? "开" : "关", gCfg.str, gCfg.dex, gCfg.intel, gCfg.luk);
     } else if (on && ratioChanged) {

@@ -38,8 +38,9 @@ SELL_FUNC_TAGS: dict[str, str] = {
     "攤販": "sell|potion",
     "商人": "sell|potion",
     "藥水製作師": "sell|potion",
-    "寵物飼料商人": "sell|potion|feed",
-    "寵物商人": "sell|potion|feed",
+    # 饲料店不要带 sell|potion：通用寻店会当成杂货（BIN 2026-08-20 市集科爾）
+    "寵物飼料商人": "feed",
+    "寵物商人": "feed",
     "卷軸商人": "sell",
     "捲軸商人": "sell",
 }

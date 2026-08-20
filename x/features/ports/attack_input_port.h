@@ -33,6 +33,12 @@ bool GetSmartInterval();
 bool FaceToward(float dx);
 bool ApplyFaceNow();
 
+// 落地后对齐朝向：用引擎 MoveAction bit0（1=左）对照 dx。
+// 已经对着 → 只同步 gLastFaceSign，不脉冲（BIN 06:41 朝向已对再 SetInput 会掐刀）。
+// 不一致 → 清缓存后 SetInput。给 Settling 挂台后再调，下一拍才出刀（勿同拍翻面+挥）。
+// engineMa<0（没读到）时不动。返回是否真下发了 SetInput。
+bool AlignFaceToEngine(float dx, int engineMa);
+
 // 上一次 ApplyFaceNow 的落地情况（只读探针，供 combat.log 逐刀取证）。
 //   maOut   引擎 VecCtrl.moveAction；bit0=1 面朝左、0 面朝右。-1=本次未读到。
 //   whyOut  0=已下发 SetInput（ma 为同帧实读）
