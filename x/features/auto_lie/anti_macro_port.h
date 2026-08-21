@@ -94,7 +94,28 @@ bool IsPredFresh();
 bool IsPredStale();
 // mousePosList 对象指针（供 SendWill 帧脉冲无锁读 Count；勿跨题缓存）。
 void* PeekNonFiniteMouseList(void* instance);
-bool ReadRawPosList(void* instance, std::vector<Vec2>& out);
+
+// ReadRawPosList 失败时的分型。BIN 7bb1b7（D115 08-20 17:08）连打 10 次 no-path 却没记下
+// list/n/items，事后分不清「指针空」和「Count=0 的空壳单例」。
+enum class RawPathWhy : uint8_t {
+    Ok = 0,
+    NoInst,
+    NoList,
+    Empty,
+    TooBig,
+    NoItems,
+    CapMismatch,
+    Seh,
+};
+struct RawPathPeek {
+    RawPathWhy why = RawPathWhy::NoInst;
+    void* list = nullptr;
+    void* items = nullptr;
+    int n = -1;
+    int cap = -1;
+};
+const char* RawPathWhyTag(RawPathWhy why);
+bool ReadRawPosList(void* instance, std::vector<Vec2>& out, RawPathPeek* peek = nullptr);
 void* ReadNonFiniteTargetRect(void* instance);  // RawImage → RectTransform
 
 // rawPosList 是 DecodePath 后的归一化题面坐标（量级 ~1），不是像素。

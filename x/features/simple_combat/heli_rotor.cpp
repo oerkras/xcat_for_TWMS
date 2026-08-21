@@ -633,27 +633,37 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // C2799 22:11：PlayReady 后 SoftOrNetQuiet 已放行（hold+ready=false），但 IsHoldActive
     // 仍真 → Combat 旋翼被挡；同时 lie_safe_land 的 CombatImpact BAN detach 把台摘了
     // → cmd=0 vy=-670 卸台。安全落台空中必须抗重力；仍禁止出刀（TickImpl 硬闸/hold 另挡）。
+    // C2799 22:11：PlayReady 后 SoftOrNetQuiet 已放行，但 IsHoldActive 仍真 → Combat
+    // 旋翼被挡；BAN 摘台后 cmd=0 vy=-670。F6 已豁免；Combat/Gather 离台同样只停刀。
+    // 地上仍禁起飞。客户 0.1.167：空中 unlatch+guard=soft_hold 循环坠落。
     if (x::features::soft_login_probe::IsGameplayQuiet() && o != Owner::Fly) {
         const bool softHold = x::features::soft_login_probe::IsHoldActive();
+        const bool combatAirKeep =
+            !st.onFh && (o == Owner::Combat || o == Owner::Gather);
         const bool safeLandAir =
             !st.onFh && o == Owner::Combat &&
             x::features::simple_combat::IsSafeLandActive();
-        if (!safeLandAir && (softHold || st.onFh)) {
+        if (!safeLandAir && !combatAirKeep && (softHold || st.onFh)) {
             tm.guard = softHold ? "soft_hold" : "soft_land_quiet";
             gLastTickFired = false;
             if (out) *out = tm;
             return false;
         }
-        // soft_land_quiet / 安全落台 + !onFh：落下继续算冲量。
+        // soft_land_quiet / 安全落台 / 交战离台 + !onFh：落下继续算冲量。
     }
     {
         const int nm = kick_sniff::LastSessionState();
         // CMS: Disconnecting=0 Disconnected=1（kick_sniff）；-1=尚未采样，放行。
+        // 752824 要停的是出刀；空中再挡 Impact = BAN 摘台后自由落体。F6 同豁免。
         if (nm == 0 || nm == 1) {
-            tm.guard = "nm_down";
-            gLastTickFired = false;
-            if (out) *out = tm;
-            return false;
+            const bool combatAirKeep =
+                !st.onFh && (o == Owner::Combat || o == Owner::Gather);
+            if (!combatAirKeep && o != Owner::Fly) {
+                tm.guard = "nm_down";
+                gLastTickFired = false;
+                if (out) *out = tm;
+                return false;
+            }
         }
     }
     if (UpdateStaleness(st, now)) {  // 断线/切图：再发也只是对着死数据空转

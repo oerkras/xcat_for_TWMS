@@ -9,8 +9,10 @@
 #include "../galaxy_token_probe/galaxy_token_probe.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../notify/notify.h"
+#include "../simple_combat/simple_combat.h"
 #include "../ports/fly_fh_ban.h"
 #include "../ports/foothold_port.h"
+#include "../ports/mob_gather_port.h"
 #include "../ports/world_port.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -39,22 +41,22 @@ using x::runtime::il2cpp::ReadPtr;
 constexpr wchar_t kMarkerName[] = L"soft_login_probe.on";
 
 // SceneLogin public void() — starts ConnectLoginServer IEnumerator via StartCoroutine.
-constexpr uint32_t kRvaSceneLoginGet = 0xC18DB0;
-constexpr uint32_t kRvaConnectLoginStart = 0xC19CA0;
+constexpr uint32_t kRvaSceneLoginGet = 0xC1B4F0;
+constexpr uint32_t kRvaConnectLoginStart = 0xC1C400;
 constexpr char kHashSceneLoginGet[] =
-    "e4287c402ce5b9a4f3ce98fc73296e9b731f8ac17b12c4b36981d699841a8f3";
+    "f6435272a9a666f019a810a4c597917b4d49d1b079bcd6026e97c23a027165c";
 constexpr char kHashConnectLoginStart[] =
-    "bf2dff96a3278df222efe7615a457b5e76329c1f1fc7de3e9ef950551c3282c";
+    "af853e3f8aac062296eaca644a801b3c7f1cb60efa604bf8398674598675da7";
 
 // Session.Disconnect / CloseSession（与 kick_sniff 同口径）。
 // BIN 01:53：Disconnect 只把 Connected→Connecting→Connected，WorldItems 仍空（书页大厅）。
 // 空大厅改 CloseSession 硬拆，再等 Disconnected 后才 ConnectLogin。
-constexpr uint32_t kRvaNmDisconnect = 0x1CEBF40;
-constexpr uint32_t kRvaNmCloseSession = 0x1CFB0E0;
+constexpr uint32_t kRvaNmDisconnect = 0x1CEEB10;
+constexpr uint32_t kRvaNmCloseSession = 0x1CFDCB0;
 constexpr char kHashNmDisconnect[] =
-    "fd234700fd58eb37067c062e4fadffe5bd80eb5d733e5120939b8c1ce6848a9";
+    "e595f66e338bcffb24b9b99d1e3a8ad1a62b51804206c84cbccb1dcde3a64ee";
 constexpr char kHashNmCloseSession[] =
-    "a7ce69500f1733fa002681c8f5370df1a99e7b470cdc5d9c9cafa3aa7bd6925";
+    "dbba63c2fbb6391b5560399468aa256c9e870f8e0f2f2c71642c0c1920b70eb";
 
 // settle 用墙钟截止（见 Worker）：Call 耗时曾未计入 waited，实机 1500ms 常被拉成 2.5–3s+。
 // Notice 多在断线瞬间弹出；Connecting 早退即可，不必死等满窗。
@@ -99,6 +101,7 @@ constexpr DWORD kSoftCycleRetryGapMs = 400;
 // 重进等待：playReady 采样宜短；泵堵时 1500ms 等满只会叠 job timeout（E216）。
 constexpr DWORD kPlayReadySampleMs = 400;
 // 已 playReady+inMap 但 curFh=0（悬空/掉落，ec1fe7 heli 半空软重进）：再等挂台再 RESULT。
+// 空中贴怪本来就不挂台：等满 15s 才弹「软重连成功」，人早已在打（BIN 7F43 17:01:58→17:02:14）。
 // 覆盖同图热重载数轮（约 3s/次）；满窗降级成功，勿再 ConnectLogin soft cycle。
 constexpr DWORD kStandReadyWaitMs = 15000;
 // 等挂台时又离场（BIN 6c3ef8：inMap curFh=0 → Disconnected → 大厅）：2s 内清
@@ -171,56 +174,56 @@ constexpr size_t kOffSlWorldUi = 0xC8;
 
 // UIUtilDialog（非 Ex）— 与 worldmap_marker_travel 同源
 constexpr char kUtilDialogClass[] =
-    "f989ca10968e30ab111eefff2f43ccf2222a97e6b274b980e61752bce1ac892";
+    "cabf3fe9cc1437a22ff14cae558ff4ccdc75c0b90a22311eaa71c8921615d15";
 // UIDialog 基类（仅解析 Close；禁止 FindAll 基类——子树含 UIMiniMap 等 HUD）
 constexpr char kUiDialogClass[] =
-    "e56e047d217a913b9ac005357ce14fcd67b22893a91c6bf2ea3e01598c40a7f";
+    "b898158ab45f364f4f30bd141a65763a8692ec18521c02e189e0242ebd4159b";
 // UIMiniMap : UIDialog — 纵深防护（白名单路径本不应扫到）
 constexpr char kMiniMapClass[] =
-    "e111dbdd43bb5426a4416c2474b5da500eaf89e589addd75e8a2de03f39745a";
+    "b962d74817f8c2df12e0a78f62cade89bb8267001f1f6d592c2e20e68bcfd52";
 // scanBase 白名单：断线/踢线 Notice 族（显式 FindAll 各类，永不扫 UIDialog 基类）
 constexpr char kNoticeDialogClass[] =
-    "dadfd6020bd8fdea578bd9abf3ef9c908cd3c2ae46f9c2d9db0550e7d067db6";
+    "e385b1cd935707b8b784f9457030ac4ea934d49b9e0140aae81be6a2fe06cb4";
 constexpr char kLoginUtilDialogClass[] =
-    "a3fc7e890f81840e47fc15fd5ba6476ebc2f975d6875b29012b4b19a1e18851";
+    "fbc2ce7959249426f2fd70380894288901b68f5af2a7b2d484f71cce302e9bc";
 constexpr char kSlideNoticeClass[] =
-    "aa9c53b2b2c21df17f61c1d5e413fad0670b674da51e48c0d3e9db888fb0c10";
+    "a5d356032766ccd207d8c143839a520c97cda604f765f7acaac7ec49219b76f";
 constexpr char kMultiLineNoticeClass[] =
-    "cb08a9932397926ec686df1238557cfef35ce92ac0d341aa01ed547ff4d40db";
+    "ab985ec23eda60fea535ae10c5a1328f1f845ce9e2e25c33de2e56d032f2b77";
 constexpr char kAntiMacroNoticeClass[] =
-    "cf17e353911bc771fd1f679a3c30d4373099e1f27305840aaebc3433a86bf2d";
+    "eb0cd232582626989bee2a787691610ab0e6e16e88fcd30bdf39b36794d1577";
 // UIUtilDialogEx — 与 shop_port 同源
 constexpr char kUtilDialogExClass[] =
-    "f4640aac0fff8dde1646abb7ec3d20c681502597a5e52c5c9ae46bf94d6b949";
+    "c0e2575bfaabf8fa25bee32fa3d0b6972a771b99104acbf9f0c98590c225be3";
 // 官方关窗（CMS CloseDialog→UIDialog.Close）；不走 OnClickYes/Ok，避免踢线「確認」
-constexpr uint32_t kRvaCloseDialog = 0x788550;   // UIUtilDialog.CloseDialog
-constexpr uint32_t kRvaUiDialogClose = 0x14B8D80;  // UIDialog.Close（shop_port 同源）
+constexpr uint32_t kRvaCloseDialog = 0x789400;   // UIUtilDialog.CloseDialog
+constexpr uint32_t kRvaUiDialogClose = 0x14BABD0;  // UIDialog.Close（shop_port 同源）
 constexpr char kHashCloseDialog[] =
-    "ed9ad0386273c23a2c92bc9fe76913f3ee3499fbd1d705f9d5ee0cefb85d502";
+    "a0030285f34cb3d07587574f1ec3f560c795231c8aa987cefed79dc03a9258f";
 // UIUtilDialog.Notice — Abs trampoline 会 PATCH GA .text（NGS/GRAP 忌讳）。
 // BIN 16:xx：装 Abs 后反复「安全模組…強制關閉」；封禁/踢线文案改走 DialogScrape。
 // 开启：截 sMsg + 返回实例；dismiss 仍以 FindAll 为主。
 constexpr bool kNoticeAbsEnabled = false;
-constexpr uint32_t kRvaNotice = 0x75A7E0;
+constexpr uint32_t kRvaNotice = 0x75B6A0;
 // 序言：push r15/r14/r12/rsi/rdi/rbp/rbx ; sub rsp,80h（17B，指令边界；IDA 运行时 dump）
 constexpr size_t kNoticeSteal = 17;
 constexpr uint8_t kNoticeSig[kNoticeSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x56, 0x57,
                                               0x55, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00,
                                               0x00};
 // YesNo — 同表邻接；封禁单钮窗也可能不经 Notice
-constexpr uint32_t kRvaYesNo = 0x756750;
+constexpr uint32_t kRvaYesNo = 0x757610;
 constexpr size_t kYesNoSteal = 19;
 constexpr uint8_t kYesNoSig[kYesNoSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                                             0x56, 0x57, 0x55, 0x53, 0x48, 0x81, 0xEC, 0x88,
                                             0x00, 0x00, 0x00};
 // UIUtilDialog 表邻接备用 Open（少 xref；登录封禁路径候选，callee of login packet handler）
-constexpr uint32_t kRvaAltDlgOpen = 0x78F560;
+constexpr uint32_t kRvaAltDlgOpen = 0x790410;
 constexpr size_t kAltDlgSteal = 14;
 constexpr uint8_t kAltDlgSig[kAltDlgSteal] = {0x41, 0x57, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48,
                                               0x81, 0xEC, 0x90, 0x00, 0x00, 0x00};
 constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
-constexpr uint32_t kRvaGoSetActive = 0x4E95290;
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4E95430;
+constexpr uint32_t kRvaGoSetActive = 0x4E97EE0;
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4E98080;
 constexpr size_t kOffCachedPtr = 0x10;  // UnityEngine.Object.m_CachedPtr
 constexpr int kDismissMissRetries = 2;
 constexpr DWORD kDismissMissGapMs = 80;
@@ -813,14 +816,26 @@ bool SoftForceNmTeardown(const char* why) {
     return closed;
 }
 
-// 图内主动拆：SoftForceNmTeardown 会 refuse inMap。本路径只允许 Field+playReady。
+// 图内主动拆：SoftForceNmTeardown 会 refuse inMap。一般路径只允许 Field+playReady。
+// hangup_fires / hangup_timer：图内 play-ready 即拆（不要求 scene 仍是 Field）。
+bool WhyIsHangupClose(const char* why) {
+    return why && (std::strcmp(why, "hangup_fires") == 0 ||
+                   std::strcmp(why, "hangup_timer") == 0);
+}
+
 bool SoftCloseSessionInField(const char* why) {
     using x::features::ports::world::GetSceneState;
+    using x::features::ports::world::IsInMapScene;
     using x::features::ports::world::IsPlayReady;
     using x::features::ports::world::SceneState;
-    if (GetSceneState() != SceneState::Field || !IsPlayReady()) {
-        LogLine("close_in_field refuse scene=%d play=%d why=%s",
-                static_cast<int>(GetSceneState()), IsPlayReady() ? 1 : 0, why ? why : "?");
+    const bool hangupClose = WhyIsHangupClose(why);
+    const bool sceneOk = hangupClose
+                             ? (IsInMapScene() && IsPlayReady())
+                             : (GetSceneState() == SceneState::Field && IsPlayReady());
+    if (!sceneOk) {
+        LogLine("close_in_field refuse scene=%d inMap=%d play=%d why=%s",
+                static_cast<int>(GetSceneState()), IsInMapScene() ? 1 : 0,
+                IsPlayReady() ? 1 : 0, why ? why : "?");
         KickLogLine("close_in_field refuse");
         return false;
     }
@@ -1919,18 +1934,29 @@ void SamplePlayReadyOnPump(void* user) {
 
 void SetHold(bool on) { gHold.store(on, std::memory_order_release); }
 
+bool ImpactAirSkipStand() {
+    return x::features::simple_combat::IsEnabled() &&
+           x::features::simple_combat::IsImpactApproachEnabled();
+}
+
 void ArmLandQuiet(DWORD ms) {
     const DWORD now = GetTickCount();
     DWORD armed = now ? now : 1;
     gLandQuietArmedAtMs.store(armed, std::memory_order_release);
 
     // RESULT 已等挂台：再套 quiet 是落地后空等。Impact 起飞仍有 wait_onFh。
+    // 空中贴怪：curFh 一直 0，quiet 会再 SafeLand 把正在打的人拽到台下。
     if (x::features::ports::world::IsPlayReady() &&
-        x::features::ports::foothold::PeekCurFhId() != 0) {
+        (x::features::ports::foothold::PeekCurFhId() != 0 || ImpactAirSkipStand())) {
         gLandQuietUntilMs.store(0, std::memory_order_release);
         gPostSoftAirUntilMs.store(0, std::memory_order_release);
-        LogLine("land_quiet skip stood (already onFh)");
-        KickLogLine("land_quiet skip stood");
+        if (x::features::ports::foothold::PeekCurFhId() != 0) {
+            LogLine("land_quiet skip stood (already onFh)");
+            KickLogLine("land_quiet skip stood");
+        } else {
+            LogLine("land_quiet skip impact air (curFh=0 hover is land)");
+            KickLogLine("land_quiet skip impact_air");
+        }
         return;
     }
 
@@ -2112,6 +2138,7 @@ bool WhyStringNeedsRealReconnect(const char* why) {
            std::strcmp(why, "nm_gone_inmap") == 0 || std::strcmp(why, "inbound_dead_inmap") == 0 ||
            std::strcmp(why, "mob_gather_timer") == 0 ||
            std::strcmp(why, "hangup_timer") == 0 ||
+           std::strcmp(why, "hangup_fires") == 0 ||
            std::strcmp(why, "mob_gather_clear") == 0 ||
            std::strncmp(why, "channel_hop", 11) == 0;
 }
@@ -2222,6 +2249,19 @@ bool SoftFinishIfInMarket(const char* tag) {
 int SoftProbeInMapOrFinish(const char* tag) {
     // 拍卖/商城优先于一切图内判据：此时 inMap 必为 0，不先认出来就会被当成「回到大厅」。
     if (SoftFinishIfInMarket(tag)) return 1;
+    // 出刀闸到期：禁止 stuck_lobby / already_in_map 假成功把 hangup 当落地。
+    if (x::features::ports::mob_gather::HangupFiresDue() &&
+        x::features::ports::world::IsInMapScene()) {
+        const DWORD now = GetTickCount();
+        const DWORD lastLog = gLastRefuseLogMs.load(std::memory_order_acquire);
+        if (!lastLog || now - lastLog >= kRefuseLogGapMs) {
+            gLastRefuseLogMs.store(now ? now : 1, std::memory_order_release);
+            LogLine("in_map_probe refuse hangup_fires_due tag=%s why=%s — CloseSession first",
+                    tag ? tag : "?", gWhy);
+            KickLogLine("in_map_probe refuse hangup_fires_due tag=%s", tag ? tag : "?");
+        }
+        return -1;
+    }
     // gWhy 是裸缓冲；判定读原子量，避免 memset 中间态被读成空串又放开假成功。
     const bool needReconnect = gWhyNeedsReconnect.load(std::memory_order_acquire);
     // Off-pump：WorldPort 场景缓存（worker 其它路径已在用）；泵堵时仍能认出已进图。
@@ -3649,7 +3689,10 @@ DWORD WINAPI Worker(LPVOID) {
                         if (play.sampled) lastSampleInMap = play.inMap != 0;
                         if (play.ready) {
                             // 图内须挂台（curFh≠0）再 RESULT；悬空=掉落/热重载循环（ec1fe7）。
-                            if (play.inMap && play.curFh == 0) {
+                            // 空中贴怪悬停 curFh 一直 0：等挂台只会晚弹成功、再 SafeLand 打断正在打。
+                            const bool impactAir = play.inMap && play.curFh == 0 &&
+                                                   ImpactAirSkipStand();
+                            if (play.inMap && play.curFh == 0 && !impactAir) {
                                 awaitingStand = true;
                                 sawInMapWhileDone = true;  // 热重载 !inMap 时勿 Done 再启
                                 standLeftMapSinceMs = 0;
@@ -3696,6 +3739,10 @@ DWORD WINAPI Worker(LPVOID) {
                                 Sleep(kReenterPollMs);
                                 if (gStop.load()) break;
                                 continue;
+                            }
+                            if (impactAir) {
+                                LogLine("play-ready skip stand wait — impact air curFh=0");
+                                KickLogLine("play-ready skip_stand impact_air");
                             }
 
                             playOk = true;
@@ -4025,6 +4072,10 @@ bool IsReconnectInFlight() {
 }
 
 bool RequestProactiveReconnect(const char* why) {
+    using x::features::ports::world::GetSceneState;
+    using x::features::ports::world::IsInMapScene;
+    using x::features::ports::world::IsPlayReady;
+    using x::features::ports::world::SceneState;
     if (!IsArmed()) {
         LogLine("proactive skip not_armed why=%s", why ? why : "?");
         KickLogLine("proactive skip not_armed");
@@ -4034,16 +4085,28 @@ bool RequestProactiveReconnect(const char* why) {
         LogLine("proactive skip breaker why=%s", why ? why : "?");
         return false;
     }
+    const bool hangupFires = why && std::strcmp(why, "hangup_fires") == 0;
     if (IsReconnectInFlight()) {
-        LogLine("proactive skip in_flight why=%s", why ? why : "?");
-        return false;
+        // 图内假 recover（stuck_lobby）占着 in_flight 时，出刀闸仍必须拆会话。
+        if (!hangupFires || !IsInMapScene() || !IsPlayReady()) {
+            LogLine("proactive skip in_flight why=%s", why ? why : "?");
+            return false;
+        }
+        LogLine("proactive hangup_fires while in_flight — CloseSession anyway");
+        KickLogLine("proactive hangup_fires in_flight CloseSession");
+        if (!SoftCloseSessionInField(why)) return false;
+        gSettleProactiveFast.store(true, std::memory_order_release);
+        LogLine("proactive close issued why=%s (in_flight, wait !inMap)", why);
+        KickLogLine("proactive close issued why=%s", why);
+        return true;
     }
-    using x::features::ports::world::GetSceneState;
-    using x::features::ports::world::IsPlayReady;
-    using x::features::ports::world::SceneState;
-    if (GetSceneState() != SceneState::Field || !IsPlayReady()) {
-        LogLine("proactive skip not_field scene=%d play=%d why=%s",
-                static_cast<int>(GetSceneState()), IsPlayReady() ? 1 : 0, why ? why : "?");
+    const bool sceneOk = WhyIsHangupClose(why)
+                             ? (IsInMapScene() && IsPlayReady())
+                             : (GetSceneState() == SceneState::Field && IsPlayReady());
+    if (!sceneOk) {
+        LogLine("proactive skip not_field scene=%d inMap=%d play=%d why=%s",
+                static_cast<int>(GetSceneState()), IsInMapScene() ? 1 : 0,
+                IsPlayReady() ? 1 : 0, why ? why : "?");
         return false;
     }
     // 先粘性：拆会话后 kick_sniff 也可能再写 close_session_inmap。图内不 SetHold。

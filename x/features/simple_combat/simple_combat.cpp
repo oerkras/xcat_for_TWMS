@@ -1927,6 +1927,17 @@ bool HeliHeldByPeer() {
     return o == heli::Owner::Travel || o == heli::Owner::Fly || o == heli::Owner::Gather;
 }
 
+// 交战已在飞：soft_hold / NM 闪断只许停刀，不许卸 BAN、不许停抗重力。
+// 地上 / 未 latch / 未开空中贴怪：走原来的 Unlatch（软登录扫图、进图 CurFh=0 仍禁止 BAN）。
+bool CombatMustHoverThroughQuiet() {
+    if (!gEnabled.load(std::memory_order_acquire)) return false;
+    if (!gImpactApproachEnabled.load(std::memory_order_acquire)) return false;
+    if (!ports::world::IsPlayReady()) return false;
+    if (travel::IsActive() || HeliHeldByPeer()) return false;
+    if (!gHeliLatchedThisEnable) return false;
+    return CombatHeliAirborne();
+}
+
 // 关 F5 / 软静默 / 赶路抢主：卸 CombatImpact。交战期不走这里落地砍（build 132：空中砍）。
 void UnlatchCombatHeli(const char* why) {
     gHeliLatchedThisEnable = false;
@@ -3330,6 +3341,9 @@ DWORD gLieSafeStartedMs = 0;
 DWORD gLieSafeCatchStartedMs = 0;
 int gLieSafeMapId = -1;     // 钉落点时所在图；换图后旧 fh/坐标在新图无意义，必须重钉
 int gLieSafeDropFarN = 0;   // 连续 drop_far 重试次数（见 kLieSafeDropFarRetryMax）
+// drop_far / catch 失败后改 Station 托住，禁止再走软卸。硬闸还在时绝不能 End→自由落体。
+// D115 19:47：give_up + keepFlyHold 拆旋翼 → ap y=-2025 穿到 -2762 断连。
+bool gLieSafeHoverLock = false;
 // BIN 64b013：回城卷后 mapId 已翻、AbsPos 仍是挂机图 → 假 onFh/原地 Station。
 // 换图落台先等出生点落入本图近台，再钉点。
 bool gLieSafeAwaitSpawn = false;
@@ -3482,12 +3496,14 @@ bool HeliBaseArmed() {
     // Bootstrap / 非地图：禁止武装——payload 可在 worker 起来前 SetEnabled，BAN 会卡住整段换图。
     if (travel::IsActive()) return false;
     if (!ports::world::IsPlayReady()) return false;
-    return gEnabled.load(std::memory_order_acquire) && CombatGlideEnabled() &&
-           gHardPauseMask.load(std::memory_order_acquire) == 0 &&
-           !gKickStressActive.load(std::memory_order_acquire) &&
-           !SoftOrNetQuiet() &&
-           // ce6797：soft success 后勿立刻 CombatImpact BAN ON 空中扫图。
-           !soft_login_probe::IsPostSoftAirCombatBlocked();
+    if (!gEnabled.load(std::memory_order_acquire) || !CombatGlideEnabled() ||
+        gHardPauseMask.load(std::memory_order_acquire) != 0 ||
+        gKickStressActive.load(std::memory_order_acquire)) {
+        return false;
+    }
+    // 已在飞：soft_hold / post_air 不得拆武装。地上仍走 quiet/post_air 闸（ce6797 扫图）。
+    if (CombatMustHoverThroughQuiet()) return true;
+    return !SoftOrNetQuiet() && !soft_login_probe::IsPostSoftAirCombatBlocked();
 }
 
 bool PlayerOutOfPlayBounds(float px, float py);  // 定义见下；Sync 清 bail 要用
@@ -3512,6 +3528,7 @@ void BeginLieSafeLand(const char* why) {
     gLieSafeCatchStartedMs = 0;
     gLieSafeMapId = -1;
     gLieSafeDropFarN = 0;
+    gLieSafeHoverLock = false;
     gLieSafeAwaitSpawn =
         why && (std::strstr(why, "map_change") || std::strstr(why, "ResetForMapChange") ||
                 std::strstr(why, "map_arrive") || std::strstr(why, "MapArrive"));
@@ -3584,14 +3601,36 @@ void EndLieSafeLand(const char* why) {
     gLieSafeCatchDrop = false;
     gLieSafeCatchStartedMs = 0;
     gLieSafeDropFarN = 0;
+    gLieSafeHoverLock = false;
     if (was) {
-        heli::Disarm(heli::Owner::Combat);
-        heli::Release(heli::Owner::Combat);
-        gHeliHoldValid = false;
+        ports::teleport::FlightState st{};
+        const bool onFh = ports::teleport::QueryFlightState(st) && st.ok && st.onFh;
+        const int nm = kick_sniff::LastSessionState();
+        const bool sessionDead = (nm == 0 || nm == 1);
         ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::CombatImpact, false);
-        // BIN adfed6：落台 Tick 每拍续 gHeliAirborneUntilMs；若 onFh 结束仍留宽限，
-        // SyncImpactFhBan 立刻 BAN ON 撕掉刚挂的台 → Hold 悬空 / combat↔none 抖振。
-        gHeliAirborneUntilMs = 0;
+        if (onFh || sessionDead) {
+            heli::Disarm(heli::Owner::Combat);
+            heli::Release(heli::Owner::Combat);
+            gHeliHoldValid = false;
+            // BIN adfed6：落台 Tick 每拍续 gHeliAirborneUntilMs；若 onFh 结束仍留宽限，
+            // SyncImpactFhBan 立刻 BAN ON 撕掉刚挂的台 → Hold 悬空 / combat↔none 抖振。
+            gHeliAirborneUntilMs = 0;
+        } else {
+            // 还没挂台：禁止 Disarm。D115 19:47 drop_far_exhausted 后 1.3s 掉到 y=-2762。
+            const DWORD now = x::runtime::NowMs();
+            if (heli::Bailed()) heli::ClearBailed();
+            (void)heli::Acquire(heli::Owner::Combat);
+            gHeliAirborneUntilMs = now + kHeliAirborneGraceMs;
+            heli::Setpoint sp{};
+            sp.x = st.ok ? st.x : gLieSafeX;
+            sp.y = st.ok ? st.y : gLieSafeY;
+            ClampAimInPlayBounds(&sp.x, &sp.y);
+            sp.mode = heli::Mode::Station;
+            heli::SetSetpoint(heli::Owner::Combat, sp);
+            gHeliHoldValid = true;
+            LogLine("lie_safe_land end airborne keep-heli why=%s ap=(%.0f,%.0f) (no freefall)",
+                    why ? why : "?", st.ok ? st.x : 0.f, st.ok ? st.y : 0.f);
+        }
     }
     gLieSafeAwaitSpawn = false;
     const bool keepFlyHold =
@@ -3775,9 +3814,12 @@ void RestartLieSafeLand(const char* why) {
     gLieSafeCatchStartedMs = 0;
     gLieSafeMapId = -1;
     gLieSafeDropFarN = 0;
+    gLieSafeHoverLock = false;
     gLieSafeAwaitSpawn = true;
     // 不在此 Acquire：等 Ensure 钉到本图落点后再由 Tick 抢旋翼（BIN 79a8f1 幽灵台）。
-    if (heli::CurrentOwner() == heli::Owner::Combat) {
+    // 硬闸还在时禁止 Disarm：换图重钉不能把人扔进自由落体。
+    if (heli::CurrentOwner() == heli::Owner::Combat &&
+        (gHardPauseMask.load(std::memory_order_acquire) & kSafeLandHoldersMask) == 0) {
         heli::Disarm(heli::Owner::Combat);
         heli::Release(heli::Owner::Combat);
     }
@@ -3808,8 +3850,43 @@ void ClearLieSafeMotion() {
     LogLine("lie_safe_land clear_v ok=%d pumped=%d", job.ok ? 1 : 0, pumped ? 1 : 0);
 }
 
+bool SafeLandHoldersActive() {
+    return (gHardPauseMask.load(std::memory_order_acquire) & kSafeLandHoldersMask) != 0;
+}
+
+// 硬闸还在：Station 托住，禁止软卸旋翼。AbsPos 更大 Y = 更高；有台则托在台面上方 lift。
+void DriveLieSafeHover(DWORD now, const ports::teleport::FlightState& st, const char* why) {
+    gLieSafeCatching = false;
+    gLieSafeCatchDrop = false;
+    gLieSafeCatchStartedMs = 0;
+    gLieSafeHoverLock = true;
+    if (heli::Bailed()) heli::ClearBailed();
+    (void)heli::Acquire(heli::Owner::Combat);
+    gHeliAirborneUntilMs = now + kHeliAirborneGraceMs;
+    heli::Setpoint sp{};
+    if (gLieSafeHaveTarget) {
+        sp.x = gLieSafeX;
+        sp.y = (gLieSafeFh != 0) ? (gLieSafeY + kLieSafeCatchLiftPx) : gLieSafeY;
+    } else {
+        sp.x = st.x;
+        sp.y = st.y;
+    }
+    ClampAimInPlayBounds(&sp.x, &sp.y);
+    sp.mode = heli::Mode::Station;
+    heli::SetSetpoint(heli::Owner::Combat, sp);
+    static DWORD sHoverLog = 0;
+    if (!sHoverLog || now - sHoverLog > 800) {
+        sHoverLog = now;
+        LogLine("lie_safe_land hover hold why=%s fh=%u ap=(%.0f,%.0f) sp=(%.0f,%.0f) "
+                "onFh=%d (no freefall)",
+                why ? why : "?", (unsigned)gLieSafeFh, st.x, st.y, sp.x, sp.y,
+                st.onFh ? 1 : 0);
+    }
+}
+
 // 安全落台：旋翼飞近 → 卸禁挂台 → 短托消速 → 软卸旋翼挂台。禁止硬掰 AbsPos。
 // BIN 10:42:57 一进 catch 就 Disarm → 直坠；10:49 Station 永不卸 → onFh 卡死 catch_timeout。
+// D115 19:47：测谎期 catch drop 穿下层台，give_up 再拆旋翼 → 掉出图。硬闸期禁止自由落体。
 void TickLieSafeLand(DWORD now) {
     if (!gLieSafeLand.load(std::memory_order_acquire)) return;
 
@@ -3817,7 +3894,12 @@ void TickLieSafeLand(DWORD now) {
     if (!ports::teleport::QueryFlightState(st) || !st.ok) return;
     EnsureLieSafeTarget(st.x, st.y);
     // BIN 79a8f1：等图就绪期间无落点——勿用 (0,0)/陈旧坐标 Station，也勿挂 approach ban。
+    // 硬闸还在时禁止 Disarm 等目标：人会自由落体。
     if (!gLieSafeHaveTarget) {
+        if (SafeLandHoldersActive()) {
+            DriveLieSafeHover(now, st, "wait_target");
+            return;
+        }
         if (heli::CurrentOwner() == heli::Owner::Combat) {
             heli::Disarm(heli::Owner::Combat);
             heli::Release(heli::Owner::Combat);
@@ -3877,6 +3959,16 @@ void TickLieSafeLand(DWORD now) {
         }
     }
 
+    if (gLieSafeHoverLock && SafeLandHoldersActive()) {
+        // 已锁悬停：有近台则退出 lock 走 catch/drop，避免 0.1.171 永久浮空。
+        if (gLieSafeFh != 0) {
+            gLieSafeHoverLock = false;
+        } else {
+            DriveLieSafeHover(now, st, "hover_lock");
+            return;
+        }
+    }
+
     // fh=0 = 近处压根没有可挂的台（snap reject far / miss snap 的原地钉）。这时 catch→drop 那套
     // 「松手让引擎自己挂台」是空转：一松手就自由落体，掉出 kLieSafeOnFhOkPx 又被旋翼拉回，
     // 成了 ~780ms 一轮的弹跳——BIN 64b013 在 ap=(-1533,245) 抖了 4.5s，直到撞上 drop_far
@@ -3886,6 +3978,10 @@ void TickLieSafeLand(DWORD now) {
     if (gLieSafeFh == 0) {
         if (gLieSafeStartedMs != 0 &&
             static_cast<int>(now - gLieSafeStartedMs) >= static_cast<int>(kLieSafeNoLandHoldMs)) {
+            if (SafeLandHoldersActive()) {
+                DriveLieSafeHover(now, st, "no_landable_timeout");
+                return;
+            }
             LogLine("lie_safe_land no-landable hold expired age=%dms ap=(%.0f,%.0f) map=%d",
                     static_cast<int>(now - gLieSafeStartedMs), st.x, st.y,
                     ports::world::GetMapId());
@@ -3933,6 +4029,9 @@ void TickLieSafeLand(DWORD now) {
         const DWORD catchAge =
             gLieSafeCatchStartedMs ? (now - gLieSafeCatchStartedMs) : 0;
         // 软卸：消速后放开托举，让引擎挂台；掉远则重飞。
+        // 硬闸也必须 drop：0.1.171 skip-drop+hover_lock 把人钉在台面上方 32px，
+        // MapArrive 永远等不到 onFh。穿台弹跳真因是 catch 后又 BAN ON，
+        // 已在 SyncImpactFhBan 用 catching 卸掉（不是靠 skip-drop）。
         if (!gLieSafeCatchDrop && catchAge >= kLieSafeCatchHoldMs) {
             gLieSafeCatchDrop = true;
             heli::Disarm(heli::Owner::Combat);
@@ -3962,6 +4061,16 @@ void TickLieSafeLand(DWORD now) {
                     gLieSafeCatchDrop = false;
                     gLieSafeCatchStartedMs = 0;
                     LogLine("lie_safe_land catch retry d=%.0f", d);
+                } else if (SafeLandHoldersActive()) {
+                    // 勿 hover_lock：DriveLieSafeHover 会清 catching → BAN 再摘台，永远挂不上。
+                    if (!gLieSafeCatchDrop) {
+                        gLieSafeCatchDrop = true;
+                        heli::Disarm(heli::Owner::Combat);
+                        heli::Release(heli::Owner::Combat);
+                        LogLine("lie_safe_land catch_timeout drop d=%.0f ap=(%.0f,%.0f)", d, st.x,
+                                st.y);
+                    }
+                    return;
                 } else {
                     ClearLieSafeMotion();
                     EndLieSafeLand("catch_timeout");
@@ -4023,6 +4132,9 @@ void SyncImpactFhBan() {
     bool wantBan = false;
     if (lieApproach) {
         wantBan = ports::world::IsPlayReady();
+    } else if (CombatMustHoverThroughQuiet()) {
+        // 空中静默：HeliBaseArmed 因 SoftOrNetQuiet/post_air 为假，但仍要顶住 BAN。
+        wantBan = true;
     } else if (HeliBaseArmed() && CombatSpawnAllowsBan()) {
         wantBan = true;
     } else if (HeliBaseArmed()) {
@@ -4060,6 +4172,12 @@ void SyncImpactFhBan() {
         const DWORD now = x::runtime::NowMs();
         wantBan = gHeliAirborneUntilMs != 0 &&
                static_cast<int>(now - gHeliAirborneUntilMs) < 0;
+    }
+    // catch/drop 必须卸 BAN。补给硬闸下 TickImpl 会在 TickLieSafeLand 后再 Sync 一次：
+    // catch begin 刚 BAN OFF，CombatMustHoverThroughQuiet 又把 CombatImpact 打开并 detach
+    // （客户 0.1.170：卖装 Pause 后 catch→drop→Acquire 穿台弹跳，人一直漂）。
+    if (safeLand && gLieSafeHaveTarget && gLieSafeCatching) {
+        wantBan = false;
     }
     ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::CombatImpact, wantBan);
     // catch hold：ban 已关，但仍要占着 Combat 发 Station；drop 段才交还。
@@ -4959,6 +5077,26 @@ void PublishHeliSetpoint(DWORD now, float px, float py, bool haveLock) {
 float gHeliLastVx = 0.f;
 float gHeliLastVy = 0.f;
 
+// 空中静默：钉在当前位置 Hold，不追怪。BAN 由 SyncImpactFhBan 的 keep-air 分支顶住。
+void PublishQuietAirHold(DWORD now) {
+    ports::teleport::FlightState st{};
+    if (!(ports::teleport::QueryFlightState(st) && st.ok)) return;
+    if (heli::CurrentOwner() == heli::Owner::None) {
+        if (heli::Bailed()) heli::ClearBailed();
+        (void)heli::TryAcquire(heli::Owner::Combat);
+    }
+    heli::Setpoint sp{};
+    sp.x = st.x;
+    sp.y = st.y;
+    ClampAimInPlayBounds(&sp.x, &sp.y);
+    sp.mode = heli::Mode::Hold;
+    heli::SetSetpoint(heli::Owner::Combat, sp);
+    gHeliHoldValid = true;
+    gHeliHoldX = sp.x;
+    gHeliHoldY = sp.y;
+    gHeliAirborneUntilMs = now + kHeliAirborneGraceMs;
+}
+
 // A 层入口：必须在 TickImpl 所有提前 return 之前调，否则 skill_prepare / 池未热身 /
 // arm_grace 这些 return 会让旋翼停转，fh-ban 下就是自由落体。
 void TickHeliRotor(DWORD now) {
@@ -5314,24 +5452,41 @@ void TickImpl(DWORD now) {
     // IsPlayReady 在 NM 断后仍常为真（InMap&&Alive），不能依赖 not_play（752824）。
     if (SoftOrNetQuiet()) {
         ports::hit_pin::SetWishOid(0);
-        gHeliAirborneUntilMs = 0;
-        gHeliHoldValid = false;
+        const bool keepAir = CombatMustHoverThroughQuiet();
+        if (!keepAir) {
+            gHeliAirborneUntilMs = 0;
+            gHeliHoldValid = false;
+        }
         const bool softHold = soft_login_probe::IsHoldActive();
         const bool landQuiet = soft_login_probe::IsLandQuiet();
         const char* why = softHold ? "soft_hold" : (landQuiet ? "soft_land_quiet" : "nm_down");
 
         // soft_hold / nm_down：拆落台并清 MapArrive（BIN fada72：abort 后 MapArrive 永挂）。
         // soft_land_quiet：已回图——悬空则开落台抗重力，勿清 MapArrive（BIN 681ebe）。
+        // 已在飞：只停刀，不 Unlatch。客户 0.1.167 空中 BAN dropped + v=-670 循环坠落。
         if (softHold || !landQuiet) {
-            if (gLieSafeLand.load(std::memory_order_acquire)) {
-                EndLieSafeLand("soft_or_net_quiet");
+            if (!keepAir) {
+                if (gLieSafeLand.load(std::memory_order_acquire)) {
+                    EndLieSafeLand("soft_or_net_quiet");
+                }
+                if (gHeliLatchedThisEnable) UnlatchCombatHeli(why);
             }
             ReleaseMapArriveIfHeld();
-            // F5 还开着：软静默停飞。结束后 HeliBaseArmed 会再武装（build 132 先起飞）。
-            if (gHeliLatchedThisEnable) UnlatchCombatHeli(why);
+            if (keepAir) {
+                PublishQuietAirHold(now);
+                static DWORD sKeepAir = 0;
+                if (!sKeepAir || now - sKeepAir > 800) {
+                    sKeepAir = now;
+                    ports::teleport::FlightState ap{};
+                    const bool ok = ports::teleport::QueryFlightState(ap) && ap.ok;
+                    LogLine("quiet keep_air why=%s ap=(%.0f,%.0f) ma=%d (BAN+rotor; no fire)",
+                            why, ok ? ap.x : 0.f, ok ? ap.y : 0.f, ok ? ap.ma : -1);
+                }
+            }
             if (gState != State::Idle) GoIdle(now, why);
             else SyncImpactFhBan();
             ports::attack::ForceRelease();
+            if (keepAir) TickHeliRotor(now);
         } else {
             if (gState != State::Idle) GoIdle(now, why);
             ports::attack::ForceRelease();
@@ -5391,9 +5546,9 @@ void TickImpl(DWORD now) {
         static DWORD sQuietLog = 0;
         if (!sQuietLog || now - sQuietLog > 2000) {
             sQuietLog = now;
-            LogLine("combat quiet why=%s hold=%d landQuiet=%d nm=%d safeLand=%d (no fire)",
+            LogLine("combat quiet why=%s hold=%d landQuiet=%d nm=%d safeLand=%d keepAir=%d (no fire)",
                     why, softHold ? 1 : 0, landQuiet ? 1 : 0, kick_sniff::LastSessionState(),
-                    gLieSafeLand.load(std::memory_order_acquire) ? 1 : 0);
+                    gLieSafeLand.load(std::memory_order_acquire) ? 1 : 0, keepAir ? 1 : 0);
         }
         gHiraishinSawSoftQuiet = true;
         return;
@@ -5409,7 +5564,8 @@ void TickImpl(DWORD now) {
             LogLine("soft_hold released — combat resume (play-ready)");
     }
     // soft quiet 已过、post_air_gate 仍在：HeliBaseArmed=false，清宽免 BAN 拖尾。
-    if (soft_login_probe::IsPostSoftAirCombatBlocked()) {
+    // 人还在空中时清宽 = SyncImpactFhBan 下一拍卸 BAN → 再坠。ce6797 只挡地面起飞扫图。
+    if (soft_login_probe::IsPostSoftAirCombatBlocked() && !CombatMustHoverThroughQuiet()) {
         gHeliAirborneUntilMs = 0;
         gHeliHoldValid = false;
     }

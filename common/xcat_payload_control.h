@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 138u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 140u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -104,6 +104,8 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 138u;
 // v136: simpleCombatForgeHitFillList / MultiPkt — 已移除（已证实踢号；字段保留布局，恒 0）
 // v137: simpleCombatSkipAccMiss 厂默关→开（当时 N=2）；旧盘仍为关迁一次。升 version 后用户可再关掉
 // v138: simpleCombatSkipAccMissN 厂默 2→1；旧盘仍为 2 迁一次。升 version 后用户可再改
+// v139: 主动软重连旧厂默开+14s 残留迁关一次（v122 已改厂默关，当时没迁盘）
+// v140: forceTrade — 实验·强制交易：改 UIUserInfo 人物卡交易按钮等级阈值 global；默认关
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -356,6 +358,8 @@ constexpr uint32_t kMobGatherAimMsMin = 8u;
 constexpr uint32_t kMobGatherAimMsMax = 100u;
 constexpr uint32_t kMobGatherSoftReloginDefault = 0u;
 constexpr uint32_t kMobGatherSoftReloginSecDefault = 20u;
+// v104 厂默 14s 且默认开。v122 改关后旧盘仍 1+14，当残留迁关。
+constexpr uint32_t kMobGatherSoftReloginSecLegacyDefault = 14u;
 constexpr uint32_t kMobGatherSoftReloginSecMin = 10u;
 constexpr uint32_t kMobGatherSoftReloginSecMax = 3600u;
 // 落地后累计出刀（与 combat.log「fire id=」同拍 +1）达此主动软重连；与首页秒数先到先拆。勾选独立。
@@ -818,6 +822,8 @@ struct PayloadControl {
     // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认开）。
     // 服端可能断线；与挂机「守护模式」叠加会干净重拉——挂机/守护时建议关。
     uint32_t auctionTownBypass = 1;
+    // 实验 TAB 一次探针：主泵备份/还原 level+建角 DateTime 后调迁拍卖。不常驻假等级。
+    uint32_t auctionGateProbeSeq = 0;
     // v76/v77: 实验·坐下/椅子回蓝（刷 WM 累加器；默认关）。BIN 已证真蓝会动；过密踢。
     uint32_t restMpAccel = 0;
     uint32_t restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
@@ -826,6 +832,8 @@ struct PayloadControl {
     uint32_t secAttackTextHook = 0;
     // v80/v81: 实验·无限飞镖。用户入口已关（kInfiniteStarsUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t infiniteStars = 0;
+    // v140: 实验·强制交易（UIUserInfo 15 级门改阈值；仅客户端人物卡交易按钮；默认关）
+    uint32_t forceTrade = 0;
     // Deprecated（经典版）：补给真源为 user.ini [auto_supply]。
     // 字段仅保留结构布局兼容；Read/WritePayloadControl 不再读写，并会清掉 core.autoSell*。
     uint32_t autoSell = 0;

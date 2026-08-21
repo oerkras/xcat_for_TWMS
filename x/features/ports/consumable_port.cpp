@@ -33,18 +33,18 @@ constexpr DWORD kUseMiRetryMs = 3000;
 constexpr DWORD kFkmRebindMs = 3000;
 
 // FuncKeyMappedManager · remounted 2026-08-06（与 attack_input_port 钉值一致）
-constexpr uint32_t kRvaGetDataByKeyCode = 0x1673990;
+constexpr uint32_t kRvaGetDataByKeyCode = 0x1671060;
 constexpr char kHashGetDataByKeyCode[] =
-    "cd8dee679c6dd6b485790cc165cb37356680d649280cca46ed8ec022e098d2e";
+    "b512b465c90e7a26ebb7a560105df1d2e96b72c2425fa8002090de0e0d14ff5";
 constexpr char kFkmClass[] =
-    "e74c74c72ef5a40cec5cedc318aa6ccef90f8df89f51b54a0cb199a1defd174";
+    "d5c894008ab3517ddbbf98768b3cfe952c59b00a97806a77c72c344cb4ec6b5";
 constexpr int32_t kFuncTypeItem = 2;  // FuncType.Item
 constexpr char kFuncKeyClass[] =
-    "d545ecd5bc5f00ba7c3af10f829e0d98f2da062c63750606b992d34c0ddc016";
+    "ad101c284c26e938b1f94c2666b42085d4958fe72cd8160af489f17a42a6f63";
 constexpr char kHashFkType[] =
-    "f29273c7f2c0090e47dd96db88f54b0a156fc9ab45e0b577a9fbbe91913b960";
+    "f20fb5cf349a35907e11a8279c9aef4468c9a28fdb2fe855f1cf43036490983";
 constexpr char kHashFkValue[] =
-    "b13615498bc8fd19ec966fd2ae3a988fa5b1a98c91205f33231b81435be63ba";
+    "b03e9afb4378bb895916dba490dfdea8ee95fafa73f9c85416e6a9a381ac721";
 constexpr size_t kFbFkType = 0x10;
 constexpr size_t kFbFkValue = 0x14;
 size_t gOffFkType = kFbFkType;
@@ -53,21 +53,21 @@ bool gFkFieldTried = false;
 
 // --- 字段防漂移（remount 2026-08-06 · TDI/offset 对齐；WM/FKM/FuncKey 未漂）---
 constexpr char kHashWorldManager[] =
-    "f87be298afca3b6020c8f4695d83819fcc9a28877005b6a669187d33a0a2711";
+    "f05b942aeb569b2c37916e7ee710b3ba74011550adcb611a0b26981331a8321";
 constexpr char kHashCharacterData[] =
-    "db37b8a1a37487837eec8bfad308ee5267bbe7c534c9aeb8472ae81878f78bf";
+    "cb1adcfaa2d7a4777b1980f1b967ca8c4bc7c63812245c43c9cf792e4b2b410";
 constexpr char kHashItemSlotBase[] =
-    "c318a7313ffb8e812f6db10b4e98a91dcee0caf2c5b7feb48474d12a82677ac";
+    "a685e8d519d8a6d182732393f3ca82c37177616744fec2d3bee2287c1e531ee";
 constexpr char kHashItemSlotBundle[] =
-    "cc245fb7362f275fd0b64547ac8be7835052db6f5d2fe78ca62a2b535227ad6";
+    "e776f8453a3e71f64ae3a1635413380bf069a8c3e6d088d401e1249851302de";
 constexpr char kHashWmCharacterData[] =
-    "a3ce8101b83cba94f6794a29c5c6cfd17110bfc1ee2c4fc52f2b2cc0b8489d8";
+    "ade0e91001d3248b5f649264d9536e3f60b3f269d9596b8651e77c61da582c6";
 constexpr char kHashCdItemSlots[] =
-    "e7114fc3f4efdfbde38ae02b70058c8c5ed9004d854ce5b27e2093777da86ad";
+    "bd8d6cc061546925a4b90fb97643a21c57d17a27a5f2537c3e411c953eaa40c";
 constexpr char kHashItemId[] =
-    "ba097becccd7cd2d15813c26f7095f13a3ae8a264032e79a2c58b7ab4f894d1";
+    "f195118d673a188cdcc0ae9b8b221192b6b745a65dbe91ad7fda54ec9ea5b15";
 constexpr char kHashBundleNumber[] =
-    "ea441e202ca6f266fc1e6597d68a8bc2cd041cd5c5ef845b96c1c7ebb4587ec";
+    "ce3cd4752a111dc7b0fa43e9a1a14332f2382a76befd978793788f404f46c1e";
 
 constexpr size_t kFbWmCharacterData = 0xE0;
 constexpr size_t kFbCdItemSlots = 0x40;
@@ -82,20 +82,20 @@ std::atomic<bool> gFieldOffResolved{false};
 char gFieldOffPath[64]{};
 
 // UISlotItem.SendStatChangeItemUseRequest — 药水等属性道具；hashed；TypeDefIndex 488。
-// Remount 2026-08-06: ACS class/method rehashed；RVA 未漂（仍 0x5F5020）。
+// Remount 2026-08-06: ACS class/method rehashed；RVA 未漂（仍 0x5F4960）。
 // Evidence: dump.cs static Send* 声明序对齐 CMS（Lottery → StatChange → AntiMacro → PortalScroll…）。
 // Resolve: name → method-hash → RVA+kind(void,int,int)。
 constexpr char kUiSlotItemClassHash[] =
-    "b1e954b480017cf522bfaff81a9f14ef4e0653d902f810de1d51f13a702463f";
+    "b496546d595f4b2c5f271cc44142fe677c854a21ed741950b6defdf82b1b5af";
 constexpr char kUseReqMethodHash[] =
-    "d44ebb6c6bec4ff91d1c64ed309cf88cab907c6000ec8e8c39cc9c29f10db5f";
-constexpr uint32_t kRvaSendStatChangeItemUseRequest = 0x5F5020;
+    "a86e84e5ea36f6ad587bdfe5b6a95b7df994969a48df01131d8f749af5f4216";
+constexpr uint32_t kRvaSendStatChangeItemUseRequest = 0x5F4960;
 
 // UISlotItem.SendPortalScrollUseRequest — 回家/城镇卷（2030xxx）；CMS private static (nPOS,nItemID)。
-// TW dump 同簇；RVA 未漂 0x5F7DB0。
+// TW dump 同簇；RVA 未漂 0x5F76F0。
 constexpr char kPortalScrollMethodHash[] =
-    "cc3cbeb17961ecb17d75c0c987a904e1a1896648d46b5247c54ef031b468022";
-constexpr uint32_t kRvaSendPortalScrollUseRequest = 0x5F7DB0;
+    "d8fa04c6e0740c261c9280dd3b3cd9ddce35c71c7bffb95a71f86fc06e37a4a";
+constexpr uint32_t kRvaSendPortalScrollUseRequest = 0x5F76F0;
 
 using FnUseRequest = void (*)(int nPos, int itemId, const void* methodInfo);
 

@@ -60,34 +60,34 @@ using x::runtime::il2cpp::ReadPtr;
 // User / SecondaryStat：dump.cs 2026-08-06 字段哈希 → field_get_offset；失败回退下方 kFb*
 // User=b8c9aedb…（TDI 1560）；SS=fda0a837…（TDI 1329，WM+0xF0）
 constexpr char kSecondaryStatClass[] =
-    "d76746e1e5090a3f7627f84d73ef602cea9ec903277cda194d79c833738095c";
+    "d002005f3130062676c8a6de6ac155c4d71d8e59ecf13e2d7e413867563aacd";
 constexpr char kUserClass[] =
-    "ead9ab2e851cf06879704044ce549197d7fb5017ecb635104f7a6e366f9ac7a";
+    "f19ee52eb2762addde30d9ee30704c7ed4948091596d0ce9fe8db390c3aeeba";
 constexpr char kHashNInv[] =
-    "f64c7f0a2dd79dd4b99453cd2a7303e236dfe8b29cf533887c40907b9bbe589";
+    "bb72678ec5fcf37c539ad4d0841a5882fb436e47adffd7d96a9ea4d0e81fcf8";
 constexpr char kHashRInv[] =
-    "cda108a683cee0a865c8cddb2f1afd6bb2ee7ccc2c47686281bd2b2ef7c95ca";
+    "ac22fc4b301bfb2b196828dc72641a77a3c62e90d7ffc9f7ce310c1b4d70ca4";
 constexpr char kHashTInv[] =
-    "a86b2c31e0a90e3d8e072713def5f7d6efe4c6dbb160f11dd78d3bb45c599ea";
+    "e09c4d3ba2e539719101e91cd39030baee084976d97a66cd8f5898997acf4aa";
 constexpr char kHashNDojang[] =
-    "ce5569a8a97c410cdcb56c8c89ab9bcf3d552caa8759c360a82ddf725bf1dac";
+    "a75d7740beecca7882b22afa8e6f616d6c9f468856b5d94328439832b65f10e";
 constexpr char kHashRDojang[] =
-    "dfbfbe8a06817f5bd8d8d58d99231c316e3f184217cfc63cab0a284932285a0";
+    "bd0cd0369ca358cc67f985d14e6f246e7ca8fddd9f1ea815602e9f53d42ad77";
 constexpr char kHashTDojang[] =
-    "e3298588bcd96aa6e129f07ecebd4ba57aafdfa7c79749bcfd679432791df51";
+    "d57b054508c3b6327fe1fc20a6030fc3e0d3f71085237a3079fa76855bc0f7a";
 constexpr char kHashHitPeriodRemain[] =
-    "a4b98d2767fc79577d42a02e7de66de11b19cef11d0257c66b72f51642e2bae";
+    "a0db07b50b4a066951abc8a7719bbcfdad78b5b2a79d953a4bde240bf052de6";
 constexpr char kHashLayerStateCounter[] =
-    "dd4296d39345bd2ebdeca4651486d98e3fdaf60aaaf3063e2f169cc224d922c";
+    "e5092388c6a91f11f2c68a0966c58d71168d4cbe99bebdd2d53ffe664055b1d";
 constexpr char kHashLogicalPos[] =
-    "fbb96ebf96fbe214ee24fcbda14d147b6fe121817305ba2191c875f7367f88c";
+    "e29e8d55e03e34aa5e9d6e773d2c8a8312fedf969cb8170fe5fc71cc797f834";
 // VisPos 在 User 祖先 edc85ce2…（MonoBehaviour 派生）@+0x64
 constexpr char kHashVisPos[] =
-    "dfe2e5f14ea04b0ca19e131b66bb4d53e06ca0c22744c299a991cd322e915e4";
+    "cf84c347e6d42aeed6a7320ec46ce5e76cd339550ee0f05e83b2508b331eef8";
 constexpr char kHashSoftTickA[] =
-    "bb14cecd6e35b74806d3df1b30f0d7cc392abe06fd2a8efe5382a6fe443b040";
+    "c6b63860ffff99f16dde059f4d9ac0ef4092431c911c97ef0199ad90676cc64";
 constexpr char kHashSoftTickB[] =
-    "ab67b975e252a0898e6954376dc1b0bb6a5f6895218dd287cb806ace9098d25";
+    "b80f5b5336bf18e17f0bd0b37274e3e6b2084b40fdca22706a33f8b844a2ddd";
 
 constexpr size_t kFbWmSecondaryStat = 0xF0;
 

@@ -31,21 +31,21 @@ using x::runtime::il2cpp::AtRva;
 
 // UserBase 父类. 短 IsAlertMode（CanPerformAction 真 callee）
 // IDA: mov eax,imm; add eax,[rip]; cmp [rcx+0x118],eax; setnle
-constexpr uint32_t kRvaIsAlertMode = 0x124DC50;
+constexpr uint32_t kRvaIsAlertMode = 0x1250420;
 
 // Secondary: MethodInfo on DragManager.CanPerformAction (rarely hit; keep for MI callers)
 constexpr char kDragManagerClass[] =
-    "d2a817cd6c06f9ed6b47ff80270050e539859eebb678eb0b8209f2c08d925f2";
-constexpr uint32_t kRvaCanPerformAction = 0x4CFEC0;
+    "be43bc57d8f0db676e7f400c91d58e92886efbdea7d940cc00a32a63f9525f7";
+constexpr uint32_t kRvaCanPerformAction = 0x4CEEC0;
 constexpr char kUserAlertClass[] =
-    "a484ffac0ec2820f7d3cb62ddd233330e4c2613af7446a96b81d316db06bc44";
+    "dcf2cb53a937aadfeaa3b732e940a10e7e64793f9213ffeed54c59562e772c6";
 constexpr char kHashIsAlertMode[] =
-    "e757c4c413f82f697bee6ed0b780bbd3ef58512dbbec1f4f99ffd4cc759b1bf";
+    "f1edd34b222841a0ea9bbc9660f256beca1e6734d87d39cc5ad3aa1127c11e0";
 constexpr char kHashCanPerformAction[] =
-    "cbe010af1c67e2ef6ff3c519ec3f00548ff5dd0cb906bac4148ed1dd8293b47";
+    "ee4e496953bc13056b1ff37de711bc9a39476d3a9c7b71fb633bc85025a6eb3";
 // UserBase alert stamp（int）：仅 shape 校验 cmp 偏移；主路径不再清字段
 constexpr char kHashAlertAt[] =
-    "ff6326189ddf2aa2850ea0cfbb0a37b162b8a1881f2dc5c6044bd1e93ca52b0";
+    "a1d1a0fe73ff1af12abfb2ca85e2212a9441a832050ab0a45c7dd104a96a8ed";
 constexpr size_t kFbAlertAt = 0x118;
 size_t gOffAlertAt = kFbAlertAt;
 #define kOffAlertAt (gOffAlertAt)

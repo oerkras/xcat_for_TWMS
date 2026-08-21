@@ -17,7 +17,7 @@ namespace il2 = x::runtime::il2cpp;
 
 // Prefab attribute class (dump TypeDef 934) — _prefabPath @0x10 · remounted 2026-08-06
 constexpr char kPrefabAttrClass[] =
-    "cf260d64e912730b843b4f088e1b4b7d98f908340fcfeb7b4eea5157849a03d";
+    "a59872c698d9039653d477bee4e415348d8ec4d3c6d0d9108f81b3c4e68fb25";
 constexpr size_t kOffPrefabPath = 0x10;
 
 bool LooksLikeHeapPtr(void* p) { return il2::LooksLikeHeapPtr(p); }

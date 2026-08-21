@@ -629,11 +629,14 @@ void DrawLaunchTab(LaunchUiState& ui) {
 
     CardGap();
     {
-        // 功能未完成：整卡置灰，防止误点开独立罐。改 true 即恢复可点。
-        constexpr bool kGpDeviceLoginUiReady = false;
+        // 总开关在 gamapass_device_login.h：kGamaPassDeviceLoginEnabled。
+        constexpr bool kGpDeviceLoginUiReady = msc::launcher::kGamaPassDeviceLoginEnabled;
         xcat::ui::CardGuard card("##tab_gp_device_login",
                                  kGpDeviceLoginUiReady ? "Gama Pass 账密登录"
                                                        : "Gama Pass 账密登录（未开放）");
+        if (!kGpDeviceLoginUiReady) {
+            ImGui::TextWrapped("功能尚未开放，请用上面的「GAMA PASS自动登录」。不会开独立浏览器配置。");
+        } else {
         static bool loaded = false;
         if (kGpDeviceLoginUiReady && !loaded) {
             loaded = true;
@@ -761,6 +764,7 @@ void DrawLaunchTab(LaunchUiState& ui) {
             }
         }
         if (!kGpDeviceLoginUiReady) ImGui::EndDisabled();
+        } // kGpDeviceLoginUiReady
     }
 
     CardGap();
@@ -4724,6 +4728,7 @@ void DrawBetaTab(LaunchUiState& ui) {
     static bool auctionTownBypass = true;
     static bool restMpAccel = false;
     static int restMpAccelIntervalMs = (int)xcat::kRestMpAccelIntervalDefaultMs;
+    static bool forceTrade = false;
     static bool frameLock = true;
     static int frameLockFps = (int)xcat::kFrameLockFpsDefault;
     static bool skipDialog = false;
@@ -4742,6 +4747,7 @@ void DrawBetaTab(LaunchUiState& ui) {
                 restMpAccelIntervalMs = (int)xcat::ClampRestMpAccelIntervalMs(
                     disk.restMpAccelIntervalMs ? disk.restMpAccelIntervalMs
                                                : xcat::kRestMpAccelIntervalDefaultMs);
+                forceTrade = disk.forceTrade != 0;
                 frameLock = disk.frameLock != 0;
                 frameLockFps = (int)xcat::ClampFrameLockFps(
                     disk.frameLockFps ? disk.frameLockFps : xcat::kFrameLockFpsDefault);
@@ -4780,6 +4786,7 @@ void DrawBetaTab(LaunchUiState& ui) {
         c.restMpAccelIntervalMs = xcat::ClampRestMpAccelIntervalMs(
             static_cast<uint32_t>(restMpAccelIntervalMs < 0 ? 0 : restMpAccelIntervalMs));
         restMpAccelIntervalMs = (int)c.restMpAccelIntervalMs;
+        c.forceTrade = forceTrade ? 1u : 0u;
         c.infiniteStars = 0;
         c.frameLock = frameLock ? 1u : 0u;
         c.frameLockFps = xcat::ClampFrameLockFps(
@@ -4798,6 +4805,7 @@ void DrawBetaTab(LaunchUiState& ui) {
                 restMpAccelIntervalMs = (int)xcat::ClampRestMpAccelIntervalMs(
                     verify.restMpAccelIntervalMs ? verify.restMpAccelIntervalMs
                                                  : xcat::kRestMpAccelIntervalDefaultMs);
+                forceTrade = verify.forceTrade != 0;
                 frameLock = verify.frameLock != 0;
                 frameLockFps = (int)xcat::ClampFrameLockFps(
                     verify.frameLockFps ? verify.frameLockFps : xcat::kFrameLockFpsDefault);
@@ -4806,12 +4814,12 @@ void DrawBetaTab(LaunchUiState& ui) {
             }
             xcat::log::Ok("App",
                           "已下发 core：战斗中可丢物=%d 野外可开拍卖=%d 坐下回蓝加速=%d "
-                          "回蓝间隔=%ums 引擎帧率锁=%d fps=%u",
+                          "回蓝间隔=%ums 强制交易=%d 引擎帧率锁=%d fps=%u",
                           dropInCombat ? 1 : 0, auctionTownBypass ? 1 : 0, restMpAccel ? 1 : 0,
-                          (uint32_t)restMpAccelIntervalMs, frameLock ? 1 : 0,
+                          (uint32_t)restMpAccelIntervalMs, forceTrade ? 1 : 0, frameLock ? 1 : 0,
                           (uint32_t)frameLockFps);
         } else {
-            xcat::log::Warn("App", "写入 user.ini [core] drop/auction/restMp/frameLock 失败");
+            xcat::log::Warn("App", "写入 user.ini [core] drop/auction/restMp/forceTrade/frameLock 失败");
         }
     };
 
@@ -4980,6 +4988,36 @@ void DrawBetaTab(LaunchUiState& ui) {
             "挂机/守护期间建议关。默认开。\n"
             "开启期间其它读 IsTown/该 Option 位的逻辑也会受影响。");
         }
+        if (ImGui::Button("拍卖原生按钮（一次）")) {
+            if (ui.prefsBinDir.empty()) {
+                xcat::log::Warn("App", "拍卖探针：prefsBinDir 空");
+            } else {
+                xcat::PayloadControl c{};
+                (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+                c.auctionGateProbeSeq = c.auctionGateProbeSeq + 1u;
+                if (c.auctionGateProbeSeq == 0) c.auctionGateProbeSeq = 1;
+                c.writeTickMs = GetTickCount64();
+                if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                    xcat::PayloadControl verify{};
+                    if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify))
+                        dropSeenTick = verify.writeTickMs;
+                    else
+                        dropSeenTick = c.writeTickMs;
+                    xcat::log::Ok("App",
+                                  "已下发拍卖原生按钮探针 seq=%u（OnClickButton(17)，不改等级）",
+                                  verify.auctionGateProbeSeq ? verify.auctionGateProbeSeq
+                                                             : c.auctionGateProbeSeq);
+                } else {
+                    xcat::log::Warn("App", "写入 auctionGateProbeSeq 失败");
+                }
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "一次探针：进图后点。主泵上 FindAll 状态栏，调官方 OnClickButton(17)，\n"
+                "与手点拍卖同一条链（含红号检查→迁拍卖 0x002E）。不改等级/建角时间。\n"
+                "15/24h 仍走客户端官方闸；服端权威不变。日志 AuctionGateProbe。");
+        }
         if (xcat::ui::OptionCheckbox("回蓝加速（实验）", &restMpAccel)) persistDrop();
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
@@ -5003,6 +5041,13 @@ void DrawBetaTab(LaunchUiState& ui) {
                 xcat::kRestMpAccelIntervalDefaultMs);
         }
         ImGui::EndDisabled();
+        if (xcat::ui::OptionCheckbox("强制交易（实验）", &forceTrade)) persistDrop();
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "改 UIUserInfo 人物卡「交易」按钮的等级比较阈值（装一次）：\n"
+                "15 级以下也能点交易。仅客户端 UI；服务端仍可能拒包。\n"
+                "不覆盖右键菜单 / 丢物。关即还原官方 15 级门。默认关。");
+        }
         ImGui::Separator();
         if (xcat::ui::OptionCheckbox("引擎帧率锁", &frameLock)) persistDrop();
         if (ImGui::IsItemHovered()) {

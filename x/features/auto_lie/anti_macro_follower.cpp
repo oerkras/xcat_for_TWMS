@@ -104,6 +104,10 @@ DWORD gLastPlanAttempt = 0;
 DWORD gLastProgressLog = 0;
 DWORD gLastFocusBringMs = 0;
 bool gWasNonFiniteOpen = false;
+// Instantiated 但还没读到 rawPosList：空壳等待起点。BIN 7bb1b7 空转 7.5s 后 InterStage
+// 把单例拆掉，当时已经 RecordSeen，关窗就被记成 missed。
+DWORD gWaitPathSinceMs = 0;
+DWORD gWaitPathLoggedMs = 0;
 // 谓词降级（主泵拥堵 → 快照过期 → 一律报「没开」）的起始时刻。跟随中撞上它必须按住不动：
 // Abort 会把光标弹回答题前的位置，而游戏那几帧照采，轨迹里就多一段人为瞬移。
 // BIN aa29bc 08-10 22:45：samples 288/330 时降级，光标被弹走约 260 ms（约 7~8 个采样点），
@@ -592,6 +596,8 @@ void Abort(const char* reason) {
     gPulseBadSampleLogged = 0;
     gPulseStallLoggedMs = 0;
     gMapFailStreak = 0;
+    gWaitPathSinceMs = 0;
+    gWaitPathLoggedMs = 0;
     if (gMapFailNotified) {
         gMapFailNotified = false;
         x::features::notify::DismissNotification("auto-lie-map-fail");
@@ -769,14 +775,20 @@ bool BuildAndPublishPlan(void* inst, DWORD now) {
             }
         }
     }
-    if (!forceRefresh && gLastPlanAttempt && now - gLastPlanAttempt < kPlanRetryMs) return false;
-    gLastPlanAttempt = now;
 
     std::vector<anti_macro_port::Vec2> path;
-    if (!anti_macro_port::ReadRawPosList(inst, path) || path.empty()) {
-        Log("plan fail: no-path");
+    anti_macro_port::RawPathPeek peek{};
+    if (!anti_macro_port::ReadRawPosList(inst, path, &peek) || path.empty()) {
+        Log("plan fail: no-path why=%s n=%d cap=%d list=%p items=%p",
+            anti_macro_port::RawPathWhyTag(peek.why), peek.n, peek.cap, peek.list, peek.items);
         return false;
     }
+    // 还没有 plan 时不要用 800ms 节流：空壳等到轨迹写入的那一拍必须立刻建图。
+    // 已有 plan 的 refresh 仍节流，避免每拍重映射。
+    if (!forceRefresh && PublishedPlan() && gLastPlanAttempt &&
+        now - gLastPlanAttempt < kPlanRetryMs)
+        return true;
+    gLastPlanAttempt = now;
     // 关键证优先：一读到答案轨就落盘，不依赖 MapBatch（E175：pts=330 但 ok=0 仍可事后分析）。
     DumpMousePathEvidence(inst, path, nullptr, nullptr, false, "have-path", nullptr);
 
@@ -1217,9 +1229,42 @@ void Tick(DWORD now) {
                 static_cast<unsigned long>(held), static_cast<unsigned long>(gBlindTotalMs));
     }
 
+    void* inst = open ? anti_macro_port::GetNonFinite() : nullptr;
+    anti_macro_port::RawPathPeek pathPeek{};
+    std::vector<anti_macro_port::Vec2> pathNow;
+    const bool havePath =
+        inst && anti_macro_port::ReadRawPosList(inst, pathNow, &pathPeek) && pathNow.size() >= 2;
+
+    // Instantiated ≠ 题已开。BIN 7bb1b7（D115 08-20 17:08）：重连落地 0.9s 后 IsInstantiated
+    // 变真，但 _rawPosList 空了整整 7.5s，随后同图 InterStage 闪 252ms 把单例拆掉。
+    // 当时一 Instantiated 就 RecordSeen + 硬闸 + 报警，关窗就被记 missed——鼠标一次没跟。
+    // 真题以往 200ms 内就能读到 330 点。没轨迹就不算开题：不记账、不报警、不硬闸。
+    if (open && !havePath && !gWasNonFiniteOpen) {
+        if (!gWaitPathSinceMs) gWaitPathSinceMs = now ? now : 1;
+        if (!gWaitPathLoggedMs || now - gWaitPathLoggedMs >= kPlanRetryMs) {
+            gWaitPathLoggedMs = now;
+            const int frame = inst ? anti_macro_port::ReadNonFiniteTickFrame(inst) : -1;
+            Log("NonFinite instantiated, waiting path why=%s n=%d cap=%d list=%p items=%p "
+                "frame=%d inst=%p age=%lums",
+                anti_macro_port::RawPathWhyTag(pathPeek.why), pathPeek.n, pathPeek.cap,
+                pathPeek.list, pathPeek.items, frame, inst,
+                static_cast<unsigned long>(now - gWaitPathSinceMs));
+        }
+        gUiVisible.store(false);
+        RefreshAutoLieHardPause();
+        if (mouse_region_overlay::IsEnabled()) PublishOverlayWaiting("waiting path");
+        return;
+    }
+
     gUiVisible.store(open);
     if (!open) {
-        // 开过题却没走到 FinishAnswerSent：自动作答没成，闩会在这里补记 missed。
+        if (gWaitPathSinceMs) {
+            Log("NonFinite ghost close — never got path (waited %lums)",
+                static_cast<unsigned long>(now - gWaitPathSinceMs));
+            gWaitPathSinceMs = 0;
+            gWaitPathLoggedMs = 0;
+        }
+        // 开过题（读到过轨迹）却没走到 FinishAnswerSent：自动作答没成，闩会在这里补记 missed。
         if (gWasNonFiniteOpen) lie_stats::NotifyClosed(lie_stats::Kind::Mouse);
         gWasNonFiniteOpen = false;
         gForceRemapOnce = false;
@@ -1236,24 +1281,26 @@ void Tick(DWORD now) {
         if (mouse_region_overlay::IsEnabled()) PublishOverlayWaiting(nullptr);
         return;
     }
+    gWaitPathSinceMs = 0;
+    gWaitPathLoggedMs = 0;
 
-    // 真题刚弹出：立刻强制游戏前台（对照仓 wantEnsure / 无人值守）。
+    // 真题刚弹出（已读到轨迹）：立刻强制游戏前台（对照仓 wantEnsure / 无人值守）。
     if (!gWasNonFiniteOpen) {
         gWasNonFiniteOpen = true;
         gSolvingRemapDone = false;
         gForceRemapOnce = false;
         gVerdictLogged = false;
         gAnswerDone.store(false, std::memory_order_release);
-        lie_stats::RecordSeen(lie_stats::Kind::Mouse,
-                              reinterpret_cast<uint64_t>(anti_macro_port::GetNonFinite()));
-        Log("NonFinite open — force foreground (Attach-SFW)");
+        lie_stats::RecordSeen(lie_stats::Kind::Mouse, reinterpret_cast<uint64_t>(inst));
+        Log("NonFinite open — force foreground (Attach-SFW) pts=%zu why=%s frame=%d",
+            pathNow.size(), anti_macro_port::RawPathWhyTag(pathPeek.why),
+            anti_macro_port::ReadNonFiniteTickFrame(inst));
         anti_macro_port::TryBringGameForeground("lie-open", true);
         gLastFocusBringMs = now;
     }
 
     RefreshAutoLieHardPause();
 
-    void* inst = anti_macro_port::GetNonFinite();
     if (!inst) {
         if (mouse_region_overlay::IsEnabled()) PublishOverlayWaiting("instance null");
         return;
@@ -1312,6 +1359,11 @@ void Tick(DWORD now) {
         gPlayback.store(false, std::memory_order_release);
         if (PublishedPlan()) {
             (void)TickCalibration(inst, now);
+        }
+        if (!gLastProgressLog || now - gLastProgressLog >= kProgressLogMs) {
+            gLastProgressLog = now;
+            Log("prepare frame=%d calib=%d (follow at frame>=%d)", frame,
+                static_cast<int>(gCalibPhase), kStartSolvingFrame);
         }
         if (mouse_region_overlay::IsEnabled()) {
             const PhysicalPlan* plan = PublishedPlan();

@@ -70,7 +70,7 @@ F6 飞天踢线请对齐 MovePath 基线 + kick_sniff 的 **STATE / RING**，不
 | 符号 | 角色 |
 |---|---|
 | `SendMobPrevPosHack()` | 怪前位异常上报 |
-| `SecurityClient.SetDetectMobSpeedHack` / `SendMobSpeedHackDetectCheck` | 怪加速检测与发送 |
+| `SecurityClient.SetDetectMobSpeedHack` / `SendMobSpeedHackDetectCheck` | 怪加速检测与发送；**已解码**见 [`怪速举报type21与被动插值.md`](怪速举报type21与被动插值.md)：仅 `CalcPassivePos` 触发、阈值全=0、节流 300s |
 | LiveValue `MobHackLogDisconnectCount` (408) | 怪 hack log → 断线次数阈值 |
 | LiveValue `FindMobInRectHackLogDisconnectCount` (411) | 矩形找怪类 hack |
 | LiveValue `MobNotMoveHackCheckValue` (525) | 怪「该动不动」类检查 |

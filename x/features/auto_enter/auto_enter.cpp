@@ -47,78 +47,78 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
 // RVAs remounted 2026-08-06（dump.cs / script.json · ForceVersion 31）
-constexpr uint32_t kRvaSceneLoginGet = 0xC18DB0;  // SceneLogin static get_Instance
-constexpr uint32_t kRvaOnClickWorldItem = 0xAAF590;  // UILoginWorld void(int)
-constexpr uint32_t kRvaSelectChannel = 0xAA8040;  // UILoginChannel.SelectChannel
-constexpr uint32_t kRvaOnClickGoWorld = 0xAAB330;  // UILoginChannel.OnClickButtonGoWorld
-constexpr uint32_t kRvaSelectCharacter = 0xA930B0;  // UILoginCharacter void(int,bool)
-constexpr uint32_t kRvaOnClickButtonSelect = 0xA94500;  // UILoginCharacter.OnClickButtonSelect
-constexpr uint32_t kRvaGetAvatarCount = 0xA9EEE0;  // UILoginCharacter public int()
-constexpr uint32_t kRvaIsSlotEnable = 0xA9AB80;  // UILoginCharacter bool(int)
+constexpr uint32_t kRvaSceneLoginGet = 0xC1B4F0;  // SceneLogin static get_Instance
+constexpr uint32_t kRvaOnClickWorldItem = 0xAB17F0;  // UILoginWorld void(int)
+constexpr uint32_t kRvaSelectChannel = 0xAAA760;  // UILoginChannel.SelectChannel
+constexpr uint32_t kRvaOnClickGoWorld = 0xAAD9A0;  // UILoginChannel.OnClickButtonGoWorld
+constexpr uint32_t kRvaSelectCharacter = 0xA958B0;  // UILoginCharacter void(int,bool)
+constexpr uint32_t kRvaOnClickButtonSelect = 0xA96C20;  // UILoginCharacter.OnClickButtonSelect
+constexpr uint32_t kRvaGetAvatarCount = 0xAA16B0;  // UILoginCharacter public int()
+constexpr uint32_t kRvaIsSlotEnable = 0xA9D2E0;  // UILoginCharacter bool(int)
 
 constexpr char kClassSceneLogin[] =
-    "d563b656dd0164ea7564d54f6a5f7d37b67bcc7caaec297ff699be822cd473e";
+    "bb1caf5f2d406c154f3dcdd919346fcfd41cdc6a87ec14c6b0571ebad0dca78";
 constexpr char kClassUiLoginWorld[] =
-    "dae7fbcbd8b96fd27b3b0da42335346ebcc6416b1b048c4f6ef08a2bcb4f1b0";
+    "b31f0d00e217d3bbe1b237a6d0fa6cf83f912af1258cd4e67daafea74a84301";
 constexpr char kClassUiLoginCharacter[] =
-    "b41ae874b133f78824bfeda523592a3ca16b9422e76877d2f2b404deec8cffe";
+    "fc5b7ecd41af37ce3038b1ff887ec5ba1c1ca4032df17a6f186b635bf47abc3";
 constexpr char kClassUiLoginChannel[] =
-    "fdddbde5effee293ccbbddb94cf5f460456d1831948322c7babda5683636d8b";
+    "f1c62fa13fca3ebb6aa2b2b5ac35752133b1104569d4c8d0a8ba2110410e636";
 
 constexpr size_t kFbSlChannelUi = 0xC0;
 constexpr size_t kFbSlWorldUi = 0xC8;
 constexpr size_t kFbSlCharUi = 0xD0;
 constexpr char kHashSlChannelUi[] =
-    "<a55b06681d697ad8eb0b15e58bb02077a324bab4e85ccf7a47e7f62778b394b>k__BackingField";
+    "<eaf29c47d079625ed8ef788293bf161d8acfc1621fa81a0e28cec608fac2bb7>k__BackingField";
 constexpr char kHashSlWorldUi[] =
-    "<fbaa801776bfa449ea01dd54107f264fe6a3e73f64d8c374c032b4ff496da41>k__BackingField";
+    "<d54bf505f41d14db037a8fe67fd790d0f19ee2bdc88fd28f875f591edc8a51e>k__BackingField";
 constexpr char kHashSlCharUi[] =
-    "<df26ddce626c6cd36c648ab3ba560564648f82d13bd7b5a35531fdc44d9f10a>k__BackingField";
+    "<fb3fa3c29af1d92f626f778b8a6b4dd45e5c5e17ecc851a9290b1dd9669b57c>k__BackingField";
 // WorldItems / WorldChannels / AvatarList + remaining login slots: hash -> field_get_offset
 constexpr char kHashWorldItems[] =
-    "<fdec9c1d90d6c5fdf50ba6815412a6aaae5f671553dae69c2269a508dab614a>k__BackingField";
+    "<fbcb0424988d98f42962c5cf03d1d5c63eff4d90111c69d7dbe46601dfafead>k__BackingField";
 constexpr char kHashWorldChannels[] =
-    "e55306e731f51baa08245d45f3fa196ea4b65c550a6e8e7ec3e176630eefd6d";
+    "c82322b7b68a679cbaf01361e8cbcca32b31b3cec56eed625cb1238656f7564";
 constexpr char kHashCharAvatarList[] =
-    "d066d7783ba8571253b2283202b91ff746066f6f31a65110fa82a89b4777710";
+    "f74f5ea7ab26829ea5fbdaf304a5bd28159165b93380d617696d0a0b343413b";
 constexpr char kHashCharSelectedIndex[] =
-    "<bf13a5e0186d63364763cd9612af94325e6afc074bf3f2e36a12a91576c9150>k__BackingField";
+    "<c9652bbaf6274fc1e1e0a8a2da4e9842fbdef0f54b7eac7215df60d3d363e20>k__BackingField";
 constexpr char kHashCharSlotCount[] =
-    "<a89c75c55f00e428764ad5b570eecf75b6b168c4b9afc7cc7f69da0f38cb7bc>k__BackingField";
+    "<ded9bb562b9f7a3ecfdcc59c36dfdf0c906b6692d3af49f01affa5d815c490b>k__BackingField";
 constexpr char kHashChannelSelectedWorld[] =
-    "f6e88c617cdd09d3b872d4a8ef9321e489787e03ce1f0b61d0040b5c513e558";
+    "fec5df63ad835b22ffeaa1f7ac120dc1360f483bba7927087dd1150498ee01f";
 constexpr char kHashChannelSelectedId[] =
-    "a9d34ec05c3a84a7c8fa34335327103b21041d913863ed2da496f219ba31b55";
+    "dce1eb39cf80c18e39bd82ebfeaa6782092d4d13ea3c00c504255a48c326985";
 constexpr char kHashWorldId[] =
-    "f0851b29a04b330123772cd6ef98570ffa39d707e714ab5789e79b7a5041063";
+    "e0ea4909b34a3fd16338102f3edb3ddb14fec5d32b3807a6a590413c6c558c6";
 constexpr char kHashWorldName[] =
-    "fc8bd2ca55af73b8a4c192dc980d5415c28142b364cf14eedcd489da7226a2e";
+    "d8cf5dbd31e8822c48e8a8cdab1e152ff8ac5384140871ce795fc8b1ead01d6";
 constexpr char kHashChUserNo[] =
-    "d63310af0e4a3ebc938c93754babd629a3276a6a36ff90eddb10e86c62c1acf";
+    "d47a9a0336b5c955243ee2982804a538b85966b1d6d0c4aeb7e125255fce45e";
 constexpr char kHashChChannelId[] =
-    "bf857ac8b979c13340593b0a1755440777dfea9d1c401709e6167fe22cb5b37";
+    "ea9f3d2e57ddca0ab8f828814178d7a6fe2d323096d885b6437fc381ea75fc4";
 constexpr char kHashChAdult[] =
-    "ac561a9da74a4c203132b8167900dfdfaa3b77720a24c9c75a4c3987a64846f";
+    "eb1378337833531a59c728fd04186262127c9984a4809636a611dd6b5681688";
 constexpr char kHashChCapacity[] =
-    "e57d6bf7d76ae2a42161b42b55a0b206fab4e3507852cd441e7634b9b2eeb7d";
+    "c357c138bdc955cf6664d9d50db7da3c3499e728af6c8aa3edcb2b055896578";
 
 // 方法哈希（dump.cs · remount 2026-08-06）
 constexpr char kHashSceneLoginGet[] =
-    "e4287c402ce5b9a4f3ce98fc73296e9b731f8ac17b12c4b36981d699841a8f3";
+    "f6435272a9a666f019a810a4c597917b4d49d1b079bcd6026e97c23a027165c";
 constexpr char kHashOnClickWorldItem[] =
-    "a893eee4f252f03fef1898dc11c478c8157356f303b13fead6836644f895af1";
+    "c09a89a71472fb514d15630eac394057d2954b379ea2e0e7b8e86927f9b950d";
 constexpr char kHashSelectChannel[] =
-    "cd7426e76a99a70fbd0fd06bec0c1f14994b77ca4b5988fafcc2d1e2bf0ec56";
+    "e99c5caa7230b91d1dd184eac32caf0149be4ba3cefc7c3e1b1ec7d2527b4a5";
 constexpr char kHashSelectCharacter[] =
-    "f1b06a9e9dbefc44b8e8487648f857daabc22fb5433c18badf7eefecd342039";
+    "c33b0b31a48858a3dff0bab0cf01f779d799848a1a1dd3570f88a01c1e2e3ba";
 constexpr char kHashGetAvatarCount[] =
-    "aa68db0acaa9dda98cf7eceb57ee20dec4fb106527a1028bd29e5a8c4adecff";
+    "a9e2b2f23b83ca9a58b8918342e7c20320eeb46f3f49df9352d4e079589a9f4";
 constexpr char kHashIsSlotEnable[] =
-    "cab134aba231069e0267114df5a6aac82fb1f5bb11ca378a722333d3abe9923";
+    "f2b9c21788695f4d5bf7ff9a5ccfb60256dbcd7747962ccdb8ffb0e2ea6d95d";
 constexpr char kClassWorldItem[] =
-    "b9d263be3adad59d0e9637106113bc0cd939a7f0a84671f340bc27933efb07f";
+    "eac92a483b9fc0e8d22a602d3bbda0535ae32e56bd1efc08475da8523d9ad3d";
 constexpr char kClassChannelEntry[] =
-    "a0f4d1f43520089d07cecb376062daadc9e30d41fe8bbf4e64a45dd1c3ad865";
+    "b5b45504335620cb54edc2c18eee7a7ab00111ff95128c253bdef22be74bba7";
 constexpr size_t kFbWorldItems = 0x58;  // 08-13：0x50 插入 GameObject，List<WorldItem> 顺移
 constexpr size_t kFbWorldChannels = 0x38;
 constexpr size_t kFbCharAvatarList = 0x170;

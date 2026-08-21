@@ -9,7 +9,7 @@
 // 调度：换图/未稳住 50ms 快写；已稳住 1s 慢校验（已正确则零写）。
 // 不能「仅点击才写」：状态栏直调 migrate，无回调；禁 .text/HWBP。
 // 默认开：野外迁移仍可能被服端断线；挂机「守护模式」会当踢线干净重拉——守护时建议关。
-// 真源：WorldManager.SendMigrateToGlobalMarketRequest RVA 0xDDD620（2026-08-04）。
+// 真源：WorldManager.SendMigrateToGlobalMarketRequest RVA 0xDDF6E0（2026-08-04）。
 
 #include <Windows.h>
 

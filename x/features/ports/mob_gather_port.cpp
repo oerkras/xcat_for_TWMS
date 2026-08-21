@@ -114,7 +114,7 @@ constexpr size_t kCallScan = 0x4000;
 constexpr size_t kOnFixedScan = 0x8000;
 
 constexpr char kMobClass[] =
-    "dd472cd442d83d6a25198278fa3e0a09d3a98a6db2e05d1b12d508d43db4cb5";
+    "fb43e2ad477d86db8f0e257c3cbd8466a36d35a5be3db4a252cd0e15ce82f9b";
 constexpr char kHashApplyControl[] =
     "a7982679b4b10ec2c0b41ae7d2ca76e66f7d61e29b31fd00bd18b6a1cf080ed";
 constexpr char kHashCanApplyCtrl[] =
@@ -1446,6 +1446,9 @@ bool HangupDeferNextClock();
 
 void NoteHangupFire() {
     if (!HangupFiresEnabled()) return;
+    // 拆会话 / 回图途中 / 落地卖装 hold：这轮已经结束，刀数保持 0。
+    // BIN：触发 hangup 后仍 1542/1900，落地 no_trip 又马上 +1，看起来像没清零。
+    if (HangupWashInFlight() || HangupCombatHold()) return;
     const unsigned n = gHangupFires.fetch_add(1, std::memory_order_relaxed) + 1u;
     const unsigned need = gHangupFiresNeed.load(std::memory_order_acquire);
     if (need && (n == need || (n % 500u) == 0u)) {
@@ -1455,6 +1458,7 @@ void NoteHangupFire() {
 
 void NoteAttackDirty() {
     if (!SoftReloginWanted()) return;
+    if (HangupWashInFlight() || HangupCombatHold()) return;
     if (gAttackDirty.exchange(1, std::memory_order_acq_rel) != 0) return;
     x::runtime::LogI("MobGather", "attack dirty — hangup owed to clear accel flags");
 }
@@ -1480,11 +1484,26 @@ void NoteHangupLandIfReady() {
     using x::features::ports::world::IsInMapScene;
     using x::features::ports::world::IsPlayReady;
     if (gHangupAwaitLand.load(std::memory_order_acquire) == 0) return;
+    // 出刀闸已到期：禁止图内假落地（stuck_lobby / 掉上台）把累计清零而不 CloseSession。
+    if (HangupFiresDue()) {
+        static DWORD sDueLandSkipMs = 0;
+        const DWORD now = GetTickCount();
+        if (!sDueLandSkipMs || now - sDueLandSkipMs > 2000) {
+            sDueLandSkipMs = now;
+            x::runtime::LogI("MobGather",
+                             "hangup land skip — fires due %u/%u (CloseSession first)",
+                             gHangupFires.load(std::memory_order_acquire),
+                             gHangupFiresNeed.load(std::memory_order_acquire));
+        }
+        return;
+    }
     if (IsReconnectInFlight() || PersonFlyBusy()) return;
     if (!IsInMapScene() || !IsPlayReady()) return;
     if (x::features::simple_combat::IsSafeLandActive()) return;
     x::features::ports::teleport::FlightState st{};
-    if (!x::features::ports::teleport::QueryFlightState(st) || !st.ok || !st.onFh) return;
+    if (!x::features::ports::teleport::QueryFlightState(st) || !st.ok) return;
+    // 旋翼打怪 curFh=0 / !onFh 是常态。等挂台会让 await 卡住：秒数闸每拍被 Defer 清钟，
+    // 出刀闸 TickSoftRelogin 也静默 return（BIN 1f0727：1900 到点只停手、15s 后假落地清零）。
     gHangupAwaitLand.store(0, std::memory_order_release);
     gHangupLandedOk.store(1, std::memory_order_release);
     gAttackDirty.store(0, std::memory_order_release);
@@ -1501,9 +1520,9 @@ void NoteHangupLandIfReady() {
 bool SoftReloginHoldClock() {
     using x::features::soft_login_probe::IsReconnectInFlight;
     // 脏会话到点必须洗：卖装/赶路/开店不得冻秒数闸（补给应让路，落地再卖）。
-    // 重连在途冻的是这一轮自己。测谎/起号仍冻，避免拆会话毁掉答题或起号。
-    return IsReconnectInFlight() || x::features::char_boot::IsBusy() ||
-           x::features::auto_lie::IsBusy();
+    // 重连在途冻的是这一轮自己。起号仍冻。测谎不冻：拆会话优先于答题
+    // （题没答完进小黑屋；脏会话继续打会封号）。
+    return IsReconnectInFlight() || x::features::char_boot::IsBusy();
 }
 
 bool HangupWashInFlight() {
@@ -1544,6 +1563,14 @@ bool FireProactiveHangup(const char* why) {
     if (!RequestProactiveReconnect(why ? why : "hangup")) return false;
     gSoftArmMs = 0;
     gSoftPauseMs = 0;
+    // 会话到此结束：顶栏出刀数立刻归零。落地还会再清一次。
+    // BIN：触发 hangup_timer 后仍显示 1542/1900，直到落地才 SESSRESET——拆会话到回图
+    // 中间几十秒看起来像「没重置」。
+    const unsigned wasFires = gHangupFires.exchange(0, std::memory_order_acq_rel);
+    if (wasFires) {
+        x::runtime::LogI("MobGather", "hangup fires reset %u → 0 why=%s", wasFires,
+                         why ? why : "?");
+    }
     gHangupAwaitLand.store(1, std::memory_order_release);
     gHangupLandedOk.store(0, std::memory_order_release);
     gHangupLandOkMs.store(0, std::memory_order_release);
@@ -1567,9 +1594,11 @@ bool FireProactiveHangup(const char* why) {
 bool HangupBeforeOtherAction(const char* why) {
     using x::features::soft_login_probe::IsReconnectInFlight;
     using x::features::soft_login_probe::IsArmed;
-    if (IsReconnectInFlight() || gHangupAwaitLand.load(std::memory_order_acquire) != 0)
-        return true;
-    if (!gAttackDirty.load(std::memory_order_acquire) && !HangupFiresDue()) return false;
+    const bool dueFires = HangupFiresDue();
+    // 出刀闸到期：即使上一轮 await 还卡着（旋翼未挂台），也必须再拆本局。
+    if (IsReconnectInFlight() && !dueFires) return true;
+    if (!dueFires && gHangupAwaitLand.load(std::memory_order_acquire) != 0) return true;
+    if (!gAttackDirty.load(std::memory_order_acquire) && !dueFires) return false;
     if (!SoftReloginWanted() || !IsArmed()) return true;
     FireProactiveHangup(why && why[0] ? why : "pre_action");
     return true;
@@ -1603,7 +1632,16 @@ void TickSoftRelogin() {
     }
 
     const DWORD now = GetTickCount();
-    if (!IsInMapScene()) {
+    bool dueFiresNow = HangupFiresDue();
+    if (IsInMapScene()) {
+        NoteHangupLandIfReady();
+        dueFiresNow = HangupFiresDue();
+        if (gHangupCombatHold.load(std::memory_order_acquire)) {
+            const DWORD landMs = gHangupLandOkMs.load(std::memory_order_acquire);
+            if (landMs && now - landMs > kHangupSupplyHoldMaxMs)
+                ReleaseHangupCombatHold("timeout");
+        }
+    } else if (!dueFiresNow) {
         // 离图只在本轮已拆时清钟。Travel 贴门 / 遇人 hop 都继续走。
         if (HangupDeferNextClock()) {
             gSoftArmMs = 0;
@@ -1618,18 +1656,12 @@ void TickSoftRelogin() {
         }
         return;
     }
-    NoteHangupLandIfReady();
-    if (gHangupCombatHold.load(std::memory_order_acquire)) {
-        const DWORD landMs = gHangupLandOkMs.load(std::memory_order_acquire);
-        if (landMs && now - landMs > kHangupSupplyHoldMaxMs)
-            ReleaseHangupCombatHold("timeout");
-    }
+    // 上一轮 await 卡住（旋翼永不 onFh）时，出刀闸到期仍必须 CloseSession。
     if (HangupDeferNextClock()) {
         gSoftArmMs = 0;
         gSoftPauseMs = 0;
-        return;
+        if (!dueFiresNow) return;
     }
-    const bool dueFiresNow = HangupFiresDue();
     const bool dirty = gAttackDirty.load(std::memory_order_acquire) != 0;
     if (HangupSecondsOn()) {
         if (!gSoftArmMs && dirty) {
@@ -1644,7 +1676,7 @@ void TickSoftRelogin() {
                              x::features::simple_combat::IsEnabled() ? 1 : 0,
                              gHangupUnbindF5.load(std::memory_order_acquire) ? 1 : 0);
         }
-        // 出刀闸、秒数闸到点都要拆。HoldClock 只剩重连/起号/测谎。
+        // 出刀闸、秒数闸到点都要拆（测谎中也拆）。HoldClock 只剩重连/起号。
         if (SoftReloginHoldClock() && !dueFiresNow) {
             if (!gSoftPauseMs) gSoftPauseMs = now ? now : 1;
             return;
@@ -1671,9 +1703,30 @@ void TickSoftRelogin() {
                          (HangupSecondsOn() || dirty);
     if (!dueFires && !dueTime) return;
 
-    if (GetSceneState() != SceneState::Field || !IsPlayReady()) return;
-    // 遇人软重连正在选新频：让它拆，到点 hangup 不抢、不中止成回原频。
-    if (x::features::channel_hop::IsEncounterSoftHop()) return;
+    if (!IsPlayReady() || !IsInMapScene()) {
+        if (!gSoftSkipLogMs || now - gSoftSkipLogMs > 2000) {
+            gSoftSkipLogMs = now;
+            x::runtime::LogW("MobGather",
+                             "soft relogin skip: inMap=%d play=%d scene=%d dueFires=%d dueTime=%d",
+                             IsInMapScene() ? 1 : 0, IsPlayReady() ? 1 : 0,
+                             static_cast<int>(GetSceneState()), dueFires ? 1 : 0,
+                             dueTime ? 1 : 0);
+        }
+        return;
+    }
+    // 出刀闸：图内 play-ready 即拆，不要求 WM scene 仍是 Field（BIN 1f0727：
+    // Field 检查静默 return，1900 到点没 CloseSession）。秒数闸仍认 Field。
+    if (!dueFires && GetSceneState() != SceneState::Field) {
+        if (!gSoftSkipLogMs || now - gSoftSkipLogMs > 2000) {
+            gSoftSkipLogMs = now;
+            x::runtime::LogW("MobGather",
+                             "soft relogin skip: scene=%d not Field (timer)",
+                             static_cast<int>(GetSceneState()));
+        }
+        return;
+    }
+    // 遇人软重连正在选新频：让它拆。出刀闸到期则抢拆（AbortHop 在下面）。
+    if (!dueFires && x::features::channel_hop::IsEncounterSoftHop()) return;
     if (x::features::channel_hop::GetState() != x::features::channel_hop::State::Idle ||
         x::features::channel_hop::HasPending()) {
         x::runtime::LogI("MobGather", "soft relogin preempt hop (window due)");
@@ -1728,7 +1781,11 @@ void QuerySoftReloginClock(unsigned* on, unsigned* paused, unsigned* remainMs, u
 }
 
 void QueryHangupFires(unsigned* count, unsigned* need) {
-    if (count) count[0] = gHangupFires.load(std::memory_order_acquire);
+    if (count) {
+        count[0] = (HangupWashInFlight() || HangupCombatHold())
+                       ? 0u
+                       : gHangupFires.load(std::memory_order_acquire);
+    }
     if (need) {
         const bool show = HangupFiresEnabled() &&
                           gHangupFiresUiUnlocked.load(std::memory_order_acquire) != 0;
@@ -1737,7 +1794,11 @@ void QueryHangupFires(unsigned* count, unsigned* need) {
 }
 
 void QueryHangupFiresRaw(unsigned* count, unsigned* need) {
-    if (count) count[0] = gHangupFires.load(std::memory_order_acquire);
+    if (count) {
+        count[0] = (HangupWashInFlight() || HangupCombatHold())
+                       ? 0u
+                       : gHangupFires.load(std::memory_order_acquire);
+    }
     if (need) {
         need[0] = HangupFiresEnabled() ? gHangupFiresNeed.load(std::memory_order_acquire) : 0u;
     }

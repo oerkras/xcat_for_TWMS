@@ -659,9 +659,10 @@ void TickImpl(DWORD now) {
     anti_macro_follower::Tick(now);
 
     const bool textOpen = anti_macro_port::IsTextCaptchaOpen();
-    const bool mouseOpen = anti_macro_port::IsNonFiniteOpen();
-    const bool anyOpen =
-        anti_macro_port::IsOpenAntiMacro() || textOpen || mouseOpen;
+    // 轨迹题以 follower 为准：IsInstantiated 但还没轨迹的空壳不算开题（BIN 7bb1b7）。
+    const bool mouseOpen =
+        anti_macro_follower::IsUiVisible() || anti_macro_follower::IsFollowing();
+    const bool anyOpen = textOpen || mouseOpen;
 
     // 知识题记账（轨迹题在 follower 里埋）；关窗时若没提交过答案，闩会补记 missed。
     static bool s_textWasOpen = false;

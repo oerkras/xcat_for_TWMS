@@ -11,6 +11,9 @@
 
 namespace msc::launcher {
 
+// 总开关：false = UI 不开放、Start 直接拒绝（不会开独立 user-data-dir）。
+inline constexpr bool kGamaPassDeviceLoginEnabled = false;
+
 enum class GpDeviceLoginBrowserKind : int {
     Auto = 0,        // Chrome++ > Chrome > Edge
     ChromePlus = 1,

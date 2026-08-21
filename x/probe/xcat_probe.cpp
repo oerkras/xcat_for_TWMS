@@ -40,7 +40,9 @@
 #include "../features/ports/curfh_gate_bypass.h"
 #include "../features/auto_lie/auto_lie.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
+#include "../features/force_trade/force_trade.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
+#include "../features/auction_gate_probe/auction_gate_probe.h"
 #include "../features/rest_mp_accel/rest_mp_accel.h"
 #include "../features/ports/security_attack_port.h"
 #include "../features/infinite_stars/infinite_stars.h"
@@ -152,7 +154,9 @@ void StopAllFeatureWorkers() {
     x::features::channel_hop::StopWorker();
     x::features::ga_text_probe::StopWorker();
     x::features::drop_alert_bypass::StopWorker();
+    x::features::force_trade::Shutdown();
     x::features::auction_town_bypass::StopWorker();
+    x::features::auction_gate_probe::Shutdown();
     x::features::rest_mp_accel::StopWorker();
     x::features::ports::security_attack::StopWorker();
     x::features::auto_lie::StopWorker();
@@ -404,6 +408,8 @@ bool StartPlayPathWorkers() {
     // 1) 其余保命：掉落报警 → 药/键/Buff 线程 → 攻速
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::Init());
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::force_trade::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::force_trade::StartWorker());
     XCAT_PLAY_BOOT_BATCH("survival-skills");
     XCAT_PLAY_BOOT_STEP(x::features::autopot::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::auto_stat::Init());
@@ -465,6 +471,7 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::fly::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::Init());
     XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::auction_gate_probe::Init());
     XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::Init());
     XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ports::security_attack::Init());

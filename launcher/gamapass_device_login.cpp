@@ -748,6 +748,10 @@ std::wstring GamaPassDeviceLoginUserDataDir(const std::wstring& exe) {
 bool StartGamaPassDeviceLogin(const GamaPassDeviceLoginAccount& acc, const std::wstring& storePath,
                               HttpLoginLogFn log, std::wstring& err) {
     err.clear();
+    if (!kGamaPassDeviceLoginEnabled) {
+        err = L"账密登录助手尚未开放";
+        return false;
+    }
     if (gBusy.exchange(true)) {
         err = L"账密登录助手正在运行";
         return false;

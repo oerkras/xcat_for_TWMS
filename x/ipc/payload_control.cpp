@@ -29,7 +29,9 @@
 #include "../features/mob_pool_observe/mob_pool_observe.h"
 #include "../features/fly/fly.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
+#include "../features/force_trade/force_trade.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
+#include "../features/auction_gate_probe/auction_gate_probe.h"
 #include "../features/rest_mp_accel/rest_mp_accel.h"
 #include "../features/infinite_stars/infinite_stars.h"
 #include "../features/player_hide/player_hide.h"
@@ -405,6 +407,32 @@ void ApplyImpactHopTestSeq(const xcat::PayloadControl& c) {
     fire(c.impactHopTestSeq);
 }
 
+void ApplyAuctionGateProbeSeq(const xcat::PayloadControl& c) {
+    if (c.auctionGateProbeSeq == 0) return;
+    static std::atomic<bool> s_bootstrapped{false};
+    static std::atomic<uint32_t> s_lastApplied{0};
+    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
+        const bool writtenAfterInject =
+            c.writeTickMs != 0 &&
+            c.writeTickMs + kManualRejoinWriteSkewMs >= kManualRejoinModuleStartMs;
+        s_lastApplied.store(c.auctionGateProbeSeq, std::memory_order_release);
+        if (writtenAfterInject) {
+            x::runtime::LogI("PayloadControl", "auction gate probe fire seq=%u (bootstrap)",
+                             c.auctionGateProbeSeq);
+            x::features::auction_gate_probe::RequestRun();
+            return;
+        }
+        x::runtime::LogI("PayloadControl",
+                         "auction gate probe bootstrap adopt seq=%u (no fire)",
+                         c.auctionGateProbeSeq);
+        return;
+    }
+    if (c.auctionGateProbeSeq <= s_lastApplied.load(std::memory_order_acquire)) return;
+    s_lastApplied.store(c.auctionGateProbeSeq, std::memory_order_release);
+    x::runtime::LogI("PayloadControl", "auction gate probe fire seq=%u", c.auctionGateProbeSeq);
+    x::features::auction_gate_probe::RequestRun();
+}
+
 void ApplyControl(const xcat::PayloadControl& c) {
     // 登录阶段只灌 auto_enter：BIN 11:47 在 LOGIN worker 里 Poll→Apply 打开了
     // invuln/加速/打怪/Travel MI，随后进程闪退。play-ready 前禁止玩法开关。
@@ -597,7 +625,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::galaxy_token_probe::SetEnabled(c.galaxyTokenProbe != 0);
     x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
     x::features::drop_alert_bypass::SetEnabled(c.dropAlertBypass != 0);
+    x::features::force_trade::SetEnabled(c.forceTrade != 0);
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
+    ApplyAuctionGateProbeSeq(c);
     x::features::rest_mp_accel::SetIntervalMs(c.restMpAccelIntervalMs);
     x::features::rest_mp_accel::SetEnabled(c.restMpAccel != 0);
     if (xcat::kInfiniteStarsUserEnabled)

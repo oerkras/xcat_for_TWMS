@@ -46,14 +46,14 @@ namespace {
 namespace heli = x::features::simple_combat::heli;
 
 // 屏→世界：回归更新前 `ScreenToWorldPoint(Vector3)` 三参重载。
-// 2026-08-03 误把旧 0x4DDEF70 映到四参版 0x4E15B00，且 eye 误用 Mono=0
+// 2026-08-03 误把旧 0x4DDEF70 映到四参版 0x4E18750，且 eye 误用 Mono=0
 //（Unity 枚举：Left=0 Right=1 Mono=2）。三参包装在 IDA 内硬编码 eye=2。
-// 正确孪生：ScreenToWorldPoint_…824 @ 0x4E15DB0。
+// 正确孪生：ScreenToWorldPoint_…824 @ 0x4E18A00。
 // get_position 走包装（Injected 桩不转发参数）；STW 必须 arity=1 三参重载。
-constexpr uint32_t kRvaCamGetMain = 0x4E25780;         // remounted 2026-08-06 Camera.get_main
-constexpr uint32_t kRvaCamScreenToWorld = 0x4E252B0;  // remounted 2026-08-06 Camera.ScreenToWorldPoint(Vector3)
-constexpr uint32_t kRvaCompGetTransform = 0x4E8F9E0;  // remounted 2026-08-06 Component.get_transform
-constexpr uint32_t kRvaTfGetPos = 0x4EAA450;          // remounted 2026-08-06 Transform.get_position
+constexpr uint32_t kRvaCamGetMain = 0x4E283D0;         // remounted 2026-08-06 Camera.get_main
+constexpr uint32_t kRvaCamScreenToWorld = 0x4E27F00;  // remounted 2026-08-06 Camera.ScreenToWorldPoint(Vector3)
+constexpr uint32_t kRvaCompGetTransform = 0x4E92630;  // remounted 2026-08-06 Component.get_transform
+constexpr uint32_t kRvaTfGetPos = 0x4EAD0A0;          // remounted 2026-08-06 Transform.get_position
 
 // 1ms 空转会放大 F6 跟飞对主泵的压力；8ms 足够跟手且显著减负。
 constexpr DWORD kWorkerSleepMs = 8;

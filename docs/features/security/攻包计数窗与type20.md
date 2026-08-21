@@ -144,7 +144,7 @@ SendAttackPacketCountCheck(now)：
 | 机制 | 在哪 | 像不像攻包窗 |
 |------|------|----------------|
 | type20 攻包/技能计数 | `SecurityClient` 硬编码 60s/2000 | **本窗** |
-| type21 怪加速 | 同クラス `+0x14/+0x18` + Send | 平行举报，对象是怪速 |
+| type21 怪加速 | 同クラス `+0x14/+0x18` + Send | 平行举报，对象是怪速；**详见** [`怪速举报type21与被动插值.md`](怪速举报type21与被动插值.md)（阈值全=0、节流 300s、仅被动怪触发）|
 | ClientHacks 1–3 | 按键统计 | 事件型，非 60s/2000 包计数 |
 | ClientHacks 4–16 | RawInput / Soft / World 宏 | 输入模式检测 |
 | ClientHacks 17–19 | 反宏键盘 / 句柄 / NGS | 另一路 |

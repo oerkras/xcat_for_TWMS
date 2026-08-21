@@ -57,7 +57,9 @@ bool IsAttemptBusy();
 bool IsReconnectInFlight();
 
 // 图内主动拆会话：先粘性武装，再泵上 CloseSession。不 SetHold（图内 hold 会闪成强制软重连）。
-// 仅 Field+playReady；商城/拍卖/InterStage 拒绝。首页「软重连试连」未开则拒绝（禁止裸拆）。
+// 一般路径仅 Field+playReady。hangup_fires / hangup_timer：图内 play-ready 即拆。
+// hangup_fires 在软重连 in_flight（图内假 recover）时仍 CloseSession。
+// 首页「软重连试连」未开则拒绝（禁止裸拆）。
 bool RequestProactiveReconnect(const char* why);
 
 // 遇人换频失败仍在图内：抬掉连续失败熔断，允许 CloseSession + 软重连清脏（否则会原地出刀）。

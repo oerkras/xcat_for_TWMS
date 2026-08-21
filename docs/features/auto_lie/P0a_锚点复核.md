@@ -71,14 +71,16 @@
 | Material | `+0x88` | `+0xA8` |
 | `lieDetectorBaseTexture` | `+0x90` | `+0xB0` |
 | 描述 Text | `+0x98` | `+0xB8` |
-| ShaderModule | `+0xA8` | `+0xD0` |
-| AntiMacroInfo | `+0xB0` | `+0xD8` |
-| TickCounter | `+0xB8` | `+0xE0` |
-| `_rawPosList` | `+0xC0` | `+0xE8` |
-| `_mousePosList` | `+0xC8` | `+0xF0` |
-| `_isResultRecv` | `+0xD0` | `+0xF8`（hash `e377d738…`；XCAT `ReadNonFiniteIsResultRecv`） |
-| `_pathTexture` | `+0xD8` | `+0x100` |
-| `_isSuccess` | `+0xE0` | `+0x108` |
+| ShaderModule | `+0xA8` | `+0xD8`（08-14 曾是 `+0xD0`） |
+| AntiMacroInfo / Tick 数据 | `+0xB0` | `+0xE0` |
+| TickCounter（nested） | `+0xB8` | **`+0xE8`**（08-14 `+0xE0`） |
+| `_rawPosList` `List<Vector2>` | `+0xC0` | **`+0xF0`**（08-14 `+0xE8`；08-20 插 `bool@+0xD0` 后整体 +8） |
+| `_mousePosList` `List<Vector2Int>` | `+0xC8` | **`+0xF8`** |
+| `_isResultRecv` | `+0xD0` | **`+0x100`** |
+| `_pathTexture` | `+0xD8` | `+0x108` |
+| `_isSuccess` | `+0xE0` | **`+0x110`** |
+
+> 08-20 在 `Transform(+0xC8)` 后新增实例 `bool(+0xD0)` + `static int[]` + 两个 `const int=30`。若仍按 08-14 的 `rawPos=+0xE8` 读，读到的是 TickCounter，轨迹永远空。
 
 关键方法（TW RVA，runtime IDB `GameAssembly.dll.i64` imagebase `0x7ff848c80000`）：
 
@@ -132,7 +134,7 @@
 
 | 空间 | 范围 / 原点 | Y 方向 | 来源 |
 |---|---|---|---|
-| `rawPosList` | 归一化，约 ±0.75 × ±0.5 | 向上 | 原生字段 `+0xE8` |
+| `rawPosList` | 归一化，约 ±0.75 × ±0.5 | 向上 | 原生字段 `+0xF0`（08-20；08-14 曾是 `+0xE8`） |
 | **cursor-point 画布** | `0..750 × 0..500`，左上原点 | **向下** | `RawToCursorLocal`：`(x+0.75)*500` / `(y+0.5)*500` |
 | **RectTransform 局部** | `rect.x..x+width`，中心原点 | **向上** | `RectTransform.get_rect` |
 

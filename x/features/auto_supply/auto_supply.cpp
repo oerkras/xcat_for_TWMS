@@ -1119,6 +1119,9 @@ bool FireAutoTrip(bool potionFire, bool customFire, bool custom2Fire, bool feedF
     gManualTrip = false;
     gRechargeReq.store(false, std::memory_order_release);
     PublishStatusIni();
+    // 进 Pause 当拍就硬闸。旧逻辑只 Enter，PauseSystems 要等下一拍 TickPause
+    // （200ms）；若当拍后挂上 HangupWash，TickPause 会先 return，打怪一直不停。
+    PauseSystems();
     Enter(Phase::Pause, pauseMsg);
     return true;
 }
@@ -1130,6 +1133,7 @@ void TickIdle(DWORD now) {
     if (gTripReq.load(std::memory_order_acquire)) {
         if (char_boot::IsBusy()) {
             gTripReq.store(false, std::memory_order_release);
+            ResumeSystems();
             Publish(notify::NotificationKind::Warning, "auto-supply-trip", "无法启动",
                     "起号进行中");
             return;
@@ -1153,6 +1157,7 @@ void TickIdle(DWORD now) {
         char msg[96]{};
         if (!ResolveShopTarget(msg, sizeof(msg))) {
             gTripReq.store(false, std::memory_order_release);
+            ResumeSystems();
             Publish(notify::NotificationKind::Warning, "auto-supply-trip", "无法启动",
                     msg[0] ? msg : "自动寻店失败；可手填杂货地图");
             return;
@@ -1175,6 +1180,7 @@ void TickIdle(DWORD now) {
         runtime::LogI("AutoSupply", "手动一趟 shop=%s (%s)", gShopMap, msg);
         Publish(notify::NotificationKind::Info, "auto-supply-trip", "补给已接单",
                 "先开趟冷却，再赶路卖装");
+        PauseSystems();
         Enter(Phase::Pause, "手动补给：停手并记下挂机图…");
         return;
     }
@@ -1302,6 +1308,7 @@ void TickIdle(DWORD now) {
 }
 
 void TickPause(DWORD now) {
+    PauseSystems();
     if (ports::mob_gather::HangupWashInFlight()) {
         SetMsg("等软重连落地…");
         return;
@@ -2259,13 +2266,14 @@ void YieldTripForSessionWash() {
 
     travel::RequestStop();
     sellbag::Abort("session_wash");
-    ResumeSystems();
+    // 还要续卖时不要把打怪硬闸放开：否则清洗落地前又开始出刀。
+    if (!resumeSell) ResumeSystems();
     ClearTripTravelArm();
     gCooldownUntil = 0;
     gScrollPendingLand = false;
     if (resumeSell) {
         gTripReq.store(true, std::memory_order_release);
-        runtime::LogI("AutoSupply", "yield trip for hangup wash — resume sell after land");
+        runtime::LogI("AutoSupply", "yield trip for hangup wash — keep pause, resume sell after land");
     } else if (resumeFarm) {
         gPendingReturnFarm = true;
         PublishStatusIni();

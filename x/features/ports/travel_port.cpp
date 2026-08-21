@@ -54,30 +54,30 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 constexpr char kPortalManagerClass[] =
-    "d91e4c21a0096a2aa9d6bec7f24404c8f55e272abe4b1069f450829647c33d8";  // remounted 2026-08-06
+    "f2c620096b0f4a214137e6107644874a0701108a5152d2c9a8e0afa8023db3a";  // remounted 2026-08-06
 // WM / UserLocal / NM → il2cpp_shape Resolve*Klass（hash + shape）
 // SEND OutPacket TypeDef 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "e0c844c6ebe831431dd6925430869fed0b7b35b9fad5484c3f4d18ecb8f65c5";
+    "b74303ab73cbc42ed6d4c0098d32f315dfffe76c4a7d6379bbdf53a9c804842";
 // remounted 2026-08-06 · dump.cs / script.json
 constexpr char kHashCheckMovePortal[] =
-    "b38bafd7a351df47174fa8dbd7dd6743b2303f662875bff967dc9b9fb23233d";
+    "c8ffce2c807af6c9d2f60a34d632d23ca8dae625f573eb9a0ca457940e7e4cd";
 constexpr char kHashOutCreate[] =
-    "cbfb75afdbb647454b889d8dfa7ea8f054cffaa7192a29dd45ae66baccd03d8";
+    "f81b173e66885e22b09f4da7f0274b780c9cdfb60f49a491094659800f7b345";
 constexpr char kHashEncode1[] =
-    "fc9e10918826f64a862d940d4b763e72cd40171bc4fd0d2ef75f4e989c8ef41";  // Encode1(byte)
+    "f9f12f51e97fe7fd474e6ec383274085be6efdf36afcb9c5bb2b22fd8509364";  // Encode1(byte)
 constexpr char kHashEncodeStr[] =
-    "c936c080d1e6ac3a60d5db6eab00fe42d91b5d74bff272358bf140b66370d29";
+    "b249614ebdf8f98b48e4f74f3160addbb307a8b6d18887b3b400ef74274a2a2";
 constexpr char kHashSendPacket[] =
-    "dd3ebd84f1e0480d15640c97c2fe3a0f6b46e8a205f26311874a57c1e1a4520";  // Session bool(OutPacket)
+    "c9ab47fdd2dd9bce011a542e0877434b78da1951dcb24b26cb3335b0f0c3eec";  // Session bool(OutPacket)
 
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
-constexpr uint32_t kRvaCheckMovePortal = 0xDE5930;  // remounted 2026-08-06 WM.CheckMovePortal
-constexpr uint32_t kRvaOutPacketCreate = 0x1CEC3F0;  // remounted 2026-08-06 OutPacket.Create
-constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CF8B00;  // remounted 2026-08-06 Encode1(byte)
-constexpr uint32_t kRvaOutPacketEncodeStr = 0x1CF9210;  // remounted 2026-08-06 EncodeStr
-constexpr uint32_t kRvaNmSend = 0x1CEE000;  // remounted 2026-08-06 Session.SendPacket bool
-constexpr uint32_t kRvaSendOutPacket = 0x1CEC4F0;  // Network.SendOutPacket → 直调 SendPacket RVA
+constexpr uint32_t kRvaCheckMovePortal = 0xDE7A90;  // remounted 2026-08-06 WM.CheckMovePortal
+constexpr uint32_t kRvaOutPacketCreate = 0x1CEEFC0;  // remounted 2026-08-06 OutPacket.Create
+constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CFB6D0;  // remounted 2026-08-06 Encode1(byte)
+constexpr uint32_t kRvaOutPacketEncodeStr = 0x1CFBDE0;  // remounted 2026-08-06 EncodeStr
+constexpr uint32_t kRvaNmSend = 0x1CF0BD0;  // remounted 2026-08-06 Session.SendPacket bool
+constexpr uint32_t kRvaSendOutPacket = 0x1CEF0C0;  // Network.SendOutPacket → 直调 SendPacket RVA
 // CMS ClientPacket.UserPortalTeleportRequest = 114 · wire 0x0072（Rpc 伪造仍用 enum）
 constexpr int kClientPortalTeleport = 114;
 constexpr uint16_t kWirePortalTeleport = 0x0072;
@@ -100,58 +100,58 @@ constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 
 constexpr char kMapPortalDataClass[] =
-    "aaf993b817afa6300e1ff248eb0906f2d55db3996396e5bc65bcec4d5810206";  // remounted 2026-08-06
+    "d31a10313fb5c498bbc7e56467abe29bb3ece95defd0898a1a02535b8ae5617";  // remounted 2026-08-06
 constexpr char kPortalClass[] =
-    "d04ffd0ddfd445248b7ca5632f203be1a98cea96c13b322fcfd453b286098f7";  // remounted 2026-08-06
+    "ca342e7bf6dc2fb557eb216aaa609e3a4bf5d90fd98f33903228c170433426a";  // remounted 2026-08-06
 constexpr char kActorBaseClass[] =
-    "edca107f56b886052491eaa5c89b93e25d6f5f228bc505251f2d2060743b6cf";  // = teleport_port
+    "dbfdaecfa6ec49a19a019f06093eac445b3ca6082f2b874b489646c98303d44";  // = teleport_port
 constexpr char kVecCtrlClass[] =
-    "fb50f6a1736ed7dc2ae31fe0164df2ac21372ae1ba8c5f346fa63e05fbeff6a";  // = teleport_port
+    "c59d7aae5606ba613a8f11b7cb1b87f531d6779f531d032ae48cb63b641a919";  // = teleport_port
 constexpr char kPacketClass[] =
-    "d04fa6aecc271eb36d049f6c9422e28025c1aa02128d608e6dd3addd9402f4e";  // Packet base 13773
+    "c848eff7a1bfc6c43a334eefc656232eb016c7475e61e2199a5072889e7e46a";  // Packet base 13773
 
 constexpr char kHashPortalData[] =
-    "a90dad856e46496565a924e2a913de41a68234052ac0ff31b7127b784bb6911";
+    "fa09bfacbd874cc775ecdb9f84262c03bab6c5f36f26b534e6fe6a4a42e137a";
 constexpr char kHashMpdId[] =
-    "<cf32aefb941b8ec4fff28e735e40fb6c4c1d2d51653cacd17007a451f4c7928>k__BackingField";
+    "<c8e2aa9083a139a0be9fecfe533e9cda73037c50c5e0dcd491a07b395206afe>k__BackingField";
 constexpr char kHashMpdType[] =
-    "<b744722aca2a30d3f736f001c7ea101e2277d42700b23c15b710507bd64e2d0>k__BackingField";
+    "<e98c844f9e4150fd204920ac6442cbbf33cebb6501c2c274af9729341e26c09>k__BackingField";
 constexpr char kHashMpdEnable[] =
-    "<b896436b0eb24adb014f6b377ec16caaeb3b269a6c0b676d459813cc4e78c15>k__BackingField";
+    "<c5841b4d4db0542e3a69f6629b7f1d21a7f39d32dac1f8921752843f9a9c48b>k__BackingField";
 constexpr char kHashMpdPName[] =
-    "<ce6b4ec72a0c3dfa541cdaedbcb354bc2ed2e5bf8212c02ab60c86965fbb28e>k__BackingField";
+    "<c75433864716c1f7b52e1fb5ebdb62447e7137373854681066f9c6c7339dbc0>k__BackingField";
 constexpr char kHashMpdX[] =
-    "<c061f2ec9235a4dde0ec6666f05ccb0539eb39247eb5d9b2a94d982983a4fd8>k__BackingField";
+    "<cf86953fd06d7a6ef2ef845204e4112991d011a271993a99604a7de88c1a46f>k__BackingField";
 constexpr char kHashMpdY[] =
-    "<c62fd7ee2e5853d0e39dc5d1c8c6f7863643d375599577f742e6f0fe784e48a>k__BackingField";
+    "<fa2714ca0e1643680a6508660dcb4188e4cce9b1f5fe1f9c2c1214761ff2f28>k__BackingField";
 constexpr char kHashMpdToMapId[] =
-    "<d7be56d85729adbdd470343475f5ec532ba22e064db13caa24317fd87afa366>k__BackingField";
+    "<b00e30e8b228a3aa42fda457ed2de8432a3bb7392e53bc2a9319b96ad400fc5>k__BackingField";
 // MapPortalData 字段偏移未漂；hash remount 2026-08-06 dump.cs TypeDef 2079
 constexpr char kHashMpdPortalRect[] =
-    "<fb4a0978f9c8dae39eb6c79ecb9efa1c584631b871b5eb262547938d85ad792>k__BackingField";
+    "<b005755f08c96fb76ff7ad3b5637dead8c43248a9df1b37e47a286351c4dd41>k__BackingField";
 constexpr char kHashMpdHRange[] =
-    "<e1232a809aacf3ae1ad55c25574b77e14628d6bfd6920068bb4ab411f669681>k__BackingField";
+    "<dcb2166f7217b9308188855ae21d08e38f5565d759d9b4ccd13fbc8edac6ae1>k__BackingField";
 constexpr char kHashMpdVRange[] =
-    "<bdace1163f0e19d44422c49de69a7c08134f3b16dcd0548fb67b1e022d645c9>k__BackingField";
+    "<adaed1890845261ca3ff1f71af17790558a31d586e3193891f2027c89a76367>k__BackingField";
 constexpr char kHashMpdVImpact[] =
-    "<f0e8ea99e10d8c96ed1b9856aa6eb43d350f04f99acbe97dd6e7e6ea22594b9>k__BackingField";
+    "<e17aa936f1c80ae00fed9271f70dee1f19eb30a8d530c99725f3c0b151edbd0>k__BackingField";
 constexpr char kHashMpdHImpact[] =
-    "<f7e7497cec566d6079098ee662f80816f84a458056565f4dee6d3e9f7940730>k__BackingField";
+    "<ce3f7431aecaeb3cf7778f903ea2cbf62772023dff9562734f2460663b315fb>k__BackingField";
 constexpr char kHashWmFieldKey[] =
-    "b6671f7d73d76016bbb92f58d78544eeeeb0fab19da581c695b47641673899c";  // = world_port
+    "e7c850e510712d210dbd4bd49f31bc2b3b21a069cb08ac04ecc53acbdb571e0";  // = world_port
 // Packet base 13773 buffer/offset；SEND OutPacket 13775 id@0x20（非 InPacket backing）
 constexpr char kHashPacketBuffer[] =
-    "<c80e82272566f0050a426f923ba33bf491232354873be700b04b1ec9d4bdf24>k__BackingField";
+    "<d722ff83a72648a6172c71d1c72addab6b1b7c15fea02759e9c8fedc971b56c>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<a6a9d0e78ddfe79b0ada28f2fc0ee12b24818d9b56ec62abc8fe3dcea5e1fe6>k__BackingField";
+    "<ae74f2c03cb7e81c627f408ec3dfe8c489da3f305e391a23adfd23328c7c47c>k__BackingField";
 constexpr char kHashOutPacketId[] =
-    "bb53a520d0cb431a8c0ba3e0f1510fdb7268c7c25ec4ec11685039ebec2f3de";
+    "b272464a1cc05b43e57ae055661805d7df3f3df5e81c85a338a0c24c8e63dd9";
 constexpr char kHashUserVecCtrl[] =
-    "<a53533cecb18cbe1cddb1ee6c9adf83e4397ed25de00154905063e15bc1d11f>k__BackingField";
+    "<fa431c5c26278a9e2fbcd0e091bb230983ceea3ac8ef75a7a90d5cbe5764964>k__BackingField";
 constexpr char kHashVcAp[] =
-    "e399633b16dbf327df9b459015caf617aff8e505e4f1fb694acf87a011d4259";
+    "e2fa4ca57a23d9d8a6383149acdf3578426b5c780f3458c68c30431424923bd";
 constexpr char kHashVcApl[] =
-    "c49050214b60ed6c8a28b69ca35db5af10f706e3cbd653db9af0c290f425677";
+    "bb7149a36d5f4294f94485af5e295402881bc27ce9f75682a5f5e7f8579f1be";
 
 constexpr size_t kFbPortalData = 0x10, kFbMpdId = 0x10, kFbMpdType = 0x14, kFbMpdEnable = 0x18;
 constexpr size_t kFbMpdPName = 0x20, kFbMpdX = 0x28, kFbMpdY = 0x2C, kFbMpdToMapId = 0x30;
@@ -236,7 +236,7 @@ void EnsureTravelFieldOff() {
     void* portal = x::runtime::il2cpp::FindClass("", kPortalClass);
     // WorldManager hash（与 il2cpp_shape / world_port 同源）
     constexpr char kWorldManagerClass[] =
-        "f87be298afca3b6020c8f4695d83819fcc9a28877005b6a669187d33a0a2711";
+        "f05b942aeb569b2c37916e7ee710b3ba74011550adcb611a0b26981331a8321";
     void* wm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
     if (!wm) wm = x::runtime::il2cpp::FindClass("", kWorldManagerClass);
     void* actor = x::runtime::il2cpp::FindClass("", kActorBaseClass);
@@ -2095,6 +2095,10 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             if (fired) {
                 ++fireN;
                 failStreak = 0;
+            } else if (tm.guard && std::strcmp(tm.guard, "bailed") == 0) {
+                // 10X 贴门 AbsPos 偶发冻 1~2s（客户 22:22 in02 bail stale）→ 旧逻辑 60 tick
+                // 判 IMPACT_STICK_FAIL 卸旋翼，人在空中发呆再坠落。数据一动会自己清 bail。
+                heli::ClearBailed();
             } else if (tm.guard && tm.guard[0] &&
                        std::strcmp(tm.guard, "cadence") != 0 &&
                        std::strcmp(tm.guard, "deadband") != 0) {

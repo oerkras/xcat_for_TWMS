@@ -30,15 +30,15 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
 // Remount 2026-08-06：ACS hash 全换；字段 off 未漂；ActivatePet 按 CIM 方法序 + restore_method_map
-constexpr uint32_t kRvaSendActivatePetRequest = 0xC72280;  // remounted 2026-08-06
+constexpr uint32_t kRvaSendActivatePetRequest = 0xC742D0;  // remounted 2026-08-20
 constexpr char kHashSendActivatePet[] =
-    "a2c47d02adc9ad81301aecafa305f6b610ad2d11ebf6deccc883bdbf5369e4a";
+    "ff16446601cdda99f380b3c9f8bdd2c6205028cb6d2d9ffc22984708b4c73c2";
 
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 constexpr char kCashItemManagerClass[] =
-    "e312a6e851ba36ef8dfecbbfdf1f557302635a5667fa0c74b389d45b82d9fb5";
+    "e2bc3e68515c3ab38cd61212c3b6a6791f026b24d3a3484290296d57a911a00";
 constexpr char kUserClass[] =
-    "ead9ab2e851cf06879704044ce549197d7fb5017ecb635104f7a6e366f9ac7a";  // TDI:1560
+    "f19ee52eb2762addde30d9ee30704c7ed4948091596d0ce9fe8db390c3aeeba";  // TDI:1560
 
 // dump fallback；运行时 hash + field_get_offset 优先
 constexpr size_t kFbWmMyUser = 0x28;
@@ -46,15 +46,15 @@ constexpr size_t kFbApPet = 0x288;  // 08-13：User Pet[]
 constexpr size_t kFbLogicalPos = 0x2B0;  // 08-13：User Vector2
 constexpr size_t kFbVisPos = 0x64;
 constexpr char kHashFldWmMyUser[] =
-    "<bb0c2e4b7d64301206ad5d9671295f9f6e2fbebb9d44f99243efc2c08d2a17c>k__BackingField";  // WM.MyUser@0x28
+    "<a080716de91a209a5bcfdb18c82ae6f03749b6edea5f0249c9a2a958bf2f54b>k__BackingField";  // WM.MyUser@0x28
 constexpr char kHashFldApPet[] =
-    "a32dacc4100cf0c374d07e352a066c84fccb976e957f0a5596237cc88854e97";
+    "f6eabf82a345b44fa30b3f469af173ee7339b20b23eb51290b1ac0c83f57bd3";
 constexpr char kHashFldCurPos[] =
-    "fbb96ebf96fbe214ee24fcbda14d147b6fe121817305ba2191c875f7367f88c";
+    "e29e8d55e03e34aa5e9d6e773d2c8a8312fedf969cb8170fe5fc71cc797f834";
 constexpr char kHashFldFieldPos[] =
-    "dfe2e5f14ea04b0ca19e131b66bb4d53e06ca0c22744c299a991cd322e915e4";
+    "cf84c347e6d42aeed6a7320ec46ce5e76cd339550ee0f05e83b2508b331eef8";
 constexpr char kVecCtrlOwnerClass[] =
-    "edca107f56b886052491eaa5c89b93e25d6f5f228bc505251f2d2060743b6cf";
+    "dbfdaecfa6ec49a19a019f06093eac445b3ca6082f2b874b489646c98303d44";
 
 struct PetFieldOff {
     size_t wmMyUser = kFbWmMyUser;
@@ -74,19 +74,19 @@ PetFieldOff gOff{};
 // 背包列表：SSOT = player_vitals（ItemSlots hash）；本文件不再钉 CD 偏移。
 // Pet / ItemSlotPet：hash → field_get_offset
 constexpr char kPetClass[] =
-    "c9d5e7a73b1137b6bbe92d7af4b1c0db7c29fe4970e0c237580a1ce71dbf049";
+    "c9502a879126b9f285381f7be2dc0c3526c00a52a3ee41c0b73e24cf890c046";
 constexpr char kItemSlotPetClass[] =
-    "c8744da123efbcf1c25864e5cfd0ba33afd9ef69107341fa6eeee28788e04cd";
+    "a1c565c357a70c0957401c78fd38901308388b28127466acdaafccdf73f8494";
 constexpr char kHashPetRepleteness[] =
-    "fba622aae5b5ca73ad458635e21cfb0ae312108a47565d675f5b629cf07095b";
+    "b000d98fff54c1979ef79dc8bd504b75f770f23932dc732aa554061b7642e13";
 constexpr char kHashSlotRepleteness[] =
-    "b46ddb31cac51d052a9887e0c080cc2f24eb75f0bcec05ea13066cf57d5406e";
+    "db30da3e54ba84fb1ba7124953153a1522cf307554b91579466a91f165affa3";
 constexpr char kHashDateDead[] =
-    "ac04cd65f02dd45121e8bddbfac9f2e8c24b53e4b2503bb102e6079d3775285";
+    "dcc73a7cf0d007e756bf48202d6d378e2ceb038c97a637043780c85c540828b";
 constexpr char kHashRemainLife[] =
-    "e2a999dc93276222c0c5b355a0486eb158636fd5a2c8ba9d1b095f2465e8a6d";
+    "c03747115a21668725192ac988edb719b151084f45545b7fe0230358db896c3";
 constexpr char kHashActiveState[] =
-    "f4bf789e7445a9bb7209785995fedaa824668a952b8314f380c1081a67da9de";
+    "f395a09880bb129857a3991d9671a9bea7a8ac3173ad9873beb0f3fdfa7983e";
 constexpr size_t kFbPetRepleteness = 0xBC, kFbSlotRepleteness = 0x38, kFbDateDead = 0x40;
 constexpr size_t kFbRemainLife = 0x48, kFbActiveState = 0x4E;
 size_t gOffPetRepleteness = kFbPetRepleteness, gOffSlotRepleteness = kFbSlotRepleteness;

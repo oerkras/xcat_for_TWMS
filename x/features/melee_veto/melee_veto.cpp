@@ -4,10 +4,10 @@
 //
 // | RVA | 符号 | 托管参数 | 原生参数 |
 // |---|---|---|---|
-// | `0x105AE40` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
-// | `0x1070390` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
+// | `0x105D2B0` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
+// | `0x1072800` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
 //
-// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x105AE40 上，
+// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x105D2B0 上，
 //   于是 `methodInfo` 被塞进第 7 参的位置、真 methodInfo 丢失，把射击路径整体打歪
 //   （体感「基本必挥弓」）。改这里之前先用 `Dumps/runtime/out/dump.cs` 按 RVA 复核形状。
 //
@@ -69,9 +69,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaTryDoingMeleeAttack = 0x105AE40;
-constexpr uint32_t kRvaTryDoingShootAttack = 0x1070390;
-constexpr uint32_t kRvaGetWeaponType = 0x1429CE0;
+constexpr uint32_t kRvaTryDoingMeleeAttack = 0x105D2B0;
+constexpr uint32_t kRvaTryDoingShootAttack = 0x1072800;
+constexpr uint32_t kRvaGetWeaponType = 0x142BB80;
 
 // ── 取框探针（一次性调研，`XCAT_MELEE_RECT_PROBE=1` 才挂）──────────────────────
 //
@@ -85,8 +85,8 @@ constexpr uint32_t kRvaGetWeaponType = 0x1429CE0;
 // （按仓规逐处实读；这里按 0 读会把分支判反。它不是武器类型——枚举最大是 Gun=49。）
 //
 // 探针要回答的就一件事：飞镖普攻那一发走的是哪条、arg4 实际是几、框实际多大。
-constexpr uint32_t kRvaGetAttackRect = 0x1239330;  // sub_7FF849EA8290
-constexpr uint32_t kRvaConstRect = 0x5656590;      // remounted 2026-08-14 GetAttackRect RIP → (-88,-6,70,56)
+constexpr uint32_t kRvaGetAttackRect = 0x123bb00;  // sub_7FF849EA8290
+constexpr uint32_t kRvaConstRect = 0x5659210;      // remounted 2026-08-20 GetAttackRect RIP → (-88,-6,70,56)
 constexpr int kRectKindConstPath = 55;
 
 // 近战 / 射击开头一致：push rbp / r15 / r14 / r13 / r12 / rsi / rdi / rbx = 12 字节。
@@ -606,13 +606,13 @@ bool TryArmOne(AbsHookState& st, std::atomic<bool>& refuse, uint32_t rva, void* 
 //
 // 以下哈希取自运行时 dump：
 //   ActionManager TDI 1657，父类 Singleton<ActionManager>
-//   Singleton<T>._instance static Lazy<T> @0x0（08-14 hash c7bc0456…；旧 b9143f0b 从未进 dump）
+//   Singleton<T>._instance static Lazy<T> @0x0（08-20 hash c47aca80…；08-14 为 c7bc0456…）
 //   MeleeAttackAfterImage TDI 1644；Range: Dictionary<int,Rect> @0x18
 //   _afterimageMap: Dictionary<string, AfterImage> @0x20（08-13 在 0x40，0x40 现为另一张 Dictionary）
 constexpr char kHashActionManager[] =
-    "f4ce1b46b0eabc745ad8b2c9f0ee7ac5ac737e0c1172735dae0a7c367f52a71";
+    "c7d30db48dc35ebbc0465dba91574ca9fdb27f9e03b08d36af62bc9f9deac25";
 constexpr char kHashSingletonInstance[] =
-    "c7bc0456df619d6443dbf0aae84401cca7a600cbc416ab9ee4eb8fa433c36f3";
+    "c47aca801202bf11c06a1a81834dd62c970c960ea1be6bd33517f396c9de858";
 constexpr size_t kOffActionMgrAfterImageMap = 0x20;
 constexpr size_t kOffAfterImageRange = 0x18;
 

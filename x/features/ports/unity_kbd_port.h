@@ -3,7 +3,7 @@
 // 走位是**变化驱动**，不是轮询。已在 IDB 逐个查完：游戏代码（0x7ff849xxxxxx 段）对
 // Keyboard.get_current、InputAction.IsPressed/WasPressedThisFrame/ReadValue/triggered、
 // Input.GetAxis(Raw)/GetKeyInt 全部**零调用**；唯一的旧版 Input.GetKey(KeyCode) 在
-// UserLocal.IsSit()（RVA 0x109E330，实读种子算出 273/275/276=上右左）只管起立。
+// UserLocal.IsSit()（RVA 0x10A07A0，实读种子算出 273/275/276=上右左）只管起立。
 // 配上运行时实测（纯事件注入 71.4% 能走 / 直写状态缓冲降到 10.2%），结论是门闩吃状态**变化**
 // （change monitor / InputAction 回调），不看当前状态 —— 所以只有把 StateEvent 灌进队列才算数，
 // 直写缓冲反而自断触发。

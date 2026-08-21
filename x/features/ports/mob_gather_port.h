@@ -70,7 +70,8 @@ bool HangupBeforeOtherAction(const char* why);
 void NoteHangupFire();
 // 成功出刀：钉「欠 hangup」清加速 FLAG。TryFirePrimaryEx / NoteLastFire（forge）调用。
 void NoteAttackDirty();
-// 落地后累计出刀已到阈值：必须先拆会话清 FLAG，卖装/赶路/补给不得插队。
+    // 落地后累计出刀已到阈值：必须先拆会话清 FLAG，卖装/赶路/补给不得插队。
+// 到点必须 CloseSession；禁止只停手、禁止图内假落地清零。
 bool HangupFiresDue();
 // 重连在途 / AwaitLand / 出过刀未落地 禁卖。没出过刀、人已在图里：满包可直接出门。
 // 倒计时将尽也推迟，避免出门撞上下一轮拆会话。

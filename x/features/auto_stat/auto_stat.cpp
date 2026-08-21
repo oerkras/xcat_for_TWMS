@@ -40,16 +40,16 @@ constexpr DWORD kJobWaitMs = 800;
 constexpr int kMaxFail = 5;
 
 constexpr char kUiStatClassHash[] =
-    "ced1e8945281777f4874208c7b3883872f22dd7fb90a155f2d118436e704809";
+    "f7a5053c75a5c679707ef6d6b3b4f6c9b3aef71046adca6620b97dbecbefe15";
 constexpr char kSendApMethodHash[] =
-    "e469a254e86c1709ddfcfd645c7fe2ef203a2a2fbf63246f9cb232add54b2af";
-constexpr uint32_t kRvaSendAp = 0x64A230;
+    "cf6df4143d44ea176bc65841ab8e1cd5cfbd504814e06f66f36f2f626f6e5cf";
+constexpr uint32_t kRvaSendAp = 0x64A200;
 
 constexpr char kWmClassHash[] =
-    "f87be298afca3b6020c8f4695d83819fcc9a28877005b6a669187d33a0a2711";
+    "f05b942aeb569b2c37916e7ee710b3ba74011550adcb611a0b26981331a8321";
 constexpr char kCanSendExclHash[] =
-    "dfd38249ceafcba4fdfb0a5ec33e43d27045e6fa44d4afee959f99c93f978d9";
-constexpr uint32_t kRvaCanSendExcl = 0xDF8980;
+    "c515b8b4fb72ad8196f17b12a56326fd68c041265675ccb2029620aacd4a646";
+constexpr uint32_t kRvaCanSendExcl = 0xDFAED0;
 // UIStat.b6a2d557 VA 0x7FFD60EC668A：mov edx, 3BAFE07Eh; xor edx, dword_7FFD670F3158
 // 运行时 dump 种子 0x3BAFE18A → type=500。与换频 SendTransfer 同一把独占锁（不是抄错 type）。
 constexpr int kExclTypeStatUp = 500;

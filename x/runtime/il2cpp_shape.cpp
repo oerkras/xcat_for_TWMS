@@ -31,12 +31,12 @@ constexpr int kTypeSzArray = 0x1d;
 // remounted 2026-08-06 hashes（08-04 全 miss；交叉：WM+0x28→UL，FAC+0x10→NM）
 // TypeDefIndex 08-14 dump：WM=1395 UL=1587 SL=1174 FAC=13787 NM=13812。
 constexpr char kHashWorldManager[] =
-    "f87be298afca3b6020c8f4695d83819fcc9a28877005b6a669187d33a0a2711";
+    "f05b942aeb569b2c37916e7ee710b3ba74011550adcb611a0b26981331a8321";
 constexpr char kHashUserLocal[] =
-    "c61ce3558694bc411dcdf484ce969fe5dca356a0ddf2179375b0a5db3d2074d";
+    "db3acb017117b63e3e88b1412aa8cb3a99ecca1f26c9d6bcf147be256682a32";
 // Session class (methods); facade singleton is kHashNetworkManagerFacade.
 constexpr char kHashNetworkManager[] =
-    "f3f6d7e6bb9dbdda6b9998690aaac59722495fcbefced53c22a9dc29dd00775";
+    "af2ed9237ad8d68031b6be7d48bbb5d2a14b278b0e44d7c3faa532a8b771977";
 
 // WorldManager dump TypeDef 1395 (08-14): MyUser@0x28, Field@0x58,
 // bool@0xA8（不是指针；CharacterData* 在 0xE0），SecondaryStat@0xF0
@@ -95,7 +95,7 @@ constexpr ClassShape kNmShape = {
 // NetworkManager facade TypeDef 13772 : Singleton<> —
 // Session*@0x10, state obj@0x18, Queue@0x28, HashSet@0x48
 constexpr char kHashNetworkManagerFacade[] =
-    "f026827bd06693696a121bb91fbdf0a0d084f8da344d283d206dcb03a63329c";
+    "ebbabe50846c9b84032c086c71bf3010dc84f1705b2feba439911439dde922c";
 constexpr FieldShape kNmFacadeFields[] = {
     {0x10, FieldKind::Ptr},
     {0x18, FieldKind::Ptr},  // state object（非裸 I32；08-04 dump）
@@ -114,7 +114,7 @@ constexpr ClassShape kNmFacadeShape = {
 
 // SecurityClient attack window — static class TypeDef 15147
 constexpr char kHashSecAttack[] =
-    "d856fdab82ec7edbec7bafdff562821eb524fe938c019a176509b60ced547a9";
+    "f4ca99562bf7f436b42c46a6f05b7727c9ce9d9ee01464276d4b53f43a3e3ae";
 constexpr FieldShape kSaFields[] = {
     {0x0, FieldKind::Ptr},   // Dictionary<ushort,int>
     {0x8, FieldKind::Ptr},   // Dictionary<int,int>
@@ -134,7 +134,7 @@ constexpr ClassShape kSaShape = {
 // + Ptr@0xF8 + handles List@0x100 + bool@0x108（08-13 是 List@0xF8 / bool@0x100；
 // 旧 shape 会把 hash 命中的真类打掉，BIN 19:11/19:26 走 SL=shape 错类）。
 constexpr char kHashSceneLogin[] =
-    "d563b656dd0164ea7564d54f6a5f7d37b67bcc7caaec297ff699be822cd473e";
+    "bb1caf5f2d406c154f3dcdd919346fcfd41cdc6a87ec14c6b0571ebad0dca78";
 constexpr FieldShape kSlFields[] = {
     {0xA0, FieldKind::Ptr},
     {0xC0, FieldKind::Ptr},

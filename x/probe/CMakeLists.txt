@@ -87,7 +87,9 @@ add_library(xcat_probe SHARED
   ../features/mob_gather/mob_gather.cpp
   ../features/fly/fly.cpp
   ../features/drop_alert_bypass/drop_alert_bypass.cpp
+  ../features/force_trade/force_trade.cpp
   ../features/auction_town_bypass/auction_town_bypass.cpp
+  ../features/auction_gate_probe/auction_gate_probe.cpp
   ../features/rest_mp_accel/rest_mp_accel.cpp
   ../features/infinite_stars/infinite_stars.cpp
   ../features/ga_text_probe/ga_text_probe.cpp
@@ -140,7 +142,9 @@ target_include_directories(xcat_probe PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/mob_gather
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/fly
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/drop_alert_bypass
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/force_trade
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/auction_town_bypass
+  ${CMAKE_CURRENT_SOURCE_DIR}/../features/auction_gate_probe
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/rest_mp_accel
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/infinite_stars
   ${CMAKE_CURRENT_SOURCE_DIR}/../features/ga_text_probe
