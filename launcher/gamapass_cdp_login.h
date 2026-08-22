@@ -10,9 +10,14 @@
 //   Main 上 init/过期 OTT 等官网拉起：可宽限后「最后一次」stale-ott-retry 重开 Galaxy
 //  （见实现；非无限 soft-retry）。
 
+#include "chromium_cdp.h"
 #include "http_beanfun_login.h"
 
+#include <functional>
+
 namespace msc::launcher {
+
+using GpCdpOnLoginPageFn = std::function<void(msc::cdp::Session& cdp, HttpLoginLogFn log)>;
 
 // SelectGameAccount 页：1-based 昵称槽（跳过「建立遊戲暱稱」后的第 N 个可选项）。
 // 默认 1；范围 1..16；写入程序目录 gamapass_nick_slot.txt。
@@ -26,5 +31,12 @@ void SetGamaPassAccountSlot(int slot1Based);
 
 // 打开/附着 Chrome|Edge → Galaxy → 点 Gama Pass → 选号 → 选昵称 → 收 OTT 换票
 HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log = nullptr, int timeoutMs = 240000);
+
+// 已 EnsureBrowser 的会话上走同一套点选换票（账密独立罐 19223 复用，勿再 Ensure 日常罐）。
+// debugPort：换票成功后 CloseRemoteBrowser 用的调试口；失败不关窗。
+// onLoginPage：落到完整 /login 时由账密助手自动填表；日常 UIA/CDP 不传。
+HttpLoginResult HttpGamaPassCdpLoginToOttOnConnected(
+    msc::cdp::Session& cdp, HttpLoginLogFn log = nullptr, int timeoutMs = 240000,
+    int debugPort = msc::cdp::kDefaultRemoteDebugPort, GpCdpOnLoginPageFn onLoginPage = nullptr);
 
 }  // namespace msc::launcher

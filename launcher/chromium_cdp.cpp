@@ -1,6 +1,8 @@
 #include "chromium_cdp.h"
+#include "gamapass_login_phase.h"
 #include "http_gamapass_login.h"
 #include "msc_launch.h"
+#include "ngm_protocol_allow.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -387,6 +389,11 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
         }
         if (u.find("select-account") != std::string::npos) return 85;
         if (u.find("galaxy.games.gamania.com") != std::string::npos) return 80;
+        // 启动参数 about:blank 常是用户看见的那一页；优先于 chrome://newtab
+        if (u.empty() || u == "about:blank" || u.rfind("about:blank", 0) == 0) return 5;
+        if (u.rfind("chrome://", 0) == 0 || u.rfind("edge://", 0) == 0 ||
+            u.rfind("chrome-extension://", 0) == 0)
+            return 1;
         // /login、/error、oauth 半截：不优先附着（启动层会重新开 Galaxy）
         return 0;
     };
@@ -785,6 +792,11 @@ bool LaunchChromiumWithDebugPort(const BrowserProfile& profile, int port, const 
         DeleteFileW((def + L"\\Last Tabs").c_str());
     }
 
+    // 仅独立罐：启动前写入「始终允许 ngm://」。日常 User Data 不改文件（由用户点选或 UIA 点对话框，Chrome 自己落盘）。
+    if (IsIsolatedXcatCdpUserData(profile.userData)) {
+        msc::launcher::SeedNgmProtocolAllowlist(profile.userData, log);
+    }
+
     // 整行命令行；user-data-dir 加引号防空格路径
     std::wstring cmd = L"\"";
     cmd += profile.exe;
@@ -937,11 +949,22 @@ bool Session::ProbeUserDataConflict(const BrowserProfile& profile, int debugPort
 bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn& log,
                             std::wstring* outFailHint) {
     if (outFailHint) outFailHint->clear();
-    if (Connect(port, log)) return true;
+    auto failCanceled = [&]() -> bool {
+        LogLine(log, L"[cdp] 用户取消，停止打开调试浏览器");
+        if (outFailHint) *outFailHint = L"用户取消登录";
+        (void)CloseRemoteBrowser(port, log);
+        return false;
+    };
+    if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
+    if (Connect(port, log)) {
+        if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
+        return true;
+    }
     if (profile.exe.empty() || profile.userData.empty()) {
         if (outFailHint) *outFailHint = L"未解析到浏览器可执行文件或配置目录";
         return false;
     }
+    if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
 
     // 自动登录前再清一轮占用目标目录的主进程（Resolve 已对日常目录做过）
     {
@@ -966,13 +989,18 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
         return true;
     };
 
+    if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
     if (!tryLaunch()) return false;
 
     // 等待调试口；若进程未带上调试参数（Edge Singleton/Shell 丢参），杀主进程后重开，切勿空等。
     int relaunches = 0;
     for (int i = 0; i < 50; ++i) {
+        if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
         Sleep(400);
-        if (Connect(port, log)) return true;
+        if (Connect(port, log)) {
+            if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
+            return true;
+        }
 
         const bool checkpoint = (i == 8 || i == 18 || i == 30 || i == 40);
         if (!checkpoint) continue;
@@ -984,6 +1012,7 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
         }
 
         if (relaunches >= 2) continue;
+        if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
         LogLine(log, L"[cdp] 未检测到带调试口的浏览器进程，防呆结束占用后重开…");
         (void)KillBrowsersBlockingProfile(profile, port, log);
         Sleep(600);
@@ -1136,6 +1165,37 @@ int Session::CloseExtraBlankPages(const LogFn& log) {
         pos += 4;
     }
     return closed;
+}
+
+bool Session::ActivateAttachedPage(const LogFn& log) {
+    if (port_ <= 0 || pageWsUrl_.empty()) return false;
+    std::string body;
+    if (!HttpGetLocal(port_, L"/json/list", body)) return false;
+    size_t pos = 0;
+    while ((pos = body.find("\"id\"", pos)) != std::string::npos) {
+        size_t winStart = (pos > 400) ? pos - 400 : 0;
+        size_t winEnd = (std::min)(body.size(), pos + 800);
+        std::string win = body.substr(winStart, winEnd - winStart);
+        const std::string ws = JsonGetString(win, "webSocketDebuggerUrl");
+        if (!ws.empty()) {
+            const std::wstring wsW = Utf8ToWide(ws);
+            if (_wcsicmp(wsW.c_str(), pageWsUrl_.c_str()) == 0) {
+                const std::string id = JsonGetString(win, "id");
+                if (id.empty()) break;
+                std::wstring path = L"/json/activate/";
+                path.append(id.begin(), id.end());
+                std::string ignore;
+                if (HttpGetLocal(port_, path.c_str(), ignore)) {
+                    LogLine(log, L"[cdp] 已把附着标签拉到前台 id=" + Utf8ToWide(id));
+                    return true;
+                }
+                LogLine(log, L"[cdp] 激活标签失败 id=" + Utf8ToWide(id));
+                return false;
+            }
+        }
+        pos += 4;
+    }
+    return false;
 }
 
 bool Session::QuitBrowser(int port, const LogFn& log) {

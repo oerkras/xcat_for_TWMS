@@ -17,6 +17,7 @@
 #include "../../ui/player_vitals.h"
 #include "../auto_lie/auto_lie.h"
 #include "../ports/world_port.h"
+#include "../travel/travel.h"
 
 #include "xcat_auto_stat.h"
 
@@ -98,6 +99,7 @@ bool gLoggedExcl = false;
 bool gLoggedOffs = false;
 bool gLoggedSkipJob = false;
 bool gLieBusy = false;
+bool gTravelBusy = false;
 
 struct SendJobCtx {
     uint32_t flag = 0;
@@ -297,8 +299,20 @@ SendResult SendAp(int idx) {
 void Tick(DWORD now) {
     if (!gCfg.enabled) return;
     if (!xcat::AutoStatRatioOk(gCfg)) return;
-    // 离图 / 测谎只跳过：保留 pending，避免过门或轨迹踢期间清确认态导致连发。
+    // 离图 / 测谎 / 赶路只跳过：保留 pending，避免过门或轨迹踢期间清确认态导致连发。
     if (!ports::world::IsPlayReady()) return;
+    // SendAp 与进门同一把 WM 独占锁 type=500。D217 02:27：加点连发时 Up 发门超时 / fake-up。
+    if (travel::IsActive()) {
+        if (!gTravelBusy) {
+            gTravelBusy = true;
+            x::runtime::LogI("AutoStat", "赶路中，暂停加点（独占锁让给发门）");
+        }
+        return;
+    }
+    if (gTravelBusy) {
+        gTravelBusy = false;
+        x::runtime::LogI("AutoStat", "赶路结束，恢复加点");
+    }
     if (auto_lie::IsBusy()) {
         if (!gLieBusy) {
             gLieBusy = true;
@@ -471,6 +485,7 @@ void Init() {
     gLoggedOffs = false;
     gLoggedSkipJob = false;
     gLieBusy = false;
+    gTravelBusy = false;
     x::runtime::LogI("Feature", "auto_stat ready (off until [auto_stat] enabled + ratio=5; leftover AP 不限 5)");
 }
 

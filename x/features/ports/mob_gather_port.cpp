@@ -693,13 +693,9 @@ void DriveSeekFly(const teleport::FlightState& st, DWORD now, const char* tag) {
         }
     }
 
-    // v146 巡点/寻簇/归位飞行限速：不再跟随 Combat 档（用户面板可拉到 1000% = 6200px/s，
-    // 巡航冲刺 3~5s 内必被服务器掐——BIN 01:49~01:51 十连断，545px 冲刺照掐；玩家侧速度
-    // 检测与怪的 ~1200px 位移预算是两套规则）。锁 1.0X（Cruise≈620px/s）：simple_combat
-    // 尸检 12 轮断线里「长途满速巡航死活同分布」的长期运行口径。
-    constexpr float kSeekFlyMaxScale = 1.0f;
-    float seekScl = heli::SpeedScale(Owner::Combat);
-    if (seekScl > kSeekFlyMaxScale) seekScl = kSeekFlyMaxScale;
+    // 寻簇 / 归位 / 巡点跟 F5 Combat 档（面板倍率，100%=Cruise≈620px/s）。
+    // 曾锁 1.0X 防长途满速掐人；用户要求与打怪飞同速。人侧速度门和怪位移不是同一条。
+    const float seekScl = heli::SpeedScale(Owner::Combat);
     gSeeking.store(1, std::memory_order_release);
     if (heli::CurrentOwner() != Owner::Gather) {
         (void)heli::Acquire(Owner::Gather);
@@ -725,9 +721,10 @@ void DriveSeekFly(const teleport::FlightState& st, DWORD now, const char* tag) {
         sFlyLog = now;
         x::runtime::LogI("MobGather",
                          "%s fly latch=(%.0f,%.0f) ap=(%.0f,%.0f) d=%.0f v=(%.0f,%.0f) "
-                         "mode=%s owner=%s",
+                         "mode=%s owner=%s scl=%.2f",
                          tag ? tag : "seek", landX, landY, st.x, st.y, dist, st.vx, st.vy,
-                         heli::ModeName(sp.mode), heli::OwnerName(heli::CurrentOwner()));
+                         heli::ModeName(sp.mode), heli::OwnerName(heli::CurrentOwner()),
+                         seekScl);
     }
 }
 

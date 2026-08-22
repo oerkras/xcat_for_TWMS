@@ -1,8 +1,10 @@
 #include "gamapass_cdp_login.h"
 
 #include "chromium_cdp.h"
+#include "gamapass_login_phase.h"
 #include "gamapass_ticket_harvest.h"
 #include "msc_launch.h"
+#include "ngm_protocol_allow.h"
 #include "ott_ticket_fetch.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -107,44 +109,74 @@ void SaveAccountSlotToDisk(int slot) { SaveSlotFile(AccountSlotPath(), slot); }
 std::wstring JsClickGamaPassProvider() {
     // 只触发一次原生 click：勿叠加 pointer/mouse 序列 + click()，否则官网 OAuth
     // 会当成连点两次，Galaxy 页常弹「登录阶段超时」而另一路仍跳到 select-account。
+    // 独立罐实锤：querySelectorAll 先扫到整张卡（含两个 Sign in，长度<80），
+    // innerText 带 gamapass 就被点掉 → AwaitLeaveGalaxy 永远等不到跳转。
+    // 必须排除同时含 gamania/HK 的父节点，点最短的「Sign in with gamapass」叶子。
     return std::wstring(L"(function(){try{") +
            L"function T(el){return ((el&&(el.innerText||el.textContent||''))||'').replace(/\\s+/g,' ').trim();}"
-           L"function prefer(el){"
-           L"  if(!el)return null;"
-           L"  var t=el.closest('a,button,[role=button]')||el;"
-           L"  return t;"
+           L"function tl(el){return T(el).toLowerCase();}"
+           L"function hasHk(s){s=s||'';"
+           L"  if(s.indexOf('sign in with gamania')>=0) return true;"
+           L"  return s.indexOf('gamania')>=0 && (s.indexOf('hk')>=0||s.indexOf('\\u6e2f')>=0);}"
+           L"function signInCount(s){return ((s||'').match(/sign in with/g)||[]).length;}"
+           L"function isGpOnly(s){"
+           L"  if(!s||hasHk(s)||signInCount(s)>1) return false;"
+           L"  if(s==='sign in with gama pass'||s==='sign in with gamapass'||s==='gama pass'||s==='gamapass')"
+           L"    return true;"
+           L"  return (s.indexOf('gama pass')>=0||s.indexOf('gamapass')>=0) && s.length<=48;"
            L"}"
            L"function fireOnce(el){if(!el)return false;"
-           L"  var t=prefer(el); if(!t)return false;"
+           L"  var t=el, up=el.closest('a,button,[role=button]');"
+           L"  if(up && isGpOnly(tl(up))) t=up;"
            L"  try{t.scrollIntoView({block:'center'});}catch(e){}"
            L"  try{t.click(); return true;}catch(e){return false;}}"
-           L"var nodes=[].slice.call(document.querySelectorAll('a,button,[role=button],div,span,li'));"
-           L"var exact=[];"
-           L"for(var i=0;i<nodes.length;i++){"
-           L"  var t=T(nodes[i]); var tl=t.toLowerCase();"
-           L"  if(tl==='sign in with gama pass' || tl==='gama pass') exact.push(nodes[i]);"
-           L"}"
-           L"if(exact.length){"
-           // 优先真实 button/a（面积更小的更像可点控件），避免点到外包一层再冒泡成二次提交。
-           L"  exact.sort(function(a,b){"
-           L"    function rank(el){var tag=(el.tagName||'').toLowerCase();"
-           L"      if(tag==='button'||tag==='a')return 0;"
-           L"      if((el.getAttribute('role')||'')==='button')return 1; return 2;}"
-           L"    var ra=rank(prefer(a)||a), rb=rank(prefer(b)||b); if(ra!==rb)return ra-rb;"
-           L"    var aa=(prefer(a)||a).getBoundingClientRect();"
-           L"    var bb=(prefer(b)||b).getBoundingClientRect();"
-           L"    return (aa.width*aa.height)-(bb.width*bb.height);"
-           L"  });"
-           L"  if(fireOnce(exact[0])) return 'click-gamapass|exact';"
-           L"}"
-           L"for(var i=0;i<nodes.length;i++){"
-           L"  var t=T(nodes[i]); var tl=t.toLowerCase();"
-           L"  if(t.length>80) continue;"
-           L"  if(tl.indexOf('gama pass')>=0 || tl.indexOf('gamapass')>=0){"
-           L"    if(fireOnce(nodes[i])) return 'click-gamapass|'+t.slice(0,40);"
-           L"  }"
-           L"}"
+           L"var nodes=[].slice.call(document.querySelectorAll('a,button,[role=button],div,span,li,p,label'));"
+           L"var cands=[];"
+           L"for(var i=0;i<nodes.length;i++){if(isGpOnly(tl(nodes[i]))) cands.push(nodes[i]);}"
+           L"cands.sort(function(a,b){"
+           L"  function rank(el){var tag=(el.tagName||'').toLowerCase();"
+           L"    if(tag==='button'||tag==='a')return 0;"
+           L"    if((el.getAttribute('role')||'')==='button')return 1; return 2;}"
+           L"  var ra=rank(a), rb=rank(b); if(ra!==rb)return ra-rb;"
+           L"  var da=T(a).length-T(b).length; if(da) return da;"
+           L"  var aa=a.getBoundingClientRect(), bb=b.getBoundingClientRect();"
+           L"  return (aa.width*aa.height)-(bb.width*bb.height);"
+           L"});"
+           L"if(cands.length&&fireOnce(cands[0])) return 'click-gamapass|'+T(cands[0]).slice(0,40);"
            L"return 'wait-gamapass';"
+           L"}catch(e){return 'err:'+String(e);}})();";
+}
+
+std::wstring JsDismissPostLoginInterstitial() {
+    // /login/finished：绿勾已表示会话写入。Passkey 是可选项，点「設定」会卡死换票。
+    // 只点「繼續使用密碼」/「回到 Gama Play」，让 OAuth 接着走；点不到则上层回 Galaxy。
+    return std::wstring(L"(function(){try{") +
+           L"function T(el){return ((el&&(el.innerText||el.textContent||el.getAttribute('aria-label')||''))||'').replace(/\\s+/g,' ').trim();}"
+           L"function tl(el){return T(el).toLowerCase();}"
+           L"function vis(el){var r=el.getBoundingClientRect(),s=getComputedStyle(el);"
+           L"  return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';}"
+           L"function fire(el){if(!el)return false; var t=el.closest('a,button,[role=button]')||el;"
+           L"  if(T(t).length>80) t=el;"
+           L"  try{t.scrollIntoView({block:'center'});}catch(e){}"
+           L"  try{t.click(); return true;}catch(e){return false;}}"
+           L"var nodes=[].slice.call(document.querySelectorAll('a,button,[role=button],div,span,p,label'));"
+           L"function pick(pred){var c=[];"
+           L"  for(var i=0;i<nodes.length;i++){var s=tl(nodes[i]);"
+           L"    if(!s||s.length>64||!vis(nodes[i])||!pred(s)) continue; c.push(nodes[i]);}"
+           L"  c.sort(function(a,b){return T(a).length-T(b).length;}); return c[0]||null;}"
+           L"var skip=pick(function(s){return s.indexOf('\\u7e7c\\u7e8c\\u4f7f\\u7528\\u5bc6\\u78bc')>=0"
+           L"  ||s.indexOf('\\u7ee7\\u7eed\\u4f7f\\u7528\\u5bc6\\u7801')>=0"
+           L"  ||s.indexOf('continue using password')>=0||s.indexOf('continue with password')>=0;});"
+           L"if(skip&&fire(skip)) return 'skip-passkey|'+T(skip).slice(0,40);"
+           L"var back=pick(function(s){return s.indexOf('\\u56de\\u5230 gama play')>=0"
+           L"  ||s.indexOf('\\u56de\\u5230gama play')>=0||s.indexOf('back to gama play')>=0;});"
+           L"if(back&&fire(back)) return 'back-gama-play|'+T(back).slice(0,40);"
+           L"var path=(location.pathname||'').toLowerCase();"
+           L"while(path.length>1&&path.slice(-1)==='/') path=path.slice(0,-1);"
+           L"if(path==='/login/finished') return 'wait-finished';"
+           L"var body=(document.body&&document.body.innerText||'');"
+           L"if(body.indexOf('Passkey')>=0||body.indexOf('\\u767b\\u5165\\u6210\\u529f')>=0) return 'wait-finished-dom';"
+           L"return 'no-postlogin';"
            L"}catch(e){return 'err:'+String(e);}})();";
 }
 
@@ -360,8 +392,11 @@ std::wstring JsDomStageReady() {
            L"  var path=(location.pathname||'').toLowerCase();"
            L"  while(path.length>1&&path.slice(-1)==='/') path=path.slice(0,-1);"
            L"  if(path==='/login') return 'need-login';"
+           L"  if(path==='/login/finished') return 'ready-finished';"
            L"  if(path.indexOf('/oauth')>=0) return 'wait-oauth';"
            L"}"
+           L"if(hasText('\\u555f\\u7528 Passkey')||hasText('\\u8a2d\\u5b9a Passkey')||hasText('\\u7e7c\\u7e8c\\u4f7f\\u7528\\u5bc6\\u78bc')"
+           L"  ||hasText('\\u56de\\u5230 Gama Play')||hasText('\\u767b\\u5165\\u6210\\u529f')) return 'ready-finished';"
            L"if(h.indexOf('galaxy.games.gamania.com')>=0 && h.indexOf('access_token=')<0){"
            L"  var t=(document.body&&document.body.innerText||'').toLowerCase();"
            L"  if(t.indexOf('gama pass')>=0||t.indexOf('gamapass')>=0) return 'ready-gp';"
@@ -426,6 +461,20 @@ bool IsGamaniaFullLoginUrl(const std::wstring& lowerUrl) {
                             : lowerUrl.substr(pathStart, pathEnd - pathStart);
     while (path.size() > 1 && path.back() == L'/') path.pop_back();
     return path == L"/login";
+}
+
+bool IsGamaniaLoginFinishedUrl(const std::wstring& lowerUrl) {
+    const std::wstring hostKey = L"accounts.gamania.com";
+    const size_t host = lowerUrl.find(hostKey);
+    if (host == std::wstring::npos) return false;
+    const size_t pathStart = lowerUrl.find(L'/', host + hostKey.size());
+    if (pathStart == std::wstring::npos) return false;
+    const size_t pathEnd = lowerUrl.find_first_of(L"?#", pathStart);
+    std::wstring path = (pathEnd == std::wstring::npos)
+                            ? lowerUrl.substr(pathStart)
+                            : lowerUrl.substr(pathStart, pathEnd - pathStart);
+    while (path.size() > 1 && path.back() == L'/') path.pop_back();
+    return path == L"/login/finished";
 }
 
 bool IsOauthAuthorizeUrl(const std::wstring& lowerUrl) {
@@ -539,40 +588,17 @@ void SetGamaPassAccountSlot(int slot1Based) {
     SaveAccountSlotToDisk(gAccountSlotCached);
 }
 
-// 单轮 CDP 点选；accounts/error 的干净重开由外层 HttpGamaPassCdpLoginToOtt 负责。
-static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int timeoutMs) {
+// 已连接 CDP 会话上的点选换票。accounts/error 的干净重开由外层 HttpGamaPassCdpLoginToOtt 负责。
+static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLogFn log, int timeoutMs,
+                                           int debugPort, GpCdpOnLoginPageFn onLoginPage) {
     const int nickSlot = GetGamaPassNickSlot();
     const int accountSlot = GetGamaPassAccountSlot();
-    Log(log, L"[gamapass-cdp] 开始：默认浏览器点选（不调用 refresh/token，不改 LS）；账号=" +
-                 std::to_wstring(accountSlot) + L" 昵称=" + std::to_wstring(nickSlot));
-
-    msc::cdp::BrowserProfile profile;
-    if (!msc::cdp::ResolvePreferredChromium(profile, [&](const std::wstring& s) { Log(log, s); })) {
-        return Fail(HttpLoginError::BadInput,
-                    "未找到 Chrome/Edge。请安装官方 Chrome、Edge 或 Chrome++ 后再试。");
+    Log(log, L"[gamapass-cdp] 已连接会话点选换票；账号=" + std::to_wstring(accountSlot) +
+                 L" 昵称=" + std::to_wstring(nickSlot) + L" port=" + std::to_wstring(debugPort));
+    if (GamaPassLoginCanceled()) {
+        Log(log, L"[gamapass-cdp] 用户取消登录");
+        return Fail(HttpLoginError::Cancelled, "用户已取消登录");
     }
-
-    msc::cdp::Session cdp;
-    std::wstring failHint;
-    if (!cdp.EnsureBrowser(profile, kCdpPort, [&](const std::wstring& s) { Log(log, s); },
-                           &failHint)) {
-        if (!failHint.empty()) {
-            // message 走 UTF-8，与现有 Fail 文案一致
-            int n = WideCharToMultiByte(CP_UTF8, 0, failHint.data(), (int)failHint.size(), nullptr, 0,
-                                        nullptr, nullptr);
-            std::string utf8(n, 0);
-            if (n > 0) {
-                WideCharToMultiByte(CP_UTF8, 0, failHint.data(), (int)failHint.size(), utf8.data(), n,
-                                    nullptr, nullptr);
-            }
-            return Fail(HttpLoginError::Network, utf8.empty()
-                                                     ? "无法连接浏览器调试口，请先关闭已打开的浏览器后重试"
-                                                     : utf8);
-        }
-        return Fail(HttpLoginError::Network,
-                    "无法连接浏览器调试口。已尝试自动结束占用进程；请确认浏览器可启动后重试。");
-    }
-    Log(log, L"[gamapass-cdp] Browser=" + cdp.BrowserVersion());
 
     // 已在「成功路径中途」标签上则复用。下列不算 reusable（应重新开 Galaxy）：
     // - /login、/error、oauth 半截
@@ -601,6 +627,9 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         skippedGalaxyNav = true;
         Log(log, L"[gamapass-cdp] 复用当前标签，跳过 Galaxy Navigate：" + curUrl.substr(0, 160));
     } else if (!cdp.Navigate(kGalaxyLogin, [&](const std::wstring& s) { Log(log, s); })) {
+        if (GamaPassLoginCanceled()) {
+            return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+        }
         return Fail(HttpLoginError::Network, "无法打开 Galaxy 登录页");
     }
     // Galaxy 已占住主标签后，清掉启动/会话恢复留下的多余 about:blank
@@ -706,6 +735,9 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
     DWORD noClickUntil = GetTickCount() + kNavSettleMs;
     DWORD nickRadioAt = 0;
     DWORD lastStageLog = 0;
+    DWORD postLoginAt = 0;           // 见到 /login/finished 的时刻
+    DWORD postLoginClickAt = 0;      // 点过「繼續使用密碼」/「回到 Gama Play」
+    bool reenteredGalaxyAfterLogin = false;
 
     auto enterStage = [&](Stage next, const wchar_t* why, bool force = false) {
         if (!force && stage == next) return;
@@ -719,6 +751,28 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         }
         Log(log, std::wstring(L"[gamapass-cdp] 状态→") + stageName(next) +
                      (why && *why ? (std::wstring(L"（") + why + L"）") : L""));
+        switch (next) {
+            case Stage::GalaxyWaitGp:
+            case Stage::AwaitLeaveGalaxy:
+                SetGamaPassUiPhase(GamaPassUiPhase::ClickGamaPass);
+                break;
+            case Stage::AccWait:
+            case Stage::AwaitLeaveAcc:
+                SetGamaPassUiPhase(GamaPassUiPhase::SelectAccount);
+                break;
+            case Stage::NickWaitRadio:
+            case Stage::NickWaitContinue:
+            case Stage::AwaitLeaveNick:
+                SetGamaPassUiPhase(GamaPassUiPhase::SelectNick);
+                break;
+            case Stage::TokenWait:
+                SetGamaPassUiPhase(sawNgmHint ? GamaPassUiPhase::WaitClassic
+                                              : GamaPassUiPhase::WaitNgm);
+                break;
+            case Stage::ManualLoginWait:
+                SetGamaPassUiPhase(GamaPassUiPhase::ManualLogin);
+                break;
+        }
     };
 
     auto stepBudgetMs = [&](Step s) -> DWORD {
@@ -772,13 +826,21 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
     auto enterManualLoginWait = [&]() {
         if (stage == Stage::ManualLoginWait) return;
         enterStage(Stage::ManualLoginWait, L"need-login-in-cdp-window", true);
-        Log(log, L"[gamapass-cdp] 落到完整登录页。请直接在本自动点选窗口内登录并勾选记住；"
-                 L"出现选账号后会继续自动点选。不要用日常 Chrome 另开登录（Gama 会话互斥会被顶掉）。"
-                 L"未调用 refresh、未清 Cookie、不从日常重灌。");
+        if (onLoginPage) {
+            Log(log, L"[gamapass-cdp] 落到完整登录页，由账密助手自动填表（不直接打开 select-account）。");
+        } else {
+            Log(log, L"[gamapass-cdp] 落到完整登录页。请直接在本自动点选窗口内登录并勾选记住；"
+                     L"出现选账号后会继续自动点选。不要用日常 Chrome 另开登录（Gama 会话互斥会被顶掉）。"
+                     L"未调用 refresh、未清 Cookie、不从日常重灌。");
+        }
     };
     if (stage == Stage::ManualLoginWait) {
-        Log(log, L"[gamapass-cdp] 当前已是完整登录页。请直接在本自动点选窗口内登录并勾选记住；"
-                 L"出现选账号后会继续自动点选。不要用日常 Chrome 另开登录（会话互斥）。");
+        if (onLoginPage) {
+            Log(log, L"[gamapass-cdp] 当前已是完整登录页，由账密助手自动填表。");
+        } else {
+            Log(log, L"[gamapass-cdp] 当前已是完整登录页。请直接在本自动点选窗口内登录并勾选记住；"
+                     L"出现选账号后会继续自动点选。不要用日常 Chrome 另开登录（会话互斥）。");
+        }
     }
 
     auto failNeedManualLogin = [&]() -> HttpLoginResult {
@@ -853,7 +915,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         if (closedBrowserAfterTicket) return;
         closedBrowserAfterTicket = true;
         Log(log, L"[gamapass-cdp] 已收票/经典版，关闭登录用网页…");
-        msc::cdp::CloseRemoteBrowser(kCdpPort, [&](const std::wstring& s) { Log(log, s); });
+        msc::cdp::CloseRemoteBrowser(debugPort, [&](const std::wstring& s) { Log(log, s); });
     };
 
     auto returnIfTicketOk = [&](HttpLoginResult&& r) -> HttpLoginResult {
@@ -875,6 +937,7 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         if (!IsNgmProcessRunningCreatedAfter(sessionNotBefore)) return false;
         sawNgmHint = true;
         ngmHintAt = GetTickCount();
+        SetGamaPassUiPhase(GamaPassUiPhase::WaitClassic);
         Log(log, L"[gamapass-cdp] 探测到 NGM 已启动（官网拉起中；成功门禁仍等经典版 cmdline 票）…");
         if (!parkedAfterNgm && !closedBrowserAfterTicket) {
             parkedAfterNgm = true;
@@ -888,10 +951,13 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         const bool sawBefore = sawNgmHint;
         auto out =
             GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgmHint, log, L"[gamapass-cdp]");
-        if (sawNgmHint && !sawBefore && !parkedAfterNgm && !closedBrowserAfterTicket) {
-            parkedAfterNgm = true;
-            parkLoginTabBlank(
-                L"[gamapass-cdp] 已见 NGM，登录页已 blank（等经典版票后再关浏览器）…");
+        if (sawNgmHint && !sawBefore) {
+            SetGamaPassUiPhase(GamaPassUiPhase::WaitClassic);
+            if (!parkedAfterNgm && !closedBrowserAfterTicket) {
+                parkedAfterNgm = true;
+                parkLoginTabBlank(
+                    L"[gamapass-cdp] 已见 NGM，登录页已 blank（等经典版票后再关浏览器）…");
+            }
         }
         return out;
     };
@@ -905,8 +971,23 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                     std::string("Gama Pass 阶段超时：") + name + "。请检查网络后重试。");
     };
 
+    if (stage == Stage::GalaxyWaitGp) {
+        SetGamaPassUiPhase(GamaPassUiPhase::ClickGamaPass);
+    }
+
     while ((int)(GetTickCount() - t0) < timeoutMs) {
+        if (GamaPassLoginCanceled()) {
+            Log(log, L"[gamapass-cdp] 用户取消登录");
+            return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+        }
         const DWORD nowTick = GetTickCount();
+        if (stage == Stage::TokenWait) {
+            SetGamaPassUiPhase(sawNgmHint ? GamaPassUiPhase::WaitClassic : GamaPassUiPhase::WaitNgm);
+        }
+        if (stage == Stage::TokenWait ||
+            ToLower(lastUrl).find(L"maplestoryclassic.beanfun.com") != std::wstring::npos) {
+            TryAcceptNgmProtocolDialog(log);
+        }
         std::wstring url;
         if (cdp.GetUrl(url, nullptr) && !url.empty()) {
             if (url != lastUrl) {
@@ -934,6 +1015,8 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                         noClickUntil = GetTickCount() + kNavSettleMs;
                     } else if (IsGamaniaFullLoginUrl(lowerNav)) {
                         enterManualLoginWait();
+                    } else if (IsGamaniaLoginFinishedUrl(lowerNav)) {
+                        enterStage(Stage::ManualLoginWait, L"login-finished");
                     } else if (lowerNav.find(L"selectgameaccount") != std::wstring::npos) {
                         enterStage(Stage::NickWaitRadio, L"gp-skip-to-nick");
                         noClickUntil = GetTickCount() + kNavSettleMs;
@@ -1133,7 +1216,8 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
                              ? L"[gamapass-cdp] TokenWait：已见 NGM，仍等经典版 cmdline 票…"
                              : L"[gamapass-cdp] TokenWait 仍在等 OTT/经典版进程（受总超时约束）…");
             }
-            if (curStep == Step::ManualLogin && wallNow - lastStageLog > 8000) {
+            if (curStep == Step::ManualLogin && wallNow - lastStageLog > 8000 &&
+                !IsGamaniaLoginFinishedUrl(ToLower(lastUrl))) {
                 lastStageLog = wallNow;
                 Log(log, L"[gamapass-cdp] ManualLoginWait：请在本自动点选窗口内完成登录…");
             }
@@ -1174,7 +1258,55 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
             continue;
         }
 
+        {
+            const std::wstring hrefNow = ToLower(lastUrl);
+            const bool finishedUrl = IsGamaniaLoginFinishedUrl(hrefNow);
+            const bool maybePostLogin =
+                finishedUrl ||
+                (stage == Stage::ManualLoginWait && !IsGamaniaFullLoginUrl(hrefNow) &&
+                 hrefNow.find(L"input-password") == std::wstring::npos &&
+                 hrefNow.find(L"select-account") == std::wstring::npos &&
+                 hrefNow.find(L"two-factor") == std::wstring::npos &&
+                 hrefNow.find(L"otp") == std::wstring::npos &&
+                 hrefNow.find(L"2fa") == std::wstring::npos);
+            if (maybePostLogin) {
+                std::string finEv;
+                cdp.Evaluate(JsDismissPostLoginInterstitial(), finEv, nullptr);
+                const std::string fin = StripJsonStringValue(finEv);
+                const bool onPostLogin = finishedUrl || fin.find("skip-passkey") == 0 ||
+                                         fin.find("back-gama-play") == 0 ||
+                                         fin.rfind("wait-finished", 0) == 0;
+                if (onPostLogin) {
+                    if (postLoginAt == 0) {
+                        postLoginAt = GetTickCount();
+                        Log(log, L"[gamapass-cdp] 登录已完成，会话已写入独立罐。"
+                                 L"跳过 Passkey（不点设定），继续换票；关窗后再进也会复用。");
+                    }
+                    if (fin.find("skip-passkey") == 0 || fin.find("back-gama-play") == 0) {
+                        postLoginClickAt = GetTickCount();
+                        noClickUntil = postLoginClickAt + 800;
+                        Log(log, L"[gamapass-cdp] " + std::wstring(fin.begin(), fin.end()));
+                    }
+                    const DWORD waitFrom = postLoginClickAt ? postLoginClickAt : postLoginAt;
+                    if (!reenteredGalaxyAfterLogin && GetTickCount() - waitFrom > 2800) {
+                        reenteredGalaxyAfterLogin = true;
+                        Log(log, L"[gamapass-cdp] 完成页未自动回跳，同窗再进 Galaxy（不冲 Cookie）…");
+                        if (cdp.Navigate(kGalaxyLogin,
+                                         [&](const std::wstring& s) { Log(log, s); })) {
+                            enterStage(Stage::GalaxyWaitGp, L"login-finished-reenter", true);
+                            noClickUntil = GetTickCount() + kNavSettleMs;
+                        }
+                    }
+                    Sleep(kPollMs);
+                    continue;
+                }
+            }
+        }
+
         if (stage == Stage::TokenWait || stage == Stage::ManualLoginWait) {
+            if (stage == Stage::ManualLoginWait && onLoginPage) {
+                onLoginPage(cdp, log);
+            }
             Sleep(kPollMs);
             continue;
         }
@@ -1289,6 +1421,11 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
         Sleep(kPollMs);
     }
 
+    if (GamaPassLoginCanceled()) {
+        Log(log, L"[gamapass-cdp] 用户取消登录");
+        return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+    }
+
     {
         auto harvested = returnIfTicketOk(tryHarvestRunningClassic());
         if (harvested.ok && harvested.ticketFilled) return harvested;
@@ -1303,12 +1440,60 @@ static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int tim
 
 }
 
+static HttpLoginResult HttpGamaPassCdpLoginToOttOnce(HttpLoginLogFn log, int timeoutMs) {
+    if (GamaPassLoginCanceled()) {
+        return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+    }
+    const int nickSlot = GetGamaPassNickSlot();
+    const int accountSlot = GetGamaPassAccountSlot();
+    Log(log, L"[gamapass-cdp] 开始：默认浏览器点选（不调用 refresh/token，不改 LS）；账号=" +
+                 std::to_wstring(accountSlot) + L" 昵称=" + std::to_wstring(nickSlot));
+
+    msc::cdp::BrowserProfile profile;
+    if (!msc::cdp::ResolvePreferredChromium(profile, [&](const std::wstring& s) { Log(log, s); })) {
+        return Fail(HttpLoginError::BadInput,
+                    "未找到 Chrome/Edge。请安装官方 Chrome、Edge 或 Chrome++ 后再试。");
+    }
+
+    msc::cdp::Session cdp;
+    std::wstring failHint;
+    if (!cdp.EnsureBrowser(profile, kCdpPort, [&](const std::wstring& s) { Log(log, s); },
+                           &failHint)) {
+        if (GamaPassLoginCanceled()) {
+            return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+        }
+        if (!failHint.empty()) {
+            // message 走 UTF-8，与现有 Fail 文案一致
+            int n = WideCharToMultiByte(CP_UTF8, 0, failHint.data(), (int)failHint.size(), nullptr, 0,
+                                        nullptr, nullptr);
+            std::string utf8(n, 0);
+            if (n > 0) {
+                WideCharToMultiByte(CP_UTF8, 0, failHint.data(), (int)failHint.size(), utf8.data(), n,
+                                    nullptr, nullptr);
+            }
+            return Fail(HttpLoginError::Network, utf8.empty()
+                                                     ? "无法连接浏览器调试口，请先关闭已打开的浏览器后重试"
+                                                     : utf8);
+        }
+        return Fail(HttpLoginError::Network,
+                    "无法连接浏览器调试口。已尝试自动结束占用进程；请确认浏览器可启动后重试。");
+    }
+    Log(log, L"[gamapass-cdp] Browser=" + cdp.BrowserVersion());
+    return CdpTicketOnConnected(cdp, log, timeoutMs, kCdpPort, nullptr);
+}
+
 static bool IsAccountsOauthErrorFail(const HttpLoginResult& r) {
     return !r.ok && r.accountsOauthError;
 }
 
 HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
     auto first = HttpGamaPassCdpLoginToOttOnce(log, timeoutMs);
+    if (GamaPassLoginCanceled() || first.error == HttpLoginError::Cancelled) {
+        if (first.error != HttpLoginError::Cancelled) {
+            first = Fail(HttpLoginError::Cancelled, "用户已取消登录");
+        }
+        return first;
+    }
     if (first.ok || !IsAccountsOauthErrorFail(first)) return first;
 
     // 实锤：authorize 半残 → /error 后，关调试浏览器 + 新 Galaxy OTT 再走一轮可进 select-account。
@@ -1318,7 +1503,16 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
              L"（关调试浏览器后重开一轮，最多 1 次）…");
     msc::cdp::CloseRemoteBrowser(kCdpPort, [&](const std::wstring& s) { Log(log, s); });
     Sleep(1800);
+    if (GamaPassLoginCanceled()) {
+        return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+    }
     return HttpGamaPassCdpLoginToOttOnce(log, timeoutMs);
+}
+
+HttpLoginResult HttpGamaPassCdpLoginToOttOnConnected(msc::cdp::Session& cdp, HttpLoginLogFn log,
+                                                     int timeoutMs, int debugPort,
+                                                     GpCdpOnLoginPageFn onLoginPage) {
+    return CdpTicketOnConnected(cdp, log, timeoutMs, debugPort, std::move(onLoginPage));
 }
 
 }  // namespace msc::launcher

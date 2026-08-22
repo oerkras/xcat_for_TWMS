@@ -18,6 +18,7 @@ enum class HttpLoginError {
     DualVerifyRequired,  // 双重验证
     Protocol,          // 表单/字段/跳转不符合预期
     OttMissing,
+    Cancelled,  // 用户取消登录
 };
 
 struct HttpLoginResult {

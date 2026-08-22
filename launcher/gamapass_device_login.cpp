@@ -1,18 +1,23 @@
 #include "gamapass_device_login.h"
 
 #include "chromium_cdp.h"
+#include "gamapass_cdp_login.h"
+#include "gamapass_login_phase.h"
 #include "http_gamapass_login.h"
+#include "msc_webview_login.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
+#include <wincrypt.h>
 #include <ShlObj.h>
 #include <winreg.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -23,8 +28,6 @@ namespace msc::launcher {
 namespace {
 
 constexpr int kDeviceLoginDebugPort = 19223;
-constexpr wchar_t kSiteOrigin[] = L"https://accounts.gamania.com";
-constexpr wchar_t kStartUrl[] = L"https://accounts.gamania.com";
 constexpr wchar_t kProfileDirName[] = L"GpDeviceLoginProfile";
 
 std::atomic<bool> gBusy{false};
@@ -52,6 +55,47 @@ std::string WideToUtf8(const std::wstring& w) {
 bool DirExists(const std::wstring& p) {
     DWORD a = GetFileAttributesW(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+std::wstring IsolatedProfileRoot() {
+    wchar_t localApp[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return {};
+    return std::wstring(localApp) + L"\\XCat\\" + kProfileDirName;
+}
+
+bool IsSafeIsolatedProfileRoot(const std::wstring& root) {
+    const std::wstring expected = IsolatedProfileRoot();
+    if (expected.empty() || root.empty()) return false;
+    if (_wcsicmp(root.c_str(), expected.c_str()) != 0) return false;
+    if (root.find(L"GpDeviceLoginProfile") == std::wstring::npos) return false;
+    if (root.find(L"User Data") != std::wstring::npos) return false;
+    if (root.find(L"Chrome++ Data") != std::wstring::npos) return false;
+    return true;
+}
+
+void DeleteDirRecursive(const std::wstring& dir) {
+    WIN32_FIND_DATAW fd{};
+    const HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        const std::wstring p = dir + L"\\" + fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+            RemoveDirectoryW(p.c_str());
+            DeleteFileW(p.c_str());
+            continue;
+        }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            DeleteDirRecursive(p);
+        } else {
+            SetFileAttributesW(p.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(p.c_str());
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    SetFileAttributesW(dir.c_str(), FILE_ATTRIBUTE_NORMAL);
+    RemoveDirectoryW(dir.c_str());
 }
 
 bool EnsureDir(const std::wstring& p) {
@@ -138,8 +182,41 @@ bool FileReadAll(const std::wstring& path, std::string& out) {
 bool FileWriteAll(const std::wstring& path, const std::string& body) {
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) return false;
-    f.write(body.data(), (std::streamsize)body.size());
-    return (bool)f;
+    f.write(body.data(), static_cast<std::streamsize>(body.size()));
+    return static_cast<bool>(f);
+}
+
+bool DpapiProtect(const std::string& plain, std::vector<uint8_t>& out) {
+    DATA_BLOB in{};
+    in.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(plain.data()));
+    in.cbData = static_cast<DWORD>(plain.size());
+    DATA_BLOB blob{};
+    if (!CryptProtectData(&in, L"xcat-gp-device-login", nullptr, nullptr, nullptr,
+                          CRYPTPROTECT_UI_FORBIDDEN, &blob)) {
+        return false;
+    }
+    out.assign(blob.pbData, blob.pbData + blob.cbData);
+    LocalFree(blob.pbData);
+    return true;
+}
+
+bool DpapiUnprotect(const uint8_t* data, size_t len, std::string& plain) {
+    DATA_BLOB in{};
+    in.pbData = const_cast<BYTE*>(data);
+    in.cbData = static_cast<DWORD>(len);
+    DATA_BLOB blob{};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN,
+                            &blob)) {
+        return false;
+    }
+    plain.assign(reinterpret_cast<char*>(blob.pbData), blob.cbData);
+    LocalFree(blob.pbData);
+    return true;
+}
+
+void SecureWipeString(std::string& s) {
+    if (!s.empty()) SecureZeroMemory(s.data(), s.size());
+    s.clear();
 }
 
 bool EvalUtf8(msc::cdp::Session& cdp, const std::string& js, std::string& out,
@@ -270,8 +347,7 @@ bool PinDeviceId(msc::cdp::Session& cdp, const std::string& deviceId, const Http
     std::string params = "{\"source\":\"" + JsonEscape(bootJs) + "\",\"runImmediately\":true}";
     std::string res;
     if (!cdp.Command("Page.addScriptToEvaluateOnNewDocument", params, res, cdpLog)) {
-        LogLine(log, L"[gp-device-login] addScriptToEvaluateOnNewDocument 失败");
-        return false;
+        LogLine(log, L"[gp-device-login] addScriptToEvaluateOnNewDocument 失败（仍继续打开登录页）");
     }
 
     if (!cdp.Command("DOMStorage.enable", "{}", res, cdpLog)) {
@@ -290,21 +366,6 @@ bool PinDeviceId(msc::cdp::Session& cdp, const std::string& deviceId, const Http
     EvalUtf8(cdp, pageJs, got, log);
     LogLine(log, L"[gp-device-login] 已钉 device_id");
     return true;
-}
-
-bool WaitDocumentUsable(msc::cdp::Session& cdp, DWORD timeoutMs, const HttpLoginLogFn& log) {
-    const DWORD t0 = GetTickCount();
-    while (GetTickCount() - t0 < timeoutMs) {
-        std::string r;
-        if (EvalUtf8(cdp,
-                     "document.readyState === 'interactive' || document.readyState === 'complete'", r,
-                     log) &&
-            ResultTruthy(r))
-            return true;
-        Sleep(300);
-    }
-    LogLine(log, L"[gp-device-login] 等待页面就绪超时");
-    return false;
 }
 
 bool FillVisibleInput(msc::cdp::Session& cdp, bool password, const std::string& value,
@@ -403,34 +464,20 @@ bool HasPasswordInput(msc::cdp::Session& cdp, const HttpLoginLogFn& log) {
     return ResultTruthy(r);
 }
 
-bool HarvestSession(msc::cdp::Session& cdp, GamaPassDeviceLoginAccount& acc,
-                    const HttpLoginLogFn& log) {
+bool HasEmailInput(msc::cdp::Session& cdp, const HttpLoginLogFn& log) {
     static const char kJs[] =
-        "(() => { try { const openId = localStorage.getItem('current_user_open_id') || '';"
-        "  return JSON.stringify({"
-        "    deviceId: localStorage.getItem('device_id') || '',"
-        "    openId: openId,"
-        "    trackId: localStorage.getItem('track_id') || '',"
-        "    user: localStorage.getItem(openId ? ('user_' + openId) : '') || ''"
-        "  }); } catch (e) { return '{}'; } })()";
-    std::string raw;
-    if (!EvalUtf8(cdp, kJs, raw, log)) return false;
-    const std::string deviceId = JsonGetString(raw, "deviceId");
-    const std::string openId = JsonGetString(raw, "openId");
-    const std::string trackId = JsonGetString(raw, "trackId");
-    const std::string user = JsonGetString(raw, "user");
-    if (!deviceId.empty() && deviceId != acc.deviceId) {
-        LogLine(log, L"[gp-device-login] 页面 device_id 与卖家不一致，保留卖家值");
-    }
-    if (!openId.empty()) acc.openId = openId;
-    if (!trackId.empty()) acc.trackId = trackId;
-    if (!user.empty()) {
-        const std::string tok = JsonGetString(user, "token");
-        if (!tok.empty()) acc.userToken = tok;
-        const std::string rt = JsonGetString(user, "refreshToken");
-        if (!rt.empty()) acc.refreshToken = rt;
-    }
-    return !acc.openId.empty() || !acc.userToken.empty();
+        "(() => {"
+        "  const visible = el => { const style = getComputedStyle(el), rect = el.getBoundingClientRect();"
+        "    return !el.disabled && style.display !== 'none' && style.visibility !== 'hidden'"
+        "      && rect.width > 0 && rect.height > 0; };"
+        "  const all = [...document.querySelectorAll('input')].filter(visible);"
+        "  return Boolean(all.find(el => ['email','tel'].includes((el.type || '').toLowerCase()))"
+        "    || all.find(el => ['username','email'].includes((el.autocomplete || '').toLowerCase()))"
+        "    || all.find(el => (el.type || 'text').toLowerCase() === 'text'));"
+        "})()";
+    std::string r;
+    if (!EvalUtf8(cdp, kJs, r, log)) return false;
+    return ResultTruthy(r);
 }
 
 bool UrlLooksTwoFactor(msc::cdp::Session& cdp, const HttpLoginLogFn& log) {
@@ -443,18 +490,100 @@ bool UrlLooksTwoFactor(msc::cdp::Session& cdp, const HttpLoginLogFn& log) {
 }
 
 void CloseHelperAfterSuccess(msc::cdp::Session& cdp, const HttpLoginLogFn& log) {
-    LogLine(log, L"[gp-device-login] 登录成功，关闭独立调试窗（先 Browser.close 落盘 Cookie；只动调试口 19223）");
+    LogLine(log, L"[gp-device-login] 换票完成，关闭独立调试窗（先 Browser.close 落盘 Cookie；只动调试口 19223）");
     Sleep(600);
     cdp.Close();
     if (!msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
                                       [&](const std::wstring& s) { LogLine(log, s); })) {
-        LogLine(log, L"[gp-device-login] 独立调试窗未能自动关掉，请手动关那一扇后再点 GAMA PASS自动登录");
+        LogLine(log, L"[gp-device-login] 独立调试窗未能自动关掉，请手动关那一扇");
     }
+}
+
+struct GpFillState {
+    bool emailSubmitted = false;
+    bool passwordSubmitted = false;
+    bool notedTwoFactor = false;
+};
+
+void TryFillGpLoginOnce(msc::cdp::Session& cdp, const GamaPassDeviceLoginAccount& acc,
+                        GpFillState& st, const HttpLoginLogFn& log) {
+    if (GamaPassLoginCanceled()) return;
+    if (st.passwordSubmitted) return;
+    std::wstring cur;
+    if (cdp.GetUrl(cur, [&](const std::wstring& s) { LogLine(log, s); })) {
+        std::wstring low = cur;
+        for (auto& c : low) c = (wchar_t)towlower(c);
+        if (low.find(L"/login/finished") != std::wstring::npos) return;
+    }
+    if (UrlLooksTwoFactor(cdp, log)) {
+        if (!st.notedTwoFactor) {
+            st.notedTwoFactor = true;
+            LogLine(log, L"[gp-device-login] 需要二次验证：请在独立窗口内完成；完成后会自动换票开游戏。");
+        }
+        SetGamaPassUiPhase(GamaPassUiPhase::TwoFactor);
+        return;
+    }
+    if (HasPasswordInput(cdp, log)) {
+        SetGamaPassUiPhase(GamaPassUiPhase::FillingForm);
+        const bool emailOk = FillVisibleInput(cdp, false, acc.email, log);
+        const bool passOk = FillVisibleInput(cdp, true, acc.password, log);
+        if (passOk) {
+            EnsureKeepSignedIn(cdp, log);
+            if (ClickPrimaryButton(cdp, log)) {
+                st.passwordSubmitted = true;
+                LogLine(log, L"[gp-device-login] 已提交 Gama Pass 密码" +
+                                 std::wstring(emailOk ? L"" : L"（本步无邮箱框）"));
+            }
+        }
+        return;
+    }
+    if (!st.emailSubmitted && HasEmailInput(cdp, log)) {
+        SetGamaPassUiPhase(GamaPassUiPhase::FillingForm);
+        if (FillVisibleInput(cdp, false, acc.email, log)) {
+            EnsureKeepSignedIn(cdp, log);
+            if (ClickPrimaryButton(cdp, log)) {
+                st.emailSubmitted = true;
+                LogLine(log, L"[gp-device-login] 已填邮箱并点继续，等待密码框…");
+            }
+        }
+    }
+}
+
+void LaunchClassicAfterIsolatedTicket(msc::cdp::Session& cdp, GamaPassDeviceLoginAccount& acc,
+                                      const std::wstring& storePath, const HttpLoginLogFn& log) {
+    LogLine(log, L"[gp-device-login] 从 Galaxy 点 Gama Pass 换票（select-account 必须走 OAuth，不能直接打开）");
+    GpFillState fill;
+    auto onLogin = [&](msc::cdp::Session& s, HttpLoginLogFn lg) { TryFillGpLoginOnce(s, acc, fill, lg); };
+    auto lr = HttpGamaPassCdpLoginToOttOnConnected(cdp, log, 240000, kDeviceLoginDebugPort, onLogin);
+    if (GamaPassLoginCanceled() || lr.error == HttpLoginError::Cancelled) {
+        LogLine(log, L"[gp-device-login] 已取消账密直登（不接管经典版、不杀游戏）");
+        cdp.Close();
+        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
+                                           [&](const std::wstring& s) { LogLine(log, s); });
+        return;
+    }
+    if (lr.ok && lr.ticketFilled) {
+        SaveGamaPassDeviceLoginAccount(storePath, acc);
+        LogLine(log, L"[gp-device-login] 换票成功 uid=" + lr.ticket.userObjectId + L" gid=" +
+                         lr.ticket.gid + L"，接管经典版（不调用 NGM）");
+        if (!msc::weblogin::LaunchClassicAfterTicket(std::move(lr.ticket))) {
+            LogLine(log, L"[gp-device-login] 换票成功，但未接管到经典版。"
+                         L"请确认官网已拉起 Maplestory_Classic.exe 后再点一次（已有窗口不会重填账密）");
+        }
+        CloseHelperAfterSuccess(cdp, log);
+        return;
+    }
+    LogLine(log, L"[gp-device-login] 换票未完成 [" +
+                     Utf8ToWide(HttpLoginErrorName(lr.error)) + L"] " + Utf8ToWide(lr.message) +
+                     L"。独立窗口保持打开；下次点同一按钮会复用会话，不再直开 select-account。");
 }
 
 void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginLogFn log) {
     struct BusyGuard {
-        ~BusyGuard() { gBusy.store(false); }
+        ~BusyGuard() {
+            SetGamaPassUiPhase(GamaPassUiPhase::Idle);
+            gBusy.store(false);
+        }
     } busyGuard;
 
     if (acc.deviceId.empty()) {
@@ -462,6 +591,7 @@ void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginL
         return;
     }
     LogLine(log, L"[gp-device-login] 使用卖家 device_id（不自造）");
+    SetGamaPassUiPhase(GamaPassUiPhase::OpeningBrowser);
     SaveGamaPassDeviceLoginAccount(storePath, acc);
 
     msc::cdp::BrowserProfile profile;
@@ -490,7 +620,18 @@ void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginL
     std::wstring fail;
     if (!cdp.EnsureBrowser(profile, kDeviceLoginDebugPort,
                            [&](const std::wstring& s) { LogLine(log, s); }, &fail)) {
-        LogLine(log, L"[gp-device-login] 无法打开调试浏览器 " + fail);
+        if (GamaPassLoginCanceled()) {
+            LogLine(log, L"[gp-device-login] 已取消账密直登");
+        } else {
+            LogLine(log, L"[gp-device-login] 无法打开调试浏览器 " + fail);
+        }
+        return;
+    }
+    if (GamaPassLoginCanceled()) {
+        LogLine(log, L"[gp-device-login] 已取消账密直登");
+        cdp.Close();
+        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
+                                           [&](const std::wstring& s) { LogLine(log, s); });
         return;
     }
 
@@ -498,67 +639,43 @@ void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginL
     cdp.Command("Page.enable", "{}", ignore, [&](const std::wstring& s) { LogLine(log, s); });
     cdp.Command("Runtime.enable", "{}", ignore, [&](const std::wstring& s) { LogLine(log, s); });
 
-    if (!PinDeviceId(cdp, acc.deviceId, log)) return;
-    if (!cdp.Navigate(kStartUrl, [&](const std::wstring& s) { LogLine(log, s); })) {
-        LogLine(log, L"[gp-device-login] 打开登录页失败");
+    if (!PinDeviceId(cdp, acc.deviceId, log)) {
+        LogLine(log, L"[gp-device-login] 预钉 device_id 未完全成功，仍走 Galaxy");
+    }
+    if (GamaPassLoginCanceled()) {
+        LogLine(log, L"[gp-device-login] 已取消账密直登");
+        cdp.Close();
+        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
+                                           [&](const std::wstring& s) { LogLine(log, s); });
         return;
     }
-    if (!WaitDocumentUsable(cdp, 20000, log)) return;
-    PinDeviceId(cdp, acc.deviceId, log);
+    LogLine(log, L"[gp-device-login] 不直接打开 select-account；先 Galaxy 再点 Gama Pass。"
+                 L"未登录则在 OAuth 登录页自动填表。");
+    LaunchClassicAfterIsolatedTicket(cdp, acc, storePath, log);
+}
 
-    if (HarvestSession(cdp, acc, log) && !HasPasswordInput(cdp, log)) {
-        SaveGamaPassDeviceLoginAccount(storePath, acc);
-        LogLine(log, L"[gp-device-login] 该独立窗口已有会话（device_id 已钉死）。");
-        CloseHelperAfterSuccess(cdp, log);
-        return;
+std::wstring DeviceLoginPlainStorePath(const std::wstring& dpapiPath) {
+    constexpr wchar_t kSuf[] = L".dpapi";
+    const size_t n = dpapiPath.size();
+    if (n >= 6 && _wcsicmp(dpapiPath.c_str() + (n - 6), kSuf) == 0) {
+        return dpapiPath.substr(0, n - 6) + L".json";
     }
+    return {};
+}
 
-    const DWORD t0 = GetTickCount();
-    bool filled = false;
-    bool twoFactor = false;
-    while (GetTickCount() - t0 < 45000) {
-        if (UrlLooksTwoFactor(cdp, log)) {
-            twoFactor = true;
-            LogLine(log, L"[gp-device-login] 需要二次验证：请在独立窗口内完成；完成后会自动关窗。");
-            break;
-        }
-        if (HasPasswordInput(cdp, log)) {
-            const bool emailOk = FillVisibleInput(cdp, false, acc.email, log);
-            const bool passOk = FillVisibleInput(cdp, true, acc.password, log);
-            if (emailOk && passOk) {
-                EnsureKeepSignedIn(cdp, log);
-                if (ClickPrimaryButton(cdp, log)) {
-                    filled = true;
-                    LogLine(log, L"[gp-device-login] 已提交账密（已尝试勾选保持登入）");
-                    break;
-                }
-            }
-        }
-        Sleep(500);
-    }
-    if (!filled && !twoFactor) {
-        LogLine(log, L"[gp-device-login] 未找到账密框。请在独立窗口内手动登录；device_id 已预先写入。");
-        return;
-    }
-
-    const DWORD t1 = GetTickCount();
-    bool notedTwoFactor = twoFactor;
-    while (GetTickCount() - t1 < 90000) {
-        if (UrlLooksTwoFactor(cdp, log)) {
-            if (!notedTwoFactor) {
-                notedTwoFactor = true;
-                LogLine(log, L"[gp-device-login] 需要二次验证：请在独立窗口内完成；完成后会自动关窗。");
-            }
-        } else if (HarvestSession(cdp, acc, log) && !HasPasswordInput(cdp, log)) {
-            SaveGamaPassDeviceLoginAccount(storePath, acc);
-            LogLine(log, L"[gp-device-login] 登录完成，已保存 device_id / 会话。不换票、不开游戏。");
-            CloseHelperAfterSuccess(cdp, log);
-            return;
-        }
-        Sleep(800);
-    }
-    SaveGamaPassDeviceLoginAccount(storePath, acc);
-    LogLine(log, L"[gp-device-login] 等待登录结果超时，独立窗口保持打开。若窗口里已经登入，下次会复用同一 device_id。");
+bool ParseAccountFromStoreJson(const std::string& body, GamaPassDeviceLoginAccount& out) {
+    out = {};
+    out.email = JsonGetString(body, "email");
+    out.password = JsonGetString(body, "password");
+    out.emailPassword = JsonGetString(body, "emailPassword");
+    if (out.emailPassword.empty()) out.emailPassword = JsonGetString(body, "gamaPassword");
+    out.deviceId = JsonGetString(body, "deviceId");
+    out.openId = JsonGetString(body, "openId");
+    out.userToken = JsonGetString(body, "userToken");
+    out.refreshToken = JsonGetString(body, "refreshToken");
+    out.trackId = JsonGetString(body, "trackId");
+    out.browserKind = ClampBrowserKind(JsonGetInt(body, "browserKind", 0));
+    return !out.email.empty() || !out.deviceId.empty();
 }
 
 }  // namespace
@@ -645,30 +762,51 @@ std::wstring GamaPassDeviceLoginStorePath(const std::wstring& prefsBinDir) {
     if (!prefsBinDir.empty()) {
         const std::wstring st = prefsBinDir + L"\\state";
         EnsureDir(st);
-        return st + L"\\gp_device_login.json";
+        return st + L"\\gp_device_login.dpapi";
     }
     wchar_t localApp[MAX_PATH]{};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return {};
     const std::wstring root = std::wstring(localApp) + L"\\XCat";
     EnsureDir(root);
-    return root + L"\\gp_device_login.json";
+    return root + L"\\gp_device_login.dpapi";
 }
 
 bool LoadGamaPassDeviceLoginAccount(const std::wstring& storePath, GamaPassDeviceLoginAccount& out) {
     out = {};
-    std::string body;
-    if (!FileReadAll(storePath, body) || body.empty()) return false;
-    out.email = JsonGetString(body, "email");
-    out.password = JsonGetString(body, "password");
-    out.emailPassword = JsonGetString(body, "emailPassword");
-    if (out.emailPassword.empty()) out.emailPassword = JsonGetString(body, "gamaPassword");
-    out.deviceId = JsonGetString(body, "deviceId");
-    out.openId = JsonGetString(body, "openId");
-    out.userToken = JsonGetString(body, "userToken");
-    out.refreshToken = JsonGetString(body, "refreshToken");
-    out.trackId = JsonGetString(body, "trackId");
-    out.browserKind = ClampBrowserKind(JsonGetInt(body, "browserKind", 0));
-    return !out.email.empty() || !out.deviceId.empty();
+    if (storePath.empty()) return false;
+
+    auto parseWipe = [&](std::string& body) -> bool {
+        const bool ok = ParseAccountFromStoreJson(body, out);
+        SecureWipeString(body);
+        return ok;
+    };
+
+    std::string raw;
+    if (FileReadAll(storePath, raw) && !raw.empty()) {
+        std::string body;
+        static const char kMagic[] = "GPDL1";
+        bool fromPlain = false;
+        if (raw.size() >= 5 && raw.compare(0, 5, kMagic) == 0) {
+            const bool dec = DpapiUnprotect(reinterpret_cast<const uint8_t*>(raw.data() + 5),
+                                            raw.size() - 5, body);
+            SecureWipeString(raw);
+            if (!dec) return false;
+        } else {
+            body = std::move(raw);
+            fromPlain = true;
+        }
+        if (!parseWipe(body)) return false;
+        if (fromPlain) (void)SaveGamaPassDeviceLoginAccount(storePath, out);
+        return true;
+    }
+
+    const std::wstring legacy = DeviceLoginPlainStorePath(storePath);
+    if (legacy.empty() || !FileReadAll(legacy, raw) || raw.empty()) return false;
+    if (!parseWipe(raw)) return false;
+    if (SaveGamaPassDeviceLoginAccount(storePath, out)) {
+        DeleteFileW(legacy.c_str());
+    }
+    return true;
 }
 
 bool SaveGamaPassDeviceLoginAccount(const std::wstring& storePath,
@@ -686,7 +824,28 @@ bool SaveGamaPassDeviceLoginAccount(const std::wstring& storePath,
       << "  \"trackId\":\"" << JsonEscape(acc.trackId) << "\",\n"
       << "  \"browserKind\":" << static_cast<int>(acc.browserKind) << "\n"
       << "}\n";
-    return FileWriteAll(storePath, o.str());
+    std::string plain = o.str();
+    std::vector<uint8_t> blob;
+    const bool prot = DpapiProtect(plain, blob);
+    SecureWipeString(plain);
+    if (!prot) return false;
+    std::ofstream f(storePath, std::ios::binary | std::ios::trunc);
+    if (!f) return false;
+    f.write("GPDL1", 5);
+    f.write(reinterpret_cast<const char*>(blob.data()),
+            static_cast<std::streamsize>(blob.size()));
+    if (!f) return false;
+    const std::wstring legacy = DeviceLoginPlainStorePath(storePath);
+    if (!legacy.empty()) DeleteFileW(legacy.c_str());
+    return true;
+}
+
+bool DeleteGamaPassDeviceLoginAccount(const std::wstring& storePath) {
+    if (storePath.empty()) return false;
+    const std::wstring legacy = DeviceLoginPlainStorePath(storePath);
+    if (!legacy.empty()) DeleteFileW(legacy.c_str());
+    DeleteFileW(storePath.c_str());
+    return !FileExistsW(storePath) && (legacy.empty() || !FileExistsW(legacy));
 }
 
 bool ResolveGamaPassDeviceLoginBrowser(std::wstring& outExe, std::wstring& outLabel,
@@ -739,6 +898,66 @@ bool ResolveGamaPassDeviceLoginBrowser(std::wstring& outExe, std::wstring& outLa
 
 bool IsGamaPassDeviceLoginBusy() { return gBusy.load(); }
 
+bool CancelGamaPassDeviceLogin(HttpLoginLogFn log) {
+    RequestGamaPassLoginCancel();
+    if (!gBusy.load()) {
+        LogLine(log, L"[gp-device-login] 当前没有进行中的账密直登");
+        return false;
+    }
+    LogLine(log, L"[gp-device-login] 用户取消：关闭独立调试窗（19223），不碰日常浏览器、不杀游戏");
+    const auto cdpLog = [&](const std::wstring& s) { LogLine(log, s); };
+    (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort, cdpLog);
+    const std::wstring root = IsolatedProfileRoot();
+    if (IsSafeIsolatedProfileRoot(root)) {
+        static const wchar_t* kLeaves[] = {L"chromeplus", L"chrome", L"edge"};
+        for (const wchar_t* leaf : kLeaves) {
+            msc::cdp::BrowserProfile p;
+            p.userData = root + L"\\" + leaf;
+            (void)msc::cdp::KillBrowsersBlockingProfile(p, kDeviceLoginDebugPort, cdpLog);
+        }
+    }
+    return true;
+}
+
+bool ClearGamaPassDeviceLoginProfile(HttpLoginLogFn log, std::wstring& err) {
+    err.clear();
+    if (gBusy.load()) {
+        err = L"账密直登进行中，请等结束后再清空";
+        return false;
+    }
+    const std::wstring root = IsolatedProfileRoot();
+    if (!IsSafeIsolatedProfileRoot(root)) {
+        err = L"无法解析独立罐路径，已拒绝清空";
+        return false;
+    }
+    const auto cdpLog = [&](const std::wstring& s) { LogLine(log, s); };
+    (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort, cdpLog);
+    static const wchar_t* kLeaves[] = {L"chromeplus", L"chrome", L"edge"};
+    for (const wchar_t* leaf : kLeaves) {
+        msc::cdp::BrowserProfile p;
+        p.userData = root + L"\\" + leaf;
+        (void)msc::cdp::KillBrowsersBlockingProfile(p, kDeviceLoginDebugPort, cdpLog);
+    }
+    Sleep(400);
+    if (DirExists(root)) DeleteDirRecursive(root);
+    if (DirExists(root)) {
+        Sleep(400);
+        DeleteDirRecursive(root);
+    }
+    if (DirExists(root)) {
+        err = L"独立罐仍被占用，请先关掉账密登录那扇浏览器再试";
+        LogLine(log, L"[gp-device-login] 清空失败：目录仍在 " + root);
+        return false;
+    }
+    wchar_t localApp[MAX_PATH]{};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) {
+        EnsureDir(std::wstring(localApp) + L"\\XCat");
+    }
+    EnsureDir(root);
+    LogLine(log, L"[gp-device-login] 已清空独立罐（未动日常 User Data / Cookie）");
+    return true;
+}
+
 std::wstring GamaPassDeviceLoginUserDataDir(const std::wstring& exe) {
     wchar_t localApp[MAX_PATH]{};
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return {};
@@ -747,15 +966,21 @@ std::wstring GamaPassDeviceLoginUserDataDir(const std::wstring& exe) {
 
 bool StartGamaPassDeviceLogin(const GamaPassDeviceLoginAccount& acc, const std::wstring& storePath,
                               HttpLoginLogFn log, std::wstring& err) {
+    (void)log;
     err.clear();
     if (!kGamaPassDeviceLoginEnabled) {
         err = L"账密登录助手尚未开放";
         return false;
     }
-    if (gBusy.exchange(true)) {
-        err = L"账密登录助手正在运行";
+    if (msc::weblogin::IsBusy()) {
+        err = L"GAMA PASS自动登录正在换票。请等它完成后再用账密拉起";
         return false;
     }
+    if (gBusy.exchange(true)) {
+        err = L"账密登录正在运行";
+        return false;
+    }
+    ResetGamaPassLoginCancel();
     if (acc.email.empty() || acc.password.empty()) {
         gBusy.store(false);
         err = L"请粘贴卖家账号行（账号----密码----邮箱密码----device_id）";
@@ -766,8 +991,11 @@ bool StartGamaPassDeviceLogin(const GamaPassDeviceLoginAccount& acc, const std::
         err = L"缺少 device_id。卖家行必须带第 4 段，禁止自造";
         return false;
     }
-    LogLine(log, L"[gp-device-login] 开始：独立窗口登录（钉卖家 device_id，不换票、不开游戏）");
-    std::thread([acc, storePath, log]() { RunLogin(acc, storePath, log); }).detach();
+    SetGamaPassUiPhase(GamaPassUiPhase::OpeningBrowser);
+    HttpLoginLogFn sink = [](const std::wstring& line) { msc::weblogin::QueueLog(line); };
+    LogLine(sink, L"[gp-device-login] 开始：独立窗口登录并拉起经典版"
+                 L"（已有会话则跳过填表；钉卖家 device_id，不调用 NGM）");
+    std::thread([acc, storePath, sink]() { RunLogin(acc, storePath, sink); }).detach();
     return true;
 }
 

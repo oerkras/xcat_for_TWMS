@@ -14,6 +14,7 @@
 #include "workspace_tabs.h"
 
 #include "msc_webview_login.h"
+#include "gamapass_device_login.h"
 #include "process_util.h"
 #include "xcat_log.h"
 #include "xcat_version.h"
@@ -21,6 +22,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -120,6 +122,11 @@ void MaybeLaunchFeedbackFromLog(const std::wstring& line) {
         sound::LaunchFail();
         notify::PushLocal(/*Warning*/ 2, "attach-fail", "注入失败", "附着注入未完成，详见启动日志。",
                           6000);
+        return;
+    }
+    if (line.find(L"已取消 GAMA PASS") != std::wstring::npos ||
+        line.find(L"已取消账密直登") != std::wstring::npos) {
+        if (gLogUi) gLogUi->status = "已取消登录";
         return;
     }
     if (line.find(msc::weblogin::kHttpBusyTag) != std::wstring::npos) {
@@ -267,20 +274,60 @@ void FinishGracefulExit(AppWindow& app, LaunchUiState& /*ui*/, const char* reaso
     app.running = false;
 }
 
+bool GpLoginLineIsMaskChars(const char* s) {
+    if (!s || !s[0]) return false;
+    for (const char* p = s; *p; ++p) {
+        if (*p != '*') return false;
+    }
+    return true;
+}
+
+void FillGpLoginMask(LaunchUiState& ui, size_t rawLen) {
+    SecureZeroMemory(ui.gpLoginLine, sizeof(ui.gpLoginLine));
+    size_t n = rawLen;
+    if (n < 12) n = 12;
+    if (n > 48) n = 48;
+    if (n >= sizeof(ui.gpLoginLine)) n = sizeof(ui.gpLoginLine) - 1;
+    std::memset(ui.gpLoginLine, '*', n);
+    ui.gpLoginLine[n] = '\0';
+    ++ui.gpPasteEpoch;
+}
+
+void ClearGpLoginUi(LaunchUiState& ui) {
+    SecureZeroMemory(ui.gpLoginLine, sizeof(ui.gpLoginLine));
+    ui.gpDisplayAccount[0] = '\0';
+    ++ui.gpPasteEpoch;
+}
+
 }  // namespace
+
+bool LaunchPanel_GpLoginLineIsMask(const LaunchUiState& ui) {
+    return GpLoginLineIsMaskChars(ui.gpLoginLine);
+}
 
 void LaunchPanel_LoadAccount(LaunchUiState& ui) {
     const std::wstring line = msc::weblogin::LoadSavedAccountLine();
-    if (line.empty()) return;
-    const std::string utf8 = xcat::WideToUtf8(line);
-    if (utf8.size() >= sizeof(ui.accountLine)) {
-        memcpy(ui.accountLine, utf8.data(), sizeof(ui.accountLine) - 1);
-        ui.accountLine[sizeof(ui.accountLine) - 1] = '\0';
-    } else {
-        memcpy(ui.accountLine, utf8.data(), utf8.size());
-        ui.accountLine[utf8.size()] = '\0';
+    if (!line.empty()) {
+        const std::string utf8 = xcat::WideToUtf8(line);
+        if (utf8.size() >= sizeof(ui.accountLine)) {
+            memcpy(ui.accountLine, utf8.data(), sizeof(ui.accountLine) - 1);
+            ui.accountLine[sizeof(ui.accountLine) - 1] = '\0';
+        } else {
+            memcpy(ui.accountLine, utf8.data(), utf8.size());
+            ui.accountLine[utf8.size()] = '\0';
+        }
+        SoftWrapAccountBuffer(ui.accountLine, sizeof(ui.accountLine));
     }
-    SoftWrapAccountBuffer(ui.accountLine, sizeof(ui.accountLine));
+    SecureZeroMemory(ui.gpLoginLine, sizeof(ui.gpLoginLine));
+    ui.gpDisplayAccount[0] = '\0';
+    if (ui.prefsBinDir.empty()) return;
+    const std::wstring path =
+        msc::launcher::GamaPassDeviceLoginStorePath(Utf8ToWide(ui.prefsBinDir));
+    msc::launcher::GamaPassDeviceLoginAccount acc;
+    if (!msc::launcher::LoadGamaPassDeviceLoginAccount(path, acc) || acc.email.empty()) return;
+    std::snprintf(ui.gpDisplayAccount, sizeof(ui.gpDisplayAccount), "%s", acc.email.c_str());
+    ui.gpLoginBrowserKind = static_cast<int>(acc.browserKind);
+    FillGpLoginMask(ui, 24);
 }
 
 void LaunchPanel_FormatAccountForUi(LaunchUiState& ui) {
@@ -332,6 +379,34 @@ unsigned LaunchPanel_StrategyPrepLeftSec(LaunchUiState& ui) {
     return (ui.autoLaunchNotBeforeMs - now + 999u) / 1000u;
 }
 
+void LaunchPanel_CancelGpClearConfirm(LaunchUiState& ui) { ui.gpClearConfirmUntilMs = 0; }
+
+unsigned LaunchPanel_GpClearConfirmLeftSec(LaunchUiState& ui) {
+    if (ui.gpClearConfirmUntilMs == 0) return 0;
+    const DWORD now = GetTickCount();
+    if (now >= ui.gpClearConfirmUntilMs) {
+        ui.gpClearConfirmUntilMs = 0;
+        return 0;
+    }
+    return (ui.gpClearConfirmUntilMs - now + 999u) / 1000u;
+}
+
+void LaunchPanel_ArmGpClearConfirm(LaunchUiState& ui) {
+    ui.gpClearConfirmUntilMs = GetTickCount() + kGpClearConfirmMs;
+    if (ui.gpDisplayAccount[0]) {
+        ui.status = std::string("再点一次「确认删除」将清掉 ") + ui.gpDisplayAccount +
+                    " 和独立罐（5 秒内有效）";
+    } else {
+        ui.status = "当前没有已保存账号；再点一次仍会清独立罐登录态（5 秒内有效）";
+    }
+}
+
+bool LaunchPanel_GpClearConfirmReady(LaunchUiState& ui) {
+    if (LaunchPanel_GpClearConfirmLeftSec(ui) == 0) return false;
+    const DWORD armedAt = ui.gpClearConfirmUntilMs - kGpClearConfirmMs;
+    return GetTickCount() - armedAt >= kGpClearConfirmDebounceMs;
+}
+
 bool LaunchPanel_CancelPendingAutoLaunch(LaunchUiState& ui) {
     if (!ui.pendingAutoLaunch && ui.autoLaunchNotBeforeMs == 0) return false;
     ui.pendingAutoLaunch = false;
@@ -346,7 +421,143 @@ void LaunchPanel_ArmGamaPassAutoLaunch(LaunchUiState& ui) {
                 " 秒后自动换票（读秒中可改账号/昵称槽，或点取消）";
 }
 
+bool LaunchPanel_TryCommitGamaPassDirectPaste(LaunchUiState& ui, bool reportError) {
+    if (ui.gpLoginLine[0] == '\0') return ui.gpDisplayAccount[0] != '\0';
+    if (GpLoginLineIsMaskChars(ui.gpLoginLine)) return ui.gpDisplayAccount[0] != '\0';
+    msc::launcher::GamaPassDeviceLoginAccount acc;
+    std::string lineErr;
+    if (!msc::launcher::ParseGamaPassDeviceLoginLine(ui.gpLoginLine, acc, lineErr)) {
+        if (reportError) {
+            ui.status = lineErr.empty() ? "请粘贴账号行" : lineErr;
+            sound::UiError();
+        }
+        return false;
+    }
+    acc.browserKind = static_cast<msc::launcher::GpDeviceLoginBrowserKind>(ui.gpLoginBrowserKind);
+    const std::wstring path =
+        msc::launcher::GamaPassDeviceLoginStorePath(Utf8ToWide(ui.prefsBinDir));
+    if (!msc::launcher::SaveGamaPassDeviceLoginAccount(path, acc)) {
+        if (reportError) {
+            ui.status = "无法保存账号";
+            sound::UiError();
+        }
+        return false;
+    }
+    const bool switched =
+        ui.gpDisplayAccount[0] && std::strcmp(ui.gpDisplayAccount, acc.email.c_str()) != 0;
+    std::string oldEmail = ui.gpDisplayAccount;
+    std::snprintf(ui.gpDisplayAccount, sizeof(ui.gpDisplayAccount), "%s", acc.email.c_str());
+    size_t rawLen = 0;
+    while (rawLen + 1 < sizeof(ui.gpLoginLine) && ui.gpLoginLine[rawLen]) ++rawLen;
+    FillGpLoginMask(ui, rawLen);
+    LaunchPanel_CancelGpClearConfirm(ui);
+    if (switched) {
+        ui.status = "已切换账号：" + oldEmail + " → " + acc.email;
+    } else {
+        ui.status = "已保存账号：" + acc.email;
+    }
+    return true;
+}
+
+void LaunchPanel_ArmGamaPassDirectLaunch(LaunchUiState& ui, bool fromUserClick) {
+    if (ui.gpLoginLine[0] && !LaunchPanel_TryCommitGamaPassDirectPaste(ui, fromUserClick)) return;
+    LaunchPanel_CancelGpClearConfirm(ui);
+    if (!ui.gpDisplayAccount[0]) {
+        LaunchPanel_CancelPendingAutoLaunch(ui);
+        ui.status = "请先粘贴账号行（账号----密码----邮箱密码----device_id）";
+        if (fromUserClick) sound::UiError();
+        return;
+    }
+    LaunchPanel_ArmStrategyPrep(ui, kGamaPassAutoPrepMs);
+    ui.pendingAutoLaunch = true;
+    ui.status = "GAMA PASS账密直登：约 " + std::to_string(kGamaPassAutoPrepSec) +
+                " 秒后自动登录（可贴新账号行，或点取消）";
+}
+
+bool LaunchPanel_ClearGamaPassDirectProfile(LaunchUiState& ui) {
+    LaunchPanel_CancelPendingAutoLaunch(ui);
+    if (msc::launcher::IsGamaPassDeviceLoginBusy() || msc::weblogin::IsBusy()) {
+        ui.status = "登录进行中，无法删除";
+        sound::UiError();
+        return false;
+    }
+    std::wstring err;
+    sound::UiClick();
+    const std::wstring path =
+        msc::launcher::GamaPassDeviceLoginStorePath(Utf8ToWide(ui.prefsBinDir));
+    (void)msc::launcher::DeleteGamaPassDeviceLoginAccount(path);
+    ClearGpLoginUi(ui);
+    LaunchPanel_CancelGpClearConfirm(ui);
+    if (!msc::launcher::ClearGamaPassDeviceLoginProfile(
+            [](const std::wstring& line) { LaunchPanel_OnWebLog(line); }, err)) {
+        ui.status = err.empty() ? "已删除账号，但独立罐未清干净" : xcat::WideToUtf8(err);
+        sound::UiError();
+        return false;
+    }
+    ui.status = "已删除浏览器账号数据，请重新粘贴账号行";
+    return true;
+}
+
+bool LaunchPanel_StartGamaPassDirect(LaunchUiState& ui) {
+    if (!hangup_schedule::AllowsLaunch(ui.prefsBinDir)) {
+        ui.status = "挂机时段：当前为非挂机小时，已跳过启动";
+        return false;
+    }
+    if (msc::launcher::IsGamaPassDeviceLoginBusy()) {
+        ui.status = "账密直登进行中";
+        return false;
+    }
+    if (msc::weblogin::IsBusy()) {
+        ui.status = "GAMA PASS自动登录进行中";
+        return false;
+    }
+    if (ui.gpLoginLine[0] && !LaunchPanel_TryCommitGamaPassDirectPaste(ui, true)) return false;
+    LaunchPanel_CancelGpClearConfirm(ui);
+    const std::wstring path =
+        msc::launcher::GamaPassDeviceLoginStorePath(Utf8ToWide(ui.prefsBinDir));
+    msc::launcher::GamaPassDeviceLoginAccount acc;
+    if (!msc::launcher::LoadGamaPassDeviceLoginAccount(path, acc) || acc.email.empty() ||
+        acc.password.empty()) {
+        ui.status = "请粘贴账号行";
+        sound::UiError();
+        return false;
+    }
+    acc.browserKind = static_cast<msc::launcher::GpDeviceLoginBrowserKind>(ui.gpLoginBrowserKind);
+    std::wstring err;
+    sound::UiClick();
+    if (!msc::launcher::StartGamaPassDeviceLogin(
+            acc, path, [](const std::wstring& line) { LaunchPanel_OnWebLog(line); }, err)) {
+        ui.status = err.empty() ? "无法开始账密直登" : xcat::WideToUtf8(err);
+        sound::UiError();
+        return false;
+    }
+    ui.status = "账密直登已开始";
+    ui.pendingAutoLaunch = false;
+    ui.autoLaunchNotBeforeMs = 0;
+    hangup_schedule::NoteLaunchStarted(0);
+    return true;
+}
+
+bool LaunchPanel_CancelInFlightGpLogin(LaunchUiState& ui) {
+    const bool device = msc::launcher::IsGamaPassDeviceLoginBusy();
+    const bool autoLogin = msc::weblogin::IsBusy();
+    if (!device && !autoLogin) return false;
+    sound::UiClick();
+    if (device) {
+        msc::launcher::CancelGamaPassDeviceLogin(
+            [](const std::wstring& line) { LaunchPanel_OnWebLog(line); });
+        ui.status = "正在取消账密直登…（不关日常浏览器、不杀游戏）";
+    } else {
+        msc::weblogin::RequestCancelInFlightLogin();
+        ui.status = "正在取消 GAMA PASS 自动登录…（不关日常浏览器、不杀游戏）";
+    }
+    return true;
+}
+
 bool LaunchPanel_StartOneClick(LaunchUiState& ui, bool honorStrategyPrep) {
+    if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassDirect) {
+        return LaunchPanel_StartGamaPassDirect(ui);
+    }
     if (honorStrategyPrep) {
         if (const unsigned prepLeft = LaunchPanel_StrategyPrepLeftSec(ui)) {
             ui.status = "启动策略刚改过：约 " + std::to_string(prepLeft) +
@@ -386,7 +597,9 @@ bool LaunchPanel_StartOneClick(LaunchUiState& ui, bool honorStrategyPrep) {
         }
     }
     if (!msc::weblogin::CanStartOneClick()) {
-        ui.status = "登录会话未就绪";
+        ui.status = msc::launcher::IsGamaPassDeviceLoginBusy()
+                        ? "账密登录正在拉起游戏，请稍候"
+                        : "登录会话未就绪";
         sound::UiError();
         return false;
     }
@@ -425,9 +638,40 @@ void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui) {
         } else if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::OneClickLogin) {
             ui.status = "gamania (HK)：约 " + std::to_string(prepLeft) +
                         " 秒后自动启动（可再点按钮取消）";
+        } else if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassDirect) {
+            ui.status = "GAMA PASS账密直登：约 " + std::to_string(prepLeft) +
+                        " 秒后自动登录（可再点按钮取消）";
         } else {
             ui.status = "GAMA PASS：约 " + std::to_string(prepLeft) +
                         " 秒后自动换票（顶部可取消，或切到启动页）";
+        }
+        return;
+    }
+
+    if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassDirect) {
+        if (msc::launcher::IsGamaPassDeviceLoginBusy() || msc::weblogin::IsBusy()) {
+            ui.pendingAutoLaunch = false;
+            ui.autoLaunchNotBeforeMs = 0;
+            return;
+        }
+        if (!ui.gpDisplayAccount[0]) {
+            ui.pendingAutoLaunch = false;
+            ui.autoLaunchNotBeforeMs = 0;
+            ui.status = "请先粘贴账号行（账号----密码----邮箱密码----device_id）";
+            return;
+        }
+        if (!hangup_schedule::AllowsLaunch(ui.prefsBinDir)) {
+            ui.pendingAutoLaunch = false;
+            ui.status = "非挂机时段，已跳过冷启自动启动（时段到后由挂机调度拉起）";
+            xcat::log::Info("App", "auto GamaPass direct skipped: hangup schedule off-hour");
+            LaunchPanel_AppendLog(ui, L"[Hangup] 非挂机时段，跳过冷启账密直登");
+            return;
+        }
+        ui.pendingAutoLaunch = false;
+        if (LaunchPanel_StartGamaPassDirect(ui)) {
+            xcat::log::Info("App", "auto GamaPass direct launch started");
+        } else {
+            xcat::log::Warn("App", "auto GamaPass direct launch failed: %s", ui.status.c_str());
         }
         return;
     }

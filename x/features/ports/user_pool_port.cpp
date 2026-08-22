@@ -701,6 +701,18 @@ bool PeekRemoteUserCount(int* outCount) {
     return true;
 }
 
+bool PeekRemoteUserCountBound(int* outCount) {
+    if (!outCount) return false;
+    *outCount = 0;
+    // 不 Resolve / 不 RuntimeClassInit：战斗 worker 与遇人 peek 闸用。
+    void* pool = gPool;
+    if (!pool || !LooksLikeUserPool(pool)) return false;
+    const int n = CountFromPool(pool);
+    if (n < 0) return false;
+    *outCount = n;
+    return true;
+}
+
 bool PeekEnumRemoteUsers(void** out, int cap, int* outCount) {
     if (outCount) *outCount = 0;
     if (!out || cap <= 0 || !outCount) return false;

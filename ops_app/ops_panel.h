@@ -174,6 +174,10 @@ struct OpsState {
         bool online = false;
         bool visible = true;
         unsigned long long lastMeso = 0;
+        unsigned long long dartQty = 0;  // 名下角色雷之鏢合计（底账）
+        bool hasScroll = false;          // 名下有 204/234
+        std::string wealthText;          // 名单「高价值」列（短）；空=无
+        std::string wealthTip;           // 悬停竖排全量
         ULONGLONG lastAlertMs = 0;
         std::deque<MesoDashPoint> points;
     };
@@ -202,6 +206,7 @@ struct OpsState {
         unsigned long long after = 0;
         unsigned long long mag = 0;
         std::string note;
+        int itemId = 0;  // 卷轴/雷之鏢；0=金币流水或旧记录
     };
     std::vector<MesoDashSeries> mesoDashSeries;
     std::deque<MesoDashPoint> mesoDashTotal;
@@ -209,13 +214,15 @@ struct OpsState {
     std::deque<MesoEvent> mesoEvents;
     int mesoDashWindowMin = 30;  // 10 / 30 / 60 / 180 / 1440 / 10080
     char mesoDashFilter[64]{};
+    bool mesoDashOnlyDart = false;    // 名单仅有雷之鏢
+    bool mesoDashOnlyScroll = false;  // 名单仅有卷轴；与有鏢同时开=并集
     bool mesoDashShowTotal = true;
     bool mesoDashShowOffline = true;
     bool mesoDashYFromZero = true;
     int mesoDashNoToken = 0;
     int mesoDashHoverSeries = -1;  // legend 悬停高亮；-1 无
     unsigned long long mesoAlertMin = 100000;  // 默认 10 万：低于此不记流水
-    int mesoEventView = 0;  // 0=异常 1=全部 2=进账
+    int mesoEventView = 0;  // 0=异常 1=全部 2=进账 3=高价值
     float mesoUiPlotH = 0.f;     // 折线区高度；0=按窗口推
     float mesoUiLegendW = 0.f;   // 右侧名单宽度；0=按窗口推
 

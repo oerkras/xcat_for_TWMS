@@ -350,8 +350,12 @@ bool SnapshotInventory(std::unordered_map<int, unsigned long long>& out) {
     return any;
 }
 
+// 探活快照：204/234 卷 + 雷之鏢。ID 与 drop_pool_port.h kThunderDartItemId 同值。
+constexpr int kWealthThunderDartItemId = 2070005;
+
 bool IsWealthScrollItem(int itemId) {
     if (itemId <= 0) return false;
+    if (itemId == kWealthThunderDartItemId) return true;
     const int fam = itemId / 10000;
     return fam == 204 || fam == 234;
 }
@@ -370,9 +374,10 @@ bool FormatWealthScrollsImpl(char* dst, size_t cap) {
         items.push_back(kv);
     }
     auto rank = [](int id) {
-        if (id / 10000 == 234) return 0;
-        if (id / 100 == 20491) return 1;
-        return 2;
+        if (id == kWealthThunderDartItemId) return 0;
+        if (id / 10000 == 234) return 1;
+        if (id / 100 == 20491) return 2;
+        return 3;
     };
     std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
         const int ra = rank(a.first);

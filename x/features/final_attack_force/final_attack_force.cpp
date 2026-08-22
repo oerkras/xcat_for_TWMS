@@ -465,6 +465,10 @@ int WeaponTypeFromItemId(int itemId) {
 
 int CallGetWeaponType(int itemId) {
     if (itemId <= 0) return 0;
+    // 托管方法只许主泵；worker 上 ItemInfo.GetWeaponType 会点类初始化。
+    // 13/14xxxx 走 WeaponTypeFromItemId，本函数只给现金 17xxxxx。
+    if (x::runtime::main_thread::IsInstalled() && !x::runtime::main_thread::IsOnPumpThread())
+        return 0;
     EnsureMethodApis();
     auto fn = gGetWeaponType;
     if (!fn) return 0;

@@ -22,6 +22,7 @@
 #include "../features/final_attack_force/final_attack_force.h"
 #include "../features/melee_veto/melee_veto.h"
 #include "../features/ports/hit_pin_port.h"
+#include "../features/ports/hit_geom_port.h"
 #include "../features/skill_max_level/skill_max_level.h"
 #include "../features/kick_sniff/kick_sniff.h"
 #include "../features/mob_scan/mob_scan.h"
@@ -199,6 +200,7 @@ void StopAllFeatureWorkers() {
     x::features::melee_veto::Shutdown();
     x::features::map_attack::Shutdown();
     x::features::ports::hit_pin::Shutdown();
+    x::features::ports::hit_geom::Shutdown();
     // 同样改了 GameAssembly .text（三处判空跳转）。它只在 GA 内部翻分支、不跳进 xcat.dll，
     // 所以不会像上面那样卸载后跳进已释放内存；但不摘掉的话补丁会一直留在游戏里 ——
     // 卸载后既关不掉也擦不掉，脏页还留给完整性校验。
@@ -437,6 +439,7 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::melee_veto::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ports::hit_pin::Init());
     XCAT_PLAY_BOOT_STEP(x::features::ports::hit_pin::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::ports::hit_geom::Init());
     XCAT_PLAY_BOOT_STEP(x::features::map_attack::Init());
     XCAT_PLAY_BOOT_STEP(x::features::skill_max_level::Init());
     XCAT_PLAY_BOOT_STEP(x::features::skill_max_level::StartWorker());

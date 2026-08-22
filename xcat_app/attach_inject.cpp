@@ -53,6 +53,7 @@ void WriteLaunchModeFile(const std::wstring& path, LaunchMode mode) {
     EnsureParentDir(path);
     const char* v = "attach_watch";
     if (mode == LaunchMode::GamaPassAuto) v = "gama_pass_auto";
+    else if (mode == LaunchMode::GamaPassDirect) v = "gama_pass_direct";
     else if (mode == LaunchMode::OneClickLogin) v = "one_click";
     std::ofstream f(NarrowUtf8(path), std::ios::binary | std::ios::trunc);
     if (!f) return;
@@ -72,6 +73,10 @@ LaunchMode ParseLaunchModeRaw(std::string raw) {
     if (raw == "gama_pass_auto" || raw == "gamapass_auto" || raw == "gama_pass" ||
         raw == "gamapass" || raw == "2") {
         return LaunchMode::GamaPassAuto;
+    }
+    if (raw == "gama_pass_direct" || raw == "gamapass_direct" || raw == "gp_direct" ||
+        raw == "game_pass_direct" || raw == "3") {
+        return LaunchMode::GamaPassDirect;
     }
     if (raw == "one_click" || raw == "oneclick" || raw == "1" || raw == "login") {
         return LaunchMode::OneClickLogin;
@@ -323,6 +328,8 @@ const char* LaunchModeLabel(LaunchMode mode) {
     switch (mode) {
     case LaunchMode::GamaPassAuto:
         return "GAMA PASS自动登录";
+    case LaunchMode::GamaPassDirect:
+        return "GAMA PASS账密直登";
     case LaunchMode::OneClickLogin:
         return "gamania (HK)";
     case LaunchMode::AttachWatch:

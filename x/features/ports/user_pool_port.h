@@ -40,9 +40,12 @@ void* PeekUserLocal();
 
 void* PeekUserPool();
 
-// 已绑定池上的纯内存快照（不 Resolve、不 InvokeAndWait）。
-// 热路径预筛用：池未绑定时返回 false，调用方 fail-open / 走其它口径。
+// 已绑定池上的纯内存快照。
+// PeekRemoteUserCount：池未绑定时会 Resolve（可触发 class init）——只许泵上 / 已绑冷路径。
+// PeekRemoteUserCountBound：绝不 Resolve；未绑返回 false，调用方 fail-open。
+// 战斗 worker 热路径只能走 Bound，禁止走 Resolve 版。
 bool PeekRemoteUserCount(int* outCount);
+bool PeekRemoteUserCountBound(int* outCount);
 bool PeekEnumRemoteUsers(void** out, int cap, int* outCount);
 
 }  // namespace x::features::ports::user_pool

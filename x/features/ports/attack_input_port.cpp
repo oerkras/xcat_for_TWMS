@@ -1077,6 +1077,17 @@ bool PeekAttackBinding(int32_t* type, int32_t* value) {
     return true;
 }
 
+bool PeekAttackBindingCached(int32_t* type, int32_t* value) {
+    if (type) *type = -1;
+    if (value) *value = -1;
+    const int32_t t = gResolvedFkType;
+    const int32_t v = gResolvedFkValue;
+    if (t < 0) return false;
+    if (type) *type = t;
+    if (value) *value = v;
+    return true;
+}
+
 void SetAttackVk(WORD vk) {
     if (vk) gAttackVk.store(vk);
 }

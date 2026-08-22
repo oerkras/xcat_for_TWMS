@@ -11,6 +11,8 @@
 #include "update_client.h"
 
 #include "msc_webview_login.h"
+#include "gamapass_device_login.h"
+#include "gamapass_login_phase.h"
 #include "xcat_log.h"
 #include "xcat_payload_status.h"
 #include "xcat_version.h"
@@ -41,12 +43,20 @@ void FormatDurationHms(uint64_t sec, char* out, size_t outN) {
 }
 
 const char* SessionPhase(const RuntimeLeds& leds) {
-    if (msc::weblogin::IsBusy()) {
-        if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto ||
-            msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto)
-            return "GAMA PASS登录中";
-        return "换票中";
+    const bool gpLoginBusy = msc::launcher::IsGamaPassDeviceLoginBusy() ||
+                             (msc::weblogin::IsBusy() &&
+                              (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto ||
+                               attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassDirect ||
+                               msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto));
+    if (gpLoginBusy) {
+        if (msc::launcher::GamaPassLoginCanceled()) return "登录·正在取消";
+        const auto p = msc::launcher::GetGamaPassUiPhase();
+        if (p != msc::launcher::GamaPassUiPhase::Idle) {
+            return msc::launcher::GamaPassUiPhaseLabel(p);
+        }
+        return "GAMA PASS登录中";
     }
+    if (msc::weblogin::IsBusy()) return "换票中";
     if (hangup_schedule::IsCleanRelaunchInFlight()) return "干净重拉中";
     if (leds.gameContext) return "游戏运行中";
     if (leds.ipc) return "空闲";
@@ -331,7 +341,8 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         ImGui::PushTextWrapPos(0.f);
 
         const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const bool busy = msc::weblogin::IsBusy() || attach_inject::IsInjectBusy();
+        const bool busy = msc::weblogin::IsBusy() || attach_inject::IsInjectBusy() ||
+                          msc::launcher::IsGamaPassDeviceLoginBusy();
         const UpdateSnapshot snap = GetUpdateSnapshot();
         const bool attachMode =
             attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode());
@@ -342,6 +353,16 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
                 ? (!busy &&
                    (attach_inject::IsWatching() || strategyPrepLeft == 0 || autoPending))
                 : (!busy && (strategyPrepLeft == 0 || autoPending));
+        const bool gpLoginBusy = msc::launcher::IsGamaPassDeviceLoginBusy() ||
+                                 (msc::weblogin::IsBusy() &&
+                                  (attach_inject::GetLaunchMode() ==
+                                       attach_inject::LaunchMode::GamaPassAuto ||
+                                   attach_inject::GetLaunchMode() ==
+                                       attach_inject::LaunchMode::GamaPassDirect ||
+                                   msc::weblogin::GetAuthStrategy() ==
+                                       msc::weblogin::AuthStrategy::GamaPassAuto));
+        const bool gpCanceling = gpLoginBusy && msc::launcher::GamaPassLoginCanceled();
+        const bool startEnabled = autoPending || (gpLoginBusy && !gpCanceling) || canStart;
 
         // —— 1/4 产品 + 版本（脱敏：不写服名/游戏名）——
         BeginStatusRow(origin, rowH, 0);
@@ -379,20 +400,30 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
             ImGui::TextDisabled("%s", pidBuf);
         }
         ImGui::SameLine(0.f, ui::Gap());
-        if (!canStart) ImGui::BeginDisabled();
+        if (!startEnabled) ImGui::BeginDisabled();
         const char* startLabel =
-            autoPending ? "取消"
-                        : (attachMode ? (attach_inject::IsWatching() ? "监视中" : "监视")
-                                      : "启动");
+            gpCanceling ? "正在取消"
+                        : (gpLoginBusy ? "取消"
+                                       : (autoPending ? "取消"
+                                                      : (attachMode
+                                                             ? (attach_inject::IsWatching() ? "监视中"
+                                                                                            : "监视")
+                                                             : "启动")));
         if (ImGui::SmallButton(startLabel)) {
-            if (autoPending) {
+            if (gpLoginBusy) {
+                LaunchPanel_CancelInFlightGpLogin(ui);
+                xcat::log::Info("App", "user cancelled in-flight GP login (status bar)");
+            } else if (autoPending) {
                 sound::UiClick();
                 LaunchPanel_CancelPendingAutoLaunch(ui);
                 ui.status = attachMode ? "已取消自动监视 — 需要时再点「监视」"
                                        : (attach_inject::GetLaunchMode() ==
                                                   attach_inject::LaunchMode::OneClickLogin
                                               ? "已取消自动启动 — 需要时再点「启动」"
-                                              : "已取消自动登录 — 可改槽位后再点「启动」重新读秒");
+                                              : (attach_inject::GetLaunchMode() ==
+                                                         attach_inject::LaunchMode::GamaPassDirect
+                                                     ? "已取消自动登录 — 可贴新账号后再点「启动」重新读秒"
+                                                     : "已取消自动登录 — 可改槽位后再点「启动」重新读秒"));
                 xcat::log::Info("App", "user cancelled pending auto-launch (status bar)");
             } else if (attachMode) {
                 if (!attach_inject::IsWatching()) {
@@ -409,6 +440,11 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
                     LaunchPanel_ArmGamaPassAutoLaunch(ui);
                     xcat::log::Info("App", "status-bar re-armed GamaPass auto-launch (%us)",
                                     kGamaPassAutoPrepSec);
+                } else if (attach_inject::GetLaunchMode() ==
+                           attach_inject::LaunchMode::GamaPassDirect) {
+                    LaunchPanel_ArmGamaPassDirectLaunch(ui, true);
+                    xcat::log::Info("App", "status-bar re-armed GamaPass direct launch (%us)",
+                                    kGamaPassAutoPrepSec);
                 } else {
                     if (msc::weblogin::GetAuthStrategy() ==
                         msc::weblogin::AuthStrategy::GamaPassAuto) {
@@ -419,7 +455,11 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
             }
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            if (autoPending) {
+            if (gpCanceling) {
+                ImGui::SetTooltip("正在取消登录，请稍候");
+            } else if (gpLoginBusy) {
+                ImGui::SetTooltip("取消本次登录。不关日常浏览器、不杀已开游戏。");
+            } else if (autoPending) {
                 ImGui::SetTooltip("取消即将开始的自动%s",
                                   attachMode ? "监视" : "换票/启动");
             } else if (strategyPrepLeft > 0 &&
@@ -431,7 +471,7 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
                                              : "一键换票 / 开游戏 / Classic 注入");
             }
         }
-        if (!canStart) ImGui::EndDisabled();
+        if (!startEnabled) ImGui::EndDisabled();
 
         // —— 3/5 守护 + 在线 ——
         BeginStatusRow(origin, rowH, 2);

@@ -2,9 +2,11 @@
 
 #include "gamapass_cdp_login.h"
 #include "gamapass_device_login.h"
+#include "gamapass_login_phase.h"
 #include "gamapass_ticket_harvest.h"
 #include "http_beanfun_login.h"
 #include "http_gamapass_login.h"
+#include "ngm_protocol_allow.h"
 #include "ott_ticket_fetch.h"
 #include "win_uia.h"
 
@@ -192,6 +194,11 @@ HWND WaitBrowserHwnd(DWORD launchPid, int waitMs, const HttpLoginLogFn& log, DWO
     bool loggedReuseHint = false;
     bool loggedSkipForeign = false;
     while ((int)(GetTickCount() - t0) < waitMs) {
+        if (GamaPassLoginCanceled()) {
+            if (hProc) CloseHandle(hProc);
+            Log(log, std::wstring(kLogTag) + L" 用户取消，停止等待浏览器窗口");
+            return nullptr;
+        }
         HWND h = nullptr;
         bool reused = false;
 
@@ -716,10 +723,14 @@ bool KeepLoginBrowserForeground(HWND hwnd, const HttpLoginLogFn& log, DWORD* las
 }  // namespace
 
 static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int timeoutMs) {
+    if (GamaPassLoginCanceled()) {
+        return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+    }
     const int nickSlot = GetGamaPassNickSlot();
     const int accountSlot = GetGamaPassAccountSlot();
     Log(log, std::wstring(kLogTag) + L" 开始：浏览器 UIA 点选（不调用 refresh/token）；账号=" +
                  std::to_wstring(accountSlot) + L" 昵称=" + std::to_wstring(nickSlot));
+    SetGamaPassUiPhase(GamaPassUiPhase::OpeningBrowser);
     Log(log, std::wstring(kLogTag) +
                  L" 自动登录期间将强制保持浏览器登录窗最大化并在前台（最小化/窗口化/被挡都会自动拉回）。");
     Log(log, std::wstring(kLogTag) +
@@ -728,7 +739,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
 
     if (IsGamaPassDeviceLoginBusy()) {
         return Fail(HttpLoginError::BadInput,
-                    "账密登录助手正在运行。请等它完成后再点 GAMA PASS自动登录（不会自动衔接）。");
+                    "账密登录助手正在运行。请等它完成后再点 GAMA PASS自动登录。");
     }
 
     std::wstring exe;
@@ -743,6 +754,9 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
 
     DWORD launchPid = 0;
     std::vector<HWND> beforeHwnds;
+    if (GamaPassLoginCanceled()) {
+        return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+    }
     if (!LaunchDailyBrowser(exe, kGalaxyLogin, &launchPid, log, &beforeHwnds)) {
         return Fail(HttpLoginError::Network, "无法启动日常浏览器打开 Galaxy 登录页");
     }
@@ -750,6 +764,19 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     DWORD attachPid = launchPid;
     bool loginHwndReused = false;
     HWND hwnd = WaitBrowserHwnd(launchPid, 40000, log, &attachPid, beforeHwnds, &loginHwndReused);
+    if (GamaPassLoginCanceled()) {
+        if (hwnd) {
+            SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+        } else {
+            const std::vector<std::wstring> keys = {
+                L"galaxy.games.gamania", L"accounts.gamania", L"Gama Pass", L"select-account"};
+            HWND spawned = msc::uia::FindNewBrowserHwnd(beforeHwnds, keys, nullptr);
+            if (spawned && !HwndWasBeforeLaunch(spawned, beforeHwnds)) {
+                SoftCloseHwnd(spawned, log);
+            }
+        }
+        return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+    }
     if (!hwnd) {
         return Fail(HttpLoginError::Network,
                     "未找到浏览器窗口（UIA 附着失败）。请确认 Edge/Chrome 能打开 Galaxy 后重试一键；"
@@ -768,6 +795,10 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     {
         const DWORD settleCap = GetTickCount() + 500;
         while ((int)(GetTickCount() - settleCap) < 0) {
+            if (GamaPassLoginCanceled()) {
+                SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+                return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+            }
             KeepLoginBrowserForeground(hwnd, log, &lastFgLog);
             IUIAutomationElement* probe = uia.ElementFromHwnd(hwnd);
             if (probe) {
@@ -917,6 +948,32 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     };
 
     while ((int)(GetTickCount() - t0) < timeoutMs) {
+        if (GamaPassLoginCanceled()) {
+            SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+            return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+        }
+        if (stage == UiaStage::WaitTicket) {
+            TryAcceptNgmProtocolDialog(log);
+        }
+        switch (stage) {
+            case UiaStage::WaitGp:
+                SetGamaPassUiPhase(GamaPassUiPhase::ClickGamaPass);
+                break;
+            case UiaStage::WaitAcc:
+                SetGamaPassUiPhase(GamaPassUiPhase::SelectAccount);
+                break;
+            case UiaStage::WaitNick:
+            case UiaStage::WaitContinue:
+                SetGamaPassUiPhase(GamaPassUiPhase::SelectNick);
+                break;
+            case UiaStage::WaitTicket:
+                SetGamaPassUiPhase(sawNgmHint ? GamaPassUiPhase::WaitClassic
+                                              : GamaPassUiPhase::WaitNgm);
+                break;
+            case UiaStage::ManualLogin:
+                SetGamaPassUiPhase(GamaPassUiPhase::ManualLogin);
+                break;
+        }
         // 点选阶段不必每 40ms 扫一遍进程表；等票阶段才 harvest
         if (stage == UiaStage::WaitTicket || continueClicked) {
             auto harvested = tryHarvest();
@@ -1514,6 +1571,11 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         Sleep(stagePollMs());
     }
 
+    if (GamaPassLoginCanceled()) {
+        SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
+        return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+    }
+
     {
         auto harvested = tryHarvest();
         if (harvested.ok && harvested.ticketFilled) {
@@ -1542,6 +1604,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
 
 bool ShouldUiaCleanRestart(const HttpLoginResult& r) {
     if (r.ok) return false;
+    if (r.error == HttpLoginError::Cancelled) return false;
     // accounts/error、点选超时、附着失败（日常已开 Chrome 单例移交常见）→ 关窗/重开 Galaxy
     if (r.accountsOauthError) return true;
     if (r.error == HttpLoginError::OttMissing) return true;
@@ -1571,6 +1634,9 @@ HttpLoginResult HttpGamaPassUiaLoginToOtt(HttpLoginLogFn log, int timeoutMs) {
                      std::to_wstring(restart + 1) + L"/" + std::to_wstring(kMaxCleanRestart) +
                      L"）…");
         Sleep(1500);
+        if (GamaPassLoginCanceled()) {
+            return Fail(HttpLoginError::Cancelled, "用户已取消登录");
+        }
     }
 }
 

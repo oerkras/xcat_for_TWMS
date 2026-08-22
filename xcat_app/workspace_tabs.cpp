@@ -20,6 +20,7 @@
 
 #include "msc_webview_login.h"
 #include "gamapass_device_login.h"
+#include "gamapass_login_phase.h"
 #include "process_util.h"
 #include "xcat_buffs.h"
 #include "xcat_imgui_basic.h"
@@ -335,6 +336,41 @@ void DrawPrepHintBlueWrapped(const char* text) {
 
 void DrawPrepHintBlue(const char* text) { DrawPrepHintBlueWrapped(text); }
 
+void DrawGamaPassSlotRow(LaunchUiState& ui, bool slotsLocked, float rowW, float gap) {
+    const float slotW = (std::max)(AppDpi_Px(88.f), (rowW - gap) * 0.5f - AppDpi_Px(36.f));
+    int accountSlot = msc::weblogin::GetGamaPassAccountSlot();
+    ImGui::TextUnformatted("账号");
+    ImGui::SameLine(0.f, gap * 0.5f);
+    if (slotsLocked) ImGui::BeginDisabled();
+    ImGui::SetNextItemWidth(slotW);
+    if (ImGui::InputInt("##gp_account_slot", &accountSlot, 1, 1)) {
+        if (accountSlot < 1) accountSlot = 1;
+        if (accountSlot > 16) accountSlot = 16;
+        msc::weblogin::SetGamaPassAccountSlot(accountSlot);
+        ui.status = "将登录第 " + std::to_string(accountSlot) + " 个账号";
+    }
+    if (slotsLocked) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Gama Pass 账号列表序号：1=第一个。读秒中可改，换票开始后不可改。");
+    }
+    ImGui::SameLine(0.f, gap);
+    int nickSlot = msc::weblogin::GetGamaPassNickSlot();
+    ImGui::TextUnformatted("昵称");
+    ImGui::SameLine(0.f, gap * 0.5f);
+    if (slotsLocked) ImGui::BeginDisabled();
+    ImGui::SetNextItemWidth(slotW);
+    if (ImGui::InputInt("##gp_nick_slot", &nickSlot, 1, 1)) {
+        if (nickSlot < 1) nickSlot = 1;
+        if (nickSlot > 16) nickSlot = 16;
+        msc::weblogin::SetGamaPassNickSlot(nickSlot);
+        ui.status = "将使用第 " + std::to_string(nickSlot) + " 个游戏昵称";
+    }
+    if (slotsLocked) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("游戏昵称列表序号：1=第一个（不含「建立暱稱」）。读秒中可改，换票开始后不可改。");
+    }
+}
+
 
 // 首页 / 启动 TAB 共用：三行浓缩启动条（无长提示；细则进 Tooltip）
 // 行1 模式 · 行2 槽位/验证码或监视钮 · 行3 主按钮（准备秒数可贴在按钮下）
@@ -349,20 +385,27 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
         const auto cur = attach_inject::GetLaunchMode();
         int modeIdx = 0;
         if (cur == attach_inject::LaunchMode::GamaPassAuto) modeIdx = 1;
-        else if (cur == attach_inject::LaunchMode::OneClickLogin) modeIdx = 2;
-        const char* items[] = {"手动启动并注入", "GAMA PASS自动登录", "gamania (HK)"};
+        else if (cur == attach_inject::LaunchMode::GamaPassDirect) modeIdx = 2;
+        else if (cur == attach_inject::LaunchMode::OneClickLogin) modeIdx = 3;
+        const char* items[] = {
+            "手动启动并注入", "GAMA PASS自动登录", "GAMA PASS账密直登", "gamania (HK)"};
         ImGui::SetNextItemWidth(-1.f);
-        if (ImGui::Combo("##launch_mode", &modeIdx, items, 3)) {
+        if (ImGui::Combo("##launch_mode", &modeIdx, items, 4)) {
+            LaunchPanel_CancelGpClearConfirm(ui);
             if (modeIdx == 0) {
                 LaunchPanel_ArmStrategyPrep(ui, 7000);
                 attach_inject::SetLaunchMode(attach_inject::LaunchMode::AttachWatch);
                 ui.pendingAutoLaunch = true;
-                ui.status = "已切换：手动启动并注入 — 约 7 秒后自动开始监视";
+                ui.status = "已切换：手动启动并注入";
             } else if (modeIdx == 1) {
                 if (attach_inject::IsWatching()) attach_inject::StopWatch();
                 attach_inject::SetLaunchMode(attach_inject::LaunchMode::GamaPassAuto);
                 msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
                 LaunchPanel_ArmGamaPassAutoLaunch(ui);
+            } else if (modeIdx == 2) {
+                if (attach_inject::IsWatching()) attach_inject::StopWatch();
+                attach_inject::SetLaunchMode(attach_inject::LaunchMode::GamaPassDirect);
+                LaunchPanel_ArmGamaPassDirectLaunch(ui);
             } else {
                 LaunchPanel_ArmStrategyPrep(ui, 7000);
                 if (attach_inject::IsWatching()) attach_inject::StopWatch();
@@ -371,15 +414,8 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
                     msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
                 }
                 ui.pendingAutoLaunch = false;
-                ui.status = "已切换：gamania (HK) — 约 7 秒后可点启动（防误触）";
+                ui.status = "已切换：gamania (HK)";
             }
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "手动：自行开游戏后监视注入。\n"
-                "GAMA PASS：日常浏览器 UIA 点选换票（无需账密）；切模式/冷启约 5 秒自动换票。\n"
-                "gamania (HK)：账密 HTTP 换票。\n"
-                "写入 XCat_data/state/launch_mode.txt");
         }
     }
 
@@ -387,6 +423,7 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
     const bool attachMode = attach_inject::IsAttachWatchMode(launchMode);
     const bool httpOneClick = (launchMode == attach_inject::LaunchMode::OneClickLogin);
     const bool gamaPassMode = (launchMode == attach_inject::LaunchMode::GamaPassAuto);
+    const bool gamaPassDirect = (launchMode == attach_inject::LaunchMode::GamaPassDirect);
     const unsigned strategyPrepLeft = LaunchPanel_StrategyPrepLeftSec(ui);
     const bool busy = msc::weblogin::IsBusy();
 
@@ -480,44 +517,20 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
             msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
         }
         const bool autoPending = ui.pendingAutoLaunch;
-        const float slotW = (std::max)(AppDpi_Px(88.f), (rowW - gap) * 0.5f - AppDpi_Px(36.f));
-        int accountSlot = msc::weblogin::GetGamaPassAccountSlot();
-        ImGui::TextUnformatted("账号");
-        ImGui::SameLine(0.f, gap * 0.5f);
-        if (busy) ImGui::BeginDisabled();
-        ImGui::SetNextItemWidth(slotW);
-        if (ImGui::InputInt("##gp_account_slot", &accountSlot, 1, 1)) {
-            if (accountSlot < 1) accountSlot = 1;
-            if (accountSlot > 16) accountSlot = 16;
-            msc::weblogin::SetGamaPassAccountSlot(accountSlot);
-            ui.status = "将登录第 " + std::to_string(accountSlot) + " 个账号";
-        }
-        if (busy) ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Gama Pass 账号列表序号：1=第一个。读秒中可改，换票开始后不可改。");
-        }
-        ImGui::SameLine(0.f, gap);
-        int nickSlot = msc::weblogin::GetGamaPassNickSlot();
-        ImGui::TextUnformatted("昵称");
-        ImGui::SameLine(0.f, gap * 0.5f);
-        if (busy) ImGui::BeginDisabled();
-        ImGui::SetNextItemWidth(slotW);
-        if (ImGui::InputInt("##gp_nick_slot", &nickSlot, 1, 1)) {
-            if (nickSlot < 1) nickSlot = 1;
-            if (nickSlot > 16) nickSlot = 16;
-            msc::weblogin::SetGamaPassNickSlot(nickSlot);
-            ui.status = "将使用第 " + std::to_string(nickSlot) + " 个游戏昵称";
-        }
-        if (busy) ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("游戏昵称列表序号：1=第一个（不含「建立暱稱」）。读秒中可改，换票开始后不可改。");
-        }
+        DrawGamaPassSlotRow(ui, busy, rowW, gap);
 
-        // —— 行 3：主按钮 ——
-        if (busy) ImGui::BeginDisabled();
-        const char* gpLabel = autoPending ? "取消自动登录" : "GAMA PASS自动登录";
+        // —— 行 3：主按钮（登录中可取消；不关日常浏览器、不杀游戏）——
+        const bool gpCanceling = busy && msc::launcher::GamaPassLoginCanceled();
+        const bool disableGpMain = gpCanceling;
+        if (disableGpMain) ImGui::BeginDisabled();
+        const char* gpLabel = gpCanceling ? "正在取消…"
+                              : (busy ? "取消登录"
+                                      : (autoPending ? "取消自动登录" : "GAMA PASS自动登录"));
         if (ImGui::Button(gpLabel, ImVec2(-1.f, btnH))) {
-            if (autoPending) {
+            if (busy) {
+                LaunchPanel_CancelInFlightGpLogin(ui);
+                xcat::log::Info("App", "user cancelled in-flight GamaPass auto-login");
+            } else if (autoPending) {
                 sound::UiClick();
                 LaunchPanel_CancelPendingAutoLaunch(ui);
                 ui.status = "已取消自动登录 — 可改账号/昵称槽，再点「GAMA PASS自动登录」重新读秒";
@@ -529,11 +542,120 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
                                 kGamaPassAutoPrepSec);
             }
         }
-        if (busy) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(busy ? (gpCanceling ? "正在取消登录，请稍候"
+                                                  : "取消本次自动登录。不关日常浏览器、不杀已开游戏。")
+                                   : (autoPending ? "取消即将开始的自动登录"
+                                                  : "5 秒后自动换票，可再点取消"));
+        }
+        if (disableGpMain) ImGui::EndDisabled();
         if (autoPending && strategyPrepLeft > 0) {
             ImGui::TextColored(PrepHintBlue(), "准备中：%u 秒后自动换票", strategyPrepLeft);
         } else if (autoPending) {
             ImGui::TextColored(PrepHintBlue(), "即将自动换票…");
+        }
+    } else if (gamaPassDirect) {
+        const bool gpBusy = msc::launcher::IsGamaPassDeviceLoginBusy() || busy;
+        const bool autoPending = ui.pendingAutoLaunch;
+        if (gpBusy) ImGui::BeginDisabled();
+        ImGui::SetNextItemWidth(-1.f);
+        ImGui::PushID(static_cast<int>(ui.gpPasteEpoch));
+        ImGuiInputTextFlags pasteFlags = ImGuiInputTextFlags_EnterReturnsTrue |
+                                         ImGuiInputTextFlags_NoUndoRedo;
+        if (LaunchPanel_GpLoginLineIsMask(ui)) pasteFlags |= ImGuiInputTextFlags_AutoSelectAll;
+        if (gpBusy) pasteFlags |= ImGuiInputTextFlags_ReadOnly;
+        const bool pasteEnter = ImGui::InputTextWithHint(
+            "##gp_direct_line", "账号----密码----邮箱密码----device_id", ui.gpLoginLine,
+            sizeof(ui.gpLoginLine), pasteFlags);
+        const bool pasteEdited = ImGui::IsItemEdited();
+        const bool pasteDeactivated = ImGui::IsItemDeactivatedAfterEdit();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "粘贴完整卖家行后会保存，输入框显示为 *。\n"
+                "已有账号时再贴一行即换号。点框可全选覆盖。");
+        }
+        ImGui::PopID();
+        if (!gpBusy && (pasteEnter || pasteDeactivated || pasteEdited)) {
+            LaunchPanel_TryCommitGamaPassDirectPaste(ui, pasteEnter);
+        }
+        if (gpBusy) ImGui::EndDisabled();
+        if (ui.gpDisplayAccount[0]) {
+            ImGui::Text("当前账号：%s", ui.gpDisplayAccount);
+        } else {
+            ImGui::TextDisabled("当前账号：未设置 — 请先粘贴账号行");
+        }
+        DrawGamaPassSlotRow(ui, gpBusy, rowW, gap);
+
+        const bool loginNoAccount =
+            !ui.gpDisplayAccount[0] &&
+            (ui.gpLoginLine[0] == '\0' || LaunchPanel_GpLoginLineIsMask(ui));
+        const bool gpCanceling = gpBusy && msc::launcher::GamaPassLoginCanceled();
+        const bool disableLogin = gpCanceling || (!gpBusy && !autoPending && loginNoAccount);
+        if (disableLogin) ImGui::BeginDisabled();
+        const char* gpLabel = gpCanceling ? "正在取消…"
+                              : (gpBusy ? "取消登录"
+                                        : (autoPending ? "取消自动登录" : "登录并开游戏"));
+        if (ImGui::Button(gpLabel, ImVec2(halfW, btnH))) {
+            LaunchPanel_CancelGpClearConfirm(ui);
+            if (gpBusy) {
+                LaunchPanel_CancelInFlightGpLogin(ui);
+                xcat::log::Info("App", "user cancelled in-flight GamaPass direct login");
+            } else if (autoPending) {
+                sound::UiClick();
+                LaunchPanel_CancelPendingAutoLaunch(ui);
+                ui.status = "已取消自动登录 — 可贴新账号，再点「登录并开游戏」重新读秒";
+                xcat::log::Info("App", "user cancelled pending GamaPass direct launch");
+            } else {
+                LaunchPanel_ArmGamaPassDirectLaunch(ui, true);
+                xcat::log::Info("App", "user re-armed GamaPass direct launch (%us)",
+                                kGamaPassAutoPrepSec);
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(gpBusy
+                                  ? (gpCanceling ? "正在取消登录，请稍候"
+                                                 : "取消本次账密直登。只关独立调试窗，不关日常浏览器、不杀游戏。")
+                                  : (loginNoAccount ? "请先粘贴完整账号行"
+                                                    : (autoPending ? "取消即将开始的自动登录"
+                                                                   : "5 秒后自动登录，可再点取消")));
+        }
+        if (disableLogin) ImGui::EndDisabled();
+        ImGui::SameLine(0.f, gap);
+        if (gpBusy) ImGui::BeginDisabled();
+        const unsigned clearLeft = LaunchPanel_GpClearConfirmLeftSec(ui);
+        const bool clearArmed = clearLeft > 0;
+        if (clearArmed) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.42f, 0.14f, 0.16f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.62f, 0.18f, 0.22f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.72f, 0.22f, 0.26f, 1.f));
+        }
+        const char* clearLabel =
+            clearArmed ? "确认删除###gp_clear_account" : "删除浏览器账号数据###gp_clear_account";
+        if (ImGui::Button(clearLabel, ImVec2(halfW, btnH))) {
+            if (clearArmed) {
+                if (LaunchPanel_GpClearConfirmReady(ui)) {
+                    LaunchPanel_ClearGamaPassDirectProfile(ui);
+                }
+            } else {
+                sound::UiClick();
+                LaunchPanel_ArmGpClearConfirm(ui);
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(gpBusy ? "登录进行中，无法删除"
+                                     : (clearArmed ? "再点一次才会删除账号和独立罐登录态。不碰日常浏览器。"
+                                                   : "先点一次武装，5 秒内再点「确认删除」才会清掉。不碰日常浏览器。"));
+        }
+        if (clearArmed) ImGui::PopStyleColor(3);
+        if (gpBusy) ImGui::EndDisabled();
+        if (clearArmed) {
+            char clearHint[96];
+            std::snprintf(clearHint, sizeof(clearHint), "再点一次确认删除（%u 秒后取消）", clearLeft);
+            ImGui::TextColored(ImVec4(0.85f, 0.35f, 0.32f, 1.f), "%s", clearHint);
+        } else if (autoPending && strategyPrepLeft > 0) {
+            ImGui::TextColored(PrepHintBlue(), "准备中：%u 秒后自动登录", strategyPrepLeft);
+        } else if (autoPending) {
+            ImGui::TextColored(PrepHintBlue(), "即将自动登录…");
         }
     }
 }
@@ -600,22 +722,17 @@ void DrawLaunchTab(LaunchUiState& ui) {
         if (launchMode == attach_inject::LaunchMode::OneClickLogin) {
             ImGui::Spacing();
             const float btnH = ui::BtnH();
-            const float gap = ImGui::GetStyle().ItemSpacing.x;
-            const float halfW =
-                (std::max)(1.f, (ImGui::GetContentRegionAvail().x - gap) * 0.5f);
             ImGui::SetNextItemWidth(-1);
             ImGui::InputTextMultiline("##account", ui.accountLine, sizeof(ui.accountLine),
                                       ImVec2(-1, btnH * 3.6f), ImGuiInputTextFlags_AllowTabInput);
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 LaunchPanel_FormatAccountForUi(ui);
             }
-            if (ImGui::Button("保存账号", ImVec2(halfW, btnH))) {
+            if (ImGui::Button("保存账号", ImVec2(-1.f, btnH))) {
                 sound::UiClick();
                 LaunchPanel_SaveAccount(ui);
-                ui.status = "已保存到程序目录 account.txt";
+                ui.status = "已保存账号";
             }
-            ImGui::SameLine(0.f, gap);
-            ImGui::TextDisabled("账密粘贴区（仅本页）");
         }
 
         if (!ui.status.empty()) {
@@ -629,148 +746,9 @@ void DrawLaunchTab(LaunchUiState& ui) {
 
     CardGap();
     {
-        // 总开关在 gamapass_device_login.h：kGamaPassDeviceLoginEnabled。
-        constexpr bool kGpDeviceLoginUiReady = msc::launcher::kGamaPassDeviceLoginEnabled;
-        xcat::ui::CardGuard card("##tab_gp_device_login",
-                                 kGpDeviceLoginUiReady ? "Gama Pass 账密登录"
-                                                       : "Gama Pass 账密登录（未开放）");
-        if (!kGpDeviceLoginUiReady) {
-            ImGui::TextWrapped("功能尚未开放，请用上面的「GAMA PASS自动登录」。不会开独立浏览器配置。");
-        } else {
-        static bool loaded = false;
-        if (kGpDeviceLoginUiReady && !loaded) {
-            loaded = true;
-            const std::wstring path =
-                msc::launcher::GamaPassDeviceLoginStorePath(xcat::Utf8ToWide(ui.prefsBinDir));
-            msc::launcher::GamaPassDeviceLoginAccount acc;
-            if (msc::launcher::LoadGamaPassDeviceLoginAccount(path, acc) && !acc.email.empty()) {
-                const std::string line = msc::launcher::FormatGamaPassDeviceLoginLine(acc);
-                std::snprintf(ui.gpLoginLine, sizeof(ui.gpLoginLine), "%s", line.c_str());
-                ui.gpLoginBrowserKind = static_cast<int>(acc.browserKind);
-            }
-        }
-
-        if (kGpDeviceLoginUiReady) {
-            ImGui::TextWrapped(
-                "独立模块：只帮你在专用浏览器窗口登 Gama Pass。"
-                "粘贴卖家整行：账号----密码----邮箱密码----device_id。"
-                "原样钉第 4 段 device_id（禁止自造、不加横线）。"
-                "不换票、不开游戏。登录成功后会关掉这扇独立窗，再点上面的「GAMA PASS自动登录」换票。"
-                "二次验证请在弹出窗里完成；失败则窗口保持打开。日常 Chrome/Edge 登录态不动。");
-        } else {
-            ImGui::TextWrapped("功能尚未开放，请用上面的「GAMA PASS自动登录」。");
-        }
-        if (!kGpDeviceLoginUiReady) ImGui::BeginDisabled();
-
-        const float btnH = ui::BtnH();
-        const bool gpBusy = msc::launcher::IsGamaPassDeviceLoginBusy();
-        if (gpBusy) ImGui::BeginDisabled();
-        ImGui::SetNextItemWidth(-1.f);
-        ImGui::InputTextWithHint(
-            "##gp_login_line",
-            "账号----密码----邮箱密码----device_id",
-            ui.gpLoginLine, sizeof(ui.gpLoginLine),
-            gpBusy ? ImGuiInputTextFlags_ReadOnly : 0);
-        if (gpBusy) ImGui::EndDisabled();
-
-        msc::launcher::GamaPassDeviceLoginAccount preview;
-        std::string parseErr;
-        const bool lineOk =
-            msc::launcher::ParseGamaPassDeviceLoginLine(ui.gpLoginLine, preview, parseErr);
-        if (lineOk) {
-            ImGui::TextDisabled("账号 %s  ·  device_id %s", preview.email.c_str(),
-                                preview.deviceId.c_str());
-        } else if (ui.gpLoginLine[0] != '\0') {
-            ImGui::TextDisabled("%s", parseErr.c_str());
-        }
-
-        {
-            if (!lineOk) ImGui::BeginDisabled();
-            if (ImGui::Button("复制 device_id", ImVec2(AppDpi_Px(120.f), btnH))) {
-                sound::UiClick();
-                ImGui::SetClipboardText(preview.deviceId.c_str());
-                ui.status = "已复制卖家 device_id";
-            }
-            if (!lineOk) ImGui::EndDisabled();
-        }
-
-        static std::string browserHint;
-        static DWORD lastProbe = 0;
-        if (kGpDeviceLoginUiReady && (lastProbe == 0 || GetTickCount() - lastProbe > 4000)) {
-            lastProbe = GetTickCount();
-            std::wstring exe, label;
-            const auto kind =
-                static_cast<msc::launcher::GpDeviceLoginBrowserKind>(ui.gpLoginBrowserKind);
-            if (msc::launcher::ResolveGamaPassDeviceLoginBrowser(exe, label, nullptr, kind)) {
-                browserHint = xcat::WideToUtf8(label) + " · 独立配置目录（非日常）";
-            } else {
-                browserHint = "未找到所选浏览器（支持 Chrome++ / Chrome / Edge，不支持 360）";
-            }
-        }
-        {
-            static const char* kBrowserItems[] = {
-                "自动（Chrome++ > Chrome > Edge）",
-                "Chrome++",
-                "Google Chrome",
-                "Microsoft Edge",
-            };
-            ImGui::SetNextItemWidth(-1.f);
-            if (gpBusy) ImGui::BeginDisabled();
-            if (ImGui::Combo("##gp_login_browser", &ui.gpLoginBrowserKind, kBrowserItems, 4)) {
-                lastProbe = 0;
-            }
-            if (gpBusy) ImGui::EndDisabled();
-        }
-        ImGui::TextDisabled("%s", browserHint.c_str());
-
-        if (gpBusy) ImGui::BeginDisabled();
-        if (ImGui::Button(gpBusy ? "登录中…" : "开始登录", ImVec2(-1.f, btnH))) {
-            sound::UiClick();
-            if (!kGpDeviceLoginUiReady) {
-                ui.status = "账密登录助手尚未开放";
-            } else {
-            msc::launcher::GamaPassDeviceLoginAccount acc;
-            std::string lineErr;
-            if (!msc::launcher::ParseGamaPassDeviceLoginLine(ui.gpLoginLine, acc, lineErr)) {
-                ui.status = lineErr.empty() ? "卖家账号行无法解析" : lineErr;
-                sound::UiError();
-            } else {
-                acc.browserKind =
-                    static_cast<msc::launcher::GpDeviceLoginBrowserKind>(ui.gpLoginBrowserKind);
-                const std::wstring path =
-                    msc::launcher::GamaPassDeviceLoginStorePath(xcat::Utf8ToWide(ui.prefsBinDir));
-                std::wstring err;
-                if (!msc::launcher::StartGamaPassDeviceLogin(
-                        acc, path, [](const std::wstring& line) { LaunchPanel_OnWebLog(line); },
-                        err)) {
-                    ui.status = err.empty() ? "无法开始账密登录" : xcat::WideToUtf8(err);
-                    sound::UiError();
-                } else {
-                    ui.status = "已打开独立登录窗口（钉卖家 device_id；成功后自动关窗，不换票）";
-                }
-            }
-            }
-        }
-        if (gpBusy) ImGui::EndDisabled();
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            if (!kGpDeviceLoginUiReady) {
-                ImGui::SetTooltip("功能尚未开放，请用上面的 GAMA PASS自动登录。");
-            } else {
-                ImGui::SetTooltip(
-                    "浏览器：Chrome++ / Chrome / Edge（可选手选；360 不支持）。\n"
-                    "各浏览器独立配置目录，不开日常 User Data。\n"
-                    "accounts 页填第 2 段 Gama Pass 密码；第 3 段邮箱密码只保存不填。\n"
-                    "device_id 必须是 32 位 hex。二次验证请在弹出窗口里自己完成。");
-            }
-        }
-        if (!kGpDeviceLoginUiReady) ImGui::EndDisabled();
-        } // kGpDeviceLoginUiReady
-    }
-
-    CardGap();
-    {
         xcat::ui::CardGuard card("##tab_launch_log", "登录日志", /*fillRemaining=*/true);
-        ImGui::TextUnformatted(msc::weblogin::IsBusy() || attach_inject::IsInjectBusy()
+        ImGui::TextUnformatted(msc::weblogin::IsBusy() || attach_inject::IsInjectBusy() ||
+                                       msc::launcher::IsGamaPassDeviceLoginBusy()
                                    ? "进行中…"
                                    : "最近输出");
         ImGui::BeginChild("##log_scroll", ImVec2(0, 0), ImGuiChildFlags_Borders);
@@ -1485,8 +1463,6 @@ void DrawHomeTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("%s", tip);
-        ImGui::SameLine(0.f, ui::Gap() * 0.5f);
-        ImGui::TextDisabled("= %.0f px/s 巡航", 620.f * (float)(*v) / 100.f);
         const int presets[] = {100, 200, 300, 500};
         for (int p : presets) {
             char btnId[64]{};
@@ -1739,7 +1715,6 @@ void DrawHomeTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "跟随鼠标飞行；需开无敌。\n"
-                "推进间隔可在「调试」TAB 调整。\n"
                 "Ctrl/Shift 暂停跟随。");
         }
         if (xcat::ui::OptionCheckbox("自动打怪", &autoCombat)) persistCore();
@@ -2071,12 +2046,8 @@ void DrawHomeTab(LaunchUiState& ui) {
                  true);
         speedRow("F5 滑翔", "home_combat_speed", &gUiFlySpeedPct,
                  "F5 空中贴怪 + 自动赶路共用（都是「自动飞」）。\n"
-                 "默认 500%；拟人 / 站桩输出 / 关闭时置灰。",
-                 gUiApproachMode == 0);
-        ImGui::TextDisabled(
-            "范围 %u–%u%%。只放大「意图」速度；撞墙预刹 / 位置包线 / 坠落自救不跟着缩。\n"
-            "实测已验到 5X；更高属外推。推进间隔仍在「调试 → 飞行调试」。",
-            xcat::kHeliSpeedPctMin, xcat::kHeliSpeedPctMax);
+                 "站桩输出也可调（赶路仍吃这份倍率）。默认 500%；拟人 / 瞬移找怪 / 关闭时置灰。",
+                 gUiApproachMode == 0 || gUiApproachMode == 2);
     }
     CardGap();
     {
@@ -6119,7 +6090,6 @@ void DrawBetaTab(LaunchUiState& ui) {
 }
 
 void DrawDebugTab(LaunchUiState& ui) {
-    DesignBanner();
     {
         xcat::ui::CardGuard card("##tab_dbg_status", "运行状态");
         ImGui::TextUnformatted("产品：XCat");
@@ -6128,11 +6098,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                     attach_inject::LaunchModeLabel(attach_inject::GetLaunchMode()));
         ImGui::Text("取票策略：%s", msc::weblogin::AuthStrategyLabel(msc::weblogin::GetAuthStrategy()));
         ImGui::Text("验证码UI：%s", msc::weblogin::CaptchaUiModeLabel(msc::weblogin::GetCaptchaUiMode()));
-        ImGui::TextDisabled("换票：GAMA PASS CDP / HTTP Beanfun（无 WebView2）");
         ImGui::Text("换票会话：%s", msc::weblogin::IsBusy() ? "忙碌" : "空闲");
-        ImGui::TextDisabled("顶栏 5 灯：IPC / GameContext / LocalPlayer / Map / Cache");
-        ImGui::TextDisabled("注入后由 PayloadStatus SHM 点亮 LP/Map；Cache=测谎 TypeResolve");
-        ImGui::TextDisabled("游戏 PID / 注入状态：见顶栏灯与状态条");
     }
     CardGap();
     {
@@ -6295,13 +6261,10 @@ void DrawDebugTab(LaunchUiState& ui) {
         }
         if (scrollSaveFailed)
             ImGui::TextColored(ImVec4(1.f, 0.45f, 0.4f, 1.f), "保存 user.ini [pet_loot] 失败");
-        ImGui::TextDisabled("首页「拾物」改其它项不会冲掉本开关。");
     }
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_dbg_soft_dismiss", "断线弹窗");
-        ImGui::TextDisabled(
-            "自动关窗失败时点一次。安全路径：CloseDialog + SetActive，不点「確認」。");
         if (ImGui::Button("关闭断线弹窗", ImVec2(-1.f, 0.f))) {
             if (ui.prefsBinDir.empty()) {
                 notify::PushLocal(/*Warning*/ 2, "soft-dismiss", "下发失败", "无数据目录", 3000);
@@ -6461,7 +6424,6 @@ void DrawDebugTab(LaunchUiState& ui) {
             const std::string lastStatusUi = SanitizeImGuiLogLine(lastStatus);
             ImGui::TextDisabled("%s", lastStatusUi.c_str());
         }
-        ImGui::TextDisabled("进度见面板日志 / bin/logs/launcher.jsonl（标签 Attach）");
     }
 #endif
     CardGap();
@@ -6541,8 +6503,6 @@ void DrawDebugTab(LaunchUiState& ui) {
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.35f);
         ImGui::TextUnformatted("ms");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::TextDisabled("加速开启时不参与");
     }
     CardGap();
     {
@@ -6642,7 +6602,7 @@ void DrawDebugTab(LaunchUiState& ui) {
             persistPump();
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.35f);
-        ImGui::TextDisabled("格");
+        ImGui::TextUnformatted("格");
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "游戏主线程排队任务达到这么多格时，出刀/瞬移先让一拍（背压，防灌爆触发 GC 弹窗）。\n"
@@ -6670,7 +6630,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                 (unsigned)xcat::kPumpDrainBudgetDefault, (unsigned)xcat::kPumpDrainBudgetMax);
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.35f);
-        ImGui::TextDisabled("格 · 默认抽干");
+        ImGui::TextUnformatted("格");
     }
     CardGap();
     {
@@ -6731,10 +6691,6 @@ void DrawDebugTab(LaunchUiState& ui) {
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.35f);
         ImGui::TextUnformatted("px");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::TextDisabled("下限 %u · 默认 %u · 无上限",
-                            (unsigned)xcat::kCombatTeleportMaxHopMin,
-                            (unsigned)xcat::kCombatTeleportMaxHopDefault);
     }
     CardGap();
     {
@@ -6800,22 +6756,15 @@ void DrawDebugTab(LaunchUiState& ui) {
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.35f);
         ImGui::TextUnformatted("px");
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::TextDisabled("AbsPos 更大 Y=更高 · 默认 %u",
-                            (unsigned)xcat::kTravelPortalAimLiftDefault);
     }
     CardGap();
     {
         xcat::ui::CardGuard card("##tab_dbg_miss", "锚点 MISS 灯");
-        ImGui::TextDisabled("绿=OK · 黄=降级(shape/部分MI) · 红=MISS · 灰=pending(已占位未决)");
-        ImGui::TextDisabled("注入后整表先灰后变色；某灯一直灰=对应 feature 尚未上报/卡在绑定前");
         xcat::AnchorLampsStatus lamps{};
         const bool have = !ui.prefsBinDir.empty() &&
                           xcat::ReadAnchorLamps(ui.prefsBinDir.c_str(), lamps) &&
                           xcat::AnchorLampsFresh(lamps, GetTickCount64(), 8000);
-        if (!have) {
-            ImGui::TextDisabled("等待注入后 payload 上报（约 0.5s 心跳）…");
-        } else {
+        if (have) {
             const float cellW = AppDpi_Px(78.f);
             const float cellH = AppDpi_Px(28.f);
             const float gap = ImGui::GetStyle().ItemSpacing.x;
@@ -6863,8 +6812,8 @@ void DrawDebugTab(LaunchUiState& ui) {
                 }
                 ImGui::PopID();
             }
-            ImGui::TextDisabled("共 %u 项 · tick %llu", lamps.count,
-                                static_cast<unsigned long long>(lamps.writeTickMs));
+            ImGui::Text("共 %u 项 · tick %llu", lamps.count,
+                        static_cast<unsigned long long>(lamps.writeTickMs));
         }
     }
     CardGap();
@@ -6919,9 +6868,6 @@ void DrawDebugTab(LaunchUiState& ui) {
         };
 
         xcat::ui::CardGuard card("##tab_dbg_fly", "飞行调试");
-        ImGui::TextDisabled("F6 飞行（闭环旋翼）；武装期禁挂台");
-        ImGui::TextDisabled("F6/F5 速度倍率：首页「飞行速度」卡（当前手动 %d%% / 滑翔 %d%%）",
-                            gUiManualFlySpeedPct, gUiFlySpeedPct);
 
         if (xcat::ui::OptionCheckbox("防抖", &gUiAntiJitter)) persistAntiJitter();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
@@ -6931,8 +6877,6 @@ void DrawDebugTab(LaunchUiState& ui) {
                 "仍用 Station（保留满速进站预刹）；不会改成 Hold。\n"
                 "ini：core.simpleCombatAntiJitter=0 也可关。");
         }
-        ImGui::SameLine(0.f, ui::Gap());
-        ImGui::TextDisabled("F5 空中贴怪 · 默认开");
 
         ImGui::Separator();
         ImGui::TextUnformatted("推进路线");
@@ -6986,10 +6930,6 @@ void DrawDebugTab(LaunchUiState& ui) {
         if (ImGui::Button("120ms##dbg_fly_cd120")) bumpCd(120);
         ImGui::SameLine();
         if (ImGui::Button("400ms##dbg_fly_cd400")) bumpCd(400);
-        ImGui::TextDisabled("范围 %u–%u，默认 %u（多久重算一次鼠标世界点）",
-                            xcat::kFlyHopCdMinMs, xcat::kFlyHopCdMaxMs,
-                            xcat::kFlyHopCdDefaultMs);
-        ImGui::TextDisabled("实测系统时钟一格 15.6ms：低于 16 的设定不会更跟手，走同一条路径。");
     }
     if (gGatherTabUnlocked) {
         CardGap();
@@ -7026,10 +6966,6 @@ void DrawDebugTab(LaunchUiState& ui) {
         };
         xcat::ui::CardGuard card("##tab_dbg_mpflush", "上报采证(MovePath.Flush)");
         if (xcat::ui::OptionCheckbox("采证上报包(测试专用·用完即关)", &mpFlush)) persistMpFlush();
-        ImGui::SameLine();
-        ImGui::TextDisabled("勾选自动允许.text钩");
-        ImGui::TextDisabled("进图后开→飞/跑一段；对 logs\\movepath_flush.log");
-        ImGui::TextDisabled("标注：a=N!非Normal  fh=0*空中  err=..!!越包络(地>18/空>27)  头 maxErr/air/tel/over");
     }
     CardGap();
     {
@@ -7074,8 +7010,6 @@ void DrawDebugTab(LaunchUiState& ui) {
 
         xcat::ui::CardGuard card("##tab_dbg_lie", "测谎诊断");
         if (xcat::ui::OptionCheckbox("测谎干跑(不OnOk)", &dryRun)) persistDry();
-        ImGui::SameLine();
-        ImGui::TextDisabled("服端未开时可先验泵/报警");
         {
             const float gap = ImGui::GetStyle().ItemSpacing.x;
             const float rowW = ImGui::GetContentRegionAvail().x;
@@ -7174,7 +7108,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                 }
             }
             ImGui::Separator();
-            ImGui::TextDisabled("已测谎统计（本机累计 · 按角色）");
+            ImGui::TextUnformatted("已测谎统计（本机累计 · 按角色）");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
                     "前五列是本工具的作答情况：\n"
@@ -7190,9 +7124,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                     "\n"
                     "干跑期间不记账。数据文件：state\\lie_stats.tsv");
             }
-            if (statRows.empty()) {
-                ImGui::TextDisabled("暂无记录 — 遇到真题后自动累计");
-            } else if (ImGui::BeginTable("##lie_stats", 9,
+            if (!statRows.empty() && ImGui::BeginTable("##lie_stats", 9,
                                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                              ImGuiTableFlags_SizingStretchProp)) {
                 ImGui::TableSetupColumn("角色");
@@ -7238,20 +7170,12 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
-        // 原生瞬移调试入口已关闭；不再对外展示试推控件。
-        xcat::ui::CardGuard card("##tab_dbg_tp", "瞬移 / 踢号压测");
-        ImGui::TextDisabled("原生瞬移调试按钮已关闭（测试贴怪 / 原生CALL / 踢号压测）。");
-        ImGui::TextDisabled("旧 user.ini 的 teleport*Seq 会被 payload 拒发并写 Control 日志。");
-    }
-    CardGap();
-    {
         static bool memWatch = true;
         xcat::ui::CardGuard card("##tab_dbg_mem", "低内存守护");
         xcat::ui::OptionCheckbox("低内存自动回收", &memWatch);
         xcat::ui::OptionCheckbox("换图后回收", &memWatch);
         if (ImGui::Button("手动安全回收一次", ImVec2(AppDpi_Px(160.f), 0.f))) {
         }
-        ImGui::TextDisabled("payload 内存指标：未注入");
     }
     CardGap();
     {
@@ -8922,7 +8846,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
                                      ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
                     "打进攻击盒但 ACC 不够、飘 MISS 时换下一只。盒外空刀不算。\n"
-                    "连续 N 次（默认 1）才换。\n"
+                    "连续 N 次（默认 3）才换。已经掉过血 / 打出真伤的浮动 MISS 不计。\n"
                     "不预判 ACC/EVA——客户端 CheckPDamageMiss 吃随机数，乱调会搅 RNG。\n"
                     "免疫等其它 0 伤也可能被当成 MISS。\n"
                     "生效核对：combat.log 出现 acc_miss 与 switch reason=skip_acc_miss");
@@ -8950,7 +8874,8 @@ void DrawMobGatherTab(LaunchUiState& ui) {
             ImGui::TextDisabled("连续MISS换下一只");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "进盒 ACC 不够才算。连续飘字满 N 次后 8 秒内不打这只。");
+                    "进盒 ACC 不够才算。满血连续飘字满 N 次后 8 秒内不打这只。\n"
+                    "残血 / 已打出真伤的一次 MISS 不换靶。");
             }
         }
         if (xcat::ui::OptionCheckbox("出刀软重连", &gUiMobGatherHangupFiresOn))
@@ -9395,12 +9320,6 @@ void DrawMobGatherDyLimScanCard(LaunchUiState& ui) {
     EnsureGatherUnlockLoaded();
     if (!gGatherTabUnlocked) return;
     xcat::ui::CardGuard card("##tab_dbg_gather_dylim", "高度闸扫描");
-    ImGui::PushTextWrapPos(0.f);
-    ImGui::TextDisabled(
-        "一键测竖直极限：自动开吸怪、关寻簇飞、半径 6000、冻结 14 秒软重连/清怪重连。"
-        "闸从 1 每秒 +100 到 2000。掐线看 x.jsonl：dylim_ramp KICK dyLim=。不写 user.ini。"
-        "停扫把闸改回「吸怪 快攻」TAB「高度闸」，不是写死 1200。");
-    ImGui::PopTextWrapPos();
     const uint32_t rampSeq =
         ui.prefsBinDir.empty() ? 0u : xcat::ReadMobGatherDyRampSeq(ui.prefsBinDir.c_str());
     ImGui::Text("seq=%u  %s", rampSeq, rampSeq ? "扫描中/待停" : "闲置（闸=面板高度闸）");
@@ -9459,7 +9378,6 @@ void DrawMobGatherFlyDebugCards(LaunchUiState& ui) {
                         ImVec2(ImGui::GetStyle().ItemSpacing.x, ui::Gap() * 0.85f));
     {
         xcat::ui::CardGuard card("##tab_dbg_gather_fly", "吸怪飞控");
-        ImGui::TextDisabled("怪侧 VTOL。人飞最密堆走 F5 滑翔（「吸怪 快攻」TAB 勾选），本卡只拧怪侧。");
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("吸速");
         ImGui::SameLine(0.f, ui::Gap());
@@ -9473,8 +9391,8 @@ void DrawMobGatherFlyDebugCards(LaunchUiState& ui) {
                 "100%% = 巡航档 px/s（下面「档速」可改）。默认满火力档；≥5X 抄 F5 死拍。");
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.5f);
-        ImGui::TextDisabled("= %.0f px/s",
-                            (float)gUiMobGatherCruiseV * (float)gUiMobGatherSpeedPct / 100.f);
+        ImGui::Text("= %.0f px/s",
+                    (float)gUiMobGatherCruiseV * (float)gUiMobGatherSpeedPct / 100.f);
         const int presets[] = {100, 200, 300, 500};
         for (int i = 0; i < 4; ++i) {
             const int p = presets[i];
@@ -9518,9 +9436,6 @@ void DrawMobGatherFlyDebugCards(LaunchUiState& ui) {
                           "距落点超过这个数用进站档（默认 28）。再近用悬停档。档速见下面。");
         MobGatherDragFree(ui, "重力", "grav", &gUiMobGatherGravity, 1.f, "",
                           "每物理步重力补偿（默认 60）。BIN：gLoss=。0 = 不补。");
-        ImGui::PushTextWrapPos(0.f);
-        ImGui::TextDisabled("只改怪侧 VTOL，不接 F5 旋翼。乱拧会抖或穿台。");
-        ImGui::PopTextWrapPos();
     }
     CardGap();
     {
@@ -9531,9 +9446,6 @@ void DrawMobGatherFlyDebugCards(LaunchUiState& ui) {
                           "进了巡航圈、还在进站圈外的 1X 合速（默认 480）。再乘吸速%。");
         MobGatherDragFree(ui, "悬停档", "hov", &gUiMobGatherHoldV, 10.f, "px/s",
                           "进了进站圈后的 1X 合速（默认 360）。再乘吸速%。≥5X 死拍改吃顶速。");
-        ImGui::PushTextWrapPos(0.f);
-        ImGui::TextDisabled("1X 数字 × 吸速%%。上面「吸速」旁的 px/s 跟巡航档走。");
-        ImGui::PopTextWrapPos();
     }
     CardGap();
     {

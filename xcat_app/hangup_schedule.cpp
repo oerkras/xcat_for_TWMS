@@ -8,6 +8,7 @@
 #include "update_client.h"
 
 #include "msc_webview_login.h"
+#include "gamapass_device_login.h"
 #include "process_util.h"
 #include "xcat_log.h"
 #include "xcat_payload_control.h"
@@ -35,6 +36,11 @@ constexpr uint64_t kRelaunchSettleMs = 2500;
 // success absorb 后约 1s 把下一跳 seq 当踢线硬杀。窗长须盖住 land_quiet
 // + 一拍 Tick；result==2 仍立刻硬杀。不得把 result==1 做成永久吞 seq。
 constexpr uint64_t kSoftSuccessGraceMs = 8000;
+
+bool LoginWorkerBusy() {
+    // 账密直登不置 weblogin::busy；守护/挂机必须把独立罐换票也当成在途。
+    return msc::weblogin::IsBusy() || msc::launcher::IsGamaPassDeviceLoginBusy();
+}
 
 enum class RelaunchPhase : uint8_t {
     None = 0,
@@ -184,7 +190,7 @@ void ArmSessionIfLive(DWORD livePid, bool handshakeOk) {
 // Returns false if busy/cooldown/WebView not ready (does not consume cooldown).
 bool BeginCleanRelaunch(LaunchUiState& ui, uint64_t now, uint32_t cooldownSec,
                         const char* logLine, const char* statusLine) {
-    if (RelaunchInFlight() || g.launchBusy || msc::weblogin::IsBusy()) return false;
+    if (RelaunchInFlight() || g.launchBusy || LoginWorkerBusy()) return false;
     if (CooldownBlocks(now, g.lastRestartTick, cooldownSec)) {
         if (g.lastCooldownBlockLogTick == 0 || now - g.lastCooldownBlockLogTick >= 5000u) {
             g.lastCooldownBlockLogTick = now;
@@ -266,7 +272,7 @@ void PumpCleanRelaunch(LaunchUiState& ui, uint64_t now) {
             PushStatus(ui, "[Watchdog] 旧游戏/NGM 未清净，已中止重拉",
                        "守护模式：旧进程未退出，禁止重拉");
             ClearRelaunchJob();
-            g.launchBusy = msc::weblogin::IsBusy();
+            g.launchBusy = LoginWorkerBusy();
             g.runtime.restartInFlight = false;
             // Keep Recovering so backoff/retry can pick up; do not clear sessionArm mid-crash
             // if process somehow returns — next Tick will re-arm from live pid.
@@ -319,6 +325,9 @@ void PumpCleanRelaunch(LaunchUiState& ui, uint64_t now) {
         } else {
             if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto) {
                 msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+            } else if (attach_inject::GetLaunchMode() ==
+                       attach_inject::LaunchMode::GamaPassDirect) {
+                // 账密直登：StartOneClick 会转到 StartGamaPassDirect
             } else if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
                 msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
             }
@@ -522,14 +531,14 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     g.lastTick = now;
 
     if (UpdateNeedsVisibleUi()) {
-        g.launchBusy = msc::weblogin::IsBusy() || RelaunchInFlight();
+        g.launchBusy = LoginWorkerBusy() || RelaunchInFlight();
         return;
     }
 
     // Always pump in-flight clean relaunch first.
     if (RelaunchInFlight()) {
         PumpCleanRelaunch(ui, now);
-        g.launchBusy = msc::weblogin::IsBusy() || RelaunchInFlight();
+        g.launchBusy = LoginWorkerBusy() || RelaunchInFlight();
         // Still evaluate hangup/watchdog gates below while waiting, but starts are blocked.
     }
 
@@ -543,7 +552,7 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     g.hangupOn = hangupOn;
     g.watchdogOn = watchdogOn;
     g.combatEnabled = cfg.simpleCombat != 0;
-    g.launchBusy = msc::weblogin::IsBusy() || RelaunchInFlight();
+    g.launchBusy = LoginWorkerBusy() || RelaunchInFlight();
     cfg.launcherHangupScheduleMask = ClampMaskImpl(cfg.launcherHangupScheduleMask);
     cfg.launcherWatchdogNoExpSec = xcat::ClampWatchdogNoExpSec(cfg.launcherWatchdogNoExpSec);
     cfg.launcherWatchdogCooldownSec =
@@ -554,10 +563,10 @@ void Tick(LaunchUiState& ui, bool appExiting) {
 
     if (!hangupOn && !watchdogOn) {
         // 手动干净重拉不依赖挂机/守护开关；在途时禁止 Reset 清掉 job / restartInFlight。
-        if (RelaunchInFlight() || g.runtime.restartInFlight || msc::weblogin::IsBusy()) {
+        if (RelaunchInFlight() || g.runtime.restartInFlight || LoginWorkerBusy()) {
             g.launchBusy =
-                msc::weblogin::IsBusy() || RelaunchInFlight() || g.runtime.restartInFlight;
-            if (!msc::weblogin::IsBusy() && !RelaunchInFlight()) {
+                LoginWorkerBusy() || RelaunchInFlight() || g.runtime.restartInFlight;
+            if (!LoginWorkerBusy() && !RelaunchInFlight()) {
                 g.runtime.restartInFlight = false;
                 g.launchBusy = false;
                 g.mode = UiMode::Disabled;
@@ -640,6 +649,13 @@ void Tick(LaunchUiState& ui, bool appExiting) {
                                             g.localHour, g.mask);
                             PushStatus(ui, "[Hangup] 挂机时段，GAMA PASS 自动启动并注入",
                                        "挂机时段：正在按时段拉起…");
+                        } else if (attach_inject::GetLaunchMode() ==
+                                   attach_inject::LaunchMode::GamaPassDirect) {
+                            xcat::log::Info("Hangup",
+                                            "schedule on->gamapass-direct hour=%d mask=0x%06X",
+                                            g.localHour, g.mask);
+                            PushStatus(ui, "[Hangup] 挂机时段，GAMA PASS账密直登",
+                                       "挂机时段：正在按时段拉起…");
                         } else {
                             if (msc::weblogin::GetAuthStrategy() ==
                                 msc::weblogin::AuthStrategy::GamaPassAuto) {
@@ -670,10 +686,10 @@ void Tick(LaunchUiState& ui, bool appExiting) {
 
     if (!watchdogOn) {
         // 仅关守护时仍可能有手动/挂机触发的干净重拉；勿整表清 runtime 把 restartInFlight 冲掉。
-        if (RelaunchInFlight() || g.runtime.restartInFlight || msc::weblogin::IsBusy()) {
+        if (RelaunchInFlight() || g.runtime.restartInFlight || LoginWorkerBusy()) {
             g.launchBusy =
-                msc::weblogin::IsBusy() || RelaunchInFlight() || g.runtime.restartInFlight;
-            if (!msc::weblogin::IsBusy() && !RelaunchInFlight()) {
+                LoginWorkerBusy() || RelaunchInFlight() || g.runtime.restartInFlight;
+            if (!LoginWorkerBusy() && !RelaunchInFlight()) {
                 g.runtime.restartInFlight = false;
                 g.launchBusy = false;
             }
@@ -812,7 +828,7 @@ void Tick(LaunchUiState& ui, bool appExiting) {
     guardian_policy::Input input{};
     input.now = now;
     input.noExpSec = noExp;
-    input.launchWorkerBusy = g.launchBusy || msc::weblogin::IsBusy() || RelaunchInFlight();
+    input.launchWorkerBusy = g.launchBusy || LoginWorkerBusy() || RelaunchInFlight();
     input.gamePid =
         processAlive ? static_cast<uint32_t>(livePid)
                      : (crashedArmed ? static_cast<uint32_t>(g.trackedPid) : 0u);
@@ -1061,14 +1077,17 @@ bool IsCleanRelaunchInFlight() {
 }
 
 bool RequestManualCleanRelaunch(LaunchUiState& ui) {
-    if (RelaunchInFlight() || g.launchBusy || msc::weblogin::IsBusy()) {
+    if (RelaunchInFlight() || g.launchBusy || LoginWorkerBusy()) {
         PushStatus(ui, nullptr, "正在启动/重拉中，请稍候再点");
         return false;
     }
     const bool attachMode =
         attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode());
     if (!attachMode && !msc::weblogin::CanStartOneClick()) {
-        PushStatus(ui, nullptr, "当前无法启动（请检查 GAMA PASS 会话/环境）");
+        PushStatus(ui, nullptr,
+                   attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassDirect
+                       ? "账密直登进行中，请稍候"
+                       : "当前无法启动（请检查 GAMA PASS 会话/环境）");
         return false;
     }
     if (!AllowsLaunch(ui.prefsBinDir)) {

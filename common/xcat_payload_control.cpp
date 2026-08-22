@@ -748,7 +748,8 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     else
         out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
     // v137: 旧厂默关迁一次开。升 version 后用户可再关掉。
-    // v138: 旧厂默 N=2 迁一次 N=1。升 version 后用户可再改。
+    // v138: 旧厂默 N=2 迁一次（当时厂默 1）。升 version 后用户可再改。
+    // v148: 旧厂默 N=1 迁一次 N=3。已手改成 2/4/5 的盘保留。
     {
         uint32_t coreIniVer = 0;
         const bool hasCoreVer = IniGetU32(ini, "core", "version", coreIniVer);
@@ -756,6 +757,9 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
             out.simpleCombatSkipAccMiss = 1;
         if ((!hasCoreVer || coreIniVer < 138u) &&
             out.simpleCombatSkipAccMissN == 2u)
+            out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
+        if ((!hasCoreVer || coreIniVer < 148u) &&
+            out.simpleCombatSkipAccMissN == 1u)
             out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
     }
     {

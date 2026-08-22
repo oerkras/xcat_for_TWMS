@@ -84,6 +84,9 @@ public:
     // 关掉多余 about:blank 标签（保留当前附着页），避免二次启动留下空标签
     int CloseExtraBlankPages(const LogFn& log = nullptr);
 
+    // 把当前附着标签拉到前台（避免 Navigate 发生在后台 tab，用户盯着另一扇 about:blank）
+    bool ActivateAttachedPage(const LogFn& log = nullptr);
+
     // 调试口是否仍在响应（/json/version）
     static bool IsPortAlive(int port);
 

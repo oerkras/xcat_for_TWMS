@@ -145,8 +145,6 @@ void DrawLogUploadPanel(const std::string& prefsBinDir) {
     } else if (!snap.message.empty()) {
         const std::string msgUi = SanitizeImGuiLogLine(snap.message);
         ImGui::TextWrapped("%s", msgUi.c_str());
-    } else {
-        ImGui::TextDisabled("默认轻量；深排障再切全量。");
     }
 
     const std::vector<LogUploadHistoryEntry> history = GetLogUploadHistory();

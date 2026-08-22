@@ -9,7 +9,7 @@
 // v9：角色快照（名/等级/职业/背包金 → launcher 探活头 → 运维台）；
 // v10：当前频道（1-based ch.N）→ 探活头 → 运维台（地图 Id 已在 v2 mapId）。
 // v11：原生 MapDataInfo.IsTown（守护主城无经验豁免；绕过拍卖强制写前的真值）。
-// v12：高价值卷轴快照（消耗栏 204/234 → launcher 探活头 → 运维台；客户端无 UI）。
+// v12：高价值消耗快照（204/234 卷 + 雷之鏢 2070005 → launcher 探活头 → 运维台；客户端无 UI）。
 // v13：主动软重连倒计时 → ImGui 顶栏。
 // v14：落地后累计出刀 hangup（吸怪 TAB「出刀」）。
 // v15：SecurityClient 攻包窗只读峰值（吸怪 TAB type20）。
@@ -98,7 +98,7 @@ struct PayloadStatus {
     uint32_t mapIsTown = 0;       // 1=城镇（仅 map_info.town=1；非原生 IsTown / 非 %1000000）
     uint32_t mapIsTownValid = 0;  // 1=已采到 mapId；0=未知
 
-    // v12：高价值卷轴（ASCII `id:qty,id:qty`；valid=0 表示本拍未采到，探活勿覆盖服务端旧值）
+    // v12：高价值消耗（ASCII `id:qty,id:qty`；valid=0 表示本拍未采到，探活勿覆盖服务端旧值）
     uint32_t playerWealthScrollsValid = 0;
     char playerWealthScrolls[384]{};
 

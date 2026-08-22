@@ -44,6 +44,7 @@ import { createIpGeo } from "./twms-ip-geo.mjs";
 import { createUpdateChannels } from "./twms-update-channels.mjs";
 
 const SERVER_VERSION = "0.4.12";
+const kChinaTz = "Asia/Shanghai";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
@@ -238,6 +239,16 @@ const kRecentDenyMax = 40;
 const devicesByIp = new Map();
 /** @type {Map<string, { machine: string, deviceId: string, mac: string, device: string }>} */
 const knownByDevice = new Map();
+const kIpMultiLogCooldownMs = 15 * 60 * 1000;
+const kIpMultiLogStartupGraceMs = 90 * 1000;
+const kIpMultiLogMinJump = 2;
+const kIpMultiLogMaxPerMin = 6;
+const ipMultiLogStartedAt = Date.now();
+/** @type {Map<string, { t: number, n: number }>} */
+const ipMultiLogAt = new Map();
+let ipMultiLogWindowStart = 0;
+let ipMultiLogWindowCount = 0;
+let ipMultiLogWindowDropped = 0;
 
 const ipGeo = createIpGeo({
   logWarn: (msg) => console.warn(`[geo] ${msg}`),
@@ -321,7 +332,7 @@ function decodeCharHeaderText(raw, maxChars) {
   return s.slice(0, maxChars);
 }
 
-/** 探活头 `2040001:3,2049100:1`；`-` 或空 = 已采到但身上无高价值卷轴。 */
+/** 探活头 `2040001:3,2070005:80`；`-` 或空 = 已采到但身上无高价值消耗（卷/雷之鏢）。 */
 function parseWealthScrollsHeader(raw) {
   const s = String(raw || "").trim();
   if (!s || s === "-") return "";
@@ -433,6 +444,32 @@ function deviceFingerprint({ machine, deviceId, mac, macs }) {
   return "";
 }
 
+function shouldLogSameIpMulti(ip, size) {
+  const now = Date.now();
+  if (now - ipMultiLogStartedAt < kIpMultiLogStartupGraceMs) return false;
+  const prev = ipMultiLogAt.get(ip);
+  if (prev && now - prev.t < kIpMultiLogCooldownMs && size - prev.n < kIpMultiLogMinJump) {
+    return false;
+  }
+  if (now - ipMultiLogWindowStart >= 60 * 1000) {
+    if (ipMultiLogWindowDropped > 0) {
+      logWarn(
+        `same-ip multi-device throttled dropped=${ipMultiLogWindowDropped} (max ${kIpMultiLogMaxPerMin}/min)`,
+      );
+    }
+    ipMultiLogWindowStart = now;
+    ipMultiLogWindowCount = 0;
+    ipMultiLogWindowDropped = 0;
+  }
+  if (ipMultiLogWindowCount >= kIpMultiLogMaxPerMin) {
+    ipMultiLogWindowDropped += 1;
+    return false;
+  }
+  ipMultiLogWindowCount += 1;
+  ipMultiLogAt.set(ip, { t: now, n: size });
+  return true;
+}
+
 function rememberDeviceOnIp(ip, identity) {
   if (!ip || ipGeo.isLoopback(ip)) return;
   const fp = deviceFingerprint(identity);
@@ -450,8 +487,8 @@ function rememberDeviceOnIp(ip, identity) {
     mac: String(identity.mac || (identity.macs && identity.macs[0]) || "").slice(0, 32),
     device: String(identity.device || "").slice(0, 96),
   });
-  // 同公网 IP 冒出新 deviceId：告警（NAT 多机或泄露扩散）
-  if (wasNew && set.size >= 2) {
+  // 同公网 IP 冒出新 deviceId：告警（NAT 多机或泄露扩散）。OPS 连接表仍全量记，这里只节流日志。
+  if (wasNew && set.size >= 2 && shouldLogSameIpMulti(ip, set.size)) {
     let geoHint = "";
     for (const row of activeClients.values()) {
       if (row.ip === ip && row.geo) {
@@ -907,8 +944,6 @@ function clientIp(req) {
 function isLoopback(ip) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "localhost";
 }
-
-const kChinaTz = "Asia/Shanghai";
 
 function ts(d = new Date()) {
   // 运维台 / 访问日志统一北京时间；内部仍用 epoch ms。

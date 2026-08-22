@@ -253,8 +253,8 @@ void ClearBailed();
 // 旋翼是**单例**：一份 setpoint、一份发射时钟。驱动方：F5 打怪 / 赶路 / F6 手动飞 /
 // 吸怪寻簇（可选，默认不占）。各方各写各的就是抢方向盘。
 //
-// ★ 为什么不能靠「把另一个暂停掉」解决：`simple_combat::Tick` 里 `TickHeliRotor(now)`
-//   刻意放在 `gExternalPause` 判断**之前**，因为 fh-ban 挂着时停一拍旋翼就是掉一段。
+// ★ 硬闸时 `Tick` 先 GoIdle 再 TickHeliRotor：停的是贴怪 setpoint，旋翼仍转（落台 / fh-ban）。
+//   未硬闸的提前 return（skill_prepare / arm_grace / 池未热身）仍必须先转旋翼，停一拍就是掉一段。
 //   也就是说旋翼**必须一直转**，能换的只有 setpoint 的来源 —— 所以要的是交接，不是暂停。
 //
 // 交接语义：`Acquire` 抢占式，后来者直接接管（手动 F6 压过自动，符合直觉）。被抢走的

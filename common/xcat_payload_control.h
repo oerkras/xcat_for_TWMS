@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 147u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 148u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -104,6 +104,7 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 147u;
 // v136: simpleCombatForgeHitFillList / MultiPkt — 已移除（已证实踢号；字段保留布局，恒 0）
 // v137: simpleCombatSkipAccMiss 厂默关→开（当时 N=2）；旧盘仍为关迁一次。升 version 后用户可再关掉
 // v138: simpleCombatSkipAccMissN 厂默 2→1；旧盘仍为 2 迁一次。升 version 后用户可再改
+// v148: simpleCombatSkipAccMissN 厂默 1→3；残血 MISS 不再换靶。旧盘仍为 1 迁一次。
 // v139: 主动软重连旧厂默开+14s 残留迁关一次（v122 已改厂默关，当时没迁盘）
 // v140: forceTrade — 实验·强制交易：改 UIUserInfo 人物卡交易按钮等级阈值 global；默认关
 //       kForceTradeUserEnabled=false — 实测无效；实验 TAB 置灰；不启 worker / 不改阈值
@@ -471,10 +472,10 @@ constexpr uint32_t kCombatHitRotateDefault = 0u;
 constexpr uint32_t kCombatHitRotateNDefault = 2u;
 constexpr uint32_t kCombatHitRotateNMin = 1u;
 constexpr uint32_t kCombatHitRotateNMax = 20u;
-// 不打 MISS 怪：进盒但 ACC 不够、连续 N 次 Damage=0 后禁锁换靶。默认开 / N=1。
-// 不预调 CheckPDamageMiss（吃 Rand32）。
+// 不打 MISS 怪：进盒但 ACC 不够、连续 N 次 Damage=0 后禁锁换靶。默认开 / N=3。
+// 不预调 CheckPDamageMiss（吃 Rand32）。残血 / 已打出真伤的浮动 MISS 不计。
 constexpr uint32_t kCombatSkipAccMissDefault = 1u;
-constexpr uint32_t kCombatSkipAccMissNDefault = 1u;
+constexpr uint32_t kCombatSkipAccMissNDefault = 3u;
 constexpr uint32_t kCombatSkipAccMissNMin = 1u;
 constexpr uint32_t kCombatSkipAccMissNMax = 5u;
 // 瞬移找怪「每只怪打一下」：出一刀后切下一只（走原选怪）。默认关。

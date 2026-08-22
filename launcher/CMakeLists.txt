@@ -11,6 +11,8 @@ add_library(msc_launch STATIC
   gamapass_ticket_harvest.cpp
   gamapass_uia_login.cpp
   gamapass_device_login.cpp
+  gamapass_login_phase.cpp
+  ngm_protocol_allow.cpp
   win_uia.cpp
   msc_webview_login.cpp
 )

@@ -20,6 +20,7 @@
 #include "../ports/foothold_port.h"
 #include "../ports/ground_spoof.h"
 #include "../ports/hit_pin_port.h"
+#include "../ports/hit_geom_port.h"
 #include "../ports/input_port.h"
 #include "../ports/map_bounds_port.h"
 #include "../ports/mob_gather_port.h"
@@ -33,6 +34,7 @@
 #include "../ports/world_port.h"
 #include "../travel/travel.h"
 #include "../invuln/invuln.h"
+#include "../encounter/encounter.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
@@ -535,6 +537,8 @@ struct LockState {
 };
 LockState gLock{};
 const char* gLastLockLostWhy = "lost";
+// 上次引擎接刀的 action id（b1≥0）。出刀闸对 Range 取并集，此值只进 geom 日志。
+int gLastSwingAction = -1;
 // iv=0 持火起点；仅「站稳后」累计，超时仍不可命中则 softban 换怪。
 DWORD gInViewHoldSince = 0;
 // 站稳后仍 iv=0 超过此时长 → unreachable softban（FindHit 长期不恢复）。
@@ -1264,6 +1268,16 @@ bool HandleTinyHopSticky(DWORD now, float playerX, float playerY, float standOff
     return true;  // break 等
 }
 
+// 本锁已经打进过血：一次 RNG MISS 不是「这只打不了」。
+// armHp 是观察窗起点，连砍后常已等于当前残血，不能当「是否交过手」。
+bool AccMissLockAlreadyWounded() {
+    if (gLock.dealtHits > 0) return true;
+    if (gLock.lockStartHp >= 0 && gLock.lastHp >= 0 && gLock.lastHp < gLock.lockStartHp) {
+        return true;
+    }
+    return false;
+}
+
 // 进盒后 ACC 不够：AddDamageInfo 仍写 lastHitted，但 Damage@+0x24=0（飘 MISS）。
 // 列表偶发晚一拍 → 上升沿先记下 lastHitted，窗内再读。血条已掉不当 MISS。
 void ResolveAccMissAfterBump(DWORD now, const char* when) {
@@ -1289,6 +1303,13 @@ void ResolveAccMissAfterBump(DWORD now, const char* when) {
         gLock.accMissStreak = 0;
         return;
     }
+    if (AccMissLockAlreadyWounded()) {
+        gLock.accMissStreak = 0;
+        LogLine("acc_miss keep why=wounded id=%d hit=%d hp=%d startHp=%d dealt=%d lf=%d when=%s",
+                gLock.id, gLock.lastHitted, gLock.lastHp, gLock.lockStartHp, gLock.dealtHits,
+                gLock.lockFires, when && when[0] ? when : "?");
+        return;
+    }
     gLock.accMissStreak += 1;
     gLock.accMissCount += 1;
     LogLine("acc_miss id=%d hit=%d dmg=0 char=%u skill=%d act=%d idx=%d hp=%d lf=%d fires=%d "
@@ -1300,9 +1321,11 @@ void ResolveAccMissAfterBump(DWORD now, const char* when) {
 }
 
 // CMS CheckPDamageMiss 吃 Rand32，禁止预调。进盒连续 Damage=0 满 N 再禁锁。
+// 残血 / 已打出真伤：一次浮动 MISS 不换靶（BIN 22:39：hp=55 仍 skip_acc_miss 禁 8s）。
 bool TryAbandonAccMiss(DWORD now) {
     if (!gSkipAccMissEnabled.load(std::memory_order_acquire)) return false;
     if (!gLock.id) return false;
+    if (AccMissLockAlreadyWounded()) return false;
     const int need = gSkipAccMissN.load(std::memory_order_acquire);
     if (need <= 0 || gLock.accMissStreak < need) return false;
     LogLine("switch reason=skip_acc_miss id=%d streak=%d need=%d n=%d hp=%d hit=%d fires=%d "
@@ -5579,6 +5602,16 @@ void TickImpl(DWORD now) {
     SyncImpactFhBan();
     // 测谎落台 setpoint 必须在旋翼 Tick 之前写好（同 PublishHeliSetpoint 约束）。
     TickLieSafeLand(now);
+    // 遇人：战斗拍上 peek 硬闸。必须在旋翼前清锁，否则本拍仍按贴怪 setpoint 冲出去砍。
+    // 旋翼不停（fh-ban / 落台仍要作动）；换的是 setpoint 来源。
+    const bool encounterPeekHold = encounter::TryHoldFromBoundPeek();
+    if (gHardPauseMask.load(std::memory_order_acquire) != 0) {
+        if (gState != State::Idle)
+            GoIdle(now, encounterPeekHold ? "encounter_peek" : "pause");
+        TickHeliRotor(now);
+        SyncImpactFhBan();
+        return;
+    }
     // 旋翼必须在这里转：下面每一个提前 return（skill_prepare / arm_grace / 池未热身 /
     // bad_pos / wait_pet）都会跳过 FSM，而 fh-ban 仍挂着——停一拍就是掉一段。
     TickHeliRotor(now);
@@ -5821,7 +5854,12 @@ void TickImpl(DWORD now) {
     }
 
     // Aim/Recover→Firing 同 tick 连跑；多给几拍让 dead→acquire→MoveTo 同轮完成。
+    // 遇人 peek：同轮 dead 后禁止再 acquire（BIN：死怪后 1ms 就贴下一只砍完才 hop）。
     for (int pass = 0; pass < 5; ++pass) {
+        if (encounter::TryHoldFromBoundPeek()) {
+            if (gState != State::Idle) GoIdle(now, "encounter_peek");
+            break;
+        }
         SyncHitPinWish();
         // 站位点每拍刷新：怪会动，出刀期间旋翼也要跟着它悬停（这才是「打完不掉」的关键）。
         if (impactOn) PublishHeliSetpoint(now, player.x, player.y, gLock.id != 0);
@@ -6858,42 +6896,36 @@ void TickImpl(DWORD now) {
                 break;
             }
 
-            // ★ inView=0：默认不 TryFire（FindHit 拒刀 → softban）。
-            // BIN 00:16：几何已 InHeliFireBand 仍 NeedsHeliStationKeep → heli_iv0_hold
-            // Firing↔MoveTo 自激，体感「贴到怪身上呆住」。
-            // · 已进带：禁止再进 MoveTo，原地持火等 inView（旋翼仍 Publish 收站）。
-            // · 换锁首刀且已进带：直接放行（first_lock_fire forgive 兜空挥）。
-            // · 打中换怪：FindHit 硬拒 inView=0，宽带 forgive 必空，不放行。
+            // ★ inView=0：FindHit 硬拒（IDA `[r13+100h]` cmovnz 续，否则 rsi 拒）。
+            // 任何模式、包括换锁首刀，都禁止 TryFire。旧「进带首刀 forgive」BIN 22:39
+            // 4/7 次 first_lock hit=0 就是这么挥空的（acquire iv=0 仍 lf=0 出刀，b1≥0）。
+            // 已进带：禁止再进 MoveTo，原地持火等 inView（旋翼仍 Publish 收站）。
             if (!hiraishinOn && !gLock.inView) {
-                const bool hitRotateOn = HitRotateFarmActive();
                 const bool heliInBand =
                     impactOn && InHeliFireBand(player.x, player.y, gLock.x, gLock.y);
-                if (hitRotateOn || !(heliInBand && gLock.lockFires == 0)) {
-                    if (impactOn && !heliInBand &&
-                        NeedsHeliStationKeep(player.x, player.y, gLock.x, gLock.y)) {
-                        gInViewHoldSince = 0;
-                        if (TryEnterMoveTo(now, "heli_iv0_hold")) continue;
-                        break;
-                    }
-                    if (!gInViewHoldSince) gInViewHoldSince = now;
-                    static DWORD sIvHoldLog = 0;
-                    if (!sIvHoldLog || now - sIvHoldLog > 500) {
-                        sIvHoldLog = now;
-                        LogLine("fire hold iv=0 id=%d d=(%.0f,%.0f) since=%ums", gLock.id,
-                                gLock.x - player.x, gLock.y - player.y, now - gInViewHoldSince);
-                    }
-                    if (now - gInViewHoldSince >= kInViewHoldFireMaxMs) {
-                        SoftBanFor(gLock.id, now, kInViewHoldSoftBanMs, kBanUnreachable);
-                        LogLine("switch reason=iv0_timeout id=%d hold=%ums softBan=%ums", gLock.id,
-                                now - gInViewHoldSince, (unsigned)kInViewHoldSoftBanMs);
-                        gLastLockLostWhy = "iv0_timeout";
-                        ClearLockRetarget();
-                        EnterState(State::Acquire, now, "iv0_timeout");
-                        continue;
-                    }
-                    break;  // 留 Firing：持火等 inView，不弹 MoveTo
+                if (impactOn && !heliInBand &&
+                    NeedsHeliStationKeep(player.x, player.y, gLock.x, gLock.y)) {
+                    gInViewHoldSince = 0;
+                    if (TryEnterMoveTo(now, "heli_iv0_hold")) continue;
+                    break;
                 }
-                gInViewHoldSince = 0;  // 首刀+已进带：落入下方出刀
+                if (!gInViewHoldSince) gInViewHoldSince = now;
+                static DWORD sIvHoldLog = 0;
+                if (!sIvHoldLog || now - sIvHoldLog > 500) {
+                    sIvHoldLog = now;
+                    LogLine("fire hold iv=0 id=%d d=(%.0f,%.0f) since=%ums", gLock.id,
+                            gLock.x - player.x, gLock.y - player.y, now - gInViewHoldSince);
+                }
+                if (now - gInViewHoldSince >= kInViewHoldFireMaxMs) {
+                    SoftBanFor(gLock.id, now, kInViewHoldSoftBanMs, kBanUnreachable);
+                    LogLine("switch reason=iv0_timeout id=%d hold=%ums softBan=%ums", gLock.id,
+                            now - gInViewHoldSince, (unsigned)kInViewHoldSoftBanMs);
+                    gLastLockLostWhy = "iv0_timeout";
+                    ClearLockRetarget();
+                    EnterState(State::Acquire, now, "iv0_timeout");
+                    continue;
+                }
+                break;  // 留 Firing：持火等 inView，不弹 MoveTo
             } else {
                 gInViewHoldSince = 0;
             }
@@ -6912,12 +6944,27 @@ void TickImpl(DWORD now) {
                 }
             }
 
-            // ── 换向：一律同拍转身+出刀，不再 face_settle Recover ────────────────
-            // 分拍实证能抬换向命中，但到位后 ApplyFaceNow 行走输入 + Recover =
-            // 体感发呆（BIN 23:09）。首刀已同拍；用户要连砍也不愣 → 后续刀同样不恢复。
-            // 换向空刀：首刀仍 first_lock_fire forgive；后续走正常 whiff。
-            // （启用瞬间的那一刀改走上面 enable_face_settle。）
-            if (ports::attack::FaceNeedsFlip(faceDx)) {
+            // ── 换向 ──────────────────────────────────────────────────────────
+            // 换锁第一刀：分拍转身，并用引擎 ma bit0 对齐（AlignFaceToEngine）。
+            // sticky `fw=2` 只信 gLastFaceSign，缓存常仍是上一只怪 → 攻击盒在背后。
+            // 连砍同拍翻面+挥（BIN 23:09 发呆是中段连砍分拍，不在首刀）。
+            if (firstOfLock && !hiraishinOn) {
+                ports::teleport::FlightState faceSt{};
+                const int engineMa =
+                    (ports::teleport::QueryFlightState(faceSt) && faceSt.ok) ? faceSt.ma : -1;
+                bool pulsed = false;
+                if (engineMa >= 0) {
+                    pulsed = ports::attack::AlignFaceToEngine(faceDx, engineMa);
+                } else if (ports::attack::FaceNeedsFlip(faceDx)) {
+                    pulsed = ports::attack::ApplyFaceNow();
+                }
+                if (pulsed) {
+                    LogLine("fire hold face_settle id=%d dx=%.0f ma=%d first=1", gLock.id, faceDx,
+                            engineMa);
+                    EnterState(State::Recover, now, "lock_face_settle");
+                    break;
+                }
+            } else if (ports::attack::FaceNeedsFlip(faceDx)) {
                 (void)ports::attack::ApplyFaceNow();
             }
 
@@ -7049,6 +7096,42 @@ void TickImpl(DWORD now) {
                     break;
                 }
             } else {
+                // 官方相交闸：afterimage 攻击盒 ∩ GetBodyRect。只拦刀，不改旋翼站距。
+                // 放在 face_settle / 忙锁之后——朝向未落地时盒在背后，会误拦。
+                // Separate：确定不相交 → 压刀（含表空特赦用尽后的 no_range）。
+                // Unknown：A 槽豁免 / 泵失败 no_body / 表空第一次特赦。
+                {
+                    ports::teleport::FlightState geomSt{};
+                    bool faceLeft = (faceDx < 0.f);
+                    if (ports::teleport::QueryFlightState(geomSt) && geomSt.ok && geomSt.ma >= 0)
+                        faceLeft = (geomSt.ma & 1) != 0;
+                    const ports::hit_geom::Snap gs = ports::hit_geom::QueryLockOverlap(
+                        gLock.ptr, player.x, player.y, faceLeft, gLastSwingAction);
+                    if (gs.geom == ports::hit_geom::Geom::Separate) {
+                        static DWORD sGeomHold = 0;
+                        if (!sGeomHold || now - sGeomHold > 400) {
+                            sGeomHold = now;
+                            LogLine(
+                                "fire hold geom id=%d hit=0 why=%s action=%d hint=%d n=%d "
+                                "atk=(%.0f,%.0f,%.0f,%.0f) body=(%.0f,%.0f,%.0f,%.0f) "
+                                "faceL=%d d=(%.0f,%.0f)",
+                                gLock.id, gs.why ? gs.why : "?", gs.actionUsed, gs.actionHint,
+                                gs.rangeN, gs.atkX, gs.atkY, gs.atkW, gs.atkH, gs.bodyX, gs.bodyY,
+                                gs.bodyW, gs.bodyH, faceLeft ? 1 : 0, gLock.x - player.x,
+                                gLock.y - player.y);
+                        }
+                        break;
+                    }
+                    if (gs.geom == ports::hit_geom::Geom::Unknown) {
+                        static DWORD sGeomSkip = 0;
+                        if (!sGeomSkip || now - sGeomSkip > 2000) {
+                            sGeomSkip = now;
+                            LogLine("fire geom skip why=%s n=%d id=%d t=%d v=%d wt=%d",
+                                    gs.why ? gs.why : "?", gs.rangeN, gLock.id, gs.fkType,
+                                    gs.fkValue, gs.weaponType);
+                        }
+                    }
+                }
                 // 仅换锁首刀跳过面板间隔（BIN：换锁后常卡在 ~400ms 残值）。
                 // 同锁第 2 刀起恢复面板节奏；pendingUp / 泵拥堵始终挡。
                 // 站桩输出不走 ignore：换锁第一刀也等间隔 + 忙锁，禁止 18ms 空刷。
@@ -7122,6 +7205,7 @@ void TickImpl(DWORD now) {
                     uint32_t spFh = 0;
                     ports::ground_spoof::FireDebug(&spV, &spFh);
                     ports::attack::FireOutcomeDebug(&b0, &b1);
+                    if (b1 >= 0) gLastSwingAction = b1;
                     int bapx = 0, bapy = 0, baplx = 0, baply = 0, bap2x = 0, bap2y = 0;
                     if (blink.on) ports::attack::BlinkDebug(&bapx, &bapy, &baplx, &baply, &bap2x, &bap2y);
                     LogToFile(

@@ -10,6 +10,8 @@
 #include <functional>
 #include <string>
 
+#include "msc_launch.h"
+
 namespace msc::weblogin {
 
 using LogCallback = std::function<void(const std::wstring& line)>;
@@ -57,12 +59,20 @@ void SetGamaPassAccountSlot(int slot1Based);
 
 bool StartOneClick(const std::wstring& accountLine, std::wstring& err);
 
+// 账密独立罐换票成功后：接管经典版并注入（不调用 NGM）。
+bool LaunchClassicAfterTicket(msc::launcher::GalaxyTicket ticket);
+
+// 写入 bin/launcher.log 并刷新启动 TAB 日志（工作线程可调）。
+void QueueLog(const std::wstring& line);
+
 bool TryParseAccountLine(const std::wstring& accountLine, std::wstring& err);
 
 void OnTimer(UINT_PTR timerId);
 void OnFlushLogs();  // WM_APP+1
 void OnIdle();       // WM_APP+2
 void Shutdown();
+// 取消进行中的 GAMA PASS 自动登录 / HTTP 换票（只置标志，不关日常浏览器）。
+void RequestCancelInFlightLogin();
 
 std::wstring LoadSavedAccountLine();
 void SaveAccountLine(const std::wstring& line);

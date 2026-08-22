@@ -301,7 +301,8 @@ constexpr bool kFullFireCombatApproachBrake = false;
 // 竖速超出意图档时先卸战斗 X，紧急也走航向钳（BIN 19:00 分轴横推+砸落）。
 // 左右墙预刹窗见 Tick 里 kLimitDashWallBrakeSec（16ms 节拍不得把 X 窗缩到 32ms）。
 // ★ 回退改 false：恢复 90ms + 纯死拍（18:23）。
-constexpr bool kFullFireCombatLimitDash = true;
+// 2026-08-23：满火力 16ms 进近 Move 过密，会话到不了 40s，按注释回退。
+constexpr bool kFullFireCombatLimitDash = false;
 // 出刀几何已够（|ey|≤首刀/续砍带）时，禁止把残差 /T 打成上千 vy。超闸第一拍立即卸；
 // 随后锁 48ms 等物理步刷新，禁止连发（BIN 19:40 cadence=0 到站泵抖）。
 // BIN 19:13：d=(58,-11)/( -53,-2) 已在盒内，vy=7133/7332 被 hold；11/0.016=687 仍超闸 600。

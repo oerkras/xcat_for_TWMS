@@ -20,6 +20,7 @@
 #include "../auto_lie/auto_lie.h"
 #include "../ports/skill_port.h"
 #include "../ports/world_port.h"
+#include "../travel/travel.h"
 
 #include "xcat_auto_skill.h"
 
@@ -100,6 +101,7 @@ int gLevelBefore = 0;
 bool gLoggedResolve = false;
 bool gLoggedOffs = false;
 bool gLieBusy = false;
+bool gTravelBusy = false;
 bool gLoggedFamily = false;
 bool gLoggedWaitBook = false;
 bool gNeedPersist = false;
@@ -576,6 +578,21 @@ void Tick(DWORD now) {
     if (!gCfg.enabled) return;
     if (!xcat::AutoSkillReady(gCfg)) return;
     if (!x::features::ports::world::IsPlayReady()) return;
+    // SendSp 与进门同一把 WM 独占锁 type=500。加点让路后技能点不能接着占锁。
+    if (x::features::travel::IsActive()) {
+        if (!gTravelBusy) {
+            gTravelBusy = true;
+            ResetPending();
+            x::runtime::LogI("AutoSkill", "赶路中，暂停加技能点（独占锁让给发门）");
+        }
+        return;
+    }
+    if (gTravelBusy) {
+        gTravelBusy = false;
+        gLastUseMs = now;
+        x::runtime::LogI("AutoSkill", "赶路结束，恢复加技能点");
+        return;
+    }
     if (auto_lie::IsBusy()) {
         if (!gLieBusy) {
             gLieBusy = true;
@@ -740,6 +757,7 @@ void Init() {
     gLoggedResolve = false;
     gLoggedOffs = false;
     gLieBusy = false;
+    gTravelBusy = false;
     gLoggedFamily = false;
     gLoggedWaitBook = false;
     gNeedPersist = false;

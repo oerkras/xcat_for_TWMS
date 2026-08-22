@@ -228,6 +228,8 @@ const char* HttpLoginErrorName(HttpLoginError e) {
             return "Protocol";
         case HttpLoginError::OttMissing:
             return "OttMissing";
+        case HttpLoginError::Cancelled:
+            return "Cancelled";
     }
     return "Unknown";
 }

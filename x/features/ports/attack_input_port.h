@@ -130,6 +130,10 @@ void ForceRelease();
 // type = FuncType（1=Skill 2=Item 5=BasicAction）；value = skillId 或 FkmType（普攻=52）。
 bool PeekAttackBinding(int32_t* type, int32_t* value);
 
+// Worker 可调：读上次 EnsureAttackFkOnMain 缓存的 t/v。从未解析则 false（t/v=-1）。
+// 禁止在 worker 上调 PeekAttackBinding（会 false，且不得为读槽去 InvokeAndWait）。
+bool PeekAttackBindingCached(int32_t* type, int32_t* value);
+
 // 必须已在主线程泵上（禁止再 Invoke）。SetInput(0,0) 清走路锁存。
 // fill+Doing / Settling 自愈用；ForceRelease 会再包一层 Invoke。
 void ClearWalkLatchMainThread();

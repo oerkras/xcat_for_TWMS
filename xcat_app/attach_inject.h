@@ -13,7 +13,8 @@ namespace xcat::app::attach_inject {
 enum class LaunchMode {
     AttachWatch = 0,   // 手动启动并注入（默认）
     OneClickLogin = 1, // gamania (HK)：账密 HTTP/WebView 换票 + NGM + 注入
-    GamaPassAuto = 2,  // GAMA PASS自动登录：浏览器点选换票 + NGM + 注入
+    GamaPassAuto = 2,  // GAMA PASS自动登录：日常浏览器点选换票 + 注入
+    GamaPassDirect = 3, // GAMA PASS账密直登：独立罐填卖家行后换票 + 注入
 };
 
 inline bool IsAttachWatchMode(LaunchMode m) { return m == LaunchMode::AttachWatch; }

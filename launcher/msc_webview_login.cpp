@@ -16,6 +16,8 @@
 #include "http_gamapass_login.h"
 #include "gamapass_cdp_login.h"
 #include "gamapass_uia_login.h"
+#include "gamapass_device_login.h"
+#include "gamapass_login_phase.h"
 #include "chromium_cdp.h"
 #include "inject_after_launch.h"
 
@@ -275,6 +277,7 @@ void FlushLogsToUi() {
 
 void SetBusy(bool busy) {
     g.busy = busy;
+    if (!busy) msc::launcher::SetGamaPassUiPhase(msc::launcher::GamaPassUiPhase::Idle);
     if (!g.hwnd) return;
     if (!busy) {
         KillTimer(g.hwnd, kHttpBusyTimerId);
@@ -325,21 +328,31 @@ bool LaunchWithTicket(msc::launcher::GalaxyTicket ticket, bool attachExistingCla
     return injectOk;
 }
 
+bool LaunchClassicAfterTicket(msc::launcher::GalaxyTicket ticket) {
+    return LaunchWithTicket(std::move(ticket), /*attachExistingClassic=*/true);
+}
+
 void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
     err.clear();
     if (g.busy) {
         err = L"正在登录中";
         return;
     }
+    if (msc::launcher::IsGamaPassDeviceLoginBusy()) {
+        err = L"账密登录正在拉起游戏，请等它完成后再点 GAMA PASS自动登录";
+        return;
+    }
 
     if (g.authStrategy == AuthStrategy::GamaPassAuto) {
         g.cred = {};
         SetBusy(true);
+        msc::launcher::ResetGamaPassLoginCancel();
+        msc::launcher::SetGamaPassUiPhase(msc::launcher::GamaPassUiPhase::OpeningBrowser);
         QueueLog(std::wstring(kHttpBusyTag) + L" GAMA PASS 浏览器点选换票中…");
         QueueLog(L"[…] GAMA PASS：UIA 点选换票（无调试口）。"
                  L"始终走日常浏览器，不因账密助手 device_id 改道独立罐。不写回日常罐。");
-        QueueLog(L"[提示] 一键会新开登录窗。助手不会自动衔接换票；请先助手登完再点自动登录。"
-                 L"不调用 refresh。");
+        QueueLog(L"[提示] 账密登录是另一条拉起路径（独立窗口）。"
+                 L"本按钮仍走日常浏览器 UIA。不调用 refresh。");
 
         std::thread([]() {
             const bool usable = msc::launcher::HttpGamaPassHasUsableSession();
@@ -348,6 +361,12 @@ void StartOneClickWithLine(const std::wstring& accountLine, std::wstring& err) {
 
             auto lr = msc::launcher::HttpGamaPassUiaLoginToOtt(
                 [](const std::wstring& line) { QueueLog(line); });
+            if (msc::launcher::GamaPassLoginCanceled() ||
+                lr.error == msc::launcher::HttpLoginError::Cancelled) {
+                QueueLog(L"[…] 已取消 GAMA PASS 自动登录");
+                PostMessageW(g.hwnd, kMsgIdle, 0, 0);
+                return;
+            }
             if (lr.ok && lr.ticketFilled) {
                 QueueLog(std::wstring(kHttpTicketOkTag) + L" GAMA PASS 换票成功，正在开游戏…");
                 QueueLog(L"[OK] 换票成功 uid=" + lr.ticket.userObjectId + L" gid=" + lr.ticket.gid);
@@ -433,7 +452,7 @@ bool Init(HWND msgHwnd, LogCallback onLog) {
 }
 
 bool IsBusy() { return g.busy.load(); }
-bool CanStartOneClick() { return true; }
+bool CanStartOneClick() { return !msc::launcher::IsGamaPassDeviceLoginBusy(); }
 
 AuthStrategy GetAuthStrategy() { return g.authStrategy; }
 
@@ -517,6 +536,12 @@ void OnTimer(UINT_PTR id) {
 
 void OnFlushLogs() { FlushLogsToUi(); }
 void OnIdle() { SetBusy(false); FlushLogsToUi(); }
+
+void RequestCancelInFlightLogin() {
+    if (!g.busy.load()) return;
+    msc::launcher::RequestGamaPassLoginCancel();
+    QueueLog(L"[…] 用户取消登录（不关日常浏览器、不杀游戏）");
+}
 
 void Shutdown() {
     if (g.closing) return;

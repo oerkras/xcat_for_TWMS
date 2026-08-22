@@ -37,6 +37,9 @@ void InvalidateOccupancy();
 void RequestSampleNow();
 // 遇人仍钉着 simple_combat pause（channel_hop Fail/OK 结束时勿抢清）
 bool HoldsCombatPause();
+// 战斗热路径：已绑定 UserPool 纯内存 peek。有人则立刻硬闸，门控允许时顺带 RequestHop。
+// 不 Resolve、不投泵。池未绑 / 无人 / 无刷怪图 → false（调用方 fail-open）。
+bool TryHoldFromBoundPeek();
 
 // 赶路开趟前同步冻结遇人：FSM→Idle、silent 解开硬闸/停吸、丢掉排队中的 hop。
 // 世界地图关图可能阻塞 1.5s，必须在 Close / RequestGoto 之前调用。

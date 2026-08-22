@@ -35,6 +35,7 @@ add_library(xcat_probe SHARED
   ../features/titlebar/titlebar_game.cpp
   ../features/ports/mob_pool_port.cpp
   ../features/ports/hit_pin_port.cpp
+  ../features/ports/hit_geom_port.cpp
   ../features/ports/map_attack_port.cpp
   ../features/ports/mob_gather_port.cpp
   ../features/ports/mob_fh_ban.cpp

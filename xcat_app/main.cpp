@@ -259,6 +259,11 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         ui.status = "启动模式：手动启动并注入 — 就绪后自动开始监视";
         xcat::log::Info("App", "pending auto-watch (AttachWatch)");
     } else if (xcat::app::attach_inject::GetLaunchMode() ==
+               xcat::app::attach_inject::LaunchMode::GamaPassDirect) {
+        xcat::app::LaunchPanel_ArmGamaPassDirectLaunch(ui);
+        xcat::log::Info("App", "pending auto GamaPass direct launch (defer %us)",
+                        xcat::app::kGamaPassAutoPrepSec);
+    } else if (xcat::app::attach_inject::GetLaunchMode() ==
                xcat::app::attach_inject::LaunchMode::OneClickLogin) {
         if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
             // weblogin 尚未 Init；稍后 Init 会读盘。此处只设状态。

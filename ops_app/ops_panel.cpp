@@ -1230,6 +1230,7 @@ void MesoEventsLoad(OpsState& st);
 void MesoUnitsSave(OpsState& st);
 void MesoUnitsLoad(OpsState& st);
 void MesoMergeUidTokenAliases(OpsState& st);
+bool ContainsIgnoreCase(const std::string& hay, const char* needle);
 
 std::string MesoUnitKey(const std::string& token, const std::string& charName,
                         const std::string& deviceId) {
@@ -1251,6 +1252,7 @@ std::string MesoPersonId(const std::string& uid, const std::string& token) {
 }
 
 using WealthQtyMap = std::unordered_map<int, unsigned long long>;
+constexpr int kThunderDartItemId = 2070005;  // 与 drop_pool_port.h 同值
 
 void ParseWealthScrolls(const std::string& s, WealthQtyMap& out) {
     out.clear();
@@ -1272,6 +1274,7 @@ void ParseWealthScrolls(const std::string& s, WealthQtyMap& out) {
 }
 
 std::string ScrollItemLabel(const OpsState& st, int itemId) {
+    if (itemId == kThunderDartItemId) return "雷之鏢";
     char code[16]{};
     std::snprintf(code, sizeof(code), "%d", itemId);
     const char* name = xcat::ItemCatalogLookupName(
@@ -1302,8 +1305,94 @@ std::string FormatWealthScrollsHuman(const OpsState& st, const std::string& raw)
     return out;
 }
 
+bool IsEquipScrollItemId(int itemId) {
+    if (itemId <= 0) return false;
+    const int fam = itemId / 10000;
+    return fam == 204 || fam == 234;
+}
+
+void MergeWealthQty(WealthQtyMap& dst, const std::string& raw) {
+    WealthQtyMap add;
+    ParseWealthScrolls(raw, add);
+    for (const auto& kv : add) dst[kv.first] += kv.second;
+}
+
+void WealthHoldStats(const WealthQtyMap& m, unsigned long long& dartQty, bool& hasScroll) {
+    dartQty = 0;
+    hasScroll = false;
+    for (const auto& kv : m) {
+        if (kv.first == kThunderDartItemId)
+            dartQty += kv.second;
+        else if (IsEquipScrollItemId(kv.first) && kv.second > 0)
+            hasScroll = true;
+    }
+}
+
+void WealthHoldSorted(const WealthQtyMap& m,
+                      std::vector<std::pair<int, unsigned long long>>& items) {
+    items.clear();
+    items.reserve(m.size());
+    for (const auto& kv : m) {
+        if (kv.second > 0) items.push_back(kv);
+    }
+    std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+        const bool ad = a.first == kThunderDartItemId;
+        const bool bd = b.first == kThunderDartItemId;
+        if (ad != bd) return ad && !bd;
+        if (a.second != b.second) return a.second > b.second;
+        return a.first < b.first;
+    });
+}
+
+std::string FormatWealthHoldCompact(const OpsState& st, const WealthQtyMap& m) {
+    std::vector<std::pair<int, unsigned long long>> items;
+    WealthHoldSorted(m, items);
+    if (items.empty()) return {};
+    std::string out = ScrollItemLabel(st, items[0].first);
+    out += "×";
+    out += std::to_string(items[0].second);
+    if (items.size() > 1) {
+        out += " +";
+        out += std::to_string(items.size() - 1);
+    }
+    return out;
+}
+
+std::string FormatWealthHoldVertical(const OpsState& st, const WealthQtyMap& m) {
+    std::vector<std::pair<int, unsigned long long>> items;
+    WealthHoldSorted(m, items);
+    if (items.empty()) return {};
+    std::string out;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i) out += "\n";
+        out += ScrollItemLabel(st, items[i].first);
+        out += "  ×";
+        out += std::to_string(items[i].second);
+    }
+    return out;
+}
+
 bool MesoKindScroll(const std::string& kind) {
     return kind.size() >= 7 && kind.compare(0, 7, "scroll_") == 0;
+}
+
+bool MesoEventIsDart(const OpsState::MesoEvent& e) {
+    if (e.itemId == kThunderDartItemId) return true;
+    if (e.itemId != 0) return false;
+    return e.note.rfind("雷之鏢", 0) == 0;
+}
+
+bool MesoEventMatchesView(const OpsState::MesoEvent& e, int view) {
+    if (view == 1) return true;
+    if (view == 2) return e.kind == "inflow" || e.kind == "scroll_inflow";
+    if (view == 3) return MesoKindScroll(e.kind);
+    return MesoKindAbnormal(e.kind);
+}
+
+bool MesoEventMatchesFilter(const OpsState::MesoEvent& e, const char* filter) {
+    if (!filter || !filter[0]) return true;
+    return ContainsIgnoreCase(e.token, filter) || ContainsIgnoreCase(e.charName, filter) ||
+           ContainsIgnoreCase(e.peerToken, filter) || ContainsIgnoreCase(e.note, filter);
 }
 
 bool MesoKindAlert(const std::string& kind) {
@@ -1783,6 +1872,7 @@ void SampleMesoDash(OpsState& st) {
             ev.mag = scrollDeltas[i].mag;
             ev.note = ScrollItemLabel(st, scrollDeltas[i].itemId) + " 同号 " +
                       scrollDeltas[i].charName + " → " + scrollDeltas[j].charName;
+            ev.itemId = scrollDeltas[i].itemId;
             emit(ev);
             scrollDeltas[i].used = true;
             scrollDeltas[j].used = true;
@@ -1807,6 +1897,7 @@ void SampleMesoDash(OpsState& st) {
             ev.mag = scrollDeltas[i].mag;
             ev.note = ScrollItemLabel(st, scrollDeltas[i].itemId) + " 跨号 " +
                       scrollDeltas[i].token + " → " + scrollDeltas[j].token;
+            ev.itemId = scrollDeltas[i].itemId;
             emit(ev);
             scrollDeltas[i].used = true;
             scrollDeltas[j].used = true;
@@ -1818,6 +1909,12 @@ void SampleMesoDash(OpsState& st) {
     std::string scrollHint;
     for (auto& d : scrollDeltas) {
         if (d.used) continue;
+        // 雷之鏢是战斗弹药：单端数量下降多半是扔出去的，不当外转。
+        // 进账 / 同号搬仓 / 跨号对冲仍记（上面两轮已 used）。
+        if (d.down && d.itemId == kThunderDartItemId) {
+            d.used = true;
+            continue;
+        }
         OpsState::MesoEvent ev;
         ev.token = d.token;
         ev.charName = d.charName;
@@ -1825,6 +1922,7 @@ void SampleMesoDash(OpsState& st) {
         ev.after = d.after;
         ev.mag = d.mag;
         const std::string item = ScrollItemLabel(st, d.itemId);
+        ev.itemId = d.itemId;
         if (d.down) {
             ev.kind = d.reconnect ? "scroll_reconnect" : "scroll_outflow";
             ev.note = d.reconnect ? (item + " 离线后骤降，无对端进账")
@@ -1874,6 +1972,7 @@ void SampleMesoDash(OpsState& st) {
     std::unordered_map<std::string, std::set<std::string>> tokChars;
     std::unordered_map<std::string, int> tokLiveSessions;
     std::unordered_map<std::string, std::string> tokUid;
+    std::unordered_map<std::string, WealthQtyMap> tokWealth;
     unsigned long long total = 0;
     for (const auto& u : st.mesoUnits) {
         if (!u.sampled) continue;
@@ -1884,6 +1983,7 @@ void SampleMesoDash(OpsState& st) {
         addMeso(total, u.lastMeso);
         if (!u.charName.empty()) tokChars[pid].insert(u.charName);
         if (!u.uid.empty()) tokUid[pid] = u.uid;
+        if (u.scrollsSampled) MergeWealthQty(tokWealth[pid], u.lastScrolls);
     }
     for (const auto& kv : live) tokLiveSessions[kv.second.personId] += kv.second.sessions;
 
@@ -1900,6 +2000,14 @@ void SampleMesoDash(OpsState& st) {
         ser->sessions = tokLiveSessions[kv.first];
         ser->online = ser->sessions > 0;
         ser->lastMeso = kv.second.first;
+        {
+            const auto wit = tokWealth.find(kv.first);
+            const WealthQtyMap empty;
+            const WealthQtyMap& wm = wit != tokWealth.end() ? wit->second : empty;
+            WealthHoldStats(wm, ser->dartQty, ser->hasScroll);
+            ser->wealthText = FormatWealthHoldCompact(st, wm);
+            ser->wealthTip = FormatWealthHoldVertical(st, wm);
+        }
         ser->chars.clear();
         int n = 0;
         for (const auto& name : tokChars[kv.first]) {
@@ -1919,6 +2027,10 @@ void SampleMesoDash(OpsState& st) {
             s.online = false;
             s.sessions = 0;
             s.chars.clear();
+            s.dartQty = 0;
+            s.hasScroll = false;
+            s.wealthText.clear();
+            s.wealthTip.clear();
         }
     }
 
@@ -5330,7 +5442,7 @@ void DrawClientsPanel(OpsState& st) {
                         tip += c.charMeso.empty() ? "—" : c.charMeso;
                         tip += "）";
                         if (c.hasWealthScrolls) {
-                            tip += "\n卷轴 ";
+                            tip += "\n高价值 ";
                             tip += FormatWealthScrollsHuman(st, c.wealthScrolls);
                         }
                         ImGui::SetTooltip("%s", tip.c_str());
@@ -6810,12 +6922,23 @@ void DrawMesoDashPanel(OpsState& st) {
 
     int nOnline = 0;
     unsigned long long bookTotal = 0;
+    unsigned long long dartTotal = 0;
+    int dartHolders = 0;
+    int scrollHolders = 0;
     for (const auto& s : st.mesoDashSeries) {
         if (s.online) ++nOnline;
         if (bookTotal > (std::numeric_limits<unsigned long long>::max)() - s.lastMeso)
             bookTotal = (std::numeric_limits<unsigned long long>::max)();
         else
             bookTotal += s.lastMeso;
+        if (s.dartQty > 0) {
+            ++dartHolders;
+            if (dartTotal > (std::numeric_limits<unsigned long long>::max)() - s.dartQty)
+                dartTotal = (std::numeric_limits<unsigned long long>::max)();
+            else
+                dartTotal += s.dartQty;
+        }
+        if (s.hasScroll) ++scrollHolders;
     }
     unsigned long long winFirst = 0, winLast = bookTotal;
     bool haveFirst = false;
@@ -6853,7 +6976,9 @@ void DrawMesoDashPanel(OpsState& st) {
         if (thVals[i] == st.mesoAlertMin) thIdx = i;
     if (ImGui::Combo("##meso_th", &thIdx, thLabs, 5)) st.mesoAlertMin = thVals[thIdx];
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("金币变化达到此额度才记流水（过滤打怪小额抖动）\n卷轴数量变化 ≥1 即记，不受此门槛");
+        ImGui::SetTooltip(
+            "金币变化达到此额度才记流水（过滤打怪小额抖动）\n"
+            "卷轴数量变化 ≥1 即记；雷之鏢只记进账与跨号/搬仓，战斗消耗不记外转");
     ImGui::SameLine();
     ImGui::Checkbox("合计曲线", &st.mesoDashShowTotal);
     ImGui::SameLine();
@@ -6882,7 +7007,7 @@ void DrawMesoDashPanel(OpsState& st) {
 
     const float avail = ImGui::GetContentRegionAvail().x;
     const float gap = 8.f;
-    const float cardW = (avail - gap * 3.f) / 4.f;
+    const float cardW = (avail - gap * 4.f) / 5.f;
     char v1[48]{}, v3[48]{}, sub3[64]{};
     FormatMesoUll(bookTotal, v1, sizeof(v1));
     FormatMesoDelta(haveFirst ? winFirst : bookTotal, winLast, v3, sizeof(v3));
@@ -6916,6 +7041,20 @@ void DrawMesoDashPanel(OpsState& st) {
         DrawMesoKpiCard("在线人数##kpi4", tokBuf, "在线 / 已见过（签卡 uid 优先，否则旧 TOKEN）",
                         OpsTone::Token(), cardW);
     }
+    ImGui::SameLine(0, gap);
+    {
+        char dartBuf[48]{};
+        std::snprintf(dartBuf, sizeof(dartBuf), "%llu", dartTotal);
+        char dartSub[80]{};
+        std::snprintf(dartSub, sizeof(dartSub), "%d 人持有 · 卷轴 %d 人", dartHolders,
+                      scrollHolders);
+        DrawMesoKpiCard("雷之鏢##kpi5", dartBuf, dartSub,
+                        dartTotal > 0 ? OpsTone::Warn() : OpsTone::Muted(), cardW);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "底账合计（含离线上次探活）\n"
+                "未注入新 DLL 的号探活头没有 2070005，这里为 0");
+    }
 
     if (!st.clientsError.empty()) {
         ImGui::TextColored(OpsTone::DangerSoft(), "%s", st.clientsError.c_str());
@@ -6930,6 +7069,11 @@ void DrawMesoDashPanel(OpsState& st) {
             !ContainsIgnoreCase(s.uid, st.mesoDashFilter) &&
             !ContainsIgnoreCase(s.chars, st.mesoDashFilter))
             continue;
+        if (st.mesoDashOnlyDart || st.mesoDashOnlyScroll) {
+            const bool hitDart = st.mesoDashOnlyDart && s.dartQty > 0;
+            const bool hitSc = st.mesoDashOnlyScroll && s.hasScroll;
+            if (!hitDart && !hitSc) continue;
+        }
         listed.push_back(i);
     }
     std::stable_sort(listed.begin(), listed.end(), [&](size_t a, size_t b) {
@@ -6967,11 +7111,11 @@ void DrawMesoDashPanel(OpsState& st) {
         const float rowH = ImGui::GetContentRegionAvail().y;
         const float rowW = ImGui::GetContentRegionAvail().x;
         const float minPlotW = 360.f;
-        const float minLegendW = 420.f;
+        const float minLegendW = 520.f;
         if (st.mesoUiLegendW < minLegendW) {
-            st.mesoUiLegendW = rowW * 0.40f;
+            st.mesoUiLegendW = rowW * 0.42f;
             if (st.mesoUiLegendW < minLegendW) st.mesoUiLegendW = minLegendW;
-            if (st.mesoUiLegendW > 720.f) st.mesoUiLegendW = 720.f;
+            if (st.mesoUiLegendW > 800.f) st.mesoUiLegendW = 800.f;
         }
         {
             const float maxLeg = (std::max)(minLegendW, rowW - minPlotW - 8.f);
@@ -6991,39 +7135,50 @@ void DrawMesoDashPanel(OpsState& st) {
         ImGui::SameLine(0, 0);
         ImGui::BeginChild("meso_legend_cell", ImVec2(st.mesoUiLegendW, rowH), false,
                           ImGuiWindowFlags_NoScrollbar);
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 56.f);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 168.f);
         ImGui::InputTextWithHint("##meso_filter", "筛选身份 / 角色", st.mesoDashFilter,
                                  sizeof(st.mesoDashFilter));
         ImGui::SameLine();
         ImGui::TextDisabled("%d人", static_cast<int>(listed.size()));
+        ImGui::SameLine();
+        ImGui::Checkbox("有鏢", &st.mesoDashOnlyDart);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("只看名下有雷之鏢的人；与「有卷」同时开=并集");
+        ImGui::SameLine();
+        ImGui::Checkbox("有卷", &st.mesoDashOnlyScroll);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("只看名下有 204/234 卷轴的人；与「有鏢」同时开=并集");
         ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8.f, 6.f));
         ImGui::BeginChild("meso_legend", ImVec2(0, 0), true);
         if (listed.empty()) {
-            ImGui::TextDisabled("暂无样本。有签卡 uid 或旧 TOKEN 的会话会出现在这里。");
-        } else if (ImGui::BeginTable("meso_leg_tbl", 7,
+            if (st.mesoDashOnlyDart || st.mesoDashOnlyScroll)
+                ImGui::TextDisabled("筛选结果为空。关掉「有鏢 / 有卷」，或等新 DLL 探活带上 2070005。");
+            else
+                ImGui::TextDisabled("暂无样本。有签卡 uid 或旧 TOKEN 的会话会出现在这里。");
+        } else if (ImGui::BeginTable("meso_leg_tbl", 8,
                                      ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                          ImGuiTableFlags_SizingStretchProp |
                                          ImGuiTableFlags_PadOuterX)) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn("##vis", ImGuiTableColumnFlags_WidthFixed, 28.f);
-            ImGui::TableSetupColumn("身份", ImGuiTableColumnFlags_WidthStretch, 1.15f);
-            ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 1.05f);
+            ImGui::TableSetupColumn("身份", ImGuiTableColumnFlags_WidthStretch, 1.05f);
+            ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 0.9f);
             ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthFixed, 52.f);
-            ImGui::TableSetupColumn("实时", ImGuiTableColumnFlags_WidthFixed, 100.f);
-            ImGui::TableSetupColumn("增减", ImGuiTableColumnFlags_WidthFixed, 88.f);
-            ImGui::TableSetupColumn("走势", ImGuiTableColumnFlags_WidthFixed, 100.f);
+            ImGui::TableSetupColumn("高价值", ImGuiTableColumnFlags_WidthStretch, 1.15f);
+            ImGui::TableSetupColumn("实时", ImGuiTableColumnFlags_WidthFixed, 96.f);
+            ImGui::TableSetupColumn("增减", ImGuiTableColumnFlags_WidthFixed, 80.f);
+            ImGui::TableSetupColumn("走势", ImGuiTableColumnFlags_WidthFixed, 92.f);
             ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
             {
-                const char* tips[7] = {
+                const char* tips[8] = {
                     "勾选后左侧折线显示此人",
                     "签卡 uid（绿）；未激活为旧 TOKEN",
                     "该名下角色，斜杠分隔",
                     "在线=当前探活到；离线保留底账与轨迹",
+                    "格内只显示首件 +其余件数；悬停竖排看全部",
                     "底账金币；离线为上次探活",
                     "当前时间窗口净变化（与顶栏窗口一致）",
                     "当前时间窗口迷你折线",
                 };
-                for (int col = 0; col < 7; ++col) {
+                for (int col = 0; col < 8; ++col) {
                     ImGui::TableSetColumnIndex(col);
                     ImGui::PushID(col);
                     ImGui::TableHeader(ImGui::TableGetColumnName(col));
@@ -7064,11 +7219,21 @@ void DrawMesoDashPanel(OpsState& st) {
                 ImGui::EndGroup();
                 if (ImGui::IsItemHovered()) {
                     st.mesoDashHoverSeries = static_cast<int>(idx);
-                    ImGui::SetTooltip("%s%s\n%s\n%d 台 · %s%s\n双击只看此项", s.token.c_str(),
-                                      s.uid.empty() ? "（旧 TOKEN，尚未签卡）" : "（签卡 uid）",
-                                      s.chars.empty() ? "—" : s.chars.c_str(), s.sessions,
-                                      s.online ? "在线" : "离线（保留轨迹）",
-                                      hot ? "\n近 24h 有外转/骤降告警" : "");
+                    std::string tip = s.token;
+                    tip += s.uid.empty() ? "（旧 TOKEN，尚未签卡）" : "（签卡 uid）";
+                    tip += "\n";
+                    tip += s.chars.empty() ? "—" : s.chars;
+                    tip += "\n";
+                    tip += std::to_string(s.sessions);
+                    tip += " 台 · ";
+                    tip += s.online ? "在线" : "离线（保留轨迹）";
+                    if (hot) tip += "\n近 24h 有外转/骤降告警";
+                    if (!s.wealthTip.empty()) {
+                        tip += "\n";
+                        tip += s.wealthTip;
+                    }
+                    tip += "\n双击只看此项";
+                    ImGui::SetTooltip("%s", tip.c_str());
                 }
                 if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                     for (size_t j = 0; j < st.mesoDashSeries.size(); ++j)
@@ -7086,13 +7251,25 @@ void DrawMesoDashPanel(OpsState& st) {
                 else
                     ImGui::TextDisabled("离线");
                 ImGui::TableSetColumnIndex(4);
+                if (s.wealthText.empty()) {
+                    ImGui::TextDisabled("—");
+                } else {
+                    const ImVec4 wcol = s.dartQty > 0 ? OpsTone::Warn() : OpsTone::Muted();
+                    ImGui::TextColored(wcol, "%s", s.wealthText.c_str());
+                    if (ImGui::IsItemHovered()) {
+                        st.mesoDashHoverSeries = static_cast<int>(idx);
+                        ImGui::SetTooltip("%s", s.wealthTip.empty() ? s.wealthText.c_str()
+                                                                   : s.wealthTip.c_str());
+                    }
+                }
+                ImGui::TableSetColumnIndex(5);
                 char mesoBuf[48]{};
                 FormatMesoUll(s.lastMeso, mesoBuf, sizeof(mesoBuf));
                 if (s.online)
                     ImGui::TextUnformatted(mesoBuf);
                 else
                     ImGui::TextDisabled("%s", mesoBuf);
-                ImGui::TableSetColumnIndex(5);
+                ImGui::TableSetColumnIndex(6);
                 unsigned long long f = s.lastMeso, l = s.lastMeso;
                 bool hf = false;
                 for (const auto& p : s.points) {
@@ -7109,7 +7286,7 @@ void DrawMesoDashPanel(OpsState& st) {
                                     : (l > f)         ? OpsTone::Ok()
                                                       : OpsTone::Danger();
                 ImGui::TextColored(dcol, "%s", dBuf);
-                ImGui::TableSetColumnIndex(6);
+                ImGui::TableSetColumnIndex(7);
                 DrawMesoSparkline(s.points, t0, t1, col, ImVec2(92.f, 28.f));
                 if (ImGui::IsItemHovered()) st.mesoDashHoverSeries = static_cast<int>(idx);
                 ImGui::PopID();

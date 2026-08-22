@@ -142,7 +142,7 @@ void FillLeds(xcat::PayloadStatus& st) {
                 const char* jobTw =
                     x::features::titlebar::game::JobText(vitals.job, jobFallback);
                 if (jobTw) strncpy_s(st.playerJobName, jobTw, _TRUNCATE);
-                // 仅 playReady：换图空窗勿把空背包当成「卷轴清零」。纯内存读，无 UI。
+                // 仅 playReady：换图空窗勿把空背包当成「卷轴/雷之鏢清零」。纯内存读，无 UI。
                 if (st.playReady &&
                     x::features::titlebar::game::FormatWealthScrolls(
                         st.playerWealthScrolls, sizeof(st.playerWealthScrolls))) {
