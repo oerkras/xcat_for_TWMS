@@ -19,6 +19,7 @@
 #include "../features/ports/mob_fh_ban.h"
 #include "../features/ports/attack_input_port.h"
 #include "../features/ports/curfh_gate_bypass.h"
+#include "../features/ports/mob_prevpos_patch.h"
 #include "../features/ports/ground_spoof.h"
 #include "../features/ports/teleport_port.h"
 #include "../features/ports/travel_port.h"
@@ -408,6 +409,7 @@ void ApplyImpactHopTestSeq(const xcat::PayloadControl& c) {
 }
 
 void ApplyAuctionGateProbeSeq(const xcat::PayloadControl& c) {
+    if (!xcat::kAuctionGateProbeUserEnabled) return;
     if (c.auctionGateProbeSeq == 0) return;
     static std::atomic<bool> s_bootstrapped{false};
     static std::atomic<uint32_t> s_lastApplied{0};
@@ -489,8 +491,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::autopot::SetMpEnabled(c.mpPotion != 0);
     x::features::autopot::SetHpThresholdPct(static_cast<int>(c.hpThresholdPct));
     x::features::autopot::SetMpThresholdPct(static_cast<int>(c.mpThresholdPct));
-    x::features::pet_feed::SetDesired(c.petSummon != 0);
-    x::features::pet_feed::SetRequireFood(c.petSummonRequireFood != 0);
+    x::features::pet_feed::SetDesired(xcat::kPetSummonUserEnabled && c.petSummon != 0);
+    x::features::pet_feed::SetRequireFood(xcat::kPetSummonUserEnabled &&
+                                          c.petSummonRequireFood != 0);
     x::features::multi_skill::SetConfig(c.multiSkill != 0, c.multiSkillGapMs,
                                         c.multiSkillSafeStagger != 0);
     x::features::multi_skill::SetSendUseRequest(c.multiSkillSendUseRequest != 0);
@@ -517,6 +520,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::map_attack::SetEnabled(c.mapAttack != 0);
     // 吸怪只认首页勾；站桩输出不代开。
     x::features::ports::mob_gather::SetEnabled(c.mobGather != 0);
+    x::features::ports::mob_fh_ban::SetStrategy(c.mobGatherStrategy);
+    x::features::ports::mob_fh_ban::SetLandOnArrive(c.mobGatherLandOnArrive != 0);
+    x::features::ports::mob_fh_ban::SetHopPx(static_cast<float>(c.mobGatherHopPx));
     x::features::ports::mob_gather::SetSpeedPct(c.mobGatherSpeedPct);
     x::features::ports::mob_gather::SetAntiJitter(c.mobGatherAntiJitter != 0);
     x::features::ports::mob_gather::SetMaxHold(c.mobGatherMax);
@@ -540,6 +546,10 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::mob_gather::SetHangupFiresUiUnlocked(c.gatherTabUnlocked != 0);
     x::features::ports::mob_gather::SetClearRelogin(c.mobGatherClearRelogin != 0);
     x::features::ports::mob_gather::SetSeekCluster(c.mobGatherSeekCluster != 0);
+    x::features::ports::mob_gather::SetPatrolFar(c.mobGatherPatrolFar != 0);
+    // 防举报已证伪：忽略 INI，硬关并还原可能残留的 GA .text 脏页。吸怪其余旋钮不受影响。
+    (void)c.mobGatherAntiReport;
+    x::features::ports::mob_prevpos_patch::SetEnabled(false);
     x::features::ports::mob_gather::SetHomeReturn(c.mobGatherHomeReturn != 0);
     x::features::ports::mob_gather::SetHomePos(
         c.mobGatherHomeX, c.mobGatherHomeY, c.mobGatherHomeMapId, c.mobGatherHomeValid != 0,
@@ -600,6 +610,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
         xcat::ClampMobGatherStandOffY(c.mobGatherStandOffY));
     x::features::ports::mob_fh_ban::SetAimJitterPx(
         static_cast<float>(xcat::ClampMobGatherAimJitter(c.mobGatherAimJitterPx)));
+    x::features::ports::mob_fh_ban::SetDispClamp(
+        c.mobGatherDispClampOn != 0,
+        static_cast<float>(xcat::ClampMobGatherDispCapPx(c.mobGatherDispCapPx)));
     x::features::ports::ground_spoof::SetEnabled(c.simpleCombatGroundSpoof != 0);
     x::features::simple_combat::SetOneshotParams(c.simpleCombatOneshotMaxHp,
                                                  c.simpleCombatOneshotMinBumps,
@@ -625,9 +638,10 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::galaxy_token_probe::SetEnabled(c.galaxyTokenProbe != 0);
     x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
     x::features::drop_alert_bypass::SetEnabled(c.dropAlertBypass != 0);
-    x::features::force_trade::SetEnabled(c.forceTrade != 0);
+    x::features::force_trade::SetEnabled(xcat::kForceTradeUserEnabled && c.forceTrade != 0);
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
-    ApplyAuctionGateProbeSeq(c);
+    if (xcat::kAuctionGateProbeUserEnabled)
+        ApplyAuctionGateProbeSeq(c);
     x::features::rest_mp_accel::SetIntervalMs(c.restMpAccelIntervalMs);
     x::features::rest_mp_accel::SetEnabled(c.restMpAccel != 0);
     if (xcat::kInfiniteStarsUserEnabled)

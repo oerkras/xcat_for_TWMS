@@ -5,6 +5,7 @@
 #include "encounter.h"
 
 #include "../auto_lie/auto_lie.h"
+#include "../auto_supply/auto_supply.h"
 #include "../channel_hop/channel_hop.h"
 #include "../notify/notify.h"
 #include "../player_hide/player_hide.h"
@@ -277,7 +278,7 @@ void ResumeExposure(bool townSkip = false, bool silent = false) {
 
 // 超级赶路：整段冻结遇人（含已停手 / 已 Hopping）。
 // 旧实现只 return 不 Resume → 落台/停吸/换频排队继续抢旋翼和瞬移冷却。
-void SuspendForTravel(DWORD now) {
+void SuspendForTravel(DWORD now, const char* why = "travel") {
     if (GetStateLocal() != State::Idle) SetState(State::Idle);
     gConfirmSince = 0;
     gHopGraceUntil = 0;
@@ -285,7 +286,7 @@ void SuspendForTravel(DWORD now) {
     if (gPaused) ResumeExposure(/*townSkip=*/false, /*silent=*/true);
     if (now - gLastHopDeferLog > kHopDeferLogMs) {
         gLastHopDeferLog = now;
-        Log("suspend travel (no encounter hop/pause)");
+        Log("suspend %s (no encounter hop/pause)", why ? why : "travel");
     }
 }
 
@@ -333,6 +334,11 @@ void RequestHop(const ports::user_pool::RemoteThreatSample& t, bool threat) {
     FormatRemoteNames(t, names, sizeof(names));
     if (x::features::travel::IsActive()) {
         Log("hop skip: travel active other=%d names=[%s] threat=%d", other,
+            names[0] ? names : "?", threat ? 1 : 0);
+        return;
+    }
+    if (x::features::auto_supply::IsBusy()) {
+        Log("hop skip: auto_supply busy other=%d names=[%s] threat=%d", other,
             names[0] ? names : "?", threat ? 1 : 0);
         return;
     }
@@ -494,6 +500,11 @@ void Tick(DWORD now) {
     // 必须先于 !PlayReady：赶路换图时 PlayReady 会掉，旧 Hopping 会被当成换频空窗。
     if (x::features::travel::IsActive()) {
         SuspendForTravel(now);
+        return;
+    }
+    // 卖装/补给开趟：硬闸只停了打怪，遇人原先仍会 RequestHop（trip cool 窗口最常见）。
+    if (x::features::auto_supply::IsBusy()) {
+        SuspendForTravel(now, "auto_supply");
         return;
     }
     if (!ports::world::IsPlayReady()) {

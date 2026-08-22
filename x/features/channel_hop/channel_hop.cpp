@@ -7,6 +7,7 @@
 
 #include "../auto_enter/auto_enter.h"
 #include "../auto_lie/auto_lie.h"
+#include "../auto_supply/auto_supply.h"
 #include "../ccu/ccu.h"
 #include "../encounter/encounter.h"
 #include "../invuln/invuln.h"
@@ -223,6 +224,18 @@ bool IsEncounterHopSeq(uint32_t seq) { return seq >= kEncounterHopSeqBase; }
 
 bool WantEncounterSoftHop() {
     return gSoftReloginHop || IsEncounterHopSeq(gActiveSeq.load());
+}
+
+// 赶路贴门 / 卖装开趟期间禁止换频：PauseCombatForHop 会 ForceNativeCooldown，
+// CloseSession 会拆卖装途中的会话。测谎走 DeferReason，不在这里硬丢 pending。
+bool YieldHop() {
+    return x::features::travel::IsActive() || x::features::auto_supply::IsBusy();
+}
+
+const char* YieldHopWhy() {
+    if (x::features::travel::IsActive()) return "travel";
+    if (x::features::auto_supply::IsBusy()) return "auto_supply";
+    return nullptr;
 }
 
 int KnownDisp1Based() {
@@ -812,8 +825,9 @@ void JobFn(void* user) {
     }
     case JobCtx::Kind::FireTransfer: {
         // WaitFireIdle 可堵 2s，其间赶路可能已开工——发包前再挡一次。
-        if (x::features::travel::IsActive()) {
-            strncpy_s(job->err, "travel active", _TRUNCATE);
+        if (YieldHop()) {
+            strncpy_s(job->err, YieldHopWhy() == nullptr ? "yield hop" : YieldHopWhy(),
+                      _TRUNCATE);
             return;
         }
         if (WantEncounterSoftHop()) {
@@ -1237,8 +1251,11 @@ void ClearHopFailRecover(const char* why);
 // 超级赶路：整段停换频（含 Waiting）。
 // 不走 Fail：会 toast「换频失败」并可能 RequestAttempt 软重连，把赶路截断。
 // Waiting 包若已出门撤不回，只停本地结算——避免把赶路换图当成迁频 SettleOk。
-void AbortHopForTravel() {
-    if (!x::features::travel::IsActive()) return;
+// 超级赶路 / 自动补给：整段停换频（含 Waiting）。
+// 不走 Fail：会 toast「换频失败」并可能 RequestAttempt 软重连，把赶路/卖装截断。
+void AbortHopForYield() {
+    const char* why = YieldHopWhy();
+    if (!why) return;
     const State st = GetStateLocal();
     const uint32_t pend = gPendingSeq.exchange(0);
     const uint32_t active = gActiveSeq.load();
@@ -1250,15 +1267,15 @@ void AbortHopForTravel() {
         gSoftReloginHop = false;
         ClearAttemptState();
         SetState(State::Idle);
-        Log("abort travel seq=%u was=%u (no more transfer)", active,
+        Log("abort %s seq=%u was=%u (no more transfer)", why, active,
             static_cast<unsigned>(st));
     }
     gResumeAt = 0;
     gEarlyHoldFromRequest.store(false, std::memory_order_release);
-    ClearHopFailRecover("travel");
+    ClearHopFailRecover(why);
     ResumeCombatAfterHop();
     ports::teleport::ClearNativeSelfCd();
-    if (pend) Log("drop pending seq=%u travel active", pend);
+    if (pend) Log("drop pending seq=%u %s active", pend, why);
 }
 
 void ClearHopFailRecover(const char* why) {
@@ -1537,6 +1554,7 @@ const char* DeferReason() {
     if (ss == ports::world::SceneState::CashShop) return "商城中";
     if (ss == ports::world::SceneState::Login) return "登录中";
     if (auto_lie::IsBusy()) return "测谎中";
+    if (x::features::auto_supply::IsBusy()) return "补给中";
     if (now < gCooldownUntil) return "冷却中";
     // 警戒不在 Idle defer：BeginActive 停手后再 Confirming 等解除（避免一直打怪刷警戒）
     return nullptr;
@@ -1561,8 +1579,8 @@ void MaybeNotifyDefer(uint32_t seq, const char* reason, DWORD now) {
 }
 
 void BeginActive(uint32_t seq, DWORD now) {
-    if (x::features::travel::IsActive()) {
-        Log("begin skip seq=%u travel active", seq);
+    if (YieldHop()) {
+        Log("begin skip seq=%u %s active", seq, YieldHopWhy());
         return;
     }
     gActiveSeq.store(seq);
@@ -1626,7 +1644,7 @@ void CommitEncounterSoftHop() {
 }
 
 void TickSelecting(DWORD now) {
-    if (x::features::travel::IsActive()) return;
+    if (YieldHop()) return;
     (void)now;
     JobCtx info{};
     info.kind = JobCtx::Kind::ReadInfo;
@@ -1654,7 +1672,7 @@ void TickSelecting(DWORD now) {
 }
 
 void TickConfirming(DWORD now) {
-    if (x::features::travel::IsActive()) return;
+    if (YieldHop()) return;
     if (WantEncounterSoftHop()) {
         Log("confirm redirect soft-hop (no SendTransfer) seq=%u", gActiveSeq.load());
         CommitEncounterSoftHop();
@@ -1734,8 +1752,8 @@ void TickConfirming(DWORD now) {
 
     // 再收一次在途攻击键；settle 跟墙钟对齐，防末火刚过就叠 Transfer
     (void)ports::attack::WaitFireIdle(kFireIdleTimeoutMs, kFireIdleSettleMs);
-    if (x::features::travel::IsActive()) {
-        Log("confirm skip transfer travel seq=%u", gActiveSeq.load());
+    if (YieldHop()) {
+        Log("confirm skip transfer %s seq=%u", YieldHopWhy(), gActiveSeq.load());
         return;
     }
 
@@ -1747,7 +1765,8 @@ void TickConfirming(DWORD now) {
         Log("transfer blocked/fail seq=%u targetIdx=%d err=%s A8=%u→%u canSend=%d",
             gActiveSeq.load(), gTargetChannel, fire.err[0] ? fire.err : "?", fire.exclFlagA8,
             fire.exclFlagA8After, fire.exclOk ? 1 : 0);
-        if (std::strcmp(fire.err, "travel active") == 0) {
+        if (std::strcmp(fire.err, "travel") == 0 || std::strcmp(fire.err, "auto_supply") == 0 ||
+            std::strcmp(fire.err, "travel active") == 0 || std::strcmp(fire.err, "yield hop") == 0) {
             --gFireAttempt;
             return;
         }
@@ -2133,8 +2152,8 @@ void RequestRejoin(uint32_t seq, bool encounterSoftHop) {
     if (seq == 0) return;
     // 超级赶路中禁止新换频：PauseCombatForHop 会 ForceNativeCooldown 4s，贴门 ↑ 吃不到门
     // （BIN 06:04：enter-armed 同拍 hop → kbd Up timeout + fake soft）。
-    if (x::features::travel::IsActive()) {
-        Log("request skip seq=%u travel active", seq);
+    if (YieldHop()) {
+        Log("request skip seq=%u %s active", seq, YieldHopWhy());
         return;
     }
     // BIN 0.1.37：request→BeginActive 可隔数十 ms，其间仍 fire/MoveTo。边沿立刻硬闸停刀。
@@ -2235,8 +2254,8 @@ DWORD CooldownRemainingMs() {
 
 void Tick(DWORD now) {
     UpdatePlayReadyClock(now);
-    if (x::features::travel::IsActive()) {
-        AbortHopForTravel();
+    if (YieldHop()) {
+        AbortHopForYield();
         return;
     }
     TickPostHopResume(now);
@@ -2300,11 +2319,11 @@ void Tick(DWORD now) {
                 ResumeCombatAfterHop();
                 Log("hold pending seq=%u during %s (combat resume, fire after cool)", seq, defer);
             }
-        } else if (x::features::travel::IsActive()) {
+        } else if (YieldHop()) {
             gPendingSeq.store(0);
             ResumeCombatAfterHop();
             ports::teleport::ClearNativeSelfCd();
-            Log("begin skip seq=%u travel active", seq);
+            Log("begin skip seq=%u %s active", seq, YieldHopWhy());
         } else {
             BeginActive(seq, now);
         }

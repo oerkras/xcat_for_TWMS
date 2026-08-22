@@ -125,6 +125,8 @@ void FillLeds(xcat::PayloadStatus& st) {
     st.playerJobName[0] = '\0';
     st.playerWealthScrollsValid = 0;
     st.playerWealthScrolls[0] = '\0';
+    st.playerRegDateValid = 0;
+    st.playerRegDateTicks = 0;
     if (st.localPlayerOk) {
         x::features::titlebar::game::Vitals vitals{};
         if (x::features::titlebar::game::ReadVitals(vitals) && vitals.ok) {
@@ -146,6 +148,36 @@ void FillLeds(xcat::PayloadStatus& st) {
                         st.playerWealthScrolls, sizeof(st.playerWealthScrolls))) {
                     st.playerWealthScrollsValid = 1u;
                 }
+            }
+        }
+    }
+
+    // CharacterRegDate 进角后不变：采到一次就闩，换角色名才再读 WM。
+    {
+        static int64_t sTicks = 0;
+        static char sName[64]{};
+        const bool nameOk = st.playerCharValid && st.playerName[0];
+        const bool sameChar = nameOk && sName[0] && strncmp(sName, st.playerName, sizeof(sName)) == 0;
+        if (sTicks && (!nameOk || !sName[0] || sameChar)) {
+            if (nameOk && !sName[0]) strncpy_s(sName, st.playerName, _TRUNCATE);
+            st.playerRegDateValid = 1u;
+            st.playerRegDateTicks = sTicks;
+        } else if (st.wmAlive) {
+            int64_t ticks = 0;
+            if (x::features::ports::world::ReadCharacterRegDateTicks(&ticks)) {
+                sTicks = ticks;
+                if (nameOk)
+                    strncpy_s(sName, st.playerName, _TRUNCATE);
+                else
+                    sName[0] = '\0';
+                st.playerRegDateValid = 1u;
+                st.playerRegDateTicks = ticks;
+                x::runtime::LogI("PayloadStatus",
+                                 "CharacterRegDate latch ticks=%lld name=%s",
+                                 static_cast<long long>(ticks), sName[0] ? sName : "-");
+            } else if (nameOk && sName[0] && !sameChar) {
+                sTicks = 0;
+                sName[0] = '\0';
             }
         }
     }

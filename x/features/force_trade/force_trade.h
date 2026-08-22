@@ -1,6 +1,7 @@
 #pragma once
 
 // Classic TWMS：强制交易（实验）。
+// 用户入口已关（kForceTradeUserEnabled=false）：不启 worker、不改阈值。
 // 主路径：改写 UIUserInfo 人物卡「交易」按钮的等级比较 threshold global
 // （imm+global→0 ⇒ level>=0 恒真）。关功能 restore。默认关。
 // No GameAssembly .text patch / 不占 HWBP。Server Trade 权威不变。

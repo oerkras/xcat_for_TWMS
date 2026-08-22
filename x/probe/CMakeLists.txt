@@ -57,6 +57,7 @@ add_library(xcat_probe SHARED
   ../features/ports/fly_fh_ban.cpp
   ../features/ports/ground_spoof.cpp
   ../features/ports/curfh_gate_bypass.cpp
+  ../features/ports/mob_prevpos_patch.cpp
   ../features/ports/foothold_port.cpp
   ../features/ports/foothold_path.cpp
   ../features/ports/map_bounds_port.cpp

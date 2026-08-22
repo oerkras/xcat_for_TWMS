@@ -207,6 +207,9 @@ bool TryRefreshCacheLite(Snapshot& out);
 int CountMapMobLifeSlots();
 int GetSpawnPeak();
 
+// MapLifeData Type==Npc(2) 的刷点（AbsPos；更大 Y = 更高）。NpcPool 未刷出时用来贴排挡。
+bool FindNpcLifeSpawn(int templateId, float* outX, float* outY);
+
 // Ap 是否距某条 Mob 槽 (X,Y) < nearPx。不管 Rx 巡逻带（走出台仍在 Rx 内，不能当「还在出生点」）。
 // spawnPointN==0（LifeList 未读到）→ false（放行，避免误杀全图）。
 bool NearMobLifeSlot(float x, float y, const Snapshot& snap, float nearPx,

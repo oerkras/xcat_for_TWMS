@@ -4,12 +4,15 @@
 #include "../fly/fly.h"
 #include "../notify/notify.h"
 #include "../ports/consumable_port.h"
+#include "../ports/foothold_path.h"
+#include "../ports/mob_pool_port.h"
 #include "../ports/shop_port.h"
 #include "../ports/teleport_port.h"
 #include "../ports/travel_port.h"
 #include "../ports/world_port.h"
 #include "../sellbag/sellbag.h"
 #include "../simple_combat/simple_combat.h"
+#include "../simple_combat/heli_rotor.h"
 #include "../char_boot/char_boot.h"
 #include "../ports/mob_gather_port.h"
 #include "../soft_login_probe/soft_login_probe.h"
@@ -24,6 +27,7 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -79,6 +83,8 @@ DWORD gWaitOpenNotified = 0;
 DWORD gLastTalkAttempt = 0;
 int gTalkMissStreak = 0;  // OpeningShop：目标 NPC 连续对不上 → 提早改道（BIN 4bb7ea）
 constexpr int kTalkMissReroute = 3;
+constexpr float kShopNpcTalkPx = 280.f;
+bool gNpcApproaching = false;
 DWORD gLastMenuAttempt = 0;
 DWORD gLastBuyAttempt = 0;
 DWORD gLastCloseShopAttempt = 0;
@@ -95,6 +101,7 @@ bool gPreferDirect = false;
 bool gPausedCombat = false;
 bool gPausedFly = false;
 bool gManualTrip = false;
+bool gKeepFarmMap = false;  // yield 续卖：禁止 TickPause 把过路图写成挂机图
 bool gPotionEmptyArmed = true;  // 缺药触发后闭锁，直到绑定药再次达标才重开
 bool gCustomLowArmed = true;
 bool gCustom2LowArmed = true;
@@ -1172,16 +1179,17 @@ void TickIdle(DWORD now) {
             gPendingReturnFarm = false;
             PublishStatusIni();
         }
-        gManualTrip = true;
+        gManualTrip = !gKeepFarmMap;
         gShopExclude[0] = 0;
         gShopStockReroute = 0;
         gCooldownUntil = 0;
         travel::RequestStop();  // 清掉上次 already_there 等陈旧 failKind
-        runtime::LogI("AutoSupply", "手动一趟 shop=%s (%s)", gShopMap, msg);
+        runtime::LogI("AutoSupply", "%s shop=%s (%s)",
+                      gManualTrip ? "手动一趟" : "续卖一趟", gShopMap, msg);
         Publish(notify::NotificationKind::Info, "auto-supply-trip", "补给已接单",
                 "先开趟冷却，再赶路卖装");
         PauseSystems();
-        Enter(Phase::Pause, "手动补给：停手并记下挂机图…");
+        Enter(Phase::Pause, gManualTrip ? "手动补给：停手并记下挂机图…" : "续卖：停手…");
         return;
     }
 
@@ -1313,10 +1321,16 @@ void TickPause(DWORD now) {
         SetMsg("等软重连落地…");
         return;
     }
-    RememberFarmMapInternal(/*allowTown=*/false);
-    if (!gLastFarmMap[0]) {
-        // 已在城镇触发时允许记下当前图以免卡死
-        RememberFarmMapInternal(/*allowTown=*/true);
+    if (gKeepFarmMap) {
+        runtime::LogI("AutoSupply", "keep farm map %s (resume after wash)",
+                      gLastFarmMap[0] ? gLastFarmMap : "-");
+        gKeepFarmMap = false;
+    } else {
+        RememberFarmMapInternal(/*allowTown=*/false);
+        if (!gLastFarmMap[0]) {
+            // 已在城镇触发时允许记下当前图以免卡死
+            RememberFarmMapInternal(/*allowTown=*/true);
+        }
     }
     if (!gLastFarmMap[0]) {
         FailTrip("无法记录挂机图");
@@ -1336,6 +1350,7 @@ void TickPause(DWORD now) {
         gWaitOpenNotified = 0;
         gLastTalkAttempt = 0;
         gTalkMissStreak = 0;
+        gNpcApproaching = false;
         gLastMenuAttempt = 0;
         gShopReadySince = 0;
         return;
@@ -1359,6 +1374,7 @@ void TickGoingTown(DWORD now) {
         gWaitOpenNotified = 0;
         gLastTalkAttempt = 0;
         gTalkMissStreak = 0;
+        gNpcApproaching = false;
         gLastMenuAttempt = 0;
         gShopReadySince = 0;
         return;
@@ -1492,6 +1508,7 @@ bool TryRerouteShopAfterOpenMiss(const char* why) {
     runtime::LogW("AutoSupply", "%s，改道 %s npc=%s", why ? why : "开店失败", gShopMap,
                   gResolvedNpc);
     gTalkMissStreak = 0;
+    gNpcApproaching = false;
     gWaitOpenNotified = 0;
     gLastTalkAttempt = 0;
     gLastMenuAttempt = 0;
@@ -1515,6 +1532,7 @@ bool TryRerouteShopAfterStockMiss(const char* why) {
                   gResolvedNpc);
     (void)shop::CloseShop();
     gTalkMissStreak = 0;
+    gNpcApproaching = false;
     gWaitOpenNotified = 0;
     gLastTalkAttempt = 0;
     gLastMenuAttempt = 0;
@@ -1526,14 +1544,91 @@ bool TryRerouteShopAfterStockMiss(const char* why) {
     return true;
 }
 
+bool ResolveShopNpcStand(int tpl, float* outX, float* outY, const char** outSrc) {
+    if (outSrc) *outSrc = "?";
+    if (outX) *outX = 0.f;
+    if (outY) *outY = 0.f;
+    if (tpl <= 0) return false;
+    shop::NpcLocate loc{};
+    if (shop::LocateNpcByTemplate(tpl, loc) && loc.ok) {
+        if (outX) *outX = loc.x;
+        if (outY) *outY = loc.y;
+        if (outSrc) *outSrc = "pool";
+        return true;
+    }
+    if (ports::mob::FindNpcLifeSpawn(tpl, outX, outY)) {
+        if (outSrc) *outSrc = "life";
+        return true;
+    }
+    return false;
+}
+
+bool StickToShopNpc(int tpl, float x, float y, const char* src) {
+    namespace heli = x::features::simple_combat::heli;
+    ports::teleport::FlightState st{};
+    float px = 0.f, py = 0.f;
+    const bool haveAp = ports::teleport::QueryFlightState(st) && st.ok;
+    if (haveAp) {
+        px = st.x;
+        py = st.y;
+    }
+    const float dx = x - px;
+    const float dy = y - py;
+    const float dist = std::sqrt(dx * dx + dy * dy);
+    if (haveAp && st.onFh && dist <= kShopNpcTalkPx) {
+        gNpcApproaching = false;
+        return true;
+    }
+    if (simple_combat::IsSafeLandActive())
+        simple_combat::CancelSafeLand("auto_supply_stick_npc");
+    if (heli::Bailed()) heli::ClearBailed();
+
+    float sx = x, sy = y;
+    uint32_t fh = 0;
+    bool snap = ports::foothold_path::SnapStandAt(x, y, &sx, &sy, &fh, true, false) && fh != 0;
+    if (!snap)
+        snap = ports::foothold_path::SnapStandAt(x, y, &sx, &sy, &fh, false, false) && fh != 0;
+    const float landY = snap ? sy : y;  // AbsPos：更大 Y = 更高
+
+    ports::travel::PortalInfo p{};
+    char name[32]{};
+    snprintf(name, sizeof(name), "shop-npc:%d", tpl);
+    p.name = name;
+    p.x = x;
+    p.y = landY;
+    p.rectValid = true;
+    p.rectL = x - 160.f;
+    p.rectR = x + 160.f;
+    p.rectT = landY - 80.f;
+    p.rectB = landY + 80.f;
+
+    gNpcApproaching = true;
+    runtime::LogI("AutoSupply",
+                  "stick shop npc tpl=%d src=%s actor=(%.0f,%.0f) ap=(%.0f,%.0f) dist=%.0f "
+                  "landY=%.0f fh=%u",
+                  tpl, src ? src : "?", x, y, px, py, dist, landY, fh);
+    std::string res;
+    const bool ok = ports::travel::StickToStand(p, res);
+    runtime::LogI("AutoSupply", "stick shop npc done ok=%d result=%s", ok ? 1 : 0,
+                  res.c_str());
+    if (ok && (res == "STOOD" || res == "ALREADY")) {
+        gNpcApproaching = false;
+        return true;
+    }
+    return false;
+}
+
 void TickOpeningShop(DWORD now) {
     if (ports::mob_gather::HangupWashInFlight()) {
         SetMsg("等软重连落地…");
         return;
     }
     // 已在店图开趟：Travel 到站后仍可能悬空；先请求落台再等站稳。
-    EnsureSafeLandIfAirborne(now);
-    if (!WaitSafeLand(now)) return;
+    // 贴排挡途中不要再 DriveLieSafeHover，否则会把人拽回传送口。
+    if (!gNpcApproaching) {
+        EnsureSafeLandIfAirborne(now);
+        if (!WaitSafeLand(now)) return;
+    }
     if (now - gPhaseSince > kWaitOpenTimeoutMs) {
         if (TryRerouteShopAfterOpenMiss("开店超时")) return;
         FailTrip("等待开店超时");
@@ -1555,13 +1650,28 @@ void TickOpeningShop(DWORD now) {
         const bool talked = shop::TryTalkNearestNpc(0.f, tpl);
         if (!talked) {
             ++gTalkMissStreak;
-            (void)shop::TryNpcTalkFuncKey();
-            if (tpl > 0 && gTalkMissStreak >= kTalkMissReroute &&
+            float nx = 0.f, ny = 0.f;
+            const char* src = nullptr;
+            const bool haveNpc = ResolveShopNpcStand(tpl, &nx, &ny, &src);
+            if (haveNpc) {
+                SetMsg("飞向杂货 NPC…");
+                (void)StickToShopNpc(tpl, nx, ny, src);
+                if (shop::TryTalkNearestNpc(0.f, tpl)) {
+                    gTalkMissStreak = 0;
+                    gNpcApproaching = false;
+                    gTalkedThisOpen = true;
+                }
+            } else {
+                (void)shop::TryNpcTalkFuncKey();
+            }
+            // 本图有刷点就贴过去，勿 7 秒改道弓箭手村（BIN F7BC3442 蚂蚁矿坑排挡）。
+            if (!haveNpc && tpl > 0 && gTalkMissStreak >= kTalkMissReroute &&
                 TryRerouteShopAfterOpenMiss("开店找不到目标NPC")) {
                 return;
             }
         } else {
             gTalkMissStreak = 0;
+            gNpcApproaching = false;
             gTalkedThisOpen = true;
         }
         gLastMenuAttempt = now;
@@ -2257,6 +2367,17 @@ void HotReadConfig() {
 void YieldTripForSessionWash() {
     if (gPhase == Phase::Idle || gPhase == Phase::Cooldown) return;
     if (!ports::mob_gather::HangupWashInFlight()) return;
+    // 赶路换图 InterStage 会把 IsReconnectInFlight 拉真（stuck_lobby）。
+    // 这时掐 Travel 会把人扔在过路图，续卖再误记挂机图。
+    if (travel::IsActive()) {
+        static DWORD sSkip = 0;
+        const DWORD now = GetTickCount();
+        if (!sSkip || now - sSkip >= 2000) {
+            sSkip = now;
+            runtime::LogI("AutoSupply", "yield skip travel_active (map transfer ≠ hangup wash)");
+        }
+        return;
+    }
 
     const bool resumeSell = gPhase == Phase::Pause || gPhase == Phase::GoingTown ||
                             gPhase == Phase::OpeningShop || gPhase == Phase::Selling ||
@@ -2273,6 +2394,7 @@ void YieldTripForSessionWash() {
     gScrollPendingLand = false;
     if (resumeSell) {
         gTripReq.store(true, std::memory_order_release);
+        gKeepFarmMap = true;
         runtime::LogI("AutoSupply", "yield trip for hangup wash — keep pause, resume sell after land");
     } else if (resumeFarm) {
         gPendingReturnFarm = true;

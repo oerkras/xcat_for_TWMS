@@ -48,7 +48,7 @@ void SetApplyCtrl(bool on);
 // 没出过刀：关 F5 不计时，满包可直接卖。勾选可单独开（不绑出刀）。
 // freeze 临时关 F5 只停表（未出刀时），不清落地闸 / 不清欠 hangup。
 // 脏会话到点必须洗：卖装/赶路/换图/开店不得清钟、不得冻秒数闸。重连在途 / AwaitLand /
-// 卖装优先 hold 不起下一轮表。测谎 / 起号仍冻（拆会话会毁答题或起号）。
+// 卖装优先 hold 不起下一轮表。测谎答题中推迟拆会话，关题后强制拆一次；起号仍冻。
 // F5 出过刀后 hangup 窗口硬期限：遇人换频 / 寻簇飞不冻钟，到点中止 hop 再拆。
 // 「吸怪 快攻」TAB「快攻」卡「主动软重连」= 秒数闸。瞬移找怪+F5 默认强制开秒数（面板置灰，不改落盘）。
 // 调试 TAB hangupUnbindF5 可解除该防呆，秒数闸只跟该勾选。
@@ -92,6 +92,9 @@ void SetClearRelogin(bool on);
 void TickClearRelogin();
 // 「先飞到最密堆再吸」：默认关。关=站立吸怪；开=人飞到簇后再 Arm。
 void SetSeekCluster(bool on);
+// v146 远怪自动巡点：寻簇的跨层/全图版。没持怪时不限 |dY| 找全图最密堆、人飞过去就地吸。
+// 动机：服务器按「离怪原位总位移 >~1200px」掐线，远怪拉不得，只能人过去。与 homeReturn 互斥。
+void SetPatrolFar(bool on);
 void TickSeekCluster();
 bool IsSeekingCluster();
 // 「软重连后返回原位」：与寻簇互斥。F5 开打怪 / 面板「记录人物坐标」记 AbsPos；回图后飞回该点再吸。

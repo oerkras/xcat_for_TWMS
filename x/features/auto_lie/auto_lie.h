@@ -32,4 +32,8 @@ void Tick(DWORD now);
 // 快照过期时 IsNonFiniteOpen 会谎称没开；加点 / 加技能点必须让路。
 bool IsBusy();
 
+// 真在答服端测谎（知识题 / 轨迹题 UI 或跟光标）。不含谓词 stale、不含鼠标烟测。
+// 主动软重连用这个 defer / 答完强制拆，避免 pred blind 误拆。
+bool IsQuizActive();
+
 }  // namespace x::features::auto_lie

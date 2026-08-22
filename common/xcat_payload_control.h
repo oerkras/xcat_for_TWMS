@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 140u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 147u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -106,6 +106,13 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 140u;
 // v138: simpleCombatSkipAccMissN 厂默 2→1；旧盘仍为 2 迁一次。升 version 后用户可再改
 // v139: 主动软重连旧厂默开+14s 残留迁关一次（v122 已改厂默关，当时没迁盘）
 // v140: forceTrade — 实验·强制交易：改 UIUserInfo 人物卡交易按钮等级阈值 global；默认关
+//       kForceTradeUserEnabled=false — 实测无效；实验 TAB 置灰；不启 worker / 不改阈值
+// v141: mobGatherDispClampOn / mobGatherDispCapPx — 吸怪 TAB「位移夹速」：把被拽怪每帧位移
+//       夹到 ≤ cap(px/帧)，不越客户端「怪速+10」门→不触发 prevpos 举报；厂默开、cap=48
+// v142: mobGatherHangupFires 厂默 1900→1700；旧盘仍为 1900/1800 迁一次。升 version 后用户可再改
+// v143: mobGatherStrategy — 吸怪开关旁策略：0=A IMPACT（现有悬停）、1=B FH-SNAP（官方绑台）
+// v144: mobGatherLandOnArrive — 策略 A 子项「到站落地」：怪水平到站(≤stationR)后松手，交给游戏
+//       原生物理自然下坠落台（不再逐帧摘台/定住）；玩家走远(>cruiseR)恢复吸拉。默认关。落点由站距自调。
 constexpr int32_t kImpactImpulseDirDefault = 1;
 constexpr uint32_t kImpactImpulseVxDefault = 400u;
 constexpr uint32_t kImpactImpulseVyDefault = 200u;
@@ -272,7 +279,8 @@ constexpr uint32_t kMobGatherMaxMax = 64u;
 constexpr uint32_t kMobGatherFarInFlightDefault = 0u;
 constexpr uint32_t kMobGatherFarInFlightMin = 0u;
 constexpr uint32_t kMobGatherFarInFlightMax = 64u;
-constexpr uint32_t kMobGatherRadiusDefaultPx = 2800u;
+// 2026-08-22：厂默 2800→1000。r=1000 实机 9.4min 零断连；r≥~1250 / 厂默 2800 必掐（服端自量离原位总位移）。
+constexpr uint32_t kMobGatherRadiusDefaultPx = 1000u;
 constexpr uint32_t kMobGatherRadiusMinPx = 200u;
 // 半径只防爆钳，不再业务封顶 8000（落点同款 ±30000）。
 constexpr uint32_t kMobGatherRadiusMaxPx = 30000u;
@@ -321,6 +329,25 @@ constexpr uint32_t kMobGatherStationRMax = 200u;
 constexpr uint32_t kMobGatherMaxCmdDefault = 4800u;
 constexpr uint32_t kMobGatherMaxCmdMin = 620u;
 constexpr uint32_t kMobGatherMaxCmdMax = 8000u;
+// 位移夹速：每帧位移上限（px/帧）。客户端每帧比对怪移动位移 vs 怪速+10，超门即触发 prevpos 举报
+// （逆向见 docs/features/security/怪速举报type21与被动插值.md §7.2）。夹到 ≤ cap 就永不触发。
+// 厂默开、48px/帧（≈1600px/s@30ms）。真实怪速阈值看 MobFhBan impact 日志 disp/cap 标定。
+constexpr uint32_t kMobGatherDispClampOnDefault = 1u;
+constexpr uint32_t kMobGatherDispCapPxDefault = 48u;
+constexpr uint32_t kMobGatherDispCapPxMin = 8u;
+constexpr uint32_t kMobGatherDispCapPxMax = 400u;
+// v143: 吸怪策略。0=A IMPACT（现有 SetImpactNext 悬停）；1=B FH-SNAP（官方绑台）。缺键=A。
+constexpr uint32_t kMobGatherStrategyImpact = 0u;
+constexpr uint32_t kMobGatherStrategyFhSnap = 1u;
+constexpr uint32_t kMobGatherStrategyDefault = kMobGatherStrategyImpact;
+// v144: 策略 A「到站落地」。1=到站后松手让怪自然落台；0=保持现有悬停。默认 0。
+constexpr uint32_t kMobGatherLandOnArriveDefault = 0u;
+// v145: 远怪接力跳距（px/跳）。实机标定：单次连续拉取总距 ≤~1024px 零断连（r=1000 · 9.4min），
+// ≥~1253px 必掐（179 场尸检 + r=2800 风暴）。>跳距的远怪改为逐跳接力：每跳 ≤hopPx、到中转点
+// 驻留 ~450ms 让服务器移动段落账，再起下一跳。0=关（直拉，旧行为）。
+constexpr uint32_t kMobGatherHopPxDefault = 950u;
+constexpr uint32_t kMobGatherHopPxMin = 200u;
+constexpr uint32_t kMobGatherHopPxMax = 1150u;
 constexpr uint32_t kMobGatherKpDefault = 7u;
 constexpr uint32_t kMobGatherKpMin = 1u;
 constexpr uint32_t kMobGatherKpMax = 20u;
@@ -363,15 +390,25 @@ constexpr uint32_t kMobGatherSoftReloginSecLegacyDefault = 14u;
 constexpr uint32_t kMobGatherSoftReloginSecMin = 10u;
 constexpr uint32_t kMobGatherSoftReloginSecMax = 3600u;
 // 落地后累计出刀（与 combat.log「fire id=」同拍 +1）达此主动软重连；与首页秒数先到先拆。勾选独立。
-constexpr uint32_t kMobGatherHangupFiresDefault = 1900u;
+constexpr uint32_t kMobGatherHangupFiresDefault = 1700u;
 constexpr uint32_t kMobGatherHangupFiresMin = 0u;
 constexpr uint32_t kMobGatherHangupFiresMax = 1900u;
+// v127 厂默 1900；会话里还出现过 1800。v142 迁一次。
+constexpr uint32_t kMobGatherHangupFiresLegacyDefault = 1900u;
+constexpr uint32_t kMobGatherHangupFiresLegacyDefault1800 = 1800u;
 constexpr uint32_t kMobGatherHangupFiresOnDefault = 1u;
 constexpr uint32_t kMobGatherHangupUnbindF5Default = 0u;
 // 清怪重连：吸怪开着才拆。默认关，与首页主动软重连独立。缺键走关；盘上已有键原样保留。
 constexpr uint32_t kMobGatherClearReloginDefault = 0u;
 // 先飞到最密堆再吸。默认关：站立吸怪（高度闸/履历闸/14s 照旧）。
 constexpr uint32_t kMobGatherSeekClusterDefault = 0u;
+// v146: 远怪自动巡点。寻簇的跨层/全图版：没持怪时不限 |dY| 找全图最密堆、贴台点也不限层，
+// 人飞过去就地吸。配合安全聚拢半径（≤~1100，服务器按「离怪原位总位移 >~1200px」掐线，
+// 远怪拉不得只能人过去）。默认关。与「软重连后返回原位」互斥。
+constexpr uint32_t kMobGatherPatrolFarDefault = 0u;
+// v147 键仍保留（INI 兼容），但 2026-08-22 起硬关：BIN 证伪，读写/apply 都强制 0，永不打 GA .text。
+// 详见 docs/features/security/怪速举报type21与被动插值.md §7.12 与 mob_prevpos_patch.h。
+constexpr uint32_t kMobGatherAntiReportDefault = 0u;
 // 软重连后飞回记录点再吸。默认关。无首次记录不飞。与寻簇互斥。
 constexpr uint32_t kMobGatherHomeReturnDefault = 0u;
 // 寻簇同层窗 |dY|（AbsPos）。默认 200。用户自填，只防爆钳 30000。0=合法。
@@ -421,8 +458,16 @@ constexpr bool kSkillMaxLevelUserEnabled = false;
 // false：实验 TAB「普攻必出终极一击」置灰；读盘/落盘/Apply 强制关，不启 FaForce worker
 //（曾 off-pump GetSkill → GA+0x3a0bde TLS AV；功能已弃用，代码保留防日后重开）。
 constexpr bool kFinalAttackForceUserEnabled = false;
+// false：实验 TAB「自动召唤宠物 / 有粮才召」置灰；读盘/落盘/Apply 强制关，防更新残留仍召宠。
+constexpr bool kPetSummonUserEnabled = false;
 // false：实验 TAB 不画「无限飞镖」入口；读盘/落盘/Apply 强制关，不启 worker、不挂钩。
 constexpr bool kInfiniteStarsUserEnabled = false;
+// false：实验 TAB「强制交易」置灰；读盘/落盘/Apply 强制关，不启 worker、不改 UIUserInfo 阈值
+//（实测改客户端 15 级门无效，服端仍拒；避免再碰人物卡/交易闸挡原业务）。
+constexpr bool kForceTradeUserEnabled = false;
+// false：实验 TAB「拍卖原生按钮（一次）」置灰；IPC 脉冲不点状态栏 17、不写等级/建角。
+// 代码保留；野外开拍卖走 auctionTownBypass，不走本探针。
+constexpr bool kAuctionGateProbeUserEnabled = false;
 // 群怪优先：落盘仍用 clusterWeight；0=关，非 0=开（旧 1–100 权重一律视为开）。
 constexpr uint32_t kClusterWeightDefault = 0u;
 constexpr uint32_t kClusterWeightMax = 100u;
@@ -599,8 +644,8 @@ struct PayloadControl {
     uint32_t mpPotion = 1;         // 自动加蓝（默认开）
     uint32_t hpThresholdPct = 50;  // 1-99
     uint32_t mpThresholdPct = 30;  // 1-99
-    uint32_t petSummon = 0;              // 自动召唤宠物（默认关）
-    uint32_t petSummonRequireFood = 0;   // 1=有粮才召（默认关）
+    uint32_t petSummon = 0;              // 用户入口已关（kPetSummonUserEnabled）；字段保留防旧 ini / 日后重开
+    uint32_t petSummonRequireFood = 0;   // 同上；有粮才召
     uint32_t multiSkill = 0;              // ???????
     uint32_t multiSkillGapMs = kMultiSkillGapDefaultMs;
     uint32_t multiSkillSafeStagger = 1;   // ?????????>=120?
@@ -638,6 +683,12 @@ struct PayloadControl {
     uint32_t mapAttack = 0;
     // v90/v94: 吸怪。落盘 user.ini；默认关。勾选后周期把本地模拟怪吸到面前空点（不贴台）。
     uint32_t mobGather = 0;
+    // v143: 0=A IMPACT，1=B FH-SNAP。缺键=A，不改现有 IMPACT。
+    uint32_t mobGatherStrategy = kMobGatherStrategyDefault;
+    // v144: 策略 A 子项「到站落地」。到站后松手让怪自然落台；默认 0（保持悬停）。
+    uint32_t mobGatherLandOnArrive = kMobGatherLandOnArriveDefault;
+    // v145: 远怪接力跳距 px/跳（0=关直拉）。单跳 ≤此值 + 到点驻留，绕开服务器 ~1200px 拉距掐线。
+    uint32_t mobGatherHopPx = kMobGatherHopPxDefault;
     uint32_t mobGatherSpeedPct = kMobGatherSpeedPctDefault;
     uint32_t mobGatherAntiJitter = kMobGatherAntiJitterDefault;
     uint32_t mobGatherMax = kMobGatherMaxDefault;
@@ -657,6 +708,9 @@ struct PayloadControl {
     uint32_t mobGatherStationR = kMobGatherStationRDefault;
     uint32_t mobGatherMaxCmd = kMobGatherMaxCmdDefault;
     uint32_t mobGatherKp = kMobGatherKpDefault;
+    // v141: 位移夹速。开=把被拽怪每帧位移夹到 ≤ mobGatherDispCapPx，规避「怪速+10」举报门。
+    uint32_t mobGatherDispClampOn = kMobGatherDispClampOnDefault;
+    uint32_t mobGatherDispCapPx = kMobGatherDispCapPxDefault;
     uint32_t mobGatherDead = kMobGatherDeadDefault;
     uint32_t mobGatherGravity = kMobGatherGravityDefault;
     uint32_t mobGatherCruiseV = kMobGatherCruiseVDefault;
@@ -671,7 +725,7 @@ struct PayloadControl {
     // 追怪=瞬移找怪且 F5 开着时强制起表（不改本字段落盘）；卖装/赶路冻钟。
     uint32_t mobGatherSoftRelogin = kMobGatherSoftReloginDefault;
     uint32_t mobGatherSoftReloginSec = kMobGatherSoftReloginSecDefault;
-    // v127: 落地后累计出刀阈值。0=关（只用首页秒数）；与秒数先到先拆。缺键厂默 1900。
+    // v127/v142: 落地后累计出刀阈值。缺键厂默 1700。与秒数先到先拆。
     uint32_t mobGatherHangupFires = kMobGatherHangupFiresDefault;
     // v128: 出刀累计软重连独立勾选。0=关（秒数勾选仍可拆）。缺键厂默开。
     uint32_t mobGatherHangupFiresOn = kMobGatherHangupFiresOnDefault;
@@ -684,6 +738,10 @@ struct PayloadControl {
     uint32_t mobGatherApplyCtrl = 0;
     // v110: 先飞到最密堆再吸。默认关。开：人飞到簇质心后再 Arm，寻路冻 14s。
     uint32_t mobGatherSeekCluster = kMobGatherSeekClusterDefault;
+    // v146: 远怪自动巡点（寻簇跨层/全图版）。默认关。与 homeReturn 互斥。
+    uint32_t mobGatherPatrolFar = kMobGatherPatrolFarDefault;
+    // v147: 防举报（实验）。默认关。开=改 GA .text 让 Mob 永走正常移动包、不发 prevpos 举报。
+    uint32_t mobGatherAntiReport = kMobGatherAntiReportDefault;
     // v111: 软重连后返回原位。默认关。与 seekCluster 互斥。
     uint32_t mobGatherHomeReturn = kMobGatherHomeReturnDefault;
     int32_t mobGatherHomeX = 0;
@@ -822,7 +880,7 @@ struct PayloadControl {
     // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认开）。
     // 服端可能断线；与挂机「守护模式」叠加会干净重拉——挂机/守护时建议关。
     uint32_t auctionTownBypass = 1;
-    // 实验 TAB 一次探针：主泵备份/还原 level+建角 DateTime 后调迁拍卖。不常驻假等级。
+    // 实验 TAB 一次探针：主泵点官方状态栏拍卖按钮。用户入口已关（kAuctionGateProbeUserEnabled）。
     uint32_t auctionGateProbeSeq = 0;
     // v76/v77: 实验·坐下/椅子回蓝（刷 WM 累加器；默认关）。BIN 已证真蓝会动；过密踢。
     uint32_t restMpAccel = 0;
@@ -832,7 +890,7 @@ struct PayloadControl {
     uint32_t secAttackTextHook = 0;
     // v80/v81: 实验·无限飞镖。用户入口已关（kInfiniteStarsUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t infiniteStars = 0;
-    // v140: 实验·强制交易（UIUserInfo 15 级门改阈值；仅客户端人物卡交易按钮；默认关）
+    // v140: 实验·强制交易。用户入口已关（kForceTradeUserEnabled）；字段保留防旧 ini / 日后重开。
     uint32_t forceTrade = 0;
     // Deprecated（经典版）：补给真源为 user.ini [auto_supply]。
     // 字段仅保留结构布局兼容；Read/WritePayloadControl 不再读写，并会清掉 core.autoSell*。
@@ -947,6 +1005,13 @@ inline uint32_t ClampMobGatherMax(uint32_t n) {
 inline uint32_t ClampMobGatherFarInFlight(uint32_t n) {
     if (n > kMobGatherFarInFlightMax) return kMobGatherFarInFlightMax;
     return n;
+}
+
+inline uint32_t ClampMobGatherHopPx(uint32_t px) {
+    if (px == 0u) return 0u;  // 0=关（直拉）
+    if (px < kMobGatherHopPxMin) return kMobGatherHopPxMin;
+    if (px > kMobGatherHopPxMax) return kMobGatherHopPxMax;
+    return px;
 }
 
 inline uint32_t ClampMobGatherRadiusPx(uint32_t px) {
@@ -1066,6 +1131,17 @@ inline int32_t ClampMobGatherStandOffY(int32_t y) {
 inline uint32_t ClampMobGatherAimJitter(uint32_t px) {
     if (px > kMobGatherAimJitterMax) return kMobGatherAimJitterMax;
     return px;
+}
+
+inline uint32_t ClampMobGatherDispCapPx(uint32_t px) {
+    if (px < kMobGatherDispCapPxMin) return kMobGatherDispCapPxMin;
+    if (px > kMobGatherDispCapPxMax) return kMobGatherDispCapPxMax;
+    return px;
+}
+
+inline uint32_t ClampMobGatherStrategy(uint32_t v) {
+    if (v > kMobGatherStrategyFhSnap) return kMobGatherStrategyDefault;
+    return v;
 }
 
 inline uint32_t ClampSimpleCombatTickMs(uint32_t ms) {

@@ -14,6 +14,7 @@
 #include "../../runtime/managed_main.h"
 #include "../../runtime/anchor_lamps.h"
 #include "../../ui/player_vitals.h"
+#include "xcat_payload_control.h"
 
 #include <Psapi.h>
 #include <cstring>
@@ -586,15 +587,17 @@ bool ResolveCashItemManager(DWORD now) {
     }
     if (gCashMgr) {
         x::runtime::LogI("PetPort", "CashItemManager bind %p", gCashMgr);
-        if (!gMiActivate) gMiActivate = ResolveActivateMi(gCashMgrKlass);
-        if (gMiActivate) {
-            x::runtime::LogI("PetPort", "Activate MI bind ok mi=%p rva=0x%X", gMiActivate,
-                             kRvaSendActivatePetRequest);
-        } else {
-            x::runtime::LogW("PetPort", "Activate MI miss — will use RVA 0x%X",
-                             kRvaSendActivatePetRequest);
+        if (xcat::kPetSummonUserEnabled) {
+            if (!gMiActivate) gMiActivate = ResolveActivateMi(gCashMgrKlass);
+            if (gMiActivate) {
+                x::runtime::LogI("PetPort", "Activate MI bind ok mi=%p rva=0x%X", gMiActivate,
+                                 kRvaSendActivatePetRequest);
+            } else {
+                x::runtime::LogW("PetPort", "Activate MI miss — will use RVA 0x%X",
+                                 kRvaSendActivatePetRequest);
+            }
+            ReportPetActLamp();
         }
-        ReportPetActLamp();
     }
     return gCashMgr != nullptr;
 }
@@ -718,13 +721,15 @@ void ScanCashPets(PetCareState& out) {
     // 仅当场上 m_apPet 已空、但 Cash 槽仍 active!=0（粘滞）时回退，避免误填 summonPos。
     if (summonPos == 0 && livingAnyPos > 0 && out.activatedCount == 0) {
         summonPos = livingAnyPos;
-        static DWORD sLastActiveStuckLog = 0;
-        const DWORD nowMs = GetTickCount();
-        if (!sLastActiveStuckLog || nowMs - sLastActiveStuckLog >= 5000) {
-            sLastActiveStuckLog = nowMs;
-            x::runtime::LogW("PetPort",
-                             "summon fallback active-stuck pos=%d cash=%d dead=%d active=%d",
-                             summonPos, cashPets, dead, out.probeActiveState);
+        if (xcat::kPetSummonUserEnabled) {
+            static DWORD sLastActiveStuckLog = 0;
+            const DWORD nowMs = GetTickCount();
+            if (!sLastActiveStuckLog || nowMs - sLastActiveStuckLog >= 5000) {
+                sLastActiveStuckLog = nowMs;
+                x::runtime::LogW("PetPort",
+                                 "summon fallback active-stuck pos=%d cash=%d dead=%d active=%d",
+                                 summonPos, cashPets, dead, out.probeActiveState);
+            }
         }
     }
     out.cashPetCount = cashPets;
@@ -758,6 +763,7 @@ struct ActivateJob {
 };
 
 void ActivateJobOnMain(void* user) {
+    if (!xcat::kPetSummonUserEnabled) return;
     (void)x::runtime::main_thread::AssertOnPumpThread("pet.Activate");
     auto* job = reinterpret_cast<ActivateJob*>(user);
     if (!job || job->pos <= 0) return;
@@ -821,6 +827,7 @@ bool ReadState(PetCareState& out) {
 }
 
 bool TryActivatePet(int nPos) {
+    if (!xcat::kPetSummonUserEnabled) return false;
     if (nPos <= 0) return false;
     if (!BindApis()) return false;
     ActivateJob job{};

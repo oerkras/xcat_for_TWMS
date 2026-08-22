@@ -823,10 +823,12 @@ void MarkLogicalPortalDead(const std::string& fromMap, const std::string& seedId
 
 bool IsTransientFireFail(const std::string& res) {
     // FH0 → 假火软确认；MAP_TRANSITION 现由 FirePortal 返回 true，不再当失败重试
+    // INVULN_OFF：换图 quiet 会 drop LU，IsEnabled=0 一两秒是常态，禁止整趟 FireStuck。
     return res == "TELEPORT_FAIL" || res == "TELEPORT_UNBOUND" || res == "MAIN_TIMEOUT" ||
            res == "NO_CHECKMOVE" || res == "NO_LOCALUSER" || res == "KEY_FAIL" ||
            res == "EXCEPTION" || res == "NOT_PLAY_READY" || res == "TELEPORT_COOLDOWN" ||
-           res == "NOT_STOOD" || res == "OUT_OF_RECT" || res == "IMPACT_STICK_FAIL";
+           res == "NOT_STOOD" || res == "OUT_OF_RECT" || res == "IMPACT_STICK_FAIL" ||
+           res == "INVULN_OFF";
 }
 
 // 可累计 FireStuck 熔断的硬贴门失败（冷却/未就绪只重试，不熔断，防误停）。
@@ -1495,17 +1497,6 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
 
     if (!firedOk) {
         gLastMsg = fireResult;
-        if (fireResult == "INVULN_OFF") {
-            // Impact 贴门需无敌；Hold 异常时立刻停，禁止空转。
-            ClearTransientFire();
-            char detail[128]{};
-            snprintf(detail, sizeof(detail), "%s INVULN_OFF", liveName.c_str());
-            x::runtime::LogW("Travel", "fire stop %s: impact stick needs invuln",
-                             liveName.c_str());
-            SetIdle("invuln_off", FailKind::FireStuck);
-            NotifyTravelOutcome(FailKind::FireStuck, cur, gTarget, detail);
-            return;
-        }
         if (IsTransientFireFail(fireResult)) {
             (void)NoteTransientFireFail(now, cur, liveName, fireResult);
             return;

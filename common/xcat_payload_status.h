@@ -16,6 +16,7 @@
 // v16：攻包窗 detectTime 窗内最高（峰值/包合计/技能合计）。
 // v17：secAttackTextHookOn 保留布局，恒 0（.text AB 已拆除）。
 // v18：攻包/技能分表单键峰值 + 峰值键（吸怪 TAB type20 观测）。
+// v19：WorldManager.CharacterRegDate（.NET ticks）→ ImGui 顶栏建角时间。
 
 #include <Windows.h>
 
@@ -25,7 +26,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 18u;
+constexpr uint32_t kPayloadStatusVersion = 19u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -126,6 +127,10 @@ struct PayloadStatus {
     int32_t secAttackPktPeakId = 0;    // v18：攻包峰值 opcode
     int32_t secAttackSkillPeakId = 0;  // v18：技能峰值 skillId
     int32_t secAttackDetectTime = 0;   // v18：窗起点（游戏 tCur）
+
+    // v19：建角 DateTime（.NET ticks，低 62 bit；valid=0 表示未采到）
+    uint32_t playerRegDateValid = 0;
+    int64_t playerRegDateTicks = 0;
 };
 #pragma pack(pop)
 

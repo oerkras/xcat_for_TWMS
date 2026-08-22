@@ -1,5 +1,6 @@
 #pragma once
 // pet_feed — Classic TWMS 自动召唤宠物（喂食交官方）
+// 用户入口：kPetSummonUserEnabled=false（置灰 + 不启 worker + 不发 ActivatePet）；代码保留。
 
 #include <Windows.h>
 

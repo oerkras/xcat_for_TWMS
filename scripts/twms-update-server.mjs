@@ -908,8 +908,25 @@ function isLoopback(ip) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "localhost";
 }
 
+const kChinaTz = "Asia/Shanghai";
+
 function ts(d = new Date()) {
-  return d.toISOString().replace("T", " ").slice(0, 19);
+  // 运维台 / 访问日志统一北京时间；内部仍用 epoch ms。
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: kChinaTz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const parts = {};
+  for (const p of fmt.formatToParts(d)) {
+    if (p.type !== "literal") parts[p.type] = p.value;
+  }
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
 function logInfo(msg) {

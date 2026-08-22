@@ -226,6 +226,8 @@ constexpr char kMapLifeClass[] =
     "b7401697b4585a68b3efd0b9eb702c0f171c58c3d12467086c294d7657d73d8";
 constexpr char kHashLifeType[] =
     "<bad31fc40a4c66a16e995e5eb3900c7d8eb7fd8b983e94c721ccf0f4ace0e5d>k__BackingField";
+constexpr char kHashLifeId[] =
+    "<bab958b0e516b0312f70850955facc63d6aba39e219d442b217d07388424218>k__BackingField";
 constexpr char kHashLifeX[] =
     "<c5dff3e6b5f5a02af651e96c1955604aadbaf3e8e4e59006b9bcb23d4378b90>k__BackingField";
 constexpr char kHashLifeY[] =
@@ -235,21 +237,25 @@ constexpr char kHashLifeRx0[] =
 constexpr char kHashLifeRx1[] =
     "<c43b1dea7e6a4f027fbb7f38637df219c811983302dcf30c8908639599fc47d>k__BackingField";
 constexpr size_t kFbLifeType = 0x20;
+constexpr size_t kFbLifeId = 0x1C;
 constexpr size_t kFbLifeX = 0x24;
 constexpr size_t kFbLifeY = 0x28;
 constexpr size_t kFbLifeRx0 = 0x38;
 constexpr size_t kFbLifeRx1 = 0x3C;
 size_t gOffLifeType = kFbLifeType;
+size_t gOffLifeId = kFbLifeId;
 size_t gOffLifeX = kFbLifeX;
 size_t gOffLifeY = kFbLifeY;
 size_t gOffLifeRx0 = kFbLifeRx0;
 size_t gOffLifeRx1 = kFbLifeRx1;
 #define kOffLifeType (gOffLifeType)
+#define kOffLifeId (gOffLifeId)
 #define kOffLifeX (gOffLifeX)
 #define kOffLifeY (gOffLifeY)
 #define kOffLifeRx0 (gOffLifeRx0)
 #define kOffLifeRx1 (gOffLifeRx1)
 constexpr int kLifeTypeMob = 1;
+constexpr int kLifeTypeNpc = 2;
 std::atomic<bool> gUiLifeFieldResolved{false};
 
 constexpr float kMinPosAbs = 0.5f;
@@ -883,18 +889,19 @@ void EnsureUiLifeFieldOffsets() {
     if (MobFieldOffHit(gUiHpTagKlass, kHashUiHpTagMaxHp, kFbUiHpTagMaxHp, &gOffUiHpTagMaxHp))
         ++hits;
     if (MobFieldOffHit(lifeKlass, kHashLifeType, kFbLifeType, &gOffLifeType)) ++hits;
+    if (MobFieldOffHit(lifeKlass, kHashLifeId, kFbLifeId, &gOffLifeId)) ++hits;
     if (MobFieldOffHit(lifeKlass, kHashLifeX, kFbLifeX, &gOffLifeX)) ++hits;
     if (MobFieldOffHit(lifeKlass, kHashLifeY, kFbLifeY, &gOffLifeY)) ++hits;
     if (MobFieldOffHit(lifeKlass, kHashLifeRx0, kFbLifeRx0, &gOffLifeRx0)) ++hits;
     if (MobFieldOffHit(lifeKlass, kHashLifeRx1, kFbLifeRx1, &gOffLifeRx1)) ++hits;
-    constexpr int kExpect = 8;
+    constexpr int kExpect = 9;
     x::runtime::LogI(
         "MobPool",
         "uiHp/life fields path=%s hits=%d/%d mobId=0x%zX cur=0x%zX max=0x%zX "
-        "lifeTy=0x%zX x=0x%zX y=0x%zX rx0=0x%zX rx1=0x%zX",
+        "lifeTy=0x%zX id=0x%zX x=0x%zX y=0x%zX rx0=0x%zX rx1=0x%zX",
         hits == kExpect ? "meta" : (hits ? "meta-partial" : "fallback"), hits, kExpect,
-        gOffUiHpTagMobId, gOffUiHpTagCurHp, gOffUiHpTagMaxHp, gOffLifeType, gOffLifeX, gOffLifeY,
-        gOffLifeRx0, gOffLifeRx1);
+        gOffUiHpTagMobId, gOffUiHpTagCurHp, gOffUiHpTagMaxHp, gOffLifeType, gOffLifeId, gOffLifeX,
+        gOffLifeY, gOffLifeRx0, gOffLifeRx1);
 }
 
 // Fill spawnSlots from LifeList; fallback to peak.
@@ -1142,6 +1149,36 @@ int CountMapMobLifeSlots() {
 
 int GetSpawnPeak() {
     return gPeakAlive > 0 ? gPeakAlive : -1;
+}
+
+bool FindNpcLifeSpawn(int templateId, float* outX, float* outY) {
+    if (outX) *outX = 0.f;
+    if (outY) *outY = 0.f;
+    if (templateId <= 0) return false;
+    if (!EnsureBound()) return false;
+    EnsureUiLifeFieldOffsets();
+    void* wm = world::GetWorldManager();
+    if (!wm) return false;
+    void* mapData = ReadPtr(wm, kOffWmCurrentMapData);
+    if (!LooksLikeHeapPtr(mapData)) return false;
+    if (gMapDataKlass && !ObjKlassIs(mapData, gMapDataKlass)) return false;
+    void* list = ReadPtr(mapData, kOffMapLifeList);
+    if (!LooksLikeHeapPtr(list)) return false;
+    void* items = ReadPtr(list, kOffListItems);
+    const int size = ReadI32(list, kOffListSize);
+    if (!LooksLikeHeapPtr(items) || size < 0 || size > 4096) return false;
+    for (int i = 0; i < size; ++i) {
+        void* life = ArrayAt(items, (uintptr_t)i);
+        if (!LooksLikeHeapPtr(life)) continue;
+        if (ReadI32(life, kOffLifeType) != kLifeTypeNpc) continue;
+        if (ReadI32(life, kOffLifeId) != templateId) continue;
+        const float x = static_cast<float>(ReadI32(life, kOffLifeX));
+        const float y = static_cast<float>(ReadI32(life, kOffLifeY));
+        if (outX) *outX = x;
+        if (outY) *outY = y;
+        return true;
+    }
+    return false;
 }
 
 bool NearMobLifeSlot(float x, float y, const Snapshot& snap, float nearPx, float* outDist) {

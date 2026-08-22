@@ -1,6 +1,7 @@
 #pragma once
 
 // Classic TWMS：一次点官方状态栏拍卖按钮（实验）。
+// 用户入口已关（kAuctionGateProbeUserEnabled=false）：IPC 脉冲不点按钮。
 // 主泵 FindAll(UIStatusBar) → OnClickButton(17) → 官方链
 // CheckRedAccountRestriction → SendMigrateToGlobalMarketRequest → 0x002E。
 // 不写 CharacterStat.level / 建角 DateTime（不破坏战斗）；零 .text / 不 INLINE HOOK。

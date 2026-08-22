@@ -10,6 +10,7 @@
 #include "../kick_sniff/kick_sniff.h"
 #include "../notify/notify.h"
 #include "../simple_combat/simple_combat.h"
+#include "../travel/travel.h"
 #include "../ports/fly_fh_ban.h"
 #include "../ports/foothold_port.h"
 #include "../ports/mob_gather_port.h"
@@ -2651,7 +2652,11 @@ DWORD WINAPI Worker(LPVOID) {
             // 只认 Login 会漏。拍卖/商城是 4/5。冷启 WaitWorldList 的 IsDone=0 不抢。
             const bool hallLike = scene == SceneState::Login ||
                                   (scene == SceneState::InterStage && !inMap);
-            if (!softBusy && !IsLandQuiet() && !gPending.load(std::memory_order_acquire) &&
+            // 超级赶路贴门后必经 InterStage≈2s（客户 20:13 west00 后 scene=1）。
+            // 旧逻辑 2s 当 stuck_lobby → Yield 掐 Travel → 过路图当挂机图 → INVULN_OFF。
+            if (hallLike && x::features::travel::IsActive()) {
+                loginHallSinceMs = 0;
+            } else if (!softBusy && !IsLandQuiet() && !gPending.load(std::memory_order_acquire) &&
                 !gDeferred.load(std::memory_order_acquire) &&
                 x::features::auto_enter::IsDesired() &&
                 (x::features::auto_enter::IsDone() || x::features::auto_enter::IsFailed()) &&

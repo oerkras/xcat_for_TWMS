@@ -19,6 +19,7 @@
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/log.h"
 #include "../../runtime/anchor_lamps.h"
+#include "xcat_payload_control.h"
 
 #include <atomic>
 #include <cstdint>
@@ -376,6 +377,10 @@ DWORD WINAPI Worker(LPVOID) {
 
 void Init() {
     gDesired.store(false);
+    if (!xcat::kForceTradeUserEnabled) {
+        x::runtime::LogI("ForceTrade", "user gate off — skipped (keep code)");
+        return;
+    }
     x::runtime::LogI("ForceTrade",
                      "init — UIUserInfo trade button level gate (imm+global→0); "
                      "rva=0x%X official=%u (default off)",
@@ -389,6 +394,13 @@ void Shutdown() {
 }
 
 void StartWorker() {
+    if (!xcat::kForceTradeUserEnabled) {
+        gDesired.store(false);
+        x::runtime::anchor_lamps::Set("ForceTrade",
+                                      x::runtime::anchor_lamps::AnchorLampCode::Unknown,
+                                      "disabled");
+        return;
+    }
     if (gWorker.load()) return;
     gStop.store(false);
     HANDLE th = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
@@ -402,6 +414,7 @@ void StopWorker() {
 }
 
 void SetEnabled(bool on) {
+    if (!xcat::kForceTradeUserEnabled) on = false;
     const bool prev = gDesired.exchange(on);
     if (prev != on) {
         x::runtime::LogI("ForceTrade", "SetEnabled %d", on ? 1 : 0);

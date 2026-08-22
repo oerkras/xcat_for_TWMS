@@ -3063,11 +3063,21 @@ std::string GateExpRemainText(long long exp) {
     return "剩 " + std::to_string(hours > 0 ? hours : 1) + " 小时";
 }
 
+// 运维台统一北京时间（GMT+8），不跟 Windows 时区走。内部时间戳仍是 UTC epoch。
+bool BeijingTm(time_t utcSec, std::tm& out) {
+    constexpr time_t kEightHours = 8 * 3600;
+    if (utcSec > 0 && utcSec > (std::numeric_limits<time_t>::max)() - kEightHours)
+        utcSec = (std::numeric_limits<time_t>::max)();
+    else
+        utcSec += kEightHours;
+    return gmtime_s(&out, &utcSec) == 0;
+}
+
 std::string GateExpAbsText(long long exp) {
     if (exp <= 0) return "永不过期";
     const time_t t = static_cast<time_t>(exp);
     struct tm tmv{};
-    localtime_s(&tmv, &t);
+    if (!BeijingTm(t, tmv)) return "—";
     char buf[32]{};
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
     return buf;
@@ -3115,10 +3125,13 @@ bool PostGateSign(OpsState& st, const std::string& uid, int days, const std::str
     } else {
         const time_t t = static_cast<time_t>(exp);
         struct tm tmv{};
-        localtime_s(&tmv, &t);
-        char buf[32]{};
-        std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
-        expText = buf;
+        if (!BeijingTm(t, tmv)) {
+            expText = "—";
+        } else {
+            char buf[32]{};
+            std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
+            expText = buf;
+        }
     }
     st.gateSignToken = token;
     st.gateSignInfo = "uid=" + uid + " · 到期 " + expText;
@@ -6310,7 +6323,7 @@ const char* MesoKindLabel(const std::string& kind) {
 void FormatWallHms(ULONGLONG wallMs, char* buf, size_t n) {
     const time_t sec = static_cast<time_t>(wallMs / 1000ull);
     std::tm t{};
-    if (localtime_s(&t, &sec) != 0) {
+    if (!BeijingTm(sec, t)) {
         std::snprintf(buf, n, "--:--:--");
         return;
     }
@@ -6320,7 +6333,7 @@ void FormatWallHms(ULONGLONG wallMs, char* buf, size_t n) {
 void FormatWallTick(ULONGLONG wallMs, int windowMin, char* buf, size_t n) {
     const time_t sec = static_cast<time_t>(wallMs / 1000ull);
     std::tm t{};
-    if (localtime_s(&t, &sec) != 0) {
+    if (!BeijingTm(sec, t)) {
         std::snprintf(buf, n, "--:--");
         return;
     }

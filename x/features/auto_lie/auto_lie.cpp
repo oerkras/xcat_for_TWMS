@@ -912,4 +912,9 @@ bool IsBusy() {
            anti_macro_port::IsPredStale();
 }
 
+bool IsQuizActive() {
+    return gBusy.load() || anti_macro_follower::IsFollowing() ||
+           anti_macro_follower::IsUiVisible();
+}
+
 }  // namespace x::features::auto_lie

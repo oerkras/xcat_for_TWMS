@@ -1,11 +1,11 @@
 {
-  "version": "0.1.174",
-  "buildId": 174,
-  "name": "xcat_for_twms_0821_0.1.174_build174",
-  "zipName": "xcat_for_twms_0821_0.1.174_build174.zip",
-  "downloadUrl": "xcat_for_twms_0821_0.1.174_build174.zip",
-  "sha256": "1350cac5bc5517994cdb73087e94ece38ab80fb2367b35a9d6f818b5bc823eee",
-  "size": 6596764,
-  "notes": "xcat_for_twms xcat_for_twms_0821_0.1.174_build174",
-  "createdAt": "2026-08-21T11:19:49.397Z"
+  "version": "0.1.176",
+  "buildId": 176,
+  "name": "xcat_for_twms_0822_0.1.176_build176",
+  "zipName": "xcat_for_twms_0822_0.1.176_build176.zip",
+  "downloadUrl": "xcat_for_twms_0822_0.1.176_build176.zip",
+  "sha256": "fd87c584daa268c0d7f23b6ce4185f400d9a6cc675e89cf6e8f0f50f375f3fdf",
+  "size": 6608885,
+  "notes": "xcat_for_twms xcat_for_twms_0822_0.1.176_build176",
+  "createdAt": "2026-08-21T18:39:41.530Z"
 }

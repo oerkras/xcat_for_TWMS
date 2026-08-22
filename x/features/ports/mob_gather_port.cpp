@@ -66,7 +66,8 @@ constexpr DWORD kDtCapMs = 120;
 constexpr DWORD kDtDefaultMs = 40;
 constexpr DWORD kOneshotHoldMs = 5000;
 constexpr DWORD kApplyPeriodMs = 1000;
-// 履历闸：新 oid 先让官方 CD 横移且贴地；脚边 / 进图第一批照吸。不改飞控。
+// 履历闸：进图第一批（exempt）照吸。补刷 oid 必须先让官方 CD 贴地且非掉落，
+// 脚边只豁免横移、豁免不了出生落地。高度闸对补刷始终生效。不改飞控。
 // 掉落用 onFh/vy 挡（AbsPos：Y 增大=更高，掉落 vy 更负）。横移只认平台来回，
 // 不要大于巡逻幅度（105060100 实测来回约 70–200，240 会把补刷整波卡死在 14s 窗外）。
 // 横移 / 脚边以面板 mobGatherWalkDx / mobGatherFeetExemptPx 为准。
@@ -159,6 +160,10 @@ std::atomic<DWORD> gHangupLandOkMs{0};
 constexpr DWORD kHangupSupplyHoldMaxMs = 8000;
 std::atomic<uint8_t> gClearRelogin{0};
 std::atomic<uint8_t> gSeekClusterOn{0};
+// v146 远怪自动巡点：寻簇的跨层/全图版（选簇与贴台不吃 layerY 层窗）。与 homeReturn 互斥。
+// 动机：服务器按「离怪原位总位移 >~1200px」掐线，远怪拉不得（夹速/leash/落地/接力四连败），
+// 只能人飞过去就地吸。
+std::atomic<uint8_t> gPatrolFarOn{0};
 std::atomic<uint8_t> gHomeReturnOn{0};
 std::atomic<uint8_t> gSeeking{0};
 std::atomic<uint8_t> gHomePending{0};
@@ -182,6 +187,7 @@ DWORD gSeekSettleMs = 0;
 DWORD gSeekNearMs = 0;
 DWORD gSoftArmMs = 0;
 DWORD gSoftPauseMs = 0;
+uint8_t gHangupLieDeferred = 0;  // 测谎中或刚关题：答完强制拆一次
 DWORD gSoftSkipLogMs = 0;
 DWORD gSoftKeepOffMapLogMs = 0;
 constexpr unsigned kHangupSellDeferSoonMs = 2500;
@@ -211,6 +217,13 @@ bool gSpawnGateOn = false;
 
 void ClearOidTrack() { gOidN = 0; }
 
+bool OidExempt(int32_t id) {
+    for (int i = 0; i < gOidN; ++i) {
+        if (gOid[i].id == id) return gOid[i].exempt != 0;
+    }
+    return false;
+}
+
 void NoteOid(int32_t id, float x, float y) {
     if (id == 0) return;
     for (int i = 0; i < gOidN; ++i) {
@@ -229,7 +242,8 @@ void NoteOid(int32_t id, float x, float y) {
     ++gOidN;
 }
 
-bool WalkHoldNew(int32_t id, float x, float vy, int onFh, float* outDx) {
+// skipWalkDx：脚边补刷仍要贴地，只跳过「横移够了没」。walkDx=0 时横移本就不挡。
+bool WalkHoldNew(int32_t id, float x, float vy, int onFh, bool skipWalkDx, float* outDx) {
     if (outDx) *outDx = 0.f;
     for (int i = 0; i < gOidN; ++i) {
         if (gOid[i].id != id) continue;
@@ -237,7 +251,7 @@ bool WalkHoldNew(int32_t id, float x, float vy, int onFh, float* outDx) {
         float dx = x - gOid[i].homeX;
         if (dx < 0.f) dx = -dx;
         if (outDx) *outDx = dx;
-        if (dx < gWalkReadyDx.load(std::memory_order_acquire)) return true;
+        if (!skipWalkDx && dx < gWalkReadyDx.load(std::memory_order_acquire)) return true;
         if (onFh == 0) return true;
         if (vy < kWalkMaxDropVy) return true;
         return false;
@@ -430,10 +444,13 @@ struct DenseCluster {
     int live = 0;
 };
 
-bool FindDenseCluster(const mob::Snapshot& snap, float playerY, DenseCluster* out) {
+// layerWin<0 = 用 gLayerYPx（同层寻簇）；巡点传大窗放开层限制（全图找最密堆）。
+bool FindDenseCluster(const mob::Snapshot& snap, float playerY, float layerWinOverride,
+                      DenseCluster* out) {
     if (!out) return false;
     *out = DenseCluster{};
-    const float layerWin = gLayerYPx.load(std::memory_order_acquire);
+    const float layerWin =
+        layerWinOverride >= 0.f ? layerWinOverride : gLayerYPx.load(std::memory_order_acquire);
     float xs[mob::kMaxLiteMobs];
     float ys[mob::kMaxLiteMobs];
     int n = 0;
@@ -533,7 +550,8 @@ bool SeekSpeedBled(const teleport::FlightState& st) {
     return avx <= kSeekHoldEnterVx && avy <= kSeekHoldEnterVy;
 }
 
-bool SnapSeekLand(float x, float y, float layerY, float maxSnapPx, float* ox, float* oy) {
+bool SnapSeekLand(float x, float y, float layerY, float maxSnapPx, float* ox, float* oy,
+                  float layerWinOverride = -1.f) {
     if (!ox || !oy) return false;
     float sx = x;
     float sy = y;
@@ -541,7 +559,9 @@ bool SnapSeekLand(float x, float y, float layerY, float maxSnapPx, float* ox, fl
     if (!foothold_path::SnapStandAt(x, y, &sx, &sy, &fh, true, false) || !fh) return false;
     float layerDy = sy - layerY;
     if (layerDy < 0.f) layerDy = -layerDy;
-    if (layerDy > gLayerYPx.load(std::memory_order_acquire)) return false;
+    const float layerWin =
+        layerWinOverride >= 0.f ? layerWinOverride : gLayerYPx.load(std::memory_order_acquire);
+    if (layerDy > layerWin) return false;
     if (maxSnapPx > 0.f) {
         const float dx = sx - x;
         const float dy = sy - y;
@@ -671,14 +691,21 @@ void DriveSeekFly(const teleport::FlightState& st, DWORD now, const char* tag) {
         }
     }
 
+    // v146 巡点/寻簇/归位飞行限速：不再跟随 Combat 档（用户面板可拉到 1000% = 6200px/s，
+    // 巡航冲刺 3~5s 内必被服务器掐——BIN 01:49~01:51 十连断，545px 冲刺照掐；玩家侧速度
+    // 检测与怪的 ~1200px 位移预算是两套规则）。锁 1.0X（Cruise≈620px/s）：simple_combat
+    // 尸检 12 轮断线里「长途满速巡航死活同分布」的长期运行口径。
+    constexpr float kSeekFlyMaxScale = 1.0f;
+    float seekScl = heli::SpeedScale(Owner::Combat);
+    if (seekScl > kSeekFlyMaxScale) seekScl = kSeekFlyMaxScale;
     gSeeking.store(1, std::memory_order_release);
     if (heli::CurrentOwner() != Owner::Gather) {
         (void)heli::Acquire(Owner::Gather);
-        heli::SetSpeedScale(Owner::Gather, heli::SpeedScale(Owner::Combat));
+        heli::SetSpeedScale(Owner::Gather, seekScl);
         x::features::ports::fly_fh_ban::SetSourceArmed(
             x::features::ports::fly_fh_ban::BanSource::Gather, true);
     } else {
-        heli::SetSpeedScale(Owner::Gather, heli::SpeedScale(Owner::Combat));
+        heli::SetSpeedScale(Owner::Gather, seekScl);
     }
 
     float aimY = landY + kSeekAimLiftY;
@@ -1168,6 +1195,7 @@ struct HoldItem {
     bool pushed = false;
     bool detach = false;
     bool live = false;
+    bool fresh = false;  // 补刷（非 exempt）：本拍要走官方 ApplyControl
     const char* why = "skip";
 };
 
@@ -1195,7 +1223,7 @@ void HoldJobFn(void* p) {
         job->why = "not_play_ready";
         return;
     }
-    if (job->applyOn && job->nApply > 0) {
+    if (job->nApply > 0) {
         ApplyCtrlWave(job->applyMob, job->applyId, job->nApply, &job->applied, &job->applySeh,
                       &job->tCur);
     }
@@ -1218,15 +1246,28 @@ void HoldJobFn(void* p) {
             it.why = "dead";
             continue;
         }
+        // 到站落地态：交给游戏原生物理落台，别再摘台/定住（否则每拍摘台会把怪从落点重新踢空）。
+        if (x::features::ports::mob_fh_ban::IsLanded(vc)) {
+            it.why = "landed";
+            continue;
+        }
         if (!x::features::ports::mob_fh_ban::EnsureInstalledOnPump(vc) ||
             !x::features::ports::mob_fh_ban::Arm(vc, it.mob, it.id, job->playerX, job->playerY)) {
             it.why = "arm";
             continue;
         }
         it.detach = true;
-        x::features::ports::mob_fh_ban::ClearFh(vc);
+        // B 的卸台+写落点在 ApplyFhSnapOnVc。A 仍在本拍摘台交给 IMPACT。
+        if (x::features::ports::mob_fh_ban::Strategy() != xcat::kMobGatherStrategyFhSnap) {
+            x::features::ports::mob_fh_ban::ClearFh(vc);
+        }
+        // v145 接力跳：远怪的一次性速度命令瞄槽位有效目标（在途=中转点），不直瞄远站点，
+        // 否则 cmd ∝ 全距（远怪 ~4800px/s）又把单段移动拉超服务器 ~1200px 掐线阈值。
+        float aimX = job->playerX;
+        float aimY = job->playerY;
+        x::features::ports::mob_fh_ban::EffectiveAim(vc, &aimX, &aimY);
         x::features::ports::mob_fh_ban::ComputeSetVelocity(
-            x, y, vx, vy, job->playerX, job->playerY, job->sinceMs, &it.cmdVx, &it.cmdVy);
+            x, y, vx, vy, aimX, aimY, job->sinceMs, &it.cmdVx, &it.cmdVy);
         it.pushed = true;
         it.why = "ok";
     }
@@ -1520,8 +1561,9 @@ void NoteHangupLandIfReady() {
 bool SoftReloginHoldClock() {
     using x::features::soft_login_probe::IsReconnectInFlight;
     // 脏会话到点必须洗：卖装/赶路/开店不得冻秒数闸（补给应让路，落地再卖）。
-    // 重连在途冻的是这一轮自己。起号仍冻。测谎不冻：拆会话优先于答题
-    // （题没答完进小黑屋；脏会话继续打会封号）。
+    // 重连在途冻的是这一轮自己。起号仍冻。
+    // 测谎不冻钟：答题中推迟 CloseSession，关题后无论到点与否都强制拆一次
+    // （F40 16:50 hangup_timer 砸进跟轨窗 → dropped）。
     return IsReconnectInFlight() || x::features::char_boot::IsBusy();
 }
 
@@ -1600,6 +1642,13 @@ bool HangupBeforeOtherAction(const char* why) {
     if (!dueFires && gHangupAwaitLand.load(std::memory_order_acquire) != 0) return true;
     if (!gAttackDirty.load(std::memory_order_acquire) && !dueFires) return false;
     if (!SoftReloginWanted() || !IsArmed()) return true;
+    if (x::features::auto_lie::IsQuizActive()) {
+        gHangupLieDeferred = 1;
+        x::runtime::LogI("MobGather",
+                         "hangup before-action defer auto_lie why=%s — fire after quiz",
+                         why && why[0] ? why : "pre_action");
+        return true;
+    }
     FireProactiveHangup(why && why[0] ? why : "pre_action");
     return true;
 }
@@ -1611,27 +1660,36 @@ void TickSoftRelogin() {
     using x::features::ports::world::SceneState;
     using x::features::soft_login_probe::IsArmed;
 
+    const DWORD now = GetTickCount();
+    const bool quizActive = x::features::auto_lie::IsQuizActive();
+    static uint8_t sWasQuiz = 0;
+    if (sWasQuiz && !quizActive) gHangupLieDeferred = 1;
+    if (quizActive) gHangupLieDeferred = 1;
+    sWasQuiz = quizActive ? 1 : 0;
+
     // 计时：会话脏了才起表。换图 / Travel / InterStage 短离图不得清钟。
     // 只有这一轮已经拆（HangupDefer / 落地洗 FLAG）才开下一轮。
+    // 答完强制拆：秒数闸/出刀闸都关时也要落到下面的 fire 路径。
     if (!SoftReloginWanted()) {
         gSoftArmMs = 0;
         gSoftPauseMs = 0;
-        if (!HangupPolicyActive()) {
-            ClearHangupSellGate();
+        const bool oweLieHangup = gHangupLieDeferred && !quizActive;
+        if (!oweLieHangup) {
+            if (!HangupPolicyActive()) {
+                ClearHangupSellGate();
+                return;
+            }
+            // 欠 hangup 已清 / 仅 freeze 关 F5：停表，不清闸，仍认落地。
+            if (IsInMapScene()) NoteHangupLandIfReady();
+            if (gHangupCombatHold.load(std::memory_order_acquire)) {
+                const DWORD landMs = gHangupLandOkMs.load(std::memory_order_acquire);
+                if (landMs && now - landMs > kHangupSupplyHoldMaxMs)
+                    ReleaseHangupCombatHold("timeout");
+            }
             return;
         }
-        // 欠 hangup 已清 / 仅 freeze 关 F5：停表，不清闸，仍认落地。
-        if (IsInMapScene()) NoteHangupLandIfReady();
-        const DWORD nowOff = GetTickCount();
-        if (gHangupCombatHold.load(std::memory_order_acquire)) {
-            const DWORD landMs = gHangupLandOkMs.load(std::memory_order_acquire);
-            if (landMs && nowOff - landMs > kHangupSupplyHoldMaxMs)
-                ReleaseHangupCombatHold("timeout");
-        }
-        return;
     }
 
-    const DWORD now = GetTickCount();
     bool dueFiresNow = HangupFiresDue();
     if (IsInMapScene()) {
         NoteHangupLandIfReady();
@@ -1646,6 +1704,7 @@ void TickSoftRelogin() {
         if (HangupDeferNextClock()) {
             gSoftArmMs = 0;
             gSoftPauseMs = 0;
+            gHangupLieDeferred = 0;
         } else if (gSoftArmMs &&
                    (!gSoftKeepOffMapLogMs || now - gSoftKeepOffMapLogMs > 2000)) {
             gSoftKeepOffMapLogMs = now;
@@ -1657,10 +1716,19 @@ void TickSoftRelogin() {
         return;
     }
     // 上一轮 await 卡住（旋翼永不 onFh）时，出刀闸到期仍必须 CloseSession。
+    // 重连在途 / 已拆未落地：答完那发作废（会话已在洗）。卖装 hold 不挡 hangup_after_lie。
     if (HangupDeferNextClock()) {
         gSoftArmMs = 0;
         gSoftPauseMs = 0;
-        if (!dueFiresNow) return;
+        const bool washing =
+            gHangupAwaitLand.load(std::memory_order_acquire) != 0 ||
+            x::features::soft_login_probe::IsReconnectInFlight();
+        if (washing) {
+            gHangupLieDeferred = 0;
+            if (!dueFiresNow) return;
+        } else if (!dueFiresNow && !(gHangupLieDeferred && !quizActive)) {
+            return;
+        }
     }
     const bool dirty = gAttackDirty.load(std::memory_order_acquire) != 0;
     if (HangupSecondsOn()) {
@@ -1676,7 +1744,7 @@ void TickSoftRelogin() {
                              x::features::simple_combat::IsEnabled() ? 1 : 0,
                              gHangupUnbindF5.load(std::memory_order_acquire) ? 1 : 0);
         }
-        // 出刀闸、秒数闸到点都要拆（测谎中也拆）。HoldClock 只剩重连/起号。
+        // 出刀闸、秒数闸到点都要拆。测谎中不拆（见下方 quiz 推迟）。HoldClock 只剩重连/起号。
         if (SoftReloginHoldClock() && !dueFiresNow) {
             if (!gSoftPauseMs) gSoftPauseMs = now ? now : 1;
             return;
@@ -1696,12 +1764,28 @@ void TickSoftRelogin() {
     const unsigned needMs =
         xcat::ClampMobGatherSoftReloginSec(gSoftReloginSec.load(std::memory_order_acquire)) *
         1000u;
-    const DWORD retryUntil = gHangupRetryUntil.load(std::memory_order_acquire);
-    if (retryUntil && now < retryUntil) return;
     const bool dueFires = dueFiresNow;
     const bool dueTime = gSoftArmMs && (now - gSoftArmMs) >= needMs &&
                          (HangupSecondsOn() || dirty);
-    if (!dueFires && !dueTime) return;
+
+    // 测谎进行中禁止 CloseSession：题 UI 会被拆掉（F40 16:50 hangup_timer → dropped）。
+    // 钟继续走、不冻表；关题后无论到点与否都强制拆（hangup_after_lie）。
+    // 必须在 retryUntil 之前：失败 5s 重试窗若撞上答题，不能把 CloseSession 打进跟轨。
+    if (quizActive) {
+        static DWORD sLieDeferLog = 0;
+        if (!sLieDeferLog || now - sLieDeferLog > 1000) {
+            sLieDeferLog = now;
+            x::runtime::LogI("MobGather",
+                             "soft relogin defer quiz dueFires=%d dueTime=%d "
+                             "deferred=%d — hangup_after_lie when UI closes",
+                             dueFires ? 1 : 0, dueTime ? 1 : 0, gHangupLieDeferred ? 1 : 0);
+        }
+        return;
+    }
+
+    const DWORD retryUntil = gHangupRetryUntil.load(std::memory_order_acquire);
+    if (retryUntil && now < retryUntil) return;
+    if (!dueFires && !dueTime && !gHangupLieDeferred) return;
 
     if (!IsPlayReady() || !IsInMapScene()) {
         if (!gSoftSkipLogMs || now - gSoftSkipLogMs > 2000) {
@@ -1725,8 +1809,9 @@ void TickSoftRelogin() {
         }
         return;
     }
-    // 遇人软重连正在选新频：让它拆。出刀闸到期则抢拆（AbortHop 在下面）。
-    if (!dueFires && x::features::channel_hop::IsEncounterSoftHop()) return;
+    // 遇人软重连正在选新频：让它拆。出刀闸到期 / 答完强制拆则抢拆（AbortHop 在下面）。
+    if (!dueFires && !gHangupLieDeferred && x::features::channel_hop::IsEncounterSoftHop())
+        return;
     if (x::features::channel_hop::GetState() != x::features::channel_hop::State::Idle ||
         x::features::channel_hop::HasPending()) {
         x::runtime::LogI("MobGather", "soft relogin preempt hop (window due)");
@@ -1740,21 +1825,34 @@ void TickSoftRelogin() {
                              "soft relogin skip: homepage 软重连试连 is off (no CloseSession)");
         }
         gSoftArmMs = now;
+        gHangupLieDeferred = 0;
         return;
     }
 
     if (x::features::travel::IsActive()) {
         x::runtime::LogI("MobGather", "hangup due — stop travel, CloseSession first why=%s",
-                         dueFires ? "hangup_fires" : "hangup_timer");
+                         gHangupLieDeferred ? "hangup_after_lie"
+                         : dueFires        ? "hangup_fires"
+                                           : "hangup_timer");
         x::features::travel::RequestStop();
     }
 
-    const char* why = dueFires ? "hangup_fires" : "hangup_timer";
-    x::runtime::LogI("MobGather", "soft relogin fire why=%s fires=%u/%u age=%us need=%us", why,
-                     fires, needFires, (unsigned)((now - gSoftArmMs) / 1000u), needMs / 1000u);
+    const bool afterLie = gHangupLieDeferred != 0;
+    const char* why = afterLie ? "hangup_after_lie" : (dueFires ? "hangup_fires" : "hangup_timer");
+    gHangupLieDeferred = 0;
+    const unsigned ageSec = gSoftArmMs ? (unsigned)((now - gSoftArmMs) / 1000u) : 0u;
+    if (afterLie) {
+        x::runtime::LogI("MobGather",
+                         "soft relogin fire after auto_lie why=%s fires=%u/%u age=%us need=%us",
+                         why, fires, needFires, ageSec, needMs / 1000u);
+    } else {
+        x::runtime::LogI("MobGather", "soft relogin fire why=%s fires=%u/%u age=%us need=%us", why,
+                         fires, needFires, ageSec, needMs / 1000u);
+    }
     if (!FireProactiveHangup(why)) {
         gHangupRetryUntil.store(now + 5000, std::memory_order_release);
         if (dueTime && !dueFires) gSoftArmMs = now - needMs + 5000;
+        if (afterLie) gHangupLieDeferred = 1;
     }
 }
 
@@ -1904,6 +2002,31 @@ void SetSeekCluster(bool on) {
     }
 }
 
+void SetPatrolFar(bool on) {
+    if (on) {
+        const uint8_t prevHome = gHomeReturnOn.exchange(0, std::memory_order_acq_rel);
+        if (prevHome != 0) {
+            gHomePending.store(0, std::memory_order_release);
+            if (gFlyKind == 2) StopSeekFly("patrol_mutex");
+            x::runtime::LogI("MobGather", "homeReturn=0 (mutex patrol_far)");
+        }
+    }
+    if (on && gDyRampOn.load(std::memory_order_acquire) != 0) {
+        const uint8_t prev = gPatrolFarOn.exchange(0, std::memory_order_acq_rel);
+        if (prev != 0) StopSeekFly("dylim_ramp");
+        return;
+    }
+    const uint8_t v = on ? 1 : 0;
+    const uint8_t prev = gPatrolFarOn.exchange(v, std::memory_order_acq_rel);
+    // 关掉时清跨层 latch；seekCluster 若还开着会自行按同层规则重新寻簇。
+    if (prev != 0 && v == 0) StopSeekFly("opt_off");
+    if (prev != v) {
+        x::runtime::LogI("MobGather",
+                         "patrolFar=%d (cross-layer seek densest pack; far mobs by moving player)",
+                         on ? 1 : 0);
+    }
+}
+
 void TickSeekCluster() {
     using x::features::simple_combat::heli::Owner;
     namespace heli = x::features::simple_combat::heli;
@@ -1913,8 +2036,9 @@ void TickSeekCluster() {
         StopSeekFly("dylim_ramp");
         return;
     }
-    if (gSeekClusterOn.load(std::memory_order_acquire) == 0 || !IsEnabled() ||
-        IsEncounterPaused()) {
+    if ((gSeekClusterOn.load(std::memory_order_acquire) == 0 &&
+         gPatrolFarOn.load(std::memory_order_acquire) == 0) ||
+        !IsEnabled() || IsEncounterPaused()) {
         StopSeekFly("off");
         return;
     }
@@ -1977,16 +2101,19 @@ void TickSeekCluster() {
     }
 
     if (!gSeekLatchOn) {
+        // 巡点：层窗全放开，跨层/全图找最密堆；关巡点则维持同层寻簇老行为。
+        const bool patrol = gPatrolFarOn.load(std::memory_order_acquire) != 0;
+        const float lw = patrol ? 100000.f : -1.f;
         mob::Snapshot snap{};
         DenseCluster pack{};
-        if (!mob::GetCached(snap) || !snap.ok || !FindDenseCluster(snap, st.y, &pack)) {
+        if (!mob::GetCached(snap) || !snap.ok || !FindDenseCluster(snap, st.y, lw, &pack)) {
             StopSeekFly("no_pack");
             return;
         }
         float lx = pack.cx;
         float ly = pack.cy;
-        if (!SnapSeekLand(pack.cx, pack.cy, st.y, 0.f, &lx, &ly) &&
-            !SnapSeekLand(pack.cx, st.y, st.y, 0.f, &lx, &ly)) {
+        if (!SnapSeekLand(pack.cx, pack.cy, st.y, 0.f, &lx, &ly, lw) &&
+            !SnapSeekLand(pack.cx, st.y, st.y, 0.f, &lx, &ly, lw)) {
             StopSeekFly("no_fh");
             return;
         }
@@ -2003,9 +2130,9 @@ void TickSeekCluster() {
         gSeekLatchY = ly;
         x::runtime::LogI("MobGather",
                          "seek_cluster latch c=(%.0f,%.0f) snap=(%.0f,%.0f) n=%d "
-                         "ap=(%.0f,%.0f) dY=%.0f layerY=%.0f",
+                         "ap=(%.0f,%.0f) dY=%.0f layerY=%.0f patrol=%d",
                          pack.cx, pack.cy, lx, ly, pack.n, st.x, st.y, st.y - ly,
-                         gLayerYPx.load(std::memory_order_relaxed));
+                         gLayerYPx.load(std::memory_order_relaxed), patrol ? 1 : 0);
     }
 
     DriveSeekFly(st, now, "seek_cluster");
@@ -2019,6 +2146,11 @@ void SetHomeReturn(bool on) {
         if (prevSeek != 0) {
             if (gFlyKind == 1) StopSeekFly("home_mutex");
             x::runtime::LogI("MobGather", "seekCluster=0 (mutex home_return)");
+        }
+        const uint8_t prevPatrol = gPatrolFarOn.exchange(0, std::memory_order_acq_rel);
+        if (prevPatrol != 0) {
+            if (gFlyKind == 1) StopSeekFly("home_mutex");
+            x::runtime::LogI("MobGather", "patrolFar=0 (mutex home_return)");
         }
     }
     const uint8_t v = on ? 1 : 0;
@@ -2302,6 +2434,7 @@ void TickDyLimRamp() {
         gDyLim.store(1.f, std::memory_order_release);
         SetEnabled(true);
         SetSeekCluster(false);
+        SetPatrolFar(false);
         gHomePending.store(0, std::memory_order_release);
         if (gFlyKind == 2) StopSeekFly("dylim_ramp");
         x::features::ports::mob_fh_ban::ClearAll();
@@ -2631,6 +2764,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         float ad = 0.f;
         int32_t ctrl = 0;
         bool armed = false;
+        bool fresh = false;
     };
     Cand cands[mob::kMaxLiteMobs]{};
     int nCand = 0;
@@ -2697,26 +2831,29 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         if (adLive > radius && !keepArmed) continue;
         // 清怪重连本轮已冻结：只维持这一批，禁止 Arm 新怪。
         if (ClearReloginHoldWaveOnly() && (!keepArmed || !ClearWaveHas(m.id))) continue;
-        // 新 oid：横移不够、未贴地/掉落、或竖跨出步行网 → 不 Arm。脚边照吸。
+        // 进图第一批 exempt 仍脚边照吸。补刷：脚边只豁免横移，贴地/掉落/高度闸照挡。
         const float feet = gFeetExemptPx.load(std::memory_order_acquire);
-        if (!keepArmed && adLive > feet) {
-            float dHome = 0.f;
-            if (gDyRampOn.load(std::memory_order_acquire) == 0 &&
-                WalkHoldNew(m.id, x, vy, onFh, &dHome)) {
-                ++skippedSpawn;
-                if (onFh == 0 || vy < kWalkMaxDropVy) ++skippedAir;
-                if (dHome > skipWalkDxMax) skipWalkDxMax = dHome;
-                if (skipWalkId == 0 || dHome < skipWalkDx) {
-                    skipWalkId = m.id;
-                    skipWalkDx = dHome;
-                    skipWalkX = x;
-                    skipWalkY = y;
-                    skipWalkVy = vy;
-                    skipWalkFh = onFh;
+        const bool nearFeet = adLive <= feet;
+        const bool exempt = OidExempt(m.id);
+        if (!keepArmed) {
+            if (gDyRampOn.load(std::memory_order_acquire) == 0) {
+                float dHome = 0.f;
+                if (WalkHoldNew(m.id, x, vy, onFh, nearFeet, &dHome)) {
+                    ++skippedSpawn;
+                    if (onFh == 0 || vy < kWalkMaxDropVy) ++skippedAir;
+                    if (dHome > skipWalkDxMax) skipWalkDxMax = dHome;
+                    if (skipWalkId == 0 || dHome < skipWalkDx) {
+                        skipWalkId = m.id;
+                        skipWalkDx = dHome;
+                        skipWalkX = x;
+                        skipWalkY = y;
+                        skipWalkVy = vy;
+                        skipWalkFh = onFh;
+                    }
+                    continue;
                 }
-                continue;
             }
-            if (HeightHoldNew(y, st.y)) {
+            if ((!exempt || !nearFeet) && HeightHoldNew(y, st.y)) {
                 ++skippedDy;
                 continue;
             }
@@ -2727,6 +2864,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         cands[nCand].ad = adLive;
         cands[nCand].ctrl = m.ctrl;
         cands[nCand].armed = keepArmed;
+        cands[nCand].fresh = !keepArmed && !exempt;
         ++nCand;
     }
     for (int a = 0; a < nCand; ++a) {
@@ -2795,8 +2933,10 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         it.mob = cands[i].m->ptr;
         it.id = cands[i].m->id;
         it.ctrl = cands[i].ctrl;
+        it.fresh = cands[i].fresh;
         ++out->considered;
-        if (applyOn && it.ctrl <= 0 && job.nApply < kMaxHold) {
+        // 面板「申请控制权」照旧。补刷 ctrl≤0 即使没勾也走官方 ApplyControl（不挡 Arm）。
+        if ((applyOn || it.fresh) && it.ctrl <= 0 && job.nApply < kMaxHold) {
             job.applyMob[job.nApply] = it.mob;
             job.applyId[job.nApply] = it.id;
             ++job.nApply;

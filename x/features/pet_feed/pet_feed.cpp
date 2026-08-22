@@ -13,6 +13,7 @@
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
 #include "../../ui/player_vitals.h"
+#include "xcat_payload_control.h"
 
 #include <atomic>
 #include <cstdarg>
@@ -207,6 +208,14 @@ void ClearHoldPublish() {
 }
 
 void Tick(DWORD now) {
+    if (!xcat::kPetSummonUserEnabled) {
+        if (gDesired.load(std::memory_order_relaxed)) {
+            gDesired.store(false, std::memory_order_relaxed);
+        }
+        gPendingUntil = 0;
+        ClearHoldPublish();
+        return;
+    }
     if (!gDesired.load(std::memory_order_relaxed)) {
         gPendingUntil = 0;
         ClearHoldPublish();
@@ -376,6 +385,12 @@ DWORD WINAPI Worker(LPVOID) {
 }  // namespace
 
 void Init() {
+    if (!xcat::kPetSummonUserEnabled) {
+        gDesired.store(false, std::memory_order_relaxed);
+        gRequireFood.store(false, std::memory_order_relaxed);
+        ClearHoldPublish();
+        return;
+    }
     OpenLog();
     LogLine("Init P0c summon-only");
 }
@@ -389,6 +404,12 @@ void Shutdown() {
 }
 
 void StartWorker() {
+    if (!xcat::kPetSummonUserEnabled) {
+        gDesired.store(false, std::memory_order_relaxed);
+        gRequireFood.store(false, std::memory_order_relaxed);
+        ClearHoldPublish();
+        return;
+    }
     if (gWorkerThread.load(std::memory_order_acquire)) return;
     gWorkerStop.store(false, std::memory_order_release);
     HANDLE th = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
@@ -410,15 +431,20 @@ void StopWorker() {
 }
 
 void SetDesired(bool on) {
+    if (!xcat::kPetSummonUserEnabled) on = false;
     gDesired.store(on, std::memory_order_relaxed);
     if (!on) ClearHoldPublish();
 }
 
-void SetRequireFood(bool on) { gRequireFood.store(on, std::memory_order_relaxed); }
+void SetRequireFood(bool on) {
+    if (!xcat::kPetSummonUserEnabled) on = false;
+    gRequireFood.store(on, std::memory_order_relaxed);
+}
 
 bool IsDesired() { return gDesired.load(std::memory_order_relaxed); }
 
 bool ShouldHoldCombatForSummon(bool armBudget) {
+    if (!xcat::kPetSummonUserEnabled) return false;
     if (!gDesired.load(std::memory_order_relaxed)) return false;
     if (!ports::world::IsPlayReady()) return false;
 

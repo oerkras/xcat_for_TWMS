@@ -38,19 +38,25 @@ constexpr char kHashWmCharacterId[] =
 // FieldKey 现挂在 WM 本体（byte@_fieldKey），不再走 SceneField+0x98
 constexpr char kHashWmFieldKey[] =
     "e7c850e510712d210dbd4bd49f31bc2b3b21a069cb08ac04ecc53acbdb571e0";
+// CharacterRegDate backing（08-20 dump；紧挨 QuestTimers@+0x240）
+constexpr char kHashWmCharacterRegDate[] =
+    "<a4dde0132cd8b2253290dee45468a3f949136e790a7c024b44d053ff293a6ce>k__BackingField";
 
 constexpr size_t kFbWmSceneState = 0x34;
 constexpr size_t kFbWmField = 0x58;
 constexpr size_t kFbWmCharacterId = 0x90;  // was 0x98
 constexpr size_t kFbWmFieldKey = 0x80;     // was Field+0x98
+constexpr size_t kFbWmCharacterRegDate = 0x238;
 size_t gOffWmSceneState = kFbWmSceneState;
 size_t gOffWmField = kFbWmField;
 size_t gOffWmCharacterId = kFbWmCharacterId;
 size_t gOffFieldKey = kFbWmFieldKey;
+size_t gOffWmCharacterRegDate = kFbWmCharacterRegDate;
 #define kOffWmSceneState (gOffWmSceneState)
 #define kOffWmField (gOffWmField)
 #define kOffWmCharacterId (gOffWmCharacterId)
 #define kOffFieldKey (gOffFieldKey)
+#define kOffWmCharacterRegDate (gOffWmCharacterRegDate)
 #define kOffWmMapData (x::runtime::il2cpp_mapdata::OffWmMapData())
 #define kOffMapDataId (x::runtime::il2cpp_mapdata::OffMapId())
 #define kOffWmCharacterData (x::ui::player::OffWmCharacterData())
@@ -58,8 +64,10 @@ size_t gOffFieldKey = kFbWmFieldKey;
 bool gWmFieldTried = false;
 
 bool PlausibleWmOff(size_t off) { return off >= 0x20 && off < 0x200; }
+bool PlausibleWmDateOff(size_t off) { return off >= 0x1C0 && off < 0x2C0; }
 
-bool WmFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
+bool WmFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out,
+                   bool (*plausible)(size_t) = PlausibleWmOff) {
     *out = fb;
     if (!klass || !hash || !il2::Ensure()) return false;
     const auto& e = il2::Get();
@@ -78,7 +86,7 @@ bool WmFieldOffHit(void* klass, const char* hash, size_t fb, size_t* out) {
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 off = 0;
             }
-            if (PlausibleWmOff(off)) {
+            if (plausible(off)) {
                 *out = off;
                 return true;
             }
@@ -111,11 +119,15 @@ void EnsureWmFieldOff() {
     if (WmFieldOffHit(wm, kHashWmField, kFbWmField, &gOffWmField)) ++hits;
     if (WmFieldOffHit(wm, kHashWmCharacterId, kFbWmCharacterId, &gOffWmCharacterId)) ++hits;
     if (WmFieldOffHit(wm, kHashWmFieldKey, kFbWmFieldKey, &gOffFieldKey)) ++hits;
+    if (WmFieldOffHit(wm, kHashWmCharacterRegDate, kFbWmCharacterRegDate, &gOffWmCharacterRegDate,
+                      PlausibleWmDateOff))
+        ++hits;
     x::runtime::LogI("WorldPort",
-                     "wm/field slots path=%s hits=%d/4 scene=0x%zX field=0x%zX charId=0x%zX "
-                     "fkey=0x%zX",
-                     hits == 4 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
-                     gOffWmSceneState, gOffWmField, gOffWmCharacterId, gOffFieldKey);
+                     "wm/field slots path=%s hits=%d/5 scene=0x%zX field=0x%zX charId=0x%zX "
+                     "fkey=0x%zX regDate=0x%zX",
+                     hits == 5 ? "meta" : (hits ? "meta-partial" : "fallback"), hits,
+                     gOffWmSceneState, gOffWmField, gOffWmCharacterId, gOffFieldKey,
+                     gOffWmCharacterRegDate);
 }
 
 constexpr DWORD kWmRebindMs = 3000;
@@ -139,6 +151,15 @@ uint8_t ReadU8(void* base, size_t off) {
     if (!base) return 0;
     __try {
         return *reinterpret_cast<uint8_t*>(reinterpret_cast<uint8_t*>(base) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+int64_t ReadI64(void* base, size_t off) {
+    if (!base) return 0;
+    __try {
+        return *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(base) + off);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
     }
@@ -479,5 +500,24 @@ void* GetCharacterData() { return x::ui::player::LocalCharacterData(); }
 void* GetCharacterStat() { return x::ui::player::LocalCharacterStat(); }
 int64_t ReadMoney() { return x::ui::player::ReadMoney(); }
 void* GetItemSlotList(int invType) { return x::ui::player::GetItemSlotList(invType); }
+
+bool ReadCharacterRegDateTicks(int64_t* outTicks) {
+    if (outTicks) *outTicks = 0;
+    EnsureWmFieldOff();
+    void* wm = PeekWorldManager();
+    if (!il2::LooksLikeHeapPtr(wm)) wm = GetWorldManager();
+    if (!il2::LooksLikeHeapPtr(wm)) return false;
+
+    constexpr int64_t kTicksMask = 0x3FFFFFFFFFFFFFFFLL;
+    // .NET DateTime：2000-01-01 .. ~2040-01-01，滤掉未下发的 0 / 砸到 QuestTimers 指针。
+    constexpr int64_t kMinTicks = 630822816000000000LL;
+    constexpr int64_t kMaxTicks = 646790112000000000LL;
+
+    const int64_t raw = ReadI64(wm, kOffWmCharacterRegDate);
+    const int64_t ticks = raw & kTicksMask;
+    if (ticks < kMinTicks || ticks > kMaxTicks) return false;
+    if (outTicks) *outTicks = ticks;
+    return true;
+}
 
 }  // namespace x::features::ports::world

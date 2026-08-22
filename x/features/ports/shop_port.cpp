@@ -1580,6 +1580,7 @@ struct TalkJob {
     float npcY = 0.f;
     float playerX = 0.f;
     float playerY = 0.f;
+    int poolN = 0;
     const char* err = "?";
 };
 
@@ -1640,6 +1641,7 @@ void TalkJobOnMain(void* user) {
     job->npcY = 0.f;
     job->playerX = 0.f;
     job->playerY = 0.f;
+    job->poolN = 0;
     job->err = "init";
 
     if (!ResolveApi() || !gGA) {
@@ -1680,6 +1682,7 @@ void TalkJobOnMain(void* user) {
     const float tplMaxD2 =
         job->preferTemplateId > 0 ? (kTplMapWide * kTplMapWide) : maxD2;
     const int n = ListSize(list);
+    job->poolN = n;
     void* bestNear = nullptr;
     float bestNearD2 = maxD2;
     int bestNearOid = 0;
@@ -2773,9 +2776,10 @@ bool TryTalkNearestNpc(float maxDist, int preferTemplateId, bool inRangeOnly) {
     const DWORD now = GetTickCount();
     if (now - gLastTalkLogMs > 2500) {
         gLastTalkLogMs = now;
-        x::runtime::LogI("Shop", "TryTalkNearest ok=%d oid=%d tpl=%d want=%d dist=%.1f err=%s",
+        x::runtime::LogI("Shop",
+                         "TryTalkNearest ok=%d oid=%d tpl=%d want=%d dist=%.1f poolN=%d err=%s",
                          job.ok ? 1 : 0, job.npcOid, job.matchedTpl, preferTemplateId, job.dist,
-                         job.err ? job.err : "?");
+                         job.poolN, job.err ? job.err : "?");
     }
     return job.ok;
 }

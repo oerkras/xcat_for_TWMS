@@ -59,4 +59,9 @@ void* GetCharacterStat();   // 转发 player::LocalCharacterStat
 int64_t ReadMoney();        // 转发 player::ReadMoney；失败 -1
 void* GetItemSlotList(int invType);  // 转发 player::GetItemSlotList
 
+// WorldManager.CharacterRegDate（.NET DateTime ticks，低 62 bit）。
+// 现行 dump 槽 +0x238；未进角 / 未收到 S2C 395 时返回 false。
+// 纯内存读，可 off-pump。发布侧进角后只调一次。
+bool ReadCharacterRegDateTicks(int64_t* outTicks);
+
 }  // namespace x::features::ports::world

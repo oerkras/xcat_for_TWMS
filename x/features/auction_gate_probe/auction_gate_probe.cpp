@@ -9,6 +9,7 @@
 #endif
 #include "auction_gate_probe.h"
 
+#include "xcat_payload_control.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_metadata_lock.h"
 #include "../../runtime/il2cpp_method.h"
@@ -163,6 +164,10 @@ DWORD WINAPI ProbeThread(LPVOID) {
 }  // namespace
 
 void Init() {
+    if (!xcat::kAuctionGateProbeUserEnabled) {
+        x::runtime::LogI("AuctionGateProbe", "user gate off — skipped (keep code)");
+        return;
+    }
     x::runtime::LogI("AuctionGateProbe",
                      "init — one-shot native UIStatusBar.OnClickButton(%d); "
                      "no fake level/date; RVA 0x%X fallback",
@@ -175,6 +180,7 @@ void Shutdown() {
 }
 
 void RequestRun() {
+    if (!xcat::kAuctionGateProbeUserEnabled) return;
     if (gStop.load(std::memory_order_relaxed)) return;
     bool expected = false;
     if (!gBusy.compare_exchange_strong(expected, true)) {

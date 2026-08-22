@@ -17,7 +17,9 @@
 
 #include "imgui.h"
 
+#include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <string>
 
 namespace xcat::app {
@@ -104,6 +106,59 @@ void DrawCompactWatchdogLine() {
         return;
     }
     ImGui::TextUnformatted(timer.c_str());
+}
+
+// .NET DateTime ticks（年 1 起，Kind 已在读侧剥掉）→ 固定 GMT+8 北京时间。
+// 包里是 FILETIME，客户端 FromFileTimeUtc → ticks 日历是 UTC；台服/经典版墙钟是 UTC+8，
+// 不跟 Windows 时区走（localtime 会在非东八区机器上偏掉）。
+bool FormatDotNetTicksGmt8(int64_t ticks, char* when, size_t whenN, char* age, size_t ageN) {
+    if (!when || whenN == 0) return false;
+    when[0] = '\0';
+    if (age && ageN) age[0] = '\0';
+    constexpr int64_t kUnixEpochTicks = 621355968000000000LL;
+    constexpr int64_t kTicksPerSecond = 10000000LL;
+    constexpr int64_t kGmt8Sec = 8LL * 3600LL;
+    if (ticks < kUnixEpochTicks) return false;
+    const int64_t unixUtc = (ticks - kUnixEpochTicks) / kTicksPerSecond;
+    const time_t unixCst = static_cast<time_t>(unixUtc + kGmt8Sec);
+    struct tm cst {};
+    if (gmtime_s(&cst, &unixCst) != 0) return false;
+    snprintf(when, whenN, "%04d-%02d-%02d %02d:%02d", cst.tm_year + 1900, cst.tm_mon + 1,
+             cst.tm_mday, cst.tm_hour, cst.tm_min);
+    if (age && ageN) {
+        const time_t now = time(nullptr);
+        const int64_t sec = (now > unixUtc) ? static_cast<int64_t>(now - unixUtc) : 0;
+        const int64_t days = sec / 86400;
+        const int64_t hours = (sec % 86400) / 3600;
+        snprintf(age, ageN, "距今 %lld 天 %lld 小时", static_cast<long long>(days),
+                 static_cast<long long>(hours));
+    }
+    return true;
+}
+
+void DrawCharacterRegDate(const LaunchUiState& ui) {
+    if (ui.prefsBinDir.empty()) return;
+    xcat::PayloadStatus st{};
+    if (!xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) ||
+        !xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000) ||
+        !st.playerRegDateValid || st.playerRegDateTicks <= 0) {
+        return;
+    }
+    char when[32]{};
+    char age[48]{};
+    if (!FormatDotNetTicksGmt8(st.playerRegDateTicks, when, sizeof(when), age, sizeof(age)))
+        return;
+    ImGui::SameLine(0.f, ui::Gap());
+    ImGui::TextDisabled("|");
+    ImGui::SameLine(0.f, ui::Gap());
+    ImGui::BeginGroup();
+    ImGui::TextUnformatted("建角时间");
+    ImGui::SameLine(0.f, ui::Gap());
+    ImGui::TextUnformatted(when);
+    ImGui::EndGroup();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s\nGMT+8 北京时间 · WorldManager.CharacterRegDate", age);
+    }
 }
 
 void DrawCcuText(const LaunchUiState& ui) {
@@ -300,6 +355,7 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
             ImGui::SameLine(0.f, ui::Gap());
             ImGui::TextDisabled("最新 build %u", snap.latestBuildId);
         }
+        DrawCharacterRegDate(ui);
 
         // —— 2/4 运行时间 + 阶段 + PID + 启动 ——
         BeginStatusRow(origin, rowH, 1);

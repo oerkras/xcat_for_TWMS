@@ -489,6 +489,9 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.simpleCombatForgeHitMultiPkt = kForgeHitMultiPktDefault;
     out.mapAttack = 0;
     out.mobGather = 0;
+    out.mobGatherStrategy = kMobGatherStrategyDefault;
+    out.mobGatherLandOnArrive = kMobGatherLandOnArriveDefault;
+    out.mobGatherHopPx = kMobGatherHopPxDefault;
     out.mobGatherSpeedPct = kMobGatherSpeedPctDefault;
     out.mobGatherAntiJitter = kMobGatherAntiJitterDefault;
     out.mobGatherMax = kMobGatherMaxDefault;
@@ -508,6 +511,8 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherStationR = kMobGatherStationRDefault;
     out.mobGatherMaxCmd = kMobGatherMaxCmdDefault;
     out.mobGatherKp = kMobGatherKpDefault;
+    out.mobGatherDispClampOn = kMobGatherDispClampOnDefault;
+    out.mobGatherDispCapPx = kMobGatherDispCapPxDefault;
     out.mobGatherDead = kMobGatherDeadDefault;
     out.mobGatherGravity = kMobGatherGravityDefault;
     out.mobGatherCruiseV = kMobGatherCruiseVDefault;
@@ -527,6 +532,8 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherClearRelogin = kMobGatherClearReloginDefault;
     out.mobGatherApplyCtrl = 0;
     out.mobGatherSeekCluster = kMobGatherSeekClusterDefault;
+    out.mobGatherPatrolFar = kMobGatherPatrolFarDefault;
+    out.mobGatherAntiReport = kMobGatherAntiReportDefault;
     out.mobGatherHomeReturn = kMobGatherHomeReturnDefault;
     out.mobGatherHomeX = 0;
     out.mobGatherHomeY = 0;
@@ -691,6 +698,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "mpPotion", b)) out.mpPotion = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "petSummon", b)) out.petSummon = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "petSummonRequireFood", b)) out.petSummonRequireFood = b ? 1u : 0u;
+    if (!kPetSummonUserEnabled) {
+        out.petSummon = 0;
+        out.petSummonRequireFood = 0;
+    }
     if (IniGetBool(ini, "core", "multiSkill", b)) out.multiSkill = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "multiSkillSafeStagger", b))
         out.multiSkillSafeStagger = b ? 1u : 0u;
@@ -758,6 +769,12 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGather = b ? 1u : 0u;
     else
         out.mobGather = ReadMobGatherSession(binDir) ? 1u : 0u;
+    if (IniGetU32(ini, "core", "mobGatherStrategy", u))
+        out.mobGatherStrategy = ClampMobGatherStrategy(u);
+    if (IniGetU32(ini, "core", "mobGatherLandOnArrive", u))
+        out.mobGatherLandOnArrive = u ? 1u : 0u;
+    if (IniGetU32(ini, "core", "mobGatherHopPx", u))
+        out.mobGatherHopPx = ClampMobGatherHopPx(u);
     ReadMobGatherTune(binDir, &out.mobGatherSpeedPct, &out.mobGatherAntiJitter);
     if (IniGetU32(ini, "core", "mobGatherSpeedPct", u))
         out.mobGatherSpeedPct = u;
@@ -815,6 +832,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetU32(ini, "core", "mobGatherMaxCmd", u))
         out.mobGatherMaxCmd = u;
     if (IniGetU32(ini, "core", "mobGatherKp", u)) out.mobGatherKp = u;
+    if (IniGetU32(ini, "core", "mobGatherDispClampOn", u))
+        out.mobGatherDispClampOn = u ? 1u : 0u;
+    if (IniGetU32(ini, "core", "mobGatherDispCapPx", u))
+        out.mobGatherDispCapPx = ClampMobGatherDispCapPx(u);
     if (IniGetU32(ini, "core", "mobGatherDead", u)) out.mobGatherDead = u;
     if (IniGetU32(ini, "core", "mobGatherGravity", u))
         out.mobGatherGravity = u;
@@ -852,6 +873,16 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherHangupFires = ClampMobGatherHangupFires(u);
     if (IniGetBool(ini, "core", "mobGatherHangupFiresOn", b))
         out.mobGatherHangupFiresOn = b ? 1u : 0u;
+    // v142: 旧厂默 1900/1800 迁一次 1700。升 version 后用户可再改。
+    {
+        uint32_t coreIniVer = 0;
+        const bool hasCoreVer = IniGetU32(ini, "core", "version", coreIniVer);
+        if (!hasCoreVer || coreIniVer < 142u) {
+            if (out.mobGatherHangupFires == kMobGatherHangupFiresLegacyDefault ||
+                out.mobGatherHangupFires == kMobGatherHangupFiresLegacyDefault1800)
+                out.mobGatherHangupFires = kMobGatherHangupFiresDefault;
+        }
+    }
     if (IniGetBool(ini, "core", "mobGatherHangupUnbindF5", b))
         out.mobGatherHangupUnbindF5 = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "gatherTabUnlocked", b))
@@ -862,6 +893,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherApplyCtrl = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mobGatherSeekCluster", b))
         out.mobGatherSeekCluster = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "mobGatherPatrolFar", b))
+        out.mobGatherPatrolFar = b ? 1u : 0u;
+    // 键保留兼容；读盘强制关，避免旧 user.ini=1 再流入 apply。
+    out.mobGatherAntiReport = 0u;
     if (IniGetBool(ini, "core", "mobGatherHomeReturn", b))
         out.mobGatherHomeReturn = b ? 1u : 0u;
     {
@@ -1059,6 +1094,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetBool(ini, "core", "infiniteStars", b)) out.infiniteStars = b ? 1u : 0u;
     if (!kInfiniteStarsUserEnabled) out.infiniteStars = 0;
     if (IniGetBool(ini, "core", "forceTrade", b)) out.forceTrade = b ? 1u : 0u;
+    if (!kForceTradeUserEnabled) out.forceTrade = 0;
     // core.autoSell* 已废弃：真源 [auto_supply]；此处强制清零，避免旧 key 干扰。
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
@@ -1194,8 +1230,10 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.autoEnter = normalized.autoEnter ? 1u : 0u;
     normalized.hpPotion = normalized.hpPotion ? 1u : 0u;
     normalized.mpPotion = normalized.mpPotion ? 1u : 0u;
-    normalized.petSummon = normalized.petSummon ? 1u : 0u;
-    normalized.petSummonRequireFood = normalized.petSummonRequireFood ? 1u : 0u;
+    normalized.petSummon =
+        (kPetSummonUserEnabled && normalized.petSummon) ? 1u : 0u;
+    normalized.petSummonRequireFood =
+        (kPetSummonUserEnabled && normalized.petSummonRequireFood) ? 1u : 0u;
     normalized.multiSkill = normalized.multiSkill ? 1u : 0u;
     normalized.multiSkillSafeStagger = normalized.multiSkillSafeStagger ? 1u : 0u;
     normalized.multiSkillSendUseRequest = normalized.multiSkillSendUseRequest ? 1u : 0u;
@@ -1239,6 +1277,9 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.simpleCombatForgeHitMultiPkt = 0;
     normalized.mapAttack = normalized.mapAttack ? 1u : 0u;
     normalized.mobGather = normalized.mobGather ? 1u : 0u;
+    normalized.mobGatherStrategy = ClampMobGatherStrategy(normalized.mobGatherStrategy);
+    normalized.mobGatherLandOnArrive = normalized.mobGatherLandOnArrive ? 1u : 0u;
+    normalized.mobGatherHopPx = ClampMobGatherHopPx(normalized.mobGatherHopPx);
     ApplyMobGatherEncounterForce(normalized);
     normalized.mobGatherAntiJitter = normalized.mobGatherAntiJitter ? 1u : 0u;
     normalized.mobGatherMax = ClampMobGatherMax(
@@ -1262,6 +1303,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherStandOffX = ClampMobGatherStandOffX(normalized.mobGatherStandOffX);
     normalized.mobGatherStandOffY = ClampMobGatherStandOffY(normalized.mobGatherStandOffY);
     normalized.mobGatherAimJitterPx = ClampMobGatherAimJitter(normalized.mobGatherAimJitterPx);
+    normalized.mobGatherDispClampOn = normalized.mobGatherDispClampOn ? 1u : 0u;
+    normalized.mobGatherDispCapPx = ClampMobGatherDispCapPx(normalized.mobGatherDispCapPx);
     normalized.mobGatherSoftRelogin = normalized.mobGatherSoftRelogin ? 1u : 0u;
     normalized.mobGatherSoftReloginSec = ClampMobGatherSoftReloginSec(
         normalized.mobGatherSoftReloginSec ? normalized.mobGatherSoftReloginSec
@@ -1273,9 +1316,13 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherClearRelogin = normalized.mobGatherClearRelogin ? 1u : 0u;
     normalized.mobGatherApplyCtrl = normalized.mobGatherApplyCtrl ? 1u : 0u;
     normalized.mobGatherSeekCluster = normalized.mobGatherSeekCluster ? 1u : 0u;
+    normalized.mobGatherPatrolFar = normalized.mobGatherPatrolFar ? 1u : 0u;
+    normalized.mobGatherAntiReport = 0u;
     normalized.mobGatherHomeReturn = normalized.mobGatherHomeReturn ? 1u : 0u;
     if (normalized.mobGatherHomeReturn && normalized.mobGatherSeekCluster)
         normalized.mobGatherSeekCluster = 0u;
+    if (normalized.mobGatherHomeReturn && normalized.mobGatherPatrolFar)
+        normalized.mobGatherPatrolFar = 0u;
     normalized.mobGatherHomeX = ClampMobGatherStandOffX(normalized.mobGatherHomeX);
     normalized.mobGatherHomeY = ClampMobGatherStandOffY(normalized.mobGatherHomeY);
     normalized.mobGatherHomeValid = normalized.mobGatherHomeValid ? 1u : 0u;
@@ -1332,7 +1379,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.secAttackTextHook = 0;
     normalized.infiniteStars =
         (kInfiniteStarsUserEnabled && normalized.infiniteStars) ? 1u : 0u;
-    normalized.forceTrade = normalized.forceTrade ? 1u : 0u;
+    normalized.forceTrade =
+        (kForceTradeUserEnabled && normalized.forceTrade) ? 1u : 0u;
     normalized.autoSell = normalized.autoSell ? 1u : 0u;
     normalized.launcherHangupSchedule = normalized.launcherHangupSchedule ? 1u : 0u;
     normalized.launcherHangupScheduleMask =
@@ -1481,6 +1529,9 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniEraseKey(ini, "core", "simpleCombatForgeHitMultiPkt");
         IniSetBool(ini, "core", "mapAttack", false);
         IniSetBool(ini, "core", "mobGather", normalized.mobGather != 0);
+        IniSetU32(ini, "core", "mobGatherStrategy", normalized.mobGatherStrategy);
+        IniSetU32(ini, "core", "mobGatherLandOnArrive", normalized.mobGatherLandOnArrive);
+        IniSetU32(ini, "core", "mobGatherHopPx", normalized.mobGatherHopPx);
         IniSetU32(ini, "core", "mobGatherSpeedPct", normalized.mobGatherSpeedPct);
         IniSetBool(ini, "core", "mobGatherAntiJitter", normalized.mobGatherAntiJitter != 0);
         IniSetU32(ini, "core", "mobGatherMax", normalized.mobGatherMax);
@@ -1503,6 +1554,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "mobGatherStationR", normalized.mobGatherStationR);
         IniSetU32(ini, "core", "mobGatherMaxCmd", normalized.mobGatherMaxCmd);
         IniSetU32(ini, "core", "mobGatherKp", normalized.mobGatherKp);
+        IniSetU32(ini, "core", "mobGatherDispClampOn", normalized.mobGatherDispClampOn);
+        IniSetU32(ini, "core", "mobGatherDispCapPx", normalized.mobGatherDispCapPx);
         IniSetU32(ini, "core", "mobGatherDead", normalized.mobGatherDead);
         IniSetU32(ini, "core", "mobGatherGravity", normalized.mobGatherGravity);
         IniSetU32(ini, "core", "mobGatherCruiseV", normalized.mobGatherCruiseV);
@@ -1522,6 +1575,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "mobGatherClearRelogin", normalized.mobGatherClearRelogin != 0);
         IniSetBool(ini, "core", "mobGatherApplyCtrl", normalized.mobGatherApplyCtrl != 0);
         IniSetBool(ini, "core", "mobGatherSeekCluster", normalized.mobGatherSeekCluster != 0);
+        IniSetBool(ini, "core", "mobGatherPatrolFar", normalized.mobGatherPatrolFar != 0);
+        IniSetBool(ini, "core", "mobGatherAntiReport", false);
         IniSetBool(ini, "core", "mobGatherHomeReturn", normalized.mobGatherHomeReturn != 0);
         IniSetI32(ini, "core", "mobGatherHomeX", normalized.mobGatherHomeX);
         IniSetI32(ini, "core", "mobGatherHomeY", normalized.mobGatherHomeY);
