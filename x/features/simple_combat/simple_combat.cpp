@@ -500,6 +500,9 @@ struct LockState {
     // 本窗**首刀**的 |dx|，判决时喂给 reach_cal 估触及包线。取首刀是为了与离线口径
     // 一致（`_faceflip.windows` 也用 w[0]），两边的数才能并表核对。
     float armDx = -1.f;
+    // 上一刀未确认：禁止再 OnFuncKey。1ms+无 CD 时引擎吞刀 (b1=-1) 仍会 Arm 并连刷，
+    // 画面空挥来自这里，不是命中盒算错。命中回写 / 观察窗满走 ClearWhiffArm 提前放行。
+    DWORD fireHoldUntil = 0;
     int firesInArm = 0;
     bool hitProbeLogged = false;  // 本观察窗内 hit_probe 只打一次，防刷屏
     int32_t accMissWaitHitted = -1;  // lastHitted 上升后等 DamageInfo；-1=无待判
@@ -765,6 +768,17 @@ void ClearWhiffArm() {
     gLock.firesInArm = 0;
     gLock.hitProbeLogged = false;
     gLock.accMissWaitHitted = -1;
+    gLock.fireHoldUntil = 0;
+}
+
+// 一刀一确认：窗内 / 吞刀冷却未到期则压下一刀。lastHitted 回写会 ClearWhiffArm 立刻放行。
+bool FireConfirmHolds(DWORD now) {
+    if (!gLock.fireHoldUntil) return false;
+    if (static_cast<int>(gLock.fireHoldUntil - now) <= 0) {
+        gLock.fireHoldUntil = 0;
+        return false;
+    }
+    return true;
 }
 
 // 轻暂停 / skill_prepare：停刀期间 KillTimeout 不计墙钟（与 SoftResetWhiff 同因）。
@@ -786,8 +800,8 @@ void ReleaseKillTimeoutHold(DWORD now) {
 // 轻暂停（buffs/timed_keys）会停出刀数百 ms：若不撤观察窗，墙钟到期会误 +whiff → 换怪瞬移（BIN：定时键后 +0.8s whiff×3）。
 void SoftResetWhiffForLightPause(const char* why) {
     NoteKillTimeoutHold(GetTickCount());
-    if (!gLock.id && !gLock.armUntil && !gLock.whiff) return;
-    if (gLock.whiff || gLock.armUntil || gLock.firesInArm) {
+    if (!gLock.id && !gLock.armUntil && !gLock.whiff && !gLock.fireHoldUntil) return;
+    if (gLock.whiff || gLock.armUntil || gLock.firesInArm || gLock.fireHoldUntil) {
         LogLine("whiff soft-reset why=%s id=%d streak=%d arm=%d", why ? why : "?", gLock.id,
                 gLock.whiff, gLock.firesInArm);
     }
@@ -6814,6 +6828,8 @@ void TickImpl(DWORD now) {
                     break;
                 }
             }
+            // 无 CD 时 busy 闸失效：必须在 TryFire 前拦住「观察窗内连按」。
+            if (!hiraishinOn && FireConfirmHolds(now)) break;
             // 左右可位移框外：旋翼拉回（build 132 交战期一直飞，无地面 skip）。
             if (impactOn && PlayerOutOfPlayBounds(player.x, player.y)) {
                 EnterState(State::Aim, now, "oob_hold");
@@ -7176,7 +7192,9 @@ void TickImpl(DWORD now) {
                         break;
                     }
                 }
+                int acceptedB1 = 1;
                 if (!forgedOk) {
+                acceptedB1 = -2;
                 ports::attack::FireBlink blink{};
                 ok = ports::attack::TryFirePrimaryEx(ignoreInterval, blink);
                 if (ok) {
@@ -7205,6 +7223,7 @@ void TickImpl(DWORD now) {
                     uint32_t spFh = 0;
                     ports::ground_spoof::FireDebug(&spV, &spFh);
                     ports::attack::FireOutcomeDebug(&b0, &b1);
+                    acceptedB1 = b1;
                     if (b1 >= 0) gLastSwingAction = b1;
                     int bapx = 0, bapy = 0, baplx = 0, baply = 0, bap2x = 0, bap2y = 0;
                     if (blink.on) ports::attack::BlinkDebug(&bapx, &bapy, &baplx, &baply, &bap2x, &bap2y);
@@ -7217,7 +7236,19 @@ void TickImpl(DWORD now) {
                         b0, b1, blink.on ? 1 : 0, blink.x, blink.y, bapx, bapy, baplx, baply, bap2x,
                         bap2y);
                     // 与 BIN「fire id=」同一拍：墙钟分钟加总就是那次 2030。不看 b1/命中。
-                    x::features::ports::mob_gather::NoteHangupFire();
+                    // b1≥0 才算挥出：挂机刀数 / 空刀观察跟真实接刀走。吞刀只压下一拍，不记账。
+                    gLock.fireHoldUntil = now + kWhiffObserveMs;
+                    if (b1 >= 0) {
+                        x::features::ports::mob_gather::NoteHangupFire();
+                    } else {
+                        static DWORD sSwallow = 0;
+                        if (!sSwallow || now - sSwallow > 400) {
+                            sSwallow = now;
+                            LogLine("fire hold swallow b1=%d id=%d d=(%.0f,%.0f) hold=%ums", b1,
+                                    gLock.id, faceDx, player.y - gLock.y,
+                                    (unsigned)kWhiffObserveMs);
+                        }
+                    }
                     if (!gStandstillSince) {
                         gStandstillSince = now;
                         gStandstillAnchorX = player.x;
@@ -7234,10 +7265,12 @@ void TickImpl(DWORD now) {
                     break;
                 }
                 }
-            }
 
+            // 吞刀不武装观察窗：没挥出去的刀不该 +whiff / 记 lockFires。
+            if (forgedOk || acceptedB1 >= 0) {
             // 出刀只武装观察窗；真正 +whiff / 换怪在 RefreshLock→ResolveWhiffArm。
             ArmWhiffObserve(now, hpBefore, std::fabs(faceDx));
+            }
 
             // 自校准状态节流播报：离线用它与 `_reach.py` 的逐档表并行核对，
             // 确认「在线估的边界」与「事后统计的边界」是同一个数。
@@ -7252,18 +7285,19 @@ void TickImpl(DWORD now) {
                 }
             }
             // 瞬移「每只怪打一下」：出刀当帧切下一只（与射后不管同拍，不等 Recover）。
-            if (!hiraishinOn && TryAbandonTeleportOneHit(now)) {
+            if ((forgedOk || acceptedB1 >= 0) && !hiraishinOn && TryAbandonTeleportOneHit(now)) {
                 EnterState(State::Acquire, now, gLastLockLostWhy);
                 continue;
             }
             // 射后不管：出刀当帧即可早切（不等 Recover 下一拍读 lastHitted）。
             // 站桩输出不因 oneshot / 空刀观察换锁。
-            if (!hiraishinOn && TryAbandonOneshot(now)) {
+            if ((forgedOk || acceptedB1 >= 0) && !hiraishinOn && TryAbandonOneshot(now)) {
                 EnterState(State::Acquire, now, gLastLockLostWhy);
                 continue;
             }
             EnterState(State::Recover, now, "fired");
             break;
+            }
         }
 
         case State::Recover: {
@@ -7281,6 +7315,9 @@ void TickImpl(DWORD now) {
                     break;
                 }
             }
+
+            // 无 CD 时 busy 闸失效：必须在进 Firing 前拦住「观察窗内连按」。
+            if (FireConfirmHolds(now)) break;
             // 站桩输出：面前有怪就点按续砍（等忙锁 / 间隔，换锁首刀也不 ignore）。
             if (hiraishinOn) {
                 if (HiraishinLootHoldBlocksFire(now)) break;

@@ -28,6 +28,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <ostream>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -1231,6 +1232,7 @@ void MesoUnitsSave(OpsState& st);
 void MesoUnitsLoad(OpsState& st);
 void MesoMergeUidTokenAliases(OpsState& st);
 bool ContainsIgnoreCase(const std::string& hay, const char* needle);
+bool ContainsIgnoreCase(const std::string& hay, const char* needle);
 
 std::string MesoUnitKey(const std::string& token, const std::string& charName,
                         const std::string& deviceId) {
@@ -1382,6 +1384,15 @@ bool MesoEventIsDart(const OpsState::MesoEvent& e) {
     return e.note.rfind("雷之鏢", 0) == 0;
 }
 
+bool MesoKindAlert(const std::string& kind) {
+    return kind == "outflow" || kind == "token_xfer" || kind == "reconnect_drop" ||
+           kind == "scroll_outflow" || kind == "scroll_xfer" || kind == "scroll_reconnect";
+}
+
+bool MesoKindAbnormal(const std::string& kind) {
+    return MesoKindAlert(kind) || kind == "char_move" || kind == "scroll_move";
+}
+
 bool MesoEventMatchesView(const OpsState::MesoEvent& e, int view) {
     if (view == 1) return true;
     if (view == 2) return e.kind == "inflow" || e.kind == "scroll_inflow";
@@ -1393,15 +1404,6 @@ bool MesoEventMatchesFilter(const OpsState::MesoEvent& e, const char* filter) {
     if (!filter || !filter[0]) return true;
     return ContainsIgnoreCase(e.token, filter) || ContainsIgnoreCase(e.charName, filter) ||
            ContainsIgnoreCase(e.peerToken, filter) || ContainsIgnoreCase(e.note, filter);
-}
-
-bool MesoKindAlert(const std::string& kind) {
-    return kind == "outflow" || kind == "token_xfer" || kind == "reconnect_drop" ||
-           kind == "scroll_outflow" || kind == "scroll_xfer" || kind == "scroll_reconnect";
-}
-
-bool MesoKindAbnormal(const std::string& kind) {
-    return MesoKindAlert(kind) || kind == "char_move" || kind == "scroll_move";
 }
 
 int MesoCountEvents(const OpsState& st, ULONGLONG sinceMs, int mode) {
@@ -2635,17 +2637,23 @@ void MesoDashClearFile(OpsState& st) {
                     std::ios::binary | std::ios::trunc);
 }
 
+void MesoEventWriteLine(std::ostream& f, const OpsState::MesoEvent& ev) {
+    f << "{\"t\":" << ev.wallMs << ",\"kind\":\"" << JsonEscapeLocal(ev.kind) << "\",\"k\":\""
+      << JsonEscapeLocal(ev.token) << "\",\"c\":\"" << JsonEscapeLocal(ev.charName)
+      << "\",\"pk\":\"" << JsonEscapeLocal(ev.peerToken) << "\",\"pc\":\""
+      << JsonEscapeLocal(ev.peerChar) << "\",\"b\":" << ev.before << ",\"a\":" << ev.after
+      << ",\"m\":" << ev.mag << ",\"n\":\"" << JsonEscapeLocal(ev.note) << "\"";
+    if (ev.itemId > 0) f << ",\"id\":" << ev.itemId;
+    f << "}\n";
+}
+
 void MesoEventsAppend(OpsState& st, const OpsState::MesoEvent& ev) {
     if (st.repoRoot.empty()) return;
     EnsureDirs(st.repoRoot);
     std::ofstream f(std::filesystem::path(OpsLogMesoEvents(st.repoRoot)),
                     std::ios::binary | std::ios::app);
     if (!f) return;
-    f << "{\"t\":" << ev.wallMs << ",\"kind\":\"" << JsonEscapeLocal(ev.kind) << "\",\"k\":\""
-      << JsonEscapeLocal(ev.token) << "\",\"c\":\"" << JsonEscapeLocal(ev.charName)
-      << "\",\"pk\":\"" << JsonEscapeLocal(ev.peerToken) << "\",\"pc\":\""
-      << JsonEscapeLocal(ev.peerChar) << "\",\"b\":" << ev.before << ",\"a\":" << ev.after
-      << ",\"m\":" << ev.mag << ",\"n\":\"" << JsonEscapeLocal(ev.note) << "\"}\n";
+    MesoEventWriteLine(f, ev);
 }
 
 void MesoEventsLoad(OpsState& st) {
@@ -2678,6 +2686,7 @@ void MesoEventsLoad(OpsState& st) {
         ev.after = MesoDashParseUll(FindJsonNumber(line, "a"));
         ev.mag = MesoDashParseUll(FindJsonNumber(line, "m"));
         ev.note = FindJsonString(line, "n");
+        ev.itemId = JsonIntField(line, "id", 0);
         if (ev.kind.empty() || ev.token.empty()) continue;
         kept.push_back(std::move(ev));
         if (MesoKindAlert(kept.back().kind)) MesoMarkSeriesAlert(st, kept.back().token, t);
@@ -2688,15 +2697,7 @@ void MesoEventsLoad(OpsState& st) {
         const std::wstring tmp = path + L".tmp";
         std::ofstream out(std::filesystem::path(tmp), std::ios::binary | std::ios::trunc);
         if (out) {
-            for (const auto& ev : st.mesoEvents) {
-                out << "{\"t\":" << ev.wallMs << ",\"kind\":\"" << JsonEscapeLocal(ev.kind)
-                    << "\",\"k\":\"" << JsonEscapeLocal(ev.token) << "\",\"c\":\""
-                    << JsonEscapeLocal(ev.charName) << "\",\"pk\":\""
-                    << JsonEscapeLocal(ev.peerToken) << "\",\"pc\":\""
-                    << JsonEscapeLocal(ev.peerChar) << "\",\"b\":" << ev.before
-                    << ",\"a\":" << ev.after << ",\"m\":" << ev.mag << ",\"n\":\""
-                    << JsonEscapeLocal(ev.note) << "\"}\n";
-            }
+            for (const auto& ev : st.mesoEvents) MesoEventWriteLine(out, ev);
             out.close();
             std::error_code ec;
             std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
@@ -6418,18 +6419,22 @@ void FormatMesoDelta(unsigned long long first, unsigned long long last, char* ou
     std::snprintf(out, n, "%s%s", up ? "+" : "-", magBuf);
 }
 
-const char* MesoKindLabel(const std::string& kind) {
+const char* MesoKindLabel(const std::string& kind, bool dart = false) {
     if (kind == "outflow") return "外转嫌疑";
     if (kind == "token_xfer") return "跨号转移";
     if (kind == "char_move") return "同号搬仓";
     if (kind == "reconnect_drop") return "重连骤降";
     if (kind == "inflow") return "进账";
-    if (kind == "scroll_outflow") return "卷轴外转";
-    if (kind == "scroll_xfer") return "卷轴跨号";
-    if (kind == "scroll_move") return "卷轴搬仓";
-    if (kind == "scroll_reconnect") return "卷轴骤降";
-    if (kind == "scroll_inflow") return "卷轴进账";
+    if (kind == "scroll_outflow") return dart ? "雷之鏢外转" : "卷轴外转";
+    if (kind == "scroll_xfer") return dart ? "雷之鏢跨号" : "卷轴跨号";
+    if (kind == "scroll_move") return dart ? "雷之鏢搬仓" : "卷轴搬仓";
+    if (kind == "scroll_reconnect") return dart ? "雷之鏢骤降" : "卷轴骤降";
+    if (kind == "scroll_inflow") return dart ? "雷之鏢进账" : "卷轴进账";
     return kind.c_str();
+}
+
+const char* MesoKindLabel(const OpsState::MesoEvent& e) {
+    return MesoKindLabel(e.kind, MesoEventIsDart(e));
 }
 
 void FormatWallHms(ULONGLONG wallMs, char* buf, size_t n) {
@@ -6572,30 +6577,219 @@ void MesoDragSplitEW(const char* id, float* rightW, float rowW, float rowH, floa
 }
 
 void DrawMesoKpiCard(const char* title, const char* value, const char* sub, ImVec4 valueCol,
-                     float width) {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, OpsIsLight()
-                                                ? ImVec4(1.f, 1.f, 1.f, 1.f)
-                                                : ImVec4(0.11f, 0.12f, 0.15f, 1.f));
-    ImGui::BeginChild(title, ImVec2(width, 92.f), true, ImGuiWindowFlags_NoScrollbar);
+                     float width, bool selected = false, bool clickable = false) {
+    const bool light = OpsIsLight();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, light ? ImVec4(1.f, 1.f, 1.f, 1.f)
+                                                   : ImVec4(0.11f, 0.12f, 0.15f, 1.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f, 10.f));
+    ImGui::BeginChild(title, ImVec2(width, 88.f), true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const char* hash = std::strstr(title, "##");
     if (hash && hash != title) {
         ImGui::TextDisabled("%.*s", static_cast<int>(hash - title), title);
     } else {
         ImGui::TextDisabled("%s", title);
     }
-    ImGui::SetWindowFontScale(1.35f);
+    ImGui::SetWindowFontScale(1.32f);
     ImGui::PushStyleColor(ImGuiCol_Text, valueCol);
     ImGui::TextUnformatted(value);
     ImGui::PopStyleColor();
     ImGui::SetWindowFontScale(1.f);
     if (sub && sub[0]) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + width - 16.f);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + width - 20.f);
         ImGui::TextDisabled("%s", sub);
         ImGui::PopTextWrapPos();
     }
     ImGui::EndChild();
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 b = ImGui::GetItemRectMax();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (clickable && ImGui::IsItemHovered()) {
+        const ImU32 wash = ImGui::GetColorU32(ImVec4(1.f, 1.f, 1.f, light ? 0.10f : 0.06f));
+        dl->AddRectFilled(a, b, wash, 8.f);
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    if (selected) {
+        const ImU32 accent = ImGui::GetColorU32(valueCol);
+        dl->AddRect(a, b, accent, 8.f, 0, 1.6f);
+        dl->AddRectFilled(ImVec2(a.x + 1.f, a.y + 8.f), ImVec2(a.x + 4.f, b.y - 8.f), accent, 1.5f);
+    }
 }
+
+void DrawMesoToggleChip(const char* label, bool* on, ImVec4 color, const char* tip) {
+    const bool light = OpsIsLight();
+    const bool active = on && *on;
+    if (active) {
+        const float a = light ? 0.28f : 0.38f;
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(color.x, color.y, color.z, a));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(color.x, color.y, color.z, a + 0.10f));
+        ImGui::PushStyleColor(ImGuiCol_Text, light ? color : ImVec4(0.96f, 0.97f, 0.98f, 1.f));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, color);
+    }
+    if (ImGui::SmallButton(label) && on) *on = !*on;
+    if (active) ImGui::PopStyleColor(3);
+    else ImGui::PopStyleColor(1);
+    if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+}
+
+void DrawMesoSegBtn(const char* label, bool on, int* dst, int value, const char* tip = nullptr) {
+    const bool light = OpsIsLight();
+    const ImVec4 acc = OpsTone::Info();
+    if (on) {
+        const float a = light ? 0.26f : 0.36f;
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(acc.x, acc.y, acc.z, a));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(acc.x, acc.y, acc.z, a + 0.10f));
+        ImGui::PushStyleColor(ImGuiCol_Text, light ? acc : ImVec4(0.96f, 0.97f, 0.98f, 1.f));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, light ? ImVec4(0.93f, 0.94f, 0.96f, 1.f)
+                                                      : ImVec4(0.16f, 0.17f, 0.20f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, light ? ImVec4(0.88f, 0.90f, 0.93f, 1.f)
+                                                            : ImVec4(0.22f, 0.24f, 0.28f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_Text, OpsTone::Body());
+    }
+    if (ImGui::SmallButton(label) && dst) *dst = value;
+    ImGui::PopStyleColor(3);
+    if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+}
+
+ImVec4 MesoToneWash(ImVec4 tone) {
+    return ImVec4(tone.x, tone.y, tone.z, OpsIsLight() ? 0.16f : 0.30f);
+}
+
+void DrawMesoPill(const char* text, ImVec4 fill, ImVec4 fg) {
+    const ImVec2 ts = ImGui::CalcTextSize(text);
+    const float padX = 7.f, padY = 2.f;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 sz(ts.x + padX * 2.f, ts.y + padY * 2.f);
+    ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y),
+                                              ImGui::GetColorU32(fill), 8.f);
+    ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + padX, p.y + padY), ImGui::GetColorU32(fg),
+                                        text);
+    ImGui::Dummy(sz);
+}
+
+void FormatWallFull(ULONGLONG wallMs, char* buf, size_t n) {
+    const time_t sec = static_cast<time_t>(wallMs / 1000ull);
+    std::tm t{};
+    if (!BeijingTm(sec, t)) {
+        std::snprintf(buf, n, "--");
+        return;
+    }
+    std::strftime(buf, n, "%m-%d %H:%M:%S", &t);
+}
+
+void FormatWallRelative(ULONGLONG wallMs, ULONGLONG nowMs, char* buf, size_t n) {
+    if (nowMs < wallMs) {
+        FormatWallHms(wallMs, buf, n);
+        return;
+    }
+    const ULONGLONG sec = (nowMs - wallMs) / 1000ull;
+    if (sec < 10ull)
+        std::snprintf(buf, n, "刚刚");
+    else if (sec < 60ull)
+        std::snprintf(buf, n, "%llu 秒前", static_cast<unsigned long long>(sec));
+    else if (sec < 3600ull)
+        std::snprintf(buf, n, "%llu 分钟前", static_cast<unsigned long long>(sec / 60ull));
+    else if (sec < 86400ull)
+        std::snprintf(buf, n, "%llu 小时前", static_cast<unsigned long long>(sec / 3600ull));
+    else
+        std::snprintf(buf, n, "%llu 天前", static_cast<unsigned long long>(sec / 86400ull));
+}
+
+void DrawMesoClippedText(const char* text, ImVec4 col) {
+    if (!text || !text[0]) {
+        ImGui::TextDisabled("—");
+        return;
+    }
+    const float maxW = (std::max)(8.f, ImGui::GetContentRegionAvail().x);
+    const ImVec2 sz = ImGui::CalcTextSize(text);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float w = (std::min)(sz.x, maxW);
+    ImGui::Dummy(ImVec2(w, sz.y));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (sz.x <= maxW + 0.5f) {
+        dl->AddText(p, ImGui::GetColorU32(col), text);
+    } else {
+        dl->PushClipRect(p, ImVec2(p.x + maxW, p.y + sz.y + 1.f), true);
+        dl->AddText(p, ImGui::GetColorU32(col), text);
+        dl->PopClipRect();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", text);
+}
+
+void MesoClearDashFilters(OpsState& st) {
+    st.mesoDashFilter[0] = '\0';
+    st.mesoDashOnlyDart = false;
+    st.mesoDashOnlyScroll = false;
+    st.mesoDashShowOffline = true;
+}
+
+long long MesoWinDelta(const OpsState::MesoDashSeries& s, ULONGLONG t0) {
+    unsigned long long f = s.lastMeso, l = s.lastMeso;
+    bool hf = false;
+    for (const auto& p : s.points) {
+        if (p.wallMs < t0) continue;
+        if (!hf) {
+            f = p.meso;
+            hf = true;
+        }
+        l = p.meso;
+    }
+    if (!hf) return 0;
+    if (l >= f) return static_cast<long long>(l - f);
+    return -static_cast<long long>(f - l);
+}
+
+int CmpUllField(unsigned long long a, unsigned long long b) {
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+struct MesoHoverPersonRow {
+    ImVec4 col;
+    std::string name;
+    unsigned long long meso = 0;
+};
+
+// 悬停按人（签卡 uid / 卡密）列金额，与折线分组键 MesoPersonId 一致。
+void MesoCollectHoverPersonRows(const OpsState& st, const std::vector<size_t>& visIdx,
+                                ULONGLONG hoverT, std::vector<MesoHoverPersonRow>& rows) {
+    rows.clear();
+    for (size_t idx : visIdx) {
+        const auto& s = st.mesoDashSeries[idx];
+        bool ok = false;
+        const unsigned long long v = MesoAtOrBefore(s.points, hoverT, &ok);
+        if (!ok) continue;
+        const ImVec4 col = ImGui::ColorConvertU32ToFloat4(MesoSeriesColor(s.token, s.online));
+        std::string lab;
+        if (!s.uid.empty()) {
+            lab = "uid:";
+            lab += s.token;
+        } else {
+            lab = s.token;
+            lab += " 旧";
+        }
+        rows.push_back({col, std::move(lab), v});
+    }
+    std::sort(rows.begin(), rows.end(), [](const MesoHoverPersonRow& a, const MesoHoverPersonRow& b) {
+        if (a.meso != b.meso) return a.meso > b.meso;
+        return a.name < b.name;
+    });
+}
+
+constexpr ImGuiID kMesoColVis = 1;
+constexpr ImGuiID kMesoColId = 2;
+constexpr ImGuiID kMesoColChar = 3;
+constexpr ImGuiID kMesoColStat = 4;
+constexpr ImGuiID kMesoColWealth = 5;
+constexpr ImGuiID kMesoColMeso = 6;
+constexpr ImGuiID kMesoColDelta = 7;
+constexpr ImGuiID kMesoColSpark = 8;
 
 void DrawMesoSparkline(const std::deque<OpsState::MesoDashPoint>& pts, ULONGLONG t0, ULONGLONG t1,
                        ImU32 col, ImVec2 size) {
@@ -6896,15 +7090,12 @@ void DrawMesoPlot(OpsState& st, const std::vector<size_t>& visIdx, ULONGLONG t0,
                     ImGui::TextColored(OpsTone::Warn(), "合计  %s", buf);
                 }
             }
-            for (size_t idx : visIdx) {
-                const auto& s = st.mesoDashSeries[idx];
-                bool ok = false;
-                const unsigned long long v = MesoAtOrBefore(s.points, hoverT, &ok);
-                if (!ok) continue;
+            std::vector<MesoHoverPersonRow> personRows;
+            MesoCollectHoverPersonRows(st, visIdx, hoverT, personRows);
+            for (const auto& row : personRows) {
                 char buf[48]{};
-                FormatMesoUll(v, buf, sizeof(buf));
-                ImVec4 col = ImGui::ColorConvertU32ToFloat4(MesoSeriesColor(s.token, s.online));
-                ImGui::TextColored(col, "%s  %s", s.token.c_str(), buf);
+                FormatMesoUll(row.meso, buf, sizeof(buf));
+                ImGui::TextColored(row.col, "%s  %s", row.name.c_str(), buf);
             }
         }
         ImGui::EndTooltip();
@@ -6951,24 +7142,41 @@ void DrawMesoDashPanel(OpsState& st) {
         winLast = p.meso;
     }
 
-    ImGui::TextUnformatted("利润监控");
-    ImGui::SameLine();
-    ImGui::TextDisabled("按人分组 · 底账含离线 · 关服断线留白 · 流水 30 天");
-    ImGui::SameLine(0, 12.f);
-    ImGui::TextDisabled("窗口");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(100.f);
     const char* winLabs[] = {"10 分钟", "30 分钟", "1 小时", "3 小时", "24 小时", "7 天"};
     const int winVals[] = {10, 30, 60, 180, 1440, 10080};
     int winIdx = 1;
     for (int i = 0; i < 6; ++i)
         if (winVals[i] == st.mesoDashWindowMin) winIdx = i;
-    if (ImGui::Combo("##meso_win", &winIdx, winLabs, 6)) st.mesoDashWindowMin = winVals[winIdx];
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("折线与名单「增减」共用此时段");
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f);
+    ImGui::TextUnformatted("利润监控");
+    ImGui::SameLine(0, 10.f);
+    ImGui::TextDisabled("按人分组 · 底账含离线 · 流水 30 天");
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.f, 0.f));
+    DrawMesoSegBtn("10分##mw10", st.mesoDashWindowMin == 10, &st.mesoDashWindowMin, 10,
+                   "折线与名单「增减」共用此时段");
     ImGui::SameLine();
+    DrawMesoSegBtn("30分##mw30", st.mesoDashWindowMin == 30, &st.mesoDashWindowMin, 30,
+                   "折线与名单「增减」共用此时段");
+    ImGui::SameLine();
+    DrawMesoSegBtn("1时##mw60", st.mesoDashWindowMin == 60, &st.mesoDashWindowMin, 60,
+                   "折线与名单「增减」共用此时段");
+    ImGui::SameLine();
+    DrawMesoSegBtn("3时##mw180", st.mesoDashWindowMin == 180, &st.mesoDashWindowMin, 180,
+                   "折线与名单「增减」共用此时段");
+    ImGui::SameLine();
+    DrawMesoSegBtn("1天##mw1440", st.mesoDashWindowMin == 1440, &st.mesoDashWindowMin, 1440,
+                   "折线与名单「增减」共用此时段");
+    ImGui::SameLine();
+    DrawMesoSegBtn("7天##mw7d", st.mesoDashWindowMin == 10080, &st.mesoDashWindowMin, 10080,
+                   "折线与名单「增减」共用此时段");
+    ImGui::PopStyleVar();
+    ImGui::SameLine(0, 14.f);
+    ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("门槛");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(88.f);
+    ImGui::SetNextItemWidth(96.f);
     const char* thLabs[] = {"≥1万", "≥5万", "≥10万", "≥50万", "≥100万"};
     const unsigned long long thVals[] = {10000ull, 50000ull, 100000ull, 500000ull, 1000000ull};
     int thIdx = 2;
@@ -6980,30 +7188,44 @@ void DrawMesoDashPanel(OpsState& st) {
             "金币变化达到此额度才记流水（过滤打怪小额抖动）\n"
             "卷轴数量变化 ≥1 即记；雷之鏢只记进账与跨号/搬仓，战斗消耗不记外转");
     ImGui::SameLine();
-    ImGui::Checkbox("合计曲线", &st.mesoDashShowTotal);
-    ImGui::SameLine();
-    ImGui::Checkbox("离线样本", &st.mesoDashShowOffline);
-    ImGui::SameLine();
-    ImGui::Checkbox("Y 从 0", &st.mesoDashYFromZero);
-    ImGui::SameLine();
-    if (ImGui::SmallButton("全显##meso")) {
-        for (auto& s : st.mesoDashSeries) s.visible = true;
+    {
+        const float btnW = ImGui::CalcTextSize("显示").x + ImGui::GetStyle().FramePadding.x * 2.f + 8.f;
+        const float x = ImGui::GetCursorPosX();
+        const float availR = ImGui::GetContentRegionAvail().x;
+        if (availR > btnW) ImGui::SetCursorPosX(x + availR - btnW);
     }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("全隐##meso")) {
-        for (auto& s : st.mesoDashSeries) s.visible = false;
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("清空曲线##meso")) {
-        for (auto& s : st.mesoDashSeries) s.points.clear();
-        st.mesoDashTotal.clear();
-        MesoDashClearFile(st);
-        SetStatus(st, "已清空曲线（流水与角色底账未动）");
-    }
+    if (NeutralSmallButton("显示##meso_view")) ImGui::OpenPopup("meso_view_menu");
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip(
-            "只清折线缓存 meso_dash.jsonl\n"
-            "流水 meso_events.jsonl 与角色底账 meso_units.json 保留");
+        ImGui::SetTooltip("合计 / 离线样本 / Y 轴 / 折线显隐与缓存");
+    if (ImGui::BeginPopup("meso_view_menu")) {
+        int nVis = 0;
+        for (const auto& s : st.mesoDashSeries)
+            if (s.visible) ++nVis;
+        ImGui::TextDisabled("折线 %d / %d 可见", nVis, static_cast<int>(st.mesoDashSeries.size()));
+        ImGui::Separator();
+        ImGui::MenuItem("合计曲线", nullptr, &st.mesoDashShowTotal);
+        ImGui::MenuItem("离线样本", nullptr, &st.mesoDashShowOffline);
+        ImGui::MenuItem("Y 轴从 0", nullptr, &st.mesoDashYFromZero);
+        ImGui::Separator();
+        if (ImGui::MenuItem("全部显示折线")) {
+            for (auto& s : st.mesoDashSeries) s.visible = true;
+        }
+        if (ImGui::MenuItem("全部隐藏折线")) {
+            for (auto& s : st.mesoDashSeries) s.visible = false;
+        }
+        ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_Text, OpsTone::Danger());
+        if (ImGui::MenuItem("清空折线缓存")) {
+            for (auto& s : st.mesoDashSeries) s.points.clear();
+            st.mesoDashTotal.clear();
+            MesoDashClearFile(st);
+            SetStatus(st, "已清空曲线（流水与角色底账未动）");
+        }
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("只清 meso_dash.jsonl，流水与底账保留");
+        ImGui::EndPopup();
+    }
 
     const float avail = ImGui::GetContentRegionAvail().x;
     const float gap = 8.f;
@@ -7011,7 +7233,9 @@ void DrawMesoDashPanel(OpsState& st) {
     char v1[48]{}, v3[48]{}, sub3[64]{};
     FormatMesoUll(bookTotal, v1, sizeof(v1));
     FormatMesoDelta(haveFirst ? winFirst : bookTotal, winLast, v3, sizeof(v3));
-    std::snprintf(sub3, sizeof(sub3), "近 %d 分钟折线净变化", winMin);
+    for (int i = 0; i < 6; ++i)
+        if (winVals[i] == st.mesoDashWindowMin) winIdx = i;
+    std::snprintf(sub3, sizeof(sub3), "相对 %s", winLabs[winIdx]);
     const ULONGLONG dayCut = nowMs > 86400000ull ? nowMs - 86400000ull : 0;
     const int nOut24 = MesoCountEvents(st, dayCut, 0);
     const int nAbn24 = MesoCountEvents(st, dayCut, 1);
@@ -7032,14 +7256,18 @@ void DrawMesoDashPanel(OpsState& st) {
     DrawMesoKpiCard("窗口净增##kpi2", v3, sub3, deltaCol, cardW);
     ImGui::SameLine(0, gap);
     DrawMesoKpiCard("外转嫌疑##kpi3", v4, sub4, nOut24 > 0 ? OpsTone::Danger() : OpsTone::Muted(),
-                    cardW);
+                    cardW, st.mesoEventView == 0, true);
+    if (ImGui::IsItemClicked()) st.mesoEventView = (st.mesoEventView == 0) ? 1 : 0;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("单击切换：异常流水 / 全部流水");
     ImGui::SameLine(0, gap);
     {
         char tokBuf[48]{};
         std::snprintf(tokBuf, sizeof(tokBuf), "%d / %d", nOnline,
                       static_cast<int>(st.mesoDashSeries.size()));
         DrawMesoKpiCard("在线人数##kpi4", tokBuf, "在线 / 已见过（签卡 uid 优先，否则旧 TOKEN）",
-                        OpsTone::Token(), cardW);
+                        OpsTone::Token(), cardW, !st.mesoDashShowOffline, true);
+        if (ImGui::IsItemClicked()) st.mesoDashShowOffline = !st.mesoDashShowOffline;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("单击：名单只看在线（再点恢复离线样本）");
     }
     ImGui::SameLine(0, gap);
     {
@@ -7049,12 +7277,42 @@ void DrawMesoDashPanel(OpsState& st) {
         std::snprintf(dartSub, sizeof(dartSub), "%d 人持有 · 卷轴 %d 人", dartHolders,
                       scrollHolders);
         DrawMesoKpiCard("雷之鏢##kpi5", dartBuf, dartSub,
-                        dartTotal > 0 ? OpsTone::Warn() : OpsTone::Muted(), cardW);
+                        dartTotal > 0 ? OpsTone::Warn() : OpsTone::Muted(), cardW,
+                        st.mesoDashOnlyDart, true);
+        if (ImGui::IsItemClicked()) st.mesoDashOnlyDart = !st.mesoDashOnlyDart;
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip(
+                "单击：名单只看有鏢的人\n"
                 "底账合计（含离线上次探活）\n"
                 "未注入新 DLL 的号探活头没有 2070005，这里为 0");
     }
+
+    {
+        bool onlyOnline = !st.mesoDashShowOffline;
+        DrawMesoToggleChip("有鏢", &st.mesoDashOnlyDart, OpsTone::Warn(),
+                           "只看名下有雷之鏢的人；与「有卷」同时开=并集");
+        ImGui::SameLine(0, 6.f);
+        DrawMesoToggleChip("有卷", &st.mesoDashOnlyScroll, OpsTone::Info(),
+                           "只看名下有 204/234 卷轴的人；与「有鏢」同时开=并集");
+        ImGui::SameLine(0, 6.f);
+        DrawMesoToggleChip("只看在线", &onlyOnline, OpsTone::Token(),
+                           "名单隐藏离线样本；再点恢复");
+        st.mesoDashShowOffline = !onlyOnline;
+        if (st.mesoDashFilter[0]) {
+            ImGui::SameLine(0, 8.f);
+            char qchip[80]{};
+            std::snprintf(qchip, sizeof(qchip), "搜索 %.16s×##meso_qchip", st.mesoDashFilter);
+            if (ImGui::SmallButton(qchip)) st.mesoDashFilter[0] = '\0';
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("清除搜索");
+        }
+        const bool anyFilter = st.mesoDashFilter[0] || st.mesoDashOnlyDart || st.mesoDashOnlyScroll ||
+                               !st.mesoDashShowOffline;
+        if (anyFilter) {
+            ImGui::SameLine(0, 10.f);
+            if (ImGui::SmallButton("清除筛选##meso_clrall")) MesoClearDashFilters(st);
+        }
+    }
+    ImGui::Dummy(ImVec2(0, 2.f));
 
     if (!st.clientsError.empty()) {
         ImGui::TextColored(OpsTone::DangerSoft(), "%s", st.clientsError.c_str());
@@ -7080,6 +7338,7 @@ void DrawMesoDashPanel(OpsState& st) {
         const auto& sa = st.mesoDashSeries[a];
         const auto& sb = st.mesoDashSeries[b];
         if (sa.online != sb.online) return sa.online && !sb.online;
+        if (st.mesoDashOnlyDart && sa.dartQty != sb.dartQty) return sa.dartQty > sb.dartQty;
         if (sa.lastMeso != sb.lastMeso) return sa.lastMeso > sb.lastMeso;
         return sa.token < sb.token;
     });
@@ -7135,37 +7394,59 @@ void DrawMesoDashPanel(OpsState& st) {
         ImGui::SameLine(0, 0);
         ImGui::BeginChild("meso_legend_cell", ImVec2(st.mesoUiLegendW, rowH), false,
                           ImGuiWindowFlags_NoScrollbar);
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 168.f);
-        ImGui::InputTextWithHint("##meso_filter", "筛选身份 / 角色", st.mesoDashFilter,
+        {
+            const float chipReserve = st.mesoDashFilter[0] ? 72.f : 48.f;
+            ImGui::SetNextItemWidth(
+                (std::max)(80.f, ImGui::GetContentRegionAvail().x - chipReserve));
+        }
+        ImGui::InputTextWithHint("##meso_filter", "搜索身份 / 角色", st.mesoDashFilter,
                                  sizeof(st.mesoDashFilter));
+        if (ImGui::IsItemFocused() && ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            st.mesoDashFilter[0] = '\0';
+        if (st.mesoDashFilter[0]) {
+            ImGui::SameLine(0, 4.f);
+            if (ImGui::SmallButton("×##meso_clr")) st.mesoDashFilter[0] = '\0';
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("清除搜索（Esc）");
+        }
         ImGui::SameLine();
-        ImGui::TextDisabled("%d人", static_cast<int>(listed.size()));
-        ImGui::SameLine();
-        ImGui::Checkbox("有鏢", &st.mesoDashOnlyDart);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("只看名下有雷之鏢的人；与「有卷」同时开=并集");
-        ImGui::SameLine();
-        ImGui::Checkbox("有卷", &st.mesoDashOnlyScroll);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("只看名下有 204/234 卷轴的人；与「有鏢」同时开=并集");
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%d 人", static_cast<int>(listed.size()));
         ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8.f, 6.f));
         ImGui::BeginChild("meso_legend", ImVec2(0, 0), true);
         if (listed.empty()) {
-            if (st.mesoDashOnlyDart || st.mesoDashOnlyScroll)
-                ImGui::TextDisabled("筛选结果为空。关掉「有鏢 / 有卷」，或等新 DLL 探活带上 2070005。");
-            else
+            ImGui::Dummy(ImVec2(0, 18.f));
+            if (st.mesoDashOnlyDart || st.mesoDashOnlyScroll || st.mesoDashFilter[0] ||
+                !st.mesoDashShowOffline) {
+                ImGui::TextDisabled("没有匹配的人。");
+                if (ImGui::SmallButton("清除筛选##meso_empty")) MesoClearDashFilters(st);
+            } else {
                 ImGui::TextDisabled("暂无样本。有签卡 uid 或旧 TOKEN 的会话会出现在这里。");
+            }
         } else if (ImGui::BeginTable("meso_leg_tbl", 8,
                                      ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                                          ImGuiTableFlags_SizingStretchProp |
-                                         ImGuiTableFlags_PadOuterX)) {
+                                         ImGuiTableFlags_PadOuterX | ImGuiTableFlags_Resizable |
+                                         ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate)) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn("##vis", ImGuiTableColumnFlags_WidthFixed, 28.f);
-            ImGui::TableSetupColumn("身份", ImGuiTableColumnFlags_WidthStretch, 1.05f);
-            ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 0.9f);
-            ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthFixed, 52.f);
-            ImGui::TableSetupColumn("高价值", ImGuiTableColumnFlags_WidthStretch, 1.15f);
-            ImGui::TableSetupColumn("实时", ImGuiTableColumnFlags_WidthFixed, 96.f);
-            ImGui::TableSetupColumn("增减", ImGuiTableColumnFlags_WidthFixed, 80.f);
-            ImGui::TableSetupColumn("走势", ImGuiTableColumnFlags_WidthFixed, 92.f);
+            ImGui::TableSetupColumn("##vis",
+                                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
+                                    28.f, kMesoColVis);
+            ImGui::TableSetupColumn("身份", ImGuiTableColumnFlags_WidthStretch, 1.05f, kMesoColId);
+            ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 0.9f, kMesoColChar);
+            ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthFixed, 64.f, kMesoColStat);
+            ImGui::TableSetupColumn("高价值", ImGuiTableColumnFlags_WidthStretch, 1.15f,
+                                    kMesoColWealth);
+            ImGui::TableSetupColumn("实时",
+                                    ImGuiTableColumnFlags_WidthFixed |
+                                        ImGuiTableColumnFlags_PreferSortDescending,
+                                    96.f, kMesoColMeso);
+            ImGui::TableSetupColumn("增减",
+                                    ImGuiTableColumnFlags_WidthFixed |
+                                        ImGuiTableColumnFlags_PreferSortDescending,
+                                    80.f, kMesoColDelta);
+            ImGui::TableSetupColumn("走势",
+                                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
+                                    92.f, kMesoColSpark);
             ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
             {
                 const char* tips[8] = {
@@ -7186,6 +7467,52 @@ void DrawMesoDashPanel(OpsState& st) {
                         ImGui::SetTooltip("%s", tips[col]);
                     ImGui::PopID();
                 }
+            }
+            if (ImGuiTableSortSpecs* specs = ImGui::TableGetSortSpecs()) {
+                if (specs->SpecsCount > 0) {
+                    std::stable_sort(listed.begin(), listed.end(), [&](size_t ia, size_t ib) {
+                        const auto& sa = st.mesoDashSeries[ia];
+                        const auto& sb = st.mesoDashSeries[ib];
+                        for (int n = 0; n < specs->SpecsCount; ++n) {
+                            const ImGuiTableColumnSortSpecs& sp = specs->Specs[n];
+                            int delta = 0;
+                            switch (sp.ColumnUserID) {
+                                case kMesoColId:
+                                    delta = CmpStrField(sa.token, sb.token);
+                                    break;
+                                case kMesoColChar:
+                                    delta = CmpStrField(sa.chars, sb.chars);
+                                    break;
+                                case kMesoColStat:
+                                    delta = CmpUllField(sa.online ? 1ull : 0ull, sb.online ? 1ull : 0ull);
+                                    break;
+                                case kMesoColWealth:
+                                    delta = CmpUllField(sa.dartQty, sb.dartQty);
+                                    if (delta == 0)
+                                        delta = CmpUllField(sa.hasScroll ? 1ull : 0ull,
+                                                            sb.hasScroll ? 1ull : 0ull);
+                                    break;
+                                case kMesoColMeso:
+                                    delta = CmpUllField(sa.lastMeso, sb.lastMeso);
+                                    break;
+                                case kMesoColDelta: {
+                                    const long long da = MesoWinDelta(sa, t0);
+                                    const long long db = MesoWinDelta(sb, t0);
+                                    if (da < db) delta = -1;
+                                    else if (da > db) delta = 1;
+                                    break;
+                                }
+                                default:
+                                    break;
+                            }
+                            if (delta != 0)
+                                return (sp.SortDirection == ImGuiSortDirection_Ascending) ? (delta < 0)
+                                                                                          : (delta > 0);
+                        }
+                        return ia < ib;
+                    });
+                }
+                specs->SpecsDirty = false;
             }
             st.mesoDashHoverSeries = -1;
             for (size_t idx : listed) {
@@ -7243,13 +7570,13 @@ void DrawMesoDashPanel(OpsState& st) {
                 if (s.chars.empty())
                     ImGui::TextDisabled("—");
                 else
-                    ImGui::TextUnformatted(s.chars.c_str());
+                    DrawMesoClippedText(s.chars.c_str(), ImGui::GetStyleColorVec4(ImGuiCol_Text));
                 if (ImGui::IsItemHovered()) st.mesoDashHoverSeries = static_cast<int>(idx);
                 ImGui::TableSetColumnIndex(3);
                 if (s.online)
-                    ImGui::TextColored(OpsTone::Ok(), "在线");
+                    DrawMesoPill("在线", MesoToneWash(OpsTone::Ok()), OpsTone::Ok());
                 else
-                    ImGui::TextDisabled("离线");
+                    DrawMesoPill("离线", MesoToneWash(OpsTone::Muted()), OpsTone::Muted());
                 ImGui::TableSetColumnIndex(4);
                 if (s.wealthText.empty()) {
                     ImGui::TextDisabled("—");
@@ -7301,50 +7628,65 @@ void DrawMesoDashPanel(OpsState& st) {
 
     MesoDragSplitNS("meso_plot_ev_split", &st.mesoUiPlotH, bodyH, minPlot, evHdrH + minEv);
 
-    int evMatch = 0;
+    int evViewN[4] = {};
     for (const auto& e : st.mesoEvents) {
-        const bool ok = st.mesoEventView == 1 ||
-                        (st.mesoEventView == 2 &&
-                         (e.kind == "inflow" || e.kind == "scroll_inflow")) ||
-                        (st.mesoEventView == 0 && MesoKindAbnormal(e.kind));
-        if (!ok) continue;
-        if (st.mesoDashFilter[0] && !ContainsIgnoreCase(e.token, st.mesoDashFilter) &&
-            !ContainsIgnoreCase(e.charName, st.mesoDashFilter) &&
-            !ContainsIgnoreCase(e.peerToken, st.mesoDashFilter))
-            continue;
-        ++evMatch;
+        if (!MesoEventMatchesFilter(e, st.mesoDashFilter)) continue;
+        ++evViewN[1];
+        if (MesoKindAbnormal(e.kind)) ++evViewN[0];
+        if (e.kind == "inflow" || e.kind == "scroll_inflow") ++evViewN[2];
+        if (MesoKindScroll(e.kind)) ++evViewN[3];
     }
+    const int evMatch = evViewN[st.mesoEventView];
+    ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("转移流水");
     ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%d 条", evMatch);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("落盘 artifacts\\ops_logs\\meso_events.jsonl（最多 30 天）");
-    ImGui::SameLine(0, 10.f);
-    if (ImGui::RadioButton("异常##ev", st.mesoEventView == 0)) st.mesoEventView = 0;
+    if (st.mesoDashFilter[0]) {
+        ImGui::SameLine(0, 8.f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("与名单同筛");
+    }
+    ImGui::SameLine(0, 12.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.f, 0.f));
+    {
+        char lab[40]{};
+        std::snprintf(lab, sizeof(lab), "异常 %d##ev0", evViewN[0]);
+        DrawMesoSegBtn(lab, st.mesoEventView == 0, &st.mesoEventView, 0, "外转 / 跨号 / 重连骤降");
+        ImGui::SameLine();
+        std::snprintf(lab, sizeof(lab), "全部 %d##ev1", evViewN[1]);
+        DrawMesoSegBtn(lab, st.mesoEventView == 1, &st.mesoEventView, 1, "全部流水");
+        ImGui::SameLine();
+        std::snprintf(lab, sizeof(lab), "进账 %d##ev2", evViewN[2]);
+        DrawMesoSegBtn(lab, st.mesoEventView == 2, &st.mesoEventView, 2, "金币与高价值进账");
+        ImGui::SameLine();
+        std::snprintf(lab, sizeof(lab), "高价值 %d##ev3", evViewN[3]);
+        DrawMesoSegBtn(lab, st.mesoEventView == 3, &st.mesoEventView, 3,
+                       "卷轴 / 雷之鏢的进账、搬仓、跨号、外转");
+    }
+    ImGui::PopStyleVar();
     ImGui::SameLine();
-    if (ImGui::RadioButton("全部##ev", st.mesoEventView == 1)) st.mesoEventView = 1;
-    ImGui::SameLine();
-    if (ImGui::RadioButton("进账##ev", st.mesoEventView == 2)) st.mesoEventView = 2;
-    ImGui::SameLine();
-    if (ImGui::SmallButton("复制流水##ev")) {
+    {
+        const float btnW =
+            ImGui::CalcTextSize("复制").x + ImGui::GetStyle().FramePadding.x * 2.f + 8.f;
+        const float x = ImGui::GetCursorPosX();
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (avail > btnW) ImGui::SetCursorPosX(x + avail - btnW);
+    }
+    if (NeutralSmallButton("复制##ev")) {
         std::string out = "time\tkind\tid\tchar\tbefore\tafter\tdelta\tpeer\tnote\n";
         int n = 0;
         for (auto it = st.mesoEvents.rbegin(); it != st.mesoEvents.rend(); ++it) {
             const auto& e = *it;
-            const bool ok = st.mesoEventView == 1 ||
-                            (st.mesoEventView == 2 &&
-                             (e.kind == "inflow" || e.kind == "scroll_inflow")) ||
-                            (st.mesoEventView == 0 && MesoKindAbnormal(e.kind));
-            if (!ok) continue;
-            if (st.mesoDashFilter[0] && !ContainsIgnoreCase(e.token, st.mesoDashFilter) &&
-                !ContainsIgnoreCase(e.charName, st.mesoDashFilter) &&
-                !ContainsIgnoreCase(e.peerToken, st.mesoDashFilter))
-                continue;
+            if (!MesoEventMatchesView(e, st.mesoEventView)) continue;
+            if (!MesoEventMatchesFilter(e, st.mesoDashFilter)) continue;
             char tlab[24]{};
-            FormatWallTick(e.wallMs, 1440, tlab, sizeof(tlab));
+            FormatWallFull(e.wallMs, tlab, sizeof(tlab));
             out += tlab;
             out += '\t';
-            out += MesoKindLabel(e.kind);
+            out += MesoKindLabel(e);
             out += '\t';
             out += e.token;
             out += '\t';
@@ -7372,37 +7714,59 @@ void DrawMesoDashPanel(OpsState& st) {
     }
 
     const float evH = (std::max)(90.f, ImGui::GetContentRegionAvail().y);
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8.f, 6.f));
     if (ImGui::BeginTable("meso_ev_tbl", 7,
-                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                              ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
+                          ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                              ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX |
+                              ImGuiTableFlags_Resizable,
                           ImVec2(0, evH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 120.f);
-        ImGui::TableSetupColumn("判定", ImGuiTableColumnFlags_WidthFixed, 96.f);
+        ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 96.f);
+        ImGui::TableSetupColumn("判定", ImGuiTableColumnFlags_WidthFixed, 108.f);
         ImGui::TableSetupColumn("身份", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthStretch, 0.95f);
         ImGui::TableSetupColumn("变化", ImGuiTableColumnFlags_WidthFixed, 108.f);
         ImGui::TableSetupColumn("对端", ImGuiTableColumnFlags_WidthStretch, 1.15f);
         ImGui::TableSetupColumn("说明", ImGuiTableColumnFlags_WidthStretch, 1.5f);
-        ImGui::TableHeadersRow();
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
+        {
+            const char* tips[7] = {
+                "相对时间；悬停看北京时间",
+                "外转 / 跨号 / 搬仓 / 进账",
+                "单击筛此人（名单与流水）",
+                "该次变化的角色",
+                "金币或数量变化",
+                "对端身份 / 角色",
+                "探活备注",
+            };
+            for (int col = 0; col < 7; ++col) {
+                ImGui::TableSetColumnIndex(col);
+                ImGui::PushID(col);
+                ImGui::TableHeader(ImGui::TableGetColumnName(col));
+                if (tips[col] && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tips[col]);
+                ImGui::PopID();
+            }
+        }
         int shown = 0;
+        bool truncated = false;
         for (auto it = st.mesoEvents.rbegin(); it != st.mesoEvents.rend(); ++it) {
             const auto& e = *it;
-            const bool ok = st.mesoEventView == 1 ||
-                            (st.mesoEventView == 2 &&
-                             (e.kind == "inflow" || e.kind == "scroll_inflow")) ||
-                            (st.mesoEventView == 0 && MesoKindAbnormal(e.kind));
-            if (!ok) continue;
-            if (st.mesoDashFilter[0] && !ContainsIgnoreCase(e.token, st.mesoDashFilter) &&
-                !ContainsIgnoreCase(e.charName, st.mesoDashFilter) &&
-                !ContainsIgnoreCase(e.peerToken, st.mesoDashFilter))
-                continue;
-            if (++shown > 400) break;
+            if (!MesoEventMatchesView(e, st.mesoEventView)) continue;
+            if (!MesoEventMatchesFilter(e, st.mesoDashFilter)) continue;
+            if (++shown > 400) {
+                truncated = true;
+                break;
+            }
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             char tlab[24]{};
-            FormatWallTick(e.wallMs, 1440, tlab, sizeof(tlab));
+            FormatWallRelative(e.wallMs, nowMs, tlab, sizeof(tlab));
             ImGui::TextUnformatted(tlab);
+            if (ImGui::IsItemHovered()) {
+                char full[32]{};
+                FormatWallFull(e.wallMs, full, sizeof(full));
+                ImGui::SetTooltip("北京时间  %s", full);
+            }
             ImGui::TableSetColumnIndex(1);
             const ImVec4 kcol = MesoKindAlert(e.kind)
                                     ? OpsTone::Danger()
@@ -7411,11 +7775,18 @@ void DrawMesoDashPanel(OpsState& st) {
                                 : (e.kind == "inflow" || e.kind == "scroll_inflow")
                                     ? OpsTone::Ok()
                                     : OpsTone::Muted();
-            ImGui::TextColored(kcol, "%s", MesoKindLabel(e.kind));
+            DrawMesoPill(MesoKindLabel(e), MesoToneWash(kcol), kcol);
             ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(e.token.c_str());
+            DrawMesoClippedText(e.token.c_str(), ImGui::GetStyleColorVec4(ImGuiCol_Text));
+            if (ImGui::IsItemClicked() && !e.token.empty()) {
+                std::snprintf(st.mesoDashFilter, sizeof(st.mesoDashFilter), "%s", e.token.c_str());
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("单击：名单与流水只看此人\n%s", e.token.c_str());
             ImGui::TableSetColumnIndex(3);
-            ImGui::TextUnformatted(e.charName.empty() ? "—" : e.charName.c_str());
+            if (e.charName.empty())
+                ImGui::TextDisabled("—");
+            else
+                DrawMesoClippedText(e.charName.c_str(), ImGui::GetStyleColorVec4(ImGuiCol_Text));
             ImGui::TableSetColumnIndex(4);
             char dBuf[48]{};
             if (MesoKindScroll(e.kind)) {
@@ -7435,23 +7806,48 @@ void DrawMesoDashPanel(OpsState& st) {
             if (e.peerToken.empty())
                 ImGui::TextDisabled("—");
             else {
-                ImGui::TextUnformatted(e.peerToken.c_str());
+                DrawMesoClippedText(e.peerToken.c_str(), ImGui::GetStyleColorVec4(ImGuiCol_Text));
+                if (ImGui::IsItemClicked()) {
+                    std::snprintf(st.mesoDashFilter, sizeof(st.mesoDashFilter), "%s",
+                                  e.peerToken.c_str());
+                }
                 if (!e.peerChar.empty()) {
                     ImGui::SameLine(0, 4.f);
                     ImGui::TextDisabled("%s", e.peerChar.c_str());
                 }
             }
             ImGui::TableSetColumnIndex(6);
-            ImGui::TextUnformatted(e.note.empty() ? "—" : e.note.c_str());
+            if (e.note.empty())
+                ImGui::TextDisabled("—");
+            else
+                DrawMesoClippedText(e.note.c_str(), OpsTone::Muted());
         }
         if (shown == 0) {
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
-            ImGui::TextDisabled("暂无流水。达到告警额度的涨跌会记在这里，重开 OPS 仍在。");
+            if (st.mesoDashFilter[0] || st.mesoEventView != 1) {
+                ImGui::TextDisabled("没有匹配的流水。");
+                if (st.mesoEventView != 1) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("查看全部##evempty")) st.mesoEventView = 1;
+                }
+                if (st.mesoDashFilter[0]) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("清除搜索##evempty")) st.mesoDashFilter[0] = '\0';
+                }
+            } else {
+                ImGui::TextDisabled("暂无流水。达到告警额度的涨跌会记在这里，重开 OPS 仍在。");
+            }
+        } else if (truncated) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("仅显示最近 400 条，可用复制导出当前筛选。");
         }
         ImGui::EndTable();
     }
+    ImGui::PopStyleVar();
     ImGui::EndChild();
+    ImGui::PopStyleVar();
 }
 
 void DrawQuotaPanel(OpsState& st) {
