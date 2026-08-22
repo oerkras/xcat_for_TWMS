@@ -5,7 +5,7 @@
 //   - UIWorldMapItem 无原生 OnDoubleClick；OnPointerDown 用 clickCount / 系统双击间隔自检。
 //   - UpdateView 缓存 Spot 的 MapNo[0] + 地图名，双击时优先用图号 goto。
 //   - 确认：UIUtilDialog.YesNo + 原生 System.Action（对照枫星 TextConfirm）。
-//   - Yes / 直通 goto 前先调 UIWorldMap.Close（基类对话框），避免全屏图吞掉首跳 ↑。
+//   - Yes / 直通 goto 前先冻结遇人（含丢掉排队 hop），再 UIWorldMap.Close，再 RequestGoto。
 //   - 瞬移石开的是 UIMapTransferDialog，不是 UIWorldMap → 无需石头/非石头门控。
 // 防漂移：Spot/MapListData/clickCount 字段走 hash + field_get_offset；dump 常量仅 fallback。
 // OnPointerDown 是 override：热路径 = ExecuteEvents 委托 method_ptr → 接口 VirtualInvokeData。
@@ -17,6 +17,7 @@
 
 #include "../travel/travel.h"
 #include "../char_boot/char_boot.h"
+#include "../encounter/encounter.h"
 #include "../ports/travel_port.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -1439,6 +1440,8 @@ void CloseWorldMapUi() {
 }
 
 void StartGotoFromWorldMap(const char* target) {
+    // Close 世界地图可能投泵等 1.5s；遇人 Confirming/Hopping 必须先冻结，否则会抢 CloseSession。
+    encounter::SuspendNow("worldmap_goto");
     CloseWorldMapUi();
     travel::RequestGoto(target);
 }
@@ -1458,7 +1461,8 @@ void __fastcall OnConfirmYes(void*, void*) {
         (void)ShowTravelNotice("起号进行中");
         return;
     }
-    x::runtime::LogI("WorldMapTravel", "确认赶路 → Close世界地图 → RequestGoto [%s]%s%s", target,
+    x::runtime::LogI("WorldMapTravel",
+                     "确认赶路 → 冻结遇人 → Close世界地图 → RequestGoto [%s]%s%s", target,
                      label[0] ? " " : "", label[0] ? label : "");
     StartGotoFromWorldMap(target);
 }
@@ -2211,7 +2215,7 @@ bool TryInstall() {
     (void)TryInstallAuxHooks();
     x::runtime::LogI("WorldMapTravel",
                      "init[经典版]：UpdateView(MI)+OnPointerDown(%s) 无.text；"
-                     "双击 Spot → YesNo → Close世界地图 → RequestGoto；空 Spot 仅失败路径兜底",
+                     "双击 Spot → YesNo → 冻结遇人 → Close世界地图 → RequestGoto；空 Spot 仅失败路径兜底",
                      gDownPath);
     x::runtime::anchor_lamps::Set("WorldMap", x::runtime::anchor_lamps::AnchorLampCode::Ok,
                                  gDownPath);

@@ -798,10 +798,11 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     bool accGateLogged = false;    // 一次性：首点被门禁挡住
     bool accNoCardLogged = false;  // 一次性：选账号页上没解析出卡
     DWORD lastNickClickAt = 0;
+    DWORD lastNickAltScanAt = 0;  // Radio 空时节流 ListItem/CheckBox 整窗扫描
     DWORD lastContinueClickAt = 0;
     DWORD resultOrMainSeenAt = 0;  // 首次到 result/Main：给官网 JS 兑票拉 NGM 的宽限
     DWORD mainTicketOttSeenAt = 0; // 地址栏出现 Main?OTT= 才开始等官网拉游戏（不要从 result 页起算）
-    bool ottHttpTried = false;     // 地址栏已有 ticket OTT 时改走 GetOneTimeWebInfo
+    bool officialLaunchWaitLogged = false;  // 15s 仍未见经典版：只记一次（不走 GetOneTimeWebInfo / NGM）
     int resultReloadCount = 0;     // 卡在 Galaxy result 时 F5 重跑回跳
     DWORD lastResultReloadAt = 0;
     int pageReloadCount = 0;       // 登录页连不上 / 卡在 openid 过渡：F5
@@ -831,6 +832,8 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     constexpr DWORD kAccStarveMs = 1200;      // 地址栏读数抖动时的兜底：见页 1.2s 必点
     constexpr DWORD kNickRetryMs = 3000;      // 点昵称后未到繼續/跳转 → 重选
     constexpr DWORD kContinueReadyMs = 400;   // 选昵称后等按钮启用再点（BIN：同秒點繼續空成功）
+    constexpr DWORD kNickEmptyBackoffMs = 280; // Radio 未进树时不要 40ms 连扫 ListItem/CheckBox
+    constexpr DWORD kNickAltScanMs = 1000;    // 冷页无 Radio 时最多 1s 一次改扫 ListItem/CheckBox
     // C2735 第二轮：首点繼續后 5s 仍停 SelectGameAccount，旧逻辑连点 #2/#3/#4 mouse
     // → beanfun ErrorHandler SPGA0001。与 CDP AwaitLeaveNick 一致：绝不再点繼續。
     constexpr DWORD kContinueStuckMs = 15000;
@@ -1329,10 +1332,20 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         } else if (canClick && stage == UiaStage::WaitNick && !nickSelected) {
             std::wstring hitName;
             const int idx = (std::max)(0, nickSlot - 1);
-            // SelectionItem / 点卡片左侧勾选圆；禁止点「ABC」文字中心（会拖选）
-            bool clicked = uia.ClickTypeIndex(root, UIA_RadioButtonControlTypeId, idx, &hitName) ||
-                           uia.ClickTypeIndex(root, UIA_ListItemControlTypeId, idx, &hitName) ||
-                           uia.ClickTypeIndex(root, UIA_CheckBoxControlTypeId, idx, &hitName);
+            // 先只扫 Radio。冷页没有 Radio 时 || ListItem/CheckBox 会把整窗书签/标签扫一遍，
+            // FindAll 一次可数秒（BIN 21:14 第一次空等 21s；第二次树热了同一秒点中）。
+            bool clicked = uia.ClickTypeIndex(root, UIA_RadioButtonControlTypeId, idx, &hitName);
+            if (!clicked) {
+                // Radio 已进树但点失败、或尚未进树：都不要立刻扫 ListItem/CheckBox。
+                // 最多 1s 补一次（真·列表页兜底）。
+                if (lastNickAltScanAt && (now - lastNickAltScanAt) >= kNickAltScanMs) {
+                    lastNickAltScanAt = now;
+                    clicked = uia.ClickTypeIndex(root, UIA_ListItemControlTypeId, idx, &hitName) ||
+                              uia.ClickTypeIndex(root, UIA_CheckBoxControlTypeId, idx, &hitName);
+                } else if (!lastNickAltScanAt) {
+                    lastNickAltScanAt = now;
+                }
+            }
             if (clicked) {
                 nickSelected = true;
                 lastClickAt = now;
@@ -1342,9 +1355,16 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 Log(log, std::wstring(kLogTag) + L" nick-selected|slot" +
                              std::to_wstring(nickSlot) + L"|" + hitName.substr(0, 40));
                 Log(log, std::wstring(kLogTag) + L" 状态→WaitContinue");
-            } else if (now - lastStageLog > 5000) {
-                lastStageLog = now;
-                Log(log, std::wstring(kLogTag) + L" 等待选昵称…");
+            } else {
+                if (now - lastStageLog > 2000) {
+                    lastStageLog = now;
+                    Log(log, std::wstring(kLogTag) +
+                                 (hitName.empty() ? L" 等待选昵称（Radio 未进树）…"
+                                                  : L" 等待选昵称（Radio 已见但未点上）…"));
+                }
+                root->Release();
+                Sleep(kNickEmptyBackoffMs);
+                continue;
             }
         } else if (stage == UiaStage::WaitNick && nickSelected) {
             // 兜底：已选昵称却停在 WaitNick（URL 误纠偏）→ 拉回点繼續
@@ -1463,43 +1483,23 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                     }
                 }
 
-                // BIN 22:21：result 页起算 3s 就 GetOneTimeWebInfo，和官网抢同一条 OTT
-                // → apiCode=-1 帳號已被鎖定，游戏其实已经起来，UIA 还在浏览器阶段干净重开。
-                // Main?OTT= 后先让官网 JS 拉 NGM/经典版；HTTP 只是官网没拉起来时的退路。
+                // 只等官网 JS 拉经典版，从 cmdline 接管。不走 GetOneTimeWebInfo（会和官网抢 OTT），
+                // 也不自行 ngm://（XCAT 不调用 NGM）。
                 constexpr DWORD kWaitOfficialAfterOttMs = 15000;
-                if (!ottHttpTried && !sawNgmHint && haveTicketOtt && mainTicketOttSeenAt &&
+                if (!sawNgmHint && haveTicketOtt && mainTicketOttSeenAt &&
                     (now - mainTicketOttSeenAt) >= kWaitOfficialAfterOttMs) {
-                    {
-                        auto harvested = tryHarvest();
-                        if (harvested.ok && harvested.ticketFilled) {
-                            SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
-                            root->Release();
-                            return harvested;
-                        }
-                    }
-                    ottHttpTried = true;
-                    Log(log, std::wstring(kLogTag) +
-                                 L" 官网未拉起经典版，改走 GetOneTimeWebInfo 换票"
-                                 L"（地址栏已有 OTT，已等" +
-                                 std::to_wstring(now - mainTicketOttSeenAt) + L"ms）…");
-                    auto fetched = FetchTicketFromOttOrFail(ottOnUrl, log, "getonetimewebinfo-retry");
-                    if (fetched.ok && fetched.ticketFilled) {
+                    auto harvested = tryHarvest();
+                    if (harvested.ok && harvested.ticketFilled) {
                         SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
                         root->Release();
-                        return fetched;
+                        return harvested;
                     }
-                    {
-                        auto harvested = tryHarvest();
-                        if (harvested.ok && harvested.ticketFilled) {
-                            Log(log, std::wstring(kLogTag) +
-                                         L" GetOneTimeWebInfo 失败，但已从经典版 cmdline 接管票");
-                            SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
-                            root->Release();
-                            return harvested;
-                        }
+                    if (!officialLaunchWaitLogged) {
+                        officialLaunchWaitLogged = true;
+                        Log(log, std::wstring(kLogTag) +
+                                     L" 官网尚未拉起经典版，继续等（不调用 NGM、不走 GetOneTimeWebInfo；已等" +
+                                     std::to_wstring(now - mainTicketOttSeenAt) + L"ms）");
                     }
-                    Log(log, std::wstring(kLogTag) +
-                                 L" GetOneTimeWebInfo 失败，继续等官网拉起经典版（不干净重开）");
                 }
                 if (now - lastStageLog > 8000) {
                     lastStageLog = now;
@@ -1531,7 +1531,13 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
 
     Log(log, std::wstring(kLogTag) + L" 超时 @" + UiaStageName(stage));
     SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
-    return Fail(HttpLoginError::OttMissing, "UIA 点选超时，未捕获经典版 cmdline 票");
+    // 已点繼續 / 已到 Main / 已见官网 NGM：OTT 在，缺的是客户端。
+    // 不能标 OttMissing/Protocol，否则会 uia-clean-restart 最多 10 次、和官网抢新 OTT。
+    if (stage == UiaStage::WaitTicket || continueClicked || sawNgmHint) {
+        return Fail(HttpLoginError::Network,
+                    "官网未拉起经典版。XCAT 不调用 NGM；请再点一键或检查是否弹出客户端。");
+    }
+    return Fail(HttpLoginError::OttMissing, "UIA 点选超时，未完成 Gama Pass 点选");
 }
 
 bool ShouldUiaCleanRestart(const HttpLoginResult& r) {

@@ -68,6 +68,9 @@ bool HangupBeforeOtherAction(const char* why);
 // 与 combat.log「fire id=」同一拍 +1（那次峰值 2030 就是按分钟数这些行）。
 // 自组发出 / 多发 NA 真正挥出同样 +1。不看 ActionBusy、不看命中。
 void NoteHangupFire();
+// NM 会话真死（Disconnected / 图内 CloseSession）：出刀账归这一局，避免落地 age=0 再拆。
+// KickSniff 工作线程可调（只动原子）。stuck_lobby / dialog_linger 必须忽略。
+void NoteNmSessionEnded(const char* why);
 // 成功出刀：钉「欠 hangup」清加速 FLAG。TryFirePrimaryEx / NoteLastFire（forge）调用。
 void NoteAttackDirty();
     // 落地后累计出刀已到阈值：必须先拆会话清 FLAG，卖装/赶路/补给不得插队。

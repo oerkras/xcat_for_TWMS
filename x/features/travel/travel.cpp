@@ -17,6 +17,7 @@
 #include "../kick_sniff/kick_sniff.h"
 #include "../notify/notify.h"
 #include "../simple_combat/simple_combat.h"
+#include "../encounter/encounter.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
 
@@ -1631,6 +1632,8 @@ void StopWorker() {
 void RequestGoto(const char* target) {
     if (!target || !target[0]) return;
     EnqueueCmd(std::string("goto ") + target);
+    // 排队即算 IsActive；同拍冻结遇人，不等 worker 50ms / encounter 200ms。
+    encounter::SuspendNow("travel_goto");
 }
 
 void RequestStop() { EnqueueCmd("stop"); }

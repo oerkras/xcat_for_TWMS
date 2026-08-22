@@ -4063,6 +4063,7 @@ void RequestDeferredAttempt(const char* why) {
     strncpy_s(gDeferredWhy, why ? why : "deferred", _TRUNCATE);
     gDeferredSinceMs.store(GetTickCount(), std::memory_order_release);
     gDeferred.store(true, std::memory_order_release);
+    x::features::ports::mob_gather::NoteNmSessionEnded(gDeferredWhy);
     LogLine("deferred soft arm why=%s (wait !inMap or hall)", gDeferredWhy);
     KickLogLine("deferred soft arm why=%s", gDeferredWhy);
 }
@@ -4186,6 +4187,7 @@ void RequestAttempt(const char* why) {
                              std::memory_order_release);
     memset(gWhy, 0, sizeof(gWhy));
     strncpy_s(gWhy, why ? why : "disconnect", _TRUNCATE);
+    x::features::ports::mob_gather::NoteNmSessionEnded(gWhy);
     // 必须在 kick_sniff 抬 disconnectSeq / 宿主读 status 之前同步 hold。
     // 若只靠 worker 50ms 轮询再 SetHold，守护会先看到 seq 上涨且 hold=0 → 立刻干净重拉
     // （upload 9fee22：10:38:37 disconnect → 10:38:39 kill，soft_login 无 attempt begin）。

@@ -207,7 +207,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
 
-    std::cout << "[WARN] --launch：将调用 NGM 真拉起\n";
+    std::cout << "[WARN] --launch：XCAT 不调用 NGM；无已有经典版时会失败\n";
     msc::launcher::Options opt;
     opt.ticket = fr.ticket;
     auto rr = msc::launcher::Run(opt, [](const msc::launcher::Progress& p) {

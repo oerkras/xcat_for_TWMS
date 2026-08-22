@@ -3658,12 +3658,12 @@ void EnsureLieSafeTarget(float px, float py) {
     const int mapId = ports::world::GetMapId();
     const bool playReady = ports::world::IsInMapScene() && ports::world::IsPlayReady() &&
                            ports::world::GetSceneState() == ports::world::SceneState::Field;
-    const bool fhReady = mapId > 0 && ports::foothold::IsCacheReadyForMap(mapId) &&
+    const bool fhReady = ports::world::HasMapData() && ports::foothold::IsCacheReadyForMap(mapId) &&
                          ports::foothold_path::EnsureGraph();
 
     // 已有目标：同图且人仍靠近则保持（含 fh=0 原地钉，BIN 79a8f1 每拍 miss 重钉=乱飘）。
     if (gLieSafeHaveTarget) {
-        const bool sameMap = mapId > 0 && mapId == gLieSafeMapId;
+        const bool sameMap = ports::world::HasMapData() && mapId == gLieSafeMapId;
         const float tdx = px - gLieSafeX;
         const float tdy = py - gLieSafeY;
         const float td = std::sqrt(tdx * tdx + tdy * tdy);
@@ -4197,8 +4197,8 @@ void SyncImpactFhBan() {
     }
 }
 
-// 旋翼 setpoint 夹取：F5 Combat 可位移区 = raw FH AABB × kCombatMoveBoundsScale（0.95）。
-// 贴边怪照打，人/站位点不得稳出此框（205：贴边出刀越界）。
+// 旋翼 setpoint 夹取：F5 Combat 左右 = raw FH AABB（见 kCombatMoveBoundsScale）。
+// 贴边怪照打；人停在墙刹线（raw±kBrakeInsetXPx），不要把站位再往里夹一层。
 // F6 手动飞仍用 heli::ClampToAirspace（外扩空域），见 fly 路径直接调用。
 bool ClampAimInPlayBounds(float* x, float* y) { return heli::ClampToCombatMoveBounds(x, y); }
 
@@ -4325,8 +4325,10 @@ constexpr float kHeliFirstLockMaxDx = 120.f;
 // 同锁 |vy| 上限；首刀曾用 200（旧 BIN：|vy|≥200 空 62%）。
 // BIN 20:49–20:57（带=70）：人已进出刀几何仍 fire hold vy，体感「冲到跟前顿一下」。
 // 21:02 提到 450 后中速顿刀少了；仍常见 |vy| 550–700 被卡 → 再放到 600。
-constexpr float kHeliStrikeMaxVy = 600.f;
-constexpr float kHeliFirstLockMaxVy = 600.f;
+// BIN 19:59：卸速钳 kStrikeDumpMaxVy=600 落地后再吃一步重力 60 → |vy| 601–614
+// 仍 > 600 被 hold（149 次里 67 次贴边）。闸放到 680 = 600+60+余量；卸速钳仍 600。
+constexpr float kHeliStrikeMaxVy = 680.f;
+constexpr float kHeliFirstLockMaxVy = 680.f;
 
 // 自定义站距下这两个数必须放大，否则远程被一票否决（理由见 HeliHoverMaxDx 处）。
 // 取 max 保证**只放宽、不收紧**：用户把 X 填成 5，仍按内置命中盒 120 判，
@@ -4440,7 +4442,7 @@ bool NeedsHeliStationKeep(float px, float py, float mx, float my) {
     return !HeliStationOk(px, py, mx, my);
 }
 
-// 悬停站位点：怪旁 standOff、略高于怪心；**X** 夹进 Combat 左右框（raw×0.95），Y 不夹。
+// 悬停站位点：怪旁 standOff、略高于怪心；**X** 夹进 Combat 左右框（raw），Y 不夹。
 // 给的是「要待着的地方」，不是「这一拍往哪推」——推多少由旋翼按 P 控 + 重力前馈自己算。
 //
 // ★ 左右竖边：强制站**地图内侧**朝外打（BIN 弓箭手 205 / 08:37 框沿空挥）。
@@ -4866,8 +4868,11 @@ bool DodgeHoldsFire(DWORD now) {
 // 需要弃战自救吗？**只判左右竖边**（出 Combat 可位移框 left/right）。
 // 上下（top/bottom）不进 RTB——竖直仍由 A 层包线与站位点夹取管。
 // 已回左右框内即停 RTB（可 Station）；latch 深入后清除。走门由用户关 F5/F6。
-constexpr float kRtbAimInsetPx = 48.f;
-constexpr float kRtbExitInsetPx = 48.f;
+// 与墙刹同线（kBrakeInsetXPx=24）。曾用 48 叠在 0.95 框上 → 本图 L 收到 -320，
+// 左缘怪 -414 的 dx=94，出刀 AABB 73 永远不够（BIN 21:18 rtb sp=-320）。
+// ★ 回退：改回 48.f（只在 scale 仍是 0.95 时有旧语义）。
+constexpr float kRtbAimInsetPx = heli::kBrakeInsetXPx;
+constexpr float kRtbExitInsetPx = heli::kBrakeInsetXPx;
 bool gHeliRtbLatched = false;
 
 // RTB latch 清闩：只看水平是否深入左右框（与 NeedsHeliRtb 同口径）。

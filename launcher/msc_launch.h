@@ -58,9 +58,9 @@ struct Options {
     std::wstring gameExeName = L"Maplestory_Classic.exe";
     int          waitGameSec = 90;
     bool         dryRunDeepLinkOnly = false;
-    // 策略 B：已有经典版则跳过 NGM、直接接管 PID 注入。
-    // 优先 cmdline 四元组匹配本票；否则接管任一存活实例（官网 CDP 常已先拉起且票可能不同）。
-    // 仅建议 GAMA PASS 等「浏览器可能已自启」路径打开；HTTP 冷启默认 false，避免误接管残留进程。
+    // 已有经典版则接管 PID 注入。XCAT 不调用 NGM（不 ShellExecute ngm:// / 不 CreateProcess NGM）。
+    // 优先 cmdline 四元组匹配本票；否则接管年龄窗内唯一存活实例（官网 JS 常已先拉起）。
+    // 无进程 / 多候选无法判定 → 失败，等官网拉起后再一键。
     bool attachExistingClassic = false;
     // 接管时的最大进程年龄（秒）：更老的实例按「上一局残留」处理，不接管（0=不限）。
     // 换票登录刚完成时，本局客户端必然远新于此窗口。

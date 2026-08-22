@@ -253,21 +253,15 @@ constexpr uint32_t kSimpleCombatTickMaxMs = 100u;
 //   · 撞墙预刹按 room/0.2s 限速 ⇒ **高倍率在小图上拿不满**：离墙 800px 时最快只有
 //     4000 px/s，与倍率无关。10X 的收益随地图尺寸递减。
 //   · 服务端对 6200 px/s（约合法步行速 50 倍）的容忍度从未测过。加档必须配合看日志。
-// F5 滑翔 / 自动赶路默认倍率：面板顶格 1000%（满火力死拍档）。可调低；旧 ini 有值则读盘为准。
-//
-// ⚠️ 两条实机约束，调高前先想清楚：
-//   · 作动器实测到 cmd=3231/v=3100（5X，零饱和），8000 是从那儿起的 2.1 倍外推、未验。
-//   · 撞墙预刹按 room/0.2s 限速 ⇒ **高倍率在小图上拿不满**：离墙 800px 时最快只有
-//     4000 px/s，与倍率无关。10X 的收益随地图尺寸递减。
-//   · 服务端对 6200 px/s（约合法步行速 50 倍）的容忍度从未测过。加档必须配合看日志。
-constexpr uint32_t kHeliSpeedPctDefault = 1000u;
+// F5 滑翔 / 自动赶路默认倍率 500%（实测已验档）。可调到顶格 1000%；旧 ini 有值则读盘为准。
+constexpr uint32_t kHeliSpeedPctDefault = 500u;
 constexpr uint32_t kHeliSpeedPctMin = 25u;
 constexpr uint32_t kHeliSpeedPctMax = 1000u;
 // F6 手动飞默认倍率 300%：换旋翼前开环等效约 1600 px/s ≈ 2.6X，
 // 直接给 1.0X（Cruise 620）会比旧版慢一大截；3X 开箱手感更接近旧手动飞。
 constexpr uint32_t kFlySpeedPctDefault = 300u;
-// 吸怪倍率：与 F5 滑翔同一套 100%=巡航 620、顶格 1000%、默认满火力。
-constexpr uint32_t kMobGatherSpeedPctDefault = kHeliSpeedPctDefault;
+// 吸怪倍率：与 F5 滑翔同一套 100%=巡航 620、顶格 1000%；默认仍满火力，不跟 F5 默认绑死。
+constexpr uint32_t kMobGatherSpeedPctDefault = 1000u;
 constexpr uint32_t kMobGatherSpeedPctMin = kHeliSpeedPctMin;
 constexpr uint32_t kMobGatherSpeedPctMax = kHeliSpeedPctMax;
 constexpr uint32_t kMobGatherAntiJitterDefault = 1u;

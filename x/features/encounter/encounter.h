@@ -38,6 +38,10 @@ void RequestSampleNow();
 // 遇人仍钉着 simple_combat pause（channel_hop Fail/OK 结束时勿抢清）
 bool HoldsCombatPause();
 
+// 赶路开趟前同步冻结遇人：FSM→Idle、silent 解开硬闸/停吸、丢掉排队中的 hop。
+// 世界地图关图可能阻塞 1.5s，必须在 Close / RequestGoto 之前调用。
+void SuspendNow(const char* why = "travel");
+
 void Tick(DWORD now);
 
 }  // namespace x::features::encounter

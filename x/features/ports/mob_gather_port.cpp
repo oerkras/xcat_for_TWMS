@@ -151,6 +151,8 @@ std::atomic<uint8_t> gHangupFiresOn{xcat::kMobGatherHangupFiresOnDefault != 0 ? 
 std::atomic<uint8_t> gHangupFiresUiUnlocked{0};
 std::atomic<uint8_t> gHangupUnbindF5{0};
 std::atomic<unsigned> gHangupFires{0};
+// KickSniff 线程置位；TickSoftRelogin 收口清秒表。stuck_lobby 不得置位。
+std::atomic<uint8_t> gNmSessionEnded{0};
 std::atomic<DWORD> gHangupRetryUntil{0};
 std::atomic<uint8_t> gHangupAwaitLand{0};
 std::atomic<uint8_t> gHangupLandedOk{0};
@@ -1301,6 +1303,7 @@ void Init() {
     gSeeking.store(0, std::memory_order_release);
     gAttackDirty.store(0, std::memory_order_release);
     gHangupFires.store(0, std::memory_order_release);
+    gNmSessionEnded.store(0, std::memory_order_release);
     gHangupFiresUiUnlocked.store(0, std::memory_order_release);
     gHangupUnbindF5.store(0, std::memory_order_release);
     gHangupRetryUntil.store(0, std::memory_order_release);
@@ -1485,6 +1488,36 @@ bool HangupPolicyActive() {
 
 bool HangupDeferNextClock();
 
+static bool WhyEndsNmSessionForHangup(const char* why) {
+    if (!why || !why[0]) return false;
+    // stuck_lobby / dialog_linger = 图内假 recover，出刀闸必须仍 due（BIN 1f0727）。
+    return std::strcmp(why, "disconnected") == 0 || std::strcmp(why, "disconnecting") == 0 ||
+           std::strcmp(why, "close_session_inmap") == 0 ||
+           std::strcmp(why, "nm_gone_inmap") == 0 ||
+           std::strcmp(why, "inbound_dead_inmap") == 0;
+}
+
+void NoteNmSessionEnded(const char* why) {
+    if (!WhyEndsNmSessionForHangup(why)) return;
+    const unsigned wasFires = gHangupFires.exchange(0, std::memory_order_acq_rel);
+    const uint8_t wasDirty = gAttackDirty.exchange(0, std::memory_order_acq_rel);
+    gNmSessionEnded.store(1, std::memory_order_release);
+    if (wasFires || wasDirty) {
+        x::runtime::LogI("MobGather",
+                         "hangup session end why=%s fires %u→0 dirty=%u (no age=0 CloseSession)",
+                         why ? why : "?", wasFires, static_cast<unsigned>(wasDirty));
+    }
+}
+
+static void ConsumeNmSessionEnd() {
+    if (gNmSessionEnded.exchange(0, std::memory_order_acq_rel) == 0) return;
+    // 只许 TickSoftRelogin 线程写秒表（gSoftArmMs 非原子）。
+    gSoftArmMs = 0;
+    gSoftPauseMs = 0;
+    gHangupFires.store(0, std::memory_order_release);
+    gAttackDirty.store(0, std::memory_order_release);
+}
+
 void NoteHangupFire() {
     if (!HangupFiresEnabled()) return;
     // 拆会话 / 回图途中 / 落地卖装 hold：这轮已经结束，刀数保持 0。
@@ -1526,6 +1559,7 @@ void NoteHangupLandIfReady() {
     using x::features::ports::world::IsPlayReady;
     if (gHangupAwaitLand.load(std::memory_order_acquire) == 0) return;
     // 出刀闸已到期：禁止图内假落地（stuck_lobby / 掉上台）把累计清零而不 CloseSession。
+    // 裸 DC 残留 1700 不走这里（await=0）；由 NoteNmSessionEnded 在 Disconnected 清掉。
     if (HangupFiresDue()) {
         static DWORD sDueLandSkipMs = 0;
         const DWORD now = GetTickCount();
@@ -1666,6 +1700,7 @@ void TickSoftRelogin() {
     if (sWasQuiz && !quizActive) gHangupLieDeferred = 1;
     if (quizActive) gHangupLieDeferred = 1;
     sWasQuiz = quizActive ? 1 : 0;
+    ConsumeNmSessionEnd();
 
     // 计时：会话脏了才起表。换图 / Travel / InterStage 短离图不得清钟。
     // 只有这一轮已经拆（HangupDefer / 落地洗 FLAG）才开下一轮。
@@ -1837,8 +1872,16 @@ void TickSoftRelogin() {
         x::features::travel::RequestStop();
     }
 
+    // 拆之前再收一次：Naked DC 可能夹在 due 判定与 CloseSession 之间。
+    ConsumeNmSessionEnd();
+    const bool dueFiresStill = HangupFiresDue();
+    const bool dueTimeStill = gSoftArmMs && (now - gSoftArmMs) >= needMs &&
+                              (HangupSecondsOn() || gAttackDirty.load(std::memory_order_acquire) != 0);
+    if (!dueFiresStill && !dueTimeStill && !gHangupLieDeferred) return;
+
     const bool afterLie = gHangupLieDeferred != 0;
-    const char* why = afterLie ? "hangup_after_lie" : (dueFires ? "hangup_fires" : "hangup_timer");
+    const char* why =
+        afterLie ? "hangup_after_lie" : (dueFiresStill ? "hangup_fires" : "hangup_timer");
     gHangupLieDeferred = 0;
     const unsigned ageSec = gSoftArmMs ? (unsigned)((now - gSoftArmMs) / 1000u) : 0u;
     if (afterLie) {
@@ -1851,7 +1894,7 @@ void TickSoftRelogin() {
     }
     if (!FireProactiveHangup(why)) {
         gHangupRetryUntil.store(now + 5000, std::memory_order_release);
-        if (dueTime && !dueFires) gSoftArmMs = now - needMs + 5000;
+        if (dueTimeStill && !dueFiresStill) gSoftArmMs = now - needMs + 5000;
         if (afterLie) gHangupLieDeferred = 1;
     }
 }

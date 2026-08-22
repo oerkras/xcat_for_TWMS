@@ -294,8 +294,8 @@ void OpenClassicMainInBrowser() {
 }
 
 bool LaunchWithTicket(msc::launcher::GalaxyTicket ticket, bool attachExistingClassic = false) {
-    QueueLog(attachExistingClassic ? L"[…] 换票完成：优先接管已有经典版，否则 NGM 拉起…"
-                                   : L"[…] NGM 拉起并验票…");
+    QueueLog(attachExistingClassic ? L"[…] 换票完成：接管已有经典版（不调用 NGM）…"
+                                   : L"[…] 启动：XCAT 不调用 NGM，仅在已有经典版时注入…");
     msc::launcher::Options opt;
     opt.ticket = std::move(ticket);
     opt.attachExistingClassic = attachExistingClassic;

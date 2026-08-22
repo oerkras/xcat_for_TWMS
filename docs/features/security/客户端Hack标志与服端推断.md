@@ -71,9 +71,14 @@ F6 飞天踢线请对齐 MovePath 基线 + kick_sniff 的 **STATE / RING**，不
 |---|---|
 | `SendMobPrevPosHack()` | 怪前位异常上报 |
 | `SecurityClient.SetDetectMobSpeedHack` / `SendMobSpeedHackDetectCheck` | 怪加速检测与发送；**已解码**见 [`怪速举报type21与被动插值.md`](怪速举报type21与被动插值.md)：仅 `CalcPassivePos` 触发、阈值全=0、节流 300s |
-| LiveValue `MobHackLogDisconnectCount` (408) | 怪 hack log → 断线次数阈值 |
+| LiveValue `MobHackLogDisconnectCount` (408) | 怪 hack log → 断线次数阈值（表 id；累加器未钉） |
 | LiveValue `FindMobInRectHackLogDisconnectCount` (411) | 矩形找怪类 hack |
 | LiveValue `MobNotMoveHackCheckValue` (525) | 怪「该动不动」类检查 |
+| LiveValue `MobPullingHack` / `Threshold` / `Kick` (926–928) | **独立拉怪 Kick 通道**（不经 408 枢纽） |
+| LiveValue `MobDensityByCentroid*` (932–934) · `MobDensityBySector*` (938–941) | 质心/扇区挤堆 |
+| LiveValue `MobDeadPositionInspect*` (935–937) | 死亡点离出生点过远 |
+
+> 408 不是 928/934/936 的别名。吸怪 205 的平行族与 thunk 表见 [`吸怪平行检测族-拉怪密度死点.md`](吸怪平行检测族-拉怪密度死点.md)（2026-08-22）。
 
 ### 2.4 反推服端逻辑（怪物链）
 

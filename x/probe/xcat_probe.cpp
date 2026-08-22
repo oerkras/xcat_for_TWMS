@@ -39,6 +39,7 @@
 #include "../features/ports/key_macro_bin.h"
 #include "../features/ports/curfh_gate_bypass.h"
 #include "../features/ports/mob_prevpos_patch.h"
+#include "../features/ports/mob_inspect_probe.h"
 #include "../features/auto_lie/auto_lie.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
 #include "../features/force_trade/force_trade.h"
@@ -160,6 +161,7 @@ void StopAllFeatureWorkers() {
     x::features::auction_gate_probe::Shutdown();
     x::features::rest_mp_accel::StopWorker();
     x::features::ports::security_attack::StopWorker();
+    x::features::ports::mob_inspect_probe::StopWorker();
     x::features::auto_lie::StopWorker();
     xcat::sound::CancelPlayback();
     x::features::fly::StopWorker();
@@ -202,6 +204,7 @@ void StopAllFeatureWorkers() {
     // 卸载后既关不掉也擦不掉，脏页还留给完整性校验。
     x::features::ports::curfh_gate_bypass::SetEnabled(false);
     x::features::ports::mob_prevpos_patch::SetEnabled(false);
+    x::features::ports::mob_inspect_probe::Shutdown();
     x::features::attack_accel::StopWorker();
     x::features::invuln::StopWorker();
     x::features::kick_sniff::StopWorker();
@@ -486,6 +489,8 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ports::security_attack::Init());
     XCAT_PLAY_BOOT_STEP(x::features::ports::security_attack::StartWorker());
+    XCAT_PLAY_BOOT_STEP(x::features::ports::mob_inspect_probe::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::ports::mob_inspect_probe::StartWorker());
     if (xcat::kInfiniteStarsUserEnabled) {
         XCAT_PLAY_BOOT_STEP(x::features::infinite_stars::Init());
     }

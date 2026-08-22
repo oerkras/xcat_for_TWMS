@@ -1253,9 +1253,8 @@ void ClearHopFailRecover(const char* why);
 // Waiting 包若已出门撤不回，只停本地结算——避免把赶路换图当成迁频 SettleOk。
 // 超级赶路 / 自动补给：整段停换频（含 Waiting）。
 // 不走 Fail：会 toast「换频失败」并可能 RequestAttempt 软重连，把赶路/卖装截断。
-void AbortHopForYield() {
-    const char* why = YieldHopWhy();
-    if (!why) return;
+void AbortHopWithWhy(const char* why) {
+    if (!why || !why[0]) why = "yield";
     const State st = GetStateLocal();
     const uint32_t pend = gPendingSeq.exchange(0);
     const uint32_t active = gActiveSeq.load();
@@ -1276,6 +1275,12 @@ void AbortHopForYield() {
     ResumeCombatAfterHop();
     ports::teleport::ClearNativeSelfCd();
     if (pend) Log("drop pending seq=%u %s active", pend, why);
+}
+
+void AbortHopForYield() {
+    const char* why = YieldHopWhy();
+    if (!why) return;
+    AbortHopWithWhy(why);
 }
 
 void ClearHopFailRecover(const char* why) {
@@ -2245,6 +2250,8 @@ void AbortHopForHangup() {
     ports::teleport::ClearNativeSelfCd();
     if (pend) Log("drop pending seq=%u hangup preempt", pend);
 }
+
+void AbortHopForTravel() { AbortHopWithWhy("travel"); }
 
 DWORD CooldownRemainingMs() {
     const DWORD now = GetTickCount();

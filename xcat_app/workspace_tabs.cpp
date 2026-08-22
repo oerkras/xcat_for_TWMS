@@ -2071,7 +2071,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                  true);
         speedRow("F5 滑翔", "home_combat_speed", &gUiFlySpeedPct,
                  "F5 空中贴怪 + 自动赶路共用（都是「自动飞」）。\n"
-                 "默认 1000%（满火力档）；拟人 / 站桩输出 / 关闭时置灰。",
+                 "默认 500%；拟人 / 站桩输出 / 关闭时置灰。",
                  gUiApproachMode == 0);
         ImGui::TextDisabled(
             "范围 %u–%u%%。只放大「意图」速度；撞墙预刹 / 位置包线 / 坠落自救不跟着缩。\n"

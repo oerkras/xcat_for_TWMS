@@ -1,14 +1,38 @@
 {
-    "updatedAt":  "2026-08-22 02:39:41",
-    "latest":  "xcat_for_twms_0822_0.1.176_build176.zip",
+    "updatedAt":  "2026-08-22 21:56:40",
+    "latest":  "xcat_for_twms_0822_0.1.179_build179.zip",
     "versions":  [
+                     {
+                         "name":  "xcat_for_twms_0822_0.1.179_build179.zip",
+                         "file":  "/downloads/xcat_for_twms_0822_0.1.179_build179.zip",
+                         "publishedAt":  "2026-08-22 21:56:40",
+                         "sizeBytes":  6597458,
+                         "sizeText":  "6.29 MB",
+                         "isLatest":  true
+                     },
+                     {
+                         "name":  "xcat_for_twms_0822_0.1.178_build178.zip",
+                         "file":  "/downloads/xcat_for_twms_0822_0.1.178_build178.zip",
+                         "publishedAt":  "2026-08-22 20:04:40",
+                         "sizeBytes":  6609281,
+                         "sizeText":  "6.3 MB",
+                         "isLatest":  false
+                     },
+                     {
+                         "name":  "xcat_for_twms_0822_0.1.177_build177.zip",
+                         "file":  "/downloads/xcat_for_twms_0822_0.1.177_build177.zip",
+                         "publishedAt":  "2026-08-22 19:16:26",
+                         "sizeBytes":  6609198,
+                         "sizeText":  "6.3 MB",
+                         "isLatest":  false
+                     },
                      {
                          "name":  "xcat_for_twms_0822_0.1.176_build176.zip",
                          "file":  "/downloads/xcat_for_twms_0822_0.1.176_build176.zip",
                          "publishedAt":  "2026-08-22 02:39:41",
                          "sizeBytes":  6608885,
                          "sizeText":  "6.3 MB",
-                         "isLatest":  true
+                         "isLatest":  false
                      },
                      {
                          "name":  "xcat_for_twms_0821_0.1.175_build175.zip",

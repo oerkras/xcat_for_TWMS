@@ -70,6 +70,9 @@ bool gGmAlarmActive = false;
 int gHideSuspectStreak = 0;
 int gPostHopClearStreak = 0;  // 宽限内连续 other==0 拍数
 char gLastNamesLog[384]{};    // 上次已落盘的 names= 指纹，变化才再记
+// 世界地图关图期间 RequestGoto 尚未入队：IsActive 仍假，靠此挡遇人 hop。
+std::atomic<bool> gForcedYield{false};
+std::atomic<DWORD> gForcedYieldAt{0};
 
 void SetState(State s) { gState.store(static_cast<unsigned>(s)); }
 State GetStateLocal() { return static_cast<State>(gState.load()); }
@@ -337,6 +340,11 @@ void RequestHop(const ports::user_pool::RemoteThreatSample& t, bool threat) {
             names[0] ? names : "?", threat ? 1 : 0);
         return;
     }
+    if (gForcedYield.load(std::memory_order_acquire)) {
+        Log("hop skip: travel yield hold other=%d names=[%s] threat=%d", other,
+            names[0] ? names : "?", threat ? 1 : 0);
+        return;
+    }
     if (x::features::auto_supply::IsBusy()) {
         Log("hop skip: auto_supply busy other=%d names=[%s] threat=%d", other,
             names[0] ? names : "?", threat ? 1 : 0);
@@ -409,6 +417,14 @@ void OnMapChange(int mapId, DWORD now) {
 
 }  // namespace
 
+void SuspendNow(const char* why) {
+    if (!why || !why[0]) why = "travel";
+    gForcedYield.store(true, std::memory_order_release);
+    gForcedYieldAt.store(GetTickCount(), std::memory_order_release);
+    channel_hop::AbortHopForTravel();
+    SuspendForTravel(GetTickCount(), why);
+}
+
 void Init() {
     gWorkerStop.store(false);
     SetState(State::Idle);
@@ -426,6 +442,8 @@ void Init() {
     gPostHopClearStreak = 0;
     gLastNamesLog[0] = 0;
     gNeedSampleNow.store(false);
+    gForcedYield.store(false, std::memory_order_release);
+    gForcedYieldAt.store(0, std::memory_order_release);
     Log("Init (UserPool + optional GM/hide escalate + forced Alarm, no Reload)");
 }
 
@@ -498,14 +516,18 @@ void Tick(DWORD now) {
         return;
     }
     // 必须先于 !PlayReady：赶路换图时 PlayReady 会掉，旧 Hopping 会被当成换频空窗。
-    if (x::features::travel::IsActive()) {
-        SuspendForTravel(now);
-        return;
-    }
-    // 卖装/补给开趟：硬闸只停了打怪，遇人原先仍会 RequestHop（trip cool 窗口最常见）。
-    if (x::features::auto_supply::IsBusy()) {
-        SuspendForTravel(now, "auto_supply");
-        return;
+    const bool travelOn = x::features::travel::IsActive();
+    const bool supplyOn = x::features::auto_supply::IsBusy();
+    if (gForcedYield.load(std::memory_order_acquire) || travelOn || supplyOn) {
+        const DWORD yieldAt = gForcedYieldAt.load(std::memory_order_relaxed);
+        if (!travelOn && !supplyOn && yieldAt != 0 && now - yieldAt > 8000) {
+            gForcedYield.store(false, std::memory_order_release);
+            Log("forced yield timeout (no travel/supply)");
+        } else {
+            SuspendForTravel(now, supplyOn && !travelOn ? "auto_supply" : "travel");
+            if (travelOn || supplyOn) gForcedYield.store(false, std::memory_order_release);
+            return;
+        }
     }
     if (!ports::world::IsPlayReady()) {
         if (GetStateLocal() == State::Hopping) {

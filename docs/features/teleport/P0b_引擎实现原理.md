@@ -4,7 +4,8 @@
 > **状态**：✅ 只读采证完成（dump + IDA 双向）；偏移核对全数一致；**位移真源已改写，见 §4**
 > **产品**：新枫之谷：经典版（TW · `Maplestory_Classic.exe`）· **不是**枫星
 > **数据源**：`DumpRestoredData/dump.cs.restored.C`（折中档）· 原始真源 `Dumps/runtime/out/dump.cs` · IDB `Dumps/runtime/GameAssembly.dll.i64`
-> **RVA 基址**：`0x7FFB16B40000`（同 [`P0a`](P0a_瞬移CALL锚点.md)）· VA = base + RVA
+> **RVA 基址**：`0x7FFB16B40000`（同 [`P0a`](P0a_瞬移CALL锚点.md)）· VA = base + RVA  
+> **2026-08-22**：下文 `ApplyImpact 0x11A4E60` / `LeaveFoothold 0x11AF5C0` 是**旧 dump**。当前 runtime IDB 为 `ApplyImpact 0x11C85D0`、`LeaveFoothold 0x11D2F00`、`SetImpactNext 0x11C5150`（imagebase 以打开的 `GameAssembly.dll.i64` 为准）。语义仍对（清 Valid → 写 Ap.V、两轴同一条 Min/Max 路 + 整数截断）；RVA 以 [`../simple_combat/满火力进站与竖直权限.md`](../simple_combat/满火力进站与竖直权限.md) 为准，勿把旧表抄进新代码。
 > **实现**：`x/features/ports/teleport_port.cpp`（现役已不走本文 ImpactNext 旁路）
 > **安全**：全程只读 dump / IDB / 源码，未改 `.text`、未发包、未运行客户端
 

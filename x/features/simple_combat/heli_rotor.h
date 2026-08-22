@@ -50,6 +50,10 @@
 //    `kEnvPushVy=120`（低于 180 盈亏线）⇒ 越"救"越掉，bea1c3 从 y=-270 一路掉到
 //    -1188 后被服务端断线。所以配平必须由**距上次发射的真实耗时**算出来，而不是
 //    写死常数——主线程一卡顿，发射变稀，需要的配平就同比变大。
+//
+// 进站律 / 当前 IDB 的 ApplyImpact RVA / 客户 0.32 vs 本机 0.15 BIN：
+//   docs/features/simple_combat/满火力进站与竖直权限.md
+//   （模块设计.md §4.0 ②③ 过期句以本头文件 + 该笔记为准）
 
 #include <Windows.h>
 
@@ -178,7 +182,7 @@ constexpr float kBrakeInsetXPx = 24.f;
 // 只处理真异常，而不是参与日常闭环。
 constexpr float kBrakeInsetYPx = 24.f;
 
-// 越过空域上沿后的受控下沉速度。
+// 越过空域上沿后的受控下沉速度（F6 / 非交战）。Combat/Gather 不走顶侧紧急，见 Tick。
 //
 // 原实现用 `-caps.speed`，与另外三个方向（kEnvPushVx / kRescueClimbVy 都是固定 300）不对称，
 // 而且会**跟着用户的速度倍率放大**：1X 是 480，5X 就是 2400。可上沿之外是纯空气，
@@ -195,24 +199,28 @@ constexpr float kEnvSinkVy = 300.f;
 // 那个 72 借自**瞬移落点**的安全内缩，语义不通用：落点要避边界，悬停点不用。
 //
 // 无 bounds 数据时原样返回 true（宁可不夹也不误杀）。
-// F6 等仍可用本函数；**F5 Combat 可位移区见 ClampToCombatMoveBounds（raw×0.95）**。
+// F6 等仍可用本函数；**F5 Combat 可位移区见 ClampToCombatMoveBounds（raw L/R）**。
 bool ClampToAirspace(float* x, float* y);
 
-// 仅 F5 自动打怪可位移区：raw FH AABB 中心等比缩到 kCombatMoveBoundsScale（默认 0.95）。
-// ★ **只约束左右**：站位夹取 / RTB / oob_hold / Combat 包线左右与预刹用 0.95 的 L/R。
-//   竖直不夹不闸——BIN 10:24 站位被钉死 `sp.y=图底×0.95`（如 -607）=「下界保护」误伤下层怪。
-//   真下穿图底仍由 A 层 raw±slack 的恒生效上拉/bailout 保命（与 F6 unbounded 同门）。
-// **不含** Owner::Travel（超级赶路贴边门，走 raw±slack，勿套 0.95）。
-constexpr float kCombatMoveBoundsScale = 0.95f;
+// 仅 F5 自动打怪可位移区：左右 = raw FH AABB（不再中心 ×0.95）。
+// 站位 / RTB / oob_hold / Combat 预刹必须同框。0.95 曾把站位钉在工作框沿、RTB 再往里
+// 收一截，左缘怪够不着出刀 AABB（BIN 21:16：框 L=-368、RTB sp=-320、怪 x=-414、dx=94>73）。
+// 穿墙改由 kBrakeInsetXPx=24 + 满火力 X 预刹 90ms 管，勿再叠一层假墙。
+// ★ **只约束左右**。竖直不夹不闸——BIN 10:24 站位被钉死 `sp.y=图底×0.95`（如 -607）。
+//   真下穿图底仍由 A 层 raw±slack 的恒生效上拉/bailout 保命。
+// **不含** Owner::Travel（超级赶路贴边门，走 raw±slack）。
+// ★ 回退：改回 0.95f（恢复 21:16 前的假墙；贴边怪会再打不着）。
+constexpr float kCombatMoveBoundsScale = 1.0f;
 
-// 写出 move 框（L/R=0.95；T/B 仍写出缩放值供诊断，业务竖直勿当闸）。
+// 写出 move 框（L/R=raw×scale；T/B 仍写出供诊断，业务竖直勿当闸）。
 // 成功且非退化返回 true；无 bounds / 非法 raw 返回 false（调用方应放行）。
 bool QueryCombatMoveBounds(float* left, float* top, float* right, float* bottom);
 
 // 点是否在可位移**左右**框内（忽略 Y）。无 bounds 时返回 true（不误杀）。
 bool PointInCombatMoveBounds(float x, float y);
 
-// 把点的 **X** 夹进可位移左右框；Y 原样。无 bounds 时原样返回 true。
+// 把点的 **X** 夹进可位移左右框的墙刹线（raw ± kBrakeInsetXPx）；Y 原样。
+// 无 bounds 时原样返回 true。
 bool ClampToCombatMoveBounds(float* x, float* y);
 
 // 一次 tick 的遥测。由 simple_combat 写进 combat.log（BIN 分析都在那张日志里）。
@@ -273,7 +281,7 @@ const char* OwnerName(Owner o);
 // 变成代码事实的唯一位置，别加无 owner 的重载。
 void SetSetpoint(Owner o, const Setpoint& sp);
 Setpoint CurrentSetpoint();
-void Disarm(Owner o);  // = SetSetpoint(o, {Mode::Off})
+void Disarm(Owner o);  // = SetSetpoint(o, {Mode::Off})；持有者会清发射时钟
 
 // 每个驱动 tick 都调（内部自控 ~11Hz 发射节奏，不必外部限频）。
 // 返回 true = 本 tick 真发了冲量。out 可为空。非持有者恒返回 false。
@@ -305,8 +313,13 @@ bool SoftSettleEnabled();
 // ★ 面板拉到 **1000%（10.0X）** 时：
 //   1) Cruise/Station 死拍 desiredV = err/T（远距顶满；近距按距离收油）
 //   2) 档位意图顶到 kIntentCeilV（≈7410）；Rtb 同步抬
-//   3) 可选对站点预刹（kFullFireApproachBrake）：允许速度 ≤ 剩余距离/0.15s，
-//      只在本档生效；回退改该常量 false 即可，不拆其它逻辑
+//   3) Travel/Fly 可选对站点预刹（kFullFireApproachBrake，0.15s）
+//   4) Combat/Gather 满火力默认不对站点预刹（kFullFireCombatApproachBrake=false）
+//   5) 换靶极限合速（kFullFireCombatLimitDash）：进近 16ms 发拍，剩余 > cap·T 时
+//      矢量顶满 ≈7410，末段死拍。撞墙预刹视野 2 拍；墙框内沿航向缩合速。
+//      竖速超出意图档时先卸战斗 X（BIN 19:00 紧急分轴横推+砸落），紧急不再走分轴钳。
+//      出刀 dy 带内卸竖速只发一拍，随后锁过物理步（BIN 19:40 连发泵抖）。
+//      Combat 不走顶侧紧急 sink（BIN 19:47 起飞过冲顶蹦床）；底侧上拉与左右 raw 预刹仍在。
 // 其它倍率仍是 Kp·err + 分档限速。撞墙预刹 / 包线 / 可达集不撤。
 //
 // 倍率**按 Owner 各存一份**：手动飞和自动打怪对手感的诉求不同（F6 旧实现等效约

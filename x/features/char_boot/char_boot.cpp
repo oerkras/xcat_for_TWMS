@@ -298,13 +298,14 @@ const char* StateName(State s) {
 
 void SetMsg(const char* m) { strncpy_s(gMsg, m ? m : "", _TRUNCATE); }
 
-bool InFarm(int mapId) { return mapId > 0 && mapId == gTrip.farmMap; }
+bool InFarm(int mapId) { return mapId >= 0 && mapId == gTrip.farmMap; }
 
-bool IsMapleIsland(int mapId) { return mapId > 0 && mapId < 100000000; }
+// 出生图 Field 0 = 菇菇村訓練所入口。GetMapId()==0 是合法图号，不是没进图。
+bool IsMapleIsland(int mapId) { return mapId >= 0 && mapId < 100000000; }
 
 void MapKey(int mapId, char* buf, size_t cap) {
     if (!buf || cap == 0) return;
-    if (mapId <= 0) {
+    if (mapId < 0) {
         buf[0] = 0;
         return;
     }
@@ -902,13 +903,20 @@ void Fail(const char* why) {
 }
 
 bool WaitSafeLand(DWORD now) {
-    if (simple_combat::IsSafeLandActive()) {
-        SetMsg("安全落台中…");
-        return false;
-    }
     ports::teleport::FlightState st{};
     const bool have = ports::teleport::QueryFlightState(st) && st.ok;
+    // Field 0 落台曾把 mapId>0 当 fhReady，IsSafeLandActive 永不结束，GotoFarm 39s 没 RequestGoto。
     if (have && st.onFh) return true;
+    if (simple_combat::IsSafeLandActive()) {
+        SetMsg("安全落台中…");
+        static DWORD sLog = 0;
+        if (!sLog || now - sLog >= 1500) {
+            sLog = now;
+            runtime::LogI("CharBoot", "wait-land active=1 onFh=%d map=%d", have && st.onFh ? 1 : 0,
+                          ports::world::GetMapId());
+        }
+        return false;
+    }
     if (travel::IsActive()) {
         SetMsg("赶路稳图中…");
         return false;
@@ -1265,7 +1273,7 @@ bool ClampFarm(int farm, int curMap, char* why, size_t whyCap) {
         snprintf(why, whyCap, "farm_is_town");
         return true;
     }
-    if (IsMapleIsland(curMap) && curMap > 0) {
+    if (IsMapleIsland(curMap)) {
         char a[32]{}, b[32]{};
         MapKey(curMap, a, sizeof(a));
         MapKey(farm, b, sizeof(b));
@@ -1374,7 +1382,7 @@ void JumpAfterArm(const VitalsSnap& s) {
         Enter(State::GotoFarm, whyFarm);
         return;
     }
-    Fail("arm_no_jump");
+    Fail("未知地图无法起号");
 }
 
 bool EnsureCombatOn(char* why, size_t whyCap) {
@@ -1407,7 +1415,7 @@ bool EnsureCombatOn(char* why, size_t whyCap) {
 
 void TickArm(const VitalsSnap& s) {
     char why[96]{};
-    if (!s.playReady) {
+    if (!s.playReady || !ports::world::HasMapData()) {
         Fail("未进图");
         return;
     }

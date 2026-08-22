@@ -14,6 +14,7 @@
 #include "../channel_hop/channel_hop.h"
 #include "../ports/world_port.h"
 #include "../soft_login_probe/soft_login_probe.h"
+#include "../ports/mob_gather_port.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
 #include "../../runtime/il2cpp_bind.h"
@@ -2087,6 +2088,8 @@ void OnStateChange(int prev, int now, int err) {
         // land_quiet 期内 RequestAttempt 早退且 hold=0：再 bump 会让守护 1Hz 下一拍
         // 把进图 Session 闪断当踢线硬杀（BIN 01:00:24 success → 01:00:25 kill）。
         x::features::galaxy_token_probe::RequestSample(
+            now == kStateDisconnecting ? "disconnecting" : "disconnected");
+        x::features::ports::mob_gather::NoteNmSessionEnded(
             now == kStateDisconnecting ? "disconnecting" : "disconnected");
         // hop 已发包：Disconnected 是迁频抖。KickSniff 抢 RequestAttempt 会与 Waiting Fail 双主
         //（BIN 13:59：fire→117ms Disc→soft→hop Fail「会话已断开」）。seq 也不 bump：

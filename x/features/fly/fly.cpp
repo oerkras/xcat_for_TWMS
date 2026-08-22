@@ -647,7 +647,6 @@ void PollF6() {
 
 void PollLmbHop() {
     if (!gArmed.load(std::memory_order_acquire) ||
-        gExternalPause.load(std::memory_order_acquire) ||
         x::features::ports::action_gate::IsSkillCastBusy()) {
         gLmbWasDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         return;
@@ -747,13 +746,9 @@ float LeadFade(DWORD age) {
 // 只要 fh-ban 挂着，停一拍就是掉一段——这条与 F5 的 TickHeliRotor 是同一条铁律。
 void DriveRotor(DWORD now) {
     if (!gArmed.load(std::memory_order_acquire)) return;
-    // 外部暂停（auto_supply 补给中）：停发冲量，语义与旧实现「不 hop」一致。
-    // 注：此时 fh-ban 仍挂着，角色会持续下坠且接不住地板——这是改造前就有的行为，
-    // 本轮原样保留，不在这里顺手改语义。
-    if (gExternalPause.load(std::memory_order_acquire)) {
-        heli::Disarm(heli::Owner::Fly);
-        return;
-    }
+    // 外部暂停（补给 / 换频道 / 到站）不得在 F6 已武装时停翼：fh-ban 仍开、
+    // DriveRotor 早退 = 自由落体（BIN 2026-08-22 17:51 channel_hop_pause + F6 ARMED）。
+    // 未武装时 worker 根本不进这里；CharBoot 贴 NPC 不会被没按 F6 的鼠标 setpoint 拽走。
     if (!ports::world::IsPlayReady()) return;
     // 产品门禁：飞需无敌；不偷偷 SetDesired。（Impact 端口自身也会拒，这里只是早退省开销）
     if (!x::features::invuln::IsEnabled()) return;
@@ -898,10 +893,9 @@ DWORD WINAPI Worker(LPVOID) {
             x::ipc::PayloadControl_PublishFly(false);
         }
         PollF6();
-        // ExternalPause 必须把 DriveRotor 一起停掉。只停 hop 的话，armed 时仍会每拍
-        // 把鼠标 setpoint 写进 Owner::Fly——CharBoot 贴 NPC 抢到 Fly 旋翼后会被对拽。
-        if (gArmed.load(std::memory_order_acquire) &&
-            !gExternalPause.load(std::memory_order_acquire)) {
+        // 只看武装：未开 F6 不写旋翼，pause 调用方（补给/CharBoot/换频道）不受影响。
+        // 已开 F6 则 pause 也必须 DriveRotor——否则 fh-ban 卸台 + 停翼 = 掉落。
+        if (gArmed.load(std::memory_order_acquire)) {
             // F6 自由飞：不因近门自动卸飞。发门/贴门进门由超级赶路 travel 管。
             PollAimFollow();
             PollLmbHop();

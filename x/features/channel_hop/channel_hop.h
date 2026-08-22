@@ -43,6 +43,9 @@ bool IsMigrateInFlight();
 // 主动 hangup 到点：丢掉 pending / 未发包的 hop；已发包则 sticky 目标频再 Idle。
 // 不 RequestAttempt——由 hangup_timer 自己 CloseSession。
 void AbortHopForHangup();
+// 超级赶路开趟前同步丢掉未完成 hop（不走 Fail toast / 不拉 soft）。
+// 不依赖 travel::IsActive()：世界地图关图可能要 1.5s，必须在 RequestGoto 前就能撤 hop。
+void AbortHopForTravel();
 // 成功/失败冷却剩余 ms；0=可立刻再 hop（遇人策略对齐用）
 DWORD CooldownRemainingMs();
 // 上次成功换频 / 图内读到的频道（玩家 UI ch.N = 列表 id + 1）；未知返回 0。

@@ -5,7 +5,7 @@
 > **证据源**：`Dumps/runtime/GameAssembly.dll.i64`（运行时 dump，imagebase `0x7ffd60830000`）· `Dumps/cms_cw/dump.cs`（语义名）· `x/features/ports/security_attack_port.cpp`（锚点 RVA）
 > **日期**：2026-08-21
 > **目的**：把「吸怪→软重连」溯因里对 type21 的怀疑**证伪**（§0–§6：type21 是被动怪插值时间越界检查、节流 5 分钟、无 px/s 天花板）；并锁定真正逐帧上报的 `Mob.SendMobPrevPosHack` 链——解其位移阈值/确认无节流、量化预武装窗口（§7）。
-> **关联**：[`客户端Hack标志与服端推断.md`](客户端Hack标志与服端推断.md) · [`攻包计数窗与type20.md`](攻包计数窗与type20.md) · [`../mob_gather/模块设计.md`](../mob_gather/模块设计.md) · `x/features/ports/mob_fh_ban.cpp`
+> **关联**：[`客户端Hack标志与服端推断.md`](客户端Hack标志与服端推断.md) · [`攻包计数窗与type20.md`](攻包计数窗与type20.md) · [`吸怪平行检测族-拉怪密度死点.md`](吸怪平行检测族-拉怪密度死点.md) · [`../mob_gather/模块设计.md`](../mob_gather/模块设计.md) · `x/features/ports/mob_fh_ban.cpp`
 
 ---
 
@@ -361,3 +361,5 @@ on=? cap=?`，运行时真值直接可见、不必再靠 UI 猜。
 2. **充大 `[obj+0x44]`（旧 B' 提案）= 令 `disp≤|e|+10` 恒真 = 与本轮 anti-report patch（强走正常包）完全等效**。patch 已实机证伪，故 B' 同死，无需再实现。
 
 **安全禁用（2026-08-22，不拆模块）**：`mob_prevpos_patch` 文件保留；`SetEnabled` 以 `kKillSwitched=true` 硬关（忽略 on、只卸载）；`ApplyPayloadControl` 永不装；INI 读/写/normalize 与面板勾选一律强制 0（勾子灰掉）。卸载侧若发现 GA 仍是补丁字节（`4C 8B F8 90`），即使本进程没装过也会写回 `cmovz`（`4C 0F 44 F8`），清残留脏页。吸怪 / leash / 巡点 / 策略 A·B 原逻辑不动。回滚只需把 `kKillSwitched` 改回 `false` 并恢复 apply/INI。
+
+**平行族（2026-08-22）**：§7.12 只钉死了通道 A（服端自量移动包位移）。dump + IDA 另有拉怪 Kick 926–928、质心/扇区密度 932–941、死亡点 935–937、HackLog 枢纽 408，互相不替代。详文 [`吸怪平行检测族-拉怪密度死点.md`](吸怪平行检测族-拉怪密度死点.md)。

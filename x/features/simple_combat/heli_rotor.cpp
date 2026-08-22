@@ -23,6 +23,8 @@ namespace {
 
 // 发射节奏：~11Hz。每发一次 = 一个主线程泵 job，太密会拖帧；太疏则两拍之间重力
 // 累积的落差变大（90ms = 3 个物理步 = 180px/s 锯齿 ≈ 8px 位置起伏，可接受）。
+// Combat 满火力换靶另见 kFullFireCombatLimitDash：进近加密到 kIssueSettleMs，否则
+// 一发 7410×90ms = 667px，短距离换怪死拍只能走 err/0.09，永远摸不到极限合速。
 constexpr DWORD kIssueMs = 90;
 // 贴怪到位悬停：加密到战斗 tick（16ms）。比物理步 30ms 更密，可在一步重力中途
 // 再纠一次 vy，把位置锯齿往「接近 0」压。进近/赶路仍 90。禁止 AbsPos 硬写。
@@ -173,6 +175,37 @@ float VxCommandFor(float vt, float v) {
     return vt - v;
 }
 
+// 墙框内沿当前意图航向取最大可行合速。分轴独立钳会把斜向拧成「先横后竖」。
+// 空旷满速样本航向本就是 0°；真拧折发生在紧急分支（BIN 19:00 vy=-8000 / desx=3579 des=-38）。
+void ClipToRoomsAlongHeading(float* vx, float* vy, float roomL, float roomR, float roomB,
+                             float roomT, bool clampX, bool clampTop) {
+    float mag = std::sqrt((*vx) * (*vx) + (*vy) * (*vy));
+    if (mag < 1e-3f) return;
+    const float ux = *vx / mag;
+    const float uy = *vy / mag;
+    float s = mag;
+    if (clampX) {
+        if (ux > 1e-4f) {
+            const float a = roomR / ux;
+            if (a < s) s = a;
+        } else if (ux < -1e-4f) {
+            const float a = roomL / ux;
+            if (a < s) s = a;
+        }
+    }
+    if (clampTop && uy > 1e-4f) {
+        const float a = roomB / uy;
+        if (a < s) s = a;
+    }
+    if (uy < -1e-4f) {
+        const float a = roomT / uy;
+        if (a < s) s = a;
+    }
+    if (s < 0.f) s = 0.f;
+    *vx = ux * s;
+    *vy = uy * s;
+}
+
 // 深度出界：超过安全框这么多就判不可救，缴械让引擎接管（见 Bailed()）。
 constexpr float kBailoutPx = 420.f;
 // 位置与速度持续这么久完全不变 = 状态停更（断线/切图/死亡）。
@@ -252,13 +285,54 @@ static_assert(kBaseRtb * 10.0f <= kIntentCeilV, "10X 必须落在可救性范围
 constexpr float kFullFireScale = 10.0f;
 constexpr float kFullFireScaleEps = 0.05f;
 // 1000% 对站点预刹（与撞墙预刹同形：允许速度 ≤ 剩余距离 / 视野）。
-// ★ 回退：改 false 即整段失效，死拍/7410 天花板不动。效果差就关，别拆别的。
+// Travel/Fly 仍可用。Combat/Gather 另见 kFullFireCombatApproachBrake。
+// ★ 回退：改 false 即整段失效，死拍/7410 天花板不动。
 constexpr bool kFullFireApproachBrake = true;
-// 0.15s：进站约多半秒减速尾巴，比撞墙 0.2s 少磨叽。改 0.10 更猛、0.20 更稳。
 constexpr float kFullFireApproachBrakeSec = 0.15f;
+// Combat/Gather 满火力：默认不对站点套 0.15。
+// T≈90ms < 0.15 ⇒ min(err/T, err/H) 恒取 err/H，死拍名存实亡，每段进站至少磨 150ms。
+// 作动器已是定点死拍（err/T 一拍落到 sp）；再叠恒时缓冲，对不上瞬移打怪体感。
+// 撞墙预刹 / 到位软钉 / 死区杀残速仍在。出刀 |vy|≤680 仍在（过冲会 hold vy，那是闸不是飞控缓冲）。
+// ★ 回退改 true：恢复 16:58/18:07 恒时进站。
+constexpr bool kFullFireCombatApproachBrake = false;
+// Combat/Gather 满火力换靶：合速顶满 kIntentCeilV，节奏跟到位软钉同为 16ms。
+// 死拍 err/T 在 T=90ms 时 667px 以内永远到不了 7410（200px→2222）。加密后 cap·T≈119px，
+// 更远走极限合速矢量，末段再死拍刹停。撞墙预刹仍在下游。
+// 竖速超出意图档时先卸战斗 X，紧急也走航向钳（BIN 19:00 分轴横推+砸落）。
+// 左右墙预刹窗见 Tick 里 kLimitDashWallBrakeSec（16ms 节拍不得把 X 窗缩到 32ms）。
+// ★ 回退改 false：恢复 90ms + 纯死拍（18:23）。
+constexpr bool kFullFireCombatLimitDash = true;
+// 出刀几何已够（|ey|≤首刀/续砍带）时，禁止把残差 /T 打成上千 vy。超闸第一拍立即卸；
+// 随后锁 48ms 等物理步刷新，禁止连发（BIN 19:40 cadence=0 到站泵抖）。
+// BIN 19:13：d=(58,-11)/( -53,-2) 已在盒内，vy=7133/7332 被 hold；11/0.016=687 仍超闸 600。
+// 同层换靶带着上一跳 7410 竖速飞进来，几何先到、速度后到。
+// ★ 回退：把 kStrikeDumpBandEy 改 0。
+constexpr float kStrikeDumpDeadEy = 20.f;   // = simple_combat kHeliFirstLockMaxDy
+constexpr float kStrikeDumpBandEy = 50.f;   // = simple_combat kHeliStrikeMaxDy
+constexpr float kStrikeDumpMaxVy = 600.f;   // 卸速钳；出刀闸 kHeliStrikeMaxVy=680（+一步重力余量）
+// 卸竖速只许一拍。BIN 19:40：cadence=0 时 since=2ms 连发 cmdY=±7k，样本 vy 还停在
+// 7132（物理步 30ms 未刷新），叠加语义把人泵起来 = 到站狂抖。锁过一个物理步再看。
+constexpr DWORD kStrikeDumpLockMs = 48;
+// 满火力站点 Y 拦截：剩余 |ey| / 90ms。远距 |ey|>667 时 room≫7410，爬升仍满速；
+// 末段才收，避免整段 0.15（那会把跨层进站磨到 0.66s）。
+// BIN 20:36:15：起飞 dy=540 斜向 desY=5109，402ms 后 vy=-7997，Y 在 8↔549 弹。
+// 过冲后 saturate 会按新 err 再顶满反向 7410；此钳把反向也收到 ey/0.09。
+// 进 kStrikeDumpBandEy 仍交给卸速，不把 dump 的 0 改回 room。
+// ★ 回退：把 kStationInterceptSec 改 0（或删掉下面 intercept 块）。
+constexpr float kStationInterceptSec = 0.090f;
+// 软静默 / 停转回来：近距 |ey| 才限卸速钳，跨层起飞不限。
+// BIN 20:51:39：unlatch Disarm 后 gLastIssueMs 仍是静默前的值，3.4s 后 since=3455
+// trim=800、des=-32；下一拍 16ms limitDash 把 ey=111 打到 vy=-1641，出刀闸 hold。
+// ★ 回退：把 kQuietResumeCapEy 改 0（近距限速整段失效；清时钟仍要留，否则 trim 火箭还在）。
+constexpr float kQuietResumeCapEy = 180.f;
+// 仅当 kFullFireCombatApproachBrake 打开时才有意义（X 带外死拍、带内再套 0.15）。
+// ★ 回退整段：改 false。只动 Combat/Gather 满火力 X。
+constexpr bool kFullFireXCatchBrake = true;
+constexpr float kFullFireXCatchMaxEy = 20.f;
+constexpr float kFullFireXCatchMinEx = 120.f;
 
-// Combat 出刀末段预刹（**不限** 1000%）。满火力预刹只罩 FullFire；常态 Kp 仍会
-// 带着 |vy| 几百撞进紧出刀带。
+// Combat 出刀末段预刹（**非** 1000%）。满火力已有两轴 0.15s 对站点预刹，本段不再叠。
+// 常态 Kp 会带着 |vy| 几百撞进 ~35px 出刀带，Y 比 X 窄所以仍要单独收油。
 //
 // BIN 16:12 停机距仿真：跨层 hold 仍高；再加 safety×2 + 超速归零后，
 // BIN 17:05–17:07 进站/lie_safe_land（同走 Owner::Combat）竖直 des 对拉、体感降落狂抖
@@ -268,11 +342,12 @@ constexpr float kFullFireApproachBrakeSec = 0.15f;
 // p50≈0.66s。作用带 220→100→70：远处满 Kp，末段收油。
 // BIN 21:54–23:20（闸600+带70）：跨层 hold-then-fire≈15%；同层≈0。
 // BIN 00:02–00:18（带120）：跨层 hold 降到 4%，但进站 p50 509→667，体感首刀慢。
-// 折中 **90**：比 70 早收一点油，比 120 少磨末段。
+// 折中带 **90**。视野曾 0.32（90px 只许 281）——X 同距满火力 0.15s 仍 600，体感「左右刹得
+// 干脆、上下磨」。对齐 0.15：90px→600、50px→333，仍 err/H 不归零。
 // ★ 回退整段：改 false。只动 Combat + Cruise/Station，不动 Travel/手动。
 constexpr bool kCombatStrikeApproachBrake = true;
 constexpr float kCombatStrikeBrakeBandY = 90.f;   // 开始收油的 |errY|（远处不咬合）
-constexpr float kCombatStrikeBrakeSec = 0.32f;    // |vy|≤|errY|/H；50px→156、90px→281
+constexpr float kCombatStrikeBrakeSec = 0.15f;    // 与满火力 X 同视野；90px→600
 // 死区内残速闸：|st.vy| 超过此值就意图=0（否则滑翔穿死区上下抖）。
 constexpr float kCombatDeadzoneCoastVy = 80.f;
 // Combat 到位软钉：水平窗放宽到站位环量级，避免「Y 已到、X 还差 20」进不了 settle。
@@ -362,6 +437,9 @@ std::atomic<bool> gSpUnbounded{false};
 
 DWORD gLastIssueMs = 0;
 bool gLastTickFired = false;
+DWORD gStrikeDumpMs = 0;
+// Disarm / 长空窗后第一段近距贴怪：竖速顶多 kStrikeDumpMaxVy，避免 16ms 顶满。
+bool gNeedQuietResumeCap = false;
 
 // 与 simple_combat 防抖同开同关（SetAntiJitterEnabled 转发）。
 std::atomic<bool> gSoftSettleEnabled{true};
@@ -462,9 +540,14 @@ bool ClampToCombatMoveBounds(float* x, float* y) {
     if (!QueryCombatMoveBounds(&l, &t, &ri, &b)) return true;
     (void)t;
     (void)b;
-    (void)y;  // 竖直不夹——避免站位钉在 0.95 下沿（BIN 10:24 sp.y=-607）
-    if (*x < l) *x = l;
-    if (*x > ri) *x = ri;
+    (void)y;  // 竖直不夹——避免站位钉在图底下沿（BIN 10:24 sp.y=-607）
+    // 站位停在墙刹线上，不把 setpoint 指进 24px 余量里（与 kBrakeInsetXPx / RTB 同线）。
+    float inset = kBrakeInsetXPx;
+    const float halfW = 0.5f * (ri - l);
+    if (inset > halfW) inset = halfW;
+    if (inset < 0.f) inset = 0.f;
+    if (*x < l + inset) *x = l + inset;
+    if (*x > ri - inset) *x = ri - inset;
     return true;
 }
 
@@ -535,7 +618,15 @@ Setpoint CurrentSetpoint() {
     return sp;
 }
 
-void Disarm(Owner o) { SetSetpoint(o, Setpoint{}); }
+void Disarm(Owner o) {
+    SetSetpoint(o, Setpoint{});
+    if (!Owns(o)) return;
+    // 停转后 since 不得带着静默时长进下一拍（BIN 20:51:39 since=3455）。
+    // keepAir 仍在发冲量，走不到这里。
+    gLastIssueMs = 0;
+    gStrikeDumpMs = 0;
+    gNeedQuietResumeCap = true;
+}
 
 void Reset() {
     // Reset 是「换图/开关」的全局复位，不走 Owns 闸：此时正需要把残留所有权一并清掉，
@@ -549,6 +640,8 @@ void Reset() {
     gMode.store(static_cast<unsigned>(Mode::Off), std::memory_order_release);
     gLastIssueMs = 0;
     gLastTickFired = false;
+    gStrikeDumpMs = 0;
+    gNeedQuietResumeCap = false;
     gBailed.store(false, std::memory_order_release);
     gStaleSinceMs = 0;
     // 倍率是用户设置，不是本轮状态，换图/开关都不该把它冲掉。
@@ -609,6 +702,10 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     if (sp.mode == Mode::Off) {
         tm.guard = "off";
         gLastTickFired = false;
+        // Disarm 未走到仍可能 Off 空转；清时钟避免下一拍 since 带静默时长。
+        gLastIssueMs = 0;
+        gStrikeDumpMs = 0;
+        gNeedQuietResumeCap = true;
         if (out) *out = tm;
         return false;
     }
@@ -646,6 +743,9 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
         if (!safeLandAir && !combatAirKeep && (softHold || st.onFh)) {
             tm.guard = softHold ? "soft_hold" : "soft_land_quiet";
             gLastTickFired = false;
+            gLastIssueMs = 0;
+            gStrikeDumpMs = 0;
+            gNeedQuietResumeCap = true;
             if (out) *out = tm;
             return false;
         }
@@ -680,6 +780,7 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
 
     const ModeCaps caps = CapsFor(sp.mode);
     const DWORD sinceMs = gLastIssueMs ? (now - gLastIssueMs) : static_cast<DWORD>(kIssueMs);
+    if (sinceMs > static_cast<DWORD>(kMaxTrimWindowMs)) gNeedQuietResumeCap = true;
     const float trim = GravityLoss(sinceMs);
     tm.sinceMs = sinceMs;
     tm.trimVy = trim;
@@ -736,23 +837,54 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // 面板拉到 1000% 时改成死拍（deadbeat）：desiredV = 误差 / 周期。
     //   · 远距：|err|/T ≫ caps → 下游合速钳咬到档位上限（满火力 CapsFor≈7410）
     //   · 近距：|err|/T < caps → 自动收油，一拍落到目标（不冲穿）
-    // 曾试过 bang-bang「死区外恒满速」：出刀点本来就贴怪，fire 行 |v| 仍低；接近段
-    // 过冲晃刀，用户判定不行 → 已回退为本死拍。只开 Cruise/Station。
+    // 90ms 节奏下「远距顶满」几乎不发生：cap·T≈667px，换怪通常一两百 px → 只跑 err/0.09。
+    // Combat 满火力换靶（kFullFireCombatLimitDash）：16ms 发拍 + 剩余距离 > cap·T 时
+    // 矢量顶满 caps.speed，否则死拍。曾试过 90ms 死区外恒满速：一发滑 667px，过冲晃刀。
     // 撞墙预刹 / 合速钳 / 可达集全在下游。
     // 到位软钉时两轴都禁止死拍：几 px 残差会被 /T 放大成泵，与「接近 0」相反。
+    const bool combatOwner = (o == Owner::Combat || o == Owner::Gather);
+    const bool limitDash =
+        kFullFireCombatLimitDash && FullFireScale() && combatOwner &&
+        (sp.mode == Mode::Cruise || sp.mode == Mode::Station) && !st.onFh &&
+        !settleHoverCand;
+    bool strikeDumpVy = false;
+    const bool quietResumeNear =
+        gNeedQuietResumeCap && std::fabs(errY) <= kQuietResumeCapEy;
     if (FullFireScale() && (sp.mode == Mode::Cruise || sp.mode == Mode::Station)) {
         float Tsec = static_cast<float>(sinceMs) * 0.001f;
-        if (Tsec < 0.020f) Tsec = 0.020f;  // 与紧急档同量级下限，避免除零/火箭
-        if (!settleHoverCand && std::fabs(errX) > kDeadX)
-            desiredVx = sp.leadVx + errX / Tsec;
-        if (!settleHoverCand && !st.onFh && std::fabs(errY) > kDeadY)
-            desiredVy = sp.leadVy + errY / Tsec;
+        if (limitDash && !quietResumeNear) {
+            if (!gLastIssueMs || Tsec < 0.016f) Tsec = 0.016f;
+        } else if (Tsec < 0.020f) {
+            Tsec = 0.020f;  // 与紧急档同量级下限，避免除零/火箭
+        }
+        const float dist = std::sqrt(errX * errX + errY * errY);
+        const float capT = caps.speed * Tsec;
+        const bool saturate = limitDash && dist > capT && dist > 1.f;
+        if (saturate) {
+            const float k = caps.speed / dist;
+            if (std::fabs(errX) > kDeadX) desiredVx = sp.leadVx + errX * k;
+            if (!st.onFh && std::fabs(errY) > kDeadY)
+                desiredVy = sp.leadVy + errY * k;
+        } else {
+            if (!settleHoverCand && std::fabs(errX) > kDeadX)
+                desiredVx = sp.leadVx + errX / Tsec;
+            if (!settleHoverCand && !st.onFh && std::fabs(errY) > kDeadY)
+                desiredVy = sp.leadVy + errY / Tsec;
+        }
 
-        // 对站点预刹：远距 room=err/H ≫ caps → 不咬合，仍满速；进站才收油。
-        // 回退开关见文件顶部 kFullFireApproachBrake。
-        if (kFullFireApproachBrake && kFullFireApproachBrakeSec > 1e-4f) {
+        // 对站点预刹：远距 room=err/H ≫ caps → 不咬合；进站才收油。
+        // Combat/Gather 默认跳过（kFullFireCombatApproachBrake=false）：死拍直达 sp。
+        const bool doApproachBrake =
+            kFullFireApproachBrake && kFullFireApproachBrakeSec > 1e-4f &&
+            (!combatOwner || kFullFireCombatApproachBrake);
+        if (doApproachBrake) {
             const float H = kFullFireApproachBrakeSec;
-            if (!settleHoverCand && std::fabs(errX) > kDeadX) {
+            const bool xCatchDeadbeat =
+                kFullFireXCatchBrake &&
+                combatOwner &&
+                std::fabs(errY) <= kFullFireXCatchMaxEy &&
+                std::fabs(errX) > kFullFireXCatchMinEx;
+            if (!settleHoverCand && std::fabs(errX) > kDeadX && !xCatchDeadbeat) {
                 const float room = errX / H;  // 与误差同号
                 if (errX > 0.f) {
                     if (desiredVx > room) desiredVx = room;
@@ -771,12 +903,43 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
         }
     }
 
-    // ── Combat Y 进站预刹（全倍率 · err/H）────────────────────────────
-    // 见文件顶部 kCombatStrikeApproachBrake。在 FullFire 预刹之后再夹一次：
-    // 只收油、不把 desired 打成 0（停机距超速归零会进站/落地抖，BIN 17:07）。
-    if (kCombatStrikeApproachBrake && (o == Owner::Combat || o == Owner::Gather) &&
+    // 满火力站点 Y 拦截（不是整段 0.15）。见 kStationInterceptSec。
+    if (kFullFireCombatLimitDash && FullFireScale() && combatOwner && !st.onFh &&
+        kStationInterceptSec > 1e-4f &&
+        (sp.mode == Mode::Cruise || sp.mode == Mode::Station || sp.mode == Mode::Hold) &&
+        !settleHoverCand) {
+        const float absEy = std::fabs(errY);
+        if (absEy > kStrikeDumpBandEy) {
+            const float roomY = errY / kStationInterceptSec;
+            if (errY > 0.f) {
+                if (desiredVy > roomY) desiredVy = roomY;
+            } else {
+                if (desiredVy < roomY) desiredVy = roomY;
+            }
+        }
+    }
+
+    // 静默回来近距：竖速顶多卸速钳。跨层 |ey|>kQuietResumeCapEy 立刻摘旗，起飞仍满速。
+    if (gNeedQuietResumeCap && combatOwner && !st.onFh) {
+        const float absEy = std::fabs(errY);
+        if (absEy > kQuietResumeCapEy) {
+            gNeedQuietResumeCap = false;
+        } else if (absEy > kStrikeDumpBandEy) {
+            if (desiredVy > kStrikeDumpMaxVy) desiredVy = kStrikeDumpMaxVy;
+            if (desiredVy < -kStrikeDumpMaxVy) desiredVy = -kStrikeDumpMaxVy;
+        } else {
+            gNeedQuietResumeCap = false;
+        }
+    }
+
+    // ── Combat Y 进站预刹（非满火力 · err/H）──────────────────────────
+    // 见文件顶部 kCombatStrikeApproachBrake。满火力 Combat 已死拍直达，不再套 0.15。
+    const bool combatApproach =
+        (o == Owner::Combat || o == Owner::Gather) &&
         (sp.mode == Mode::Cruise || sp.mode == Mode::Station) && !st.onFh &&
-        !settleHoverCand && kCombatStrikeBrakeSec > 1e-4f) {
+        !settleHoverCand;
+    if (kCombatStrikeApproachBrake && !FullFireScale() && combatApproach &&
+        kCombatStrikeBrakeSec > 1e-4f) {
         const float absEy = std::fabs(errY);
         if (absEy > kDeadY && absEy <= kCombatStrikeBrakeBandY) {
             const float room = errY / kCombatStrikeBrakeSec;  // 与误差同号
@@ -786,9 +949,37 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
                 if (desiredVy < room) desiredVy = room;
             }
         }
-        // 死区内杀残速（BIN 15:08 限位振荡）。
-        if (absEy <= kDeadY && std::fabs(st.vy) > kCombatDeadzoneCoastVy) {
+    }
+    // 死区内杀残速（BIN 15:08 限位振荡）。满火力也要：它对站点预刹在死区外就停了。
+    if (kCombatStrikeApproachBrake && combatApproach) {
+        if (std::fabs(errY) <= kDeadY && std::fabs(st.vy) > kCombatDeadzoneCoastVy) {
             desiredVy = 0.f;
+        }
+    }
+
+    // 满火力进站：几何已在出刀 dy 带内时卸竖速，别把 10px 残差 /16ms 打成 600+ 去撞闸。
+    // 残速超闸时第一拍立即发；随后 48ms 内禁止再叠卸速（BIN 19:40 since=2 泵抖）。
+    if (kFullFireCombatLimitDash && FullFireScale() && combatOwner && !st.onFh &&
+        (sp.mode == Mode::Cruise || sp.mode == Mode::Station || sp.mode == Mode::Hold)) {
+        const float absEy = std::fabs(errY);
+        const bool hotVy = std::fabs(st.vy) > kStrikeDumpMaxVy;
+        const bool dumpLocked = gStrikeDumpMs && (now - gStrikeDumpMs) < kStrikeDumpLockMs;
+        if (!hotVy) {
+            gStrikeDumpMs = 0;
+        }
+        if (dumpLocked && hotVy) {
+            desiredVy = st.vy;
+        } else if (absEy <= kStrikeDumpDeadEy) {
+            desiredVy = 0.f;
+            if (hotVy) strikeDumpVy = true;
+        } else if (absEy <= kStrikeDumpBandEy) {
+            if (hotVy) {
+                desiredVy = 0.f;
+                strikeDumpVy = true;
+            } else {
+                if (desiredVy > kStrikeDumpMaxVy) desiredVy = kStrikeDumpMaxVy;
+                if (desiredVy < -kStrikeDumpMaxVy) desiredVy = -kStrikeDumpMaxVy;
+            }
         }
     }
 
@@ -802,8 +993,8 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     if (ports::map_bounds::QueryPlayBounds(0, &r) && r.ok) {
         const float rawL = static_cast<float>(r.left);
         const float rawR = static_cast<float>(r.right);
-        // 仅 F5 Combat：左右可位移 = raw×0.95；竖直仍用 raw±slack（真下穿图底才上拉）。
-        // 若把 t/b 也换成 0.95，站位/包线会把人钉在「假下界」（BIN 10:24 sp.y=-607）。
+        // 仅 F5 Combat：左右可位移 = QueryCombatMoveBounds（现 raw）；竖直仍用 raw±slack。
+        // 若把 t/b 也换成缩放框，站位/包线会把人钉在「假下界」（BIN 10:24 sp.y=-607）。
         const bool combatMove = (o == Owner::Combat || o == Owner::Gather);
         float l = rawL - kEnvSlackXPx;
         float ri = rawR + kEnvSlackXPx;
@@ -851,10 +1042,13 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
                 // 与横向**各自独立**判断（别串成 else if）。这里可以只写 st.y > b：
                 // 它与上面的 st.y < t 因 b > t 而互斥，等价于原先那条 else if。
                 if (st.y > b) {
-                    // 已在最高台之上：下降是免费的，给个受控下沉速度而不是放任自由落体。
-                    // 用固定值而非 caps.speed，理由见 kEnvSinkVy。
-                    desiredVy = -kEnvSinkVy;
-                    emergency = true;
+                    // F6 / 非交战：受控下沉。Combat/Gather 不走这条——BIN 19:47 首次起飞
+                    // y=-186→1181 过冲顶后 sink-300，再砸穿站点弹到 1402，合法怪在 y=955。
+                    // 上方是纯空气；继续往上仍由 roomB 预刹咬住，朝图内 sp 满速飞回来。
+                    if (!combatMove) {
+                        desiredVy = -kEnvSinkVy;
+                        emergency = true;
+                    }
                 }
             }
 
@@ -869,23 +1063,35 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
             // BIN c9b8dc：怪在最左台，角色带 vx=-448 扑过去，AABB 左沿 -585 却冲到 -658
             //（出界 73px）并在界外继续出刀，服务端判非法坐标，一轮掉线两次。
             //
-            // 视野取 150ms 而非标称的 90ms：主线程一卡顿发射就变稀（实测 since 到过
-            // 106ms），按标称算会刹不住。早刹几十毫秒不影响出刀，冲出去要掉线。
-            // 视野按「一次错过的发射」给足：紧急档 45ms，卡顿时实测能拖到 106ms，取 200ms。
+            // 默认视野 200ms：给 90ms 档 + 主线程卡顿（实测 since 到过 106ms）。
+            // ★ 满火力换靶 16ms 仍用 200ms = 7410×0.2 往前看 1482px。竖图高度远不够，
+            // roomB/roomT 把爬升/下砸锁在 ~1500（BIN 18:35 纯竖 desY 中位 1525，
+            // ey=198→des=1380 = 剩余/0.2）。横向图宽，所以只觉得「左右快、上下/斜向有缓冲」。
+            // limitDash：Y 仍按 2 拍预测（高台跨层才能顶满合速）。X 不得跟着缩——
+            // BIN 20:17:04 第一拍 since=90 墙钳 desx=-2716，下一拍 since=16 把 brakeH
+            // 收到 32ms，room 放开，顶满 7410，203ms 从 x=145 穿到 -548（FH L=-444）。
+            // X 地板 90ms：7410×0.09=667px 内才咬合；空旷 room≫cap，仍满速。
+            // ★ 回退：删掉 brakeHX 地板，X/Y 共用 limitDash 短窗。
             constexpr float kBrakeHorizonSec = 0.200f;
-            // 刹车线相对**工作框**内缩：Combat 工作框已是 raw×0.95；再套 kBrakeInset 防贴边。
+            constexpr float kLimitDashWallBrakeSec = 0.090f;
+            float brakeH = kBrakeHorizonSec;
+            if (limitDash) {
+                brakeH = static_cast<float>(sinceMs) * 0.001f;
+                if (brakeH < 0.016f) brakeH = 0.016f;
+                brakeH *= 2.f;
+                if (brakeH > kBrakeHorizonSec) brakeH = kBrakeHorizonSec;
+            }
+            float brakeHX = brakeH;
+            if (limitDash && brakeHX < kLimitDashWallBrakeSec) brakeHX = kLimitDashWallBrakeSec;
+            // 刹车线相对**工作框**内缩：Combat 工作框 = raw L/R；再套 kBrakeInset 防贴边。
             // 窄图兜底：内缩量不超过框宽的 1/4，两条刹车线永不交叉。
             const float edgeL = combatMove ? l : rawL;
             const float edgeR = combatMove ? ri : rawR;
             float insetX = (edgeR - edgeL) * 0.25f;
             if (insetX > kBrakeInsetXPx) insetX = kBrakeInsetXPx;
             if (insetX < 0.f) insetX = 0.f;
-            if (!sp.unbounded) {
-                const float roomR = (edgeR - insetX - st.x) / kBrakeHorizonSec;
-                const float roomL = (edgeL + insetX - st.x) / kBrakeHorizonSec;
-                if (desiredVx > roomR) desiredVx = roomR;
-                if (desiredVx < roomL) desiredVx = roomL;
-            }
+            const float roomR = (edgeR - insetX - st.x) / brakeHX;
+            const float roomL = (edgeL + insetX - st.x) / brakeHX;
 
             // 埋点：内缩之后还能贴到离工作框半个内缩量以内，说明有东西绕过了这条钳位。
             // 只在跨过阈值的那一拍打一行，不刷屏；平时一行都不该出现。
@@ -909,7 +1115,7 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
             // 620px/s 下降在一个 90ms 周期里走 56px，位置包线是「越过才报警」的事后判据，
             // 等它发现时人已经在界外几十 px。横向冲出去是掉线，竖直冲出去是掉出地图。
             //
-            // 用工作框 t/b（Combat=raw×0.95；F6=外扩空域）而非裸 raw。
+            // 用工作框 t/b（Combat 竖直=外扩空域 raw±slack；F6 同）而非业务缩放框。
             // 刹车线同样从工作框上下沿内缩，让稳态停靠点落在紧急触发线**里侧**。
             // 成因、几何免费性与 BIN a0ab58 的实测见 heli_rotor.h 的 kBrakeInsetYPx。
             // 矮图兜底同 X：内缩量不超过空域高度的 1/4，两条刹车线永不交叉。
@@ -920,10 +1126,19 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
             // 上沿那条随自由空域一起让位；**底侧那条不让** —— 它才是「不许俯冲出图」的实际
             // 执行者：位置包线是越过才报警的事后判据，5X 一个周期就能走过整个 kBailoutPx，
             // 只留位置判据等于没留。放开上沿、留住底侧，正是「四面里只关会摔死的那一面」。
-            const float roomB = (b - insetY - st.y) / kBrakeHorizonSec;  // 允许的最大 +vy（上升）
-            const float roomT = (t + insetY - st.y) / kBrakeHorizonSec;  // 允许的最小 vy（界内为负）
-            if (!sp.unbounded && desiredVy > roomB) desiredVy = roomB;
-            if (desiredVy < roomT) desiredVy = roomT;
+            const float roomB = (b - insetY - st.y) / brakeH;  // 允许的最大 +vy（上升）
+            const float roomT = (t + insetY - st.y) / brakeH;  // 允许的最小 vy（界内为负）
+            // BIN 19:00：vy=-7997 触发 FallGate/贴顶，紧急分轴留下 desx=3579 des=-38，
+            // 斜向变成「横着飞、竖着砸」，cmdY=8000 只在卸落速。竖速已超意图档或已穿底时
+            // 先清掉战斗残留 X（侧墙 ±kEnvPushVx 内推保留），墙钳一律按航向缩。
+            const bool dumpVertFirst =
+                (st.y < t) || (!st.onFh && st.vy < -FallGateVy()) ||
+                (std::fabs(st.vy) > caps.speed);
+            if (dumpVertFirst && std::fabs(desiredVx) > kEnvPushVx + 1.f) {
+                desiredVx = 0.f;
+            }
+            ClipToRoomsAlongHeading(&desiredVx, &desiredVy, roomL, roomR, roomB, roomT,
+                                    /*clampX=*/!sp.unbounded, /*clampTop=*/!sp.unbounded);
         }
     }
     tm.emergency = emergency;
@@ -1015,9 +1230,16 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
         }
     }
     const bool settleHover = !emergency && settleHoverCand;
+    const bool limitDashCadence =
+        kFullFireCombatLimitDash && FullFireScale() &&
+        (o == Owner::Combat || o == Owner::Gather) &&
+        (sp.mode == Mode::Cruise || sp.mode == Mode::Station) && !st.onFh &&
+        !settleHover;
     const DWORD cadence =
-        emergency ? kIssueEmergencyMs : (settleHover ? kIssueSettleMs : kIssueMs);
-    if (gLastIssueMs && (now - gLastIssueMs) < cadence) {
+        strikeDumpVy ? 0u
+                     : (emergency ? kIssueEmergencyMs
+                                  : ((settleHover || limitDashCadence) ? kIssueSettleMs : kIssueMs));
+    if (cadence && gLastIssueMs && (now - gLastIssueMs) < cadence) {
         tm.guard = "cadence";
         gLastTickFired = false;
         if (out) *out = tm;
@@ -1056,6 +1278,7 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     gLastIssueMs = now;
     gLastTickFired = true;
     tm.fired = true;
+    if (strikeDumpVy) gStrikeDumpMs = now;
     if (out) *out = tm;
     return true;
 }

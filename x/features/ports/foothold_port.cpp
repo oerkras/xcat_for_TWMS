@@ -440,7 +440,8 @@ bool GetCachedMeta(SnapshotMeta* out) {
 }
 
 bool IsCacheReadyForMap(int32_t mapId) {
-    if (mapId <= 0) return false;
+    // Field 0 菇菇村訓練所入口是合法图号。禁止把 0 当成没图。
+    if (mapId < 0) return false;
     SnapshotMeta meta{};
     if (!GetCachedMeta(&meta) || !meta.ok) return false;
     return meta.mapId == mapId && meta.footholdN > 0;

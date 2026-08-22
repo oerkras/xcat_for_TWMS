@@ -676,7 +676,7 @@ unsigned long FindExistingClassicPid(const GalaxyTicket& ticket, const wchar_t* 
 
 Result Run(const Options& opts, ProgressCallback cb) {
     Result r;
-    Emit(cb, Stage::Init, "MSC NGM launch skeleton");
+    Emit(cb, Stage::Init, "MSC attach Classic（XCAT 不调用 NGM）");
 
     if (!TicketLooksUsable(opts.ticket)) {
         r.finalStage = Stage::BlockedNeedsTicket;
@@ -684,6 +684,15 @@ Result Run(const Options& opts, ProgressCallback cb) {
             "GalaxyTicket 缺失或含非法字符（空/空白/引号/控制符）。"
             "先走官网 OTT→GetOneTimeWebInfo，或客户端 UIGalaxyLoginWebView 登录后再填入。";
         Emit(cb, Stage::BlockedNeedsTicket, r.errorMessage);
+        return r;
+    }
+
+    if (opts.dryRunDeepLinkOnly) {
+        const std::wstring deepLink = BuildNgmDeepLink(opts.ticket, opts.mode);
+        r.deepLinkSummary = FormatDeepLinkForLog(deepLink);
+        r.ok = true;
+        r.finalStage = Stage::Done;
+        Emit(cb, Stage::Done, "dry-run：仅生成 deep-link 摘要，未拉起进程、未调用 NGM");
         return r;
     }
 
@@ -699,7 +708,7 @@ Result Run(const Options& opts, ProgressCallback cb) {
                                                      &matched, cutoffPtr, &unmatched);
         // 票匹配 → 确定是本次登录的实例，直接接管。
         // 无匹配但只有一个候选 → 官网自启的常见情形，按既有策略接管。
-        // 无匹配且有多个候选 → 无从判定哪个属于本票，拒绝猜测，改走 NGM 正常拉起。
+        // 无匹配且有多个候选 → 无从判定，失败（不调用 NGM）。
         const bool ambiguous = !matched && unmatched > 1;
         if (existing && !ambiguous) {
             r.ok = true;
@@ -707,93 +716,26 @@ Result Run(const Options& opts, ProgressCallback cb) {
             r.cmdLineSummary = FormatCmdLineForLog(cmd);
             r.finalStage = Stage::Done;
             Emit(cb, Stage::Done,
-                 matched ? "接管已有经典版（cmdline 票匹配），跳过 NGM"
-                         : "接管已有经典版（cmdline 未匹配本票，可能为官网自启），跳过 NGM",
+                 matched ? "接管已有经典版（cmdline 票匹配），不调用 NGM"
+                         : "接管已有经典版（cmdline 未匹配本票，可能为官网自启），不调用 NGM",
                  existing);
             return r;
         }
-        if (ambiguous) {
-            Emit(cb, Stage::LaunchingGame,
-                 "发现 " + std::to_string(unmatched) +
-                     " 个经典版且无一匹配本票，不猜测接管（避免串到别的账号），改走 NGM 拉起");
-        } else {
-            Emit(cb, Stage::LaunchingGame, "未发现可接管的经典版（含年龄窗过滤），改走 NGM 拉起");
-        }
-    }
-
-    Emit(cb, Stage::FindingNgm, "定位 NGM64.exe");
-    const std::wstring ngm = FindNgmPath();
-    if (ngm.empty()) {
         r.finalStage = Stage::Failed;
         r.errorMessage =
-            "未找到 NGM（已搜：运行中进程 / ngm:// 协议 / ProgramData·ProgramFiles·Nexon 目录 / "
-            "安装注册表 / 经典版旁路）。请确认 Nexon NGM 已安装。";
-        Emit(cb, Stage::Failed, r.errorMessage);
-        return r;
-    }
-    Emit(cb, Stage::FindingNgm, "NGM=" + NarrowLossy(ngm));
-
-    const std::wstring deepLink = BuildNgmDeepLink(opts.ticket, opts.mode);
-    r.deepLinkSummary = FormatDeepLinkForLog(deepLink);
-    Emit(cb, Stage::LaunchingGame, "deep-link " + r.deepLinkSummary);
-
-    if (opts.dryRunDeepLinkOnly) {
-        r.ok = true;
-        r.finalStage = Stage::Done;
-        Emit(cb, Stage::Done, "dry-run：仅生成 deep-link 摘要，未拉起进程");
-        return r;
-    }
-
-    std::unordered_set<DWORD> before;
-    {
-        const auto snap = CollectPidsByExeName(opts.gameExeName.c_str());
-        before.insert(snap.begin(), snap.end());
-        Emit(cb, Stage::LaunchingGame,
-             "拉起前已有 " + NarrowLossy(opts.gameExeName) + " ×" + std::to_string(before.size()));
-    }
-
-    if (!EnsureNgmRunning()) {
-        Emit(cb, Stage::LaunchingGame, "EnsureNgmRunning 未就绪，仍尝试 deep-link");
-    }
-
-    auto shell = ShellOpen(deepLink);
-    bool launched = shell.ok;
-    if (!launched) {
-        Emit(cb, Stage::LaunchingGame,
-             "ShellExecute ngm:// 失败" + ErrSuffix(shell.err) + "，改 CreateProcess");
-        auto cp = CreateProcessOnNgm(ngm, deepLink);
-        launched = cp.ok;
-        if (!launched) {
-            r.finalStage = Stage::Failed;
-            r.errorMessage = "NGM 拉起失败：ShellExecute" + ErrSuffix(shell.err) +
-                             "；CreateProcess" + ErrSuffix(cp.err);
-            Emit(cb, Stage::Failed, r.errorMessage);
-            return r;
-        }
-        Emit(cb, Stage::LaunchingGame, "CreateProcess(NGM) 已发起");
-    } else {
-        Emit(cb, Stage::LaunchingGame, "ShellExecute(ngm://) 已发起");
-    }
-
-    Emit(cb, Stage::WaitingForGame,
-         "等待新进程且 cmdline 四元组匹配 ticket（uid/token/gid/galaxyId）");
-
-    std::wstring matchedCmd;
-    const DWORD pid = WaitForClassicWithTicket(opts.gameExeName.c_str(), before, opts.ticket,
-                                               opts.waitGameSec, &matchedCmd);
-    if (!pid) {
-        r.finalStage = Stage::Failed;
-        r.errorMessage =
-            "等待带匹配 Galaxy 票的新进程超时；可能票过期、NGM 未透传 passarg，或仅有无票旧进程";
+            ambiguous
+                ? ("发现 " + std::to_string(unmatched) +
+                   " 个经典版且无一匹配本票，不猜测接管，也不调用 NGM")
+                : "未发现可接管的经典版（含年龄窗过滤）。XCAT 不调用 NGM；"
+                  "游戏由官网拉起后从 cmdline 接管";
         Emit(cb, Stage::Failed, r.errorMessage);
         return r;
     }
 
-    r.ok = true;
-    r.gamePid = pid;
-    r.cmdLineSummary = FormatCmdLineForLog(matchedCmd);
-    r.finalStage = Stage::Done;
-    Emit(cb, Stage::Done, "cmdline 验票通过 " + r.cmdLineSummary, pid);
+    r.finalStage = Stage::Failed;
+    r.errorMessage =
+        "XCAT 不调用 NGM。请走 Gama Pass 让官网拉起经典版后接管，或先手动开游戏再注入。";
+    Emit(cb, Stage::Failed, r.errorMessage);
     return r;
 }
 
