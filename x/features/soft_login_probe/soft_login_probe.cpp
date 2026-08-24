@@ -6,6 +6,7 @@
 
 #include "../auto_enter/auto_enter.h"
 #include "../channel_hop/channel_hop.h"
+#include "../encounter/encounter.h"
 #include "../galaxy_token_probe/galaxy_token_probe.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../notify/notify.h"
@@ -63,27 +64,32 @@ constexpr char kHashNmCloseSession[] =
 // Notice 多在断线瞬间弹出；Connecting 早退即可，不必死等满窗。
 constexpr DWORD kSettleMs = 600;
 // 主动 CloseSession（hangup_timer）：BIN 05:12 Notice 在 dismiss 后 +132ms 才关到；
-// 满 600ms 是空等。关到窗即走，空枪最多再等这么久吃晚到的窗。踢线仍用 kSettleMs。
+// 满 600ms 是空等。关到窗即走，空枪最多再等这么久吃晚到的窗。
+// KickSniff 已 Disconnected / 图内关会话：窗已在或不会再出，同样走短 settle（BIN 19:47 踢线空等 600ms）。
 constexpr DWORD kSettleProactiveMs = 200;
 constexpr DWORD kPollMs = 400;
 // BIN 04:20：Disconnected 空耗满 40 轮≈16s 才 soft cycle；总 cap 须盖住 empty-hall 等待窗。
 constexpr int kPollRounds = 36;  // ≥ kEmptyHallPollRounds；~14s @ kPollMs
 // Connected items=0：先等多等列表（BIN 书页大厅会晚刷）。
 // BUILD118 后曾满 8 轮(~3.2s) 就 CloseSession → 登录会话作废 →「已登出登入的帳號」+ avatars=0。
-// 现策略：只等 / soft cycle，**禁止**为 empty hall 硬拆（见 kAllowEmptyHallCloseSession）。
+// 现策略：前两轮空大厅只等 / soft cycle（列表晚刷）；第 2 轮空才 CloseSession 一次再试；
+// 第 3 轮仍空放 hold 交守护（见 kEmptyHallCloseSessionAfterStreaks）。禁止一上来硬拆。
 constexpr int kEmptyHallPollRounds = 30;  // ~12s @ kPollMs
-// connect-wait 内 Connected+items=0：约 10s 仍空再 soft cycle（勿 CloseSession）。
+// connect-wait 内 Connected+items=0：约 10s 仍空再 soft cycle（轮内勿 CloseSession）。
 constexpr int kEmptyHallConnectWaitRounds = 40;  // ~10s @ kConnectWaitMs
 // BIN 04:20：ConnectLogin 后变 Disconnected，仍空等到 poll 末尾；满 4 轮(~1.6s+) 即 soft cycle。
 constexpr int kDiscPollFailRounds = 4;
 constexpr DWORD kWaitDiscAfterCloseMs = 4000;
 constexpr int kEmptyHallSoftCycleMax = 3;  // 连续空大厅满额放 hold → 守护干净重拉
+// 连续空满这么多轮：一次 CloseSession 再 ConnectLogin。第 1 轮空多半是列表晚刷，不拆票。
+constexpr int kEmptyHallCloseSessionAfterStreaks = 2;
 constexpr int kCharSelectStuckMax = 2;  // avatars>0 超时两次 → CloseSession；avatars=0 直接 Finish(2)
 // skip/GoWorld 前：活 Notice 再探一次；仍在则禁止进世界（BIN 22:47:45 noticeKinds=1 → avatars=0）。
 constexpr DWORD kDirtyHallNoticeRecheckMs = 250;
 // 选角页连续空头像（busy 已刷完仍 0）→ 已登出；冷启 3s 内会刷出头像，满 5s 才交守护。
 constexpr DWORD kEmptyAvatarFailMs = 5000;
-// 空大厅 CloseSession：默认关。仅调试「真·书页死锁且确认非登录竞态」时可临时开。
+// 空大厅「轮内/一上来」CloseSession：默认关（BIN 15:40 误拆登录票）。
+// 连续空满 kEmptyHallCloseSessionAfterStreaks 后的那一次走 why=empty_hall_after_2，不受此开关拦。
 constexpr bool kAllowEmptyHallCloseSession = false;
 constexpr DWORD kReenterPollMs = 350;
 // 墙钟总预算（每轮含 dismiss/SamplePlayReady Call，旧「130×350≈45s」严重低估；dcaf08 卡死约 114s）。
@@ -118,13 +124,16 @@ constexpr DWORD kSoftPumpFreshMs = 300;
 constexpr DWORD kDlgProbeGapMs = 1500;
 constexpr DWORD kDlgLingerHealMs = 2000;
 constexpr DWORD kSoftSampleCallMs = 400;  // 对齐 kTransitInvokeCapMs；勿再等满 1500
-// 成功进图后玩法错峰：Finish 放 hold，但仍压 Combat/Invuln 急钉，避免 q=8 齐开（B9B）。
+// 成功进图后玩法错峰：Finish 放 hold，但仍压 Combat/Invuln 急钉，避免 q 齐开（B9B）。
 // ce6797：quiet 一结束立刻 BAN ON + |v|~7k Impact → 再软断。
 // land quiet = 整段停刀/停旋翼；post_air_gate ≥ quiet，防 quiet 被提前清掉后仍空中开打。
-// RESULT 本身已等 curFh≠0；主动软重连落地后再套 300–600ms 是空等。
-// 挂台：Arm 时直接 skip；未挂台才走 cap，PeekCurFh 一到即早释（wait_onFh 仍挡没台）。
-constexpr DWORD kSoftLandQuietMs = 250;
-constexpr DWORD kSoftPostAirGateMs = 400;
+// 角色重连：挂台后再短停再打。空中贴怪禁止强制 quiet（会卸旋翼把人拽死）。
+constexpr DWORD kSoftLandQuietMs = 600;
+constexpr DWORD kSoftPostAirGateMs = 600;
+// 空中贴怪 skip land_quiet 之后：BAN/旋翼仍要留，但出刀/遇人采样/喝药不得立刻抢泵。
+// BIN 16:44:28 RESULT(curFh=0) → 16:44:30 Call(2000) 占队 → 16:44:31 pump idle → pid empty。
+constexpr DWORD kPostReenterMinMs = 800;
+constexpr DWORD kPostReenterMaxMs = 3000;
 // Connected 后等分区列表刷出再 RequestRestart（BIN 21:44：壳指针先到、WorldItems=0）。
 // 空列表靠加长等待 + soft cycle；勿 CloseSession 刷新（会登出登录会话）。
 constexpr DWORD kHallReadyWaitMs = 12000;
@@ -267,6 +276,9 @@ std::atomic<bool> gHold{false};
 std::atomic<DWORD> gLandQuietUntilMs{0};     // GetTickCount 截止；0=无静默
 std::atomic<DWORD> gPostSoftAirUntilMs{0};  // 禁止 F5 空中；≥ land quiet
 std::atomic<DWORD> gLandQuietArmedAtMs{0};   // Arm 墙钟；早释算 elapsed
+std::atomic<DWORD> gLandQuietForceUntilMs{0};  // 强制落地停：到期前禁止 onFh 早释
+std::atomic<DWORD> gPostReenterUntilMs{0};   // RESULT 后生产者错峰；不卸 BAN
+std::atomic<DWORD> gPostReenterArmedMs{0};
 std::atomic<unsigned> gResult{0};  // 0 none 1 ok 2 fail
 std::atomic<bool> gUiEnabled{false};
 char gWhy[64]{};
@@ -280,7 +292,8 @@ constexpr DWORD kDeferredSoftMaxMs = 120000;
 // 读侧撞上中间态会拿到空串 → 判成「非真断线」→ 又放开假 already_in_map（BIN 17:29 误杀）。
 // 判定只读这个原子量；gWhy 退化为纯日志用途。
 std::atomic<bool> gWhyNeedsReconnect{false};
-// RequestProactiveReconnect 置位；KickSniff 会把 gWhy 改成 disconnected，settle 用这个认主动关窗。
+// RequestProactiveReconnect 置位；KickSniff 已 Disconnected 等也置位（勿再空等满 600ms）。
+// KickSniff 可能把 gWhy 改成 disconnected，settle 仍认这个原子量（+ WhySessionAlreadyDead）。
 std::atomic<bool> gSettleProactiveFast{false};
 
 // attempt 起点（GetTickCount，0=无）；Finish 用它兑现最小 hold 时长。
@@ -390,6 +403,18 @@ struct PlayReadyCtx {
     int sampled = 0;  // 1=泵上跑完；0=未进泵 / Assert 失败
     uint32_t curFh = 0;  // PeekCurFhId；inMap 时采，悬空=0
 };
+
+// 世界已 play-ready：worker 侧填采样，勿再 High Call 抢泵。
+bool FillPlayReadyOffPump(PlayReadyCtx* play) {
+    if (!play) return false;
+    if (!x::features::ports::world::IsInMapScene()) return false;
+    if (!x::features::ports::world::IsPlayReady()) return false;
+    play->inMap = 1;
+    play->ready = 1;
+    play->sampled = 1;
+    play->curFh = x::features::ports::foothold::PeekCurFhId();
+    return true;
+}
 
 bool DirExists(const std::wstring& p) {
     const DWORD a = GetFileAttributesW(p.c_str());
@@ -778,9 +803,11 @@ bool WaitPumpAlive(DWORD waitMs, const char* tag);
 
 // true=已发起硬拆（或 session 已空）；调用方清 invokeOk，等 Disconnected 再 ConnectLogin。
 // 已进图 / 泵不新鲜：拒绝硬拆（返回 false），由 SoftProbeInMapOrFinish 解 hold。
-// 空大厅 why：默认拒绝（kAllowEmptyHallCloseSession=false）——硬拆会「已登出登入的帳號」。
+// 空大厅 why：默认拒绝（一上来硬拆会「已登出登入的帳號」）。连续空 2 轮后的
+// empty_hall_after_2 放行一次，再失败交守护。
 bool SoftForceNmTeardown(const char* why) {
-    if (!kAllowEmptyHallCloseSession && why &&
+    const bool emptyHallLastDitch = why && std::strstr(why, "empty_hall_after_2") != nullptr;
+    if (!kAllowEmptyHallCloseSession && !emptyHallLastDitch && why &&
         (std::strstr(why, "empty_hall") || std::strstr(why, "hall_wait"))) {
         LogLine("force_nm_close refuse empty_hall_policy why=%s", why);
         KickLogLine("force_nm_close refuse_empty_hall why=%s", why ? why : "?");
@@ -821,7 +848,8 @@ bool SoftForceNmTeardown(const char* why) {
 // hangup_fires / hangup_timer：图内 play-ready 即拆（不要求 scene 仍是 Field）。
 bool WhyIsHangupClose(const char* why) {
     return why && (std::strcmp(why, "hangup_fires") == 0 ||
-                   std::strcmp(why, "hangup_timer") == 0);
+                   std::strcmp(why, "hangup_timer") == 0 ||
+                   std::strcmp(why, "same_map_field_reload") == 0);
 }
 
 bool SoftCloseSessionInField(const char* why) {
@@ -1935,29 +1963,56 @@ void SamplePlayReadyOnPump(void* user) {
 
 void SetHold(bool on) { gHold.store(on, std::memory_order_release); }
 
+void ArmPostReenterQuiet() {
+    const DWORD now = GetTickCount();
+    DWORD armed = now ? now : 1;
+    DWORD until = now + kPostReenterMaxMs;
+    if (until == 0) until = 1;
+    gPostReenterArmedMs.store(armed, std::memory_order_release);
+    gPostReenterUntilMs.store(until, std::memory_order_release);
+    LogLine("post_reenter quiet min=%ums max=%ums (producers; BAN/heli kept)",
+            static_cast<unsigned>(kPostReenterMinMs),
+            static_cast<unsigned>(kPostReenterMaxMs));
+    KickLogLine("post_reenter quiet min=%ums max=%ums",
+                static_cast<unsigned>(kPostReenterMinMs),
+                static_cast<unsigned>(kPostReenterMaxMs));
+}
+
+void ClearPostReenterQuiet() {
+    gPostReenterUntilMs.store(0, std::memory_order_release);
+    gPostReenterArmedMs.store(0, std::memory_order_release);
+}
+
 bool ImpactAirSkipStand() {
     return x::features::simple_combat::IsEnabled() &&
            x::features::simple_combat::IsImpactApproachEnabled();
 }
 
-void ArmLandQuiet(DWORD ms) {
+void ArmLandQuiet(DWORD ms, bool force = false) {
     const DWORD now = GetTickCount();
     DWORD armed = now ? now : 1;
     gLandQuietArmedAtMs.store(armed, std::memory_order_release);
 
-    // RESULT 已等挂台：再套 quiet 是落地后空等。Impact 起飞仍有 wait_onFh。
-    // 空中贴怪：curFh 一直 0，quiet 会再 SafeLand 把正在打的人拽到台下。
-    if (x::features::ports::world::IsPlayReady() &&
-        (x::features::ports::foothold::PeekCurFhId() != 0 || ImpactAirSkipStand())) {
+    const bool stood = x::features::ports::foothold::PeekCurFhId() != 0;
+    const bool impactAir = !stood && ImpactAirSkipStand();
+    // 空中贴怪：强制 quiet + Unlatch 会把人从悬停拽成自由落体（BIN 12:50 WM idle 2–4s）。
+    // 仍要挡出刀/采样/喝药：RESULT 后立刻放行会把 2s job 堆进未转起来的泵（BIN 16:44:28–32）。
+    if (impactAir) {
         gLandQuietUntilMs.store(0, std::memory_order_release);
         gPostSoftAirUntilMs.store(0, std::memory_order_release);
-        if (x::features::ports::foothold::PeekCurFhId() != 0) {
-            LogLine("land_quiet skip stood (already onFh)");
-            KickLogLine("land_quiet skip stood");
-        } else {
-            LogLine("land_quiet skip impact air (curFh=0 hover is land)");
-            KickLogLine("land_quiet skip impact_air");
-        }
+        gLandQuietForceUntilMs.store(0, std::memory_order_release);
+        ArmPostReenterQuiet();
+        LogLine("land_quiet skip impact air (curFh=0 hover is land) force=%d", force ? 1 : 0);
+        KickLogLine("land_quiet skip impact_air");
+        return;
+    }
+    // 拍卖/商城：已挂台再套 quiet 是空等。
+    if (!force && stood && x::features::ports::world::IsPlayReady()) {
+        gLandQuietUntilMs.store(0, std::memory_order_release);
+        gPostSoftAirUntilMs.store(0, std::memory_order_release);
+        gLandQuietForceUntilMs.store(0, std::memory_order_release);
+        LogLine("land_quiet skip stood (already onFh)");
+        KickLogLine("land_quiet skip stood");
         return;
     }
 
@@ -1970,10 +2025,12 @@ void ArmLandQuiet(DWORD ms) {
     // 若调用方传入更长 quiet，空中闸至少盖住 quiet。
     if (static_cast<int>(airUntil - until) < 0) airUntil = until;
     gPostSoftAirUntilMs.store(airUntil, std::memory_order_release);
-    LogLine("land_quiet arm=%ums post_air_gate=%ums (not onFh)", static_cast<unsigned>(dur),
-            static_cast<unsigned>(airUntil - now));
-    KickLogLine("land_quiet arm=%ums post_air=%ums", static_cast<unsigned>(dur),
-                static_cast<unsigned>(airUntil - now));
+    gLandQuietForceUntilMs.store(force ? airUntil : 0, std::memory_order_release);
+    LogLine("land_quiet arm=%ums post_air_gate=%ums force=%d onFh=%d",
+            static_cast<unsigned>(dur), static_cast<unsigned>(airUntil - now), force ? 1 : 0,
+            x::features::ports::foothold::PeekCurFhId() != 0 ? 1 : 0);
+    KickLogLine("land_quiet arm=%ums post_air=%ums force=%d", static_cast<unsigned>(dur),
+                static_cast<unsigned>(airUntil - now), force ? 1 : 0);
 }
 
 // Finish 兑现最小 hold 时长期间静默窗会照常流逝；顺延同样时长，
@@ -2090,6 +2147,7 @@ void Finish(unsigned result, const char* line, bool suppressNotify = false) {
     if (result == 1) gPending.store(false, std::memory_order_release);
     if (result == 1) {
         NoteSoftSuccess();
+        x::features::encounter::NoteSoftReenterLand("result_ok");
     } else if (result == 2) {
         NoteSoftFailure();
     }
@@ -2140,8 +2198,18 @@ bool WhyStringNeedsRealReconnect(const char* why) {
            std::strcmp(why, "mob_gather_timer") == 0 ||
            std::strcmp(why, "hangup_timer") == 0 ||
            std::strcmp(why, "hangup_fires") == 0 ||
+           std::strcmp(why, "same_map_field_reload") == 0 ||
            std::strcmp(why, "mob_gather_clear") == 0 ||
            std::strncmp(why, "channel_hop", 11) == 0;
+}
+
+// KickSniff 已看到会话死掉：Notice 多半已在或不会再弹，不必再空等满 kSettleMs。
+bool WhySessionAlreadyDead(const char* why) {
+    if (!why || !why[0]) return false;
+    return std::strcmp(why, "disconnected") == 0 || std::strcmp(why, "disconnecting") == 0 ||
+           std::strcmp(why, "close_session_inmap") == 0 ||
+           std::strcmp(why, "nm_gone_inmap") == 0 ||
+           std::strcmp(why, "inbound_dead_inmap") == 0;
 }
 
 std::atomic<DWORD> gLastRefuseLogMs{0};
@@ -2250,16 +2318,16 @@ bool SoftFinishIfInMarket(const char* tag) {
 int SoftProbeInMapOrFinish(const char* tag) {
     // 拍卖/商城优先于一切图内判据：此时 inMap 必为 0，不先认出来就会被当成「回到大厅」。
     if (SoftFinishIfInMarket(tag)) return 1;
-    // 出刀闸到期：禁止 stuck_lobby / already_in_map 假成功把 hangup 当落地。
-    if (x::features::ports::mob_gather::HangupFiresDue() &&
+    // 出刀闸到期 / 已拆未落地 / 掉出图待洗：禁止 stuck_lobby / already_in_map 假成功。
+    if (x::features::ports::mob_gather::HangupBlocksFakeInMapRecover() &&
         x::features::ports::world::IsInMapScene()) {
         const DWORD now = GetTickCount();
         const DWORD lastLog = gLastRefuseLogMs.load(std::memory_order_acquire);
         if (!lastLog || now - lastLog >= kRefuseLogGapMs) {
             gLastRefuseLogMs.store(now ? now : 1, std::memory_order_release);
-            LogLine("in_map_probe refuse hangup_fires_due tag=%s why=%s — CloseSession first",
+            LogLine("in_map_probe refuse hangup_wash tag=%s why=%s — CloseSession first",
                     tag ? tag : "?", gWhy);
-            KickLogLine("in_map_probe refuse hangup_fires_due tag=%s", tag ? tag : "?");
+            KickLogLine("in_map_probe refuse hangup_wash tag=%s", tag ? tag : "?");
         }
         return -1;
     }
@@ -2273,7 +2341,7 @@ int SoftProbeInMapOrFinish(const char* tag) {
                  "RESULT success already_in_map skip_teardown tag=%s via=off_pump why=%s",
                  tag ? tag : "?", gWhy);
         KickLogLine("already_in_map skip_teardown tag=%s via=off_pump", tag ? tag : "?");
-        ArmLandQuiet(kSoftLandQuietMs);
+        ArmLandQuiet(kSoftLandQuietMs, /*force=*/true);
         Finish(1, ok);
         return 1;
     }
@@ -2331,7 +2399,7 @@ int SoftProbeInMapOrFinish(const char* tag) {
                  static_cast<unsigned>(kInMapRecoverConfirmMs), gWhy);
         KickLogLine("RESULT success in_map_recovered tag=%s curFh=%u", tag ? tag : "?",
                     static_cast<unsigned>(play.curFh));
-        ArmLandQuiet(kSoftLandQuietMs);
+        ArmLandQuiet(kSoftLandQuietMs, /*force=*/true);
         Finish(1, ok);
         return 1;
     }
@@ -2341,7 +2409,7 @@ int SoftProbeInMapOrFinish(const char* tag) {
              tag ? tag : "?", static_cast<unsigned>(play.curFh), gWhy);
     KickLogLine("already_in_map skip_teardown tag=%s curFh=%u", tag ? tag : "?",
                 static_cast<unsigned>(play.curFh));
-    ArmLandQuiet(kSoftLandQuietMs);
+    ArmLandQuiet(kSoftLandQuietMs, /*force=*/true);
     Finish(1, ok);
     return 1;
 }
@@ -2506,6 +2574,14 @@ bool SoftFailOrRetry(int softCycle, const char* failLine, int* emptyHallStreak, 
     if (StreakGiveUp(emptyHallStreak, kEmptyHallSoftCycleMax, emptyHall, "empty_hall", failLine))
         return false;
     if (StreakGiveUp(limboStreak, kLimboSoftCycleMax, limbo, "limbo", failLine)) return false;
+    // 第 2 轮仍空：假 Connected 僵尸会话。CloseSession 一次再试；第 3 轮仍空走上面 GiveUp。
+    if (emptyHall && emptyHallStreak &&
+        *emptyHallStreak == kEmptyHallCloseSessionAfterStreaks) {
+        LogLine("empty_hall streak=%d/%d — CloseSession once then retry", *emptyHallStreak,
+                kEmptyHallSoftCycleMax);
+        KickLogLine("empty_hall CloseSession after streak=%d", *emptyHallStreak);
+        (void)SoftForceNmTeardown("empty_hall_after_2");
+    }
     if (softCycle < kSoftCycleMax && !gStop.load()) {
         const bool pumpish =
             failLine && (std::strstr(failLine, "pump_dead") || std::strstr(failLine, "pump_fail") ||
@@ -2584,6 +2660,8 @@ DWORD WINAPI Worker(LPVOID) {
                 const DWORD since = gDeferredSinceMs.load(std::memory_order_acquire);
                 if (since && now - since > kDeferredSoftMaxMs) {
                     gDeferred.store(false, std::memory_order_release);
+                    // hangup 主动关窗也会在 deferred 上置 fast；过期未开火则不得留给下次 stuck_lobby。
+                    gSettleProactiveFast.store(false, std::memory_order_release);
                     LogLine("deferred soft expire why=%s", gDeferredWhy[0] ? gDeferredWhy : "?");
                     KickLogLine("deferred soft expire");
                 } else if (!inMap) {
@@ -2684,6 +2762,7 @@ DWORD WINAPI Worker(LPVOID) {
         }
         if (!IsArmed()) {
             LogLine("skip: not armed why=%s — clear hold", gWhy);
+            gSettleProactiveFast.store(false, std::memory_order_release);
             SetHold(false);
             continue;
         }
@@ -2694,6 +2773,7 @@ DWORD WINAPI Worker(LPVOID) {
         }
 
         gResult.store(0, std::memory_order_release);
+        ClearPostReenterQuiet();
         SetHold(true);
         // Finish 用它兑现最小 hold 时长（守护 SHM 500ms/拍）。
         {
@@ -2704,11 +2784,15 @@ DWORD WINAPI Worker(LPVOID) {
         gInMapRecoverDropSinceMs.store(0, std::memory_order_release);
         gLastRefuseLogMs.store(0, std::memory_order_release);
         EnsureNoticeAbsHook();
-        const bool settleFast = gSettleProactiveFast.load(std::memory_order_acquire);
+        const bool settleFast = gSettleProactiveFast.load(std::memory_order_acquire) ||
+                                WhySessionAlreadyDead(gWhy);
+        if (settleFast) gSettleProactiveFast.store(true, std::memory_order_release);
         const DWORD settleMs = settleFast ? kSettleProactiveMs : kSettleMs;
-        LogLine("attempt begin why=%s settle=%ums proactive=%d hold=1 softCycles=%d doneRestarts=%d",
-                gWhy, static_cast<unsigned>(settleMs), settleFast ? 1 : 0, kSoftCycleMax,
-                kDoneNoPlayMaxRestarts);
+        LogLine("attempt begin why=%s settle=%ums proactive=%d already_disc=%d hold=1 "
+                "softCycles=%d doneRestarts=%d",
+                gWhy, static_cast<unsigned>(settleMs),
+                gSettleProactiveFast.load(std::memory_order_acquire) ? 1 : 0,
+                WhySessionAlreadyDead(gWhy) ? 1 : 0, kSoftCycleMax, kDoneNoPlayMaxRestarts);
         KickLogLine("attempt begin why=%s hold=1 softCycles=%d", gWhy, kSoftCycleMax);
         // 拍卖/商城迁服照样要接下 hold（否则守护按踢线干净重拉），但别弹「试连中」——
         // 用户只是点了拍卖，没被踢。收尾那条 in_market 气泡会把原委讲清楚。
@@ -2772,7 +2856,8 @@ DWORD WINAPI Worker(LPVOID) {
         // 勿每 120ms 叠 Util/Ex/Notice（Bootstrap 半死时易挤 ConnectLogin）。
         // scanBase=1：Notice 白名单；永不 FindAll(UIDialog 基类)。
         {
-            const bool proactiveFast = gSettleProactiveFast.load(std::memory_order_acquire);
+            const bool proactiveFast = gSettleProactiveFast.load(std::memory_order_acquire) ||
+                                       WhySessionAlreadyDead(gWhy);
             const DWORD settleCap = proactiveFast ? kSettleProactiveMs : kSettleMs;
             const DWORD settleDeadline = GetTickCount() + settleCap;
             bool settleDismissDone = false;
@@ -3649,8 +3734,25 @@ DWORD WINAPI Worker(LPVOID) {
                         }
 
                         PlayReadyCtx play{};
-                        const bool sampleOk = SoftPumpCall(
-                            &SamplePlayReadyOnPump, &play, kPlayReadySampleMs);
+                        bool sampleOffPump = FillPlayReadyOffPump(&play);
+                        bool sampleOk = sampleOffPump;
+                        if (sampleOk) {
+                            if ((r % 10) == 0) {
+                                LogLine("reenter wait[%d] skip SamplePlayReady (world ready "
+                                        "curFh=%u) — no High Call",
+                                        r, static_cast<unsigned>(play.curFh));
+                            }
+                        } else {
+                            sampleOk = SoftPumpCall(&SamplePlayReadyOnPump, &play,
+                                                    kPlayReadySampleMs);
+                            if (!sampleOk && FillPlayReadyOffPump(&play)) {
+                                sampleOk = true;
+                                sampleOffPump = true;
+                                LogLine("reenter wait[%d] sample pump_fail but world ready "
+                                        "curFh=%u — treat sampled",
+                                        r, static_cast<unsigned>(play.curFh));
+                            }
+                        }
                         if (!sampleOk) {
                             // 泵堵：勿叠 dismiss、勿当 !playReady 去 Done 再启。
                             ++pumpFailStreak;
@@ -3697,7 +3799,9 @@ DWORD WINAPI Worker(LPVOID) {
                             // 空中贴怪悬停 curFh 一直 0：等挂台只会晚弹成功、再 SafeLand 打断正在打。
                             const bool impactAir = play.inMap && play.curFh == 0 &&
                                                    ImpactAirSkipStand();
-                            if (play.inMap && play.curFh == 0 && !impactAir) {
+                            // 世界已就绪时 PeekCurFh 可能因 settle 跳过 LU 绑定而为 0；
+                            // 勿因此空等 15s 挂台（落地停刀交给 force land_quiet）。
+                            if (play.inMap && play.curFh == 0 && !impactAir && !sampleOffPump) {
                                 awaitingStand = true;
                                 sawInMapWhileDone = true;  // 热重载 !inMap 时勿 Done 再启
                                 standLeftMapSinceMs = 0;
@@ -3730,7 +3834,7 @@ DWORD WINAPI Worker(LPVOID) {
                                              "RESULT success degrade stand_timeout curFh=0 "
                                              "why=%s reenter_rounds=%d soft_cycle=%d/%d",
                                              gWhy, r + 1, softCycle, kSoftCycleMax);
-                                    ArmLandQuiet(kSoftLandQuietMs);
+                                    ArmLandQuiet(kSoftLandQuietMs, /*force=*/true);
                                     Finish(1, ok);
                                     break;
                                 }
@@ -3781,7 +3885,7 @@ DWORD WINAPI Worker(LPVOID) {
                             KickLogLine("RESULT success play-ready rounds=%d soft_cycle=%d "
                                         "curFh=%u",
                                         r + 1, softCycle, static_cast<unsigned>(play.curFh));
-                            ArmLandQuiet(kSoftLandQuietMs);
+                            ArmLandQuiet(kSoftLandQuietMs, /*force=*/true);
                             Finish(1, ok);
                             break;
                         }
@@ -3913,7 +4017,7 @@ DWORD WINAPI Worker(LPVOID) {
                                      "RESULT success degrade Done+inMap timeout playReady=0 "
                                      "why=%s soft_cycle=%d/%d",
                                      gWhy, softCycle, kSoftCycleMax);
-                            ArmLandQuiet(kSoftLandQuietMs);
+                            ArmLandQuiet(kSoftLandQuietMs, /*force=*/true);
                             Finish(1, ok);
                         } else {
                             char fail[220]{};
@@ -4006,6 +4110,11 @@ static void MaybeEarlyReleaseQuietOnFh() {
     const DWORD until = gLandQuietUntilMs.load(std::memory_order_acquire);
     const DWORD air = gPostSoftAirUntilMs.load(std::memory_order_acquire);
     if (!until && !air) return;
+    const DWORD forceUntil = gLandQuietForceUntilMs.load(std::memory_order_acquire);
+    if (forceUntil) {
+        const DWORD nowForce = GetTickCount();
+        if (static_cast<int>(forceUntil - nowForce) > 0) return;
+    }
     if (!x::features::ports::world::IsPlayReady()) return;
     if (x::features::ports::foothold::PeekCurFhId() == 0) return;
     const DWORD armed = gLandQuietArmedAtMs.load(std::memory_order_acquire);
@@ -4027,6 +4136,27 @@ bool IsLandQuiet() {
     return false;
 }
 
+bool IsPostReenterQuiet() {
+    DWORD until = gPostReenterUntilMs.load(std::memory_order_acquire);
+    if (!until) return false;
+    const DWORD now = GetTickCount();
+    if (static_cast<int>(until - now) <= 0) {
+        (void)gPostReenterUntilMs.compare_exchange_strong(until, 0, std::memory_order_acq_rel);
+        return false;
+    }
+    const DWORD armed = gPostReenterArmedMs.load(std::memory_order_acquire);
+    const DWORD elapsed = (armed && now >= armed) ? (now - armed) : 0;
+    // 泵已转、最短窗过了：提前放行，别空等满 3s。
+    if (elapsed >= kPostReenterMinMs && x::runtime::main_thread::IsPumpTicking(400)) {
+        if (gPostReenterUntilMs.compare_exchange_strong(until, 0, std::memory_order_acq_rel)) {
+            LogLine("post_reenter early_release elapsed=%ums (pump live)",
+                    static_cast<unsigned>(elapsed));
+        }
+        return false;
+    }
+    return true;
+}
+
 bool IsPostSoftAirCombatBlocked() {
     MaybeEarlyReleaseQuietOnFh();
     DWORD until = gPostSoftAirUntilMs.load(std::memory_order_acquire);
@@ -4037,7 +4167,7 @@ bool IsPostSoftAirCombatBlocked() {
     return false;
 }
 
-bool IsGameplayQuiet() { return IsHoldActive() || IsLandQuiet(); }
+bool IsGameplayQuiet() { return IsHoldActive() || IsLandQuiet() || IsPostReenterQuiet(); }
 
 unsigned ResultCode() { return gResult.load(std::memory_order_acquire); }
 
@@ -4063,6 +4193,7 @@ void RequestDeferredAttempt(const char* why) {
     strncpy_s(gDeferredWhy, why ? why : "deferred", _TRUNCATE);
     gDeferredSinceMs.store(GetTickCount(), std::memory_order_release);
     gDeferred.store(true, std::memory_order_release);
+    // 短 settle 只在真正 RequestAttempt 开火时置位；这里提前置位会在 expire 后串到下次。
     x::features::ports::mob_gather::NoteNmSessionEnded(gDeferredWhy);
     LogLine("deferred soft arm why=%s (wait !inMap or hall)", gDeferredWhy);
     KickLogLine("deferred soft arm why=%s", gDeferredWhy);
@@ -4073,8 +4204,8 @@ bool IsDeferredPending() { return gDeferred.load(std::memory_order_acquire); }
 bool IsAttemptBusy() { return gBusy.load(std::memory_order_acquire); }
 
 bool IsReconnectInFlight() {
-    return IsHoldActive() || IsLandQuiet() || IsAttemptBusy() || IsDeferredPending() ||
-           gPending.load(std::memory_order_acquire);
+    return IsHoldActive() || IsLandQuiet() || IsPostReenterQuiet() || IsAttemptBusy() ||
+           IsDeferredPending() || gPending.load(std::memory_order_acquire);
 }
 
 bool RequestProactiveReconnect(const char* why) {
@@ -4091,16 +4222,23 @@ bool RequestProactiveReconnect(const char* why) {
         LogLine("proactive skip breaker why=%s", why ? why : "?");
         return false;
     }
-    const bool hangupFires = why && std::strcmp(why, "hangup_fires") == 0;
+    const bool hangupClose = WhyIsHangupClose(why);
     if (IsReconnectInFlight()) {
-        // 图内假 recover（stuck_lobby）占着 in_flight 时，出刀闸仍必须拆会话。
-        if (!hangupFires || !IsInMapScene() || !IsPlayReady()) {
+        // 图内假 recover（stuck_lobby）占着 in_flight 时，hangup / 掉出图洗会话仍必须拆。
+        if (!hangupClose || !IsInMapScene() || !IsPlayReady()) {
             LogLine("proactive skip in_flight why=%s", why ? why : "?");
             return false;
         }
-        LogLine("proactive hangup_fires while in_flight — CloseSession anyway");
-        KickLogLine("proactive hangup_fires in_flight CloseSession");
-        if (!SoftCloseSessionInField(why)) return false;
+        LogLine("proactive hangup_close while in_flight — CloseSession anyway why=%s",
+                why ? why : "?");
+        KickLogLine("proactive hangup_close in_flight CloseSession why=%s", why ? why : "?");
+        x::features::channel_hop::AbortHopForHangup();
+        x::features::channel_hop::EnsureReconnectNotSameChannel(why);
+        if (!SoftCloseSessionInField(why)) {
+            if (x::features::ports::world::IsInMapScene())
+                x::features::channel_hop::RevertReconnectHopIfArmed("close_fail_inflight");
+            return false;
+        }
         gSettleProactiveFast.store(true, std::memory_order_release);
         LogLine("proactive close issued why=%s (in_flight, wait !inMap)", why);
         KickLogLine("proactive close issued why=%s", why);
@@ -4116,9 +4254,12 @@ bool RequestProactiveReconnect(const char* why) {
         return false;
     }
     // 先粘性：拆会话后 kick_sniff 也可能再写 close_session_inmap。图内不 SetHold。
+    x::features::channel_hop::AbortHopForHangup();
+    x::features::channel_hop::EnsureReconnectNotSameChannel(why ? why : "proactive");
     RequestDeferredAttempt(why ? why : "proactive");
     if (!SoftCloseSessionInField(why ? why : "proactive")) {
         if (x::features::ports::world::IsInMapScene()) {
+            x::features::channel_hop::RevertReconnectHopIfArmed("close_fail");
             gDeferred.store(false, std::memory_order_release);
             LogLine("proactive close fail — drop deferred (still inMap)");
         }
@@ -4158,10 +4299,8 @@ void RequestAttempt(const char* why) {
         KickLogLine("request skip lost_session inMap");
         return;
     }
-    // 正式 attempt 接管粘性票。
-    gDeferred.store(false, std::memory_order_release);
-    // 进行中的 soft 自拆 CloseSession / 进图 Session 抖动会再抬 Disconnected；
-    // 再排队 → RESULT 后立刻 attempt begin（BIN 02:12）。本轮 soft 自己会处理断线。
+    // busy / land_quiet 早退不得先清 deferred：否则 IsReconnectInFlight 空一拍，
+    // 遇人 Tick 会把残影 other=1 再 RequestHop 进队列（BIN 18:30:09.092 seq=3774873614）。
     if (gBusy.load(std::memory_order_acquire)) {
         LogLine("request skip busy why=%s", why ? why : "?");
         KickLogLine("request skip busy why=%s", why ? why : "?");
@@ -4173,6 +4312,8 @@ void RequestAttempt(const char* why) {
     if (IsLandQuiet()) {
         // 与 WaitLeaveMap 同一张 why 表：漏一项就会在落地静默里 skip，叠登窗口重开。
         if (WhyStringNeedsRealReconnect(why)) {
+            x::features::channel_hop::AbortHopForHangup();
+            x::features::channel_hop::EnsureReconnectNotSameChannel(why);
             RequestDeferredAttempt(why);
             LogLine("request defer land_quiet why=%s (wait leave-map / quiet end)", why);
             KickLogLine("request defer land_quiet why=%s", why);
@@ -4188,10 +4329,19 @@ void RequestAttempt(const char* why) {
     memset(gWhy, 0, sizeof(gWhy));
     strncpy_s(gWhy, why ? why : "disconnect", _TRUNCATE);
     x::features::ports::mob_gather::NoteNmSessionEnded(gWhy);
+    // hold 必须先于清 deferred：空窗里 Encounter 会把旧图残影再排进 hop 队列。
+    if (WhyStringNeedsRealReconnect(gWhy))
+        x::features::channel_hop::AbortHopForHangup();
+    SetHold(true);
+    gDeferred.store(false, std::memory_order_release);
+    if (WhyStringNeedsRealReconnect(gWhy))
+        x::features::channel_hop::EnsureReconnectNotSameChannel(gWhy);
+    // KickSniff 已 Disconnected：worker settle 走短窗，勿再空等满 600ms。
+    if (WhySessionAlreadyDead(gWhy))
+        gSettleProactiveFast.store(true, std::memory_order_release);
     // 必须在 kick_sniff 抬 disconnectSeq / 宿主读 status 之前同步 hold。
     // 若只靠 worker 50ms 轮询再 SetHold，守护会先看到 seq 上涨且 hold=0 → 立刻干净重拉
     // （upload 9fee22：10:38:37 disconnect → 10:38:39 kill，soft_login 无 attempt begin）。
-    SetHold(true);
     gPending.store(true);
     EnsureNoticeAbsHook();  // 断线 Notice 往往立刻直 call；须在弹窗前装好 Abs
     LogLine("request why=%s hold=1 (sync before worker)", gWhy);

@@ -46,6 +46,7 @@
 #include "../features/force_trade/force_trade.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/auction_gate_probe/auction_gate_probe.h"
+#include "../features/ui_cheat_overlay/ui_cheat_overlay.h"
 #include "../features/rest_mp_accel/rest_mp_accel.h"
 #include "../features/ports/security_attack_port.h"
 #include "../features/infinite_stars/infinite_stars.h"
@@ -160,6 +161,7 @@ void StopAllFeatureWorkers() {
     x::features::force_trade::Shutdown();
     x::features::auction_town_bypass::StopWorker();
     x::features::auction_gate_probe::Shutdown();
+    x::features::ui_cheat_overlay::Shutdown();
     x::features::rest_mp_accel::StopWorker();
     x::features::ports::security_attack::StopWorker();
     x::features::ports::mob_inspect_probe::StopWorker();
@@ -412,6 +414,11 @@ bool StartPlayPathWorkers() {
     }
     if (!StartPostSettleColdInits()) return false;
 
+    // 遇人检测不得等 ForceApply / 战斗灌配置。冷绑后立刻开 worker：
+    // 进图后别人出现必须能停手；若已 Pause，随后 combat Init 会 keep HardPause。
+    XCAT_PLAY_BOOT_STEP(x::features::encounter::Init());
+    XCAT_PLAY_BOOT_STEP(x::features::encounter::StartWorker());
+
     // 1) 其余保命：掉落报警 → 药/键/Buff 线程 → 攻速
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::Init());
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
@@ -488,6 +495,7 @@ bool StartPlayPathWorkers() {
     if (xcat::kAuctionGateProbeUserEnabled) {
         XCAT_PLAY_BOOT_STEP(x::features::auction_gate_probe::Init());
     }
+    XCAT_PLAY_BOOT_STEP(x::features::ui_cheat_overlay::Init());
     XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::Init());
     XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ports::security_attack::Init());
@@ -501,12 +509,10 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::infinite_stars::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ga_text_probe::Init());
     XCAT_PLAY_BOOT_STEP(x::features::ga_text_probe::StartWorker());
-    XCAT_PLAY_BOOT_STEP(x::features::encounter::Init());
-    XCAT_PLAY_BOOT_STEP(x::features::encounter::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::player_hide::Init());
     XCAT_PLAY_BOOT_STEP(x::features::player_hide::StartWorker());
-    // settle 期 Poll 可能已 Apply；其后 Init 会把若干 gDesired 清 0，且 writeTick
-    // 未变导致 Poll 跳过（BIN：AuctionTown 须 IMGUI 再点一次）。进图后再灌一次。
+    // play-boot 完成前 Poll 只灌无敌 + 遇人。Init 会清若干 desired；writeTick 不变则 Poll 跳过。
+    // 此处才允许完整 Apply（战斗/飞/攻速/FhBan），避免一进图就跟冷绑抢泵。
     XCAT_PLAY_BOOT_STEP(x::ipc::PayloadControl_ForceApply());
     if (AbortRequested()) {
         StopAllFeatureWorkers();

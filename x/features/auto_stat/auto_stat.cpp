@@ -100,12 +100,15 @@ bool gLoggedOffs = false;
 bool gLoggedSkipJob = false;
 bool gLieBusy = false;
 bool gTravelBusy = false;
+bool gJobRatioHold = false;
 
 struct SendJobCtx {
     uint32_t flag = 0;
+    uint32_t expectCid = 0;
     bool invoked = false;  // 已真正调到官方函数（不含泵拒/解析失败/独占忙）
     bool seh = false;
     bool exclBusy = false;
+    bool jobReject = false;  // 落地前职业/cid/配比已变，取消这次发包
 };
 
 enum class SendResult { Transient = 0, HardFail = 1, Ok = 2 };
@@ -252,6 +255,15 @@ void SendJobOnMain(void* user) {
     ctx->invoked = false;
     ctx->seh = false;
     ctx->exclBusy = false;
+    ctx->jobReject = false;
+    // 泵排队期间可能已换角/转职：托管调用前再读一遍，对不上则不调官方加点。
+    x::ui::player::BaseApStats live{};
+    if (!x::ui::player::ReadBaseApStats(live) || !live.ok || live.characterId == 0 ||
+        live.characterId != ctx->expectCid || !xcat::AutoStatJobReady(live.job) ||
+        !xcat::AutoStatJobRatioOk(live.job, gCfg)) {
+        ctx->jobReject = true;
+        return;
+    }
     __try {
         if (!ResolveExclOnMain() || !gFnCanSendExcl) return;
         void* wm = ports::world::PeekWorldManager();
@@ -274,13 +286,20 @@ void SendJobOnMain(void* user) {
     }
 }
 
-SendResult SendAp(int idx) {
+SendResult SendAp(int idx, uint32_t expectCid) {
     if (idx < 0 || idx >= kStatCount) return SendResult::Transient;
     SendJobCtx ctx{};
     ctx.flag = kStatFlag[idx];
+    ctx.expectCid = expectCid;
     if (!x::runtime::main_thread::InvokeAndWait(&SendJobOnMain, &ctx, kJobWaitMs,
                                                 x::runtime::main_thread::JobPrio::Low)) {
         x::runtime::LogWThrottled(230, 3000, "AutoStat", "SendAp pump timeout/reject %s",
+                                  kStatName[idx]);
+        return SendResult::Transient;
+    }
+    if (ctx.jobReject) {
+        x::runtime::LogWThrottled(235, 3000, "AutoStat",
+                                  "落地取消 +%s（cid/职业/配比已变，未调用官方加点）",
                                   kStatName[idx]);
         return SendResult::Transient;
     }
@@ -346,6 +365,7 @@ void Tick(DWORD now) {
         ResetFail();
         gLoggedSkipJob = false;
         gLoggedOffs = false;
+        gJobRatioHold = false;
         x::runtime::LogI("AutoStat", "换角色 cid %u → %u，本会话配比计数清零", gLastCharId,
                          st.characterId);
     }
@@ -357,6 +377,7 @@ void Tick(DWORD now) {
             gLoggedSkipJob = true;
             ResetAlloc();
             ResetFail();
+            gJobRatioHold = false;
             x::runtime::LogI("AutoStat", "0转不加 job=%d cid=%u 剩余AP=%d，1转后才加点", st.job,
                              st.characterId, st.ap);
         } else if (st.ap > 0) {
@@ -400,6 +421,20 @@ void Tick(DWORD now) {
         }
     }
 
+    if (!xcat::AutoStatJobRatioOk(st.job, gCfg)) {
+        if (!gJobRatioHold) {
+            gJobRatioHold = true;
+            x::runtime::LogW("AutoStat",
+                             "职业与配比不符 job=%d 力量=%u 敏捷=%u 智力=%u 幸运=%u，暂停加点",
+                             st.job, gCfg.str, gCfg.dex, gCfg.intel, gCfg.luk);
+        }
+        return;
+    }
+    if (gJobRatioHold) {
+        gJobRatioHold = false;
+        x::runtime::LogI("AutoStat", "职业与配比已对齐 job=%d，恢复加点", st.job);
+    }
+
     if (st.ap <= 0) return;
     if (gLastUseMs && static_cast<int>(now - gLastUseMs) < static_cast<int>(kMinSendGapMs)) return;
 
@@ -427,7 +462,7 @@ void Tick(DWORD now) {
     gLastUseMs = now;  // 含瞬时失败：避免泵堵时 400ms 连打 InvokeAndWait
     gLastPick = pick;
     gStatBefore = BaseStatByIdx(st, pick);
-    const SendResult sent = SendAp(pick);
+    const SendResult sent = SendAp(pick, st.characterId);
     if (sent == SendResult::Ok) {
         gPendingVerify = true;
         x::runtime::LogI("AutoStat", "已发 +1 %s（剩余AP=%d 等待回写）", kStatName[pick], st.ap);
@@ -486,6 +521,7 @@ void Init() {
     gLoggedSkipJob = false;
     gLieBusy = false;
     gTravelBusy = false;
+    gJobRatioHold = false;
     x::runtime::LogI("Feature", "auto_stat ready (off until [auto_stat] enabled + ratio=5; leftover AP 不限 5)");
 }
 

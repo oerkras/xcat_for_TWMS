@@ -33,6 +33,7 @@
 #include "../features/force_trade/force_trade.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
 #include "../features/auction_gate_probe/auction_gate_probe.h"
+#include "../features/ui_cheat_overlay/ui_cheat_overlay.h"
 #include "../features/rest_mp_accel/rest_mp_accel.h"
 #include "../features/infinite_stars/infinite_stars.h"
 #include "../features/player_hide/player_hide.h"
@@ -58,6 +59,9 @@ namespace {
 
 std::atomic<uint64_t> gLastAppliedTick{0};
 std::atomic<bool> gHaveApplied{false};
+// 冷启动 play-boot 完成前：invuln worker 已 Poll，但 F5/1ms/10×/FhBan 不得提前灌。
+// BIN 13:02:34 一进图就 SetEnabled → WarmInstall ~280ms，随后 Init 又卸 BAN，ForceApply 再开。
+std::atomic<bool> gPlayBootApplyReady{false};
 
 // DLL 加载时刻（文件域静态，勿放进 Apply 首次非 0 才初始化——否则 App 写盘 tick
 // 总早于 Apply 内 GetTickCount64，首点 afterInject 恒为 0，见本地 19:02:30 adopt）。
@@ -408,6 +412,28 @@ void ApplyImpactHopTestSeq(const xcat::PayloadControl& c) {
     fire(c.impactHopTestSeq);
 }
 
+void ApplyUiCheatOverlaySeq(const xcat::PayloadControl& c) {
+    if (c.uiCheatOverlaySeq == 0) return;
+    static std::atomic<bool> s_bootstrapped{false};
+    static std::atomic<uint32_t> s_lastApplied{0};
+    // 一次性脉冲。进图前 ini 里残留的 seq（BIN：seq=8 停在 21:29，21:46 重注入
+    // 因 writeTickMs 被其它偏好写刷新，误判 writtenAfterInject → 默认开了 GM 台）。
+    // 首拍只收养；真要点再按实验 TAB 按钮，seq+1 才会 fire。
+    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
+        s_lastApplied.store(c.uiCheatOverlaySeq, std::memory_order_release);
+        x::runtime::LogI("PayloadControl",
+                         "ui cheat overlay bootstrap adopt seq=%u (no fire) writeTick=%llu "
+                         "modStart=%llu",
+                         c.uiCheatOverlaySeq, (unsigned long long)c.writeTickMs,
+                         (unsigned long long)kManualRejoinModuleStartMs);
+        return;
+    }
+    if (c.uiCheatOverlaySeq <= s_lastApplied.load(std::memory_order_acquire)) return;
+    s_lastApplied.store(c.uiCheatOverlaySeq, std::memory_order_release);
+    x::runtime::LogI("PayloadControl", "ui cheat overlay fire seq=%u", c.uiCheatOverlaySeq);
+    x::features::ui_cheat_overlay::RequestOpen();
+}
+
 void ApplyAuctionGateProbeSeq(const xcat::PayloadControl& c) {
     if (!xcat::kAuctionGateProbeUserEnabled) return;
     if (c.auctionGateProbeSeq == 0) return;
@@ -433,6 +459,18 @@ void ApplyAuctionGateProbeSeq(const xcat::PayloadControl& c) {
     s_lastApplied.store(c.auctionGateProbeSeq, std::memory_order_release);
     x::runtime::LogI("PayloadControl", "auction gate probe fire seq=%u", c.auctionGateProbeSeq);
     x::features::auction_gate_probe::RequestRun();
+}
+
+void ApplyEncounterFromControl(const xcat::PayloadControl& c) {
+    // 遇人检测不得跟 play-boot 推迟战斗绑在一起：进图后别人出现必须立刻能停手。
+    xcat::PayloadControl forced = c;
+    xcat::ApplyMobGatherEncounterForce(forced);
+    xcat::ApplyAttackNoCdEncounterForce(forced);
+    x::features::encounter::SetEnabled(forced.mobGather != 0 || forced.autoRelogin != 0);
+    x::features::encounter::SetStrategies(forced.autoReloginStopCombat != 0,
+                                          forced.mobGather != 0 || forced.autoReloginReconnect != 0,
+                                          forced.autoReloginGmEscalate != 0,
+                                          forced.mobGather != 0 || forced.autoReloginStopGather != 0);
 }
 
 void ApplyControl(const xcat::PayloadControl& c) {
@@ -461,7 +499,20 @@ void ApplyControl(const xcat::PayloadControl& c) {
         return;
     }
 
+    // 落地空窗会挨打：无敌在 play-ready 后立刻灌。遇人检测同样立刻灌，不得等 ForceApply。
+    // 战斗/飞/攻速仍等到 ForceApply，避免一进图就跟冷绑抢泵。
     x::features::invuln::SetDesired(c.invuln != 0);
+    ApplyEncounterFromControl(c);
+    if (!gPlayBootApplyReady.load()) {
+        static bool sLoggedBootDefer = false;
+        if (!sLoggedBootDefer) {
+            sLoggedBootDefer = true;
+            x::runtime::LogI("PayloadControl",
+                             "defer combat/fly until play-boot ForceApply "
+                             "(invuln+encounter applied)");
+        }
+        return;
+    }
     const bool attackAccelOn =
         xcat::kAttackAccelUserEnabled && c.attackAccel != 0;
     const bool clearBusyOn = c.attackAccelClearBusy != 0;
@@ -497,7 +548,6 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::multi_skill::SetConfig(c.multiSkill != 0, c.multiSkillGapMs,
                                         c.multiSkillSafeStagger != 0);
     x::features::multi_skill::SetSendUseRequest(c.multiSkillSendUseRequest != 0);
-    x::features::simple_combat::SetEnabled(c.simpleCombat != 0);
     x::features::simple_combat::SetAttackIntervalMs(
         xcat::EffectiveAttackIntervalForApply(c.simpleCombatAttackIntervalMs,
                                               attackAccelOn ? 1u : 0u, clearBusyOn ? 1u : 0u,
@@ -538,6 +588,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::mob_gather::SetIgnoreQuiet(c.mobGatherIgnoreQuiet != 0);
     x::features::ports::mob_gather::SetQuietDelayMs(c.mobGatherQuietDelayMs);
     x::features::ports::mob_gather::SetApplyCtrl(c.mobGatherApplyCtrl != 0);
+    x::features::ports::mob_gather::SetFirstGenOnly(c.mobGatherFirstGenOnly != 0);
     x::features::ports::mob_gather::SetSoftRelogin(c.mobGatherSoftRelogin != 0,
                                                   c.mobGatherSoftReloginSec);
     x::features::ports::mob_gather::SetHangupUnbindF5(c.mobGatherHangupUnbindF5 != 0);
@@ -551,6 +602,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     (void)c.mobGatherAntiReport;
     x::features::ports::mob_prevpos_patch::SetEnabled(false);
     x::features::ports::mob_gather::SetHomeReturn(c.mobGatherHomeReturn != 0);
+    x::features::channel_hop::SetReconnectHopEnabled(c.mobGatherReconnectHop != 0);
     x::features::ports::mob_gather::SetHomePos(
         c.mobGatherHomeX, c.mobGatherHomeY, c.mobGatherHomeMapId, c.mobGatherHomeValid != 0,
         c.mobGatherHomeHasMap != 0);
@@ -619,6 +671,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
                                                  c.simpleCombatOneshotMinFires,
                                                  c.simpleCombatOneshotMinLagMs,
                                                  c.simpleCombatOneshotFoxFillGapMs);
+    // 配置齐了再开 F5。BIN 17:05:29 ForceApply 先 SetEnabled（human=1/standOff=12）
+    // 再灌 10× / 拟人关 / 站位，worker 可能吃到一拍默认值。
+    x::features::simple_combat::SetEnabled(c.simpleCombat != 0);
     x::runtime::main_thread::SetCongestionThreshold(
         static_cast<int>(xcat::ClampPumpCongestion(c.pumpCongestionThreshold)));
     x::runtime::main_thread::SetDrainBudget(
@@ -642,16 +697,13 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
     if (xcat::kAuctionGateProbeUserEnabled)
         ApplyAuctionGateProbeSeq(c);
+    ApplyUiCheatOverlaySeq(c);
     x::features::rest_mp_accel::SetIntervalMs(c.restMpAccelIntervalMs);
     x::features::rest_mp_accel::SetEnabled(c.restMpAccel != 0);
     if (xcat::kInfiniteStarsUserEnabled)
         x::features::infinite_stars::SetEnabled(c.infiniteStars != 0);
     // 自动补给真源：user.ini [auto_supply]（HotReadConfig）；勿再用 core.autoSell 灌开关。
-    x::features::encounter::SetEnabled(c.mobGather != 0 || c.autoRelogin != 0);
-    x::features::encounter::SetStrategies(c.autoReloginStopCombat != 0,
-                                          c.mobGather != 0 || c.autoReloginReconnect != 0,
-                                          c.autoReloginGmEscalate != 0,
-                                          c.mobGather != 0 || c.autoReloginStopGather != 0);
+    ApplyEncounterFromControl(c);
     x::features::player_hide::SetEnabled(c.hideOtherPlayers != 0);
     x::features::frame_lock::SetTargetFps(c.frameLockFps);
     x::features::frame_lock::SetEnabled(c.frameLock != 0);
@@ -697,6 +749,7 @@ void PayloadControl_ForceApply() {
     if (bin.empty()) return;
     xcat::PayloadControl c{};
     if (!xcat::ReadPayloadControl(bin.c_str(), c)) return;
+    gPlayBootApplyReady.store(true);
     gHaveApplied.store(false);
     x::runtime::LogI("PayloadControl",
                      "force-apply after play-boot (rebind; Init must not leave desired=0)");

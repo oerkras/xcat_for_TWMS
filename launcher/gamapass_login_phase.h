@@ -16,6 +16,7 @@ enum class GamaPassUiPhase : int {
     WaitNgm,         // 等 NGM
     WaitClassic,     // 已见 NGM，等经典版
     ManualLogin,     // 请在窗口内登录
+    CreateNick,      // 新号：请在本窗建立游戏昵称
 };
 
 void SetGamaPassUiPhase(GamaPassUiPhase phase);

@@ -17,6 +17,7 @@
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../travel/travel.h"
 #include "../../runtime/log.h"
+#include "../../runtime/main_thread_pump.h"
 #include "xcat_sound.h"
 
 #include <Windows.h>
@@ -32,10 +33,14 @@ namespace {
 constexpr DWORD kTickMs = 32;  // peek/停手跟战斗拍；全量 SampleThreat 仍走 kCheckIntervalMs
 constexpr DWORD kCheckIntervalMs = 200;  // 全量威胁采样（名字 / GM）；停手不绑这条
 constexpr DWORD kFirstLandGraceMs = 1000;  // 进图宽限缩短（原 5s；落地仍有人更快再 hop）
+// 同图软重连不改 mapId，kFirstLandGraceMs 不会刷新。BIN 20:18:43 UserPool
+// 残影 other=1 names=[?] → pause，RESULT 后 600ms 再 hop 拆会话。
+constexpr DWORD kSoftReenterGhostMs = 3000;
 // BIN：再 hop 宽限须 ≥ channel_hop 成功冷却，否则宽限一过就狂 RequestHop.
 // 停手恢复不绑这条：Hopping 在 !HasPending 后即可采样 Resume（出刀另受 hop 4s 静默）.
 constexpr DWORD kPostHopGraceMs = 0;  // 用户：遇人再 hop 不绑宽限（冷却已关；仅 HasPending 挡并发）
 constexpr DWORD kHopDeferLogMs = 4000;
+constexpr DWORD kNamelessGhostLogMs = 2000;  // peek 每战斗拍都会 hold skip，必须节流（BIN 21:50 jsonl.2/3 被刷满）
 constexpr DWORD kGmAlarmPulseMs = 3000;  // 对齐 auto_lie：威胁期间每 3s 强制 Alarm
 constexpr int kHideSuspectConfirmSamples = 2;  // 连续 N 拍才认隐身，压进图/加载假阳
 constexpr int kPostHopClearSamples = 2;  // 宽限内连续无人确认，压落地 UserPool 假空
@@ -43,11 +48,11 @@ constexpr uint32_t kHopSeqBase = x::features::channel_hop::kEncounterHopSeqBase;
 
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
-std::atomic<bool> gEnabled{false};
+std::atomic<bool> gEnabled{true};
 std::atomic<bool> gStopCombat{true};
 std::atomic<bool> gReconnect{true};
 std::atomic<bool> gGmEscalate{true};
-std::atomic<bool> gStopGather{false};
+std::atomic<bool> gStopGather{true};
 std::atomic<unsigned> gState{static_cast<unsigned>(State::Idle)};
 std::atomic<int> gLastOther{-1};
 std::atomic<int> gLastAdminLike{0};
@@ -58,8 +63,10 @@ DWORD gPhaseAt = 0;
 DWORD gLastSampleAt = 0;
 DWORD gConfirmSince = 0;
 DWORD gLandedAt = 0;
+DWORD gGhostUntrustedUntil = 0;  // NoteSoftReenterLand 武装；无名远程在窗内不当遇人
 DWORD gHopGraceUntil = 0;
 DWORD gLastHopDeferLog = 0;
+DWORD gLastNamelessGhostLog = 0;
 int gLastMapId = 0;
 bool gPaused = false;
 uint32_t gHopSeq = kHopSeqBase;
@@ -88,6 +95,19 @@ void Log(const char* fmt, ...) {
 
 void Notify(notify::NotificationKind kind, const char* key, const char* title, const char* body) {
     notify::PublishNotification(notify::NotificationEvent{kind, key, title, body, 5200});
+}
+
+bool InSoftReenterGhost(DWORD now) {
+    const DWORD until = gGhostUntrustedUntil;
+    if (!until) return false;
+    return static_cast<int>(until - now) > 0;
+}
+
+// 普通遇人：必须读到角色名。字典 count>0 但 names 全失败 = 换图/软重连残影（BIN names=[?]）。
+// GM/管理员仍凭 JobCategory 升级，不要求名字。
+bool OrdinaryOccupancyLive(const ports::user_pool::RemoteThreatSample& t) {
+    if (t.adminLikeCount > 0) return true;
+    return t.remoteCount > 0 && t.nameCount > 0;
 }
 
 // 把 RemoteThreatSample.names 拼成逗号列表；无人或全失败 → "?"。
@@ -351,6 +371,14 @@ void RequestHop(const ports::user_pool::RemoteThreatSample& t, bool threat) {
             names[0] ? names : "?", threat ? 1 : 0);
         return;
     }
+    if (!threat && t.nameCount <= 0) {
+        const DWORD nowSkip = GetTickCount();
+        if (!gLastNamelessGhostLog || nowSkip - gLastNamelessGhostLog >= kNamelessGhostLogMs) {
+            gLastNamelessGhostLog = nowSkip;
+            Log("hop skip: nameless remote=%d (UserPool ghost)", other);
+        }
+        return;
+    }
     // SoftOrNetQuiet 会在 PlayReady 时提前放刀，但 soft hold/land_quiet 仍在飞——
     // 此时遇人 hop 会与软重连抢会话（BIN 23:48:01 request 早于 RESULT success）。
     if (soft_login_probe::IsReconnectInFlight()) {
@@ -408,6 +436,15 @@ void ApplyHoldAndMaybeHop(const ports::user_pool::RemoteThreatSample& threat, bo
     if (!gStopCombat.load() && !gReconnect.load() && !gStopGather.load()) {
         SetState(State::Idle);
         gConfirmSince = 0;
+        return;
+    }
+    // 无名普通远程：UserPool 残影（BIN names=[?]）。先 Pause 会把停手粘到落地 hop。
+    if (!elevated && !OrdinaryOccupancyLive(threat)) {
+        if (!gLastNamelessGhostLog || now - gLastNamelessGhostLog >= kNamelessGhostLogMs) {
+            gLastNamelessGhostLog = now;
+            Log("hold skip nameless remote=%d names=%d (UserPool ghost)", threat.remoteCount,
+                threat.nameCount);
+        }
         return;
     }
     PauseExposure(threat, elevated);
@@ -470,12 +507,14 @@ void Init() {
     gPaused = false;
     gHopGraceUntil = 0;
     gLastHopDeferLog = 0;
+    gLastNamelessGhostLog = 0;
     gConfirmSince = 0;
     gNotifyThreatKey = -1;
     gLastGmAlarmAt = 0;
     gGmAlarmActive = false;
     gHideSuspectStreak = 0;
     gPostHopClearStreak = 0;
+    gGhostUntrustedUntil = 0;
     gLastNamesLog[0] = 0;
     gNeedSampleNow.store(false);
     gForcedYield.store(false, std::memory_order_release);
@@ -539,6 +578,24 @@ void InvalidateOccupancy() {
     gNeedSampleNow.store(true);
 }
 
+void NoteSoftReenterLand(const char* why) {
+    const DWORD now = GetTickCount();
+    gLandedAt = now ? now : 1;
+    DWORD until = now + kSoftReenterGhostMs;
+    if (until == 0) until = 1;
+    gGhostUntrustedUntil = until;
+    gLastOther.store(-1);
+    gNeedSampleNow.store(true);
+    gConfirmSince = 0;
+    gPostHopClearStreak = 0;
+    if (!channel_hop::HasPending()) {
+        SetState(State::Idle);
+        ResumeExposure(/*townSkip=*/false, /*silent=*/true);
+    }
+    Log("soft reenter land why=%s ghost=%ums", why ? why : "?",
+        (unsigned)kSoftReenterGhostMs);
+}
+
 void RequestSampleNow() { gNeedSampleNow.store(true); }
 
 bool HoldsCombatPause() {
@@ -556,6 +613,10 @@ bool TryHoldFromBoundPeek() {
     const auto ss = ports::world::GetSceneState();
     if (ss == ports::world::SceneState::CashShop || ss == ports::world::SceneState::Login)
         return false;
+    // 软重连途中 / 刚 RESULT：字典 count 常是旧图残影，peek 没有名字，不能当遇人。
+    if (soft_login_probe::IsReconnectInFlight()) return false;
+    const DWORD nowPeek = GetTickCount();
+    if (InSoftReenterGhost(nowPeek)) return false;
 
     int n = 0;
     if (!ports::user_pool::PeekRemoteUserCountBound(&n) || n <= 0) return false;
@@ -657,6 +718,11 @@ void Tick(DWORD now) {
     // 绑定池 peek：不等 200ms 全量 SampleThreat。有人先硬闸，战斗同拍才不会 acquire 再砍。
     TryHoldFromBoundPeek();
 
+    if (soft_login_probe::IsReconnectInFlight() ||
+        x::runtime::main_thread::IsPlayReadySettling()) {
+        return;
+    }
+
     const bool punch = gNeedSampleNow.exchange(false);
     // 吸怪强制遇人停吸时把采样收到 worker 拍（200ms），缩短「有人进来还在吸」窗口。
     const DWORD sampleIv = gStopGather.load() ? kTickMs : kCheckIntervalMs;
@@ -744,7 +810,14 @@ void Tick(DWORD now) {
         return;
     }
 
-    if (other <= 0) {
+    if (other <= 0 || (!elevated && !OrdinaryOccupancyLive(threat))) {
+        if (other > 0 && threat.nameCount <= 0) {
+            if (!gLastNamelessGhostLog || now - gLastNamelessGhostLog >= kNamelessGhostLogMs) {
+                gLastNamelessGhostLog = now;
+                Log("ghost skip remote=%d names=0 (UserPool leftover, no hop)", other);
+            }
+            gLastOther.store(0);
+        }
         gConfirmSince = 0;
         gNotifyOther = -1;
         // 换频宽限内且仍停手：连续无人确认后再 Resume，避免落地 UserPool 短暂空表误恢复。

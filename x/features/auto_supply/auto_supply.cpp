@@ -1732,12 +1732,22 @@ void TickSelling(DWORD now) {
         FailTrip(st.message[0] ? st.message : "卖出失败");
         return;
     }
-    // 开错店：卖栏投影空，背包物全记「店不可卖」（BIN 2026-08-20 科爾）。
-    if (st.state == 2u && (st.equipSold + st.etcSold) == 0 && st.kept > 0) {
+    // 开错店：卖栏投影空，背包里有「店不可卖」货（BIN 2026-08-20 科爾）。
+    // 只剩白名单保留件（BIN A134 玻璃鞋 kept>0 shopSkip=0）= 卖完，接着买，勿两店互踢。
+    if (st.state == 2u && (st.equipSold + st.etcSold) == 0 && st.shopSkip > 0) {
         (void)shop::CloseShop();
-        if (TryRerouteShopAfterOpenMiss("卖栏空/店不可卖（未开对店）")) return;
+        if (gShopStockReroute < kMaxShopStockReroute &&
+            TryRerouteShopAfterOpenMiss("卖栏空/店不可卖（未开对店）")) {
+            ++gShopStockReroute;
+            return;
+        }
         FailTrip("商店货架对不上，无法卖出");
         return;
+    }
+    if (st.state == 2u && (st.equipSold + st.etcSold) == 0 && st.kept > 0) {
+        runtime::LogI("AutoSupply",
+                      "sell empty kept=%u shopSkip=0 — treat as done, buy (no shop hop)",
+                      st.kept);
     }
     bool ready = false;
     if (!shop::ShopReady(ready) || !ready) {

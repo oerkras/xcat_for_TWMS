@@ -34,9 +34,11 @@ void StopWorker();
 
 bool IsArmed();
 bool IsHoldActive();
-// soft 成功进图后的落地静默（与 softLoginHold 解耦：Finish 已放 hold，守护可 absorb）。
+// 成功进图后的落地静默（与 softLoginHold 解耦：Finish 已放 hold，守护可 absorb）。
 bool IsLandQuiet();
-// hold 或 land quiet：打怪/旋翼停；Invuln：hold 停写，land quiet 允许急钉。
+// 空中贴怪 skip land_quiet 后的生产者错峰（停刀/采样/喝药，不卸 BAN）。
+bool IsPostReenterQuiet();
+// hold 或 land quiet 或 post-reenter：打怪停刀；Invuln：hold 停写，land quiet 允许急钉。
 bool IsGameplayQuiet();
 // soft 成功后墙钟内禁止 F5 空中 fhBan/旋翼（ce6797：quiet 结束立刻 BAN ON → 高速 Impact → 再软断）。
 // 比 land quiet 更长；不影响 hold 期 SafeLand / 测谎落台。
@@ -53,12 +55,12 @@ void RequestDeferredAttempt(const char* why);
 bool IsDeferredPending();
 // worker 正在跑 ConnectLogin / 重进。
 bool IsAttemptBusy();
-// hold / 落地静默 / 粘性 / attempt：赶路当空档，禁止 wait_wm_field。
+// hold / 落地静默 / 空中 RESULT 后生产者错峰 / 粘性 / attempt：赶路当空档，禁止 wait_wm_field。
 bool IsReconnectInFlight();
 
 // 图内主动拆会话：先粘性武装，再泵上 CloseSession。不 SetHold（图内 hold 会闪成强制软重连）。
-// 一般路径仅 Field+playReady。hangup_fires / hangup_timer：图内 play-ready 即拆。
-// hangup_fires 在软重连 in_flight（图内假 recover）时仍 CloseSession。
+// 一般路径仅 Field+playReady。hangup_fires / hangup_timer / same_map_field_reload：图内 play-ready 即拆。
+// 上述 why 在软重连 in_flight（图内假 recover / stuck_lobby）时仍 CloseSession。
 // 首页「软重连试连」未开则拒绝（禁止裸拆）。
 bool RequestProactiveReconnect(const char* why);
 

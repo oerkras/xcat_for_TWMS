@@ -51,7 +51,7 @@ bool IsTeleportEnabled();
 void SetTeleportOneHit(bool on);
 bool IsTeleportOneHit();
 // Impact 贴怪（默认开）：近战直升机——旋翼环持续托举悬停在怪旁，空中出刀。
-// 优先于拟人。需无敌；交战期间自动挂 fh-ban（无怪超宽限则卸掉落地）。
+// 优先于拟人。需无敌；交战期间自动挂 fh-ban。场上清完怪仍悬停，不落地。
 void SetImpactApproachEnabled(bool on);
 bool IsImpactApproachEnabled();
 // 空中贴怪防抖（钉点 + 旋翼到位软悬停）。关=安全回退到每拍跟理想点 + 旧 90ms 律。
@@ -79,7 +79,7 @@ uint32_t HiraishinLootHoldMs();
 // 站桩输出选怪 hypot 上限（px）。0=叠怪圈（GatherRadiusPx）。当前不挡刀。
 void SetHiraishinRangePx(uint32_t px);
 uint32_t HiraishinRangePx();
-// 站桩输出面前攻击盒半宽/半高（px，AbsPos）。0=该轴不限。默认 60×10。
+// 站桩输出面前攻击盒半宽/半高（px，AbsPos）。0=该轴不限。默认 100×80。
 void SetHiraishinFrontBox(uint32_t dx, uint32_t dy);
 uint32_t HiraishinFrontDx();
 uint32_t HiraishinFrontDy();
@@ -131,6 +131,8 @@ bool IsLootPulseActive();
 uint32_t LootPulseGeneration();
 // 多发：普攻 OnFuncKey 真正成功时再武装空刀观察（勿在 TryCast 排程时记账）。
 void NotifyMultiNormalAttackFired();
+// OnFuncKey / 自组攻包已发出：本锁出刀 +1。空挥、引擎吞刀都计，不看命中。
+void NoteLockFire();
 void ResetForMapChange();
 
 // 以下原生瞬移入口已禁用（封禁风险）；调用只记日志。

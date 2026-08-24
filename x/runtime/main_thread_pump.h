@@ -107,9 +107,15 @@ bool IsCongested();
 void SetCongestionThreshold(int depth);
 
 // Per-tick Drain budget (how many queued jobs to run after each host tick).
-// Clamped to [1, queue capacity]; capacity (=8) means drain the whole queue.
+// Clamped to [1, queue capacity]; capacity means drain the whole queue.
 void SetDrainBudget(int maxJobs);
 int DrainBudget();
+
+// play-ready 上升沿：保持 MapTransitBlock / FindAll 冻结，直到泵空闲（min）或超时（max）。
+// 冷启动已有 worker 错峰；软重连 worker 早已在跑，靠这把锁挡齐抢。
+void ArmPlayReadySettle();
+void CancelPlayReadySettle();
+bool IsPlayReadySettling();
 
 // Guard for managed / il2cpp access: debug asserts (__debugbreak), release logs
 // a throttled warning. Returns IsOnPumpThread(). Call at the top of any function

@@ -442,6 +442,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.attackAccel = 0;
     out.attackAccelClearBusy = 0;  // 默认关（吸怪 TAB「攻击无CD」）
     out.attackAccelClearBusyMinIntervalMs = kAttackAccelClearBusyMinIntervalDefaultMs;
+    out.attackNoCdEncounterUnbind = 0;
     out.attackAccelCutLayer = 0;
     out.attackAccelSkipPrepare = 0;  // 默认关
     out.attackAccelBooster = 0;      // 默认关
@@ -531,6 +532,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.gatherTabUnlocked = 0;
     out.mobGatherClearRelogin = kMobGatherClearReloginDefault;
     out.mobGatherApplyCtrl = 0;
+    out.mobGatherFirstGenOnly = kMobGatherFirstGenOnlyDefault;
     out.mobGatherSeekCluster = kMobGatherSeekClusterDefault;
     out.mobGatherPatrolFar = kMobGatherPatrolFarDefault;
     out.mobGatherAntiReport = kMobGatherAntiReportDefault;
@@ -540,6 +542,7 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherHomeMapId = 0;
     out.mobGatherHomeValid = 0;
     out.mobGatherHomeHasMap = 0;
+    out.mobGatherReconnectHop = kMobGatherReconnectHopDefault;
     out.mobGatherLayerYPx = kMobGatherLayerYPxDefault;
     out.mobGatherDyLimPx = kMobGatherDyLimPxDefault;
     out.mobGatherWalkDx = kMobGatherWalkDxDefault;
@@ -601,16 +604,17 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.impactHopForce = 0;
     out.softLoginDismissSeq = 0;
     out.autoRelogin = 1;
-    out.autoReloginStopCombat = 0;
+    out.autoReloginStopCombat = 1;
     out.autoReloginReconnect = 1;
     out.autoReloginGmEscalate = 1;
-    out.autoReloginStopGather = 0;
+    out.autoReloginStopGather = 1;
     out.hideOtherPlayers = 0;
     out.frameLock = 1;  // 默认开
     out.frameLockFps = kFrameLockFpsDefault;
     out.dropAlertBypass = 1;  // 默认开
     out.auctionTownBypass = 1;  // 默认开
     out.auctionGateProbeSeq = 0;
+    out.uiCheatOverlaySeq = 0;
     out.restMpAccel = 0;  // 实验·默认关
     out.restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
     out.secAttackIntercept = 0;  // 已移除；布局占位
@@ -646,6 +650,8 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     // 「攻击无CD」/清忙锁（独立字段）。旧版曾把本 key 误并进 attackAccel；现各自读写。
     if (IniGetBool(ini, "core", "attackAccelClearBusy", b))
         out.attackAccelClearBusy = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "attackNoCdEncounterUnbind", b))
+        out.attackNoCdEncounterUnbind = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "attackAccelClearBusyMinIntervalMs", u)) {
         // 旧默认 410 → 1（地板已解除）；显式其它值保留。
         if (u == kAttackAccelClearBusyMinIntervalLegacyDefaultMs)
@@ -750,6 +756,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     // v137: 旧厂默关迁一次开。升 version 后用户可再关掉。
     // v138: 旧厂默 N=2 迁一次（当时厂默 1）。升 version 后用户可再改。
     // v148: 旧厂默 N=1 迁一次 N=3。已手改成 2/4/5 的盘保留。
+    // v158: 旧厂默 N=3 迁一次 N=1。已手改成 2/4/5 的盘保留。
     {
         uint32_t coreIniVer = 0;
         const bool hasCoreVer = IniGetU32(ini, "core", "version", coreIniVer);
@@ -760,6 +767,9 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
             out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
         if ((!hasCoreVer || coreIniVer < 148u) &&
             out.simpleCombatSkipAccMissN == 1u)
+            out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
+        if ((!hasCoreVer || coreIniVer < 158u) &&
+            out.simpleCombatSkipAccMissN == 3u)
             out.simpleCombatSkipAccMissN = kCombatSkipAccMissNDefault;
     }
     {
@@ -777,8 +787,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherStrategy = ClampMobGatherStrategy(u);
     if (IniGetU32(ini, "core", "mobGatherLandOnArrive", u))
         out.mobGatherLandOnArrive = u ? 1u : 0u;
-    if (IniGetU32(ini, "core", "mobGatherHopPx", u))
+    if (IniGetU32(ini, "core", "mobGatherHopPx", u)) {
+        if (u == kMobGatherHopPxMistakenDefault) u = kMobGatherHopPxDefault;
         out.mobGatherHopPx = ClampMobGatherHopPx(u);
+    }
     ReadMobGatherTune(binDir, &out.mobGatherSpeedPct, &out.mobGatherAntiJitter);
     if (IniGetU32(ini, "core", "mobGatherSpeedPct", u))
         out.mobGatherSpeedPct = u;
@@ -788,8 +800,11 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherMax = ClampMobGatherMax(u);
     if (IniGetU32(ini, "core", "mobGatherFarInFlight", u))
         out.mobGatherFarInFlight = ClampMobGatherFarInFlight(u);
-    if (IniGetU32(ini, "core", "mobGatherRadiusPx", u))
+    if (IniGetU32(ini, "core", "mobGatherRadiusPx", u)) {
+        if (u == kMobGatherRadiusLegacyDefaultPx || u == kMobGatherRadiusLegacyDefaultOldPx)
+            u = kMobGatherRadiusDefaultPx;
         out.mobGatherRadiusPx = ClampMobGatherRadiusPx(u);
+    }
     if (IniGetU32(ini, "core", "mobGatherHoldMs", u))
         out.mobGatherHoldMs = ClampMobGatherHoldMs(u);
     if (IniGetU32(ini, "core", "mobGatherIntervalMs", u))
@@ -840,6 +855,13 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherDispClampOn = u ? 1u : 0u;
     if (IniGetU32(ini, "core", "mobGatherDispCapPx", u))
         out.mobGatherDispCapPx = ClampMobGatherDispCapPx(u);
+    // v150: v141 厂默开。BIN 证 cap=48 仍 205，厂默改关；旧盘 on=1 迁一次。升 version 后可再勾。
+    {
+        uint32_t coreIniVer = 0;
+        const bool hasCoreVer = IniGetU32(ini, "core", "version", coreIniVer);
+        if ((!hasCoreVer || coreIniVer < 150u) && out.mobGatherDispClampOn != 0)
+            out.mobGatherDispClampOn = 0;
+    }
     if (IniGetU32(ini, "core", "mobGatherDead", u)) out.mobGatherDead = u;
     if (IniGetU32(ini, "core", "mobGatherGravity", u))
         out.mobGatherGravity = u;
@@ -895,6 +917,8 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherClearRelogin = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mobGatherApplyCtrl", b))
         out.mobGatherApplyCtrl = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "mobGatherFirstGenOnly", b))
+        out.mobGatherFirstGenOnly = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mobGatherSeekCluster", b))
         out.mobGatherSeekCluster = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mobGatherPatrolFar", b))
@@ -921,14 +945,20 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherHomeValid = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mobGatherHomeHasMap", b))
         out.mobGatherHomeHasMap = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "mobGatherReconnectHop", b))
+        out.mobGatherReconnectHop = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "mobGatherLayerYPx", u))
         out.mobGatherLayerYPx = ClampMobGatherLayerYPx(u);
-    if (IniGetU32(ini, "core", "mobGatherDyLimPx", u))
+    if (IniGetU32(ini, "core", "mobGatherDyLimPx", u)) {
+        if (u == kMobGatherDyLimPxLegacyDefault) u = kMobGatherDyLimPxDefault;
         out.mobGatherDyLimPx = ClampMobGatherDyLimPx(u);
+    }
     if (IniGetU32(ini, "core", "mobGatherWalkDx", u))
         out.mobGatherWalkDx = ClampMobGatherWalkDx(u);
-    if (IniGetU32(ini, "core", "mobGatherFeetExemptPx", u))
+    if (IniGetU32(ini, "core", "mobGatherFeetExemptPx", u)) {
+        if (u == kMobGatherFeetExemptPxLegacyDefault) u = kMobGatherFeetExemptPxDefault;
         out.mobGatherFeetExemptPx = ClampMobGatherFeetExemptPx(u);
+    }
     if (IniGetBool(ini, "core", "simpleCombatTeleport", b))
         out.simpleCombatTeleport = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "simpleCombatTeleportOneHit", b))
@@ -968,13 +998,15 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.simpleCombatHiraishinRangePx = kHiraishinRangeDefaultPx;
     if (IniGetU32(ini, "core", "simpleCombatHiraishinFrontDx", u)) {
         if (u == kHiraishinFrontDxLegacyDefault || u == kHiraishinFrontDxLegacyDefaultV107 ||
-            u == kHiraishinFrontDxLegacyDefaultV109 || u == kHiraishinFrontDxLegacyDefaultV116)
+            u == kHiraishinFrontDxLegacyDefaultV109 || u == kHiraishinFrontDxLegacyDefaultV116 ||
+            u == kHiraishinFrontDxLegacyDefaultV119)
             u = kHiraishinFrontDxDefault;
         out.simpleCombatHiraishinFrontDx = ClampHiraishinFrontDx(u);
     } else
         out.simpleCombatHiraishinFrontDx = kHiraishinFrontDxDefault;
     if (IniGetU32(ini, "core", "simpleCombatHiraishinFrontDy", u)) {
-        if (u == kHiraishinFrontDyLegacyDefault || u == kHiraishinFrontDyLegacyDefaultV109)
+        if (u == kHiraishinFrontDyLegacyDefault || u == kHiraishinFrontDyLegacyDefaultV109 ||
+            u == kHiraishinFrontDyLegacyDefaultV116)
             u = kHiraishinFrontDyDefault;
         out.simpleCombatHiraishinFrontDy = ClampHiraishinFrontDy(u);
     } else
@@ -1068,14 +1100,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.autoReloginGmEscalate = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "autoReloginStopGather", b))
         out.autoReloginStopGather = b ? 1u : 0u;
-    // v82: 旧厂默（关检测+开停手+开换频）→ 检测开、停手关；换频跟现行厂默（v133 开）。
-    if (out.autoRelogin == 0 && out.autoReloginStopCombat == 1 &&
-        out.autoReloginReconnect == 1) {
-        out.autoRelogin = 1;
-        out.autoReloginStopCombat = 0;
-        out.autoReloginReconnect = 1;
-    }
+    if (IniGetBool(ini, "core", "hideOtherPlayers", b)) out.hideOtherPlayers = b ? 1u : 0u;
     // v133: 旧厂默换频关迁一次「一直有人就换频」开。升 version 后用户可再关掉。
+    // v154: 撤 v82 无条件改写。旧厂默指纹只补停手/停吸，总开关不再改关。
+    // v156: v154 厂默「总开关关」迁一次开。升 version 后用户可再关掉。
     {
         uint32_t coreIniVer = 0;
         const bool hasCoreVer = IniGetU32(ini, "core", "version", coreIniVer);
@@ -1083,13 +1111,26 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
             out.autoReloginReconnect == 0) {
             out.autoReloginReconnect = 1;
         }
+        if ((!hasCoreVer || coreIniVer < 154u) && out.autoRelogin == 1 &&
+            out.autoReloginStopCombat == 0 && out.autoReloginReconnect == 1 &&
+            out.autoReloginGmEscalate == 1 && out.autoReloginStopGather == 0 &&
+            out.hideOtherPlayers == 0) {
+            out.autoReloginStopCombat = 1;
+            out.autoReloginStopGather = 1;
+        }
+        if ((!hasCoreVer || coreIniVer < 156u) && out.autoRelogin == 0 &&
+            out.autoReloginStopCombat == 1 && out.autoReloginReconnect == 1 &&
+            out.autoReloginGmEscalate == 1 && out.autoReloginStopGather == 1 &&
+            out.hideOtherPlayers == 0) {
+            out.autoRelogin = 1;
+        }
     }
-    if (IniGetBool(ini, "core", "hideOtherPlayers", b)) out.hideOtherPlayers = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "frameLock", b)) out.frameLock = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "frameLockFps", u)) out.frameLockFps = ClampFrameLockFps(u);
     if (IniGetBool(ini, "core", "dropAlertBypass", b)) out.dropAlertBypass = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "auctionTownBypass", b)) out.auctionTownBypass = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "auctionGateProbeSeq", u)) out.auctionGateProbeSeq = u;
+    if (IniGetU32(ini, "core", "uiCheatOverlaySeq", u)) out.uiCheatOverlaySeq = u;
     if (IniGetBool(ini, "core", "restMpAccel", b)) out.restMpAccel = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "restMpAccelIntervalMs", u))
         out.restMpAccelIntervalMs = ClampRestMpAccelIntervalMs(u);
@@ -1148,7 +1189,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.simpleCombatTeleportCooldownMs = ClampCombatTeleportCooldownMs(u);
     }
     if (IniGetU32(ini, "core", "simpleCombatTeleportMaxHop", u)) {
-        // 旧默认 400 / 520 / 550 → 3000；显式调过其它值保留。
+        // 旧默认 400 / 520 / 550 / 3000 → 1500；显式调过其它值保留。
         if (IsRetiredCombatTeleportMaxHopDefault(u)) u = kCombatTeleportMaxHopDefault;
         out.simpleCombatTeleportMaxHop = ClampCombatTeleportMaxHop(u);
     }
@@ -1186,6 +1227,7 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     out.magic = kPayloadControlMagic;
     out.version = kPayloadControlVersion;
     ApplyMobGatherEncounterForce(out);
+    ApplyAttackNoCdEncounterForce(out);
     return true;
 }
 
@@ -1200,6 +1242,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.attackAccel =
         (kAttackAccelUserEnabled && normalized.attackAccel) ? 1u : 0u;
     normalized.attackAccelClearBusy = normalized.attackAccelClearBusy ? 1u : 0u;
+    normalized.attackNoCdEncounterUnbind = normalized.attackNoCdEncounterUnbind ? 1u : 0u;
     normalized.attackAccelClearBusyMinIntervalMs = ClampAttackAccelClearBusyMinIntervalMs(
         !normalized.attackAccelClearBusyMinIntervalMs
             ? kAttackAccelClearBusyMinIntervalDefaultMs
@@ -1283,8 +1326,11 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGather = normalized.mobGather ? 1u : 0u;
     normalized.mobGatherStrategy = ClampMobGatherStrategy(normalized.mobGatherStrategy);
     normalized.mobGatherLandOnArrive = normalized.mobGatherLandOnArrive ? 1u : 0u;
+    if (normalized.mobGatherHopPx == kMobGatherHopPxMistakenDefault)
+        normalized.mobGatherHopPx = kMobGatherHopPxDefault;
     normalized.mobGatherHopPx = ClampMobGatherHopPx(normalized.mobGatherHopPx);
     ApplyMobGatherEncounterForce(normalized);
+    ApplyAttackNoCdEncounterForce(normalized);
     normalized.mobGatherAntiJitter = normalized.mobGatherAntiJitter ? 1u : 0u;
     normalized.mobGatherMax = ClampMobGatherMax(
         normalized.mobGatherMax ? normalized.mobGatherMax : kMobGatherMaxDefault);
@@ -1319,6 +1365,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.gatherTabUnlocked = normalized.gatherTabUnlocked ? 1u : 0u;
     normalized.mobGatherClearRelogin = normalized.mobGatherClearRelogin ? 1u : 0u;
     normalized.mobGatherApplyCtrl = normalized.mobGatherApplyCtrl ? 1u : 0u;
+    normalized.mobGatherFirstGenOnly = normalized.mobGatherFirstGenOnly ? 1u : 0u;
     normalized.mobGatherSeekCluster = normalized.mobGatherSeekCluster ? 1u : 0u;
     normalized.mobGatherPatrolFar = normalized.mobGatherPatrolFar ? 1u : 0u;
     normalized.mobGatherAntiReport = 0u;
@@ -1331,6 +1378,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherHomeY = ClampMobGatherStandOffY(normalized.mobGatherHomeY);
     normalized.mobGatherHomeValid = normalized.mobGatherHomeValid ? 1u : 0u;
     normalized.mobGatherHomeHasMap = normalized.mobGatherHomeHasMap ? 1u : 0u;
+    normalized.mobGatherReconnectHop = normalized.mobGatherReconnectHop ? 1u : 0u;
     normalized.simpleCombatTeleport = normalized.simpleCombatTeleport ? 1u : 0u;
     normalized.simpleCombatTeleportOneHit = normalized.simpleCombatTeleportOneHit ? 1u : 0u;
     normalized.simpleCombatImpactApproach = normalized.simpleCombatImpactApproach ? 1u : 0u;
@@ -1425,7 +1473,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         normalized.simpleCombatTeleportCooldownMs = ClampCombatTeleportCooldownMs(cd);
     }
     // 0 合法（关门控）；勿把 0 当成缺省。
-    // 旧默认 400/520/550：抬到 3000。显式调过其它值保留。
+    // 旧默认 400/520/550/3000：抬到 1500。显式调过其它值保留。
     {
         uint32_t hop = normalized.simpleCombatTeleportMaxHop;
         if (!hop || IsRetiredCombatTeleportMaxHopDefault(hop)) hop = kCombatTeleportMaxHopDefault;
@@ -1475,6 +1523,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "attackAccel", normalized.attackAccel != 0);
         IniSetBool(ini, "core", "attackAccelClearBusy",
                    normalized.attackAccelClearBusy != 0);
+        IniSetBool(ini, "core", "attackNoCdEncounterUnbind",
+                   normalized.attackNoCdEncounterUnbind != 0);
         IniSetU32(ini, "core", "attackAccelClearBusyMinIntervalMs",
                   normalized.attackAccelClearBusyMinIntervalMs);
         IniSetBool(ini, "core", "attackAccelCutLayer", normalized.attackAccelCutLayer != 0);
@@ -1578,6 +1628,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "gatherTabUnlocked", normalized.gatherTabUnlocked != 0);
         IniSetBool(ini, "core", "mobGatherClearRelogin", normalized.mobGatherClearRelogin != 0);
         IniSetBool(ini, "core", "mobGatherApplyCtrl", normalized.mobGatherApplyCtrl != 0);
+        IniSetBool(ini, "core", "mobGatherFirstGenOnly", normalized.mobGatherFirstGenOnly != 0);
         IniSetBool(ini, "core", "mobGatherSeekCluster", normalized.mobGatherSeekCluster != 0);
         IniSetBool(ini, "core", "mobGatherPatrolFar", normalized.mobGatherPatrolFar != 0);
         IniSetBool(ini, "core", "mobGatherAntiReport", false);
@@ -1587,6 +1638,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetI32(ini, "core", "mobGatherHomeMapId", normalized.mobGatherHomeMapId);
         IniSetBool(ini, "core", "mobGatherHomeValid", normalized.mobGatherHomeValid != 0);
         IniSetBool(ini, "core", "mobGatherHomeHasMap", normalized.mobGatherHomeHasMap != 0);
+        IniSetBool(ini, "core", "mobGatherReconnectHop", normalized.mobGatherReconnectHop != 0);
         IniSetU32(ini, "core", "mobGatherLayerYPx", normalized.mobGatherLayerYPx);
         IniSetU32(ini, "core", "mobGatherDyLimPx", normalized.mobGatherDyLimPx);
         IniSetU32(ini, "core", "mobGatherWalkDx", normalized.mobGatherWalkDx);
@@ -1678,6 +1730,7 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniEraseKey(ini, "core", "pointBlankShoot");
         IniSetBool(ini, "core", "auctionTownBypass", normalized.auctionTownBypass != 0);
         IniSetU32(ini, "core", "auctionGateProbeSeq", normalized.auctionGateProbeSeq);
+        IniSetU32(ini, "core", "uiCheatOverlaySeq", normalized.uiCheatOverlaySeq);
         IniSetBool(ini, "core", "restMpAccel", normalized.restMpAccel != 0);
         IniSetU32(ini, "core", "restMpAccelIntervalMs",
                   ClampRestMpAccelIntervalMs(normalized.restMpAccelIntervalMs

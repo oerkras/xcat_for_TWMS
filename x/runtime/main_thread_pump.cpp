@@ -19,7 +19,9 @@
 namespace x::runtime::main_thread {
 namespace {
 
-constexpr int kQueueCap = 8;
+// 12：软重连 play-ready 齐抢时多 4 个停车位，少 queue full 硬失败。
+// 每 tick 默认仍只 Drain 8（见 payload kPumpDrainBudgetDefault），不把 12 个托管活一次性倒进 Unity 帧。
+constexpr int kQueueCap = 12;
 // RVA = 末级兜底；ResolvePumpMi：明文名 → unique void() kind → RVA（禁止 RVA-first）。
 constexpr uint32_t kRvaSendWillRenderCanvases = 0x52843c0;  // remounted 2026-08-06 Canvas.SendWillRenderCanvases
 constexpr uint32_t kRvaSceneLoginUpdate = 0xC1BE20;         // remounted 2026-08-06
@@ -99,6 +101,12 @@ std::atomic<DWORD> gPumpTid{0};  // Unity pump thread; set on each hook entry
 std::atomic<int> gQueuedCount{0};  // parked-job depth; +1 enqueue, -1 dequeue/reclaim
 std::atomic<uint32_t> gEnqueueSeq{0};  // monotonic; Drain ties broken by earlier seq
 
+// play-ready 上升沿：挡 FindAll / 非 High，直到泵空或超时。
+constexpr DWORD kPlayReadySettleMinMs = 300;
+constexpr DWORD kPlayReadySettleMaxMs = 1200;
+std::atomic<uint8_t> gSettleOn{0};
+std::atomic<DWORD> gSettleArmedMs{0};
+
 void NotePumpThread() {
     gPumpTid.store(GetCurrentThreadId(), std::memory_order_release);
 }
@@ -110,8 +118,9 @@ constexpr DWORD kPumpIdleFailMs = 2000;
 constexpr DWORD kTransitIdleFailMs = 400;
 // 同窗 InvokeAndWait 等待上限（auto_enter 仍在 freeze=1 时不走此帽）。
 constexpr DWORD kTransitInvokeCapMs = 500;
-// Per-tick Drain 上限；面板/ini 可调，默认抽干整队（=kQueueCap）。
-std::atomic<int> gDrainBudget{kQueueCap};
+// Per-tick Drain 上限；面板/ini 可调。默认 8：槽是 12 也不把整队托管活倒进同一帧。
+constexpr int kDrainBudgetDefault = 8;
+std::atomic<int> gDrainBudget{kDrainBudgetDefault};
 // Queue depth at/above which IsCongested() tells producers to back off.
 // Runtime-tunable via SetCongestionThreshold (panel/config); 0 disables backpressure.
 std::atomic<int> gCongestionThreshold{(kQueueCap * 3) / 4};
@@ -781,9 +790,48 @@ int QueuedJobCount() {
     return n < 0 ? 0 : n;
 }
 
+void ArmPlayReadySettle() {
+    const DWORD now = GetTickCount();
+    gSettleArmedMs.store(now ? now : 1, std::memory_order_release);
+    gSettleOn.store(1, std::memory_order_release);
+    x::runtime::LogI("MainPump", "play-ready settle arm min=%ums max=%ums q=%d",
+                     static_cast<unsigned>(kPlayReadySettleMinMs),
+                     static_cast<unsigned>(kPlayReadySettleMaxMs), QueuedJobCount());
+}
+
+void CancelPlayReadySettle() {
+    if (gSettleOn.exchange(0, std::memory_order_acq_rel) != 0) {
+        x::runtime::LogI("MainPump", "play-ready settle cancel (left map)");
+    }
+}
+
+bool IsPlayReadySettling() {
+    if (gSettleOn.load(std::memory_order_acquire) == 0) return false;
+    const DWORD armed = gSettleArmedMs.load(std::memory_order_acquire);
+    const DWORD now = GetTickCount();
+    const DWORD elapsed = (armed && now >= armed) ? (now - armed) : 0;
+    const int q = QueuedJobCount();
+    if (elapsed >= kPlayReadySettleMaxMs) {
+        if (gSettleOn.exchange(0, std::memory_order_acq_rel) != 0) {
+            x::runtime::LogI("MainPump", "play-ready settle cap %ums q=%d — release FindAll freeze",
+                             static_cast<unsigned>(elapsed), q);
+        }
+        return false;
+    }
+    if (elapsed >= kPlayReadySettleMinMs && q <= 0) {
+        if (gSettleOn.exchange(0, std::memory_order_acq_rel) != 0) {
+            x::runtime::LogI("MainPump", "play-ready settle idle after %ums q=0",
+                             static_cast<unsigned>(elapsed));
+        }
+        return false;
+    }
+    return true;
+}
+
 bool IsCongested() {
     // InterStage / 卸图：让打怪/吸物等认背压直接让路（登录 freeze 期不触发，护 auto_enter）。
     if (IsTransitQuiesce()) return true;
+    if (IsPlayReadySettling()) return true;
     const int th = gCongestionThreshold.load(std::memory_order_relaxed);
     if (th <= 0) return false;  // 0 = backpressure off
     return gQueuedCount.load(std::memory_order_relaxed) >= th;
@@ -832,15 +880,17 @@ bool InvokeAndWait(JobFn fn, void* user, DWORD timeoutMs, JobPrio prio) {
     const bool transit = managed_main::IsMapTransitBlocked();
     const bool freeze = managed_main::IsLoginFrozen();
     const bool quiesce = transit && !freeze;  // = IsTransitQuiesce；此处内联免跨层歧义
+    const bool settling = IsPlayReadySettling();
 
     // 玩法 Low（吸物等）：冻屏/卸图一律拒排，别占 kQueueCap。
-    if (prio == JobPrio::Low && (transit || freeze)) {
-        FailLogThrottled("reject Low (transit/freeze)");
+    if (prio == JobPrio::Low && (transit || freeze || settling)) {
+        FailLogThrottled("reject Low (transit/freeze/settle)");
         return false;
     }
-    // InterStage：Normal 也拒（出刀/重绑）；High 留给换频/系统短探。
-    if (quiesce && prio != JobPrio::High) {
-        FailLogThrottled("reject non-High (interstage quiesce)");
+    // InterStage / play-ready settle：Normal 也拒（出刀/重绑/FindAll）；High 留给换频/系统短探。
+    if ((quiesce || settling) && prio != JobPrio::High) {
+        FailLogThrottled(settling ? "reject non-High (play-ready settle)"
+                                  : "reject non-High (interstage quiesce)");
         return false;
     }
 
@@ -903,6 +953,7 @@ bool InvokeAndWait(JobFn fn, void* user, DWORD timeoutMs, JobPrio prio) {
 }
 
 void Shutdown() {
+    gSettleOn.store(0, std::memory_order_release);
     gFrameTick.store(nullptr, std::memory_order_release);
     gFrameTickUser.store(nullptr, std::memory_order_release);
     gAuxFrameTick.store(nullptr, std::memory_order_release);

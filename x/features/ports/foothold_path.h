@@ -28,8 +28,14 @@ struct FirstAction {
     int hops = 0;
 };
 
-bool EnsureGraph();
+bool EnsureGraph();  // 懒建。换图只靠 CollectToCache；拟人/落台/lie_safe 第一次 Snap 才构图。
 bool FindNearestFh(float x, float y, uint32_t* outId, float* outDist = nullptr);
+
+// 本图欧氏最近可站点（段上最近点，不是中点）。跳过墙；先宽链、没有再允许窄台。
+// 给 lie_safe / 补给落台用：不走 SnapStandAt 的同高 band（会贴到千米外幽灵台）。
+bool FindNearestStand(float x, float y, float* outX, float* outY, uint32_t* outFhId = nullptr,
+                      float* outDist = nullptr, bool avoidWalkJunction = true,
+                      bool cliffInset = true);
 
 // 贴站立平台：优先同层(|fy-y|≤45)且覆盖 x → 同层 Y 带 → 宽松覆盖 → 最近点。
 // FH=Prev/Next 线段链。

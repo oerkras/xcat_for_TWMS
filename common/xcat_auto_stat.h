@@ -41,4 +41,31 @@ inline bool AutoStatJobReady(int job) {
     return job <= 522;
 }
 
+// 职业主属性与配比是否对得上。对不上必须暂停加点（防呆）。
+// 0 转 / 未知职业 / 配比未满 5：不在这里拦，返回 true。
+// 规则：主属性权重要 >0；明显错维必须为 0。
+//   战士 1xx：必须有力量，禁止智力（允许敏捷 4:1）
+//   法师 2xx：必须有智力，禁止力量和敏捷
+//   弓手 3xx：必须有敏捷，禁止智力
+//   飞侠 4xx / 双刀 430–434：必须有幸运，禁止智力
+//   海盗 500：力量或敏捷至少一项，禁止智力
+//   拳手 51x：必须有力量，禁止智力
+//   枪手 52x：必须有敏捷，禁止智力
+inline bool AutoStatJobRatioOk(int job, const AutoStatConfig& cfg) {
+    if (!AutoStatJobReady(job)) return true;
+    if (!AutoStatRatioOk(cfg)) return true;
+    const uint32_t str = cfg.str;
+    const uint32_t dex = cfg.dex;
+    const uint32_t intel = cfg.intel;
+    const uint32_t luk = cfg.luk;
+    if (job >= 100 && job <= 132) return str > 0 && intel == 0;
+    if (job >= 200 && job <= 232) return intel > 0 && str == 0 && dex == 0;
+    if (job >= 300 && job <= 322) return dex > 0 && intel == 0;
+    if ((job >= 400 && job <= 422) || (job >= 430 && job <= 434)) return luk > 0 && intel == 0;
+    if (job == 500) return (str > 0 || dex > 0) && intel == 0;
+    if (job >= 510 && job <= 512) return str > 0 && intel == 0;
+    if (job >= 520 && job <= 522) return dex > 0 && intel == 0;
+    return true;
+}
+
 }  // namespace xcat

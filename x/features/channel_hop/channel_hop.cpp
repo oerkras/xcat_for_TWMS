@@ -173,6 +173,7 @@ DWORD gResumeAt = 0;  // 结算后延迟 Resume；0=无需/已恢复
 int gTargetChannel = -1;
 int gFromChannel = -1;
 int gChannelCount = 0;
+int gLastChannelCount = 0;  // ClearAttemptState 会把 gChannelCount 清 0；重连抽频用这个残留
 int gFireAttempt = 0;
 int gTried[128]{};
 int gTriedN = 0;
@@ -186,6 +187,10 @@ DWORD gLandedAt = 0;       // 离图后再进 PlayReady 的时刻；0=本轮未�
 bool gSawLeavePlay = false;  // 发包后是否见过 !IsPlayReady（黑屏/InterStage）
 bool gWasPlayReady = true;
 int gKnownChannelIdx = -1;  // 上次成功换频后的 0-based 索引；跨 job 保留
+std::atomic<uint8_t> gReconnectHopWant{0};
+std::atomic<int> gReconnectHopFrom{-1};
+std::atomic<int> gReconnectHopTo{-1};
+std::atomic<uint8_t> gReconnectHopArmed{0};
 bool gInvulnHeld = false;     // 本模块临时关了 Invuln（仅 BeginActive 后）
 bool gInvulnWasOn = false;    // 关之前的 desired，Finish 时还原
 std::atomic<bool> gCombatPaused{false};  // ChannelHop 硬闸；Request/Tick 跨线程
@@ -1659,6 +1664,7 @@ void TickSelecting(DWORD now) {
     }
     gFromChannel = info.channelId;
     gChannelCount = info.channelCount;
+    if (gChannelCount > 1) gLastChannelCount = gChannelCount;
     gTargetChannel = PickRandomChannel(info.channelId, info.channelCount);
     if (gTargetChannel < 0) {
         Fail("仅有一个频道");
@@ -2044,9 +2050,139 @@ void TickWaiting(DWORD now) {
     (void)TryRetryOtherChannel(why, gFromChannel, now, /*markRejected=*/false);
 }
 
+// Kick 线程可调：不读 WM / 不碰 gTried。只排除 from、id=0、成人；可读已有 soft-avoid。
+int PickReconnectOther(int fromIdx, int count) {
+    if (count <= 1) return -1;
+    const DWORD now = GetTickCount();
+    int clean[128]{};
+    int soft[128]{};
+    int nClean = 0, nSoft = 0;
+    const int cap = count < 128 ? count : 128;
+    for (int id = 1; id < cap; ++id) {
+        if (id == fromIdx) continue;
+        if (IsAdultIdx(id)) continue;
+        if (SoftAvoidActive(id, now)) {
+            if (nSoft < 128) soft[nSoft++] = id;
+        } else if (nClean < 128) {
+            clean[nClean++] = id;
+        }
+    }
+    const int* pool = nClean > 0 ? clean : soft;
+    const int n = nClean > 0 ? nClean : nSoft;
+    if (n <= 0 || !pool) return -1;
+    const uint32_t mix = now ^ 0x9E3779B9u ^ static_cast<uint32_t>(fromIdx * 97);
+    return pool[mix % static_cast<uint32_t>(n)];
+}
+
+void ClearReconnectHopLatch() {
+    gReconnectHopArmed.store(0, std::memory_order_release);
+    gReconnectHopFrom.store(-1, std::memory_order_release);
+    gReconnectHopTo.store(-1, std::memory_order_release);
+}
+
 }  // namespace
 
 int LastKnownChannel1Based() { return KnownDisp1Based(); }
+
+void SetReconnectHopEnabled(bool on) {
+    gReconnectHopWant.store(on ? 1 : 0, std::memory_order_release);
+    if (!on) ClearReconnectHopLatch();
+}
+
+void EnsureReconnectNotSameChannel(const char* why) {
+    if (gReconnectHopWant.load(std::memory_order_acquire) == 0) return;
+    if (why && std::strcmp(why, "encounter_soft_hop") == 0) {
+        // 只 skip 重抽不够：KickSniff 随后 RequestAttempt(disconnected) 会再进 Ensure。
+        // 把 latch 钉在遇人已选频上，后续只回贴、不抽第三频（BIN 18:30:09 51→22 后又 22→19）。
+        const int sticky = auto_enter::StickyChannel1Based();
+        const int known = gKnownChannelIdx;
+        const int pin = (known >= 1 && known <= 64) ? known : sticky;
+        if (pin >= 1 && pin <= 64) {
+            gReconnectHopFrom.store(pin, std::memory_order_release);
+            gReconnectHopTo.store(pin, std::memory_order_release);
+            gReconnectHopArmed.store(1, std::memory_order_release);
+            Log("reconnect-hop skip why=%s pin latch idx=%d ch=%d (encounter already picked)", why,
+                pin, DispCh(pin));
+        } else {
+            Log("reconnect-hop skip why=%s (encounter already picked)", why);
+        }
+        return;
+    }
+    if (IsMigrateInFlight()) {
+        Log("reconnect-hop skip why=%s (migrate in flight)", why ? why : "?");
+        return;
+    }
+
+    const int armedTo = gReconnectHopTo.load(std::memory_order_acquire);
+    if (gReconnectHopArmed.load(std::memory_order_acquire) && armedTo >= 1 && armedTo <= 64) {
+        const int armedFrom = gReconnectHopFrom.load(std::memory_order_acquire);
+        const bool pinOnly = armedFrom == armedTo;
+        // 遇人 pin 的 latch 是 from==to。下一轮 hangup_timer 必须重抽，不能永远粘那一频。
+        // KickSniff disconnected / 同轮 CloseSession 重试仍走回贴。
+        const bool newHangupCycle =
+            why && (std::strcmp(why, "hangup_timer") == 0 || std::strcmp(why, "hangup_fires") == 0 ||
+                    std::strcmp(why, "hangup_after_lie") == 0 ||
+                    std::strcmp(why, "same_map_field_reload") == 0);
+        if (pinOnly && newHangupCycle) {
+            ClearReconnectHopLatch();
+            Log("reconnect-hop drop stale encounter pin idx=%d ch=%d why=%s (new hangup cycle)",
+                armedTo, DispCh(armedTo), why);
+        } else {
+            gKnownChannelIdx = armedTo;
+            auto_enter::NoteStickyChannel(armedTo, "reconnect_hop_latch");
+            Log("reconnect-hop latch reapply to=%d ch=%d why=%s", armedTo, DispCh(armedTo),
+                why ? why : "?");
+            return;
+        }
+    }
+
+    const int sticky = auto_enter::StickyChannel1Based();
+    const int known = gKnownChannelIdx;
+    const int from = (known >= 0 && known <= 64) ? known : sticky;
+    int count = gChannelCount;
+    if (count <= 1) count = gLastChannelCount;
+    if (count <= 1) {
+        const int ccuN = ccu::GetCcuStatus().worldChannelCount;
+        if (ccuN > 1 && ccuN <= 64) count = ccuN;
+    }
+
+    if (sticky >= 1 && known >= 0 && sticky != known) {
+        // hangup_preempt_hop 已粘 hop 目标，known 还是旧频：只把 known 收成 sticky，不再抽第三频。
+        gKnownChannelIdx = sticky;
+        Log("reconnect-hop adopt sticky=%d knownWas=%d why=%s (no re-pick)", sticky, known,
+            why ? why : "?");
+        return;
+    }
+    if (from < 0) {
+        Log("reconnect-hop skip why=%s (from unknown)", why ? why : "?");
+        return;
+    }
+
+    const int to = PickReconnectOther(from, count);
+    if (to < 1 || to == from) {
+        Log("reconnect-hop fail-open sameCh from=%d ch=%d count=%d why=%s", from, DispCh(from),
+            count, why ? why : "?");
+        return;
+    }
+
+    gKnownChannelIdx = to;
+    if (from >= 1 && sticky <= 0) auto_enter::NoteStickyChannel(from, "reconnect_hop_from");
+    auto_enter::NoteStickyChannel(to, "reconnect_hop");
+    gReconnectHopFrom.store(from, std::memory_order_release);
+    gReconnectHopTo.store(to, std::memory_order_release);
+    gReconnectHopArmed.store(1, std::memory_order_release);
+    Log("reconnect-hop from=%d ch=%d → to=%d ch=%d count=%d why=%s", from, DispCh(from), to,
+        DispCh(to), count, why ? why : "?");
+}
+
+void RevertReconnectHopIfArmed(const char* why) {
+    if (gReconnectHopArmed.load(std::memory_order_acquire) == 0) return;
+    const int from = gReconnectHopFrom.load(std::memory_order_acquire);
+    ClearReconnectHopLatch();
+    if (from >= 0 && from <= 64) gKnownChannelIdx = from;
+    if (from >= 1) auto_enter::NoteStickyChannel(from, "reconnect_hop_revert");
+    Log("reconnect-hop revert from=%d ch=%d why=%s", from, DispCh(from), why ? why : "?");
+}
 
 int DisplayChannel1Based() {
     // 玩家 UI = 列表 id / WM+0x6C + 1。BIN 08-15：sticky=39 raw6c=39 → 頻道 40。
@@ -2060,6 +2196,9 @@ void SyncKnownAfterEnter(int channelId1Based, const char* why) {
     const int idx = channelId1Based;
     const int prev = gKnownChannelIdx;
     gKnownChannelIdx = idx;
+    // 不在进图清 latch：land_quiet 里 KickSniff disconnected 还会再 Ensure。
+    // 过早清掉会把遇人已选频当成「挂机重连」再抽一频（BIN 18:31:17 落地后 20→43）。
+    // latch 改在 Tick 里 IsReconnectInFlight 下降沿清。
     // 清前进基线：下一拍 ObserveWm 走 known，勿把进图后 +0x6C 抖动当 wm6c_adv。
     gLastRaw68 = -999;
     gLastRaw6c = -999;
@@ -2129,6 +2268,7 @@ void Init() {
     gResumeAt = 0;
     ClearHopFailRecover("init");
     ClearSoftAvoid("init");
+    ClearReconnectHopLatch();
     gWatchDisconnect = false;
     gDisconnectingSince = 0;
     gSawConnecting = false;
@@ -2261,6 +2401,12 @@ DWORD CooldownRemainingMs() {
 
 void Tick(DWORD now) {
     UpdatePlayReadyClock(now);
+    {
+        static bool sWasInFlight = false;
+        const bool inFlight = soft_login_probe::IsReconnectInFlight();
+        if (sWasInFlight && !inFlight) ClearReconnectHopLatch();
+        sWasInFlight = inFlight;
+    }
     if (YieldHop()) {
         AbortHopForYield();
         return;
@@ -2315,16 +2461,23 @@ void Tick(DWORD now) {
         if (seq == 0) {
             // fall through to switch (Idle no-op)
         } else if (const char* defer = DeferReason()) {
-            MaybeNotifyDefer(seq, defer, now);
-            // 冷却/静默内连点：保留 pending，到期后自动 Begin（勿丢弃，否则体感「点了没触发」）。
-            // 仍等满 cooldown 再开火，不缩短冷却窗（BIN 踢号风险）。
-            // 静默已结束（仅剩冷却）则放刀；勿因排队把战斗停到冷却满。
-            if ((std::strcmp(defer, "冷却中") == 0 || std::strcmp(defer, "换频静默") == 0) &&
-                gResumeAt == 0 &&
-                gEarlyHoldFromRequest.exchange(false, std::memory_order_acq_rel)) {
-                gFireReadyAt.store(0, std::memory_order_release);
-                ResumeCombatAfterHop();
-                Log("hold pending seq=%u during %s (combat resume, fire after cool)", seq, defer);
+            // 软重连跨进图：旧图 UserPool 残影会在 CloseSession 后 80ms 再 RequestHop。
+            // 若像冷却那样保住 pending，落地必再打一刀（BIN 18:30:09 seq=3774873614 空图再 hop）。
+            if (std::strcmp(defer, "软重连中") == 0) {
+                Log("drop pending seq=%u reconnect in flight", seq);
+                AbortHopForHangup();
+            } else {
+                MaybeNotifyDefer(seq, defer, now);
+                // 冷却/静默内连点：保留 pending，到期后自动 Begin（勿丢弃，否则体感「点了没触发」）。
+                // 仍等满 cooldown 再开火，不缩短冷却窗（BIN 踢号风险）。
+                // 静默已结束（仅剩冷却）则放刀；勿因排队把战斗停到冷却满。
+                if ((std::strcmp(defer, "冷却中") == 0 || std::strcmp(defer, "换频静默") == 0) &&
+                    gResumeAt == 0 &&
+                    gEarlyHoldFromRequest.exchange(false, std::memory_order_acq_rel)) {
+                    gFireReadyAt.store(0, std::memory_order_release);
+                    ResumeCombatAfterHop();
+                    Log("hold pending seq=%u during %s (combat resume, fire after cool)", seq, defer);
+                }
             }
         } else if (YieldHop()) {
             gPendingSeq.store(0);

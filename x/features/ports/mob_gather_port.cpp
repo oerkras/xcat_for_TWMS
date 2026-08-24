@@ -53,6 +53,7 @@ using x::runtime::il2cpp::ReadPtr;
 constexpr size_t kFbVecCtrl = 0x50;
 constexpr size_t kFbPvcActive = 0xF0;
 constexpr size_t kFbMobData = 0x138;
+constexpr size_t kFbSummonType = 0x114;
 constexpr size_t kFbVcAp = 0x98;
 constexpr size_t kFbVcCurFh = 0x28;
 constexpr size_t kFbFhId = 0x10;
@@ -60,7 +61,6 @@ constexpr size_t kFbMoveAbility = 0x2C;
 constexpr size_t kFbVcAct = 0x80;
 
 constexpr int kMaxHold = 64;
-constexpr float kGatherRadiusPx = 2800.f;
 constexpr DWORD kJobWaitMs = 1500;
 constexpr DWORD kDtCapMs = 120;
 constexpr DWORD kDtDefaultMs = 40;
@@ -79,7 +79,8 @@ constexpr float kWalkMaxDropVy = -120.f;
 // 一样是 1300px 层谎，BIN 15:45:10 sample ap=-157 / py=-1509 → 205）。
 // 弃用 foothold 图闸：快照是 AbsPos 空间且山谷图斜坡 prev/next 链把坑底连进人所在
 // 步行连通域（BIN reach=381/634 含坑），Walk 不限跳会把坑白名单化，闸整体失效。
-constexpr float kGatherMaxBelowPlayerPx = 1200.f;  // 厂默；运行时以面板 mobGatherDyLimPx / gDyLimUser 为准
+constexpr float kGatherMaxBelowPlayerPx =
+    static_cast<float>(xcat::kMobGatherDyLimPxDefault);  // 厂默；运行时以面板 mobGatherDyLimPx / gDyLimUser 为准
 // 最密簇：只在人所在层找（|dY|≤竖层窗，面板「竖层」，默认 200）。禁止跨层俯冲
 // （BIN 16:50:40 跨 1078px 0.47s 到了人还在台上方，松旋翼后一边掉一边砍）。
 // 选项关（默认）= 站立吸怪，本闸不跑。
@@ -132,7 +133,7 @@ DWORD gLastHoldTick = 0;
 DWORD gLastApplyTick = 0;
 std::atomic<int> gMaxHold{kMaxHold};
 std::atomic<int> gFarInFlightMax{0};
-std::atomic<float> gRadiusPx{kGatherRadiusPx};
+std::atomic<float> gRadiusPx{static_cast<float>(xcat::kMobGatherRadiusDefaultPx)};
 std::atomic<float> gLayerYPx{static_cast<float>(xcat::kMobGatherLayerYPxDefault)};
 std::atomic<float> gDyLimUser{static_cast<float>(xcat::kMobGatherDyLimPxDefault)};
 std::atomic<float> gWalkReadyDx{static_cast<float>(xcat::kMobGatherWalkDxDefault)};
@@ -144,6 +145,7 @@ std::atomic<uint8_t> gIgnoreQuiet{0};
 std::atomic<unsigned> gQuietDelayMs{0};
 std::atomic<DWORD> gQuietSinceMs{0};
 std::atomic<uint8_t> gApplyCtrl{0};
+std::atomic<uint8_t> gFirstGenOnly{xcat::kMobGatherFirstGenOnlyDefault != 0 ? 1 : 0};
 std::atomic<uint8_t> gSoftRelogin{0};
 std::atomic<unsigned> gSoftReloginSec{xcat::kMobGatherSoftReloginSecDefault};
 std::atomic<unsigned> gHangupFiresNeed{xcat::kMobGatherHangupFiresDefault};
@@ -158,6 +160,10 @@ std::atomic<uint8_t> gHangupAwaitLand{0};
 std::atomic<uint8_t> gHangupLandedOk{0};
 std::atomic<uint8_t> gHangupCombatHold{0};
 std::atomic<uint8_t> gAttackDirty{0};
+// 掉出图脏会话：回同图必须 CloseSession，禁止 same_map_resume / stuck_lobby 接着打。
+std::atomic<DWORD> gLeftPlayMs{0};
+std::atomic<uint8_t> gSameMapWashPending{0};
+constexpr DWORD kSameMapFieldReloadMinMs = 200;
 std::atomic<DWORD> gHangupLandOkMs{0};
 constexpr DWORD kHangupSupplyHoldMaxMs = 8000;
 std::atomic<uint8_t> gClearRelogin{0};
@@ -216,6 +222,31 @@ OidTrack gOid[kOidTrack]{};
 int gOidN = 0;
 int gSpawnGateMapId = 0;
 bool gSpawnGateOn = false;
+
+int32_t gFieldOid[kOidTrack]{};
+int gFieldN = 0;
+uint8_t gFieldLatchPending = 1;
+
+void ClearFieldSnap() {
+    if (gFieldN > 0) {
+        x::runtime::LogI("MobGather", "onField snap clear n=%d", gFieldN);
+    }
+    gFieldN = 0;
+    gFieldLatchPending = gFirstGenOnly.load(std::memory_order_acquire) != 0 ? 1 : 0;
+}
+
+bool InOnFieldSnap(int32_t id) {
+    for (int i = 0; i < gFieldN; ++i) {
+        if (gFieldOid[i] == id) return true;
+    }
+    return false;
+}
+
+void NoteFieldOid(int32_t id) {
+    if (id == 0 || gFieldN >= kOidTrack) return;
+    if (InOnFieldSnap(id)) return;
+    gFieldOid[gFieldN++] = id;
+}
 
 void ClearOidTrack() { gOidN = 0; }
 
@@ -382,6 +413,8 @@ bool IsFixedOrImmovable(void* mob) {
     return ReadMoveAbility(mob) == 0;
 }
 
+int32_t ReadSummonType(void* mob) { return ReadI32(mob, kFbSummonType); }
+
 bool ApLooksLive(float x, float y) {
     return std::fabs(x) + std::fabs(y) > 1.f;
 }
@@ -460,6 +493,9 @@ bool FindDenseCluster(const mob::Snapshot& snap, float playerY, float layerWinOv
         const mob::MobLite& m = snap.mobs[i];
         if (!LooksLikeHeapPtr(m.ptr) || !m.ready || m.deadType != 0) continue;
         if (IsFixedOrImmovable(m.ptr)) continue;
+        if (gFirstGenOnly.load(std::memory_order_acquire) != 0 && !gFieldLatchPending &&
+            !InOnFieldSnap(m.id))
+            continue;
         float x = 0.f;
         float y = 0.f;
         int split = 0;
@@ -1289,6 +1325,7 @@ void Init() {
     ClearOidTrack();
     gSpawnGateMapId = 0;
     gSpawnGateOn = false;
+    ClearFieldSnap();
     gSeekLatchOn = 0;
     gSeekSettleMs = 0;
     gSeekNearMs = 0;
@@ -1450,6 +1487,15 @@ void SetApplyCtrl(bool on) {
     }
 }
 
+void SetFirstGenOnly(bool on) {
+    const uint8_t v = on ? 1 : 0;
+    const uint8_t prev = gFirstGenOnly.exchange(v, std::memory_order_acq_rel);
+    if (prev == v) return;
+    gFieldN = 0;
+    gFieldLatchPending = on ? 1 : 0;
+    x::runtime::LogI("MobGather", "onField=%d (latch live oids; skip later spawn)", on ? 1 : 0);
+}
+
 bool HangupSecondsOn() {
     if (gSoftRelogin.load(std::memory_order_acquire) != 0) return true;
     if (gHangupUnbindF5.load(std::memory_order_acquire) != 0) return false;
@@ -1603,6 +1649,77 @@ bool HangupWashInFlight() {
     return gHangupAwaitLand.load(std::memory_order_acquire) != 0 || IsReconnectInFlight();
 }
 
+void NoteLeftPlayForHangup() {
+    if (gHangupAwaitLand.load(std::memory_order_acquire) != 0) return;
+    if (x::features::travel::IsActive()) return;
+    if (!gAttackDirty.load(std::memory_order_acquire) && !HangupFiresDue()) return;
+    if (!SoftReloginWanted()) return;
+    const DWORD now = GetTickCount();
+    DWORD expected = 0;
+    if (gLeftPlayMs.compare_exchange_strong(expected, now ? now : 1u, std::memory_order_acq_rel)) {
+        x::runtime::LogI("MobGather",
+                         "same-map field reload arm — dirty leave-play (must CloseSession on return)");
+    }
+    gSameMapWashPending.store(1, std::memory_order_release);
+}
+
+bool HangupAwaitingLand() {
+    return gHangupAwaitLand.load(std::memory_order_acquire) != 0;
+}
+
+bool HangupBlocksFakeInMapRecover() {
+    return HangupFiresDue() || HangupAwaitingLand() ||
+           gSameMapWashPending.load(std::memory_order_acquire) != 0;
+}
+
+bool HangupOnSameMapFieldReload() {
+    using x::features::soft_login_probe::IsArmed;
+    if (gHangupAwaitLand.load(std::memory_order_acquire) != 0) {
+        gSameMapWashPending.store(0, std::memory_order_release);
+        return true;
+    }
+    if (gSameMapWashPending.load(std::memory_order_acquire) == 0) return false;
+
+    const DWORD now = GetTickCount();
+    const DWORD left = gLeftPlayMs.load(std::memory_order_acquire);
+    const DWORD away = left ? (now - left) : 0xFFFFFFFFu;
+    if (left && away < kSameMapFieldReloadMinMs) {
+        gLeftPlayMs.store(0, std::memory_order_release);
+        gSameMapWashPending.store(0, std::memory_order_release);
+        x::runtime::LogI("MobGather",
+                         "same-map field reload skip flicker away=%ums",
+                         static_cast<unsigned>(away));
+        return false;
+    }
+    if (!gAttackDirty.load(std::memory_order_acquire) && !HangupFiresDue()) {
+        gLeftPlayMs.store(0, std::memory_order_release);
+        gSameMapWashPending.store(0, std::memory_order_release);
+        return false;
+    }
+    if (!SoftReloginWanted() || !IsArmed()) {
+        x::runtime::LogW("MobGather",
+                         "same-map field reload wash owed but skip (wanted=%d armed=%d)",
+                         SoftReloginWanted() ? 1 : 0, IsArmed() ? 1 : 0);
+        return true;
+    }
+    if (x::features::auto_lie::IsQuizActive()) {
+        gHangupLieDeferred = 1;
+        x::runtime::LogI("MobGather",
+                         "same-map field reload defer auto_lie — fire after quiz");
+        return true;
+    }
+    if (FireProactiveHangup("same_map_field_reload")) {
+        gLeftPlayMs.store(0, std::memory_order_release);
+        gSameMapWashPending.store(0, std::memory_order_release);
+        x::runtime::LogI("MobGather",
+                         "same-map field reload wash CloseSession away=%ums",
+                         static_cast<unsigned>(away == 0xFFFFFFFFu ? 0 : away));
+        return true;
+    }
+    x::runtime::LogW("MobGather", "same-map field reload CloseSession fail — retry");
+    return true;
+}
+
 // hangup 已拆还没落地 / 卖装优先未拍板：dirty 还在也不能起下一轮表。
 bool HangupDeferNextClock() {
     using x::features::soft_login_probe::IsReconnectInFlight;
@@ -1698,6 +1815,13 @@ void TickSoftRelogin() {
     if (quizActive) gHangupLieDeferred = 1;
     sWasQuiz = quizActive ? 1 : 0;
     ConsumeNmSessionEnd();
+
+    // 掉出图：脏会话必须回图后 CloseSession。Travel 赶路 NoteLeftPlay 会自行忽略。
+    if (!(IsPlayReady() && IsInMapScene())) {
+        NoteLeftPlayForHangup();
+    } else {
+        (void)HangupOnSameMapFieldReload();
+    }
 
     // 计时：会话脏了才起表。换图 / Travel / InterStage 短离图不得清钟。
     // 只有这一轮已经拆（HangupDefer / 落地洗 FLAG）才开下一轮。
@@ -2480,6 +2604,7 @@ void TickDyLimRamp() {
         x::features::ports::mob_fh_ban::ClearAll();
         ClearOidTrack();
         gSpawnGateOn = false;
+        ClearFieldSnap();
         x::runtime::LogI("MobGather",
                          "dylim_ramp start seq=%u dyLim=1 r=%.0f (auto-on, no-seek, "
                          "+100/s to 2000; soft-relogin/clear paused)",
@@ -2712,6 +2837,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     teleport::FlightState st{};
     if (!teleport::QueryFlightState(st) || !st.ok) {
         gQuietSinceMs.store(0, std::memory_order_release);
+        ClearFieldSnap();
         out->why = "no_flight";
         skipLog("no_flight");
         return false;
@@ -2720,6 +2846,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     const int nm = x::features::kick_sniff::LastSessionState();
     if (nm == 0 || nm == 1) {
         gQuietSinceMs.store(0, std::memory_order_release);
+        ClearFieldSnap();
         x::features::ports::mob_fh_ban::ClearAll();
         out->why = "nm_down";
         skipLog("nm_down");
@@ -2733,6 +2860,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     // 软重连 hold = 还没进图站稳。hold / 离图 / 掉线清延时钟。落地也吸只管落地静默。
     if (hold && !landQ) {
         gQuietSinceMs.store(0, std::memory_order_release);
+        ClearFieldSnap();
         x::features::ports::mob_fh_ban::ClearAll();
         out->why = "land_quiet";
         skipLog("hold");
@@ -2742,10 +2870,12 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     const DWORD now = GetTickCount();
     DWORD since = gQuietSinceMs.load(std::memory_order_acquire);
     // 整模块延时：进图站稳后起表。关吸怪 / hold / 离图清钟。不绑落地也吸。
+    // 同图软重连 oid 全换：延时钟清零这一拍必须丢掉旧场快照，否则 why=gen 一张不吸。
     if (since == 0) {
         since = now ? now : 1;
         gQuietSinceMs.store(since, std::memory_order_release);
         ClearOidTrack();
+        ClearFieldSnap();
     }
     if (landGate && !ignoreQuiet) {
         x::features::ports::mob_fh_ban::ClearAll();
@@ -2777,6 +2907,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         gSpawnGateMapId = snap.mapId;
         ClearOidTrack();
         gSpawnGateOn = false;
+        ClearFieldSnap();
     }
     PruneOidTrack(liveIds, nLiveIds);
     if (snap.count <= 0) {
@@ -2814,6 +2945,9 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     int skippedAir = 0;
     int skippedDy = 0;
     int skippedPool = 0;
+    int skippedGen = 0;
+    int skipGenHave = 0;
+    int32_t skipGenSt = 0;
     int32_t skipWalkId = 0;
     float skipWalkDx = 0.f;
     float skipWalkDxMax = 0.f;
@@ -2868,6 +3002,16 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         }
         const bool keepArmed = x::features::ports::mob_fh_ban::IsArmed(liveVc) &&
                                x::features::ports::mob::StillSameLiveMob(m.ptr, m.id, nullptr);
+        const bool onField = gFirstGenOnly.load(std::memory_order_acquire) != 0;
+        if (onField && gFieldLatchPending) NoteFieldOid(m.id);
+        if (onField && !gFieldLatchPending && !keepArmed && !InOnFieldSnap(m.id)) {
+            ++skippedGen;
+            if (!skipGenHave) {
+                skipGenHave = 1;
+                skipGenSt = ReadSummonType(m.ptr);
+            }
+            continue;
+        }
         if (adLive > radius && !keepArmed) continue;
         // 清怪重连本轮已冻结：只维持这一批，禁止 Arm 新怪。
         if (ClearReloginHoldWaveOnly() && (!keepArmed || !ClearWaveHas(m.id))) continue;
@@ -2906,6 +3050,10 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         cands[nCand].armed = keepArmed;
         cands[nCand].fresh = !keepArmed && !exempt;
         ++nCand;
+    }
+    if (gFirstGenOnly.load(std::memory_order_acquire) != 0 && gFieldLatchPending && gFieldN > 0) {
+        gFieldLatchPending = 0;
+        x::runtime::LogI("MobGather", "onField latch n=%d", gFieldN);
     }
     for (int a = 0; a < nCand; ++a) {
         for (int b = a + 1; b < nCand; ++b) {
@@ -2984,19 +3132,25 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     }
 
     if (job.n <= 0 && job.nApply <= 0) {
-        out->why = (nLive <= 0) ? "no_live"
-                                : ((skippedSpawn > 0 || skippedDy > 0 || skippedPool > 0) ? "walk"
-                                                                                          : "empty");
+        out->why = (skippedGen > 0 && skippedSpawn == 0 && skippedDy == 0 && skippedPool == 0)
+                       ? "gen"
+                       : ((nLive <= 0) ? "no_live"
+                                       : ((skippedSpawn > 0 || skippedDy > 0 || skippedPool > 0)
+                                              ? "walk"
+                                              : "empty"));
         if (verbose || PeriodicLogOk()) {
             x::runtime::LogI("MobGather",
                              "%s considered=0 pushed=0 why=%s n=%d live=%d ours=%d passive=%d "
                              "fixed=%d remote=%d skipSpawn=%d skipAir=%d skipDy=%d skipPool=%d "
+                             "skipGen=%d st=%d onField=%d "
                              "holdId=%d dHome=%.0f dHomeMax=%.0f ap=%.0f,%.0f "
                              "onFh=%d vy=%.0f spawnN=%d gate=%d applyOn=%d qdelay=%u dyLim=%.0f "
                              "packN=%d packY=%.0f layerY=%.0f walkDx=%.0f feet=%.0f "
                              "off=%.0f,%.0f",
                              kind, out->why, snap.count, nLive, nOurs, nPassive, skippedFixed,
                              skippedRemote, skippedSpawn, skippedAir, skippedDy, skippedPool,
+                             skippedGen, skipGenSt,
+                             gFirstGenOnly.load(std::memory_order_relaxed) ? 1 : 0,
                              skipWalkId, skipWalkDx, skipWalkDxMax, skipWalkX, skipWalkY, skipWalkFh,
                              skipWalkVy, snap.spawnPointN, gSpawnGateOn ? 1 : 0, applyOn ? 1 : 0,
                              gQuietDelayMs.load(std::memory_order_relaxed),
@@ -3069,7 +3223,8 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         }
         x::runtime::LogI("MobGather",
                          "%s considered=%d new=%d sta=%d far=%d skipFar=%d farAdm=%d skipSpawn=%d "
-                         "skipAir=%d skipDy=%d skipPool=%d holdId=%d dHome=%.0f dHomeMax=%.0f "
+                         "skipAir=%d skipDy=%d skipPool=%d skipGen=%d st=%d onField=%d "
+                         "holdId=%d dHome=%.0f dHomeMax=%.0f "
                          "onFh=%d vy=%.0f "
                          "spawnN=%d gate=%d pushed=%d "
                          "detach=%d why=ok "
@@ -3081,7 +3236,9 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
                          "sample id=%d ctrl=%d(%s) cmd=(%.0f,%.0f) ap=%.1f,%.1f vy=%.0f "
                          "maxAd=%.0f maxCmd=%.0f",
                          kind, out->considered, nNew, nSta, nFar, nSkipFar, nFarAdmit, skippedSpawn,
-                         skippedAir, skippedDy, skippedPool, skipWalkId, skipWalkDx, skipWalkDxMax,
+                         skippedAir, skippedDy, skippedPool, skippedGen, skipGenSt,
+                         gFirstGenOnly.load(std::memory_order_relaxed) ? 1 : 0, skipWalkId,
+                         skipWalkDx, skipWalkDxMax,
                          skipWalkFh, skipWalkVy, snap.spawnPointN, gSpawnGateOn ? 1 : 0, out->pushed,
                          nDetach, nLive,
                          nOurs, nPassive, skippedRemote,

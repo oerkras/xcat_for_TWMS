@@ -18,30 +18,45 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# 跨版本捞回按角色累计的测谎战绩。
+# 跨版本捞回：测谎战绩 + GAMA PASS账密直登账号。
 #
-# 换包时 XCat_data\state 整体丢弃，只还原启动器白名单里那几个偏好文件。lie_stats.tsv 记的是
-# 「这个角色历史上遇到过几次测谎、服端判过几次通过」——攒出来的历史，清掉就再也补不回来。
-# BIN d43e77：客户 08-03~08-11 更新九次，seen 从 17 被清成 1。
+# 换包时 XCat_data\state 整体丢弃，只还原启动器白名单里那几个偏好文件。
+# lie_stats.tsv：按角色累计的测谎战绩，清掉补不回来（BIN d43e77）。
+# gp_device_login.dpapi / .json：账密直登「当前账号」；182→183 白名单没带上，换包后要重新粘贴。
 #
 # 白名单已在 update_client.cpp 补上，但那份脚本由**当前已装的**启动器生成，得等客户装上带
 # 白名单的版本之后才生效。这个钩子随新包走、当场就能跑，正好补上中间那一次。两边都在时
 # 不覆盖已还原的（白名单还原在前，且它取自 stage 快照，比 aside 更可靠）。
 #
-# 失败只记一行不 throw：为一个统计文件中止整个换包不值。
-# in-place 覆盖模式下 aside 为空、旧 state 已被清，这里捞不到也属正常，靠白名单兜下一次。
+# 来源优先级：
+#   1) $Work\carry_state（pre_apply 在清盘前从旧树暂存；in-place 也有）
+#   2) rename-aside 旧树
+# 失败只记一行不 throw：为一个偏好文件中止整个换包不值。
+$carryLeaves = @('lie_stats.tsv', 'gp_device_login.dpapi', 'gp_device_login.json')
+$srcDirs = New-Object 'System.Collections.Generic.List[string]'
+if ($Work) {
+    $stash = Join-Path $Work 'carry_state'
+    if (Test-Path -LiteralPath $stash -PathType Container) {
+        [void]$srcDirs.Add($stash)
+    }
+}
 if ($InstallAside -and (Test-Path -LiteralPath $InstallAside)) {
+    [void]$srcDirs.Add((Join-Path $InstallAside 'XCat_data\state'))
+}
+foreach ($leaf in $carryLeaves) {
     try {
-        $src = Join-Path $InstallAside 'XCat_data\state\lie_stats.tsv'
-        $dst = Join-Path $FinalDest 'XCat_data\state\lie_stats.tsv'
-        if ((Test-Path -LiteralPath $src -PathType Leaf) -and
-            -not (Test-Path -LiteralPath $dst -PathType Leaf)) {
+        $dst = Join-Path $FinalDest ('XCat_data\state\' + $leaf)
+        if (Test-Path -LiteralPath $dst -PathType Leaf) { continue }
+        foreach ($dir in $srcDirs) {
+            $src = Join-Path $dir $leaf
+            if (-not (Test-Path -LiteralPath $src -PathType Leaf)) { continue }
             New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
             Copy-Item -LiteralPath $src -Destination $dst -Force
-            Write-Output "lie_stats.tsv carried over from aside install"
+            Write-Output ($leaf + " carried over from " + $dir)
+            break
         }
     } catch {
-        Write-Output ("carry lie_stats.tsv failed: " + $_.Exception.Message)
+        Write-Output ("carry " + $leaf + " failed: " + $_.Exception.Message)
     }
 }
 

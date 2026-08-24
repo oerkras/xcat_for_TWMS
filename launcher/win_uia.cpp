@@ -744,6 +744,11 @@ IUIAutomationElement* Session::ElementFromHwnd(HWND hwnd) const {
     return el;
 }
 
+IUIAutomationElement* Session::PageDocument(IUIAutomationElement* root) const {
+    if (!uia_ || !root) return nullptr;
+    return FindPageDocument(uia_, root);
+}
+
 IUIAutomationElement* Session::FindByName(IUIAutomationElement* root, const wchar_t* namePart,
                                           bool substring, bool preferInvokeable) const {
     if (!uia_ || !root || !namePart || !*namePart) return nullptr;
@@ -1327,12 +1332,11 @@ bool Session::ClickAccountCardIndex(IUIAutomationElement* root, int index0, std:
                                     int clickVariant) const {
     if (!uia_ || !root || index0 < 0) return false;
 
-    IUIAutomationCondition* trueCond = nullptr;
-    if (FAILED(uia_->CreateTrueCondition(&trueCond)) || !trueCond) return false;
-    IUIAutomationElementArray* arr = nullptr;
-    HRESULT hr = root->FindAll(TreeScope_Descendants, trueCond, &arr);
-    trueCond->Release();
-    if (FAILED(hr) || !arr) return false;
+    // 已是 Document 就不要再找子 Document（iframe 会搜偏）。窗口根才提页。
+    CONTROLTYPEID rootType = 0;
+    root->get_CurrentControlType(&rootType);
+    IUIAutomationElement* page =
+        (rootType == UIA_DocumentControlTypeId) ? nullptr : FindPageDocument(uia_, root);
 
     struct AccHit {
         IUIAutomationElement* el = nullptr;
@@ -1344,115 +1348,127 @@ bool Session::ClickAccountCardIndex(IUIAutomationElement* root, int index0, std:
         int bonus = 0;
     };
 
-    int len = 0;
-    arr->get_Length(&len);
-    std::vector<AccHit> raw;
-    for (int i = 0; i < len; ++i) {
-        IUIAutomationElement* el = nullptr;
-        if (FAILED(arr->GetElement(i, &el)) || !el) continue;
-        const std::wstring n = ElemName(el);
-        if (!LooksLikeAccountSeedName(n)) {
-            el->Release();
-            continue;
-        }
-        const RECT seedR = ElemRect(el);
-        const long seedW = seedR.right - seedR.left;
-        const long seedH = seedR.bottom - seedR.top;
-        const int seedAt = CountAtSigns(n);
-
-        IUIAutomationElement* card = nullptr;
-        // 种子本身已是「单卡尺寸」→ 不再上溯（防单账号爬进列表壳，BIN 05:37/05:50）
-        if (seedAt == 1 && seedH >= 40 && seedH <= 160 && seedW >= 100 && seedW <= 640 &&
-            RectVisible(seedR)) {
-            card = el;
-            card->AddRef();
-            el->Release();
-        } else {
-            card = ResolveAccountCard(uia_, el);
-            el->Release();
-        }
-        if (!card) continue;
-        const std::wstring ct = ElemName(card);
-        if (BadAccountCardName(ct) || CountAtSigns(ct) >= 2) {
-            card->Release();
-            continue;
-        }
-        const RECT r = ElemRect(card);
-        if (!RectVisible(r)) {
-            card->Release();
-            continue;
-        }
-        const long w = r.right - r.left;
-        const long hgt = r.bottom - r.top;
-        const long area = w * hgt;
-        // 最终候选仍过大 → 丢弃（点中心必空）
-        if (area < 80 || hgt > 180 || w > 680) {
-            card->Release();
-            continue;
-        }
-        AccHit hit;
-        hit.el = card;
-        hit.name = ct.empty() ? n : ct;
-        hit.mailKey = MailKeyFromName(hit.name);
-        if (hit.mailKey.empty()) hit.mailKey = MailKeyFromName(n);
-        hit.rect = r;
-        hit.area = area;
-        hit.mailCount = CountAtSigns(hit.name);
-        if (hit.mailCount == 1) hit.bonus += 30;
-        if (hit.name.find(L'@') != std::wstring::npos) hit.bonus += 10;
-        if (StrStrIW(hit.name.c_str(), L"default-user-avatar")) hit.bonus += 5;
-        // 更接近「一行卡」加分
-        if (hgt >= 48 && hgt <= 120) hit.bonus += 15;
-        raw.push_back(std::move(hit));
-    }
-    arr->Release();
-
-    // 按邮箱去重；父子包含时保留单邮箱、bonus/面积更优者（对齐 CDP）
     std::vector<AccHit> uniq;
-    for (auto& h : raw) {
-        int idx = -1;
-        for (int j = 0; j < (int)uniq.size(); ++j) {
-            auto& u = uniq[j];
-            const bool sameMail = !h.mailKey.empty() && h.mailKey == u.mailKey;
-            const bool nearPos = std::abs(h.rect.top - u.rect.top) < 12 &&
-                                 std::abs(h.rect.left - u.rect.left) < 12;
-            const bool nested =
-                (h.rect.left <= u.rect.left + 2 && h.rect.top <= u.rect.top + 2 &&
-                 h.rect.right >= u.rect.right - 2 && h.rect.bottom >= u.rect.bottom - 2) ||
-                (u.rect.left <= h.rect.left + 2 && u.rect.top <= h.rect.top + 2 &&
-                 u.rect.right >= h.rect.right - 2 && u.rect.bottom >= h.rect.bottom - 2);
-            if (sameMail || nearPos || nested) {
-                idx = j;
-                break;
+    auto collectFrom = [&](IUIAutomationElement* scope) {
+        for (auto& h : uniq) h.el->Release();
+        uniq.clear();
+        if (!scope) return;
+
+        IUIAutomationCondition* trueCond = nullptr;
+        if (FAILED(uia_->CreateTrueCondition(&trueCond)) || !trueCond) return;
+        IUIAutomationElementArray* arr = nullptr;
+        HRESULT hr = scope->FindAll(TreeScope_Descendants, trueCond, &arr);
+        trueCond->Release();
+        if (FAILED(hr) || !arr) return;
+
+        int len = 0;
+        arr->get_Length(&len);
+        std::vector<AccHit> raw;
+        for (int i = 0; i < len; ++i) {
+            IUIAutomationElement* el = nullptr;
+            if (FAILED(arr->GetElement(i, &el)) || !el) continue;
+            const std::wstring n = ElemName(el);
+            if (!LooksLikeAccountSeedName(n)) {
+                el->Release();
+                continue;
+            }
+            const RECT seedR = ElemRect(el);
+            const long seedW = seedR.right - seedR.left;
+            const long seedH = seedR.bottom - seedR.top;
+            const int seedAt = CountAtSigns(n);
+
+            IUIAutomationElement* card = nullptr;
+            // 种子本身已是「单卡尺寸」→ 不再上溯（防单账号爬进列表壳，BIN 05:37/05:50）
+            if (seedAt == 1 && seedH >= 40 && seedH <= 160 && seedW >= 100 && seedW <= 640 &&
+                RectVisible(seedR)) {
+                card = el;
+                card->AddRef();
+                el->Release();
+            } else {
+                card = ResolveAccountCard(uia_, el);
+                el->Release();
+            }
+            if (!card) continue;
+            const std::wstring ct = ElemName(card);
+            if (BadAccountCardName(ct) || CountAtSigns(ct) >= 2) {
+                card->Release();
+                continue;
+            }
+            const RECT r = ElemRect(card);
+            if (!RectVisible(r)) {
+                card->Release();
+                continue;
+            }
+            const long w = r.right - r.left;
+            const long hgt = r.bottom - r.top;
+            const long area = w * hgt;
+            if (area < 80 || hgt > 180 || w > 680) {
+                card->Release();
+                continue;
+            }
+            AccHit hit;
+            hit.el = card;
+            hit.name = ct.empty() ? n : ct;
+            hit.mailKey = MailKeyFromName(hit.name);
+            if (hit.mailKey.empty()) hit.mailKey = MailKeyFromName(n);
+            hit.rect = r;
+            hit.area = area;
+            hit.mailCount = CountAtSigns(hit.name);
+            if (hit.mailCount == 1) hit.bonus += 30;
+            if (hit.name.find(L'@') != std::wstring::npos) hit.bonus += 10;
+            if (StrStrIW(hit.name.c_str(), L"default-user-avatar")) hit.bonus += 5;
+            if (hgt >= 48 && hgt <= 120) hit.bonus += 15;
+            raw.push_back(std::move(hit));
+        }
+        arr->Release();
+
+        for (auto& h : raw) {
+            int idx = -1;
+            for (int j = 0; j < (int)uniq.size(); ++j) {
+                auto& u = uniq[j];
+                const bool sameMail = !h.mailKey.empty() && h.mailKey == u.mailKey;
+                const bool nearPos = std::abs(h.rect.top - u.rect.top) < 12 &&
+                                     std::abs(h.rect.left - u.rect.left) < 12;
+                const bool nested =
+                    (h.rect.left <= u.rect.left + 2 && h.rect.top <= u.rect.top + 2 &&
+                     h.rect.right >= u.rect.right - 2 && h.rect.bottom >= u.rect.bottom - 2) ||
+                    (u.rect.left <= h.rect.left + 2 && u.rect.top <= h.rect.top + 2 &&
+                     u.rect.right >= h.rect.right - 2 && u.rect.bottom >= h.rect.bottom - 2);
+                if (sameMail || nearPos || nested) {
+                    idx = j;
+                    break;
+                }
+            }
+            if (idx < 0) {
+                uniq.push_back(std::move(h));
+                continue;
+            }
+            auto& cur = uniq[idx];
+            bool preferH = false;
+            if (h.mailCount == 1 && cur.mailCount != 1)
+                preferH = true;
+            else if (h.mailCount != 1 && cur.mailCount == 1)
+                preferH = false;
+            else if (h.mailCount == 1 && cur.mailCount == 1)
+                preferH = (h.area < cur.area) || (h.area == cur.area && h.bonus > cur.bonus);
+            else if (h.bonus > cur.bonus || (h.bonus == cur.bonus && h.area < cur.area))
+                preferH = true;
+            if (preferH) {
+                cur.el->Release();
+                cur = std::move(h);
+            } else {
+                h.el->Release();
             }
         }
-        if (idx < 0) {
-            uniq.push_back(std::move(h));
-            continue;
-        }
-        auto& cur = uniq[idx];
-        bool preferH = false;
-        if (h.mailCount == 1 && cur.mailCount != 1)
-            preferH = true;
-        else if (h.mailCount != 1 && cur.mailCount == 1)
-            preferH = false;
-        // 同为单邮箱：保留更紧的卡（更小面积），避免点到列表壳中心（BIN 05:37）
-        else if (h.mailCount == 1 && cur.mailCount == 1)
-            preferH = (h.area < cur.area) || (h.area == cur.area && h.bonus > cur.bonus);
-        else if (h.bonus > cur.bonus || (h.bonus == cur.bonus && h.area < cur.area))
-            preferH = true;
-        if (preferH) {
-            cur.el->Release();
-            cur = std::move(h);
-        } else {
-            h.el->Release();
-        }
-    }
+        std::sort(uniq.begin(), uniq.end(), [](const AccHit& a, const AccHit& b) {
+            if (a.rect.top != b.rect.top) return a.rect.top < b.rect.top;
+            return a.rect.left < b.rect.left;
+        });
+    };
 
-    std::sort(uniq.begin(), uniq.end(), [](const AccHit& a, const AccHit& b) {
-        if (a.rect.top != b.rect.top) return a.rect.top < b.rect.top;
-        return a.rect.left < b.rect.left;
-    });
+    collectFrom(page ? page : root);
+    if (uniq.empty() && page) collectFrom(root);
+    if (page) page->Release();
 
     bool ok = false;
     if (index0 < (int)uniq.size()) {

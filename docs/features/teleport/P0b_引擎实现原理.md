@@ -6,6 +6,7 @@
 > **数据源**：`DumpRestoredData/dump.cs.restored.C`（折中档）· 原始真源 `Dumps/runtime/out/dump.cs` · IDB `Dumps/runtime/GameAssembly.dll.i64`
 > **RVA 基址**：`0x7FFB16B40000`（同 [`P0a`](P0a_瞬移CALL锚点.md)）· VA = base + RVA  
 > **2026-08-22**：下文 `ApplyImpact 0x11A4E60` / `LeaveFoothold 0x11AF5C0` 是**旧 dump**。当前 runtime IDB 为 `ApplyImpact 0x11C85D0`、`LeaveFoothold 0x11D2F00`、`SetImpactNext 0x11C5150`（imagebase 以打开的 `GameAssembly.dll.i64` 为准）。语义仍对（清 Valid → 写 Ap.V、两轴同一条 Min/Max 路 + 整数截断）；RVA 以 [`../simple_combat/满火力进站与竖直权限.md`](../simple_combat/满火力进站与竖直权限.md) 为准，勿把旧表抄进新代码。
+> **2026-08-24 本 IDB 复核 `SetImpactNext 0x11C5150`：** 写 `WingsNow` 的种子是 `byte_670D2938=0xAF xor 0xAF` → **恒为 0**（停翼，不是进翼）。正文「每次调用都写 Now」仍对，**值不是 1**。旧 dump `add al,5Dh` 不要用。Valid 置位 `0x53 xor 0x52=1`。ApplyImpact 清 Valid：`0x4E+0xB2` 溢出 → **0**。对照 [`../protocol/运动系统.md`](../protocol/运动系统.md) §12.5。
 > **实现**：`x/features/ports/teleport_port.cpp`（现役已不走本文 ImpactNext 旁路）
 > **安全**：全程只读 dump / IDB / 源码，未改 `.text`、未发包、未运行客户端
 

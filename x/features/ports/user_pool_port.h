@@ -8,7 +8,7 @@ namespace x::features::ports::user_pool {
 
 // 同图远程角色名落盘上限（遇人日志 / 通知；超出只记人数）。
 constexpr int kRemoteNameMax = 12;
-constexpr int kRemoteNameLen = 28;
+constexpr int kRemoteNameLen = 40;  // 13 汉字 UTF-8 + NUL；读失败时用 "#id"
 
 // 同图威胁采样（遇人策略 / GM·隐身升级用）。
 struct RemoteThreatSample {
@@ -17,10 +17,10 @@ struct RemoteThreatSample {
     int hideSuspectCount = 0;  // avatarRoot 存在但 activeSelf=false（调用方应在未开「藏人」时才采）
     uint16_t sampleAdminJob = 0;  // 首个 admin-like 的 JobCode（日志用）
     int nameCount = 0;         // names[] 有效条数（≤ remoteCount / kRemoteNameMax）
-    char names[kRemoteNameMax][kRemoteNameLen]{};  // UTF-8 角色名（User.CharacterName@+0x1B8）
+    char names[kRemoteNameMax][kRemoteNameLen]{};  // UTF-8 角色名（User.CharacterName@+0x1A0；失败为 #id）
 };
 
-// 读 User / UserRemote 角色名（CharacterName backing @+0x1B8；hash 防漂）。
+// 读 User / UserRemote 角色名（CharacterName backing @+0x1A0；hash 防漂）。
 // 成功写入 UTF-8 到 out；失败 out[0]=0 并返回 false。须在可读堆指针上调用。
 bool ReadUserCharacterName(void* user, char* out, int outSz);
 

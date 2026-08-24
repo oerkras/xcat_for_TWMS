@@ -32,6 +32,9 @@ const char* GetStateName();
 int LastOtherCount();
 int LastAdminLikeCount();     // JobCategory 8/9
 int LastHideSuspectCount();   // avatar 未激活嫌疑（藏人功能开时恒 0）
+// 软重连 RESULT success：同图不走换图宽限，UserPool 字典残影会 other=1 names=[?]。
+// 开一段残影窗并 silent 解开误 pause，避免落地立刻 RequestHop。
+void NoteSoftReenterLand(const char* why);
 // 吸怪刚开 / 换图：清掉旧人数并立刻再采，未采到前按「有人」处理。
 void InvalidateOccupancy();
 void RequestSampleNow();

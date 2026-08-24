@@ -432,7 +432,14 @@ bool EnsureGraph() {
 
     std::lock_guard<std::mutex> lock(gMu);
     if (GraphMatchesCacheUnlocked()) return true;
-    return RebuildFromCacheUnlocked();
+    const bool ok = RebuildFromCacheUnlocked();
+    if (ok && gGraph && gGraph->ok) {
+        x::runtime::LogI("Foothold",
+                         "graph lazy-build map=%d n=%d walk=%d climb=%d fall=%d rope=%d",
+                         gGraph->mapId, gGraph->n, gGraph->walkEdges, gGraph->climbEdges,
+                         gGraph->fallEdges, gGraph->ropeLinked);
+    }
+    return ok;
 }
 
 bool FindNearestFh(float x, float y, uint32_t* outId, float* outDist) {
@@ -481,6 +488,57 @@ bool FindNearestFh(float x, float y, uint32_t* outId, float* outDist) {
     if (pick < 0) return false;
     *outId = g.ids[pick];
     if (outDist) *outDist = (bestCover >= 0) ? bestCoverD : bestAnyD;
+    return true;
+}
+
+bool FindNearestStand(float x, float y, float* outX, float* outY, uint32_t* outFhId, float* outDist,
+                      bool avoidWalkJunction, bool cliffInset) {
+    if (outX) *outX = x;
+    if (outY) *outY = y;
+    if (outFhId) *outFhId = 0;
+    if (outDist) *outDist = 1e9f;
+    if (!outX || !outY) return false;
+    if (!EnsureGraph()) return false;
+
+    std::lock_guard<std::mutex> lock(gMu);
+    if (!gGraph || !gGraph->ok) return false;
+    const Graph& g = *gGraph;
+    const int ix = static_cast<int>(std::lround(x));
+    const int iy = static_cast<int>(std::lround(y));
+    const int endInset = cliffInset ? kEndInsetCliff : kEndInsetFly;
+
+    auto consider = [&](bool allowNarrow, int* bestIdx, int* bestCx, int* bestFy,
+                        float* bestD) {
+        for (int i = 0; i < g.n; ++i) {
+            if (IsWallFh(g, i)) continue;
+            if (!allowNarrow && ChainTooNarrowToStand(g, i, endInset)) continue;
+            int lo = 0, hi = 0;
+            if (!SafeStandXRange(g, i, &lo, &hi, avoidWalkJunction, endInset)) continue;
+            const int cx = ClampToSafeStandX(g, i, ix, avoidWalkJunction, endInset);
+            const int fy = FhYAtX(g.x1[i], g.y1[i], g.x2[i], g.y2[i], cx);
+            const float dx = static_cast<float>(cx - ix);
+            const float dy = static_cast<float>(fy - iy);
+            const float d = std::sqrt(dx * dx + dy * dy);
+            if (d < *bestD) {
+                *bestD = d;
+                *bestIdx = i;
+                *bestCx = cx;
+                *bestFy = fy;
+            }
+        }
+    };
+
+    int bestIdx = -1, bestCx = ix, bestFy = iy;
+    float bestD = 1e9f;
+    consider(/*allowNarrow=*/false, &bestIdx, &bestCx, &bestFy, &bestD);
+    if (bestIdx < 0)
+        consider(/*allowNarrow=*/true, &bestIdx, &bestCx, &bestFy, &bestD);
+    if (bestIdx < 0) return false;
+
+    *outX = static_cast<float>(bestCx);
+    *outY = static_cast<float>(bestFy);
+    if (outFhId) *outFhId = g.ids[bestIdx];
+    if (outDist) *outDist = bestD;
     return true;
 }
 

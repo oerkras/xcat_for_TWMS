@@ -118,9 +118,10 @@ void DrawCompactWatchdogLine() {
     ImGui::TextUnformatted(timer.c_str());
 }
 
-// .NET DateTime ticks（年 1 起，Kind 已在读侧剥掉）→ 固定 GMT+8 北京时间。
-// 包里是 FILETIME，客户端 FromFileTimeUtc → ticks 日历是 UTC；台服/经典版墙钟是 UTC+8，
-// 不跟 Windows 时区走（localtime 会在非东八区机器上偏掉）。
+// .NET DateTime ticks（年 1 起，Kind 已在读侧剥掉）→ 按 GMT+8 墙钟直接显示。
+// 实锤（上传 2026-08-23_21-03-57 ticks=639230635200000000）：日历是 08-23 06:32；
+// 再 +8h 会变成 14:32。同角色当天 08:43 已在选角，不可能下午才建。另一份
+// ticks=639230227800000000 若 +8h 会落到上传时刻之后。台服存的就是东八区墙钟。
 bool FormatDotNetTicksGmt8(int64_t ticks, char* when, size_t whenN, char* age, size_t ageN) {
     if (!when || whenN == 0) return false;
     when[0] = '\0';
@@ -129,14 +130,15 @@ bool FormatDotNetTicksGmt8(int64_t ticks, char* when, size_t whenN, char* age, s
     constexpr int64_t kTicksPerSecond = 10000000LL;
     constexpr int64_t kGmt8Sec = 8LL * 3600LL;
     if (ticks < kUnixEpochTicks) return false;
-    const int64_t unixUtc = (ticks - kUnixEpochTicks) / kTicksPerSecond;
-    const time_t unixCst = static_cast<time_t>(unixUtc + kGmt8Sec);
+    const int64_t unixCal = (ticks - kUnixEpochTicks) / kTicksPerSecond;
+    const time_t cal = static_cast<time_t>(unixCal);
     struct tm cst {};
-    if (gmtime_s(&cst, &unixCst) != 0) return false;
+    if (gmtime_s(&cst, &cal) != 0) return false;
     snprintf(when, whenN, "%04d-%02d-%02d %02d:%02d", cst.tm_year + 1900, cst.tm_mon + 1,
              cst.tm_mday, cst.tm_hour, cst.tm_min);
     if (age && ageN) {
         const time_t now = time(nullptr);
+        const int64_t unixUtc = unixCal - kGmt8Sec;
         const int64_t sec = (now > unixUtc) ? static_cast<int64_t>(now - unixUtc) : 0;
         const int64_t days = sec / 86400;
         const int64_t hours = (sec % 86400) / 3600;

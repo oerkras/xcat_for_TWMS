@@ -414,6 +414,14 @@ bool HasSelectAccountChrome(msc::uia::Session& uia, IUIAutomationElement* root) 
            uia.NameContains(root, L"使用其他账号登录", true);
 }
 
+bool LooksLikeCreateNickCta(msc::uia::Session& uia, IUIAutomationElement* root) {
+    if (!root) return false;
+    return uia.NameContains(root, L"建立遊戲暱稱", true) ||
+           uia.NameContains(root, L"建立游戏昵称", true) ||
+           uia.NameContains(root, L"建立暱稱", true) ||
+           uia.NameContains(root, L"建立昵称", true);
+}
+
 bool LooksLikeNickPage(msc::uia::Session& uia, IUIAutomationElement* root) {
     if (!root) return false;
     // 帳號卡页优先：标题/其它帳號链接在树里时绝不当暱稱页
@@ -426,9 +434,7 @@ bool LooksLikeNickPage(msc::uia::Session& uia, IUIAutomationElement* root) {
                            uia.NameContains(root, L"選擇遊戲暱稱", true) ||
                            uia.NameContains(root, L"游戏昵称", true) ||
                            uia.NameContains(root, L"选择游戏昵称", true);
-    const bool createNick = uia.NameContains(root, L"建立遊戲暱稱", true) ||
-                            uia.NameContains(root, L"建立游戏昵称", true);
-    return nickLabel || createNick;
+    return nickLabel || LooksLikeCreateNickCta(uia, root);
 }
 
 bool LooksLikeSelectAccountPage(msc::uia::Session& uia, IUIAutomationElement* root) {
@@ -819,6 +825,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     bool nickSelected = false;
     bool continueClicked = false;
     bool manualTipShown = false;
+    bool waitingCreateNick = false;  // 新号：页上有「建立遊戲暱稱」但还没有可选 radio
     DWORD lastClickAt = 0;
     DWORD lastStageLog = 0;
     DWORD lastUrlLog = 0;
@@ -849,7 +856,7 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
     UiaStage stage = UiaStage::WaitGp;
     std::wstring lastUrlHint;
 
-    const DWORD t0 = GetTickCount();
+    DWORD t0 = GetTickCount();  // 建昵称期间停表；建好后重新起算总时限
     constexpr DWORD kClickCooldownMs = 150;
     constexpr DWORD kPollClickMs = 40;
     constexpr DWORD kPollTicketMs = 100;
@@ -947,7 +954,8 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
         return (stage == UiaStage::WaitTicket) ? kPollTicketMs : kPollClickMs;
     };
 
-    while ((int)(GetTickCount() - t0) < timeoutMs) {
+    while (true) {
+        if (!waitingCreateNick && (int)(GetTickCount() - t0) >= timeoutMs) break;
         if (GamaPassLoginCanceled()) {
             SoftCloseLoginHwndIfOwned(hwnd, loginHwndReused, log);
             return Fail(HttpLoginError::Cancelled, "用户已取消登录");
@@ -964,7 +972,8 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 break;
             case UiaStage::WaitNick:
             case UiaStage::WaitContinue:
-                SetGamaPassUiPhase(GamaPassUiPhase::SelectNick);
+                SetGamaPassUiPhase(waitingCreateNick ? GamaPassUiPhase::CreateNick
+                                                     : GamaPassUiPhase::SelectNick);
                 break;
             case UiaStage::WaitTicket:
                 SetGamaPassUiPhase(sawNgmHint ? GamaPassUiPhase::WaitClassic
@@ -1279,7 +1288,17 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 Log(log, std::wstring(kLogTag) + L" 等待 Gama Pass 按钮就绪…");
             }
         } else if (canClick && stage == UiaStage::WaitAcc && !accClicked) {
-            const bool onSelect = urlIsAcc || (mayDomAcc && LooksLikeSelectAccountPage(uia, root));
+            // 认页/点卡只扫当前 Document。BIN 整窗 FindAll(True) 一次可数秒。
+            struct PageRel {
+                IUIAutomationElement* p = nullptr;
+                ~PageRel() {
+                    if (p) p->Release();
+                }
+            } pageRel;
+            pageRel.p = uia.PageDocument(root);
+            IUIAutomationElement* accRoot = pageRel.p ? pageRel.p : root;
+            const bool onSelect =
+                urlIsAcc || (mayDomAcc && LooksLikeSelectAccountPage(uia, accRoot));
             const bool onNick =
                 urlIsNick ||
                 (!urlIsAcc && !urlIsResult && !urlIsGalaxy && !skipPostAccTitleDom &&
@@ -1348,7 +1367,9 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
             bool clicked = false;
             // 选账号页：紧单卡尺寸过滤 + 几何点击；日志带 WxH 便于核对选区
             if (allowAccClick && onSelect) {
-                clicked = uia.ClickAccountCardIndex(root, idx, &hitName, accRetryCount);
+                clicked = uia.ClickAccountCardIndex(accRoot, idx, &hitName, accRetryCount);
+                if (!clicked && hitName.empty() && pageRel.p)
+                    clicked = uia.ClickAccountCardIndex(root, idx, &hitName, accRetryCount);
                 // 只要选出了候选并尝试过激活（hitName 非空），就必须记 cooldown——
                 // 成功/失败/曾误 junk 都不许 40ms 狂点（BIN 07:49 + review High）
                 if (clicked || !hitName.empty()) {
@@ -1393,6 +1414,21 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
             // FindAll 一次可数秒（BIN 21:14 第一次空等 21s；第二次树热了同一秒点中）。
             bool clicked = uia.ClickTypeIndex(root, UIA_RadioButtonControlTypeId, idx, &hitName);
             if (!clicked) {
+                const bool createCta = LooksLikeCreateNickCta(uia, root);
+                if (createCta) {
+                    // 新号：不要扫 ListItem/CheckBox，避免点到「建立遊戲暱稱」替用户造号
+                    waitingCreateNick = true;
+                    SetGamaPassUiPhase(GamaPassUiPhase::CreateNick);
+                    if (now - lastStageLog > 8000) {
+                        lastStageLog = now;
+                        Log(log, std::wstring(kLogTag) +
+                                     L" 这个账号还没有游戏昵称。请在本窗点「建立遊戲暱稱」建好；"
+                                     L"不限时，建好后会自动选号继续（不会替你造名字）。");
+                    }
+                    root->Release();
+                    Sleep(kNickEmptyBackoffMs);
+                    continue;
+                }
                 // Radio 已进树但点失败、或尚未进树：都不要立刻扫 ListItem/CheckBox。
                 // 最多 1s 补一次（真·列表页兜底）。
                 if (lastNickAltScanAt && (now - lastNickAltScanAt) >= kNickAltScanMs) {
@@ -1404,6 +1440,12 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
                 }
             }
             if (clicked) {
+                if (waitingCreateNick) {
+                    t0 = GetTickCount();
+                    Log(log, std::wstring(kLogTag) +
+                                 L" 已有游戏昵称，继续自动选号（登录总时限已重新起算）");
+                }
+                waitingCreateNick = false;
                 nickSelected = true;
                 lastClickAt = now;
                 lastNickClickAt = now;

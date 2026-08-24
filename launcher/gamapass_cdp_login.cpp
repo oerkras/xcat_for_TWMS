@@ -376,8 +376,20 @@ std::wstring JsDomStageReady() {
            L"  } return null;}"
            L"if(h.indexOf('selectgameaccount')>=0){"
            L"  var radios=[].slice.call(document.querySelectorAll('input[type=radio]'));"
-           L"  if(!radios.length) return 'wait-nick-dom';"
-           L"  var checked=radios.filter(function(r){return r.checked;});"
+           L"  var goods=[];"
+           L"  for(var i=0;i<radios.length;i++){"
+           L"    var lab=radios[i].closest('label')||radios[i].parentElement;"
+           L"    var t=((lab&&(lab.innerText||lab.textContent))||'').replace(/\\s+/g,' ').trim();"
+           L"    if(t.indexOf('建立')>=0||t.indexOf('创建')>=0||t.toLowerCase().indexOf('create')>=0) continue;"
+           L"    goods.push(radios[i]);"
+           L"  }"
+           L"  if(!goods.length){"
+           L"    var create=hasText('\\u5efa\\u7acb\\u904a\\u6232\\u66b1\\u7a31')||hasText('\\u5efa\\u7acb\\u6e38\\u620f\\u6635\\u79f0')"
+           L"      ||hasText('\\u5efa\\u7acb\\u66b1\\u7a31')||hasText('\\u5efa\\u7acb\\u6635\\u79f0');"
+           L"    if(create||radios.length) return 'need-create-nick';"
+           L"    return 'wait-nick-dom';"
+           L"  }"
+           L"  var checked=goods.filter(function(r){return r.checked;});"
            L"  if(!checked.length) return 'ready-nick-radio';"
            L"  var cont=findContinue();"
            L"  if(!cont) return 'wait-nick-btn';"
@@ -649,6 +661,7 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
         AccWait,
         AwaitLeaveAcc,
         NickWaitRadio,
+        CreateNickWait,   // 新号无游戏昵称：等人在本窗建立，再选号（须在 TokenWait 前，才能 url-advance 到收票）
         NickWaitContinue,
         AwaitLeaveNick,
         TokenWait,
@@ -662,6 +675,7 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             case Stage::AccWait: return L"AccWait";
             case Stage::AwaitLeaveAcc: return L"AwaitLeaveAcc";
             case Stage::NickWaitRadio: return L"NickWaitRadio";
+            case Stage::CreateNickWait: return L"CreateNickWait";
             case Stage::NickWaitContinue: return L"NickWaitContinue";
             case Stage::AwaitLeaveNick: return L"AwaitLeaveNick";
             case Stage::TokenWait: return L"TokenWait";
@@ -684,13 +698,16 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             case Stage::TokenWait:
                 return Step::Token;
             case Stage::ManualLoginWait:
+            case Stage::CreateNickWait:
                 return Step::ManualLogin;
         }
         return Step::Galaxy;
     };
 
     constexpr DWORD kNavSettleMs = 1100;
+    constexpr DWORD kAccNavSettleMs = 350;  // 选账号页已出，不必再空等满 1.1s
     constexpr DWORD kPollMs = 1000;
+    constexpr DWORD kAccPollMs = 200;
     constexpr DWORD kAfterGpClickMs = 800;
     constexpr DWORD kAfterAccClickMs = 800;
     constexpr DWORD kAfterNickRadioMs = 1200;
@@ -701,7 +718,7 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
     constexpr DWORD kStepAccMs = 50000;
     constexpr DWORD kStepNickMs = 70000;
 
-    const DWORD t0 = GetTickCount();
+    DWORD t0 = GetTickCount();  // 建昵称期间会停表；建好后重新起算总时限
     FILETIME sessionNotBefore{};
     GetSystemTimeAsFileTime(&sessionNotBefore);
     // 允许约 2s 时钟/调度偏差，仍滤掉更早的残留 NGM/Classic
@@ -738,11 +755,18 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
     DWORD postLoginAt = 0;           // 见到 /login/finished 的时刻
     DWORD postLoginClickAt = 0;      // 点过「繼續使用密碼」/「回到 Gama Play」
     bool reenteredGalaxyAfterLogin = false;
+    DWORD nickEmptySince = 0;        // selectgameaccount 上一直没有可选昵称 radio
 
     auto enterStage = [&](Stage next, const wchar_t* why, bool force = false) {
         if (!force && stage == next) return;
+        const bool leavingCreateNick =
+            (stage == Stage::CreateNickWait && next != Stage::CreateNickWait);
         const Step prevStep = stepOf(stage);
         const Step nextStep = stepOf(next);
+        if (leavingCreateNick) {
+            t0 = GetTickCount();  // 发呆建昵称不吃总时限；建好后重新给足后续点选/收票时间
+            Log(log, L"[gamapass-cdp] 已有游戏昵称，继续自动选号（登录总时限已重新起算）");
+        }
         stage = next;
         stageEnteredAt = GetTickCount();
         // 仅业务步骤前进/后退时刷新墙钟；AwaitLeave↔同一步 Wait 不刷新
@@ -771,6 +795,9 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                 break;
             case Stage::ManualLoginWait:
                 SetGamaPassUiPhase(GamaPassUiPhase::ManualLogin);
+                break;
+            case Stage::CreateNickWait:
+                SetGamaPassUiPhase(GamaPassUiPhase::CreateNick);
                 break;
         }
     };
@@ -874,7 +901,13 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             if (ToLower(url).find(L"ott=") != std::wstring::npos ||
                 url.rfind(L"OTT:", 0) == 0 ||
                 IsMapleStoryClassicHostUrl(ToLower(url))) {
-                return TryFetchFromOtt(ott, log);
+                // 不 HTTP 兑 Main 上的 Login OTT：兑了页内 JS 再兑会锁号；
+                // returnIfTicketOk 还会 blank+关窗，打断官网 ngm:// → 换票成功但经典版起不来。
+                Log(log, L"[gamapass-cdp] 见到 Main Login OTT，跳过 HTTP 兑票，"
+                         L"等官网拉起经典版（不关网页）…");
+                if (stage != Stage::TokenWait)
+                    enterStage(Stage::TokenWait, L"main-ott-wait-classic");
+                return {};
             }
         }
         return {};
@@ -920,9 +953,8 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
 
     auto returnIfTicketOk = [&](HttpLoginResult&& r) -> HttpLoginResult {
         if (r.ok && r.ticketFilled) {
+            // 只在已经从经典版 cmdline 收到票时关窗。HTTP 兑票成功不等于游戏已拉起。
             parkBrowserAfterTicketOk();
-            // 收票后再关：见 NGM 立刻 Close+Terminate 易打断 Cookie 落盘；
-            // 干净重拉若残留旧 NGM，过早关页会让 TokenWait 永远等不到新经典版。
             closeBrowserAfterTicket();
         }
         return std::move(r);
@@ -975,7 +1007,9 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
         SetGamaPassUiPhase(GamaPassUiPhase::ClickGamaPass);
     }
 
-    while ((int)(GetTickCount() - t0) < timeoutMs) {
+    while (true) {
+        // 新号建昵称不限时（用户可能发呆填名字）；其余阶段仍受 timeoutMs 约束
+        if (stage != Stage::CreateNickWait && (int)(GetTickCount() - t0) >= timeoutMs) break;
         if (GamaPassLoginCanceled()) {
             Log(log, L"[gamapass-cdp] 用户取消登录");
             return Fail(HttpLoginError::Cancelled, "用户已取消登录");
@@ -993,7 +1027,11 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             if (url != lastUrl) {
                 lastUrl = url;
                 urlChangedTick = GetTickCount();
-                noClickUntil = (std::max)(noClickUntil, urlChangedTick + kNavSettleMs);
+                {
+                    const DWORD settle = IsSelectAccountUrl(ToLower(url)) ? kAccNavSettleMs
+                                                                          : kNavSettleMs;
+                    noClickUntil = (std::max)(noClickUntil, urlChangedTick + settle);
+                }
                 Log(log, L"[gamapass-cdp] nav " + url.substr(0, 160));
 
                 const std::wstring lowerNav = ToLower(url);
@@ -1012,7 +1050,7 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                         // stay AwaitLeaveGalaxy
                     } else if (IsSelectAccountUrl(lowerNav)) {
                         enterStage(Stage::AccWait, L"gp-click-acked");
-                        noClickUntil = GetTickCount() + kNavSettleMs;
+                        noClickUntil = GetTickCount() + kAccNavSettleMs;
                     } else if (IsGamaniaFullLoginUrl(lowerNav)) {
                         enterManualLoginWait();
                     } else if (IsGamaniaLoginFinishedUrl(lowerNav)) {
@@ -1048,8 +1086,12 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                     }
                 } else {
                     Stage inferred = inferStageFromUrl(lowerNav);
-                    if (inferred != stage && (int)inferred > (int)stage)
+                    if (stage == Stage::CreateNickWait) {
+                        if (inferred == Stage::TokenWait)
+                            enterStage(inferred, L"url-advance");
+                    } else if (inferred != stage && (int)inferred > (int)stage) {
                         enterStage(inferred, L"url-advance");
+                    }
                 }
             }
 
@@ -1062,7 +1104,8 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                     "请回到 Galaxy 登录页重新点 Gama Pass；程序不会清 Cookie。");
             }
             // 任意阶段落到完整登录页：停在本 CDP 窗等人登录（禁止 Fail 关窗 / 禁止引导日常重灌）
-            if (IsGamaniaFullLoginUrl(lowerNav)) {
+            // 建昵称中途可能路过 accounts 子页，不要把 CreateNickWait 冲掉
+            if (IsGamaniaFullLoginUrl(lowerNav) && stage != Stage::CreateNickWait) {
                 enterManualLoginWait();
             } else if (stage == Stage::ManualLoginWait) {
                 // 用户在本窗登完 → 恢复自动点选
@@ -1092,8 +1135,13 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                             "请关闭多余登录标签后，在当前浏览器会话内重试（不会清 Cookie）。");
             }
 
-            auto fromOtt = returnIfTicketOk(tryOttFromUrl(url));
-            if (fromOtt.ok && fromOtt.ticketFilled) return fromOtt;
+            auto fromOtt = tryOttFromUrl(url);
+            if (fromOtt.ok && fromOtt.ticketFilled) {
+                // 防御：Main OTT 不再走 HTTP 成功返回。若仍兑到票，也必须等经典版。
+                Log(log, L"[gamapass-cdp] HTTP 换票成功，仍等官网拉起经典版（不关网页）…");
+                if (stage != Stage::TokenWait)
+                    enterStage(Stage::TokenWait, L"http-ticket-wait-classic");
+            }
             // HTTP 兑票失败：先等官网自己拉起经典版（常见于 init OTT 已被页内兑过）。
             // 禁止立刻重开 Galaxy——会整段点选第二遍，体感=登录两次/开两次游戏。
             // 若已见 NGM：说明官网已在拉，再宽限到 45s，勿过早 stale-ott-retry。
@@ -1185,12 +1233,11 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                 cdp.Evaluate(JsScrapeTicketOtt(), ev, nullptr);
                 const std::string scraped = StripJsonStringValue(ev);
                 if (scraped.size() >= 16 && scraped.find("OTT:") == 0) {
-                    std::wstring ott(scraped.begin(), scraped.end());
-                    Log(log, L"[gamapass-cdp] 从 Main 页扫到 OTT");
-                    auto scrapedR = returnIfTicketOk(TryFetchFromOtt(ott, log));
-                    if (scrapedR.ok && scrapedR.ticketFilled) return scrapedR;
-                    // ★ 禁止换票失败就 return：过期 OTT 残留在 DOM 时会整段登录误杀（守护重拉常见）
-                    Log(log, L"[gamapass-cdp] 扫到的 OTT 换票失败，继续等待/点选…");
+                    // 不 HTTP 兑 DOM 残留 OTT（与官网抢票会锁号，关窗会打断 ngm://）
+                    if (nowTick - lastStageLog > 8000) {
+                        lastStageLog = nowTick;
+                        Log(log, L"[gamapass-cdp] Main 页仍有 OTT，等官网拉起经典版（不 HTTP 兑票）…");
+                    }
                 }
                 auto harvested = returnIfTicketOk(tryHarvestRunningClassic());
                 if (harvested.ok && harvested.ticketFilled) return harvested;
@@ -1219,7 +1266,12 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             if (curStep == Step::ManualLogin && wallNow - lastStageLog > 8000 &&
                 !IsGamaniaLoginFinishedUrl(ToLower(lastUrl))) {
                 lastStageLog = wallNow;
-                Log(log, L"[gamapass-cdp] ManualLoginWait：请在本自动点选窗口内完成登录…");
+                if (stage == Stage::CreateNickWait) {
+                    Log(log, L"[gamapass-cdp] CreateNickWait：请在本窗点「建立遊戲暱稱」建好，"
+                             L"不限时，出现可选昵称后会自动继续（不会替你造名字）…");
+                } else {
+                    Log(log, L"[gamapass-cdp] ManualLoginWait：请在本自动点选窗口内完成登录…");
+                }
             }
         }
 
@@ -1311,9 +1363,13 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             continue;
         }
 
-        if (nowTick < noClickUntil || nowTick - urlChangedTick < kNavSettleMs) {
-            Sleep(300);
-            continue;
+        {
+            const DWORD needSettle =
+                (stage == Stage::AccWait) ? kAccNavSettleMs : kNavSettleMs;
+            if (nowTick < noClickUntil || nowTick - urlChangedTick < needSettle) {
+                Sleep(stage == Stage::AccWait ? 80 : 300);
+                continue;
+            }
         }
 
         std::string ev;
@@ -1325,6 +1381,34 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
 
         std::wstring hrefLower = ToLower(lastUrl);
         const std::string stageDom = runJs(JsDomStageReady());
+        if (hrefLower.find(L"selectgameaccount") != std::wstring::npos) {
+            if (stageDom.find("need-create-nick") == 0) {
+                nickEmptySince = 0;
+                enterStage(Stage::CreateNickWait, L"no-game-nick");
+            } else if (stageDom.rfind("wait-nick-dom", 0) == 0) {
+                if (!nickEmptySince) nickEmptySince = nowTick;
+                if (nowTick - nickEmptySince > 12000)
+                    enterStage(Stage::CreateNickWait, L"nick-dom-empty");
+            } else {
+                nickEmptySince = 0;
+                if (stage == Stage::CreateNickWait &&
+                    (stageDom.find("ready-nick-radio") == 0 ||
+                     stageDom.find("ready-nick-continue") == 0)) {
+                    enterStage(Stage::NickWaitRadio, L"nick-created");
+                }
+            }
+        } else if (stage != Stage::CreateNickWait) {
+            nickEmptySince = 0;
+        }
+        if (stage == Stage::CreateNickWait) {
+            if (nowTick - lastStageLog > 8000) {
+                lastStageLog = nowTick;
+                Log(log, L"[gamapass-cdp] 这个账号还没有游戏昵称。请在本窗点「建立遊戲暱稱」建好；"
+                         L"不限时，建好后会自动选号继续。");
+            }
+            Sleep(kPollMs);
+            continue;
+        }
         if (stageDom.rfind("wait-", 0) == 0) {
             if (nowTick - lastStageLog > 5000) {
                 lastStageLog = nowTick;
@@ -1418,7 +1502,7 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             }
         }
 
-        Sleep(kPollMs);
+        Sleep(stage == Stage::AccWait ? kAccPollMs : kPollMs);
     }
 
     if (GamaPassLoginCanceled()) {

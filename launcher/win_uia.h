@@ -79,6 +79,9 @@ public:
                          int index0, bool substring, std::wstring* outName = nullptr,
                          bool forceMouse = false) const;
 
+    // 当前页 Document（不含标签栏/扩展）。调用方 Release。失败返回 nullptr。
+    IUIAutomationElement* PageDocument(IUIAutomationElement* root) const;
+
     // 选账号页：对齐 CDP JsSelectAccount（紧单卡 + 几何点击）；clickVariant 重试换水平落点
     bool ClickAccountCardIndex(IUIAutomationElement* root, int index0,
                                std::wstring* outName = nullptr, int clickVariant = 0) const;

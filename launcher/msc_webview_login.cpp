@@ -24,6 +24,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <mutex>
@@ -245,13 +246,16 @@ bool ParseAccountLine(const std::wstring& raw, AccountCred& out, std::wstring& e
 
 void AppendFileLog(const std::wstring& line) {
     if (g.logFilePath.empty()) return;
-    std::ofstream f(NarrowUtf8(g.logFilePath), std::ios::app);
-    if (!f) return;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, g.logFilePath.c_str(), L"ab") != 0 || !f) return;
     SYSTEMTIME st{};
     GetLocalTime(&st);
     char ts[64];
     sprintf_s(ts, "%02d:%02d:%02d ", st.wHour, st.wMinute, st.wSecond);
-    f << ts << NarrowUtf8(line) << '\n';
+    const std::string body = NarrowUtf8(line) + "\n";
+    fwrite(ts, 1, strlen(ts), f);
+    fwrite(body.data(), 1, body.size(), f);
+    fclose(f);
 }
 
 void QueueLog(const std::wstring& line) {

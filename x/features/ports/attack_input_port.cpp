@@ -15,6 +15,7 @@
 #include "input_port.h"
 #include "key_macro_bin.h"
 #include "mob_gather_port.h"
+#include "../simple_combat/simple_combat.h"
 #include "player_combat_port.h"
 #include "unity_kbd_port.h"
 #include "../attack_accel/attack_accel.h"
@@ -1862,6 +1863,7 @@ void NoteLastFire() {
     // 自组攻包发出 ≈ 一次出刀。不看 ActionBusy（攻击无CD 会清忙位）。
     x::features::ports::mob_gather::NoteHangupFire();
     x::features::ports::mob_gather::NoteAttackDirty();
+    x::features::simple_combat::NoteLockFire();
 }
 
 bool TryFirePrimaryEx(bool ignoreCombatInterval, const FireBlink& blink) {
@@ -1921,7 +1923,10 @@ bool TryFirePrimaryEx(bool ignoreCombatInterval, const FireBlink& blink) {
 
     gLastFireMs.store(now, std::memory_order_relaxed);
     gFireOk.fetch_add(1, std::memory_order_relaxed);
+    // 出刀计数 = OnFuncKey 已返回：空挥 / 引擎吞刀都 +1，不看命中、不看 b1。
+    x::features::ports::mob_gather::NoteHangupFire();
     x::features::ports::mob_gather::NoteAttackDirty();
+    x::features::simple_combat::NoteLockFire();
 
     static uint32_t sFaceLog = 0;
     if (sFaceLog < 12) {

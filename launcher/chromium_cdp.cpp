@@ -2,7 +2,6 @@
 #include "gamapass_login_phase.h"
 #include "http_gamapass_login.h"
 #include "msc_launch.h"
-#include "ngm_protocol_allow.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -790,11 +789,6 @@ bool LaunchChromiumWithDebugPort(const BrowserProfile& profile, int port, const 
         DeleteFileW((def + L"\\Current Tabs").c_str());
         DeleteFileW((def + L"\\Last Session").c_str());
         DeleteFileW((def + L"\\Last Tabs").c_str());
-    }
-
-    // 仅独立罐：启动前写入「始终允许 ngm://」。日常 User Data 不改文件（由用户点选或 UIA 点对话框，Chrome 自己落盘）。
-    if (IsIsolatedXcatCdpUserData(profile.userData)) {
-        msc::launcher::SeedNgmProtocolAllowlist(profile.userData, log);
     }
 
     // 整行命令行；user-data-dir 加引号防空格路径

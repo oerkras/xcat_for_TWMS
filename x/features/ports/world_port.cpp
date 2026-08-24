@@ -12,10 +12,12 @@
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/managed_main.h"
 #include "../../ui/player_vitals.h"
+#include "../soft_login_probe/soft_login_probe.h"
 
 #include <Windows.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -137,6 +139,7 @@ void* gWorldManager = nullptr;
 DWORD gLastWmBindMs = 0;
 std::atomic<int> gLastLoggedScene{-999};
 std::atomic<DWORD> gLastSceneLogMs{0};
+std::atomic<uint8_t> gPlayReadyLatched{0};  // IsPlayReady 上升沿 → ArmPlayReadySettle
 
 uint32_t ReadU32(void* base, size_t off) {
     if (!base) return 0;
@@ -327,6 +330,8 @@ void Invalidate() {
     PublishWmLive(false);
     // Explicit leave-map: do not wait for the next IsPlayReady poll.
     x::runtime::main_thread::SetPumpPhase(x::runtime::main_thread::PumpPhase::Bootstrap);
+    gPlayReadyLatched.store(0, std::memory_order_release);
+    x::runtime::main_thread::CancelPlayReadySettle();
     x::runtime::managed_main::SetMapTransitBlock(true);
 }
 
@@ -339,6 +344,8 @@ bool IsInMapScene() {
     void* wm = GetWorldManager();
     if (!il2::LooksLikeHeapPtr(wm)) {
         // No WM → cannot be play-ready; drop pump phase without waiting for IsPlayReady.
+        gPlayReadyLatched.store(0, std::memory_order_release);
+        x::runtime::main_thread::CancelPlayReadySettle();
         if (x::runtime::main_thread::GetPumpPhase() == x::runtime::main_thread::PumpPhase::InMap) {
             x::runtime::main_thread::SetPumpPhase(x::runtime::main_thread::PumpPhase::Bootstrap);
         }
@@ -362,9 +369,12 @@ bool IsInMapScene() {
     MaybeLogScene(st, inMap);
     // Soft sync on leave (InterStage / CashShop / migrate): Bootstrap immediately.
     // Enter InMap only via IsPlayReady (needs IsAlive).
-    if (!inMap &&
-        x::runtime::main_thread::GetPumpPhase() == x::runtime::main_thread::PumpPhase::InMap) {
-        x::runtime::main_thread::SetPumpPhase(x::runtime::main_thread::PumpPhase::Bootstrap);
+    if (!inMap) {
+        gPlayReadyLatched.store(0, std::memory_order_release);
+        x::runtime::main_thread::CancelPlayReadySettle();
+        if (x::runtime::main_thread::GetPumpPhase() == x::runtime::main_thread::PumpPhase::InMap) {
+            x::runtime::main_thread::SetPumpPhase(x::runtime::main_thread::PumpPhase::Bootstrap);
+        }
     }
     return inMap;
 }
@@ -374,9 +384,22 @@ bool IsPlayReady() {
     // Phase: InMap drains on WM.FixedUpdate/Update once MI patched; else Bootstrap hooks.
     x::runtime::main_thread::SetPumpPhase(ready ? x::runtime::main_thread::PumpPhase::InMap
                                                 : x::runtime::main_thread::PumpPhase::Bootstrap);
-    // 仓级契约：!PlayReady ⇒ managed_main::FindAll 默认拒（bypassFreeze 除外）。
-    x::runtime::managed_main::SetMapTransitBlock(!ready);
-    return ready;
+    if (!ready) {
+        gPlayReadyLatched.store(0, std::memory_order_release);
+        x::runtime::main_thread::CancelPlayReadySettle();
+        x::runtime::managed_main::SetMapTransitBlock(true);
+        return false;
+    }
+    // 软重连 worker 早已在跑：只在 hold/attempt 上升沿冻 FindAll（冷启动另有 boot settle）。
+    // 进图必须立刻解开 MapTransitBlock——否则 Drain 走 InterStage quiesce，WM 宿主空转。
+    if (gPlayReadyLatched.exchange(1, std::memory_order_acq_rel) == 0) {
+        if (x::features::soft_login_probe::IsHoldActive() ||
+            x::features::soft_login_probe::IsAttemptBusy()) {
+            x::runtime::main_thread::ArmPlayReadySettle();
+        }
+    }
+    x::runtime::managed_main::SetMapTransitBlock(false);
+    return true;
 }
 
 void* GetMapScene() {

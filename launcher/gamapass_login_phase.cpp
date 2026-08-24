@@ -30,6 +30,7 @@ const char* GamaPassUiPhaseLabel(GamaPassUiPhase phase) {
         case GamaPassUiPhase::WaitNgm: return "登录·等NGM";
         case GamaPassUiPhase::WaitClassic: return "登录·等经典版";
         case GamaPassUiPhase::ManualLogin: return "登录·请登录";
+        case GamaPassUiPhase::CreateNick: return "登录·请建立昵称";
     }
     return "GAMA PASS登录中";
 }

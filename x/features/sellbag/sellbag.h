@@ -25,6 +25,7 @@ struct Status {
     uint32_t equipSold = 0;
     uint32_t etcSold = 0;
     uint32_t kept = 0;
+    uint32_t shopSkip = 0;  // 不在本店卖栏（任务/开错店），与 kept 分开
     uint32_t failed = 0;
     int64_t  mesoGained = 0;  // 本轮金币差；未知则 0 且 mesoGainedValid=0
     uint32_t mesoGainedValid = 0;

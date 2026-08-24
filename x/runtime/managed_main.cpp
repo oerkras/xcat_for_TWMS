@@ -100,6 +100,12 @@ void* FindAll(FnFindAll fn, void* typeObj, DWORD timeoutMs, bool bypassFreeze) {
         TransitLogOnce("FindAll");
         return nullptr;
     }
+    // 软重连 play-ready 错峰：冻 FindAll，但不要借 MapTransitBlock（那会把进图当成 InterStage
+    // quiesce，Drain 跳过 Normal、WM.FixedUpdate 空转 —— BIN 12:50 落地卡死）。
+    if (!bypassFreeze && main_thread::IsPlayReadySettling()) {
+        TransitLogOnce("FindAll(settle)");
+        return nullptr;
+    }
     FindAllCtx c{fn, typeObj, nullptr};
     if (!Call(&FindAllJob, &c, timeoutMs)) return nullptr;
     return c.result;

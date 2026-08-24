@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 148u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 158u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -79,16 +79,19 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 148u;
 // v113: travelPortalAimLiftY — 调试 TAB「超级赶路」贴门抬升（AbsPos 更大 Y=更高）
 // v114: mobGatherLayerYPx — 吸怪 TAB「竖层」；寻簇同层窗 |dY|，默认 200
 // v115: mobGatherDyLimPx — 吸怪 TAB「高度闸」；新收 |dY| 上限，默认 1200
+// v152: 吸怪半径/高度闸/脚边厂默改 8000
 // v116: 站桩输出厂默 静止 0ms、面前盒 30×10（旧 3000 / 80×60 / 110×100 / 280 读盘迁）
 // v117: mobGatherWalkDx / mobGatherFeetExemptPx — 吸怪 TAB 履历横移/脚边；清怪重连厂默关
 // v118: mobGatherStandOffX/Y 厂默 40/10→29/9（吸怪自定义落点；旧 62/12 一并迁）
 // v119: 站桩输出面前盒厂默 30×10→60×10（横向；竖直仍 10）
+// v151: 站桩输出面前盒厂默 60×10→100×80（横向/竖直）
 // v120: mobGatherHomeReturn 厂默改关（旧盘已有键原样保留）
 // v121: mobGatherAimJitterPx — 吸怪 TAB 落点「抖动」；按 oid 稳定散开，0=叠点
 // v122: 主动软重连入口改首页挂机卡，不再要求先开吸怪（键名不变）
 // v123: simpleCombatTeleportOneHit — 瞬移找怪「每只怪打一下」；默认关
 // v124: mobPoolObserve — 怪物刷新感知增强（MI Enter/Leave → ImmediateScan；默认关）
 // v125: simpleCombatTeleportMaxHop 厂默 400/520/550→3000（远图一次到位；手改保留）
+// v153: simpleCombatTeleportMaxHop 厂默 3000→1500
 // v126: simpleCombatTeleportCooldownMs 厂默 200→80；读盘迁旧默认 200
 // v127: mobGatherHangupFires — 落地后累计出刀达此主动软重连；与首页秒数先到先拆；厂默 1900
 //       simpleCombatForgeHitFrontDx/Dy — 出刀自组攻包独立攻击盒；不与站桩面前盒共用
@@ -99,17 +102,27 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 148u;
 // v131: mobGatherHangupUnbindF5 — 调试 TAB：解除瞬移找怪+F5 强制开秒数闸；缺键关
 // v132: secAttackTextHook — 已移除（服端自有计数；字段保留布局，恒 0）
 // v133: autoReloginReconnect — 遇人「一直有人就换频」厂默开；旧厂默换频关读盘迁一次
+// v154: 遇人策略厂默：先停手·停吸·换频·GM 升级开；隐藏玩家关。撤 v82 无条件改写；旧厂默指纹迁一次
+// v155: mobGatherFirstGenOnly — 吸怪 TAB「只吸场上的」；厂默开。缺键=开。
+// v156: 遇人总开关厂默开。v154 曾把旧厂默迁成关；v154 厂默指纹迁一次开。藏人仍默认关。
+// v157: attackNoCdEncounterUnbind — 调试 TAB 解绑「攻击无CD → 强制遇人三项」；缺键=仍绑定
 // v134: simpleCombatSkipAccMiss / SkipAccMissN — 「不打MISS怪」：进盒 ACC 不够连续 N 次后换怪
 // v135: simpleCombatForgeHitMobs — 已移除（填充列表/同拍多包踢号；字段保留布局，恒 1）
 // v136: simpleCombatForgeHitFillList / MultiPkt — 已移除（已证实踢号；字段保留布局，恒 0）
 // v137: simpleCombatSkipAccMiss 厂默关→开（当时 N=2）；旧盘仍为关迁一次。升 version 后用户可再关掉
 // v138: simpleCombatSkipAccMissN 厂默 2→1；旧盘仍为 2 迁一次。升 version 后用户可再改
 // v148: simpleCombatSkipAccMissN 厂默 1→3；残血 MISS 不再换靶。旧盘仍为 1 迁一次。
+// v158: simpleCombatSkipAccMissN 厂默 3→1；旧盘仍为 3 迁一次。升 version 后用户可再改
+// v150: 位移夹速厂默开→关（BIN：cap=48 仍 205）；旧盘 on=1 迁一次。升 version 后可再勾。
+// v151: 站桩输出面前盒厂默 60×10→100×80；旧横向 60 / 竖直 10 读盘迁一次。手改保留。
+// v152: 吸怪半径/高度闸/脚边厂默改 8000；旧 1000·2800 / 1200 / 320 读盘迁一次。手改保留。
+// v153: 自动打怪寻怪 simpleCombatTeleportMaxHop 厂默 3000→1500；旧 400/520/550/3000 读盘迁。手改保留。
+// v149: mobGatherReconnectHop — 吸怪 TAB「重连换频」；软重连进异频；厂默关。缺键=关。
 // v139: 主动软重连旧厂默开+14s 残留迁关一次（v122 已改厂默关，当时没迁盘）
 // v140: forceTrade — 实验·强制交易：改 UIUserInfo 人物卡交易按钮等级阈值 global；默认关
 //       kForceTradeUserEnabled=false — 实测无效；实验 TAB 置灰；不启 worker / 不改阈值
 // v141: mobGatherDispClampOn / mobGatherDispCapPx — 吸怪 TAB「位移夹速」：把被拽怪每帧位移
-//       夹到 ≤ cap(px/帧)，不越客户端「怪速+10」门→不触发 prevpos 举报；厂默开、cap=48
+//       夹到 ≤ cap(px/帧)，不越客户端「怪速+10」门→不触发 prevpos 举报；v150 起厂默关、cap=48
 // v142: mobGatherHangupFires 厂默 1900→1700；旧盘仍为 1900/1800 迁一次。升 version 后用户可再改
 // v143: mobGatherStrategy — 吸怪开关旁策略：0=A IMPACT（现有悬停）、1=B FH-SNAP（官方绑台）
 // v144: mobGatherLandOnArrive — 策略 A 子项「到站落地」：怪水平到站(≤stationR)后松手，交给游戏
@@ -202,15 +215,17 @@ constexpr uint32_t kHiraishinRangeDefaultPx = 0u;
 constexpr uint32_t kHiraishinRangeMinPx = 0u;
 constexpr uint32_t kHiraishinRangeMaxPx = 8000u;
 // 站桩输出面前攻击盒（AbsPos 半宽/半高，px）。0=该轴不限。
-// 厂默 60×10；旧横向 280 / 110 / 80 / 30 读盘迁过来（显式改过其它值保留）。
-constexpr uint32_t kHiraishinFrontDxDefault = 60u;
+// 厂默 100×80；旧横向 280 / 110 / 80 / 30 / 60、旧竖直 100 / 60 / 10 读盘迁（显式改过其它值保留）。
+constexpr uint32_t kHiraishinFrontDxDefault = 100u;
 constexpr uint32_t kHiraishinFrontDxLegacyDefault = 280u;
 constexpr uint32_t kHiraishinFrontDxLegacyDefaultV107 = 110u;
 constexpr uint32_t kHiraishinFrontDxLegacyDefaultV109 = 80u;
 constexpr uint32_t kHiraishinFrontDxLegacyDefaultV116 = 30u;
-constexpr uint32_t kHiraishinFrontDyDefault = 10u;
+constexpr uint32_t kHiraishinFrontDxLegacyDefaultV119 = 60u;
+constexpr uint32_t kHiraishinFrontDyDefault = 80u;
 constexpr uint32_t kHiraishinFrontDyLegacyDefault = 100u;
 constexpr uint32_t kHiraishinFrontDyLegacyDefaultV109 = 60u;
+constexpr uint32_t kHiraishinFrontDyLegacyDefaultV116 = 10u;
 constexpr uint32_t kHiraishinFrontDxMin = 0u;
 constexpr uint32_t kHiraishinFrontDyMin = 0u;
 constexpr uint32_t kHiraishinFrontDxMax = 4000u;
@@ -274,8 +289,10 @@ constexpr uint32_t kMobGatherMaxMax = 64u;
 constexpr uint32_t kMobGatherFarInFlightDefault = 0u;
 constexpr uint32_t kMobGatherFarInFlightMin = 0u;
 constexpr uint32_t kMobGatherFarInFlightMax = 64u;
-// 2026-08-22：厂默 2800→1000。r=1000 实机 9.4min 零断连；r≥~1250 / 厂默 2800 必掐（服端自量离原位总位移）。
-constexpr uint32_t kMobGatherRadiusDefaultPx = 1000u;
+// 2026-08-23：厂默 1000→8000。旧厂默 2800 / 1000 读盘迁（显式改过其它值保留）。
+constexpr uint32_t kMobGatherRadiusDefaultPx = 8000u;
+constexpr uint32_t kMobGatherRadiusLegacyDefaultPx = 1000u;
+constexpr uint32_t kMobGatherRadiusLegacyDefaultOldPx = 2800u;
 constexpr uint32_t kMobGatherRadiusMinPx = 200u;
 // 半径只防爆钳，不再业务封顶 8000（落点同款 ±30000）。
 constexpr uint32_t kMobGatherRadiusMaxPx = 30000u;
@@ -326,8 +343,8 @@ constexpr uint32_t kMobGatherMaxCmdMin = 620u;
 constexpr uint32_t kMobGatherMaxCmdMax = 8000u;
 // 位移夹速：每帧位移上限（px/帧）。客户端每帧比对怪移动位移 vs 怪速+10，超门即触发 prevpos 举报
 // （逆向见 docs/features/security/怪速举报type21与被动插值.md §7.2）。夹到 ≤ cap 就永不触发。
-// 厂默开、48px/帧（≈1600px/s@30ms）。真实怪速阈值看 MobFhBan impact 日志 disp/cap 标定。
-constexpr uint32_t kMobGatherDispClampOnDefault = 1u;
+// 厂默关（v150；BIN 证 cap=48 仍 205）。48px/帧（≈1600px/s@30ms）仍是上限旋钮默认。
+constexpr uint32_t kMobGatherDispClampOnDefault = 0u;
 constexpr uint32_t kMobGatherDispCapPxDefault = 48u;
 constexpr uint32_t kMobGatherDispCapPxMin = 8u;
 constexpr uint32_t kMobGatherDispCapPxMax = 400u;
@@ -343,6 +360,8 @@ constexpr uint32_t kMobGatherLandOnArriveDefault = 0u;
 constexpr uint32_t kMobGatherHopPxDefault = 950u;
 constexpr uint32_t kMobGatherHopPxMin = 200u;
 constexpr uint32_t kMobGatherHopPxMax = 1150u;
+// 误把厂默改成 1500 的一版：读盘迁回 950。
+constexpr uint32_t kMobGatherHopPxMistakenDefault = 1500u;
 constexpr uint32_t kMobGatherKpDefault = 7u;
 constexpr uint32_t kMobGatherKpMin = 1u;
 constexpr uint32_t kMobGatherKpMax = 20u;
@@ -406,21 +425,27 @@ constexpr uint32_t kMobGatherPatrolFarDefault = 0u;
 constexpr uint32_t kMobGatherAntiReportDefault = 0u;
 // 软重连后飞回记录点再吸。默认关。无首次记录不飞。与寻簇互斥。
 constexpr uint32_t kMobGatherHomeReturnDefault = 0u;
+// v149: 软重连不粘原频。默认关。缺键=关。不改遇人 hop。
+constexpr uint32_t kMobGatherReconnectHopDefault = 0u;
+// v155: 只吸场上的。默认开。缺键=开。开=勾上时场上 oid 快照才吸；之后新刷不吸。
+constexpr uint32_t kMobGatherFirstGenOnlyDefault = 1u;
 // 寻簇同层窗 |dY|（AbsPos）。默认 200。用户自填，只防爆钳 30000。0=合法。
 constexpr uint32_t kMobGatherLayerYPxDefault = 200u;
 constexpr uint32_t kMobGatherLayerYPxMin = 0u;
 constexpr uint32_t kMobGatherLayerYPxMax = 30000u;
-// 高度闸 |mobY-py|（AbsPos）。默认 1200。用户自填，只防爆钳 30000。0=合法。
+// 高度闸 |mobY-py|（AbsPos）。默认 8000。用户自填，只防爆钳 30000。0=合法。
 // 只挡新 Arm；已吸住的继续。距人 hypot≤脚边 不走这闸。
-constexpr uint32_t kMobGatherDyLimPxDefault = 1200u;
+constexpr uint32_t kMobGatherDyLimPxDefault = 8000u;
+constexpr uint32_t kMobGatherDyLimPxLegacyDefault = 1200u;
 constexpr uint32_t kMobGatherDyLimPxMin = 0u;
 constexpr uint32_t kMobGatherDyLimPxMax = 30000u;
 // 履历闸横移 |dx from first seen|。默认 96。用户自填，只防爆钳 30000。0=不挡横移。
 constexpr uint32_t kMobGatherWalkDxDefault = 96u;
 constexpr uint32_t kMobGatherWalkDxMin = 0u;
 constexpr uint32_t kMobGatherWalkDxMax = 30000u;
-// 脚边豁免 hypot。默认 320。用户自填，只防爆钳 30000。0=不开豁免。
-constexpr uint32_t kMobGatherFeetExemptPxDefault = 320u;
+// 脚边豁免 hypot。默认 8000。用户自填，只防爆钳 30000。0=不开豁免。
+constexpr uint32_t kMobGatherFeetExemptPxDefault = 8000u;
+constexpr uint32_t kMobGatherFeetExemptPxLegacyDefault = 320u;
 constexpr uint32_t kMobGatherFeetExemptPxMin = 0u;
 constexpr uint32_t kMobGatherFeetExemptPxMax = 30000u;
 constexpr uint32_t kMobScanIntervalDefaultMs = 20u;
@@ -472,10 +497,10 @@ constexpr uint32_t kCombatHitRotateDefault = 0u;
 constexpr uint32_t kCombatHitRotateNDefault = 2u;
 constexpr uint32_t kCombatHitRotateNMin = 1u;
 constexpr uint32_t kCombatHitRotateNMax = 20u;
-// 不打 MISS 怪：进盒但 ACC 不够、连续 N 次 Damage=0 后禁锁换靶。默认开 / N=3。
+// 不打 MISS 怪：进盒但 ACC 不够、连续 N 次 Damage=0 后禁锁换靶。默认开 / N=1。
 // 不预调 CheckPDamageMiss（吃 Rand32）。残血 / 已打出真伤的浮动 MISS 不计。
 constexpr uint32_t kCombatSkipAccMissDefault = 1u;
-constexpr uint32_t kCombatSkipAccMissNDefault = 3u;
+constexpr uint32_t kCombatSkipAccMissNDefault = 1u;
 constexpr uint32_t kCombatSkipAccMissNMin = 1u;
 constexpr uint32_t kCombatSkipAccMissNMax = 5u;
 // 瞬移找怪「每只怪打一下」：出一刀后切下一只（走原选怪）。默认关。
@@ -544,13 +569,14 @@ constexpr uint32_t kCombatTeleportCooldownMinMs = 5u;
 constexpr uint32_t kCombatTeleportCooldownMaxMs = 8000u;
 constexpr uint32_t kCombatTeleportCooldownLegacyDefaultMs = 200u;
 // 单次贴怪 hop（px）；更远分段贴近。调试 TAB 可调。
-// 默认 3000：远图（鱷魚潭Ⅰ hopFar≈2375）一次到位。只夹下限，无上限。
-constexpr uint32_t kCombatTeleportMaxHopDefault = 3000u;
+// 默认 1500。只夹下限，无上限。旧厂默 400 / 520 / 550 / 3000 读盘迁。
+constexpr uint32_t kCombatTeleportMaxHopDefault = 1500u;
 constexpr uint32_t kCombatTeleportMaxHopMin = 350u;
-// 旧默认迁移：400→520→550→3000；显式调过其它值保留。
+// 旧默认迁移：400→520→550→3000→1500；显式调过其它值保留。
 constexpr uint32_t kCombatTeleportMaxHopLegacyDefault = 400u;
 constexpr uint32_t kCombatTeleportMaxHopPrevDefault = 520u;
 constexpr uint32_t kCombatTeleportMaxHopPrevDefault2 = 550u;
+constexpr uint32_t kCombatTeleportMaxHopPrevDefault3 = 3000u;
 // 加速秒杀早切（lastHitted 确认后切怪；0 maxHp = 关此道；默认关）
 constexpr uint32_t kCombatOneshotMaxHpDefault = 0u;
 // 勾选启用 /「均衡」档回填的表血上限（非落盘缺省）
@@ -575,14 +601,16 @@ constexpr uint32_t kCombatOneshotFoxFillGapLegacyDefaultMs = 280u;
 constexpr uint32_t kCombatOneshotFoxFillGapMinMs = 0u;
 constexpr uint32_t kCombatOneshotFoxFillGapMaxMs = 2000u;
 // 泵背压拥堵阈值：主线程泵排队 job 数达到该值即视为拥堵，出刀/瞬移让路。
-// 0=关闭背压；上限须等于泵队列容量 kQueueCap（main_thread_pump.cpp，当前 8）。
-constexpr uint32_t kPumpCongestionDefault = 6u;
+// 0=关闭背压；上限须等于泵队列容量 kQueueCap（main_thread_pump.cpp，当前 12）。
+constexpr uint32_t kPumpQueueCap = 12u;
+constexpr uint32_t kPumpCongestionDefault = 9u;  // 3/4 × 12
 constexpr uint32_t kPumpCongestionMin = 0u;
-constexpr uint32_t kPumpCongestionMax = 8u;
-// 每 tick Drain 最多跑几个排队 job；须 ∈[1, kQueueCap]。默认 8=抽干整队。
+constexpr uint32_t kPumpCongestionMax = kPumpQueueCap;
+// 每 tick Drain 最多跑几个排队 job；须 ∈[1, kQueueCap]。
+// 默认 8：槽加到 12 后仍不把一整队托管活倒进同一 Unity 帧。
 constexpr uint32_t kPumpDrainBudgetDefault = 8u;
 constexpr uint32_t kPumpDrainBudgetMin = 1u;
-constexpr uint32_t kPumpDrainBudgetMax = 8u;
+constexpr uint32_t kPumpDrainBudgetMax = kPumpQueueCap;
 // 超级赶路贴门抬升（AbsPos 更大 Y=更高）。末段 / recover / 发门带空悬停共用。
 constexpr uint32_t kTravelPortalAimLiftDefault = 16u;
 constexpr uint32_t kTravelPortalAimLiftMin = 4u;
@@ -600,6 +628,8 @@ struct PayloadControl {
     uint32_t attackAccelClearBusy = 0;
     // 清忙锁开启时的出刀间隔地板（ms）；默认 200。不改写面板间隔落盘。
     uint32_t attackAccelClearBusyMinIntervalMs = kAttackAccelClearBusyMinIntervalDefaultMs;
+    // v157: 调试 TAB 解绑「攻击无CD → 强制遇人三项」。缺键=仍绑定（0）。不改吸怪遇人强制。
+    uint32_t attackNoCdEncounterUnbind = 0;
     // 实验：砍动作层 layer+0x14 倒计时（默认关；不改变 attackAccel 语义）
     uint32_t attackAccelCutLayer = 0;
     // 实验：跳过 PrepareActionLayer（默认关；LocalUser 虚表；实验 TAB）
@@ -731,6 +761,8 @@ struct PayloadControl {
     uint32_t mobGatherClearRelogin = kMobGatherClearReloginDefault;
     // v100: 申请控制权。默认关。开：吸怪持有期泵上调官方 ApplyControl（不造包）。
     uint32_t mobGatherApplyCtrl = 0;
+    // v155: 只吸场上的。默认开。开：勾上时场上已有 oid 才吸；拒之后图刷/分裂/召唤。
+    uint32_t mobGatherFirstGenOnly = kMobGatherFirstGenOnlyDefault;
     // v110: 先飞到最密堆再吸。默认关。开：人飞到簇质心后再 Arm，寻路冻 14s。
     uint32_t mobGatherSeekCluster = kMobGatherSeekClusterDefault;
     // v146: 远怪自动巡点（寻簇跨层/全图版）。默认关。与 homeReturn 互斥。
@@ -744,6 +776,8 @@ struct PayloadControl {
     int32_t mobGatherHomeMapId = 0;
     uint32_t mobGatherHomeValid = 0;
     uint32_t mobGatherHomeHasMap = 0;
+    // v149: 吸怪「重连换频」。0=关（默认）。开：hangup/被动软重连进异频。遇人 hop 已选频则不抢。
+    uint32_t mobGatherReconnectHop = kMobGatherReconnectHopDefault;
     // v114: 竖层 px。寻簇同层窗。用户自填；缺键走厂默。0=合法。
     uint32_t mobGatherLayerYPx = kMobGatherLayerYPxDefault;
     // v115: 高度闸 px。新收 |dY| 上限。用户自填；缺键走厂默。0=合法。
@@ -850,15 +884,15 @@ struct PayloadControl {
     uint32_t softLoginProbe = 1;
     // v62: 调试 TAB「关闭断线弹窗」— bump 后载荷走 CloseDialog+SetActive（不点確認）
     uint32_t softLoginDismissSeq = 0;
-    // v20/v82/v133: 遇人策略 UX（UserPool + channel_hop，非 Reload）
-    // v133 厂默：检测开；普通停手关；一直有人就换频开；GM/隐身升级开
-    uint32_t autoRelogin = 1;             // 检测同图玩家
-    uint32_t autoReloginStopCombat = 0;   // 先停手（普通遇人）
+    // v20/v82/v133/v154/v156: 遇人策略 UX（UserPool + channel_hop，非 Reload）
+    // v156 厂默：总开关开；先停手开；一直有人就换频开；GM/隐身升级开；遇人停吸开；隐藏玩家关
+    uint32_t autoRelogin = 1;             // 检测同图玩家（总开关；默认开）
+    uint32_t autoReloginStopCombat = 1;   // 先停手（普通遇人）
     uint32_t autoReloginReconnect = 1;    // 一直有人就换频（普通遇人）
     // v60: GM/隐身升级（Admin·Manager 或客户端隐身 → 立刻停手/换频 + 强制 Alarm；默认开）
     uint32_t autoReloginGmEscalate = 1;
-    // v101: 遇人停吸。默认关。吸怪开启时强制打开（连同检测/换频），避免别人看见吸怪。
-    uint32_t autoReloginStopGather = 0;
+    // v101/v154: 遇人停吸。厂默开。吸怪开启时仍强制打开（连同检测/换频），避免别人看见吸怪。
+    uint32_t autoReloginStopGather = 1;
     // v46: 隐藏同图其他玩家（UserPool 远程 → AvatarRoot.SetActive；默认关）
     uint32_t hideOtherPlayers = 0;
     // v47: 引擎帧率锁（vSync=0 + Application.targetFrameRate；非显示器硬件刷新率）
@@ -877,6 +911,8 @@ struct PayloadControl {
     uint32_t auctionTownBypass = 1;
     // 实验 TAB 一次探针：主泵点官方状态栏拍卖按钮。用户入口已关（kAuctionGateProbeUserEnabled）。
     uint32_t auctionGateProbeSeq = 0;
+    // 实验 TAB 一次：主泵打开 UICheat IMGUI GM overlay（CreateInstance+Open；不直调 OnGUI）。
+    uint32_t uiCheatOverlaySeq = 0;
     // v76/v77: 实验·坐下/椅子回蓝（刷 WM 累加器；默认关）。BIN 已证真蓝会动；过密踢。
     uint32_t restMpAccel = 0;
     uint32_t restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
@@ -912,6 +948,17 @@ inline void ApplyMobGatherEncounterForce(PayloadControl& c) {
     c.autoRelogin = 1;
     c.autoReloginReconnect = 1;
     c.autoReloginStopGather = 1;
+}
+
+// 「攻击无CD」开着时强制：检测同图 + 先停手 + 一直有人就换频。
+// 不改遇人停吸 / GM 升级 / 隐藏玩家；关无CD 后不把这三项写回 0（与吸怪强制同口径）。
+// attackNoCdEncounterUnbind=1（调试 TAB「解绑」）时跳过，遇人三项跟用户勾选。
+inline void ApplyAttackNoCdEncounterForce(PayloadControl& c) {
+    if (c.attackAccelClearBusy == 0) return;
+    if (c.attackNoCdEncounterUnbind != 0) return;
+    c.autoRelogin = 1;
+    c.autoReloginStopCombat = 1;
+    c.autoReloginReconnect = 1;
 }
 
 inline uint32_t ClampHangupScheduleMask(uint32_t mask) {
@@ -1259,7 +1306,7 @@ inline uint32_t ClampCombatTeleportMaxHop(uint32_t v) {
 }
 inline bool IsRetiredCombatTeleportMaxHopDefault(uint32_t v) {
     return v == kCombatTeleportMaxHopLegacyDefault || v == kCombatTeleportMaxHopPrevDefault ||
-           v == kCombatTeleportMaxHopPrevDefault2;
+           v == kCombatTeleportMaxHopPrevDefault2 || v == kCombatTeleportMaxHopPrevDefault3;
 }
 
 inline uint32_t ClampCombatOneshotMaxHp(uint32_t v) {

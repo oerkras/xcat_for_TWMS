@@ -43,8 +43,8 @@ constexpr ULONGLONG kWatchdogGraceMs = 8000;
 constexpr ULONGLONG kWatchdogMaxBackoffMs = 120000;
 constexpr ULONGLONG kHealthyResetMs = 60000;
 constexpr ULONGLONG kLogRotateBytes = 32ull * 1024ull * 1024ull;
-constexpr ULONGLONG kMesoDashKeepMs = 7ull * 24ull * 60ull * 60ull * 1000ull;
-constexpr ULONGLONG kMesoEventKeepMs = 30ull * 24ull * 60ull * 60ull * 1000ull;
+// 折线在内存里只留图上最长窗口（7 天）；磁盘 meso_dash.jsonl 不裁、不重写。
+constexpr ULONGLONG kMesoDashRamKeepMs = 7ull * 24ull * 60ull * 60ull * 1000ull;
 // 探活采样约 5s；相邻点超过此时长视为关服/API 断连，折线断开不连斜线。
 constexpr ULONGLONG kMesoDashGapMs = 30ull * 1000ull;
 
@@ -1580,7 +1580,7 @@ void MesoMarkSeriesAlert(OpsState& st, const std::string& token, ULONGLONG nowMs
 void SampleMesoDash(OpsState& st) {
     MesoMergeUidTokenAliases(st);
     const ULONGLONG nowMs = MesoDashWallMs();
-    const ULONGLONG cutMs = nowMs > kMesoDashKeepMs ? nowMs - kMesoDashKeepMs : 0;
+    const ULONGLONG cutMs = nowMs > kMesoDashRamKeepMs ? nowMs - kMesoDashRamKeepMs : 0;
     const unsigned long long alertMin = st.mesoAlertMin > 0 ? st.mesoAlertMin : 100000ull;
 
     struct LiveUnit {
@@ -1950,12 +1950,6 @@ void SampleMesoDash(OpsState& st) {
         SetStatus(st, msg + "（利润监控流水已记）");
     }
 
-    while (!st.mesoEvents.empty() &&
-           (st.mesoEvents.size() > 4000 ||
-            (st.mesoEvents.front().wallMs + kMesoEventKeepMs < nowMs))) {
-        st.mesoEvents.pop_front();
-    }
-
     for (auto& s : st.mesoDashSeries) {
         s.online = false;
         s.sessions = 0;
@@ -2039,19 +2033,7 @@ void SampleMesoDash(OpsState& st) {
     MesoDashPush(st.mesoDashTotal, nowMs, total);
     MesoDashPrune(st.mesoDashTotal, cutMs);
 
-    st.mesoDashSeries.erase(
-        std::remove_if(st.mesoDashSeries.begin(), st.mesoDashSeries.end(),
-                       [&](const OpsState::MesoDashSeries& s) {
-                           return !s.online && s.points.empty();
-                       }),
-        st.mesoDashSeries.end());
     for (auto& s : st.mesoDashSeries) MesoDashPrune(s.points, cutMs);
-
-    st.mesoUnits.erase(std::remove_if(st.mesoUnits.begin(), st.mesoUnits.end(),
-                                      [&](const OpsState::MesoUnit& u) {
-                                          return !u.online && u.lastSeenMs < cutMs;
-                                      }),
-                       st.mesoUnits.end());
 
     MesoDashAppendFile(st, nowMs, total);
     MesoUnitsSave(st);
@@ -2545,50 +2527,20 @@ void MesoDashParseSeriesArray(OpsState& st, const std::string& line, ULONGLONG t
     }
 }
 
-void MesoDashRewriteFile(OpsState& st, ULONGLONG cutMs) {
-    if (st.repoRoot.empty()) return;
-    const std::wstring path = OpsLogMesoDash(st.repoRoot);
-    const std::wstring tmp = path + L".tmp";
-    std::ifstream in(std::filesystem::path(path), std::ios::binary);
-    if (!in) return;
-    std::ofstream out(std::filesystem::path(tmp), std::ios::binary | std::ios::trunc);
-    if (!out) return;
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty() || line[0] != '{') continue;
-        const ULONGLONG t = MesoDashParseUll(FindJsonNumber(line, "t"));
-        if (t < cutMs) continue;
-        out << line << '\n';
-    }
-    out.close();
-    in.close();
-    std::error_code ec;
-    std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
-    if (ec) {
-        std::filesystem::remove(std::filesystem::path(path), ec);
-        std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
-    }
-}
-
 void MesoDashLoadFile(OpsState& st) {
     if (st.repoRoot.empty()) return;
     const std::wstring path = OpsLogMesoDash(st.repoRoot);
     std::ifstream in(std::filesystem::path(path), std::ios::binary);
     if (!in) return;
     const ULONGLONG nowMs = MesoDashWallMs();
-    const ULONGLONG cutMs = nowMs > kMesoDashKeepMs ? nowMs - kMesoDashKeepMs : 0;
-    bool needCompact = false;
+    const ULONGLONG cutMs = nowMs > kMesoDashRamKeepMs ? nowMs - kMesoDashRamKeepMs : 0;
     std::string line;
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty() || line[0] != '{') continue;
         const ULONGLONG t = MesoDashParseUll(FindJsonNumber(line, "t"));
         if (t == 0) continue;
-        if (t < cutMs) {
-            needCompact = true;
-            continue;
-        }
+        if (t < cutMs) continue;
         const unsigned long long tot = MesoDashParseUll(FindJsonNumber(line, "tot"));
         MesoDashPush(st.mesoDashTotal, t, tot);
         MesoDashParseSeriesArray(st, line, t);
@@ -2600,7 +2552,6 @@ void MesoDashLoadFile(OpsState& st) {
         if (!s.points.empty()) s.lastMeso = s.points.back().meso;
         s.online = false;
     }
-    if (needCompact) MesoDashRewriteFile(st, cutMs);
     MesoUnitsLoad(st);
     MesoEventsLoad(st);
     MesoMergeUidTokenAliases(st);
@@ -2661,9 +2612,6 @@ void MesoEventsLoad(OpsState& st) {
     const std::wstring path = OpsLogMesoEvents(st.repoRoot);
     std::ifstream in(std::filesystem::path(path), std::ios::binary);
     if (!in) return;
-    const ULONGLONG nowMs = MesoDashWallMs();
-    const ULONGLONG cutMs = nowMs > kMesoEventKeepMs ? nowMs - kMesoEventKeepMs : 0;
-    bool needCompact = false;
     std::string line;
     std::deque<OpsState::MesoEvent> kept;
     while (std::getline(in, line)) {
@@ -2671,10 +2619,6 @@ void MesoEventsLoad(OpsState& st) {
         if (line.empty() || line[0] != '{') continue;
         const ULONGLONG t = MesoDashParseUll(FindJsonNumber(line, "t"));
         if (t == 0) continue;
-        if (t < cutMs) {
-            needCompact = true;
-            continue;
-        }
         OpsState::MesoEvent ev;
         ev.wallMs = t;
         ev.kind = FindJsonString(line, "kind");
@@ -2693,20 +2637,6 @@ void MesoEventsLoad(OpsState& st) {
     }
     in.close();
     st.mesoEvents = std::move(kept);
-    if (needCompact) {
-        const std::wstring tmp = path + L".tmp";
-        std::ofstream out(std::filesystem::path(tmp), std::ios::binary | std::ios::trunc);
-        if (out) {
-            for (const auto& ev : st.mesoEvents) MesoEventWriteLine(out, ev);
-            out.close();
-            std::error_code ec;
-            std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
-            if (ec) {
-                std::filesystem::remove(std::filesystem::path(path), ec);
-                std::filesystem::rename(std::filesystem::path(tmp), std::filesystem::path(path), ec);
-            }
-        }
-    }
 }
 
 void MesoUnitsSave(OpsState& st) {
@@ -2737,8 +2667,6 @@ void MesoUnitsLoad(OpsState& st) {
     if (!in) return;
     std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     if (body.empty()) return;
-    const ULONGLONG nowMs = MesoDashWallMs();
-    const ULONGLONG cutMs = nowMs > kMesoDashKeepMs ? nowMs - kMesoDashKeepMs : 0;
     size_t i = body.find("\"u\":");
     if (i == std::string::npos) return;
     i = body.find('[', i);
@@ -2782,7 +2710,6 @@ void MesoUnitsLoad(OpsState& st) {
         u.lastSeenMs = MesoDashParseUll(FindJsonNumber(obj, "s"));
         const std::string pid = MesoPersonId(u.uid, u.token);
         if (pid.empty()) continue;
-        if (u.lastSeenMs != 0 && u.lastSeenMs < cutMs) continue;
         u.key = MesoUnitKey(pid, u.charName, u.deviceId);
         u.sampled = true;
         u.online = false;
@@ -3763,11 +3690,11 @@ void DrawMainTabButtons(OpsState& st) {
             tabBtn(mesoTab, 2);
             ImGui::PopStyleColor();
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("近 24h 外转/跨号/重连骤降 %d 笔\n背包金=利润，流水落盘 30 天", nAlert);
+                ImGui::SetTooltip("近 24h 外转/跨号/重连骤降 %d 笔\n背包金=利润，流水与底账长期落盘", nAlert);
         } else {
             tabBtn(mesoTab, 2);
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("监控用户背包金变化（利润）\n防偷偷转移 · 流水 30 天");
+                ImGui::SetTooltip("监控用户背包金变化（利润）\n防偷偷转移 · 流水与底账长期落盘");
         }
     }
     ImGui::SameLine();
@@ -7065,7 +6992,7 @@ void DrawMesoPlot(OpsState& st, const std::vector<size_t>& visIdx, ULONGLONG t0,
     }
 
     if (!any) {
-        const char* empty = gaps.empty() ? "等待采样或历史为空。约 5 秒一点，已落盘 7 天。"
+        const char* empty = gaps.empty() ? "等待采样或历史为空。约 5 秒一点，折线落盘长期保留。"
                                          : "断连期间无采样。关服后折线留白，底账不掉。";
         const ImVec2 ts = ImGui::CalcTextSize(empty);
         dl->AddText(ImVec2((x0 + x1 - ts.x) * 0.5f, (y0 + y1 - ts.y) * 0.5f), axis, empty);
@@ -7151,7 +7078,7 @@ void DrawMesoDashPanel(OpsState& st) {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f);
     ImGui::TextUnformatted("利润监控");
     ImGui::SameLine(0, 10.f);
-    ImGui::TextDisabled("按人分组 · 底账含离线 · 流水 30 天");
+    ImGui::TextDisabled("按人分组 · 底账含离线 · 流水长期保留");
 
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(3.f, 0.f));
     DrawMesoSegBtn("10分##mw10", st.mesoDashWindowMin == 10, &st.mesoDashWindowMin, 10,
@@ -7223,7 +7150,7 @@ void DrawMesoDashPanel(OpsState& st) {
         }
         ImGui::PopStyleColor();
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("只清 meso_dash.jsonl，流水与底账保留");
+            ImGui::SetTooltip("清空磁盘上全部折线历史 meso_dash.jsonl；流水与角色底账不动");
         ImGui::EndPopup();
     }
 
@@ -7643,7 +7570,7 @@ void DrawMesoDashPanel(OpsState& st) {
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("%d 条", evMatch);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("落盘 artifacts\\ops_logs\\meso_events.jsonl（最多 30 天）");
+        ImGui::SetTooltip("落盘 artifacts\\ops_logs\\meso_events.jsonl（长期保留，不裁）");
     if (st.mesoDashFilter[0]) {
         ImGui::SameLine(0, 8.f);
         ImGui::AlignTextToFramePadding();

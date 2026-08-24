@@ -14,6 +14,7 @@
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/anchor_lamps.h"
 #include "../../runtime/mono_clock.h"
+#include "../soft_login_probe/soft_login_probe.h"
 
 #include <atomic>
 #include <cstdio>
@@ -1241,6 +1242,13 @@ bool FindAndUsePotion(PotionKind kind, FindResult& out) {
 
 bool ResolveBoundPotion(bool wantHp, FindResult& out) {
     out = {};
+    if (x::runtime::main_thread::IsCongested() ||
+        x::features::soft_login_probe::IsGameplayQuiet() ||
+        x::features::soft_login_probe::IsReconnectInFlight() ||
+        !x::runtime::main_thread::IsPumpTicking(400)) {
+        out.missWhy = "quiet";
+        return false;
+    }
     BoundResolveJobCtx ctx{};
     ctx.wantHp = wantHp;
     ctx.out = &out;

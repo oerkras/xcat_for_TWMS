@@ -262,14 +262,17 @@ DWORD WINAPI Worker(LPVOID) {
                     lastFhMapId = fh.mapId;
                     lastSlotsRefresh = 0;  // 换图立刻重刷 M
                     ports::foothold::DumpCachedLog();
+                    // 换图只灌台面缓存（起飞闸 / 飞出图外包）。走路图论懒建：
+                    // 空中贴怪不需要 walk/climb/fall；拟人、瞬移落点、lie_safe 第一次 Snap 再 EnsureGraph。
                     ports::foothold_path::GraphMeta gm{};
-                    const bool gOk = ports::foothold_path::EnsureGraph() &&
-                                     ports::foothold_path::GetGraphMeta(&gm);
+                    const bool gOk = ports::foothold_path::GetGraphMeta(&gm) &&
+                                     gm.ok && gm.mapId == fh.mapId;
                     LogLine("foothold map=%d n=%d ladders=%d curFh=%u mismatch=%d "
-                            "graph=%d nodes=%d walk=%d climb=%d fall=%d ropeLink=%d (see foothold.log)",
+                            "graph=%d deferred=%d nodes=%d walk=%d climb=%d fall=%d ropeLink=%d "
+                            "(see foothold.log)",
                             fh.mapId, fh.footholdN, fh.ladderN, fh.curFhId, fh.idMismatch,
-                            gOk ? 1 : 0, gm.nodes, gm.walkEdges, gm.climbEdges, gm.fallEdges,
-                            gm.ropeLinked);
+                            gOk ? 1 : 0, gOk ? 0 : 1, gm.nodes, gm.walkEdges, gm.climbEdges,
+                            gm.fallEdges, gm.ropeLinked);
                 }
             }
         }

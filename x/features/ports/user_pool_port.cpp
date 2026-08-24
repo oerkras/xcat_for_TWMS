@@ -12,6 +12,7 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 namespace x::features::ports::user_pool {
@@ -55,11 +56,17 @@ constexpr char kHashAvatarRootField[] =
     "e19a7703df60dd7e9e06d10e38d0932000a30c05684025726b91b7db7a88db4";
 constexpr char kFldAvatarRoot[] = "_avatarRoot";
 constexpr size_t kFbAvatarRoot = 0x80;
-// User.<CharacterName>k__BackingField（dump.cs.restored TypeDef 1560；titlebar 同源）
+// User.CharacterName backing（dump.cs TypeDef 1570 · getter RVA 0xFC8540 → *(this+0x1A0)）。
+// 旧 bacf9760…@0x1B8 是 MiniRoomSn（uint），当名字读会全员「?」。
 constexpr char kHashCharacterNameField[] =
-    "bacf9760e028af0b3080175a44d847812e3f6b1ec0875e396b2bb5de5d6cd91";
-constexpr char kFldCharacterName[] = "<CharacterName>k__BackingField";
-constexpr size_t kFbCharacterName = 0x1B8;
+    "b67722c0326ffe1bcc665128f868735c260726acfbbc3f5ae5810d3546a0531";
+constexpr char kFldCharacterName[] =
+    "<b67722c0326ffe1bcc665128f868735c260726acfbbc3f5ae5810d3546a0531>k__BackingField";
+constexpr size_t kFbCharacterName = 0x1A0;
+// User.CharacterId backing（同 getter RVA 0xFC8520 → *(uint*)(this+0x19C)；名字失败时日志用 #id）
+constexpr char kHashCharacterIdField[] =
+    "f3607f2a1fa94ef7f7f92f7f806619ac30dc142e082a31c2deeb68c87982130";
+constexpr size_t kFbCharacterId = 0x19C;
 constexpr uint32_t kRvaGoGetActiveSelf = 0x4E98080;  // remount 2026-08-06 · shop_port 同源
 
 constexpr DWORD kJobWaitMs = 800;
@@ -72,6 +79,7 @@ DWORD gLastBind = 0;
 size_t gOffAvatarRoot = kFbAvatarRoot;
 bool gAvatarOffTried = false;
 size_t gOffCharacterName = kFbCharacterName;
+size_t gOffCharacterId = kFbCharacterId;
 bool gCharNameOffTried = false;
 
 struct MethodInfoHead {
@@ -376,6 +384,17 @@ uint16_t ReadU16(void* base, size_t off) {
     return v;
 }
 
+uint32_t ReadU32(void* base, size_t off) {
+    if (!base) return 0;
+    uint32_t v = 0;
+    __try {
+        v = *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(base) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return v;
+}
+
 bool IsAdminLikeJob(uint16_t job) {
     if (job == 0 || job == 0xFFFF) return false;
     const int cat = static_cast<int>(job % 1000) / 100;
@@ -437,13 +456,21 @@ void EnsureCharacterNameOffset() {
     if (!x::runtime::il2cpp::Ensure()) return;
     void* k = ResolveUserKlass();
     if (!k) return;
-    size_t off = FieldOffsetByHash(k, kHashCharacterNameField);
-    if (!off) off = FieldOffsetByHash(k, kFldCharacterName);
+    size_t off = FieldOffsetByHash(k, kFldCharacterName);
+    if (!off) off = FieldOffsetByHash(k, kHashCharacterNameField);
+    if (!off) off = FieldOffsetByHash(k, "<CharacterName>k__BackingField");
     if (!off) off = FieldOffsetByHash(k, "CharacterName");
-    if (off >= 0x10 && off < 0x800) {
+    // 拒绝 0x1B8：那是 MiniRoomSn uint（bacf9760…），不是 string。
+    if (off >= 0x10 && off < 0x800 && off != 0x1B8) {
         gOffCharacterName = off;
         x::runtime::LogI("UserPool", "CharacterName off=0x%zX", gOffCharacterName);
+    } else {
+        gOffCharacterName = kFbCharacterName;
+        x::runtime::LogI("UserPool", "CharacterName off=0x%zX (fallback, hash_off=0x%zX)",
+                         gOffCharacterName, off);
     }
+    size_t idOff = FieldOffsetByHash(k, kHashCharacterIdField);
+    if (idOff >= 0x10 && idOff < 0x800) gOffCharacterId = idOff;
 }
 
 bool ReadIl2CppStringUtf8(void* str, char* out, int outSz) {
@@ -561,6 +588,13 @@ void FillThreatFromUsers(void** users, int n, RemoteThreatSample* out, bool chec
             char* slot = out->names[out->nameCount];
             if (ReadUserCharacterNameLocked(u, slot, kRemoteNameLen) && slot[0]) {
                 ++out->nameCount;
+            } else {
+                EnsureCharacterNameOffset();
+                const uint32_t id = ReadU32(u, gOffCharacterId);
+                if (id) {
+                    std::snprintf(slot, kRemoteNameLen, "#%u", id);
+                    ++out->nameCount;
+                }
             }
         }
     }

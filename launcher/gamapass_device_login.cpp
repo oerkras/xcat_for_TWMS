@@ -3,6 +3,7 @@
 #include "chromium_cdp.h"
 #include "gamapass_cdp_login.h"
 #include "gamapass_login_phase.h"
+#include "gamapass_ticket_harvest.h"
 #include "http_gamapass_login.h"
 #include "msc_webview_login.h"
 
@@ -554,19 +555,78 @@ void LaunchClassicAfterIsolatedTicket(msc::cdp::Session& cdp, GamaPassDeviceLogi
     LogLine(log, L"[gp-device-login] 从 Galaxy 点 Gama Pass 换票（select-account 必须走 OAuth，不能直接打开）");
     GpFillState fill;
     auto onLogin = [&](msc::cdp::Session& s, HttpLoginLogFn lg) { TryFillGpLoginOnce(s, acc, fill, lg); };
-    auto lr = HttpGamaPassCdpLoginToOttOnConnected(cdp, log, 240000, kDeviceLoginDebugPort, onLogin);
-    if (GamaPassLoginCanceled() || lr.error == HttpLoginError::Cancelled) {
+    const FILETIME sessionNotBefore = GamaPassSessionNotBeforeNow();
+    bool sawNgm = false;
+    constexpr int kMaxRounds = 3;
+    constexpr int kCdpTimeoutMs = 240000;
+    HttpLoginResult lr;
+
+    auto abortCanceled = [&]() {
         LogLine(log, L"[gp-device-login] 已取消账密直登（不接管经典版、不杀游戏）");
         cdp.Close();
         (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
                                            [&](const std::wstring& s) { LogLine(log, s); });
-        return;
+    };
+
+    auto attachClassic = [&](GalaxyTicket ticket) -> bool {
+        if (msc::weblogin::LaunchClassicAfterTicket(std::move(ticket))) return true;
+        LogLine(log, L"[gp-device-login] 换票成功，经典版尚未出现，再等一会接管（不重开 Galaxy、不点第二次 Gama Pass）…");
+        for (int i = 0; i < 8; ++i) {
+            if (GamaPassLoginCanceled()) return false;
+            Sleep(1500);
+            auto harvested = GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgm, log,
+                                                             L"[gp-device-login]");
+            if (harvested.ok && harvested.ticketFilled &&
+                msc::weblogin::LaunchClassicAfterTicket(std::move(harvested.ticket))) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (int round = 1; round <= kMaxRounds; ++round) {
+        if (GamaPassLoginCanceled()) {
+            abortCanceled();
+            return;
+        }
+        if (round > 1) {
+            LogLine(log, L"[gp-device-login] 整轮结束仍未拉起经典版，同独立罐再试第 " +
+                             std::to_wstring(round) + L"/" + std::to_wstring(kMaxRounds) +
+                             L" 轮（不清 Cookie、不关窗、不 refresh）…");
+            fill = {};
+            Sleep(2000);
+            if (GamaPassLoginCanceled()) {
+                abortCanceled();
+                return;
+            }
+            auto late = GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgm, log,
+                                                        L"[gp-device-login]");
+            if (late.ok && late.ticketFilled) {
+                lr = std::move(late);
+                break;
+            }
+        }
+        lr = HttpGamaPassCdpLoginToOttOnConnected(cdp, log, kCdpTimeoutMs, kDeviceLoginDebugPort,
+                                                  onLogin);
+        if (GamaPassLoginCanceled() || lr.error == HttpLoginError::Cancelled) {
+            abortCanceled();
+            return;
+        }
+        if (lr.ok && lr.ticketFilled) break;
+        const bool retryable =
+            lr.error == HttpLoginError::OttMissing || lr.error == HttpLoginError::Network;
+        if (!retryable) break;
     }
+
     if (lr.ok && lr.ticketFilled) {
         SaveGamaPassDeviceLoginAccount(storePath, acc);
         LogLine(log, L"[gp-device-login] 换票成功 uid=" + lr.ticket.userObjectId + L" gid=" +
                          lr.ticket.gid + L"，接管经典版（不调用 NGM）");
-        if (!msc::weblogin::LaunchClassicAfterTicket(std::move(lr.ticket))) {
+        if (!attachClassic(std::move(lr.ticket))) {
+            if (GamaPassLoginCanceled()) {
+                abortCanceled();
+                return;
+            }
             LogLine(log, L"[gp-device-login] 换票成功，但未接管到经典版。"
                          L"请确认官网已拉起 Maplestory_Classic.exe 后再点一次（已有窗口不会重填账密）");
         }

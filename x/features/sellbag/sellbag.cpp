@@ -322,7 +322,7 @@ bool BuildQueueForCurrentBag() {
         if (ShouldKeep(it, bagBit)) continue;
         if (sellSnapOk && onSellList.find(it.itemId) == onSellList.end()) {
             ++skippedQuest;
-            ++g_status.kept;
+            ++g_status.shopSkip;
             const char* offline = OfflineName(it.itemId);
             runtime::LogI("Sellbag", "跳过(任务/店不可卖) id=%d name=%s", it.itemId,
                           it.name[0] ? it.name : offline);
@@ -352,6 +352,7 @@ void ResetRoundState() {
     g_status.equipSold = 0;
     g_status.etcSold = 0;
     g_status.kept = 0;
+    g_status.shopSkip = 0;
     g_status.failed = 0;
     g_status.mesoGained = 0;
     g_status.mesoGainedValid = 0;
@@ -379,9 +380,10 @@ void EndFlow(const char* msg, bool error) {
     g_roundMesoOk = false;
 
     SetMessage(msg);
-    runtime::LogI("Sellbag", "流程结束: %s (装备%u 其他%u 保留%u 失败%u meso=%lld)",
+    runtime::LogI("Sellbag",
+                  "流程结束: %s (装备%u 其他%u 保留%u 店不可卖%u 失败%u meso=%lld)",
                   msg ? msg : "?", g_status.equipSold, g_status.etcSold, g_status.kept,
-                  g_status.failed,
+                  g_status.shopSkip, g_status.failed,
                   static_cast<long long>(g_status.mesoGainedValid ? g_status.mesoGained : 0));
 
     if (!g_suppressNotify) {
@@ -565,7 +567,7 @@ void TickSelling(DWORD now) {
                 return;
             }
             runtime::LogW("Sellbag", "列表未就绪耗尽 id=%d pos=%d", q.itemId, q.pos);
-            // 投影始终无此项（任务道具常见）：记保留跳过，不抬失败计数
+            // 投影始终无此项（任务道具常见）：已入队说明建队时在卖栏；不当开错店
             ++g_queueIndex;
             ++g_status.kept;
             g_skip[q.itemId] = 1;

@@ -9,6 +9,9 @@
 // 默认站立吸怪不占 heli_rotor；「先飞到最密堆再吸」/「软重连后返回原位」才用 Owner::Gather。
 // 控权申请（TAB 选项，默认关）：泵上调官方 Mob.ApplyControl(tCur)，不钩 calc_priority、
 // 不造 206、不写 0xE8。服端批 280 后才变本地模拟。
+// 「只吸场上的」（TAB，默认开）：勾上时场上已有的 oid 才吸；之后图刷/分裂/召唤的新 oid 不吸。
+// 换图 / 软重连回图会清快照再 latch（同图重连 oid 全换，不清则 why=gen 不吸）。
+// TW 场怪 _summonType 实测为 0，不能当第一世代门。
 // 产品 = 经典版，不是枫星。文案 = 吸怪方便打，禁止写成防抢。
 // 公开图 MobCtrl 常全 -1；以本地物理是否在跑当权威代理，不靠 ctrl>0。
 
@@ -43,6 +46,7 @@ unsigned AimIntervalMs();
 void SetIgnoreQuiet(bool on);
 void SetQuietDelayMs(unsigned ms);
 void SetApplyCtrl(bool on);
+void SetFirstGenOnly(bool on);
 // 「吸怪 快攻」TAB「快攻」卡「主动软重连」。不绑吸怪；试连未开则只起表不拆会话。
 // 出过刀 = 欠一次 hangup 清加速 FLAG：第一刀才起表；出刀后关 F5 仍走完这一轮。
 // 没出过刀：关 F5 不计时，满包可直接卖。勾选可单独开（不绑出刀）。
@@ -65,8 +69,9 @@ bool FireProactiveHangup(const char* why);
 // 卖装/补给等要出门：若本轮出过刀或刀数已到期，立刻软重连清 FLAG，调用方必须等落地。
 // 已在拆/未出过刀：不重复拆。返回 true=先等 hangup，false=可以出门。
 bool HangupBeforeOtherAction(const char* why);
-// 与 combat.log「fire id=」同一拍 +1（那次峰值 2030 就是按分钟数这些行）。
-// 自组发出 / 多发 NA 真正挥出同样 +1。不看 ActionBusy、不看命中。
+// 与 combat.log「fire id=」同一拍 +1。
+// TryFirePrimaryEx（OnFuncKey 已返回）/ NoteLastFire（自组）调用。
+// 空挥、引擎吞刀都计；不看 ActionBusy、不看命中。
 void NoteHangupFire();
 // NM 会话真死（Disconnected / 图内 CloseSession）：出刀账归这一局，避免落地 age=0 再拆。
 // KickSniff 工作线程可调（只动原子）。stuck_lobby / dialog_linger 必须忽略。
@@ -81,6 +86,14 @@ bool HangupFiresDue();
 bool SoftReloginAllowsAutoSell();
 // 已拆未落地或软重连在途：卖装必须让路，落地再开趟。
 bool HangupWashInFlight();
+// 掉出图 / PlayReady 丢失：脏会话记一笔。Travel 赶路不记。
+void NoteLeftPlayForHangup();
+// 同图回来：离图 ≥200ms 且脏，则 CloseSession 洗会话。返回 true=调用方必须停刀。
+bool HangupOnSameMapFieldReload();
+// 已拆等落地。
+bool HangupAwaitingLand();
+// 禁止 stuck_lobby / already_in_map 假成功：出刀闸到期 / 等落地 / 掉出图待洗。
+bool HangupBlocksFakeInMapRecover();
 // hangup 已开火、补给还没拍板：F5 不准恢复出刀（卖装优先于打怪）。
 bool HangupCombatHold();
 void ReleaseHangupCombatHold(const char* why);

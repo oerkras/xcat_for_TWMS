@@ -63,6 +63,13 @@ void NoteCrowdedChannel();
 // 换图清空软拉黑（mapId<=0 仅清；同图 no-op）。
 void OnMapChanged(int mapId);
 
+// 吸怪 TAB「重连换频」。默认关。只改 known+sticky，不进 hop FSM、不 SendTransfer、不拉黑。
+void SetReconnectHopEnabled(bool on);
+// 软重连进选频前调用。遇人已 commit / sticky 已异于 known 则 no-op。Kick 线程可调（不读 WM）。
+void EnsureReconnectNotSameChannel(const char* why);
+// CloseSession 失败仍在图内：把 known/sticky 扳回本轮 from，避免 native_wm 误判换频。
+void RevertReconnectHopIfArmed(const char* why);
+
 void Tick(DWORD now);
 
 }  // namespace x::features::channel_hop

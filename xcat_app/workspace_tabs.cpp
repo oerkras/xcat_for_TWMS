@@ -367,7 +367,10 @@ void DrawGamaPassSlotRow(LaunchUiState& ui, bool slotsLocked, float rowW, float 
     }
     if (slotsLocked) ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("游戏昵称列表序号：1=第一个（不含「建立暱稱」）。读秒中可改，换票开始后不可改。");
+        ImGui::SetTooltip(
+            "游戏昵称列表序号：1=第一个（不含「建立暱稱」）。"
+            "新号请在弹出窗自己点「建立遊戲暱稱」填名字，建好后会自动继续。"
+            "读秒中可改，换票开始后不可改。");
     }
 }
 
@@ -415,6 +418,15 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
                 }
                 ui.pendingAutoLaunch = false;
                 ui.status = "已切换：gamania (HK)";
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            if (modeIdx == 2) {
+                ImGui::SetTooltip(
+                    "账密直登会另开一扇 XCAT 专用浏览器（独立登录罐），\n"
+                    "不是你日常用的 Chrome / Edge。");
+            } else if (modeIdx == 1) {
+                ImGui::SetTooltip("用你日常浏览器点选 Gama Pass 换票。不另开独立罐。");
             }
         }
     }
@@ -555,6 +567,10 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
             ImGui::TextColored(PrepHintBlue(), "即将自动换票…");
         }
     } else if (gamaPassDirect) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + rowW);
+        ImGui::TextColored(PrepHintBlue(),
+                           "弹出的是 XCAT 专用浏览器，不是你日常用的 Chrome / Edge。");
+        ImGui::PopTextWrapPos();
         const bool gpBusy = msc::launcher::IsGamaPassDeviceLoginBusy() || busy;
         const bool autoPending = ui.pendingAutoLaunch;
         if (gpBusy) ImGui::BeginDisabled();
@@ -767,6 +783,8 @@ static bool gUiCombatLiveStep = false;
 // 跳过攻击动画 / 砍动画倒计时：实验 TAB（不绑吸怪解锁）；默认关。
 static bool gUiAttackAccelSkipPrepare = false;  // 实验 TAB「跳过攻击动画」
 static bool gUiAttackAccelClearBusy = false;    // 吸怪 TAB「攻击无CD」
+// 调试 TAB「解绑」：开着则攻击无CD 不再强制遇人三项。默认关（仍绑定）。
+static bool gUiAttackNoCdEncounterUnbind = false;
 // 历史字段，Apply 不再抬间隔；仍落盘兼容。
 static int gUiAttackAccelClearBusyMinIntervalMs =
     (int)xcat::kAttackAccelClearBusyMinIntervalDefaultMs;
@@ -877,12 +895,14 @@ static bool gUiMobGatherSeekCluster = xcat::kMobGatherSeekClusterDefault != 0;
 static bool gUiMobGatherPatrolFar = xcat::kMobGatherPatrolFarDefault != 0;
 static bool gUiMobGatherAntiReport = xcat::kMobGatherAntiReportDefault != 0;
 static bool gUiMobGatherHomeReturn = xcat::kMobGatherHomeReturnDefault != 0;
+static bool gUiMobGatherReconnectHop = xcat::kMobGatherReconnectHopDefault != 0;
 static int gUiMobGatherHomeX = 0;
 static int gUiMobGatherHomeY = 0;
 static int gUiMobGatherHomeMapId = 0;
 static bool gUiMobGatherHomeValid = false;
 static bool gUiMobGatherHomeHasMap = false;
 static bool gUiMobGatherApplyCtrl = false;
+static bool gUiMobGatherFirstGenOnly = xcat::kMobGatherFirstGenOnlyDefault != 0;
 // 地面门旁路：仅实验 TAB；与站立伪装（simpleCombatGroundSpoof）独立。
 static bool gUiCurFhGateBypass = false;
 // F6 手动飞 / F5 滑翔倍率：首页「飞行速度」卡；调试 TAB 不再改这两项。
@@ -997,6 +1017,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 gUiAttackAccelCutLayer = disk.attackAccelCutLayer != 0;
                 gUiAttackAccelSkipPrepare = disk.attackAccelSkipPrepare != 0;
                 gUiAttackAccelClearBusy = disk.attackAccelClearBusy != 0;
+                gUiAttackNoCdEncounterUnbind = disk.attackNoCdEncounterUnbind != 0;
                 gUiAttackAccelClearBusyMinIntervalMs =
                     (int)xcat::ClampAttackAccelClearBusyMinIntervalMs(
                         disk.attackAccelClearBusyMinIntervalMs
@@ -1145,12 +1166,14 @@ void DrawHomeTab(LaunchUiState& ui) {
                 gUiMobGatherPatrolFar = disk.mobGatherPatrolFar != 0;
                 gUiMobGatherAntiReport = false;
                 gUiMobGatherHomeReturn = disk.mobGatherHomeReturn != 0;
+                gUiMobGatherReconnectHop = disk.mobGatherReconnectHop != 0;
                 gUiMobGatherHomeX = (int)xcat::ClampMobGatherStandOffX(disk.mobGatherHomeX);
                 gUiMobGatherHomeY = (int)xcat::ClampMobGatherStandOffY(disk.mobGatherHomeY);
                 gUiMobGatherHomeMapId = disk.mobGatherHomeMapId;
                 gUiMobGatherHomeValid = disk.mobGatherHomeValid != 0;
                 gUiMobGatherHomeHasMap = disk.mobGatherHomeHasMap != 0;
                 gUiMobGatherApplyCtrl = disk.mobGatherApplyCtrl != 0;
+                gUiMobGatherFirstGenOnly = disk.mobGatherFirstGenOnly != 0;
                 teleportMinDx = (int)xcat::ClampCombatTeleportMinDx(
                     disk.simpleCombatTeleportMinDx ? disk.simpleCombatTeleportMinDx
                                                    : xcat::kCombatTeleportMinDxDefault);
@@ -1221,6 +1244,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
         c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
         c.attackAccelClearBusy = gUiAttackAccelClearBusy ? 1u : 0u;
+        c.attackNoCdEncounterUnbind = gUiAttackNoCdEncounterUnbind ? 1u : 0u;
         c.attackAccelClearBusyMinIntervalMs = xcat::ClampAttackAccelClearBusyMinIntervalMs(
             (uint32_t)gUiAttackAccelClearBusyMinIntervalMs);
         c.attackAccelBooster =
@@ -1383,7 +1407,9 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.mobGatherPatrolFar = gUiMobGatherPatrolFar ? 1u : 0u;
         c.mobGatherAntiReport = 0u;
         c.mobGatherHomeReturn = gUiMobGatherHomeReturn ? 1u : 0u;
+        c.mobGatherReconnectHop = gUiMobGatherReconnectHop ? 1u : 0u;
         c.mobGatherApplyCtrl = gUiMobGatherApplyCtrl ? 1u : 0u;
+        c.mobGatherFirstGenOnly = gUiMobGatherFirstGenOnly ? 1u : 0u;
         c.simpleCombatTeleportMinDx =
             xcat::ClampCombatTeleportMinDx(static_cast<uint32_t>(teleportMinDx < 0 ? 0 : teleportMinDx));
         // simpleCombatTeleportStandOff 已在上面按共用 X 写入。
@@ -1419,6 +1445,7 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.softLoginProbe = softLoginProbe ? 1u : 0u;
         c.galaxyTokenProbe = softLoginProbe ? 1u : 0u;
         // 补给开关/店图不写 core：真源 [auto_supply]。
+        xcat::ApplyAttackNoCdEncounterForce(c);
         c.writeTickMs = GetTickCount64();
         if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
             lastSeenTick = c.writeTickMs;
@@ -1759,7 +1786,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                     "单选追怪方式。\n"
                     "· 空中贴怪：悬停在怪旁出刀，需无敌，可穿层；默认。\n"
                     "· 拟人模式：同层走路贴近后 A 键出刀，不做跨层。\n"
-                    "· 站桩输出：人原地砍。面前攻击盒（下方横向/竖直，默认 60×10）\n"
+                    "· 站桩输出：人原地砍。面前攻击盒（下方横向/竖直，默认 100×80）\n"
                     "  里有活怪就一直 A，不等贴脸、不空砍换怪、不禁锁。\n"
                     "  开打/切策略/换图/软重连后原地站「静止」ms 给吸物；0=不等；换怪不重新站。\n"
                     "  不自动吸怪；要吸请自己开「吸怪 快攻」TAB。\n"
@@ -1802,7 +1829,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "人↔怪 AbsPos 横向半宽（px）。默认 60。0=该轴不限。\n"
+                    "人↔怪 AbsPos 横向半宽（px）。默认 100。0=该轴不限。\n"
                     "叠怪吸过边会停刀，可加大。砍太远会空刀或踢。");
             }
             ImGui::SameLine(0.f, ui::Gap() * 0.35f);
@@ -1820,7 +1847,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "人↔怪 AbsPos 竖直半高（px）。默认 10。0=该轴不限。\n"
+                    "人↔怪 AbsPos 竖直半高（px）。默认 80。0=该轴不限。\n"
                     "AbsPos：更大 Y = 更高。叠怪吸过边会停刀，可加大。砍太远会空刀或踢。");
             }
             ImGui::SameLine(0.f, ui::Gap() * 0.35f);
@@ -2498,12 +2525,13 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::TextDisabled("500px 内先打密堆");
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
-                    "开：500px 内先打周围更密的堆（密度看同层 250px 活怪数）。\n"
-                    "脚边独怪不会压过半径内的堆；超过 500px 仍打近的，不去追全图。\n"
-                    "空中贴怪/瞬移找怪可跨层比密度；拟人仍只在同层比。\n"
-                    "关：只按距离选最近可打怪（同层有怪就不跨层）\n"
+                    "开：500px 内先打周围更密的堆（密度看同一 zMass、250px 活怪数）。\n"
+                    "脚边独怪不会压过半径内的堆；超过 500px 仍打欧式最近的，不去追全图。\n"
+                    "空中贴怪换怪按欧式距离最近活怪（落点失败也会锁，不跳去远处可落点独怪）。\n"
+                    "拟人仍只在同层比。\n"
+                    "关：换怪只打欧式距离最近的可打怪\n"
                     "注意：已锁定交手中不会中途改锁——只影响下一次选怪\n"
-                    "生效核对：combat.log 出现 SetClusterPriority 1，acquire 的 cluster>=1");
+                    "生效核对：combat.log 出现 SetClusterPriority 1，acquire 的 clusterOn=1");
             }
         }
 
@@ -3984,8 +4012,8 @@ void DrawReloginTab(LaunchUiState& ui) {
     DesignBanner();
 
     static bool detect = true;
-    static bool stopCombat = false;
-    static bool stopGather = false;
+    static bool stopCombat = true;
+    static bool stopGather = true;
     static bool channelHop = true;
     static bool gmEscalate = true;
     static bool hideOthers = false;
@@ -3997,8 +4025,8 @@ void DrawReloginTab(LaunchUiState& ui) {
     auto loadUi = [&]() {
         if (ui.prefsBinDir.empty()) {
             detect = true;
-            stopCombat = false;
-            stopGather = false;
+            stopCombat = true;
+            stopGather = true;
             channelHop = true;
             gmEscalate = true;
             hideOthers = false;
@@ -4030,7 +4058,9 @@ void DrawReloginTab(LaunchUiState& ui) {
         c.autoReloginReconnect = channelHop ? 1u : 0u;
         c.autoReloginGmEscalate = gmEscalate ? 1u : 0u;
         c.hideOtherPlayers = hideOthers ? 1u : 0u;
+        c.attackNoCdEncounterUnbind = gUiAttackNoCdEncounterUnbind ? 1u : 0u;
         xcat::ApplyMobGatherEncounterForce(c);
+        xcat::ApplyAttackNoCdEncounterForce(c);
         c.writeTickMs = GetTickCount64();
         if (!xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) return false;
         s_lastTick = c.writeTickMs;
@@ -4060,19 +4090,28 @@ void DrawReloginTab(LaunchUiState& ui) {
     }
 
     const bool gatherForce = gatherOn || gUiMobGather;
+    const bool noCdForce = gUiAttackAccelClearBusy && !gUiAttackNoCdEncounterUnbind;
     if (gatherForce) {
         detect = true;
         stopGather = true;
         channelHop = true;
     }
+    if (noCdForce) {
+        detect = true;
+        stopCombat = true;
+        channelHop = true;
+    }
+    const bool lockDetectHop = gatherForce || noCdForce;
 
     xcat::ui::CardGuard card("##tab_relogin", "有人来时怎么办");
-    ImGui::BeginDisabled(gatherForce);
+    ImGui::BeginDisabled(lockDetectHop);
     if (xcat::ui::OptionCheckbox("检测同图玩家", &detect)) trySaveOrRevert();
     ImGui::EndDisabled();
     ImGui::Separator();
     ImGui::TextUnformatted("处理流程");
+    ImGui::BeginDisabled(noCdForce);
     if (xcat::ui::OptionCheckbox("先停手", &stopCombat)) trySaveOrRevert();
+    ImGui::EndDisabled();
     if (WorkspaceGatherTabUnlocked() || gatherForce) {
         ImGui::BeginDisabled(gatherForce);
         if (xcat::ui::OptionCheckbox("遇人停吸", &stopGather)) trySaveOrRevert();
@@ -4081,12 +4120,17 @@ void DrawReloginTab(LaunchUiState& ui) {
             gatherForce ? "吸怪开启时强制遇人停吸 + 软重连进新频，避免别人看见吸怪。"
                         : "勾选后遇人（含 GM/隐身升级）会卸掉正在吸的怪，人走净再继续。不改「吸怪 快攻」TAB 开关。");
     }
-    ImGui::BeginDisabled(gatherForce);
+    ImGui::BeginDisabled(lockDetectHop);
     if (xcat::ui::OptionCheckbox("一直有人就换频", &channelHop)) trySaveOrRevert();
     ImGui::EndDisabled();
     ImGui::TextDisabled("勾上：遇人则软重连进随机新频，不回原频道。首页「软重连试连」须开。F10 手动仍走游戏换频。");
     if (gatherForce) {
         ImGui::TextDisabled("吸怪开启时强制启用，关吸怪后才能改。");
+    }
+    if (noCdForce) {
+        ImGui::TextDisabled("攻击无CD 开启时强制：检测同图 + 先停手 + 一直有人就换频，关无CD 后才能改。");
+    } else if (gUiAttackAccelClearBusy && gUiAttackNoCdEncounterUnbind) {
+        ImGui::TextDisabled("已在调试 TAB 解绑攻击无CD 遇人强制，这三项可改。");
     }
     if (xcat::ui::OptionCheckbox("GM/隐身立即处理", &gmEscalate)) trySaveOrRevert();
     ImGui::TextDisabled(
@@ -5019,6 +5063,37 @@ void DrawBetaTab(LaunchUiState& ui) {
                 "一次探针：进图后点。主泵上 FindAll 状态栏，调官方 OnClickButton(17)，\n"
                 "与手点拍卖同一条链（含红号检查→迁拍卖 0x002E）。不改等级/建角时间。\n"
                 "15/24h 仍走客户端官方闸；服端权威不变。日志 AuctionGateProbe。");
+        }
+        if (ImGui::Button("打开 GM 调试 overlay")) {
+            if (ui.prefsBinDir.empty()) {
+                xcat::log::Warn("App", "GM overlay：prefsBinDir 空");
+            } else {
+                xcat::PayloadControl c{};
+                (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+                c.uiCheatOverlaySeq = c.uiCheatOverlaySeq + 1u;
+                if (c.uiCheatOverlaySeq == 0) c.uiCheatOverlaySeq = 1;
+                c.writeTickMs = GetTickCount64();
+                if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                    xcat::PayloadControl verify{};
+                    if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify))
+                        dropSeenTick = verify.writeTickMs;
+                    else
+                        dropSeenTick = c.writeTickMs;
+                    xcat::log::Ok("App",
+                                  "已下发打开 GM 调试 overlay seq=%u（UICheat.CreateInstance+Open）",
+                                  verify.uiCheatOverlaySeq ? verify.uiCheatOverlaySeq
+                                                           : c.uiCheatOverlaySeq);
+                } else {
+                    xcat::log::Warn("App", "写入 uiCheatOverlaySeq 失败");
+                }
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "进图后点。主泵调官方 UICheat.CreateInstance + UIWindow.Open，\n"
+                "并 SetActive，让 Unity 自己每帧跑 OnGUI（IMGUI GM 台）。\n"
+                "韩文按钮会译成简体（GUILayout caption 对照表；未收录的会打 zh miss 日志）。\n"
+                "不直调 OnGUI。部分按钮仍可能要 GM/服端权限。日志 UiCheatOverlay。");
         }
         if (xcat::ui::OptionCheckbox("回蓝加速（实验）", &restMpAccel)) persistDrop();
         if (ImGui::IsItemHovered()) {
@@ -6547,6 +6622,61 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
+        xcat::ui::CardGuard card("##tab_dbg_nocd_enc_unbind", "攻击无CD · 遇人绑定");
+        static bool nocdUnbindDbgLoaded = false;
+        static uint64_t nocdUnbindDbgSeen = 0;
+        if (!ui.prefsBinDir.empty()) {
+            xcat::PayloadControl disk{};
+            if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), disk)) {
+                if (!nocdUnbindDbgLoaded || disk.writeTickMs != nocdUnbindDbgSeen) {
+                    gUiAttackNoCdEncounterUnbind = disk.attackNoCdEncounterUnbind != 0;
+                    nocdUnbindDbgSeen = disk.writeTickMs;
+                    nocdUnbindDbgLoaded = true;
+                }
+            } else if (!nocdUnbindDbgLoaded) {
+                nocdUnbindDbgLoaded = true;
+            }
+        } else if (!nocdUnbindDbgLoaded) {
+            nocdUnbindDbgLoaded = true;
+        }
+
+        const char* btnLabel = gUiAttackNoCdEncounterUnbind ? "恢复绑定##dbg_nocd_enc"
+                                                            : "解绑##dbg_nocd_enc";
+        if (ImGui::Button(btnLabel, ImVec2(-1.f, 0.f))) {
+            const bool wantUnbind = !gUiAttackNoCdEncounterUnbind;
+            if (ui.prefsBinDir.empty()) {
+                gUiAttackNoCdEncounterUnbind = wantUnbind;
+            } else {
+                xcat::PayloadControl c{};
+                (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
+                c.attackNoCdEncounterUnbind = wantUnbind ? 1u : 0u;
+                xcat::ApplyAttackNoCdEncounterForce(c);
+                c.writeTickMs = GetTickCount64();
+                if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
+                    gUiAttackNoCdEncounterUnbind = wantUnbind;
+                    nocdUnbindDbgSeen = c.writeTickMs;
+                    xcat::log::Ok("App", "已下发 core：attackNoCdEncounterUnbind=%d（调试）",
+                                  wantUnbind ? 1 : 0);
+                    sound::UiClick();
+                } else {
+                    xcat::log::Warn("App", "写入 user.ini [core] 攻击无CD遇人解绑失败");
+                    sound::UiError();
+                }
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认绑定：开「攻击无CD」时强制遇人 TAB「检测同图 + 先停手 + 一直有人就换频」，三项置灰。\n"
+                "点「解绑」：不再强制，遇人三项可自行改；不改吸怪那套遇人强制。\n"
+                "点「恢复绑定」：无CD 若仍开着，三项会重新强制打开。\n"
+                "解绑不会自动关掉遇人勾选，只是允许你改。");
+        }
+        ImGui::TextDisabled(gUiAttackNoCdEncounterUnbind
+                                ? "已解绑：开攻击无CD 时不再锁遇人三项。"
+                                : "已绑定：开攻击无CD 时强制检测同图 / 先停手 / 换频。");
+    }
+    CardGap();
+    {
         xcat::ui::CardGuard card("##tab_dbg_pump_drain", "主线程泵");
         static int pumpDrainBudget = (int)xcat::kPumpDrainBudgetDefault;
         static bool drainDbgLoaded = false;
@@ -6623,11 +6753,12 @@ void DrawDebugTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "主线程泵每个宿主 tick 最多执行多少个排队 job（%u–%u，默认 %u=抽干整队）。\n"
-                "队列共 %u 格。调小=单帧更轻、易 defer/跳刀；调大=吞吐更高、单帧可能更尖。\n"
+                "主线程泵每个宿主 tick 最多执行多少个排队 job（%u–%u，默认 %u）。\n"
+                "队列共 %u 格；默认 Drain 不会一次抽干整队，避免单帧倒进过多托管活。\n"
+                "调小=单帧更轻、易 defer/跳刀；调大=吞吐更高、单帧可能更尖。\n"
                 "与上方「拥堵让路阈值」无关：那是背压，这项是每 tick 清队上限。",
                 (unsigned)xcat::kPumpDrainBudgetMin, (unsigned)xcat::kPumpDrainBudgetMax,
-                (unsigned)xcat::kPumpDrainBudgetDefault, (unsigned)xcat::kPumpDrainBudgetMax);
+                (unsigned)xcat::kPumpDrainBudgetDefault, (unsigned)xcat::kPumpQueueCap);
         }
         ImGui::SameLine(0.f, ui::Gap() * 0.35f);
         ImGui::TextUnformatted("格");
@@ -6684,8 +6815,10 @@ void DrawDebugTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "贴怪单次瞬移最大距离（下限 %u px，默认 %u，无上限）。\n"
-                "更远会分段贴近；过大易软断（lean_local_or_soft）。",
+                "贴怪单次 fill 最大距离（下限 %u px，默认 %u，无上限）。\n"
+                "空中贴怪 / 瞬移找怪都会用：更远会分段贴近。\n"
+                "这是单段距离，不是「不去打远处的怪」——选怪仍先清当前 zMass。\n"
+                "过大易软断（lean_local_or_soft）。",
                 (unsigned)xcat::kCombatTeleportMaxHopMin,
                 (unsigned)xcat::kCombatTeleportMaxHopDefault);
         }
@@ -8141,13 +8274,42 @@ void DrawAutoStatTab(LaunchUiState& ui) {
         xcat::ui::CardGuard card("##tab_auto_stat", "自动加点");
         const int ratioSum = str + dex + intel + luk;
         const bool canEnable = ratioSum == static_cast<int>(xcat::kAutoStatRatioSum);
+        xcat::AutoStatConfig probe{};
+        probe.str = str < 0 ? 0u : static_cast<uint32_t>(str);
+        probe.dex = dex < 0 ? 0u : static_cast<uint32_t>(dex);
+        probe.intel = intel < 0 ? 0u : static_cast<uint32_t>(intel);
+        probe.luk = luk < 0 ? 0u : static_cast<uint32_t>(luk);
+        bool jobMismatch = false;
+        if (canEnable && !ui.prefsBinDir.empty()) {
+            xcat::PayloadStatus ps{};
+            if (xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), ps) &&
+                xcat::PayloadStatusHeartbeatFresh(ps, GetTickCount64(), 5000) &&
+                ps.playerCharValid != 0) {
+                jobMismatch = !xcat::AutoStatJobRatioOk(ps.playerJob, probe);
+            }
+        }
         DrawPrepHintBlue("先分配好点数才允许勾选！！！");
-        ImGui::BeginDisabled(!enabled && !canEnable);
+        if (jobMismatch) {
+            ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.25f));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
+            ImGui::TextColored(ImVec4(0.92f, 0.16f, 0.14f, 1.f), "职业与加点不符合，请检查");
+            ImGui::PopTextWrapPos();
+        }
+        const ImVec4 jobWarnRed(0.92f, 0.16f, 0.14f, 1.f);
+        const bool pauseLook = enabled && jobMismatch;
+        if (pauseLook) {
+            ImGui::PushStyleColor(ImGuiCol_Text, jobWarnRed);
+            ImGui::PushStyleColor(ImGuiCol_CheckMark, jobWarnRed);
+        }
+        ImGui::BeginDisabled(!enabled && (!canEnable || jobMismatch));
         if (xcat::ui::OptionCheckbox("自动加点", &enabled)) persist();
         ImGui::EndDisabled();
         const bool autoStatHover = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+        if (pauseLook) ImGui::PopStyleColor(2);
         ImGui::SameLine();
-        if (canEnable) {
+        if (pauseLook) {
+            ImGui::TextColored(jobWarnRed, "已暂停");
+        } else if (canEnable) {
             ImGui::TextDisabled("配比 %d/%u", ratioSum, xcat::kAutoStatRatioSum);
         } else {
             ImGui::Text("配比 %d/%u", ratioSum, xcat::kAutoStatRatioSum);
@@ -8156,7 +8318,9 @@ void DrawAutoStatTab(LaunchUiState& ui) {
             ImGui::SetTooltip(
                 "默认关闭。勾上后把身上剩余 AP 加完（不限 5 点）。\n"
                 "从勾上那一刻起，每 5 点按配比分，不追身上已有属性。\n"
-                "力量/敏捷/智力/幸运 合计必须为 5。关闭时不读属性、不发包。");
+                "力量/敏捷/智力/幸运 合计必须为 5。关闭时不读属性、不发包。\n"
+                "配比与职业主属性对不上时暂停加点（勾仍在，旁注「已暂停」，改对后自动恢复）。\n"
+                "法师禁止力量/敏捷，战士禁止智力。");
         }
 
         auto clampStat = [&](int* v, int others) {
@@ -8521,13 +8685,16 @@ static void MobGatherApplyDisk(const xcat::PayloadControl& c) {
     gUiMobGatherPatrolFar = c.mobGatherPatrolFar != 0;
     gUiMobGatherAntiReport = false;
     gUiMobGatherHomeReturn = c.mobGatherHomeReturn != 0;
+    gUiMobGatherReconnectHop = c.mobGatherReconnectHop != 0;
     gUiMobGatherHomeX = (int)xcat::ClampMobGatherStandOffX(c.mobGatherHomeX);
     gUiMobGatherHomeY = (int)xcat::ClampMobGatherStandOffY(c.mobGatherHomeY);
     gUiMobGatherHomeMapId = c.mobGatherHomeMapId;
     gUiMobGatherHomeValid = c.mobGatherHomeValid != 0;
     gUiMobGatherHomeHasMap = c.mobGatherHomeHasMap != 0;
     gUiMobGatherApplyCtrl = c.mobGatherApplyCtrl != 0;
+    gUiMobGatherFirstGenOnly = c.mobGatherFirstGenOnly != 0;
     gUiAttackAccelClearBusy = c.attackAccelClearBusy != 0;
+    gUiAttackNoCdEncounterUnbind = c.attackNoCdEncounterUnbind != 0;
     gUiAttackAccelSkipPrepare = c.attackAccelSkipPrepare != 0;
     gUiAttackAccelCutLayer = c.attackAccelCutLayer != 0;
     gUiCombatTickMs = (int)xcat::ClampSimpleCombatTickMs(
@@ -8621,13 +8788,17 @@ static bool MobGatherSaveUi(LaunchUiState& ui) {
     c.mobGatherPatrolFar = gUiMobGatherPatrolFar ? 1u : 0u;
     c.mobGatherAntiReport = 0u;
     c.mobGatherHomeReturn = gUiMobGatherHomeReturn ? 1u : 0u;
+    c.mobGatherReconnectHop = gUiMobGatherReconnectHop ? 1u : 0u;
     c.mobGatherHomeX = xcat::ClampMobGatherStandOffX(gUiMobGatherHomeX);
     c.mobGatherHomeY = xcat::ClampMobGatherStandOffY(gUiMobGatherHomeY);
     c.mobGatherHomeMapId = gUiMobGatherHomeMapId;
     c.mobGatherHomeValid = gUiMobGatherHomeValid ? 1u : 0u;
     c.mobGatherHomeHasMap = gUiMobGatherHomeHasMap ? 1u : 0u;
     c.mobGatherApplyCtrl = gUiMobGatherApplyCtrl ? 1u : 0u;
+    c.mobGatherFirstGenOnly = gUiMobGatherFirstGenOnly ? 1u : 0u;
     c.attackAccelClearBusy = gUiAttackAccelClearBusy ? 1u : 0u;
+    c.attackNoCdEncounterUnbind = gUiAttackNoCdEncounterUnbind ? 1u : 0u;
+    xcat::ApplyAttackNoCdEncounterForce(c);
     c.attackAccelSkipPrepare = gUiAttackAccelSkipPrepare ? 1u : 0u;
     c.attackAccelCutLayer = gUiAttackAccelCutLayer ? 1u : 0u;
     c.simpleCombatTickMs = xcat::ClampSimpleCombatTickMs(
@@ -8836,6 +9007,9 @@ void DrawMobGatherTab(LaunchUiState& ui) {
                 "清掉引擎「动作未完吞键」忙锁，出刀可更快再按。\n"
                 "产品名「攻击无CD」；不是技能服端 CD。\n"
                 "出刀频率看「首页 → 挂机 → 出刀间隔」。\n"
+                "开启后强制遇人策略：检测同图 + 先停手 + 一直有人就换频\n"
+                "（别人进图立刻停手，人还在就换频；关无CD 后可再改遇人勾选）。\n"
+                "调试 TAB「解绑」可解除该强制，遇人三项改回可勾选。\n"
                 "进图落地约 0.4s 内暂停写入，降低脱同步。\n"
                 "本 TAB 未解锁时不可用，也会强制关掉下发。");
         }
@@ -8846,7 +9020,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
                                      ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
                     "打进攻击盒但 ACC 不够、飘 MISS 时换下一只。盒外空刀不算。\n"
-                    "连续 N 次（默认 3）才换。已经掉过血 / 打出真伤的浮动 MISS 不计。\n"
+                    "连续 N 次（默认 1）才换。已经掉过血 / 打出真伤的浮动 MISS 不计。\n"
                     "不预判 ACC/EVA——客户端 CheckPDamageMiss 吃随机数，乱调会搅 RNG。\n"
                     "免疫等其它 0 伤也可能被当成 MISS。\n"
                     "生效核对：combat.log 出现 acc_miss 与 switch reason=skip_acc_miss");
@@ -8883,14 +9057,15 @@ void DrawMobGatherTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
                 "默认开。本勾选只开累计出刀闸，与同卡「主动软重连」秒数闸互不绑架。\n"
-                "调用出刀成功即 +1。到阈值必须先拆清 FLAG，卖装/赶路不得插队。落地清零。\n"
+                "OnFuncKey 调用成功即 +1（空挥/引擎吞刀都计，不看命中）。\n"
+                "到阈值必须先拆清 FLAG，卖装/赶路不得插队。落地清零。\n"
                 "两勾都开则先到先拆。首页「软重连试连」必须开。上限 1900。");
         }
         ImGui::BeginDisabled(!gUiMobGatherHangupFiresOn);
         MobGatherDragU(ui, "出刀", "hangup_fires", &gUiMobGatherHangupFires,
                        (int)xcat::kMobGatherHangupFiresMin, (int)xcat::kMobGatherHangupFiresMax,
                        10.f, "刀",
-                       "落地后累计出刀达此主动软重连。与 combat.log「fire id=」同拍 +1（不看忙位/命中）。换怪不清。\n"
+                       "落地后累计出刀达此主动软重连。OnFuncKey 成功即 +1（空挥/吞刀都计，不看命中）。换怪不清。\n"
                        "默认 1700，上限 1900。须勾上方「出刀软重连」。与秒数闸先到先拆。");
         ImGui::EndDisabled();
         {
@@ -8940,6 +9115,14 @@ void DrawMobGatherTab(LaunchUiState& ui) {
             ImGui::SameLine();
             ImGui::TextDisabled("秒");
             ImGui::EndDisabled();
+        }
+        if (xcat::ui::OptionCheckbox("重连换频", &gUiMobGatherReconnectHop))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认关。勾上后，吸怪挂机时软断连（主动 hangup 或被动踢线）进别的频，不回原频。\n"
+                "须开首页「软重连试连」。见人仍由遇人策略换频，本勾不抢。\n"
+                "仅一频或抽空则进原频。不走 F10 官方迁频。落盘 user.ini。");
         }
     }
     CardGap();
@@ -8996,6 +9179,14 @@ void DrawMobGatherTab(LaunchUiState& ui) {
                 "默认关。勾上后吸怪持有期每秒对半径内非 Active 怪走官方 ApplyControl。\n"
                 "客户端只能申请；服端批 280 才变你控。不改 0xE8、不造包、不谎报优先级。\n"
                 "贴脸更值钱。狂申帮不上忙，还可能踢。落盘 user.ini。");
+        }
+        if (xcat::ui::OptionCheckbox("只吸场上的", &gUiMobGatherFirstGenOnly))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认开。只吸这一次进图/重连回图时已经站在场上的怪。\n"
+                "之后新刷、分裂、召唤的不吸。换图或软重连会重新收这一波。\n"
+                "BIN：onField latch n= / skipGen=（新 oid） why=gen。落盘 user.ini。");
         }
         MobGatherDragU(ui, "延时启动", "qdelay", &gUiMobGatherQuietDelayMs,
                        (int)xcat::kMobGatherQuietDelayMsMin, (int)xcat::kMobGatherQuietDelayMsMax,
@@ -9143,7 +9334,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
             MobGatherTrySaveOrRevert(ui);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "把被拽怪每帧位移夹到不超过右边的上限（默认开）。\n"
+                "把被拽怪每帧位移夹到不超过右边的上限（默认关）。\n"
                 "客户端每帧比对怪移动位移，超过「怪速+10」就走异常上报路径，\n"
                 "服务器攒够即踢下线（第二波吸怪断连的扳机）。夹住就永不触发。\n"
                 "BIN：MobFhBan impact 的 disp/cap/clamp。");
@@ -9187,7 +9378,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
         xcat::ui::CardGuard card("##tab_gather_range", "收怪");
         MobGatherDragU(ui, "半径", "radius", &gUiMobGatherRadiusPx, (int)xcat::kMobGatherRadiusMinPx,
                        (int)xcat::kMobGatherRadiusMaxPx, 50.f, "px",
-                       "新收半径，默认 1000（实机 9.4min 零断连）。只防爆钳 30000。\n"
+                       "新收半径，默认 8000。只防爆钳 30000。\n"
                        "服端按离怪原位总位移掐线，>~1150 易断；远怪请开「远怪自动巡点」。\n"
                        "已吸住的飞出仍维持，直到超时。BIN：tick r=。");
         MobGatherDragU(ui, "超时", "hold", &gUiMobGatherHoldMs, (int)xcat::kMobGatherHoldMsMin,
@@ -9203,7 +9394,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
         xcat::ui::CardGuard card("##tab_gather_gate", "闸门");
         MobGatherDragU(ui, "高度闸", "dylim", &gUiMobGatherDyLimPx, (int)xcat::kMobGatherDyLimPxMin,
                        (int)xcat::kMobGatherDyLimPxMax, 10.f, "px",
-                       "新收竖直上限 |mobY-人Y|，默认 1200。AbsPos 更大 Y = 更高。用户自填。\n"
+                       "新收竖直上限 |mobY-人Y|，默认 8000。AbsPos 更大 Y = 更高。用户自填。\n"
                        "站着吸时：距人 hypot 超过「脚边」且 |dY| 超过这个数 → 不新 Arm。已吸住的继续。\n"
                        "0=任意高度差都不新收。只防爆钳 30000。不是「竖层」。\n"
                        "调试 TAB「高度闸扫描」测极限；停扫恢复本滑条。\n"
@@ -9216,7 +9407,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
         MobGatherDragU(ui, "脚边", "feet", &gUiMobGatherFeetExemptPx,
                        (int)xcat::kMobGatherFeetExemptPxMin, (int)xcat::kMobGatherFeetExemptPxMax,
                        10.f, "px",
-                       "距人 hypot ≤此不走履历闸和高度闸，照吸。默认 320。用户自填。\n"
+                       "距人 hypot ≤此不走履历闸和高度闸，照吸。默认 8000。用户自填。\n"
                        "0=不开豁免。只防爆钳 30000。BIN：tick feet=。");
     }
     CardGap();
@@ -9307,7 +9498,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
-                "业务旋钮回实测稳组合：策略 A、半径 1000、位移夹速开/48、到站落地关。\n"
+                "业务旋钮回实测稳组合：策略 A、半径 1000、位移夹速关/48、到站落地关。\n"
                 "「吸怪」总开关本身不动。飞控默认在「调试 → 吸怪飞控」。");
         }
     }

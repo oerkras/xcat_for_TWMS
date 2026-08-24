@@ -350,6 +350,7 @@ void LaunchPanel_AppendLog(LaunchUiState& ui, const std::wstring& line) {
 }
 
 void LaunchPanel_OnWebLog(const std::wstring& line) {
+    xcat::log::Info("GamaPass", "%s", xcat::WideToUtf8(line).c_str());
     std::lock_guard<std::mutex> lock(gLogUiMu);
     if (gLogUi) LaunchPanel_AppendLog(*gLogUi, line);
 }

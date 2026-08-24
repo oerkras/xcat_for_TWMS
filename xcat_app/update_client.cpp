@@ -1172,6 +1172,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     //   - state：user.ini（含 [buffs]/[core]/[update] token 等）+ buffs.lkg/control.lkg + 多技能勾选
     //           + launch_mode.txt（启动模式，优先于安装根）
     //           + lie_stats.tsv（按角色累计的测谎战绩：是攒出来的历史，不是运行态）
+    //           + gp_device_login.dpapi / .json（GAMA PASS账密直登账号行；换包丢 state 会清空「当前账号」）
     // 其余 state（赶路学习图/测谎运行态/IPC .bin/冷启标记）仍丢弃，包内 travel_* 种子始终用新包。
     ps += "Write-XCatLog ('stage user prefs whitelist + prev logs; discard runtime state; dest=' + $finalDest)\r\n";
     // 换包会冲掉 logs；先快照到 TEMP，落新包后再写回 XCat_data\\logs\\prev。
@@ -1205,7 +1206,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "  }\r\n";
     ps += "  foreach ($leaf in "
           "@('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt','lie_"
-          "stats.tsv')) {\r\n";
+          "stats.tsv','gp_device_login.dpapi','gp_device_login.json')) {\r\n";
     ps += "    $s=Join-Path $oldDest ('XCat_data\\state\\' + $leaf)\r\n";
     ps += "    if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "    try {\r\n";
@@ -1314,7 +1315,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "    New-Item -ItemType Directory -Path $dstState -Force | Out-Null\r\n";
     ps += "    foreach ($leaf in "
           "@('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt','lie_"
-          "stats.tsv')) {\r\n";
+          "stats.tsv','gp_device_login.dpapi','gp_device_login.json')) {\r\n";
     ps += "      $s=Join-Path $userPrefsBak $leaf\r\n";
     ps += "      if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "      $d=Join-Path $dstState $leaf\r\n";

@@ -94,7 +94,7 @@ constexpr float kMaxCmd = 4800.f;
 // 单位=px/帧；默认 48 ≈ 1600 px/s@30ms（低于满档 144px/帧、高于巡航 18.6px/帧）。
 // 真实怪速阈值需运行时实测——impact 日志会打 disp/cap，据此调 gDispCapPx。
 constexpr float kDispCapPxDefault = 48.f;
-constexpr bool kDispClampOnDefault = true;
+constexpr bool kDispClampOnDefault = false;
 // v145 远怪接力跳（拉距掐线根治）：服务器按「单次连续拉取总距」掐线——实测 ≤~1024px 零断连
 // （r=1000 · 9.4min · 0 掐，含 far=22 齐拉），≥~1253px 必掐（179 场尸检 + r=2800 每波必掐）；
 // 帧位移夹速(leash ≤39px/帧)与拉取量都救不了。故 >hopPx 的怪不直瞄站点：每跳朝站点推进

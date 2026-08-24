@@ -417,23 +417,24 @@ void ResolveLuJobOnMain(void* user) {
 bool TryResolveLocalUser(DWORD now) {
     if (LocalUserStillAlive()) return true;
 
-    // MyUser 指针变了：先清缓存并强制解节流，禁止「throttle && gLocalUser」卡死旧指针。
-    bool forceRebind = false;
+    // Worker 只认 WM.MyUser 字段（与 DropPort 同口径）。禁止为换图空窗
+    // InvokeAndWait(2000)+FindAll：BIN 16:44:30 settle 刚放就占队，随后 pump idle / pid empty。
     void* wm = world::PeekWorldManager();
     void* mu = wm ? ReadPtr(wm, kOffWmMyUser) : nullptr;
-    if (gLocalUser) {
-        if (UnityObjectAlive(mu) && mu != gLocalUser) forceRebind = true;
-    } else if (UnityObjectAlive(mu) && !gLastLuRebind) {
-        // 进程内首次：缓存空但 WM 已有人 → 立刻首绑。失败后仍走 kRebindMs，
-        // 禁止「mu 活着却一直 resolve 失败」时每 tick 打主线程 FindAll。
-        forceRebind = true;
+    if (UnityObjectAlive(mu)) {
+        if (gLocalUser != mu) {
+            x::runtime::LogI("PlayerCombat", "LocalUser ACCEPT wm.MyUser lu=%p (peek)", mu);
+        }
+        gLocalUser = mu;
+        gLastLuRebind = now;
+        return true;
     }
     gLocalUser = nullptr;
 
-    // InterStage / 卸图：禁主线程 FindAll（拖黑屏）；MyUser 空则等 PlayReady。
     if (!world::IsPlayReady()) return false;
-
-    if (!forceRebind && gLastLuRebind && now - gLastLuRebind < kRebindMs) return false;
+    if (x::runtime::main_thread::IsCongested()) return false;
+    if (!x::runtime::main_thread::IsOnPumpThread()) return false;
+    if (gLastLuRebind && now - gLastLuRebind < kRebindMs) return false;
     gLastLuRebind = now;
 
     if (!gLuType) {
@@ -442,10 +443,7 @@ bool TryResolveLocalUser(DWORD now) {
     }
 
     ResolveLuCtx ctx{};
-    if (!x::runtime::managed_main::Call(&ResolveLuJobOnMain, &ctx, 2000)) {
-        x::runtime::LogWThrottled(70, 5000, "PlayerCombat", "LocalUser resolve main pump fail");
-        return false;
-    }
+    ResolveLuJobOnMain(&ctx);
     return ctx.ok;
 }
 
