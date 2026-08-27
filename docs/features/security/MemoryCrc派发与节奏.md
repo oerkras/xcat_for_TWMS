@@ -108,8 +108,8 @@ GRAP_DetectorRegistry_Init @ 0xC0F140
 ## 6. 工程含义（经典版 XCAT）
 
 1. **禁止**游戏进程内 INLINE HOOK / 改 GA·ntdll·grap-core `.text`（见 [`GRAP与枫星对齐.md`](GRAP与枫星对齐.md) §4.1）。
-   闸门 = `XCAT_ALLOW_TEXT_PATCH=1`，且**只许用户显式给**：2026-08-13 盘点发现 `infinite_stars` /
-   `melee_veto` / `movepath_flush_probe` 曾在启用时自设该变量绕闸，已修（[`检测面盘点与187秒墙.md`](检测面盘点与187秒墙.md) §6）。  
+   闸门 = `XCAT_ALLOW_TEXT_PATCH=1`，且**只许用户显式给**：2026-08-13 盘点发现 `melee_veto` /
+   `movepath_flush_probe`（及已拆除的 `infinite_stars`）曾在启用时自设该变量绕闸，已修（[`检测面盘点与187秒墙.md`](检测面盘点与187秒墙.md) §6）。  
 2. Init 窗与运行中都可能 RPM；探针脏窗（如 `ga_text_probe` 默认 10min）是**观察窗**，不是官方周期常量。  
 3. 灭火目标若是 MemoryCrc：对准 **RpmScan / 其 vptr+8 / 页表数据面**，不要去 patch OpenSSL「Virt30」。  
 4. 周期调用栈未闭合前，**不要**把「DRBG 忙碌 = MemoryCrc 更勤」写成已证因果；最多作弱相关假设。  

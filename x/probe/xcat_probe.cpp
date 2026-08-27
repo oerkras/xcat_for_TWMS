@@ -43,13 +43,8 @@
 #include "../features/ports/mob_inspect_probe.h"
 #include "../features/auto_lie/auto_lie.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
-#include "../features/force_trade/force_trade.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
-#include "../features/auction_gate_probe/auction_gate_probe.h"
-#include "../features/ui_cheat_overlay/ui_cheat_overlay.h"
-#include "../features/rest_mp_accel/rest_mp_accel.h"
 #include "../features/ports/security_attack_port.h"
-#include "../features/infinite_stars/infinite_stars.h"
 #include "../features/ga_text_probe/ga_text_probe.h"
 #include "../features/galaxy_token_probe/galaxy_token_probe.h"
 #include "../features/soft_login_probe/soft_login_probe.h"
@@ -158,11 +153,7 @@ void StopAllFeatureWorkers() {
     x::features::channel_hop::StopWorker();
     x::features::ga_text_probe::StopWorker();
     x::features::drop_alert_bypass::StopWorker();
-    x::features::force_trade::Shutdown();
     x::features::auction_town_bypass::StopWorker();
-    x::features::auction_gate_probe::Shutdown();
-    x::features::ui_cheat_overlay::Shutdown();
-    x::features::rest_mp_accel::StopWorker();
     x::features::ports::security_attack::StopWorker();
     x::features::ports::mob_inspect_probe::StopWorker();
     x::features::auto_lie::StopWorker();
@@ -196,9 +187,8 @@ void StopAllFeatureWorkers() {
     x::features::auto_enter::StopWorker();
     x::features::skill_max_level::StopWorker();
     x::features::final_attack_force::StopWorker();
-    // Shutdown 而非只 StopWorker：这两个功能在 GameAssembly 函数头上写了 abs-jmp，
+    // Shutdown 而非只 StopWorker：melee_veto 在 GameAssembly 函数头上写了 abs-jmp，
     // 不摘掉的话卸载后游戏会跳进已释放内存。
-    x::features::infinite_stars::Shutdown();
     x::features::melee_veto::Shutdown();
     x::features::map_attack::Shutdown();
     x::features::ports::hit_pin::Shutdown();
@@ -422,11 +412,6 @@ bool StartPlayPathWorkers() {
     // 1) 其余保命：掉落报警 → 药/键/Buff 线程 → 攻速
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::Init());
     XCAT_PLAY_BOOT_STEP(x::features::drop_alert_bypass::StartWorker());
-    if (xcat::kForceTradeUserEnabled) {
-        XCAT_PLAY_BOOT_STEP(x::features::force_trade::Init());
-    }
-    // 入口关闭时只标灯 disabled，不 Init、不开线程。
-    XCAT_PLAY_BOOT_STEP(x::features::force_trade::StartWorker());
     XCAT_PLAY_BOOT_BATCH("survival-skills");
     XCAT_PLAY_BOOT_STEP(x::features::autopot::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::auto_stat::Init());
@@ -492,21 +477,10 @@ bool StartPlayPathWorkers() {
     XCAT_PLAY_BOOT_STEP(x::features::fly::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::Init());
     XCAT_PLAY_BOOT_STEP(x::features::auction_town_bypass::StartWorker());
-    if (xcat::kAuctionGateProbeUserEnabled) {
-        XCAT_PLAY_BOOT_STEP(x::features::auction_gate_probe::Init());
-    }
-    XCAT_PLAY_BOOT_STEP(x::features::ui_cheat_overlay::Init());
-    XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::Init());
-    XCAT_PLAY_BOOT_STEP(x::features::rest_mp_accel::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ports::security_attack::Init());
     XCAT_PLAY_BOOT_STEP(x::features::ports::security_attack::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ports::mob_inspect_probe::Init());
     XCAT_PLAY_BOOT_STEP(x::features::ports::mob_inspect_probe::StartWorker());
-    if (xcat::kInfiniteStarsUserEnabled) {
-        XCAT_PLAY_BOOT_STEP(x::features::infinite_stars::Init());
-    }
-    // 入口关闭时只标灯 disabled，不 Init、不开线程。
-    XCAT_PLAY_BOOT_STEP(x::features::infinite_stars::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::ga_text_probe::Init());
     XCAT_PLAY_BOOT_STEP(x::features::ga_text_probe::StartWorker());
     XCAT_PLAY_BOOT_STEP(x::features::player_hide::Init());
@@ -681,8 +655,7 @@ DWORD WINAPI BootstrapThread(LPVOID) {
     // 同理可赶在 feature 之前：崩溃上传会在主线程上同步走 WinINet，网络不通时能把
     // 客户端冻死（2026-08-09 04:45 实测）。默认关；XCAT_CRASH_UPLOAD_GUARD=1 才套 IAT 超时。
     x::features::crash_upload_guard::Start();
-    // 也要抢在所有 feature 之前挂上：元数据锁泄漏的源头是 il2cpp 内部的访问违例被
-    // __except 吞掉，只有首次异常阶段能看见它。
+    // 锁泄漏探针：默认不挂 VEH（检测面）。Start 内看 XCAT_FAULT_PROBE / fault_probe.on。
     x::runtime::il2cpp_fault_probe::Start();
 
     if (!WaitNativeGameAssembly()) {

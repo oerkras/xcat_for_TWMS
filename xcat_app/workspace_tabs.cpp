@@ -4773,9 +4773,6 @@ void DrawBetaTab(LaunchUiState& ui) {
     DesignBanner();
     static bool dropInCombat = true;
     static bool auctionTownBypass = true;
-    static bool restMpAccel = false;
-    static int restMpAccelIntervalMs = (int)xcat::kRestMpAccelIntervalDefaultMs;
-    static bool forceTrade = false;
     static bool frameLock = true;
     static int frameLockFps = (int)xcat::kFrameLockFpsDefault;
     static bool skipDialog = false;
@@ -4790,11 +4787,6 @@ void DrawBetaTab(LaunchUiState& ui) {
             if (!dropLoaded || disk.writeTickMs != dropSeenTick) {
                 dropInCombat = disk.dropAlertBypass != 0;
                 auctionTownBypass = disk.auctionTownBypass != 0;
-                restMpAccel = disk.restMpAccel != 0;
-                restMpAccelIntervalMs = (int)xcat::ClampRestMpAccelIntervalMs(
-                    disk.restMpAccelIntervalMs ? disk.restMpAccelIntervalMs
-                                               : xcat::kRestMpAccelIntervalDefaultMs);
-                forceTrade = xcat::kForceTradeUserEnabled && disk.forceTrade != 0;
                 frameLock = disk.frameLock != 0;
                 frameLockFps = (int)xcat::ClampFrameLockFps(
                     disk.frameLockFps ? disk.frameLockFps : xcat::kFrameLockFpsDefault);
@@ -4829,12 +4821,6 @@ void DrawBetaTab(LaunchUiState& ui) {
         (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
         c.dropAlertBypass = dropInCombat ? 1u : 0u;
         c.auctionTownBypass = auctionTownBypass ? 1u : 0u;
-        c.restMpAccel = restMpAccel ? 1u : 0u;
-        c.restMpAccelIntervalMs = xcat::ClampRestMpAccelIntervalMs(
-            static_cast<uint32_t>(restMpAccelIntervalMs < 0 ? 0 : restMpAccelIntervalMs));
-        restMpAccelIntervalMs = (int)c.restMpAccelIntervalMs;
-        c.forceTrade = (xcat::kForceTradeUserEnabled && forceTrade) ? 1u : 0u;
-        c.infiniteStars = 0;
         c.frameLock = frameLock ? 1u : 0u;
         c.frameLockFps = xcat::ClampFrameLockFps(
             static_cast<uint32_t>(frameLockFps < 0 ? 0 : frameLockFps));
@@ -4848,11 +4834,6 @@ void DrawBetaTab(LaunchUiState& ui) {
                 dropSeenTick = verify.writeTickMs;
                 dropInCombat = verify.dropAlertBypass != 0;
                 auctionTownBypass = verify.auctionTownBypass != 0;
-                restMpAccel = verify.restMpAccel != 0;
-                restMpAccelIntervalMs = (int)xcat::ClampRestMpAccelIntervalMs(
-                    verify.restMpAccelIntervalMs ? verify.restMpAccelIntervalMs
-                                                 : xcat::kRestMpAccelIntervalDefaultMs);
-                forceTrade = xcat::kForceTradeUserEnabled && verify.forceTrade != 0;
                 frameLock = verify.frameLock != 0;
                 frameLockFps = (int)xcat::ClampFrameLockFps(
                     verify.frameLockFps ? verify.frameLockFps : xcat::kFrameLockFpsDefault);
@@ -4860,13 +4841,12 @@ void DrawBetaTab(LaunchUiState& ui) {
                 dropSeenTick = c.writeTickMs;
             }
             xcat::log::Ok("App",
-                          "已下发 core：战斗中可丢物=%d 野外可开拍卖=%d 坐下回蓝加速=%d "
-                          "回蓝间隔=%ums 强制交易=%d 引擎帧率锁=%d fps=%u",
-                          dropInCombat ? 1 : 0, auctionTownBypass ? 1 : 0, restMpAccel ? 1 : 0,
-                          (uint32_t)restMpAccelIntervalMs, forceTrade ? 1 : 0, frameLock ? 1 : 0,
+                          "已下发 core：战斗中可丢物=%d 野外可开拍卖=%d "
+                          "引擎帧率锁=%d fps=%u",
+                          dropInCombat ? 1 : 0, auctionTownBypass ? 1 : 0, frameLock ? 1 : 0,
                           (uint32_t)frameLockFps);
         } else {
-            xcat::log::Warn("App", "写入 user.ini [core] drop/auction/restMp/forceTrade/frameLock 失败");
+            xcat::log::Warn("App", "写入 user.ini [core] drop/auction/frameLock 失败");
         }
     };
 
@@ -5034,120 +5014,6 @@ void DrawBetaTab(LaunchUiState& ui) {
             "若开着「守护模式」会把断线当踢线→5秒干净重拉（像被杀死）。\n"
             "挂机/守护期间建议关。默认开。\n"
             "开启期间其它读 IsTown/该 Option 位的逻辑也会受影响。");
-        }
-        if (!xcat::kAuctionGateProbeUserEnabled) ImGui::BeginDisabled();
-        if (ImGui::Button("拍卖原生按钮（一次）") && xcat::kAuctionGateProbeUserEnabled) {
-            if (ui.prefsBinDir.empty()) {
-                xcat::log::Warn("App", "拍卖探针：prefsBinDir 空");
-            } else {
-                xcat::PayloadControl c{};
-                (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-                c.auctionGateProbeSeq = c.auctionGateProbeSeq + 1u;
-                if (c.auctionGateProbeSeq == 0) c.auctionGateProbeSeq = 1;
-                c.writeTickMs = GetTickCount64();
-                if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-                    xcat::PayloadControl verify{};
-                    if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify))
-                        dropSeenTick = verify.writeTickMs;
-                    else
-                        dropSeenTick = c.writeTickMs;
-                    xcat::log::Ok("App",
-                                  "已下发拍卖原生按钮探针 seq=%u（OnClickButton(17)，不改等级）",
-                                  verify.auctionGateProbeSeq ? verify.auctionGateProbeSeq
-                                                             : c.auctionGateProbeSeq);
-                } else {
-                    xcat::log::Warn("App", "写入 auctionGateProbeSeq 失败");
-                }
-            }
-        }
-        if (!xcat::kAuctionGateProbeUserEnabled) {
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::TextDisabled("当前暂不可用");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip(
-                    "已停用：15/24h 探针实测无效，不再点状态栏拍卖、不改等级/建角。\n"
-                    "野外开拍卖仍走上方「野外可开拍卖」。代码保留。");
-            }
-        } else if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "一次探针：进图后点。主泵上 FindAll 状态栏，调官方 OnClickButton(17)，\n"
-                "与手点拍卖同一条链（含红号检查→迁拍卖 0x002E）。不改等级/建角时间。\n"
-                "15/24h 仍走客户端官方闸；服端权威不变。日志 AuctionGateProbe。");
-        }
-        if (ImGui::Button("打开 GM 调试 overlay")) {
-            if (ui.prefsBinDir.empty()) {
-                xcat::log::Warn("App", "GM overlay：prefsBinDir 空");
-            } else {
-                xcat::PayloadControl c{};
-                (void)xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), c);
-                c.uiCheatOverlaySeq = c.uiCheatOverlaySeq + 1u;
-                if (c.uiCheatOverlaySeq == 0) c.uiCheatOverlaySeq = 1;
-                c.writeTickMs = GetTickCount64();
-                if (xcat::WritePayloadControl(ui.prefsBinDir.c_str(), c)) {
-                    xcat::PayloadControl verify{};
-                    if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify))
-                        dropSeenTick = verify.writeTickMs;
-                    else
-                        dropSeenTick = c.writeTickMs;
-                    xcat::log::Ok("App",
-                                  "已下发打开 GM 调试 overlay seq=%u（UICheat.CreateInstance+Open）",
-                                  verify.uiCheatOverlaySeq ? verify.uiCheatOverlaySeq
-                                                           : c.uiCheatOverlaySeq);
-                } else {
-                    xcat::log::Warn("App", "写入 uiCheatOverlaySeq 失败");
-                }
-            }
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "进图后点。主泵调官方 UICheat.CreateInstance + UIWindow.Open，\n"
-                "并 SetActive，让 Unity 自己每帧跑 OnGUI（IMGUI GM 台）。\n"
-                "韩文按钮会译成简体（GUILayout caption 对照表；未收录的会打 zh miss 日志）。\n"
-                "不直调 OnGUI。部分按钮仍可能要 GM/服端权限。日志 UiCheatOverlay。");
-        }
-        if (xcat::ui::OptionCheckbox("回蓝加速（实验）", &restMpAccel)) persistDrop();
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "按间隔写满 WorldManager 回蓝累加器（+0x17C 休息 / +0x180 椅子）。\n"
-                "BIN 已证真蓝会动；过密会踢——用下方间隔自己调。\n"
-                "不要求坐椅（站着也会催）。日志：XCat_data/logs/rest_mp_accel.log\n"
-                "默认关·间隔默认 2500ms（曾 16ms 狂刷会秒踢）。");
-        }
-        ImGui::BeginDisabled(!restMpAccel);
-        ImGui::SetNextItemWidth(160.f);
-        if (ImGui::SliderInt("回蓝间隔(ms)##rest_mp_iv", &restMpAccelIntervalMs,
-                             (int)xcat::kRestMpAccelIntervalMinMs,
-                             (int)xcat::kRestMpAccelIntervalMaxMs)) {
-        }
-        if (ImGui::IsItemDeactivatedAfterEdit()) persistDrop();
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "两次催回蓝的最小间隔。越小越快、踢风险越高。\n"
-                "范围 %u~%u，默认 %u。建议从 1000+ 往下拧。",
-                xcat::kRestMpAccelIntervalMinMs, xcat::kRestMpAccelIntervalMaxMs,
-                xcat::kRestMpAccelIntervalDefaultMs);
-        }
-        ImGui::EndDisabled();
-        if (!xcat::kForceTradeUserEnabled) {
-            forceTrade = false;
-            ImGui::BeginDisabled();
-        }
-        if (xcat::ui::OptionCheckbox("强制交易（实验）", &forceTrade)) persistDrop();
-        if (!xcat::kForceTradeUserEnabled) {
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::TextDisabled("当前暂不可用");
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip(
-                    "已停用：改人物卡 15 级交易门实测无效（服端仍拒），不再改阈值。\n"
-                    "代码保留；需要时把 kForceTradeUserEnabled 改回 true。");
-            }
-        } else if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "改 UIUserInfo 人物卡「交易」按钮的等级比较阈值（装一次）：\n"
-                "15 级以下也能点交易。仅客户端 UI；服务端仍可能拒包。\n"
-                "不覆盖右键菜单 / 丢物。关即还原官方 15 级门。默认关。");
         }
         ImGui::Separator();
         if (xcat::ui::OptionCheckbox("引擎帧率锁", &frameLock)) persistDrop();

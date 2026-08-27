@@ -30,12 +30,7 @@
 #include "../features/mob_pool_observe/mob_pool_observe.h"
 #include "../features/fly/fly.h"
 #include "../features/drop_alert_bypass/drop_alert_bypass.h"
-#include "../features/force_trade/force_trade.h"
 #include "../features/auction_town_bypass/auction_town_bypass.h"
-#include "../features/auction_gate_probe/auction_gate_probe.h"
-#include "../features/ui_cheat_overlay/ui_cheat_overlay.h"
-#include "../features/rest_mp_accel/rest_mp_accel.h"
-#include "../features/infinite_stars/infinite_stars.h"
 #include "../features/player_hide/player_hide.h"
 #include "../features/frame_lock/frame_lock.h"
 #include "../features/movepath_flush_probe/movepath_flush_probe.h"
@@ -412,55 +407,6 @@ void ApplyImpactHopTestSeq(const xcat::PayloadControl& c) {
     fire(c.impactHopTestSeq);
 }
 
-void ApplyUiCheatOverlaySeq(const xcat::PayloadControl& c) {
-    if (c.uiCheatOverlaySeq == 0) return;
-    static std::atomic<bool> s_bootstrapped{false};
-    static std::atomic<uint32_t> s_lastApplied{0};
-    // 一次性脉冲。进图前 ini 里残留的 seq（BIN：seq=8 停在 21:29，21:46 重注入
-    // 因 writeTickMs 被其它偏好写刷新，误判 writtenAfterInject → 默认开了 GM 台）。
-    // 首拍只收养；真要点再按实验 TAB 按钮，seq+1 才会 fire。
-    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
-        s_lastApplied.store(c.uiCheatOverlaySeq, std::memory_order_release);
-        x::runtime::LogI("PayloadControl",
-                         "ui cheat overlay bootstrap adopt seq=%u (no fire) writeTick=%llu "
-                         "modStart=%llu",
-                         c.uiCheatOverlaySeq, (unsigned long long)c.writeTickMs,
-                         (unsigned long long)kManualRejoinModuleStartMs);
-        return;
-    }
-    if (c.uiCheatOverlaySeq <= s_lastApplied.load(std::memory_order_acquire)) return;
-    s_lastApplied.store(c.uiCheatOverlaySeq, std::memory_order_release);
-    x::runtime::LogI("PayloadControl", "ui cheat overlay fire seq=%u", c.uiCheatOverlaySeq);
-    x::features::ui_cheat_overlay::RequestOpen();
-}
-
-void ApplyAuctionGateProbeSeq(const xcat::PayloadControl& c) {
-    if (!xcat::kAuctionGateProbeUserEnabled) return;
-    if (c.auctionGateProbeSeq == 0) return;
-    static std::atomic<bool> s_bootstrapped{false};
-    static std::atomic<uint32_t> s_lastApplied{0};
-    if (!s_bootstrapped.exchange(true, std::memory_order_acq_rel)) {
-        const bool writtenAfterInject =
-            c.writeTickMs != 0 &&
-            c.writeTickMs + kManualRejoinWriteSkewMs >= kManualRejoinModuleStartMs;
-        s_lastApplied.store(c.auctionGateProbeSeq, std::memory_order_release);
-        if (writtenAfterInject) {
-            x::runtime::LogI("PayloadControl", "auction gate probe fire seq=%u (bootstrap)",
-                             c.auctionGateProbeSeq);
-            x::features::auction_gate_probe::RequestRun();
-            return;
-        }
-        x::runtime::LogI("PayloadControl",
-                         "auction gate probe bootstrap adopt seq=%u (no fire)",
-                         c.auctionGateProbeSeq);
-        return;
-    }
-    if (c.auctionGateProbeSeq <= s_lastApplied.load(std::memory_order_acquire)) return;
-    s_lastApplied.store(c.auctionGateProbeSeq, std::memory_order_release);
-    x::runtime::LogI("PayloadControl", "auction gate probe fire seq=%u", c.auctionGateProbeSeq);
-    x::features::auction_gate_probe::RequestRun();
-}
-
 void ApplyEncounterFromControl(const xcat::PayloadControl& c) {
     // 遇人检测不得跟 play-boot 推迟战斗绑在一起：进图后别人出现必须立刻能停手。
     xcat::PayloadControl forced = c;
@@ -693,15 +639,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::galaxy_token_probe::SetEnabled(c.galaxyTokenProbe != 0);
     x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
     x::features::drop_alert_bypass::SetEnabled(c.dropAlertBypass != 0);
-    x::features::force_trade::SetEnabled(xcat::kForceTradeUserEnabled && c.forceTrade != 0);
     x::features::auction_town_bypass::SetEnabled(c.auctionTownBypass != 0);
-    if (xcat::kAuctionGateProbeUserEnabled)
-        ApplyAuctionGateProbeSeq(c);
-    ApplyUiCheatOverlaySeq(c);
-    x::features::rest_mp_accel::SetIntervalMs(c.restMpAccelIntervalMs);
-    x::features::rest_mp_accel::SetEnabled(c.restMpAccel != 0);
-    if (xcat::kInfiniteStarsUserEnabled)
-        x::features::infinite_stars::SetEnabled(c.infiniteStars != 0);
     // 自动补给真源：user.ini [auto_supply]（HotReadConfig）；勿再用 core.autoSell 灌开关。
     ApplyEncounterFromControl(c);
     x::features::player_hide::SetEnabled(c.hideOtherPlayers != 0);

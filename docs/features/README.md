@@ -96,9 +96,8 @@
 | [`auto_supply/模块设计.md`](auto_supply/模块设计.md) | **自动回城卖/补给**：就近寻店卖装 + 去店用卷 `SendPortalScrollUseRequest`（2030000/2030059）+ 可选补货；Charge/回程用卷待验 |
 | [`char_boot/模块设计.md`](char_boot/模块设计.md) | **一键起号（v1 法师）** 📐 独立 TAB、未落码：岛上 `farmMap` + 转职后 `hangupMap`；船费 150；可选自动建角 |
 | [`auto_supply/P2_货架寻店.md`](auto_supply/P2_货架寻店.md) | 按货架/物品码全局寻店：**不做**（无 SetShopDlg Commodity 全表；产品语义为就近能卖） |
-| [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认开；apply-once+1s hold；`Init` 不清 desired + boot 末 ForceApply；服端断线+守护会干净重拉。实验 TAB「拍卖 15/24h 探针」一次备份/还原，不常驻假等级 |
+| [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) | **野外开拍卖** ✅ 零 `.text`；默认开；apply-once+1s hold；`Init` 不清 desired + boot 末 ForceApply；服端断线+守护会干净重拉。拍卖原生按钮探针已拆除，只走本模块 |
 | [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) | **战斗中可丢物** ✅ IsAlertMode threshold global（装一次）；抑制客户端警戒；默认开 |
-| [`force_trade/模块设计.md`](force_trade/模块设计.md) | **强制交易（实验）** ✅ UIUserInfo 人物卡交易按钮 15 级门改阈值；默认关；仅客户端 |
 
 ---
 
@@ -159,7 +158,6 @@
 | `x/features/encounter/` | 遇人策略 → `[core] autoRelogin*`；见 [`encounter/模块设计.md`](encounter/模块设计.md) |
 | `x/features/auto_supply/` + `ports/shop_port.*` + `ports/consumable_port.*` | 自动回城卖/补给 → `[auto_supply]`；去店用卷 `PortalScroll`；见 [`auto_supply/模块设计.md`](auto_supply/模块设计.md) |
 | `x/features/char_boot/`（预定） | 一键起号编排 → `[char_boot]`；独立 TAB；v1 只做法师；见 [`char_boot/模块设计.md`](char_boot/模块设计.md) |
-| `x/features/auction_town_bypass/` | 野外开拍卖 → `[core] auctionTownBypass`；原生拍卖按钮一次探针 → `[core] auctionGateProbeSeq`；见 [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) |
+| `x/features/auction_town_bypass/` | 野外开拍卖 → `[core] auctionTownBypass`；见 [`auction_town_bypass/模块设计.md`](auction_town_bypass/模块设计.md) |
 | `x/features/drop_alert_bypass/` | 战斗中可丢物 → `[core] dropAlertBypass`；见 [`drop_alert_bypass/模块设计.md`](drop_alert_bypass/模块设计.md) |
-| `x/features/force_trade/` | 强制交易（实验） → `[core] forceTrade`；见 [`force_trade/模块设计.md`](force_trade/模块设计.md) |
 | `DumpRestoredData/` | dump.cs 符号恢复分档（titlebar 偏移锚点） |

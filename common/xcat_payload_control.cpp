@@ -615,12 +615,12 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.auctionTownBypass = 1;  // 默认开
     out.auctionGateProbeSeq = 0;
     out.uiCheatOverlaySeq = 0;
-    out.restMpAccel = 0;  // 实验·默认关
+    out.restMpAccel = 0;
     out.restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
     out.secAttackIntercept = 0;  // 已移除；布局占位
     out.secAttackTextHook = 0;  // 已移除；布局占位
-    out.infiniteStars = 0;  // 实验·默认关
-    out.forceTrade = 0;  // 实验·强制交易·默认关
+    out.infiniteStars = 0;
+    out.forceTrade = 0;
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
     out.autoSellReturnFarmSeq = 0;
@@ -1129,17 +1129,15 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
     if (IniGetU32(ini, "core", "frameLockFps", u)) out.frameLockFps = ClampFrameLockFps(u);
     if (IniGetBool(ini, "core", "dropAlertBypass", b)) out.dropAlertBypass = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "auctionTownBypass", b)) out.auctionTownBypass = b ? 1u : 0u;
-    if (IniGetU32(ini, "core", "auctionGateProbeSeq", u)) out.auctionGateProbeSeq = u;
-    if (IniGetU32(ini, "core", "uiCheatOverlaySeq", u)) out.uiCheatOverlaySeq = u;
-    if (IniGetBool(ini, "core", "restMpAccel", b)) out.restMpAccel = b ? 1u : 0u;
-    if (IniGetU32(ini, "core", "restMpAccelIntervalMs", u))
-        out.restMpAccelIntervalMs = ClampRestMpAccelIntervalMs(u);
+    // 已拆除：不再读 auctionGateProbeSeq / uiCheatOverlaySeq / restMpAccel* / infiniteStars。
+    out.auctionGateProbeSeq = 0;
+    out.uiCheatOverlaySeq = 0;
+    out.restMpAccel = 0;
+    out.restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
     out.secAttackIntercept = 0;
     out.secAttackTextHook = 0;
-    if (IniGetBool(ini, "core", "infiniteStars", b)) out.infiniteStars = b ? 1u : 0u;
-    if (!kInfiniteStarsUserEnabled) out.infiniteStars = 0;
-    if (IniGetBool(ini, "core", "forceTrade", b)) out.forceTrade = b ? 1u : 0u;
-    if (!kForceTradeUserEnabled) out.forceTrade = 0;
+    out.infiniteStars = 0;
+    out.forceTrade = 0;
     // core.autoSell* 已废弃：真源 [auto_supply]；此处强制清零，避免旧 key 干扰。
     out.autoSell = 0;
     out.autoSellShopMap[0] = '\0';
@@ -1423,16 +1421,14 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.autoLieMouseRegionOverlay = normalized.autoLieMouseRegionOverlay ? 1u : 0u;
     normalized.dropAlertBypass = normalized.dropAlertBypass ? 1u : 0u;
     normalized.auctionTownBypass = normalized.auctionTownBypass ? 1u : 0u;
-    normalized.restMpAccel = normalized.restMpAccel ? 1u : 0u;
-    normalized.restMpAccelIntervalMs = ClampRestMpAccelIntervalMs(
-        normalized.restMpAccelIntervalMs ? normalized.restMpAccelIntervalMs
-                                         : kRestMpAccelIntervalDefaultMs);
+    normalized.auctionGateProbeSeq = 0;
+    normalized.uiCheatOverlaySeq = 0;
+    normalized.restMpAccel = 0;
+    normalized.restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
     normalized.secAttackIntercept = 0;
     normalized.secAttackTextHook = 0;
-    normalized.infiniteStars =
-        (kInfiniteStarsUserEnabled && normalized.infiniteStars) ? 1u : 0u;
-    normalized.forceTrade =
-        (kForceTradeUserEnabled && normalized.forceTrade) ? 1u : 0u;
+    normalized.infiniteStars = 0;
+    normalized.forceTrade = 0;
     normalized.autoSell = normalized.autoSell ? 1u : 0u;
     normalized.launcherHangupSchedule = normalized.launcherHangupSchedule ? 1u : 0u;
     normalized.launcherHangupScheduleMask =
@@ -1729,17 +1725,14 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         // 「不挥弓」已拆除（v70）：清掉历史 key，免得旧 ini 一直留着个没人读的开关。
         IniEraseKey(ini, "core", "pointBlankShoot");
         IniSetBool(ini, "core", "auctionTownBypass", normalized.auctionTownBypass != 0);
-        IniSetU32(ini, "core", "auctionGateProbeSeq", normalized.auctionGateProbeSeq);
-        IniSetU32(ini, "core", "uiCheatOverlaySeq", normalized.uiCheatOverlaySeq);
-        IniSetBool(ini, "core", "restMpAccel", normalized.restMpAccel != 0);
-        IniSetU32(ini, "core", "restMpAccelIntervalMs",
-                  ClampRestMpAccelIntervalMs(normalized.restMpAccelIntervalMs
-                                                 ? normalized.restMpAccelIntervalMs
-                                                 : kRestMpAccelIntervalDefaultMs));
+        IniEraseKey(ini, "core", "auctionGateProbeSeq");
+        IniEraseKey(ini, "core", "uiCheatOverlaySeq");
+        IniEraseKey(ini, "core", "restMpAccel");
+        IniEraseKey(ini, "core", "restMpAccelIntervalMs");
         IniEraseKey(ini, "core", "secAttackIntercept");
         IniEraseKey(ini, "core", "secAttackTextHook");
-        IniSetBool(ini, "core", "infiniteStars", normalized.infiniteStars != 0);
-        IniSetBool(ini, "core", "forceTrade", normalized.forceTrade != 0);
+        IniEraseKey(ini, "core", "infiniteStars");
+        IniEraseKey(ini, "core", "forceTrade");
         // 剥离双轨：不再写 core.autoSell*，并清掉历史 key。
         IniEraseKeysWithPrefix(ini, "core", "autoSell");
         IniSetBool(ini, "core", "launcherHangupSchedule",

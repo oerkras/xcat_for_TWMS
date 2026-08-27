@@ -21,6 +21,7 @@
 //      正被别人持着，在 VEH 里去拿必死；模块地址一律由后台线程预先解析好缓存；
 //   3. 整个函数体裹在 __try 里兜底，并有线程局部重入闩。
 // 格式化、模块名解析、落盘全部由后台 flusher 线程做，那里怎么抛都不影响异常派发。
+// 默认不 AddVectoredExceptionHandler。排障：XCAT_FAULT_PROBE=1 或 fault_probe.on。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -359,22 +360,46 @@ DWORD WINAPI FlushThread(LPVOID) {
 
 }  // namespace
 
-// 熄火开关：探针挂在全进程每一次异常上，是本仓风险最高的一块代码（06:01 那版就把客户端
-// 送进了 abort）。真再出事时用户没法等我重新构建，放个标记文件就能把它整块停掉。
+bool MarkerExists(const char* bin, const char* rel) {
+    if (!bin || !bin[0] || !rel) return false;
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s%s", bin, rel);
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+// 强制关：旧杀手锏文件。GetBinDir 已是 XCat_data/，两处都认以免旧路径失效。
 bool KillSwitchOn() {
     const char* bin = x::runtime::GetBinDir();
-    if (!bin || !bin[0]) return false;
-    char path[MAX_PATH];
-    snprintf(path, sizeof(path), "%s\\XCat_data\\state\\no_fault_probe", bin);
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    return MarkerExists(bin, "state\\no_fault_probe") ||
+           MarkerExists(bin, "XCat_data\\state\\no_fault_probe");
+}
+
+bool EnvFaultProbeOn() {
+    char env[8]{};
+    const DWORD n = GetEnvironmentVariableA("XCAT_FAULT_PROBE", env, sizeof(env));
+    if (!n || n >= sizeof(env)) return false;
+    return env[0] == '1' || env[0] == 'y' || env[0] == 'Y';
+}
+
+// 默认关 VEH。排障：XCAT_FAULT_PROBE=1 或 DLL 目录 / state 下 fault_probe.on。
+bool WantVeh() {
+    if (KillSwitchOn()) return false;
+    if (EnvFaultProbeOn()) return true;
+    const char* bin = x::runtime::GetBinDir();
+    return MarkerExists(bin, "fault_probe.on") || MarkerExists(bin, "state\\fault_probe.on");
 }
 
 void Start() {
     bool expected = false;
     if (!gRunning.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
-    if (KillSwitchOn()) {
+    if (!WantVeh()) {
         gRunning.store(false, std::memory_order_release);
-        x::runtime::LogI("Il2cppFault", "检测到 state\\no_fault_probe，探针已停用");
+        if (KillSwitchOn()) {
+            x::runtime::LogI("Il2cppFault", "检测到 state\\no_fault_probe，探针已停用");
+        } else {
+            x::runtime::LogI("Il2cppFault",
+                             "VEH off（默认不挂异常链；排障设 XCAT_FAULT_PROBE=1 或放 fault_probe.on）");
+        }
         return;
     }
     gStop.store(false, std::memory_order_release);

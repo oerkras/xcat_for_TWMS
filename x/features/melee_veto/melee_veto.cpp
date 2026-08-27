@@ -882,7 +882,7 @@ void PumpApply(void*) {
     }
 }
 
-// 勾上即自行放行 .text 补丁。关开关不撤环境变量：无限飞镖和近战不挥拳共用这根旗，
+// 勾上即自行放行 .text 补丁。关开关不撤环境变量：近战不挥拳与 movepath_flush 共用这根旗，
 // 一方关掉若清掉，另一方会整段拒绝下钩（01:17 BIN：两边同时「须先设 XCAT_ALLOW_TEXT_PATCH=1」）。
 bool EnsurePatchEnv() {
     char env[8]{};

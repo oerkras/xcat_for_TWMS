@@ -22,7 +22,7 @@ const char* const kOrder[] = {"WM",         "UL",         "NM",         "FAC",
                               "ShopUnity",  "AttackFK",   "ChanHop",    "DropAlert",
                               "InputOnKey", "WorldMap",   "Consumable", "Teleport",
                               "PetAct",     "PetRect",    "DropFields", "SkillMax",
-                              "FaForce",    "InfStars",   "ForceTrade"};
+                              "FaForce"};
 
 struct Slot {
     char id[xcat::kAnchorLampIdLen]{};

@@ -36,14 +36,12 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 158u;
 // v99: 清忙锁出刀地板解除 — Apply 不再 max 抬间隔；默认/下限 1；读盘迁旧默认 410
 // v100: 攻击间隔只保留出厂默认 123；取消读盘 50/46→123 迁移
 // v101: autoReloginStopGather — 遇人停吸（遇人策略；仅 WS888 解锁后露出）
-// v76: restMpAccel — 实验·坐下/椅子回蓝累加器加速（写 WM+0x17C/+0x180；默认关）
-// v77: restMpAccelIntervalMs — 写满间隔（默认 2500；过密会踢；BIN 已证真回蓝）
+// v76/v77: restMpAccel* — 实验·回蓝累加器已拆除；字段保留布局，恒 0 / 默认间隔
 // v78: meleeVeto — 「近战不挥拳」：让普攻那一发 TryDoingMeleeAttack 判负，落到兜底射击。
 //      勾上后先测量再决定：观测到近战体内自己转调射击（nest>0）就拒绝拦截 —— 弓正是这样，
 //      拦了会把整条伤害链打断（见 ARCHER_SHOOT_VS_BONK_GATE_20260809.md §0″/§0‴）。默认关。
 // v79: curFhGateBypass — 实验·地面门旁路（改 GA CurFh 判空跳转；≠ 站立伪装）
-// v80: infiniteStars — 实验·无限飞镖：自动维持 4121006 无形镖 + 客户端冻 207xxxx 扣数；默认关
-// v81: kInfiniteStarsUserEnabled=false — 实验 TAB 不画入口；不启 worker / 不挂钩；代码保留
+// v80/v81: infiniteStars — 实验·无限飞镖已拆除；字段保留布局，恒 0
 // v83: simpleCombatHitRotate / HitRotateN — 「打中换怪」：同一 oid 确认命中 N 次后切攻击盒外最近活怪；活怪<3 停刀
 // v84: simpleCombatForgeHit — 打怪出刀自组攻包；落盘 user.ini
 // v85: mapAttack — 实验·全图攻击 P2 扩盒（FindHit Rect=本图 AABB，不抬 maxCount）；会话态默认关，不落盘
@@ -119,8 +117,7 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 158u;
 // v153: 自动打怪寻怪 simpleCombatTeleportMaxHop 厂默 3000→1500；旧 400/520/550/3000 读盘迁。手改保留。
 // v149: mobGatherReconnectHop — 吸怪 TAB「重连换频」；软重连进异频；厂默关。缺键=关。
 // v139: 主动软重连旧厂默开+14s 残留迁关一次（v122 已改厂默关，当时没迁盘）
-// v140: forceTrade — 实验·强制交易：改 UIUserInfo 人物卡交易按钮等级阈值 global；默认关
-//       kForceTradeUserEnabled=false — 实测无效；实验 TAB 置灰；不启 worker / 不改阈值
+// v140: forceTrade — 实验·强制交易已拆除；字段保留布局，恒 0
 // v141: mobGatherDispClampOn / mobGatherDispCapPx — 吸怪 TAB「位移夹速」：把被拽怪每帧位移
 //       夹到 ≤ cap(px/帧)，不越客户端「怪速+10」门→不触发 prevpos 举报；v150 起厂默关、cap=48
 // v142: mobGatherHangupFires 厂默 1900→1700；旧盘仍为 1900/1800 迁一次。升 version 后用户可再改
@@ -480,14 +477,6 @@ constexpr bool kSkillMaxLevelUserEnabled = false;
 constexpr bool kFinalAttackForceUserEnabled = false;
 // false：实验 TAB「自动召唤宠物 / 有粮才召」置灰；读盘/落盘/Apply 强制关，防更新残留仍召宠。
 constexpr bool kPetSummonUserEnabled = false;
-// false：实验 TAB 不画「无限飞镖」入口；读盘/落盘/Apply 强制关，不启 worker、不挂钩。
-constexpr bool kInfiniteStarsUserEnabled = false;
-// false：实验 TAB「强制交易」置灰；读盘/落盘/Apply 强制关，不启 worker、不改 UIUserInfo 阈值
-//（实测改客户端 15 级门无效，服端仍拒；避免再碰人物卡/交易闸挡原业务）。
-constexpr bool kForceTradeUserEnabled = false;
-// false：实验 TAB「拍卖原生按钮（一次）」置灰；IPC 脉冲不点状态栏 17、不写等级/建角。
-// 代码保留；野外开拍卖走 auctionTownBypass，不走本探针。
-constexpr bool kAuctionGateProbeUserEnabled = false;
 // 群怪优先：落盘仍用 clusterWeight；0=关，非 0=开（旧 1–100 权重一律视为开）。
 constexpr uint32_t kClusterWeightDefault = 0u;
 constexpr uint32_t kClusterWeightMax = 100u;
@@ -516,10 +505,8 @@ constexpr uint32_t kAttackRpcMobsMax = 15u;
 constexpr uint32_t kAttackRpcIntervalDefaultMs = 500u;
 constexpr uint32_t kAttackRpcIntervalMinMs = 50u;
 constexpr uint32_t kAttackRpcIntervalMaxMs = 5000u;
-// rest_mp_accel：两次写满累加器间隔。自然约 5~10s；默认 2.5s；过小会踢。
+// restMpAccelIntervalMs 布局占位默认（功能已拆除，不再读写 ini）。
 constexpr uint32_t kRestMpAccelIntervalDefaultMs = 2500u;
-constexpr uint32_t kRestMpAccelIntervalMinMs = 50u;
-constexpr uint32_t kRestMpAccelIntervalMaxMs = 10000u;
 constexpr uint32_t kAttackRpcDamageDefault = 1u;
 constexpr uint32_t kAttackRpcDamageMin = 1u;
 constexpr uint32_t kAttackRpcDamageMax = 999999u;
@@ -910,19 +897,17 @@ struct PayloadControl {
     // 野外可开拍卖：数据面强制 MapDataInfo.IsTown=1（仅客户端；默认开）。
     // 服端可能断线；与挂机「守护模式」叠加会干净重拉——挂机/守护时建议关。
     uint32_t auctionTownBypass = 1;
-    // 实验 TAB 一次探针：主泵点官方状态栏拍卖按钮。用户入口已关（kAuctionGateProbeUserEnabled）。
+    // 已拆除：拍卖原生按钮探针 / GM overlay / 回蓝加速。字段保留布局，恒 0。
     uint32_t auctionGateProbeSeq = 0;
-    // 实验 TAB 一次：主泵打开 UICheat IMGUI GM overlay（CreateInstance+Open；不直调 OnGUI）。
     uint32_t uiCheatOverlaySeq = 0;
-    // v76/v77: 实验·坐下/椅子回蓝（刷 WM 累加器；默认关）。BIN 已证真蓝会动；过密踢。
     uint32_t restMpAccel = 0;
     uint32_t restMpAccelIntervalMs = kRestMpAccelIntervalDefaultMs;
     // v130/v132：拦截 / .text 已移除。字段保留布局，恒 0。
     uint32_t secAttackIntercept = 0;
     uint32_t secAttackTextHook = 0;
-    // v80/v81: 实验·无限飞镖。用户入口已关（kInfiniteStarsUserEnabled）；字段保留防旧 ini / 日后重开。
+    // 已拆除：无限飞镖。字段保留布局，恒 0。
     uint32_t infiniteStars = 0;
-    // v140: 实验·强制交易。用户入口已关（kForceTradeUserEnabled）；字段保留防旧 ini / 日后重开。
+    // 已拆除：强制交易。字段保留布局，恒 0。
     uint32_t forceTrade = 0;
     // Deprecated（经典版）：补给真源为 user.ini [auto_supply]。
     // 字段仅保留结构布局兼容；Read/WritePayloadControl 不再读写，并会清掉 core.autoSell*。
@@ -1245,12 +1230,6 @@ inline uint32_t ClampAttackRpcMobs(uint32_t n) {
 inline uint32_t ClampAttackRpcIntervalMs(uint32_t ms) {
     if (ms < kAttackRpcIntervalMinMs) return kAttackRpcIntervalMinMs;
     if (ms > kAttackRpcIntervalMaxMs) return kAttackRpcIntervalMaxMs;
-    return ms;
-}
-
-inline uint32_t ClampRestMpAccelIntervalMs(uint32_t ms) {
-    if (ms < kRestMpAccelIntervalMinMs) return kRestMpAccelIntervalMinMs;
-    if (ms > kRestMpAccelIntervalMaxMs) return kRestMpAccelIntervalMaxMs;
     return ms;
 }
 

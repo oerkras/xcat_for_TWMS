@@ -296,7 +296,7 @@ void PumpApply(void*) {
 }  // namespace
 
 void SetEnabled(bool on) {
-    // 勾上即自行放行 .text 补丁。关开关不撤环境变量（与 melee_veto / 无限飞镖共用这根旗）。
+    // 勾上即自行放行 .text 补丁。关开关不撤环境变量（与 melee_veto 共用这根旗）。
     if (on) {
         char env[8]{};
         const DWORD n = GetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", env, sizeof(env));
