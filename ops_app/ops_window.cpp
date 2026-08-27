@@ -23,6 +23,7 @@ OpsWindow* g_opsWindow = nullptr;
 ImGuiStyle g_styleBase{};
 bool g_hasStyleBase = false;
 bool g_pendingThemeCommit = false;
+bool g_frameHadInput = true;
 std::string g_opsThemeBinDir;
 
 void ApplyDpiStyle(float scale);
@@ -337,6 +338,10 @@ void OpsWindow_BeginFrame(OpsWindow& app, const float clearColor[4]) {
 }
 
 void OpsWindow_EndFrame(OpsWindow& app) {
+    ImGuiIO& io = ImGui::GetIO();
+    g_frameHadInput = io.WantTextInput || ImGui::IsAnyItemActive() || io.MouseWheel != 0.f ||
+                      io.MouseWheelH != 0.f || io.MouseDelta.x != 0.f || io.MouseDelta.y != 0.f ||
+                      io.MouseDown[0] || io.MouseDown[1] || io.MouseDown[2];
     ImGui::Render();
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     const HRESULT hr = app.swapChain->Present(1, 0);
@@ -344,6 +349,10 @@ void OpsWindow_EndFrame(OpsWindow& app) {
         OutputDebugStringW(L"XCat TWMS Ops: D3D11 Present failed.\n");
         app.running = false;
     }
+}
+
+bool OpsWindow_FrameHadInput() {
+    return g_frameHadInput;
 }
 
 void OpsWindow_HandleResize(OpsWindow& app, UINT width, UINT height) {

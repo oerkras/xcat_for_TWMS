@@ -1127,7 +1127,9 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
         }
         if (stage == Stage::TokenWait ||
             ToLower(lastUrl).find(L"maplestoryclassic.beanfun.com") != std::wstring::npos) {
-            TryAcceptNgmProtocolDialog(log);
+            NgmProtocolAllowOpts ngmOpts;
+            ngmOpts.debugPort = debugPort;
+            TryAcceptNgmProtocolDialog(log, ngmOpts);
         }
         std::wstring url;
         if (cdp.GetUrl(url, nullptr) && !url.empty()) {

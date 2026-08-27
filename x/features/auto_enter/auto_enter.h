@@ -44,6 +44,10 @@ int LastCharAvatarCount();
 // 选角 UI 是否在（世界/频道页 avatarCount 也是 0，不能单凭头像数判登出）。
 bool CharUiVisible();
 
+// 选角页已稳定且名单空（新号未建角色）。自动进停手等玩家创建，禁止再 GoWorld / 软重连。
+// BIN 22:42 6E96607D：avatars=0 超时 Failed → 8s char_ui → GoWorld 拆会话 → dismiss 弹窗循环。
+bool IsWaitingCreateChar();
+
 // 选角链路已收尾（Done）。软重进用来发现「Done 了但迟迟不 play-ready」的卡死，
 // 避免空等到 reenter_timeout（dcaf08：Done@01:16:21 → 仍 playReady=0 直到 01:18:11 fail）。
 bool IsDone();

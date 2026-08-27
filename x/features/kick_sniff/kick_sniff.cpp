@@ -12,6 +12,7 @@
 #include "../ports/foothold_port.h"
 #include "../ports/ground_spoof.h"
 #include "../channel_hop/channel_hop.h"
+#include "../auto_enter/auto_enter.h"
 #include "../ports/world_port.h"
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../ports/mob_gather_port.h"
@@ -2097,6 +2098,8 @@ void OnStateChange(int prev, int now, int err) {
         if (x::features::channel_hop::IsMigrateInFlight() &&
             x::features::soft_login_probe::IsArmed()) {
             Log("skip disconnect soft: hop migrate in flight (seq not bumped)");
+        } else if (x::features::auto_enter::IsWaitingCreateChar()) {
+            Log("skip disconnect soft: empty char roster (wait create char)");
         } else {
             x::features::soft_login_probe::RequestAttempt(
                 now == kStateDisconnecting ? "disconnecting" : "disconnected");

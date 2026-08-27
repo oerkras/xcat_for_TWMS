@@ -1134,12 +1134,33 @@ bool IsSoftBanned(int id, DWORD now) {
     return false;
 }
 
-bool ShouldSkipAcquireMob(const ports::mob::MobLite& m, DWORD now) {
-    if (IsSoftBanned(m.id, now)) return true;
+bool IsSoftBannedDead(int id, DWORD now) {
+    PurgeSoftBan(now);
+    for (int i = 0; i < gSoftBanN; ++i) {
+        if (gSoftBan[i].id == id && gSoftBan[i].kind == kBanDead && gSoftBan[i].untilMs > now)
+            return true;
+    }
+    return false;
+}
+
+void DropSoftBanId(int id) {
+    if (id <= 0) return;
+    int w = 0;
+    for (int i = 0; i < gSoftBanN; ++i) {
+        if (gSoftBan[i].id == id) continue;
+        gSoftBan[w++] = gSoftBan[i];
+    }
+    gSoftBanN = w;
+}
+
+// ignoreInstanceBan：空池松个体禁（C165：ban=37/softN=24 原地悬停 2～3s）。
+// 种类禁仍挡；尸体 kBanDead 仍挡，避免同 tick 鬼锁。
+bool ShouldSkipAcquireMob(const ports::mob::MobLite& m, DWORD now, bool ignoreInstanceBan = false) {
     if (gSkipAccMissEnabled.load(std::memory_order_acquire) &&
         IsAccMissTplBanned(m.templateId, now))
         return true;
-    return false;
+    if (ignoreInstanceBan) return IsSoftBannedDead(m.id, now);
+    return IsSoftBanned(m.id, now);
 }
 
 void SoftBanFor(int id, DWORD now, DWORD ms, SoftBanKind kind = kBanGeneric) {
@@ -2956,7 +2977,7 @@ bool TryHumanPassbyRetarget(const ports::mob::Snapshot& snap, float px, float py
 }
 
 bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWORD now,
-                       bool allowCrossLayer, bool looseLand) {
+                       bool allowCrossLayer, bool looseLand, bool ignoreInstanceBan = false) {
     const float standOff = ClampStandOff();
     const bool clusterOn = gClusterPriority.load(std::memory_order_acquire);
     const ports::mob::MobLite* best = nullptr;
@@ -3043,7 +3064,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
             if (m.templateId == kSpecialTplFilter) continue;
-            if (ShouldSkipAcquireMob(m, now)) continue;
+            if (ShouldSkipAcquireMob(m, now, ignoreInstanceBan)) continue;
             if (!HiraishinFrontOk(px, py, m.x, m.y)) continue;
             const float dx = m.x - px;
             const float dy = m.y - py;
@@ -3060,7 +3081,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
             if (m.templateId == kSpecialTplFilter) continue;
-            if (ShouldSkipAcquireMob(m, now)) continue;
+            if (ShouldSkipAcquireMob(m, now, ignoreInstanceBan)) continue;
             if (!HiraishinRangeOk(px, py, m.x, m.y)) continue;
             float hop = 0, tx = 0, ty = 0;
             uint32_t fh = 0;
@@ -3093,7 +3114,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) return;
             if (m.templateId == kSpecialTplFilter) return;
-            if (ShouldSkipAcquireMob(m, now)) return;
+            if (ShouldSkipAcquireMob(m, now, ignoreInstanceBan)) return;
             if (!HiraishinRangeOk(px, py, m.x, m.y)) return;
 
             if (!allowCrossLayer) {
@@ -3182,7 +3203,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
             if (m.templateId == kSpecialTplFilter) continue;
-            if (ShouldSkipAcquireMob(m, now)) continue;
+            if (ShouldSkipAcquireMob(m, now, ignoreInstanceBan)) continue;
             if (!HiraishinRangeOk(px, py, m.x, m.y)) continue;
             const float ndx = m.x - px;
             const float ndy = m.y - py;
@@ -6317,6 +6338,17 @@ void TickImpl(DWORD now) {
                         }
                         got = PickNearestTarget(snap, player.x, player.y, now, allowCross,
                                                /*looseLand=*/true);
+                    }
+                    if (!got) {
+                        // 个体禁表满 + 种类禁时 DropSoftBanNonSticky 清不动 sticky。
+                        // 松个体禁再选（仍挡 tplBan / 尸体），避免 C165 原地悬停 2～3s。
+                        got = PickNearestTarget(snap, player.x, player.y, now, allowCross,
+                                               /*looseLand=*/true, /*ignoreInstanceBan=*/true);
+                        if (got) {
+                            DropSoftBanId(gLock.id);
+                            LogLine("acquire empty_pool relax id=%d tpl=%d softN=%d (keep tplBan)",
+                                    gLock.id, gLock.templateId, gSoftBanN);
+                        }
                     }
                 }
                 if (!got) {

@@ -961,7 +961,9 @@ static HttpLoginResult HttpGamaPassUiaLoginToOttOnce(HttpLoginLogFn log, int tim
             return Fail(HttpLoginError::Cancelled, "用户已取消登录");
         }
         if (stage == UiaStage::WaitTicket) {
-            TryAcceptNgmProtocolDialog(log);
+            NgmProtocolAllowOpts ngmOpts;
+            ngmOpts.hwnd = hwnd;
+            TryAcceptNgmProtocolDialog(log, ngmOpts);
         }
         switch (stage) {
             case UiaStage::WaitGp:

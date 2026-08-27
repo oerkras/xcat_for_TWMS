@@ -308,12 +308,6 @@ void CollectAppPathExe(std::vector<std::wstring>& out, const wchar_t* sub) {
 
 void CollectFallbackExes(std::vector<std::wstring>& out) {
     static const wchar_t* kCands[] = {
-        L"%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
-        L"%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe",
-        L"%LocalAppData%\\Google\\Chrome\\Application\\chrome.exe",
-        L"%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe",
-        L"%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe",
-        L"%LocalAppData%\\Microsoft\\Edge\\Application\\msedge.exe",
         L"%ProgramFiles%\\Chrome\\App\\chrome.exe",
         L"%ProgramFiles(x86)%\\Chrome\\App\\chrome.exe",
         L"%LocalAppData%\\Chrome\\App\\chrome.exe",
@@ -323,6 +317,12 @@ void CollectFallbackExes(std::vector<std::wstring>& out) {
         L"E:\\Chrome\\App\\chrome.exe",
         L"%ProgramFiles%\\Google\\Chrome\\App\\chrome.exe",
         L"%ProgramFiles(x86)%\\Google\\Chrome\\App\\chrome.exe",
+        L"%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
+        L"%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe",
+        L"%LocalAppData%\\Google\\Chrome\\Application\\chrome.exe",
+        L"%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe",
+        L"%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe",
+        L"%LocalAppData%\\Microsoft\\Edge\\Application\\msedge.exe",
     };
     for (const wchar_t* cand : kCands) PushExpandedExe(out, cand);
     CollectAppPathExe(out, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe");
@@ -738,7 +738,10 @@ void HarvestManualIsolatedLogin(const msc::cdp::BrowserProfile& profile,
             LogLine(log, L"[gp-device-login] 已取消账密直登");
             return;
         }
-        TryAcceptNgmProtocolDialog([&](const std::wstring& s) { LogLine(log, s); });
+        NgmProtocolAllowOpts ngmOpts;
+        ngmOpts.debugPort = kDeviceLoginDebugPort;
+        ngmOpts.cmdNeedle = L"GpDeviceLoginProfile";
+        TryAcceptNgmProtocolDialog([&](const std::wstring& s) { LogLine(log, s); }, ngmOpts);
         if (GetTickCount() - lastUia > 2500) {
             lastUia = GetTickCount();
             if (TryUiaClickBackToGamaPlay(0, L"GpDeviceLoginProfile", log)) {
@@ -808,7 +811,7 @@ void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginL
     msc::cdp::BrowserProfile profile;
     std::wstring label;
     if (!ResolveGamaPassDeviceLoginBrowser(profile.exe, label, log, acc.browserKind)) {
-        LogLine(log, L"[gp-device-login] 未找到所选浏览器（需要 Google Chrome 或 Microsoft Edge，不支持 360）");
+        LogLine(log, L"[gp-device-login] 未找到所选浏览器（需要 Chrome++ / Google Chrome / Microsoft Edge，不支持 360）");
         return;
     }
     wchar_t localApp[MAX_PATH]{};
@@ -1095,14 +1098,15 @@ bool ResolveGamaPassDeviceLoginBrowser(std::wstring& outExe, std::wstring& outLa
         ok = pick([](const std::wstring& e) { return IsEdgeExe(e); });
         if (!ok) LogLine(log, L"[gp-device-login] 未找到 Microsoft Edge");
     } else {
-        ok = pick([](const std::wstring& e) { return IsOfficialChromeExe(e); }) ||
-             pick([](const std::wstring& e) { return IsEdgeExe(e); }) ||
-             pick([](const std::wstring& e) { return IsChromePlus(e); });
+        // 自动：Chrome++ > 官方 Chrome > Edge。Win 几乎必有 Edge，旧顺序会永远抢在 Chrome++ 前面。
+        ok = pick([](const std::wstring& e) { return IsChromePlus(e); }) ||
+             pick([](const std::wstring& e) { return IsOfficialChromeExe(e); }) ||
+             pick([](const std::wstring& e) { return IsEdgeExe(e); });
         if (!ok) {
             if (!preferred.empty() && Is360Exe(preferred)) {
-                LogLine(log, L"[gp-device-login] 系统默认是 360，本模块不支持，请安装 Google Chrome 或 Microsoft Edge");
+                LogLine(log, L"[gp-device-login] 系统默认是 360，本模块不支持，请安装 Chrome++ / Google Chrome / Microsoft Edge");
             } else {
-                LogLine(log, L"[gp-device-login] 未找到 Google Chrome / Microsoft Edge（也没有 Chrome++）");
+                LogLine(log, L"[gp-device-login] 未找到 Chrome++ / Google Chrome / Microsoft Edge");
             }
         }
     }

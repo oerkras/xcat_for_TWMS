@@ -16,7 +16,7 @@ struct LaunchUiState {
     char gpLoginLine[2048]{};      // 粘贴缓冲；解析成功后改成 * 占位，不回填密文
     char gpDisplayAccount[256]{};  // 仅邮箱，给输入框下方展示
     unsigned gpPasteEpoch = 0;     // 提交后换 ID，丢掉 ImGui 内部编辑态
-    int gpLoginBrowserKind = 0;  // 0 自动(Chrome>Edge>Chrome++) / 1 Chrome++ / 2 Chrome / 3 Edge
+    int gpLoginBrowserKind = 0;  // 0 自动(Chrome++>Chrome>Edge) / 1 Chrome++ / 2 Chrome / 3 Edge
     std::string status;
     std::string logTail;
     std::string prefsBinDir;

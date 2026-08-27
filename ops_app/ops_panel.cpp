@@ -776,8 +776,9 @@ void OpsState_Tick(OpsState& st) {
 
     // 利润折线按墙钟采样，不能绑在「当前 Tab / 窗口是否在画」。
     // 最小化时 main 仍会 Tick；忙于启停服务时也继续采，避免切走页面就断线。
+    // 「自动刷新」关掉后连接表冻结；利润页自己还会 RefreshClients。
     if (TwmsRunning(st)) {
-        RefreshClients(st, false);
+        if (st.clientsAutoRefresh) RefreshClients(st, false);
     } else if (!st.clients.empty() || st.clientsCount != 0) {
         st.clients.clear();
         st.clientsCount = 0;
@@ -4274,7 +4275,6 @@ ImVec4 StatusMessageColor(const std::string& msg) {
 
 void DrawClientsPanel(OpsState& st) {
     if (st.clientsAutoRefresh) {
-        RefreshClients(st, false);
         RefreshBans(st, false);
     }
 
@@ -4513,6 +4513,10 @@ void DrawClientsPanel(OpsState& st) {
     ImGui::TextDisabled("近 %ds", st.clientsActiveSec);
     ImGui::SameLine(0, 10.f);
     ImGui::Checkbox("自动刷新", &st.clientsAutoRefresh);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(
+            "每 5 秒向本机更新服务拉一次在线表，不是每帧。\n"
+            "关掉后连接表冻结（利润监控也不再后台采样）；点「刷新」或 F5 仍可立刻拉。");
     ImGui::SameLine();
     if (ImGui::SmallButton("刷新##clients")) {
         RefreshClients(st, true);

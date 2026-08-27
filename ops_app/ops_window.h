@@ -21,6 +21,7 @@ void OpsWindow_Show(OpsWindow& app);
 bool OpsWindow_IsMinimized(const OpsWindow& app);
 void OpsWindow_BeginFrame(OpsWindow& app, const float clearColor[4]);
 void OpsWindow_EndFrame(OpsWindow& app);
+bool OpsWindow_FrameHadInput();
 void OpsWindow_HandleResize(OpsWindow& app, UINT width, UINT height);
 void OpsWindow_LoadFonts(OpsWindow& app);
 void OpsWindow_RefreshDpi(OpsWindow& app, bool reloadFont);

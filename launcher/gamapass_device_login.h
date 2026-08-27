@@ -15,7 +15,7 @@ namespace msc::launcher {
 inline constexpr bool kGamaPassDeviceLoginEnabled = true;
 
 enum class GpDeviceLoginBrowserKind : int {
-    Auto = 0,        // Chrome > Edge > Chrome++（典型用户只有前两个）
+    Auto = 0,        // Chrome++ > Chrome > Edge
     ChromePlus = 1,
     Chrome = 2,
     Edge = 3,

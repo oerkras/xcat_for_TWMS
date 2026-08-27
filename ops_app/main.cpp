@@ -50,13 +50,16 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
 
     const float clear[4] = {0.04f, 0.045f, 0.06f, 1.f};
     // 运维台 UI 不需要高刷：Present(1) 在最小化/遮挡时常立刻返回，会空转吃满 GPU。
-    constexpr ULONGLONG kOpsFrameBudgetMs = 33;  // ~30 FPS 上限
+    constexpr ULONGLONG kOpsFrameBusyMs = 33;   // 交互中 ~30 FPS
+    constexpr ULONGLONG kOpsFrameIdleMs = 100;  // 干盯连接表 ~10 FPS（数据本身 5s 才变）
+    bool lastFrameHadInput = true;
     while (window.running) {
         MSG msg{};
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
             if (msg.message == WM_QUIT) window.running = false;
+            lastFrameHadInput = true;
         }
         if (!window.running) break;
 
@@ -72,10 +75,12 @@ int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         OpsWindow_BeginFrame(window, clear);
         xcat::ops::OpsPanel_Draw(state);
         OpsWindow_EndFrame(window);
+        lastFrameHadInput = OpsWindow_FrameHadInput();
 
+        const ULONGLONG budget = lastFrameHadInput ? kOpsFrameBusyMs : kOpsFrameIdleMs;
         const ULONGLONG elapsed = GetTickCount64() - frameStart;
-        if (elapsed < kOpsFrameBudgetMs) {
-            Sleep(static_cast<DWORD>(kOpsFrameBudgetMs - elapsed));
+        if (elapsed < budget) {
+            Sleep(static_cast<DWORD>(budget - elapsed));
         }
     }
 

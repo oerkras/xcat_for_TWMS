@@ -320,6 +320,8 @@ DWORD gCharSelectedAt = 0;
 DWORD gCharConfirmAt = 0;
 DWORD gBusyStuckSince = 0;
 int gCharSelectTimeoutStreak = 0;
+// 选角页空名单：新号创建角色。跨 RequestRestart 保留，避免 soft_login 再 GoWorld。
+std::atomic<bool> gEmptyCharPark{false};
 DWORD gPumpFailUntil = 0;
 int gEnterAttempts = 0;
 int gCharConfirmAttempts = 0;
@@ -1415,6 +1417,14 @@ bool CharUiReadyForPick() {
            gSnap.slLoginPhase == kSlPhaseForCharConfirm;
 }
 
+// 选角页已出、名单空、已到选角阶段。phase=1/busy 的灌表窗不算（刚 GoWorld 会短暂 avatars=0）。
+bool EmptyCharRosterWaitingCreate() {
+    return gSnap.charUi && gSnap.avatarCount <= 0 &&
+           gSnap.slLoginPhase == kSlPhaseForCharConfirm;
+}
+
+void NoteEmptyCharPark(bool on) { gEmptyCharPark.store(on, std::memory_order_release); }
+
 // Done/Failed 后选角页仍在：解锁重跑。禁止在图内 / 软重连 / hop / 赶路贴门 / 拍卖商城开火。
 void MaybeRestartIfCharUiStillUp() {
     using SceneState = x::features::ports::world::SceneState;
@@ -1422,6 +1432,21 @@ void MaybeRestartIfCharUiStillUp() {
     static DWORD sLastProbeMs = 0;
     static DWORD sReadySinceMs = 0;
     static DWORD sQuiesceSinceMs = 0;
+    if (gEmptyCharPark.load(std::memory_order_acquire)) {
+        sReadySinceMs = 0;
+        sQuiesceSinceMs = 0;
+        // 建角完成：Failed 闩里不会再走进 WaitCharSelect，这里解开并拉回选角。
+        if (!sLastProbeMs || GetTickCount() - sLastProbeMs >= kDoneCharUiProbeGapMs) {
+            sLastProbeMs = GetTickCount();
+            if (RefreshSnap(/*idleCache=*/false, /*highPrio=*/true) && CharUiReadyForPick()) {
+                NoteEmptyCharPark(false);
+                Log("empty-roster park: char created avatars=%d — WaitCharSelect",
+                    gSnap.avatarCount);
+                SetPhase(Phase::WaitCharSelect);
+            }
+        }
+        return;
+    }
     if (scene == SceneState::Field || scene == SceneState::CashShop ||
         scene == SceneState::GlobalMarket || x::features::ports::world::IsPlayReady() ||
         x::features::ports::world::IsInMapScene()) {
@@ -1524,6 +1549,7 @@ void Tick() {
             Log("desired off ? Idle");
             gSoftFastTrack.store(false, std::memory_order_release);
             gCharSelectTimeoutStreak = 0;
+            NoteEmptyCharPark(false);
             SetPhase(Phase::Idle);
             ResetRuntime();
         }
@@ -1590,15 +1616,30 @@ void Tick() {
     }
 
     if (PhaseTimedOut()) {
-        if (gPhase == Phase::WaitCharSelect) {
-            ++gCharSelectTimeoutStreak;
-            Log("phase timeout WaitCharSelect streak=%d busy=%d avatars=%d slPhase=%d",
-                gCharSelectTimeoutStreak, gSnap.slBusy, gSnap.avatarCount, gSnap.slLoginPhase);
+        const bool parked = gEmptyCharPark.load(std::memory_order_acquire);
+        const bool emptyCharUi =
+            gPhase == Phase::WaitCharSelect && gSnap.charUi && gSnap.avatarCount <= 0;
+        if (parked && gSnap.avatarCount > 0) {
+            // 建角完成：本拍交给 WaitCharSelect unpark，禁止续 park / Failed。
+            if (gPhase != Phase::WaitCharSelect) SetPhase(Phase::WaitCharSelect);
+        } else if (parked || emptyCharUi) {
+            // 空名单 / 已 park：建角向导可能暂时藏起 charUi，禁止 Failed→GoWorld。
+            NoteEmptyCharPark(true);
+            gPhaseSince = GetTickCount();
+            LogThrottled("WaitCharSelect empty roster — wait create char (no fail/restart)");
+            return;
         } else {
-            Log("phase timeout ? Failed (phase=%u)", (unsigned)gPhase);
+            if (gPhase == Phase::WaitCharSelect) {
+                ++gCharSelectTimeoutStreak;
+                Log("phase timeout WaitCharSelect streak=%d busy=%d avatars=%d slPhase=%d",
+                    gCharSelectTimeoutStreak, gSnap.slBusy, gSnap.avatarCount,
+                    gSnap.slLoginPhase);
+            } else {
+                Log("phase timeout ? Failed (phase=%u)", (unsigned)gPhase);
+            }
+            SetPhase(Phase::Failed);
+            return;
         }
-        SetPhase(Phase::Failed);
-        return;
     }
 
     char wantName[64]{};
@@ -1615,6 +1656,13 @@ void Tick() {
         if (CharUiReadyForPick()) {
             Log("WaitWorldList already on char UI avatars=%d busy=%d — skip world/channel",
                 gSnap.avatarCount, gSnap.slBusy);
+            SetPhase(Phase::WaitCharSelect);
+            break;
+        }
+        // 新号空名单 / 已 park：频道壳还在，resume→GoWorld 会拆会话弹窗循环（BIN 22:42 6E96607D）。
+        if (gEmptyCharPark.load(std::memory_order_acquire) || EmptyCharRosterWaitingCreate()) {
+            NoteEmptyCharPark(true);
+            Log("WaitWorldList empty char roster — park WaitCharSelect (no GoWorld)");
             SetPhase(Phase::WaitCharSelect);
             break;
         }
@@ -1746,6 +1794,12 @@ void Tick() {
             SetPhase(Phase::WaitCharSelect);
             break;
         }
+        if (gEmptyCharPark.load(std::memory_order_acquire) || EmptyCharRosterWaitingCreate()) {
+            NoteEmptyCharPark(true);
+            Log("WaitChannelArmed empty char roster — skip GoWorld, park WaitCharSelect");
+            SetPhase(Phase::WaitCharSelect);
+            break;
+        }
         void* chUi = gSnap.channelUi;
         if (!chUi || !StillOnTargetChannelUi(wantId, wantName)) {
             LogThrottled("WaitChannelArmed: channel UI gone early ? wait char");
@@ -1800,8 +1854,13 @@ void Tick() {
             LogThrottled("char UI present avatars=%d chLinger=%p sl=%p phase=%d busy=%d", count,
                          gSnap.channelUi, gSnap.sceneLogin, gSnap.slLoginPhase, gSnap.slBusy);
             if (count <= 0) {
+                if (EmptyCharRosterWaitingCreate()) NoteEmptyCharPark(true);
                 gCharReadyAt = 0;
                 return;
+            }
+            if (gEmptyCharPark.exchange(false, std::memory_order_acq_rel)) {
+                gPhaseSince = GetTickCount();
+                Log("char created avatars=%d — resume PickChar", count);
             }
             // OnClickButtonSelect 硬门：SceneLogin+0x98 必须已是选角阶段(=2)
             if (gSnap.slLoginPhase != kSlPhaseForCharConfirm) {
@@ -1863,6 +1922,7 @@ void Tick() {
         const int count = gSnap.avatarCount > 0 ? gSnap.avatarCount : AvatarCount(charUi);
         if (count <= 0) {
             LogThrottled("PickChar: avatars still 0");
+            if (EmptyCharRosterWaitingCreate()) NoteEmptyCharPark(true);
             gCharReadyAt = 0;
             SetPhase(Phase::WaitCharSelect);
             return;
@@ -2056,6 +2116,7 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
     if (on && !was) {
         // 开自动进：强制冻住 lobby FindAll（与进程默认 freeze=1 对齐，防中途被解冻）。
         x::runtime::managed_main::SetLoginFreeze(true);
+        NoteEmptyCharPark(false);
         SetPhase(Phase::Idle);
         ResetRuntime();
     }
@@ -2065,6 +2126,7 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
             x::runtime::managed_main::SetLoginFreeze(false);
         }
         gSoftFastTrack.store(false, std::memory_order_release);
+        NoteEmptyCharPark(false);
         SetPhase(Phase::Idle);
         ResetRuntime();
     }
@@ -2089,6 +2151,10 @@ void RequestRestart(const char* why) {
         Log("RequestRestart skip: autoEnter off (%s)", why ? why : "?");
         return;
     }
+    if (gEmptyCharPark.load(std::memory_order_acquire)) {
+        Log("RequestRestart skip: empty char roster (create char) why=%s", why ? why : "?");
+        return;
+    }
     EnsureCs();
     // 软重进仍在大厅：保持 freeze，避免 titlebar/ports 抢跑 FindAll。
     x::runtime::managed_main::SetLoginFreeze(true);
@@ -2108,6 +2174,8 @@ int CharSelectTimeoutStreak() { return gCharSelectTimeoutStreak; }
 int LastCharAvatarCount() { return gSnap.avatarCount; }
 
 bool CharUiVisible() { return gSnap.charUi != nullptr; }
+
+bool IsWaitingCreateChar() { return gEmptyCharPark.load(std::memory_order_acquire); }
 
 bool IsDone() { return gPhase == Phase::Done; }
 

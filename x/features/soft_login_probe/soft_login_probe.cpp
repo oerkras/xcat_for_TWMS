@@ -4299,6 +4299,11 @@ void RequestAttempt(const char* why) {
         KickLogLine("request skip lost_session inMap");
         return;
     }
+    if (x::features::auto_enter::IsWaitingCreateChar()) {
+        LogLine("request skip empty_char_create why=%s", why ? why : "?");
+        KickLogLine("request skip empty_char_create why=%s", why ? why : "?");
+        return;
+    }
     // busy / land_quiet 早退不得先清 deferred：否则 IsReconnectInFlight 空一拍，
     // 遇人 Tick 会把残影 other=1 再 RequestHop 进队列（BIN 18:30:09.092 seq=3774873614）。
     if (gBusy.load(std::memory_order_acquire)) {
