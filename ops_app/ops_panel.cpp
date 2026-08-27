@@ -1242,6 +1242,31 @@ std::string SumGroupMeso(const OpsState& st, const std::vector<size_t>& members,
     return std::to_string(sum);
 }
 
+bool SumGroupRate(const OpsState& st, const std::vector<size_t>& members, bool meso, long long* outSum,
+                  int* outCounted) {
+    if (outSum) *outSum = 0;
+    if (outCounted) *outCounted = 0;
+    long long sum = 0;
+    int counted = 0;
+    constexpr long long kMax = (std::numeric_limits<long long>::max)();
+    constexpr long long kMin = (std::numeric_limits<long long>::min)();
+    for (size_t mi : members) {
+        const auto& c = st.clients[mi];
+        if (!c.hasRates) continue;
+        const long long v = meso ? c.mesoPerMin : c.expPerMin;
+        if (v > 0 && sum > kMax - v)
+            sum = kMax;
+        else if (v < 0 && sum < kMin - v)
+            sum = kMin;
+        else
+            sum += v;
+        ++counted;
+    }
+    if (outSum) *outSum = sum;
+    if (outCounted) *outCounted = counted;
+    return counted > 0;
+}
+
 ULONGLONG MesoDashWallMs() {
     FILETIME ft{};
     GetSystemTimeAsFileTime(&ft);
@@ -5036,34 +5061,34 @@ void DrawClientsPanel(OpsState& st) {
                     }
                     ImGui::TableSetColumnIndex(7);
                     {
-                        long long best = 0;
-                        bool any = false;
-                        for (size_t mi : g.members) {
-                            if (!st.clients[mi].hasRates) continue;
-                            any = true;
-                            best = (std::max)(best, st.clients[mi].expPerMin);
-                        }
-                        if (!any) ImGui::TextDisabled("—");
-                        else {
+                        long long sum = 0;
+                        int counted = 0;
+                        if (!SumGroupRate(st, g.members, false, &sum, &counted)) {
+                            ImGui::TextDisabled("—");
+                        } else {
                             char buf[48]{};
-                            FormatSignedPerMin(best, true, buf, sizeof(buf));
+                            FormatSignedPerMin(sum, true, buf, sizeof(buf));
                             ImGui::TextUnformatted(buf);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("组内经/分累计 %s\n%d/%zu 台上报", buf, counted,
+                                                  g.members.size());
+                            }
                         }
                     }
                     ImGui::TableSetColumnIndex(8);
                     {
-                        long long best = 0;
-                        bool any = false;
-                        for (size_t mi : g.members) {
-                            if (!st.clients[mi].hasRates) continue;
-                            any = true;
-                            best = (std::max)(best, st.clients[mi].mesoPerMin);
-                        }
-                        if (!any) ImGui::TextDisabled("—");
-                        else {
+                        long long sum = 0;
+                        int counted = 0;
+                        if (!SumGroupRate(st, g.members, true, &sum, &counted)) {
+                            ImGui::TextDisabled("—");
+                        } else {
                             char buf[48]{};
-                            FormatSignedPerMin(best, true, buf, sizeof(buf));
+                            FormatSignedPerMin(sum, true, buf, sizeof(buf));
                             ImGui::TextUnformatted(buf);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("组内金/分累计 %s\n%d/%zu 台上报", buf, counted,
+                                                  g.members.size());
+                            }
                         }
                     }
                     ImGui::TableSetColumnIndex(9);

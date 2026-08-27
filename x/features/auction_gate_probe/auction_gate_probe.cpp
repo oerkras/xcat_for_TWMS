@@ -2,7 +2,7 @@
 //
 // 0820：UIStatusBar.OnClickButton(17 / CnNpt) 是状态栏真入口；体内
 // CheckRedAccountRestriction 之后直调 SendMigrateToGlobalMarketRequest
-// （RVA 0xDFB9D0）。BIN 08-21：假等级/假建角时间骗不过服端，且会污染战斗真源。
+// （RVA 0xDFB9B0）。BIN 08-21：假等级/假建角时间骗不过服端，且会污染战斗真源。
 // 本探针不再写字段，只在 Unity 主泵上点官方按钮。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -24,8 +24,8 @@ namespace x::features::auction_gate_probe {
 
 // UIStatusBar（dump class hash）；OnClickButton 明文仍在 script.json
 constexpr char kHashStatusBar[] =
-    "e586a5254f41bdc4112064bc295980a39d5eb73ad06d1b178a4b758d67a8648";
-constexpr uint32_t kRvaOnClickButton = 0x66C7A0;  // 08-20 dump；hash/plain 优先
+    "a563bceeefc39a2386c29f3a7128df0208bc1e135e207d84db01cd4fcc30fac";
+constexpr uint32_t kRvaOnClickButton = 0x66C790;  // 08-20 dump；hash/plain 优先
 constexpr int32_t kBtnAuction = 17;               // CMS CnNpt
 constexpr DWORD kPumpTimeoutMs = 4000;
 

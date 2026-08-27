@@ -4,7 +4,7 @@
 // 现改为在挂台虚函数入口拦截（LocalUser 限定），武装期不重挂。
 //
 // 锚点（GameAssembly IDB imagebase 0x7FF848C80000）：
-//   VecCtrl_WorkUpdateActive @ RVA 0x11C7AB0
+//   VecCtrl_WorkUpdateActive @ RVA 0x11C7A80
 //   有台：call [klass+0x208]  CollisionDetect     (r9=0)
 //   无台：call [klass+0x218]  CollisionDetectFloat (r9=1)
 // 安装：改 klass 上对应 methodPtr（VirtualProtect）。

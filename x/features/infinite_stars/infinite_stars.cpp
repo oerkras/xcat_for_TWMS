@@ -6,7 +6,7 @@
 //
 // 辅路径（runtime dump `Dumps/runtime/GameAssembly.dll`）：
 //   ItemSlotBundle.SetItemNumber  RVA 0x1305FC0  `mov [rcx+0x28], dx; ret` + NOP
-//   ItemSlotBundle.GetItemNumber  RVA 0x1305fd0  `movzx eax, [rcx+0x28]; ret` + NOP
+//   ItemSlotBundle.GetItemNumber  RVA 0x1305fa0  `movzx eax, [rcx+0x28]; ret` + NOP
 //   ItemSlotBase.ItemId           @0x10
 //   ItemSlotBundle.nNumber        ushort @0x28
 // 虚调用走 vtable，PatchMethodInfo 拦不到；函数体只有 5 字节，靠 ret 后对齐 NOP
@@ -40,8 +40,8 @@ namespace {
 
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 
-constexpr uint32_t kRvaSetItemNumber = 0x1305FC0;
-constexpr uint32_t kRvaGetItemNumber = 0x1305fd0;
+constexpr uint32_t kRvaSetItemNumber = 0x1305F90;
+constexpr uint32_t kRvaGetItemNumber = 0x1305fa0;
 constexpr int kSkillSpiritJavelin = 4121006;  // NightlordSpiritJavelin
 constexpr float kRenewRemainSec = 8.f;
 constexpr DWORD kCastGapMs = 3000;

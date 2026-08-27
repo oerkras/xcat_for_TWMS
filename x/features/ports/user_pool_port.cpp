@@ -25,12 +25,12 @@ using x::runtime::il2cpp::ReadPtr;
 // remount 2026-08-04 · TypeDef 1582 UserPool : Singleton<UserPool>
 // 旧 e0e036a9… 已不存在；字段布局未变（UL@0x10 List@0x18 Dict@0x20 Field@0x28）
 constexpr char kUserPoolClass[] =
-    "a4cce819caf68c0cfa07dd466d22b3634229c6e6174663b61d2d762cfc1f126";
+    "bef5f4ee976d9d345449bbb0df89f280a1027b8af0c7780eb9af48279cb9e42";
 // 字段防漂移：哈希名 → field_get_offset；失败回退 Hint
 constexpr char kHashRemoteDict[] =
-    "fc8466c33153a1eca8594c6876f7388e777c4d61d4ac3e6e2bc9933c2cbb0aa";
+    "a8300338f1cceb519bcb557092e96e84e3d53c6c452e423cad93499fed696f5";
 constexpr char kHashRemoteList[] =
-    "add17ffdbf91302a54cf7f095ccd1e113a4b0f1e37e9b61be27d0f7f6d7cdbf";
+    "be7a9af44be5c005e37dd2b948e186a81ef886a4a8ab8a14c6b87de42eadafd";
 
 // GetRemoteUserCount CFA @ 0x1114BA0（旧 0x110E240）；采样优先读字段，避免调 CFA。
 constexpr size_t kOffUserLocalHint = 0x10;  // get_UserLocal → *(this+0x10)
@@ -53,21 +53,21 @@ constexpr int kEnumCapHard = 256;
 // UserRemote.GetJobCode → *(uint16*)(this+0x3AE)；JobCategory = job%1000/100（8=Manager 9=Admin）.
 constexpr size_t kOffRemoteJobCode = 0x3AE;
 constexpr char kHashAvatarRootField[] =
-    "e19a7703df60dd7e9e06d10e38d0932000a30c05684025726b91b7db7a88db4";
+    "a8db74dd39024acfae045a0fbc81fa2ce60f4cfd5e81953d346a8477eb5d129";
 constexpr char kFldAvatarRoot[] = "_avatarRoot";
 constexpr size_t kFbAvatarRoot = 0x80;
-// User.CharacterName backing（dump.cs TypeDef 1570 · getter RVA 0xFC8540 → *(this+0x1A0)）。
+// User.CharacterName backing（dump.cs TypeDef 1570 · getter RVA 0xFC8520 → *(this+0x1A0)）。
 // 旧 bacf9760…@0x1B8 是 MiniRoomSn（uint），当名字读会全员「?」。
 constexpr char kHashCharacterNameField[] =
-    "b67722c0326ffe1bcc665128f868735c260726acfbbc3f5ae5810d3546a0531";
+    "d1af3dc9de515310d445bf8c45fcd2990c64203f28559eb6137ddb50e4ba8d2";
 constexpr char kFldCharacterName[] =
-    "<b67722c0326ffe1bcc665128f868735c260726acfbbc3f5ae5810d3546a0531>k__BackingField";
+    "<d1af3dc9de515310d445bf8c45fcd2990c64203f28559eb6137ddb50e4ba8d2>k__BackingField";
 constexpr size_t kFbCharacterName = 0x1A0;
 // User.CharacterId backing（同 getter RVA 0xFC8520 → *(uint*)(this+0x19C)；名字失败时日志用 #id）
 constexpr char kHashCharacterIdField[] =
-    "f3607f2a1fa94ef7f7f92f7f806619ac30dc142e082a31c2deeb68c87982130";
+    "dbd4e4e70e3c410e6bcd11a8863f726a3432fe6976d873def691b4bb0ab55f5";
 constexpr size_t kFbCharacterId = 0x19C;
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4E98080;  // remount 2026-08-06 · shop_port 同源
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4E980D0;  // remount 2026-08-06 · shop_port 同源
 
 constexpr DWORD kJobWaitMs = 800;
 constexpr DWORD kRebindMs = 2000;
@@ -408,7 +408,7 @@ void EnsureAvatarRootOffset() {
     const auto& e = x::runtime::il2cpp::Get();
     // remotes 是 User 子类；用 User 哈希类找 avatar（与 player_hide 同 hash）；不依赖 UserPool gKlass.
     void* k = x::runtime::il2cpp::FindClass("",
-        "f19ee52eb2762addde30d9ee30704c7ed4948091596d0ce9fe8db390c3aeeba");
+        "b55b16bb785ad758d4375d173f78195e824184cc2edf99eadc7eead36551193");
     if (!k) k = x::runtime::il2cpp::FindClass("Msc.Game.Object", "User");
     if (!k) return;
     const char* names[] = {kFldAvatarRoot, kHashAvatarRootField};
@@ -445,7 +445,7 @@ void EnsureAvatarRootOffset() {
 
 void* ResolveUserKlass() {
     void* k = x::runtime::il2cpp::FindClass("",
-        "f19ee52eb2762addde30d9ee30704c7ed4948091596d0ce9fe8db390c3aeeba");
+        "b55b16bb785ad758d4375d173f78195e824184cc2edf99eadc7eead36551193");
     if (!k) k = x::runtime::il2cpp::FindClass("Msc.Game.Object", "User");
     return k;
 }

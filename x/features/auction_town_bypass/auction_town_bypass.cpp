@@ -43,24 +43,24 @@ constexpr uint32_t kUnableMigrateBit = 0x10u;
 
 // TypeDef hashes (dump.cs 2026-08-04).
 constexpr char kHashMapDataInfo[] =
-    "d70146fafd6ed6633bcfc144a34e8b22e0ffae3e2ba5094826fcca5b035e34c";
+    "af2927161d046194d9c94350782c0924d0eea6d2345850fc2fce19c5175b3a1";
 constexpr char kHashMapData[] =
-    "f758734a49bea8d6127094ca94be6bc84c27dbb2b468a6248153563487d6daf";
+    "eca01f9d2fbb16afddb74e0a6128167dde4d2e423f84433d39f4654aef4a767";
 constexpr char kHashSceneMap[] =
-    "afd07123d4660ab61cde9f4cf4d8eac723da94f4e46492592330554d3c186b9";
+    "e87006475acc3cce0167109d1a58a6f2fb25704f5655ea0a9086d0f4877f68c";
 // IsTown / Option / Info / MapData backing / WM._field / WM._currentMapData
 constexpr char kHashIsTown[] =
-    "bee95cd4c15a1bf166213f6728244ad665477461603b68c67142468f49feac4";
+    "f165bd04c15864caf132c9fa4b7facbed33870e1d94f4b7c1a742f92a35f5f2";
 constexpr char kHashOption[] =
-    "f391d6fecfb3916d320bc9213da8d2b323a0bb7bafa0c23726e1b88a3298b89";
+    "d6ef3006d3f9960a23b4ef4f68055ed260bbadf3d8f7338a3dd21f3e2127f32";
 constexpr char kHashMapDataInfoField[] =
-    "a5de049fff9264183ca33cbf762135de4d2f54e8a2f9fb54ec27c0f3e1c6cd9";
+    "c3748b9e5f4e52e3292571edabc4e4b5068fe8537c4c4caa68a1c47fd1edd09";
 constexpr char kHashSceneMapDataBacking[] =
-    "<bdd7dd182636cfdbe340d6afdae15750505fce47dea40a736428b53d5c04a06>k__BackingField";
+    "<d3b3d8d489a7080033c61732bb5b6b1c5881a3fcd71e6f3dcf3d7124e2519b0>k__BackingField";
 constexpr char kHashWmField[] =
-    "c8849d22f0cbc0cc1e7f1ce767b0308a40ba75442d2649f305e941110da76c8";
+    "e310f7c2fc2ba5f94dfc65e8d90f7b826bc952f691a9be0b0b78a6d4e35a9aa";
 constexpr char kHashWmCurrentMapData[] =
-    "fc95232f4234caa40e16447efa6c709eec3f9ca4b3b4027ec7b736e5022f6d8";
+    "b2dffc39394d96600313685b903b5892fa881485fc9ddb4db7156ccbc149402";
 
 constexpr DWORD kTickMsApply = 50;    // 未稳住 / 换图：快拍一次写到位
 constexpr DWORD kTickMsHold = 1000;   // 已稳住：慢校验（游戏一般不回写 IsTown）

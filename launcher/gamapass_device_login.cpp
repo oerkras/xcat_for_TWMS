@@ -1135,16 +1135,18 @@ bool CancelGamaPassDeviceLogin(HttpLoginLogFn log) {
     LogLine(log, L"[gp-device-login] 用户取消：后台关闭独立调试窗（19223），不碰日常浏览器、不杀游戏");
     std::thread([log]() {
         const auto cdpLog = [&](const std::wstring& s) { LogLine(log, s); };
-        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort, cdpLog);
+        // debugPort=-1：连带 --remote-debugging-port=19223 的独立罐一并结束。
+        // 若先 CloseRemoteBrowser，Browser.close 握手会把取消线程卡住（空罐第一次）。
         const std::wstring root = IsolatedProfileRoot();
         if (IsSafeIsolatedProfileRoot(root)) {
             static const wchar_t* kLeaves[] = {L"chromeplus", L"chrome", L"edge"};
             for (const wchar_t* leaf : kLeaves) {
                 msc::cdp::BrowserProfile p;
                 p.userData = root + L"\\" + leaf;
-                (void)msc::cdp::KillBrowsersBlockingProfile(p, kDeviceLoginDebugPort, cdpLog);
+                (void)msc::cdp::KillBrowsersBlockingProfile(p, -1, cdpLog);
             }
         }
+        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort, cdpLog);
     }).detach();
     return true;
 }

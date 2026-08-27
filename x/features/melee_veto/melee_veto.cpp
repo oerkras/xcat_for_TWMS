@@ -4,10 +4,10 @@
 //
 // | RVA | 符号 | 托管参数 | 原生参数 |
 // |---|---|---|---|
-// | `0x105D2B0` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
-// | `0x1072800` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
+// | `0x105D290` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
+// | `0x10727e0` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
 //
-// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x105D2B0 上，
+// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x105D290 上，
 //   于是 `methodInfo` 被塞进第 7 参的位置、真 methodInfo 丢失，把射击路径整体打歪
 //   （体感「基本必挥弓」）。改这里之前先用 `Dumps/runtime/out/dump.cs` 按 RVA 复核形状。
 //
@@ -69,9 +69,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaTryDoingMeleeAttack = 0x105D2B0;
-constexpr uint32_t kRvaTryDoingShootAttack = 0x1072800;
-constexpr uint32_t kRvaGetWeaponType = 0x142BB80;
+constexpr uint32_t kRvaTryDoingMeleeAttack = 0x105D290;
+constexpr uint32_t kRvaTryDoingShootAttack = 0x10727e0;
+constexpr uint32_t kRvaGetWeaponType = 0x142BB50;
 
 // ── 取框探针（一次性调研，`XCAT_MELEE_RECT_PROBE=1` 才挂）──────────────────────
 //
@@ -85,7 +85,7 @@ constexpr uint32_t kRvaGetWeaponType = 0x142BB80;
 // （按仓规逐处实读；这里按 0 读会把分支判反。它不是武器类型——枚举最大是 Gun=49。）
 //
 // 探针要回答的就一件事：飞镖普攻那一发走的是哪条、arg4 实际是几、框实际多大。
-constexpr uint32_t kRvaGetAttackRect = 0x123bb00;  // sub_7FF849EA8290
+constexpr uint32_t kRvaGetAttackRect = 0x123bad0;  // sub_7FF849EA8290
 constexpr uint32_t kRvaConstRect = 0x5659210;      // remounted 2026-08-20 GetAttackRect RIP → (-88,-6,70,56)
 constexpr int kRectKindConstPath = 55;
 
@@ -610,9 +610,9 @@ bool TryArmOne(AbsHookState& st, std::atomic<bool>& refuse, uint32_t rva, void* 
 //   MeleeAttackAfterImage TDI 1644；Range: Dictionary<int,Rect> @0x18
 //   _afterimageMap: Dictionary<string, AfterImage> @0x20（08-13 在 0x40，0x40 现为另一张 Dictionary）
 constexpr char kHashActionManager[] =
-    "c7d30db48dc35ebbc0465dba91574ca9fdb27f9e03b08d36af62bc9f9deac25";
+    "e35f6343ebf368eebf40fc2ad5feeaeb3b9dc4ac6326ee032d935aadd50d4c5";
 constexpr char kHashSingletonInstance[] =
-    "c47aca801202bf11c06a1a81834dd62c970c960ea1be6bd33517f396c9de858";
+    "c8072d39439eef6a06153eff03c75ee45009876f675c7c7ebc01a78bf7f0856";
 constexpr size_t kOffActionMgrAfterImageMap = 0x20;
 constexpr size_t kOffAfterImageRange = 0x18;
 

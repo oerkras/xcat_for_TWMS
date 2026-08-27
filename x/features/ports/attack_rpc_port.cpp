@@ -37,66 +37,66 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Session 方法宿主 → ResolveNetworkManagerKlass；单例壳 → ResolveNetworkManagerFacadeKlass
 constexpr char kOutPacketClass[] =
-    "b74303ab73cbc42ed6d4c0098d32f315dfffe76c4a7d6379bbdf53a9c804842";
+    "cd51be7839b7a083c73895b67111fc5128bafd286f00db728c0ba4684471183";
 constexpr char kHashUserClass[] =
-    "f19ee52eb2762addde30d9ee30704c7ed4948091596d0ce9fe8db390c3aeeba";
+    "b55b16bb785ad758d4375d173f78195e824184cc2edf99eadc7eead36551193";
 constexpr char kHashSecurityClient[] =
-    "f4ca99562bf7f436b42c46a6f05b7727c9ce9d9ee01464276d4b53f43a3e3ae";
+    "db4cf7d9ac52005334a184651f0e6eb74747e8b65440e2e88d47c27842fecfd";
 // SkillInfo（与 skill_port 同 hash）。MeleeAttackAction = Dictionary<int, List<ActionType>> @ static 0x118
 constexpr char kSkillInfoClass[] =
-    "d5a71e9361cc241444c11353243830fc0f44fc7ca4154479f541c4140367025";
+    "b741d6a7c88737e2c5736793139334b3224c4b3342ee41415e08e654577ec48";
 constexpr char kHashMeleeAttackAction[] =
-    "b58c4aca85f0912251d4eed923c1bd4163f0e9a51b2c8d86aa7143b5782e61d";
+    "fd26406714c68645f09a5e9082be757a2f762ed6ea57a0a64f8756645ebe9de";
 constexpr size_t kOffMeleeAttackActionFb = 0x118;
 // SkillInfo.MagicAttackAction = Dictionary<int, List<ActionType>> @ static 0x128（CMS；无现成 hash）
 constexpr size_t kOffMagicAttackActionFb = 0x128;
 
 // P0b / P0c RVAs — remounted 2026-08-04；解析优先 hash/plain（见下方 kHash*）
-constexpr uint32_t kRvaOutPacketCreate = 0x1CEEFC0;
-constexpr uint32_t kRvaEncode1Byte = 0x1CFB6D0;
-constexpr uint32_t kRvaEncode1Bool = 0x1CFB7B0;
-constexpr uint32_t kRvaEncode2Ushort = 0x1CFB940;
-constexpr uint32_t kRvaEncode2Short = 0x1CFB8C0;
-constexpr uint32_t kRvaEncode4Int = 0x1CFB9D0;
-constexpr uint32_t kRvaEncode4Uint = 0x1CFBA50;
-constexpr uint32_t kRvaEncodeVector2 = 0x1CFC5A0;
+constexpr uint32_t kRvaOutPacketCreate = 0x1CEEF90;
+constexpr uint32_t kRvaEncode1Byte = 0x1CFB6A0;
+constexpr uint32_t kRvaEncode1Bool = 0x1CFB780;
+constexpr uint32_t kRvaEncode2Ushort = 0x1CFB910;
+constexpr uint32_t kRvaEncode2Short = 0x1CFB890;
+constexpr uint32_t kRvaEncode4Int = 0x1CFB9A0;
+constexpr uint32_t kRvaEncode4Uint = 0x1CFBA20;
+constexpr uint32_t kRvaEncodeVector2 = 0x1CFC570;
 // 官方门：Network_SendOutPacket（this=facade）
 //   → HashSet<ushort>.Contains(opcode@pkt+0x20) → Session.SendPacket（[facade+0x10]）
 // 2026-08-03 BIN：直调 Session.SendPacket 旁路 HashSet → 第 3 次 forge 后 ~109ms Disconnected
 // （与 sellbag「错包+Session.Send → 105ms」同型；KickSniff verdict=lean_local_or_soft）。
-constexpr uint32_t kRvaNmSendPacket = 0x1CF0BD0;  // remounted 2026-08-06 · Session.SendPacket
-constexpr uint32_t kRvaSendOutPacket = 0x1CEF0C0;  // remounted 2026-08-20
-constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDDF180;  // remounted 2026-08-06 get_GetUpdateTime
+constexpr uint32_t kRvaNmSendPacket = 0x1CF0BA0;  // remounted 2026-08-06 · Session.SendPacket
+constexpr uint32_t kRvaSendOutPacket = 0x1CEF090;  // remounted 2026-08-20
+constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDDF150;  // remounted 2026-08-06 get_GetUpdateTime
 // 延后踢对策：对齐 TryDoingNormalAttack 发包前最小本地态
-//   SetAttackAction(lu, action, aux, skill=null, 0) @0xFFC730
-//   CollectAttackPacket(50) @0x3C8F0A0（Tap 旁路；SendOut 静态无直调）
-constexpr uint32_t kRvaSetAttackAction = 0xFFC730;  // remounted 2026-08-04；旧 0xFD39C0
-constexpr uint32_t kRvaCollectAttackPacket = 0x3C8F0A0;  // remounted 2026-08-04；旧 0x3C44C10
+//   SetAttackAction(lu, action, aux, skill=null, 0) @0xFFC710
+//   CollectAttackPacket(50) @0x3C8F0F0（Tap 旁路；SendOut 静态无直调）
+constexpr uint32_t kRvaSetAttackAction = 0xFFC710;  // remounted 2026-08-04；旧 0xFD39C0
+constexpr uint32_t kRvaCollectAttackPacket = 0x3C8F0F0;  // remounted 2026-08-04；旧 0x3C44C10
 
 constexpr char kHashOutCreate[] =
-    "f81b173e66885e22b09f4da7f0274b780c9cdfb60f49a491094659800f7b345";
+    "bcc25ed62085ab50962455796b8c40a33b586c5acfcf5c24f5173fd5339b2e9";
 constexpr char kHashEncode1Byte[] =
-    "f9f12f51e97fe7fd474e6ec383274085be6efdf36afcb9c5bb2b22fd8509364";
+    "cad8c37b8a3165056770fbdca6425bda2b3c746bbe0cf5de6e3a12a57a38ab9";
 constexpr char kHashEncode1Bool[] =
-    "efae6ea3361f73e7fa226a691533433bd461338c88d0f7873c91a2eaf055f1c";
+    "f2da3fc106a7dda6b92339a184a405f0ffdbcaf90f32c51b3955d2ff1917949";
 constexpr char kHashEncode2Ushort[] =
-    "abc2b7a1beaa0eee23507dfdfd871cc29bb8110995f09a83d1214c20de5471b";
+    "f680cf1314e973918f960a34f37adc1e4636ad25743b25b7e033ce6d3a1ce5a";
 constexpr char kHashEncode2Short[] =
-    "aaffb976d45e8ac5017166c83de8dff5ebd9e0fbe1b8c505a3fb75f1163f118";
+    "ccfb7d045aa098e24cc8252c05e9d563f25fcec2eba77cae83e2aca1091a1ab";
 constexpr char kHashEncode4Int[] =
-    "d0dca07d6b4573864a0066a44c4f534ba563ab5200ba99fa67648422b757ced";
+    "c4aaa441945a3301b8f7c82f806d5f75e2e1ec38319d078130b0b31c0b86e29";
 constexpr char kHashEncode4Uint[] =
-    "c8ea179fde0d5a0b7fdbf69ab4cdff50035ab3d930beeed3a58a940a505e7b4";
+    "efbb861d0f8ec6c02408027cbad01992f36f71100985687042450b6da2a421c";
 constexpr char kHashEncodeVector2[] =
-    "f566ce001397ab0f15be6e9bc5e8adfd86a6cdb5a1f0d9b5fe9af5ba6de4813";
+    "df0456f2728d7c49be50478d17282ff65c809a23706264a14a46d290ab87fb2";
 constexpr char kHashSendOutPacket[] =
-    "bf9747369ff8d8ff80a726da25729d0e003ed0bd95e9833f0dae1b93322c4f6";
+    "c0eeb48fc95521d75f3d70143097f5a21924d6bebf507dc0f007c7b8f7662f3";
 constexpr char kHashGetUpdateTime[] =
-    "e0b072ae5f502ce0244c18d29c8441f9762f4947bbe2c956e1ca73a1be1d4c9";  // get_GetUpdateTime
+    "f57e1b7e2e4f09335469406d37dfd4531c4bd106bca65d63eaf8c18aa1790b1";  // get_GetUpdateTime
 constexpr char kHashSetAttackAction[] =
-    "f37cb0a29d545f1f928c15e001582a0a9cb1c2a942286d27711013945ead10a";
+    "e2ed80ea6781e736856dd5e94cfe75e117d591a2aea2feb500284e6bbc2ee7b";
 constexpr char kHashCollectAttackPacket[] =
-    "ad3afdf88f14ecabce8f9ee448e38d380bee771d324282539955fb13d3b54b3";
+    "ce7b18fd52c750deb8278d4fe731615aac799febbacdb7f12d410457481384e";
 // 探针安全：单次勾选最多 2 刀（auto_stop）。进程累计封顶可面板清零，不必重注。
 // 清零要闲置 >= kResetIdleMs，避免勾选连点把 15ms 洪水送出去。
 // 旧 BIN：Session.Send 旁路第 3 踢；SendOut 对齐后稀疏 4 刀已打出真杀。
@@ -111,8 +111,8 @@ constexpr float kMeleeMaxDist = 50.f;  // 探针 TAB hypot；更大 Y=更高。�
 constexpr float kDropFootReachX = 0.f;
 
 // Create opcode 跟装备，不手选。射击 Create 种子已实算：word_7FFD6711C344=0xBABC
-// + 0x4577 → 0x10033 → u16 51（TryDoingShootAttack @ RVA 0x1072800）。
-// 魔法 Create 种子：word_7FFD790BB4E8(0x77FF)+0xFFFF8835 → 52（TryDoingMagicAttack @ RVA 0x10AB6D0）。
+// + 0x4577 → 0x10033 → u16 51（TryDoingShootAttack @ RVA 0x10727e0）。
+// 魔法 Create 种子：word_7FFD790BB4E8(0x77FF)+0xFFFF8835 → 52（TryDoingMagicAttack @ RVA 0x10AB6B0）。
 constexpr int kOpcodeMeleeAttack = 50;
 constexpr int kOpcodeShootAttack = 51;
 constexpr int kOpcodeMagicAttack = 52;

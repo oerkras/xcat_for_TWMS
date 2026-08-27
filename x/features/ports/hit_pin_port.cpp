@@ -21,9 +21,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-// dump.cs：e1cf738dcfe1c8bf0d4e5da929e0101628359f854d5e0e9f7fa3e052be77cfa
+// dump.cs：d7f12f4cc34eb8c408869db0c4459a3e53597364a87582f89ee7301faa99859
 // CMS：FindHitMobInRect(Rect, ref List<Mob>, maxCount, except, wishMobId, …)
-constexpr uint32_t kRvaFindHitMobInRect = 0xF89C60;
+constexpr uint32_t kRvaFindHitMobInRect = 0xF89C40;
 constexpr size_t kFbMobId = 0x134;
 
 // 与 melee_veto 近战/射击同一套 12 字节序言。

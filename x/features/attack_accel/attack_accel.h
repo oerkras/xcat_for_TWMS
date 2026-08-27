@@ -35,7 +35,7 @@ namespace attack_accel {
 //   写 CalcWeaponAttackSpeedTier 独占种子 dword（GA .data，禁 E9）：lo 由滑条设定（默认 -10）。
 //   不开本项时引擎仍夹 [2,10]，PB=-8 顶格仍是 deg=2（×0.75）。
 //   开启后 PB=-8 可落到 deg<0（如 wpn4+(-8)→-4，×0.375）；lo=-10 时最快 deg=-10 → 延迟×0。
-// remount 2026-08-06：Prepare 0xFFFD50/0x1257350；字段位移未变，哈希已换；IDB imagebase 0x7ff848c80000。
+// remount 2026-08-06：Prepare 0xFFFD30/0x1257320；字段位移未变，哈希已换；IDB imagebase 0x7ff848c80000。
 void Init();
 void Shutdown();
 void StartWorker();

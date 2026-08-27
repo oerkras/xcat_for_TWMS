@@ -1,7 +1,7 @@
 // TWMS Classic — 实验：强制打开 UICheat IMGUI GM overlay。
 //
 // dump：类 hash c1f54c54… TypeDef 163，[UIPrefab("UICheat")]。
-// OnGUI RVA 0xD25E60（含 LiveValue 525 等 GM 控件）。不直调 OnGUI：
+// OnGUI RVA 0xD25E30（含 LiveValue 525 等 GM 控件）。不直调 OnGUI：
 // MonoBehaviour 挂在 active GO 上后由 Unity 每帧调用。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -26,29 +26,29 @@
 namespace x::features::ui_cheat_overlay {
 
 constexpr char kHashUiCheat[] =
-    "c1f54c5425c636db05a846e2ca87d01172b37116cab2615cc5107ece3fb47f9";
+    "ad1bd7fa61ec69583e7475e6d72dc850d240a30f4e45568c0ca9a7bf2751cd4";
 constexpr char kHashIsInstantiated[] =
-    "ff84f6924f6e96917e22c3a0baaf9cb245962212a2209398e27b160fee02fe8";
+    "aef37510dff764effd2273a981ed1240c84b827969f98843cbd1188d65d86bd";
 constexpr char kHashCreateInstance[] =
-    "bdfee1f539b33969bdae9b3ff8b6141457975fa821d42b4c00772faed0cde7c";
+    "a6247d15c4fb1f984e30ba3fa95738457e979d1490f6547ce435bf29cee8ece";
 constexpr char kHashGetInstance[] =
-    "f6ff4a351af5f3989e757ef0e1fa4dbb40c3cb2b0a6d1f1257fd3e8f1d691a6";
+    "a324a176931909eaccb554dda8c01834d6f465e293ca91ddb51720e3857c15f";
 constexpr char kHashOpen[] =
     "eb98051de038f22f6c41b64f23af11c80ebf4738587f1b92021581af57c4baf";
 
 // runtime dump.cs（2026-08 活进程）；hash/plain 优先，RVA 仅 fallback。
-constexpr uint32_t kRvaIsInstantiated = 0xD3B4C0;
-constexpr uint32_t kRvaCreateInstance = 0xD3B870;
-constexpr uint32_t kRvaGetInstance = 0xD3BAA0;
-constexpr uint32_t kRvaOpen = 0x7E2F50;  // UIWindow.Open（父类 slot 28）
-constexpr uint32_t kRvaGoCtorName = 0x4E98FE0;
-constexpr uint32_t kRvaAddComponent = 0x4E97700;
-constexpr uint32_t kRvaDontDestroy = 0x4EA11A0;
-constexpr uint32_t kRvaGoSetActive = 0x4E97EE0;
-constexpr uint32_t kRvaCompGetGo = 0x4E92710;
+constexpr uint32_t kRvaIsInstantiated = 0xD3B490;
+constexpr uint32_t kRvaCreateInstance = 0xD3B840;
+constexpr uint32_t kRvaGetInstance = 0xD3BA70;
+constexpr uint32_t kRvaOpen = 0x7E2F40;  // UIWindow.Open（父类 slot 28）
+constexpr uint32_t kRvaGoCtorName = 0x4E99030;
+constexpr uint32_t kRvaAddComponent = 0x4E97750;
+constexpr uint32_t kRvaDontDestroy = 0x4EA11F0;
+constexpr uint32_t kRvaGoSetActive = 0x4E97F30;
+constexpr uint32_t kRvaCompGetGo = 0x4E92760;
 // GUIContent.Temp(string)：Button/Label/Box/Toggle 都是直 call 这个 RVA，
 // MethodInfo->methodPointer 改写进不去（BIN 已证 hits=5/5 但 0 次 Translate）。
-constexpr uint32_t kRvaGuiContentTemp = 0x4F0B410;
+constexpr uint32_t kRvaGuiContentTemp = 0x4F0B460;
 
 constexpr DWORD kPumpTimeoutMs = 8000;
 

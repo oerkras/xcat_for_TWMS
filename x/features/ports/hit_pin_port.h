@@ -2,7 +2,7 @@
 // hit_pin_port — Classic TWMS · 打中换怪时指定 FindHitMobInRect 的 wishMobId
 //
 // 真源：Dumps/runtime/out/dump.cs MobPool.c2f16606… = FindHitMobInRect
-//   RVA 0xF89C60（runtime IDB imagebase 0x7FFD60880000）
+//   RVA 0xF89C40（runtime IDB imagebase 0x7FFD60880000）
 // 默认关：wishOid=0 时钩子原样转发。开启时原函数仍按攻击盒扫描（不改 wishMobId），
 // 再把列表滤成锁 oid；盒内没有则清空（空刀），不把邻居塞进环。
 

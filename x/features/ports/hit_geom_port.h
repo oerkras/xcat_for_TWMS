@@ -2,8 +2,8 @@
 // hit_geom_port — Classic TWMS · 出刀前复刻 FindHit 相交谓词
 //
 // 官方命中真源（runtime IDB imagebase 0x7FFD60830000）：
-//   MobPool.FindHitMobInRect  RVA 0xF89C60
-//     → Mob.GetBodyRect(out Rect, continuous=true)  RVA 0xF281C0
+//   MobPool.FindHitMobInRect  RVA 0xF89C40
+//     → Mob.GetBodyRect(out Rect, continuous=true)  RVA 0xF281A0
 //     → Unity Rect AABB ∩ 攻击盒
 // 攻击盒来自 ActionManager._afterimageMap → MeleeAttackAfterImage.Range[action]
 // （与 GetMeleeAttackRange 同源；XYWH，朝右时绕原点翻 X）。

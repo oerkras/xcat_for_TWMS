@@ -116,7 +116,7 @@ constexpr size_t kCallScan = 0x4000;
 constexpr size_t kOnFixedScan = 0x8000;
 
 constexpr char kMobClass[] =
-    "fb43e2ad477d86db8f0e257c3cbd8466a36d35a5be3db4a252cd0e15ce82f9b";
+    "d8b8258494049523e613374de0bd0539bb7318d4802873cd0c7dfbab192bf96";
 constexpr char kHashApplyControl[] =
     "a7982679b4b10ec2c0b41ae7d2ca76e66f7d61e29b31fd00bd18b6a1cf080ed";
 constexpr char kHashCanApplyCtrl[] =

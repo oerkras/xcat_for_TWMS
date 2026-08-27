@@ -7,11 +7,11 @@
 // 仍走「有台」CONT 边，不种台。
 //
 // IDA（imagebase 0x7ffd60830000 · 08-20 dump）锚点：
-//   TryDoingMagicAttack @0x10AB6D0：User+0x50 -> VecCtrl+0x28 后
+//   TryDoingMagicAttack @0x10AB6B0：User+0x50 -> VecCtrl+0x28 后
 //     cmovnz rax,rcx @ RVA 0x10B18CD（48 0F 45 C1 -> 48 8B C1 90）
-//   TryDoingShootAttack @0x1072800：同上
+//   TryDoingShootAttack @0x10727e0：同上
 //     cmovnz rax,r12 @ RVA 0x107977E（49 0F 45 C4 -> 49 8B C4 90）
-//   DoActiveSkillPrepare @0x10D0320：同上
+//   DoActiveSkillPrepare @0x10D0300：同上
 //     jnz +7 @ RVA 0x10D2B5A（75 07 -> EB 07）
 // 旧 Prepare setnz @0x10B34A7 是 cmp r10d,eax 的 0F 95 C2，不是 CurFh 门，已弃。
 // Melee 只看 LadderOrRope(+0x40)，本旁路不碰。

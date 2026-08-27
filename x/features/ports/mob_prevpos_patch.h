@@ -12,7 +12,7 @@
 //   Mob 类每帧算逐帧欧氏位移 disp = sqrt(dx²+dy²)，与由 [obj+0x44]（记 e）导出的
 //   门限 |e|+10 比较：disp ≤ |e|+10 走「正常移动包」路径，disp > |e|+10 走
 //   prevpos/异常上报路径。猛拉相逐帧越界 → 逐帧上报，服端跨吸攒计数 → 掉线。
-//   该发送体内联在 14KB CFF 大函数 sub_7FFD61789D50（RVA 0xF59D50）里、无独立入口
+//   该发送体内联在 14KB CFF 大函数 sub_7FFD61789D50（RVA 0xF59D30）里、无独立入口
 //   → MinHook 挂不上；且它纯位移自门控、不读任何旗（§7.1），mob_fh_ban 只 hook
 //   VecCtrlMob 也压不住这条 Mob 链。故只能内联翻分支。
 //

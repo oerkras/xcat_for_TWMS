@@ -42,25 +42,25 @@ using x::runtime::il2cpp::ReadPtr;
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
 // remounted 2026-08-06（GA 重哈希；IDB imagebase 0x7ff848c80000）
 // GetSkillLevel：dump 被误标 GetMonsterCardCheckListSize；IDA xref→SkillInfo.GetSkillLevel 实锤。
-constexpr uint32_t kRvaGetSkillLevel = 0x108D030;
+constexpr uint32_t kRvaGetSkillLevel = 0x108D010;
 // 公开总入口 DoActiveSkill(int skillId, uint scanCode=0) —— 经典版对标枫星 UseOnClientImmediate。
-constexpr uint32_t kRvaDoActiveSkill = 0x108E720;
-constexpr uint32_t kRvaDoActiveSkillPrepare = 0x10D0320;
-constexpr uint32_t kRvaSendSkillUseRequest = 0x10E4A20;
+constexpr uint32_t kRvaDoActiveSkill = 0x108E700;
+constexpr uint32_t kRvaDoActiveSkillPrepare = 0x10D0300;
+constexpr uint32_t kRvaSendSkillUseRequest = 0x10E4A00;
 // SkillInfo.GetSkill(int) → SkillEntry（Singleton；勿用 ItemDataManager）
-constexpr uint32_t kRvaSkillInfoGetSkill = 0x158fa10;
+constexpr uint32_t kRvaSkillInfoGetSkill = 0x158f9e0;
 // SecondaryStat.GetRemainTime(int nSkillID, int tCur) —— 返回剩余 ms（tCur 必须是游戏钟）。
-constexpr uint32_t kRvaSecondaryStatGetRemainTime = 0xD83190;
+constexpr uint32_t kRvaSecondaryStatGetRemainTime = 0xD83160;
 // WorldManager.get_GetUpdateTime() —— (int)(_updateTime * 1000)；tXxx_/CoolTimeOver 同此钟。
-constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDDF180;
+constexpr uint32_t kRvaWorldManagerGetUpdateTime = 0xDDF150;
 // CharacterData.GetSkillCoolTimeOver / IsExist —— IDA：`[this+0x70]` + Dict.TryGetValue。
 // 禁止手扫 entries 容量：BIN 会命中残留脏槽（over≈GetTickCount 量级）。
-constexpr uint32_t kRvaGetSkillCoolTimeOver = 0x12FC100;
-constexpr uint32_t kRvaIsExistSkillCoolTimeOver = 0x12FD9B0;
+constexpr uint32_t kRvaGetSkillCoolTimeOver = 0x12FC0D0;
+constexpr uint32_t kRvaIsExistSkillCoolTimeOver = 0x12FD980;
 // SkillEntry.GetLevelData(int level) → SkillLevelData*（与 final_attack_force 同锚）
-constexpr uint32_t kRvaGetLevelData = 0x157C9B0;
+constexpr uint32_t kRvaGetLevelData = 0x157C980;
 // SkillLevelData.GetCrc()：IsCalcCrc@+0xDC 为 0 时先 CalcCrc，再返回 Crc@+0xD8。
-constexpr uint32_t kRvaGetCrc = 0x157A3C0;
+constexpr uint32_t kRvaGetCrc = 0x157A390;
 // CMS/TW SkillLevelData：Prop@0x84 已证实同布局 → MPCon@0x68
 constexpr size_t kFbMpCon = 0x68;
 // CMS/TW SkillLevelData.Cooltime@0xD4（秒；与 Prop@0x84 同布局已证实）
@@ -71,42 +71,42 @@ constexpr size_t kFbCrc = 0xD8;
 
 // 方法哈希（dump 名；RVA 漂时优先）
 constexpr char kHashGetSkillLevel[] =
-    "d7783fdc0e4347384f9013e3a1caac32b2b3a8568298124e6964f9cdfe8fa12";
+    "f91f2d8c7b29222576dc228ad73b27e39792d18605096e42ae63b60698d09c2";
 constexpr char kHashGetLevelData[] =
-    "bace2768278932b3ca5bd34877e5e5153ac78b4099cb1aeb517a28295e6ea79";
+    "cc56734d0bc877d307a93e0e0cec2ed10b63d532e50c5a8bb2f9011c3b6f3a4";
 // SkillLevelData klass（与 final_attack_force 同 hash）
 constexpr char kHashSkillLevelData[] =
-    "b2f5d0b8ce2ad731134e9937cb3326f237c61d89a37fd92f288559bb19078c6";
+    "adabe2e65d96775d4631251e56e1d193ed22cc67ac54b5207fa1ac5741c60b3";
 constexpr char kHashDoActiveSkill[] =
-    "f98ac413784b25f9539b3f05022a21db5a03321c222ce535d635685391cd69e";
+    "d736216cc2496ee6d6465ca9b13c64566d38b2897b0174c34427a21169294ea";
 constexpr char kHashDoActiveSkillPrepare[] =
-    "b5158c950caeee9dd51dac232fabd1f1058f52bea9d6c6c8f7caa25dc3b5cdd";
+    "aba97616c0bb053eb7b524b8795c6645f9290e501aaa0b870e78f8dc4e3c7c2";
 // SendSkillUseRequest(SkillEntry,int,uint,int,int[],int) —— dump.cs.restored 命名。
 constexpr char kHashSendSkillUseRequest[] =
-    "e7c28588f13f5e890875636b260bf96d4bdbe31984ee418a13582edc427f432";
+    "e4180b9d9b3662412f9e916d57afc8107251d711e61f6405a3ee969097bd388";
 constexpr char kHashSkillInfoGetSkill[] =
-    "d1bd668588dabc372de5fdb6b07527663f36b6960f4819d4f7e890ea77a5dee";
+    "f8e6bf7a9d482d7c2a4b5ea6b5d232a50f627d527a0033ad08a245c8ee16777";
 constexpr char kHashGetRemainTime[] =
-    "d1ca95876ef37d690e4a4d68c78ab499f25c26c364704da1b11f5495d1532b5";
+    "f87728f0940ef237eeabf79b3aae6a597c7a344b25efcca0c441c01a53a4d86";
 constexpr char kHashGetUpdateTime[] =
-    "e0b072ae5f502ce0244c18d29c8441f9762f4947bbe2c956e1ca73a1be1d4c9";
+    "f57e1b7e2e4f09335469406d37dfd4531c4bd106bca65d63eaf8c18aa1790b1";
 constexpr char kHashGetSkillCoolTimeOver[] =
-    "f40b242d23d9864885009ee8bfc4986953bdddaeb736330f85133bea7a1cdaf";
+    "e21f94e8d9b9f848ab484a6bd382fccd2458bfa78cef50921e8201bad81db37";
 constexpr char kHashIsExistSkillCoolTimeOver[] =
-    "f653688f9b9f8bdd85ca32f165e8cde880898a116aed96314ecae688704ff8b";
+    "f4d60db154373aec2aaf64e72656f8684cef5ef54d22f673e6b72125495eaf9";
 // UserLocal：il2cpp_shape::ResolveUserLocalKlass
 // SkillInfo（Singleton；勿与 struct SkillInfo / ItemDataManager 混淆）
 constexpr char kSkillInfoClass[] =
-    "d5a71e9361cc241444c11353243830fc0f44fc7ca4154479f541c4140367025";
+    "b741d6a7c88737e2c5736793139334b3224c4b3342ee41415e08e654577ec48";
 // SkillEntry
 constexpr char kSkillEntryClass[] =
-    "d8dcbebeb55ab45d6b95cf1c860dd92448e9b5510193e0842d5ffbf5eb66ef2";
+    "c9574ed72d8b2bc703695933c0620fdcb6766bc9d20b12fcc6bab09128aa96c";
 // WM+0xF0 SecondaryStat
 constexpr char kSecondaryStatClass[] =
-    "d002005f3130062676c8a6de6ac155c4d71d8e59ecf13e2d7e413867563aacd";
+    "ad9a99918e9b3f2240f1de89a05d6dbdaf331c6211d0cf1efe22dc8350663fc";
 // CharacterData（WM+0xE0）
 constexpr char kCharacterDataClass[] =
-    "cb1adcfaa2d7a4777b1980f1b967ca8c4bc7c63812245c43c9cf792e4b2b410";
+    "a5319803ef38578b7e1149ce0fcdaea9578a09b85581424fc138483df1a5d4c";
 
 // CharacterData / SkillRecord / Cooltime / SecondaryStat / MyUser → x::ui::player（hash 防漂）。
 // UserLocal 在身 / Prepare / Pos：EnsureSkillFieldOffsets（明文/hash → field_get_offset）。
@@ -122,28 +122,28 @@ constexpr size_t kFbSkillId = 0x10;            // SkillEntry
 constexpr size_t kFbSkillName = 0x18;
 constexpr char kFldAffectedList[] = "_listAffectedSkillEntry";
 constexpr char kHashAffectedList[] =
-    "f60d1665c83ec8435ed819283a720f5fcdce07bb6e8469641ca62b563019a57";
+    "dd86f8014007061b020f4f35f5b20d0f02f059a5db9602daf3e872e132aef08";
 constexpr char kHashPreparingSkill[] =
-    "d92a49187e9a30f9c609056d2fa77a08c0046d3785f7965aa7679c984192c0d";
+    "e52b4e9674cc05e3293b9ca4f79970da30b3fef80b37cafb1890f0125b5b34c";
 constexpr char kFldAffSkillId[] = "nSkillID";
 constexpr char kFldAffStartTime[] = "tStart";
 constexpr char kHashAffSkillId[] =
-    "a8847d858ec644bfc7ed1c8b7d092598b36470c358ca0215edc56601a13a986";
+    "e38aa9f6b126c705a3fc0449365ec68a9fdf7abc132ca91b0ae4edcab2e2346";
 constexpr char kHashAffStartTime[] =
-    "d654ef9a39d9b21b22c54bcad746119d6b5b7f23dc869a83490b1389abd20c1";
+    "edf2e100fa9c673a7cb2b8a24ff88ce11336f1fb2a49a4490be4e60fb2ea38a";
 // VisPos 与 invuln 同 hash；CurPos 与 invuln / pet_port 同 hash（08-13 Vector2@0x2B0）
 constexpr char kHashFldVisPos[] =
-    "cf84c347e6d42aeed6a7320ec46ce5e76cd339550ee0f05e83b2508b331eef8";
+    "f5e96097bcfbc4e0b6bb1606c0cc3f2e20f2635a65745766422d9c9b50e0386";
 constexpr char kHashFldLogicalPos[] =
-    "e29e8d55e03e34aa5e9d6e773d2c8a8312fedf969cb8170fe5fc71cc797f834";
+    "ae4a30c4aa075fb68238dc227c1799d252632cad9320bf76370521351096d27";
 constexpr char kFldVisPosPlain[] = "Pos";
 constexpr char kFldLogicalPosPlain[] = "CurPos";
 constexpr char kHashSkillInfoDict[] =
-    "eb19302654553d3b5581d346ef1be846cb98f9bc9f63f24abfa90cfc5702cbf";
+    "bac26f369f465683f246767186719d1f910ec86f93dfe92dd083ff93b0a60be";
 constexpr char kHashSkillEntryId[] =
-    "adb81a8493b05c7804c3c98ce40b4c802e927305cfb8b2eac655d2f19ba154e";
+    "ba36d9064e1e8c5748a5215f0728b2b85f5995220f4b7994694adeb42233a57";
 constexpr char kHashSkillEntryName[] =
-    "c156335e53933cfe245c05e7e9d5eb529f5000986d226d42f92b21ddfece937";
+    "f8d85fe53163dff235e067b8d33f313e9c5ac280894892fc912b15660dcf11d";
 constexpr size_t kOffCachedPtr = 0x10;
 
 // Dictionary Entry / Il2CppArray → il2cpp_container SSOT（valuetype 槽按 K/V 择优）

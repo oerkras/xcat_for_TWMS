@@ -59,57 +59,57 @@ constexpr DWORD kFireJobWaitMs = 800;
 constexpr DWORD kFaceJobWaitMs = 400;
 constexpr DWORD kFkmRebindMs = 3000;
 
-constexpr uint32_t kRvaOnFuncKey = 0x10A3DE0;  // remounted 2026-08-06
-constexpr uint32_t kRvaGetKeyByFunc = 0x1671e00;  // remounted 2026-08-06
-constexpr uint32_t kRvaGetDataByKeyCode = 0x1671060;  // remounted 2026-08-06
-constexpr uint32_t kRvaFuncKeyCtor = 0x1669410;  // remounted 2026-08-06: .ctor(FuncType,int)
+constexpr uint32_t kRvaOnFuncKey = 0x10A3DC0;  // remounted 2026-08-06
+constexpr uint32_t kRvaGetKeyByFunc = 0x1671dd0;  // remounted 2026-08-06
+constexpr uint32_t kRvaGetDataByKeyCode = 0x1671030;  // remounted 2026-08-06
+constexpr uint32_t kRvaFuncKeyCtor = 0x16693E0;  // remounted 2026-08-06: .ctor(FuncType,int)
 // 写 InputX/Y + 内联 OnResolveMoveAction（朝向）；见 docs/features/protocol/MoveElem字段.md
-constexpr uint32_t kRvaVecCtrlSetInput = 0x11D8DC0;  // remounted 2026-08-06
+constexpr uint32_t kRvaVecCtrlSetInput = 0x11D8D90;  // remounted 2026-08-06
 // KeyPad.SetFields / PackState（IDA 2026-08-07；keypad_walk_bin match BASE）。
-constexpr uint32_t kRvaKeyPadSetFields = 0x1AE9140;
-constexpr uint32_t kRvaKeyPadPackState = 0x1AE9160;
+constexpr uint32_t kRvaKeyPadSetFields = 0x1AE9110;
+constexpr uint32_t kRvaKeyPadPackState = 0x1AE9130;
 constexpr size_t kOffKeyPadSlot4 = 0x178;
 // Query 用 PackState 返回值 bit0：even→latchX=+1，odd→−1（MoveElem §11.10）。
 // 反了设 XCAT_KP_FLIP=1。
 
 // 方法哈希（dump.cs · remount 2026-08-06）
 constexpr char kHashOnFuncKey[] =
-    "e5caecb8cad10608bc617ed26e2566e53ff3305965a740cb2c0d5b4fa4d0f4e";
+    "ef1b1671df93752bfd68e72b42b0d6863ed674656563ffa905e4275721507e5";
 constexpr char kHashGetKeyByFunc[] =
-    "c9bf803c2d377a5203921d149348505a83e458489eee684f76218be3b04fd92";
+    "e015453650852afb17bc2b0b4ae083137fabba6b3f1706464b08c1e313518a3";
 constexpr char kHashGetDataByKeyCode[] =
-    "b512b465c90e7a26ebb7a560105df1d2e96b72c2425fa8002090de0e0d14ff5";
+    "a9d12fd8e02cb5d28a5a697ba34537708ae9026679f695962841f313b058cfe";
 constexpr char kHashVecCtrlSetInput[] =
-    "f8e1f06bfe45e409110a1bdb066351afc74b5179a4f968f8f73d9e7e99fab88";
+    "aa277e91f8f4ec4a566b83f15b9bbd2ade3144e602bb72dcfddb76e79d719a6";
 constexpr char kVecCtrlClass[] =
-    "c59d7aae5606ba613a8f11b7cb1b87f531d6779f531d032ae48cb63b641a919";
+    "d7d4003a734229d3b8fd8a969b6a9168c36692d3b039b8824d5d40d2cb4430b";
 constexpr char kActorBaseClass[] =
-    "dbfdaecfa6ec49a19a019f06093eac445b3ca6082f2b874b489646c98303d44";
+    "d9aab778a925d77c0ae0b654ad29a8c6dc20a1f4684cffb7e533c336bc6ae5c";
 // FKM remounted 2026-08-06 (owns GetKeyByFunc / GetDataByKeyCode).
 constexpr char kFkmClass[] =
-    "d5c894008ab3517ddbbf98768b3cfe952c59b00a97806a77c72c344cb4ec6b5";
+    "ddaf7cda95ce5a5a35e3302464f50a5e5112d097c6c5b61aba3a446c5aaf4d4";
 constexpr char kFuncKeyClass[] =
-    "ad101c284c26e938b1f94c2666b42085d4958fe72cd8160af489f17a42a6f63";
+    "b5412ba0ee5ef27e38d09921abb5e86fe5fae2fe9100db9bc9745628d44d94f";
 // KeyPad 单例（与 keypad_walk_bin 同源；RO hook 已证 Slot4=PackState BASE）。
 constexpr char kHashKeyPadClass[] =
-    "d5773f56c1bacea24cf1c0f213e3614b4155883561ecd5b777f0db4db9c3cab";
+    "a5cb5d3f8ba99d2e77a5865742d09b78f4d4c8547f83423e0e081f0502e0a84";
 
 // Actor.VecCtrl / VecCtrl.MoveAction / FuncKey.type|value：hash → field_get_offset
 constexpr char kHashUserVecCtrl[] =
-    "<fa431c5c26278a9e2fbcd0e091bb230983ceea3ac8ef75a7a90d5cbe5764964>k__BackingField";
+    "<aeb819450fbe3e8e0eb38423605993f53e2c72baef2b39f45a89237951f1628>k__BackingField";
 constexpr char kHashVcMoveAction[] =
-    "d276efc9b6ee373249c2f391c5d0e7574e8cfb68d6d3f196598a228fa3d38e1";
+    "d10ed4cafacd56d4c6ba0f899100bbf9a8bb8307c84e243655dfd45524f860c";
 constexpr char kHashFkType[] =
-    "f20fb5cf349a35907e11a8279c9aef4468c9a28fdb2fe855f1cf43036490983";
+    "d62a23dc4236d567594896c71e5e54063bc816861c1227b9030b313e405dc8e";
 constexpr char kHashFkValue[] =
-    "b03e9afb4378bb895916dba490dfdea8ee95fafa73f9c85416e6a9a381ac721";
+    "c68490abcc9ceae4d736c9ed8c6191e4b66c320bab45f55131da2f049de8b0d";
 // UserLocal._antiRepeat / AntiRepeat._repeatCount（dump.cs 0814；CountLimit=100）
 constexpr char kHashAntiRepeat[] =
-    "c9cd7064bb791c895f43bcb50ff47e1ec0d3dcb5d2c1799373799c462c8efd1";
+    "d2117739faf53f97bf349e4a48ba3d92779e2b4d16900565fce94669b61c71c";
 constexpr char kHashRepeatCount[] =
-    "a58f532fd01a8dc63290bc2efe9155d52e8ceda0a00b4f6ef55681b0193e6a7";
+    "b1c356eb19019e73354ec7c8005328640a3f00a366edc90aa9e4c1c469c2048";
 constexpr char kAntiRepeatClass[] =
-    "ca3ae87b81b3509263138b804fcacbb279d2cae312335254350b79164feda38";
+    "afc2ff79a011cace080736ddd258505fdb5325eaa419214bc1b041ce458597a";
 
 constexpr size_t kFbVecCtrl = 0x50;
 constexpr size_t kFbVcMoveAction = 0x84;
@@ -1371,7 +1371,7 @@ uint32_t __fastcall PackStateDriveHook(void* self, const void* methodInfo) {
 
 bool InstallPackDriveHook() {
     // 已拆除：kOffKeyPadSlot4 所指的类**不是** KeyPad 而是 Rand32，slot4 = `Rand32.Random()`
-    // （运行期 origRva=0x1AE9160 与 dump 对上；反编译为 xorshift：三状态字、移位 13/19·4/25·8/11；
+    // （运行期 origRva=0x1AE9130 与 dump 对上；反编译为 xorshift：三状态字、移位 13/19·4/25·8/11；
     //  Random() 正是 Rand32 首个自有虚方法，恰落 slot4）。
     // 于是 PackStateDriveHook 那句 `r |= 1u / r &= ~1u` 不是「锁存方向」，而是把游戏伪随机数的
     // 最低位在走路期间钉成定值 —— 污染 RNG 流，且当初「PackBit 无效」根本没测到真的 PackState。

@@ -129,6 +129,18 @@ std::string PeekRawForLog(const std::string& raw) {
     return o;
 }
 
+bool SockWaitReadable(SOCKET s, int timeoutMs) {
+    if (s == INVALID_SOCKET) return false;
+    fd_set r;
+    FD_ZERO(&r);
+    FD_SET(s, &r);
+    timeval tv{};
+    if (timeoutMs < 0) timeoutMs = 0;
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    return select(0, &r, nullptr, nullptr, &tv) > 0;
+}
+
 bool HttpExchangeOnSock(SOCKET s, int af, int port, const char* methodA, const char* pathA,
                         std::string& body, std::string* peek) {
     body.clear();
@@ -152,7 +164,9 @@ bool HttpExchangeOnSock(SOCKET s, int af, int port, const char* methodA, const c
     const DWORD t0 = GetTickCount();
     char buf[2048];
     for (;;) {
+        if (msc::launcher::GamaPassLoginCanceled()) break;
         if (GetTickCount() - t0 > 1500) break;
+        if (!SockWaitReadable(s, 400)) break;
         const int n = recv(s, buf, sizeof(buf), 0);
         if (n > 0) {
             raw.append(buf, static_cast<size_t>(n));
@@ -553,7 +567,11 @@ std::string B64Encode16(const unsigned char raw[16]) {
 
 bool RecvExactFrom(SOCKET s, std::string& leftover, char* p, int n) {
     int got = 0;
+    const DWORD t0 = GetTickCount();
+    constexpr DWORD kBudgetMs = 2500;
     while (got < n) {
+        if (msc::launcher::GamaPassLoginCanceled()) return false;
+        if (GetTickCount() - t0 > kBudgetMs) return false;
         if (!leftover.empty()) {
             const int take = (std::min)(n - got, static_cast<int>(leftover.size()));
             memcpy(p + got, leftover.data(), static_cast<size_t>(take));
@@ -561,6 +579,9 @@ bool RecvExactFrom(SOCKET s, std::string& leftover, char* p, int n) {
             got += take;
             continue;
         }
+        const DWORD elapsed = GetTickCount() - t0;
+        const int remain = elapsed >= kBudgetMs ? 0 : static_cast<int>(kBudgetMs - elapsed);
+        if (!SockWaitReadable(s, remain > 400 ? 400 : remain)) return false;
         const int r = recv(s, p + got, n - got, 0);
         if (r <= 0) return false;
         got += r;
@@ -889,7 +910,7 @@ bool Session::OpenWs(const std::wstring& wsUrl, const LogFn& log) {
     for (int k = 0; k < 2; ++k) {
         const int af = order[k];
         SOCKET s = INVALID_SOCKET;
-        if (!TcpConnectFam(af, port, 3000, &s)) continue;
+        if (!TcpConnectFam(af, port, 800, &s)) continue;
         char host[80]{};
         if (af == AF_INET)
             sprintf_s(host, "127.0.0.1:%d", port);
@@ -913,7 +934,11 @@ bool Session::OpenWs(const std::wstring& wsUrl, const LogFn& log) {
         std::string raw;
         char buf[1024];
         const DWORD t0 = GetTickCount();
-        while (GetTickCount() - t0 < 3000) {
+        DWORD hsTo = 800;
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&hsTo), sizeof(hsTo));
+        while (GetTickCount() - t0 < 2000) {
+            if (msc::launcher::GamaPassLoginCanceled()) break;
+            if (!SockWaitReadable(s, 400)) break;
             const int n = recv(s, buf, sizeof(buf), 0);
             if (n <= 0) break;
             raw.append(buf, static_cast<size_t>(n));
@@ -951,7 +976,7 @@ bool Session::SendRecv(const std::string& method, const std::string& paramsJson,
         return false;
     }
     const DWORD t0 = GetTickCount();
-    while (GetTickCount() - t0 < 15000) {
+    while (GetTickCount() - t0 < 4000) {
         std::string buf;
         if (!WsRecvMessage(s, wsLeftover_, buf)) {
             LogLine(log, L"[cdp] WebSocketReceive 失败");
@@ -1310,6 +1335,21 @@ unsigned KillDailyBrowsersForUiaLogin(const std::wstring& preferredExe, const Lo
 bool Session::Connect(int port, const LogFn& log) {
     Close();
     port_ = port;
+    const DWORD t0 = GetTickCount();
+    auto abortIfSlow = [&](const wchar_t* where) -> bool {
+        if (msc::launcher::GamaPassLoginCanceled()) {
+            LogLine(log, L"[cdp] 用户取消，停止附着 WebSocket");
+            Close();
+            return true;
+        }
+        if (GetTickCount() - t0 > 8000) {
+            LogLine(log, std::wstring(L"[cdp] 附着 WebSocket 超时（") + where +
+                             L"）port=" + std::to_wstring(port));
+            Close();
+            return true;
+        }
+        return false;
+    };
     std::string ver;
     if (!HttpGetLocal(port, L"/json/version", ver)) {
         LogLine(log, L"[cdp] 调试口无响应 port=" + std::to_wstring(port));
@@ -1317,13 +1357,27 @@ bool Session::Connect(int port, const LogFn& log) {
     }
     browserVersion_ = Utf8ToWide(JsonGetString(ver, "Browser"));
     if (browserVersion_.empty()) browserVersion_ = L"(unknown)";
+    LogLine(log, L"[cdp] 调试口 HTTP 已通，附着 WebSocket… port=" + std::to_wstring(port) +
+                     L" Browser=" + browserVersion_);
+    if (abortIfSlow(L"version")) return false;
     std::wstring wsUrl;
     if (!PickPageWsUrl(port, wsUrl, log)) return false;
+    if (abortIfSlow(L"pick-page")) return false;
     pageWsUrl_ = wsUrl;
     if (!OpenWs(wsUrl, log)) return false;
+    if (abortIfSlow(L"open-ws")) return false;
     std::string ignore;
-    SendRecv("Page.enable", "{}", ignore, log);
-    SendRecv("Runtime.enable", "{}", ignore, log);
+    if (!SendRecv("Page.enable", "{}", ignore, log)) {
+        LogLine(log, L"[cdp] Page.enable 失败，放弃本轮附着");
+        Close();
+        return false;
+    }
+    if (abortIfSlow(L"page-enable")) return false;
+    if (!SendRecv("Runtime.enable", "{}", ignore, log)) {
+        LogLine(log, L"[cdp] Runtime.enable 失败，放弃本轮附着");
+        Close();
+        return false;
+    }
     LogLine(log, L"[cdp] 已连接 " + browserVersion_ + L" port=" + std::to_wstring(port));
     return true;
 }
@@ -1399,7 +1453,10 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
 
     // 等待 CDP HTTP。tcp=1 不等于调试口：Hyper-V/WinNAT 会占 19223，接 TCP 但不说 HTTP
     //（WIN-20260826WCU 0.1.189：全程 tcp=1 http=0，窗停在 about:blank）。
+    // HTTP 已通但 Connect/WebSocket 卡住时：BIN 14:54 空罐第一次停在 about:blank 两分半，
+    // 禁止在 Connect 里阻塞整轮；失败几次就把窗交给手动兜底去开 Galaxy。
     int relaunches = 0;
+    int wsFail = 0;
     for (int i = 0; i < 40; ++i) {
         if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
         Sleep(250);
@@ -1446,9 +1503,23 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
                              (http ? L"1" : L"0") + L" want=" + std::to_wstring(launchPort) +
                              L" file=" + std::to_wstring(filePort) + L" peek=" + Utf8ToWide(peek));
         }
-        if (http && Connect(livePort, log)) {
-            if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
-            return true;
+        if (http) {
+            if (Connect(livePort, log)) {
+                if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
+                return true;
+            }
+            ++wsFail;
+            LogLine(log, L"[cdp] HTTP 已通但 WebSocket 未附着 fail=" + std::to_wstring(wsFail) +
+                             L"/3 port=" + std::to_wstring(livePort) +
+                             L"（窗还在 about:blank，不再空等）");
+            if (wsFail >= 3) {
+                const std::wstring hint =
+                    L"调试口 HTTP 通，但 WebSocket 挂不上。窗口仍在；将把 Galaxy 交给这扇独立罐窗。";
+                LogLine(log, L"[cdp] " + hint);
+                if (outFailHint) *outFailHint = hint;
+                return false;
+            }
+            continue;
         }
 
         const bool checkpoint = (i == 4 || i == 10 || i == 18 || i == 28);
@@ -1777,14 +1848,17 @@ bool Session::IsPortAlive(int port) {
 bool CloseRemoteBrowser(int port, const LogFn& log) {
     if (port <= 0) port = kDefaultRemoteDebugPort;
 
-    // 先礼后兵：Browser.close → 轮询等调试口自行消失（Cookie 落盘窗口）→ 再精确杀残留。
-    // 口已死则立刻往下，不再盲等满额；最长约 800ms。
-    Session s;
-    (void)s.QuitBrowser(port, log);
-    const DWORD deadline = GetTickCount() + 800u;
-    while (Session::IsPortAlive(port)) {
-        if (GetTickCount() >= deadline) break;
-        Sleep(50);
+    // 空罐第一次 WebSocket 会卡死；取消时禁止再走 Browser.close 握手。
+    // 只杀 cmdline 带 --remote-debugging-port=N 的实例，不动日常无调试口窗口。
+    if (!msc::launcher::GamaPassLoginCanceled()) {
+        Session s;
+        (void)s.QuitBrowser(port, log);
+        const DWORD deadline = GetTickCount() + 800u;
+        while (Session::IsPortAlive(port)) {
+            if (msc::launcher::GamaPassLoginCanceled()) break;
+            if (GetTickCount() >= deadline) break;
+            Sleep(50);
+        }
     }
 
     const unsigned n = KillBrowsersOnDebugPort(port, log);

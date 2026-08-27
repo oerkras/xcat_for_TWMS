@@ -31,11 +31,11 @@ namespace {
 using x::runtime::il2cpp::AtRva;
 
 // UIUserInfo 私有刷新（dump TypeDef 596；hash 名即方法名）
-constexpr uint32_t kRvaUiUserInfoRefresh = 0x766C30;
+constexpr uint32_t kRvaUiUserInfoRefresh = 0x766C10;
 constexpr char kUiUserInfoClass[] =
-    "d2fdb0b511c14ec2c793daf1e17baf136e502f4b80bceea878c33be7939add2";
+    "d68968347bfea105bc8a9b1a30f27da64e60faf633020cdf5ed2133f33e7356";
 constexpr char kHashRefresh[] =
-    "c73415a295da088c9692f3a30ad9642853d7a7f9f6e5f083f07b44171de7a9d";
+    "c911ecc86b38fd73ae007fdc52b99578a8348fec8e8c6213bac3f1a6e7f63b7";
 
 constexpr uint32_t kLevelGate = 15u;  // 官方解出阈值；换版变了则 shape 拒写
 constexpr uint32_t kThreshTarget = 0u;  // 武装后 imm+global；level>=0 恒真

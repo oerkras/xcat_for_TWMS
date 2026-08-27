@@ -1,6 +1,6 @@
 // TWMS Classic — rest_mp_accel（实验·回蓝累加器加速）
 //
-// 真源：WorldManager.TryRecovery RVA 0xDF27F0。
+// 真源：WorldManager.TryRecovery RVA 0xDF27D0。
 // 按间隔写满 WM+0x17C（休息 MP）与 +0x180（椅子 MP）——BIN 已证真蓝会动；
 // 过密会踢，间隔由用户滑条自调。禁止 GA .text / E9。
 // BIN：bin/XCat_data/logs/rest_mp_accel.log

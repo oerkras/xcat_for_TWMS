@@ -26,17 +26,17 @@ namespace {
 
 // SSOT class hash：与 ports/mob_pool_port.cpp 同代（dump.cs.restored MobPool）。
 constexpr char kMobPoolClass[] =
-    "de0bfa635af7881c2355ef947532ea53b0813b6bc6f2091a48411ea04756f54";
+    "f7d2cfdd4abeae714c68b631e8408308c98f019d4c0ff73f3010811343565da";
 
 // dump.cs.restored：OnMouseMove 后首两个 InPacket = Enter / Leave（P0a 位序，跨 dump 稳定）。
 // Il2CppDumper 写的是 CFF 体内 RVA；运行时 MethodInfo.methodPointer 与
-// codeGenModule->methodPointers[] 都是 IDA 函数头（BIN 05:28：0xF973D0 / 0xF979F0）。
+// codeGenModule->methodPointers[] 都是 IDA 函数头（BIN 05:28：0xF973B0 / 0xF979D0）。
 // 包分发走 methodPointers 表拷贝，只换 MI 会 install ok 但 obs 零命中。
 constexpr uint32_t kRvaEnterDump = 0xF951D0;
 constexpr uint32_t kRvaLeaveDump = 0xF957F0;
-constexpr uint32_t kRvaEnterFn = 0xF973D0;
-constexpr uint32_t kRvaLeaveFn = 0xF979F0;
-constexpr uint32_t kRvaMouseFn = 0xF96F90;    // OnMouseMove 函数头（dump 体内 0xF94D90）
+constexpr uint32_t kRvaEnterFn = 0xF973B0;
+constexpr uint32_t kRvaLeaveFn = 0xF979D0;
+constexpr uint32_t kRvaMouseFn = 0xF96F70;    // OnMouseMove 函数头（dump 体内 0xF94D90）
 constexpr uint32_t kRvaMouseDump = 0xF94D90;
 constexpr uint32_t kRvaTableEnter = 0x690F680;  // .data methodPointers Enter；Leave=+8
 constexpr char kHashEnterField[] =

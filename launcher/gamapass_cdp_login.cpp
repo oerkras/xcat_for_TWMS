@@ -667,6 +667,7 @@ HWND FindGamaPassHelperBrowserHwnd(int debugPort, const wchar_t* cmdNeedle) {
 }
 
 bool TryUiaClickBackToGamaPlay(int debugPort, const wchar_t* cmdNeedle, HttpLoginLogFn log) {
+    if (GamaPassLoginCanceled()) return false;
     HWND hwnd = FindGamaPassHelperBrowserHwnd(debugPort, cmdNeedle);
     if (!hwnd) return false;
     msc::uia::Session uia;
