@@ -655,7 +655,8 @@ DWORD WINAPI BootstrapThread(LPVOID) {
     // 同理可赶在 feature 之前：崩溃上传会在主线程上同步走 WinINet，网络不通时能把
     // 客户端冻死（2026-08-09 04:45 实测）。默认关；XCAT_CRASH_UPLOAD_GUARD=1 才套 IAT 超时。
     x::features::crash_upload_guard::Start();
-    // 锁泄漏探针：默认不挂 VEH（检测面）。Start 内看 XCAT_FAULT_PROBE / fault_probe.on。
+    // 也要抢在所有 feature 之前挂上：元数据锁泄漏的源头是 il2cpp 内部的访问违例被
+    // __except 吞掉，只有首次异常阶段能看见它。
     x::runtime::il2cpp_fault_probe::Start();
 
     if (!WaitNativeGameAssembly()) {
