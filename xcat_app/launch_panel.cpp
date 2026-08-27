@@ -477,8 +477,10 @@ void LaunchPanel_ArmGamaPassDirectLaunch(LaunchUiState& ui, bool fromUserClick) 
 
 bool LaunchPanel_ClearGamaPassDirectProfile(LaunchUiState& ui) {
     LaunchPanel_CancelPendingAutoLaunch(ui);
-    if (msc::launcher::IsGamaPassDeviceLoginBusy() || msc::weblogin::IsBusy()) {
-        ui.status = "登录进行中，无法删除";
+    if (msc::launcher::IsGamaPassDeviceLoginBusy() || msc::weblogin::IsBusy() ||
+        msc::launcher::IsGamaPassDeviceLoginClearing()) {
+        ui.status = msc::launcher::IsGamaPassDeviceLoginClearing() ? "正在清除独立罐，请稍候"
+                                                                   : "登录进行中，无法删除";
         sound::UiError();
         return false;
     }
@@ -491,11 +493,11 @@ bool LaunchPanel_ClearGamaPassDirectProfile(LaunchUiState& ui) {
     LaunchPanel_CancelGpClearConfirm(ui);
     if (!msc::launcher::ClearGamaPassDeviceLoginProfile(
             [](const std::wstring& line) { LaunchPanel_OnWebLog(line); }, err)) {
-        ui.status = err.empty() ? "已删除账号，但独立罐未清干净" : xcat::WideToUtf8(err);
+        ui.status = err.empty() ? "无法开始清除独立罐" : xcat::WideToUtf8(err);
         sound::UiError();
         return false;
     }
-    ui.status = "已删除浏览器账号数据，请重新粘贴账号行";
+    ui.status = "正在清除独立罐…";
     return true;
 }
 
@@ -506,6 +508,10 @@ bool LaunchPanel_StartGamaPassDirect(LaunchUiState& ui) {
     }
     if (msc::launcher::IsGamaPassDeviceLoginBusy()) {
         ui.status = "账密直登进行中";
+        return false;
+    }
+    if (msc::launcher::IsGamaPassDeviceLoginClearing()) {
+        ui.status = "正在清除独立罐，请稍候";
         return false;
     }
     if (msc::weblogin::IsBusy()) {
@@ -650,7 +656,8 @@ void LaunchPanel_TryAutoLaunchWhenReady(LaunchUiState& ui) {
     }
 
     if (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassDirect) {
-        if (msc::launcher::IsGamaPassDeviceLoginBusy() || msc::weblogin::IsBusy()) {
+        if (msc::launcher::IsGamaPassDeviceLoginBusy() || msc::weblogin::IsBusy() ||
+            msc::launcher::IsGamaPassDeviceLoginClearing()) {
             ui.pendingAutoLaunch = false;
             ui.autoLaunchNotBeforeMs = 0;
             return;
@@ -764,6 +771,18 @@ void DrawMainShell(AppWindow& app, LaunchUiState& ui) {
     }
 
     if (PollGracefulExit(app, ui)) return;
+
+    {
+        std::wstring clearErr;
+        if (msc::launcher::PollGamaPassDeviceLoginClearResult(clearErr)) {
+            if (clearErr.empty()) {
+                ui.status = "已删除浏览器账号数据，请重新粘贴账号行";
+            } else {
+                ui.status = xcat::WideToUtf8(clearErr);
+                sound::UiError();
+            }
+        }
+    }
 
     const RuntimeLeds leds = QueryRuntimeLeds(ui.prefsBinDir.c_str());
     PollMilestoneSounds(leds);

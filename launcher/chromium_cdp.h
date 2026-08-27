@@ -3,6 +3,7 @@
 // Chromium DevTools Protocol（Chrome / Edge / Chrome++ 共用）最小客户端。
 // 仅使用稳定域：Page / Runtime；不依赖 WebView2。
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -63,8 +64,9 @@ public:
     static bool ProbeUserDataConflict(const BrowserProfile& profile, int debugPort,
                                       std::wstring& outHint, const LogFn& log = nullptr);
 
-    bool IsConnected() const { return ws_ != nullptr; }
+    bool IsConnected() const { return wsSock_ != 0; }
     std::wstring BrowserVersion() const { return browserVersion_; }
+    int Port() const { return port_; }
 
     // 打开/复用标签并导航
     bool Navigate(const std::wstring& url, const LogFn& log = nullptr);
@@ -87,6 +89,10 @@ public:
     // 把当前附着标签拉到前台（避免 Navigate 发生在后台 tab，用户盯着另一扇 about:blank）
     bool ActivateAttachedPage(const LogFn& log = nullptr);
 
+    // 视口 CSS 像素上的受信任鼠标单击（Input.dispatchMouseEvent，isTrusted=true）。
+    // 页内 dispatchEvent / element.click() 是假事件，React 账号卡会吞掉。
+    bool ClickViewport(double x, double y, const LogFn& log = nullptr);
+
     // 调试口是否仍在响应（/json/version）
     static bool IsPortAlive(int port);
 
@@ -100,9 +106,9 @@ private:
                   const LogFn& log);
     bool PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log);
 
-    void* session_ = nullptr;  // HINTERNET
-    void* connect_ = nullptr;  // HINTERNET
-    void* ws_ = nullptr;       // HINTERNET websocket
+    std::uintptr_t wsSock_ = 0;  // SOCKET；环回 WebSocket，不走 WinHttp
+    std::string wsLeftover_;
+    int loopbackFam_ = 0;  // AF_INET / AF_INET6；OpenWs 优先用 HTTP 探活成功的那族
     int nextId_ = 1;
     int port_ = 0;
     std::wstring browserVersion_;

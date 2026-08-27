@@ -4,6 +4,7 @@
 #endif
 #include "buffs.h"
 
+#include "../auto_supply/auto_supply.h"
 #include "../ports/action_gate.h"
 #include "../ports/attack_input_port.h"
 #include "../ports/player_combat_port.h"
@@ -490,6 +491,8 @@ void TickOnce(DWORD now) {
     if (!g_active || !Landed()) return;
 
     for (size_t i = 0; i < xcat::kBuffSlotCount; ++i) TickVerify(g_slots[i], now);
+
+    if (x::features::auto_supply::IsBusy()) return;
 
     for (size_t i = 0; i < xcat::kBuffSlotCount; ++i) {
         auto& s = g_slots[i];

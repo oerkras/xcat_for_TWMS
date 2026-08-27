@@ -635,7 +635,9 @@ bool TryHoldFromBoundPeek() {
         return true;
     }
     ApplyHoldAndMaybeHop(stub, /*elevated=*/false, now);
-    return gPaused;
+    // PauseExposure 只在 先停手 / 换频 / GM 时钉 Encounter 硬闸；仅停吸只 SyncGatherPause。
+    // 战斗侧认本函数返回值 GoIdle——gPaused 含「只卸吸怪」，不得当作出刀闸。
+    return gPaused && (gStopCombat.load() || gReconnect.load());
 }
 
 void Tick(DWORD now) {

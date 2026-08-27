@@ -17,6 +17,8 @@
 // v17：secAttackTextHookOn 保留布局，恒 0（.text AB 已拆除）。
 // v18：攻包/技能分表单键峰值 + 峰值键（吸怪 TAB type20 观测）。
 // v19：WorldManager.CharacterRegDate（.NET ticks）→ ImGui 顶栏建角时间。
+// v20：标题栏金/经每分钟（环形窗；valid=0 探活勿覆盖服务端旧值）。
+// v21：登录闩分区 worldId（进图后不再变；valid=0 探活勿覆盖）。
 
 #include <Windows.h>
 
@@ -26,7 +28,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 19u;
+constexpr uint32_t kPayloadStatusVersion = 21u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -131,6 +133,16 @@ struct PayloadStatus {
     // v19：建角 DateTime（.NET ticks，低 62 bit；valid=0 表示未采到）
     uint32_t playerRegDateValid = 0;
     int64_t playerRegDateTicks = 0;
+
+    // v20：标题栏同算法的金/经每分钟；valid=0 表示尚未满 3s 窗 / 换角刚重置
+    uint32_t playerRateValid = 0;
+    int64_t playerExpPerMin = 0;
+    int64_t playerMesoPerMin = 0;
+
+    // v21：登录选分区闩一次（进图后不变）；valid=0 探活勿覆盖
+    uint32_t playerWorldValid = 0;
+    int32_t playerWorldId = 0;
+    char playerWorldName[48]{};
 };
 #pragma pack(pop)
 

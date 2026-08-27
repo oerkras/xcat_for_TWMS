@@ -110,11 +110,16 @@ struct OpsState {
         std::string charMeso;  // 十进制字符串，避免大数精度问题
         std::string wealthScrolls;  // ASCII id:qty,id:qty
         bool hasWealthScrolls = false;
+        bool hasRates = false;
+        long long expPerMin = 0;
+        long long mesoPerMin = 0;
         int charLevel = 0;
         int charJob = 0;
         uint32_t mapId = 0;
         std::string mapName;
         int channelId = 0;  // UI ch.N，1-based；0=未知
+        int worldId = 0;    // 登录闩分区；0=未知
+        std::string worldName;
         std::string lastKind;
         std::string lastSeenAt;
         int idleSec = 0;

@@ -191,6 +191,9 @@ std::atomic<uint8_t> gReconnectHopWant{0};
 std::atomic<int> gReconnectHopFrom{-1};
 std::atomic<int> gReconnectHopTo{-1};
 std::atomic<uint8_t> gReconnectHopArmed{0};
+// SyncKnownAfterEnter 已见到 latch 目标频。land_quiet 期内 KickSniff 仍回贴；
+// 落地静默结束后再 disconnected 视为新一轮，必须重抽（否则回已在的频 = 看起来没换频）。
+std::atomic<uint8_t> gReconnectHopLanded{0};
 bool gInvulnHeld = false;     // 本模块临时关了 Invuln（仅 BeginActive 后）
 bool gInvulnWasOn = false;    // 关之前的 desired，Finish 时还原
 std::atomic<bool> gCombatPaused{false};  // ChannelHop 硬闸；Request/Tick 跨线程
@@ -2078,6 +2081,7 @@ void ClearReconnectHopLatch() {
     gReconnectHopArmed.store(0, std::memory_order_release);
     gReconnectHopFrom.store(-1, std::memory_order_release);
     gReconnectHopTo.store(-1, std::memory_order_release);
+    gReconnectHopLanded.store(0, std::memory_order_release);
 }
 
 }  // namespace
@@ -2101,6 +2105,7 @@ void EnsureReconnectNotSameChannel(const char* why) {
             gReconnectHopFrom.store(pin, std::memory_order_release);
             gReconnectHopTo.store(pin, std::memory_order_release);
             gReconnectHopArmed.store(1, std::memory_order_release);
+            gReconnectHopLanded.store(0, std::memory_order_release);
             Log("reconnect-hop skip why=%s pin latch idx=%d ch=%d (encounter already picked)", why,
                 pin, DispCh(pin));
         } else {
@@ -2110,6 +2115,10 @@ void EnsureReconnectNotSameChannel(const char* why) {
     }
     if (IsMigrateInFlight()) {
         Log("reconnect-hop skip why=%s (migrate in flight)", why ? why : "?");
+        return;
+    }
+    if (x::features::auto_supply::IsBusy()) {
+        Log("reconnect-hop skip why=%s (auto_supply busy)", why ? why : "?");
         return;
     }
 
@@ -2123,10 +2132,16 @@ void EnsureReconnectNotSameChannel(const char* why) {
             why && (std::strcmp(why, "hangup_timer") == 0 || std::strcmp(why, "hangup_fires") == 0 ||
                     std::strcmp(why, "hangup_after_lie") == 0 ||
                     std::strcmp(why, "same_map_field_reload") == 0);
-        if (pinOnly && newHangupCycle) {
+        // 上一轮 hop 已进图：land_quiet 里的 KickSniff 仍回贴；静默结束后的被动断必须重抽。
+        const bool settling = soft_login_probe::IsLandQuiet() ||
+                              soft_login_probe::IsPostReenterQuiet();
+        const bool landedSettled =
+            gReconnectHopLanded.load(std::memory_order_acquire) != 0 && !settling;
+        if ((pinOnly && newHangupCycle) || landedSettled) {
             ClearReconnectHopLatch();
-            Log("reconnect-hop drop stale encounter pin idx=%d ch=%d why=%s (new hangup cycle)",
-                armedTo, DispCh(armedTo), why);
+            Log("reconnect-hop drop stale latch idx=%d ch=%d why=%s pin=%d landed=%d settle=%d",
+                armedTo, DispCh(armedTo), why ? why : "?", pinOnly ? 1 : 0, landedSettled ? 1 : 0,
+                settling ? 1 : 0);
         } else {
             gKnownChannelIdx = armedTo;
             auto_enter::NoteStickyChannel(armedTo, "reconnect_hop_latch");
@@ -2171,6 +2186,7 @@ void EnsureReconnectNotSameChannel(const char* why) {
     gReconnectHopFrom.store(from, std::memory_order_release);
     gReconnectHopTo.store(to, std::memory_order_release);
     gReconnectHopArmed.store(1, std::memory_order_release);
+    gReconnectHopLanded.store(0, std::memory_order_release);
     Log("reconnect-hop from=%d ch=%d → to=%d ch=%d count=%d why=%s", from, DispCh(from), to,
         DispCh(to), count, why ? why : "?");
 }
@@ -2198,6 +2214,15 @@ void SyncKnownAfterEnter(int channelId1Based, const char* why) {
     gKnownChannelIdx = idx;
     // 不在进图清 latch：land_quiet 里 KickSniff disconnected 还会再 Ensure。
     // 过早清掉会把遇人已选频当成「挂机重连」再抽一频（BIN 18:31:17 落地后 20→43）。
+    // 只打「已见到目标频」：静默结束后的被动断才丢 latch 重抽。
+    if (gReconnectHopArmed.load(std::memory_order_acquire)) {
+        const int armedTo = gReconnectHopTo.load(std::memory_order_acquire);
+        if (armedTo == idx) {
+            gReconnectHopLanded.store(1, std::memory_order_release);
+            Log("reconnect-hop mark landed idx=%d ch=%d why=%s", idx, DispCh(idx),
+                why ? why : "?");
+        }
+    }
     // latch 改在 Tick 里 IsReconnectInFlight 下降沿清。
     // 清前进基线：下一拍 ObserveWm 走 known，勿把进图后 +0x6C 抖动当 wm6c_adv。
     gLastRaw68 = -999;

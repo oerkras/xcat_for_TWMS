@@ -318,6 +318,7 @@ bool LaunchWithTicket(msc::launcher::GalaxyTicket ticket, bool attachExistingCla
         QueueLog(L"[…] 一键注入：等待 GameAssembly 后 LoadLibraryW…");
         xcat::twms_inject::Options iopt;
         iopt.pid = rr.gamePid;
+        iopt.abortWait = [] { return msc::launcher::GamaPassLoginCanceled(); };
         auto ir = xcat::twms_inject::InjectIntoClassic(iopt, [](const std::wstring& line) {
             QueueLog(line);
         });

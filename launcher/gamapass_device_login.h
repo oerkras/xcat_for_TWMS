@@ -15,7 +15,7 @@ namespace msc::launcher {
 inline constexpr bool kGamaPassDeviceLoginEnabled = true;
 
 enum class GpDeviceLoginBrowserKind : int {
-    Auto = 0,        // Chrome++ > Chrome > Edge
+    Auto = 0,        // Chrome > Edge > Chrome++（典型用户只有前两个）
     ChromePlus = 1,
     Chrome = 2,
     Edge = 3,
@@ -50,17 +50,20 @@ bool SaveGamaPassDeviceLoginAccount(const std::wstring& storePath,
 // 删除 dpapi 与旧明文 json。文件本就不在也算成功。
 bool DeleteGamaPassDeviceLoginAccount(const std::wstring& storePath);
 
-// 解析将使用的浏览器 exe（Chrome++ / Chrome / Edge；排除 360）
+// 解析将使用的浏览器 exe（Chrome / Edge / Chrome++；排除 360）
 bool ResolveGamaPassDeviceLoginBrowser(std::wstring& outExe, std::wstring& outLabel,
                                        HttpLoginLogFn log = nullptr,
                                        GpDeviceLoginBrowserKind kind = GpDeviceLoginBrowserKind::Auto);
 
 bool IsGamaPassDeviceLoginBusy();
+bool IsGamaPassDeviceLoginClearing();
+// 后台清罐完成时取走一次结果（err 空=成功）。无新结果返回 false。
+bool PollGamaPassDeviceLoginClearResult(std::wstring& err);
 // 用户取消账密直登：置取消标志并关掉独立调试窗（port 19223）。不碰日常浏览器、不杀游戏。
 bool CancelGamaPassDeviceLogin(HttpLoginLogFn log = nullptr);
 
 // 只清独立罐 %LOCALAPPDATA%\XCat\GpDeviceLoginProfile（chromeplus/chrome/edge）。
-// 先关调试口 19223，再按 --user-data-dir 释放锁；不碰日常 User Data / Cookie。
+// 关窗/杀进程/删目录在后台线程；调用立刻返回。不碰日常 User Data / Cookie。
 // 账密 dpapi 由调用方 DeleteGamaPassDeviceLoginAccount 另删。
 bool ClearGamaPassDeviceLoginProfile(HttpLoginLogFn log, std::wstring& err);
 

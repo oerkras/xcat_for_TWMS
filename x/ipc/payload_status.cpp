@@ -15,6 +15,7 @@
 #include "../features/ports/travel_port.h"
 #include "../features/ports/world_port.h"
 #include "../features/sellbag/sellbag.h"
+#include "../features/titlebar/titlebar.h"
 #include "../features/titlebar/titlebar_game.h"
 #include "../runtime/bin_dir.h"
 #include "../runtime/il2cpp_bind.h"
@@ -25,10 +26,20 @@
 
 #include "../../common/xcat_map_names.h"
 #include "../../common/xcat_payload_status.h"
+#include "../../common/xcat_world_names.h"
 
 #include <Windows.h>
 
 #include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+
+#include <Windows.h>
+
+#include <atomic>
+#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -36,6 +47,58 @@ namespace x::ipc {
 namespace {
 
 constexpr DWORD kPublishIntervalMs = 500;
+
+int64_t RateToI64(double v) {
+    if (!std::isfinite(v)) return 0;
+    if (v > 9.0e18) return 9000000000000000000LL;
+    if (v < -9.0e18) return -9000000000000000000LL;
+    return static_cast<int64_t>(std::llround(v));
+}
+
+void ResolveWorldDisplayName(int32_t worldId, char* dst, size_t cap) {
+    if (!dst || cap < 2) return;
+    dst[0] = '\0';
+    if (worldId <= 0) return;
+    char key[24]{};
+    std::snprintf(key, sizeof(key), "_Center%d", worldId);
+    const xcat::WorldNamesPack& wn = xcat::GetSharedWorldNames(x::runtime::GetBinDir());
+    const std::string pretty = xcat::WorldNamePreferDisplay(wn, key);
+    if (!pretty.empty())
+        xcat::CopyUtf8Truncate(dst, cap, pretty.c_str());
+    else
+        xcat::CopyUtf8Truncate(dst, cap, key);
+}
+
+// 分区进图后基本不变：登录页可随点选更新，第一次 playReady 且 id>0 后冻结。
+void LatchWorld(xcat::PayloadStatus& st) {
+    static int32_t sId = 0;
+    static char sName[48]{};
+    static bool sFrozen = false;
+
+    st.playerWorldValid = 0;
+    st.playerWorldId = 0;
+    st.playerWorldName[0] = '\0';
+
+    if (!sFrozen) {
+        const int32_t id = x::features::ccu::GetCcuStatus().worldId;
+        if (id > 0) {
+            if (id != sId) {
+                sId = id;
+                ResolveWorldDisplayName(id, sName, sizeof(sName));
+            }
+            if (st.playReady) {
+                sFrozen = true;
+                x::runtime::LogI("PayloadStatus", "world latch id=%d name=%s", sId,
+                                 sName[0] ? sName : "-");
+            }
+        }
+    }
+    if (sId > 0) {
+        st.playerWorldValid = 1u;
+        st.playerWorldId = sId;
+        if (sName[0]) strncpy_s(st.playerWorldName, sName, _TRUNCATE);
+    }
+}
 
 // docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-06（与 anti_macro_port 对齐）
 constexpr char kAntiMacroUtilClass[] =
@@ -113,6 +176,8 @@ void FillLeds(xcat::PayloadStatus& st) {
         if (ch1 > 0) st.channelId = ch1;
     }
 
+    LatchWorld(st);
+
     st.quizCacheRootOk = EnsureQuizTypesResolved() ? 1u : 0u;
 
     st.playerExp = 0;
@@ -127,7 +192,12 @@ void FillLeds(xcat::PayloadStatus& st) {
     st.playerWealthScrolls[0] = '\0';
     st.playerRegDateValid = 0;
     st.playerRegDateTicks = 0;
-    if (st.localPlayerOk) {
+    st.playerRateValid = 0;
+    st.playerExpPerMin = 0;
+    st.playerMesoPerMin = 0;
+    // 角色快照走 WM.CharacterStat，不要被 MyUser 缓存卡住：
+    // 换角时 localPlayerOk 可能短暂为 0，若因此不报角色头，服务端会粘着旧名/旧金。
+    {
         x::features::titlebar::game::Vitals vitals{};
         if (x::features::titlebar::game::ReadVitals(vitals) && vitals.ok) {
             st.playerExp = static_cast<uint64_t>(static_cast<uint32_t>(vitals.exp));
@@ -147,6 +217,14 @@ void FillLeds(xcat::PayloadStatus& st) {
                     x::features::titlebar::game::FormatWealthScrolls(
                         st.playerWealthScrolls, sizeof(st.playerWealthScrolls))) {
                     st.playerWealthScrollsValid = 1u;
+                }
+                const x::features::titlebar::CachedRates rates =
+                    x::features::titlebar::GetCachedRates();
+                if (rates.valid && rates.charName[0] &&
+                    strncmp(rates.charName, st.playerName, sizeof(st.playerName)) == 0) {
+                    st.playerRateValid = 1u;
+                    st.playerExpPerMin = RateToI64(rates.expPerMin);
+                    st.playerMesoPerMin = RateToI64(rates.mesoPerMin);
                 }
             }
         }

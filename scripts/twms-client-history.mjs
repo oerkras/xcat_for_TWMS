@@ -74,6 +74,8 @@ export function createClientHistory(opts) {
       charName: str(raw?.charName, 48),
       charLevel: num(raw?.charLevel),
       charJobName: str(raw?.charJobName, 32),
+      worldId: num(raw?.worldId),
+      worldName: str(raw?.worldName, 32),
       firstSeenMs: num(raw?.firstSeenMs) || lastSeenMs,
       lastSeenMs,
       // 最后一次探活放行：租约剩余按它 + 64h 估算（与 gateViewForRow 同口径）。
@@ -198,6 +200,8 @@ export function createClientHistory(opts) {
         charName: "",
         charLevel: 0,
         charJobName: "",
+        worldId: 0,
+        worldName: "",
         firstSeenMs: num(src?.firstSeenMs) || now,
         lastSeenMs: now,
         lastAllowAtMs: 0,
@@ -221,6 +225,10 @@ export function createClientHistory(opts) {
     if (src?.charName) row.charName = str(src.charName, 48);
     if (src?.charLevel) row.charLevel = num(src.charLevel);
     if (src?.charJobName) row.charJobName = str(src.charJobName, 32);
+    if (num(src?.worldId)) {
+      row.worldId = num(src.worldId);
+      if (src?.worldName) row.worldName = str(src.worldName, 32);
+    }
     if (num(src?.hits) > row.hits) row.hits = num(src.hits);
     if (num(src?.lastAllowAtMs) > row.lastAllowAtMs) row.lastAllowAtMs = num(src.lastAllowAtMs);
     if (num(src?.lastDenyAtMs) > row.lastDenyAtMs) {

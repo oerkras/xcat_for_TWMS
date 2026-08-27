@@ -127,13 +127,18 @@ std::wstring DefaultPayloadDllBesideExe() {
     return dir + L"XCat_data\\xcat.dll";
 }
 
-bool WaitForModuleByName(DWORD pid, const wchar_t* moduleName, int timeoutSec, LogFn log) {
+bool WaitForModuleByName(DWORD pid, const wchar_t* moduleName, int timeoutSec, LogFn log,
+                         const std::function<bool()>& abortWait) {
     if (!pid || !moduleName || !moduleName[0]) return false;
     const DWORD deadline =
         GetTickCount() + static_cast<DWORD>((timeoutSec > 0 ? timeoutSec : 60) * 1000);
     DWORD lastLog = 0;
     DWORD stickyErr = ERROR_SUCCESS;
     for (;;) {
+        if (abortWait && abortWait()) {
+            LogLine(log, L"[…] 已取消，停止等待模块");
+            return false;
+        }
         if (!IsProcessAlive(pid)) {
             LogLine(log, L"[FAIL] 等待模块时游戏进程已退出");
             return false;
@@ -202,7 +207,8 @@ Result InjectIntoClassic(const Options& opt, LogFn log) {
 
     if (opt.waitForGameAssembly) {
         LogLine(log, L"[…] 等待 GameAssembly.dll…");
-        if (!WaitForModuleByName(opt.pid, L"GameAssembly.dll", opt.waitGameAssemblySec, log)) {
+        if (!WaitForModuleByName(opt.pid, L"GameAssembly.dll", opt.waitGameAssemblySec, log,
+                                 opt.abortWait)) {
             out.message = "等待 GameAssembly.dll 超时";
             return out;
         }

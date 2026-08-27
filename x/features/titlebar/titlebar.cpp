@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <timeapi.h>
 
@@ -76,6 +77,7 @@ DWORD gRateStartTick = 0;
 bool gHaveCachedRate = false;
 double gCachedExpPer = 0.0;
 double gCachedMesoPer = 0.0;
+char gRateCharName[64]{};
 double gCachedLootPer = 0.0;
 double gCachedMpPer = 0.0;
 double gCachedMpPotPer = 0.0;
@@ -131,6 +133,7 @@ void ResetRates() {
     gCachedMpPotPer = 0.0;
     gLootKnownCount = 0;
     gLootUnknownCount = 0;
+    gRateCharName[0] = '\0';
     game::ResetLootBaseline();
 }
 
@@ -186,6 +189,13 @@ void UpdateRates(DWORD now, const game::Vitals& vitals) {
         if (gRateActive) ResetRates();
         return;
     }
+    if (vitals.name[0] && gRateCharName[0] &&
+        strncmp(gRateCharName, vitals.name, sizeof(gRateCharName)) != 0) {
+        x::runtime::LogI("Titlebar", "rate reset (char switch) %s -> %s", gRateCharName,
+                         vitals.name);
+        ResetRates();
+    }
+    if (vitals.name[0]) strncpy_s(gRateCharName, vitals.name, _TRUNCATE);
     const double exp = static_cast<double>(vitals.exp);
     const double maxExp = static_cast<double>(vitals.maxExp);
     const double meso = static_cast<double>(vitals.meso);
@@ -348,6 +358,8 @@ void OnLeavePlay(const char* reason) {
         ResetRates();
     }
     gHaveValidVitals = false;
+    // 换角走选角时 MyUser 可能短暂仍指向旧对象；清缓存，避免探活继续当「还在旧角色」。
+    game::ClearLocalUser();
     // WM/地图态改由 ImGui 顶栏 MAP 灯展示；离图恢复游戏原标题。
     RestoreOrigTitleText();
 }
@@ -439,6 +451,15 @@ DWORD WINAPI TitlebarThread(LPVOID) {
 }
 
 }  // namespace
+
+CachedRates GetCachedRates() {
+    CachedRates out{};
+    out.valid = gHaveCachedRate;
+    out.expPerMin = gCachedExpPer;
+    out.mesoPerMin = gCachedMesoPer;
+    if (gRateCharName[0]) strncpy_s(out.charName, gRateCharName, _TRUNCATE);
+    return out;
+}
 
 void Init() {
     gEnabled.store(true);

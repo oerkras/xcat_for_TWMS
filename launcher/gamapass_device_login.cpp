@@ -5,7 +5,9 @@
 #include "gamapass_login_phase.h"
 #include "gamapass_ticket_harvest.h"
 #include "http_gamapass_login.h"
+#include "msc_launch.h"
 #include "msc_webview_login.h"
+#include "ngm_protocol_allow.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -21,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -30,8 +33,15 @@ namespace {
 
 constexpr int kDeviceLoginDebugPort = 19223;
 constexpr wchar_t kProfileDirName[] = L"GpDeviceLoginProfile";
+constexpr wchar_t kGalaxyLogin[] =
+    L"https://galaxy.games.gamania.com/webapi/view/login/mstc"
+    L"?redirect_url=https://maplestoryclassic.beanfun.com/Main";
 
 std::atomic<bool> gBusy{false};
+std::atomic<bool> gClearing{false};
+std::atomic<bool> gClearFinished{false};
+std::mutex gClearMu;
+std::wstring gClearErr;
 
 void LogLine(const HttpLoginLogFn& log, const std::wstring& s) {
     if (log) log(s);
@@ -298,6 +308,12 @@ void CollectAppPathExe(std::vector<std::wstring>& out, const wchar_t* sub) {
 
 void CollectFallbackExes(std::vector<std::wstring>& out) {
     static const wchar_t* kCands[] = {
+        L"%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
+        L"%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe",
+        L"%LocalAppData%\\Google\\Chrome\\Application\\chrome.exe",
+        L"%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe",
+        L"%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe",
+        L"%LocalAppData%\\Microsoft\\Edge\\Application\\msedge.exe",
         L"%ProgramFiles%\\Chrome\\App\\chrome.exe",
         L"%ProgramFiles(x86)%\\Chrome\\App\\chrome.exe",
         L"%LocalAppData%\\Chrome\\App\\chrome.exe",
@@ -307,12 +323,6 @@ void CollectFallbackExes(std::vector<std::wstring>& out) {
         L"E:\\Chrome\\App\\chrome.exe",
         L"%ProgramFiles%\\Google\\Chrome\\App\\chrome.exe",
         L"%ProgramFiles(x86)%\\Google\\Chrome\\App\\chrome.exe",
-        L"%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
-        L"%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe",
-        L"%LocalAppData%\\Google\\Chrome\\Application\\chrome.exe",
-        L"%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe",
-        L"%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe",
-        L"%LocalAppData%\\Microsoft\\Edge\\Application\\msedge.exe",
     };
     for (const wchar_t* cand : kCands) PushExpandedExe(out, cand);
     CollectAppPathExe(out, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe");
@@ -491,11 +501,12 @@ bool UrlLooksTwoFactor(msc::cdp::Session& cdp, const HttpLoginLogFn& log) {
 }
 
 void CloseHelperAfterSuccess(msc::cdp::Session& cdp, const HttpLoginLogFn& log) {
-    LogLine(log, L"[gp-device-login] 换票完成，关闭独立调试窗（先 Browser.close 落盘 Cookie；只动调试口 19223）");
+    const int port = cdp.Port() > 0 ? cdp.Port() : kDeviceLoginDebugPort;
+    LogLine(log, L"[gp-device-login] 换票完成，关闭独立调试窗（先 Browser.close 落盘 Cookie；只动调试口 " +
+                     std::to_wstring(port) + L"）");
     Sleep(600);
     cdp.Close();
-    if (!msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
-                                      [&](const std::wstring& s) { LogLine(log, s); })) {
+    if (!msc::cdp::CloseRemoteBrowser(port, [&](const std::wstring& s) { LogLine(log, s); })) {
         LogLine(log, L"[gp-device-login] 独立调试窗未能自动关掉，请手动关那一扇");
     }
 }
@@ -550,8 +561,28 @@ void TryFillGpLoginOnce(msc::cdp::Session& cdp, const GamaPassDeviceLoginAccount
     }
 }
 
+bool TryAttachAlreadyRunningClassic(GamaPassDeviceLoginAccount& acc, const std::wstring& storePath,
+                                    const HttpLoginLogFn& log) {
+    FILETIME noCutoff{};
+    bool dummyNgm = false;
+    auto already = GamaPassTryHarvestClassicTicket(noCutoff, dummyNgm, log, L"[gp-device-login]");
+    if (!already.ok || !already.ticketFilled) return false;
+    SaveGamaPassDeviceLoginAccount(storePath, acc);
+    LogLine(log, L"[gp-device-login] 已有经典版在跑（cmdline 有票），跳过 Galaxy/選號，直接接管"
+                 L"（避免再點繼續打出 SPGA0001）…");
+    if (!msc::weblogin::LaunchClassicAfterTicket(std::move(already.ticket))) {
+        LogLine(log, L"[gp-device-login] 已有经典版但接管失败，仍走账密登录");
+        return false;
+    }
+    return true;
+}
+
 void LaunchClassicAfterIsolatedTicket(msc::cdp::Session& cdp, GamaPassDeviceLoginAccount& acc,
                                       const std::wstring& storePath, const HttpLoginLogFn& log) {
+    if (TryAttachAlreadyRunningClassic(acc, storePath, log)) {
+        CloseHelperAfterSuccess(cdp, log);
+        return;
+    }
     LogLine(log, L"[gp-device-login] 从 Galaxy 点 Gama Pass 换票（select-account 必须走 OAuth，不能直接打开）");
     GpFillState fill;
     auto onLogin = [&](msc::cdp::Session& s, HttpLoginLogFn lg) { TryFillGpLoginOnce(s, acc, fill, lg); };
@@ -563,9 +594,9 @@ void LaunchClassicAfterIsolatedTicket(msc::cdp::Session& cdp, GamaPassDeviceLogi
 
     auto abortCanceled = [&]() {
         LogLine(log, L"[gp-device-login] 已取消账密直登（不接管经典版、不杀游戏）");
+        const int port = cdp.Port() > 0 ? cdp.Port() : kDeviceLoginDebugPort;
         cdp.Close();
-        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
-                                           [&](const std::wstring& s) { LogLine(log, s); });
+        (void)msc::cdp::CloseRemoteBrowser(port, [&](const std::wstring& s) { LogLine(log, s); });
     };
 
     auto attachClassic = [&](GalaxyTicket ticket) -> bool {
@@ -606,7 +637,8 @@ void LaunchClassicAfterIsolatedTicket(msc::cdp::Session& cdp, GamaPassDeviceLogi
                 break;
             }
         }
-        lr = HttpGamaPassCdpLoginToOttOnConnected(cdp, log, kCdpTimeoutMs, kDeviceLoginDebugPort,
+        lr = HttpGamaPassCdpLoginToOttOnConnected(cdp, log, kCdpTimeoutMs,
+                                                  cdp.Port() > 0 ? cdp.Port() : kDeviceLoginDebugPort,
                                                   onLogin);
         if (GamaPassLoginCanceled() || lr.error == HttpLoginError::Cancelled) {
             abortCanceled();
@@ -616,6 +648,31 @@ void LaunchClassicAfterIsolatedTicket(msc::cdp::Session& cdp, GamaPassDeviceLogi
         const bool retryable =
             lr.error == HttpLoginError::OttMissing || lr.error == HttpLoginError::Network;
         if (!retryable) break;
+        // TokenWait 已见 NGM 再重开 Galaxy/點繼續 → beanfun SPGA0001（AA7E 03:43→03:46）
+        if (IsNgmProcessRunningCreatedAfter(sessionNotBefore)) {
+            LogLine(log, L"[gp-device-login] 本轮已见 NGM，不再重开 Galaxy（防選號閒置 SPGA0001）；"
+                         L"只再等经典版 cmdline 票…");
+            bool got = false;
+            for (int i = 0; i < 20; ++i) {
+                if (GamaPassLoginCanceled()) {
+                    abortCanceled();
+                    return;
+                }
+                Sleep(1500);
+                auto late = GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgm, log,
+                                                            L"[gp-device-login]");
+                if (late.ok && late.ticketFilled) {
+                    lr = std::move(late);
+                    got = true;
+                    break;
+                }
+            }
+            if (!got) {
+                LogLine(log, L"[gp-device-login] NGM 已启动但经典版仍未出现。请看 NGM/游戏是否被拦，"
+                             L"不要再点選號繼續。");
+            }
+            break;
+        }
     }
 
     if (lr.ok && lr.ticketFilled) {
@@ -638,6 +695,99 @@ void LaunchClassicAfterIsolatedTicket(msc::cdp::Session& cdp, GamaPassDeviceLogi
                      L"。独立窗口保持打开；下次点同一按钮会复用会话，不再直开 select-account。");
 }
 
+bool OpenGalaxyInIsolatedProfile(const msc::cdp::BrowserProfile& profile, const HttpLoginLogFn& log) {
+    if (profile.exe.empty() || profile.userData.empty()) return false;
+    std::wstring cmd = L"\"";
+    cmd += profile.exe;
+    cmd += L"\" --user-data-dir=\"";
+    cmd += profile.userData;
+    cmd += L"\" --force-renderer-accessibility --new-window \"";
+    cmd += kGalaxyLogin;
+    cmd += L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+    mutableCmd.push_back(L'\0');
+    LogLine(log, L"[gp-device-login] 把 Galaxy 交给独立罐窗口（无新调试口、不碰日常罐）…");
+    if (!CreateProcessW(profile.exe.c_str(), mutableCmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                        nullptr, &si, &pi)) {
+        LogLine(log, L"[gp-device-login] CreateProcess 失败 err=" + std::to_wstring(GetLastError()));
+        return false;
+    }
+    LogLine(log, L"[gp-device-login] 已把 Galaxy 交给独立罐 pid=" + std::to_wstring(pi.dwProcessId));
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
+void HarvestManualIsolatedLogin(const msc::cdp::BrowserProfile& profile,
+                                GamaPassDeviceLoginAccount& acc, const std::wstring& storePath,
+                                const HttpLoginLogFn& log) {
+    SetGamaPassUiPhase(GamaPassUiPhase::ManualLogin);
+    LogLine(log, L"[gp-device-login] 调试口未连上，走手动兜底（BUILD187 同款）："
+                 L"请在独立窗口内登录；登录成功后请点「回到 GAMA PLAY」。"
+                 L"程序会继续找这个按钮、勾选 NGM 协议窗，并接管经典版。");
+    const FILETIME sessionNotBefore = GamaPassSessionNotBeforeNow();
+    bool sawNgm = false;
+    const DWORD t0 = GetTickCount();
+    DWORD lastLog = 0;
+    DWORD lastUia = 0;
+    while ((int)(GetTickCount() - t0) < 240000) {
+        if (GamaPassLoginCanceled()) {
+            LogLine(log, L"[gp-device-login] 已取消账密直登");
+            return;
+        }
+        TryAcceptNgmProtocolDialog([&](const std::wstring& s) { LogLine(log, s); });
+        if (GetTickCount() - lastUia > 2500) {
+            lastUia = GetTickCount();
+            if (TryUiaClickBackToGamaPlay(0, L"GpDeviceLoginProfile", log)) {
+                SetGamaPassUiPhase(GamaPassUiPhase::WaitNgm);
+            }
+        }
+        auto harvested =
+            GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgm, log, L"[gp-device-login]");
+        if (sawNgm) SetGamaPassUiPhase(GamaPassUiPhase::WaitClassic);
+        if (harvested.ok && harvested.ticketFilled) {
+            SaveGamaPassDeviceLoginAccount(storePath, acc);
+            LogLine(log, L"[gp-device-login] 换票成功 uid=" + harvested.ticket.userObjectId +
+                             L" gid=" + harvested.ticket.gid + L"，接管经典版（不调用 NGM）");
+            if (!msc::weblogin::LaunchClassicAfterTicket(std::move(harvested.ticket))) {
+                LogLine(log, L"[gp-device-login] 换票成功，经典版尚未出现，再等一会接管…");
+                bool attached = false;
+                for (int i = 0; i < 8; ++i) {
+                    if (GamaPassLoginCanceled()) return;
+                    Sleep(1500);
+                    auto late = GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgm, log,
+                                                                L"[gp-device-login]");
+                    if (late.ok && late.ticketFilled &&
+                        msc::weblogin::LaunchClassicAfterTicket(std::move(late.ticket))) {
+                        attached = true;
+                        break;
+                    }
+                }
+                if (!attached) {
+                    LogLine(log, L"[gp-device-login] 换票成功，但未接管到经典版。"
+                                 L"请确认官网已拉起 Maplestory_Classic.exe");
+                    return;
+                }
+            }
+            LogLine(log, L"[gp-device-login] 换票完成，关闭独立罐窗口（不碰日常浏览器）");
+            (void)msc::cdp::KillBrowsersBlockingProfile(
+                profile, -1, [&](const std::wstring& s) { LogLine(log, s); });
+            return;
+        }
+        if (GetTickCount() - lastLog > 8000) {
+            lastLog = GetTickCount();
+            LogLine(log, sawNgm ? L"[gp-device-login] 已见 NGM，仍等经典版 cmdline 票…"
+                                : L"[gp-device-login] 请完成登录并点「回到 GAMA PLAY」；"
+                                  L"程序会等官网拉起游戏。");
+        }
+        Sleep(800);
+    }
+    LogLine(log, L"[gp-device-login] 手动兜底超时。独立窗口保持打开；下次点同一按钮会复用会话。");
+}
+
 void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginLogFn log) {
     struct BusyGuard {
         ~BusyGuard() {
@@ -651,13 +801,14 @@ void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginL
         return;
     }
     LogLine(log, L"[gp-device-login] 使用卖家 device_id（不自造）");
+    if (TryAttachAlreadyRunningClassic(acc, storePath, log)) return;
     SetGamaPassUiPhase(GamaPassUiPhase::OpeningBrowser);
     SaveGamaPassDeviceLoginAccount(storePath, acc);
 
     msc::cdp::BrowserProfile profile;
     std::wstring label;
     if (!ResolveGamaPassDeviceLoginBrowser(profile.exe, label, log, acc.browserKind)) {
-        LogLine(log, L"[gp-device-login] 未找到所选浏览器（需要 Chrome++ / Chrome / Edge，不支持 360）");
+        LogLine(log, L"[gp-device-login] 未找到所选浏览器（需要 Google Chrome 或 Microsoft Edge，不支持 360）");
         return;
     }
     wchar_t localApp[MAX_PATH]{};
@@ -682,16 +833,18 @@ void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginL
                            [&](const std::wstring& s) { LogLine(log, s); }, &fail)) {
         if (GamaPassLoginCanceled()) {
             LogLine(log, L"[gp-device-login] 已取消账密直登");
-        } else {
-            LogLine(log, L"[gp-device-login] 无法打开调试浏览器 " + fail);
+            return;
         }
+        LogLine(log, L"[gp-device-login] 无法打开调试浏览器 " + fail);
+        (void)OpenGalaxyInIsolatedProfile(profile, log);
+        HarvestManualIsolatedLogin(profile, acc, storePath, log);
         return;
     }
     if (GamaPassLoginCanceled()) {
         LogLine(log, L"[gp-device-login] 已取消账密直登");
+        const int port = cdp.Port() > 0 ? cdp.Port() : kDeviceLoginDebugPort;
         cdp.Close();
-        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
-                                           [&](const std::wstring& s) { LogLine(log, s); });
+        (void)msc::cdp::CloseRemoteBrowser(port, [&](const std::wstring& s) { LogLine(log, s); });
         return;
     }
 
@@ -704,9 +857,9 @@ void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginL
     }
     if (GamaPassLoginCanceled()) {
         LogLine(log, L"[gp-device-login] 已取消账密直登");
+        const int port = cdp.Port() > 0 ? cdp.Port() : kDeviceLoginDebugPort;
         cdp.Close();
-        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort,
-                                           [&](const std::wstring& s) { LogLine(log, s); });
+        (void)msc::cdp::CloseRemoteBrowser(port, [&](const std::wstring& s) { LogLine(log, s); });
         return;
     }
     LogLine(log, L"[gp-device-login] 不直接打开 select-account；先 Galaxy 再点 Gama Pass。"
@@ -942,14 +1095,14 @@ bool ResolveGamaPassDeviceLoginBrowser(std::wstring& outExe, std::wstring& outLa
         ok = pick([](const std::wstring& e) { return IsEdgeExe(e); });
         if (!ok) LogLine(log, L"[gp-device-login] 未找到 Microsoft Edge");
     } else {
-        ok = pick([](const std::wstring& e) { return IsChromePlus(e); }) ||
-             pick([](const std::wstring& e) { return IsOfficialChromeExe(e); }) ||
-             pick([](const std::wstring& e) { return IsEdgeExe(e); });
+        ok = pick([](const std::wstring& e) { return IsOfficialChromeExe(e); }) ||
+             pick([](const std::wstring& e) { return IsEdgeExe(e); }) ||
+             pick([](const std::wstring& e) { return IsChromePlus(e); });
         if (!ok) {
             if (!preferred.empty() && Is360Exe(preferred)) {
-                LogLine(log, L"[gp-device-login] 系统默认是 360，本模块不支持，请安装 Chrome++ / Chrome / Edge");
+                LogLine(log, L"[gp-device-login] 系统默认是 360，本模块不支持，请安装 Google Chrome 或 Microsoft Edge");
             } else {
-                LogLine(log, L"[gp-device-login] 未找到 Chrome++ / Chrome / Edge");
+                LogLine(log, L"[gp-device-login] 未找到 Google Chrome / Microsoft Edge（也没有 Chrome++）");
             }
         }
     }
@@ -958,24 +1111,41 @@ bool ResolveGamaPassDeviceLoginBrowser(std::wstring& outExe, std::wstring& outLa
 
 bool IsGamaPassDeviceLoginBusy() { return gBusy.load(); }
 
+bool IsGamaPassDeviceLoginClearing() { return gClearing.load(); }
+
+bool PollGamaPassDeviceLoginClearResult(std::wstring& err) {
+    err.clear();
+    if (!gClearFinished.exchange(false)) return false;
+    {
+        std::lock_guard<std::mutex> lock(gClearMu);
+        err = gClearErr;
+        gClearErr.clear();
+    }
+    gClearing.store(false);
+    return true;
+}
+
 bool CancelGamaPassDeviceLogin(HttpLoginLogFn log) {
     RequestGamaPassLoginCancel();
     if (!gBusy.load()) {
         LogLine(log, L"[gp-device-login] 当前没有进行中的账密直登");
         return false;
     }
-    LogLine(log, L"[gp-device-login] 用户取消：关闭独立调试窗（19223），不碰日常浏览器、不杀游戏");
-    const auto cdpLog = [&](const std::wstring& s) { LogLine(log, s); };
-    (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort, cdpLog);
-    const std::wstring root = IsolatedProfileRoot();
-    if (IsSafeIsolatedProfileRoot(root)) {
-        static const wchar_t* kLeaves[] = {L"chromeplus", L"chrome", L"edge"};
-        for (const wchar_t* leaf : kLeaves) {
-            msc::cdp::BrowserProfile p;
-            p.userData = root + L"\\" + leaf;
-            (void)msc::cdp::KillBrowsersBlockingProfile(p, kDeviceLoginDebugPort, cdpLog);
+    // 关调试窗含 WinHttp / 杀进程 / Sleep，绝不能在 ImGui 点击线程做（B237282/MFL：点取消整窗卡死）。
+    LogLine(log, L"[gp-device-login] 用户取消：后台关闭独立调试窗（19223），不碰日常浏览器、不杀游戏");
+    std::thread([log]() {
+        const auto cdpLog = [&](const std::wstring& s) { LogLine(log, s); };
+        (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort, cdpLog);
+        const std::wstring root = IsolatedProfileRoot();
+        if (IsSafeIsolatedProfileRoot(root)) {
+            static const wchar_t* kLeaves[] = {L"chromeplus", L"chrome", L"edge"};
+            for (const wchar_t* leaf : kLeaves) {
+                msc::cdp::BrowserProfile p;
+                p.userData = root + L"\\" + leaf;
+                (void)msc::cdp::KillBrowsersBlockingProfile(p, kDeviceLoginDebugPort, cdpLog);
+            }
         }
-    }
+    }).detach();
     return true;
 }
 
@@ -985,36 +1155,58 @@ bool ClearGamaPassDeviceLoginProfile(HttpLoginLogFn log, std::wstring& err) {
         err = L"账密直登进行中，请等结束后再清空";
         return false;
     }
+    if (gClearing.load()) {
+        err = L"正在清除独立罐，请稍候";
+        return false;
+    }
     const std::wstring root = IsolatedProfileRoot();
     if (!IsSafeIsolatedProfileRoot(root)) {
         err = L"无法解析独立罐路径，已拒绝清空";
         return false;
     }
-    const auto cdpLog = [&](const std::wstring& s) { LogLine(log, s); };
-    (void)msc::cdp::CloseRemoteBrowser(kDeviceLoginDebugPort, cdpLog);
-    static const wchar_t* kLeaves[] = {L"chromeplus", L"chrome", L"edge"};
-    for (const wchar_t* leaf : kLeaves) {
-        msc::cdp::BrowserProfile p;
-        p.userData = root + L"\\" + leaf;
-        (void)msc::cdp::KillBrowsersBlockingProfile(p, kDeviceLoginDebugPort, cdpLog);
-    }
-    Sleep(400);
-    if (DirExists(root)) DeleteDirRecursive(root);
-    if (DirExists(root)) {
-        Sleep(400);
-        DeleteDirRecursive(root);
-    }
-    if (DirExists(root)) {
-        err = L"独立罐仍被占用，请先关掉账密登录那扇浏览器再试";
-        LogLine(log, L"[gp-device-login] 清空失败：目录仍在 " + root);
+    if (gClearing.exchange(true)) {
+        err = L"正在清除独立罐，请稍候";
         return false;
     }
-    wchar_t localApp[MAX_PATH]{};
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) {
-        EnsureDir(std::wstring(localApp) + L"\\XCat");
+    {
+        std::lock_guard<std::mutex> lock(gClearMu);
+        gClearErr.clear();
+        gClearFinished.store(false);
     }
-    EnsureDir(root);
-    LogLine(log, L"[gp-device-login] 已清空独立罐（未动日常 User Data / Cookie）");
+    // 关窗 / 杀进程 / 删目录绝不能在 ImGui 点击线程做（点「确认删除」整窗卡死）。
+    LogLine(log, L"[gp-device-login] 开始清除独立罐（后台；不碰日常 User Data / Cookie）");
+    std::thread([log, root]() {
+        const auto cdpLog = [&](const std::wstring& s) { LogLine(log, s); };
+        static const wchar_t* kLeaves[] = {L"chromeplus", L"chrome", L"edge"};
+        for (const wchar_t* leaf : kLeaves) {
+            msc::cdp::BrowserProfile p;
+            p.userData = root + L"\\" + leaf;
+            (void)msc::cdp::KillBrowsersBlockingProfile(p, -1, cdpLog);
+        }
+        Sleep(400);
+        if (DirExists(root)) DeleteDirRecursive(root);
+        if (DirExists(root)) {
+            Sleep(400);
+            DeleteDirRecursive(root);
+        }
+        std::wstring doneErr;
+        if (DirExists(root)) {
+            doneErr = L"独立罐仍被占用，请先关掉账密登录那扇浏览器再试";
+            LogLine(log, L"[gp-device-login] 清空失败：目录仍在 " + root);
+        } else {
+            wchar_t localApp[MAX_PATH]{};
+            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) {
+                EnsureDir(std::wstring(localApp) + L"\\XCat");
+            }
+            EnsureDir(root);
+            LogLine(log, L"[gp-device-login] 已清空独立罐（未动日常 User Data / Cookie）");
+        }
+        {
+            std::lock_guard<std::mutex> lock(gClearMu);
+            gClearErr = std::move(doneErr);
+        }
+        gClearFinished.store(true);
+    }).detach();
     return true;
 }
 
@@ -1030,6 +1222,10 @@ bool StartGamaPassDeviceLogin(const GamaPassDeviceLoginAccount& acc, const std::
     err.clear();
     if (!kGamaPassDeviceLoginEnabled) {
         err = L"账密登录助手尚未开放";
+        return false;
+    }
+    if (gClearing.load()) {
+        err = L"正在清除独立罐，请稍候再登录";
         return false;
     }
     if (msc::weblogin::IsBusy()) {

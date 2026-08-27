@@ -6,6 +6,7 @@
 #include "msc_launch.h"
 #include "ngm_protocol_allow.h"
 #include "ott_ticket_fetch.h"
+#include "win_uia.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -14,6 +15,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -149,40 +152,61 @@ std::wstring JsClickGamaPassProvider() {
 
 std::wstring JsDismissPostLoginInterstitial() {
     // /login/finished：绿勾已表示会话写入。Passkey 是可选项，点「設定」会卡死换票。
-    // 只点「繼續使用密碼」/「回到 Gama Play」，让 OAuth 接着走；点不到则上层回 Galaxy。
+    // 「回到」和「GAMA PLAY」常拆在两个 span 上，必须用祖先整段 innerText；
+    // element.click() 是假事件，坐标交给 CDP Input.dispatchMouseEvent。
     return std::wstring(L"(function(){try{") +
            L"function T(el){return ((el&&(el.innerText||el.textContent||el.getAttribute('aria-label')||''))||'').replace(/\\s+/g,' ').trim();}"
-           L"function tl(el){return T(el).toLowerCase();}"
+           L"function tl(s){return (s||'').toLowerCase();}"
            L"function vis(el){var r=el.getBoundingClientRect(),s=getComputedStyle(el);"
            L"  return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';}"
-           L"function fire(el){if(!el)return false; var t=el.closest('a,button,[role=button]')||el;"
-           L"  if(T(t).length>80) t=el;"
-           L"  try{t.scrollIntoView({block:'center'});}catch(e){}"
-           L"  try{t.click(); return true;}catch(e){return false;}}"
-           L"var nodes=[].slice.call(document.querySelectorAll('a,button,[role=button],div,span,p,label'));"
-           L"function pick(pred){var c=[];"
-           L"  for(var i=0;i<nodes.length;i++){var s=tl(nodes[i]);"
-           L"    if(!s||s.length>64||!vis(nodes[i])||!pred(s)) continue; c.push(nodes[i]);}"
-           L"  c.sort(function(a,b){return T(a).length-T(b).length;}); return c[0]||null;}"
-           L"var skip=pick(function(s){return s.indexOf('\\u7e7c\\u7e8c\\u4f7f\\u7528\\u5bc6\\u78bc')>=0"
+           L"function isSkip(s){return s.indexOf('\\u7e7c\\u7e8c\\u4f7f\\u7528\\u5bc6\\u78bc')>=0"
            L"  ||s.indexOf('\\u7ee7\\u7eed\\u4f7f\\u7528\\u5bc6\\u7801')>=0"
-           L"  ||s.indexOf('continue using password')>=0||s.indexOf('continue with password')>=0;});"
-           L"if(skip&&fire(skip)) return 'skip-passkey|'+T(skip).slice(0,40);"
-           L"var back=pick(function(s){return s.indexOf('\\u56de\\u5230 gama play')>=0"
-           L"  ||s.indexOf('\\u56de\\u5230gama play')>=0||s.indexOf('back to gama play')>=0;});"
-           L"if(back&&fire(back)) return 'back-gama-play|'+T(back).slice(0,40);"
+           L"  ||s.indexOf('continue using password')>=0||s.indexOf('continue with password')>=0;}"
+           L"function isBack(s){"
+           L"  if(s.indexOf('back to gama play')>=0||s.indexOf('back to gamaplay')>=0) return true;"
+           L"  if(s.indexOf('\\u56de\\u5230')<0) return false;"
+           L"  return s.indexOf('gama play')>=0||s.indexOf('gamaplay')>=0;}"
+           L"function isGpOnly(s){return s==='gama play'||s==='gamaplay';}"
+           L"function walk(pred){var best=null,bestLen=9999;"
+           L"  var nodes=[].slice.call(document.querySelectorAll('a,button,[role=button],div,span,p,label'));"
+           L"  for(var i=0;i<nodes.length;i++){"
+           L"    if(!vis(nodes[i])) continue;"
+           L"    var t=nodes[i];"
+           L"    for(var k=0;k<8&&t;k++){"
+           L"      var s=tl(T(t));"
+           L"      if(!s){t=t.parentElement;continue;}"
+           L"      if(s.length>96) break;"
+           L"      if(pred(s)){"
+           L"        var el=t.closest('a,button,[role=button]')||t;"
+           L"        var n=T(el).length;"
+           L"        if(n>0&&n<bestLen&&vis(el)){best=el;bestLen=n;}"
+           L"        break;}"
+           L"      t=t.parentElement;}}"
+           L"  return best;}"
+           L"function report(kind,el){"
+           L"  try{el.scrollIntoView({block:'center'});}catch(e){}"
+           L"  var box=el.getBoundingClientRect();"
+           L"  if(!(box.width>=8&&box.height>=8)) return kind+'|tiny';"
+           L"  var x=Math.floor(box.left+box.width/2), y=Math.floor(box.top+box.height/2);"
+           L"  try{el.click();}catch(e){}"
+           L"  return kind+'|'+T(el).slice(0,40)+'|xy|'+x+'|'+y;}"
+           L"var skip=walk(isSkip); if(skip) return report('skip-passkey', skip);"
+           L"var back=walk(isBack); if(back) return report('back-gama-play', back);"
            L"var path=(location.pathname||'').toLowerCase();"
            L"while(path.length>1&&path.slice(-1)==='/') path=path.slice(0,-1);"
-           L"if(path==='/login/finished') return 'wait-finished';"
-           L"var body=(document.body&&document.body.innerText||'');"
-           L"if(body.indexOf('Passkey')>=0||body.indexOf('\\u767b\\u5165\\u6210\\u529f')>=0) return 'wait-finished-dom';"
+           L"if(path==='/login/finished'){"
+           L"  var gp=walk(isGpOnly); if(gp) return report('back-gama-play', gp);"
+           L"  return 'wait-finished';}"
+           L"var body=tl(document.body&&document.body.innerText||'');"
+           L"if(body.indexOf('passkey')>=0||body.indexOf('\\u767b\\u5165\\u6210\\u529f')>=0"
+           L"  ||body.indexOf('\\u767b\\u5f55\\u6210\\u529f')>=0) return 'wait-finished-dom';"
            L"return 'no-postlogin';"
            L"}catch(e){return 'err:'+String(e);}})();";
 }
 
 std::wstring JsSelectAccount(int accountSlot) {
-    // accounts.gamania.com/login/select-account：按自上而下序号点第 N 张账号卡。
-    // 避开「使用其他帳號」；卡片中心一次 MouseEvent click（React 外层 div 需坐标点击）。
+    // accounts.gamania.com/login/select-account：定位第 N 张卡。
+    // 有 React onClick 则直调；坐标交给 CDP Input.dispatchMouseEvent（受信任，不是 UIA）。
     // 刹车：父节点若含 ≥2 个邮箱绝不往上扩，避免两张卡被收成一块。
     accountSlot = ClampSlot(accountSlot);
     return std::wstring(L"(function(){try{") +
@@ -199,26 +223,42 @@ std::wstring JsSelectAccount(int accountSlot) {
            L"  for(var k=0;k<10&&t.parentElement;k++){"
            L"    var p=t.parentElement; var pt=T(p);"
            L"    if(!pt||pt.length>160||bad(pt)) break;"
-           // 父块已含两张及以上邮箱 → 列表容器，停在当前单卡。
            L"    if(mailCount(pt)>=2) break;"
            L"    if(pt.indexOf('@')>=0) t=p; else break;"
            L"  }"
            L"  try{var c=t.closest('a,button,[role=button],li');"
            L"    if(c&&!bad(T(c))&&T(c).length<=160&&mailCount(T(c))<=1) t=c;}catch(e){}"
            L"  return t;}"
-           L"function fireOnce(el){var t=resolveCard(el)||el; if(!t)return false;"
-           L"  try{t.scrollIntoView({block:'center'});}catch(e){}"
-           L"  var r=t.getBoundingClientRect();"
-           L"  if(!(r.width>=12&&r.height>=12)) return false;"
-           L"  var x=Math.floor(r.left+r.width/2), y=Math.floor(r.top+r.height/2);"
-           L"  var top=document.elementFromPoint(x,y)||t;"
-           L"  try{var up=top.closest('a,button,[role=button],li,div');"
-           L"    if(up&&!bad(T(up))&&mailCount(T(up))===1&&T(up).length<=160) top=up;}catch(e){}"
-           L"  try{"
-           L"    top.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,"
-           L"      clientX:x,clientY:y,button:0,buttons:1}));"
-           L"    return true;"
-           L"  }catch(e){ try{top.click(); return true;}catch(e2){return false;} }}"
+           L"function stripTe(){try{"
+           L"  var q=document.querySelectorAll('#goog-gt-tt,.goog-te-banner-frame,.skiptranslate,"
+           L"iframe.goog-te-banner-frame');"
+           L"  for(var i=0;i<q.length;i++) q[i].remove();"
+           L"  if(document.body) document.body.style.top='';"
+           L"}catch(e){}}"
+           L"function callReactClick(el){try{"
+           L"  var n=el;"
+           L"  for(var d=0;n&&d<14;d++,n=n.parentElement){"
+           L"    var keys=Object.keys(n);"
+           L"    for(var i=0;i<keys.length;i++){"
+           L"      var k=keys[i], v=n[k]; if(!v) continue;"
+           L"      var fn=null, via='';"
+           L"      if(k.indexOf('__reactProps$')===0){"
+           L"        if(typeof v.onClick==='function'){ fn=v.onClick; via='react-props'; }"
+           L"        else if(typeof v.onPointerUp==='function'){ fn=v.onPointerUp; via='react-ptr'; }"
+           L"      } else if(k.indexOf('__reactFiber$')===0){"
+           L"        var mp=v.memoizedProps||v.pendingProps||{};"
+           L"        if(typeof mp.onClick==='function'){ fn=mp.onClick; via='react-fiber'; }"
+           L"        else if(typeof mp.onPointerUp==='function'){ fn=mp.onPointerUp; via='react-fiber-ptr'; }"
+           L"      }"
+           L"      if(fn){"
+           L"        fn({isTrusted:true,type:'click',bubbles:true,cancelable:true,"
+           L"          currentTarget:n,target:el,nativeEvent:{isTrusted:true},"
+           L"          preventDefault:function(){},stopPropagation:function(){},persist:function(){}});"
+           L"        return via;"
+           L"      }"
+           L"    }"
+           L"  }"
+           L"}catch(e){} return '';}"
            L"var path=(location.pathname||'').toLowerCase();"
            L"var onSelect=path.indexOf('select-account')>=0||path.indexOf('/login/select')>=0;"
            L"if(!onSelect && (location.href||'').toLowerCase().indexOf('accounts.gamania.com')<0)"
@@ -276,8 +316,13 @@ std::wstring JsSelectAccount(int accountSlot) {
            L"if(idx>=uniq.length){ idx=uniq.length-1; clamped=1; }"
            L"var pick=uniq[idx];"
            L"var tag='slot'+wantSlot+'|use'+(idx+1)+'|goods'+uniq.length+(clamped?'|clamped':'');"
-           L"if(!fireOnce(pick.el)) return 'wait-select-account|click-fail|'+tag;"
-           L"return 'select-account|'+tag+'|'+pick.t.slice(0,50);"
+           L"stripTe();"
+           L"try{pick.el.scrollIntoView({block:'center'});}catch(e){}"
+           L"var box=pick.el.getBoundingClientRect();"
+           L"if(!(box.width>=12&&box.height>=12)) return 'wait-select-account|click-fail|'+tag;"
+           L"var x=Math.floor(box.left+box.width/2), y=Math.floor(box.top+box.height/2);"
+           L"var via=callReactClick(pick.el)||'locate';"
+           L"return 'select-account|'+tag+'|via|'+via+'|xy|'+x+'|'+y+'|'+pick.t.slice(0,50);"
            L"}catch(e){return 'err:'+String(e);}})();";
 }
 
@@ -408,7 +453,8 @@ std::wstring JsDomStageReady() {
            L"  if(path.indexOf('/oauth')>=0) return 'wait-oauth';"
            L"}"
            L"if(hasText('\\u555f\\u7528 Passkey')||hasText('\\u8a2d\\u5b9a Passkey')||hasText('\\u7e7c\\u7e8c\\u4f7f\\u7528\\u5bc6\\u78bc')"
-           L"  ||hasText('\\u56de\\u5230 Gama Play')||hasText('\\u767b\\u5165\\u6210\\u529f')) return 'ready-finished';"
+           L"  ||hasText('\\u56de\\u5230 Gama Play')||hasText('\\u56de\\u5230GAMA PLAY')||hasText('\\u56de\\u5230Gama Play')"
+           L"  ||hasText('\\u767b\\u5165\\u6210\\u529f')||hasText('\\u767b\\u5f55\\u6210\\u529f')) return 'ready-finished';"
            L"if(h.indexOf('galaxy.games.gamania.com')>=0 && h.indexOf('access_token=')<0){"
            L"  var t=(document.body&&document.body.innerText||'').toLowerCase();"
            L"  if(t.indexOf('gama pass')>=0||t.indexOf('gamapass')>=0) return 'ready-gp';"
@@ -600,6 +646,71 @@ void SetGamaPassAccountSlot(int slot1Based) {
     SaveAccountSlotToDisk(gAccountSlotCached);
 }
 
+HWND FindGamaPassHelperBrowserHwnd(int debugPort, const wchar_t* cmdNeedle) {
+    wchar_t portNeedle[80]{};
+    if (debugPort > 0) {
+        swprintf_s(portNeedle, L"--remote-debugging-port=%d", debugPort);
+    }
+    HWND byProfile = nullptr;
+    for (HWND h : msc::uia::EnumBrowserTopHwnds()) {
+        if (!h || !IsWindow(h)) continue;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        if (!pid) continue;
+        const std::wstring cmd = GetProcessCommandLineW(pid);
+        if (portNeedle[0] && cmd.find(portNeedle) != std::wstring::npos) return h;
+        if (cmdNeedle && cmdNeedle[0] && cmd.find(cmdNeedle) != std::wstring::npos) {
+            if (!byProfile) byProfile = h;
+        }
+    }
+    return byProfile;
+}
+
+bool TryUiaClickBackToGamaPlay(int debugPort, const wchar_t* cmdNeedle, HttpLoginLogFn log) {
+    HWND hwnd = FindGamaPassHelperBrowserHwnd(debugPort, cmdNeedle);
+    if (!hwnd) return false;
+    msc::uia::Session uia;
+    if (!uia.Init(nullptr)) return false;
+    IUIAutomationElement* root = uia.ElementFromHwnd(hwnd);
+    if (!root) return false;
+
+    const wchar_t* exact[] = {L"回到 GAMA PLAY",
+                              L"回到GAMA PLAY",
+                              L"回到 Gama Play",
+                              L"回到Gama Play",
+                              L"Back to GAMA PLAY",
+                              L"Back to Gama Play",
+                              L"繼續使用密碼",
+                              L"继续使用密码"};
+    for (const wchar_t* n : exact) {
+        if (uia.ClickLargestExactName(root, n, /*forceMouse=*/true)) {
+            Log(log, std::wstring(L"[gamapass-cdp] UIA 点到「") + n + L"」");
+            root->Release();
+            return true;
+        }
+    }
+    const wchar_t* fuzzy[] = {L"回到 GAMA PLAY", L"回到GAMA PLAY", L"Back to GAMA PLAY",
+                              L"Back to Gama Play", L"繼續使用密碼", L"继续使用密码"};
+    for (const wchar_t* n : fuzzy) {
+        if (uia.ClickName(root, n, true, /*forceMouse=*/true)) {
+            Log(log, std::wstring(L"[gamapass-cdp] UIA 模糊点到「") + n + L"」");
+            root->Release();
+            return true;
+        }
+    }
+    const std::wstring hint = ToLower(uia.ReadUrlHint(root, hwnd));
+    const bool finished = hint.find(L"login/finished") != std::wstring::npos ||
+                          uia.NameContains(root, L"登入成功", true) ||
+                          uia.NameContains(root, L"登录成功", true);
+    if (finished && uia.ClickName(root, L"GAMA PLAY", true, /*forceMouse=*/true)) {
+        Log(log, L"[gamapass-cdp] UIA 在完成页点到 GAMA PLAY");
+        root->Release();
+        return true;
+    }
+    root->Release();
+    return false;
+}
+
 // 已连接 CDP 会话上的点选换票。accounts/error 的干净重开由外层 HttpGamaPassCdpLoginToOtt 负责。
 static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLogFn log, int timeoutMs,
                                            int debugPort, GpCdpOnLoginPageFn onLoginPage) {
@@ -705,7 +816,7 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
     };
 
     constexpr DWORD kNavSettleMs = 1100;
-    constexpr DWORD kAccNavSettleMs = 350;  // 选账号页已出，不必再空等满 1.1s
+    constexpr DWORD kAccNavSettleMs = 800;  // 350ms 时 React 监听未挂上，首点空放（BIN 02:38）
     constexpr DWORD kPollMs = 1000;
     constexpr DWORD kAccPollMs = 200;
     constexpr DWORD kAfterGpClickMs = 800;
@@ -713,7 +824,8 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
     constexpr DWORD kAfterNickRadioMs = 1200;
     constexpr DWORD kAfterNickContinueMs = 800;
     constexpr DWORD kAccessTokenGraceMs = 5500;
-    constexpr DWORD kClickAckMs = 28000;  // 单次点击等多久离开；超时可重试 1 次
+    constexpr DWORD kClickAckMs = 28000;     // Galaxy 单次点击等多久离开
+    constexpr DWORD kAccClickAckMs = 8000;   // 选账号应马上跳走；28s 体感=卡死
     constexpr DWORD kStepGalaxyMs = 70000;
     constexpr DWORD kStepAccMs = 50000;
     constexpr DWORD kStepNickMs = 70000;
@@ -754,6 +866,8 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
     DWORD lastStageLog = 0;
     DWORD postLoginAt = 0;           // 见到 /login/finished 的时刻
     DWORD postLoginClickAt = 0;      // 点过「繼續使用密碼」/「回到 Gama Play」
+    DWORD lastPostClickTry = 0;      // 完成页受信任点击节流
+    DWORD lastUiaPostClick = 0;
     bool reenteredGalaxyAfterLogin = false;
     DWORD nickEmptySince = 0;        // selectgameaccount 上一直没有可选昵称 radio
 
@@ -962,20 +1076,17 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
 
     // NGM 只作「官网已开始拉起」的早信号；成功仍要求 Classic + 可解析 cmdline 票。
     // 只认本轮 sessionNotBefore 之后创建的 NGM，避免残留进程误报。
-    // 见 NGM 仅 blank 停泊，等 cmdline 票收齐后再 CloseRemoteBrowser。
-    bool parkedAfterNgm = false;
+    // 见 NGM 不要 Navigate about:blank：协议窗刚勾选时 NGM 进程已在、Main 可能还没把
+    // ngm:// 票递完（AA7E 03:39：blank 后经典版 240s 不出现）。二次兑票防护只在 cmdline
+    // 收票后 parkBrowserAfterTicketOk。
     auto noteNgmLaunchHint = [&]() {
         if (sawNgmHint) return false;
         if (!IsNgmProcessRunningCreatedAfter(sessionNotBefore)) return false;
         sawNgmHint = true;
         ngmHintAt = GetTickCount();
         SetGamaPassUiPhase(GamaPassUiPhase::WaitClassic);
-        Log(log, L"[gamapass-cdp] 探测到 NGM 已启动（官网拉起中；成功门禁仍等经典版 cmdline 票）…");
-        if (!parkedAfterNgm && !closedBrowserAfterTicket) {
-            parkedAfterNgm = true;
-            parkLoginTabBlank(
-                L"[gamapass-cdp] 已见 NGM，登录页已 blank（等经典版票后再关浏览器）…");
-        }
+        Log(log, L"[gamapass-cdp] 探测到 NGM 已启动（官网拉起中；成功门禁仍等经典版 cmdline 票；"
+                 L"不 blank Main）…");
         return true;
     };
 
@@ -985,11 +1096,6 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             GamaPassTryHarvestClassicTicket(sessionNotBefore, sawNgmHint, log, L"[gamapass-cdp]");
         if (sawNgmHint && !sawBefore) {
             SetGamaPassUiPhase(GamaPassUiPhase::WaitClassic);
-            if (!parkedAfterNgm && !closedBrowserAfterTicket) {
-                parkedAfterNgm = true;
-                parkLoginTabBlank(
-                    L"[gamapass-cdp] 已见 NGM，登录页已 blank（等经典版票后再关浏览器）…");
-            }
         }
         return out;
     };
@@ -1154,7 +1260,7 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                     ottHttpFailWaitSince = GetTickCount();
                     enterStage(Stage::TokenWait, L"ott-http-fail-wait-classic");
                     Log(log, L"[gamapass-cdp] Main OTT HTTP 换票失败，先等官网拉起经典版"
-                             L"（见 NGM 则宽限 45s，否则 20s 内不重开 Galaxy）…");
+                             L"（见 NGM 则不再重开 Galaxy，否则 20s 内不重开）…");
                 } else if (!forcedGalaxyAfterStaleOtt) {
                     const DWORD waited = GetTickCount() - ottHttpFailWaitSince;
                     const bool ngmAlive = IsNgmProcessRunningCreatedAfter(sessionNotBefore);
@@ -1163,22 +1269,25 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                         (sawNgmHint || ngmAlive) ? 45000u : 20000u;
                     if (waited > waitBudget) {
                         forcedGalaxyAfterStaleOtt = true;
-                        Log(log, L"[gamapass-cdp] 等待官网拉起超时" +
-                                     (sawNgmHint ? std::wstring(L"（曾见 NGM）") : L"") +
-                                     L"，最后一次重开 Galaxy…");
-                        if (!cdp.Navigate(kGalaxyLogin,
-                                          [&](const std::wstring& s) { Log(log, s); })) {
-                            return Fail(HttpLoginError::Network, "无法打开 Galaxy 登录页");
+                        if (ngmAlive || sawNgmHint) {
+                            Log(log, L"[gamapass-cdp] 已见 NGM，不重开 Galaxy（防選號 SPGA0001），"
+                                     L"继续等经典版 cmdline 票…");
+                        } else {
+                            Log(log, L"[gamapass-cdp] 等待官网拉起超时，最后一次重开 Galaxy…");
+                            if (!cdp.Navigate(kGalaxyLogin,
+                                              [&](const std::wstring& s) { Log(log, s); })) {
+                                return Fail(HttpLoginError::Network, "无法打开 Galaxy 登录页");
+                            }
+                            sawAccessToken = false;
+                            chasedWebToken = false;
+                            ottHttpFailWaitSince = 0;
+                            galaxyInitOtt.clear();
+                            enterStage(Stage::GalaxyWaitGp, L"stale-ott-retry", true);
+                            urlChangedTick = GetTickCount();
+                            noClickUntil = urlChangedTick + kNavSettleMs;
+                            Sleep(1200);
+                            continue;
                         }
-                        sawAccessToken = false;
-                        chasedWebToken = false;
-                        ottHttpFailWaitSince = 0;
-                        galaxyInitOtt.clear();
-                        enterStage(Stage::GalaxyWaitGp, L"stale-ott-retry", true);
-                        urlChangedTick = GetTickCount();
-                        noClickUntil = urlChangedTick + kNavSettleMs;
-                        Sleep(1200);
-                        continue;
                     }
                 }
             }
@@ -1279,7 +1388,9 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
         if (stage == Stage::AwaitLeaveGalaxy || stage == Stage::AwaitLeaveAcc ||
             stage == Stage::AwaitLeaveNick) {
             const DWORD ackNow = GetTickCount();
-            if (ackNow - stageEnteredAt > kClickAckMs) {
+            const DWORD ackBudget =
+                (stage == Stage::AwaitLeaveAcc) ? kAccClickAckMs : kClickAckMs;
+            if (ackNow - stageEnteredAt > ackBudget) {
                 if (stage == Stage::AwaitLeaveGalaxy) {
                     if (gpClickRetry < 1) {
                         ++gpClickRetry;
@@ -1332,17 +1443,50 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                     if (postLoginAt == 0) {
                         postLoginAt = GetTickCount();
                         Log(log, L"[gamapass-cdp] 登录已完成，会话已写入独立罐。"
-                                 L"跳过 Passkey（不点设定），继续换票；关窗后再进也会复用。");
+                                 L"跳过 Passkey（不点设定）；要点「回到 GAMA PLAY」才能把 OAuth 走完。");
                     }
                     if (fin.find("skip-passkey") == 0 || fin.find("back-gama-play") == 0) {
+                        int vx = 0, vy = 0;
+                        const char* xy = strstr(fin.c_str(), "|xy|");
+                        if (xy) sscanf_s(xy, "|xy|%d|%d", &vx, &vy);
+                        const DWORD nowClick = GetTickCount();
+                        if ((vx + vy) > 0 && nowClick - lastPostClickTry > 1600) {
+                            lastPostClickTry = nowClick;
+                            if (cdp.ClickViewport(static_cast<double>(vx), static_cast<double>(vy),
+                                                 [&](const std::wstring& s) { Log(log, s); })) {
+                                Log(log, L"[gamapass-cdp] 完成页受信任点击 xy=" +
+                                             std::to_wstring(vx) + L"," + std::to_wstring(vy) +
+                                             L" " + std::wstring(fin.begin(), fin.end()));
+                            }
+                        } else if ((vx + vy) <= 0) {
+                            Log(log, L"[gamapass-cdp] " + std::wstring(fin.begin(), fin.end()));
+                        }
                         postLoginClickAt = GetTickCount();
                         noClickUntil = postLoginClickAt + 800;
-                        Log(log, L"[gamapass-cdp] " + std::wstring(fin.begin(), fin.end()));
+                    } else {
+                        if (GetTickCount() - lastUiaPostClick > 2500) {
+                            lastUiaPostClick = GetTickCount();
+                            if (TryUiaClickBackToGamaPlay(debugPort, L"GpDeviceLoginProfile",
+                                                          log)) {
+                                postLoginClickAt = GetTickCount();
+                                noClickUntil = postLoginClickAt + 800;
+                            }
+                        }
+                        if (GetTickCount() - lastStageLog > 5000) {
+                            lastStageLog = GetTickCount();
+                            Log(log, L"[gamapass-cdp] 还在登录成功页，未点到「回到 GAMA PLAY」。"
+                                     L"可手动点一次；程序会继续找按钮。 " +
+                                     std::wstring(fin.begin(), fin.end()));
+                        }
                     }
+                    // 先等按钮把 OAuth 走完；过早 Navigate Galaxy 会丢掉回调（不像 187 用户手点还能成）。
                     const DWORD waitFrom = postLoginClickAt ? postLoginClickAt : postLoginAt;
-                    if (!reenteredGalaxyAfterLogin && GetTickCount() - waitFrom > 2800) {
+                    const DWORD stayMs = postLoginClickAt ? 10000u : 20000u;
+                    if (!reenteredGalaxyAfterLogin && GetTickCount() - waitFrom > stayMs &&
+                        GetTickCount() - postLoginAt > 20000) {
                         reenteredGalaxyAfterLogin = true;
-                        Log(log, L"[gamapass-cdp] 完成页未自动回跳，同窗再进 Galaxy（不冲 Cookie）…");
+                        Log(log, L"[gamapass-cdp] 完成页仍未跳转，同窗再进 Galaxy 兜底（不冲 Cookie）。"
+                                 L"若已看到「回到 GAMA PLAY」请再手点一次。");
                         if (cdp.Navigate(kGalaxyLogin,
                                          [&](const std::wstring& s) { Log(log, s); })) {
                             enterStage(Stage::GalaxyWaitGp, L"login-finished-reenter", true);
@@ -1435,6 +1579,23 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
                    stageDom.find("ready-acc") == 0) {
             auto r = runJs(JsSelectAccount(accountSlot));
             if (r.find("select-account|") == 0) {
+                // 页内 dispatchEvent 是假点击。JS 会直调 React onClick；无论成败都补一记
+                // CDP Input 受信任鼠标（不是 UIA）——BIN 03:07 假点击永远不离页。
+                const bool viaReact = r.find("|via|react") != std::string::npos;
+                int vx = 0, vy = 0;
+                const char* xy = strstr(r.c_str(), "|xy|");
+                if (xy) sscanf_s(xy, "|xy|%d|%d", &vx, &vy);
+                (void)viaReact;
+                if ((vx + vy) > 0) {
+                    if (cdp.ClickViewport(static_cast<double>(vx), static_cast<double>(vy),
+                                          [&](const std::wstring& s) { Log(log, s); })) {
+                        Log(log, L"[gamapass-cdp] 选账号 CDP 受信任点击 xy=" +
+                                     std::to_wstring(vx) + L"," + std::to_wstring(vy));
+                    } else {
+                        Log(log, L"[gamapass-cdp] 选账号 CDP 受信任点击失败 xy=" +
+                                     std::to_wstring(vx) + L"," + std::to_wstring(vy));
+                    }
+                }
                 ackFromUrl = lastUrl;
                 noClickUntil = GetTickCount() + kAfterAccClickMs;
                 enterStage(Stage::AwaitLeaveAcc, L"clicked-acc");

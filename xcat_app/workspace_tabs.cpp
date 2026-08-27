@@ -572,14 +572,16 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
                            "弹出的是 XCAT 专用浏览器，不是你日常用的 Chrome / Edge。");
         ImGui::PopTextWrapPos();
         const bool gpBusy = msc::launcher::IsGamaPassDeviceLoginBusy() || busy;
+        const bool gpClearing = msc::launcher::IsGamaPassDeviceLoginClearing();
+        const bool gpLocked = gpBusy || gpClearing;
         const bool autoPending = ui.pendingAutoLaunch;
-        if (gpBusy) ImGui::BeginDisabled();
+        if (gpLocked) ImGui::BeginDisabled();
         ImGui::SetNextItemWidth(-1.f);
         ImGui::PushID(static_cast<int>(ui.gpPasteEpoch));
         ImGuiInputTextFlags pasteFlags = ImGuiInputTextFlags_EnterReturnsTrue |
                                          ImGuiInputTextFlags_NoUndoRedo;
         if (LaunchPanel_GpLoginLineIsMask(ui)) pasteFlags |= ImGuiInputTextFlags_AutoSelectAll;
-        if (gpBusy) pasteFlags |= ImGuiInputTextFlags_ReadOnly;
+        if (gpLocked) pasteFlags |= ImGuiInputTextFlags_ReadOnly;
         const bool pasteEnter = ImGui::InputTextWithHint(
             "##gp_direct_line", "账号----密码----邮箱密码----device_id", ui.gpLoginLine,
             sizeof(ui.gpLoginLine), pasteFlags);
@@ -591,26 +593,28 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
                 "已有账号时再贴一行即换号。点框可全选覆盖。");
         }
         ImGui::PopID();
-        if (!gpBusy && (pasteEnter || pasteDeactivated || pasteEdited)) {
+        if (!gpLocked && (pasteEnter || pasteDeactivated || pasteEdited)) {
             LaunchPanel_TryCommitGamaPassDirectPaste(ui, pasteEnter);
         }
-        if (gpBusy) ImGui::EndDisabled();
+        if (gpLocked) ImGui::EndDisabled();
         if (ui.gpDisplayAccount[0]) {
             ImGui::Text("当前账号：%s", ui.gpDisplayAccount);
         } else {
             ImGui::TextDisabled("当前账号：未设置 — 请先粘贴账号行");
         }
-        DrawGamaPassSlotRow(ui, gpBusy, rowW, gap);
+        DrawGamaPassSlotRow(ui, gpLocked, rowW, gap);
 
         const bool loginNoAccount =
             !ui.gpDisplayAccount[0] &&
             (ui.gpLoginLine[0] == '\0' || LaunchPanel_GpLoginLineIsMask(ui));
         const bool gpCanceling = gpBusy && msc::launcher::GamaPassLoginCanceled();
-        const bool disableLogin = gpCanceling || (!gpBusy && !autoPending && loginNoAccount);
+        const bool disableLogin =
+            gpClearing || gpCanceling || (!gpBusy && !autoPending && loginNoAccount);
         if (disableLogin) ImGui::BeginDisabled();
-        const char* gpLabel = gpCanceling ? "正在取消…"
+        const char* gpLabel = gpClearing ? "正在清除…"
+                              : (gpCanceling ? "正在取消…"
                               : (gpBusy ? "取消登录"
-                                        : (autoPending ? "取消自动登录" : "登录并开游戏"));
+                                        : (autoPending ? "取消自动登录" : "登录并开游戏")));
         if (ImGui::Button(gpLabel, ImVec2(halfW, btnH))) {
             LaunchPanel_CancelGpClearConfirm(ui);
             if (gpBusy) {
@@ -628,16 +632,17 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
             }
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(gpBusy
+            ImGui::SetTooltip(gpClearing ? "正在清除独立罐，请稍候"
+                                  : (gpBusy
                                   ? (gpCanceling ? "正在取消登录，请稍候"
                                                  : "取消本次账密直登。只关独立调试窗，不关日常浏览器、不杀游戏。")
                                   : (loginNoAccount ? "请先粘贴完整账号行"
                                                     : (autoPending ? "取消即将开始的自动登录"
-                                                                   : "5 秒后自动登录，可再点取消")));
+                                                                   : "5 秒后自动登录，可再点取消"))));
         }
         if (disableLogin) ImGui::EndDisabled();
         ImGui::SameLine(0.f, gap);
-        if (gpBusy) ImGui::BeginDisabled();
+        if (gpLocked) ImGui::BeginDisabled();
         const unsigned clearLeft = LaunchPanel_GpClearConfirmLeftSec(ui);
         const bool clearArmed = clearLeft > 0;
         if (clearArmed) {
@@ -646,7 +651,9 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
             ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.72f, 0.22f, 0.26f, 1.f));
         }
         const char* clearLabel =
-            clearArmed ? "确认删除###gp_clear_account" : "删除浏览器账号数据###gp_clear_account";
+            gpClearing ? "正在清除…###gp_clear_account"
+                       : (clearArmed ? "确认删除###gp_clear_account"
+                                     : "删除浏览器账号数据###gp_clear_account");
         if (ImGui::Button(clearLabel, ImVec2(halfW, btnH))) {
             if (clearArmed) {
                 if (LaunchPanel_GpClearConfirmReady(ui)) {
@@ -658,13 +665,16 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
             }
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(gpBusy ? "登录进行中，无法删除"
+            ImGui::SetTooltip(gpClearing ? "正在结束独立罐浏览器并删目录，界面不会卡住"
+                                     : (gpBusy ? "登录进行中，无法删除"
                                      : (clearArmed ? "再点一次才会删除账号和独立罐登录态。不碰日常浏览器。"
-                                                   : "先点一次武装，5 秒内再点「确认删除」才会清掉。不碰日常浏览器。"));
+                                                   : "先点一次武装，5 秒内再点「确认删除」才会清掉。不碰日常浏览器。")));
         }
         if (clearArmed) ImGui::PopStyleColor(3);
-        if (gpBusy) ImGui::EndDisabled();
-        if (clearArmed) {
+        if (gpLocked) ImGui::EndDisabled();
+        if (gpClearing) {
+            ImGui::TextColored(PrepHintBlue(), "正在清除独立罐…");
+        } else if (clearArmed) {
             char clearHint[96];
             std::snprintf(clearHint, sizeof(clearHint), "再点一次确认删除（%u 秒后取消）", clearLeft);
             ImGui::TextColored(ImVec4(0.85f, 0.35f, 0.32f, 1.f), "%s", clearHint);
@@ -3246,7 +3256,8 @@ void DrawAutoSellTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
             ImGui::SetTooltip(
                 "按装备栏件数自动回城卖装（其他栏不计数）\n"
-                "自动寻最近可卖店；进城先卖装再卖其他，并补 1 张回城卷\n"
+                "自动寻最近可卖店；进城先卖装再卖其他\n"
+                "回城卷少于目标才买：自定义槽若是回家卷则按「补到」；否则只保证 1 张\n"
                 "可选充飞镖 / 补红蓝自定义饲料：店有则买\n"
                 "出过刀必须先 hangup 清 FLAG 再卖；没出过刀满包可直接出门。\n"
                 "重连途中不卖；倒计时将尽也推迟到下一轮落地。\n"
@@ -3581,7 +3592,7 @@ void DrawAutoSellTab(LaunchUiState& ui) {
         }
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
             ImGui::SetTooltip(
-                "立刻跑完整行程：回城→先卖装→货架有则补回城卷→可选充飞镖→可选补红/蓝/自定义/"
+                "立刻跑完整行程：回城→先卖装→按设定补回城卷→可选充飞镖→可选补红/蓝/自定义/"
                 "饲料→回挂机图\n"
                 "不依赖装备件数阈值；自动寻最近可卖店");
         }
@@ -6622,7 +6633,7 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
-        xcat::ui::CardGuard card("##tab_dbg_nocd_enc_unbind", "攻击无CD · 遇人绑定");
+        xcat::ui::CardGuard card("##tab_dbg_nocd_enc_unbind");
         static bool nocdUnbindDbgLoaded = false;
         static uint64_t nocdUnbindDbgSeen = 0;
         if (!ui.prefsBinDir.empty()) {
@@ -6640,9 +6651,7 @@ void DrawDebugTab(LaunchUiState& ui) {
             nocdUnbindDbgLoaded = true;
         }
 
-        const char* btnLabel = gUiAttackNoCdEncounterUnbind ? "恢复绑定##dbg_nocd_enc"
-                                                            : "解绑##dbg_nocd_enc";
-        if (ImGui::Button(btnLabel, ImVec2(-1.f, 0.f))) {
+        if (ImGui::Button("解绑##dbg_nocd_enc", ImVec2(-1.f, 0.f))) {
             const bool wantUnbind = !gUiAttackNoCdEncounterUnbind;
             if (ui.prefsBinDir.empty()) {
                 gUiAttackNoCdEncounterUnbind = wantUnbind;
@@ -6664,16 +6673,6 @@ void DrawDebugTab(LaunchUiState& ui) {
                 }
             }
         }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(
-                "默认绑定：开「攻击无CD」时强制遇人 TAB「检测同图 + 先停手 + 一直有人就换频」，三项置灰。\n"
-                "点「解绑」：不再强制，遇人三项可自行改；不改吸怪那套遇人强制。\n"
-                "点「恢复绑定」：无CD 若仍开着，三项会重新强制打开。\n"
-                "解绑不会自动关掉遇人勾选，只是允许你改。");
-        }
-        ImGui::TextDisabled(gUiAttackNoCdEncounterUnbind
-                                ? "已解绑：开攻击无CD 时不再锁遇人三项。"
-                                : "已绑定：开攻击无CD 时强制检测同图 / 先停手 / 换频。");
     }
     CardGap();
     {
@@ -9121,6 +9120,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
                 "默认关。勾上后，吸怪挂机时软断连（主动 hangup 或被动踢线）进别的频，不回原频。\n"
+                "上一轮已经换过的频，落地后再被踢也会再抽，不会粘在当前频。\n"
                 "须开首页「软重连试连」。见人仍由遇人策略换频，本勾不抢。\n"
                 "仅一频或抽空则进原频。不走 F10 官方迁频。落盘 user.ini。");
         }
@@ -9401,7 +9401,7 @@ void DrawMobGatherTab(LaunchUiState& ui) {
                        "BIN：tick skipDy= / dyLim=。");
         MobGatherDragU(ui, "履历", "walkdx", &gUiMobGatherWalkDx, (int)xcat::kMobGatherWalkDxMin,
                        (int)xcat::kMobGatherWalkDxMax, 1.f, "px",
-                       "履历闸横移。新 oid 相对第一次见到的 Ap，|dx| 小于此不 Arm。默认 96。用户自填。\n"
+                       "履历闸横移。新 oid 相对第一次见到的 Ap，|dx| 小于此不 Arm。默认 0。用户自填。\n"
                        "0=不挡横移。调小=更容易收补刷；调大=等巡逻走开。只防爆钳 30000。\n"
                        "脚边以内不走这闸。BIN：dHome= / dHomeMax= / walkDx=。");
         MobGatherDragU(ui, "脚边", "feet", &gUiMobGatherFeetExemptPx,

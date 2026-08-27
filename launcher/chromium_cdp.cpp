@@ -6,12 +6,17 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <ws2ipdef.h>
 #include <Windows.h>
 #include <Shellapi.h>
 #include <ShlObj.h>
 #include <TlHelp32.h>
 #include <winhttp.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -19,9 +24,236 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 namespace msc::cdp {
 namespace {
+
+BOOL CALLBACK WsaInitOnceCb(PINIT_ONCE, PVOID, PVOID*) {
+    WSADATA w{};
+    WSAStartup(MAKEWORD(2, 2), &w);
+    return TRUE;
+}
+
+void EnsureWsa() {
+    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+    InitOnceExecuteOnce(&once, WsaInitOnceCb, nullptr, nullptr);
+}
+
+// 环回 TCP 短超时。WinHttp 即便 NO_PROXY 在部分机器上仍会空等（SNAILVPC 0.1.188 空罐 about:blank）。
+bool TcpConnectLoopbackTo(SOCKET s, const sockaddr* addr, int addrLen, int timeoutMs) {
+    u_long nb = 1;
+    ioctlsocket(s, FIONBIO, &nb);
+    connect(s, addr, addrLen);
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET(s, &w);
+    timeval tv{};
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    const int sel = select(0, nullptr, &w, nullptr, &tv);
+    int err = 0;
+    int elen = sizeof(err);
+    getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &elen);
+    if (sel <= 0 || err != 0) return false;
+    nb = 0;
+    ioctlsocket(s, FIONBIO, &nb);
+    DWORD to = timeoutMs > 0 ? static_cast<DWORD>(timeoutMs) : 800u;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
+    return true;
+}
+
+bool TcpConnectFam(int af, int port, int timeoutMs, SOCKET* outSock) {
+    if (outSock) *outSock = INVALID_SOCKET;
+    if (port <= 0) return false;
+    EnsureWsa();
+    if (af == AF_INET) {
+        SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s == INVALID_SOCKET) return false;
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(static_cast<u_short>(port));
+        inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+        if (TcpConnectLoopbackTo(s, reinterpret_cast<sockaddr*>(&a), sizeof(a), timeoutMs)) {
+            if (outSock) *outSock = s;
+            else closesocket(s);
+            return true;
+        }
+        closesocket(s);
+        return false;
+    }
+    SOCKET s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) return false;
+    DWORD v6only = 1;
+    setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&v6only), sizeof(v6only));
+    sockaddr_in6 a{};
+    a.sin6_family = AF_INET6;
+    a.sin6_port = htons(static_cast<u_short>(port));
+    inet_pton(AF_INET6, "::1", &a.sin6_addr);
+    if (TcpConnectLoopbackTo(s, reinterpret_cast<sockaddr*>(&a), sizeof(a), timeoutMs)) {
+        if (outSock) *outSock = s;
+        else closesocket(s);
+        return true;
+    }
+    closesocket(s);
+    return false;
+}
+
+bool TcpConnectLoopback(int port, int timeoutMs, SOCKET* outSock) {
+    if (TcpConnectFam(AF_INET, port, timeoutMs, outSock)) return true;
+    return TcpConnectFam(AF_INET6, port, timeoutMs, outSock);
+}
+
+bool TcpLoopbackOpen(int port, int timeoutMs) {
+    SOCKET s = INVALID_SOCKET;
+    if (!TcpConnectLoopback(port, timeoutMs, &s)) return false;
+    closesocket(s);
+    return true;
+}
+
+std::string PeekRawForLog(const std::string& raw) {
+    std::string o;
+    if (raw.empty()) return "(empty)";
+    for (size_t i = 0; i < raw.size() && o.size() < 56; ++i) {
+        const unsigned char c = static_cast<unsigned char>(raw[i]);
+        if (c == '\r')
+            o += "\\r";
+        else if (c == '\n')
+            o += "\\n";
+        else if (c >= 32 && c < 127)
+            o.push_back(static_cast<char>(c));
+        else
+            o.push_back('.');
+    }
+    return o;
+}
+
+bool HttpExchangeOnSock(SOCKET s, int af, int port, const char* methodA, const char* pathA,
+                        std::string& body, std::string* peek) {
+    body.clear();
+    char host[80]{};
+    if (af == AF_INET)
+        sprintf_s(host, "127.0.0.1:%d", port);
+    else
+        sprintf_s(host, "[::1]:%d", port);
+    char req[768]{};
+    sprintf_s(req,
+              "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept: */*\r\n\r\n",
+              methodA, pathA, host);
+    const int reqLen = static_cast<int>(strlen(req));
+    DWORD rcvTo = 800;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTo), sizeof(rcvTo));
+    if (send(s, req, reqLen, 0) != reqLen) {
+        if (peek) *peek = "(send-fail)";
+        return false;
+    }
+    std::string raw;
+    const DWORD t0 = GetTickCount();
+    char buf[2048];
+    for (;;) {
+        if (GetTickCount() - t0 > 1500) break;
+        const int n = recv(s, buf, sizeof(buf), 0);
+        if (n > 0) {
+            raw.append(buf, static_cast<size_t>(n));
+            if (raw.size() > 2 * 1024 * 1024) break;
+        } else {
+            break;
+        }
+        size_t hdr = raw.find("\r\n\r\n");
+        size_t sep = 4;
+        if (hdr == std::string::npos) {
+            hdr = raw.find("\n\n");
+            sep = 2;
+        }
+        if (hdr == std::string::npos) continue;
+        std::string headers = raw.substr(0, hdr);
+        for (auto& c : headers)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        int cl = -1;
+        const size_t clPos = headers.find("content-length:");
+        if (clPos != std::string::npos) {
+            cl = 0;
+            for (size_t i = clPos + 15; i < headers.size(); ++i) {
+                if (headers[i] == '\r' || headers[i] == '\n') break;
+                if (headers[i] >= '0' && headers[i] <= '9') cl = cl * 10 + (headers[i] - '0');
+            }
+        }
+        if (cl >= 0 && raw.size() >= hdr + sep + static_cast<size_t>(cl)) break;
+    }
+    if (peek) *peek = PeekRawForLog(raw);
+    size_t hdr = raw.find("\r\n\r\n");
+    size_t sep = 4;
+    if (hdr == std::string::npos) {
+        hdr = raw.find("\n\n");
+        sep = 2;
+    }
+    if (hdr == std::string::npos) return false;
+    body = raw.substr(hdr + sep);
+    if (raw.find("200") == std::string::npos && raw.find("HTTP") != 0) return !body.empty();
+    return !body.empty();
+}
+
+bool LoopbackHttp(int port, const wchar_t* method, const wchar_t* path, std::string& body, int* usedAf,
+                  std::string* peek, bool* tcp4, bool* tcp6) {
+    body.clear();
+    if (tcp4) *tcp4 = false;
+    if (tcp6) *tcp6 = false;
+    if (usedAf) *usedAf = 0;
+    if (peek) peek->clear();
+    if (!method || !path || port <= 0) return false;
+    char methodA[16]{};
+    char pathA[256]{};
+    WideCharToMultiByte(CP_UTF8, 0, method, -1, methodA, sizeof(methodA), nullptr, nullptr);
+    WideCharToMultiByte(CP_UTF8, 0, path, -1, pathA, sizeof(pathA), nullptr, nullptr);
+    const int afs[2] = {AF_INET, AF_INET6};
+    std::string lastPeek;
+    for (int af : afs) {
+        SOCKET s = INVALID_SOCKET;
+        const bool tcp = TcpConnectFam(af, port, 400, &s);
+        if (af == AF_INET && tcp4) *tcp4 = tcp;
+        if (af == AF_INET6 && tcp6) *tcp6 = tcp;
+        if (!tcp) continue;
+        std::string p;
+        std::string b;
+        const bool ok = HttpExchangeOnSock(s, af, port, methodA, pathA, b, &p);
+        closesocket(s);
+        lastPeek = p;
+        if (ok) {
+            body = std::move(b);
+            if (usedAf) *usedAf = af;
+            if (peek) *peek = std::move(p);
+            return true;
+        }
+    }
+    if (peek) *peek = lastPeek.empty() ? "(no-tcp)" : lastPeek;
+    return false;
+}
+
+bool ReadDevToolsActivePort(const std::wstring& userData, int* outPort) {
+    if (outPort) *outPort = 0;
+    if (userData.empty()) return false;
+    const std::wstring path = userData + L"\\DevToolsActivePort";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[256]{};
+    DWORD n = 0;
+    const BOOL rd = ReadFile(h, buf, sizeof(buf) - 1, &n, nullptr);
+    CloseHandle(h);
+    if (!rd || n == 0) return false;
+    int port = 0;
+    for (DWORD i = 0; i < n; ++i) {
+        if (buf[i] >= '0' && buf[i] <= '9')
+            port = port * 10 + (buf[i] - '0');
+        else
+            break;
+    }
+    if (port <= 0 || port > 65535) return false;
+    if (outPort) *outPort = port;
+    return true;
+}
 
 void LogLine(const LogFn& log, const std::wstring& s) {
     if (log) log(s);
@@ -84,6 +316,74 @@ bool FileExists(const std::wstring& p) {
 bool EnsureDir(const std::wstring& p) {
     if (DirExists(p)) return true;
     return CreateDirectoryW(p.c_str(), nullptr) != 0 || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+void WipeDirFiles(const std::wstring& dir) {
+    if (!DirExists(dir)) return;
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.cFileName[0] == L'.' &&
+            (fd.cFileName[1] == 0 || (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0)))
+            continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+void ReplaceAll(std::string& s, const char* from, const char* to) {
+    const size_t fl = std::strlen(from);
+    const size_t tl = std::strlen(to);
+    size_t p = 0;
+    while ((p = s.find(from, p)) != std::string::npos) {
+        s.replace(p, fl, to);
+        p += tl;
+    }
+}
+
+// 只改已有 Preferences 的退出标记。禁止从零写残缺 JSON（Chrome 会当崩溃退出再弹恢复条）。
+void MarkProfileExitedCleanly(const std::wstring& prefsPath) {
+    if (!FileExists(prefsPath)) return;
+    HANDLE h = CreateFileW(prefsPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    const DWORD sz = GetFileSize(h, nullptr);
+    if (sz == INVALID_FILE_SIZE || sz == 0 || sz > 4 * 1024 * 1024) {
+        CloseHandle(h);
+        return;
+    }
+    std::string body(sz, 0);
+    DWORD n = 0;
+    if (!ReadFile(h, body.data(), sz, &n, nullptr) || n != sz) {
+        CloseHandle(h);
+        return;
+    }
+    ReplaceAll(body, "\"exit_type\":\"Crashed\"", "\"exit_type\":\"Normal\"");
+    ReplaceAll(body, "\"exit_type\": \"Crashed\"", "\"exit_type\": \"Normal\"");
+    ReplaceAll(body, "\"exited_cleanly\":false", "\"exited_cleanly\":true");
+    ReplaceAll(body, "\"exited_cleanly\": false", "\"exited_cleanly\": true");
+    SetFilePointer(h, 0, nullptr, FILE_BEGIN);
+    DWORD w = 0;
+    WriteFile(h, body.data(), (DWORD)body.size(), &w, nullptr);
+    SetEndOfFile(h);
+    CloseHandle(h);
+}
+
+void PrepareIsolatedLaunchUserData(const std::wstring& userData) {
+    const std::wstring def = userData + L"\\Default";
+    CreateDirectoryW(userData.c_str(), nullptr);
+    CreateDirectoryW(def.c_str(), nullptr);
+    HANDLE fr = CreateFileW((userData + L"\\First Run").c_str(), GENERIC_WRITE, 0, nullptr,
+                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (fr != INVALID_HANDLE_VALUE) CloseHandle(fr);
+    DeleteFileW((def + L"\\Current Session").c_str());
+    DeleteFileW((def + L"\\Current Tabs").c_str());
+    DeleteFileW((def + L"\\Last Session").c_str());
+    DeleteFileW((def + L"\\Last Tabs").c_str());
+    WipeDirFiles(def + L"\\Sessions");
+    MarkProfileExitedCleanly(def + L"\\Preferences");
 }
 
 void CopyFileTo(const std::wstring& src, const std::wstring& dst) {
@@ -232,6 +532,147 @@ bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCd
     return DirExists(outCdpData);
 }
 
+std::string B64Encode16(const unsigned char raw[16]) {
+    static const char kTab[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string o;
+    o.resize(24);
+    int oix = 0;
+    for (int i = 0; i < 16; i += 3) {
+        unsigned v = (unsigned)raw[i] << 16;
+        if (i + 1 < 16) v |= (unsigned)raw[i + 1] << 8;
+        if (i + 2 < 16) v |= raw[i + 2];
+        o[oix++] = kTab[(v >> 18) & 63];
+        o[oix++] = kTab[(v >> 12) & 63];
+        o[oix++] = (i + 1 < 16) ? kTab[(v >> 6) & 63] : '=';
+        o[oix++] = (i + 2 < 16) ? kTab[v & 63] : '=';
+    }
+    o.resize(static_cast<size_t>(oix));
+    return o;
+}
+
+bool RecvExactFrom(SOCKET s, std::string& leftover, char* p, int n) {
+    int got = 0;
+    while (got < n) {
+        if (!leftover.empty()) {
+            const int take = (std::min)(n - got, static_cast<int>(leftover.size()));
+            memcpy(p + got, leftover.data(), static_cast<size_t>(take));
+            leftover.erase(0, static_cast<size_t>(take));
+            got += take;
+            continue;
+        }
+        const int r = recv(s, p + got, n - got, 0);
+        if (r <= 0) return false;
+        got += r;
+    }
+    return true;
+}
+
+bool ParseLoopbackWsUrl(const std::wstring& wsUrl, int* outPort, std::string* outPath) {
+    const std::string u = WideToUtf8(wsUrl);
+    const char* p = u.c_str();
+    if (u.rfind("ws://", 0) == 0)
+        p += 5;
+    else if (u.rfind("http://", 0) == 0)
+        p += 7;
+    else
+        return false;
+    if (*p == '[') {
+        const char* rb = strchr(p, ']');
+        if (!rb) return false;
+        p = rb + 1;
+    } else {
+        while (*p && *p != ':' && *p != '/') ++p;
+    }
+    int port = 80;
+    if (*p == ':') {
+        ++p;
+        port = 0;
+        while (*p >= '0' && *p <= '9') port = port * 10 + (*p++ - '0');
+    }
+    if (*p != '/' || port <= 0) return false;
+    if (outPort) *outPort = port;
+    if (outPath) *outPath = p;
+    return true;
+}
+
+bool WsSendText(SOCKET s, const std::string& msg) {
+    const uint64_t n = msg.size();
+    std::string framed;
+    framed.push_back(static_cast<char>(0x81));
+    if (n <= 125) {
+        framed.push_back(static_cast<char>(0x80 | static_cast<unsigned>(n)));
+    } else if (n <= 0xFFFF) {
+        framed.push_back(static_cast<char>(0x80 | 126));
+        framed.push_back(static_cast<char>(n >> 8));
+        framed.push_back(static_cast<char>(n));
+    } else {
+        framed.push_back(static_cast<char>(0x80 | 127));
+        for (int i = 7; i >= 0; --i) framed.push_back(static_cast<char>(n >> (8 * i)));
+    }
+    unsigned char mask[4] = {
+        static_cast<unsigned char>(GetTickCount()),
+        static_cast<unsigned char>(GetCurrentThreadId()),
+        static_cast<unsigned char>(n ^ 0xA5),
+        static_cast<unsigned char>(n >> 8),
+    };
+    framed.append(reinterpret_cast<char*>(mask), 4);
+    const size_t off = framed.size();
+    framed.resize(off + static_cast<size_t>(n));
+    for (uint64_t k = 0; k < n; ++k)
+        framed[off + static_cast<size_t>(k)] =
+            static_cast<char>(static_cast<unsigned char>(msg[static_cast<size_t>(k)]) ^ mask[k % 4]);
+    return send(s, framed.data(), static_cast<int>(framed.size()), 0) ==
+           static_cast<int>(framed.size());
+}
+
+bool WsRecvMessage(SOCKET s, std::string& leftover, std::string& out) {
+    out.clear();
+    for (;;) {
+        unsigned char h2[2];
+        if (!RecvExactFrom(s, leftover, reinterpret_cast<char*>(h2), 2)) return false;
+        const int opcode = h2[0] & 0x0F;
+        const bool fin = (h2[0] & 0x80) != 0;
+        const bool masked = (h2[1] & 0x80) != 0;
+        uint64_t len = h2[1] & 0x7F;
+        if (len == 126) {
+            unsigned char e[2];
+            if (!RecvExactFrom(s, leftover, reinterpret_cast<char*>(e), 2)) return false;
+            len = (static_cast<uint64_t>(e[0]) << 8) | e[1];
+        } else if (len == 127) {
+            unsigned char e[8];
+            if (!RecvExactFrom(s, leftover, reinterpret_cast<char*>(e), 8)) return false;
+            len = 0;
+            for (int i = 0; i < 8; ++i) len = (len << 8) | e[i];
+        }
+        unsigned char mask[4]{};
+        if (masked && !RecvExactFrom(s, leftover, reinterpret_cast<char*>(mask), 4)) return false;
+        if (len > 8ull * 1024ull * 1024ull) return false;
+        std::string payload(static_cast<size_t>(len), 0);
+        if (len && !RecvExactFrom(s, leftover, payload.data(), static_cast<int>(len))) return false;
+        if (masked) {
+            for (size_t k = 0; k < payload.size(); ++k)
+                payload[k] = static_cast<char>(static_cast<unsigned char>(payload[k]) ^ mask[k % 4]);
+        }
+        if (opcode == 0x8) return false;
+        if (opcode == 0x9) {
+            unsigned char pongHdr[2] = {0x8A, static_cast<unsigned char>(payload.size() <= 125
+                                                                            ? payload.size()
+                                                                            : 0)};
+            if (payload.size() <= 125) {
+                send(s, reinterpret_cast<char*>(pongHdr), 2, 0);
+                if (!payload.empty()) send(s, payload.data(), static_cast<int>(payload.size()), 0);
+            }
+            continue;
+        }
+        if (opcode == 0xA) continue;
+        out += payload;
+        if (fin && (opcode == 0x0 || opcode == 0x1 || opcode == 0x2)) return true;
+        if (!fin) continue;
+        return !out.empty();
+    }
+}
+
 }  // namespace
 
 void RequestCdpSessionResync() {
@@ -314,19 +755,12 @@ Session::Session() = default;
 Session::~Session() { Close(); }
 
 void Session::Close() {
-    if (ws_) {
-        WinHttpWebSocketClose((HINTERNET)ws_, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, nullptr, 0);
-        WinHttpCloseHandle((HINTERNET)ws_);
-        ws_ = nullptr;
+    if (wsSock_) {
+        SOCKET s = static_cast<SOCKET>(wsSock_);
+        closesocket(s);
+        wsSock_ = 0;
     }
-    if (connect_) {
-        WinHttpCloseHandle((HINTERNET)connect_);
-        connect_ = nullptr;
-    }
-    if (session_) {
-        WinHttpCloseHandle((HINTERNET)session_);
-        session_ = nullptr;
-    }
+    wsLeftover_.clear();
     pageWsUrl_.clear();
     browserVersion_.clear();
 }
@@ -336,37 +770,9 @@ bool Session::HttpGetLocal(int port, const wchar_t* path, std::string& body) {
 }
 
 bool Session::HttpLocal(int port, const wchar_t* method, const wchar_t* path, std::string& body) {
-    body.clear();
-    HINTERNET ses = WinHttpOpen(L"xcat-cdp/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!ses) return false;
-    WinHttpSetTimeouts(ses, 3000, 3000, 3000, 3000);
-    HINTERNET con = WinHttpConnect(ses, L"127.0.0.1", (INTERNET_PORT)port, 0);
-    if (!con) {
-        WinHttpCloseHandle(ses);
-        return false;
-    }
-    HINTERNET req =
-        WinHttpOpenRequest(con, method, path, nullptr, WINHTTP_NO_REFERER,
-                           WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    bool ok = false;
-    if (req && WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0,
-                                  0, 0) &&
-        WinHttpReceiveResponse(req, nullptr)) {
-        for (;;) {
-            DWORD avail = 0;
-            if (!WinHttpQueryDataAvailable(req, &avail) || avail == 0) break;
-            std::string chunk(avail, 0);
-            DWORD read = 0;
-            if (!WinHttpReadData(req, chunk.data(), avail, &read) || read == 0) break;
-            chunk.resize(read);
-            body += chunk;
-        }
-        ok = !body.empty();
-    }
-    if (req) WinHttpCloseHandle(req);
-    WinHttpCloseHandle(con);
-    WinHttpCloseHandle(ses);
+    int af = 0;
+    const bool ok = LoopbackHttp(port, method, path, body, &af, nullptr, nullptr, nullptr);
+    if (ok && af) loopbackFam_ = af;
     return ok;
 }
 
@@ -390,11 +796,17 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
         if (u.find("galaxy.games.gamania.com") != std::string::npos) return 80;
         // 启动参数 about:blank 常是用户看见的那一页；优先于 chrome://newtab
         if (u.empty() || u == "about:blank" || u.rfind("about:blank", 0) == 0) return 5;
-        if (u.rfind("chrome://", 0) == 0 || u.rfind("edge://", 0) == 0 ||
-            u.rfind("chrome-extension://", 0) == 0)
-            return 1;
         // /login、/error、oauth 半截：不优先附着（启动层会重新开 Galaxy）
         return 0;
+    };
+    auto isJunkTab = [](const std::string& urlUtf8) -> bool {
+        std::string u = urlUtf8;
+        for (auto& c : u)
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        return u.rfind("chrome-extension://", 0) == 0 || u.rfind("chrome://", 0) == 0 ||
+               u.rfind("edge://", 0) == 0 || u.rfind("devtools://", 0) == 0 ||
+               u.rfind("extension://", 0) == 0 || u.find("ntp.msn.com") != std::string::npos ||
+               u.find("msn.com/spartan") != std::string::npos;
     };
 
     if (HttpGetLocal(port, L"/json/list", body)) {
@@ -418,6 +830,9 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
                 std::string ws = JsonGetString(win, "webSocketDebuggerUrl");
                 if (!ws.empty()) {
                     std::string pageUrl = JsonGetString(win, "url");
+                    // Chrome 144 会把扩展 background.html 标成 page；挂上去 Navigate Galaxy 不会走
+                    //（AA7E 03:38：nkeimhogj…/background.html score=1，随后把真 blank 清掉）
+                    if (isJunkTab(pageUrl)) continue;
                     const int sc = scoreUrl(pageUrl);
                     // 同分保留先扫到的；有分的优先于 0
                     if (sc > bestScore || (bestWs.empty() && sc == 0 && bestScore < 0)) {
@@ -441,6 +856,7 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
     }
     body.clear();
     // 没有可用 page 时才新建（Chrome 新版本：/json/new 需 PUT）
+    LogLine(log, L"[cdp] 没有可附着的登录标签（已跳过扩展/chrome://），新建 about:blank");
     if (HttpLocal(port, L"PUT", L"/json/new", body)) {
         std::string ws = JsonGetString(body, "webSocketDebuggerUrl");
         if (!ws.empty()) {
@@ -453,114 +869,100 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
 }
 
 bool Session::OpenWs(const std::wstring& wsUrl, const LogFn& log) {
-    // WinHttpCrackUrl 不认 ws:// / wss://，先改成 http(s) 再解析
-    std::wstring crackUrl = wsUrl;
-    bool secure = false;
-    if (crackUrl.rfind(L"ws://", 0) == 0) {
-        crackUrl.replace(0, 5, L"http://");
-    } else if (crackUrl.rfind(L"wss://", 0) == 0) {
-        crackUrl.replace(0, 6, L"https://");
-        secure = true;
-    }
-    URL_COMPONENTS uc{};
-    uc.dwStructSize = sizeof(uc);
-    wchar_t host[256]{};
-    wchar_t path[2048]{};
-    uc.lpszHostName = host;
-    uc.dwHostNameLength = 256;
-    uc.lpszUrlPath = path;
-    uc.dwUrlPathLength = 2048;
-    if (!WinHttpCrackUrl(crackUrl.c_str(), 0, 0, &uc)) {
+    Close();
+    int port = 0;
+    std::string path;
+    if (!ParseLoopbackWsUrl(wsUrl, &port, &path) || path.empty()) {
         LogLine(log, L"[cdp] CrackUrl 失败 url=" + wsUrl.substr(0, 120));
         return false;
     }
-    if (uc.nScheme == INTERNET_SCHEME_HTTPS) secure = true;
-    HINTERNET ses = WinHttpOpen(L"xcat-cdp/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
-                                WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!ses) return false;
-    WinHttpSetTimeouts(ses, 10000, 10000, 30000, 30000);
-    HINTERNET con = WinHttpConnect(ses, host, uc.nPort, 0);
-    if (!con) {
-        WinHttpCloseHandle(ses);
-        return false;
+    int order[2] = {AF_INET, AF_INET6};
+    if (loopbackFam_ == AF_INET6) {
+        order[0] = AF_INET6;
+        order[1] = AF_INET;
     }
-    DWORD flags = secure ? WINHTTP_FLAG_SECURE : 0;
-    HINTERNET req = WinHttpOpenRequest(con, L"GET", path, nullptr, WINHTTP_NO_REFERER,
-                                       WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
-    if (!req) {
-        WinHttpCloseHandle(con);
-        WinHttpCloseHandle(ses);
-        return false;
+    unsigned char rawKey[16];
+    const DWORD mix = GetTickCount() ^ (GetCurrentThreadId() << 7);
+    for (int i = 0; i < 16; ++i)
+        rawKey[i] = static_cast<unsigned char>(mix >> (i % 4) * 8 ^ (i * 29));
+    const std::string keyB64 = B64Encode16(rawKey);
+    for (int k = 0; k < 2; ++k) {
+        const int af = order[k];
+        SOCKET s = INVALID_SOCKET;
+        if (!TcpConnectFam(af, port, 3000, &s)) continue;
+        char host[80]{};
+        if (af == AF_INET)
+            sprintf_s(host, "127.0.0.1:%d", port);
+        else
+            sprintf_s(host, "[::1]:%d", port);
+        char req[1536]{};
+        sprintf_s(req,
+                  "GET %s HTTP/1.1\r\n"
+                  "Host: %s\r\n"
+                  "Upgrade: websocket\r\n"
+                  "Connection: Upgrade\r\n"
+                  "Sec-WebSocket-Key: %s\r\n"
+                  "Sec-WebSocket-Version: 13\r\n"
+                  "\r\n",
+                  path.c_str(), host, keyB64.c_str());
+        const int reqLen = static_cast<int>(strlen(req));
+        if (send(s, req, reqLen, 0) != reqLen) {
+            closesocket(s);
+            continue;
+        }
+        std::string raw;
+        char buf[1024];
+        const DWORD t0 = GetTickCount();
+        while (GetTickCount() - t0 < 3000) {
+            const int n = recv(s, buf, sizeof(buf), 0);
+            if (n <= 0) break;
+            raw.append(buf, static_cast<size_t>(n));
+            if (raw.find("\r\n\r\n") != std::string::npos) break;
+            if (raw.size() > 8192) break;
+        }
+        if (raw.find("101") == std::string::npos || raw.find("\r\n\r\n") == std::string::npos) {
+            closesocket(s);
+            continue;
+        }
+        const size_t hdrEnd = raw.find("\r\n\r\n");
+        wsLeftover_ = raw.substr(hdrEnd + 4);
+        DWORD to = 8000;
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
+        wsSock_ = static_cast<std::uintptr_t>(s);
+        loopbackFam_ = af;
+        return true;
     }
-    if (!WinHttpSetOption(req, WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, nullptr, 0)) {
-        LogLine(log, L"[cdp] UPGRADE_TO_WEB_SOCKET 失败");
-        WinHttpCloseHandle(req);
-        WinHttpCloseHandle(con);
-        WinHttpCloseHandle(ses);
-        return false;
-    }
-    if (!WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0,
-                            0) ||
-        !WinHttpReceiveResponse(req, nullptr)) {
-        LogLine(log, L"[cdp] WebSocket 握手失败");
-        WinHttpCloseHandle(req);
-        WinHttpCloseHandle(con);
-        WinHttpCloseHandle(ses);
-        return false;
-    }
-    HINTERNET ws = WinHttpWebSocketCompleteUpgrade(req, 0);
-    WinHttpCloseHandle(req);
-    if (!ws) {
-        LogLine(log, L"[cdp] WebSocketCompleteUpgrade 失败");
-        WinHttpCloseHandle(con);
-        WinHttpCloseHandle(ses);
-        return false;
-    }
-    // 会话与连接句柄须保持打开，直至 WebSocket 关闭
-    session_ = ses;
-    connect_ = con;
-    ws_ = ws;
-    return true;
+    LogLine(log, L"[cdp] WebSocket 握手失败 port=" + std::to_wstring(port));
+    return false;
 }
 
 bool Session::SendRecv(const std::string& method, const std::string& paramsJson,
                        std::string& resultJson, const LogFn& log) {
     resultJson.clear();
-    if (!ws_) return false;
+    if (!wsSock_) return false;
+    SOCKET s = static_cast<SOCKET>(wsSock_);
     const int id = nextId_++;
     std::string msg = "{\"id\":" + std::to_string(id) + ",\"method\":\"" + method + "\"";
     if (!paramsJson.empty()) msg += ",\"params\":" + paramsJson;
     msg += "}";
-    if (WinHttpWebSocketSend((HINTERNET)ws_, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                             (PVOID)msg.data(), (DWORD)msg.size()) != ERROR_SUCCESS) {
+    if (!WsSendText(s, msg)) {
         LogLine(log, L"[cdp] WebSocketSend 失败 method=" + Utf8ToWide(method));
         return false;
     }
-    // 读到匹配 id 的响应（跳过事件）
     const DWORD t0 = GetTickCount();
-    std::string buf;
     while (GetTickCount() - t0 < 15000) {
-        BYTE chunk[8192];
-        DWORD got = 0;
-        WINHTTP_WEB_SOCKET_BUFFER_TYPE typ{};
-        DWORD st = WinHttpWebSocketReceive((HINTERNET)ws_, chunk, sizeof(chunk), &got, &typ);
-        if (st != ERROR_SUCCESS) {
+        std::string buf;
+        if (!WsRecvMessage(s, wsLeftover_, buf)) {
             LogLine(log, L"[cdp] WebSocketReceive 失败");
             return false;
         }
-        if (typ == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE) return false;
-        buf.append(reinterpret_cast<char*>(chunk), got);
-        if (typ == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE ||
-            typ == WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE)
-            continue;
-        // complete message
         const std::string idPat = "\"id\":" + std::to_string(id);
         if (buf.find(idPat) != std::string::npos) {
             resultJson = std::move(buf);
             return resultJson.find("\"error\"") == std::string::npos ||
                    resultJson.find("\"result\"") != std::string::npos;
         }
-        buf.clear();  // event, ignore
     }
     LogLine(log, L"[cdp] 等待响应超时 method=" + Utf8ToWide(method));
     return false;
@@ -781,17 +1183,14 @@ bool AnyChromiumHasDebugPort(int debugPort) {
 bool LaunchChromiumWithDebugPort(const BrowserProfile& profile, int port, const LogFn& log,
                                  DWORD* outPid) {
     if (outPid) *outPid = 0;
-    if (profile.exe.empty() || profile.userData.empty() || port <= 0) return false;
+    if (profile.exe.empty() || profile.userData.empty() || port < 0) return false;
 
-    {
-        const std::wstring def = profile.userData + L"\\Default";
-        DeleteFileW((def + L"\\Current Session").c_str());
-        DeleteFileW((def + L"\\Current Tabs").c_str());
-        DeleteFileW((def + L"\\Last Session").c_str());
-        DeleteFileW((def + L"\\Last Tabs").c_str());
-    }
+    PrepareIsolatedLaunchUserData(profile.userData);
 
     // 整行命令行；user-data-dir 加引号防空格路径
+    // 不钉 --remote-debugging-address=127.0.0.1：Hyper-V 常把 19223 的 IPv4 占成黑洞
+    //（WIN-20260826WCU：tcp=1 http=0），Chrome 绑 127.0.0.1 失败后窗仍开、CDP 永不起来。
+    // 让 Chrome 绑 localhost（::1 或 127.0.0.1）；HTTP 探活两族都试。port=0 则读 DevToolsActivePort。
     std::wstring cmd = L"\"";
     cmd += profile.exe;
     cmd += L"\" --remote-debugging-port=";
@@ -799,7 +1198,17 @@ bool LaunchChromiumWithDebugPort(const BrowserProfile& profile, int port, const 
     cmd += L" --remote-allow-origins=* --user-data-dir=\"";
     cmd += profile.userData;
     cmd += L"\" --no-first-run --no-default-browser-check"
-           L" --disable-session-crashed-bubble --new-window about:blank";
+           L" --force-renderer-accessibility"
+           L" --disable-session-crashed-bubble --hide-crash-restore-bubble"
+           // 独立罐登录只要几十秒：别去查更新，否则右上角弹「无法安装更新」（客户机 Chrome 120 已过期）。
+           L" --check-for-update-interval=31536000 --disable-background-networking"
+           // 独立罐勿弹「翻译此页」：翻译条会挡住账号卡，首点看起来像卡死（BIN 02:38 select-account）。
+           // Translate* 管 Chrome；msEdgeTranslate / msTranslate / 首次运行管 Edge。
+           L" --disable-translate --disable-sync --disable-infobars --disable-features="
+           L"Translate,TranslateUI,msEdgeTranslate,msTranslate,"
+           L"msEdgeFirstRunExperience,msImplicitSignin,"
+           L"ChromeWhatsNewUI,SafetyHub,OutdatedUpgradeBubble,InfiniteSessionRestore"
+           L" --new-window about:blank";
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -816,7 +1225,8 @@ bool LaunchChromiumWithDebugPort(const BrowserProfile& profile, int port, const 
     }
     if (outPid) *outPid = pi.dwProcessId;
     LogLine(log, L"[cdp] 已拉起浏览器 pid=" + std::to_wstring(pi.dwProcessId) + L" port=" +
-                     std::to_wstring(port));
+                     std::to_wstring(port) +
+                     (port == 0 ? L"（系统分配，等 DevToolsActivePort）" : L""));
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return true;
@@ -960,9 +1370,9 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
     }
     if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
 
-    // 自动登录前再清一轮占用目标目录的主进程（Resolve 已对日常目录做过）
+    // 自动登录前清占用独立罐的进程（含上次残留的 --remote-debugging-port=19223 黑洞实例）
     {
-        const unsigned n = KillBrowsersBlockingProfile(profile, port, log);
+        const unsigned n = KillBrowsersBlockingProfile(profile, -1, log);
         if (n > 0) Sleep(800);
     }
 
@@ -972,9 +1382,10 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
         return false;
     }
 
+    int launchPort = port;
     auto tryLaunch = [&]() -> bool {
         DWORD pid = 0;
-        if (!LaunchChromiumWithDebugPort(profile, port, log, &pid)) {
+        if (!LaunchChromiumWithDebugPort(profile, launchPort, log, &pid)) {
             std::wstring hint = L"启动浏览器失败（CreateProcess）。请确认 Edge/Chrome 可手动打开后重试。";
             LogLine(log, L"[cdp] " + hint);
             if (outFailHint) *outFailHint = hint;
@@ -986,30 +1397,92 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
     if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
     if (!tryLaunch()) return false;
 
-    // 等待调试口；若进程未带上调试参数（Edge Singleton/Shell 丢参），杀主进程后重开，切勿空等。
+    // 等待 CDP HTTP。tcp=1 不等于调试口：Hyper-V/WinNAT 会占 19223，接 TCP 但不说 HTTP
+    //（WIN-20260826WCU 0.1.189：全程 tcp=1 http=0，窗停在 about:blank）。
     int relaunches = 0;
-    for (int i = 0; i < 50; ++i) {
+    for (int i = 0; i < 40; ++i) {
         if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
-        Sleep(400);
-        if (Connect(port, log)) {
+        Sleep(250);
+        int filePort = 0;
+        ReadDevToolsActivePort(profile.userData, &filePort);
+        const int candidates[3] = {filePort, launchPort, port};
+        bool http = false;
+        int livePort = 0;
+        bool tcp4 = false;
+        bool tcp6 = false;
+        std::string peek;
+        std::string ver;
+        for (int ci = 0; ci < 3; ++ci) {
+            const int tp = candidates[ci];
+            if (tp <= 0) continue;
+            bool dup = false;
+            for (int pj = 0; pj < ci; ++pj) {
+                if (candidates[pj] == tp) dup = true;
+            }
+            if (dup) continue;
+            bool t4 = false;
+            bool t6 = false;
+            std::string p;
+            int af = 0;
+            if (LoopbackHttp(tp, L"GET", L"/json/version", ver, &af, &p, &t4, &t6)) {
+                http = true;
+                livePort = tp;
+                tcp4 = t4;
+                tcp6 = t6;
+                peek = std::move(p);
+                loopbackFam_ = af;
+                break;
+            }
+            const int logPort = filePort > 0 ? filePort : (launchPort > 0 ? launchPort : port);
+            if (tp == logPort) {
+                tcp4 = t4;
+                tcp6 = t6;
+                peek = std::move(p);
+            }
+        }
+        if (i == 0 || i == 3 || i == 8 || (i % 10) == 9) {
+            LogLine(log, L"[cdp] 等待调试口 tick=" + std::to_wstring(i) + L" tcp4=" +
+                             (tcp4 ? L"1" : L"0") + L" tcp6=" + (tcp6 ? L"1" : L"0") + L" http=" +
+                             (http ? L"1" : L"0") + L" want=" + std::to_wstring(launchPort) +
+                             L" file=" + std::to_wstring(filePort) + L" peek=" + Utf8ToWide(peek));
+        }
+        if (http && Connect(livePort, log)) {
             if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
             return true;
         }
 
-        const bool checkpoint = (i == 8 || i == 18 || i == 30 || i == 40);
+        const bool checkpoint = (i == 4 || i == 10 || i == 18 || i == 28);
         if (!checkpoint) continue;
 
-        if (AnyChromiumHasDebugPort(port)) {
-            // 已有带调试口的进程，继续等口起来（启动慢）
-            LogLine(log, L"[cdp] 已检测到调试口进程，继续等待 port=" + std::to_wstring(port));
+        if (!http && relaunches < 2) {
+            const bool blackHole = (tcp4 || tcp6) && filePort <= 0;
+            const bool stillBooting = !tcp4 && !tcp6 && i < 10;
+            const bool fileButNoHttp = filePort > 0 && i < 18;
+            if (stillBooting || fileButNoHttp) {
+                LogLine(log, L"[cdp] 已检测到调试口进程，继续等待 file=" +
+                                 std::to_wstring(filePort) + L" tcp4=" + (tcp4 ? L"1" : L"0") +
+                                 L" tcp6=" + (tcp6 ? L"1" : L"0"));
+                continue;
+            }
+            if (!blackHole && i < 10) continue;
+            LogLine(log, L"[cdp] 调试口无 HTTP（file=" + std::to_wstring(filePort) + L" tcp4=" +
+                             (tcp4 ? L"1" : L"0") + L" tcp6=" + (tcp6 ? L"1" : L"0") + L" peek=" +
+                             Utf8ToWide(peek) + L"），改用系统分配端口重开…");
+            if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
+            (void)KillBrowsersBlockingProfile(profile, -1, log);
+            Sleep(600);
+            launchPort = 0;
+            if (!tryLaunch()) return false;
+            ++relaunches;
             continue;
         }
 
         if (relaunches >= 2) continue;
         if (msc::launcher::GamaPassLoginCanceled()) return failCanceled();
-        LogLine(log, L"[cdp] 未检测到带调试口的浏览器进程，防呆结束占用后重开…");
-        (void)KillBrowsersBlockingProfile(profile, port, log);
+        LogLine(log, L"[cdp] 未检测到可用调试口，防呆结束占用后重开…");
+        (void)KillBrowsersBlockingProfile(profile, -1, log);
         Sleep(600);
+        launchPort = 0;
         if (!tryLaunch()) return false;
         ++relaunches;
     }
@@ -1019,8 +1492,8 @@ bool Session::EnsureBrowser(const BrowserProfile& profile, int port, const LogFn
         return false;
     }
     const std::wstring hint =
-        L"等待浏览器调试口超时。官方 Chrome 应走 GamaPassCdpProfile 副本；"
-        L"若仍超时，请检查副本是否被占用，或改用 Edge / Chrome++ 直开日常目录。";
+        L"等待浏览器调试口超时。19223 上有 TCP 不等于 Chrome CDP（Hyper-V 常占成黑洞）。"
+        L"已尝试系统分配端口；若仍失败请关掉独立罐 Chrome 后重试。";
     LogLine(log, L"[cdp] " + hint);
     if (!AnyChromiumHasDebugPort(port)) {
         LogLine(log, L"[cdp] 诊断：全程未出现 cmdline 含 --remote-debugging-port=" +
@@ -1192,6 +1665,34 @@ bool Session::ActivateAttachedPage(const LogFn& log) {
     return false;
 }
 
+bool Session::ClickViewport(double x, double y, const LogFn& log) {
+    auto send = [&](const char* type, const char* button, int clickCount) -> bool {
+        char buf[288];
+        sprintf_s(buf,
+                  "{\"type\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"button\":\"%s\",\"clickCount\":%d,"
+                  "\"pointerType\":\"mouse\"}",
+                  type, x, y, button, clickCount);
+        std::string res;
+        return SendRecv("Input.dispatchMouseEvent", buf, res, log);
+    };
+    (void)ActivateAttachedPage(log);
+    if (!send("mouseMoved", "none", 0)) {
+        LogLine(log, L"[cdp] Input.mouseMoved 失败");
+        return false;
+    }
+    Sleep(20);
+    if (!send("mousePressed", "left", 1)) {
+        LogLine(log, L"[cdp] Input.mousePressed 失败");
+        return false;
+    }
+    Sleep(30);
+    if (!send("mouseReleased", "left", 1)) {
+        LogLine(log, L"[cdp] Input.mouseReleased 失败");
+        return false;
+    }
+    return true;
+}
+
 bool Session::QuitBrowser(int port, const LogFn& log) {
     if (port <= 0) port = port_ > 0 ? port_ : kDefaultRemoteDebugPort;
     std::string ver;
@@ -1215,10 +1716,7 @@ bool Session::QuitBrowser(int port, const LogFn& log) {
     const int id = nextId_++;
     const std::string msg =
         std::string("{\"id\":") + std::to_string(id) + ",\"method\":\"Browser.close\",\"params\":{}}";
-    const DWORD sendSt =
-        WinHttpWebSocketSend((HINTERNET)ws_, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-                             (PVOID)msg.data(), (DWORD)msg.size());
-    if (sendSt != ERROR_SUCCESS) {
+    if (!WsSendText(static_cast<SOCKET>(wsSock_), msg)) {
         LogLine(log, L"[cdp] Browser.close 发送失败");
         Close();
         return false;
@@ -1270,6 +1768,7 @@ unsigned KillBrowsersOnDebugPort(int port, const LogFn& log) {
 
 bool Session::IsPortAlive(int port) {
     if (port <= 0) return false;
+    if (!TcpLoopbackOpen(port, 200)) return false;
     Session s;
     std::string ver;
     return s.HttpGetLocal(port, L"/json/version", ver);

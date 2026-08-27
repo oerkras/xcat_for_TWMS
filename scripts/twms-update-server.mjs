@@ -345,6 +345,15 @@ function parseWealthScrollsHeader(raw) {
   return parts.join(",").slice(0, 360);
 }
 
+/** 标题栏金/经每分钟（整数；非法则 null）。 */
+function parseRateHeader(raw) {
+  const s = String(raw || "").trim();
+  if (!/^-?\d{1,18}$/.test(s)) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
+}
+
 function clientIdentityFromReq(req) {
   const macRaw = headerText(req, "x-xcat-mac");
   const macs = access.parseMacList(macRaw);
@@ -364,11 +373,19 @@ function clientIdentityFromReq(req) {
   const wealthScrolls = hasWealthHeader
     ? parseWealthScrollsHeader(headerText(req, "x-xcat-wealth-scrolls"))
     : "";
+  const expPerMinRaw = headerText(req, "x-xcat-exp-per-min");
+  const mesoPerMinRaw = headerText(req, "x-xcat-meso-per-min");
+  const expPerMin = parseRateHeader(expPerMinRaw);
+  const mesoPerMin = parseRateHeader(mesoPerMinRaw);
+  const hasRateHeader = expPerMin != null && mesoPerMin != null;
   const mapIdRaw = headerText(req, "x-xcat-map-id");
   const channelRaw = headerText(req, "x-xcat-channel");
   const mapName = decodeCharHeaderText(headerText(req, "x-xcat-map-name"), 64);
   const mapId = /^\d+$/.test(mapIdRaw) ? Number(mapIdRaw) : null;
   const channelId = /^-?\d+$/.test(channelRaw) ? Number(channelRaw) : null;
+  const worldIdRaw = headerText(req, "x-xcat-world-id");
+  const worldId = /^-?\d+$/.test(worldIdRaw) ? Number(worldIdRaw) : null;
+  const worldName = decodeCharHeaderText(headerText(req, "x-xcat-world-name"), 32);
   const deviceId = headerText(req, "x-xcat-device-id").slice(0, 64);
   // 新客户端发派生凭证（整张卡不上网）；老客户端仍发整张卡，两者都认，优先前者。
   const gateProof = headerText(req, "x-xcat-gate-proof").slice(0, 400);
@@ -394,11 +411,17 @@ function clientIdentityFromReq(req) {
     charMeso,
     hasWealthHeader,
     wealthScrolls,
+    hasRateHeader,
+    expPerMin,
+    mesoPerMin,
     hasChar: !!(charName && charLevel != null && charLevel > 0),
     mapId,
     mapName,
     channelId,
     hasMap: !!(mapId != null && mapId > 0) || !!(channelId != null && channelId > 0),
+    worldId,
+    worldName,
+    hasWorld: !!(worldId != null && worldId > 0),
   };
 }
 
@@ -561,6 +584,16 @@ function hydrateCharFromHistory(row) {
   if (!row.charJobName && prev.charJobName) row.charJobName = String(prev.charJobName).slice(0, 32);
 }
 
+function hydrateWorldFromHistory(row) {
+  if (!row || row.worldId) return;
+  const prev =
+    clientHistory.get(row.key) ||
+    (row.deviceId ? clientHistory.getByDeviceId(row.deviceId) : null);
+  if (!prev?.worldId) return;
+  row.worldId = prev.worldId;
+  if (!row.worldName && prev.worldName) row.worldName = String(prev.worldName).slice(0, 32);
+}
+
 function pruneActiveClients(now = Date.now()) {
   for (const [k, v] of activeClients) {
     // 下包 / latest.json 不带头，曾经按 ip: 建过空壳行。那些行没有身份，运维台看起来像「无名氏探活」。
@@ -591,10 +624,16 @@ function touchClient({
   hasChar,
   hasWealthHeader,
   wealthScrolls,
+  hasRateHeader,
+  expPerMin,
+  mesoPerMin,
   mapId,
   mapName,
   channelId,
   hasMap,
+  worldId,
+  worldName,
+  hasWorld,
 }) {
   if (!ip || ip === "unknown") return;
   const now = Date.now();
@@ -626,9 +665,14 @@ function touchClient({
       charMeso: "",
       hasWealthScrolls: false,
       wealthScrolls: "",
+      hasRates: false,
+      expPerMin: 0,
+      mesoPerMin: 0,
       mapId: 0,
       mapName: "",
       channelId: 0,
+      worldId: 0,
+      worldName: "",
       firstSeenMs: now,
       lastSeenMs: now,
       hits: 0,
@@ -663,7 +707,15 @@ function touchClient({
   }
   // 仅在探活带上有效角色快照时刷新；未进图的请求不抹掉上次快照。
   if (hasChar) {
-    row.charName = String(charName || "").slice(0, 48);
+    const nextName = String(charName || "").slice(0, 48);
+    const prevName = row.charName || "";
+    const switched = !!(prevName && nextName && prevName !== nextName);
+    if (switched) {
+      logInfo(
+        `char switch ip=${ip} ${prevName} -> ${nextName} uid=${row.uid || "-"} device=${row.deviceId || "-"}`,
+      );
+    }
+    row.charName = nextName;
     row.charLevel = Number.isFinite(charLevel) ? Math.max(0, Math.floor(charLevel)) : 0;
     row.charJob = Number.isFinite(charJob) ? Math.floor(charJob) : 0;
     row.charJobName = String(charJobName || "").slice(0, 32);
@@ -671,6 +723,18 @@ function touchClient({
     if (hasWealthHeader) {
       row.hasWealthScrolls = true;
       row.wealthScrolls = String(wealthScrolls || "").slice(0, 360);
+    } else if (switched) {
+      row.hasWealthScrolls = false;
+      row.wealthScrolls = "";
+    }
+    if (hasRateHeader) {
+      row.hasRates = true;
+      row.expPerMin = expPerMin;
+      row.mesoPerMin = mesoPerMin;
+    } else if (switched) {
+      row.hasRates = false;
+      row.expPerMin = 0;
+      row.mesoPerMin = 0;
     }
   } else {
     // 重启 / 更新后第一轮探活常不带角色（游戏还没进）。内存快照没了，从落盘历史补回名字。
@@ -685,6 +749,38 @@ function touchClient({
       if (name) row.mapName = name;
     }
     if (Number.isFinite(channelId) && channelId > 0) row.channelId = Math.floor(channelId);
+  }
+  // 分区进图后基本不变：有头才写，缺头不抹。
+  if (hasWorld) {
+    row.worldId = Math.floor(worldId);
+    const wn = String(worldName || "").slice(0, 32);
+    if (wn) row.worldName = wn;
+  } else {
+    hydrateWorldFromHistory(row);
+  }
+  if (hasChar) {
+    const snap = `${row.charName}|${row.charLevel}|${row.charMeso}|${row.mapId || 0}|${row.channelId || 0}|${row.worldId || 0}`;
+    if (row.lastProbeSnap !== snap) {
+      row.lastProbeSnap = snap;
+      appendAccessLog({
+        t: ts(new Date(now)),
+        kind: "probe",
+        ip,
+        machine: row.machine || undefined,
+        deviceId: row.deviceId || undefined,
+        uid: row.uid || undefined,
+        charName: row.charName,
+        charLevel: row.charLevel,
+        charMeso: row.charMeso,
+        expPerMin: row.hasRates ? row.expPerMin : undefined,
+        mesoPerMin: row.hasRates ? row.mesoPerMin : undefined,
+        mapId: row.mapId || undefined,
+        mapName: row.mapName || undefined,
+        channelId: row.channelId || undefined,
+        worldId: row.worldId || undefined,
+        worldName: row.worldName || undefined,
+      });
+    }
   }
   row.identified = !!(
     row.machine ||
@@ -878,9 +974,14 @@ function listActiveClients(activeSec) {
         charMeso: row.charMeso || "",
         hasWealthScrolls: !!row.hasWealthScrolls,
         wealthScrolls: row.wealthScrolls || "",
+        hasRates: !!row.hasRates,
+        expPerMin: row.hasRates ? row.expPerMin || 0 : 0,
+        mesoPerMin: row.hasRates ? row.mesoPerMin || 0 : 0,
         mapId: row.mapId || 0,
         mapName: row.mapName || "",
         channelId: row.channelId || 0,
+        worldId: row.worldId || 0,
+        worldName: row.worldName || "",
         identified: !!row.identified,
         sameIpOnline: byIp.get(row.ip) || 1,
         knownOnIp: devicesByIp.get(row.ip)?.size || 0,
@@ -1064,10 +1165,16 @@ function recordRequest({
   hasChar,
   hasWealthHeader,
   wealthScrolls,
+  hasRateHeader,
+  expPerMin,
+  mesoPerMin,
   mapId,
   mapName,
   channelId,
   hasMap,
+  worldId,
+  worldName,
+  hasWorld,
 }) {
   stats.requestsTotal += 1;
   stats.lastRequestAt = ts();
@@ -1101,10 +1208,16 @@ function recordRequest({
     hasChar,
     hasWealthHeader,
     wealthScrolls,
+    hasRateHeader,
+    expPerMin,
+    mesoPerMin,
     mapId,
     mapName,
     channelId,
     hasMap,
+    worldId,
+    worldName,
+    hasWorld,
   });
 
   if (isQuietForcePoll(status, kind, routedPath)) return;
@@ -1152,10 +1265,16 @@ function attachRequestRecorder(req, res, meta) {
       hasChar: id.hasChar,
       hasWealthHeader: id.hasWealthHeader,
       wealthScrolls: id.wealthScrolls,
+      hasRateHeader: id.hasRateHeader,
+      expPerMin: id.expPerMin,
+      mesoPerMin: id.mesoPerMin,
       mapId: id.mapId,
       mapName: id.mapName,
       channelId: id.channelId,
       hasMap: id.hasMap,
+      worldId: id.worldId,
+      worldName: id.worldName,
+      hasWorld: id.hasWorld,
     });
   });
 }

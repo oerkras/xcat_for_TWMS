@@ -20,6 +20,8 @@ bool IsDesired();
 // why=="soft_login" 时开快轨：Connected/点区/选频/离频/选角 settle 压到最短、
 // **仅该轮**优先粘 sticky（不可用则候选池随机，不就近/不偏人少）；
 // 频道 UI 已武装到 sticky 则跳过 SelectChannel 直 GoWorld。
+// why=="char_ui"：Done/Failed 后现采到选角页仍在，只解锁重跑（不开 softFast、
+// 不 CloseSession、不换频）。WaitWorldList 见选角则跳过分区/频道。
 // worker 可调；下一拍 Tick 会进 WaitWorldList。
 // 若选角页已在（avatars>0 且 loginPhase=2），跳过频道 resume/GoWorld，直进选角。
 void RequestRestart(const char* why);

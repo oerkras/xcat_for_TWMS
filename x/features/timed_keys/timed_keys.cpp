@@ -7,6 +7,7 @@
 #include "../ports/action_gate.h"
 #include "../ports/input_port.h"
 #include "../ports/world_port.h"
+#include "../auto_supply/auto_supply.h"
 #include "../../ipc/payload_timed_keys.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
@@ -408,12 +409,15 @@ void TickOnce(DWORD now) {
         g_landingQuietUntil && static_cast<int>(now - g_landingQuietUntil) < 0;
     const bool teleportBlocked = ports::action_gate::IsTeleportBlocked();
     const bool foreignBusy = ports::action_gate::IsSkillCastBusy();
-    if (teleportBlocked || landingQuiet || foreignBusy) {
+    const bool supplyBusy = x::features::auto_supply::IsBusy();
+    if (teleportBlocked || landingQuiet || foreignBusy || supplyBusy) {
         ExclusiveLock lock(g_lock);
         auto& slot = g_slots[due.index];
-        const char* why = foreignBusy
-                              ? "buff_casting"
-                              : (teleportBlocked ? "teleport_transit" : "landing_quiet");
+        const char* why = supplyBusy
+                              ? "auto_supply"
+                              : (foreignBusy ? "buff_casting"
+                                             : (teleportBlocked ? "teleport_transit"
+                                                                : "landing_quiet"));
         if (slot.enabled && slot.vk == due.vk && !slot.halted && !slot.queued &&
             g_queueCount < xcat::kTimedKeySlotCount) {
             const size_t pos = (g_queueHead + g_queueCount) % xcat::kTimedKeySlotCount;

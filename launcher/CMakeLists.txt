@@ -30,6 +30,7 @@ endif()
 target_link_libraries(msc_launch PUBLIC
   shell32
   advapi32
+  ws2_32
   winhttp
   ole32
   oleaut32

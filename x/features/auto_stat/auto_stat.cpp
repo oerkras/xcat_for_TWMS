@@ -17,6 +17,7 @@
 #include "../../ui/player_vitals.h"
 #include "../auto_lie/auto_lie.h"
 #include "../ports/world_port.h"
+#include "../soft_login_probe/soft_login_probe.h"
 #include "../travel/travel.h"
 
 #include "xcat_auto_stat.h"
@@ -158,8 +159,9 @@ void ResetAlloc() {
 void TryPersistOff(const char* why) {
     if (!gNeedPersistOff) return;
     xcat::AutoStatConfig disk{};
-    if (xcat::ReadAutoStat(x::runtime::GetBinDir(), disk) && disk.writeTickMs > gPersistOffTick) {
-        gNeedPersistOff = false;  // 盘上有更新写入（用户重开）
+    if (xcat::ReadAutoStat(x::runtime::GetBinDir(), disk) &&
+        xcat::AutoStatPersistDiskIsUserReopen(disk.writeTickMs, gPersistOffTick)) {
+        gNeedPersistOff = false;
         return;
     }
     gCfg.enabled = 0;
@@ -177,8 +179,17 @@ void PersistDisabled(const char* why) {
     gCfg.enabled = 0;
     ResetPending();
     gNeedPersistOff = true;
-    gPersistOffTick = 0;  // 允许覆盖盘上旧的 enabled=1
+    gPersistOffTick = 0;  // 尚未写盘；TryPersistOff 必须覆盖旧 enabled=1
     TryPersistOff(why);
+}
+
+void AbandonPending(const char* why) {
+    if (!gPendingVerify) return;
+    x::runtime::LogW("AutoStat", "取消在途 +%s（%s）",
+                     (gLastPick >= 0 && gLastPick < kStatCount) ? kStatName[gLastPick] : "?",
+                     why ? why : "?");
+    ResetPending();
+    ResetFail();
 }
 
 bool ResolveSendOnMain() {
@@ -318,9 +329,8 @@ SendResult SendAp(int idx, uint32_t expectCid) {
 void Tick(DWORD now) {
     if (!gCfg.enabled) return;
     if (!xcat::AutoStatRatioOk(gCfg)) return;
-    // 离图 / 测谎 / 赶路只跳过：保留 pending，避免过门或轨迹踢期间清确认态导致连发。
-    if (!ports::world::IsPlayReady()) return;
     // SendAp 与进门同一把 WM 独占锁 type=500。D217 02:27：加点连发时 Up 发门超时 / fake-up。
+    // 赶路必须先于 !PlayReady：过门期间 Field 会掉，但包可能落地，清 pending 会连发。
     if (travel::IsActive()) {
         if (!gTravelBusy) {
             gTravelBusy = true;
@@ -342,6 +352,14 @@ void Tick(DWORD now) {
     if (gLieBusy) {
         gLieBusy = false;
         x::runtime::LogI("AutoStat", "测谎结束，恢复加点");
+    }
+    // 过门 Field 会掉：只跳过、保留 pending。软重连 / CloseSession 则在途包已废——
+    // 0CAB 01:22 hangup_timer 后 DEX 34→34 连 miss 把开关静默掐死。
+    if (!ports::world::IsPlayReady()) {
+        if (soft_login_probe::IsHoldActive() || soft_login_probe::IsAttemptBusy()) {
+            AbandonPending("软重连/会话中断");
+        }
+        return;
     }
     const DWORD pollGap =
         (gPendingVerify || (gLastUseMs && static_cast<int>(now - gLastUseMs) < 3000))
@@ -416,7 +434,9 @@ void Tick(DWORD now) {
                              (gLastPick >= 0 && gLastPick < kStatCount) ? kStatName[gLastPick] : "?",
                              static_cast<long long>(gStatBefore), static_cast<long long>(cur),
                              gFailStreak);
-            if (gFailStreak >= kMaxFail) PersistDisabled("确认超时");
+            if (gFailStreak >= kMaxFail) {
+                AbandonPending("确认超时，稍后重试（不关开关）");
+            }
             return;
         }
     }

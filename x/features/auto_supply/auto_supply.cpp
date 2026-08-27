@@ -157,6 +157,7 @@ int gPlannedPrice[kBuySlotCount]{}; // 对应单价，买入时再按实时 meso
 
 std::atomic<bool> gStop{false};
 std::atomic<HANDLE> gThread{nullptr};
+std::atomic<bool> gPreSupplyHold{false};  // Idle 上等 hangup 再开趟：遇人/重连换频让路
 
 constexpr DWORD kBagPollMs = 2500;   // 缺药/自定义/饲料低库存监视（主线程扫栏，保持节流）
 constexpr DWORD kBoundPeekMs = 500;  // 绑定药 ID → status → 面板补红/蓝对齐（跟手）
@@ -391,10 +392,25 @@ void EnsureSafeLandIfAirborne(DWORD now) {
 
 void RearmLowStockLatchesAfterTrip(const char* why);
 
+void ArmPreSupplyHold(const char* why) {
+    bool expected = false;
+    if (gPreSupplyHold.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        runtime::LogI("AutoSupply", "pre_supply hold arm (%s) — encounter/reconnect-hop yield",
+                      why ? why : "");
+    }
+}
+
+void ClearPreSupplyHold(const char* why) {
+    if (gPreSupplyHold.exchange(false, std::memory_order_acq_rel)) {
+        runtime::LogI("AutoSupply", "pre_supply hold clear (%s)", why ? why : "");
+    }
+}
+
 void FailTrip(const char* why) {
     travel::RequestStop();
     sellbag::Abort(why);
     ResumeSystems();
+    ClearPreSupplyHold("fail_trip");
     gManualTrip = false;
     gRechargeReq.store(false, std::memory_order_release);
     gPendingReturnFarm = false;
@@ -825,6 +841,38 @@ int CountConsume(int itemId) {
     return present ? count : 0;
 }
 
+bool ItemIdIsReturnScroll(int id) {
+    if (id <= 0) return false;
+    return id == ParseItemCode(xcat::kAutoSupplyDefaultReturnScrollCode) ||
+           id == ParseItemCode(xcat::kAutoSupplyAltReturnScrollCode);
+}
+
+bool CodeIsReturnScroll(const char* code) { return ItemIdIsReturnScroll(ParseItemCode(code)); }
+
+int CountReturnScrolls() {
+    return CountConsume(ParseItemCode(xcat::kAutoSupplyDefaultReturnScrollCode)) +
+           CountConsume(ParseItemCode(xcat::kAutoSupplyAltReturnScrollCode));
+}
+
+bool CustomSlotCoversReturnScroll() {
+    // 必须 buyTo>0 才交给 PlanRefills；否则专用步仍按保底 1 张买，避免勾了回家卷、补到 0 时两头都不买。
+    return (gCfg.refillCustomEnabled != 0 && CodeIsReturnScroll(gCfg.refillCustomCode) &&
+            gCfg.refillCustomBuyTo > 0) ||
+           (gCfg.refillCustom2Enabled != 0 && CodeIsReturnScroll(gCfg.refillCustom2Code) &&
+            gCfg.refillCustom2BuyTo > 0);
+}
+
+// 自定义槽若勾了回家卷 → 用「补到 N」；否则每趟只保证至少 1 张，不再无限 +1。
+int ReturnScrollTargetQty() {
+    if (gCfg.refillCustomEnabled != 0 && CodeIsReturnScroll(gCfg.refillCustomCode) &&
+        gCfg.refillCustomBuyTo > 0)
+        return gCfg.refillCustomBuyTo;
+    if (gCfg.refillCustom2Enabled != 0 && CodeIsReturnScroll(gCfg.refillCustom2Code) &&
+        gCfg.refillCustom2BuyTo > 0)
+        return gCfg.refillCustom2BuyTo;
+    return 1;
+}
+
 void StartReturnOrDone() {
     NotifyIfStillLowAfterTrip();
     RearmLowStockLatchesAfterTrip("supply_done");
@@ -917,7 +965,7 @@ void PlanRefillsWithMeso() {
         if (!en || buyTo <= 0 || n >= kBuySlotCount) return;
         const int id = ParseItemCode(code);
         if (id <= 0) return;
-        const int have = CountConsume(id);
+        const int have = ItemIdIsReturnScroll(id) ? CountReturnScrolls() : CountConsume(id);
         if (have >= buyTo) return;
         bool inShop = false;
         int price = 0;
@@ -1063,9 +1111,15 @@ bool FireAutoTrip(bool potionFire, bool customFire, bool custom2Fire, bool feedF
                   int used, int cap, const char* potionWhy, const char* customWhy,
                   const char* custom2Why, const char* feedWhy) {
     if (gPhase != Phase::Idle) return false;
+    // 先硬闸再寻店：补给/战斗不同线程，ResolveShop 期间还能挥最后一刀把会话打脏。
+    // hold：phase 仍 Idle 时 IsBusy 也要真，挡住定时键/BUFF。
+    PauseSystems();
+    ArmPreSupplyHold("fire_resolve");
     char msg[96]{};
     if (!ResolveShopTarget(msg, sizeof(msg))) {
         SetMsg(msg[0] ? msg : "自动寻店失败");
+        ClearPreSupplyHold("shop_resolve_fail");
+        ResumeSystems();
         return false;
     }
     gShopExclude[0] = 0;
@@ -1117,6 +1171,8 @@ bool FireAutoTrip(bool potionFire, bool customFire, bool custom2Fire, bool feedF
         runtime::LogI("AutoSupply", "装备触发 %d/%d thr=%d → shop=%s", used, cap, gEquipTrigger,
                       gShopMap);
     } else {
+        ClearPreSupplyHold("fire_no_trigger");
+        ResumeSystems();
         return false;
     }
     sPotionLowStreak = 0;
@@ -1130,6 +1186,7 @@ bool FireAutoTrip(bool potionFire, bool customFire, bool custom2Fire, bool feedF
     // （200ms）；若当拍后挂上 HangupWash，TickPause 会先 return，打怪一直不停。
     PauseSystems();
     Enter(Phase::Pause, pauseMsg);
+    ClearPreSupplyHold("fire_trip");
     return true;
 }
 
@@ -1151,6 +1208,7 @@ void TickIdle(DWORD now) {
             return;
         }
         if (!ports::mob_gather::SoftReloginAllowsAutoSell()) {
+            ArmPreSupplyHold("pre_supply_manual");
             (void)ports::mob_gather::HangupBeforeOtherAction("pre_supply_manual");
             static DWORD sManualDeferLog = 0;
             if (!sManualDeferLog || now - sManualDeferLog >= 4000) {
@@ -1161,6 +1219,7 @@ void TickIdle(DWORD now) {
             return;
         }
         if (!ports::world::IsPlayReady() || sellbag::IsBusy() || travel::IsActive()) return;
+        PauseSystems();
         char msg[96]{};
         if (!ResolveShopTarget(msg, sizeof(msg))) {
             gTripReq.store(false, std::memory_order_release);
@@ -1170,6 +1229,7 @@ void TickIdle(DWORD now) {
             return;
         }
         gTripReq.store(false, std::memory_order_release);
+        ClearPreSupplyHold("manual_trip");
         // 开趟优先：丢掉挂起的一键充，避免回 Idle 后迟到弹「请先开店」
         gRechargeReq.store(false, std::memory_order_release);
         // 用户显式开趟：取消崩溃续跑，避免先回挂机再卖
@@ -1261,13 +1321,19 @@ void TickIdle(DWORD now) {
         }
     }
 
-    if (!gDesired.load()) return;
+    if (!gDesired.load()) {
+        ClearPreSupplyHold("disabled");
+        return;
+    }
     if (now < gCooldownUntil) return;
     if (gLastBagPoll && now - gLastBagPoll < kBagPollMs) return;
     gLastBagPoll = now;
 
     if (!ports::world::IsPlayReady()) return;
-    if (char_boot::IsBusy()) return;
+    if (char_boot::IsBusy()) {
+        ClearPreSupplyHold("char_boot");
+        return;
+    }
     if (sellbag::IsBusy() || travel::IsActive()) return;
 
     char potionWhy[96]{};
@@ -1298,9 +1364,13 @@ void TickIdle(DWORD now) {
         (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0);
     int used = 0, cap = 0;
     const bool equipMet = sellTriggerOn && EquipTriggerMet(used, cap);
-    if (!potionFire && !customFire && !custom2Fire && !feedFire && !equipMet) return;
+    if (!potionFire && !customFire && !custom2Fire && !feedFire && !equipMet) {
+        ClearPreSupplyHold("no_trigger");
+        return;
+    }
 
     if (!ports::mob_gather::SoftReloginAllowsAutoSell()) {
+        ArmPreSupplyHold("pre_supply");
         (void)ports::mob_gather::HangupBeforeOtherAction("pre_supply");
         static DWORD sDeferLog = 0;
         if (!sDeferLog || now - sDeferLog >= 4000) {
@@ -1311,6 +1381,7 @@ void TickIdle(DWORD now) {
         return;
     }
 
+    ClearPreSupplyHold("fire");
     (void)FireAutoTrip(potionFire, customFire, custom2Fire, feedFire, equipMet, used, cap,
                        potionWhy, customWhy, custom2Why, feedWhy);
 }
@@ -1798,11 +1869,24 @@ void TickBuyingReal(DWORD now) {
 
     if (gBuyStep == BuyStep::ReturnScroll) {
         gLastBuyAttempt = now;
+        gScrollJustBoughtPrice = 0;
+        gMesoBeforeScrollBuy = -1;
+        const int have = CountReturnScrolls();
+        const int want = ReturnScrollTargetQty();
+        if (have >= want) {
+            runtime::LogI("AutoSupply", "补回城卷 skip 已达标 have=%d want=%d", have, want);
+            gBuyStep = BuyStep::Charge;
+            return;
+        }
+        // 自定义槽已负责补到 N：本步不再先 +1，避免和 PlanRefills 叠买。
+        if (CustomSlotCoversReturnScroll()) {
+            runtime::LogI("AutoSupply", "补回城卷 defer 自定义槽 have=%d want=%d", have, want);
+            gBuyStep = BuyStep::Charge;
+            return;
+        }
         const int scrollId = ParseItemCode(xcat::kAutoSupplyDefaultReturnScrollCode);
         bool inShop = false;
         int price = 0;
-        gScrollJustBoughtPrice = 0;
-        gMesoBeforeScrollBuy = -1;
         if (scrollId > 0 && shop::QueryShopBuyOffer(scrollId, inShop, price) && inShop) {
             std::string err;
             gMesoBeforeScrollBuy = shop::QueryMeso();
@@ -1812,11 +1896,11 @@ void TickBuyingReal(DWORD now) {
                 gMesoBeforeScrollBuy = -1;
             } else {
                 gScrollJustBoughtPrice = price > 0 ? price : 0;
-                runtime::LogI("AutoSupply", "补回城卷 ok price=%d mesoBefore=%lld", price,
-                              static_cast<long long>(gMesoBeforeScrollBuy));
+                runtime::LogI("AutoSupply", "补回城卷 ok price=%d mesoBefore=%lld have=%d want=%d",
+                              price, static_cast<long long>(gMesoBeforeScrollBuy), have, want);
             }
         } else {
-            runtime::LogI("AutoSupply", "店内无回城卷，跳过");
+            runtime::LogI("AutoSupply", "店内无回城卷，跳过 have=%d want=%d", have, want);
         }
         gBuyStep = BuyStep::Charge;
         return;
@@ -2242,6 +2326,7 @@ void TickCooldown(DWORD now) {
 void TickManualCmds() {
     if (gAbortReq.exchange(false, std::memory_order_acq_rel)) {
         gRechargeReq.store(false, std::memory_order_release);
+        ClearPreSupplyHold("abort");
         if (gPhase == Phase::Charging) {
             // 一键充不关店、不进冷却；停手即回空闲
             Enter(Phase::Idle, gAbortWhy[0] ? gAbortWhy : "已停止充飞镖");
@@ -2506,6 +2591,7 @@ void Init() {
     gAbortWhy[0] = 0;
     gPendingReturnFarm = false;
     SetMsg("");
+    gPreSupplyHold.store(false, std::memory_order_release);
 
     // 对照枫星：先恢复落盘挂机图/待回图，再吞旧 manualSeq
     {
@@ -2577,9 +2663,15 @@ void SetDesired(bool on) {
 bool IsDesired() { return gDesired.load(std::memory_order_acquire); }
 
 bool IsBusy() {
+    if (gPreSupplyHold.load(std::memory_order_acquire)) return true;
     if (gTripReq.load(std::memory_order_acquire) ||
         gReturnReq.load(std::memory_order_acquire))
         return true;
+    return gPhase != Phase::Idle && gPhase != Phase::Cooldown;
+}
+
+bool HoldsHangupClock() {
+    // 开趟后冻 hangup；Idle 上的 pre_supply 必须让 hangup 先拆完。
     return gPhase != Phase::Idle && gPhase != Phase::Cooldown;
 }
 

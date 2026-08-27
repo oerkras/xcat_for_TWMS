@@ -40,7 +40,8 @@ void InvalidateOccupancy();
 void RequestSampleNow();
 // 遇人仍钉着 simple_combat pause（channel_hop Fail/OK 结束时勿抢清）
 bool HoldsCombatPause();
-// 战斗热路径：已绑定 UserPool 纯内存 peek。有人则立刻硬闸，门控允许时顺带 RequestHop。
+// 战斗热路径：已绑定 UserPool 纯内存 peek。有人则 ApplyHold（停吸 / 先停手 / 换频）。
+// 返回 true = 出刀应 GoIdle（先停手 / 换频 / 已在 Hopping）。仅「遇人停吸」仍卸吸怪，返回 false。
 // 不 Resolve、不投泵。池未绑 / 无人 / 无刷怪图 → false（调用方 fail-open）。
 bool TryHoldFromBoundPeek();
 

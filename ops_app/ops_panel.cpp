@@ -1036,6 +1036,15 @@ std::string MapLabelShort(const std::string& label) {
     return label;
 }
 
+void FormatWorldCell(const OpsState::ConnectedClient& c, char* out, size_t outN) {
+    if (!out || outN == 0) return;
+    out[0] = '\0';
+    if (!c.worldName.empty())
+        std::snprintf(out, outN, "%s", c.worldName.c_str());
+    else if (c.worldId > 0)
+        std::snprintf(out, outN, "%d", c.worldId);
+}
+
 void FormatMapChannelCell(const OpsState& st, const OpsState::ConnectedClient& c, char* out,
                           size_t outN) {
     if (!out || outN == 0) return;
@@ -1067,16 +1076,26 @@ const char* ChannelOrDash(int ch, char* buf, size_t n) {
 void CopyClientSummary(const OpsState& st, const OpsState::ConnectedClient& c) {
     const std::string mapLabel = ClientMapLabel(st, c);
     char chBuf[16]{};
-    char buf[1024]{};
+    char expPerBuf[32]{};
+    char mesoPerBuf[32]{};
+    if (c.hasRates) {
+        std::snprintf(expPerBuf, sizeof(expPerBuf), "%lld", c.expPerMin);
+        std::snprintf(mesoPerBuf, sizeof(mesoPerBuf), "%lld", c.mesoPerMin);
+    }
+    char buf[1280]{};
     std::snprintf(buf, sizeof(buf),
-                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\t%s\tmap=%u\t%s\tch=%s\tgate=%s\tidle=%ds",
+                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\t%s\t%s\t%s\tworld=%d\t%s\tmap=%u\t%s\tch=%s\tgate=%s\tidle=%ds",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
                   c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
                   c.charJobName.empty() ? "-" : c.charJobName.c_str(),
                   c.charMeso.empty() ? "-" : c.charMeso.c_str(),
+                  c.hasRates ? expPerBuf : "-",
+                  c.hasRates ? mesoPerBuf : "-",
                   c.hasWealthScrolls ? (c.wealthScrolls.empty() ? "-" : c.wealthScrolls.c_str())
                                      : "-",
+                  c.worldId,
+                  c.worldName.empty() ? "-" : c.worldName.c_str(),
                   c.mapId,
                   mapLabel.empty() ? "-" : mapLabel.c_str(), ChannelOrDash(c.channelId, chBuf, sizeof(chBuf)),
                   c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec);
@@ -1086,15 +1105,25 @@ void CopyClientSummary(const OpsState& st, const OpsState::ConnectedClient& c) {
 void AppendClientSummaryLine(std::string& out, const OpsState& st, const OpsState::ConnectedClient& c) {
     const std::string mapLabel = ClientMapLabel(st, c);
     char chBuf[16]{};
-    char buf[1024]{};
-    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%u\t%s\t%s\t%s\t%d\n",
+    char expPerBuf[32]{};
+    char mesoPerBuf[32]{};
+    if (c.hasRates) {
+        std::snprintf(expPerBuf, sizeof(expPerBuf), "%lld", c.expPerMin);
+        std::snprintf(mesoPerBuf, sizeof(mesoPerBuf), "%lld", c.mesoPerMin);
+    }
+    char buf[1280]{};
+    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%u\t%s\t%s\t%s\t%d\n",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
                   c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
                   c.charJobName.empty() ? "-" : c.charJobName.c_str(),
                   c.charMeso.empty() ? "-" : c.charMeso.c_str(),
+                  c.hasRates ? expPerBuf : "-",
+                  c.hasRates ? mesoPerBuf : "-",
                   c.hasWealthScrolls ? (c.wealthScrolls.empty() ? "-" : c.wealthScrolls.c_str())
                                      : "-",
+                  c.worldId,
+                  c.worldName.empty() ? "-" : c.worldName.c_str(),
                   c.mapId,
                   mapLabel.empty() ? "-" : mapLabel.c_str(), ChannelOrDash(c.channelId, chBuf, sizeof(chBuf)),
                   c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec);
@@ -1157,6 +1186,20 @@ void FormatMesoDisplay(const std::string& mesoRaw, char* out, size_t outN) {
         std::snprintf(out, outN, "%s%.1f万", sign, scaled);
     else
         std::snprintf(out, outN, "%s%.2f万", sign, scaled);
+}
+
+void FormatSignedPerMin(long long perMin, bool ok, char* out, size_t outN) {
+    if (!out || outN == 0) return;
+    if (!ok) {
+        std::snprintf(out, outN, "—");
+        return;
+    }
+    const bool neg = perMin < 0;
+    const unsigned long long mag =
+        neg ? static_cast<unsigned long long>(-perMin) : static_cast<unsigned long long>(perMin);
+    char absBuf[48]{};
+    FormatMesoDisplay(std::to_string(mag), absBuf, sizeof(absBuf));
+    std::snprintf(out, outN, "%s%s", neg ? "-" : "+", absBuf);
 }
 
 // 组内背包金累加（十进制串 → ull；忽略空/非数字/负数；溢出夹到 ULLONG_MAX）。
@@ -2213,11 +2256,16 @@ bool ParseClientsPayload(const std::string& body, OpsState& st) {
         row.charMeso = FindJsonString(obj, "charMeso");
         row.wealthScrolls = FindJsonString(obj, "wealthScrolls");
         row.hasWealthScrolls = obj.find("\"hasWealthScrolls\":true") != std::string::npos;
+        row.hasRates = obj.find("\"hasRates\":true") != std::string::npos;
+        row.expPerMin = JsonInt64Field(obj, "expPerMin", 0);
+        row.mesoPerMin = JsonInt64Field(obj, "mesoPerMin", 0);
         row.charLevel = JsonIntField(obj, "charLevel", 0);
         row.charJob = JsonIntField(obj, "charJob", 0);
         row.mapId = static_cast<uint32_t>(JsonIntField(obj, "mapId", 0));
         row.mapName = FindJsonString(obj, "mapName");
         row.channelId = JsonIntField(obj, "channelId", 0);
+        row.worldId = JsonIntField(obj, "worldId", 0);
+        row.worldName = FindJsonString(obj, "worldName");
         row.lastKind = FindJsonString(obj, "lastKind");
         row.lastSeenAt = FindJsonString(obj, "lastSeenAt");
         row.lastDenyAt = FindJsonString(obj, "lastDenyAt");
@@ -3924,9 +3972,11 @@ bool ClientMatchesFilter(const OpsState& st, const OpsState::ConnectedClient& c,
            ContainsIgnoreCase(c.geo, filter) || ContainsIgnoreCase(c.gate, filter) ||
            ContainsIgnoreCase(c.appVersion, filter) || ContainsIgnoreCase(c.charName, filter) ||
            ContainsIgnoreCase(c.charJobName, filter) || ContainsIgnoreCase(c.mapName, filter) ||
+           ContainsIgnoreCase(c.worldName, filter) ||
            ContainsIgnoreCase(mapLabel, filter) ||
            (c.mapId > 0 && ContainsIgnoreCase(std::to_string(c.mapId), filter)) ||
-           (c.channelId > 0 && ContainsIgnoreCase(std::to_string(c.channelId), filter));
+           (c.channelId > 0 && ContainsIgnoreCase(std::to_string(c.channelId), filter)) ||
+           (c.worldId > 0 && ContainsIgnoreCase(std::to_string(c.worldId), filter));
 }
 
 const char* GateFilterLabel(const char* key) {
@@ -3948,6 +3998,9 @@ enum ClientSortCol : ImGuiID {
     kCliLevel,
     kCliJob,
     kCliMeso,
+    kCliExpPer,
+    kCliMesoPer,
+    kCliWorld,
     kCliMapCh,
     kCliMac,
     kCliToken,
@@ -3999,6 +4052,17 @@ int CompareConnectedClient(const OpsState::ConnectedClient& a, const OpsState::C
             return CmpStrField(a.charJobName, b.charJobName);
         case kCliMeso:
             return CmpMesoField(a.charMeso, b.charMeso);
+        case kCliExpPer: {
+            if (int d = CmpIntField(a.hasRates ? 1 : 0, b.hasRates ? 1 : 0)) return d;
+            return (a.expPerMin > b.expPerMin) - (a.expPerMin < b.expPerMin);
+        }
+        case kCliMesoPer: {
+            if (int d = CmpIntField(a.hasRates ? 1 : 0, b.hasRates ? 1 : 0)) return d;
+            return (a.mesoPerMin > b.mesoPerMin) - (a.mesoPerMin < b.mesoPerMin);
+        }
+        case kCliWorld:
+            if (int d = CmpIntField(a.worldId, b.worldId)) return d;
+            return CmpStrField(a.worldName, b.worldName);
         case kCliMapCh:
             if (int d = CmpIntField(static_cast<int>(a.mapId), static_cast<int>(b.mapId))) return d;
             return CmpIntField(a.channelId, b.channelId);
@@ -4065,6 +4129,41 @@ bool ClientPersonKeyIsUid(const std::string& key) {
 const char* ClientPersonKeyDisplay(const std::string& key) {
     if (key.size() >= 2 && key[1] == '\x1f') return key.c_str() + 2;
     return key.c_str();
+}
+
+bool ClientPersonKeyHasIdentity(const std::string& key) {
+    return key.size() >= 2 && key[1] == '\x1f' && (key[0] == 'u' || key[0] == 't');
+}
+
+void DrawPersonAllowUpdateMenu(OpsState& st, const std::string& personKey) {
+    if (!ClientPersonKeyHasIdentity(personKey)) return;
+    if (!ImGui::BeginMenu("允许更新到")) return;
+    const uint32_t cur = AllowedBuildForPerson(st, personKey);
+    const bool isUid = ClientPersonKeyIsUid(personKey);
+    const char* who = ClientPersonKeyDisplay(personKey);
+    const bool followDefault =
+        st.allowedClientBuildId == 0 || cur == st.allowedClientBuildId;
+    if (ImGui::MenuItem("跟随默认", nullptr, followDefault)) {
+        std::string err;
+        if (PostUpdateChannelGroup(st, isUid ? who : nullptr, isUid ? nullptr : who, 0, true, err))
+            SetStatus(st, std::string("已让 ") + who + " 跟随默认允许版本");
+        else
+            SetStatus(st, err);
+    }
+    for (const auto& pkg : st.updatePackages) {
+        char lab[80]{};
+        std::snprintf(lab, sizeof(lab), "v%s #%u", pkg.version.c_str(), pkg.buildId);
+        if (ImGui::MenuItem(lab, nullptr, cur == pkg.buildId)) {
+            std::string err;
+            if (PostUpdateChannelGroup(st, isUid ? who : nullptr, isUid ? nullptr : who,
+                                       pkg.buildId, false, err))
+                SetStatus(st, std::string(who) + " 允许更新到 #" + std::to_string(pkg.buildId));
+            else
+                SetStatus(st, err);
+        }
+    }
+    if (st.updatePackages.empty()) ImGui::TextDisabled("无可用包（重启更新服务）");
+    ImGui::EndMenu();
 }
 
 // 旧调试 TOKEN 比较（连接表排序兜底；利润监控分组已改走 MesoPersonId）。
@@ -4440,7 +4539,8 @@ void DrawClientsPanel(OpsState& st) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
             "有签卡按 uid 合并；同一旧 TOKEN 能对上该 uid 的未签卡会话也并入\n"
-            "对不上的仍按旧 TOKEN 一组；无身份不合并\n点 [+] 展开；右键组操作");
+            "对不上的仍按旧 TOKEN 一组；无身份不合并\n"
+            "两台以上点 [+] 展开、右键组头；单台直接在该行右键「允许更新到」");
     if (st.clientsGroupByToken) {
         ImGui::SameLine(0, 4.f);
         if (ImGui::SmallButton("全展##tok_expand_all")) {
@@ -4516,7 +4616,7 @@ void DrawClientsPanel(OpsState& st) {
         ImGuiTableFlags_SortTristate;
     // 工具条收紧后主表再抬一点。
     const float clientsH = (std::max)(260.f, ImGui::GetContentRegionAvail().y * 0.58f);
-    if (ImGui::BeginTable("clients_table", 17, flags, ImVec2(0, clientsH))) {
+    if (ImGui::BeginTable("clients_table", 20, flags, ImVec2(0, clientsH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 100.f, kCliIp);
         ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.2f, kCliGeo);
@@ -4525,6 +4625,9 @@ void DrawClientsPanel(OpsState& st) {
         ImGui::TableSetupColumn("等级", ImGuiTableColumnFlags_WidthFixed, 44.f, kCliLevel);
         ImGui::TableSetupColumn("职业", ImGuiTableColumnFlags_WidthFixed, 88.f, kCliJob);
         ImGui::TableSetupColumn("背包金", ImGuiTableColumnFlags_WidthFixed, 100.f, kCliMeso);
+        ImGui::TableSetupColumn("经/分", ImGuiTableColumnFlags_WidthFixed, 72.f, kCliExpPer);
+        ImGui::TableSetupColumn("金/分", ImGuiTableColumnFlags_WidthFixed, 72.f, kCliMesoPer);
+        ImGui::TableSetupColumn("分区", ImGuiTableColumnFlags_WidthFixed, 88.f, kCliWorld);
         ImGui::TableSetupColumn("图/频", ImGuiTableColumnFlags_WidthFixed, 140.f, kCliMapCh);
         ImGui::TableSetupColumn("MAC", ImGuiTableColumnFlags_WidthFixed, 110.f, kCliMac);
         ImGui::TableSetupColumn("TOKEN",
@@ -4781,39 +4884,7 @@ void DrawClientsPanel(OpsState& st) {
                                 SetStatus(st, lastErr.empty() ? "本组无可识别设备" : lastErr);
                             if (ok) RefreshClients(st, true);
                         }
-                        if (tokenGroup && ImGui::BeginMenu("允许更新到")) {
-                            const uint32_t cur = AllowedBuildForPerson(st, g.key);
-                            const bool isUid = ClientPersonKeyIsUid(g.key);
-                            const char* who = ClientPersonKeyDisplay(g.key);
-                            const bool followDefault =
-                                st.allowedClientBuildId == 0 || cur == st.allowedClientBuildId;
-                            if (ImGui::MenuItem("跟随默认", nullptr, followDefault)) {
-                                std::string err;
-                                if (PostUpdateChannelGroup(st, isUid ? who : nullptr,
-                                                           isUid ? nullptr : who, 0, true, err))
-                                    SetStatus(st, std::string("已让 ") + who + " 跟随默认允许版本");
-                                else
-                                    SetStatus(st, err);
-                            }
-                            for (const auto& pkg : st.updatePackages) {
-                                char lab[80]{};
-                                std::snprintf(lab, sizeof(lab), "v%s #%u", pkg.version.c_str(),
-                                              pkg.buildId);
-                                if (ImGui::MenuItem(lab, nullptr, cur == pkg.buildId)) {
-                                    std::string err;
-                                    if (PostUpdateChannelGroup(st, isUid ? who : nullptr,
-                                                               isUid ? nullptr : who, pkg.buildId,
-                                                               false, err))
-                                        SetStatus(st, std::string(who) + " 允许更新到 #" +
-                                                          std::to_string(pkg.buildId));
-                                    else
-                                        SetStatus(st, err);
-                                }
-                            }
-                            if (st.updatePackages.empty())
-                                ImGui::TextDisabled("无可用包（重启更新服务）");
-                            ImGui::EndMenu();
-                        }
+                        if (tokenGroup) DrawPersonAllowUpdateMenu(st, g.key);
                         if (ImGui::MenuItem("本组指定推更", nullptr, false,
                                             st.latestClientBuildId > 0 &&
                                                 st.forcedClientBuildId == 0)) {
@@ -4947,48 +5018,93 @@ void DrawClientsPanel(OpsState& st) {
                         if (jobs.empty()) ImGui::TextDisabled("—");
                         else ImGui::TextUnformatted(jobs.c_str());
                     }
-                    for (int col = 6; col <= 8; ++col) {
-                        ImGui::TableSetColumnIndex(col);
-                        if (col == 6) {
-                            int counted = 0;
-                            const std::string sumRaw = SumGroupMeso(st, g.members, &counted);
-                            if (sumRaw.empty()) {
-                                ImGui::TextDisabled("—");
-                            } else {
-                                char mesoBuf[48]{};
-                                FormatMesoDisplay(sumRaw, mesoBuf, sizeof(mesoBuf));
-                                ImGui::TextUnformatted(mesoBuf);
-                                if (ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip("组内累计 %s\n%d/%zu 台上报", sumRaw.c_str(),
-                                                      counted, g.members.size());
-                                }
-                            }
-                        } else if (col == 7) {
-                            std::string maps;
-                            int nShow = 0;
-                            for (size_t mi : g.members) {
-                                const auto& m = st.clients[mi];
-                                if (m.mapId == 0 && m.channelId <= 0) continue;
-                                char cell[96]{};
-                                FormatMapChannelCell(st, m, cell, sizeof(cell));
-                                if (!cell[0]) continue;
-                                if (nShow > 0) maps += " / ";
-                                maps += cell;
-                                if (++nShow >= 2) {
-                                    if (static_cast<int>(g.members.size()) > nShow) maps += " …";
-                                    break;
-                                }
-                            }
-                            if (maps.empty()) ImGui::TextDisabled("—");
-                            else ImGui::TextUnformatted(maps.c_str());
+                    ImGui::TableSetColumnIndex(6);
+                    {
+                        int counted = 0;
+                        const std::string sumRaw = SumGroupMeso(st, g.members, &counted);
+                        if (sumRaw.empty()) {
+                            ImGui::TextDisabled("—");
                         } else {
-                            const std::string macs = joinUnique(
-                                [](const OpsState::ConnectedClient& m) { return m.mac; }, 2);
-                            if (macs.empty()) ImGui::TextDisabled("—");
-                            else ImGui::TextUnformatted(macs.c_str());
+                            char mesoBuf[48]{};
+                            FormatMesoDisplay(sumRaw, mesoBuf, sizeof(mesoBuf));
+                            ImGui::TextUnformatted(mesoBuf);
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("组内累计 %s\n%d/%zu 台上报", sumRaw.c_str(),
+                                                  counted, g.members.size());
+                            }
+                        }
+                    }
+                    ImGui::TableSetColumnIndex(7);
+                    {
+                        long long best = 0;
+                        bool any = false;
+                        for (size_t mi : g.members) {
+                            if (!st.clients[mi].hasRates) continue;
+                            any = true;
+                            best = (std::max)(best, st.clients[mi].expPerMin);
+                        }
+                        if (!any) ImGui::TextDisabled("—");
+                        else {
+                            char buf[48]{};
+                            FormatSignedPerMin(best, true, buf, sizeof(buf));
+                            ImGui::TextUnformatted(buf);
+                        }
+                    }
+                    ImGui::TableSetColumnIndex(8);
+                    {
+                        long long best = 0;
+                        bool any = false;
+                        for (size_t mi : g.members) {
+                            if (!st.clients[mi].hasRates) continue;
+                            any = true;
+                            best = (std::max)(best, st.clients[mi].mesoPerMin);
+                        }
+                        if (!any) ImGui::TextDisabled("—");
+                        else {
+                            char buf[48]{};
+                            FormatSignedPerMin(best, true, buf, sizeof(buf));
+                            ImGui::TextUnformatted(buf);
                         }
                     }
                     ImGui::TableSetColumnIndex(9);
+                    {
+                        const std::string worlds = joinUnique(
+                            [](const OpsState::ConnectedClient& m) {
+                                if (!m.worldName.empty()) return m.worldName;
+                                return m.worldId > 0 ? std::to_string(m.worldId) : std::string{};
+                            },
+                            2);
+                        if (worlds.empty()) ImGui::TextDisabled("—");
+                        else ImGui::TextUnformatted(worlds.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(10);
+                    {
+                        std::string maps;
+                        int nShow = 0;
+                        for (size_t mi : g.members) {
+                            const auto& m = st.clients[mi];
+                            if (m.mapId == 0 && m.channelId <= 0) continue;
+                            char cell[96]{};
+                            FormatMapChannelCell(st, m, cell, sizeof(cell));
+                            if (!cell[0]) continue;
+                            if (nShow > 0) maps += " / ";
+                            maps += cell;
+                            if (++nShow >= 2) {
+                                if (static_cast<int>(g.members.size()) > nShow) maps += " …";
+                                break;
+                            }
+                        }
+                        if (maps.empty()) ImGui::TextDisabled("—");
+                        else ImGui::TextUnformatted(maps.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(11);
+                    {
+                        const std::string macs = joinUnique(
+                            [](const OpsState::ConnectedClient& m) { return m.mac; }, 2);
+                        if (macs.empty()) ImGui::TextDisabled("—");
+                        else ImGui::TextUnformatted(macs.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(12);
                     {
                         if (tokenGroup) {
                             const char* who = ClientPersonKeyDisplay(g.key);
@@ -5014,7 +5130,7 @@ void DrawClientsPanel(OpsState& st) {
                             else ImGui::TextUnformatted(tokens.c_str());
                         }
                     }
-                    ImGui::TableSetColumnIndex(10);
+                    ImGui::TableSetColumnIndex(13);
                     {
                         const std::string devices = joinUnique(
                             [](const OpsState::ConnectedClient& m) {
@@ -5024,14 +5140,14 @@ void DrawClientsPanel(OpsState& st) {
                         if (devices.empty()) ImGui::TextDisabled(open ? "" : "—");
                         else ImGui::TextUnformatted(devices.c_str());
                     }
-                    ImGui::TableSetColumnIndex(11);
+                    ImGui::TableSetColumnIndex(14);
                     {
                         const std::string vers = joinUnique(
                             [](const OpsState::ConnectedClient& m) { return m.appVersion; }, 2);
                         if (vers.empty()) ImGui::TextDisabled("—");
                         else ImGui::TextUnformatted(vers.c_str());
                     }
-                    ImGui::TableSetColumnIndex(12);
+                    ImGui::TableSetColumnIndex(15);
                     {
                         size_t best = g.members.front();
                         for (size_t mi : g.members) {
@@ -5048,7 +5164,7 @@ void DrawClientsPanel(OpsState& st) {
                             }
                         }
                     }
-                    ImGui::TableSetColumnIndex(13);
+                    ImGui::TableSetColumnIndex(16);
                     {
                         int bestIdle = head.idleSec;
                         for (size_t mi : g.members)
@@ -5057,7 +5173,7 @@ void DrawClientsPanel(OpsState& st) {
                         FormatIdleSec(bestIdle, idleBuf, sizeof(idleBuf));
                         ImGui::TextColored(IdleSecColor(bestIdle), "%s", idleBuf);
                     }
-                    ImGui::TableSetColumnIndex(14);
+                    ImGui::TableSetColumnIndex(17);
                     {
                         const std::string gates = joinUnique(
                             [](const OpsState::ConnectedClient& m) { return m.gate; }, 2);
@@ -5069,13 +5185,13 @@ void DrawClientsPanel(OpsState& st) {
                         else
                             ImGui::TextUnformatted(gates.c_str());
                     }
-                    ImGui::TableSetColumnIndex(15);
+                    ImGui::TableSetColumnIndex(18);
                     {
                         int hits = 0;
                         for (size_t mi : g.members) hits += st.clients[mi].hits;
                         ImGui::TextDisabled("%d", hits);
                     }
-                    ImGui::TableSetColumnIndex(16);
+                    ImGui::TableSetColumnIndex(19);
                     if (open)
                         ImGui::TextDisabled("");
                     else
@@ -5148,11 +5264,11 @@ void DrawClientsPanel(OpsState& st) {
                         ImGui::TableSetColumnIndex(1);
                         if (ihead.geo.empty()) ImGui::TextDisabled("—");
                         else ImGui::TextUnformatted(ihead.geo.c_str());
-                        for (int col = 2; col <= 8; ++col) {
+                        for (int col = 2; col <= 11; ++col) {
                             ImGui::TableSetColumnIndex(col);
                             ImGui::TextDisabled(ipOpen ? "" : "—");
                         }
-                        ImGui::TableSetColumnIndex(9);
+                        ImGui::TableSetColumnIndex(12);
                         {
                             const char* who = ClientPersonKeyDisplay(g.key);
                             if (ClientPersonKeyIsUid(g.key))
@@ -5160,16 +5276,16 @@ void DrawClientsPanel(OpsState& st) {
                             else
                                 ImGui::TextColored(OpsTone::Warn(), "%s", who);
                         }
-                        for (int col = 10; col <= 15; ++col) {
+                        for (int col = 13; col <= 18; ++col) {
                             ImGui::TableSetColumnIndex(col);
-                            if (col == 13) {
+                            if (col == 16) {
                                 int bestIdle = ihead.idleSec;
                                 for (size_t mi : ib.members)
                                     bestIdle = (std::min)(bestIdle, st.clients[mi].idleSec);
                                 char idleBuf[16]{};
                                 FormatIdleSec(bestIdle, idleBuf, sizeof(idleBuf));
                                 ImGui::TextColored(IdleSecColor(bestIdle), "%s", idleBuf);
-                            } else if (col == 15) {
+                            } else if (col == 18) {
                                 int hits = 0;
                                 for (size_t mi : ib.members) hits += st.clients[mi].hits;
                                 ImGui::TextDisabled("%d", hits);
@@ -5177,7 +5293,7 @@ void DrawClientsPanel(OpsState& st) {
                                 ImGui::TextDisabled(ipOpen ? "" : "—");
                             }
                         }
-                        ImGui::TableSetColumnIndex(16);
+                        ImGui::TableSetColumnIndex(19);
                         ImGui::TextDisabled(ipOpen ? "" : "点开展开");
                         ImGui::PopID();
                         ++shown;
@@ -5204,17 +5320,24 @@ void DrawClientsPanel(OpsState& st) {
                 } else {
                     std::snprintf(ipLabel, sizeof(ipLabel), "%s", c.ip.c_str());
                 }
-                if (c.banned) ImGui::TextColored(OpsTone::Danger(), "%s", ipLabel);
-                else if (!childRow && (c.knownOnIp > 1 || c.sameIpOnline > 1))
-                    ImGui::TextColored(OpsTone::Warn(), "%s", ipLabel);
-                else if (allowMode && !c.allowed)
-                    ImGui::TextColored(OpsTone::Warn(), "%s", ipLabel);
-                else if (c.allowed)
-                    ImGui::TextColored(OpsTone::Ok(), "%s", ipLabel);
-                else if (childRow)
-                    ImGui::TextDisabled("%s", ipLabel);
-                else
-                    ImGui::Selectable(ipLabel, false);
+                {
+                    ImVec4 ipCol = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                    if (c.banned)
+                        ipCol = OpsTone::Danger();
+                    else if (!childRow && (c.knownOnIp > 1 || c.sameIpOnline > 1))
+                        ipCol = OpsTone::Warn();
+                    else if (allowMode && !c.allowed)
+                        ipCol = OpsTone::Warn();
+                    else if (c.allowed)
+                        ipCol = OpsTone::Ok();
+                    else if (childRow)
+                        ipCol = OpsTone::Muted();
+                    ImGui::PushStyleColor(ImGuiCol_Text, ipCol);
+                    ImGui::Selectable(ipLabel, false,
+                                      ImGuiSelectableFlags_SpanAllColumns |
+                                          ImGuiSelectableFlags_AllowOverlap);
+                    ImGui::PopStyleColor();
+                }
                 const bool ipHovered = ImGui::IsItemHovered();
                 if (ipHovered) {
                     if (c.banned) ImGui::SetTooltip("此设备已在封禁清单");
@@ -5237,13 +5360,24 @@ void DrawClientsPanel(OpsState& st) {
                         ImGui::SetTooltip("旧客户端未报身份；该 IP 历史上传见过 %d 台设备",
                                           c.knownOnIp);
                     } else {
-                        ImGui::SetTooltip("双击复制一行摘要；右键更多操作");
+                        ImGui::SetTooltip("双击复制一行摘要；右键可指定允许更新版本 / 更多操作");
                     }
                 }
                 if (ImGui::BeginPopupContextItem("ip")) {
                     if (ImGui::MenuItem("复制 IP")) CopyText(c.ip.c_str());
                     if (c.identified && ImGui::MenuItem("复制计算机名")) CopyText(c.machine.c_str());
                     if (!c.charName.empty() && ImGui::MenuItem("复制角色名")) CopyText(c.charName.c_str());
+                    if ((c.worldId > 0 || !c.worldName.empty()) && ImGui::MenuItem("复制分区")) {
+                        char buf[96]{};
+                        if (!c.worldName.empty() && c.worldId > 0)
+                            std::snprintf(buf, sizeof(buf), "%s (id=%d)", c.worldName.c_str(),
+                                          c.worldId);
+                        else if (!c.worldName.empty())
+                            std::snprintf(buf, sizeof(buf), "%s", c.worldName.c_str());
+                        else
+                            std::snprintf(buf, sizeof(buf), "%d", c.worldId);
+                        CopyText(buf);
+                    }
                     if ((c.mapId > 0 || c.channelId > 0) && ImGui::MenuItem("复制地图/频道")) {
                         const std::string label = ClientMapLabel(st, c);
                         char chBuf[16]{};
@@ -5265,6 +5399,13 @@ void DrawClientsPanel(OpsState& st) {
                     if (ImGui::MenuItem("复制一行摘要")) {
                         CopyClientSummary(st, c);
                         SetStatus(st, "已复制客户端摘要到剪贴板");
+                    }
+                    {
+                        const std::string personKey = ClientPersonKey(c, idx, tokenToUid);
+                        if (ClientPersonKeyHasIdentity(personKey)) {
+                            ImGui::Separator();
+                            DrawPersonAllowUpdateMenu(st, personKey);
+                        }
                     }
                     if (c.identified && (!c.deviceId.empty() || !c.mac.empty())) {
                         ImGui::Separator();
@@ -5369,6 +5510,16 @@ void DrawClientsPanel(OpsState& st) {
                         tip += "（精确 ";
                         tip += c.charMeso.empty() ? "—" : c.charMeso;
                         tip += "）";
+                        if (c.hasRates) {
+                            char expBuf[48]{};
+                            char mesoBuf[48]{};
+                            FormatSignedPerMin(c.expPerMin, true, expBuf, sizeof(expBuf));
+                            FormatSignedPerMin(c.mesoPerMin, true, mesoBuf, sizeof(mesoBuf));
+                            tip += "\n经/分 ";
+                            tip += expBuf;
+                            tip += " · 金/分 ";
+                            tip += mesoBuf;
+                        }
                         if (c.hasWealthScrolls) {
                             tip += "\n高价值 ";
                             tip += FormatWealthScrollsHuman(st, c.wealthScrolls);
@@ -5395,6 +5546,35 @@ void DrawClientsPanel(OpsState& st) {
                 }
                 ImGui::TableSetColumnIndex(7);
                 {
+                    char buf[48]{};
+                    FormatSignedPerMin(c.expPerMin, c.hasRates, buf, sizeof(buf));
+                    if (!c.hasRates) ImGui::TextDisabled("—");
+                    else ImGui::TextUnformatted(buf);
+                }
+                ImGui::TableSetColumnIndex(8);
+                {
+                    char buf[48]{};
+                    FormatSignedPerMin(c.mesoPerMin, c.hasRates, buf, sizeof(buf));
+                    if (!c.hasRates) ImGui::TextDisabled("—");
+                    else ImGui::TextUnformatted(buf);
+                }
+                ImGui::TableSetColumnIndex(9);
+                {
+                    char cell[48]{};
+                    FormatWorldCell(c, cell, sizeof(cell));
+                    if (!cell[0]) {
+                        ImGui::TextDisabled("—");
+                    } else {
+                        ImGui::TextUnformatted(cell);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("分区 %s (id=%d)",
+                                              c.worldName.empty() ? "—" : c.worldName.c_str(),
+                                              c.worldId);
+                        }
+                    }
+                }
+                ImGui::TableSetColumnIndex(10);
+                {
                     if (c.mapId == 0 && c.channelId <= 0) {
                         ImGui::TextDisabled("—");
                     } else {
@@ -5414,9 +5594,9 @@ void DrawClientsPanel(OpsState& st) {
                         }
                     }
                 }
-                ImGui::TableSetColumnIndex(8);
+                ImGui::TableSetColumnIndex(11);
                 ImGui::TextUnformatted((!c.identified || c.mac.empty()) ? "—" : c.mac.c_str());
-                ImGui::TableSetColumnIndex(9);
+                ImGui::TableSetColumnIndex(12);
                 if (!c.identified || c.token.empty()) {
                     ImGui::TextDisabled("—");
                 } else {
@@ -5437,9 +5617,9 @@ void DrawClientsPanel(OpsState& st) {
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip("卡到期：%s", GateExpAbsText(c.gateExp).c_str());
                 }
-                ImGui::TableSetColumnIndex(10);
+                ImGui::TableSetColumnIndex(13);
                 ImGui::TextUnformatted((!c.identified || c.device.empty()) ? "—" : c.device.c_str());
-                ImGui::TableSetColumnIndex(11);
+                ImGui::TableSetColumnIndex(14);
                 if (c.appVersion.empty()) {
                     ImGui::TextDisabled("—");
                 } else {
@@ -5451,7 +5631,7 @@ void DrawClientsPanel(OpsState& st) {
                                           st.latestClientBuildId);
                     }
                 }
-                ImGui::TableSetColumnIndex(12);
+                ImGui::TableSetColumnIndex(15);
                 if (!c.lastSeenAt.empty()) {
                     ImGui::Text("%s", c.lastSeenAt.c_str());
                     ImGui::SameLine(0, 6.f);
@@ -5459,12 +5639,12 @@ void DrawClientsPanel(OpsState& st) {
                 } else {
                     ImGui::TextDisabled("—");
                 }
-                ImGui::TableSetColumnIndex(13);
+                ImGui::TableSetColumnIndex(16);
                 char idleBuf[16]{};
                 FormatIdleSec(c.idleSec, idleBuf, sizeof(idleBuf));
                 ImGui::TextColored(IdleSecColor(c.idleSec), "%s", idleBuf);
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("空闲 %d 秒", c.idleSec);
-                ImGui::TableSetColumnIndex(14);
+                ImGui::TableSetColumnIndex(17);
                 {
                     auto formatRemain = [](int sec, char* out, size_t outN) {
                         if (sec <= 0) {
@@ -5530,9 +5710,9 @@ void DrawClientsPanel(OpsState& st) {
                             c.leaseTtlHours > 0 ? c.leaseTtlHours : 64);
                     }
                 }
-                ImGui::TableSetColumnIndex(15);
+                ImGui::TableSetColumnIndex(18);
                 ImGui::Text("%d", c.hits);
-                ImGui::TableSetColumnIndex(16);
+                ImGui::TableSetColumnIndex(19);
                 if (c.identified && (!c.deviceId.empty() || !c.mac.empty())) {
                     const bool forcePending = !c.forceTargetId.empty() &&
                                               (c.forceTargetStatus == "queued" ||

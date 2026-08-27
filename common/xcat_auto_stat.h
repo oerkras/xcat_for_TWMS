@@ -34,6 +34,16 @@ bool AutoStatRatioOk(const AutoStatConfig& cfg);
 bool ReadAutoStat(const char* binDir, AutoStatConfig& out);
 bool WriteAutoStat(const char* binDir, const AutoStatConfig& cfg);
 
+// 停机写盘：persistTick==0 表示刚决定停机、还没写成盘，盘上旧 enabled=1 的 tick
+// 永远 >0，不能当成「用户又开了」。仅当已经写过一次停机 tick 之后，
+// 盘上出现更新的 writeTick 才视为用户重开（对齐全 auto_skill）。
+constexpr bool AutoStatPersistDiskIsUserReopen(uint64_t diskWriteTickMs, uint64_t persistTickMs) {
+    return persistTickMs != 0 && diskWriteTickMs > persistTickMs;
+}
+static_assert(!AutoStatPersistDiskIsUserReopen(123, 0), "persistTick=0 must overwrite old enabled=1");
+static_assert(AutoStatPersistDiskIsUserReopen(200, 100), "newer disk tick after persist is user reopen");
+static_assert(!AutoStatPersistDiskIsUserReopen(50, 100), "older disk tick is not user reopen");
+
 // 初心者 job<100（含 0）不加。1 转起（100/200/300/400/500 及后续 2/3/4 转、双刀 430–434）才加。
 inline bool AutoStatJobReady(int job) {
     if (job < 100) return false;

@@ -20,6 +20,8 @@
 #include "../channel_hop/channel_hop.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../ports/world_port.h"
+#include "../soft_login_probe/soft_login_probe.h"
+#include "../travel/travel.h"
 
 #include "../../../common/xcat_world_names.h"
 #include "../../../common/xcat_worlds_cache.h"
@@ -176,13 +178,26 @@ constexpr DWORD kPumpFailBackoffMs = 1500;
 constexpr DWORD kLeftChannelHoldMs = 800;
 // 选角页：phase/busy 已就绪时少等；BIN 18:04 显示 avatars/phase 一帧就齐，700ms 偏肉。
 constexpr DWORD kCharReadySettleMs = 200;
-// Select→Confirm：0=同 Tick 连点。非 0 时仍会多吃 1 轮 worker Sleep(80)（BIN 18:17：设 100 实测 260ms）。
-constexpr DWORD kAfterSelectCharMs = 0;
+// Select→Confirm 必须错开：0=同 Tick 连点，槽 1 默认 selectedIndex=0 时 Select 早退，
+// Confirm 空转（0cabdegd 冷启 04:00 / BIN 17:34）。非 0 会多吃 1 轮 worker Sleep。
+constexpr DWORD kAfterSelectCharMs = 200;
+constexpr DWORD kAfterSelectCharSoftMs = 80;  // 仍非 0；softFast 也要等选中动画起跳
 constexpr DWORD kCharConfirmRetryMs = 1500;
-constexpr int kMaxCharConfirmAttempts = 4;
+constexpr int kMaxCharConfirmAttempts = 10;
+// 一轮点满仍停在选角页：再开一轮，冷启不要 Failed 停手（0cabdegd 04:00 点 4 次就终态）。
+constexpr int kMaxCharConfirmBursts = 3;
 constexpr int kMaxSelectCharAttempts = 8;
 // Idle 扫 WorldsCache / 活跃期写缓存的最小间隔（主线程 FindAll 高压期勿密扫）。
 constexpr DWORD kIdleProbeMinMs = 4000;
+// Done/Failed 锁死后游戏自己回到选角（BIN 20:58 WM 死、scene=-1，stuck_lobby 认不出）。
+// 只现采 SL 选角页再 RequestRestart(char_ui)；不扩 hallLike、不走软重连拆会话。
+constexpr DWORD kDoneCharUiProbeGapMs = 1000;
+constexpr DWORD kDoneCharUiHoldMs = 2000;
+constexpr DWORD kDoneCharUiGraceMs = 5000;
+// BIN 03:36：Done + scene=-1 + interstage quiesce → RefreshSnap 被 IsCongested 挡死。
+// 泵静默满窗不再等 Snap，直接 RequestRestart（会 SetLoginFreeze，随后 WaitWorldList 才能探）。
+// 赶路过门 InterStage 也会 scene=1/inMap=0（BIN 04:22），travel::IsActive 时不走此窗。
+constexpr DWORD kDoneQuiesceRestartMs = 8000;
 constexpr DWORD kActiveProbeMinMs = 500;  // 有 UI 后的活跃探频下限
 constexpr DWORD kWaitWorldProbeMinMs = 500;  // 等选区；原 1500 被 Connected settle 盖住后仍偏钝
 constexpr DWORD kWorldsCacheScanMinMs = 2500;
@@ -308,6 +323,7 @@ int gCharSelectTimeoutStreak = 0;
 DWORD gPumpFailUntil = 0;
 int gEnterAttempts = 0;
 int gCharConfirmAttempts = 0;
+int gCharConfirmBurst = 0;
 int gSelectCharAttempts = 0;
 int gPickCharIndex = -1;
 char gWorldsFp[512]{};
@@ -923,6 +939,9 @@ DWORD AfterSelectChannelMs() {
     return SoftFastTrack() ? kAfterSelectChannelSoftMs : kAfterSelectChannelMs;
 }
 DWORD CharReadySettleMs() { return SoftFastTrack() ? kCharReadySettleSoftMs : kCharReadySettleMs; }
+DWORD AfterSelectCharMs() {
+    return SoftFastTrack() ? kAfterSelectCharSoftMs : kAfterSelectCharMs;
+}
 DWORD WaitWorldProbeMinMs() {
     return SoftFastTrack() ? kWaitWorldProbeMinSoftMs : kWaitWorldProbeMinMs;
 }
@@ -957,7 +976,7 @@ bool LoginNetReadyForWorldProbe() {
     return (now - gConnectedSinceMs) >= AfterConnectedSettleMs();
 }
 
-bool RefreshSnap(bool idleCache = false) {
+bool RefreshSnap(bool idleCache = false, bool highPrio = false) {
     const DWORD now = GetTickCount();
     if (gPumpFailUntil && now < gPumpFailUntil) {
         LogThrottled("waiting main pump? (backoff)");
@@ -969,7 +988,8 @@ bool RefreshSnap(bool idleCache = false) {
         LogThrottled("waiting main pump? (idle)");
         return false;
     }
-    if (x::runtime::main_thread::IsCongested()) {
+    // High：换图静默期仍探（BIN 03:36 Done 回大厅，Normal 被 quiesce 拒）。
+    if (!highPrio && x::runtime::main_thread::IsCongested()) {
         LogThrottled("pump congested — skip probe");
         return false;
     }
@@ -979,9 +999,12 @@ bool RefreshSnap(bool idleCache = false) {
         !gSnap.worldUi;
     DWORD waitMs = 1500;
     if (idleCache) waitMs = 500;
+    else if (gPhase == Phase::Done || gPhase == Phase::Failed) waitMs = 500;
     else if (gPhase == Phase::WaitCharSelect) waitMs = 3000;
     else if (waitWorld) waitMs = kWaitWorldProbeWaitMs;
-    if (!x::runtime::main_thread::InvokeAndWait(&ProbeOnMain, nullptr, waitMs)) {
+    const auto prio = highPrio ? x::runtime::main_thread::JobPrio::High
+                               : x::runtime::main_thread::JobPrio::Normal;
+    if (!x::runtime::main_thread::InvokeAndWait(&ProbeOnMain, nullptr, waitMs, prio)) {
         // 选区加载窗超时：加长退避，别每 1.5s 再灌（BIN be7fff 32→41）。
         const DWORD back =
             waitWorld ? kPumpFailBackoffLoadMs : kPumpFailBackoffMs;
@@ -1059,7 +1082,9 @@ void RunJobOnMain() {
                         slotN);
                     break;
                 }
-                fnSel(ui, a, false, miSel);
+                // 第二参 true：已选中也走选中动画。false + index==SelectedIndex 早退，
+                // 槽 1 默认 wasSelected=0 时等于没点选（0cabdegd 冷启 Confirm 空转）。
+                fnSel(ui, a, true, miSel);
                 ok = true;
             }
             break;
@@ -1152,6 +1177,7 @@ bool TryMarkEnterDone(const char* why) {
         if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
         gSoftFastTrack.store(false, std::memory_order_release);
         gCharSelectTimeoutStreak = 0;
+        gCharConfirmBurst = 0;
         gBusyStuckSince = 0;
         SetPhase(Phase::Done);
         if (gPickedChannelId > 0)
@@ -1167,6 +1193,7 @@ bool TryMarkEnterDone(const char* why) {
         if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
         gSoftFastTrack.store(false, std::memory_order_release);
         gCharSelectTimeoutStreak = 0;
+        gCharConfirmBurst = 0;
         gBusyStuckSince = 0;
         SetPhase(Phase::Done);
         if (gPickedChannelId > 0)
@@ -1388,6 +1415,74 @@ bool CharUiReadyForPick() {
            gSnap.slLoginPhase == kSlPhaseForCharConfirm;
 }
 
+// Done/Failed 后选角页仍在：解锁重跑。禁止在图内 / 软重连 / hop / 赶路贴门 / 拍卖商城开火。
+void MaybeRestartIfCharUiStillUp() {
+    using SceneState = x::features::ports::world::SceneState;
+    const SceneState scene = x::features::ports::world::GetSceneState();
+    static DWORD sLastProbeMs = 0;
+    static DWORD sReadySinceMs = 0;
+    static DWORD sQuiesceSinceMs = 0;
+    if (scene == SceneState::Field || scene == SceneState::CashShop ||
+        scene == SceneState::GlobalMarket || x::features::ports::world::IsPlayReady() ||
+        x::features::ports::world::IsInMapScene()) {
+        sReadySinceMs = 0;
+        sQuiesceSinceMs = 0;
+        return;
+    }
+    if (x::features::soft_login_probe::IsReconnectInFlight() ||
+        x::features::channel_hop::IsMigrateInFlight() ||
+        x::features::travel::IsActive()) {
+        sReadySinceMs = 0;
+        sQuiesceSinceMs = 0;
+        return;
+    }
+    const DWORD now = GetTickCount();
+    if (gPhaseSince && now - gPhaseSince < kDoneCharUiGraceMs) return;
+    if (!LoginNetReadyForWorldProbe()) {
+        sReadySinceMs = 0;
+        sQuiesceSinceMs = 0;
+        return;
+    }
+
+    if (!sLastProbeMs || now - sLastProbeMs >= kDoneCharUiProbeGapMs) {
+        sLastProbeMs = now;
+        // High：换图静默期 Normal 会被拒（BIN 03:36 pump congested 死循环）。
+        if (RefreshSnap(/*idleCache=*/false, /*highPrio=*/true) && CharUiReadyForPick() &&
+            gSnap.slBusy == 0) {
+            sQuiesceSinceMs = 0;
+            if (!sReadySinceMs) sReadySinceMs = now ? now : 1;
+            if (now - sReadySinceMs < kDoneCharUiHoldMs) {
+                LogThrottled(
+                    "Done/Failed char UI still up avatars=%d phase=%d busy=%d — hold then restart",
+                    gSnap.avatarCount, gSnap.slLoginPhase, gSnap.slBusy);
+                return;
+            }
+            sReadySinceMs = 0;
+            Log("Done/Failed char UI still up avatars=%d phase=%d busy=%d — "
+                "RequestRestart (no CloseSession)",
+                gSnap.avatarCount, gSnap.slLoginPhase, gSnap.slBusy);
+            RequestRestart("char_ui");
+            return;
+        }
+        sReadySinceMs = 0;
+    }
+
+    // 选角 2s 确认窗进行中：下一拍 High 探会 RequestRestart，勿叠 8s 无 Snap 路径。
+    if (sReadySinceMs) return;
+
+    if (!sQuiesceSinceMs) sQuiesceSinceMs = now ? now : 1;
+    const DWORD held = now - sQuiesceSinceMs;
+    if (held < kDoneQuiesceRestartMs) {
+        LogThrottled("Done/Failed !inMap scene=%d pumpBlock — hold %ums then restart (no snap)",
+                     static_cast<int>(scene), static_cast<unsigned>(kDoneQuiesceRestartMs));
+        return;
+    }
+    sQuiesceSinceMs = 0;
+    Log("Done/Failed !inMap scene=%d held=%ums — RequestRestart (no snap, login freeze)",
+        static_cast<int>(scene), static_cast<unsigned>(held));
+    RequestRestart("char_ui");
+}
+
 bool BusyFlagStale() {
     if (gSnap.slBusy == 0) {
         gBusyStuckSince = 0;
@@ -1413,6 +1508,7 @@ void ResetRuntime() {
     gPumpFailUntil = 0;
     gEnterAttempts = 0;
     gCharConfirmAttempts = 0;
+    gCharConfirmBurst = 0;
     gSelectCharAttempts = 0;
     gPickCharIndex = -1;
     gLastActiveProbeMs = 0;
@@ -1458,7 +1554,10 @@ void Tick() {
         Log("start WaitWorldList worldId=%d slot=%u", gWorldId.load(), gCharSlot.load());
         return;
     }
-    if (gPhase == Phase::Done || gPhase == Phase::Failed) return;
+    if (gPhase == Phase::Done || gPhase == Phase::Failed) {
+        MaybeRestartIfCharUiStillUp();
+        return;
+    }
 
     // Connecting / 刚连上选区灌表：完全不探，把主线程留给游戏（BIN be7fff）。
     if (gPhase == Phase::WaitWorldList && !gSnap.worldUi) {
@@ -1796,8 +1895,7 @@ void Tick() {
         gSelectCharAttempts = 0;
         gCharSelectedAt = GetTickCount();
         SetPhase(Phase::WaitCharArmed);
-        // delay=0：不要 break，同 Tick 落入 WaitCharArmed→Confirm（否则再 Sleep 一轮才点）。
-        if (kAfterSelectCharMs > 0) break;
+        if (AfterSelectCharMs() > 0) break;
         [[fallthrough]];
     }
     case Phase::WaitCharArmed: {
@@ -1807,7 +1905,7 @@ void Tick() {
             SetPhase(Phase::WaitLeaveChar);
             break;
         }
-        if (GetTickCount() - gCharSelectedAt < kAfterSelectCharMs) return;
+        if (GetTickCount() - gCharSelectedAt < AfterSelectCharMs()) return;
         SetPhase(Phase::ConfirmChar);
         [[fallthrough]];
     }
@@ -1849,22 +1947,46 @@ void Tick() {
     }
     case Phase::WaitLeaveChar: {
         if (TryMarkEnterDone("WaitLeaveChar")) break;
+        const bool waited = !gCharConfirmAt ||
+                            (GetTickCount() - gCharConfirmAt >= kCharConfirmRetryMs);
         if (gCharConfirmAttempts >= kMaxCharConfirmAttempts) {
-            Log("ConfirmChar exhausted attempts=%d — Failed (still on char UI)",
-                gCharConfirmAttempts);
+            // 最后一枪先等 leave；点完立刻 Failed 会把刚发出的 Confirm 判死
+            //（0cabdegd 冷启 attempt=4 后 80ms 终态，人停在选角页）。
+            if (!waited) {
+                LogThrottled("waiting leave char UI after last confirm? (confirm=%d phase=%d "
+                             "busy=%d)",
+                             gCharConfirmAttempts, gSnap.slLoginPhase, gSnap.slBusy);
+                return;
+            }
+            if (gSnap.slBusy != 0) {
+                LogThrottled("Confirm in flight busy=%d — hold fail (confirm=%d)", gSnap.slBusy,
+                             gCharConfirmAttempts);
+                return;
+            }
+            ++gCharConfirmBurst;
+            if (gSnap.charUi && gCharConfirmBurst < kMaxCharConfirmBursts) {
+                Log("ConfirmChar still on char UI after %d clicks — burst %d/%d, keep clicking",
+                    gCharConfirmAttempts, gCharConfirmBurst + 1, kMaxCharConfirmBursts);
+                gCharConfirmAttempts = 0;
+                gCharConfirmAt = 0;
+                SetPhase(Phase::PickChar);
+                break;
+            }
+            Log("ConfirmChar exhausted attempts=%d bursts=%d — Failed (still on char UI)",
+                gCharConfirmAttempts, gCharConfirmBurst);
             SetPhase(Phase::Failed);
             return;
         }
-        if (gCharConfirmAt && GetTickCount() - gCharConfirmAt >= kCharConfirmRetryMs) {
+        if (waited) {
             // 进图途中 busy=1：再点 Select/Confirm 会打乱状态机；等 busy 清或 play-ready。
             if (gSnap.slBusy != 0) {
                 LogThrottled("Confirm in flight busy=%d — hold retry (confirm=%d)", gSnap.slBusy,
                              gCharConfirmAttempts);
                 return;
             }
-            Log("still on char UI — retry via PickChar (%d/%d) phase=%d busy=%d",
-                gCharConfirmAttempts + 1, kMaxCharConfirmAttempts, gSnap.slLoginPhase,
-                gSnap.slBusy);
+            Log("still on char UI — retry via PickChar (%d/%d) burst=%d/%d phase=%d busy=%d",
+                gCharConfirmAttempts + 1, kMaxCharConfirmAttempts, gCharConfirmBurst + 1,
+                kMaxCharConfirmBursts, gSnap.slLoginPhase, gSnap.slBusy);
             SetPhase(Phase::PickChar);
             break;
         }

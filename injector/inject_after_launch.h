@@ -22,6 +22,8 @@ struct Options {
     bool waitForGameAssembly = true;
     // false：不按 DLL 旁路重绑 inject.jsonl（自定义路径常在 XCat 树外）。
     bool registerInjectLog = true;
+    // 登录进行中点取消时由调用方置位，立刻结束等 GA（否则 ImGui「正在取消」会空等满 waitGameAssemblySec）。
+    std::function<bool()> abortWait;
 };
 
 struct Result {
@@ -34,7 +36,8 @@ struct Result {
 using LogFn = std::function<void(const std::wstring& line)>;
 
 std::wstring DefaultPayloadDllBesideExe();
-bool WaitForModuleByName(DWORD pid, const wchar_t* moduleName, int timeoutSec, LogFn log);
+bool WaitForModuleByName(DWORD pid, const wchar_t* moduleName, int timeoutSec, LogFn log,
+                         const std::function<bool()>& abortWait = {});
 
 // Classic LoadLibraryW：等 GameAssembly → 注入 → 校验模块在 LDR
 Result InjectIntoClassic(const Options& opt, LogFn log = {});

@@ -43,6 +43,7 @@ void FormatDurationHms(uint64_t sec, char* out, size_t outN) {
 }
 
 const char* SessionPhase(const RuntimeLeds& leds) {
+    if (msc::launcher::IsGamaPassDeviceLoginClearing()) return "正在清除独立罐";
     const bool gpLoginBusy = msc::launcher::IsGamaPassDeviceLoginBusy() ||
                              (msc::weblogin::IsBusy() &&
                               (attach_inject::GetLaunchMode() == attach_inject::LaunchMode::GamaPassAuto ||
@@ -344,7 +345,8 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
 
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const bool busy = msc::weblogin::IsBusy() || attach_inject::IsInjectBusy() ||
-                          msc::launcher::IsGamaPassDeviceLoginBusy();
+                          msc::launcher::IsGamaPassDeviceLoginBusy() ||
+                          msc::launcher::IsGamaPassDeviceLoginClearing();
         const UpdateSnapshot snap = GetUpdateSnapshot();
         const bool attachMode =
             attach_inject::IsAttachWatchMode(attach_inject::GetLaunchMode());

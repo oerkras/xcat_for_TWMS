@@ -7,8 +7,8 @@
 //   accounts/error → 置 accountsOauthError，外层关调试浏览器后干净重开 1 次（新 Galaxy OTT；
 //     非同标签 soft-retry；识别靠标志位而非 Fail 文案）；
 //   完整登录页、选昵称 ack 失败 → 立刻停、不重开登录页；
-//   Main 上 init/过期 OTT 等官网拉起：可宽限后「最后一次」stale-ott-retry 重开 Galaxy
-//  （见实现；非无限 soft-retry）。
+//   Main 上 init/过期 OTT 等官网拉起：未见到 NGM 时可宽限后「最后一次」stale-ott-retry
+//   重开 Galaxy（见实现；已见 NGM 则不再 Navigate，防 SPGA0001）。
 
 #include "chromium_cdp.h"
 #include "http_beanfun_login.h"
@@ -38,5 +38,9 @@ HttpLoginResult HttpGamaPassCdpLoginToOtt(HttpLoginLogFn log = nullptr, int time
 HttpLoginResult HttpGamaPassCdpLoginToOttOnConnected(
     msc::cdp::Session& cdp, HttpLoginLogFn log = nullptr, int timeoutMs = 240000,
     int debugPort = msc::cdp::kDefaultRemoteDebugPort, GpCdpOnLoginPageFn onLoginPage = nullptr);
+
+// 无 CDP / JS 点不到时：在独立罐窗口上 UIA 点「回到 GAMA PLAY」。
+// debugPort>0 时优先匹配 --remote-debugging-port=N；cmdNeedle 匹配 cmdline（账密罐用 GpDeviceLoginProfile）。
+bool TryUiaClickBackToGamaPlay(int debugPort, const wchar_t* cmdNeedle, HttpLoginLogFn log);
 
 }  // namespace msc::launcher

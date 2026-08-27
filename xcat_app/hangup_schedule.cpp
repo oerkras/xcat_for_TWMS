@@ -39,7 +39,8 @@ constexpr uint64_t kSoftSuccessGraceMs = 8000;
 
 bool LoginWorkerBusy() {
     // 账密直登不置 weblogin::busy；守护/挂机必须把独立罐换票也当成在途。
-    return msc::weblogin::IsBusy() || msc::launcher::IsGamaPassDeviceLoginBusy();
+    return msc::weblogin::IsBusy() || msc::launcher::IsGamaPassDeviceLoginBusy() ||
+           msc::launcher::IsGamaPassDeviceLoginClearing();
 }
 
 enum class RelaunchPhase : uint8_t {

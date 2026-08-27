@@ -2385,6 +2385,21 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
                                wealthW.c_str());
                     out += wealthHeaders;
                 }
+                if (st.playerRateValid) {
+                    char expPerBuf[32]{};
+                    char mesoPerBuf[32]{};
+                    std::snprintf(expPerBuf, sizeof(expPerBuf), "%lld",
+                                  static_cast<long long>(st.playerExpPerMin));
+                    std::snprintf(mesoPerBuf, sizeof(mesoPerBuf), "%lld",
+                                  static_cast<long long>(st.playerMesoPerMin));
+                    const std::wstring expPerW = sanitizeHdr(xcat::Utf8ToWide(expPerBuf));
+                    const std::wstring mesoPerW = sanitizeHdr(xcat::Utf8ToWide(mesoPerBuf));
+                    wchar_t rateHeaders[192]{};
+                    _snwprintf(rateHeaders, 192,
+                               L"X-XCat-Exp-Per-Min: %s\r\nX-XCat-Meso-Per-Min: %s\r\n",
+                               expPerW.c_str(), mesoPerW.c_str());
+                    out += rateHeaders;
+                }
             }
             if (st.mapId > 0 || st.channelId > 0) {
                 char mapIdBuf[16]{};
@@ -2406,6 +2421,18 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
                                mapIdW.c_str(), mapNameW.c_str());
                 }
                 out += mapHeaders;
+            }
+            if (st.playerWorldValid && st.playerWorldId > 0) {
+                char worldIdBuf[16]{};
+                std::snprintf(worldIdBuf, sizeof(worldIdBuf), "%d", st.playerWorldId);
+                const std::wstring worldIdW = sanitizeHdr(xcat::Utf8ToWide(worldIdBuf));
+                const std::wstring worldNameW =
+                    sanitizeHdrLen(utf8ToB64Hdr(st.playerWorldName), 120);
+                wchar_t worldHeaders[256]{};
+                _snwprintf(worldHeaders, 256,
+                           L"X-XCat-World-Id: %s\r\nX-XCat-World-Name: %s\r\n", worldIdW.c_str(),
+                           worldNameW.c_str());
+                out += worldHeaders;
             }
         }
     }

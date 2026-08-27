@@ -21,6 +21,15 @@ void StopWorker();
 void SetEnabled(bool on);
 bool IsEnabled();
 
+// 标题栏环形窗当前金/经每分钟；valid=false 时探活勿覆盖。charName 与 vitals 对齐才可上报。
+struct CachedRates {
+    bool valid = false;
+    double expPerMin = 0.0;
+    double mesoPerMin = 0.0;
+    char charName[64]{};
+};
+CachedRates GetCachedRates();
+
 }  // namespace titlebar
 }  // namespace features
 }  // namespace x

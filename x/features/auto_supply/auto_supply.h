@@ -15,8 +15,12 @@ void StopWorker();
 
 void SetDesired(bool on);
 bool IsDesired();
-// 开趟中（含排队的卖装/回挂机）。Cooldown / 纯 Idle 不算。
+// 开趟中（含排队的卖装/回挂机、以及 pre_supply 等 hangup 落地）。
+// Cooldown / 纯 Idle 不算。遇人 RequestHop / 重连换频认这个。
 bool IsBusy();
+// 真正进行程（Pause 及之后，不含 Idle 上的 pre_supply）时冻 hangup 秒数闸/出刀闸。
+// pre_supply 在等 hangup，绝不能冻，否则死锁。
+bool HoldsHangupClock();
 
 // 城镇判定：仅 map_info.tsv town=1。不用原生 IsTown，也不用 %1000000==0
 //（野外入口如 107000000 沼澤地Ⅰ 也会整除，误禁记挂机图）。

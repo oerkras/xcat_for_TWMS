@@ -144,9 +144,12 @@ constexpr DWORD kEarlyAbandonSoftBanMs = 0;
 // 打中换怪：刚打过的怪禁锁一会儿，避免投射物/回贴又打到同一只；也挡住 Acquire 回退最近。
 constexpr DWORD kHitRotateBanMs = 5000;
 constexpr int kHitRotateMinLive = 3;
-// 不打 MISS 怪：连续 ACC MISS 满 N 后禁锁。sticky（kBanHitRotate）防同 tick 重选。
-// 比 hit_rotate 稍长：高 EVA 怪会一直飘字，短禁立刻被最近选回来。
+// 不打 MISS 怪：连续 ACC MISS 满 N 后禁锁。sticky（kBanHitRotate）防同 tick 鬼锁。
+// 同类 40s 才是主闸。到期再锁上按 1ms 连砍，命中够了就能打。
+// 不在确认前停手：停手会把能打中的怪第一刀垫到 100ms，面板 1ms 作废。
 constexpr DWORD kSkipAccMissBanMs = 8000;
+constexpr DWORD kSkipAccMissTplBanMs = 40000;
+constexpr int kAccMissTplBanCap = 16;
 constexpr DWORD kTeleportOneHitBanMs = 2500;
 // lastHitted 多数当帧写，但 DamageInfo 列表常晚一拍；窗只挡「确认命中」路径。
 // 锁怪换刀真源是 hitBumpCount（lastHitted 上升沿），不依赖这扇窗、也不依赖 DI.charId。
@@ -613,6 +616,14 @@ struct SoftBan {
 SoftBan gSoftBan[kSoftBanCap]{};
 int gSoftBanN = 0;
 
+// 不打 MISS 怪：按 templateId 记 40s，不是写死怪号。换图 / 关功能清。
+struct AccMissTplBan {
+    int32_t tpl = 0;
+    DWORD untilMs = 0;
+};
+AccMissTplBan gAccMissTplBan[kAccMissTplBanCap]{};
+int gAccMissTplBanN = 0;
+
 // 落点 FH 禁飞：换怪也会踩同一毒台；换图清空。
 struct LandFhBan {
     uint32_t fh = 0;
@@ -799,7 +810,9 @@ void ClearWhiffArm() {
     gLock.armDx = -1.f;
     gLock.firesInArm = 0;
     gLock.hitProbeLogged = false;
-    gLock.accMissWaitHitted = -1;
+    // 不在这里清 accMissWaitHitted。lastHitted 上升会走 whiff-clear，但 DamageInfo
+    // 常晚一拍；清掉 wait 后本锁不再上升沿、1ms 连砍会把「N=1」打成十几刀
+    // （BIN 23:03 id=20090982 fires=20 才 skip_acc_miss）。
 }
 
 // 轻暂停 / skill_prepare：停刀期间 KillTimeout 不计墙钟（与 SoftResetWhiff 同因）。
@@ -888,6 +901,50 @@ bool EnsureFreshMobSnap(ports::mob::Snapshot& snap, DWORD maxAgeMs) {
 void ClearSoftBan() {
     gSoftBanN = 0;
     memset(gSoftBan, 0, sizeof(gSoftBan));
+}
+
+void ClearAccMissTplBan() {
+    gAccMissTplBanN = 0;
+    memset(gAccMissTplBan, 0, sizeof(gAccMissTplBan));
+}
+
+void PurgeAccMissTplBan(DWORD now) {
+    int w = 0;
+    for (int i = 0; i < gAccMissTplBanN; ++i) {
+        if (gAccMissTplBan[i].tpl > 0 && gAccMissTplBan[i].untilMs > now)
+            gAccMissTplBan[w++] = gAccMissTplBan[i];
+    }
+    gAccMissTplBanN = w;
+}
+
+void BanAccMissTpl(int32_t tpl, DWORD now) {
+    if (tpl <= 0) return;
+    PurgeAccMissTplBan(now);
+    const DWORD until = now + kSkipAccMissTplBanMs;
+    for (int i = 0; i < gAccMissTplBanN; ++i) {
+        if (gAccMissTplBan[i].tpl != tpl) continue;
+        if (until > gAccMissTplBan[i].untilMs) gAccMissTplBan[i].untilMs = until;
+        return;
+    }
+    int slot = gAccMissTplBanN;
+    if (slot >= kAccMissTplBanCap) {
+        slot = 0;
+        for (int i = 1; i < gAccMissTplBanN; ++i) {
+            if (gAccMissTplBan[i].untilMs < gAccMissTplBan[slot].untilMs) slot = i;
+        }
+    } else {
+        ++gAccMissTplBanN;
+    }
+    gAccMissTplBan[slot] = AccMissTplBan{tpl, until};
+}
+
+bool IsAccMissTplBanned(int32_t tpl, DWORD now) {
+    if (tpl <= 0) return false;
+    PurgeAccMissTplBan(now);
+    for (int i = 0; i < gAccMissTplBanN; ++i) {
+        if (gAccMissTplBan[i].tpl == tpl && gAccMissTplBan[i].untilMs > now) return true;
+    }
+    return false;
 }
 
 bool IsBadLandPoint(float x, float y, DWORD now) {
@@ -1074,6 +1131,14 @@ bool IsSoftBanned(int id, DWORD now) {
     for (int i = 0; i < gSoftBanN; ++i) {
         if (gSoftBan[i].id == id && gSoftBan[i].untilMs > now) return true;
     }
+    return false;
+}
+
+bool ShouldSkipAcquireMob(const ports::mob::MobLite& m, DWORD now) {
+    if (IsSoftBanned(m.id, now)) return true;
+    if (gSkipAccMissEnabled.load(std::memory_order_acquire) &&
+        IsAccMissTplBanned(m.templateId, now))
+        return true;
     return false;
 }
 
@@ -1363,11 +1428,13 @@ bool TryAbandonAccMiss(DWORD now) {
     if (AccMissLockAlreadyWounded()) return false;
     const int need = gSkipAccMissN.load(std::memory_order_acquire);
     if (need <= 0 || gLock.accMissStreak < need) return false;
-    LogLine("switch reason=skip_acc_miss id=%d streak=%d need=%d n=%d hp=%d hit=%d fires=%d "
-            "ban=%ums",
-            gLock.id, gLock.accMissStreak, need, gLock.accMissCount, gLock.lastHp, gLock.lastHitted,
-            gLock.lockFires, (unsigned)kSkipAccMissBanMs);
+    LogLine("switch reason=skip_acc_miss id=%d tpl=%d streak=%d need=%d n=%d hp=%d hit=%d fires=%d "
+            "ban=%ums tplBan=%ums",
+            gLock.id, gLock.templateId, gLock.accMissStreak, need, gLock.accMissCount, gLock.lastHp,
+            gLock.lastHitted, gLock.lockFires, (unsigned)kSkipAccMissBanMs,
+            (unsigned)kSkipAccMissTplBanMs);
     SoftBanFor(gLock.id, now, kSkipAccMissBanMs, kBanHitRotate);
+    BanAccMissTpl(gLock.templateId, now);
     gLastLockLostWhy = "skip_acc_miss";
     ClearLockRetarget();
     return true;
@@ -2828,6 +2895,9 @@ void AssignLockFromMob(const ports::mob::MobLite& m, float px, float py) {
     gLock.stickyFixes = 0;
     gLock.lastStickyCorrectMs = 0;
     gLock.needApproachCorrect = false;
+    gLock.accMissWaitHitted = -1;
+    gLock.accMissCount = 0;
+    gLock.accMissStreak = 0;
     gLandSide = (px >= m.x) ? 1 : -1;
     gStandstillSince = 0;
     gStandstillShuffleLast = 0;
@@ -2861,7 +2931,7 @@ bool TryHumanPassbyRetarget(const ports::mob::Snapshot& snap, float px, float py
         if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
         if (m.templateId == kSpecialTplFilter) continue;
         if (m.id == gLock.id) continue;
-        if (IsSoftBanned(m.id, now)) continue;
+        if (ShouldSkipAcquireMob(m, now)) continue;
         if (!HumanWalkReachable(px, py, m.x, m.y)) continue;
         if (!InHitBand(px, py, m.x, m.y, standOff)) continue;
         const float dx = m.x - px;
@@ -2973,6 +3043,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
             if (m.templateId == kSpecialTplFilter) continue;
+            if (ShouldSkipAcquireMob(m, now)) continue;
             if (!HiraishinFrontOk(px, py, m.x, m.y)) continue;
             const float dx = m.x - px;
             const float dy = m.y - py;
@@ -2989,7 +3060,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
             if (m.templateId == kSpecialTplFilter) continue;
-            if (IsSoftBanned(m.id, now)) continue;
+            if (ShouldSkipAcquireMob(m, now)) continue;
             if (!HiraishinRangeOk(px, py, m.x, m.y)) continue;
             float hop = 0, tx = 0, ty = 0;
             uint32_t fh = 0;
@@ -3022,7 +3093,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) return;
             if (m.templateId == kSpecialTplFilter) return;
-            if (IsSoftBanned(m.id, now)) return;
+            if (ShouldSkipAcquireMob(m, now)) return;
             if (!HiraishinRangeOk(px, py, m.x, m.y)) return;
 
             if (!allowCrossLayer) {
@@ -3111,7 +3182,7 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             const auto& m = snap.mobs[i];
             if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
             if (m.templateId == kSpecialTplFilter) continue;
-            if (IsSoftBanned(m.id, now)) continue;
+            if (ShouldSkipAcquireMob(m, now)) continue;
             if (!HiraishinRangeOk(px, py, m.x, m.y)) continue;
             const float ndx = m.x - px;
             const float ndy = m.y - py;
@@ -3160,7 +3231,7 @@ bool PickHitRotateTarget(const ports::mob::Snapshot& snap, float fromX, float fr
         const auto& m = snap.mobs[i];
         if (!MobIsLiveFarm(m)) continue;
         if (m.id == excludeId) continue;
-        if (IsSoftBanned(m.id, now)) continue;
+        if (ShouldSkipAcquireMob(m, now)) continue;
         if (!HiraishinRangeOk(px, py, m.x, m.y)) continue;
         if (!allowCrossLayer) {
             if (!SameLayerZm(playerZm, playerZmOk, py, m.x, m.y, 0)) continue;
@@ -3251,7 +3322,7 @@ void ExplainAcquireMiss(const ports::mob::Snapshot& snap, float px, float py, DW
             ++nSpecial;
             continue;
         }
-        if (IsSoftBanned(m.id, now)) {
+        if (ShouldSkipAcquireMob(m, now)) {
             ++nBan;
             continue;
         }
@@ -5505,6 +5576,7 @@ void BeginMapArmGraceMs(DWORD now, const char* why, DWORD graceMs) {
     // land_miss 毒台 ban 跨过 arm 窗口；仅真换图才清（FH id 按图编号）。
     if (why && (!std::strcmp(why, "map_change") || !std::strcmp(why, "ResetForMapChange"))) {
         ClearLandFhBan();
+        ClearAccMissTplBan();
     }
     ports::mob::ClearAbsHpCache();
     ports::attack::ForceRelease();
@@ -8121,6 +8193,7 @@ uint32_t HitRotateN() {
 void SetSkipAccMissEnabled(bool on) {
     const bool prev = gSkipAccMissEnabled.exchange(on, std::memory_order_acq_rel);
     if (prev == on) return;
+    if (!on) ClearAccMissTplBan();
     LogLine("SetSkipAccMissEnabled %d (prev=%d)", on ? 1 : 0, prev ? 1 : 0);
 }
 

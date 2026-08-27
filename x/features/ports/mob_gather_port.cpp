@@ -1637,7 +1637,7 @@ void NoteHangupLandIfReady() {
 
 bool SoftReloginHoldClock() {
     using x::features::soft_login_probe::IsReconnectInFlight;
-    // 脏会话到点必须洗：卖装/赶路/开店不得冻秒数闸（补给应让路，落地再卖）。
+// 脏会话到点必须洗：pre_supply（Idle）不得冻秒数闸。开趟后由 HoldsHangupClock 冻。
     // 重连在途冻的是这一轮自己。起号仍冻。
     // 测谎不冻钟：答题中推迟 CloseSession，关题后无论到点与否都强制拆一次
     // （F40 16:50 hangup_timer 砸进跟轨窗 → dropped）。
@@ -1900,8 +1900,10 @@ void TickSoftRelogin() {
                              x::features::simple_combat::IsEnabled() ? 1 : 0,
                              gHangupUnbindF5.load(std::memory_order_acquire) ? 1 : 0);
         }
-        // 出刀闸、秒数闸到点都要拆。测谎中不拆（见下方 quiz 推迟）。HoldClock 只剩重连/起号。
-        if (SoftReloginHoldClock() && !dueFiresNow) {
+        // 出刀闸、秒数闸到点都要拆。测谎中不拆（见下方 quiz 推迟）。
+        // HoldClock：重连/起号。补给开趟也冻（含出刀闸），免得卖装中途 CloseSession 换频。
+        if (x::features::auto_supply::HoldsHangupClock() ||
+            (SoftReloginHoldClock() && !dueFiresNow)) {
             if (!gSoftPauseMs) gSoftPauseMs = now ? now : 1;
             return;
         }
@@ -1912,6 +1914,7 @@ void TickSoftRelogin() {
     } else if (!dirty) {
         gSoftArmMs = 0;
         gSoftPauseMs = 0;
+        if (x::features::auto_supply::HoldsHangupClock()) return;
         if (SoftReloginHoldClock() && !dueFiresNow) return;
     }
 
@@ -1935,6 +1938,19 @@ void TickSoftRelogin() {
                              "soft relogin defer quiz dueFires=%d dueTime=%d "
                              "deferred=%d — hangup_after_lie when UI closes",
                              dueFires ? 1 : 0, dueTime ? 1 : 0, gHangupLieDeferred ? 1 : 0);
+        }
+        return;
+    }
+
+    // 秒数闸路径已在上方冻钟；出刀闸-only 也会走到这里，开趟中一律不拆。
+    if (x::features::auto_supply::HoldsHangupClock()) {
+        if (!gSoftPauseMs) gSoftPauseMs = now ? now : 1;
+        static DWORD sSupplyHoldLog = 0;
+        if (!sSupplyHoldLog || now - sSupplyHoldLog >= 4000) {
+            sSupplyHoldLog = now;
+            x::runtime::LogI("MobGather",
+                             "soft relogin hold: auto_supply trip dueFires=%d dueTime=%d",
+                             dueFires ? 1 : 0, dueTime ? 1 : 0);
         }
         return;
     }

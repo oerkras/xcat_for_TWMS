@@ -66,22 +66,64 @@ bool ToggleOnIfOff(IUIAutomationElement* el) {
     return ok;
 }
 
+IUIAutomationElement* FindFirstNamed(msc::uia::Session& uia, IUIAutomationElement* root,
+                                     const wchar_t* const* parts, int n, bool preferInvoke) {
+    for (int i = 0; i < n; ++i) {
+        IUIAutomationElement* el = uia.FindByName(root, parts[i], true, preferInvoke);
+        if (el) return el;
+    }
+    return nullptr;
+}
+
+// 必须先确认是协议窗，才能点短「打开 / 開啟 / Open」（Edge 按钮常不带 NGM 全名）。
+bool LooksLikeProtocolDialog(msc::uia::Session& uia, IUIAutomationElement* root) {
+    static const wchar_t* kMarkers[] = {
+        L"想打开此应用",
+        L"想開啟此應用",
+        L"想開啟這個應用程式",
+        L"wants to open this application",
+        L"wants to open",
+        L"trying to open",
+        L"正在尝试打开",
+        L"正嘗試開啟",
+        L"正在嘗試開啟",
+        L"打开此类链接",
+        L"開啟這類連結",
+        L"開啟這類鏈接",
+        L"open these types of links",
+        L"始终允许",
+        L"始終允許",
+        L"一律允許",
+        L"Always allow",
+        L"打开Nexon",
+        L"打开 Nexon",
+        L"開啟Nexon",
+        L"開啟 Nexon",
+        L"Open Nexon",
+    };
+    IUIAutomationElement* marker =
+        FindFirstNamed(uia, root, kMarkers, (int)(sizeof(kMarkers) / sizeof(kMarkers[0])), false);
+    if (!marker) return false;
+    marker->Release();
+    return true;
+}
+
 bool AcceptInBrowserWindow(msc::uia::Session& uia, HWND hwnd) {
     IUIAutomationElement* root = uia.ElementFromHwnd(hwnd);
     if (!root) return false;
-
-    IUIAutomationElement* marker = uia.FindByName(root, L"想打开此应用", true, false);
-    if (!marker) marker = uia.FindByName(root, L"wants to open this application", true, false);
-    if (!marker) marker = uia.FindByName(root, L"始终允许", true, true);
-    if (!marker) marker = uia.FindByName(root, L"Always allow", true, true);
-    if (!marker) {
+    if (!LooksLikeProtocolDialog(uia, root)) {
         root->Release();
         return false;
     }
-    marker->Release();
 
-    IUIAutomationElement* always = uia.FindByName(root, L"始终允许", true, true);
-    if (!always) always = uia.FindByName(root, L"Always allow", true, true);
+    static const wchar_t* kAlways[] = {
+        L"始终允许",
+        L"始終允許",
+        L"一律允許",
+        L"Always allow",
+    };
+    IUIAutomationElement* always =
+        FindFirstNamed(uia, root, kAlways, (int)(sizeof(kAlways) / sizeof(kAlways[0])), true);
     bool did = false;
     if (always) {
         if (ToggleOnIfOff(always)) {
@@ -92,12 +134,30 @@ bool AcceptInBrowserWindow(msc::uia::Session& uia, HWND hwnd) {
         always->Release();
     }
 
-    IUIAutomationElement* openBtn = uia.FindByName(root, L"打开Nexon Game Manager", true, true);
-    if (!openBtn) openBtn = uia.FindByName(root, L"打开 Nexon Game Manager", true, true);
-    if (!openBtn) openBtn = uia.FindByName(root, L"Open Nexon Game Manager", true, true);
+    static const wchar_t* kOpenLong[] = {
+        L"打开Nexon Game Manager",
+        L"打开 Nexon Game Manager",
+        L"開啟Nexon Game Manager",
+        L"開啟 Nexon Game Manager",
+        L"Open Nexon Game Manager",
+        L"打开Nexon",
+        L"打开 Nexon",
+        L"開啟Nexon",
+        L"開啟 Nexon",
+        L"Open Nexon",
+    };
+    IUIAutomationElement* openBtn =
+        FindFirstNamed(uia, root, kOpenLong, (int)(sizeof(kOpenLong) / sizeof(kOpenLong[0])), true);
     if (openBtn) {
         did = uia.InvokeOrClick(openBtn, false) || did;
         openBtn->Release();
+    } else {
+        // Edge 协议窗主按钮经常只有「打开 / 開啟 / Open」
+        if (uia.ClickLargestExactName(root, L"打开", false) ||
+            uia.ClickLargestExactName(root, L"開啟", false) ||
+            uia.ClickLargestExactName(root, L"Open", false)) {
+            did = true;
+        }
     }
     root->Release();
     return did;

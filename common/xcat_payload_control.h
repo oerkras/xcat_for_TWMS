@@ -439,8 +439,8 @@ constexpr uint32_t kMobGatherDyLimPxDefault = 8000u;
 constexpr uint32_t kMobGatherDyLimPxLegacyDefault = 1200u;
 constexpr uint32_t kMobGatherDyLimPxMin = 0u;
 constexpr uint32_t kMobGatherDyLimPxMax = 30000u;
-// 履历闸横移 |dx from first seen|。默认 96。用户自填，只防爆钳 30000。0=不挡横移。
-constexpr uint32_t kMobGatherWalkDxDefault = 96u;
+// 履历闸横移 |dx from first seen|。默认 0=不挡横移。用户自填，只防爆钳 30000。
+constexpr uint32_t kMobGatherWalkDxDefault = 0u;
 constexpr uint32_t kMobGatherWalkDxMin = 0u;
 constexpr uint32_t kMobGatherWalkDxMax = 30000u;
 // 脚边豁免 hypot。默认 8000。用户自填，只防爆钳 30000。0=不开豁免。
@@ -776,7 +776,8 @@ struct PayloadControl {
     int32_t mobGatherHomeMapId = 0;
     uint32_t mobGatherHomeValid = 0;
     uint32_t mobGatherHomeHasMap = 0;
-    // v149: 吸怪「重连换频」。0=关（默认）。开：hangup/被动软重连进异频。遇人 hop 已选频则不抢。
+    // v149: 吸怪「重连换频」。0=关（默认）。开：hangup/被动软重连进异频。
+    // 落地后再被踢会重抽（不粘上一轮目标频）。遇人 hop 已选频则本轮不抢。
     uint32_t mobGatherReconnectHop = kMobGatherReconnectHopDefault;
     // v114: 竖层 px。寻簇同层窗。用户自填；缺键走厂默。0=合法。
     uint32_t mobGatherLayerYPx = kMobGatherLayerYPxDefault;
