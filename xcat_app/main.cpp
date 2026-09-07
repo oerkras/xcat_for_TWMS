@@ -23,6 +23,7 @@
 
 #include "msc_webview_login.h"
 #include "process_util.h"
+#include "xcat_install_names.h"
 #include "xcat_log.h"
 #include "xcat_payload_control.h"
 #include "xcat_version.h"
@@ -58,7 +59,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     if (!IsProcessElevated()) {
         wchar_t exePath[MAX_PATH]{};
         if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH) || !exePath[0]) {
-            MessageBoxW(nullptr, L"请用管理员模式启动", L"XCat TWMS",
+            MessageBoxW(nullptr, L"请用管理员模式启动", xcat::install::kMsgBoxTitle,
                         MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
             return 1;
         }
@@ -91,22 +92,24 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         }
         MessageBoxW(nullptr,
                     L"需要管理员权限才能稳定注入与启动。\n"
-                    L"请在 UAC 对话框点「是」，或右键 xcat.exe「以管理员身份运行」。",
-                    L"XCat TWMS", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+                    L"请在 UAC 对话框点「是」，或以管理员身份运行本程序。",
+                    xcat::install::kMsgBoxTitle, MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
         return 1;
     }
 
     if (!xcat::app::AcquireXcatSingleInstance(3000)) {
-        MessageBoxW(nullptr, L"XCat 已在运行。", L"XCat TWMS", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"已在运行。", xcat::install::kMsgBoxTitle, MB_OK | MB_ICONINFORMATION);
         return 1;
     }
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     const std::string binDir = ExeDirUtf8();
+    (void)xcat::MigrateLegacyPayloadDir(binDir.c_str());
     xcat::CreateDirectoryUtf8(binDir + "logs");
-    xcat::CreateDirectoryUtf8(binDir + "XCat_data\\state");
-    xcat::CreateDirectoryUtf8(binDir + "XCat_data\\logs");
+    const std::string prefsBin = xcat::install::JoinPayloadDir(binDir);
+    xcat::CreateDirectoryUtf8(prefsBin + "\\state");
+    xcat::CreateDirectoryUtf8(prefsBin + "\\logs");
 
     xcat::log::Options logOpts{};
     logOpts.component = xcat::log::Component::Launcher;
@@ -119,7 +122,6 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     xcat::log::Info("App", "start %s %s launcher=%s", xcat::kXcatProductName,
                     xcat::kXcatVersionString, logOpts.filePath.c_str());
 
-    const std::string prefsBin = binDir + "XCat_data";
     // 飞行武装不持久化：每次启动 launcher 清会话态。出刀自组已落盘 user.ini，不清。
     xcat::ClearFlyArmedSession(prefsBin.c_str());
     xcat::ClearMapAttackSession(prefsBin.c_str());

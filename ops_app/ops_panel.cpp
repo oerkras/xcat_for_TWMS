@@ -7,6 +7,7 @@
 #include "xcat_imgui_theme.h"
 
 #include "../common/process_util.h"
+#include "../common/xcat_install_names.h"
 #include "../common/xcat_map_names.h"
 #include "../common/xcat_item_catalog.h"
 
@@ -1007,9 +1008,9 @@ void FormatIdleSec(int idleSec, char* buf, size_t bufSize) {
     }
 }
 
-// 与启动器同口径：repo/bin/XCat_data/dataservice/map_names.tsv
+// 与启动器同口径：repo/bin/<payloadDir>/dataservice/map_names.tsv
 std::string OpsMapNamesBinDir(const OpsState& st) {
-    return st.repoRootUtf8 + "\\bin\\XCat_data";
+    return st.repoRootUtf8 + "\\bin\\" + xcat::install::kPayloadDir;
 }
 
 // 离线表优先；未命中再回退客户端上报名；再无则「圖{id}」。
@@ -8264,7 +8265,7 @@ void DrawGateSignPanel(OpsState& st) {
     if (st.lastQuotaFetchMs == 0) RefreshQuota(st, true);
 
     ImGui::TextDisabled(
-        "给成员签发启动 TOKEN：填 uid + 有效期 → 签发 → 复制发给他，启动 xcat.exe 时粘贴一次即激活。");
+        "给成员签发启动 TOKEN：填 uid + 有效期 → 签发 → 复制发给他，启动启动器时粘贴一次即激活。");
     ImGui::TextDisabled("私钥离线保管在本机 secrets\\，只由本机更新服务读取，不入库、不外发。");
 
     if (!TwmsRunning(st)) {
@@ -8671,10 +8672,10 @@ void OpsPanel_Draw(OpsState& st) {
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
     if (st.mainTab == 2)
         hostFlags |= ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
-    ImGui::Begin("XCat TWMS Ops", nullptr, hostFlags);
+    ImGui::Begin("rtapp Ops", nullptr, hostFlags);
 
     // ── Header（压成两行，把高度留给内容页） ──
-    ImGui::TextUnformatted("XCat TWMS 运维控制台");
+    ImGui::TextUnformatted("运维控制台");
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("台服经典版 · bin_ops\n关窗即停 API(:18789) 与发布站(:52080)");
     }

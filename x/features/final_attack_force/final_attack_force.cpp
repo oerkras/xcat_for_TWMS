@@ -23,6 +23,7 @@
 #include "../../runtime/main_thread_pump.h"
 #include "../../ui/player_vitals.h"
 #include "xcat_payload_control.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -59,41 +60,41 @@ constexpr size_t kFbCdEquipped = 0x28;   // CharacterData.Equipped[]
 constexpr size_t kFbCdEquipped2 = 0x30;  // CharacterData.Equipped2[]（现金）
 
 // GetLevelData(int level) → SkillLevelData*
-constexpr uint32_t kRvaGetLevelData = 0x157C980;
+constexpr uint32_t kRvaGetLevelData = 0x15816C0;
 // UserLocal.TryDoingFinalAttack — remount 2026-08-06
-// 警告：0x1045f00 / a42678b6… 是 TryDoingFallDown，勿再绑。
-constexpr uint32_t kRvaTryDoingFinalAttack = 0x10BD980;
+// 警告：0x1049b70 / a42678b6… 是 TryDoingFallDown，勿再绑。
+constexpr uint32_t kRvaTryDoingFinalAttack = 0x10C10F0;
 // ItemInfo.GetWeaponType(int) — 与 Doing 内比较同源（edx=MethodInfo 可为 null）
-constexpr uint32_t kRvaGetWeaponType = 0x142BB50;
+constexpr uint32_t kRvaGetWeaponType = 0x1432080;
 // CharacterData.GetItem(nTI, nPos)
-constexpr uint32_t kRvaCdGetItem = 0x12EECA0;
+constexpr uint32_t kRvaCdGetItem = 0x12F3A50;
 
 constexpr char kHashGetLevelData[] =
-    "cc56734d0bc877d307a93e0e0cec2ed10b63d532e50c5a8bb2f9011c3b6f3a4";
+    "ca2998c36ac6c3b77376b6d23a9307fd7dcbbb6d49efcadc45250ae857cd111";
 constexpr char kHashSkillEntry[] =
-    "c9574ed72d8b2bc703695933c0620fdcb6766bc9d20b12fcc6bab09128aa96c";
+    "eb0565446ebbab5d50d30acc467fb3c5ced56721f7d3a63463d620ba32c54f5";
 constexpr char kHashSkillLevelData[] =
-    "adabe2e65d96775d4631251e56e1d193ed22cc67ac54b5207fa1ac5741c60b3";
+    "a7899ffe9f6c61083c4e44d5c1ad2777c39d3228385223aa294a38beb4777c0";
 constexpr char kHashProp[] =
-    "ecb1409abcee0e05af2121f3471bdabd70bae6831560668caa6bcc9efe7a51e";
+    "c8fda1239ceb954325d6e1f7f30cd6b3e3234688e34f29dcb766b4d206235bb";
 constexpr char kHashLevelDataList[] =
-    "d2f082d326921feddbfbe47941f4edff3f3a242b4bc974ecb4336865b98db36";
+    "b72c9176290b97fb46d1a9d6bc83859612660d284c0db2b773f183acdefbaef";
 constexpr char kHashFinalAttackField[] =
-    "d920b2b56e33a252b93e77f59772532b58f7e7e3672cd0aceb3507c7d7f1374";
+    "efe42e51d99584557b693384c3963124bf95ee8e0e20f36eafba2cc8c44516f";
 constexpr char kHashCdEquipped[] =
-    "b99cb6e9e5de3b626746b86bfabca7126843a7e16a56cd166e1caf865b4bcb7";
+    "f738d5b2897f8a09006e2729512a33fb09dd39678a8bdc4e9faa645fd561e2d";
 constexpr char kHashCdEquipped2[] =
-    "da4db0853086734be08983d33f60a2f150707142907579aa187d3993f360e5d";
+    "fed6e951540bcea42e765c4a6f4203d15887a269e915cbe747ed08a1f19f615";
 constexpr char kHashTryDoingFinalAttack[] =
-    "f08bef29f7fab6ca0b9c3bbc9e7d2c68580e05ec1124993e7a95015b9795552";
+    "d5d7ace46658c437acd6ccde5ecb2676694e6063e3776a578e7f2d9b5b4ed6a";
 constexpr char kHashGetWeaponType[] =
-    "e10de38b61c575de459d719bd75f85e1cea96cf4d03c780a8f78e51c5bca7b0";
+    "d504adabbd5cc85835f628a3b2d1ae3cf390ec1b3ff1e657375ce10d249e124";
 constexpr char kHashCdGetItem[] =
-    "a9c8de5a574605c132ca4bd784465ff755a93ef4b81eb81e5856ce53b48b9df";
+    "c1ffe7024243a4b901529ba755d345d01e5b83c2fea84baf80d7f05acb278fd";
 constexpr char kHashItemInfo[] =
-    "f567e9c48b4f40c92d9d1582bf1da89f17568ef5af61a05ac2936c4da7df240";
+    "ca9a4e5fe86c2859d380ba0158c932527ee8733d408db3450f99742b297c0f0";
 constexpr char kHashCharacterData[] =
-    "a5319803ef38578b7e1149ce0fcdaea9578a09b85581424fc138483df1a5d4c";
+    "fa256f3348fd00837ea1501cb2014efe45c3b08940bba7596d0d618285450d6";
 
 // 经典版 Final Attack 技能表（狂战士剑/斧优先；同 prop 机制一并覆盖）
 constexpr int kFinalAttackIds[] = {
@@ -912,10 +913,7 @@ DWORD WINAPI Worker(LPVOID) {
 }
 
 bool EnvForceOn() {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_FINAL_ATTACK_FORCE", buf, sizeof(buf));
-    if (n == 0 || n >= sizeof(buf)) return false;
-    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
+    return XCAT_ENV_ON(kEnvFinalAttackForce);
 }
 
 }  // namespace
@@ -938,7 +936,7 @@ void Init() {
     }
     if (EnvForceOn()) {
         gDesired.store(true, std::memory_order_relaxed);
-        x::runtime::LogI("FaForce", "env XCAT_FINAL_ATTACK_FORCE → on");
+        x::runtime::LogI("FaForce", "env final_attack_force → on");
     }
 }
 

@@ -28,14 +28,14 @@ using x::runtime::il2cpp::ReadPtr;
 
 // dump.cs Mob TDI 1507；与 mob_pool_port 同源。
 constexpr char kMobClass[] =
-    "d8b8258494049523e613374de0bd0539bb7318d4802873cd0c7dfbab192bf96";
-constexpr uint32_t kRvaGetBodyRect = 0xF281A0;
+    "de49679f4fa010cff83f3abcf3443df89b12c8102b0f973237328b38f4ac36a";
+constexpr uint32_t kRvaGetBodyRect = 0xF2BAA0;
 
 // ActionManager 哈希 / 字段：melee_veto 已实机跑通（08-20 dump）。
 constexpr char kHashActionManager[] =
-    "e35f6343ebf368eebf40fc2ad5feeaeb3b9dc4ac6326ee032d935aadd50d4c5";
+    "b6556cb63d6e47860340c30f5009d1a0db6dd6382fd771512a14e7792432946";
 constexpr char kHashSingletonInstance[] =
-    "c8072d39439eef6a06153eff03c75ee45009876f675c7c7ebc01a78bf7f0856";
+    "a4acbfea5717698475dab6427b71c33bd8fbab4d9fbdb4b7c5f58cdbec21b47";
 constexpr size_t kOffActionMgrAfterImageMap = 0x20;
 constexpr size_t kOffAfterImageRange = 0x18;
 constexpr size_t kOffDictEntries = 0x18;

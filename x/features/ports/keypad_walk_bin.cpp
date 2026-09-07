@@ -15,6 +15,7 @@
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/mono_clock.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -32,14 +33,14 @@ using x::runtime::il2cpp::ReadPtr;
 using x::runtime::NowMs;
 
 // 注意：这个哈希解析出来的类**不是** KeyPad，而是 Rand32（伪随机数生成器）。
-// 运行期真值 origRva=0x1AE9130 与 dump 对上，而该 RVA 在 dump 里是 `Rand32.Random()`，
+// 运行期真值 origRva=0x1AEE410 与 dump 对上，而该 RVA 在 dump 里是 `Rand32.Random()`，
 // 反编译确认是 xorshift（三状态字、移位 13/19 · 4/25 · 8/11）；`Random()` 正是 Rand32 的
 // 首个自有虚方法，落在 vtable slot 4（前四槽属 Object）—— 四条证据一致。
 // 因此曾经挂在 slot4 上的「PackState 钩子」实际挂的是 PRNG：读数全是随机噪声，
 // 且它每帧被调多次，把 BIN 的空闲节流整体旁通。钩子已拆除，此处只保留字段观测。
 // A/B/C/p28 仍作为该单例的指纹留用；slot4 打出原始 RVA 便于换构建时核对。
 constexpr char kHashKeyPad[] =
-    "a5cb5d3f8ba99d2e77a5865742d09b78f4d4c8547f83423e0e081f0502e0a84";
+    "bf7320cb0a75afb61e60c9788023cfefb4be811f8c595b35ca650f8bbfe463a";
 constexpr size_t kOffKeyPadSlot4 = 0x178;
 constexpr size_t kOffKpA = 0x10;
 constexpr size_t kOffKpB = 0x14;
@@ -231,10 +232,7 @@ void LogLine(const char* fmt, ...) {
 }
 
 bool EnvOn() {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_WALK_BIN", buf, sizeof(buf));
-    if (n == 0) return false;  // 缺省关（采证已完成；开着日志巨大）
-    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
+    return XCAT_ENV_ON(kEnvWalkBin);
 }
 
 char KeysTag() {
@@ -335,7 +333,7 @@ void BinFrameTick(void*) {
             void* ik = *reinterpret_cast<void**>(sing);
             if (LooksLikeHeapPtr(ik)) {
                 void* fn = *reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(ik) + kOffKeyPadSlot4);
-                HMODULE ga = GetModuleHandleW(L"GameAssembly.dll");
+                HMODULE ga = x::runtime::il2cpp::GameAssembly();
                 if (ga && fn) {
                     slot4rva = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(fn) -
                                                      reinterpret_cast<uintptr_t>(ga));
@@ -407,7 +405,7 @@ void Init() {
     if (gInited.exchange(true)) return;
     if (!EnvOn()) {
         gEnabled.store(false);
-        x::runtime::LogI("WalkBin", "off (set XCAT_WALK_BIN=1 to enable)");
+        x::runtime::LogI("WalkBin", "off (walk_bin env to enable)");
         return;
     }
     gEnabled.store(true);

@@ -67,6 +67,8 @@ Get-Process -Name @('xcat','XCat','Maplestory_Classic') -ErrorAction SilentlyCon
         if ($exe) {
             $dir = Split-Path $exe -Parent
             Add-Root $dir
+            Add-Root (Join-Path $dir 'rtcache')
+            Add-Root (Join-Path $dir 'rtcache\logs\hang')
             Add-Root (Join-Path $dir 'XCat_data')
             Add-Root (Join-Path $dir 'XCat_data\logs\hang')
         }
@@ -109,8 +111,8 @@ foreach ($f in $hangFiles) {
     }
 }
 if ($hangFiles.Count -eq 0) {
-    Out-Log $summary "  NONE. missing XCat_data\logs\hang\hang_*.txt"
-    Out-Log $summary "  Inject xcat before freeze; do not delete XCat_data\logs\hang"
+    Out-Log $summary "  NONE. missing rtcache\logs\hang\hang_*.txt"
+    Out-Log $summary "  Inject payload before freeze; do not delete rtcache\logs\hang"
 }
 
 $gpuPath = Join-Path $outDir 'gpu.txt'

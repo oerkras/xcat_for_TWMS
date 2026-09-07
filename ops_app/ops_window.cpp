@@ -5,6 +5,7 @@
 #include "xcat_imgui_theme.h"
 
 #include "../common/process_util.h"
+#include "../common/xcat_install_names.h"
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
@@ -131,7 +132,7 @@ bool CreateDevice(OpsWindow& app, HWND hwnd) {
         return true;
     }
 
-    OutputDebugStringW(L"XCat TWMS Ops: hardware D3D11 failed; falling back to WARP.\n");
+    OutputDebugStringW(L"rtapp Ops: hardware D3D11 failed; falling back to WARP.\n");
     HRESULT warpHr = E_FAIL;
     return TryCreateDevice(app, hwnd, D3D_DRIVER_TYPE_WARP, featureLevel, warpHr);
 }
@@ -258,12 +259,12 @@ bool OpsWindow_Create(OpsWindow& app, HINSTANCE inst, int designW, int designH) 
         inst, MAKEINTRESOURCEW(IDI_OPS_APP_ICON), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"XCatTwmsOpsWindow";
+    wc.lpszClassName = xcat::install::kWndClassOps;
     RegisterClassExW(&wc);
 
     // Create at design size first; real DPI is known only after HWND exists.
     app.hwnd = CreateWindowExW(
-        WS_EX_APPWINDOW, wc.lpszClassName, L"XCat TWMS Ops (:18789)",
+        WS_EX_APPWINDOW, wc.lpszClassName, L"rtapp Ops (:18789)",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, designW, designH,
         nullptr, nullptr, inst, nullptr);
     if (!app.hwnd) return false;
@@ -346,7 +347,7 @@ void OpsWindow_EndFrame(OpsWindow& app) {
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     const HRESULT hr = app.swapChain->Present(1, 0);
     if (FAILED(hr)) {
-        OutputDebugStringW(L"XCat TWMS Ops: D3D11 Present failed.\n");
+        OutputDebugStringW(L"rtapp Ops: D3D11 Present failed.\n");
         app.running = false;
     }
 }
@@ -360,7 +361,7 @@ void OpsWindow_HandleResize(OpsWindow& app, UINT width, UINT height) {
     CleanupRenderTarget(app);
     const HRESULT hr = app.swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr) || !CreateRenderTarget(app)) {
-        OutputDebugStringW(L"XCat TWMS Ops: D3D11 resize failed.\n");
+        OutputDebugStringW(L"rtapp Ops: D3D11 resize failed.\n");
         app.running = false;
     }
 }

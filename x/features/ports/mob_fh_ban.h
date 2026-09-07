@@ -13,7 +13,7 @@ void Shutdown();
 // 已在 MainPump 上时调用（禁止再套 InvokeAndWait）。sampleVc 取 klass。
 bool EnsureInstalledOnPump(void* sampleVc);
 
-bool Arm(void* vc, void* mob, int32_t id, float aimX, float aimY);
+bool Arm(void* vc, void* mob, int32_t id, float aimX, float aimY, int32_t templateId = 0);
 void Disarm(void* vc);
 void ClearFh(void* vc);
 void ClearAll();
@@ -68,6 +68,10 @@ bool IsLanded(void* vc);
 // 面板入口：吸怪 快攻 TAB「防断」卡。
 void SetHopPx(float px);
 float HopPx();
+// v161: 按怪速限制拉速。开=每槽按 WZ speed 限制瞄点推进（最慢档 slowPx）；红/青螃蟹不额外限。
+// 与全局位移夹速取更严的那个。关=清槽位覆盖。面板「防断」卡，厂默关。
+void SetWzLeash(bool on, float slowPx);
+bool WzLeashEnabled();
 // 读 vc 槽位当前有效瞄点（接力跳时=中转点，否则=站点）。用于一次性速度命令别直瞄远站点。
 bool EffectiveAim(void* vc, float* tx, float* ty);
 // 到位圈 / 到位 Kp / ≥5X 刹车(ms) / 死区下滑切断(px/s)。

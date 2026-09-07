@@ -36,6 +36,7 @@
 #include "../features/movepath_flush_probe/movepath_flush_probe.h"
 #include "../features/galaxy_token_probe/galaxy_token_probe.h"
 #include "../features/soft_login_probe/soft_login_probe.h"
+#include "../runtime/bin_dir.h"
 #include "../runtime/log.h"
 #include "../runtime/main_thread_pump.h"
 #include "../runtime/managed_main.h"
@@ -65,11 +66,8 @@ const uint64_t kManualRejoinModuleStartMs = GetTickCount64();
 constexpr uint64_t kManualRejoinWriteSkewMs = 5000;
 
 std::string PayloadBinDir() {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&PayloadBinDir), &self) ||
-        !self)
+    HMODULE self = x::runtime::GetImageModule();
+    if (!self)
         return {};
     wchar_t path[MAX_PATH]{};
     if (!GetModuleFileNameW(self, path, MAX_PATH)) return {};
@@ -519,6 +517,10 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::mob_fh_ban::SetStrategy(c.mobGatherStrategy);
     x::features::ports::mob_fh_ban::SetLandOnArrive(c.mobGatherLandOnArrive != 0);
     x::features::ports::mob_fh_ban::SetHopPx(static_cast<float>(c.mobGatherHopPx));
+    x::features::ports::mob_gather::SetSlowNearOnly(c.mobGatherSlowNearOnly != 0);
+    x::features::ports::mob_gather::SetSlowNearPx(c.mobGatherSlowNearPx);
+    x::features::ports::mob_fh_ban::SetWzLeash(c.mobGatherWzLeashOn != 0,
+                                              static_cast<float>(c.mobGatherWzLeashSlowPx));
     x::features::ports::mob_gather::SetSpeedPct(c.mobGatherSpeedPct);
     x::features::ports::mob_gather::SetAntiJitter(c.mobGatherAntiJitter != 0);
     x::features::ports::mob_gather::SetMaxHold(c.mobGatherMax);

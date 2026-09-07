@@ -11,6 +11,7 @@
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/managed_main.h"
 #include "../../ui/player_vitals.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -30,27 +31,27 @@ using x::runtime::il2cpp::ReadPtr;
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 // Remount 2026-08-06：ACS hash 全换。08-13：CurPos 哈希从数组槽撕开（见 kHashLogicalPos）。
 constexpr char kActorBaseClass[] =
-    "d9aab778a925d77c0ae0b654ad29a8c6dc20a1f4684cffb7e533c336bc6ae5c";
+    "a83e4f1c524fa6e5dc75a3f38110e85704c157550dd8e171c128f9d66e5c739";
 constexpr char kVecCtrlClass[] =
-    "d7d4003a734229d3b8fd8a969b6a9168c36692d3b039b8824d5d40d2cb4430b";
+    "b866b6310c1647fd6473a886a59a14e5121b75565a9314fd00c5ef362f8e776";
 constexpr char kFhClass[] =
-    "d703fdc58843f58f6bdbfdf787ee904002af8c3dfa967cc8c2974c29ad9bf87";
+    "de52928858acf8626fff3660917b8e2019da9b66400ee396975bb609b70faea";
 
 // hash → field_get_offset（与 foothold / mob / invuln / skill 同源）
 constexpr char kHashUserVecCtrl[] =
-    "<aeb819450fbe3e8e0eb38423605993f53e2c72baef2b39f45a89237951f1628>k__BackingField";
+    "<e22b1f6d38f00abbcb8a5dd7bbd304c2288f14cddbee6a552a6fbc18fc280f6>k__BackingField";
 constexpr char kHashPos[] =
-    "f5e96097bcfbc4e0b6bb1606c0cc3f2e20f2635a65745766422d9c9b50e0386";
+    "cf776ff0c583bd614c1ea26f338a0f3c6971482b301704c1bbb8d962b9cb1cf";
 constexpr char kHashVcCurFh[] =
-    "<f875921689ad1c6797cf0c47b7213e908a4f617666d45649265f8af167e1032>k__BackingField";
+    "<a92b3c5adc5622f5d82bd02e8c0cff34f8df7315ca94ebbdd809c5da1e12b63>k__BackingField";
 constexpr char kHashVcAp[] =
-    "c58e00a053bb88a5ed4a0a369ce0968c883a9ff77b788c812b896dc6c58aca3";  // AbsPos; Y=+8
+    "e0990df580e30ca5d5e49277ad3fe6d2aa68067d54a056bc00f418f8e55f8e6";  // AbsPos; Y=+8
 constexpr char kHashVcApl[] =
-    "de49f50f26b3f5583cc1ef8827ea3a3bdfe285cf2d2ef999ff1165e16b82d14";  // Apl; Y=+8
+    "a46b5decdc70dbf3985ab4d74685e8854799f85749212d042bd9c5b5b0663ad";  // Apl; Y=+8
 constexpr char kHashVcRelPos[] =
-    "f7055037de361435ae5f8a1dea8c2ccc03ce9df8f8f7c04b7fa198760f37320";  // RelPos; V=+8
+    "b16c341fc2c692c45ebbcb207ebb364da63d6e7f543eb5dfbcd9e3a41abc873";  // RelPos; V=+8
 constexpr char kHashFhId[] =
-    "<be06e824a3fbd24b780da0021689dbfafb704b4666633a72ac4549369cd6fda>k__BackingField";
+    "<eb31ed85c75e75f08bfcbc77c1bbc39dfdbdef2a88bb1e0c74d0e184548c114>k__BackingField";
 // LocalUser 镜头 CurPos（只读诊断）。08-13：真 Vector2 是 ccce125f@0x2B0；
 // d6f3e65b@0x240 已是数组，equal-offset 会假命中。窗口 0x200–0x300 仍包住 0x2B0。
 // 2026-08-04 撤销「镜头自愈」：0.1.36 实测只读探针 dApCur 静息 27~53px、dApPos=0、
@@ -58,18 +59,18 @@ constexpr char kHashFhId[] =
 // 平滑跟随物理上无法收敛。自愈据此每 0.29s 硬拧一次镜头（中位 343px、峰值 1419px），
 // 反而成了撕裂源。原「镜头粘死」证据取自 nSlow_=140 污染动作层的旧局，根因已换，立论作废。
 constexpr char kHashLogicalPos[] =
-    "ae4a30c4aa075fb68238dc227c1799d252632cad9320bf76370521351096d27";
+    "adb40bd150b8a460d80f10c5bc5560f7f52aeb7057a93b6396edc804bc0ee25";
 // e2a28(Key) 键位移偏移对（IDA：mov [rsi+4B4h], rdx · 两 int32）
 constexpr char kHashKeyMoveDelta[] =
-    "<e103ecfbac4d0c0bdbc512284cd6247d1dd5d8e3cac3ded72ef1e4784ccd700>k__BackingField";
+    "<e0cbbba0f7d386909960c9770a447ae8588af410f49ca7dcdce0e80c08292ef>k__BackingField";
 
 constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 // Mob 专属 PvcActive；LU 上无同名槽，保留软探针（LooksLikeHeapPtr 失败 → VecCtrl）
 constexpr char kHashPvcActive[] =
-    "dd50193bf1aa5d93bfde7b1d0ba00ca40574669f552c96e424c69d28acbdf46";
+    "a7586701633914ead657c56ae2d67c86c1288be9d27a54f76a13e6aa66fadfc";
 constexpr char kMobClass[] =
-    "d8b8258494049523e613374de0bd0539bb7318d4802873cd0c7dfbab192bf96";
+    "de49679f4fa010cff83f3abcf3443df89b12c8102b0f973237328b38f4ac36a";
 constexpr size_t kFbPvcActive = 0xF0;
 size_t gOffPvcActive = kFbPvcActive;
 #define kOffPvcActive (gOffPvcActive)
@@ -601,14 +602,9 @@ void LogVisualLayer(const char* comp, const char* phase, const char* note,
 }
 
 namespace {
-bool ProbeEnvFlag(const char* name) {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
-    return n > 0 && (buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y');
-}
-bool ProbeOnKeyEnvOn() { return ProbeEnvFlag("XCAT_PROBE_ONKEY"); }
-bool ProbeDoActiveEnvOn() { return ProbeEnvFlag("XCAT_PROBE_DOACTIVE"); }
-bool ProbeFillCamEnvOn() { return ProbeEnvFlag("XCAT_PROBE_FILLCAM"); }
+bool ProbeOnKeyEnvOn() { return XCAT_ENV_ON(kEnvProbeOnKey); }
+bool ProbeDoActiveEnvOn() { return XCAT_ENV_ON(kEnvProbeDoActive); }
+bool ProbeFillCamEnvOn() { return XCAT_ENV_ON(kEnvProbeFillCam); }
 }  // namespace
 
 void LogE2a28KeyProbe(const char* phase, const char* note, const VisualSnap* baseline) {

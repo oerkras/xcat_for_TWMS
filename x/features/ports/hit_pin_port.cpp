@@ -8,6 +8,7 @@
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -21,9 +22,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-// dump.cs：d7f12f4cc34eb8c408869db0c4459a3e53597364a87582f89ee7301faa99859
+// dump.cs：b9c344cfc7bf0c826e083d33602ab68eb4aca9f32fc88adb58c711062ebf6cd
 // CMS：FindHitMobInRect(Rect, ref List<Mob>, maxCount, except, wishMobId, …)
-constexpr uint32_t kRvaFindHitMobInRect = 0xF89C40;
+constexpr uint32_t kRvaFindHitMobInRect = 0xF8D9D0;
 constexpr size_t kFbMobId = 0x134;
 
 // 与 melee_veto 近战/射击同一套 12 字节序言。
@@ -143,11 +144,9 @@ void RemoveAbs(AbsHookState& st) {
 }
 
 bool EnsurePatchEnv() {
-    char env[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", env, sizeof(env));
-    if (n > 0 && env[0] == '1') return true;
-    if (!SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", "1")) {
-        x::runtime::LogW("HitPin", "无法设置 XCAT_ALLOW_TEXT_PATCH=1 err=%lu", GetLastError());
+    if (XCAT_ENV_ON(kEnvAllowTextPatch)) return true;
+    if (!XCAT_ENV_SETA(kEnvAllowTextPatch, "1")) {
+        x::runtime::LogW("HitPin", "无法设置 allow_text_patch env err=%lu", GetLastError());
         return false;
     }
     return true;

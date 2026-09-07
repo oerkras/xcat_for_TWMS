@@ -116,7 +116,7 @@ constexpr size_t kCallScan = 0x4000;
 constexpr size_t kOnFixedScan = 0x8000;
 
 constexpr char kMobClass[] =
-    "d8b8258494049523e613374de0bd0539bb7318d4802873cd0c7dfbab192bf96";
+    "de49679f4fa010cff83f3abcf3443df89b12c8102b0f973237328b38f4ac36a";
 constexpr char kHashApplyControl[] =
     "a7982679b4b10ec2c0b41ae7d2ca76e66f7d61e29b31fd00bd18b6a1cf080ed";
 constexpr char kHashCanApplyCtrl[] =
@@ -146,6 +146,8 @@ std::atomic<unsigned> gQuietDelayMs{0};
 std::atomic<DWORD> gQuietSinceMs{0};
 std::atomic<uint8_t> gApplyCtrl{0};
 std::atomic<uint8_t> gFirstGenOnly{xcat::kMobGatherFirstGenOnlyDefault != 0 ? 1 : 0};
+std::atomic<uint8_t> gSlowNearOnly{xcat::kMobGatherSlowNearOnlyDefault != 0 ? 1 : 0};
+std::atomic<unsigned> gSlowNearPx{xcat::kMobGatherSlowNearPxDefault};
 std::atomic<uint8_t> gSoftRelogin{0};
 std::atomic<unsigned> gSoftReloginSec{xcat::kMobGatherSoftReloginSecDefault};
 std::atomic<unsigned> gHangupFiresNeed{xcat::kMobGatherHangupFiresDefault};
@@ -1231,6 +1233,7 @@ struct HoldItem {
     bool detach = false;
     bool live = false;
     bool fresh = false;  // 补刷（非 exempt）：本拍要走官方 ApplyControl
+    int32_t templateId = 0;
     const char* why = "skip";
 };
 
@@ -1287,7 +1290,8 @@ void HoldJobFn(void* p) {
             continue;
         }
         if (!x::features::ports::mob_fh_ban::EnsureInstalledOnPump(vc) ||
-            !x::features::ports::mob_fh_ban::Arm(vc, it.mob, it.id, job->playerX, job->playerY)) {
+            !x::features::ports::mob_fh_ban::Arm(vc, it.mob, it.id, job->playerX, job->playerY,
+                                                it.templateId)) {
             it.why = "arm";
             continue;
         }
@@ -1494,6 +1498,40 @@ void SetFirstGenOnly(bool on) {
     gFieldN = 0;
     gFieldLatchPending = on ? 1 : 0;
     x::runtime::LogI("MobGather", "onField=%d (latch live oids; skip later spawn)", on ? 1 : 0);
+}
+
+void SetSlowNearOnly(bool on) {
+    const uint8_t v = on ? 1 : 0;
+    const uint8_t prev = gSlowNearOnly.exchange(v, std::memory_order_acq_rel);
+    if (prev == v) return;
+    x::runtime::LogI("MobGather", "slowNear=%d px=%u (speed>=%d hopOk, <=%d floor)", on ? 1 : 0,
+                     gSlowNearPx.load(std::memory_order_relaxed), xcat::kMobGatherSpeedHopOk,
+                     xcat::kMobGatherSpeedSlowFloor);
+}
+
+void SetSlowNearPx(unsigned px) {
+    const unsigned v = xcat::ClampMobGatherSlowNearPx(px);
+    const unsigned prev = gSlowNearPx.exchange(v, std::memory_order_acq_rel);
+    if (prev == v) return;
+    x::runtime::LogI("MobGather", "slowNearPx=%u", v);
+}
+
+static float RecruitNearCapPx(int32_t tpl, int32_t* outSp) {
+    const int32_t sp = mob::LookupTemplateWzSpeed(tpl);
+    if (outSp) *outSp = sp;
+    if (sp == mob::kWzSpeedUnknown) return -1.f;
+    if (sp >= xcat::kMobGatherSpeedHopOk) return -1.f;
+    const float lo = static_cast<float>(gSlowNearPx.load(std::memory_order_acquire));
+    if (sp <= xcat::kMobGatherSpeedSlowFloor) return lo;
+    const float hop = x::features::ports::mob_fh_ban::HopPx();
+    const float hiRaw = hop > 1.f ? hop : static_cast<float>(xcat::kMobGatherHopPxDefault);
+    const float hi = hiRaw > lo ? hiRaw : lo;
+    const float span =
+        static_cast<float>(xcat::kMobGatherSpeedHopOk - xcat::kMobGatherSpeedSlowFloor);
+    const float t = static_cast<float>(sp - xcat::kMobGatherSpeedSlowFloor) / span;
+    float cap = lo + t * (hi - lo);
+    if (cap < 0.f) cap = 0.f;
+    return cap;
 }
 
 bool HangupSecondsOn() {
@@ -2962,8 +3000,12 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     int skippedDy = 0;
     int skippedPool = 0;
     int skippedGen = 0;
+    int skippedSlow = 0;
     int skipGenHave = 0;
     int32_t skipGenSt = 0;
+    int32_t skipSlowSp = 0;
+    float skipSlowCap = 0.f;
+    float skipSlowAd = 0.f;
     int32_t skipWalkId = 0;
     float skipWalkDx = 0.f;
     float skipWalkDxMax = 0.f;
@@ -3029,6 +3071,20 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
             continue;
         }
         if (adLive > radius && !keepArmed) continue;
+        if (!keepArmed && gSlowNearOnly.load(std::memory_order_acquire) != 0 &&
+            !x::features::ports::mob_fh_ban::WzLeashEnabled()) {
+            int32_t sp = 0;
+            const float cap = RecruitNearCapPx(m.templateId, &sp);
+            if (cap >= 0.f && adLive > cap) {
+                ++skippedSlow;
+                if (skipSlowAd <= 0.f || adLive < skipSlowAd) {
+                    skipSlowAd = adLive;
+                    skipSlowSp = sp;
+                    skipSlowCap = cap;
+                }
+                continue;
+            }
+        }
         // 清怪重连本轮已冻结：只维持这一批，禁止 Arm 新怪。
         if (ClearReloginHoldWaveOnly() && (!keepArmed || !ClearWaveHas(m.id))) continue;
         // 进图第一批 exempt 仍脚边照吸。补刷：脚边只豁免横移，贴地/掉落/高度闸照挡。
@@ -3138,6 +3194,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         it.id = cands[i].m->id;
         it.ctrl = cands[i].ctrl;
         it.fresh = cands[i].fresh;
+        it.templateId = cands[i].m->templateId;
         ++out->considered;
         // 面板「申请控制权」照旧。补刷 ctrl≤0 即使没勾也走官方 ApplyControl（不挡 Arm）。
         if ((applyOn || it.fresh) && it.ctrl <= 0 && job.nApply < kMaxHold) {
@@ -3148,25 +3205,34 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     }
 
     if (job.n <= 0 && job.nApply <= 0) {
-        out->why = (skippedGen > 0 && skippedSpawn == 0 && skippedDy == 0 && skippedPool == 0)
+        out->why = (skippedGen > 0 && skippedSpawn == 0 && skippedDy == 0 && skippedPool == 0 &&
+                    skippedSlow == 0)
                        ? "gen"
-                       : ((nLive <= 0) ? "no_live"
-                                       : ((skippedSpawn > 0 || skippedDy > 0 || skippedPool > 0)
-                                              ? "walk"
-                                              : "empty"));
+                       : ((skippedSlow > 0 && skippedSpawn == 0 && skippedDy == 0 &&
+                           skippedPool == 0 && skippedGen == 0)
+                              ? "slow"
+                              : ((nLive <= 0) ? "no_live"
+                                              : ((skippedSpawn > 0 || skippedDy > 0 ||
+                                                  skippedPool > 0 || skippedSlow > 0)
+                                                     ? "walk"
+                                                     : "empty")));
         if (verbose || PeriodicLogOk()) {
             x::runtime::LogI("MobGather",
                              "%s considered=0 pushed=0 why=%s n=%d live=%d ours=%d passive=%d "
                              "fixed=%d remote=%d skipSpawn=%d skipAir=%d skipDy=%d skipPool=%d "
-                             "skipGen=%d st=%d onField=%d "
+                             "skipGen=%d skipSlow=%d st=%d onField=%d slowNear=%d wzLeash=%d "
+                             "spd=%d cap=%.0f "
                              "holdId=%d dHome=%.0f dHomeMax=%.0f ap=%.0f,%.0f "
                              "onFh=%d vy=%.0f spawnN=%d gate=%d applyOn=%d qdelay=%u dyLim=%.0f "
                              "packN=%d packY=%.0f layerY=%.0f walkDx=%.0f feet=%.0f "
                              "off=%.0f,%.0f",
                              kind, out->why, snap.count, nLive, nOurs, nPassive, skippedFixed,
                              skippedRemote, skippedSpawn, skippedAir, skippedDy, skippedPool,
-                             skippedGen, skipGenSt,
+                             skippedGen, skippedSlow, skipGenSt,
                              gFirstGenOnly.load(std::memory_order_relaxed) ? 1 : 0,
+                             gSlowNearOnly.load(std::memory_order_relaxed) ? 1 : 0,
+                             x::features::ports::mob_fh_ban::WzLeashEnabled() ? 1 : 0, skipSlowSp,
+                             skipSlowCap,
                              skipWalkId, skipWalkDx, skipWalkDxMax, skipWalkX, skipWalkY, skipWalkFh,
                              skipWalkVy, snap.spawnPointN, gSpawnGateOn ? 1 : 0, applyOn ? 1 : 0,
                              gQuietDelayMs.load(std::memory_order_relaxed),
@@ -3239,7 +3305,8 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         }
         x::runtime::LogI("MobGather",
                          "%s considered=%d new=%d sta=%d far=%d skipFar=%d farAdm=%d skipSpawn=%d "
-                         "skipAir=%d skipDy=%d skipPool=%d skipGen=%d st=%d onField=%d "
+                         "skipAir=%d skipDy=%d skipPool=%d skipGen=%d skipSlow=%d st=%d onField=%d "
+                         "slowNear=%d wzLeash=%d spd=%d cap=%.0f "
                          "holdId=%d dHome=%.0f dHomeMax=%.0f "
                          "onFh=%d vy=%.0f "
                          "spawnN=%d gate=%d pushed=%d "
@@ -3252,8 +3319,11 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
                          "sample id=%d ctrl=%d(%s) cmd=(%.0f,%.0f) ap=%.1f,%.1f vy=%.0f "
                          "maxAd=%.0f maxCmd=%.0f",
                          kind, out->considered, nNew, nSta, nFar, nSkipFar, nFarAdmit, skippedSpawn,
-                         skippedAir, skippedDy, skippedPool, skippedGen, skipGenSt,
-                         gFirstGenOnly.load(std::memory_order_relaxed) ? 1 : 0, skipWalkId,
+                         skippedAir, skippedDy, skippedPool, skippedGen, skippedSlow, skipGenSt,
+                         gFirstGenOnly.load(std::memory_order_relaxed) ? 1 : 0,
+                         gSlowNearOnly.load(std::memory_order_relaxed) ? 1 : 0,
+                         x::features::ports::mob_fh_ban::WzLeashEnabled() ? 1 : 0, skipSlowSp,
+                         skipSlowCap, skipWalkId,
                          skipWalkDx, skipWalkDxMax,
                          skipWalkFh, skipWalkVy, snap.spawnPointN, gSpawnGateOn ? 1 : 0, out->pushed,
                          nDetach, nLive,

@@ -10,6 +10,7 @@
 #include "../ports/mob_pool_port.h"
 #include "../ports/world_port.h"
 #include "../simple_combat/simple_combat.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
 
@@ -52,11 +53,8 @@ void WriteLogHandle(HANDLE h, const char* buf, int n) {
 }
 
 std::wstring ModuleDir() {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&ModuleDir), &self) ||
-        !self)
+    HMODULE self = x::runtime::GetImageModule();
+    if (!self)
         return L".";
     wchar_t path[MAX_PATH]{};
     if (!GetModuleFileNameW(self, path, MAX_PATH)) return L".";
@@ -199,7 +197,7 @@ DWORD WINAPI Worker(LPVOID) {
         if (!ports::mob::EnsureBound()) {
             if (now - lastMissLog >= kMissLogMs) {
                 lastMissLog = now;
-                LogLine("mobscan wait: GameAssembly / class bind");
+                LogLine("mobscan wait: GA / class bind");
             }
             WaitWake(kIdleSleepMs);
             continue;

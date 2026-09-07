@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "../../common/xcat_install_names.h"
 #include "bin_dir.h"
 #include "il2cpp_metadata_lock.h"
 #include "log.h"
@@ -221,7 +222,7 @@ bool Capture(const char* reason) {
     GetLocalTime(&st);
     char head[512];
     snprintf(head, sizeof(head),
-             "XCat hang autopsy\n"
+             "hang autopsy\n"
              "time      : %04u-%02u-%02u %02u:%02u:%02u.%03u\n"
              "reason    : %s\n"
              "pid       : %lu\n"
@@ -240,7 +241,7 @@ bool Capture(const char* reason) {
         char lockText[512];
         if (!methodLock.read) {
             snprintf(lockText, sizeof(lockText),
-                     "il2cpp method lock: 读取失败（GameAssembly 未加载或 RVA 越界）\n\n");
+                     "il2cpp method lock: 读取失败（GA 未加载或 RVA 越界）\n\n");
         } else if (!methodLock.plausible) {
             snprintf(lockText, sizeof(lockText),
                      "il2cpp method lock: 取值不合理（word=0x%x owner=0x%llx）——RVA 很可能已随"
@@ -258,16 +259,16 @@ bool Capture(const char* reason) {
                 ownerSeen = true;
                 for (int i = 0; i < ts.n; ++i) {
                     const ModuleRange* m = FindModule(mods, ts.frames[i]);
-                    if (m && _stricmp(m->name, "xcat.dll") == 0) ownerIsXcat = true;
+                    if (m && _stricmp(m->name, xcat::install::kPayloadDll) == 0) ownerIsXcat = true;
                 }
             }
             snprintf(lockText, sizeof(lockText),
                      "il2cpp method lock: %s  word=%u recursion=%u\n"
                      "  持有者 tid : %lu%s%s\n"
-                     "  （持有者若是 xcat.dll 线程 = XCat 的锅；若是游戏线程 = 客户端自身死锁）\n\n",
+                     "  （持有者若是载荷 DLL 线程 = 本模块；若是游戏线程 = 客户端自身死锁）\n\n",
                      state, methodLock.word, methodLock.recursion, ownerTid,
                      ownerSeen ? "" : "  [该线程已不在快照里]",
-                     ownerIsXcat ? "  ← 栈里有 xcat.dll" : "");
+                     ownerIsXcat ? "  ← 栈里有载荷 DLL" : "");
         }
         text += lockText;
     }

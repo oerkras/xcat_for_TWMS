@@ -89,6 +89,13 @@ public:
     // 把当前附着标签拉到前台（避免 Navigate 发生在后台 tab，用户盯着另一扇 about:blank）
     bool ActivateAttachedPage(const LogFn& log = nullptr);
 
+    // 把本调试口 Chrome 主窗从最小化/后台拉起来（不最大化，避免已量过的视口坐标失效）。
+    // 无人值守：启动器最小化时选账号仍依赖受信任 Input，窗被挡住会回包极慢。
+    bool RestoreDebugWindows(const LogFn& log = nullptr);
+
+    // 跨域跳转后页面 target 可能换了：关旧 WS，再绑当前页。不清 Cookie。
+    bool RebindPage(const LogFn& log = nullptr);
+
     // 视口 CSS 像素上的受信任鼠标单击（Input.dispatchMouseEvent，isTrusted=true）。
     // 页内 dispatchEvent / element.click() 是假事件，React 账号卡会吞掉。
     bool ClickViewport(double x, double y, const LogFn& log = nullptr);

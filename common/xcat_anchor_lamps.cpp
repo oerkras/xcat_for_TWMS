@@ -1,5 +1,7 @@
 #include "xcat_anchor_lamps.h"
 
+#include "xcat_install_names.h"
+
 #include <Windows.h>
 
 #include <cstdio>
@@ -45,7 +47,7 @@ uint32_t HashBinDirForShm(const char* binDir) {
 
 std::wstring MapName(const char* binDir) {
     wchar_t name[96]{};
-    swprintf_s(name, L"Local\\XCatAnchorLamps_v%u_%08X", kShmVersion, HashBinDirForShm(binDir));
+    swprintf_s(name, xcat::install::kShmLampsFmt, kShmVersion, HashBinDirForShm(binDir));
     return name;
 }
 

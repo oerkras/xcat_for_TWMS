@@ -14,6 +14,7 @@
 #include "gamapass_device_login.h"
 #include "gamapass_login_phase.h"
 #include "xcat_log.h"
+#include "xcat_install_names.h"
 #include "xcat_payload_status.h"
 #include "xcat_version.h"
 
@@ -371,7 +372,7 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         // —— 1/4 产品 + 版本（脱敏：不写服名/游戏名）——
         BeginStatusRow(origin, rowH, 0);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("XCat");
+        ImGui::TextUnformatted(xcat::install::kLauncherStem);
         ImGui::SameLine(0.f, ui::Gap());
         ImGui::TextDisabled("%s", xcat::kXcatVersionString);
         if (snap.latestBuildId > 0) {
@@ -390,7 +391,7 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
             const uint64_t start = launchTickMs ? launchTickMs : now;
             char dur[24]{};
             FormatDurationHms((now >= start ? now - start : 0u) / 1000u, dur, sizeof(dur));
-            ImGui::TextDisabled("XCat运行时间 %s", dur);
+            ImGui::TextDisabled("运行时间 %s", dur);
         }
         ImGui::SameLine(0.f, ui::Gap());
         ImGui::TextDisabled("|");

@@ -8,6 +8,7 @@
 #include "../ports/player_combat_port.h"
 #include "../ports/world_port.h"
 #include "../../ipc/payload_control.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_shape.h"
@@ -43,9 +44,9 @@ constexpr DWORD kPendingMs = 5000;
 // UserBase 短 IsAlertMode：LocalUser alert stamp > 0（与 drop_alert 同字段）
 // hash → field_get_offset；dump fallback 0x118（勿用 bac75f bool@0x114）
 constexpr char kUserAlertClass[] =
-    "e86cb2ff43093983d0050fa57e9c1b4746806199978f85d31b599efe8722abd";
+    "db2b44b77b8e0b6f7cc2afaad5f17070b20b342d42ecd898aa70061f768d2ab";
 constexpr char kHashAlertAt[] =
-    "a928d9017b1afecab6b776b5671f47a127d16f543c95e9be6e1980b268998d8";
+    "d7d34628bac16e8ec6002b89e1730bbb9a0fa6588fe8eaf2a66b28c993b7c71";
 constexpr size_t kFbAlertAt = 0x118;
 size_t gOffAlertAt = kFbAlertAt;
 bool gAlertFieldTried = false;
@@ -121,11 +122,8 @@ void WriteLogHandle(HANDLE h, const char* buf, int n) {
 }
 
 std::wstring ModuleDir() {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&ModuleDir), &self) ||
-        !self)
+    HMODULE self = x::runtime::GetImageModule();
+    if (!self)
         return L".";
     wchar_t path[MAX_PATH]{};
     if (!GetModuleFileNameW(self, path, MAX_PATH)) return L".";
@@ -331,7 +329,7 @@ DWORD WINAPI Worker(LPVOID) {
         if (!ports::pet::EnsureBound()) {
             if (now - lastMissLog >= kMissLogMs) {
                 lastMissLog = now;
-                LogLine("petfeed wait: GameAssembly / MyUser / WorldManager");
+                LogLine("petfeed wait: GA / MyUser / WorldManager");
             }
             Sleep(kIdleSleepMs);
             continue;

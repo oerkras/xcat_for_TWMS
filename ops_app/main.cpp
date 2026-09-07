@@ -6,12 +6,14 @@
 #include "ops_panel.h"
 #include "ops_window.h"
 
+#include "../common/xcat_install_names.h"
+
 namespace {
 
 HANDLE g_singleInstance = nullptr;
 
 bool AcquireSingleInstance() {
-    g_singleInstance = CreateMutexW(nullptr, TRUE, L"Local\\XCatTwmsOpsConsole.SingleInstance");
+    g_singleInstance = CreateMutexW(nullptr, TRUE, xcat::install::kMutexOps);
     if (!g_singleInstance) return false;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(g_singleInstance);
@@ -33,13 +35,13 @@ void ReleaseSingleInstance() {
 
 int APIENTRY wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     if (!AcquireSingleInstance()) {
-        MessageBoxW(nullptr, L"XCat TWMS 运维控制台已在运行。", L"XCat TWMS Ops", MB_ICONINFORMATION);
+        MessageBoxW(nullptr, L"运维控制台已在运行。", xcat::install::kWndTitleOps, MB_ICONINFORMATION);
         return 0;
     }
 
     OpsWindow window{};
     if (!OpsWindow_Create(window, inst, 1080, 760)) {
-        MessageBoxW(nullptr, L"Failed to create ops window / D3D11 device.", L"XCat TWMS Ops", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to create ops window / D3D11 device.", xcat::install::kWndTitleOps, MB_ICONERROR);
         ReleaseSingleInstance();
         return 1;
     }

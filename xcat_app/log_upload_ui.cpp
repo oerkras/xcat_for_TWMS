@@ -8,6 +8,7 @@
 #include "update_client.h"
 
 #include "process_util.h"
+#include "xcat_install_names.h"
 
 #include "imgui.h"
 
@@ -80,7 +81,7 @@ LogUploadRequest MakeLogUploadRequest(const std::string& prefsBinDir) {
     req.profileId = "twms";
     req.exeBinDir = g_ui.exeBinDir;
     req.payloadBinDir = prefsBinDir.empty()
-                            ? xcat::JoinBinPath(req.exeBinDir.c_str(), "XCat_data")
+                            ? xcat::JoinBinPath(req.exeBinDir.c_str(), xcat::install::kPayloadDir)
                             : prefsBinDir;
     return req;
 }

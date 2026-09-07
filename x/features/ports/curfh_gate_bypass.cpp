@@ -19,14 +19,14 @@ namespace {
 
 // remounted 2026-08-20。CurFh 门：User+0x50 -> VecCtrl+0x28 -> test -> CONT/FAIL。
 // Magic/Shoot 收成 cmovnz dispatcher；Prepare 仍是 75 07 跳过 FAIL 槽。
-constexpr uint32_t kRvaMagicCmov = 0x10B18AD;   // cmovnz rax,rcx -> mov rax,rcx; nop
-constexpr uint32_t kRvaShootCmov = 0x107975E;   // cmovnz rax,r12 -> mov rax,r12; nop
-constexpr uint32_t kRvaPrepareJnz = 0x10D2B3A;  // 75 07 -> EB 07
+constexpr uint32_t kRvaMagicCmov = 0x10B504B;   // cmovnz rax,rcx -> mov rax,rcx; nop
+constexpr uint32_t kRvaShootCmov = 0x107D02C;   // cmovnz rax,rdx -> mov rax,rdx; nop
+constexpr uint32_t kRvaPrepareJnz = 0x10D2B3A;  // 75 07 -> EB 07（09-03 CurFh 已改 setnz 跳表，未改补丁）
 
 constexpr uint8_t kMagicExpect[] = {0x48, 0x0F, 0x45, 0xC1};
 constexpr uint8_t kMagicPatch[] = {0x48, 0x8B, 0xC1, 0x90};
-constexpr uint8_t kShootExpect[] = {0x49, 0x0F, 0x45, 0xC4};
-constexpr uint8_t kShootPatch[] = {0x49, 0x8B, 0xC4, 0x90};
+constexpr uint8_t kShootExpect[] = {0x48, 0x0F, 0x45, 0xC2};
+constexpr uint8_t kShootPatch[] = {0x48, 0x8B, 0xC2, 0x90};
 constexpr uint8_t kJnzExpect[] = {0x75, 0x07};
 constexpr uint8_t kJmpPatch[] = {0xEB, 0x07};
 

@@ -70,6 +70,9 @@ struct MobLite {
 
 // 离线表 dataservice/mob_stats.tsv：templateId → maxHP。未知模板返回 0。
 int64_t LookupTemplateMaxHp(int32_t templateId);
+// 同表 WZ speed 列。未知模板返回 kWzSpeedUnknown（不当慢怪，fail-open）。
+constexpr int32_t kWzSpeedUnknown = 0x7FFFFFFF;
+int32_t LookupTemplateWzSpeed(int32_t templateId);
 
 // UIHpTag（预制名）：包/UI 路径缓存的绝对血（非 Mob 本体）。
 // IDA：ShowMobHpTag 写 mobId@+0xC8 · cur@+0xD4 · max@+0xD8（CMS 同语义，TW 偏移 +8）。

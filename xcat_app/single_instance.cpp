@@ -1,19 +1,19 @@
 #include "single_instance.h"
 
+#include "xcat_install_names.h"
 #include "xcat_log.h"
 
 namespace xcat::app {
 namespace {
 
 HANDLE g_mutex = nullptr;
-constexpr wchar_t kMutexName[] = L"Local\\XCatTwms.Launcher.SingleInstance";
 
 }  // namespace
 
 bool AcquireXcatSingleInstance(DWORD maxWaitMs) {
     if (g_mutex) return true;
 
-    g_mutex = CreateMutexW(nullptr, FALSE, kMutexName);
+    g_mutex = CreateMutexW(nullptr, FALSE, xcat::install::kMutexLauncher);
     if (!g_mutex) {
         xcat::log::Error("App", "CreateMutex single-instance failed err=%lu", GetLastError());
         return false;

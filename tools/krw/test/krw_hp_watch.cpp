@@ -78,7 +78,7 @@ struct WmPick {
 // Prefer xcat-published live pointer (requires injected payload in-map).
 WmPick LatestWmFromLiveFile(std::uint32_t expect_pid) {
   WmPick out{};
-  const std::string path = ExeDir() + "..\\XCat_data\\state\\wm_live.txt";
+  const std::string path = ExeDir() + "..\\rtcache\\state\\wm_live.txt";
   std::ifstream in(path);
   if (!in) return out;
   std::string line;
@@ -107,7 +107,7 @@ WmPick LatestWmFromLiveFile(std::uint32_t expect_pid) {
 WmPick LatestWmFromLog() {
   WmPick out{};
   out.source = "x.jsonl";
-  const std::string base = ExeDir() + "..\\XCat_data\\logs\\";
+  const std::string base = ExeDir() + "..\\rtcache\\logs\\";
   const char* names[] = {"x.jsonl", "x.jsonl.1"};
   WIN32_FILE_ATTRIBUTE_DATA fad{};
   if (GetFileAttributesExA((base + "x.jsonl").c_str(), GetFileExInfoStandard, &fad)) {

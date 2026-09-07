@@ -67,11 +67,11 @@ int32_t ReadI32Local(void* obj, size_t off) {
 
 // Remount 2026-08-06：TDI 15147 字段 ACS 重哈希；偏移仍 0/8/0x10；klass cf990184… 未漂。
 constexpr char kHashPktDict[] =
-    "b6b5e5e72ee73eb19ed4c8529a586a9a6b8aa8a2e230c6ddd2d8b834fcea064";  // Dictionary<ushort,int>
+    "c277799449b1b33009e836e9cc2f40fdf0b06b8f9c994773069885dc6bf1676";  // Dictionary<ushort,int>
 constexpr char kHashSkillDict[] =
-    "afe650a62348a01943361d79054983ab2d2c385140b14130af684a371c5e61c";  // Dictionary<int,int>
+    "fd2195ba7942d5f4a69852015487aa96d6a7bad769bb53b6f23e06240122de6";  // Dictionary<int,int>
 constexpr char kHashDetectTime[] =
-    "e6948e560231bfb779488347b3bb00909259460aa53cf3caf19d5a60adbaa32";
+    "dbcecbc004cb5fa89451b1a32ac7681fff33fb11a61cd1c3bd4d9f2e873e77b";
 constexpr size_t kFbPktDict = 0x0;
 constexpr size_t kFbSkillDict = 0x8;
 constexpr size_t kFbDetectTime = 0x10;
@@ -161,7 +161,7 @@ void EnsureStaticFieldOff() {
         gKlass = x::runtime::il2cpp_shape::ResolveSecAttackKlass();
         if (!gKlass) {
             gKlass = x::runtime::il2cpp::FindClass(
-                "", "db4cf7d9ac52005334a184651f0e6eb74747e8b65440e2e88d47c27842fecfd");
+                "", "cba2e3cd69679bff7e5ed2ae7f4d6f4ba4ff19d05ea8789e929dcf1c0d4800c");
         }
     }
     if (!gKlass) return;
@@ -350,8 +350,7 @@ DWORD WINAPI ProbeWorker(LPVOID) {
     runtime::LogI("SecAttack", "probe worker start sample=%ums bin=%ums",
                   (unsigned)kSampleMs, (unsigned)kBinProbeMs);
     UndoStaleTextHook();
-    for (int i = 0; i < 400 && !gProbeStop.load() &&
-                    !GetModuleHandleW(L"GameAssembly.dll");
+    for (int i = 0; i < 400 && !gProbeStop.load() && !x::runtime::il2cpp::GameAssembly();
          ++i)
         Sleep(50);
     while (!gProbeStop.load()) {
@@ -490,9 +489,9 @@ void SampleTick(DWORD now) {
 
 
 // 热更清残：上一版若把 Collect*/Send 入口写成 xor eax,eax; ret，按原序言还原。不再安装。
-constexpr uint32_t kRvaCollectAttackPacket = 0x3C8F0F0;
-constexpr uint32_t kRvaCollectAttackSkill = 0x3C8F750;
-constexpr uint32_t kRvaSendAttackPacketCountCheck = 0x3C8FB00;
+constexpr uint32_t kRvaCollectAttackPacket = 0x3C95AE0;
+constexpr uint32_t kRvaCollectAttackSkill = 0x3C96150;
+constexpr uint32_t kRvaSendAttackPacketCountCheck = 0x3C96550;
 constexpr size_t kTextPatchN = 8;
 constexpr uint8_t kRetPatch[] = {0x33, 0xC0, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90};
 constexpr uint8_t kExpectPkt[] = {0x56, 0x57, 0x48, 0x81, 0xEC, 0xB8, 0x00, 0x00};
@@ -535,7 +534,7 @@ bool ProtectWrite(void* addr, size_t n, const uint8_t* src) {
 }
 
 void UndoStaleTextHook() {
-    HMODULE ga = GetModuleHandleW(L"GameAssembly.dll");
+    HMODULE ga = x::runtime::il2cpp::GameAssembly();
     if (!ga) return;
     auto* base = reinterpret_cast<uint8_t*>(ga);
     int n = 0;

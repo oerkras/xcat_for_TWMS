@@ -9,6 +9,7 @@
 #include "mob_pool_observe.h"
 
 #include "../mob_scan/mob_scan.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_metadata_lock.h"
@@ -26,17 +27,17 @@ namespace {
 
 // SSOT class hash：与 ports/mob_pool_port.cpp 同代（dump.cs.restored MobPool）。
 constexpr char kMobPoolClass[] =
-    "f7d2cfdd4abeae714c68b631e8408308c98f019d4c0ff73f3010811343565da";
+    "b06f818211149c675f11ae24bfd8186c06b6b987035d057abefd0bd4ee3b03f";
 
 // dump.cs.restored：OnMouseMove 后首两个 InPacket = Enter / Leave（P0a 位序，跨 dump 稳定）。
 // Il2CppDumper 写的是 CFF 体内 RVA；运行时 MethodInfo.methodPointer 与
-// codeGenModule->methodPointers[] 都是 IDA 函数头（BIN 05:28：0xF973B0 / 0xF979D0）。
+// codeGenModule->methodPointers[] 都是 IDA 函数头（BIN 05:28：0xF9B0F0 / 0xF9B720）。
 // 包分发走 methodPointers 表拷贝，只换 MI 会 install ok 但 obs 零命中。
 constexpr uint32_t kRvaEnterDump = 0xF951D0;
 constexpr uint32_t kRvaLeaveDump = 0xF957F0;
-constexpr uint32_t kRvaEnterFn = 0xF973B0;
-constexpr uint32_t kRvaLeaveFn = 0xF979D0;
-constexpr uint32_t kRvaMouseFn = 0xF96F70;    // OnMouseMove 函数头（dump 体内 0xF94D90）
+constexpr uint32_t kRvaEnterFn = 0xF9B0F0;
+constexpr uint32_t kRvaLeaveFn = 0xF9B720;
+constexpr uint32_t kRvaMouseFn = 0xF9AD40;    // OnMouseMove 函数头（dump 体内 0xF94D90）
 constexpr uint32_t kRvaMouseDump = 0xF94D90;
 constexpr uint32_t kRvaTableEnter = 0x690F680;  // .data methodPointers Enter；Leave=+8
 constexpr char kHashEnterField[] =
@@ -83,11 +84,8 @@ void ReturnLeakedMetadataLock(const char* where) {
 }
 
 std::wstring ModuleDir() {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&ModuleDir), &self) ||
-        !self)
+    HMODULE self = x::runtime::GetImageModule();
+    if (!self)
         return L".";
     wchar_t path[MAX_PATH]{};
     if (!GetModuleFileNameW(self, path, MAX_PATH)) return L".";

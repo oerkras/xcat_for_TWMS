@@ -1,5 +1,7 @@
 #include "xcat_payload_status.h"
 
+#include "xcat_install_names.h"
+
 #include <Windows.h>
 
 #include <cstdio>
@@ -46,7 +48,7 @@ uint32_t HashBinDirForShm(const char* binDir) {
 
 std::wstring PayloadStatusMapName(const char* binDir) {
     wchar_t name[96]{};
-    swprintf_s(name, L"Local\\XCatPayloadStatus_%08X", HashBinDirForShm(binDir));
+    swprintf_s(name, xcat::install::kShmStatusFmt, HashBinDirForShm(binDir));
     return name;
 }
 

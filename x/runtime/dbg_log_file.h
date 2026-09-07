@@ -12,6 +12,9 @@
 
 #include <Windows.h>
 
+#include "bin_dir.h"
+#include "xor_cstr.h"
+
 #include <cwctype>
 #include <mutex>
 #include <string>
@@ -109,24 +112,32 @@ inline bool EnsureFreshUnlocked(DbgLogSlot& slot, const std::wstring& full, int 
 }  // namespace detail
 
 // Optional repo dump dir for probe logs (kick / soft_login / galaxy_token).
-// Never hardcode a Windows username into the binary: resolve at runtime.
-// Priority: XCAT_DBG_LOG_DIR → %USERPROFILE%\Desktop\xcat_for_TWMS\Dumps\runtime (if present).
+// 不把用户名或仓名写进 PE：XCAT_DBG_LOG_DIR，否则载荷目录上两级的 Dumps\runtime（若存在）。
 inline std::wstring OptionalRepoRuntimeDumpDir() {
     wchar_t env[MAX_PATH]{};
-    DWORD n = GetEnvironmentVariableW(L"XCAT_DBG_LOG_DIR", env, MAX_PATH);
+    DWORD n = XCAT_ENV_GETW(kEnvDbgLogDir, env, MAX_PATH);
     if (n > 0 && n < MAX_PATH) {
         const std::wstring d(env, n);
         const DWORD a = GetFileAttributesW(d.c_str());
         if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0) return d;
     }
-    wchar_t profile[MAX_PATH]{};
-    n = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        const std::wstring d =
-            std::wstring(profile, n) + L"\\Desktop\\xcat_for_TWMS\\Dumps\\runtime";
-        const DWORD a = GetFileAttributesW(d.c_str());
-        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0) return d;
+    const char* bin = GetBinDir();
+    if (!bin || !bin[0]) return {};
+    const int wn = MultiByteToWideChar(CP_UTF8, 0, bin, -1, nullptr, 0);
+    if (wn <= 1) return {};
+    std::wstring cur(static_cast<size_t>(wn), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, 0, bin, -1, cur.data(), wn) <= 0) return {};
+    if (!cur.empty() && cur.back() == L'\0') cur.pop_back();
+    while (!cur.empty() && (cur.back() == L'\\' || cur.back() == L'/')) cur.pop_back();
+    for (int i = 0; i < 2; ++i) {
+        const size_t sl = cur.find_last_of(L"\\/");
+        if (sl == std::wstring::npos) return {};
+        cur.resize(sl);
     }
+    if (cur.empty()) return {};
+    const std::wstring d = cur + L"\\Dumps\\runtime";
+    const DWORD a = GetFileAttributesW(d.c_str());
+    if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0) return d;
     return {};
 }
 

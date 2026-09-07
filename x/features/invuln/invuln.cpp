@@ -22,6 +22,7 @@
 #include "invuln.h"
 
 #include "../../ipc/payload_control.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
@@ -32,6 +33,7 @@
 #include "../../ui/player_vitals.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_shape.h"
+#include "xor_cstr.h"
 
 #include <Psapi.h>
 #include <atomic>
@@ -60,34 +62,34 @@ using x::runtime::il2cpp::ReadPtr;
 // User / SecondaryStat：dump.cs 2026-08-06 字段哈希 → field_get_offset；失败回退下方 kFb*
 // User=b8c9aedb…（TDI 1560）；SS=fda0a837…（TDI 1329，WM+0xF0）
 constexpr char kSecondaryStatClass[] =
-    "ad9a99918e9b3f2240f1de89a05d6dbdaf331c6211d0cf1efe22dc8350663fc";
+    "a7598494a709ff6f16f832a97d653fcdb8f1af530dfa60dc738fe12aaf2ff31";
 constexpr char kUserClass[] =
-    "b55b16bb785ad758d4375d173f78195e824184cc2edf99eadc7eead36551193";
+    "e1835bc9e7ef210b5145fcaf2193e47cfaef8d17a5607749a1252fc857c149d";
 constexpr char kHashNInv[] =
-    "b494ac1bb4ec938e00b01777a5d36939be79c903d56aa6afd382a722c1e5e4b";
+    "f5e90ae683a4f9b3026365d03b4f1722ceb30c1bfa9e635e855597802e55c35";
 constexpr char kHashRInv[] =
-    "c1bca803269d5b801fd3b57a9fa04ea30e458e4f473fad911d224d39acf94dd";
+    "ac0812dafcf43cde7eee4bf5473817533e8e95d46d3cf7b50fb98fd73271dd4";
 constexpr char kHashTInv[] =
-    "d7d1ca0f77bed2ccedebb05b8f33915ec2e809d1a5eb9dbed2face6cbbeebd4";
+    "e06a88f23e31e522365fa6c711a84414ec4d073ec247bac5ea979d9090e6680";
 constexpr char kHashNDojang[] =
-    "a98f4ba29021d9d49cdef781611cbeea262c0d1ed1bf5043772d115955e4a71";
+    "f21ac060f622fdfb1734073442f828a9f222d30a55b42c19b4875c698633070";
 constexpr char kHashRDojang[] =
-    "e7c749d62f8e4b3f2d47c87b4c0c4d7660933c92ad8dc6d381ef4e99eb7d1b9";
+    "cba32d6d8a64a5edffaeafe2dc153d7730b8e83d22b4819f5519be838024ded";
 constexpr char kHashTDojang[] =
-    "dc5c48120aa713b5e7241e000cf794f7397bc83472b73f4f58d56c79bc21d29";
+    "f3cf57ae1f0a077b53c455e0b7c9cdc52914d72ba96587e640f37dfc740dbad";
 constexpr char kHashHitPeriodRemain[] =
-    "dc84ffecb08ef0a125c5586c71a5b094e4d01f9f9ddaee443265a929d650818";
+    "fef28d0808f06933e45ac32e71487360d7f47ce5fe93b60ff783bd4e264096f";
 constexpr char kHashLayerStateCounter[] =
-    "abd22a0ac127217d877ceabbdb4c07f604b2dd7817a4b285fc9709f51716698";
+    "fbed3008d22fb7706e7859b7d258f10d54dc0a6ef7b70a2b43371d9a368c023";
 constexpr char kHashLogicalPos[] =
-    "ae4a30c4aa075fb68238dc227c1799d252632cad9320bf76370521351096d27";
+    "adb40bd150b8a460d80f10c5bc5560f7f52aeb7057a93b6396edc804bc0ee25";
 // VisPos 在 User 祖先 edc85ce2…（MonoBehaviour 派生）@+0x64
 constexpr char kHashVisPos[] =
-    "f5e96097bcfbc4e0b6bb1606c0cc3f2e20f2635a65745766422d9c9b50e0386";
+    "cf776ff0c583bd614c1ea26f338a0f3c6971482b301704c1bbb8d962b9cb1cf";
 constexpr char kHashSoftTickA[] =
-    "b86d1614a36e90979730f4489395d9f8039036ed4cbd2fbdcd1a62d8aa0cc7d";
+    "be67129c0172e557c6871d30a731738bdaaba20910a73157e9c2c56d4b19a1d";
 constexpr char kHashSoftTickB[] =
-    "a20c181bc456cdf668f0f3fb9c01a987a026df6d7fe84ce36e14534f4d046f4";
+    "d787edc1f103093d36836226dbaecd2d940aad39697d4809787b8a04cb2f861";
 
 constexpr size_t kFbWmSecondaryStat = 0xF0;
 
@@ -307,11 +309,8 @@ bool DirExists(const std::wstring& dir) {
 }
 
 std::wstring ModuleDir() {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&ModuleDir), &self) ||
-        !self)
+    HMODULE self = x::runtime::GetImageModule();
+    if (!self)
         return L".";
     wchar_t path[MAX_PATH]{};
     if (!GetModuleFileNameW(self, path, MAX_PATH)) return L".";
@@ -330,7 +329,7 @@ void OpenLogs() {
     if (GetTempPathW(MAX_PATH, tmp)) {
         std::wstring t(tmp);
         while (!t.empty() && t.back() == L'\\') t.pop_back();
-        gLogTemp = x::runtime::OpenRotatingDbgLog(t, L"xcat_invuln.log");
+        gLogTemp = x::runtime::OpenRotatingDbgLog(t, L"invuln.log");
     }
 }
 
@@ -418,7 +417,7 @@ void* FindClassTypeObject(const char* className) {
 
 bool BindApis() {
     if (!x::runtime::il2cpp::Ensure()) {
-        Log("BindApis: no GameAssembly");
+        Log("BindApis: no GA");
         return false;
     }
     const auto& e = x::runtime::il2cpp::Get();
@@ -784,9 +783,7 @@ void DisarmFrameBlink() {
 }
 
 bool ProbeEnabled() {
-    char buf[16]{};
-    if (GetEnvironmentVariableA("XCAT_INVULN_PROBE", buf, sizeof(buf)) == 0) return false;
-    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
+    return XCAT_ENV_ON(kEnvInvulnProbe);
 }
 
 // Read-only: interpret +0x20C/+0x210 as both int tick and float; compare CurPos@+0x2B0.
@@ -853,19 +850,14 @@ void LogReadback(const char* tag) {
 }
 
 bool EnvWantsOn() {
-    char buf[16]{};
-    if (GetEnvironmentVariableA("XCAT_INVULN", buf, sizeof(buf)) > 0) {
-        if (buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T')
-            return true;
-    }
-    return false;
+    return XCAT_ENV_ON(kEnvInvuln);
 }
 
 void WarnIfSoftEnvRequested() {
     char buf[32]{};
-    if (GetEnvironmentVariableA("XCAT_INVULN_GATE", buf, sizeof(buf)) == 0) return;
+    if (XCAT_ENV_GETA(kEnvInvulnGate, buf, sizeof(buf)) == 0) return;
     if (_stricmp(buf, "soft") == 0 || _stricmp(buf, "228") == 0) {
-        Log("XCAT_INVULN_GATE=%s ignored — soft +0x228 writes vanish avatar; using hit gate", buf);
+        Log("invuln_gate=%s ignored — soft +0x228 writes vanish avatar; using hit gate", buf);
     }
 }
 
@@ -892,7 +884,7 @@ DWORD WINAPI InvulnThread(LPVOID) {
         (unsigned)kRebindFastMs, (unsigned)kRebindMs, (unsigned)kBindGraceMs,
         ProbeEnabled() ? "on" : "off");
 
-    for (int i = 0; i < 200 && !GetModuleHandleW(L"GameAssembly.dll") && !gWorkerStop.load(); ++i)
+    for (int i = 0; i < 200 && !x::runtime::il2cpp::GameAssembly() && !gWorkerStop.load(); ++i)
         Sleep(50);
     if (gWorkerStop.load()) {
         DisarmFrameBlink();
@@ -908,7 +900,7 @@ DWORD WINAPI InvulnThread(LPVOID) {
 
     if (EnvWantsOn()) {
         gDesired.store(true);
-        Log("env XCAT_INVULN → desired=1");
+        Log("env invuln → desired=1");
     }
 
     // 冷启：勿再 Sleep(1500) — 落地空窗会挨打（BIN 00:28 ACCEPT 前空等）。

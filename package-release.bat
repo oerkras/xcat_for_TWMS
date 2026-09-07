@@ -45,9 +45,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-tasklist /FI "IMAGENAME eq xcat.exe" 2>nul | find /I "xcat.exe" >nul
+tasklist /FI "IMAGENAME eq rtapp.exe" 2>nul | find /I "rtapp.exe" >nul
 if not errorlevel 1 (
-    echo !C_RED!FAILED: xcat.exe is running. Close it before packaging.!C_RESET!
+    echo !C_RED!FAILED: rtapp.exe is running. Close it before packaging.!C_RESET!
     exit /b 1
 )
 
@@ -80,7 +80,7 @@ echo [package-release] Building %PRODUCT_NAME% (%CONFIG%)...
 cmake --build "%BUILD_DIR%" --config "%CONFIG%" --target xcat xcat_probe
 if errorlevel 1 (
     echo !C_RED!FAILED: compile/link error.!C_RESET!
-    echo !C_YELLOW!HINT: If LNK1104, close bin\xcat.exe ^(and anything locking bin\XCat_data\xcat.dll^) then retry.!C_RESET!
+    echo !C_YELLOW!HINT: If LNK1104, close bin\rtapp.exe ^(and anything locking bin\rtcache\rtmod.dll^) then retry.!C_RESET!
     copy /Y "%VERSION_BACKUP%" "%VERSION_FILE%" >nul
     del "%VERSION_BACKUP%" >nul 2>&1
     exit /b 1

@@ -30,19 +30,19 @@ namespace il2 = x::runtime::il2cpp;
 // SceneState / Field / CharacterId / FieldKey：hash → field_get_offset（2026-08-06 remount）
 // CharacterData / CharacterStat：SSOT = x::ui::player
 constexpr char kWorldManagerClass[] =
-    "da19eb0b093a50825187352f1d062610ff5b23c1f314b9cd8c4218aa9db3bc7";
+    "c85ba61839ce73c7f45293ed2e906fdb9e3e0dab928f9582e494367e08948af";
 constexpr char kHashWmSceneState[] =
-    "c3bd9d6dd3c644e6f5fd10fbd4e18d628bbe7506ae72ea476e8dcc46118995d";
+    "bf1e2ffb6070733f5c1d8e8acaf96ee2ace62598f653865ca7c4bfad7b35242";
 constexpr char kHashWmField[] =
-    "e310f7c2fc2ba5f94dfc65e8d90f7b826bc952f691a9be0b0b78a6d4e35a9aa";
+    "d1a97253ac9b8f6bd8b86e68a1eee15db131c640023ae9efe2f3b5ac8f7c82e";
 constexpr char kHashWmCharacterId[] =
-    "<b1774c50372bfdc8b225982cea817215c878b04965a98661709e2ea78a5c074>k__BackingField";
+    "<bcc33d0d858b72ec9c34303757954eba62283023e7c9b17b45d6b0400ce9e41>k__BackingField";
 // FieldKey 现挂在 WM 本体（byte@_fieldKey），不再走 SceneField+0x98
 constexpr char kHashWmFieldKey[] =
-    "bc45b05cf90f595280379cc9244c7dbb928e7616c2a89febaeeccdf3b0d1d76";
+    "d7f1102f10ddd72499f72716872c61847a5b4d9890dd6aa2699d80c701f2af8";
 // CharacterRegDate backing（08-20 dump；紧挨 QuestTimers@+0x240）
 constexpr char kHashWmCharacterRegDate[] =
-    "<d56bc045c4373c93fc713c182cae4b6bfb4e20f17193b049addc66de5a17284>k__BackingField";
+    "<e139df2cde71f2ad42e973c1108a969cfcd9585071ff74eedef457e8f28d82f>k__BackingField";
 
 constexpr size_t kFbWmSceneState = 0x34;
 constexpr size_t kFbWmField = 0x58;

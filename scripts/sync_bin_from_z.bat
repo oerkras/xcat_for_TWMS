@@ -4,7 +4,7 @@ chcp 65001 >nul
 
 rem ============================================================
 rem  虚拟机内使用：从映射盘 Z: 同步 bin 到本地盘，再启动 XCAT
-rem  不要从 Z:\...\xcat.exe 直接跑（共享盘写日志会卡游戏）
+rem  不要从 Z:\...\rtapp.exe 直接跑（共享盘写日志会卡游戏）
 rem ============================================================
 
 rem --- 按你的环境改这两行 ---
@@ -19,8 +19,8 @@ echo [sync] %SRC%
 echo [  -^>] %DST%
 echo.
 
-if not exist "%SRC%\xcat.exe" (
-  echo [FAIL] 源目录没有 xcat.exe：%SRC%
+if not exist "%SRC%\rtapp.exe" (
+  echo [FAIL] 源目录没有 rtapp.exe：%SRC%
   echo        请确认虚拟机已映射 Z:，且本机路径正确。
   pause
   exit /b 1
@@ -45,15 +45,15 @@ if %RC% GEQ 8 (
 
 echo [OK] 同步完成。
 
-if not exist "%DST%\xcat.exe" (
-  echo [FAIL] 目标没有 xcat.exe：%DST%
+if not exist "%DST%\rtapp.exe" (
+  echo [FAIL] 目标没有 rtapp.exe：%DST%
   pause
   exit /b 1
 )
 
 if "%LAUNCH%"=="1" (
-  echo [run] "%DST%\xcat.exe"
-  start "" "%DST%\xcat.exe"
+  echo [run] "%DST%\rtapp.exe"
+  start "" "%DST%\rtapp.exe"
 ) else (
   echo [skip] 未启动（LAUNCH=0）
 )

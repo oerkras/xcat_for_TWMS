@@ -1,10 +1,10 @@
 // Classic TWMS — Keyboard 设备状态注入（内部输入真源）。
 // RVA/布局取自运行期 dump（Dumps/runtime/out/dump.cs.restored · remount 2026-08-06）：
-//   InputSystem.QueueEvent(InputEventPtr)      @0x4734E60
-//   Keyboard.get_current()                     @0x4790350
-//   InputSystem.get_settings()                 @0x4735510
-//   InputSettings.set_backgroundBehavior(e)    @0x47B38E0
-//   InputSystem.EnableDevice(InputDevice)      @0x4733B50
+//   InputSystem.QueueEvent(InputEventPtr)      @0x473B710
+//   Keyboard.get_current()                     @0x4796c00
+//   InputSystem.get_settings()                 @0x473bdc0
+//   InputSettings.set_backgroundBehavior(e)    @0x47BA190
+//   InputSystem.EnableDevice(InputDevice)      @0x473A400
 //   StateEvent: baseEvent@0x00(20B) stateFormat@0x14 stateData@0x18
 //   KeyboardState: 'KEYS' · 16B 位图 · leftArrow=bit61 rightArrow=bit62
 #ifndef WIN32_LEAN_AND_MEAN
@@ -15,6 +15,7 @@
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
+#include "xor_cstr.h"
 
 #include <atomic>
 #include <cstdio>
@@ -25,23 +26,23 @@ namespace {
 
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 
-constexpr uint32_t kRvaQueueEvent = 0x4734E60;
-constexpr uint32_t kRvaKeyboardGetCurrent = 0x4790350;
-constexpr uint32_t kRvaGetSettings = 0x4735510;
-constexpr uint32_t kRvaSetBackgroundBehavior = 0x47B38E0;
-constexpr uint32_t kRvaEnableDevice = 0x4733B50;
-// InputControl.get_currentStatePtr() → InputStateBuffers.GetFrontBufferForDevice(deviceIndex)@0x4808E60
+constexpr uint32_t kRvaQueueEvent = 0x473B710;
+constexpr uint32_t kRvaKeyboardGetCurrent = 0x4796c00;
+constexpr uint32_t kRvaGetSettings = 0x473bdc0;
+constexpr uint32_t kRvaSetBackgroundBehavior = 0x47BA190;
+constexpr uint32_t kRvaEnableDevice = 0x473A400;
+// InputControl.get_currentStatePtr() → InputStateBuffers.GetFrontBufferForDevice(deviceIndex)@0x480F710
 // 已在运行期 IDB（imagebase 0x7ff848c80000 → VA 0x7FF84D37D900）反汇编核实。
-constexpr uint32_t kRvaGetCurrentStatePtr = 0x4738b30;
+constexpr uint32_t kRvaGetCurrentStatePtr = 0x473f3e0;
 // Keyboard.IEventPreProcessor.PreProcessEvent(InputEventPtr) —— 每个键盘事件落到设备前的收口点。
 // VA 0x7FF84D3D7020 反编译已核实：判 type=='STAT'（1398030676）→ 判 *(u32*)(ev+0x14)=='KEYS'
 // → 拿 ev+0x18 当位图**原地改写**（Unity 自己把 bit111 挪到 bit127），恒返回 1。
 // 这既确认了它在必经之路上，也确认了 +0x14/+0x18 与本文件 KeyboardStateEvent 的布局一致。
-constexpr uint32_t kRvaKeyboardPreProcess = 0x4792250;
+constexpr uint32_t kRvaKeyboardPreProcess = 0x4798b00;
 // InputManager 的事件循环按设备标志位 DeviceFlags.HasEventPreProcessor(0x4000) 决定要不要调
 // pre-processor。这位是 0 时，钩子装得再对也永远不会被调到 —— 必须实读，必要时置上。
-constexpr uint32_t kRvaGetHasPreProc = 0x4744260;
-constexpr uint32_t kRvaSetHasPreProc = 0x4744270;
+constexpr uint32_t kRvaGetHasPreProc = 0x474ab10;
+constexpr uint32_t kRvaSetHasPreProc = 0x474ab20;
 
 // InputDevice 字段（dump.cs · InputDevice : InputControl）
 constexpr size_t kOffDeviceId = 0xE4;          // m_DeviceId
@@ -149,20 +150,6 @@ MethodInfoHead* MethodByName(void* klass, const char* name, int argc) {
     return (mi && mi->methodPointer) ? mi : nullptr;
 }
 
-bool EnvOff(const char* name) {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
-    if (!n || n >= sizeof(buf)) return false;
-    return buf[0] == '0' || buf[0] == 'n' || buf[0] == 'N' || buf[0] == 'f' || buf[0] == 'F';
-}
-
-bool EnvOn(const char* name) {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
-    if (!n || n >= sizeof(buf)) return false;
-    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
-}
-
 bool PatchVtableMethodPtr(void** slot, void* hook, void** outOrig) {
     if (!slot || !hook) return false;
     DWORD old = 0;
@@ -190,7 +177,7 @@ bool Bind() {
     gBindNextTryMs = now + 2000;
 
     if (!x::runtime::il2cpp::Ensure()) {
-        gFail = "il2cpp_unbound";
+        gFail = "unbound";
         return false;
     }
     gKeyboardKlass = x::runtime::il2cpp::FindClass("UnityEngine.InputSystem", "Keyboard");
@@ -212,7 +199,7 @@ bool Bind() {
     gControlKlass = x::runtime::il2cpp::FindClass("UnityEngine.InputSystem", "InputControl");
     if (gControlKlass) gMiGetStatePtr = MethodByName(gControlKlass, "get_currentStatePtr", 0);
 
-    gDirectWrite = EnvOn("XCAT_KBD_DIRECT");
+    gDirectWrite = XCAT_ENV_ON(kEnvKbdDirect);
     gBindOk = true;
     gFail = "ok";
     x::runtime::LogI("UnityKbd",
@@ -238,9 +225,9 @@ void* CurrentKeyboard() {
 // 失焦不重置/不禁用键盘设备，否则后台注入会被整体丢弃。XCAT_KBD_BG=0 可关。
 void EnsureBackgroundBehavior(void* device) {
     if (gBgApplied) return;
-    if (EnvOff("XCAT_KBD_BG")) {
+    if (XCAT_ENV_OFF(kEnvKbdBg)) {
         gBgApplied = true;
-        x::runtime::LogI("UnityKbd", "backgroundBehavior keep default (XCAT_KBD_BG=0)");
+        x::runtime::LogI("UnityKbd", "backgroundBehavior keep default (kbd_bg=0)");
         return;
     }
     auto getSettings = FnOf<FnGetSettings>(gMiGetSettings, kRvaGetSettings);
@@ -561,8 +548,8 @@ void** ResolveIfaceSlot(void* klass, void* ifaceKlass) {
 bool InstallEventGuard(void* dev) {
     if (gGuardSlotCount != 0) return gGuardSlotCount > 0;  // -1 = 已显式停用，不再重试
     if (!dev) return false;
-    if (EnvOff("XCAT_KBD_GUARD")) {
-        x::runtime::LogI("UnityKbd", "event guard off (XCAT_KBD_GUARD=0)");
+    if (XCAT_ENV_OFF(kEnvKbdGuard)) {
+        x::runtime::LogI("UnityKbd", "event guard off (kbd_guard=0)");
         gGuardSlotCount = -1;  // 明确停用，不再重试
         return false;
     }

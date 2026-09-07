@@ -17,9 +17,9 @@
 namespace x::runtime::il2cpp {
 
 // UnityEngine.Object / Component — shared across ports (TW Classic dump).
-constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E8A380;  // remounted 2026-08-06 Resources.FindObjectsOfTypeAll(Type)
-constexpr uint32_t kRvaCompGetGo = 0x4E92760;              // remounted 2026-08-06 Component.get_gameObject
-constexpr uint32_t kRvaObjGetName = 0x4E9F6C0;             // remounted 2026-08-06 Object.get_name
+constexpr uint32_t kRvaFindObjectsOfTypeAll = 0x4E90C30;  // remounted 2026-08-06 Resources.FindObjectsOfTypeAll(Type)
+constexpr uint32_t kRvaCompGetGo = 0x4E99010;              // remounted 2026-09-03 Component.get_gameObject
+constexpr uint32_t kRvaObjGetName = 0x4EA5F70;             // remounted 2026-08-06 Object.get_name
 
 using FnFindAll = void* (*)(void* typeObj, void* methodInfo);
 using FnCompGo = void* (*)(void* comp, void* methodInfo);
@@ -136,7 +136,7 @@ struct Exports {
 // True when Prefab attribute exports resolved.
 bool PrefabExportsReady();
 
-// Idempotent. False until GameAssembly.dll is loaded + core exports resolve.
+// Idempotent. False until GA is loaded + core exports resolve.
 bool Ensure();
 
 const Exports& Get();

@@ -6,11 +6,13 @@
 
 #include "player_combat_port.h"
 #include "world_port.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_mapdata.h"
 #include "../../runtime/log.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -48,56 +50,56 @@ using x::runtime::il2cpp::ReadPtr;
 // StaticFoothold / LadderOrRope / User.VecCtrl / VecCtrl.CurFh：hash → field_get_offset
 // remounted 2026-08-06（与 teleport_port 同源；字段偏移未漂）
 constexpr char kFhClass[] =
-    "d703fdc58843f58f6bdbfdf787ee904002af8c3dfa967cc8c2974c29ad9bf87";
+    "de52928858acf8626fff3660917b8e2019da9b66400ee396975bb609b70faea";
 constexpr char kLrClass[] =
-    "a423163793c28d949da86be08d500b88dd8b941ac755b667ee6aabacd40074c";
+    "f8ce8ae18dc0275c741913ff9911b94206205b1106ae65c955787ec827ab173";
 constexpr char kActorBaseClass[] =
-    "d9aab778a925d77c0ae0b654ad29a8c6dc20a1f4684cffb7e533c336bc6ae5c";
+    "a83e4f1c524fa6e5dc75a3f38110e85704c157550dd8e171c128f9d66e5c739";
 constexpr char kVecCtrlClass[] =
-    "d7d4003a734229d3b8fd8a969b6a9168c36692d3b039b8824d5d40d2cb4430b";
+    "b866b6310c1647fd6473a886a59a14e5121b75565a9314fd00c5ef362f8e776";
 
 constexpr char kHashFhId[] =
-    "<be06e824a3fbd24b780da0021689dbfafb704b4666633a72ac4549369cd6fda>k__BackingField";
+    "<eb31ed85c75e75f08bfcbc77c1bbc39dfdbdef2a88bb1e0c74d0e184548c114>k__BackingField";
 constexpr char kHashFhX1[] =
-    "<a9b46ef06fb0432debb88392c4b8dcfac3a3d2ab03775e683775334871059a7>k__BackingField";
+    "<acb95558f765b9c3c94502e6df03b226bd1b7e5d7af2bf86dab2321cfd2d22f>k__BackingField";
 constexpr char kHashFhY1[] =
-    "<e50ec7244664ed7784bc6317061f2d657161bd89529cc48a2e485fc7cc42108>k__BackingField";
+    "<ad68ddf5f45e709f472674351ada1a7243121d7c694d9f78a6c3523e46c5bad>k__BackingField";
 constexpr char kHashFhX2[] =
-    "<d86396a984d36ee7e2b6c30017cc3670669dade13856f3d143698b66fe3f926>k__BackingField";
+    "<e9204cc09294a7795a580f26b8b19935b822f50a8ea35512dd9dbec50fd1dbd>k__BackingField";
 constexpr char kHashFhY2[] =
-    "<bd11be0fd977577f55d38f4ec54245fcf715bf637e35439e9ced47ac091d834>k__BackingField";
+    "<a943a2129892e00a8c8c56d1a12403c43e37cec09fec1d392946537c92558e5>k__BackingField";
 constexpr char kHashFhPrev[] =
-    "<f71590bf45118f7ecdd813127294edbfdaa58f725d37eba8f01155d1e05c88e>k__BackingField";
+    "<c7ff695b93b7cdf4f9895f51cb27b2af5d153facee6b1b87cb93cbd766839b0>k__BackingField";
 constexpr char kHashFhNext[] =
-    "<bb04f57d6f8a1c38bca50bfe881476c22442ee970712012646aa48b8b64dd6b>k__BackingField";
+    "<c38f903568d7fcf2f299dc79da5917d07a75f50966ce6f6cfb1f74331450b6f>k__BackingField";
 constexpr char kHashFhForbid[] =
-    "<c09d8b102fa2c16bed5741e89b75f48bd143f4c090cc46743b67fc8da6ebc34>k__BackingField";
+    "<a8916a05d71df322811563b8f761e5654b5421a80d843fb43595fa6057b4b84>k__BackingField";
 constexpr char kHashFhLayer[] =
-    "<e34901b6b97cef1645b1aac86408e6e9866d026019ef8ee61c1e0e5770ecd72>k__BackingField";
+    "<a8e8178b58a5c48918deb115993cf7146190ec2a9a5d3bb657a6f15fb4bcfa8>k__BackingField";
 constexpr char kHashFhPage[] =
-    "ed79f6b367b75d0ce17724656bdd056e932c051f78b5390b9bcea9ec92abbfe";
+    "c6317978ba6cf10375db46d4a63ab346a9a22bccb3893306e81a9470068d7bf";
 constexpr char kHashFhZMass[] =
-    "f1932f56a51fa673f4c9e336bd62f550faa2c985ec1bc18cb2f3782afeb1ea1";
+    "fefb015dd35a96dbff90a5046e9141fd72e9be745bf24fad3cdd054535936e7";
 
 constexpr char kHashLrId[] =
-    "<c6bdecee989366e8754b76f5e0e83768bab93634a50cfafb794655a4359b146>k__BackingField";
+    "<e69d59ab4444301c8aa76a6a8eebec5ed7ea7fdfcadd99b66a406977223e692>k__BackingField";
 constexpr char kHashLrX[] =
-    "<c8da2d650c9a00b312b17ef8c6112ff95dd6d4422130f792a231e1c30083eeb>k__BackingField";
+    "<d1cd8a25739d63a0aa44858d108196a4ffe1962a8e7751eacde95d08642c3e5>k__BackingField";
 constexpr char kHashLrY1[] =
-    "<dde9c2a65119410a6fd5bc8d6d65169cd711e69d6ceecc5a009084aad0b5f7d>k__BackingField";
+    "<f30d33ab2c9cd1728be287fcd6f423a25104a165af7a8d3ac322e36b28341fa>k__BackingField";
 constexpr char kHashLrY2[] =
-    "<ba7517c1dea7aa0b3b3d21ad4bb802627ceb84cd60c7db9af737734ead29804>k__BackingField";
+    "<b261828577d3593cdd997a6df6d14c0acde54ec494bc9020e8b711a0f45363c>k__BackingField";
 constexpr char kHashLrPage[] =
-    "<e477101c9a642995056dc6714081f132a611ccb1463edb674ff500a443a7e12>k__BackingField";
+    "<b4ca2a1a2ae0628837eb2efea5375928874e724ca1507b963ac2520ad57033c>k__BackingField";
 constexpr char kHashLrIsLadder[] =
-    "<eb992ddd193651282a311c62c89906df2e70e234f7429b237c3ca367186b1a9>k__BackingField";
+    "<acfc42bb573bf57f1efab476c1c046bb78b12af3915eda4abd60909564db792>k__BackingField";
 constexpr char kHashLrIsUpper[] =
-    "<a85b72074a233c15536ae0fc098cd660c320c2a265de58071b378174f50a4b6>k__BackingField";
+    "<a627cee473d0ddc6db1d94ca63f79c9b369d9365089d0755947bd8f987dce66>k__BackingField";
 
 constexpr char kHashUserVecCtrl[] =
-    "<aeb819450fbe3e8e0eb38423605993f53e2c72baef2b39f45a89237951f1628>k__BackingField";
+    "<e22b1f6d38f00abbcb8a5dd7bbd304c2288f14cddbee6a552a6fbc18fc280f6>k__BackingField";
 constexpr char kHashVcCurFh[] =
-    "<f875921689ad1c6797cf0c47b7213e908a4f617666d45649265f8af167e1032>k__BackingField";
+    "<a92b3c5adc5622f5d82bd02e8c0cff34f8df7315ca94ebbdd809c5da1e12b63>k__BackingField";
 
 constexpr size_t kFbFhId = 0x10, kFbFhX1 = 0x14, kFbFhY1 = 0x18, kFbFhX2 = 0x1C, kFbFhY2 = 0x20;
 constexpr size_t kFbFhPrev = 0x24, kFbFhNext = 0x28, kFbFhForbid = 0x38, kFbFhLayer = 0x44;
@@ -306,11 +308,8 @@ Snapshot* EnsureCacheUnlocked() {
 }
 
 std::wstring ModuleDir() {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&ModuleDir), &self) ||
-        !self)
+    HMODULE self = x::runtime::GetImageModule();
+    if (!self)
         return L".";
     wchar_t path[MAX_PATH]{};
     if (!GetModuleFileNameW(self, path, MAX_PATH)) return L".";
@@ -508,9 +507,7 @@ bool GetCached(Snapshot& out) {
 
 // 默认只写摘要；逐条 fh/lr 需 XCAT_FH_DUMP=1，或 idMismatch 时自动展开。
 bool DetailDumpEnabled() {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_FH_DUMP", buf, sizeof(buf));
-    return n > 0 && n < sizeof(buf) && buf[0] != '\0' && buf[0] != '0';
+    return XCAT_ENV_NZ(kEnvFhDump);
 }
 
 void DumpCachedLog() {
@@ -542,7 +539,7 @@ void DumpCachedLog() {
             }
             WriteFileOnly("dump done map=%d", meta.mapId);
         } else {
-            WriteFileOnly("dump summary-only map=%d (set XCAT_FH_DUMP=1 for fh/lr detail)",
+            WriteFileOnly("dump summary-only map=%d (fh_dump env for fh/lr detail)",
                           meta.mapId);
         }
     }

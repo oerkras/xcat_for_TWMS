@@ -22,6 +22,7 @@
 #include "gamapass_device_login.h"
 #include "gamapass_login_phase.h"
 #include "process_util.h"
+#include "xcat_install_names.h"
 #include "xcat_buffs.h"
 #include "xcat_imgui_basic.h"
 #include "xcat_log.h"
@@ -378,29 +379,29 @@ void DrawGamaPassSlotRow(LaunchUiState& ui, bool slotsLocked, float rowW, float 
 // 首页 / 启动 TAB 共用：三行浓缩启动条（无长提示；细则进 Tooltip）
 // 行1 模式 · 行2 槽位/验证码或监视钮 · 行3 主按钮（准备秒数可贴在按钮下）
 void DrawLaunchCompactBar(LaunchUiState& ui) {
-    const float gap = ImGui::GetStyle().ItemSpacing.x;
-    const float rowW = ImGui::GetContentRegionAvail().x;
-    const float halfW = (std::max)(1.f, (rowW - gap) * 0.5f);
-    const float btnH = ui::BtnH();
+        const float gap = ImGui::GetStyle().ItemSpacing.x;
+        const float rowW = ImGui::GetContentRegionAvail().x;
+        const float halfW = (std::max)(1.f, (rowW - gap) * 0.5f);
+        const float btnH = ui::BtnH();
 
     // —— 行 1：启动模式 ——
-    {
-        const auto cur = attach_inject::GetLaunchMode();
-        int modeIdx = 0;
+        {
+            const auto cur = attach_inject::GetLaunchMode();
+            int modeIdx = 0;
         if (cur == attach_inject::LaunchMode::GamaPassAuto) modeIdx = 1;
         else if (cur == attach_inject::LaunchMode::GamaPassDirect) modeIdx = 2;
         else if (cur == attach_inject::LaunchMode::OneClickLogin) modeIdx = 3;
         const char* items[] = {
             "手动启动并注入", "GAMA PASS自动登录", "GAMA PASS账密直登", "gamania (HK)"};
-        ImGui::SetNextItemWidth(-1.f);
+            ImGui::SetNextItemWidth(-1.f);
         if (ImGui::Combo("##launch_mode", &modeIdx, items, 4)) {
             LaunchPanel_CancelGpClearConfirm(ui);
-            if (modeIdx == 0) {
+                if (modeIdx == 0) {
                 LaunchPanel_ArmStrategyPrep(ui, 7000);
-                attach_inject::SetLaunchMode(attach_inject::LaunchMode::AttachWatch);
-                ui.pendingAutoLaunch = true;
+                    attach_inject::SetLaunchMode(attach_inject::LaunchMode::AttachWatch);
+                    ui.pendingAutoLaunch = true;
                 ui.status = "已切换：手动启动并注入";
-            } else if (modeIdx == 1) {
+                } else if (modeIdx == 1) {
                 if (attach_inject::IsWatching()) attach_inject::StopWatch();
                 attach_inject::SetLaunchMode(attach_inject::LaunchMode::GamaPassAuto);
                 msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
@@ -411,16 +412,16 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
                 LaunchPanel_ArmGamaPassDirectLaunch(ui);
             } else {
                 LaunchPanel_ArmStrategyPrep(ui, 7000);
-                if (attach_inject::IsWatching()) attach_inject::StopWatch();
-                attach_inject::SetLaunchMode(attach_inject::LaunchMode::OneClickLogin);
-                if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
-                    msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
-                }
-                ui.pendingAutoLaunch = false;
+                    if (attach_inject::IsWatching()) attach_inject::StopWatch();
+                    attach_inject::SetLaunchMode(attach_inject::LaunchMode::OneClickLogin);
+                    if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
+                        msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
+                    }
+                    ui.pendingAutoLaunch = false;
                 ui.status = "已切换：gamania (HK)";
+                }
             }
-        }
-        if (ImGui::IsItemHovered()) {
+            if (ImGui::IsItemHovered()) {
             if (modeIdx == 2) {
                 ImGui::SetTooltip(
                     "账密直登会另开一扇 XCAT 专用浏览器（独立登录罐），\n"
@@ -428,76 +429,76 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
             } else if (modeIdx == 1) {
                 ImGui::SetTooltip("用你日常浏览器点选 Gama Pass 换票。不另开独立罐。");
             }
+            }
         }
-    }
 
-    const auto launchMode = attach_inject::GetLaunchMode();
-    const bool attachMode = attach_inject::IsAttachWatchMode(launchMode);
-    const bool httpOneClick = (launchMode == attach_inject::LaunchMode::OneClickLogin);
-    const bool gamaPassMode = (launchMode == attach_inject::LaunchMode::GamaPassAuto);
+        const auto launchMode = attach_inject::GetLaunchMode();
+        const bool attachMode = attach_inject::IsAttachWatchMode(launchMode);
+        const bool httpOneClick = (launchMode == attach_inject::LaunchMode::OneClickLogin);
+        const bool gamaPassMode = (launchMode == attach_inject::LaunchMode::GamaPassAuto);
     const bool gamaPassDirect = (launchMode == attach_inject::LaunchMode::GamaPassDirect);
-    const unsigned strategyPrepLeft = LaunchPanel_StrategyPrepLeftSec(ui);
+        const unsigned strategyPrepLeft = LaunchPanel_StrategyPrepLeftSec(ui);
     const bool busy = msc::weblogin::IsBusy();
 
     // —— 行 2：模式相关（账号/昵称 · 验证码 · 监视/注入）——
-    if (attachMode) {
-        const bool watching = attach_inject::IsWatching();
-        const bool injBusy = attach_inject::IsInjectBusy();
-        const bool autoPending = ui.pendingAutoLaunch;
+        if (attachMode) {
+            const bool watching = attach_inject::IsWatching();
+            const bool injBusy = attach_inject::IsInjectBusy();
+            const bool autoPending = ui.pendingAutoLaunch;
         const bool prepBlocksStart = strategyPrepLeft > 0 && !watching && !autoPending;
-        if (watching) {
-            if (injBusy) ImGui::BeginDisabled();
-            if (ImGui::Button("停止监视", ImVec2(halfW, btnH))) {
-                sound::UiClick();
-                attach_inject::StopWatch();
-                ui.status = "已停止监视";
+            if (watching) {
+                if (injBusy) ImGui::BeginDisabled();
+                if (ImGui::Button("停止监视", ImVec2(halfW, btnH))) {
+                    sound::UiClick();
+                    attach_inject::StopWatch();
+                    ui.status = "已停止监视";
+                }
+                if (injBusy) ImGui::EndDisabled();
+            } else {
+                if (injBusy || prepBlocksStart) ImGui::BeginDisabled();
+                const char* watchLabel = autoPending ? "取消自动监视" : "开始监视";
+                if (ImGui::Button(watchLabel, ImVec2(halfW, btnH))) {
+                    sound::UiClick();
+                    if (autoPending) {
+                        LaunchPanel_CancelPendingAutoLaunch(ui);
+                        ui.status = "已取消自动监视 — 需要时再点「开始监视」";
+                        xcat::log::Info("App", "user cancelled pending auto-watch");
+                    } else if (attach_inject::StartWatch()) {
+                        ui.pendingAutoLaunch = false;
+                        ui.autoLaunchNotBeforeMs = 0;
+                        ui.status = "监视中：等待游戏进程…";
+                        hangup_schedule::NoteLaunchStarted(0);
+                    } else {
+                        ui.status = "无法启动监视";
+                        sound::UiError();
+                    }
+                }
+                if (injBusy || prepBlocksStart) ImGui::EndDisabled();
             }
-            if (injBusy) ImGui::EndDisabled();
-        } else {
-            if (injBusy || prepBlocksStart) ImGui::BeginDisabled();
-            const char* watchLabel = autoPending ? "取消自动监视" : "开始监视";
-            if (ImGui::Button(watchLabel, ImVec2(halfW, btnH))) {
+            ImGui::SameLine(0.f, gap);
+            if (injBusy) ImGui::BeginDisabled();
+            if (ImGui::Button("立即注入", ImVec2(halfW, btnH))) {
                 sound::UiClick();
-                if (autoPending) {
-                    LaunchPanel_CancelPendingAutoLaunch(ui);
-                    ui.status = "已取消自动监视 — 需要时再点「开始监视」";
-                    xcat::log::Info("App", "user cancelled pending auto-watch");
-                } else if (attach_inject::StartWatch()) {
-                    ui.pendingAutoLaunch = false;
-                    ui.autoLaunchNotBeforeMs = 0;
-                    ui.status = "监视中：等待游戏进程…";
-                    hangup_schedule::NoteLaunchStarted(0);
-                } else {
-                    ui.status = "无法启动监视";
+                std::wstring err;
+                if (!attach_inject::InjectNow(&err)) {
+                    ui.status = err.empty() ? "立即注入失败" : xcat::WideToUtf8(err);
                     sound::UiError();
+                } else {
+                    ui.status = "已开始立即注入…";
+                    hangup_schedule::NoteLaunchStarted(0);
                 }
             }
-            if (injBusy || prepBlocksStart) ImGui::EndDisabled();
-        }
-        ImGui::SameLine(0.f, gap);
-        if (injBusy) ImGui::BeginDisabled();
-        if (ImGui::Button("立即注入", ImVec2(halfW, btnH))) {
-            sound::UiClick();
-            std::wstring err;
-            if (!attach_inject::InjectNow(&err)) {
-                ui.status = err.empty() ? "立即注入失败" : xcat::WideToUtf8(err);
-                sound::UiError();
-            } else {
-                ui.status = "已开始立即注入…";
-                hangup_schedule::NoteLaunchStarted(0);
-            }
-        }
-        if (injBusy) ImGui::EndDisabled();
+            if (injBusy) ImGui::EndDisabled();
 
         // —— 行 3：准备提示 ——
-        if (autoPending && strategyPrepLeft > 0) {
+            if (autoPending && strategyPrepLeft > 0) {
             ImGui::TextColored(PrepHintBlue(), "准备中：%u 秒后自动监视", strategyPrepLeft);
-        } else if (prepBlocksStart) {
+            } else if (prepBlocksStart) {
             ImGui::TextColored(PrepHintBlue(), "准备中：%u 秒后可监视", strategyPrepLeft);
         } else {
             ImGui::TextDisabled("%s", attach_inject::StatusBrief().c_str());
         }
-    } else if (httpOneClick) {
+        } else if (httpOneClick) {
         if (msc::weblogin::GetAuthStrategy() == msc::weblogin::AuthStrategy::GamaPassAuto) {
             msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::HttpFirst);
         }
@@ -515,20 +516,20 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
         }
 
         // —— 行 3：一键启动 ——
-        const bool startBlocked = busy || strategyPrepLeft > 0;
-        if (startBlocked) ImGui::BeginDisabled();
+            const bool startBlocked = busy || strategyPrepLeft > 0;
+            if (startBlocked) ImGui::BeginDisabled();
         if (ImGui::Button("一键启动游戏", ImVec2(-1.f, btnH))) {
             LaunchPanel_StartOneClick(ui);
         }
-        if (startBlocked) ImGui::EndDisabled();
-        if (strategyPrepLeft > 0) {
+            if (startBlocked) ImGui::EndDisabled();
+            if (strategyPrepLeft > 0) {
             ImGui::TextColored(PrepHintBlue(), "准备中：%u 秒后可启动", strategyPrepLeft);
-        }
-    } else if (gamaPassMode) {
+            }
+        } else if (gamaPassMode) {
         if (msc::weblogin::GetAuthStrategy() != msc::weblogin::AuthStrategy::GamaPassAuto) {
             msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
         }
-        const bool autoPending = ui.pendingAutoLaunch;
+            const bool autoPending = ui.pendingAutoLaunch;
         DrawGamaPassSlotRow(ui, busy, rowW, gap);
 
         // —— 行 3：主按钮（登录中可取消；不关日常浏览器、不杀游戏）——
@@ -538,17 +539,17 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
         const char* gpLabel = gpCanceling ? "正在取消…"
                               : (busy ? "取消登录"
                                       : (autoPending ? "取消自动登录" : "GAMA PASS自动登录"));
-        if (ImGui::Button(gpLabel, ImVec2(-1.f, btnH))) {
+            if (ImGui::Button(gpLabel, ImVec2(-1.f, btnH))) {
             if (busy) {
                 LaunchPanel_CancelInFlightGpLogin(ui);
                 xcat::log::Info("App", "user cancelled in-flight GamaPass auto-login");
             } else if (autoPending) {
-                sound::UiClick();
-                LaunchPanel_CancelPendingAutoLaunch(ui);
+                    sound::UiClick();
+                    LaunchPanel_CancelPendingAutoLaunch(ui);
                 ui.status = "已取消自动登录 — 可改账号/昵称槽，再点「GAMA PASS自动登录」重新读秒";
-                xcat::log::Info("App", "user cancelled pending GamaPass auto-launch");
-            } else {
-                msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
+                    xcat::log::Info("App", "user cancelled pending GamaPass auto-launch");
+                } else {
+                    msc::weblogin::SetAuthStrategy(msc::weblogin::AuthStrategy::GamaPassAuto);
                 LaunchPanel_ArmGamaPassAutoLaunch(ui);
                 xcat::log::Info("App", "user re-armed GamaPass auto-launch (%us)",
                                 kGamaPassAutoPrepSec);
@@ -561,9 +562,9 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
                                                   : "5 秒后自动换票，可再点取消"));
         }
         if (disableGpMain) ImGui::EndDisabled();
-        if (autoPending && strategyPrepLeft > 0) {
+            if (autoPending && strategyPrepLeft > 0) {
             ImGui::TextColored(PrepHintBlue(), "准备中：%u 秒后自动换票", strategyPrepLeft);
-        } else if (autoPending) {
+            } else if (autoPending) {
             ImGui::TextColored(PrepHintBlue(), "即将自动换票…");
         }
     } else if (gamaPassDirect) {
@@ -691,7 +692,7 @@ void DrawLaunchCompactBar(LaunchUiState& ui) {
 void DrawUpdateControl() {
     const bool updateUi = UpdateShouldDrawProgressUi();
     const bool updateBusyGate = UpdateNeedsVisibleUi();
-    const UpdateSnapshot snap = GetUpdateSnapshot();
+        const UpdateSnapshot snap = GetUpdateSnapshot();
 
     ImGui::PushID("xcat_update");
     if (updateBusyGate) ImGui::BeginDisabled();
@@ -702,7 +703,7 @@ void DrawUpdateControl() {
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         if (updateBusyGate) {
             ImGui::SetTooltip("更新进行中，请等待当前流程完成。");
-        } else {
+            } else {
             ImGui::SetTooltip("检查内置更新口；有新版本则自动下载安装。\n"
                               "安装前会结束游戏与启动链相关进程，无需再确认。");
         }
@@ -860,6 +861,10 @@ static bool gUiMobGather = false;
 static int gUiMobGatherStrategy = (int)xcat::kMobGatherStrategyDefault;
 static bool gUiMobGatherLandOnArrive = xcat::kMobGatherLandOnArriveDefault != 0;
 static int gUiMobGatherHopPx = (int)xcat::kMobGatherHopPxDefault;
+static bool gUiMobGatherSlowNearOnly = xcat::kMobGatherSlowNearOnlyDefault != 0;
+static int gUiMobGatherSlowNearPx = (int)xcat::kMobGatherSlowNearPxDefault;
+static bool gUiMobGatherWzLeashOn = xcat::kMobGatherWzLeashOnDefault != 0;
+static int gUiMobGatherWzLeashSlowPx = (int)xcat::kMobGatherWzLeashSlowPxDefault;
 static int gUiMobGatherSpeedPct = (int)xcat::kMobGatherSpeedPctDefault;
 static bool gUiMobGatherAntiJitter = xcat::kMobGatherAntiJitterDefault != 0;
 static int gUiMobGatherMax = (int)xcat::kMobGatherMaxDefault;
@@ -1083,9 +1088,9 @@ void DrawHomeTab(LaunchUiState& ui) {
                 smartInterval = disk.simpleCombatSmartInterval != 0;
                 gUiSimpleCombatAttackIntervalMs =
                     (int)xcat::ClampSimpleCombatAttackIntervalMs(
-                        disk.simpleCombatAttackIntervalMs
-                            ? disk.simpleCombatAttackIntervalMs
-                            : xcat::kSimpleCombatAttackIntervalDefaultMs);
+                    disk.simpleCombatAttackIntervalMs
+                        ? disk.simpleCombatAttackIntervalMs
+                        : xcat::kSimpleCombatAttackIntervalDefaultMs);
                 gUiCombatTickMs = (int)xcat::ClampSimpleCombatTickMs(
                     disk.simpleCombatTickMs ? disk.simpleCombatTickMs
                                            : xcat::kSimpleCombatTickDefaultMs);
@@ -1118,6 +1123,11 @@ void DrawHomeTab(LaunchUiState& ui) {
                 gUiMobGatherStrategy = (int)xcat::ClampMobGatherStrategy(disk.mobGatherStrategy);
                 gUiMobGatherLandOnArrive = disk.mobGatherLandOnArrive != 0;
                 gUiMobGatherHopPx = (int)xcat::ClampMobGatherHopPx(disk.mobGatherHopPx);
+                gUiMobGatherSlowNearOnly = disk.mobGatherSlowNearOnly != 0;
+                gUiMobGatherSlowNearPx = (int)xcat::ClampMobGatherSlowNearPx(disk.mobGatherSlowNearPx);
+                gUiMobGatherWzLeashOn = disk.mobGatherWzLeashOn != 0;
+                gUiMobGatherWzLeashSlowPx =
+                    (int)xcat::ClampMobGatherWzLeashSlowPx(disk.mobGatherWzLeashSlowPx);
                 gUiMobGatherSpeedPct = (int)disk.mobGatherSpeedPct;
                 gUiMobGatherAntiJitter = disk.mobGatherAntiJitter != 0;
                 gUiMobGatherMax = (int)xcat::ClampMobGatherMax(
@@ -1357,6 +1367,12 @@ void DrawHomeTab(LaunchUiState& ui) {
         c.mobGatherLandOnArrive = gUiMobGatherLandOnArrive ? 1u : 0u;
         c.mobGatherHopPx = xcat::ClampMobGatherHopPx(
             static_cast<uint32_t>(gUiMobGatherHopPx < 0 ? 0 : gUiMobGatherHopPx));
+        c.mobGatherSlowNearOnly = gUiMobGatherSlowNearOnly ? 1u : 0u;
+        c.mobGatherSlowNearPx = xcat::ClampMobGatherSlowNearPx(
+            static_cast<uint32_t>(gUiMobGatherSlowNearPx < 0 ? 0 : gUiMobGatherSlowNearPx));
+        c.mobGatherWzLeashOn = gUiMobGatherWzLeashOn ? 1u : 0u;
+        c.mobGatherWzLeashSlowPx = xcat::ClampMobGatherWzLeashSlowPx(
+            static_cast<uint32_t>(gUiMobGatherWzLeashSlowPx < 0 ? 0 : gUiMobGatherWzLeashSlowPx));
         c.mobGatherSpeedPct = MobGatherUiU32(gUiMobGatherSpeedPct);
         c.mobGatherAntiJitter = gUiMobGatherAntiJitter ? 1u : 0u;
         c.mobGatherMax = xcat::ClampMobGatherMax(
@@ -1789,10 +1805,10 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (gUiApproachMode < 0 || gUiApproachMode > 4) gUiApproachMode = 0;
             if (ImGui::Combo("##f5_approach_mode", &gUiApproachMode, approachItems,
                              IM_ARRAYSIZE(approachItems))) {
-                persistCore();
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip(
+            persistCore();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
                     "单选追怪方式。\n"
                     "· 空中贴怪：悬停在怪旁出刀，需无敌，可穿层；默认。\n"
                     "· 拟人模式：同层走路贴近后 A 键出刀，不做跨层。\n"
@@ -1808,7 +1824,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
         }
         if (gUiApproachMode == 2) {
-            ImGui::AlignTextToFramePadding();
+        ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("静止");
             ImGui::SameLine(0.f, ui::Gap() * 0.45f);
             ImGui::SetNextItemWidth(AppDpi_Px(56.f));
@@ -1826,7 +1842,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             }
             ImGui::SameLine(0.f, ui::Gap() * 0.35f);
             ImGui::TextUnformatted("ms");
-            ImGui::SameLine(0.f, ui::Gap());
+        ImGui::SameLine(0.f, ui::Gap());
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("横向");
             ImGui::SameLine(0.f, ui::Gap() * 0.45f);
@@ -1835,10 +1851,10 @@ void DrawHomeTab(LaunchUiState& ui) {
                                (int)xcat::kHiraishinFrontDxMin, (int)xcat::kHiraishinFrontDxMax)) {
                 gUiHiraishinFrontDx = (int)xcat::ClampHiraishinFrontDx(
                     static_cast<uint32_t>(gUiHiraishinFrontDx < 0 ? 0 : gUiHiraishinFrontDx));
-                persistCore();
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-                ImGui::SetTooltip(
+            persistCore();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
                     "人↔怪 AbsPos 横向半宽（px）。默认 100。0=该轴不限。\n"
                     "叠怪吸过边会停刀，可加大。砍太远会空刀或踢。");
             }
@@ -1847,7 +1863,7 @@ void DrawHomeTab(LaunchUiState& ui) {
             ImGui::SameLine(0.f, ui::Gap());
             ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("竖直");
-            ImGui::SameLine(0.f, ui::Gap() * 0.45f);
+        ImGui::SameLine(0.f, ui::Gap() * 0.45f);
             ImGui::SetNextItemWidth(AppDpi_Px(56.f));
             if (ImGui::DragInt("##f5_hiraishin_front_dy", &gUiHiraishinFrontDy, 5,
                                (int)xcat::kHiraishinFrontDyMin, (int)xcat::kHiraishinFrontDyMax)) {
@@ -2122,7 +2138,7 @@ void DrawHomeTab(LaunchUiState& ui) {
                 // 空框：勿写 skipCount=0 冲掉盘上/默认「箭矢 彈丸」。
                 // 勾选启用时回填默认关键词；关闭过滤时保留 cfg 里 Read 到的规则。
                 if (pickupBlacklist) {
-                    cfg.skipRuleCount = 0;
+            cfg.skipRuleCount = 0;
                     auto addKw = [&](const char* key) {
                         if (cfg.skipRuleCount >= (uint32_t)xcat::kPetLootMaxSkipRules) return;
                         xcat::PetLootSkipRule& r = cfg.skipRules[cfg.skipRuleCount++];
@@ -2400,9 +2416,9 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (ImGui::DragFloat("##loot_vac_w", &lootVacW, 1.f, xcat::kPetLootVacuumMin, vacMaxW,
                                  "%.0f"))
                 persistPetLoot();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 if (lootMode == kLootChar) {
-                    ImGui::SetTooltip(
+            ImGui::SetTooltip(
                         "人物直吸宽度（%.0f–%.0f，默认 %.0f）。用户自调；过大可能空 Send。",
                         xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
                         xcat::kPetLootVacuumWDefault);
@@ -2420,9 +2436,9 @@ void DrawHomeTab(LaunchUiState& ui) {
             if (ImGui::DragFloat("##loot_vac_h", &lootVacH, 1.f, xcat::kPetLootVacuumMin, vacMaxH,
                                  "%.0f"))
                 persistPetLoot();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 if (lootMode == kLootChar) {
-                    ImGui::SetTooltip(
+            ImGui::SetTooltip(
                         "人物直吸高度（%.0f–%.0f，默认 %.0f）。用户自调。",
                         xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
                         xcat::kPetLootVacuumHDefault);
@@ -2432,11 +2448,11 @@ void DrawHomeTab(LaunchUiState& ui) {
                         xcat::kPetLootVacuumMin, xcat::kPetLootVacuumMax,
                         xcat::kPetLootVacuumHDefault);
                 }
-            }
-            ImGui::SameLine(0.f, ui::Gap() * 0.35f);
+        }
+        ImGui::SameLine(0.f, ui::Gap() * 0.35f);
             ImGui::TextUnformatted("高");
             ImGui::EndDisabled();
-        }
+    }
         if (xcat::ui::OptionCheckbox("高价值优先吸", &highValuePriority)) persistPetLoot();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
@@ -3024,7 +3040,7 @@ void DrawAutoSellTab(LaunchUiState& ui) {
             ImGui::TextWrapped(
                 "填写「不卖名单」后点下方按钮；名单与「自动卖装」共用。需先打开 NPC 商店。");
 
-            // —— 不卖名单（对照仓 DrawSellbagKeepRulesEditor）——
+        // —— 不卖名单（对照仓 DrawSellbagKeepRulesEditor）——
         ImGui::TextUnformatted("不卖名单");
         ImGui::SameLine();
         ImGui::TextDisabled("（装备栏+其他栏共用；手动卖 / 自动卖共用）");
@@ -3220,7 +3236,7 @@ void DrawAutoSellTab(LaunchUiState& ui) {
         {
             // —— 自动回城卖 / 补给 ——
             xcat::ui::CardGuard card("##tab_auto_sell_auto", "自动卖装");
-            DrawAutoSupplyStatusLine(ui.prefsBinDir);
+        DrawAutoSupplyStatusLine(ui.prefsBinDir);
 
         {
             // 对照仓：只读展示 lastFarmMapName；开启自动打怪 / 跑补给时自动记野图。
@@ -3414,7 +3430,7 @@ void DrawAutoSellTab(LaunchUiState& ui) {
             }
 
             ImGui::SetCursorPos(ImVec2(xBuy, rowY));
-            ImGui::AlignTextToFramePadding();
+                ImGui::AlignTextToFramePadding();
             ImGui::TextUnformatted("补到");
             ImGui::SameLine(0.f, gap * 0.35f);
             ImGui::SetNextItemWidth(qtyW);
@@ -3437,21 +3453,21 @@ void DrawAutoSellTab(LaunchUiState& ui) {
                         if (*tripBelow <= 0) *tripBelow = defaultTripBelow(*buyTo);
                         clampTripBelowUi(*tripBelow, *buyTo);
                     }
-                    persistAsup();
-                }
+                persistAsup();
+            }
                 if (!canTrip) ImGui::EndDisabled();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     if (!codeOk)
                         ImGui::SetTooltip("先把右侧物品名匹配成功（显示「已匹配」）");
                     else if (!buyOk)
                         ImGui::SetTooltip("先把「补到」设成大于 0");
                     else
-                        ImGui::SetTooltip(
+                ImGui::SetTooltip(
                             "勾选后：背包里这件少于右侧数字就回城补给\n"
                             "阈值必须小于「补到」；勾选会顺带打开左侧补货");
-                }
+            }
                 ImGui::SameLine(0.f, gap * 0.25f);
-                ImGui::AlignTextToFramePadding();
+            ImGui::AlignTextToFramePadding();
                 ImGui::TextUnformatted("低于");
                 ImGui::SameLine(0.f, gap * 0.25f);
                 ImGui::SetNextItemWidth(qtyW);
@@ -3459,7 +3475,7 @@ void DrawAutoSellTab(LaunchUiState& ui) {
                 const int maxBelow = (*buyTo > 0) ? (*buyTo - 1) : 0;
                 if (NativeInputIntClamped(id, *tripBelow, 0, maxBelow > 0 ? maxBelow : 0)) {
                     clampTripBelowUi(*tripBelow, *buyTo);
-                    persistAsup();
+                persistAsup();
                 }
                 ImGui::SameLine(0.f, gap * 0.25f);
                 ImGui::AlignTextToFramePadding();
@@ -3501,22 +3517,22 @@ void DrawAutoSellTab(LaunchUiState& ui) {
                         ImGui::SetTooltip("回车/失焦后按精确中文名查表；未匹配则不会买");
                 }
             } else {
-                char disp[96]{};
+            char disp[96]{};
                 snprintf(disp, sizeof(disp), "%s / %s", xcat::kAutoSupplyDefaultRefillFeedName,
-                         xcat::kAutoSupplyDefaultRefillFeedAltName);
-                ImGui::BeginDisabled(true);
+                     xcat::kAutoSupplyDefaultRefillFeedAltName);
+            ImGui::BeginDisabled(true);
                 ImGui::InputText(id, disp, sizeof(disp), ImGuiInputTextFlags_ReadOnly);
-                ImGui::EndDisabled();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::SetTooltip("固定：美味飼料优先，其次寵物食品\nCODE %s → %s",
                                       xcat::kAutoSupplyDefaultRefillFeedCode,
-                                      xcat::kAutoSupplyDefaultRefillFeedAltCode);
-                }
+                                  xcat::kAutoSupplyDefaultRefillFeedAltCode);
+            }
             }
 
             if (matchLabel) {
                 ImGui::SameLine(0.f, gap * 0.35f);
-                ImGui::AlignTextToFramePadding();
+            ImGui::AlignTextToFramePadding();
                 if (matchBad) {
                     ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.f), "%s", matchLabel);
                 } else {
@@ -3630,7 +3646,7 @@ void DrawAutoSellTab(LaunchUiState& ui) {
                 "若已在用回城卷换图，客户端仍会卸图完成（我方不再追加动作）");
         }
     }
-    }
+}
 }
 void DrawHangupScheduleTab(LaunchUiState& ui) {
     DesignBanner();
@@ -3666,7 +3682,7 @@ void DrawHangupScheduleTab(LaunchUiState& ui) {
 
     if (ui.prefsBinDir.empty()) {
     xcat::ui::CardGuard card("##tab_hangup", "挂机时段");
-        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [core] 挂机时段。");
+        ImGui::TextWrapped("未定位数据目录，无法读写 user.ini [core] 挂机时段。");
         return;
     }
 
@@ -3830,7 +3846,7 @@ void DrawMultiSkillTab(LaunchUiState& ui) {
 
     if (ui.prefsBinDir.empty()) {
         xcat::ui::CardGuard card("##tab_multiskill", "技能多发");
-        ImGui::TextWrapped("未定位 XCat_data，无法读写 multiSkill / multiskill_select.tsv。");
+        ImGui::TextWrapped("未定位数据目录，无法读写 multiSkill / multiskill_select.tsv。");
         return;
     }
 
@@ -4212,7 +4228,7 @@ void DrawTimedKeysTab(LaunchUiState& ui) {
 
     if (ui.prefsBinDir.empty()) {
         xcat::ui::CardGuard card("##tab_timed", "定时按键");
-        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [timed_keys]。");
+        ImGui::TextWrapped("未定位数据目录，无法读写 user.ini [timed_keys]。");
         return;
     }
 
@@ -4340,7 +4356,7 @@ void DrawBuffsTab(LaunchUiState& ui) {
 
     if (ui.prefsBinDir.empty()) {
         xcat::ui::CardGuard card("##tab_buffs", "BUFF 管理器");
-        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [buffs]。");
+        ImGui::TextWrapped("未定位数据目录，无法读写 user.ini [buffs]。");
         return;
     }
 
@@ -4838,7 +4854,7 @@ void DrawBetaTab(LaunchUiState& ui) {
                 frameLockFps = (int)xcat::ClampFrameLockFps(
                     verify.frameLockFps ? verify.frameLockFps : xcat::kFrameLockFpsDefault);
             } else {
-                dropSeenTick = c.writeTickMs;
+            dropSeenTick = c.writeTickMs;
             }
             xcat::log::Ok("App",
                           "已下发 core：战斗中可丢物=%d 野外可开拍卖=%d "
@@ -4870,7 +4886,7 @@ void DrawBetaTab(LaunchUiState& ui) {
             if (xcat::ReadPayloadControl(ui.prefsBinDir.c_str(), verify)) {
                 dropSeenTick = verify.writeTickMs;
             } else {
-                dropSeenTick = c.writeTickMs;
+            dropSeenTick = c.writeTickMs;
             }
             xcat::log::Ok("App", "已下发 core：attackRpc=%d mobs=%u ms=%u dmg=%u（实验）",
                           gUiAttackRpc ? 1 : 0, c.attackRpcMobs, c.attackRpcIntervalMs,
@@ -5942,7 +5958,7 @@ void DrawBetaTab(LaunchUiState& ui) {
                 ImGui::SetTooltip("写入包内 Encode4 占位；正式服通常重算，改这个不会改实际伤害");
             }
         ImGui::Unindent(ui::Gap() * 1.2f);
-        }
+    }
 
         if (xcat::ui::OptionCheckbox("全图攻击（P2 扩盒）", &gUiMapAttack))
             persistMapAttack();
@@ -5991,7 +6007,7 @@ void DrawBetaTab(LaunchUiState& ui) {
                 "写 HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers\n"
                 "TdrDelay / TdrDdiDelay（推荐 8 秒；系统默认 Delay≈2 / Ddi≈5）。\n"
                 "与攻击加速/游戏 core 无关；勿关 TDR（TdrLevel=0）。\n"
-                "需管理员（XCat 已提权）。改完必须重启才生效。");
+                "需管理员（启动器已提权）。改完必须重启才生效。");
         }
 
         const float halfW = (ImGui::GetContentRegionAvail().x - ui::Gap()) * 0.5f;
@@ -6044,7 +6060,7 @@ void DrawBetaTab(LaunchUiState& ui) {
 void DrawDebugTab(LaunchUiState& ui) {
     {
         xcat::ui::CardGuard card("##tab_dbg_status", "运行状态");
-        ImGui::TextUnformatted("产品：XCat");
+        ImGui::TextUnformatted("产品：rtapp");
         ImGui::Text("版本：%s (build %u)", xcat::kXcatVersionString, xcat::kXcatBuildId);
         ImGui::Text("启动模式：%s",
                     attach_inject::LaunchModeLabel(attach_inject::GetLaunchMode()));
@@ -6196,7 +6212,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                 xcat::sound::PlayScrollDropAnnounce(2040001);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
                 ImGui::SetTooltip("2040001 头盔防御卷轴60%。走正式口播，不经过掉落池。");
-            ImGui::SameLine();
+        ImGui::SameLine();
             if (ImGui::Button("试播雷之鏢##dbg_thunder_dart", ImVec2(halfW, 0.f)))
                 xcat::sound::PlayScrollDropAnnounce(2070005);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
@@ -6300,7 +6316,7 @@ void DrawDebugTab(LaunchUiState& ui) {
 
         ImGui::TextWrapped(
             "向当前 Maplestory_Classic.exe 注入自选 DLL（LoadLibraryW）。"
-            "与正式 xcat.dll 注入共用忙锁；成功不标记「已注入载荷」，监视仍会补正式 DLL。");
+            "与正式载荷 DLL 注入共用忙锁；成功不标记「已注入载荷」，监视仍会补正式 DLL。");
 
         const DWORD gamePid = xcat::FindProcessIdByName(L"Maplestory_Classic.exe");
         if (gamePid) {
@@ -6383,9 +6399,9 @@ void DrawDebugTab(LaunchUiState& ui) {
         xcat::ui::CardGuard card("##tab_dbg_maint", "日志 / 更新");
         ImGui::TextWrapped("启动器 JSONL：bin/logs/launcher.jsonl");
         ImGui::TextWrapped("注入 JSONL：bin/logs/inject.jsonl");
-        ImGui::TextWrapped("载荷 JSONL：bin/XCat_data/logs/x.jsonl");
+        ImGui::TextWrapped("载荷 JSONL：数据目录/logs/x.jsonl");
         ImGui::TextWrapped("换票文本：bin/launcher.log");
-        ImGui::TextWrapped("账号：仅 bin/account.txt（与 xcat.exe 同级；不写 LocalAppData）");
+        ImGui::TextWrapped("账号：仅 bin/account.txt（与启动器同级；不写 LocalAppData）");
         if (ImGui::Button("清空面板日志", ImVec2(AppDpi_Px(140.f), 0.f))) ui.logTail.clear();
         ImGui::Dummy(ImVec2(0.f, ui::Gap() * 0.6f));
         ImGui::Separator();
@@ -6811,7 +6827,7 @@ void DrawDebugTab(LaunchUiState& ui) {
                 ImGui::PopID();
             }
             ImGui::Text("共 %u 项 · tick %llu", lamps.count,
-                        static_cast<unsigned long long>(lamps.writeTickMs));
+                                static_cast<unsigned long long>(lamps.writeTickMs));
         }
     }
     CardGap();
@@ -7168,19 +7184,10 @@ void DrawDebugTab(LaunchUiState& ui) {
     }
     CardGap();
     {
-        static bool memWatch = true;
-        xcat::ui::CardGuard card("##tab_dbg_mem", "低内存守护");
-        xcat::ui::OptionCheckbox("低内存自动回收", &memWatch);
-        xcat::ui::OptionCheckbox("换图后回收", &memWatch);
-        if (ImGui::Button("手动安全回收一次", ImVec2(AppDpi_Px(160.f), 0.f))) {
-        }
-    }
-    CardGap();
-    {
         xcat::ui::CardGuard card("##tab_dbg_theme", "界面（诊断）");
         ImGui::Text("主题：%s", AppTheme_IsLight() ? "白天" : "暗夜");
         ImGui::TextWrapped("顶栏可切换主题；偏好写入 %s\\state\\user.ini",
-                           ui.prefsBinDir.empty() ? "XCat_data" : ui.prefsBinDir.c_str());
+                           ui.prefsBinDir.empty() ? xcat::install::kPayloadDir : ui.prefsBinDir.c_str());
     }
     CardGap();
     {
@@ -7471,10 +7478,10 @@ void DrawAutoSkillCard(LaunchUiState& ui) {
         }
         s_anim1 = {};
         s_anim2 = {};
-        if (ui.prefsBinDir.empty()) {
+            if (ui.prefsBinDir.empty()) {
             loaded = true;
-            return;
-        }
+                return;
+            }
         xcat::AutoSkillConfig cfg{};
         if (xcat::ReadAutoSkill(ui.prefsBinDir.c_str(), cfg)) {
             enabled = cfg.enabled != 0;
@@ -7518,9 +7525,9 @@ void DrawAutoSkillCard(LaunchUiState& ui) {
 
     if (ui.prefsBinDir.empty()) {
         ImGui::TextUnformatted("自动加技能点");
-        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [auto_skill]。");
-        return;
-    }
+        ImGui::TextWrapped("未定位数据目录，无法读写 user.ini [auto_skill]。");
+                return;
+            }
 
     // 进 Tab 第一帧只出壳、立刻泵消息。读 ini / 解析 TSV / CardGuard 拉丝都放到下一帧，
     // 否则 Debug 下 ChannelsSplit+fillRemaining 或抢 user.ini 锁会让窗口直接「未响应」。
@@ -7723,7 +7730,7 @@ void DrawAutoSkillCard(LaunchUiState& ui) {
             if (job <= 0) {
                 if (fillBit == 2u) {
                     ImGui::TextWrapped("未选 2 转：不会动 2 转技能点。需要时再选职业。");
-                } else {
+            } else {
                     ImGui::TextWrapped("先在上面选 1 转职业。");
                 }
             } else {
@@ -7736,8 +7743,8 @@ void DrawAutoSkillCard(LaunchUiState& ui) {
                 if (SkillListPickAdd(bin, job, ids, n, &addId)) appendSkill(addId);
             }
             ImGui::PopID();
-            return;
-        }
+                return;
+            }
         const float rowH = ImGui::GetFrameHeightWithSpacing();
         const float avail = ImGui::GetContentRegionAvail().x;
         const SkillListCols col = MakeSkillListCols(avail);
@@ -8112,7 +8119,7 @@ void DrawAutoStatTab(LaunchUiState& ui) {
 
     if (ui.prefsBinDir.empty()) {
         xcat::ui::CardGuard card("##tab_auto_stat", "自动加点");
-        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [auto_stat]。");
+        ImGui::TextWrapped("未定位数据目录，无法读写 user.ini [auto_stat]。");
         return;
     }
 
@@ -8333,7 +8340,7 @@ void DrawCharBootTab(LaunchUiState& ui) {
 
     if (ui.prefsBinDir.empty()) {
         xcat::ui::CardGuard card("##tab_char_boot", "一键起号");
-        ImGui::TextWrapped("未定位 XCat_data，无法读写 user.ini [char_boot]。");
+        ImGui::TextWrapped("未定位数据目录，无法读写 user.ini [char_boot]。");
         return;
     }
 
@@ -8498,6 +8505,10 @@ static void MobGatherApplyDisk(const xcat::PayloadControl& c) {
     gUiMobGatherStrategy = (int)xcat::ClampMobGatherStrategy(c.mobGatherStrategy);
     gUiMobGatherLandOnArrive = c.mobGatherLandOnArrive != 0;
     gUiMobGatherHopPx = (int)xcat::ClampMobGatherHopPx(c.mobGatherHopPx);
+    gUiMobGatherSlowNearOnly = c.mobGatherSlowNearOnly != 0;
+    gUiMobGatherSlowNearPx = (int)xcat::ClampMobGatherSlowNearPx(c.mobGatherSlowNearPx);
+    gUiMobGatherWzLeashOn = c.mobGatherWzLeashOn != 0;
+    gUiMobGatherWzLeashSlowPx = (int)xcat::ClampMobGatherWzLeashSlowPx(c.mobGatherWzLeashSlowPx);
     gUiMobGatherSpeedPct = (int)c.mobGatherSpeedPct;
     gUiMobGatherAntiJitter = c.mobGatherAntiJitter != 0;
     gUiMobGatherMax = (int)xcat::ClampMobGatherMax(
@@ -8593,6 +8604,12 @@ static bool MobGatherSaveUi(LaunchUiState& ui) {
     c.mobGatherLandOnArrive = gUiMobGatherLandOnArrive ? 1u : 0u;
     c.mobGatherHopPx = xcat::ClampMobGatherHopPx(
         static_cast<uint32_t>(gUiMobGatherHopPx < 0 ? 0 : gUiMobGatherHopPx));
+    c.mobGatherSlowNearOnly = gUiMobGatherSlowNearOnly ? 1u : 0u;
+    c.mobGatherSlowNearPx = xcat::ClampMobGatherSlowNearPx(
+        static_cast<uint32_t>(gUiMobGatherSlowNearPx < 0 ? 0 : gUiMobGatherSlowNearPx));
+    c.mobGatherWzLeashOn = gUiMobGatherWzLeashOn ? 1u : 0u;
+    c.mobGatherWzLeashSlowPx = xcat::ClampMobGatherWzLeashSlowPx(
+        static_cast<uint32_t>(gUiMobGatherWzLeashSlowPx < 0 ? 0 : gUiMobGatherWzLeashSlowPx));
     c.mobGatherSpeedPct = MobGatherUiU32(gUiMobGatherSpeedPct);
     c.mobGatherAntiJitter = gUiMobGatherAntiJitter ? 1u : 0u;
     c.mobGatherMax = xcat::ClampMobGatherMax(
@@ -8779,7 +8796,7 @@ static const char* SecAttackPktOpcodeName(int opcode) {
 void DrawMobGatherType20ProbeCard(LaunchUiState& ui) {
     xcat::ui::CardGuard card("##tab_gather_type20", "type20 观测");
     ImGui::TextDisabled("只读原生 SecurityClient 字典 peakKey，不出刀闸。约 0.5s 刷新。");
-    ImGui::TextDisabled("BIN：XCat_data/logs/sec_attack.log  ·  grep PROBE");
+    ImGui::TextDisabled("BIN：数据目录/logs/sec_attack.log  ·  grep PROBE");
     xcat::PayloadStatus st{};
     const bool fresh = !ui.prefsBinDir.empty() &&
                        xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) &&
@@ -9196,6 +9213,45 @@ void DrawMobGatherTab(LaunchUiState& ui) {
         ImGui::PushTextWrapPos(0.f);
         ImGui::TextDisabled("远怪逐跳接过来，绕开服务器约 1200px 单次拉距红线；0=关。");
         ImGui::PopTextWrapPos();
+        if (xcat::ui::OptionCheckbox("按怪速限制远处新收", &gUiMobGatherSlowNearOnly))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认开。按 WZ 移速自动限制未吸住怪的新收距离：乌龟（-50）只用下面「最慢距离」；\n"
+                "越快允许越远；红螃蟹/青螃蟹（-10/0）及以上不限制、照常 hop。\n"
+                "中间速度在最慢距离与「远怪接力」之间插值，不 hop。关=全部按原半径/接力\n"
+                "（海龟沙滩可能服端断）。未知模板不限制。BIN：skipSlow= / spd= / cap= / why=slow。");
+        }
+        ImGui::BeginDisabled(!gUiMobGatherSlowNearOnly);
+        MobGatherDragU(ui, "最慢距离", "slownear", &gUiMobGatherSlowNearPx,
+                       (int)xcat::kMobGatherSlowNearPxMin, (int)xcat::kMobGatherSlowNearPxMax, 10.f,
+                       "px",
+                       "WZ speed≤-50 允许新收的距人距离，默认 320。0=最慢档完全不新收。\n"
+                       "已吸住的不丢。只防爆钳 800。中间速度在此值与远怪接力之间插值。\n"
+                       "BIN：SetSlowNearPx / tick cap=。");
+        ImGui::EndDisabled();
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextDisabled("越慢越近才新收；青螃蟹海滩I 不额外限制。");
+        ImGui::PopTextWrapPos();
+        if (xcat::ui::OptionCheckbox("按怪速限制拉速", &gUiMobGatherWzLeashOn))
+            MobGatherTrySaveOrRevert(ui);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "默认关。开=远处慢怪仍吸，但每帧瞄点推进按 WZ 移速限制（对准服端自量位移）。\n"
+                "乌龟用下面「最慢拉速」（默认 10px/帧）；红/青螃蟹不额外限、照常 hop。\n"
+                "与「按怪速限制远处新收」同时开时，本项优先：仍收远处，只限拉速。\n"
+                "BIN：MobFhBan impact wz= / tick wzLeash=。");
+        }
+        ImGui::BeginDisabled(!gUiMobGatherWzLeashOn);
+        MobGatherDragU(ui, "最慢拉速", "wzleash", &gUiMobGatherWzLeashSlowPx,
+                       (int)xcat::kMobGatherWzLeashSlowPxMin, (int)xcat::kMobGatherWzLeashSlowPxMax,
+                       1.f, "px/帧",
+                       "WZ speed≤-50 每帧允许推进的瞄点距离，默认 10。只防爆钳 2–48。\n"
+                       "还断就调小；不断可逐步调大换吸得更快。BIN：SetWzLeash / impact wz=。");
+        ImGui::EndDisabled();
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextDisabled("限的是每帧位移，不是 hop 距；青螃蟹不额外限。");
+        ImGui::PopTextWrapPos();
         if (xcat::ui::OptionCheckbox("位移夹速", &gUiMobGatherDispClampOn))
             MobGatherTrySaveOrRevert(ui);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -9359,6 +9415,10 @@ void DrawMobGatherTab(LaunchUiState& ui) {
             gUiMobGatherDispCapPx = (int)xcat::kMobGatherDispCapPxDefault;
             gUiMobGatherLandOnArrive = xcat::kMobGatherLandOnArriveDefault != 0;
             gUiMobGatherHopPx = (int)xcat::kMobGatherHopPxDefault;
+            gUiMobGatherSlowNearOnly = xcat::kMobGatherSlowNearOnlyDefault != 0;
+            gUiMobGatherSlowNearPx = (int)xcat::kMobGatherSlowNearPxDefault;
+            gUiMobGatherWzLeashOn = xcat::kMobGatherWzLeashOnDefault != 0;
+            gUiMobGatherWzLeashSlowPx = (int)xcat::kMobGatherWzLeashSlowPxDefault;
             gUiMobGatherAntiReport = false;
             MobGatherTrySaveOrRevert(ui);
         }

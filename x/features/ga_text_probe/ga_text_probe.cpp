@@ -10,6 +10,8 @@
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/log.h"
 
+#include "xor_cstr.h"
+
 #include <Windows.h>
 #include <Psapi.h>
 
@@ -214,12 +216,16 @@ HMODULE FindGrapCoreModule() {
         // Prefer path containing grap-core
         const wchar_t* leaf = wcsrchr(path, L'\\');
         leaf = leaf ? leaf + 1 : path;
-        if (_wcsicmp(leaf, L"grap-core64.aes") == 0) return mods[i];
+        if (xcat::xor_cstr::WideEqualsI(leaf, xcat::xor_cstr::kGrapCore64Aes,
+                                        sizeof(xcat::xor_cstr::kGrapCore64Aes)))
+            return mods[i];
     }
     for (DWORD i = 0; i < count && i < 512; ++i) {
         wchar_t path[MAX_PATH]{};
         if (!GetModuleFileNameW(mods[i], path, MAX_PATH)) continue;
-        if (wcsstr(path, L"grap-core") != nullptr) return mods[i];
+        if (xcat::xor_cstr::WideContains(path, xcat::xor_cstr::kGrapCore,
+                                         sizeof(xcat::xor_cstr::kGrapCore)))
+            return mods[i];
     }
     return nullptr;
 }
@@ -307,8 +313,8 @@ DWORD WINAPI Worker(LPVOID) {
         Sleep(500);
     }
     if (!x::runtime::il2cpp::Ensure()) {
-        LogLine("FAIL GameAssembly not ready within %lu ms", static_cast<unsigned long>(kGaWaitMs));
-        WriteStatus("FAIL", "no_gameassembly");
+        LogLine("FAIL GA not ready within %lu ms", static_cast<unsigned long>(kGaWaitMs));
+        WriteStatus("FAIL", "no_ga");
         gRunning.store(false);
         return 0;
     }
@@ -326,8 +332,8 @@ DWORD WINAPI Worker(LPVOID) {
     if (gWantCrc.load()) {
         HMODULE core = FindGrapCoreModule();
         if (!core) {
-            LogLine("CRC_FAIL grap-core module not found in process");
-            WriteStatus("FAIL", "no_grap_core");
+            LogLine("CRC_FAIL ac module not found in process");
+            WriteStatus("FAIL", "no_ac_mod");
             gRunning.store(false);
             return 0;
         }
@@ -388,10 +394,10 @@ DWORD WINAPI Worker(LPVOID) {
 
 void Init() {
     const bool want = EnvOn("GA_TEXT_PROBE") || FlagFileOn("ga_text_probe.enable");
-    if (want && !EnvOn("XCAT_ALLOW_TEXT_PATCH")) {
-        SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", "1");
+    if (want && !XCAT_ENV_ON(kEnvAllowTextPatch)) {
+        XCAT_ENV_SETA(kEnvAllowTextPatch, "1");
     }
-    const bool allowText = EnvOn("XCAT_ALLOW_TEXT_PATCH");
+    const bool allowText = XCAT_ENV_ON(kEnvAllowTextPatch);
     gEnabled.store(want && allowText);
     gWantCrc.store(EnvOn("GA_TEXT_PROBE_CRC") || FlagFileOn("ga_text_probe_crc.enable"));
     gDirtyMs = EnvMs("GA_TEXT_PROBE_MS", kDefaultDirtyMs);

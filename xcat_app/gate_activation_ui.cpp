@@ -54,7 +54,7 @@ bool DrawGateTitleBar(AppWindow& app) {
                     ImVec2(origin.x + fullW, origin.y + titleH),
                     ImGui::ColorConvertFloat4ToU32(p.titleBarLineBottom));
         dl->AddText(ImVec2(origin.x + pad, origin.y + (titleH - ImGui::GetFontSize()) * 0.5f),
-                    ImGui::ColorConvertFloat4ToU32(p.brandText), "XCat 启动激活");
+                    ImGui::ColorConvertFloat4ToU32(p.brandText), "启动激活");
     }
 
     // 拖拽区：占满除关闭按钮外的整条。

@@ -73,4 +73,21 @@ python scripts/ga_remount.py audit
 - 把 ForceDump / Il2CppDumper 收成一条脚本（要注入、要游戏在跑）。
 - 按**方法哈希**对 `kRva*`（现在只验「这个数字是不是某个方法头」，验不出指错函数）。
 - 自动从平坦化搜 jnz/cmov。
+
+## 6. 2026-09-04 IDA 抽检（F5 热路径 · 09-03 dump）
+
+IDB：`Dumps/runtime/GameAssembly.dll.i64`，imagebase `0x7FF86BA70000`。只核方法头身份 / ABI / klass 槽，不改业务。
+
+| 锚点 | 源码 RVA | IDA 结论 |
+|---|---|---|
+| `OnFuncKey` | `0x10A74D0` | 序言 `rcx=this edx=type r8=FuncKey* r9=scan`，哈希 OK |
+| `GetBodyRect` | `0xF2BAA0` | `rsi=Rect*`，两处 `movups [rsi], xmm0`（16 字节），哈希 OK |
+| `SetImpactNext` | `0x11C9310` | `xmm1/xmm2` 双精度，哈希 OK |
+| `SetInput` | `0x11DCAA0` | `edx/r8d` → `+0x50/+0x54`，哈希 OK |
+| `WUA` 禁台槽 | klass `+0x208/+0x218` | 仍在：`r9=0` 调 `+208`，`r9=1` 调 `+218` |
+| Camera `get_main` / STW(Vector3) / `get_transform` / `get_position` | `0x4E2ECD0` / `0x4E2E800` / `0x4E98F30` / `0x4EB39A0` | icall 包装字符串对上；STW 硬编码 eye=2 |
+| `set/get_targetFrameRate` / `set_vSyncCount` | `0x4E28A50` / `0x4E28A10` / `0x4E43DB0` | Unity 明文包装对上 |
+| **`GetKeyByFunc`** | 旧 `0x1671DD0` → **`0x1676590`** | 旧 RVA 是 FKM 4 字节 setter（`mov [rcx+20h], edx; ret`）。哈希仍在，真方法 dump.cs `0x1676590`。`FindMethodResolved` 先走哈希，03:33 BIN 的合成 5/52 也不依赖它。 |
+
+F5 出刀成功后硬崩：上表方法头对得上，**不是**「OnFuncKey / SetImpactNext / GetBodyRect 指错函数」。
 ---

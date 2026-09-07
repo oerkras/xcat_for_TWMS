@@ -10,6 +10,7 @@
 #include "../ports/world_port.h"
 #include "../ports/mob_gather_port.h"
 #include "../channel_hop/channel_hop.h"
+#include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
 
@@ -434,7 +435,7 @@ void Tick(DWORD now) {
 DWORD WINAPI TitlebarThread(LPVOID) {
     timeBeginPeriod(1);
     x::runtime::LogI("Titlebar", "worker start (WorldManager→CharacterData→CharacterStat)");
-    for (int i = 0; i < 200 && !GetModuleHandleW(L"GameAssembly.dll") && !gWorkerStop.load(); ++i) Sleep(50);
+    for (int i = 0; i < 200 && !x::runtime::il2cpp::GameAssembly() && !gWorkerStop.load(); ++i) Sleep(50);
     if (gWorkerStop.load()) { timeEndPeriod(1); return 0; }
     if (!game::BindApis()) { timeEndPeriod(1); return 1; }
     Sleep(2000);

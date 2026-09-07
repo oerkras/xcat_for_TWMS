@@ -34,9 +34,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem Main target: bin\xcat.exe (GamaPass CDP / HTTP ticket inside).
-rem POST_BUILD syncs dumps/offline_tables/tsv -> bin/XCat_data/dataservice (copy_if_different only).
-rem On LNK1104: close bin\xcat.exe yourself, then re-run. This script never kills processes.
+rem Main target: bin\rtapp.exe (GamaPass CDP / HTTP ticket inside).
+rem POST_BUILD syncs dumps/offline_tables/tsv -> bin/rtcache/dataservice (copy_if_different only).
+rem On LNK1104: close bin\rtapp.exe yourself, then re-run. This script never kills processes.
 cmake --build "%BUILD_DIR%" --config %CONFIG% --target xcat_sound
 if errorlevel 1 (
     echo !C_YELLOW!Build WARNING: xcat_sound.exe was not built; continuing without build sound.!C_RESET!
@@ -46,7 +46,7 @@ cmake --build "%BUILD_DIR%" --config %CONFIG% --target xcat xcat_probe
 if errorlevel 1 (
     echo.
     echo !C_RED!Build FAILED: compile/link error.!C_RESET!
-    echo !C_YELLOW!If LNK1104: close bin\xcat.exe yourself, then re-run build.bat.!C_RESET!
+    echo !C_YELLOW!If LNK1104: close bin\rtapp.exe yourself, then re-run build.bat.!C_RESET!
     if exist "bin\xcat_sound.exe" (
         rem 同步播完再退出：start /b 会被脚本结束连带杀掉，音效截断。
         "bin\xcat_sound.exe" build-fail >nul 2>&1
@@ -55,8 +55,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo !C_GREEN!Build succeeded: %PRODUCT_NAME% -^> bin\xcat.exe + bin\XCat_data\xcat.dll!C_RESET!
-echo          ^(offline tables: dumps\offline_tables\tsv -^> bin\XCat_data\dataservice^)
+echo !C_GREEN!Build succeeded: %PRODUCT_NAME% -^> bin\rtapp.exe + bin\rtcache\rtmod.dll!C_RESET!
+echo          ^(offline tables: dumps\offline_tables\tsv -^> bin\rtcache\dataservice^)
 if exist "bin\xcat_sound.exe" (
     "bin\xcat_sound.exe" build-ok >nul 2>&1
 )

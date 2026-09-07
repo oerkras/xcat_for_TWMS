@@ -3665,6 +3665,14 @@ bool SoftOrNetQuiet() {
     return true;
 }
 
+// 关会话 / 软重连正在跑：play-ready 闪真也不得出刀（WIN-20260826WCU 05:47：
+// CloseSession 后 332ms heli_strike → 泵 idle / GC 弹窗）。
+// 不认 IsHoldActive：Finish 那 2s hold + 已进图时仍要出刀（BIN 05:13）。
+// 只挡 Firing；旋翼已在本拍 TickHeliRotor，勿 Unlatch。
+bool SessionWashBlocksFire() {
+    return soft_login_probe::IsAttemptBusy() || soft_login_probe::IsDeferredPending();
+}
+
 bool InCombatEnableHold(DWORD now) {
     return gEnableHoldUntilMs != 0 && static_cast<int>(now - gEnableHoldUntilMs) < 0;
 }
@@ -6031,6 +6039,16 @@ void TickImpl(DWORD now) {
         if (!sHangupSellLog || now - sHangupSellLog > 800) {
             sHangupSellLog = now;
             LogLine("hangup sell-first hold (no fire until auto-supply decides)");
+        }
+        return;
+    }
+    if (SessionWashBlocksFire()) {
+        if (gState != State::Idle) GoIdle(now, "session_wash");
+        ports::attack::ForceRelease();
+        static DWORD sWashLog = 0;
+        if (!sWashLog || now - sWashLog > 800) {
+            sWashLog = now;
+            LogLine("session_wash no fire (attempt/deferred; keep heli)");
         }
         return;
     }

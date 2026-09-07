@@ -1,6 +1,7 @@
 #include "xcat_access_deny_sticky.h"
 
 #include "process_util.h"
+#include "xcat_install_names.h"
 
 #include <Windows.h>
 #include <shlobj.h>
@@ -42,7 +43,8 @@ std::string LegacyMachineStickyPath() {
     std::wstring w = base;
     CoTaskMemFree(base);
     if (!w.empty() && w.back() != L'\\' && w.back() != L'/') w.push_back(L'\\');
-    w += L"XCatTWMS\\access_deny.json";
+    w += xcat::install::LegacyProgramDataLeafW();
+    w += L"\\access_deny.json";
     return WideToUtf8(w);
 }
 

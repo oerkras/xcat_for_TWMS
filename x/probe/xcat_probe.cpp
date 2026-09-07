@@ -71,6 +71,7 @@
 #include "../ipc/payload_status.h"
 #include "../ipc/payload_timed_keys.h"
 #include "xcat_payload_control.h"
+#include "xcat_install_names.h"
 #include "../features/crash_upload_guard/crash_upload_guard.h"
 #include "../runtime/bin_dir.h"
 #include "../runtime/hang_autopsy.h"
@@ -84,6 +85,7 @@
 #include "../x_version.h"
 
 #include "xcat_sound.h"
+#include "xor_cstr.h"
 
 namespace {
 
@@ -133,7 +135,7 @@ void WaitManagedProbeIdle(DWORD maxMs) {
 
 void MarkReady() {
     wchar_t name[64]{};
-    swprintf_s(name, L"Local\\XCatTwmsProbeReady_%lu", GetCurrentProcessId());
+    swprintf_s(name, xcat::install::kEventProbeReadyFmt, GetCurrentProcessId());
     gReadyEvent = CreateEventW(nullptr, TRUE, TRUE, name);
 }
 
@@ -227,10 +229,7 @@ constexpr DWORD kPlayBootDrainMaxMs = 2000;  // ≥ InvokeAndWait 默认 1500，
 constexpr DWORD kPlayBootDrainPollMs = 20;
 
 bool EnvPlayBootStaggerOff() {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_PLAY_BOOT_STAGGER", buf, sizeof(buf));
-    if (!n || n >= sizeof(buf)) return false;
-    return buf[0] == '0' || buf[0] == 'n' || buf[0] == 'N' || buf[0] == 'f' || buf[0] == 'F';
+    return XCAT_ENV_OFF(kEnvPlayBootStagger);
 }
 
 // unfreeze 后等泵空闲再动第一批 survival（削 settle 窗 job timeout）。
@@ -391,7 +390,7 @@ bool StartPlayPathWorkers() {
     const bool stagger = !EnvPlayBootStaggerOff();
     x::runtime::LogI("Bootstrap",
                      "play-ready — start PLAY workers %s (invuln first → settle → cold init → rest)",
-                     stagger ? "staggered" : "sync(XCAT_PLAY_BOOT_STAGGER=0)");
+                     stagger ? "staggered" : "sync(play_boot_stagger=0)");
 
     // 保命优先：无敌先于 settle/冷绑。落地空窗等 cold init 会挨打（用户反馈首次启动）。
     // Invuln MyUser 急钉不依赖 FindClass 冷绑。
@@ -593,10 +592,7 @@ bool BootFeatureWorkersTwoPhase() {
 
 bool WaitNativeGameAssembly() {
     while (!AbortRequested()) {
-        if (GetModuleHandleW(L"GameAssembly.dll")) {
-            // 仅解析导出（GetProcAddress / RVA），不碰托管堆。
-            if (x::runtime::il2cpp::Ensure()) return true;
-        }
+        if (x::runtime::il2cpp::Ensure()) return true;
         Sleep(kGaPollMs);
     }
     return false;
@@ -663,7 +659,7 @@ DWORD WINAPI BootstrapThread(LPVOID) {
         gPhase.store(static_cast<int>(Phase::Idle), std::memory_order_release);
         return 0;
     }
-    x::runtime::LogI("Bootstrap", "GameAssembly exports ready — native settle next");
+    x::runtime::LogI("Bootstrap", "GA exports ready — native settle next");
 
     if (!WaitNativeBeforeFindClass()) {
         x::runtime::LogI("Bootstrap", "cold-start aborted during native settle (detach)");

@@ -1,5 +1,7 @@
 #include "xcat_payload_notify.h"
 
+#include "xcat_install_names.h"
+
 #include <Windows.h>
 
 #include <algorithm>
@@ -68,7 +70,7 @@ uint32_t HashBinDirForShm(const char* binDir) {
 
 std::wstring NotifyMapName(const char* binDir) {
     wchar_t name[96]{};
-    swprintf_s(name, L"Local\\XCatNotify_%08X", HashBinDirForShm(binDir));
+    swprintf_s(name, xcat::install::kShmNotifyFmt, HashBinDirForShm(binDir));
     return name;
 }
 

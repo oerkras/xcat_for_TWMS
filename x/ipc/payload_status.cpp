@@ -102,11 +102,11 @@ void LatchWorld(xcat::PayloadStatus& st) {
 
 // docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-06（与 anti_macro_port 对齐）
 constexpr char kAntiMacroUtilClass[] =
-    "bfd9b528da13edcb891e88ed6ca1ea3f16c6875daf9a512c6735cd5c0ad5eb9";
+    "b14025466ba0e40c51d1bf13f7e915b0e78f9389ed347b2d4da80ea3da005c9";
 constexpr char kAntiMacroNonFiniteClass[] =
-    "ed05e9de51d5fbe4381867aafd01803bb6d5ff492237cac606e9531d3860fd2";
+    "c58aeae97e7e118cafe20417fa8d27da1ce04437f3aefecbe83a8287ac2df04";
 constexpr char kAntiMacroTextCaptchaClass[] =
-    "f896ad65f80e49605a867297e0e62ca5925787b7fe3f8ea103383e886a5a7c4";
+    "cf4796979346f21ec878365cbc8cd889c01bd1ebe4d4ca8f23704aa38c8a769";
 constexpr char kPrefabNonFinite[] = "UIAntiMacroNonFinite";
 constexpr char kPrefabTextCaptcha[] = "UIAntiMacroTextCaptcha";
 
@@ -116,7 +116,7 @@ std::atomic<bool> gQuizTypesOk{false};
 bool gQuizTypesLogged = false;
 
 bool GameAssemblyPresent() {
-    return GetModuleHandleW(L"GameAssembly.dll") != nullptr;
+    return x::runtime::il2cpp::GameAssembly() != nullptr;
 }
 
 // Cache 灯：Util 哈希 + Text/NonFinite（哈希优先、Prefab 兜底）就绪即 latch。
@@ -354,7 +354,7 @@ namespace {
 
 DWORD WINAPI WorkerProc(LPVOID) {
     x::runtime::LogI("PayloadStatus", "publisher start");
-    for (int i = 0; i < 200 && !GetModuleHandleW(L"GameAssembly.dll") && !gStop.load(); ++i)
+    for (int i = 0; i < 200 && !x::runtime::il2cpp::GameAssembly() && !gStop.load(); ++i)
         Sleep(50);
     while (!gStop.load()) {
         PayloadStatus_Publish();

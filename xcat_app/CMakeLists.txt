@@ -77,12 +77,13 @@ if(MSVC)
     set_property(TARGET xcat PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
-    # 内嵌应用清单 requireAdministrator：双击 xcat.exe 即弹 UAC 以管理员运行。
+    # 内嵌应用清单 requireAdministrator：双击启动器即弹 UAC 以管理员运行。
     # 注入 / OpenProcess 等高权限操作需要管理员；模式对照仓枫星 xcat_app。
     target_link_options(xcat PRIVATE "/MANIFESTUAC:level='requireAdministrator' uiAccess='false'")
 endif()
 
 set_target_properties(xcat PROPERTIES
+    OUTPUT_NAME ${XCAT_LAUNCHER_OUTPUT_NAME}
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin
     RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin
     RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/bin
@@ -92,40 +93,40 @@ set_target_properties(xcat PROPERTIES
 
 # 离线表 / 赶路 seed：仅 copy_if_different，不重跑 dump。源目录缺失则跳过。
 add_custom_command(TARGET xcat POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xcat>/XCat_data/dataservice"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xcat>/XCat_data/state"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xcat>/XCat_data/skill_catalog"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/dataservice"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/state"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/skill_catalog"
     COMMAND ${CMAKE_COMMAND}
             -DSRC_DIR="${CMAKE_SOURCE_DIR}/dumps/offline_tables/tsv"
-            -DDST_DIR="$<TARGET_FILE_DIR:xcat>/XCat_data/dataservice"
+            -DDST_DIR="$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/dataservice"
             -P "${CMAKE_SOURCE_DIR}/cmake/sync_dir_if_exists.cmake"
     COMMAND ${CMAKE_COMMAND}
             -DSRC="${CMAKE_SOURCE_DIR}/dumps/offline_tables/tsv/skill_catalog_full.tsv"
-            -DDST="$<TARGET_FILE_DIR:xcat>/XCat_data/skill_catalog/skill_catalog_full.tsv"
+            -DDST="$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/skill_catalog/skill_catalog_full.tsv"
             -P "${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake"
     COMMAND ${CMAKE_COMMAND}
             -DSRC_DIR="${CMAKE_SOURCE_DIR}/dumps/offline_tables/scroll_voice"
-            -DDST_DIR="$<TARGET_FILE_DIR:xcat>/XCat_data/dataservice/scroll_voice"
+            -DDST_DIR="$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/dataservice/scroll_voice"
             -P "${CMAKE_SOURCE_DIR}/cmake/sync_dir_if_exists.cmake"
     COMMAND ${CMAKE_COMMAND}
             -DSRC="${CMAKE_SOURCE_DIR}/dumps/offline_tables/SOURCE.md"
-            -DDST="$<TARGET_FILE_DIR:xcat>/XCat_data/dataservice/SOURCE.md"
+            -DDST="$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/dataservice/SOURCE.md"
             -P "${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake"
     COMMAND ${CMAKE_COMMAND}
             -DSRC="${CMAKE_SOURCE_DIR}/dumps/twms_routes/travel_graph.seed.tsv"
-            -DDST="$<TARGET_FILE_DIR:xcat>/XCat_data/state/travel_graph.seed.tsv"
+            -DDST="$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/state/travel_graph.seed.tsv"
             -P "${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake"
     COMMAND ${CMAKE_COMMAND}
             -DSRC="${CMAKE_SOURCE_DIR}/dumps/twms_routes/travel_catalog.tsv"
-            -DDST="$<TARGET_FILE_DIR:xcat>/XCat_data/state/travel_catalog.tsv"
+            -DDST="$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/state/travel_catalog.tsv"
             -P "${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake"
     COMMAND ${CMAKE_COMMAND}
             -DSRC="${CMAKE_SOURCE_DIR}/dumps/twms_routes/travel_harbor.tsv"
-            -DDST="$<TARGET_FILE_DIR:xcat>/XCat_data/state/travel_harbor.tsv"
+            -DDST="$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/state/travel_harbor.tsv"
             -P "${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake"
     COMMAND ${CMAKE_COMMAND}
             -DSRC="${CMAKE_SOURCE_DIR}/dumps/twms_routes/travel_script_portal.tsv"
-            -DDST="$<TARGET_FILE_DIR:xcat>/XCat_data/state/travel_script_portal.tsv"
+            -DDST="$<TARGET_FILE_DIR:xcat>/${XCAT_PAYLOAD_DIR_NAME}/state/travel_script_portal.tsv"
             -P "${CMAKE_SOURCE_DIR}/cmake/copy_if_exists.cmake"
     COMMENT "Sync offline dataservice TSV + twms travel seeds (copy_if_different only)"
 )

@@ -13,7 +13,7 @@
 namespace x::features::auto_lie::mouse_region_overlay {
 namespace {
 
-constexpr const wchar_t* kClassName = L"XCatLieMouseRegionOverlay";
+constexpr const wchar_t* kClassName = L"RtLieMouseRegionOverlay";
 constexpr int kPad = 48;
 constexpr int kHudW = 520;
 constexpr int kHudH = 72;
@@ -54,7 +54,10 @@ void DrawDiamond(HDC hdc, long x, long y, long r, HPEN pen) {
 bool EnsureClass() {
     if (g_classRegistered) return true;
     HMODULE mod = x::runtime::GetImageModule();
-    if (!mod) mod = GetModuleHandleW(nullptr);
+    if (!mod) {
+        x::runtime::LogW("AutoLieOverlay", "RegisterClassEx skipped: no image module");
+        return false;
+    }
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = DefWindowProcW;
@@ -197,13 +200,16 @@ bool EnsureOverlayWindow(const RECT& want) {
 
     if (!g_hwnd || !IsWindow(g_hwnd)) {
         HMODULE createMod = x::runtime::GetImageModule();
-        if (!createMod) createMod = GetModuleHandleW(nullptr);
+        if (!createMod) {
+            x::runtime::LogW("AutoLieOverlay", "CreateWindowEx skipped: no image module");
+            return false;
+        }
         // 故意不挂 Unity 为 owner：最小化时 owned popup 的创建/销毁会 Sync 进挂起的
         // 游戏窗口线程，实机已出现模拟后泵永久 idle（BIN 18:12 最小化测）。
         g_hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
                 WS_EX_NOACTIVATE,
-            kClassName, L"XCatLieOverlay", WS_POPUP, want.left, want.top, w, h, nullptr,
+            kClassName, L"RtLieOverlay", WS_POPUP, want.left, want.top, w, h, nullptr,
             nullptr, createMod, nullptr);
         if (!g_hwnd) {
             x::runtime::LogW("AutoLieOverlay", "CreateWindowEx failed err=%lu", GetLastError());

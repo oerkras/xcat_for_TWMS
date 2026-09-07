@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
@@ -34,21 +35,21 @@ using x::runtime::il2cpp::ReadPtr;
 // 交叉：Mob TDI:1507；MobPool→Dictionary<int,Mob>@+0x10；字段偏移未漂（deadType@0x1B4 等）。
 // 误用其它 Map* 壳会通过 FindClass 但 ObjKlassIs 失败 → M/mapId 全废。
 constexpr char kMobPoolClass[] =
-    "f7d2cfdd4abeae714c68b631e8408308c98f019d4c0ff73f3010811343565da";
+    "b06f818211149c675f11ae24bfd8186c06b6b987035d057abefd0bd4ee3b03f";
 constexpr char kMobClass[] =
-    "d8b8258494049523e613374de0bd0539bb7318d4802873cd0c7dfbab192bf96";
+    "de49679f4fa010cff83f3abcf3443df89b12c8102b0f973237328b38f4ac36a";
 constexpr char kMapDataClass[] =
-    "eca01f9d2fbb16afddb74e0a6128167dde4d2e423f84433d39f4654aef4a767";
+    "e7deb27fdaac1d8fec9cc2277febc6c35b2687979aebe9df5877ff29dc16129";
 // UIHpTag（dump 属性 "UIHpTag"；绝对 cur/max 缓存）
 constexpr char kUiHpTagClass[] =
-    "ad52268ca97de621cd3c16fc8671f16d76df50b8dcb0cb61b84f580abefb138";
+    "ec3d659034791f273f004d0b0703e29c01f466beb628fdf960b8cf8308b7ad7";
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
 
 // MobPool
 constexpr size_t kFbPoolDict = 0x10;  // Dictionary<int,Mob>
 constexpr char kHashPoolDict[] =
-    "e0d74e1464f4f50492b787dcf6a83a9a641fcb2e25af1fe07912f653232502a";
+    "da28a0a36aeb35bc9f8daa5eec5cb3865141c027ca61dbda47d6f30b23b22a8";
 size_t gOffPoolDict = kFbPoolDict;
 #define kOffPoolDict (gOffPoolDict)
 
@@ -56,33 +57,33 @@ size_t gOffPoolDict = kFbPoolDict;
 constexpr size_t kOffCachedPtr = 0x10;  // UnityEngine.Object.m_CachedPtr
 
 constexpr char kHashVecCtrl[] =
-    "<aeb819450fbe3e8e0eb38423605993f53e2c72baef2b39f45a89237951f1628>k__BackingField";
+    "<e22b1f6d38f00abbcb8a5dd7bbd304c2288f14cddbee6a552a6fbc18fc280f6>k__BackingField";
 constexpr char kHashPos[] =
-    "f5e96097bcfbc4e0b6bb1606c0cc3f2e20f2635a65745766422d9c9b50e0386";
+    "cf776ff0c583bd614c1ea26f338a0f3c6971482b301704c1bbb8d962b9cb1cf";
 constexpr char kHashTemplateId[] =
-    "d4f2c5c63f9e40403051f5ccaf8cd51d8b725f63ed52df88f727ad3dd2ad211";
+    "baa114074e164bbbc3ff93e1fb7fe4f0359602274e9a88eb4cd08e835374b8e";
 constexpr char kHashIsReady[] =
-    "<b9c20c10f0aa7466b338e4a56d4829af4dd389342579dd0decd11aab70a4f5e>k__BackingField";
+    "<d523dd38afd43eca1592c1e5eea26abee8e667d1fcb4a5fd1af26ed1cea6935>k__BackingField";
 constexpr char kHashPvcActive[] =
-    "dd50193bf1aa5d93bfde7b1d0ba00ca40574669f552c96e424c69d28acbdf46";
+    "a7586701633914ead657c56ae2d67c86c1288be9d27a54f76a13e6aa66fadfc";
 constexpr char kHashMobId[] =
-    "b69fe5ba27c839063f6d724b9cbefbea83fe3bd4ce1182c8237516bbee0efbc";
+    "ec83f1e2f8dc9bb07cb6a1fb9210ddc6d2bd2cb52c8d1de56408e02952cadbe";
 constexpr char kHashDeadType[] =
-    "fe561572d021d00801e4b8f81cbe4f8545393d023c402b45a0f5ded4b66e4e7";
+    "c2db6e6f0c099fa31cd3ec8b681e6b47e4800a93c5f1556e12d7bd3a28bd6ba";
 constexpr char kHashDamageInfoList[] =
-    "b49f948615b61641f78b94109d67b8ba1be608cfc23c09a8eda0eaeff4c7f21";
+    "b0191e433e3aa14d89fb829b293dd2efc8f3faa175d4468458b8341f18bbbd9";
 constexpr char kHashLastHitted[] =
-    "eafa7e6c114df837b3046e6def6e17a87722bcc1e9d4a7540189ab3018ef54b";
+    "fed1807b61524af5683fe00e0ab1b4724d8c1703dc412e41e92bfe701b8c097";
 constexpr char kHashHpPct[] =
-    "<b590ddec48d9045bc725b30c20063609294eff594b1ef39ee54a73da638dcd4>k__BackingField";
+    "<a3f60469d6764c46030bcb3d8227cab21a45e3549f9ab0b2697f172fe8a91cc>k__BackingField";
 constexpr char kHashMobCtrlState[] =
-    "ba05438716f76bdd3f8e3d6e953334cb565292d1243c44d6d56b29211e6d021";
+    "f196afc84e93e6c11f3b04f794ba80435f4d6dd904de0a76e781583d28f5bd3";
 // FindHit 同构门参考：inViewSplit@0x100 / suspended@0x240（08-13：旧 0x1B8 bool 已搬走）。
 // suspended 仍挡入榜；inView 只写入 MobLite（出刀归 FindHit，不挡 n）。
 constexpr char kHashInViewSplit[] =
-    "bd6f267c4a5855ccc5799f4fe9106f95c09c2b887ca34d4b5ba06e3f1d7a7cc";
+    "f45160f227f4945ff920da9d1589ed08cc5fa8cf8096514a63a72ad4cf507aa";
 constexpr char kHashSuspended[] =
-    "<f9b4d141e2038bd2ba57c0e200290b90bc234bde81e64f999ab6515deeb0021>k__BackingField";
+    "<f650d441467b1c41fff44aed5f32e574f76aa6461478205da854ef9a6787b19>k__BackingField";
 
 constexpr size_t kFbVecCtrl = 0x50;
 constexpr size_t kFbPos = 0x64;
@@ -134,28 +135,28 @@ constexpr float kMaxPosAbs = 100000.f;
 // DamageInfo / VecCtrl.AbsPos：hash → field_get_offset
 // Remount 2026-08-06：VecCtrl TDI 1596 / AbsPos@0x98（与 drop/player_combat 同钉）
 constexpr char kDamageInfoClass[] =
-    "dbbdaae67e53a65d79175ae31282d194360b63c882734370fbe6bc0ab415ccc";
+    "b0663b19e56b4bb6a036f9d44a0fa17395ba75a61c70b89f28b396e53d9e295";
 constexpr char kVecCtrlClass[] =
-    "d7d4003a734229d3b8fd8a969b6a9168c36692d3b039b8824d5d40d2cb4430b";
+    "b866b6310c1647fd6473a886a59a14e5121b75565a9314fd00c5ef362f8e776";
 constexpr char kHashDiDelayed[] =
-    "f38576b2b999c928227659276e4f92e59d6a673d749bfab67f75383237082c3";  // DelayedProcess@0x10
+    "eb21b5a50df071d3bc9b6251a98f072e514ddebc44bc1d7bbe11851bbafd513";  // DelayedProcess@0x10
 constexpr char kHashDiCharId[] =
-    "e70f0b60fdce0e8115be624fcc6076bc58a53bf0b67f2e6f85e77747d4d763f";
+    "b34d8e9f883d8ad51a0036bc180efa35575b4c3dfd94ec49c057e225fc4f3cf";
 constexpr char kHashDiSkillId[] =
-    "fbf5b801dae7fe91f9de689d9974f2cb116f6c09e09888ce03895d97e9f25ac";
+    "f05c25ff7ae724e4547a20a87c0480b8fc4ee242ec04f275b180a2a34f23b0f";
 constexpr char kHashDiHitAction[] =
-    "b14787654a1d9459660f528566e9eca5bdba90698be1a36a716ef3c24cdf687";
+    "f80f8bb350f3df287f5a246cdfe848cb5e5da574a6d5779b44c5020c0c94989";
 constexpr char kHashDiDamage[] =
-    "a8ce2c7064523b3201e2492c4f920b4de375479229e4c689acec745983d3388";
+    "e01ef639b15493873e3c1aa0f400bd2968a097dd461f8598d33a6deccd7158a";
 constexpr char kHashDiAttackIdx[] =
-    "a5b9a7f31f353b058fb9515bac31189a1481f925f73793f438cbce518822ff7";
+    "e05ff2a8b91bdf3eb4737e05ff132e82a2e491dfbfad9c04eb38206d16f9dcd";
 constexpr char kHashDiMoveType[] =
-    "e952415ce50920f016380ebb263170874fd5570cbc885e7a17d7adb39ce5da7";
+    "ff731b7ab970227db7069d53238888526e618e3f2cdd399ed7019e3e6235d2f";
 constexpr char kHashVcAp[] =
-    "c58e00a053bb88a5ed4a0a369ce0968c883a9ff77b788c812b896dc6c58aca3";  // AbsPos start; Y=+8
+    "e0990df580e30ca5d5e49277ad3fe6d2aa68067d54a056bc00f418f8e55f8e6";  // AbsPos start; Y=+8
 // VecCtrl.Active@0x80：SetRemoteMob 置 false 后常留池（P0a §7.6）→ 不计入 n
 constexpr char kHashVcActive[] =
-    "<e7e744fdace220c84fae70b2ec0151239d21c68be35bf8a8ed9b41e1d6af304>k__BackingField";
+    "<fa4e45c38045eff44ee550b3e3c6c8b6a35a5a21c07de0479a37f6ad54e846e>k__BackingField";
 
 constexpr size_t kFbDiDelayed = 0x10;
 constexpr size_t kFbDiCharId = 0x14;
@@ -194,11 +195,11 @@ constexpr size_t kFbUiHpTagMobId = 0xC8;
 constexpr size_t kFbUiHpTagCurHp = 0xD4;
 constexpr size_t kFbUiHpTagMaxHp = 0xD8;
 constexpr char kHashUiHpTagMobId[] =
-    "ebb6bae4cc0d57b0aded949de3f1153408ffd474dde2a6157bb78fa3223f297";
+    "ed9a675b0b34ed3ac6fcd239dd0274098783870f244337a72f6303646777175";
 constexpr char kHashUiHpTagCurHp[] =
-    "cc47f9c9e54180b7982b600c5fd8dbe16afbf369a533b166b76944b197864cd";
+    "c195387d13b2cdd2519193474cd0ce8be7b895b7eb0f126674249fe3679c94b";
 constexpr char kHashUiHpTagMaxHp[] =
-    "add43a61291f977e9b307e50fa8121b8476a355feea9432f621129ff20aef4f";
+    "c31074b8d980d96aa039aeba0925026f57821c0243ee2b48a4d14445c2284c3";
 size_t gOffUiHpTagMobId = kFbUiHpTagMobId;
 size_t gOffUiHpTagCurHp = kFbUiHpTagCurHp;
 size_t gOffUiHpTagMaxHp = kFbUiHpTagMaxHp;
@@ -223,19 +224,19 @@ size_t gOffUiHpTagMaxHp = kFbUiHpTagMaxHp;
 #define kOffListSize (x::runtime::il2cpp_container::OffListSize())
 // MapLifeData.LifeType（hash 防漂）；Mob=1（枚举 0/1/2）
 constexpr char kMapLifeClass[] =
-    "c869f2ff3ca7a4e96799c57074166ff70b9ca93905d25f714ce3ac46cbc6edf";
+    "cbcc582f0bc3a22c8d9070323dcca33d05ff9f24926170047e88594e57b9d2b";
 constexpr char kHashLifeType[] =
-    "<cc3be73154a100832f3150c42187f1627025c2d25c7f36be44b9c6d49ab4fc2>k__BackingField";
+    "<f0c9616aafe9b21e12d41786b0022c0949cb4abebeb1229e53ec152477b580d>k__BackingField";
 constexpr char kHashLifeId[] =
-    "<ee9f5244f47be9e78fd10e4b43d2763e364c0ae03032edea784caa7d9707ca5>k__BackingField";
+    "<efb64afa79ebf6a24ac0e5c158ab625abd7c94004fc9005575b5c46917c9a8d>k__BackingField";
 constexpr char kHashLifeX[] =
-    "<d35ff31b483ff11141ed030ef373c7b9ccc9923aa963eb1dcd5a7de5809a814>k__BackingField";
+    "<af223666a8fd3347f40fe25ac17df619c962e0227102a556af43aa70d30453c>k__BackingField";
 constexpr char kHashLifeY[] =
-    "<ff349134718298162171e735a82b8a8060d20eca9799813850de70fb8c1ecc4>k__BackingField";
+    "<f94bf067cc6d8d2e668bb6a28ed1b456376b8388bb6fafcd5bd93564f34accb>k__BackingField";
 constexpr char kHashLifeRx0[] =
-    "<a45c15ada7fc5bc34049a13bb28b5a56519af389d93f73b176358b0f10e9b2b>k__BackingField";
+    "<b33c7bc353f735b7dd7288d5796f69808658e834652db808449530fcf91bde5>k__BackingField";
 constexpr char kHashLifeRx1[] =
-    "<e93a9b54396aa2c787312eef47b5eaea99efe526b98fce1bcd24655d94288f3>k__BackingField";
+    "<d27cef12433785686820b053fa8be616a9b0f71b0ada467c3577b70003aed34>k__BackingField";
 constexpr size_t kFbLifeType = 0x20;
 constexpr size_t kFbLifeId = 0x1C;
 constexpr size_t kFbLifeX = 0x24;
@@ -1201,9 +1202,16 @@ bool NearMobLifeSlot(float x, float y, const Snapshot& snap, float nearPx, float
     return hit;
 }
 
-int64_t LookupTemplateMaxHp(int32_t templateId) {
+namespace {
+
+struct MobStatsTables {
+    std::unordered_map<int32_t, int64_t> maxHp;
+    std::unordered_map<int32_t, int32_t> speed;
+};
+
+const MobStatsTables& MobStats() {
     static std::once_flag once;
-    static std::unordered_map<int32_t, int64_t> table;
+    static MobStatsTables t;
     std::call_once(once, [] {
         std::string path = x::runtime::GetBinDir() ? x::runtime::GetBinDir() : "";
         if (!path.empty() && path.back() != '\\' && path.back() != '/') path += '\\';
@@ -1218,26 +1226,46 @@ int64_t LookupTemplateMaxHp(int32_t templateId) {
         while (std::getline(f, line)) {
             if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty() || line[0] == '#') continue;
-            // mob_id \t level \t maxHP \t ...
-            const size_t t0 = line.find('\t');
-            if (t0 == std::string::npos) continue;
-            const size_t t1 = line.find('\t', t0 + 1);
-            if (t1 == std::string::npos) continue;
-            const size_t t2 = line.find('\t', t1 + 1);
-            const int32_t mid = static_cast<int32_t>(atoi(line.c_str()));
-            const char* hpStr = line.c_str() + t1 + 1;
-            const int64_t maxHp = _atoi64(hpStr);
-            if (mid > 0 && maxHp > 0) {
-                table[mid] = maxHp;
+            // mob_id level maxHP maxMP exp PA PD MA MD acc eva speed ...
+            int32_t mid = 0;
+            int64_t maxHp = 0;
+            int32_t speed = 0;
+            int col = 0;
+            const char* p = line.c_str();
+            while (*p && col <= 11) {
+                const char* start = p;
+                while (*p && *p != '\t') ++p;
+                if (col == 0) mid = static_cast<int32_t>(atoi(start));
+                else if (col == 2) maxHp = _atoi64(start);
+                else if (col == 11) speed = atoi(start);
+                if (*p == '\t') ++p;
+                ++col;
+            }
+            if (mid > 0) {
+                if (maxHp > 0) t.maxHp[mid] = maxHp;
+                t.speed[mid] = speed;
                 ++n;
             }
-            (void)t2;
         }
         x::runtime::LogI("MobPool", "mob_stats loaded n=%zu path=%s", n, path.c_str());
     });
+    return t;
+}
+
+}  // namespace
+
+int64_t LookupTemplateMaxHp(int32_t templateId) {
     if (templateId <= 0) return 0;
-    const auto it = table.find(templateId);
-    return it == table.end() ? 0 : it->second;
+    const auto& t = MobStats();
+    const auto it = t.maxHp.find(templateId);
+    return it == t.maxHp.end() ? 0 : it->second;
+}
+
+int32_t LookupTemplateWzSpeed(int32_t templateId) {
+    if (templateId <= 0) return kWzSpeedUnknown;
+    const auto& t = MobStats();
+    const auto it = t.speed.find(templateId);
+    return it == t.speed.end() ? kWzSpeedUnknown : it->second;
 }
 
 namespace {

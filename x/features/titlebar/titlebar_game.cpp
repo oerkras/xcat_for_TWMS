@@ -34,28 +34,28 @@ using x::runtime::il2cpp::ReadPtr;
 // HP/MP 真源在 x::ui::player（WM→CS）；LocalUser → il2cpp_shape::ResolveUserLocalKlass
 // ItemDataManager：08-06 remount（TypeDef 2027；dataTable@+0x18 / bundleMap@+0x38）
 constexpr char kItemDataManagerClass[] =
-    "eb60a943bfe4c065303f95fa78540808cea9a8a0feb35b417ad87ebaf2e87bc";
+    "c8101ac7dfb0f2d093f36c7c8358ab9f1e20c3e893471976e0aaa4aed1b3504";
 constexpr char kItemDataClass[] =
-    "e6db8750d2edfc463d89dae2c9077b4aa3454757f18aae9a7dc6461cd443463";
+    "d0faf43681b85608fdeeb49e50b4ef39661f9915255f9cc42ffbcef8c7ecdcc";
 constexpr char kItemBundleClass[] =
-    "c6bbce1cff1b862adb3d605623f021a21d41f9814b8c33301986e3213256935";
+    "ccc4e1b77fa37600b2bbf1888206bcd117dd4ceceff4a783c7efc9131f5d21c";
 // ItemData.info 实际类型（restored Info · TypeDef 2031），不是旧 ItemInfo 名
 constexpr char kItemInfoClass[] =
-    "e0718330c0be8affbea02d2dc3d4145d16dcfb043c8ed89253df44bcd943e49";
+    "d17b63a8e0d464dcc480fe3c2ca318421794428fcbead1527e27897c386c30b";
 
 // IDM / ItemData / Bundle / Info 价位：hash → field_get_offset（dump fallback）
 constexpr char kHashIdmDataTable[] =
-    "aa899e7138ea90e71607fb337d8544ce8715374ea9d31d3b05884092872154e";
+    "ded28030272bf2e90688c23c32a571e7cf83627c8898a5a50f17c0455c17ea1";
 constexpr char kHashIdmBundleMap[] =
-    "c89305e66a8857c0615bbc1f7ea22ba3daa4cf2a57b474524b2b636e283743e";
+    "e30e4193c8e632b191b35015269bae2df727e796e7fe8e119424d3d83764f1b";
 constexpr char kHashBundleSellPrice[] =
-    "a27407c45419648ef2941d44f75970c857888706fb255b980231c501769b31d";
+    "f969c41971327210442b801874eddca18cbdf8512270d09cc7b4abbb05bba7a";
 constexpr char kHashItemDataInfo[] =
-    "cd95ff6aa880bff628b02bd3967258a7cc0ff50ae851786a6fd3247bc39a920";
+    "bb139da95e1f69f3567bf5d09454077ef5aae9327c2493a8289add95d00c5d5";
 constexpr char kHashInfoPrice[] =
-    "fc1e2ad2f643c96b6c7f35def044f46efe51950ff4adb78b5e235497415377b";
+    "fd19b7bd9fbad387cdc96c474df39e3e8ed72da57e3e4e47c3454de9b4d1bf9";
 constexpr char kHashInfoNotSale[] =
-    "a63401345ba05046376c5d8945383c7f4f11cf3e41bf4f7c1d2b81c159c4768";
+    "e3c7d31b40e12b912751749439277c43ee1e749a86c384403fe2157d8e82392";
 
 constexpr size_t kFbIdmDataTable = 0x18;
 constexpr size_t kFbIdmBundleMap = 0x38;
@@ -436,7 +436,7 @@ int LookupSellPrice(int itemId) {
 
 bool BindApis() {
     if (!x::runtime::il2cpp::Ensure()) {
-        x::runtime::LogW("Titlebar", "BindApis: no GameAssembly");
+        x::runtime::LogW("Titlebar", "BindApis: no GA");
         return false;
     }
     const auto& exports = x::runtime::il2cpp::Get();

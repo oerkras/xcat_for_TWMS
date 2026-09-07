@@ -13,6 +13,10 @@ import { createHash } from "node:crypto";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const productName = "xcat_for_twms";
+// 与 common/xcat_install_names.h / 根 CMakeLists.txt 一致
+const launcherExe = "rtapp.exe";
+const payloadDir = "rtcache";
+const payloadDll = "rtmod.dll";
 
 function die(msg) {
   console.error(`[package-release] ${msg}`);
@@ -59,14 +63,14 @@ function copyRequired(srcRel, dstRel) {
   cpSync(src, dst);
 }
 
-/** 与 xcat POST_BUILD 对齐：dumps → 发布包 XCat_data（dataservice / skill_catalog / travel seed / scroll_voice）。 */
+/** 与 xcat POST_BUILD 对齐：dumps → 发布包载荷目录（dataservice / skill_catalog / travel seed / scroll_voice）。 */
 function copyOfflineDataservice() {
   const tsvSrc = join(repo, "dumps", "offline_tables", "tsv");
   if (!existsSync(tsvSrc)) die("缺少 dumps/offline_tables/tsv");
   const tsvFiles = readdirSync(tsvSrc).filter((n) => n.toLowerCase().endsWith(".tsv"));
   if (tsvFiles.length === 0) die("dumps/offline_tables/tsv 下没有 .tsv");
 
-  const dsDst = join(outDir, "XCat_data", "dataservice");
+  const dsDst = join(outDir, payloadDir, "dataservice");
   mkdirSync(dsDst, { recursive: true });
   for (const name of tsvFiles) {
     cpSync(join(tsvSrc, name), join(dsDst, name));
@@ -74,7 +78,7 @@ function copyOfflineDataservice() {
 
   copyRequired(
     "dumps/offline_tables/tsv/skill_catalog_full.tsv",
-    "XCat_data/skill_catalog/skill_catalog_full.tsv",
+    `${payloadDir}/skill_catalog/skill_catalog_full.tsv`,
   );
 
   const travelSeeds = [
@@ -84,7 +88,7 @@ function copyOfflineDataservice() {
     "travel_script_portal.tsv",
   ];
   for (const name of travelSeeds) {
-    copyRequired(`dumps/twms_routes/${name}`, `XCat_data/state/${name}`);
+    copyRequired(`dumps/twms_routes/${name}`, `${payloadDir}/state/${name}`);
   }
 
   const voiceWavs = copyScrollVoice();
@@ -103,7 +107,7 @@ function copyScrollVoice() {
     );
   }
 
-  const dst = join(outDir, "XCat_data", "dataservice", "scroll_voice");
+  const dst = join(outDir, payloadDir, "dataservice", "scroll_voice");
   mkdirSync(dst, { recursive: true });
 
   let wavs = 0;
@@ -148,21 +152,21 @@ if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true });
 if (existsSync(zipPath)) rmSync(zipPath, { force: true });
 mkdirSync(outDir, { recursive: true });
 
-const exeSrc = join(repo, "bin", "xcat.exe");
-if (!existsSync(exeSrc)) die("缺少 bin/xcat.exe，请先构建 Release");
-cpSync(exeSrc, join(outDir, "xcat.exe"));
+const exeSrc = join(repo, "bin", launcherExe);
+if (!existsSync(exeSrc)) die(`缺少 bin/${launcherExe}，请先构建 Release`);
+cpSync(exeSrc, join(outDir, launcherExe));
 
-const dllSrc = join(repo, "bin", "XCat_data", "xcat.dll");
-if (!existsSync(dllSrc)) die("缺少 bin/XCat_data/xcat.dll，请先构建 xcat_probe");
-mkdirSync(join(outDir, "XCat_data"), { recursive: true });
-cpSync(dllSrc, join(outDir, "XCat_data", "xcat.dll"));
+const dllSrc = join(repo, "bin", payloadDir, payloadDll);
+if (!existsSync(dllSrc)) die(`缺少 bin/${payloadDir}/${payloadDll}，请先构建 xcat_probe`);
+mkdirSync(join(outDir, payloadDir), { recursive: true });
+cpSync(dllSrc, join(outDir, payloadDir, payloadDll));
 
 mkdirSync(join(outDir, "logs"), { recursive: true });
-mkdirSync(join(outDir, "XCat_data", "state"), { recursive: true });
-mkdirSync(join(outDir, "XCat_data", "update"), { recursive: true });
+mkdirSync(join(outDir, payloadDir, "state"), { recursive: true });
+mkdirSync(join(outDir, payloadDir, "update"), { recursive: true });
 copyOfflineDataservice();
-copyRequired("packaging/update/pre_apply.ps1", "XCat_data/update/pre_apply.ps1");
-copyRequired("packaging/update/post_apply.ps1", "XCat_data/update/post_apply.ps1");
+copyRequired("packaging/update/pre_apply.ps1", `${payloadDir}/update/pre_apply.ps1`);
+copyRequired("packaging/update/post_apply.ps1", `${payloadDir}/update/post_apply.ps1`);
 
 writeFileSync(
   join(outDir, "README.txt"),
@@ -170,11 +174,9 @@ writeFileSync(
 
 ## 使用
 1. 解压到任意目录
-2. 双击运行 xcat.exe
-3. 客户端更新检查默认：http://xcat.work:18789/twms/update/latest.json
-   （网页下载站：http://xcat.work:52080/；本机探活可用 127.0.0.1）
+2. 双击运行 ${launcherExe}
 
-内含：xcat.exe、XCat_data\\xcat.dll、离线 dataservice / 卷轴语音 / 赶路 seed。
+内含：${launcherExe}、${payloadDir}\\${payloadDll}、离线 dataservice / 卷轴语音 / 赶路 seed。
 换票：GAMA PASS（浏览器 CDP）或 gamania (HK) HTTP，无需 WebView2 Runtime。
 
 构建时间：${new Date().toISOString().replace("T", " ").slice(0, 19)}

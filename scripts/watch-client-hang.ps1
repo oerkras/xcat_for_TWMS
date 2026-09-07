@@ -61,7 +61,7 @@ $repo = (Resolve-Path "$PSScriptRoot\..").Path
 $symParts = @(
     "$repo\build_xcat_for_TWMS\x\probe\Release",
     "$repo\build_xcat_for_TWMS\x\probe\RelWithDebInfo",
-    "$repo\bin\XCat_data"
+    "$repo\bin\rtcache"
 )
 if ($MsSymbols) { $symParts += 'srv*C:\symbols*https://msdl.microsoft.com/download/symbols' }
 $env:_NT_SYMBOL_PATH = ($symParts -join ';')

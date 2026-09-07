@@ -4,6 +4,7 @@
 #include "inject_log.h"
 
 #include "../common/process_util.h"
+#include "../common/xcat_install_names.h"
 
 #include <Psapi.h>
 #include <TlHelp32.h>
@@ -124,7 +125,7 @@ std::wstring DefaultPayloadDllBesideExe() {
     wchar_t exe[MAX_PATH]{};
     if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return {};
     std::wstring dir = ParentDirWithSlash(exe);
-    return dir + L"XCat_data\\xcat.dll";
+    return xcat::install::JoinPayloadDllW(dir);
 }
 
 bool WaitForModuleByName(DWORD pid, const wchar_t* moduleName, int timeoutSec, LogFn log,
@@ -161,7 +162,7 @@ bool WaitForModuleByName(DWORD pid, const wchar_t* moduleName, int timeoutSec, L
         Sleep(400);
     }
     wchar_t fail[160]{};
-    swprintf_s(fail, L"[FAIL] 等待模块超时：%s lastErr=%lu（若为5=拒绝访问，请以管理员运行 XCat）",
+    swprintf_s(fail, L"[FAIL] 等待模块超时：%s lastErr=%lu（若为5=拒绝访问，请以管理员运行启动器）",
                moduleName, static_cast<unsigned long>(stickyErr));
     LogLine(log, fail);
     return false;
@@ -195,7 +196,7 @@ Result InjectIntoClassic(const Options& opt, LogFn log) {
     }
     if (GetFileAttributesW(abs.c_str()) == INVALID_FILE_ATTRIBUTES) {
         out.message = opt.dllPath.empty()
-                          ? "DLL 不存在（请先编 xcat_probe → bin/XCat_data/xcat.dll）"
+                          ? "DLL 不存在（请先编 xcat_probe）"
                           : "DLL 不存在";
         LogLine(log, L"[FAIL] 注入：未找到 " + abs);
         return out;

@@ -11,6 +11,7 @@
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -26,7 +27,7 @@ namespace {
 // MovePath.Flush 的 .text 入口 RVA。2026-08-06 晚 remount：旧 0x119F980 +0x1E70；
 // 当前 IDB imagebase 0x7FF848C80000 → VA 0x7FF849E217F0（序言已核对：8×push + sub rsp,4B8h）。
 // 字段偏移未漂；序言签名拒钩兜底，客户端再漂会 refuse 而不是瞎 patch。
-constexpr uint32_t kRvaMovePathFlush = 0x11BC0A0;
+constexpr uint32_t kRvaMovePathFlush = 0x11C0110;
 
 // 序言签名（前 15 字节，到 sub rsp 的 mod/rm+imm8 头）。客户端改版漂移即拒绝下钩，
 // 避免 RVA 对不上时把 abs-jmp 覆到随机 .text 上崩游戏。
@@ -298,11 +299,9 @@ void PumpApply(void*) {
 void SetEnabled(bool on) {
     // 勾上即自行放行 .text 补丁。关开关不撤环境变量（与 melee_veto 共用这根旗）。
     if (on) {
-        char env[8]{};
-        const DWORD n = GetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", env, sizeof(env));
-        if (!(n > 0 && env[0] == '1')) {
-            if (!SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", "1")) {
-                x::runtime::LogW("MpFlush", "无法设置 XCAT_ALLOW_TEXT_PATCH=1 err=%lu",
+        if (!XCAT_ENV_ON(kEnvAllowTextPatch)) {
+            if (!XCAT_ENV_SETA(kEnvAllowTextPatch, "1")) {
+                x::runtime::LogW("MpFlush", "无法设置 allow_text_patch env err=%lu",
                                  GetLastError());
                 return;
             }

@@ -77,7 +77,7 @@ bool RotateSinkFiles(const FileSink& sink) {
     }
 
     char dbg[256]{};
-    snprintf(dbg, sizeof(dbg), "[xcat_log] rotate FAIL path=%s err=%lu\n", base.c_str(),
+    snprintf(dbg, sizeof(dbg), "[rt_log] rotate FAIL path=%s err=%lu\n", base.c_str(),
              static_cast<unsigned long>(GetLastError()));
     OutputDebugStringA(dbg);
     return false;
@@ -359,7 +359,7 @@ void BeginSession(const char* bannerLabel) {
              st.wHour, st.wMinute, st.wSecond);
 
     char body[160]{};
-    snprintf(body, sizeof(body), "=== xcat %s %s ===", bannerLabel ? bannerLabel : "session",
+    snprintf(body, sizeof(body), "=== %s %s ===", bannerLabel ? bannerLabel : "session",
              ts);
     const std::string banner = std::string(body) + "\n";
 

@@ -25,11 +25,11 @@
 #include <cwchar>
 
 #include "../../runtime/log.h"
+#include "xor_cstr.h"
 
 namespace x::features::crash_upload_guard {
 namespace {
 
-constexpr wchar_t kTargetModule[] = L"CrashReporter.dll";
 constexpr char kWinInet[] = "WININET.dll";
 constexpr char kHookedFn[] = "HttpSendRequestExW";
 
@@ -124,11 +124,12 @@ void* PatchIat(HMODULE mod, const char* dllName, const char* funcName, void* new
 
 // 返回「不必再重试」。quiet=true 用于加载器回调：那时在加载器锁里，一律不落盘。
 bool TryInstall(bool quiet) {
-    HMODULE cr = GetModuleHandleW(kTargetModule);
+    HMODULE cr = xcat::xor_cstr::GetModuleW(xcat::xor_cstr::kCrashReporterDll,
+                                           sizeof(xcat::xor_cstr::kCrashReporterDll));
     if (!cr) return false;
 
     HMODULE wi = GetModuleHandleA(kWinInet);
-    if (!wi) return false;  // CrashReporter 在，WinINet 却没起来：等下一轮
+    if (!wi) return false;  // 崩溃上报模块已在，WinINet 却没起来：等下一轮
     gSetOption =
         reinterpret_cast<FnInternetSetOptionW>(GetProcAddress(wi, "InternetSetOptionW"));
     if (!gSetOption) {
@@ -140,8 +141,8 @@ bool TryInstall(bool quiet) {
     if (!prev) {
         if (!quiet) {
             x::runtime::LogW("CrashUpload",
-                             "%s 的 %s 导入格没找到（导入表变了？），超时护栏未安装",
-                             "CrashReporter.dll", kHookedFn);
+                             "崩溃上报模块的 %s 导入格没找到（导入表变了？），超时护栏未安装",
+                             kHookedFn);
         }
         return true;
     }
@@ -149,9 +150,9 @@ bool TryInstall(bool quiet) {
     gInstalled.store(true, std::memory_order_release);
     if (!quiet) {
         x::runtime::LogI("CrashUpload",
-                         "已给 CrashReporter 的 %s 套上 %lu ms 超时 —— 崩溃报告上传不会再无限"
-                         "阻塞主线程（那正是 04:45 那次黑屏的成因）",
-                         kHookedFn, kTimeoutMs);
+                         "已给崩溃上报上传套上 %lu ms 超时 —— 不会再无限阻塞主线程"
+                         "（那正是 04:45 那次黑屏的成因）",
+                         kTimeoutMs);
     }
     return true;
 }
@@ -181,18 +182,21 @@ using FnLdrNotify = VOID(CALLBACK*)(ULONG, const LdrDllNotificationData*, PVOID)
 using FnLdrRegister = LONG(NTAPI*)(ULONG, FnLdrNotify, PVOID, PVOID*);
 using FnLdrUnregister = LONG(NTAPI*)(PVOID);
 
-bool BaseNameIs(const UnicodeStringLite* s, const wchar_t* want) {
+bool BaseNameIsTarget(const UnicodeStringLite* s) {
     if (!s || !s->Buffer || !s->Length) return false;
     const size_t n = s->Length / sizeof(wchar_t);
-    const size_t w = wcslen(want);
-    if (n != w) return false;
-    return _wcsnicmp(s->Buffer, want, w) == 0;
+    if (n == 0 || n >= 64) return false;
+    wchar_t tmp[64]{};
+    memcpy(tmp, s->Buffer, n * sizeof(wchar_t));
+    tmp[n] = 0;
+    return xcat::xor_cstr::WideEqualsI(tmp, xcat::xor_cstr::kCrashReporterDll,
+                                       sizeof(xcat::xor_cstr::kCrashReporterDll));
 }
 
 VOID CALLBACK OnDllEvent(ULONG reason, const LdrDllNotificationData* data, PVOID) {
     if (reason != kLdrDllNotificationReasonLoaded || !data) return;
     if (gInstalled.load(std::memory_order_acquire)) return;
-    if (!BaseNameIs(data->BaseDllName, kTargetModule)) return;
+    if (!BaseNameIsTarget(data->BaseDllName)) return;
     // 回调在**加载器锁**里跑：只做 VirtualProtect + 写指针，绝不落盘、绝不 LoadLibrary。
     TryInstall(true);
     if (gInstalled.load(std::memory_order_acquire)) {
@@ -215,8 +219,7 @@ DWORD WINAPI WatchThread(LPVOID) {
     // 同时它也是通知注册失败时的退路，间隔取短一些，尽量少输一点。
     while (!gStop.load(std::memory_order_acquire)) {
         if (gInstalledByNotify.exchange(false, std::memory_order_acq_rel)) {
-            x::runtime::LogI("CrashUpload", "加载器通知命中：%s 一映射完就已挂上超时钩子",
-                             "CrashReporter.dll");
+            x::runtime::LogI("CrashUpload", "加载器通知命中：崩溃上报模块一映射完就已挂上超时钩子");
         }
         if (gInstalled.load(std::memory_order_acquire)) break;
         if (TryInstall(false)) break;
@@ -229,15 +232,13 @@ DWORD WINAPI WatchThread(LPVOID) {
 }  // namespace
 
 bool EnvGuardOn() {
-    char buf[16]{};
-    return GetEnvironmentVariableA("XCAT_CRASH_UPLOAD_GUARD", buf, sizeof(buf)) > 0 &&
-           buf[0] == '1';
+    return XCAT_ENV_ON(kEnvCrashUploadGuard);
 }
 
 void Start() {
     if (!EnvGuardOn()) {
         x::runtime::LogI("CrashUpload",
-                         "skip (default off; set XCAT_CRASH_UPLOAD_GUARD=1 to enable IAT timeout)");
+                         "skip (default off; crash_upload_guard env to enable IAT timeout)");
         return;
     }
     bool expected = false;

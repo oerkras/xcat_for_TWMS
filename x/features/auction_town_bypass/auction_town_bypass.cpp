@@ -1,6 +1,6 @@
 // TWMS Classic — auction_town_bypass.
 //
-// SendMigrateToGlobalMarketRequest (RVA 0xDDF6E0 @ remount 2026-08-04; was 0xDD8610)
+// SendMigrateToGlobalMarketRequest (RVA 0xDE2C60 @ remount 2026-08-04; was 0xDD8610)
 // gates on MapDataInfo:
 //   1) IsUnableToMigrate ≡ (Option & 0x10) != 0
 //   2) IsTown
@@ -21,6 +21,7 @@
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_shape.h"
 #include "../../runtime/log.h"
+#include "xor_cstr.h"
 
 #include <atomic>
 #include <cstdint>
@@ -43,24 +44,24 @@ constexpr uint32_t kUnableMigrateBit = 0x10u;
 
 // TypeDef hashes (dump.cs 2026-08-04).
 constexpr char kHashMapDataInfo[] =
-    "af2927161d046194d9c94350782c0924d0eea6d2345850fc2fce19c5175b3a1";
+    "c67ecc721e7372066c1f300f3528edfcd528628ed2c36a9aa488c4ff8ab56d0";
 constexpr char kHashMapData[] =
-    "eca01f9d2fbb16afddb74e0a6128167dde4d2e423f84433d39f4654aef4a767";
+    "e7deb27fdaac1d8fec9cc2277febc6c35b2687979aebe9df5877ff29dc16129";
 constexpr char kHashSceneMap[] =
-    "e87006475acc3cce0167109d1a58a6f2fb25704f5655ea0a9086d0f4877f68c";
+    "f733993ad59341231f8c2010110cf2aae05c7693af2e9a88d71979322cf0f97";
 // IsTown / Option / Info / MapData backing / WM._field / WM._currentMapData
 constexpr char kHashIsTown[] =
-    "f165bd04c15864caf132c9fa4b7facbed33870e1d94f4b7c1a742f92a35f5f2";
+    "f30010e72db22873c4fe3bb84d792f685021d2c3de22f9c019de79e97d83d86";
 constexpr char kHashOption[] =
-    "d6ef3006d3f9960a23b4ef4f68055ed260bbadf3d8f7338a3dd21f3e2127f32";
+    "defcf0cb5ce168c541b52cd38649f926029c99c5ed88690cdc84b04e02a9d3a";
 constexpr char kHashMapDataInfoField[] =
-    "c3748b9e5f4e52e3292571edabc4e4b5068fe8537c4c4caa68a1c47fd1edd09";
+    "c9c92f592d3d9149e888bf4d891ad5c930e333a0fc0a1056c009350402f6dc7";
 constexpr char kHashSceneMapDataBacking[] =
-    "<d3b3d8d489a7080033c61732bb5b6b1c5881a3fcd71e6f3dcf3d7124e2519b0>k__BackingField";
+    "<e82d6fbfbc7b076d74bcdec824e6b806a7837a757b41960d7afefd2926df95c>k__BackingField";
 constexpr char kHashWmField[] =
-    "e310f7c2fc2ba5f94dfc65e8d90f7b826bc952f691a9be0b0b78a6d4e35a9aa";
+    "d1a97253ac9b8f6bd8b86e68a1eee15db131c640023ae9efe2f3b5ac8f7c82e";
 constexpr char kHashWmCurrentMapData[] =
-    "b2dffc39394d96600313685b903b5892fa881485fc9ddb4db7156ccbc149402";
+    "b562aba780b2f942a4381660b4aa344dec0608179cf56523d2753c464a2e884";
 
 constexpr DWORD kTickMsApply = 50;    // 未稳住 / 换图：快拍一次写到位
 constexpr DWORD kTickMsHold = 1000;   // 已稳住：慢校验（游戏一般不回写 IsTown）
@@ -145,7 +146,7 @@ void EnsureGateOffsets() {
     }
     if (!gFieldFromName) {
         gFieldFromName = reinterpret_cast<FnFieldFromName>(
-            GetProcAddress(ga, "il2cpp_class_get_field_from_name"));
+            XCAT_GETPROC(ga, kIl2cppClassGetFieldFromName));
     }
     if (!gFieldFromName || !il2::Get().fieldGetOffset) {
         x::runtime::LogW("AuctionTown", "offset resolve: field exports miss — using dump fallbacks");
@@ -178,7 +179,7 @@ void EnsureGateOffsets() {
     x::runtime::LogI(
         "AuctionTown",
         "offsets path=%s hits=%d/6 wmF=0x%zx wmM=0x%zx fieldMD=0x%zx info=0x%zx "
-        "IsTown=0x%zx Option=0x%zx (migrate RVA 0xDDF6E0 / op 0x002E)",
+        "IsTown=0x%zx Option=0x%zx (migrate RVA 0xDE2C60 / op 0x002E)",
         gOff.path, hits, gOff.wmField, gOff.wmMapData, gOff.fieldMapData,
         gOff.mapDataInfo, gOff.infoIsTown, gOff.infoOption);
 }
@@ -377,7 +378,7 @@ DWORD WINAPI Worker(LPVOID) {
     x::runtime::LogI("AuctionTown",
                      "worker start — zero .text; apply-once + 1s hold check "
                      "(no click hook: status-bar is direct call); default on");
-    for (int i = 0; i < 400 && !gStop.load() && !GetModuleHandleW(L"GameAssembly.dll");
+    for (int i = 0; i < 400 && !gStop.load() && !x::runtime::il2cpp::GameAssembly();
          ++i)
         Sleep(50);
     Tick(GetTickCount());
@@ -403,7 +404,7 @@ void Init() {
     // 直到 IMGUI 再点一次才重新下发。静态默认已是 false。
     x::runtime::LogI("AuctionTown",
                      "init — field auction client bypass via MapDataInfo gates only "
-                     "(no .text); migrate RVA 0xDDF6E0 / op 0x002E; "
+                     "(no .text); migrate RVA 0xDE2C60 / op 0x002E; "
                      "offsets via hash+field_get_offset; default on");
 }
 

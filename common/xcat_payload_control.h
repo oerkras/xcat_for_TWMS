@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 158u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 160u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -102,6 +102,11 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 158u;
 // v133: autoReloginReconnect — 遇人「一直有人就换频」厂默开；旧厂默换频关读盘迁一次
 // v154: 遇人策略厂默：先停手·停吸·换频·GM 升级开；隐藏玩家关。撤 v82 无条件改写；旧厂默指纹迁一次
 // v155: mobGatherFirstGenOnly — 吸怪 TAB「只吸场上的」；厂默开。缺键=开。
+// v159: mobGatherSlowNearOnly / SlowNearPx — 吸怪 TAB 按 WZ speed 限制远处新收。
+// v160: 厂默开；≥HopOk(-10) 不限（红/青螃蟹），≤SlowFloor(-50) 用 SlowNearPx，中间 lerp 到 hopPx。
+//       旧厂默关迁一次开。升 version 后用户可再关掉。
+// v161: mobGatherWzLeashOn / WzLeashSlowPx — 「按怪速限制拉速」可选项，厂默关。
+//       开=远处慢怪仍收，每帧瞄点推进按 WZ speed 限制（最慢档默认 10px/帧）。
 // v156: 遇人总开关厂默开。v154 曾把旧厂默迁成关；v154 厂默指纹迁一次开。藏人仍默认关。
 // v157: attackNoCdEncounterUnbind — 调试 TAB 解绑「攻击无CD → 强制遇人三项」；缺键=仍绑定
 // v134: simpleCombatSkipAccMiss / SkipAccMissN — 「不打MISS怪」：进盒 ACC 不够连续 N 次后换怪
@@ -357,6 +362,19 @@ constexpr uint32_t kMobGatherLandOnArriveDefault = 0u;
 constexpr uint32_t kMobGatherHopPxDefault = 950u;
 constexpr uint32_t kMobGatherHopPxMin = 200u;
 constexpr uint32_t kMobGatherHopPxMax = 1150u;
+// v160: 按怪速限制远处新收。厂默开。WZ speed≥HopOk 不额外限制（可 hop）；
+// ≤SlowFloor 只用 SlowNearPx；中间 lerp 到 hopPx（不 hop）。未知模板 fail-open。
+constexpr uint32_t kMobGatherSlowNearOnlyDefault = 1u;
+constexpr uint32_t kMobGatherSlowNearPxDefault = 320u;
+constexpr uint32_t kMobGatherSlowNearPxMin = 0u;    // 0=最慢档完全不新收
+constexpr uint32_t kMobGatherSlowNearPxMax = 800u;
+constexpr int32_t kMobGatherSpeedHopOk = -10;       // 红螃蟹 -10 / 青螃蟹 0
+constexpr int32_t kMobGatherSpeedSlowFloor = -50;   // 乌龟 -50
+// v161: 按怪速限制拉速。可选项，厂默关。开则不挡远处新收，按 speed 限制每帧瞄点推进。
+constexpr uint32_t kMobGatherWzLeashOnDefault = 0u;
+constexpr uint32_t kMobGatherWzLeashSlowPxDefault = 10u;  // speed≤-50
+constexpr uint32_t kMobGatherWzLeashSlowPxMin = 2u;
+constexpr uint32_t kMobGatherWzLeashSlowPxMax = 48u;
 // 误把厂默改成 1500 的一版：读盘迁回 950。
 constexpr uint32_t kMobGatherHopPxMistakenDefault = 1500u;
 constexpr uint32_t kMobGatherKpDefault = 7u;
@@ -701,6 +719,12 @@ struct PayloadControl {
     uint32_t mobGatherLandOnArrive = kMobGatherLandOnArriveDefault;
     // v145: 远怪接力跳距 px/跳（0=关直拉）。单跳 ≤此值 + 到点驻留，绕开服务器 ~1200px 拉距掐线。
     uint32_t mobGatherHopPx = kMobGatherHopPxDefault;
+    // v160: 按怪速限制远处新收。开=未 armed 的慢/中速怪只在 speed 插值出的 cap 内新收。
+    uint32_t mobGatherSlowNearOnly = kMobGatherSlowNearOnlyDefault;
+    uint32_t mobGatherSlowNearPx = kMobGatherSlowNearPxDefault;
+    // v161: 按怪速限制拉速（可选项，厂默关）。
+    uint32_t mobGatherWzLeashOn = kMobGatherWzLeashOnDefault;
+    uint32_t mobGatherWzLeashSlowPx = kMobGatherWzLeashSlowPxDefault;
     uint32_t mobGatherSpeedPct = kMobGatherSpeedPctDefault;
     uint32_t mobGatherAntiJitter = kMobGatherAntiJitterDefault;
     uint32_t mobGatherMax = kMobGatherMaxDefault;
@@ -1039,6 +1063,17 @@ inline uint32_t ClampMobGatherHopPx(uint32_t px) {
     if (px == 0u) return 0u;  // 0=关（直拉）
     if (px < kMobGatherHopPxMin) return kMobGatherHopPxMin;
     if (px > kMobGatherHopPxMax) return kMobGatherHopPxMax;
+    return px;
+}
+
+inline uint32_t ClampMobGatherSlowNearPx(uint32_t px) {
+    if (px > kMobGatherSlowNearPxMax) return kMobGatherSlowNearPxMax;
+    return px;
+}
+
+inline uint32_t ClampMobGatherWzLeashSlowPx(uint32_t px) {
+    if (px < kMobGatherWzLeashSlowPxMin) return kMobGatherWzLeashSlowPxMin;
+    if (px > kMobGatherWzLeashSlowPxMax) return kMobGatherWzLeashSlowPxMax;
     return px;
 }
 

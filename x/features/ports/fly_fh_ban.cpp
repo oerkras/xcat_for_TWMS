@@ -4,7 +4,7 @@
 // 现改为在挂台虚函数入口拦截（LocalUser 限定），武装期不重挂。
 //
 // 锚点（GameAssembly IDB imagebase 0x7FF848C80000）：
-//   VecCtrl_WorkUpdateActive @ RVA 0x11C7A80
+//   VecCtrl_WorkUpdateActive @ RVA 0x11CBC80
 //   有台：call [klass+0x208]  CollisionDetect     (r9=0)
 //   无台：call [klass+0x218]  CollisionDetectFloat (r9=1)
 // 安装：改 klass 上对应 methodPtr（VirtualProtect）。
@@ -19,6 +19,7 @@
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 #include <Psapi.h>
@@ -49,8 +50,7 @@ constexpr uint8_t kRpmScanPrologueExpect[] = {0x41, 0x57, 0x41, 0x56};
 constexpr uint8_t kEarlyRet[] = {0x33, 0xC0, 0xC3};  // xor eax,eax ; ret
 
 bool EnvCrcExtinguishOn() {
-    char buf[16]{};
-    return GetEnvironmentVariableA("XCAT_FH_BAN_CRC", buf, sizeof(buf)) > 0 && buf[0] == '1';
+    return XCAT_ENV_ON(kEnvFhBanCrc);
 }
 
 // (this, a2, a3, flag) → bool；MI 由调用方放栈，不进寄存器。
@@ -148,8 +148,11 @@ bool IsLocalVc(void* self) {
 
 void ExtinguishMemoryCrcIfPresent() {
     if (gCrcExtinguished) return;
-    HMODULE grap = GetModuleHandleW(L"grap-core64.aes");
-    if (!grap) grap = GetModuleHandleW(L"grap-core64.dll");
+    HMODULE grap = xcat::xor_cstr::GetModuleW(xcat::xor_cstr::kGrapCore64Aes,
+                                             sizeof(xcat::xor_cstr::kGrapCore64Aes));
+    if (!grap)
+        grap = xcat::xor_cstr::GetModuleW(xcat::xor_cstr::kGrapCore64Dll,
+                                         sizeof(xcat::xor_cstr::kGrapCore64Dll));
     if (!grap) {
         // 枚举一次（与 ga_text_probe 同策略，缩略）
         HMODULE mods[256]{};
@@ -161,8 +164,10 @@ void ExtinguishMemoryCrcIfPresent() {
                 if (!GetModuleFileNameW(mods[i], path, MAX_PATH)) continue;
                 const wchar_t* leaf = wcsrchr(path, L'\\');
                 leaf = leaf ? leaf + 1 : path;
-                if (_wcsicmp(leaf, L"grap-core64.aes") == 0 ||
-                    _wcsicmp(leaf, L"grap-core64.dll") == 0) {
+                if (xcat::xor_cstr::WideEqualsI(leaf, xcat::xor_cstr::kGrapCore64Aes,
+                                                sizeof(xcat::xor_cstr::kGrapCore64Aes)) ||
+                    xcat::xor_cstr::WideEqualsI(leaf, xcat::xor_cstr::kGrapCore64Dll,
+                                                sizeof(xcat::xor_cstr::kGrapCore64Dll))) {
                     grap = mods[i];
                     break;
                 }
@@ -255,7 +260,7 @@ void InstallJobFn(void* p) {
     if (EnvCrcExtinguishOn()) {
         ExtinguishMemoryCrcIfPresent();
     } else {
-        x::runtime::LogI("FlyFhBan", "skip MemoryCrc extinguish (set XCAT_FH_BAN_CRC=1 to enable)");
+        x::runtime::LogI("FlyFhBan", "skip MemoryCrc extinguish (fh_ban_crc env to enable)");
     }
     if (!PatchSlot(slotCd, reinterpret_cast<void*>(&HookCollisionDetect), &gOrigCd)) {
         strncpy_s(job->why, "patch_cd", _TRUNCATE);

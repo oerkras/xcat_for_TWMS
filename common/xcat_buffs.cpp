@@ -1,6 +1,7 @@
 #include "xcat_buffs.h"
 
 #include "xcat_config_ini.h"
+#include "xcat_install_names.h"
 #include "xcat_skill_names.h"
 
 #include <Windows.h>
@@ -60,7 +61,7 @@ uint32_t HashBinDirForShm(const char* binDir) {
 
 std::wstring BuffsRuntimeMapName(const char* binDir) {
     wchar_t name[96]{};
-    swprintf_s(name, L"Local\\XCatBuffsRuntime_v2_%08X", HashBinDirForShm(binDir));
+    swprintf_s(name, xcat::install::kShmBuffsFmt, HashBinDirForShm(binDir));
     return name;
 }
 

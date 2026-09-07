@@ -1580,29 +1580,40 @@ static HttpLoginResult CdpTicketOnConnected(msc::cdp::Session& cdp, HttpLoginLog
             }
         } else if (stage == Stage::AccWait && IsSelectAccountUrl(hrefLower) &&
                    stageDom.find("ready-acc") == 0) {
+            // 先拉窗再量坐标：最小化时 Input 回包极慢；最大化会让已量过的 xy 失效。
+            (void)cdp.RestoreDebugWindows([&](const std::wstring& s) { Log(log, s); });
+            Sleep(200);
             auto r = runJs(JsSelectAccount(accountSlot));
             if (r.find("select-account|") == 0) {
-                // 页内 dispatchEvent 是假点击。JS 会直调 React onClick；无论成败都补一记
-                // CDP Input 受信任鼠标（不是 UIA）——BIN 03:07 假点击永远不离页。
+                // 页内 dispatchEvent 是假点击。JS 会直调 React onClick；必须再补 CDP
+                // Input 受信任鼠标（不是 UIA）——BIN 03:07 假点击永远不离页。
                 const bool viaReact = r.find("|via|react") != std::string::npos;
                 int vx = 0, vy = 0;
                 const char* xy = strstr(r.c_str(), "|xy|");
                 if (xy) sscanf_s(xy, "|xy|%d|%d", &vx, &vy);
                 (void)viaReact;
+                bool trusted = false;
                 if ((vx + vy) > 0) {
-                    if (cdp.ClickViewport(static_cast<double>(vx), static_cast<double>(vy),
-                                          [&](const std::wstring& s) { Log(log, s); })) {
+                    trusted = cdp.ClickViewport(static_cast<double>(vx), static_cast<double>(vy),
+                                                [&](const std::wstring& s) { Log(log, s); });
+                    if (trusted) {
                         Log(log, L"[gamapass-cdp] 选账号 CDP 受信任点击 xy=" +
                                      std::to_wstring(vx) + L"," + std::to_wstring(vy));
                     } else {
                         Log(log, L"[gamapass-cdp] 选账号 CDP 受信任点击失败 xy=" +
-                                     std::to_wstring(vx) + L"," + std::to_wstring(vy));
+                                     std::to_wstring(vx) + L"," + std::to_wstring(vy) +
+                                     L"；仍停在选账号（不当成已点过）");
                     }
+                }
+                Log(log, L"[gamapass-cdp] " + std::wstring(r.begin(), r.end()));
+                if (!trusted) {
+                    noClickUntil = GetTickCount() + 1200;
+                    Sleep(kPollMs);
+                    continue;
                 }
                 ackFromUrl = lastUrl;
                 noClickUntil = GetTickCount() + kAfterAccClickMs;
                 enterStage(Stage::AwaitLeaveAcc, L"clicked-acc");
-                Log(log, L"[gamapass-cdp] " + std::wstring(r.begin(), r.end()));
             } else if (r.find("wait-select-account") == 0 && nowTick - lastStageLog > 5000) {
                 lastStageLog = nowTick;
                 Log(log, L"[gamapass-cdp] 等待点选账号卡片… " +

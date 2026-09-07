@@ -27,17 +27,17 @@ using x::runtime::il2cpp::AtRva;
 // 2026-08-22 runtime IDB。abs-jmp 要 12 字节且不能切开 RIP-relative；
 // 序言不够 12 或后面紧跟 lea [rip] 的，改 E9+近桩（steal 落在指令边界）。
 
-constexpr uint32_t kRvaPullKick = 0x1C1D400;   // 6244D430
-constexpr uint32_t kRvaPullSend = 0x1C1B570;   // 6244B5A0
-constexpr uint32_t kRvaDensity = 0x1C20330;    // 62450360
-constexpr uint32_t kRvaDeadPos = 0x1C146F0;    // 62444720
-constexpr uint32_t kRvaHub408 = 0xD105D0;      // 61540600
-constexpr uint32_t kRvaSched = 0xBF5B80;       // 61425BB0 → tail jmp tick
-constexpr uint32_t kRvaDispatch = 0x1C19B70;   // 62449BA0 Inspect 分发
-constexpr uint32_t kRvaTick = 0x1C275B0;       // 624575E0 密度/死点 tick
-constexpr uint32_t kRvaDensWrap = 0x1C1F700;   // 6244F730
-constexpr uint32_t kRvaDeadWrap = 0x1C13DD0;   // 62443E00
-constexpr uint32_t kRvaUnwrap = 0xB2FDD0;      // 6135FDF0 GetInt 解盒
+constexpr uint32_t kRvaPullKick = 0x1C23240;   // 6244D430
+constexpr uint32_t kRvaPullSend = 0x1C212E0;   // 6244B5A0
+constexpr uint32_t kRvaDensity = 0x1C26100;    // 62450360
+constexpr uint32_t kRvaDeadPos = 0x1C1A590;    // 62444720
+constexpr uint32_t kRvaHub408 = 0xD13970;      // 61540600
+constexpr uint32_t kRvaSched = 0xBF8660;       // 61425BB0 → tail jmp tick
+constexpr uint32_t kRvaDispatch = 0x1C1FA80;   // 62449BA0 Inspect 分发
+constexpr uint32_t kRvaTick = 0x1C2D2F0;       // 624575E0 密度/死点 tick
+constexpr uint32_t kRvaDensWrap = 0x1C25470;   // 6244F730
+constexpr uint32_t kRvaDeadWrap = 0x1C19D20;   // 62443E00
+constexpr uint32_t kRvaUnwrap = 0xB31070;      // 6135FDF0 GetInt 解盒
 
 constexpr uint8_t kSigPullKick[] = {0x41, 0x56, 0x56, 0x57, 0x53, 0x48,
                                     0x81, 0xEC, 0xC8, 0x02, 0x00, 0x00};
@@ -108,12 +108,12 @@ struct LvThunk {
 
 // docs §3 已验种子的专用 GetInt thunk。不 FindClass（TW 哈希名会 miss）。
 constexpr LvThunk kLvThunks[] = {
-    {220, 0x1700BA0}, {408, 0x1722BC0}, {411, 0x1723450}, {412, 0x1723720},
-    {525, 0x17387B0}, {710, 0x17599F0}, {781, 0x17669B0}, {926, 0x1781460},
-    {927, 0x17817A0}, {928, 0x1781A30}, {929, 0x1781D20}, {930, 0x1782020},
-    {932, 0x17825B0}, {933, 0x1782870}, {934, 0x1782C00}, {935, 0x1782F80},
-    {936, 0x17831f0}, {937, 0x17834A0}, {938, 0x17837C0}, {939, 0x1783AB0},
-    {940, 0x1783DE0}, {941, 0x17840f0},
+    {220, 0x17058F0}, {408, 0x1727A40}, {411, 0x17282c0}, {412, 0x1728550},
+    {525, 0x173D2F0}, {710, 0x175EFD0}, {781, 0x176BDB0}, {926, 0x1786770},
+    {927, 0x1786A00}, {928, 0x1786CC0}, {929, 0x1787030}, {930, 0x1787370},
+    {932, 0x1787970}, {933, 0x1787c20}, {934, 0x1787E80}, {935, 0x1788110},
+    {936, 0x1788460}, {937, 0x1788710}, {938, 0x1788990}, {939, 0x1788CA0},
+    {940, 0x1788FC0}, {941, 0x17892d0},
 };
 
 const char* SiteTag(int i) {

@@ -22,6 +22,7 @@
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
 #include "../../runtime/managed_main.h"
+#include "xor_cstr.h"
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/anchor_lamps.h"
 #include "../../ui/player_vitals.h"
@@ -54,30 +55,30 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 constexpr char kPortalManagerClass[] =
-    "f57372a0245b31de065eae5b3f27e196c2d3a536ae939b1a517e9fefa3aba09";  // remounted 2026-08-06
+    "a772207dc761a88203ba79b3d090cea9136601f47b526fb34af27454d998e9d";  // remounted 2026-08-06
 // WM / UserLocal / NM → il2cpp_shape Resolve*Klass（hash + shape）
 // SEND OutPacket TypeDef 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "cd51be7839b7a083c73895b67111fc5128bafd286f00db728c0ba4684471183";
+    "ceb815618772d63cb42bdd643630c4b5e662df06a1077e64756b7c153ac7b74";
 // remounted 2026-08-06 · dump.cs / script.json
 constexpr char kHashCheckMovePortal[] =
-    "d12ae5b42de13b8d7f05ac45fccb275cf806ab3c2a1b7f8344343c63ec37e77";
+    "cdc8f0c5f77801a43607a062ffa15a5854691d9a8406669b334f5bf28dc552c";
 constexpr char kHashOutCreate[] =
-    "bcc25ed62085ab50962455796b8c40a33b586c5acfcf5c24f5173fd5339b2e9";
+    "c20bdff906c15584c65c62ea482e1a220385c0329db377b878479172a2c7c4e";
 constexpr char kHashEncode1[] =
-    "cad8c37b8a3165056770fbdca6425bda2b3c746bbe0cf5de6e3a12a57a38ab9";  // Encode1(byte)
+    "a9f7faecc4f4530b785abd629d6f9fee0d819fecc5e04dd4ca06d48819a21d2";  // Encode1(byte)
 constexpr char kHashEncodeStr[] =
-    "bd0884d2ce9e84cb4a06607b8a7cf7204cb62485f4cbb6f65b1d3c22613a2db";
+    "d1c087b095502a8f885c7ab3871edbb2fae559e8dded7c51a5a417105d9f8dd";
 constexpr char kHashSendPacket[] =
-    "f6830b5ee95ed3ede833bbf2824cc2c6d6e2745fbb4614780f6332ae0d8ce63";  // Session bool(OutPacket)
+    "ce57a0ddc7703a2d9139e8edb783f28f0289a720bb33fb28d75fd00b486e078";  // Session bool(OutPacket)
 
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
-constexpr uint32_t kRvaCheckMovePortal = 0xDE7A60;  // remounted 2026-08-06 WM.CheckMovePortal
-constexpr uint32_t kRvaOutPacketCreate = 0x1CEEF90;  // remounted 2026-08-06 OutPacket.Create
-constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1CFB6A0;  // remounted 2026-08-06 Encode1(byte)
-constexpr uint32_t kRvaOutPacketEncodeStr = 0x1CFBDB0;  // remounted 2026-08-06 EncodeStr
-constexpr uint32_t kRvaNmSend = 0x1CF0BA0;  // remounted 2026-08-06 Session.SendPacket bool
-constexpr uint32_t kRvaSendOutPacket = 0x1CEF090;  // Network.SendOutPacket → 直调 SendPacket RVA
+constexpr uint32_t kRvaCheckMovePortal = 0xDEB170;  // remounted 2026-08-06 WM.CheckMovePortal
+constexpr uint32_t kRvaOutPacketCreate = 0x1CF4750;  // remounted 2026-08-06 OutPacket.Create
+constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1D00810;  // remounted 2026-08-06 Encode1(byte)
+constexpr uint32_t kRvaOutPacketEncodeStr = 0x1D00F60;  // remounted 2026-08-06 EncodeStr
+constexpr uint32_t kRvaNmSend = 0x1CF63B0;  // remounted 2026-08-06 Session.SendPacket bool
+constexpr uint32_t kRvaSendOutPacket = 0x1CF4830;  // Network.SendOutPacket → 直调 SendPacket RVA
 // CMS ClientPacket.UserPortalTeleportRequest = 114 · wire 0x0072（Rpc 伪造仍用 enum）
 constexpr int kClientPortalTeleport = 114;
 constexpr uint16_t kWirePortalTeleport = 0x0072;
@@ -100,58 +101,58 @@ constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 
 constexpr char kMapPortalDataClass[] =
-    "d8fdc40c344d1a65097578d75e041470ebcbdfcda59bcbe0496a2b2ac7b3d5f";  // remounted 2026-08-06
+    "b449fffa2691f0549c6f4e111403f7c7ecc257c106af794ed49fa1b22327685";  // remounted 2026-08-06
 constexpr char kPortalClass[] =
-    "fe105af038302916dc9fad4f037485a40575d41f754ff9e407063d1d4554772";  // remounted 2026-08-06
+    "c6c8ca2470c22b81cbc687302ff17e606ae2b7af1010e70eb26c1ee2b751113";  // remounted 2026-08-06
 constexpr char kActorBaseClass[] =
-    "d9aab778a925d77c0ae0b654ad29a8c6dc20a1f4684cffb7e533c336bc6ae5c";  // = teleport_port
+    "a83e4f1c524fa6e5dc75a3f38110e85704c157550dd8e171c128f9d66e5c739";  // = teleport_port
 constexpr char kVecCtrlClass[] =
-    "d7d4003a734229d3b8fd8a969b6a9168c36692d3b039b8824d5d40d2cb4430b";  // = teleport_port
+    "b866b6310c1647fd6473a886a59a14e5121b75565a9314fd00c5ef362f8e776";  // = teleport_port
 constexpr char kPacketClass[] =
-    "d3785c31ca0087d002d78da28dad2667158b740d047c5aeb1e6f8f5107b81de";  // Packet base 13773
+    "b30f04513b1c4d41e3c27445fdc90c247c232bd88aa1121648eda3f3924f72d";  // Packet base 13773
 
 constexpr char kHashPortalData[] =
-    "f5a9bfea0e3aa1b9b38087a9a66f972fe30d31e80261f37b67917422f2e6249";
+    "ce3c3a4fc39e2f609fc49ee53706d583e1c315441c5a6b7ee8a2246a63faae9";
 constexpr char kHashMpdId[] =
-    "<c408581f690602dc72818651ccfdf9ed5c9a9cd10924068cda8808901e58510>k__BackingField";
+    "<d06427fb19a018be862c0337fb5b3192ebf2efe2ca6528f62aba87f52864911>k__BackingField";
 constexpr char kHashMpdType[] =
-    "<ea34f736068d77ef4ee3cf9542fae5f9033802fc0b45deffc5950a8483e5b47>k__BackingField";
+    "<ba6ff739da47df2e2cae73ecf9aa1eabfb85cc7f78d84a4d233807ee36ddb31>k__BackingField";
 constexpr char kHashMpdEnable[] =
-    "<b6172b93c5a09bcc5c3488760928fe0817c4f1dad5be58dffd46b409183b708>k__BackingField";
+    "<e33696e3c9590c767f7a10d9b4458f2ae3b14ef35845ef4599d650762cf085f>k__BackingField";
 constexpr char kHashMpdPName[] =
-    "<fba04a3d1084359deb8d2e6f4dc066b3fecc2d8ce68e0bd0be41e25636222ab>k__BackingField";
+    "<a4ee4ed178b6dfafecc77fcb676d89345ffcb22bf6d8d0b03f27467915de2d7>k__BackingField";
 constexpr char kHashMpdX[] =
-    "<ac2705bba4d354f364df89f7a539149c26aa95692f2d921e10b0785ba80e49c>k__BackingField";
+    "<f0e0291d12de3209cfdc1d805be70a8f1ce7bc8b64b51143add33365456e95d>k__BackingField";
 constexpr char kHashMpdY[] =
-    "<ff718f7e9f0c2f46c22c4c7b6814d787ac5a484a139d3f3b9ea0a696f9e0e77>k__BackingField";
+    "<f0e3a11d6fc0df51c4347a0593b306495f649bb9a9482732c3377258a3963de>k__BackingField";
 constexpr char kHashMpdToMapId[] =
-    "<c4a60a18fecd11d621e9123a41a83d3cc406e9480a8eb2090a65748e9e416c4>k__BackingField";
+    "<b2787e8c95df41d3125d1476f2d29b857abd1bf176291c0f1431176688429f6>k__BackingField";
 // MapPortalData 字段偏移未漂；hash remount 2026-08-06 dump.cs TypeDef 2079
 constexpr char kHashMpdPortalRect[] =
-    "<cbedbc648a190276f82d8b5e420e61bba9dec22096272a875597e6450dadb50>k__BackingField";
+    "<d88961f3e0a1e6fede7e74a25e2d44e6d16b379f3b32d740d46ee2dd09e0b2f>k__BackingField";
 constexpr char kHashMpdHRange[] =
-    "<f6400e20d8596d3a4fe7c4b96dfd58cb88c9e8a123d2f8c4738305cbefaa740>k__BackingField";
+    "<bcfc3e43b73510493b7e1025636b366eadc6c59ff36c3247eef2f8c4b9503eb>k__BackingField";
 constexpr char kHashMpdVRange[] =
-    "<eaa8299637c945e55265072abd53bc61b6de0ff250acb7d3a70dd671387e0a3>k__BackingField";
+    "<b2930f43c1dd1330ce7fba6b09796e60bdf3926b7d6b91cae197e5db8c7cb1a>k__BackingField";
 constexpr char kHashMpdVImpact[] =
-    "<bc26627b4fec6a57cea31c699473eb46748eed675bccaeaa7903472d5c91bc8>k__BackingField";
+    "<a37b978e524d5b66a698e1b047046f75aaf42caf17348b66a0b07dc84a1a037>k__BackingField";
 constexpr char kHashMpdHImpact[] =
-    "<ab71e749183f0f6309446b36fed003ad176f463f0338086f3fb465b080fe13e>k__BackingField";
+    "<d782232ec4d5c06e49ee6672a024f9f97b04e38b3e21f53e420f65e121874e7>k__BackingField";
 constexpr char kHashWmFieldKey[] =
-    "bc45b05cf90f595280379cc9244c7dbb928e7616c2a89febaeeccdf3b0d1d76";  // = world_port
+    "d7f1102f10ddd72499f72716872c61847a5b4d9890dd6aa2699d80c701f2af8";  // = world_port
 // Packet base 13773 buffer/offset；SEND OutPacket 13775 id@0x20（非 InPacket backing）
 constexpr char kHashPacketBuffer[] =
-    "<f4089890cfff6634129a4521f9b26b6ab553e5415150558b993a1167d43e1d5>k__BackingField";
+    "<a98e32adcdd8ab49bc3842ef070bcb91444555bdbbd2f82400d1320276ba18f>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<c38ad7aae0f32191d273a203a344daf528f9575b63a0506300e12dea7d2eefe>k__BackingField";
+    "<f8c46e00eb78d41330636a2a5039f144f30d4a7c6a19b373e0b0c049fcc56b3>k__BackingField";
 constexpr char kHashOutPacketId[] =
-    "e68e7f1c111d9ebeeb6e0d357363f28b463c45d0d9f9e80ef38bd0faffba03d";
+    "bb408cfc09d7de1810883c1162375d43bb2d6e0d2cd95c7813e81b2fa9b1407";
 constexpr char kHashUserVecCtrl[] =
-    "<aeb819450fbe3e8e0eb38423605993f53e2c72baef2b39f45a89237951f1628>k__BackingField";
+    "<e22b1f6d38f00abbcb8a5dd7bbd304c2288f14cddbee6a552a6fbc18fc280f6>k__BackingField";
 constexpr char kHashVcAp[] =
-    "c58e00a053bb88a5ed4a0a369ce0968c883a9ff77b788c812b896dc6c58aca3";
+    "e0990df580e30ca5d5e49277ad3fe6d2aa68067d54a056bc00f418f8e55f8e6";
 constexpr char kHashVcApl[] =
-    "de49f50f26b3f5583cc1ef8827ea3a3bdfe285cf2d2ef999ff1165e16b82d14";
+    "a46b5decdc70dbf3985ab4d74685e8854799f85749212d042bd9c5b5b0663ad";
 
 constexpr size_t kFbPortalData = 0x10, kFbMpdId = 0x10, kFbMpdType = 0x14, kFbMpdEnable = 0x18;
 constexpr size_t kFbMpdPName = 0x20, kFbMpdX = 0x28, kFbMpdY = 0x2C, kFbMpdToMapId = 0x30;
@@ -236,7 +237,7 @@ void EnsureTravelFieldOff() {
     void* portal = x::runtime::il2cpp::FindClass("", kPortalClass);
     // WorldManager hash（与 il2cpp_shape / world_port 同源）
     constexpr char kWorldManagerClass[] =
-        "da19eb0b093a50825187352f1d062610ff5b23c1f314b9cd8c4218aa9db3bc7";
+        "c85ba61839ce73c7f45293ed2e906fdb9e3e0dab928f9582e494367e08948af";
     void* wm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
     if (!wm) wm = x::runtime::il2cpp::FindClass("", kWorldManagerClass);
     void* actor = x::runtime::il2cpp::FindClass("", kActorBaseClass);
@@ -565,11 +566,11 @@ int32_t ReadI32(void* obj, size_t off);
 
 uint16_t ReadU16(void* obj, size_t off) {
     if (!obj) return 0;
-    __try {
+        __try {
         return *reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(obj) + off);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 0;
-    }
+        }
 }
 
 // hash ??plain ??RVA/kind?FindMethodResolved SSOT???
@@ -627,8 +628,8 @@ void DumpOutPacket(void* pkt, const char* tag) {
         std::lock_guard<std::mutex> lock(gLastCapMu);
         if (gCapIdN < kCapIdRing) gCapIdRing[gCapIdN++] = id;
         if (IsPortalWireId(id)) {
-            gLastCapId = id;
-            gLastCapHex = hex;
+        gLastCapId = id;
+        gLastCapHex = hex;
             gLastCapTick = GetTickCount();
         }
     }
@@ -865,8 +866,8 @@ bool RebindManagers(DWORD now) {
                                                 static_cast<size_t>(i) * sizeof(void*));
             // FindAll 在泵上跑完后仍回到 worker：禁 GetGoName（GC unknown thread）。
             if (!LooksLikeHeapPtr(o) || !ReadPtr(o, 0) || !ReadPtr(o, 0x10)) continue;
-            gLocalUser = o;
-            break;
+                gLocalUser = o;
+                break;
         }
     }
 
@@ -1282,18 +1283,6 @@ void WarmPortalKbd(const char* why) {
     }
 }
 
-bool EnvFlagOff(const char* name) {
-    char env[16]{};
-    if (GetEnvironmentVariableA(name, env, sizeof(env)) == 0) return false;
-    return env[0] == '0' || env[0] == 'n' || env[0] == 'N' || env[0] == 'f' || env[0] == 'F';
-}
-
-bool EnvFlagOn(const char* name) {
-    char env[16]{};
-    if (GetEnvironmentVariableA(name, env, sizeof(env)) == 0) return false;
-    return env[0] == '1' || env[0] == 'y' || env[0] == 'Y' || env[0] == 't' || env[0] == 'T';
-}
-
 bool MarkerOffFile(const char* fileName) {
     const char* bin = x::runtime::GetBinDir();
     if (!bin || !bin[0] || !fileName || !fileName[0]) return false;
@@ -1303,24 +1292,24 @@ bool MarkerOffFile(const char* fileName) {
 }
 
 bool TravelMapIdGateEnabled() {
-    if (EnvFlagOff("XCAT_TRAVEL_MAPID_GATE") || MarkerOffFile("travel_mapid_gate.off")) {
+    if (XCAT_ENV_OFF(kEnvTravelMapidGate) || MarkerOffFile("travel_mapid_gate.off")) {
         return false;
     }
-    if (EnvFlagOn("XCAT_TRAVEL_MAPID_GATE")) return true;
+    if (XCAT_ENV_ON(kEnvTravelMapidGate)) return true;
     return kTravelMapIdGateDefault;
 }
 
 bool TravelUp2Enabled() {
-    if (EnvFlagOff("XCAT_TRAVEL_UP2") || MarkerOffFile("travel_up2.off")) return false;
-    if (EnvFlagOn("XCAT_TRAVEL_UP2")) return true;
+    if (XCAT_ENV_OFF(kEnvTravelUp2) || MarkerOffFile("travel_up2.off")) return false;
+    if (XCAT_ENV_ON(kEnvTravelUp2)) return true;
     return kTravelUp2Default;
 }
 
 bool TravelUpDrainEnabled() {
-    if (EnvFlagOff("XCAT_TRAVEL_UP_DRAIN") || MarkerOffFile("travel_up_drain.off")) {
+    if (XCAT_ENV_OFF(kEnvTravelUpDrain) || MarkerOffFile("travel_up_drain.off")) {
         return false;
     }
-    if (EnvFlagOn("XCAT_TRAVEL_UP_DRAIN")) return true;
+    if (XCAT_ENV_ON(kEnvTravelUpDrain)) return true;
     return kTravelUpDrainDefault;
 }
 
@@ -1330,10 +1319,10 @@ bool TravelUpDrainEnabled() {
 constexpr bool kTravelPreFireZeroDefault = false;
 
 bool TravelPreFireZeroEnabled() {
-    if (EnvFlagOff("XCAT_TRAVEL_PREFIRE_ZERO") || MarkerOffFile("travel_prefire_zero.off")) {
+    if (XCAT_ENV_OFF(kEnvTravelPrefireZero) || MarkerOffFile("travel_prefire_zero.off")) {
         return false;
     }
-    if (EnvFlagOn("XCAT_TRAVEL_PREFIRE_ZERO")) return true;
+    if (XCAT_ENV_ON(kEnvTravelPrefireZero)) return true;
     return kTravelPreFireZeroDefault;
 }
 
@@ -1342,10 +1331,10 @@ bool TravelPreFireZeroEnabled() {
 constexpr bool kTravelHoldZeroDefault = false;
 
 bool TravelHoldZeroEnabled() {
-    if (EnvFlagOff("XCAT_TRAVEL_HOLD_ZERO") || MarkerOffFile("travel_hold_zero.off")) {
+    if (XCAT_ENV_OFF(kEnvTravelHoldZero) || MarkerOffFile("travel_hold_zero.off")) {
         return false;
     }
-    if (EnvFlagOn("XCAT_TRAVEL_HOLD_ZERO")) return true;
+    if (XCAT_ENV_ON(kEnvTravelHoldZero)) return true;
     return kTravelHoldZeroDefault;
 }
 
@@ -1582,8 +1571,8 @@ bool TryFireEnterOnMain(FireMode mode, std::string& outResult) {
                              "stick-up1 post-sleep res=%s map0=%d mapNow=%d skipUp2=1",
                              outResult.c_str(), map0, world::GetMapId());
             NotePortalUpOutcome(outResult.c_str());
-            return true;
-        }
+                return true;
+            }
         if (probe) LogUpPortalCap(mode == FireMode::StickUp ? "stick-up1" : "up-pulse1");
 
         if (ok && mode == FireMode::StickUp) {
@@ -1634,7 +1623,7 @@ bool TryFireEnterOnMain(FireMode mode, std::string& outResult) {
     job.fieldKey = gWm ? ReadU8(gWm, kOffWmFieldKey) : 0;
     if (!x::runtime::managed_main::Call(&FireJobOnMain, &job, 2500)) {
         outResult = "MAIN_TIMEOUT";
-        return false;
+    return false;
     }
     if (!world::IsInMapScene() || !world::IsPlayReady()) {
         outResult = "MAP_TRANSITION";
@@ -1817,7 +1806,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     {
         const float d0 = std::sqrt((aimX - luX) * (aimX - luX) + (aimY - luY) * (aimY - luY));
         const bool st0 = wantStation(d0, InPortalTrigger(portal));
-        x::runtime::LogI("Travel",
+    x::runtime::LogI("Travel",
                          "heli stick aim name=%s portal=(%.0f,%.0f) aim=(%.0f,%.0f) landY=%.0f "
                          "ap=(%.0f,%.0f) rect=%d aimFh=%u hover=%d liftY=%.0f speed=%.2fX (%s) "
                          "mode=%s enterR=%.0f exitR=%.0f dist=%.0f skipDetach=%d",
@@ -1904,7 +1893,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     }
     if (!nearDeckWalk) fhBan.Arm();
 
-    const DWORD t0 = GetTickCount();
+        const DWORD t0 = GetTickCount();
     DWORD settleSince = 0;
     DWORD holdSince = 0;
     DWORD readySince = 0;  // onFh∧低速∧Ap静；滑移则整段清零重等
@@ -1925,15 +1914,15 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     int fireN = 0;
     int failStreak = 0;
     heli::Telemetry tm{};
-    for (;;) {
+        for (;;) {
         const DWORD now = GetTickCount();
-        if (!world::IsInMapScene() || !world::IsPlayReady()) {
-            outResult = "MAP_TRANSITION";
+            if (!world::IsInMapScene() || !world::IsPlayReady()) {
+                outResult = "MAP_TRANSITION";
             fhBan.LeaveArmedForEnter();
             x::runtime::LogI("Travel", "heli stick map transition name=%s ticks=%d fire=%d",
                              portal.name.c_str(), tickN, fireN);
-            return true;
-        }
+                return true;
+            }
         if (now - t0 >= kImpactStickMaxMs) {
             outResult = "NOT_STOOD";
             float ax = 0.f, ay = 0.f;
@@ -1969,7 +1958,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             leftTrigSince = 0;
             if (settleSince == 0) {
                 settleSince = now;
-                x::runtime::LogI("Travel",
+                        x::runtime::LogI("Travel",
                                  "heli stick settle begin name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
                                  "ticks=%d",
                                  portal.name.c_str(), px, py, aimX, aimY, tickN);
@@ -2078,7 +2067,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             const bool wasApproach = approachLatched;
             const bool station = wantStation(dist, inTrigNow);
             if (station && !wasApproach) {
-                x::runtime::LogI("Travel",
+                        x::runtime::LogI("Travel",
                                  "heli stick mode phase=approach name=%s dist=%.0f%s",
                                  portal.name.c_str(), dist,
                                  softApproach ? " restick=1" : " (latched)");
@@ -2421,8 +2410,8 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                         if (!world::IsInMapScene() || !world::IsPlayReady()) {
                             outResult = "MAP_TRANSITION";
                             fhBan.LeaveArmedForEnter();
-                            return true;
-                        }
+            return true;
+        }
                         Sleep(kImpactStickPollMs);
                     }
                     float fx = px, fy = py;
@@ -2458,7 +2447,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                             portal.name.c_str(), fx, fy, aimX, aimY, fs2.vx, fs2.vy,
                             (unsigned)(GetTickCount() - readySince), tickN, fireN);
                         fhBan.LeaveArmedForEnter();
-                        return true;
+        return true;
                     } else {
                         x::runtime::LogI(
                             "Travel",
@@ -2546,9 +2535,9 @@ bool StickThenEnterReady(const PortalInfo& portal, FireMode enterMode, std::stri
         bool havePrevAp = false;
         while (GetTickCount() - t0 < kPortalLandTimeoutMs) {
             if (!world::IsInMapScene() || !world::IsPlayReady()) {
-                outResult = "MAP_TRANSITION";
-                return true;
-            }
+        outResult = "MAP_TRANSITION";
+        return true;
+    }
             if (!InPortalTrigger(portal)) {
                 break;
             }
@@ -2689,9 +2678,9 @@ bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string
     job.fieldKey = gWm ? ReadU8(gWm, kOffWmFieldKey) : 0;
     strncpy_s(job.name, portalName.c_str(), _TRUNCATE);
 
-    if (!x::runtime::managed_main::Call(&FireJobOnMain, &job, 2500)) {
-        outResult = "MAIN_TIMEOUT";
-        return false;
+        if (!x::runtime::managed_main::Call(&FireJobOnMain, &job, 2500)) {
+            outResult = "MAIN_TIMEOUT";
+            return false;
     }
     outResult = job.result;
     return job.ok;

@@ -3,6 +3,9 @@
 #include "http_gamapass_login.h"
 #include "msc_launch.h"
 
+#include "../common/process_util.h"
+#include "../common/xcat_install_names.h"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -493,10 +496,10 @@ void ClearForceSessionSync(const std::wstring& cdpRoot) {
 // 重灌仅：空副本 / 强制标记（不用 mtime 自动盖，避免半残日常毁掉可用 SSO）。
 bool PrepareCdpSafeUserData(const std::wstring& srcUserData, std::wstring& outCdpData, const LogFn& log) {
     outCdpData.clear();
-    wchar_t localApp[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return false;
-    outCdpData = std::wstring(localApp) + L"\\XCat\\GamaPassCdpProfile";
-    if (!EnsureDir(std::wstring(localApp) + L"\\XCat") || !EnsureDir(outCdpData)) return false;
+    const std::wstring leafRoot = xcat::IsolatedLocalAppRootW();
+    if (leafRoot.empty()) return false;
+    outCdpData = leafRoot + L"\\GamaPassCdpProfile";
+    if (!EnsureDir(leafRoot) || !EnsureDir(outCdpData)) return false;
 
     LogLine(log, L"[cdp] 会话目录：只读源（日常）=" + srcUserData);
     LogLine(log, L"[cdp] 会话目录：写入目标（副本）=" + outCdpData);
@@ -568,7 +571,9 @@ std::string B64Encode16(const unsigned char raw[16]) {
 bool RecvExactFrom(SOCKET s, std::string& leftover, char* p, int n) {
     int got = 0;
     const DWORD t0 = GetTickCount();
-    constexpr DWORD kBudgetMs = 2500;
+    // 后台/最小化标签上 Input.dispatchMouseEvent 常 >400ms 才回；select 超时只能续等，
+    // 不能当成套接字已死（BIN 06:59/07:08 无人值守选账号：WebSocketReceive 失败 → 页发呆）。
+    constexpr DWORD kBudgetMs = 8000;
     while (got < n) {
         if (msc::launcher::GamaPassLoginCanceled()) return false;
         if (GetTickCount() - t0 > kBudgetMs) return false;
@@ -581,7 +586,9 @@ bool RecvExactFrom(SOCKET s, std::string& leftover, char* p, int n) {
         }
         const DWORD elapsed = GetTickCount() - t0;
         const int remain = elapsed >= kBudgetMs ? 0 : static_cast<int>(kBudgetMs - elapsed);
-        if (!SockWaitReadable(s, remain > 400 ? 400 : remain)) return false;
+        if (remain <= 0) return false;
+        const int slice = remain > 400 ? 400 : remain;
+        if (!SockWaitReadable(s, slice)) continue;
         const int r = recv(s, p + got, n - got, 0);
         if (r <= 0) return false;
         got += r;
@@ -697,11 +704,10 @@ bool WsRecvMessage(SOCKET s, std::string& leftover, std::string& out) {
 }  // namespace
 
 void RequestCdpSessionResync() {
-    wchar_t localApp[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return;
-    const std::wstring xcat = std::wstring(localApp) + L"\\XCat";
-    const std::wstring profile = xcat + L"\\GamaPassCdpProfile";
-    CreateDirectoryW(xcat.c_str(), nullptr);
+    const std::wstring leafRoot = xcat::IsolatedLocalAppRootW();
+    if (leafRoot.empty()) return;
+    const std::wstring profile = leafRoot + L"\\GamaPassCdpProfile";
+    CreateDirectoryW(leafRoot.c_str(), nullptr);
     CreateDirectoryW(profile.c_str(), nullptr);
     const std::wstring marker = profile + L"\\.xcat_force_session_sync";
     HANDLE h = CreateFileW(marker.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
@@ -976,7 +982,7 @@ bool Session::SendRecv(const std::string& method, const std::string& paramsJson,
         return false;
     }
     const DWORD t0 = GetTickCount();
-    while (GetTickCount() - t0 < 4000) {
+    while (GetTickCount() - t0 < 8000) {
         std::string buf;
         if (!WsRecvMessage(s, wsLeftover_, buf)) {
             LogLine(log, L"[cdp] WebSocketReceive 失败");
@@ -1089,15 +1095,22 @@ struct ConflictHit {
     std::wstring leaf;
 };
 
-bool IsIsolatedXcatCdpUserData(const std::wstring& userData) {
-    wchar_t localApp[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return false;
-    const std::wstring root = std::wstring(localApp) + L"\\XCat\\";
+bool IsIsolatedLeafRoot(const std::wstring& userData, const std::wstring& leafRoot) {
+    if (leafRoot.empty()) return false;
+    const std::wstring root = leafRoot + L"\\";
     if (PathKeysEqual(userData, root + L"GamaPassCdpProfile")) return true;
     const std::wstring gp = NormalizePathKey(root + L"GpDeviceLoginProfile");
     const std::wstring ud = NormalizePathKey(userData);
     if (ud == gp) return true;
     return ud.size() > gp.size() && ud.compare(0, gp.size(), gp) == 0 && ud[gp.size()] == L'\\';
+}
+
+bool IsIsolatedXcatCdpUserData(const std::wstring& userData) {
+    if (IsIsolatedLeafRoot(userData, xcat::IsolatedLocalAppRootW())) return true;
+    wchar_t localApp[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return false;
+    const std::wstring legacy = std::wstring(localApp) + L"\\" + xcat::install::LegacyLocalAppLeafW();
+    return IsIsolatedLeafRoot(userData, legacy);
 }
 
 void CollectConflictingBrowserHits(const BrowserProfile& profile, int debugPort,
@@ -1225,6 +1238,9 @@ bool LaunchChromiumWithDebugPort(const BrowserProfile& profile, int port, const 
     cmd += L"\" --no-first-run --no-default-browser-check"
            L" --force-renderer-accessibility"
            L" --disable-session-crashed-bubble --hide-crash-restore-bubble"
+           // 无人值守：启动器最小化时独立罐常被当成后台页，Input/定时器被 Chrome 节流。
+           L" --disable-renderer-backgrounding --disable-backgrounding-occluded-windows"
+           L" --disable-background-timer-throttling"
            // 独立罐登录只要几十秒：别去查更新，否则右上角弹「无法安装更新」（客户机 Chrome 120 已过期）。
            L" --check-for-update-interval=31536000 --disable-background-networking"
            // 独立罐勿弹「翻译此页」：翻译条会挡住账号卡，首点看起来像卡死（BIN 02:38 select-account）。
@@ -1237,6 +1253,8 @@ bool LaunchChromiumWithDebugPort(const BrowserProfile& profile, int port, const 
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_SHOWNORMAL;
     PROCESS_INFORMATION pi{};
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
@@ -1736,6 +1754,109 @@ bool Session::ActivateAttachedPage(const LogFn& log) {
     return false;
 }
 
+bool Session::RestoreDebugWindows(const LogFn& log) {
+    const int port = port_ > 0 ? port_ : kDefaultRemoteDebugPort;
+    if (port <= 0) return false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    std::vector<DWORD> pids;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (!IsWantedChromiumProcessName(pe.szExeFile)) continue;
+            const std::wstring cmd = msc::launcher::GetProcessCommandLineW(pe.th32ProcessID);
+            if (CmdHasRemoteDebugPort(cmd, port)) pids.push_back(pe.th32ProcessID);
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    if (pids.empty()) return false;
+
+    struct Ctx {
+        const std::vector<DWORD>* pids = nullptr;
+        std::vector<HWND> hwnds;
+    } ctx;
+    ctx.pids = &pids;
+    EnumWindows(
+        [](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* c = reinterpret_cast<Ctx*>(lp);
+            DWORD wpid = 0;
+            GetWindowThreadProcessId(hwnd, &wpid);
+            bool ours = false;
+            for (DWORD pid : *c->pids) {
+                if (pid == wpid) {
+                    ours = true;
+                    break;
+                }
+            }
+            if (!ours) return TRUE;
+            if (GetWindow(hwnd, GW_OWNER)) return TRUE;
+            if (!IsWindowVisible(hwnd) && !IsIconic(hwnd)) return TRUE;
+            RECT r{};
+            if (!GetWindowRect(hwnd, &r)) return TRUE;
+            if ((r.right - r.left) < 64 || (r.bottom - r.top) < 64) return TRUE;
+            wchar_t cls[64]{};
+            GetClassNameW(hwnd, cls, 64);
+            // Chrome / Edge / 换皮 Chromium 主窗
+            if (!wcsstr(cls, L"Chrome_WidgetWin") && !wcsstr(cls, L"Chrome_WidgetWin_1"))
+                return TRUE;
+            c->hwnds.push_back(hwnd);
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&ctx));
+
+    if (ctx.hwnds.empty()) return false;
+    unsigned n = 0;
+    unsigned fromIconic = 0;
+    for (HWND hwnd : ctx.hwnds) {
+        DWORD targetPid = 0;
+        GetWindowThreadProcessId(hwnd, &targetPid);
+        if (targetPid) AllowSetForegroundWindow(targetPid);
+        if (IsIconic(hwnd)) {
+            ShowWindowAsync(hwnd, SW_RESTORE);
+            ++fromIconic;
+        }
+        ShowWindowAsync(hwnd, SW_SHOW);
+        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_ASYNCWINDOWPOS);
+        SetForegroundWindow(hwnd);
+        ++n;
+    }
+    (void)ActivateAttachedPage(log);
+    if (fromIconic)
+        LogLine(log, L"[cdp] 已从最小化拉起独立罐登录窗 ×" + std::to_wstring(fromIconic) +
+                         L"（不最大化，坐标仍有效）");
+    return n > 0;
+}
+
+bool Session::RebindPage(const LogFn& log) {
+    if (port_ <= 0) return false;
+    const int port = port_;
+    const std::wstring ver = browserVersion_;
+    Close();
+    port_ = port;
+    browserVersion_ = ver;
+    std::wstring wsUrl;
+    if (!PickPageWsUrl(port_, wsUrl, log)) {
+        LogLine(log, L"[cdp] 重绑页面：找不到当前标签");
+        return false;
+    }
+    pageWsUrl_ = wsUrl;
+    if (!OpenWs(wsUrl, log)) {
+        LogLine(log, L"[cdp] 重绑页面：WebSocket 失败");
+        return false;
+    }
+    std::string ignore;
+    if (!SendRecv("Page.enable", "{}", ignore, log) || !SendRecv("Runtime.enable", "{}", ignore, log)) {
+        LogLine(log, L"[cdp] 重绑页面：Page/Runtime.enable 失败");
+        Close();
+        port_ = port;
+        return false;
+    }
+    LogLine(log, L"[cdp] 已重绑页面 WebSocket");
+    return true;
+}
+
 bool Session::ClickViewport(double x, double y, const LogFn& log) {
     auto send = [&](const char* type, const char* button, int clickCount) -> bool {
         char buf[288];
@@ -1746,22 +1867,30 @@ bool Session::ClickViewport(double x, double y, const LogFn& log) {
         std::string res;
         return SendRecv("Input.dispatchMouseEvent", buf, res, log);
     };
-    (void)ActivateAttachedPage(log);
-    if (!send("mouseMoved", "none", 0)) {
-        LogLine(log, L"[cdp] Input.mouseMoved 失败");
-        return false;
-    }
-    Sleep(20);
-    if (!send("mousePressed", "left", 1)) {
-        LogLine(log, L"[cdp] Input.mousePressed 失败");
-        return false;
-    }
-    Sleep(30);
-    if (!send("mouseReleased", "left", 1)) {
-        LogLine(log, L"[cdp] Input.mouseReleased 失败");
-        return false;
-    }
-    return true;
+    auto once = [&]() -> bool {
+        (void)ActivateAttachedPage(log);
+        if (!send("mouseMoved", "none", 0)) {
+            LogLine(log, L"[cdp] Input.mouseMoved 失败");
+            return false;
+        }
+        Sleep(20);
+        if (!send("mousePressed", "left", 1)) {
+            LogLine(log, L"[cdp] Input.mousePressed 失败");
+            return false;
+        }
+        Sleep(30);
+        if (!send("mouseReleased", "left", 1)) {
+            LogLine(log, L"[cdp] Input.mouseReleased 失败");
+            return false;
+        }
+        return true;
+    };
+    (void)RestoreDebugWindows(log);
+    if (once()) return true;
+    LogLine(log, L"[cdp] 受信任点击失败，重绑页面后再点一次（不清 Cookie）");
+    if (!RebindPage(log)) return false;
+    (void)RestoreDebugWindows(log);
+    return once();
 }
 
 bool Session::QuitBrowser(int port, const LogFn& log) {

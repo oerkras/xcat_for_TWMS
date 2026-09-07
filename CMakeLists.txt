@@ -17,6 +17,11 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL     ${CMAKE_BINARY_DIR}/lib/MinSiz
 
 include(${CMAKE_SOURCE_DIR}/cmake/imgui.cmake)
 
+# 安装身份：必须与 common/xcat_install_names.h 一致。不冒充系统 DLL。
+set(XCAT_LAUNCHER_OUTPUT_NAME "rtapp")
+set(XCAT_PAYLOAD_DIR_NAME "rtcache")
+set(XCAT_PAYLOAD_OUTPUT_NAME "rtmod")
+
 add_subdirectory(common)
 add_subdirectory(sound_cli)
 add_subdirectory(injector)

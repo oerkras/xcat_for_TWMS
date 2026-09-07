@@ -10,6 +10,7 @@
 #include "log.h"
 #include "main_thread_pump.h"
 #include "managed_main.h"
+#include "xor_cstr.h"
 
 #include <atomic>
 
@@ -156,6 +157,12 @@ void UpgradeUnityManagedFns() {
     }
 }
 
+HMODULE LookupGaModule() {
+    if (gExp.ga) return gExp.ga;
+    return xcat::xor_cstr::GetModuleW(xcat::xor_cstr::kGameAssemblyDll,
+                                     sizeof(xcat::xor_cstr::kGameAssemblyDll));
+}
+
 }  // namespace
 
 bool Ensure() {
@@ -165,7 +172,7 @@ bool Ensure() {
         return true;
     }
 
-    HMODULE ga = GetModuleHandleW(L"GameAssembly.dll");
+    HMODULE ga = LookupGaModule();
     if (!ga) return false;
 
     Exports e{};
@@ -174,91 +181,78 @@ bool Ensure() {
     e.findAll = reinterpret_cast<FnFindAll>(reinterpret_cast<uint8_t*>(ga) + kRvaFindObjectsOfTypeAll);
     e.compGo = reinterpret_cast<FnCompGo>(reinterpret_cast<uint8_t*>(ga) + kRvaCompGetGo);
     e.objName = reinterpret_cast<FnObjName>(reinterpret_cast<uint8_t*>(ga) + kRvaObjGetName);
-    e.domainGet = reinterpret_cast<FnDomainGet>(GetProcAddress(ga, "il2cpp_domain_get"));
+    e.domainGet = reinterpret_cast<FnDomainGet>(XCAT_GETPROC(ga, kIl2cppDomainGet));
     e.domainAssemblies =
-        reinterpret_cast<FnDomainAssemblies>(GetProcAddress(ga, "il2cpp_domain_get_assemblies"));
-    e.asmImage = reinterpret_cast<FnAsmImage>(GetProcAddress(ga, "il2cpp_assembly_get_image"));
-    e.classFromName =
-        reinterpret_cast<FnClassFromName>(GetProcAddress(ga, "il2cpp_class_from_name"));
-    e.classGetType = reinterpret_cast<FnClassGetType>(GetProcAddress(ga, "il2cpp_class_get_type"));
-    e.typeGetObject =
-        reinterpret_cast<FnTypeGetObject>(GetProcAddress(ga, "il2cpp_type_get_object"));
+        reinterpret_cast<FnDomainAssemblies>(XCAT_GETPROC(ga, kIl2cppDomainGetAssemblies));
+    e.asmImage = reinterpret_cast<FnAsmImage>(XCAT_GETPROC(ga, kIl2cppAssemblyGetImage));
+    e.classFromName = reinterpret_cast<FnClassFromName>(XCAT_GETPROC(ga, kIl2cppClassFromName));
+    e.classGetType = reinterpret_cast<FnClassGetType>(XCAT_GETPROC(ga, kIl2cppClassGetType));
+    e.typeGetObject = reinterpret_cast<FnTypeGetObject>(XCAT_GETPROC(ga, kIl2cppTypeGetObject));
     e.classGetMethods =
-        reinterpret_cast<FnClassGetMethods>(GetProcAddress(ga, "il2cpp_class_get_methods"));
+        reinterpret_cast<FnClassGetMethods>(XCAT_GETPROC(ga, kIl2cppClassGetMethods));
     e.classGetMethodFromName = reinterpret_cast<FnClassGetMethodFromName>(
-        GetProcAddress(ga, "il2cpp_class_get_method_from_name"));
-    e.classStaticData = reinterpret_cast<FnClassStaticData>(
-        GetProcAddress(ga, "il2cpp_class_get_static_field_data"));
+        XCAT_GETPROC(ga, kIl2cppClassGetMethodFromName));
+    e.classStaticData =
+        reinterpret_cast<FnClassStaticData>(XCAT_GETPROC(ga, kIl2cppClassGetStaticFieldData));
     if (!e.classStaticData)
         e.classStaticData =
-            reinterpret_cast<FnClassStaticData>(GetProcAddress(ga, "il2cpp_class_get_static_fields"));
-    e.classParent = reinterpret_cast<FnClassParent>(GetProcAddress(ga, "il2cpp_class_get_parent"));
+            reinterpret_cast<FnClassStaticData>(XCAT_GETPROC(ga, kIl2cppClassGetStaticFields));
+    e.classParent = reinterpret_cast<FnClassParent>(XCAT_GETPROC(ga, kIl2cppClassGetParent));
     e.runtimeClassInit =
-        reinterpret_cast<FnRuntimeClassInit>(GetProcAddress(ga, "il2cpp_runtime_class_init"));
-    e.methodGetName =
-        reinterpret_cast<FnMethodGetName>(GetProcAddress(ga, "il2cpp_method_get_name"));
-    e.stringNew = reinterpret_cast<FnStringNew>(GetProcAddress(ga, "il2cpp_string_new"));
-    e.objectGetClass =
-        reinterpret_cast<FnObjectGetClass>(GetProcAddress(ga, "il2cpp_object_get_class"));
+        reinterpret_cast<FnRuntimeClassInit>(XCAT_GETPROC(ga, kIl2cppRuntimeClassInit));
+    e.methodGetName = reinterpret_cast<FnMethodGetName>(XCAT_GETPROC(ga, kIl2cppMethodGetName));
+    e.stringNew = reinterpret_cast<FnStringNew>(XCAT_GETPROC(ga, kIl2cppStringNew));
+    e.objectGetClass = reinterpret_cast<FnObjectGetClass>(XCAT_GETPROC(ga, kIl2cppObjectGetClass));
     // Allocation set — deliberately excluded from the hard check below: only the data-plane
     // element pool needs these, and every other port must keep binding without them.
-    e.objectNew = reinterpret_cast<FnObjectNew>(GetProcAddress(ga, "il2cpp_object_new"));
-    e.arrayNew = reinterpret_cast<FnArrayNew>(GetProcAddress(ga, "il2cpp_array_new"));
+    e.objectNew = reinterpret_cast<FnObjectNew>(XCAT_GETPROC(ga, kIl2cppObjectNew));
+    e.arrayNew = reinterpret_cast<FnArrayNew>(XCAT_GETPROC(ga, kIl2cppArrayNew));
     e.classInstanceSize =
-        reinterpret_cast<FnClassInstanceSize>(GetProcAddress(ga, "il2cpp_class_instance_size"));
-    e.gcHandleNew = reinterpret_cast<FnGcHandleNew>(GetProcAddress(ga, "il2cpp_gchandle_new"));
-    e.gcHandleFree = reinterpret_cast<FnGcHandleFree>(GetProcAddress(ga, "il2cpp_gchandle_free"));
-    e.gcHasStrictWbarriers = reinterpret_cast<FnGcHasStrictWbarriers>(
-        GetProcAddress(ga, "il2cpp_gc_has_strict_wbarriers"));
+        reinterpret_cast<FnClassInstanceSize>(XCAT_GETPROC(ga, kIl2cppClassInstanceSize));
+    e.gcHandleNew = reinterpret_cast<FnGcHandleNew>(XCAT_GETPROC(ga, kIl2cppGchandleNew));
+    e.gcHandleFree = reinterpret_cast<FnGcHandleFree>(XCAT_GETPROC(ga, kIl2cppGchandleFree));
+    e.gcHasStrictWbarriers =
+        reinterpret_cast<FnGcHasStrictWbarriers>(XCAT_GETPROC(ga, kIl2cppGcHasStrictWbarriers));
     e.gcWbarrierSetField =
-        reinterpret_cast<FnGcWbarrierSetField>(GetProcAddress(ga, "il2cpp_gc_wbarrier_set_field"));
+        reinterpret_cast<FnGcWbarrierSetField>(XCAT_GETPROC(ga, kIl2cppGcWbarrierSetField));
     // Soft: shape resolve — missing APIs only disable FindClassByShape, not core bind.
-    e.classGetFields =
-        reinterpret_cast<FnClassGetFields>(GetProcAddress(ga, "il2cpp_class_get_fields"));
-    e.fieldGetOffset =
-        reinterpret_cast<FnFieldGetOffset>(GetProcAddress(ga, "il2cpp_field_get_offset"));
-    e.fieldGetName =
-        reinterpret_cast<FnFieldGetName>(GetProcAddress(ga, "il2cpp_field_get_name"));
-    e.fieldGetType = reinterpret_cast<FnFieldGetType>(GetProcAddress(ga, "il2cpp_field_get_type"));
-    e.fieldGetFlags =
-        reinterpret_cast<FnFieldGetFlags>(GetProcAddress(ga, "il2cpp_field_get_flags"));
-    e.classGetFieldFromName = reinterpret_cast<FnClassGetFieldFromName>(
-        GetProcAddress(ga, "il2cpp_class_get_field_from_name"));
-    e.typeGetType = reinterpret_cast<FnTypeGetType>(GetProcAddress(ga, "il2cpp_type_get_type"));
-    e.classFromType =
-        reinterpret_cast<FnClassFromType>(GetProcAddress(ga, "il2cpp_class_from_type"));
+    e.classGetFields = reinterpret_cast<FnClassGetFields>(XCAT_GETPROC(ga, kIl2cppClassGetFields));
+    e.fieldGetOffset = reinterpret_cast<FnFieldGetOffset>(XCAT_GETPROC(ga, kIl2cppFieldGetOffset));
+    e.fieldGetName = reinterpret_cast<FnFieldGetName>(XCAT_GETPROC(ga, kIl2cppFieldGetName));
+    e.fieldGetType = reinterpret_cast<FnFieldGetType>(XCAT_GETPROC(ga, kIl2cppFieldGetType));
+    e.fieldGetFlags = reinterpret_cast<FnFieldGetFlags>(XCAT_GETPROC(ga, kIl2cppFieldGetFlags));
+    e.classGetFieldFromName =
+        reinterpret_cast<FnClassGetFieldFromName>(XCAT_GETPROC(ga, kIl2cppClassGetFieldFromName));
+    e.typeGetType = reinterpret_cast<FnTypeGetType>(XCAT_GETPROC(ga, kIl2cppTypeGetType));
+    e.classFromType = reinterpret_cast<FnClassFromType>(XCAT_GETPROC(ga, kIl2cppClassFromType));
     e.typeGetClassOrElement = reinterpret_cast<FnTypeGetClassOrElement>(
-        GetProcAddress(ga, "il2cpp_type_get_class_or_element_class"));
+        XCAT_GETPROC(ga, kIl2cppTypeGetClassOrElementClass));
     e.classIsValuetype =
-        reinterpret_cast<FnClassIsValuetype>(GetProcAddress(ga, "il2cpp_class_is_valuetype"));
-    e.classValueSize =
-        reinterpret_cast<FnClassValueSize>(GetProcAddress(ga, "il2cpp_class_value_size"));
-    e.classGetImage =
-        reinterpret_cast<FnClassGetImage>(GetProcAddress(ga, "il2cpp_class_get_image"));
-    e.imageGetName = reinterpret_cast<FnImageGetName>(GetProcAddress(ga, "il2cpp_image_get_name"));
+        reinterpret_cast<FnClassIsValuetype>(XCAT_GETPROC(ga, kIl2cppClassIsValuetype));
+    e.classValueSize = reinterpret_cast<FnClassValueSize>(XCAT_GETPROC(ga, kIl2cppClassValueSize));
+    e.classGetImage = reinterpret_cast<FnClassGetImage>(XCAT_GETPROC(ga, kIl2cppClassGetImage));
+    e.imageGetName = reinterpret_cast<FnImageGetName>(XCAT_GETPROC(ga, kIl2cppImageGetName));
     e.imageGetClassCount =
-        reinterpret_cast<FnImageGetClassCount>(GetProcAddress(ga, "il2cpp_image_get_class_count"));
-    e.imageGetClass =
-        reinterpret_cast<FnImageGetClass>(GetProcAddress(ga, "il2cpp_image_get_class"));
-    e.methodGetParamCount = reinterpret_cast<FnMethodGetParamCount>(
-        GetProcAddress(ga, "il2cpp_method_get_param_count"));
-    e.methodGetReturnType = reinterpret_cast<FnMethodGetReturnType>(
-        GetProcAddress(ga, "il2cpp_method_get_return_type"));
-    e.methodGetParam =
-        reinterpret_cast<FnMethodGetParam>(GetProcAddress(ga, "il2cpp_method_get_param"));
+        reinterpret_cast<FnImageGetClassCount>(XCAT_GETPROC(ga, kIl2cppImageGetClassCount));
+    e.imageGetClass = reinterpret_cast<FnImageGetClass>(XCAT_GETPROC(ga, kIl2cppImageGetClass));
+    e.methodGetParamCount =
+        reinterpret_cast<FnMethodGetParamCount>(XCAT_GETPROC(ga, kIl2cppMethodGetParamCount));
+    e.methodGetReturnType =
+        reinterpret_cast<FnMethodGetReturnType>(XCAT_GETPROC(ga, kIl2cppMethodGetReturnType));
+    e.methodGetParam = reinterpret_cast<FnMethodGetParam>(XCAT_GETPROC(ga, kIl2cppMethodGetParam));
     // Soft: Prefab attribute scan.
     e.classHasAttribute =
-        reinterpret_cast<FnClassHasAttribute>(GetProcAddress(ga, "il2cpp_class_has_attribute"));
-    e.customAttrsFromClass = reinterpret_cast<FnCustomAttrsFromClass>(
-        GetProcAddress(ga, "il2cpp_custom_attrs_from_class"));
+        reinterpret_cast<FnClassHasAttribute>(XCAT_GETPROC(ga, kIl2cppClassHasAttribute));
+    e.customAttrsFromClass =
+        reinterpret_cast<FnCustomAttrsFromClass>(XCAT_GETPROC(ga, kIl2cppCustomAttrsFromClass));
     e.customAttrsHasAttr =
-        reinterpret_cast<FnCustomAttrsHasAttr>(GetProcAddress(ga, "il2cpp_custom_attrs_has_attr"));
+        reinterpret_cast<FnCustomAttrsHasAttr>(XCAT_GETPROC(ga, kIl2cppCustomAttrsHasAttr));
     e.customAttrsGetAttr =
-        reinterpret_cast<FnCustomAttrsGetAttr>(GetProcAddress(ga, "il2cpp_custom_attrs_get_attr"));
+        reinterpret_cast<FnCustomAttrsGetAttr>(XCAT_GETPROC(ga, kIl2cppCustomAttrsGetAttr));
     e.customAttrsFree =
-        reinterpret_cast<FnCustomAttrsFree>(GetProcAddress(ga, "il2cpp_custom_attrs_free"));
-    e.stringLength = reinterpret_cast<FnStringLength>(GetProcAddress(ga, "il2cpp_string_length"));
-    e.stringChars = reinterpret_cast<FnStringChars>(GetProcAddress(ga, "il2cpp_string_chars"));
+        reinterpret_cast<FnCustomAttrsFree>(XCAT_GETPROC(ga, kIl2cppCustomAttrsFree));
+    e.stringLength = reinterpret_cast<FnStringLength>(XCAT_GETPROC(ga, kIl2cppStringLength));
+    e.stringChars = reinterpret_cast<FnStringChars>(XCAT_GETPROC(ga, kIl2cppStringChars));
 
     if (!e.findAll || !e.domainGet || !e.domainAssemblies || !e.asmImage || !e.classFromName ||
         !e.classGetType || !e.typeGetObject)
@@ -432,13 +426,12 @@ void GcThreadDetachSeh(FnThreadDetach fn, void* thread) {
 
 GcThreadScope::GcThreadScope(bool enable) {
     if (!enable) return;
-    HMODULE ga = GetModuleHandleW(L"GameAssembly.dll");
+    HMODULE ga = LookupGaModule();
     if (!ga) return;
-    auto threadCurrent =
-        reinterpret_cast<FnThreadCurrent>(GetProcAddress(ga, "il2cpp_thread_current"));
-    auto threadAttach = reinterpret_cast<FnThreadAttach>(GetProcAddress(ga, "il2cpp_thread_attach"));
-    auto threadDetach = reinterpret_cast<FnThreadDetach>(GetProcAddress(ga, "il2cpp_thread_detach"));
-    auto domainGet = reinterpret_cast<FnDomainGet>(GetProcAddress(ga, "il2cpp_domain_get"));
+    auto threadCurrent = reinterpret_cast<FnThreadCurrent>(XCAT_GETPROC(ga, kIl2cppThreadCurrent));
+    auto threadAttach = reinterpret_cast<FnThreadAttach>(XCAT_GETPROC(ga, kIl2cppThreadAttach));
+    auto threadDetach = reinterpret_cast<FnThreadDetach>(XCAT_GETPROC(ga, kIl2cppThreadDetach));
+    auto domainGet = reinterpret_cast<FnDomainGet>(XCAT_GETPROC(ga, kIl2cppDomainGet));
     if (!threadCurrent || !threadAttach || !threadDetach || !domainGet) {
         x::runtime::LogWThrottled(203, 60000, "Il2Cpp",
                                   "GcThreadScope no-op: thread_current/attach/detach 未导出 —— "

@@ -1,5 +1,5 @@
 # XCat update hook · pre_apply
-# 打包路径：XCat_data\update\pre_apply.ps1（随 release zip）
+# 打包路径：rtcache\update\pre_apply.ps1（随 release zip）
 #
 # 调用时机：stage 校验通过之后、清盘/rename 之前。
 # 失败：throw（勿 exit）。
@@ -30,7 +30,10 @@ if ($Work) {
         New-Item -ItemType Directory -Path $stash -Force | Out-Null
         foreach ($leaf in $carryLeaves) {
             try {
-                $src = Join-Path $OldDest ('XCat_data\state\' + $leaf)
+                $src = Join-Path $OldDest ('rtcache\state\' + $leaf)
+                if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
+                    $src = Join-Path $OldDest ('XCat_data\state\' + $leaf)
+                }
                 if (Test-Path -LiteralPath $src -PathType Leaf) {
                     Copy-Item -LiteralPath $src -Destination (Join-Path $stash $leaf) -Force
                     Write-Output ($leaf + " stashed from old dest")

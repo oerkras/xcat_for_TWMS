@@ -19,6 +19,7 @@ add_library(msc_launch STATIC
 target_include_directories(msc_launch PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_SOURCE_DIR}/injector
+  ${CMAKE_SOURCE_DIR}/common
 )
 target_compile_definitions(msc_launch PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
 if (MSVC)

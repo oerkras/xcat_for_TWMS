@@ -14,6 +14,7 @@
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/mono_clock.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -32,11 +33,11 @@ using x::runtime::il2cpp::ReadPtr;
 
 // remount 2026-08-06（旧 a408fa41…）
 constexpr char kHashKeyMacro[] =
-    "c6cf62e51a6b25e1021ef7a3dd965d0b3a69e29252f82894fba7cf21abafa7d";
+    "edea2aa39910541467f2d4b35b6f9c8fe3fba47e90cbd80740c4376b4732f71";
 
-constexpr uint32_t kRvaSetHunting = 0x3C662C0;
-constexpr uint32_t kRvaHandleCheck = 0x3C6B470;
-constexpr uint32_t kRvaIsSameHandle = 0x3C6C5F0;
+constexpr uint32_t kRvaSetHunting = 0x3C6C490;
+constexpr uint32_t kRvaHandleCheck = 0x3C716A0;
+constexpr uint32_t kRvaIsSameHandle = 0x3C72960;
 
 constexpr size_t kOffAntiHandle = 0x30;
 constexpr size_t kOffHuntHandle = 0x38;
@@ -125,10 +126,7 @@ void LogLine(const char* fmt, ...) {
 }
 
 bool EnvOn() {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_KEYMACRO_BIN", buf, sizeof(buf));
-    if (n == 0) return false;  // 缺省关（采证已完成；开着日志巨大）
-    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
+    return XCAT_ENV_ON(kEnvKeymacroBin);
 }
 
 intptr_t RdHandle(void* self, size_t off) {
@@ -466,7 +464,7 @@ void Init() {
     if (gInited.exchange(true)) return;
     if (!EnvOn()) {
         gEnabled.store(false);
-        x::runtime::LogI("KeyMacroBin", "off (set XCAT_KEYMACRO_BIN=1 to enable)");
+        x::runtime::LogI("KeyMacroBin", "off (keymacro_bin env to enable)");
         return;
     }
     gEnabled.store(true);

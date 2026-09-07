@@ -4,10 +4,10 @@
 //
 // | RVA | 符号 | 托管参数 | 原生参数 |
 // |---|---|---|---|
-// | `0x105D290` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
-// | `0x10727e0` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
+// | `0x1060DB0` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
+// | `0x1075d20` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
 //
-// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x105D290 上，
+// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x1060DB0 上，
 //   于是 `methodInfo` 被塞进第 7 参的位置、真 methodInfo 丢失，把射击路径整体打歪
 //   （体感「基本必挥弓」）。改这里之前先用 `Dumps/runtime/out/dump.cs` 按 RVA 复核形状。
 //
@@ -54,6 +54,7 @@
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
 #include "../../ui/player_vitals.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -69,9 +70,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaTryDoingMeleeAttack = 0x105D290;
-constexpr uint32_t kRvaTryDoingShootAttack = 0x10727e0;
-constexpr uint32_t kRvaGetWeaponType = 0x142BB50;
+constexpr uint32_t kRvaTryDoingMeleeAttack = 0x1060DB0;
+constexpr uint32_t kRvaTryDoingShootAttack = 0x1075d20;
+constexpr uint32_t kRvaGetWeaponType = 0x1432080;
 
 // ── 取框探针（一次性调研，`XCAT_MELEE_RECT_PROBE=1` 才挂）──────────────────────
 //
@@ -85,8 +86,8 @@ constexpr uint32_t kRvaGetWeaponType = 0x142BB50;
 // （按仓规逐处实读；这里按 0 读会把分支判反。它不是武器类型——枚举最大是 Gun=49。）
 //
 // 探针要回答的就一件事：飞镖普攻那一发走的是哪条、arg4 实际是几、框实际多大。
-constexpr uint32_t kRvaGetAttackRect = 0x123bad0;  // sub_7FF849EA8290
-constexpr uint32_t kRvaConstRect = 0x5659210;      // remounted 2026-08-20 GetAttackRect RIP → (-88,-6,70,56)
+constexpr uint32_t kRvaGetAttackRect = 0x1240030;  // sub_7FF849EA8290
+constexpr uint32_t kRvaConstRect = 0x5660030;      // remounted 2026-09-03 GetAttackRect RIP → (-88,-6,70,56)
 constexpr int kRectKindConstPath = 55;
 
 // 近战 / 射击开头一致：push rbp / r15 / r14 / r13 / r12 / rsi / rdi / rbx = 12 字节。
@@ -610,9 +611,9 @@ bool TryArmOne(AbsHookState& st, std::atomic<bool>& refuse, uint32_t rva, void* 
 //   MeleeAttackAfterImage TDI 1644；Range: Dictionary<int,Rect> @0x18
 //   _afterimageMap: Dictionary<string, AfterImage> @0x20（08-13 在 0x40，0x40 现为另一张 Dictionary）
 constexpr char kHashActionManager[] =
-    "e35f6343ebf368eebf40fc2ad5feeaeb3b9dc4ac6326ee032d935aadd50d4c5";
+    "b6556cb63d6e47860340c30f5009d1a0db6dd6382fd771512a14e7792432946";
 constexpr char kHashSingletonInstance[] =
-    "c8072d39439eef6a06153eff03c75ee45009876f675c7c7ebc01a78bf7f0856";
+    "a4acbfea5717698475dab6427b71c33bd8fbab4d9fbdb4b7c5f58cdbec21b47";
 constexpr size_t kOffActionMgrAfterImageMap = 0x20;
 constexpr size_t kOffAfterImageRange = 0x18;
 
@@ -641,7 +642,7 @@ const char* ClassNameOf(void* klass) {
     if (!sTried) {
         sTried = true;
         if (HMODULE ga = x::runtime::il2cpp::GameAssembly())
-            sFn = reinterpret_cast<FnClassName>(GetProcAddress(ga, "il2cpp_class_get_name"));
+            sFn = reinterpret_cast<FnClassName>(XCAT_GETPROC(ga, kIl2cppClassGetName));
     }
     if (!klass || !sFn) return "?";
     const char* s = nullptr;
@@ -885,11 +886,9 @@ void PumpApply(void*) {
 // 勾上即自行放行 .text 补丁。关开关不撤环境变量：近战不挥拳与 movepath_flush 共用这根旗，
 // 一方关掉若清掉，另一方会整段拒绝下钩（01:17 BIN：两边同时「须先设 XCAT_ALLOW_TEXT_PATCH=1」）。
 bool EnsurePatchEnv() {
-    char env[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", env, sizeof(env));
-    if (n > 0 && env[0] == '1') return true;
-    if (!SetEnvironmentVariableA("XCAT_ALLOW_TEXT_PATCH", "1")) {
-        x::runtime::LogW("MeleeVeto", "无法设置 XCAT_ALLOW_TEXT_PATCH=1 err=%lu", GetLastError());
+    if (XCAT_ENV_ON(kEnvAllowTextPatch)) return true;
+    if (!XCAT_ENV_SETA(kEnvAllowTextPatch, "1")) {
+        x::runtime::LogW("MeleeVeto", "无法设置 allow_text_patch env err=%lu", GetLastError());
         return false;
     }
     return true;

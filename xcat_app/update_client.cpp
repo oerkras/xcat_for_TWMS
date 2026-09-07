@@ -5,6 +5,7 @@
 #include "log_upload.h"
 
 #include "../common/process_util.h"
+#include "../common/xcat_install_names.h"
 #include "../common/xcat_access_deny_sticky.h"
 #include "../common/xcat_config_ini.h"
 #include "../common/xcat_log.h"
@@ -375,7 +376,7 @@ HttpResult HttpGetTextOnce(const ParsedUrl& url, DWORD accessType, const char* m
                            const wchar_t* extraHeaders, int resolveMs = 8000, int connectMs = 8000,
                            int sendMs = 15000, int receiveMs = 20000) {
     HttpResult result;
-    HINTERNET ses = WinHttpOpen(L"XCat-Update/1.0", accessType,
+    HINTERNET ses = WinHttpOpen(xcat::install::kHttpUserAgent, accessType,
                                 WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!ses) {
         result.err = WinHttpFailure("WinHttpOpen", GetLastError(), mode);
@@ -626,7 +627,7 @@ std::string SanitizeFileName(std::string s) {
 
 bool DownloadFileOnce(const ParsedUrl& url, const std::wstring& path, DWORD accessType,
                       const char* mode, uint64_t expectedSize, std::string& err) {
-    HINTERNET ses = WinHttpOpen(L"XCat-Update/1.0", accessType,
+    HINTERNET ses = WinHttpOpen(xcat::install::kHttpUserAgent, accessType,
                                 WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!ses) {
         err = WinHttpFailure("WinHttpOpen", GetLastError(), mode);
@@ -896,60 +897,67 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     const DWORD pid = GetCurrentProcessId();
     std::string ps;
     ps += "$ErrorActionPreference='Stop'\r\n";
+    ps += "$payloadDir='" + std::string(xcat::install::kPayloadDir) + "'\r\n";
+    ps += "$payloadDll='" + std::string(xcat::install::kPayloadDll) + "'\r\n";
+    ps += "$launcherExe='" + std::string(xcat::install::kLauncherExe) + "'\r\n";
+    ps += "$launcherStem='" + std::string(xcat::install::kLauncherStem) + "'\r\n";
+    ps += "$legacyPayloadDir='" + std::string(xcat::install::LegacyPayloadDirA()) + "'\r\n";
+    ps += "$legacyLauncherStem='" + std::string(xcat::install::LegacyLauncherStemA()) + "'\r\n";
+    ps += "$legacyPayloadDll='" + std::string(xcat::install::LegacyPayloadDllA()) + "'\r\n";
     // 绝不能 cwd=安装目录：本脚本会 Rename 整包，cwd 钉在 dest 会令目录永远「正在使用中」。
     ps += "try { Set-Location -LiteralPath $env:TEMP } catch {}\r\n";
     ps += "$log=Join-Path $env:TEMP 'xcat_update_apply.log'\r\n";
-    ps += "function Write-XCatLog($m) { Add-Content -LiteralPath $log -Encoding UTF8 -Value ((Get-Date -Format o) + ' ' + $m) }\r\n";
-    ps += "Write-XCatLog ('updater cwd=' + (Get-Location).Path)\r\n";
+    ps += "function Write-UpdLog($m) { Add-Content -LiteralPath $log -Encoding UTF8 -Value ((Get-Date -Format o) + ' ' + $m) }\r\n";
+    ps += "Write-UpdLog ('updater cwd=' + (Get-Location).Path)\r\n";
     // throwOnFail=$true：换包前门禁；=$false：失败 relaunch 时尽力清栈，不阻断拉起启动器。
-    ps += "function Wait-XCatProcessGone($name, $graceSec, $forceSec, $throwOnFail=$true) {\r\n";
+    ps += "function Wait-ProcGone($name, $graceSec, $forceSec, $throwOnFail=$true) {\r\n";
     ps += "  $deadline=(Get-Date).AddSeconds($graceSec)\r\n";
     ps += "  while (@(Get-Process -Name $name -ErrorAction SilentlyContinue).Count -gt 0) {\r\n";
-    ps += "    if ((Get-Date) -gt $deadline) { Write-XCatLog ($name + '.exe still running; force stop'); Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; break }\r\n";
+    ps += "    if ((Get-Date) -gt $deadline) { Write-UpdLog ($name + '.exe still running; force stop'); Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue; break }\r\n";
     ps += "    Start-Sleep -Milliseconds 300\r\n";
     ps += "  }\r\n";
     ps += "  $deadline=(Get-Date).AddSeconds($forceSec)\r\n";
     ps += "  while (@(Get-Process -Name $name -ErrorAction SilentlyContinue).Count -gt 0) {\r\n";
     ps += "    if ((Get-Date) -gt $deadline) {\r\n";
     ps += "      if ($throwOnFail) { throw ($name + '.exe still running after force stop') }\r\n";
-    ps += "      Write-XCatLog ($name + '.exe still running after force stop; continue')\r\n";
+    ps += "      Write-UpdLog ($name + '.exe still running after force stop; continue')\r\n";
     ps += "      return $false\r\n";
     ps += "    }\r\n";
     ps += "    Start-Sleep -Milliseconds 200\r\n";
     ps += "  }\r\n";
     ps += "  return $true\r\n";
     ps += "}\r\n";
-    // TWMS：清经典版游戏与 NGM 启动器，避免注入态占用 XCat_data\xcat.dll / 目录锁。
-    ps += "function Stop-XCatClassicStack($graceSec, $forceSec, $throwOnFail=$true) {\r\n";
-    ps += "  Write-XCatLog ('Stop-XCatClassicStack begin grace=' + $graceSec + ' force=' + $forceSec)\r\n";
-    ps += "  Wait-XCatProcessGone 'Maplestory_Classic' $graceSec $forceSec $throwOnFail | Out-Null\r\n";
-    ps += "  Wait-XCatProcessGone 'NGM64' $graceSec $forceSec $false | Out-Null\r\n";
-    ps += "  Wait-XCatProcessGone 'NGM' $graceSec $forceSec $false | Out-Null\r\n";
-    ps += "  Write-XCatLog 'Stop-XCatClassicStack done'\r\n";
+    // TWMS：清经典版游戏与 NGM 启动器，避免注入态占用 rtcache\rtmod.dll / 目录锁。
+    ps += "function Stop-ClassicStack($graceSec, $forceSec, $throwOnFail=$true) {\r\n";
+    ps += "  Write-UpdLog ('Stop-ClassicStack begin grace=' + $graceSec + ' force=' + $forceSec)\r\n";
+    ps += "  Wait-ProcGone 'Maplestory_Classic' $graceSec $forceSec $throwOnFail | Out-Null\r\n";
+    ps += "  Wait-ProcGone 'NGM64' $graceSec $forceSec $false | Out-Null\r\n";
+    ps += "  Wait-ProcGone 'NGM' $graceSec $forceSec $false | Out-Null\r\n";
+    ps += "  Write-UpdLog 'Stop-ClassicStack done'\r\n";
     ps += "}\r\n";
     // 兼容旧脚本调用名。
-    ps += "function Stop-XCatNexonStack($graceSec, $forceSec, $throwOnFail=$true) {\r\n";
-    ps += "  Stop-XCatClassicStack $graceSec $forceSec $throwOnFail\r\n";
+    ps += "function Stop-NexonStack($graceSec, $forceSec, $throwOnFail=$true) {\r\n";
+    ps += "  Stop-ClassicStack $graceSec $forceSec $throwOnFail\r\n";
     ps += "}\r\n";
     // 清目录：只去掉 ReadOnly（勿把目录 Attributes 设成 Normal），再重试删除。
-    ps += "function Clear-XCatAttrs($path) {\r\n";
+    ps += "function Clear-PathAttrs($path) {\r\n";
     ps += "  if (-not (Test-Path -LiteralPath $path)) { return }\r\n";
     ps += "  $mask=[int][IO.FileAttributes]::ReadOnly\r\n";
     ps += "  $clear={ param($p) try { $it=Get-Item -LiteralPath $p -Force -ErrorAction Stop; $it.Attributes = ([int]$it.Attributes -band (-bnot $mask)) } catch {} }\r\n";
     ps += "  & $clear $path\r\n";
     ps += "  try { Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { & $clear $_.FullName } } catch {}\r\n";
     ps += "}\r\n";
-    ps += "function Remove-XCatPathRetry($path, $attempts) {\r\n";
+    ps += "function Remove-PathRetry($path, $attempts) {\r\n";
     ps += "  if (-not (Test-Path -LiteralPath $path)) { return $true }\r\n";
     ps += "  for ($i=1; $i -le $attempts; $i++) {\r\n";
-    ps += "    Clear-XCatAttrs $path\r\n";
-    ps += "    try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop; return $true } catch { Write-XCatLog ('remove retry ' + $i + '/' + $attempts + ': ' + $path + ' :: ' + $_.Exception.Message) }\r\n";
+    ps += "    Clear-PathAttrs $path\r\n";
+    ps += "    try { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop; return $true } catch { Write-UpdLog ('remove retry ' + $i + '/' + $attempts + ': ' + $path + ' :: ' + $_.Exception.Message) }\r\n";
     ps += "    Start-Sleep -Milliseconds (200 * $i)\r\n";
     ps += "  }\r\n";
     ps += "  return $false\r\n";
     ps += "}\r\n";
     // 换包失败通知：短摘要给人看；全文进日志。落盘 state + TEMP，并 Popup 兜底（不依赖新启动器）。
-    ps += "function Format-XCatUpdateFailSummary($reason) {\r\n";
+    ps += "function Format-UpdFailSummary($reason) {\r\n";
     ps += "  $raw=($reason | Out-String)\r\n";
     ps += "  foreach ($line in @($raw -split \"`n\")) {\r\n";
     ps += "    $l=$line.Trim()\r\n";
@@ -960,27 +968,27 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "  }\r\n";
     ps += "  return '自动更新安装失败，请查看 %TEMP%\\xcat_update_apply.log'\r\n";
     ps += "}\r\n";
-    ps += "function Write-XCatUpdateFailedNotify($dest, $reason) {\r\n";
-    ps += "  $summary=Format-XCatUpdateFailSummary $reason\r\n";
+    ps += "function Write-UpdFailedNotify($dest, $reason) {\r\n";
+    ps += "  $summary=Format-UpdFailSummary $reason\r\n";
     ps += "  $stamp=Get-Date -Format o\r\n";
     ps += "  $text=$stamp + [Environment]::NewLine + $summary + [Environment]::NewLine + '日志: %TEMP%\\xcat_update_apply.log'\r\n";
     ps += "  $tempNotify=Join-Path $env:TEMP 'xcat_update_failed.notify'\r\n";
     ps += "  try {\r\n";
     ps += "    Set-Content -LiteralPath $tempNotify -Value $text -Encoding UTF8\r\n";
-    ps += "    Write-XCatLog ('update failed notify written (TEMP): ' + $tempNotify)\r\n";
-    ps += "  } catch { Write-XCatLog ('update failed TEMP notify write failed: ' + ($_ | Out-String)) }\r\n";
+    ps += "    Write-UpdLog ('update failed notify written (TEMP): ' + $tempNotify)\r\n";
+    ps += "  } catch { Write-UpdLog ('update failed TEMP notify write failed: ' + ($_ | Out-String)) }\r\n";
     ps += "  if (-not $dest) { return $summary }\r\n";
     ps += "  try {\r\n";
-    ps += "    $dir=Join-Path $dest 'XCat_data\\state'\r\n";
+    ps += "    $dir=Join-Path $dest 'rtcache\\state'\r\n";
     ps += "    New-Item -ItemType Directory -Path $dir -Force | Out-Null\r\n";
     ps += "    $p=Join-Path $dir 'update_failed.notify'\r\n";
     ps += "    Set-Content -LiteralPath $p -Value $text -Encoding UTF8\r\n";
-    ps += "    Write-XCatLog ('update failed notify written: ' + $p)\r\n";
-    ps += "  } catch { Write-XCatLog ('update failed notify write failed: ' + ($_ | Out-String)) }\r\n";
+    ps += "    Write-UpdLog ('update failed notify written: ' + $p)\r\n";
+    ps += "  } catch { Write-UpdLog ('update failed notify write failed: ' + ($_ | Out-String)) }\r\n";
     ps += "  return $summary\r\n";
     ps += "}\r\n";
     // 失败提示：user32 MessageBoxW（独立进程，不依赖 WScript）；未确认显示再试 msg.exe。
-    ps += "function Show-XCatUpdateFailedUi($summary) {\r\n";
+    ps += "function Show-UpdFailedUi($summary) {\r\n";
     ps += "  $msg='更新失败：' + $summary + [Environment]::NewLine + [Environment]::NewLine + '详情见 %TEMP%\\xcat_update_apply.log'\r\n";
     ps += "  if ($msg.Length -gt 500) { $msg=$msg.Substring(0,497) + '...' }\r\n";
     ps += "  $shown=$false\r\n";
@@ -994,14 +1002,14 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "  Add-Type -TypeDefinition @\"\r\n";
     ps += "using System;\r\n";
     ps += "using System.Runtime.InteropServices;\r\n";
-    ps += "public static class XCatNativeMsg {\r\n";
+    ps += "public static class NativeMsg {\r\n";
     ps += "  [DllImport(\"user32.dll\", CharSet = CharSet.Unicode)]\r\n";
     ps += "  public static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);\r\n";
     ps += "}\r\n";
     ps += "\"@\r\n";
     ps += "  Set-Content -LiteralPath $readyPath -Value 'ready' -Encoding ASCII\r\n";
     ps += "  # 0x10=MB_ICONERROR 0x40000=MB_SETFOREGROUND 0x1000=MB_SYSTEMMODAL\r\n";
-    ps += "  [void][XCatNativeMsg]::MessageBoxW([IntPtr]::Zero, $Text, 'XCat 更新失败', 0x10 -bor 0x40000 -bor 0x1000)\r\n";
+    ps += "  [void][NativeMsg]::MessageBoxW([IntPtr]::Zero, $Text, '更新失败', 0x10 -bor 0x40000 -bor 0x1000)\r\n";
     ps += "} finally {\r\n";
     ps += "  Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue\r\n";
     ps += "  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n";
@@ -1015,9 +1023,9 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "      if (Test-Path -LiteralPath $ready -PathType Leaf) { $shown=$true; break }\r\n";
     ps += "      Start-Sleep -Milliseconds 100\r\n";
     ps += "    }\r\n";
-    ps += "    if ($shown) { Write-XCatLog ('update failed UI MessageBox ready path=' + $ui) }\r\n";
-    ps += "    else { Write-XCatLog ('update failed UI MessageBox not confirmed within timeout path=' + $ui) }\r\n";
-    ps += "  } catch { Write-XCatLog ('update failed MessageBox launch failed: ' + ($_ | Out-String)) }\r\n";
+    ps += "    if ($shown) { Write-UpdLog ('update failed UI MessageBox ready path=' + $ui) }\r\n";
+    ps += "    else { Write-UpdLog ('update failed UI MessageBox not confirmed within timeout path=' + $ui) }\r\n";
+    ps += "  } catch { Write-UpdLog ('update failed MessageBox launch failed: ' + ($_ | Out-String)) }\r\n";
     ps += "  if ($shown) { return }\r\n";
     ps += "  try {\r\n";
     ps += "    $msgExe=Join-Path $env:SystemRoot 'System32\\msg.exe'\r\n";
@@ -1025,59 +1033,59 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "    $short=((($msg -replace \"`r\",'') -replace \"`n\",' ').Trim())\r\n";
     ps += "    if ($short.Length -gt 220) { $short=$short.Substring(0,217) + '...' }\r\n";
     ps += "    Start-Process -FilePath $msgExe -ArgumentList @('*','/TIME:15', $short) -WindowStyle Hidden | Out-Null\r\n";
-    ps += "    Write-XCatLog 'update failed UI msg.exe launched'\r\n";
-    ps += "  } catch { Write-XCatLog ('update failed UI msg.exe failed: ' + ($_ | Out-String)) }\r\n";
+    ps += "    Write-UpdLog 'update failed UI msg.exe launched'\r\n";
+    ps += "  } catch { Write-UpdLog ('update failed UI msg.exe failed: ' + ($_ | Out-String)) }\r\n";
     ps += "}\r\n";
     // 删不掉时先挪到 TEMP，避免安装目录旁留下 __xcat_old_* 邻居包。
-    ps += "function Remove-XCatAsideTrash($asidePath) {\r\n";
+    ps += "function Remove-AsideTrash($asidePath) {\r\n";
     ps += "  if (-not $asidePath -or -not (Test-Path -LiteralPath $asidePath)) { return }\r\n";
-    ps += "  if (Remove-XCatPathRetry $asidePath 4) { Write-XCatLog ('old install trash removed: ' + $asidePath); return }\r\n";
+    ps += "  if (Remove-PathRetry $asidePath 4) { Write-UpdLog ('old install trash removed: ' + $asidePath); return }\r\n";
     ps += "  $trash=Join-Path $env:TEMP ('xcat_update_trash_' + [guid]::NewGuid().ToString('N'))\r\n";
     ps += "  try {\r\n";
     ps += "    Move-Item -LiteralPath $asidePath -Destination $trash -Force -ErrorAction Stop\r\n";
-    ps += "    Write-XCatLog ('old install moved to TEMP trash: ' + $trash)\r\n";
-    ps += "    if (Remove-XCatPathRetry $trash 3) { Write-XCatLog ('TEMP trash removed: ' + $trash) }\r\n";
-    ps += "    else { Write-XCatLog ('TEMP trash left for OS cleanup: ' + $trash) }\r\n";
-    ps += "  } catch { Write-XCatLog ('aside trash relocate failed: ' + $asidePath + ' :: ' + $_.Exception.Message) }\r\n";
+    ps += "    Write-UpdLog ('old install moved to TEMP trash: ' + $trash)\r\n";
+    ps += "    if (Remove-PathRetry $trash 3) { Write-UpdLog ('TEMP trash removed: ' + $trash) }\r\n";
+    ps += "    else { Write-UpdLog ('TEMP trash left for OS cleanup: ' + $trash) }\r\n";
+    ps += "  } catch { Write-UpdLog ('aside trash relocate failed: ' + $asidePath + ' :: ' + $_.Exception.Message) }\r\n";
     ps += "}\r\n";
     // 整目录改名让位；失败返回 $null（由调用方降级为逐文件原地覆盖）。
-    ps += "function Move-XCatInstallAside($finalDest) {\r\n";
+    ps += "function Move-InstallAside($finalDest) {\r\n";
     ps += "  if (-not (Test-Path -LiteralPath $finalDest)) { return $null }\r\n";
     ps += "  $parent=Split-Path -Parent $finalDest\r\n";
     ps += "  $leaf=Split-Path -Leaf $finalDest\r\n";
     ps += "  $aside=$null\r\n";
     ps += "  for ($i=1; $i -le 6; $i++) {\r\n";
     ps += "    $aside=Join-Path $parent ($leaf + '.__xcat_old_' + [guid]::NewGuid().ToString('N').Substring(0,8))\r\n";
-    ps += "    Clear-XCatAttrs $finalDest\r\n";
-    ps += "    try { Rename-Item -LiteralPath $finalDest -NewName (Split-Path -Leaf $aside) -ErrorAction Stop; Write-XCatLog ('install moved aside -> ' + $aside); return $aside } catch { Write-XCatLog ('rename aside retry ' + $i + ': ' + $_.Exception.Message) }\r\n";
+    ps += "    Clear-PathAttrs $finalDest\r\n";
+    ps += "    try { Rename-Item -LiteralPath $finalDest -NewName (Split-Path -Leaf $aside) -ErrorAction Stop; Write-UpdLog ('install moved aside -> ' + $aside); return $aside } catch { Write-UpdLog ('rename aside retry ' + $i + ': ' + $_.Exception.Message) }\r\n";
     ps += "    Start-Sleep -Milliseconds (300 * $i)\r\n";
     ps += "  }\r\n";
-    ps += "  Write-XCatLog ('rename aside gave up (dir in use): ' + $finalDest)\r\n";
+    ps += "  Write-UpdLog ('rename aside gave up (dir in use): ' + $finalDest)\r\n";
     ps += "  return $null\r\n";
     ps += "}\r\n";
     // rename 失败时的降级：尽量删光子项再 Copy-Item 覆盖；关键文件删不掉则硬失败。
-    ps += "function Clear-XCatInstallForInPlace($finalDest) {\r\n";
+    ps += "function Clear-InstallForInPlace($finalDest) {\r\n";
     ps += "  if (-not (Test-Path -LiteralPath $finalDest)) { return }\r\n";
     ps += "  foreach ($it in @(Get-ChildItem -LiteralPath $finalDest -Force -ErrorAction SilentlyContinue)) {\r\n";
-    ps += "    if (-not (Remove-XCatPathRetry $it.FullName 6)) { Write-XCatLog ('in-place clean leftover: ' + $it.FullName) }\r\n";
+    ps += "    if (-not (Remove-PathRetry $it.FullName 6)) { Write-UpdLog ('in-place clean leftover: ' + $it.FullName) }\r\n";
     ps += "  }\r\n";
-    ps += "  foreach ($rel in @('xcat.exe','XCat_data\\xcat.dll','XCat_data\\state')) {\r\n";
+    ps += "  foreach ($rel in @($launcherExe, ($payloadDir+'\\'+$payloadDll), ($payloadDir+'\\state'), ($legacyLauncherStem+'.exe'), ($legacyPayloadDir+'\\'+$legacyPayloadDll), ($legacyPayloadDir+'\\state'))) {\r\n";
     ps += "    $p=Join-Path $finalDest $rel\r\n";
     ps += "    if (-not (Test-Path -LiteralPath $p)) { continue }\r\n";
-    ps += "    if (-not (Remove-XCatPathRetry $p 8)) {\r\n";
-    ps += "      if ($rel -eq 'XCat_data\\state') { Write-XCatLog ('in-place state cleanup leftover: ' + $p); continue }\r\n";
+    ps += "    if (-not (Remove-PathRetry $p 8)) {\r\n";
+    ps += "      if ($rel -eq ($payloadDir+'\\state') -or $rel -eq ($legacyPayloadDir+'\\state')) { Write-UpdLog ('in-place state cleanup leftover: ' + $p); continue }\r\n";
     ps += "      throw ('in-place update blocked; locked file: ' + $p)\r\n";
     ps += "    }\r\n";
     ps += "  }\r\n";
     ps += "}\r\n";
     // 固定名桌面快捷方式；清理指向旧安装目录 / 旧包名文件夹的 .lnk
-    ps += "function Update-XCatDesktopShortcut($finalDest, $oldDest) {\r\n";
+    ps += "function Update-DesktopShortcut($finalDest, $oldDest) {\r\n";
     ps += "  $desktop=[Environment]::GetFolderPath('Desktop')\r\n";
-    ps += "  if (-not $desktop) { Write-XCatLog 'desktop shortcut skip: no Desktop path'; return }\r\n";
-    ps += "  $exe=Join-Path $finalDest 'xcat.exe'\r\n";
-    ps += "  if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Write-XCatLog 'desktop shortcut skip: missing xcat.exe'; return }\r\n";
+    ps += "  if (-not $desktop) { Write-UpdLog 'desktop shortcut skip: no Desktop path'; return }\r\n";
+    ps += "  $exe=Join-Path $finalDest 'rtapp.exe'\r\n";
+    ps += "  if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { Write-UpdLog 'desktop shortcut skip: missing rtapp.exe'; return }\r\n";
     ps += "  $shell=New-Object -ComObject WScript.Shell\r\n";
-    ps += "  $keepName='XCat.lnk'\r\n";
+    ps += "  $keepName='rtapp.lnk'\r\n";
     ps += "  $keepPath=Join-Path $desktop $keepName\r\n";
     ps += "  $oldNorm=$null\r\n";
     ps += "  if ($oldDest) { try { $oldNorm=[System.IO.Path]::GetFullPath($oldDest).TrimEnd('\\').ToLowerInvariant() } catch {} }\r\n";
@@ -1090,7 +1098,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "    try {\r\n";
     ps += "      $sc=$shell.CreateShortcut($lnk.FullName)\r\n";
     ps += "      $tp=$sc.TargetPath\r\n";
-    ps += "      if ($tp -and ([System.IO.Path]::GetFileName($tp) -ieq 'xcat.exe')) {\r\n";
+    ps += "      if ($tp -and (($leaf=([System.IO.Path]::GetFileName($tp))) -and ($leaf -ieq $launcherExe -or $leaf -ieq ($legacyLauncherStem + '.exe')))) {\r\n";
     ps += "        $td=[System.IO.Path]::GetDirectoryName($tp)\r\n";
     ps += "        if ($td) {\r\n";
     ps += "          $tdNorm=[System.IO.Path]::GetFullPath($td).TrimEnd('\\').ToLowerInvariant()\r\n";
@@ -1101,16 +1109,16 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "      }\r\n";
     ps += "    } catch {}\r\n";
     ps += "    if ($drop) {\r\n";
-    ps += "      try { Remove-Item -LiteralPath $lnk.FullName -Force -ErrorAction Stop; Write-XCatLog ('removed old shortcut: ' + $lnk.Name) } catch { Write-XCatLog ('remove shortcut failed: ' + $lnk.Name) }\r\n";
+    ps += "      try { Remove-Item -LiteralPath $lnk.FullName -Force -ErrorAction Stop; Write-UpdLog ('removed old shortcut: ' + $lnk.Name) } catch { Write-UpdLog ('remove shortcut failed: ' + $lnk.Name) }\r\n";
     ps += "    }\r\n";
     ps += "  }\r\n";
     ps += "  $scNew=$shell.CreateShortcut($keepPath)\r\n";
     ps += "  $scNew.TargetPath=$exe\r\n";
     ps += "  $scNew.WorkingDirectory=$finalDest\r\n";
     ps += "  $scNew.IconLocation=$exe + ',0'\r\n";
-    ps += "  $scNew.Description='XCat'\r\n";
+    ps += "  $scNew.Description='rtapp'\r\n";
     ps += "  $scNew.Save()\r\n";
-    ps += "  Write-XCatLog ('desktop shortcut ready: ' + $keepPath)\r\n";
+    ps += "  Write-UpdLog ('desktop shortcut ready: ' + $keepPath)\r\n";
     ps += "}\r\n";
     ps += "$pidToWait=" + std::to_string(pid) + "\r\n";
     ps += "$zipPath=" + PsQuote(zipPath) + "\r\n";
@@ -1125,47 +1133,48 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "$recoverExitZero=$false\r\n";
     ps += "$installCommitted=$false\r\n";
     ps += "try {\r\n";
-    ps += "Write-XCatLog ('begin zip=' + $zipPath + ' oldDest=' + $oldDest)\r\n";
+    ps += "Write-UpdLog ('begin zip=' + $zipPath + ' oldDest=' + $oldDest)\r\n";
     ps += "while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }\r\n";
-    // 装前再清一轮：游戏注入会锁 xcat.dll；NGM 偶发占目录。
-    ps += "Stop-XCatClassicStack 0 12\r\n";
-    ps += "Wait-XCatProcessGone 'xcat' 0 8\r\n";
+    // 装前再清一轮：游戏注入会锁 rtmod.dll；NGM 偶发占目录。
+    ps += "Stop-ClassicStack 0 12\r\n";
+    ps += "Wait-ProcGone $launcherStem 0 8\r\n";
+    ps += "Wait-ProcGone $legacyLauncherStem 0 8 $false\r\n";
     ps += "if (@(Get-Process -Name 'Maplestory_Classic' -ErrorAction SilentlyContinue).Count -gt 0) {\r\n";
-    ps += "  Write-XCatLog 'WARN residual Maplestory_Classic before swap; extra stop + settle 5s'\r\n";
-    ps += "  Stop-XCatClassicStack 3 10 $false\r\n";
+    ps += "  Write-UpdLog 'WARN residual Maplestory_Classic before swap; extra stop + settle 5s'\r\n";
+    ps += "  Stop-ClassicStack 3 10 $false\r\n";
     ps += "  Start-Sleep -Seconds 5\r\n";
-    ps += "  Stop-XCatClassicStack 0 8 $false\r\n";
+    ps += "  Stop-ClassicStack 0 8 $false\r\n";
     ps += "}\r\n";
-    ps += "Write-XCatLog 'pre-update process recheck ok'\r\n";
+    ps += "Write-UpdLog 'pre-update process recheck ok'\r\n";
     ps += "New-Item -ItemType Directory -Path $work -Force | Out-Null\r\n";
     ps += "Add-Type -AssemblyName System.IO.Compression.FileSystem\r\n";
     ps += "[System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $work)\r\n";
     ps += "$roots=@(Get-ChildItem -LiteralPath $work -Directory -Force)\r\n";
     ps += "$src=if ($roots.Count -eq 1) { $roots[0].FullName } else { $work }\r\n";
-    ps += "if (-not (Test-Path -LiteralPath (Join-Path $src 'xcat.exe') -PathType Leaf)) { throw 'update zip missing xcat.exe' }\r\n";
-    ps += "if (-not (Test-Path -LiteralPath (Join-Path $src 'XCat_data\\xcat.dll') -PathType Leaf)) { Write-XCatLog 'WARN update zip has no XCat_data\\xcat.dll (TWMS launcher-only package ok)' }\r\n";
+    ps += "if (-not (Test-Path -LiteralPath (Join-Path $src 'rtapp.exe') -PathType Leaf)) { throw 'update zip missing rtapp.exe' }\r\n";
+    ps += "if (-not (Test-Path -LiteralPath (Join-Path $src 'rtcache\\rtmod.dll') -PathType Leaf)) { Write-UpdLog 'WARN update zip has no rtcache\\rtmod.dll (TWMS launcher-only package ok)' }\r\n";
     // 先落到 stage，校验通过后再写入安装目录；禁止「先清空 dest」。
     ps += "if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }\r\n";
     ps += "New-Item -ItemType Directory -Path $stage -Force | Out-Null\r\n";
     ps += "Copy-Item -Path (Join-Path $src '*') -Destination $stage -Recurse -Force\r\n";
-    ps += "if (-not (Test-Path -LiteralPath (Join-Path $stage 'xcat.exe') -PathType Leaf)) { throw 'stage missing xcat.exe' }\r\n";
+    ps += "if (-not (Test-Path -LiteralPath (Join-Path $stage 'rtapp.exe') -PathType Leaf)) { throw 'stage missing rtapp.exe' }\r\n";
     // 包内预执行钩子：仅当「当前启动器」已含本调用时才会跑；脚本在新包 stage 里。
     // 契约见 packaging/update/pre_apply.ps1。失败则中止换包（勿半套迁移）。
-    ps += "$preApply=Join-Path $stage 'XCat_data\\update\\pre_apply.ps1'\r\n";
+    ps += "$preApply=Join-Path $stage 'rtcache\\update\\pre_apply.ps1'\r\n";
     ps += "if (Test-Path -LiteralPath $preApply -PathType Leaf) {\r\n";
-    ps += "  Write-XCatLog ('pre_apply begin path=' + $preApply)\r\n";
+    ps += "  Write-UpdLog ('pre_apply begin path=' + $preApply)\r\n";
     ps += "  try { Unblock-File -LiteralPath $preApply -ErrorAction SilentlyContinue } catch {}\r\n";
     ps += "  $prevEap=$ErrorActionPreference\r\n";
     ps += "  $ErrorActionPreference='Stop'\r\n";
     ps += "  try {\r\n";
     ps += "    $hookOut=@(& $preApply -OldDest $oldDest -FinalDest $finalDest -Stage $stage -Work $work 2>&1)\r\n";
-    ps += "    foreach ($line in $hookOut) { Write-XCatLog ('pre_apply| ' + $line) }\r\n";
-    ps += "    Write-XCatLog 'pre_apply ok'\r\n";
+    ps += "    foreach ($line in $hookOut) { Write-UpdLog ('pre_apply| ' + $line) }\r\n";
+    ps += "    Write-UpdLog 'pre_apply ok'\r\n";
     ps += "  } catch {\r\n";
     ps += "    throw ('pre_apply failed: ' + ($_ | Out-String))\r\n";
     ps += "  } finally { $ErrorActionPreference=$prevEap }\r\n";
     ps += "} else {\r\n";
-    ps += "  Write-XCatLog 'pre_apply skipped (no XCat_data\\update\\pre_apply.ps1 in package)'\r\n";
+    ps += "  Write-UpdLog 'pre_apply skipped (no rtcache\\update\\pre_apply.ps1 in package)'\r\n";
     ps += "}\r\n";
     // 全员 ≥build106 后：白名单保留
     //   - 安装根：account.txt（账号串）+ auth_strategy/captcha_ui/launch_mode + xcat_imgui.ini
@@ -1174,25 +1183,31 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     //           + lie_stats.tsv（按角色累计的测谎战绩：是攒出来的历史，不是运行态）
     //           + gp_device_login.dpapi / .json（GAMA PASS账密直登账号行；换包丢 state 会清空「当前账号」）
     // 其余 state（赶路学习图/测谎运行态/IPC .bin/冷启标记）仍丢弃，包内 travel_* 种子始终用新包。
-    ps += "Write-XCatLog ('stage user prefs whitelist + prev logs; discard runtime state; dest=' + $finalDest)\r\n";
-    // 换包会冲掉 logs；先快照到 TEMP，落新包后再写回 XCat_data\\logs\\prev。
+    ps += "Write-UpdLog ('stage user prefs whitelist + prev logs; discard runtime state; dest=' + $finalDest)\r\n";
+    // 换包会冲掉 logs；先快照到 TEMP，落新包后再写回 rtcache\\logs\\prev。
     ps += "$prevLogsBak=Join-Path $env:TEMP ('xcat_prev_logs_' + [guid]::NewGuid().ToString('N'))\r\n";
     ps += "try {\r\n";
     ps += "  New-Item -ItemType Directory -Path $prevLogsBak -Force | Out-Null\r\n";
-    ps += "  foreach ($rel in @('logs\\launcher.jsonl','logs\\launcher.log','XCat_data\\logs\\x.jsonl','XCat_data\\logs\\x.log')) {\r\n";
+    ps += "  foreach ($rel in @('logs\\launcher.jsonl','logs\\launcher.log')) {\r\n";
     ps += "    $s=Join-Path $oldDest $rel\r\n";
     ps += "    if (Test-Path -LiteralPath $s -PathType Leaf) { Copy-Item -LiteralPath $s -Destination (Join-Path $prevLogsBak (Split-Path -Leaf $rel)) -Force -ErrorAction SilentlyContinue }\r\n";
     ps += "  }\r\n";
+    ps += "  foreach ($sub in @($payloadDir, $legacyPayloadDir)) {\r\n";
+    ps += "    foreach ($leaf in @('x.jsonl','x.log')) {\r\n";
+    ps += "      $s=Join-Path $oldDest ($sub + '\\logs\\' + $leaf)\r\n";
+    ps += "      if (Test-Path -LiteralPath $s -PathType Leaf) { Copy-Item -LiteralPath $s -Destination (Join-Path $prevLogsBak $leaf) -Force -ErrorAction SilentlyContinue }\r\n";
+    ps += "    }\r\n";
+    ps += "  }\r\n";
     ps += "  if (Test-Path -LiteralPath $log -PathType Leaf) { Copy-Item -LiteralPath $log -Destination (Join-Path $prevLogsBak 'update_apply.log') -Force -ErrorAction SilentlyContinue }\r\n";
-    ps += "  Write-XCatLog ('prev logs staged -> ' + $prevLogsBak)\r\n";
-    ps += "} catch { Write-XCatLog ('preserve prev logs failed: ' + ($_ | Out-String)); $prevLogsBak=$null }\r\n";
+    ps += "  Write-UpdLog ('prev logs staged -> ' + $prevLogsBak)\r\n";
+    ps += "} catch { Write-UpdLog ('preserve prev logs failed: ' + ($_ | Out-String)); $prevLogsBak=$null }\r\n";
     // 用户偏好白名单：在 rename/in-place 清盘前拷到 TEMP（与日志同源，旧目录尚在）。
     // 单文件失败不整单作废：已 staged 的仍会还原。
-    // root_* = 安装根（与 xcat.exe 同级）；其余 = XCat_data/state
+    // root_* = 安装根（与 rtapp.exe 同级）；其余 = rtcache/state
     ps += "$userPrefsBak=Join-Path $env:TEMP ('xcat_user_prefs_' + [guid]::NewGuid().ToString('N'))\r\n";
     ps += "$prefsCopied=0\r\n";
     ps += "try { New-Item -ItemType Directory -Path $userPrefsBak -Force | Out-Null } catch {\r\n";
-    ps += "  Write-XCatLog ('stage user prefs mkdir failed: ' + ($_ | Out-String)); $userPrefsBak=$null\r\n";
+    ps += "  Write-UpdLog ('stage user prefs mkdir failed: ' + ($_ | Out-String)); $userPrefsBak=$null\r\n";
     ps += "}\r\n";
     ps += "if ($userPrefsBak) {\r\n";
     ps += "  foreach ($leaf in @('account.txt','auth_strategy.txt','captcha_ui.txt','launch_mode.txt','gamapass_nick_slot.txt','gamapass_account_slot.txt','xcat_imgui.ini')) {\r\n";
@@ -1201,38 +1216,38 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "    try {\r\n";
     ps += "      Copy-Item -LiteralPath $s -Destination (Join-Path $userPrefsBak ('root_' + $leaf)) -Force -ErrorAction Stop\r\n";
     ps += "      $prefsCopied++\r\n";
-    ps += "      Write-XCatLog ('user pref staged (install root): ' + $leaf)\r\n";
-    ps += "    } catch { Write-XCatLog ('user pref stage failed (root): ' + $leaf + ' :: ' + $_.Exception.Message) }\r\n";
+    ps += "      Write-UpdLog ('user pref staged (install root): ' + $leaf)\r\n";
+    ps += "    } catch { Write-UpdLog ('user pref stage failed (root): ' + $leaf + ' :: ' + $_.Exception.Message) }\r\n";
     ps += "  }\r\n";
     ps += "  foreach ($leaf in "
           "@('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt','lie_"
           "stats.tsv','gp_device_login.dpapi','gp_device_login.json')) {\r\n";
-    ps += "    $s=Join-Path $oldDest ('XCat_data\\state\\' + $leaf)\r\n";
+    ps += "    $s=Join-Path $oldDest ($payloadDir + '\\state\\' + $leaf); if (-not (Test-Path -LiteralPath $s)) { $s=Join-Path $oldDest ($legacyPayloadDir + '\\state\\' + $leaf) }\r\n";
     ps += "    if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "    try {\r\n";
     ps += "      Copy-Item -LiteralPath $s -Destination (Join-Path $userPrefsBak $leaf) -Force -ErrorAction Stop\r\n";
     ps += "      $prefsCopied++\r\n";
-    ps += "      Write-XCatLog ('user pref staged: ' + $leaf)\r\n";
-    ps += "    } catch { Write-XCatLog ('user pref stage failed: ' + $leaf + ' :: ' + $_.Exception.Message) }\r\n";
+    ps += "      Write-UpdLog ('user pref staged: ' + $leaf)\r\n";
+    ps += "    } catch { Write-UpdLog ('user pref stage failed: ' + $leaf + ' :: ' + $_.Exception.Message) }\r\n";
     ps += "  }\r\n";
     ps += "  if ($prefsCopied -eq 0) {\r\n";
-    ps += "    Write-XCatLog 'user prefs whitelist: nothing to stage'\r\n";
+    ps += "    Write-UpdLog 'user prefs whitelist: nothing to stage'\r\n";
     ps += "    Remove-Item -LiteralPath $userPrefsBak -Recurse -Force -ErrorAction SilentlyContinue\r\n";
     ps += "    $userPrefsBak=$null\r\n";
-    ps += "  } else { Write-XCatLog ('user prefs staged -> ' + $userPrefsBak + ' count=' + $prefsCopied) }\r\n";
+    ps += "  } else { Write-UpdLog ('user prefs staged -> ' + $userPrefsBak + ' count=' + $prefsCopied) }\r\n";
     ps += "}\r\n";
     // 优先整目录 rename 让位；桌面等场景 rename 失败则降级逐文件原地覆盖。
     // 偏好已在 TEMP；运行时 state 仍丢弃；rename 成功时失败可回滚 aside。
     ps += "$installMode='fresh'\r\n";
     ps += "if (Test-Path -LiteralPath $finalDest) {\r\n";
-    ps += "  Write-XCatLog ('before rename aside cwd=' + (Get-Location).Path + ' dest=' + $finalDest)\r\n";
-    ps += "  $installAside=Move-XCatInstallAside $finalDest\r\n";
+    ps += "  Write-UpdLog ('before rename aside cwd=' + (Get-Location).Path + ' dest=' + $finalDest)\r\n";
+    ps += "  $installAside=Move-InstallAside $finalDest\r\n";
     ps += "  $installSwapped=[bool]$installAside\r\n";
     ps += "  if ($installSwapped) { $installMode='rename-aside' }\r\n";
     ps += "  else {\r\n";
     ps += "    $installMode='in-place-overwrite'\r\n";
-    ps += "    Write-XCatLog 'rename aside failed; fallback to in-place overwrite'\r\n";
-    ps += "    Clear-XCatInstallForInPlace $finalDest\r\n";
+    ps += "    Write-UpdLog 'rename aside failed; fallback to in-place overwrite'\r\n";
+    ps += "    Clear-InstallForInPlace $finalDest\r\n";
     ps += "  }\r\n";
     ps += "}\r\n";
     ps += "New-Item -ItemType Directory -Path $finalDest -Force | Out-Null\r\n";
@@ -1242,9 +1257,9 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     // 另清 legacy 多发勾选路径，避免 ReadMultiSkillSelect 把旧 dumps/skill_catalog 勾选迁回 state。
     // 用户偏好稍后从 TEMP 白名单还原（不依赖残留）。
     ps += "if ($installMode -eq 'in-place-overwrite') {\r\n";
-    ps += "  $dstState=Join-Path $finalDest 'XCat_data\\state'\r\n";
-    ps += "  $srcState=Join-Path $stage 'XCat_data\\state'\r\n";
-    ps += "  if (Test-Path -LiteralPath $dstState) { Remove-XCatPathRetry $dstState 6 | Out-Null }\r\n";
+    ps += "  $dstState=Join-Path $finalDest 'rtcache\\state'\r\n";
+    ps += "  $srcState=Join-Path $stage 'rtcache\\state'\r\n";
+    ps += "  if (Test-Path -LiteralPath $dstState) { Remove-PathRetry $dstState 6 | Out-Null }\r\n";
     ps += "  if (Test-Path -LiteralPath $srcState) {\r\n";
     ps += "    New-Item -ItemType Directory -Path $dstState -Force | Out-Null\r\n";
     ps += "    Copy-Item -Path (Join-Path $srcState '*') -Destination $dstState -Recurse -Force -ErrorAction SilentlyContinue\r\n";
@@ -1268,9 +1283,9 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "      if ($leaf -eq 'update_failed.notify') { return }\r\n";
     ps += "      $isCritical=$criticalNames -contains $leaf\r\n";
     ps += "      $tries=if ($isCritical) { 8 } else { 4 }\r\n";
-    ps += "      if (Remove-XCatPathRetry $_.FullName $tries) { Write-XCatLog ('in-place state purged: ' + $rel) }\r\n";
+    ps += "      if (Remove-PathRetry $_.FullName $tries) { Write-UpdLog ('in-place state purged: ' + $rel) }\r\n";
     ps += "      else {\r\n";
-    ps += "        Write-XCatLog ('in-place state purge leftover: ' + $_.FullName)\r\n";
+    ps += "        Write-UpdLog ('in-place state purge leftover: ' + $_.FullName)\r\n";
     ps += "        if ($isCritical) { [void]$criticalStateLeftover.Add($rel) }\r\n";
     ps += "      }\r\n";
     ps += "    }\r\n";
@@ -1279,26 +1294,26 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "      Sort-Object { $_.FullName.Length } -Descending |\r\n";
     ps += "      ForEach-Object {\r\n";
     ps += "        $kids=@(Get-ChildItem -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue)\r\n";
-    ps += "        if ($kids.Count -eq 0) { Remove-XCatPathRetry $_.FullName 2 | Out-Null }\r\n";
+    ps += "        if ($kids.Count -eq 0) { Remove-PathRetry $_.FullName 2 | Out-Null }\r\n";
     ps += "      }\r\n";
     ps += "  }\r\n";
     ps += "  foreach ($legacyRel in @(\r\n";
-    ps += "    'XCat_data\\skill_catalog\\multiskill_select.tsv',\r\n";
-    ps += "    'XCat_data\\dumps\\Lua\\skill_catalog\\multiskill_select.tsv',\r\n";
+    ps += "    'rtcache\\skill_catalog\\multiskill_select.tsv',\r\n";
+    ps += "    'rtcache\\dumps\\Lua\\skill_catalog\\multiskill_select.tsv',\r\n";
     ps += "    'dumps\\Lua\\skill_catalog\\multiskill_select.tsv'\r\n";
     ps += "  )) {\r\n";
     ps += "    $legacy=Join-Path $finalDest $legacyRel\r\n";
     ps += "    if (-not (Test-Path -LiteralPath $legacy -PathType Leaf)) { continue }\r\n";
-    ps += "    if (Remove-XCatPathRetry $legacy 8) { Write-XCatLog ('in-place legacy multiskill purged: ' + $legacyRel) }\r\n";
+    ps += "    if (Remove-PathRetry $legacy 8) { Write-UpdLog ('in-place legacy multiskill purged: ' + $legacyRel) }\r\n";
     ps += "    else {\r\n";
-    ps += "      Write-XCatLog ('WARN in-place legacy multiskill leftover: ' + $legacy)\r\n";
+    ps += "      Write-UpdLog ('WARN in-place legacy multiskill leftover: ' + $legacy)\r\n";
     ps += "      [void]$criticalStateLeftover.Add($legacyRel)\r\n";
     ps += "    }\r\n";
     ps += "  }\r\n";
     ps += "  if ($criticalStateLeftover.Count -gt 0) {\r\n";
-    ps += "    Write-XCatLog ('WARN critical state leftovers after purge: ' + ([string]::Join('; ', $criticalStateLeftover)))\r\n";
+    ps += "    Write-UpdLog ('WARN critical state leftovers after purge: ' + ([string]::Join('; ', $criticalStateLeftover)))\r\n";
     ps += "  }\r\n";
-    ps += "  Write-XCatLog 'in-place state replaced from package (prefs restore follows)'\r\n";
+    ps += "  Write-UpdLog 'in-place state replaced from package (prefs restore follows)'\r\n";
     ps += "}\r\n";
     // 还原白名单偏好：覆盖包默认/残留；并剥掉行程运行态 section，避免跨版本半截补给行程。
     // 含安装根账号串 account.txt（rename-aside / in-place 清盘子项都会冲掉）。
@@ -1309,9 +1324,9 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "      if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "      $d=Join-Path $finalDest $leaf\r\n";
     ps += "      Copy-Item -LiteralPath $s -Destination $d -Force -ErrorAction Stop\r\n";
-    ps += "      Write-XCatLog ('user pref restored (install root): ' + $leaf)\r\n";
+    ps += "      Write-UpdLog ('user pref restored (install root): ' + $leaf)\r\n";
     ps += "    }\r\n";
-    ps += "    $dstState=Join-Path $finalDest 'XCat_data\\state'\r\n";
+    ps += "    $dstState=Join-Path $finalDest 'rtcache\\state'\r\n";
     ps += "    New-Item -ItemType Directory -Path $dstState -Force | Out-Null\r\n";
     ps += "    foreach ($leaf in "
           "@('user.ini','multiskill_select.tsv','buffs.lkg','control.lkg','launch_mode.txt','lie_"
@@ -1320,7 +1335,7 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "      if (-not (Test-Path -LiteralPath $s -PathType Leaf)) { continue }\r\n";
     ps += "      $d=Join-Path $dstState $leaf\r\n";
     ps += "      Copy-Item -LiteralPath $s -Destination $d -Force -ErrorAction Stop\r\n";
-    ps += "      Write-XCatLog ('user pref restored: ' + $leaf)\r\n";
+    ps += "      Write-UpdLog ('user pref restored: ' + $leaf)\r\n";
     ps += "    }\r\n";
     ps += "    $iniPath=Join-Path $dstState 'user.ini'\r\n";
     ps += "    if (Test-Path -LiteralPath $iniPath -PathType Leaf) {\r\n";
@@ -1335,25 +1350,25 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "          $sec=$Matches[1].Trim()\r\n";
     ps += "          $skip=$false\r\n";
     ps += "          foreach ($drop in $dropSections) { if ($sec -ieq $drop) { $skip=$true; break } }\r\n";
-    ps += "          if ($skip) { $stripped=$true; Write-XCatLog ('user.ini stripped runtime section: [' + $sec + ']'); continue }\r\n";
+    ps += "          if ($skip) { $stripped=$true; Write-UpdLog ('user.ini stripped runtime section: [' + $sec + ']'); continue }\r\n";
     ps += "        }\r\n";
     ps += "        if (-not $skip) { [void]$kept.Add($line) }\r\n";
     ps += "      }\r\n";
     ps += "      if ($stripped) {\r\n";
     ps += "        $utf8NoBom=New-Object System.Text.UTF8Encoding $false\r\n";
     ps += "        [System.IO.File]::WriteAllLines($iniPath, $kept.ToArray(), $utf8NoBom)\r\n";
-    ps += "        Write-XCatLog 'user.ini rewritten without BOM after section strip'\r\n";
+    ps += "        Write-UpdLog 'user.ini rewritten without BOM after section strip'\r\n";
     ps += "      }\r\n";
     ps += "    }\r\n";
-    ps += "    Write-XCatLog 'user prefs whitelist restore done'\r\n";
-    ps += "  } catch { Write-XCatLog ('restore user prefs failed: ' + ($_ | Out-String)) }\r\n";
+    ps += "    Write-UpdLog 'user prefs whitelist restore done'\r\n";
+    ps += "  } catch { Write-UpdLog ('restore user prefs failed: ' + ($_ | Out-String)) }\r\n";
     ps += "}\r\n";
-    ps += "Write-XCatLog ('install mode=' + $installMode + '; package seeds + user prefs whitelist')\r\n";
+    ps += "Write-UpdLog ('install mode=' + $installMode + '; package seeds + user prefs whitelist')\r\n";
     // 包内后执行钩子：新树已就位且白名单偏好已还原；可做合并/修补。失败中止（此时已 committed 前）。
     // 注意：须在 $installCommitted=$true 之前，以便失败仍可 aside 回滚。
-    ps += "$postApply=Join-Path $stage 'XCat_data\\update\\post_apply.ps1'\r\n";
+    ps += "$postApply=Join-Path $stage 'rtcache\\update\\post_apply.ps1'\r\n";
     ps += "if (Test-Path -LiteralPath $postApply -PathType Leaf) {\r\n";
-    ps += "  Write-XCatLog ('post_apply begin path=' + $postApply)\r\n";
+    ps += "  Write-UpdLog ('post_apply begin path=' + $postApply)\r\n";
     ps += "  try { Unblock-File -LiteralPath $postApply -ErrorAction SilentlyContinue } catch {}\r\n";
     ps += "  $prevEap=$ErrorActionPreference\r\n";
     ps += "  $ErrorActionPreference='Stop'\r\n";
@@ -1361,90 +1376,90 @@ bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& instal
     ps += "  $prefsBakArg=if ($userPrefsBak) { [string]$userPrefsBak } else { '' }\r\n";
     ps += "  try {\r\n";
     ps += "    $hookOut=@(& $postApply -OldDest $oldDest -FinalDest $finalDest -Stage $stage -Work $work -InstallAside $asideArg -InstallMode $installMode -UserPrefsBak $prefsBakArg 2>&1)\r\n";
-    ps += "    foreach ($line in $hookOut) { Write-XCatLog ('post_apply| ' + $line) }\r\n";
-    ps += "    Write-XCatLog 'post_apply ok'\r\n";
+    ps += "    foreach ($line in $hookOut) { Write-UpdLog ('post_apply| ' + $line) }\r\n";
+    ps += "    Write-UpdLog 'post_apply ok'\r\n";
     ps += "  } catch {\r\n";
     ps += "    throw ('post_apply failed: ' + ($_ | Out-String))\r\n";
     ps += "  } finally { $ErrorActionPreference=$prevEap }\r\n";
     ps += "} else {\r\n";
-    ps += "  Write-XCatLog 'post_apply skipped (no XCat_data\\update\\post_apply.ps1 in package)'\r\n";
+    ps += "  Write-UpdLog 'post_apply skipped (no rtcache\\update\\post_apply.ps1 in package)'\r\n";
     ps += "}\r\n";
     ps += "if ($prevLogsBak -and (Test-Path -LiteralPath $prevLogsBak)) {\r\n";
     ps += "  try {\r\n";
-    ps += "    $prevLogs=Join-Path $finalDest 'XCat_data\\logs\\prev'\r\n";
+    ps += "    $prevLogs=Join-Path $finalDest 'rtcache\\logs\\prev'\r\n";
     ps += "    New-Item -ItemType Directory -Path $prevLogs -Force | Out-Null\r\n";
     ps += "    Copy-Item -Path (Join-Path $prevLogsBak '*') -Destination $prevLogs -Recurse -Force\r\n";
     ps += "    if (Test-Path -LiteralPath $log -PathType Leaf) { Copy-Item -LiteralPath $log -Destination (Join-Path $prevLogs 'update_apply.log') -Force -ErrorAction SilentlyContinue }\r\n";
-    ps += "    Write-XCatLog ('prev logs restored -> ' + $prevLogs)\r\n";
-    ps += "  } catch { Write-XCatLog ('restore prev logs failed: ' + ($_ | Out-String)) }\r\n";
+    ps += "    Write-UpdLog ('prev logs restored -> ' + $prevLogs)\r\n";
+    ps += "  } catch { Write-UpdLog ('restore prev logs failed: ' + ($_ | Out-String)) }\r\n";
     ps += "}\r\n";
-    ps += "if (-not (Test-Path -LiteralPath (Join-Path $finalDest 'xcat.exe') -PathType Leaf)) { throw 'install missing xcat.exe after copy' }\r\n";
-    ps += "if (-not (Test-Path -LiteralPath (Join-Path $finalDest 'XCat_data\\xcat.dll') -PathType Leaf)) { Write-XCatLog 'WARN install has no xcat.dll after copy (TWMS launcher-only package ok)' }\r\n";
+    ps += "if (-not (Test-Path -LiteralPath (Join-Path $finalDest 'rtapp.exe') -PathType Leaf)) { throw 'install missing rtapp.exe after copy' }\r\n";
+    ps += "if (-not (Test-Path -LiteralPath (Join-Path $finalDest 'rtcache\\rtmod.dll') -PathType Leaf)) { Write-UpdLog 'WARN install has no rtmod.dll after copy (TWMS launcher-only package ok)' }\r\n";
     // 关键文件已就位：此后失败只重拉 finalDest，禁止再把 aside 滚回来盖掉新包。
     ps += "$installCommitted=$true\r\n";
-    ps += "Write-XCatLog 'install committed (exe verified)'\r\n";
-    ps += "try { Update-XCatDesktopShortcut $finalDest $oldDest } catch { Write-XCatLog ('desktop shortcut failed: ' + ($_ | Out-String)) }\r\n";
+    ps += "Write-UpdLog 'install committed (exe verified)'\r\n";
+    ps += "try { Update-DesktopShortcut $finalDest $oldDest } catch { Write-UpdLog ('desktop shortcut failed: ' + ($_ | Out-String)) }\r\n";
     // 拉起前再清游戏/NGM，避免旧会话立刻回锁新目录。
-    ps += "Stop-XCatClassicStack 5 10 $false\r\n";
-    ps += "Wait-XCatProcessGone 'xcat' 0 5 $false\r\n";
-    ps += "Write-XCatLog 'pre-relaunch process settle 5s'\r\n";
+    ps += "Stop-ClassicStack 5 10 $false\r\n";
+    ps += "Wait-ProcGone $launcherStem 0 5 $false\r\n";
+    ps += "Write-UpdLog 'pre-relaunch process settle 5s'\r\n";
     ps += "Start-Sleep -Seconds 5\r\n";
-    ps += "Stop-XCatClassicStack 0 8 $false\r\n";
-    ps += "Wait-XCatProcessGone 'xcat' 0 3 $false\r\n";
+    ps += "Stop-ClassicStack 0 8 $false\r\n";
+    ps += "Wait-ProcGone $launcherStem 0 3 $false\r\n";
     // 只写启动器冷启标记；新启动器在完整冷启成功前保留该标记，失败重试仍强制清栈。
-    ps += "$coldFlagDir=Join-Path $finalDest 'XCat_data\\state'\r\n";
+    ps += "$coldFlagDir=Join-Path $finalDest 'rtcache\\state'\r\n";
     ps += "New-Item -ItemType Directory -Path $coldFlagDir -Force | Out-Null\r\n";
     ps += "$coldFlag=Join-Path $coldFlagDir 'post_update_cold_start.flag'\r\n";
     ps += "Set-Content -LiteralPath $coldFlag -Value ((Get-Date -Format o) + ' post_update_cold_start') -Encoding UTF8\r\n";
-    ps += "Write-XCatLog ('post-update cold-start flag written: ' + $coldFlag)\r\n";
+    ps += "Write-UpdLog ('post-update cold-start flag written: ' + $coldFlag)\r\n";
     // 先清 aside，再拉起：避免新实例旁长期挂着 __xcat_old_* 邻居目录。
-    ps += "if ($installAside -and (Test-Path -LiteralPath $installAside)) { Remove-XCatAsideTrash $installAside; $installAside=$null }\r\n";
-    ps += "Write-XCatLog ('copy ok; restart launcher dest=' + $finalDest)\r\n";
-    ps += "Start-Process -FilePath (Join-Path $finalDest 'xcat.exe') -WorkingDirectory $finalDest\r\n";
+    ps += "if ($installAside -and (Test-Path -LiteralPath $installAside)) { Remove-AsideTrash $installAside; $installAside=$null }\r\n";
+    ps += "Write-UpdLog ('copy ok; restart launcher dest=' + $finalDest)\r\n";
+    ps += "Start-Process -FilePath (Join-Path $finalDest 'rtapp.exe') -WorkingDirectory $finalDest\r\n";
     ps += "} catch {\r\n";
     ps += "  $failReason=($_ | Out-String)\r\n";
-    ps += "  Write-XCatLog ('FAILED ' + $failReason)\r\n";
+    ps += "  Write-UpdLog ('FAILED ' + $failReason)\r\n";
     ps += "  $rolledBack=$false\r\n";
     ps += "  if ((-not $installCommitted) -and $installSwapped -and $installAside -and (Test-Path -LiteralPath $installAside)) {\r\n";
     ps += "    try {\r\n";
-    ps += "      if (Test-Path -LiteralPath $finalDest) { Remove-XCatPathRetry $finalDest 3 | Out-Null }\r\n";
+    ps += "      if (Test-Path -LiteralPath $finalDest) { Remove-PathRetry $finalDest 3 | Out-Null }\r\n";
     ps += "      if (-not (Test-Path -LiteralPath $finalDest)) {\r\n";
     ps += "        Rename-Item -LiteralPath $installAside -NewName (Split-Path -Leaf $finalDest) -ErrorAction Stop\r\n";
-    ps += "        Write-XCatLog ('rolled back install from aside: ' + $installAside)\r\n";
+    ps += "        Write-UpdLog ('rolled back install from aside: ' + $installAside)\r\n";
     ps += "        $installAside=$null\r\n";
     ps += "        $rolledBack=$true\r\n";
     ps += "      } else {\r\n";
-    ps += "        Write-XCatLog ('rollback skipped: finalDest still present; manual restore: 1) delete/rename away broken [' + $finalDest + '] 2) rename [' + $installAside + '] -> [' + (Split-Path -Leaf $finalDest) + ']')\r\n";
+    ps += "        Write-UpdLog ('rollback skipped: finalDest still present; manual restore: 1) delete/rename away broken [' + $finalDest + '] 2) rename [' + $installAside + '] -> [' + (Split-Path -Leaf $finalDest) + ']')\r\n";
     ps += "      }\r\n";
-    ps += "    } catch { Write-XCatLog ('rollback failed: ' + ($_ | Out-String) + '; manual restore: 1) delete/rename away broken [' + $finalDest + '] 2) rename [' + $installAside + '] -> [' + (Split-Path -Leaf $finalDest) + ']') }\r\n";
+    ps += "    } catch { Write-UpdLog ('rollback failed: ' + ($_ | Out-String) + '; manual restore: 1) delete/rename away broken [' + $finalDest + '] 2) rename [' + $installAside + '] -> [' + (Split-Path -Leaf $finalDest) + ']') }\r\n";
     ps += "  } elseif ($installCommitted -and $installAside -and (Test-Path -LiteralPath $installAside)) {\r\n";
-    ps += "    Write-XCatLog 'install committed; skip rollback; trash leftover aside'\r\n";
-    ps += "    Remove-XCatAsideTrash $installAside\r\n";
+    ps += "    Write-UpdLog 'install committed; skip rollback; trash leftover aside'\r\n";
+    ps += "    Remove-AsideTrash $installAside\r\n";
     ps += "    $installAside=$null\r\n";
     ps += "  }\r\n";
     // 先落失败通知再拉起：state + TEMP；新包靠 Consume 气泡，旧包/无进程靠 Popup。
-    ps += "  $failSummary=Write-XCatUpdateFailedNotify $finalDest $failReason\r\n";
-    ps += "  if ($oldDest -and ($oldDest -ne $finalDest)) { Write-XCatUpdateFailedNotify $oldDest $failReason | Out-Null }\r\n";
+    ps += "  $failSummary=Write-UpdFailedNotify $finalDest $failReason\r\n";
+    ps += "  if ($oldDest -and ($oldDest -ne $finalDest)) { Write-UpdFailedNotify $oldDest $failReason | Out-Null }\r\n";
     // 启动器已 ExitProcess；committed / 回滚成功 / 未 swap：只要 finalDest 有 exe 就重拉。
     ps += "  $relaunched=$false\r\n";
-    ps += "  $relaunchExe=Join-Path $finalDest 'xcat.exe'\r\n";
+    ps += "  $relaunchExe=Join-Path $finalDest 'rtapp.exe'\r\n";
     ps += "  $canRelaunchFinal=$installCommitted -or $rolledBack -or (-not $installSwapped)\r\n";
     ps += "  if ($canRelaunchFinal -and (Test-Path -LiteralPath $relaunchExe -PathType Leaf)) {\r\n";
     ps += "    try {\r\n";
-    ps += "      Wait-XCatProcessGone 'xcat' 0 3 $false\r\n";
-    ps += "      Write-XCatLog 'failure-relaunch process settle 10s'\r\n";
+    ps += "      Wait-ProcGone $launcherStem 0 3 $false\r\n";
+    ps += "      Write-UpdLog 'failure-relaunch process settle 10s'\r\n";
     ps += "      Start-Sleep -Seconds 10\r\n";
     ps += "      Start-Process -FilePath $relaunchExe -WorkingDirectory $finalDest -ErrorAction Stop\r\n";
     ps += "      $relaunched=$true\r\n";
-    ps += "      Write-XCatLog 'relaunched launcher after update failure'\r\n";
-    ps += "    } catch { Write-XCatLog ('relaunch after failure failed: ' + ($_ | Out-String)) }\r\n";
+    ps += "      Write-UpdLog 'relaunched launcher after update failure'\r\n";
+    ps += "    } catch { Write-UpdLog ('relaunch after failure failed: ' + ($_ | Out-String)) }\r\n";
     ps += "  }\r\n";
     // Popup 兜底：无 relaunch、或回滚/未 committed（多半旧包无 Consume）。新包已拉起则只靠 ImGui。
     ps += "  if ((-not $relaunched) -or $rolledBack -or (-not $installCommitted)) {\r\n";
-    ps += "    Show-XCatUpdateFailedUi $failSummary\r\n";
+    ps += "    Show-UpdFailedUi $failSummary\r\n";
     ps += "  }\r\n";
     // 已恢复则可 exit 0；先落到 finally 清 TEMP，再退出（勿在 catch 里直接 exit 跳过清理）。
-    ps += "  if ($relaunched) { $recoverExitZero=$true; Write-XCatLog 'update failed but launcher recovered; will exit 0 after cleanup' }\r\n";
+    ps += "  if ($relaunched) { $recoverExitZero=$true; Write-UpdLog 'update failed but launcher recovered; will exit 0 after cleanup' }\r\n";
     ps += "  else { throw }\r\n";
     ps += "}\r\n";
     ps += "finally {\r\n";
@@ -1589,11 +1604,11 @@ std::string ResolveDownloadUrl(const std::string& manifestUrl, const Manifest& m
 void CheckWorker(std::string serviceUrl) {
     // 手动检查时顺带探活：解禁后清残留粘性；仍 Denied 则给明确文案（避免只看到「连不上更新口」）。
     const std::string prefsHint = []() -> std::string {
-        // CheckWorker 无 payloadBinDir 参数；用 exe 旁 XCat_data（与主程序 prefs 一致）。
+        // CheckWorker 无 payloadBinDir 参数；用 exe 旁 rtcache（与主程序 prefs 一致）。
         wchar_t mod[MAX_PATH]{};
         if (!GetModuleFileNameW(nullptr, mod, MAX_PATH)) return {};
         std::filesystem::path p(mod);
-        p = p.parent_path() / L"XCat_data";
+        p = p.parent_path() / xcat::install::kPayloadDirW;
         return xcat::WideToUtf8(p.wstring());
     }();
     {
@@ -1833,7 +1848,8 @@ std::vector<std::string> AccessDenyStickyReadPaths(const std::string& payloadBin
         std::wstring w = base;
         CoTaskMemFree(base);
         if (!w.empty() && w.back() != L'\\' && w.back() != L'/') w.push_back(L'\\');
-        w += L"XCatTWMS\\access_deny.json";
+        w += xcat::install::LegacyProgramDataLeafW();
+        w += L"\\access_deny.json";
         paths.push_back(xcat::WideToUtf8(w));
     }
     // 兼容安装目录内旧文件名
@@ -2006,7 +2022,7 @@ bool ReadAccessDenySticky(const std::string& payloadBinDir, std::string& reasonO
         reasonOut = JsonString(body, "reason");
         modeOut = JsonString(body, "mode");
         if (reasonOut.empty()) reasonOut = "cached";
-        const bool legacyPath = path.find("XCatTWMS") != std::string::npos ||
+        const bool legacyPath = path.find(xcat::install::LegacyProgramDataLeafA()) != std::string::npos ||
                                 path.find("access_deny.json") != std::string::npos;
         const bool legacyPlain = raw.size() < 4 || raw[0] != 'W' || raw[1] != 'C' || raw[2] != '1';
         if (legacyPath || legacyPlain) {
@@ -3018,7 +3034,7 @@ void ShowAccessGatePopup(AccessGateExitKind kind) {
     const wchar_t* text =
         (kind == AccessGateExitKind::AccessDeny) ? L"网络错误 (2)" : L"网络错误 (3)";
     HWND owner = g_accessGateUiHwnd.load(std::memory_order_acquire);
-    MessageBoxW(owner, text, L"XCat TWMS",
+    MessageBoxW(owner, text, xcat::install::kMsgBoxTitle,
                 MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
 }
 

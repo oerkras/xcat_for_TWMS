@@ -4,6 +4,7 @@
 #endif
 #include "galaxy_token_probe.h"
 
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/log.h"
@@ -58,11 +59,8 @@ bool FileExists(const std::wstring& p) {
 }
 
 std::wstring ModuleDir() {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&DirExists), &self) ||
-        !self)
+    HMODULE self = x::runtime::GetImageModule();
+    if (!self)
         return {};
     wchar_t path[MAX_PATH]{};
     const DWORD n = GetModuleFileNameW(self, path, MAX_PATH);

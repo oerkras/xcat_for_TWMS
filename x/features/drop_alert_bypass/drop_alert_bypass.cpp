@@ -2,10 +2,11 @@
 //
 // Root cause (BIN): callers use direct `call CanPerformAction` (E8×N), so
 // MethodInfo swap never runs. Real drop gate calls thin IsAlertMode which is:
-//   mov eax,imm ; add eax,[global] ; cmp [rcx+0x118],eax ; setnle
-// File-time imm+global==0 ⇒ stamp>0. That global has a single xref.
+//   mov eax,imm ; add/xor eax,[global] ; cmp [rcx+0x118],eax ; setnle
+// File-time decoded const==0 ⇒ stamp>0. That global has a single xref.
+// 09-03 dump：xor eax,[rip]（种子 0x7DEC9BA4 ^ 0x7DEC9BA4 = 0），不是 add。
 //
-// v3 primary: rewrite that dword so imm+global==INT_MAX → IsAlertMode always
+// v3 primary: rewrite that dword so decoded==INT_MAX → IsAlertMode always
 // false (出刀怎么刷 +0x118 都无空窗). Restore on disable. No GA .text / no HWBP.
 // Secondary: CanPerformAction MethodInfo (rarely hit).
 #ifndef WIN32_LEAN_AND_MEAN
@@ -30,22 +31,22 @@ namespace {
 using x::runtime::il2cpp::AtRva;
 
 // UserBase 父类. 短 IsAlertMode（CanPerformAction 真 callee）
-// IDA: mov eax,imm; add eax,[rip]; cmp [rcx+0x118],eax; setnle
-constexpr uint32_t kRvaIsAlertMode = 0x12503F0;
+// IDA: mov eax,imm; xor eax,[rip]; cmp [rcx+0x118],eax; setnle（08-27 为 add）
+constexpr uint32_t kRvaIsAlertMode = 0x12545A0;
 
 // Secondary: MethodInfo on DragManager.CanPerformAction (rarely hit; keep for MI callers)
 constexpr char kDragManagerClass[] =
-    "b96f4570114f4418457ad106c02578b8f421a66c0188f16dec6525915dfa558";
-constexpr uint32_t kRvaCanPerformAction = 0x4CEEC0;
+    "f2e6fe647a4bfed2fe2983206b46b73ea1dcc500bb62c2d539dc4f6276535ea";
+constexpr uint32_t kRvaCanPerformAction = 0x4CFBB0;
 constexpr char kUserAlertClass[] =
-    "e86cb2ff43093983d0050fa57e9c1b4746806199978f85d31b599efe8722abd";
+    "db2b44b77b8e0b6f7cc2afaad5f17070b20b342d42ecd898aa70061f768d2ab";
 constexpr char kHashIsAlertMode[] =
-    "e4f5b4e09ab8d6297e9565c11f76c010ec907ac72dfdeac77d22db3a2ec11b3";
+    "a657adee5a2e87014cff1f1715720a514f9caca3b25e4d5943c71de86c91864";
 constexpr char kHashCanPerformAction[] =
-    "faf9eeea984ea6199b26c370e2e97f70427ff964a71edb4ae6c8843e3c519d3";
+    "e0ac016b2b5bc965a109cba93f01e48df0eef995d8926af45122fa7c5b56e26";
 // UserBase alert stamp（int）：仅 shape 校验 cmp 偏移；主路径不再清字段
 constexpr char kHashAlertAt[] =
-    "a928d9017b1afecab6b776b5671f47a127d16f543c95e9be6e1980b268998d8";
+    "d7d34628bac16e8ec6002b89e1730bbb9a0fa6588fe8eaf2a66b28c993b7c71";
 constexpr size_t kFbAlertAt = 0x118;
 size_t gOffAlertAt = kFbAlertAt;
 #define kOffAlertAt (gOffAlertAt)
@@ -59,7 +60,7 @@ constexpr uint32_t kThreshTarget = 0x7FFFFFFFu;  // signed INT_MAX；stamp > INT
 
 // 短 IsAlertMode 机码结构指纹
 //   B8 xx xx xx xx          mov eax, imm32
-//   03 05 xx xx xx xx       add eax, [rip+disp]
+//   03 05 / 33 05 xx xx xx xx  add/xor eax, [rip+disp]
 //   39 81 dd dd dd dd       cmp [rcx+alertOff], eax
 //   0F 9F C0 / C3 …
 constexpr size_t kAlertShapeScan = 48;
@@ -70,6 +71,7 @@ struct AlertShapeInfo {
     AlertShape shape = AlertShape::Unknown;
     uint32_t imm = 0;
     uint32_t* global = nullptr;
+    bool xorSeed = false;  // true: xor eax,[rip]；false: add eax,[rip]
 };
 
 std::atomic<AlertShape> gAlertShape{AlertShape::Unknown};
@@ -207,10 +209,12 @@ AlertShapeInfo ProbeAlertShape(const void* fn) {
 
     size_t movAt = static_cast<size_t>(-1);
     for (size_t i = 0; i + 11 <= sizeof(buf); ++i) {
-        if (buf[i] == 0xB8 && buf[i + 5] == 0x03 && buf[i + 6] == 0x05) {
-            movAt = i;
-            break;
-        }
+        if (buf[i] != 0xB8 || buf[i + 6] != 0x05) continue;
+        const uint8_t op = buf[i + 5];
+        if (op != 0x03 && op != 0x33) continue;
+        movAt = i;
+        out.xorSeed = (op == 0x33);
+        break;
     }
     if (movAt == static_cast<size_t>(-1)) {
         out.shape = AlertShape::BadConst;
@@ -248,12 +252,12 @@ AlertShapeInfo RefreshAlertShape(bool forceLog) {
         gShapeLogged.store(true);
         if (info.shape == AlertShape::Ok) {
             x::runtime::LogI("DropAlert",
-                             "shape OK IsAlertMode cmp[rcx+0x%zX] imm=0x%X global=%p (rva=0x%X)",
+                             "shape OK IsAlertMode cmp[rcx+0x%zX] imm=0x%X global=%p op=%s (rva=0x%X)",
                              gOffAlertAt, info.imm, reinterpret_cast<void*>(info.global),
-                             kRvaIsAlertMode);
+                             info.xorSeed ? "xor" : "add", kRvaIsAlertMode);
         } else {
             x::runtime::LogW("DropAlert",
-                             "shape FAIL code=%u — refuse threshold (want mov+add eax,[rip] + "
+                             "shape FAIL code=%u — refuse threshold (want mov+add/xor eax,[rip] + "
                              "cmp [rcx+0x%zX]) rva=0x%X",
                              static_cast<unsigned>(info.shape), gOffAlertAt, kRvaIsAlertMode);
         }
@@ -382,9 +386,11 @@ void RestoreThreshold() {
 bool ArmThreshold(const AlertShapeInfo& info, DWORD now) {
     if (info.shape != AlertShape::Ok || !info.global) return false;
 
-    const uint32_t want = static_cast<uint32_t>((static_cast<uint64_t>(kThreshTarget) -
-                                                 static_cast<uint64_t>(info.imm)) &
-                                                0xffffffffu);
+    const uint32_t want =
+        info.xorSeed ? (info.imm ^ kThreshTarget)
+                     : static_cast<uint32_t>((static_cast<uint64_t>(kThreshTarget) -
+                                              static_cast<uint64_t>(info.imm)) &
+                                             0xffffffffu);
 
     if (!gThreshSaved || gThreshGlobal != info.global || gThreshImm != info.imm) {
         uint32_t cur = 0;
@@ -534,7 +540,7 @@ bool MaintainThreshold(DWORD now) {
 DWORD WINAPI Worker(LPVOID) {
     x::runtime::LogI("DropAlert",
                      "worker start — threshold global (IsAlertMode); MI secondary");
-    for (int i = 0; i < 400 && !gStop.load() && !GetModuleHandleW(L"GameAssembly.dll"); ++i)
+    for (int i = 0; i < 400 && !gStop.load() && !x::runtime::il2cpp::GameAssembly(); ++i)
         Sleep(50);
     Tick(GetTickCount());
     while (!gStop.load()) {

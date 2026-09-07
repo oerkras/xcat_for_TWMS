@@ -1,7 +1,7 @@
 # 离线基建冒烟：写 fixture_echo 夹具并等待 ans（不依赖服端测谎）。
 # 用法：
 #   powershell -File scripts/lie_ai_infra_smoke.ps1
-#   powershell -File scripts/lie_ai_infra_smoke.ps1 -BinDir "C:\path\to\bin\XCat_data"
+#   powershell -File scripts/lie_ai_infra_smoke.ps1 -BinDir "C:\path\to\bin\rtcache"
 
 param(
     [string]$BinDir = "",
@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 
 if (-not $BinDir) {
     $root = Split-Path -Parent $PSScriptRoot
-    $BinDir = Join-Path $root "bin\XCat_data"
+    $BinDir = Join-Path $root "bin\rtcache"
 }
 
 $req = Join-Path $BinDir "state\lie_ai\req"
@@ -41,7 +41,7 @@ $body = "kind=fixture_echo`nq=offline fixture echo`no1=`no2=`no3=`no4=`n"
 
 Write-Host "Wrote fixture id=$id"
 Write-Host "  txt=$txt"
-Write-Host "Waiting for ans (need xcat.exe running LieAiPump_Tick)... timeout=${TimeoutSec}s"
+Write-Host "Waiting for ans (need rtapp.exe running LieAiPump_Tick)... timeout=${TimeoutSec}s"
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 while ((Get-Date) -lt $deadline) {
@@ -53,6 +53,6 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 400
 }
 
-Write-Host "TIMEOUT: no ans. Ensure xcat.exe is running so LieAiPump picks up req/."
+Write-Host "TIMEOUT: no ans. Ensure rtapp.exe is running so LieAiPump picks up req/."
 Write-Host "Or click panel button [本地泵] which also enqueues a fixture."
 exit 1

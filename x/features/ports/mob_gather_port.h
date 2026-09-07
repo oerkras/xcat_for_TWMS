@@ -47,6 +47,11 @@ void SetIgnoreQuiet(bool on);
 void SetQuietDelayMs(unsigned ms);
 void SetApplyCtrl(bool on);
 void SetFirstGenOnly(bool on);
+// 「按怪速限制远处新收」（TAB 防断卡，默认开）：未 armed 时按 WZ speed 限制新收距离。
+// ≥-10（红/青螃蟹）不限、可 hop；≤-50（乌龟）只用 SlowNearPx；中间 lerp 到 hopPx。
+// 关=全部按原半径/接力。0 px=最慢档完全不新收。已 armed 的维持。未知模板 fail-open。
+void SetSlowNearOnly(bool on);
+void SetSlowNearPx(unsigned px);
 // 「吸怪 快攻」TAB「快攻」卡「主动软重连」。不绑吸怪；试连未开则只起表不拆会话。
 // 出过刀 = 欠一次 hangup 清加速 FLAG：第一刀才起表；出刀后关 F5 仍走完这一轮。
 // 没出过刀：关 F5 不计时，满包可直接卖。勾选可单独开（不绑出刀）。

@@ -1,5 +1,8 @@
 #include "process_util.h"
 
+#include "xcat_install_names.h"
+
+#include <ShlObj.h>
 #include <TlHelp32.h>
 #include <cerrno>
 #include <share.h>
@@ -181,5 +184,125 @@ bool IsProcessAlive(DWORD pid) {
     CloseHandle(process);
     return ok && code == STILL_ACTIVE;
 }
+
+namespace {
+
+bool MigrateDirIfNeeded(const std::wstring& from, const std::wstring& to) {
+    if (from.empty() || to.empty()) return false;
+    const DWORD aTo = GetFileAttributesW(to.c_str());
+    if (aTo != INVALID_FILE_ATTRIBUTES) return false;
+    const DWORD aFrom = GetFileAttributesW(from.c_str());
+    if (aFrom == INVALID_FILE_ATTRIBUTES || (aFrom & FILE_ATTRIBUTE_DIRECTORY) == 0) return false;
+    return MoveFileW(from.c_str(), to.c_str()) == TRUE;
+}
+
+}  // namespace
+
+bool MigrateLegacyPayloadDir(const char* exeBinDir) {
+    if (!exeBinDir || !exeBinDir[0]) return false;
+    const std::string neu = JoinBinPath(exeBinDir, install::kPayloadDir);
+    const std::string old = JoinBinPath(exeBinDir, install::LegacyPayloadDirA());
+    return MigrateDirIfNeeded(Utf8ToWide(old), Utf8ToWide(neu));
+}
+
+bool MigrateLegacyLocalAppLeaf() {
+    wchar_t localApp[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return false;
+    const std::wstring base = localApp;
+    const std::wstring neu = base + L"\\" + install::kLocalAppLeafW;
+    const std::wstring old = base + L"\\" + install::LegacyLocalAppLeafW();
+    return MigrateDirIfNeeded(old, neu);
+}
+
+std::wstring IsolatedLocalAppRootW() {
+    (void)MigrateLegacyLocalAppLeaf();
+    wchar_t localApp[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return {};
+    return std::wstring(localApp) + L"\\" + install::kLocalAppLeafW;
+}
+
+namespace install {
+namespace {
+
+void XorDecodeVolatile(const unsigned char* enc, size_t n, char* out, size_t cap) {
+    if (!out || cap < n + 1) return;
+    volatile unsigned char key = 0x5A;
+    for (size_t i = 0; i < n; ++i) out[i] = static_cast<char>(enc[i] ^ key);
+    out[n] = 0;
+}
+
+void AsciiToWide(const char* a, wchar_t* w, size_t cap) {
+    if (!a || !w || cap == 0) return;
+    size_t i = 0;
+    for (; a[i] && i + 1 < cap; ++i) w[i] = static_cast<wchar_t>(static_cast<unsigned char>(a[i]));
+    w[i] = 0;
+}
+
+}  // namespace
+
+const char* LegacyPayloadDirA() {
+    static char buf[16]{};
+    if (!buf[0]) {
+        static const unsigned char enc[] = {0x02, 0x19, 0x3B, 0x2E, 0x05, 0x3E, 0x3B, 0x2E, 0x3B};
+        XorDecodeVolatile(enc, sizeof(enc), buf, sizeof(buf));
+    }
+    return buf;
+}
+
+const wchar_t* LegacyPayloadDirW() {
+    static wchar_t buf[16]{};
+    if (!buf[0]) AsciiToWide(LegacyPayloadDirA(), buf, 16);
+    return buf;
+}
+
+const char* LegacyLauncherStemA() {
+    static char buf[8]{};
+    if (!buf[0]) {
+        static const unsigned char enc[] = {0x22, 0x39, 0x3B, 0x2E};
+        XorDecodeVolatile(enc, sizeof(enc), buf, sizeof(buf));
+    }
+    return buf;
+}
+
+const char* LegacyPayloadDllA() {
+    static char buf[12]{};
+    if (!buf[0]) {
+        static const unsigned char enc[] = {0x22, 0x39, 0x3B, 0x2E, 0x74, 0x3E, 0x36, 0x36};
+        XorDecodeVolatile(enc, sizeof(enc), buf, sizeof(buf));
+    }
+    return buf;
+}
+
+const char* LegacyLocalAppLeafA() {
+    static char buf[8]{};
+    if (!buf[0]) {
+        static const unsigned char enc[] = {0x02, 0x19, 0x3B, 0x2E};
+        XorDecodeVolatile(enc, sizeof(enc), buf, sizeof(buf));
+    }
+    return buf;
+}
+
+const wchar_t* LegacyLocalAppLeafW() {
+    static wchar_t buf[8]{};
+    if (!buf[0]) AsciiToWide(LegacyLocalAppLeafA(), buf, 8);
+    return buf;
+}
+
+const char* LegacyProgramDataLeafA() {
+    static char buf[12]{};
+    if (!buf[0]) {
+        static const unsigned char enc[] = {0x02, 0x19, 0x3B, 0x2E, 0x0E, 0x0D, 0x17, 0x09};
+        XorDecodeVolatile(enc, sizeof(enc), buf, sizeof(buf));
+    }
+    return buf;
+}
+
+const wchar_t* LegacyProgramDataLeafW() {
+    static wchar_t buf[12]{};
+    if (!buf[0]) AsciiToWide(LegacyProgramDataLeafA(), buf, 12);
+    return buf;
+}
+
+}  // namespace install
 
 }  // namespace xcat

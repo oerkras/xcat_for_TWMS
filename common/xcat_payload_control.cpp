@@ -493,6 +493,10 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherStrategy = kMobGatherStrategyDefault;
     out.mobGatherLandOnArrive = kMobGatherLandOnArriveDefault;
     out.mobGatherHopPx = kMobGatherHopPxDefault;
+    out.mobGatherSlowNearOnly = kMobGatherSlowNearOnlyDefault;
+    out.mobGatherSlowNearPx = kMobGatherSlowNearPxDefault;
+    out.mobGatherWzLeashOn = kMobGatherWzLeashOnDefault;
+    out.mobGatherWzLeashSlowPx = kMobGatherWzLeashSlowPxDefault;
     out.mobGatherSpeedPct = kMobGatherSpeedPctDefault;
     out.mobGatherAntiJitter = kMobGatherAntiJitterDefault;
     out.mobGatherMax = kMobGatherMaxDefault;
@@ -791,6 +795,21 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         if (u == kMobGatherHopPxMistakenDefault) u = kMobGatherHopPxDefault;
         out.mobGatherHopPx = ClampMobGatherHopPx(u);
     }
+    if (IniGetBool(ini, "core", "mobGatherSlowNearOnly", b))
+        out.mobGatherSlowNearOnly = b ? 1u : 0u;
+    if (IniGetU32(ini, "core", "mobGatherSlowNearPx", u))
+        out.mobGatherSlowNearPx = ClampMobGatherSlowNearPx(u);
+    // v160: v159 厂默关。改成按 speed 连续限制后厂默开；旧盘 off 迁一次。升 version 后可再关。
+    {
+        uint32_t coreIniVer = 0;
+        const bool hasCoreVer = IniGetU32(ini, "core", "version", coreIniVer);
+        if ((!hasCoreVer || coreIniVer < 160u) && out.mobGatherSlowNearOnly == 0)
+            out.mobGatherSlowNearOnly = 1;
+    }
+    if (IniGetBool(ini, "core", "mobGatherWzLeashOn", b))
+        out.mobGatherWzLeashOn = b ? 1u : 0u;
+    if (IniGetU32(ini, "core", "mobGatherWzLeashSlowPx", u))
+        out.mobGatherWzLeashSlowPx = ClampMobGatherWzLeashSlowPx(u);
     ReadMobGatherTune(binDir, &out.mobGatherSpeedPct, &out.mobGatherAntiJitter);
     if (IniGetU32(ini, "core", "mobGatherSpeedPct", u))
         out.mobGatherSpeedPct = u;
@@ -1327,6 +1346,12 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     if (normalized.mobGatherHopPx == kMobGatherHopPxMistakenDefault)
         normalized.mobGatherHopPx = kMobGatherHopPxDefault;
     normalized.mobGatherHopPx = ClampMobGatherHopPx(normalized.mobGatherHopPx);
+    normalized.mobGatherSlowNearOnly = normalized.mobGatherSlowNearOnly ? 1u : 0u;
+    normalized.mobGatherSlowNearPx = ClampMobGatherSlowNearPx(normalized.mobGatherSlowNearPx);
+    normalized.mobGatherWzLeashOn = normalized.mobGatherWzLeashOn ? 1u : 0u;
+    normalized.mobGatherWzLeashSlowPx = ClampMobGatherWzLeashSlowPx(
+        normalized.mobGatherWzLeashSlowPx ? normalized.mobGatherWzLeashSlowPx
+                                          : kMobGatherWzLeashSlowPxDefault);
     ApplyMobGatherEncounterForce(normalized);
     ApplyAttackNoCdEncounterForce(normalized);
     normalized.mobGatherAntiJitter = normalized.mobGatherAntiJitter ? 1u : 0u;
@@ -1582,6 +1607,10 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "mobGatherStrategy", normalized.mobGatherStrategy);
         IniSetU32(ini, "core", "mobGatherLandOnArrive", normalized.mobGatherLandOnArrive);
         IniSetU32(ini, "core", "mobGatherHopPx", normalized.mobGatherHopPx);
+        IniSetBool(ini, "core", "mobGatherSlowNearOnly", normalized.mobGatherSlowNearOnly != 0);
+        IniSetU32(ini, "core", "mobGatherSlowNearPx", normalized.mobGatherSlowNearPx);
+        IniSetBool(ini, "core", "mobGatherWzLeashOn", normalized.mobGatherWzLeashOn != 0);
+        IniSetU32(ini, "core", "mobGatherWzLeashSlowPx", normalized.mobGatherWzLeashSlowPx);
         IniSetU32(ini, "core", "mobGatherSpeedPct", normalized.mobGatherSpeedPct);
         IniSetBool(ini, "core", "mobGatherAntiJitter", normalized.mobGatherAntiJitter != 0);
         IniSetU32(ini, "core", "mobGatherMax", normalized.mobGatherMax);

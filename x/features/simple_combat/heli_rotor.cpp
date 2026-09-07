@@ -33,6 +33,10 @@ constexpr DWORD kIssueSettleMs = 16;
 // 配平加密 / 软钉 sp 的位置窗（略宽于进近 P 死区，避免边缘掉回 90ms）。
 constexpr float kSettleErrX = 16.f;
 constexpr float kSettleErrY = 16.f;
+// 进窗 16、出窗更宽：BIN 10:32:29 同锁 ey 从 −2 到 +32 掉出窗，立刻走 Kp=7×5X，
+// vy −36 → +143 → −670，人像弹簧。滞回把这一拍仍留在软钉律。
+constexpr float kSettleErrYExit = 32.f;
+constexpr float kSettleLatchSlackX = 16.f;
 // 到位软钉（两轴对称）：进近死区 ±12 会把残差冻在进入点（BIN X 中位 |ex|≈11）。
 // 1px 死区 + 中等 P；限幅防 /T 死拍把几 px 放大成泵。GravityLoss 已按真实 since。
 constexpr float kSettleDeadX = 1.f;
@@ -429,6 +433,16 @@ float GravityLoss(DWORD sinceMs) {
     return kGravityPerStep * ms / kPhysicsStepMs;
 }
 
+// 亚物理步占一步重力的比例。trim 已经按 since/30 算；cmd 里「落地帧 +30」和
+// (desired−vy) 必须同一比例，否则 16ms 软钉每拍都当整步落地，物理 30ms 未刷新 vy
+// 就叠第二次 → BIN 10:32:29 弹簧。90ms 进近 frac=1，与改前同式。
+float PhysicsStepFrac(DWORD sinceMs) {
+    float f = static_cast<float>(sinceMs) / kPhysicsStepMs;
+    if (f < 0.f) f = 0.f;
+    if (f > 1.f) f = 1.f;
+    return f;
+}
+
 std::atomic<unsigned> gMode{static_cast<unsigned>(Mode::Off)};
 std::atomic<float> gSpX{0.f};
 std::atomic<float> gSpY{0.f};
@@ -444,6 +458,7 @@ bool gNeedQuietResumeCap = false;
 
 // 与 simple_combat 防抖同开同关（SetAntiJitterEnabled 转发）。
 std::atomic<bool> gSoftSettleEnabled{true};
+bool gSettleHoverLatch = false;
 
 std::atomic<bool> gBailed{false};
 
@@ -627,6 +642,7 @@ void Disarm(Owner o) {
     gLastIssueMs = 0;
     gStrikeDumpMs = 0;
     gNeedQuietResumeCap = true;
+    gSettleHoverLatch = false;
 }
 
 void Reset() {
@@ -643,6 +659,7 @@ void Reset() {
     gLastTickFired = false;
     gStrikeDumpMs = 0;
     gNeedQuietResumeCap = false;
+    gSettleHoverLatch = false;
     gBailed.store(false, std::memory_order_release);
     gStaleSinceMs = 0;
     // 倍率是用户设置，不是本轮状态，换图/开关都不该把它冲掉。
@@ -799,10 +816,21 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // Combat：X 窗放到 kCombatSettleErrX，否则站位环内微调 X 时 Y 进不了软钉、死区对拉。
     const float settleEx =
         (o == Owner::Combat || o == Owner::Gather) ? kCombatSettleErrX : kSettleErrX;
-    const bool settleHoverCand =
+    const bool settleIn =
         gSoftSettleEnabled.load(std::memory_order_acquire) && !st.onFh &&
         (sp.mode == Mode::Station || sp.mode == Mode::Hold) &&
         std::fabs(errX) <= settleEx && std::fabs(errY) <= kSettleErrY;
+    const bool settleStay =
+        gSoftSettleEnabled.load(std::memory_order_acquire) && !st.onFh &&
+        (sp.mode == Mode::Station || sp.mode == Mode::Hold) &&
+        std::fabs(errX) <= settleEx + kSettleLatchSlackX &&
+        std::fabs(errY) <= kSettleErrYExit;
+    if (settleIn) {
+        gSettleHoverLatch = true;
+    } else if (!settleStay) {
+        gSettleHoverLatch = false;
+    }
+    const bool settleHoverCand = settleIn || gSettleHoverLatch;
 
     float desiredVx = sp.leadVx;
     if (settleHoverCand) {
@@ -1172,11 +1200,6 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // 放在预刹与档位限幅**之后**：它只在意图本身这一拍够不着时才收窄，而刹停/内推/救援
     // 这些安全机动恒满足 |vt−v| ≤ maxCap+300 ≤ C，一拍可达，不会被它撤销（见 kMaxCmdVx）。
     // 会被摊到多拍的只有「满速换靶到反方向」这类纯性能场景。
-    const float feedforward = trim * 0.5f + kGravityPerStep * 0.5f;
-    desiredVx = ReachableV(desiredVx, st.vx, 0.f, kMaxCmdVx);
-    if (!st.onFh) desiredVy = ReachableV(desiredVy, st.vy, feedforward, kMaxCmdVy);
-    tm.desiredVy = desiredVy;
-
     // 叠加语义 ⇒ 发的是**增量**：把当前速度补到目标，再预付本周期的重力损耗。
     //
     // 目标是让**周期平均**速度等于 desiredVy（平均为 0 才是真不漂）。设发射前速度 vp、
@@ -1184,7 +1207,17 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // vp+cmd-60, vp+cmd-120, …, vp+cmd-60N，平均 = vp + cmd - (trim/2 + 30)。
     // 令其等于 desiredVy 即得下式。末尾那个 kGravityPerStep/2 就是"落地帧那一步"，
     // 漏掉它稳态会稳定下沉 30px/s —— 十秒 300px，正是过去"看着在悬停却越飘越低"的量级。
-    float cmdVy = st.onFh ? 0.f : (desiredVy - st.vy) + feedforward;
+    //
+    // ★ 16ms 软钉：N 不再是「一整步」。落地项与 (desired−vy) 都乘 PhysicsStepFrac，
+    // 两拍亚步 ≈ 一步重力；不乘的话每拍 +30 落地 + 全量改 vy，物理未刷新就叠泵
+    // （BIN 10:32:29 同锁弹簧）。90ms 进近 frac=1，式子与改前相同。
+    const float stepFrac = PhysicsStepFrac(sinceMs);
+    const float feedforward = trim * 0.5f + kGravityPerStep * 0.5f * stepFrac;
+    desiredVx = ReachableV(desiredVx, st.vx, 0.f, kMaxCmdVx);
+    if (!st.onFh) desiredVy = ReachableV(desiredVy, st.vy, feedforward, kMaxCmdVy);
+    tm.desiredVy = desiredVy;
+
+    float cmdVy = st.onFh ? 0.f : (desiredVy - st.vy) * stepFrac + feedforward;
 
     // 限幅落在**意图速度**上（这才是落地速度），再换算成增量。反过来钳增量会把反向
     // 所需的 |vt|+|v| 削掉，那正是 c72cff 里刹不住的原因。

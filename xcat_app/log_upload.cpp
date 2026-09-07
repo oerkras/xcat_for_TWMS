@@ -2,6 +2,7 @@
 
 #include "process_util.h"
 #include "xcat_config_ini.h"
+#include "xcat_install_names.h"
 #include "xcat_log.h"
 #include "xcat_version.h"
 
@@ -117,7 +118,7 @@ std::string WinHttpFailure(const char* action, DWORD err, const char* mode) {
 }
 
 std::string PayloadBinDirFromExe(const std::string& exeBinDir) {
-    return xcat::JoinBinPath(exeBinDir.c_str(), "XCat_data");
+    return xcat::JoinBinPath(exeBinDir.c_str(), xcat::install::kPayloadDir);
 }
 
 bool EnsureStateDir(const char* payloadBinDir) {
@@ -423,7 +424,7 @@ std::string ParseRotatedLogBaseName(const std::string& leaf) {
 }
 
 /**
- * 扫 XCat_data/logs 下全部频道、全部现存卷（combat.log / combat.log.24 …）。
+ * 扫 rtcache/logs 下全部频道、全部现存卷（combat.log / combat.log.24 …）。
  * 已收录的精确文件名跳过；白名单已收的基名整族跳过；prev/ 另走专收。
  * maxBackups：轮转序号上限（.N 的 N）；当前卷（无序号）始终收。
  */
@@ -483,7 +484,7 @@ void AddFeatureChannelLogs(std::vector<LogBlob>& logs, const char* payloadBinDir
             if (idx == 0 || idx > cap) continue;
         }
 
-        AddLogIfPresent(logs, leaf, "XCat_data/logs/" + leaf,
+        AddLogIfPresent(logs, leaf, "rtcache/logs/" + leaf,
                         xcat::WideToUtf8(it->path().wstring()));
         already.insert(leaf);
     }
@@ -754,7 +755,7 @@ LieEventsAttach AddLieEventsIfPresent(std::vector<LogBlob>& logs, const std::str
         if (zipSize <= kMaxLieEventsZipBytes) {
             LogBlob blob{};
             blob.name = "lie_events.zip";
-            blob.source = "XCat_data/state/lie_events.zip";
+            blob.source = "rtcache/state/lie_events.zip";
             if (!ReadWholeFileCapped(xcat::WideToUtf8(zipPath.wstring()), kMaxLieEventsZipBytes,
                                      blob)) {
                 xcat::log::Warn("LogUpload", "lie_events zip read failed");
@@ -826,12 +827,12 @@ CollectedLogs CollectLogs(const LogUploadRequest& req) {
 
     // 现行：只收集 JSONL。旧版 .log / app.jsonl 若仍残留则顺带捡起，便于过渡期排障。
     AddRotatedLogsIfPresent(out.logs, "freeze_incident.jsonl",
-                            "XCat_data/logs/freeze_incident.jsonl", freezeIncidentJsonl, backups);
+                            "rtcache/logs/freeze_incident.jsonl", freezeIncidentJsonl, backups);
     AddRotatedLogsIfPresent(out.logs, "freeze_incident.log",
-                            "XCat_data/logs/freeze_incident.log",
+                            "rtcache/logs/freeze_incident.log",
                             xcat::log::paths::TextLog(freezeIncidentJsonl), backups);
-    AddRotatedLogsIfPresent(out.logs, "x.jsonl", "XCat_data/logs/x.jsonl", payloadJsonl, backups);
-    AddRotatedLogsIfPresent(out.logs, "x.log", "XCat_data/logs/x.log",
+    AddRotatedLogsIfPresent(out.logs, "x.jsonl", "rtcache/logs/x.jsonl", payloadJsonl, backups);
+    AddRotatedLogsIfPresent(out.logs, "x.log", "rtcache/logs/x.log",
                             xcat::log::paths::TextLog(payloadJsonl), backups);
     AddRotatedLogsIfPresent(out.logs, "launcher.jsonl", "bin/logs/launcher.jsonl",
                             launcherJsonl, backups);
@@ -846,9 +847,9 @@ CollectedLogs CollectLogs(const LogUploadRequest& req) {
                             backups);
     AddRotatedLogsIfPresent(out.logs, "inject.log", "bin/logs/inject.log",
                             xcat::log::paths::TextLog(injectJsonl), backups);
-    AddRotatedLogsIfPresent(out.logs, "overlay_host.jsonl", "XCat_data/state/overlay_host.jsonl",
+    AddRotatedLogsIfPresent(out.logs, "overlay_host.jsonl", "rtcache/state/overlay_host.jsonl",
                             overlayJsonl, backups);
-    AddRotatedLogsIfPresent(out.logs, "overlay_host.log", "XCat_data/state/overlay_host.log",
+    AddRotatedLogsIfPresent(out.logs, "overlay_host.log", "rtcache/state/overlay_host.log",
                             xcat::log::paths::TextLog(overlayJsonl), backups);
 
     // 更新器脚本日志 / 失败通知在 %TEMP%（及 state），不随旧安装目录删除——热更失败采证关键。
@@ -863,18 +864,18 @@ CollectedLogs CollectLogs(const LogUploadRequest& req) {
                             xcat::WideToUtf8(tempRoot + L"xcat_update_failed.notify"));
         }
         AddLogIfPresent(out.logs, "update_failed_state.notify",
-                        "XCat_data/state/update_failed.notify",
+                        "rtcache/state/update_failed.notify",
                         xcat::JoinBinPath(req.payloadBinDir.c_str(), "state\\update_failed.notify"));
     }
 
     // 测谎作答统计（角色 × 题型累计）：几百字节，随包带上才看得到客户端战绩。
-    AddLogIfPresent(out.logs, "lie_stats.tsv", "XCat_data/state/lie_stats.tsv",
+    AddLogIfPresent(out.logs, "lie_stats.tsv", "rtcache/state/lie_stats.tsv",
                     xcat::JoinBinPath(req.payloadBinDir.c_str(), "state\\lie_stats.tsv"));
 
     // 功能频道日志：combat / foothold / petloot / invuln / auto_enter …（白名单未列的一律扫入）。
     AddFeatureChannelLogs(out.logs, req.payloadBinDir.c_str(), backups);
 
-    // 上一版本遗留日志：更新器删旧目录前拷入 XCat_data\logs\prev（旧目录已不存在）。
+    // 上一版本遗留日志：更新器删旧目录前拷入 rtcache\logs\prev（旧目录已不存在）。
     {
         namespace fs = std::filesystem;
         const std::string prevDirUtf8 = xcat::JoinBinPath(req.payloadBinDir.c_str(), "logs\\prev");
@@ -887,7 +888,7 @@ CollectedLogs CollectLogs(const LogUploadRequest& req) {
                 const std::string leaf = xcat::WideToUtf8(it->path().filename().wstring());
                 if (leaf.empty()) continue;
                 // name 不含斜杠（会进 PUT URL）；source 保留层级供服务端归档。
-                AddLogIfPresent(out.logs, "prev_" + leaf, "XCat_data/logs/prev/" + leaf,
+                AddLogIfPresent(out.logs, "prev_" + leaf, "rtcache/logs/prev/" + leaf,
                                 xcat::WideToUtf8(it->path().wstring()));
             }
         }
@@ -1295,7 +1296,7 @@ HttpResult HttpExchangeOnce(const ParsedUrl& base, const std::wstring& path, con
                             DWORD accessType, const char* mode) {
     HttpResult result;
     HINTERNET session =
-        WinHttpOpen(L"XCat-LogUpload/2.0", accessType, WINHTTP_NO_PROXY_NAME,
+        WinHttpOpen(L"rtapp-LogUpload/2.0", accessType, WINHTTP_NO_PROXY_NAME,
                     WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) {
         result.err = WinHttpFailure("WinHttpOpen", GetLastError(), mode);

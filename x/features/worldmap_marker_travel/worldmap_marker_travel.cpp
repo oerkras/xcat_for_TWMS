@@ -28,6 +28,7 @@
 #include "../../runtime/main_thread_pump.h"
 
 #include "../../../common/xcat_map_names.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -48,41 +49,41 @@ using x::runtime::il2cpp::ReadPtr;
 
 // UIWorldMapItem（Prefab 字段形：三 string@0x70/78/80 + mapId@0x88）
 constexpr char kItemClass[] =
-    "ecea5050ccbc073c4d2a2ab38da0567eca82083e8d6e55986e4a9cb4296a148";
-constexpr uint32_t kRvaUpdateView = 0x7F4B90;  // remounted 2026-08-06
-constexpr uint32_t kRvaOnPointerDown = 0x7F7470;  // remounted 2026-08-06
+    "d1c2053b8611cdd6ea651486e2257db50f1f26617ea8b4723b66c1bc663f0a7";
+constexpr uint32_t kRvaUpdateView = 0x7F4730;  // remounted 2026-08-06
+constexpr uint32_t kRvaOnPointerDown = 0x7F7010;  // remounted 2026-08-06
 // 世界地图标题点（TypeDef 636）：有 Title/坐标，无 UIWorldMapItem.UpdateView。
 constexpr char kLabelClass[] =
-    "ce3a5ca0cc527f89a25aa7970ac857b3501e265669315c3dcfad02feb0dd546";
-constexpr uint32_t kRvaLabelBind = 0x7F5830;
-constexpr uint32_t kRvaLabelClick = 0x7F76A0;
+    "d918077f270b164ca5b587e404d0e909eb707d5dff8d301ec411108f7189d1d";
+constexpr uint32_t kRvaLabelBind = 0x7F5500;
+constexpr uint32_t kRvaLabelClick = 0x7F71F0;
 constexpr char kHashLabelBind[] =
-    "cc8a33207135f911ccdf053e868429e31d1776be45257b0fdd4e1f7b5e2e4a3";
+    "e61419573560b52c4bc7dc558dba1d01f8010da75c5d3841c53610636a7ba5f";
 // UIWorldMap / WorldMap：空 Spot 兜底只读列表，装不上不得卸主功能。
 constexpr char kUiWorldMapClass[] =
-    "fd2ad8f876b0245d971eea724fe93e8ddcfaa65813bea449986a2daa1ed9331";
+    "e4f4aa6fb9208cfee8a92a8ad78750b685d489d9a46b213f70fadbdcb1b3d11";
 constexpr char kWorldMapDataClass[] =
-    "b0b5c5a2f171187693e376b9192cf942aceda98ed0bb4c192e380a7e147bcc8";
+    "e7cacd410be4c89b46e4b88ed9d70d073b28947e3b6999cf2823b0cd980ea0b";
 constexpr char kLabelDataClass[] =
-    "b0b5c5a2f171187693e376b9192cf942aceda98ed0bb4c192e380a7e147bcc8."
-    "d46afe6e46e09ba636f2c83caf645b75bac604fc3f51db4ec020eb8579f07fd";
+    "e7cacd410be4c89b46e4b88ed9d70d073b28947e3b6999cf2823b0cd980ea0b."
+    "fe5ade1c85171c8b0a15c94da31da3aed5373efb42328ca725eef2844b0fbb4";
 constexpr char kLabelDataClassSlash[] =
-    "b0b5c5a2f171187693e376b9192cf942aceda98ed0bb4c192e380a7e147bcc8/"
-    "d46afe6e46e09ba636f2c83caf645b75bac604fc3f51db4ec020eb8579f07fd";
+    "e7cacd410be4c89b46e4b88ed9d70d073b28947e3b6999cf2823b0cd980ea0b/"
+    "fe5ade1c85171c8b0a15c94da31da3aed5373efb42328ca725eef2844b0fbb4";
 constexpr char kHashWmItems[] =
-    "b26906d822b211713b092a9686eb58972bbbc61d35e8248bc4bb55128c46b8e";
+    "ba89f7e166890bd1578cdcd87baf9bff74c445f20ee30298e3cf14aea553155";
 constexpr char kHashWmLabels[] =
-    "b247b2771ea7f35ecfe6b271ac846cc6945f62f5d694cfa126dd3828b235759";
+    "c97b4adb74213c4e219dce7fc894d30229d2220e3ee85cd984d54fb89a92aca";
 constexpr char kHashWmWorldMap[] =
-    "bca54f299263a0cb64476b456c3dabb14494693c14dfaeece5b769d2bc044c9";
+    "f8b49eed1c5f9d52ef4dfd27c882ef9d831a3a5829dbd87570df1356be942df";
 constexpr char kHashLabelDataList[] =
-    "b07c07e1f72986afc2a69755de05bef49069e404f400207b433fd5a7cd0dc1c";
+    "f7c55c0b02a72b2af34158418357fe67d60879fb3987a45a7e14900e21410e6";
 constexpr char kHashLabelTitle[] =
-    "b2888430d45842fe37d9fec4f03234c76e660829788b9ee3843e132ff74ef13";
+    "f36979df3b1d75390d91c44d144c94ce89720c36685f43a600e1fd0dcef1ed5";
 constexpr char kHashLabelIdx[] =
-    "ab74518447e62c410450048b5c97e40e7750cbb2784cfeed9bc337a6709fe43";
+    "ebba28f85573d8ffcfbed7ca3dda6b777097cd9d3d6b5000510f34678ea18f6";
 constexpr char kHashLabelIdxU[] =
-    "ba7db7ecb0cb4f9a1cd55093e4fd174536d566bbf3d9ad4d45316fa69609aae";
+    "b1146c467afb7961d0b2f271d430a2db42755c4e12457c9f0bbaaeb84acc801";
 constexpr size_t kFbWmItems = 0xE0;
 constexpr size_t kFbWmLabels = 0xE8;
 constexpr size_t kFbWmWorldMap = 0x110;
@@ -91,21 +92,21 @@ constexpr size_t kFbLabelTitle = 0x18;
 constexpr size_t kFbLabelIdx = 0x20;
 constexpr size_t kFbLabelIdxU = 0x38;
 // ExecuteEvents.Execute(IPointerDownHandler, BaseEventData) — script.json Address
-constexpr uint32_t kRvaExecutePointerDown = 0x52C5960;  // remounted 2026-08-06
+constexpr uint32_t kRvaExecutePointerDown = 0x52CC210;  // remounted 2026-08-06
 constexpr size_t kFbSPointerDownHandler = 0x18;         // ExecuteEvents static field
 
 // UIUtilDialog（非 Ex）：YesNo(string,Action,Action,…) / Notice(string,string,bool…)
 constexpr char kUtilDialogClass[] =
-    "dbba47d52b66af5fbd96d4596cdb84ae3a2d43e054ae5c7730712648af977f3";
-constexpr uint32_t kRvaYesNo = 0x7575f0;  // remounted 2026-08-06
-constexpr uint32_t kRvaNotice = 0x75B680;  // remounted 2026-08-06
+    "df44f323081769037ec18cd5c53e9c528e6843469341798b1df69e993287650";
+constexpr uint32_t kRvaYesNo = 0x7570a0;  // remounted 2026-08-06
+constexpr uint32_t kRvaNotice = 0x75B270;  // remounted 2026-08-06
 
 constexpr char kHashUpdateView[] =
-    "bf5bb29abed320fa980d7fec618a854876020164ff9d582ef18fbb4bc79a55a";
+    "cd68a96c06529f18c9b1f64a03acc0223a5fb3d4ba3f6a4ff9970304c015d28";
 constexpr char kHashYesNo[] =
-    "b4c4107f7f4ba8e00a86f97d1588fae32e246044f27164210597586d6be713d";
+    "e1e7858adcb0b3cd6add0f3bd8e5e17ce6a40e62308538d95f44d8cab8e586b";
 constexpr char kHashNotice[] =
-    "f80a6d97e2e334250b18f591bbc5d5cf0279345aeccb6dfe7d52a15030090c0";
+    "c48c375bf842cfb2293bebba685857630204accde73a6b32433f815c9289f44";
 
 // dump 验证 fallback（remount 2026-08-06；UpdateView 写回 +0x70/78/80；mapId@0x88）
 constexpr size_t kFbMapDesc = 0x70;
@@ -122,29 +123,29 @@ constexpr size_t kFbPointerClickCount = 0x178;
 
 // Spot 字段哈希（dump.cs TypeDefIndex 630）
 constexpr char kHashMapDesc[] =
-    "a0556abfce27eb087f83559cf21eded85cddc81a5ff853da5e46fc140ba66e8";
+    "ef80c10db528687c51133f320dfbf3bdd1a0b7a86ea3e9641b26ccd457f16d0";
 constexpr char kHashMapName[] =
-    "bc87e1750bdcfa8f180091d4cef58c1756e847437373c5314e8d828d796c6f2";
+    "df2ce1c32b56cd035cf3581ccb65610e28cd508faa6dee8312a0cb1323020c9";
 constexpr char kHashStreetName[] =
-    "c6a25bac7a7248005a231aab64050e181e0415f59544332a738d5854ae0fdfa";
+    "c4133dedf6beec9b2a3d43e0621604b95858915212970cba1c1025d63c06d72";
 constexpr char kHashCachedMapId[] =
-    "ff685ffcd3c1e0f283eb1688957388038ed6f3b57ee87ca570b33701131939e";
+    "c20cf5eef8333ef9d1f079f9da9191152aed42e660973abd3a48857e47743aa";
 
 // MapListData 嵌套类 + 属性 backing 字段（TypeDefIndex 2183）
 constexpr char kMapListDataClass[] =
-    "b0b5c5a2f171187693e376b9192cf942aceda98ed0bb4c192e380a7e147bcc8."
-    "db8cf216366e4e65694e4e2e55a5b584d1c3150010bbd01972fe0a69cbdddde";
+    "e7cacd410be4c89b46e4b88ed9d70d073b28947e3b6999cf2823b0cd980ea0b."
+    "b15b16f073e52233aeb924c617cfed3cf8102582a36454e8d6e0fff6c8bca25";
 constexpr char kMapListDataClassSlash[] =
-    "b0b5c5a2f171187693e376b9192cf942aceda98ed0bb4c192e380a7e147bcc8/"
-    "db8cf216366e4e65694e4e2e55a5b584d1c3150010bbd01972fe0a69cbdddde";
+    "e7cacd410be4c89b46e4b88ed9d70d073b28947e3b6999cf2823b0cd980ea0b/"
+    "b15b16f073e52233aeb924c617cfed3cf8102582a36454e8d6e0fff6c8bca25";
 constexpr char kMapListDataNested[] =
-    "db8cf216366e4e65694e4e2e55a5b584d1c3150010bbd01972fe0a69cbdddde";
+    "b15b16f073e52233aeb924c617cfed3cf8102582a36454e8d6e0fff6c8bca25";
 constexpr char kHashMapNoList[] =
-    "<c464a2b5b5e4d3d9dab7d81c15a6859a89940d5fe681f3e4a0c84fbb087f617>k__BackingField";
+    "<ea406e0041bc472303aebefa944718879cc7fdb02b4f7dfab3f1b143adc2dbe>k__BackingField";
 constexpr char kHashMapTitle[] =
-    "<baddf54ba78348adeabeb82c7072dffd4f7df349033f720255906b6534cbe19>k__BackingField";
+    "<c6ba71965a98545ff204615bd5a599d95d44206ff9299b502f93645760c4b0e>k__BackingField";
 constexpr char kHashMapListDesc[] =
-    "<ee289e8a493d61cd4365fd3c7ab30ee3eb240df46d7f7133fac65092779a369>k__BackingField";
+    "<e8650ba2712881a0a0253ffb25e6177d0d65c2baca46e34ef1787ecb5f25a71>k__BackingField";
 constexpr char kHashClickCount[] = "<clickCount>k__BackingField";
 constexpr DWORD kDblClickMsMin = 400;
 constexpr DWORD kDblClickMsMax = 800;
@@ -631,7 +632,7 @@ void RestoreVtableMethodPtr(void** slot, void* orig) {
 }
 
 uint32_t PtrRva(void* p) {
-    HMODULE ga = GetModuleHandleW(L"GameAssembly.dll");
+    HMODULE ga = x::runtime::il2cpp::GameAssembly();
     if (!ga || !p) return 0;
     const auto a = reinterpret_cast<uintptr_t>(p);
     const auto b = reinterpret_cast<uintptr_t>(ga);
@@ -1226,10 +1227,10 @@ bool EnsureFieldExports() {
     if (!ga) return false;
     if (!gFieldFromName)
         gFieldFromName =
-            reinterpret_cast<FnFieldFromName>(GetProcAddress(ga, "il2cpp_class_get_field_from_name"));
+            reinterpret_cast<FnFieldFromName>(XCAT_GETPROC(ga, kIl2cppClassGetFieldFromName));
     if (!gFieldGetOffset)
         gFieldGetOffset =
-            reinterpret_cast<FnFieldGetOffset>(GetProcAddress(ga, "il2cpp_field_get_offset"));
+            reinterpret_cast<FnFieldGetOffset>(XCAT_GETPROC(ga, kIl2cppFieldGetOffset));
     return gFieldFromName && gFieldGetOffset;
 }
 

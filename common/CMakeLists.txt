@@ -1,6 +1,7 @@
 # 轻量工具库：进程/日志/INI。运维台只链这个，避免编进整包游戏逻辑。
 add_library(xcat_util STATIC
     process_util.cpp
+    xor_cstr.cpp
     xcat_log.cpp
     xcat_config_ini.cpp
     xcat_access_deny_sticky.cpp

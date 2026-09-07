@@ -11,6 +11,7 @@
 #include "runtime_leds.h"
 
 #include "xcat_imgui_theme.h"
+#include "xcat_install_names.h"
 #include "xcat_log.h"
 
 #include "imgui.h"
@@ -219,7 +220,7 @@ inline void DrawLauncherTopBar(AppWindow& app, const RuntimeLeds& leds,
                     ImVec2(origin.x + fullW, origin.y + titleH),
                     ImGui::ColorConvertFloat4ToU32(p.titleBarLineBottom));
         dl->AddText(ImVec2(origin.x + pad, origin.y + AppDpi_Px(6.f)),
-                    ImGui::ColorConvertFloat4ToU32(p.brandText), "XCat");
+                    ImGui::ColorConvertFloat4ToU32(p.brandText), xcat::install::kLauncherStem);
     }
 
     ImGui::SetCursorScreenPos(origin);
@@ -436,7 +437,7 @@ struct LauncherFrame {
             sz.y = (std::max)(1.f, sz.y - reservedBottomPx);
         ImGui::SetNextWindowPos(ImVec2(0.f, 0.f), ImGuiCond_Always);
         ImGui::SetNextWindowSize(sz, ImGuiCond_Always);
-        visible = ImGui::Begin("XCat", open,
+        visible = ImGui::Begin(xcat::install::kLauncherStem, open,
                                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
                                    ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoTitleBar |

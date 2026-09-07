@@ -38,6 +38,8 @@
 #include "il2cpp_bind.h"
 #include "il2cpp_metadata_lock.h"
 #include "log.h"
+#include "xor_cstr.h"
+#include "../../common/xcat_install_names.h"
 
 namespace x::runtime::il2cpp_fault_probe {
 namespace {
@@ -313,7 +315,7 @@ void Emit(const Rec& r) {
     if (r.owned) {
         x::runtime::LogW("Il2cppFault",
                          "★持锁时抛异常★ code=0x%08lX %s 0x%llx 于 %s tid=%lu recursion=%u "
-                         "—— 栈里有 xcat.dll，若外层 __except 吞掉它这把锁就永久泄漏、"
+                         "—— 栈里有载荷 DLL，若外层 __except 吞掉它这把锁就永久泄漏、"
                          "全客户端黑屏。栈: %s",
                          r.code, what, static_cast<unsigned long long>(r.target), at, r.tid,
                          r.recursion, stack);
@@ -367,18 +369,17 @@ bool MarkerExists(const char* bin, const char* rel) {
     return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
 }
 
-// 强制关：旧杀手锏文件。GetBinDir 已是 XCat_data/，两处都认以免旧路径失效。
+// 强制关：旧杀手锏文件。GetBinDir 已是载荷目录，两处都认以免旧嵌套路径失效。
 bool KillSwitchOn() {
     const char* bin = x::runtime::GetBinDir();
-    return MarkerExists(bin, "state\\no_fault_probe") ||
-           MarkerExists(bin, "XCat_data\\state\\no_fault_probe");
+    if (MarkerExists(bin, "state\\no_fault_probe")) return true;
+    char nested[MAX_PATH]{};
+    snprintf(nested, sizeof(nested), "%s\\state\\no_fault_probe", xcat::install::LegacyPayloadDirA());
+    return MarkerExists(bin, nested);
 }
 
 bool EnvFaultProbeOn() {
-    char env[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_FAULT_PROBE", env, sizeof(env));
-    if (!n || n >= sizeof(env)) return false;
-    return env[0] == '1' || env[0] == 'y' || env[0] == 'Y';
+    return XCAT_ENV_ON(kEnvFaultProbe);
 }
 
 // 默认关 VEH。排障：XCAT_FAULT_PROBE=1 或 DLL 目录 / state 下 fault_probe.on。
@@ -398,7 +399,7 @@ void Start() {
             x::runtime::LogI("Il2cppFault", "检测到 state\\no_fault_probe，探针已停用");
         } else {
             x::runtime::LogI("Il2cppFault",
-                             "VEH off（默认不挂异常链；排障设 XCAT_FAULT_PROBE=1 或放 fault_probe.on）");
+                             "VEH off（默认不挂异常链；排障设 fault_probe env 或放 fault_probe.on）");
         }
         return;
     }

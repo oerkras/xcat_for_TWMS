@@ -17,6 +17,7 @@
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../ports/mob_gather_port.h"
 #include "../../runtime/dbg_log_file.h"
+#include "../../runtime/bin_dir.h"
 #include "../../runtime/log.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
@@ -61,14 +62,14 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Packet / OutPacket fields：hash → field_get_offset（In/Out 同布局 · remount 2026-08-06）
 constexpr char kPacketBaseClass[] =
-    "d3785c31ca0087d002d78da28dad2667158b740d047c5aeb1e6f8f5107b81de";
+    "b30f04513b1c4d41e3c27445fdc90c247c232bd88aa1121648eda3f3924f72d";
 constexpr char kHashPacketBuffer[] =
-    "<f4089890cfff6634129a4521f9b26b6ab553e5415150558b993a1167d43e1d5>k__BackingField";
+    "<a98e32adcdd8ab49bc3842ef070bcb91444555bdbbd2f82400d1320276ba18f>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<c38ad7aae0f32191d273a203a344daf528f9575b63a0506300e12dea7d2eefe>k__BackingField";
+    "<f8c46e00eb78d41330636a2a5039f144f30d4a7c6a19b373e0b0c049fcc56b3>k__BackingField";
 // OutPacket.id@0x20（TDI 13775）— 勿用 InPacket TDI 13774 的 f4e004d8… backing
 constexpr char kHashOutPacketId[] =
-    "e68e7f1c111d9ebeeb6e0d357363f28b463c45d0d9f9e80ef38bd0faffba03d";
+    "bb408cfc09d7de1810883c1162375d43bb2d6e0d2cd95c7813e81b2fa9b1407";
 constexpr size_t kFbOutPacketId = 0x20;
 constexpr size_t kFbPacketBuffer = 0x10;
 constexpr size_t kFbPacketOffset = 0x18;
@@ -84,51 +85,51 @@ int gPktFieldHits = -1;
 
 // TW dump.cs RVAs — call-edge targets（Session TDI 13797 · remount 2026-08-06 按方法序对齐）。
 // CloseSession=旧 CloseSocket；Disconnect=旧 Close；另挂 OnDisconnect / set_SessionState。
-constexpr uintptr_t kRvaNmCloseSession = 0x1CFDC80;  // remounted 2026-08-06
-constexpr uintptr_t kRvaNmDisconnect = 0x1CEEAE0;    // remounted 2026-08-06
-constexpr uintptr_t kRvaSessionSetState = 0x1CFD800;  // remounted 2026-08-06: set_SessionState
-constexpr uintptr_t kRvaSessionOnDisc = 0x1CFEE50;  // remounted 2026-08-06: OnDisconnect
+constexpr uintptr_t kRvaNmCloseSession = 0x1D02E00;  // remounted 2026-08-06
+constexpr uintptr_t kRvaNmDisconnect = 0x1CF41C0;    // remounted 2026-08-06
+constexpr uintptr_t kRvaSessionSetState = 0x1D02930;  // remounted 2026-08-06: set_SessionState
+constexpr uintptr_t kRvaSessionOnDisc = 0x1D040A0;  // remounted 2026-08-06: OnDisconnect
 // Outbound funnel（Session.SendPacket）
-constexpr uintptr_t kRvaSessionSend = 0x1CF0BA0;  // remounted 2026-08-06
+constexpr uintptr_t kRvaSessionSend = 0x1CF63B0;  // remounted 2026-08-06
 // 方法哈希（Session 上 void() 极多，kind 不唯一；哈希漂 RVA 时仍可活）
 constexpr char kHashCloseSession[] =
-    "c99b7c5c8102466fa89ca91e90da9084c8014e70942e72efcbb36026410913c";
+    "bc96e8dd02f3782b9f833f513417477309252531f45f4500441bd7646f7e8f2";
 constexpr char kHashDisconnect[] =
-    "b00728c326c7e65f387ec92cc9dc40e0c543c5bbd9abf36d07139da2e12cd58";
+    "f2338e47e14b2fde086336f563f784b4f42f419773ee4a86c5269418eb03a05";
 constexpr char kHashOnDisconnect[] =
-    "f51da434385e8415049fea1fa6692f061e8849bd9c5321823a8d2becf2540e0";
+    "c1143facc5f9c0e1bb6b2754615c92dc1cb0b64fb63e415a0cfbcf88b392dd3";
 constexpr char kHashSetSessionState[] =
-    "b12e24ea7ae6edb56a58d03b5896d6dfc8d3db0d7b15e00b7f087417a2a8e69";
+    "f3123b085d7297fd3d156366f195da7f17050e2743987d7c45168efd2a935a1";
 constexpr char kHashSendPacket[] =
-    "f6830b5ee95ed3ede833bbf2824cc2c6d6e2745fbb4614780f6332ae0d8ce63";
+    "ce57a0ddc7703a2d9139e8edb783f28f0289a720bb33fb28d75fd00b486e078";
 // SEND OutPacket TDI 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "cd51be7839b7a083c73895b67111fc5128bafd286f00db728c0ba4684471183";
+    "ceb815618772d63cb42bdd643630c4b5e662df06a1077e64756b7c153ac7b74";
 // a480 local-disconnect（WM）：TryLocal 写 bool@0x2A0 + float@0x2A4 后 call DoLocal。
 // 旁路 bool@0x290 仍在，HWBP 边沿以 0x2A0 为准。
-// 08-27：DoLocal 唯一 E8 在 FixedUpdate 内 call @0xDF1EE0（E8 8B 0D 00 00 -> DoLocal @0xDF2C70）。
-constexpr uintptr_t kRvaA480TryLocalDisc = 0xDE8980;  // remounted 2026-08-06
-constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDF1EE0;  // remounted 2026-08-27
-constexpr uintptr_t kRvaA480DoLocalDisc = 0xDF2C70;  // remounted 2026-08-06
+// 09-03：DoLocal 唯一 E8 在 FixedUpdate 内 call @0xDF56DB（E8 80 0D 00 00 -> DoLocal @0xDF6460）。
+constexpr uintptr_t kRvaA480TryLocalDisc = 0xDEC2D0;  // remounted 2026-08-06
+constexpr uintptr_t kRvaA480UpdateCallA480 = 0xDF56DB;  // remounted 2026-09-03
+constexpr uintptr_t kRvaA480DoLocalDisc = 0xDF6460;  // remounted 2026-08-06
 // CloseSession 直接调用方（runtime IDB 2026-08-12 · imagebase 0x7ff848c80000）
-constexpr uintptr_t kRvaCsCaller1CC5520 = 0x1CEE0E0;
-constexpr uintptr_t kRvaCsCaller1CD5570 = 0x1CFE130;  // MI/data only
-constexpr uintptr_t kRvaCsCaller1CD92A0 = 0x1D01E60;
-constexpr uintptr_t kRvaCsParent1CC52C0 = 0x1CEDE80;
-constexpr uintptr_t kRvaCsParent1CC74C0 = 0x1CF0080;
-constexpr uintptr_t kRvaCsParent1CD7870 = 0x1D00430;
-constexpr uintptr_t kRvaCsParent1CDA040 = 0x1D02C00;
+constexpr uintptr_t kRvaCsCaller1CC5520 = 0x1CF3850;
+constexpr uintptr_t kRvaCsCaller1CD5570 = 0x1D03360;  // MI/data only
+constexpr uintptr_t kRvaCsCaller1CD92A0 = 0x1D07000;
+constexpr uintptr_t kRvaCsParent1CC52C0 = 0x1CF3630;
+constexpr uintptr_t kRvaCsParent1CC74C0 = 0x1CF5860;
+constexpr uintptr_t kRvaCsParent1CD7870 = 0x1D055E0;
+constexpr uintptr_t kRvaCsParent1CDA040 = 0x1D07E30;
 // Session.CallbackRecv(IAsyncResult) — remount 后写 SessionState@+0x60=Disconnected
 // dump hash aff6dcff…；写点 mov [rcx+60h],eax @ 0x1CD7796（rip 后一条 0x1CD7799）
-constexpr uintptr_t kRvaSessionCallbackRecv = 0x1D00060;
+constexpr uintptr_t kRvaSessionCallbackRecv = 0x1D051C0;
 constexpr char kWorldManagerClass[] =
-    "da19eb0b093a50825187352f1d062610ff5b23c1f314b9cd8c4218aa9db3bc7";
+    "c85ba61839ce73c7f45293ed2e906fdb9e3e0dab928f9582e494367e08948af";
 constexpr char kHashA480ForceDisc[] =
-    "d7ea9e722374c24529a267a25fc130eb50fdf8f51d50a2667792d243bff128f";  // bool@0x2A0
+    "f8e045c6514d9037bbae580fc72615dc257fe1b842cd8c81fd1350345251bd7";  // bool@0x2A0
 constexpr char kHashA480ForceDiscAlt[] =
-    "f448ef541b420a9402e0f1531c133fa8b6a0fce8a883c7eafb955c11a939904";  // bool@0x290 旁路
+    "fcfbc18ce2f46dbbd5a9670658a10e424e4266fd9b85f38c8e3db192a15f91c";  // bool@0x290 旁路
 constexpr char kHashA480DiscTimer[] =
-    "adedeb036f1791651a6951644c6d805f69d44b2f6dfb48204d4415da1240fd1";  // float@0x2A4
+    "ab3bc1fbe3e7ef4bb22a18ba95baf7ba3a3fdd8c3de68cbe812c7d137016857";  // float@0x2A4
 constexpr size_t kFbA480ForceDiscFlag = 0x2A0;
 constexpr size_t kFbA480DiscTimer = 0x2A4;
 size_t gOffA480ForceDiscFlag = kFbA480ForceDiscFlag;
@@ -439,11 +440,8 @@ bool FileExists(const std::wstring& p) {
 }
 
 std::wstring ModuleDir() {
-    HMODULE self = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&DirExists), &self) ||
-        !self)
+    HMODULE self = x::runtime::GetImageModule();
+    if (!self)
         return {};
     wchar_t path[MAX_PATH]{};
     const DWORD n = GetModuleFileNameW(self, path, MAX_PATH);
@@ -1312,7 +1310,7 @@ void LogCallEdge(const char* edge, void* self, bool selfIsSession, bool selfIsA4
         const uintptr_t abs = reinterpret_cast<uintptr_t>(frames[i]);
         const uintptr_t rva = base ? (abs - base) : abs;
         const char* tag = nullptr;
-        if (base && _stricmp(name, "GameAssembly.dll") == 0) tag = TagCloseSessionChainRva(rva);
+        if (base && gGaBase && base == gGaBase) tag = TagCloseSessionChainRva(rva);
         if (tag)
             Log("  #%u %s+0x%llX [%s]", (unsigned)i, name, (unsigned long long)rva, tag);
         else
@@ -1360,7 +1358,7 @@ void LogCallEdgeFromCtx(const char* edge, bool selfIsSession, bool selfIsA480, C
             const char* name = BasenamePath(modPath[0] ? modPath : "?");
             const uintptr_t rva = base ? (ret - base) : ret;
             const char* tag =
-                (base && _stricmp(name, "GameAssembly.dll") == 0) ? TagCloseSessionChainRva(rva)
+                (base && gGaBase && base == gGaBase) ? TagCloseSessionChainRva(rva)
                                                                   : nullptr;
             if (tag)
                 Log("  rsp[%d] %s+0x%llX [%s]", i, name, (unsigned long long)rva, tag);
@@ -1605,8 +1603,7 @@ void InstallHwbpCallEdge() {
             kTeardownHwbpMarkerName);
         return;
     }
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&InstallHwbpCallEdge), &gSelfMod);
+    gSelfMod = x::runtime::GetImageModule();
 
     const bool teardown = (want == HwbpWant::Teardown);
     gHwbpTeardownMode.store(teardown);
@@ -1728,8 +1725,7 @@ void InstallSendProbe() {
         }
         Log("SEND_PROBE body dump op:quota=%s (KICK_SEND_DUMP=0 disables)", list);
     }
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&InstallSendProbe), &gSelfMod);
+    gSelfMod = x::runtime::GetImageModule();
 
     // 优先 MethodInfo（hash / OutPacket kind）；失败再退 ga+RVA。
     if (!gSessionKlass) gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
@@ -1934,7 +1930,7 @@ void InstallCallEdgeHooks() {
         return;
     }
     if (!gClassGetMethods) {
-        Log("CALL_EDGE skip: il2cpp_class_get_methods missing");
+        Log("CALL_EDGE skip: class methods export missing");
         return;
     }
     if (!gSessionKlass) gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();
@@ -2124,19 +2120,19 @@ DWORD WINAPI Worker(LPVOID) {
     Log("kick_sniff worker start (data-plane Session poll + S→C ring, no .text hook)");
     int lastState = -1;
     int lastErr = -1;
-    for (int i = 0; i < 300 && !gStop.load() && !GetModuleHandleW(L"GameAssembly.dll"); ++i)
+    for (int i = 0; i < 300 && !gStop.load() && !x::runtime::il2cpp::GameAssembly(); ++i)
         Sleep(50);
 
-    HMODULE ga = GetModuleHandleW(L"GameAssembly.dll");
+    HMODULE ga = x::runtime::il2cpp::GameAssembly();
     if (!ga) {
-        Log("GameAssembly.dll missing after wait — kick_sniff idle");
+        Log("GA missing after wait — kick_sniff idle");
         while (!gStop.load()) Sleep(200);
         Log("kick_sniff worker stop");
         return 0;
     }
     gGaBase = reinterpret_cast<uintptr_t>(ga);
     if (!x::runtime::il2cpp::Ensure()) {
-        Log("il2cpp_bind Ensure failed — kick_sniff idle");
+        Log("bind Ensure failed — kick_sniff idle");
         while (!gStop.load()) Sleep(200);
         Log("kick_sniff worker stop");
         return 1;
@@ -2147,7 +2143,7 @@ DWORD WINAPI Worker(LPVOID) {
     gClassStaticData = e.classStaticData;
     gClassParent = e.classParent;
     gClassGetMethods = e.classGetMethods;
-    if (!gClassStaticData) Log("warn: il2cpp_class_get_static_field_data missing — probing klass offsets");
+    if (!gClassStaticData) Log("warn: class static field data export missing — probing klass offsets");
 
     gFacadeKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerFacadeKlass();
     gSessionKlass = x::runtime::il2cpp_shape::ResolveNetworkManagerKlass();

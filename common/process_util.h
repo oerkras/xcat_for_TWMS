@@ -26,8 +26,13 @@ errno_t FopenUtf8(FILE** file, const std::string& path, const wchar_t* mode);
 // 按进程名找第一个匹配 PID（0=未找到）；用于挂机时段探测游戏是否在跑。
 DWORD FindProcessIdByName(std::wstring_view exeName);
 
-// 按进程名结束全部匹配实例（用于「退出 XCat 和游戏」）
+// 按进程名结束全部匹配实例（用于「退出启动器与游戏」）
 unsigned KillProcessesByExeName(std::wstring_view exeName);
+
+// 旧载荷目录 / LocalAppData 叶名 XOR 解码后 MoveFile；目标已存在则跳过。
+bool MigrateLegacyPayloadDir(const char* exeBinDir);
+bool MigrateLegacyLocalAppLeaf();
+std::wstring IsolatedLocalAppRootW();
 
 // 结束经典版并短重试：门禁/关窗用，避免偶发 OpenProcess/杀不净漏网。
 unsigned KillClassicGameWithRetry(unsigned maxRounds = 3, DWORD gapMs = 250);

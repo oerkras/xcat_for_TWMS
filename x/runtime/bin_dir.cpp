@@ -13,15 +13,11 @@ char g_binDir[1024]{};
 HMODULE g_imageModule = nullptr;
 
 void FallbackBinDirFromModule() {
-    HMODULE self = g_imageModule;
-    if (!self) {
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&GetBinDir), &self);
-    }
+    HMODULE self = GetImageModule();
+    if (!self) return;
     wchar_t path[MAX_PATH]{};
-    GetModuleFileNameW(self, path, MAX_PATH);
-    // DLL 在 bin/XCat_data/xcat.dll → GetBinDir = XCat_data/（PayloadLog 写 logs/x.jsonl）
+    if (!GetModuleFileNameW(self, path, MAX_PATH) || !path[0]) return;
+    // DLL 在 bin/rtcache/<payload.dll> → GetBinDir = 载荷目录/（PayloadLog 写 logs/x.jsonl）
     const std::string binDir = xcat::WideToUtf8(xcat::ParentDirWithSlash(path));
     strncpy_s(g_binDir, binDir.c_str(), _TRUNCATE);
 }
@@ -39,7 +35,17 @@ void GetLogFilePath(char* out, int size) {
     snprintf(out, size, "%s", path.c_str());
 }
 
-HMODULE GetImageModule() { return g_imageModule; }
+HMODULE GetImageModule() {
+    if (g_imageModule) return g_imageModule;
+    HMODULE self = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&GetImageModule), &self) &&
+        self) {
+        g_imageModule = self;
+    }
+    return self;
+}
 
 void SetImageModule(HMODULE mod) { g_imageModule = mod; }
 

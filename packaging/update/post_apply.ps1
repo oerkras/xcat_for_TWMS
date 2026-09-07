@@ -1,7 +1,7 @@
 # XCat update hook · post_apply
-# 打包路径：XCat_data\update\post_apply.ps1（随 release zip）
+# 打包路径：rtcache\update\post_apply.ps1（随 release zip）
 #
-# 调用时机：新树已落到 FinalDest、关键文件校验之后、拉起 xcat.exe 之前。
+# 调用时机：新树已落到 FinalDest、关键文件校验之后、拉起启动器之前。
 # 失败：throw（勿 exit）。
 #
 # 本文件默认空操作。
@@ -20,7 +20,7 @@ $ErrorActionPreference = "Stop"
 
 # 跨版本捞回：测谎战绩 + GAMA PASS账密直登账号。
 #
-# 换包时 XCat_data\state 整体丢弃，只还原启动器白名单里那几个偏好文件。
+# 换包时 rtcache\state 整体丢弃，只还原启动器白名单里那几个偏好文件。
 # lie_stats.tsv：按角色累计的测谎战绩，清掉补不回来（BIN d43e77）。
 # gp_device_login.dpapi / .json：账密直登「当前账号」；182→183 白名单没带上，换包后要重新粘贴。
 #
@@ -41,11 +41,12 @@ if ($Work) {
     }
 }
 if ($InstallAside -and (Test-Path -LiteralPath $InstallAside)) {
+    [void]$srcDirs.Add((Join-Path $InstallAside 'rtcache\state'))
     [void]$srcDirs.Add((Join-Path $InstallAside 'XCat_data\state'))
 }
 foreach ($leaf in $carryLeaves) {
     try {
-        $dst = Join-Path $FinalDest ('XCat_data\state\' + $leaf)
+        $dst = Join-Path $FinalDest ('rtcache\state\' + $leaf)
         if (Test-Path -LiteralPath $dst -PathType Leaf) { continue }
         foreach ($dir in $srcDirs) {
             $src = Join-Path $dir $leaf

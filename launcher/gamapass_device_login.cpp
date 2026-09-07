@@ -9,6 +9,9 @@
 #include "msc_webview_login.h"
 #include "ngm_protocol_allow.h"
 
+#include "../common/process_util.h"
+#include "../common/xcat_install_names.h"
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -69,9 +72,9 @@ bool DirExists(const std::wstring& p) {
 }
 
 std::wstring IsolatedProfileRoot() {
-    wchar_t localApp[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return {};
-    return std::wstring(localApp) + L"\\XCat\\" + kProfileDirName;
+    const std::wstring root = xcat::IsolatedLocalAppRootW();
+    if (root.empty()) return {};
+    return root + L"\\" + kProfileDirName;
 }
 
 bool IsSafeIsolatedProfileRoot(const std::wstring& root) {
@@ -625,6 +628,10 @@ void LaunchClassicAfterIsolatedTicket(msc::cdp::Session& cdp, GamaPassDeviceLogi
                              std::to_wstring(round) + L"/" + std::to_wstring(kMaxRounds) +
                              L" 轮（不清 Cookie、不关窗、不 refresh）…");
             fill = {};
+            (void)cdp.RestoreDebugWindows(log);
+            if (!cdp.RebindPage(log)) {
+                LogLine(log, L"[gp-device-login] 重绑页面失败，仍用当前会话继续点选");
+            }
             Sleep(2000);
             if (GamaPassLoginCanceled()) {
                 abortCanceled();
@@ -814,15 +821,14 @@ void RunLogin(GamaPassDeviceLoginAccount acc, std::wstring storePath, HttpLoginL
         LogLine(log, L"[gp-device-login] 未找到所选浏览器（需要 Chrome++ / Google Chrome / Microsoft Edge，不支持 360）");
         return;
     }
-    wchar_t localApp[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) {
+    const std::wstring leafRoot = xcat::IsolatedLocalAppRootW();
+    if (leafRoot.empty()) {
         LogLine(log, L"[gp-device-login] 无法解析 LocalAppData");
         return;
     }
-    const std::wstring xcat = std::wstring(localApp) + L"\\XCat";
-    const std::wstring root = xcat + L"\\" + kProfileDirName;
+    const std::wstring root = leafRoot + L"\\" + kProfileDirName;
     profile.userData = root + L"\\" + ProfileLeafForExe(profile.exe);
-    if (!EnsureDir(xcat) || !EnsureDir(root) || !EnsureDir(profile.userData)) {
+    if (!EnsureDir(leafRoot) || !EnsureDir(root) || !EnsureDir(profile.userData)) {
         LogLine(log, L"[gp-device-login] 无法创建独立配置目录");
         return;
     }
@@ -980,9 +986,8 @@ std::wstring GamaPassDeviceLoginStorePath(const std::wstring& prefsBinDir) {
         EnsureDir(st);
         return st + L"\\gp_device_login.dpapi";
     }
-    wchar_t localApp[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return {};
-    const std::wstring root = std::wstring(localApp) + L"\\XCat";
+    const std::wstring root = xcat::IsolatedLocalAppRootW();
+    if (root.empty()) return {};
     EnsureDir(root);
     return root + L"\\gp_device_login.dpapi";
 }
@@ -1200,10 +1205,8 @@ bool ClearGamaPassDeviceLoginProfile(HttpLoginLogFn log, std::wstring& err) {
             doneErr = L"独立罐仍被占用，请先关掉账密登录那扇浏览器再试";
             LogLine(log, L"[gp-device-login] 清空失败：目录仍在 " + root);
         } else {
-            wchar_t localApp[MAX_PATH]{};
-            if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) {
-                EnsureDir(std::wstring(localApp) + L"\\XCat");
-            }
+            const std::wstring leafRoot = xcat::IsolatedLocalAppRootW();
+            if (!leafRoot.empty()) EnsureDir(leafRoot);
             EnsureDir(root);
             LogLine(log, L"[gp-device-login] 已清空独立罐（未动日常 User Data / Cookie）");
         }
@@ -1217,9 +1220,9 @@ bool ClearGamaPassDeviceLoginProfile(HttpLoginLogFn log, std::wstring& err) {
 }
 
 std::wstring GamaPassDeviceLoginUserDataDir(const std::wstring& exe) {
-    wchar_t localApp[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp))) return {};
-    return std::wstring(localApp) + L"\\XCat\\" + kProfileDirName + L"\\" + ProfileLeafForExe(exe);
+    const std::wstring root = IsolatedProfileRoot();
+    if (root.empty()) return {};
+    return root + L"\\" + ProfileLeafForExe(exe);
 }
 
 bool StartGamaPassDeviceLogin(const GamaPassDeviceLoginAccount& acc, const std::wstring& storePath,

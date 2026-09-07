@@ -42,15 +42,15 @@ constexpr size_t kKlassOffWuaMethodPtr = 0x1E8;  // Slot 11 WorkUpdateActive
 constexpr size_t kKlassOffCdMethodPtr = 0x208;   // Slot 13 CollisionDetectWalk
 constexpr size_t kKlassOffCdfMethodPtr = 0x218;  // Slot 14 CollisionDetectFloat
 // dump.cs.restored.C · VecCtrlMob（RVA 仅 fallback；安装走 hash）
-constexpr uint32_t kRvaMobWua = 0x11DF260;
-constexpr uint32_t kRvaBaseWua = 0x11C5510;
+constexpr uint32_t kRvaMobWua = 0x11DEAB0;   // VecCtrlMob Slot 11 override
+constexpr uint32_t kRvaBaseWua = 0x11CBC80;  // VecCtrl Slot 11 WorkUpdateActive
 constexpr uint32_t kRvaInspect = 0x11DBAB0;
 constexpr uint32_t kRvaCtrlStop = 0x11DE6B0;
 constexpr uint32_t kRvaCtrlMove = 0x11DFEB0;
 constexpr uint32_t kRvaCtrlJump = 0x11E1100;
 constexpr uint32_t kRvaCtrlFly = 0x11E8080;
 constexpr char kHashWorkUpdateActive[] =
-    "cd769ef8216fb484c02c0a08d78ec389a9b88ead83f9323f50d7aa26578497e";
+    "a006b7702411427329a1d9287f1a5ab428c09b63f9910e42355cd9023d08c1e";
 constexpr char kHashInspectUpdateActive[] =
     "d1efee0dea25b6293b6455c5f1256daec2dfe06fd42855f82fabff7246e06b1";
 constexpr char kHashCtrlStop[] =
@@ -179,6 +179,8 @@ std::atomic<uint32_t> gBanHopX[kMaxBan]{};
 std::atomic<uint32_t> gBanHopY[kMaxBan]{};
 std::atomic<uint8_t> gBanHopOn[kMaxBan]{};
 std::atomic<DWORD> gBanHopDwell[kMaxBan]{};
+std::atomic<int32_t> gBanTpl[kMaxBan]{};
+std::atomic<uint32_t> gBanWzCap[kMaxBan]{};  // bits；0=本槽不额外限
 std::atomic<DWORD> gLastAimMs{0};
 std::atomic<unsigned> gLastAimDt{0};
 float gStickX = 0.f;
@@ -216,6 +218,8 @@ std::atomic<float> gDispCapPx{kDispCapPxDefault};
 std::atomic<uint8_t> gLandOnArrive{xcat::kMobGatherLandOnArriveDefault ? 1u : 0u};
 // v145 接力跳距 px/跳；<1 = 关（直拉旧行为）。
 std::atomic<float> gHopPx{static_cast<float>(xcat::kMobGatherHopPxDefault)};
+std::atomic<uint8_t> gWzLeashOn{xcat::kMobGatherWzLeashOnDefault != 0 ? 1 : 0};
+std::atomic<float> gWzLeashSlowPx{static_cast<float>(xcat::kMobGatherWzLeashSlowPxDefault)};
 
 uint32_t FToBits(float f) {
     uint32_t u = 0;
@@ -248,6 +252,8 @@ void ClearSlot(int i, const char* why) {
     gBanHopY[i].store(0, std::memory_order_release);
     gBanHopOn[i].store(0, std::memory_order_release);
     gBanHopDwell[i].store(0, std::memory_order_release);
+    gBanTpl[i].store(0, std::memory_order_release);
+    gBanWzCap[i].store(0, std::memory_order_release);
     if (why && why[0] && id != 0) {
         x::runtime::LogI("MobFhBan", "disarm id=%d why=%s", id, why);
     }
@@ -257,6 +263,29 @@ float ClampF(float v, float lo, float hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+float WzLeashCapPx(int32_t tpl) {
+    if (gWzLeashOn.load(std::memory_order_acquire) == 0) return 0.f;
+    if (tpl <= 0) return 0.f;
+    const int32_t sp = x::features::ports::mob::LookupTemplateWzSpeed(tpl);
+    if (sp == x::features::ports::mob::kWzSpeedUnknown) return 0.f;
+    if (sp >= xcat::kMobGatherSpeedHopOk) return 0.f;
+    const float lo = gWzLeashSlowPx.load(std::memory_order_acquire);
+    const float loClamped = lo < 1.f ? 1.f : lo;
+    if (sp <= xcat::kMobGatherSpeedSlowFloor) return loClamped;
+    const float hi = kDispCapPxDefault;
+    const float span =
+        static_cast<float>(xcat::kMobGatherSpeedHopOk - xcat::kMobGatherSpeedSlowFloor);
+    const float t = static_cast<float>(sp - xcat::kMobGatherSpeedSlowFloor) / span;
+    float cap = loClamped + t * (hi - loClamped);
+    if (cap < loClamped) cap = loClamped;
+    return cap;
+}
+
+void StoreSlotWzCap(int i, int32_t tpl) {
+    gBanTpl[i].store(tpl, std::memory_order_release);
+    gBanWzCap[i].store(FToBits(WzLeashCapPx(tpl)), std::memory_order_release);
 }
 
 void WritePtrSeh(void* base, size_t off, void* val) {
@@ -815,8 +844,14 @@ void ApplyVtolOnVc(void* vc) {
     // 都还是 ~120px——游戏按「目标点距离」搬怪，与我们下的速度大小无关（近目标 0.4px、远目标封顶
     // ~120px）。故改夹目标点：每拍只把目标朝真 aim 推进 ≤ cap px，怪就当「近目标」小步挪、逐帧
     // 位移 ≤ cap，永不越客户端「怪速+10」门。cap 面板同项（吸怪 快攻 TAB「防断」）。
-    const bool clampOn = gDispClampOn.load(std::memory_order_acquire) != 0;
-    const float cap = gDispCapPx.load(std::memory_order_acquire);
+    const bool globalClamp = gDispClampOn.load(std::memory_order_acquire) != 0;
+    float cap = gDispCapPx.load(std::memory_order_acquire);
+    const float wz = BitsToF(gBanWzCap[i].load(std::memory_order_acquire));
+    bool clampOn = globalClamp;
+    if (wz > 0.5f) {
+        clampOn = true;
+        if (!(cap > 0.f) || wz < cap) cap = wz;
+    }
     float ltx = tx, lty = ty;
     float leashStep = -1.f;  // 本拍目标点离怪的距离（=期望逐帧位移），仅日志用
     if (clampOn && cap > 0.f) {
@@ -880,9 +915,9 @@ void ApplyVtolOnVc(void* vc) {
         x::runtime::LogI(
             "MobFhBan",
             "impact n=%u cmd=(%.0f,%.0f) vt=(%.0f,%.0f) ap=(%.1f,%.1f) aim=(%.1f,%.1f) "
-            "disp=%.1f cap=%.0f clamp=%.2f dt=%ums big=%d leash=%.0f",
+            "disp=%.1f cap=%.0f clamp=%.2f dt=%ums big=%d leash=%.0f wz=%.0f",
             sFireN, cmdVx, cmdVy, dvx, dvy, x, y, tx, ty, realizedDisp, cap, clampScale,
-            since, bigReal ? 1 : 0, leashStep);
+            since, bigReal ? 1 : 0, leashStep, wz);
         sFireN = 0;
     }
 }
@@ -1205,7 +1240,7 @@ static void SeedArmBaseline(int i, void* vc) {
     gBanApOk[i].store(1, std::memory_order_release);
 }
 
-bool Arm(void* vc, void* mob, int32_t id, float tx, float ty) {
+bool Arm(void* vc, void* mob, int32_t id, float tx, float ty, int32_t templateId) {
     if (!LooksLikeHeapPtr(vc) || !LooksLikeHeapPtr(mob) || id == 0) return false;
     const uintptr_t p = reinterpret_cast<uintptr_t>(vc);
     const uintptr_t mp = reinterpret_cast<uintptr_t>(mob);
@@ -1231,6 +1266,7 @@ bool Arm(void* vc, void* mob, int32_t id, float tx, float ty) {
             gBanTx[i].store(FToBits(ex), std::memory_order_release);
             gBanTy[i].store(FToBits(ey), std::memory_order_release);
             gBanAim[i].store(1, std::memory_order_release);
+            StoreSlotWzCap(i, templateId);
             return true;
         }
         if (cur == 0 && empty < 0) empty = i;
@@ -1245,7 +1281,7 @@ bool Arm(void* vc, void* mob, int32_t id, float tx, float ty) {
     uintptr_t expected = 0;
     if (!gBanVc[empty].compare_exchange_strong(expected, p, std::memory_order_acq_rel,
                                                std::memory_order_acquire)) {
-        return Arm(vc, mob, id, tx, ty);
+        return Arm(vc, mob, id, tx, ty, templateId);
     }
     gBanMob[empty].store(mp, std::memory_order_release);
     gBanId[empty].store(id, std::memory_order_release);
@@ -1263,6 +1299,7 @@ bool Arm(void* vc, void* mob, int32_t id, float tx, float ty) {
     }
     gBanAim[empty].store(1, std::memory_order_release);
     SeedArmBaseline(empty, vc);
+    StoreSlotWzCap(empty, templateId);
     return true;
 }
 
@@ -1471,6 +1508,25 @@ void SetHopPx(float px) {
 }
 
 float HopPx() { return gHopPx.load(std::memory_order_acquire); }
+
+void SetWzLeash(bool on, float slowPx) {
+    const float px = static_cast<float>(
+        xcat::ClampMobGatherWzLeashSlowPx(slowPx < 0.f ? 0u : static_cast<uint32_t>(slowPx + 0.5f)));
+    const uint8_t prevOn = gWzLeashOn.exchange(on ? 1u : 0u, std::memory_order_acq_rel);
+    const float prevPx = gWzLeashSlowPx.exchange(px, std::memory_order_acq_rel);
+    if (!on) {
+        for (int i = 0; i < kMaxBan; ++i) gBanWzCap[i].store(0, std::memory_order_release);
+    } else {
+        for (int i = 0; i < kMaxBan; ++i) {
+            if (gBanVc[i].load(std::memory_order_acquire) == 0) continue;
+            StoreSlotWzCap(i, gBanTpl[i].load(std::memory_order_acquire));
+        }
+    }
+    if (prevOn == (on ? 1u : 0u) && prevPx == px) return;
+    x::runtime::LogI("MobFhBan", "wzLeash on=%d slowPx=%.0f", on ? 1 : 0, px);
+}
+
+bool WzLeashEnabled() { return gWzLeashOn.load(std::memory_order_acquire) != 0; }
 
 bool EffectiveAim(void* vc, float* tx, float* ty) {
     const int i = FindBanIndex(vc);

@@ -7,6 +7,7 @@
 
 #include "../common/xcat_log.h"
 #include "../common/process_util.h"
+#include "../common/xcat_install_names.h"
 
 #include "xcat_imgui_win32_ime.h"
 #include "xcat_imgui_theme.h"
@@ -301,13 +302,13 @@ bool AppWindow_Create(AppWindow& app, HINSTANCE inst, float designW, float desig
     wc.hInstance = inst;
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP_ICON));
     wc.hIconSm = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP_ICON));
-    wc.lpszClassName = L"XCatAppWindow";
+    wc.lpszClassName = xcat::install::kWndClass;
     RegisterClassExW(&wc);
 
     const int initW = static_cast<int>(designW + 0.5f);
     const int initH = static_cast<int>(designH + 0.5f);
 
-    app.hwnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"XCat", kLauncherFrameStyle,
+    app.hwnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, xcat::install::kWndTitle, kLauncherFrameStyle,
                                CW_USEDEFAULT, CW_USEDEFAULT, initW, initH, nullptr, nullptr, inst,
                                nullptr);
     if (!app.hwnd) return false;
@@ -379,7 +380,7 @@ void AppWindow_Destroy(AppWindow& app) {
     CleanupDevice(app);
     if (app.hwnd && IsWindow(app.hwnd)) DestroyWindow(app.hwnd);
     app.hwnd = nullptr;
-    UnregisterClassW(L"XCatAppWindow", GetModuleHandleW(nullptr));
+    UnregisterClassW(xcat::install::kWndClass, GetModuleHandleW(nullptr));
 }
 
 void AppWindow_GetClearColor(float out[4]) {
@@ -598,7 +599,7 @@ LRESULT AppWindow_WndProc(AppWindow& app, HWND hwnd, UINT msg, WPARAM wParam, LP
         {
             wchar_t mod[MAX_PATH]{};
             if (GetModuleFileNameW(nullptr, mod, MAX_PATH) > 0) {
-                prefsBin = xcat::WideToUtf8(xcat::ParentDirWithSlash(mod)) + "XCat_data";
+                prefsBin = xcat::install::JoinPayloadDir(xcat::WideToUtf8(xcat::ParentDirWithSlash(mod)));
             }
         }
         if (xcat::app::ShouldKillGameOnLauncherClose(prefsBin)) {

@@ -135,7 +135,7 @@ HttpResult WinHttpRequest(const ParsedUrl& url, const wchar_t* method, const std
                           DWORD timeoutMs) {
     HttpResult result;
     HINTERNET hSes =
-        WinHttpOpen(L"XCat-AntiBotAI/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+        WinHttpOpen(L"rtapp-AntiBotAI/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
                     WINHTTP_NO_PROXY_BYPASS, 0);
     if (!hSes) {
         result.winErr = GetLastError();

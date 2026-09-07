@@ -1,6 +1,7 @@
 #include "xcat_config_ini.h"
 
 #include "process_util.h"
+#include "xcat_install_names.h"
 #include "xcat_log.h"
 
 #include <Windows.h>
@@ -87,7 +88,7 @@ public:
     explicit IniPathMutex(const char* path) {
         const std::string key = NormalizePathForMutex(path);
         wchar_t name[64]{};
-        swprintf_s(name, L"Local\\xcat_ini_%016llx",
+        swprintf_s(name, xcat::install::kMutexIniFmt,
                    static_cast<unsigned long long>(Fnv1a64(key)));
         mutex_ = CreateMutexW(nullptr, FALSE, name);
     }

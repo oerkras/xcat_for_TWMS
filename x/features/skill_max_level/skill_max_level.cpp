@@ -16,6 +16,7 @@
 #include "../../runtime/main_thread_pump.h"
 #include "../../ui/player_vitals.h"
 #include "xcat_payload_control.h"
+#include "xor_cstr.h"
 
 #include <Windows.h>
 
@@ -34,25 +35,25 @@ using x::runtime::il2cpp::ReadPtr;
 
 constexpr size_t kFbLevelDataList = 0x120;
 // remounted 2026-08-06（与 skill_port 钉值一致；GetMaxLevel RVA 仍待 BIN 确认）
-constexpr uint32_t kRvaGetMaxLevel = 0x157BA30;
-constexpr uint32_t kRvaUlGetSkillLevel = 0x108D010;
+constexpr uint32_t kRvaGetMaxLevel = 0x15809D0;
+constexpr uint32_t kRvaUlGetSkillLevel = 0x1090850;
 // SkillInfo.GetPureSkillLevel / GetSkillLevel(ref CD, id, ref SE)
 // 注意：同邻域 GetShootSkillRange(ref CD, skillId, weaponType) 返回射程——禁止当学级钩。
 // Pure 与 Level 一并抬满：本功能要客户端「已学即满级」；若需保留纯加点真值再拆。
-constexpr uint32_t kRvaSiGetPureSkillLevel = 0x1591070;
-constexpr uint32_t kRvaSiGetSkillLevel = 0x1591500;
+constexpr uint32_t kRvaSiGetPureSkillLevel = 0x1596670;
+constexpr uint32_t kRvaSiGetSkillLevel = 0x1596af0;
 constexpr char kHashGetMaxLevel[] =
-    "acadd17104ca35f3df414efaca928e4ea12c579ffcd938b343a593bb26ac867";
+    "a0bab9bf07950572673aefdf96fcd396d8cf79bdf5447968f8ed1ce99ba9b73";
 constexpr char kHashSkillEntry[] =
-    "c9574ed72d8b2bc703695933c0620fdcb6766bc9d20b12fcc6bab09128aa96c";
+    "eb0565446ebbab5d50d30acc467fb3c5ced56721f7d3a63463d620ba32c54f5";
 constexpr char kHashUlGetSkillLevel[] =
-    "f91f2d8c7b29222576dc228ad73b27e39792d18605096e42ae63b60698d09c2";
+    "b4a3c3eb37322a33f75909337ccc64f7a029ee863d796c1fb5e48675e06e86e";
 constexpr char kHashSiGetPureSkillLevel[] =
-    "ca4af1fb59f6327049ed5e6722e1951aa1ef7595ddb00c6753ef1091cae00a3";
+    "a9b2de54a07d30bfa8021573dff320f9131536d3ab5d2ad59d7d83f9aa069ce";
 constexpr char kHashSiGetSkillLevel[] =
-    "d36c7ec2012861c7f4afe93f1efcbcc424622ba24aeb2a900d7e7dae6f0e082";
+    "d34dcfcea4fe2886677fa907a45d5295e06594e7b8862e81f4b2bdd1fd12745";
 constexpr char kHashSkillInfoClass[] =
-    "b741d6a7c88737e2c5736793139334b3224c4b3342ee41415e08e654577ec48";
+    "da5eccc23efb9ae36b991a9373947462514c34555686add28a16653b3e8238c";
 
 constexpr DWORD kTickMsOn = 400;
 constexpr DWORD kTickMsOff = 900;
@@ -770,10 +771,7 @@ DWORD WINAPI Worker(LPVOID) {
 }
 
 bool EnvForceOn() {
-    char buf[8]{};
-    const DWORD n = GetEnvironmentVariableA("XCAT_SKILL_MAX_LEVEL", buf, sizeof(buf));
-    if (n == 0 || n >= sizeof(buf)) return false;
-    return buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y' || buf[0] == 't' || buf[0] == 'T';
+    return XCAT_ENV_ON(kEnvSkillMaxLevel);
 }
 
 }  // namespace
@@ -786,7 +784,7 @@ void Init() {
     }
     if (EnvForceOn()) {
         gDesired.store(true, std::memory_order_relaxed);
-        x::runtime::LogI("SkillMax", "env XCAT_SKILL_MAX_LEVEL → on");
+        x::runtime::LogI("SkillMax", "env skill_max_level → on");
     }
 }
 
