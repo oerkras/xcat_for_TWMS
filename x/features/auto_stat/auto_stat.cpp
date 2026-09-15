@@ -1,7 +1,8 @@
 // auto_stat — Classic TWMS 自动加点。
 // 策略对照 Maplecat UseAP（权重总和=5、贪心每次 +1、属性 +1 确认）。
 // 「5」是从开启起每 5 点的配比权重，不追身上已有四维；身上剩多少 AP 加多少。
-// 发包：泵上直调官方 UIStat.ed6479da(uint flag)，不造包、不开属性窗。
+// 发包：泵上直调官方 UIStat.f701293c(uint flag)，不造包、不开属性窗。
+// 09-10 dump：类 hash b3912d2e…（Prefab "UIStat"）、SendAp RVA 0x65A900；旧 0x649E90 已不在函数入口。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -42,16 +43,16 @@ constexpr DWORD kJobWaitMs = 800;
 constexpr int kMaxFail = 5;
 
 constexpr char kUiStatClassHash[] =
-    "cc038e5fcedf40d47a143f0d0b77cd9288893179012f40b187a51e14d383cf2";
+    "b69cfcf3949b23c361ded7de554ebe2531561c53b30f77bbd37b394f6ff1435";
 constexpr char kSendApMethodHash[] =
-    "c22ec76568107a92d1fc6c9a3cd706c52322fa8b72181f92c72f94021c10f7c";
-constexpr uint32_t kRvaSendAp = 0x649E90;
+    "fe80933d6eb61287d96f0f450262c5f4fa9d19e4b6d084cf707e4efcd32cf29";
+constexpr uint32_t kRvaSendAp = 0x65A900;
 
 constexpr char kWmClassHash[] =
-    "c85ba61839ce73c7f45293ed2e906fdb9e3e0dab928f9582e494367e08948af";
+    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
 constexpr char kCanSendExclHash[] =
-    "d05d345c5298fe2287063cc6157168accfc8529a94677774fcec1fd1be172fe";
-constexpr uint32_t kRvaCanSendExcl = 0xDFE8F0;
+    "a6be5f14683c006f833199ed31484f6347112b7fae0d6461c3fc38c84c74f0f";
+constexpr uint32_t kRvaCanSendExcl = 0xE2D840;
 // UIStat.b6a2d557 VA 0x7FFD60EC668A：mov edx, 3BAFE07Eh; xor edx, dword_7FFD670F3158
 // 运行时 dump 种子 0x3BAFE18A → type=500。与换频 SendTransfer 同一把独占锁（不是抄错 type）。
 constexpr int kExclTypeStatUp = 500;
@@ -280,7 +281,7 @@ void SendJobOnMain(void* user) {
         void* wm = ports::world::PeekWorldManager();
         if (!wm) wm = ports::world::GetWorldManager();
         if (!wm) return;
-        // 官方按钮：r8=false r9=null。busy 则不调 ed6479da（避免抢锁/尾跳落锁）。
+        // 官方按钮：r8=false r9=null。busy 则不调 f701293c（避免抢锁/尾跳落锁）。
         if (gFnCanSendExcl(wm, kExclTypeStatUp, nullptr, nullptr) == 0) {
             ctx->exclBusy = true;
             return;

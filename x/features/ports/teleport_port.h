@@ -83,6 +83,9 @@ struct FlightState {
     int ma = -1;               // VecCtrl.MoveAction；4/5=站走，6/7=跳飞；读失败=-1
 };
 bool QueryFlightState(FlightState& out);
+// 任意 VecCtrl（含怪的 PvcActive / VecCtrl）：同一套 Ap / Ap.V / MoveAction 字段。SEH 读，worker 可调。
+// 怪的横速 / 站走态就从这里来——赶路跳怪要知道它是迎面来、站着还是同向走，别拿快照差分猜。
+bool QueryVcFlightState(void* vc, FlightState& out);
 
 // 直给速度（px/s，y 向下为正），不走「位置误差 → 速度」映射，也不套 kImpactHopVxMin
 // 的每轴 80 地板 —— 那个地板让近距无法做小修正，只能大踹，是空中限幅震荡的根因。

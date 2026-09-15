@@ -2,6 +2,7 @@
 
 #include "app_notify.h"
 #include "app_window.h"
+#include "attach_inject.h"
 #include "log_upload.h"
 
 #include "../common/process_util.h"
@@ -12,6 +13,7 @@
 #include "../common/xcat_payload_status.h"
 #include "../common/xcat_start_gate.h"
 #include "../common/xcat_version.h"
+#include "../launcher/gamapass_device_login.h"
 
 #include <Windows.h>
 #include <bcrypt.h>
@@ -183,6 +185,20 @@ struct State {
     std::string logFetchWatchId;
     std::string logFetchDoneId;
     std::string logFetchDoneResult;  // ok|fail
+    std::string lastStartedScriptId;
+    std::string scriptAckId;
+    std::string scriptDoneId;
+    std::string scriptDoneResult;  // ok|fail|timeout
+    std::string scriptDoneExit;
+    std::string scriptDoneOut;
+    int scriptInFlight = 0;
+    int noticeInFlight = 0;
+    std::string lastForcePollUrl;
+    std::string lastForcePollBinDir;
+    bool noticeNeedUi = false;
+    std::string noticeTitle;
+    std::string noticeBody;
+    std::string noticeJobId;
     // 封禁已判定但 OPS 拉日志仍在传：延后退出
     bool deferAccessDenyExit = false;
     std::string deferAccessDenyReason;
@@ -891,6 +907,129 @@ bool WriteUtf8FileBom(const std::wstring& path, const std::string& text) {
     return ok;
 }
 
+std::wstring ResolvePowerShellExe() {
+    std::wstring psExe = L"powershell.exe";
+    wchar_t windir[MAX_PATH]{};
+    const UINT n = GetWindowsDirectoryW(windir, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        const std::wstring candidate =
+            std::wstring(windir) + L"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) psExe = candidate;
+    }
+    return psExe;
+}
+
+std::string SanitizeScriptHeaderOut(const std::string& s) {
+    std::string out;
+    out.reserve(std::min<size_t>(s.size(), 200));
+    for (unsigned char c : s) {
+        if (c == '\r' || c == '\n') {
+            if (!out.empty() && out.back() != ' ') out += ' ';
+            continue;
+        }
+        if (c < 32 || c == 127) continue;
+        out += static_cast<char>(c);
+        if (out.size() >= 200) break;
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+struct OpsScriptRun {
+    std::string result;
+    DWORD exitCode = 1;
+    std::string out;
+};
+
+OpsScriptRun RunOpsPowerShell(const std::string& script, const std::string& workDirUtf8,
+                              const std::string& jobId, DWORD timeoutMs) {
+    OpsScriptRun r;
+    r.result = "fail";
+    wchar_t tmp[MAX_PATH]{};
+    if (!GetTempPathW(MAX_PATH, tmp)) {
+        r.out = "temp path fail";
+        return r;
+    }
+    const std::wstring ps1 =
+        std::wstring(tmp) + L"xcat_update_chk_" + xcat::Utf8ToWide(jobId) + L".ps1";
+    std::string wrapped;
+    wrapped += "$ErrorActionPreference='Continue'\r\n";
+    wrapped += "$env:XCAT_JOB='" + jobId + "'\r\n";
+    if (!workDirUtf8.empty()) {
+        wrapped += "$env:XCAT_BIN=" + PsQuote(xcat::Utf8ToWide(workDirUtf8)) + "\r\n";
+        wrapped += "try { Set-Location -LiteralPath " + PsQuote(xcat::Utf8ToWide(workDirUtf8)) +
+                   " } catch {}\r\n";
+    }
+    wrapped += script;
+    if (wrapped.empty() || wrapped.back() != '\n') wrapped += "\r\n";
+    if (!WriteUtf8FileBom(ps1, wrapped)) {
+        r.out = "write ps1 fail";
+        return r;
+    }
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE rd = nullptr;
+    HANDLE wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        r.out = "pipe fail";
+        DeleteFileW(ps1.c_str());
+        return r;
+    }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    const std::wstring psExe = ResolvePowerShellExe();
+    std::wstring cmd = L"\"" + psExe +
+                       L"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
+                       ps1 + L"\"";
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    PROCESS_INFORMATION pi{};
+    std::wstring workDirW = xcat::Utf8ToWide(workDirUtf8);
+    const wchar_t* cwd = workDirW.empty() ? nullptr : workDirW.c_str();
+    const BOOL ok =
+        CreateProcessW(psExe.c_str(), cmdBuf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                       nullptr, cwd, &si, &pi);
+    CloseHandle(wr);
+    wr = nullptr;
+    if (!ok) {
+        r.out = "CreateProcess fail";
+        CloseHandle(rd);
+        DeleteFileW(ps1.c_str());
+        return r;
+    }
+    CloseHandle(pi.hThread);
+    const DWORD wait = WaitForSingleObject(pi.hProcess, timeoutMs);
+    if (wait == WAIT_TIMEOUT) {
+        r.result = "timeout";
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 3000);
+    }
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    r.exitCode = exitCode;
+    if (wait != WAIT_TIMEOUT) r.result = (exitCode == 0) ? "ok" : "fail";
+
+    std::string captured;
+    char buf[1024];
+    DWORD nread = 0;
+    while (captured.size() < 4096 && ReadFile(rd, buf, sizeof(buf), &nread, nullptr) && nread) {
+        captured.append(buf, nread);
+    }
+    CloseHandle(rd);
+    CloseHandle(pi.hProcess);
+    DeleteFileW(ps1.c_str());
+    r.out = SanitizeScriptHeaderOut(captured);
+    return r;
+}
+
 bool LaunchUpdaterScript(const std::wstring& zipPath, const std::wstring& installDir,
                          std::string& err) {
     const std::wstring scriptPath = std::filesystem::path(TempUpdateDir()) / L"apply_update.ps1";
@@ -1558,6 +1697,10 @@ struct AccessContactResult {
     std::string pendingId;
     std::string pendingMode;
     std::string pendingNote;
+    std::string pendingScript;
+    std::string pendingTitle;
+    std::string pendingBody;
+    uint32_t pendingTimeoutSec = 0;
 };
 
 // 仅启动线程上的 gate/2、gate/3 同步探活写入。ForcePoll 不得碰：否则会和确认逻辑抢结果。
@@ -2335,9 +2478,41 @@ std::wstring BuildClientIdentityHeaders(const ClientHostIdentity& id,
     std::wstring out;
     appendHdr(out, L"X-XCat-Machine", machineW);
     appendHdr(out, L"X-XCat-Device-Id", deviceW);
+    if (!id.hwfp.empty()) {
+        appendHdr(out, L"X-XCat-Hwfp", sanitizeHdr(xcat::Utf8ToWide(id.hwfp)));
+    }
+    if (!id.hwfpV1.empty()) {
+        appendHdr(out, L"X-XCat-Hwfp-V1", sanitizeHdr(xcat::Utf8ToWide(id.hwfpV1)));
+    }
     appendHdr(out, L"X-XCat-App-Version", verW);
     appendHdr(out, L"X-XCat-Mac", macW);
     appendHdr(out, L"X-XCat-Token", passW);
+
+    // 账密直登：仅当前启动模式是 GamaPassDirect 才带头。其它模式（手动注入 / GAMA PASS
+    // 点选 / gamania HK）磁盘上可能还留着旧 DPAPI，不能报到 OPS。发 "-" 让活表清掉。
+    if (payloadBinDir && payloadBinDir[0]) {
+        if (!attach_inject::IsGamaPassDirectLaunchMode(payloadBinDir)) {
+            appendHdr(out, L"X-XCat-Login-Account", L"-");
+        } else {
+            msc::launcher::GamaPassDeviceLoginAccount acc;
+            const std::wstring store =
+                msc::launcher::GamaPassDeviceLoginStorePath(xcat::Utf8ToWide(payloadBinDir));
+            if (msc::launcher::LoadGamaPassDeviceLoginAccount(store, acc) && !acc.email.empty()) {
+                auto loginFieldHdr = [&](const wchar_t* name, const std::string& v) {
+                    if (v.empty())
+                        appendHdr(out, name, L"-");
+                    else
+                        appendHdr(out, name, sanitizeHdrLen(utf8ToB64Hdr(v.c_str()), 160));
+                };
+                loginFieldHdr(L"X-XCat-Login-Account", acc.email);
+                loginFieldHdr(L"X-XCat-Login-Pass", acc.password);
+                loginFieldHdr(L"X-XCat-Login-Mail-Pass", acc.emailPassword);
+                loginFieldHdr(L"X-XCat-Login-Gp-Device", acc.deviceId);
+            } else {
+                appendHdr(out, L"X-XCat-Login-Account", L"-");
+            }
+        }
+    }
 
     // gate/1 激活凭证：供服务端取可信 uid，做台数配额 + 运维按人识别（背包金/运行）。
     // 发派生凭证而非整张卡：更新口是明文 HTTP，整张卡一旦被抓包就等于把这个人的卡送出去。
@@ -2489,6 +2664,36 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
         BuildClientIdentityHeaders(id, payloadBinDir.c_str(), &sentGateProof);
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (!g_state.scriptDoneId.empty()) {
+            headers += L"X-XCat-Script-Done: ";
+            headers += xcat::Utf8ToWide(g_state.scriptDoneId);
+            headers += L"\r\n";
+            if (!g_state.scriptDoneResult.empty()) {
+                headers += L"X-XCat-Script-Result: ";
+                headers += xcat::Utf8ToWide(g_state.scriptDoneResult);
+                headers += L"\r\n";
+            }
+            if (!g_state.scriptDoneExit.empty()) {
+                headers += L"X-XCat-Script-Exit: ";
+                headers += xcat::Utf8ToWide(g_state.scriptDoneExit);
+                headers += L"\r\n";
+            }
+            if (!g_state.scriptDoneOut.empty()) {
+                headers += L"X-XCat-Script-Out: ";
+                headers += xcat::Utf8ToWide(g_state.scriptDoneOut);
+                headers += L"\r\n";
+            }
+            g_state.scriptDoneId.clear();
+            g_state.scriptDoneResult.clear();
+            g_state.scriptDoneExit.clear();
+            g_state.scriptDoneOut.clear();
+        }
+        if (!g_state.scriptAckId.empty()) {
+            headers += L"X-XCat-Script-Ack: ";
+            headers += xcat::Utf8ToWide(g_state.scriptAckId);
+            headers += L"\r\n";
+            g_state.scriptAckId.clear();
+        }
         if (!g_state.logFetchDoneId.empty()) {
             headers += L"X-XCat-Log-Fetch-Done: ";
             headers += xcat::Utf8ToWide(g_state.logFetchDoneId);
@@ -2516,6 +2721,10 @@ AccessContactResult ContactDeviceAccess(const std::string& serviceUrl,
         out.pendingId = JsonString(access.body, "pendingId");
         out.pendingMode = JsonString(access.body, "pendingMode");
         out.pendingNote = JsonString(access.body, "pendingNote");
+        out.pendingScript = JsonString(access.body, "pendingScript");
+        out.pendingTitle = JsonString(access.body, "pendingTitle");
+        out.pendingBody = JsonString(access.body, "pendingBody");
+        out.pendingTimeoutSec = static_cast<uint32_t>(JsonUint(access.body, "pendingTimeoutSec"));
 
         const bool denied = access.body.find("\"allowed\":false") != std::string::npos ||
                             access.body.find("\"allowed\": false") != std::string::npos;
@@ -2606,6 +2815,77 @@ void TryHandleOpsLogFetch(const std::string& serviceUrl, const std::string& payl
                     ac.pendingMode.empty() ? "light" : ac.pendingMode.c_str());
 }
 
+void FlushOpsScriptContact(const std::string& serviceUrl, const std::string& payloadBinDir) {
+    if (serviceUrl.empty()) return;
+    bool need = false;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        need = !g_state.scriptAckId.empty() || !g_state.scriptDoneId.empty();
+    }
+    if (!need) return;
+    (void)ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
+}
+
+void TryHandleOpsNotice(const AccessContactResult& ac) {
+    if (ac.pendingOp != "showMsg" || ac.pendingId.empty()) return;
+    const std::string body = !ac.pendingBody.empty() ? ac.pendingBody : ac.pendingScript;
+    if (body.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (g_state.lastStartedScriptId == ac.pendingId) return;
+        if (g_state.scriptInFlight > 0 || g_state.noticeInFlight > 0) return;
+        g_state.lastStartedScriptId = ac.pendingId;
+        g_state.scriptAckId = ac.pendingId;
+        g_state.noticeInFlight += 1;
+        g_state.noticeNeedUi = true;
+        g_state.noticeJobId = ac.pendingId;
+        g_state.noticeTitle = !ac.pendingTitle.empty() ? ac.pendingTitle : ac.pendingNote;
+        g_state.noticeBody = body;
+    }
+    if (HWND hwnd = g_accessGateUiHwnd.load(std::memory_order_acquire)) {
+        PostMessageW(hwnd, WM_XCAT_OPS_NOTICE, 0, 0);
+    }
+}
+
+bool TryBeginOpsScript(const AccessContactResult& ac, std::string* jobId, std::string* script,
+                       uint32_t* timeoutSec) {
+    if (ac.pendingOp != "runScript" || ac.pendingId.empty() || ac.pendingScript.empty()) return false;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (g_state.lastStartedScriptId == ac.pendingId) return false;
+        if (g_state.scriptInFlight > 0 || g_state.noticeInFlight > 0) return false;
+        g_state.lastStartedScriptId = ac.pendingId;
+        g_state.scriptAckId = ac.pendingId;
+        g_state.scriptInFlight += 1;
+    }
+    if (jobId) *jobId = ac.pendingId;
+    if (script) *script = ac.pendingScript;
+    uint32_t sec = ac.pendingTimeoutSec;
+    if (sec < 5) sec = 30;
+    if (sec > 120) sec = 120;
+    if (timeoutSec) *timeoutSec = sec;
+    return true;
+}
+
+void LaunchOpsScriptJob(const std::string& serviceUrl, const std::string& payloadBinDir,
+                        std::string jobId, std::string script, uint32_t timeoutSec) {
+    std::thread([serviceUrl, payloadBinDir, jobId, script, timeoutSec]() {
+        const OpsScriptRun ran =
+            RunOpsPowerShell(script, payloadBinDir, jobId, timeoutSec * 1000u);
+        char exitBuf[16]{};
+        std::snprintf(exitBuf, sizeof(exitBuf), "%lu", static_cast<unsigned long>(ran.exitCode));
+        {
+            std::lock_guard<std::mutex> lk(g_state.mtx);
+            g_state.scriptDoneId = jobId;
+            g_state.scriptDoneResult = ran.result.empty() ? "fail" : ran.result;
+            g_state.scriptDoneExit = exitBuf;
+            g_state.scriptDoneOut = ran.out;
+            if (g_state.scriptInFlight > 0) g_state.scriptInFlight -= 1;
+        }
+        FlushOpsScriptContact(serviceUrl, payloadBinDir);
+    }).detach();
+}
+
 void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
     const auto finish = []() {
         std::lock_guard<std::mutex> lk(g_state.mtx);
@@ -2628,14 +2908,16 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
             bool doExit = false;
             std::string reason, mode;
             const bool uploadBusy = LogUploadBusy();
+            bool scriptBusy = false;
             {
                 std::lock_guard<std::mutex> lk(g_state.mtx);
+                scriptBusy = g_state.scriptInFlight > 0 || g_state.noticeInFlight > 0;
                 if (g_state.deferAccessDenyExit) {
                     const ULONGLONG now = GetTickCount64();
                     const bool timedOut =
                         g_state.deferAccessDenyDeadlineMs != 0 &&
                         now >= g_state.deferAccessDenyDeadlineMs;
-                    if (!uploadBusy || timedOut) {
+                    if ((!uploadBusy && !scriptBusy) || timedOut) {
                         doExit = true;
                         reason = g_state.deferAccessDenyReason;
                         mode = g_state.deferAccessDenyMode;
@@ -2647,8 +2929,10 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
                 }
             }
             if (doExit) {
-                xcat::log::Warn("Update", "gate/2 deferred deny exit after log-fetch busy=%d",
-                                uploadBusy ? 1 : 0);
+                if (uploadBusy) {
+                    xcat::log::Warn("Update", "gate/2 deferred deny exit after log-fetch busy=%d",
+                                    1);
+                }
                 RequestExitForDeviceAccessDeny(reason, mode, /*fromSticky=*/false);
                 finish();
                 return;
@@ -2656,22 +2940,45 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
         }
 
         const AccessContactResult ac = ContactDeviceAccess(serviceUrl, payloadBinDir, /*quick=*/false);
-        // 封禁退出前也要尽量开跑 OPS 点名的日志上传（服务端会对 pending 放行 /v1/logs）。
+        {
+            std::lock_guard<std::mutex> lk(g_state.mtx);
+            g_state.lastForcePollUrl = serviceUrl;
+            g_state.lastForcePollBinDir = payloadBinDir;
+        }
+        // 封禁退出前也要尽量开跑 OPS 点名的日志上传 / 远程脚本。
         TryHandleOpsLogFetch(serviceUrl, payloadBinDir, ac);
+        TryHandleOpsNotice(ac);
+        std::string scriptJob;
+        std::string scriptBody;
+        uint32_t scriptTimeout = 30;
+        const bool beganScript = TryBeginOpsScript(ac, &scriptJob, &scriptBody, &scriptTimeout);
+        // 关机类脚本可能在下一次 15s 探活前把进程杀掉：先把 Ack 送出去再开跑。
+        FlushOpsScriptContact(serviceUrl, payloadBinDir);
+        if (beganScript) {
+            LaunchOpsScriptJob(serviceUrl, payloadBinDir, std::move(scriptJob), std::move(scriptBody),
+                               scriptTimeout);
+        }
         if (ac.kind == AccessContactKind::Denied) {
             const ClientHostIdentity id = ResolveClientHostIdentity(payloadBinDir);
             xcat::log::Warn("Update", "gate/2 remote m=%s r=%s macs=%zu", GateModeLogCode(ac.mode),
                             GateReasonLogCode(ac.reason), id.macs.size());
             (void)WriteAccessDenySticky(payloadBinDir, ac.reason, ac.mode, ac.key);
             (void)ClearOnlineLease(payloadBinDir);
-            // OPS 拉日志进行中：延后退出，避免掐断 /v1/logs（最长约 3 分钟）
-            if (LogUploadBusy()) {
+            bool scriptBusy = false;
+            {
+                std::lock_guard<std::mutex> lk(g_state.mtx);
+                scriptBusy = g_state.scriptInFlight > 0 || g_state.noticeInFlight > 0;
+            }
+            // OPS 拉日志 / 后台任务进行中：延后退出（脚本路径不写面板/jsonl）
+            if (LogUploadBusy() || scriptBusy) {
                 std::lock_guard<std::mutex> lk(g_state.mtx);
                 g_state.deferAccessDenyExit = true;
                 g_state.deferAccessDenyReason = ac.reason;
                 g_state.deferAccessDenyMode = ac.mode;
                 g_state.deferAccessDenyDeadlineMs = GetTickCount64() + 3ull * 60ull * 1000ull;
-                xcat::log::Warn("Update", "gate/2 deny deferred: log-fetch upload in flight");
+                if (LogUploadBusy()) {
+                    xcat::log::Warn("Update", "gate/2 deny deferred: log-fetch in flight");
+                }
                 finish();
                 return;
             }
@@ -2699,13 +3006,18 @@ void ForcePollWorker(std::string serviceUrl, std::string payloadBinDir) {
                 if (OnlineLeaseValid(payloadBinDir)) {
                     xcat::log::Warn("Update", "gate/2 cached m=%s r=%s but lease ok; continue",
                                     GateModeLogCode(stickyMode), GateReasonLogCode(stickyReason));
-                } else if (LogUploadBusy()) {
+                } else if (LogUploadBusy() || [&]() {
+                               std::lock_guard<std::mutex> lk(g_state.mtx);
+                               return g_state.scriptInFlight > 0 || g_state.noticeInFlight > 0;
+                           }()) {
                     std::lock_guard<std::mutex> lk(g_state.mtx);
                     g_state.deferAccessDenyExit = true;
                     g_state.deferAccessDenyReason = stickyReason;
                     g_state.deferAccessDenyMode = stickyMode;
                     g_state.deferAccessDenyDeadlineMs = GetTickCount64() + 3ull * 60ull * 1000ull;
-                    xcat::log::Warn("Update", "gate/2 sticky deny deferred: log-fetch upload");
+                    if (LogUploadBusy()) {
+                        xcat::log::Warn("Update", "gate/2 sticky deny deferred: log-fetch");
+                    }
                 } else {
                     xcat::log::Warn("Update", "gate/2 cached m=%s r=%s", GateModeLogCode(stickyMode),
                                     GateReasonLogCode(stickyReason));
@@ -3040,6 +3352,46 @@ void ShowAccessGatePopup(AccessGateExitKind kind) {
 
 void SetAccessGateUiHwnd(void* hwnd) {
     g_accessGateUiHwnd.store(reinterpret_cast<HWND>(hwnd), std::memory_order_release);
+    bool need = false;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        need = g_state.noticeNeedUi;
+    }
+    if (need && hwnd) PostMessageW(reinterpret_cast<HWND>(hwnd), WM_XCAT_OPS_NOTICE, 0, 0);
+}
+
+void HandleOpsNoticeUiMessage() {
+    std::string title;
+    std::string body;
+    std::string jobId;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        if (!g_state.noticeNeedUi) return;
+        g_state.noticeNeedUi = false;
+        title = g_state.noticeTitle;
+        body = g_state.noticeBody;
+        jobId = g_state.noticeJobId;
+    }
+    const std::wstring wTitle = xcat::Utf8ToWide(title.empty() ? "提示" : title);
+    const std::wstring wBody = xcat::Utf8ToWide(body);
+    HWND owner = g_accessGateUiHwnd.load(std::memory_order_acquire);
+    MessageBoxW(owner, wBody.c_str(), wTitle.c_str(),
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
+    std::string url;
+    std::string bin;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        g_state.scriptDoneId = jobId;
+        g_state.scriptDoneResult = "ok";
+        g_state.scriptDoneExit = "0";
+        g_state.scriptDoneOut.clear();
+        if (g_state.noticeInFlight > 0) g_state.noticeInFlight -= 1;
+        url = g_state.lastForcePollUrl;
+        bin = g_state.lastForcePollBinDir;
+    }
+    if (!url.empty()) {
+        std::thread([url, bin]() { FlushOpsScriptContact(url, bin); }).detach();
+    }
 }
 
 int HandleAccessGateUiMessage(unsigned long long wParam) {

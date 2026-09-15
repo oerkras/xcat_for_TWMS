@@ -28,15 +28,17 @@ using x::runtime::il2cpp::ReadPtr;
 
 // dump.cs Mob TDI 1507；与 mob_pool_port 同源。
 constexpr char kMobClass[] =
-    "de49679f4fa010cff83f3abcf3443df89b12c8102b0f973237328b38f4ac36a";
-constexpr uint32_t kRvaGetBodyRect = 0xF2BAA0;
+    "fea4358a07c99f6ab1e2cda4d015f36773997b07da3838b9e592aaf7184672d";
+constexpr uint32_t kRvaGetBodyRect = 0xF61810;
 
-// ActionManager 哈希 / 字段：melee_veto 已实机跑通（08-20 dump）。
+// ActionManager：09-10pm dump TDI 1666。BIN 19:03 bind map=null — Singleton Lazy 字段再漂。
 constexpr char kHashActionManager[] =
-    "b6556cb63d6e47860340c30f5009d1a0db6dd6382fd771512a14e7792432946";
+    "e7fa713cddeb17a0a199ba3d6495dbcb2aa0caa0cd2926154a72fffa65e181d";
 constexpr char kHashSingletonInstance[] =
-    "a4acbfea5717698475dab6427b71c33bd8fbab4d9fbdb4b7c5f58cdbec21b47";
-constexpr size_t kOffActionMgrAfterImageMap = 0x20;
+    "b462a770d3e4e79c3308e21945cbb26fb30d3d4c9950770d02afa701db9bb64";  // Lazy<T> @0x0 · TDI 13795
+constexpr char kHashAfterImageMap[] =
+    "d3949f8040941d8b2bbc3b55fdf9b13a41dc37bb2784bbc9837bf1a0c1225bc";  // Dict<string,AfterImage>
+constexpr size_t kOffActionMgrAfterImageMap = 0x18;  // 09-10；0x20 已是 WZ 节点
 constexpr size_t kOffAfterImageRange = 0x18;
 constexpr size_t kOffDictEntries = 0x18;
 constexpr size_t kOffDictCount = 0x20;
@@ -272,7 +274,16 @@ void* ResolveAfterImageMapOnPump() {
     if (!fValue) return nullptr;
     void* mgr = ReadPtr(lazy, api.fieldGetOffset(fValue));
     if (!LooksLikeHeapPtr(mgr)) return nullptr;
-    void* map = ReadPtr(mgr, kOffActionMgrAfterImageMap);
+    size_t offMap = kOffActionMgrAfterImageMap;
+    void* fMap = nullptr;
+    __try {
+        fMap = api.classGetFieldFromName(amKlass, kHashAfterImageMap);
+        if (fMap) offMap = api.fieldGetOffset(fMap);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("hit_geom/afterimageMap");
+        return nullptr;
+    }
+    void* map = ReadPtr(mgr, offMap);
     return LooksLikeHeapPtr(map) ? map : nullptr;
 }
 

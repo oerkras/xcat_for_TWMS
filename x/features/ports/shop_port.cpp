@@ -36,6 +36,7 @@
 #include <vector>
 
 namespace x::features::ports::shop {
+namespace item_type = x::ui::player::item_type;
 namespace {
 
 using x::runtime::il2cpp::ArrayAt;
@@ -43,76 +44,87 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-// UIShopDialog — Prefab TypeDef 434 · remounted 2026-08-06
+// UIShopDialog — dump TDI 442 · remounted 2026-09-10（勿用 UIStat TDI 518 / b3912d2e）
 constexpr char kUiShopDialogClass[] =
-    "d2533e86daac7664c2ad562762550504e2606abd6f68978b33fa9085a148691";
+    "fad5dd775041636b6da0d06794c9e5ea676fb9966275b6e5f83ede20626d226";
 constexpr char kPrefabShopDialog[] = "UIShopDialog";
 // NpcPool — remounted 2026-08-06（形：List@10 Dict@18 List@20 List@28 Field@30 int@38）
 constexpr char kNpcPoolClass[] =
-    "f8bac4f3ce197f9afb67799f8c8c716ff4459d106a24311627d1f1b568b5233";
+    "fc5c1e8281303e6ed33d461b8b1ffcbdf5a121fd946b32133da20f788dfd225";
 // UIUtilDialogEx（脚本对话 / AskMenu）— Prefab TypeDefIndex 609
 constexpr char kUiUtilDialogExClass[] =
-    "bd208055ffbf49c1012cf3cd16e73423f5b8dab0a80dcecf8a0f89fe6442e81";
+    "b7ca33f59d8ffad545e8e024f40b5b8caee3d90c486c720fdf08d7e8839f94e";
 constexpr char kPrefabUtilDialogEx[] = "UIUtilDialogEx";
 constexpr char kFuncKeyClass[] =
-    "f0b8920ce79f0bcfeb94839972045ade29a6f32d137eae98105d6107d1efccb";
+    "ea3da4955e170bddd23954b6fadb04307346cce8502f56114ac4c270f4cf65b";
 
 // OutPacket SEND 13775 / Session Send — 与 travel_port 同源 · remounted 2026-08-06
-constexpr uint32_t kRvaOutPacketCreate = 0x1CF4750;
-constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1D006E0;  // Encode1(sbyte)
-constexpr uint32_t kRvaOutPacketEncode2Short = 0x1D009E0;
-constexpr uint32_t kRvaOutPacketEncode4Int = 0x1D00AF0;
-constexpr uint32_t kRvaNmSend = 0x1CF63B0;  // Session.SendPacket bool(OutPacket)
-constexpr uint32_t kRvaUserLocalTalkToNpc = 0x10abbf0;  // remounted 2026-08-06
-constexpr uint32_t kRvaOnFuncKey = 0x10A74D0;  // remounted 2026-08-06 UL.OnFuncKey
-constexpr uint32_t kRvaFuncKeyCtor = 0x166D9E0;  // remounted 2026-08-06 .ctor(FuncType,int)
+constexpr uint32_t kRvaOutPacketCreate = 0x1D88D70;
+constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1D94DC0;  // Encode1(sbyte)
+constexpr uint32_t kRvaOutPacketEncode2Short = 0x1D95140;
+constexpr uint32_t kRvaOutPacketEncode4Int = 0x1D95250;
+constexpr uint32_t kRvaNmSend = 0x1D8AA00;  // Session.SendPacket bool(OutPacket)
+constexpr uint32_t kRvaUserLocalTalkToNpc = 0x1139250;  // remounted 2026-08-06
+constexpr uint32_t kRvaOnFuncKey = 0x1134ce0;  // remounted 2026-08-06 UL.OnFuncKey
+constexpr uint32_t kRvaFuncKeyCtor = 0x1700270;  // remounted 2026-08-06 .ctor(FuncType,int)
 // UIUtilDialogEx：SetKeyFocus(int) / OnClickBtOk
-constexpr uint32_t kRvaUiDlgSelectMenu = 0x7988d0;  // remounted 2026-08-06 SetKeyFocus
-constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x7A1510;  // remounted 2026-08-06 OnClickBtOk
-// UIShopDialog 产品买卖入口 — RVA 未漂；hash remount 2026-08-06
-constexpr uint32_t kRvaSendSellRequestPacket = 0x55B7F0;
-constexpr uint32_t kRvaSendBuyRequestPacket = 0x55AC10;
-constexpr uint32_t kRvaSendRechargeRequestPacket = 0x55BE30;
-constexpr uint32_t kRvaCmpSellItem = 0x55D6B0;
-constexpr uint32_t kRvaShopSetRet = 0x5495e0;
+constexpr uint32_t kRvaUiDlgSelectMenu = 0x7ba6c0;  // remounted 2026-08-06 SetKeyFocus
+constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x7C3540;  // remounted 2026-08-06 OnClickBtOk
+// UIShopDialog 产品买卖入口 — remount 2026-09-10
+// Sell/Buy：Create(68) + Encode1(byte op) + Enc2(pos) + Enc4(id) + Enc2(qty)
+//   0x56A440 op=(0xFA+7)&0xFF=1 卖；0x569360 op=0x7B^0x7B=0 买
+constexpr uint32_t kRvaSendSellRequestPacket = 0x56A440;
+constexpr uint32_t kRvaSendBuyRequestPacket = 0x569360;
+constexpr uint32_t kRvaSendRechargeRequestPacket = 0x56A9D0;
+constexpr uint32_t kRvaCmpSellItem = 0x56D340;
+constexpr uint32_t kRvaShopSetRet = 0x5524A0;
+// Select 只写 current@0x54；货架 List@0x210 由本方法填（IDA：call a5b0c102 / e209269e）。
+constexpr uint32_t kRvaShopRefreshSell = 0x561A00;
 // UIDialog.Close — 基类虚函数；关 UI 实例
-constexpr uint32_t kRvaUiDialogClose = 0x14C0630;  // remounted 2026-08-20
+constexpr uint32_t kRvaUiDialogClose = 0x11CE8F0;  // remounted 2026-08-20
 // 方法哈希（dump 可读名缺失时的防漂；void(int) 在 UIShopDialog 上不唯一）
 constexpr char kHashSendSell[] =
-    "a08f8b22241059787a253b7b74f366539e81524b24d74098b3e7d0313c027ce";
+    "aafc4d8783a767fd4531615ac6964490149ee07255d804fbb7b1a2fdc2c3eb4";
 constexpr char kHashSendBuy[] =
-    "b2fdc08a015a95a14d6798b48610eea5d0669062c2df4ce79ed3a317ae1b177";
+    "b224a07ec6e813d7883f4f5d162d8cfb23aa669512dee5c5666c339a6e26e1f";
 constexpr char kHashSendRecharge[] =
-    "d76855099fb01af298726641e03618e35ca1cdbd71be7eea0ea4a1b7627fcfd";
+    "b5de26af73f37c03e88ad0a2ae189f09314000a6e5ed35c931accff7255bcf2";
 constexpr char kHashCmpSell[] =
-    "f12ac5720ab6c2c184c64d5db8909e19c0ce544a2076a5b7e4c70ba91b17863";
+    "a519bf65c007206ad0d2e3e1fe93cf08184f9545d75a1a770f030823cc656b2";
 constexpr char kHashSendPacket[] =
-    "ce57a0ddc7703a2d9139e8edb783f28f0289a720bb33fb28d75fd00b486e078";
+    "b3b21eb3c2730d1980bf0eaa9708443c5ae9bda8a633de4a507ec2c3f7d8306";
 constexpr char kHashTalkToNpc[] =
-    "aa01ffef7b4ff6d3404fe2c5a6f0dc6c52afc421cd30ef2b6c5ebdbaadd913c";
+    "eab84f75b4da089684698d5abea5e991a8cb0482b7a72127f8a5e4d6cd68e65";
 constexpr char kHashOnFuncKey[] =
-    "c947540847c05920a4da23eea3134877db4f32f8191c6103405f5fc9a66189c";
+    "a8e976cda164129940d026862b8f8df7c0bae4251ce63aaa8f285bbd3f03532";
 constexpr char kHashUiTabOnClick[] =
-    "c93b9ae3ffb4e7f119aa79be3083c01bced157217df71c9af5a32fa821a3fd3";
+    "e52297c4804472cd50014661ae0518836adf744236d48bba75f0fba9c236dba";
+constexpr char kHashShopUiTabSelect[] =
+    "f405f1b218bf7558e1aa363c04aabd067b035ce06e21d748eea74fce3e9042e";
+constexpr char kHashShopRefreshSell[] =
+    "ada8adc9115dfb5f8089079083880495b53fa767dfb15bebf5ee8e11ba58809";
 constexpr char kHashSetKeyFocus[] =
-    "f82ad8bb9783095086969c6978513c1f526755915a8e2cf9c0693bece0ea803";
+    "cee979840ed8b665bdd844a43d1a0edbd156c5c53ccf9ff64f4433d0f4da909";
 // OutPacket Create/Encode* — SEND OutPacket 13775；Encode1 本 port 用 sbyte
 constexpr char kHashOutCreate[] =
-    "c20bdff906c15584c65c62ea482e1a220385c0329db377b878479172a2c7c4e";
+    "bdc818833eaf10c8b4c4aea87655578c1089f35f56b7410a43fa11280595a66";
 constexpr char kHashEncode1Sbyte[] =
-    "f34d9c607705bc96d7edbd43bf097a5f3380882856017e776e973c456c7d8bb";
+    "f02d13240bb0374fe69bc6627e36273fa70d25bbeb181d38199fb28bdb131ce";
 constexpr char kHashEncode2Short[] =
-    "f64c8a9336fc28f7f4e0a28b09cb482ac7e84e3f258c1e0bbd273ea6b292b27";
+    "bdabff0bda0baec172c08f36a0c532dffe77801915c9fea5b30f18358b03659";
 constexpr char kHashEncode4Int[] =
-    "ba307dd262ea17352e6e06840f5c7f5b4733a57d5ee2bb24d6f0cd324c9d4bb";
+    "a100894d7b827d6eded8215773d18524d053c3dc32926bbd6108b7edb57f6c9";
 constexpr char kOutPacketClass[] =
-    "ceb815618772d63cb42bdd643630c4b5e662df06a1077e64756b7c153ac7b74";
+    "daba5b68fb674204a54bbd26da7dd4508e4521a0b2248bf88275bbebffe37a4";
 // Unity helpers（明文名稳定）— 走 ResolveUnityMi
-constexpr uint32_t kRvaButtonPress = 0x4FF9A10;  // remounted 2026-08-06 Button.Press
+constexpr uint32_t kRvaButtonPress = 0x50ABC00;  // remounted 2026-08-06 Button.Press
 constexpr uint32_t kRvaGetGameObject = x::runtime::il2cpp::kRvaCompGetGo;
-constexpr uint32_t kRvaGoSetActive = 0x4E9E7E0;  // remounted 2026-08-06 GameObject.set_active
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4E9E980;  // remounted 2026-08-06 get_activeSelf
-constexpr uint32_t kRvaUiTabOnClickTab = 0xB2CD80;  // remounted 2026-08-06 UITab.OnClickTab
+constexpr uint32_t kRvaGoSetActive = 0x4F5DF20;  // remounted 2026-08-06 GameObject.set_active
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4F5E0C0;  // remounted 2026-08-06 get_activeSelf
+constexpr uint32_t kRvaUiTabOnClickTab = 0xB5A5C0;  // remounted 2026-08-06 UITab.OnClickTab
+// 09-10：UIShopDialog 槽 0xC0/0xC8 类型换成商店专用 TAB（非 caafbe07 UITab）。
+// 选中下标 backing @0x54；切页 RVA 0xB63340（cmp [this+54h]）。
+constexpr uint32_t kRvaShopUiTabSelect = 0xB63340;
 constexpr int kClientUserShopRequest = 67;
 constexpr uint8_t kShopOpSell = 1;
 constexpr uint8_t kShopOpBuy = 0;
@@ -126,7 +138,7 @@ constexpr int kUiDlgTypeList = 4;
 
 // Session/NM 方法宿主（与 il2cpp_shape::kHashNetworkManager 同）
 constexpr char kSessionClass[] =
-    "c9eddf65ba9888eb982987829cbcbf5b9cf2c85b88423dcd27891daeafa9a37";  // remounted 2026-08-06
+    "c932d387005490bdae5c6a171d6ae990dbfe667ad98f3d33c878e162e0c7be8";  // remounted 2026-08-06
 
 // 背包 / Money：SSOT = x::ui::player（hash→field_get_offset）；禁止再钉 WM/CD/CS 偏移。
 #define kOffListItems (x::runtime::il2cpp_container::OffListItems())
@@ -135,36 +147,36 @@ constexpr char kSessionClass[] =
 #define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
 constexpr size_t kFbNpcPoolList = 0x10;  // NpcPool._npcList
 constexpr char kHashNpcPoolList[] =
-    "b0fdc86b0c4948a322b0f079d01e1a38e4fc5d989376093710e414af268a3fd";
+    "cb154f7f966532d9e9639b0fcdedd9068eb8bae8fd9a699eb28f31e884dfccd";
 size_t gOffNpcPoolList = kFbNpcPoolList;
 #define kOffNpcPoolList (gOffNpcPoolList)
 
 constexpr char kNpcClass[] =
-    "e120e7762587fa86e3b539dc06b4a29abf3be19e3cd0c19b3d3139e1cc6f149";  // remounted 2026-08-06
+    "c66d61480e9664cd41bf8a64a739535ff4b7e20e92d4e97bd236e43583c0c76";  // remounted 2026-08-06
 constexpr char kNpcDataClass[] =
-    "fcfef43ca1b41e037618be8f149e9fd33288d87b351379b420f036d6974c3be";
+    "b53489fb79a5c313eb21d78991e12366c0bf2300bd0a53e24f1220503e35eab";
 constexpr char kActorBaseClass[] =
-    "a83e4f1c524fa6e5dc75a3f38110e85704c157550dd8e171c128f9d66e5c739";  // = teleport
+    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";  // = teleport
 constexpr char kPacketClass[] =
-    "b30f04513b1c4d41e3c27445fdc90c247c232bd88aa1121648eda3f3924f72d";  // Packet base 13773
+    "e4a837e0c122619b214e15b955ec342c4ec02ab6af11631b5a9cf43d784247c";  // Packet base 13773
 
 constexpr char kHashActorPos[] =
-    "cf776ff0c583bd614c1ea26f338a0f3c6971482b301704c1bbb8d962b9cb1cf";
+    "cdb04ce386f0f95b2ea1efe9454c2974a452cfe4d5b5924ec89759bb59836ad";
 constexpr char kHashNpcObjectId[] =
-    "<bc72aad97a7af47c53b702fbecf94df00534a0c98848987099876504e428f62>k__BackingField";
+    "<fec2c5eb64f723aec62b0036109101aaea61d8eb1a6e453252d986c60949778>k__BackingField";
 constexpr char kHashNpcData[] =
-    "de23aeb084827720c45f42750e8221559aa71f885fd928f6f768a3d1147ed55";
+    "b9dca1541ad897a4326b0836d26beafcf0e398555037277775dd3cc697ae199";
 constexpr char kHashNpcDataId[] =
-    "f20be559937249fffacce749c1eb716fd42459105b81d6dd15b7e45628412fc";
+    "c3c7f4467635c185848247d3f7df1767d2bef278359b6ec82128df6f6c85faf";
 constexpr char kHashUiDlgType[] =
-    "faa2d0ff7a3b114a8ccebde69c0c7797e50d08b044c0d4909e0d826300ff1fa";
+    "ba4f5380e382ee51071677c3fb777258e61fbb5e1647f2342f71bb3041369c8";
 constexpr char kHashUiDlgMenuTexts[] =
-    "<d9855d19f804010dc8f0fd7328c6b4b6c21e2fcfd99b5bdf7dc157ca55d8099>k__BackingField";
+    "<dc192c018156f959bb71c248b93cd1a980579fab6c2cf21cf4b27a043003fa8>k__BackingField";
 // Packet offset（基类）；SEND OutPacket id@0x20（非 InPacket backing）
 constexpr char kHashPacketOffset[] =
-    "<f8c46e00eb78d41330636a2a5039f144f30d4a7c6a19b373e0b0c049fcc56b3>k__BackingField";
+    "<c11600e369c78d4413498612cbf64d787d921969340d2448edb34dbe6935da5>k__BackingField";
 constexpr char kHashOutPacketId[] =
-    "bb408cfc09d7de1810883c1162375d43bb2d6e0d2cd95c7813e81b2fa9b1407";
+    "d0e34e976361bf622107ef86c3429c2150c8f1c186db2704f278bbba8c11409";
 
 constexpr size_t kFbActorPos = 0x64, kFbNpcObjectId = 0x78, kFbNpcData = 0x80;
 constexpr size_t kFbNpcDataId = 0x10, kFbUiDlgType = 0xA0, kFbUiDlgMenuTexts = 0xE0;
@@ -188,14 +200,14 @@ constexpr size_t kOffCachedPtr = 0x10;
 #define kOffSessionState (x::runtime::il2cpp_network::OffSessionState())
 
 // —— UIShopDialog / Item / UITab 字段防漂移：hash→field_get_offset；下列仅 dump fallback ——
-constexpr size_t kFbBuyItemList0 = 0x178;
-constexpr size_t kFbBuyItemList1 = 0x180;
-constexpr size_t kFbSellItemList = 0x198;
-constexpr size_t kFbBuySelectedIndex = 0x1A8;
-constexpr size_t kFbSellSelectedIndex = 0x1AC;
-constexpr size_t kFbLastBuyIndex = 0x1B0;
-constexpr size_t kFbHasShopRequestSent = 0x1B4;
-constexpr size_t kFbLastSellIndex = 0x1B8;
+constexpr size_t kFbBuyItemList0 = 0x1F0;
+constexpr size_t kFbBuyItemList1 = 0x1F8;
+constexpr size_t kFbSellItemList = 0x210;
+constexpr size_t kFbBuySelectedIndex = 0x220;
+constexpr size_t kFbSellSelectedIndex = 0x224;
+constexpr size_t kFbLastBuyIndex = 0x230;
+constexpr size_t kFbHasShopRequestSent = 0x238;
+constexpr size_t kFbLastSellIndex = 0x23C;
 constexpr size_t kFbShopUiTab0 = 0xC0;
 constexpr size_t kFbShopUiTab1 = 0xC8;
 constexpr size_t kFbShopButtonExit = 0xA8;
@@ -209,51 +221,60 @@ constexpr size_t kFbShopItemQty = 0x40;
 constexpr size_t kFbShopItemSlot = 0x48;  // ItemSlotBase*；Charge 真源数量在 Bundle.nNumber
 constexpr size_t kFbUiTabCurrentIndex = 0x20;
 constexpr size_t kFbUiTabItems = 0x28;
+constexpr size_t kFbShopUiTabCurrent = 0x54;  // dump TDI 963 backing int
+constexpr size_t kFbShopUiTabItems = 0x48;    // Button[]；ListSize 读 max_length@0x18
 
-// UIShopDialog 私有字段哈希（dump.cs TDI 434 · remount 2026-08-06；偏移未漂）
+// UIShopDialog 私有字段哈希（dump.cs TDI 442 · remount 2026-09-10）
 constexpr char kHashFldBuyList0[] =
-    "e4a662695b38e3e99d68274411543fafd66840a2482123cee69e2991f71766e";  // _buyItemList
+    "ceeca5cebf98ab0dc67ce048abecb4d118161eeeb62f943ff7fa46aa0418dff";  // _buyItemList @0x1F0
 constexpr char kHashFldBuyList1[] =
-    "b2138c1d80c5c05e6071a8462da6128d195598f38c54e6e97726faed33ca2bb";  // _buyItemRecommendedList
+    "a6e39eb6db2a2287d9fab1165faac8ff1f53298ea5c27531506f6136713c9df";  // _buyItemRecommendedList @0x1F8
 constexpr char kHashFldSellList[] =
-    "a952ddf8e0eeb87d6f60c8aeab9f5fc3f6ac688db09978a3f12bb502e0e439a";  // _sellItemList
+    "b03b48364947156c04f329f0f694436393d090e02e20bae6d43cd517389db23";  // _sellItemList @0x210
 constexpr char kHashFldBuySelected[] =
-    "c09c9c73a5b17d658304c3e2e008c06d3c50cd55e1437e4bc7a46e9361e23da";  // _buySelectedIndex
+    "c7bec8c5b6629e858ffb735784a76ae8f884d5bcccde6803ea87f5da09f5927";  // _buySelectedIndex @0x220
 constexpr char kHashFldSellSelected[] =
-    "aa08442fa4594e819bdb4a2bd96cd42a5f7cd118ebbbbf3fd124bc25469ba47";  // _sellSelectedIndex
+    "d2fc4521a8d186fe5366e2a6cc96e90de4ffba01d4e2a407bdaf7f2d6989371";  // _sellSelectedIndex @0x224
 constexpr char kHashFldLastBuy[] =
-    "ffc0b333fdf21b299e2677dd6f10cd638c996f05011e1835aabe7e22099fdd6";  // lastBuy
+    "b2cbb2c06c4baa5965ed1a88321d99cae15b51d5b474a76123f2af65c4c6ec2";  // @0x230；SendSell 当卖栏下标（切 TAB 会写成 -1）
 constexpr char kHashFldHasRequest[] =
-    "f626a0908a67db2440ad66957983a10e428de539297ded6eefac72a27b48e74";  // _hasShopRequestSent
+    "d660c8c14102d657fa81f8b54096606f74ab4ef81612dabefa194f5cc200f1d";  // _hasShopRequestSent @0x238
 constexpr char kHashFldLastSell[] =
-    "bec76984da71d830194c5974fde512aaece915c885239908f8354c54d84c49e";  // _lastSellIndex
+    "c0375b40626f24c980b21ecd2a402b4b25781b60ac99b9ae485172e82b3a0a9";  // _lastSellIndex @0x23C
 constexpr char kHashFldUiTab0[] =
-    "e2b0a7f353632e1230d18ce4d7f66c161231b30cf6c0ae5727d5487c8f97b04";
+    "bc5b1c04288c09db306ee3ab3b9183df4fb503a82188980254eea1d1ba3dabf";
 constexpr char kHashFldUiTab1[] =
-    "a2ae8f7ebd9c369bf5ef39505c472bd9c1addc5b4e7fe502b97a5c72134c38d";
+    "c1168b5622ca77bfb4fea84ce0fe142e384271205b5dfd31d2649d4c735df04";
 constexpr char kHashFldButtonExit[] =
-    "fa0b91e334a681e43b53846ed097df3e1c344d97e920b8611c2edaef6dd64f7";
+    "a0c64f0c60c2328f471da4abe046b8833d36d0e29c26401eca84a918e47ae5a";
+// 商店专用 TAB（dump TDI 963 · 09-10）；勿再用通用 UITab 的 0x20/0x28。
+constexpr char kShopUiTabClass[] =
+    "f76c1894e817b23f68fd33db895c1b91585f948399bc3135c592817431bf249";
+constexpr char kHashShopTabCurrent[] =
+    "<ff9093c07788fb93e2d227480f6a3e9871ad54f4d85ce350dec66806729ec20>k__BackingField";
+constexpr char kHashShopTabItems[] =
+    "a56b6c70546ce5e66b1c4ab0fa2229b40015f06dcc21aaaf5c1278106982490";
 
-// Item DTO（TDI 435）· remount 2026-08-06（明文名已哈希；偏移未漂）
+// Item DTO（TDI 443）· remount 2026-09-10（明文名已哈希；偏移未漂）
 constexpr char kFldItemId[] =
-    "ae65c9370ab5db1461a8b6a4fd915a27f672e46bf2c41d7a10cd1f944b2fe9f";
+    "ec6c5d5325794bead6bd01ed2ac0772fdee1baa50a04dbcff150d6f863f1ad4";
 constexpr char kFldItemPos[] =
-    "ce1d996ba684395ceb4f717e71b95630fdc19033c154cbbc3dd499c642af8d0";
+    "c6ffc5a541376ff9fbe1fbcd770ec748346d30a02a66ee12428c1c73162a2f7";
 constexpr char kFldItemPrice[] =
-    "e5112ad9872ad8decd33c7d33678c757b9fda083cbfe2d47442f81646f1dcf5";
+    "a85e38b90964af1c6ee1d2a1cc8ebb43769189a0b35e675b2d7791b745d7daa";
 constexpr char kFldItemUnitPrice[] =
-    "e70952b9c181b22689bc5fa10151021625b116359a8578fa40148bc54fa7f5a";  // double@0x30
+    "ad6e83b15ff12928cff11ba548aa3edd19c1ca2963b82c59cb8629be8281906";  // double@0x30
 constexpr char kFldItemMaxSlot[] =
-    "c6e6ca90488cc7ceec84f49705947fc412ca7c277c77cde0289ab46d548a268";
+    "de81411ac8993feb4b4dfde0b498e0d5daaeb9e41f83de0390d1f65e2bf75d4";
 constexpr char kFldItemQty[] =
-    "f0b0e42d66c6e9bcee94086b5e101a49d1f674cc912fc4aca252457d74c9df8";
+    "f1cb256bcd07ae9795a647f5d8f6566b0ab6b7a89d3853ee796b3e4ce583c56";
 constexpr char kFldUiTabCurrent[] =
-    "d0dda77dbf0b63baab26db18f3e920d272e7049cb93ee9c98011ef8edca77ae";
+    "a586a9a1e246ce0554a2408ea18ed4fdbc4682bdfa60959d78d7b7868173fc4";
 constexpr char kFldUiTabItems[] =
-    "c9f447daaf1d0298467d7ee9a3ef264fe41dc3d9ca45ca1de902da3d84d41f1";
-// ShopItem klass hash（internal nested TDI 435；FindShopItemKlass 鉴别用）
+    "ab1da97229ac4de52aa4f089eb2ef317a8d2940bd5880d84a4527bd63ad867d";
+// ShopItem klass hash（internal nested TDI 443；FindShopItemKlass 鉴别用）
 constexpr char kShopItemClass[] =
-    "ae3dd6247e81c6eb4b01cde2b99061e53eb0196299e4e9fd10cff67609dbc40";
+    "c17341b9c26809365582d9f793bbdddc495cfc9fbcb842d996ed402a46fbed8";
 
 struct ShopFieldOff {
     size_t buyList0 = kFbBuyItemList0;
@@ -275,8 +296,8 @@ struct ShopFieldOff {
     size_t itemStock = kFbShopItemStock;
     size_t itemQty = kFbShopItemQty;
     size_t itemSlot = kFbShopItemSlot;
-    size_t tabCurrent = kFbUiTabCurrentIndex;
-    size_t tabItems = kFbUiTabItems;
+    size_t tabCurrent = kFbShopUiTabCurrent;
+    size_t tabItems = kFbShopUiTabItems;
     bool tried = false;
     int hits = 0;
     const char* path = "fallback";  // meta | meta-partial | fallback
@@ -312,19 +333,19 @@ constexpr int kShurikenIdMax = 2079999;
 constexpr int kShurikenDefaultMaxSlot = 500;
 constexpr int kSessionStateConnected = 3;
 
-// ItemDataManager : Singleton<>（TDI 2027）— 与 titlebar 同源 hash
+// ItemDataManager : Singleton<>（dump TDI 2032 · remounted 2026-09-10）— 与 titlebar 同源 hash
 constexpr char kItemDataManagerClass[] =
-    "c8101ac7dfb0f2d093f36c7c8358ab9f1e20c3e893471976e0aaa4aed1b3504";
+    "bff751c2534faed4265d5bef882ae1d31e4c2f410adb17332cc66a00ad07955";
 constexpr char kItemDataClass[] =
     "d0faf43681b85608fdeeb49e50b4ef39661f9915255f9cc42ffbcef8c7ecdcc";
 constexpr char kItemBundleClass[] =
-    "ccc4e1b77fa37600b2bbf1888206bcd117dd4ceceff4a783c7efc9131f5d21c";
+    "c17341b9c26809365582d9f793bbdddc495cfc9fbcb842d996ed402a46fbed8";
 constexpr char kItemInfoClass[] =
     "d17b63a8e0d464dcc480fe3c2ca318421794428fcbead1527e27897c386c30b";
 constexpr char kHashIdmDataTable[] =
-    "ded28030272bf2e90688c23c32a571e7cf83627c8898a5a50f17c0455c17ea1";
+    "e4a61e49a1ac663c21808443cd325d892ef1e6ff6dfcd5f9a61b94a3bad5958";
 constexpr char kHashIdmBundleMap[] =
-    "e30e4193c8e632b191b35015269bae2df727e796e7fe8e119424d3d83764f1b";
+    "b9179fefdbfaaf491fe1bae547155bd56b9c16b271ecadeadc45d64c70089ba";
 constexpr char kHashItemDataInfo[] =
     "bb139da95e1f69f3567bf5d09454077ef5aae9327c2493a8289add95d00c5d5";
 // 运行时字段名已哈希；明文 nMaxPerSlot/slotMax 会 field_get_offset miss
@@ -353,9 +374,6 @@ DWORD gLastIdmRebind = 0;
 bool gIdmFieldTried = false;
 std::unordered_map<int, int> gItemMaxSlotCache;
 
-constexpr int kInvTiEquip = 1;
-constexpr int kInvTiConsume = 2;
-constexpr int kInvTiEtc = 4;
 constexpr DWORD kJobWaitMs = 2000;
 constexpr float kDefaultTalkDist = 220.f;
 
@@ -382,6 +400,7 @@ using FnSendBuyPacket = void (*)(void* self, int nCount, const void* method);
 using FnSendRechargePacket = void (*)(void* self, const void* method);
 using FnCmpSellItem = int (*)(void* self, const void* method);
 using FnShopSetRet = void (*)(void* self, const void* method);
+using FnShopRefreshSell = void (*)(void* self, const void* method);
 using FnUiDialogClose = void (*)(void* self, const void* method);
 using FnButtonPress = void (*)(void* self, const void* method);
 using FnGetGameObject = void* (*)(void* self, const void* method);
@@ -417,6 +436,7 @@ MethodInfoHead* gMiSendBuyPacket = nullptr;
 MethodInfoHead* gMiSendRechargePacket = nullptr;
 MethodInfoHead* gMiCmpSellItem = nullptr;
 MethodInfoHead* gMiShopSetRet = nullptr;
+MethodInfoHead* gMiShopRefreshSell = nullptr;
 MethodInfoHead* gMiUiDialogClose = nullptr;
 MethodInfoHead* gMiUiDlgOnClickOk = nullptr;
 MethodInfoHead* gMiUiDlgSelectMenu = nullptr;
@@ -539,10 +559,9 @@ void EnsureShopFieldOffsets() {
             x::runtime::il2cpp_prefab::FindClassCached(kUiShopDialogClass, kPrefabShopDialog).klass;
         if (shopKlass) gShopDlgKlass = shopKlass;
     }
-    void* tabKlass = x::runtime::il2cpp::FindClass("", "UITab");
-    if (!tabKlass)
-        tabKlass = x::runtime::il2cpp::FindClass(
-            "", "eddde887f68129b9cb47d4df8053f833a8a889aa182b6378b0843d8595f6745");
+    // 09-10：商店页签是专用 TAB（TDI 963），不是通用 UITab。用通用类会把
+    // current 解到 bool@0x20 → 装备 want=0 被当成「已在目标页」从不切 TAB。
+    void* shopTabKlass = x::runtime::il2cpp::FindClass("", kShopUiTabClass);
     void* itemKlass = FindShopItemKlass(shopKlass);
 
     int hits = 0;
@@ -570,17 +589,24 @@ void EnsureShopFieldOffsets() {
     hit(FieldOffOrFb(itemKlass, kFldItemQty, kFbShopItemQty, &gOff.itemQty));
     // Stock@MaxSlot+4：dump 明文可解析；哈希化时用 MaxSlot/Quantity 夹心推导（0x38/0x3C/0x40）
     {
-        bool stockOk = FieldOffOrFb(itemKlass, "Stock", kFbShopItemStock, &gOff.itemStock);
+        bool stockOk = FieldOffOrFb(itemKlass,
+                                    "e493e91e850a60625fad057d8afd4c685a3b49a9540ef35bf9829f38b9fa606",
+                                    kFbShopItemStock, &gOff.itemStock);
         if (!stockOk && gOff.itemQty == gOff.itemMaxSlot + 8) {
             gOff.itemStock = gOff.itemMaxSlot + 4;
             stockOk = true;
         }
         hit(stockOk);
     }
-    hit(FieldOffOrFb(itemKlass, "ItemSlot", kFbShopItemSlot, &gOff.itemSlot));
+    hit(FieldOffOrFb(itemKlass,
+                     "f278793e0a4fdb1a2fa628e8d703216d8cfc5da19d31a40ddc905c943d1d6ba",
+                     kFbShopItemSlot, &gOff.itemSlot));
 
-    hit(FieldOffOrFb(tabKlass, kFldUiTabCurrent, kFbUiTabCurrentIndex, &gOff.tabCurrent));
-    hit(FieldOffOrFb(tabKlass, kFldUiTabItems, kFbUiTabItems, &gOff.tabItems));
+    if (shopTabKlass) {
+        hit(FieldOffOrFb(shopTabKlass, kHashShopTabCurrent, kFbShopUiTabCurrent, &gOff.tabCurrent));
+        hit(FieldOffOrFb(shopTabKlass, kHashShopTabItems, kFbShopUiTabItems, &gOff.tabItems));
+    }
+    // shopTabKlass miss：保留 dump fallback 0x54/0x48，禁止用通用 UITab 的 0x20/0x28 覆盖。
 
     void* npcPoolKlass =
         gNpcPoolKlass ? gNpcPoolKlass : x::runtime::il2cpp::FindClass("", kNpcPoolClass);
@@ -1279,6 +1305,11 @@ bool Rebind(DWORD now) {
     if (gShopDlgKlass && !gMiShopSetRet) {
         constexpr MethodShape kRet{0, TypeKind::Void, true, false, {}};
         gMiShopSetRet = ResolveMi(gShopDlgKlass, kRvaShopSetRet, kRet, "SetRet", nullptr);
+    }
+    if (gShopDlgKlass && !gMiShopRefreshSell) {
+        constexpr MethodShape kRef{0, TypeKind::Void, false, false, {}};
+        gMiShopRefreshSell = ResolveMi(gShopDlgKlass, kRvaShopRefreshSell, kRef, nullptr,
+                                       kHashShopRefreshSell);
     }
     // Close 在 UIDialog 基类：walkParents + 明文 Close。
     if (!gMiUiDialogClose && gShopDlgKlass) {
@@ -2005,8 +2036,9 @@ void ScanJobOnMain(void* user) {
     if (!job || !job->items || job->maxItems <= 0) return;
     job->count = 0;
     job->ok = false;
-    const int invType = job->equip ? kInvTiEquip : kInvTiEtc;
-    void* list = GetBagList(invType);
+    const int bagType = job->equip ? item_type::Equip : item_type::Etc;
+    const int shopUi = job->equip ? kShopUiEquip : kShopUiEtc;
+    void* list = GetBagList(bagType);
     if (!list) return;
     const int n = ListSize(list);
     if (n <= 0 || n > 512) return;
@@ -2016,7 +2048,7 @@ void ScanJobOnMain(void* user) {
         if (!LooksLikeHeapPtr(slot)) continue;
         const int itemId = ReadI32(slot, x::ui::player::OffSlotItemId());
         if (itemId <= 0) continue;
-        const int qty = ItemQty(slot);
+        const int qty = (bagType == item_type::Equip) ? 1 : ItemQty(slot);
         if (qty <= 0) continue;
         const int pos = oneBased ? i : (i + 1);
         if (pos <= 0) continue;
@@ -2026,7 +2058,7 @@ void ScanJobOnMain(void* user) {
         it.pos = pos;
         it.itemId = itemId;
         it.count = qty;
-        it.invType = invType;
+        it.invType = shopUi;
         FillName(itemId, it.name, sizeof(it.name));
         // 可卖：优先离线 item_value 卖价；无名无价时仍尝试（表外物品交给服端拒）
         char code[32]{};
@@ -2087,7 +2119,8 @@ bool FindSellListIndex(void* dlg, int itemId, int preferPos, int& outIndex, int&
     return true;
 }
 
-// ItemType Equip=1..Etc=4 → 角色区 UITab 下标 0..3（BIN：错 TAB 时 _sellItemList 为空）
+// 商店 UITab 1/2/4 → 角色区下标 0/1/3（invType-1）。不是 CharacterData ItemType。
+// BIN：错 TAB 时 _sellItemList 为空。
 int InvTypeToCharTabIndex(int invType) {
     if (invType >= 1 && invType <= 5) return invType - 1;
     return 0;
@@ -2113,18 +2146,41 @@ void* PickShopCharInvTab(void* dlg, int wantIdx) {
     return nullptr;
 }
 
+bool CallShopRefreshSell(void* dlg) {
+    auto refresh = gMiShopRefreshSell && gMiShopRefreshSell->methodPointer
+                       ? reinterpret_cast<FnShopRefreshSell>(gMiShopRefreshSell->methodPointer)
+                       : AtRva<FnShopRefreshSell>(kRvaShopRefreshSell);
+    if (!refresh) return true;
+    __try {
+        refresh(dlg, gMiShopRefreshSell);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
 // 卖出前切到对应背包 TAB，否则 CmpSellItem 投影列表为空 → LIST_MISS。
 // outSwitched：本拍确实调用了 OnClickTab（同帧列表可能尚未刷新，调用方应 LIST_STALE 重试）。
-bool EnsureShopSellInvTab(void* dlg, int invType, bool* outSwitched) {
+// refreshIfCurrent：已在目标页时仍 RefreshSell。关店再开默认仍在装备页，跳过刷新会
+// listN=0（客服 0.1.201：第一趟 listN=16，之后装备投影空、占用 17/32 死循环）。
+// 卖出步进勿开：每包重建卖栏会打乱正在缩的下标。
+bool EnsureShopSellInvTab(void* dlg, int invType, bool* outSwitched, bool refreshIfCurrent = false) {
     if (outSwitched) *outSwitched = false;
     const int want = InvTypeToCharTabIndex(invType);
     void* tab = PickShopCharInvTab(dlg, want);
     if (!LooksLikeHeapPtr(tab)) return false;
     const int cur = ReadI32(tab, kOffUiTabCurrentIndex);
-    if (cur == want) return true;
+    if (cur == want) {
+        if (!refreshIfCurrent) return true;
+        if (!CallShopRefreshSell(dlg)) return false;
+        x::runtime::LogI("Shop", "sell tab refresh inv=%d tab=%d (already current, RefreshSell)",
+                         invType, want);
+        return true;
+    }
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
-    // UITab.OnClickTab(int) — void(int) 不唯一 → 哈希；读 klass from object[0]。
+    // 09-10 商店 TAB 切页：hash ad139b0f / RVA 0xB63340（cmp [this+54h]）。
+    // 通用 UITab.OnClickTab 不在此 klass 上；AtRva 也必须走商店 RVA，勿再 0xB5A5C0。
     void* tabKlass = nullptr;
     __try {
         tabKlass = *reinterpret_cast<void**>(tab);
@@ -2133,19 +2189,23 @@ bool EnsureShopSellInvTab(void* dlg, int invType, bool* outSwitched) {
     }
     constexpr MethodShape kTab{1, TypeKind::Void, true, true, {TypeKind::I32}};
     MethodInfoHead* miTab =
-        ResolveMi(tabKlass, kRvaUiTabOnClickTab, kTab, "OnClickTab", kHashUiTabOnClick);
+        ResolveMi(tabKlass, kRvaShopUiTabSelect, kTab, nullptr, kHashShopUiTabSelect);
+    if (!miTab)
+        miTab = ResolveMi(tabKlass, kRvaUiTabOnClickTab, kTab, "OnClickTab", kHashUiTabOnClick);
     auto onClick = miTab && miTab->methodPointer
                        ? reinterpret_cast<FnUiTabOnClickTab>(miTab->methodPointer)
-                       : AtRva<FnUiTabOnClickTab>(kRvaUiTabOnClickTab);
+                       : AtRva<FnUiTabOnClickTab>(kRvaShopUiTabSelect);
     if (!onClick) return false;
     __try {
         onClick(tab, want, miTab);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+    // 09-10 IDA：Select 只改 [tab+54h]；SendSell/CmpSell 读 dlg+210h，填表在 f9f99cae。
+    if (!CallShopRefreshSell(dlg)) return false;
     if (outSwitched) *outSwitched = true;
-    x::runtime::LogI("Shop", "sell tab switch inv=%d tab %d→%d (UITab.OnClickTab)", invType, cur,
-                     want);
+    x::runtime::LogI("Shop", "sell tab switch inv=%d tab %d→%d (ShopUiTab.Select+RefreshSell)",
+                     invType, cur, want);
     return true;
 }
 
@@ -2219,9 +2279,12 @@ void SellJobOnMain(void* user) {
         }
         WriteI32(gShopDlg, kOffSellSelectedIndex, sellIdx);
         WriteI32(gShopDlg, kOffLastSellIndex, sellIdx);
+        // 09-10 IDA SendSell（0x56A440）：List.get_Item([this+210h], [this+230h])。
+        // +230h 是 dump 的 lastBuy；Select+RefreshSell / e586ef3a 会写成 -1 → get_Item 抛 → BIN EXCEPTION。
+        WriteI32(gShopDlg, kOffLastBuyIndex, sellIdx);
         int qty = job->count > 0 ? job->count : 1;
         // 装备栏 BundleNumber 常非堆叠数；BIN 曾 qty=7 卖弓后 135ms→Disconnected/205
-        if (job->invType == 1 /* Equip */) qty = 1;
+        if (job->invType == kShopUiEquip) qty = 1;
         sendPkt(gShopDlg, qty, gMiSendSellPacket);
         job->ok = true;
         snprintf(job->err, sizeof(job->err), "FIRED via=ui");
@@ -2333,8 +2396,8 @@ void ChargeJobOnMain(void* user) {
         // 连续空投影：先弹 Etc（仅刷新用，本拍不扫飞镖），下拍再回 Consume。
         const bool bounceEtc =
             gChargeEmptyStreak > 0 && (gChargeEmptyStreak % 4) == 2;
-        const int wantInv = bounceEtc ? kInvTiEtc : kInvTiConsume;
-        (void)EnsureShopSellInvTab(gShopDlg, wantInv, &tabSwitched);
+        const int wantInv = bounceEtc ? kShopUiEtc : kShopUiConsume;
+        (void)EnsureShopSellInvTab(gShopDlg, wantInv, &tabSwitched, /*refreshIfCurrent=*/true);
         if (cmpSell) {
             __try {
                 cmpSell(gShopDlg, gMiCmpSellItem);
@@ -2481,6 +2544,7 @@ void ChargeJobOnMain(void* user) {
         }
         WriteI32(gShopDlg, kOffSellSelectedIndex, bestIdx);
         WriteI32(gShopDlg, kOffLastSellIndex, bestIdx);
+        WriteI32(gShopDlg, kOffLastBuyIndex, bestIdx);
         sendPkt(gShopDlg, gMiSendRechargePacket);
         NoteChargeFired(bestPos, bestQty, meso);
         job->charged = 1;
@@ -2673,7 +2737,8 @@ void PresentJobOnMain(void* user) {
         if (!LooksLikeHeapPtr(slot)) continue;
         if (ReadI32(slot, x::ui::player::OffSlotItemId()) != job->itemId) continue;
         found = true;
-        total += ItemQty(slot);
+        // 装备 BundleNumber 是强化槽等，不是件数（BIN qty=7 绿龙服）。
+        total += (job->invType == item_type::Equip) ? 1 : ItemQty(slot);
     }
     job->present = found && total > 0;
     job->count = total;
@@ -2703,7 +2768,7 @@ void UsageJobOnMain(void* user) {
     job->ok = false;
     job->used = 0;
     job->cap = 0;
-    const int invType = job->equip ? kInvTiEquip : kInvTiEtc;
+    const int invType = job->equip ? item_type::Equip : item_type::Etc;
     void* list = GetBagList(invType);
     if (!list) return;
     const int n = ListSize(list);
@@ -2825,9 +2890,48 @@ bool ScanBag(bool equipBag, BagItem* items, int maxItems, int& outCount) {
     return job.ok;
 }
 
+int ShopItemSellQty(void* it, int invType) {
+    if (!LooksLikeHeapPtr(it)) return 1;
+    // 装备栏 BundleNumber 常为强化槽（客服日志 qty=7）；发包已强制 1，建队/确认也必须是 1。
+    if (invType == kShopUiEquip || invType == item_type::Equip) return 1;
+    const int id = ReadI32(it, kOffShopItemId);
+    const int pos = ReadI32(it, kOffShopItemPos);
+    auto plausible = [](int n) { return n > 0 && n <= 3000; };
+
+    void* dtoSlot = ReadPtr(it, kOffShopItemSlot);
+    const int dtoN = BundleNumberRaw(dtoSlot);
+    if (plausible(dtoN)) return dtoN;
+
+    // 卖栏 Stock/Qty 常为 0 或货架残留，禁止当堆叠数（否则 200 个只卖掉 1 个）。
+    void* list = GetBagList(ShopUiToBagType(invType));
+    if (list && id > 0) {
+        const int n = ListSize(list);
+        if (n > 0 && n <= 512) {
+            const bool oneBased = (n > 1 && ListAt(list, 0) == nullptr && ListAt(list, 1) != nullptr);
+            int idFallback = 0;
+            for (int i = 0; i < n; ++i) {
+                void* slot = ListAt(list, i);
+                if (!LooksLikeHeapPtr(slot)) continue;
+                if (ReadI32(slot, x::ui::player::OffSlotItemId()) != id) continue;
+                const int slotPos = oneBased ? i : (i + 1);
+                const int q = BundleNumberRaw(slot);
+                if (!plausible(q)) continue;
+                if (pos > 0 && slotPos == pos) return q;
+                if (idFallback <= 0) idFallback = q;
+            }
+            if (idFallback > 0) return idFallback;
+        }
+    }
+
+    const int qty = ReadI32(it, kOffShopItemQty);
+    if (plausible(qty)) return qty;
+    return 1;
+}
+
 struct SellSnapJob {
     int invType = 0;
     int* outIds = nullptr;
+    BagItem* outRows = nullptr;
     int maxOut = 0;
     int count = 0;
     int listN = 0;
@@ -2850,7 +2954,7 @@ void SellSnapJobOnMain(void* user) {
         if (!ready.ready || !LooksLikeHeapPtr(gShopDlg)) return;
 
         bool tabSwitched = false;
-        (void)EnsureShopSellInvTab(gShopDlg, job->invType, &tabSwitched);
+        (void)EnsureShopSellInvTab(gShopDlg, job->invType, &tabSwitched, /*refreshIfCurrent=*/true);
         job->tabSwitched = tabSwitched;
         auto* cmpSell = reinterpret_cast<FnCmpSellItem>(
             gMiCmpSellItem && gMiCmpSellItem->methodPointer ? gMiCmpSellItem->methodPointer
@@ -2874,7 +2978,19 @@ void SellSnapJobOnMain(void* user) {
             if (!LooksLikeHeapPtr(it)) continue;
             const int id = ReadI32(it, kOffShopItemId);
             if (id <= 0) continue;
-            if (job->outIds && job->count < job->maxOut) job->outIds[job->count] = id;
+            if (job->count < job->maxOut) {
+                if (job->outIds) job->outIds[job->count] = id;
+                if (job->outRows) {
+                    BagItem& row = job->outRows[job->count];
+                    row = {};
+                    row.itemId = id;
+                    row.pos = ReadI32(it, kOffShopItemPos);
+                    row.count = ShopItemSellQty(it, job->invType);
+                    row.invType = job->invType;
+                    row.sellable = true;
+                    FillName(id, row.name, sizeof(row.name));
+                }
+            }
             ++job->count;
         }
         job->ok = true;
@@ -2898,6 +3014,23 @@ bool SnapshotShopSellList(int invType, int* outItemIds, int maxOut, int& outCoun
     job.maxOut = maxOut > 0 ? maxOut : 0;
     if (!x::runtime::managed_main::Call(&SellSnapJobOnMain, &job, kJobWaitMs)) return false;
     outCount = job.count;
+    outListN = job.listN;
+    if (outTabSwitched) *outTabSwitched = job.tabSwitched;
+    return job.ok;
+}
+
+bool SnapshotShopSellRows(int invType, BagItem* items, int maxItems, int& outCount, int& outListN,
+                          bool* outTabSwitched) {
+    outCount = 0;
+    outListN = 0;
+    if (outTabSwitched) *outTabSwitched = false;
+    if (!items || maxItems <= 0) return false;
+    SellSnapJob job{};
+    job.invType = invType;
+    job.outRows = items;
+    job.maxOut = maxItems;
+    if (!x::runtime::managed_main::Call(&SellSnapJobOnMain, &job, kJobWaitMs)) return false;
+    outCount = job.count > maxItems ? maxItems : job.count;
     outListN = job.listN;
     if (outTabSwitched) *outTabSwitched = job.tabSwitched;
     return job.ok;
@@ -3007,6 +3140,23 @@ bool LogBuyShelfSnapshot(int focusItemId) {
     return job.ok;
 }
 
+int ShopUiToBagType(int shopUi) {
+    switch (shopUi) {
+        case kShopUiEquip:
+            return item_type::Equip;
+        case kShopUiConsume:
+            return item_type::Consume;
+        case 3:
+            return item_type::Install;
+        case kShopUiEtc:
+            return item_type::Etc;
+        case 5:
+            return item_type::Cash;
+        default:
+            return shopUi;
+    }
+}
+
 bool QueryItemPresent(int invType, int itemId, bool& outPresent, int& outCount) {
     outPresent = false;
     outCount = 0;
@@ -3017,6 +3167,10 @@ bool QueryItemPresent(int invType, int itemId, bool& outPresent, int& outCount) 
     outPresent = job.present;
     outCount = job.count;
     return job.ok;
+}
+
+bool QueryItemPresentShopUi(int shopUi, int itemId, bool& outPresent, int& outCount) {
+    return QueryItemPresent(ShopUiToBagType(shopUi), itemId, outPresent, outCount);
 }
 
 bool QueryBagUsage(bool equipBag, int& outUsed, int& outCap) {
@@ -3042,7 +3196,6 @@ struct GrocerySeed {
     char npcId[24]{};
     char mapId[16]{};
     uint32_t tags = 0;  // 1=sell 2=potion 4=feed
-    bool petFeedMerchant = false;  // 寵物飼料/寵物商人：货架不能卖普通装备
 };
 
 constexpr uint32_t kTagSell = 1u;
@@ -3092,8 +3245,6 @@ void EnsureGrocerySeeds() {
         strncpy_s(s.npcId, npc, _TRUNCATE);
         strncpy_s(s.mapId, map, _TRUNCATE);
         s.tags = ParseTags(tags);
-        s.petFeedMerchant = line.find("寵物飼料商人") != std::string::npos ||
-                            line.find("寵物商人") != std::string::npos;
         gSeeds.push_back(s);
     }
     x::runtime::LogI("Shop", "grocery seed loaded n=%zu path=%s", gSeeds.size(), path.c_str());
@@ -3144,7 +3295,8 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
         auto hasScroll = [&](int itemId) {
             present = false;
             qty = 0;
-            return QueryItemPresent(/*consume*/ 2, itemId, present, qty) && present && qty > 0;
+            return QueryItemPresent(x::ui::player::item_type::Consume, itemId, present, qty) &&
+                   present && qty > 0;
         };
         if (hasScroll(2030000) || hasScroll(2030059)) {
             if (features::travel::PredictReturnScrollTownOutdoor(cur.c_str(), scrollTown,
@@ -3163,8 +3315,6 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
 
     for (const auto& s : gSeeds) {
         if (excludeMap && excludeMap[0] && MapEqualsLoose(s.mapId, excludeMap)) continue;
-        // 科爾等寵物飼料店：BIN 2026-08-20 hops=7 压过露娜雜貨，落地 listN=0 全不可卖。
-        if (s.petFeedMerchant) continue;
         int direct = -1;
         int via = -1;
         if (!cur.empty() && cur != "?") {
@@ -3185,11 +3335,10 @@ bool PickNearestShop(const char* excludeMap, std::string& outNpcId, std::string&
         } else {
             hops = 9999;  // unreachable → last resort
         }
-        // hops 优先；户外主城加罚（BIN 4bb7ea）；同 hops 偏好雜貨/药（potion）压过武器店
+        // hops 优先；户外主城加罚（BIN 4bb7ea）。任何店都能卖任何栏，不按职称/饲料店跳过。
         const int mapIdNum = atoi(s.mapId);
         const int outdoorPen = LooksLikeTownOutdoorMap(mapIdNum) ? 15000 : 0;
-        const int score = hops * 10000 + outdoorPen + ((s.tags & kTagPotion) ? 0 : 1000) +
-                          ((s.tags & kTagSell) ? 0 : 10);
+        const int score = hops * 10000 + outdoorPen;
         if (score < bestScore) {
             bestScore = score;
             best = &s;

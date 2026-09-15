@@ -11,10 +11,10 @@
 
 #include <atomic>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace x::features::sellbag {
@@ -279,66 +279,77 @@ bool BuildQueueForCurrentBag() {
     const uint32_t bagBit = g_curEquipBag ? xcat::kSellbagBagEquip : xcat::kSellbagBagEtc;
     if (g_keepIdsDirty) RebuildKeepIds();
 
+    // 卖栏投影 = 开店后客户端从背包筛出的可卖格（任何店、任何栏同一套 UI）。
+    // 投影成功（含 listN=0）即以投影建队，禁止再 ScanBag：空装备页扫包会把消耗品打成
+    // shopSkip，AutoSupply 误判「未开对店」。只有投影失败才回退扫包。
+    const int invType = g_curEquipBag ? shop::kShopUiEquip : shop::kShopUiEtc;
+    shop::BagItem snap[kScanMax]{};
+    int snapCount = 0;
+    int listN = 0;
+    bool sellSnapOk = false;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        snapCount = 0;
+        listN = 0;
+        bool tabSwitched = false;
+        if (!shop::SnapshotShopSellRows(invType, snap, kScanMax, snapCount, listN, &tabSwitched)) {
+            runtime::LogW("Sellbag", "卖栏投影失败，回退扫包建队");
+            break;
+        }
+        if (tabSwitched && listN <= 0 && attempt + 1 < 4) {
+            Sleep(60);
+            continue;
+        }
+        sellSnapOk = true;
+        char idbuf[160]{};
+        size_t used = 0;
+        int nshow = 0;
+        for (int i = 0; i < snapCount && nshow < 8; ++i) {
+            if (snap[i].itemId <= 0) continue;
+            used += static_cast<size_t>(snprintf(idbuf + used, sizeof(idbuf) - used, "%s%d",
+                                                 nshow ? "," : "", snap[i].itemId));
+            if (used >= sizeof(idbuf) - 1) break;
+            ++nshow;
+        }
+        runtime::LogI("Sellbag", "卖栏投影 %s: listN=%d rows=%d attempt=%d ids=%s",
+                      g_curEquipBag ? "装备" : "其他", listN, snapCount, attempt + 1,
+                      idbuf[0] ? idbuf : "-");
+        if (g_curEquipBag) g_status.lastEquipListN = listN;
+        break;
+    }
+
+    auto enqueue = [&](const shop::BagItem& it) {
+        if (it.itemId <= 0) return;
+        if (g_skip.count(it.itemId)) return;
+        if (ShouldKeep(it, bagBit)) return;
+        QueueItem q{};
+        q.pos = it.pos;
+        q.itemId = it.itemId;
+        q.count = it.count > 0 ? it.count : 1;
+        q.invType = it.invType > 0 ? it.invType : invType;
+        strncpy_s(q.name, it.name, _TRUNCATE);
+        g_queue.push_back(q);
+    };
+
+    if (sellSnapOk) {
+        g_queue.reserve(static_cast<size_t>(snapCount));
+        for (int i = 0; i < snapCount; ++i) enqueue(snap[i]);
+        runtime::LogI("Sellbag", "队列生成 %s: candidates=%zu fromSellList=%d",
+                      g_curEquipBag ? "装备" : "其他", g_queue.size(), snapCount);
+        return true;
+    }
+
     shop::BagItem items[kScanMax]{};
     int n = 0;
     if (!shop::ScanBag(g_curEquipBag, items, kScanMax, n)) return false;
 
-    // 店卖栏投影 = 客户端认可的可卖格；任务道具有卖价也不进表 → 建队时跳过。
-    // 刚切 TAB 时投影可能短暂为空，短等再拍，避免把可卖物全跳过。
-    std::unordered_set<int> onSellList;
-    bool sellSnapOk = false;
-    {
-        const int invType = g_curEquipBag ? 1 : 4;
-        for (int attempt = 0; attempt < 4; ++attempt) {
-            int snapIds[kScanMax]{};
-            int snapCount = 0;
-            int listN = 0;
-            bool tabSwitched = false;
-            if (!shop::SnapshotShopSellList(invType, snapIds, kScanMax, snapCount, listN,
-                                           &tabSwitched)) {
-                runtime::LogW("Sellbag", "卖栏投影失败，回退仅按离线卖价建队");
-                break;
-            }
-            if (tabSwitched && listN <= 0 && attempt + 1 < 4) {
-                Sleep(60);
-                continue;
-            }
-            sellSnapOk = true;
-            for (int i = 0; i < snapCount && i < kScanMax; ++i) {
-                if (snapIds[i] > 0) onSellList.insert(snapIds[i]);
-            }
-            runtime::LogI("Sellbag", "卖栏投影 %s: listN=%d uniqueIds=%zu attempt=%d",
-                          g_curEquipBag ? "装备" : "其他", listN, onSellList.size(), attempt + 1);
-            break;
-        }
-    }
-
-    int skippedQuest = 0;
     g_queue.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
         const auto& it = items[i];
         if (!it.sellable || it.pos <= 0 || it.itemId <= 0) continue;
-        if (g_skip.count(it.itemId)) continue;
-        if (ShouldKeep(it, bagBit)) continue;
-        if (sellSnapOk && onSellList.find(it.itemId) == onSellList.end()) {
-            ++skippedQuest;
-            ++g_status.shopSkip;
-            const char* offline = OfflineName(it.itemId);
-            runtime::LogI("Sellbag", "跳过(任务/店不可卖) id=%d name=%s", it.itemId,
-                          it.name[0] ? it.name : offline);
-            continue;
-        }
-
-        QueueItem q{};
-        q.pos = it.pos;
-        q.itemId = it.itemId;
-        q.count = it.count;
-        q.invType = it.invType;
-        strncpy_s(q.name, it.name, _TRUNCATE);
-        g_queue.push_back(q);
+        enqueue(it);
     }
-    runtime::LogI("Sellbag", "队列生成 %s: candidates=%zu scanned=%d skipQuest=%d",
-                  g_curEquipBag ? "装备" : "其他", g_queue.size(), n, skippedQuest);
+    runtime::LogI("Sellbag", "队列生成 %s: candidates=%zu scanned=%d (snap fail fallback)",
+                  g_curEquipBag ? "装备" : "其他", g_queue.size(), n);
     return true;
 }
 
@@ -356,6 +367,7 @@ void ResetRoundState() {
     g_status.failed = 0;
     g_status.mesoGained = 0;
     g_status.mesoGainedValid = 0;
+    g_status.lastEquipListN = -1;
 }
 
 void EndFlow(const char* msg, bool error) {
@@ -428,7 +440,7 @@ bool ConfirmPending(DWORD now) {
     bool present = true;
     int count = 0;
     const bool queried =
-        shop::QueryItemPresent(g_pending.invType, g_pending.itemId, present, count);
+        shop::QueryItemPresentShopUi(g_pending.invType, g_pending.itemId, present, count);
     const bool gone = queried && !present;
     const bool reduced = queried && present && count < g_pending.countBefore;
     if (gone || reduced) {
@@ -552,6 +564,11 @@ void TickSelling(DWORD now) {
     const QueueItem& q = g_queue[g_queueIndex];
     std::string err;
     const int64_t mesoBefore = shop::QueryMeso();
+    bool present = false;
+    int presentCount = 0;
+    const bool counted =
+        shop::QueryItemPresentShopUi(q.invType, q.itemId, present, presentCount) &&
+        presentCount > 0;
     if (!shop::SellItem(q.invType, q.pos, q.itemId, q.count, err)) {
         // SHOP_BUSY：店内请求未清，不跳过、不消耗队列下标，下步再试
         if (err.find("SHOP_BUSY") != std::string::npos) {
@@ -588,10 +605,12 @@ void TickSelling(DWORD now) {
     g_listStaleRetries = 0;
     g_pending.active = true;
     g_pending.itemId = q.itemId;
-    g_pending.countBefore = q.count;
     g_pending.invType = q.invType;
     g_pending.mesoBefore = mesoBefore;
     g_pending.firedAt = now;
+    g_pending.countBefore =
+        counted ? presentCount
+                : ((q.invType == shop::kShopUiEquip) ? 1 : (q.count > 0 ? q.count : 1));
     runtime::LogI("Sellbag", "已发包 id=%d pos=%d qty=%d ti=%d name=%s", q.itemId, q.pos, q.count,
                   q.invType, q.name);
 }

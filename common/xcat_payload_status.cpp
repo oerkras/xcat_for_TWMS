@@ -12,7 +12,7 @@ namespace xcat {
 namespace {
 
 constexpr uint32_t kPayloadStatusShmMagic = 0x58435053u;  // 'XCPS'
-constexpr uint32_t kPayloadStatusShmVersion = 21u;
+constexpr uint32_t kPayloadStatusShmVersion = 22u;
 
 struct PayloadStatusShared {
     uint32_t magic = kPayloadStatusShmMagic;

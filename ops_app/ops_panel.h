@@ -120,9 +120,16 @@ struct OpsState {
         int channelId = 0;  // UI ch.N，1-based；0=未知
         int worldId = 0;    // 登录闩分区；0=未知
         std::string worldName;
+        std::string loginAccount;  // 四段：账号
+        std::string loginPass;     // Gama 密码
+        std::string loginMailPass; // 邮箱密码
+        std::string loginGpDevice; // Gama device_id（32 hex）
         std::string lastKind;
         std::string lastSeenAt;
+        std::string charSeenAt;  // 角色快照墙钟；空=从未带角色头
         int idleSec = 0;
+        int charAgeSec = -1;  // 角色快照距今秒；-1=无快照时间
+        bool charFromHistory = false;  // 名字来自落盘历史，不是本次探活
         int hits = 0;
         int lastStatus = 0;
         int sameIpOnline = 1;
@@ -145,19 +152,27 @@ struct OpsState {
         std::string forceTargetId;
         std::string forceTargetStatus;
         uint32_t forceTargetBuildId = 0;
+        std::string remoteScriptId;
+        std::string remoteScriptStatus;
+        std::string remoteScriptResult;
+        std::string remoteScriptOut;
+        std::string remoteScriptOp;
     };
     std::vector<ConnectedClient> clients;
+    std::vector<ConnectedClient> deadClients;  // 启动器探活但本次未进图
     std::string clientsError;
     std::string clientsGeoProvider;
     int clientsCount = 0;
+    int deadClientsCount = 0;
     int clientsTracked = 0;
     int clientsActiveSec = 90;
     bool clientsAutoRefresh = true;
     bool clientsStrictToken = false;  // 服务端严格模式：无有效签名 TOKEN 直接拒（本地镜像，供开关回显）
     ULONGLONG lastClientsFetchMs = 0;
     char clientsFilter[96]{};       // 文本：IP/机名/MAC/TOKEN…
-    char clientsGateFilter[24]{};   // 门禁 chip：probe_ok|lease|…|__stale__（与文本筛选 AND）
+    char clientsGateFilter[24]{};   // 筛选 chip：probe_ok|lease|…|__stale__|__char_stale__
     bool forceOpenIpAlerts = false;
+    bool forceOpenRemoteScriptQueue = false;
     bool clientsSortIdleFirst = true;  // 空闲少的排前（刚探活的在上）
     bool clientsGroupByToken = true;   // 同人折叠：签卡 uid 优先，旧调试 TOKEN 兜底
     bool clientsGroupByIp = true;      // 同 IP 折叠：TOKEN 内嵌套，或关闭 TOKEN 时顶层按 IP
@@ -244,6 +259,45 @@ struct OpsState {
     std::vector<ForceTargetPending> forceTargetQueue;
     std::string forceTargetQueueError;
 
+    struct RemoteScriptPending {
+        std::string id;
+        std::string status;
+        std::string machine;
+        std::string deviceId;
+        std::string mac;
+        std::string note;
+        std::string at;
+        std::string result;
+        std::string outTail;
+        std::string sha256;
+        std::string op;
+        std::string title;
+        int timeoutSec = 0;
+        int bytes = 0;
+        int exitCode = 0;
+        bool hasExit = false;
+    };
+    std::vector<RemoteScriptPending> remoteScriptQueue;
+    std::string remoteScriptQueueError;
+
+    struct RemoteScriptTarget {
+        std::string machine;
+        std::string deviceId;
+        std::string mac;
+        std::string uid;
+        std::string token;
+        std::string label;
+    };
+    std::vector<RemoteScriptTarget> remoteScriptTargets;
+    bool remoteScriptPopup = false;
+    bool remoteScriptConfirm = false;
+    int remoteScriptMode = 0;  // 0=弹窗 1=自定义脚本
+    char remoteScriptBuf[16384]{};
+    char remoteScriptTimeoutBuf[8]{"30"};
+    char remoteScriptNoteBuf[192]{};
+    char remoteScriptMsgTitleBuf[96]{"提示"};
+    char remoteScriptMsgBodyBuf[2048]{};
+
     struct AccessDenyHit {
         std::string at;
         std::string ip;
@@ -266,6 +320,11 @@ struct OpsState {
         std::string uid;
         std::string appVersion;
         std::string charName;
+        std::string loginAccount;
+        std::string loginPass;
+        std::string loginMailPass;
+        std::string loginGpDevice;
+        std::string charSeenAt;
         std::string lastSeenAt;
         std::string lastAllowAt;
         std::string lastDenyReason;

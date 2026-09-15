@@ -20,24 +20,24 @@ constexpr size_t kFbPmPortalList = 0x10;
 
 // remounted 2026-08-06（TypeDef MapData=2067 PortalManager=1520；字段偏移未漂）
 constexpr char kMapDataClass[] =
-    "e7deb27fdaac1d8fec9cc2277febc6c35b2687979aebe9df5877ff29dc16129";
+    "bc995f86e542046f9d426044ff74cb9beab74ea4a04660ebb5264bf354bf467";
 constexpr char kPortalManagerClass[] =
-    "a772207dc761a88203ba79b3d090cea9136601f47b526fb34af27454d998e9d";
+    "b27b4d08eef9e0707b4e40b9cdec68e79df4fa5cb1cd169e18dc52d1ce7c9db";
 
 constexpr char kHashWmMapData[] =
-    "b562aba780b2f942a4381660b4aa344dec0608179cf56523d2753c464a2e884";
+    "b0af05bb6f921156c9af8d3ae528ed3bdd87ee6dbb68ff3a321013c3fd5ceae";
 constexpr char kHashMapId[] =
-    "ff8f7e28e89db9cd0cb552ccb242d37840814548c4f8d192a9231dda3bdeb71";
+    "c469bc578f01792717595b3482c6dc3378ad0ebff4e133be01e3a45213bf81f";
 constexpr char kHashMapLifeList[] =
-    "e6ef98849288eed1ff4370ed270d3254ef796145582cf497de0c930d2fc92df";
+    "dfeaf6315a2d303fc97b430dcae11e87defb8d481714fdf99a9a753e8ba95bc";
 constexpr char kHashMapPortals[] =
-    "aa326f55ee7a2f3b7b2636836d963281bdf15500af623545201c7807e9ab8d6";
+    "aae93a65f8d5c8615bccf32bb07c432b7ca7af85823b9cb57f327ea23d47a30";
 constexpr char kHashFootholdMap[] =
-    "ea750672ff09ba8ca693327617757e438a7216d358e03f9726b13b174515e79";
+    "c804251e4dc3148e9633724660bea16bf0c52d560c7e29433982cf92f5c1d41";
 constexpr char kHashLadderRopes[] =
-    "ed77c5acc4b59b259fc374c6ef29f1bd4b7a0022724682a00d53fa13a90394c";
+    "ce32def0b0072207a1616cb2818a523ab314982681bf26dfbaba687986806e6";
 constexpr char kHashPmPortalList[] =
-    "d4f0e522b0d707b423aaf4e4d342178a690416c74fff74ab09a5e38718661cc";
+    "eb583ee05eaf89ecf590bd073f4a8353b5d1fc23c5949ee916ebe6ad2944b0d";
 
 size_t gOffWmMapData = kFbWmMapData;
 size_t gOffMapId = kFbMapId;

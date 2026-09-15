@@ -4,10 +4,10 @@
 //
 // | RVA | 符号 | 托管参数 | 原生参数 |
 // |---|---|---|---|
-// | `0x1060DB0` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
-// | `0x1075d20` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
+// | `0x10EDC20` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
+// | `0x1103280` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
 //
-// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x1060DB0 上，
+// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x10EDC20 上，
 //   于是 `methodInfo` 被塞进第 7 参的位置、真 methodInfo 丢失，把射击路径整体打歪
 //   （体感「基本必挥弓」）。改这里之前先用 `Dumps/runtime/out/dump.cs` 按 RVA 复核形状。
 //
@@ -70,9 +70,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaTryDoingMeleeAttack = 0x1060DB0;
-constexpr uint32_t kRvaTryDoingShootAttack = 0x1075d20;
-constexpr uint32_t kRvaGetWeaponType = 0x1432080;
+constexpr uint32_t kRvaTryDoingMeleeAttack = 0x10EDC20;
+constexpr uint32_t kRvaTryDoingShootAttack = 0x1103280;
+constexpr uint32_t kRvaGetWeaponType = 0x14C92F0;
 
 // ── 取框探针（一次性调研，`XCAT_MELEE_RECT_PROBE=1` 才挂）──────────────────────
 //
@@ -86,8 +86,8 @@ constexpr uint32_t kRvaGetWeaponType = 0x1432080;
 // （按仓规逐处实读；这里按 0 读会把分支判反。它不是武器类型——枚举最大是 Gun=49。）
 //
 // 探针要回答的就一件事：飞镖普攻那一发走的是哪条、arg4 实际是几、框实际多大。
-constexpr uint32_t kRvaGetAttackRect = 0x1240030;  // sub_7FF849EA8290
-constexpr uint32_t kRvaConstRect = 0x5660030;      // remounted 2026-09-03 GetAttackRect RIP → (-88,-6,70,56)
+constexpr uint32_t kRvaGetAttackRect = 0x1298080;  // sub_7FF849EA8290
+constexpr uint32_t kRvaConstRect = 0x571FBB0;      // remounted 2026-09-10pm GetAttackRect RIP → (-88,-6,70,56)
 constexpr int kRectKindConstPath = 55;
 
 // 近战 / 射击开头一致：push rbp / r15 / r14 / r13 / r12 / rsi / rdi / rbx = 12 字节。
@@ -103,7 +103,7 @@ constexpr size_t kSteal = 12;
 // §0″ 那种「拦了把伤害源一起掐掉」的事故在结构上就不可能重演。
 constexpr int kWtThrowingGlove = 47;
 constexpr int kBodyPartWeapon = 11;
-constexpr int kInvTiEquip = 1;
+constexpr int kInvTiEquip = x::ui::player::item_type::Equip;
 constexpr size_t kFbCdEquipped = 0x28;
 constexpr size_t kFbCdEquipped2 = 0x30;
 // 缓存窗口直接决定「换武器后还有多久可能拿旧武器判拦截」。飞镖换弓那一瞬如果还按 47 拦，
@@ -607,14 +607,16 @@ bool TryArmOne(AbsHookState& st, std::atomic<bool>& refuse, uint32_t rva, void* 
 //
 // 以下哈希取自运行时 dump：
 //   ActionManager TDI 1657，父类 Singleton<ActionManager>
-//   Singleton<T>._instance static Lazy<T> @0x0（08-20 hash c47aca80…；08-14 为 c7bc0456…）
-//   MeleeAttackAfterImage TDI 1644；Range: Dictionary<int,Rect> @0x18
-//   _afterimageMap: Dictionary<string, AfterImage> @0x20（08-13 在 0x40，0x40 现为另一张 Dictionary）
+//   Singleton<T>._instance static Lazy<T> @0x0（09-10pm hash b462a770… · TDI 13795）
+//   MeleeAttackAfterImage TDI 1655；Range: Dictionary<int,Rect> @0x18
+//   _afterimageMap: Dictionary<string, AfterImage> @0x18（09-10；旧钉 0x20 已是 WZ 节点）
 constexpr char kHashActionManager[] =
-    "b6556cb63d6e47860340c30f5009d1a0db6dd6382fd771512a14e7792432946";
+    "e7fa713cddeb17a0a199ba3d6495dbcb2aa0caa0cd2926154a72fffa65e181d";
 constexpr char kHashSingletonInstance[] =
-    "a4acbfea5717698475dab6427b71c33bd8fbab4d9fbdb4b7c5f58cdbec21b47";
-constexpr size_t kOffActionMgrAfterImageMap = 0x20;
+    "b462a770d3e4e79c3308e21945cbb26fb30d3d4c9950770d02afa701db9bb64";
+constexpr char kHashAfterImageMap[] =
+    "d3949f8040941d8b2bbc3b55fdf9b13a41dc37bb2784bbc9837bf1a0c1225bc";
+constexpr size_t kOffActionMgrAfterImageMap = 0x18;
 constexpr size_t kOffAfterImageRange = 0x18;
 
 // Dictionary<K,V> 固定布局：buckets@0x10 entries@0x18 count@0x20
@@ -740,7 +742,11 @@ void* ResolveAfterImageMap(char* why, size_t cap) {
     void* mgr = x::runtime::il2cpp::ReadPtr(lazy, api.fieldGetOffset(fValue));
     if (!LooksLikeHeapPtr(mgr)) return note("Lazy._value 为空（单例还没被取用）"), nullptr;
 
-    void* map = x::runtime::il2cpp::ReadPtr(mgr, kOffActionMgrAfterImageMap);
+    size_t offMap = kOffActionMgrAfterImageMap;
+    if (void* fMap = api.classGetFieldFromName(amKlass, kHashAfterImageMap)) {
+        offMap = api.fieldGetOffset(fMap);
+    }
+    void* map = x::runtime::il2cpp::ReadPtr(mgr, offMap);
     if (!LooksLikeHeapPtr(map)) return note("ActionManager._afterimageMap 为空"), nullptr;
     return map;
 }

@@ -1,10 +1,11 @@
 // Classic TWMS — Keyboard 设备状态注入（内部输入真源）。
 // RVA/布局取自运行期 dump（Dumps/runtime/out/dump.cs.restored · remount 2026-08-06）：
-//   InputSystem.QueueEvent(InputEventPtr)      @0x473B710
-//   Keyboard.get_current()                     @0x4796c00
-//   InputSystem.get_settings()                 @0x473bdc0
-//   InputSettings.set_backgroundBehavior(e)    @0x47BA190
-//   InputSystem.EnableDevice(InputDevice)      @0x473A400
+//   InputSystem.QueueEvent(InputEventPtr)      @0x47FAE40
+//   Keyboard.get_current()                     @0x4856330
+//   InputSystem.get_settings()                 @0x47fb4f0
+//   InputSettings.set_backgroundBehavior(e)    @0x48798C0
+//   InputSystem.set_runInBackground(bool)      @0x47FCDB0
+//   InputSystem.EnableDevice(InputDevice)      @0x4737B30
 //   StateEvent: baseEvent@0x00(20B) stateFormat@0x14 stateData@0x18
 //   KeyboardState: 'KEYS' · 16B 位图 · leftArrow=bit61 rightArrow=bit62
 #ifndef WIN32_LEAN_AND_MEAN
@@ -26,23 +27,24 @@ namespace {
 
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 
-constexpr uint32_t kRvaQueueEvent = 0x473B710;
-constexpr uint32_t kRvaKeyboardGetCurrent = 0x4796c00;
-constexpr uint32_t kRvaGetSettings = 0x473bdc0;
-constexpr uint32_t kRvaSetBackgroundBehavior = 0x47BA190;
-constexpr uint32_t kRvaEnableDevice = 0x473A400;
-// InputControl.get_currentStatePtr() → InputStateBuffers.GetFrontBufferForDevice(deviceIndex)@0x480F710
+constexpr uint32_t kRvaQueueEvent = 0x47FAE40;
+constexpr uint32_t kRvaKeyboardGetCurrent = 0x4856330;
+constexpr uint32_t kRvaGetSettings = 0x47fb4f0;
+constexpr uint32_t kRvaSetBackgroundBehavior = 0x48798C0;
+constexpr uint32_t kRvaSetRunInBackground = 0x47FCDB0;
+constexpr uint32_t kRvaEnableDevice = 0x47F9B30;
+// InputControl.get_currentStatePtr() → InputStateBuffers.GetFrontBufferForDevice(deviceIndex)@0x48CEE40
 // 已在运行期 IDB（imagebase 0x7ff848c80000 → VA 0x7FF84D37D900）反汇编核实。
-constexpr uint32_t kRvaGetCurrentStatePtr = 0x473f3e0;
+constexpr uint32_t kRvaGetCurrentStatePtr = 0x47feb10;
 // Keyboard.IEventPreProcessor.PreProcessEvent(InputEventPtr) —— 每个键盘事件落到设备前的收口点。
 // VA 0x7FF84D3D7020 反编译已核实：判 type=='STAT'（1398030676）→ 判 *(u32*)(ev+0x14)=='KEYS'
 // → 拿 ev+0x18 当位图**原地改写**（Unity 自己把 bit111 挪到 bit127），恒返回 1。
 // 这既确认了它在必经之路上，也确认了 +0x14/+0x18 与本文件 KeyboardStateEvent 的布局一致。
-constexpr uint32_t kRvaKeyboardPreProcess = 0x4798b00;
+constexpr uint32_t kRvaKeyboardPreProcess = 0x4858230;
 // InputManager 的事件循环按设备标志位 DeviceFlags.HasEventPreProcessor(0x4000) 决定要不要调
 // pre-processor。这位是 0 时，钩子装得再对也永远不会被调到 —— 必须实读，必要时置上。
-constexpr uint32_t kRvaGetHasPreProc = 0x474ab10;
-constexpr uint32_t kRvaSetHasPreProc = 0x474ab20;
+constexpr uint32_t kRvaGetHasPreProc = 0x480A240;
+constexpr uint32_t kRvaSetHasPreProc = 0x480a250;
 
 // InputDevice 字段（dump.cs · InputDevice : InputControl）
 constexpr size_t kOffDeviceId = 0xE4;          // m_DeviceId
@@ -75,6 +77,7 @@ using FnQueueEvent = void(__fastcall*)(void* eventPtr, const void* mi);
 using FnGetCurrent = void*(__fastcall*)(const void* mi);
 using FnGetSettings = void*(__fastcall*)(const void* mi);
 using FnSetBgBehavior = void(__fastcall*)(void* self, int32_t value, const void* mi);
+using FnSetRunInBg = void(__fastcall*)(bool value, const void* mi);
 using FnEnableDevice = void(__fastcall*)(void* device, const void* mi);
 using FnGetStatePtr = void*(__fastcall*)(void* control, const void* mi);
 using FnPreProcess = char(__fastcall*)(void* self, void* eventPtr, const void* mi);
@@ -104,12 +107,14 @@ MethodInfoHead* gMiQueueEvent = nullptr;
 MethodInfoHead* gMiGetCurrent = nullptr;
 MethodInfoHead* gMiGetSettings = nullptr;
 MethodInfoHead* gMiSetBg = nullptr;
+MethodInfoHead* gMiSetRunInBg = nullptr;
 MethodInfoHead* gMiEnableDevice = nullptr;
 MethodInfoHead* gMiGetStatePtr = nullptr;
 
 uint8_t gMask[kKeyboardStateBytes]{};
 double gLastSentTime = 0.0;
 bool gBgApplied = false;
+DWORD gLastBgMs = 0;
 uint32_t gBgTries = 0;
 uint32_t gQueued = 0;
 uint32_t gForeign = 0;
@@ -117,6 +122,14 @@ uint32_t gDirect = 0;
 uint32_t gGuarded = 0;
 bool gDirectWrite = false;  // XCAT_KBD_DIRECT=1 才开；见 RepushOnMain 注释
 bool gInputTickOwned = false;  // 本模块已挂 InputFrameTick（掩码非空自管）
+// 跨帧补边沿（RefreshWalkEdgeOnMain）：本帧只松，隔 ≥2 帧由 RepushOnMain 按回。
+// 同帧「松→按」两条事件被游戏吃成一帧 ma=9→3→9（BIN 2026-09-09 13:59:37 fg=0），
+// 反向退一步（跨帧的真边沿）才走得动——所以补边沿也得跨帧。
+bool gEdgePending = false;
+bool gEdgeHadL = false;
+bool gEdgeHadR = false;
+DWORD gEdgeReleaseMs = 0;
+constexpr DWORD kEdgeRestoreGapMs = 32;
 
 std::atomic<FnPreProcess> gOrigPreProcess{nullptr};
 void** gGuardSlots[4]{};
@@ -196,6 +209,7 @@ bool Bind() {
     gMiGetSettings = MethodByName(gInputSystemKlass, "get_settings", 0);
     gMiEnableDevice = MethodByName(gInputSystemKlass, "EnableDevice", 1);
     if (gSettingsKlass) gMiSetBg = MethodByName(gSettingsKlass, "set_backgroundBehavior", 1);
+    gMiSetRunInBg = MethodByName(gInputSystemKlass, "set_runInBackground", 1);
     gControlKlass = x::runtime::il2cpp::FindClass("UnityEngine.InputSystem", "InputControl");
     if (gControlKlass) gMiGetStatePtr = MethodByName(gControlKlass, "get_currentStatePtr", 0);
 
@@ -203,10 +217,10 @@ bool Bind() {
     gBindOk = true;
     gFail = "ok";
     x::runtime::LogI("UnityKbd",
-                     "bind ok kb=%p is=%p mi(cur=%p q=%p set=%p bg=%p en=%p sp=%p) direct=%d",
+                     "bind ok kb=%p is=%p mi(cur=%p q=%p set=%p bg=%p runbg=%p en=%p sp=%p) direct=%d",
                      gKeyboardKlass, gInputSystemKlass, (void*)gMiGetCurrent, (void*)gMiQueueEvent,
-                     (void*)gMiGetSettings, (void*)gMiSetBg, (void*)gMiEnableDevice,
-                     (void*)gMiGetStatePtr, gDirectWrite ? 1 : 0);
+                     (void*)gMiGetSettings, (void*)gMiSetBg, (void*)gMiSetRunInBg,
+                     (void*)gMiEnableDevice, (void*)gMiGetStatePtr, gDirectWrite ? 1 : 0);
     return true;
 }
 
@@ -223,25 +237,41 @@ void* CurrentKeyboard() {
 }
 
 // 失焦不重置/不禁用键盘设备，否则后台注入会被整体丢弃。XCAT_KBD_BG=0 可关。
+// 失焦时 Unity 会再 Reset/Disable，只设一次不够（BIN 12:15 fg=0 push 掉到 5/s）。
 void EnsureBackgroundBehavior(void* device) {
-    if (gBgApplied) return;
     if (XCAT_ENV_OFF(kEnvKbdBg)) {
-        gBgApplied = true;
-        x::runtime::LogI("UnityKbd", "backgroundBehavior keep default (kbd_bg=0)");
+        if (!gBgApplied) {
+            gBgApplied = true;
+            x::runtime::LogI("UnityKbd", "backgroundBehavior keep default (kbd_bg=0)");
+        }
         return;
     }
+    const DWORD now = GetTickCount();
+    if (gBgApplied && gLastBgMs && now - gLastBgMs < 200) return;
+    gLastBgMs = now;
+
     auto getSettings = FnOf<FnGetSettings>(gMiGetSettings, kRvaGetSettings);
     auto setBg = FnOf<FnSetBgBehavior>(gMiSetBg, kRvaSetBackgroundBehavior);
-    bool ok = false;
+    auto setRun = FnOf<FnSetRunInBg>(gMiSetRunInBg, kRvaSetRunInBackground);
+    bool okBg = false;
+    bool okRun = false;
     if (getSettings && setBg) {
         __try {
             void* settings = getSettings(gMiGetSettings);
             if (LooksLikeHeapPtr(settings)) {
                 setBg(settings, kBackgroundIgnoreFocus, gMiSetBg);
-                ok = true;
+                okBg = true;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            ok = false;
+            okBg = false;
+        }
+    }
+    if (setRun) {
+        __try {
+            setRun(true, gMiSetRunInBg);
+            okRun = true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            okRun = false;
         }
     }
     auto enableDev = FnOf<FnEnableDevice>(gMiEnableDevice, kRvaEnableDevice);
@@ -251,10 +281,12 @@ void EnsureBackgroundBehavior(void* device) {
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
-    // 本函数每帧都会被 Repush 路过；失败也要封顶重试次数，否则日志会被刷爆。
-    if (ok || ++gBgTries >= 3) gBgApplied = true;
-    x::runtime::LogI("UnityKbd", "backgroundBehavior=IgnoreFocus %s (try=%u)", ok ? "ok" : "FAIL",
-                     gBgTries);
+    const bool ok = okBg || okRun;
+    if (!gBgApplied) {
+        if (ok || ++gBgTries >= 3) gBgApplied = true;
+        x::runtime::LogI("UnityKbd", "background IgnoreFocus=%d runInBackground=%d (try=%u)",
+                         okBg ? 1 : 0, okRun ? 1 : 0, gBgTries);
+    }
 }
 
 // PreProcessEvent 只有在设备的 DeviceFlags.HasEventPreProcessor(0x4000) 置位时才会被
@@ -283,6 +315,8 @@ void EnsurePreProcFlag(void* dev) {
 }
 
 bool WriteStateDirect(void* dev);
+bool MaskEmpty();
+bool MaskWantsEventGuard();
 
 bool PushState() {
     if (!Bind()) return false;
@@ -292,10 +326,18 @@ bool PushState() {
         return false;
     }
     EnsureBackgroundBehavior(dev);
-    EnsurePreProcFlag(dev);
     // 守位钩子必须拿到设备实例才能取到派发用的 klass，故装在这里而非 Bind()。
-    // 只在手里有键时才动手（见 GuardOwnedBits），空手期零开销。
-    (void)InstallEventGuard(dev);
+    // 拟人只持左右箭头时不改虚表、不置 HasEventPreProcessor；赶路 ↑ / 定时键仍走原钩。
+    if (MaskWantsEventGuard()) {
+        EnsurePreProcFlag(dev);
+        (void)InstallEventGuard(dev);
+    } else if (!MaskEmpty()) {
+        static bool sLoggedWalkSkip = false;
+        if (!sLoggedWalkSkip) {
+            sLoggedWalkSkip = true;
+            x::runtime::LogI("UnityKbd", "event guard skip (walk-only mask; no vtable)");
+        }
+    }
 
     auto queue = FnOf<FnQueueEvent>(gMiQueueEvent, kRvaQueueEvent);
     if (!queue) {
@@ -392,11 +434,29 @@ bool MaskEmpty() {
     return true;
 }
 
+// 只有左右箭头（拟人走路）时不装 PreProcess 虚表。↑/技能/喝药等其它位仍装，赶路 StickUp 不受影响。
+bool MaskWantsEventGuard() {
+    uint8_t walk[kKeyboardStateBytes]{};
+    auto mark = [&](int32_t bit) {
+        if (bit <= 0 || bit >= kMaxKeyBit) return;
+        const size_t byteIdx = static_cast<size_t>(bit) / 8u;
+        walk[byteIdx] = static_cast<uint8_t>(
+            walk[byteIdx] | static_cast<uint8_t>(1u << (static_cast<uint32_t>(bit) & 7u)));
+    };
+    mark(kKeyLeftArrow);
+    mark(kKeyRightArrow);
+    for (int i = 0; i < kKeyboardStateBytes; ++i) {
+        if (static_cast<uint8_t>(gMask[i] & static_cast<uint8_t>(~walk[i]))) return true;
+    }
+    return false;
+}
+
 void InputRepushFrameTick(void*) { (void)RepushOnMain(); }
 
 // 掩码非空 → 挂 InputFrameTick；变空 → 摘掉。走路不再独占该槽。
+// 跨帧补边沿松着的那两帧掩码可能为空，tick 必须保住，否则没人把键按回去。
 void SyncInputFrameTick() {
-    const bool want = !MaskEmpty();
+    const bool want = !MaskEmpty() || gEdgePending;
     if (want == gInputTickOwned) return;
     if (!x::runtime::main_thread::Ensure() && !x::runtime::main_thread::IsOnPumpThread()) {
         // 泵未就绪：下次 Push/Hold 再试；勿永久卡死。
@@ -644,6 +704,13 @@ uint32_t HeldMaskHash() {
 }
 
 bool SetWalkDirOnMain(int inputX) {
+    if (gEdgePending) {
+        // 补边沿还在「松」的那两帧里：同向的再灌（失焦 120ms 一次的 relatch）别急着按回去，
+        // 否则松→按又挤进同一帧，白补。换向 / 松手则新命令优先。
+        const bool sameDir = ((inputX < 0) == gEdgeHadL) && ((inputX > 0) == gEdgeHadR);
+        if (sameDir && GetTickCount() - gEdgeReleaseMs < kEdgeRestoreGapMs) return true;
+        gEdgePending = false;
+    }
     const bool wasEmpty = MaskEmpty();
     SetBit(kKeyLeftArrow, inputX < 0);
     SetBit(kKeyRightArrow, inputX > 0);
@@ -652,11 +719,41 @@ bool SetWalkDirOnMain(int inputX) {
     return PushState();
 }
 
+bool SetClimbJumpOnMain(int vertY, bool jumpDown, int prevVertY, bool prevJump) {
+    const bool wasEmpty = MaskEmpty();
+    bool changed = false;
+    auto apply = [&](int32_t key, bool on) {
+        const bool was = BitIsSet(key);
+        if (was == on) return;
+        SetBit(key, on);
+        if (!on) {
+            const size_t i = static_cast<size_t>(key) / 8u;
+            const uint8_t m = static_cast<uint8_t>(1u << (static_cast<uint32_t>(key) & 7u));
+            gPrevDirectMask[i] = static_cast<uint8_t>(gPrevDirectMask[i] & ~m);
+        }
+        changed = true;
+    };
+    if (vertY > 0 || prevVertY > 0) apply(kKeyUpArrow, vertY > 0);
+    if (vertY < 0 || prevVertY < 0) apply(kKeyDownArrow, vertY < 0);
+    if (jumpDown || prevJump) apply(kKeyLeftAlt, jumpDown);
+    if (!changed) {
+        gFail = "ok";
+        return true;
+    }
+    if (wasEmpty && MaskEmpty()) return true;
+    return PushState();
+}
+
 bool ReleaseAllOnMain() {
     // 只松走路左右；保留脉冲位（PageDown/技能/StickUp），避免与 Inject 互抹。
+    const bool pendingEdge = gEdgePending;
+    gEdgePending = false;  // 松手就别再按回去
     const bool hadL = BitIsSet(kKeyLeftArrow);
     const bool hadR = BitIsSet(kKeyRightArrow);
-    if (!hadL && !hadR) return true;
+    if (!hadL && !hadR) {
+        if (pendingEdge) SyncInputFrameTick();  // 补边沿撑着的 tick 该摘了
+        return true;
+    }
     SetBit(kKeyLeftArrow, false);
     SetBit(kKeyRightArrow, false);
     // gPrevDirectMask：清掉左右对应位，免直写路径误清脉冲。
@@ -672,7 +769,42 @@ bool ReleaseAllOnMain() {
     return PushState();
 }
 
+bool RefreshWalkEdgeOnMain() {
+    if (gEdgePending) return true;  // 上一次还没按回去
+    const bool hadL = BitIsSet(kKeyLeftArrow);
+    const bool hadR = BitIsSet(kKeyRightArrow);
+    if (!hadL && !hadR) return true;
+    // 本帧只松；≥2 帧后 RepushOnMain 按回（真按键的松→按至少隔一帧，游戏就是按这个节律认边沿）。
+    // 旧做法同帧入队两条事件：游戏吃成 ma=9→3→9，人没动（BIN 2026-09-09 13:59:37.8 / 13:59:48.8）。
+    gEdgeHadL = hadL;
+    gEdgeHadR = hadR;
+    gEdgeReleaseMs = GetTickCount();
+    gEdgePending = true;
+    SetBit(kKeyLeftArrow, false);
+    SetBit(kKeyRightArrow, false);
+    {
+        const int32_t bits[2] = {kKeyLeftArrow, kKeyRightArrow};
+        for (int n = 0; n < 2; ++n) {
+            const size_t i = static_cast<size_t>(bits[n]) / 8u;
+            const uint8_t m = static_cast<uint8_t>(1u << (static_cast<uint32_t>(bits[n]) & 7u));
+            gPrevDirectMask[i] = static_cast<uint8_t>(gPrevDirectMask[i] & ~m);
+        }
+    }
+    return PushState();
+}
+
 bool RepushOnMain() {
+    if (gEdgePending) {
+        if (GetTickCount() - gEdgeReleaseMs < kEdgeRestoreGapMs) {
+            // 松着的这两帧：有别的键就照常补写，没有就什么都不发（别把「全松」再喊一遍）。
+            if (MaskEmpty()) return true;
+        } else {
+            gEdgePending = false;
+            SetBit(kKeyLeftArrow, gEdgeHadL);
+            SetBit(kKeyRightArrow, gEdgeHadR);
+            return PushState();
+        }
+    }
     if (!gBindOk || MaskEmpty()) return false;
     // 默认走事件注入。直写（XCAT_KBD_DIRECT=1）虽然能稳赢事件队列的排队竞争，
     // 但 02:53 实测把纯内部注入的移动率从 71.4% 打到 10.2% —— 说明游戏那道门闩不是

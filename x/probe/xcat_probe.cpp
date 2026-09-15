@@ -58,6 +58,7 @@
 #include "../features/titlebar/titlebar_game.h"
 #include "../features/titlebar/titlebar_win.h"
 #include "../features/travel/travel.h"
+#include "../features/ports/nav_memory.h"
 #include "../features/worldmap_marker_travel/worldmap_marker_travel.h"
 #include "../features/sellbag/sellbag.h"
 #include "../features/attack_rpc/attack_rpc.h"
@@ -173,6 +174,7 @@ void StopAllFeatureWorkers() {
     x::features::mob_gather::StopWorker();
     x::features::worldmap_marker_travel::Shutdown();
     x::features::travel::StopWorker();
+    x::features::ports::nav_memory::Flush();  // 刷怪间隔 EMA 30s 合并落盘，卸载前把尾巴写掉
     x::features::multi_skill::StopWorker();
     x::features::buffs::StopWorker();
     x::features::timed_keys::StopWorker();

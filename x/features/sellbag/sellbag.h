@@ -29,6 +29,7 @@ struct Status {
     uint32_t failed = 0;
     int64_t  mesoGained = 0;  // 本轮金币差；未知则 0 且 mesoGainedValid=0
     uint32_t mesoGainedValid = 0;
+    int32_t  lastEquipListN = -1;  // 本轮装备卖栏投影条数；-1=未扫
     char     message[128]{};
     uint64_t lastRunTickMs = 0;
 };

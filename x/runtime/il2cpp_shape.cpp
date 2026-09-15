@@ -31,12 +31,12 @@ constexpr int kTypeSzArray = 0x1d;
 // remounted 2026-08-06 hashes（08-04 全 miss；交叉：WM+0x28→UL，FAC+0x10→NM）
 // TypeDefIndex 08-14 dump：WM=1395 UL=1587 SL=1174 FAC=13787 NM=13812。
 constexpr char kHashWorldManager[] =
-    "c85ba61839ce73c7f45293ed2e906fdb9e3e0dab928f9582e494367e08948af";
+    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
 constexpr char kHashUserLocal[] =
-    "cdde711d7a07e25bac4b04bc93ae8f0e61f4161f29fcdb7030c0d4ed618db50";
+    "ad323f590ae79afe13fb9b744449e4ce07ba250b7adf5df5bc7b3b5d749aa5d";
 // Session class (methods); facade singleton is kHashNetworkManagerFacade.
 constexpr char kHashNetworkManager[] =
-    "c9eddf65ba9888eb982987829cbcbf5b9cf2c85b88423dcd27891daeafa9a37";
+    "c932d387005490bdae5c6a171d6ae990dbfe667ad98f3d33c878e162e0c7be8";
 
 // WorldManager dump TypeDef 1395 (08-14): MyUser@0x28, Field@0x58,
 // bool@0xA8（不是指针；CharacterData* 在 0xE0），SecondaryStat@0xF0
@@ -59,9 +59,9 @@ constexpr ClassShape kWmShape = {
 // User parent: only need non-null inheritance (UserLocal : User).
 constexpr ClassShape kUserParentHint = {nullptr, 0, nullptr, 0, true, false, false};
 
-// Teleport valuetype @0x390: bool/bool/Vector2/int/int → ~0x14..0x18 (next field @0x3A8)
+// Teleport valuetype @0x3D8: bool/bool/Vector2/int/int → 0x18 (next field @0x3F0) remount 2026-09-10
 constexpr FieldShape kUlFields[] = {
-    {0x390, FieldKind::ValueTypeApprox, 0x10, 0x20},
+    {0x3D8, FieldKind::ValueTypeApprox, 0x10, 0x20},
 };
 constexpr ClassShape kUlShape = {
     kUlFields,
@@ -95,7 +95,7 @@ constexpr ClassShape kNmShape = {
 // NetworkManager facade TypeDef 13772 : Singleton<> —
 // Session*@0x10, state obj@0x18, Queue@0x28, HashSet@0x48
 constexpr char kHashNetworkManagerFacade[] =
-    "b4a873f6513bc6cad4aa4a791adda7a5b108ab5a16f6a75ade8e5d95c0234a1";
+    "e5b83e30fe25bc3857a0373acc3164b965f9a67591f7800973519750bb7dcb6";
 constexpr FieldShape kNmFacadeFields[] = {
     {0x10, FieldKind::Ptr},
     {0x18, FieldKind::Ptr},  // state object（非裸 I32；08-04 dump）
@@ -114,7 +114,7 @@ constexpr ClassShape kNmFacadeShape = {
 
 // SecurityClient attack window — static class TypeDef 15147
 constexpr char kHashSecAttack[] =
-    "cba2e3cd69679bff7e5ed2ae7f4d6f4ba4ff19d05ea8789e929dcf1c0d4800c";
+    "bbe2605f1d53ac8b6df295d29b57d66f6578443902261ac859b54cb898b7019";
 constexpr FieldShape kSaFields[] = {
     {0x0, FieldKind::Ptr},   // Dictionary<ushort,int>
     {0x8, FieldKind::Ptr},   // Dictionary<int,int>
@@ -130,19 +130,20 @@ constexpr ClassShape kSaShape = {
     true,  // staticFields
 };
 
-// SceneLogin TypeDef 1174（08-14）：GO@0xA0 + 登录 UI 槽@0xC0/C8/D0
-// + Ptr@0xF8 + handles List@0x100 + bool@0x108（08-13 是 List@0xF8 / bool@0x100；
-// 旧 shape 会把 hash 命中的真类打掉，BIN 19:11/19:26 走 SL=shape 错类）。
+// SceneLogin TypeDef 1178（09-10）：enum@0xA0 + GO@0xA8 + 0xC0 新 UI + Channel@0xC8 / World@0xD0 / Char@0xD8
+// + Ptr@0xF8 + handles@0x100 + List@0x108 + bool@0x110（08-14 是 bool@0x108，现已是 List）。
 constexpr char kHashSceneLogin[] =
-    "a61c2596fd894bea309779a4140898fbb0aa356bfc8de5ba003cc6898e54d5d";
+    "d8b374c0601bc1255934015b3f8368910ec7bba6bc127d665774220be276eb6";
 constexpr FieldShape kSlFields[] = {
-    {0xA0, FieldKind::Ptr},
+    {0xA8, FieldKind::Ptr},
     {0xC0, FieldKind::Ptr},
     {0xC8, FieldKind::Ptr},
     {0xD0, FieldKind::Ptr},
+    {0xD8, FieldKind::Ptr},
     {0xF8, FieldKind::Ptr},
     {0x100, FieldKind::Ptr},
-    {0x108, FieldKind::Bool},
+    {0x108, FieldKind::Ptr},
+    {0x110, FieldKind::Bool},
 };
 constexpr ClassShape kSlShape = {
     kSlFields,

@@ -16,6 +16,7 @@
 #include "security_attack_port.h"
 #include "world_port.h"
 #include "fly_fh_ban.h"
+#include "../attack_accel/attack_accel.h"
 #include "../auto_lie/auto_lie.h"
 #include "../auto_supply/auto_supply.h"
 #include "../char_boot/char_boot.h"
@@ -71,7 +72,11 @@ constexpr DWORD kApplyPeriodMs = 1000;
 // 掉落用 onFh/vy 挡（AbsPos：Y 增大=更高，掉落 vy 更负）。横移只认平台来回，
 // 不要大于巡逻幅度（105060100 实测来回约 70–200，240 会把补刷整波卡死在 14s 窗外）。
 // 横移 / 脚边以面板 mobGatherWalkDx / mobGatherFeetExemptPx 为准。
+// Fly/FlyRandom（ma=3/4）永不挂台：补刷不卡 CurFh / 掉落 vy，否则复活换 oid 后 skipAir 永久挡。
 constexpr float kWalkMaxDropVy = -120.f;
+// MobMoveAbility：Stop=0 Walk=1 Jump=2 Fly=3 FlyRandom=4（TW MobData+0x2C）
+constexpr int kMoveAbilityFly = 3;
+constexpr int kMoveAbilityFlyRandom = 4;
 // 新 oid 竖直闸：只挡「比人低超过预算」的怪。预算是**服务器容忍度**（179 场断连尸检标定，
 // 全图一致，不是某图坑深）：低于人 ≤1156px 的拉取窗口 0/80 被掐；≥1253px 的窗口 78/80
 // 被掐（首拉到掐 3.8~14s，中位 8.5s）。速度 maxCmd 与拉取量均与被掐无关。
@@ -116,7 +121,7 @@ constexpr size_t kCallScan = 0x4000;
 constexpr size_t kOnFixedScan = 0x8000;
 
 constexpr char kMobClass[] =
-    "de49679f4fa010cff83f3abcf3443df89b12c8102b0f973237328b38f4ac36a";
+    "fea4358a07c99f6ab1e2cda4d015f36773997b07da3838b9e592aaf7184672d";
 constexpr char kHashApplyControl[] =
     "a7982679b4b10ec2c0b41ae7d2ca76e66f7d61e29b31fd00bd18b6a1cf080ed";
 constexpr char kHashCanApplyCtrl[] =
@@ -148,6 +153,8 @@ std::atomic<uint8_t> gApplyCtrl{0};
 std::atomic<uint8_t> gFirstGenOnly{xcat::kMobGatherFirstGenOnlyDefault != 0 ? 1 : 0};
 std::atomic<uint8_t> gSlowNearOnly{xcat::kMobGatherSlowNearOnlyDefault != 0 ? 1 : 0};
 std::atomic<unsigned> gSlowNearPx{xcat::kMobGatherSlowNearPxDefault};
+std::atomic<uint8_t> gSkipSlowTpl{xcat::kMobGatherSkipSlowTplDefault != 0 ? 1 : 0};
+std::atomic<int32_t> gSkipSlowSpeed{xcat::kMobGatherSkipSlowSpeedDefault};
 std::atomic<uint8_t> gSoftRelogin{0};
 std::atomic<unsigned> gSoftReloginSec{xcat::kMobGatherSoftReloginSecDefault};
 std::atomic<unsigned> gHangupFiresNeed{xcat::kMobGatherHangupFiresDefault};
@@ -197,7 +204,7 @@ DWORD gSeekSettleMs = 0;
 DWORD gSeekNearMs = 0;
 DWORD gSoftArmMs = 0;
 DWORD gSoftPauseMs = 0;
-uint8_t gHangupLieDeferred = 0;  // 测谎中或刚关题：答完强制拆一次
+uint8_t gHangupLieDeferred = 0;  // 测谎中欠拆 / 「攻击无CD」开时关题强制洗 FLAG
 DWORD gSoftSkipLogMs = 0;
 DWORD gSoftKeepOffMapLogMs = 0;
 constexpr unsigned kHangupSellDeferSoonMs = 2500;
@@ -278,7 +285,9 @@ void NoteOid(int32_t id, float x, float y) {
 }
 
 // skipWalkDx：脚边补刷仍要贴地，只跳过「横移够了没」。walkDx=0 时横移本就不挡。
-bool WalkHoldNew(int32_t id, float x, float vy, int onFh, bool skipWalkDx, float* outDx) {
+// flyFamily：飞行怪无 CurFh，贴地/掉落闸对它们永不成立。
+bool WalkHoldNew(int32_t id, float x, float vy, int onFh, bool skipWalkDx, bool flyFamily,
+                 float* outDx) {
     if (outDx) *outDx = 0.f;
     for (int i = 0; i < gOidN; ++i) {
         if (gOid[i].id != id) continue;
@@ -287,8 +296,10 @@ bool WalkHoldNew(int32_t id, float x, float vy, int onFh, bool skipWalkDx, float
         if (dx < 0.f) dx = -dx;
         if (outDx) *outDx = dx;
         if (!skipWalkDx && dx < gWalkReadyDx.load(std::memory_order_acquire)) return true;
-        if (onFh == 0) return true;
-        if (vy < kWalkMaxDropVy) return true;
+        if (!flyFamily) {
+            if (onFh == 0) return true;
+            if (vy < kWalkMaxDropVy) return true;
+        }
         return false;
     }
     return gSpawnGateOn;
@@ -409,6 +420,11 @@ int ReadMoveAbility(void* mob) {
     void* data = ReadPtr(mob, kFbMobData);
     if (!LooksLikeHeapPtr(data)) return -1;
     return ReadI32(data, kFbMoveAbility);
+}
+
+bool IsFlyFamily(void* mob) {
+    const int ma = ReadMoveAbility(mob);
+    return ma == kMoveAbilityFly || ma == kMoveAbilityFlyRandom;
 }
 
 bool IsFixedOrImmovable(void* mob) {
@@ -1516,6 +1532,21 @@ void SetSlowNearPx(unsigned px) {
     x::runtime::LogI("MobGather", "slowNearPx=%u", v);
 }
 
+void SetSkipSlowTpl(bool on) {
+    const uint8_t v = on ? 1 : 0;
+    const uint8_t prev = gSkipSlowTpl.exchange(v, std::memory_order_acq_rel);
+    if (prev == v) return;
+    x::runtime::LogI("MobGather", "skipTpl=%d thr=%d", on ? 1 : 0,
+                     gSkipSlowSpeed.load(std::memory_order_relaxed));
+}
+
+void SetSkipSlowSpeed(int32_t speed) {
+    const int32_t v = xcat::ClampMobGatherSkipSlowSpeed(speed);
+    const int32_t prev = gSkipSlowSpeed.exchange(v, std::memory_order_acq_rel);
+    if (prev == v) return;
+    x::runtime::LogI("MobGather", "skipTplThr=%d", v);
+}
+
 static float RecruitNearCapPx(int32_t tpl, int32_t* outSp) {
     const int32_t sp = mob::LookupTemplateWzSpeed(tpl);
     if (outSp) *outSp = sp;
@@ -1542,6 +1573,8 @@ bool HangupSecondsOn() {
 }
 
 bool HangupFiresEnabled() {
+    // 出刀软重连在吸怪 TAB；未 ws888 解锁不得开（厂默勾选仍保留，解开才生效）。
+    if (gHangupFiresUiUnlocked.load(std::memory_order_acquire) == 0) return false;
     return gHangupFiresOn.load(std::memory_order_acquire) != 0;
 }
 
@@ -1677,8 +1710,8 @@ bool SoftReloginHoldClock() {
     using x::features::soft_login_probe::IsReconnectInFlight;
 // 脏会话到点必须洗：pre_supply（Idle）不得冻秒数闸。开趟后由 HoldsHangupClock 冻。
     // 重连在途冻的是这一轮自己。起号仍冻。
-    // 测谎不冻钟：答题中推迟 CloseSession，关题后无论到点与否都强制拆一次
-    // （F40 16:50 hangup_timer 砸进跟轨窗 → dropped）。
+    // 测谎不冻钟：答题中推迟 CloseSession。
+    // 「攻击无CD」开时关题后强制拆一次；关着则只补到期那发。
     return IsReconnectInFlight() || x::features::char_boot::IsBusy();
 }
 
@@ -1848,9 +1881,20 @@ void TickSoftRelogin() {
 
     const DWORD now = GetTickCount();
     const bool quizActive = x::features::auto_lie::IsQuizActive();
+    // 「攻击无CD」开：关题强制 hangup_after_lie 洗 FLAG。关着：不额外欠拆。
+    // 答题中 HangupBeforeOtherAction / same-map 已写下的欠拆仍保留，
+    // 秒数闸/出刀闸到点也仍拆。未解锁时攻击无CD 被强制关，本路径不开。
+    const bool forceHangupAfterLie = x::features::attack_accel::IsDesired();
     static uint8_t sWasQuiz = 0;
-    if (sWasQuiz && !quizActive) gHangupLieDeferred = 1;
-    if (quizActive) gHangupLieDeferred = 1;
+    if (sWasQuiz && !quizActive) {
+        if (forceHangupAfterLie) {
+            gHangupLieDeferred = 1;
+        } else if (!gHangupLieDeferred) {
+            x::runtime::LogI("MobGather",
+                             "hangup_after_lie skip — 攻击无CD off");
+        }
+    }
+    if (quizActive && forceHangupAfterLie) gHangupLieDeferred = 1;
     sWasQuiz = quizActive ? 1 : 0;
     ConsumeNmSessionEnd();
 
@@ -1863,7 +1907,7 @@ void TickSoftRelogin() {
 
     // 计时：会话脏了才起表。换图 / Travel / InterStage 短离图不得清钟。
     // 只有这一轮已经拆（HangupDefer / 落地洗 FLAG）才开下一轮。
-    // 答完强制拆：秒数闸/出刀闸都关时也要落到下面的 fire 路径。
+    // 「攻击无CD」开时答完强制拆：秒数闸/出刀闸都关也要落到 fire。关无CD 不走这条。
     if (!SoftReloginWanted()) {
         gSoftArmMs = 0;
         gSoftPauseMs = 0;
@@ -1966,7 +2010,8 @@ void TickSoftRelogin() {
                          (HangupSecondsOn() || dirty);
 
     // 测谎进行中禁止 CloseSession：题 UI 会被拆掉（F40 16:50 hangup_timer → dropped）。
-    // 钟继续走、不冻表；关题后无论到点与否都强制拆（hangup_after_lie）。
+    // 钟继续走、不冻表。「攻击无CD」开时关题无论到点与否都强制拆；
+    // 关着只推迟，关题不额外拆。
     // 必须在 retryUntil 之前：失败 5s 重试窗若撞上答题，不能把 CloseSession 打进跟轨。
     if (quizActive) {
         static DWORD sLieDeferLog = 0;
@@ -1974,8 +2019,9 @@ void TickSoftRelogin() {
             sLieDeferLog = now;
             x::runtime::LogI("MobGather",
                              "soft relogin defer quiz dueFires=%d dueTime=%d "
-                             "deferred=%d — hangup_after_lie when UI closes",
-                             dueFires ? 1 : 0, dueTime ? 1 : 0, gHangupLieDeferred ? 1 : 0);
+                             "deferred=%d afterClose=%s",
+                             dueFires ? 1 : 0, dueTime ? 1 : 0, gHangupLieDeferred ? 1 : 0,
+                             forceHangupAfterLie ? "hangup_after_lie" : "skip_no_cd");
         }
         return;
     }
@@ -2103,9 +2149,7 @@ void QueryHangupFires(unsigned* count, unsigned* need) {
                        : gHangupFires.load(std::memory_order_acquire);
     }
     if (need) {
-        const bool show = HangupFiresEnabled() &&
-                          gHangupFiresUiUnlocked.load(std::memory_order_acquire) != 0;
-        need[0] = show ? gHangupFiresNeed.load(std::memory_order_acquire) : 0u;
+        need[0] = HangupFiresEnabled() ? gHangupFiresNeed.load(std::memory_order_acquire) : 0u;
     }
 }
 
@@ -2501,6 +2545,21 @@ void TickHomeReturn() {
 
     const bool landQ = x::features::soft_login_probe::IsLandQuiet();
     const bool play = x::features::ports::world::IsPlayReady();
+    // pre_supply hold / 已拆未落地：补给在等 hangup，不能挡回家飞。
+    // yield 会钉 gSeeking，PersonFlyBusy 让 NoteHangupLandIfReady 永不成立（BIN e3501b）。
+    // 真开趟（Pause 及之后）仍让路；遇人/换频继续认 IsBusy()（含 hold）。
+    const bool supplyOccupiesWorld =
+        x::features::auto_supply::IsBusy() &&
+        !x::features::auto_supply::IsPreSupplyHold() && !HangupWashInFlight();
+    if (x::features::auto_supply::IsBusy() && !supplyOccupiesWorld &&
+        (gFlyKind == 2 || gHomePending.load(std::memory_order_acquire) != 0)) {
+        static DWORD sHoldYieldLog = 0;
+        if (!sHoldYieldLog || now - sHoldYieldLog > 2000) {
+            sHoldYieldLog = now;
+            x::runtime::LogI("MobGather",
+                             "home_return ignore auto_supply hold/wash (hangup land first)");
+        }
+    }
     const bool yieldPeer = x::features::travel::IsActive() ||
                            heli::CurrentOwner() == Owner::Fly ||
                            heli::CurrentOwner() == Owner::Travel ||
@@ -2508,7 +2567,7 @@ void TickHomeReturn() {
                                x::features::channel_hop::State::Idle ||
                            x::features::channel_hop::HasPending() ||
                            x::features::auto_lie::IsBusy() ||
-                           x::features::auto_supply::IsBusy() ||
+                           supplyOccupiesWorld ||
                            x::features::char_boot::IsBusy() ||
                            x::features::sellbag::IsBusy();
     if (yieldPeer) {
@@ -3001,11 +3060,14 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     int skippedPool = 0;
     int skippedGen = 0;
     int skippedSlow = 0;
+    int skippedTpl = 0;
     int skipGenHave = 0;
     int32_t skipGenSt = 0;
     int32_t skipSlowSp = 0;
     float skipSlowCap = 0.f;
     float skipSlowAd = 0.f;
+    int32_t skipTplSp = 0;
+    int32_t skipTplThr = 0;
     int32_t skipWalkId = 0;
     float skipWalkDx = 0.f;
     float skipWalkDxMax = 0.f;
@@ -3013,6 +3075,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
     float skipWalkY = 0.f;
     float skipWalkVy = 0.f;
     int skipWalkFh = 0;
+    int skipWalkMa = -1;
     int nPassive = 0;
     int nOurs = 0;
     int nLive = 0;
@@ -3071,6 +3134,18 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
             continue;
         }
         if (adLive > radius && !keepArmed) continue;
+        if (!keepArmed && gSkipSlowTpl.load(std::memory_order_acquire) != 0) {
+            const int32_t sp = mob::LookupTemplateWzSpeed(m.templateId);
+            const int32_t thr = gSkipSlowSpeed.load(std::memory_order_acquire);
+            if (sp != mob::kWzSpeedUnknown && sp <= thr) {
+                ++skippedTpl;
+                if (skipTplSp == 0) {
+                    skipTplSp = sp;
+                    skipTplThr = thr;
+                }
+                continue;
+            }
+        }
         if (!keepArmed && gSlowNearOnly.load(std::memory_order_acquire) != 0 &&
             !x::features::ports::mob_fh_ban::WzLeashEnabled()) {
             int32_t sp = 0;
@@ -3088,15 +3163,18 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         // 清怪重连本轮已冻结：只维持这一批，禁止 Arm 新怪。
         if (ClearReloginHoldWaveOnly() && (!keepArmed || !ClearWaveHas(m.id))) continue;
         // 进图第一批 exempt 仍脚边照吸。补刷：脚边只豁免横移，贴地/掉落/高度闸照挡。
+        // 飞行怪无台可贴，贴地/掉落闸跳过，否则复活换 oid 后永远 skipAir。
         const float feet = gFeetExemptPx.load(std::memory_order_acquire);
         const bool nearFeet = adLive <= feet;
         const bool exempt = OidExempt(m.id);
+        const bool flyFamily = IsFlyFamily(m.ptr);
+        const int ma = ReadMoveAbility(m.ptr);
         if (!keepArmed) {
             if (gDyRampOn.load(std::memory_order_acquire) == 0) {
                 float dHome = 0.f;
-                if (WalkHoldNew(m.id, x, vy, onFh, nearFeet, &dHome)) {
+                if (WalkHoldNew(m.id, x, vy, onFh, nearFeet, flyFamily, &dHome)) {
                     ++skippedSpawn;
-                    if (onFh == 0 || vy < kWalkMaxDropVy) ++skippedAir;
+                    if (!flyFamily && (onFh == 0 || vy < kWalkMaxDropVy)) ++skippedAir;
                     if (dHome > skipWalkDxMax) skipWalkDxMax = dHome;
                     if (skipWalkId == 0 || dHome < skipWalkDx) {
                         skipWalkId = m.id;
@@ -3105,6 +3183,7 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
                         skipWalkY = y;
                         skipWalkVy = vy;
                         skipWalkFh = onFh;
+                        skipWalkMa = ma;
                     }
                     continue;
                 }
@@ -3206,35 +3285,41 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
 
     if (job.n <= 0 && job.nApply <= 0) {
         out->why = (skippedGen > 0 && skippedSpawn == 0 && skippedDy == 0 && skippedPool == 0 &&
-                    skippedSlow == 0)
+                    skippedSlow == 0 && skippedTpl == 0)
                        ? "gen"
-                       : ((skippedSlow > 0 && skippedSpawn == 0 && skippedDy == 0 &&
+                       : ((skippedTpl > 0 && skippedSpawn == 0 && skippedDy == 0 &&
                            skippedPool == 0 && skippedGen == 0)
-                              ? "slow"
-                              : ((nLive <= 0) ? "no_live"
-                                              : ((skippedSpawn > 0 || skippedDy > 0 ||
-                                                  skippedPool > 0 || skippedSlow > 0)
-                                                     ? "walk"
-                                                     : "empty")));
+                              ? "slowsp"
+                              : ((skippedSlow > 0 && skippedSpawn == 0 && skippedDy == 0 &&
+                                  skippedPool == 0 && skippedGen == 0)
+                                     ? "slow"
+                                     : ((nLive <= 0) ? "no_live"
+                                                     : ((skippedSpawn > 0 || skippedDy > 0 ||
+                                                         skippedPool > 0 || skippedSlow > 0 ||
+                                                         skippedTpl > 0)
+                                                            ? "walk"
+                                                            : "empty"))));
         if (verbose || PeriodicLogOk()) {
             x::runtime::LogI("MobGather",
                              "%s considered=0 pushed=0 why=%s n=%d live=%d ours=%d passive=%d "
                              "fixed=%d remote=%d skipSpawn=%d skipAir=%d skipDy=%d skipPool=%d "
-                             "skipGen=%d skipSlow=%d st=%d onField=%d slowNear=%d wzLeash=%d "
+                             "skipGen=%d skipSlow=%d skipTpl=%d skipSp=%d thr=%d "
+                             "st=%d onField=%d slowNear=%d wzLeash=%d "
                              "spd=%d cap=%.0f "
                              "holdId=%d dHome=%.0f dHomeMax=%.0f ap=%.0f,%.0f "
-                             "onFh=%d vy=%.0f spawnN=%d gate=%d applyOn=%d qdelay=%u dyLim=%.0f "
+                             "onFh=%d vy=%.0f ma=%d spawnN=%d gate=%d applyOn=%d qdelay=%u dyLim=%.0f "
                              "packN=%d packY=%.0f layerY=%.0f walkDx=%.0f feet=%.0f "
                              "off=%.0f,%.0f",
                              kind, out->why, snap.count, nLive, nOurs, nPassive, skippedFixed,
                              skippedRemote, skippedSpawn, skippedAir, skippedDy, skippedPool,
-                             skippedGen, skippedSlow, skipGenSt,
+                             skippedGen, skippedSlow, skippedTpl, skipTplSp, skipTplThr, skipGenSt,
                              gFirstGenOnly.load(std::memory_order_relaxed) ? 1 : 0,
                              gSlowNearOnly.load(std::memory_order_relaxed) ? 1 : 0,
                              x::features::ports::mob_fh_ban::WzLeashEnabled() ? 1 : 0, skipSlowSp,
                              skipSlowCap,
                              skipWalkId, skipWalkDx, skipWalkDxMax, skipWalkX, skipWalkY, skipWalkFh,
-                             skipWalkVy, snap.spawnPointN, gSpawnGateOn ? 1 : 0, applyOn ? 1 : 0,
+                             skipWalkVy, skipWalkMa, snap.spawnPointN, gSpawnGateOn ? 1 : 0,
+                             applyOn ? 1 : 0,
                              gQuietDelayMs.load(std::memory_order_relaxed),
                              gDyLim.load(std::memory_order_relaxed), pack.n, pack.cy,
                              gLayerYPx.load(std::memory_order_relaxed),
@@ -3305,10 +3390,11 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
         }
         x::runtime::LogI("MobGather",
                          "%s considered=%d new=%d sta=%d far=%d skipFar=%d farAdm=%d skipSpawn=%d "
-                         "skipAir=%d skipDy=%d skipPool=%d skipGen=%d skipSlow=%d st=%d onField=%d "
-                         "slowNear=%d wzLeash=%d spd=%d cap=%.0f "
+                         "skipAir=%d skipDy=%d skipPool=%d skipGen=%d skipSlow=%d "
+                         "skipTpl=%d skipSp=%d thr=%d "
+                         "st=%d onField=%d slowNear=%d wzLeash=%d spd=%d cap=%.0f "
                          "holdId=%d dHome=%.0f dHomeMax=%.0f "
-                         "onFh=%d vy=%.0f "
+                         "onFh=%d vy=%.0f ma=%d "
                          "spawnN=%d gate=%d pushed=%d "
                          "detach=%d why=ok "
                          "live=%d ours=%d passive=%d remote=%d aimDt=%u gLoss=%.0f py=%.1f "
@@ -3319,13 +3405,15 @@ bool TryHoldBatch(OneshotResult* out, bool verbose) {
                          "sample id=%d ctrl=%d(%s) cmd=(%.0f,%.0f) ap=%.1f,%.1f vy=%.0f "
                          "maxAd=%.0f maxCmd=%.0f",
                          kind, out->considered, nNew, nSta, nFar, nSkipFar, nFarAdmit, skippedSpawn,
-                         skippedAir, skippedDy, skippedPool, skippedGen, skippedSlow, skipGenSt,
+                         skippedAir, skippedDy, skippedPool, skippedGen, skippedSlow, skippedTpl,
+                         skipTplSp, skipTplThr, skipGenSt,
                          gFirstGenOnly.load(std::memory_order_relaxed) ? 1 : 0,
                          gSlowNearOnly.load(std::memory_order_relaxed) ? 1 : 0,
                          x::features::ports::mob_fh_ban::WzLeashEnabled() ? 1 : 0, skipSlowSp,
                          skipSlowCap, skipWalkId,
                          skipWalkDx, skipWalkDxMax,
-                         skipWalkFh, skipWalkVy, snap.spawnPointN, gSpawnGateOn ? 1 : 0, out->pushed,
+                         skipWalkFh, skipWalkVy, skipWalkMa, snap.spawnPointN, gSpawnGateOn ? 1 : 0,
+                         out->pushed,
                          nDetach, nLive,
                          nOurs, nPassive, skippedRemote,
                          x::features::ports::mob_fh_ban::LastAimDtMs(), job.gLoss, st.y, aimX,

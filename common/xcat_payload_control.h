@@ -8,7 +8,7 @@ namespace xcat {
 // TWMS ???????launcher <-> payload??? user.ini [core]?
 constexpr uint32_t kPayloadControlMagic = 0x58435443u;  // 'XCTC'
 constexpr uint32_t kPayloadControlVersion = 1u;
-constexpr uint32_t kPayloadControlCoreIniVersion = 160u;
+constexpr uint32_t kPayloadControlCoreIniVersion = 163u;
 // v47: 引擎帧率锁（非显示器 Hz）
 // v48: finalAttackForce — 普攻必出终极一击（SkillLevelData.Prop=100）
 // v49: finalAttackForce — Prop=100 + 强制注册 FinalAttack / TryDoingFinalAttack
@@ -95,7 +95,7 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 160u;
 //       simpleCombatForgeHitFrontDx/Dy — 出刀自组攻包独立攻击盒；不与站桩面前盒共用
 // v128: 自组攻包攻击盒厂默 60×10→480×420；缺键不再抄站桩盒
 //       mobGatherHangupFiresOn — 出刀累计软重连独立勾选；与秒数勾选互不绑架；厂默开
-// v129: gatherTabUnlocked — 调试 TAB ws888 解锁镜像；标题/顶栏「刀 n/阈值」显示门控（缺键关）
+// v129: gatherTabUnlocked — 调试 TAB ws888 解锁镜像；出刀软重连 + 标题/顶栏刀数门控（缺键关）
 // v130: secAttackIntercept — 已移除（服端自有计数；字段保留布局，恒 0）
 // v131: mobGatherHangupUnbindF5 — 调试 TAB：解除瞬移找怪+F5 强制开秒数闸；缺键关
 // v132: secAttackTextHook — 已移除（服端自有计数；字段保留布局，恒 0）
@@ -105,6 +105,8 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 160u;
 // v159: mobGatherSlowNearOnly / SlowNearPx — 吸怪 TAB 按 WZ speed 限制远处新收。
 // v160: 厂默开；≥HopOk(-10) 不限（红/青螃蟹），≤SlowFloor(-50) 用 SlowNearPx，中间 lerp 到 hopPx。
 //       旧厂默关迁一次开。升 version 后用户可再关掉。
+// v163: mobGatherSkipSlowTpl / SkipSlowSpeed — 「不吸慢速怪」可选项，厂默关。开=WZ speed≤阈值的
+//       未 armed 怪不新收（默认阈值 -50=乌龟及更慢）。已吸住的不丢。未知模板 fail-open。
 // v161: mobGatherWzLeashOn / WzLeashSlowPx — 「按怪速限制拉速」可选项，厂默关。
 //       开=远处慢怪仍收，每帧瞄点推进按 WZ speed 限制（最慢档默认 10px/帧）。
 // v156: 遇人总开关厂默开。v154 曾把旧厂默迁成关；v154 厂默指纹迁一次开。藏人仍默认关。
@@ -121,6 +123,8 @@ constexpr uint32_t kPayloadControlCoreIniVersion = 160u;
 // v152: 吸怪半径/高度闸/脚边厂默改 8000；旧 1000·2800 / 1200 / 320 读盘迁一次。手改保留。
 // v153: 自动打怪寻怪 simpleCombatTeleportMaxHop 厂默 3000→1500；旧 400/520/550/3000 读盘迁。手改保留。
 // v149: mobGatherReconnectHop — 吸怪 TAB「重连换频」；软重连进异频；厂默关。缺键=关。
+// v162: mobGatherReconnectHopPin / Channel — 「指定频道」；厂默关。开则重连只进该 UI ch.N
+//       （列表 id = N-1）；满员/成人停在选频页重试，不改抽。遇人 hop 本轮不抢。缺键=关。
 // v139: 主动软重连旧厂默开+14s 残留迁关一次（v122 已改厂默关，当时没迁盘）
 // v140: forceTrade — 实验·强制交易已拆除；字段保留布局，恒 0
 // v141: mobGatherDispClampOn / mobGatherDispCapPx — 吸怪 TAB「位移夹速」：把被拽怪每帧位移
@@ -275,6 +279,8 @@ constexpr uint32_t kSimpleCombatTickMaxMs = 100u;
 constexpr uint32_t kHeliSpeedPctDefault = 500u;
 constexpr uint32_t kHeliSpeedPctMin = 25u;
 constexpr uint32_t kHeliSpeedPctMax = 1000u;
+// F5 滑翔 1.00X（巡航 620 px/s）：运行时强制关无敌，不改 ini 勾选。
+constexpr uint32_t kHeliWalkGlideSpeedPct = 100u;
 // F6 手动飞默认倍率 300%：换旋翼前开环等效约 1600 px/s ≈ 2.6X，
 // 直接给 1.0X（Cruise 620）会比旧版慢一大截；3X 开箱手感更接近旧手动飞。
 constexpr uint32_t kFlySpeedPctDefault = 300u;
@@ -370,6 +376,11 @@ constexpr uint32_t kMobGatherSlowNearPxMin = 0u;    // 0=最慢档完全不新�
 constexpr uint32_t kMobGatherSlowNearPxMax = 800u;
 constexpr int32_t kMobGatherSpeedHopOk = -10;       // 红螃蟹 -10 / 青螃蟹 0
 constexpr int32_t kMobGatherSpeedSlowFloor = -50;   // 乌龟 -50
+// v163: 不吸慢速怪。可选项，厂默关。开则 WZ speed≤阈值的未 armed 怪不新收。
+constexpr uint32_t kMobGatherSkipSlowTplDefault = 0u;
+constexpr int32_t kMobGatherSkipSlowSpeedDefault = kMobGatherSpeedSlowFloor;
+constexpr int32_t kMobGatherSkipSlowSpeedMin = -80;
+constexpr int32_t kMobGatherSkipSlowSpeedMax = 40;
 // v161: 按怪速限制拉速。可选项，厂默关。开则不挡远处新收，按 speed 限制每帧瞄点推进。
 constexpr uint32_t kMobGatherWzLeashOnDefault = 0u;
 constexpr uint32_t kMobGatherWzLeashSlowPxDefault = 10u;  // speed≤-50
@@ -442,6 +453,11 @@ constexpr uint32_t kMobGatherAntiReportDefault = 0u;
 constexpr uint32_t kMobGatherHomeReturnDefault = 0u;
 // v149: 软重连不粘原频。默认关。缺键=关。不改遇人 hop。
 constexpr uint32_t kMobGatherReconnectHopDefault = 0u;
+// v162: 重连换频「指定频道」。默认关。Channel 是標題「頻道 N」（1-based）。
+constexpr uint32_t kMobGatherReconnectHopPinDefault = 0u;
+constexpr uint32_t kMobGatherReconnectHopChannelDefault = 1u;
+constexpr uint32_t kMobGatherReconnectHopChannelMin = 1u;
+constexpr uint32_t kMobGatherReconnectHopChannelMax = 64u;
 // v155: 只吸场上的。默认开。缺键=开。开=勾上时场上 oid 快照才吸；之后新刷不吸。
 constexpr uint32_t kMobGatherFirstGenOnlyDefault = 1u;
 // 寻簇同层窗 |dY|（AbsPos）。默认 200。用户自填，只防爆钳 30000。0=合法。
@@ -725,6 +741,9 @@ struct PayloadControl {
     // v161: 按怪速限制拉速（可选项，厂默关）。
     uint32_t mobGatherWzLeashOn = kMobGatherWzLeashOnDefault;
     uint32_t mobGatherWzLeashSlowPx = kMobGatherWzLeashSlowPxDefault;
+    // v163: 不吸慢速怪（可选项，厂默关）。开=WZ speed≤mobGatherSkipSlowSpeed 的未 armed 不新收。
+    uint32_t mobGatherSkipSlowTpl = kMobGatherSkipSlowTplDefault;
+    int32_t mobGatherSkipSlowSpeed = kMobGatherSkipSlowSpeedDefault;
     uint32_t mobGatherSpeedPct = kMobGatherSpeedPctDefault;
     uint32_t mobGatherAntiJitter = kMobGatherAntiJitterDefault;
     uint32_t mobGatherMax = kMobGatherMaxDefault;
@@ -790,6 +809,9 @@ struct PayloadControl {
     // v149: 吸怪「重连换频」。0=关（默认）。开：hangup/被动软重连进异频。
     // 落地后再被踢会重抽（不粘上一轮目标频）。遇人 hop 已选频则本轮不抢。
     uint32_t mobGatherReconnectHop = kMobGatherReconnectHopDefault;
+    // v162: 指定频道。0=关。开且重连换频开：软重连只进 mobGatherReconnectHopChannel（UI ch.N）。
+    uint32_t mobGatherReconnectHopPin = kMobGatherReconnectHopPinDefault;
+    uint32_t mobGatherReconnectHopChannel = kMobGatherReconnectHopChannelDefault;
     // v114: 竖层 px。寻簇同层窗。用户自填；缺键走厂默。0=合法。
     uint32_t mobGatherLayerYPx = kMobGatherLayerYPxDefault;
     // v115: 高度闸 px。新收 |dY| 上限。用户自填；缺键走厂默。0=合法。
@@ -1046,6 +1068,12 @@ inline uint32_t ClampHeliSpeedPct(uint32_t pct) {
     return pct;
 }
 
+inline uint32_t ClampMobGatherReconnectHopChannel(uint32_t n) {
+    if (n < kMobGatherReconnectHopChannelMin) return kMobGatherReconnectHopChannelMin;
+    if (n > kMobGatherReconnectHopChannelMax) return kMobGatherReconnectHopChannelMax;
+    return n;
+}
+
 inline uint32_t ClampMobGatherSpeedPct(uint32_t pct) { return ClampHeliSpeedPct(pct); }
 
 inline uint32_t ClampMobGatherMax(uint32_t n) {
@@ -1075,6 +1103,12 @@ inline uint32_t ClampMobGatherWzLeashSlowPx(uint32_t px) {
     if (px < kMobGatherWzLeashSlowPxMin) return kMobGatherWzLeashSlowPxMin;
     if (px > kMobGatherWzLeashSlowPxMax) return kMobGatherWzLeashSlowPxMax;
     return px;
+}
+
+inline int32_t ClampMobGatherSkipSlowSpeed(int32_t sp) {
+    if (sp < kMobGatherSkipSlowSpeedMin) return kMobGatherSkipSlowSpeedMin;
+    if (sp > kMobGatherSkipSlowSpeedMax) return kMobGatherSkipSlowSpeedMax;
+    return sp;
 }
 
 inline uint32_t ClampMobGatherRadiusPx(uint32_t px) {

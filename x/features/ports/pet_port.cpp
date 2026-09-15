@@ -31,31 +31,31 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
 // Remount 2026-08-06：ACS hash 全换；字段 off 未漂；ActivatePet 按 CIM 方法序 + restore_method_map
-constexpr uint32_t kRvaSendActivatePetRequest = 0xC77390;  // remounted 2026-08-20
+constexpr uint32_t kRvaSendActivatePetRequest = 0xCAFFA0;  // remounted 2026-09-10 dump CIM TDI 1259
 constexpr char kHashSendActivatePet[] =
-    "bf8a6fab4e9bf34efd45c30da95a6d176d1f3ddf31266585d3ed4f4f478d29d";
+    "f394da268abd7b45ef5d69e5555207237de1d07bccb9b33f3c4214107397f25";
 
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 constexpr char kCashItemManagerClass[] =
-    "c09f2032ba242ecb0392719e152d4796813d43bb445fcd405e97f29bd8a9b36";
+    "d33db1dbca243009ae5b260f7c80aa0066aaf69b6993c9c5e4519d3f9d79481";
 constexpr char kUserClass[] =
-    "e1835bc9e7ef210b5145fcaf2193e47cfaef8d17a5607749a1252fc857c149d";  // TDI:1560
+    "b8129050fd86f9f4f79caa5cfb878f706fd3744e8c7f07ba1c392fd337a77d1";  // TDI:1578 User
 
 // dump fallback；运行时 hash + field_get_offset 优先
 constexpr size_t kFbWmMyUser = 0x28;
-constexpr size_t kFbApPet = 0x288;  // 08-13：User Pet[]
-constexpr size_t kFbLogicalPos = 0x2B0;  // 08-13：User Vector2
+constexpr size_t kFbApPet = 0x2B8;  // 09-10：User Pet[]；旧哈希 df4ed6d7 已是 Vector3@0x288
+constexpr size_t kFbLogicalPos = 0x2E8;  // 09-10：User Vector2；旧哈希 df491dca 已是 uint@0x2B0
 constexpr size_t kFbVisPos = 0x64;
 constexpr char kHashFldWmMyUser[] =
-    "<ae99459ebc7ebb64d9e6b45b9a6c462bf8c396db42a22e86f6c651eb016618a>k__BackingField";  // WM.MyUser@0x28
+    "<e8188e62384d9888cf8dbf795b258a6cdda4933a2b3bba9725997db5ed14b83>k__BackingField";  // WM.MyUser@0x28
 constexpr char kHashFldApPet[] =
-    "f447a1602f3aec40ed186f98331c533cf74742840c8de498d0fa934d01d0be2";
+    "c2675a4ed88f37237efb6d05daa060b64d9bed3f5126f569688dfd9a4df17e4";  // remounted 2026-09-10 Pet[]@0x2B8
 constexpr char kHashFldCurPos[] =
-    "adb40bd150b8a460d80f10c5bc5560f7f52aeb7057a93b6396edc804bc0ee25";
+    "c7e7d437346692c76ab582a510af39b410bca9920f2870d7500a1ee63be5f7a";  // remounted 2026-09-10 Vector2@0x2E8
 constexpr char kHashFldFieldPos[] =
-    "cf776ff0c583bd614c1ea26f338a0f3c6971482b301704c1bbb8d962b9cb1cf";
+    "cdb04ce386f0f95b2ea1efe9454c2974a452cfe4d5b5924ec89759bb59836ad";
 constexpr char kVecCtrlOwnerClass[] =
-    "a83e4f1c524fa6e5dc75a3f38110e85704c157550dd8e171c128f9d66e5c739";
+    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";
 
 struct PetFieldOff {
     size_t wmMyUser = kFbWmMyUser;
@@ -75,21 +75,21 @@ PetFieldOff gOff{};
 // 背包列表：SSOT = player_vitals（ItemSlots hash）；本文件不再钉 CD 偏移。
 // Pet / ItemSlotPet：hash → field_get_offset
 constexpr char kPetClass[] =
-    "f01f17935b6b3ea8c196864395bb15e3be2f13024f9f8aaa0a916618c425f53";
+    "dbfe30e0a0a7c826c9372128f252063563764b92b0f06a8d86b143825765038";
 constexpr char kItemSlotPetClass[] =
-    "cdc7b4c0b345acb35d38ab995d0ab5374090f2b97304d23e950b15c250ebf01";
+    "c4b060f3acdfd1f1794828bc9cd55fcc5a38ee078680297b48b796e87d3b551";
 constexpr char kHashPetRepleteness[] =
-    "eeb99b376a468865c6f3c51b1d832306efce5599b688357a26163f5d3680411";
+    "ef1deb0c9e8f41908aab7274d2d408d06206df566b8ad1806fb5f7fc6a75d83";
 constexpr char kHashSlotRepleteness[] =
-    "dc85f311e822b34847f802d22d782d07457584132b7a4ed199ccd75d18b7173";
+    "c870426bcd39992d729a3711186bb4ada4d89bdb58ba19e5994a2f983642de7";
 constexpr char kHashDateDead[] =
-    "ecd2e833401c6e6100d056118337c3d46fbb1ee7d401295305bba391791d3db";
+    "e35b6675a84df25bffb4af358f6337e1c90801da8d156c9306f24f15969b4f2";
 constexpr char kHashRemainLife[] =
-    "b7d71d4ce254b988575041a0eb41556c44beb0831d22fabf13724db586422fa";
+    "c8f93e092af7f4a7c4ca03537e9e00da855cf4e8ea934b6fbe43f651575417c";
 constexpr char kHashActiveState[] =
-    "aed10602ad57247a92e1aa47f5ea75e879406df2815db8419acd3097f9d4e02";
-constexpr size_t kFbPetRepleteness = 0xBC, kFbSlotRepleteness = 0x38, kFbDateDead = 0x40;
-constexpr size_t kFbRemainLife = 0x48, kFbActiveState = 0x4E;
+    "f5623b391edc21ad28691b7723a3cc83817dc38cce711a7a1bd2c69488a8658";
+constexpr size_t kFbPetRepleteness = 0xBC, kFbSlotRepleteness = 0x40, kFbDateDead = 0x48;
+constexpr size_t kFbRemainLife = 0x50, kFbActiveState = 0x54;
 size_t gOffPetRepleteness = kFbPetRepleteness, gOffSlotRepleteness = kFbSlotRepleteness;
 size_t gOffDateDead = kFbDateDead, gOffRemainLife = kFbRemainLife, gOffActiveState = kFbActiveState;
 #define kOffPetRepleteness (gOffPetRepleteness)
@@ -102,8 +102,9 @@ constexpr int64_t kDateTimeTicksMask = 0x3FFFFFFFFFFFFFFFLL;
 constexpr int64_t kPetPermanentTicksFloor = 653000000000000000LL;
 constexpr size_t kOffCachedPtr = 0x10;
 
-constexpr int kItemTypeConsume = 2;
-constexpr int kItemTypeCash = 5;
+constexpr int kItemTypeConsume = x::ui::player::item_type::Consume;
+constexpr int kItemTypeCash = x::ui::player::item_type::Cash;
+static_assert(kItemTypeCash == 5);
 constexpr int kDefaultFoodCode = 2120000;
 constexpr int kFoodIdMin = 2120000;
 constexpr int kFoodIdMax = 2129999;
@@ -121,7 +122,7 @@ using FnClassParent = void* (*)(void* klass);
 using FnRuntimeClassInit = void (*)(void* klass);
 using FnCompGo = void* (*)(void* comp, void* methodInfo);
 using FnObjName = void* (*)(void* go, void* methodInfo);
-using FnActivatePet = void (*)(void* self, int nPos, const void* methodInfo);
+using FnActivatePet = void (*)(void* self, int nPos, int8_t extra, const void* methodInfo);
 
 struct MethodInfoHead {
     void* methodPointer;
@@ -377,8 +378,8 @@ MethodInfoHead* ResolveActivateMi(void* klass) {
     using x::runtime::il2cpp_method::ResolvePath;
     using x::runtime::il2cpp_method::TypeKind;
     if (!klass) return nullptr;
-    // hash → plain → RVA/kind；void(int) 同形 → unique=false。
-    constexpr MethodShape kAct{1, TypeKind::Void, false, false, {TypeKind::I32}};
+    // hash → plain → RVA/kind；void(int, sbyte=-1)。旧 void(int) 哈希已从 CIM 消失。
+    constexpr MethodShape kAct{2, TypeKind::Void, true, false, {TypeKind::I32, TypeKind::Any}};
     const auto mr = x::runtime::il2cpp_method::FindMethodResolved(
         klass, kRvaSendActivatePetRequest, kAct, "SendActivatePetRequest", kHashSendActivatePet);
     static bool sLogged = false;
@@ -398,7 +399,7 @@ void ReportPetActLamp() {
                                      "Activate MI");
     } else if (gCashMgrKlass) {
         x::runtime::anchor_lamps::Set("PetAct", x::runtime::anchor_lamps::AnchorLampCode::Degraded,
-                                     "RVA fallback");
+                                     "Activate MI miss");
     } else {
         x::runtime::anchor_lamps::Set("PetAct", x::runtime::anchor_lamps::AnchorLampCode::Unknown,
                                      "pending");
@@ -593,7 +594,7 @@ bool ResolveCashItemManager(DWORD now) {
                 x::runtime::LogI("PetPort", "Activate MI bind ok mi=%p rva=0x%X", gMiActivate,
                                  kRvaSendActivatePetRequest);
             } else {
-                x::runtime::LogW("PetPort", "Activate MI miss — will use RVA 0x%X",
+                x::runtime::LogW("PetPort", "Activate MI miss hash/rva=0x%X — 不硬跳",
                                  kRvaSendActivatePetRequest);
             }
             ReportPetActLamp();
@@ -678,7 +679,39 @@ void ScanFood(PetCareState& out) {
     }
 }
 
+void LogCashItemTypeCensusOnce() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    auto petsIn = [](int ti, int* outN, int* outPets, int* outId) {
+        *outN = -1;
+        *outPets = 0;
+        *outId = 0;
+        void* list = GetSlotList(ti);
+        if (!list) return;
+        const int n = ListSize(list);
+        *outN = n;
+        if (n <= 0 || n > 512) return;
+        for (int i = 0; i < n; ++i) {
+            void* item = ListAt(list, i);
+            if (!item) continue;
+            const int id = ReadI32(item, x::ui::player::OffSlotItemId());
+            if (!IsPetItemId(id)) continue;
+            ++*outPets;
+            if (*outId == 0) *outId = id;
+        }
+    };
+    int n4 = -1, p4 = 0, id4 = 0, n5 = -1, p5 = 0, id5 = 0;
+    petsIn(4, &n4, &p4, &id4);
+    petsIn(5, &n5, &p5, &id5);
+    x::runtime::LogI("PetPort",
+                     "ItemType cash census t4 n=%d pets=%d id=%d t5 n=%d pets=%d id=%d "
+                     "(GetItem_Ex Cash=5)",
+                     n4, p4, id4, n5, p5, id5);
+}
+
 void ScanCashPets(PetCareState& out) {
+    LogCashItemTypeCensusOnce();
     void* list = GetSlotList(kItemTypeCash);
     if (!list) return;
     const int n = ListSize(list);
@@ -775,15 +808,13 @@ void ActivateJobOnMain(void* user) {
             return;
         }
         if (!gMiActivate && gCashMgrKlass) gMiActivate = ResolveActivateMi(gCashMgrKlass);
-        if (gMiActivate) ReportPetActLamp();
-        auto fn = (gMiActivate && gMiActivate->methodPointer)
-                      ? reinterpret_cast<FnActivatePet>(gMiActivate->methodPointer)
-                      : AtRva<FnActivatePet>(kRvaSendActivatePetRequest);
-        if (!fn) {
-            ReportPetActLamp();
+        ReportPetActLamp();
+        if (!gMiActivate || !gMiActivate->methodPointer) {
+            x::runtime::LogW("PetPort", "Activate: no MI (refuse RVA mid-fn jump)");
             return;
         }
-        fn(gCashMgr, job->pos, gMiActivate);
+        auto fn = reinterpret_cast<FnActivatePet>(gMiActivate->methodPointer);
+        fn(gCashMgr, job->pos, static_cast<int8_t>(-1), gMiActivate);
         job->ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         job->ok = false;

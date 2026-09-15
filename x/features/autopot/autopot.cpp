@@ -13,6 +13,7 @@
 #include "../ports/world_port.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <timeapi.h>
 
@@ -53,6 +54,28 @@ bool gPrevMpEnabled = false;
 bool gPrevLanded = false;
 DWORD gLandedAt = 0;
 DWORD gDualOneSince = 0;
+// 喝到目标线：跌破门槛后不是补一瓶就完，连喝到「门槛 + 带宽」再停。弱药把人长期
+// 吊在门槛边（upload 2026-09-09：5 瓶全在 27~29% 喝，之后再没高过 ~36%），一波多打就没了。
+// 药空 / 喝了不涨 → 立即退出补血带，免得 450ms 一次空喊。
+// 带宽自适应：VerifyPot 每次量到「一瓶回了几个百分点」就更新 EMA，带宽 = max(15%, 3 瓶的量)，
+// 封顶 40%；目标线不超 90%。新手药回 7% → 带 21%，门槛 30% 就补到 51%；白药回 45% → 一瓶就过线。
+bool gHpRefilling = false;
+float gHpHealPctEma = 0.f;  // 0 = 还没量过
+
+int HpRefillBandPct() {
+    int band = config::kHpRefillBandPct;
+    if (gHpHealPctEma > 0.f) {
+        const int byPots = static_cast<int>(std::lround(config::kHpRefillPotsWorth * gHpHealPctEma));
+        if (byPots > band) band = byPots;
+    }
+    if (band > config::kHpRefillBandMaxPct) band = config::kHpRefillBandMaxPct;
+    return band;
+}
+
+int HpRefillTargetPct(int hpTh) {
+    const int target = hpTh + HpRefillBandPct();
+    return target > config::kHpRefillCeilPct ? config::kHpRefillCeilPct : target;
+}
 
 std::atomic<bool> gWorkerStop{false};
 std::atomic<HANDLE> gWorkerThread{nullptr};
@@ -68,6 +91,7 @@ void ResetHpRuntime() {
     gHpBeforePot = -1;
     gHpEmptyStreak = 0;
     gHpIneffectiveStreak = 0;
+    gHpRefilling = false;
 }
 
 void ResetMpRuntime() {
@@ -93,6 +117,11 @@ void VerifyPot(DWORD& verifyAt, int& before, int& streak, DWORD& backoffUntil, D
                int cur, DWORD now, const char* tag) {
     if (!verifyAt || static_cast<int>(now - verifyAt) < 0) return;
     if (cur < 0) return;
+    // 量一瓶回多少（喝后 300ms 的净涨幅；中间被打只会量少，带宽只会偏宽，安全侧）。
+    if (before >= 0 && cur > before && std::strcmp(tag, "hp") == 0) {
+        const float heal = static_cast<float>(cur - before);
+        gHpHealPctEma = gHpHealPctEma > 0.f ? gHpHealPctEma * 0.5f + heal * 0.5f : heal;
+    }
     if (before >= 0 && cur <= before) {
         if (++streak >= config::kFailStreakLimit) {
             backoffUntil = now + config::kEmptyPotBackoffMs;
@@ -251,21 +280,36 @@ void Tick(DWORD now) {
     if (gHpBindMissUntil && static_cast<int>(now - gHpBindMissUntil) < 0) allowHp = false;
     if (gMpBindMissUntil && static_cast<int>(now - gMpBindMissUntil) < 0) allowMp = false;
 
-    if (hpPct >= hpTh) {
+    // 刚好等于门槛仍算要喝（BUILD198：210/696 截成 30%，门槛 30 时 `>=` 会把 empty-CD 清掉
+    // 却又不喝）。只有 **高于** 门槛才当健康，把 empty-CD / heal-stuck 清掉。
+    if (hpPct > hpTh) {
         gHpHealStuckUntil = 0;
         gHpEmptyCdUntil = 0;
         gHpEmptyStreak = 0;
         gHpIneffectiveStreak = 0;
     }
-    if (mpPct >= mpTh) {
+    if (mpPct > mpTh) {
         gMpHealStuckUntil = 0;
         gMpEmptyCdUntil = 0;
         gMpEmptyStreak = 0;
         gMpIneffectiveStreak = 0;
     }
 
-    const bool tryHp = allowHp && ((hpPct >= 0 && hpPct < hpTh) || hpEmergency);
-    const bool tryMp = allowMp && ((mpPct >= 0 && mpPct < mpTh) || mpEmergency);
+    // 补血带：到线即收；喝了不涨（heal-stuck / 软退避）也收，别在带里空转。
+    const int hpRefillTo = HpRefillTargetPct(hpTh);
+    if (gHpRefilling && (hpPct < 0 || hpPct >= hpRefillTo || hpHealStuck ||
+                         (gHpBackoffUntil && static_cast<int>(now - gHpBackoffUntil) < 0))) {
+        if (hpPct >= hpRefillTo)
+            x::runtime::LogI("AutoPot", "hp refill done hp=%d%% (>=%d%%, band=%d%% heal/pot~%.0f%%)",
+                             hpPct, hpRefillTo, HpRefillBandPct(), gHpHealPctEma);
+        gHpRefilling = false;
+    }
+    const bool hpRefill = gHpRefilling && hpPct >= 0 && hpPct < hpRefillTo;
+
+    // 面板「30%」= HP% ≤ 30 就喝。旧严格 `<` 让截断后刚好等于门槛的人永远不喝
+    //（同一 BIN 调到 40% 才正常：30 < 40）。
+    const bool tryHp = allowHp && ((hpPct >= 0 && hpPct <= hpTh) || hpEmergency || hpRefill);
+    const bool tryMp = allowMp && ((mpPct >= 0 && mpPct <= mpTh) || mpEmergency);
     if (!tryHp && !tryMp) return;
 
     // Prefer HP when both needed (保命优先); mage-first omitted in MVP.
@@ -278,10 +322,13 @@ void Tick(DWORD now) {
             gHpEmptyStreak = 0;
             gHpBeforePot = hpPct;
             gHpVerifyAt = now + config::kPotEffectDelayMs;
-            x::runtime::LogI("AutoPot", "act=hp pos=%d id=%d qty=%d hp=%d%%", fr.pos, fr.itemId,
-                             fr.qty, hpPct);
+            // 到门槛（含刚好等于）才起补血带；带内续喝不重复起。药剩 ≤1 瓶就别指望连喝了。
+            if (!gHpRefilling && hpPct <= hpTh && fr.qty > 1) gHpRefilling = true;
+            x::runtime::LogI("AutoPot", "act=hp pos=%d id=%d qty=%d hp=%d%%%s to=%d%%", fr.pos,
+                             fr.itemId, fr.qty, hpPct, hpRefill ? " (refill)" : "", hpRefillTo);
         } else if (!fr.ok) {
             gStats.hpPotionQty = -1;
+            gHpRefilling = false;
             gHpBindMissUntil = now + config::kBindMissBackoffMs;
             const char* why = fr.missWhy ? fr.missWhy : "unknown";
             static DWORD s_noHp = 0;
@@ -303,6 +350,7 @@ void Tick(DWORD now) {
             // 找到药但 qty 未降：按游戏 CD/拒用处理，勿在同窗连打进 heal-stuck。
             gStats.hpPotionQty = fr.qty;
             gLastHpPot = now;
+            gHpRefilling = false;
             gHpEmptyCdUntil = now + config::kEmptyUseCooldownMs;
             const bool countStreak =
                 !gHpLastEmptyStreakAt ||

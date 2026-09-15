@@ -4,7 +4,7 @@
 // MethodInfo swap never runs. Real drop gate calls thin IsAlertMode which is:
 //   mov eax,imm ; add/xor eax,[global] ; cmp [rcx+0x118],eax ; setnle
 // File-time decoded const==0 ⇒ stamp>0. That global has a single xref.
-// 09-03 dump：xor eax,[rip]（种子 0x7DEC9BA4 ^ 0x7DEC9BA4 = 0），不是 add。
+// 09-10 dump：xor eax,[rip]（种子 0x2E183506 ^ 0x2E183506 = 0），不是 add。
 //
 // v3 primary: rewrite that dword so decoded==INT_MAX → IsAlertMode always
 // false (出刀怎么刷 +0x118 都无空窗). Restore on disable. No GA .text / no HWBP.
@@ -32,21 +32,21 @@ using x::runtime::il2cpp::AtRva;
 
 // UserBase 父类. 短 IsAlertMode（CanPerformAction 真 callee）
 // IDA: mov eax,imm; xor eax,[rip]; cmp [rcx+0x118],eax; setnle（08-27 为 add）
-constexpr uint32_t kRvaIsAlertMode = 0x12545A0;
+constexpr uint32_t kRvaIsAlertMode = 0x12AE890;
 
 // Secondary: MethodInfo on DragManager.CanPerformAction (rarely hit; keep for MI callers)
 constexpr char kDragManagerClass[] =
-    "f2e6fe647a4bfed2fe2983206b46b73ea1dcc500bb62c2d539dc4f6276535ea";
-constexpr uint32_t kRvaCanPerformAction = 0x4CFBB0;
+    "c13c688b403f1a8b94b298fa7c2c9f71efbb1387150384f6bd3752a17ce465b";
+constexpr uint32_t kRvaCanPerformAction = 0x4D4360;
 constexpr char kUserAlertClass[] =
-    "db2b44b77b8e0b6f7cc2afaad5f17070b20b342d42ecd898aa70061f768d2ab";
+    "b294bd93aa7e13db6037be77316e311e5a2a2785e71ece309a5a6fa71874e84";
 constexpr char kHashIsAlertMode[] =
-    "a657adee5a2e87014cff1f1715720a514f9caca3b25e4d5943c71de86c91864";
+    "f040b7e32e6f281408e8342b9df2ca39e842da201b72d179c81e3b077ba16d2";
 constexpr char kHashCanPerformAction[] =
-    "e0ac016b2b5bc965a109cba93f01e48df0eef995d8926af45122fa7c5b56e26";
+    "ba83803d77cbdf50f963098d56357b60a66b5e13fe9ba52bbffe27bcf466f28";
 // UserBase alert stamp（int）：仅 shape 校验 cmp 偏移；主路径不再清字段
 constexpr char kHashAlertAt[] =
-    "d7d34628bac16e8ec6002b89e1730bbb9a0fa6588fe8eaf2a66b28c993b7c71";
+    "d6f9a4fb43f9816cee247cfb4b47e2b5b869248fc873437584ac99bac34b40d";
 constexpr size_t kFbAlertAt = 0x118;
 size_t gOffAlertAt = kFbAlertAt;
 #define kOffAlertAt (gOffAlertAt)

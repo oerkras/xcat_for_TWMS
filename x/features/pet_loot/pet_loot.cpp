@@ -374,11 +374,7 @@ void TickDropFallBoost() {
     }
 }
 
-void TickNativeVacHold() {
-    if (!gCfg.nativeVacEnabled) {
-        ports::drop::ReleaseByPetRectPack();
-        return;
-    }
+void HoldPetVacuumRect() {
     float vacW = 0.f, vacH = 0.f;
     xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
     static DWORD sMiss = 0;
@@ -386,7 +382,36 @@ void TickNativeVacHold() {
     const DWORD now = GetTickCount();
     if (!sMiss || now - sMiss > 2000) {
         sMiss = now;
-        LogLineOd("native-vac hold miss box=%.0fx%.0f", vacW, vacH);
+        LogLineOd("vac-rect hold miss box=%.0fx%.0f", vacW, vacH);
+    }
+}
+
+void TickNativeVacHold() {
+    if (!gCfg.nativeVacEnabled) {
+        if (!gCfg.enabled) ports::drop::ReleaseByPetRectPack();
+        return;
+    }
+    HoldPetVacuumRect();
+}
+
+void TickNativeVacStall(DWORD now) {
+    if (x::runtime::main_thread::IsCongested()) return;
+    const DWORD interval = xcat::PetLootClampIntervalMs(gCfg.intervalMs);
+    static DWORD sLast = 0;
+    if (sLast && now - sLast < interval) return;
+    sLast = now;
+    float vacW = 0.f, vacH = 0.f;
+    xcat::PetLootEffectiveVacuum(gCfg, vacW, vacH);
+    ports::drop::NativeVacStallResult sr{};
+    if (!ports::drop::TickNativeVacStall(vacW, vacH, CurrentSkipIds(), &sr)) return;
+    static DWORD sLog = 0;
+    if (sr.held > 0 || sr.touchAdded > 0 || sr.fallback > 0) {
+        if (!sLog || now - sLog > 2000) {
+            sLog = now;
+            LogLineOd("nativeVac stall held=%d stamp=%d touch=%d fb=%d exp=%d ready=%d drops=%d why=%s",
+                      sr.held, sr.stamped, sr.touchAdded, sr.fallback, sr.expiredRestored, sr.readyNear,
+                      sr.dropCount, sr.why ? sr.why : "?");
+        }
     }
 }
 
@@ -408,10 +433,11 @@ void Tick(DWORD now) {
         // 仍盖黑名单戳，否则原生脚边 50x60 会把箭矢舔走。
         simple_combat::SetHighValueLootUrgent(false);
         HoldSkipWhileYielding();
+        if (gCfg.enabled) HoldPetVacuumRect();
         static DWORD sCongLog = 0;
         if (!sCongLog || now - sCongLog > 2000) {
             sCongLog = now;
-            LogLineOd("yield pump_congested q=%d (defer loot for combat; skip-hold on)",
+            LogLineOd("yield pump_congested q=%d (pet box held; skip pump Send)",
                       x::runtime::main_thread::QueuedJobCount());
         }
         return;
@@ -454,18 +480,23 @@ void Tick(DWORD now) {
         simple_combat::SetHighValueLootUrgent(false);
     }
 
-    if (!simple_combat::IsLootPulseActive()) {
-        HoldSkipWhileYielding();
-        static DWORD sFireLog = 0;
-        if (!sFireLog || now - sFireLog > 2000) {
-            sFireLog = now;
-            LogLineOd("yield combat_fire_window (defer loot for Firing only; skip-hold on)");
-        }
-        return;
-    }
-
     // 人吸/脚下 due 拍也要喂 LiveSkip + 盖戳；原生宠 Tick 不跟面板档位走。
     HoldSkipWhileYielding();
+
+    const bool lootPulse = simple_combat::IsLootPulseActive();
+    if (!lootPulse) {
+        // 出刀窗：宠吸保持 ByPet 扩盒，官方宠 Tick 自己捡（与变态宠吸同路，不抢泵）。
+        // 人吸/脚下没有这条旁路，泵未堵时仍走下面一次官方口。
+        if (gCfg.enabled) {
+            HoldPetVacuumRect();
+            static DWORD sFireLog = 0;
+            if (!sFireLog || now - sFireLog > 2000) {
+                sFireLog = now;
+                LogLineOd("mode=petmap hold-during-fire box held (official pet tick; no pump Send)");
+            }
+        }
+        if (gCfg.enabled || (!gCfg.charVacEnabled && !gCfg.footEnabled)) return;
+    }
 
     // 人物直吸 = 宠吸控制面，主体换成角色；半盒 = vacuumW/H / 2（与宠吸共用全盒）；
     // 官方 Send 不写 LastTry，拒收必须靠 sentDropId AddStall；burst 跟面板（自设，硬顶 HardCap）。
@@ -804,6 +835,17 @@ DWORD WINAPI Worker(LPVOID) {
         const bool wantScrollNotify = gCfg.scrollDropNotify != 0;
         const bool wantSkip = gCfg.skipFilterEnabled != 0;
         const bool wantFall = gCfg.dropSnapLand != 0 || gCfg.dropAccelFall != 0;
+
+        static bool sNativeVacArmed = false;
+        if (wantNativeVac) {
+            sNativeVacArmed = true;
+        } else if (sNativeVacArmed) {
+            ports::drop::ReleaseNativeVacStall();
+            sNativeVacArmed = false;
+        } else {
+            ports::drop::PollNativeVacStallRelease();
+        }
+
         if (!wantFoot && !wantPet && !wantChar && !wantNativeVac && !wantScrollNotify &&
             !wantSkip && !wantFall) {
             ports::drop::ReleaseByPetRectPack();
@@ -819,6 +861,7 @@ DWORD WINAPI Worker(LPVOID) {
                 HoldSkipWhileYielding();
                 if (wantFall) TickDropFallBoost();
                 TickNativeVacHold();
+                TickNativeVacStall(now);
                 static DWORD sNvLog = 0;
                 if (!sNvLog || now - sNvLog > 2000) {
                     sNvLog = now;
@@ -831,7 +874,10 @@ DWORD WINAPI Worker(LPVOID) {
             Sleep(kIdleSleepMs);
             continue;
         }
-        ports::drop::ReleaseByPetRectPack();
+        if (wantPet && dropOk)
+            HoldPetVacuumRect();
+        else
+            ports::drop::ReleaseByPetRectPack();
 
         const bool petOk = !wantPet || ports::pet::EnsureBound();
         const bool anyReady = dropOk && (wantFoot || wantChar || (wantPet && petOk));
@@ -954,10 +1000,12 @@ void Init() {
 void Shutdown() { StopWorker(); }
 
 void ApplyConfig(const xcat::PetLootConfig& cfg) {
+    const bool wasNativeVac = gCfg.nativeVacEnabled != 0;
     gCfg = cfg;
     xcat::PetLootNormalize(gCfg);
     gSkipDirty = true;
-    if (!gCfg.nativeVacEnabled) ports::drop::ReleaseByPetRectPack();
+    if (wasNativeVac && !gCfg.nativeVacEnabled) ports::drop::ReleaseNativeVacStall();
+    if (!gCfg.nativeVacEnabled && !gCfg.enabled) ports::drop::ReleaseByPetRectPack();
 }
 
 void StartWorker() {

@@ -4,6 +4,7 @@
 #include "xcat_config_ini.h"
 #include "xcat_install_names.h"
 #include "xcat_log.h"
+#include "xcat_start_gate.h"
 #include "xcat_version.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -23,6 +24,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <cwctype>
 #include <filesystem>
 #include <mutex>
@@ -38,6 +40,10 @@ namespace xcat::app {
 namespace {
 
 constexpr size_t kMaxBytesPerLog = 512 * 1024;  // 与 payload 单文件轮转上限对齐（整文件收取）
+// hang 取证从头读：文件头含 reason / pump tid / 元数据锁；105 线程栈约 0.5–1 MiB。
+constexpr size_t kMaxBytesPerHangDump = 2 * 1024 * 1024;
+constexpr size_t kHangDumpsLight = 8;
+constexpr size_t kHangDumpsFull = 32;
 // 全量上限与 payload LogInit maxBackups / kLogUploadBackupsFull 对齐；收集时再按 mode 截断。
 constexpr size_t kMaxLogBackups = kLogUploadBackupsFull;
 // 会话创建未返回 maxFiles 时的保守上限（旧服务曾默认 512）。
@@ -376,6 +382,37 @@ bool ReadTailBytes(const std::string& path, size_t maxBytes, LogBlob& out) {
     return true;
 }
 
+/** 从头读：hang 取证的 reason / 主泵 tid / 锁状态都在文件头，不能用尾部截断。 */
+bool ReadHeadBytes(const std::string& path, size_t maxBytes, LogBlob& out) {
+    const std::wstring wide = xcat::Utf8ToWide(path);
+    if (wide.empty()) return false;
+
+    HANDLE file = CreateFileW(wide.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0) {
+        CloseHandle(file);
+        return false;
+    }
+
+    out.size = static_cast<uint64_t>(size.QuadPart);
+    out.truncated = out.size > maxBytes;
+    const DWORD toRead = static_cast<DWORD>(std::min<uint64_t>(out.size, maxBytes));
+
+    std::string data(toRead, '\0');
+    DWORD read = 0;
+    const BOOL ok = toRead == 0 || ReadFile(file, data.data(), toRead, &read, nullptr);
+    CloseHandle(file);
+    if (!ok) return false;
+
+    data.resize(read);
+    out.bytes = std::move(data);
+    return true;
+}
+
 void AddLogIfPresent(std::vector<LogBlob>& logs, const std::string& name,
                      const std::string& source, const std::string& path) {
     if (path.empty()) return;
@@ -487,6 +524,86 @@ void AddFeatureChannelLogs(std::vector<LogBlob>& logs, const char* payloadBinDir
         AddLogIfPresent(logs, leaf, "rtcache/logs/" + leaf,
                         xcat::WideToUtf8(it->path().wstring()));
         already.insert(leaf);
+    }
+}
+
+bool IsHangAutopsyLeaf(const std::string& leaf) {
+    if (leaf.size() < 10) return false;
+    if (leaf.find('/') != std::string::npos || leaf.find('\\') != std::string::npos) return false;
+    if (leaf.rfind("hang_", 0) != 0) return false;
+    auto ends_with_ci = [](std::string_view s, std::string_view suf) {
+        if (s.size() < suf.size()) return false;
+        for (size_t i = 0; i < suf.size(); ++i) {
+            const unsigned char a = static_cast<unsigned char>(s[s.size() - suf.size() + i]);
+            const unsigned char b = static_cast<unsigned char>(suf[i]);
+            if (std::tolower(a) != std::tolower(b)) return false;
+        }
+        return true;
+    };
+    return ends_with_ci(leaf, ".txt");
+}
+
+/**
+ * 扫 rtcache/logs/hang/hang_*.txt。
+ * AddFeatureChannelLogs 只扫 logs 根、且只认 .log/.jsonl，卡死取证进不了包。
+ * PUT 名用叶名（URL 不能带斜杠）；source 保留 rtcache/logs/hang/...。
+ */
+void AddHangAutopsyLogs(std::vector<LogBlob>& logs, const char* payloadBinDir, size_t maxFiles) {
+    if (!payloadBinDir || !payloadBinDir[0] || maxFiles == 0) return;
+    namespace fs = std::filesystem;
+    const std::string hangDirUtf8 = xcat::JoinBinPath(payloadBinDir, "logs\\hang");
+    std::error_code ec;
+    const fs::path hangDir(xcat::Utf8ToWide(hangDirUtf8));
+    if (!fs::is_directory(hangDir, ec)) return;
+
+    struct Cand {
+        std::string leaf;
+        fs::path path;
+        fs::file_time_type mtime{};
+    };
+    std::vector<Cand> cands;
+    for (fs::directory_iterator it(hangDir, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec) || ec) continue;
+        const std::string leaf = xcat::WideToUtf8(it->path().filename().wstring());
+        if (!IsHangAutopsyLeaf(leaf)) continue;
+        Cand c;
+        c.leaf = leaf;
+        c.path = it->path();
+        c.mtime = it->last_write_time(ec);
+        cands.push_back(std::move(c));
+    }
+    if (cands.empty()) return;
+
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+        if (a.leaf != b.leaf) return a.leaf > b.leaf;
+        return a.mtime > b.mtime;
+    });
+
+    std::unordered_set<std::string> already;
+    already.reserve(logs.size() + cands.size());
+    for (const LogBlob& b : logs) {
+        if (!b.name.empty()) already.insert(b.name);
+    }
+
+    size_t added = 0;
+    size_t truncated = 0;
+    for (const Cand& c : cands) {
+        if (added >= maxFiles) break;
+        if (already.count(c.leaf)) continue;
+        LogBlob blob{};
+        blob.name = c.leaf;
+        blob.source = "rtcache/logs/hang/" + c.leaf;
+        if (!ReadHeadBytes(xcat::WideToUtf8(c.path.wstring()), kMaxBytesPerHangDump, blob)) continue;
+        if (blob.bytes.empty() && blob.size == 0) continue;
+        if (blob.truncated) truncated += 1;
+        already.insert(c.leaf);
+        logs.push_back(std::move(blob));
+        added += 1;
+    }
+    if (added) {
+        xcat::log::Info("LogUpload", "hang autopsy files=%zu truncated=%zu dir=%s", added,
+                        truncated, hangDirUtf8.c_str());
     }
 }
 
@@ -875,6 +992,10 @@ CollectedLogs CollectLogs(const LogUploadRequest& req) {
     // 功能频道日志：combat / foothold / petloot / invuln / auto_enter …（白名单未列的一律扫入）。
     AddFeatureChannelLogs(out.logs, req.payloadBinDir.c_str(), backups);
 
+    // 卡死取证：rtcache/logs/hang/hang_*.txt（子目录，不进频道扫）。
+    AddHangAutopsyLogs(out.logs, req.payloadBinDir.c_str(),
+                       req.mode == LogUploadMode::Full ? kHangDumpsFull : kHangDumpsLight);
+
     // 上一版本遗留日志：更新器删旧目录前拷入 rtcache\logs\prev（旧目录已不存在）。
     {
         namespace fs = std::filesystem;
@@ -1095,7 +1216,203 @@ bool WriteDeviceIdFile(const std::string& path, const std::string& id) {
     return n == body.size();
 }
 
-bool PersistDeviceIdToUserIni(const char* payloadBinDir, const std::string& id) {
+std::string NormalizeHwfp(std::string s);
+bool        IsHwfpHex(const std::string& s);
+
+std::string HwfpInstallPath(const char* payloadBinDir) {
+    if (!payloadBinDir || !payloadBinDir[0]) return {};
+    std::string path = payloadBinDir;
+    if (path.back() != '\\' && path.back() != '/') path.push_back('\\');
+    path += "state\\hw.dat";
+    return path;
+}
+
+std::string HwfpMachinePathForInstall(const char* payloadBinDir) {
+    const std::string dir = DeviceIdMachineDir();
+    if (dir.empty()) return {};
+    const std::string key = NormalizeInstallKey(payloadBinDir);
+    if (key.empty()) return dir + "\\hw.dat";
+    char name[32]{};
+    std::snprintf(name, sizeof(name), "\\hw_%08x.dat", HashInstallKey(key));
+    return dir + name;
+}
+
+bool ReadHwfpFile(const std::string& path, std::string& out) {
+    out.clear();
+    if (path.empty()) return false;
+    const DWORD attr = GetFileAttributesA(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+    char buf[80]{};
+    const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return false;
+    std::string s(buf, n);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' ||
+                          s.back() == '\t' || s.back() == '\0')) {
+        s.pop_back();
+    }
+    s = NormalizeHwfp(std::move(s));
+    if (s.empty()) return false;
+    out = std::move(s);
+    return true;
+}
+
+bool WriteHwfpFile(const std::string& path, const std::string& fp) {
+    if (path.empty() || !IsHwfpHex(fp)) return false;
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(xcat::Utf8ToWide(path)).parent_path(),
+                                        ec);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) return false;
+    const std::string body = fp + "\n";
+    const size_t n = fwrite(body.data(), 1, body.size(), f);
+    fclose(f);
+    return n == body.size();
+}
+
+void PersistHwfpSidecars(const char* payloadBinDir, const std::string& fp) {
+    if (fp.empty()) return;
+    (void)WriteHwfpFile(HwfpInstallPath(payloadBinDir), fp);
+    (void)WriteHwfpFile(HwfpMachinePathForInstall(payloadBinDir), fp);
+}
+
+// 任一份记下的指纹与当前机不一致 → 换机/克隆（含只删了 user.ini 那一行）。
+// 全空才当真正的老安装。仅-GUID 的 v1 不算不一致。
+bool StoredHwfpRequiresRemint(const xcat::IniStore& ini, const char* payloadBinDir,
+                              const std::string& liveFp, const std::string& v1Fp) {
+    std::string vals[3];
+    std::string tmp;
+    if (xcat::IniGetString(ini, "log_upload", "hwfp", tmp)) vals[0] = NormalizeHwfp(std::move(tmp));
+    (void)ReadHwfpFile(HwfpInstallPath(payloadBinDir), vals[1]);
+    (void)ReadHwfpFile(HwfpMachinePathForInstall(payloadBinDir), vals[2]);
+    for (const std::string& stored : vals) {
+        if (stored.empty()) continue;
+        if (stored == liveFp) continue;
+        if (!v1Fp.empty() && stored == v1Fp) continue;
+        return true;
+    }
+    return false;
+}
+
+std::string Sha256HexLower(const void* data, size_t len) {
+    if (!data || len == 0) return {};
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return {};
+    uint8_t hash[32]{};
+    const NTSTATUS st =
+        BCryptHash(alg, nullptr, 0, static_cast<PUCHAR>(const_cast<void*>(data)),
+                   static_cast<ULONG>(len), hash, sizeof(hash));
+    BCryptCloseAlgorithmProvider(alg, 0);
+    if (st != 0) return {};
+    char hex[65]{};
+    for (int i = 0; i < 32; ++i) std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
+    return hex;
+}
+
+std::string ReadMachineGuidLower() {
+    wchar_t buf[80]{};
+    DWORD cb = sizeof(buf);
+    const LSTATUS err =
+        RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", L"MachineGuid",
+                     RRF_RT_REG_SZ, nullptr, buf, &cb);
+    if (err != ERROR_SUCCESS || !buf[0]) return {};
+    std::string g = xcat::WideToUtf8(buf);
+    for (char& c : g) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return g;
+}
+
+bool IsHwfpHex(const std::string& s) {
+    if (s.size() != 64) return false;
+    return std::all_of(s.begin(), s.end(),
+                       [](unsigned char c) { return std::isxdigit(c) != 0; });
+}
+
+std::string NormalizeHwfp(std::string s) {
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return IsHwfpHex(s) ? s : std::string();
+}
+
+bool UuidBytesUseless(const uint8_t u[16]) {
+    bool allZero = true;
+    bool allFf = true;
+    for (int i = 0; i < 16; ++i) {
+        if (u[i] != 0) allZero = false;
+        if (u[i] != 0xFF) allFf = false;
+    }
+    return allZero || allFf;
+}
+
+// SMBIOS Type 1 UUID 在固件/虚拟机配置里，不在被克隆的 Windows 磁盘上。
+// 整盘/虚拟机 Clone 通常会换这份 UUID，MachineGuid 却跟着注册表走。
+std::string ReadSmbiosSystemUuidHex() {
+    const DWORD provider = 0x52534D42u;  // 'RSMB'
+    const UINT need = GetSystemFirmwareTable(provider, 0, nullptr, 0);
+    if (need < 8 + 0x19) return {};
+    std::vector<uint8_t> buf(need);
+    const UINT got = GetSystemFirmwareTable(provider, 0, buf.data(), need);
+    if (got < 8 + 0x19 || got > buf.size()) return {};
+    uint32_t tableLen = 0;
+    std::memcpy(&tableLen, buf.data() + 4, sizeof(tableLen));
+    if (tableLen < 0x19 || tableLen > got - 8) return {};
+    const uint8_t* p = buf.data() + 8;
+    const uint8_t* const end = p + tableLen;
+    while (p + 4 <= end) {
+        const uint8_t type = p[0];
+        const uint8_t len = p[1];
+        if (len < 4 || p + len > end) break;
+        if (type == 1 && len >= 0x19) {
+            const uint8_t* uuid = p + 8;
+            if (UuidBytesUseless(uuid)) return {};
+            char hex[33]{};
+            for (int i = 0; i < 16; ++i) std::snprintf(hex + i * 2, 3, "%02x", uuid[i]);
+            return hex;
+        }
+        if (type == 127) break;
+        const uint8_t* q = p + len;
+        while (q + 1 < end && !(q[0] == 0 && q[1] == 0)) ++q;
+        if (q + 1 >= end) break;
+        p = q + 2;
+    }
+    return {};
+}
+
+struct HwfpState {
+    std::string v1;
+    std::string live;
+};
+
+const HwfpState& HwfpCached() {
+    static HwfpState s;
+    static std::once_flag once;
+    std::call_once(once, []() {
+        const std::string guid = ReadMachineGuidLower();
+        if (guid.empty()) return;
+        const std::string m1 = std::string("twms-hwfp|") + guid;
+        s.v1 = Sha256HexLower(m1.data(), m1.size());
+        const std::string smbios = ReadSmbiosSystemUuidHex();
+        if (smbios.empty()) {
+            s.live = s.v1;
+            return;
+        }
+        const std::string m2 = std::string("twms-hwfp|v2|") + guid + "|" + smbios;
+        s.live = Sha256HexLower(m2.data(), m2.size());
+    });
+    return s;
+}
+
+// 现用指纹：能读到 SMBIOS UUID 时混入 v2（防整盘克隆）；否则退回仅 MachineGuid 的 v1。
+std::string CurrentHwfp() { return HwfpCached().live; }
+
+std::string CurrentHwfpV1() { return HwfpCached().v1; }
+
+bool PersistDeviceIdToUserIni(const char* payloadBinDir, const std::string& id,
+                              const std::string& hwfp) {
     if (!payloadBinDir || !payloadBinDir[0] || !IsValidDeviceId(id)) return false;
     const std::string path = xcat::UserConfigIniPath(payloadBinDir);
     return xcat::UpdateIniFile(path.c_str(), [&](xcat::IniStore& store) {
@@ -1106,6 +1423,7 @@ bool PersistDeviceIdToUserIni(const char* payloadBinDir, const std::string& id) 
             xcat::IniSetU32(store, "log_upload", "version", kLogUploadIniVersion);
         }
         xcat::IniSetString(store, "log_upload", "deviceId", id.c_str());
+        if (!hwfp.empty()) xcat::IniSetString(store, "log_upload", "hwfp", hwfp.c_str());
     });
 }
 
@@ -1173,27 +1491,46 @@ std::string EnsureDeviceId(const char* payloadBinDir) {
     const bool iniExists =
         GetFileAttributesA(iniPath.c_str()) != INVALID_FILE_ATTRIBUTES;
 
+    const std::string liveFp = CurrentHwfp();
+
+    auto persistId = [&](const std::string& id) {
+        if (!PersistDeviceIdToUserIni(payloadBinDir, id, liveFp)) {
+            xcat::log::Warn("LogUpload", "persist deviceId failed path=%s", iniPath.c_str());
+        }
+        PersistHwfpSidecars(payloadBinDir, liveFp);
+        if (!PersistDeviceIdMirrors(payloadBinDir, id)) {
+            xcat::log::Warn("LogUpload", "persist machine deviceId failed");
+        }
+    };
+
+    auto adoptId = [&](std::string id) -> std::string {
+        if (!liveFp.empty() &&
+            StoredHwfpRequiresRemint(ini, payloadBinDir, liveFp, CurrentHwfpV1())) {
+            // 换物理机 / 整盘克隆 / 只删了 ini 里的 hwfp 但 sidecar 还在。
+            // 重发 deviceId；激活缓存仍绑旧 id → 必须再贴卡。
+            const std::string neu = NewDeviceId();
+            xcat::log::Warn("LogUpload",
+                            "hwfp mismatch; new deviceId, activation cache will not match");
+            persistId(neu);
+            return remember(neu);
+        }
+        persistId(id);
+        return remember(std::move(id));
+    };
+
     if (iniLoaded) {
         std::string id;
         if (xcat::IniGetString(ini, "log_upload", "deviceId", id) && IsValidDeviceId(id)) {
-            (void)PersistDeviceIdMirrors(payloadBinDir, id);
-            return remember(std::move(id));
+            return adoptId(std::move(id));
         }
     }
 
     if (haveMirror) {
-        if (!iniExists || iniLoaded) {
-            if (!PersistDeviceIdToUserIni(payloadBinDir, mirrorId)) {
-                xcat::log::Warn("LogUpload", "heal user.ini deviceId failed path=%s",
-                                iniPath.c_str());
-            }
-        } else {
+        if (iniExists && !iniLoaded) {
             xcat::log::Warn("LogUpload",
                             "user.ini unreadable; reusing machine deviceId (not rewriting ini)");
         }
-        // 旧 id.dat 迁到路径分片，避免继续被其他安装目录覆盖。
-        (void)PersistDeviceIdMirrors(payloadBinDir, mirrorId);
-        return remember(std::move(mirrorId));
+        return adoptId(std::move(mirrorId));
     }
 
     if (iniExists && !iniLoaded) {
@@ -1207,12 +1544,7 @@ std::string EnsureDeviceId(const char* payloadBinDir) {
     }
 
     const std::string id = NewDeviceId();
-    if (!PersistDeviceIdToUserIni(payloadBinDir, id)) {
-        xcat::log::Warn("LogUpload", "persist deviceId failed path=%s", iniPath.c_str());
-    }
-    if (!PersistDeviceIdMirrors(payloadBinDir, id)) {
-        xcat::log::Warn("LogUpload", "persist machine deviceId failed");
-    }
+    persistId(id);
     return remember(id);
 }
 
@@ -1270,7 +1602,8 @@ std::wstring SanitizeUploadHdr(const std::wstring& in) {
     return out;
 }
 
-// 让 /v1/logs* 门禁能认设备（OPS 拉取封禁机日志时靠此匹配 pending）。
+// 让 /v1/logs* 门禁能认设备（OPS 拉取封禁机日志时靠此匹配 pending），
+// 并带派生凭证供服务端把上传写进 catalog.uid（整张卡不上网）。
 std::wstring BuildLogUploadIdentityHeaders(const std::string& payloadBinDir) {
     const ClientHostIdentity id = ResolveClientHostIdentityImpl(payloadBinDir);
     const std::string token = LoadOpsToken(payloadBinDir);
@@ -1280,15 +1613,34 @@ std::wstring BuildLogUploadIdentityHeaders(const std::string& payloadBinDir) {
         macJoined += id.macs[i];
         if (macJoined.size() > 180) break;
     }
-    wchar_t buf[768]{};
-    _snwprintf(buf, 768,
-               L"X-XCat-Machine: %s\r\nX-XCat-Device-Id: %s\r\n"
-               L"X-XCat-Mac: %s\r\nX-XCat-Token: %s\r\n",
-               SanitizeUploadHdr(xcat::Utf8ToWide(id.machine)).c_str(),
-               SanitizeUploadHdr(xcat::Utf8ToWide(id.deviceId)).c_str(),
-               SanitizeUploadHdr(xcat::Utf8ToWide(macJoined)).c_str(),
-               SanitizeUploadHdr(xcat::Utf8ToWide(token)).c_str());
-    return buf;
+    std::wstring out;
+    auto appendHdr = [](std::wstring& dst, const wchar_t* name, const std::wstring& value) {
+        dst += name;
+        dst += L": ";
+        dst += value;
+        dst += L"\r\n";
+    };
+    appendHdr(out, L"X-XCat-Machine", SanitizeUploadHdr(xcat::Utf8ToWide(id.machine)));
+    appendHdr(out, L"X-XCat-Device-Id", SanitizeUploadHdr(xcat::Utf8ToWide(id.deviceId)));
+    appendHdr(out, L"X-XCat-Mac", SanitizeUploadHdr(xcat::Utf8ToWide(macJoined)));
+    appendHdr(out, L"X-XCat-Token", SanitizeUploadHdr(xcat::Utf8ToWide(token)));
+
+    // 与探活同一口径：HMAC 派生凭证绑定 ts + deviceId。过长不截断（截了必验不过）。
+    if (!payloadBinDir.empty()) {
+        const long long nowSec = static_cast<long long>(::time(nullptr));
+        const std::string proof = xcat::gate::BuildGateProof(payloadBinDir, id.deviceId, nowSec);
+        if (proof.empty()) {
+            const std::string cached = xcat::gate::LoadActivatedGateToken(payloadBinDir, id.deviceId);
+            if (!cached.empty()) {
+                xcat::log::Warn("LogUpload", "gate proof empty despite cached token");
+            }
+        } else if (proof.size() > 400) {
+            xcat::log::Warn("LogUpload", "gate proof too long n=%zu; not sending", proof.size());
+        } else {
+            appendHdr(out, L"X-XCat-Gate-Proof", SanitizeUploadHdr(xcat::Utf8ToWide(proof)));
+        }
+    }
+    return out;
 }
 
 HttpResult HttpExchangeOnce(const ParsedUrl& base, const std::wstring& path, const wchar_t* method,
@@ -1490,11 +1842,12 @@ bool IsUploadKeepFirst(const std::string& name) {
     if (name.empty()) return false;
     if (name == "lie_events.zip" || name.rfind("lie_events", 0) == 0) return true;
     if (name.rfind("freeze_incident", 0) == 0) return true;
+    if (name.rfind("hang_", 0) == 0) return true;
     return false;
 }
 
 /**
- * 会话文件上限裁剪：优先保留 lie/freeze 与当前卷，再按轮转序号从小到大（新→旧）。
+ * 会话文件上限裁剪：优先保留 lie/freeze/hang 与当前卷，再按轮转序号从小到大（新→旧）。
  * 全量模式可收 360×多频道，超过服务端 maxFiles 时否则 PUT 400 整单失败。
  */
 void TrimLogsToMaxFiles(std::vector<LogBlob>& logs, size_t maxFiles) {
@@ -1779,6 +2132,8 @@ ClientHostIdentity ResolveClientHostIdentityImpl(const std::string& payloadBinDi
     ClientHostIdentity out;
     out.machine = MachineName();
     out.deviceId = EnsureDeviceId(payloadBinDir.c_str());
+    out.hwfp = CurrentHwfp();
+    out.hwfpV1 = CurrentHwfpV1();
     out.macs = CollectLocalMacs();
     return out;
 }

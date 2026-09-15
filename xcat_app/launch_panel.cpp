@@ -1,4 +1,4 @@
-﻿#include "launch_panel.h"
+#include "launch_panel.h"
 #include "app_dpi.h"
 #include "app_event_log.h"
 #include "app_notify.h"

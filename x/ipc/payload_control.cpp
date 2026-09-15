@@ -418,6 +418,12 @@ void ApplyEncounterFromControl(const xcat::PayloadControl& c) {
 }
 
 void ApplyControl(const xcat::PayloadControl& c) {
+    // 指定频只改原子量，必须赶在 SetDesired 之前：登录冻结会在下面 return，
+    // 进图后才灌则冷启 auto_enter 已经 PickOpen 完了（指定频 33 进了随机频）。
+    x::features::channel_hop::SetReconnectHopEnabled(c.mobGatherReconnectHop != 0);
+    x::features::channel_hop::SetReconnectHopPin(
+        c.mobGatherReconnectHop != 0 && c.mobGatherReconnectHopPin != 0,
+        static_cast<int>(xcat::ClampMobGatherReconnectHopChannel(c.mobGatherReconnectHopChannel)));
     // 登录阶段只灌 auto_enter：BIN 11:47 在 LOGIN worker 里 Poll→Apply 打开了
     // invuln/加速/打怪/Travel MI，随后进程闪退。play-ready 前禁止玩法开关。
     x::features::auto_enter::SetDesired(c.autoEnter != 0, c.worldId, c.worldName, c.charSlot);
@@ -427,6 +433,9 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::galaxy_token_probe::SetEnabled(c.galaxyTokenProbe != 0);
     x::features::soft_login_probe::SetEnabled(c.softLoginProbe != 0);
     ApplySoftLoginDismissSeq(c);
+    // 1.00X 否决必须先于 SetDesired / worker boot pin，否则 play-ready 空窗会先写无敌再清。
+    x::features::invuln::SetWalkGlideVeto(c.simpleCombatFlySpeedPct <=
+                                         xcat::kHeliWalkGlideSpeedPct);
     if (x::runtime::managed_main::IsLoginFrozen() ||
         !x::features::ports::world::IsPlayReady()) {
         static bool sLoggedDefer = false;
@@ -445,6 +454,7 @@ void ApplyControl(const xcat::PayloadControl& c) {
 
     // 落地空窗会挨打：无敌在 play-ready 后立刻灌。遇人检测同样立刻灌，不得等 ForceApply。
     // 战斗/飞/攻速仍等到 ForceApply，避免一进图就跟冷绑抢泵。
+    // veto 已在登录闸前同步；此处只灌 desired（EffectiveOn 已含 1.00X 否决）。
     x::features::invuln::SetDesired(c.invuln != 0);
     ApplyEncounterFromControl(c);
     if (!gPlayBootApplyReady.load()) {
@@ -519,6 +529,8 @@ void ApplyControl(const xcat::PayloadControl& c) {
     x::features::ports::mob_fh_ban::SetHopPx(static_cast<float>(c.mobGatherHopPx));
     x::features::ports::mob_gather::SetSlowNearOnly(c.mobGatherSlowNearOnly != 0);
     x::features::ports::mob_gather::SetSlowNearPx(c.mobGatherSlowNearPx);
+    x::features::ports::mob_gather::SetSkipSlowTpl(c.mobGatherSkipSlowTpl != 0);
+    x::features::ports::mob_gather::SetSkipSlowSpeed(c.mobGatherSkipSlowSpeed);
     x::features::ports::mob_fh_ban::SetWzLeash(c.mobGatherWzLeashOn != 0,
                                               static_cast<float>(c.mobGatherWzLeashSlowPx));
     x::features::ports::mob_gather::SetSpeedPct(c.mobGatherSpeedPct);
@@ -550,7 +562,6 @@ void ApplyControl(const xcat::PayloadControl& c) {
     (void)c.mobGatherAntiReport;
     x::features::ports::mob_prevpos_patch::SetEnabled(false);
     x::features::ports::mob_gather::SetHomeReturn(c.mobGatherHomeReturn != 0);
-    x::features::channel_hop::SetReconnectHopEnabled(c.mobGatherReconnectHop != 0);
     x::features::ports::mob_gather::SetHomePos(
         c.mobGatherHomeX, c.mobGatherHomeY, c.mobGatherHomeMapId, c.mobGatherHomeValid != 0,
         c.mobGatherHomeHasMap != 0);

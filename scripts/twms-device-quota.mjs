@@ -2,13 +2,18 @@
  * TWMS 台数配额（产品=经典版）。
  *
  * 与 gate/1 启动激活门配套：客户端探活带 X-XCat-Gate-Token（个人签名 TOKEN）。
- * 本模块用内嵌公钥验签取出可信 uid，按 uid 累计已激活的 deviceId 集合，超过
+ * 本模块用内嵌公钥验签取出可信 uid，按 uid 累计已激活的「物理机」集合，超过
  * 该 uid 的台数上限则拒（access.json 返回 allowed:false, reason:quota）。
+ *
+ * 槽位键：有硬件指纹时用 `h:{hwfp}`，否则退回 `id:{deviceId}`。
+ * 整包拷到另一台 PC（MachineGuid 变了）必须占新名额；同机复制/换目录共用指纹，不占第二台。
+ * 同一 deviceId 配上不同 hwfp = 改过的客户端想沿用旧 id 钻空，仍按新机算。
  *
  * 设计要点：
  *  - 台账 device-quota.json 存 { defaultMax, agingDays, users: { uid: { max, devices } } }。
  *  - max<=0 视为不限（默认 opt-in：未显式配上限的人不受限，避免误锁）。
- *  - devices[deviceId] = lastSeen(ISO)；agingDays>0 时超期设备计数前自动释放。
+ *  - devices[slotKey] = { lastSeen, deviceId, hwfp }；老台账 devices[deviceId]=ISO 字符串仍认。
+ *  - agingDays>0 时超期设备计数前自动释放。
  *  - uid 由验签得到，客户端改头伪造别人 uid 需要私钥 → 做不到。
  *  - 无 gateToken（老客户端 / 未升级）时本模块放行，不阻断存量。
  */
@@ -42,7 +47,7 @@ export function createDeviceQuota(opts) {
   const proofSkewSec = Number.isFinite(opts.proofSkewSec)
     ? Math.max(60, Math.floor(opts.proofSkewSec))
     : 900;
-  /** @type {Map<string, { max: number, devices: Map<string, string> }>} */
+  /** @type {Map<string, { max: number, devices: Map<string, { lastSeen: string, hwfp: string, deviceId: string }> }>} */
   const users = new Map();
   let saveChain = Promise.resolve();
 
@@ -200,6 +205,70 @@ export function createDeviceQuota(opts) {
     return String(deviceId || "").trim().slice(0, 64);
   }
 
+  function normHwfp(hwfp) {
+    const s = String(hwfp || "")
+      .trim()
+      .toLowerCase();
+    if (!/^[0-9a-f]{16,64}$/.test(s)) return "";
+    return s.slice(0, 64);
+  }
+
+  /** @param {{ lastSeen?: string, hwfp?: string, deviceId?: string }} slot */
+  function keyOf(slot) {
+    if (slot.hwfp) return `h:${slot.hwfp}`;
+    if (slot.deviceId) return `id:${slot.deviceId}`;
+    return "";
+  }
+
+  function makeSlot(deviceId, lastSeen, hwfp) {
+    return {
+      lastSeen: lastSeen || ts(),
+      hwfp: normHwfp(hwfp),
+      deviceId: normDevice(deviceId),
+    };
+  }
+
+  function ingestDeviceEntry(rawKey, seen) {
+    const k = String(rawKey || "");
+    let deviceId = "";
+    let hwfp = "";
+    if (k.startsWith("h:")) hwfp = normHwfp(k.slice(2));
+    else if (k.startsWith("id:")) deviceId = normDevice(k.slice(3));
+    else deviceId = normDevice(k);
+    if (seen && typeof seen === "object" && !Array.isArray(seen)) {
+      return makeSlot(seen.deviceId || deviceId, seen.lastSeen, seen.hwfp || hwfp);
+    }
+    return makeSlot(deviceId, seen, hwfp);
+  }
+
+  function findExistingKey(rec, dev, fp, fpV1) {
+    if (fp && rec.devices.has(`h:${fp}`)) return `h:${fp}`;
+    if (fp) {
+      for (const [k, slot] of rec.devices) {
+        if (slot.hwfp === fp) return k;
+      }
+    }
+    // 同机把仅-MachineGuid 的 v1 槽迁到混了 SMBIOS 的 v2。必须 deviceId 也对上，
+    // 否则整盘克隆重发了新 id 却会凭相同 MachineGuid 把原机槽偷走。
+    if (fp && fpV1 && fp !== fpV1 && rec.devices.has(`h:${fpV1}`)) {
+      const slot = rec.devices.get(`h:${fpV1}`);
+      if (!dev || !slot.deviceId || slot.deviceId === dev) return `h:${fpV1}`;
+    }
+    if (dev && rec.devices.has(`id:${dev}`)) {
+      const slot = rec.devices.get(`id:${dev}`);
+      if (fp && slot.hwfp && slot.hwfp !== fp) return "";
+      return `id:${dev}`;
+    }
+    if (dev) {
+      for (const [k, slot] of rec.devices) {
+        if (slot.deviceId !== dev) continue;
+        if (fp && slot.hwfp && slot.hwfp !== fp) return "";
+        return k;
+      }
+    }
+    return "";
+  }
+
   // lastSeen 解析不出来（老台账手工编辑坏了）时返回 -1，调用方按「未知」处理而不是当成刚见过。
   function idleSecOf(lastSeen, now) {
     const t = Date.parse(lastSeen);
@@ -210,8 +279,8 @@ export function createDeviceQuota(opts) {
   function pruneAged(rec) {
     if (agingDays <= 0) return;
     const cutoff = Date.now() - agingDays * 86400 * 1000;
-    for (const [dev, seen] of [...rec.devices.entries()]) {
-      const t = Date.parse(seen);
+    for (const [dev, slot] of [...rec.devices.entries()]) {
+      const t = Date.parse(slot.lastSeen);
       if (Number.isFinite(t) && t < cutoff) rec.devices.delete(dev);
     }
   }
@@ -233,8 +302,9 @@ export function createDeviceQuota(opts) {
         const devices = new Map();
         const dsrc = rec?.devices && typeof rec.devices === "object" ? rec.devices : {};
         for (const [dev, seen] of Object.entries(dsrc)) {
-          const d = normDevice(dev);
-          if (d) devices.set(d, String(seen || ts()));
+          const slot = ingestDeviceEntry(dev, seen);
+          const key = keyOf(slot);
+          if (key) devices.set(key, slot);
         }
         users.set(String(uid).slice(0, 64), { max, devices });
       }
@@ -250,10 +320,17 @@ export function createDeviceQuota(opts) {
         await fs.mkdir(path.dirname(quotaPath), { recursive: true });
         const usersObj = {};
         for (const [uid, rec] of [...users.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-          usersObj[uid] = {
-            max: rec.max,
-            devices: Object.fromEntries([...rec.devices.entries()]),
-          };
+          const devices = {};
+          for (const [k, slot] of [...rec.devices.entries()].sort((a, b) =>
+            a[0].localeCompare(b[0]),
+          )) {
+            devices[k] = {
+              lastSeen: slot.lastSeen,
+              deviceId: slot.deviceId,
+              ...(slot.hwfp ? { hwfp: slot.hwfp } : {}),
+            };
+          }
+          usersObj[uid] = { max: rec.max, devices };
         }
         const body = `${JSON.stringify({ version: 1, updatedAt: ts(), defaultMax, agingDays, users: usersObj }, null, 2)}\n`;
         const tmp = `${quotaPath}.tmp`;
@@ -267,12 +344,14 @@ export function createDeviceQuota(opts) {
   // 探活判定：返回 { enabled, allowed, reason, uid, used, max }。
   // 未启用（无公钥）或无 gateToken/验签失败 → allowed:true（不阻断），仅 enabled/uid 反映情况。
   // claims 可由调用方预先验好传入（探活路径已经验过一次，别重复做 ECDSA/HMAC）。
-  function evaluate({ gateToken, gateProof, deviceId, claims }) {
+  function evaluate({ gateToken, gateProof, deviceId, hwfp, hwfpV1, claims }) {
     if (!enabled()) return { enabled: false, allowed: true, reason: "", uid: "", used: 0, max: 0 };
     const verified =
       claims || verifyGateProof(gateProof, deviceId) || verifyGateToken(gateToken);
     if (!verified) return { enabled: true, allowed: true, reason: "", uid: "", used: 0, max: 0 };
     const dev = normDevice(deviceId);
+    const fp = normHwfp(hwfp);
+    const fpV1 = normHwfp(hwfpV1);
     const uid = verified.uid;
     let rec = users.get(uid);
     if (!rec) {
@@ -281,16 +360,20 @@ export function createDeviceQuota(opts) {
     }
     pruneAged(rec);
     const max = rec.max > 0 ? rec.max : defaultMax; // <=0 视为不限
-    const known = dev && rec.devices.has(dev);
+    const existing = findExistingKey(rec, dev, fp, fpV1);
 
-    if (dev) {
-      if (known) {
-        rec.devices.set(dev, ts()); // 刷新 lastSeen
-        void persist();
-        return { enabled: true, allowed: true, reason: "", uid, used: rec.devices.size, max };
-      }
+    if (existing) {
+      const prev = rec.devices.get(existing);
+      const next = makeSlot(dev || prev.deviceId, ts(), fp || prev.hwfp);
+      const nk = keyOf(next);
+      if (nk && nk !== existing) rec.devices.delete(existing);
+      if (nk) rec.devices.set(nk, next);
+      void persist();
+      return { enabled: true, allowed: true, reason: "", uid, used: rec.devices.size, max };
+    }
+    if (dev || fp) {
       if (max > 0 && rec.devices.size >= max) {
-        // 超额：不收录新设备。
+        // 超额：不收录新设备（含「同一 deviceId、不同指纹」的整包克隆）。
         return {
           enabled: true,
           allowed: false,
@@ -300,11 +383,13 @@ export function createDeviceQuota(opts) {
           max,
         };
       }
-      rec.devices.set(dev, ts());
+      const slot = makeSlot(dev, ts(), fp);
+      const nk = keyOf(slot);
+      if (nk) rec.devices.set(nk, slot);
       void persist();
       return { enabled: true, allowed: true, reason: "", uid, used: rec.devices.size, max };
     }
-    // 无 deviceId：无法计数，放行但不收录。
+    // 无 deviceId / hwfp：无法计数，放行但不收录。
     return { enabled: true, allowed: true, reason: "", uid, used: rec.devices.size, max };
   }
 
@@ -318,10 +403,10 @@ export function createDeviceQuota(opts) {
         effectiveMax: rec.max > 0 ? rec.max : defaultMax,
         used: rec.devices.size,
         // idleSec 由服务端算：OPS 与服务端同机也不必赌两边时区/时钟一致。
-        devices: [...rec.devices.entries()].map(([deviceId, lastSeen]) => ({
-          deviceId,
-          lastSeen,
-          idleSec: idleSecOf(lastSeen, now),
+        devices: [...rec.devices.values()].map((slot) => ({
+          deviceId: slot.deviceId,
+          lastSeen: slot.lastSeen,
+          idleSec: idleSecOf(slot.lastSeen, now),
         })),
       });
     }
@@ -356,7 +441,11 @@ export function createDeviceQuota(opts) {
     const u = String(uid || "").trim().slice(0, 64);
     const d = normDevice(deviceId);
     const rec = users.get(u);
-    if (rec && d) rec.devices.delete(d);
+    if (rec && d) {
+      for (const [k, slot] of [...rec.devices.entries()]) {
+        if (k === d || k === `id:${d}` || slot.deviceId === d) rec.devices.delete(k);
+      }
+    }
     await persist();
     return { uid: u, used: rec ? rec.devices.size : 0 };
   }
@@ -378,8 +467,8 @@ export function createDeviceQuota(opts) {
     const detail = [];
     for (const [key, rec] of targets) {
       let n = 0;
-      for (const [dev, seen] of [...rec.devices.entries()]) {
-        const idle = idleSecOf(seen, now);
+      for (const [dev, slot] of [...rec.devices.entries()]) {
+        const idle = idleSecOf(slot.lastSeen, now);
         // idle<0（时间戳坏）不动：宁可留着让人工看，也不误删名额。
         if (idle >= cutoffSec) {
           rec.devices.delete(dev);

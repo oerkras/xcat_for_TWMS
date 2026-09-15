@@ -27,10 +27,17 @@ bool IsDesired();
 void RequestRestart(const char* why);
 
 // 记下应粘回的频道：SelectChannel / 登录列表 ChannelId / WM+0x6C 同口径（不是 UI ch.N）。
-// BIN 08-15：id=39 时玩家看到 頻道 40。软重连 PickSticky 用此 id 调 SelectChannel。
+// BIN 08-15：id=39 时玩家看到 頻道 40。id=0 是標題頻道 1。软重连 PickSticky 用此 id 调 SelectChannel。
 void NoteStickyChannel(int channelId1Based, const char* why);
-// 当前 sticky（列表 id）；未设置返回 0。标题栏显示须 +1。
+// 当前 sticky（列表 id）；未设置返回 -1。标题栏显示须 +1。
 int StickyChannel1Based();
+
+// 重连换频「指定频道」：本轮进图只许这个 0-based 列表 id（UI ch.N = id+1）。
+// -1=本轮不钉。满员/成人/不在表 → PickOpen 返回 -1，调用方须等，禁止改抽。
+void ArmReconnectPin(int listIdx);
+void ClearReconnectPin();
+int ArmedReconnectPinListIdx();
+bool IsWaitingReconnectPin();
 
 // 当前是否停在 Failed（软重进可据此早退，不必空等到 play-ready 超时）。
 bool IsFailed();

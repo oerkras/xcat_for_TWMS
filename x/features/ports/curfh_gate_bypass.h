@@ -6,14 +6,14 @@
 // 本模块：改 GameAssembly .text，让 Magic / Shoot / Prepare 在 CurFh==null 时
 // 仍走「有台」CONT 边，不种台。
 //
-// IDA（imagebase 0x7ffd60830000 · 08-20 dump）锚点：
-//   TryDoingMagicAttack @0x10AF270：User+0x50 -> VecCtrl+0x28 后
-//     cmovnz rax,rcx @ RVA 0x10B18CD（48 0F 45 C1 -> 48 8B C1 90）
-//   TryDoingShootAttack @0x1075d20：同上
-//     cmovnz rax,r12 @ RVA 0x107977E（49 0F 45 C4 -> 49 8B C4 90）
-//   DoActiveSkillPrepare @0x10D3CF0：同上
-//     jnz +7 @ RVA 0x10D2B5A（75 07 -> EB 07）
-// 旧 Prepare setnz @0x10B34A7 是 cmp r10d,eax 的 0F 95 C2，不是 CurFh 门，已弃。
+// IDA（imagebase 0x7FFD2F950000 · 09-10pm dump）锚点：
+//   TryDoingMagicAttack @0x113CAD0：User+0x50 @0x1142878 -> VecCtrl+0x28 后 test rcx; jnz+7
+//     @ RVA 0x11428A5（75 07 -> EB 07）
+//   TryDoingShootAttack @0x1103280：同上 test rdx; jnz+7
+//     @ RVA 0x110A356（75 07 -> EB 07）
+//   含 xor al,1 的 Prepare @0x115FF30：call 0x111DEC0（读 +0x28）后
+//     xor al,1 @ RVA 0x1160FFD（34 01 -> 31 C0；解出 cmp 常量 2 → 强制 CONT）
+// 旧 Prepare jnz+7 @0x10D2B3A / setnz @0x10B34A7 已弃。
 // Melee 只看 LadderOrRope(+0x40)，本旁路不碰。
 //
 // 默认关；仅实验 TAB。

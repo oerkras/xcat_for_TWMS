@@ -42,6 +42,9 @@ std::string BuildGateProof(const std::string& payloadBinDir, const std::string& 
 // 是否已有有效激活缓存（绑定本机 deviceId、TOKEN 未过期且验签通过）。不弹 UI、不联网。
 bool HasValidActivation(const std::string& payloadBinDir, const std::string& deviceId);
 
+// 读激活缓存里的签卡 uid。无有效卡返回空串。不写日志（给 UI 节流调用）。
+std::string PeekActivatedUid(const std::string& payloadBinDir, const std::string& deviceId);
+
 // 丢掉本机激活缓存（ProgramData + 安装目录）。服务端认不出当前卡时调用，下一步弹框重贴。
 void InvalidateActivationCache(const std::string& payloadBinDir);
 

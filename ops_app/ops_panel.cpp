@@ -250,6 +250,59 @@ std::string FindJsonString(const std::string& body, const char* key) {
     return body.substr(i, j - i);
 }
 
+std::string JsonUnescape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            const char n = s[++i];
+            switch (n) {
+                case '"':
+                case '\\':
+                case '/':
+                    out.push_back(n);
+                    break;
+                case 'n':
+                    out.push_back('\n');
+                    break;
+                case 't':
+                    out.push_back('\t');
+                    break;
+                case 'r':
+                    out.push_back('\r');
+                    break;
+                default:
+                    out.push_back(n);
+                    break;
+            }
+        } else {
+            out.push_back(s[i]);
+        }
+    }
+    return out;
+}
+
+// 账密可能含 " \\ ；活表/历史 JSON 用这个读。
+std::string FindJsonStringEscaped(const std::string& body, const char* key) {
+    const std::string needle = std::string("\"") + key + "\":";
+    const size_t p = body.find(needle);
+    if (p == std::string::npos) return "";
+    size_t i = p + needle.size();
+    while (i < body.size() && std::isspace(static_cast<unsigned char>(body[i]))) ++i;
+    if (i >= body.size() || body[i] != '"') return "";
+    ++i;
+    size_t j = i;
+    while (j < body.size()) {
+        if (body[j] == '\\' && j + 1 < body.size()) {
+            j += 2;
+            continue;
+        }
+        if (body[j] == '"') break;
+        ++j;
+    }
+    return JsonUnescape(body.substr(i, j - i));
+}
+
 // 取 "key":{...} 对象正文（含花括号），供嵌套字段再 FindJsonString。
 std::string FindJsonObjectSlice(const std::string& body, const char* key) {
     const std::string needle = std::string("\"") + key + "\":";
@@ -780,9 +833,11 @@ void OpsState_Tick(OpsState& st) {
     // 「自动刷新」关掉后连接表冻结；利润页自己还会 RefreshClients。
     if (TwmsRunning(st)) {
         if (st.clientsAutoRefresh) RefreshClients(st, false);
-    } else if (!st.clients.empty() || st.clientsCount != 0) {
+    } else if (!st.clients.empty() || st.clientsCount != 0 || !st.deadClients.empty()) {
         st.clients.clear();
+        st.deadClients.clear();
         st.clientsCount = 0;
+        st.deadClientsCount = 0;
         st.clientsTracked = 0;
     }
 
@@ -1008,6 +1063,88 @@ void FormatIdleSec(int idleSec, char* buf, size_t bufSize) {
     }
 }
 
+const char* ClockHms(const std::string& at) {
+    if (at.size() >= 8) {
+        const size_t sp = at.rfind(' ');
+        if (sp != std::string::npos && at.size() - sp >= 9) return at.c_str() + sp + 1;
+    }
+    return at.empty() ? "" : at.c_str();
+}
+
+const char* ProbeKindLabel(const std::string& kind) {
+    if (kind.empty()) return "—";
+    if (kind == "update" || kind == "probe") return "探活";
+    return kind.c_str();
+}
+
+// lastSeenAt 是更新服务的北京墙钟（YYYY-MM-DD HH:MM:SS）。运维机默认东八区。
+bool TsDateIsToday(const std::string& at) {
+    if (at.size() < 10) return false;
+    SYSTEMTIME lt{};
+    GetLocalTime(&lt);
+    char today[16]{};
+    std::snprintf(today, sizeof(today), "%04u-%02u-%02u", static_cast<unsigned>(lt.wYear),
+                  static_cast<unsigned>(lt.wMonth), static_cast<unsigned>(lt.wDay));
+    return at.compare(0, 10, today) == 0;
+}
+
+void FormatProbeClock(const std::string& at, char* out, size_t n) {
+    if (!out || n == 0) return;
+    out[0] = '\0';
+    if (at.empty()) return;
+    if (TsDateIsToday(at)) {
+        std::snprintf(out, n, "%s", ClockHms(at));
+        return;
+    }
+    if (at.size() >= 16)
+        std::snprintf(out, n, "%.5s %.5s", at.c_str() + 5, at.c_str() + 11);
+    else
+        std::snprintf(out, n, "%s", at.c_str());
+}
+
+void DrawProbeClockCell(const std::string& lastSeenAt, int idleSec, const std::string& lastKind) {
+    char clock[24]{};
+    FormatProbeClock(lastSeenAt, clock, sizeof(clock));
+    if (!clock[0]) {
+        ImGui::TextDisabled("—");
+        return;
+    }
+    ImGui::TextUnformatted(clock);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("最后探活 %s\n距最后探活 %d 秒\n类型 %s",
+                          lastSeenAt.empty() ? "—" : lastSeenAt.c_str(), idleSec,
+                          ProbeKindLabel(lastKind));
+    }
+}
+
+bool CharSnapStale(const OpsState::ConnectedClient& c) {
+    if (c.charName.empty()) return false;
+    if (c.charFromHistory) return true;
+    if (c.charAgeSec < 0) return false;
+    return c.charAgeSec > c.idleSec + 20;
+}
+
+std::string FormatLoginFourLine(const std::string& account, const std::string& pass,
+                                 const std::string& mailPass, const std::string& gpDevice) {
+    return account + "----" + pass + "----" + mailPass + "----" + gpDevice;
+}
+
+void DrawLoginCredCell(const std::string& account, const std::string& pass,
+                        const std::string& mailPass, const std::string& gpDevice) {
+    if (account.empty() && pass.empty() && mailPass.empty() && gpDevice.empty()) {
+        ImGui::TextDisabled("—");
+        return;
+    }
+    const std::string line = FormatLoginFourLine(account, pass, mailPass, gpDevice);
+    ImGui::TextUnformatted(line.c_str());
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "账密直登四段（粘贴行）\n账号 %s\nGama密码 %s\n邮箱密码 %s\ndevice_id %s",
+            account.empty() ? "—" : account.c_str(), pass.empty() ? "—" : pass.c_str(),
+            mailPass.empty() ? "—" : mailPass.c_str(), gpDevice.empty() ? "—" : gpDevice.c_str());
+    }
+}
+
 // 与启动器同口径：repo/bin/<payloadDir>/dataservice/map_names.tsv
 std::string OpsMapNamesBinDir(const OpsState& st) {
     return st.repoRootUtf8 + "\\bin\\" + xcat::install::kPayloadDir;
@@ -1084,9 +1221,11 @@ void CopyClientSummary(const OpsState& st, const OpsState::ConnectedClient& c) {
         std::snprintf(expPerBuf, sizeof(expPerBuf), "%lld", c.expPerMin);
         std::snprintf(mesoPerBuf, sizeof(mesoPerBuf), "%lld", c.mesoPerMin);
     }
-    char buf[1280]{};
+    char buf[2048]{};
+    const std::string login4 =
+        FormatLoginFourLine(c.loginAccount, c.loginPass, c.loginMailPass, c.loginGpDevice);
     std::snprintf(buf, sizeof(buf),
-                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\t%s\t%s\t%s\tworld=%d\t%s\tmap=%u\t%s\tch=%s\tgate=%s\tidle=%ds",
+                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\tLv.%d\t%s\t%s\t%s\t%s\t%s\tworld=%d\t%s\tmap=%u\t%s\tch=%s\tgate=%s\tidle=%ds\tprobe=%s\tsnap=%s\tlogin=%s",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
                   c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
@@ -1100,7 +1239,10 @@ void CopyClientSummary(const OpsState& st, const OpsState::ConnectedClient& c) {
                   c.worldName.empty() ? "-" : c.worldName.c_str(),
                   c.mapId,
                   mapLabel.empty() ? "-" : mapLabel.c_str(), ChannelOrDash(c.channelId, chBuf, sizeof(chBuf)),
-                  c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec);
+                  c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec,
+                  c.lastSeenAt.empty() ? "-" : c.lastSeenAt.c_str(),
+                  c.charSeenAt.empty() ? "-" : c.charSeenAt.c_str(),
+                  login4.empty() || login4 == "--------" ? "-" : login4.c_str());
     CopyText(buf);
 }
 
@@ -1113,8 +1255,9 @@ void AppendClientSummaryLine(std::string& out, const OpsState& st, const OpsStat
         std::snprintf(expPerBuf, sizeof(expPerBuf), "%lld", c.expPerMin);
         std::snprintf(mesoPerBuf, sizeof(mesoPerBuf), "%lld", c.mesoPerMin);
     }
-    char buf[1280]{};
-    std::snprintf(buf, sizeof(buf), "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%u\t%s\t%s\t%s\t%d\n",
+    char buf[2048]{};
+    std::snprintf(buf, sizeof(buf),
+                  "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%u\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
                   c.ip.c_str(), c.machine.c_str(), c.mac.c_str(), c.token.c_str(),
                   c.deviceId.c_str(), c.appVersion.c_str(),
                   c.charName.empty() ? "-" : c.charName.c_str(), c.charLevel,
@@ -1128,7 +1271,13 @@ void AppendClientSummaryLine(std::string& out, const OpsState& st, const OpsStat
                   c.worldName.empty() ? "-" : c.worldName.c_str(),
                   c.mapId,
                   mapLabel.empty() ? "-" : mapLabel.c_str(), ChannelOrDash(c.channelId, chBuf, sizeof(chBuf)),
-                  c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec);
+                  c.gate.empty() ? "-" : c.gate.c_str(), c.idleSec,
+                  c.lastSeenAt.empty() ? "-" : c.lastSeenAt.c_str(),
+                  c.charSeenAt.empty() ? "-" : c.charSeenAt.c_str(),
+                  c.loginAccount.empty() ? "-" : c.loginAccount.c_str(),
+                  c.loginPass.empty() ? "-" : c.loginPass.c_str(),
+                  c.loginMailPass.empty() ? "-" : c.loginMailPass.c_str(),
+                  c.loginGpDevice.empty() ? "-" : c.loginGpDevice.c_str());
     out += buf;
 }
 
@@ -2157,12 +2306,93 @@ long long JsonInt64Field(const std::string& obj, const char* key, long long fall
     return std::strtoll(raw.c_str(), nullptr, 10);
 }
 
+bool FillConnectedClientFromObj(const std::string& obj, OpsState::ConnectedClient& row) {
+    row = {};
+    row.ip = FindJsonString(obj, "ip");
+    if (row.ip.empty()) return false;
+    row.geo = FindJsonString(obj, "geo");
+    row.geoStatus = FindJsonString(obj, "geoStatus");
+    row.machine = FindJsonString(obj, "machine");
+    row.deviceId = FindJsonString(obj, "deviceId");
+    row.device = FindJsonString(obj, "device");
+    row.mac = FindJsonString(obj, "mac");
+    row.token = FindJsonString(obj, "token");
+    row.uid = FindJsonString(obj, "uid");
+    row.gateExp = JsonInt64Field(obj, "gateExp", 0);
+    row.appVersion = FindJsonString(obj, "appVersion");
+    row.charName = FindJsonString(obj, "charName");
+    row.charJobName = FindJsonString(obj, "charJobName");
+    row.charMeso = FindJsonString(obj, "charMeso");
+    row.wealthScrolls = FindJsonString(obj, "wealthScrolls");
+    row.hasWealthScrolls = obj.find("\"hasWealthScrolls\":true") != std::string::npos;
+    row.hasRates = obj.find("\"hasRates\":true") != std::string::npos;
+    row.expPerMin = JsonInt64Field(obj, "expPerMin", 0);
+    row.mesoPerMin = JsonInt64Field(obj, "mesoPerMin", 0);
+    row.charLevel = JsonIntField(obj, "charLevel", 0);
+    row.charJob = JsonIntField(obj, "charJob", 0);
+    row.mapId = static_cast<uint32_t>(JsonIntField(obj, "mapId", 0));
+    row.mapName = FindJsonString(obj, "mapName");
+    row.channelId = JsonIntField(obj, "channelId", 0);
+    row.worldId = JsonIntField(obj, "worldId", 0);
+    row.worldName = FindJsonString(obj, "worldName");
+    row.loginAccount = FindJsonStringEscaped(obj, "loginAccount");
+    row.loginPass = FindJsonStringEscaped(obj, "loginPass");
+    row.loginMailPass = FindJsonStringEscaped(obj, "loginMailPass");
+    row.loginGpDevice = FindJsonStringEscaped(obj, "loginGpDevice");
+    row.lastKind = FindJsonString(obj, "lastKind");
+    row.lastSeenAt = FindJsonString(obj, "lastSeenAt");
+    row.charSeenAt = FindJsonString(obj, "charSeenAt");
+    row.charAgeSec = JsonIntField(obj, "charAgeSec", -1);
+    row.charFromHistory = obj.find("\"charFromHistory\":true") != std::string::npos;
+    row.lastDenyAt = FindJsonString(obj, "lastDenyAt");
+    row.lastDenyReason = FindJsonString(obj, "lastDenyReason");
+    row.lastDenyMatch = FindJsonString(obj, "lastDenyMatch");
+    row.lastAllowAt = FindJsonString(obj, "lastAllowAt");
+    row.gate = FindJsonString(obj, "gate");
+    row.idleSec = JsonIntField(obj, "idleSec", 0);
+    row.hits = JsonIntField(obj, "hits", 0);
+    row.lastStatus = JsonIntField(obj, "lastStatus", 0);
+    row.sameIpOnline = JsonIntField(obj, "sameIpOnline", 1);
+    row.knownOnIp = JsonIntField(obj, "knownOnIp", 0);
+    row.leaseRemainSec = JsonIntField(obj, "leaseRemainSec", 0);
+    row.leaseTtlHours = JsonIntField(obj, "leaseTtlHours", 64);
+    row.identified = obj.find("\"identified\":true") != std::string::npos;
+    row.banned = obj.find("\"banned\":true") != std::string::npos;
+    row.allowed = obj.find("\"allowed\":true") != std::string::npos;
+    {
+        const std::string lf = FindJsonObjectSlice(obj, "logFetch");
+        if (!lf.empty()) {
+            row.logFetchId = FindJsonString(lf, "id");
+            row.logFetchMode = FindJsonString(lf, "mode");
+            row.logFetchStatus = FindJsonString(lf, "status");
+        }
+        const std::string ft = FindJsonObjectSlice(obj, "forceTarget");
+        if (!ft.empty()) {
+            row.forceTargetId = FindJsonString(ft, "id");
+            row.forceTargetStatus = FindJsonString(ft, "status");
+            row.forceTargetBuildId = static_cast<uint32_t>(JsonIntField(ft, "buildId", 0));
+        }
+        const std::string rs = FindJsonObjectSlice(obj, "remoteScript");
+        if (!rs.empty()) {
+            row.remoteScriptId = FindJsonString(rs, "id");
+            row.remoteScriptStatus = FindJsonString(rs, "status");
+            row.remoteScriptResult = FindJsonString(rs, "result");
+            row.remoteScriptOut = FindJsonString(rs, "outTail");
+            row.remoteScriptOp = FindJsonString(rs, "op");
+        }
+    }
+    if (!row.identified && !row.machine.empty() && !row.device.empty()) row.identified = true;
+    return true;
+}
+
 bool ParseClientsPayload(const std::string& body, OpsState& st) {
     st.clients.clear();
+    st.deadClients.clear();
     st.recentDenies.clear();
     st.ipAlerts.clear();
     st.ipAlertCount = JsonIntField(body, "ipMultiDeviceAlertCount", 0);
     st.clientsCount = JsonIntField(body, "count", 0);
+    st.deadClientsCount = JsonIntField(body, "deadCount", 0);
     st.clientsTracked = JsonIntField(body, "tracked", 0);
     st.clientsGeoProvider = FindJsonString(body, "geoProvider");
     const int activeSec = JsonIntField(body, "activeSec", st.clientsActiveSec);
@@ -2266,70 +2496,17 @@ bool ParseClientsPayload(const std::string& body, OpsState& st) {
 
     parseObjArray("clients", [&](const std::string& obj) {
         OpsState::ConnectedClient row;
-        row.ip = FindJsonString(obj, "ip");
-        if (row.ip.empty()) return;
-        row.geo = FindJsonString(obj, "geo");
-        row.geoStatus = FindJsonString(obj, "geoStatus");
-        row.machine = FindJsonString(obj, "machine");
-        row.deviceId = FindJsonString(obj, "deviceId");
-        row.device = FindJsonString(obj, "device");
-        row.mac = FindJsonString(obj, "mac");
-        row.token = FindJsonString(obj, "token");
-        row.uid = FindJsonString(obj, "uid");
-        row.gateExp = JsonInt64Field(obj, "gateExp", 0);
-        row.appVersion = FindJsonString(obj, "appVersion");
-        row.charName = FindJsonString(obj, "charName");
-        row.charJobName = FindJsonString(obj, "charJobName");
-        row.charMeso = FindJsonString(obj, "charMeso");
-        row.wealthScrolls = FindJsonString(obj, "wealthScrolls");
-        row.hasWealthScrolls = obj.find("\"hasWealthScrolls\":true") != std::string::npos;
-        row.hasRates = obj.find("\"hasRates\":true") != std::string::npos;
-        row.expPerMin = JsonInt64Field(obj, "expPerMin", 0);
-        row.mesoPerMin = JsonInt64Field(obj, "mesoPerMin", 0);
-        row.charLevel = JsonIntField(obj, "charLevel", 0);
-        row.charJob = JsonIntField(obj, "charJob", 0);
-        row.mapId = static_cast<uint32_t>(JsonIntField(obj, "mapId", 0));
-        row.mapName = FindJsonString(obj, "mapName");
-        row.channelId = JsonIntField(obj, "channelId", 0);
-        row.worldId = JsonIntField(obj, "worldId", 0);
-        row.worldName = FindJsonString(obj, "worldName");
-        row.lastKind = FindJsonString(obj, "lastKind");
-        row.lastSeenAt = FindJsonString(obj, "lastSeenAt");
-        row.lastDenyAt = FindJsonString(obj, "lastDenyAt");
-        row.lastDenyReason = FindJsonString(obj, "lastDenyReason");
-        row.lastDenyMatch = FindJsonString(obj, "lastDenyMatch");
-        row.lastAllowAt = FindJsonString(obj, "lastAllowAt");
-        row.gate = FindJsonString(obj, "gate");
-        row.idleSec = JsonIntField(obj, "idleSec", 0);
-        row.hits = JsonIntField(obj, "hits", 0);
-        row.lastStatus = JsonIntField(obj, "lastStatus", 0);
-        row.sameIpOnline = JsonIntField(obj, "sameIpOnline", 1);
-        row.knownOnIp = JsonIntField(obj, "knownOnIp", 0);
-        row.leaseRemainSec = JsonIntField(obj, "leaseRemainSec", 0);
-        row.leaseTtlHours = JsonIntField(obj, "leaseTtlHours", 64);
-        row.identified = obj.find("\"identified\":true") != std::string::npos;
-        row.banned = obj.find("\"banned\":true") != std::string::npos;
-        row.allowed = obj.find("\"allowed\":true") != std::string::npos;
-        {
-            const std::string lf = FindJsonObjectSlice(obj, "logFetch");
-            if (!lf.empty()) {
-                row.logFetchId = FindJsonString(lf, "id");
-                row.logFetchMode = FindJsonString(lf, "mode");
-                row.logFetchStatus = FindJsonString(lf, "status");
-            }
-            const std::string ft = FindJsonObjectSlice(obj, "forceTarget");
-            if (!ft.empty()) {
-                row.forceTargetId = FindJsonString(ft, "id");
-                row.forceTargetStatus = FindJsonString(ft, "status");
-                row.forceTargetBuildId =
-                    static_cast<uint32_t>(JsonIntField(ft, "buildId", 0));
-            }
-        }
-        if (!row.identified && !row.machine.empty() && !row.device.empty()) row.identified = true;
+        if (!FillConnectedClientFromObj(obj, row)) return;
         st.clients.push_back(std::move(row));
+    });
+    parseObjArray("deadClients", [&](const std::string& obj) {
+        OpsState::ConnectedClient row;
+        if (!FillConnectedClientFromObj(obj, row)) return;
+        st.deadClients.push_back(std::move(row));
     });
 
     if (st.clientsCount <= 0) st.clientsCount = static_cast<int>(st.clients.size());
+    if (st.deadClientsCount <= 0) st.deadClientsCount = static_cast<int>(st.deadClients.size());
     return true;
 }
 
@@ -2340,6 +2517,28 @@ std::string JsonEscapeLocal(const std::string& s) {
         if (c == '"' || c == '\\') {
             out.push_back('\\');
             out.push_back(static_cast<char>(c));
+        } else if (c < 0x20) {
+            continue;
+        } else {
+            out.push_back(static_cast<char>(c));
+        }
+    }
+    return out;
+}
+
+std::string JsonEscapeMultiline(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        if (c == '"' || c == '\\') {
+            out.push_back('\\');
+            out.push_back(static_cast<char>(c));
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\r') {
+            out += "\\r";
+        } else if (c == '\t') {
+            out += "\\t";
         } else if (c < 0x20) {
             continue;
         } else {
@@ -3387,6 +3586,11 @@ void ParseClientHistoryPayload(const std::string& body, OpsState& st) {
         row.uid = FindJsonString(obj, "uid");
         row.appVersion = FindJsonString(obj, "appVersion");
         row.charName = FindJsonString(obj, "charName");
+        row.loginAccount = FindJsonStringEscaped(obj, "loginAccount");
+        row.loginPass = FindJsonStringEscaped(obj, "loginPass");
+        row.loginMailPass = FindJsonStringEscaped(obj, "loginMailPass");
+        row.loginGpDevice = FindJsonStringEscaped(obj, "loginGpDevice");
+        row.charSeenAt = FindJsonString(obj, "charSeenAt");
         row.lastSeenAt = FindJsonString(obj, "lastSeenAt");
         row.lastAllowAt = FindJsonString(obj, "lastAllowAt");
         row.lastDenyReason = FindJsonString(obj, "lastDenyReason");
@@ -3464,6 +3668,119 @@ bool PostCardJtiAction(OpsState& st, const char* action, const std::string& jti,
     }
     if (r.body.find("\"ok\":true") == std::string::npos) {
         err = "服务端拒绝：" + r.body.substr(0, 160);
+        return false;
+    }
+    return true;
+}
+
+OpsState::RemoteScriptTarget RemoteScriptTargetFromClient(const OpsState::ConnectedClient& c) {
+    OpsState::RemoteScriptTarget t;
+    t.machine = c.machine;
+    t.deviceId = c.deviceId;
+    t.mac = c.mac;
+    t.uid = c.uid;
+    t.token = c.token;
+    t.label = c.machine.empty() ? c.deviceId : c.machine;
+    if (!c.uid.empty()) t.label += " · " + c.uid;
+    return t;
+}
+
+void OpenRemoteScriptPopup(OpsState& st, std::vector<OpsState::RemoteScriptTarget> targets,
+                           int mode = -1) {
+    st.remoteScriptTargets = std::move(targets);
+    st.remoteScriptConfirm = false;
+    st.remoteScriptPopup = true;
+    if (mode == 0 || mode == 1) st.remoteScriptMode = mode;
+}
+
+bool PostRemoteScript(OpsState& st, const OpsState::RemoteScriptTarget& t, const char* op,
+                      const char* script, const char* title, const char* msgBody, int timeoutSec,
+                      const char* note, std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    if (t.deviceId.empty() && t.mac.empty() && t.token.empty()) {
+        err = "需要 deviceId / MAC / TOKEN";
+        return false;
+    }
+    const char* useOp = (op && op[0]) ? op : "runScript";
+    const bool isMsg = std::strcmp(useOp, "showMsg") == 0;
+    const char* bodyScript = script ? script : "";
+    const char* bodyMsg = msgBody ? msgBody : "";
+    if (isMsg) {
+        if (!bodyMsg[0]) {
+            err = "弹窗正文为空";
+            return false;
+        }
+    } else if (!bodyScript[0]) {
+        err = "脚本为空";
+        return false;
+    }
+    if (timeoutSec < 5) timeoutSec = 30;
+    if (timeoutSec > 120) timeoutSec = 120;
+    std::string body = "{\"action\":\"enqueue\",\"timeoutSec\":";
+    body += std::to_string(timeoutSec);
+    body += ",\"op\":\"";
+    body += JsonEscapeLocal(useOp);
+    body += "\"";
+    if (isMsg) {
+        body += ",\"title\":\"";
+        body += JsonEscapeLocal(title && title[0] ? title : "提示");
+        body += "\",\"body\":\"";
+        body += JsonEscapeMultiline(bodyMsg);
+        body += "\"";
+    } else {
+        body += ",\"script\":\"";
+        body += JsonEscapeMultiline(bodyScript);
+        body += "\"";
+    }
+    if (note && note[0]) body += ",\"note\":\"" + JsonEscapeLocal(note) + "\"";
+    if (!t.machine.empty()) body += ",\"machine\":\"" + JsonEscapeLocal(t.machine) + "\"";
+    if (!t.deviceId.empty()) body += ",\"deviceId\":\"" + JsonEscapeLocal(t.deviceId) + "\"";
+    if (!t.mac.empty()) body += ",\"mac\":\"" + JsonEscapeLocal(t.mac) + "\"";
+    if (!t.token.empty()) body += ",\"token\":\"" + JsonEscapeLocal(t.token) + "\"";
+    body += "}";
+    const auto r = HttpPost(L"127.0.0.1", 18789, L"/twms/admin/remote-script", body.c_str(), 4000,
+                            128 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务（需含 remote-script）";
+        if (r.status == 413) err = isMsg ? "正文太大" : "脚本太大（上限 16KB）";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "推送失败";
+        return false;
+    }
+    return true;
+}
+
+bool PostRemoteScriptCancel(OpsState& st, const std::string& id, const OpsState::ConnectedClient* c,
+                            std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    std::string body = "{\"action\":\"cancel\"";
+    if (!id.empty()) body += ",\"id\":\"" + JsonEscapeLocal(id) + "\"";
+    if (c) {
+        if (!c->machine.empty()) body += ",\"machine\":\"" + JsonEscapeLocal(c->machine) + "\"";
+        if (!c->deviceId.empty()) body += ",\"deviceId\":\"" + JsonEscapeLocal(c->deviceId) + "\"";
+        if (!c->mac.empty()) body += ",\"mac\":\"" + JsonEscapeLocal(c->mac) + "\"";
+    }
+    body += "}";
+    const auto r =
+        HttpPost(L"127.0.0.1", 18789, L"/twms/admin/remote-script", body.c_str(), 2500, 64 * 1024);
+    if (!r.ok) {
+        err = !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务（需含 remote-script）";
+        return false;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        err = FindJsonString(r.body, "error");
+        if (err.empty()) err = "取消脚本失败";
         return false;
     }
     return true;
@@ -3598,6 +3915,92 @@ bool PostForceTargetCancel(OpsState& st, const OpsState::ConnectedClient& c, std
     return true;
 }
 
+void DrawRemoteScriptPopup(OpsState& st) {
+    const char* popupId = st.remoteScriptMode == 0 ? "推送弹窗###ops_remote_script"
+                                                   : "推送脚本###ops_remote_script";
+    if (st.remoteScriptPopup) {
+        ImGui::OpenPopup(popupId);
+        st.remoteScriptPopup = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(560.f, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(popupId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::TextDisabled("本机管理口 · 点名目标 · 约 15s 探活");
+    ImGui::RadioButton("弹窗通知##ops_rs_mode0", &st.remoteScriptMode, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("自定义脚本##ops_rs_mode1", &st.remoteScriptMode, 1);
+    ImGui::Separator();
+    ImGui::TextDisabled("目标 %zu 台", st.remoteScriptTargets.size());
+    const int showN = (std::min)(8, static_cast<int>(st.remoteScriptTargets.size()));
+    for (int i = 0; i < showN; ++i) {
+        ImGui::BulletText("%s", st.remoteScriptTargets[static_cast<size_t>(i)].label.c_str());
+    }
+    if (static_cast<int>(st.remoteScriptTargets.size()) > showN) {
+        ImGui::TextDisabled("…还有 %zu 台", st.remoteScriptTargets.size() - static_cast<size_t>(showN));
+    }
+    if (st.remoteScriptMode == 1) {
+        ImGui::InputText("超时秒##ops_rs_to", st.remoteScriptTimeoutBuf,
+                         sizeof(st.remoteScriptTimeoutBuf));
+        ImGui::SameLine();
+        ImGui::TextDisabled("5–120，默认 30");
+    }
+    ImGui::InputText("备注##ops_rs_note", st.remoteScriptNoteBuf, sizeof(st.remoteScriptNoteBuf));
+    ImGui::Separator();
+    if (st.remoteScriptMode == 0) {
+        ImGui::TextUnformatted("给用户弹置顶信息框（主线程 MessageBox，不跑 PowerShell）");
+        ImGui::InputText("标题##ops_rs_msg_title", st.remoteScriptMsgTitleBuf,
+                         sizeof(st.remoteScriptMsgTitleBuf));
+        ImGui::InputTextMultiline("##ops_rs_msg_body", st.remoteScriptMsgBodyBuf,
+                                  sizeof(st.remoteScriptMsgBodyBuf), ImVec2(520.f, 120.f));
+        ImGui::TextDisabled("正文必填。旧客户端会忽略，约 75s 后队列标「旧端未应答」。");
+    } else {
+        ImGui::TextDisabled("隐藏 PowerShell · 上限 16KB · $env:XCAT_BIN / $env:XCAT_JOB");
+        ImGui::InputTextMultiline("##ops_rs_body", st.remoteScriptBuf, sizeof(st.remoteScriptBuf),
+                                  ImVec2(520.f, 180.f));
+    }
+    ImGui::Checkbox("确认对上述目标执行", &st.remoteScriptConfirm);
+    if (ImGui::Button("取消##ops_rs_no", ImVec2(120.f, 0.f))) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    const bool canPush =
+        st.remoteScriptConfirm && !st.remoteScriptTargets.empty() &&
+        (st.remoteScriptMode == 0 ? st.remoteScriptMsgBodyBuf[0] != 0 : st.remoteScriptBuf[0] != 0);
+    if (!canPush) ImGui::BeginDisabled();
+    if (ImGui::Button(st.remoteScriptMode == 0 ? "推送弹窗##ops_rs_yes" : "推送脚本##ops_rs_yes",
+                      ImVec2(160.f, 0.f))) {
+        int timeoutSec = 30;
+        if (st.remoteScriptMode == 1 && st.remoteScriptTimeoutBuf[0])
+            timeoutSec = std::atoi(st.remoteScriptTimeoutBuf);
+        int ok = 0;
+        std::string lastErr;
+        for (const auto& t : st.remoteScriptTargets) {
+            std::string err;
+            const bool sent =
+                st.remoteScriptMode == 0
+                    ? PostRemoteScript(st, t, "showMsg", "", st.remoteScriptMsgTitleBuf,
+                                       st.remoteScriptMsgBodyBuf, timeoutSec,
+                                       st.remoteScriptNoteBuf, err)
+                    : PostRemoteScript(st, t, "runScript", st.remoteScriptBuf, "", "", timeoutSec,
+                                       st.remoteScriptNoteBuf, err);
+            if (sent)
+                ++ok;
+            else
+                lastErr = err;
+        }
+        if (ok) {
+            SetStatus(st, std::string(st.remoteScriptMode == 0 ? "已排队弹窗 " : "已排队脚本 ") +
+                              std::to_string(ok) + " 台（约 15s 内探活）");
+            st.forceOpenRemoteScriptQueue = true;
+            RefreshClients(st, true);
+            ImGui::CloseCurrentPopup();
+        } else {
+            SetStatus(st, lastErr.empty() ? "推送失败" : lastErr);
+        }
+    }
+    if (!canPush) ImGui::EndDisabled();
+    ImGui::EndPopup();
+}
+
 void RefreshForceTargetQueue(OpsState& st) {
     st.forceTargetQueue.clear();
     st.forceTargetQueueError.clear();
@@ -3671,6 +4074,87 @@ void RefreshForceTargetQueue(OpsState& st) {
     }
 }
 
+void RefreshRemoteScriptQueue(OpsState& st) {
+    st.remoteScriptQueue.clear();
+    st.remoteScriptQueueError.clear();
+    if (!TwmsRunning(st)) return;
+    const auto r = HttpGet(L"127.0.0.1", 18789, L"/twms/admin/remote-script", 1500, 256 * 1024);
+    if (!r.ok) {
+        if (r.status == 404) {
+            st.remoteScriptQueueError = "需重启更新服务（remote-script）";
+        } else {
+            st.remoteScriptQueueError =
+                !r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status));
+        }
+        return;
+    }
+    if (r.body.find("\"ok\":true") == std::string::npos) {
+        st.remoteScriptQueueError = FindJsonString(r.body, "error");
+        if (st.remoteScriptQueueError.empty()) st.remoteScriptQueueError = "remote-script 解析失败";
+        return;
+    }
+    const size_t arrKey = r.body.find("\"pending\"");
+    if (arrKey == std::string::npos) return;
+    size_t i = r.body.find('[', arrKey);
+    if (i == std::string::npos) return;
+    ++i;
+    while (i < r.body.size()) {
+        while (i < r.body.size() &&
+               (r.body[i] == ' ' || r.body[i] == '\t' || r.body[i] == '\r' || r.body[i] == '\n' ||
+                r.body[i] == ',')) {
+            ++i;
+        }
+        if (i >= r.body.size() || r.body[i] == ']') break;
+        if (r.body[i] != '{') break;
+        const size_t start = i;
+        int depth = 0;
+        bool inStr = false;
+        for (; i < r.body.size(); ++i) {
+            const char c = r.body[i];
+            if (inStr) {
+                if (c == '\\' && i + 1 < r.body.size()) {
+                    ++i;
+                    continue;
+                }
+                if (c == '"') inStr = false;
+                continue;
+            }
+            if (c == '"') {
+                inStr = true;
+                continue;
+            }
+            if (c == '{') ++depth;
+            else if (c == '}') {
+                --depth;
+                if (depth == 0) {
+                    ++i;
+                    break;
+                }
+            }
+        }
+        const std::string obj = r.body.substr(start, i - start);
+        OpsState::RemoteScriptPending row;
+        row.id = FindJsonString(obj, "id");
+        row.status = FindJsonString(obj, "status");
+        row.machine = FindJsonString(obj, "machine");
+        row.deviceId = FindJsonString(obj, "deviceId");
+        row.mac = FindJsonString(obj, "mac");
+        row.note = FindJsonString(obj, "note");
+        row.at = FindJsonString(obj, "at");
+        row.result = FindJsonString(obj, "result");
+        row.outTail = FindJsonString(obj, "outTail");
+        row.sha256 = FindJsonString(obj, "sha256");
+        row.op = FindJsonString(obj, "op");
+        row.title = FindJsonString(obj, "title");
+        row.timeoutSec = JsonIntField(obj, "timeoutSec", 0);
+        row.bytes = JsonIntField(obj, "bytes", 0);
+        row.exitCode = JsonIntField(obj, "exitCode", 0);
+        row.hasExit = obj.find("\"exitCode\":") != std::string::npos &&
+                      obj.find("\"exitCode\":null") == std::string::npos;
+        if (!row.id.empty()) st.remoteScriptQueue.push_back(std::move(row));
+    }
+}
+
 void RefreshClients(OpsState& st, bool force, bool refreshGeo) {
     const ULONGLONG now = GetTickCount64();
     if (!force && st.lastClientsFetchMs != 0 && now - st.lastClientsFetchMs < 5000) return;
@@ -3678,10 +4162,13 @@ void RefreshClients(OpsState& st, bool force, bool refreshGeo) {
 
     if (!TwmsRunning(st)) {
         st.clients.clear();
+        st.deadClients.clear();
         st.clientsCount = 0;
+        st.deadClientsCount = 0;
         st.clientsTracked = 0;
         st.clientsError = "TWMS API 未运行";
         st.forceTargetQueue.clear();
+        st.remoteScriptQueue.clear();
         return;
     }
 
@@ -3692,7 +4179,9 @@ void RefreshClients(OpsState& st, bool force, bool refreshGeo) {
     const auto r = HttpGet(L"127.0.0.1", 18789, path.c_str(), 2500, 2 * 1024 * 1024);
     if (!r.ok) {
         st.clients.clear();
+        st.deadClients.clear();
         st.clientsCount = 0;
+        st.deadClientsCount = 0;
         st.clientsTracked = 0;
         if (r.status == 404) {
             st.clientsError = "接口不存在：请重启 TWMS 更新服务以加载新版 twms-update-server";
@@ -3710,6 +4199,7 @@ void RefreshClients(OpsState& st, bool force, bool refreshGeo) {
     st.clientsError.clear();
     SampleMesoDash(st);
     RefreshForceTargetQueue(st);
+    RefreshRemoteScriptQueue(st);
 }
 
 void DrawMainTabButtons(OpsState& st) {
@@ -3986,6 +4476,8 @@ bool ClientMatchesFilter(const OpsState& st, const OpsState::ConnectedClient& c,
             if (st.latestClientVersionText.empty() || c.appVersion.empty() ||
                 ClientVersionIsCurrent(st, c.appVersion))
                 return false;
+        } else if (std::strcmp(st.clientsGateFilter, "__char_stale__") == 0) {
+            if (!CharSnapStale(c)) return false;
         } else if (c.gate != st.clientsGateFilter) {
             return false;
         }
@@ -4000,6 +4492,10 @@ bool ClientMatchesFilter(const OpsState& st, const OpsState::ConnectedClient& c,
            ContainsIgnoreCase(c.appVersion, filter) || ContainsIgnoreCase(c.charName, filter) ||
            ContainsIgnoreCase(c.charJobName, filter) || ContainsIgnoreCase(c.mapName, filter) ||
            ContainsIgnoreCase(c.worldName, filter) ||
+           ContainsIgnoreCase(c.loginAccount, filter) ||
+           ContainsIgnoreCase(c.loginPass, filter) ||
+           ContainsIgnoreCase(c.loginMailPass, filter) ||
+           ContainsIgnoreCase(c.loginGpDevice, filter) ||
            ContainsIgnoreCase(mapLabel, filter) ||
            (c.mapId > 0 && ContainsIgnoreCase(std::to_string(c.mapId), filter)) ||
            (c.channelId > 0 && ContainsIgnoreCase(std::to_string(c.channelId), filter)) ||
@@ -4013,6 +4509,7 @@ const char* GateFilterLabel(const char* key) {
     if (std::strcmp(key, "policy_deny") == 0) return "策略将拒";
     if (std::strcmp(key, "denied") == 0) return "已拒绝";
     if (std::strcmp(key, "__stale__") == 0) return "版本落后";
+    if (std::strcmp(key, "__char_stale__") == 0) return "角色残留";
     return key;
 }
 
@@ -4037,6 +4534,7 @@ enum ClientSortCol : ImGuiID {
     kCliIdle,
     kCliGate,
     kCliHits,
+    kCliLogin,
     kCliAction,
 };
 
@@ -4109,6 +4607,8 @@ int CompareConnectedClient(const OpsState::ConnectedClient& a, const OpsState::C
             return CmpStrField(a.gate, b.gate);
         case kCliHits:
             return CmpIntField(a.hits, b.hits);
+        case kCliLogin:
+            return CmpStrField(a.loginAccount, b.loginAccount);
         default:
             return 0;
     }
@@ -4274,13 +4774,153 @@ ImVec4 StatusMessageColor(const std::string& msg) {
     return ImGui::GetStyleColorVec4(ImGuiCol_Text);
 }
 
+void DrawDeadClientsSection(OpsState& st) {
+    const int n = st.deadClientsCount > 0 ? st.deadClientsCount
+                                             : static_cast<int>(st.deadClients.size());
+    char hdr[80]{};
+    if (n > 0)
+        std::snprintf(hdr, sizeof(hdr), "死表 · 未进图 %d##dead_clients", n);
+    else
+        std::snprintf(hdr, sizeof(hdr), "死表 · 未进图##dead_clients");
+    ImGui::SetNextItemOpen(n > 0, ImGuiCond_Once);
+    if (!ImGui::CollapsingHeader(hdr)) return;
+    ImGui::TextDisabled("启动器还在探活，但这次请求没带地图（没进图 / 已回登录）。不是历史台账。");
+    ImGui::SameLine(0, 10.f);
+    if (ImGui::SmallButton("复制可见##dead_clients")) {
+        std::string out =
+            "ip\tmachine\tmac\ttoken\tdeviceId\tver\tchar\tlevel\tjob\tmeso\texpPer\tmesoPer\twealth\tworldId\tworld\tmapId\tmap\tch\tgate\tidle\tprobe\tsnap\tlogin\tpass\tmailPass\tgpDevice\n";
+        int copied = 0;
+        for (const auto& c : st.deadClients) {
+            if (!ClientMatchesFilter(st, c, st.clientsFilter)) continue;
+            AppendClientSummaryLine(out, st, c);
+            ++copied;
+        }
+        CopyText(out.c_str());
+        SetStatus(st, "已复制死表 " + std::to_string(copied) + " 行");
+    }
+    const float deadH = (std::max)(120.f, ImGui::GetTextLineHeightWithSpacing() * 8.f);
+    if (!ImGui::BeginTable("dead_clients_table", 10,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp |
+                              ImGuiTableFlags_Resizable,
+                          ImVec2(0, deadH))) {
+        return;
+    }
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 100.f);
+    ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+    ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+    ImGui::TableSetupColumn("uid", ImGuiTableColumnFlags_WidthFixed, 72.f);
+    ImGui::TableSetupColumn("版本", ImGuiTableColumnFlags_WidthFixed, 88.f);
+    ImGui::TableSetupColumn("探活", ImGuiTableColumnFlags_WidthFixed, 104.f);
+    ImGui::TableSetupColumn("空闲", ImGuiTableColumnFlags_WidthFixed, 42.f);
+    ImGui::TableSetupColumn("门禁", ImGuiTableColumnFlags_WidthFixed, 88.f);
+    ImGui::TableSetupColumn("残留", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+    ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthFixed, 120.f);
+    ImGui::TableHeadersRow();
+    if (st.deadClients.empty()) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextDisabled("(无)");
+        ImGui::EndTable();
+        return;
+    }
+    int shown = 0;
+    for (size_t i = 0; i < st.deadClients.size(); ++i) {
+        const auto& c = st.deadClients[i];
+        if (!ClientMatchesFilter(st, c, st.clientsFilter)) continue;
+        ++shown;
+        ImGui::PushID(static_cast<int>(i) + 70000);
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted(c.ip.empty() ? "—" : c.ip.c_str());
+        if (ImGui::BeginPopupContextItem("dead_ip")) {
+            if (ImGui::MenuItem("复制 IP")) CopyText(c.ip.c_str());
+            if (!c.machine.empty() && ImGui::MenuItem("复制计算机名")) CopyText(c.machine.c_str());
+            ImGui::EndPopup();
+        }
+        ImGui::TableSetColumnIndex(1);
+        if (c.geo.empty()) ImGui::TextDisabled("—");
+        else ImGui::TextUnformatted(c.geo.c_str());
+        ImGui::TableSetColumnIndex(2);
+        ImGui::TextUnformatted(c.machine.empty() ? "—" : c.machine.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("deviceId %s\n%s", c.deviceId.empty() ? "—" : c.deviceId.c_str(),
+                              c.lastKind.empty() ? "" : c.lastKind.c_str());
+        }
+        ImGui::TableSetColumnIndex(3);
+        if (c.uid.empty()) ImGui::TextDisabled("—");
+        else ImGui::TextUnformatted(c.uid.c_str());
+        ImGui::TableSetColumnIndex(4);
+        ImGui::TextDisabled("%s", c.appVersion.empty() ? "—" : c.appVersion.c_str());
+        ImGui::TableSetColumnIndex(5);
+        DrawProbeClockCell(c.lastSeenAt, c.idleSec, c.lastKind);
+        ImGui::TableSetColumnIndex(6);
+        {
+            char idleBuf[16]{};
+            FormatIdleSec(c.idleSec, idleBuf, sizeof(idleBuf));
+            ImGui::TextColored(IdleSecColor(c.idleSec), "%s", idleBuf);
+        }
+        ImGui::TableSetColumnIndex(7);
+        ImGui::TextUnformatted(c.gate.empty() ? "—" : GateFilterLabel(c.gate.c_str()));
+        ImGui::TableSetColumnIndex(8);
+        {
+            char leftover[96]{};
+            if (!c.charName.empty()) {
+                std::snprintf(leftover, sizeof(leftover), "%s", c.charName.c_str());
+            } else {
+                leftover[0] = '\0';
+            }
+            if (leftover[0])
+                ImGui::TextDisabled("%s", leftover);
+            else
+                ImGui::TextDisabled("—");
+        }
+        ImGui::TableSetColumnIndex(9);
+        if (c.identified && (!c.deviceId.empty() || !c.mac.empty())) {
+            if (ImGui::SmallButton("封禁")) {
+                std::string err;
+                if (PostBanAction(st, "ban", c.machine, c.deviceId, "dead-table", {}, err, c.mac, {},
+                                  {}, c.uid)) {
+                    SetStatus(st, "已封禁");
+                    RefreshBans(st, true);
+                    RefreshClients(st, true);
+                } else {
+                    SetStatus(st, err);
+                }
+            }
+            ImGui::SameLine(0, 4.f);
+            if (ImGui::SmallButton("加白")) {
+                std::string err;
+                if (PostBanAction(st, "allow", c.machine, c.deviceId, {}, {}, err, c.mac, {}, {},
+                                  c.uid)) {
+                    SetStatus(st, "已加入白名单");
+                    RefreshBans(st, true);
+                    RefreshClients(st, true);
+                } else {
+                    SetStatus(st, err);
+                }
+            }
+        } else {
+            ImGui::TextDisabled("—");
+        }
+        ImGui::PopID();
+    }
+    if (shown == 0) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextDisabled("(无匹配筛选)");
+    }
+    ImGui::EndTable();
+}
+
 void DrawClientsPanel(OpsState& st) {
     if (st.clientsAutoRefresh) {
         RefreshBans(st, false);
     }
 
     const bool allowMode = st.accessMode == "allow";
-    int nProbe = 0, nLease = 0, nPolicy = 0, nDenied = 0, nStaleVer = 0;
+    int nProbe = 0, nLease = 0, nPolicy = 0, nDenied = 0, nStaleVer = 0, nCharStale = 0;
     for (const auto& c : st.clients) {
         if (c.gate == "probe_ok") ++nProbe;
         else if (c.gate == "lease") ++nLease;
@@ -4288,6 +4928,7 @@ void DrawClientsPanel(OpsState& st) {
         else if (c.gate == "denied") ++nDenied;
         if (!c.appVersion.empty() && !ClientVersionIsCurrent(st, c.appVersion))
             ++nStaleVer;
+        if (CharSnapStale(c)) ++nCharStale;
     }
     const int alertN =
         st.ipAlertCount > 0 ? st.ipAlertCount : static_cast<int>(st.ipAlerts.size());
@@ -4448,7 +5089,9 @@ void DrawClientsPanel(OpsState& st) {
     if (!st.clientsError.empty()) {
         ImGui::TextColored(OpsTone::DangerSoft(), "%s", st.clientsError.c_str());
     } else {
-        ImGui::Text("在线 %d", st.clientsCount);
+        ImGui::Text("进图 %d", st.clientsCount);
+        ImGui::SameLine(0, 10.f);
+        ImGui::TextDisabled("未进图 %d", st.deadClientsCount);
         ImGui::SameLine(0, 10.f);
         ImGui::TextDisabled("/ 跟踪 %d", st.clientsTracked);
         ImGui::SameLine(0, 14.f);
@@ -4491,6 +5134,15 @@ void DrawClientsPanel(OpsState& st) {
                                   st.latestClientVersionText.c_str());
             }
         }
+        if (nCharStale > 0) {
+            ImGui::SameLine(0, 14.f);
+            char chip[48]{};
+            std::snprintf(chip, sizeof(chip), "角色残留 %d##f_char_stale", nCharStale);
+            FilterChipButton(st, chip, "__char_stale__", OpsTone::Warn());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("角色快照落后于探活（换角/选角页仍挂着上次进图的名字）");
+            }
+        }
         if (alertN > 0) {
             ImGui::SameLine(0, 14.f);
             ImGui::PushStyleColor(ImGuiCol_Text, OpsTone::Warn());
@@ -4509,14 +5161,14 @@ void DrawClientsPanel(OpsState& st) {
 
     // ── 当前连接（主区域优先；次要块放表后） ──
     ImGui::Separator();
-    ImGui::TextUnformatted("当前连接");
+    ImGui::TextUnformatted("当前连接 · 进图");
     ImGui::SameLine();
     ImGui::TextDisabled("近 %ds", st.clientsActiveSec);
     ImGui::SameLine(0, 10.f);
     ImGui::Checkbox("自动刷新", &st.clientsAutoRefresh);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip(
-            "每 5 秒向本机更新服务拉一次在线表，不是每帧。\n"
+            "每 5 秒向本机更新服务拉一次进图表，不是每帧。\n"
             "关掉后连接表冻结（利润监控也不再后台采样）；点「刷新」或 F5 仍可立刻拉。");
     ImGui::SameLine();
     if (ImGui::SmallButton("刷新##clients")) {
@@ -4537,10 +5189,10 @@ void DrawClientsPanel(OpsState& st) {
         if (st.clientsActiveSec < 30) st.clientsActiveSec = 30;
         if (st.clientsActiveSec > 3600) st.clientsActiveSec = 3600;
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("在线判定窗口（秒）");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("进图判定窗口（秒）。未进图的在下方死表，不进活表。");
     ImGui::SameLine(0, 10.f);
     ImGui::SetNextItemWidth(168.f);
-    ImGui::InputTextWithHint("##clients_filter", "筛选 IP/机名/角色/地图/频道/MAC/TOKEN…",
+    ImGui::InputTextWithHint("##clients_filter", "筛选 IP/机名/角色/账密/地图/频道/MAC/TOKEN…",
                              st.clientsFilter,
                              sizeof(st.clientsFilter));
     if (st.clientsFilter[0] != '\0') {
@@ -4610,7 +5262,7 @@ void DrawClientsPanel(OpsState& st) {
     ImGui::SameLine(0, 6.f);
     if (ImGui::SmallButton("复制可见##clients")) {
         std::string out =
-            "ip\tmachine\tmac\ttoken\tdeviceId\tver\tchar\tlevel\tjob\tmeso\tmapId\tmap\tch\tgate\tidle\n";
+            "ip\tmachine\tmac\ttoken\tdeviceId\tver\tchar\tlevel\tjob\tmeso\texpPer\tmesoPer\twealth\tworldId\tworld\tmapId\tmap\tch\tgate\tidle\tprobe\tsnap\tlogin\tpass\tmailPass\tgpDevice\n";
         int n = 0;
         for (const auto& c : st.clients) {
             if (!ClientMatchesFilter(st, c, st.clientsFilter)) continue;
@@ -4646,7 +5298,7 @@ void DrawClientsPanel(OpsState& st) {
         ImGuiTableFlags_SortTristate;
     // 工具条收紧后主表再抬一点。
     const float clientsH = (std::max)(260.f, ImGui::GetContentRegionAvail().y * 0.58f);
-    if (ImGui::BeginTable("clients_table", 20, flags, ImVec2(0, clientsH))) {
+    if (ImGui::BeginTable("clients_table", 21, flags, ImVec2(0, clientsH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("IP", ImGuiTableColumnFlags_WidthFixed, 100.f, kCliIp);
         ImGui::TableSetupColumn("归属地", ImGuiTableColumnFlags_WidthStretch, 1.2f, kCliGeo);
@@ -4665,10 +5317,11 @@ void DrawClientsPanel(OpsState& st) {
                                 88.f, kCliToken);
         ImGui::TableSetupColumn("设备", ImGuiTableColumnFlags_WidthStretch, 1.0f, kCliDevice);
         ImGui::TableSetupColumn("版本", ImGuiTableColumnFlags_WidthStretch, 0.85f, kCliVer);
-        ImGui::TableSetupColumn("最近活动", ImGuiTableColumnFlags_WidthFixed, 120.f, kCliLastSeen);
+        ImGui::TableSetupColumn("探活", ImGuiTableColumnFlags_WidthFixed, 104.f, kCliLastSeen);
         ImGui::TableSetupColumn("空闲", ImGuiTableColumnFlags_WidthFixed, 42.f, kCliIdle);
         ImGui::TableSetupColumn("门禁", ImGuiTableColumnFlags_WidthFixed, 128.f, kCliGate);
         ImGui::TableSetupColumn("请求", ImGuiTableColumnFlags_WidthFixed, 40.f, kCliHits);
+        ImGui::TableSetupColumn("账密", ImGuiTableColumnFlags_WidthFixed, 260.f, kCliLogin);
         ImGui::TableSetupColumn("操作",
                                 ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 200.f,
                                 kCliAction);
@@ -4914,6 +5567,26 @@ void DrawClientsPanel(OpsState& st) {
                                 SetStatus(st, lastErr.empty() ? "本组无可识别设备" : lastErr);
                             if (ok) RefreshClients(st, true);
                         }
+                        if (ImGui::MenuItem("本组弹窗通知")) {
+                            std::vector<OpsState::RemoteScriptTarget> ts;
+                            forEachIdentified([&](const OpsState::ConnectedClient& m) {
+                                ts.push_back(RemoteScriptTargetFromClient(m));
+                            });
+                            if (ts.empty())
+                                SetStatus(st, "本组无可识别设备");
+                            else
+                                OpenRemoteScriptPopup(st, std::move(ts), 0);
+                        }
+                        if (ImGui::MenuItem("本组推送脚本")) {
+                            std::vector<OpsState::RemoteScriptTarget> ts;
+                            forEachIdentified([&](const OpsState::ConnectedClient& m) {
+                                ts.push_back(RemoteScriptTargetFromClient(m));
+                            });
+                            if (ts.empty())
+                                SetStatus(st, "本组无可识别设备");
+                            else
+                                OpenRemoteScriptPopup(st, std::move(ts), 1);
+                        }
                         if (tokenGroup) DrawPersonAllowUpdateMenu(st, g.key);
                         if (ImGui::MenuItem("本组指定推更", nullptr, false,
                                             st.latestClientBuildId > 0 &&
@@ -4992,6 +5665,13 @@ void DrawClientsPanel(OpsState& st) {
                         }
                         ImGui::TextColored(OpsTone::Warn(), "%s", summary.c_str());
                     }
+                    bool groupCharStale = false;
+                    for (size_t mi : g.members) {
+                        if (CharSnapStale(st.clients[mi])) {
+                            groupCharStale = true;
+                            break;
+                        }
+                    }
                     ImGui::TableSetColumnIndex(3);
                     {
                         std::string chars;
@@ -5006,8 +5686,15 @@ void DrawClientsPanel(OpsState& st) {
                                 break;
                             }
                         }
-                        if (chars.empty()) ImGui::TextDisabled("—");
-                        else ImGui::TextUnformatted(chars.c_str());
+                        if (chars.empty()) {
+                            ImGui::TextDisabled("—");
+                        } else if (groupCharStale) {
+                            ImGui::TextColored(OpsTone::Warn(), "%s", chars.c_str());
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("组内有角色快照落后于探活（换角/选角残留）");
+                        } else {
+                            ImGui::TextUnformatted(chars.c_str());
+                        }
                     }
 
                     // 折叠头：汇总关键列，避免整行只剩「…」看不见内容。
@@ -5039,14 +5726,20 @@ void DrawClientsPanel(OpsState& st) {
                             }
                         }
                         if (!any) ImGui::TextDisabled("—");
-                        else ImGui::Text("≤%d", maxLv);
+                        else if (groupCharStale)
+                            ImGui::TextColored(OpsTone::Warn(), "≤%d", maxLv);
+                        else
+                            ImGui::Text("≤%d", maxLv);
                     }
                     ImGui::TableSetColumnIndex(5);
                     {
                         const std::string jobs = joinUnique(
                             [](const OpsState::ConnectedClient& m) { return m.charJobName; }, 2);
                         if (jobs.empty()) ImGui::TextDisabled("—");
-                        else ImGui::TextUnformatted(jobs.c_str());
+                        else if (groupCharStale)
+                            ImGui::TextColored(OpsTone::Warn(), "%s", jobs.c_str());
+                        else
+                            ImGui::TextUnformatted(jobs.c_str());
                     }
                     ImGui::TableSetColumnIndex(6);
                     {
@@ -5057,10 +5750,14 @@ void DrawClientsPanel(OpsState& st) {
                         } else {
                             char mesoBuf[48]{};
                             FormatMesoDisplay(sumRaw, mesoBuf, sizeof(mesoBuf));
-                            ImGui::TextUnformatted(mesoBuf);
+                            if (groupCharStale)
+                                ImGui::TextColored(OpsTone::Warn(), "%s", mesoBuf);
+                            else
+                                ImGui::TextUnformatted(mesoBuf);
                             if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("组内累计 %s\n%d/%zu 台上报", sumRaw.c_str(),
-                                                  counted, g.members.size());
+                                ImGui::SetTooltip("组内累计 %s\n%d/%zu 台上报%s", sumRaw.c_str(),
+                                                  counted, g.members.size(),
+                                                  groupCharStale ? "\n含残留角色快照" : "");
                             }
                         }
                     }
@@ -5184,15 +5881,7 @@ void DrawClientsPanel(OpsState& st) {
                             if (st.clients[mi].idleSec < st.clients[best].idleSec) best = mi;
                         }
                         const auto& act = st.clients[best];
-                        if (act.lastSeenAt.empty()) {
-                            ImGui::TextDisabled("—");
-                        } else {
-                            ImGui::Text("%s", act.lastSeenAt.c_str());
-                            if (!act.lastKind.empty()) {
-                                ImGui::SameLine(0, 6.f);
-                                ImGui::TextDisabled("%s", act.lastKind.c_str());
-                            }
-                        }
+                        DrawProbeClockCell(act.lastSeenAt, act.idleSec, act.lastKind);
                     }
                     ImGui::TableSetColumnIndex(16);
                     {
@@ -5202,6 +5891,8 @@ void DrawClientsPanel(OpsState& st) {
                         char idleBuf[16]{};
                         FormatIdleSec(bestIdle, idleBuf, sizeof(idleBuf));
                         ImGui::TextColored(IdleSecColor(bestIdle), "%s", idleBuf);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("距最后探活 %d 秒（组内最近一台）", bestIdle);
                     }
                     ImGui::TableSetColumnIndex(17);
                     {
@@ -5222,6 +5913,23 @@ void DrawClientsPanel(OpsState& st) {
                         ImGui::TextDisabled("%d", hits);
                     }
                     ImGui::TableSetColumnIndex(19);
+                    {
+                        std::string accs;
+                        int nShow = 0;
+                        for (size_t mi : g.members) {
+                            const auto& m = st.clients[mi];
+                            if (m.loginAccount.empty()) continue;
+                            if (nShow > 0) accs += " / ";
+                            accs += m.loginAccount;
+                            if (++nShow >= 2) {
+                                if (static_cast<int>(g.members.size()) > nShow) accs += " …";
+                                break;
+                            }
+                        }
+                        if (accs.empty()) ImGui::TextDisabled("—");
+                        else ImGui::TextUnformatted(accs.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(20);
                     if (open)
                         ImGui::TextDisabled("");
                     else
@@ -5306,24 +6014,45 @@ void DrawClientsPanel(OpsState& st) {
                             else
                                 ImGui::TextColored(OpsTone::Warn(), "%s", who);
                         }
-                        for (int col = 13; col <= 18; ++col) {
+                        for (int col = 13; col <= 19; ++col) {
                             ImGui::TableSetColumnIndex(col);
-                            if (col == 16) {
+                            if (col == 15) {
+                                size_t best = ib.members.front();
+                                for (size_t mi : ib.members) {
+                                    if (st.clients[mi].idleSec < st.clients[best].idleSec) best = mi;
+                                }
+                                const auto& act = st.clients[best];
+                                DrawProbeClockCell(act.lastSeenAt, act.idleSec, act.lastKind);
+                            } else if (col == 16) {
                                 int bestIdle = ihead.idleSec;
                                 for (size_t mi : ib.members)
                                     bestIdle = (std::min)(bestIdle, st.clients[mi].idleSec);
                                 char idleBuf[16]{};
                                 FormatIdleSec(bestIdle, idleBuf, sizeof(idleBuf));
                                 ImGui::TextColored(IdleSecColor(bestIdle), "%s", idleBuf);
+                                if (ImGui::IsItemHovered())
+                                    ImGui::SetTooltip("距最后探活 %d 秒（同 IP 最近一台）", bestIdle);
                             } else if (col == 18) {
                                 int hits = 0;
                                 for (size_t mi : ib.members) hits += st.clients[mi].hits;
                                 ImGui::TextDisabled("%d", hits);
+                            } else if (col == 19) {
+                                std::string accs;
+                                int nShow = 0;
+                                for (size_t mi : ib.members) {
+                                    const auto& m = st.clients[mi];
+                                    if (m.loginAccount.empty()) continue;
+                                    if (nShow > 0) accs += " / ";
+                                    accs += m.loginAccount;
+                                    if (++nShow >= 2) break;
+                                }
+                                if (accs.empty()) ImGui::TextDisabled(ipOpen ? "" : "—");
+                                else ImGui::TextUnformatted(accs.c_str());
                             } else {
                                 ImGui::TextDisabled(ipOpen ? "" : "—");
                             }
                         }
-                        ImGui::TableSetColumnIndex(19);
+                        ImGui::TableSetColumnIndex(20);
                         ImGui::TextDisabled(ipOpen ? "" : "点开展开");
                         ImGui::PopID();
                         ++shown;
@@ -5396,6 +6125,11 @@ void DrawClientsPanel(OpsState& st) {
                 if (ImGui::BeginPopupContextItem("ip")) {
                     if (ImGui::MenuItem("复制 IP")) CopyText(c.ip.c_str());
                     if (c.identified && ImGui::MenuItem("复制计算机名")) CopyText(c.machine.c_str());
+                    if (!c.loginAccount.empty() && ImGui::MenuItem("复制账密")) {
+                        CopyText(FormatLoginFourLine(c.loginAccount, c.loginPass, c.loginMailPass,
+                                                     c.loginGpDevice)
+                                     .c_str());
+                    }
                     if (!c.charName.empty() && ImGui::MenuItem("复制角色名")) CopyText(c.charName.c_str());
                     if ((c.worldId > 0 || !c.worldName.empty()) && ImGui::MenuItem("复制分区")) {
                         char buf[96]{};
@@ -5466,6 +6200,24 @@ void DrawClientsPanel(OpsState& st) {
                                 SetStatus(st, err);
                             }
                         }
+                        if (ImGui::MenuItem("弹窗通知此设备")) {
+                            OpenRemoteScriptPopup(st, {RemoteScriptTargetFromClient(c)}, 0);
+                        }
+                        if (ImGui::MenuItem("推送脚本到此设备")) {
+                            OpenRemoteScriptPopup(st, {RemoteScriptTargetFromClient(c)}, 1);
+                        }
+                        if (!c.remoteScriptId.empty() &&
+                            ImGui::MenuItem(c.remoteScriptOp == "showMsg" ? "取消此设备弹窗"
+                                                                         : "取消此设备脚本")) {
+                            std::string err;
+                            if (PostRemoteScriptCancel(st, c.remoteScriptId, &c, err)) {
+                                SetStatus(st, c.remoteScriptOp == "showMsg" ? "已取消弹窗任务"
+                                                                           : "已取消脚本任务");
+                                RefreshClients(st, true);
+                            } else {
+                                SetStatus(st, err);
+                            }
+                        }
                         ImGui::Separator();
                         if (st.latestClientBuildId == 0 || st.forcedClientBuildId > 0) {
                             ImGui::BeginDisabled();
@@ -5520,15 +6272,53 @@ void DrawClientsPanel(OpsState& st) {
                     ImGui::TextUnformatted(c.machine.empty() ? "—" : c.machine.c_str());
                 }
                 ImGui::TableSetColumnIndex(3);
+                const bool charStale = CharSnapStale(c);
                 if (c.charName.empty()) {
                     ImGui::TextDisabled("—");
                 } else {
-                    ImGui::TextUnformatted(c.charName.c_str());
+                    ImGui::BeginGroup();
+                    if (charStale)
+                        ImGui::TextColored(OpsTone::Warn(), "%s", c.charName.c_str());
+                    else
+                        ImGui::TextUnformatted(c.charName.c_str());
+                    if (charStale) {
+                        char ageBuf[16]{};
+                        if (c.charAgeSec >= 0) {
+                            FormatIdleSec(c.charAgeSec, ageBuf, sizeof(ageBuf));
+                            ImGui::SameLine(0, 4.f);
+                            ImGui::TextDisabled("%s", ageBuf);
+                        } else {
+                            ImGui::SameLine(0, 4.f);
+                            ImGui::TextDisabled("旧");
+                        }
+                    }
+                    ImGui::EndGroup();
                     if (ImGui::IsItemHovered()) {
                         char mesoTip[48]{};
                         FormatMesoDisplay(c.charMeso, mesoTip, sizeof(mesoTip));
+                        char probeAge[16]{};
+                        char snapAge[16]{};
+                        FormatIdleSec(c.idleSec, probeAge, sizeof(probeAge));
+                        if (c.charAgeSec >= 0) FormatIdleSec(c.charAgeSec, snapAge, sizeof(snapAge));
                         std::string tip = "角色 ";
                         tip += c.charName;
+                        tip += "\n探活 ";
+                        tip += c.lastSeenAt.empty() ? "—" : c.lastSeenAt.c_str();
+                        tip += "（";
+                        tip += probeAge;
+                        tip += "前）";
+                        tip += "\n快照 ";
+                        if (c.charFromHistory)
+                            tip += "历史补名，非本次探活";
+                        else if (c.charSeenAt.empty())
+                            tip += "—";
+                        else {
+                            tip += c.charSeenAt;
+                            tip += "（";
+                            tip += snapAge;
+                            tip += "前）";
+                        }
+                        if (charStale) tip += "\n⚠ 角色栏可能是残留";
                         tip += "\n等级 ";
                         tip += std::to_string(c.charLevel);
                         tip += " · 职业 ";
@@ -5559,11 +6349,22 @@ void DrawClientsPanel(OpsState& st) {
                 }
                 ImGui::TableSetColumnIndex(4);
                 if (c.charLevel <= 0) ImGui::TextDisabled("—");
-                else ImGui::Text("%d", c.charLevel);
+                else if (charStale)
+                    ImGui::TextColored(OpsTone::Warn(), "%d", c.charLevel);
+                else
+                    ImGui::Text("%d", c.charLevel);
                 ImGui::TableSetColumnIndex(5);
                 if (c.charJobName.empty()) {
-                    if (c.charJob != 0) ImGui::TextDisabled("%d", c.charJob);
-                    else ImGui::TextDisabled("—");
+                    if (c.charJob != 0) {
+                        if (charStale)
+                            ImGui::TextColored(OpsTone::Warn(), "%d", c.charJob);
+                        else
+                            ImGui::TextDisabled("%d", c.charJob);
+                    } else {
+                        ImGui::TextDisabled("—");
+                    }
+                } else if (charStale) {
+                    ImGui::TextColored(OpsTone::Warn(), "%s", c.charJobName.c_str());
                 } else {
                     ImGui::TextUnformatted(c.charJobName.c_str());
                 }
@@ -5572,7 +6373,10 @@ void DrawClientsPanel(OpsState& st) {
                     char mesoBuf[48]{};
                     FormatMesoDisplay(c.charMeso, mesoBuf, sizeof(mesoBuf));
                     if (c.charMeso.empty()) ImGui::TextDisabled("—");
-                    else ImGui::TextUnformatted(mesoBuf);
+                    else if (charStale)
+                        ImGui::TextColored(OpsTone::Warn(), "%s", mesoBuf);
+                    else
+                        ImGui::TextUnformatted(mesoBuf);
                 }
                 ImGui::TableSetColumnIndex(7);
                 {
@@ -5662,18 +6466,12 @@ void DrawClientsPanel(OpsState& st) {
                     }
                 }
                 ImGui::TableSetColumnIndex(15);
-                if (!c.lastSeenAt.empty()) {
-                    ImGui::Text("%s", c.lastSeenAt.c_str());
-                    ImGui::SameLine(0, 6.f);
-                    ImGui::TextDisabled("%s", c.lastKind.c_str());
-                } else {
-                    ImGui::TextDisabled("—");
-                }
+                DrawProbeClockCell(c.lastSeenAt, c.idleSec, c.lastKind);
                 ImGui::TableSetColumnIndex(16);
                 char idleBuf[16]{};
                 FormatIdleSec(c.idleSec, idleBuf, sizeof(idleBuf));
                 ImGui::TextColored(IdleSecColor(c.idleSec), "%s", idleBuf);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("空闲 %d 秒", c.idleSec);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("距最后探活 %d 秒", c.idleSec);
                 ImGui::TableSetColumnIndex(17);
                 {
                     auto formatRemain = [](int sec, char* out, size_t outN) {
@@ -5743,6 +6541,8 @@ void DrawClientsPanel(OpsState& st) {
                 ImGui::TableSetColumnIndex(18);
                 ImGui::Text("%d", c.hits);
                 ImGui::TableSetColumnIndex(19);
+                DrawLoginCredCell(c.loginAccount, c.loginPass, c.loginMailPass, c.loginGpDevice);
+                ImGui::TableSetColumnIndex(20);
                 if (c.identified && (!c.deviceId.empty() || !c.mac.empty())) {
                     const bool forcePending = !c.forceTargetId.empty() &&
                                               (c.forceTargetStatus == "queued" ||
@@ -5847,6 +6647,61 @@ void DrawClientsPanel(OpsState& st) {
                             ImGui::SetTooltip("FETCH 全量：各频道最多约 360 卷");
                     }
                     ImGui::SameLine(0, 4.f);
+                    {
+                        const bool scriptPending =
+                            !c.remoteScriptId.empty() &&
+                            (c.remoteScriptStatus == "queued" || c.remoteScriptStatus == "offered" ||
+                             c.remoteScriptStatus == "acked");
+                        if (scriptPending) {
+                            ImGui::TextDisabled(c.remoteScriptOp == "showMsg" ? "弹窗…" : "脚本…");
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip(
+                                    "远程脚本 %s\nresult %s\n%s\nid %s\n右键可取消",
+                                    c.remoteScriptStatus.c_str(),
+                                    c.remoteScriptResult.empty() ? "-" : c.remoteScriptResult.c_str(),
+                                    c.remoteScriptOut.empty() ? "" : c.remoteScriptOut.c_str(),
+                                    c.remoteScriptId.c_str());
+                                if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                                    ImGui::OpenPopup("rs_pending");
+                            }
+                            if (ImGui::BeginPopup("rs_pending")) {
+                                if (ImGui::MenuItem(c.remoteScriptOp == "showMsg" ? "取消此弹窗"
+                                                                                 : "取消此脚本")) {
+                                    std::string err;
+                                    if (PostRemoteScriptCancel(st, c.remoteScriptId, &c, err)) {
+                                        SetStatus(st, c.remoteScriptOp == "showMsg" ? "已取消弹窗任务"
+                                                                                   : "已取消脚本任务");
+                                        RefreshClients(st, true);
+                                    } else {
+                                        SetStatus(st, err);
+                                    }
+                                }
+                                ImGui::EndPopup();
+                            }
+                        } else if (c.identified && (!c.deviceId.empty() || !c.mac.empty())) {
+                            if (SafeSmallButton("弹窗")) {
+                                OpenRemoteScriptPopup(st, {RemoteScriptTargetFromClient(c)}, 0);
+                            }
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("给这一台弹置顶信息框（需确认）");
+                            ImGui::SameLine(0, 2.f);
+                            if (SafeSmallButton("脚本")) {
+                                OpenRemoteScriptPopup(st, {RemoteScriptTargetFromClient(c)}, 1);
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                if (!c.remoteScriptResult.empty() || !c.remoteScriptOut.empty()) {
+                                    ImGui::SetTooltip(
+                                        "推送 PowerShell 到这一台（需确认）\n上次 %s\n%s",
+                                        c.remoteScriptResult.empty() ? "-"
+                                                                     : c.remoteScriptResult.c_str(),
+                                        c.remoteScriptOut.empty() ? "" : c.remoteScriptOut.c_str());
+                                } else {
+                                    ImGui::SetTooltip("推送 PowerShell 到这一台（需确认）");
+                                }
+                            }
+                        }
+                    }
+                    ImGui::SameLine(0, 4.f);
                     if (c.banned) {
                         if (NeutralSmallButton("解禁")) {
                             std::string err;
@@ -5933,6 +6788,8 @@ void DrawClientsPanel(OpsState& st) {
         }
         ImGui::EndTable();
     }
+
+    DrawDeadClientsSection(st);
 
     // ── 下半：次要折叠 + 封禁|白名单并排 ──
     const float belowH = (std::max)(160.f, ImGui::GetContentRegionAvail().y);
@@ -6076,13 +6933,14 @@ void DrawClientsPanel(OpsState& st) {
             }
 
             const float histH = (std::min)(180.f, belowH * 0.38f);
-            if (ImGui::BeginTable("client_hist", 7,
+            if (ImGui::BeginTable("client_hist", 8,
                                   ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                       ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
                                   ImVec2(0, histH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("uid", ImGuiTableColumnFlags_WidthFixed, 100.f);
                 ImGui::TableSetupColumn("计算机", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+                ImGui::TableSetupColumn("账密", ImGuiTableColumnFlags_WidthFixed, 240.f);
                 ImGui::TableSetupColumn("角色", ImGuiTableColumnFlags_WidthFixed, 90.f);
                 ImGui::TableSetupColumn("版本", ImGuiTableColumnFlags_WidthFixed, 70.f);
                 ImGui::TableSetupColumn("最后见到", ImGuiTableColumnFlags_WidthFixed, 130.f);
@@ -6115,16 +6973,42 @@ void DrawClientsPanel(OpsState& st) {
                     ImGui::TableSetColumnIndex(1);
                     ImGui::TextUnformatted(h.machine.empty() ? "—" : h.machine.c_str());
                     ImGui::TableSetColumnIndex(2);
-                    ImGui::TextUnformatted(h.charName.empty() ? "—" : h.charName.c_str());
+                    DrawLoginCredCell(h.loginAccount, h.loginPass, h.loginMailPass, h.loginGpDevice);
+                    if (!h.loginAccount.empty() && ImGui::BeginPopupContextItem("hist_login")) {
+                        if (ImGui::MenuItem("复制账密"))
+                            CopyText(FormatLoginFourLine(h.loginAccount, h.loginPass, h.loginMailPass,
+                                                        h.loginGpDevice)
+                                         .c_str());
+                        ImGui::EndPopup();
+                    }
                     ImGui::TableSetColumnIndex(3);
+                    if (h.charName.empty()) {
+                        ImGui::TextDisabled("—");
+                    } else {
+                        ImGui::TextUnformatted(h.charName.c_str());
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("角色 %s\n快照 %s\n最后见到 %s", h.charName.c_str(),
+                                              h.charSeenAt.empty() ? "—" : h.charSeenAt.c_str(),
+                                              h.lastSeenAt.empty() ? "—" : h.lastSeenAt.c_str());
+                        }
+                    }
+                    ImGui::TableSetColumnIndex(4);
                     ImGui::TextDisabled("%s", h.appVersion.empty() ? "—" : h.appVersion.c_str());
 
-                    ImGui::TableSetColumnIndex(4);
-                    ImGui::TextDisabled("%s", h.lastSeenAt.empty()
-                                                  ? "—"
-                                                  : h.lastSeenAt.substr(0, 16).c_str());
-
                     ImGui::TableSetColumnIndex(5);
+                    {
+                        char clock[24]{};
+                        FormatProbeClock(h.lastSeenAt, clock, sizeof(clock));
+                        if (!clock[0]) {
+                            ImGui::TextDisabled("—");
+                        } else {
+                            ImGui::TextDisabled("%s", clock);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("最后见到 %s", h.lastSeenAt.c_str());
+                        }
+                    }
+
+                    ImGui::TableSetColumnIndex(6);
                     const std::string lease = LeaseRemainText(h.leaseRemainSec);
                     if (h.online)
                         ImGui::TextColored(OpsTone::Ok(), "%s", lease.c_str());
@@ -6139,7 +7023,7 @@ void DrawClientsPanel(OpsState& st) {
                                           h.lastAllowAt.empty() ? "（无记录）"
                                                                 : h.lastAllowAt.c_str());
 
-                    ImGui::TableSetColumnIndex(6);
+                    ImGui::TableSetColumnIndex(7);
                     if (h.lastDenyMatch.empty() && h.lastDenyReason.empty()) {
                         ImGui::TextDisabled("—");
                     } else {
@@ -6212,6 +7096,123 @@ void DrawClientsPanel(OpsState& st) {
                             SetStatus(st, err);
                         }
                     }
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+        }
+    }
+
+    const bool openRsQ = st.forceOpenRemoteScriptQueue;
+    st.forceOpenRemoteScriptQueue = false;
+    if (!st.remoteScriptQueue.empty() || !st.remoteScriptQueueError.empty()) {
+        char rsHdr[72]{};
+        std::snprintf(rsHdr, sizeof(rsHdr), "远程任务排队 (%zu)##remote_script_q",
+                      st.remoteScriptQueue.size());
+        if (openRsQ) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+        if (ImGui::CollapsingHeader(rsHdr)) {
+            ImGui::TextDisabled("本机管理口 · 点名设备 · 内存队列；重启更新服务会丢。");
+            if (!st.remoteScriptQueueError.empty()) {
+                ImGui::TextColored(OpsTone::Warn(), "%s", st.remoteScriptQueueError.c_str());
+            }
+            const float qH = (std::min)(160.f, belowH * 0.26f);
+            if (ImGui::BeginTable("remote_script_queue", 7,
+                                  ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
+                                  ImVec2(0, qH))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("目标", ImGuiTableColumnFlags_WidthStretch, 1.3f);
+                ImGui::TableSetupColumn("类型", ImGuiTableColumnFlags_WidthFixed, 44.f);
+                ImGui::TableSetupColumn("状态", ImGuiTableColumnFlags_WidthFixed, 72.f);
+                ImGui::TableSetupColumn("结果", ImGuiTableColumnFlags_WidthStretch, 1.5f);
+                ImGui::TableSetupColumn("超时", ImGuiTableColumnFlags_WidthFixed, 48.f);
+                ImGui::TableSetupColumn("时间", ImGuiTableColumnFlags_WidthFixed, 130.f);
+                ImGui::TableSetupColumn("操作", ImGuiTableColumnFlags_WidthFixed, 56.f);
+                ImGui::TableHeadersRow();
+                for (size_t i = 0; i < st.remoteScriptQueue.size(); ++i) {
+                    const auto& j = st.remoteScriptQueue[i];
+                    const bool isMsg = j.op == "showMsg";
+                    ImGui::PushID(static_cast<int>(i) + 61000);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    std::string target = j.machine;
+                    if (target.empty()) target = j.deviceId;
+                    if (target.empty()) target = j.mac;
+                    if (target.empty()) target = j.id;
+                    if (isMsg && !j.title.empty()) {
+                        target += " · ";
+                        target += j.title;
+                    }
+                    ImGui::TextUnformatted(target.c_str());
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("id=%s\nop=%s\nsha=%s\nbytes=%d\n%s", j.id.c_str(),
+                                          j.op.empty() ? "runScript" : j.op.c_str(),
+                                          j.sha256.c_str(), j.bytes,
+                                          j.title.empty() ? (j.note.empty() ? "" : j.note.c_str())
+                                                          : j.title.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(isMsg ? "弹窗" : "脚本");
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(j.status.empty() ? "—" : j.status.c_str());
+                    ImGui::TableSetColumnIndex(3);
+                    const char* resultZh = nullptr;
+                    if (j.result == "ok")
+                        resultZh = isMsg ? "已点确定" : "完成";
+                    else if (j.result == "no_ack")
+                        resultZh = "旧端未应答";
+                    else if (j.result == "timeout")
+                        resultZh = isMsg ? "弹窗超时" : "执行超时";
+                    else if (j.result == "fail")
+                        resultZh = "失败";
+                    else if (j.result == "cancelled")
+                        resultZh = "已取消";
+                    if (!j.outTail.empty()) {
+                        ImGui::TextUnformatted(j.outTail.c_str());
+                    } else if (resultZh) {
+                        ImGui::TextUnformatted(resultZh);
+                    } else if (!j.result.empty()) {
+                        ImGui::TextUnformatted(j.result.c_str());
+                    } else {
+                        ImGui::TextDisabled("—");
+                    }
+                    if (ImGui::IsItemHovered() && (!j.result.empty() || j.hasExit)) {
+                        char exitTip[16]{};
+                        if (j.hasExit)
+                            std::snprintf(exitTip, sizeof(exitTip), "%d", j.exitCode);
+                        else
+                            std::snprintf(exitTip, sizeof(exitTip), "-");
+                        ImGui::SetTooltip("result %s\nexit %s",
+                                          j.result.empty() ? "-" : j.result.c_str(), exitTip);
+                    }
+                    ImGui::TableSetColumnIndex(4);
+                    if (isMsg)
+                        ImGui::TextDisabled("—");
+                    else if (j.timeoutSec > 0)
+                        ImGui::Text("%ds", j.timeoutSec);
+                    else
+                        ImGui::TextDisabled("—");
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::TextUnformatted(j.at.empty() ? "—" : j.at.c_str());
+                    ImGui::TableSetColumnIndex(6);
+                    const bool canCancel = j.status == "queued" || j.status == "offered" ||
+                                           j.status == "acked";
+                    if (!canCancel) ImGui::BeginDisabled();
+                    if (SafeSmallButton("取消")) {
+                        OpsState::ConnectedClient tmp;
+                        tmp.remoteScriptId = j.id;
+                        tmp.machine = j.machine;
+                        tmp.deviceId = j.deviceId;
+                        tmp.mac = j.mac;
+                        std::string err;
+                        if (PostRemoteScriptCancel(st, j.id, &tmp, err)) {
+                            SetStatus(st, std::string(isMsg ? "已取消弹窗 " : "已取消脚本 ") + j.id);
+                            RefreshClients(st, true);
+                        } else {
+                            SetStatus(st, err);
+                        }
+                    }
+                    if (!canCancel) ImGui::EndDisabled();
                     ImGui::PopID();
                 }
                 ImGui::EndTable();
@@ -6538,6 +7539,7 @@ void DrawClientsPanel(OpsState& st) {
     }
 
     ImGui::EndChild();
+    DrawRemoteScriptPopup(st);
 }
 
 void FormatMesoUll(unsigned long long v, char* out, size_t n) {
@@ -8115,7 +9117,8 @@ void DrawQuotaPanel(OpsState& st) {
 
             ImGui::TableSetColumnIndex(0);
             std::string caption = (expanded ? "v  " : ">  ") + u.uid;
-            if (ImGui::Selectable(caption.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
+            // 不能 SpanAllColumns：整行命中会盖住「上限」输入框，点进去无法编辑。
+            if (ImGui::Selectable(caption.c_str(), false, ImGuiSelectableFlags_AllowOverlap)) {
                 if (expanded)
                     st.quotaExpanded.erase(u.uid);
                 else

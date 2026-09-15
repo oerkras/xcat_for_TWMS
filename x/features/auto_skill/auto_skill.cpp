@@ -48,19 +48,19 @@ constexpr int kEntryMissCap = 2;
 constexpr uint32_t kPersistLockMs = 0;
 
 constexpr char kWmClassHash[] =
-    "c85ba61839ce73c7f45293ed2e906fdb9e3e0dab928f9582e494367e08948af";
+    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
 constexpr char kSendSpMethodHash[] =
-    "d893a9cce2180b5d10fb027fed98d650ddb6838afcaebd87e43272f1b83008e";
+    "f395b08e30490840fb6cdfa52300d3c002bf43d3cddfb0a0a6a12a7b0b6abea";
 constexpr char kCanSendExclHash[] =
-    "d05d345c5298fe2287063cc6157168accfc8529a94677774fcec1fd1be172fe";
+    "a6be5f14683c006f833199ed31484f6347112b7fae0d6461c3fc38c84c74f0f";
 constexpr char kHashGetMaxLevel[] =
-    "a0bab9bf07950572673aefdf96fcd396d8cf79bdf5447968f8ed1ce99ba9b73";
+    "f951953fe3b808a50f6b517839148c1c82822c2024f08408de589722889fd36";
 constexpr char kHashSkillEntry[] =
-    "eb0565446ebbab5d50d30acc467fb3c5ced56721f7d3a63463d620ba32c54f5";
+    "df9940d6cc221439d7ac2249b2fdb08fa1a98806a1fcd88e620337550fd665b";
 
-constexpr uint32_t kRvaSendSp = 0xE300E0;
-constexpr uint32_t kRvaCanSendExcl = 0xDFE8F0;
-constexpr uint32_t kRvaGetMaxLevel = 0x15809D0;
+constexpr uint32_t kRvaSendSp = 0xE5B780;
+constexpr uint32_t kRvaCanSendExcl = 0xE2D840;
+constexpr uint32_t kRvaGetMaxLevel = 0x15FFB50;
 
 constexpr size_t kFbLevelDataList = 0x120;
 // CharacterStat._extendSp @+0x60；ExtendSp._spSet List<SpSet> @+0x10；SpSet.JobLevel/Sp @+0x10/+0x11。

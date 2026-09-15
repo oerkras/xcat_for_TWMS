@@ -20,6 +20,7 @@
 #include "../simple_combat/heli_rotor.h"
 #include "../simple_combat/simple_combat.h"
 #include "../invuln/invuln.h"
+#include "../notify/notify.h"
 #include "../travel/travel.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/managed_main.h"
@@ -46,14 +47,14 @@ namespace {
 namespace heli = x::features::simple_combat::heli;
 
 // 屏→世界：回归更新前 `ScreenToWorldPoint(Vector3)` 三参重载。
-// 2026-08-03 误把旧 0x4DDEF70 映到四参版 0x4E1F000，且 eye 误用 Mono=0
+// 2026-08-03 误把旧 0x4DDEF70 映到四参版 0x4EDE730，且 eye 误用 Mono=0
 //（Unity 枚举：Left=0 Right=1 Mono=2）。三参包装在 IDA 内硬编码 eye=2。
-// 正确孪生：ScreenToWorldPoint_…824 @ 0x4E1F2B0。
+// 正确孪生：ScreenToWorldPoint_…824 @ 0x4EDE9E0。
 // get_position 走包装（Injected 桩不转发参数）；STW 必须 arity=1 三参重载。
-constexpr uint32_t kRvaCamGetMain = 0x4E2ECD0;         // remounted 2026-09-03 Camera.get_main
-constexpr uint32_t kRvaCamScreenToWorld = 0x4E2E800;  // remounted 2026-09-03 Camera.ScreenToWorldPoint(Vector3)
-constexpr uint32_t kRvaCompGetTransform = 0x4E98F30;  // remounted 2026-08-06 Component.get_transform
-constexpr uint32_t kRvaTfGetPos = 0x4EB39A0;          // remounted 2026-09-03 Transform.get_position
+constexpr uint32_t kRvaCamGetMain = 0x4EEE400;         // remounted 2026-09-03 Camera.get_main
+constexpr uint32_t kRvaCamScreenToWorld = 0x4EEDF30;  // remounted 2026-09-03 Camera.ScreenToWorldPoint(Vector3)
+constexpr uint32_t kRvaCompGetTransform = 0x4F58670;  // remounted 2026-08-06 Component.get_transform
+constexpr uint32_t kRvaTfGetPos = 0x4F72FF0;          // remounted 2026-09-03 Transform.get_position
 
 // 1ms 空转会放大 F6 跟飞对主泵的压力；8ms 足够跟手且显著减负。
 constexpr DWORD kWorkerSleepMs = 8;
@@ -205,6 +206,23 @@ void ClearLead() {
     gPrevTgtMs = 0;
 }
 
+// 拟人档（走路模式）锁飞：用户拍板「拟人不用变态功能」。F6 / 面板 / IPC 一律拒；
+// 已在飞时切到拟人档由 Worker 的 force-disarm 自动卸。
+bool HumanModeLocksFly() { return x::features::simple_combat::IsHumanGroundMove(); }
+
+void NotifyHumanFlyLock(const char* via) {
+    static DWORD sLastMs = 0;
+    const DWORD now = GetTickCount();
+    if (sLastMs && now - sLastMs < 3000) return;
+    sLastMs = now;
+    const bool auto_off = via && strcmp(via, "force-disarm") == 0;
+    notify::PublishNotification(notify::NotificationEvent{
+        notify::NotificationKind::Warning, "fly.human_lock", "F6 飞行",
+        auto_off ? "已切拟人模式，F6 飞行已自动关闭（拟人档只走路）"
+                 : "拟人模式下 F6 已锁定（防误按）：拟人档只走路，要飞请先切回瞬移 / Impact 档",
+        4500});
+}
+
 bool ManualFlyBlocked(DWORD now) {
     if (x::runtime::managed_main::IsMapTransitBlocked()) return true;
     if (!ports::world::IsPlayReady()) return true;
@@ -212,18 +230,21 @@ bool ManualFlyBlocked(DWORD now) {
     if (x::features::travel::IsActive()) return true;
     // Travel 已 Idle 后仍可能 RequestSafeLand 托台（同崩② settle BAN 追 F6）。
     if (x::features::simple_combat::IsSafeLandActive()) return true;
+    if (HumanModeLocksFly()) return true;
     return false;
 }
 
 void LogFlyBlocked(DWORD now, const char* why) {
     if (gBlockLogMs && now - gBlockLogMs < 1000) return;
     gBlockLogMs = now;
-    x::runtime::LogI("Fly", "arm blocked (%s) travel=%d safeLand=%d landRemain=%dms",
+    const bool human = HumanModeLocksFly();
+    x::runtime::LogI("Fly", "arm blocked (%s) travel=%d safeLand=%d human=%d landRemain=%dms",
                      why ? why : "?", x::features::travel::IsActive() ? 1 : 0,
-                     x::features::simple_combat::IsSafeLandActive() ? 1 : 0,
+                     x::features::simple_combat::IsSafeLandActive() ? 1 : 0, human ? 1 : 0,
                      gLandBlockUntil && static_cast<int>(now - gLandBlockUntil) < 0
                          ? static_cast<int>(gLandBlockUntil - now)
                          : 0);
+    if (human) NotifyHumanFlyLock(why);
 }
 
 void ClearFollowTrack() {
@@ -750,8 +771,18 @@ void DriveRotor(DWORD now) {
     // DriveRotor 早退 = 自由落体（BIN 2026-08-22 17:51 channel_hop_pause + F6 ARMED）。
     // 未武装时 worker 根本不进这里；CharBoot 贴 NPC 不会被没按 F6 的鼠标 setpoint 拽走。
     if (!ports::world::IsPlayReady()) return;
-    // 产品门禁：飞需无敌；不偷偷 SetDesired。（Impact 端口自身也会拒，这里只是早退省开销）
-    if (!x::features::invuln::IsEnabled()) return;
+    // 禁止因无敌未钉而停翼。F5≤1.00X 否决后 IsEnabled=0，但 SetArmed 已 fh-ban：
+    // BIN 17:34:31 ARMED fhBan=1 speed=1.00X → 338ms 无 heli 行 → 自由落体。
+    // 旋翼 Tick 对 Fly 走 force Impact（Owner::Fly / HeliOverrideInvulnGate）。
+    if (!x::features::invuln::IsEnabled()) {
+        static DWORD sInvOff = 0;
+        if (!sInvOff || now - sInvOff > 1500) {
+            sInvOff = now;
+            x::runtime::LogI("Fly", "DriveRotor invuln_off force=1 veto=%d desired=%d",
+                             x::features::invuln::IsWalkGlideVeto() ? 1 : 0,
+                             x::features::invuln::IsDesired() ? 1 : 0);
+        }
+    }
 
     // 旋翼判死（状态停更 / 深度出界）后必须**先卸掉禁挂台**：清 bail 的唯一条件是 onFh，
     // 而禁挂台挂着就永远接不住地板 —— 那是「一路掉到出图也醒不过来」的死锁。注意不能就此

@@ -32,24 +32,24 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 // HP/MP 真源在 x::ui::player（WM→CS）；LocalUser → il2cpp_shape::ResolveUserLocalKlass
-// ItemDataManager：08-06 remount（TypeDef 2027；dataTable@+0x18 / bundleMap@+0x38）
+// ItemDataManager：09-10 remount（TypeDef 2032；dataTable@+0x18 / bundleMap@+0x38）
 constexpr char kItemDataManagerClass[] =
-    "c8101ac7dfb0f2d093f36c7c8358ab9f1e20c3e893471976e0aaa4aed1b3504";
+    "bff751c2534faed4265d5bef882ae1d31e4c2f410adb17332cc66a00ad07955";
 constexpr char kItemDataClass[] =
     "d0faf43681b85608fdeeb49e50b4ef39661f9915255f9cc42ffbcef8c7ecdcc";
 constexpr char kItemBundleClass[] =
-    "ccc4e1b77fa37600b2bbf1888206bcd117dd4ceceff4a783c7efc9131f5d21c";
+    "c17341b9c26809365582d9f793bbdddc495cfc9fbcb842d996ed402a46fbed8";
 // ItemData.info 实际类型（restored Info · TypeDef 2031），不是旧 ItemInfo 名
 constexpr char kItemInfoClass[] =
     "d17b63a8e0d464dcc480fe3c2ca318421794428fcbead1527e27897c386c30b";
 
 // IDM / ItemData / Bundle / Info 价位：hash → field_get_offset（dump fallback）
 constexpr char kHashIdmDataTable[] =
-    "ded28030272bf2e90688c23c32a571e7cf83627c8898a5a50f17c0455c17ea1";
+    "e4a61e49a1ac663c21808443cd325d892ef1e6ff6dfcd5f9a61b94a3bad5958";
 constexpr char kHashIdmBundleMap[] =
-    "e30e4193c8e632b191b35015269bae2df727e796e7fe8e119424d3d83764f1b";
+    "b9179fefdbfaaf491fe1bae547155bd56b9c16b271ecadeadc45d64c70089ba";
 constexpr char kHashBundleSellPrice[] =
-    "f969c41971327210442b801874eddca18cbdf8512270d09cc7b4abbb05bba7a";
+    "de81411ac8993feb4b4dfde0b498e0d5daaeb9e41f83de0390d1f65e2bf75d4";
 constexpr char kHashItemDataInfo[] =
     "bb139da95e1f69f3567bf5d09454077ef5aae9327c2493a8289add95d00c5d5";
 constexpr char kHashInfoPrice[] =
@@ -91,9 +91,9 @@ bool gPriceFieldTried = false;
 #define kOffEntryValue (x::runtime::il2cpp_container::OffDictEntryValuePtr())
 #define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
 
-constexpr int kInvTiConsume = 2;
-constexpr int kInvTiInstall = 3;
-constexpr int kInvTiEtc = 4;
+constexpr int kInvTiConsume = x::ui::player::item_type::Consume;
+constexpr int kInvTiInstall = x::ui::player::item_type::Install;
+constexpr int kInvTiEtc = x::ui::player::item_type::Etc;
 
 using FnFindAll = void* (*)(void*, void*);
 using FnCompGo = void* (*)(void*, void*);
@@ -342,7 +342,7 @@ bool SnapshotInventory(std::unordered_map<int, unsigned long long>& out) {
             void* slot = ArrayAt(items, static_cast<uintptr_t>(index));
             const int itemId = ReadI32(slot, offItemId);
             if (!LooksLikeHeapPtr(slot) || itemId <= 0) continue;
-            // TI 2/3/4 槽位运行时多为 ItemSlotBundle；数量在子类 nNumber ushort。
+            // 09-10：Consume/Install/Etc = 1/2/3；槽位运行时多为 ItemSlotBundle。
             unsigned long long quantity = ReadU16(slot, offBundleNum);
             out[itemId] += quantity ? quantity : 1;
         }

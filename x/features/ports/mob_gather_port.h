@@ -52,12 +52,17 @@ void SetFirstGenOnly(bool on);
 // 关=全部按原半径/接力。0 px=最慢档完全不新收。已 armed 的维持。未知模板 fail-open。
 void SetSlowNearOnly(bool on);
 void SetSlowNearPx(unsigned px);
+// 「不吸慢速怪」（TAB 防断卡，可选项，默认关）：未 armed 且 WZ speed≤阈值则不新收。
+// 默认阈值 -50（乌龟及更慢）。已 armed 的维持。未知模板 fail-open。
+void SetSkipSlowTpl(bool on);
+void SetSkipSlowSpeed(int32_t speed);
 // 「吸怪 快攻」TAB「快攻」卡「主动软重连」。不绑吸怪；试连未开则只起表不拆会话。
 // 出过刀 = 欠一次 hangup 清加速 FLAG：第一刀才起表；出刀后关 F5 仍走完这一轮。
 // 没出过刀：关 F5 不计时，满包可直接卖。勾选可单独开（不绑出刀）。
 // freeze 临时关 F5 只停表（未出刀时），不清落地闸 / 不清欠 hangup。
 // 脏会话到点必须洗：卖装/赶路/换图/开店不得清钟、不得冻秒数闸。重连在途 / AwaitLand /
-// 卖装优先 hold 不起下一轮表。测谎答题中推迟拆会话，关题后强制拆一次；起号仍冻。
+// 卖装优先 hold 不起下一轮表。测谎答题中推迟拆会话；旋翼/瞬移档关题后强制拆一次洗
+// 掉落 FLAG，拟人档关题不额外拆（无那套掉落 BUG）。起号仍冻。
 // F5 出过刀后 hangup 窗口硬期限：遇人换频 / 寻簇飞不冻钟，到点中止 hop 再拆。
 // 「吸怪 快攻」TAB「快攻」卡「主动软重连」= 秒数闸。瞬移找怪+F5 默认强制开秒数（面板置灰，不改落盘）。
 // 调试 TAB hangupUnbindF5 可解除该防呆，秒数闸只跟该勾选。
@@ -65,7 +70,7 @@ void SetSoftRelogin(bool on, unsigned sec);
 void SetHangupUnbindF5(bool on);
 // 同卡「出刀软重连」= 累计出刀闸。两勾独立；都开则先到先拆。
 void SetHangupFires(bool on, unsigned n);
-// 调试 TAB ws888 解锁后才给标题/顶栏报刀数；不影响出刀闸本身。
+// 调试 TAB ws888 解锁后才开出刀闸，并给标题/顶栏报刀数。未解锁不计刀、不拆。
 void SetHangupFiresUiUnlocked(bool on);
 void TickSoftRelogin();
 bool IsSoftReloginWanted();

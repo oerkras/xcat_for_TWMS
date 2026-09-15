@@ -8,6 +8,7 @@
 inline constexpr UINT WM_XCAT_GRACEFUL_EXIT_DONE = WM_USER + 0x7C41;
 // 门禁退出：工作线程 PostMessage → 主窗 WndProc 弹「网络错误 (2|3)」并 ExitProcess。
 inline constexpr UINT WM_XCAT_ACCESS_GATE = WM_USER + 0x7C42;
+inline constexpr UINT WM_XCAT_OPS_NOTICE = WM_USER + 0x7C43;
 
 struct AppWindow {
     HWND hwnd = nullptr;

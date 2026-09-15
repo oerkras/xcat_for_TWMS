@@ -1,8 +1,8 @@
 tag	kind	rva	expect	target	source	note
-CurFhMagicCmov	text	0x10B504B	48 0F 45 C1		x/features/ports/curfh_gate_bypass.cpp	TryDoingMagicAttack CurFh CONT (cmovnz rax,rcx)
-CurFhShootCmov	text	0x107D02C	48 0F 45 C2		x/features/ports/curfh_gate_bypass.cpp	TryDoingShootAttack CurFh CONT (cmovnz rax,rdx)
-CurFhPrepareJnz	text	0x10D2B3A	75 07		x/features/ports/curfh_gate_bypass.cpp	DoActiveSkillPrepare CurFh jnz+7 (09-03 gate is setnz table, not 75 07)
-KickHwbpCall	call	0xDF56DB	E8	0xDF6460	x/features/kick_sniff/kick_sniff.cpp	FixedUpdate E8 -> DoLocal
-ByPetRectPack	data	0x55C98F0	19 00 00 00 0A 00 00 00 00 00 00 00 00 00 00 00 00 00 48 42 00 00 70 42		x/features/ports/drop_pool_port.cpp	int32 25,10 + float 50,60
-MeleeConstRect	data	0x5660030	00 00 B0 C2 00 00 C0 C0 00 00 8C 42 00 00 60 42		x/features/melee_veto/melee_veto.cpp	float -88,-6,70,56
-DegreeClampLoSeed	data	0x68BA940	90 F4 42 B6		x/features/attack_accel/attack_accel.cpp	add imm 0x49BCAF72 → lo=2; exclusive xref CalcWeaponAttackSpeedTier 0x15B3420
+CurFhMagicCmov	text	0x11428A5	75 07		x/features/ports/curfh_gate_bypass.cpp	TryDoingMagicAttack CurFh CONT (User+0x50/+0x28 then test rcx; jnz+7) remount 2026-09-10pm
+CurFhShootCmov	text	0x110A356	75 07		x/features/ports/curfh_gate_bypass.cpp	TryDoingShootAttack CurFh CONT (User+0x50/+0x28 then test rdx; jnz+7) remount 2026-09-10pm
+CurFhPrepareJnz	text	0x1160FFD	34 01		x/features/ports/curfh_gate_bypass.cpp	Prepare@0x115FF30 call 0x111DEC0 then xor al,1; seed^0xBA86121D=2; 34 01->31 C0 force CONT remount 2026-09-10pm
+KickHwbpCall	call	0x87DDE5	E8	0xE52160	x/features/kick_sniff/kick_sniff.cpp	DoLocal 唯一 E8 @0x87DDE5 -> 0xE52160 remount 2026-09-10pm
+ByPetRectPack	data	0x568C0B0	19 00 00 00 0A 00 00 00 00 00 00 00 00 00 00 00 00 00 48 42 00 00 70 42		x/features/ports/drop_pool_port.cpp	int32 25,10 + float 50,60 remount 2026-09-10pm
+MeleeConstRect	data	0x571FBB0	00 00 B0 C2 00 00 C0 C0 00 00 8C 42 00 00 60 42		x/features/melee_veto/melee_veto.cpp	float -88,-6,70,56 remount 2026-09-10pm
+DegreeClampLoSeed	data	0x699CF1C	49 40 E2 8C		x/features/attack_accel/attack_accel.cpp	xor imm 0x8CE2404B → lo=2; CalcWeaponAttackSpeedTier 0x1636630 remount 2026-09-10pm

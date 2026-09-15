@@ -33,13 +33,13 @@ using x::runtime::il2cpp::ReadPtr;
 // Prefab 类哈希（与 payload_status Cache 灯一致）· remount 2026-08-06 dump / 2026-08-08 复核
 // Util 无 Prefab 属性（纯工具类）；Text/NonFinite 可走 Prefab 串兜底。
 constexpr const char* kUtilClass =
-    "b14025466ba0e40c51d1bf13f7e915b0e78f9389ed347b2d4da80ea3da005c9";
+    "ee7633015884e0202eb0b1c8c2dc0fac6cb5cc36b06909d28b5ae65b52a7e0f";
 constexpr const char* kNonFiniteClass =
-    "c58aeae97e7e118cafe20417fa8d27da1ce04437f3aefecbe83a8287ac2df04";
+    "dd5f0ccaa0bbbfa4399941f5e3e9eceb4aa32cb26d92d923fa366cb95a33ee2";
 constexpr const char* kTextCaptchaClass =
-    "cf4796979346f21ec878365cbc8cd889c01bd1ebe4d4ca8f23704aa38c8a769";
+    "b1199570deb2d78310c572e1a27fd768ad662c4bc4ff0d4cb98acac50761181";
 constexpr const char* kTextCaptchaInfoClass =
-    "fba68536c141b4d34966a1dd166f5871032d71408e5cda98fb4629f4cbe9a58";
+    "b0d48ed9f98449c8379474ce6a4321fe675877adaa721e60f424e5f66345d97";
 constexpr const char* kPrefabNonFinite = "UIAntiMacroNonFinite";
 constexpr const char* kPrefabTextCaptcha = "UIAntiMacroTextCaptcha";
 
@@ -51,62 +51,62 @@ void* ResolveQuizKlass(const char* hashName, const char* prefabName) {
     return x::runtime::il2cpp::FindClass("", hashName);
 }
 
-constexpr uint32_t kRvaIsOpenAntiMacro = 0x94B3C0;  // Util.IsOpenAntiMacro
-constexpr uint32_t kRvaTextGet = 0x9480c0;  // TextCaptcha.GetAntiMacro
-constexpr uint32_t kRvaTextIsInst = 0x9483c0;  // TextCaptcha.IsInstantiated
-// 真 OnOk（Rosetta bee55c…）；旧误钉 OnSuccess@0x94ae20 / abd99c…
-constexpr uint32_t kRvaTextOnOk = 0x94A5B0;
-constexpr uint32_t kRvaNonGet = 0x93a680;  // NonFinite.GetAntiMacro
-constexpr uint32_t kRvaNonIsInst = 0x93a900;  // NonFinite.IsInstantiated
-constexpr uint32_t kRvaTryGetWinCursorPos = 0x94b940;  // Util.TryGetWinCursorPos（IDB 实钉；旧文档 0x936C30 已废）
+constexpr uint32_t kRvaIsOpenAntiMacro = 0x972a70;  // Util.IsOpenAntiMacro
+constexpr uint32_t kRvaTextGet = 0x96f470;  // TextCaptcha.GetAntiMacro
+constexpr uint32_t kRvaTextIsInst = 0x96f820;  // TextCaptcha.IsInstantiated
+// 真 OnOk（Rosetta bee55c…）；旧误钉 OnSuccess@0x9725c0 / abd99c…
+constexpr uint32_t kRvaTextOnOk = 0x971C30;
+constexpr uint32_t kRvaNonGet = 0x961b90;  // NonFinite.GetAntiMacro
+constexpr uint32_t kRvaNonIsInst = 0x961f60;  // NonFinite.IsInstantiated
+constexpr uint32_t kRvaTryGetWinCursorPos = 0x9730d0;  // Util.TryGetWinCursorPos（IDB 实钉；旧文档 0x936C30 已废）
 // 面板仿射主映射（对照 Artale PanelLocalToDesktop；RVA = runtime dump 包装，plain 名主路径）
-constexpr uint32_t kRvaCamGetMain = 0x4E2ECD0;           // Camera.get_main（与 fly 同钉）
-constexpr uint32_t kRvaCamWorldToScreen = 0x4E2E660;     // Camera.WorldToScreenPoint(Vector3) eye=Mono
-constexpr uint32_t kRvaRectGetRect = 0x4EB1220;          // RectTransform.get_rect
-constexpr uint32_t kRvaTransformPoint = 0x4EB75E0;       // Transform.TransformPoint(Vector3)
+constexpr uint32_t kRvaCamGetMain = 0x4EEE400;           // Camera.get_main（与 fly 同钉）
+constexpr uint32_t kRvaCamWorldToScreen = 0x4EEDD90;     // Camera.WorldToScreenPoint(Vector3) eye=Mono
+constexpr uint32_t kRvaRectGetRect = 0x4F70870;          // RectTransform.get_rect
+constexpr uint32_t kRvaTransformPoint = 0x4F76C30;       // Transform.TransformPoint(Vector3)
 
 // 方法哈希（dump.cs）— static bool()/void() 同形多，哈希主路径
 constexpr char kHashIsOpenAntiMacro[] =
-    "efb81c3685d1e27cde1b6a0c06ba3568e784e1149eada83b57265e2c29bb797";
+    "c5e77a2bb1df108f832e1fd223b83216bca11d97b21e05e8bdd21cf157156aa";
 constexpr char kHashTextGet[] =
-    "de5e4e610829a78e918ac0b6a71db2aca59743a16c6bd569ac7e27fe912b9f4";
+    "d5bf9b7e12531dc9fe037dfc1c28ca584d805ef4aaf74fb5b06b0316665212a";
 constexpr char kHashTextIsInst[] =
-    "c3b55d8b51a50c09991c0661bc9f1e28dc8a2f4fbc1c883b855e9aaf4a175cc";
+    "e6baf59150537149f28ffe35fa476596a4aaa832097964d7df874416c3dd622";
 constexpr char kHashTextOnOk[] =
-    "a3b2535bc06b85ab1de1cbeeaed9e8547bf68cc73c74f89ece03869bd0f146b";
+    "d25168d2cfe173169380d060f53402984c6cb8f79494c4be8afae9566989f9d";
 constexpr char kHashNonGet[] =
-    "ced58e86be0e45b182a4d8b3bf14cf113a07d99340aabb6998efa29b3e19387";
+    "bea76cf14e4ffde6d5acb5baaccfbc13d494ea440ff00b71bf2d49c7ec3b0e7";
 constexpr char kHashNonIsInst[] =
-    "fa218c57c1c3cbf4c8ca4dfcb2af6b9604c80e7b37e04e4a01ac51d598efda6";
+    "cb07d07deb927c3a19c371add96755caefcc00079aebf26f8d92e3b9171ed50";
 constexpr char kHashTryGetWinCursorPos[] =
-    "f76d64af9609e56ac9e6ed4768655f1811f5053a98defe8f89c660dc5d3cb2e";
+    "d4f411cf45d50c983a71e7fa2bc54c2c3fb7efb7853808b6d206352e63a8480";
 // Quiz 字段：hash → field_get_offset（dump 常量仅 fallback）
 constexpr char kHashTextRawImage[] =
-    "afe04d41a23152790c95e3c94dd6d0e996c3032854d5330b55d392042051994";
+    "b6e01fae80f1eb4fb037c3faef008b03766cc64881807a0fd1545b6914a7ff1";
 constexpr char kHashTextInputField[] =
-    "f0e928bbb5fd4c58d57de31d2654ff0eba03a34c7694788b892067e0d220595";
+    "e8948b08832f7bae0c96adffe77590f22168c4f4565ba6c68b7379e89ff78d8";
 constexpr char kHashNonRawImage[] =
-    "ea9589824c279dc52265a78192ab35e6f139765e12f1a8837742ee52b9ba671";
+    "ac08947a1198e754ce045ea2c63e0a0515eadea38399d6fe9cfeae0ef29d3da";
 // 08-20：动画帧在 nested TickCounter（+0xE8），不是旁边 Tick 数据类（+0xE0）。
-// IDA GetFrame@0x945c90 = *(this+20)；CMS _frame@+0x14。BIN 62cdf8 读错对象 → frame 永不 ≥150。
+// IDA GetFrame@0x96d240 = *(this+20)；CMS _frame@+0x14。BIN 62cdf8 读错对象 → frame 永不 ≥150。
 constexpr char kHashNonTick[] =
-    "d73adaed9a0b98c13848a67fabc15e1c94e8e370916231123eb89ba0271569a";
+    "d192129553983e5f600ef19b31ad3f04a69bb394b38ef5cfac0aa94cb802b95";
 // 08-20 dump：在 Transform(+0xC8) 后插了实例 bool(+0xD0)，后续字段整体 +8。
 // 按类型钉哈希，禁止按旧偏移 0xE8 当 path——那个槽现在是 nested TickCounter。
 constexpr char kHashNonRawPosList[] =
-    "ac14f5269c410970938e6669e0dcf5396eeb7375a7216c2a5481ad26af2402b";  // List<Vector2> @0xF0
+    "f5cf2d1db178a4e40e5098cec5c740860a02c74673958e3bb24578eb8a89257";  // List<Vector2> @0xF0
 constexpr char kHashNonMousePosList[] =
-    "e3429f41c88dbd33ccc7c561dc29e00e1821659e7334f0bf899fc312557521b";  // List<Vector2Int> @0xF8
+    "cd3ee9029f51c48959c00276f8c3a64da5e5f5f2e687a187859990b958dc9b0";  // List<Vector2Int> @0xF8
 constexpr char kHashNonIsResultRecv[] =
-    "b036315f5494019ea3c11629cc5f18d2b3d3e8e540ae7db457e62f433468cac";  // bool @0x100
+    "e5bd0a95e35e8acf1dd9b4a88b79bc65a53ab01344a1a34c3ffa661778c9fc7";  // bool @0x100
 constexpr char kHashNonIsSuccess[] =
-    "a81e36974640e7d0c371e34ae1370c5c1fdde9d74d1077ecf01f02e82ac7fc1";  // bool @0x110
+    "c0143062c75825fb6ace2da775e83de7f037b8c7f82b71e251c37b2bd3a1ca3";  // bool @0x110
 constexpr char kHashInfoJpegData[] =
-    "b263ca062dbd1fa41dc3a8c932fccdf75ca4340e8d4189a5e04d8b3f095b0ad";
+    "d64fdb10ba889534d71d2c205159d13fec5d8e32080d6219202c0f5b8560f64";
 constexpr char kHashTickFrame[] =
-    "aa3512ca45564258efa34db5a898dc5c399c7cbc55ae2d9fd37247371ae6b55";  // TickCounter _frame @0x14
+    "e853018d2271896a6a8104f5294efbb56d3bf972e7b3865a14f47e532b69a83";  // TickCounter _frame @0x14
 constexpr char kNonTickNestedName[] =
-    "b2e10183d2d6e2c33d13837cffc223c946834664b7c34e56b5abf672e0fad7f";
+    "fb7fbd0f4e31f5f391773673d14b156e7276be37bccaf7141a9cbd0b86acfaf";
 
 constexpr size_t kFbTextRawImage = 0xA0;
 constexpr size_t kFbTextInputField = 0xB0;
@@ -257,10 +257,10 @@ using FnGetTransform = void* (*)(void* self, const void* methodInfo);
 using FnGetTexture = void* (*)(void* self, const void* methodInfo);
 // TW Unity：仅有 EncodeToPNG(Texture2D) —— 无 EncodeToJPG。
 using FnEncodePng = void* (*)(void* tex, const void* methodInfo);
-// BIN（RVA 0x94b940 序言）：rcx=RectTransform*, rdx=Vector2(8B by-value), r8=out*, r9=MethodInfo*
+// BIN（RVA 0x9730d0 序言）：rcx=RectTransform*, rdx=Vector2(8B by-value), r8=out*, r9=MethodInfo*
 // 误写成 (float,float) 会把 out* 挤到 R9、RDX/R8 成垃圾 → MapBatch 全点 ok=0（E175 真题）。
 static_assert(sizeof(Vec2) == 8, "Vec2 must be 8B for IL2CPP Vector2-by-value ABI");
-// IDA（GameAssembly runtime dump）：TryGetWinCursorPos @ RVA 0x94b940
+// IDA（GameAssembly runtime dump）：TryGetWinCursorPos @ RVA 0x9730d0
 //   prologue: rdi=rcx(RectTransform*), rbx=rdx(Vector2 by-value), rsi=r8(Vector2* out)
 //   返回 bool；写出 Windows 屏幕坐标 float（内含 Y 翻转），与 SetCursorPos 同空间。
 //   MethodShape 第 2 参必须是 Any（valuetype Vector2），禁止写成 Ptr / 拆 float×2。

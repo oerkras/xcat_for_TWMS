@@ -10,7 +10,7 @@
 // 禁止 INLINE HOOK；不调用游戏写接口。
 //
 // 绝对血：
-//   Mob 本体只有 HpPercentage@+0x238（08-13：旧 0x240 已变成 bool）。
+//   Mob HP% 真源 backing@+0x23C（09-10：0x238 是缓存，init 写成 -1）。
 //   包/UI 侧有绝对血（ShowMobHpTag → UIHpTag cur@+0xD4 max@+0xD8），但包路径为 E8 直调；
 //   不做 MI/trampoline 观察。ResolveAbsHp：可选 FindAll UIHpTag → 进程缓存 → hp%×表。
 
@@ -59,6 +59,12 @@ struct MobLite {
     int32_t ctrl = 0;  // MobCtrlType; >0 = ours
     float x = 0.f;
     float y = 0.f;
+    // VecCtrl.Ap.V / MoveAction（怪自己的飞控字段，与玩家同类同偏移）：motionOk=false 表示没读到。
+    // 赶路跳怪按这个分「迎面 / 站着 / 同向走」定起跳窗，不靠快照差分猜方向。
+    float vx = 0.f;
+    float vy = 0.f;
+    int32_t ma = -1;
+    bool motionOk = false;
     bool ready = false;
     // FindHit 要 inView；选怪/旋翼不再因 false 剔出 n（BIN：下层满血怪 v=0 → 假空图落地）。
     bool inView = false;

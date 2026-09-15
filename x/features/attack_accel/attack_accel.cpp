@@ -8,11 +8,11 @@
 //
 // 2026-08-04 撤销「Prepare 绝对攻速」写入：SecondaryStat+0x1BC/0x1C4 经 IDA 实证
 // 是 nSlow_/tSlow_（减速 debuff），不是攻速槽。Prepare 内仍 `mov eax,[r14+1BCh]`
-//（remount 2026-08-06：RVA 0x1003570 @ imagebase 0x7ff848c80000 → 0x7FF849C60963），
+//（remount 2026-08-06：RVA 0x108b090 @ imagebase 0x7ff848c80000 → 0x7FF849C60963），
 // nSlow_ 非 0 即顶掉 GetSpeed()。两字段现仅作只读诊断。
 //
 // 2026-08-04 接入真攻速槽 nBooster_@0xBC（IDA 运行时 dump，imagebase 0x7FFB83A80000）：
-//   StatDetailAggregator.GetAttackSpeed(RVA 0xE98A60) `mov rax,[rdi+8]`(=input.SecondaryStat)
+//   StatDetailAggregator.GetAttackSpeed(RVA 0xEDAA60) `mov rax,[rdi+8]`(=input.SecondaryStat)
 //     → `mov ebx,[rax+0BCh]` → 作 weaponBooster 传入 GetAttackSpeedDegree(0x7FFB850112B0)
 //   GetAttackSpeedDegree 去混淆后 = clamp(weaponDegree - (skill==4001334 ? 2:0)
 //                                          + weaponBooster + partyBooster, 2, 10)
@@ -35,7 +35,7 @@
 //   算单开 -8 约 68ms（×0.8）。要量它就必须能在 accel=0 时单独打开 —— 同一开关做不到，
 //   因为 attackAccel 还顺带下发 animBusyOverride=0 / immediateUp，会混进变量。
 //
-// 实验·跳过 Prepare：改 LocalUser 虚表槽（SetAttackAction @RVA 0x111DB90 虚调 Prepare），
+// 实验·跳过 Prepare：改 LocalUser 虚表槽（SetAttackAction @RVA 0x103e100 虚调 Prepare），
 // 不碰 GA .text。关开关时 hook 仍在，走 orig 透传。
 // remount 2026-08-06：Prepare/哈希/字段名哈希已对 dump.cs.restored.C + 运行时 IDB。
 #ifndef WIN32_LEAN_AND_MEAN
@@ -120,25 +120,24 @@ constexpr size_t kOffLuWeaponDegree = 0x15C;
 // nBooster_ 仍写死 -8（用户入口已关）。
 constexpr int kBoosterValue = -8;
 constexpr int kPartyBoosterValueDefault = -8;
-// CalcWeaponAttackSpeedTier（RVA 0x15B3420 @ runtime IDB imagebase 0x7FF86BA70000）：
-//   lo 比较：cmp v6, dword_7FF87232A940 + 0x49BCAF72
-//     种子 RVA 0x68BA940 = 0xB642F490 → 解出 2（独占 xref）
-//   hi 比较：dword_7FF87232A944 + 157842520 → 解出 10（同函数，不写）
-// 08-27 是 xor 0xE95BBBB4 @ 0x686956C（现已是 .rdata UNWIND_CODE，禁止再写）。
+// CalcWeaponAttackSpeedTier（RVA 0x1636630 @ runtime IDB imagebase 0x7FFD2F950000）：
+//   lo：xor ecx, [0x699CF1C] ^ 0x8CE2404B → 2
+//   hi：xor eax, dword_7FFD362DFF10 ^ 0x5ACE1AB7 → 10（同函数，不写）
+// 09-03 是 add 0x49BCAF72 @ 0x68BA940（现已不是该种子）。
 // 破限：写 lo 种子使解出值=滑条（默认 -10）；不改 Party / nBooster_。
 // delay=(deg+10)/16；deg=-10 → ×0。
-constexpr uint32_t kRvaDegreeClampLoSeed = 0x68BA940u;
-constexpr uint32_t kDegreeClampLoAddImm = 0x49BCAF72u;  // 1237126002
-constexpr uint32_t kDegreeClampLoSeedPristine = 0xB642F490u;  // → 2
+constexpr uint32_t kRvaDegreeClampLoSeed = 0x699CF1Cu;
+constexpr uint32_t kDegreeClampLoXorImm = 0x8CE2404Bu;
+constexpr uint32_t kDegreeClampLoSeedPristine = 0x8CE24049u;  // → 2
 constexpr int kDegreeClampLoDefault = -10;
 constexpr DWORD kDegreeFloorSeedRetryMs = 2000;
 
 uint32_t SeedForDegreeClampLo(int lo) {
-    return static_cast<uint32_t>(lo) - kDegreeClampLoAddImm;
+    return static_cast<uint32_t>(lo) ^ kDegreeClampLoXorImm;
 }
 
 int DegreeClampLoFromSeed(uint32_t seed) {
-    return static_cast<int>(seed + kDegreeClampLoAddImm);
+    return static_cast<int>(seed ^ kDegreeClampLoXorImm);
 }
 // nSpeed_=+40 + 基速 100 → GetActionSpeed≈140（Prepare clamp 上限）。
 constexpr int kActionSpeedNValue = 40;
@@ -152,15 +151,15 @@ constexpr DWORD kLogIdleMs = 30000;   // 稳态心跳
 constexpr DWORD kLandGraceMs = 400;
 constexpr DWORD kSkipPrepareLandGraceMs = 1000;
 
-// LocalUser(TDI:1560) 覆写 Prepare @ 0x1003570；基类 User @ 0x125b4a0
+// LocalUser(TDI:1560) 覆写 Prepare @ 0x108b090；基类 User @ 0x12b59e0
 // UserLocal(TDI:1577) : LocalUser — 无再覆写；虚表槽仍在实例 klass 上。
 // dump Slot:32 · 哈希 f71637b0…（默认参 action=6,speed=100,bool=false）· remount 2026-08-06
-constexpr uint32_t kRvaUserPrepare = 0x1003570;
-constexpr uint32_t kRvaFbPrepare = 0x125b4a0;
+constexpr uint32_t kRvaUserPrepare = 0x108b090;
+constexpr uint32_t kRvaFbPrepare = 0x12b59e0;
 constexpr char kHashPrepareActionLayer[] =
-    "ec33c102d12e0ebbfb50c0fc9d90601621546100b4345661b77a55433b345a2";
+    "aea1f8acbb4ae30b2ef40172061bc0eebed82a2655dd722757006f0e9ef6fec";
 constexpr char kHashLocalUser[] =
-    "e1835bc9e7ef210b5145fcaf2193e47cfaef8d17a5607749a1252fc857c149d";
+    "b8129050fd86f9f4f79caa5cfb878f706fd3744e8c7f07ba1c392fd337a77d1";
 // 声明 Prepare 的类（= LocalUser）；虚表补丁仍打在最末级 UserLocal 上
 constexpr const char* kHashLocalUserDecl = kHashLocalUser;
 constexpr int kPrepareVtableSlot = 32;
@@ -173,23 +172,23 @@ constexpr DWORD kSkipPrepareInstallRetryMs = 2000;
 // 字段防漂移（Il2CppDumper 哈希名 → field_get_offset；失败回退 Hint）
 // remount 2026-08-13：ActionBusy 为 Avatar 上 protected int@0x11C（旧 0x118 已变成另一 private int）
 constexpr char kHashSecondaryStat[] =
-    "a7598494a709ff6f16f832a97d653fcdb8f1af530dfa60dc738fe12aaf2ff31";
+    "f658bd0071fd35465c674b92739ca92f86b35cc9f91dd6daeaa2593f0c6c14e";
 constexpr char kHashSlow[] =
-    "a668fcf2e78b87213427289c2d4c8b83924d6b958a4683a15eca22022602262";
+    "efdd24cbe2f742396b7af18c04fc72b888a66df372e454ea49082faf04a1389";
 constexpr char kHashSlowExpire[] =
-    "fc15ff09f07ed1a81b0578a5425b5950849cc9847571d62442097a4ebff781d";
+    "f491cf6b4c326414662d7873c375502168b847a51f9b59558ffde3151934986";
 constexpr char kHashBoost[] =
-    "bad9949954d487c62319534e314e311020236a77ed9bd79d32464c710ab0397";
+    "f0b0ddd826aca93ba0e56036c621e766a4fa10b082f45c1a3fec891a5a39c3c";
 constexpr char kHashBoostReason[] =
-    "d62026910a7a97183fddbfda44c843c5d588ce88a8c1ea954c160799b73d998";
+    "c906c1ca5380e20bc7e94ac4dbd5e37944f89b615416bbfe4376b1939d98d42";
 constexpr char kHashBoostExpire[] =
-    "b2617260e372d51c430b43c3d86c905381a0fe5725fe27d642820b0bad78b6e";
+    "ae4117bf910d5d430dd1b7e8d1b4e6c2bd23c01653d50c44a7217e72e14c839";
 constexpr char kHashActionBusy[] =
-    "f5ce38cf995fb8bd30432b18fcff7000b19070d2b17ce28fde175dd2987d16c";
+    "c1726282651af0ac1e2807cda4ab504dabd7014f0543cdf62ab9e0bbcb22dcd";
 constexpr char kHashActionLayerA[] =
-    "a0d62b92e9e64f0b6a586a3c5392a5428d06d19bd702f4e3f5aa2575f5e70ee";
+    "f19f84107c6f57d498de50d2bf10f861cf721d39a373edcc54a3e3e24a3e76e";
 constexpr char kHashActionLayerB[] =
-    "f6708a66cc703eb019817009e77d430263cb525139aa3b67637eb2406ef30dd";
+    "c4f6b714abed8ddfc61aab030d95258f8bd6007eb3c270ef4c776f565af7ddd";
 
 using FnPrepareActionLayer = void (*)(void* self, int32_t action, int32_t speed, uint8_t flag,
                                       const void* methodInfo);

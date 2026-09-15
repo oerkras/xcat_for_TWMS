@@ -44,24 +44,24 @@ using x::runtime::il2cpp::FindClass;
 using x::runtime::il2cpp::ReadPtr;
 
 // Field.SendTransferChannelRequest(int) — remount 2026-08-04 dump.cs
-constexpr uint32_t kRvaSendTransferChannelRequest = 0xBD1DA0;
+constexpr uint32_t kRvaSendTransferChannelRequest = 0xBFD870;
 // UserBase 短 IsAlertMode — CanPerformAction callee；读 LocalUser+0x118
-constexpr uint32_t kRvaIsAlertMode = 0x12545A0;
+constexpr uint32_t kRvaIsAlertMode = 0x12AE890;
 // WorldManager.CanSendExclRequest — SendTransfer 发包前门控（BIN：未过则无 op=44）
-constexpr uint32_t kRvaCanSendExclRequest = 0xDFE8F0;
+constexpr uint32_t kRvaCanSendExclRequest = 0xE2D840;
 constexpr int kExclTypeTransferChannel = 500;  // SendTransfer 传入的 type（常量解混淆）
 
 constexpr char kFieldClass[] =
-    "ee843704090f807f3a2c510c077fb7348c6d7672d52c4cb8d04454295ff5eee";
+    "bf7ebd0549efcb9ab26f7cd82c02e80af1a31a9c151b7fee38e07bf897aa14b";
 // UserBase（短 IsAlertMode 宿主；非 UserLocal）
 constexpr char kUserAlertClass[] =
-    "db2b44b77b8e0b6f7cc2afaad5f17070b20b342d42ecd898aa70061f768d2ab";
+    "b294bd93aa7e13db6037be77316e311e5a2a2785e71ece309a5a6fa71874e84";
 constexpr char kHashSendTransfer[] =
-    "fc289786c65ce89fff3e780817e571fec5fcc75eb5110c525616d05de3fdb2e";
+    "cb4d79d2dceac2f9075481f6e8a5cfcccb30f8366ce7d221c5070d21470292f";
 constexpr char kHashIsAlertMode[] =
-    "a657adee5a2e87014cff1f1715720a514f9caca3b25e4d5943c71de86c91864";
+    "f040b7e32e6f281408e8342b9df2ca39e842da201b72d179c81e3b077ba16d2";
 constexpr char kHashCanSendExcl[] =
-    "d05d345c5298fe2287063cc6157168accfc8529a94677774fcec1fd1be172fe";
+    "a6be5f14683c006f833199ed31484f6347112b7fae0d6461c3fc38c84c74f0f";
 
 // WorldManager 字段 Hint（docs + 08-04 dump 复核）；运行时 field_hash 覆盖
 // SendTransferChannelRequest(int nIdx)：0-based；游戏 UI「ch.N」= nIdx+1。
@@ -80,21 +80,21 @@ constexpr size_t kOffWmExclACHint = 0xAC;
 
 // WM 字段哈希（08-04 dump；backing 用内嵌 hash，strstr 匹配）
 constexpr char kHashWmChannelId[] =
-    "<a898bf1328ab5d595f1be217585198450962e56a41f225eb9308827f1a87632>k__BackingField";
+    "<b51cc8d786558ba37b5d13e4f4540eb3627b976bf2538eeea01e65f7b770b5a>k__BackingField";
 constexpr char kHashWmChannelAlt[] =
-    "<bf654b87e157e48617b539f4b2073fcc20de7ab8786fffc94b479887180e320>k__BackingField";
+    "<cc0b975a29c3aeaf99cf348a97ffc36733ced4a0be510a35d41c4420da2412e>k__BackingField";
 constexpr char kHashWmAdultChannel[] =
-    "c6756522fefd336f9167184262505b17f8ce3ef82f94186416448aa0a8e1918";
+    "ca83242bdcf633fd96d895e5a8959ab4b65993102ad994ac7c7cd901e648a3b";
 constexpr char kHashWmExclA0[] =
-    "fcebb61a08dc7c8ba41aeb15b0c3c40118d5973b256ba68f7a3cd2f4c687b2f";
+    "e17f56dbe132b9c673cc11f37b5ca57f23aa495572649d4a6e8d7a3f1647285";
 constexpr char kHashWmExclA4[] =
     "ce49f7df7cdeaf874359c6a99dcc9b8aed11e4841a83c8a71e9889ed6392f7f";
 constexpr char kHashWmExclA8[] =
-    "b6fc0755dc8d0e3a1eb15efd5de4f50c1c1af6ec392bab84e86ee36f3b088b2";
+    "dea9141277282c0a7d4f0bbea30fa963d9f9b26db5283f17a513c51611b3c7e";
 constexpr char kHashWmExclA9[] =
-    "e4e9aecd1d16474b578f13eba193558013ed92867b45e1da22fcc76664f32e5";
+    "d59a4ab1685e60343abdaf425001b0b101584787109db4caae36e60e0220c32";
 constexpr char kHashWmExclAC[] =
-    "a49fc82ca2cc64fd98706fdb5357d5e20fa63ce639befeb174334da52ec1ed3";
+    "e1697a7fa0b8dedf56b7c144c5aa31af831a201a53e65104f290842035fcf65";
 
 size_t gOffWmChannelId = kOffWmChannelIdHint;
 size_t gOffWmChannelAlt = kOffWmChannelAltHint;
@@ -188,6 +188,7 @@ bool gSawLeavePlay = false;  // 发包后是否见过 !IsPlayReady（黑屏/Inte
 bool gWasPlayReady = true;
 int gKnownChannelIdx = -1;  // 上次成功换频后的 0-based 索引；跨 job 保留
 std::atomic<uint8_t> gReconnectHopWant{0};
+std::atomic<int> gReconnectHopPinList{-1};  // -1=关；0-63=指定列表 id（UI ch = id+1）
 std::atomic<int> gReconnectHopFrom{-1};
 std::atomic<int> gReconnectHopTo{-1};
 std::atomic<uint8_t> gReconnectHopArmed{0};
@@ -254,7 +255,8 @@ int KnownDisp1Based() {
 // 把 known 推到 auto_enter sticky（遇人换频后 soft 必须粘新频，不能只靠进图 Done）。
 void PushStickyFromKnown(const char* why) {
     // sticky 与 SelectChannel / WM+0x6C 同口径（0-based 列表 id）。BIN 08-15：id=39 时 UI 为 40。
-    if (gKnownChannelIdx >= 1 && gKnownChannelIdx <= 64)
+    // 列表 id 0 = 標題頻道 1，也要能粘。
+    if (gKnownChannelIdx >= 0 && gKnownChannelIdx <= 64)
         auto_enter::NoteStickyChannel(gKnownChannelIdx, why);
 }
 
@@ -948,7 +950,7 @@ void MaybeObserveNativeChannel(DWORD now) {
     if (job.channelId < 0) return;
     const int stickyApi = auto_enter::StickyChannel1Based();
     // BIN 08-15：sticky/raw6c=39，玩家 UI=40。两者都是 0-based 列表 id，不是 ch.N。
-    if (stickyApi > 0 && job.channelId == stickyApi) {
+    if (stickyApi >= 0 && job.channelId == stickyApi) {
         gKnownChannelIdx = job.channelId;
         Log("native_wm keep sticky id=%d ui=%d (src=%s raw6c=%d raw68=%d)", stickyApi,
             DispCh(stickyApi), job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
@@ -959,8 +961,8 @@ void MaybeObserveNativeChannel(DWORD now) {
         PushStickyFromKnown("native_wm");
         return;
     }
-    if (stickyApi <= 0) {
-        if (job.channelId >= 1 && job.channelId <= 64) {
+    if (stickyApi < 0) {
+        if (job.channelId >= 0 && job.channelId <= 64) {
             gKnownChannelIdx = job.channelId;
             Log("native_wm cold id=%d ui=%d (src=%s raw6c=%d raw68=%d)", job.channelId,
                 DispCh(job.channelId), job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
@@ -974,7 +976,7 @@ void MaybeObserveNativeChannel(DWORD now) {
     Log("native_wm id %d→%d ui %d→%d (src=%s raw6c=%d raw68=%d) — sticky", from, job.channelId,
         DispCh(from), DispCh(job.channelId), job.channelSrc ? job.channelSrc : "?", job.channelRaw6c,
         job.channelRaw68);
-    if (job.channelId >= 1 && job.channelId <= 64)
+    if (job.channelId >= 0 && job.channelId <= 64)
         auto_enter::NoteStickyChannel(job.channelId, "native_wm");
 }
 
@@ -1479,7 +1481,7 @@ void SettleOk(const char* how, int curIdx, DWORD now) {
     // sticky 与 SelectChannel 同口径（0-based 列表 id）；UI 显示再 +1。
     {
         const int api = gKnownChannelIdx >= 0 ? gKnownChannelIdx : shownToIdx;
-        if (api >= 1 && api <= 64) auto_enter::NoteStickyChannel(api, "channel_hop");
+        if (api >= 0 && api <= 64) auto_enter::NoteStickyChannel(api, "channel_hop");
     }
     FinishActive(kCooldownAfterOkMs, now);
 }
@@ -1626,7 +1628,7 @@ void CommitEncounterSoftHop() {
         Fail("遇人软重连无可用新频");
         return;
     }
-    // NoteStickyChannel / PickSticky 拒 0（列表 id 0 = UI 频道1）。再抽一次。
+    // PickReconnectOther 池从 id=1 起；若抽到 0（標題頻道 1）再抽一次，避免旧路径粘不住。
     if (to < 1) {
         MarkTried(to);
         to = PickRandomChannel(from, gChannelCount);
@@ -1639,9 +1641,10 @@ void CommitEncounterSoftHop() {
     // 必须先改 known：Login 的 PushStickyFromKnown 会用 known 盖 sticky，不改就会回原频。
     gKnownChannelIdx = to;
     // sticky 还没同步时先钉原频再钉目标，PickSticky miss 才能排除原频。
-    if (from >= 1 && auto_enter::StickyChannel1Based() <= 0)
+    if (from >= 0 && auto_enter::StickyChannel1Based() < 0)
         auto_enter::NoteStickyChannel(from, "encounter_soft_hop_from");
     auto_enter::NoteStickyChannel(to, "encounter_soft_hop");
+    auto_enter::ClearReconnectPin();
     Log("soft-hop commit seq=%u fromIdx=%d fromCh=%d toIdx=%d toCh=%d", gActiveSeq.load(), from,
         DispCh(from), to, DispCh(to));
     char body[96]{};
@@ -1649,7 +1652,7 @@ void CommitEncounterSoftHop() {
     Notify(notify::NotificationKind::Info, "manual-rejoin", "遇人换频·软重连", body);
     if (!x::features::ports::mob_gather::FireProactiveHangup("encounter_soft_hop")) {
         if (from >= 0) gKnownChannelIdx = from;
-        if (from >= 1) auto_enter::NoteStickyChannel(from, "encounter_soft_hop_revert");
+        if (from >= 0) auto_enter::NoteStickyChannel(from, "encounter_soft_hop_revert");
         Fail("遇人软重连拆会话失败");
         return;
     }
@@ -2090,7 +2093,22 @@ int LastKnownChannel1Based() { return KnownDisp1Based(); }
 
 void SetReconnectHopEnabled(bool on) {
     gReconnectHopWant.store(on ? 1 : 0, std::memory_order_release);
-    if (!on) ClearReconnectHopLatch();
+    if (!on) {
+        ClearReconnectHopLatch();
+        auto_enter::ClearReconnectPin();
+    }
+}
+
+void SetReconnectHopPin(bool on, int uiCh1Based) {
+    int idx = -1;
+    if (on && uiCh1Based >= 1 && uiCh1Based <= 64) idx = uiCh1Based - 1;
+    gReconnectHopPinList.store(idx, std::memory_order_release);
+    if (idx < 0) auto_enter::ClearReconnectPin();
+}
+
+int ReconnectPinListIdx() {
+    if (gReconnectHopWant.load(std::memory_order_acquire) == 0) return -1;
+    return gReconnectHopPinList.load(std::memory_order_acquire);
 }
 
 void EnsureReconnectNotSameChannel(const char* why) {
@@ -2100,8 +2118,8 @@ void EnsureReconnectNotSameChannel(const char* why) {
         // 把 latch 钉在遇人已选频上，后续只回贴、不抽第三频（BIN 18:30:09 51→22 后又 22→19）。
         const int sticky = auto_enter::StickyChannel1Based();
         const int known = gKnownChannelIdx;
-        const int pin = (known >= 1 && known <= 64) ? known : sticky;
-        if (pin >= 1 && pin <= 64) {
+        const int pin = (known >= 0 && known <= 64) ? known : sticky;
+        if (pin >= 0 && pin <= 64) {
             gReconnectHopFrom.store(pin, std::memory_order_release);
             gReconnectHopTo.store(pin, std::memory_order_release);
             gReconnectHopArmed.store(1, std::memory_order_release);
@@ -2122,8 +2140,10 @@ void EnsureReconnectNotSameChannel(const char* why) {
         return;
     }
 
+    // 指定频必须在 latch 回贴之后：否则 encounter 钉好的频会被 disconnected Ensure 盖回指定频。
+    // hangup_timer 丢过期 latch 之后才 Arm 指定频（下一轮 hangup 钉回 UI 勾选的频）。
     const int armedTo = gReconnectHopTo.load(std::memory_order_acquire);
-    if (gReconnectHopArmed.load(std::memory_order_acquire) && armedTo >= 1 && armedTo <= 64) {
+    if (gReconnectHopArmed.load(std::memory_order_acquire) && armedTo >= 0 && armedTo <= 64) {
         const int armedFrom = gReconnectHopFrom.load(std::memory_order_acquire);
         const bool pinOnly = armedFrom == armedTo;
         // 遇人 pin 的 latch 是 from==to。下一轮 hangup_timer 必须重抽，不能永远粘那一频。
@@ -2151,6 +2171,20 @@ void EnsureReconnectNotSameChannel(const char* why) {
         }
     }
 
+    const int pinIdx = ReconnectPinListIdx();
+    if (pinIdx >= 0 && pinIdx <= 63) {
+        gKnownChannelIdx = pinIdx;
+        auto_enter::NoteStickyChannel(pinIdx, "reconnect_hop_pin");
+        auto_enter::ArmReconnectPin(pinIdx);
+        gReconnectHopFrom.store(pinIdx, std::memory_order_release);
+        gReconnectHopTo.store(pinIdx, std::memory_order_release);
+        gReconnectHopArmed.store(1, std::memory_order_release);
+        gReconnectHopLanded.store(0, std::memory_order_release);
+        Log("reconnect-hop pin idx=%d ch=%d why=%s", pinIdx, DispCh(pinIdx), why ? why : "?");
+        return;
+    }
+    auto_enter::ClearReconnectPin();
+
     const int sticky = auto_enter::StickyChannel1Based();
     const int known = gKnownChannelIdx;
     const int from = (known >= 0 && known <= 64) ? known : sticky;
@@ -2161,7 +2195,7 @@ void EnsureReconnectNotSameChannel(const char* why) {
         if (ccuN > 1 && ccuN <= 64) count = ccuN;
     }
 
-    if (sticky >= 1 && known >= 0 && sticky != known) {
+    if (sticky >= 0 && known >= 0 && sticky != known) {
         // hangup_preempt_hop 已粘 hop 目标，known 还是旧频：只把 known 收成 sticky，不再抽第三频。
         gKnownChannelIdx = sticky;
         Log("reconnect-hop adopt sticky=%d knownWas=%d why=%s (no re-pick)", sticky, known,
@@ -2181,7 +2215,7 @@ void EnsureReconnectNotSameChannel(const char* why) {
     }
 
     gKnownChannelIdx = to;
-    if (from >= 1 && sticky <= 0) auto_enter::NoteStickyChannel(from, "reconnect_hop_from");
+    if (from >= 0 && sticky < 0) auto_enter::NoteStickyChannel(from, "reconnect_hop_from");
     auto_enter::NoteStickyChannel(to, "reconnect_hop");
     gReconnectHopFrom.store(from, std::memory_order_release);
     gReconnectHopTo.store(to, std::memory_order_release);
@@ -2196,19 +2230,19 @@ void RevertReconnectHopIfArmed(const char* why) {
     const int from = gReconnectHopFrom.load(std::memory_order_acquire);
     ClearReconnectHopLatch();
     if (from >= 0 && from <= 64) gKnownChannelIdx = from;
-    if (from >= 1) auto_enter::NoteStickyChannel(from, "reconnect_hop_revert");
+    if (from >= 0) auto_enter::NoteStickyChannel(from, "reconnect_hop_revert");
     Log("reconnect-hop revert from=%d ch=%d why=%s", from, DispCh(from), why ? why : "?");
 }
 
 int DisplayChannel1Based() {
     // 玩家 UI = 列表 id / WM+0x6C + 1。BIN 08-15：sticky=39 raw6c=39 → 頻道 40。
     const int api = auto_enter::StickyChannel1Based();
-    if (api > 0) return api + 1;
+    if (api >= 0) return api + 1;
     return KnownDisp1Based();
 }
 
 void SyncKnownAfterEnter(int channelId1Based, const char* why) {
-    if (channelId1Based < 1 || channelId1Based > 64) return;
+    if (channelId1Based < 0 || channelId1Based > 64) return;
     const int idx = channelId1Based;
     const int prev = gKnownChannelIdx;
     gKnownChannelIdx = idx;
@@ -2463,7 +2497,7 @@ void Tick(DWORD now) {
                 // 软重连途中 hold 往往还没置上（图内 CloseSession 不 SetHold），
                 // 用 inFlight 挡住，否则会清掉刚拉黑的挤频，下一跳又抽回原频。
                 const int st = auto_enter::StickyChannel1Based();
-                if (st > 0) {
+                if (st >= 0) {
                     gKnownChannelIdx = st;
                     Log("login clear keep known from sticky id=%d ui=%d", st, DispCh(st));
                 } else {

@@ -31,51 +31,51 @@ using x::runtime::il2cpp::ReadPtr;
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 // Remount 2026-08-06：ACS hash 全换。08-13：CurPos 哈希从数组槽撕开（见 kHashLogicalPos）。
 constexpr char kActorBaseClass[] =
-    "a83e4f1c524fa6e5dc75a3f38110e85704c157550dd8e171c128f9d66e5c739";
+    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";
 constexpr char kVecCtrlClass[] =
-    "b866b6310c1647fd6473a886a59a14e5121b75565a9314fd00c5ef362f8e776";
+    "bd523630874d83261c9d61195338db2618e754c6337046aa8515dc68eef73a5";
 constexpr char kFhClass[] =
-    "de52928858acf8626fff3660917b8e2019da9b66400ee396975bb609b70faea";
+    "e9d65262f1f5ece125f49574ab4dc65dada20b15d417ba5cfa21250a9d67487";
 
 // hash → field_get_offset（与 foothold / mob / invuln / skill 同源）
 constexpr char kHashUserVecCtrl[] =
-    "<e22b1f6d38f00abbcb8a5dd7bbd304c2288f14cddbee6a552a6fbc18fc280f6>k__BackingField";
+    "<bebe8c30521415d7031ea8549625722dcb5515452987adf2de99200de295a48>k__BackingField";
 constexpr char kHashPos[] =
-    "cf776ff0c583bd614c1ea26f338a0f3c6971482b301704c1bbb8d962b9cb1cf";
+    "cdb04ce386f0f95b2ea1efe9454c2974a452cfe4d5b5924ec89759bb59836ad";
 constexpr char kHashVcCurFh[] =
-    "<a92b3c5adc5622f5d82bd02e8c0cff34f8df7315ca94ebbdd809c5da1e12b63>k__BackingField";
+    "<cf1bc2539b28ff004818c68a891dd228f73884dde334aa6e476ee9d44b53ec9>k__BackingField";
 constexpr char kHashVcAp[] =
-    "e0990df580e30ca5d5e49277ad3fe6d2aa68067d54a056bc00f418f8e55f8e6";  // AbsPos; Y=+8
+    "ed692ba84d6145d5f4eed7fad03baafc62274cc1b73022f669e3d0b6667ebff";  // AbsPos; Y=+8
 constexpr char kHashVcApl[] =
-    "a46b5decdc70dbf3985ab4d74685e8854799f85749212d042bd9c5b5b0663ad";  // Apl; Y=+8
+    "e6053248466e4ad4100d3d922bc15e323c9cf4812394367f2d5e8127d50f476";  // Apl; Y=+8
 constexpr char kHashVcRelPos[] =
-    "b16c341fc2c692c45ebbcb207ebb364da63d6e7f543eb5dfbcd9e3a41abc873";  // RelPos; V=+8
+    "ab42d9995c29b365dd1497c92348830639a83a8629ec74ccba9e5a57e000880";  // RelPos; V=+8
 constexpr char kHashFhId[] =
-    "<eb31ed85c75e75f08bfcbc77c1bbc39dfdbdef2a88bb1e0c74d0e184548c114>k__BackingField";
-// LocalUser 镜头 CurPos（只读诊断）。08-13：真 Vector2 是 ccce125f@0x2B0；
-// d6f3e65b@0x240 已是数组，equal-offset 会假命中。窗口 0x200–0x300 仍包住 0x2B0。
+    "<bf5b8ba0164685af3299d62b34febcd91731196d36cb9ff115203ea7e7f9477>k__BackingField";
+// LocalUser 镜头 CurPos（只读诊断）。09-10：真 Vector2 是 cac8b9b8@0x2E8；
+// df491dca@0x2B0 已是去闪 uint，equal-offset 会假命中。窗口 0x200–0x300 包住 0x2E8。
 // 2026-08-04 撤销「镜头自愈」：0.1.36 实测只读探针 dApCur 静息 27~53px、dApPos=0、
 // dAA=0.0，引擎跟随本就是活的；dApCur 变大只是因为贴怪每秒瞬移 ~6.7 次、每次几百像素，
 // 平滑跟随物理上无法收敛。自愈据此每 0.29s 硬拧一次镜头（中位 343px、峰值 1419px），
 // 反而成了撕裂源。原「镜头粘死」证据取自 nSlow_=140 污染动作层的旧局，根因已换，立论作废。
 constexpr char kHashLogicalPos[] =
-    "adb40bd150b8a460d80f10c5bc5560f7f52aeb7057a93b6396edc804bc0ee25";
+    "c7e7d437346692c76ab582a510af39b410bca9920f2870d7500a1ee63be5f7a";
 // e2a28(Key) 键位移偏移对（IDA：mov [rsi+4B4h], rdx · 两 int32）
 constexpr char kHashKeyMoveDelta[] =
-    "<e0cbbba0f7d386909960c9770a447ae8588af410f49ca7dcdce0e80c08292ef>k__BackingField";
+    "<f154e2b49e5db407a07820519b83e8c3768dc4cd6c9ceee14da6aa6c3129873>k__BackingField";
 
 constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 // Mob 专属 PvcActive；LU 上无同名槽，保留软探针（LooksLikeHeapPtr 失败 → VecCtrl）
 constexpr char kHashPvcActive[] =
-    "a7586701633914ead657c56ae2d67c86c1288be9d27a54f76a13e6aa66fadfc";
+    "a20ac39af9c6fac3ba61b19a9471130a7670ba41be8f541fc6da51cebf4d905";
 constexpr char kMobClass[] =
-    "de49679f4fa010cff83f3abcf3443df89b12c8102b0f973237328b38f4ac36a";
+    "fea4358a07c99f6ab1e2cda4d015f36773997b07da3838b9e592aaf7184672d";
 constexpr size_t kFbPvcActive = 0xF0;
 size_t gOffPvcActive = kFbPvcActive;
 #define kOffPvcActive (gOffPvcActive)
 constexpr size_t kFbVecCtrl = 0x50, kFbPos = 0x64, kFbVcCurFh = 0x28, kFbVcAp = 0x98;
-constexpr size_t kFbVcApl = 0xB8, kFbVcRelPos = 0x88, kFbFhId = 0x10, kFbLogicalPos = 0x2B0;
+constexpr size_t kFbVcApl = 0xB8, kFbVcRelPos = 0x88, kFbFhId = 0x10, kFbLogicalPos = 0x2E8;
 constexpr size_t kFbKeyMoveDelta = 0x47C;
 size_t gOffVecCtrl = kFbVecCtrl, gOffPos = kFbPos, gOffVcCurFh = kFbVcCurFh, gOffVcAp = kFbVcAp;
 size_t gOffVcApl = kFbVcApl, gOffVcRelPos = kFbVcRelPos, gOffFhId = kFbFhId;

@@ -3,7 +3,7 @@
 // 走位是**变化驱动**，不是轮询。已在 IDB 逐个查完：游戏代码（0x7ff849xxxxxx 段）对
 // Keyboard.get_current、InputAction.IsPressed/WasPressedThisFrame/ReadValue/triggered、
 // Input.GetAxis(Raw)/GetKeyInt 全部**零调用**；唯一的旧版 Input.GetKey(KeyCode) 在
-// UserLocal.IsSit()（RVA 0x10A40D0，实读种子算出 273/275/276=上右左）只管起立。
+// UserLocal.IsSit()（RVA 0x11316C0，实读种子算出 273/275/276=上右左）只管起立。
 // 配上运行时实测（纯事件注入 71.4% 能走 / 直写状态缓冲降到 10.2%），结论是门闩吃状态**变化**
 // （change monitor / InputAction 回调），不看当前状态 —— 所以只有把 StateEvent 灌进队列才算数，
 // 直写缓冲反而自断触发。
@@ -28,6 +28,7 @@ constexpr int32_t kKeyLeftArrow = 61;
 constexpr int32_t kKeyRightArrow = 62;
 constexpr int32_t kKeyUpArrow = 63;
 constexpr int32_t kKeyDownArrow = 64;
+constexpr int32_t kKeyLeftAlt = 53;  // InputSystem.Key.LeftAlt；经典版跳
 
 // 主线程：把某个 Key 置为按住/松开并立刻入队一帧设备状态。
 bool SetKeyHeldOnMain(int32_t unityKey, bool down);
@@ -35,8 +36,20 @@ bool SetKeyHeldOnMain(int32_t unityKey, bool down);
 // 主线程：方向锁存，-1 左 / +1 右 / 0 双松（互斥，切向时自动清另一侧）。
 bool SetWalkDirOnMain(int inputX);
 
+// 主线程：拟人爬绳/下跳。vertY=-1/0/+1，jumpDown=LeftAlt。
+// 只改「本次或上次由本接口持有」的 ↑↓/Alt，不碰赶路 StickUp / 定时键。
+bool SetClimbJumpOnMain(int vertY, bool jumpDown, int prevVertY, bool prevJump);
+
 // 主线程：清空**走路**左右键并入队（不碰 PageDown/技能/StickUp 等脉冲位）。
 bool ReleaseAllOnMain();
+
+// 主线程：给当前按住的走路方向补一个「松→按」边沿，最终掩码不变。
+// 走位门闩吃**变化**：初始边沿被吞（失焦 Reset / 出刀锁 / 被外来事件盖）以后，
+// 同态补写永远触发不了，人站着不动、键却一直「按着」（BIN 10:26:36 / 10:28:13 fg=0）。
+// 松与按**跨帧**：本帧只松，≥32ms 后由 RepushOnMain（InputFrameTick）按回。同帧两条事件
+// 游戏吃成 ma=9→3→9、人仍不动（BIN 2026-09-09 13:59:37 / 13:59:48 fg=0），而反向退一步
+// 这种跨帧真边沿每次都走得动——补边沿必须按同样的节律。未持左右 → no-op。
+bool RefreshWalkEdgeOnMain();
 
 // 主线程：Hold 租约（与 SetKeyHeld 等价，语义更明确；掩码非空时挂帧 tick）。
 bool BeginHoldOnMain(int32_t unityKey);

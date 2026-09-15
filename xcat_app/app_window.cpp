@@ -622,6 +622,10 @@ LRESULT AppWindow_WndProc(AppWindow& app, HWND hwnd, UINT msg, WPARAM wParam, LP
         return 0;
     }
 
+    case WM_XCAT_OPS_NOTICE:
+        xcat::app::HandleOpsNoticeUiMessage();
+        return 0;
+
     case WM_DESTROY:
         app.running = false;
         if (app.hwnd == hwnd) app.hwnd = nullptr;

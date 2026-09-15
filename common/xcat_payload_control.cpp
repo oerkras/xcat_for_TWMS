@@ -497,6 +497,8 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherSlowNearPx = kMobGatherSlowNearPxDefault;
     out.mobGatherWzLeashOn = kMobGatherWzLeashOnDefault;
     out.mobGatherWzLeashSlowPx = kMobGatherWzLeashSlowPxDefault;
+    out.mobGatherSkipSlowTpl = kMobGatherSkipSlowTplDefault;
+    out.mobGatherSkipSlowSpeed = kMobGatherSkipSlowSpeedDefault;
     out.mobGatherSpeedPct = kMobGatherSpeedPctDefault;
     out.mobGatherAntiJitter = kMobGatherAntiJitterDefault;
     out.mobGatherMax = kMobGatherMaxDefault;
@@ -547,6 +549,8 @@ void PayloadControlSetDefaults(PayloadControl& out) {
     out.mobGatherHomeValid = 0;
     out.mobGatherHomeHasMap = 0;
     out.mobGatherReconnectHop = kMobGatherReconnectHopDefault;
+    out.mobGatherReconnectHopPin = kMobGatherReconnectHopPinDefault;
+    out.mobGatherReconnectHopChannel = kMobGatherReconnectHopChannelDefault;
     out.mobGatherLayerYPx = kMobGatherLayerYPxDefault;
     out.mobGatherDyLimPx = kMobGatherDyLimPxDefault;
     out.mobGatherWalkDx = kMobGatherWalkDxDefault;
@@ -810,6 +814,13 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherWzLeashOn = b ? 1u : 0u;
     if (IniGetU32(ini, "core", "mobGatherWzLeashSlowPx", u))
         out.mobGatherWzLeashSlowPx = ClampMobGatherWzLeashSlowPx(u);
+    if (IniGetBool(ini, "core", "mobGatherSkipSlowTpl", b))
+        out.mobGatherSkipSlowTpl = b ? 1u : 0u;
+    {
+        int32_t sp = 0;
+        if (IniGetI32(ini, "core", "mobGatherSkipSlowSpeed", sp))
+            out.mobGatherSkipSlowSpeed = ClampMobGatherSkipSlowSpeed(sp);
+    }
     ReadMobGatherTune(binDir, &out.mobGatherSpeedPct, &out.mobGatherAntiJitter);
     if (IniGetU32(ini, "core", "mobGatherSpeedPct", u))
         out.mobGatherSpeedPct = u;
@@ -966,6 +977,10 @@ bool ReadPayloadControl(const char* binDir, PayloadControl& out) {
         out.mobGatherHomeHasMap = b ? 1u : 0u;
     if (IniGetBool(ini, "core", "mobGatherReconnectHop", b))
         out.mobGatherReconnectHop = b ? 1u : 0u;
+    if (IniGetBool(ini, "core", "mobGatherReconnectHopPin", b))
+        out.mobGatherReconnectHopPin = b ? 1u : 0u;
+    if (IniGetU32(ini, "core", "mobGatherReconnectHopChannel", u))
+        out.mobGatherReconnectHopChannel = ClampMobGatherReconnectHopChannel(u);
     if (IniGetU32(ini, "core", "mobGatherLayerYPx", u))
         out.mobGatherLayerYPx = ClampMobGatherLayerYPx(u);
     if (IniGetU32(ini, "core", "mobGatherDyLimPx", u)) {
@@ -1352,6 +1367,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherWzLeashSlowPx = ClampMobGatherWzLeashSlowPx(
         normalized.mobGatherWzLeashSlowPx ? normalized.mobGatherWzLeashSlowPx
                                           : kMobGatherWzLeashSlowPxDefault);
+    normalized.mobGatherSkipSlowTpl = normalized.mobGatherSkipSlowTpl ? 1u : 0u;
+    normalized.mobGatherSkipSlowSpeed = ClampMobGatherSkipSlowSpeed(normalized.mobGatherSkipSlowSpeed);
     ApplyMobGatherEncounterForce(normalized);
     ApplyAttackNoCdEncounterForce(normalized);
     normalized.mobGatherAntiJitter = normalized.mobGatherAntiJitter ? 1u : 0u;
@@ -1402,6 +1419,11 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
     normalized.mobGatherHomeValid = normalized.mobGatherHomeValid ? 1u : 0u;
     normalized.mobGatherHomeHasMap = normalized.mobGatherHomeHasMap ? 1u : 0u;
     normalized.mobGatherReconnectHop = normalized.mobGatherReconnectHop ? 1u : 0u;
+    normalized.mobGatherReconnectHopPin = normalized.mobGatherReconnectHopPin ? 1u : 0u;
+    normalized.mobGatherReconnectHopChannel =
+        ClampMobGatherReconnectHopChannel(normalized.mobGatherReconnectHopChannel
+                                              ? normalized.mobGatherReconnectHopChannel
+                                              : kMobGatherReconnectHopChannelDefault);
     normalized.simpleCombatTeleport = normalized.simpleCombatTeleport ? 1u : 0u;
     normalized.simpleCombatTeleportOneHit = normalized.simpleCombatTeleportOneHit ? 1u : 0u;
     normalized.simpleCombatImpactApproach = normalized.simpleCombatImpactApproach ? 1u : 0u;
@@ -1611,6 +1633,8 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetU32(ini, "core", "mobGatherSlowNearPx", normalized.mobGatherSlowNearPx);
         IniSetBool(ini, "core", "mobGatherWzLeashOn", normalized.mobGatherWzLeashOn != 0);
         IniSetU32(ini, "core", "mobGatherWzLeashSlowPx", normalized.mobGatherWzLeashSlowPx);
+        IniSetBool(ini, "core", "mobGatherSkipSlowTpl", normalized.mobGatherSkipSlowTpl != 0);
+        IniSetI32(ini, "core", "mobGatherSkipSlowSpeed", normalized.mobGatherSkipSlowSpeed);
         IniSetU32(ini, "core", "mobGatherSpeedPct", normalized.mobGatherSpeedPct);
         IniSetBool(ini, "core", "mobGatherAntiJitter", normalized.mobGatherAntiJitter != 0);
         IniSetU32(ini, "core", "mobGatherMax", normalized.mobGatherMax);
@@ -1664,6 +1688,10 @@ bool WritePayloadControl(const char* binDir, const PayloadControl& control) {
         IniSetBool(ini, "core", "mobGatherHomeValid", normalized.mobGatherHomeValid != 0);
         IniSetBool(ini, "core", "mobGatherHomeHasMap", normalized.mobGatherHomeHasMap != 0);
         IniSetBool(ini, "core", "mobGatherReconnectHop", normalized.mobGatherReconnectHop != 0);
+        IniSetBool(ini, "core", "mobGatherReconnectHopPin",
+                   normalized.mobGatherReconnectHopPin != 0);
+        IniSetU32(ini, "core", "mobGatherReconnectHopChannel",
+                  normalized.mobGatherReconnectHopChannel);
         IniSetU32(ini, "core", "mobGatherLayerYPx", normalized.mobGatherLayerYPx);
         IniSetU32(ini, "core", "mobGatherDyLimPx", normalized.mobGatherDyLimPx);
         IniSetU32(ini, "core", "mobGatherWalkDx", normalized.mobGatherWalkDx);

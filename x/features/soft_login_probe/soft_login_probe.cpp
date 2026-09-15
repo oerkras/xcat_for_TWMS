@@ -10,6 +10,7 @@
 #include "../galaxy_token_probe/galaxy_token_probe.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../notify/notify.h"
+#include "../auto_lie/auto_lie.h"
 #include "../simple_combat/simple_combat.h"
 #include "../travel/travel.h"
 #include "../ports/fly_fh_ban.h"
@@ -45,22 +46,22 @@ using x::runtime::il2cpp::ReadPtr;
 constexpr wchar_t kMarkerName[] = L"soft_login_probe.on";
 
 // SceneLogin public void() — starts ConnectLoginServer IEnumerator via StartCoroutine.
-constexpr uint32_t kRvaSceneLoginGet = 0xC1E920;
-constexpr uint32_t kRvaConnectLoginStart = 0xC1F800;
+constexpr uint32_t kRvaSceneLoginGet = 0xC4A970;
+constexpr uint32_t kRvaConnectLoginStart = 0xC4B8D0;
 constexpr char kHashSceneLoginGet[] =
-    "e602501d006250c5fcc8c89a8001d2e79fce276b6e10f37466cdab2be763ef0";
+    "cb1694ead1a0bb77d18b732c459e965e7236a1ba1c71109b4afcede7afe56b5";
 constexpr char kHashConnectLoginStart[] =
-    "c94dc22062ff1ce7c46ad1c02eca1366d708643e37a982589ed6de0fd0cf2a9";
+    "b87df2aaa66dc42000e48933ea8dd4b61cbcb82b5cbdcded47c6c9091ca682d";
 
 // Session.Disconnect / CloseSession（与 kick_sniff 同口径）。
 // BIN 01:53：Disconnect 只把 Connected→Connecting→Connected，WorldItems 仍空（书页大厅）。
 // 空大厅改 CloseSession 硬拆，再等 Disconnected 后才 ConnectLogin。
-constexpr uint32_t kRvaNmDisconnect = 0x1CF41C0;
-constexpr uint32_t kRvaNmCloseSession = 0x1D02E00;
+constexpr uint32_t kRvaNmDisconnect = 0x1D887B0;
+constexpr uint32_t kRvaNmCloseSession = 0x1D97540;
 constexpr char kHashNmDisconnect[] =
-    "f2338e47e14b2fde086336f563f784b4f42f419773ee4a86c5269418eb03a05";
+    "dce0ac5ff27c414d65dcf2e784d2e47e71f04eca3594bc79a4db6746930f723";
 constexpr char kHashNmCloseSession[] =
-    "bc96e8dd02f3782b9f833f513417477309252531f45f4500441bd7646f7e8f2";
+    "b8edb777727720f8a3635baa2e95a83a485c2b059fb937585946c2959b34111";
 
 // settle 用墙钟截止（见 Worker）：Call 耗时曾未计入 waited，实机 1500ms 常被拉成 2.5–3s+。
 // Notice 多在断线瞬间弹出；Connecting 早退即可，不必死等满窗。
@@ -181,61 +182,61 @@ constexpr int kStateConnecting = 2;
 constexpr int kStateConnected = 3;
 
 // SceneLogin 登录 UI 槽（与 auto_enter / il2cpp_shape 同口径；软登录只读判定用）
-constexpr size_t kOffSlChannelUi = 0xC0;
-constexpr size_t kOffSlWorldUi = 0xC8;
+constexpr size_t kOffSlChannelUi = 0xC8;
+constexpr size_t kOffSlWorldUi = 0xD0;
 
 // UIUtilDialog（非 Ex）— 与 worldmap_marker_travel 同源
 constexpr char kUtilDialogClass[] =
-    "df44f323081769037ec18cd5c53e9c528e6843469341798b1df69e993287650";
+    "fe77fc12a7e27f8b663be407d5d83966ed6a4433875753ad26500648c0a3cd8";
 // UIDialog 基类（仅解析 Close；禁止 FindAll 基类——子树含 UIMiniMap 等 HUD）
 constexpr char kUiDialogClass[] =
-    "d82f521e349ed567bbe934b0244852952de6f7f7b53497e3dc50d06c58ebf30";
+    "ec21266988dfb825cc2ccb208f51539beb8aa1227a0b43100d8c18ce1bd4995";
 // UIMiniMap : UIDialog — 纵深防护（白名单路径本不应扫到）
 constexpr char kMiniMapClass[] =
-    "e1999658b8b11570c59db64dde64800b881cade97b974275aa99576849588ea";
+    "fc294a46a7f84209c3a768d6833439a12168ac11338af083fe14f7861ce54d1";
 // scanBase 白名单：断线/踢线 Notice 族（显式 FindAll 各类，永不扫 UIDialog 基类）
 constexpr char kNoticeDialogClass[] =
-    "a7b643d795d4e1829664bc533b454f7d072bb009d4ba579db0582b0f565abc4";
+    "a6ae60a0090ed2eb59fd271248a6b08e1b74cd6d5f70a600bad8ebc07155d89";
 constexpr char kLoginUtilDialogClass[] =
-    "d29f3c289bd6c3a0f56a75471e7e195ad8aaf662f0eda3273a23fd0981ca15c";
+    "add00eb05692aa07ec7803fad7dfa5698464be9b2582cc712e5b03410ec4bc4";
 constexpr char kSlideNoticeClass[] =
-    "ff7662cb5db7c609c54a178f5217320d1e16fda2bb6da3b910a9021ac81c0f8";
+    "e91b9b4837edd099aafb2d26ff06a05fd46b0840f0108aa526c3c609383bccd";
 constexpr char kMultiLineNoticeClass[] =
-    "af1aa41f2d69ba5d8e240d9057197f74db4da11870da73a7e71a509c6f4dd8d";
+    "b964f2a2b5ab891a5d15c2023d85b21ce4e24172718f9ea98205e26e46f490b";
 constexpr char kAntiMacroNoticeClass[] =
-    "f29162011b0dc9d2271ab2f07329c24e2d48e7059109d524677f8463dacf942";
+    "e83ffe85e4bbae980a00840781ef9221c42fc16624ce22df4795b0265be86ad";
 // UIUtilDialogEx — 与 shop_port 同源
 constexpr char kUtilDialogExClass[] =
-    "bd208055ffbf49c1012cf3cd16e73423f5b8dab0a80dcecf8a0f89fe6442e81";
+    "b7ca33f59d8ffad545e8e024f40b5b8caee3d90c486c720fdf08d7e8839f94e";
 // 官方关窗（CMS CloseDialog→UIDialog.Close）；不走 OnClickYes/Ok，避免踢线「確認」
-constexpr uint32_t kRvaCloseDialog = 0x788d90;   // UIUtilDialog.CloseDialog
-constexpr uint32_t kRvaUiDialogClose = 0x14C0630;  // UIDialog.Close（shop_port 同源）
+constexpr uint32_t kRvaCloseDialog = 0x7aae60;   // UIUtilDialog.CloseDialog
+constexpr uint32_t kRvaUiDialogClose = 0x11CE8F0;  // UIDialog.Close（shop_port 同源）
 constexpr char kHashCloseDialog[] =
-    "c576ea5dad39fbabad448de6e972d57d3ed6f458101a9556dbfdd7622355ccc";
+    "e5284e73e3625bb71545fca591fd6e96bab65ad073a1ae30a9dd01babdb3df6";
 // UIUtilDialog.Notice — Abs trampoline 会 PATCH GA .text（NGS/GRAP 忌讳）。
 // BIN 16:xx：装 Abs 后反复「安全模組…強制關閉」；封禁/踢线文案改走 DialogScrape。
 // 开启：截 sMsg + 返回实例；dismiss 仍以 FindAll 为主。
 constexpr bool kNoticeAbsEnabled = false;
-constexpr uint32_t kRvaNotice = 0x75B270;
+constexpr uint32_t kRvaNotice = 0x77D430;
 // 序言：push r15/r14/r12/rsi/rdi/rbp/rbx ; sub rsp,80h（17B，指令边界；IDA 运行时 dump）
 constexpr size_t kNoticeSteal = 17;
 constexpr uint8_t kNoticeSig[kNoticeSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x56, 0x57,
                                               0x55, 0x53, 0x48, 0x81, 0xEC, 0x80, 0x00, 0x00,
                                               0x00};
 // YesNo — 同表邻接；封禁单钮窗也可能不经 Notice
-constexpr uint32_t kRvaYesNo = 0x7570a0;
+constexpr uint32_t kRvaYesNo = 0x778f90;
 constexpr size_t kYesNoSteal = 19;
 constexpr uint8_t kYesNoSig[kYesNoSteal] = {0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                                             0x56, 0x57, 0x55, 0x53, 0x48, 0x81, 0xEC, 0x88,
                                             0x00, 0x00, 0x00};
 // UIUtilDialog 表邻接备用 Open（少 xref；登录封禁路径候选，callee of login packet handler）
-constexpr uint32_t kRvaAltDlgOpen = 0x790100;
+constexpr uint32_t kRvaAltDlgOpen = 0x7b1e10;
 constexpr size_t kAltDlgSteal = 14;
 constexpr uint8_t kAltDlgSig[kAltDlgSteal] = {0x41, 0x57, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48,
                                               0x81, 0xEC, 0x90, 0x00, 0x00, 0x00};
 constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
-constexpr uint32_t kRvaGoSetActive = 0x4E9E7E0;
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4E9E980;
+constexpr uint32_t kRvaGoSetActive = 0x4F5DF20;
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4F5E0C0;
 constexpr size_t kOffCachedPtr = 0x10;  // UnityEngine.Object.m_CachedPtr
 constexpr int kDismissMissRetries = 2;
 constexpr DWORD kDismissMissGapMs = 80;
@@ -2706,6 +2707,7 @@ DWORD WINAPI Worker(LPVOID) {
                                     static_cast<int>(scene));
                     }
                     if (healHint && !inMap && !IsLandQuiet() &&
+                        !x::features::auto_lie::IsQuizActive() &&
                         !gDeferred.load(std::memory_order_acquire) &&
                         x::features::auto_enter::IsDesired() &&
                         (x::features::auto_enter::IsDone() ||
@@ -2732,7 +2734,8 @@ DWORD WINAPI Worker(LPVOID) {
                                   (scene == SceneState::InterStage && !inMap);
             // 超级赶路贴门后必经 InterStage≈2s（客户 20:13 west00 后 scene=1）。
             // 旧逻辑 2s 当 stuck_lobby → Yield 掐 Travel → 过路图当挂机图 → INVULN_OFF。
-            if (hallLike && x::features::travel::IsActive()) {
+            if (hallLike && (x::features::travel::IsActive() ||
+                             x::features::auto_lie::IsQuizActive())) {
                 loginHallSinceMs = 0;
             } else if (!softBusy && !IsLandQuiet() && !gPending.load(std::memory_order_acquire) &&
                 !gDeferred.load(std::memory_order_acquire) &&
@@ -3540,6 +3543,15 @@ DWORD WINAPI Worker(LPVOID) {
                     DWORD budgetStartMs = GetTickCount();
                     DWORD budgetMs = kReenterBudgetMs;
                     for (int r = 0; !gStop.load(); ++r) {
+                        if (x::features::auto_enter::IsWaitingReconnectPin()) {
+                            budgetStartMs = GetTickCount();
+                            if ((r % 25) == 0) {
+                                const int pin = x::features::auto_enter::ArmedReconnectPinListIdx();
+                                LogLine("reenter wait pin ch=%d not open — hold wall clock",
+                                        pin + 1);
+                                KickLogLine("reenter wait_pin ch=%d", pin + 1);
+                            }
+                        }
                         if (GetTickCount() - budgetStartMs >= budgetMs) break;
 
                         // 重进途中又断线：busy 会吞掉 RequestAttempt（6c3ef8 06:13:48

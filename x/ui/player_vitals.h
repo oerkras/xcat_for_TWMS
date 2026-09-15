@@ -67,10 +67,25 @@ size_t OffWmCharacterData();  // WM→CharacterData*（hash 防漂）
 size_t OffCdCharacterStat();  // CharacterData→CharacterStat*（hash 防漂）
 // CharacterStat.money；失败 -1（字段走 hash 防漂）。
 int64_t ReadMoney();
-// CharacterData.ItemSlots[invType] → List<ItemSlotBase>*；invType: 1=equip 2=consume 4=etc…
+
+// CharacterData.ItemSlots[nTI] 直下标。GetItemSlotPos 参数 = dump.cs TDI 2039：
+//   -1 None · 0 Equip · 1 Consume · 2 Install · 3 Etc · 4 另栏 · 5 Cash · 6 Count
+// GetItemSlotList 种子解出合法 nTI 为 [0,6)。6 不是背包栏。
+// BIN：Consume=1（GetItemSlotPos 药水）；Cash=5（GetItem_Ex `cmp ebx,5` → Equipped2@+0x30）。
+// GetItem 特殊路径：0=Equipped 穿戴，5=Cash。商店 UITab 的 1/2/4 不是这套，见 shop_port。
+namespace item_type {
+constexpr int Equip = 0;
+constexpr int Consume = 1;
+constexpr int Install = 2;
+constexpr int Etc = 3;
+constexpr int Cash = 5;
+}  // namespace item_type
+static_assert(item_type::Consume == 1);
+static_assert(item_type::Cash == 5);
+
 void* GetItemSlotList(int invType);
 
-// 槽位字段偏移（meta 解析后；dump fallback：ItemId@0x10 / nNumber@0x28）
+// 槽位字段偏移（meta 解析后；dump fallback：ItemId@0x10 / nNumber@0x30；nPOS@0x28）
 size_t OffSlotItemId();
 size_t OffSlotBundleNumber();
 

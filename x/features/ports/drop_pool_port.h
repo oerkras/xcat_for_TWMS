@@ -3,6 +3,7 @@
 // 真源：docs/features/pet_loot/P0a_锚点复核.md
 // 宠吸：.rdata 矩形包 → Pet.TryPickUpDrop → ByPet → Pet.Send（禁止手组包 / 改 GA .text）
 // 变态宠吸：启用时写一次 .rdata 真空尺寸，关掉还原原生 50×60；不投泵调 ByPet
+// 官方 Tick 持续跑：队头满栏须跨帧 LastTry=INT_MAX，切档 ReleaseNativeVacStall 清场
 // 脚下：只自动触发原生 DropPool.TryPickUpDrop(userPos)；不盖戳、不清闸、不扩盒
 
 #include <cstdint>
@@ -94,8 +95,8 @@ struct VacuumResult {
     int pacedPickRank = 0;          // 0普通 1金币 2高价值
     // 服端异步清池：同拍 Δ 常为 0；跨拍 dropCount < 上拍 after → 真吸
     bool poolFellSinceLast = false;
-    uint16_t petSkill = 0;       // GetUpgradePetSkill()（= GetItemSlot→usPetSkill）
-    uint16_t petSkillSlot = 0;   // 直读 ItemSlotPet.usPetSkill@+0x3C（ByPet 真源路径）
+    uint16_t petSkill = 0;       // GetItemSlot → ItemSlotPet.usPetSkill@0x44
+    uint16_t petSkillSlot = 0;   // 与 petSkill 同槽（ByPet 真源）
     Rect4 beforeRc{};
     Rect4 afterRc{};
     // ByPet→Send 多为直接 call，MI 探针可能恒 0；以 dropsΔ / poolFell 为准
@@ -180,6 +181,27 @@ bool HoldByPetRectPack(float vacuumW, float vacuumH);
 // 还原原生 25/10 + 50×60 并恢复页保护。未 hold 则 no-op。
 void ReleaseByPetRectPack();
 
+// 变态宠吸队头退避（泵上 Low）。官方 Tick 自己捡，不能拍末还原 LastTry。
+// Ready 且 LastTry 非 0/INT_MAX → AddStall；无戳且池不降且 Ready≥2 → FallbackHeads。
+// 盖戳跨帧保留，仅到期还原；跳过用户黑名单。堵泵/失败返回 false（下拍再试）。
+struct NativeVacStallResult {
+    bool ok = false;
+    const char* why = "idle";
+    int dropCount = 0;
+    int readyNear = 0;
+    int touchAdded = 0;
+    int fallback = 0;
+    int stamped = 0;
+    int expiredRestored = 0;
+    int held = 0;
+};
+bool TickNativeVacStall(float vacuumW, float vacuumH, const SkipIds* skipIds,
+                        NativeVacStallResult* out = nullptr);
+// 离开变态 / 切档：把 gStall 件的 INT_MAX 清回 0 并清表（不碰黑名单戳）。
+// 过图拒泵时只挂 pending，不干等；worker 调 PollNativeVacStallRelease 下拍再清。
+void ReleaseNativeVacStall();
+void PollNativeVacStallRelease();
+
 // 出刀让路 / 堵泵时不调 ByPet，但仍盖黑名单戳（LastTry+EndPara）并尽量同步 ExceptionList。
 // 纯内存读写，worker 可调。挡住原生脚边 50x60 在真空暂停时把箭矢舔走。
 // 落地当帧：EnsureBound 会给 Pet.TryPickUpDrop 换 MI，原生宠 Tick 进钩后再盖戳（早于 E8 ByPet）。
@@ -203,6 +225,17 @@ int BoostDropFall(bool snapLand, bool accelFall, const SkipIds* skipIds = nullpt
 bool PeekHighValueActionable(float petX, float petY, float halfW, float halfH, const SkipIds* skip,
                              int& outNearHv, int& outSkippedFull, int* outSampleDropId = nullptr,
                              int* outSampleInfo = nullptr, int* outSampleKind = nullptr);
+
+// 全图最近一件可捡高价值（装备 / 204 卷 / 雷之鏢；栏未满）。纯内存，worker 可调。
+// skipDropId≠0 时跳过该件（走不到时暂禁）。失败 / 没有 → false。
+struct HighValueLoot {
+    int dropId = 0;
+    int itemId = 0;
+    int kind = 0;  // 1装备 2卷軸 3雷之鏢
+    float x = 0.f;
+    float y = 0.f;  // AbsPos：更大 Y = 更高
+};
+bool FindNearestHighValueDrop(float ux, float uy, HighValueLoot& out, int skipDropId = 0);
 
 struct HighValueDropAlert {
     int dropId = 0;

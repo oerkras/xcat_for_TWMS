@@ -17,18 +17,21 @@
 namespace x::features::ports::curfh_gate_bypass {
 namespace {
 
-// remounted 2026-08-20。CurFh 门：User+0x50 -> VecCtrl+0x28 -> test -> CONT/FAIL。
-// Magic/Shoot 收成 cmovnz dispatcher；Prepare 仍是 75 07 跳过 FAIL 槽。
-constexpr uint32_t kRvaMagicCmov = 0x10B504B;   // cmovnz rax,rcx -> mov rax,rcx; nop
-constexpr uint32_t kRvaShootCmov = 0x107D02C;   // cmovnz rax,rdx -> mov rax,rdx; nop
-constexpr uint32_t kRvaPrepareJnz = 0x10D2B3A;  // 75 07 -> EB 07（09-03 CurFh 已改 setnz 跳表，未改补丁）
+// remounted 2026-09-10。CurFh 门：User+0x50 -> VecCtrl+0x28 -> test -> CONT/FAIL。
+// Magic/Shoot：test+jnz 75 07（跳过 FAIL 槽）。
+// Prepare：内联 +0x28 收进 callee 0x111dec0（public bool）；调用后
+//   xor al,1 / add eax,eax / cmp eax, (0x383581E2+seed)=0 / cmovnz FAIL。
+// 解出 0：stood → eax=0 → CONT。xor al,1（34 01）改 xor eax,eax（31 C0）强制 CONT。
+constexpr uint32_t kRvaMagicCmov = 0x11428A5;   // 75 07 -> EB 07
+constexpr uint32_t kRvaShootCmov = 0x110A356;   // 75 07 -> EB 07
+constexpr uint32_t kRvaPrepareJnz = 0x1160FFD;  // 34 01 -> 31 C0
 
-constexpr uint8_t kMagicExpect[] = {0x48, 0x0F, 0x45, 0xC1};
-constexpr uint8_t kMagicPatch[] = {0x48, 0x8B, 0xC1, 0x90};
-constexpr uint8_t kShootExpect[] = {0x48, 0x0F, 0x45, 0xC2};
-constexpr uint8_t kShootPatch[] = {0x48, 0x8B, 0xC2, 0x90};
-constexpr uint8_t kJnzExpect[] = {0x75, 0x07};
-constexpr uint8_t kJmpPatch[] = {0xEB, 0x07};
+constexpr uint8_t kMagicExpect[] = {0x75, 0x07};
+constexpr uint8_t kMagicPatch[] = {0xEB, 0x07};
+constexpr uint8_t kShootExpect[] = {0x75, 0x07};
+constexpr uint8_t kShootPatch[] = {0xEB, 0x07};
+constexpr uint8_t kJnzExpect[] = {0x34, 0x01};
+constexpr uint8_t kJmpPatch[] = {0x31, 0xC0};
 
 std::atomic<bool> gWant{false};
 std::atomic<bool> gInstalled{false};

@@ -114,6 +114,7 @@ struct State {
     std::mutex mu;
     std::mutex threadMu;       // watchThread / asyncJoinThread
     LogFn log;
+    bool inited = false;
     LaunchMode mode = LaunchMode::AttachWatch;
     std::atomic<bool> watching{false};
     std::atomic<bool> stopWatch{false};
@@ -293,6 +294,7 @@ void Init(LogFn log, const std::string& prefsBinDir) {
         g_prefsStateDir.clear();
     }
     g.mode = LoadLaunchModeFromDisk();
+    g.inited = true;
     xcat::log::Info("Attach", "init mode=%s state=%s", LaunchModeLabel(g.mode),
                     g_prefsStateDir.empty() ? "(root-only)" : NarrowUtf8(g_prefsStateDir).c_str());
 }
@@ -306,11 +308,25 @@ void Shutdown() {
     }
     std::lock_guard<std::mutex> lock(g.mu);
     g.log = {};
+    g.inited = false;
 }
 
 LaunchMode GetLaunchMode() {
     std::lock_guard<std::mutex> lock(g.mu);
     return g.mode;
+}
+
+bool IsGamaPassDirectLaunchMode(const char* payloadBinDir) {
+    {
+        std::lock_guard<std::mutex> lock(g.mu);
+        if (g.inited) return g.mode == LaunchMode::GamaPassDirect;
+    }
+    if (!payloadBinDir || !payloadBinDir[0]) return false;
+    LaunchMode mode = LaunchMode::AttachWatch;
+    const std::wstring state =
+        xcat::Utf8ToWide(std::string(payloadBinDir) + "\\state\\launch_mode.txt");
+    if (TryReadLaunchModeFile(state, &mode)) return mode == LaunchMode::GamaPassDirect;
+    return false;
 }
 
 void SetLaunchMode(LaunchMode mode) {

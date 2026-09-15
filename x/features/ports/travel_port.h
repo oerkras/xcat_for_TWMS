@@ -33,7 +33,7 @@ enum class FireMode {
     Up = 0,             // 当前位置 unity_kbd ↑（调试；不硬写坐标）
     CheckMove = 1,      // 当前位置 WM.CheckMovePortal（调试；不硬写坐标）
     Rpc = 2,            // OutPacket.Create(114) + EncodeStr(+可选 fieldKey) + Send
-    StickUp = 3,        // Impact 贴门 + unity_kbd ↑（产品；禁 CheckMove）
+    StickUp = 3,        // 产品：Impact 贴门或拟人走路贴门 + unity_kbd ↑（禁 CheckMove）
     DirectEnter = 4,    // Impact 贴门 + CheckMovePortal（易断线，调试保留）
 };
 

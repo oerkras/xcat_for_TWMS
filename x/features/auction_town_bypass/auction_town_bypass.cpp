@@ -1,6 +1,6 @@
 // TWMS Classic — auction_town_bypass.
 //
-// SendMigrateToGlobalMarketRequest (RVA 0xDE2C60 @ remount 2026-08-04; was 0xDD8610)
+// SendMigrateToGlobalMarketRequest (RVA 0xE104D0 @ remount 2026-08-04; was 0xDD8610)
 // gates on MapDataInfo:
 //   1) IsUnableToMigrate ≡ (Option & 0x10) != 0
 //   2) IsTown
@@ -44,24 +44,24 @@ constexpr uint32_t kUnableMigrateBit = 0x10u;
 
 // TypeDef hashes (dump.cs 2026-08-04).
 constexpr char kHashMapDataInfo[] =
-    "c67ecc721e7372066c1f300f3528edfcd528628ed2c36a9aa488c4ff8ab56d0";
+    "ac32148ca400c440041131e73551e5da07ec6f62382661c270c399eac2e872f";
 constexpr char kHashMapData[] =
-    "e7deb27fdaac1d8fec9cc2277febc6c35b2687979aebe9df5877ff29dc16129";
+    "bc995f86e542046f9d426044ff74cb9beab74ea4a04660ebb5264bf354bf467";
 constexpr char kHashSceneMap[] =
-    "f733993ad59341231f8c2010110cf2aae05c7693af2e9a88d71979322cf0f97";
+    "cc47f00d792dda446f68db9af0648b8e4ec9f032576a60a452401a25031418f";
 // IsTown / Option / Info / MapData backing / WM._field / WM._currentMapData
 constexpr char kHashIsTown[] =
-    "f30010e72db22873c4fe3bb84d792f685021d2c3de22f9c019de79e97d83d86";
+    "d2adba90e99936f6044b6abedf2b6a411ce42127dc8f79b03d92729e846eeca";
 constexpr char kHashOption[] =
-    "defcf0cb5ce168c541b52cd38649f926029c99c5ed88690cdc84b04e02a9d3a";
+    "be0d6c8567db13b63d5386cede19d3f273a43467de268aeae9955f3c783393d";
 constexpr char kHashMapDataInfoField[] =
-    "c9c92f592d3d9149e888bf4d891ad5c930e333a0fc0a1056c009350402f6dc7";
+    "d08cdee74040e5f640d0ba9202e0f7f6561a1186260040ff01fad78bca3514b";
 constexpr char kHashSceneMapDataBacking[] =
-    "<e82d6fbfbc7b076d74bcdec824e6b806a7837a757b41960d7afefd2926df95c>k__BackingField";
+    "<a8ffe2e210205ed147e2da2cad069b16462676136217fa379694456f6cec6f2>k__BackingField";
 constexpr char kHashWmField[] =
-    "d1a97253ac9b8f6bd8b86e68a1eee15db131c640023ae9efe2f3b5ac8f7c82e";
+    "dc00e862f0e4e0c3f0efb5091af8610accce4c5f987ebaa5228c5cd6c1728bb";
 constexpr char kHashWmCurrentMapData[] =
-    "b562aba780b2f942a4381660b4aa344dec0608179cf56523d2753c464a2e884";
+    "b0af05bb6f921156c9af8d3ae528ed3bdd87ee6dbb68ff3a321013c3fd5ceae";
 
 constexpr DWORD kTickMsApply = 50;    // 未稳住 / 换图：快拍一次写到位
 constexpr DWORD kTickMsHold = 1000;   // 已稳住：慢校验（游戏一般不回写 IsTown）
@@ -179,7 +179,7 @@ void EnsureGateOffsets() {
     x::runtime::LogI(
         "AuctionTown",
         "offsets path=%s hits=%d/6 wmF=0x%zx wmM=0x%zx fieldMD=0x%zx info=0x%zx "
-        "IsTown=0x%zx Option=0x%zx (migrate RVA 0xDE2C60 / op 0x002E)",
+        "IsTown=0x%zx Option=0x%zx (migrate RVA 0xE104D0 / op 0x002E)",
         gOff.path, hits, gOff.wmField, gOff.wmMapData, gOff.fieldMapData,
         gOff.mapDataInfo, gOff.infoIsTown, gOff.infoOption);
 }
@@ -404,7 +404,7 @@ void Init() {
     // 直到 IMGUI 再点一次才重新下发。静态默认已是 false。
     x::runtime::LogI("AuctionTown",
                      "init — field auction client bypass via MapDataInfo gates only "
-                     "(no .text); migrate RVA 0xDE2C60 / op 0x002E; "
+                     "(no .text); migrate RVA 0xE104D0 / op 0x002E; "
                      "offsets via hash+field_get_offset; default on");
 }
 

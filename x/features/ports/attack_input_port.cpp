@@ -60,69 +60,75 @@ constexpr DWORD kFireJobWaitMs = 800;
 constexpr DWORD kFaceJobWaitMs = 400;
 constexpr DWORD kFkmRebindMs = 3000;
 
-constexpr uint32_t kRvaOnFuncKey = 0x10A74D0;  // remounted 2026-08-06
-constexpr uint32_t kRvaGetKeyByFunc = 0x1676590;  // remounted 2026-09-03 dump.cs FKM GetKeyByFunc
-constexpr uint32_t kRvaGetDataByKeyCode = 0x16757b0;  // remounted 2026-08-06
-constexpr uint32_t kRvaFuncKeyCtor = 0x166D9E0;  // remounted 2026-08-06: .ctor(FuncType,int)
+constexpr uint32_t kRvaOnFuncKey = 0x1134ce0;  // remounted 2026-08-06
+constexpr uint32_t kRvaGetKeyByFunc = 0x1708b40;  // remounted 2026-09-03 dump.cs FKM GetKeyByFunc
+constexpr uint32_t kRvaGetDataByKeyCode = 0x1707db0;  // remounted 2026-08-06
+constexpr uint32_t kRvaFuncKeyCtor = 0x1700270;  // remounted 2026-08-06: .ctor(FuncType,int)
 // 写 InputX/Y + 内联 OnResolveMoveAction（朝向）；见 docs/features/protocol/MoveElem字段.md
-constexpr uint32_t kRvaVecCtrlSetInput = 0x11DCAA0;  // remounted 2026-08-06
+constexpr uint32_t kRvaVecCtrlSetInput = 0x1234c80;  // remounted 2026-08-06
 // KeyPad.SetFields / PackState（IDA 2026-08-07；keypad_walk_bin match BASE）。
-constexpr uint32_t kRvaKeyPadSetFields = 0x1AEE3F0;
-constexpr uint32_t kRvaKeyPadPackState = 0x1AEE410;
+constexpr uint32_t kRvaKeyPadSetFields = 0x1B87EC0;
+constexpr uint32_t kRvaKeyPadPackState = 0x1B87EE0;
 constexpr size_t kOffKeyPadSlot4 = 0x178;
 // Query 用 PackState 返回值 bit0：even→latchX=+1，odd→−1（MoveElem §11.10）。
 // 反了设 XCAT_KP_FLIP=1。
 
 // 方法哈希（dump.cs · remount 2026-08-06）
 constexpr char kHashOnFuncKey[] =
-    "c947540847c05920a4da23eea3134877db4f32f8191c6103405f5fc9a66189c";
+    "a8e976cda164129940d026862b8f8df7c0bae4251ce63aaa8f285bbd3f03532";
 constexpr char kHashGetKeyByFunc[] =
-    "e68fe49513d72a1f550fb5066202f7f4cb74d97ea2e75c1814636684e535977";
+    "bf95f33d5443318ae43dc05816ea50250569b614b4a66e34538bda08f26c489";
 constexpr char kHashGetDataByKeyCode[] =
-    "c5ba9359daa32b9a9ecd6dd21f59a1daf3550ab24fc26fdbe31cff9194468a4";
+    "f4d269a29538abe89c689039e722d95808b9a6d422e72dc5c654954ff55b1c9";
 constexpr char kHashVecCtrlSetInput[] =
-    "afa5ebc4cfd14c10f833189b554f4a61f02677119a6c638b68cc4c00d14e471";
+    "aec9f69414d50b2d2f275615f126629183ef04432efdfe96c4f2bff17a4dce2";
 constexpr char kVecCtrlClass[] =
-    "b866b6310c1647fd6473a886a59a14e5121b75565a9314fd00c5ef362f8e776";
+    "bd523630874d83261c9d61195338db2618e754c6337046aa8515dc68eef73a5";
 constexpr char kActorBaseClass[] =
-    "a83e4f1c524fa6e5dc75a3f38110e85704c157550dd8e171c128f9d66e5c739";
+    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";
 // FKM remounted 2026-08-06 (owns GetKeyByFunc / GetDataByKeyCode).
 constexpr char kFkmClass[] =
-    "a366864b3af75aa862c17e4105401a1fac4af817433d05b838abdae72b08b2d";
+    "ec7bb71ea4393f644de2ed52289a4e5858c88fbfff567507d7e50e57a26e02c";
 constexpr char kFuncKeyClass[] =
-    "f0b8920ce79f0bcfeb94839972045ade29a6f32d137eae98105d6107d1efccb";
+    "ea3da4955e170bddd23954b6fadb04307346cce8502f56114ac4c270f4cf65b";
 // KeyPad 单例（与 keypad_walk_bin 同源；RO hook 已证 Slot4=PackState BASE）。
 constexpr char kHashKeyPadClass[] =
-    "bf7320cb0a75afb61e60c9788023cfefb4be811f8c595b35ca650f8bbfe463a";
+    "c3e029bd53a767c9a4b6371db30f2fa16d9d29121839a0fb8874116eacdfee7";
 
 // Actor.VecCtrl / VecCtrl.MoveAction / FuncKey.type|value：hash → field_get_offset
 constexpr char kHashUserVecCtrl[] =
-    "<e22b1f6d38f00abbcb8a5dd7bbd304c2288f14cddbee6a552a6fbc18fc280f6>k__BackingField";
+    "<bebe8c30521415d7031ea8549625722dcb5515452987adf2de99200de295a48>k__BackingField";
 constexpr char kHashVcMoveAction[] =
-    "e6c5cb2845dfe81d490dec38aa8809c6f1f379e62a7e9f3d742c7e5d92b6936";
+    "e2c61b27e2bee1d50eceb5b24696aee2531c80f29e25a0768e76c1b9e26e879";
 constexpr char kHashFkType[] =
-    "ea3bb17028eeb6e9b2809497a9ecc98ed0026e64c5687c9d97598fdf379ac50";
+    "eb5cc4bbe5f9608739a872cb31aba295efcbc843d4c5aaaa9521287f539955f";
 constexpr char kHashFkValue[] =
-    "a69afda01125d34feeb695b33023fa6f3441c8c13d206122993e41351abe9c5";
-// UserLocal._antiRepeat / AntiRepeat._repeatCount（dump.cs 0814；CountLimit=100）
-constexpr char kHashAntiRepeat[] =
-    "dd392dfbdf240c01b209bccec901acfeae3ea0d8cd94078bdd66b75df1f9f68";
+    "c1d993179dfd59441f3302e60f20468f822c7e9ab14f4078d70b5a5e39f8683";
+// UserLocal AntiRepeat / _repeatCount（dump.cs 09-10；CountLimit 种子解出 100）
+// 两枚只读实例：TryDoing 普攻 [lu+0x548]，技能侧 [lu+0x550]。旧哈希 b7eeddb5 落在
+// +0x500（Skill 数据块，+0x18 是 string），清忙等于没清，站桩同像素必撞门。
+constexpr char kHashAntiRepeatNa[] =
+    "fb6087acc494cd3a5d17cba98aaf4de99b4211b0209d8f83e2d2ffd411df30e";
+constexpr char kHashAntiRepeatSkill[] =
+    "fb3ea54ac46413be15db3e9c8a5248fb1c72eebf1368cc79907faec8e7b5ecd";
 constexpr char kHashRepeatCount[] =
-    "b918fea24c74159cd4fde93e986976258104349b3738f291e36747ffef0e403";
+    "ed2cd904752599c52cafc8f64a783b30438a269b7fd28a919ba17b829b52363";
 constexpr char kAntiRepeatClass[] =
-    "fc1e01c4c1c6c92c8897227cb3095ab5cc38df3b0ac0063f293a34d5ae66a80";
+    "fd9226a6a88a5b855a78bb01cfda6f516e75fcbc65382544dc83323cbc70146";
 
 constexpr size_t kFbVecCtrl = 0x50;
 constexpr size_t kFbVcMoveAction = 0x84;
 constexpr size_t kFbFkType = 0x10;
 constexpr size_t kFbFkValue = 0x14;
-constexpr size_t kFbAntiRepeat = 0x500;
+constexpr size_t kFbAntiRepeatNa = 0x548;
+constexpr size_t kFbAntiRepeatSkill = 0x550;
 constexpr size_t kFbRepeatCount = 0x18;
 size_t gOffVecCtrl = kFbVecCtrl;
 size_t gOffVcMoveAction = kFbVcMoveAction;
 size_t gOffFkType = kFbFkType;
 size_t gOffFkValue = kFbFkValue;
-size_t gOffAntiRepeat = kFbAntiRepeat;
+size_t gOffAntiRepeatNa = kFbAntiRepeatNa;
+size_t gOffAntiRepeatSkill = kFbAntiRepeatSkill;
 size_t gOffRepeatCount = kFbRepeatCount;
 #define kOffVecCtrl (gOffVecCtrl)
 #define kOffVcMoveAction (gOffVcMoveAction)
@@ -182,16 +188,19 @@ void EnsureAttackFieldOff() {
     void* ul = x::runtime::il2cpp_shape::ResolveUserLocalKlass();
     void* arKlass = x::runtime::il2cpp::FindClass("", kAntiRepeatClass);
     int arHits = 0;
-    if (AttackFieldOffHit(ul, kHashAntiRepeat, kFbAntiRepeat, &gOffAntiRepeat, 0x3C0, 0x600))
+    if (AttackFieldOffHit(ul, kHashAntiRepeatNa, kFbAntiRepeatNa, &gOffAntiRepeatNa, 0x520, 0x580))
+        ++arHits;
+    if (AttackFieldOffHit(ul, kHashAntiRepeatSkill, kFbAntiRepeatSkill, &gOffAntiRepeatSkill, 0x520,
+                          0x580))
         ++arHits;
     if (AttackFieldOffHit(arKlass, kHashRepeatCount, kFbRepeatCount, &gOffRepeatCount, 0x10, 0x20))
         ++arHits;
     x::runtime::LogI("Attack",
                      "attack slots path=%s hits=%d/4 vc=0x%zX move=0x%zX fkT=0x%zX fkV=0x%zX "
-                     "antirepeat=%d/2 lu+0x%zX cnt+0x%zX",
+                     "antirepeat=%d/3 na=0x%zX skill=0x%zX cnt+0x%zX",
                      hits == 4 ? "meta" : (hits ? "meta-partial" : "fallback"), hits, gOffVecCtrl,
-                     gOffVcMoveAction, gOffFkType, gOffFkValue, arHits, gOffAntiRepeat,
-                     gOffRepeatCount);
+                     gOffVcMoveAction, gOffFkType, gOffFkValue, arHits, gOffAntiRepeatNa,
+                     gOffAntiRepeatSkill, gOffRepeatCount);
 }
 
 void LogLine(const char* fmt, ...);
@@ -199,12 +208,13 @@ void LogLine(const char* fmt, ...);
 // TryDoing* 入口会调 AntiRepeat.TryRepeat(x,y)：同像素累加 _repeatCount，超过 CountLimit=100
 // 就直接拒刀（SetAttackAction 都不进 → fire b1=-1）。站桩输出原地连砍必撞这条；造包绕过 TryDoing。
 // 出刀前把计数清零。只写 AntiRepeat 对象，不写人 AbsPos。
-void ResetAntiRepeat(void* localUser) {
-    if (!LooksLikeHeapPtr(localUser) || !gOffAntiRepeat) return;
+// IDA：普攻 TryDoing 读 [UserLocal+0x548]；技能路径读 +0x550。两枚都清。
+void ZeroAntiRepeatCount(void* localUser, size_t off, int* maxPrev) {
+    if (!off || !LooksLikeHeapPtr(localUser)) return;
     void* ar = nullptr;
     int prev = 0;
     __try {
-        ar = ReadPtr(localUser, gOffAntiRepeat);
+        ar = ReadPtr(localUser, off);
         if (!LooksLikeHeapPtr(ar)) return;
         prev = *reinterpret_cast<int*>(reinterpret_cast<uint8_t*>(ar) + gOffRepeatCount);
         if (prev == 0) return;
@@ -212,8 +222,17 @@ void ResetAntiRepeat(void* localUser) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
+    if (maxPrev && prev > *maxPrev) *maxPrev = prev;
+}
+
+void ResetAntiRepeat(void* localUser) {
+    if (!LooksLikeHeapPtr(localUser)) return;
+    int prev = 0;
+    ZeroAntiRepeatCount(localUser, gOffAntiRepeatNa, &prev);
+    ZeroAntiRepeatCount(localUser, gOffAntiRepeatSkill, &prev);
     if (prev >= 80) {
-        LogLine("antirepeat reset count=%d (limit=100)", prev);
+        LogLine("antirepeat reset count=%d (limit=100) na=0x%zX skill=0x%zX", prev,
+                gOffAntiRepeatNa, gOffAntiRepeatSkill);
     }
 }
 
@@ -259,6 +278,9 @@ std::atomic<int> gLastFaceSign{0};  // -1 左 / +1 右 / 0 未知
 std::atomic<int> gFaceLastMa{-1};
 std::atomic<int> gFaceLastWhy{-1};
 std::atomic<int> gWalkHeld{0};      // 拟人走路锁存：-1/0/+1
+std::atomic<int> gVertHeld{0};      // 拟人爬绳：-1 下 / 0 / +1 上
+std::atomic<int> gJumpHeld{0};      // LeftAlt 0/1
+std::atomic<DWORD> gJumpUntilMs{0};
 DWORD gRateWindowStart = 0;
 
 void* gFkm = nullptr;
@@ -1192,6 +1214,10 @@ HWND FindUnityGameHwnd() {
 
 // 默认 Win32 走路；XCAT_WALK_KP=1 失败时也回落这里。
 bool SendVkKeyEvent(WORD vk, bool down) {
+    HWND game = FindUnityGameHwnd();
+    // SendInput 进前台窗口。游戏失焦切到本程序 ImGui 时方向键会变成面板导航，
+    // 后台 unity_kbd 还没来得及补边沿，用户体感就是「键跑到 IMGUI / 后台没跟上」。
+    if (!game || GetForegroundWindow() != game) return false;
     UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
     INPUT in{};
     in.type = INPUT_KEYBOARD;
@@ -1357,7 +1383,7 @@ uint32_t __fastcall PackStateDriveHook(void* self, const void* methodInfo) {
 
 bool InstallPackDriveHook() {
     // 已拆除：kOffKeyPadSlot4 所指的类**不是** KeyPad 而是 Rand32，slot4 = `Rand32.Random()`
-    // （运行期 origRva=0x1AEE410 与 dump 对上；反编译为 xorshift：三状态字、移位 13/19·4/25·8/11；
+    // （运行期 origRva=0x1B87EE0 与 dump 对上；反编译为 xorshift：三状态字、移位 13/19·4/25·8/11；
     //  Random() 正是 Rand32 首个自有虚方法，恰落 slot4）。
     // 于是 PackStateDriveHook 那句 `r |= 1u / r &= ~1u` 不是「锁存方向」，而是把游戏伪随机数的
     // 最低位在走路期间钉成定值 —— 污染 RNG 流，且当初「PackBit 无效」根本没测到真的 PackState。
@@ -1513,7 +1539,16 @@ bool HoldWalk(int inputX) {
     if (inputX != -1 && inputX != 1) return StopWalk();
 
     ArmWalkTick();
-    const int mode = gWalkDriveMode.load(std::memory_order_relaxed);
+    int mode = gWalkDriveMode.load(std::memory_order_relaxed);
+    HWND hwnd = FindUnityGameHwnd();
+    const bool fg = hwnd && GetForegroundWindow() == hwnd;
+    // 失焦切到本程序时若已回落 OS 模式，SendInput 会打进 ImGui。立刻改回内部键盘。
+    if (mode == 2 && !fg) {
+        gWalkDriveMode.store(3, std::memory_order_relaxed);
+        ClearOsWalkKeys();
+        (void)unity_kbd::EnsureBound();
+        mode = 3;
+    }
     const bool packMode = (mode == 1);
     const bool kbdMode = (mode == 3);
 
@@ -1521,7 +1556,19 @@ bool HoldWalk(int inputX) {
     // 抢主线程（拟人进带抖动时 Hold+Stop 齐喷 → ImGui/泵卡死，upload 48610f）。
     const int held = gWalkHeld.load(std::memory_order_acquire);
     if (held == inputX && kbdMode && gWalkTickArmed.load(std::memory_order_acquire)) {
-        return true;
+        static HWND sLastFg = nullptr;
+        static DWORD sBgRelatch = 0;
+        const DWORD nowBg = NowMs();
+        HWND curFg = GetForegroundWindow();
+        const bool lostFocus = sLastFg && hwnd && sLastFg == hwnd && !fg;
+        sLastFg = curFg;
+        if (fg) {
+            sBgRelatch = 0;
+            return true;
+        }
+        // 失焦：IgnoreFocus 会被再 Reset，只靠 Repush 会丢键。刚切走立刻补，之后每 40ms。
+        if (!lostFocus && sBgRelatch && nowBg - sBgRelatch < 40) return true;
+        sBgRelatch = nowBg;
     }
 
     gWalkHeld.store(inputX, std::memory_order_release);
@@ -1529,7 +1576,7 @@ bool HoldWalk(int inputX) {
     bool osOk = false;  // 仅在真的按了 OS 键时才置位，否则 Hold 日志里的 os= 会骗人
     if (packMode || kbdMode) {
         ClearOsWalkKeys();
-    } else {
+    } else if (fg) {
         osOk = EnsureOsWalkDir(inputX);
     }
 
@@ -1546,11 +1593,16 @@ bool HoldWalk(int inputX) {
         if (job.ok) gLastFaceSign.store(inputX, std::memory_order_relaxed);
     }
 
-    // 内部输入绑不上就别装死：回落 Win32，至少前台还能走。
+    // 内部输入绑不上：仅游戏在前台才回落 Win32。失焦回落会把方向键送进本程序 ImGui。
     if (kbdMode && !kbdOk) {
-        gWalkDriveMode.store(2, std::memory_order_relaxed);
-        LogLine("walkW Kbd inject FAIL (%s) → OS fallback", unity_kbd::LastFail());
-        osOk = EnsureOsWalkDir(inputX);
+        if (fg) {
+            gWalkDriveMode.store(2, std::memory_order_relaxed);
+            LogLine("walkW Kbd inject FAIL (%s) → OS fallback (fg)", unity_kbd::LastFail());
+            osOk = EnsureOsWalkDir(inputX);
+        } else {
+            LogLine("walkW Kbd inject FAIL (%s) unfocused — retry kbd, no OS (ImGui leak)",
+                    unity_kbd::LastFail());
+        }
     }
 
     static DWORD sHoldLog = 0;
@@ -1587,6 +1639,26 @@ bool HoldWalk(int inputX) {
     return gWalkTickArmed.load(std::memory_order_acquire) && (packMode || kbdOk || osOk);
 }
 
+bool RefreshWalk() {
+    const int held = gWalkHeld.load(std::memory_order_acquire);
+    if (held != -1 && held != 1) return true;
+    if (gWalkDriveMode.load(std::memory_order_relaxed) != 3) return true;  // 仅 Kbd 模式
+    if (!runtime::main_thread::Ensure()) return false;
+    FaceJob job{};
+    job.inputX = held;
+    job.wantKbd = true;
+    (void)runtime::main_thread::InvokeAndWait(
+        [](void* p) {
+            auto* job = static_cast<FaceJob*>(p);
+            job->kbdOk = unity_kbd::RefreshWalkEdgeOnMain();
+            ApplyWalkSetInput(job->inputX, job);
+        },
+        &job, kFaceJobWaitMs, runtime::main_thread::JobPrio::High);
+    LogLine("walkW refresh dir=%d kbd=%d set=%d ma=%d→%d", held, job.kbdOk ? 1 : 0,
+            job.ok ? 1 : 0, job.maBefore, job.maAfter);
+    return job.kbdOk && job.ok;
+}
+
 bool StopWalk() {
     const int prev = gWalkHeld.exchange(0, std::memory_order_acq_rel);
     ClearOsWalkKeys();
@@ -1617,6 +1689,77 @@ bool StopWalk() {
 }
 
 bool IsWalkHeld() { return gWalkHeld.load(std::memory_order_acquire) != 0; }
+
+struct NavKeyJob {
+    int vert = 0;
+    bool jump = false;
+    int prevVert = 0;
+    bool prevJump = false;
+    bool ok = false;
+};
+
+void NavKeyJobFn(void* p) {
+    auto* j = static_cast<NavKeyJob*>(p);
+    if (!j) return;
+    j->ok = unity_kbd::SetClimbJumpOnMain(j->vert, j->jump, j->prevVert, j->prevJump);
+}
+
+bool ApplyNavKeys(int vertY, bool jumpDown) {
+    if (vertY != -1 && vertY != 0 && vertY != 1) vertY = 0;
+    const int prevV = gVertHeld.load(std::memory_order_acquire);
+    const int prevJ = gJumpHeld.load(std::memory_order_acquire);
+    if (prevV == vertY && (prevJ != 0) == jumpDown) return true;
+    if (!runtime::main_thread::Ensure()) return false;
+    NavKeyJob job{};
+    job.vert = vertY;
+    job.jump = jumpDown;
+    job.prevVert = prevV;
+    job.prevJump = prevJ != 0;
+    (void)runtime::main_thread::InvokeAndWait(&NavKeyJobFn, &job, kFaceJobWaitMs,
+                                               runtime::main_thread::JobPrio::High);
+    if (!job.ok) return false;
+    gVertHeld.store(vertY, std::memory_order_release);
+    gJumpHeld.store(jumpDown ? 1 : 0, std::memory_order_release);
+    if (!jumpDown) gJumpUntilMs.store(0, std::memory_order_release);
+    return true;
+}
+
+bool HoldVertical(int inputY) {
+    if (inputY != -1 && inputY != 1) return ReleaseVertical();
+    const bool jump = gJumpHeld.load(std::memory_order_acquire) != 0;
+    return ApplyNavKeys(inputY, jump);
+}
+
+bool ReleaseVertical() {
+    const bool jump = gJumpHeld.load(std::memory_order_acquire) != 0;
+    return ApplyNavKeys(0, jump);
+}
+
+bool PulseJump(DWORD holdMs) {
+    if (holdMs < 16) holdMs = 16;
+    if (holdMs > 250) holdMs = 250;
+    const DWORD now = NowMs();
+    const DWORD until = gJumpUntilMs.load(std::memory_order_acquire);
+    if (gJumpHeld.load(std::memory_order_acquire) && until && static_cast<int>(now - until) < 0)
+        return true;
+    const int vert = gVertHeld.load(std::memory_order_acquire);
+    if (!ApplyNavKeys(vert, true)) return false;
+    gJumpUntilMs.store(now + holdMs, std::memory_order_release);
+    return true;
+}
+
+bool ReleaseJump() {
+    const int vert = gVertHeld.load(std::memory_order_acquire);
+    gJumpUntilMs.store(0, std::memory_order_release);
+    return ApplyNavKeys(vert, false);
+}
+
+bool StopNav() {
+    const bool w = StopWalk();
+    const bool n = ApplyNavKeys(0, false);
+    gJumpUntilMs.store(0, std::memory_order_release);
+    return w && n;
+}
 
 void FaceSetInputJobFn(void* p) {
     auto* job = static_cast<FaceJob*>(p);
@@ -1789,6 +1932,12 @@ DWORD EffectiveAnimBusyMs() {
     return static_cast<DWORD>(ov);
 }
 
+DWORD MsSinceLastFire() {
+    const DWORD last = gLastFireMs.load(std::memory_order_relaxed);
+    if (!last) return 0x7fffffffu;
+    return NowMs() - last;
+}
+
 bool MotionBusy() {
     const DWORD last = gLastFireMs.load();
     if (!last) return false;
@@ -1946,7 +2095,15 @@ bool TryFirePrimary() { return TryFirePrimaryEx(/*ignoreCombatInterval=*/false);
 
 bool TryFirePrimaryForMultiSkill() { return TryFirePrimaryEx(/*ignoreCombatInterval=*/true); }
 
-void TickReleases() { FlushPendingUp(NowMs()); }
+void TickReleases() {
+    FlushPendingUp(NowMs());
+    const DWORD now = NowMs();
+    const DWORD until = gJumpUntilMs.load(std::memory_order_acquire);
+    if (gJumpHeld.load(std::memory_order_acquire) && until &&
+        static_cast<int>(now - until) >= 0) {
+        (void)ReleaseJump();
+    }
+}
 
 void SetFireSuppressed(bool on) {
     const bool was = gFireSuppressed.exchange(on, std::memory_order_acq_rel);
@@ -1975,6 +2132,8 @@ void ForceRelease() {
     ports::input::ForceReleaseVk(VK_LEFT);
     ports::input::ForceReleaseVk(VK_RIGHT);
     gWalkHeld.store(0, std::memory_order_release);
+    (void)ApplyNavKeys(0, false);
+    gJumpUntilMs.store(0, std::memory_order_release);
     DisarmWalkTick();
     // 关 F5 / ExternalPause：强制清 VecCtrl 走路锁存（InputX 粘住 → 走不动）。
     if (runtime::main_thread::Ensure()) {
@@ -2002,6 +2161,12 @@ void ClearWalkLatchMainThread() {
         gLastFaceSign.store(0, std::memory_order_relaxed);
         gFaceDx.store(0.f, std::memory_order_relaxed);
     }
+    const int prevV = gVertHeld.load(std::memory_order_acquire);
+    const int prevJ = gJumpHeld.load(std::memory_order_acquire);
+    (void)unity_kbd::SetClimbJumpOnMain(0, false, prevV, prevJ != 0);
+    gVertHeld.store(0, std::memory_order_release);
+    gJumpHeld.store(0, std::memory_order_release);
+    gJumpUntilMs.store(0, std::memory_order_release);
 }
 
 }  // namespace x::features::ports::attack

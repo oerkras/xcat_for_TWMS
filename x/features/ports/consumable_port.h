@@ -7,11 +7,12 @@ namespace x::features::ports::consumable {
 enum class PotionKind { Hp, Mp };
 
 struct FindResult {
-    int pos = -1;       // nPOS for UseRequest (1-based maple slot)
-    int listIndex = -1; // raw List index (for empty-use POS retry)
+    int pos = -1;       // nPOS for UseRequest (格子号；GetItem 直下标)
+    int listIndex = -1; // raw List index (nPOS 缺失时才作 fallback / alt)
     int itemId = 0;
     int qty = 0;
     bool ok = false;
+    bool posFromSlot = false;  // pos 来自 ItemSlotBase.nPOS@0x28，勿再 ±1 alt
     // Bound-resolve miss tag (static literal). Set when ok==false from ResolveBoundPotion /
     // FindAndUseBoundPotion; e.g. empty_bind / soft_reject / not_in_bag / not_item.
     const char* missWhy = nullptr;

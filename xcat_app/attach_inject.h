@@ -30,6 +30,9 @@ void Shutdown();
 LaunchMode GetLaunchMode();
 void SetLaunchMode(LaunchMode mode);
 const char* LaunchModeLabel(LaunchMode mode);
+// 探活是否上报账密直登四段。Init 之后以当前启动模式为准；启动门在 Init 之前探活时读
+// payloadBinDir/state/launch_mode.txt。不是 GamaPassDirect 就不带头（磁盘上可能还留着旧账）。
+bool IsGamaPassDirectLaunchMode(const char* payloadBinDir = nullptr);
 
 bool StartWatch();
 // 非阻塞：置停旗并唤醒 poll；join 在后台完成（ImGui 切模式勿再卡 1s Sleep）。

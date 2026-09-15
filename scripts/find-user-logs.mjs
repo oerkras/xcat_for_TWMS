@@ -9,7 +9,7 @@
  *   node scripts/find-user-logs.mjs catalog           # 重建 catalog.jsonl
  *   node scripts/find-user-logs.mjs open <关键字>     # 打开匹配到的最新上传目录
  *
- * 关键字可匹配：note(备注) / machine / device / deviceId / IP / uploadId / 安装路径片段 / 日志正文(--in-logs)
+ * 关键字可匹配：note(备注) / uid / machine / device / deviceId / IP / uploadId / 安装路径片段 / 日志正文(--in-logs)
  */
 import fs from 'node:fs/promises';
 import { existsSync, createReadStream } from 'node:fs';
@@ -70,6 +70,33 @@ export async function migrateFlatDeviceDirs(outRoot = defaultOutRoot) {
   return { moved, merged };
 }
 
+function isHangDumpName(name) {
+  const n = String(name || '').toLowerCase();
+  return n.startsWith('hang_') && n.endsWith('.txt');
+}
+
+function savedHasHang(saved) {
+  if (!Array.isArray(saved)) return false;
+  return saved.some((f) => {
+    const name = String(f?.name || '');
+    const source = String(f?.source || '');
+    return isHangDumpName(name) || /(?:^|[/\\])hang[/\\]/i.test(source);
+  });
+}
+
+async function uploadHasHang(uploadDir, saved) {
+  if (savedHasHang(saved)) return true;
+  try {
+    const ents = await fs.readdir(uploadDir, { withFileTypes: true });
+    for (const e of ents) {
+      if (e.isFile() && isHangDumpName(e.name)) return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
 function parseArgs(argv) {
   const positional = [];
   const flags = new Map();
@@ -91,6 +118,37 @@ function parseArgs(argv) {
   return { positional, flags };
 }
 
+function sanitizeUid(value) {
+  return String(value || '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 64);
+}
+
+/** 探活历史：deviceId → 最近一次见到的 uid（只用于旧上传回填，新上传走验签头）。 */
+async function loadUidByDeviceId() {
+  const historyPath = path.join(repoRoot, 'artifacts', 'release', 'client-history.json');
+  /** @type {Map<string, { uid: string, lastSeenMs: number }>} */
+  const best = new Map();
+  try {
+    const j = JSON.parse(await fs.readFile(historyPath, 'utf8'));
+    const clients = Array.isArray(j?.clients) ? j.clients : [];
+    for (const c of clients) {
+      const deviceId = String(c?.deviceId || '').trim().toLowerCase();
+      const uid = sanitizeUid(c?.uid);
+      if (!deviceId || !uid) continue;
+      const lastSeenMs = Number(c?.lastSeenMs) || 0;
+      const prev = best.get(deviceId);
+      if (!prev || lastSeenMs >= prev.lastSeenMs) best.set(deviceId, { uid, lastSeenMs });
+    }
+  } catch {
+    // 无历史台账时 catalog 仍可建，uid 留空
+  }
+  const map = new Map();
+  for (const [deviceId, row] of best) map.set(deviceId, row.uid);
+  return map;
+}
+
 async function readJson(filePath) {
   return JSON.parse(await fs.readFile(filePath, 'utf8'));
 }
@@ -103,17 +161,21 @@ async function safeStat(filePath) {
   }
 }
 
-/** 从 launcher.jsonl / 旧 launcher.log 抽一点人话线索（安装路径 / Windows 用户名） */
+/** 从 launcher.jsonl / 旧 launcher.log 抽一点人话线索（安装路径 / Windows 用户名 / uid） */
 async function extractHints(uploadDir) {
-  const hints = { installPath: '', winUser: '', releaseFolder: '' };
+  const hints = { installPath: '', winUser: '', releaseFolder: '', uid: '' };
   const candidates = ['launcher.jsonl', 'launcher.log', 'prev_launcher.jsonl', 'prev_launcher.log'];
   for (const name of candidates) {
     const launcher = path.join(uploadDir, name);
     if (!existsSync(launcher)) continue;
     try {
       const text = await fs.readFile(launcher, 'utf8');
+      if (!hints.uid) {
+        const uidMatch = text.match(/gate\/1 server recognized uid=([^\s"\\]{1,64})/i);
+        if (uidMatch) hints.uid = sanitizeUid(uidMatch[1]);
+      }
       const pathMatch = text.match(/[A-Za-z]:\\Users\\[^\\\r\n]+\\[^\r\n]*?xcat[^\r\n]*?/i);
-      if (pathMatch) {
+      if (pathMatch && !hints.installPath) {
         hints.installPath = pathMatch[0].slice(0, 240);
         const userMatch = hints.installPath.match(/Users\\([^\\]+)/i);
         if (userMatch) hints.winUser = userMatch[1];
@@ -121,8 +183,8 @@ async function extractHints(uploadDir) {
           /\\([^\\]*(?:xcat_for_twms|xcat_for_fengxing|xcat)[^\\]*)\\/i,
         );
         if (folderMatch) hints.releaseFolder = folderMatch[1];
-        return hints;
       }
+      if (hints.uid && hints.installPath) return hints;
     } catch {
       // ignore
     }
@@ -149,6 +211,7 @@ export async function scanUploads(outRoot = defaultOutRoot) {
   await migrateFlatDeviceDirs(outRoot);
   const bucket = devicesRoot(outRoot);
   if (!existsSync(bucket)) return [];
+  const uidByDevice = await loadUidByDeviceId();
   const devices = (await fs.readdir(bucket, { withFileTypes: true }))
     .filter((e) => e.isDirectory())
     .map((e) => e.name);
@@ -192,6 +255,15 @@ export async function scanUploads(outRoot = defaultOutRoot) {
           }
         }
       }
+      const hasHang = await uploadHasHang(uploadDir, meta?.saved);
+      const hasFreezeFile = existsSync(path.join(uploadDir, 'freeze_incident.log'))
+        || existsSync(path.join(uploadDir, 'freeze_incident.jsonl'));
+      const deviceId = meta?.deviceId || '';
+      let uid = sanitizeUid(meta?.uid) || sanitizeUid(hints.uid);
+      if (!uid && deviceId) {
+        uid = uidByDevice.get(String(deviceId).trim().toLowerCase()) || '';
+      }
+      const uidNeedsPersist = Boolean(uid && meta && sanitizeUid(meta.uid) !== uid);
       rows.push({
         device,
         uploadId,
@@ -202,16 +274,18 @@ export async function scanUploads(outRoot = defaultOutRoot) {
         note,
         remoteAddress: meta?.remoteAddress || '',
         machine: meta?.machine || device.split('_')[0] || '',
-        deviceId: meta?.deviceId || '',
+        deviceId,
         clientId: meta?.clientId || '',
         appVersion: meta?.appVersion || '',
         uploadMode: meta?.uploadMode || '',
         profile: meta?.profile || '',
         fileCount: Array.isArray(meta?.saved) ? meta.saved.length : 0,
         hasLieEvents: Boolean(meta?.lieEvents?.ok),
-        hasFreeze: existsSync(path.join(uploadDir, 'freeze_incident.log'))
-          || existsSync(path.join(uploadDir, 'freeze_incident.jsonl')),
+        hasHang,
+        hasFreeze: hasFreezeFile || hasHang,
         ...hints,
+        uid,
+        uidNeedsPersist,
       });
     }
   }
@@ -230,6 +304,7 @@ function matchRow(row, query) {
   if (!q) return true;
   const hay = [
     row.note,
+    row.uid,
     row.device,
     row.uploadId,
     row.machine,
@@ -242,6 +317,8 @@ function matchRow(row, query) {
     row.winUser,
     row.releaseFolder,
     row.relPath,
+    row.hasHang && 'hang',
+    row.hasFreeze && 'freeze',
   ]
     .filter(Boolean)
     .join('\n')
@@ -265,6 +342,14 @@ async function grepUploadLogs(uploadDir, query, { maxHits = 3 } = {}) {
     'prev_launcher.log',
     'update_apply.log',
   ];
+  try {
+    const ents = await fs.readdir(uploadDir);
+    for (const name of ents) {
+      if (isHangDumpName(name) && !candidates.includes(name)) candidates.push(name);
+    }
+  } catch {
+    /* ignore */
+  }
   const hits = [];
   for (const name of candidates) {
     const filePath = path.join(uploadDir, name);
@@ -292,9 +377,27 @@ export async function writeCatalog(outRoot = defaultOutRoot) {
   const catalogJsonl = path.join(outRoot, 'catalog.jsonl');
   const legacyCatalogMd = path.join(outRoot, 'CATALOG.md');
 
+  // 旧目录：把回填到的 uid 写进 meta.json，下次重建不依赖 30 天探活历史。
+  for (const r of rows) {
+    if (!r.uidNeedsPersist || !r.path) continue;
+    const uid = sanitizeUid(r.uid);
+    if (!uid) continue;
+    const metaPath = path.join(r.path, 'meta.json');
+    if (!existsSync(metaPath)) continue;
+    try {
+      const meta = await readJson(metaPath);
+      if (sanitizeUid(meta?.uid) === uid) continue;
+      meta.uid = uid;
+      await fs.writeFile(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
+    } catch {
+      // 单条 meta 写失败不影响 catalog
+    }
+  }
+
   const jsonl = rows.map((r) => JSON.stringify({
     receivedAt: r.receivedAt,
     note: r.note || '',
+    uid: r.uid || '',
     device: r.device,
     uploadId: r.uploadId,
     machine: r.machine,
@@ -305,6 +408,7 @@ export async function writeCatalog(outRoot = defaultOutRoot) {
     winUser: r.winUser,
     releaseFolder: r.releaseFolder,
     isLatest: r.isLatest,
+    hasHang: Boolean(r.hasHang),
     hasFreeze: r.hasFreeze,
     hasLieEvents: r.hasLieEvents,
     relPath: r.relPath,
@@ -328,22 +432,23 @@ function printTable(rows) {
   }
   const pad = (s, n) => String(s ?? '').slice(0, n).padEnd(n);
   console.log(
-    `${pad('receivedAt', 19)}  ${pad('machine', 15)}  ${pad('device', 26)}  ${pad('ip', 15)}  ${pad('ver', 18)}  clue`,
+    `${pad('receivedAt', 19)}  ${pad('uid', 12)}  ${pad('machine', 15)}  ${pad('device', 26)}  ${pad('ip', 15)}  ${pad('ver', 18)}  clue`,
   );
-  console.log('-'.repeat(120));
+  console.log('-'.repeat(132));
   for (const r of rows) {
     const clue = [
       r.note && `note=${r.note}`,
       r.uploadMode && `mode=${r.uploadMode}`,
       r.winUser && `user=${r.winUser}`,
       r.releaseFolder,
+      r.hasHang && 'hang',
       r.hasFreeze && 'freeze',
       r.isLatest && 'latest',
     ]
       .filter(Boolean)
       .join(' · ');
     console.log(
-      `${pad(r.receivedAt, 19)}  ${pad(r.machine, 15)}  ${pad(r.device, 26)}  ${pad(r.remoteAddress, 15)}  ${pad(r.appVersion, 18)}  ${clue}`,
+      `${pad(r.receivedAt, 19)}  ${pad(r.uid, 12)}  ${pad(r.machine, 15)}  ${pad(r.device, 26)}  ${pad(r.remoteAddress, 15)}  ${pad(r.appVersion, 18)}  ${clue}`,
     );
     console.log(`  → ${r.relPath}`);
     if (r.logHits?.length) {

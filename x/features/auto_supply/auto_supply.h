@@ -16,8 +16,11 @@ void StopWorker();
 void SetDesired(bool on);
 bool IsDesired();
 // 开趟中（含排队的卖装/回挂机、以及 pre_supply 等 hangup 落地）。
-// Cooldown / 纯 Idle 不算。遇人 RequestHop / 重连换频认这个。
+// Cooldown / 纯 Idle 不算。遇人 RequestHop / 重连换频认这个（hold 期间禁止换走）。
 bool IsBusy();
+// Idle 上已 Arm pre_supply：人还在野图等 hangup 落地，没有占用赶路/旋翼。
+// home_return 不得把这当 IsBusy 让路，否则 PersonFlyBusy 钉死、hangup 落不了地。
+bool IsPreSupplyHold();
 // 真正进行程（Pause 及之后，不含 Idle 上的 pre_supply）时冻 hangup 秒数闸/出刀闸。
 // pre_supply 在等 hangup，绝不能冻，否则死锁。
 bool HoldsHangupClock();

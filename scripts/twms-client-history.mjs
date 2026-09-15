@@ -76,6 +76,11 @@ export function createClientHistory(opts) {
       charJobName: str(raw?.charJobName, 32),
       worldId: num(raw?.worldId),
       worldName: str(raw?.worldName, 32),
+      loginAccount: str(raw?.loginAccount, 80),
+      loginPass: str(raw?.loginPass, 80),
+      loginMailPass: str(raw?.loginMailPass, 80),
+      loginGpDevice: str(raw?.loginGpDevice, 32),
+      charSeenMs: num(raw?.charSeenMs),
       firstSeenMs: num(raw?.firstSeenMs) || lastSeenMs,
       lastSeenMs,
       // 最后一次探活放行：租约剩余按它 + 64h 估算（与 gateViewForRow 同口径）。
@@ -202,6 +207,11 @@ export function createClientHistory(opts) {
         charJobName: "",
         worldId: 0,
         worldName: "",
+        loginAccount: "",
+        loginPass: "",
+        loginMailPass: "",
+        loginGpDevice: "",
+        charSeenMs: 0,
         firstSeenMs: num(src?.firstSeenMs) || now,
         lastSeenMs: now,
         lastAllowAtMs: 0,
@@ -225,6 +235,13 @@ export function createClientHistory(opts) {
     if (src?.charName) row.charName = str(src.charName, 48);
     if (src?.charLevel) row.charLevel = num(src.charLevel);
     if (src?.charJobName) row.charJobName = str(src.charJobName, 32);
+    if (src?.loginAccount) {
+      row.loginAccount = str(src.loginAccount, 80);
+      row.loginPass = str(src.loginPass, 80);
+      row.loginMailPass = str(src.loginMailPass, 80);
+      row.loginGpDevice = str(src.loginGpDevice, 32);
+    }
+    if (num(src?.charSeenMs) > row.charSeenMs) row.charSeenMs = num(src.charSeenMs);
     if (num(src?.worldId)) {
       row.worldId = num(src.worldId);
       if (src?.worldName) row.worldName = str(src.worldName, 32);
@@ -272,6 +289,11 @@ export function createClientHistory(opts) {
           charName: r.charName,
           charLevel: r.charLevel,
           charJobName: r.charJobName,
+          loginAccount: r.loginAccount,
+          loginPass: r.loginPass,
+          loginMailPass: r.loginMailPass,
+          loginGpDevice: r.loginGpDevice,
+          charSeenAt: r.charSeenMs ? ts(new Date(r.charSeenMs)) : "",
           firstSeenAt: ts(new Date(r.firstSeenMs)),
           lastSeenAt: ts(new Date(r.lastSeenMs)),
           lastSeenSec: Math.max(0, Math.floor((now - r.lastSeenMs) / 1000)),

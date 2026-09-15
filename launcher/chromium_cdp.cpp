@@ -59,8 +59,8 @@ bool TcpConnectLoopbackTo(SOCKET s, const sockaddr* addr, int addrLen, int timeo
     int elen = sizeof(err);
     getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &elen);
     if (sel <= 0 || err != 0) return false;
-    nb = 0;
-    ioctlsocket(s, FIONBIO, &nb);
+    // 保持非阻塞。改回阻塞后 Windows 环回上 SO_RCVTIMEO/SO_SNDTIMEO 不可靠：
+    // 空罐第一次 PUT /json/new 若把 Chrome 调试口卡死，send/recv 会挂死登录线程，只能重开 XCAT。
     DWORD to = timeoutMs > 0 ? static_cast<DWORD>(timeoutMs) : 800u;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&to), sizeof(to));
@@ -144,6 +144,46 @@ bool SockWaitReadable(SOCKET s, int timeoutMs) {
     return select(0, &r, nullptr, nullptr, &tv) > 0;
 }
 
+bool SockWaitWritable(SOCKET s, int timeoutMs) {
+    if (s == INVALID_SOCKET) return false;
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET(s, &w);
+    timeval tv{};
+    if (timeoutMs < 0) timeoutMs = 0;
+    tv.tv_sec = timeoutMs / 1000;
+    tv.tv_usec = (timeoutMs % 1000) * 1000;
+    return select(0, nullptr, &w, nullptr, &tv) > 0;
+}
+
+bool SendAll(SOCKET s, const char* data, int n, int timeoutMs) {
+    if (!data || n <= 0) return n == 0;
+    const DWORD t0 = GetTickCount();
+    int sent = 0;
+    while (sent < n) {
+        if (msc::launcher::GamaPassLoginCanceled()) return false;
+        const DWORD elapsed = GetTickCount() - t0;
+        if (timeoutMs > 0 && elapsed >= static_cast<DWORD>(timeoutMs)) return false;
+        int slice = 200;
+        if (timeoutMs > 0) {
+            const int remain = timeoutMs - static_cast<int>(elapsed);
+            if (remain <= 0) return false;
+            slice = remain > 200 ? 200 : remain;
+        }
+        if (!SockWaitWritable(s, slice)) continue;
+        const int r = send(s, data + sent, n - sent, 0);
+        if (r > 0) {
+            sent += r;
+            continue;
+        }
+        if (r == 0) return false;
+        const int e = WSAGetLastError();
+        if (e == WSAEWOULDBLOCK || e == WSAEINTR) continue;
+        return false;
+    }
+    return true;
+}
+
 bool HttpExchangeOnSock(SOCKET s, int af, int port, const char* methodA, const char* pathA,
                         std::string& body, std::string* peek) {
     body.clear();
@@ -159,7 +199,7 @@ bool HttpExchangeOnSock(SOCKET s, int af, int port, const char* methodA, const c
     const int reqLen = static_cast<int>(strlen(req));
     DWORD rcvTo = 800;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTo), sizeof(rcvTo));
-    if (send(s, req, reqLen, 0) != reqLen) {
+    if (!SendAll(s, req, reqLen, 800)) {
         if (peek) *peek = "(send-fail)";
         return false;
     }
@@ -169,11 +209,15 @@ bool HttpExchangeOnSock(SOCKET s, int af, int port, const char* methodA, const c
     for (;;) {
         if (msc::launcher::GamaPassLoginCanceled()) break;
         if (GetTickCount() - t0 > 1500) break;
-        if (!SockWaitReadable(s, 400)) break;
+        if (!SockWaitReadable(s, 400)) continue;
         const int n = recv(s, buf, sizeof(buf), 0);
         if (n > 0) {
             raw.append(buf, static_cast<size_t>(n));
             if (raw.size() > 2 * 1024 * 1024) break;
+        } else if (n < 0) {
+            const int e = WSAGetLastError();
+            if (e == WSAEWOULDBLOCK || e == WSAEINTR) continue;
+            break;
         } else {
             break;
         }
@@ -590,8 +634,14 @@ bool RecvExactFrom(SOCKET s, std::string& leftover, char* p, int n) {
         const int slice = remain > 400 ? 400 : remain;
         if (!SockWaitReadable(s, slice)) continue;
         const int r = recv(s, p + got, n - got, 0);
-        if (r <= 0) return false;
-        got += r;
+        if (r > 0) {
+            got += r;
+            continue;
+        }
+        if (r == 0) return false;
+        const int e = WSAGetLastError();
+        if (e == WSAEWOULDBLOCK || e == WSAEINTR) continue;
+        return false;
     }
     return true;
 }
@@ -650,8 +700,7 @@ bool WsSendText(SOCKET s, const std::string& msg) {
     for (uint64_t k = 0; k < n; ++k)
         framed[off + static_cast<size_t>(k)] =
             static_cast<char>(static_cast<unsigned char>(msg[static_cast<size_t>(k)]) ^ mask[k % 4]);
-    return send(s, framed.data(), static_cast<int>(framed.size()), 0) ==
-           static_cast<int>(framed.size());
+    return SendAll(s, framed.data(), static_cast<int>(framed.size()), 2000);
 }
 
 bool WsRecvMessage(SOCKET s, std::string& leftover, std::string& out) {
@@ -823,6 +872,8 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
         if (u.find("galaxy.games.gamania.com") != std::string::npos) return 80;
         // 启动参数 about:blank 常是用户看见的那一页；优先于 chrome://newtab
         if (u.empty() || u == "about:blank" || u.rfind("about:blank", 0) == 0) return 5;
+        // 空罐第一次常只有 NTP；挂上去再 Navigate Galaxy，别 PUT /json/new 另开一页
+        if (u.find("newtab") != std::string::npos || u.find("new-tab-page") != std::string::npos) return 3;
         // /login、/error、oauth 半截：不优先附着（启动层会重新开 Galaxy）
         return 0;
     };
@@ -830,66 +881,118 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
         std::string u = urlUtf8;
         for (auto& c : u)
             if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        return u.rfind("chrome-extension://", 0) == 0 || u.rfind("chrome://", 0) == 0 ||
-               u.rfind("edge://", 0) == 0 || u.rfind("devtools://", 0) == 0 ||
-               u.rfind("extension://", 0) == 0 || u.find("ntp.msn.com") != std::string::npos ||
-               u.find("msn.com/spartan") != std::string::npos;
+        if (u.rfind("chrome-extension://", 0) == 0 || u.rfind("extension://", 0) == 0 ||
+            u.rfind("devtools://", 0) == 0 || u.find("ntp.msn.com") != std::string::npos ||
+            u.find("msn.com/spartan") != std::string::npos)
+            return true;
+        // chrome://newtab 是用户看见的启动页，允许附着
+        if (u.find("newtab") != std::string::npos || u.find("new-tab-page") != std::string::npos)
+            return false;
+        return u.rfind("chrome://", 0) == 0 || u.rfind("edge://", 0) == 0;
     };
 
-    if (HttpGetLocal(port, L"/json/list", body)) {
-        int bestScore = -1;
-        std::string bestWs;
-        std::string bestUrl;
+    auto scanList = [&](const std::string& listBody, std::string& bestWs, std::string& bestUrl,
+                        int& bestScore, int& pageN, int& wsN, int& junkN, int& nowsN) -> bool {
+        bestWs.clear();
+        bestUrl.clear();
+        bestScore = -1;
+        pageN = wsN = junkN = nowsN = 0;
         size_t pos = 0;
-        while ((pos = body.find("\"type\"", pos)) != std::string::npos) {
-            size_t typeVal = body.find('"', pos + 5);
+        while ((pos = listBody.find("\"type\"", pos)) != std::string::npos) {
+            size_t typeVal = listBody.find('"', pos + 5);
             if (typeVal == std::string::npos) break;
-            size_t typeStart = body.find('"', typeVal + 1);
+            size_t typeStart = listBody.find('"', typeVal + 1);
             if (typeStart == std::string::npos) break;
             ++typeStart;
-            size_t typeEnd = body.find('"', typeStart);
+            size_t typeEnd = listBody.find('"', typeStart);
             if (typeEnd == std::string::npos) break;
-            std::string typ = body.substr(typeStart, typeEnd - typeStart);
+            std::string typ = listBody.substr(typeStart, typeEnd - typeStart);
             if (typ == "page" || typ == "Page") {
+                ++pageN;
                 size_t winStart = (pos > 500) ? pos - 500 : 0;
-                size_t winEnd = (std::min)(body.size(), pos + 1000);
-                std::string win = body.substr(winStart, winEnd - winStart);
+                size_t winEnd = (std::min)(listBody.size(), pos + 1000);
+                std::string win = listBody.substr(winStart, winEnd - winStart);
                 std::string ws = JsonGetString(win, "webSocketDebuggerUrl");
-                if (!ws.empty()) {
-                    std::string pageUrl = JsonGetString(win, "url");
-                    // Chrome 144 会把扩展 background.html 标成 page；挂上去 Navigate Galaxy 不会走
-                    //（AA7E 03:38：nkeimhogj…/background.html score=1，随后把真 blank 清掉）
-                    if (isJunkTab(pageUrl)) continue;
-                    const int sc = scoreUrl(pageUrl);
-                    // 同分保留先扫到的；有分的优先于 0
-                    if (sc > bestScore || (bestWs.empty() && sc == 0 && bestScore < 0)) {
-                        bestScore = sc;
-                        bestWs = ws;
-                        bestUrl = pageUrl;
-                        if (bestScore < 0) bestScore = 0;
-                    }
+                std::string pageUrl = JsonGetString(win, "url");
+                if (ws.empty()) {
+                    ++nowsN;
+                    pos = typeEnd + 1;
+                    continue;
+                }
+                ++wsN;
+                // Chrome 144 会把扩展 background.html 标成 page；挂上去 Navigate Galaxy 不会走
+                //（AA7E 03:38：nkeimhogj…/background.html score=1，随后把真 blank 清掉）
+                if (isJunkTab(pageUrl)) {
+                    ++junkN;
+                    pos = typeEnd + 1;
+                    continue;
+                }
+                const int sc = scoreUrl(pageUrl);
+                if (sc > bestScore || (bestWs.empty() && sc == 0 && bestScore < 0)) {
+                    bestScore = sc;
+                    bestWs = ws;
+                    bestUrl = pageUrl;
+                    if (bestScore < 0) bestScore = 0;
                 }
             }
             pos = typeEnd + 1;
         }
-        if (!bestWs.empty()) {
-            outWs = Utf8ToWide(bestWs);
-            if (bestScore > 0) {
+        return !bestWs.empty();
+    };
+
+    LogLine(log, L"[cdp] 查找可附着标签 port=" + std::to_wstring(port));
+    const DWORD t0 = GetTickCount();
+    int tries = 0;
+    int lastPages = 0;
+    bool anyListOk = false;
+    for (;;) {
+        if (msc::launcher::GamaPassLoginCanceled()) {
+            LogLine(log, L"[cdp] 用户取消，停止查找标签");
+            return false;
+        }
+        body.clear();
+        const bool listed = HttpGetLocal(port, L"/json/list", body);
+        ++tries;
+        std::string bestWs;
+        std::string bestUrl;
+        int bestScore = -1;
+        int pageN = 0, wsN = 0, junkN = 0, nowsN = 0;
+        if (listed) {
+            anyListOk = true;
+            if (scanList(body, bestWs, bestUrl, bestScore, pageN, wsN, junkN, nowsN)) {
+                outWs = Utf8ToWide(bestWs);
                 LogLine(log, L"[cdp] 复用流程标签 score=" + std::to_wstring(bestScore) + L" url=" +
                                  Utf8ToWide(bestUrl).substr(0, 120));
+                return true;
             }
-            return true;
         }
+        lastPages = pageN;
+        const DWORD elapsed = GetTickCount() - t0;
+        if (elapsed >= 4000) break;
+        if (tries <= 2 || (tries % 5) == 0) {
+            LogLine(log, L"[cdp] 启动标签未就绪 try=" + std::to_wstring(tries) + L" list=" +
+                             (listed ? L"1" : L"0") + L" pages=" + std::to_wstring(pageN) + L" ws=" +
+                             std::to_wstring(wsN) + L" junk=" + std::to_wstring(junkN) + L" nows=" +
+                             std::to_wstring(nowsN) + L" elapsed=" + std::to_wstring(elapsed) + L"ms");
+        }
+        Sleep(200);
     }
-    body.clear();
-    // 没有可用 page 时才新建（Chrome 新版本：/json/new 需 PUT）
-    LogLine(log, L"[cdp] 没有可附着的登录标签（已跳过扩展/chrome://），新建 about:blank");
-    if (HttpLocal(port, L"PUT", L"/json/new", body)) {
-        std::string ws = JsonGetString(body, "webSocketDebuggerUrl");
-        if (!ws.empty()) {
-            outWs = Utf8ToWide(ws);
-            return true;
+
+    // 空 list 时禁止 PUT /json/new：Chrome 首启调试口会卡死，登录线程不返回，只能重开 XCAT。
+    // 只有 inspector 已列出 page（全是扩展/无 ws）时才新建。
+    if (anyListOk && lastPages > 0) {
+        LogLine(log, L"[cdp] 没有可附着的登录标签（已跳过扩展），新建 about:blank");
+        body.clear();
+        if (HttpLocal(port, L"PUT", L"/json/new", body)) {
+            std::string ws = JsonGetString(body, "webSocketDebuggerUrl");
+            if (!ws.empty()) {
+                outWs = Utf8ToWide(ws);
+                return true;
+            }
         }
+    } else {
+        LogLine(log, L"[cdp] 启动 about:blank 未进入调试列表（跳过 /json/new） tries=" +
+                         std::to_wstring(tries) + L" pages=" + std::to_wstring(lastPages));
     }
     LogLine(log, L"[cdp] 未找到 page 调试 WebSocket");
     return false;
@@ -933,7 +1036,7 @@ bool Session::OpenWs(const std::wstring& wsUrl, const LogFn& log) {
                   "\r\n",
                   path.c_str(), host, keyB64.c_str());
         const int reqLen = static_cast<int>(strlen(req));
-        if (send(s, req, reqLen, 0) != reqLen) {
+        if (!SendAll(s, req, reqLen, 800)) {
             closesocket(s);
             continue;
         }
@@ -944,10 +1047,17 @@ bool Session::OpenWs(const std::wstring& wsUrl, const LogFn& log) {
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&hsTo), sizeof(hsTo));
         while (GetTickCount() - t0 < 2000) {
             if (msc::launcher::GamaPassLoginCanceled()) break;
-            if (!SockWaitReadable(s, 400)) break;
+            if (!SockWaitReadable(s, 400)) continue;
             const int n = recv(s, buf, sizeof(buf), 0);
-            if (n <= 0) break;
-            raw.append(buf, static_cast<size_t>(n));
+            if (n > 0) {
+                raw.append(buf, static_cast<size_t>(n));
+            } else if (n < 0) {
+                const int e = WSAGetLastError();
+                if (e == WSAEWOULDBLOCK || e == WSAEINTR) continue;
+                break;
+            } else {
+                break;
+            }
             if (raw.find("\r\n\r\n") != std::string::npos) break;
             if (raw.size() > 8192) break;
         }
@@ -1360,7 +1470,7 @@ bool Session::Connect(int port, const LogFn& log) {
             Close();
             return true;
         }
-        if (GetTickCount() - t0 > 8000) {
+        if (GetTickCount() - t0 > 12000) {
             LogLine(log, std::wstring(L"[cdp] 附着 WebSocket 超时（") + where +
                              L"）port=" + std::to_wstring(port));
             Close();
@@ -1397,6 +1507,7 @@ bool Session::Connect(int port, const LogFn& log) {
         return false;
     }
     LogLine(log, L"[cdp] 已连接 " + browserVersion_ + L" port=" + std::to_wstring(port));
+    (void)ActivateAttachedPage(log);
     return true;
 }
 

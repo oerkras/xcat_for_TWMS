@@ -17,6 +17,7 @@
 #include "../features/sellbag/sellbag.h"
 #include "../features/titlebar/titlebar.h"
 #include "../features/titlebar/titlebar_game.h"
+#include "../features/simple_combat/simple_combat.h"
 #include "../runtime/bin_dir.h"
 #include "../runtime/il2cpp_bind.h"
 #include "../runtime/il2cpp_prefab.h"
@@ -102,11 +103,11 @@ void LatchWorld(xcat::PayloadStatus& st) {
 
 // docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-06（与 anti_macro_port 对齐）
 constexpr char kAntiMacroUtilClass[] =
-    "b14025466ba0e40c51d1bf13f7e915b0e78f9389ed347b2d4da80ea3da005c9";
+    "ee7633015884e0202eb0b1c8c2dc0fac6cb5cc36b06909d28b5ae65b52a7e0f";
 constexpr char kAntiMacroNonFiniteClass[] =
-    "c58aeae97e7e118cafe20417fa8d27da1ce04437f3aefecbe83a8287ac2df04";
+    "dd5f0ccaa0bbbfa4399941f5e3e9eceb4aa32cb26d92d923fa366cb95a33ee2";
 constexpr char kAntiMacroTextCaptchaClass[] =
-    "cf4796979346f21ec878365cbc8cd889c01bd1ebe4d4ca8f23704aa38c8a769";
+    "b1199570deb2d78310c572e1a27fd768ad662c4bc4ff0d4cb98acac50761181";
 constexpr char kPrefabNonFinite[] = "UIAntiMacroNonFinite";
 constexpr char kPrefabTextCaptcha[] = "UIAntiMacroTextCaptcha";
 
@@ -312,6 +313,13 @@ void PayloadStatus_Publish() {
         x::features::ports::mob_gather::QueryHangupFires(&fires, &firesNeed);
         st.hangupFires = fires;
         st.hangupFiresNeed = firesNeed;
+    }
+
+    {
+        uint32_t hint = 0, remain = 0;
+        x::features::simple_combat::QueryHumanHud(&hint, &remain);
+        st.humanHint = hint;
+        st.humanRemainMs = remain;
     }
 
     {

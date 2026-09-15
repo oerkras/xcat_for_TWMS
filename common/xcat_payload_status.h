@@ -19,6 +19,7 @@
 // v19：WorldManager.CharacterRegDate（.NET ticks）→ ImGui 顶栏建角时间。
 // v20：标题栏金/经每分钟（环形窗；valid=0 探活勿覆盖服务端旧值）。
 // v21：登录闩分区 worldId（进图后不再变；valid=0 探活勿覆盖）。
+// v22：拟人 HUD（随机小休 / 捡高价值 / 挂绳回血）→ ImGui 顶栏。
 
 #include <Windows.h>
 
@@ -28,7 +29,7 @@
 namespace xcat {
 
 constexpr uint32_t kPayloadStatusMagic = 0x58435450u;  // 'XCTP'
-constexpr uint32_t kPayloadStatusVersion = 21u;
+constexpr uint32_t kPayloadStatusVersion = 22u;
 
 // hangup_schedule / guardian_policy hardFailCode：服务器踢线/断线（TWMS 本地码）。
 constexpr uint32_t kHardFailServerKick = 1001u;
@@ -143,6 +144,10 @@ struct PayloadStatus {
     uint32_t playerWorldValid = 0;
     int32_t playerWorldId = 0;
     char playerWorldName[48]{};
+
+    // v22：拟人顶栏（0=无 1=随机小休 2=捡高价值 3=挂绳回血）；remainMs 仅小休有意义
+    uint32_t humanHint = 0;
+    uint32_t humanRemainMs = 0;
 };
 #pragma pack(pop)
 

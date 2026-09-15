@@ -42,25 +42,25 @@ constexpr size_t kKlassOffWuaMethodPtr = 0x1E8;  // Slot 11 WorkUpdateActive
 constexpr size_t kKlassOffCdMethodPtr = 0x208;   // Slot 13 CollisionDetectWalk
 constexpr size_t kKlassOffCdfMethodPtr = 0x218;  // Slot 14 CollisionDetectFloat
 // dump.cs.restored.C · VecCtrlMob（RVA 仅 fallback；安装走 hash）
-constexpr uint32_t kRvaMobWua = 0x11DEAB0;   // VecCtrlMob Slot 11 override
-constexpr uint32_t kRvaBaseWua = 0x11CBC80;  // VecCtrl Slot 11 WorkUpdateActive
-constexpr uint32_t kRvaInspect = 0x11DBAB0;
+constexpr uint32_t kRvaMobWua = 0x1236B10;   // VecCtrlMob Slot 11 override
+constexpr uint32_t kRvaBaseWua = 0x1223460;  // VecCtrl Slot 11 WorkUpdateActive
+constexpr uint32_t kRvaInspect = 0x1233b80;  // remounted 2026-09-10 方法头
 constexpr uint32_t kRvaCtrlStop = 0x11DE6B0;
-constexpr uint32_t kRvaCtrlMove = 0x11DFEB0;
+constexpr uint32_t kRvaCtrlMove = 0x1236B10;  // remounted 2026-09-10 Slot 11
 constexpr uint32_t kRvaCtrlJump = 0x11E1100;
-constexpr uint32_t kRvaCtrlFly = 0x11E8080;
+constexpr uint32_t kRvaCtrlFly = 0x12402C0;  // remounted 2026-09-10
 constexpr char kHashWorkUpdateActive[] =
-    "a006b7702411427329a1d9287f1a5ab428c09b63f9910e42355cd9023d08c1e";
+    "ab294a368f790cda97d1b0faacfc9e7680beb9897363a7c383efbea5a83c4c9";
 constexpr char kHashInspectUpdateActive[] =
-    "d1efee0dea25b6293b6455c5f1256daec2dfe06fd42855f82fabff7246e06b1";
+    "f32fd5b5d711d34a68856d48c870d1c949f4d4227435fdc23d4173b965cfc9b";
 constexpr char kHashCtrlStop[] =
     "c9e385cfbdebe4c7e3fe11062f63ff09014a4da7af4cc6eb5a1df6cb99bc59c";
 constexpr char kHashCtrlMove[] =
-    "e5220e282d4f0a2223e3e418de7ed57e2ca9293452d00de6b272be674e3e81a";
+    "ab294a368f790cda97d1b0faacfc9e7680beb9897363a7c383efbea5a83c4c9";
 constexpr char kHashCtrlJump[] =
     "d4cda78c5f174760c6aa00311b7a3e2f46a3c137293f79d849b01aaf4d9b8fa";
 constexpr char kHashCtrlFly[] =
-    "d89b0988c604ddfec7678c02ed07f661cc08188203c66897ef4ced3b1d6aff7";
+    "bde942d9aced0e3fc4b52acc3f7e315f72798321234d549f2ace348522abd83";
 
 constexpr int kMaxBan = 64;
 constexpr DWORD kArmTimeoutMs = 8000;

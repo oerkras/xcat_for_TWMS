@@ -113,6 +113,14 @@ DWORD gWaitPathLoggedMs = 0;
 // BIN aa29bc 08-10 22:45：samples 288/330 时降级，光标被弹走约 260 ms（约 7~8 个采样点），
 // 泵恢复后又被当成新题重开，接着走完 330 交了卷 —— 交上去的轨迹是脏的。
 DWORD gStaleSinceMs = 0;
+// 同图 InterStage：Field 指针空，NonFinite 单例跟着没。谓词是「新鲜的没开」，不是泵 stale。
+// BIN 5a4123 17:16：准备期 frame=143 撞上 ~2s 卸图，Abort(ui-closed) 松闸，51s 后进小黑屋。
+// BIN aa29bc：ui-closed 后 250ms 面板重开还能跟完。按住等回图，禁止弹光标、禁止 stuck_lobby。
+std::atomic<bool> gTransitHold{false};
+DWORD gTransitSinceMs = 0;
+DWORD gTransitBackMs = 0;
+constexpr DWORD kFieldTransitHoldMs = 8000;
+constexpr DWORD kFieldTransitSettleMs = 1200;
 // 按住的上限。真关闭时泵是好的（谓词照样算得出「没开」且新鲜），所以走到这条只可能是泵真卡死，
 // 那时测谎大概也黄了，放手让原关闭路径收尾。
 constexpr DWORD kPredStaleHoldMs = 3000;
@@ -422,9 +430,33 @@ void RefreshAutoLieHardPause() {
     const bool on =
         gQuizPaused.load(std::memory_order_acquire) ||
         gFollowing.load(std::memory_order_acquire) || uiHold ||
+        gTransitHold.load(std::memory_order_acquire) ||
         mouse_trajectory_sim::IsRunning();
     x::features::simple_combat::SetHardPause(x::features::simple_combat::HardPauseHolder::AutoLie,
                                              on);
+}
+
+bool QuizArmed() {
+    return gFollowing.load(std::memory_order_acquire) || gClipActive ||
+           gPublishedPlan.load(std::memory_order_acquire) || gWasNonFiniteOpen;
+}
+
+void ClearTransitHold() {
+    gTransitHold.store(false, std::memory_order_release);
+    gTransitSinceMs = 0;
+    gTransitBackMs = 0;
+}
+
+void ReleaseCursorClipOnly();
+void PublishOverlayWaiting(const char* label);
+
+void HoldQuizThroughTransit(const char* overlay) {
+    gPlayback.store(false, std::memory_order_release);
+    ReleaseCursorClipOnly();
+    gTransitHold.store(true, std::memory_order_release);
+    gUiVisible.store(true, std::memory_order_release);
+    RefreshAutoLieHardPause();
+    if (mouse_region_overlay::IsEnabled()) PublishOverlayWaiting(overlay);
 }
 
 void ReleaseCursorClipOnly() {
@@ -591,6 +623,7 @@ void Abort(const char* reason) {
     gFollowing.store(false);
     gFocusLost.store(false);
     gAnswerDone.store(false, std::memory_order_release);
+    ClearTransitHold();
     ClearPublishedPlan();
     gPulseBadSample.store(0, std::memory_order_relaxed);
     gPulseBadSampleLogged = 0;
@@ -1036,7 +1069,7 @@ void FillMissedSnapshot(char* out, int outSz) {
              "answerDone=%d\r\n"
              "plan published=%u seq=%u mapFailStreak=%d building=%d calib=%d\r\n"
              "pulse sample=%d/%d moves=%u missed=%u fails=%u reasserts=%u badSample=%u\r\n"
-             "pulse sinceMove=%lums\r\n"
+             "pulse sinceMove=%lums transitHold=%d\r\n"
              "lastDump id=%.47s mapped=%d",
              gEnabled.load() ? 1 : 0, gFollowing.load() ? 1 : 0, gUiVisible.load() ? 1 : 0,
              gQuizPaused.load() ? 1 : 0, gFocusLost.load() ? 1 : 0, gPlayback.load() ? 1 : 0,
@@ -1044,7 +1077,8 @@ void FillMissedSnapshot(char* out, int outSz) {
              gBuildingInstance ? 1 : 0, static_cast<int>(gCalibPhase), gPulseLastSample.load(),
              kPosCount, gPulseMoves.load(), gPulseMissed.load(), gPulseFails.load(),
              gPulseReasserts.load(), gPulseBadSample.load(),
-             static_cast<unsigned long>(lastMove ? now - lastMove : 0), gPathDumpId,
+             static_cast<unsigned long>(lastMove ? now - lastMove : 0),
+             gTransitHold.load(std::memory_order_acquire) ? 1 : 0, gPathDumpId,
              gPathDumpMapped ? 1 : 0);
 }
 
@@ -1130,6 +1164,7 @@ void Shutdown() {
 
 bool IsFollowing() { return gFollowing.load(); }
 bool IsUiVisible() { return gUiVisible.load(); }
+bool IsHoldingFieldTransit() { return gTransitHold.load(std::memory_order_acquire); }
 bool IsRegionOverlayEnabled() { return gOverlayPref.load(std::memory_order_acquire); }
 
 void Tick(DWORD now) {
@@ -1177,12 +1212,18 @@ void Tick(DWORD now) {
         return;
     }
 
-    const bool open = anti_macro_port::IsNonFiniteOpen();
+    const bool predOpen = anti_macro_port::IsNonFiniteOpen();
+    // GetPumpPhase 是 world_port 维护的纯读快照，不像 IsPlayReady 会反写相位。
+    const bool inMap =
+        x::runtime::main_thread::GetPumpPhase() == x::runtime::main_thread::PumpPhase::InMap;
+    // 卸图期谓词可能还缓存着「开着」，但实例已随 Field 销毁，不能当开题去读。
+    const bool open = predOpen && inMap;
 
     // 「没开」有两种：真关了，和主泵拥堵导致谓词快照过期后的降级。跟随中途只认前者。
     // 误认后者的代价不是记错账，而是 Abort 把光标弹回答题前的位置、游戏照采，
     // 轨迹里留一段人为瞬移（BIN aa29bc 08-10 22:45）。泵恢复通常在几百毫秒内，按住等它。
-    if (!open && !anti_macro_port::IsPredFresh() &&
+    // InterStage 卸图时谓词也会过期，但 mouseList 已经没了，禁止走这条「脉冲继续」的路。
+    if (!open && inMap && !anti_macro_port::IsPredFresh() &&
         (gFollowing.load() || gClipActive || gPublishedPlan.load(std::memory_order_acquire))) {
         if (!gStaleSinceMs) {
             gStaleSinceMs = now ? now : 1;
@@ -1206,9 +1247,6 @@ void Tick(DWORD now) {
     // 谓词必然 stale——那时人根本不在图里，测谎题压根不会弹。BIN d43e77（08-11 20:10~21:13）
     // 八次盲区共 51 s，全是自动换频道换出来的（stickyCh 17→18→19，playReady=0 inMap=0），
     // 一条真风险都没有；照报只会把「图里泵卡住」这种真该看的淹在噪音里。
-    // GetPumpPhase 是 world_port 维护的纯读快照，不像 IsPlayReady 会反写相位。
-    const bool inMap =
-        x::runtime::main_thread::GetPumpPhase() == x::runtime::main_thread::PumpPhase::InMap;
     if (!anti_macro_port::IsPredFresh() && inMap) {
         if (!gBlindSinceMs) gBlindSinceMs = now ? now : 1;
         const DWORD held = now - gBlindSinceMs;
@@ -1227,6 +1265,44 @@ void Tick(DWORD now) {
         if (held >= kBlindWarnMs)
             Log("pred blind recovered after %lums (session total %lums)",
                 static_cast<unsigned long>(held), static_cast<unsigned long>(gBlindTotalMs));
+    }
+
+    // 同图 InterStage 把 Field 卸掉：Instantiated 变假，或谓词还缓存着「开着」但实例已随 Field 销毁。
+    // 按住计划/硬闸，停脉冲（mouseList 已死），等回图再看面板；超时或回图后仍关才走 ui-closed。
+    // BIN 5a4123 17:16 准备期 frame=143 撞 ~2s 卸图；BIN aa29bc 250ms 后面板能重开。
+    if (QuizArmed() && !inMap) {
+        gTransitBackMs = 0;
+        if (!gTransitSinceMs) {
+            gTransitSinceMs = now ? now : 1;
+            Log("field transit while quiz — hold plan+pause (not ui-closed)");
+        }
+        if (now - gTransitSinceMs < kFieldTransitHoldMs) {
+            HoldQuizThroughTransit("field transit — holding quiz");
+            return;
+        }
+        Log("field transit %lums >= hold — treat as closed",
+            static_cast<unsigned long>(now - gTransitSinceMs));
+        ClearTransitHold();
+    } else if (!open && QuizArmed() &&
+               (gTransitHold.load(std::memory_order_acquire) || gTransitSinceMs)) {
+        if (!gTransitBackMs) {
+            gTransitBackMs = now ? now : 1;
+            Log("field transit back in-map, UI still closed — settle %ums",
+                static_cast<unsigned>(kFieldTransitSettleMs));
+        }
+        if (now - gTransitBackMs < kFieldTransitSettleMs) {
+            HoldQuizThroughTransit("field transit — waiting UI");
+            return;
+        }
+        Log("field transit settle done — UI still closed");
+        ClearTransitHold();
+    } else if (open && (gTransitHold.load(std::memory_order_acquire) || gTransitSinceMs)) {
+        Log("field transit recovered — UI open, remap+continue");
+        ClearTransitHold();
+        gForceRemapOnce = true;
+        gSolvingRemapDone = false;
+        gLastPlanAttempt = 0;
+        gPlayback.store(false, std::memory_order_release);
     }
 
     void* inst = open ? anti_macro_port::GetNonFinite() : nullptr;

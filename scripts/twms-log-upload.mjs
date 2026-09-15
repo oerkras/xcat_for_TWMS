@@ -42,6 +42,7 @@ const kChinaTz = "Asia/Shanghai";
  *   getShuttingDown: () => boolean,
  *   noteError: (err: any) => void,
  *   clientIp: (req: import('node:http').IncomingMessage) => string,
+ *   resolveUidFromReq?: (req: import('node:http').IncomingMessage) => string,
  * }} opts
  */
 export function createLogUpload(opts) {
@@ -71,6 +72,8 @@ export function createLogUpload(opts) {
   const noteError = opts.noteError;
   const clientIp = opts.clientIp;
   const getShuttingDown = opts.getShuttingDown;
+  const resolveUidFromReq =
+    typeof opts.resolveUidFromReq === "function" ? opts.resolveUidFromReq : () => "";
 
   const stats = {
     uploadsOk: 0,
@@ -86,7 +89,7 @@ export function createLogUpload(opts) {
   const rateBuckets = new Map();
   /** @type {Map<string, number>} */
   const inflightByIp = new Map();
-  /** @type {Map<string, { dir: string, ip: string, createdAt: number, files: Array<object> }>} */
+  /** @type {Map<string, { dir: string, ip: string, createdAt: number, files: Array<object>, uid: string }>} */
   const uploadSessions = new Map();
 
   const sessionRoot = () => path.join(outRoot, "_sessions");
@@ -135,6 +138,21 @@ export function createLogUpload(opts) {
       return sanitizeName(`${machine}_${hex.slice(0, 8)}`, "client");
     }
     return sanitizeName(payload?.machine || payload?.clientId || "client", "client");
+  }
+
+  function sanitizeUid(raw) {
+    return String(raw || "")
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim()
+      .slice(0, 64);
+  }
+
+  function uidFromReq(req) {
+    try {
+      return sanitizeUid(resolveUidFromReq(req));
+    } catch {
+      return "";
+    }
   }
 
   function sanitizeUploadNote(raw) {
@@ -290,12 +308,14 @@ export function createLogUpload(opts) {
     }
   }
 
-  async function finalizeSavedUpload({ dir, deviceDir, device, uploadId, ip, payload, saved, protocol }) {
+  async function finalizeSavedUpload({ dir, deviceDir, device, uploadId, ip, payload, saved, protocol, uid }) {
     const lieEvents = await extractLieEventsArchive(dir);
     const now = new Date();
     const note = sanitizeUploadNote(payload.note);
     const uploadModeRaw = String(payload.uploadMode || "").trim().toLowerCase();
     const uploadMode = uploadModeRaw === "full" || uploadModeRaw === "light" ? uploadModeRaw : "";
+    // uid 只来自验签头（opts.resolveUidFromReq），不信 payload 自报。
+    const verifiedUid = sanitizeUid(uid);
     const meta = {
       uploadId,
       receivedAt: ts(now),
@@ -306,6 +326,7 @@ export function createLogUpload(opts) {
       clientId: payload.clientId || "",
       machine: payload.machine || "",
       deviceId: payload.deviceId || "",
+      uid: verifiedUid,
       note,
       uploadMode: uploadMode || undefined,
       device,
@@ -330,6 +351,7 @@ export function createLogUpload(opts) {
     stats.lastUploadAt = ts(now);
     logInfo(
       `saved ${device}/${uploadId} files=${saved.length} protocol=${protocol}` +
+        (verifiedUid ? ` uid=${verifiedUid}` : " uid=-") +
         (uploadMode ? ` mode=${uploadMode}` : "") +
         (note ? ` note=${JSON.stringify(note)}` : ""),
     );
@@ -487,8 +509,9 @@ export function createLogUpload(opts) {
     const sessionId = `${localUploadStamp()}_${crypto.randomBytes(4).toString("hex")}`;
     const dir = path.join(sessionRoot(), sessionId);
     await fs.mkdir(dir, { recursive: true });
-    uploadSessions.set(sessionId, { dir, ip, createdAt: Date.now(), files: [] });
-    logInfo(`upload session create ${ip} id=${sessionId}`);
+    const uid = uidFromReq(req);
+    uploadSessions.set(sessionId, { dir, ip, createdAt: Date.now(), files: [], uid });
+    logInfo(`upload session create ${ip} id=${sessionId}` + (uid ? ` uid=${uid}` : " uid=-"));
     sendJson(res, 200, {
       ok: true,
       sessionId,
@@ -612,6 +635,7 @@ export function createLogUpload(opts) {
       payload,
       saved: session.files,
       protocol: "session-v2",
+      uid: uidFromReq(req) || session.uid || "",
     });
 
     uploadSessions.delete(sessionId);
@@ -723,6 +747,7 @@ export function createLogUpload(opts) {
         payload,
         saved,
         protocol: "legacy-json",
+        uid: uidFromReq(req),
       });
       sendJson(res, 200, {
         ok: true,

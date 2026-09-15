@@ -1,6 +1,6 @@
 // TWMS Classic — data-plane invuln v2.6.8 (land-pin after InterStage 2026-08-09).
 //
-// Hit gate: User+0x270 i-frame (~100ms worker top-up).
+// Hit gate: User+0x2A0 i-frame (~100ms worker top-up). SetDamaged 早退读这个 int。
 // Anti-blink hybrid: MainPump frame tick (before+after SendWill) + worker 8ms backup.
 // Soft +0x20C/+0x210 DISABLED. Optional layout probe: XCAT_INVULN_PROBE=1 (default off).
 // Bind SSOT: WM.MyUser@+0x28 first (same as Drop/Skill/Combat); FindAll fallback.
@@ -14,8 +14,8 @@
 // 1.5s ACCEPT grace; LU drop keeps SecondaryStat（仅 PlayReady 内写）。
 // No hotkey — panel / [core] invuln / XCAT_INVULN=1 only.
 // Docs: docs/features/invuln/模块设计.md
-// Remount 2026-08-06: GA MD5 c7a3842d…; User=b8c9aedb…; UserLocal=d81db6fb…;
-// SS=fda0a837… @WM+0xF0（勿用 +0xB8 嵌套 struct）；字段偏移未漂，类/字段哈希已换。
+// Remount 2026-09-10: User=b8abf3b8… TDI 1578. 旧 hit 哈希 f79c216b 现打在
+// MonoBehaviour*@0x270；SetDamaged 真源是 int@0x2A0。去闪 uint@0x2B0（n&3）。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -62,34 +62,34 @@ using x::runtime::il2cpp::ReadPtr;
 // User / SecondaryStat：dump.cs 2026-08-06 字段哈希 → field_get_offset；失败回退下方 kFb*
 // User=b8c9aedb…（TDI 1560）；SS=fda0a837…（TDI 1329，WM+0xF0）
 constexpr char kSecondaryStatClass[] =
-    "a7598494a709ff6f16f832a97d653fcdb8f1af530dfa60dc738fe12aaf2ff31";
+    "f658bd0071fd35465c674b92739ca92f86b35cc9f91dd6daeaa2593f0c6c14e";
 constexpr char kUserClass[] =
-    "e1835bc9e7ef210b5145fcaf2193e47cfaef8d17a5607749a1252fc857c149d";
+    "b8129050fd86f9f4f79caa5cfb878f706fd3744e8c7f07ba1c392fd337a77d1";
 constexpr char kHashNInv[] =
-    "f5e90ae683a4f9b3026365d03b4f1722ceb30c1bfa9e635e855597802e55c35";
+    "feb00941fbbeac4d966669d4d62e7a9901e247def613fa52ee46f7268863ebc";
 constexpr char kHashRInv[] =
-    "ac0812dafcf43cde7eee4bf5473817533e8e95d46d3cf7b50fb98fd73271dd4";
+    "b72f4751eb79851090f32dfb6e9368826cfdac1c2a2974796cc8742d0899c77";
 constexpr char kHashTInv[] =
-    "e06a88f23e31e522365fa6c711a84414ec4d073ec247bac5ea979d9090e6680";
+    "d5841589ff2b880f899654ca8dcff66980e828ebda527543e1a9ed2c9cb7061";
 constexpr char kHashNDojang[] =
-    "f21ac060f622fdfb1734073442f828a9f222d30a55b42c19b4875c698633070";
+    "c3f576b5dfa094096159258cf1033827d32874014fd1745b8b4781c76f68c63";
 constexpr char kHashRDojang[] =
-    "cba32d6d8a64a5edffaeafe2dc153d7730b8e83d22b4819f5519be838024ded";
+    "e3a24cf3be8579d826339836dd331d0c570bacf84f6e32a7b40f6715e74213c";
 constexpr char kHashTDojang[] =
-    "f3cf57ae1f0a077b53c455e0b7c9cdc52914d72ba96587e640f37dfc740dbad";
+    "ef7eb937f0b4d899868bda2b62ed4b90bcfa910240cdee036d9e28e00e567b3";
 constexpr char kHashHitPeriodRemain[] =
-    "fef28d0808f06933e45ac32e71487360d7f47ce5fe93b60ff783bd4e264096f";
+    "ad8ac625534cb108eb71eb7b8b25aa8701f087574261bd0e19c9f5644c28730";
 constexpr char kHashLayerStateCounter[] =
-    "fbed3008d22fb7706e7859b7d258f10d54dc0a6ef7b70a2b43371d9a368c023";
+    "aa76bedaa04945dca05e3142468782a141b71436f87b78eee2f914a5c981ad9";
 constexpr char kHashLogicalPos[] =
-    "adb40bd150b8a460d80f10c5bc5560f7f52aeb7057a93b6396edc804bc0ee25";
+    "c7e7d437346692c76ab582a510af39b410bca9920f2870d7500a1ee63be5f7a";
 // VisPos 在 User 祖先 edc85ce2…（MonoBehaviour 派生）@+0x64
 constexpr char kHashVisPos[] =
-    "cf776ff0c583bd614c1ea26f338a0f3c6971482b301704c1bbb8d962b9cb1cf";
+    "cdb04ce386f0f95b2ea1efe9454c2974a452cfe4d5b5924ec89759bb59836ad";
 constexpr char kHashSoftTickA[] =
-    "be67129c0172e557c6871d30a731738bdaaba20910a73157e9c2c56d4b19a1d";
+    "f042d85dcb25136be293a8dd55bbae58a615c568c45f23ec2413a91484205ba";
 constexpr char kHashSoftTickB[] =
-    "d787edc1f103093d36836226dbaecd2d940aad39697d4809787b8a04cb2f861";
+    "fda06f5257f3559a6974eae9b8e7adda00a9a94b67ecc7b47b8ce168c50bd8b";
 
 constexpr size_t kFbWmSecondaryStat = 0xF0;
 
@@ -99,10 +99,10 @@ constexpr size_t kFbTInv = 0xF4;
 constexpr size_t kFbNDojang = 0x2C4;
 constexpr size_t kFbRDojang = 0x2C8;
 constexpr size_t kFbTDojang = 0x2CC;
-constexpr size_t kFbHitPeriodRemain = 0x270;
-constexpr size_t kFbLayerStateCounter = 0x280;
+constexpr size_t kFbHitPeriodRemain = 0x2A0;
+constexpr size_t kFbLayerStateCounter = 0x2B0;
 constexpr size_t kFbVisPos = 0x64;
-constexpr size_t kFbLogicalPos = 0x2B0;
+constexpr size_t kFbLogicalPos = 0x2E8;
 constexpr size_t kFbSoftTickA = 0x20C;
 constexpr size_t kFbSoftTickB = 0x210;
 
@@ -256,7 +256,13 @@ DWORD gLuBoundTick = 0;  // GetTickCount at MyUser ACCEPT (grace for spawn pos)
 std::vector<void*> gSecondaryStats;  // all WM SS pointers
 
 std::atomic<bool> gDesired{false};
+std::atomic<bool> gWalkGlideVeto{false};  // F5 ≤1.00X：挡写，不改 desired
 std::atomic<bool> gWorkerStop{false};
+
+bool EffectiveOn() {
+    return gDesired.load(std::memory_order_acquire) &&
+           !gWalkGlideVeto.load(std::memory_order_acquire);
+}
 std::atomic<HANDLE> gWorkerThread{nullptr};
 std::atomic<bool> gFrameBlink{false};
 HANDLE gLog = INVALID_HANDLE_VALUE;
@@ -596,7 +602,7 @@ bool AcceptLocalUser(void* lu, const char* how) {
         ReadI32(gLocalUser, kOffHitPeriodRemain), (unsigned)kBindGraceMs);
     x::runtime::managed_main::SetLoginFreeze(false);
     // 冷启/重绑：ACCEPT 当拍急钉，勿等下一轮 gate（BIN 00:28：ACCEPT hit298=330 → 2s 后才 refresh）。
-    if (gDesired.load() && x::features::ports::world::IsPlayReady()) {
+    if (EffectiveOn() && x::features::ports::world::IsPlayReady()) {
         ApplyInvuln(true);
         Log("land pin hit298=%d (ACCEPT %s)", ReadI32(gLocalUser, kOffHitPeriodRemain),
             how ? how : "?");
@@ -756,7 +762,7 @@ void ApplyAntiBlink() {
 
 // MainPump sticky tick (after SendWill/Update). Data-plane only.
 void AntiBlinkFrameTick(void*) {
-    if (!gDesired.load(std::memory_order_relaxed)) return;
+    if (!EffectiveOn()) return;
     if (!x::features::ports::world::IsPlayReady()) return;
     if (InMapIdQuiet(GetTickCount())) return;
     ApplyAntiBlink();
@@ -786,7 +792,7 @@ bool ProbeEnabled() {
     return XCAT_ENV_ON(kEnvInvulnProbe);
 }
 
-// Read-only: interpret +0x20C/+0x210 as both int tick and float; compare CurPos@+0x2B0.
+// Read-only: interpret +0x20C/+0x210 as both int tick and float; compare CurPos@+0x2E8.
 void ProbeSoftSlots(const char* tag) {
     if (!gLocalUser || !LocalUserStillAlive()) return;
     static float sLastCx = 0.f, sLastCy = 0.f;
@@ -838,10 +844,10 @@ void ApplyInvuln(bool on) {
 }
 
 void LogReadback(const char* tag) {
-    Log("%s lu=%p gate=hit hit298=%d layer2A8=%u ssN=%zu desired=%d alive=%d", tag, gLocalUser,
-        gLocalUser ? ReadI32(gLocalUser, kOffHitPeriodRemain) : -1,
+    Log("%s lu=%p gate=hit hit298=%d layer2A8=%u ssN=%zu desired=%d veto=%d alive=%d", tag,
+        gLocalUser, gLocalUser ? ReadI32(gLocalUser, kOffHitPeriodRemain) : -1,
         gLocalUser ? ReadU32(gLocalUser, kOffLayerStateCounter) : 0u, gSecondaryStats.size(),
-        gDesired.load() ? 1 : 0, LocalUserStillAlive() ? 1 : 0);
+        gDesired.load() ? 1 : 0, gWalkGlideVeto.load() ? 1 : 0, LocalUserStillAlive() ? 1 : 0);
     for (size_t i = 0; i < gSecondaryStats.size() && i < 4; ++i) {
         void* ss = gSecondaryStats[i];
         Log("  ss[%zu]=%p n/r/t=%d/%d/%d dojang_n=%d", i, ss, ReadI32(ss, kOffNInv),
@@ -877,7 +883,7 @@ void EnsureBindings() {
 DWORD WINAPI InvulnThread(LPVOID) {
     Beep(740, 80);
     WarnIfSoftEnvRequested();
-    Log("Invuln worker v2.6.8 start (hit=+0x270; anti-blink=frame+backup8ms; "
+    Log("Invuln worker v2.6.8 start (hit=+0x2A0; anti-blink=frame+backup8ms; "
         "bind=wm.MyUser+FindAll; rebind=%ums/%ums grace=%ums; "
         "FindAll=PlayReady+TransitBlock; write=PlayReady-only; "
         "map_quiet=pre-InterStage-only; probe228 %s)",
@@ -906,7 +912,7 @@ DWORD WINAPI InvulnThread(LPVOID) {
     // 冷启：勿再 Sleep(1500) — 落地空窗会挨打（BIN 00:28 ACCEPT 前空等）。
     // desired 可能稍后才从 PayloadControl 来；先绑，desired 到了 SetDesired/ACCEPT 急钉。
     EnsureBindings();
-    if (gDesired.load() && x::features::ports::world::IsPlayReady() && gLocalUser) {
+    if (EffectiveOn() && x::features::ports::world::IsPlayReady() && gLocalUser) {
         ApplyInvuln(true);
         Log("boot pin hit298=%d", ReadI32(gLocalUser, kOffHitPeriodRemain));
     }
@@ -924,7 +930,8 @@ DWORD WINAPI InvulnThread(LPVOID) {
 
     while (!gWorkerStop.load()) {
         const DWORD now = GetTickCount();
-        const bool on = gDesired.load();
+        const bool desired = gDesired.load(std::memory_order_acquire);
+        const bool on = EffectiveOn();
         const bool play = x::features::ports::world::IsPlayReady();
 
         if (now - lastPoll >= 200) {
@@ -933,7 +940,9 @@ DWORD WINAPI InvulnThread(LPVOID) {
         }
 
         // 卸图/InterStage：卸帧钉、丢旧 LU/SS 缓存，本拍不写不重绑。
-        if (on && !play) {
+        // 生命周期跟 desired，不跟 EffectiveOn：1.00X 否决时仍要丢死指针，
+        // 否则恢复倍率后会朝过期 LU 写 hit。
+        if (desired && !play) {
             if (gFrameBlink.load(std::memory_order_acquire)) {
                 DisarmFrameBlink();
                 if (!lastTransitLog || now - lastTransitLog > 2000) {
@@ -953,8 +962,9 @@ DWORD WINAPI InvulnThread(LPVOID) {
             // 回场急钉靠下面「resume 先于 quiet continue」恢复，勿在 !PlayReady 闪断时提前放开写闸。
             if (now - lastHb >= 5000) {
                 lastHb = now;
-                Log("heartbeat n=%lu desired=%d transit=1 blink=off lu=%p alive=0", gTickCount,
-                    on ? 1 : 0, gLocalUser);
+                Log("heartbeat n=%lu desired=%d veto=%d transit=1 blink=off lu=%p alive=0",
+                    gTickCount, gDesired.load() ? 1 : 0, gWalkGlideVeto.load() ? 1 : 0,
+                    gLocalUser);
             }
             Sleep(kWorkerSleepOnMs);
             continue;
@@ -1035,7 +1045,8 @@ DWORD WINAPI InvulnThread(LPVOID) {
         }
         // MapId 闪变仍 PlayReady：立刻停写（手动/Travel 进门脏窗，BIN 02:48）。
         // 语义不变：只挡进门脏窗；真正回场由上面的 resume 清 quiet 并急钉。
-        if (on && play) {
+        // quiet 跟踪跟 desired：1.00X 否决时也要建 dirty 窗，恢复倍率才不会进门写 hit。
+        if (desired && play) {
             const int mid = x::features::ports::world::GetMapId();
             if (mid > 0) {
                 if (gQuietTrackMapId > 0 && mid != gQuietTrackMapId) {
@@ -1181,14 +1192,15 @@ DWORD WINAPI InvulnThread(LPVOID) {
 
         if (now - lastHb >= 5000) {
             lastHb = now;
-            Log("heartbeat n=%lu desired=%d gate=hit blink=%s+8ms lu=%p hit298=%d alive=%d", gTickCount,
-                on ? 1 : 0, gFrameBlink.load() ? "frame" : "worker", gLocalUser,
+            Log("heartbeat n=%lu desired=%d veto=%d gate=hit blink=%s+8ms lu=%p hit298=%d alive=%d",
+                gTickCount, gDesired.load() ? 1 : 0, gWalkGlideVeto.load() ? 1 : 0,
+                gFrameBlink.load() ? "frame" : "worker", gLocalUser,
                 gLocalUser ? ReadI32(gLocalUser, kOffHitPeriodRemain) : -1,
                 LocalUserStillAlive() ? 1 : 0);
         }
         Sleep(on ? kWorkerSleepOnMs : kWorkerSleepOffMs);
     }
-    if (gLocalUser && !gDesired.load()) ApplyInvuln(false);
+    if (gLocalUser && !EffectiveOn()) ApplyInvuln(false);
     DisarmFrameBlink();
     Log("Invuln worker stop");
     return 0;
@@ -1226,14 +1238,26 @@ void StopWorker() {
 void SetDesired(bool on) {
     const bool prev = gDesired.exchange(on);
     if (prev == on) return;
-    Log("SetDesired %d", on ? 1 : 0);
+    Log("SetDesired %d%s", on ? 1 : 0, gWalkGlideVeto.load() ? " walk_glide_veto" : "");
     // InterStage：只记 desired；回 Field 由 worker transit resume 再绑再写。
-    if (on && x::features::ports::world::IsPlayReady()) EnsureBindings();
-    ApplyInvuln(on);
+    if (EffectiveOn() && x::features::ports::world::IsPlayReady()) EnsureBindings();
+    ApplyInvuln(EffectiveOn());
+}
+
+void SetWalkGlideVeto(bool on) {
+    const bool prev = gWalkGlideVeto.exchange(on, std::memory_order_acq_rel);
+    if (prev == on) return;
+    Log("walk_glide_veto %d (F5<=1.00X desired=%d)", on ? 1 : 0, gDesired.load() ? 1 : 0);
+    ApplyInvuln(EffectiveOn());
 }
 
 bool IsDesired() { return gDesired.load(); }
-bool IsEnabled() { return gDesired.load() && LocalUserStillAlive(); }
+bool IsEnabled() { return EffectiveOn() && LocalUserStillAlive(); }
+bool IsWalkGlideVeto() { return gWalkGlideVeto.load(std::memory_order_acquire); }
+bool HeliOverrideInvulnGate() {
+    return gDesired.load(std::memory_order_acquire) &&
+           gWalkGlideVeto.load(std::memory_order_acquire);
+}
 
 }  // namespace invuln
 }  // namespace features

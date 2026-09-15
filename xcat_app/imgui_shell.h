@@ -183,7 +183,9 @@ inline void DrawLauncherTopBar(AppWindow& app, const RuntimeLeds& leds,
     const float iconBtnW = AppDpi_Px(26.f);
     const float btnGap = AppDpi_Px(2.f);
     const float pad = Gap();
-    const float brandW = AppDpi_Px(48.f);
+    const char* brandLine = xcat::install::kLauncherStem;
+    const ImVec2 brandSz = ImGui::CalcTextSize(brandLine);
+    const float brandW = (std::max)(AppDpi_Px(48.f), brandSz.x + pad * 2.f);
     const float themeBtnW = TopBarThemeToggleWidth(titleH);
     const float leftChromeW = brandW + themeBtnW + btnGap;
     constexpr const char* kEventsLabel = "历史事件";
@@ -220,7 +222,7 @@ inline void DrawLauncherTopBar(AppWindow& app, const RuntimeLeds& leds,
                     ImVec2(origin.x + fullW, origin.y + titleH),
                     ImGui::ColorConvertFloat4ToU32(p.titleBarLineBottom));
         dl->AddText(ImVec2(origin.x + pad, origin.y + AppDpi_Px(6.f)),
-                    ImGui::ColorConvertFloat4ToU32(p.brandText), xcat::install::kLauncherStem);
+                    ImGui::ColorConvertFloat4ToU32(p.brandText), brandLine);
     }
 
     ImGui::SetCursorScreenPos(origin);

@@ -660,8 +660,10 @@ void TickImpl(DWORD now) {
 
     const bool textOpen = anti_macro_port::IsTextCaptchaOpen();
     // 轨迹题以 follower 为准：IsInstantiated 但还没轨迹的空壳不算开题（BIN 7bb1b7）。
-    const bool mouseOpen =
-        anti_macro_follower::IsUiVisible() || anti_macro_follower::IsFollowing();
+    // 同图卸 Field 按住期间 UI 谓词是假的，仍算在答题，禁止松硬闸。
+    const bool mouseOpen = anti_macro_follower::IsUiVisible() ||
+                           anti_macro_follower::IsFollowing() ||
+                           anti_macro_follower::IsHoldingFieldTransit();
     const bool anyOpen = textOpen || mouseOpen;
 
     // 知识题记账（轨迹题在 follower 里埋）；关窗时若没提交过答案，闩会补记 missed。
@@ -908,13 +910,13 @@ void Tick(DWORD now) { TickImpl(now); }
 
 bool IsBusy() {
     return gBusy.load() || anti_macro_follower::IsFollowing() ||
-           anti_macro_follower::IsUiVisible() || mouse_trajectory_sim::IsRunning() ||
-           anti_macro_port::IsPredStale();
+           anti_macro_follower::IsUiVisible() || anti_macro_follower::IsHoldingFieldTransit() ||
+           mouse_trajectory_sim::IsRunning() || anti_macro_port::IsPredStale();
 }
 
 bool IsQuizActive() {
     return gBusy.load() || anti_macro_follower::IsFollowing() ||
-           anti_macro_follower::IsUiVisible();
+           anti_macro_follower::IsUiVisible() || anti_macro_follower::IsHoldingFieldTransit();
 }
 
 }  // namespace x::features::auto_lie

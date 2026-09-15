@@ -11,7 +11,6 @@
 #include "../ports/foothold_path.h"
 #include "../ports/teleport_port.h"
 #include "../ports/world_port.h"
-#include "../invuln/invuln.h"
 #include "../simple_combat/heli_rotor.h"
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../kick_sniff/kick_sniff.h"
@@ -136,25 +135,6 @@ DWORD gLastSnapMs = 0;
 std::mutex gCmdMu;
 std::string gPendingCmd;
 
-// 赶路期间顶住无敌，防进出门被怪打飞导致 CheckMove 脱门。
-bool gTravelHeldInvuln = false;
-bool gInvulnPrevDesired = false;
-
-void HoldInvulnForTravel() {
-    if (gTravelHeldInvuln) return;
-    gInvulnPrevDesired = invuln::IsDesired();
-    if (!gInvulnPrevDesired) invuln::SetDesired(true);
-    gTravelHeldInvuln = true;
-    x::runtime::LogI("Travel", "invuln hold for goto (prev=%d)", gInvulnPrevDesired ? 1 : 0);
-}
-
-void ReleaseInvulnForTravel() {
-    if (!gTravelHeldInvuln) return;
-    if (!gInvulnPrevDesired) invuln::SetDesired(false);
-    gTravelHeldInvuln = false;
-    x::runtime::LogI("Travel", "invuln release (restored=%d)", gInvulnPrevDesired ? 1 : 0);
-}
-
 // Idle/停路兜底：卸 Travel 禁挂台 + 停旋翼（贴门成功路径会 LeaveArmed，换图/Idle 在此收尾）。
 // 只清 BanSource::Travel，不碰 F5 CombatImpact / F6 Fly。
 void ReleaseTravelFhBan() {
@@ -205,6 +185,20 @@ void TickSettleHover(DWORD now, const char* phase) {
     namespace heli = x::features::simple_combat::heli;
     ports::teleport::FlightState st{};
     if (!ports::teleport::QueryFlightState(st) || !st.ok) return;
+
+    if (x::features::simple_combat::IsHumanGroundMove()) {
+        if (st.onFh) {
+            ClearSettleHoverState();
+            return;
+        }
+        static DWORD sWalk = 0;
+        if (!sWalk || now - sWalk >= 800) {
+            sWalk = now;
+            x::runtime::LogI("Travel", "settle wait onFh (human walk) phase=%s ap=(%.0f,%.0f)",
+                             phase ? phase : "?", st.x, st.y);
+        }
+        return;
+    }
 
     if (st.onFh) {
         if (heli::CurrentOwner() == heli::Owner::Travel ||
@@ -474,9 +468,22 @@ void NotifyTravelOutcome(FailKind kind, const std::string& src, const std::strin
     case FailKind::FireStuck:
         key = "travel.fire_stuck";
         nk = NotificationKind::Danger;
-        snprintf(body, sizeof(body), "贴门失败已停止：%s @ %s → %s",
-                 (raw && raw[0]) ? raw : "?", src.empty() ? "?" : src.c_str(),
-                 dst.empty() ? "?" : dst.c_str());
+        if (x::features::simple_combat::IsHumanGroundMove()) {
+            // 拟人档只走路，不退回旋翼（用户拍板：拟人不用变态功能）。走不到就停下来说清楚。
+            snprintf(body, sizeof(body), "拟人走路到不了门，已停止（拟人档不启用飞行）：%s @ %s → %s",
+                     (raw && raw[0]) ? raw : "?", src.empty() ? "?" : src.c_str(),
+                     dst.empty() ? "?" : dst.c_str());
+        } else {
+            snprintf(body, sizeof(body), "贴门失败已停止：%s @ %s → %s",
+                     (raw && raw[0]) ? raw : "?", src.empty() ? "?" : src.c_str(),
+                     dst.empty() ? "?" : dst.c_str());
+        }
+        break;
+    case FailKind::PlayerDead:
+        key = "travel.player_dead";
+        nk = NotificationKind::Danger;
+        snprintf(body, sizeof(body), "角色已死亡，赶路已停止：%s → %s（请手动复活后再出发）",
+                 src.empty() ? "?" : src.c_str(), dst.empty() ? "?" : dst.c_str());
         break;
     case FailKind::CombatOn: {
         key = "travel.combat_on";
@@ -545,7 +552,6 @@ void SetIdle(const char* msg, FailKind fail = FailKind::None) {
     ClearFakeFire();
     ClearTransientFire();
     ClearLateWait();
-    ReleaseInvulnForTravel();
     ReleaseTravelFhBan();
     ClearSettleHoverState();
     gFailKind = fail;
@@ -692,11 +698,11 @@ bool StartGotoResolved(const std::string& src, const std::string& dst, const std
     gArriveReadyAt = 0;
     gLastMsg = "goto " + dst + " hops=" + std::to_string(gHops.size());
     gLastSnapMs = GetTickCount();
-    x::runtime::LogI("Travel", "goto %s -> %s hops=%d fire=%s firstSettle=%ums", src.c_str(),
+    x::runtime::LogI("Travel", "goto %s -> %s hops=%d fire=%s walk=%d firstSettle=%ums", src.c_str(),
                      dst.c_str(), (int)gHops.size(),
                      ports::travel::FireModeName(ports::travel::GetFireMode()),
+                     x::features::simple_combat::IsHumanGroundMove() ? 1 : 0,
                      (unsigned)kFirstHopSettleMs);
-    HoldInvulnForTravel();
     return true;
 }
 
@@ -824,12 +830,10 @@ void MarkLogicalPortalDead(const std::string& fromMap, const std::string& seedId
 
 bool IsTransientFireFail(const std::string& res) {
     // FH0 → 假火软确认；MAP_TRANSITION 现由 FirePortal 返回 true，不再当失败重试
-    // INVULN_OFF：换图 quiet 会 drop LU，IsEnabled=0 一两秒是常态，禁止整趟 FireStuck。
     return res == "TELEPORT_FAIL" || res == "TELEPORT_UNBOUND" || res == "MAIN_TIMEOUT" ||
            res == "NO_CHECKMOVE" || res == "NO_LOCALUSER" || res == "KEY_FAIL" ||
            res == "EXCEPTION" || res == "NOT_PLAY_READY" || res == "TELEPORT_COOLDOWN" ||
-           res == "NOT_STOOD" || res == "OUT_OF_RECT" || res == "IMPACT_STICK_FAIL" ||
-           res == "INVULN_OFF";
+           res == "NOT_STOOD" || res == "OUT_OF_RECT" || res == "IMPACT_STICK_FAIL";
 }
 
 // 可累计 FireStuck 熔断的硬贴门失败（冷却/未就绪只重试，不熔断，防误停）。
@@ -1417,8 +1421,8 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
         SetIdle("arrived");
         x::runtime::LogI("Travel", "arrived %s onFh=%d", cur.c_str(), arriveOnFh ? 1 : 0);
         if (!arriveOnFh) {
-            // Travel 已 Idle：交棒 Combat 软着陆（同测谎落台）。
-            simple_combat::RequestSafeLand("travel_arrive_airborne");
+            if (!x::features::simple_combat::IsHumanGroundMove())
+                simple_combat::RequestSafeLand("travel_arrive_airborne");
         }
         SaveGraph();
         return;
@@ -1498,6 +1502,15 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
 
     if (!firedOk) {
         gLastMsg = fireResult;
+        // 角色死亡：不是门的问题，别当瞬态失败反复重开 WalkStick。停下等复活。
+        if (fireResult == "PLAYER_DEAD") {
+            ClearTransientFire();
+            x::runtime::LogW("Travel", "player_dead stop map=%s portal=%s", cur.c_str(),
+                             liveName.c_str());
+            SetIdle("player_dead", FailKind::PlayerDead);
+            NotifyTravelOutcome(FailKind::PlayerDead, cur, gTarget);
+            return;
+        }
         if (IsTransientFireFail(fireResult)) {
             (void)NoteTransientFireFail(now, cur, liveName, fireResult);
             return;
@@ -1513,6 +1526,7 @@ void TickGoto(DWORD now, std::unique_lock<std::mutex>& lock) {
             if (NoteNoMapChangeTimeout(now)) return;
             return;
         }
+        if (fireResult == "STOPPED") return;
         if (now - gHopStartedMs > 2000) {
             gHopStartedMs = now;
             x::runtime::LogW("Travel", "fire fail %s: %s", liveName.c_str(), fireResult.c_str());
@@ -1650,6 +1664,10 @@ bool IsActive() {
         queued = gPendingCmd;
     }
     if (queued.rfind("goto", 0) == 0) return true;
+    // 排队中的 stop 也立刻算「不在途」：拟人贴门是 worker 里一段 90s 的阻塞循环，每 16ms 拿 IsActive
+    // 当中止旗；不看排队命令就得等这段走完、门开完才轮到 HandleCmd（BIN 2026-09-09 13:59:44 点停 →
+    // 14:00:11 才停，用户按了 9 次）。
+    if (queued.rfind("stop", 0) == 0) return false;
     std::lock_guard<std::mutex> lock(gMu);
     return gMode != Mode::Idle || !gPendingGoto.empty();
 }

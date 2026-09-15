@@ -5,9 +5,11 @@
 #include "simple_combat.h"
 
 #include "heli_rotor.h"
+#include "human_nav.h"
 #include "reach_cal.h"
 
 #include "../auto_supply/auto_supply.h"
+#include "../autopot/autopot.h"
 #include "../attack_accel/attack_accel.h"
 #include "../fly/fly.h"
 #include "../kick_sniff/kick_sniff.h"
@@ -16,8 +18,10 @@
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../ports/attack_input_port.h"
 #include "../ports/attack_rpc_port.h"
+#include "../ports/drop_pool_port.h"
 #include "../ports/foothold_path.h"
 #include "../ports/foothold_port.h"
+#include "../ports/nav_memory.h"
 #include "../ports/ground_spoof.h"
 #include "../ports/hit_pin_port.h"
 #include "../ports/hit_geom_port.h"
@@ -35,6 +39,8 @@
 #include "../travel/travel.h"
 #include "../invuln/invuln.h"
 #include "../encounter/encounter.h"
+#include "../notify/notify.h"
+#include "../../ui/player_vitals.h"
 #include "../../ipc/payload_control.h"
 #include "../../runtime/bin_dir.h"
 #include "../../runtime/dbg_log_file.h"
@@ -42,6 +48,7 @@
 #include "../../runtime/main_thread_pump.h"
 #include "../../runtime/mono_clock.h"
 #include "../../../common/xcat_payload_control.h"
+#include "../../../common/xor_cstr.h"
 
 #include <Windows.h>
 
@@ -245,6 +252,7 @@ enum class State : uint8_t {
     Aim,
     Firing,
     Recover,
+    Dead,  // 角色死亡（hp≤0）：停刀停走等复活；复活 → Acquire
 };
 
 const char* StateName(State s) {
@@ -263,10 +271,97 @@ const char* StateName(State s) {
             return "Firing";
         case State::Recover:
             return "Recover";
+        case State::Dead:
+            return "Dead";
         default:
             return "?";
     }
 }
+
+void LogLine(const char* fmt, ...);
+
+// ───────── KPI 成绩单 ─────────
+// 每 10 分钟一行（F5 关时补一行）：击杀 / 小时、出刀、换锁、各态时间占比、导航失手计数。
+// 没有这行就判断不了一次改动是进步还是退步——日志里的 human_blocked / no_path / fell_back 散在
+// 几万行里，肉眼数不过来。
+namespace kpi {
+constexpr DWORD kWindowMs = 10u * 60u * 1000u;
+constexpr DWORD kMinReportMs = 60u * 1000u;  // F5 开不到 1 分钟就关，不出成绩单（没意义）
+struct Acc {
+    DWORD windowStartMs = 0;
+    DWORD lastTickMs = 0;
+    DWORD stateMs[8]{};
+    uint32_t kills = 0;
+    uint32_t fires = 0;
+    uint32_t acquires = 0;
+    uint32_t altPicks = 0;
+    uint32_t killTimeouts = 0;
+    uint32_t navFails = 0;  // MoveTo 里 nav 返回 Unreachable/Timeout
+    bool humanOn = false;
+    human_nav::Stats navBase{};
+    bool navBaseOk = false;
+};
+Acc gAcc;
+
+void Reset(DWORD now) {
+    gAcc = Acc{};
+    gAcc.windowStartMs = now;
+    gAcc.lastTickMs = now;
+    gAcc.navBase = human_nav::GetStats();
+    gAcc.navBaseOk = true;
+}
+
+void Report(DWORD now, const char* why) {
+    if (!gAcc.windowStartMs) return;
+    const DWORD win = now - gAcc.windowStartMs;
+    if (win < kMinReportMs) return;
+    DWORD total = 0;
+    for (DWORD ms : gAcc.stateMs) total += ms;
+    if (total == 0) total = 1;
+    auto pct = [&](State s) {
+        return static_cast<int>(gAcc.stateMs[static_cast<int>(s)] * 100u / total);
+    };
+    const human_nav::Stats nv = human_nav::GetStats();
+    const human_nav::Stats& b = gAcc.navBase;
+    const float hours = static_cast<float>(win) / 3600000.f;
+    const float killsPerHour = hours > 0.f ? static_cast<float>(gAcc.kills) / hours : 0.f;
+    LogLine("kpi why=%s win=%us human=%d kills=%u (%.0f/h) fires=%u acquires=%u alt=%u kill_timeout=%u "
+            "nav_fail=%u | state%% acquire=%d move=%d aim=%d fire=%d settle=%d recover=%d dead=%d idle=%d | "
+            "nav hops=%u/%u blocked=%u relatch=%u reverse=%u no_path=%u timeout=%u grab_fail=%u "
+            "across_fell=%u across_fail=%u loop=%u input_fail=%u knock=%u dead_edges=%u",
+            why ? why : "?", (unsigned)(win / 1000u), gAcc.humanOn ? 1 : 0, gAcc.kills, killsPerHour, gAcc.fires, gAcc.acquires, gAcc.altPicks, gAcc.killTimeouts, gAcc.navFails,
+            pct(State::Acquire), pct(State::MoveTo), pct(State::Aim), pct(State::Firing), pct(State::Settling),
+            pct(State::Recover), pct(State::Dead), pct(State::Idle), nv.hopsDone - b.hopsDone,
+            nv.actionsStarted - b.actionsStarted, nv.blocked - b.blocked, nv.relatch - b.relatch,
+            nv.reverse - b.reverse, nv.noPath - b.noPath, nv.actionTimeout - b.actionTimeout,
+            nv.grabFail - b.grabFail, nv.acrossFellBack - b.acrossFellBack, nv.acrossFail - b.acrossFail,
+            nv.loopBreak - b.loopBreak, nv.inputFails - b.inputFails, nv.knockbacks - b.knockbacks, nv.deadEdges);
+}
+
+void Tick(DWORD now, State st, bool humanOn) {
+    if (!gAcc.windowStartMs) {
+        Reset(now);
+        gAcc.humanOn = humanOn;
+        return;
+    }
+    gAcc.humanOn = humanOn;
+    const DWORD dt = now - gAcc.lastTickMs;
+    gAcc.lastTickMs = now;
+    if (dt < 5000) {  // 断档（暂停 / 换图）不算进任何态
+        const int idx = static_cast<int>(st);
+        if (idx >= 0 && idx < 8) gAcc.stateMs[idx] += dt;
+    }
+    if (now - gAcc.windowStartMs >= kWindowMs) {
+        Report(now, "10min");
+        Reset(now);
+    }
+}
+
+void Flush(DWORD now, const char* why) {
+    Report(now, why);
+    gAcc = Acc{};
+}
+}  // namespace kpi
 
 std::atomic<bool> gEnabled{false};
 std::atomic<DWORD> gTickIntervalMs{xcat::kSimpleCombatTickDefaultMs};
@@ -397,20 +492,22 @@ std::atomic<uint32_t> gTeleportMinDx{xcat::kCombatTeleportMinDxDefault};
 std::atomic<uint32_t> gTeleportMaxHop{xcat::kCombatTeleportMaxHopDefault};
 // 拟人走路追怪超时：卡台边 / 够不着则 softBan 换怪。
 constexpr DWORD kHumanWalkTimeoutMs = 8000;
+constexpr DWORD kHumanWalkTimeoutCapMs = 26000;
+constexpr DWORD kHumanTripHardCapMs = 60000;  // 整趟拟人赶到怪的硬上限（逐跳秒表另计）
+DWORD gHumanHopEpoch = 0;      // 逐跳秒表所属的 MoveTo（= gStateEnterMs）
+uint64_t gHumanHopSig = 0;     // from/to/hops 签名，变了 = 这一跳完成 / 重规划
+DWORD gHumanHopMs = 0;         // 当前这一跳开始时刻
+// 整图寻堆：|dx| 超过此值后按像素加时，避免 8s 掐掉跨图走路。
+constexpr float kHumanWalkTimeoutDx0 = 400.f;
+constexpr float kHumanWalkTimeoutMsPerPx = 8.f;
 // 拟人单层 MVP（upload 847b21）：timeout 禁 200ms → 两只错台怪 8s 乒乓空走。
 // 不可达禁锁对齐跨层量级，让同台怪有机会被选中。
 constexpr DWORD kHumanUnreachableSoftBanMs = 5000;
-// 走路无进展早退：进度钟武装后，「自己几乎没朝目标挪」且「距离也没缩短」→ 卡边。
-// 自己走了但 dx 变大 = 怪跑路，不 stall（勿误禁 5s）。
-constexpr DWORD kHumanWalkStallMs = 2500;
-constexpr float kHumanWalkMinProgressPx = 40.f;
-// BIN 00:43：失焦开步 travel=0 空等满 stall → 进度钟未武装前仅给这么久，超时 human_no_move。
-constexpr DWORD kHumanWalkArmGiveUpMs = 1200;
-constexpr float kHumanWalkArmTravelPx = 2.f;  // 自身位移达此才武装进度钟
-// no_move 多为失焦/慢启动，勿用满额 5s 把旁怪一起晾干。
-constexpr DWORD kHumanNoMoveSoftBanMs = 1500;
+// 走路「没进展」的判定已下沉到 human_nav（Progress：顶住 → 跳 / 退步 / 重规划 → Unreachable）。
+// 旧的 no_move / stall 启发式按 |dx| 与自身位移算，怪跨台 / 怪走远时会误杀
+// （BIN 12:28 dx=284→312 no_move ×7 / 怪换 FH 重置锚点 → 1.2s 即 no_move）。
 // BIN 01:01：kHumanWalkMaxChaseDx=400 把同台 ok=4/5 全标 humanFar → 远处有怪空转。
-// 远距卡死改由 stall / no_move / walk timeout 管；选怪只靠同高 + Walk 连通 + 近者优先。
+// 拟人整图寻堆：可达密堆优先，再用路径代价；远距卡死仍由 stall / timeout 管。
 // BIN 01:07：MoveTo 用选怪同高 45，走路 |dy| 微漂到 46~48 就 forbid+5s ban → 左右远怪乒乓洗黑名单。
 // 已锁追击放宽到同高地板容差；真断崖才 5s，Y 越界只短晾。
 constexpr float kHumanWalkChaseY = kSameFloorMaxDy;  // 100
@@ -421,6 +518,14 @@ constexpr DWORD kHumanPassbyCooldownMs = 500;
 
 float MaxApproachHopPx() {
     return static_cast<float>(gTeleportMaxHop.load(std::memory_order_acquire));
+}
+
+DWORD HumanWalkTimeoutForDx(float absDx) {
+    if (!(absDx > kHumanWalkTimeoutDx0)) return kHumanWalkTimeoutMs;
+    const float extra = (absDx - kHumanWalkTimeoutDx0) * kHumanWalkTimeoutMsPerPx;
+    DWORD ms = kHumanWalkTimeoutMs + static_cast<DWORD>(extra);
+    if (ms > kHumanWalkTimeoutCapMs) ms = kHumanWalkTimeoutCapMs;
+    return ms;
 }
 std::atomic<int64_t> gOneshotMaxHp{kOneshotMaxHpDefault};
 std::atomic<int> gOneshotMinBumps{kOneshotMinBumpsDefault};
@@ -502,6 +607,14 @@ std::atomic<DWORD> gLootPulseUntil{0};
 std::atomic<uint32_t> gLootPulseGen{0};
 std::atomic<bool> gHvLootUrgent{false};
 std::atomic<bool> gHvLootPauseHeld{false};
+// 拟人 HUD（payload 顶栏每 500ms 读）：1=小休 2=捡高价值 3=挂绳回血
+std::atomic<uint32_t> gHumanHudHint{0};
+std::atomic<uint32_t> gHumanHudRemainMs{0};
+
+void PublishHumanHud(uint32_t hint, uint32_t remainMs) {
+    gHumanHudHint.store(hint, std::memory_order_release);
+    gHumanHudRemainMs.store(remainMs, std::memory_order_release);
+}
 DWORD gSettleUntil = 0;
 float gSettleX = 0.f;
 float gSettleY = 0.f;
@@ -552,6 +665,7 @@ struct LockState {
     ports::mob::AbsHpSrc absSrc = ports::mob::AbsHpSrc::None;
     int32_t lockStartHp = -1;
     int32_t prevHittedSample = -1;
+    float humanBandFrac = 1.f;  // 拟人：本锁的进带距离系数（AssignLockFromMob 随机 0.72~1.0）
     int hitBumpCount = 0;
     DWORD firstBumpMs = 0;
     int lockFires = 0;
@@ -591,11 +705,7 @@ DWORD gEngineBusySince = 0;   // 被引擎忙锁连续拦住的起点；0=上一
 unsigned gEngineBusyTicks = 0;  // 累计被拦拍数（节流播报用，勿逐拍打日志）
 DWORD gStickySpinSince = 0;  // hop_sticky Aim↔MoveTo 空转计时
 DWORD gLastHumanPassbyMs = 0;
-float gHumanWalkStartAbsDx = -1.f;  // 进度钟武装时的 |dx|；<0=未采样
-float gHumanWalkStartPx = 0.f;
-int gHumanWalkStartDir = 0;  // 武装时朝怪符号 -1/1
-DWORD gHumanWalkArmedMs = 0;  // 首次真正开走（travel）时刻；0=未武装
-DWORD gHumanWalkFocusTickMs = 0;  // 失焦时推进 enter/armed 锚点，冻 no_move/stall/timeout
+DWORD gHumanWalkFocusTickMs = 0;  // 失焦时推进 enter 锚点，冻走路 timeout
 float gStandstillAnchorX = 0.f;
 float gStandstillAnchorY = 0.f;
 
@@ -615,6 +725,19 @@ struct SoftBan {
 };
 SoftBan gSoftBan[kSoftBanCap]{};
 int gSoftBanN = 0;
+
+// 拟人寻路失败：只 ban 那只怪会立刻改锁同一不可达台（BIN 00:15 wx=861 连 timeout）。
+// dest 与人所在 Walk 连通域不同 → 禁整层；同层只禁具体 FH。
+constexpr int kHumanFhBanCap = 12;
+constexpr DWORD kHumanFhBanMs = 8000;
+struct HumanFhBan {
+    uint32_t fh = 0;
+    DWORD untilMs = 0;
+};
+HumanFhBan gHumanFhBan[kHumanFhBanCap]{};
+int gHumanFhBanN = 0;
+int gHumanBanWalkComp = 0;
+DWORD gHumanBanWalkCompUntil = 0;
 
 // 不打 MISS 怪：按 templateId 记 40s，不是写死怪号。换图 / 关功能清。
 struct AccMissTplBan {
@@ -763,7 +886,8 @@ void EnterState(State s, DWORD now, const char* why) {
     // 切档锁存清理由 `SetImpactApproachEnabled` / `SetHumanWalkEnabled` 兜底。
     if (prev == State::MoveTo && s != State::MoveTo &&
         !gImpactApproachEnabled.load(std::memory_order_acquire)) {
-        (void)ports::attack::StopWalk();
+        (void)ports::attack::StopNav();
+        human_nav::Reset();
     }
     const bool hotCycle =
         (prev == State::Firing && s == State::Recover) ||
@@ -778,10 +902,8 @@ void EnterState(State s, DWORD now, const char* why) {
     gState = s;
     gStateEnterMs = now;
     if (s == State::MoveTo) {
-        gHumanWalkStartAbsDx = -1.f;
-        gHumanWalkStartDir = 0;
-        gHumanWalkArmedMs = 0;
         gHumanWalkFocusTickMs = 0;
+        human_nav::Reset();
     }
     // 吸物：出刀链关脉冲；其余态开门。离开出刀 / 进 Settling 时边沿，便于立刻吸一拍。
     if (s == State::Aim || s == State::Firing || s == State::Recover) {
@@ -898,9 +1020,89 @@ bool EnsureFreshMobSnap(ports::mob::Snapshot& snap, DWORD maxAgeMs) {
     return snap.ok;
 }
 
+void ClearHumanFhBan() {
+    gHumanFhBanN = 0;
+    memset(gHumanFhBan, 0, sizeof(gHumanFhBan));
+    gHumanBanWalkComp = 0;
+    gHumanBanWalkCompUntil = 0;
+    ports::foothold_path::ClearHopSkips();
+}
+
+void PurgeHumanFhBan(DWORD now) {
+    int w = 0;
+    for (int i = 0; i < gHumanFhBanN; ++i) {
+        if (gHumanFhBan[i].fh && gHumanFhBan[i].untilMs > now) gHumanFhBan[w++] = gHumanFhBan[i];
+    }
+    gHumanFhBanN = w;
+    if (gHumanBanWalkComp && gHumanBanWalkCompUntil <= now) {
+        gHumanBanWalkComp = 0;
+        gHumanBanWalkCompUntil = 0;
+    }
+}
+
+void BanHumanFh(uint32_t fh, DWORD now) {
+    if (!fh) return;
+    PurgeHumanFhBan(now);
+    const DWORD until = now + kHumanFhBanMs;
+    for (int i = 0; i < gHumanFhBanN; ++i) {
+        if (gHumanFhBan[i].fh != fh) continue;
+        if (until > gHumanFhBan[i].untilMs) gHumanFhBan[i].untilMs = until;
+        return;
+    }
+    if (gHumanFhBanN >= kHumanFhBanCap) {
+        int victim = 0;
+        for (int i = 1; i < gHumanFhBanN; ++i) {
+            if (gHumanFhBan[i].untilMs < gHumanFhBan[victim].untilMs) victim = i;
+        }
+        gHumanFhBan[victim] = HumanFhBan{fh, until};
+        return;
+    }
+    gHumanFhBan[gHumanFhBanN++] = HumanFhBan{fh, until};
+}
+
+bool IsHumanFhBanned(uint32_t fh, DWORD now) {
+    if (!fh) return false;
+    PurgeHumanFhBan(now);
+    for (int i = 0; i < gHumanFhBanN; ++i) {
+        if (gHumanFhBan[i].fh == fh) return true;
+    }
+    return false;
+}
+
+bool IsHumanWalkCompBanned(int comp, DWORD now) {
+    if (comp <= 0) return false;
+    PurgeHumanFhBan(now);
+    return gHumanBanWalkComp > 0 && gHumanBanWalkComp == comp && gHumanBanWalkCompUntil > now;
+}
+
+void BanHumanNavFail(float mx, float my, uint32_t fromFh, uint32_t toFh, DWORD now,
+                     ports::foothold_path::EdgeKind hopKind) {
+    float sx = 0.f, sy = 0.f;
+    uint32_t mfh = 0;
+    if (ports::foothold_path::SnapStandAt(mx, my, &sx, &sy, &mfh, /*preferFlat=*/false,
+                                          /*avoidWalkJunction=*/false, /*cliffInset=*/false) &&
+        mfh)
+        BanHumanFh(mfh, now);
+    if (toFh) BanHumanFh(toFh, now);
+    if (fromFh && toFh) ports::foothold_path::AddHopSkip(fromFh, toFh, hopKind);
+    const uint32_t destFh = mfh ? mfh : toFh;
+    const int mc = ports::foothold_path::WalkCompOf(destFh);
+    const int fc = ports::foothold_path::WalkCompOf(fromFh);
+    if (mc > 0 && fc > 0 && mc != fc) {
+        gHumanBanWalkComp = mc;
+        gHumanBanWalkCompUntil = now + kHumanFhBanMs;
+        LogLine("human_fh_ban destComp=%d fromComp=%d fh=%u to=%u hop=%d %ums", mc, fc,
+                (unsigned)mfh, (unsigned)toFh, (int)hopKind, (unsigned)kHumanFhBanMs);
+    } else {
+        LogLine("human_fh_ban fh=%u to=%u sameComp hop=%d %ums", (unsigned)mfh, (unsigned)toFh,
+                (int)hopKind, (unsigned)kHumanFhBanMs);
+    }
+}
+
 void ClearSoftBan() {
     gSoftBanN = 0;
     memset(gSoftBan, 0, sizeof(gSoftBan));
+    ClearHumanFhBan();
 }
 
 void ClearAccMissTplBan() {
@@ -1325,6 +1527,8 @@ bool TryCorrectSameLock(DWORD now, float playerX, float mobX, const char* why) {
     return true;
 }
 
+bool TeleportTooClose(float playerX, float mobX);
+
 // hop 过小且未进带：止血 sticky 空转。true=已接管状态（调用方 continue/break 按返回约定）。
 // 返回 true 且 outContinue=true → continue；true 且 outContinue=false → break。
 bool HandleTinyHopSticky(DWORD now, float playerX, float playerY, float standOff, bool* outContinue) {
@@ -1344,7 +1548,9 @@ bool HandleTinyHopSticky(DWORD now, float playerX, float playerY, float standOff
     }
     if (StickyCorrectCooling(now)) {
         // 冷却中禁止 Aim↔MoveTo；近距强砍，否则原地等下一 tick。
-        if (std::fabs(gLock.x - playerX) < kReapproachMinDx &&
+        // 贴怪心除外：强砍会 geom separate 空站（BIN 09800f）。
+        if (!TeleportTooClose(playerX, gLock.x) &&
+            std::fabs(gLock.x - playerX) < kReapproachMinDx &&
             std::fabs(gLock.y - playerY) <= kSameFloorMaxDy) {
             ClearStickySpin();
             EnterState(State::Firing, now, "sticky_cool_fire");
@@ -1379,7 +1585,8 @@ bool HandleTinyHopSticky(DWORD now, float playerX, float playerY, float standOff
         *outContinue = true;
         return true;
     }
-    if (std::fabs(gLock.x - playerX) < kReapproachMinDx &&
+    if (!TeleportTooClose(playerX, gLock.x) &&
+        std::fabs(gLock.x - playerX) < kReapproachMinDx &&
         std::fabs(gLock.y - playerY) <= kSameFloorMaxDy) {
         ClearStickySpin();
         EnterState(State::Firing, now, "center_hop_fire");
@@ -1699,6 +1906,41 @@ bool TryAbandonHitLag(DWORD now) {
     return true;
 }
 
+// 零伤害熔断：连续 N 只怪、每只 ≥3 次命中反馈（lastHitted 在变）却血条纹丝不动（起止都满血）
+// → 我们的攻击正被服务端无效化（upload 2026-09-09 10:31:58 起 27 只全 100→100、经验停涨，
+// 两分钟后角色无伤 HP 归零）。继续打只会更糟：停 F5 + 通知。任一只怪血条掉过 / 打死 → 计数清零；
+// 血条读不到（hp<0）不计，免得把 HP 条不显示的怪当成零伤害。
+constexpr int kZeroDmgStreakLimit = 6;
+constexpr int kZeroDmgMinBumps = 3;
+int gZeroDmgStreak = 0;
+
+void NoteZeroDamageTarget(DWORD now, int droppedTotal) {
+    (void)now;
+    const bool hpReadable = gLock.lockStartHp >= 0 && gLock.lastHp >= 0;
+    if (!hpReadable) return;
+    if (droppedTotal > 0) {
+        gZeroDmgStreak = 0;
+        return;
+    }
+    const bool zeroDmg = gLock.hitBumpCount >= kZeroDmgMinBumps && gLock.lockStartHp >= 100 &&
+                         gLock.lastHp >= 100;
+    if (!zeroDmg) return;
+    ++gZeroDmgStreak;
+    LogLine("zero_damage streak=%d/%d id=%d bumps=%d fires=%d", gZeroDmgStreak, kZeroDmgStreakLimit,
+            gLock.id, gLock.hitBumpCount, gLock.lockFires);
+    if (gZeroDmgStreak < kZeroDmgStreakLimit) return;
+    gZeroDmgStreak = 0;
+    LogLine("zero_damage BREAKER: %d targets hit without any hp drop — combat OFF", kZeroDmgStreakLimit);
+    char body[220];
+    snprintf(body, sizeof(body),
+             "连续 %d 只怪打中了却一滴血不掉，疑似服务端已无效化攻击。自动打怪已停止，建议下线休息或换频道后再开",
+             kZeroDmgStreakLimit);
+    notify::PublishNotification(notify::NotificationEvent{
+        notify::NotificationKind::Danger, "combat.zero_damage", "自动打怪", body, 12000});
+    SetEnabled(false);
+    x::ipc::PayloadControl_PublishSimpleCombat(false);
+}
+
 // 有可见掉血：刷新进度锚点（滑动窗）。MISS/磨皮不会进这里 → 满超时弃锁。
 void NoteKillTimeoutHpProgress(DWORD now) {
     if (!gLock.lastKillProgressMs) return;
@@ -1722,11 +1964,13 @@ bool TryAbandonLockKillTimeout(DWORD now) {
 
     const int droppedTotal =
         (gLock.lockStartHp >= 0 && gLock.lastHp >= 0) ? (gLock.lockStartHp - gLock.lastHp) : 0;
+    ++kpi::gAcc.killTimeouts;
     LogLine("switch reason=kill_timeout id=%d age=%ums fires=%d hp=%d→%d drop=%d hit=%d "
             "dealt=%lld bumps=%d softBan=%ums",
             gLock.id, (unsigned)age, gLock.lockFires, gLock.lockStartHp, gLock.lastHp,
             droppedTotal, gLock.lastHitted, static_cast<long long>(gLock.dealtSum),
             gLock.hitBumpCount, (unsigned)kLockKillTimeoutSoftBanMs);
+    NoteZeroDamageTarget(now, droppedTotal);
     SoftBanFor(gLock.id, now, kLockKillTimeoutSoftBanMs, kBanWhiff);
     gLastLockLostWhy = "kill_timeout";
     ClearLockRetarget();
@@ -1899,33 +2143,51 @@ uint32_t ResolveHumanPlayerFh(float px, float py, uint32_t hint = 0) {
     return 0;
 }
 
-// 拟人可走达细分类：选怪紧同高；MoveTo 用 chaseY + 区分 Y 隙 / 断崖（BIN 01:07）。
+// 拟人可达：同 Walk 连通，或 PlanFirst 有绳/梯/下跳。无图时退回同高。
 enum class HumanWalkVerdict : uint8_t { Ok = 0, YGap, Cliff };
 
 HumanWalkVerdict ClassifyHumanWalk(float px, float py, float mx, float my, float yTol,
-                                   uint32_t playerFhHint = 0) {
-    if (!HumanWalkSamePlatform(py, my, yTol)) return HumanWalkVerdict::YGap;
-    if (!ports::foothold_path::EnsureGraph()) return HumanWalkVerdict::Ok;
+                                   uint32_t playerFhHint = 0, int* outHops = nullptr) {
+    if (outHops) *outHops = 0;
+    if (!ports::foothold_path::EnsureGraph()) {
+        return HumanWalkSamePlatform(py, my, yTol) ? HumanWalkVerdict::Ok
+                                                   : HumanWalkVerdict::YGap;
+    }
 
     // 非 0 hint = 调用方已 ResolveHumanPlayerFh；避免每怪再 Snap+BFS。
     const uint32_t pfh = playerFhHint ? playerFhHint : ResolveHumanPlayerFh(px, py);
-    if (!pfh) return HumanWalkVerdict::Ok;
+    if (!pfh) {
+        return HumanWalkSamePlatform(py, my, yTol) ? HumanWalkVerdict::Ok
+                                                   : HumanWalkVerdict::YGap;
+    }
 
     float msx = 0.f, msy = 0.f;
     uint32_t mfh = 0;
     if (!ports::foothold_path::SnapStandAt(mx, my, &msx, &msy, &mfh, /*preferFlat=*/false) ||
-        !mfh)
-        return HumanWalkVerdict::Ok;  // 贴不准：放行，交给 stall / timeout
-    // 贴飞到另一层台：不可信，勿当断崖拒绝（怪心原坐标已过 yTol）。
+        !mfh) {
+        return HumanWalkSamePlatform(py, my, yTol) ? HumanWalkVerdict::Ok
+                                                   : HumanWalkVerdict::YGap;
+    }
+    if (ports::foothold_path::SameWalkComponent(pfh, mfh)) {
+        if (outHops) *outHops = 0;
+        return HumanWalkVerdict::Ok;
+    }
+    ports::foothold_path::FirstAction act{};
+    if (ports::foothold_path::PlanFirst(pfh, mfh, &act) && act.ok) {
+        if (outHops) *outHops = act.hops;
+        return HumanWalkVerdict::Ok;
+    }
+    // 贴飞到另一层台：不可信，勿当断崖拒绝。
     if (std::fabs(my - msy) > yTol) return HumanWalkVerdict::Ok;
-    return ports::foothold_path::SameWalkComponent(pfh, mfh) ? HumanWalkVerdict::Ok
-                                                            : HumanWalkVerdict::Cliff;
+    if (HumanWalkSamePlatform(py, my, yTol)) return HumanWalkVerdict::Cliff;
+    return HumanWalkVerdict::YGap;
 }
 
 // BIN 00:52：preferFlat 把怪心贴飞 / Snap 失败曾 return false → acquire miss ok=5 却不锁旁怪。
 bool HumanWalkReachable(float px, float py, float mx, float my, uint32_t playerFhHint = 0,
-                        float yTol = kSameLayerY) {
-    return ClassifyHumanWalk(px, py, mx, my, yTol, playerFhHint) == HumanWalkVerdict::Ok;
+                        float yTol = kSameLayerY, int* outHops = nullptr) {
+    return ClassifyHumanWalk(px, py, mx, my, yTol, playerFhHint, outHops) ==
+           HumanWalkVerdict::Ok;
 }
 
 // 玩家优先 CurFh.zMass；怪用点附近站立 FH 的 zMass。解析失败退回 Y 带。
@@ -2195,6 +2457,45 @@ bool InHumanHoldBand(float playerX, float playerY, float mobX, float mobY, float
     return dx <= standOff * kHitBandMaxFrac + kHumanBandExitSlackPx;
 }
 
+// 拟人进带 / 出刀：必须站在真 FH 上，且与怪同 Walk 连通。
+// 绳上 CurFh=0 时 SameLayer 会用 ZMassAt 贴到邻台，|dy|≤100 仍进带 → 松 ↑ 去空砍
+// （BIN 00:18 climb_up cur=0 → human_in_band → fire geom separate）。
+// 同一块可走地面：同 Walk 连通域，且两台在各自 X 处的台面 Y 差 ≤24（与 PlanFirst 的 hops=0 口径一致）。
+// 只看 |py-my|≤45 会把 36px 台阶上层的怪当同层：人贴着立面硬走想打（BIN 17:16 截图）。
+constexpr float kSameFloorFhDy = 24.f;
+bool SameWalkFloor(uint32_t cur, float px, uint32_t mfh, float mx) {
+    if (!ports::foothold_path::SameWalkComponent(cur, mfh)) return false;
+    if (cur == mfh) return true;
+    float fyCur = 0.f, fyMob = 0.f;
+    if (!ports::foothold_path::FhYAt(cur, px, &fyCur) || !ports::foothold_path::FhYAt(mfh, mx, &fyMob))
+        return true;
+    return std::fabs(fyCur - fyMob) <= kSameFloorFhDy;
+}
+
+bool HumanStandingOnMobFloor(float px, float py, float mx, float my) {
+    ports::teleport::FlightState st{};
+    if (!(ports::teleport::QueryFlightState(st) && st.ok && st.onFh)) return false;
+    const uint32_t cur = ports::foothold::PeekCurFhId();
+    if (!cur) return false;
+    if (std::fabs(py - my) > kSameLayerY) return false;
+    if (!ports::foothold_path::EnsureGraph()) return SameLayerY(py, my);
+    float sx = 0.f, sy = 0.f;
+    uint32_t mfh = 0;
+    if (!ports::foothold_path::SnapStandAt(mx, my, &sx, &sy, &mfh, /*preferFlat=*/false) || !mfh)
+        return SameLayerY(py, my);
+    return SameWalkFloor(cur, px, mfh, mx);
+}
+
+bool HumanHitBandReady(float px, float py, float mx, float my, float standOff) {
+    // 进带用本锁的随机系数（每只怪不一样）；出带 / 续砍仍用 InHumanHoldBand 的宽口径，不会来回抖。
+    const float frac = (gLock.humanBandFrac > 0.5f && gLock.humanBandFrac <= 1.f) ? gLock.humanBandFrac : 1.f;
+    return InHitBand(px, py, mx, my, standOff * frac) && HumanStandingOnMobFloor(px, py, mx, my);
+}
+
+bool HumanHoldBandReady(float px, float py, float mx, float my, float standOff) {
+    return InHumanHoldBand(px, py, mx, my, standOff) && HumanStandingOnMobFloor(px, py, mx, my);
+}
+
 // 无脑A 续砍带：同层且未到重贴距离 → 继续打（与 NeedsReapproach 无缝衔接）。
 // 含 dx≈0 怪心重叠：旧版 dx<1 拒刀 + Aim 不重贴 → melee_wait_tp 空等（upload d8cd64 ≈7s）。
 // BIN 7b792b：起伏双台 |dy|~50 但 dx 已近 → 仍可续砍，勿因 SameLayerY(45) 卡死。
@@ -2217,6 +2518,31 @@ bool NeedsReapproach(float playerX, float playerY, float mobX, float mobY) {
     if (NearMeleeFloor(playerX, playerY, mobX, mobY)) return false;
     if (!SameLayer(playerX, playerY, mobX, mobY)) return true;
     return std::fabs(mobX - playerX) >= kReapproachMinDx;
+}
+
+// 瞬移：|dy|>SameLayerY(45) 就是错台。zMass+SameFloorY(100) 仍会 layer=same / in_band /
+// melee hold，命中盒却 separate，人站着等到 dx≥100 才 await_band
+// （BIN 4e8558：dy=73 空站 4s）。起伏双台 dy~50 能打中时盒不相交不会走这条。
+bool TeleportWrongFloor(float playerY, float mobY) {
+    return std::fabs(playerY - mobY) > kSameLayerY;
+}
+
+// 贴进怪心：InHitBand 要求 |dx|≥kMinLandAway(10)，InMeleeHoldBand 却放行 dx≈0。
+// Face 死区 8px 不转身，攻击盒在背后 → geom separate 干等（BIN 09800f：d=(-3,-1) 空站 2.4s）。
+bool TeleportTooClose(float playerX, float mobX) {
+    return std::fabs(playerX - mobX) < kMinLandAway;
+}
+
+// |dx|<8 时 FaceToward/FaceNeedsFlip 当没位移。用真实左右合成 ±16，勿用过期 gLandSide
+//（落在怪右侧却 side=-1 会把脸拧到反方向）。
+float CombatFaceDx(float playerX, float mobX) {
+    const float dx = mobX - playerX;
+    if (!std::isfinite(dx)) return dx;
+    const float adx = std::fabs(dx);
+    if (adx >= 8.f) return dx;
+    if (adx >= 1.f) return (dx < 0.f) ? -16.f : 16.f;
+    if (gLandSide != 0) return static_cast<float>(-gLandSide) * 16.f;
+    return dx;
 }
 
 // 残血/空砍纠偏：离开真命中带即强制重贴。
@@ -2377,6 +2703,8 @@ bool EstimateLand(float px, float py, float mx, float my, float standOff, float*
         chosenSide = (pref > 0.f) ? -1 : 1;
     } else if (loose) {
         // 两侧偏移都不可站（起伏碎台）：贴怪台 snap，宁可贴怪心也不错层循环。
+        // 人已经在怪心再落到 standX → melee_hold + 朝向死区空砍（BIN 09800f）。
+        if (std::fabs(px - standX) < kMinLandAway) return fail(LandFail::kSides);
         tx = standX;
         ty = standY;
         landFh = standFh;
@@ -2566,6 +2894,8 @@ bool RefreshLock(const ports::mob::Snapshot& snap) {
     ports::mob::MobLite live{};
     if (!ports::mob::TryFillLive(gLock.ptr, gLock.id, live)) {
         LogLine("switch reason=dead_or_gone id=%d via=live", gLock.id);
+        if (gLock.lockFires > 0) ++kpi::gAcc.kills;  // 打过才算击杀；没打就消失的是别人的 / 刷没了
+        gZeroDmgStreak = 0;  // 有怪被打没了 = 伤害在生效
         ports::mob::InvalidateAbsHpCache(gLock.id);
         SoftBanFor(gLock.id, now, kDeadSoftBanMs, kBanDead);
         gLastLockLostWhy = "dead_or_gone";
@@ -2616,6 +2946,24 @@ constexpr float kClusterRadiusPx = 250.f;
 constexpr float kClusterPreferPx = 500.f;
 constexpr float kClusterPreferR2 = kClusterPreferPx * kClusterPreferPx;
 constexpr int kClusterPackMin = 3;
+constexpr int kHumanMaxPathCost = 80;
+// 拟人选怪的时间尺子（ms）。
+constexpr float kHumanWalkPxPerSec = 125.f;
+constexpr float kHumanMaxEtaMs = 45000.f;            // 走 45s 才到的怪不如巡逻等刷新
+constexpr float kHumanEtaClusterBonusMs = 1500.f;    // 密堆每多一只省 1.5s
+constexpr float kHumanEtaWoundBonusMs = 1000.f;      // 残血怪一刀收
+constexpr float kHumanEtaHiddenPenaltyMs = 2000.f;   // inView=0 假空图保险
+// 途中换更近的怪：新怪 ETA 得比当前剩余 ETA 省一半以上、且至少省 4s，4s 内不重复换。
+constexpr float kHumanRetargetRatio = 0.5f;
+constexpr float kHumanRetargetMinSaveMs = 4000.f;
+constexpr DWORD kHumanRetargetCooldownMs = 4000;
+constexpr DWORD kHumanRetargetEvalMs = 1500;
+float gHumanLockEtaMs = -1.f;      // 选中当前锁怪时的预计到达时间（拟人）
+constexpr unsigned kHumanAltPickPct = 12;      // 拟人：多大概率不选 ETA 最优而选候补
+constexpr float kHumanAltPickRatio = 1.4f;     // 候补 ETA ≤ 最优 × 此 + slack 才算候补
+constexpr float kHumanAltPickSlackMs = 800.f;
+DWORD gHumanRetargetEvalMs = 0;
+DWORD gHumanLastRetargetMs = 0;
 
 bool MobIsLiveFarm(const ports::mob::MobLite& m) {
     if (!m.ready || m.deadType != 0 || m.hpPct <= 0) return false;
@@ -2919,6 +3267,15 @@ void AssignLockFromMob(const ports::mob::MobLite& m, float px, float py) {
     gLock.accMissWaitHitted = -1;
     gLock.accMissCount = 0;
     gLock.accMissStreak = 0;
+    // 拟人：每只怪换一个进带距离（0.72~1.0 × 命中带上限）。旧口径每次都在带边 86~93px 起刀，
+    // 稠密到能当机器人签名（upload 10:31~10:34 七刀 dx=86/87/88/90/91/92/93）；人有时走近些才动手。
+    {
+        uint32_t h = static_cast<uint32_t>(m.id) * 2654435761u ^ (GetTickCount() >> 6);
+        h ^= h >> 15;
+        h *= 2246822519u;
+        h ^= h >> 13;
+        gLock.humanBandFrac = 0.72f + static_cast<float>(h % 29u) / 100.f;  // 0.72 .. 1.00
+    }
     gLandSide = (px >= m.x) ? 1 : -1;
     gStandstillSince = 0;
     gStandstillShuffleLast = 0;
@@ -2926,8 +3283,24 @@ void AssignLockFromMob(const ports::mob::MobLite& m, float px, float py) {
     gStandstillAnchorY = py;
 }
 
-// 拟人 MoveTo：夹在自己与锁怪之间、已进命中带的同层怪 → 换锁顺手砍。
-// BIN：交手中 / 近距叠怪禁止再切；取消「任意已进带」回退，避免 182609↔657474 乒乓。
+// 拟人路过：同层顺路怪换锁。进带太窄（自定义站距 12 → 命中带 ~19px）会贴身走过不砍。
+constexpr float kHumanPassbyDx = 80.f;
+constexpr float kHumanPassbyBehindDx = 40.f;
+
+bool HumanPassbyFloor(float px, float py, float mx, float my) {
+    ports::teleport::FlightState st{};
+    if (!(ports::teleport::QueryFlightState(st) && st.ok && st.onFh)) return false;
+    const uint32_t cur = ports::foothold::PeekCurFhId();
+    if (!cur) return false;
+    if (std::fabs(py - my) > kSameFloorMaxDy) return false;
+    if (!ports::foothold_path::EnsureGraph()) return SameFloorY(py, my);
+    float sx = 0.f, sy = 0.f;
+    uint32_t mfh = 0;
+    if (!ports::foothold_path::SnapStandAt(mx, my, &sx, &sy, &mfh, /*preferFlat=*/false) || !mfh)
+        return SameFloorY(py, my);
+    return SameWalkFloor(cur, px, mfh, mx);
+}
+
 bool TryHumanPassbyRetarget(const ports::mob::Snapshot& snap, float px, float py, float standOff,
                             DWORD now) {
     if (HitRotateFarmActive()) return false;
@@ -2935,6 +3308,7 @@ bool TryHumanPassbyRetarget(const ports::mob::Snapshot& snap, float px, float py
     if (!gLock.id) return false;
     if (LockHasEngaged() || gLock.lockFires > 0) return false;
     if (gLastHumanPassbyMs && now - gLastHumanPassbyMs < kHumanPassbyCooldownMs) return false;
+    if (human_nav::AirborneNav() || human_nav::VerticalBusy()) return false;
 
     const float chaseDx = gLock.x - px;
     if (!std::isfinite(chaseDx) || std::fabs(chaseDx) < 1.f) return false;
@@ -2943,6 +3317,7 @@ bool TryHumanPassbyRetarget(const ports::mob::Snapshot& snap, float px, float py
     // 锁怪已进入/贴近命中带：叠怪堆里勿再 passby。
     const float nearLock = standOff * kHitBandMaxFrac + 8.f;
     if (chaseAbs <= nearLock) return false;
+    const float meetDx = (std::max)(nearLock, kHumanPassbyDx);
 
     const ports::mob::MobLite* along = nullptr;
     float alongAbs = 1e9f;
@@ -2954,13 +3329,15 @@ bool TryHumanPassbyRetarget(const ports::mob::Snapshot& snap, float px, float py
         if (m.id == gLock.id) continue;
         if (ShouldSkipAcquireMob(m, now)) continue;
         if (!HumanWalkReachable(px, py, m.x, m.y)) continue;
-        if (!InHitBand(px, py, m.x, m.y, standOff)) continue;
+        if (!HumanPassbyFloor(px, py, m.x, m.y)) continue;
         const float dx = m.x - px;
         if (!std::isfinite(dx)) continue;
         const float adx = std::fabs(dx);
+        if (adx > meetDx) continue;
         const int sign = (dx < 0.f) ? -1 : 1;
-        if (sign != chaseSign) continue;
-        if (adx >= chaseAbs) continue;  // 须夹在途中，更近才切
+        const bool ahead = sign == chaseSign && adx < chaseAbs;
+        const bool justPassed = sign != chaseSign && adx <= kHumanPassbyBehindDx;
+        if (!ahead && !justPassed) continue;
         if (adx < alongAbs) {
             alongAbs = adx;
             along = &m;
@@ -2973,6 +3350,109 @@ bool TryHumanPassbyRetarget(const ports::mob::Snapshot& snap, float px, float py
     gLastHumanPassbyMs = now;
     LogLine("MoveTo human_passby id=%d→%d dx=%.0f chaseDx=%.0f along=1", oldId, along->id,
             along->x - px, chaseDx);
+    return true;
+}
+
+// 途中换更划算的怪：拟人在多跳路线上走着，图上别处刷出 / 走来一只几秒就到的，没必要把
+// 20 秒的路走完。只在跨段路线（navHops>0）、脚踩实地、非爬绳时评估，1.5s 一次；新怪 ETA 得
+// ≤ 当前剩余 ETA 的一半且至少省 4s 才换，4s 内不重复换——防两只怪之间来回摇摆。
+bool TryHumanBetterEtaRetarget(const ports::mob::Snapshot& snap, float px, float py, DWORD now,
+                               int navHops) {
+    if (!gLock.id || navHops <= 0) return false;
+    if (HitRotateFarmActive() || TeleportOneHitActive()) return false;
+    if (LockHasEngaged() || gLock.lockFires > 0) return false;
+    if (gHumanRetargetEvalMs && now - gHumanRetargetEvalMs < kHumanRetargetEvalMs) return false;
+    gHumanRetargetEvalMs = now;
+    if (gHumanLastRetargetMs && now - gHumanLastRetargetMs < kHumanRetargetCooldownMs) return false;
+    if (human_nav::AirborneNav() || human_nav::VerticalBusy()) return false;
+    const uint32_t pfh = ResolveHumanPlayerFh(px, py);
+    if (!pfh) return false;
+    static int32_t sMs[ports::foothold::kMaxFootholds];
+    static int32_t sAx[ports::foothold::kMaxFootholds];
+    const int n = ports::foothold_path::MarkAllPathTime(pfh, px, sMs, sAx,
+                                                        ports::foothold::kMaxFootholds);
+    if (n <= 0) return false;
+    auto etaOf = [&](float mx, float my, float* outEta, uint32_t* outFh) -> bool {
+        float sx = 0.f, sy = 0.f;
+        uint32_t mfh = 0;
+        if (!ports::foothold_path::SnapStandAt(mx, my, &sx, &sy, &mfh, /*preferFlat=*/false,
+                                               /*avoidWalkJunction=*/false,
+                                               /*cliffInset=*/false) ||
+            !mfh)
+            return false;
+        int ms = -1, ax = 0;
+        if (!ports::foothold_path::PathTimeOfFh(mfh, sMs, sAx, n, &ms, &ax)) return false;
+        *outEta = static_cast<float>(ms) +
+                  std::fabs(sx - static_cast<float>(ax)) / kHumanWalkPxPerSec * 1000.f;
+        if (outFh) *outFh = mfh;
+        return true;
+    };
+    float curEta = 0.f;
+    if (!etaOf(gLock.x, gLock.y, &curEta, nullptr)) return false;
+    if (curEta < kHumanRetargetMinSaveMs * 2.f) return false;  // 8s 内就到，不折腾
+
+    const ports::mob::MobLite* best = nullptr;
+    float bestEta = 1e9f;
+    for (int i = 0; i < snap.count; ++i) {
+        const auto& m = snap.mobs[i];
+        if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
+        if (m.templateId == kSpecialTplFilter) continue;
+        if (m.id == gLock.id) continue;
+        if (ShouldSkipAcquireMob(m, now)) continue;
+        float eta = 0.f;
+        uint32_t mfh = 0;
+        if (!etaOf(m.x, m.y, &eta, &mfh)) continue;
+        if (IsHumanFhBanned(mfh, now)) continue;
+        if (IsHumanWalkCompBanned(ports::foothold_path::WalkCompOf(mfh), now)) continue;
+        if (!m.inView) eta += kHumanEtaHiddenPenaltyMs;
+        if (eta < bestEta) {
+            bestEta = eta;
+            best = &m;
+        }
+    }
+    if (!best) return false;
+    if (bestEta > curEta * kHumanRetargetRatio || curEta - bestEta < kHumanRetargetMinSaveMs)
+        return false;
+    const int oldId = gLock.id;
+    AssignLockFromMob(*best, px, py);
+    gHumanLastRetargetMs = now;
+    gHumanLockEtaMs = bestEta;
+    LogLine("MoveTo human_retarget id=%d→%d eta=%.1fs→%.1fs pos=(%.0f,%.0f) hops=%d", oldId,
+            best->id, curEta / 1000.f, bestEta / 1000.f, best->x, best->y, navHops);
+    return true;
+}
+
+// 拟人无无敌：梯边同层怪会击退，抓绳前先清掉（含叠在身上 dx<10 的）。
+constexpr float kClimbThreatDx = 90.f;
+bool TryHumanClimbThreatRetarget(const ports::mob::Snapshot& snap, float px, float py, DWORD now) {
+    if (HitRotateFarmActive()) return false;
+    if (TeleportOneHitActive()) return false;
+    if (!gLock.id) return false;
+    if (human_nav::AirborneNav() || human_nav::ClimbGrabBusy()) return false;
+    if (!human_nav::StandingNearClimb(px)) return false;
+    if (gLastHumanPassbyMs && now - gLastHumanPassbyMs < kHumanPassbyCooldownMs) return false;
+
+    const ports::mob::MobLite* threat = nullptr;
+    float best = 1e9f;
+    for (int i = 0; i < snap.count; ++i) {
+        const auto& m = snap.mobs[i];
+        if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
+        if (m.templateId == kSpecialTplFilter) continue;
+        if (m.id == gLock.id) continue;
+        if (ShouldSkipAcquireMob(m, now)) continue;
+        if (!HumanStandingOnMobFloor(px, py, m.x, m.y)) continue;
+        const float adx = std::fabs(m.x - px);
+        if (adx > kClimbThreatDx) continue;
+        if (adx < best) {
+            best = adx;
+            threat = &m;
+        }
+    }
+    if (!threat) return false;
+    const int oldId = gLock.id;
+    AssignLockFromMob(*threat, px, py);
+    gLastHumanPassbyMs = now;
+    LogLine("MoveTo human_climb_clear id=%d→%d dx=%.0f", oldId, threat->id, threat->x - px);
     return true;
 }
 
@@ -3029,11 +3509,35 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
         fillZmFromFh(i, fh);
         return true;
     };
-    // 拟人选怪：玩家 FH 只解析一次，避免每只怪重复 Snap。
+    // 拟人选怪：玩家 FH 只解析一次；整图一次最短路，避免每只怪再 PlanFirst。
+    // 主尺子是**走到它要几秒**（MarkAllPathTime：走路距离 / 爬绳高度 / 下跳按实测速度折算），
+    // 抽象跳数只做兜底。旧口径 geoD2 + 跳数×3500：斜坡图一段段小台把跳数虚高，头顶近在 200px、
+    // 要绕 30 跳的怪反而压过同层 400px 走 3 秒就到的（upload 2026-09-09 11:43 `hop~30`）。
     const bool humanPick =
         !allowCrossLayer && gHumanWalkEnabled.load(std::memory_order_acquire);
     uint32_t humanPlayerFh = 0;
-    if (humanPick) humanPlayerFh = ResolveHumanPlayerFh(px, py);
+    int humanPathN = 0;
+    int humanTimeN = 0;
+    static int16_t sHumanPathCost[ports::foothold::kMaxFootholds];
+    static int32_t sHumanPathMs[ports::foothold::kMaxFootholds];
+    static int32_t sHumanArriveX[ports::foothold::kMaxFootholds];
+    if (humanPick) {
+        humanPlayerFh = ResolveHumanPlayerFh(px, py);
+        if (humanPlayerFh) {
+            humanTimeN = ports::foothold_path::MarkAllPathTime(
+                humanPlayerFh, px, sHumanPathMs, sHumanArriveX, ports::foothold::kMaxFootholds);
+            humanPathN = ports::foothold_path::MarkAllPathCost(
+                humanPlayerFh, sHumanPathCost, ports::foothold::kMaxFootholds);
+        }
+    }
+    float bestEtaMs = -1.f;
+    // 拟人：记一个「差不多一样近」的候补。永远选 ETA 最优本身就是机器特征，人有时会先打
+    // 旁边那只——每 8 次左右挑一次候补（只在候补不比最优慢太多时）。
+    const ports::mob::MobLite* human2nd = nullptr;
+    float human2ndEtaMs = -1.f;
+    float human2ndScore = 1e30f;
+    int human2ndCluster = 0;
+    float human2ndHop = 0.f;
 
     // 群怪优先：500px 内密度是第一键（geoD2，不含 inView/残血偏置）。
     // 旧 2x 相对距把 score（含 inView=2.5e6）拿来比，40px 独怪永远压过 200px 堆。
@@ -3125,20 +3629,101 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
                         mobZmOk[i] = 1;
                     }
                 }
-                const bool zmSame =
-                    SameLayerZmKnown(playerZm, playerZmOk, mobZm[i], mobZmOk[i] != 0, py, m.y);
-                if (!zmSame) return;
-                // 拟人：同高 + Walk 连通（拒绝同 zMass 错台 / 同高断崖）。
-                if (humanPick && !HumanWalkReachable(px, py, m.x, m.y, humanPlayerFh)) return;
+                if (humanPick) {
+                    int hops = 0;
+                    float msx = 0.f, msy = 0.f;
+                    uint32_t mfh = 0;
+                    // 选怪不要战斗悬崖内缩：台沿怪会被 Snap 丢掉，本层空了才去爬远处。
+                    if (!ports::foothold_path::SnapStandAt(m.x, m.y, &msx, &msy, &mfh,
+                                                           /*preferFlat=*/false,
+                                                           /*avoidWalkJunction=*/false,
+                                                           /*cliffInset=*/false) ||
+                        !mfh)
+                        return;
+                    if (IsHumanFhBanned(mfh, now)) return;
+                    const int mobComp = ports::foothold_path::WalkCompOf(mfh);
+                    if (IsHumanWalkCompBanned(mobComp, now)) return;
+                    int pathMs = -1;
+                    int arriveX = 0;
+                    const bool haveTime =
+                        humanTimeN > 0 &&
+                        ports::foothold_path::PathTimeOfFh(mfh, sHumanPathMs, sHumanArriveX,
+                                                           humanTimeN, &pathMs, &arriveX);
+                    if (humanPathN > 0) {
+                        if (!ports::foothold_path::PathCostOfFh(mfh, sHumanPathCost, humanPathN,
+                                                                &hops))
+                            return;
+                    } else if (!HumanWalkReachable(px, py, m.x, m.y, humanPlayerFh, kSameLayerY,
+                                                   &hops)) {
+                        return;
+                    }
+                    if (hops > kHumanMaxPathCost) return;
+                    fillZmFromFh(i, mfh);
+                    const float dx = m.x - px;
+                    const float dy = m.y - py;
+                    const float geoD2 = dx * dx + dy * dy;
+                    const int cn = CountClusterNeighbors(snap, i, mobZm, mobZmOk);
+                    const int cr = ports::mob::CtrlPreferRank(m.ctrl);
+                    float score = 0.f;
+                    float etaMs = -1.f;
+                    if (haveTime) {
+                        // 到达时间 = 图上最短路 + 落到怪那层后沿台走到它身边。密堆按每只省 1.5s 计
+                        //（一趟多杀几只），残血怪省 1s（一刀收），看不见的怪加 2s（假空图保险）。
+                        const float legMs = std::fabs(msx - static_cast<float>(arriveX)) /
+                                            kHumanWalkPxPerSec * 1000.f;
+                        etaMs = static_cast<float>(pathMs) + legMs;
+                        if (etaMs > kHumanMaxEtaMs) return;
+                        score = etaMs - static_cast<float>(cn - 1) * kHumanEtaClusterBonusMs -
+                                ((m.hpPct > 0 && m.hpPct < 100) ? kHumanEtaWoundBonusMs : 0.f) +
+                                (m.inView ? 0.f : kHumanEtaHiddenPenaltyMs);
+                    } else {
+                        // 兜底：旧口径（欧氏 + 跳数软罚 + 密堆轻奖）。
+                        const float woundBias = (m.hpPct > 0 && m.hpPct < 100) ? -80000.f : 0.f;
+                        score = geoD2 + static_cast<float>(hops) * 3500.f -
+                                static_cast<float>(cn) * 8000.f + woundBias;
+                    }
+                    if (cr < bestCtrlRank) return;
+                    if (cr == bestCtrlRank && score >= bestScore) {
+                        // 不是最优：够近的话记成候补
+                        if (etaMs >= 0.f && score < human2ndScore) {
+                            human2nd = &m;
+                            human2ndEtaMs = etaMs;
+                            human2ndScore = score;
+                            human2ndCluster = cn;
+                            human2ndHop = static_cast<float>(hops);
+                        }
+                        return;
+                    }
+                    if (best && bestEtaMs >= 0.f && cr == bestCtrlRank) {
+                        // 旧最优退成候补
+                        human2nd = best;
+                        human2ndEtaMs = bestEtaMs;
+                        human2ndScore = bestScore;
+                        human2ndCluster = bestCluster;
+                        human2ndHop = bestHop;
+                    }
+                    bestCtrlRank = cr;
+                    bestCluster = cn;
+                    bestScore = score;
+                    bestGeoD2 = geoD2;
+                    best = &m;
+                    bestHop = static_cast<float>(hops);
+                    bestEtaMs = etaMs;
+                    return;
+                } else {
+                    const bool zmSame =
+                        SameLayerZmKnown(playerZm, playerZmOk, mobZm[i], mobZmOk[i] != 0, py, m.y);
+                    if (!zmSame) return;
+                }
                 if (!sameLayerPass) return;
                 const float dx = m.x - px;
                 const float dy = m.y - py;
                 const float geoD2 = dx * dx + dy * dy;
-                const float inViewBias = m.inView ? 0.f : 2.5e6f;
-                const float d2 =
-                    geoD2 + ((m.hpPct > 0 && m.hpPct < 100) ? -80000.f : 0.f) + inViewBias;
+                const float woundBias = (m.hpPct > 0 && m.hpPct < 100) ? -80000.f : 0.f;
                 const int cn = clusterOn ? CountClusterNeighbors(snap, i, mobZm, mobZmOk) : 0;
                 const int cr = ports::mob::CtrlPreferRank(m.ctrl);
+                const float inViewBias = m.inView ? 0.f : 2.5e6f;
+                const float d2 = geoD2 + woundBias + inViewBias;
                 if (!better(cr, cn, geoD2, d2)) return;
                 bestCtrlRank = cr;
                 bestCluster = cn;
@@ -3178,6 +3763,28 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
         if (!best) return false;
     }
 
+    // 拟人：约 1/8 的概率挑候补（候补不比最优慢 40% + 0.8s 才算「差不多一样近」）。
+    bool pickedAlt = false;
+    if (humanPick && best && human2nd && human2nd != best && bestEtaMs >= 0.f && human2ndEtaMs >= 0.f &&
+        human2ndEtaMs <= bestEtaMs * kHumanAltPickRatio + kHumanAltPickSlackMs) {
+        uint32_t h = static_cast<uint32_t>(best->id) * 2246822519u ^ static_cast<uint32_t>(GetTickCount() >> 7);
+        h ^= h >> 13;
+        h *= 3266489917u;
+        h ^= h >> 16;
+        if (h % 100u < kHumanAltPickPct) {
+            ++kpi::gAcc.altPicks;
+            LogLine("acquire alt_pick best=%d eta=%.1fs -> alt=%d eta=%.1fs", best->id, bestEtaMs / 1000.f,
+                    human2nd->id, human2ndEtaMs / 1000.f);
+            best = human2nd;
+            bestEtaMs = human2ndEtaMs;
+            bestCluster = human2ndCluster;
+            bestHop = human2ndHop;
+            pickedAlt = true;
+        }
+    }
+    (void)pickedAlt;
+    ++kpi::gAcc.acquires;
+
     AssignLockFromMob(*best, px, py);
     const int bestIdx = static_cast<int>(best - snap.mobs);
     int32_t bestZm = 0;
@@ -3187,15 +3794,19 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
     const bool zmSamePick =
         SameLayerZmKnown(playerZm, playerZmOk, bestZm, bestZmOk, py, best->y);
     LogLine("acquire id=%d tpl=%d hp=%d%% maxHp=%lld abs=%lld src=%s ctrl=%d(%s) rank=%d "
-            "pos=(%.0f,%.0f) d=(%.0f,%.0f) layer=%s hop~%.0f side=%d clusterOn=%d cluster=%d "
-            "zm=%d sticky=%d packZm=%d loose=%d iv=%d",
+            "pos=(%.0f,%.0f) d=(%.0f,%.0f) layer=%s hop~%.0f eta=%.1fs side=%d clusterOn=%d cluster=%d "
+            "zm=%d sticky=%d packZm=%d loose=%d iv=%d hunt=%s",
             best->id, best->templateId, best->hpPct, static_cast<long long>(gLock.maxHp),
             static_cast<long long>(gLock.absHp), ports::mob::AbsHpSrcName(gLock.absSrc), best->ctrl,
             ports::mob::CtrlName(best->ctrl), bestCtrlRank, best->x, best->y, best->x - px,
-            best->y - py, zmSamePick ? "same" : "cross", bestHop, gLandSide, clusterOn ? 1 : 0,
-            clusterOn ? bestCluster : -1, playerZmOk ? (int)playerZm : 0,
+            best->y - py, zmSamePick ? "same" : "cross", bestHop,
+            bestEtaMs >= 0.f ? bestEtaMs / 1000.f : -1.f, gLandSide,
+            (clusterOn || humanPick) ? 1 : 0, (clusterOn || humanPick) ? bestCluster : -1,
+            playerZmOk ? (int)playerZm : 0,
             (kStickyPackZm && gStickyPackZmOk) ? (int)gStickyPackZm : 0, bestZmOk ? (int)bestZm : 0,
-            looseLand ? 1 : 0, best->inView ? 1 : 0);
+            looseLand ? 1 : 0, best->inView ? 1 : 0,
+            humanPick ? (bestEtaMs >= 0.f ? "eta" : "map") : "near");
+    if (humanPick && bestEtaMs >= 0.f) gHumanLockEtaMs = bestEtaMs;
     if (allowCrossLayer) {
         float nearD2 = 1e30f;
         int nearId = 0, nearTpl = 0;
@@ -3255,8 +3866,22 @@ bool PickHitRotateTarget(const ports::mob::Snapshot& snap, float fromX, float fr
         if (ShouldSkipAcquireMob(m, now)) continue;
         if (!HiraishinRangeOk(px, py, m.x, m.y)) continue;
         if (!allowCrossLayer) {
-            if (!SameLayerZm(playerZm, playerZmOk, py, m.x, m.y, 0)) continue;
-            if (humanPick && !HumanWalkReachable(px, py, m.x, m.y, humanPlayerFh)) continue;
+            if (humanPick) {
+                float sx = 0.f, sy = 0.f;
+                uint32_t mfh = 0;
+                if (!ports::foothold_path::SnapStandAt(m.x, m.y, &sx, &sy, &mfh,
+                                                       /*preferFlat=*/false,
+                                                       /*avoidWalkJunction=*/false,
+                                                       /*cliffInset=*/false) ||
+                    !mfh)
+                    continue;
+                if (IsHumanFhBanned(mfh, now)) continue;
+                const int mc = ports::foothold_path::WalkCompOf(mfh);
+                if (IsHumanWalkCompBanned(mc, now)) continue;
+                if (!HumanWalkReachable(px, py, m.x, m.y, humanPlayerFh)) continue;
+            } else if (!SameLayerZm(playerZm, playerZmOk, py, m.x, m.y, 0)) {
+                continue;
+            }
         }
         const float dxFrom = m.x - fromX;
         const float dyFrom = m.y - fromY;
@@ -3395,7 +4020,7 @@ void ExplainAcquireMiss(const ports::mob::Snapshot& snap, float px, float py, DW
             ++nSame;
         } else {
             ++nCross;
-            if (!allowCrossLayer && !kDirectTeleportNoLayerHop) continue;
+            if (!allowCrossLayer && !kDirectTeleportNoLayerHop && !humanOn) continue;
         }
         ++nOk;
         if (humanOn && !allowCrossLayer) {
@@ -3592,6 +4217,8 @@ constexpr float kStationStickMobJumpY = 10.f;
 // 避免图底无台 → 掉穿 → 场景重载（测谎关题 / 卖装换图连带异常）。
 // StabilizeFoothold 仅 detach（replant 路径已删；补种=AbsPos 重算=瞬移）。
 std::atomic<bool> gLieSafeLand{false};
+bool gHumanLandWant = false;
+DWORD gHumanLandLogMs = 0;
 bool gLieFlyPausedByUs = false;
 bool gLieOweFlyBanRestore = false;  // 测谎期临时卸了 Fly ban，答题完再按 armed 接回
 bool gLieSafeHaveTarget = false;
@@ -3605,6 +4232,14 @@ DWORD gLieSafeTargetAtMs = 0;  // 最近一次钉落点（含 fh=0 原地）；�
 DWORD gLieSafeCatchStartedMs = 0;
 int gLieSafeMapId = -1;     // 钉落点时所在图；换图后旧 fh/坐标在新图无意义，必须重钉
 int gLieSafeDropFarN = 0;   // 连续 drop_far 重试次数（见 kLieSafeDropFarRetryMax）
+// 海滩/沼泽透明层：WZ 台面比引擎碰撞高几十 px（BIN 110000000 fh=111 y=173，
+// 松手落到 y≈86 onFh=0）。本会话禁掉已证伪的 fh，改钉碰撞休息层。不改 SnapStandAt。
+constexpr int kLieSafeBanCap = 4;
+uint32_t gLieSafeBannedFhs[kLieSafeBanCap]{};
+int gLieSafeBannedN = 0;
+int gLieSafeBannedMap = 0;
+bool gLieSafeRestLayer = false;  // 真地面无对应 WZ 台：允许 fh=0 仍 catch-drop
+bool gLieSafeCatchFromAbove = false;  // 本轮 catch 从台面上方进（overFh）；超时从下方进的不穿台
 // drop_far / catch 失败后改 Station 托住，禁止再走软卸。硬闸还在时绝不能 End→自由落体。
 // D115 19:47：give_up + keepFlyHold 拆旋翼 → ap y=-2025 穿到 -2762 断连。
 bool gLieSafeHoverLock = false;
@@ -3650,6 +4285,67 @@ constexpr DWORD kLieSafeCatchHoldMs = 350;
 constexpr float kLieSafeCatchLiftPx = 32.f;
 // 允许进 catch 的纵向窗口（台面上方 0..此值）。要盖得住 lift 后的悬停高度。
 constexpr float kLieSafeCatchBandPx = 96.f;
+constexpr float kLieSafeMaxSnapPx = 100.f;  // 近处 Snap 才直接用；更远走柱探测 / 最近台
+
+bool LieSafeFhBanned(uint32_t fh) {
+    if (!fh || gLieSafeBannedN <= 0) return false;
+    const int mapId = ports::world::GetMapId();
+    if (gLieSafeBannedMap != 0 && mapId != gLieSafeBannedMap) return false;
+    for (int i = 0; i < gLieSafeBannedN; ++i)
+        if (gLieSafeBannedFhs[i] == fh) return true;
+    return false;
+}
+
+void LieSafeClearFhBan(const char* why) {
+    gLieSafeCatchFromAbove = false;
+    if (gLieSafeBannedN <= 0 && !gLieSafeRestLayer) return;
+    LogLine("lie_safe_land fh ban clear why=%s n=%d map=%d rest=%d", why ? why : "?",
+            gLieSafeBannedN, gLieSafeBannedMap, gLieSafeRestLayer ? 1 : 0);
+    gLieSafeBannedN = 0;
+    gLieSafeBannedMap = 0;
+    gLieSafeRestLayer = false;
+    for (int i = 0; i < kLieSafeBanCap; ++i) gLieSafeBannedFhs[i] = 0;
+}
+
+void LieSafeBanFh(uint32_t fh, int mapId) {
+    if (!fh) return;
+    if (gLieSafeBannedMap != 0 && mapId != gLieSafeBannedMap) LieSafeClearFhBan("ban_map");
+    gLieSafeBannedMap = mapId;
+    if (LieSafeFhBanned(fh)) return;
+    if (gLieSafeBannedN >= kLieSafeBanCap) return;
+    gLieSafeBannedFhs[gLieSafeBannedN++] = fh;
+}
+
+bool LieSafeColumnPick(float px, float py, float* ox, float* oy, uint32_t* ofh, float* outDy,
+                       int* outHits) {
+    if (ox) *ox = px;
+    if (oy) *oy = py;
+    if (ofh) *ofh = 0;
+    if (outDy) *outDy = 1e9f;
+    ports::foothold_path::ColumnHit hits[8]{};
+    const int nHit = ports::foothold_path::ProbeColumn(px, py, kLieSafeColumnWinPx, hits, 8);
+    if (outHits) *outHits = nHit;
+    int pick = -1;
+    float pickDy = 1e9f;
+    for (int i = 0; i < nHit; ++i) {
+        if (hits[i].wall || hits[i].narrow) continue;
+        if (LieSafeFhBanned(hits[i].fh)) continue;
+        const float dy = std::fabs(static_cast<float>(hits[i].y) - py);
+        if (dy < pickDy) {
+            pickDy = dy;
+            pick = i;
+        }
+    }
+    float cx = px;
+    float cy = py;
+    if (pick < 0 || !ports::foothold_path::SnapOnFh(hits[pick].fh, px, &cx, &cy)) return false;
+    if (LieSafeFhBanned(hits[pick].fh)) return false;
+    if (ox) *ox = cx;
+    if (oy) *oy = cy;
+    if (ofh) *ofh = hits[pick].fh;
+    if (outDy) *outDy = pickDy;
+    return true;
+}
 
 // NM 断开 / 落地静默：停战停旋翼（勿用粘性 SawDisconnect）。
 // hold 只留给守护 SHM（kMinHoldMs）。已经 PlayReady 且 NM Connected 时打怪不再认 hold，
@@ -3806,7 +4502,84 @@ void EndLieSafeLand(const char* why);
 void OnCombatMapChange(const char* why);
 void OnCombatSameMapResume(const char* why);
 
+// 拟人档禁止旋翼落台：卸 BAN / 停旋翼 / 松键，绳上 ↓ 爬下，腾空靠重力挂台。
+void PrepareHumanGroundLand(const char* why) {
+    const bool first = !gHumanLandWant;
+    gHumanLandWant = true;
+    if (!first) return;
+    (void)ports::attack::StopNav();
+    human_nav::Reset();
+    gHeliLatchedThisEnable = false;
+    gHeliHoldValid = false;
+    gHeliAirborneUntilMs = 0;
+    if (gLieSafeLand.exchange(false, std::memory_order_acq_rel)) {
+        gLieSafeHaveTarget = false;
+        gLieSafeCatching = false;
+        gLieSafeCatchDrop = false;
+        gLieSafeCatchFromAbove = false;
+        LieSafeClearFhBan("human_walk");
+        LogLine("lie_safe_land abort heli (human walk) why=%s", why ? why : "?");
+    }
+    if (heli::CurrentOwner() == heli::Owner::Combat) {
+        heli::Disarm(heli::Owner::Combat);
+        heli::Release(heli::Owner::Combat);
+    }
+    ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::CombatImpact, false);
+    if (!travel::IsActive() &&
+        (ports::fly_fh_ban::ActiveMask() &
+         static_cast<unsigned>(ports::fly_fh_ban::BanSource::Travel)) != 0) {
+        ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Travel, false);
+    }
+    if (fly::IsArmed() &&
+        (ports::fly_fh_ban::ActiveMask() &
+         static_cast<unsigned>(ports::fly_fh_ban::BanSource::Fly)) != 0) {
+        ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::Fly, false);
+        gLieOweFlyBanRestore = true;
+    }
+    LogLine("human ground land arm why=%s", why ? why : "?");
+}
+
+void TickHumanGroundLand(DWORD now) {
+    if (!IsHumanGroundMove()) {
+        gHumanLandWant = false;
+        return;
+    }
+    if (travel::IsActive()) return;
+    if (!gHumanLandWant) return;
+
+    ports::teleport::FlightState st{};
+    if (!ports::teleport::QueryFlightState(st) || !st.ok) return;
+    if (st.onFh) {
+        gHumanLandWant = false;
+        (void)ports::attack::ReleaseVertical();
+        (void)ports::attack::ReleaseJump();
+        (void)ports::attack::StopWalk();
+        LogLine("human ground land onFh ap=(%.0f,%.0f)", st.x, st.y);
+        return;
+    }
+
+    (void)ports::attack::StopWalk();
+    (void)ports::attack::ReleaseJump();
+    // Ap.V：y 向下为正。急坠只松键；绳/梯上 vy 小，按 ↓ 爬下直到挂台。
+    const bool falling = st.vy > 40.f || st.ma == 6 || st.ma == 7;
+    if (falling) {
+        (void)ports::attack::ReleaseVertical();
+    } else {
+        (void)ports::attack::HoldVertical(-1);
+    }
+    if (!gHumanLandLogMs || now - gHumanLandLogMs > 800) {
+        gHumanLandLogMs = now;
+        LogLine("human ground land wait ap=(%.0f,%.0f) v=(%.0f,%.0f) ma=%d fall=%d fh=%u",
+                st.x, st.y, st.vx, st.vy, st.ma, falling ? 1 : 0,
+                (unsigned)ports::foothold::PeekCurFhId());
+    }
+}
+
 void BeginLieSafeLand(const char* why) {
+    if (IsHumanGroundMove()) {
+        PrepareHumanGroundLand(why ? why : "lie_safe");
+        return;
+    }
     const bool already = gLieSafeLand.exchange(true, std::memory_order_acq_rel);
     if (already) return;
     gLieSafeHaveTarget = false;
@@ -3823,6 +4596,8 @@ void BeginLieSafeLand(const char* why) {
     gLieSafeMapId = -1;
     gLieSafeDropFarN = 0;
     gLieSafeHoverLock = false;
+    gLieSafeCatchFromAbove = false;
+    LieSafeClearFhBan("begin");
     gLieSafeAwaitSpawn =
         why && (std::strstr(why, "map_change") || std::strstr(why, "ResetForMapChange") ||
                 std::strstr(why, "map_arrive") || std::strstr(why, "MapArrive"));
@@ -3896,6 +4671,7 @@ void EndLieSafeLand(const char* why) {
     gLieSafeCatchStartedMs = 0;
     gLieSafeDropFarN = 0;
     gLieSafeHoverLock = false;
+    gLieSafeCatchFromAbove = false;
     if (was) {
         ports::teleport::FlightState st{};
         const bool onFh = ports::teleport::QueryFlightState(st) && st.ok && st.onFh;
@@ -3946,6 +4722,7 @@ void EndLieSafeLand(const char* why) {
         LogLine("lie_safe_land end why=%s was=%d keepFlyHold=%d", why ? why : "?", was ? 1 : 0,
                 keepFlyHold ? 1 : 0);
     }
+    LieSafeClearFhBan(why && why[0] ? why : "end");
 }
 
 void EnsureLieSafeTarget(float px, float py) {
@@ -3955,6 +4732,8 @@ void EnsureLieSafeTarget(float px, float py) {
     const bool fhReady = ports::world::HasMapData() && ports::foothold::IsCacheReadyForMap(mapId) &&
                          ports::foothold_path::EnsureGraph();
 
+    if (gLieSafeBannedMap != 0 && mapId != gLieSafeBannedMap) LieSafeClearFhBan("map_change");
+
     // 已有目标：同图且人仍靠近则保持（含 fh=0 原地钉，BIN 79a8f1 每拍 miss 重钉=乱飘）。
     if (gLieSafeHaveTarget) {
         const bool sameMap = ports::world::HasMapData() && mapId == gLieSafeMapId;
@@ -3962,7 +4741,15 @@ void EnsureLieSafeTarget(float px, float py) {
         const float tdy = py - gLieSafeY;
         const float td = std::sqrt(tdx * tdx + tdy * tdy);
         constexpr float kKeepNearTargetPx = 120.f;
-        if (gLieSafeFh != 0) {
+        if (gLieSafeFh != 0 && LieSafeFhBanned(gLieSafeFh)) {
+            LogLine("lie_safe_land target banned fh=%u — retarget ap=(%.0f,%.0f)",
+                    (unsigned)gLieSafeFh, px, py);
+            gLieSafeHaveTarget = false;
+            gLieSafeFh = 0;
+            gLieSafeCatching = false;
+            gLieSafeCatchDrop = false;
+            gLieSafeCatchStartedMs = 0;
+        } else if (gLieSafeFh != 0) {
             // BIN 82a4b0：换图边沿用旧图落点钉死 → 半径外空转；换图或出界则作废。
             // BIN f283a3：play bounds 未热误报 inBounds=0 → 勿因抖动重钉远台。
             const bool inBounds = ports::map_bounds::PointInPlayBounds(
@@ -3973,6 +4760,8 @@ void EnsureLieSafeTarget(float px, float py) {
                     sameMap ? 1 : 0, inBounds ? 1 : 0, td, gLieSafeX, gLieSafeY,
                     (unsigned)gLieSafeFh, gLieSafeMapId, mapId);
         } else {
+            // 碰撞休息层：WZ 台已证伪，1s 重钉会再次吸到透明层。
+            if (gLieSafeRestLayer && sameMap && td <= kKeepNearTargetPx) return;
             // 原地钉：勿跟飘动 AbsPos 每拍改 hold（否则 Station 追着人飞）。
             // fh=0 满 1s 重钉一次：首拍若钉到幽灵远台，近台再也进不来（BIN 05:02:31 补给闸下悬停）。
             const DWORD nowKeep = x::runtime::NowMs();
@@ -3994,6 +4783,8 @@ void EnsureLieSafeTarget(float px, float py) {
         gLieSafeCatchDrop = false;
         gLieSafeCatchStartedMs = 0;
         gLieSafeDropFarN = 0;
+        gLieSafeCatchFromAbove = false;
+        gLieSafeRestLayer = false;  // 重钉；若仍有 ban，miss snap 会再置 rest_layer
     }
 
     // BIN 79a8f1：回城卷 mapId 已翻成 104000000、AbsPos 仍是挂机图 (181,325)
@@ -4013,9 +4804,16 @@ void EnsureLieSafeTarget(float px, float py) {
     float sy = py;
     uint32_t fh = 0;
     // preferFlat=false：脚下/近处优先；远台退化与 settle hover 同病（d76f13/f283a3）。
-    constexpr float kLieSafeMaxSnapPx = 100.f;
-    bool nearSnap = false;
     if (ports::foothold_path::SnapStandAt(px, py, &sx, &sy, &fh, /*preferFlat=*/false) && fh) {
+        if (LieSafeFhBanned(fh)) {
+            LogLine("lie_safe_land snap skip banned fh=%u stand=(%.0f,%.0f) from=(%.0f,%.0f)",
+                    (unsigned)fh, sx, sy, px, py);
+            sx = px;
+            sy = py;
+            fh = 0;
+        }
+    }
+    if (fh) {
         const float sdx = sx - px;
         const float sdy = sy - py;
         const float sd = std::sqrt(sdx * sdx + sdy * sdy);
@@ -4033,39 +4831,29 @@ void EnsureLieSafeTarget(float px, float py) {
             // 指那儿、闸解后 cruise 0.5s 就落位），Snap 却给了 (267,265)——只因它同高 20px。
             // ProbeColumn 只收 X 区间真覆盖脚下的段，天然排掉那类远台；纵向按
             // kLieSafeColumnWinPx 放宽，不分上下取最近（旋翼上下皆可达）。
-            ports::foothold_path::ColumnHit hits[8]{};
-            const int nHit = ports::foothold_path::ProbeColumn(px, py, kLieSafeColumnWinPx, hits, 8);
-            int pick = -1;
-            float pickDy = 1e9f;
-            for (int i = 0; i < nHit; ++i) {
-                if (hits[i].wall || hits[i].narrow) continue;
-                const float dy = std::fabs(static_cast<float>(hits[i].y) - py);
-                if (dy < pickDy) {
-                    pickDy = dy;
-                    pick = i;
-                }
-            }
-            float cx = px;
-            float cy = py;
-            if (pick >= 0 && ports::foothold_path::SnapOnFh(hits[pick].fh, px, &cx, &cy)) {
+            float cx = px, cy = py, colDy = 0.f;
+            uint32_t colFh = 0;
+            int nHit = 0;
+            if (LieSafeColumnPick(px, py, &cx, &cy, &colFh, &colDy, &nHit)) {
                 gLieSafeX = cx;
                 gLieSafeY = cy;
-                gLieSafeFh = hits[pick].fh;
+                gLieSafeFh = colFh;
                 gLieSafeHaveTarget = true;
                 gLieSafeMapId = mapId;
                 gLieSafeAwaitSpawn = false;
                 gLieSafeTargetAtMs = x::runtime::NowMs();
                 LogLine("lie_safe_land column fallback fh=%u stand=(%.0f,%.0f) dy=%.0f "
                         "from=(%.0f,%.0f) hits=%d (snap gave fh=%u d=%.0f)",
-                        (unsigned)hits[pick].fh, cx, cy, pickDy, px, py, nHit, (unsigned)farFh, sd);
+                        (unsigned)colFh, cx, cy, colDy, px, py, nHit, (unsigned)farFh, sd);
                 return;
             }
             // 柱探测失败：飞本图欧氏最近可站台（段上最近点），不跟 Snap 的同高 band。
             // BIN 05:02:31 最近台 d=291；BIN 64b013 Snap 给了 |dx|≈1800 幽灵台，最近台在身旁。
             float nx = px, ny = py, nd = 0.f;
             uint32_t nfh = 0;
-            const bool nearOk =
+            bool nearOk =
                 ports::foothold_path::FindNearestStand(px, py, &nx, &ny, &nfh, &nd) && nfh &&
+                !LieSafeFhBanned(nfh) &&
                 ports::map_bounds::PointInPlayBounds(nx, ny, /*mapId=*/0,
                                                      ports::map_bounds::kLandMarginPx);
             if (nearOk) {
@@ -4121,6 +4909,7 @@ void EnsureLieSafeTarget(float px, float py) {
         float nx = px, ny = py, nd = 0.f;
         uint32_t nfh = 0;
         if (ports::foothold_path::FindNearestStand(px, py, &nx, &ny, &nfh, &nd) && nfh &&
+            !LieSafeFhBanned(nfh) &&
             ports::map_bounds::PointInPlayBounds(nx, ny, /*mapId=*/0,
                                                  ports::map_bounds::kLandMarginPx)) {
             gLieSafeX = nx;
@@ -4141,7 +4930,13 @@ void EnsureLieSafeTarget(float px, float py) {
     gLieSafeHaveTarget = true;
     gLieSafeMapId = mapId;
     gLieSafeTargetAtMs = x::runtime::NowMs();
-    LogLine("lie_safe_land target miss snap; hold=(%.0f,%.0f) map=%d", px, py, mapId);
+    if (gLieSafeBannedN > 0) {
+        gLieSafeRestLayer = true;
+        LogLine("lie_safe_land rest_layer hold=(%.0f,%.0f) bannedN=%d map=%d", px, py,
+                gLieSafeBannedN, mapId);
+    } else {
+        LogLine("lie_safe_land target miss snap; hold=(%.0f,%.0f) map=%d", px, py, mapId);
+    }
 }
 
 // 换图后重钉目标：不清旋翼、不卸 ban——补给/测谎硬闸还在，只换本图落点。
@@ -4162,7 +4957,9 @@ void RestartLieSafeLand(const char* why) {
     gLieSafeMapId = -1;
     gLieSafeDropFarN = 0;
     gLieSafeHoverLock = false;
+    gLieSafeCatchFromAbove = false;
     gLieSafeAwaitSpawn = true;
+    LieSafeClearFhBan("restart");
     // 不在此 Acquire：等 Ensure 钉到本图落点后再由 Tick 抢旋翼（BIN 79a8f1 幽灵台）。
     // 硬闸还在时禁止 Disarm：换图重钉不能把人扔进自由落体。
     if (heli::CurrentOwner() == heli::Owner::Combat &&
@@ -4235,6 +5032,7 @@ void DriveLieSafeHover(DWORD now, const ports::teleport::FlightState& st, const 
     gLieSafeCatching = false;
     gLieSafeCatchDrop = false;
     gLieSafeCatchStartedMs = 0;
+    gLieSafeCatchFromAbove = false;
     gLieSafeHoverLock = true;
     if (heli::Bailed()) heli::ClearBailed();
     (void)heli::Acquire(heli::Owner::Combat);
@@ -4303,12 +5101,10 @@ void TickLieSafeLand(DWORD now) {
         gLieSafeStartedMs != 0 &&
         static_cast<int>(now - gLieSafeStartedMs) >= static_cast<int>(kLieSafeTimeoutMs);
 
-    // 引擎已挂台且距落点不远：只清速度，结束。
-    // 勿用「catching 即可」放宽：软重连幽灵坐标 (BIN f99271 ap=-1533) 偶发假 onFh，
-    // d≈1800 时若因 catching 收台 → 立刻放闸自由落体。
-    if (st.onFh && (closeEnough || d <= kLieSafeOnFhOkPx)) {
-        // BIN 64b013：卷轴后 AbsPos 仍挂机图坐标却假 onFh（curFh 残留）→ 放行 Travel 后
-        // 出生点再 settle 起飞。收台须脚下确有近台。
+    // 引擎已挂台：旧口径还要求距 WZ Snap 目标 ≤80。海滩/沼泽透明层 WZ 台比碰撞高几十 px
+    // （BIN 110000000 fh=111 y=173 vs rest y≈86），会拒掉已经踩上真地面的 onFh。
+    // 假 onFh（AbsPos 仍在远图，BIN f99271 d≈1800）靠脚下 nearFh≤100 挡。
+    if (st.onFh) {
         float nx = st.x;
         float ny = st.y;
         uint32_t nfh = 0;
@@ -4320,18 +5116,19 @@ void TickLieSafeLand(DWORD now) {
             const float ndy = ny - st.y;
             nearFh = std::sqrt(ndx * ndx + ndy * ndy) <= 100.f;
         }
-        if (!nearFh) {
+        if (nearFh) {
+            ClearLieSafeMotion();
+            EndLieSafeLand("onFh");
+            ReleaseMapArriveIfHeld();
+            return;
+        }
+        if (closeEnough || d <= kLieSafeOnFhOkPx) {
             static DWORD sStaleOnFh = 0;
             if (!sStaleOnFh || now - sStaleOnFh > 400) {
                 sStaleOnFh = now;
                 LogLine("lie_safe_land onFh reject no-near-fh ap=(%.0f,%.0f) map=%d", st.x, st.y,
                         ports::world::GetMapId());
             }
-        } else {
-            ClearLieSafeMotion();
-            EndLieSafeLand("onFh");
-            ReleaseMapArriveIfHeld();
-            return;
         }
     }
 
@@ -4352,7 +5149,8 @@ void TickLieSafeLand(DWORD now) {
     // 上限才停（why=encounter_pause_on 不走 awaitSpawn，那道保护挡不住）。
     // 没台可落就别撒手：Station 托住原地等硬闸自己结束。期间若人自然挂上台，上面那段
     // onFh 判定（d≈0 满足 closeEnough）会正常收台。
-    if (gLieSafeFh == 0) {
+    // 海滩/沼泽 rest_layer：WZ 台已证伪，必须 catch-drop 到碰撞 Y，不能 hover_lock。
+    if (gLieSafeFh == 0 && !gLieSafeRestLayer) {
         if (TryAbortNoFhSafeLand(now, st, "no_landable_timeout")) return;
         if (gLieSafeStartedMs != 0 &&
             static_cast<int>(now - gLieSafeStartedMs) >= static_cast<int>(kLieSafeNoLandHoldMs)) {
@@ -4372,6 +5170,7 @@ void TickLieSafeLand(DWORD now) {
         gLieSafeCatching = false;
         gLieSafeCatchDrop = false;
         gLieSafeCatchStartedMs = 0;
+        gLieSafeCatchFromAbove = false;
         gLieSafeDropFarN = 0;
         if (heli::Bailed()) heli::ClearBailed();
         (void)heli::Acquire(heli::Owner::Combat);
@@ -4397,6 +5196,7 @@ void TickLieSafeLand(DWORD now) {
         gLieSafeCatching = true;
         gLieSafeCatchDrop = false;
         gLieSafeCatchStartedMs = now;
+        gLieSafeCatchFromAbove = overFh;
         ports::fly_fh_ban::SetSourceArmed(ports::fly_fh_ban::BanSource::CombatImpact, false);
         LogLine("lie_safe_land catch begin d=%.0f dy=%.0f timedOut=%d fh=%u ap=(%.0f,%.0f) "
                 "sp=(%.0f,%.0f)",
@@ -4418,9 +5218,56 @@ void TickLieSafeLand(DWORD now) {
                     (unsigned)catchAge, st.x, st.y);
         }
         if (gLieSafeCatchDrop && d > kLieSafeOnFhOkPx) {
+            const bool inBounds = ports::map_bounds::PointInPlayBounds(
+                st.x, st.y, /*mapId=*/0, ports::map_bounds::kLandMarginPx);
+            // 只收「从上往下穿台」：同列、catch 时人在台面上、松手后落到台面下超过
+            // kLieSafeOnFhOkPx。海滩/沼泽透明层满足；台下超时撒手（BIN 101030102 y=409 vs
+            // 台面 410）仍重飞原台，不拉黑。
+            const bool sameCol = std::fabs(st.x - gLieSafeX) <= kLieSafeArrivePx;
+            const bool piercedBelow = (gLieSafeY - st.y) > kLieSafeOnFhOkPx;
+            const bool pierceGhost = inBounds && gLieSafeFh != 0 && !LieSafeFhBanned(gLieSafeFh) &&
+                                     gLieSafeCatchFromAbove && sameCol && piercedBelow;
+            if (pierceGhost) {
+                const uint32_t failed = gLieSafeFh;
+                const float oldY = gLieSafeY;
+                LieSafeBanFh(failed, ports::world::GetMapId());
+                gLieSafeCatching = false;
+                gLieSafeCatchDrop = false;
+                gLieSafeCatchStartedMs = 0;
+                gLieSafeCatchFromAbove = false;
+                float nx = st.x, ny = st.y, colDy = 0.f;
+                uint32_t nfh = 0;
+                int colHits = 0;
+                if (LieSafeColumnPick(st.x, st.y, &nx, &ny, &nfh, &colDy, &colHits) && nfh &&
+                    !LieSafeFhBanned(nfh)) {
+                    gLieSafeX = nx;
+                    gLieSafeY = ny;
+                    gLieSafeFh = nfh;
+                    gLieSafeHaveTarget = true;
+                    gLieSafeRestLayer = false;
+                    gLieSafeMapId = gLieSafeBannedMap;
+                    gLieSafeTargetAtMs = now;
+                    LogLine("lie_safe_land drop_far retarget fh=%u→%u stand=(%.0f,%.0f) "
+                            "rest=(%.0f,%.0f) oldY=%.0f hits=%d",
+                            (unsigned)failed, (unsigned)nfh, nx, ny, st.x, st.y, oldY, colHits);
+                    return;
+                }
+                gLieSafeX = st.x;
+                gLieSafeY = st.y;
+                gLieSafeFh = 0;
+                gLieSafeHaveTarget = true;
+                gLieSafeRestLayer = true;
+                gLieSafeMapId = gLieSafeBannedMap;
+                gLieSafeTargetAtMs = now;
+                LogLine("lie_safe_land drop_far rest_layer from fh=%u y=%.0f → ap=(%.0f,%.0f) "
+                        "(offset layer; catch-drop on collision Y)",
+                        (unsigned)failed, oldY, st.x, st.y);
+                return;
+            }
             gLieSafeCatching = false;
             gLieSafeCatchDrop = false;
             gLieSafeCatchStartedMs = 0;
+            gLieSafeCatchFromAbove = false;
             ++gLieSafeDropFarN;
             if (gLieSafeDropFarN >= kLieSafeDropFarRetryMax) {
                 LogLine("lie_safe_land drop_far give_up n=%d d=%.0f fh=%u — end safe land",
@@ -4438,6 +5285,7 @@ void TickLieSafeLand(DWORD now) {
                     gLieSafeCatching = false;
                     gLieSafeCatchDrop = false;
                     gLieSafeCatchStartedMs = 0;
+                    gLieSafeCatchFromAbove = false;
                     LogLine("lie_safe_land catch retry d=%.0f", d);
                 } else if (SafeLandHoldersActive()) {
                     // 勿 hover_lock：DriveLieSafeHover 会清 catching → BAN 再摘台，永远挂不上。
@@ -5539,10 +6387,922 @@ void GoIdle(DWORD now, const char* why) {
     gSettleUntil = 0;
     gSettleNeedPosSane = false;
     gSettleEnteredAt = 0;
-    (void)ports::attack::StopWalk();
+    (void)ports::attack::StopNav();
+    human_nav::Reset();
     EnterState(State::Idle, now, why);
     // Idle 不一定关 F5（pause/arm）；fh-ban 仍由 SyncImpactFhBan 按总开关收敛。
     SyncImpactFhBan();
+}
+
+// ── 拟人：低血无药挂绳休息 ──
+// 触发：HP < kRestHpPct 持续 1.5s（给自动喝药一个机会），且确认没红药。
+// hpPotionQty=-1 是「从未成功用过」，不是空袋——BUILD198 把它当没药去挂绳，掉到绳底
+// 下一层后 hops=0 对着绳 X 左右走，体感=寻怪死循环。自动加血开着时，未知/有药都交给
+// autopot，只有 qty==0 才挂绳。挂到 HP ≥ kRestLeaveHpPct、或有药了、或 3 分钟到点就下来。
+// 找不到绳 / 走不到 / 掉到绳下一层 → 30s 内不再试。
+constexpr int kRestHpPct = 35;
+constexpr int kRestLeaveHpPct = 80;
+constexpr DWORD kRestLowHoldMs = 1500;
+constexpr DWORD kRestMaxMs = 180000;
+constexpr DWORD kRestRetryMs = 30000;
+bool gHumanResting = false;
+DWORD gRestLowSince = 0;
+DWORD gRestStartMs = 0;
+DWORD gRestFailUntil = 0;
+DWORD gRestLogMs = 0;
+
+// 高价值先捡：状态放在 EndHumanRest 之前，休息结束时才能看 gHvLooting。
+constexpr float kHvPickDx = 28.f;
+constexpr float kHvPickDy = 40.f;
+constexpr DWORD kHvLootMaxMs = 14000;
+constexpr DWORD kHvSkipMs = 8000;
+constexpr DWORD kHvStandWaitMs = 2800;
+bool gHvLooting = false;
+int gHvDropId = 0;
+int gHvKind = 0;
+float gHvX = 0.f, gHvY = 0.f;
+DWORD gHvStartMs = 0;
+DWORD gHvAtDropMs = 0;
+int gHvSkipId = 0;
+DWORD gHvSkipUntil = 0;
+DWORD gHvLogMs = 0;
+
+void EndHumanRest(DWORD now, const char* why) {
+    human_nav::EndRest();
+    (void)ports::attack::StopNav();
+    gHumanResting = false;
+    gRestLowSince = 0;
+    LogLine("human rest end why=%s after=%ums", why, (unsigned)(now - gRestStartMs));
+    if (!gHvLooting) PublishHumanHud(0, 0);
+}
+
+// 返回 true = 本拍已被休息逻辑接管（调用方直接 return）。
+bool TickHumanRest(DWORD now, float px, float py) {
+    const auto st = autopot::GetStats();
+    const bool hpKnown = st.valid && st.hpPct >= 0;
+    // qty>0：包里有药。autopot 开着且 qty!=0（含 -1 未知）：交给自动喝药，禁止挂绳。
+    const bool hasPot = st.hpPotionQty > 0 || (autopot::IsHpEnabled() && st.hpPotionQty != 0);
+    if (gHumanResting) {
+        if (!IsHumanGroundMove()) {
+            EndHumanRest(now, "mode_off");
+            return false;
+        }
+        if (hpKnown && st.hpPct >= kRestLeaveHpPct) {
+            EndHumanRest(now, "recovered");
+            return false;
+        }
+        if (hasPot) {
+            EndHumanRest(now, "has_potion");
+            return false;
+        }
+        if (now - gRestStartMs >= kRestMaxMs) {
+            EndHumanRest(now, "max_time");
+            return false;
+        }
+        const auto rs = human_nav::TickRest(now, px, py);
+        if (rs == human_nav::RestState::Failed) {
+            EndHumanRest(now, "nav_fail");
+            gRestFailUntil = now + kRestRetryMs;
+            return false;
+        }
+        if (!gRestLogMs || now - gRestLogMs > 5000) {
+            gRestLogMs = now;
+            LogLine("human rest %s hp=%d%% pot=%d age=%ums",
+                    rs == human_nav::RestState::Hanging ? "hanging" : "going", st.hpPct,
+                    st.hpPotionQty, (unsigned)(now - gRestStartMs));
+        }
+        PublishHumanHud(3, 0);
+        return true;
+    }
+    if (!hpKnown || st.hpPct >= kRestHpPct || hasPot) {
+        gRestLowSince = 0;
+        return false;
+    }
+    if (gRestFailUntil && static_cast<int>(now - gRestFailUntil) < 0) return false;
+    if (!gRestLowSince) {
+        gRestLowSince = now;
+        return false;
+    }
+    if (now - gRestLowSince < kRestLowHoldMs) return false;
+    if (gState != State::Idle) GoIdle(now, "rest_rope");
+    gHumanResting = true;
+    gRestStartMs = now;
+    gRestLowSince = 0;
+    gRestLogMs = 0;
+    LogLine("human rest start hp=%d%% pot=%d pos=(%.0f,%.0f)", st.hpPct, st.hpPotionQty, px, py);
+    PublishHumanHud(3, 0);
+    return true;
+}
+
+// ── 拟人：高价值掉落先捡再打（与 ClassifyHighValueItem 同一套：装备 / 204 卷 / 雷之鏢）──
+// 本轮 BIN 吸物是脚下原生（pet=0 foot=1 highValue=0）：暂停出刀并走过去，站进脚边盒让 TryPickUpDrop 吸。
+void EndHumanHvLoot(DWORD now, const char* why) {
+    if (gHvLooting) {
+        LogLine("human_hv_loot end why=%s dropId=%d age=%ums", why ? why : "?", gHvDropId,
+                (unsigned)(now - gHvStartMs));
+    }
+    gHvLooting = false;
+    gHvDropId = 0;
+    gHvAtDropMs = 0;
+    human_nav::Reset();
+    (void)ports::attack::StopNav();
+    if (!gHumanResting) PublishHumanHud(0, 0);
+}
+
+void SkipHvDrop(int dropId, DWORD now, const char* why) {
+    gHvSkipId = dropId;
+    gHvSkipUntil = now + kHvSkipMs;
+    LogLine("human_hv_loot skip dropId=%d %ums why=%s", dropId, (unsigned)kHvSkipMs,
+            why ? why : "?");
+    EndHumanHvLoot(now, why);
+}
+
+bool TickHumanHvLoot(DWORD now, float px, float py) {
+    if (!IsHumanGroundMove()) {
+        if (gHvLooting) EndHumanHvLoot(now, "mode_off");
+        return false;
+    }
+    if (gHvSkipUntil && static_cast<int>(now - gHvSkipUntil) >= 0) {
+        gHvSkipId = 0;
+        gHvSkipUntil = 0;
+    }
+    ports::drop::HighValueLoot hv{};
+    const int skip = (gHvSkipUntil && static_cast<int>(now - gHvSkipUntil) < 0) ? gHvSkipId : 0;
+    const bool have = ports::drop::FindNearestHighValueDrop(px, py, hv, skip);
+    if (!have) {
+        if (gHvLooting) EndHumanHvLoot(now, "gone");
+        return false;
+    }
+    if (!gHvLooting || gHvDropId != hv.dropId) {
+        if (gState != State::Idle) GoIdle(now, "hv_loot");
+        human_nav::Reset();
+        gHvLooting = true;
+        gHvDropId = hv.dropId;
+        gHvKind = hv.kind;
+        gHvX = hv.x;
+        gHvY = hv.y;
+        gHvStartMs = now;
+        gHvAtDropMs = 0;
+        gHvLogMs = 0;
+        const char* kind = hv.kind == 1 ? "equip" : hv.kind == 2 ? "scroll" : hv.kind == 3 ? "dart" : "?";
+        LogLine("human_hv_loot start dropId=%d itemId=%d kind=%s pos=(%.0f,%.0f) from=(%.0f,%.0f)",
+                hv.dropId, hv.itemId, kind, hv.x, hv.y, px, py);
+    } else {
+        gHvX = hv.x;
+        gHvY = hv.y;
+        gHvKind = hv.kind;
+    }
+    PublishHumanHud(2, now - gHvStartMs);
+    ArmLootPulse(now, 240u, /*edge=*/false);
+    if (now - gHvStartMs >= kHvLootMaxMs) {
+        SkipHvDrop(gHvDropId, now, "timeout");
+        return false;
+    }
+    const float dx = hv.x - px;
+    const float dy = hv.y - py;
+    const bool close = std::fabs(dx) <= kHvPickDx && std::fabs(dy) <= kHvPickDy;
+    if (close) {
+        (void)ports::attack::StopNav();
+        if (!gHvAtDropMs) gHvAtDropMs = now;
+        if (now - gHvAtDropMs >= kHvStandWaitMs) {
+            SkipHvDrop(gHvDropId, now, "stand_timeout");
+            return false;
+        }
+        if (!gHvLogMs || now - gHvLogMs > 800) {
+            gHvLogMs = now;
+            LogLine("human_hv_loot stand dropId=%d dx=%.0f dy=%.0f wait=%ums", gHvDropId, dx, dy,
+                    (unsigned)(now - gHvAtDropMs));
+        }
+        return true;
+    }
+    gHvAtDropMs = 0;
+    const uint32_t pfh = ports::foothold::PeekCurFhId();
+    const auto nav = human_nav::Tick(now, px, py, hv.x, hv.y, pfh, /*travelPortal=*/false);
+    if (nav.result == human_nav::Result::Dead) {
+        EndHumanHvLoot(now, "dead");
+        return false;
+    }
+    if (nav.result == human_nav::Result::Unreachable || nav.result == human_nav::Result::KeyFail) {
+        SkipHvDrop(gHvDropId, now, nav.why && nav.why[0] ? nav.why : "no_path");
+        return false;
+    }
+    if (!gHvLogMs || now - gHvLogMs > 800) {
+        gHvLogMs = now;
+        LogLine("human_hv_loot walk dropId=%d hops=%d kind=%d dx=%.0f dy=%.0f", gHvDropId, nav.hops,
+                (int)nav.kind, dx, dy);
+    }
+    return true;
+}
+
+// ── 拟人：场上没怪时巡逻到刷怪点 ──
+// 人清完一片不会原地站着等刷：往最近 / 最密的刷怪点走，到了停一两秒挪一下脚再看。
+// 刷点取 LifeList 里 Type==Mob 的槽（Snapshot.spawnPoints），按台聚合，评分 = 跳数×3 + 距离/150 − 槽数。
+// 20s 内去过的台不重复选；到点或走不到都换下一处。有怪立刻被 Acquire 打断，导航状态在进 MoveTo 时清。
+constexpr float kPatrolArriveDx = 40.f;
+constexpr float kPatrolArriveDy = 45.f;
+constexpr float kPatrolNearSkipPx = 120.f;
+constexpr DWORD kPatrolWaitMinMs = 700;
+constexpr DWORD kPatrolWaitMaxMs = 1600;
+constexpr DWORD kPatrolTargetMaxMs = 25000;
+constexpr DWORD kPatrolRecentMs = 20000;
+struct HumanPatrol {
+    bool on = false;
+    float tx = 0.f, ty = 0.f;
+    uint32_t tfh = 0;
+    int hops = 0;
+    DWORD pickMs = 0;
+    DWORD waitUntil = 0;
+    DWORD tapUntil = 0;
+    int tapDir = 0;
+    bool tapped = false;
+    DWORD logMs = 0;
+    uint32_t recentFh[4]{};
+    DWORD recentMs[4]{};
+    int recentN = 0;
+    bool brainDriven = false;  // 目标由寻怪大脑给：到点 / 失败后不自己挑下一处，交回大脑重评
+};
+HumanPatrol gPatrol;
+
+DWORD PatrolJitter(DWORD seed, DWORD lo, DWORD hi) {
+    if (hi <= lo) return lo;
+    uint32_t x = seed * 1664525u + 1013904223u;
+    x ^= x >> 13;
+    return lo + (x % (hi - lo + 1));
+}
+
+// ───────── 会话级随机小休（拟人）─────────
+// 人不会连续几小时匀速打怪。拟人档 F5 连开 45~90 分钟后停手 2~6 分钟（站着不动、不出刀、不走），
+// 完了接着打；间隔与时长每次重抽。只在没锁怪、身边 260px 内没活怪时开始；期间掉血立即结束
+//（人被怪咬也会回手）。换图 / 赶路 / 补给 / 测谎 / 死亡都在前面的闸门里早退，这里不会跑到。
+// XCAT_HUMAN_BREAKS=0 关掉。
+namespace hbreak {
+constexpr DWORD kGapMinMs = 45u * 60u * 1000u;
+constexpr DWORD kGapMaxMs = 90u * 60u * 1000u;
+constexpr DWORD kLenMinMs = 120u * 1000u;
+constexpr DWORD kLenMaxMs = 360u * 1000u;
+constexpr float kNoMobDx = 260.f;
+constexpr float kNoMobDy = 120.f;
+DWORD gNextAtMs = 0;  // 下次小休时刻；0 = 还没排
+DWORD gUntilMs = 0;   // >0 = 正在休，休到这一刻
+int gHpAtStart = -1;
+DWORD gLogMs = 0;
+
+bool Enabled() { return !XCAT_ENV_OFF(kEnvHumanBreaks); }
+
+void Schedule(DWORD now) {
+    gNextAtMs = now + PatrolJitter(now ^ 0x51a7u, kGapMinMs, kGapMaxMs);
+    gUntilMs = 0;
+}
+
+int HpNow() {
+    x::ui::player::Vitals vit{};
+    return x::ui::player::Read(vit) ? vit.hp : -1;
+}
+
+// 返回 true = 正在小休，调用方本拍停手。
+bool Tick(DWORD now, bool humanOn, const ports::mob::Snapshot& snap, float px, float py, bool hasLock) {
+    if (!humanOn || !Enabled()) {
+        if (gUntilMs || gNextAtMs) PublishHumanHud(0, 0);
+        gUntilMs = 0;
+        gNextAtMs = 0;
+        return false;
+    }
+    if (!gNextAtMs) {
+        Schedule(now);
+        LogLine("human_break scheduled in %us", (unsigned)((gNextAtMs - now) / 1000u));
+        return false;
+    }
+    if (gUntilMs) {
+        const int hp = HpNow();
+        const bool bitten = gHpAtStart > 0 && hp >= 0 && hp < gHpAtStart - 1;
+        if (static_cast<int>(now - gUntilMs) >= 0 || bitten) {
+            LogLine("human_break end why=%s", bitten ? "took_damage" : "timeup");
+            Schedule(now);
+            return false;
+        }
+        if (!gLogMs || now - gLogMs > 30000) {
+            gLogMs = now;
+            LogLine("human_break resting remain=%us", (unsigned)((gUntilMs - now) / 1000u));
+        }
+        PublishHumanHud(1, gUntilMs - now);
+        return true;
+    }
+    if (static_cast<int>(now - gNextAtMs) < 0) return false;
+    if (hasLock) return false;
+    for (int i = 0; i < snap.count; ++i) {
+        const auto& m = snap.mobs[i];
+        if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
+        if (std::fabs(m.x - px) <= kNoMobDx && std::fabs(m.y - py) <= kNoMobDy) return false;
+    }
+    gUntilMs = now + PatrolJitter(now ^ 0x3d9fu, kLenMinMs, kLenMaxMs);
+    gHpAtStart = HpNow();
+    gLogMs = now;
+    const unsigned lenS = (unsigned)((gUntilMs - now) / 1000u);
+    LogLine("human_break start len=%us hp=%d", lenS, gHpAtStart);
+    char body[160];
+    snprintf(body, sizeof(body), "拟人档：连续打了一阵，歇 %u 分 %02u 秒再继续（XCAT_HUMAN_BREAKS=0 可关）", lenS / 60u,
+             lenS % 60u);
+    notify::PublishNotification(
+        notify::NotificationEvent{notify::NotificationKind::Info, "combat.human_break", "自动打怪", body, 6000});
+    PublishHumanHud(1, gUntilMs - now);
+    return true;
+}
+}  // namespace hbreak
+
+bool PatrolRecent(uint32_t fh, DWORD now) {
+    for (int i = 0; i < 4; ++i)
+        if (gPatrol.recentFh[i] == fh && gPatrol.recentMs[i] && now - gPatrol.recentMs[i] < kPatrolRecentMs)
+            return true;
+    return false;
+}
+
+void PatrolRemember(uint32_t fh, DWORD now) {
+    const int i = gPatrol.recentN % 4;
+    gPatrol.recentFh[i] = fh;
+    gPatrol.recentMs[i] = now;
+    ++gPatrol.recentN;
+}
+
+bool PickPatrolTarget(const ports::mob::Snapshot& snap, float px, float py, DWORD now) {
+    struct Agg {
+        uint32_t fh = 0;
+        float sx = 0.f, sy = 0.f;
+        int n = 0;
+        int hops = 0;
+    };
+    Agg aggs[32]{};
+    int an = 0;
+    const uint32_t pfh = ResolveHumanPlayerFh(px, py);
+    if (!pfh) return false;
+    const int spN = snap.spawnPointN < ports::mob::kMaxSpawnPoints ? snap.spawnPointN
+                                                                    : ports::mob::kMaxSpawnPoints;
+    for (int i = 0; i < spN; ++i) {
+        const auto& sp = snap.spawnPoints[i];
+        float sx = 0.f, sy = 0.f;
+        uint32_t fh = 0;
+        if (!ports::foothold_path::SnapStandAt(sp.x, sp.y, &sx, &sy, &fh, /*preferFlat=*/false,
+                                               /*avoidWalkJunction=*/true, /*cliffInset=*/true) ||
+            !fh)
+            continue;
+        if (PatrolRecent(fh, now)) continue;
+        int k = -1;
+        for (int j = 0; j < an; ++j)
+            if (aggs[j].fh == fh) {
+                k = j;
+                break;
+            }
+        if (k < 0) {
+            if (an >= 32) continue;
+            ports::foothold_path::FirstAction act{};
+            if (fh != pfh && !(ports::foothold_path::PlanFirst(pfh, fh, &act) && act.ok)) continue;
+            k = an++;
+            aggs[k].fh = fh;
+            aggs[k].hops = (fh == pfh) ? 0 : act.hops;
+        }
+        aggs[k].sx += sx;
+        aggs[k].sy += sy;
+        ++aggs[k].n;
+    }
+    int best = -1;
+    float bestScore = 1e30f;
+    for (int j = 0; j < an; ++j) {
+        const float cx = aggs[j].sx / static_cast<float>(aggs[j].n);
+        const float cy = aggs[j].sy / static_cast<float>(aggs[j].n);
+        if (std::fabs(cx - px) < kPatrolNearSkipPx && std::fabs(cy - py) < kPatrolArriveDy) continue;
+        const float score = static_cast<float>(aggs[j].hops) * 3.f + std::fabs(cx - px) / 150.f -
+                            static_cast<float>(aggs[j].n);
+        if (score < bestScore) {
+            bestScore = score;
+            best = j;
+        }
+    }
+    if (best < 0) return false;
+    gPatrol.on = true;
+    gPatrol.brainDriven = false;
+    gPatrol.tx = aggs[best].sx / static_cast<float>(aggs[best].n);
+    gPatrol.ty = aggs[best].sy / static_cast<float>(aggs[best].n);
+    gPatrol.tfh = aggs[best].fh;
+    gPatrol.hops = aggs[best].hops;
+    gPatrol.pickMs = now;
+    gPatrol.logMs = 0;
+    LogLine("human_patrol pick fh=%u at=(%.0f,%.0f) hops=%d slots=%d cand=%d from=(%.0f,%.0f)",
+            gPatrol.tfh, gPatrol.tx, gPatrol.ty, gPatrol.hops, aggs[best].n, an, px, py);
+    return true;
+}
+
+void TickHumanPatrol(DWORD now, const ports::mob::Snapshot& snap, float px, float py);
+
+// 巡逻执行器：把目标点交给 gPatrol（走法 / 到点停顿 / 失败换点都复用 TickHumanPatrol 的机制）。
+void PatrolGoTo(float tx, float ty, uint32_t tfh, int hops, DWORD now, const char* why) {
+    gPatrol.on = true;
+    gPatrol.brainDriven = true;
+    gPatrol.tx = tx;
+    gPatrol.ty = ty;
+    gPatrol.tfh = tfh;
+    gPatrol.hops = hops;
+    gPatrol.pickMs = now;
+    gPatrol.logMs = 0;
+    gPatrol.waitUntil = 0;
+    LogLine("human_patrol pick fh=%u at=(%.0f,%.0f) hops=%d why=%s", tfh, tx, ty, hops, why);
+}
+
+// ───────── 拟人寻怪大脑（分层状态机：Engage / Camp / Sweep；Recover 由 TickHumanRest 先判）─────────
+// 老巡逻只会「没怪就往最近没去过的刷怪点走」，不知道哪里的怪马上要刷、哪里值得等。
+// 大脑把刷怪点按连通域 + 横向距离聚成**刷怪区**，每个槽记「什么时候空的」，用实测刷新间隔预测
+// 「什么时候会有怪」，再按「活怪 + 即将刷新 − 路程」给区打分：
+//   · Engage — 选怪器有目标：交给 Acquire/MoveTo/Aim/Firing（现有 FSM）
+//   · Camp   — 所在区没活怪但 ≤12s 内有槽要刷：走到最早刷的那个槽旁等（人会守点等刷）
+//   · Sweep  — 去分数最高的区（承诺 ≥6s 不换区，防两区之间来回跑）
+//   · 没任何刷怪信息 → 退回老巡逻
+namespace hunt {
+enum class State : uint8_t { Engage = 0, Camp, Sweep, Patrol };
+const char* StateName(State s) {
+    switch (s) {
+        case State::Engage: return "Engage";
+        case State::Camp: return "Camp";
+        case State::Sweep: return "Sweep";
+        case State::Patrol: return "Patrol";
+        default: return "?";
+    }
+}
+constexpr int kMaxSlots = ports::mob::kMaxSpawnPoints;
+constexpr int kMaxZones = 32;
+constexpr float kZoneLinkPx = 320.f;    // 同连通域内刷怪点横向相距 ≤ 此归为一区
+constexpr float kSlotOccupyDx = 90.f;   // 怪离刷怪点这么近算「占着这个槽」
+constexpr float kSlotOccupyDy = 60.f;
+constexpr float kZonePadX = 80.f;       // 区包围盒外扩，算区内活怪
+constexpr float kZonePadY = 60.f;
+constexpr DWORD kRespawnDefaultMs = 7000;
+constexpr DWORD kRespawnMinMs = 2500;
+constexpr DWORD kRespawnMaxMs = 40000;
+constexpr DWORD kCampMaxWaitMs = 12000;  // 预计这么久内会刷才守
+constexpr DWORD kCampGraceMs = 3000;     // 预测到点还没刷：再宽限这么久
+constexpr DWORD kZoneCommitMs = 6000;    // 换区最短间隔
+constexpr DWORD kEvalMs = 500;
+constexpr DWORD kObserveMs = 150;
+constexpr float kHorizonMs = 8000.f;     // 「即将刷新」看多远
+constexpr float kTtkMs = 3000.f;         // 每只怪平均清理时间（走近 + 出刀）
+constexpr float kStayRatio = 0.8f;       // 当前区分数 ≥ 最优区 × 此值就不换
+constexpr float kCampNearPx = 70.f;      // 离守点这么近就站着等，不再挪
+
+struct Slot {
+    float x = 0.f, y = 0.f;  // 站点（SnapStandAt 后）
+    uint32_t fh = 0;
+    int zone = -1;
+    bool occupied = false;
+    bool everOccupied = false;
+    DWORD emptySince = 0;   // 0 = 不知道什么时候空的
+    DWORD staleUntil = 0;   // 预测落空后这段时间不再当「即将刷新」
+};
+struct Zone {
+    int n = 0;
+    int comp = 0;
+    float xmin = 0.f, xmax = 0.f, ymin = 0.f, ymax = 0.f;
+    float cx = 0.f, cy = 0.f;
+};
+struct Brain {
+    int mapId = 0;
+    int slotN = 0;
+    Slot slots[kMaxSlots]{};
+    int zoneN = 0;
+    Zone zones[kMaxZones]{};
+    float respawnEmaMs = 0.f;  // 0 = 还没量过
+    int respawnSamples = 0;
+    State st = State::Engage;
+    DWORD stMs = 0;
+    int curZone = -1;
+    DWORD zoneSinceMs = 0;
+    DWORD evalMs = 0;
+    DWORD observeMs = 0;
+    int campSlot = -1;
+    DWORD campUntil = 0;
+    DWORD logMs = 0;
+    DWORD fidgetMs = 0;     // 守点时下次挪脚时刻
+    DWORD fidgetUntil = 0;  // 正在按方向键
+    int fidgetDir = 0;
+    int32_t prevIds[ports::mob::kMaxLiteMobs]{};  // 上一拍在场的怪 id：只有**新 id** 占上槽才算刷新
+    int prevIdN = 0;
+};
+Brain gBrain;
+
+bool WasPresent(int32_t id) {
+    for (int i = 0; i < gBrain.prevIdN; ++i)
+        if (gBrain.prevIds[i] == id) return true;
+    return false;
+}
+
+void SetState(State s, DWORD now, const char* why) {
+    if (gBrain.st == s) return;
+    LogLine("hunt_brain %s→%s why=%s zone=%d respawn~%.1fs samples=%d", StateName(gBrain.st),
+            StateName(s), why ? why : "", gBrain.curZone, gBrain.respawnEmaMs / 1000.f,
+            gBrain.respawnSamples);
+    gBrain.st = s;
+    gBrain.stMs = now;
+}
+
+DWORD RespawnMs() {
+    return gBrain.respawnEmaMs > 0.f ? static_cast<DWORD>(gBrain.respawnEmaMs) : kRespawnDefaultMs;
+}
+
+// 刷怪点 → 站点 / 连通域 → 聚区。换图或槽数变了才重建（SnapStandAt 每槽一次，别每拍做）。
+void EnsureZones(const ports::mob::Snapshot& snap, DWORD now) {
+    const int spN = snap.spawnPointN < kMaxSlots ? snap.spawnPointN : kMaxSlots;
+    if (gBrain.mapId == snap.mapId && gBrain.slotN == spN && spN > 0) return;
+    gBrain = Brain{};
+    gBrain.mapId = snap.mapId;
+    gBrain.stMs = now;
+    gBrain.zoneSinceMs = now;
+    int comps[kMaxSlots]{};
+    for (int i = 0; i < spN; ++i) {
+        const auto& sp = snap.spawnPoints[i];
+        float sx = sp.x, sy = sp.y;
+        uint32_t fh = 0;
+        (void)ports::foothold_path::SnapStandAt(sp.x, sp.y, &sx, &sy, &fh, /*preferFlat=*/false,
+                                                /*avoidWalkJunction=*/true, /*cliffInset=*/true);
+        Slot& s = gBrain.slots[gBrain.slotN++];
+        s.x = sx;
+        s.y = sy;
+        s.fh = fh;
+        comps[i] = fh ? ports::foothold_path::WalkCompOf(fh) : 0;
+    }
+    // 聚区：同连通域、横向链式相距 ≤ kZoneLinkPx（按 x 排序后贪心）
+    int order[kMaxSlots];
+    for (int i = 0; i < gBrain.slotN; ++i) order[i] = i;
+    for (int i = 1; i < gBrain.slotN; ++i) {
+        int j = i;
+        while (j > 0 && gBrain.slots[order[j - 1]].x > gBrain.slots[order[j]].x) {
+            const int t = order[j - 1];
+            order[j - 1] = order[j];
+            order[j] = t;
+            --j;
+        }
+    }
+    for (int oi = 0; oi < gBrain.slotN; ++oi) {
+        const int i = order[oi];
+        Slot& s = gBrain.slots[i];
+        int z = -1;
+        for (int zi = 0; zi < gBrain.zoneN && z < 0; ++zi) {
+            Zone& Z = gBrain.zones[zi];
+            if (Z.comp != comps[i]) continue;
+            if (s.x >= Z.xmin - kZoneLinkPx && s.x <= Z.xmax + kZoneLinkPx &&
+                std::fabs(s.y - Z.cy) <= 160.f)
+                z = zi;
+        }
+        if (z < 0) {
+            if (gBrain.zoneN >= kMaxZones) continue;
+            z = gBrain.zoneN++;
+            gBrain.zones[z] = Zone{};
+            gBrain.zones[z].comp = comps[i];
+            gBrain.zones[z].xmin = gBrain.zones[z].xmax = s.x;
+            gBrain.zones[z].ymin = gBrain.zones[z].ymax = s.y;
+        }
+        Zone& Z = gBrain.zones[z];
+        s.zone = z;
+        Z.xmin = (std::min)(Z.xmin, s.x);
+        Z.xmax = (std::max)(Z.xmax, s.x);
+        Z.ymin = (std::min)(Z.ymin, s.y);
+        Z.ymax = (std::max)(Z.ymax, s.y);
+        Z.cx = (Z.cx * Z.n + s.x) / static_cast<float>(Z.n + 1);
+        Z.cy = (Z.cy * Z.n + s.y) / static_cast<float>(Z.n + 1);
+        ++Z.n;
+    }
+    // 上次在这张图量到的刷怪间隔直接接着用（bin\state\navmem），不用再等几轮刷新才会守点。
+    ports::nav_memory::MapMemory mem{};
+    if (ports::nav_memory::Load(gBrain.mapId, &mem) && mem.respawnEmaMs > 0.f) {
+        gBrain.respawnEmaMs = mem.respawnEmaMs;
+        gBrain.respawnSamples = mem.respawnSamples;
+    }
+    LogLine("hunt_brain zones map=%d slots=%d zones=%d respawn~%.1fs (n=%d%s)", gBrain.mapId, gBrain.slotN,
+            gBrain.zoneN, RespawnMs() / 1000.f, gBrain.respawnSamples,
+            gBrain.respawnSamples > 0 ? " from navmem" : "");
+}
+
+// 每拍（限频）看一眼：哪个槽有怪 / 空了多久；空 → 有 就是一次刷新，量刷新间隔。
+void Observe(const ports::mob::Snapshot& snap, DWORD now) {
+    if (snap.spawnPointN <= 0) return;
+    EnsureZones(snap, now);
+    if (gBrain.observeMs && now - gBrain.observeMs < kObserveMs) return;
+    gBrain.observeMs = now;
+    for (int i = 0; i < gBrain.slotN; ++i) {
+        Slot& s = gBrain.slots[i];
+        bool occ = false;
+        bool occNew = false;  // 占槽的是刚出现的 id（不是从别处走回来的老怪）
+        for (int m = 0; m < snap.count && !occ; ++m) {
+            const auto& mob = snap.mobs[m];
+            if (!mob.ready || mob.deadType != 0 || mob.hpPct <= 0) continue;
+            occ = std::fabs(mob.x - s.x) <= kSlotOccupyDx && std::fabs(mob.y - s.y) <= kSlotOccupyDy;
+            if (occ) occNew = !WasPresent(mob.id);
+        }
+        if (occ && !s.occupied) {
+            if (s.emptySince && occNew) {
+                const DWORD gap = now - s.emptySince;
+                if (gap >= kRespawnMinMs && gap <= kRespawnMaxMs) {
+                    gBrain.respawnEmaMs = gBrain.respawnEmaMs > 0.f
+                                              ? gBrain.respawnEmaMs * 0.7f + static_cast<float>(gap) * 0.3f
+                                              : static_cast<float>(gap);
+                    ++gBrain.respawnSamples;
+                    ports::nav_memory::NoteRespawn(gBrain.mapId, gBrain.respawnEmaMs, gBrain.respawnSamples);
+                    if (gBrain.respawnSamples <= 5 || (gBrain.respawnSamples % 10) == 0)
+                        LogLine("hunt_brain respawn slot=%d zone=%d gap=%ums ema=%.0fms n=%d", i, s.zone,
+                                (unsigned)gap, gBrain.respawnEmaMs, gBrain.respawnSamples);
+                }
+            }
+            s.emptySince = 0;
+            s.staleUntil = 0;
+            s.everOccupied = true;
+        } else if (!occ && s.occupied) {
+            s.emptySince = now;
+        }
+        s.occupied = occ;
+    }
+    gBrain.prevIdN = 0;
+    for (int m = 0; m < snap.count && gBrain.prevIdN < ports::mob::kMaxLiteMobs; ++m) {
+        const auto& mob = snap.mobs[m];
+        if (!mob.ready || mob.deadType != 0 || mob.hpPct <= 0) continue;
+        gBrain.prevIds[gBrain.prevIdN++] = mob.id;
+    }
+}
+
+// 槽预计刷新时刻；0 = 不知道 / 暂不指望。
+DWORD SlotPredictMs(const Slot& s, DWORD now) {
+    if (s.occupied) return 0;
+    if (s.staleUntil && static_cast<int>(now - s.staleUntil) < 0) return 0;
+    if (!s.emptySince) return 0;  // 没见它有过怪 / 不知何时空的
+    return s.emptySince + RespawnMs();
+}
+
+struct ZoneEval {
+    int alive = 0;
+    float expect = 0.f;
+    int etaMs = -1;
+    int bestSlot = -1;   // 去哪个槽（最早刷 / 最近）
+    DWORD soonestMs = 0; // 最早预计刷新时刻
+    float util = 0.f;
+};
+
+void EvalZones(const ports::mob::Snapshot& snap, float px, float py, DWORD now, ZoneEval* out,
+               bool haveTime, const int32_t* ms, const int32_t* ax, int n) {
+    for (int z = 0; z < gBrain.zoneN; ++z) out[z] = ZoneEval{};
+    // 区内活怪：包围盒外扩
+    for (int m = 0; m < snap.count; ++m) {
+        const auto& mob = snap.mobs[m];
+        if (!mob.ready || mob.deadType != 0 || mob.hpPct <= 0) continue;
+        for (int z = 0; z < gBrain.zoneN; ++z) {
+            const Zone& Z = gBrain.zones[z];
+            if (mob.x >= Z.xmin - kZonePadX && mob.x <= Z.xmax + kZonePadX && mob.y >= Z.ymin - kZonePadY &&
+                mob.y <= Z.ymax + kZonePadY) {
+                ++out[z].alive;
+                break;
+            }
+        }
+    }
+    // 每个槽：ETA（图上时间 + 沿台走到槽）与预计刷新
+    for (int i = 0; i < gBrain.slotN; ++i) {
+        const Slot& s = gBrain.slots[i];
+        if (s.zone < 0 || !s.fh) continue;
+        ZoneEval& E = out[s.zone];
+        int slotEta = -1;
+        if (haveTime) {
+            int pms = -1, pax = 0;
+            if (ports::foothold_path::PathTimeOfFh(s.fh, ms, ax, n, &pms, &pax))
+                slotEta = pms + static_cast<int>(std::fabs(s.x - static_cast<float>(pax)) /
+                                                 kHumanWalkPxPerSec * 1000.f);
+        } else {
+            slotEta = static_cast<int>(std::fabs(s.x - px) / kHumanWalkPxPerSec * 1000.f) +
+                      static_cast<int>(std::fabs(s.y - py) * 20.f);
+        }
+        if (slotEta < 0) continue;
+        if (IsHumanFhBanned(s.fh, now)) continue;
+        // 刚去过 / 刚走不到的槽（PatrolRemember）：这一轮不当目的地，免得同一个点来回撞
+        const bool recent = PatrolRecent(s.fh, now);
+        if (E.etaMs < 0 || slotEta < E.etaMs) E.etaMs = slotEta;
+        const DWORD pred = SlotPredictMs(s, now);
+        if (pred) {
+            const float arriveMs = static_cast<float>(now) + static_cast<float>(slotEta);
+            if (static_cast<float>(pred) <= arriveMs + kHorizonMs) E.expect += 1.f;
+            if (!E.soonestMs || pred < E.soonestMs) {
+                E.soonestMs = pred;
+                E.bestSlot = i;  // 守点看最早刷的槽，去过也守
+            }
+        } else if (!s.occupied && !s.everOccupied && !s.staleUntil) {
+            E.expect += 0.25f;  // 没见过怪的槽：可能会刷，给个小权
+        }
+        if (E.bestSlot < 0 && !recent) E.bestSlot = i;
+    }
+    for (int z = 0; z < gBrain.zoneN; ++z) {
+        ZoneEval& E = out[z];
+        if (E.etaMs < 0) {
+            E.util = -1.f;
+            continue;
+        }
+        const float value = static_cast<float>(E.alive) + E.expect;
+        // 单位时间能打到的怪数：路上 + 清完这些怪的时间。
+        E.util = value / (static_cast<float>(E.etaMs) + value * kTtkMs + 1000.f);
+    }
+}
+
+// 返回 true = 大脑接管了这一拍的移动；false = 让老巡逻兜底。
+bool Tick(DWORD now, const ports::mob::Snapshot& snap, float px, float py) {
+    if (snap.spawnPointN <= 0) return false;
+    Observe(snap, now);
+    if (gBrain.zoneN <= 0) return false;
+
+    // 到点等刷（Camp）：预测时刻 + 宽限内，站着不动 / 挪到守点旁；到点没刷就把那槽的预测标失效。
+    if (gBrain.st == State::Camp && gBrain.campSlot >= 0 && gBrain.campSlot < gBrain.slotN) {
+        Slot& s = gBrain.slots[gBrain.campSlot];
+        if (static_cast<int>(now - gBrain.campUntil) >= 0) {
+            s.staleUntil = now + RespawnMs();
+            LogLine("hunt_brain camp_miss slot=%d zone=%d waited=%ums — prediction stale", gBrain.campSlot,
+                    s.zone, (unsigned)(now - gBrain.stMs));
+            gBrain.campSlot = -1;
+            gBrain.evalMs = 0;  // 立刻重评
+        } else {
+            const float dx = s.x - px;
+            if (std::fabs(dx) > kCampNearPx || std::fabs(s.y - py) > kPatrolArriveDy) {
+                if (!gPatrol.on || gPatrol.tfh != s.fh) PatrolGoTo(s.x, s.y, s.fh, 0, now, "camp");
+                TickHumanPatrol(now, snap, px, py);
+            } else {
+                gPatrol.on = false;
+                // 守点不是钉死不动：每 3~7s 朝刷怪点方向挪一下脚（45ms 方向键），像人在等刷时晃两下。
+                if (!gBrain.fidgetMs) gBrain.fidgetMs = now + PatrolJitter(now ^ 0x3c6eu, 3000, 7000);
+                if (gBrain.fidgetUntil && static_cast<int>(now - gBrain.fidgetUntil) < 0) {
+                    (void)ports::attack::HoldWalk(gBrain.fidgetDir);
+                } else if (static_cast<int>(now - gBrain.fidgetMs) >= 0) {
+                    gBrain.fidgetDir = (dx >= 0.f) ? 1 : -1;
+                    if (PatrolJitter(now ^ 0x9e37u, 0, 3) == 0) gBrain.fidgetDir = -gBrain.fidgetDir;  // 偶尔背身
+                    gBrain.fidgetUntil = now + PatrolJitter(now ^ 0x6a09u, 35, 75);  // 点按时长也别固定
+                    gBrain.fidgetMs = now + PatrolJitter(now ^ 0x51edu, 3000, 7000);
+                } else {
+                    (void)ports::attack::StopNav();
+                }
+                if (!gBrain.logMs || now - gBrain.logMs > 2000) {
+                    gBrain.logMs = now;
+                    LogLine("hunt_brain camping slot=%d zone=%d eta_spawn=%dms respawn~%.1fs", gBrain.campSlot,
+                            s.zone, static_cast<int>(gBrain.campUntil - kCampGraceMs) - static_cast<int>(now),
+                            RespawnMs() / 1000.f);
+                }
+            }
+            return true;
+        }
+    }
+
+    if (gBrain.evalMs && now - gBrain.evalMs < kEvalMs) {
+        // 两次评估之间：Sweep 继续走；Camp 上面已处理
+        if (gBrain.st == State::Sweep && gPatrol.on) {
+            TickHumanPatrol(now, snap, px, py);
+            return true;
+        }
+        return gBrain.st != State::Patrol;
+    }
+    gBrain.evalMs = now;
+
+    const uint32_t pfh = ResolveHumanPlayerFh(px, py);
+    static int32_t sMs[ports::foothold::kMaxFootholds];
+    static int32_t sAx[ports::foothold::kMaxFootholds];
+    int n = 0;
+    if (pfh) n = ports::foothold_path::MarkAllPathTime(pfh, px, sMs, sAx, ports::foothold::kMaxFootholds);
+    static ZoneEval evals[kMaxZones];
+    EvalZones(snap, px, py, now, evals, n > 0, sMs, sAx, n);
+
+    int best = -1;
+    for (int z = 0; z < gBrain.zoneN; ++z) {
+        if (evals[z].util <= 0.f) continue;
+        if (best < 0 || evals[z].util > evals[best].util) best = z;
+    }
+    if (best < 0) {
+        // 一个区都没价值（没怪、没预测）：老巡逻去没去过的刷怪点
+        SetState(State::Patrol, now, "no_zone_value");
+        gBrain.curZone = -1;
+        return false;
+    }
+    // 承诺：当前区分数不差太多、且换区间隔没到 → 不换
+    int target = best;
+    if (gBrain.curZone >= 0 && gBrain.curZone != best && evals[gBrain.curZone].util > 0.f) {
+        const bool recent = now - gBrain.zoneSinceMs < kZoneCommitMs;
+        if (recent || evals[gBrain.curZone].util >= evals[best].util * kStayRatio) target = gBrain.curZone;
+    }
+    if (target != gBrain.curZone) {
+        LogLine("hunt_brain zone %d→%d alive=%d expect=%.1f eta=%dms util=%.4f (best=%d util=%.4f)",
+                gBrain.curZone, target, evals[target].alive, evals[target].expect, evals[target].etaMs,
+                evals[target].util, best, evals[best].util);
+        gBrain.curZone = target;
+        gBrain.zoneSinceMs = now;
+    }
+    const ZoneEval& E = evals[target];
+    const Slot* goSlot = (E.bestSlot >= 0) ? &gBrain.slots[E.bestSlot] : nullptr;
+    if (!goSlot) return false;
+
+    // 已在区里（≤2s 到）且没活怪：有槽要刷就守，否则去别的区 / 巡逻
+    const bool inZone = E.etaMs >= 0 && E.etaMs <= 2000;
+    if (inZone && E.alive == 0) {
+        if (E.soonestMs && static_cast<int>(E.soonestMs - now) <= static_cast<int>(kCampMaxWaitMs)) {
+            gBrain.campSlot = E.bestSlot;
+            gBrain.campUntil = E.soonestMs + kCampGraceMs;
+            if (static_cast<int>(gBrain.campUntil - now) < static_cast<int>(kCampGraceMs))
+                gBrain.campUntil = now + kCampGraceMs;
+            SetState(State::Camp, now, "wait_respawn");
+            LogLine("hunt_brain camp slot=%d zone=%d spawn_in=%dms respawn~%.1fs", gBrain.campSlot, target,
+                    static_cast<int>(E.soonestMs) - static_cast<int>(now), RespawnMs() / 1000.f);
+            return true;
+        }
+        // 区里没怪也没预测：看有没有别的区值得去
+        int other = -1;
+        for (int z = 0; z < gBrain.zoneN; ++z) {
+            if (z == target || evals[z].util <= 0.f) continue;
+            if (other < 0 || evals[z].util > evals[other].util) other = z;
+        }
+        if (other >= 0 && evals[other].bestSlot >= 0) {
+            gBrain.curZone = other;
+            gBrain.zoneSinceMs = now;
+            const Slot& s2 = gBrain.slots[evals[other].bestSlot];
+            SetState(State::Sweep, now, "zone_empty");
+            PatrolGoTo(s2.x, s2.y, s2.fh, 0, now, "sweep");
+            TickHumanPatrol(now, snap, px, py);
+            return true;
+        }
+        SetState(State::Patrol, now, "nothing_expected");
+        return false;
+    }
+    if (inZone) {
+        // 区里有活怪但选怪器没选（被 ban / 暂不可达）：原地等 ban 过期，别在槽之间来回走。
+        gPatrol.on = false;
+        (void)ports::attack::StopNav();
+        if (!gBrain.logMs || now - gBrain.logMs > 2000) {
+            gBrain.logMs = now;
+            LogLine("hunt_brain hold zone=%d alive=%d unpicked (banned/unreachable) — wait", target, E.alive);
+        }
+        return true;
+    }
+    // 不在区里：去（有活怪时选怪器本该已选中；能到这里说明它们在别处 / 暂不可达，去区里看）
+    SetState(State::Sweep, now, "go_zone");
+    if (!gPatrol.on || gPatrol.tfh != goSlot->fh) PatrolGoTo(goSlot->x, goSlot->y, goSlot->fh, 0, now, "sweep");
+    TickHumanPatrol(now, snap, px, py);
+    return true;
+}
+
+void NoteEngaged(DWORD now) {
+    if (gBrain.st != State::Engage) SetState(State::Engage, now, "target");
+    gBrain.campSlot = -1;
+}
+}  // namespace hunt
+
+void TickHumanPatrol(DWORD now, const ports::mob::Snapshot& snap, float px, float py) {
+    if (snap.spawnPointN <= 0) return;
+    // 到点后的停顿：挪一下脚（转身）再等一会儿，像人在等刷。
+    if (gPatrol.waitUntil) {
+        if (static_cast<int>(now - gPatrol.waitUntil) < 0) {
+            if (gPatrol.tapUntil && static_cast<int>(now - gPatrol.tapUntil) < 0) {
+                (void)ports::attack::HoldWalk(gPatrol.tapDir);
+            } else if (!gPatrol.tapped) {
+                gPatrol.tapped = true;
+                (void)ports::attack::StopWalk();
+            }
+            return;
+        }
+        gPatrol.waitUntil = 0;
+        gPatrol.on = false;
+    }
+    if (!gPatrol.on || now - gPatrol.pickMs > kPatrolTargetMaxMs) {
+        if (gPatrol.on) PatrolRemember(gPatrol.tfh, now);
+        gPatrol.on = false;
+        if (gPatrol.brainDriven) {
+            // 大脑给的目标走完了 / 超时：不自己挑下一处，停下交回大脑（≤500ms 内重评）。
+            gPatrol.brainDriven = false;
+            (void)ports::attack::StopNav();
+            return;
+        }
+        if (!PickPatrolTarget(snap, px, py, now)) {
+            (void)ports::attack::StopNav();
+            return;
+        }
+    }
+    if (std::fabs(px - gPatrol.tx) <= kPatrolArriveDx && std::fabs(py - gPatrol.ty) <= kPatrolArriveDy) {
+        PatrolRemember(gPatrol.tfh, now);
+        gPatrol.waitUntil = now + PatrolJitter(now, kPatrolWaitMinMs, kPatrolWaitMaxMs);
+        gPatrol.tapDir = (PatrolJitter(now ^ 0x51edu, 0, 1) == 0) ? -1 : 1;
+        gPatrol.tapUntil = now + 45;
+        gPatrol.tapped = false;
+        (void)ports::attack::StopNav();
+        LogLine("human_patrol arrive fh=%u at=(%.0f,%.0f) wait=%ums", gPatrol.tfh, px, py,
+                (unsigned)(gPatrol.waitUntil - now));
+        return;
+    }
+    const uint32_t pfh = ResolveHumanPlayerFh(px, py);
+    const auto nav = human_nav::Tick(now, px, py, gPatrol.tx, gPatrol.ty, pfh, /*travelPortal=*/true);
+    if (nav.result == human_nav::Result::Unreachable || nav.result == human_nav::Result::Timeout) {
+        LogLine("human_patrol fail fh=%u why=%s sm=%s", gPatrol.tfh, nav.why ? nav.why : "?",
+                nav.state ? nav.state : "?");
+        PatrolRemember(gPatrol.tfh, now);
+        gPatrol.on = false;
+        human_nav::Reset();
+        (void)ports::attack::StopNav();
+        return;
+    }
+    if (!gPatrol.logMs || now - gPatrol.logMs > 2000) {
+        gPatrol.logMs = now;
+        LogLine("human_patrol going fh=%u d=(%.0f,%.0f) sm=%s hops=%d", gPatrol.tfh, gPatrol.tx - px,
+                gPatrol.ty - py, nav.state ? nav.state : "?", nav.hops);
+    }
 }
 
 void LogSettleDiag(const char* phase, DWORD now, DWORD sinceEnter, float dLand) {
@@ -5819,6 +7579,32 @@ void TickKickStress(DWORD now) {
     gKickNextDueMs = now + gKickIntervalMs;
 }
 
+// 角色是否已死（hp≤0）。真源与拟人导航同一份（human_nav::IsDead → CharacterStat，250ms 缓存）。
+// 活→死：进 State::Dead + 弹一次通知让用户手动复活（不代点复活）；死→活：回 Acquire。
+bool PlayerDeadGate(DWORD now) {
+    if (!ports::world::IsPlayReady()) return false;
+    const bool dead = human_nav::IsDead();
+    if (dead && gState != State::Dead) {
+        x::ui::player::Vitals vit{};
+        const bool ok = x::ui::player::Read(vit);
+        EnterState(State::Dead, now, "player_dead");
+        (void)ports::attack::StopNav();
+        LogLine("player dead hp=%d/%d — combat paused until revive", ok ? vit.hp : -1,
+                ok ? vit.mhp : -1);
+        char body[160];
+        snprintf(body, sizeof(body), "角色已死亡（HP 0/%d），自动打怪已暂停；请手动复活",
+                 ok ? vit.mhp : 0);
+        notify::PublishNotification(notify::NotificationEvent{
+            notify::NotificationKind::Danger, "combat.player_dead", "自动打怪", body, 8000});
+    } else if (!dead && gState == State::Dead) {
+        x::ui::player::Vitals vit{};
+        const bool ok = x::ui::player::Read(vit);
+        LogLine("player alive again hp=%d/%d — combat resumes", ok ? vit.hp : -1, ok ? vit.mhp : -1);
+        EnterState(State::Acquire, now, "revived");
+    }
+    return dead;
+}
+
 void TickImpl(DWORD now) {
     PollF5();
     PollF11NativeMob();
@@ -5834,8 +7620,9 @@ void TickImpl(DWORD now) {
         }
     }
 
-    // 进图预装 fh-ban 钩（不抬 BAN）：F5 关着也会跑，避免热开首刀与首次改虚表同拍。
-    if (!ports::fly_fh_ban::IsInstalled() && ports::world::IsPlayReady()) {
+    // 空中贴怪才预装 fh-ban 虚表（不抬 BAN），避免 F5 热开首刀与首次改虚表同拍。
+    // 拟人 / 瞬移 / 站桩不需要 CollisionDetect 钩；F6 / 赶路 / 吸怪寻簇走 SetSourceArmed 懒装。
+    if (!ports::fly_fh_ban::IsInstalled() && ports::world::IsPlayReady() && CombatGlideEnabled()) {
         static DWORD sFhBanWarmTryMs = 0;
         if (!sFhBanWarmTryMs || now - sFhBanWarmTryMs > 2000) {
             sFhBanWarmTryMs = now;
@@ -5866,6 +7653,14 @@ void TickImpl(DWORD now) {
             TickHeliRotor(now);
             SyncImpactFhBan();
         }
+        return;
+    }
+    kpi::Tick(now, gState, gHumanWalkEnabled.load(std::memory_order_acquire));
+    // 角色死亡：State::Dead，停刀停走等复活，别再 Acquire/MoveTo。死了不停会对着尸体按键
+    //（upload 2026-09-09 10:34：hp=0 后 30s 里 Acquire→MoveTo→human_timeout 循环、HopOff 空按）。
+    if (PlayerDeadGate(now)) {
+        ports::hit_pin::SetWishOid(0);
+        SyncImpactFhBan();
         return;
     }
     // 断线边沿 / soft settle：立刻 Idle + 卸刀；旋翼策略分 hold vs land quiet。
@@ -5965,7 +7760,8 @@ void TickImpl(DWORD now) {
                 }
             }
             TickLieSafeLand(now);
-            TickHeliRotor(now);
+            TickHumanGroundLand(now);
+            if (!IsHumanGroundMove()) TickHeliRotor(now);
     SyncImpactFhBan();
         }
         static DWORD sQuietLog = 0;
@@ -6005,10 +7801,18 @@ void TickImpl(DWORD now) {
     if (gHardPauseMask.load(std::memory_order_acquire) != 0) {
         if (gState != State::Idle)
             GoIdle(now, encounterPeekHold ? "encounter_peek" : "pause");
-        TickHeliRotor(now);
+        TickHumanGroundLand(now);
+        if (!IsHumanGroundMove()) TickHeliRotor(now);
         SyncImpactFhBan();
         return;
     }
+    // 超级赶路（含拟人走路贴门）期间禁止再 Tick 打怪位移，否则和 WalkStick 抢键。
+    if (travel::IsActive()) {
+        if (gState != State::Idle) GoIdle(now, "travel");
+        SyncImpactFhBan();
+        return;
+    }
+    TickHumanGroundLand(now);
     // 旋翼必须在这里转：下面每一个提前 return（skill_prepare / arm_grace / 池未热身 /
     // bad_pos / wait_pet）都会跳过 FSM，而 fh-ban 仍挂着——停一拍就是掉一段。
     TickHeliRotor(now);
@@ -6247,6 +8051,11 @@ void TickImpl(DWORD now) {
         return;
     }
 
+    // 拟人：低血无药 → 先去挂绳休息，不打怪。
+    if (IsHumanGroundMove() && TickHumanRest(now, player.x, player.y)) return;
+    // 拟人：场上有可捡高价值（装备/卷/雷之鏢）→ 先走过去捡，捡完再打。
+    if (IsHumanGroundMove() && TickHumanHvLoot(now, player.x, player.y)) return;
+
     ports::mob::Snapshot snap{};
     // Acquire / 无锁：要够新；站桩输出扫掠每拍都要活怪坐标；有锁热路径仍可读略旧缓存。
     const bool needFreshPick =
@@ -6269,6 +8078,18 @@ void TickImpl(DWORD now) {
         !hiraishinOn && gImpactApproachEnabled.load(std::memory_order_acquire);
     const bool humanOn =
         !hiraishinOn && !impactOn && gHumanWalkEnabled.load(std::memory_order_acquire);
+    // 寻怪大脑每拍观察刷怪槽（有怪 / 空了多久），交战中也要看，刷新间隔才量得准。
+    if (humanOn) {
+        hunt::Observe(snap, now);
+        if (gLock.id) hunt::NoteEngaged(now);
+    }
+    // 拟人：会话级随机小休（45~90 分钟停 2~6 分钟）。休着就停手，什么都不做。
+    if (hbreak::Tick(now, humanOn, snap, player.x, player.y, gLock.id != 0)) {
+        if (gState != State::Idle) GoIdle(now, "human_break");
+        SyncImpactFhBan();
+        return;
+    }
+    if (humanOn) PublishHumanHud(0, 0);
     const bool tpOn =
         !hiraishinOn && !impactOn && !humanOn && gTeleportEnabled.load(std::memory_order_acquire);
     const bool canApproach = impactOn || tpOn || humanOn;
@@ -6296,6 +8117,11 @@ void TickImpl(DWORD now) {
         if (impactOn) PublishHeliSetpoint(now, player.x, player.y, gLock.id != 0);
     switch (gState) {
         case State::Idle:
+            break;
+
+        case State::Dead:
+            // 由 PlayerDeadGate 在 TickImpl 顶部托管（死则早退，活则回 Acquire）；到这里说明
+            // 闸门没跑到（不该发生），保守起见不出刀不走。
             break;
 
         case State::Acquire: {
@@ -6374,11 +8200,14 @@ void TickImpl(DWORD now) {
                         sMiss = now;
                         ExplainAcquireMiss(snap, player.x, player.y, now, allowCross);
                     }
+                    // 拟人：没怪时交给寻怪大脑（守点等刷 / 去价值最高的刷怪区）；没刷怪信息退回老巡逻。
+                    if (humanOn && !hitRotateOn && !hunt::Tick(now, snap, player.x, player.y))
+                        TickHumanPatrol(now, snap, player.x, player.y);
                     break;
                 }
             }
-            // 纯拟人：不追跨层；Impact/瞬移由 MoveTo 控节奏。
-            if (!allowCross && !SameLayer(player.x, player.y, gLock.x, gLock.y)) {
+            // 拟人跨层交给 ClassifyHumanWalk / PlanFirst；站桩/瞬移仍禁跨层。
+            if (!allowCross && !humanOn && !SameLayer(player.x, player.y, gLock.x, gLock.y)) {
                 SoftBanFor(gLock.id, now, kCrossLayerForbidSoftBanMs);
                 LogLine("acquire forbid cross_layer id=%d ban=%ums (%s)", gLock.id,
                         (unsigned)kCrossLayerForbidSoftBanMs,
@@ -6430,13 +8259,18 @@ void TickImpl(DWORD now) {
                 if (!TryEnterMoveTo(now, "impact_approach")) break;
                 continue;
             }
-            if (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
-                EnterState(State::Aim, now, "in_band");
-                break;
-            }
             if (humanOn) {
+                if (HumanHitBandReady(player.x, player.y, gLock.x, gLock.y, standOff)) {
+                    EnterState(State::Aim, now, "in_band");
+                    break;
+                }
                 if (!TryEnterMoveTo(now, "human_approach")) break;
                 continue;
+            }
+            if (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) &&
+                !TeleportWrongFloor(player.y, gLock.y)) {
+                EnterState(State::Aim, now, "in_band");
+                break;
             }
             if (tpOn) {
                 // 贴怪开：出命中带即贴；CD 未好不进 MoveTo。
@@ -6497,7 +8331,8 @@ void TickImpl(DWORD now) {
                     EnterState(State::Firing, now, "heli_strike");
                     continue;
                 }
-                if (!x::features::invuln::IsEnabled()) {
+                if (!x::features::invuln::IsEnabled() &&
+                    !x::features::invuln::HeliOverrideInvulnGate()) {
                     static DWORD sInv = 0;
                     if (!sInv || now - sInv > 1500) {
                         sInv = now;
@@ -6546,41 +8381,20 @@ void TickImpl(DWORD now) {
                     EnterState(State::Acquire, now, gLastLockLostWhy);
                     continue;
                 }
-                if (!SameLayer(player.x, player.y, gLock.x, gLock.y)) {
-                    SoftBanFor(gLock.id, now, kCrossLayerForbidSoftBanMs);
-                    LogLine("MoveTo human forbid cross_layer id=%d ban=%ums", gLock.id,
-                            (unsigned)kCrossLayerForbidSoftBanMs);
-                    ClearLockRetarget(/*forceLite=*/false);
-                    EnterState(State::Acquire, now, "human_cross");
-                    continue;
-                }
-                {
-                    const auto hv = ClassifyHumanWalk(player.x, player.y, gLock.x, gLock.y,
-                                                     kHumanWalkChaseY);
-                    if (hv != HumanWalkVerdict::Ok) {
-                        // BIN 01:07：|dy|~46~48 被当成断崖 5s → 乒乓洗黑；Y 隙短晾，Cliff 才 5s。
-                        const DWORD banMs = (hv == HumanWalkVerdict::Cliff)
-                                               ? kHumanUnreachableSoftBanMs
-                                               : kHumanYGapSoftBanMs;
-                        SoftBanFor(gLock.id, now, banMs, kBanUnreachable);
-                        LogLine("MoveTo human forbid walk id=%d d=(%.0f,%.0f) why=%s ban=%ums",
-                                gLock.id, gLock.x - player.x, gLock.y - player.y,
-                                hv == HumanWalkVerdict::Cliff ? "cliff" : "ygap",
-                                (unsigned)banMs);
-                        ClearLockRetarget(/*forceLite=*/false);
-                        EnterState(State::Acquire, now, "human_walk");
-                        continue;
-                    }
-                }
                 // 拟人进带：只用真命中带。禁 InMeleeHoldBand(dx<100)——会在 ~99px 停走空砍
                 // （BIN 21:14 standOff=12 时 hit≈19，却在 dx=99 human_in_band）。
-                if (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
+                if (TryHumanClimbThreatRetarget(snap, player.x, player.y, now)) {
+                    EnterState(State::Aim, now, "human_climb_clear");
+                    continue;
+                }
+                if (HumanHitBandReady(player.x, player.y, gLock.x, gLock.y, standOff) &&
+                    !human_nav::AirborneNav() && !human_nav::VerticalBusy()) {
                     EnterState(State::Aim, now, "human_in_band");
                     continue;
                 }
-                // 途中已进命中带的同层怪：停走换锁出刀，勿路过浪费。
+                // 途中同层顺路怪（约 80px，含刚跳过的）：换锁出刀，勿路过。
                 if (TryHumanPassbyRetarget(snap, player.x, player.y, standOff, now)) {
-                    // EnterState(Aim) 离 MoveTo 会 StopWalk，此处勿再同步抢泵一次。
+                    // EnterState(Aim) 离 MoveTo 会 StopNav，此处勿再同步抢泵一次。
                     EnterState(State::Aim, now, "human_passby");
                     continue;
                 }
@@ -6592,88 +8406,122 @@ void TickImpl(DWORD now) {
                     continue;
                 }
                 const float absDx = std::fabs(dx);
-                // 失焦：人走不动属预期，推进锚点冻住 walkAge/progAge（BIN 01:11 no_move 洗 ban）。
+                // 失焦：人走不动属预期，推进锚点冻住 walkAge（BIN 01:11 no_move 洗 ban）。
                 if (gHumanWalkFocusTickMs && now > gHumanWalkFocusTickMs &&
                     !GameWindowLikelyFocused()) {
-                    const DWORD dt = now - gHumanWalkFocusTickMs;
-                    if (gStateEnterMs) gStateEnterMs += dt;
-                    if (gHumanWalkArmedMs) gHumanWalkArmedMs += dt;
+                    if (gStateEnterMs) gStateEnterMs += now - gHumanWalkFocusTickMs;
+                    if (gHumanHopMs) gHumanHopMs += now - gHumanWalkFocusTickMs;
                 }
                 gHumanWalkFocusTickMs = now;
-                const DWORD walkAge = gStateEnterMs ? (now - gStateEnterMs) : 0u;
-                const float inBandDx = standOff * kHitBandMaxFrac + 8.f;
-                // 采样开步锚点（未武装前也要，用来算 travel 以武装进度钟）。
-                if (gHumanWalkStartAbsDx < 0.f) {
-                    gHumanWalkStartAbsDx = absDx;
-                    gHumanWalkStartPx = player.x;
-                    gHumanWalkStartDir = (dx < 0.f) ? -1 : 1;
-                }
-                float travel =
-                    (player.x - gHumanWalkStartPx) * static_cast<float>(gHumanWalkStartDir);
-                // 进度钟：首次真正开走再起算 stall（BIN：失焦 travel=0 勿空等 2.5s）。
-                if (!gHumanWalkArmedMs) {
-                    if (travel >= kHumanWalkArmTravelPx) {
-                        gHumanWalkArmedMs = now;
-                        gHumanWalkStartAbsDx = absDx;
-                        gHumanWalkStartPx = player.x;
-                        gHumanWalkStartDir = (dx < 0.f) ? -1 : 1;
-                        travel = 0.f;
-                    } else if (walkAge >= kHumanWalkArmGiveUpMs) {
-                        SoftBanFor(gLock.id, now, kHumanNoMoveSoftBanMs, kBanUnreachable);
-                        LogLine("MoveTo human no_move id=%d age=%ums dx=%.0f travel=%.0f — "
-                                "softBan %ums",
-                                gLock.id, (unsigned)walkAge, dx, travel,
-                                (unsigned)kHumanNoMoveSoftBanMs);
-                        ClearLockRetarget(/*forceLite=*/false);
-                        EnterState(State::Acquire, now, "human_no_move");
-                        continue;
-                    }
-                }
-                const DWORD progAge =
-                    gHumanWalkArmedMs ? (now - gHumanWalkArmedMs) : 0u;
-                const float closing = gHumanWalkStartAbsDx - absDx;
-                // 负进展 stall：武装后自己几乎没挪且 |dx| 没缩短 → 卡边。
-                if (gHumanWalkArmedMs && progAge >= kHumanWalkStallMs && absDx > inBandDx &&
-                    closing < kHumanWalkMinProgressPx && travel < kHumanWalkMinProgressPx) {
-                    SoftBanFor(gLock.id, now, kHumanUnreachableSoftBanMs, kBanUnreachable);
-                    LogLine("MoveTo human stall id=%d age=%ums prog=%ums dx=%.0f startDx=%.0f "
-                            "travel=%.0f closing=%.0f — softBan %ums",
-                            gLock.id, (unsigned)walkAge, (unsigned)progAge, dx,
-                            gHumanWalkStartAbsDx, travel, closing,
-                            (unsigned)kHumanUnreachableSoftBanMs);
-                    ClearLockRetarget(/*forceLite=*/false);
-                    EnterState(State::Acquire, now, "human_stall");
+
+                const uint32_t pfh = ResolveHumanPlayerFh(player.x, player.y);
+                const auto nav = human_nav::Tick(now, player.x, player.y, gLock.x, gLock.y, pfh);
+                if (nav.result == human_nav::Result::Dead) {
+                    // 导航先于闸门读到死亡：不 ban 怪、不跳边，直接进 Dead 态。
+                    EnterState(State::Dead, now, "nav_dead");
                     continue;
                 }
-                if (gStateEnterMs && walkAge >= kHumanWalkTimeoutMs) {
+                if (nav.result == human_nav::Result::Unreachable ||
+                    nav.result == human_nav::Result::Timeout) {
+                    const bool blockedChase =
+                        nav.hops == 0 && nav.why && std::strcmp(nav.why, "blocked") == 0;
+                    // 失焦顶住：键根本没送进去，不是路不通；别洗 ban（BIN 01:11）。
+                    if (blockedChase && !GameWindowLikelyFocused()) {
+                        static DWORD sUnfocused = 0;
+                        if (!sUnfocused || now - sUnfocused > 2000) {
+                            sUnfocused = now;
+                            LogLine("MoveTo human blocked unfocused id=%d — retry", gLock.id);
+                        }
+                        human_nav::Reset();
+                        RenewLootPulseHold(now);
+                        break;
+                    }
+                    const bool ygap = std::fabs(gLock.y - player.y) > kHumanWalkChaseY;
+                    const DWORD banMs = (nav.result == human_nav::Result::Timeout || !ygap)
+                                            ? kHumanUnreachableSoftBanMs
+                                            : kHumanYGapSoftBanMs;
+                    SoftBanFor(gLock.id, now, banMs, kBanUnreachable);
+                    // 同层追怪顶住只 ban 这只怪；ban 它脚下的台会把整层同伴一起晾干。
+                    if (!blockedChase)
+                        BanHumanNavFail(gLock.x, gLock.y, nav.fromFh, nav.toFh, now, nav.kind);
+                    ++kpi::gAcc.navFails;
+                    LogLine("MoveTo human nav_fail id=%d why=%s kind=%d hops=%d sm=%s ban=%ums",
+                            gLock.id, nav.why && nav.why[0] ? nav.why : "?", (int)nav.kind,
+                            nav.hops, nav.state ? nav.state : "?", (unsigned)banMs);
+                    ClearLockRetarget(/*forceLite=*/false);
+                    EnterState(State::Acquire, now, "human_nav");
+                    // no_path 只能等下一拍再选：同拍 continue 会把整池怪挨个 no_path + ban，
+                    // 再被 empty_pool relax 放回来，一秒 385 条（BIN 17:13:29）。
+                    if (nav.why && std::strcmp(nav.why, "no_path") == 0) break;
+                    continue;
+                }
+                if (nav.result == human_nav::Result::KeyFail) {
+                    static DWORD sNavKey = 0;
+                    if (!sNavKey || now - sNavKey > 1500) {
+                        sNavKey = now;
+                        LogLine("MoveTo human nav key fail id=%d", gLock.id);
+                    }
+                    RenewLootPulseHold(now);
+                    break;
+                }
+                // 多跳长路上有更划算的怪就换（nav 下一拍按新目标重规划）。
+                if (TryHumanBetterEtaRetarget(snap, player.x, player.y, now, nav.hops)) {
+                    RenewLootPulseHold(now);
+                    break;
+                }
+                if (nav.phase != human_nav::Phase::WalkToMob) {
+                    RenewLootPulseHold(now);
+                    break;
+                }
+
+                // 进度由 nav 判：顶住会自己跳 / 退步 / 重规划，穷尽才回 Unreachable。
+                // 追着远离的怪、等怪走来都不算超时；只有真在走却到不了才 timeout。
+                // 秒表按「这一跳」计：每完成一跳（from/to/hops 变化）归零。旧口径从进 MoveTo
+                // 起算、cap 却按**剩余**跳数给，长链走到末段 age 已 11s、cap 缩回 8s → 刚爬完
+                // 绳就 timeout + ban 目标层，人又爬回去（BIN 10:23:15 / 10:23:27 / 10:24:32）。
+                const uint64_t hopSig = (static_cast<uint64_t>(nav.fromFh) << 40) |
+                                        (static_cast<uint64_t>(nav.toFh) << 8) |
+                                        static_cast<uint64_t>(nav.hops & 0xff);
+                if (gHumanHopEpoch != gStateEnterMs || gHumanHopSig != hopSig || !gHumanHopMs) {
+                    gHumanHopEpoch = gStateEnterMs;
+                    gHumanHopSig = hopSig;
+                    gHumanHopMs = now;
+                }
+                const DWORD walkAge = gStateEnterMs ? (now - gStateEnterMs) : 0u;
+                const DWORD hopAge = now - gHumanHopMs;
+                const bool chasingOrWaiting = nav.progress == human_nav::Progress::Chasing ||
+                                              nav.progress == human_nav::Progress::Waiting;
+                // 单跳兜底：|dx| 定基础时长，竖直动作（爬绳 / 下跳）再加 3s。整趟另有硬上限。
+                DWORD hopCap = HumanWalkTimeoutForDx(absDx);
+                if (nav.kind != ports::foothold_path::EdgeKind::Walk) hopCap += 3000u;
+                // 长绳（101020000 x=-98 长 1392px 要爬 14s）：nav 自己按绳长给的时限 + 2s 余量，别在半途 ban 目标。
+                if (nav.actionBudgetMs && hopCap < nav.actionBudgetMs + 2000u) hopCap = nav.actionBudgetMs + 2000u;
+                const bool hopStuck = !chasingOrWaiting && hopAge >= hopCap;
+                const bool tripTooLong = gStateEnterMs && walkAge >= kHumanTripHardCapMs;
+                if (gStateEnterMs && (hopStuck || tripTooLong)) {
                     SoftBanFor(gLock.id, now, kHumanUnreachableSoftBanMs, kBanUnreachable);
-                    LogLine("MoveTo human timeout id=%d age=%ums dx=%.0f — softBan %ums", gLock.id,
-                            (unsigned)walkAge, dx, (unsigned)kHumanUnreachableSoftBanMs);
+                    BanHumanNavFail(gLock.x, gLock.y, pfh, nav.toFh, now, nav.kind);
+                    LogLine("MoveTo human timeout id=%d why=%s age=%ums hopAge=%ums dx=%.0f hopCap=%ums "
+                            "hops=%d — softBan %ums",
+                            gLock.id, hopStuck ? "hop_stuck" : "trip_cap", (unsigned)walkAge,
+                            (unsigned)hopAge, dx, (unsigned)hopCap, nav.hops,
+                            (unsigned)kHumanUnreachableSoftBanMs);
                     ClearLockRetarget(/*forceLite=*/false);
                     EnterState(State::Acquire, now, "human_timeout");
                     continue;
                 }
                 if (absDx < 1.f) {
-                    // 怪心重叠：等怪挪开或超时换靶，勿左右抽风。
                     RenewLootPulseHold(now);
-                    break;
-                }
-                const int dir = (dx < 0.f) ? -1 : 1;
-                if (!ports::attack::HoldWalk(dir)) {
-                    static DWORD sHoldFail = 0;
-                    if (!sHoldFail || now - sHoldFail > 1500) {
-                        sHoldFail = now;
-                        LogLine("MoveTo human HoldWalk fail id=%d dir=%d", gLock.id, dir);
-                    }
                     break;
                 }
                 static DWORD sWalkLog = 0;
                 if (!sWalkLog || now - sWalkLog > 800) {
                     sWalkLog = now;
-                    LogLine("MoveTo human walk id=%d dx=%.0f dir=%d age=%ums", gLock.id, dx, dir,
-                            gStateEnterMs ? (unsigned)(now - gStateEnterMs) : 0u);
+                    LogLine("MoveTo human walk id=%d dx=%.0f hops=%d age=%ums sm=%s prog=%d",
+                            gLock.id, dx, nav.hops,
+                            gStateEnterMs ? (unsigned)(now - gStateEnterMs) : 0u,
+                            nav.state ? nav.state : "?", (int)nav.progress);
                 }
-                // 拟人走路：不出刀即可吸（charVac 直调 Send）。续脉冲边沿供 interval 豁免。
                 RenewLootPulseHold(now);
                 break;
             }
@@ -6689,7 +8537,9 @@ void TickImpl(DWORD now) {
             // 出刀互斥只靠 interval/pendingUp；贴怪瞬移不再等前摇。
 
             // 已在命中带则直接打，否则立刻贴（无 minDx）。
-            if (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
+            // 错台 |dy|>45 禁止 in_band：与 Acquire 同一闸（BIN 4e8558 / Bugbot MoveTo 漏网）。
+            if (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) &&
+                !TeleportWrongFloor(player.y, gLock.y)) {
                 EnterState(State::Firing, now, "in_band");
                 continue;
             }
@@ -6750,8 +8600,10 @@ void TickImpl(DWORD now) {
             const float minHop = hug ? kMinHugHop : kMinReapproachHop;
             // 黏住无脑A：hop 小且人还近 → 直接砍；禁止翻侧 Aim↔MoveTo 空转。
             if (hop < minHop) {
-                if (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
-                    InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
+                if (!TeleportWrongFloor(player.y, gLock.y) &&
+                    !TeleportTooClose(player.x, gLock.x) &&
+                    (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
+                     InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff))) {
                     LogLine("MoveTo melee_hold id=%d hop=%.1f dx=%.0f → fire", gLock.id, hop,
                             gLock.x - player.x);
                     ClearStickySpin();
@@ -7088,11 +8940,7 @@ void TickImpl(DWORD now) {
             // 挂台后再对齐：已对只同步缓存；不一致才 SetInput。仍 break，下一拍才 Aim/Fire。
             {
                 const float px = posOk ? landCtx.x : player.x;
-                float faceDx = gLock.x - px;
-                // |dx|<死区时 AlignFace 不转。贴脸 hop BIN 第一刀大量 fw=1；用落点侧合成朝向。
-                // gLandSide：-1=站怪左（应对右）/ +1=站怪右（应对左）。
-                if (std::fabs(faceDx) < 8.f && gLandSide != 0)
-                    faceDx = static_cast<float>(-gLandSide) * 16.f;
+                const float faceDx = CombatFaceDx(px, gLock.x);
                 ports::teleport::FlightState st{};
                 const int ma =
                     (ports::teleport::QueryFlightState(st) && st.ok) ? st.ma : -1;
@@ -7195,11 +9043,13 @@ void TickImpl(DWORD now) {
             // dx<100）是给地面站桩定的，空中够不到那么远。Impact 悬停时必须再叠一道出刀带
             // 的 dy+dx，否则这条支路会绕过上面刚收紧的 heli_hover 门禁继续空砍。
             // Impact 档禁止再走 InHitBand(ClampStandOff)：否则自定义站距下贴脸仍 ready 出刀。
-            if (!impactOn &&
-                (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
+            if (!impactOn && !(tpOn && TeleportWrongFloor(player.y, gLock.y)) &&
+                !(tpOn && TeleportTooClose(player.x, gLock.x)) &&
+                ((humanOn && HumanHitBandReady(player.x, player.y, gLock.x, gLock.y, standOff)) ||
                  (!humanOn &&
-                  InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff)))) {
-                const float faceDx = gLock.x - player.x;
+                  (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
+                   InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff))))) {
+                const float faceDx = CombatFaceDx(player.x, gLock.x);
                 (void)ports::attack::FaceToward(faceDx);
                 EnterState(State::Firing, now, "ready");
                 continue;
@@ -7215,12 +9065,21 @@ void TickImpl(DWORD now) {
                 if (TryEnterMoveTo(now, "aim_human_approach")) continue;
                 break;
             }
-            if (tpOn && NeedsReapproach(player.x, player.y, gLock.x, gLock.y)) {
+            if (tpOn && (NeedsReapproach(player.x, player.y, gLock.x, gLock.y) ||
+                         TeleportWrongFloor(player.y, gLock.y) ||
+                         TeleportTooClose(player.x, gLock.x))) {
                 // d1a58e：sticky 冷却中禁止 aim_reapproach 回灌 MoveTo。
                 if (StickyCorrectCooling(now)) {
                     break;
                 }
-                if (TryEnterMoveTo(now, "aim_reapproach")) continue;
+                const char* why = TeleportWrongFloor(player.y, gLock.y) ? "aim_wrong_floor"
+                                  : TeleportTooClose(player.x, gLock.x) ? "recenter_hug"
+                                                                        : "aim_reapproach";
+                if (TeleportTooClose(player.x, gLock.x) &&
+                    !TeleportWrongFloor(player.y, gLock.y)) {
+                    (void)TryCorrectSameLock(now, player.x, gLock.x, "recenter_hug");
+                }
+                if (TryEnterMoveTo(now, why)) continue;
                 break;
             }
             // 中距：等 CD / 等怪走近，不翻侧。
@@ -7288,7 +9147,7 @@ void TickImpl(DWORD now) {
             // sticky fw=2 脸还朝上一只 → 贴着怪、脸朝反、不出刀（BIN 21:49:33.655
             // d≈72 贴住，vy+iv=0 空 965ms，ma 到第一刀才 7→6）。
             // 忙锁仍在后面：等 busy 的 800ms 里转身照样免费。
-            const float faceDx = gLock.x - player.x;
+            const float faceDx = CombatFaceDx(player.x, gLock.x);
             (void)ports::attack::FaceToward(faceDx);
             const bool firstOfLock = (gLock.lockFires == 0);
             {
@@ -7570,6 +9429,19 @@ void TickImpl(DWORD now) {
                                 gs.bodyW, gs.bodyH, faceLeft ? 1 : 0, gLock.x - player.x,
                                 gLock.y - player.y);
                         }
+                        // 错台：InMeleeHoldBand 因 |dy|≤100 仍放行，FireGate 不赶人。
+                        // BIN 4e8558：in_band dy=73 → separate 空站 4s → dx=100 才 await_band。
+                        if (tpOn && TeleportWrongFloor(player.y, gLock.y) &&
+                            !StickyCorrectCooling(now) &&
+                            TryEnterMoveTo(now, "geom_separate")) {
+                            continue;
+                        }
+                        // 同层贴怪心 / 盒在背后：错台闸不出手。BIN 09800f d=(-3,-1) 空站 2.4s。
+                        if (tpOn && TeleportTooClose(player.x, gLock.x) &&
+                            !StickyCorrectCooling(now)) {
+                            (void)TryCorrectSameLock(now, player.x, gLock.x, "geom_hug");
+                            if (TryEnterMoveTo(now, "geom_hug")) continue;
+                        }
                         break;
                     }
                     if (gs.geom == ports::hit_geom::Geom::Unknown) {
@@ -7759,9 +9631,19 @@ void TickImpl(DWORD now) {
                 continue;
             }
             // 黏住无脑A：近距继续砍；跨层/真远才重贴。
-            const float dx = std::fabs(gLock.x - player.x);
             const bool same = SameLayer(player.x, player.y, gLock.x, gLock.y);
             const bool firstOfLock = (gLock.lockFires == 0);
+            if (tpOn && TeleportWrongFloor(player.y, gLock.y)) {
+                if (StickyCorrectCooling(now)) break;
+                if (TryEnterMoveTo(now, "wrong_floor")) continue;
+                break;
+            }
+            if (tpOn && TeleportTooClose(player.x, gLock.x)) {
+                if (StickyCorrectCooling(now)) break;
+                (void)TryCorrectSameLock(now, player.x, gLock.x, "recenter_hug");
+                if (TryEnterMoveTo(now, LiveStepOn() ? "hug_follow" : "recenter_hug")) continue;
+                break;
+            }
             // 直升机：悬停续砍；漂出站位才 MoveTo；怪死走 Acquire 换下一只。
             if (impactOn && !gLock.needApproachCorrect) {
                 if (!CombatHeliAirborne()) {
@@ -7788,7 +9670,7 @@ void TickImpl(DWORD now) {
             if (same && !gLock.needApproachCorrect) {
                 if (humanOn) {
                     // 出带迟滞：仍在宽松带内就续砍，勿 reapproach→立刻 human_in_band 抖 StopWalk。
-                    if (InHumanHoldBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
+                    if (HumanHoldBandReady(player.x, player.y, gLock.x, gLock.y, standOff)) {
                         if (!ports::attack::CanFirePrimaryEx(firstOfLock)) break;
                         EnterState(State::Firing, now, "still_valid");
                         continue;
@@ -7801,10 +9683,6 @@ void TickImpl(DWORD now) {
                     EnterState(State::Firing, now, "still_valid");
                     continue;
                 }
-            }
-            if (tpOn && same && dx < 1.f) {
-                if (!TryEnterMoveTo(now, LiveStepOn() ? "hug_follow" : "recenter_hug")) break;
-                continue;
             }
             if (humanOn && same) {
                 if (!TryEnterMoveTo(now, "reapproach_human")) break;
@@ -7917,6 +9795,12 @@ void OnCombatMapChange(const char* why) {
         ArmHiraishinLootHold("map_change_travel");
         return;
     }
+    if (IsHumanGroundMove()) {
+        PrepareHumanGroundLand(why ? why : "map_change");
+        BeginMapArmGrace(now, why ? why : "map_change");
+        ArmHiraishinLootHold("map_change");
+        return;
+    }
 
     const uint32_t holders =
         gHardPauseMask.load(std::memory_order_acquire) & kSafeLandHoldersMask;
@@ -7975,6 +9859,7 @@ void NoteLockFire() {
     if (!gLock.id) return;
     const DWORD now = GetTickCount();
     gLock.lockFires += 1;
+    ++kpi::gAcc.fires;
     ReleaseKillTimeoutHold(now);
     if (gHitRotateEnabled.load(std::memory_order_acquire)) {
         gHitRotateObserveUntil = now + kHitRotateObserveMs;
@@ -8044,10 +9929,13 @@ void SetEnabled(bool on) {
     if (prev == on) return;
     if (!on) {
         // 纯普攻：关 F5 = 松攻击键 + 停状态机 + 停旋翼（顺带卸 fh-ban 让人落地）。
+        kpi::Flush(GetTickCount(), "f5_off");
         ClearLock();
         ClearHitRotateState();
         ports::attack::ForceRelease();
         gState = State::Idle;
+        if (gHvLooting) EndHumanHvLoot(GetTickCount(), "f5_off");
+        PublishHumanHud(0, 0);
         gSettleUntil = 0;
         gNeedEnableFaceSettle.store(false, std::memory_order_release);
         gEnableHoldUntilMs = 0;
@@ -8076,6 +9964,12 @@ void SetEnabled(bool on) {
             gNeedEnableFaceSettle.store(false, std::memory_order_release);
             ArmHiraishinLootHold("f5_enable");
             LogLine("enable hiraishin (gather: no blink, melee tap)");
+        } else if (!CombatGlideEnabled()) {
+            // 拟人 / 瞬移找怪 / 关闭贴怪：地面走或瞬移，不起飞、不 latch CombatImpact。
+            gEnableHoldUntilMs = 0;
+            gEnableHoldPendingTakeoff = false;
+            gHeliAirborneUntilMs = 0;
+            LogLine("enable ground (no heli latch; human/tp/off)");
         } else {
             gEnableHoldUntilMs = x::runtime::NowMs() + kCombatEnableHoldMs;
             ports::teleport::FlightState st{};
@@ -8128,8 +10022,10 @@ void SetEnabled(bool on) {
         x::features::auto_supply::RecordHangupFarmMap("simple_combat_on");
         // 开打怪：立刻扫一帧，避免卡在 idle 360ms Wait。
         mob_scan::RequestImmediateScan();
-        // 热开兜底：即便 Tick 预装未跑到，也先装钩再 Sync（仍可能本拍不 BAN）。
-        (void)ports::fly_fh_ban::WarmInstall();
+        // 仅空中贴怪预装虚表再 Sync（仍可能本拍不 BAN）。拟人不得走这条。
+        if (CombatGlideEnabled()) {
+            (void)ports::fly_fh_ban::WarmInstall();
+        }
     }
     SyncImpactFhBan();
     LogLine("SetEnabled %d teleport=%d human=%d liveStep=%d standOff=%u minDx=%u fhBan=%d",
@@ -8190,6 +10086,11 @@ void SetHighValueLootUrgent(bool on) {
         }
         LogLine("highValueLoot urgent=0");
     }
+}
+
+void QueryHumanHud(uint32_t* hint, uint32_t* remainMs) {
+    if (hint) *hint = gHumanHudHint.load(std::memory_order_acquire);
+    if (remainMs) *remainMs = gHumanHudRemainMs.load(std::memory_order_acquire);
 }
 
 void SetAttackIntervalMs(uint32_t ms) {
@@ -8302,7 +10203,13 @@ void SetImpactApproachEnabled(bool on) {
     const bool prev = gImpactApproachEnabled.exchange(on, std::memory_order_acq_rel);
     if (prev == on) return;
     if (on) {
-        (void)ports::attack::StopWalk();
+        (void)ports::attack::StopNav();
+        human_nav::Reset();
+        // 拟人会话里 Tick 不再预装；切回空中贴怪时先改虚表，再 Sync 抬 BAN。
+        (void)ports::fly_fh_ban::WarmInstall();
+        if (gEnabled.load(std::memory_order_acquire)) {
+            LatchCombatHeli("impact_on");
+        }
     }
     heli::Reset();
     gHeliAirborneUntilMs = 0;
@@ -8353,6 +10260,7 @@ void SetFlySpeedPct(unsigned pct) {
     heli::SetSpeedScale(heli::Owner::Travel, scale);
     heli::SetSpeedScale(heli::Owner::Gather, scale);
     const float now = heli::SpeedScale(heli::Owner::Combat);
+    invuln::SetWalkGlideVeto(pct <= xcat::kHeliWalkGlideSpeedPct);
     // Clamp 后仍相同就不刷日志：IPC 每次下发全量配置，否则每轮都打一行。
     if (std::fabs(now - prev) < 1e-3f) return;
     LogLine("SetFlySpeedPct %u → %.2fX (req %.2f)%s", pct, now, scale,
@@ -8368,18 +10276,25 @@ void SetHumanWalkEnabled(bool on) {
     if (prev == on) return;
     if (!on) {
         // 切回瞬移/Impact：立刻清走路锁存，避免 InputX 粘住。
-        (void)ports::attack::StopWalk();
+        (void)ports::attack::StopNav();
+        human_nav::Reset();
     }
     LogLine("SetHumanWalkEnabled %d", on ? 1 : 0);
 }
 
 bool IsHumanWalkEnabled() { return gHumanWalkEnabled.load(std::memory_order_acquire); }
 
+bool IsHumanGroundMove() {
+    return gHumanWalkEnabled.load(std::memory_order_acquire) &&
+           !gImpactApproachEnabled.load(std::memory_order_acquire);
+}
+
 void SetHiraishinEnabled(bool on) {
     const bool prev = gHiraishinEnabled.exchange(on, std::memory_order_acq_rel);
     if (prev == on) return;
     if (on) {
-        (void)ports::attack::StopWalk();
+        (void)ports::attack::StopNav();
+        human_nav::Reset();
         UnlatchCombatHeli("hiraishin_on");
         if (!HeliHeldByPeer()) {
             heli::Reset();
@@ -8552,6 +10467,10 @@ void RequestSafeLand(const char* why) {
     // BIN 9d504e：卖装 stick 赶路中换图若 Combat 抢旋翼会和 Travel 互踩。
     if (travel::IsActive()) {
         LogLine("lie_safe_land request skip travel_active why=%s", why ? why : "?");
+        return;
+    }
+    if (IsHumanGroundMove()) {
+        PrepareHumanGroundLand(why ? why : "request");
         return;
     }
     const char* w = (why && why[0]) ? why : "request";

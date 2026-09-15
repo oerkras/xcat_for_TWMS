@@ -1234,9 +1234,13 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     // ── 闸门 ─────────────────────────────────────────────────────────
     // emergency 只让过节奏闸与技能前置闸；无敌闸：地上禁，悬空放行抗重力。
     // BIN 681ebe：soft land quiet 期 Combat 停；无敌已可 MyUser 急钉。悬空仍放行抗重力。
-    // → 开打前自由落体；出刀仍由 MoveTo/Firing 的 invuln 门挡着。
+    // → 开打前自由落体。F5≤1.00X 否决、F6 手动飞、Travel 贴门：地上起飞也放行。
+    // BIN 17:34:31：DriveRotor 因 !IsEnabled 早退 + fh-ban → 直接掉落。
     if (!x::features::invuln::IsEnabled()) {
-        if (st.onFh) {
+        const bool allowOff =
+            o == Owner::Fly || o == Owner::Travel ||
+            x::features::invuln::HeliOverrideInvulnGate();
+        if (st.onFh && !allowOff) {
             tm.guard = "invuln_off";
             gLastTickFired = false;
             if (out) *out = tm;
@@ -1300,7 +1304,10 @@ bool Tick(Owner o, DWORD now, Telemetry* out) {
     vopts.quietLog = true;
     // 悬空 + 无敌未钉（soft stagger）：仍要抗重力。ImpactSetVelocity 默认拒 invuln_off
     // → guard=impact_fail 自由落体（BIN f99271）。地上仍尊重无敌闸。
-    vopts.force = !st.onFh && !x::features::invuln::IsEnabled();
+    // F5≤1.00X 否决、F6 手动飞、Travel 贴门（不再 Hold 无敌）：地上起飞也 force。
+    vopts.force = !x::features::invuln::IsEnabled() &&
+                  (!st.onFh || o == Owner::Fly || o == Owner::Travel ||
+                   x::features::invuln::HeliOverrideInvulnGate());
     const bool ok = ports::teleport::ImpactSetVelocity(
         cmdVx, cmdVy, ports::teleport::ImpactRoute::SetImpactNext, vopts);
     if (!ok) {

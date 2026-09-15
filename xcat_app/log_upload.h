@@ -76,13 +76,19 @@ struct LogUploadHistoryEntry {
 LogUploadPrefs LoadLogUploadPrefs(const std::string& exeBinDir, const LogUploadPrefs& defaults);
 void           SaveLogUploadPrefs(const std::string& exeBinDir, const LogUploadPrefs& prefs);
 
-// 本机稳定身份：计算机名 + deviceId + 本机网卡 MAC（探活/封禁/白名单）。
+// 本机稳定身份：计算机名 + deviceId + 硬件指纹 + 本机网卡 MAC（探活/封禁/白名单）。
 // deviceId：优先 user.ini；ProgramData 按安装路径分片镜像（抗清目录、多目录不互抢）；
+// hwfp：MachineGuid + SMBIOS UUID。整包拷到另一台物理机、或整盘克隆换了固件 UUID，
+// 都与 ini / state\\hw.dat / ProgramData 记下的不一致 → 重发 deviceId，必须再贴卡。
+// 只删 user.ini 里那一行不够：安装目录和 ProgramData 还有副本。
+// 同机复制/换目录指纹不变，继续免输。旧仅-GUID 指纹升级到 v2 不重发。
 // 整段加锁 + 进程内缓存，防并发首调双 mint / 读失败乱跳。
 // TOKEN：调试 TAB 字段，随探活头 X-XCat-Token 上报（对外不说明用途）。
 struct ClientHostIdentity {
     std::string machine;
     std::string deviceId;
+    std::string hwfp;    // 现用指纹（v2=MachineGuid+SMBIOS；读不到 SMBIOS 时等于 v1）
+    std::string hwfpV1;  // 仅 MachineGuid 的旧指纹，供服务端把 v1 槽迁到 v2
     // 规范化小写冒号分隔，如 aa:bb:cc:dd:ee:ff；主网卡在前。
     std::vector<std::string> macs;
     std::string token;

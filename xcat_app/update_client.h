@@ -75,6 +75,8 @@ inline int AccessGateExitCode(AccessGateExitKind kind) {
 void           SetAccessGateUiHwnd(void* hwnd /* HWND */);
 // WndProc 调用：弹窗并返回退出码（调用方 ExitProcess）。
 int            HandleAccessGateUiMessage(unsigned long long wParam);
+// 运维弹窗：主窗 WndProc 调；不退出进程。
+void           HandleOpsNoticeUiMessage();
 // 标题栏关窗：本会话 AccessDeny / 门禁 pending / 本机粘性 → 也杀游戏。
 bool           ShouldKillGameOnLauncherClose(const std::string& payloadBinDir);
 void           StopGameForAccessGateExit();

@@ -76,7 +76,21 @@ bool FaceNeedsFlip(float dx);
 // XCAT_WALK_KBD=0 回落 Win32 SendInput（需前台）；XCAT_WALK_KP=1 = PackBit 试验（证伪）。
 bool HoldWalk(int inputX);
 bool StopWalk();
+// 走路键「按着却不走」时补一个同帧松→按边沿并重灌 SetInput（方向不变，人看不出）。
+// 只在 Keyboard 内部输入模式有效；没在走 / 其他模式 → no-op 返回 true。
+bool RefreshWalk();
 bool IsWalkHeld();
+
+// 拟人爬绳/楼梯：↑=+1 ↓=-1 0=松。同向短路，不抢泵。
+bool HoldVertical(int inputY);
+bool ReleaseVertical();
+
+// 非阻塞跳（LeftAlt）。到期由 TickReleases 松，禁止 HoldUntil 堵战斗 worker。
+bool PulseJump(DWORD holdMs = 90);
+bool ReleaseJump();
+
+// StopWalk + 松 ↑↓/Alt。离开 MoveTo / 关拟人 / 关 F5 用。
+bool StopNav();
 
 // 站桩输出：同一泵 job 内把魂闪到 (x,y) 再 OnFuncKey，返回前 Restore。Up 不闪。
 struct FireBlink {
@@ -107,6 +121,10 @@ bool CanFirePrimaryEx(bool ignoreCombatInterval);
 
 // Down 未 Up，或距上次成功出刀仍在 recover 窗内。
 bool MotionBusy();
+
+// 距上次成功出刀多久（ms）；从未出刀 → 很大的数。拟人导航用来识别攻击动画锁：
+// 出刀后 ~0.9s 走路键无效（BIN 18:27:40 / 18:29:34 出刀后 vx=0 被当顶住）。
+DWORD MsSinceLastFire();
 
 // buffs / timed_keys / ExternalPause：禁止新出刀；on 时 ForceRelease。
 void SetFireSuppressed(bool on);

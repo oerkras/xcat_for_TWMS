@@ -158,7 +158,9 @@ await check("GET /admin/clients", async () => {
   const j = JSON.parse(r.body);
   assert(j.ok === true, "ok!=true");
   assert(Array.isArray(j.clients), "clients not array");
+  assert(Array.isArray(j.deadClients), "deadClients not array");
   assert(typeof j.count === "number", "count missing");
+  assert(typeof j.deadCount === "number", "deadCount missing");
 });
 
 const failed = results.filter((x) => !x.ok);

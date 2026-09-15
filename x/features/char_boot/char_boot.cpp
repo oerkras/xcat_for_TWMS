@@ -126,24 +126,24 @@ constexpr int kUiDlgTypeYesNo = 1;
 constexpr int kUiDlgTypeList = 4;
 constexpr int kDlgScanCap = 32;
 constexpr DWORD kDlgScanLogMs = 1500;
-constexpr uint32_t kRvaUiDlgSelectMenu = 0x7988d0;
-constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x7A1510;
-constexpr uint32_t kRvaUiDlgOnClickBtYes = 0x7A1570;
+constexpr uint32_t kRvaUiDlgSelectMenu = 0x7ba6c0;
+constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x7C3540;
+constexpr uint32_t kRvaUiDlgOnClickBtYes = 0x7C35C0;
 constexpr uint32_t kRvaFindAll = x::runtime::il2cpp::kRvaFindObjectsOfTypeAll;
 constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4E9E980;
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4F5E0C0;
 
 constexpr char kUiUtilDialogExClass[] =
-    "bd208055ffbf49c1012cf3cd16e73423f5b8dab0a80dcecf8a0f89fe6442e81";
+    "b7ca33f59d8ffad545e8e024f40b5b8caee3d90c486c720fdf08d7e8839f94e";
 constexpr char kPrefabUtilDialogEx[] = "UIUtilDialogEx";
 constexpr char kHashSetKeyFocus[] =
-    "f82ad8bb9783095086969c6978513c1f526755915a8e2cf9c0693bece0ea803";
+    "cee979840ed8b665bdd844a43d1a0edbd156c5c53ccf9ff64f4433d0f4da909";
 constexpr char kHashUiDlgType[] =
-    "faa2d0ff7a3b114a8ccebde69c0c7797e50d08b044c0d4909e0d826300ff1fa";
+    "ba4f5380e382ee51071677c3fb777258e61fbb5e1647f2342f71bb3041369c8";
 constexpr char kHashUiDlgMenuTexts[] =
-    "<d9855d19f804010dc8f0fd7328c6b4b6c21e2fcfd99b5bdf7dc157ca55d8099>k__BackingField";
+    "<dc192c018156f959bb71c248b93cd1a980579fab6c2cf21cf4b27a043003fa8>k__BackingField";
 constexpr char kHashOnClickBtYes[] =
-    "b39036c6014e7b9720482f3a8a1d303daeba940d32741206fa43500e44d143c";
+    "b5ada0e5f75469e5518500b798ff2879c1e29f1e32661ed2ba62d3045947810";
 
 const char* kShipKeys[] = {"維多利亞", "维多", "乘船", "搭船", "前往", "150", "楓幣", nullptr};
 const char* kHansKeys[] = {"魔法師", "法师", "轉職", "转职", "成為", "成为", nullptr};
@@ -942,7 +942,8 @@ bool MapStable(int target, DWORD now) {
 
 bool TravelFailIsHard(travel::FailKind k) {
     return k == travel::FailKind::Unreachable || k == travel::FailKind::FakeFireStop ||
-           k == travel::FailKind::BadTarget || k == travel::FailKind::FireStuck;
+           k == travel::FailKind::BadTarget || k == travel::FailKind::FireStuck ||
+           k == travel::FailKind::PlayerDead;
 }
 
 int ExpectedGotoMap() {

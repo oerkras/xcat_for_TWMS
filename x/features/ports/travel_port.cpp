@@ -7,11 +7,15 @@
 #include "fly_fh_ban.h"
 #include "foothold_path.h"
 #include "foothold_port.h"
+#include "map_bounds_port.h"
 #include "teleport_port.h"
 #include "unity_kbd_port.h"
 #include "world_port.h"
-#include "../invuln/invuln.h"
+#include "../auto_lie/auto_lie.h"
 #include "../simple_combat/heli_rotor.h"
+#include "../simple_combat/human_nav.h"
+#include "../simple_combat/simple_combat.h"
+#include "../travel/travel.h"
 #include "../soft_login_probe/soft_login_probe.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
@@ -55,30 +59,30 @@ using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
 constexpr char kPortalManagerClass[] =
-    "a772207dc761a88203ba79b3d090cea9136601f47b526fb34af27454d998e9d";  // remounted 2026-08-06
+    "b27b4d08eef9e0707b4e40b9cdec68e79df4fa5cb1cd169e18dc52d1ce7c9db";  // remounted 2026-08-06
 // WM / UserLocal / NM → il2cpp_shape Resolve*Klass（hash + shape）
 // SEND OutPacket TypeDef 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "ceb815618772d63cb42bdd643630c4b5e662df06a1077e64756b7c153ac7b74";
+    "daba5b68fb674204a54bbd26da7dd4508e4521a0b2248bf88275bbebffe37a4";
 // remounted 2026-08-06 · dump.cs / script.json
 constexpr char kHashCheckMovePortal[] =
-    "cdc8f0c5f77801a43607a062ffa15a5854691d9a8406669b334f5bf28dc552c";
+    "faeb57681a11a71100b7be95041a4e6876631acf9ed9c5f2d591c3325327c6a";
 constexpr char kHashOutCreate[] =
-    "c20bdff906c15584c65c62ea482e1a220385c0329db377b878479172a2c7c4e";
+    "bdc818833eaf10c8b4c4aea87655578c1089f35f56b7410a43fa11280595a66";
 constexpr char kHashEncode1[] =
-    "a9f7faecc4f4530b785abd629d6f9fee0d819fecc5e04dd4ca06d48819a21d2";  // Encode1(byte)
+    "f97e6cca5f4f45fc56fa7d70cba299e5e17fbf5b56f79838d8a54bbf6648a63";  // Encode1(byte)
 constexpr char kHashEncodeStr[] =
-    "d1c087b095502a8f885c7ab3871edbb2fae559e8dded7c51a5a417105d9f8dd";
+    "f807a5fa5ba4bc729fc93fa2cc35e82cd815d1f0bcae85d54b8201cdfbfcbc2";
 constexpr char kHashSendPacket[] =
-    "ce57a0ddc7703a2d9139e8edb783f28f0289a720bb33fb28d75fd00b486e078";  // Session bool(OutPacket)
+    "b3b21eb3c2730d1980bf0eaa9708443c5ae9bda8a633de4a507ec2c3f7d8306";  // Session bool(OutPacket)
 
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
-constexpr uint32_t kRvaCheckMovePortal = 0xDEB170;  // remounted 2026-08-06 WM.CheckMovePortal
-constexpr uint32_t kRvaOutPacketCreate = 0x1CF4750;  // remounted 2026-08-06 OutPacket.Create
-constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1D00810;  // remounted 2026-08-06 Encode1(byte)
-constexpr uint32_t kRvaOutPacketEncodeStr = 0x1D00F60;  // remounted 2026-08-06 EncodeStr
-constexpr uint32_t kRvaNmSend = 0x1CF63B0;  // remounted 2026-08-06 Session.SendPacket bool
-constexpr uint32_t kRvaSendOutPacket = 0x1CF4830;  // Network.SendOutPacket → 直调 SendPacket RVA
+constexpr uint32_t kRvaCheckMovePortal = 0xE19070;  // remounted 2026-08-06 WM.CheckMovePortal
+constexpr uint32_t kRvaOutPacketCreate = 0x1D88D70;  // remounted 2026-09-10 OutPacket.Create
+constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1D94EA0;  // remounted 2026-08-06 Encode1(byte)
+constexpr uint32_t kRvaOutPacketEncodeStr = 0x1D956B0;  // remounted 2026-08-06 EncodeStr
+constexpr uint32_t kRvaNmSend = 0x1D8AA00;  // remounted 2026-08-06 Session.SendPacket bool
+constexpr uint32_t kRvaSendOutPacket = 0x1D88E80;  // Network.SendOutPacket → 直调 SendPacket RVA
 // CMS ClientPacket.UserPortalTeleportRequest = 114 · wire 0x0072（Rpc 伪造仍用 enum）
 constexpr int kClientPortalTeleport = 114;
 constexpr uint16_t kWirePortalTeleport = 0x0072;
@@ -101,58 +105,58 @@ constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 
 constexpr char kMapPortalDataClass[] =
-    "b449fffa2691f0549c6f4e111403f7c7ecc257c106af794ed49fa1b22327685";  // remounted 2026-08-06
+    "fdeeacb6faf14d494f85cdf2e1e2aacf1af406d7cab804600dc0fa4988d646c";  // remounted 2026-08-06
 constexpr char kPortalClass[] =
-    "c6c8ca2470c22b81cbc687302ff17e606ae2b7af1010e70eb26c1ee2b751113";  // remounted 2026-08-06
+    "b2f3f42f2948ec4e995bac7bd94430fafbfecb15f8497602e4bbaca87acf2ca";  // remounted 2026-08-06
 constexpr char kActorBaseClass[] =
-    "a83e4f1c524fa6e5dc75a3f38110e85704c157550dd8e171c128f9d66e5c739";  // = teleport_port
+    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";  // = teleport_port
 constexpr char kVecCtrlClass[] =
-    "b866b6310c1647fd6473a886a59a14e5121b75565a9314fd00c5ef362f8e776";  // = teleport_port
+    "bd523630874d83261c9d61195338db2618e754c6337046aa8515dc68eef73a5";  // = teleport_port
 constexpr char kPacketClass[] =
-    "b30f04513b1c4d41e3c27445fdc90c247c232bd88aa1121648eda3f3924f72d";  // Packet base 13773
+    "e4a837e0c122619b214e15b955ec342c4ec02ab6af11631b5a9cf43d784247c";  // Packet base 13773
 
 constexpr char kHashPortalData[] =
-    "ce3c3a4fc39e2f609fc49ee53706d583e1c315441c5a6b7ee8a2246a63faae9";
+    "d67147f28897d06e420dc02981086cb9cbbd72ea8a44cc76b280ab25d5230f0";
 constexpr char kHashMpdId[] =
-    "<d06427fb19a018be862c0337fb5b3192ebf2efe2ca6528f62aba87f52864911>k__BackingField";
+    "<b41f26763e3fc3356e1784832bde5cb10b30ad97f868f097aebac6dbad29205>k__BackingField";
 constexpr char kHashMpdType[] =
-    "<ba6ff739da47df2e2cae73ecf9aa1eabfb85cc7f78d84a4d233807ee36ddb31>k__BackingField";
+    "<c17dd35bc6b389db5e22c07726e097a595bc0b9e4d5c78962c166fa09b13599>k__BackingField";
 constexpr char kHashMpdEnable[] =
-    "<e33696e3c9590c767f7a10d9b4458f2ae3b14ef35845ef4599d650762cf085f>k__BackingField";
+    "<cccfb83a17d592932b0fb292f0294124c93492ce611c78f7e890f5587c094ff>k__BackingField";
 constexpr char kHashMpdPName[] =
-    "<a4ee4ed178b6dfafecc77fcb676d89345ffcb22bf6d8d0b03f27467915de2d7>k__BackingField";
+    "<d45240401cfedb76dbb102b2143ed81db335bcdb4b37e55748447fbf6dbc99a>k__BackingField";
 constexpr char kHashMpdX[] =
-    "<f0e0291d12de3209cfdc1d805be70a8f1ce7bc8b64b51143add33365456e95d>k__BackingField";
+    "<d39d58505a8c3bd1d1d085e769071d3e2b99c86f367936fabbeeee847f90af2>k__BackingField";
 constexpr char kHashMpdY[] =
-    "<f0e3a11d6fc0df51c4347a0593b306495f649bb9a9482732c3377258a3963de>k__BackingField";
+    "<b87952e2dec217a3ecb90ad24f895a7f0b22baaf9d097910b6495790d072235>k__BackingField";
 constexpr char kHashMpdToMapId[] =
-    "<b2787e8c95df41d3125d1476f2d29b857abd1bf176291c0f1431176688429f6>k__BackingField";
+    "<a2400e1da03b15f82da87aa12b8624f0d2618d7ab8477334745eb85b06fda39>k__BackingField";
 // MapPortalData 字段偏移未漂；hash remount 2026-08-06 dump.cs TypeDef 2079
 constexpr char kHashMpdPortalRect[] =
-    "<d88961f3e0a1e6fede7e74a25e2d44e6d16b379f3b32d740d46ee2dd09e0b2f>k__BackingField";
+    "<e861983bc15bed03e8e821f38ec883ad55e41adfea54394fdb4b4227049b85d>k__BackingField";
 constexpr char kHashMpdHRange[] =
-    "<bcfc3e43b73510493b7e1025636b366eadc6c59ff36c3247eef2f8c4b9503eb>k__BackingField";
+    "<fbd3b1b5e829879d3faad096bbce14dcffc24c7726eb491352c50ede7a14aa0>k__BackingField";
 constexpr char kHashMpdVRange[] =
-    "<b2930f43c1dd1330ce7fba6b09796e60bdf3926b7d6b91cae197e5db8c7cb1a>k__BackingField";
+    "<afcd86aa93191c77f6c952e77a7f6cd0d4956e57e6ca7c5262864c20ad2a010>k__BackingField";
 constexpr char kHashMpdVImpact[] =
-    "<a37b978e524d5b66a698e1b047046f75aaf42caf17348b66a0b07dc84a1a037>k__BackingField";
+    "<c15d4f46cbf442fbdaba2c87bd73a09d1cc6f53e08d9a2496591d65aa779d92>k__BackingField";
 constexpr char kHashMpdHImpact[] =
-    "<d782232ec4d5c06e49ee6672a024f9f97b04e38b3e21f53e420f65e121874e7>k__BackingField";
+    "<bc61e67e3b0df06f017b7b19e707e2c5e39c32498adf532cd2be82ac8c8b287>k__BackingField";
 constexpr char kHashWmFieldKey[] =
-    "d7f1102f10ddd72499f72716872c61847a5b4d9890dd6aa2699d80c701f2af8";  // = world_port
+    "dc11b95ca5294b7f5d3256406a57e26d84b938c96f95e81a58d6568e4206676";  // = world_port
 // Packet base 13773 buffer/offset；SEND OutPacket 13775 id@0x20（非 InPacket backing）
 constexpr char kHashPacketBuffer[] =
-    "<a98e32adcdd8ab49bc3842ef070bcb91444555bdbbd2f82400d1320276ba18f>k__BackingField";
+    "<d4b0b7fb552300a9159d9832fcb8b8407a8f4efeb1c3d75a915cad87b8572e1>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<f8c46e00eb78d41330636a2a5039f144f30d4a7c6a19b373e0b0c049fcc56b3>k__BackingField";
+    "<c11600e369c78d4413498612cbf64d787d921969340d2448edb34dbe6935da5>k__BackingField";
 constexpr char kHashOutPacketId[] =
-    "bb408cfc09d7de1810883c1162375d43bb2d6e0d2cd95c7813e81b2fa9b1407";
+    "d0e34e976361bf622107ef86c3429c2150c8f1c186db2704f278bbba8c11409";
 constexpr char kHashUserVecCtrl[] =
-    "<e22b1f6d38f00abbcb8a5dd7bbd304c2288f14cddbee6a552a6fbc18fc280f6>k__BackingField";
+    "<bebe8c30521415d7031ea8549625722dcb5515452987adf2de99200de295a48>k__BackingField";
 constexpr char kHashVcAp[] =
-    "e0990df580e30ca5d5e49277ad3fe6d2aa68067d54a056bc00f418f8e55f8e6";
+    "ed692ba84d6145d5f4eed7fad03baafc62274cc1b73022f669e3d0b6667ebff";
 constexpr char kHashVcApl[] =
-    "a46b5decdc70dbf3985ab4d74685e8854799f85749212d042bd9c5b5b0663ad";
+    "e6053248466e4ad4100d3d922bc15e323c9cf4812394367f2d5e8127d50f476";
 
 constexpr size_t kFbPortalData = 0x10, kFbMpdId = 0x10, kFbMpdType = 0x14, kFbMpdEnable = 0x18;
 constexpr size_t kFbMpdPName = 0x20, kFbMpdX = 0x28, kFbMpdY = 0x2C, kFbMpdToMapId = 0x30;
@@ -237,7 +241,7 @@ void EnsureTravelFieldOff() {
     void* portal = x::runtime::il2cpp::FindClass("", kPortalClass);
     // WorldManager hash（与 il2cpp_shape / world_port 同源）
     constexpr char kWorldManagerClass[] =
-        "c85ba61839ce73c7f45293ed2e906fdb9e3e0dab928f9582e494367e08948af";
+        "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
     void* wm = x::runtime::il2cpp_shape::ResolveWorldManagerKlass();
     if (!wm) wm = x::runtime::il2cpp::FindClass("", kWorldManagerClass);
     void* actor = x::runtime::il2cpp::FindClass("", kActorBaseClass);
@@ -1641,6 +1645,61 @@ bool InPortalTrigger(const PortalInfo& portal) {
     return AlreadyStoodAtPortal(portal);
 }
 
+// MapPortalType.Collision（dump 明文 pt=3）：BOX overlap，碰到就换图，不按 ↑。
+constexpr int kMapPortalTypeCollision = 3;
+constexpr DWORD kOverlapWarpMaxMs = 8000;
+// 无 PortalRect 时不能把整张图当盒（PointInPortalRectStrict(!rect)≡true）。
+// 半径 > 旋翼 Station 死区（~12），人停在门心附近仍算碰到。
+constexpr float kOverlapNoRectR = 24.f;
+
+bool PortalBoxAbovePlayBounds(const PortalInfo& portal) {
+    namespace heli = x::features::simple_combat::heli;
+    ports::map_bounds::Rect r{};
+    if (!ports::map_bounds::QueryPlayBounds(0, &r) || !r.ok) return false;
+    float y = portal.y;
+    if (portal.rectValid) y = 0.5f * (portal.rectT + portal.rectB);
+    const float ceiling = static_cast<float>(r.bottom) + heli::kEnvSlackYPx;
+    return y > ceiling + 8.f;
+}
+
+// 与 ImpactStick acceptStand 同口径：snap 到了但不在盒里 / 不在发门带 → 不算可站。
+bool FireBandStandUsable(const PortalInfo& portal, float sx, float sy, uint32_t sfh) {
+    if (!sfh) return false;
+    if (std::fabs(sx - portal.x) > kPortalFireMaxDx) return false;
+    if (portal.rectValid && !PointInPortalRect(portal, sx, sy) &&
+        !PointInPortalRect(portal, portal.x, sy)) {
+        return false;
+    }
+    return true;
+}
+
+bool HasUsableFireBandStand(const PortalInfo& portal) {
+    float sx = portal.x, sy = portal.y;
+    uint32_t sfh = 0;
+    if (!foothold_path::SnapStandForPortal(portal.x, portal.y, portal.rectL, portal.rectT,
+                                          portal.rectR, portal.rectB, portal.rectValid, &sx, &sy,
+                                          &sfh)) {
+        return false;
+    }
+    return FireBandStandUsable(portal, sx, sy, sfh);
+}
+
+// StickThenEnterReady 与 ImpactStick 共用。pt=3 一律碰撞进图；
+// 否则：发门带没有可用站台，且（盒/门心在 FH AABB 之上）——不要求 rectValid
+//（BIN 107000400 in00 可能是 Invisible pt=1，框解析失败时仍要飞进盒）。
+bool IsOverlapEnterPortal(const PortalInfo& portal) {
+    if (portal.pt == kMapPortalTypeCollision) return true;
+    if (HasUsableFireBandStand(portal)) return false;
+    return PortalBoxAbovePlayBounds(portal);
+}
+
+// overlap 等待换图：有框用严格框；没框必须靠近门心，禁止整图算命中。
+bool InOverlapBox(const PortalInfo& portal, float px, float py) {
+    if (portal.rectValid) return PointInPortalRectStrict(portal, px, py);
+    return std::fabs(px - portal.x) <= kOverlapNoRectR &&
+           std::fabs(py - portal.y) <= kOverlapNoRectR;
+}
+
 // Impact 贴门：对齐 F5 旋翼「滑翔到站位点再干活」。
 //   瞄准 SnapStandForPortal → 全程面板倍率 Cruise → Station（滞后）→ hold → ↑。
 // hold 期禁止再 Station（会打掉 CurFh 门前抖）。
@@ -1716,16 +1775,40 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             }
         }
     }
-    const bool hoverEnter = (aimFh == 0);
-    if (hoverEnter) {
+    bool hoverEnter = (aimFh == 0);
+    const bool overlapEnter = IsOverlapEnterPortal(portal);
+    if (overlapEnter) {
+        // BOX 碰撞进图：瞄触发盒中心。禁止抬升把人顶出盒，禁止当普通门按 ↑。
+        hoverEnter = true;
+        aimFh = 0;
+        aimX = portal.x;
+        landY = portal.y;
+        if (portal.rectValid) {
+            aimX = 0.5f * (portal.rectL + portal.rectR);
+            landY = 0.5f * (portal.rectT + portal.rectB);
+            ClampIntoPortalRect(portal, aimX, landY);
+        }
+        aimY = landY;
+        haveSnapStandX = false;
+        x::runtime::LogI("Travel",
+                         "heli stick overlap-enter name=%s pt=%d portal=(%.0f,%.0f) "
+                         "aim=(%.0f,%.0f) rect=%d[%.0f,%.0f]-[%.0f,%.0f] aboveBounds=%d",
+                         portal.name.c_str(), portal.pt, portal.x, portal.y, aimX, aimY,
+                         portal.rectValid ? 1 : 0, portal.rectL, portal.rectT, portal.rectR,
+                         portal.rectB, PortalBoxAbovePlayBounds(portal) ? 1 : 0);
+    } else if (hoverEnter) {
         x::runtime::LogI("Travel",
                          "heli stick fire-band empty name=%s portal=(%.0f,%.0f) → hover",
                          portal.name.c_str(), portal.x, portal.y);
     }
-    aimY += PortalCruiseLiftY();
-    if (portal.rectValid) {
-        if (!PointInPortalRect(portal, aimX, aimY)) ClampIntoPortalRect(portal, aimX, aimY);
-        // landY 保持台面；若抬高后 aim 被夹，不回写 landY
+    const bool hoverUnbounded =
+        overlapEnter && (PortalBoxAbovePlayBounds(portal) || !portal.rectValid);
+    if (!overlapEnter) {
+        aimY += PortalCruiseLiftY();
+        if (portal.rectValid) {
+            if (!PointInPortalRect(portal, aimX, aimY)) ClampIntoPortalRect(portal, aimX, aimY);
+            // landY 保持台面；若抬高后 aim 被夹，不回写 landY
+        }
     }
     if (outSx) *outSx = aimX;
     if (outSy) *outSy = aimY;
@@ -1740,11 +1823,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         return false;
     }
 
-    if (!x::features::invuln::IsEnabled()) {
-        outResult = "INVULN_OFF";
-        x::runtime::LogW("Travel", "heli stick refuse invuln_off name=%s", portal.name.c_str());
-        return false;
-    }
+    // 贴门不再要求无敌（Goto 也不再 Hold）。门口挨打脱台 → NOT_STOOD，外层 8s 瞬态重试。
 
     // 贴门速度 = 面板「滑翔速度」（与打怪同 Travel SpeedScale）；黑屏已另修，不再封顶 2X。
     struct TravelStickSpeedGuard {
@@ -1767,7 +1846,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             ports::teleport::QueryFlightState(fs0) && fs0.ok && fs0.onFh;
         const float deckDist =
             std::sqrt((aimX - luX) * (aimX - luX) + (landY - luY) * (landY - luY));
-        if (luY < (landY - kPortalHoldBelowMax)) {
+        if (!overlapEnter && luY < (landY - kPortalHoldBelowMax)) {
             recoverAboveDeck = true;
             softApproach = true;
             x::runtime::LogI("Travel",
@@ -1775,7 +1854,8 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                              "→ recover above+%.0f; cruise=panel restick<=%.2fX within %.0f",
                              portal.name.c_str(), luX, luY, landY, PortalFinalLiftY(),
                              kPortalBelowDeckRestickScale, kPortalRecoverSlowR);
-        } else if (!hoverEnter && onFh0 && std::fabs(luY - landY) <= kStandYTol) {
+        } else if (!overlapEnter && !hoverEnter && onFh0 &&
+                   std::fabs(luY - landY) <= kStandYTol) {
             nearDeckWalk = true;
             x::runtime::LogI(
                 "Travel",
@@ -1808,11 +1888,13 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         const bool st0 = wantStation(d0, InPortalTrigger(portal));
     x::runtime::LogI("Travel",
                          "heli stick aim name=%s portal=(%.0f,%.0f) aim=(%.0f,%.0f) landY=%.0f "
-                         "ap=(%.0f,%.0f) rect=%d aimFh=%u hover=%d liftY=%.0f speed=%.2fX (%s) "
-                         "mode=%s enterR=%.0f exitR=%.0f dist=%.0f skipDetach=%d",
+                         "ap=(%.0f,%.0f) rect=%d aimFh=%u hover=%d overlap=%d unbounded=%d "
+                         "liftY=%.0f speed=%.2fX (%s) mode=%s enterR=%.0f exitR=%.0f dist=%.0f "
+                         "skipDetach=%d",
                          portal.name.c_str(), portal.x, portal.y, aimX, aimY, landY, luX, luY,
-                         portal.rectValid ? 1 : 0, aimFh, hoverEnter ? 1 : 0,
-                         nearDeckWalk ? 0.f : PortalCruiseLiftY(),
+                         portal.rectValid ? 1 : 0, aimFh, hoverEnter ? 1 : 0, overlapEnter ? 1 : 0,
+                         hoverUnbounded ? 1 : 0,
+                         (nearDeckWalk || overlapEnter) ? 0.f : PortalCruiseLiftY(),
                          nearDeckWalk ? (std::min)(speedGuard.prev, kPortalNearDeckWalkScale)
                                       : speedGuard.prev,
                          nearDeckWalk ? "near-deck" : "panel",
@@ -1908,6 +1990,8 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     bool loggedNearDeckScale = false;
     bool loggedDeadXNudge = false;
     bool loggedRecoverDone = false;
+    bool loggedOverlapWait = false;
+    DWORD overlapSince = 0;
     const float panelScale = speedGuard.prev;  // 面板滑翔速度（与打怪同）
     int belowDeckAborts = 0;
     int tickN = 0;
@@ -1923,7 +2007,8 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                              portal.name.c_str(), tickN, fireN);
                 return true;
             }
-        if (now - t0 >= kImpactStickMaxMs) {
+        if (now - t0 >= kImpactStickMaxMs &&
+            !(overlapEnter && overlapSince && (now - overlapSince) < kOverlapWarpMaxMs)) {
             outResult = "NOT_STOOD";
             float ax = 0.f, ay = 0.f;
             const bool got = ReadLocalAp(ax, ay);
@@ -1931,10 +2016,10 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             const bool haveFs = ports::teleport::QueryFlightState(fs) && fs.ok;
             x::runtime::LogW("Travel",
                              "heli stick timeout name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
-                             "onFh=%d v=(%.0f,%.0f) ticks=%d fire=%d failStreak=%d",
+                             "onFh=%d v=(%.0f,%.0f) ticks=%d fire=%d failStreak=%d overlap=%d",
                              portal.name.c_str(), got ? ax : 0.f, got ? ay : 0.f, aimX, aimY,
                              haveFs && fs.onFh ? 1 : 0, haveFs ? fs.vx : tm.vx,
-                             haveFs ? fs.vy : tm.vy, tickN, fireN, failStreak);
+                             haveFs ? fs.vy : tm.vy, tickN, fireN, failStreak, overlapEnter ? 1 : 0);
             return false;
         }
 
@@ -1954,6 +2039,26 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
         const float distAim =
             std::sqrt((aimX - px) * (aimX - px) + (aimY - py) * (aimY - py));
         const bool inTrigNow = InPortalTrigger(portal);
+        const bool inOverlapBox = overlapEnter && InOverlapBox(portal, px, py);
+        if (inOverlapBox) {
+            if (!overlapSince) overlapSince = now;
+            if (!loggedOverlapWait) {
+                loggedOverlapWait = true;
+                x::runtime::LogI("Travel",
+                                 "heli stick overlap wait name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                                 "pt=%d (no Up, collision warp)",
+                                 portal.name.c_str(), px, py, aimX, aimY, portal.pt);
+            }
+            if (now - overlapSince >= kOverlapWarpMaxMs) {
+                outResult = "NOT_STOOD";
+                x::runtime::LogW("Travel",
+                                 "heli stick overlap no-warp name=%s ap=(%.0f,%.0f) waited=%ums",
+                                 portal.name.c_str(), px, py, (unsigned)(now - overlapSince));
+                return false;
+            }
+        } else {
+            overlapSince = 0;
+        }
         if (inTrigNow) {
             leftTrigSince = 0;
             if (settleSince == 0) {
@@ -1964,7 +2069,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
                                  portal.name.c_str(), px, py, aimX, aimY, tickN);
             }
             // 进框时已在台下：强制恢复态（BIN in02 settle@y=-26 后贴甲板就 Disarm）。
-            if (!holdPhase && py < (landY - kPortalHoldBelowMax)) {
+            if (!overlapEnter && !holdPhase && py < (landY - kPortalHoldBelowMax)) {
                 recoverAboveDeck = true;
                 softApproach = true;
             }
@@ -2047,6 +2152,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             }
             if (nearDeckSlow || fireBandNudge) heliY = landY;  // 已挂台：不抬，旋翼 onFh 时 cmdVy 本就为 0
             if (hoverEnter) heliY = landY + PortalFinalLiftY();
+            if (overlapEnter) heliY = landY;  // BOX 中心，禁止抬出盒
             // 可站点贴在发门带边：滑出 1px 后 |ap-aim| 落在旋翼死区里，瞄 aimX 拉不回来。
             // 改瞄门心只为打出 cmdVx；onPortalX 立刻 hold，禁止走进门心缝。
             float stationX = aimX;
@@ -2076,6 +2182,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             sp.x = stationX;
             sp.y = heliY;
             sp.mode = station ? heli::Mode::Station : heli::Mode::Cruise;
+            sp.unbounded = hoverUnbounded;
             heli::SetSetpoint(heli::Owner::Travel, sp);
 
             tm = {};
@@ -2106,7 +2213,7 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
             }
         }
 
-        if (holdInZone) {
+        if (holdInZone && !overlapEnter) {
             // hold 入场：须在发门带内；竖直贴台面且不得已在台下（AbsPos 更大 Y=更高）。
             // 有台仍允许空中 bleed 后卸推落地（BAN 开着本来就不会 onFh）。
             const bool stOk = std::fabs(px - aimX) <= kPortalStationDx;
@@ -2496,6 +2603,304 @@ bool ImpactStickToPortal(const PortalInfo& portal, FireMode enterMode, std::stri
     }
 }
 
+namespace {
+
+constexpr DWORD kWalkStickMaxMs = 90000;
+constexpr DWORD kWalkStickPollMs = 16;
+// 进了门框还要走到离站位点这么近再停下来 ↑。旧逻辑一进（含 12px slop 的）框就停，人站在离门心 20~22px 处：
+// BIN 09-10 16:02~16:04 三扇门（102000000 west00 / in01、102020000 west00）全停在 21~22px，↑ 按 700ms×2 不吃，
+// 2~16s 后才换图或干脆不换（uniqueBridge late-wait timeout → 赶路 stop，用户看到「到光圈发门失败」）；
+// 同一扇门第二次站到 14px 处 391ms 就进，其它站到 ≤16px 的门全是 0.3~0.4s 进。
+constexpr float kWalkStickFireDx = 8.f;
+// 框内这么久还走不到（门心在台外 / 被人挡）就按框内算，别耗着
+constexpr DWORD kWalkStickCloseInMs = 1500;
+
+bool WalkStickAborted(bool standOnly, std::string& outResult) {
+    namespace hnav = x::features::simple_combat::human_nav;
+    if (!standOnly && !x::features::travel::IsActive()) {
+        hnav::ReleaseKeys();
+        outResult = "STOPPED";
+        return true;
+    }
+    if (!world::IsInMapScene() || !world::IsPlayReady()) {
+        hnav::ReleaseKeys();
+        outResult = "MAP_TRANSITION";
+        return true;
+    }
+    return false;
+}
+
+// 进框后等站稳（与 Impact hold 同口径），禁止带着走速立刻 ↑。
+bool WalkStickWaitReady(const PortalInfo& portal, bool standOnly, std::string& outResult) {
+    namespace hnav = x::features::simple_combat::human_nav;
+    hnav::ReleaseKeys();
+    DWORD readySince = 0;
+    float readyApX = 0.f, readyApY = 0.f;
+    float prevApX = 0.f, prevApY = 0.f;
+    bool havePrevAp = false;
+    const DWORD t0 = GetTickCount();
+    while (GetTickCount() - t0 < kPortalReadyStableMs + 800) {
+        if (WalkStickAborted(standOnly, outResult)) return outResult == "MAP_TRANSITION";
+        if (!(InPortalTrigger(portal) || AlreadyStoodAtPortal(portal))) return false;
+        ports::teleport::FlightState fs{};
+        const bool haveFs = ports::teleport::QueryFlightState(fs) && fs.ok;
+        if (!(haveFs && fs.onFh)) return false;
+        const float spd = std::sqrt(fs.vx * fs.vx + fs.vy * fs.vy);
+        float ax = 0.f, ay = 0.f;
+        (void)ReadLocalAp(ax, ay);
+        const bool apStepOk =
+            !havePrevAp || (std::fabs(ax - prevApX) <= kPortalReadyApStep &&
+                            std::fabs(ay - prevApY) <= kPortalReadyApStep);
+        const DWORD now = GetTickCount();
+        if (spd <= kPortalFireSpeed && apStepOk) {
+            if (readySince == 0) {
+                readySince = now;
+                readyApX = ax;
+                readyApY = ay;
+            } else if (std::fabs(ax - readyApX) > kPortalReadyApDrift ||
+                       std::fabs(ay - readyApY) > kPortalReadyApDrift) {
+                readySince = 0;
+            }
+            if (readySince != 0 && now - readySince >= kPortalReadyStableMs) {
+                outResult = standOnly ? "STOOD" : "OK";
+                x::runtime::LogI("Travel",
+                                 "walk stick ready name=%s ap=(%.0f,%.0f) onFh=1 v=(%.0f,%.0f) "
+                                 "waited=%ums",
+                                 portal.name.c_str(), ax, ay, fs.vx, fs.vy,
+                                 (unsigned)(now - t0));
+                return true;
+            }
+        } else {
+            readySince = 0;
+        }
+        prevApX = ax;
+        prevApY = ay;
+        havePrevAp = true;
+        Sleep(kWalkStickPollMs);
+    }
+    return false;
+}
+
+// 拟人超级赶路：foothold 图走路/跳/爬到门，不启旋翼、不抬 BAN、不强制无敌。
+bool WalkStickToPortal(const PortalInfo& portal, bool standOnly, std::string& outResult) {
+    namespace hnav = x::features::simple_combat::human_nav;
+    float aimX = portal.x;
+    float aimY = portal.y;
+    uint32_t aimFh = 0;
+    float sx = portal.x, sy = portal.y;
+    if (ports::foothold_path::SnapStandForPortal(portal.x, portal.y, portal.rectL, portal.rectT,
+                                                 portal.rectR, portal.rectB, portal.rectValid,
+                                                 &sx, &sy, &aimFh) &&
+        aimFh) {
+        aimX = sx;
+        aimY = sy;
+    }
+    x::runtime::LogI("Travel",
+                     "walk stick start name=%s portal=(%.0f,%.0f) aim=(%.0f,%.0f) fh=%u stand=%d",
+                     portal.name.c_str(), portal.x, portal.y, aimX, aimY, (unsigned)aimFh,
+                     standOnly ? 1 : 0);
+    ports::foothold_path::ClearHopSkips();
+    hnav::Reset();
+    const DWORD t0 = GetTickCount();
+    int unreachableN = 0;
+    bool reAimed = false;
+    DWORD lastLog = 0;
+    DWORD atAimSince = 0;
+    DWORD quizHoldMs = 0;
+    DWORD quizHoldSince = 0;
+    DWORD inTrigSince = 0;
+    bool closeInLogged = false;
+    while (GetTickCount() - t0 - quizHoldMs < kWalkStickMaxMs) {
+        if (WalkStickAborted(standOnly, outResult)) return outResult == "MAP_TRANSITION";
+        // 测谎弹窗期间不按任何键：题在前台采样，我们的方向键/跳会污染作答，也不该边答题边赶路。
+        // 松键原地等，等题关了再接着走；等题的时间不计入 90s 上限。
+        if (x::features::auto_lie::IsQuizActive()) {
+            if (!quizHoldSince) {
+                quizHoldSince = GetTickCount();
+                hnav::ReleaseKeys();
+                x::runtime::LogI("Travel", "walk stick hold: lie-detector open name=%s",
+                                 portal.name.c_str());
+            }
+            Sleep(kWalkStickPollMs);
+            continue;
+        }
+        if (quizHoldSince) {
+            quizHoldMs += GetTickCount() - quizHoldSince;
+            x::runtime::LogI("Travel", "walk stick resume after lie-detector name=%s held=%ums",
+                             portal.name.c_str(), (unsigned)(GetTickCount() - quizHoldSince));
+            quizHoldSince = 0;
+            hnav::Reset();
+        }
+        float ax = 0.f, ay = 0.f;
+        (void)ReadLocalAp(ax, ay);
+        ports::teleport::FlightState fs{};
+        const bool haveFs = ports::teleport::QueryFlightState(fs) && fs.ok;
+        const bool onFh = haveFs && fs.onFh;
+        const bool inTrig = InPortalTrigger(portal) || AlreadyStoodAtPortal(portal);
+        if (inTrig && !onFh) {
+            // 绳顶 overlap：人在绳上进盒，没有 foothold。松键会掉下去。
+            if (hnav::OnRopeNow()) {
+                outResult = standOnly ? "STOOD" : "OK";
+                x::runtime::LogI("Travel",
+                                 "walk stick on-rope overlap name=%s ap=(%.0f,%.0f) onFh=0",
+                                 portal.name.c_str(), ax, ay);
+                return true;
+            }
+            hnav::ReleaseKeys();
+            Sleep(kWalkStickPollMs);
+            continue;
+        }
+        if (onFh && inTrig) {
+            // 框内继续走到站位点（门心）再停：站在框边 slop 上 ↑ 常不吃。
+            const DWORD nowTrig = GetTickCount();
+            if (!inTrigSince) inTrigSince = nowTrig;
+            const float dxAim = std::fabs(ax - aimX);
+            const bool closeEnough = dxAim <= kWalkStickFireDx || nowTrig - inTrigSince >= kWalkStickCloseInMs;
+            if (!closeEnough) {
+                if (!closeInLogged) {
+                    closeInLogged = true;
+                    x::runtime::LogI("Travel", "walk stick close-in name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) dx=%.0f",
+                                     portal.name.c_str(), ax, ay, aimX, aimY, dxAim);
+                }
+                // 往下走 hnav::Tick 朝 aim 继续走
+            } else {
+                if (dxAim > kWalkStickFireDx) {
+                    x::runtime::LogW("Travel",
+                                     "walk stick close-in gave up name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) dx=%.0f "
+                                     "(fire from trigger edge)",
+                                     portal.name.c_str(), ax, ay, aimX, aimY, dxAim);
+                }
+                if (WalkStickWaitReady(portal, standOnly, outResult)) return true;
+                if (outResult == "STOPPED") return false;
+                if (outResult == "MAP_TRANSITION") return true;
+                continue;
+            }
+        } else {
+            inTrigSince = 0;
+        }
+        if (!onFh && !hnav::AirborneNav()) {
+            hnav::ReleaseKeys();
+            Sleep(kWalkStickPollMs);
+            continue;
+        }
+        const DWORD now = GetTickCount();
+        const uint32_t pfh = ports::foothold::PeekCurFhId();
+        const auto nav = hnav::Tick(now, ax, ay, aimX, aimY, pfh, /*travelPortal=*/true);
+        if (nav.result == hnav::Result::Dead) {
+            hnav::ReleaseKeys();
+            outResult = "PLAYER_DEAD";
+            x::runtime::LogW("Travel", "walk stick player dead name=%s ap=(%.0f,%.0f)",
+                             portal.name.c_str(), ax, ay);
+            return false;
+        }
+        if (nav.result == hnav::Result::KeyFail) {
+            hnav::ReleaseKeys();
+            hnav::Reset();
+            outResult = "KEY_FAIL";
+            x::runtime::LogW("Travel", "walk stick key fail name=%s why=%s", portal.name.c_str(),
+                             nav.why && nav.why[0] ? nav.why : "?");
+            return false;
+        }
+        if (nav.result == hnav::Result::Unreachable) {
+            ++unreachableN;
+            if (nav.fromFh && nav.toFh)
+                ports::foothold_path::AddHopSkip(nav.fromFh, nav.toFh, nav.kind);
+            ports::foothold_path::FhGeomInfo gf{}, gt{};
+            const bool okF = ports::foothold_path::FhGeom(nav.fromFh, &gf);
+            const bool okT = ports::foothold_path::FhGeom(nav.toFh, &gt);
+            ports::foothold_path::GraphMeta gm{};
+            (void)ports::foothold_path::GetGraphMeta(&gm);
+            x::runtime::LogW("Travel",
+                             "walk stick no_path name=%s why=%s from=%u(comp=%d deg=%d y=%d) "
+                             "to=%u(comp=%d deg=%d y=%d) graph n=%d walk=%d climb=%d fall=%d n=%d",
+                             portal.name.c_str(), nav.why && nav.why[0] ? nav.why : "?",
+                             (unsigned)nav.fromFh, okF ? gf.walkComp : -1, okF ? gf.walkDeg : -1,
+                             okF ? gf.y1 : 0, (unsigned)nav.toFh, okT ? gt.walkComp : -1,
+                             okT ? gt.walkDeg : -1, okT ? gt.y1 : 0, gm.nodes, gm.walkEdges,
+                             gm.climbEdges, gm.fallEdges, unreachableN);
+            hnav::ReleaseKeys();
+            hnav::Reset();
+            // 门口站点可能贴到了孤立的小台：换一种贴法再试一次（优先平台、不缩边），别急着判无路。
+            if (!reAimed) {
+                reAimed = true;
+                float sx2 = portal.x, sy2 = portal.y;
+                uint32_t fh2 = 0;
+                bool ok2 = ports::foothold_path::SnapStandAt(portal.x, portal.y, &sx2, &sy2, &fh2,
+                                                             /*preferFlat=*/true,
+                                                             /*avoidWalkJunction=*/false,
+                                                             /*cliffInset=*/false) &&
+                           fh2 && fh2 != aimFh;
+                if (!ok2) {
+                    ok2 = ports::foothold_path::FindNearestStand(portal.x, portal.y, &sx2, &sy2, &fh2,
+                                                                 nullptr, /*avoidWalkJunction=*/false,
+                                                                 /*cliffInset=*/false) &&
+                          fh2 && fh2 != aimFh;
+                }
+                if (ok2) {
+                    x::runtime::LogI("Travel", "walk stick re-aim name=%s fh=%u→%u aim=(%.0f,%.0f)→(%.0f,%.0f)",
+                                     portal.name.c_str(), (unsigned)aimFh, (unsigned)fh2, aimX, aimY,
+                                     sx2, sy2);
+                    aimFh = fh2;
+                    aimX = sx2;
+                    aimY = sy2;
+                    unreachableN = 0;
+                    Sleep(kWalkStickPollMs);
+                    continue;
+                }
+            }
+            if (unreachableN >= 2) {
+                // 图上真没路：别让上层 70ms 一次地重开（BIN 2026-09-09 8s 内 100+ 次 no_path）。
+                Sleep(600);
+                outResult = "NOT_STOOD";
+                return false;
+            }
+        } else if (nav.result == hnav::Result::Timeout) {
+            if (nav.fromFh && nav.toFh)
+                ports::foothold_path::AddHopSkip(nav.fromFh, nav.toFh, nav.kind);
+            x::runtime::LogW("Travel", "walk stick hop timeout name=%s kind=%d from=%u to=%u",
+                             portal.name.c_str(), (int)nav.kind, (unsigned)nav.fromFh,
+                             (unsigned)nav.toFh);
+            hnav::ReleaseKeys();
+            hnav::Reset();
+        } else if (nav.hops == 0 && std::fabs(ax - aimX) < 16.f &&
+                   std::fabs(ay - aimY) > 60.f) {
+            if (!atAimSince) atAimSince = now;
+            else if (now - atAimSince > 1500) {
+                ++unreachableN;
+                x::runtime::LogW("Travel",
+                                 "walk stick wrong layer name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) "
+                                 "n=%d",
+                                 portal.name.c_str(), ax, ay, aimX, aimY, unreachableN);
+                hnav::ReleaseKeys();
+                hnav::Reset();
+                atAimSince = 0;
+                if (unreachableN >= 2) {
+                    outResult = "NOT_STOOD";
+                    return false;
+                }
+            }
+        } else {
+            atAimSince = 0;
+        }
+        if (!lastLog || now - lastLog > 800) {
+            lastLog = now;
+            x::runtime::LogI("Travel",
+                             "walk stick name=%s ap=(%.0f,%.0f) aim=(%.0f,%.0f) kind=%d hops=%d "
+                             "phase=%d onFh=%d",
+                             portal.name.c_str(), ax, ay, aimX, aimY, (int)nav.kind, nav.hops,
+                             (int)nav.phase, onFh ? 1 : 0);
+        }
+        Sleep(kWalkStickPollMs);
+    }
+    hnav::ReleaseKeys();
+    hnav::Reset();
+    outResult = "NOT_STOOD";
+    x::runtime::LogW("Travel", "walk stick timeout name=%s", portal.name.c_str());
+    return false;
+}
+
+}  // namespace
+
 bool StickToStand(const PortalInfo& portal, std::string& outResult) {
     ports::teleport::FlightState fs{};
     const bool haveFs = ports::teleport::QueryFlightState(fs) && fs.ok;
@@ -2505,29 +2910,58 @@ bool StickToStand(const PortalInfo& portal, std::string& outResult) {
                          portal.name.c_str(), fs.x, fs.y);
         return true;
     }
+    if (x::features::simple_combat::IsHumanGroundMove())
+        return WalkStickToPortal(portal, /*standOnly=*/true, outResult);
     return ImpactStickToPortal(portal, FireMode::StickUp, outResult, nullptr, nullptr,
                                /*fireEnter=*/false);
 }
 
 // 已在门内：状态就绪（框内 + onFh + 低速）即可补火；否则短等落地，不再盲等 1.5s。
 // 远处：旋翼滑翔 → 进框 Station 收速 → hold 等就绪 → 开火。
+// BOX 碰撞门（pt=3 / 绳顶 overlap）：飞进触发盒等换图，不按 ↑。
 bool StickThenEnterReady(const PortalInfo& portal, FireMode enterMode, std::string& outResult) {
+    const bool walkStick = x::features::simple_combat::IsHumanGroundMove();
+    if (IsOverlapEnterPortal(portal)) {
+        x::runtime::LogI("Travel",
+                         "stick overlap-enter name=%s pt=%d portal=(%.0f,%.0f) → fly BOX (no Up)",
+                         portal.name.c_str(), portal.pt, portal.x, portal.y);
+        (void)gStickRestickAfterFake.exchange(false, std::memory_order_acq_rel);
+        return ImpactStickToPortal(portal, enterMode, outResult, nullptr, nullptr);
+    }
+
     if (gStickRestickAfterFake.exchange(false, std::memory_order_acq_rel)) {
         float ax = 0.f, ay = 0.f;
         (void)ReadLocalAp(ax, ay);
         x::runtime::LogI("Travel",
                          "stick restick after fake-up name=%s ap=(%.0f,%.0f) "
-                         "(ImpactStick, not already_in Up)",
-                         portal.name.c_str(), ax, ay);
+                         "(%s, not already_in Up)",
+                         portal.name.c_str(), ax, ay, walkStick ? "WalkStick" : "ImpactStick");
+        if (walkStick) return WalkStickToPortal(portal, /*standOnly=*/false, outResult);
         return ImpactStickToPortal(portal, enterMode, outResult, nullptr, nullptr);
     }
     if (AlreadyStoodAtPortal(portal) || InPortalTrigger(portal)) {
         float ax = 0.f, ay = 0.f;
         (void)ReadLocalAp(ax, ay);
+        if (x::features::simple_combat::human_nav::OnRopeNow()) {
+            x::runtime::LogI("Travel",
+                             "stick already_in on-rope name=%s ap=(%.0f,%.0f) → fire",
+                             portal.name.c_str(), ax, ay);
+            outResult = "OK";
+            return true;
+        }
+        // 拟人：已在框内但离门心还远（框边 slop 上）→ 先走到门心再 ↑，别原地补火（见 kWalkStickFireDx）。
+        if (walkStick && std::fabs(ax - portal.x) > kWalkStickFireDx + 6.f) {
+            x::runtime::LogI("Travel",
+                             "stick already_in off-center name=%s ap=(%.0f,%.0f) portal=(%.0f,%.0f) "
+                             "dx=%.0f → WalkStick close-in",
+                             portal.name.c_str(), ax, ay, portal.x, portal.y, std::fabs(ax - portal.x));
+            return WalkStickToPortal(portal, /*standOnly=*/false, outResult);
+        }
         x::runtime::LogI("Travel",
                          "stick already_in wait-ready name=%s ap=(%.0f,%.0f) "
-                         "need=onFh+lowV+apStill stable=%ums",
-                         portal.name.c_str(), ax, ay, (unsigned)kPortalReadyStableMs);
+                         "need=onFh+lowV+apStill stable=%ums walk=%d",
+                         portal.name.c_str(), ax, ay, (unsigned)kPortalReadyStableMs,
+                         walkStick ? 1 : 0);
         const DWORD t0 = GetTickCount();
         DWORD readySince = 0;
         float readyApX = ax, readyApY = ay;
@@ -2535,9 +2969,9 @@ bool StickThenEnterReady(const PortalInfo& portal, FireMode enterMode, std::stri
         bool havePrevAp = false;
         while (GetTickCount() - t0 < kPortalLandTimeoutMs) {
             if (!world::IsInMapScene() || !world::IsPlayReady()) {
-        outResult = "MAP_TRANSITION";
-        return true;
-    }
+                outResult = "MAP_TRANSITION";
+                return true;
+            }
             if (!InPortalTrigger(portal)) {
                 break;
             }
@@ -2589,6 +3023,12 @@ bool StickThenEnterReady(const PortalInfo& portal, FireMode enterMode, std::stri
             havePrevAp = true;
             Sleep(kImpactStickPollMs);
         }
+        if (walkStick) {
+            x::runtime::LogI("Travel",
+                             "stick already_in → WalkStick name=%s ap=(%.0f,%.0f)",
+                             portal.name.c_str(), ax, ay);
+            return WalkStickToPortal(portal, /*standOnly=*/false, outResult);
+        }
         if (InPortalTrigger(portal) || AlreadyStoodAtPortal(portal)) {
             // 超时仍未就绪：禁止 blind 补火（易 205）；交给 Impact 卸推/落地再判。
             x::runtime::LogW("Travel",
@@ -2599,6 +3039,7 @@ bool StickThenEnterReady(const PortalInfo& portal, FireMode enterMode, std::stri
         }
         return ImpactStickToPortal(portal, enterMode, outResult, nullptr, nullptr);
     }
+    if (walkStick) return WalkStickToPortal(portal, /*standOnly=*/false, outResult);
     return ImpactStickToPortal(portal, enterMode, outResult, nullptr, nullptr);
 }
 
@@ -2636,6 +3077,11 @@ bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string
                              outResult.c_str());
             return true;
         }
+        if (IsOverlapEnterPortal(p)) {
+            x::runtime::LogI("Travel", "overlap-enter skip Up name=%s res=%s", portalName.c_str(),
+                             outResult.c_str());
+            return outResult == "MAP_TRANSITION" || outResult == "MAP_CHANGED";
+        }
         if (!world::IsPlayReady()) {
             outResult = "MAP_TRANSITION";
             x::runtime::LogI("Travel", "skip CheckMove (not play ready) name=%s",
@@ -2645,10 +3091,14 @@ bool FirePortalByName(const std::string& portalName, bool warpFirst, std::string
         float apX = 0.f, apY = 0.f;
         if (ReadLocalAp(apX, apY)) {
             const bool inRect = PointInPortalRect(p, apX, apY);
+            // 把门框和严格框内外都打出来：BIN 09-10 16:02 站在框边 slop 上（离门心 21~22px）↑ 不吃，
+            // 只有 inRect=1 看不出人到底站在哪。
             x::runtime::LogI("Travel",
-                             "pre-fire name=%s ap=(%.0f,%.0f) rect=%d inRect=%d mode=%s",
-                             portalName.c_str(), apX, apY, p.rectValid ? 1 : 0, inRect ? 1 : 0,
-                             FireModeName(mode));
+                             "pre-fire name=%s ap=(%.0f,%.0f) portal=(%.0f,%.0f) dx=%.0f rect=%d[%.0f..%.0f] "
+                             "inRect=%d strict=%d mode=%s",
+                             portalName.c_str(), apX, apY, p.x, p.y, apX - p.x, p.rectValid ? 1 : 0,
+                             p.rectValid ? p.rectL : 0.f, p.rectValid ? p.rectR : 0.f, inRect ? 1 : 0,
+                             PointInPortalRectStrict(p, apX, apY) ? 1 : 0, FireModeName(mode));
             if (p.rectValid && !inRect) {
                 outResult = "OUT_OF_RECT";
                 x::runtime::LogW("Travel",

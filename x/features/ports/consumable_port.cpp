@@ -7,8 +7,10 @@
 #include "input_port.h"
 #include "travel_port.h"
 #include "world_port.h"
+#include "../../ui/player_vitals.h"
 #include "../../runtime/il2cpp_bind.h"
 #include "../../runtime/il2cpp_container.h"
+#include "../../runtime/il2cpp_metadata_lock.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../../runtime/log.h"
 #include "../../runtime/main_thread_pump.h"
@@ -28,24 +30,26 @@ using x::runtime::il2cpp::ArrayLen;
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr int kItemTypeConsume = 2;
+// 09-10 CharacterData.ItemSlots 直下标。DumpRestoredData 旧枚举 Consume=2；BIN 已钉成 1。
+constexpr int kItemTypeConsume = 1;
+static_assert(kItemTypeConsume == x::ui::player::item_type::Consume);
 constexpr DWORD kJobWaitMs = 1500;
 constexpr DWORD kUseMiRetryMs = 3000;
 constexpr DWORD kFkmRebindMs = 3000;
 
 // FuncKeyMappedManager · remounted 2026-08-06（与 attack_input_port 钉值一致）
-constexpr uint32_t kRvaGetDataByKeyCode = 0x16757b0;
+constexpr uint32_t kRvaGetDataByKeyCode = 0x1707db0;
 constexpr char kHashGetDataByKeyCode[] =
-    "c5ba9359daa32b9a9ecd6dd21f59a1daf3550ab24fc26fdbe31cff9194468a4";
+    "f4d269a29538abe89c689039e722d95808b9a6d422e72dc5c654954ff55b1c9";
 constexpr char kFkmClass[] =
-    "a366864b3af75aa862c17e4105401a1fac4af817433d05b838abdae72b08b2d";
+    "ec7bb71ea4393f644de2ed52289a4e5858c88fbfff567507d7e50e57a26e02c";
 constexpr int32_t kFuncTypeItem = 2;  // FuncType.Item
 constexpr char kFuncKeyClass[] =
-    "f0b8920ce79f0bcfeb94839972045ade29a6f32d137eae98105d6107d1efccb";
+    "ea3da4955e170bddd23954b6fadb04307346cce8502f56114ac4c270f4cf65b";
 constexpr char kHashFkType[] =
-    "ea3bb17028eeb6e9b2809497a9ecc98ed0026e64c5687c9d97598fdf379ac50";
+    "eb5cc4bbe5f9608739a872cb31aba295efcbc843d4c5aaaa9521287f539955f";
 constexpr char kHashFkValue[] =
-    "a69afda01125d34feeb695b33023fa6f3441c8c13d206122993e41351abe9c5";
+    "c1d993179dfd59441f3302e60f20468f822c7e9ab14f4078d70b5a5e39f8683";
 constexpr size_t kFbFkType = 0x10;
 constexpr size_t kFbFkValue = 0x14;
 size_t gOffFkType = kFbFkType;
@@ -54,26 +58,27 @@ bool gFkFieldTried = false;
 
 // --- 字段防漂移（remount 2026-08-06 · TDI/offset 对齐；WM/FKM/FuncKey 未漂）---
 constexpr char kHashWorldManager[] =
-    "c85ba61839ce73c7f45293ed2e906fdb9e3e0dab928f9582e494367e08948af";
+    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
 constexpr char kHashCharacterData[] =
-    "fa256f3348fd00837ea1501cb2014efe45c3b08940bba7596d0d618285450d6";
+    "fc09ef0e0d54c07042a56575d966628802e69f257ba527a57f00748e67313b7";
 constexpr char kHashItemSlotBase[] =
-    "e7a5918e9fe9398802389de6cd8da75cccc301bbc9342ff32e2cef2fbbf00a1";
+    "f4124c869a21043b4e4b180bd9d87ad6f53eab2a7c5c1c8cb319ba3fa7ffac1";
 constexpr char kHashItemSlotBundle[] =
-    "a1b90d6e4ae1ad1aba92a08c8a1f8576833964d7a71ffaccf8f0f7a66d05b08";
+    "de4a237f4bd7fa470f0546d39d651f633f8df17c890fd2863084f398eb6c353";
 constexpr char kHashWmCharacterData[] =
-    "a2516489c0a58727985bccd3d1e934f5d332733ac3d5b828d1b874686a0db0b";
+    "eefb2ac8c168ccba5b10936a5eeb98b926a6dde1b1d8a63c69f126b3a38abf8";
 constexpr char kHashCdItemSlots[] =
-    "c24275839de447c8a08019a69569df366a31a947981b70155fbe6aec1883c72";
+    "cff110654d704ceaef1c4f120232f99e2cfe3483145be6eddd4c0968eb8a553";
 constexpr char kHashItemId[] =
-    "cf2f9f9050879abd8d5b532af2df1a2fc7cd4bfe67d3a0826fba10459550975";
+    "cd9da19da3fc26d1f45ea3ef55b667b2406400081ad46b465c66500a1c5bc2d";
 constexpr char kHashBundleNumber[] =
-    "bee573effb4c67dd714724c0c8df385e7c11db596616d74f45feacb4cb2cf35";
+    "cf980c33d088e801890cce0708e51658391028b9ec7096d7446d8ccde91bcc5";
 
 constexpr size_t kFbWmCharacterData = 0xE0;
 constexpr size_t kFbCdItemSlots = 0x40;
 constexpr size_t kFbItemId = 0x10;
-constexpr size_t kFbBundleNumber = 0x28;
+constexpr size_t kFbBundleNumber = 0x30;  // 09-10：nNumber；0x28 是基类 nPOS
+constexpr size_t kFbSlotPos = 0x28;       // ItemSlotBase nPOS
 
 size_t gOffWmCharacterData = kFbWmCharacterData;
 size_t gOffCdItemSlots = kFbCdItemSlots;
@@ -83,20 +88,20 @@ std::atomic<bool> gFieldOffResolved{false};
 char gFieldOffPath[64]{};
 
 // UISlotItem.SendStatChangeItemUseRequest — 药水等属性道具；hashed；TypeDefIndex 488。
-// Remount 2026-08-06: ACS class/method rehashed；RVA 未漂（仍 0x5F4D70）。
+// Remount 2026-08-06: ACS class/method rehashed；RVA 未漂（仍 0x608680）。
 // Evidence: dump.cs static Send* 声明序对齐 CMS（Lottery → StatChange → AntiMacro → PortalScroll…）。
 // Resolve: name → method-hash → RVA+kind(void,int,int)。
 constexpr char kUiSlotItemClassHash[] =
-    "ddbfd8f6696608109031baffdbe7a9498c5e186b525507e20b399dd5bb30009";
+    "beea43234464229758dbf036e853f4177d5f5632730f8944a2195c225bc3e3f";
 constexpr char kUseReqMethodHash[] =
-    "bc9ed9703ca9c7362aac02e97b1ce86576bc4b6365e5fb706a8832bcfce3768";
-constexpr uint32_t kRvaSendStatChangeItemUseRequest = 0x5F4D70;
+    "c16a1ae22ad34f23a22e694d93281b7ffa1143529fccfa3536542ec4d4d9fd8";
+constexpr uint32_t kRvaSendStatChangeItemUseRequest = 0x608680;
 
 // UISlotItem.SendPortalScrollUseRequest — 回家/城镇卷（2030xxx）；CMS private static (nPOS,nItemID)。
-// TW dump 同簇；RVA 未漂 0x5F77D0。
+// TW dump 同簇；RVA 未漂 0x60B280。
 constexpr char kPortalScrollMethodHash[] =
-    "f21fbef235194b8a3a0c863d0c4425d523793b70507c90fb6aec9a8bebf7aeb";
-constexpr uint32_t kRvaSendPortalScrollUseRequest = 0x5F77D0;
+    "b05a7f8f27755cff5c700daeaa9ff0b009f80fb15f1c2a634c656d603838951";
+constexpr uint32_t kRvaSendPortalScrollUseRequest = 0x60B280;
 
 using FnUseRequest = void (*)(int nPos, int itemId, const void* methodInfo);
 
@@ -119,6 +124,38 @@ MethodInfoHead* gMiGetDataByKeyCode = nullptr;
 DWORD gLastFkmRebind = 0;
 DWORD gLastBindMissLogHp = 0;
 DWORD gLastBindMissLogMp = 0;
+
+// CharacterData.GetItem(nTI, nPOS) — 与 final_attack_force 同源（RVA 0x135A310）。
+// GetItem / 直读 _items 是同一块 List；BIN 20:03 type=2 listN=25 filled=0（25 格像 Install）。
+constexpr uint32_t kRvaCdGetItem = 0x135A310;
+constexpr char kHashCdGetItem[] =
+    "b9b2574d7dd3fd84e92886a4937f9465e2562dd30b985eb92510bdcb64f15ee";
+constexpr int kConsumePosMax = 96;
+using FnCdGetItem = void* (*)(void* self, int nTI, int nPos, const void* methodInfo);
+FnCdGetItem gCdGetItem = nullptr;
+MethodInfoHead* gMiCdGetItem = nullptr;
+
+// DumpRestoredData A/B：GetItemSlotPos(ItemType, itemId)→nPOS（旧 RVA 0x12F32D0）。
+// 09-10 dump 同签名 int(ItemType,int) @ 0x1361800。IDA：ItemSlots[nTI] 直下标 + List.get_Item。
+constexpr uint32_t kRvaCdGetItemSlotPos = 0x1361800;
+constexpr char kHashCdGetItemSlotPos[] =
+    "c8224febf0dea56de41b64f9a024d6158f916bf09d90ded4c10f766ad3e0b3f";
+using FnCdGetItemSlotPos = int (*)(void* self, int nTI, int itemId, const void* methodInfo);
+FnCdGetItemSlotPos gCdGetItemSlotPos = nullptr;
+MethodInfoHead* gMiCdGetItemSlotPos = nullptr;
+
+// DumpRestoredData：GetItemCount(ItemType, itemId, bool compress=true)。09-10 @ 0x1359BE0。
+constexpr uint32_t kRvaCdGetItemCount = 0x1359BE0;
+constexpr char kHashCdGetItemCount[] =
+    "b95c4303a5d9d1373cc57e05af2a74c26af88fb96a58db2f3649ef371e3e0ed";
+using FnCdGetItemCount = int (*)(void* self, int nTI, int itemId, uint8_t compress,
+                                 const void* methodInfo);
+FnCdGetItemCount gCdGetItemCount = nullptr;
+MethodInfoHead* gMiCdGetItemCount = nullptr;
+
+void ReturnLeakedMetadataLock(const char* where) {
+    x::runtime::il2cpp_metadata_lock::ReleaseIfOwnedByCurrentThread(where);
+}
 
 // UseRequest nPOS vs List index.
 // BIN 2026-08-09: bound MP id=2000003 succeeds at pos=listIndex (7), fails when oneBased
@@ -385,6 +422,8 @@ void EnsureFkFieldOff() {
                      gOffFkValue);
 }
 
+void LogConsumeBagSnap(int wantId);
+
 void LogBindMissThrottled(const char* why, bool wantHp, int type, int value) {
     const DWORD now = x::runtime::NowMs();
     DWORD& slot = wantHp ? gLastBindMissLogHp : gLastBindMissLogMp;
@@ -392,6 +431,7 @@ void LogBindMissThrottled(const char* why, bool wantHp, int type, int value) {
     slot = now;
     x::runtime::LogW("Consumable", "bound pot miss key=%s why=%s type=%d value=%d",
                      wantHp ? "PageDown" : "PageUp", why, type, value);
+    if (why && std::strcmp(why, "not_in_bag") == 0) LogConsumeBagSnap(value);
 }
 
 bool PlausibleOff(size_t off) { return off >= 0x10 && off < 0x1000; }
@@ -516,6 +556,15 @@ uint16_t ReadU16(void* obj, size_t off) {
     }
 }
 
+int16_t ReadI16(void* obj, size_t off) {
+    if (!obj) return 0;
+    __try {
+        return *reinterpret_cast<int16_t*>(reinterpret_cast<uint8_t*>(obj) + off);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
 int ListSize(void* list) {
     if (!list) return 0;
     return ReadI32(list, x::runtime::il2cpp_container::OffListSize());
@@ -535,34 +584,320 @@ int ItemQty(void* item) {
     return 1;
 }
 
+int SlotNPos(void* item) {
+    if (!item) return 0;
+    const int p = static_cast<int>(ReadI16(item, kFbSlotPos));
+    if (p >= 1 && p <= 96) return p;
+    return 0;
+}
+
+int PickUsePos(void* item, int listIndex) {
+    // GetItem(Consume, nPOS) = list._items[nPOS]（IDA RVA 0x13583F0：edi 直下标，不减 1）。
+    // 官方 FuncKey / UseRequest 传格子 nPOS，不是 List 压缩下标。低格时两者常相等，
+    // 所以旧版绑 2000000@pos=1~8 能喝；高格（远程 2001500@listIndex=64）会打空。
+    const int fromSlot = SlotNPos(item);
+    if (fromSlot > 0) return fromSlot;
+    int primary = -1, alt = -1;
+    PickConsumePos(listIndex, &primary, &alt);
+    (void)alt;
+    return primary;
+}
+
+int ConsumeType() { return kItemTypeConsume; }
+
 void* GetConsumeList() {
     EnsureFieldOffsets();
-    void* wm = world::GetWorldManager();
-    if (!wm) return nullptr;
-    void* cd = ReadPtr(wm, gOffWmCharacterData);
-    if (!LooksLikeHeapPtr(cd)) return nullptr;
-    void* slotsArr = ReadPtr(cd, gOffCdItemSlots);
-    if (!LooksLikeHeapPtr(slotsArr)) return nullptr;
-    const uintptr_t n = ArrayLen(slotsArr);
-    if (n <= (uintptr_t)kItemTypeConsume) return nullptr;
-    return ArrayAt(slotsArr, (uintptr_t)kItemTypeConsume);
+    return x::ui::player::GetItemSlotList(ConsumeType());
+}
+
+void EnsureCdGetItem() {
+    if (gCdGetItem) return;
+    void* cdKlass = x::runtime::il2cpp::FindClass("", kHashCharacterData);
+    x::runtime::il2cpp_method::MethodShape shape{};
+    shape.arity = 2;
+    shape.ret = x::runtime::il2cpp_method::TypeKind::Ptr;
+    shape.param[0] = x::runtime::il2cpp_method::TypeKind::I32;
+    shape.param[1] = x::runtime::il2cpp_method::TypeKind::I32;
+    auto mr = x::runtime::il2cpp_method::FindMethodResolved(cdKlass, kRvaCdGetItem, shape, "GetItem",
+                                                            kHashCdGetItem);
+    if (mr.method) {
+        gMiCdGetItem = reinterpret_cast<MethodInfoHead*>(mr.method);
+        if (gMiCdGetItem && gMiCdGetItem->methodPointer)
+            gCdGetItem = reinterpret_cast<FnCdGetItem>(gMiCdGetItem->methodPointer);
+    }
+    if (!gCdGetItem) gCdGetItem = x::runtime::il2cpp::AtRva<FnCdGetItem>(kRvaCdGetItem);
+    static bool sLogged = false;
+    if (!sLogged && gCdGetItem) {
+        sLogged = true;
+        x::runtime::LogI("Consumable", "GetItem MI=%p fn=%p", (void*)gMiCdGetItem, (void*)gCdGetItem);
+    }
+}
+
+void EnsureCdGetItemSlotPos() {
+    if (gCdGetItemSlotPos) return;
+    void* cdKlass = x::runtime::il2cpp::FindClass("", kHashCharacterData);
+    x::runtime::il2cpp_method::MethodShape shape{};
+    shape.arity = 2;
+    shape.ret = x::runtime::il2cpp_method::TypeKind::I32;
+    shape.param[0] = x::runtime::il2cpp_method::TypeKind::I32;
+    shape.param[1] = x::runtime::il2cpp_method::TypeKind::I32;
+    auto mr = x::runtime::il2cpp_method::FindMethodResolved(cdKlass, kRvaCdGetItemSlotPos, shape,
+                                                            "GetItemSlotPos", kHashCdGetItemSlotPos);
+    if (mr.method) {
+        gMiCdGetItemSlotPos = reinterpret_cast<MethodInfoHead*>(mr.method);
+        if (gMiCdGetItemSlotPos && gMiCdGetItemSlotPos->methodPointer)
+            gCdGetItemSlotPos =
+                reinterpret_cast<FnCdGetItemSlotPos>(gMiCdGetItemSlotPos->methodPointer);
+    }
+    if (!gCdGetItemSlotPos)
+        gCdGetItemSlotPos = x::runtime::il2cpp::AtRva<FnCdGetItemSlotPos>(kRvaCdGetItemSlotPos);
+    static bool sLogged = false;
+    if (!sLogged && gCdGetItemSlotPos) {
+        sLogged = true;
+        x::runtime::LogI("Consumable", "GetItemSlotPos MI=%p fn=%p", (void*)gMiCdGetItemSlotPos,
+                         (void*)gCdGetItemSlotPos);
+    }
+}
+
+void EnsureCdGetItemCount() {
+    if (gCdGetItemCount) return;
+    void* cdKlass = x::runtime::il2cpp::FindClass("", kHashCharacterData);
+    x::runtime::il2cpp_method::MethodShape shape{};
+    shape.arity = 3;
+    shape.ret = x::runtime::il2cpp_method::TypeKind::I32;
+    shape.param[0] = x::runtime::il2cpp_method::TypeKind::I32;
+    shape.param[1] = x::runtime::il2cpp_method::TypeKind::I32;
+    shape.param[2] = x::runtime::il2cpp_method::TypeKind::Bool;
+    auto mr = x::runtime::il2cpp_method::FindMethodResolved(cdKlass, kRvaCdGetItemCount, shape,
+                                                            "GetItemCount", kHashCdGetItemCount);
+    if (mr.method) {
+        gMiCdGetItemCount = reinterpret_cast<MethodInfoHead*>(mr.method);
+        if (gMiCdGetItemCount && gMiCdGetItemCount->methodPointer)
+            gCdGetItemCount = reinterpret_cast<FnCdGetItemCount>(gMiCdGetItemCount->methodPointer);
+    }
+    if (!gCdGetItemCount)
+        gCdGetItemCount = x::runtime::il2cpp::AtRva<FnCdGetItemCount>(kRvaCdGetItemCount);
+    static bool sLogged = false;
+    if (!sLogged && gCdGetItemCount) {
+        sLogged = true;
+        x::runtime::LogI("Consumable", "GetItemCount MI=%p fn=%p", (void*)gMiCdGetItemCount,
+                         (void*)gCdGetItemCount);
+    }
+}
+
+void* GetItemAtTypePos(int nTI, int nPos) {
+    if (nTI < 0 || nTI > 6) return nullptr;
+    if (nPos < 1 || nPos > kConsumePosMax) return nullptr;
+    if (!x::runtime::main_thread::IsOnPumpThread()) return nullptr;
+    void* cd = x::ui::player::LocalCharacterData();
+    if (!cd) return nullptr;
+    EnsureCdGetItem();
+    if (!gCdGetItem) return nullptr;
+    void* slot = nullptr;
+    __try {
+        slot = gCdGetItem(cd, nTI, nPos, gMiCdGetItem);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("consumable/GetItem");
+        slot = nullptr;
+    }
+    return slot;
+}
+
+void* GetItemConsumePos(int nPos) { return GetItemAtTypePos(ConsumeType(), nPos); }
+
+int CallGetItemSlotPos(int nTI, int itemId) {
+    if (nTI < 0 || nTI > 6 || itemId <= 0) return 0;
+    if (!x::runtime::main_thread::IsOnPumpThread()) return 0;
+    void* cd = x::ui::player::LocalCharacterData();
+    if (!cd) return 0;
+    EnsureCdGetItemSlotPos();
+    if (!gCdGetItemSlotPos) return 0;
+    int pos = 0;
+    __try {
+        pos = gCdGetItemSlotPos(cd, nTI, itemId, gMiCdGetItemSlotPos);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("consumable/GetItemSlotPos");
+        pos = 0;
+    }
+    return pos;
+}
+
+int CallGetItemCount(int nTI, int itemId) {
+    if (nTI < 0 || nTI > 6 || itemId <= 0) return 0;
+    if (!x::runtime::main_thread::IsOnPumpThread()) return 0;
+    void* cd = x::ui::player::LocalCharacterData();
+    if (!cd) return 0;
+    EnsureCdGetItemCount();
+    if (!gCdGetItemCount) return 0;
+    int n = 0;
+    __try {
+        n = gCdGetItemCount(cd, nTI, itemId, 1, gMiCdGetItemCount);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReturnLeakedMetadataLock("consumable/GetItemCount");
+        n = 0;
+    }
+    return n;
+}
+
+void CensusOneType(int nTI, int* outSize, int* outFilled, int* outSampleId) {
+    if (outSize) *outSize = -1;
+    if (outFilled) *outFilled = 0;
+    if (outSampleId) *outSampleId = 0;
+    void* list = x::ui::player::GetItemSlotList(nTI);
+    if (!list) return;
+    const int size = ListSize(list);
+    if (outSize) *outSize = size;
+    void* items = ReadPtr(list, x::runtime::il2cpp_container::OffListItems());
+    const int cap = items ? static_cast<int>(ArrayLen(items)) : 0;
+    const int n = cap > size ? cap : size;
+    int filled = 0;
+    int sample = 0;
+    for (int i = 0; i < n && i < 128; ++i) {
+        void* slot = items ? ArrayAt(items, static_cast<uintptr_t>(i)) : nullptr;
+        if (!slot) continue;
+        const int id = ReadI32(slot, gOffItemId);
+        if (id <= 0) continue;
+        ++filled;
+        if (!sample) sample = id;
+    }
+    if (outFilled) *outFilled = filled;
+    if (outSampleId) *outSampleId = sample;
+}
+
+// GetItem(Consume, nPOS) 走 _items[nPOS]（数组 max_length，不是 List._size）。
+// 只扫 _size 会漏空格后面的格子。ItemSlots[type] 若本身是 T[]，_items 不是堆指针，按数组直扫。
+bool ConsumeSlotArray(void** outArr, int* outN) {
+    if (outArr) *outArr = nullptr;
+    if (outN) *outN = 0;
+    void* list = GetConsumeList();
+    if (!list) return false;
+    void* items = ReadPtr(list, x::runtime::il2cpp_container::OffListItems());
+    void* arr = nullptr;
+    int n = 0;
+    if (LooksLikeHeapPtr(items)) {
+        arr = items;
+        const int cap = static_cast<int>(ArrayLen(items));
+        const int size = ListSize(list);
+        n = cap > size ? cap : size;
+        if (n <= 0) n = cap;
+    } else {
+        arr = list;
+        n = static_cast<int>(ArrayLen(list));
+    }
+    if (!arr || n <= 0 || n > 256) return false;
+    if (outArr) *outArr = arr;
+    if (outN) *outN = n;
+    return true;
+}
+
+// 优先官方 GetItem(nPOS)。只扫消耗栏 ItemType=1；2 是 Install，空扫也不改栏。
+void ForEachUseBagSlot(void (*fn)(void* slot, int listIndex, void* user), void* user) {
+    if (!fn) return;
+    EnsureFieldOffsets();
+    const int nTI = kItemTypeConsume;
+    auto scanType = [&](int type) -> int {
+        int hits = 0;
+        for (int pos = 1; pos <= kConsumePosMax; ++pos) {
+            void* item = GetItemAtTypePos(type, pos);
+            if (!item) continue;
+            const int id = ReadI32(item, gOffItemId);
+            if (id <= 0) continue;
+            ++hits;
+            fn(item, pos, user);
+        }
+        return hits;
+    };
+    if (x::runtime::main_thread::IsOnPumpThread()) {
+        if (scanType(nTI) > 0) return;
+    }
+    auto scanArr = [&](int type) {
+        void* list = x::ui::player::GetItemSlotList(type);
+        if (!list) return 0;
+        void* items = ReadPtr(list, x::runtime::il2cpp_container::OffListItems());
+        if (!items) return 0;
+        const int cap = static_cast<int>(ArrayLen(items));
+        const int size = ListSize(list);
+        const int n = cap > size ? cap : size;
+        int hits = 0;
+        for (int i = 0; i < n && i < 256; ++i) {
+            void* item = ArrayAt(items, static_cast<uintptr_t>(i));
+            if (!item) continue;
+            const int id = ReadI32(item, gOffItemId);
+            if (id <= 0) continue;
+            ++hits;
+            fn(item, i, user);
+        }
+        return hits;
+    };
+    (void)scanArr(nTI);
+}
+
+void LogConsumeBagSnap(int wantId) {
+    struct Acc {
+        int ids[12]{};
+        int qtys[12]{};
+        int nfill = 0;
+        int nslot = 0;
+    } acc{};
+    void* list = GetConsumeList();
+    const int listN = list ? ListSize(list) : -1;
+    int arrN = 0;
+    void* arr = nullptr;
+    const bool haveArr = ConsumeSlotArray(&arr, &arrN);
+    ForEachUseBagSlot(
+        [](void* item, int, void* user) {
+            auto* a = static_cast<Acc*>(user);
+            ++a->nslot;
+            if (a->nfill >= 12) return;
+            a->ids[a->nfill] = ReadI32(item, gOffItemId);
+            a->qtys[a->nfill] = ItemQty(item);
+            ++a->nfill;
+        },
+        &acc);
+    char buf[256];
+    buf[0] = 0;
+    int o = 0;
+    for (int i = 0; i < acc.nfill && o < (int)sizeof(buf) - 24; ++i) {
+        o += snprintf(buf + o, sizeof(buf) - static_cast<size_t>(o), "%s%d:%d", i ? "," : "",
+                      acc.ids[i], acc.qtys[i]);
+    }
+    x::runtime::LogW("Consumable",
+                     "bag snap want=%d type=%d listN=%d arrN=%d filled=%d ids=%s", wantId,
+                     ConsumeType(), listN, haveArr ? arrN : -1, acc.nslot, acc.nfill ? buf : "-");
+    char census[320];
+    census[0] = 0;
+    int co = 0;
+    EnsureFieldOffsets();
+    for (int t = 0; t <= 5 && co < (int)sizeof(census) - 48; ++t) {
+        int sz = -1, filled = 0, sample = 0;
+        CensusOneType(t, &sz, &filled, &sample);
+        co += snprintf(census + co, sizeof(census) - static_cast<size_t>(co), "%s%d:n=%d,f=%d,id=%d",
+                       t ? " " : "", t, sz, filled, sample);
+    }
+    const int pos1 = CallGetItemSlotPos(1, wantId);
+    const int pos2 = CallGetItemSlotPos(2, wantId);
+    const int cnt1 = CallGetItemCount(1, wantId);
+    const int cnt2 = CallGetItemCount(2, wantId);
+    x::runtime::LogW("Consumable", "bag census {%s} slotPos t1=%d t2=%d count t1=%d t2=%d", census,
+                     pos1, pos2, cnt1, cnt2);
 }
 
 int QtyOfItemId(int itemId) {
     if (itemId <= 0) return -1;
-    void* list = GetConsumeList();
-    if (!list) return -1;
-    const int n = ListSize(list);
-    int total = 0;
-    bool found = false;
-    for (int i = 0; i < n && i < 256; ++i) {
-        void* item = ListAt(list, i);
-        if (!item) continue;
-        if (ReadI32(item, gOffItemId) != itemId) continue;
-        found = true;
-        total += ItemQty(item);
-    }
-    return found ? total : -1;
+    struct QtyAcc {
+        int itemId = 0;
+        int total = 0;
+        bool found = false;
+    } acc{itemId, 0, false};
+    ForEachUseBagSlot(
+        [](void* item, int, void* user) {
+            auto* a = static_cast<QtyAcc*>(user);
+            if (ReadI32(item, gOffItemId) != a->itemId) return;
+            a->found = true;
+            a->total += ItemQty(item);
+        },
+        &acc);
+    return acc.found ? acc.total : -1;
 }
 
 MethodInfoHead* FindMethodByRva(void* klass, uint32_t rva) {
@@ -842,42 +1177,45 @@ bool InvokeUse(int pos, int itemId) {
 bool FindPotionOnMain(PotionKind kind, FindResult& out) {
     out = {};
     if (!world::EnsureBound()) return false;
-    void* list = GetConsumeList();
-    if (!list) return false;
-    const int n = ListSize(list);
-    if (n <= 0 || n > 256) return false;
-
-    int bestPos = -1;
-    int bestIdx = -1;
-    int bestId = 0;
-    int bestQty = 0;
-    int bestRank = 99;
-    for (int i = 0; i < n; ++i) {
-        void* item = ListAt(list, i);
-        if (!item) continue;
-        const int id = ReadI32(item, gOffItemId);
-        const int rank = (kind == PotionKind::Hp) ? HpRank(id) : MpRank(id);
-        if (rank < 0) continue;
-        const int qty = ItemQty(item);
-        if (qty <= 0) continue;
-        int pos = -1, alt = -1;
-        PickConsumePos(i, &pos, &alt);
-        (void)alt;
-        if (pos <= 0) continue;
-        if (bestPos < 0 || rank < bestRank ||
-            (rank == bestRank && (pos < bestPos || (pos == bestPos && qty > bestQty)))) {
-            bestPos = pos;
-            bestIdx = i;
-            bestId = id;
-            bestQty = qty;
-            bestRank = rank;
-        }
-    }
-    if (bestPos < 0) return false;
-    out.pos = bestPos;
-    out.listIndex = bestIdx;
-    out.itemId = bestId;
-    out.qty = bestQty;
+    struct Best {
+        PotionKind kind = PotionKind::Hp;
+        int bestPos = -1;
+        int bestIdx = -1;
+        int bestId = 0;
+        int bestQty = 0;
+        int bestRank = 99;
+        bool bestFromSlot = false;
+    } best{};
+    best.kind = kind;
+    ForEachUseBagSlot(
+        [](void* item, int i, void* user) {
+            auto* b = static_cast<Best*>(user);
+            const int id = ReadI32(item, gOffItemId);
+            const int rank = (b->kind == PotionKind::Hp) ? HpRank(id) : MpRank(id);
+            if (rank < 0) return;
+            const int qty = ItemQty(item);
+            if (qty <= 0) return;
+            const int fromSlot = SlotNPos(item);
+            const int pos = fromSlot > 0 ? fromSlot : PickUsePos(item, i);
+            if (pos <= 0) return;
+            if (b->bestPos < 0 || rank < b->bestRank ||
+                (rank == b->bestRank &&
+                 (pos < b->bestPos || (pos == b->bestPos && qty > b->bestQty)))) {
+                b->bestPos = pos;
+                b->bestIdx = i;
+                b->bestId = id;
+                b->bestQty = qty;
+                b->bestRank = rank;
+                b->bestFromSlot = fromSlot > 0;
+            }
+        },
+        &best);
+    if (best.bestPos < 0) return false;
+    out.pos = best.bestPos;
+    out.listIndex = best.bestIdx;
+    out.itemId = best.bestId;
+    out.qty = best.bestQty;
+    out.posFromSlot = best.bestFromSlot;
     out.ok = true;
     return true;
 }
@@ -911,7 +1249,7 @@ void FindUseJobOnMain(void* user) {
     ctx->qtyBefore = QtyOfItemId(ctx->fr.itemId);
     if (!ResolveUseMethod() || !gFnUseReq) return;
     __try {
-        gFnUseReq(ctx->fr.pos, ctx->fr.itemId, gMiUseReq);
+        gFnUseReq(ctx->fr.pos, ctx->fr.itemId, nullptr);
         ctx->used = true;
         // Same-frame qty (may not drop yet — server RTT). Still safer than worker WaitQtyDrop.
         ctx->qtyAfter = QtyOfItemId(ctx->fr.itemId);
@@ -942,7 +1280,7 @@ void UseOnlyJobOnMain(void* user) {
     if (!ctx || !ctx->fr.ok || ctx->fr.pos <= 0 || ctx->fr.itemId <= 0) return;
     if (!ResolveUseMethod() || !gFnUseReq) return;
     __try {
-        gFnUseReq(ctx->fr.pos, ctx->fr.itemId, gMiUseReq);
+        gFnUseReq(ctx->fr.pos, ctx->fr.itemId, nullptr);
         ctx->ok = true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ctx->ok = false;
@@ -953,28 +1291,63 @@ bool FindItemIdOnMain(int itemId, FindResult& out) {
     out = {};
     if (itemId <= 0) return false;
     if (!world::EnsureBound()) return false;
-    void* list = GetConsumeList();
-    if (!list) return false;
-    const int n = ListSize(list);
-    if (n <= 0 || n > 256) return false;
-    for (int i = 0; i < n; ++i) {
-        void* item = ListAt(list, i);
-        if (!item) continue;
-        if (ReadI32(item, gOffItemId) != itemId) continue;
-        const int qty = ItemQty(item);
-        if (qty <= 0) continue;
-        int pos = -1, alt = -1;
-        PickConsumePos(i, &pos, &alt);
-        (void)alt;
-        if (pos <= 0) continue;
+    EnsureFieldOffsets();
+    const int t = kItemTypeConsume;
+    const int pos = CallGetItemSlotPos(t, itemId);
+    if (pos > 0) {
+        void* item = GetItemAtTypePos(t, pos);
+        int qty = ItemQty(item);
+        if (qty <= 0) qty = CallGetItemCount(t, itemId);
+        if (qty <= 0) qty = 1;
         out.pos = pos;
-        out.listIndex = i;
+        out.listIndex = pos;
         out.itemId = itemId;
         out.qty = qty;
+        out.posFromSlot = true;
         out.ok = true;
+        static DWORD sPosLog = 0;
+        const DWORD now = x::runtime::NowMs();
+        if (!sPosLog || static_cast<int>(now - sPosLog) >= 10000) {
+            sPosLog = now;
+            x::runtime::LogI("Consumable", "GetItemSlotPos type=%d pos=%d id=%d qty=%d", t, pos,
+                             itemId, qty);
+        }
         return true;
     }
-    return false;
+    struct Hit {
+        int itemId = 0;
+        FindResult* out = nullptr;
+        bool ok = false;
+    } hit{itemId, &out, false};
+    ForEachUseBagSlot(
+        [](void* item, int i, void* user) {
+            auto* h = static_cast<Hit*>(user);
+            if (h->ok || !h->out) return;
+            if (ReadI32(item, gOffItemId) != h->itemId) return;
+            const int qty = ItemQty(item);
+            if (qty <= 0) return;
+            const int fromSlot = SlotNPos(item);
+            const int pos = fromSlot > 0 ? fromSlot : PickUsePos(item, i);
+            if (pos <= 0) return;
+            h->out->pos = pos;
+            h->out->listIndex = i;
+            h->out->itemId = h->itemId;
+            h->out->qty = qty;
+            h->out->posFromSlot = fromSlot > 0;
+            h->out->ok = true;
+            h->ok = true;
+            if (fromSlot > 0 && fromSlot != i) {
+                static DWORD s_nposLog = 0;
+                const DWORD now = x::runtime::NowMs();
+                if (!s_nposLog || static_cast<int>(now - s_nposLog) >= 10000) {
+                    s_nposLog = now;
+                    x::runtime::LogI("Consumable", "nPOS=%d listIndex=%d id=%d qty=%d", fromSlot, i,
+                                     h->itemId, qty);
+                }
+            }
+        },
+        &hit);
+    return hit.ok;
 }
 
 // MUST only run on Unity main. PageDown=HP / PageUp=MP → FuncType.Item → consume slot.
@@ -1046,7 +1419,8 @@ void FindUseBoundJobOnMain(void* user) {
     ctx->qtyBefore = QtyOfItemId(ctx->fr.itemId);
     if (!ResolveUseMethod() || !gFnUseReq) return;
     __try {
-        gFnUseReq(ctx->fr.pos, ctx->fr.itemId, gMiUseReq);
+        // Official FuncKey site: (nPOS, itemId, /*MethodInfo=*/null).
+        gFnUseReq(ctx->fr.pos, ctx->fr.itemId, nullptr);
         ctx->used = true;
         ctx->qtyAfter = QtyOfItemId(ctx->fr.itemId);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1073,16 +1447,6 @@ void FindUseIdJobOnMain(void* user) {
     auto* ctx = reinterpret_cast<FindUseIdJobCtx*>(user);
     if (!ctx) return;
     if (!world::EnsureBound()) {
-        ctx->listMiss = true;
-        return;
-    }
-    void* list = GetConsumeList();
-    if (!list) {
-        ctx->listMiss = true;
-        return;
-    }
-    const int n = ListSize(list);
-    if (n <= 0 || n > 256) {
         ctx->listMiss = true;
         return;
     }
@@ -1123,6 +1487,12 @@ void Init() {
     gLastFkmRebind = 0;
     gLastBindMissLogHp = 0;
     gLastBindMissLogMp = 0;
+    gCdGetItem = nullptr;
+    gMiCdGetItem = nullptr;
+    gCdGetItemSlotPos = nullptr;
+    gMiCdGetItemSlotPos = nullptr;
+    gCdGetItemCount = nullptr;
+    gMiCdGetItemCount = nullptr;
     gFkFieldTried = false;
     gOffFkType = kFbFkType;
     gOffFkValue = kFbFkValue;
@@ -1153,6 +1523,12 @@ void Shutdown() {
     gFkm = nullptr;
     gFkmKlass = nullptr;
     gMiGetDataByKeyCode = nullptr;
+    gCdGetItem = nullptr;
+    gMiCdGetItem = nullptr;
+    gCdGetItemSlotPos = nullptr;
+    gMiCdGetItemSlotPos = nullptr;
+    gCdGetItemCount = nullptr;
+    gMiCdGetItemCount = nullptr;
     gLoggedUseReqRvaMiss = false;
     gLoggedPortalRvaMiss = false;
     gLastUseMiRetryMs = 0;
@@ -1319,9 +1695,10 @@ bool FindAndUseBoundPotion(bool wantHp, FindResult& out) {
     q.qty = -1;
     (void)x::runtime::main_thread::InvokeAndWait(&QtyJobOnMain, &q, kJobWaitMs);
 
-    // listIndex 作 nPOS 已验证时，alt=listIndex+1 只会空烧时间/CD（BIN: pos=3 ok、alt=4 empty）。
+    // 格子 nPOS 已钉死，或 listIndex 作 nPOS 已验证：alt=listIndex+1 只会空烧 CD。
     const int mode = gConsumePosMode.load(std::memory_order_relaxed);
     const bool skipAlt =
+        ctx.fr.posFromSlot ||
         mode == static_cast<int>(ConsumePosMode::ListIndexIsPos) ||
         (ctx.fr.listIndex >= 1 && ctx.fr.pos == ctx.fr.listIndex);
     if (skipAlt) {
@@ -1474,24 +1851,19 @@ bool UseStatChangeItem(int nPos) {
             bp.pos = nPos;
             auto job = [](void* user) {
                 auto* c = reinterpret_cast<ByPosCtx*>(user);
-                void* list = GetConsumeList();
-                if (!list) return;
-                const int n = ListSize(list);
-                if (n <= 0 || n > 256) return;
-                for (int i = 0; i < n; ++i) {
-                    void* item = ListAt(list, i);
-                    if (!item) continue;
-                    int primary = -1, alt = -1;
-                    PickConsumePos(i, &primary, &alt);
-                    if (primary != c->pos && alt != c->pos) continue;
-                    c->fr.pos = c->pos;
-                    c->fr.listIndex = i;
-                    c->fr.itemId = ReadI32(item, gOffItemId);
-                    c->fr.qty = ItemQty(item);
-                    c->fr.ok = c->fr.itemId > 0;
-                    c->ok = c->fr.ok;
-                    break;
-                }
+                ForEachUseBagSlot(
+                    [](void* item, int i, void* user2) {
+                        auto* c2 = static_cast<ByPosCtx*>(user2);
+                        if (c2->ok) return;
+                        if (PickUsePos(item, i) != c2->pos) return;
+                        c2->fr.pos = c2->pos;
+                        c2->fr.listIndex = i;
+                        c2->fr.itemId = ReadI32(item, gOffItemId);
+                        c2->fr.qty = ItemQty(item);
+                        c2->fr.ok = c2->fr.itemId > 0;
+                        c2->ok = c2->fr.ok;
+                    },
+                    c);
             };
             if (!x::runtime::main_thread::InvokeAndWait(job, &bp, kJobWaitMs) || !bp.ok) {
                 x::runtime::LogW("Consumable", "UseRequest by-pos: no item at pos=%d", nPos);

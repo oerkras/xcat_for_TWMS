@@ -20,6 +20,12 @@ inline constexpr int kFailStreakLimit = 3;
 inline constexpr DWORD kHealStuckBackoffMs = 15000;
 inline constexpr int kHpThresholdPct = 50;
 inline constexpr int kMpThresholdPct = 30;
+// 跌破门槛后连喝到「门槛 + 带宽」再停（弱药一瓶只回几个百分点，别把人吊在门槛边）。
+// 带宽自适应：至少 kHpRefillBandPct；实测一瓶回多少就按「3 瓶的量」拉宽，封顶 Max；目标线不超 Ceil。
+inline constexpr int kHpRefillBandPct = 15;
+inline constexpr int kHpRefillBandMaxPct = 40;
+inline constexpr int kHpRefillCeilPct = 90;
+inline constexpr float kHpRefillPotsWorth = 3.f;
 inline constexpr int kHpEmergencyPct = 25;
 inline constexpr int kMpEmergencyPct = 15;
 inline constexpr DWORD kDualOneDesyncMs = 2000;

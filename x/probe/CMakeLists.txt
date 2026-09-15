@@ -62,6 +62,7 @@ add_library(xcat_probe SHARED
   ../features/ports/mob_inspect_probe.cpp
   ../features/ports/foothold_port.cpp
   ../features/ports/foothold_path.cpp
+  ../features/ports/nav_memory.cpp
   ../features/ports/map_bounds_port.cpp
   ../features/ports/user_pool_port.cpp
   ../features/ports/shop_port.cpp
@@ -84,6 +85,7 @@ add_library(xcat_probe SHARED
   ../features/buffs/buffs.cpp
   ../features/multi_skill/multi_skill.cpp
   ../features/simple_combat/simple_combat.cpp
+  ../features/simple_combat/human_nav.cpp
   ../features/simple_combat/heli_rotor.cpp
   ../features/simple_combat/reach_cal.cpp
   ../features/map_attack/map_attack.cpp

@@ -10,9 +10,11 @@
 #include "../ports/teleport_port.h"
 #include "../ports/travel_port.h"
 #include "../ports/world_port.h"
+#include "../../ui/player_vitals.h"
 #include "../sellbag/sellbag.h"
 #include "../simple_combat/simple_combat.h"
 #include "../simple_combat/heli_rotor.h"
+#include "../simple_combat/human_nav.h"
 #include "../char_boot/char_boot.h"
 #include "../ports/mob_gather_port.h"
 #include "../soft_login_probe/soft_login_probe.h"
@@ -57,6 +59,9 @@ int gShopStockReroute = 0;  // 本趟因「店内无目标货」改道次数
 constexpr int kMaxShopStockReroute = 2;
 int gRefillStockMiss = 0;   // PlanRefills：需要补但店内无货/无价的条目数
 int gEquipTrigger = 0;
+int gEquipUsedAtTripStart = -1;  // 本趟开卖前占用；-1=未知
+int gEquipStuckUsed = -1;        // 卖完占用未降：抑制装备触发直到 used 变化
+int gEquipUnchangedTrips = 0;    // 连续「卖完占用仍等于开趟时」次数
 xcat::AutoSupplyConfig gCfg{};
 uint64_t gSeenCfgTick = 0;
 uint32_t gHandledManualSeq = 0;
@@ -187,7 +192,7 @@ constexpr DWORD kScrollWaitMs = 8000;
 // 用卷：最多 3 次（含首次）。no_consume 不立刻 walk，隔 ~1.6s 再试（BIN 23:18 落台后首发偶失败）。
 constexpr int kMaxScrollTries = 3;
 constexpr DWORD kScrollRetryGapMs = 1600;
-constexpr int kInvConsume = 2;
+constexpr int kInvConsume = x::ui::player::item_type::Consume;
 
 bool IsTownMapIdHeuristic(int mapId) {
     if (mapId <= 0) return false;
@@ -340,6 +345,35 @@ void RearmLowStockLatchesAfterTrip(const char* why);
 // 硬闸上升沿会 BeginLieSafeLand；用卷/赶路/开店前必须站稳，否则底层低 Y 掉出图外重载。
 // review：不能只看 IsSafeLandActive——soft_or_net_quiet 拆台后 inactive 仍可能悬空。
 bool WaitSafeLand(DWORD now) {
+    if (simple_combat::IsHumanGroundMove()) {
+        if (travel::IsActive()) {
+            SetMsg("赶路稳图中…");
+            return false;
+        }
+        ports::teleport::FlightState st{};
+        const bool have = ports::teleport::QueryFlightState(st) && st.ok;
+        if (have && st.onFh) return true;
+        // 挂在绳上（低血休息 / 上次导航失败留下的）：重力等不来 onFh，先跳下绳。
+        if (simple_combat::human_nav::TickGetOffRope(now)) {
+            SetMsg("下绳…");
+            static DWORD sRopeLog = 0;
+            if (!sRopeLog || now - sRopeLog >= 1500) {
+                sRopeLog = now;
+                runtime::LogI("AutoSupply", "wait human land: on rope → jump off ap=(%.0f,%.0f)",
+                              have ? st.x : 0.f, have ? st.y : 0.f);
+            }
+            return false;
+        }
+        simple_combat::RequestSafeLand("auto_supply_human_land");
+        SetMsg("落地中…");
+        static DWORD sHumanLog = 0;
+        if (!sHumanLog || now - sHumanLog >= 1500) {
+            sHumanLog = now;
+            runtime::LogI("AutoSupply", "wait human land (no heli) onFh=%d ap=(%.0f,%.0f)",
+                          have && st.onFh ? 1 : 0, have ? st.x : 0.f, have ? st.y : 0.f);
+        }
+        return false;
+    }
     if (simple_combat::IsSafeLandActive()) {
         SetMsg("安全落台中…");
         static DWORD sLog = 0;
@@ -385,6 +419,13 @@ void EnsureSafeLandIfAirborne(DWORD now) {
     ports::teleport::FlightState st{};
     if (!ports::teleport::QueryFlightState(st) || !st.ok) return;
     if (st.onFh) return;
+    if (simple_combat::IsHumanGroundMove()) {
+        if (simple_combat::human_nav::OnRopeNow()) return;  // 绳上：WaitSafeLand 会跳下来
+        runtime::LogI("AutoSupply", "human land airborne ap=(%.0f,%.0f)", st.x, st.y);
+        simple_combat::RequestSafeLand("auto_supply_human_airborne");
+        (void)now;
+        return;
+    }
     runtime::LogI("AutoSupply", "request safe land airborne ap=(%.0f,%.0f)", st.x, st.y);
     simple_combat::RequestSafeLand("auto_supply_airborne");
     (void)now;
@@ -426,7 +467,8 @@ void FailTrip(const char* why) {
 // 对照枫星 TownGotoWait：只对硬失败收尾；AlreadyThere 是陈旧终态/同图提示，不能当行程失败。
 bool TravelFailIsHard(travel::FailKind k) {
     return k == travel::FailKind::Unreachable || k == travel::FailKind::FakeFireStop ||
-           k == travel::FailKind::BadTarget || k == travel::FailKind::FireStuck;
+           k == travel::FailKind::BadTarget || k == travel::FailKind::FireStuck ||
+           k == travel::FailKind::PlayerDead;
 }
 
 bool EquipTriggerMet(int& used, int& cap) {
@@ -436,8 +478,67 @@ bool EquipTriggerMet(int& used, int& cap) {
     gStatus.equipUsed = used;
     gStatus.equipCap = cap;
     if (cap <= 0) return false;
-    if (gEquipTrigger <= 0) return used >= cap;
-    return used >= gEquipTrigger;
+    const bool raw = (gEquipTrigger <= 0) ? (used >= cap) : (used >= gEquipTrigger);
+    if (!raw) {
+        if (gEquipStuckUsed >= 0) {
+            runtime::LogI("AutoSupply", "equip stuck latch clear used=%d/%d (below thr)", used,
+                          cap);
+            gEquipStuckUsed = -1;
+            gEquipUnchangedTrips = 0;
+        }
+        return false;
+    }
+    if (gEquipStuckUsed >= 0 && used == gEquipStuckUsed) {
+        static DWORD sStuckLog = 0;
+        const DWORD n = GetTickCount();
+        if (!sStuckLog || n - sStuckLog > 8000) {
+            sStuckLog = n;
+            runtime::LogI("AutoSupply", "equip trigger suppressed stuck used=%d/%d", used, cap);
+        }
+        return false;
+    }
+    if (gEquipStuckUsed >= 0 && used != gEquipStuckUsed) {
+        runtime::LogI("AutoSupply", "equip stuck latch clear used %d→%d", gEquipStuckUsed, used);
+        gEquipStuckUsed = -1;
+        gEquipUnchangedTrips = 0;
+    }
+    return true;
+}
+
+void NoteEquipOccupancyAfterSell(const sellbag::Status& st) {
+    int used = 0, cap = 0;
+    if (!shop::QueryBagUsage(true, used, cap) || cap <= 0) return;
+    gStatus.equipUsed = used;
+    gStatus.equipCap = cap;
+    const bool stillHot = (gEquipTrigger <= 0) ? (used >= cap) : (used >= gEquipTrigger);
+    if (!stillHot) {
+        if (gEquipStuckUsed >= 0) {
+            runtime::LogI("AutoSupply", "equip stuck latch clear used=%d/%d after sell", used, cap);
+        }
+        gEquipStuckUsed = -1;
+        gEquipUnchangedTrips = 0;
+        return;
+    }
+    if (gEquipUsedAtTripStart >= 0 && used == gEquipUsedAtTripStart) {
+        ++gEquipUnchangedTrips;
+        // 投影空：这趟没机会卖装备。占用不变满 2 趟：给 RefreshSell 一次重开店机会后再锁。
+        const bool emptyProj = st.lastEquipListN == 0;
+        if (emptyProj || gEquipUnchangedTrips >= 2) {
+            gEquipStuckUsed = used;
+            runtime::LogW("AutoSupply",
+                          "equip occupancy unchanged used=%d/%d listN=%d sold=%u trips=%d — "
+                          "suppress until used changes",
+                          used, cap, st.lastEquipListN, st.equipSold, gEquipUnchangedTrips);
+        } else {
+            runtime::LogI("AutoSupply",
+                          "equip occupancy still %d/%d after sell listN=%d sold=%u — retry next "
+                          "trip (RefreshSell)",
+                          used, cap, st.lastEquipListN, st.equipSold);
+        }
+    } else {
+        gEquipUnchangedTrips = 0;
+        gEquipStuckUsed = -1;
+    }
 }
 
 int CountConsume(int itemId);  // 自定义低库存触发 / 补货计划共用
@@ -1124,6 +1225,7 @@ bool FireAutoTrip(bool potionFire, bool customFire, bool custom2Fire, bool feedF
     }
     gShopExclude[0] = 0;
     gShopStockReroute = 0;
+    gEquipUsedAtTripStart = used;
     const char* pauseMsg = "停手并记下挂机图…";
     if (potionFire || customFire || custom2Fire || feedFire) {
         if (potionFire) {
@@ -1244,6 +1346,8 @@ void TickIdle(DWORD now) {
         gShopStockReroute = 0;
         gCooldownUntil = 0;
         travel::RequestStop();  // 清掉上次 already_there 等陈旧 failKind
+        int u = 0, c = 0;
+        gEquipUsedAtTripStart = shop::QueryBagUsage(true, u, c) ? u : -1;
         runtime::LogI("AutoSupply", "%s shop=%s (%s)",
                       gManualTrip ? "手动一趟" : "续卖一趟", gShopMap, msg);
         Publish(notify::NotificationKind::Info, "auto-supply-trip", "补给已接单",
@@ -1686,6 +1790,9 @@ bool StickToShopNpc(int tpl, float x, float y, const char* src) {
         gNpcApproaching = false;
         return true;
     }
+    // 回城卷后 Bootstrap 闪一下也报 MAP_TRANSITION（人还在出生点）。
+    // 若保持 approaching，开店会跳过落地、远距 Talk（BIN 110000000 dist=709 店开了卖不出）。
+    if (res == "MAP_TRANSITION" || res == "MAP_CHANGED") gNpcApproaching = false;
     return false;
 }
 
@@ -1694,16 +1801,18 @@ void TickOpeningShop(DWORD now) {
         SetMsg("等软重连落地…");
         return;
     }
+    // 超时必须在落地等待之前：WaitSafeLand 失败会 return，90s 门闩永远走不到
+    // （BIN FA5C 海滩出生点 drop_far 空转 20+ 分钟）。
+    if (now - gPhaseSince > kWaitOpenTimeoutMs) {
+        if (TryRerouteShopAfterOpenMiss("开店超时")) return;
+        FailTrip("等待开店超时");
+        return;
+    }
     // 已在店图开趟：Travel 到站后仍可能悬空；先请求落台再等站稳。
     // 贴排挡途中不要再 DriveLieSafeHover，否则会把人拽回传送口。
     if (!gNpcApproaching) {
         EnsureSafeLandIfAirborne(now);
         if (!WaitSafeLand(now)) return;
-    }
-    if (now - gPhaseSince > kWaitOpenTimeoutMs) {
-        if (TryRerouteShopAfterOpenMiss("开店超时")) return;
-        FailTrip("等待开店超时");
-        return;
     }
     if (!gWaitOpenNotified || now - gWaitOpenNotified > 20000) {
         gWaitOpenNotified = now;
@@ -1725,7 +1834,7 @@ void TickOpeningShop(DWORD now) {
             const char* src = nullptr;
             const bool haveNpc = ResolveShopNpcStand(tpl, &nx, &ny, &src);
             if (haveNpc) {
-                SetMsg("飞向杂货 NPC…");
+                SetMsg("走向杂货 NPC…");
                 (void)StickToShopNpc(tpl, nx, ny, src);
                 if (shop::TryTalkNearestNpc(0.f, tpl)) {
                     gTalkMissStreak = 0;
@@ -1820,6 +1929,7 @@ void TickSelling(DWORD now) {
                       "sell empty kept=%u shopSkip=0 — treat as done, buy (no shop hop)",
                       st.kept);
     }
+    if (st.state == 2u) NoteEquipOccupancyAfterSell(st);
     bool ready = false;
     if (!shop::ShopReady(ready) || !ready) {
         runtime::LogW("AutoSupply", "sell phase shop closed — reopen, do not buy on air");
@@ -2524,8 +2634,9 @@ void TickHangupSupplyFirst(DWORD now) {
         (gCfg.enabled != 0) || (gCfg.autoSellOnBagFullEnabled != 0);
     int used = 0, cap = 0;
     const bool equipMet = sellTriggerOn && EquipTriggerMet(used, cap);
-    runtime::LogI("AutoSupply", "hangup sell-check on=%d equip=%d/%d thr=%d met=%d",
-                  sellTriggerOn ? 1 : 0, used, cap, gEquipTrigger, equipMet ? 1 : 0);
+    runtime::LogI("AutoSupply", "hangup sell-check on=%d equip=%d/%d thr=%d met=%d stuck=%d",
+                  sellTriggerOn ? 1 : 0, used, cap, gEquipTrigger, equipMet ? 1 : 0,
+                  (gEquipStuckUsed >= 0 && used == gEquipStuckUsed) ? 1 : 0);
     if (!potionFire && !customFire && !custom2Fire && !feedFire && !equipMet) return;
     if (FireAutoTrip(potionFire, customFire, custom2Fire, feedFire, equipMet, used, cap,
                      potionWhy, customWhy, custom2Why, feedWhy)) {
@@ -2668,6 +2779,10 @@ bool IsBusy() {
         gReturnReq.load(std::memory_order_acquire))
         return true;
     return gPhase != Phase::Idle && gPhase != Phase::Cooldown;
+}
+
+bool IsPreSupplyHold() {
+    return gPreSupplyHold.load(std::memory_order_acquire);
 }
 
 bool HoldsHangupClock() {

@@ -2,7 +2,7 @@
 //
 // FindAll / TypeObject / UI clicks ONLY on Unity main thread via main_thread_pump.
 // Worker-thread FindAll caused "Fatal error in GC / Collecting from unknown thread".
-// Prefer SceneLogin singleton (+0xC0/C8/D0) over FindObjectsOfTypeAll.
+// Prefer SceneLogin singleton (+0xC8/D0/D8 = Channel/World/Char) over FindObjectsOfTypeAll.
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -17,6 +17,7 @@
 #include "../../runtime/il2cpp_container.h"
 #include "../../runtime/il2cpp_method.h"
 #include "../ccu/ccu.h"
+#include "../auto_lie/auto_lie.h"
 #include "../channel_hop/channel_hop.h"
 #include "../kick_sniff/kick_sniff.h"
 #include "../ports/world_port.h"
@@ -49,93 +50,96 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
 // RVAs remounted 2026-08-06（dump.cs / script.json · ForceVersion 31）
-constexpr uint32_t kRvaSceneLoginGet = 0xC1E920;  // SceneLogin static get_Instance
-constexpr uint32_t kRvaOnClickWorldItem = 0xAB1CF0;  // UILoginWorld void(int)
-constexpr uint32_t kRvaSelectChannel = 0xAAACC0;  // UILoginChannel.SelectChannel
-constexpr uint32_t kRvaOnClickGoWorld = 0xAAE050;  // UILoginChannel.OnClickButtonGoWorld
-constexpr uint32_t kRvaSelectCharacter = 0xA95A90;  // UILoginCharacter void(int,bool)
-constexpr uint32_t kRvaOnClickButtonSelect = 0xA96DE0;  // UILoginCharacter.OnClickButtonSelect
-constexpr uint32_t kRvaGetAvatarCount = 0xAA1B30;  // UILoginCharacter public int()
-constexpr uint32_t kRvaIsSlotEnable = 0xA9D4F0;  // UILoginCharacter bool(int)
+constexpr uint32_t kRvaSceneLoginGet = 0xC4A970;  // SceneLogin static get_Instance
+constexpr uint32_t kRvaOnClickWorldItem = 0xADE380;  // UILoginWorld void(int)
+constexpr uint32_t kRvaSelectChannel = 0xAD7810;  // UILoginChannel.SelectChannel
+constexpr uint32_t kRvaOnClickGoWorld = 0xADAC20;  // remounted 2026-09-10 UILoginChannel void()（明文 OnClickButtonGoWorld 已消失）
+constexpr uint32_t kRvaSelectCharacter = 0xABFD50;  // UILoginCharacter void(int,bool)
+constexpr uint32_t kRvaOnClickButtonSelect = 0xAC10C0;  // remounted 2026-09-10 UILoginCharacter void()（明文 OnClickButtonSelect 已消失）
+constexpr uint32_t kRvaGetAvatarCount = 0xACBF50;  // UILoginCharacter public int()
+constexpr uint32_t kRvaIsSlotEnable = 0xAC7A80;  // UILoginCharacter bool(int)
 
 constexpr char kClassSceneLogin[] =
-    "a61c2596fd894bea309779a4140898fbb0aa356bfc8de5ba003cc6898e54d5d";
+    "d8b374c0601bc1255934015b3f8368910ec7bba6bc127d665774220be276eb6";
 constexpr char kClassUiLoginWorld[] =
-    "c616a5bb488bba6c65a60891ae868b748b84c0f6698f74e3954ce2e6586c01c";
+    "c0dc4cf4c2dcc0c324a117cefa7ab42d3e018ffc1a0e84f9d288df4acc1fcff";
 constexpr char kClassUiLoginCharacter[] =
-    "f36a2fa3fe45fb215ac5c7fda5072f9ff9d5fbb32637dff35208b727b3f7d9c";
+    "d03aecf971342226295ab6c2051182025f7cedad674bf88488dc3f1e57d959f";
 constexpr char kClassUiLoginChannel[] =
-    "a1ed89fd3c46460c3c565c02b146ffb48a5e294cba552a17c4cb8c69e2b41dd";
+    "ed11b05f861073f30f1734c7040bf9a495daeddba49ca756e7d821c71180368";
 
-constexpr size_t kFbSlChannelUi = 0xC0;
-constexpr size_t kFbSlWorldUi = 0xC8;
-constexpr size_t kFbSlCharUi = 0xD0;
+// 09-10 SceneLogin TDI 1178：0xC0 新插 UI（a951e45b），Channel/World/Char 顺移 +8
+constexpr size_t kFbSlChannelUi = 0xC8;
+constexpr size_t kFbSlWorldUi = 0xD0;
+constexpr size_t kFbSlCharUi = 0xD8;
 constexpr char kHashSlChannelUi[] =
-    "<bdb6538c377bade11e2d4ec9227b387714fddfa9578bd1a0c32e34d74e0a48c>k__BackingField";
+    "<a024ea6db7088b9f74a167848b275428687810b95714ad3f7b436fa8aaa05f8>k__BackingField";
 constexpr char kHashSlWorldUi[] =
-    "<ecd1aa1c2318c574fa23a551a75e8e2361404c582f0ba51791d6b2056f589ce>k__BackingField";
+    "<e5b78fab76b18532963bff77877f329b97ea9c5a906422c56dc3480ead07791>k__BackingField";
 constexpr char kHashSlCharUi[] =
-    "<c7b7363b110f814b575129aa9f855c76b187b7a987b9d5eb3f4370ab4e5a820>k__BackingField";
+    "<ec4db46f963fc835145e47b6912c2b970ece68df7f6a245d7008f65331bda01>k__BackingField";
 // WorldItems / WorldChannels / AvatarList + remaining login slots: hash -> field_get_offset
 constexpr char kHashWorldItems[] =
-    "<abba04afb963c908cea80242730260d6449acd04142e012dfb0aa557a0b874e>k__BackingField";
+    "<f668bef1e818527867776447329c575050f5c82730e4fd858f7c1a2ac2111b9>k__BackingField";
 constexpr char kHashWorldChannels[] =
-    "b0b2f8fad6d011903c7b26338e2f5dcbc91a9ad989a39f25b58893629dee896";
+    "e28995f390a2a8e6bce6aae8386405b0ef71a1fed072b7b0a0b4458c7dcf15a";
 constexpr char kHashCharAvatarList[] =
-    "c7b5b3077c67768e46430779a836d759d449f13fe989eedc10c705679456861";
+    "cd52638e6ff0e6383d429107e69d790b28a07b01250b847b77f99e129bd2c40";
 constexpr char kHashCharSelectedIndex[] =
-    "<f6fb18095c92ed70ceca6a77eea6b04272db45a63209888ae40786777b98701>k__BackingField";
+    "<ec3c667749eed212b3684b4cfe170bea0a6272d2a368691e4aa0e6cb7e14c79>k__BackingField";
 constexpr char kHashCharSlotCount[] =
-    "<eb42b6173e91952d4835a7f05ab434f05f35e3d60db943898201c874c5df1a2>k__BackingField";
+    "<d8fbabfdc618b2ddeb11d82987061fe60c8b8ff5097e81837d2d16a9ac71376>k__BackingField";
 constexpr char kHashChannelSelectedWorld[] =
-    "b15ea35e242b0bfe9c8366265f09184df9a1929efc49debfb9c198daf904815";
+    "bc47ddfd737527fe69805efca7596da7fe4a715cc859ceb490552f901fd64a8";
 constexpr char kHashChannelSelectedId[] =
-    "de2c59e21bc5b9ce17e10506c75777a0c9c3a822f9f9ea8bba3967c41d30c70";
+    "bf6a6a41dc5a44d5a1c0c61bd14c4155fb635048418c7e7f0a809efb73828c7";
 constexpr char kHashWorldId[] =
-    "b32aaa88bc1d6e92182eaa8ddcce05f72c3540f61003f8ca3e1fc4af0947706";
+    "e54e34bdfae2aa3a604fbd0d761a63841fd58329372cc2b38d7d4a3ef420ea8";
 constexpr char kHashWorldName[] =
-    "b44c98dea5b23e29029c79ce01b502d4a1d5f6c6aa50a6fd523381e736b89b1";
+    "a644b036ae5af62e89edfc701ae13bf21bdd6396e6390288c7907b63fa8e272";
 constexpr char kHashChUserNo[] =
-    "c1f1f139c3f1ad46d7b54d3280e2472e0b5a4b300e0f5348add1e7245f428fc";
+    "b4ff5cbf9ca175a0f48d395bf0ca6eb58c531eadacfe7198953d6f49f7a45ec";
 constexpr char kHashChChannelId[] =
-    "e48f8c286b44edcfe72b2bd74adf42f1929aae3672501394651488953ef65ab";
+    "d36b0014dd2f7b2e5ae1bf1fa9b78afa2d189d54162adc318ce9fb018cdba86";
 constexpr char kHashChAdult[] =
-    "bbc9e433eb01008d299c82cd90c09aa39a692f8ffb0c2a2e85f4705200b5c4d";
+    "d33e7821ea15b138f90e4c02ba4618f2ee86a6daae038e7b7e6a18da42bc609";
 constexpr char kHashChCapacity[] =
-    "a0f31b9933bd92bf40fa4557d64681af5bc74a562b7e6a462634e19f698e8aa";
+    "ff5c157d146c4d12f98f3726ec8041473afcdb749977950e7a7adcda9728932";
 
 // 方法哈希（dump.cs · remount 2026-08-06）
 constexpr char kHashSceneLoginGet[] =
-    "e602501d006250c5fcc8c89a8001d2e79fce276b6e10f37466cdab2be763ef0";
+    "cb1694ead1a0bb77d18b732c459e965e7236a1ba1c71109b4afcede7afe56b5";
 constexpr char kHashOnClickWorldItem[] =
-    "f6edfb7c18afaa67b4c66fbb64dcfebe6d8a5ce0579708ce863f0076e6d8d82";
+    "c78b60accf4095cdba3deb71ef146d31cdbf281df321990423740469d6b788a";
 constexpr char kHashSelectChannel[] =
-    "dba72a6f7595a81a734d47910fc65238543c2264bdf863fcf2c21e645a55de3";
+    "f82553255da01c4ac6f564358d4ffe306a2eddd48a86ecd9fc3ec6409cd9b61";
 constexpr char kHashSelectCharacter[] =
-    "d82a357ea472c9f97792ffb90288d01cc534e61f6fddc2103c82c2be4ae70de";
+    "b21c13008d1eaf6d60737a7e642c7bf4c443c716c842967fe33291cf284c53b";
 constexpr char kHashGetAvatarCount[] =
-    "e456213ce693195abec4e4eea5701083f3d22c93badda34535a0364bc8883b2";
+    "de17ffe04ceb822e91f7cab4dfe43cfa2f294f0f80a458e9e13efe9f82b7dcf";
 constexpr char kHashIsSlotEnable[] =
-    "fd75f5ed3a5552dfb2355d03bf29cff7e54d8654c3055451fbe366978fc8fef";
+    "cc916d8f15af06eaabb0a7cb6c886d84a5a52442d59f1a5cce66b49e7b3aaf3";
+constexpr char kHashOnClickButtonSelect[] =
+    "a631d38e0f4e8a0d7a6bb34ef9d01fc00e48ecbfb663cfd601d1aeb42b7268f";
 constexpr char kClassWorldItem[] =
-    "b52b0e68762bae477693bcae19f4a1a9c57e27f3f5aa275ca4aa39b05b166d3";
+    "be0c1c0f1454225d9649487026e09635f7d04dac20488f98280f050304118d9";
 constexpr char kClassChannelEntry[] =
-    "a5dc80a0cd676109aeb603c6ec71af11d261ea631a0d27f1c7e7fe11d9832a7";
+    "dcffe0e97607cc7a7a86d0ba93049e5f4a7464fac03224122acabae3cb3592c";
 constexpr size_t kFbWorldItems = 0x58;  // 08-13：0x50 插入 GameObject，List<WorldItem> 顺移
 constexpr size_t kFbWorldChannels = 0x38;
-constexpr size_t kFbCharAvatarList = 0x170;
-constexpr size_t kFbCharSelectedIndex = 0x168;
+constexpr size_t kFbCharAvatarList = 0x178;       // 09-10：0x168 插入对象，List 顺移
+constexpr size_t kFbCharSelectedIndex = 0x170;    // 09-10：int SelectedIndex 从 0x168 → 0x170
 constexpr size_t kFbCharSlotCount = 0x1A8;
-constexpr size_t kFbChannelSelectedWorld = 0x78;
-constexpr size_t kFbChannelSelectedId = 0x80;
+constexpr size_t kFbChannelSelectedWorld = 0x80;  // 09-10：0x78 插入 Button，WorldItem* 顺移
+constexpr size_t kFbChannelSelectedId = 0x88;     // SelectChannel 写 [this+88h]
 constexpr size_t kFbWorldId = 0x10;
 constexpr size_t kFbWorldName = 0x18;
 constexpr size_t kFbChUserNo = 0x18;
 constexpr size_t kFbChChannelId = 0x1D;
 constexpr size_t kFbChAdult = 0x1E;
 constexpr size_t kFbChCapacity = 0x20;
-// SceneLogin 登录阶段枚举 @+0x98；OnClickButtonSelect→SL 方法要求 ==2（IDA 种子实算）
-constexpr size_t kOffSlLoginPhase = 0x98;
+// SceneLogin 登录阶段枚举 @+0xA0（09-10；getter RVA 0xC4A790 = [this+40]*4）；OnClickButtonSelect→SL 要求 ==2
+constexpr size_t kOffSlLoginPhase = 0xA0;
 constexpr size_t kOffSlBusyFlag = 0x28;
 constexpr int kSlPhaseForCharConfirm = 2;
 size_t gOffSlChannelUi = kFbSlChannelUi;
@@ -172,6 +176,8 @@ constexpr DWORD kPhaseTimeoutMs = 60000;
 constexpr DWORD kBusyStaleMs = 8000;
 constexpr DWORD kLogThrottleMs = 3000;
 constexpr DWORD kAfterWorldClickMs = 300;  // 点分区→等频道表；600 偏钝（BIN 09a8a2）
+// 指定频满员：登录列表 UserNo 可能是点分区时的快照。周期再点一次当前分区刷新人数。
+constexpr DWORD kPinListRefreshMs = 8000;
 constexpr DWORD kAfterSelectChannelMs = 250;
 // ???? Go ????????? SelectWorld ????????
 constexpr DWORD kPumpFailBackoffMs = 1500;
@@ -239,7 +245,7 @@ struct UiSnap {
     int worldItemCount = 0;
     int avatarCount = 0;
     int charSelectedIndex = -1;  // UILoginCharacter+0x168；未知=-1
-    int slLoginPhase = -1;       // SceneLogin+0x98
+    int slLoginPhase = -1;       // SceneLogin+0xA0
     int slBusy = -1;             // SceneLogin+0x28 bool
     bool typesOk = false;
 };
@@ -310,8 +316,11 @@ std::atomic<bool> gSoftFastTrack{false};
 int gStickyChannelId = -1;
 // NoteSticky 前一次 id。PickSticky 未命中时从随机池排除，避免遇人软重连又抽回原频。
 int gStickyPrevId = -1;
+std::atomic<int> gReconnectPinListIdx{-1};
+std::atomic<uint8_t> gWaitingReconnectPin{0};
 DWORD gLastLogMs = 0;
 DWORD gWorldClickedAt = 0;
+DWORD gLastPinListRefreshMs = 0;
 DWORD gChannelSelectedAt = 0;
 DWORD gEnterAttemptAt = 0;
 DWORD gLeftChannelAt = 0;
@@ -1054,7 +1063,7 @@ void RunJobOnMain() {
             break;
         }
         case JobKind::GoWorld: {
-            // ?? OnClickButtonGoWorld??? TriggerEnterChannel/SendSelectWorld(0xA96ED0)?
+            // ?? OnClickButtonGoWorld??? TriggerEnterChannel/SendSelectWorld(0xAC11A0)?
             // Go ???? SelectWorld????? = ????? ? ?????
             (void)b;
             constexpr MethodShape kGo{0, TypeKind::Void, true, false, {}};
@@ -1090,8 +1099,8 @@ void RunJobOnMain() {
         }
         case JobKind::ConfirmCharClick: {
             constexpr MethodShape kClick{0, TypeKind::Void, true, false, {}};
-            auto* miClick =
-                ResolveMi(gKlassChar, kRvaOnClickButtonSelect, kClick, "OnClickButtonSelect");
+            auto* miClick = ResolveMi(gKlassChar, kRvaOnClickButtonSelect, kClick,
+                                      "OnClickButtonSelect", kHashOnClickButtonSelect);
             auto fnClick = FnFromMi<FnClickSelect>(miClick, kRvaOnClickButtonSelect);
             if (ui && fnClick) {
                 fnClick(ui, miClick);
@@ -1158,6 +1167,9 @@ void SetPhase(Phase p) {
     gPhase = p;
     gPhaseSince = GetTickCount();
     if (p == Phase::Failed) gSoftFastTrack.store(false, std::memory_order_release);
+    // 离开选频页就清 waiting，避免进了选角还冻软重连 150s 墙钟。
+    if (p != Phase::PickChannel && p != Phase::WaitChannelUi)
+        gWaitingReconnectPin.store(0, std::memory_order_release);
     // 注意：Done/Failed 时不要 SetLoginFreeze(false)。
     // 选角刚结束、尚未 play-ready 时解冻，会放开 titlebar/ports 的 lobby FindAll；
     // 解冻交给 titlebar 读到 vitals / invuln bind / drop_pool（进图后）。
@@ -1173,13 +1185,14 @@ bool TryMarkEnterDone(const char* why) {
     if (playReady) {
         Log("enter Done (%s): play ready charUi=%d confirm=%d", why ? why : "?",
             gSnap.charUi ? 1 : 0, gCharConfirmAttempts);
-        if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
+        if (gPickedChannelId >= 0) gStickyChannelId = gPickedChannelId;
         gSoftFastTrack.store(false, std::memory_order_release);
         gCharSelectTimeoutStreak = 0;
         gCharConfirmBurst = 0;
         gBusyStuckSince = 0;
+        ClearReconnectPin();
         SetPhase(Phase::Done);
-        if (gPickedChannelId > 0)
+        if (gPickedChannelId >= 0)
             channel_hop::SyncKnownAfterEnter(gPickedChannelId, why ? why : "enter_done");
         Log("Done — latched until autoEnter off stickyCh=%d", gStickyChannelId);
         return true;
@@ -1189,13 +1202,14 @@ bool TryMarkEnterDone(const char* why) {
                              gPhase == Phase::ConfirmChar);
     if (leftCharOk) {
         Log("enter Done (%s): left char UI confirm=%d", why ? why : "?", gCharConfirmAttempts);
-        if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
+        if (gPickedChannelId >= 0) gStickyChannelId = gPickedChannelId;
         gSoftFastTrack.store(false, std::memory_order_release);
         gCharSelectTimeoutStreak = 0;
         gCharConfirmBurst = 0;
         gBusyStuckSince = 0;
+        ClearReconnectPin();
         SetPhase(Phase::Done);
-        if (gPickedChannelId > 0)
+        if (gPickedChannelId >= 0)
             channel_hop::SyncKnownAfterEnter(gPickedChannelId, why ? why : "enter_done_left_char");
         Log("Done — latched until autoEnter off stickyCh=%d", gStickyChannelId);
         return true;
@@ -1212,6 +1226,17 @@ bool WorldMatches(void* world, int32_t wantId, const char* wantName) {
     if (_stricmp(name, wantName) == 0) return true;
     const xcat::WorldNamesPack& wn = xcat::GetSharedWorldNames(x::runtime::GetBinDir());
     return xcat::WorldNameEquals(wn, name, wantName);
+}
+
+int FindWantedWorldIndex(void* worldUi, int32_t wantId, const char* wantName) {
+    if (!worldUi) return -1;
+    void* items = ReadPtr(worldUi, gOffWorldItems);
+    const int n = ListSize(items);
+    for (int i = 0; i < n; ++i) {
+        void* w = ListAt(items, i);
+        if (WorldMatches(w, wantId, wantName)) return i;
+    }
+    return -1;
 }
 
 // ??????? PID/QPC????????????
@@ -1272,8 +1297,16 @@ void FeedCcuFromWorldItem(void* worldItem, const char* src, bool allowRefresh = 
     }
 }
 
-// ?? + ????????? id 1..64 ????????? 1..20??
-// ?????????????????????????????
+// 指定频：冷启和登录闪断（RequestRestart softFast、sticky 仍未设）也要 Arm。
+// 遇人 / 随机 hop 已粘「另一频」时禁止盖掉（ClearReconnectPin 后 sticky 是遇人目标）。
+void MaybeArmReconnectPinFromUi() {
+    const int want = channel_hop::ReconnectPinListIdx();
+    if (want < 0 || want > 63) return;
+    const int sticky = (gStickyChannelId >= 0 && gStickyChannelId <= 64) ? gStickyChannelId : -1;
+    if (SoftFastTrack() && sticky >= 0 && sticky != want) return;
+    ArmReconnectPin(want);
+}
+
 int PickOpenChannelId(void* worldItem) {
     EnsureHolderFieldOff();
     void* list = ReadPtr(worldItem, gOffWorldChannels);
@@ -1350,6 +1383,52 @@ int PickOpenChannelId(void* worldItem) {
         candUsers[candN] = users;
         ++candN;
     }
+    int pin = gReconnectPinListIdx.load(std::memory_order_acquire);
+    if (pin < 0) {
+        MaybeArmReconnectPinFromUi();
+        pin = gReconnectPinListIdx.load(std::memory_order_acquire);
+    }
+    if (pin >= 0 && pin <= 63) {
+        int pinUsers = -1;
+        int pinCap = 0;
+        int pinAdult = 0;
+        bool pinFound = false;
+        for (int i = 0; i < n; ++i) {
+            void* ch = ListAt(list, i);
+            if (!ch) continue;
+            const int id = (int)ReadU8(ch, gOffChChannelId);
+            if (id != pin) continue;
+            pinFound = true;
+            pinUsers = ReadI32(ch, gOffChUserNo);
+            pinCap = ReadI32(ch, gOffChCapacity);
+            pinAdult = (int)ReadU8(ch, gOffChAdult);
+            break;
+        }
+        if (!pinFound) {
+            gWaitingReconnectPin.store(1, std::memory_order_release);
+            Log("PickPin miss id=%d ch=%d — absent (wait, no fallback)", pin, pin + 1);
+            return -1;
+        }
+        if (pinAdult != 0) {
+            gWaitingReconnectPin.store(1, std::memory_order_release);
+            Log("PickPin miss id=%d ch=%d — adult (wait, no fallback)", pin, pin + 1);
+            return -1;
+        }
+        if (pinUsers < 0) {
+            gWaitingReconnectPin.store(1, std::memory_order_release);
+            Log("PickPin miss id=%d ch=%d — users=%d (wait, no fallback)", pin, pin + 1, pinUsers);
+            return -1;
+        }
+        if (pinCap > 0 && pinUsers >= pinCap) {
+            gWaitingReconnectPin.store(1, std::memory_order_release);
+            Log("PickPin miss id=%d ch=%d — full %d/%d (wait, no fallback)", pin, pin + 1, pinUsers,
+                pinCap);
+            return -1;
+        }
+        gWaitingReconnectPin.store(0, std::memory_order_release);
+        Log("PickPin id=%d ch=%d users=%d cap=%d", pin, pin + 1, pinUsers, pinCap);
+        return pin;
+    }
     if (candN <= 0) {
         Log("PickOpen ? none of %d channels", n);
         return -1;
@@ -1357,7 +1436,7 @@ int PickOpenChannelId(void* worldItem) {
     // 仅 softFast：优先粘回上次进图/换频后的频道（仍空闲且非成人）；冷启仍 PickOpen。
     // sticky 满员/成人/不在表：与冷启同池随机，禁止就近/偏人少（避免扎堆）；禁止硬粘满频。
     const int sticky = gStickyChannelId;
-    if (SoftFastTrack() && sticky > 0) {
+    if (SoftFastTrack() && sticky >= 0) {
         for (int i = 0; i < candN; ++i) {
             if (candId[i] == sticky) {
                 Log("PickSticky id=%d users=%d (softFast)", sticky, candUsers[i]);
@@ -1367,7 +1446,7 @@ int PickOpenChannelId(void* worldItem) {
         const uint32_t seedMiss = ChannelPickSeed(candN);
         int pickMiss = static_cast<int>(seedMiss % static_cast<uint32_t>(candN));
         const int avoid = gStickyPrevId;
-        if (avoid >= 1 && avoid != sticky && candN > 1) {
+        if (avoid >= 0 && avoid != sticky && candN > 1) {
             int filtered[64];
             int filteredUsers[64];
             int nF = 0;
@@ -1453,7 +1532,7 @@ void MaybeRestartIfCharUiStillUp() {
     }
     if (x::features::soft_login_probe::IsReconnectInFlight() ||
         x::features::channel_hop::IsMigrateInFlight() ||
-        x::features::travel::IsActive()) {
+        x::features::travel::IsActive() || x::features::auto_lie::IsQuizActive()) {
         sReadySinceMs = 0;
         sQuiesceSinceMs = 0;
         return;
@@ -1520,6 +1599,7 @@ void ResetRuntime() {
     gPickedWorldIndex = -1;
     gPickedChannelId = -1;
     gWorldClickedAt = 0;
+    gLastPinListRefreshMs = 0;
     gChannelSelectedAt = 0;
     gEnterAttemptAt = 0;
     gLeftChannelAt = 0;
@@ -1547,6 +1627,7 @@ void Tick() {
             gSoftFastTrack.store(false, std::memory_order_release);
             gCharSelectTimeoutStreak = 0;
             NoteEmptyCharPark(false);
+            ClearReconnectPin();
             SetPhase(Phase::Idle);
             ResetRuntime();
         }
@@ -1573,6 +1654,7 @@ void Tick() {
 
     if (gPhase == Phase::Idle) {
         ResetRuntime();
+        MaybeArmReconnectPinFromUi();
         SetPhase(Phase::WaitWorldList);
         Log("start WaitWorldList worldId=%d slot=%u", gWorldId.load(), gCharSlot.load());
         return;
@@ -1699,16 +1781,8 @@ void Tick() {
         void* worldUi = gSnap.worldUi;
         void* items = worldUi ? ReadPtr(worldUi, gOffWorldItems) : nullptr;
         const int n = ListSize(items);
-        int idx = -1;
-        void* world = nullptr;
-        for (int i = 0; i < n; ++i) {
-            void* w = ListAt(items, i);
-            if (WorldMatches(w, wantId, wantName)) {
-                idx = i;
-                world = w;
-                break;
-            }
-        }
+        const int idx = FindWantedWorldIndex(worldUi, wantId, wantName);
+        void* world = (idx >= 0) ? ListAt(items, idx) : nullptr;
         if (idx < 0 || !world) {
             LogThrottled("world not found id=%d name=%s count=%d", wantId, wantName, n);
             return;
@@ -1760,12 +1834,37 @@ void Tick() {
         }
         const int chId = PickOpenChannelId(gPickedWorld);
         if (chId < 0) {
+            const int pin = gReconnectPinListIdx.load(std::memory_order_acquire);
+            if (pin >= 0) {
+                gPhaseSince = GetTickCount();
+                LogThrottled("PickChannel pin idx=%d ch=%d not open — wait (full/adult/absent)",
+                             pin, pin + 1);
+                const DWORD now = GetTickCount();
+                if (!gLastPinListRefreshMs) gLastPinListRefreshMs = now ? now : 1;
+                if (now - gLastPinListRefreshMs >= kPinListRefreshMs) {
+                    gLastPinListRefreshMs = now ? now : 1;
+                    void* worldUi = gSnap.worldUi;
+                    int widx = gPickedWorldIndex;
+                    if (widx < 0) widx = FindWantedWorldIndex(worldUi, wantId, wantName);
+                    if (worldUi && widx >= 0) {
+                        Log("PickChannel pin refresh ClickWorld idx=%d (UserNo snapshot)", widx);
+                        if (EnqueueJobAndWait(JobKind::ClickWorld, worldUi, widx)) {
+                            gPickedWorldIndex = widx;
+                            gWorldClickedAt = now;
+                            SetPhase(Phase::WaitChannelUi);
+                            return;
+                        }
+                    }
+                }
+                return;
+            }
             Log("no eligible channel");
             SetPhase(Phase::Failed);
             return;
         }
         // softFast：频道 UI 已武装到目标频 → 跳过 SelectChannel，下一拍直接 GoWorld。
-        if (SoftFastTrack() && gSnap.selectedChannelId == chId) {
+        // chId==0 是 UI 频道1：selectedChannelId 未写时常为 0，禁止当成已武装。
+        if (SoftFastTrack() && chId > 0 && gSnap.selectedChannelId == chId) {
             Log("PickChannel already-armed id=%d softFast — skip SelectChannel → GoWorld", chId);
             gPickedChannelId = chId;
             gChannelSelectedAt = 0;  // AfterSelectChannel 门禁：0 = 不等
@@ -1824,7 +1923,7 @@ void Tick() {
             SetPhase(Phase::Failed);
             return;
         }
-        if (gPickedChannelId > 0) gStickyChannelId = gPickedChannelId;
+        if (gPickedChannelId >= 0) gStickyChannelId = gPickedChannelId;
         gEnterAttemptAt = GetTickCount();
         gEnterAttempts = 1;
         gLeftChannelAt = 0;
@@ -1859,7 +1958,7 @@ void Tick() {
                 gPhaseSince = GetTickCount();
                 Log("char created avatars=%d — resume PickChar", count);
             }
-            // OnClickButtonSelect 硬门：SceneLogin+0x98 必须已是选角阶段(=2)
+            // OnClickButtonSelect 硬门：SceneLogin+0xA0 必须已是选角阶段(=2)
             if (gSnap.slLoginPhase != kSlPhaseForCharConfirm) {
                 gCharReadyAt = 0;
                 gBusyStuckSince = 0;
@@ -2132,15 +2231,46 @@ void SetDesired(bool on, int32_t worldId, const char* worldName, uint32_t charSl
 bool IsDesired() { return gDesired.load(); }
 
 void NoteStickyChannel(int channelId1Based, const char* why) {
-    if (channelId1Based < 1 || channelId1Based > 64) return;
+    if (channelId1Based < 0 || channelId1Based > 64) return;
     if (gStickyChannelId == channelId1Based) return;
-    if (gStickyChannelId >= 1 && gStickyChannelId <= 64) gStickyPrevId = gStickyChannelId;
+    if (gStickyChannelId >= 0 && gStickyChannelId <= 64) gStickyPrevId = gStickyChannelId;
     Log("stickyCh %d→%d (%s)", gStickyChannelId, channelId1Based, why ? why : "?");
     gStickyChannelId = channelId1Based;
 }
 
 int StickyChannel1Based() {
-    return (gStickyChannelId >= 1 && gStickyChannelId <= 64) ? gStickyChannelId : 0;
+    return (gStickyChannelId >= 0 && gStickyChannelId <= 64) ? gStickyChannelId : -1;
+}
+
+void ClearReconnectPin() {
+    if (gReconnectPinListIdx.load(std::memory_order_acquire) < 0 &&
+        gWaitingReconnectPin.load(std::memory_order_acquire) == 0)
+        return;
+    Log("reconnect pin clear idx=%d waiting=%d", gReconnectPinListIdx.load(std::memory_order_acquire),
+        gWaitingReconnectPin.load(std::memory_order_acquire) ? 1 : 0);
+    gReconnectPinListIdx.store(-1, std::memory_order_release);
+    gWaitingReconnectPin.store(0, std::memory_order_release);
+}
+
+void ArmReconnectPin(int listIdx) {
+    if (listIdx < 0 || listIdx > 63) {
+        ClearReconnectPin();
+        return;
+    }
+    gReconnectPinListIdx.store(listIdx, std::memory_order_release);
+    gWaitingReconnectPin.store(0, std::memory_order_release);
+    Log("reconnect pin arm idx=%d ch=%d", listIdx, listIdx + 1);
+}
+
+int ArmedReconnectPinListIdx() {
+    return gReconnectPinListIdx.load(std::memory_order_acquire);
+}
+
+bool IsWaitingReconnectPin() {
+    if (gWaitingReconnectPin.load(std::memory_order_acquire) == 0) return false;
+    if (gReconnectPinListIdx.load(std::memory_order_acquire) < 0) return false;
+    // 只在选频页空等时冻墙钟。进了选角 / Done 不得误冻 150s。
+    return gPhase == Phase::PickChannel || gPhase == Phase::WaitChannelUi;
 }
 
 void RequestRestart(const char* why) {
@@ -2156,6 +2286,7 @@ void RequestRestart(const char* why) {
     // 软重进仍在大厅：保持 freeze，避免 titlebar/ports 抢跑 FindAll。
     x::runtime::managed_main::SetLoginFreeze(true);
     const bool soft = why && std::strcmp(why, "soft_login") == 0;
+    if (!soft) ClearReconnectPin();
     gSoftFastTrack.store(soft, std::memory_order_release);
     SetPhase(Phase::Idle);
     ResetRuntime();  // 不碰 gStickyChannelId / gSoftFastTrack

@@ -65,6 +65,11 @@ void OnMapChanged(int mapId);
 
 // 吸怪 TAB「重连换频」。默认关。只改 known+sticky，不进 hop FSM、不 SendTransfer、不拉黑。
 void SetReconnectHopEnabled(bool on);
+// 指定频道：uiCh1Based 是標題「頻道 N」。on=false 或非法 N → 关（回随机抽频）。
+// 满员由 auto_enter 在选频页重试；遇人 hop 本轮走遇人已选频（Ensure 先 latch 回贴再 pin）。
+void SetReconnectHopPin(bool on, int uiCh1Based);
+// 当前 UI 指定频的 0-based 列表 id；未勾或「重连换频」关返回 -1。
+int ReconnectPinListIdx();
 // 软重连进选频前调用。遇人已 commit / sticky 已异于 known 则 no-op。Kick 线程可调（不读 WM）。
 void EnsureReconnectNotSameChannel(const char* why);
 // CloseSession 失败仍在图内：把 known/sticky 扳回本轮 from，避免 native_wm 误判换频。

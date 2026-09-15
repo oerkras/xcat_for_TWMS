@@ -69,6 +69,8 @@ unsigned FlySpeedPct();
 // 拟人位移：同层走路贴近；仅当 Impact 贴怪关时生效。
 void SetHumanWalkEnabled(bool on);
 bool IsHumanWalkEnabled();
+// 拟人地面位移：Impact 关且拟人开。打怪走路与超级赶路走路贴门共用。
+bool IsHumanGroundMove();
 // 站桩输出：原地出刀 + 叠怪吸到身边（不写人 Ap）。范围 0=叠怪圈。
 // 默认关；与空中贴怪/拟人互斥。不滑翔。
 void SetHiraishinEnabled(bool on);
@@ -105,10 +107,12 @@ enum class HardPauseHolder : uint32_t {
     CharBoot = 1u << 5,
 };
 void SetHardPause(HardPauseHolder holder, bool on);
-// 硬闸安全落台进行中（测谎 / 自动补给 / 遇人 / 进图）：旋翼飞近可站台再卸禁挂台。
-// 补给用卷/赶路前应等本函数为 false，避免图底 freefall→重载。
+// 硬闸安全落台进行中（测谎 / 自动补给 / 遇人 / 进图）。空中贴怪档：旋翼飞近可站台再卸禁挂台。
+// 拟人档不走这条（IsSafeLandActive 保持 false），改为重力/爬绳挂台。
+// 补给用卷/赶路前应等站稳（onFh），避免图底 freefall→重载。
 bool IsSafeLandActive();
-// 主动请求同款安全落台（开店前 / 赶路到站后仍悬空）。Travel 活跃时 no-op（由 Travel settle 托空）。
+// 主动请求安全落台。空中贴怪档：旋翼飞近可站台。拟人档：不启旋翼，卸禁挂台后重力/爬绳挂台。
+// Travel 活跃时 no-op（由 Travel settle / 走路贴门负责）。
 // 已有落台则重钉本图落点；否则 Begin + MapArrive（无其它硬闸持有者时靠 MapArrive 保闸）。
 void RequestSafeLand(const char* why);
 // 拆掉进行中的安全落台（起号贴 NPC 时禁止把人拽回出生台）。
@@ -151,6 +155,8 @@ bool IsTeleportKickStressActive();
 void SetHighValueLootUrgent(bool on);
 // 高价值紧急拾取中：IsLootPulseActive 恒 true，并短暂停刀（ExternalPause）。
 bool IsHighValueLootUrgent();
+// 拟人 HUD：hint 0=无 1=随机小休 2=捡高价值 3=挂绳回血；remainMs 仅小休倒计时。
+void QueryHumanHud(uint32_t* hint, uint32_t* remainMs);
 
 void Tick(DWORD nowMs);
 

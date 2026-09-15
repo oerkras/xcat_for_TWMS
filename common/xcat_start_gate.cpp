@@ -322,30 +322,37 @@ void WriteActivationCache(const std::string& payloadBinDir, const std::string& t
     }
 }
 
+// 从单个缓存文件读出有效 TOKEN。currentDeviceId 为空则跳过绑定校验。
+std::string ReadTokenFromCacheFile(const std::string& path, const std::string& currentDeviceId) {
+    std::vector<uint8_t> buf;
+    std::string plain;
+    if (path.empty() || !ReadFileBytes(path, buf) || !Deobfuscate(buf, plain)) return {};
+    const long long gen = JsonNum(plain, "v");
+    if (gen != 1 && gen != kCacheGeneration) {
+        static bool loggedStale = false;
+        if (!loggedStale) {
+            loggedStale = true;
+            xcat::log::Info("Auth",
+                            "gate/1 cache generation unknown (have=%lld); ignore", gen);
+        }
+        return {};
+    }
+    const std::string cachedDevice = JsonStr(plain, "deviceId");
+    const std::string token = JsonStr(plain, "token");
+    if (token.empty()) return {};
+    if (!currentDeviceId.empty() && cachedDevice != currentDeviceId) return {};
+    TokenClaims claims;
+    if (!VerifyToken(token, claims)) return {};
+    return token;
+}
+
 // 从缓存读出有效的 TOKEN：deviceId 必须匹配、TOKEN 必须仍验签通过。返回空=无有效缓存。
 std::string ReadValidCachedToken(const std::string& payloadBinDir,
                                  const std::string& currentDeviceId) {
     const std::string paths[] = {MachineCachePath(), InstallCachePath(payloadBinDir)};
     for (const auto& p : paths) {
-        std::vector<uint8_t> buf;
-        std::string plain;
-        if (!ReadFileBytes(p, buf) || !Deobfuscate(buf, plain)) continue;
-        const long long gen = JsonNum(plain, "v");
-        if (gen != 1 && gen != kCacheGeneration) {
-            static bool loggedStale = false;
-            if (!loggedStale) {
-                loggedStale = true;
-                xcat::log::Info("Auth",
-                                "gate/1 cache generation unknown (have=%lld); ignore", gen);
-            }
-            continue;
-        }
-        const std::string cachedDevice = JsonStr(plain, "deviceId");
-        const std::string token = JsonStr(plain, "token");
-        if (token.empty()) continue;
-        if (!currentDeviceId.empty() && cachedDevice != currentDeviceId) continue;
-        TokenClaims claims;
-        if (VerifyToken(token, claims)) return token;
+        const std::string token = ReadTokenFromCacheFile(p, currentDeviceId);
+        if (!token.empty()) return token;
     }
     return {};
 }
@@ -421,6 +428,13 @@ bool HasValidActivation(const std::string& payloadBinDir, const std::string& dev
     if (cached.empty() || !VerifyToken(cached, claims)) return false;
     xcat::log::Info("Auth", "gate/1 pass (cached uid=%s)", claims.uid.c_str());
     return true;
+}
+
+std::string PeekActivatedUid(const std::string& payloadBinDir, const std::string& deviceId) {
+    TokenClaims claims;
+    const std::string cached = ReadValidCachedToken(payloadBinDir, deviceId);
+    if (cached.empty() || !VerifyToken(cached, claims) || claims.uid.empty()) return {};
+    return claims.uid;
 }
 
 void InvalidateActivationCache(const std::string& payloadBinDir) {

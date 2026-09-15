@@ -8,6 +8,7 @@
 #include "imgui_log_sanitize.h"
 #include "imgui_shell.h"
 #include "launch_panel.h"
+#include "log_upload.h"
 #include "update_client.h"
 
 #include "msc_webview_login.h"
@@ -16,10 +17,12 @@
 #include "xcat_log.h"
 #include "xcat_install_names.h"
 #include "xcat_payload_status.h"
+#include "xcat_start_gate.h"
 #include "xcat_version.h"
 
 #include "imgui.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
@@ -262,6 +265,53 @@ void DrawSoftReloginClock(const LaunchUiState& ui) {
     }
 }
 
+void DrawHumanHint(const LaunchUiState& ui) {
+    if (ui.prefsBinDir.empty()) return;
+    xcat::PayloadStatus st{};
+    if (!xcat::ReadPayloadStatus(ui.prefsBinDir.c_str(), st) ||
+        !xcat::PayloadStatusHeartbeatFresh(st, GetTickCount64(), 5000) || st.humanHint == 0) {
+        return;
+    }
+    ImGui::SameLine(0.f, ui::Gap());
+    ImGui::TextDisabled("|");
+    ImGui::SameLine(0.f, ui::Gap());
+    if (st.humanHint == 1) {
+        unsigned remainMs = st.humanRemainMs;
+        if (remainMs > 0 && st.writeTickMs) {
+            const uint64_t now = GetTickCount64();
+            if (now > st.writeTickMs) {
+                const uint64_t age = now - st.writeTickMs;
+                if (age >= remainMs)
+                    remainMs = 0;
+                else
+                    remainMs -= static_cast<unsigned>(age);
+            }
+        }
+        const unsigned sec = remainMs ? (remainMs + 999u) / 1000u : 0u;
+        char buf[48]{};
+        snprintf(buf, sizeof(buf), "拟人小休 %u:%02u", sec / 60u, sec % 60u);
+        ImGui::TextColored(StatusHintBlue(), "%s", buf);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("拟人档随机歇一会，不是卡死。掉血或时间到会继续打。\n"
+                              "环境变量 XCAT_HUMAN_BREAKS=0 可关。");
+        }
+        return;
+    }
+    if (st.humanHint == 2) {
+        ImGui::TextColored(StatusHintBlue(), "拟人捡高价值");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("场上有装备 / 204 卷 / 雷之鏢，先走过去捡完再继续打。");
+        }
+        return;
+    }
+    if (st.humanHint == 3) {
+        ImGui::TextColored(StatusHintBlue(), "拟人挂绳回血");
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("低血且没有红药，先挂绳回血，不是卡死。");
+        }
+    }
+}
+
 void BeginStatusRow(const ImVec2& origin, float rowH, int row) {
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rowH * static_cast<float>(row)));
 }
@@ -325,6 +375,42 @@ void DrawStatusEllipsis(const ImVec4& col, const std::string& text) {
 
 }  // namespace
 
+namespace {
+struct GateUidCache {
+    std::string uid;
+    std::string binDir;
+    uint64_t nextMs = 0;
+};
+GateUidCache gGateUidCache;
+char gGateUidLabel[80]{};
+
+void RefreshGateUidCache(const std::string& prefsBinDir) {
+    const uint64_t now = GetTickCount64();
+    if (now < gGateUidCache.nextMs && gGateUidCache.binDir == prefsBinDir) return;
+    gGateUidCache.binDir = prefsBinDir;
+    gGateUidCache.nextMs = now + 4000ull;
+    gGateUidCache.uid.clear();
+    if (!prefsBinDir.empty()) {
+        const std::string deviceId = ResolveClientHostIdentity(prefsBinDir).deviceId;
+        std::string uid = xcat::gate::PeekActivatedUid(prefsBinDir, deviceId);
+        uid.erase(std::remove_if(uid.begin(), uid.end(),
+                                 [](unsigned char c) { return c < 32 || c == 127; }),
+                  uid.end());
+        if (uid.size() > 32) uid.resize(32);
+        gGateUidCache.uid = std::move(uid);
+    }
+    if (gGateUidCache.uid.empty())
+        snprintf(gGateUidLabel, sizeof(gGateUidLabel), "UID -");
+    else
+        snprintf(gGateUidLabel, sizeof(gGateUidLabel), "UID %s", gGateUidCache.uid.c_str());
+}
+}  // namespace
+
+const char* LauncherCachedGateUidLabel(const std::string& prefsBinDir) {
+    RefreshGateUidCache(prefsBinDir);
+    return gGateUidLabel;
+}
+
 void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t launchTickMs) {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, AppTheme_Palette().statusStripBg);
     ImGui::PushStyleColor(ImGuiCol_Border, AppTheme_Palette().statusStripBorder);
@@ -375,6 +461,13 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         ImGui::TextUnformatted(xcat::install::kLauncherStem);
         ImGui::SameLine(0.f, ui::Gap());
         ImGui::TextDisabled("%s", xcat::kXcatVersionString);
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::TextDisabled("|");
+        ImGui::SameLine(0.f, ui::Gap());
+        ImGui::TextUnformatted(LauncherCachedGateUidLabel(ui.prefsBinDir));
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("签卡成员标识 · 截图可追溯到持卡人");
+        }
         if (snap.latestBuildId > 0) {
             ImGui::SameLine(0.f, ui::Gap());
             ImGui::TextDisabled("|");
@@ -491,6 +584,7 @@ void DrawLauncherStatusBar(LaunchUiState& ui, const RuntimeLeds& leds, uint64_t 
         BeginStatusRow(origin, rowH, 3);
         ImGui::AlignTextToFramePadding();
         DrawSoftReloginClock(ui);
+        DrawHumanHint(ui);
 
         // —— 5/5 状态 / 更新 ——
         // 用户默认停在首页 TAB，倒计时/自动登录/干净重拉必须在顶部可见。

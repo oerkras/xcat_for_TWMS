@@ -1,12 +1,12 @@
 #pragma once
 // Classic TWMS shop_port — UIShopDialog ready + TalkToNpc + UI 买卖 / 飞镖充值。
 // 字段防漂移：hash / 明文 → field_get_offset；dump 常量仅 fallback（见 EnsureShopFieldOffsets）。
-// 卖出：UIShopDialog.SendSellRequestPacket @0x55B7F0（2026-08-04）
-//   Create(67)+Encode1(1)+Encode2(pos)+Encode4(itemId)+Encode2(qty)
-// 买入：UIShopDialog.SendBuyRequestPacket @0x55AC10（2026-08-04）
-//   Create(67)+Encode1(0)+Encode2(buyIdx)+Encode4(itemId)+Encode2(qty)
-// 飞镖：UIShopDialog.SendRechargeRequestPacket @0x55BE30（2026-08-04）
-//   Create(67)+Encode1(2)+Encode2(pos)；选中卖栏 _sellSelectedIndex
+// 卖出：UIShopDialog.SendSellRequestPacket @0x56A440（2026-09-10；Encode1(byte) op=1）
+//   Create + Encode1(1) + Encode2(pos) + Encode4(itemId) + Encode2(qty)
+// 买入：UIShopDialog.SendBuyRequestPacket @0x569360（2026-09-10；Encode1(byte) op=0）
+//   Create + Encode1(0) + Encode2(buyIdx) + Encode4(itemId) + Encode2(qty)
+// 飞镖：UIShopDialog.SendRechargeRequestPacket @0x56A9D0（2026-09-10；Encode1(byte) op=2）
+//   Create + Encode1(2) + Encode2(pos)；选中卖栏 _sellSelectedIndex
 // 禁止 Session.Send 旁路 HashSet（会本地踢线）。
 
 #include <string>
@@ -18,7 +18,7 @@ struct BagItem {
     int  pos = 0;       // nPOS（发包用，与 Item.Position 一致）
     int  itemId = 0;
     int  count = 1;
-    int  invType = 0;   // 1=equip 2=consume 4=etc
+    int  invType = 0;   // 商店 UITab 码：1=装备页 2=消耗页 4=其他页（不是 CharacterData ItemType）
     char name[64]{};
     bool sellable = false;
 };
@@ -60,14 +60,25 @@ bool TryNpcTalkFuncKey();
 // 成功仅表示已点 UI；是否开出 UIShopDialog 仍看 ShopReady。
 bool TryConfirmShopScriptMenu();
 
-// 扫装备栏(invType=1)或其它栏(invType=4)。names 用离线 catalog 填。
+// 商店角色区 UITab（与 CharacterData ItemType 脱钩）。InvTypeToCharTabIndex：1→0、2→1、4→3。
+constexpr int kShopUiEquip = 1;
+constexpr int kShopUiConsume = 2;
+constexpr int kShopUiEtc = 4;
+int ShopUiToBagType(int shopUi);  // 仅商店 UITab：1/2/4 → Equip/Consume/Etc。禁止传入背包 ItemType。
+
+// 扫装备栏或其它栏（内部走 CharacterData ItemSlots）。names 用离线 catalog 填。
+// 返回的 BagItem.invType 仍是商店 UITab 码，供 SellItem / 切 TAB。
 bool ScanBag(bool equipBag, BagItem* items, int maxItems, int& outCount);
 
-// 开店后快照当前 TAB 的 _sellItemList（切 TAB + CmpSellItem）。
+// 开店后快照当前 TAB 的 _sellItemList（切 TAB 或已在目标页则 RefreshSell + CmpSellItem）。
 // 任务道具等不进卖栏投影；sellbag 建队时用此表跳过，避免 LIST_STALE 空耗。
 // outItemIds 可空；成功时 outListN=投影条数（可为 0）。
 // outTabSwitched：本拍刚切 TAB（列表可能尚未刷新；调用方宜短等再拍）。
 bool SnapshotShopSellList(int invType, int* outItemIds, int maxOut, int& outCount, int& outListN,
+                          bool* outTabSwitched = nullptr);
+
+// 同上，带 pos/qty/name。卖栏=客户端可卖格，建队应以此为准（勿再和 ScanBag 求交）。
+bool SnapshotShopSellRows(int invType, BagItem* items, int maxItems, int& outCount, int& outListN,
                           bool* outTabSwitched = nullptr);
 
 // 卖一件：需 ShopReady。成功仅表示已发包；对账由调用方看槽位变化。
@@ -85,8 +96,11 @@ bool QueryShopBuyOffer(int itemId, bool& outInShop, int& outPrice);
 // focusItemId>0 时额外标是否命中该 ID。失败（无店）返回 false。
 bool LogBuyShelfSnapshot(int focusItemId = 0);
 
-// 按 itemId 查该栏是否仍有货（确认用）。invType: 1/2/4。
+// 按 itemId 查角色背包该栏是否仍有货。invType = CharacterData ItemType（Consume=1 是消耗栏）。
+// 禁止传商店 UITab：商店装备页也是 1，会和消耗栏撞号。手里是 TAB 码用 QueryItemPresentShopUi。
 bool QueryItemPresent(int invType, int itemId, bool& outPresent, int& outCount);
+// 入参是商店 UITab（BagItem.invType / SellItem 那套 1/2/4）。内部只转一次，勿再套 ShopUiToBagType。
+bool QueryItemPresentShopUi(int shopUi, int itemId, bool& outPresent, int& outCount);
 
 // 背包占用：used=非空槽数，cap=List._size（含空槽；实机作容量候选）。
 bool QueryBagUsage(bool equipBag, int& outUsed, int& outCap);

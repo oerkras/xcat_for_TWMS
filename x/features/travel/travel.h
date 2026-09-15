@@ -36,6 +36,7 @@ enum class FailKind : unsigned char {
     AlreadyThere = 4,
     FireStuck = 5,  // 贴门瞬移/站稳等瞬态失败持续超时（如 TELEPORT_FAIL）
     CombatOn = 6,   // F5 自动打怪开启时禁止赶路
+    PlayerDead = 7, // 角色死亡（hp≤0）：停赶路，等用户手动复活后再出发
 };
 
 struct Snapshot {
