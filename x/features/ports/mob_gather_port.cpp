@@ -2065,15 +2065,6 @@ void TickSoftRelogin() {
         }
         return;
     }
-    // 遇人软重连正在选新频：让它拆。出刀闸到期 / 答完强制拆则抢拆（AbortHop 在下面）。
-    if (!dueFires && !gHangupLieDeferred && x::features::channel_hop::IsEncounterSoftHop())
-        return;
-    if (x::features::channel_hop::GetState() != x::features::channel_hop::State::Idle ||
-        x::features::channel_hop::HasPending()) {
-        x::runtime::LogI("MobGather", "soft relogin preempt hop (window due)");
-        x::features::channel_hop::AbortHopForHangup();
-    }
-
     if (!IsArmed()) {
         if (!gSoftSkipLogMs || now - gSoftSkipLogMs > 10000) {
             gSoftSkipLogMs = now;
@@ -2084,6 +2075,16 @@ void TickSoftRelogin() {
         gHangupLieDeferred = 0;
         return;
     }
+
+    // 脏会话到点必须 CloseSession，遇人 hop 让路。禁止按 IsEncounterSoftHop 静默
+    // return：E2119 travel 丢掉 pending 后 gSoftReloginHop 仍真，秒数闸被挡，
+    // 40s 拖到 hangup_fires 1700/70s 才洗。Abort 连 Idle 残留旗标一起清。
+    // 必须在 IsArmed 之后：试连关着本路不拆，不能先掐 hop。
+    // abort 仍在 CloseSession 之前：F10 可能正在 SendTransfer，不能改成「Fire 失败再 abort」。
+    if (x::features::channel_hop::HasPending()) {
+        x::runtime::LogI("MobGather", "soft relogin preempt hop (window due)");
+    }
+    x::features::channel_hop::AbortHopForHangup();
 
     if (x::features::travel::IsActive()) {
         x::runtime::LogI("MobGather", "hangup due — stop travel, CloseSession first why=%s",

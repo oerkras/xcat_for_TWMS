@@ -431,6 +431,22 @@ void EnsureSafeLandIfAirborne(DWORD now) {
     (void)now;
 }
 
+void StopSupplySafeLand(const char* why) {
+    // keep-heli 会 Acquire Combat，Travel 在途时取消 = 把贴门旋翼抢回去。
+    if (travel::IsActive()) return;
+    if (simple_combat::IsSafeLandActive()) simple_combat::CancelSafeLand(why);
+}
+
+// Travel / Stick 只 TryAcquire，抢不走 Combat。落台取消后的 keep-heli 必须先放手。
+void YieldCombatHeliForTravel(const char* why) {
+    namespace heli = x::features::simple_combat::heli;
+    if (heli::Bailed()) heli::ClearBailed();
+    if (heli::CurrentOwner() != heli::Owner::Combat) return;
+    runtime::LogI("AutoSupply", "yield combat heli for travel why=%s", why ? why : "?");
+    heli::Disarm(heli::Owner::Combat);
+    heli::Release(heli::Owner::Combat);
+}
+
 void RearmLowStockLatchesAfterTrip(const char* why);
 
 void ArmPreSupplyHold(const char* why) {
@@ -774,6 +790,13 @@ bool FillCurrentMapName(char* out, size_t outSz) {
         return true;
     }
     return false;
+}
+
+bool CurrentMapKnown() {
+    if (ports::travel::CurrentMapId() > 0) return true;
+    if (!ports::travel::CurrentMapKey().empty()) return true;
+    travel::Snapshot snap{};
+    return travel::QuerySnapshot(snap) && snap.curMap[0] != 0;
 }
 
 bool ResolveShopTarget(char* msg, size_t msgSz);
@@ -1555,10 +1578,16 @@ void TickGoingTown(DWORD now) {
         return;
     }
 
-    // 开趟冷却可与落台并行；到期后仍须等站稳再发卷/RequestGoto。
+    // 挂机图发卷前必须站稳（空中用卷会掉出图）。图号未知（InterStage）也当挂机图侧，
+    // 禁止误判 onFarm=false 后空中用卷。已确认离开挂机图：错层可能永不 onFh，不再等挂台。
     if (!TripTravelReady(now)) return;
-    EnsureSafeLandIfAirborne(now);
-    if (!WaitSafeLand(now)) return;
+    const bool onFarm = MapMatchesTarget(gLastFarmMap);
+    if (onFarm || !CurrentMapKnown()) {
+        EnsureSafeLandIfAirborne(now);
+        if (!WaitSafeLand(now)) return;
+    } else {
+        StopSupplySafeLand("auto_supply_town_move");
+    }
 
     if (!gPreferDirect && !gTriedScroll) {
         // 已成功用卷：等离开用卷前地图（或离开挂机图），落地后结束用卷并重估店。
@@ -1670,6 +1699,7 @@ void TickGoingTown(DWORD now) {
                 return;
             }
             if (!EnsureCombatPausedForTravel()) return;
+            YieldCombatHeliForTravel("goto_shop");
             travel::RequestGoto(gShopMap);
         }
     }
@@ -1739,7 +1769,6 @@ bool ResolveShopNpcStand(int tpl, float* outX, float* outY, const char** outSrc)
 }
 
 bool StickToShopNpc(int tpl, float x, float y, const char* src) {
-    namespace heli = x::features::simple_combat::heli;
     ports::teleport::FlightState st{};
     float px = 0.f, py = 0.f;
     const bool haveAp = ports::teleport::QueryFlightState(st) && st.ok;
@@ -1754,9 +1783,8 @@ bool StickToShopNpc(int tpl, float x, float y, const char* src) {
         gNpcApproaching = false;
         return true;
     }
-    if (simple_combat::IsSafeLandActive())
-        simple_combat::CancelSafeLand("auto_supply_stick_npc");
-    if (heli::Bailed()) heli::ClearBailed();
+    StopSupplySafeLand("auto_supply_stick_npc");
+    YieldCombatHeliForTravel("stick_npc");
 
     float sx = x, sy = y;
     uint32_t fh = 0;
@@ -1801,19 +1829,17 @@ void TickOpeningShop(DWORD now) {
         SetMsg("等软重连落地…");
         return;
     }
-    // 超时必须在落地等待之前：WaitSafeLand 失败会 return，90s 门闩永远走不到
-    // （BIN FA5C 海滩出生点 drop_far 空转 20+ 分钟）。
+    // 超时必须在对话之前：Talk 失败才会走到这里（找不到 NPC / 店窗不开）。
     if (now - gPhaseSince > kWaitOpenTimeoutMs) {
         if (TryRerouteShopAfterOpenMiss("开店超时")) return;
         FailTrip("等待开店超时");
         return;
     }
-    // 已在店图开趟：Travel 到站后仍可能悬空；先请求落台再等站稳。
-    // 贴排挡途中不要再 DriveLieSafeHover，否则会把人拽回传送口。
-    if (!gNpcApproaching) {
-        EnsureSafeLandIfAirborne(now);
-        if (!WaitSafeLand(now)) return;
-    }
+    // 店图杂货指定 tpl 全图 Talk（BIN 銘仁 dist=584 / B02 dist=709 店能开）。
+    // 海滩错层可能永不 onFh：禁止 WaitSafeLand / 再 RequestSafeLand，否则店开了也被
+    // 落台循环挡住卖出，旋翼还会把人吸回出生点幽灵台。贴 NPC 途中更不能抢旋翼。
+    // AutoSupply 硬闸 / 换图 Restart 仍可能在后台跑落台：每拍拆掉，避免吸去 fh=111。
+    StopSupplySafeLand("auto_supply_open");
     if (!gWaitOpenNotified || now - gWaitOpenNotified > 20000) {
         gWaitOpenNotified = now;
         Publish(notify::NotificationKind::Info, "auto-supply-open", "正在尝试打开 NPC 商店",
@@ -1900,6 +1926,7 @@ void TickSelling(DWORD now) {
         SetMsg("等软重连落地…");
         return;
     }
+    StopSupplySafeLand("auto_supply_sell");
     if (now - gPhaseSince > kSellTimeoutMs) {
         FailTrip("自动卖出超时");
         return;
@@ -1952,6 +1979,7 @@ void TickBuyingReal(DWORD now) {
         SetMsg("等软重连落地…");
         return;
     }
+    StopSupplySafeLand("auto_supply_buy");
     if (now - gPhaseSince > kBuyTimeoutMs) {
         runtime::LogW("AutoSupply", "buy phase timeout → return");
         StartReturnOrDone();
@@ -2307,6 +2335,7 @@ void TickClosingShop(DWORD now) {
         SetMsg("等软重连落地…");
         return;
     }
+    StopSupplySafeLand("auto_supply_close");
     if (now - gPhaseSince > 30000) {
         FailTrip("关店超时");
         return;
@@ -2389,9 +2418,9 @@ void TickReturning(DWORD now) {
         SetMsg("回图稳图中…");
         return;
     }
+    // 冷却期间也要停落台，否则 2.8s 自冷仍把人吸去幽灵台。keep-heli 托到 RequestGoto。
+    StopSupplySafeLand("auto_supply_return");
     if (!TripTravelReady(now)) return;
-    EnsureSafeLandIfAirborne(now);
-    if (!WaitSafeLand(now)) return;
     if (!travel::IsActive()) {
         travel::Snapshot snap{};
         if (travel::QuerySnapshot(snap)) {
@@ -2411,6 +2440,7 @@ void TickReturning(DWORD now) {
                 return;
             }
             if (!EnsureCombatPausedForTravel()) return;
+            YieldCombatHeliForTravel("goto_farm");
             travel::RequestGoto(gLastFarmMap);
         }
     }

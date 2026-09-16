@@ -2086,19 +2086,25 @@ void OnStateChange(int prev, int now, int err) {
         // 把进图 Session 闪断当踢线硬杀（BIN 01:00:24 success → 01:00:25 kill）。
         x::features::galaxy_token_probe::RequestSample(
             now == kStateDisconnecting ? "disconnecting" : "disconnected");
-        x::features::ports::mob_gather::NoteNmSessionEnded(
-            now == kStateDisconnecting ? "disconnecting" : "disconnected");
         // hop 已发包：Disconnected 是迁频抖。KickSniff 抢 RequestAttempt 会与 Waiting Fail 双主
         //（BIN 13:59：fire→117ms Disc→soft→hop Fail「会话已断开」）。seq 也不 bump：
         // 无 hold 时 bump 会让守护干净重拉。hop Fail 后再 RequestAttempt。
+        const char* const dcWhy =
+            now == kStateDisconnecting ? "disconnecting" : "disconnected";
         if (x::features::channel_hop::IsMigrateInFlight() &&
             x::features::soft_login_probe::IsArmed()) {
+            x::features::ports::mob_gather::NoteNmSessionEnded(dcWhy);
             Log("skip disconnect soft: hop migrate in flight (seq not bumped)");
         } else if (x::features::auto_enter::IsWaitingCreateChar()) {
+            x::features::ports::mob_gather::NoteNmSessionEnded(dcWhy);
             Log("skip disconnect soft: empty char roster (wait create char)");
+        } else if (x::features::soft_login_probe::TrySwallowPostReenterSentinelDisconnect(err)) {
+            Log("skip disconnect soft: post-reenter sentinel pendingError=%d "
+                "(inMap playReady; seq not bumped)",
+                err);
         } else {
-            x::features::soft_login_probe::RequestAttempt(
-                now == kStateDisconnecting ? "disconnecting" : "disconnected");
+            x::features::ports::mob_gather::NoteNmSessionEnded(dcWhy);
+            x::features::soft_login_probe::RequestAttempt(dcWhy);
             if (x::features::soft_login_probe::IsLandQuiet() &&
                 !x::features::soft_login_probe::IsHoldActive()) {
                 Log("skip disconnectSeq bump (land_quiet hold=0)");

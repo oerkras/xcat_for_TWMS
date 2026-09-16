@@ -78,7 +78,9 @@ constexpr float kHitBandMaxFrac = 1.55f;
 // 黏住无脑A：续砍直到该重贴。dx∈[命中带, 100) 仍算 hold——残血纠偏走
 // TryConsumeWhiffApproachCorrect，禁止再被本阈值吞掉重贴。
 constexpr float kReapproachMinDx = 100.f;  // ≥此值才强制重贴（常规路径）
-// 禁塌怪心：落点相对怪台至少离开这么多（枫星对照：halfW+playerHalf / kMinCombatStandoff）。
+// 禁塌怪心：只约束 EstimateLand 落点，不是出刀中断闸。
+// 202 vs 209 同图：|dx|<10 仍能打中（202 近刀 1702 / 209 被 recenter_hug 掐到 32）。
+// 盒 Separate 才纠位（Firing QueryLockOverlap）；Overlap / Unknown 贴脸续砍。
 constexpr float kMinLandAway = 10.f;
 // 同层重贴最小 hop：贴近站距下怪走开几十像素也要 TP 回侧，否则空砍。
 constexpr float kMinReapproachHop = 24.f;
@@ -145,6 +147,13 @@ constexpr DWORD kLockKillTimeoutMs = 3000;
 constexpr DWORD kLockKillTimeoutSoftBanMs = 12000;
 // 相对上次进度标记至少掉这么多 % 才算「有进展」并重置超时钟（1=任意可见掉血）。
 constexpr int kLockKillTimeoutMinDropPct = 1;
+// 站桩输出默认不走 kill_timeout / 空刀换锁（面前有怪就黏死）。
+// B02 BUILD205：脚边满血大幽灵 hpPct 冻 100、FindHit 0 伤、1446 刀直到 hangup 1700。
+// 只在「本锁血条从没降过」时弃锁；打残后的停滞仍黏到 dead_or_gone。
+constexpr DWORD kHiraishinNoHpMs = 3000;
+constexpr int kHiraishinNoHpMinFires = 8;
+// 官方盒 Separate 且一跳能回到侧位：短禁换锁（不是 12s whiff）。站桩不赶路。
+constexpr DWORD kHiraishinGeomBanMs = 600;
 constexpr DWORD kDeadSoftBanMs = 300;
 // 早切（dealt/oneshot/abshp）：禁止当尸体软禁。BIN：600ms 禁锁 → 同 id 不再补刀 → 图上「杀不死」。
 constexpr DWORD kEarlyAbandonSoftBanMs = 0;
@@ -704,6 +713,8 @@ DWORD gStandstillShuffleLast = 0;
 DWORD gEngineBusySince = 0;   // 被引擎忙锁连续拦住的起点；0=上一拍不忙
 unsigned gEngineBusyTicks = 0;  // 累计被拦拍数（节流播报用，勿逐拍打日志）
 DWORD gStickySpinSince = 0;  // hop_sticky Aim↔MoveTo 空转计时
+bool gGeomStanceFill = false;  // 官方盒 Separate 纠位：MoveTo 禁止 in_band/melee_hold 原路弹回
+DWORD gLastGeomCorrectMs = 0;  // 纠位冷却；跨 ClearLock 仍有效（锁上的 sticky 会被清掉）
 DWORD gLastHumanPassbyMs = 0;
 DWORD gHumanWalkFocusTickMs = 0;  // 失焦时推进 enter 锚点，冻走路 timeout
 float gStandstillAnchorX = 0.f;
@@ -884,10 +895,12 @@ void EnterState(State s, DWORD now, const char* why) {
     // BIN 1394b0：FSM 自激 64/s → 合成键+泵抢占冻死 ImGui。Impact 从不走路：直接跳过。
     // 拟人仍需停步，但 StopWalk 已对 prev==0 早退、HoldWalk 同向短路；出带另有迟滞。
     // 切档锁存清理由 `SetImpactApproachEnabled` / `SetHumanWalkEnabled` 兜底。
-    if (prev == State::MoveTo && s != State::MoveTo &&
-        !gImpactApproachEnabled.load(std::memory_order_acquire)) {
-        (void)ports::attack::StopNav();
-        human_nav::Reset();
+    if (prev == State::MoveTo && s != State::MoveTo) {
+        gGeomStanceFill = false;
+        if (!gImpactApproachEnabled.load(std::memory_order_acquire)) {
+            (void)ports::attack::StopNav();
+            human_nav::Reset();
+        }
     }
     const bool hotCycle =
         (prev == State::Firing && s == State::Recover) ||
@@ -972,6 +985,7 @@ void ClearLock() {
     gStandstillSince = 0;
     gStandstillShuffleLast = 0;
     gStickySpinSince = 0;
+    gGeomStanceFill = false;
     gInViewHoldSince = 0;
     // 不清会残留上一只怪的忙窗起点：下次开打首拍就被判「已等超 1200ms」而误放行一刀。
     gEngineBusySince = 0;
@@ -1977,6 +1991,32 @@ bool TryAbandonLockKillTimeout(DWORD now) {
     return true;
 }
 
+// 飞雷神专用：血条相对开锁从未下降。鬼魂 / 拆线残留 / FindHit 打不中时
+// TryFillLive 仍成功，通用 kill_timeout 被 early-return 掐掉。
+// 掉过 1% 就放过——那是真怪，站桩继续砍到死。
+bool TryAbandonHiraishinNoHp(DWORD now) {
+    if (!gHiraishinEnabled.load(std::memory_order_acquire)) return false;
+    if (gLock.killTimeoutHoldSince) return false;
+    if (!gLock.lastKillProgressMs) return false;
+    if (gLock.lockStartHp < 0 || gLock.lastHp < 0) return false;
+    if (gLock.lastHp < gLock.lockStartHp) return false;
+    if (gLock.lockFires < kHiraishinNoHpMinFires) return false;
+
+    NoteKillTimeoutHpProgress(now);
+    const DWORD age = now - gLock.lastKillProgressMs;
+    if (static_cast<int>(age) < static_cast<int>(kHiraishinNoHpMs)) return false;
+
+    ++kpi::gAcc.killTimeouts;
+    LogLine("switch reason=hiraishin_no_hp id=%d age=%ums fires=%d hp=%d→%d hit=%d "
+            "bumps=%d softBan=%ums",
+            gLock.id, (unsigned)age, gLock.lockFires, gLock.lockStartHp, gLock.lastHp,
+            gLock.lastHitted, gLock.hitBumpCount, (unsigned)kLockKillTimeoutSoftBanMs);
+    SoftBanFor(gLock.id, now, kLockKillTimeoutSoftBanMs, kBanWhiff);
+    gLastLockLostWhy = "hiraishin_no_hp";
+    ClearLockRetarget();
+    return true;
+}
+
 // 窗内掉血 → 清 whiff；窗满无掉血 → +1；满 N → 清锁并返回 false。
 // lastHitted 旁路：默认只探针；kWhiffClearOnLastHitted=true 时才参与清窗。
 bool ResolveWhiffArm(DWORD now) {
@@ -2394,12 +2434,21 @@ void UnlatchCombatHeli(const char* why) {
     LogLine("heli unlatch why=%s (session end; BAN dropped)", why ? why : "?");
 }
 
-bool TryEnterMoveTo(DWORD now, const char* why) {
+bool GeomHugRange(float px, float py, float mx, float my) {
+    const float h = std::hypot(mx - px, my - py);
+    return std::isfinite(h) && h <= kHugMaxHop;
+}
+
+bool TryEnterMoveTo(DWORD now, const char* why, bool allowHiraishinGeom = false) {
     // 站桩输出原地出刀，不走路、不滑翔；怪由叠怪吸过来。
-    if (gHiraishinEnabled.load(std::memory_order_acquire)) return false;
+    // allowHiraishinGeom：官方盒 Separate 且 hop 短——回到侧位，不是赶路。
+    const bool hirGeom =
+        gHiraishinEnabled.load(std::memory_order_acquire) && allowHiraishinGeom;
+    if (gHiraishinEnabled.load(std::memory_order_acquire) && !hirGeom) return false;
+    if (hirGeom && !gTeleportEnabled.load(std::memory_order_acquire)) return false;
     // Impact / 拟人：不查瞬移 NativeCD（速率在 MoveTo 内自管）。
-    if (gImpactApproachEnabled.load(std::memory_order_acquire) ||
-        gHumanWalkEnabled.load(std::memory_order_acquire)) {
+    if (!hirGeom && (gImpactApproachEnabled.load(std::memory_order_acquire) ||
+                     gHumanWalkEnabled.load(std::memory_order_acquire))) {
         if (gImpactApproachEnabled.load(std::memory_order_acquire)) {
             LatchCombatHeli(why ? why : "MoveTo");
         }
@@ -2527,10 +2576,82 @@ bool TeleportWrongFloor(float playerY, float mobY) {
     return std::fabs(playerY - mobY) > kSameLayerY;
 }
 
-// 贴进怪心：InHitBand 要求 |dx|≥kMinLandAway(10)，InMeleeHoldBand 却放行 dx≈0。
-// Face 死区 8px 不转身，攻击盒在背后 → geom separate 干等（BIN 09800f：d=(-3,-1) 空站 2.4s）。
+// 贴进怪心（落点 / 估点用）。禁止单凭此值从 Recover/Aim 进 MoveTo：
+// 盒已相交时那是 202 的有效贴脸；盒 Separate 由 Firing geom 收（09800f）。
 bool TeleportTooClose(float playerX, float mobX) {
     return std::fabs(playerX - mobX) < kMinLandAway;
+}
+
+bool GeomStanceCooling(DWORD now) {
+    return gLastGeomCorrectMs &&
+           static_cast<int>(now - gLastGeomCorrectMs) <
+               static_cast<int>(kStickyCorrectCooldownMs);
+}
+
+bool HiraishinHasSideCandidate(const ports::mob::Snapshot& snap, float px, float py, DWORD now) {
+    if (!snap.ok) return false;
+    for (int i = 0; i < snap.count; ++i) {
+        const auto& m = snap.mobs[i];
+        if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
+        if (m.templateId == kSpecialTplFilter) continue;
+        if (m.id == gLock.id) continue;
+        if (ShouldSkipAcquireMob(m, now)) continue;
+        if (!HiraishinFrontOk(px, py, m.x, m.y)) continue;
+        if (std::fabs(m.x - px) < kMinLandAway) continue;
+        return true;
+    }
+    return false;
+}
+
+bool HeliStrikeOk(float px, float py, float mx, float my, bool firstLock = false);
+bool GeomStanceHasLand(float px, float py);
+
+// 官方盒 Separate 是站位真源。纠位闸 = |dy|>45 / hop≤kHugMaxHop
+//（E2231 d=(10,32)）。不降全局 kSameLayerY。飞雷神不赶路：有侧位候选才短禁换锁。
+// 必须先有落点再 Enter MoveTo：无点进 MoveTo 会立刻 no_land 禁锁（209 geom_hug 6/6）。
+bool TryGeomStanceCorrect(DWORD now, float px, float py, bool hiraishinOn, bool canApproach,
+                          const ports::mob::Snapshot& snap) {
+    if (!gLock.id) return false;
+    const bool hug = TeleportTooClose(px, gLock.x);
+    const bool wrongFloor = TeleportWrongFloor(py, gLock.y);
+    const bool hugHop = GeomHugRange(px, py, gLock.x, gLock.y);
+    if (!hugHop && !wrongFloor && !hug) return false;
+    if (GeomStanceCooling(now) || StickyCorrectCooling(now)) return false;
+
+    const char* why = hug ? "geom_hug" : "geom_separate";
+    auto commitFill = [&](bool allowHirGeom) -> bool {
+        if (hug) (void)TryCorrectSameLock(now, px, gLock.x, why);
+        if (!GeomStanceHasLand(px, py)) return false;
+        gGeomStanceFill = true;
+        if (!TryEnterMoveTo(now, why, allowHirGeom)) {
+            gGeomStanceFill = false;
+            return false;
+        }
+        gLock.lastStickyCorrectMs = now;
+        gLastGeomCorrectMs = now;
+        return true;
+    };
+
+    if (hiraishinOn) {
+        if (gTeleportEnabled.load(std::memory_order_acquire)) {
+            return commitFill(/*allowHirGeom=*/true);
+        }
+        if (!HiraishinHasSideCandidate(snap, px, py, now)) return false;
+        gLastGeomCorrectMs = now;
+        SoftBanFor(gLock.id, now, kHiraishinGeomBanMs);
+        LogLine("switch reason=hiraishin_geom id=%d d=(%.0f,%.0f) hug=%d softBan=%ums", gLock.id,
+                gLock.x - px, gLock.y - py, hug ? 1 : 0, (unsigned)kHiraishinGeomBanMs);
+        gLastLockLostWhy = "hiraishin_geom";
+        ClearLockRetarget(/*forceLite=*/false);
+        EnterState(State::Acquire, now, "hiraishin_geom");
+        return true;
+    }
+    if (!canApproach) return false;
+    if (gImpactApproachEnabled.load(std::memory_order_acquire) &&
+        HeliStrikeOk(px, py, gLock.x, gLock.y, /*firstLock=*/gLock.lockFires == 0)) {
+        return false;
+    }
+    return commitFill(/*allowHirGeom=*/false);
 }
 
 // |dx|<8 时 FaceToward/FaceNeedsFlip 当没位移。用真实左右合成 ±16，勿用过期 gLandSide
@@ -2550,7 +2671,6 @@ float CombatFaceDx(float playerX, float mobX) {
 // 50~90 时刷 whiff wounded→reapproach 却走 still_valid 空砍假死
 // （upload E226_27e7a113 21:54 樹妖王 dx=54~88，265 次无 MoveTo）。
 // 返回 true：本 tick 已进 MoveTo（*outMoved）或应让路、禁止 still_valid 空砍。
-bool HeliStrikeOk(float px, float py, float mx, float my, bool firstLock = false);  // 定义见下
 bool TryConsumeWhiffApproachCorrect(DWORD now, float playerX, float playerY, float standOff,
                                     bool canApproach, bool* outMoved) {
     if (outMoved) *outMoved = false;
@@ -2704,11 +2824,34 @@ bool EstimateLand(float px, float py, float mx, float my, float standOff, float*
     } else if (loose) {
         // 两侧偏移都不可站（起伏碎台）：贴怪台 snap，宁可贴怪心也不错层循环。
         // 人已经在怪心再落到 standX → melee_hold + 朝向死区空砍（BIN 09800f）。
-        if (std::fabs(px - standX) < kMinLandAway) return fail(LandFail::kSides);
-        tx = standX;
-        ty = standY;
-        landFh = standFh;
-        chosenSide = (pref > 0.f) ? 1 : -1;
+        if (std::fabs(px - standX) < kMinLandAway) {
+            // 人已在怪心：两侧 standOff 都贴不上时，用 kMinLandAway 侧步，禁止再落到 standX。
+            auto tinySide = [&](float sign) -> bool {
+                const float idealX = standX + sign * kMinLandAway;
+                float lx = idealX, ly = standY;
+                uint32_t lfh = 0;
+                if (!ports::foothold_path::SnapStandAt(idealX, standY, &lx, &ly, &lfh,
+                                                       /*preferFlat=*/true) ||
+                    !lfh)
+                    return false;
+                if (std::fabs(ly - standY) > kSameLayerY) return false;
+                if (std::fabs(ly - my) > kSameLayerY) return false;
+                if (std::fabs(lx - standX) < kMinLandAway) return false;
+                if (IsBadLandPoint(lx, ly, GetTickCount())) return false;
+                if (!ports::foothold_path::IsXSafeOnFh(lfh, lx)) return false;
+                tx = lx;
+                ty = ly;
+                landFh = lfh;
+                chosenSide = (sign > 0.f) ? 1 : -1;
+                return true;
+            };
+            if (!tinySide(pref) && !tinySide(-pref)) return fail(LandFail::kSides);
+        } else {
+            tx = standX;
+            ty = standY;
+            landFh = standFh;
+            chosenSide = (pref > 0.f) ? 1 : -1;
+        }
     } else {
         return fail(LandFail::kSides);
     }
@@ -2734,6 +2877,18 @@ bool EstimateLandPrefer(float px, float py, float mx, float my, float standOff, 
     // 归因只取 loose 档：严格档的 kSides 会被 loose 的贴台兜底救回，报它会误导。
     return EstimateLand(px, py, mx, my, standOff, outHop, outTx, outTy, outFh, outSide, true,
                         outFail);
+}
+
+bool GeomStanceHasLand(float px, float py) {
+    float hop = 0.f, tx = 0.f, ty = 0.f;
+    uint32_t fh = 0;
+    LandFail fail = LandFail::kNone;
+    if (EstimateLandPrefer(px, py, gLock.x, gLock.y, ClampStandOff(), &hop, &tx, &ty, &fh, nullptr,
+                           &fail))
+        return true;
+    LogLine("geom stance no_land id=%d fail=%d d=(%.0f,%.0f) — hold", gLock.id, (int)fail,
+            gLock.x - px, gLock.y - py);
+    return false;
 }
 
 // 远距分段：线性插值点经 SnapStandAt 后常被拉到远台（BIN：maxHop=400 → step=911）。
@@ -2924,6 +3079,7 @@ bool RefreshLock(const ports::mob::Snapshot& snap) {
     // DI 偶发晚一拍：bump 当帧没读到，锁刷新再试。站桩也要跳过 MISS 怪。
     ResolveAccMissAfterBump(now, "lock");
     if (TryAbandonAccMiss(now)) return false;
+    if (TryAbandonHiraishinNoHp(now)) return false;
     if (gHiraishinEnabled.load(std::memory_order_acquire)) return true;
     if (TryAbandonDealtSum(now)) return false;
     if (TryAbandonOneshot(now)) return false;
@@ -3564,21 +3720,27 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
         (void)allowCrossLayer;
         (void)standOff;
         (void)now;
-        for (int i = 0; i < snap.count; ++i) {
-            const auto& m = snap.mobs[i];
-            if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
-            if (m.templateId == kSpecialTplFilter) continue;
-            if (ShouldSkipAcquireMob(m, now, ignoreInstanceBan)) continue;
-            if (!HiraishinFrontOk(px, py, m.x, m.y)) continue;
-            const float dx = m.x - px;
-            const float dy = m.y - py;
-            const float geoD2 = dx * dx + dy * dy;
-            if (geoD2 >= bestGeoD2) continue;
-            bestGeoD2 = geoD2;
-            bestScore = geoD2;
-            best = &m;
-            bestHop = std::hypot(dx, dy);
-        }
+        auto hirConsider = [&](bool allowHug) {
+            for (int i = 0; i < snap.count; ++i) {
+                const auto& m = snap.mobs[i];
+                if (!m.ready || m.deadType != 0 || m.hpPct <= 0) continue;
+                if (m.templateId == kSpecialTplFilter) continue;
+                if (ShouldSkipAcquireMob(m, now, ignoreInstanceBan)) continue;
+                if (!HiraishinFrontOk(px, py, m.x, m.y)) continue;
+                const float dx = m.x - px;
+                const float dy = m.y - py;
+                if (!allowHug && std::fabs(dx) < kMinLandAway) continue;
+                const float geoD2 = dx * dx + dy * dy;
+                if (geoD2 >= bestGeoD2) continue;
+                bestGeoD2 = geoD2;
+                bestScore = geoD2;
+                best = &m;
+                bestHop = std::hypot(dx, dy);
+            }
+        };
+        // 先跳过塌怪心：吸过来叠在脚边的那只盒对不上。只有面前只剩重叠才回退。
+        hirConsider(false);
+        if (!best) hirConsider(true);
         if (!best) return false;
     } else if (kDirectTeleportNoLayerHop) {
         for (int i = 0; i < snap.count; ++i) {
@@ -8272,6 +8434,12 @@ void TickImpl(DWORD now) {
                 EnterState(State::Aim, now, "in_band");
                 break;
             }
+            // 贴脸：先出刀，让 Firing 官方盒决定要不要纠位。禁止无落点 geom_hug→no_land。
+            if (tpOn && TeleportTooClose(player.x, gLock.x) &&
+                !TeleportWrongFloor(player.y, gLock.y)) {
+                EnterState(State::Aim, now, "melee_close");
+                break;
+            }
             if (tpOn) {
                 // 贴怪开：出命中带即贴；CD 未好不进 MoveTo。
                 float hop = 0, tx = 0, ty = 0;
@@ -8526,8 +8694,13 @@ void TickImpl(DWORD now) {
                 break;
             }
             if (!tpOn) {
-                EnterState(State::Acquire, now, "tp_disabled");
-                break;
+                const bool hirFill = hiraishinOn && gGeomStanceFill &&
+                                     gTeleportEnabled.load(std::memory_order_acquire) &&
+                                     GeomHugRange(player.x, player.y, gLock.x, gLock.y);
+                if (!hirFill) {
+                    EnterState(State::Acquire, now, "tp_disabled");
+                    break;
+                }
             }
             if (!RefreshLock(snap)) {
                 EnterState(State::Acquire, now, gLastLockLostWhy);
@@ -8538,7 +8711,8 @@ void TickImpl(DWORD now) {
 
             // 已在命中带则直接打，否则立刻贴（无 minDx）。
             // 错台 |dy|>45 禁止 in_band：与 Acquire 同一闸（BIN 4e8558 / Bugbot MoveTo 漏网）。
-            if (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) &&
+            // geom 纠位：InHitBand 对 d=(10,32) 仍为真，必须填到 standOff，禁止原路弹回 Firing。
+            if (!gGeomStanceFill && InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) &&
                 !TeleportWrongFloor(player.y, gLock.y)) {
                 EnterState(State::Firing, now, "in_band");
                 continue;
@@ -8599,9 +8773,9 @@ void TickImpl(DWORD now) {
             const bool hug = IsHugMove(same, hop);
             const float minHop = hug ? kMinHugHop : kMinReapproachHop;
             // 黏住无脑A：hop 小且人还近 → 直接砍；禁止翻侧 Aim↔MoveTo 空转。
-            if (hop < minHop) {
+            // geom 纠位必须填到 standOff：InMeleeHoldBand 会把 d=(10,32) 当可砍。
+            if (hop < minHop && !gGeomStanceFill) {
                 if (!TeleportWrongFloor(player.y, gLock.y) &&
-                    !TeleportTooClose(player.x, gLock.x) &&
                     (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
                      InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff))) {
                     LogLine("MoveTo melee_hold id=%d hop=%.1f dx=%.0f → fire", gLock.id, hop,
@@ -8671,6 +8845,7 @@ void TickImpl(DWORD now) {
             gSettleEnteredAt = now;
             gSettleMinMs = minSettle;
             gSettleWasCross = !same;
+            gGeomStanceFill = false;
             gSettleDiagLastMs = 0;
             gSettleDidStabilize = false;
             gSettleSawRpBad = false;
@@ -9044,7 +9219,6 @@ void TickImpl(DWORD now) {
             // 的 dy+dx，否则这条支路会绕过上面刚收紧的 heli_hover 门禁继续空砍。
             // Impact 档禁止再走 InHitBand(ClampStandOff)：否则自定义站距下贴脸仍 ready 出刀。
             if (!impactOn && !(tpOn && TeleportWrongFloor(player.y, gLock.y)) &&
-                !(tpOn && TeleportTooClose(player.x, gLock.x)) &&
                 ((humanOn && HumanHitBandReady(player.x, player.y, gLock.x, gLock.y, standOff)) ||
                  (!humanOn &&
                   (InHitBand(player.x, player.y, gLock.x, gLock.y, standOff) ||
@@ -9066,19 +9240,14 @@ void TickImpl(DWORD now) {
                 break;
             }
             if (tpOn && (NeedsReapproach(player.x, player.y, gLock.x, gLock.y) ||
-                         TeleportWrongFloor(player.y, gLock.y) ||
-                         TeleportTooClose(player.x, gLock.x))) {
+                         TeleportWrongFloor(player.y, gLock.y))) {
                 // d1a58e：sticky 冷却中禁止 aim_reapproach 回灌 MoveTo。
+                // |dx|<10 不在这里重贴：盒相交则续砍（202）；Separate 由 Firing geom 收。
                 if (StickyCorrectCooling(now)) {
                     break;
                 }
                 const char* why = TeleportWrongFloor(player.y, gLock.y) ? "aim_wrong_floor"
-                                  : TeleportTooClose(player.x, gLock.x) ? "recenter_hug"
                                                                         : "aim_reapproach";
-                if (TeleportTooClose(player.x, gLock.x) &&
-                    !TeleportWrongFloor(player.y, gLock.y)) {
-                    (void)TryCorrectSameLock(now, player.x, gLock.x, "recenter_hug");
-                }
                 if (TryEnterMoveTo(now, why)) continue;
                 break;
             }
@@ -9429,18 +9598,11 @@ void TickImpl(DWORD now) {
                                 gs.bodyW, gs.bodyH, faceLeft ? 1 : 0, gLock.x - player.x,
                                 gLock.y - player.y);
                         }
-                        // 错台：InMeleeHoldBand 因 |dy|≤100 仍放行，FireGate 不赶人。
-                        // BIN 4e8558：in_band dy=73 → separate 空站 4s → dx=100 才 await_band。
-                        if (tpOn && TeleportWrongFloor(player.y, gLock.y) &&
-                            !StickyCorrectCooling(now) &&
-                            TryEnterMoveTo(now, "geom_separate")) {
+                        // 官方盒 Separate 即站位错。Overlap 贴脸续砍，不走 Recover recenter。
+                        // 闸 = |dy|>45 / hop≤80，不降全局 kSameLayerY。Impact 紧带不进 MoveTo。
+                        if (TryGeomStanceCorrect(now, player.x, player.y, hiraishinOn, canApproach,
+                                                 snap)) {
                             continue;
-                        }
-                        // 同层贴怪心 / 盒在背后：错台闸不出手。BIN 09800f d=(-3,-1) 空站 2.4s。
-                        if (tpOn && TeleportTooClose(player.x, gLock.x) &&
-                            !StickyCorrectCooling(now)) {
-                            (void)TryCorrectSameLock(now, player.x, gLock.x, "geom_hug");
-                            if (TryEnterMoveTo(now, "geom_hug")) continue;
                         }
                         break;
                     }
@@ -9638,12 +9800,8 @@ void TickImpl(DWORD now) {
                 if (TryEnterMoveTo(now, "wrong_floor")) continue;
                 break;
             }
-            if (tpOn && TeleportTooClose(player.x, gLock.x)) {
-                if (StickyCorrectCooling(now)) break;
-                (void)TryCorrectSameLock(now, player.x, gLock.x, "recenter_hug");
-                if (TryEnterMoveTo(now, LiveStepOn() ? "hug_follow" : "recenter_hug")) continue;
-                break;
-            }
+            // 贴脸不在 Recover 重贴。209 在此 dx=8 hp=54 仍 recenter_hug（FA5C 20:07:48），
+            // 同图 202 继续砍。盒 Separate 由下一拍 Firing geom 收。
             // 直升机：悬停续砍；漂出站位才 MoveTo；怪死走 Acquire 换下一只。
             if (impactOn && !gLock.needApproachCorrect) {
                 if (!CombatHeliAirborne()) {
@@ -9667,18 +9825,20 @@ void TickImpl(DWORD now) {
                 continue;
             }
             // needApproachCorrect 未清时禁止 still_valid/near_band 空砍。
-            if (same && !gLock.needApproachCorrect) {
+            // 瞬移续砍跟 Aim：InMeleeHoldBand（含 NearMeleeFloor，不强制 SameLayer）。
+            // 旧 same 闸会让 layer=cross 贴脸砍一刀后 Recover→reacquire。
+            if (!gLock.needApproachCorrect) {
                 if (humanOn) {
-                    // 出带迟滞：仍在宽松带内就续砍，勿 reapproach→立刻 human_in_band 抖 StopWalk。
-                    if (HumanHoldBandReady(player.x, player.y, gLock.x, gLock.y, standOff)) {
-                        if (!ports::attack::CanFirePrimaryEx(firstOfLock)) break;
-                        EnterState(State::Firing, now, "still_valid");
+                    if (same) {
+                        if (HumanHoldBandReady(player.x, player.y, gLock.x, gLock.y, standOff)) {
+                            if (!ports::attack::CanFirePrimaryEx(firstOfLock)) break;
+                            EnterState(State::Firing, now, "still_valid");
+                            continue;
+                        }
+                        if (!TryEnterMoveTo(now, "reapproach_human")) break;
                         continue;
                     }
-                    if (!TryEnterMoveTo(now, "reapproach_human")) break;
-                    continue;
-                }
-                if (InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
+                } else if (InMeleeHoldBand(player.x, player.y, gLock.x, gLock.y, standOff)) {
                     if (!ports::attack::CanFirePrimaryEx(firstOfLock)) break;
                     EnterState(State::Firing, now, "still_valid");
                     continue;

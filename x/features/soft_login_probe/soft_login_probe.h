@@ -71,4 +71,9 @@ void ClearBreaker(const char* why);
 // 不依赖软重连是否武装；须在已注入且泵可用时调用。
 void RequestManualDismiss();
 
+// KickSniff Connected→Disconnected 边沿：RESULT 成功后短窗内、人仍在图且 playReady，
+// pendingError 仅为 Session 哨兵 204/205 时吞掉二次 leave_map（BIN 09800f 同一轮拆两次）。
+// 真踢 / 掉出图：800ms watch 见 !inMap 仍会 RequestAttempt。不得用于 nm_gone / lost_session。
+bool TrySwallowPostReenterSentinelDisconnect(int pendingError);
+
 }  // namespace x::features::soft_login_probe

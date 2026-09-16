@@ -133,6 +133,10 @@ constexpr DWORD kSoftSampleCallMs = 400;  // 对齐 kTransitInvokeCapMs；勿再
 // 角色重连：挂台后再短停再打。空中贴怪禁止强制 quiet（会卸旋翼把人拽死）。
 constexpr DWORD kSoftLandQuietMs = 600;
 constexpr DWORD kSoftPostAirGateMs = 600;
+// BIN 09800f：hangup RESULT 后 ~1.3s sticky 205 边沿再 leave_map，同一轮停两次。
+// 只盖哨兵闪断；真掉图由 kSentinelDcWatchMs 补拉（对照 BIN 01:23:52 大厅无人拉）。
+constexpr DWORD kSentinelDcGraceMs = 2500;
+constexpr DWORD kSentinelDcWatchMs = 800;
 // 空中贴怪 skip land_quiet 之后：BAN/旋翼仍要留，但出刀/遇人采样/喝药不得立刻抢泵。
 // BIN 16:44:28 RESULT(curFh=0) → 16:44:30 Call(2000) 占队 → 16:44:31 pump idle → pid empty。
 constexpr DWORD kPostReenterMinMs = 800;
@@ -282,6 +286,8 @@ std::atomic<DWORD> gLandQuietArmedAtMs{0};   // Arm 墙钟；早释算 elapsed
 std::atomic<DWORD> gLandQuietForceUntilMs{0};  // 强制落地停：到期前禁止 onFh 早释
 std::atomic<DWORD> gPostReenterUntilMs{0};   // RESULT 后生产者错峰；不卸 BAN
 std::atomic<DWORD> gPostReenterArmedMs{0};
+std::atomic<DWORD> gSentinelDcGraceUntilMs{0};  // RESULT 成功后吞 204/205 边沿
+std::atomic<DWORD> gSentinelDcWatchUntilMs{0};  // 吞边沿后看是否真的掉出图
 std::atomic<unsigned> gResult{0};  // 0 none 1 ok 2 fail
 std::atomic<bool> gUiEnabled{false};
 char gWhy[64]{};
@@ -2076,6 +2082,11 @@ void ClearBreakerLocked(const char* why) {
 void NoteSoftSuccess() {
     gFailStreak.store(0, std::memory_order_release);
     gFailStreakFirstMs.store(0, std::memory_order_release);
+    DWORD until = GetTickCount() + kSentinelDcGraceMs;
+    if (until == 0) until = 1;
+    gSentinelDcGraceUntilMs.store(until, std::memory_order_release);
+    LogLine("sentinel_dc_grace arm=%ums (swallow in-map 204/205 edge)",
+            static_cast<unsigned>(kSentinelDcGraceMs));
 }
 
 void NoteSoftFailure() {
@@ -2672,6 +2683,23 @@ DWORD WINAPI Worker(LPVOID) {
                     LogLine("deferred soft fire why=%s inMap=0", whyBuf);
                     KickLogLine("deferred soft fire why=%s inMap=0", whyBuf);
                     RequestAttempt(whyBuf);
+                }
+            }
+            // 哨兵边沿已吞：800ms 后若已掉出图 / 不再 playReady，补拉软重连（BIN 01:23:52）。
+            {
+                DWORD watch = gSentinelDcWatchUntilMs.load(std::memory_order_acquire);
+                if (watch && static_cast<int>(watch - now) <= 0) {
+                    if (gSentinelDcWatchUntilMs.compare_exchange_strong(watch, 0,
+                                                                        std::memory_order_acq_rel)) {
+                        if (!inMap) {
+                            LogLine("sentinel_dc watch: left map — RequestAttempt");
+                            KickLogLine("sentinel_dc watch left_map RequestAttempt");
+                            RequestAttempt("disconnected");
+                        } else {
+                            LogLine("sentinel_dc watch: still inMap — keep (no leave_map)");
+                            KickLogLine("sentinel_dc watch keep inMap");
+                        }
+                    }
                 }
             }
             if (!inMap && !softBusy) {
@@ -4280,6 +4308,32 @@ bool RequestProactiveReconnect(const char* why) {
     gSettleProactiveFast.store(true, std::memory_order_release);
     LogLine("proactive close issued why=%s (deferred, wait !inMap)", why ? why : "?");
     KickLogLine("proactive close issued why=%s", why ? why : "?");
+    return true;
+}
+
+bool TrySwallowPostReenterSentinelDisconnect(int pendingError) {
+    // TW Session+0x40 空闲哨兵；不是踢因。其它码走原 RequestAttempt。
+    if (pendingError != 204 && pendingError != 205) return false;
+    DWORD until = gSentinelDcGraceUntilMs.load(std::memory_order_acquire);
+    if (!until) return false;
+    const DWORD now = GetTickCount();
+    if (static_cast<int>(until - now) <= 0) {
+        (void)gSentinelDcGraceUntilMs.compare_exchange_strong(until, 0, std::memory_order_acq_rel);
+        return false;
+    }
+    // 进行中的软重连 / 拍卖迁服：不要把边沿吞掉。
+    if (IsHoldActive() || IsAttemptBusy()) return false;
+    if (SoftSceneIsMarket(nullptr)) return false;
+    if (!x::features::ports::world::IsInMapScene()) return false;
+    if (!x::features::ports::world::IsPlayReady()) return false;
+    DWORD watch = now + kSentinelDcWatchMs;
+    if (watch == 0) watch = 1;
+    gSentinelDcWatchUntilMs.store(watch, std::memory_order_release);
+    LogLine("sentinel_dc swallow pendingError=%d remain=%ums watch=%ums (no leave_map)",
+            pendingError, static_cast<unsigned>(until - now),
+            static_cast<unsigned>(kSentinelDcWatchMs));
+    KickLogLine("sentinel_dc swallow err=%d watch=%ums", pendingError,
+                static_cast<unsigned>(kSentinelDcWatchMs));
     return true;
 }
 

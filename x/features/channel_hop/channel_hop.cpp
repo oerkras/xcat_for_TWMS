@@ -199,7 +199,7 @@ bool gInvulnHeld = false;     // 本模块临时关了 Invuln（仅 BeginActive 
 bool gInvulnWasOn = false;    // 关之前的 desired，Finish 时还原
 std::atomic<bool> gCombatPaused{false};  // ChannelHop 硬闸；Request/Tick 跨线程
 std::atomic<bool> gEarlyHoldFromRequest{false};  // Request 边沿已停刀，尚未 BeginActive
-bool gSoftReloginHop = false;  // 遇人：sticky 新频 + CloseSession，禁止 SendTransfer
+std::atomic<bool> gSoftReloginHop{false};  // 遇人：sticky 新频 + CloseSession，禁止 SendTransfer
 bool gHopFailRecoverPending = false;  // 换频失败仍在图内：停刀 + CloseSession 清脏
 int gHopFailRecoverTries = 0;
 DWORD gHopFailRecoverRetryAt = 0;
@@ -232,7 +232,8 @@ int DispCh(int idx) { return idx >= 0 ? idx + 1 : idx; }
 bool IsEncounterHopSeq(uint32_t seq) { return seq >= kEncounterHopSeqBase; }
 
 bool WantEncounterSoftHop() {
-    return gSoftReloginHop || IsEncounterHopSeq(gActiveSeq.load());
+    return gSoftReloginHop.load(std::memory_order_acquire) ||
+           IsEncounterHopSeq(gActiveSeq.load());
 }
 
 // 赶路贴门 / 卖装开趟期间禁止换频：PauseCombatForHop 会 ForceNativeCooldown，
@@ -298,6 +299,13 @@ void Log(const char* fmt, ...) {
     vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
     x::runtime::LogI("ChannelHop", "%s", body);
+}
+
+// Idle abort / travel 丢掉 pending 时也必须清。E2119：旗标卡住后
+// TickSoftRelogin 把秒数闸当成「遇人 hop 正在选频」静默让路，脏会话洗不掉。
+void ClearSoftHopFlag(const char* why) {
+    if (!gSoftReloginHop.exchange(false, std::memory_order_acq_rel)) return;
+    Log("clear softHop flag why=%s", why && why[0] ? why : "?");
 }
 
 void Notify(x::features::notify::NotificationKind kind, const char* key, const char* title,
@@ -1245,7 +1253,7 @@ void MaybeNotifyExcl(DWORD now) {
 // End active job; never wipe a newer pending seq queued while we were busy.
 void FinishActive(DWORD cooldownMs, DWORD now) {
     gActiveSeq.store(0);
-    gSoftReloginHop = false;
+    gSoftReloginHop.store(false, std::memory_order_release);
     ClearAttemptState();
     SetState(State::Idle);
     if (cooldownMs > 0) gCooldownUntil = now + cooldownMs;
@@ -1270,10 +1278,12 @@ void AbortHopWithWhy(const char* why) {
     const uint32_t active = gActiveSeq.load();
     const bool held = gCombatPaused.load(std::memory_order_acquire) || gResumeAt != 0 ||
                      gHopFailRecoverPending;
-    if (st == State::Idle && pend == 0 && !held) return;
+    if (st == State::Idle && pend == 0 && !held &&
+        !gSoftReloginHop.load(std::memory_order_acquire))
+        return;
+    ClearSoftHopFlag(why);
     if (st != State::Idle) {
         gActiveSeq.store(0);
-        gSoftReloginHop = false;
         ClearAttemptState();
         SetState(State::Idle);
         Log("abort %s seq=%u was=%u (no more transfer)", why, active,
@@ -1381,7 +1391,7 @@ void TickPostHopResume(DWORD now) {
 }
 
 void Fail(const char* why, bool recoverSoft = false) {
-    const bool encounterHop = gSoftReloginHop;
+    const bool encounterHop = gSoftReloginHop.load(std::memory_order_acquire);
     const bool inMapReady =
         ports::world::IsInMapScene() && ports::world::IsPlayReady();
     Log("fail seq=%u why=%s pending=%u attempts=%d recoverSoft=%d encounter=%d inMap=%d",
@@ -1595,11 +1605,14 @@ void MaybeNotifyDefer(uint32_t seq, const char* reason, DWORD now) {
 
 void BeginActive(uint32_t seq, DWORD now) {
     if (YieldHop()) {
+        // 与 Tick Idle+YieldHop 同口径：丢掉 pending 并清 softHop，避免
+        // Request 举手后 Begin 被赶路挡住、旗标留到下一轮秒数闸。
+        AbortHopWithWhy(YieldHopWhy());
         Log("begin skip seq=%u %s active", seq, YieldHopWhy());
         return;
     }
     gActiveSeq.store(seq);
-    gSoftReloginHop = IsEncounterHopSeq(seq);
+    gSoftReloginHop.store(IsEncounterHopSeq(seq), std::memory_order_release);
     // Consume only this seq; keep a newer pending that raced in after Idle check.
     uint32_t expected = seq;
     (void)gPendingSeq.compare_exchange_strong(expected, 0);
@@ -1617,7 +1630,8 @@ void BeginActive(uint32_t seq, DWORD now) {
     gLastDeferNotifySeq = 0;
     SetState(State::Selecting);
     Log("begin seq=%u (%s, no menu) preFireSettle=%ums readyIn=%ums", seq,
-        gSoftReloginHop ? "soft-hop CloseSession" : "direct SendTransfer",
+        gSoftReloginHop.load(std::memory_order_acquire) ? "soft-hop CloseSession"
+                                                        : "direct SendTransfer",
         static_cast<unsigned>(kPreFireSettleMs), static_cast<unsigned>(ready - now));
 }
 
@@ -2312,6 +2326,7 @@ void Init() {
     SetState(State::Idle);
     gPendingSeq.store(0);
     gActiveSeq.store(0);
+    gSoftReloginHop.store(false, std::memory_order_release);
     gLastDeferNotifySeq = 0;
     gPlayReadySince = 0;
     gCombatPaused.store(false, std::memory_order_release);
@@ -2339,6 +2354,7 @@ void Init() {
 
     if (keepPending != 0) {
         gPendingSeq.store(keepPending, std::memory_order_release);
+        gSoftReloginHop.store(IsEncounterHopSeq(keepPending), std::memory_order_release);
         const DWORD now = GetTickCount();
         DWORD ready = keepReady;
         if (ready == 0 || ready <= now) ready = now + kPreFireSettleMs;
@@ -2371,14 +2387,15 @@ void RequestRejoin(uint32_t seq, bool encounterSoftHop) {
             Log("busy queue seq=%u state=%u keep softHop (encounter in flight)", seq,
                 gState.load());
         } else if (!WantEncounterSoftHop()) {
-            gSoftReloginHop = wantSoft;
+            gSoftReloginHop.store(wantSoft, std::memory_order_release);
         }
         Log("busy queue seq=%u state=%u softHop=%d (early pause held)", seq, gState.load(),
             WantEncounterSoftHop() ? 1 : 0);
         gPendingSeq.store(seq);
         return;
     }
-    gSoftReloginHop = encounterSoftHop || IsEncounterHopSeq(seq);
+    gSoftReloginHop.store(encounterSoftHop || IsEncounterHopSeq(seq),
+                         std::memory_order_release);
     // settle 从点击起算（BeginActive 会保留未到期的 armedReady）
     gFireReadyAt.store(GetTickCount() + kPreFireSettleMs, std::memory_order_release);
     gPendingSeq.store(seq);
@@ -2390,7 +2407,11 @@ void RequestManualRejoin(uint32_t seq) { RequestRejoin(seq, false); }
 
 void RequestEncounterSoftHop(uint32_t seq) { RequestRejoin(seq, true); }
 
-bool IsEncounterSoftHop() { return WantEncounterSoftHop(); }
+bool IsEncounterSoftHop() {
+    // 只认「排队中 / 进行中」。Idle 残留 gSoftReloginHop 不算遇人 hop。
+    if (!WantEncounterSoftHop()) return false;
+    return GetStateLocal() != State::Idle || gPendingSeq.load() != 0;
+}
 
 State GetState() { return GetStateLocal(); }
 
@@ -2426,7 +2447,10 @@ void AbortHopForHangup() {
     const uint32_t active = gActiveSeq.load();
     const bool held = gCombatPaused.load(std::memory_order_acquire) || gResumeAt != 0 ||
                      gHopFailRecoverPending;
-    if (st == State::Idle && pend == 0 && !held) return;
+    if (st == State::Idle && pend == 0 && !held &&
+        !gSoftReloginHop.load(std::memory_order_acquire))
+        return;
+    ClearSoftHopFlag("hangup");
     // 包已出门：hangup CloseSession 会撕迁频。粘目标频，避免 C97 粘回挤的旧频。
     if (st == State::Waiting && gTargetChannel >= 0 &&
         (gWatchDisconnect || gSawConnecting || gSawLeavePlay || gExclArmed)) {
@@ -2436,7 +2460,6 @@ void AbortHopForHangup() {
     }
     if (st != State::Idle) {
         gActiveSeq.store(0);
-        gSoftReloginHop = false;
         ClearAttemptState();
         SetState(State::Idle);
         Log("abort hangup seq=%u was=%u (hangup preempts hop)", active,
@@ -2539,9 +2562,7 @@ void Tick(DWORD now) {
                 }
             }
         } else if (YieldHop()) {
-            gPendingSeq.store(0);
-            ResumeCombatAfterHop();
-            ports::teleport::ClearNativeSelfCd();
+            AbortHopWithWhy(YieldHopWhy());
             Log("begin skip seq=%u %s active", seq, YieldHopWhy());
         } else {
             BeginActive(seq, now);
