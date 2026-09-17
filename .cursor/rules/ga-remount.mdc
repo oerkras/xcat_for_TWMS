@@ -11,14 +11,17 @@ alwaysApply: false
 ## 必须
 
 - 只换 dump 能证明的**类/字段/方法哈希**和**方法头 RVA**。
-- 体内点只核 `scripts/data/ga_patch_sites.tsv`；编码变了停，开 IDA，**禁止**在平坦化里盲搜 `75 07`。
+- 体内点只核 `scripts/data/ga_patch_sites.tsv`；编码变了先跑 `catalog`（父方法窗口唯一命中），再 IDA。**禁止**在平坦化里盲搜 `75 07`。
+- `catalog --write` 仅当用户当轮说 write/apply；改 tsv 的 rva/target **和** 该行 `cpp` 列的 `constexpr kRva*`（`kRvaMagicCmov` 等）。禁止改注释里的裸 `0xHEX`。
 - `map` 默认 dry-run。`--apply` / `--apply-hashes` / `--apply-krva` 仅当输出里 `on_old_map>0` **且用户当轮明确说 apply**。
 - `--apply` = 哈希 + 具名 `kRva*`。**禁止** `--apply-all-hex` 除非用户点名。
 - 哈希已在新 dump 上时 `--apply-all-hex` 会 REFUSE；`--apply-hashes` 会 skip。
 - apply 哈希之后跑 `layout`，再 `--apply-krva`，再 `krva` / `audit`。
-- `layout` 的 `TYPE_FLIP` / `FALLBACK_STALE` 必须改 `kFb*`（equal-offset 换哈希会把 Vector2 接到同址数组）。
-- `krva MATCH` 含同一哈希的 override 方法头；`--apply-krva` 走 `ga_krva_bind.tsv` 哈希身份。
-- 注入后 `smoke` 对照 `ga_remount_smoke_expect.tsv`，并扫日志轮转。
+- `layout` 的 `TYPE_FLIP` / `FALLBACK_STALE` 必须改 `kFb*`。`layout --write` 仅当用户当轮说 write，且只改 `FALLBACK_STALE` 的 `constexpr kFb*`。
+- `krva MATCH` 含同一哈希的 override 方法头；`--apply-krva` 走 `ga_krva_bind.tsv`（hash/plain；`shared=1` 禁止唯一改写）。`BIND_STALE` 时用户说 write 才 `--write-bind`。
+- 注入后 `smoke` 对照 `ga_remount_smoke_expect.tsv`（`need=req` 缺组才红；必过组可回退更早 bind 会话），并扫日志轮转。
+- `dump --process` 仅当用户当轮说 process/ForceDump；禁止与 `--archive` 同时；禁止藏进自定义注入。
+- `verify` 只干跑（含 map/layout），不 apply、不 ForceDump。
 
 ## 禁止
 

@@ -11,13 +11,15 @@
   python scripts/ga_remount.py map --apply-hashes
       只换源码里已映射的类/字段/方法哈希（下次更新日的默认写入）
   python scripts/ga_remount.py map --apply-krva
-      只改 constexpr kRva* = 0x…；有 bind 哈希时按 dump 身份改，不再因旧数字仍是方法头而跳过
+      只改 constexpr kRva* = 0x…；bind 按 hash/plain 身份改；shared 虚方法禁止唯一改写
   python scripts/ga_remount.py map --apply
       等价 --apply-hashes + --apply-krva。不再改注释/体内点里的裸 0xHEX
   python scripts/ga_remount.py map --apply-all-hex
       旧行为：所有 0xRVA token；哈希已在新 dump 时拒绝
   python scripts/ga_remount.py layout
-      字段偏移+类型差，以及 kFb* 是否还等于新偏移
+      字段偏移+类型差，以及 kFb* 是否还等于新偏移（默认 dry-run）
+  python scripts/ga_remount.py layout --write
+      只改 FALLBACK_STALE 的 constexpr kFb*（用户说 write；TYPE_FLIP 拒绝）
   python scripts/ga_remount.py krva
       kRva* 与同后缀 kHash* 对 dump 方法 RVA（验身份，不只是「是不是方法头」）
   python scripts/ga_remount.py audit
@@ -26,8 +28,20 @@
       扫 x.jsonl + 轮转的 hits=a/b（对照 scripts/data/ga_remount_smoke_expect.tsv）
   python scripts/ga_remount.py dump-check
       下次更新前：查运行时 GA / metadata / Dumper，不写 dump.cs
+  python scripts/ga_remount.py dump
+      预检 + 打印归档/ForceDump 计划（默认不写）
+  python scripts/ga_remount.py dump --archive
+      注入前：拷当前 dump.cs/GA 到 _archive_*（不覆盖已有归档）
+  python scripts/ga_remount.py dump --process
+      注入后：拷客户端 metadata + process_runtime_dump.py（覆盖 out/dump.cs）
+  python scripts/ga_remount.py catalog
+      体内点 follow 所在方法头窗口（默认 dry-run）；禁止全模块搜 75 07
+  python scripts/ga_remount.py verify
+      一次干跑 selftest + dump-check + map + layout + krva + catalog + audit + smoke，不 apply
+  python scripts/ga_remount.py selftest
+      正则自检：注释里的 constexpr kRva/kFb 不得被当成声明
 
-更新日顺序：归档 → 新 dump → map → map --apply-hashes → layout → map --apply-krva → krva → audit → 红灯才开 IDA。
+更新日顺序：dump --archive → 人注 GaRuntimeDump.dll → dump --process → map → map --apply-hashes → layout → map --apply-krva → krva → catalog → audit → 红灯才开 IDA。
   确认后再 --apply（= hashes+krva）。禁止 --apply-all-hex 除非用户点名。
 
 Agent 清单：docs/features/ops/GA-remount-Agent清单.md
@@ -36,12 +50,17 @@ Agent 清单：docs/features/ops/GA-remount-Agent清单.md
 from __future__ import annotations
 
 import argparse
+import bisect
+import hashlib
 import importlib.util
 import json
 import re
+import shutil
 import struct
+import subprocess
 import sys
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 
 HOWTO = """GA remount howto (classic TWMS). Do not change business logic.
@@ -50,7 +69,11 @@ Hard stops:
   - no map --apply* unless the user said apply/write AND on_old_map>0
   - --apply = hashes + named kRva* only; never rewrite bare 0xHEX in comments
   - --apply-all-hex only if user named it; on_old_map=0 => REFUSE
-  - body-site FAIL => retarget catalog + kRva*; never grep 75 07 in flattened code
+  - body-site FAIL => retarget via catalog (parent window) + kRva*; never grep 75 07 in flattened code
+  - catalog --write only if the user said write/apply; updates tsv rva/target and constexpr kRva* named in the cpp column (not comments)
+  - catalog STALE = GA site ok, constexpr kRva still old; --write only if the user said write
+  - layout --write only if the user said write; only FALLBACK_STALE constexpr kFb*; TYPE_FLIP refuses
+  - dump --process only if the user said process/ForceDump; never with --archive; never hide in inject
   - layout TYPE_FLIP / FALLBACK_STALE => fix kFb* / field hash; do not ignore
   - do not kill user processes; do not publish
 
@@ -60,14 +83,20 @@ Need:
   Dumps/runtime/_archive_*/out/dump.cs    (previous dump)
 
 Commands (repo root, this order):
+  python scripts/ga_remount.py dump --archive    # before inject; user said archive
+  python scripts/ga_remount.py dump --process    # after inject; user said process/ForceDump
   python scripts/ga_remount.py map
   python scripts/ga_remount.py map --apply-hashes
   python scripts/ga_remount.py layout
   python scripts/ga_remount.py map --apply-krva
   python scripts/ga_remount.py krva
+  python scripts/ga_remount.py catalog
   python scripts/ga_remount.py audit
   python scripts/ga_remount.py smoke
   python scripts/ga_remount.py dump-check
+  python scripts/ga_remount.py dump
+  python scripts/ga_remount.py verify            # dry-run selftest+dump-check+map+layout+krva+catalog+audit+smoke; no apply
+  python scripts/ga_remount.py selftest
 
 Read:
   Dumps/runtime/_ga_remount_audit.txt
@@ -76,10 +105,10 @@ Read:
   Dumps/runtime/_ga_remount_apply.tsv
   Dumps/runtime/_ga_remount_rva_collision.tsv   (live addrs; do not rewrite)
 
-Catalog: scripts/data/ga_patch_sites.tsv
+Catalog: scripts/data/ga_patch_sites.tsv  (parent + anchor; catalog 子命令 follow 方法头)
 Ignore:  scripts/data/ga_remount_ignore.txt
-Bind:    scripts/data/ga_krva_bind.tsv          (kRva name → method hash; apply-krva 优先用)
-Smoke:   scripts/data/ga_remount_smoke_expect.tsv
+Bind:    scripts/data/ga_krva_bind.tsv          (kRva → hash|plain ident + old RVA; shared=1 禁止唯一改写)
+Smoke:   scripts/data/ga_remount_smoke_expect.tsv  (need=req|opt)
 Full:    docs/features/ops/GA-remount-Agent*.md
 """
 
@@ -97,6 +126,18 @@ LEGACY = ROOT / "Dumps" / "runtime" / "_remount_20260814.py"
 CLIENT_META = Path(
     r"G:\Games\maplestory_classic\Maplestory_Classic_Data\il2cpp_data\Metadata\global-metadata.dat"
 )
+# smoke 必过：登录/战斗/传送/无敌/踢线。进店、F6、旅行等缺组不算红灯。
+SMOKE_REQ_TAGS = frozenset(
+    {
+        "Il2CppBind",
+        "AutoEnter",
+        "PlayerCombat",
+        "Attack",
+        "Teleport",
+        "Invuln",
+        "KickSniff",
+    }
+)
 
 RE_HASH = re.compile(r"[a-f0-9]{60,64}")
 RE_TOKEN_HASH = re.compile(r"\b[a-f0-9]{60,64}\b")
@@ -104,6 +145,10 @@ RE_TOKEN_RVA = re.compile(r"\b0x([0-9A-Fa-f]{5,8})\b")
 RE_RVA_LINE = re.compile(r"RVA:\s*0x([0-9A-Fa-f]+)")
 RE_TDI = re.compile(r"TypeDefIndex:\s*(\d+)")
 RE_CLASS = re.compile(r"\b(class|struct|enum|interface)\s+([A-Za-z0-9_.<>-]+)")
+RE_NS = re.compile(r"^//\s*Namespace:\s*(.*)$")
+RE_METH_BEFORE_PAREN = re.compile(
+    r"(\.[A-Za-z]+|[A-Za-z_][A-Za-z0-9_]*|[a-f0-9]{60,64})\s*(?:<[^<>]*>)?\s*\("
+)
 RE_FIELD_OFF = re.compile(r"//\s*0x([0-9A-Fa-f]+)\s*$")
 RE_SHAPE_HASH = re.compile(
     r"constexpr char (kHash\w+)\[\]\s*=\s*\n?\s*\"([a-f0-9]{60,64})\""
@@ -115,21 +160,20 @@ RE_SHAPE_FIELDS = re.compile(
 RE_SHAPE_FIELD = re.compile(
     r"\{0x([0-9A-Fa-f]+),\s*FieldKind::(Ptr|I32|I64|Bool|ValueTypeApprox)"
 )
-RE_KRVA = re.compile(
-    r"constexpr\s+(?:const\s+)?(?:uint32_t|uintptr_t|unsigned(?:\s+int)?)\s+"
-    r"(kRva\w+)\s*=\s*0x([0-9A-Fa-f]+)",
-    re.I,
-)
-RE_KRVA_ASSIGN = re.compile(
-    r"(constexpr\s+(?:const\s+)?(?:uint32_t|uintptr_t|unsigned(?:\s+int)?)\s+"
-    r"kRva\w+\s*=\s*)0x([0-9A-Fa-f]+)",
-    re.I,
+RE_KRVA_NAMED_ASSIGN = re.compile(
+    r"(^[ \t]*constexpr\s+(?:const\s+)?(?:uint32_t|uintptr_t|unsigned(?:\s+int)?)\s+"
+    r"(kRva\w+)\s*=\s*0x)([0-9A-Fa-f]+)(u?)",
+    re.I | re.M,
 )
 RE_KHASH_DECL = re.compile(
     r"constexpr\s+char\s+kHash(\w+)\[\]\s*=\s*(?:\n\s*)?\"(?:<)?([a-f0-9]{60,64})",
     re.M,
 )
-RE_KFB_DECL = re.compile(r"\bkFb(\w+)\s*=\s*0x([0-9A-Fa-f]+)")
+RE_KFB_NAMED_ASSIGN = re.compile(
+    r"(^[ \t]*constexpr\s+(?:const\s+)?(?:size_t|uint32_t|uintptr_t|unsigned(?:\s+int)?)\s+"
+    r"(kFb\w+)\s*=\s*0x)([0-9A-Fa-f]+)(u?)",
+    re.I | re.M,
+)
 
 # shape 表：源码哈希符号 → FieldShape 数组名（与 il2cpp_shape.cpp 对齐）
 SHAPE_PAIRS = (
@@ -177,15 +221,111 @@ def collect_x_tokens(xdir: Path) -> tuple[set[str], set[int]]:
 
 
 def collect_krva(xdir: Path) -> list[tuple[str, int, str]]:
-    """Only constexpr kRva* = 0x... (skip comments / seeds / masks)."""
+    """Only line-start constexpr kRva* = 0x... (skip comments / seeds / masks)."""
     out: list[tuple[str, int, str]] = []
     files = list(xdir.rglob("*.cpp")) + list(xdir.rglob("*.h"))
     for fp in files:
         rel = str(fp.relative_to(ROOT)).replace("\\", "/")
         txt = fp.read_text(encoding="utf-8", errors="replace")
-        for m in RE_KRVA.finditer(txt):
-            out.append((m.group(1), int(m.group(2), 16), rel))
+        for m in RE_KRVA_NAMED_ASSIGN.finditer(txt):
+            out.append((m.group(2), int(m.group(3), 16), rel))
     return out
+
+
+def catalog_cpp_names(rec: dict, by_rva: dict[int, list[str]], old_rva: int) -> list[str]:
+    raw = (rec.get("cpp") or "").strip()
+    if raw:
+        names = [
+            p.strip()
+            for p in re.split(r"[\s,]+", raw)
+            if p.strip().startswith("kRva")
+        ]
+        if names:
+            return names
+    return list(by_rva.get(old_rva) or [])
+
+
+def catalog_skip_sets(cat_path: Path) -> tuple[set[int], set[str]]:
+    """体内点 RVA 与 cpp 列 kRva 名：apply-krva 禁止走 rva_map。"""
+    rvas: set[int] = set()
+    names: set[str] = set()
+    if not cat_path.is_file():
+        return rvas, names
+    for rec in load_catalog(cat_path):
+        if rec.get("rva_i"):
+            rvas.add(int(rec["rva_i"]))
+        for n in catalog_cpp_names(rec, {}, rec.get("rva_i") or 0):
+            names.add(n.lower())
+    return rvas, names
+
+
+def skip_apply_krva(name: str, rva: int, cat_rvas: set[int], cat_names: set[str]) -> bool:
+    nl = name.lower()
+    if "seed" in nl:
+        return True
+    return nl in cat_names or rva in cat_rvas
+
+
+def patch_named_const_decls(
+    xdir: Path, patches: dict[str, tuple[int, int]], rx: re.Pattern
+) -> tuple[int, int, list[str]]:
+    """只改行首 constexpr Name = 0x…，不改注释/裸 0xHEX。
+    patches[name]=(old,new)。当前值已是 new 则跳过；既不是 old 也不是 new 则 WARN 不写。
+    """
+    if not patches:
+        return 0, 0, []
+    files = list(xdir.rglob("*.cpp")) + list(xdir.rglob("*.h"))
+    n_files = 0
+    n_decl = 0
+    warns: list[str] = []
+    seen: set[str] = set()
+    lower = {k.lower(): k for k in patches}
+
+    def sub(m: re.Match) -> str:
+        nonlocal n_decl
+        name = m.group(2)
+        key = name if name in patches else lower.get(name.lower())
+        if not key:
+            return m.group(0)
+        old, new = patches[key]
+        cur = int(m.group(3), 16)
+        seen.add(key)
+        if cur == new:
+            return m.group(0)
+        if cur != old:
+            warns.append(
+                "%s have 0x%X (not old 0x%X / new 0x%X)" % (key, cur, old, new)
+            )
+            return m.group(0)
+        src = m.group(3)
+        fmt = "%X" % new if any(c.isupper() for c in src) else "%x" % new
+        n_decl += 1
+        return m.group(1) + fmt + m.group(4)
+
+    for fp in files:
+        txt = fp.read_text(encoding="utf-8", errors="replace")
+        orig = txt
+        txt = rx.sub(sub, txt)
+        if txt != orig:
+            fp.write_text(txt, encoding="utf-8", newline="\n")
+            n_files += 1
+            print("patched", str(fp.relative_to(ROOT)).replace("\\", "/"))
+    for name in patches:
+        if name not in seen:
+            warns.append("%s constexpr not found" % name)
+    return n_files, n_decl, warns
+
+
+def patch_named_krva_decls(
+    xdir: Path, patches: dict[str, tuple[int, int]]
+) -> tuple[int, int, list[str]]:
+    return patch_named_const_decls(xdir, patches, RE_KRVA_NAMED_ASSIGN)
+
+
+def patch_named_kfb_decls(
+    xdir: Path, patches: dict[str, tuple[int, int]]
+) -> tuple[int, int, list[str]]:
+    return patch_named_const_decls(xdir, patches, RE_KFB_NAMED_ASSIGN)
 
 
 def load_ignore(path: Path) -> set[str]:
@@ -199,31 +339,152 @@ def load_ignore(path: Path) -> set[str]:
     return s
 
 
-def load_krva_bind(path: Path) -> dict[str, str]:
-    """kRvaName → method hash（当前 dump 身份；下次 apply-krva 走哈希而不是活地址跳过）。"""
-    out: dict[str, str] = {}
+def load_krva_bind(path: Path) -> dict[str, list[dict]]:
+    """kRvaName → 多行（同名不同 RVA，如 GoSetActive vs set_active）。"""
+    out: dict[str, list[dict]] = defaultdict(list)
     if not path.is_file():
-        return out
+        return {}
     for ln in path.read_text(encoding="utf-8").splitlines():
         raw = ln.split("#", 1)[0].strip()
-        if not raw:
+        if not raw or raw.startswith("name\t"):
             continue
         parts = raw.split("\t")
-        if len(parts) >= 2 and parts[0].startswith("kRva") and RE_HASH.fullmatch(parts[1]):
-            out[parts[0]] = parts[1]
-    return out
-
-
-def write_krva_bind(path: Path, rows: list[tuple[str, str, str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["name\thash\tcode_rva"]
-    seen: set[str] = set()
-    for name, h, rva in rows:
-        if name in seen or not h:
+        if len(parts) < 3 or not parts[0].startswith("kRva"):
             continue
-        seen.add(name)
-        lines.append("%s\t%s\t%s" % (name, h, rva))
+        name = parts[0]
+        if parts[1] in ("hash", "plain"):
+            kind = parts[1]
+            ident = parts[2]
+            rva_s = parts[3] if len(parts) > 3 else ""
+            shared = parts[4] == "1" if len(parts) > 4 else False
+        elif RE_HASH.fullmatch(parts[1]):
+            kind, ident, rva_s = "hash", parts[1], parts[2]
+            shared = False
+        else:
+            continue
+        try:
+            rva_i = int(rva_s, 16) if rva_s else 0
+        except ValueError:
+            rva_i = 0
+        out[name].append({"kind": kind, "ident": ident, "rva": rva_i, "shared": shared})
+    return dict(out)
+
+
+def write_krva_bind(path: Path, rows: list[tuple[str, str, str, str, str]]) -> None:
+    """rows: name, kind, ident, code_rva, shared('0'|'1'). 同名不同 RVA 都保留。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["name\tkind\tident\tcode_rva\tshared"]
+    seen: set[tuple[str, str]] = set()
+    for name, kind, ident, rva, shared in rows:
+        key = (name, rva)
+        if key in seen or not ident:
+            continue
+        seen.add(key)
+        lines.append("%s\t%s\t%s\t%s\t%s" % (name, kind, ident, rva, shared))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def pick_bind_rec(bind: dict[str, list[dict]], name: str, old_rva: int) -> dict | None:
+    recs = bind.get(name) or []
+    for rec in recs:
+        if rec.get("rva") == old_rva:
+            return rec
+    if len(recs) == 1:
+        return recs[0]
+    return None
+
+
+def remap_qual_class(qual: str, class_hash: dict[str, str]) -> str:
+    def repl(m: re.Match) -> str:
+        h = m.group(0)
+        return class_hash.get(h, h)
+
+    return RE_HASH.sub(repl, qual)
+
+
+def resolve_bound_krva(
+    rec: dict,
+    old_rva: int,
+    meth_hash_map: dict[str, str],
+    rva_map: dict[int, int],
+    new_meth: dict[str, list[int]],
+    new_plain: dict[tuple[str, str], list[int]],
+    class_hash: dict[str, str],
+) -> int | None:
+    """按 bind 身份解新 RVA。shared 哈希/明文重载禁止「只剩一个头就全改过去」。"""
+    kind = rec.get("kind")
+    ident = rec.get("ident") or ""
+    shared = bool(rec.get("shared"))
+    dump_rvas: list[int] = []
+    if kind == "hash":
+        nhash = meth_hash_map.get(ident, ident)
+        dump_rvas = list(new_meth.get(nhash) or [])
+    elif kind == "plain" and "::" in ident:
+        qual, meth = ident.split("::", 1)
+        nqual = remap_qual_class(qual, class_hash)
+        dump_rvas = list(new_plain.get((nqual, meth)) or [])
+        if not dump_rvas:
+            dump_rvas = list(new_plain.get((nqual.split(".")[-1], meth)) or [])
+    else:
+        return None
+    if not dump_rvas:
+        return None
+    if len(dump_rvas) == 1 and not shared:
+        return dump_rvas[0]
+    mapped = rva_map.get(old_rva)
+    if mapped in dump_rvas:
+        return mapped
+    if old_rva in dump_rvas:
+        return old_rva
+    return None
+
+
+def count_krva_would_rewrite(
+    xdir: Path,
+    bind: dict[str, list[dict]],
+    meth_hash_map: dict[str, str],
+    rva_map: dict[int, int],
+    new_meth: dict[str, list[int]],
+    new_plain: dict[tuple[str, str], list[int]],
+    class_hash: dict[str, str],
+    new_rvas: set[int],
+    collide: set[int],
+    cat_rvas: set[int],
+    cat_names: set[str],
+) -> tuple[int, int]:
+    """与 --apply-krva 同一套规则，只计数不写。"""
+    n = 0
+    scanned = 0
+    files = list(xdir.rglob("*.cpp")) + list(xdir.rglob("*.h"))
+    for fp in files:
+        txt = fp.read_text(encoding="utf-8", errors="replace")
+        for m in RE_KRVA_NAMED_ASSIGN.finditer(txt):
+            scanned += 1
+            v = int(m.group(3), 16)
+            name = m.group(2)
+            if skip_apply_krva(name, v, cat_rvas, cat_names):
+                continue
+            nv: int | None = None
+            rec = pick_bind_rec(bind, name, v) if name else None
+            if rec:
+                nv = resolve_bound_krva(
+                    rec, v, meth_hash_map, rva_map, new_meth, new_plain, class_hash
+                )
+            if nv is None:
+                if v in collide or v in new_rvas:
+                    continue
+                if v in rva_map and rva_map[v] != v:
+                    nv = rva_map[v]
+                else:
+                    continue
+            if nv != v:
+                n += 1
+                if n <= 8:
+                    print(
+                        "would  %s  0x%X -> 0x%X  %s"
+                        % (name, v, nv, str(fp.relative_to(ROOT)).replace("\\", "/"))
+                    )
+    return n, scanned
 
 
 def build_maps(legacy, old, new, tdi_map, rvas_in_code: set[int]):
@@ -418,6 +679,27 @@ def cmd_map(args: argparse.Namespace) -> int:
             ["0x%X" % x for x in sorted(r_collide)[:12]],
         )
 
+    bind = load_krva_bind(DEFAULT_KRVA_BIND)
+    cat_rvas, cat_names = catalog_skip_sets(DEFAULT_CATALOG)
+    slots_new = index_slots(new_path)
+    new_meth = slots_new.get("methods") or {}
+    new_plain = slots_new.get("plain_methods") or {}
+    collide = set(r_collide)
+    would, scanned = count_krva_would_rewrite(
+        xdir,
+        bind,
+        meth_hash_map,
+        rva_map,
+        new_meth,
+        new_plain,
+        class_hash,
+        new_rvas,
+        collide,
+        cat_rvas,
+        cat_names,
+    )
+    print("would apply-krva rewrites=%d / scanned=%d" % (would, scanned))
+
     apply_all_hex = bool(getattr(args, "apply_all_hex", False))
     apply_hashes = bool(getattr(args, "apply_hashes", False) or args.apply)
     apply_krva = bool(getattr(args, "apply_krva", False) or args.apply)
@@ -446,11 +728,6 @@ def cmd_map(args: argparse.Namespace) -> int:
         hash_repl.update({h: field_hash_map[h] for h in by["field"]})
         hash_repl.update({h: meth_hash_map[h] for h in by["meth"]})
 
-    bind = load_krva_bind(DEFAULT_KRVA_BIND) if apply_krva else {}
-    new_meth: dict[str, list[int]] = {}
-    if apply_krva and bind:
-        new_meth = index_slots(new_path).get("methods") or {}
-
     files = list(xdir.rglob("*.cpp")) + list(xdir.rglob("*.h"))
     changed = 0
     krva_n = 0
@@ -466,22 +743,16 @@ def cmd_map(args: argparse.Namespace) -> int:
 
             def krva_sub(m: re.Match) -> str:
                 nonlocal krva_n
-                v = int(m.group(2), 16)
-                nm_m = re.search(r"(kRva\w+)", m.group(1), re.I)
-                name = nm_m.group(1) if nm_m else ""
+                v = int(m.group(3), 16)
+                name = m.group(2)
+                if skip_apply_krva(name, v, cat_rvas, cat_names):
+                    return m.group(0)
                 nv: int | None = None
-                h = bind.get(name) if name else None
-                if h:
-                    nhash = meth_hash_map.get(h, h)
-                    dump_rvas = new_meth.get(nhash) or []
-                    if len(dump_rvas) == 1:
-                        nv = dump_rvas[0]
-                    elif dump_rvas:
-                        mapped = rva_map.get(v)
-                        if mapped in dump_rvas:
-                            nv = mapped
-                        elif v in dump_rvas:
-                            nv = v
+                rec = pick_bind_rec(bind, name, v) if name else None
+                if rec:
+                    nv = resolve_bound_krva(
+                        rec, v, meth_hash_map, rva_map, new_meth, new_plain, class_hash
+                    )
                 if nv is None:
                     if v in collide or v in new_rvas:
                         return m.group(0)
@@ -491,12 +762,12 @@ def cmd_map(args: argparse.Namespace) -> int:
                         return m.group(0)
                 if nv == v:
                     return m.group(0)
-                src = m.group(2)
+                src = m.group(3)
                 fmt = "%X" % nv if any(c.isupper() for c in src) else "%x" % nv
                 krva_n += 1
-                return m.group(1) + "0x" + fmt
+                return m.group(1) + fmt + m.group(4)
 
-            txt = RE_KRVA_ASSIGN.sub(krva_sub, txt)
+            txt = RE_KRVA_NAMED_ASSIGN.sub(krva_sub, txt)
 
         if apply_all_hex:
 
@@ -536,17 +807,29 @@ def field_decl_type(ln: str) -> str:
     return bits[0] if len(bits) == 2 else decl
 
 
+def meth_ident_from_decl(ln: str) -> str | None:
+    decl = ln.split("//")[0]
+    m = RE_METH_BEFORE_PAREN.search(decl)
+    return m.group(1) if m else None
+
+
 def index_slots(path: Path) -> dict:
-    """One pass: class hashes, method hashes, field hash → off/kind/type."""
+    """One pass: class hashes, method hashes, plaintext Class::Method, field hash → off/kind/type."""
     classes: set[str] = set()
     methods: dict[str, list[int]] = defaultdict(list)
     rva_hashes: dict[int, list[str]] = defaultdict(list)
+    plain_methods: dict[tuple[str, str], list[int]] = defaultdict(list)
+    rva_plain: dict[int, list[tuple[str, str]]] = defaultdict(list)
     structs: set[str] = set()
     fields: dict[str, list[dict]] = defaultdict(list)
     cur_name = ""
+    cur_ns = ""
     cur_tdi = -1
     pending_rva = None
     for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        nsm = RE_NS.match(ln.strip()) if ln.lstrip().startswith("//") else None
+        if nsm:
+            cur_ns = nsm.group(1).strip()
         tm = RE_TDI.search(ln)
         cm = RE_CLASS.search(ln)
         if tm and cm:
@@ -564,16 +847,27 @@ def index_slots(path: Path) -> dict:
             pending_rva = int(rm.group(1), 16)
             continue
         if pending_rva is not None and "(" in ln:
-            mh = None
-            m = re.search(r"([a-f0-9]{60,64})\s*\(", ln.split("//")[0])
-            if m:
-                mh = m.group(1)
-                rva = pending_rva
-                if rva not in methods[mh]:
-                    methods[mh].append(rva)
-                if mh not in rva_hashes[rva]:
-                    rva_hashes[rva].append(mh)
+            ident = meth_ident_from_decl(ln)
+            rva = pending_rva
             pending_rva = None
+            if ident:
+                if RE_HASH.fullmatch(ident):
+                    if rva not in methods[ident]:
+                        methods[ident].append(rva)
+                    if ident not in rva_hashes[rva]:
+                        rva_hashes[rva].append(ident)
+                else:
+                    qual = ("%s.%s" % (cur_ns, cur_name)) if cur_ns else cur_name
+                    key = (qual, ident)
+                    if rva not in plain_methods[key]:
+                        plain_methods[key].append(rva)
+                    if key not in rva_plain[rva]:
+                        rva_plain[rva].append(key)
+                    tail_key = (cur_name.split(".")[-1], ident)
+                    if tail_key != key:
+                        tlst = plain_methods[tail_key]
+                        if rva not in tlst:
+                            tlst.append(rva)
             continue
         pending_rva = None
         fm = RE_FIELD_OFF.search(ln)
@@ -603,6 +897,8 @@ def index_slots(path: Path) -> dict:
         "classes": classes,
         "methods": methods,
         "rva_hashes": dict(rva_hashes),
+        "plain_methods": dict(plain_methods),
+        "rva_plain": dict(rva_plain),
         "fields": dict(fields),
     }
 
@@ -621,8 +917,10 @@ def collect_khash_kfb(xdir: Path) -> tuple[dict[str, str], dict[str, int], dict[
             suffix_hash[suffix] = h
             if rel not in hash_files[h]:
                 hash_files[h].append(rel)
-        for m in RE_KFB_DECL.finditer(txt):
-            suffix_fb[m.group(1)] = int(m.group(2), 16)
+        for m in RE_KFB_NAMED_ASSIGN.finditer(txt):
+            name = m.group(2)
+            suffix = name[3:] if name.lower().startswith("kfb") else name
+            suffix_fb[suffix] = int(m.group(3), 16)
     hash_fb: dict[str, int] = {}
     for suffix, h in suffix_hash.items():
         if suffix in suffix_fb:
@@ -648,6 +946,7 @@ def cmd_layout(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     xdir = Path(args.x_dir)
     ignore = load_ignore(Path(args.ignore))
+    do_write = bool(getattr(args, "write", False))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("old", old_path)
@@ -679,6 +978,8 @@ def cmd_layout(args: argparse.Namespace) -> int:
 
     rows = []
     fail_n = 0
+    kfb_patches: dict[str, tuple[int, int]] = {}
+    block_write = 0
     counts: Counter[str] = Counter()
 
     def emit(verdict: str, h: str, **kw) -> None:
@@ -777,6 +1078,12 @@ def cmd_layout(args: argparse.Namespace) -> int:
             suf = suffix_hit[0].lower()
             if suf in ("logicalpos", "curpos", "vispos", "pos") and "Vector" not in new_s["ty"]:
                 flags.append("WARN_PTR_POS")
+        hard_block = [f for f in flags if f in ("TYPE_FLIP", "MOVED_TYPE", "AMBIGUOUS", "DEAD")]
+        if hard_block:
+            block_write += 1
+        elif "FALLBACK_STALE" in flags and new_s is not None and kfb is not None:
+            for s in suffix_hit:
+                kfb_patches["kFb" + s] = (kfb, new_s["off"])
         if not flags:
             flags.append("OK")
             counts["OK"] += 1
@@ -806,10 +1113,28 @@ def cmd_layout(args: argparse.Namespace) -> int:
     outp = out_dir / "_ga_remount_layout.tsv"
     outp.write_text(hdr + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
     print(
-        "fields=%d skip=%s counts=%s FAIL=%d"
-        % (len(field_hashes), dict(skipped), dict(counts), fail_n)
+        "fields=%d skip=%s counts=%s FAIL=%d would_patch_kfb=%d write=%s block=%d"
+        % (
+            len(field_hashes),
+            dict(skipped),
+            dict(counts),
+            fail_n,
+            len(kfb_patches),
+            do_write,
+            block_write,
+        )
     )
     print("wrote", outp)
+    if do_write:
+        if block_write:
+            print("REFUSE --write (TYPE_FLIP/MOVED_TYPE/DEAD/AMBIGUOUS)")
+            return 1
+        n_files, n_decl, warns = patch_named_kfb_decls(xdir, kfb_patches)
+        print("wrote kFb files=%d decls=%d" % (n_files, n_decl))
+        for w in warns:
+            print("WARN  kfb  %s" % w)
+    elif kfb_patches:
+        print("dry-run: pass --write to update constexpr kFb* (not comments)")
     return 1 if fail_n else 0
 
 
@@ -872,8 +1197,457 @@ def load_catalog(path: Path) -> list[dict]:
         rec["rva_i"] = int(rec["rva"], 16)
         rec["expect_b"] = parse_hex_bytes(rec.get("expect", ""))
         rec["target_i"] = int(rec["target"], 16) if rec.get("target", "").strip() else 0
+        pr = (rec.get("parent_rva") or "").strip()
+        rec["parent_rva_i"] = int(pr, 16) if pr else 0
+        ao = (rec.get("anchor_off") or "").strip()
+        rec["anchor_off_i"] = int(ao, 0) if ao else 0
         rows.append(rec)
     return rows
+
+
+def parse_masked_hex(s: str) -> tuple[bytes, bytes]:
+    """Hex bytes with ?? wildcards (RIP/call rel32)."""
+    pat: list[int] = []
+    mask: list[int] = []
+    for t in s.replace(",", " ").split():
+        t = t.strip()
+        if not t:
+            continue
+        if t in ("??", "?"):
+            pat.append(0)
+            mask.append(0)
+        else:
+            pat.append(int(t, 16))
+            mask.append(1)
+    return bytes(pat), bytes(mask)
+
+
+def find_masked(blob: bytes, pat: bytes, mask: bytes) -> list[int]:
+    n = len(pat)
+    if n == 0 or len(blob) < n:
+        return []
+    hits: list[int] = []
+    for i in range(0, len(blob) - n + 1):
+        ok = True
+        for j in range(n):
+            if mask[j] and blob[i + j] != pat[j]:
+                ok = False
+                break
+        if ok:
+            hits.append(i)
+    return hits
+
+
+def catalog_method_heads(slots: dict) -> list[int]:
+    s: set[int] = set()
+    for rvas in (slots.get("methods") or {}).values():
+        s.update(rvas)
+    for rvas in (slots.get("plain_methods") or {}).values():
+        s.update(rvas)
+    return sorted(s)
+
+
+def method_window(heads: list[int], head: int) -> tuple[int, int]:
+    """[head, next dump method RVA). Last method caps at +0x8000."""
+    i = bisect.bisect_right(heads, head)
+    nxt = heads[i] if i < len(heads) else head + 0x8000
+    if nxt <= head:
+        nxt = head + 0x8000
+    return head, nxt
+
+
+def resolve_catalog_ident(
+    ident: str,
+    old_rva: int,
+    slots: dict,
+    bind: dict[str, list[dict]],
+    rva_map: dict[int, int],
+    meth_hash_map: dict[str, str],
+    class_hash: dict[str, str],
+    heads: set[int],
+) -> int | None:
+    ident = (ident or "").strip()
+    new_meth = slots.get("methods") or {}
+    new_plain = slots.get("plain_methods") or {}
+    if ident.startswith("kRva"):
+        rec = pick_bind_rec(bind, ident, old_rva)
+        if rec:
+            got = resolve_bound_krva(
+                rec, old_rva, meth_hash_map, rva_map, new_meth, new_plain, class_hash
+            )
+            if got:
+                return got
+    h = ident
+    if ident.lower().startswith("hash:"):
+        h = ident.split(":", 1)[1].strip()
+    if RE_HASH.fullmatch(h):
+        nh = meth_hash_map.get(h, h)
+        rvas = list(new_meth.get(nh) or [])
+        if len(rvas) == 1:
+            return rvas[0]
+        mapped = rva_map.get(old_rva)
+        if mapped in rvas:
+            return mapped
+        if old_rva in rvas:
+            return old_rva
+        return None
+    if old_rva:
+        mapped = rva_map.get(old_rva, old_rva)
+        if mapped in heads:
+            return mapped
+    return None
+
+
+def find_e8_to(blob: bytes, lo: int, target: int) -> list[int]:
+    hits: list[int] = []
+    for i in range(0, len(blob) - 4):
+        if blob[i] != 0xE8:
+            continue
+        rel = struct.unpack_from("<i", blob, i + 1)[0]
+        got = (lo + i + 5 + rel) & 0xFFFFFFFF
+        if got == target:
+            hits.append(lo + i)
+    return hits
+
+
+def find_rip_data_targets(pe: PeImage, lo: int, hi: int, expect: bytes) -> list[int]:
+    blob = pe.read(lo, hi - lo)
+    if not blob or not expect:
+        return []
+    n = len(expect)
+    found: dict[int, None] = {}
+    for i in range(0, len(blob) - 3):
+        disp = struct.unpack_from("<i", blob, i)[0]
+        tgt = (lo + i + 4 + disp) & 0xFFFFFFFF
+        if lo <= tgt < hi or tgt < 0x10000:
+            continue
+        raw = pe.read(tgt, n)
+        if raw == expect:
+            found[tgt] = None
+    return sorted(found)
+
+
+def scan_catalog_site(
+    pe: PeImage,
+    rec: dict,
+    parent_lo: int,
+    parent_hi: int,
+    target_new: int,
+) -> dict:
+    """Unique hit inside the parent method window. Never grep the whole image."""
+    kind = (rec.get("kind") or "").strip().lower()
+    exp = rec.get("expect_b") or b""
+    blob = pe.read(parent_lo, parent_hi - parent_lo)
+    if blob is None:
+        return {"ok": False, "hits": [], "why": "cannot read parent window"}
+    if kind == "call":
+        if not target_new:
+            return {"ok": False, "hits": [], "why": "call target unresolved"}
+        hits = find_e8_to(blob, parent_lo, target_new)
+        if len(hits) != 1:
+            return {
+                "ok": False,
+                "hits": hits,
+                "new_target": target_new,
+                "why": "E8 hits=%d want unique -> 0x%X" % (len(hits), target_new),
+            }
+        return {"ok": True, "hits": hits, "new_rva": hits[0], "new_target": target_new}
+    if kind == "data":
+        if not exp:
+            return {"ok": False, "hits": [], "why": "empty expect"}
+        hits = find_rip_data_targets(pe, parent_lo, parent_hi, exp)
+        if len(hits) != 1:
+            return {"ok": False, "hits": hits, "why": "RIP-data hits=%d" % len(hits)}
+        return {"ok": True, "hits": hits, "new_rva": hits[0]}
+    anchor = (rec.get("anchor") or "").strip()
+    off = int(rec.get("anchor_off_i") or 0)
+    if anchor:
+        pat, mask = parse_masked_hex(anchor)
+        if not pat:
+            return {"ok": False, "hits": [], "why": "empty anchor"}
+        if off < 0 or off >= len(pat):
+            return {"ok": False, "hits": [], "why": "anchor_off out of range"}
+        hits = [parent_lo + i + off for i in find_masked(blob, pat, mask)]
+    else:
+        if not exp:
+            return {"ok": False, "hits": [], "why": "empty expect (need anchor)"}
+        hits = []
+        i = 0
+        while True:
+            j = blob.find(exp, i)
+            if j < 0:
+                break
+            hits.append(parent_lo + j)
+            i = j + 1
+    if len(hits) != 1:
+        return {
+            "ok": False,
+            "hits": hits,
+            "why": "text hits=%d (flatten grep forbidden)" % len(hits),
+        }
+    site = hits[0]
+    if exp:
+        got = pe.read(site, len(exp))
+        if got != exp:
+            return {
+                "ok": False,
+                "hits": hits,
+                "why": "unique hit 0x%X bytes %s want %s"
+                % (site, (got or b"").hex(" "), exp.hex(" ")),
+            }
+    return {"ok": True, "hits": hits, "new_rva": site}
+
+
+def write_catalog_tsv(path: Path, hdr: list[str], rows: list[dict]) -> None:
+    skip = {"rva_i", "expect_b", "target_i", "parent_rva_i", "anchor_off_i"}
+    use = [h for h in hdr if h not in skip]
+    lines = ["\t".join(use)]
+    for rec in rows:
+        lines.append("\t".join(str(rec.get(k, "") or "") for k in use))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def cmd_catalog(args: argparse.Namespace) -> int:
+    """Retarget in-body sites by unique hit in the parent method window."""
+    dump_path = Path(args.new)
+    ga_path = Path(args.ga)
+    cat_path = Path(args.catalog)
+    out_dir = Path(args.out_dir)
+    xdir = Path(args.x_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    do_write = bool(getattr(args, "write", False))
+
+    print("dump", dump_path)
+    print("ga  ", ga_path)
+    print("cat ", cat_path)
+    if not cat_path.is_file():
+        print("FAIL  no catalog")
+        return 1
+    if not ga_path.is_file():
+        print("FAIL  no GameAssembly.dll")
+        return 1
+
+    slots = index_slots(dump_path)
+    heads = catalog_method_heads(slots)
+    head_set = set(heads)
+    bind = load_krva_bind(DEFAULT_KRVA_BIND)
+    pe = PeImage(ga_path)
+    catalog = load_catalog(cat_path)
+    hdr = cat_path.read_text(encoding="utf-8").splitlines()[0].split("\t")
+    krvas = collect_krva(xdir)
+    by_rva: dict[int, list[str]] = defaultdict(list)
+    by_name: dict[str, int] = {}
+    for name, r, _rel in krvas:
+        by_rva[r].append(name)
+        by_name[name] = r
+
+    rva_map: dict[int, int] = {}
+    meth_hash_map: dict[str, str] = {}
+    class_hash: dict[str, str] = {}
+    old_arg = getattr(args, "old", "") or ""
+    if old_arg:
+        legacy = load_legacy()
+        old_path = Path(old_arg)
+        print("old", old_path, "(rva_map fallback only)")
+        old = legacy.parse_dump(old_path)
+        new = legacy.parse_dump(dump_path)
+        hashes_in_code, _rvas = collect_x_tokens(xdir)
+        tdi_map = legacy.match_classes(old, new, prefer_names=hashes_in_code)
+        class_hash, _fh, meth_hash_map, rva_map, _conf = build_maps(
+            legacy, old, new, tdi_map, set()
+        )
+
+    fail = 0
+    move = 0
+    match_n = 0
+    stale_n = 0
+    changed = False
+    cpp_patches: dict[str, tuple[int, int]] = {}
+    report = ["tag\tverdict\tkind\told_rva\tnew_rva\tparent\thits\tdetail"]
+
+    for rec in catalog:
+        tag = rec.get("tag") or "?"
+        kind = rec.get("kind") or ""
+        old_rva = rec["rva_i"]
+        parent_ident = (rec.get("parent") or "").strip()
+        parent_old = rec.get("parent_rva_i") or 0
+        if not parent_ident and not parent_old:
+            print("FAIL  %s  no parent (will not flatten-grep)" % tag)
+            fail += 1
+            report.append(
+                "\t".join([tag, "FAIL", kind, "0x%X" % old_rva, "", "", "0", "no parent"])
+            )
+            continue
+        parent_new = resolve_catalog_ident(
+            parent_ident,
+            parent_old,
+            slots,
+            bind,
+            rva_map,
+            meth_hash_map,
+            class_hash,
+            head_set,
+        )
+        if not parent_new:
+            print("FAIL  %s  parent unresolved %s @0x%X" % (tag, parent_ident, parent_old))
+            fail += 1
+            report.append(
+                "\t".join(
+                    [
+                        tag,
+                        "FAIL",
+                        kind,
+                        "0x%X" % old_rva,
+                        "",
+                        parent_ident,
+                        "0",
+                        "parent unresolved",
+                    ]
+                )
+            )
+            continue
+        lo, hi = method_window(heads, parent_new)
+        target_new = 0
+        target_id = (rec.get("target_id") or "").strip()
+        if kind.lower() == "call":
+            target_new = (
+                resolve_catalog_ident(
+                    target_id,
+                    rec.get("target_i") or 0,
+                    slots,
+                    bind,
+                    rva_map,
+                    meth_hash_map,
+                    class_hash,
+                    head_set,
+                )
+                or 0
+            )
+            if not target_new and rec.get("target_i"):
+                mapped = rva_map.get(rec["target_i"], rec["target_i"])
+                if mapped in head_set:
+                    target_new = mapped
+        got = scan_catalog_site(pe, rec, lo, hi, target_new)
+        hits = got.get("hits") or []
+        if not got.get("ok"):
+            print(
+                "FAIL  %s  %s  parent=[0x%X,0x%X)  %s"
+                % (tag, got.get("why"), lo, hi, ",".join("0x%X" % h for h in hits[:8]))
+            )
+            fail += 1
+            report.append(
+                "\t".join(
+                    [
+                        tag,
+                        "FAIL",
+                        kind,
+                        "0x%X" % old_rva,
+                        "",
+                        "0x%X" % parent_new,
+                        str(len(hits)),
+                        got.get("why") or "",
+                    ]
+                )
+            )
+            continue
+        new_rva = int(got["new_rva"])
+        new_tgt = int(got.get("new_target") or 0)
+        moved = new_rva != old_rva or (
+            kind.lower() == "call" and new_tgt and new_tgt != (rec.get("target_i") or 0)
+        )
+        verdict = "MOVE" if moved else "MATCH"
+        if moved:
+            move += 1
+            changed = True
+        else:
+            match_n += 1
+        cpp_names = catalog_cpp_names(rec, by_rva, old_rva)
+        if cpp_names:
+            rec["cpp"] = ",".join(cpp_names)
+        extra = "parent=0x%X" % parent_new
+        if new_tgt:
+            extra += " tgt=0x%X" % new_tgt
+        if cpp_names:
+            extra += " cpp=%s" % ",".join(cpp_names)
+            for nm in cpp_names:
+                code = by_name.get(nm)
+                if code is None:
+                    print("WARN  cpp %s constexpr not found" % nm)
+                    cpp_patches[nm] = (old_rva, new_rva)
+                elif code != new_rva:
+                    print("STALE %s constexpr=0x%X site=0x%X" % (nm, code, new_rva))
+                    cpp_patches[nm] = (code, new_rva)
+                    stale_n += 1
+                    changed = True
+                else:
+                    cpp_patches[nm] = (old_rva, new_rva)
+                    if new_rva == old_rva:
+                        print("cpp   %s  0x%X (same)" % (nm, new_rva))
+                    else:
+                        print("cpp   %s  0x%X -> 0x%X" % (nm, old_rva, new_rva))
+        print("%s  %s  0x%X -> 0x%X  %s" % (verdict, tag, old_rva, new_rva, extra))
+        report.append(
+            "\t".join(
+                [
+                    tag,
+                    verdict,
+                    kind,
+                    "0x%X" % old_rva,
+                    "0x%X" % new_rva,
+                    "0x%X" % parent_new,
+                    "1",
+                    extra,
+                ]
+            )
+        )
+        rec["rva"] = "0x%X" % new_rva
+        rec["rva_i"] = new_rva
+        rec["parent_rva"] = "0x%X" % parent_new
+        rec["parent_rva_i"] = parent_new
+        if new_tgt:
+            rec["target"] = "0x%X" % new_tgt
+            rec["target_i"] = new_tgt
+
+    outp = out_dir / "_ga_remount_catalog.tsv"
+    outp.write_text("\n".join(report) + "\n", encoding="utf-8")
+    print("wrote", outp)
+    cpp_move = sum(1 for old, new in cpp_patches.values() if old != new)
+    print(
+        "catalog MATCH=%d MOVE=%d STALE=%d FAIL=%d cpp=%d would_patch=%d write=%s"
+        % (match_n, move, stale_n, fail, len(cpp_patches), cpp_move, do_write)
+    )
+    if do_write:
+        if fail:
+            print("REFUSE --write (FAIL>0)")
+            return 1
+        want = [
+            "tag",
+            "kind",
+            "rva",
+            "expect",
+            "target",
+            "source",
+            "cpp",
+            "note",
+            "parent",
+            "parent_rva",
+            "target_id",
+            "anchor",
+            "anchor_off",
+        ]
+        for col in want:
+            if col not in hdr:
+                hdr.append(col)
+        write_catalog_tsv(cat_path, hdr, catalog)
+        print("wrote catalog", cat_path)
+        moving = {n: p for n, p in cpp_patches.items() if p[0] != p[1]}
+        n_files, n_decl, warns = patch_named_krva_decls(xdir, moving)
+        print("wrote kRva files=%d decls=%d" % (n_files, n_decl))
+        for w in warns:
+            print("WARN  cpp  %s" % w)
+    elif changed or cpp_move or stale_n:
+        print("dry-run: pass --write to update tsv rva/target and constexpr kRva* (not comments)")
+    return 1 if fail or (stale_n and not do_write) else 0
 
 
 def classify_rva(r: int) -> str:
@@ -1181,13 +1955,14 @@ def cmd_krva(args: argparse.Namespace) -> int:
     slots = index_slots(dump_path)
     meth = slots["methods"]
     rva_hashes: dict[int, list[str]] = slots.get("rva_hashes") or {}
+    rva_plain: dict[int, list[tuple[str, str]]] = slots.get("rva_plain") or {}
     suffix_hash, _fb, hash_files = collect_khash_kfb(xdir)
     krvas = collect_krva(xdir)
     catalog = load_catalog(cat_path) if cat_path.is_file() else []
     catalog_rvas = {r["rva_i"] for r in catalog}
 
     rows = []
-    bind_rows: list[tuple[str, str, str]] = []
+    bind_rows: list[tuple[str, str, str, str, str]] = []
     fail_n = 0
     counts: Counter[str] = Counter()
 
@@ -1199,6 +1974,10 @@ def cmd_krva(args: argparse.Namespace) -> int:
         dump_rvas = meth.get(h) if h else None
         in_dump = bool(dump_rvas and r in dump_rvas)
         dump_by_rva = rva_hashes.get(r) or []
+        plain_by_rva = rva_plain.get(r) or []
+        ident = ""
+        kind = ""
+        shared = False
 
         if name.lower() in ignore or key in ignore or ("%x" % r) in ignore:
             verdict = "IGN"
@@ -1210,8 +1989,19 @@ def cmd_krva(args: argparse.Namespace) -> int:
             if len(dump_by_rva) == 1:
                 verdict = "DUMP_ID"
                 h = dump_by_rva[0]
+                ident = h
+                kind = "hash"
+                shared = len(meth.get(h) or []) > 1
             elif dump_by_rva:
                 verdict = "DUMP_MULTI"
+            elif len(plain_by_rva) == 1:
+                verdict = "PLAIN_ID"
+                qual, mname = plain_by_rva[0]
+                ident = "%s::%s" % (qual, mname)
+                kind = "plain"
+                shared = len(slots["plain_methods"].get((qual, mname)) or []) > 1
+            elif plain_by_rva:
+                verdict = "PLAIN_MULTI"
             else:
                 verdict = "UNBOUND"
         elif dump_rvas is None:
@@ -1219,6 +2009,9 @@ def cmd_krva(args: argparse.Namespace) -> int:
             fail_n += 1
         elif in_dump:
             verdict = "MATCH"
+            ident = h
+            kind = "hash"
+            shared = len(dump_rvas) > 1
         else:
             verdict = "MISMATCH"
             fail_n += 1
@@ -1229,24 +2022,30 @@ def cmd_krva(args: argparse.Namespace) -> int:
             dump_col = ",".join("0x%X" % x for x in dump_rvas[:6])
             if len(dump_rvas) > 6:
                 dump_col += ",+%d" % (len(dump_rvas) - 6)
+        elif ident and kind == "plain":
+            dump_col = ident
         elif dump_by_rva:
             dump_col = ",".join(x[:12] + "…" for x in dump_by_rva[:4])
             if len(dump_by_rva) > 4:
                 dump_col += ",+%d" % (len(dump_by_rva) - 4)
+        elif plain_by_rva:
+            dump_col = ",".join("%s::%s" % p for p in plain_by_rva[:4])
         rows.append(
             "\t".join(
                 [
                     verdict,
                     name,
                     "0x%X" % r,
-                    h or "",
+                    ident or (h or ""),
                     dump_col,
                     src or rel,
                 ]
             )
         )
-        if verdict in ("MATCH", "DUMP_ID") and h:
-            bind_rows.append((name, h, "0x%X" % r))
+        if verdict in ("MATCH", "DUMP_ID", "PLAIN_ID") and ident:
+            bind_rows.append(
+                (name, kind, ident, "0x%X" % r, "1" if shared else "0")
+            )
         if verdict in ("MISMATCH", "HASH_MISS"):
             print(
                 "%s  %s code=0x%X dump=%s hash=%s  %s"
@@ -1264,7 +2063,51 @@ def cmd_krva(args: argparse.Namespace) -> int:
     outp = out_dir / "_ga_remount_krva.tsv"
     outp.write_text(hdr + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
     write_krva_bind(out_dir / "_ga_remount_krva_bind.tsv", bind_rows)
-    if getattr(args, "write_bind", False) and fail_n == 0:
+    committed = load_krva_bind(DEFAULT_KRVA_BIND)
+    fresh_ni: dict[tuple[str, str], tuple[str, int]] = {}
+    for name, kind, ident, rva_s, _sh in bind_rows:
+        try:
+            rva_i = int(rva_s, 16)
+        except ValueError:
+            continue
+        if ident:
+            fresh_ni[(name, ident)] = (kind, rva_i)
+    old_ni: dict[tuple[str, str], dict] = {}
+    for name, recs in committed.items():
+        for rec in recs:
+            ident = rec.get("ident") or ""
+            if ident:
+                old_ni[(name, ident)] = rec
+    bind_ok = bind_stale = bind_new = bind_drop = 0
+    shown = 0
+    for key, (_kind, rva_i) in sorted(fresh_ni.items()):
+        old = old_ni.get(key)
+        if old is None:
+            bind_new += 1
+            if shown < 8:
+                print("BIND_NEW  %s  %s  0x%X" % (key[0], key[1][:48], rva_i))
+                shown += 1
+        elif int(old.get("rva") or 0) != rva_i:
+            bind_stale += 1
+            if shown < 8:
+                print(
+                    "BIND_STALE  %s  0x%X -> 0x%X  %s"
+                    % (key[0], int(old.get("rva") or 0), rva_i, key[1][:40])
+                )
+                shown += 1
+        else:
+            bind_ok += 1
+    for key in old_ni:
+        if key not in fresh_ni:
+            bind_drop += 1
+    do_bind = bool(getattr(args, "write_bind", False))
+    print(
+        "bind vs data: ok=%d stale=%d new=%d drop=%d write_bind=%s"
+        % (bind_ok, bind_stale, bind_new, bind_drop, do_bind)
+    )
+    if (bind_stale or bind_new or bind_drop) and not do_bind:
+        print("dry-run: pass --write-bind to update scripts/data/ga_krva_bind.tsv")
+    if do_bind and fail_n == 0:
         write_krva_bind(DEFAULT_KRVA_BIND, bind_rows)
         print("wrote bind", DEFAULT_KRVA_BIND)
     print("kRva=%d counts=%s FAIL=%d bind=%d" % (len(krvas), dict(counts), fail_n, len(bind_rows)))
@@ -1279,14 +2122,19 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     if not files:
         print("no log", log_path)
         return 2
-    last = collect_smoke_session(files)
+    last, all_last = collect_smoke_session(files)
     re_hits = re.compile(r"hits=(\d+)/(\d+)")
     fail = 0
     n = 0
+    skip = 0
 
     if getattr(args, "write_expect", False):
         exp_path = Path(args.expect) if getattr(args, "expect", "") else DEFAULT_SMOKE_EXPECT
-        rows = ["tag\tprefix\ta\tb\tpath"]
+        old_need: dict[tuple[str, str], str] = {}
+        if exp_path.is_file():
+            for e in load_smoke_expect(exp_path):
+                old_need[(e["tag"], e["prefix"])] = e.get("need") or ""
+        rows = ["tag\tprefix\ta\tb\tpath\tneed"]
         for key in sorted(last):
             rec = last[key]
             m = re_hits.search(rec["msg"])
@@ -1294,7 +2142,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
                 continue
             prefix = smoke_prefix(rec["msg"])
             path = smoke_path(rec["msg"])
-            rows.append("\t".join([rec["tag"], prefix, m.group(1), m.group(2), path]))
+            need = old_need.get((rec["tag"], prefix)) or smoke_need_for_tag(rec["tag"])
+            rows.append("\t".join([rec["tag"], prefix, m.group(1), m.group(2), path, need]))
         exp_path.parent.mkdir(parents=True, exist_ok=True)
         exp_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
         print("wrote expect groups=%d %s" % (len(rows) - 1, exp_path))
@@ -1315,6 +2164,23 @@ def cmd_smoke(args: argparse.Namespace) -> int:
                         hit = rec
                         break
             if hit is None:
+                if exp.get("need") == "req":
+                    hit = all_last.get(ekey)
+                    if hit is None:
+                        for rec in all_last.values():
+                            if rec["tag"] == exp["tag"] and smoke_prefix(rec["msg"]) == exp["prefix"]:
+                                hit = rec
+                                break
+                    if hit is not None:
+                        print(
+                            "WARN  req prior-session  %s | %s"
+                            % (exp["tag"], exp["prefix"][:60])
+                        )
+            if hit is None:
+                if exp.get("need") == "opt":
+                    print("SKIP  optional missing  %s | %s" % (exp["tag"], exp["prefix"][:60]))
+                    skip += 1
+                    continue
                 print("FAIL  missing  %s | %s" % (exp["tag"], exp["prefix"][:60]))
                 fail += 1
                 continue
@@ -1343,8 +2209,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             print("FAIL  no hits=a/b in last bind session")
             fail += 1
         print(
-            "smoke expect=%d seen=%d FAIL=%d files=%d"
-            % (len(expect), n, fail, len(files))
+            "smoke expect=%d seen=%d skip_opt=%d FAIL=%d files=%d"
+            % (len(expect), n, skip, fail, len(files))
         )
         return 1 if fail else 0
 
@@ -1405,9 +2271,10 @@ def smoke_path(msg: str) -> str:
     return m.group(1) if m else ""
 
 
-def collect_smoke_session(files: list[Path]) -> dict[str, dict]:
-    """最后一个 Il2CppBind upgrade 之后的 hits=；同槽 last-wins（fallback→meta）。"""
+def collect_smoke_session(files: list[Path]) -> tuple[dict[str, dict], dict[str, dict]]:
+    """最后一次 Il2CppBind upgrade 之后的 hits=，以及全日志 last-wins（必过组回退）。"""
     session: dict[str, dict] = {}
+    all_last: dict[str, dict] = {}
     for fp in files:
         try:
             text = fp.read_text(encoding="utf-8", errors="replace")
@@ -1430,8 +2297,14 @@ def collect_smoke_session(files: list[Path]) -> dict[str, dict]:
             if "hits=" not in msg and "path=fallback" not in msg:
                 continue
             key = "%s|%s" % (tag, smoke_prefix(msg))
-            session[key] = {"tag": tag, "msg": msg if msg else ln, "file": fp.name}
-    return session
+            row = {"tag": tag, "msg": msg if msg else ln, "file": fp.name}
+            session[key] = row
+            all_last[key] = row
+    return session, all_last
+
+
+def smoke_need_for_tag(tag: str) -> str:
+    return "req" if tag in SMOKE_REQ_TAGS else "opt"
 
 
 def load_smoke_expect(path: Path) -> list[dict]:
@@ -1449,6 +2322,9 @@ def load_smoke_expect(path: Path) -> list[dict]:
             a, b = int(parts[2]), int(parts[3])
         except ValueError:
             continue
+        need = parts[5].strip().lower() if len(parts) > 5 else ""
+        if need not in ("req", "opt"):
+            need = smoke_need_for_tag(parts[0])
         out.append(
             {
                 "tag": parts[0],
@@ -1456,13 +2332,72 @@ def load_smoke_expect(path: Path) -> list[dict]:
                 "a": a,
                 "b": b,
                 "path": parts[4] if len(parts) > 4 else "",
+                "need": need,
             }
         )
     return out
 
 
-def cmd_dump_check(args: argparse.Namespace) -> int:
-    """下次更新前预检：运行时 GA / metadata / Dumper。默认不写 dump.cs。"""
+def file_md5(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def latest_archive_dump_cs(rt: Path) -> Path | None:
+    cands = sorted(rt.glob("_archive_*/out/dump.cs"))
+    return cands[-1] if cands else None
+
+
+def dump_archive_old_stamp(rt: Path) -> str:
+    latest = latest_archive_dump_cs(rt)
+    if latest:
+        m = re.search(r"pre_(\d{4,8})", latest.parent.parent.name)
+        if m:
+            s = m.group(1)
+            if len(s) == 4:
+                return datetime.now().strftime("%Y") + s
+            return s
+    dump_cs = rt / "out" / "dump.cs"
+    if dump_cs.is_file():
+        return datetime.fromtimestamp(dump_cs.stat().st_mtime).strftime("%Y%m%d")
+    return datetime.now().strftime("%Y%m%d")
+
+
+def dump_archive_dest(rt: Path) -> Path:
+    old = dump_archive_old_stamp(rt)
+    new = datetime.now().strftime("%Y%m%d")
+    if old == new:
+        new = new + "b"
+    return rt / ("_archive_%s_pre_%s_update" % (old, new))
+
+
+DUMP_ARCHIVE_FILES = (
+    ("out/dump.cs", "out/dump.cs"),
+    ("GameAssembly.dll", "GameAssembly.dll"),
+    ("dump_info.txt", "dump_info.txt"),
+    ("global-metadata.dat", "global-metadata.dat"),
+)
+
+
+def dump_current_already_archived(rt: Path) -> Path | None:
+    cur = rt / "out" / "dump.cs"
+    arch = latest_archive_dump_cs(rt)
+    if not cur.is_file() or not arch or not arch.is_file():
+        return None
+    if cur.stat().st_size != arch.stat().st_size:
+        return None
+    if abs(cur.stat().st_mtime - arch.stat().st_mtime) < 2:
+        return arch
+    if file_md5(cur) == file_md5(arch):
+        return arch
+    return None
+
+
+def dump_preflight(args: argparse.Namespace) -> int:
+    """运行时 GA / metadata / Dumper。不写 dump.cs。"""
     rt = ROOT / "Dumps" / "runtime"
     ga = Path(args.ga) if getattr(args, "ga", "") else rt / "GameAssembly.dll"
     meta = rt / "global-metadata.dat"
@@ -1490,16 +2425,7 @@ def cmd_dump_check(args: argparse.Namespace) -> int:
     note(meta.is_file(), "staged global-metadata.dat", str(meta) if meta.is_file() else "")
     client = Path(args.client_meta) if getattr(args, "client_meta", "") else CLIENT_META
     if client.is_file() and meta.is_file():
-        import hashlib
-
-        def md5(p: Path) -> str:
-            h = hashlib.md5()
-            with p.open("rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    h.update(chunk)
-            return h.hexdigest()
-
-        c, s = md5(client), md5(meta)
+        c, s = file_md5(client), file_md5(meta)
         note(c == s, "metadata vs client", "client=%s staged=%s" % (c[:8], s[:8]))
     elif client.is_file():
         note(True, "client metadata present (not staged yet)", str(client))
@@ -1522,11 +2448,236 @@ def cmd_dump_check(args: argparse.Namespace) -> int:
     note(bool(local_exe) or feng_dumper.is_file(), "Il2CppDumper.exe",
          str(local_exe[0] if local_exe else feng_dumper))
     note(process_py.is_file(), "process_runtime_dump.py")
+    dump_cs = rt / "out" / "dump.cs"
+    if dump_cs.is_file():
+        print(
+            "OK   out/dump.cs  %.1f MB  md5=%s"
+            % (dump_cs.stat().st_size / (1024 * 1024), file_md5(dump_cs)[:12])
+        )
+    else:
+        note(False, "out/dump.cs missing")
     archives = sorted(rt.glob("_archive_*/out/dump.cs"))
     note(True, "archives", "%d" % len(archives))
-    print("next: inject GaRuntimeDump.dll → python Dumps/runtime/process_runtime_dump.py")
+    same = dump_current_already_archived(rt)
+    if same:
+        print("OK   dump.cs already archived", same)
+    else:
+        print("WARN  out/dump.cs is not identical to latest _archive_* (archive before inject)")
+    return fail
+
+
+def cmd_dump_check(args: argparse.Namespace) -> int:
+    """下次更新前预检：运行时 GA / metadata / Dumper。默认不写 dump.cs。"""
+    fail = dump_preflight(args)
+    print("next: python scripts/ga_remount.py dump --archive   (before inject)")
+    print("      inject GaRuntimeDump.dll")
+    print("      python scripts/ga_remount.py dump --process  (user said process/ForceDump)")
     print("dump-check does not write dump.cs")
     return 1 if fail else 0
+
+
+def cmd_dump(args: argparse.Namespace) -> int:
+    """预检 + 可选归档 / ForceDump。默认 dry-run。禁止 --archive 与 --process 一起。"""
+    rt = ROOT / "Dumps" / "runtime"
+    do_archive = bool(getattr(args, "archive", False))
+    do_process = bool(getattr(args, "process", False))
+    if do_archive and do_process:
+        print("REFUSE  do not combine --archive and --process (old dump.cs mixed with new GA)")
+        return 2
+
+    fail = dump_preflight(args)
+    dest = dump_archive_dest(rt)
+    same = dump_current_already_archived(rt)
+    print("archive dest", dest)
+    for src_rel, dst_rel in DUMP_ARCHIVE_FILES:
+        src = rt / src_rel
+        extra = ""
+        if src.is_file():
+            extra = "%.1f MB" % (src.stat().st_size / (1024 * 1024))
+        print("  %s  %s  %s" % ("OK " if src.is_file() else "MISS", src_rel, extra))
+    idb = rt / "GameAssembly.dll.i64"
+    if idb.is_file():
+        print(
+            "  IDB GameAssembly.dll.i64  %.1f MB  (not copied unless --archive-idb)"
+            % (idb.stat().st_size / (1024 * 1024))
+        )
+
+    if do_archive:
+        if fail:
+            print("REFUSE --archive (preflight FAIL)")
+            return 1
+        if same:
+            print("skip --archive: dump.cs already in", same)
+        elif dest.exists():
+            print("REFUSE --archive dest exists", dest)
+            return 2
+        else:
+            dest.mkdir(parents=True, exist_ok=False)
+            for src_rel, dst_rel in DUMP_ARCHIVE_FILES:
+                src = rt / src_rel
+                if not src.is_file():
+                    print("WARN  skip missing", src_rel)
+                    continue
+                outp = dest / dst_rel
+                outp.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, outp)
+                print("copied", src_rel, "->", outp)
+            if idb.is_file() and getattr(args, "archive_idb", False):
+                shutil.copy2(idb, dest / idb.name)
+                print("copied", idb.name)
+            elif idb.is_file():
+                print("skip IDB (pass --archive-idb to copy %.1f MB)" % (idb.stat().st_size / (1024 * 1024)))
+            print("wrote archive", dest)
+    elif not do_process:
+        print("dry-run: dump --archive before inject; dump --process after inject (user must say process)")
+
+    if do_process:
+        if fail:
+            print("REFUSE --process (preflight FAIL)")
+            return 1
+        if not dump_current_already_archived(rt):
+            print("REFUSE --process: current out/dump.cs is not in latest _archive_* (run dump --archive first)")
+            return 2
+        client = Path(args.client_meta) if getattr(args, "client_meta", "") else CLIENT_META
+        staged = rt / "global-metadata.dat"
+        if not client.is_file():
+            print("REFUSE --process: no client metadata", client)
+            return 2
+        if (not staged.is_file()) or file_md5(client) != file_md5(staged):
+            shutil.copy2(client, staged)
+            print("staged metadata", staged)
+        process_py = rt / "process_runtime_dump.py"
+        print("RUN", process_py)
+        rc = subprocess.call([sys.executable, str(process_py)], cwd=str(rt))
+        print("process_runtime_dump exit", rc)
+        return 1 if rc else 0
+
+    return 1 if fail else 0
+
+
+def cmd_selftest(_args: argparse.Namespace | None = None) -> int:
+    """注释里的 constexpr 不得被当成声明；行首声明必须命中。"""
+    fail = 0
+
+    def check(ok: bool, msg: str) -> None:
+        nonlocal fail
+        print("%s  %s" % ("OK " if ok else "FAIL", msg))
+        if not ok:
+            fail += 1
+
+    krva_hit = "constexpr uint32_t kRvaFoo = 0xABu;"
+    krva_ind = "    constexpr uintptr_t kRvaBar = 0x10;"
+    krva_cmt = "// constexpr uint32_t kRvaFoo = 0xABu;"
+    krva_cmt2 = "  //constexpr uint32_t kRvaFoo = 0x1;"
+    kfb_hit = "constexpr size_t kFbFoo = 0xE0;"
+    kfb_cmt = "// constexpr size_t kFbFoo = 0xE0;"
+    check(bool(RE_KRVA_NAMED_ASSIGN.search(krva_hit)), "kRva line-start decl")
+    check(bool(RE_KRVA_NAMED_ASSIGN.search(krva_ind)), "kRva indented decl")
+    check(not RE_KRVA_NAMED_ASSIGN.search(krva_cmt), "kRva skip // comment")
+    check(not RE_KRVA_NAMED_ASSIGN.search(krva_cmt2), "kRva skip indented //")
+    check(bool(RE_KFB_NAMED_ASSIGN.search(kfb_hit)), "kFb line-start decl")
+    check(not RE_KFB_NAMED_ASSIGN.search(kfb_cmt), "kFb skip // comment")
+    m = RE_KRVA_NAMED_ASSIGN.search(krva_hit)
+    check(bool(m and m.group(2) == "kRvaFoo" and m.group(4) == "u"), "kRva keep u suffix")
+    print("selftest FAIL=%d" % fail)
+    return 1 if fail else 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """一次干跑 selftest + dump-check + map + layout + krva + catalog + audit + smoke。不写 dump.cs / 不 apply。"""
+    ignore = str(ROOT / "scripts" / "data" / "ga_remount_ignore.txt")
+    log = getattr(args, "log", "") or str(DEFAULT_LOG)
+    steps: list[tuple[str, object, dict]] = [
+        ("selftest", cmd_selftest, {}),
+        (
+            "dump-check",
+            cmd_dump_check,
+            {"ga": str(DEFAULT_GA), "client_meta": str(CLIENT_META)},
+        ),
+        (
+            "map",
+            cmd_map,
+            {
+                "old": "",
+                "new": str(DEFAULT_NEW),
+                "x_dir": str(DEFAULT_X),
+                "out_dir": str(DEFAULT_OUT),
+                "apply": False,
+                "apply_hashes": False,
+                "apply_krva": False,
+                "apply_all_hex": False,
+            },
+        ),
+        (
+            "layout",
+            cmd_layout,
+            {
+                "old": "",
+                "new": str(DEFAULT_NEW),
+                "x_dir": str(DEFAULT_X),
+                "out_dir": str(DEFAULT_OUT),
+                "ignore": ignore,
+                "write": False,
+            },
+        ),
+        (
+            "krva",
+            cmd_krva,
+            {
+                "new": str(DEFAULT_NEW),
+                "x_dir": str(DEFAULT_X),
+                "out_dir": str(DEFAULT_OUT),
+                "catalog": str(DEFAULT_CATALOG),
+                "ignore": ignore,
+                "write_bind": False,
+            },
+        ),
+        (
+            "catalog",
+            cmd_catalog,
+            {
+                "new": str(DEFAULT_NEW),
+                "ga": str(DEFAULT_GA),
+                "catalog": str(DEFAULT_CATALOG),
+                "x_dir": str(DEFAULT_X),
+                "out_dir": str(DEFAULT_OUT),
+                "old": "",
+                "write": False,
+            },
+        ),
+        (
+            "audit",
+            cmd_audit,
+            {
+                "new": str(DEFAULT_NEW),
+                "ga": str(DEFAULT_GA),
+                "x_dir": str(DEFAULT_X),
+                "catalog": str(DEFAULT_CATALOG),
+                "shape": str(DEFAULT_SHAPE),
+                "out_dir": str(DEFAULT_OUT),
+                "ignore": ignore,
+            },
+        ),
+        (
+            "smoke",
+            cmd_smoke,
+            {
+                "log": log,
+                "expect": str(DEFAULT_SMOKE_EXPECT),
+                "write_expect": False,
+                "verbose": False,
+            },
+        ),
+    ]
+    worst = 0
+    for name, fn, kw in steps:
+        print("========", name)
+        rc = int(fn(argparse.Namespace(**kw)))
+        print("--------", name, "rc", rc)
+        if rc > worst:
+            worst = rc
+    print("verify worst_rc=%d" % worst)
+    return 1 if worst else 0
 
 
 def main() -> int:
@@ -1584,6 +2735,11 @@ def main() -> int:
         "--ignore",
         default=str(ROOT / "scripts" / "data" / "ga_remount_ignore.txt"),
     )
+    p_ly.add_argument(
+        "--write",
+        action="store_true",
+        help="只改 FALLBACK_STALE 的 constexpr kFb*（TYPE_FLIP/DEAD 拒绝）",
+    )
 
     p_kr = sub.add_parser("krva", help="kRva* 与同后缀 kHash* 对 dump 方法 RVA")
     p_kr.add_argument("--new", default=str(DEFAULT_NEW))
@@ -1614,6 +2770,55 @@ def main() -> int:
     p_dc.add_argument("--ga", default=str(DEFAULT_GA))
     p_dc.add_argument("--client-meta", default=str(CLIENT_META))
 
+    p_dump = sub.add_parser(
+        "dump",
+        help="预检 + 可选归档 / ForceDump（默认 dry-run；禁止与 --archive 同时 --process）",
+    )
+    p_dump.add_argument("--ga", default=str(DEFAULT_GA))
+    p_dump.add_argument("--client-meta", default=str(CLIENT_META))
+    p_dump.add_argument(
+        "--archive",
+        action="store_true",
+        help="注入前拷 dump.cs/GA 到 _archive_*（已归档则 skip）",
+    )
+    p_dump.add_argument(
+        "--process",
+        action="store_true",
+        help="注入后拷 metadata 并跑 process_runtime_dump.py（覆盖 out/dump.cs）",
+    )
+    p_dump.add_argument(
+        "--archive-idb",
+        action="store_true",
+        help="归档时连同 GameAssembly.dll.i64（约 1.7GB，默认不拷）",
+    )
+
+    p_cat = sub.add_parser(
+        "catalog",
+        help="体内点 follow 所在方法头（默认 dry-run；禁止全模块搜 75 07）",
+    )
+    p_cat.add_argument("--new", default=str(DEFAULT_NEW))
+    p_cat.add_argument("--ga", default=str(DEFAULT_GA))
+    p_cat.add_argument("--catalog", default=str(DEFAULT_CATALOG))
+    p_cat.add_argument("--x-dir", default=str(DEFAULT_X))
+    p_cat.add_argument("--out-dir", default=str(DEFAULT_OUT))
+    p_cat.add_argument(
+        "--old",
+        default="",
+        help="旧 dump.cs：只给 shared/哈希 miss 做 rva_map 回退",
+    )
+    p_cat.add_argument(
+        "--write",
+        action="store_true",
+        help="写入 tsv 的 rva/target 以及 catalog 行 cpp 列的 constexpr kRva*（不改注释/裸 HEX）",
+    )
+
+    p_vf = sub.add_parser(
+        "verify",
+        help="干跑 selftest + dump-check + map + layout + krva + catalog + audit + smoke（不 apply）",
+    )
+    p_vf.add_argument("--log", default=str(DEFAULT_LOG))
+
+    sub.add_parser("selftest", help="正则自检：注释里的 constexpr kRva/kFb 不得命中")
     sub.add_parser("howto", help="打印 Agent 执行清单（硬停 + 命令）")
 
     args = ap.parse_args()
@@ -1629,6 +2834,14 @@ def main() -> int:
         return cmd_smoke(args)
     if args.cmd == "dump-check":
         return cmd_dump_check(args)
+    if args.cmd == "dump":
+        return cmd_dump(args)
+    if args.cmd == "catalog":
+        return cmd_catalog(args)
+    if args.cmd == "verify":
+        return cmd_verify(args)
+    if args.cmd == "selftest":
+        return cmd_selftest(args)
     if args.cmd == "howto":
         sys.stdout.write(HOWTO)
         if not HOWTO.endswith("\n"):
