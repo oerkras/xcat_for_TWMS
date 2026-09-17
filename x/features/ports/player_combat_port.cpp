@@ -60,7 +60,7 @@ constexpr char kHashFhId[] =
 // 反而成了撕裂源。原「镜头粘死」证据取自 nSlow_=140 污染动作层的旧局，根因已换，立论作废。
 constexpr char kHashLogicalPos[] =
     "fef9a14d4ac646ab7b85ae7d9d6715e0986c3054c5c74a91b7ba75b69d096a3";
-// e2a28(Key) 键位移偏移对（IDA：mov [rsi+4B4h], rdx · 两 int32）
+// e2a28(Key) 键位移偏移对（dump Vector2Int backing @0x4C4；旧 kFb 0x47C 已过期）
 constexpr char kHashKeyMoveDelta[] =
     "<b67e410e0a23ce31ba888143814c535f96eb170b123551dd7ff4f5e98d0c4f2>k__BackingField";
 
@@ -76,7 +76,7 @@ size_t gOffPvcActive = kFbPvcActive;
 #define kOffPvcActive (gOffPvcActive)
 constexpr size_t kFbVecCtrl = 0x50, kFbPos = 0x64, kFbVcCurFh = 0x28, kFbVcAp = 0x98;
 constexpr size_t kFbVcApl = 0xB8, kFbVcRelPos = 0x88, kFbFhId = 0x10, kFbLogicalPos = 0x2E8;
-constexpr size_t kFbKeyMoveDelta = 0x47C;
+constexpr size_t kFbKeyMoveDelta = 0x4C4;
 size_t gOffVecCtrl = kFbVecCtrl, gOffPos = kFbPos, gOffVcCurFh = kFbVcCurFh, gOffVcAp = kFbVcAp;
 size_t gOffVcApl = kFbVcApl, gOffVcRelPos = kFbVcRelPos, gOffFhId = kFbFhId;
 size_t gOffLogicalPos = kFbLogicalPos;

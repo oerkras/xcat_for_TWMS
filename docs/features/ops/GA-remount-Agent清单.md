@@ -5,8 +5,8 @@
 
 ## 0. 硬停（违反即停）
 
-1. 用户没说 `apply` / `写入` / `--apply` → **禁止** `map --apply`。
-2. `map` 输出 `on_old_map=0` 且 `already_on_new>0` → 源码已在新 dump 上，**禁止**再 apply（数字重用会改坏活方法，例如 `0x166BD40` 已是 FuncKey.ctor）。
+1. 用户没说 `apply` / `写入` / `--apply` → **禁止** `map --apply*`。
+2. `--apply` = `--apply-hashes` + `--apply-krva`，**禁止**改注释/体内点里的裸 `0xHEX`。`--apply-all-hex` 仅当用户点名；`on_old_map=0` 时脚本会 REFUSE。
 3. `audit` 体内点 FAIL → 只改 catalog 对应 `kRva*` / 期望字节；**禁止**扫 `75 07` 猜点。
 4. 禁止 `taskkill`、禁止打包发布、禁止动浏览器登录态。
 
@@ -31,21 +31,32 @@ Dumps/runtime/_archive_YYYYMMDD_pre_YYYYMMDD_update/GameAssembly.dll   （可选
 
 ```text
 python scripts/ga_remount.py map
+python scripts/ga_remount.py layout
+python scripts/ga_remount.py krva
 python scripts/ga_remount.py audit
 ```
 
 读：
 
+- `Dumps/runtime/_ga_remount_layout.tsv`（`TYPE_FLIP` / `FALLBACK_STALE` = 槽漂了或 `kFb*` 过期）
+- `Dumps/runtime/_ga_remount_krva.tsv`（`MISMATCH` = 代码 kRva 与 dump 里该哈希的方法头不是同一 RVA）
 - `Dumps/runtime/_ga_remount_audit.txt`
-- `Dumps/runtime/_ga_remount_apply.tsv`（空表 + `on_old_map=0` = 已 remount，到此可结束）
+- `Dumps/runtime/_ga_remount_apply.tsv`（空表 + `on_old_map=0` = 哈希已 remount，仍要过 layout / krva）
 - `Dumps/runtime/_ga_remount_rva_collision.tsv`（活地址，禁止按表改）
 
 仅当用户明确要求 **且** `on_old_map>0`：
 
 ```text
-python scripts/ga_remount.py map --apply
+python scripts/ga_remount.py map --apply-hashes
+python scripts/ga_remount.py layout
+python scripts/ga_remount.py map --apply-krva
+python scripts/ga_remount.py krva
 python scripts/ga_remount.py audit
 ```
+
+注入后：`python scripts/ga_remount.py smoke`（对照 `scripts/data/ga_remount_smoke_expect.tsv`；只扫当前 `x.jsonl` 会漏轮转里的 bind 行）。空日志 = 红灯。
+
+更新日前可跑：`python scripts/ga_remount.py dump-check`（不写 `dump.cs`）。`krva --write-bind` 刷新 `scripts/data/ga_krva_bind.tsv`，下次 `--apply-krva` 按方法哈希改 RVA，不再因为旧数字在新 dump 里仍是方法头而跳过。
 
 然后只编本职：`xcat_probe`（产出 `bin\XCat_data\xcat.dll`）。链接占用不要杀进程，等用户关。
 
@@ -54,11 +65,17 @@ python scripts/ga_remount.py audit
 | 看到 | 含义 | 动作 |
 |---|---|---|
 | `FAIL hash not in dump` | 源码哈希死了 | 用 apply 映射换；映射也没有 → IDA/dump 对类 |
+| `layout TYPE_FLIP` / `MOVED_TYPE` | 同字段类型变了（int→Dictionary、Vector2→数组） | 按**新类型**重钉哈希和 `kFb*`，禁止沿用旧偏移 |
+| `layout FALLBACK_STALE` | dump 新偏移 ≠ 源码 `kFb*` | 只改 fallback / 哈希，不改业务 |
 | `FAIL kRva not in dump` | 方法头漂了或根本不是方法头 | 先看名字是否 Seed / catalog / grap-core；真方法头才换 |
 | `IGN` | `ga_remount_ignore.txt` | 不当红灯 |
 | `WARN ... dump=Ptr shape=ValueTypeApprox` | dump 把混淆 valuetype 写成 class | 不当红灯 |
 | 体内 `have xx want yy` | 指令/常量框变了 | IDA 重钉，更新 tsv **和** 对应 `kRva*` |
-| `REFUSE --apply` | 已经在新 dump | 停 |
+| `krva MISMATCH` | 同后缀 kHash 在 dump 里的方法头 ≠ 源码 kRva | IDA 确认是不是 dump 误标名（如 TryDoingTeleport）；真指错才改 kRva |
+| `krva MATCH` | 源码 RVA 是该哈希的任一 override 头 | 绿灯 |
+| `krva DUMP_ID` | 无 kHash，但 dump 该 RVA 只对应一个方法哈希 | 写入 bind，不当红灯 |
+| `smoke FAIL missing` / 空 hits | 当前 x.jsonl 被截断或没扫轮转 | 扫 `x.jsonl*`；对照 expect |
+| `REFUSE --apply-all-hex` | 哈希已在新 dump | 停；用 `--apply-hashes` / `--apply-krva` |
 
 ## 4. 允许改 / 禁止改
 
@@ -70,9 +87,8 @@ python scripts/ga_remount.py audit
 
 ## 5. 本清单不覆盖（下轮工具债，别在更新日临时做）
 
-- 把 ForceDump / Il2CppDumper 收成一条脚本（要注入、要游戏在跑）。
-- 按**方法哈希**对 `kRva*`（现在只验「这个数字是不是某个方法头」，验不出指错函数）。
 - 自动从平坦化搜 jnz/cmov。
+- ForceDump 仍要人注入 `GaRuntimeDump.dll`；脚本只预检（`dump-check`）+ `process_runtime_dump.py`。
 
 ## 6. 2026-09-04 IDA 抽检（F5 热路径 · 09-03 dump）
 

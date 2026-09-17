@@ -310,6 +310,33 @@ export function createUpdateChannels(opts) {
     throw err;
   }
 
+  async function promoteAllToLatest() {
+    const last = await readLatestFile();
+    const bid = Number(last?.buildId) || 0;
+    if (bid <= 0) {
+      const err = new Error("latest.json missing");
+      err.status = 400;
+      throw err;
+    }
+    const pkg = await assertPackage(bid);
+    const clearedUids = [...groups.keys()].sort((a, b) => a.localeCompare(b));
+    const clearedTokens = [...tokens.keys()].sort((a, b) => a.localeCompare(b));
+    defaultBuildId = pkg.buildId;
+    groups.clear();
+    tokens.clear();
+    await queueSave();
+    logInfo(
+      `update-channels promote-all default=#${pkg.buildId} clearedUids=${clearedUids.length} clearedTokens=${clearedTokens.length}`,
+    );
+    return {
+      defaultBuildId: pkg.buildId,
+      zipName: pkg.zipName,
+      version: pkg.version,
+      clearedUids,
+      clearedTokens,
+    };
+  }
+
   async function clearGroup({ uid, token }) {
     const u = normalizeUid(uid);
     const t = normalizeToken(token);
@@ -382,6 +409,7 @@ export function createUpdateChannels(opts) {
     setDefault,
     setGroup,
     clearGroup,
+    promoteAllToLatest,
     snapshot,
   };
 }

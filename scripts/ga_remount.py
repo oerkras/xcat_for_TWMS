@@ -8,13 +8,27 @@
 用法（仓根）：
   python scripts/ga_remount.py map
       旧 dump → 新 dump 建映射，写 Dumps/runtime/_ga_remount_*.tsv（默认 dry-run）
+  python scripts/ga_remount.py map --apply-hashes
+      只换源码里已映射的类/字段/方法哈希（下次更新日的默认写入）
+  python scripts/ga_remount.py map --apply-krva
+      只改 constexpr kRva* = 0x…；有 bind 哈希时按 dump 身份改，不再因旧数字仍是方法头而跳过
   python scripts/ga_remount.py map --apply
-      源码仍是旧 dump 哈希时才写入；哈希已在新 dump 上则拒绝。
-      旧地址若在新 dump 仍是方法头（数字碰巧重用）绝不改，避免改坏业务 RVA。
+      等价 --apply-hashes + --apply-krva。不再改注释/体内点里的裸 0xHEX
+  python scripts/ga_remount.py map --apply-all-hex
+      旧行为：所有 0xRVA token；哈希已在新 dump 时拒绝
+  python scripts/ga_remount.py layout
+      字段偏移+类型差，以及 kFb* 是否还等于新偏移
+  python scripts/ga_remount.py krva
+      kRva* 与同后缀 kHash* 对 dump 方法 RVA（验身份，不只是「是不是方法头」）
   python scripts/ga_remount.py audit
       源码哈希/方法头 RVA vs dump.cs；shape vs dump 字段类型；体内点 vs GameAssembly.dll 字节
+  python scripts/ga_remount.py smoke
+      扫 x.jsonl + 轮转的 hits=a/b（对照 scripts/data/ga_remount_smoke_expect.tsv）
+  python scripts/ga_remount.py dump-check
+      下次更新前：查运行时 GA / metadata / Dumper，不写 dump.cs
 
-更新日顺序：归档旧 dump.cs → Il2CppDumper 出新 dump → map（看 miss）→ audit → 只对红灯开 IDA → 确认后再 map --apply。
+更新日顺序：归档 → 新 dump → map → map --apply-hashes → layout → map --apply-krva → krva → audit → 红灯才开 IDA。
+  确认后再 --apply（= hashes+krva）。禁止 --apply-all-hex 除非用户点名。
 
 Agent 清单：docs/features/ops/GA-remount-Agent清单.md
 本机打印：python scripts/ga_remount.py howto
@@ -23,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import re
 import struct
 import sys
@@ -32,9 +47,11 @@ from pathlib import Path
 HOWTO = """GA remount howto (classic TWMS). Do not change business logic.
 
 Hard stops:
-  - no map --apply unless the user said apply/write AND on_old_map>0
-  - on_old_map=0 + already_on_new>0 => already remounted; REFUSE apply
+  - no map --apply* unless the user said apply/write AND on_old_map>0
+  - --apply = hashes + named kRva* only; never rewrite bare 0xHEX in comments
+  - --apply-all-hex only if user named it; on_old_map=0 => REFUSE
   - body-site FAIL => retarget catalog + kRva*; never grep 75 07 in flattened code
+  - layout TYPE_FLIP / FALLBACK_STALE => fix kFb* / field hash; do not ignore
   - do not kill user processes; do not publish
 
 Need:
@@ -44,18 +61,25 @@ Need:
 
 Commands (repo root, this order):
   python scripts/ga_remount.py map
+  python scripts/ga_remount.py map --apply-hashes
+  python scripts/ga_remount.py layout
+  python scripts/ga_remount.py map --apply-krva
+  python scripts/ga_remount.py krva
   python scripts/ga_remount.py audit
-  # then only if user asked AND on_old_map>0:
-  python scripts/ga_remount.py map --apply
-  python scripts/ga_remount.py audit
+  python scripts/ga_remount.py smoke
+  python scripts/ga_remount.py dump-check
 
 Read:
   Dumps/runtime/_ga_remount_audit.txt
+  Dumps/runtime/_ga_remount_layout.tsv
+  Dumps/runtime/_ga_remount_krva.tsv
   Dumps/runtime/_ga_remount_apply.tsv
   Dumps/runtime/_ga_remount_rva_collision.tsv   (live addrs; do not rewrite)
 
 Catalog: scripts/data/ga_patch_sites.tsv
 Ignore:  scripts/data/ga_remount_ignore.txt
+Bind:    scripts/data/ga_krva_bind.tsv          (kRva name → method hash; apply-krva 优先用)
+Smoke:   scripts/data/ga_remount_smoke_expect.tsv
 Full:    docs/features/ops/GA-remount-Agent*.md
 """
 
@@ -66,7 +90,13 @@ DEFAULT_OUT = ROOT / "Dumps" / "runtime"
 DEFAULT_X = ROOT / "x"
 DEFAULT_CATALOG = ROOT / "scripts" / "data" / "ga_patch_sites.tsv"
 DEFAULT_SHAPE = ROOT / "x" / "runtime" / "il2cpp_shape.cpp"
+DEFAULT_KRVA_BIND = ROOT / "scripts" / "data" / "ga_krva_bind.tsv"
+DEFAULT_SMOKE_EXPECT = ROOT / "scripts" / "data" / "ga_remount_smoke_expect.tsv"
+DEFAULT_LOG = ROOT / "bin" / "rtcache" / "logs" / "x.jsonl"
 LEGACY = ROOT / "Dumps" / "runtime" / "_remount_20260814.py"
+CLIENT_META = Path(
+    r"G:\Games\maplestory_classic\Maplestory_Classic_Data\il2cpp_data\Metadata\global-metadata.dat"
+)
 
 RE_HASH = re.compile(r"[a-f0-9]{60,64}")
 RE_TOKEN_HASH = re.compile(r"\b[a-f0-9]{60,64}\b")
@@ -90,6 +120,16 @@ RE_KRVA = re.compile(
     r"(kRva\w+)\s*=\s*0x([0-9A-Fa-f]+)",
     re.I,
 )
+RE_KRVA_ASSIGN = re.compile(
+    r"(constexpr\s+(?:const\s+)?(?:uint32_t|uintptr_t|unsigned(?:\s+int)?)\s+"
+    r"kRva\w+\s*=\s*)0x([0-9A-Fa-f]+)",
+    re.I,
+)
+RE_KHASH_DECL = re.compile(
+    r"constexpr\s+char\s+kHash(\w+)\[\]\s*=\s*(?:\n\s*)?\"(?:<)?([a-f0-9]{60,64})",
+    re.M,
+)
+RE_KFB_DECL = re.compile(r"\bkFb(\w+)\s*=\s*0x([0-9A-Fa-f]+)")
 
 # shape 表：源码哈希符号 → FieldShape 数组名（与 il2cpp_shape.cpp 对齐）
 SHAPE_PAIRS = (
@@ -157,6 +197,33 @@ def load_ignore(path: Path) -> set[str]:
         if ln:
             s.add(ln)
     return s
+
+
+def load_krva_bind(path: Path) -> dict[str, str]:
+    """kRvaName → method hash（当前 dump 身份；下次 apply-krva 走哈希而不是活地址跳过）。"""
+    out: dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        raw = ln.split("#", 1)[0].strip()
+        if not raw:
+            continue
+        parts = raw.split("\t")
+        if len(parts) >= 2 and parts[0].startswith("kRva") and RE_HASH.fullmatch(parts[1]):
+            out[parts[0]] = parts[1]
+    return out
+
+
+def write_krva_bind(path: Path, rows: list[tuple[str, str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["name\thash\tcode_rva"]
+    seen: set[str] = set()
+    for name, h, rva in rows:
+        if name in seen or not h:
+            continue
+        seen.add(name)
+        lines.append("%s\t%s\t%s" % (name, h, rva))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def build_maps(legacy, old, new, tdi_map, rvas_in_code: set[int]):
@@ -351,23 +418,43 @@ def cmd_map(args: argparse.Namespace) -> int:
             ["0x%X" % x for x in sorted(r_collide)[:12]],
         )
 
-    if not args.apply:
-        print("dry-run（加 --apply 才改 x/ 哈希和 0xRVA；不改业务判定）")
+    apply_all_hex = bool(getattr(args, "apply_all_hex", False))
+    apply_hashes = bool(getattr(args, "apply_hashes", False) or args.apply)
+    apply_krva = bool(getattr(args, "apply_krva", False) or args.apply)
+    if apply_all_hex:
+        apply_hashes = True
+        apply_krva = True
+    if not (apply_hashes or apply_krva or apply_all_hex):
+        print("dry-run（--apply-hashes / --apply-krva / --apply 才写入；--apply 不再改裸 0xHEX）")
         return 0
 
-    if on_old == 0 and on_new > 0:
+    if apply_all_hex and on_old == 0 and on_new > 0:
         print(
-            "REFUSE --apply: source hashes already on NEW dump; "
+            "REFUSE --apply-all-hex: source hashes already on NEW dump; "
             "blind RVA rewrite would hit live methods (see _ga_remount_rva_collision.tsv)"
         )
         return 2
 
+    if apply_hashes and on_old == 0:
+        print("skip hashes: already on NEW dump (on_old_map=0)")
+        apply_hashes = False
+
+    collide = set(r_collide)
     hash_repl = {}
-    hash_repl.update({h: class_hash[h] for h in by["class"]})
-    hash_repl.update({h: field_hash_map[h] for h in by["field"]})
-    hash_repl.update({h: meth_hash_map[h] for h in by["meth"]})
+    if apply_hashes:
+        hash_repl.update({h: class_hash[h] for h in by["class"]})
+        hash_repl.update({h: field_hash_map[h] for h in by["field"]})
+        hash_repl.update({h: meth_hash_map[h] for h in by["meth"]})
+
+    bind = load_krva_bind(DEFAULT_KRVA_BIND) if apply_krva else {}
+    new_meth: dict[str, list[int]] = {}
+    if apply_krva and bind:
+        new_meth = index_slots(new_path).get("methods") or {}
+
     files = list(xdir.rglob("*.cpp")) + list(xdir.rglob("*.h"))
     changed = 0
+    krva_n = 0
+    hex_n = 0
     for fp in files:
         txt = fp.read_text(encoding="utf-8", errors="replace")
         orig = txt
@@ -375,24 +462,355 @@ def cmd_map(args: argparse.Namespace) -> int:
             if oh in txt:
                 txt = txt.replace(oh, nh)
 
-        def rva_sub(m: re.Match) -> str:
-            v = int(m.group(1), 16)
-            if v in rva_map and rva_map[v] != v:
-                if v in new_rvas:
-                    return m.group(0)
-                src = m.group(1)
-                nv = rva_map[v]
-                fmt = "%X" % nv if any(c.isupper() for c in src) else "%x" % nv
-                return "0x" + fmt
-            return m.group(0)
+        if apply_krva:
 
-        txt = RE_TOKEN_RVA.sub(rva_sub, txt)
+            def krva_sub(m: re.Match) -> str:
+                nonlocal krva_n
+                v = int(m.group(2), 16)
+                nm_m = re.search(r"(kRva\w+)", m.group(1), re.I)
+                name = nm_m.group(1) if nm_m else ""
+                nv: int | None = None
+                h = bind.get(name) if name else None
+                if h:
+                    nhash = meth_hash_map.get(h, h)
+                    dump_rvas = new_meth.get(nhash) or []
+                    if len(dump_rvas) == 1:
+                        nv = dump_rvas[0]
+                    elif dump_rvas:
+                        mapped = rva_map.get(v)
+                        if mapped in dump_rvas:
+                            nv = mapped
+                        elif v in dump_rvas:
+                            nv = v
+                if nv is None:
+                    if v in collide or v in new_rvas:
+                        return m.group(0)
+                    if v in rva_map and rva_map[v] != v:
+                        nv = rva_map[v]
+                    else:
+                        return m.group(0)
+                if nv == v:
+                    return m.group(0)
+                src = m.group(2)
+                fmt = "%X" % nv if any(c.isupper() for c in src) else "%x" % nv
+                krva_n += 1
+                return m.group(1) + "0x" + fmt
+
+            txt = RE_KRVA_ASSIGN.sub(krva_sub, txt)
+
+        if apply_all_hex:
+
+            def rva_sub(m: re.Match) -> str:
+                nonlocal hex_n
+                v = int(m.group(1), 16)
+                if v in rva_map and rva_map[v] != v:
+                    if v in new_rvas:
+                        return m.group(0)
+                    src = m.group(1)
+                    nv = rva_map[v]
+                    fmt = "%X" % nv if any(c.isupper() for c in src) else "%x" % nv
+                    hex_n += 1
+                    return "0x" + fmt
+                return m.group(0)
+
+            txt = RE_TOKEN_RVA.sub(rva_sub, txt)
+
         if txt != orig:
             fp.write_text(txt, encoding="utf-8", newline="\n")
             changed += 1
             print("patched", fp.relative_to(ROOT))
-    print("patched files=%d" % changed)
+    print(
+        "patched files=%d hash_keys=%d krva_rewrites=%d all_hex_rewrites=%d"
+        % (changed, len(hash_repl), krva_n, hex_n)
+    )
     return 0
+
+
+# ----- layout (equal-offset / kFb stale) -----
+
+def field_decl_type(ln: str) -> str:
+    decl = ln.split("//")[0].strip().rstrip(";").strip()
+    if not decl:
+        return ""
+    bits = decl.rsplit(None, 1)
+    return bits[0] if len(bits) == 2 else decl
+
+
+def index_slots(path: Path) -> dict:
+    """One pass: class hashes, method hashes, field hash → off/kind/type."""
+    classes: set[str] = set()
+    methods: dict[str, list[int]] = defaultdict(list)
+    rva_hashes: dict[int, list[str]] = defaultdict(list)
+    structs: set[str] = set()
+    fields: dict[str, list[dict]] = defaultdict(list)
+    cur_name = ""
+    cur_tdi = -1
+    pending_rva = None
+    for ln in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        tm = RE_TDI.search(ln)
+        cm = RE_CLASS.search(ln)
+        if tm and cm:
+            cur_tdi = int(tm.group(1))
+            cur_name = cm.group(2)
+            tail = cur_name.split(".")[-1]
+            if RE_HASH.fullmatch(tail):
+                classes.add(tail)
+            if cm.group(1) == "struct":
+                structs.add(tail)
+            pending_rva = None
+            continue
+        rm = RE_RVA_LINE.search(ln)
+        if rm and ln.strip().startswith("//"):
+            pending_rva = int(rm.group(1), 16)
+            continue
+        if pending_rva is not None and "(" in ln:
+            mh = None
+            m = re.search(r"([a-f0-9]{60,64})\s*\(", ln.split("//")[0])
+            if m:
+                mh = m.group(1)
+                rva = pending_rva
+                if rva not in methods[mh]:
+                    methods[mh].append(rva)
+                if mh not in rva_hashes[rva]:
+                    rva_hashes[rva].append(mh)
+            pending_rva = None
+            continue
+        pending_rva = None
+        fm = RE_FIELD_OFF.search(ln)
+        if not (fm and ";" in ln):
+            continue
+        off = int(fm.group(1), 16)
+        fh = None
+        bm = re.search(r"<([a-f0-9]{60,64})>k__BackingField", ln)
+        if bm:
+            fh = bm.group(1)
+        else:
+            hs = RE_HASH.findall(ln.split("//")[0])
+            fh = hs[-1] if hs else None
+        if not fh:
+            continue
+        ty = field_decl_type(ln)
+        fields[fh].append(
+            {
+                "off": off,
+                "kind": kind_of_csharp(ty, structs),
+                "ty": re.sub(r"\s+", " ", ty)[:80],
+                "class": cur_name.split(".")[-1][:20],
+                "tdi": cur_tdi,
+            }
+        )
+    return {
+        "classes": classes,
+        "methods": methods,
+        "rva_hashes": dict(rva_hashes),
+        "fields": dict(fields),
+    }
+
+
+def collect_khash_kfb(xdir: Path) -> tuple[dict[str, str], dict[str, int], dict[str, list[str]]]:
+    """kHashFoo / kFbFoo 按后缀配对。hash → suffix；suffix → kFb off；hash → files."""
+    suffix_hash: dict[str, str] = {}
+    suffix_fb: dict[str, int] = {}
+    hash_files: dict[str, list[str]] = defaultdict(list)
+    files = list(xdir.rglob("*.cpp")) + list(xdir.rglob("*.h"))
+    for fp in files:
+        rel = str(fp.relative_to(ROOT)).replace("\\", "/")
+        txt = fp.read_text(encoding="utf-8", errors="replace")
+        for m in RE_KHASH_DECL.finditer(txt):
+            suffix, h = m.group(1), m.group(2)
+            suffix_hash[suffix] = h
+            if rel not in hash_files[h]:
+                hash_files[h].append(rel)
+        for m in RE_KFB_DECL.finditer(txt):
+            suffix_fb[m.group(1)] = int(m.group(2), 16)
+    hash_fb: dict[str, int] = {}
+    for suffix, h in suffix_hash.items():
+        if suffix in suffix_fb:
+            hash_fb[h] = suffix_fb[suffix]
+    return suffix_hash, hash_fb, dict(hash_files)
+
+
+def pick_slot(slots: list[dict] | None) -> dict | None:
+    if not slots:
+        return None
+    if len(slots) == 1:
+        return slots[0]
+    offs = {s["off"] for s in slots}
+    if len(offs) == 1:
+        return slots[0]
+    return None  # ambiguous offsets
+
+
+def cmd_layout(args: argparse.Namespace) -> int:
+    legacy = load_legacy()
+    old_path = Path(args.old) if args.old else default_old_dump()
+    new_path = Path(args.new)
+    out_dir = Path(args.out_dir)
+    xdir = Path(args.x_dir)
+    ignore = load_ignore(Path(args.ignore))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print("old", old_path)
+    print("new", new_path)
+    print("parse dumps (class map + field types)…")
+    old = legacy.parse_dump(old_path)
+    new = legacy.parse_dump(new_path)
+    hashes_in_code, _rvas = collect_x_tokens(xdir)
+    tdi_map = legacy.match_classes(old, new, prefer_names=hashes_in_code)
+    _ch, field_hash_map, _mh, _rva, _conf = build_maps(
+        legacy, old, new, tdi_map, set()
+    )
+    rev_field = {v: k for k, v in field_hash_map.items() if v not in field_hash_map}
+    old_slots = index_slots(old_path)
+    new_slots = index_slots(new_path)
+    _suffix_hash, hash_fb, hash_files = collect_khash_kfb(xdir)
+
+    def classify_hash(h: str) -> str:
+        in_f = h in old_slots["fields"] or h in new_slots["fields"]
+        in_c = h in old_slots["classes"] or h in new_slots["classes"]
+        in_m = h in old_slots["methods"] or h in new_slots["methods"]
+        if in_f:
+            return "field"
+        if in_c:
+            return "class"
+        if in_m:
+            return "method"
+        return "unknown"
+
+    rows = []
+    fail_n = 0
+    counts: Counter[str] = Counter()
+
+    def emit(verdict: str, h: str, **kw) -> None:
+        nonlocal fail_n
+        hard = any(
+            p in verdict.split("|")
+            for p in ("TYPE_FLIP", "MOVED_TYPE", "FALLBACK_STALE", "DEAD", "AMBIGUOUS")
+        )
+        if hard:
+            fail_n += 1
+        counts[verdict.split("|")[0]] += 1
+        src = ";".join(hash_files.get(h, [])[:3])
+        old_s = kw.get("old")
+        new_s = kw.get("new")
+        kfb = kw.get("kfb")
+        rows.append(
+            "\t".join(
+                [
+                    verdict,
+                    h,
+                    src,
+                    ("0x%X" % old_s["off"]) if old_s else "",
+                    ("0x%X" % new_s["off"]) if new_s else "",
+                    (old_s["kind"] if old_s else ""),
+                    (new_s["kind"] if new_s else ""),
+                    (old_s["ty"] if old_s else ""),
+                    (new_s["ty"] if new_s else ""),
+                    ("0x%X" % kfb) if kfb is not None else "",
+                    (new_s["class"] if new_s else (old_s["class"] if old_s else "")),
+                ]
+            )
+        )
+        if hard or verdict.startswith("MOVED") or verdict.startswith("WARN"):
+            print(
+                "%s  %s  old=%s/%s  new=%s/%s  kFb=%s  %s"
+                % (
+                    verdict,
+                    h[:16],
+                    ("0x%X" % old_s["off"]) if old_s else "-",
+                    old_s["kind"] if old_s else "-",
+                    ("0x%X" % new_s["off"]) if new_s else "-",
+                    new_s["kind"] if new_s else "-",
+                    ("0x%X" % kfb) if kfb is not None else "-",
+                    src.split("/")[-1] if src else "",
+                )
+            )
+
+    field_hashes = []
+    skipped = Counter()
+    for h in sorted(hashes_in_code):
+        if h.lower() in ignore:
+            skipped["ignore"] += 1
+            continue
+        kind = classify_hash(h)
+        if kind != "field":
+            skipped[kind] += 1
+            continue
+        field_hashes.append(h)
+
+    for h in field_hashes:
+        new_list = new_slots["fields"].get(h)
+        old_list = old_slots["fields"].get(h)
+        mapped_old = rev_field.get(h)
+        mapped_new = field_hash_map.get(h)
+        if not old_list and mapped_old:
+            old_list = old_slots["fields"].get(mapped_old)
+        if not new_list and mapped_new:
+            new_list = new_slots["fields"].get(mapped_new)
+        new_s = pick_slot(new_list)
+        old_s = pick_slot(old_list)
+        kfb = hash_fb.get(h)
+        if kfb is None and mapped_old:
+            kfb = hash_fb.get(mapped_old)
+
+        flags = []
+        if (new_list and pick_slot(new_list) is None) or (
+            old_list and pick_slot(old_list) is None
+        ):
+            flags.append("AMBIGUOUS")
+        if not new_list and old_s:
+            flags.append("DEAD")
+        if old_s and new_s:
+            moved = old_s["off"] != new_s["off"]
+            flipped = old_s["kind"] != new_s["kind"]
+            if moved and flipped:
+                flags.append("MOVED_TYPE")
+            elif flipped:
+                flags.append("TYPE_FLIP")
+            elif moved:
+                flags.append("MOVED")
+        if new_s and kfb is not None and kfb != new_s["off"]:
+            flags.append("FALLBACK_STALE")
+        suffix_hit = [s for s, hh in _suffix_hash.items() if hh == h]
+        # CurFh 是对象指针，RelPos dump 常写成 class 名；只盯镜头/矩形槽被接到数组/字典。
+        if new_s and new_s["kind"] == "Ptr" and suffix_hit:
+            suf = suffix_hit[0].lower()
+            if suf in ("logicalpos", "curpos", "vispos", "pos") and "Vector" not in new_s["ty"]:
+                flags.append("WARN_PTR_POS")
+        if not flags:
+            flags.append("OK")
+            counts["OK"] += 1
+            # OK 行仍进 tsv，不刷屏
+            src = ";".join(hash_files.get(h, [])[:3])
+            rows.append(
+                "\t".join(
+                    [
+                        "OK",
+                        h,
+                        src,
+                        ("0x%X" % old_s["off"]) if old_s else "",
+                        ("0x%X" % new_s["off"]) if new_s else "",
+                        (old_s["kind"] if old_s else ""),
+                        (new_s["kind"] if new_s else ""),
+                        (old_s["ty"] if old_s else ""),
+                        (new_s["ty"] if new_s else ""),
+                        ("0x%X" % kfb) if kfb is not None else "",
+                        (new_s["class"] if new_s else ""),
+                    ]
+                )
+            )
+            continue
+        emit("|".join(flags), h, old=old_s, new=new_s, kfb=kfb)
+
+    hdr = "verdict\thash\tsrc\told_off\tnew_off\told_kind\tnew_kind\told_ty\tnew_ty\tkfb\tclass"
+    outp = out_dir / "_ga_remount_layout.tsv"
+    outp.write_text(hdr + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    print(
+        "fields=%d skip=%s counts=%s FAIL=%d"
+        % (len(field_hashes), dict(skipped), dict(counts), fail_n)
+    )
+    print("wrote", outp)
+    return 1 if fail_n else 0
 
 
 # ----- audit -----
@@ -750,6 +1168,367 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 1 if fail else 0
 
 
+def cmd_krva(args: argparse.Namespace) -> int:
+    """kRva* + 同后缀 kHash* vs dump 方法 RVA（身份，不是「碰巧是方法头」）。"""
+    dump_path = Path(args.new)
+    xdir = Path(args.x_dir)
+    out_dir = Path(args.out_dir)
+    cat_path = Path(args.catalog)
+    ignore = load_ignore(Path(args.ignore))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    print("dump", dump_path)
+    slots = index_slots(dump_path)
+    meth = slots["methods"]
+    rva_hashes: dict[int, list[str]] = slots.get("rva_hashes") or {}
+    suffix_hash, _fb, hash_files = collect_khash_kfb(xdir)
+    krvas = collect_krva(xdir)
+    catalog = load_catalog(cat_path) if cat_path.is_file() else []
+    catalog_rvas = {r["rva_i"] for r in catalog}
+
+    rows = []
+    bind_rows: list[tuple[str, str, str]] = []
+    fail_n = 0
+    counts: Counter[str] = Counter()
+
+    for name, r, rel in krvas:
+        key = "0x%x" % r
+        suffix = name[4:] if name.lower().startswith("krva") else name
+        h = suffix_hash.get(suffix)
+        src = ";".join(hash_files.get(h, [])[:2]) if h else rel
+        dump_rvas = meth.get(h) if h else None
+        in_dump = bool(dump_rvas and r in dump_rvas)
+        dump_by_rva = rva_hashes.get(r) or []
+
+        if name.lower() in ignore or key in ignore or ("%x" % r) in ignore:
+            verdict = "IGN"
+        elif r in catalog_rvas:
+            verdict = "CATALOG"
+        elif "seed" in name.lower():
+            verdict = "SEED"
+        elif not h:
+            if len(dump_by_rva) == 1:
+                verdict = "DUMP_ID"
+                h = dump_by_rva[0]
+            elif dump_by_rva:
+                verdict = "DUMP_MULTI"
+            else:
+                verdict = "UNBOUND"
+        elif dump_rvas is None:
+            verdict = "HASH_MISS"
+            fail_n += 1
+        elif in_dump:
+            verdict = "MATCH"
+        else:
+            verdict = "MISMATCH"
+            fail_n += 1
+
+        counts[verdict] += 1
+        dump_col = ""
+        if dump_rvas:
+            dump_col = ",".join("0x%X" % x for x in dump_rvas[:6])
+            if len(dump_rvas) > 6:
+                dump_col += ",+%d" % (len(dump_rvas) - 6)
+        elif dump_by_rva:
+            dump_col = ",".join(x[:12] + "…" for x in dump_by_rva[:4])
+            if len(dump_by_rva) > 4:
+                dump_col += ",+%d" % (len(dump_by_rva) - 4)
+        rows.append(
+            "\t".join(
+                [
+                    verdict,
+                    name,
+                    "0x%X" % r,
+                    h or "",
+                    dump_col,
+                    src or rel,
+                ]
+            )
+        )
+        if verdict in ("MATCH", "DUMP_ID") and h:
+            bind_rows.append((name, h, "0x%X" % r))
+        if verdict in ("MISMATCH", "HASH_MISS"):
+            print(
+                "%s  %s code=0x%X dump=%s hash=%s  %s"
+                % (
+                    verdict,
+                    name,
+                    r,
+                    dump_col or "-",
+                    (h[:16] + "…") if h else "-",
+                    rel,
+                )
+            )
+
+    hdr = "verdict\tname\tcode_rva\thash\tdump_rva\tsrc"
+    outp = out_dir / "_ga_remount_krva.tsv"
+    outp.write_text(hdr + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    write_krva_bind(out_dir / "_ga_remount_krva_bind.tsv", bind_rows)
+    if getattr(args, "write_bind", False) and fail_n == 0:
+        write_krva_bind(DEFAULT_KRVA_BIND, bind_rows)
+        print("wrote bind", DEFAULT_KRVA_BIND)
+    print("kRva=%d counts=%s FAIL=%d bind=%d" % (len(krvas), dict(counts), fail_n, len(bind_rows)))
+    print("wrote", outp)
+    return 1 if fail_n else 0
+
+
+def cmd_smoke(args: argparse.Namespace) -> int:
+    """注入后扫 hits=a/b：最后一次 Il2CppBind 会话；对照 expect；空日志不当绿灯。"""
+    log_path = Path(args.log)
+    files = smoke_log_files(log_path)
+    if not files:
+        print("no log", log_path)
+        return 2
+    last = collect_smoke_session(files)
+    re_hits = re.compile(r"hits=(\d+)/(\d+)")
+    fail = 0
+    n = 0
+
+    if getattr(args, "write_expect", False):
+        exp_path = Path(args.expect) if getattr(args, "expect", "") else DEFAULT_SMOKE_EXPECT
+        rows = ["tag\tprefix\ta\tb\tpath"]
+        for key in sorted(last):
+            rec = last[key]
+            m = re_hits.search(rec["msg"])
+            if not m:
+                continue
+            prefix = smoke_prefix(rec["msg"])
+            path = smoke_path(rec["msg"])
+            rows.append("\t".join([rec["tag"], prefix, m.group(1), m.group(2), path]))
+        exp_path.parent.mkdir(parents=True, exist_ok=True)
+        exp_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        print("wrote expect groups=%d %s" % (len(rows) - 1, exp_path))
+        return 0
+
+    expect = load_smoke_expect(
+        Path(args.expect) if getattr(args, "expect", "") else DEFAULT_SMOKE_EXPECT
+    )
+    if expect:
+        by_key = last
+        for exp in expect:
+            ekey = "%s|%s" % (exp["tag"], exp["prefix"])
+            hit = by_key.get(ekey)
+            if hit is None:
+                # prefix 已规范化（path=*）；再扫一遍兼容旧 expect
+                for rec in last.values():
+                    if rec["tag"] == exp["tag"] and smoke_prefix(rec["msg"]) == exp["prefix"]:
+                        hit = rec
+                        break
+            if hit is None:
+                print("FAIL  missing  %s | %s" % (exp["tag"], exp["prefix"][:60]))
+                fail += 1
+                continue
+            m = re_hits.search(hit["msg"])
+            if not m:
+                if "path=fallback" in hit["msg"] and exp["a"] > 0:
+                    print("FAIL  fallback  %s" % hit["msg"][:160])
+                    fail += 1
+                continue
+            a, b = int(m.group(1)), int(m.group(2))
+            n += 1
+            path = smoke_path(hit["msg"])
+            # 允许 hits 变好（a>=expect），槽数 b 必须一致；fallback 且 expect>0 为红
+            bad = b != exp["b"] or a < exp["a"]
+            if path == "fallback" and exp["a"] > 0:
+                bad = True
+            if bad:
+                print(
+                    "FAIL  %s expect>=%d/%d got %s"
+                    % (exp["tag"], exp["a"], exp["b"], hit["msg"][:160])
+                )
+                fail += 1
+            elif args.verbose:
+                print("OK    %s hits=%d/%d" % (exp["tag"], a, b))
+        if n == 0:
+            print("FAIL  no hits=a/b in last bind session")
+            fail += 1
+        print(
+            "smoke expect=%d seen=%d FAIL=%d files=%d"
+            % (len(expect), n, fail, len(files))
+        )
+        return 1 if fail else 0
+
+    for key, rec in sorted(last.items()):
+        msg = rec["msg"]
+        m = re_hits.search(msg)
+        if not m:
+            if "path=fallback" in msg:
+                print("FAIL  fallback  %s" % msg[:160])
+                fail += 1
+            continue
+        a, b = int(m.group(1)), int(m.group(2))
+        n += 1
+        bad = (a < b and "fb-open-generic" not in msg) or (
+            "path=fallback" in msg and a == 0 and b > 0
+        )
+        if bad:
+            print("FAIL  %s" % msg[:200])
+            fail += 1
+        elif args.verbose:
+            print("OK    %s" % msg[:200])
+    if n == 0:
+        print("FAIL  no hits=a/b in last bind session (%s)" % log_path)
+        fail += 1
+    print("smoke groups=%d FAIL=%d files=%d" % (n, fail, len(files)))
+    return 1 if fail else 0
+
+
+def smoke_log_files(log_path: Path) -> list[Path]:
+    """RotatingFileHandler: x.jsonl.N 越大越旧 → x.jsonl.1 → x.jsonl。"""
+    parent = log_path.parent if log_path.suffix else log_path
+    name = log_path.name if log_path.suffix else "x.jsonl"
+    if not parent.is_dir():
+        return [log_path] if log_path.is_file() else []
+    numbered: list[tuple[int, Path]] = []
+    current: list[Path] = []
+    for p in parent.glob(name + "*"):
+        if not p.is_file():
+            continue
+        if p.name == name:
+            current.append(p)
+            continue
+        suf = p.name[len(name) + 1 :]
+        if suf.isdigit():
+            numbered.append((int(suf), p))
+    numbered.sort(key=lambda x: -x[0])
+    return [p for _, p in numbered] + current
+
+
+def smoke_prefix(msg: str) -> str:
+    prefix = msg.split("hits=")[0]
+    prefix = re.sub(r"path=\S+", "path=*", prefix)
+    return prefix.strip()[:80]
+
+
+def smoke_path(msg: str) -> str:
+    m = re.search(r"path=([^\s]+)", msg)
+    return m.group(1) if m else ""
+
+
+def collect_smoke_session(files: list[Path]) -> dict[str, dict]:
+    """最后一个 Il2CppBind upgrade 之后的 hits=；同槽 last-wins（fallback→meta）。"""
+    session: dict[str, dict] = {}
+    for fp in files:
+        try:
+            text = fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for ln in text.splitlines():
+            if not ln.startswith("{") and "hits=" not in ln and "Il2CppBind" not in ln:
+                continue
+            tag = ""
+            msg = ln
+            if ln.startswith("{"):
+                try:
+                    rec = json.loads(ln)
+                    tag = str(rec.get("tag") or "")
+                    msg = str(rec.get("msg") or "")
+                except Exception:
+                    continue
+            if tag == "Il2CppBind" and "unity managed upgrade" in msg:
+                session = {}
+            if "hits=" not in msg and "path=fallback" not in msg:
+                continue
+            key = "%s|%s" % (tag, smoke_prefix(msg))
+            session[key] = {"tag": tag, "msg": msg if msg else ln, "file": fp.name}
+    return session
+
+
+def load_smoke_expect(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    out: list[dict] = []
+    for ln in path.read_text(encoding="utf-8").splitlines():
+        raw = ln.split("#", 1)[0].rstrip("\n")
+        if not raw.strip() or raw.startswith("tag\t"):
+            continue
+        parts = raw.split("\t")
+        if len(parts) < 4:
+            continue
+        try:
+            a, b = int(parts[2]), int(parts[3])
+        except ValueError:
+            continue
+        out.append(
+            {
+                "tag": parts[0],
+                "prefix": parts[1],
+                "a": a,
+                "b": b,
+                "path": parts[4] if len(parts) > 4 else "",
+            }
+        )
+    return out
+
+
+def cmd_dump_check(args: argparse.Namespace) -> int:
+    """下次更新前预检：运行时 GA / metadata / Dumper。默认不写 dump.cs。"""
+    rt = ROOT / "Dumps" / "runtime"
+    ga = Path(args.ga) if getattr(args, "ga", "") else rt / "GameAssembly.dll"
+    meta = rt / "global-metadata.dat"
+    info = rt / "dump_info.txt"
+    dumper_local = rt / "il2cppdumper_v39" / "win-x64-net8"
+    process_py = rt / "process_runtime_dump.py"
+    feng_dumper = Path(
+        r"c:\Users\kras\Desktop\xcat_for_fengxing\tools\il2cpp\il2cppdumper\Il2CppDumper.exe"
+    )
+    fail = 0
+
+    def note(ok: bool, label: str, extra: str = "") -> None:
+        nonlocal fail
+        mark = "OK " if ok else "FAIL"
+        if not ok:
+            fail += 1
+        print("%s  %s%s" % (mark, label, ("  " + extra) if extra else ""))
+
+    if ga.is_file():
+        mb = ga.stat().st_size / (1024 * 1024)
+        note(mb >= 80, "runtime GameAssembly.dll", "%.1f MB" % mb)
+    else:
+        note(False, "runtime GameAssembly.dll missing", str(ga))
+
+    note(meta.is_file(), "staged global-metadata.dat", str(meta) if meta.is_file() else "")
+    client = Path(args.client_meta) if getattr(args, "client_meta", "") else CLIENT_META
+    if client.is_file() and meta.is_file():
+        import hashlib
+
+        def md5(p: Path) -> str:
+            h = hashlib.md5()
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        c, s = md5(client), md5(meta)
+        note(c == s, "metadata vs client", "client=%s staged=%s" % (c[:8], s[:8]))
+    elif client.is_file():
+        note(True, "client metadata present (not staged yet)", str(client))
+    else:
+        note(False, "client metadata missing", str(client))
+
+    note(info.is_file(), "dump_info.txt")
+    if info.is_file():
+        txt = info.read_text(encoding="utf-8", errors="replace")
+        has_regs = "CodeRegistration=" in txt and "MetadataRegistration=" in txt
+        ga_ok = "ga_ok=1" in txt.replace(" ", "")
+        if has_regs:
+            note(True, "dump_info Registration")
+        elif ga_ok:
+            print("WARN  dump_info has no Registration (prepare_forcedump can recover)")
+        else:
+            note(False, "dump_info Registration")
+
+    local_exe = list(dumper_local.glob("Il2CppDumper*.exe")) if dumper_local.is_dir() else []
+    note(bool(local_exe) or feng_dumper.is_file(), "Il2CppDumper.exe",
+         str(local_exe[0] if local_exe else feng_dumper))
+    note(process_py.is_file(), "process_runtime_dump.py")
+    archives = sorted(rt.glob("_archive_*/out/dump.cs"))
+    note(True, "archives", "%d" % len(archives))
+    print("next: inject GaRuntimeDump.dll → python Dumps/runtime/process_runtime_dump.py")
+    print("dump-check does not write dump.cs")
+    return 1 if fail else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -762,7 +1541,22 @@ def main() -> int:
     p_map.add_argument(
         "--apply",
         action="store_true",
-        help="写入 x/ 已映射哈希和 0xRVA；默认只出 tsv",
+        help="写入已映射哈希 + constexpr kRva*（不改裸 0xHEX）",
+    )
+    p_map.add_argument(
+        "--apply-hashes",
+        action="store_true",
+        help="只换类/字段/方法哈希",
+    )
+    p_map.add_argument(
+        "--apply-krva",
+        action="store_true",
+        help="只改 constexpr kRva* = 0x…",
+    )
+    p_map.add_argument(
+        "--apply-all-hex",
+        action="store_true",
+        help="旧行为：所有 0xRVA token；哈希已在新 dump 时拒绝",
     )
 
     p_au = sub.add_parser("audit", help="残槽：哈希 / 方法头 / shape / 体内点字节")
@@ -778,13 +1572,63 @@ def main() -> int:
         help="已知不在 dump 的哈希/RVA（每行一项）",
     )
 
+    p_ly = sub.add_parser(
+        "layout",
+        help="旧/新 dump 字段偏移+类型差，以及 kFb* 是否仍等于新偏移",
+    )
+    p_ly.add_argument("--old", default="", help="旧 dump.cs（默认最新 _archive_*/out/dump.cs）")
+    p_ly.add_argument("--new", default=str(DEFAULT_NEW))
+    p_ly.add_argument("--x-dir", default=str(DEFAULT_X))
+    p_ly.add_argument("--out-dir", default=str(DEFAULT_OUT))
+    p_ly.add_argument(
+        "--ignore",
+        default=str(ROOT / "scripts" / "data" / "ga_remount_ignore.txt"),
+    )
+
+    p_kr = sub.add_parser("krva", help="kRva* 与同后缀 kHash* 对 dump 方法 RVA")
+    p_kr.add_argument("--new", default=str(DEFAULT_NEW))
+    p_kr.add_argument("--x-dir", default=str(DEFAULT_X))
+    p_kr.add_argument("--out-dir", default=str(DEFAULT_OUT))
+    p_kr.add_argument("--catalog", default=str(DEFAULT_CATALOG))
+    p_kr.add_argument(
+        "--ignore",
+        default=str(ROOT / "scripts" / "data" / "ga_remount_ignore.txt"),
+    )
+    p_kr.add_argument(
+        "--write-bind",
+        action="store_true",
+        help="把 MATCH/DUMP_ID 写入 scripts/data/ga_krva_bind.tsv（下次 apply-krva 用）",
+    )
+
+    p_sm = sub.add_parser("smoke", help="扫 x.jsonl(+轮转) 的 hits=a/b（注入后 remount 冒烟）")
+    p_sm.add_argument("--log", default=str(DEFAULT_LOG))
+    p_sm.add_argument("--expect", default=str(DEFAULT_SMOKE_EXPECT))
+    p_sm.add_argument(
+        "--write-expect",
+        action="store_true",
+        help="用当前日志写 expect 基线（不要在更新日红灯时写）",
+    )
+    p_sm.add_argument("-v", "--verbose", action="store_true")
+
+    p_dc = sub.add_parser("dump-check", help="预检运行时 GA / metadata / Dumper（不写 dump.cs）")
+    p_dc.add_argument("--ga", default=str(DEFAULT_GA))
+    p_dc.add_argument("--client-meta", default=str(CLIENT_META))
+
     sub.add_parser("howto", help="打印 Agent 执行清单（硬停 + 命令）")
 
     args = ap.parse_args()
     if args.cmd == "map":
         return cmd_map(args)
+    if args.cmd == "layout":
+        return cmd_layout(args)
+    if args.cmd == "krva":
+        return cmd_krva(args)
     if args.cmd == "audit":
         return cmd_audit(args)
+    if args.cmd == "smoke":
+        return cmd_smoke(args)
+    if args.cmd == "dump-check":
+        return cmd_dump_check(args)
     if args.cmd == "howto":
         sys.stdout.write(HOWTO)
         if not HOWTO.endswith("\n"):

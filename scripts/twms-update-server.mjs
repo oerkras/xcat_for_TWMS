@@ -28,7 +28,7 @@
  *   POST /twms/admin/remote-script (loopback；指定设备 PowerShell enqueue|cancel)
  *   GET  /twms/admin/remote-script (loopback；远程脚本队列)
  *   GET  /twms/admin/update-channels (loopback；对外允许版本 + 分组覆盖)
- *   POST /twms/admin/update-channels (loopback；set-default|set-group|clear-group)
+ *   POST /twms/admin/update-channels (loopback；set-default|set-group|clear-group|promote-all)
  */
 import http from "node:http";
 import crypto from "node:crypto";
@@ -46,7 +46,7 @@ import { createRemoteScriptQueue } from "./twms-remote-script.mjs";
 import { createIpGeo } from "./twms-ip-geo.mjs";
 import { createUpdateChannels } from "./twms-update-channels.mjs";
 
-const SERVER_VERSION = "0.4.13";
+const SERVER_VERSION = "0.4.14";
 const kChinaTz = "Asia/Shanghai";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -1790,7 +1790,20 @@ async function handleAdmin(req, res, routedPath) {
         sendJson(res, 200, { ok: true, action: "clear-group", ...r, ...(await updateChannels.snapshot()) });
         return;
       }
-      sendJson(res, 400, { ok: false, error: "action must be set-default|set-group|clear-group" });
+      if (
+        action === "promote-all" ||
+        action === "promoteall" ||
+        action === "all-latest" ||
+        action === "alllatest"
+      ) {
+        const r = await updateChannels.promoteAllToLatest();
+        sendJson(res, 200, { ok: true, action: "promote-all", ...r, ...(await updateChannels.snapshot()) });
+        return;
+      }
+      sendJson(res, 400, {
+        ok: false,
+        error: "action must be set-default|set-group|clear-group|promote-all",
+      });
     } catch (err) {
       sendJson(res, err?.status || 400, { ok: false, error: err?.message || "update-channels failed" });
     }

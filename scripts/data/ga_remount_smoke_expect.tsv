@@ -1,0 +1,37 @@
+# 09-17 最后一次 Il2CppBind 会话（path=* 已归一化）。a 只许变好，b 必须相同。
+tag	prefix	a	b	path
+AtkAccel	field offsets path=*	8	8	meta
+Attack	attack slots path=*	4	4	meta
+Attack	methods path=*	5	5	meta-partial
+AuctionTown	offsets path=*	6	6	meta
+AutoEnter	login slots path=*	16	16	meta
+AutoEnter	methods path=*	5	5	meta
+AutoLiePort	methods path=*	7	7	meta-partial
+AutoLiePort	quiz fields path=*	10	10	meta
+Consumable	FuncKey slots path=*	2	2	meta
+Consumable	PortalScroll methods path=*	1	1	meta
+Consumable	methods path=*	1	1	meta
+DropAlert	alert field path=*	1	1	meta
+DropPort	field offsets path=*	21	21	meta
+Foothold	fh/lr/vc slots path=*	20	20	meta
+Il2CppBind	unity managed upgrade OK	3	3	
+Il2CppContainer	field off path=*	0	22	fb-open-generic
+Il2CppMapData	field off path=*	7	7	meta
+Il2CppNetwork	field off path=*	9	9	meta
+InputPort	methods path=*	2	2	meta
+Invuln	fields path=*	12	12	meta
+KickSniff	pkt/a480 fields path=*	5	5	meta
+MobPool	di/vcAp path=*	9	9	meta
+MobPool	mob fields path=*	13	13	meta
+MobPool	uiHp/life fields path=*	9	9	meta
+PlayerCombat	combat slots path=*	10	10	meta
+SecAttack	static fields path=*	3	3	meta
+SkillPort	field off	9	9	
+Skill	methods path=*	9	9	meta
+Teleport	methods path=*	3	3	meta
+Teleport	tp slots path=*	16	16	meta
+Titlebar	price fields path=*	3	6	meta-partial
+UserPool	field off path=*	2	2	meta
+WorldMapTravel	offsets path=*	8	8	meta
+WorldMapTravel	wm-off path=*	7	7	meta
+WorldPort	wm/field slots path=*	5	5	meta

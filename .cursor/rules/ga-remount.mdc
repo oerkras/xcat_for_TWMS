@@ -1,6 +1,6 @@
 ---
 description: 经典版客户端更新后 GameAssembly remount（换 dump.cs 哈希/方法头 RVA）。触发词：remount、ga_remount、客户端更新、换偏移、dump.cs。
-globs: scripts/ga_remount.py,scripts/data/ga_patch_sites.tsv,scripts/data/ga_remount_ignore.txt
+globs: scripts/ga_remount.py,scripts/data/ga_patch_sites.tsv,scripts/data/ga_remount_ignore.txt,scripts/data/ga_krva_bind.tsv,scripts/data/ga_remount_smoke_expect.tsv
 alwaysApply: false
 ---
 
@@ -12,8 +12,13 @@ alwaysApply: false
 
 - 只换 dump 能证明的**类/字段/方法哈希**和**方法头 RVA**。
 - 体内点只核 `scripts/data/ga_patch_sites.tsv`；编码变了停，开 IDA，**禁止**在平坦化里盲搜 `75 07`。
-- `map` 默认 dry-run。`--apply` 仅当输出里 `on_old_map>0` **且用户当轮明确说 apply**。
-- 哈希已在新 dump 上（`already_on_new`、`on_old_map=0`）→ 脚本会 REFUSE；不要绕过。
+- `map` 默认 dry-run。`--apply` / `--apply-hashes` / `--apply-krva` 仅当输出里 `on_old_map>0` **且用户当轮明确说 apply**。
+- `--apply` = 哈希 + 具名 `kRva*`。**禁止** `--apply-all-hex` 除非用户点名。
+- 哈希已在新 dump 上时 `--apply-all-hex` 会 REFUSE；`--apply-hashes` 会 skip。
+- apply 哈希之后跑 `layout`，再 `--apply-krva`，再 `krva` / `audit`。
+- `layout` 的 `TYPE_FLIP` / `FALLBACK_STALE` 必须改 `kFb*`（equal-offset 换哈希会把 Vector2 接到同址数组）。
+- `krva MATCH` 含同一哈希的 override 方法头；`--apply-krva` 走 `ga_krva_bind.tsv` 哈希身份。
+- 注入后 `smoke` 对照 `ga_remount_smoke_expect.tsv`，并扫日志轮转。
 
 ## 禁止
 

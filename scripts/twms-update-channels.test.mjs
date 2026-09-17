@@ -69,6 +69,21 @@ assert.equal(ch2.configured(), true);
 const persisted = await ch2.resolveManifest({});
 assert.equal(persisted.buildId, 139);
 
+await ch.setGroup({ uid: "crd", buildId: 139 });
+await ch.setGroup({ uid: "wpc", buildId: 139 });
+const promoted = await ch.promoteAllToLatest();
+assert.equal(promoted.defaultBuildId, 146);
+assert.deepEqual(promoted.clearedUids, ["crd", "wpc"]);
+const afterPromote = await ch.resolveManifest({ uid: "crd" });
+assert.equal(afterPromote.buildId, 146);
+assert.equal(afterPromote.channel, "default");
+
+const ch3 = createUpdateChannels({ releaseRoot: tmp });
+await ch3.load();
+const persistedLatest = await ch3.resolveManifest({ uid: "wpc" });
+assert.equal(persistedLatest.buildId, 146);
+assert.equal(persistedLatest.channel, "default");
+
 let threw = false;
 try {
   await ch.setDefault(999);

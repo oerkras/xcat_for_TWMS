@@ -178,7 +178,12 @@ constexpr int kLimboSoftCycleMax = 2;    // 连续 limbo 周期满额放 hold �
 static_assert(kLimboConnectRounds > 8, "limbo backoff would underflow");
 static_assert(kLimboConnectRounds < kConnectWaitRounds, "limbo must fire before connect-wait ends");
 // BIN 04:20：Connecting 空耗 try=1→20 才 ConnectLogin；满 ~3s 改去 poll（自连优先，勿叠登）。
+// 09-17 客户端握手常 3s+：Connecting 期间改为 KickSniff 空等，此值只作日志节拍，不再提前进 poll。
 constexpr int kConnectingStallRounds = 12;
+// Connecting 握手中禁止 SampleNm / dismiss 抢泵（09-17 主因观感停顿；09-10 握手 ~200ms 碰不到）。
+constexpr DWORD kConnectingPeekMs = 80;
+// CloseSession 后游戏自连约 1.2s 才进 Connecting（09-10 / 09-17 同）。先等自连，勿 ConnectLogin 叠登。
+constexpr DWORD kSelfConnectGraceMs = 1500;
 
 constexpr int kStateDisconnecting = 0;
 constexpr int kStateDisconnected = 1;
@@ -525,6 +530,18 @@ void KickLogLine(const char* fmt, ...) {
     const std::wstring dir = ResolveLogDir();
     if (!dir.empty())
         (void)x::runtime::AppendDbgLog(dir + L"\\kick.log", buf, static_cast<DWORD>(n));
+}
+
+int KickPeekNmState() { return x::features::kick_sniff::LastSessionState(); }
+
+void NoteConnectingHold(int tryNo, bool* sawConnecting) {
+    if (!sawConnecting || *sawConnecting) return;
+    *sawConnecting = true;
+    LogLine("NM Connecting via=kick_sniff try=%d — hold, no ConnectLogin / no pump sample", tryNo);
+    KickLogLine("connect_wait Connecting via=kick_sniff try=%d", tryNo);
+    x::features::notify::PublishNotification(x::features::notify::NotificationEvent{
+        x::features::notify::NotificationKind::Info, "soft-login-try", "软重连试连中",
+        "登录服握手中（客户端，约数秒）", 8000});
 }
 
 const char* StateName(int st) {
@@ -2357,6 +2374,20 @@ int SoftProbeInMapOrFinish(const char* tag) {
         Finish(1, ok);
         return 1;
     }
+    // 出图后 InterStage 期 SamplePlayReady 常 Call 失败（BIN 16:09:16 sample_pump_fail），
+    // 但 WorldPort 已 inMap=0。继续投泵既拖 leave_map，又跟客户端握手抢主线程。
+    if (needReconnect && !x::features::ports::world::IsInMapScene() &&
+        !gInMapRecoverSinceMs.load(std::memory_order_acquire)) {
+        const DWORD now = GetTickCount();
+        const DWORD lastLog = gLastRefuseLogMs.load(std::memory_order_acquire);
+        if (!lastLog || now - lastLog >= kRefuseLogGapMs) {
+            gLastRefuseLogMs.store(now ? now : 1, std::memory_order_release);
+            LogLine("in_map_probe left_map tag=%s via=world_port why=%s — skip pump sample",
+                    tag ? tag : "?", gWhy);
+            KickLogLine("in_map_probe left_map tag=%s via=world_port", tag ? tag : "?");
+        }
+        return 0;
+    }
     if (SoftShouldDeferPumpWork()) {
         LogLine("in_map_probe defer tag=%s pump_stale age=%ums", tag ? tag : "?",
                 static_cast<unsigned>(x::runtime::main_thread::LastRealTickAgeMs()));
@@ -2473,7 +2504,7 @@ int WaitLeaveMapOrRecover(const char* tag) {
             KickLogLine("leave_map timeout tag=%s", tag ? tag : "?");
             return -1;
         }
-        Sleep(200);
+        Sleep(kConnectingPeekMs);
     }
     return -1;
 }
@@ -3002,6 +3033,35 @@ DWORD WINAPI Worker(LPVOID) {
             // 否则会把人从拍卖行拽回登录流程。放在泵 idle 分支之前 —— 场景态是 off-pump
             // 直读（与本 worker 其它路径的 IsInMapScene 同口径），泵不新鲜时照样判得出。
             if (SoftFinishIfInMarket("connect_wait")) goto next;
+            {
+                const int kickSt = KickPeekNmState();
+                if (kickSt == kStateConnecting) {
+                    NoteConnectingHold(t, &sawConnecting);
+                    ++connectingStreak;
+                    if (connectingStreak == kConnectingStallRounds) {
+                        LogLine("connect-wait still Connecting streak=%d — wait KickSniff "
+                                "Connected (no poll/ConnectLogin)",
+                                connectingStreak);
+                        KickLogLine("connect_wait Connecting_hold streak=%d", connectingStreak);
+                    }
+                    Sleep(kConnectingPeekMs);
+                    continue;
+                }
+                connectingStreak = 0;
+                if (kickSt != kStateConnected && !invokeOk) {
+                    const DWORD began = gAttemptBeginMs.load(std::memory_order_acquire);
+                    if (began && (GetTickCount() - began) < kSelfConnectGraceMs) {
+                        if ((t % 10) == 0) {
+                            LogLine("connect-wait self-connect grace try=%d kick=%d — no "
+                                    "ConnectLogin",
+                                    t, kickSt);
+                            KickLogLine("connect_wait self_connect_grace try=%d", t);
+                        }
+                        Sleep(kConnectingPeekMs);
+                        continue;
+                    }
+                }
+            }
             // 泵 idle：禁止 Sample/Dismiss/ConnectLogin（BIN 02:30 空打 ~20s）。
             if (SoftShouldDeferPumpWork()) {
                 ++connectPumpFail;
@@ -3033,7 +3093,8 @@ DWORD WINAPI Worker(LPVOID) {
                     }
                     goto next;
                 }
-                Sleep(kConnectWaitMs + 200);
+                Sleep(KickPeekNmState() == kStateConnected ? kConnectingPeekMs
+                                                           : (kConnectWaitMs + 200));
                 continue;
             }
 
@@ -3148,21 +3209,8 @@ DWORD WINAPI Worker(LPVOID) {
                     continue;
                 }
                 if (sample.state == kStateConnecting) {
-                    if (!sawConnecting) {
-                        sawConnecting = true;
-                        LogLine("NM Connecting during connect-wait try=%d — hold, no dismiss", t);
-                        KickLogLine("connect_wait Connecting try=%d", t);
-                    }
-                    ++connectingStreak;
-                    if (connectingStreak >= kConnectingStallRounds) {
-                        // BIN 04:20：Connecting 空转数秒后仍 ConnectLogin 叠登 → 易变 Disconnected。
-                        LogLine("connect-wait Connecting stall try=%d streak=%d — poll early", t,
-                                connectingStreak);
-                        KickLogLine("connect_wait Connecting_stall try=%d", t);
-                        break;
-                    }
-                    // Connecting：自连优先，不抢泵做 dismiss。
-                    Sleep(kConnectWaitMs);
+                    NoteConnectingHold(t, &sawConnecting);
+                    Sleep(kConnectingPeekMs);
                     continue;
                 }
                 connectingStreak = 0;
@@ -3182,6 +3230,11 @@ DWORD WINAPI Worker(LPVOID) {
             if (invokeOk) {
                 // ConnectLogin 已触发，等 NM 变 Connecting/Connected（本循环顶部采样）。
                 Sleep(kConnectWaitMs);
+                continue;
+            }
+            if (KickPeekNmState() == kStateConnecting) {
+                NoteConnectingHold(t, &sawConnecting);
+                Sleep(kConnectingPeekMs);
                 continue;
             }
 
@@ -3324,6 +3377,11 @@ DWORD WINAPI Worker(LPVOID) {
         int emptyHallPoll = 0;
         int discPoll = 0;
         for (int i = 0; i < kPollRounds && !gStop.load(); ++i) {
+            if (KickPeekNmState() == kStateConnecting) {
+                NoteConnectingHold(i, &sawConnecting);
+                Sleep(kConnectingPeekMs);
+                continue;
+            }
             {
                 DismissCtx mid{};
                 mid.aggressive = 1;

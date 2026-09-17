@@ -2118,7 +2118,14 @@ void OnStateChange(int prev, int now, int err) {
         FlushSendLog();
         Snapshot("disconnect");
     } else if (now == kStateConnected && prev != kStateConnected) {
-        x::features::galaxy_token_probe::RequestSample("connected");
+        // 软重连 attempt 期间 SampleOnPump 最长 2500ms，会跟 LoginUiReady / RequestRestart 抢泵
+        //（BIN 16:09:20 SAMPLE Call timeout/fail why=connected 与 KickSniff Connected 同拍）。
+        if (x::features::soft_login_probe::IsAttemptBusy() ||
+            x::features::soft_login_probe::IsHoldActive()) {
+            Log("skip galaxy token sample (soft attempt/hold)");
+        } else {
+            x::features::galaxy_token_probe::RequestSample("connected");
+        }
     }
 }
 

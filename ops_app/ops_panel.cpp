@@ -2696,6 +2696,98 @@ bool PostUpdateChannelDefault(OpsState& st, uint32_t buildId, std::string& err) 
 }
 
 bool PostUpdateChannelGroup(OpsState& st, const char* uid, const char* token, uint32_t buildId,
+                            bool clear, std::string& err);
+
+bool PostUpdateChannelPromoteAllFallback(OpsState& st, std::string& err) {
+    const uint32_t latest =
+        st.lastBuiltClientBuildId > 0 ? st.lastBuiltClientBuildId : st.latestClientBuildId;
+    if (latest == 0) {
+        err = "没有最新构建（latest.json）";
+        return false;
+    }
+    const auto uids = st.updateChannelGroups;
+    const auto toks = st.updateChannelTokens;
+    if (!PostUpdateChannelDefault(st, latest, err)) return false;
+    for (const auto& g : uids) {
+        if (g.uid.empty()) continue;
+        if (!PostUpdateChannelGroup(st, g.uid.c_str(), nullptr, 0, true, err)) return false;
+    }
+    for (const auto& t : toks) {
+        if (t.token.empty()) continue;
+        if (!PostUpdateChannelGroup(st, nullptr, t.token.c_str(), 0, true, err)) return false;
+    }
+    return true;
+}
+
+bool PostUpdateChannelPromoteAll(OpsState& st, std::string& err) {
+    if (!TwmsRunning(st)) {
+        err = "TWMS API 未运行";
+        return false;
+    }
+    const auto r = HttpPost(L"127.0.0.1", 18789, L"/twms/admin/update-channels",
+                            "{\"action\":\"promote-all\"}", 4000, 256 * 1024);
+    if (r.ok && r.body.find("\"ok\":true") != std::string::npos) {
+        ParseUpdateChannelsPayload(r.body, st);
+        return true;
+    }
+    const std::string apiErr = FindJsonString(r.body, "error");
+    // 旧更新服务没有 promote-all：拆成设默认 + 逐个清分组。
+    if (r.status == 400 && apiErr.find("action must be") != std::string::npos) {
+        return PostUpdateChannelPromoteAllFallback(st, err);
+    }
+    err = !apiErr.empty() ? apiErr : (!r.error.empty() ? r.error : ("HTTP " + std::to_string(r.status)));
+    if (r.status == 404) err = "接口不存在：请重启 TWMS 更新服务";
+    return false;
+}
+
+void DrawPromoteAllLatestUi(OpsState& st, const char* id) {
+    char btnId[64]{};
+    char popupId[80]{};
+    std::snprintf(btnId, sizeof(btnId), "一键全员最新##%s", id);
+    std::snprintf(popupId, sizeof(popupId), "confirm_promote_all##%s", id);
+    const uint32_t latest =
+        st.lastBuiltClientBuildId > 0 ? st.lastBuiltClientBuildId : st.latestClientBuildId;
+    const bool can = TwmsRunning(st) && latest > 0;
+    if (!can) ImGui::BeginDisabled();
+    if (ImGui::SmallButton(btnId)) ImGui::OpenPopup(popupId);
+    if (!can) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(
+            "把对外允许拉到最新构建，并清掉所有 UID/TOKEN 分组钉死的旧包。\n"
+            "死表里进不了图的人下次探活就能升。不是全体强制推送。");
+    }
+    if (ImGui::BeginPopupModal(popupId, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        std::string ver = st.lastBuiltClientVersionText;
+        if (ver.empty()) ver = st.latestClientVersionText;
+        const int nUid = static_cast<int>(st.updateChannelGroups.size());
+        const int nTok = static_cast<int>(st.updateChannelTokens.size());
+        ImGui::TextUnformatted("确认全员跟随最新？");
+        ImGui::TextDisabled("目标：v%s  build %u", ver.c_str(), latest);
+        if (nUid > 0 || nTok > 0) {
+            ImGui::TextWrapped("将清除 %d 个 UID 分组、%d 个 TOKEN 分组（钉在旧包上的人会改跟默认）。",
+                               nUid, nTok);
+        } else {
+            ImGui::TextDisabled("当前没有 UID/TOKEN 分组覆盖。");
+        }
+        ImGui::TextWrapped("不写 force-update.json。客户端下次探活检查更新即升。");
+        ImGui::Spacing();
+        if (ImGui::Button("确认全员最新##yes", ImVec2(140, 0))) {
+            std::string err;
+            if (PostUpdateChannelPromoteAll(st, err)) {
+                SetStatus(st, "已全员跟随最新 v" + ver + " #" + std::to_string(latest) +
+                                  "（已清 " + std::to_string(nUid) + " 个 UID 分组）");
+            } else {
+                SetStatus(st, err);
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("取消##no", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
+bool PostUpdateChannelGroup(OpsState& st, const char* uid, const char* token, uint32_t buildId,
                             bool clear, std::string& err) {
     if (!TwmsRunning(st)) {
         err = "TWMS API 未运行";
@@ -4798,6 +4890,11 @@ void DrawDeadClientsSection(OpsState& st) {
         CopyText(out.c_str());
         SetStatus(st, "已复制死表 " + std::to_string(copied) + " 行");
     }
+    ImGui::SameLine(0, 10.f);
+    DrawPromoteAllLatestUi(st, "dead");
+
+    std::unordered_map<std::string, std::string> tokenToUid;
+    MesoCollectTokenUidAliases(st, tokenToUid);
     const float deadH = (std::max)(120.f, ImGui::GetTextLineHeightWithSpacing() * 8.f);
     if (!ImGui::BeginTable("dead_clients_table", 10,
                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
@@ -4844,6 +4941,16 @@ void DrawDeadClientsSection(OpsState& st) {
         else ImGui::TextUnformatted(c.geo.c_str());
         ImGui::TableSetColumnIndex(2);
         ImGui::TextUnformatted(c.machine.empty() ? "—" : c.machine.c_str());
+        if (ImGui::BeginPopupContextItem("dead_machine")) {
+            if (!c.machine.empty() && ImGui::MenuItem("复制计算机名")) CopyText(c.machine.c_str());
+            if (!c.uid.empty() && ImGui::MenuItem("复制 uid")) CopyText(c.uid.c_str());
+            const std::string personKey = ClientPersonKey(c, i, tokenToUid);
+            if (ClientPersonKeyHasIdentity(personKey)) {
+                ImGui::Separator();
+                DrawPersonAllowUpdateMenu(st, personKey);
+            }
+            ImGui::EndPopup();
+        }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("deviceId %s\n%s", c.deviceId.empty() ? "—" : c.deviceId.c_str(),
                               c.lastKind.empty() ? "" : c.lastKind.c_str());
@@ -4851,6 +4958,15 @@ void DrawDeadClientsSection(OpsState& st) {
         ImGui::TableSetColumnIndex(3);
         if (c.uid.empty()) ImGui::TextDisabled("—");
         else ImGui::TextUnformatted(c.uid.c_str());
+        if (ImGui::BeginPopupContextItem("dead_uid")) {
+            if (!c.uid.empty() && ImGui::MenuItem("复制 uid")) CopyText(c.uid.c_str());
+            const std::string personKey = ClientPersonKey(c, i, tokenToUid);
+            if (ClientPersonKeyHasIdentity(personKey)) {
+                ImGui::Separator();
+                DrawPersonAllowUpdateMenu(st, personKey);
+            }
+            ImGui::EndPopup();
+        }
         ImGui::TableSetColumnIndex(4);
         ImGui::TextDisabled("%s", c.appVersion.empty() ? "—" : c.appVersion.c_str());
         ImGui::TableSetColumnIndex(5);
@@ -9951,7 +10067,7 @@ void OpsPanel_Draw(OpsState& st) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip(
                     "检查更新走「允许」版本，不是刚打的 latest.json。\n"
-                    "出新包不会自动放开；分组可在连接表右键单独指定。");
+                    "出新包不会自动放开；「一键全员最新」会把分组也拉到最新。");
             if (st.forcedClientBuildId > 0) {
                 ImGui::SameLine(0, 10.f);
                 ImGui::TextColored(OpsTone::Warn(), "强制 v%s #%u",
@@ -10000,6 +10116,8 @@ void OpsPanel_Draw(OpsState& st) {
                 if (!canSet) ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("全员检查更新升到此版；不影响磁盘上的最新构建。");
+                ImGui::SameLine();
+                DrawPromoteAllLatestUi(st, "svc");
                 if (ImGui::BeginPopupModal("confirm_allow_channel", nullptr,
                                            ImGuiWindowFlags_AlwaysAutoResize)) {
                     uint32_t bid = st.updateChannelPendingBuildId;
@@ -10014,7 +10132,8 @@ void OpsPanel_Draw(OpsState& st) {
                     ImGui::TextDisabled("目标：v%s  build %u", ver.c_str(), bid);
                     ImGui::TextWrapped(
                         "之后客户端检查更新默认升到这一版，刚打的包不会自动放开。"
-                        "个别分组可在「连接与访问」右键单独指定。");
+                        "个别分组可在「连接与访问」右键单独指定；死表也能右键。"
+                        "要一次清掉所有分组并跟最新构建，用「一键全员最新」。");
                     ImGui::Spacing();
                     if (SafeButton("确认##allow_yes", ImVec2(120, 0))) {
                         std::string err;

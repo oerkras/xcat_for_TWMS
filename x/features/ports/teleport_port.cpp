@@ -103,7 +103,7 @@ constexpr size_t kFbVcLadderOrRope = 0x40;
 constexpr size_t kFbVcRelPos = 0x88, kFbVcAp = 0x98, kFbVcApl = 0xB8, kFbVcMoveAction = 0x84;
 constexpr size_t kFbMpForcedFlush = 0x48, kFbMpX = 0x10, kFbMpY = 0x12;
 constexpr size_t kFbFhX1 = 0x14, kFbFhY1 = 0x18, kFbFhX2 = 0x1C, kFbFhY2 = 0x20;
-constexpr size_t kFbTeleport = 0x390;
+constexpr size_t kFbTeleport = 0x3D8;  // UL Teleport valuetype；shape 同源 @0x3D8
 
 size_t gOffVecCtrl = kFbVecCtrl, gOffVcCurFh = kFbVcCurFh, gOffVcLastFh = kFbVcLastFh;
 size_t gOffVcLadderOrRope = kFbVcLadderOrRope;
