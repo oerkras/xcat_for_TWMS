@@ -3715,6 +3715,15 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
     };
 
     const bool hirPick = gHiraishinEnabled.load(std::memory_order_acquire);
+    // 瞬移可跨层，但本层（玩家当前 zMass+同高）还有活怪时不先飞 hop~200 的错台。
+    // 211 FA5C：layer=cross hop~194 而同层仍有怪。空中贴怪仍欧式最近；飞雷神/拟人
+    // 不进此支。不降 kSameLayerY、不每 tick fill。用 SameLayer（玩家真站位），不用
+    // sticky pack 覆盖——否则脚边另一 zMass 的 hop~9 会被远处本区锚抢走。
+    const bool tpPreferSameFloor =
+        allowCrossLayer && !hirPick &&
+        gTeleportEnabled.load(std::memory_order_acquire) &&
+        !gImpactApproachEnabled.load(std::memory_order_acquire);
+    bool usedSameFloorPass = false;
     if (hirPick) {
         (void)looseLand;
         (void)allowCrossLayer;
@@ -3896,8 +3905,14 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
                 return;
             }
 
-            (void)sameLayerPass;
             // 空中贴怪：欧式最近活怪。落点失败仍可选（飞贴不依赖台）。
+            // 瞬移：sameLayerPass=true 只收本层；本层空了再 second pass 收错台。
+            if (tpPreferSameFloor) {
+                const bool sameFloor = SameLayer(px, py, m.x, m.y);
+                if (sameLayerPass != sameFloor) return;
+            } else {
+                (void)sameLayerPass;
+            }
             const bool landOk = ensureLand(i);
             if (!mobZmOk[i]) {
                 int32_t z = 0;
@@ -3922,6 +3937,10 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
         };
 
         for (int i = 0; i < snap.count; ++i) consider(i, /*sameLayerPass=*/true);
+        if (best && tpPreferSameFloor) usedSameFloorPass = true;
+        if (!best && tpPreferSameFloor) {
+            for (int i = 0; i < snap.count; ++i) consider(i, /*sameLayerPass=*/false);
+        }
         if (!best) return false;
     }
 
@@ -3967,7 +3986,8 @@ bool PickNearestTarget(const ports::mob::Snapshot& snap, float px, float py, DWO
             playerZmOk ? (int)playerZm : 0,
             (kStickyPackZm && gStickyPackZmOk) ? (int)gStickyPackZm : 0, bestZmOk ? (int)bestZm : 0,
             looseLand ? 1 : 0, best->inView ? 1 : 0,
-            humanPick ? (bestEtaMs >= 0.f ? "eta" : "map") : "near");
+            humanPick ? (bestEtaMs >= 0.f ? "eta" : "map")
+                      : (usedSameFloorPass ? "floor" : "near"));
     if (humanPick && bestEtaMs >= 0.f) gHumanLockEtaMs = bestEtaMs;
     if (allowCrossLayer) {
         float nearD2 = 1e30f;

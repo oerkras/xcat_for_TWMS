@@ -2834,6 +2834,18 @@ void RecordHangupFarmMap(const char* reason) {
                       reason ? reason : "");
         return;
     }
+    // F5 rising-edge / ForceApply 会把当前图写成挂机图。开趟、崩溃续跑、清洗让路
+    // 时人常在过路图：BIN ffaeaf 把 105090311 改成 105090310 后假「已回挂机图」。
+    // 起号交接必须仍能覆盖（岛上 F5 记过 40000）。不要用 HoldsHangupClock 扩到 Idle：
+    // Yield 进 Idle 是为了让脏会话 CloseSession。
+    const bool charBoot = reason && std::strcmp(reason, "char_boot_hangup") == 0;
+    if (!charBoot && (gPendingReturnFarm || gKeepFarmMap || HoldsHangupClock())) {
+        runtime::LogI("AutoSupply",
+                      "RecordHangupFarmMap skip cur=%s keep=%s pending=%d keepFlag=%d trip=%d (%s)",
+                      buf, gLastFarmMap[0] ? gLastFarmMap : "-", gPendingReturnFarm ? 1 : 0,
+                      gKeepFarmMap ? 1 : 0, HoldsHangupClock() ? 1 : 0, reason ? reason : "");
+        return;
+    }
     strncpy_s(gLastFarmMap, buf, _TRUNCATE);
     runtime::LogI("AutoSupply", "RecordHangupFarmMap %s (%s)", gLastFarmMap,
                   reason ? reason : "");
