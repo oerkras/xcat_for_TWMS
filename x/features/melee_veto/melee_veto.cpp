@@ -4,10 +4,10 @@
 //
 // | RVA | 符号 | 托管参数 | 原生参数 |
 // |---|---|---|---|
-// | `0x10EDC20` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
-// | `0x1103280` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
+// | `0x10EFCE0` | `UserLocal_TryDoingMeleeAttack` | `(skill, int, ref Nullable<int>, int, int, int, <class>)` = 7 | 9 |
+// | `0x1105190` | `UserLocal_TryDoingShootAttack` | `(skill, int, Nullable<int>, bool, int, uint)` = 6 | 8 |
 //
-// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x10EDC20 上，
+// ★ 这两个形状**极易对调**：被拆掉的 pointblank_shoot 就是把 6 参形状套在 0x10EFCE0 上，
 //   于是 `methodInfo` 被塞进第 7 参的位置、真 methodInfo 丢失，把射击路径整体打歪
 //   （体感「基本必挥弓」）。改这里之前先用 `Dumps/runtime/out/dump.cs` 按 RVA 复核形状。
 //
@@ -70,9 +70,9 @@ namespace {
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 using x::runtime::il2cpp::ReadPtr;
 
-constexpr uint32_t kRvaTryDoingMeleeAttack = 0x10EDC20;
-constexpr uint32_t kRvaTryDoingShootAttack = 0x1103280;
-constexpr uint32_t kRvaGetWeaponType = 0x14C92F0;
+constexpr uint32_t kRvaTryDoingMeleeAttack = 0x10EFCE0;
+constexpr uint32_t kRvaTryDoingShootAttack = 0x1105190;
+constexpr uint32_t kRvaGetWeaponType = 0x14CAB80;
 
 // ── 取框探针（一次性调研，`XCAT_MELEE_RECT_PROBE=1` 才挂）──────────────────────
 //
@@ -86,8 +86,8 @@ constexpr uint32_t kRvaGetWeaponType = 0x14C92F0;
 // （按仓规逐处实读；这里按 0 读会把分支判反。它不是武器类型——枚举最大是 Gun=49。）
 //
 // 探针要回答的就一件事：飞镖普攻那一发走的是哪条、arg4 实际是几、框实际多大。
-constexpr uint32_t kRvaGetAttackRect = 0x1298080;  // sub_7FF849EA8290
-constexpr uint32_t kRvaConstRect = 0x571FBB0;      // remounted 2026-09-10pm GetAttackRect RIP → (-88,-6,70,56)
+constexpr uint32_t kRvaGetAttackRect = 0x1299850;  // sub_7FF849EA8290
+constexpr uint32_t kRvaConstRect = 0x572C690;      // remounted 2026-09-17 GetAttackRect RIP → (-88,-6,70,56)
 constexpr int kRectKindConstPath = 55;
 
 // 近战 / 射击开头一致：push rbp / r15 / r14 / r13 / r12 / rsi / rdi / rbx = 12 字节。
@@ -611,11 +611,11 @@ bool TryArmOne(AbsHookState& st, std::atomic<bool>& refuse, uint32_t rva, void* 
 //   MeleeAttackAfterImage TDI 1655；Range: Dictionary<int,Rect> @0x18
 //   _afterimageMap: Dictionary<string, AfterImage> @0x18（09-10；旧钉 0x20 已是 WZ 节点）
 constexpr char kHashActionManager[] =
-    "e7fa713cddeb17a0a199ba3d6495dbcb2aa0caa0cd2926154a72fffa65e181d";
+    "a3173844b151f883b7d23a422b324112b7b9b8308794a36cf7c8101b29f1a69";
 constexpr char kHashSingletonInstance[] =
-    "b462a770d3e4e79c3308e21945cbb26fb30d3d4c9950770d02afa701db9bb64";
+    "f8f99182b10fac6826e4ca402fda7aa78424e7146f74d6f1cb1c69caafe8619";
 constexpr char kHashAfterImageMap[] =
-    "d3949f8040941d8b2bbc3b55fdf9b13a41dc37bb2784bbc9837bf1a0c1225bc";
+    "f350c90005a1ad9dc55bd9ba06ffc0a1c16e10c433ea22e2c5376ca1d7a167e";
 constexpr size_t kOffActionMgrAfterImageMap = 0x18;
 constexpr size_t kOffAfterImageRange = 0x18;
 

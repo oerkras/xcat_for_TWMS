@@ -67,11 +67,11 @@ int32_t ReadI32Local(void* obj, size_t off) {
 
 // Remount 2026-08-06：TDI 15147 字段 ACS 重哈希；偏移仍 0/8/0x10；klass cf990184… 未漂。
 constexpr char kHashPktDict[] =
-    "f84e5bda6c59c02bc5dd76e878e8de772bbb96eed69c033efd36d6766d491b8";  // Dictionary<ushort,int>
+    "a19d280e7d1cb0d2fc7ea6eee7010637ee95378a519e4252be70084f061eb00";  // Dictionary<ushort,int>
 constexpr char kHashSkillDict[] =
-    "b7b55f61cfe162f107f8d577fd51c236351f16338ea9abc22db01e729b86055";  // Dictionary<int,int>
+    "c23cb98c8629b4eddc925aaf8d36a1932eadf346d39918c25452e47b7f35483";  // Dictionary<int,int>
 constexpr char kHashDetectTime[] =
-    "e610eba746189a0b6bfbd90b496a4ef03bb95b4d786065cc728936c3ff981be";
+    "d4639be44aa73d40d772c17e67897d378c20b4a23c1382bd2d1e0f52fa040d6";
 constexpr size_t kFbPktDict = 0x0;
 constexpr size_t kFbSkillDict = 0x8;
 constexpr size_t kFbDetectTime = 0x10;
@@ -161,7 +161,7 @@ void EnsureStaticFieldOff() {
         gKlass = x::runtime::il2cpp_shape::ResolveSecAttackKlass();
         if (!gKlass) {
             gKlass = x::runtime::il2cpp::FindClass(
-                "", "bbe2605f1d53ac8b6df295d29b57d66f6578443902261ac859b54cb898b7019");
+                "", "a6493ff2ae9da2844869088be6c127764207ea41694282bbb748f00c2a53b1e");
         }
     }
     if (!gKlass) return;
@@ -489,9 +489,9 @@ void SampleTick(DWORD now) {
 
 
 // 热更清残：上一版若把 Collect*/Send 入口写成 xor eax,eax; ret，按原序言还原。不再安装。
-constexpr uint32_t kRvaCollectAttackPacket = 0x3D55180;
-constexpr uint32_t kRvaCollectAttackSkill = 0x3D556E0;
-constexpr uint32_t kRvaSendAttackPacketCountCheck = 0x3D55AE0;
+constexpr uint32_t kRvaCollectAttackPacket = 0x3D60EB0;
+constexpr uint32_t kRvaCollectAttackSkill = 0x3D613C0;
+constexpr uint32_t kRvaSendAttackPacketCountCheck = 0x3D61790;
 constexpr size_t kTextPatchN = 8;
 constexpr uint8_t kRetPatch[] = {0x33, 0xC0, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90};
 constexpr uint8_t kExpectPkt[] = {0x56, 0x57, 0x48, 0x81, 0xEC, 0xB8, 0x00, 0x00};

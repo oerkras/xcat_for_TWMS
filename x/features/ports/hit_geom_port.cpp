@@ -28,16 +28,16 @@ using x::runtime::il2cpp::ReadPtr;
 
 // dump.cs Mob TDI 1507；与 mob_pool_port 同源。
 constexpr char kMobClass[] =
-    "fea4358a07c99f6ab1e2cda4d015f36773997b07da3838b9e592aaf7184672d";
-constexpr uint32_t kRvaGetBodyRect = 0xF61810;
+    "b06a585bbb20974b370a52ef95e0e2329dca00dead70828c5a6cd86e76cd18b";
+constexpr uint32_t kRvaGetBodyRect = 0xF62EA0;
 
 // ActionManager：09-10pm dump TDI 1666。BIN 19:03 bind map=null — Singleton Lazy 字段再漂。
 constexpr char kHashActionManager[] =
-    "e7fa713cddeb17a0a199ba3d6495dbcb2aa0caa0cd2926154a72fffa65e181d";
+    "a3173844b151f883b7d23a422b324112b7b9b8308794a36cf7c8101b29f1a69";
 constexpr char kHashSingletonInstance[] =
-    "b462a770d3e4e79c3308e21945cbb26fb30d3d4c9950770d02afa701db9bb64";  // Lazy<T> @0x0 · TDI 13795
+    "f8f99182b10fac6826e4ca402fda7aa78424e7146f74d6f1cb1c69caafe8619";  // Lazy<T> @0x0 · TDI 13799
 constexpr char kHashAfterImageMap[] =
-    "d3949f8040941d8b2bbc3b55fdf9b13a41dc37bb2784bbc9837bf1a0c1225bc";  // Dict<string,AfterImage>
+    "f350c90005a1ad9dc55bd9ba06ffc0a1c16e10c433ea22e2c5376ca1d7a167e";  // Dict<string,AfterImage>
 constexpr size_t kOffActionMgrAfterImageMap = 0x18;  // 09-10；0x20 已是 WZ 节点
 constexpr size_t kOffAfterImageRange = 0x18;
 constexpr size_t kOffDictEntries = 0x18;

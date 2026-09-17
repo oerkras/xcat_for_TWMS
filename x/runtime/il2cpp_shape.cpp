@@ -31,12 +31,12 @@ constexpr int kTypeSzArray = 0x1d;
 // remounted 2026-08-06 hashes（08-04 全 miss；交叉：WM+0x28→UL，FAC+0x10→NM）
 // TypeDefIndex 08-14 dump：WM=1395 UL=1587 SL=1174 FAC=13787 NM=13812。
 constexpr char kHashWorldManager[] =
-    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
+    "cba21c42799e50c37623ea5fd88d5c4c9155c2565d25cde936671684e16dff7";
 constexpr char kHashUserLocal[] =
-    "ad323f590ae79afe13fb9b744449e4ce07ba250b7adf5df5bc7b3b5d749aa5d";
+    "ec625a83527c97420571799d52a78c9fdea67caf51422f05e7e43ba4389432b";
 // Session class (methods); facade singleton is kHashNetworkManagerFacade.
 constexpr char kHashNetworkManager[] =
-    "c932d387005490bdae5c6a171d6ae990dbfe667ad98f3d33c878e162e0c7be8";
+    "f89a9012c22d5754fcaf8cf5f3cc2075c9efa95b4601b302af21382947ecbbc";
 
 // WorldManager dump TypeDef 1395 (08-14): MyUser@0x28, Field@0x58,
 // bool@0xA8（不是指针；CharacterData* 在 0xE0），SecondaryStat@0xF0
@@ -95,7 +95,7 @@ constexpr ClassShape kNmShape = {
 // NetworkManager facade TypeDef 13772 : Singleton<> —
 // Session*@0x10, state obj@0x18, Queue@0x28, HashSet@0x48
 constexpr char kHashNetworkManagerFacade[] =
-    "e5b83e30fe25bc3857a0373acc3164b965f9a67591f7800973519750bb7dcb6";
+    "b93149729dac86ae2febf6358c35ae80437fcf765e34d492b0ffe44a50c4a8c";
 constexpr FieldShape kNmFacadeFields[] = {
     {0x10, FieldKind::Ptr},
     {0x18, FieldKind::Ptr},  // state object（非裸 I32；08-04 dump）
@@ -114,7 +114,7 @@ constexpr ClassShape kNmFacadeShape = {
 
 // SecurityClient attack window — static class TypeDef 15147
 constexpr char kHashSecAttack[] =
-    "bbe2605f1d53ac8b6df295d29b57d66f6578443902261ac859b54cb898b7019";
+    "a6493ff2ae9da2844869088be6c127764207ea41694282bbb748f00c2a53b1e";
 constexpr FieldShape kSaFields[] = {
     {0x0, FieldKind::Ptr},   // Dictionary<ushort,int>
     {0x8, FieldKind::Ptr},   // Dictionary<int,int>
@@ -133,7 +133,7 @@ constexpr ClassShape kSaShape = {
 // SceneLogin TypeDef 1178（09-10）：enum@0xA0 + GO@0xA8 + 0xC0 新 UI + Channel@0xC8 / World@0xD0 / Char@0xD8
 // + Ptr@0xF8 + handles@0x100 + List@0x108 + bool@0x110（08-14 是 bool@0x108，现已是 List）。
 constexpr char kHashSceneLogin[] =
-    "d8b374c0601bc1255934015b3f8368910ec7bba6bc127d665774220be276eb6";
+    "eb579f9e366aba64d2b93c5956ef5d48f3e3bb00804a9fe6e11813b464237be";
 constexpr FieldShape kSlFields[] = {
     {0xA8, FieldKind::Ptr},
     {0xC0, FieldKind::Ptr},

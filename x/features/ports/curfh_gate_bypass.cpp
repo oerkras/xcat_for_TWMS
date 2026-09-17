@@ -17,14 +17,14 @@
 namespace x::features::ports::curfh_gate_bypass {
 namespace {
 
-// remounted 2026-09-10。CurFh 门：User+0x50 -> VecCtrl+0x28 -> test -> CONT/FAIL。
+// remounted 2026-09-17。CurFh 门：User+0x50 -> VecCtrl+0x28 -> test -> CONT/FAIL。
 // Magic/Shoot：test+jnz 75 07（跳过 FAIL 槽）。
-// Prepare：内联 +0x28 收进 callee 0x111dec0（public bool）；调用后
-//   xor al,1 / add eax,eax / cmp eax, (0x383581E2+seed)=0 / cmovnz FAIL。
-// 解出 0：stood → eax=0 → CONT。xor al,1（34 01）改 xor eax,eax（31 C0）强制 CONT。
-constexpr uint32_t kRvaMagicCmov = 0x11428A5;   // 75 07 -> EB 07
-constexpr uint32_t kRvaShootCmov = 0x110A356;   // 75 07 -> EB 07
-constexpr uint32_t kRvaPrepareJnz = 0x1160FFD;  // 34 01 -> 31 C0
+// Prepare：内联 +0x28 收进 callee 0x111FCD0（public bool）；调用后
+//   xor al,1 / add eax,eax / cmp eax, (0xF2CE1658+seed)=2 / cmovnz FAIL。
+// 解出 2：stood → eax=0 → CONT。xor al,1（34 01）改 xor eax,eax（31 C0）强制 CONT。
+constexpr uint32_t kRvaMagicCmov = 0x1144843;   // 75 07 -> EB 07
+constexpr uint32_t kRvaShootCmov = 0x111039A;   // 75 07 -> EB 07
+constexpr uint32_t kRvaPrepareJnz = 0x1162E68;  // 34 01 -> 31 C0
 
 constexpr uint8_t kMagicExpect[] = {0x75, 0x07};
 constexpr uint8_t kMagicPatch[] = {0xEB, 0x07};

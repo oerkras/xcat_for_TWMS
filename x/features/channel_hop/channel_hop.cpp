@@ -44,24 +44,24 @@ using x::runtime::il2cpp::FindClass;
 using x::runtime::il2cpp::ReadPtr;
 
 // Field.SendTransferChannelRequest(int) — remount 2026-08-04 dump.cs
-constexpr uint32_t kRvaSendTransferChannelRequest = 0xBFD870;
+constexpr uint32_t kRvaSendTransferChannelRequest = 0xBFDC70;
 // UserBase 短 IsAlertMode — CanPerformAction callee；读 LocalUser+0x118
-constexpr uint32_t kRvaIsAlertMode = 0x12AE890;
+constexpr uint32_t kRvaIsAlertMode = 0x12B0160;
 // WorldManager.CanSendExclRequest — SendTransfer 发包前门控（BIN：未过则无 op=44）
-constexpr uint32_t kRvaCanSendExclRequest = 0xE2D840;
+constexpr uint32_t kRvaCanSendExclRequest = 0xE2F8D0;
 constexpr int kExclTypeTransferChannel = 500;  // SendTransfer 传入的 type（常量解混淆）
 
 constexpr char kFieldClass[] =
-    "bf7ebd0549efcb9ab26f7cd82c02e80af1a31a9c151b7fee38e07bf897aa14b";
+    "ba895cc954edeaca2810b55bdbf32b30abee767616bf069e13890966bdd537e";
 // UserBase（短 IsAlertMode 宿主；非 UserLocal）
 constexpr char kUserAlertClass[] =
-    "b294bd93aa7e13db6037be77316e311e5a2a2785e71ece309a5a6fa71874e84";
+    "d729ff05b21cf29f353feed539e293108a927728922602f2ef6b9be89a1c2a4";
 constexpr char kHashSendTransfer[] =
-    "cb4d79d2dceac2f9075481f6e8a5cfcccb30f8366ce7d221c5070d21470292f";
+    "c4c25c60a8367001aef74c21959d555e58b0ac827ed77d1d253a14743b72cff";
 constexpr char kHashIsAlertMode[] =
-    "f040b7e32e6f281408e8342b9df2ca39e842da201b72d179c81e3b077ba16d2";
+    "b867a2ff21c1253048d032268a6ac8100e6932897d5c14e658ce7d0dc6a3927";
 constexpr char kHashCanSendExcl[] =
-    "a6be5f14683c006f833199ed31484f6347112b7fae0d6461c3fc38c84c74f0f";
+    "b9c0f151ae3425e551d759586cec4e00bca6e886d959aebb5d95807fd38bc8f";
 
 // WorldManager 字段 Hint（docs + 08-04 dump 复核）；运行时 field_hash 覆盖
 // SendTransferChannelRequest(int nIdx)：0-based；游戏 UI「ch.N」= nIdx+1。
@@ -80,21 +80,21 @@ constexpr size_t kOffWmExclACHint = 0xAC;
 
 // WM 字段哈希（08-04 dump；backing 用内嵌 hash，strstr 匹配）
 constexpr char kHashWmChannelId[] =
-    "<b51cc8d786558ba37b5d13e4f4540eb3627b976bf2538eeea01e65f7b770b5a>k__BackingField";
+    "<ffb116e8b8244050a207945372c48ebe504a19969505faf72ce002d2fe58fe7>k__BackingField";
 constexpr char kHashWmChannelAlt[] =
-    "<cc0b975a29c3aeaf99cf348a97ffc36733ced4a0be510a35d41c4420da2412e>k__BackingField";
+    "<c5031522a50d1209a54ffabb3d394539f70d837edeeb3719e25ac7a18075ca9>k__BackingField";
 constexpr char kHashWmAdultChannel[] =
-    "ca83242bdcf633fd96d895e5a8959ab4b65993102ad994ac7c7cd901e648a3b";
+    "ef11610e672ad66457be554caca362cca7a31315655551e69282354482ca324";
 constexpr char kHashWmExclA0[] =
-    "e17f56dbe132b9c673cc11f37b5ca57f23aa495572649d4a6e8d7a3f1647285";
+    "d9518d10fcc608469229337b0ab6513d04a24c3ad53dd49964d67262fb36ad0";
 constexpr char kHashWmExclA4[] =
     "ce49f7df7cdeaf874359c6a99dcc9b8aed11e4841a83c8a71e9889ed6392f7f";
 constexpr char kHashWmExclA8[] =
-    "dea9141277282c0a7d4f0bbea30fa963d9f9b26db5283f17a513c51611b3c7e";
+    "fc647337db2843bb48a27fd6b5f81cef607ef1d6926d65b20a577876137c301";
 constexpr char kHashWmExclA9[] =
-    "d59a4ab1685e60343abdaf425001b0b101584787109db4caae36e60e0220c32";
+    "b9bf393a06f16d0c5029f730b8b4ba8d81ccb26fc820701785426eed8a95103";
 constexpr char kHashWmExclAC[] =
-    "e1697a7fa0b8dedf56b7c144c5aa31af831a201a53e65104f290842035fcf65";
+    "b0abc4e605a7c7f7709b0203d3947ee3dc76b1b5edbeaac3d7a0296d9689b3c";
 
 size_t gOffWmChannelId = kOffWmChannelIdHint;
 size_t gOffWmChannelAlt = kOffWmChannelAltHint;

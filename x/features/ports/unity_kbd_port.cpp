@@ -1,11 +1,11 @@
 // Classic TWMS — Keyboard 设备状态注入（内部输入真源）。
 // RVA/布局取自运行期 dump（Dumps/runtime/out/dump.cs.restored · remount 2026-08-06）：
-//   InputSystem.QueueEvent(InputEventPtr)      @0x47FAE40
-//   Keyboard.get_current()                     @0x4856330
-//   InputSystem.get_settings()                 @0x47fb4f0
-//   InputSettings.set_backgroundBehavior(e)    @0x48798C0
-//   InputSystem.set_runInBackground(bool)      @0x47FCDB0
-//   InputSystem.EnableDevice(InputDevice)      @0x4737B30
+//   InputSystem.QueueEvent(InputEventPtr)      @0x4806790
+//   Keyboard.get_current()                     @0x4861c80
+//   InputSystem.get_settings()                 @0x4806e40
+//   InputSettings.set_backgroundBehavior(e)    @0x4885210
+//   InputSystem.set_runInBackground(bool)      @0x4808700
+//   InputSystem.EnableDevice(InputDevice)      @0x4743480
 //   StateEvent: baseEvent@0x00(20B) stateFormat@0x14 stateData@0x18
 //   KeyboardState: 'KEYS' · 16B 位图 · leftArrow=bit61 rightArrow=bit62
 #ifndef WIN32_LEAN_AND_MEAN
@@ -27,24 +27,24 @@ namespace {
 
 using x::runtime::il2cpp::LooksLikeHeapPtr;
 
-constexpr uint32_t kRvaQueueEvent = 0x47FAE40;
-constexpr uint32_t kRvaKeyboardGetCurrent = 0x4856330;
-constexpr uint32_t kRvaGetSettings = 0x47fb4f0;
-constexpr uint32_t kRvaSetBackgroundBehavior = 0x48798C0;
-constexpr uint32_t kRvaSetRunInBackground = 0x47FCDB0;
-constexpr uint32_t kRvaEnableDevice = 0x47F9B30;
-// InputControl.get_currentStatePtr() → InputStateBuffers.GetFrontBufferForDevice(deviceIndex)@0x48CEE40
+constexpr uint32_t kRvaQueueEvent = 0x4806790;
+constexpr uint32_t kRvaKeyboardGetCurrent = 0x4861c80;
+constexpr uint32_t kRvaGetSettings = 0x4806e40;
+constexpr uint32_t kRvaSetBackgroundBehavior = 0x4885210;
+constexpr uint32_t kRvaSetRunInBackground = 0x4808700;
+constexpr uint32_t kRvaEnableDevice = 0x4805480;
+// InputControl.get_currentStatePtr() → InputStateBuffers.GetFrontBufferForDevice(deviceIndex)@0x48DA790
 // 已在运行期 IDB（imagebase 0x7ff848c80000 → VA 0x7FF84D37D900）反汇编核实。
-constexpr uint32_t kRvaGetCurrentStatePtr = 0x47feb10;
+constexpr uint32_t kRvaGetCurrentStatePtr = 0x480a460;
 // Keyboard.IEventPreProcessor.PreProcessEvent(InputEventPtr) —— 每个键盘事件落到设备前的收口点。
 // VA 0x7FF84D3D7020 反编译已核实：判 type=='STAT'（1398030676）→ 判 *(u32*)(ev+0x14)=='KEYS'
 // → 拿 ev+0x18 当位图**原地改写**（Unity 自己把 bit111 挪到 bit127），恒返回 1。
 // 这既确认了它在必经之路上，也确认了 +0x14/+0x18 与本文件 KeyboardStateEvent 的布局一致。
-constexpr uint32_t kRvaKeyboardPreProcess = 0x4858230;
+constexpr uint32_t kRvaKeyboardPreProcess = 0x4863b80;
 // InputManager 的事件循环按设备标志位 DeviceFlags.HasEventPreProcessor(0x4000) 决定要不要调
 // pre-processor。这位是 0 时，钩子装得再对也永远不会被调到 —— 必须实读，必要时置上。
-constexpr uint32_t kRvaGetHasPreProc = 0x480A240;
-constexpr uint32_t kRvaSetHasPreProc = 0x480a250;
+constexpr uint32_t kRvaGetHasPreProc = 0x4815B90;
+constexpr uint32_t kRvaSetHasPreProc = 0x4815ba0;
 
 // InputDevice 字段（dump.cs · InputDevice : InputControl）
 constexpr size_t kOffDeviceId = 0xE4;          // m_DeviceId

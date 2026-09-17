@@ -42,25 +42,25 @@ constexpr size_t kKlassOffWuaMethodPtr = 0x1E8;  // Slot 11 WorkUpdateActive
 constexpr size_t kKlassOffCdMethodPtr = 0x208;   // Slot 13 CollisionDetectWalk
 constexpr size_t kKlassOffCdfMethodPtr = 0x218;  // Slot 14 CollisionDetectFloat
 // dump.cs.restored.C · VecCtrlMob（RVA 仅 fallback；安装走 hash）
-constexpr uint32_t kRvaMobWua = 0x1236B10;   // VecCtrlMob Slot 11 override
-constexpr uint32_t kRvaBaseWua = 0x1223460;  // VecCtrl Slot 11 WorkUpdateActive
-constexpr uint32_t kRvaInspect = 0x1233b80;  // remounted 2026-09-10 方法头
-constexpr uint32_t kRvaCtrlStop = 0x11DE6B0;
-constexpr uint32_t kRvaCtrlMove = 0x1236B10;  // remounted 2026-09-10 Slot 11
-constexpr uint32_t kRvaCtrlJump = 0x11E1100;
-constexpr uint32_t kRvaCtrlFly = 0x12402C0;  // remounted 2026-09-10
+constexpr uint32_t kRvaMobWua = 0x123F970;   // VecCtrlMob Slot 11 remount 2026-09-17
+constexpr uint32_t kRvaBaseWua = 0x1224DF0;  // VecCtrl Slot 11 WorkUpdateActive
+constexpr uint32_t kRvaInspect = 0x1235360;  // remounted 2026-09-10 方法头
+constexpr uint32_t kRvaCtrlStop = 0x123ECE0;  // remounted 2026-09-17 VecCtrlMob Slot 9
+constexpr uint32_t kRvaCtrlMove = 0x123F970;  // remounted 2026-09-17 Slot 11
+constexpr uint32_t kRvaCtrlJump = 0x12407C0;  // remounted 2026-09-17 WUA 后首个 private void()
+constexpr uint32_t kRvaCtrlFly = 0x1241CC0;  // remounted 2026-09-10
 constexpr char kHashWorkUpdateActive[] =
-    "ab294a368f790cda97d1b0faacfc9e7680beb9897363a7c383efbea5a83c4c9";
+    "a8770b3bce3cb377ee06fb5c82a02c24d6e6130d03fc0a8bae77da2e5c3e43a";
 constexpr char kHashInspectUpdateActive[] =
-    "f32fd5b5d711d34a68856d48c870d1c949f4d4227435fdc23d4173b965cfc9b";
+    "e14b5e5eec901bba71a9edd45dfd783d088e948cdc7e492287e43cab5357d8b";
 constexpr char kHashCtrlStop[] =
-    "c9e385cfbdebe4c7e3fe11062f63ff09014a4da7af4cc6eb5a1df6cb99bc59c";
+    "c15f07007eb92ad883eaea57deee8a134726cd9edeefb699897995e1ff5a7ad";
 constexpr char kHashCtrlMove[] =
-    "ab294a368f790cda97d1b0faacfc9e7680beb9897363a7c383efbea5a83c4c9";
+    "a8770b3bce3cb377ee06fb5c82a02c24d6e6130d03fc0a8bae77da2e5c3e43a";
 constexpr char kHashCtrlJump[] =
-    "d4cda78c5f174760c6aa00311b7a3e2f46a3c137293f79d849b01aaf4d9b8fa";
+    "e2d82a65d69c834aee16cd42e9b2f73f5fae20527c68acfe43917d399c213a9";
 constexpr char kHashCtrlFly[] =
-    "bde942d9aced0e3fc4b52acc3f7e315f72798321234d549f2ace348522abd83";
+    "d8e0048476aeb3d00989a3c195398aa2cb30645fd48b41466d39d4aa33250df";
 
 constexpr int kMaxBan = 64;
 constexpr DWORD kArmTimeoutMs = 8000;

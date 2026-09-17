@@ -62,14 +62,14 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Packet / OutPacket fields：hash → field_get_offset（In/Out 同布局 · remount 2026-08-06）
 constexpr char kPacketBaseClass[] =
-    "e4a837e0c122619b214e15b955ec342c4ec02ab6af11631b5a9cf43d784247c";
+    "a4eb9c20ba8659d8fddc163e7949a3bc50f15fb114bd1d135d0ccb4821d1f14";
 constexpr char kHashPacketBuffer[] =
-    "<d4b0b7fb552300a9159d9832fcb8b8407a8f4efeb1c3d75a915cad87b8572e1>k__BackingField";
+    "<f618b03bb7b57bea5468dfafa2ba99e16676fb3f177c99c20bd28f34784444f>k__BackingField";
 constexpr char kHashPacketOffset[] =
-    "<c11600e369c78d4413498612cbf64d787d921969340d2448edb34dbe6935da5>k__BackingField";
+    "<d87ff8a4d0536c80399b3b78e80e3bb46e36c5b4803820ab79d2cbab0a47991>k__BackingField";
 // OutPacket.id@0x20（TDI 13775）— 勿用 InPacket TDI 13774 的 f4e004d8… backing
 constexpr char kHashOutPacketId[] =
-    "d0e34e976361bf622107ef86c3429c2150c8f1c186db2704f278bbba8c11409";
+    "a42c47c9f67f287eb829d2d80127129302201676550560fc3cb231b03b737d7";
 constexpr size_t kFbOutPacketId = 0x20;
 constexpr size_t kFbPacketBuffer = 0x10;
 constexpr size_t kFbPacketOffset = 0x18;
@@ -85,51 +85,51 @@ int gPktFieldHits = -1;
 
 // TW dump.cs RVAs — call-edge targets（Session TDI 13797 · remount 2026-08-06 按方法序对齐）。
 // CloseSession=旧 CloseSocket；Disconnect=旧 Close；另挂 OnDisconnect / set_SessionState。
-constexpr uintptr_t kRvaNmCloseSession = 0x1D97540;  // remounted 2026-08-06
-constexpr uintptr_t kRvaNmDisconnect = 0x1D887B0;    // remounted 2026-08-06
-constexpr uintptr_t kRvaSessionSetState = 0x1D97030;  // remounted 2026-08-06: set_SessionState
-constexpr uintptr_t kRvaSessionOnDisc = 0x1D987D0;  // remounted 2026-08-06: OnDisconnect
+constexpr uintptr_t kRvaNmCloseSession = 0x1D9A440;  // remounted 2026-08-06
+constexpr uintptr_t kRvaNmDisconnect = 0x1D8B6B0;    // remounted 2026-08-06
+constexpr uintptr_t kRvaSessionSetState = 0x1D99F30;  // remounted 2026-08-06: set_SessionState
+constexpr uintptr_t kRvaSessionOnDisc = 0x1D9B6D0;  // remounted 2026-08-06: OnDisconnect
 // Outbound funnel（Session.SendPacket）
-constexpr uintptr_t kRvaSessionSend = 0x1D8AA00;  // remounted 2026-08-06
+constexpr uintptr_t kRvaSessionSend = 0x1D8D900;  // remounted 2026-08-06
 // 方法哈希（Session 上 void() 极多，kind 不唯一；哈希漂 RVA 时仍可活）
 constexpr char kHashCloseSession[] =
-    "b8edb777727720f8a3635baa2e95a83a485c2b059fb937585946c2959b34111";
+    "d3ce732d632847231a7c6e59d64b038bbfe3f3cb24781ca00a5c81946549c09";
 constexpr char kHashDisconnect[] =
-    "dce0ac5ff27c414d65dcf2e784d2e47e71f04eca3594bc79a4db6746930f723";
+    "fdfbf100991236457c9efe07a834d3a8ea4bca963b42a23c02474f63f0f8fec";
 constexpr char kHashOnDisconnect[] =
-    "b4881d91a29b1bc9d0b74e6919d1f4a8d53f20c8fedc6319258a68fd6756f33";
+    "f250b493725be946be10d6e7a1488e6fe28ef2ebd054c72daeb5bbabab7463f";
 constexpr char kHashSetSessionState[] =
-    "c97d05a1993d0a73153ca683d045def177b38d2781bb99160d83b9398798b0d";
+    "da86d22e1fd59aad1df5609cedaa106a60b5a314e21cc7278c010bad4b141c8";
 constexpr char kHashSendPacket[] =
-    "b3b21eb3c2730d1980bf0eaa9708443c5ae9bda8a633de4a507ec2c3f7d8306";
+    "d4807d1f75d069434d9967bd02c9c47f2c1ad75018b107394a5b3cf794376f5";
 // SEND OutPacket TDI 13775（勿用 13774 InPacket / b980769a…）
 constexpr char kOutPacketClass[] =
-    "daba5b68fb674204a54bbd26da7dd4508e4521a0b2248bf88275bbebffe37a4";
+    "f507bd0e915b856c1a075675eb08f312b656dbf3f1c32a3b7619caceb2d3778";
 // a480 local-disconnect（WM）：TryLocal 写 bool@0x2A0 + float@0x2A4 后 call DoLocal。
 // 旁路 bool@0x290 仍在，HWBP 边沿以 0x2A0 为准。
-// 09-10pm：DoLocal 唯一代码 xref E8 @0x87DDE5（E8 E8 76 43 5D -> public bool #(int) @0xE52160）。
-constexpr uintptr_t kRvaA480TryLocalDisc = 0xE19FF0;  // remounted 2026-08-06（09-10pm dump 仍是方法头）
-constexpr uintptr_t kRvaA480UpdateCallA480 = 0x87DDE5;  // remounted 2026-09-10pm
-constexpr uintptr_t kRvaA480DoLocalDisc = 0xE52160;  // remounted 2026-09-10pm
+// 09-17：DoLocal 唯一代码 xref E8 @0x87DE65（E8 D6 62 5D 00 -> public bool #(int) @0xE54140）。
+constexpr uintptr_t kRvaA480TryLocalDisc = 0xE1C040;  // remounted 2026-08-06（09-17 dump 仍是方法头）
+constexpr uintptr_t kRvaA480UpdateCallA480 = 0x87DE65;  // remounted 2026-09-17
+constexpr uintptr_t kRvaA480DoLocalDisc = 0xE54140;  // remounted 2026-09-10pm（09-17 dump 仍是方法头）
 // CloseSession 直接调用方（runtime IDB 2026-08-12 · imagebase 0x7ff848c80000）
-constexpr uintptr_t kRvaCsCaller1CC5520 = 0x1D87E80;
-constexpr uintptr_t kRvaCsCaller1CD5570 = 0x1D97A30;  // MI/data only
-constexpr uintptr_t kRvaCsCaller1CD92A0 = 0x1D9B790;
-constexpr uintptr_t kRvaCsParent1CC52C0 = 0x1D87C40;
-constexpr uintptr_t kRvaCsParent1CC74C0 = 0x1D89E60;
-constexpr uintptr_t kRvaCsParent1CD7870 = 0x1D99D10;
-constexpr uintptr_t kRvaCsParent1CDA040 = 0x1D9C5E0;
+constexpr uintptr_t kRvaCsCaller1CC5520 = 0x1D8AD80;
+constexpr uintptr_t kRvaCsCaller1CD5570 = 0x1D9A930;  // MI/data only
+constexpr uintptr_t kRvaCsCaller1CD92A0 = 0x1D9E690;
+constexpr uintptr_t kRvaCsParent1CC52C0 = 0x1D8AB40;
+constexpr uintptr_t kRvaCsParent1CC74C0 = 0x1D8CD60;
+constexpr uintptr_t kRvaCsParent1CD7870 = 0x1D9CC10;
+constexpr uintptr_t kRvaCsParent1CDA040 = 0x1D9F4E0;
 // Session.CallbackRecv(IAsyncResult) — remount 后写 SessionState@+0x60=Disconnected
 // dump hash aff6dcff…；写点 mov [rcx+60h],eax @ 0x1CD7796（rip 后一条 0x1CD7799）
-constexpr uintptr_t kRvaSessionCallbackRecv = 0x1D99940;
+constexpr uintptr_t kRvaSessionCallbackRecv = 0x1D9C840;
 constexpr char kWorldManagerClass[] =
-    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
+    "cba21c42799e50c37623ea5fd88d5c4c9155c2565d25cde936671684e16dff7";
 constexpr char kHashA480ForceDisc[] =
-    "a6f32bb762a0ad8c94726bbb5e96a8a6aa867ad7a68bfb69aa679e7abc2a26e";  // bool@0x2A0
+    "c18452a8f1fb66628029aff988230aa666e266007313e16de8654b995f1eb73";  // bool@0x2A0
 constexpr char kHashA480ForceDiscAlt[] =
-    "c1cdb6096c8d726f056782996ee8a018a69f49b51a22bbc1941de4a187ec65b";  // bool@0x290 旁路
+    "f76ff768d5abb1773be7fcc77ca41578dc096eba0cf2b0350f6cc6a5c2ee539";  // bool@0x290 旁路
 constexpr char kHashA480DiscTimer[] =
-    "ccbd6b647974ec1e2b0f49a7da58d88afac2322ff483b78e8466460c12d1d7b";  // float@0x2A4
+    "c640d980f75ef98ddec0a68eaa4437788657d8d904ccb6595ff476765a4feea";  // float@0x2A4
 constexpr size_t kFbA480ForceDiscFlag = 0x2A0;
 constexpr size_t kFbA480DiscTimer = 0x2A4;
 size_t gOffA480ForceDiscFlag = kFbA480ForceDiscFlag;

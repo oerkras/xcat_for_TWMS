@@ -35,33 +35,33 @@ constexpr size_t kFbAvatarRoot = 0x80;  // UserBase/MsAvatar GameObject（未漂
 constexpr char kFldAvatarRoot[] = "_avatarRoot";
 // TW 字段哈希（meta 查不到明文 _avatarRoot 时用）
 constexpr char kHashAvatarRootField[] =
-    "c17aa2f6a0494198054efdcb6b15336bd083c1733170605bbdeef7599ad3d9e";
-constexpr uint32_t kRvaGoSetActive = 0x4F5DFF0;  // remount 2026-09-10 GameObject.SetActive
+    "cbe50a5961b21127cbea3ead84c90278f18ed1ad0a02a1f5325c17226c38058";
+constexpr uint32_t kRvaGoSetActive = 0x4F69940;  // remount 2026-09-10 GameObject.SetActive
 
 // —— 远程伤字 / 技能特效（dump remount 2026-08-06 · imagebase 0x7ff848c80000）——
 // 游戏逻辑区相对 2026-08-04 统一 +0x1E70；Unity SetActive 另计。
-constexpr uint32_t kRvaShowSkillEffect = 0x1095050;         // User（旧 0xFE81B0）
-constexpr uint32_t kRvaShowSkillAffected = 0x109aae0;       // User（旧 0xFED6B0）
-constexpr uint32_t kRvaShowSkillPrepare = 0x109AE20;        // User（旧 0xFEDA90）
-constexpr uint32_t kRvaShowSkillSpecialEffect = 0x109B270;  // User（旧 0xFEDF20）
-// Mob Slot14 damage-process tick（仅 MethodInfo 引用；调用 OnHit@0xF7BAA0 / ShowDamage@0xF64AF0）
-constexpr uint32_t kRvaMobDamageTick = 0xF65AC0;           // 旧 0xF0A520
+constexpr uint32_t kRvaShowSkillEffect = 0x1097070;         // User（旧 0xFE81B0）
+constexpr uint32_t kRvaShowSkillAffected = 0x109cb00;       // User（旧 0xFED6B0）
+constexpr uint32_t kRvaShowSkillPrepare = 0x109CE40;        // User（旧 0xFEDA90）
+constexpr uint32_t kRvaShowSkillSpecialEffect = 0x109D290;  // User（旧 0xFEDF20）
+// Mob Slot14 damage-process tick（仅 MethodInfo 引用；调用 OnHit@0xF7D130 / ShowDamage@0xF660E0）
+constexpr uint32_t kRvaMobDamageTick = 0xF67160;           // 旧 0xF0A520
 constexpr char kHashShowSkillEffect[] =
-    "c0793c94404e22c863d5af5987c8661372a1d4120ca3f489e4ca66f87e7c8a7";
+    "a7957e4f8e6f49b91e0327175d91dfe53e9cb4bb9d4f92a153afc30e5ed28cf";
 constexpr char kHashShowSkillAffected[] =
-    "e8dd429e38a26c5cd96a34332b887fb07edcdeb702742be96b5a8aa15b06dbc";
+    "cedd6abffbbfb26f5af05b044c86c40452acc827d5ea56a74a7013e7aba3b1b";
 constexpr char kHashShowSkillPrepare[] =
-    "f134b50d8d44b068fcb7f620513b4fd96980c95f532edf2b1b2a2b638ac8102";
+    "fb53609a1b1144ada7b59ac62d0082789ce3b0f72c4e0c6afe3ba0e63ad1163";
 constexpr char kHashShowSkillSpecialEffect[] =
-    "ac31249cf8c8c809b36e28784b31ce1f9a56ec0a308e3275afb6a0256dd06fa";
+    "f38143e901971fbcb194937101e6e6017884068082d489a418f85b7a6c04373";
 constexpr char kHashMobDamageTick[] =
-    "a671c2f06d72a6eea0592c999eec975870d8100f55c53e266e0318c918023d5";
+    "fe0140851d88e528c18b343c2ab1d3db6015ea304943fabaeebcc170e2475c2";
 // CMS LocalUser ≡ TW User（TypeDef 1560）
 constexpr char kHashUserClass[] =
-    "b8129050fd86f9f4f79caa5cfb878f706fd3744e8c7f07ba1c392fd337a77d1";
+    "bb08324aff7aa09af5962f0464fdde4d0ba12c8ce029b4529e5233402de9c3c";
 // 运行时类名已哈希；与 mob_pool / player_combat 同锚（旧 a803dc63… 已废；明文 "Mob" FindClass 会 miss）
 constexpr char kHashMobClass[] =
-    "fea4358a07c99f6ab1e2cda4d015f36773997b07da3838b9e592aaf7184672d";
+    "b06a585bbb20974b370a52ef95e0e2329dca00dead70828c5a6cd86e76cd18b";
 constexpr size_t kFbMobDamageInfoList = 0x1D8;             // Mob._damageInfo List<DamageInfo>（未漂）
 constexpr size_t kOffDamageInfoCharacterId = 0x14;         // DamageInfo.CharacterId（未漂）
 

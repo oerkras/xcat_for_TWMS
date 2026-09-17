@@ -31,15 +31,15 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll / get_gameObject / get_name → x::runtime::il2cpp::kRva*（il2cpp_bind.h SSOT）
 // Remount 2026-08-06：ACS hash 全换；字段 off 未漂；ActivatePet 按 CIM 方法序 + restore_method_map
-constexpr uint32_t kRvaSendActivatePetRequest = 0xCAFFA0;  // remounted 2026-09-10 dump CIM TDI 1259
+constexpr uint32_t kRvaSendActivatePetRequest = 0xCB0390;  // remounted 2026-09-10 dump CIM TDI 1259
 constexpr char kHashSendActivatePet[] =
-    "f394da268abd7b45ef5d69e5555207237de1d07bccb9b33f3c4214107397f25";
+    "af0546617478a458e47164f9c0a4aeabebb20bf90a944f98d90ad58d0a74d96";
 
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 constexpr char kCashItemManagerClass[] =
-    "d33db1dbca243009ae5b260f7c80aa0066aaf69b6993c9c5e4519d3f9d79481";
+    "c6b3018825eb180b31bb8fd103cc5c8d603158d2efe9f84a18e2632a275dee6";
 constexpr char kUserClass[] =
-    "b8129050fd86f9f4f79caa5cfb878f706fd3744e8c7f07ba1c392fd337a77d1";  // TDI:1578 User
+    "bb08324aff7aa09af5962f0464fdde4d0ba12c8ce029b4529e5233402de9c3c";  // TDI:1578 User
 
 // dump fallback；运行时 hash + field_get_offset 优先
 constexpr size_t kFbWmMyUser = 0x28;
@@ -47,15 +47,15 @@ constexpr size_t kFbApPet = 0x2B8;  // 09-10：User Pet[]；旧哈希 df4ed6d7 �
 constexpr size_t kFbLogicalPos = 0x2E8;  // 09-10：User Vector2；旧哈希 df491dca 已是 uint@0x2B0
 constexpr size_t kFbVisPos = 0x64;
 constexpr char kHashFldWmMyUser[] =
-    "<e8188e62384d9888cf8dbf795b258a6cdda4933a2b3bba9725997db5ed14b83>k__BackingField";  // WM.MyUser@0x28
+    "<f05b550317985a2eaa8fadb32ffffbe82cdaf841dba68e5d35d2dcf99ed6a13>k__BackingField";  // WM.MyUser@0x28
 constexpr char kHashFldApPet[] =
-    "c2675a4ed88f37237efb6d05daa060b64d9bed3f5126f569688dfd9a4df17e4";  // remounted 2026-09-10 Pet[]@0x2B8
+    "fa9e8c6fe68726558ecdd6ad634ad33a76611b036c4ae492e9385d71e37f1db";  // remounted 2026-09-10 Pet[]@0x2B8
 constexpr char kHashFldCurPos[] =
-    "c7e7d437346692c76ab582a510af39b410bca9920f2870d7500a1ee63be5f7a";  // remounted 2026-09-10 Vector2@0x2E8
+    "fef9a14d4ac646ab7b85ae7d9d6715e0986c3054c5c74a91b7ba75b69d096a3";  // remounted 2026-09-10 Vector2@0x2E8
 constexpr char kHashFldFieldPos[] =
-    "cdb04ce386f0f95b2ea1efe9454c2974a452cfe4d5b5924ec89759bb59836ad";
+    "adab4adef226133516a747cf56cea7c2badbf7b3249b7aceda99ac861097a52";
 constexpr char kVecCtrlOwnerClass[] =
-    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";
+    "bceba896aaa7328f05716b053a9243bade419f40a12ea561361454a49d42034";
 
 struct PetFieldOff {
     size_t wmMyUser = kFbWmMyUser;
@@ -75,19 +75,19 @@ PetFieldOff gOff{};
 // 背包列表：SSOT = player_vitals（ItemSlots hash）；本文件不再钉 CD 偏移。
 // Pet / ItemSlotPet：hash → field_get_offset
 constexpr char kPetClass[] =
-    "dbfe30e0a0a7c826c9372128f252063563764b92b0f06a8d86b143825765038";
+    "b0377fae934650382b1539ae72a4fba87656f399be9c6573579c955685b0b09";
 constexpr char kItemSlotPetClass[] =
-    "c4b060f3acdfd1f1794828bc9cd55fcc5a38ee078680297b48b796e87d3b551";
+    "e2659469ac81d07785decf41d1a0506850cab94bb62e84248e3960ef77926ec";
 constexpr char kHashPetRepleteness[] =
-    "ef1deb0c9e8f41908aab7274d2d408d06206df566b8ad1806fb5f7fc6a75d83";
+    "ce3217a115f4ddf6a513904ab657b54c8d4c77ce1f133ae5af9fb5ce1ac76f3";
 constexpr char kHashSlotRepleteness[] =
-    "c870426bcd39992d729a3711186bb4ada4d89bdb58ba19e5994a2f983642de7";
+    "dd1100a9952762266cff4f2e3be68e16ec1c4136daefc9470e1851aa69c538b";
 constexpr char kHashDateDead[] =
-    "e35b6675a84df25bffb4af358f6337e1c90801da8d156c9306f24f15969b4f2";
+    "dc3b6f453b6ff9e9a56ddf49176ee3e05f4722e19a2e1b4d4f587b7dc7df337";
 constexpr char kHashRemainLife[] =
-    "c8f93e092af7f4a7c4ca03537e9e00da855cf4e8ea934b6fbe43f651575417c";
+    "e9c6f0a8bf1eaf5cfe9e8c5bec087e7e2b70e62ee45778ddca413030ffc7d9f";
 constexpr char kHashActiveState[] =
-    "f5623b391edc21ad28691b7723a3cc83817dc38cce711a7a1bd2c69488a8658";
+    "a2b6fa5715cee63c7da86063f4ea1d2169f820005771546aa13085ab186513f";
 constexpr size_t kFbPetRepleteness = 0xBC, kFbSlotRepleteness = 0x40, kFbDateDead = 0x48;
 constexpr size_t kFbRemainLife = 0x50, kFbActiveState = 0x54;
 size_t gOffPetRepleteness = kFbPetRepleteness, gOffSlotRepleteness = kFbSlotRepleteness;

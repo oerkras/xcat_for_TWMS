@@ -33,14 +33,14 @@ using x::runtime::il2cpp::ReadPtr;
 using x::runtime::NowMs;
 
 // 注意：这个哈希解析出来的类**不是** KeyPad，而是 Rand32（伪随机数生成器）。
-// 运行期真值 origRva=0x1B87EE0 与 dump 对上，而该 RVA 在 dump 里是 `Rand32.Random()`，
+// 运行期真值 origRva=0x1B8A6A0 与 dump 对上，而该 RVA 在 dump 里是 `Rand32.Random()`，
 // 反编译确认是 xorshift（三状态字、移位 13/19 · 4/25 · 8/11）；`Random()` 正是 Rand32 的
 // 首个自有虚方法，落在 vtable slot 4（前四槽属 Object）—— 四条证据一致。
 // 因此曾经挂在 slot4 上的「PackState 钩子」实际挂的是 PRNG：读数全是随机噪声，
 // 且它每帧被调多次，把 BIN 的空闲节流整体旁通。钩子已拆除，此处只保留字段观测。
 // A/B/C/p28 仍作为该单例的指纹留用；slot4 打出原始 RVA 便于换构建时核对。
 constexpr char kHashKeyPad[] =
-    "c3e029bd53a767c9a4b6371db30f2fa16d9d29121839a0fb8874116eacdfee7";
+    "a3bc0ec8441ef830a13372c4797c45fa591b2718059e4d6e415eefec9637fce";
 constexpr size_t kOffKeyPadSlot4 = 0x178;
 constexpr size_t kOffKpA = 0x10;
 constexpr size_t kOffKpB = 0x14;

@@ -111,17 +111,17 @@ constexpr float kSeekSnapHomeMaxPx = 64.f;
 constexpr float kDyRampRadiusPx = 6000.f;
 // 与 mob_fh_ban 武装后 pool_jump 同阈值：一拍位移过大 = 池槽复用，不当走过。
 constexpr float kPoolJumpPx = 800.f;
-// dump.cs.restored.C 把 ApplyControl 标在 0xF57320，下一项 GetReviveList 只隔 16 字节 = stub。
-// OnFixedUpdate 0xF29E50 体积极大，禁止当成申请入口。CanApplyCtrl 0x1518160 可作 RVA fallback。
-constexpr uint32_t kRvaDumpApplyStub = 0xF57320;
-constexpr uint32_t kRvaDumpOnFixedUpdate = 0xF29E50;
+// 09-17 dump：ApplyControl stub = void(int) @0xF94BA0（下一项 List GetReviveList @0xF94BB0）。
+// OnFixedUpdate：Return Slot 14 @0xFF2220 后首个 private void() @0xFF4460。
+constexpr uint32_t kRvaDumpApplyStub = 0xF94BA0;
+constexpr uint32_t kRvaDumpOnFixedUpdate = 0xFF4460;
 constexpr uint32_t kRvaDumpCanApplyCtrl = 0x1518160;
 constexpr uint32_t kRvaDumpCalcPriority = 0xF64360;
 constexpr size_t kCallScan = 0x4000;
 constexpr size_t kOnFixedScan = 0x8000;
 
 constexpr char kMobClass[] =
-    "fea4358a07c99f6ab1e2cda4d015f36773997b07da3838b9e592aaf7184672d";
+    "b06a585bbb20974b370a52ef95e0e2329dca00dead70828c5a6cd86e76cd18b";
 constexpr char kHashApplyControl[] =
     "a7982679b4b10ec2c0b41ae7d2ca76e66f7d61e29b31fd00bd18b6a1cf080ed";
 constexpr char kHashCanApplyCtrl[] =
@@ -129,7 +129,7 @@ constexpr char kHashCanApplyCtrl[] =
 constexpr char kHashCalcPriority[] =
     "c3881ee4b61e05796972a8196ec943d2d660184c9aaca9bf5d958d0fcac9424";
 constexpr char kHashOnFixedUpdate[] =
-    "f4babc321065db6d87fa1fd3f07a232d8e702738f95f367d429cfd70724e619";
+    "ffdf27dfed118bb0be4679db7292ae671261aee6fb8eee92b1662b63b641ec6";
 
 std::atomic<bool> gOn{false};
 std::atomic<bool> gEncounterPause{false};

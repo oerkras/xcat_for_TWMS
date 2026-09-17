@@ -38,18 +38,18 @@ constexpr DWORD kUseMiRetryMs = 3000;
 constexpr DWORD kFkmRebindMs = 3000;
 
 // FuncKeyMappedManager · remounted 2026-08-06（与 attack_input_port 钉值一致）
-constexpr uint32_t kRvaGetDataByKeyCode = 0x1707db0;
+constexpr uint32_t kRvaGetDataByKeyCode = 0x1709be0;
 constexpr char kHashGetDataByKeyCode[] =
-    "f4d269a29538abe89c689039e722d95808b9a6d422e72dc5c654954ff55b1c9";
+    "d43c993cf56de6520167d5e1d1992f0b12fc20db1bc4c782ed1f9908aee1851";
 constexpr char kFkmClass[] =
-    "ec7bb71ea4393f644de2ed52289a4e5858c88fbfff567507d7e50e57a26e02c";
+    "e41c34f63e74f68108052715f3f4153bb488f7aba1aa6c23707a2536a7c4a8f";
 constexpr int32_t kFuncTypeItem = 2;  // FuncType.Item
 constexpr char kFuncKeyClass[] =
-    "ea3da4955e170bddd23954b6fadb04307346cce8502f56114ac4c270f4cf65b";
+    "ff247e31dceda987dca78a8f62c2a3787063a7d45e50e426f06aa259d45257c";
 constexpr char kHashFkType[] =
-    "eb5cc4bbe5f9608739a872cb31aba295efcbc843d4c5aaaa9521287f539955f";
+    "f8a3feb148e565a5e3482b8769274aacfba89c1e61f2ac6ddcdeed263829b1c";
 constexpr char kHashFkValue[] =
-    "c1d993179dfd59441f3302e60f20468f822c7e9ab14f4078d70b5a5e39f8683";
+    "ee25b5a7da35a2ce381d05c3f23e3205282346cdf9b29cc1e3441a20ed32e63";
 constexpr size_t kFbFkType = 0x10;
 constexpr size_t kFbFkValue = 0x14;
 size_t gOffFkType = kFbFkType;
@@ -58,21 +58,21 @@ bool gFkFieldTried = false;
 
 // --- 字段防漂移（remount 2026-08-06 · TDI/offset 对齐；WM/FKM/FuncKey 未漂）---
 constexpr char kHashWorldManager[] =
-    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
+    "cba21c42799e50c37623ea5fd88d5c4c9155c2565d25cde936671684e16dff7";
 constexpr char kHashCharacterData[] =
-    "fc09ef0e0d54c07042a56575d966628802e69f257ba527a57f00748e67313b7";
+    "b0b3ee7ea1f9e3dfe390adcc6c0f8b3ccc6703e20ecab8769f3dea0c661cda9";
 constexpr char kHashItemSlotBase[] =
-    "f4124c869a21043b4e4b180bd9d87ad6f53eab2a7c5c1c8cb319ba3fa7ffac1";
+    "f70996d114bf2f4cf0c985796a65ec566369c1014a1edd476a8287f323d72b1";
 constexpr char kHashItemSlotBundle[] =
-    "de4a237f4bd7fa470f0546d39d651f633f8df17c890fd2863084f398eb6c353";
+    "c2bf5447cf3e555d11ff3e91b1258711232145693205380dda31081d3637750";
 constexpr char kHashWmCharacterData[] =
-    "eefb2ac8c168ccba5b10936a5eeb98b926a6dde1b1d8a63c69f126b3a38abf8";
+    "c360c98c279935acfad02204ec9da405a5dc1173561ea0e1047e4dbc580b1b5";
 constexpr char kHashCdItemSlots[] =
-    "cff110654d704ceaef1c4f120232f99e2cfe3483145be6eddd4c0968eb8a553";
+    "fdceb47c0740b59430fb305f0860087dac0c18a4d861d881f5afe666af2ee73";
 constexpr char kHashItemId[] =
-    "cd9da19da3fc26d1f45ea3ef55b667b2406400081ad46b465c66500a1c5bc2d";
+    "c81b6812a4e7d60bc3b07ef14041ea4c2399fc7b44abd8869a4e7979d751ae3";
 constexpr char kHashBundleNumber[] =
-    "cf980c33d088e801890cce0708e51658391028b9ec7096d7446d8ccde91bcc5";
+    "cd85e37ec226d0aa2567cfee7f7c9eb77ffce5e379fbf388bd5c64e466c741a";
 
 constexpr size_t kFbWmCharacterData = 0xE0;
 constexpr size_t kFbCdItemSlots = 0x40;
@@ -88,20 +88,20 @@ std::atomic<bool> gFieldOffResolved{false};
 char gFieldOffPath[64]{};
 
 // UISlotItem.SendStatChangeItemUseRequest — 药水等属性道具；hashed；TypeDefIndex 488。
-// Remount 2026-08-06: ACS class/method rehashed；RVA 未漂（仍 0x608680）。
+// Remount 2026-08-06: ACS class/method rehashed；RVA 未漂（仍 0x6086d0）。
 // Evidence: dump.cs static Send* 声明序对齐 CMS（Lottery → StatChange → AntiMacro → PortalScroll…）。
 // Resolve: name → method-hash → RVA+kind(void,int,int)。
 constexpr char kUiSlotItemClassHash[] =
-    "beea43234464229758dbf036e853f4177d5f5632730f8944a2195c225bc3e3f";
+    "ec0318c8aa58794890f4defe7d2c78f613c8f47baab5551217916eb148020c6";
 constexpr char kUseReqMethodHash[] =
-    "c16a1ae22ad34f23a22e694d93281b7ffa1143529fccfa3536542ec4d4d9fd8";
-constexpr uint32_t kRvaSendStatChangeItemUseRequest = 0x608680;
+    "cfa225b04b2c24e311283466ba0ba571b7af5ec535b40535f04a894b34e1766";
+constexpr uint32_t kRvaSendStatChangeItemUseRequest = 0x6086d0;
 
 // UISlotItem.SendPortalScrollUseRequest — 回家/城镇卷（2030xxx）；CMS private static (nPOS,nItemID)。
-// TW dump 同簇；RVA 未漂 0x60B280。
+// TW dump 同簇；RVA 未漂 0x60B2D0。
 constexpr char kPortalScrollMethodHash[] =
-    "b05a7f8f27755cff5c700daeaa9ff0b009f80fb15f1c2a634c656d603838951";
-constexpr uint32_t kRvaSendPortalScrollUseRequest = 0x60B280;
+    "be07cc2d630a0c4c2139463f296575466630af69db50782147c71ff76f73eb8";
+constexpr uint32_t kRvaSendPortalScrollUseRequest = 0x60B2D0;
 
 using FnUseRequest = void (*)(int nPos, int itemId, const void* methodInfo);
 
@@ -125,29 +125,29 @@ DWORD gLastFkmRebind = 0;
 DWORD gLastBindMissLogHp = 0;
 DWORD gLastBindMissLogMp = 0;
 
-// CharacterData.GetItem(nTI, nPOS) — 与 final_attack_force 同源（RVA 0x135A310）。
+// CharacterData.GetItem(nTI, nPOS) — 与 final_attack_force 同源（RVA 0x135BC50）。
 // GetItem / 直读 _items 是同一块 List；BIN 20:03 type=2 listN=25 filled=0（25 格像 Install）。
-constexpr uint32_t kRvaCdGetItem = 0x135A310;
+constexpr uint32_t kRvaCdGetItem = 0x135BC50;
 constexpr char kHashCdGetItem[] =
-    "b9b2574d7dd3fd84e92886a4937f9465e2562dd30b985eb92510bdcb64f15ee";
+    "e423704b730739210652e47452bc607108dda102192de83ed6855a7701d6d38";
 constexpr int kConsumePosMax = 96;
 using FnCdGetItem = void* (*)(void* self, int nTI, int nPos, const void* methodInfo);
 FnCdGetItem gCdGetItem = nullptr;
 MethodInfoHead* gMiCdGetItem = nullptr;
 
 // DumpRestoredData A/B：GetItemSlotPos(ItemType, itemId)→nPOS（旧 RVA 0x12F32D0）。
-// 09-10 dump 同签名 int(ItemType,int) @ 0x1361800。IDA：ItemSlots[nTI] 直下标 + List.get_Item。
-constexpr uint32_t kRvaCdGetItemSlotPos = 0x1361800;
+// 09-10 dump 同签名 int(ItemType,int) @ 0x1363190。IDA：ItemSlots[nTI] 直下标 + List.get_Item。
+constexpr uint32_t kRvaCdGetItemSlotPos = 0x1363190;
 constexpr char kHashCdGetItemSlotPos[] =
-    "c8224febf0dea56de41b64f9a024d6158f916bf09d90ded4c10f766ad3e0b3f";
+    "eeafbe4940c08f96459626d541706fb81f8da55caf1de977f8aeb84362632c1";
 using FnCdGetItemSlotPos = int (*)(void* self, int nTI, int itemId, const void* methodInfo);
 FnCdGetItemSlotPos gCdGetItemSlotPos = nullptr;
 MethodInfoHead* gMiCdGetItemSlotPos = nullptr;
 
-// DumpRestoredData：GetItemCount(ItemType, itemId, bool compress=true)。09-10 @ 0x1359BE0。
-constexpr uint32_t kRvaCdGetItemCount = 0x1359BE0;
+// DumpRestoredData：GetItemCount(ItemType, itemId, bool compress=true)。09-10 @ 0x135B530。
+constexpr uint32_t kRvaCdGetItemCount = 0x135B530;
 constexpr char kHashCdGetItemCount[] =
-    "b95c4303a5d9d1373cc57e05af2a74c26af88fb96a58db2f3649ef371e3e0ed";
+    "ab2d4cc9bc0de58aa5a4455e36fd166e7a7f686f1a529abccfb1cbfa0d0ca03";
 using FnCdGetItemCount = int (*)(void* self, int nTI, int itemId, uint8_t compress,
                                  const void* methodInfo);
 FnCdGetItemCount gCdGetItemCount = nullptr;
@@ -592,7 +592,7 @@ int SlotNPos(void* item) {
 }
 
 int PickUsePos(void* item, int listIndex) {
-    // GetItem(Consume, nPOS) = list._items[nPOS]（IDA RVA 0x13583F0：edi 直下标，不减 1）。
+    // GetItem(Consume, nPOS) = list._items[nPOS]（IDA RVA 0x1359CE0：edi 直下标，不减 1）。
     // 官方 FuncKey / UseRequest 传格子 nPOS，不是 List 压缩下标。低格时两者常相等，
     // 所以旧版绑 2000000@pos=1~8 能喝；高格（远程 2001500@listIndex=64）会打空。
     const int fromSlot = SlotNPos(item);

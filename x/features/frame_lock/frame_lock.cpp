@@ -21,9 +21,9 @@ namespace {
 using x::runtime::il2cpp::AtRva;
 
 // remount 2026-08-06 dump.cs.runtime（相对 08-04 统一 +0x3FD0）
-constexpr uint32_t kRvaSetTargetFps = 0x4EE8180;  // Application.set_targetFrameRate
-constexpr uint32_t kRvaGetTargetFps = 0x4EE8140;  // Application.get_targetFrameRate
-constexpr uint32_t kRvaSetVSync = 0x4F034E0;      // QualitySettings.set_vSyncCount
+constexpr uint32_t kRvaSetTargetFps = 0x4EF3AD0;  // Application.set_targetFrameRate
+constexpr uint32_t kRvaGetTargetFps = 0x4EF3A90;  // Application.get_targetFrameRate
+constexpr uint32_t kRvaSetVSync = 0x4F0EE30;      // QualitySettings.set_vSyncCount
 
 constexpr DWORD kTickMsOn = 200;      // 轮询；真正重刷见 kReapplyMs / gApplyNow
 constexpr DWORD kTickMsOff = 2000;
@@ -41,7 +41,7 @@ struct MethodInfoHead {
 };
 
 // IL2CPP FreeFunction icall（IDA 实锤）：仅 rcx=int / 无 MethodInfo 末参。
-// set_targetFrameRate@0x4EE8180 / set_vSyncCount@0x4F034E0：保存 ecx → resolve → jmp icall。
+// set_targetFrameRate@0x4EF3AD0 / set_vSyncCount@0x4F0EE30：保存 ecx → resolve → jmp icall。
 using FnSetInt = void (*)(int value);
 using FnGetInt = int (*)();
 

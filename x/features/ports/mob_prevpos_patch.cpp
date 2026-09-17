@@ -17,10 +17,9 @@
 namespace x::features::ports::mob_prevpos_patch {
 namespace {
 
-// 分支决策 @ RVA 0xF5D0DB（内联在 Mob CFF 大函数 sub_7FFD61789D50 里）：
-//   cmovz r15, rax  (4C 0F 44 F8)  ->  mov r15, rax; nop  (4C 8B F8 90)
-// rax 在前一条 lea 恒为 &正常移动包路径 → 无条件 mov 后每帧每怪永走正常包。
-constexpr uint32_t kRvaBranch = 0xF5D0DB;
+// 分支决策 @ RVA 0xF9CE07（Mob private void(int) @0xF9BC70）：
+//   lea rax, off_正常包; cmovz r15, rax  (4C 0F 44 F8)  ->  mov r15, rax; nop  (4C 8B F8 90)
+constexpr uint32_t kRvaBranch = 0xF9CE07;
 constexpr uint8_t kExpect[] = {0x4C, 0x0F, 0x44, 0xF8};
 constexpr uint8_t kPatch[] = {0x4C, 0x8B, 0xF8, 0x90};
 

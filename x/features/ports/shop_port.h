@@ -1,11 +1,11 @@
 #pragma once
 // Classic TWMS shop_port — UIShopDialog ready + TalkToNpc + UI 买卖 / 飞镖充值。
 // 字段防漂移：hash / 明文 → field_get_offset；dump 常量仅 fallback（见 EnsureShopFieldOffsets）。
-// 卖出：UIShopDialog.SendSellRequestPacket @0x56A440（2026-09-10；Encode1(byte) op=1）
+// 卖出：UIShopDialog.SendSellRequestPacket @0x56A4A0（2026-09-10；Encode1(byte) op=1）
 //   Create + Encode1(1) + Encode2(pos) + Encode4(itemId) + Encode2(qty)
-// 买入：UIShopDialog.SendBuyRequestPacket @0x569360（2026-09-10；Encode1(byte) op=0）
+// 买入：UIShopDialog.SendBuyRequestPacket @0x5693c0（2026-09-10；Encode1(byte) op=0）
 //   Create + Encode1(0) + Encode2(buyIdx) + Encode4(itemId) + Encode2(qty)
-// 飞镖：UIShopDialog.SendRechargeRequestPacket @0x56A9D0（2026-09-10；Encode1(byte) op=2）
+// 飞镖：UIShopDialog.SendRechargeRequestPacket @0x56AA30（2026-09-10；Encode1(byte) op=2）
 //   Create + Encode1(2) + Encode2(pos)；选中卖栏 _sellSelectedIndex
 // 禁止 Session.Send 旁路 HashSet（会本地踢线）。
 

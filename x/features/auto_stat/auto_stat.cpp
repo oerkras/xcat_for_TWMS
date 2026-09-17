@@ -2,7 +2,7 @@
 // 策略对照 Maplecat UseAP（权重总和=5、贪心每次 +1、属性 +1 确认）。
 // 「5」是从开启起每 5 点的配比权重，不追身上已有四维；身上剩多少 AP 加多少。
 // 发包：泵上直调官方 UIStat.f701293c(uint flag)，不造包、不开属性窗。
-// 09-10 dump：类 hash b3912d2e…（Prefab "UIStat"）、SendAp RVA 0x65A900；旧 0x649E90 已不在函数入口。
+// 09-10 dump：类 hash b3912d2e…（Prefab "UIStat"）、SendAp RVA 0x65A960；旧 0x649E90 已不在函数入口。
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -43,16 +43,16 @@ constexpr DWORD kJobWaitMs = 800;
 constexpr int kMaxFail = 5;
 
 constexpr char kUiStatClassHash[] =
-    "b69cfcf3949b23c361ded7de554ebe2531561c53b30f77bbd37b394f6ff1435";
+    "addcbcb58444098731910b869736f0732fb6a2f1ac35c4e461cdc82528a1858";
 constexpr char kSendApMethodHash[] =
-    "fe80933d6eb61287d96f0f450262c5f4fa9d19e4b6d084cf707e4efcd32cf29";
-constexpr uint32_t kRvaSendAp = 0x65A900;
+    "ed9c5a11a05a8bda815522fbd069d1922512847ece225b081f617d5761d699a";
+constexpr uint32_t kRvaSendAp = 0x65A960;
 
 constexpr char kWmClassHash[] =
-    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
+    "cba21c42799e50c37623ea5fd88d5c4c9155c2565d25cde936671684e16dff7";
 constexpr char kCanSendExclHash[] =
-    "a6be5f14683c006f833199ed31484f6347112b7fae0d6461c3fc38c84c74f0f";
-constexpr uint32_t kRvaCanSendExcl = 0xE2D840;
+    "b9c0f151ae3425e551d759586cec4e00bca6e886d959aebb5d95807fd38bc8f";
+constexpr uint32_t kRvaCanSendExcl = 0xE2F8D0;
 // UIStat.b6a2d557 VA 0x7FFD60EC668A：mov edx, 3BAFE07Eh; xor edx, dword_7FFD670F3158
 // 运行时 dump 种子 0x3BAFE18A → type=500。与换频 SendTransfer 同一把独占锁（不是抄错 type）。
 constexpr int kExclTypeStatUp = 500;

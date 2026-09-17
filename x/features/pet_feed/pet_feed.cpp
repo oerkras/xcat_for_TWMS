@@ -44,9 +44,9 @@ constexpr DWORD kPendingMs = 5000;
 // UserBase 短 IsAlertMode：LocalUser alert stamp > 0（与 drop_alert 同字段）
 // hash → field_get_offset；dump fallback 0x118（勿用 bac75f bool@0x114）
 constexpr char kUserAlertClass[] =
-    "b294bd93aa7e13db6037be77316e311e5a2a2785e71ece309a5a6fa71874e84";
+    "d729ff05b21cf29f353feed539e293108a927728922602f2ef6b9be89a1c2a4";
 constexpr char kHashAlertAt[] =
-    "d6f9a4fb43f9816cee247cfb4b47e2b5b869248fc873437584ac99bac34b40d";
+    "cbdb07d77b99b6479b05f5b3eb1dbe2ee3ca6d607af5badff0a9df0e6a9b6e6";
 constexpr size_t kFbAlertAt = 0x118;
 size_t gOffAlertAt = kFbAlertAt;
 bool gAlertFieldTried = false;

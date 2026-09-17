@@ -27,23 +27,21 @@ namespace {
 
 // SSOT class hash：与 ports/mob_pool_port.cpp 同代（dump.cs.restored MobPool）。
 constexpr char kMobPoolClass[] =
-    "fb4087246b8590f5eef2e1ffdb35ead2adcb4792575a77dd2494cf34a099517";
+    "b4028adce19d99b4ffd552e49d16d46bc8618db5706e971285b60a7a309720d";
 
-// dump.cs.restored：OnMouseMove 后首两个 InPacket = Enter / Leave（P0a 位序，跨 dump 稳定）。
-// Il2CppDumper 写的是 CFF 体内 RVA；运行时 MethodInfo.methodPointer 与
-// codeGenModule->methodPointers[] 都是 IDA 函数头（BIN 05:28：0xFE3170 / 0xFE3770）。
-// 包分发走 methodPointers 表拷贝，只换 MI 会 install ok 但 obs 零命中。
-constexpr uint32_t kRvaEnterDump = 0xF951D0;
-constexpr uint32_t kRvaLeaveDump = 0xF957F0;
-constexpr uint32_t kRvaEnterFn = 0xFE3170;
-constexpr uint32_t kRvaLeaveFn = 0xFE3770;
-constexpr uint32_t kRvaMouseFn = 0xFE2D90;    // OnMouseMove 函数头（dump 体内 0xF94D90）
-constexpr uint32_t kRvaMouseDump = 0xF94D90;
-constexpr uint32_t kRvaTableEnter = 0x690F680;  // .data methodPointers Enter；Leave=+8
+// dump.cs（09-17）已写 IDA 函数头，不再单独给 CFF 体内 RVA。
+// methodPointers 表拷贝：Enter/Leave 槽相邻 +8。
+constexpr uint32_t kRvaEnterDump = 0xFE4FE0;
+constexpr uint32_t kRvaLeaveDump = 0xFE56A0;
+constexpr uint32_t kRvaEnterFn = 0xFE4FE0;
+constexpr uint32_t kRvaLeaveFn = 0xFE56A0;
+constexpr uint32_t kRvaMouseFn = 0xFE4C20;    // OnMouseMove 函数头
+constexpr uint32_t kRvaMouseDump = 0xFE4C20;
+constexpr uint32_t kRvaTableEnter = 0x6A0D1B0;  // .data methodPointers Enter；Leave=+8
 constexpr char kHashEnterField[] =
-    "f4d168496bc77fc6eeddbbb2163f03094e217722180530102905993816e4985";
+    "adb768e9b7a5e28b535a9ed3d9c2ab35ac6984746489cc29f2e4fbd3ee27d6b";
 constexpr char kHashLeaveField[] =
-    "f32b1c5ad6c0ea331c9d6feb87967122785b27710a24d9ab9e9209111dd0edf";
+    "b832e5f388aa58d6fbe04dd2eff32f5acc3822318d136eb3fec8f5939f5925e";
 
 constexpr DWORD kInstallRetryMs = 3000;
 constexpr DWORD kWorkerIdleMs = 500;

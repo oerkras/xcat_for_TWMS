@@ -31,27 +31,27 @@ using x::runtime::il2cpp::ReadPtr;
 // UserLocal → il2cpp_shape::ResolveUserLocalKlass
 // Remount 2026-08-06：ACS hash 全换。08-13：CurPos 哈希从数组槽撕开（见 kHashLogicalPos）。
 constexpr char kActorBaseClass[] =
-    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";
+    "bceba896aaa7328f05716b053a9243bade419f40a12ea561361454a49d42034";
 constexpr char kVecCtrlClass[] =
-    "bd523630874d83261c9d61195338db2618e754c6337046aa8515dc68eef73a5";
+    "b8852488236cbfef306ec9af609517b4001d141a4dfea630f4493ff1dd93c9c";
 constexpr char kFhClass[] =
-    "e9d65262f1f5ece125f49574ab4dc65dada20b15d417ba5cfa21250a9d67487";
+    "f170a7675ad228e5a230f827f38e033ea098dfac23c613cb498e5428b4c39d5";
 
 // hash → field_get_offset（与 foothold / mob / invuln / skill 同源）
 constexpr char kHashUserVecCtrl[] =
-    "<bebe8c30521415d7031ea8549625722dcb5515452987adf2de99200de295a48>k__BackingField";
+    "<b4eeb44c75ab914f1491eb1375aede619676f2d39e20fc353d1f677f4ce708b>k__BackingField";
 constexpr char kHashPos[] =
-    "cdb04ce386f0f95b2ea1efe9454c2974a452cfe4d5b5924ec89759bb59836ad";
+    "adab4adef226133516a747cf56cea7c2badbf7b3249b7aceda99ac861097a52";
 constexpr char kHashVcCurFh[] =
-    "<cf1bc2539b28ff004818c68a891dd228f73884dde334aa6e476ee9d44b53ec9>k__BackingField";
+    "<b643d128c94c35a151a28de48a9751015e6dc062e12a4bc7983c99339fdc459>k__BackingField";
 constexpr char kHashVcAp[] =
-    "ed692ba84d6145d5f4eed7fad03baafc62274cc1b73022f669e3d0b6667ebff";  // AbsPos; Y=+8
+    "ccfb64ef82657ece045552618807f482e6ffdcad5cf3610eb33102007008ffa";  // AbsPos; Y=+8
 constexpr char kHashVcApl[] =
-    "e6053248466e4ad4100d3d922bc15e323c9cf4812394367f2d5e8127d50f476";  // Apl; Y=+8
+    "a4b0e4779b815aac0077d1dba939235240eb2632cae9139641acd186f890336";  // Apl; Y=+8
 constexpr char kHashVcRelPos[] =
-    "ab42d9995c29b365dd1497c92348830639a83a8629ec74ccba9e5a57e000880";  // RelPos; V=+8
+    "dc7d11aa7e0f49915a81acf9a9be3e4d1a713a622504294ad5c2638d482d91c";  // RelPos; V=+8
 constexpr char kHashFhId[] =
-    "<bf5b8ba0164685af3299d62b34febcd91731196d36cb9ff115203ea7e7f9477>k__BackingField";
+    "<e8cec24fd7621807a7137c0a6fb08196ee6a61e9789ac847fb2923904d5e66a>k__BackingField";
 // LocalUser 镜头 CurPos（只读诊断）。09-10：真 Vector2 是 cac8b9b8@0x2E8；
 // df491dca@0x2B0 已是去闪 uint，equal-offset 会假命中。窗口 0x200–0x300 包住 0x2E8。
 // 2026-08-04 撤销「镜头自愈」：0.1.36 实测只读探针 dApCur 静息 27~53px、dApPos=0、
@@ -59,18 +59,18 @@ constexpr char kHashFhId[] =
 // 平滑跟随物理上无法收敛。自愈据此每 0.29s 硬拧一次镜头（中位 343px、峰值 1419px），
 // 反而成了撕裂源。原「镜头粘死」证据取自 nSlow_=140 污染动作层的旧局，根因已换，立论作废。
 constexpr char kHashLogicalPos[] =
-    "c7e7d437346692c76ab582a510af39b410bca9920f2870d7500a1ee63be5f7a";
+    "fef9a14d4ac646ab7b85ae7d9d6715e0986c3054c5c74a91b7ba75b69d096a3";
 // e2a28(Key) 键位移偏移对（IDA：mov [rsi+4B4h], rdx · 两 int32）
 constexpr char kHashKeyMoveDelta[] =
-    "<f154e2b49e5db407a07820519b83e8c3768dc4cd6c9ceee14da6aa6c3129873>k__BackingField";
+    "<b67e410e0a23ce31ba888143814c535f96eb170b123551dd7ff4f5e98d0c4f2>k__BackingField";
 
 constexpr size_t kOffCachedPtr = 0x10;
 #define kOffWmMyUser (x::ui::player::OffWmMyUser())
 // Mob 专属 PvcActive；LU 上无同名槽，保留软探针（LooksLikeHeapPtr 失败 → VecCtrl）
 constexpr char kHashPvcActive[] =
-    "a20ac39af9c6fac3ba61b19a9471130a7670ba41be8f541fc6da51cebf4d905";
+    "f4b312d80a2b658bdf2aaac4a7a02de2a4388ffd13b679570b57d4c60e017c3";
 constexpr char kMobClass[] =
-    "fea4358a07c99f6ab1e2cda4d015f36773997b07da3838b9e592aaf7184672d";
+    "b06a585bbb20974b370a52ef95e0e2329dca00dead70828c5a6cd86e76cd18b";
 constexpr size_t kFbPvcActive = 0xF0;
 size_t gOffPvcActive = kFbPvcActive;
 #define kOffPvcActive (gOffPvcActive)

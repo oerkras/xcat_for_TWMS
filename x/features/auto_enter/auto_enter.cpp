@@ -50,81 +50,81 @@ using x::runtime::il2cpp::ReadPtr;
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
 // RVAs remounted 2026-08-06（dump.cs / script.json · ForceVersion 31）
-constexpr uint32_t kRvaSceneLoginGet = 0xC4A970;  // SceneLogin static get_Instance
-constexpr uint32_t kRvaOnClickWorldItem = 0xADE380;  // UILoginWorld void(int)
-constexpr uint32_t kRvaSelectChannel = 0xAD7810;  // UILoginChannel.SelectChannel
-constexpr uint32_t kRvaOnClickGoWorld = 0xADAC20;  // remounted 2026-09-10 UILoginChannel void()（明文 OnClickButtonGoWorld 已消失）
-constexpr uint32_t kRvaSelectCharacter = 0xABFD50;  // UILoginCharacter void(int,bool)
-constexpr uint32_t kRvaOnClickButtonSelect = 0xAC10C0;  // remounted 2026-09-10 UILoginCharacter void()（明文 OnClickButtonSelect 已消失）
-constexpr uint32_t kRvaGetAvatarCount = 0xACBF50;  // UILoginCharacter public int()
-constexpr uint32_t kRvaIsSlotEnable = 0xAC7A80;  // UILoginCharacter bool(int)
+constexpr uint32_t kRvaSceneLoginGet = 0xC4AED0;  // SceneLogin static get_Instance
+constexpr uint32_t kRvaOnClickWorldItem = 0xADE680;  // UILoginWorld void(int)
+constexpr uint32_t kRvaSelectChannel = 0xAD7B20;  // UILoginChannel.SelectChannel
+constexpr uint32_t kRvaOnClickGoWorld = 0xADAF00;  // remounted 2026-09-10 UILoginChannel void()（明文 OnClickButtonGoWorld 已消失）
+constexpr uint32_t kRvaSelectCharacter = 0xABFF80;  // UILoginCharacter void(int,bool)
+constexpr uint32_t kRvaOnClickButtonSelect = 0xAC1360;  // remounted 2026-09-10 UILoginCharacter void()（明文 OnClickButtonSelect 已消失）
+constexpr uint32_t kRvaGetAvatarCount = 0xACC190;  // UILoginCharacter public int()
+constexpr uint32_t kRvaIsSlotEnable = 0xAC7BD0;  // UILoginCharacter bool(int)
 
 constexpr char kClassSceneLogin[] =
-    "d8b374c0601bc1255934015b3f8368910ec7bba6bc127d665774220be276eb6";
+    "eb579f9e366aba64d2b93c5956ef5d48f3e3bb00804a9fe6e11813b464237be";
 constexpr char kClassUiLoginWorld[] =
-    "c0dc4cf4c2dcc0c324a117cefa7ab42d3e018ffc1a0e84f9d288df4acc1fcff";
+    "e98e1137b821f33500521db590d8a1049200657ace2f6ec67856827a3893c29";
 constexpr char kClassUiLoginCharacter[] =
-    "d03aecf971342226295ab6c2051182025f7cedad674bf88488dc3f1e57d959f";
+    "ae5664844fcc41cde3945a710ebc491e21bf01313ecc21f8c151ec5c1418fac";
 constexpr char kClassUiLoginChannel[] =
-    "ed11b05f861073f30f1734c7040bf9a495daeddba49ca756e7d821c71180368";
+    "e4c4fb2f402b10150ad1e9001463419d0dba9b1301dbc1be9080fd48e649bb3";
 
 // 09-10 SceneLogin TDI 1178：0xC0 新插 UI（a951e45b），Channel/World/Char 顺移 +8
 constexpr size_t kFbSlChannelUi = 0xC8;
 constexpr size_t kFbSlWorldUi = 0xD0;
 constexpr size_t kFbSlCharUi = 0xD8;
 constexpr char kHashSlChannelUi[] =
-    "<a024ea6db7088b9f74a167848b275428687810b95714ad3f7b436fa8aaa05f8>k__BackingField";
+    "<b5722c058cb295689d5501d0b7b639e0551a0195c04b1d053df8490071aa0d3>k__BackingField";
 constexpr char kHashSlWorldUi[] =
-    "<e5b78fab76b18532963bff77877f329b97ea9c5a906422c56dc3480ead07791>k__BackingField";
+    "<bb3d12477afc68bc829c69c8eb86150c58476aa9067fd42d6915fee2fb649df>k__BackingField";
 constexpr char kHashSlCharUi[] =
-    "<ec4db46f963fc835145e47b6912c2b970ece68df7f6a245d7008f65331bda01>k__BackingField";
+    "<d30536dabd4e7bc36f90d617aff4440054e9a61af99425a4041d04985b9dabc>k__BackingField";
 // WorldItems / WorldChannels / AvatarList + remaining login slots: hash -> field_get_offset
 constexpr char kHashWorldItems[] =
-    "<f668bef1e818527867776447329c575050f5c82730e4fd858f7c1a2ac2111b9>k__BackingField";
+    "<fde9d1158248ead4d7a3ce96509d986bfed3c91456743c82374aec99306a583>k__BackingField";
 constexpr char kHashWorldChannels[] =
-    "e28995f390a2a8e6bce6aae8386405b0ef71a1fed072b7b0a0b4458c7dcf15a";
+    "b287addf7a261d87844f3172785186c32846dc46390f72be9192f93f314ca63";
 constexpr char kHashCharAvatarList[] =
-    "cd52638e6ff0e6383d429107e69d790b28a07b01250b847b77f99e129bd2c40";
+    "f873b99e29187b6df96060a894b1562bed24e7dc95d9d2a942d8722e3918251";
 constexpr char kHashCharSelectedIndex[] =
-    "<ec3c667749eed212b3684b4cfe170bea0a6272d2a368691e4aa0e6cb7e14c79>k__BackingField";
+    "<f30730ec55cc3adcee26cca8deacd318004c8fae0b40a1bdd31d152b1dc71f5>k__BackingField";
 constexpr char kHashCharSlotCount[] =
-    "<d8fbabfdc618b2ddeb11d82987061fe60c8b8ff5097e81837d2d16a9ac71376>k__BackingField";
+    "<f27c4ecda0cdabce84d0a19f5aac7a2eb7b311b7a76d12145d4b432d89e90f3>k__BackingField";
 constexpr char kHashChannelSelectedWorld[] =
-    "bc47ddfd737527fe69805efca7596da7fe4a715cc859ceb490552f901fd64a8";
+    "a3c354e572bbbf5769485beed41d2a0159aa7861a94d82db9237228527c9a0a";
 constexpr char kHashChannelSelectedId[] =
-    "bf6a6a41dc5a44d5a1c0c61bd14c4155fb635048418c7e7f0a809efb73828c7";
+    "c1524ada79d15e59352fdc118f6aadd433298a2e995c73279eeac28de0dc5c8";
 constexpr char kHashWorldId[] =
-    "e54e34bdfae2aa3a604fbd0d761a63841fd58329372cc2b38d7d4a3ef420ea8";
+    "edc93f8601932c359ca0cebb25369cd7c0047a71dde43f94dd378908a2b9875";
 constexpr char kHashWorldName[] =
-    "a644b036ae5af62e89edfc701ae13bf21bdd6396e6390288c7907b63fa8e272";
+    "a987f0bb279df6489ebda8369317815b391012fb0cf7d4a785c696ab9040406";
 constexpr char kHashChUserNo[] =
-    "b4ff5cbf9ca175a0f48d395bf0ca6eb58c531eadacfe7198953d6f49f7a45ec";
+    "ed4c4281fa5d4399850dfc7ad3f49bbbc99ccba8dbabb828bba7ccd20695f8e";
 constexpr char kHashChChannelId[] =
-    "d36b0014dd2f7b2e5ae1bf1fa9b78afa2d189d54162adc318ce9fb018cdba86";
+    "f56c02d175954f906a4665c458947424ca2e52dc08c42011b68be29c579eb81";
 constexpr char kHashChAdult[] =
-    "d33e7821ea15b138f90e4c02ba4618f2ee86a6daae038e7b7e6a18da42bc609";
+    "eeb34920cc4d80d9bf5b1389a39c9759ddc585a6edd1a6039182ee61e276601";
 constexpr char kHashChCapacity[] =
-    "ff5c157d146c4d12f98f3726ec8041473afcdb749977950e7a7adcda9728932";
+    "e8f3bc422b7fa93579d9c0ab606779861f8c53f9774caaca4a8f1a6c71ee85f";
 
 // 方法哈希（dump.cs · remount 2026-08-06）
 constexpr char kHashSceneLoginGet[] =
-    "cb1694ead1a0bb77d18b732c459e965e7236a1ba1c71109b4afcede7afe56b5";
+    "c014c37605faf08e1ff939aea01b8ee346e7acdf6d5a105d8243facc3c085fc";
 constexpr char kHashOnClickWorldItem[] =
-    "c78b60accf4095cdba3deb71ef146d31cdbf281df321990423740469d6b788a";
+    "b49a13a94cdcbcddb6ad5c355a1a7d7e0ddc72c97feae1ecaecaaedc8fa239c";
 constexpr char kHashSelectChannel[] =
-    "f82553255da01c4ac6f564358d4ffe306a2eddd48a86ecd9fc3ec6409cd9b61";
+    "b926337e7201fe49dffbe9b2cffc69d5146646ac65fbff847f03282d74a9352";
 constexpr char kHashSelectCharacter[] =
-    "b21c13008d1eaf6d60737a7e642c7bf4c443c716c842967fe33291cf284c53b";
+    "a716a1e27b1c3dbf53af23cd6f4b84c88f5fd71d2110abb931170910bdeb1d8";
 constexpr char kHashGetAvatarCount[] =
-    "de17ffe04ceb822e91f7cab4dfe43cfa2f294f0f80a458e9e13efe9f82b7dcf";
+    "fbc08c5ceaa1ad997fe5a4571cb525de9a846b0f112f92b028afd5b20b82f26";
 constexpr char kHashIsSlotEnable[] =
-    "cc916d8f15af06eaabb0a7cb6c886d84a5a52442d59f1a5cce66b49e7b3aaf3";
+    "d8ae8165933c762798e8b3cf2b06e0a3add529a2f9ea46a69bddeb8611ca604";
 constexpr char kHashOnClickButtonSelect[] =
-    "a631d38e0f4e8a0d7a6bb34ef9d01fc00e48ecbfb663cfd601d1aeb42b7268f";
+    "bd0b2bc5585aa33194f09ba3b0b78fb617e58dc59b58b8fe7e7ba4484571cfe";
 constexpr char kClassWorldItem[] =
-    "be0c1c0f1454225d9649487026e09635f7d04dac20488f98280f050304118d9";
+    "e59e10af6930222434c2b0ca7cf0157976b56c55770a171dfd566be2a40905a";
 constexpr char kClassChannelEntry[] =
-    "dcffe0e97607cc7a7a86d0ba93049e5f4a7464fac03224122acabae3cb3592c";
+    "c7f325084d1eee5782fa3be3ba60796139b2528b547f7e092c44c1cc78f4359";
 constexpr size_t kFbWorldItems = 0x58;  // 08-13：0x50 插入 GameObject，List<WorldItem> 顺移
 constexpr size_t kFbWorldChannels = 0x38;
 constexpr size_t kFbCharAvatarList = 0x178;       // 09-10：0x168 插入对象，List 顺移
@@ -138,7 +138,7 @@ constexpr size_t kFbChUserNo = 0x18;
 constexpr size_t kFbChChannelId = 0x1D;
 constexpr size_t kFbChAdult = 0x1E;
 constexpr size_t kFbChCapacity = 0x20;
-// SceneLogin 登录阶段枚举 @+0xA0（09-10；getter RVA 0xC4A790 = [this+40]*4）；OnClickButtonSelect→SL 要求 ==2
+// SceneLogin 登录阶段枚举 @+0xA0（09-10；getter RVA 0xC4ACF0 = [this+40]*4）；OnClickButtonSelect→SL 要求 ==2
 constexpr size_t kOffSlLoginPhase = 0xA0;
 constexpr size_t kOffSlBusyFlag = 0x28;
 constexpr int kSlPhaseForCharConfirm = 2;
@@ -1063,7 +1063,7 @@ void RunJobOnMain() {
             break;
         }
         case JobKind::GoWorld: {
-            // ?? OnClickButtonGoWorld??? TriggerEnterChannel/SendSelectWorld(0xAC11A0)?
+            // ?? OnClickButtonGoWorld??? TriggerEnterChannel/SendSelectWorld(0xAC1460)?
             // Go ???? SelectWorld????? = ????? ? ?????
             (void)b;
             constexpr MethodShape kGo{0, TypeKind::Void, true, false, {}};

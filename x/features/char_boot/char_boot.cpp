@@ -126,24 +126,24 @@ constexpr int kUiDlgTypeYesNo = 1;
 constexpr int kUiDlgTypeList = 4;
 constexpr int kDlgScanCap = 32;
 constexpr DWORD kDlgScanLogMs = 1500;
-constexpr uint32_t kRvaUiDlgSelectMenu = 0x7ba6c0;
-constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x7C3540;
+constexpr uint32_t kRvaUiDlgSelectMenu = 0x7ba740;
+constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x7C35C0;
 constexpr uint32_t kRvaUiDlgOnClickBtYes = 0x7C35C0;
 constexpr uint32_t kRvaFindAll = x::runtime::il2cpp::kRvaFindObjectsOfTypeAll;
 constexpr uint32_t kRvaCompGetGo = x::runtime::il2cpp::kRvaCompGetGo;
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4F5E0C0;
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4F69A10;
 
 constexpr char kUiUtilDialogExClass[] =
-    "b7ca33f59d8ffad545e8e024f40b5b8caee3d90c486c720fdf08d7e8839f94e";
+    "b731652cc9dbeae313cdf4c9b18aa721c563fb879cf989ff00947dc28a73129";
 constexpr char kPrefabUtilDialogEx[] = "UIUtilDialogEx";
 constexpr char kHashSetKeyFocus[] =
-    "cee979840ed8b665bdd844a43d1a0edbd156c5c53ccf9ff64f4433d0f4da909";
+    "b2a8de3b132bb8d34b4b1427d7dc24e9c365efd748c2a4ebcdac762d5c7e376";
 constexpr char kHashUiDlgType[] =
-    "ba4f5380e382ee51071677c3fb777258e61fbb5e1647f2342f71bb3041369c8";
+    "b5ca1a13181ae0336c58a288081c07399d032451ff33097265c47b13972e5c5";
 constexpr char kHashUiDlgMenuTexts[] =
-    "<dc192c018156f959bb71c248b93cd1a980579fab6c2cf21cf4b27a043003fa8>k__BackingField";
+    "<e2aa54d30928e47459acac80a4aaf4c842354926b3604aa9a11ccb813f60174>k__BackingField";
 constexpr char kHashOnClickBtYes[] =
-    "b5ada0e5f75469e5518500b798ff2879c1e29f1e32661ed2ba62d3045947810";
+    "d021b1c0331d1aa25f13a31ffd1f03a6f30c1e4b7029d8e6adcf7d83788ceac";
 
 const char* kShipKeys[] = {"維多利亞", "维多", "乘船", "搭船", "前往", "150", "楓幣", nullptr};
 const char* kHansKeys[] = {"魔法師", "法师", "轉職", "转职", "成為", "成为", nullptr};

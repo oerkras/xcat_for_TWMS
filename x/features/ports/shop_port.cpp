@@ -46,85 +46,85 @@ using x::runtime::il2cpp::ReadPtr;
 
 // UIShopDialog — dump TDI 442 · remounted 2026-09-10（勿用 UIStat TDI 518 / b3912d2e）
 constexpr char kUiShopDialogClass[] =
-    "fad5dd775041636b6da0d06794c9e5ea676fb9966275b6e5f83ede20626d226";
+    "e88eb08bae872341669ffd2cd826d4a4e8ee2335482910eb6845a2430f6b8e9";
 constexpr char kPrefabShopDialog[] = "UIShopDialog";
 // NpcPool — remounted 2026-08-06（形：List@10 Dict@18 List@20 List@28 Field@30 int@38）
 constexpr char kNpcPoolClass[] =
-    "fc5c1e8281303e6ed33d461b8b1ffcbdf5a121fd946b32133da20f788dfd225";
+    "b83832383e5ab88787c233895b11e248d89a9bde1f26f004573534c04ba0b75";
 // UIUtilDialogEx（脚本对话 / AskMenu）— Prefab TypeDefIndex 609
 constexpr char kUiUtilDialogExClass[] =
-    "b7ca33f59d8ffad545e8e024f40b5b8caee3d90c486c720fdf08d7e8839f94e";
+    "b731652cc9dbeae313cdf4c9b18aa721c563fb879cf989ff00947dc28a73129";
 constexpr char kPrefabUtilDialogEx[] = "UIUtilDialogEx";
 constexpr char kFuncKeyClass[] =
-    "ea3da4955e170bddd23954b6fadb04307346cce8502f56114ac4c270f4cf65b";
+    "ff247e31dceda987dca78a8f62c2a3787063a7d45e50e426f06aa259d45257c";
 
 // OutPacket SEND 13775 / Session Send — 与 travel_port 同源 · remounted 2026-08-06
-constexpr uint32_t kRvaOutPacketCreate = 0x1D88D70;
-constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1D94DC0;  // Encode1(sbyte)
-constexpr uint32_t kRvaOutPacketEncode2Short = 0x1D95140;
-constexpr uint32_t kRvaOutPacketEncode4Int = 0x1D95250;
-constexpr uint32_t kRvaNmSend = 0x1D8AA00;  // Session.SendPacket bool(OutPacket)
-constexpr uint32_t kRvaUserLocalTalkToNpc = 0x1139250;  // remounted 2026-08-06
-constexpr uint32_t kRvaOnFuncKey = 0x1134ce0;  // remounted 2026-08-06 UL.OnFuncKey
-constexpr uint32_t kRvaFuncKeyCtor = 0x1700270;  // remounted 2026-08-06 .ctor(FuncType,int)
+constexpr uint32_t kRvaOutPacketCreate = 0x1D8BC70;
+constexpr uint32_t kRvaOutPacketEncode1Byte = 0x1D97CC0;  // Encode1(sbyte)
+constexpr uint32_t kRvaOutPacketEncode2Short = 0x1D98040;
+constexpr uint32_t kRvaOutPacketEncode4Int = 0x1D98150;
+constexpr uint32_t kRvaNmSend = 0x1D8D900;  // Session.SendPacket bool(OutPacket)
+constexpr uint32_t kRvaUserLocalTalkToNpc = 0x113af60;  // remounted 2026-08-06
+constexpr uint32_t kRvaOnFuncKey = 0x11369d0;  // remounted 2026-08-06 UL.OnFuncKey
+constexpr uint32_t kRvaFuncKeyCtor = 0x17020a0;  // remounted 2026-08-06 .ctor(FuncType,int)
 // UIUtilDialogEx：SetKeyFocus(int) / OnClickBtOk
-constexpr uint32_t kRvaUiDlgSelectMenu = 0x7ba6c0;  // remounted 2026-08-06 SetKeyFocus
-constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x7C3540;  // remounted 2026-08-06 OnClickBtOk
+constexpr uint32_t kRvaUiDlgSelectMenu = 0x7ba740;  // remounted 2026-08-06 SetKeyFocus
+constexpr uint32_t kRvaUiDlgOnClickBtOk = 0x7C35C0;  // remounted 2026-08-06 OnClickBtOk
 // UIShopDialog 产品买卖入口 — remount 2026-09-10
 // Sell/Buy：Create(68) + Encode1(byte op) + Enc2(pos) + Enc4(id) + Enc2(qty)
-//   0x56A440 op=(0xFA+7)&0xFF=1 卖；0x569360 op=0x7B^0x7B=0 买
-constexpr uint32_t kRvaSendSellRequestPacket = 0x56A440;
-constexpr uint32_t kRvaSendBuyRequestPacket = 0x569360;
-constexpr uint32_t kRvaSendRechargeRequestPacket = 0x56A9D0;
-constexpr uint32_t kRvaCmpSellItem = 0x56D340;
-constexpr uint32_t kRvaShopSetRet = 0x5524A0;
+//   0x56A4A0 op=(0xFA+7)&0xFF=1 卖；0x5693c0 op=0x7B^0x7B=0 买
+constexpr uint32_t kRvaSendSellRequestPacket = 0x56A4A0;
+constexpr uint32_t kRvaSendBuyRequestPacket = 0x5693c0;
+constexpr uint32_t kRvaSendRechargeRequestPacket = 0x56AA30;
+constexpr uint32_t kRvaCmpSellItem = 0x56D3A0;
+constexpr uint32_t kRvaShopSetRet = 0x552500;
 // Select 只写 current@0x54；货架 List@0x210 由本方法填（IDA：call a5b0c102 / e209269e）。
-constexpr uint32_t kRvaShopRefreshSell = 0x561A00;
+constexpr uint32_t kRvaShopRefreshSell = 0x561A60;
 // UIDialog.Close — 基类虚函数；关 UI 实例
-constexpr uint32_t kRvaUiDialogClose = 0x11CE8F0;  // remounted 2026-08-20
+constexpr uint32_t kRvaUiDialogClose = 0x11D0350;  // remounted 2026-08-20
 // 方法哈希（dump 可读名缺失时的防漂；void(int) 在 UIShopDialog 上不唯一）
 constexpr char kHashSendSell[] =
-    "aafc4d8783a767fd4531615ac6964490149ee07255d804fbb7b1a2fdc2c3eb4";
+    "aae7f667c96e98eba1e387a0fc7761694d7be190baeea76d9d350a5c48e4234";
 constexpr char kHashSendBuy[] =
-    "b224a07ec6e813d7883f4f5d162d8cfb23aa669512dee5c5666c339a6e26e1f";
+    "e9c7ef832f907858e1ce62b5fa0f9521a4de1a35f109abc2b0a1f1c3dad81af";
 constexpr char kHashSendRecharge[] =
-    "b5de26af73f37c03e88ad0a2ae189f09314000a6e5ed35c931accff7255bcf2";
+    "cd6c935706e2b4f4d9e9836c428a7c174a66a50ee6377b75621b5fc9e086a97";
 constexpr char kHashCmpSell[] =
-    "a519bf65c007206ad0d2e3e1fe93cf08184f9545d75a1a770f030823cc656b2";
+    "e08b9381f2826d9bcd5059977d3dcd90a859138af9cc8579bac4044a887d64c";
 constexpr char kHashSendPacket[] =
-    "b3b21eb3c2730d1980bf0eaa9708443c5ae9bda8a633de4a507ec2c3f7d8306";
+    "d4807d1f75d069434d9967bd02c9c47f2c1ad75018b107394a5b3cf794376f5";
 constexpr char kHashTalkToNpc[] =
-    "eab84f75b4da089684698d5abea5e991a8cb0482b7a72127f8a5e4d6cd68e65";
+    "e168d9847d3adcc7ca257cc7342222b5a1de092ebf5f3c58052b7b484b06491";
 constexpr char kHashOnFuncKey[] =
-    "a8e976cda164129940d026862b8f8df7c0bae4251ce63aaa8f285bbd3f03532";
+    "f37aa0a081dcad95faf6c7024fe156ec27c000a7cf8e701ea46a51451d89129";
 constexpr char kHashUiTabOnClick[] =
-    "e52297c4804472cd50014661ae0518836adf744236d48bba75f0fba9c236dba";
+    "adcaf6dab3ac39e314aef08ca77dad5333e0e9b609e156c155154abb5a2cb83";
 constexpr char kHashShopUiTabSelect[] =
-    "f405f1b218bf7558e1aa363c04aabd067b035ce06e21d748eea74fce3e9042e";
+    "a79ba958161a2c7eb13287ee24e71fc2b96c1a87ad841df288fe0d9e93e3b89";
 constexpr char kHashShopRefreshSell[] =
-    "ada8adc9115dfb5f8089079083880495b53fa767dfb15bebf5ee8e11ba58809";
+    "d750c88eac66981608070abaf6abc03e0d47633fded2c9e65289b92a5d125bb";
 constexpr char kHashSetKeyFocus[] =
-    "cee979840ed8b665bdd844a43d1a0edbd156c5c53ccf9ff64f4433d0f4da909";
+    "b2a8de3b132bb8d34b4b1427d7dc24e9c365efd748c2a4ebcdac762d5c7e376";
 // OutPacket Create/Encode* — SEND OutPacket 13775；Encode1 本 port 用 sbyte
 constexpr char kHashOutCreate[] =
-    "bdc818833eaf10c8b4c4aea87655578c1089f35f56b7410a43fa11280595a66";
+    "a23859427d76cebc31bb8f182db4118fc33f1c39b2c840b37a9b6f756ac8027";
 constexpr char kHashEncode1Sbyte[] =
-    "f02d13240bb0374fe69bc6627e36273fa70d25bbeb181d38199fb28bdb131ce";
+    "e6d31c983be1c416eb413a30be0c18bbeee5a6912e64fb86637beffab26c11a";
 constexpr char kHashEncode2Short[] =
-    "bdabff0bda0baec172c08f36a0c532dffe77801915c9fea5b30f18358b03659";
+    "f9fcddc1795093bcf0c154f2d10d7406b7f76c9b740f1aee2cbd13084d7cdea";
 constexpr char kHashEncode4Int[] =
-    "a100894d7b827d6eded8215773d18524d053c3dc32926bbd6108b7edb57f6c9";
+    "f83d162c144da2d9357654487425fac2b57ec2843f3fda297f7d5f312451624";
 constexpr char kOutPacketClass[] =
-    "daba5b68fb674204a54bbd26da7dd4508e4521a0b2248bf88275bbebffe37a4";
+    "f507bd0e915b856c1a075675eb08f312b656dbf3f1c32a3b7619caceb2d3778";
 // Unity helpers（明文名稳定）— 走 ResolveUnityMi
-constexpr uint32_t kRvaButtonPress = 0x50ABC00;  // remounted 2026-08-06 Button.Press
+constexpr uint32_t kRvaButtonPress = 0x50B7550;  // remounted 2026-08-06 Button.Press
 constexpr uint32_t kRvaGetGameObject = x::runtime::il2cpp::kRvaCompGetGo;
-constexpr uint32_t kRvaGoSetActive = 0x4F5DF20;  // remounted 2026-08-06 GameObject.set_active
-constexpr uint32_t kRvaGoGetActiveSelf = 0x4F5E0C0;  // remounted 2026-08-06 get_activeSelf
-constexpr uint32_t kRvaUiTabOnClickTab = 0xB5A5C0;  // remounted 2026-08-06 UITab.OnClickTab
+constexpr uint32_t kRvaGoSetActive = 0x4F69870;  // remounted 2026-08-06 GameObject.set_active
+constexpr uint32_t kRvaGoGetActiveSelf = 0x4F69A10;  // remounted 2026-08-06 get_activeSelf
+constexpr uint32_t kRvaUiTabOnClickTab = 0xB5A9C0;  // remounted 2026-08-06 UITab.OnClickTab
 // 09-10：UIShopDialog 槽 0xC0/0xC8 类型换成商店专用 TAB（非 caafbe07 UITab）。
-// 选中下标 backing @0x54；切页 RVA 0xB63340（cmp [this+54h]）。
-constexpr uint32_t kRvaShopUiTabSelect = 0xB63340;
+// 选中下标 backing @0x54；切页 RVA 0xB63740（cmp [this+54h]）。
+constexpr uint32_t kRvaShopUiTabSelect = 0xB63740;
 constexpr int kClientUserShopRequest = 67;
 constexpr uint8_t kShopOpSell = 1;
 constexpr uint8_t kShopOpBuy = 0;
@@ -138,7 +138,7 @@ constexpr int kUiDlgTypeList = 4;
 
 // Session/NM 方法宿主（与 il2cpp_shape::kHashNetworkManager 同）
 constexpr char kSessionClass[] =
-    "c932d387005490bdae5c6a171d6ae990dbfe667ad98f3d33c878e162e0c7be8";  // remounted 2026-08-06
+    "f89a9012c22d5754fcaf8cf5f3cc2075c9efa95b4601b302af21382947ecbbc";  // remounted 2026-08-06
 
 // 背包 / Money：SSOT = x::ui::player（hash→field_get_offset）；禁止再钉 WM/CD/CS 偏移。
 #define kOffListItems (x::runtime::il2cpp_container::OffListItems())
@@ -147,36 +147,36 @@ constexpr char kSessionClass[] =
 #define kOffArrData (x::runtime::il2cpp_container::OffArrayData())
 constexpr size_t kFbNpcPoolList = 0x10;  // NpcPool._npcList
 constexpr char kHashNpcPoolList[] =
-    "cb154f7f966532d9e9639b0fcdedd9068eb8bae8fd9a699eb28f31e884dfccd";
+    "f66d98319ec0a251948b2263b414ec1ab03c9597eceef148db191ed63f9e75f";
 size_t gOffNpcPoolList = kFbNpcPoolList;
 #define kOffNpcPoolList (gOffNpcPoolList)
 
 constexpr char kNpcClass[] =
-    "c66d61480e9664cd41bf8a64a739535ff4b7e20e92d4e97bd236e43583c0c76";  // remounted 2026-08-06
+    "fba156e15d7e300cd893a21438dafbc22af86f8b95df67a8aa656aeb75aded6";  // remounted 2026-08-06
 constexpr char kNpcDataClass[] =
-    "b53489fb79a5c313eb21d78991e12366c0bf2300bd0a53e24f1220503e35eab";
+    "bd3d5eff972d7a5937a011b2951ff40717b2d1ed2c51cf9a1f96671571ecdda";
 constexpr char kActorBaseClass[] =
-    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";  // = teleport
+    "bceba896aaa7328f05716b053a9243bade419f40a12ea561361454a49d42034";  // = teleport
 constexpr char kPacketClass[] =
-    "e4a837e0c122619b214e15b955ec342c4ec02ab6af11631b5a9cf43d784247c";  // Packet base 13773
+    "a4eb9c20ba8659d8fddc163e7949a3bc50f15fb114bd1d135d0ccb4821d1f14";  // Packet base 13773
 
 constexpr char kHashActorPos[] =
-    "cdb04ce386f0f95b2ea1efe9454c2974a452cfe4d5b5924ec89759bb59836ad";
+    "adab4adef226133516a747cf56cea7c2badbf7b3249b7aceda99ac861097a52";
 constexpr char kHashNpcObjectId[] =
-    "<fec2c5eb64f723aec62b0036109101aaea61d8eb1a6e453252d986c60949778>k__BackingField";
+    "<f827aaca0cb2c5cb4140a24c43fa3d1d7d494f80791aec7dce9a9da3e97e602>k__BackingField";
 constexpr char kHashNpcData[] =
-    "b9dca1541ad897a4326b0836d26beafcf0e398555037277775dd3cc697ae199";
+    "bddb9d393861ee0cbf8141effe74a70838198d09dbda3c26071894d6604d185";
 constexpr char kHashNpcDataId[] =
-    "c3c7f4467635c185848247d3f7df1767d2bef278359b6ec82128df6f6c85faf";
+    "e0c084ade09d24cd238dba24dd49859f03ce609327e7015529ea44619e66aec";
 constexpr char kHashUiDlgType[] =
-    "ba4f5380e382ee51071677c3fb777258e61fbb5e1647f2342f71bb3041369c8";
+    "b5ca1a13181ae0336c58a288081c07399d032451ff33097265c47b13972e5c5";
 constexpr char kHashUiDlgMenuTexts[] =
-    "<dc192c018156f959bb71c248b93cd1a980579fab6c2cf21cf4b27a043003fa8>k__BackingField";
+    "<e2aa54d30928e47459acac80a4aaf4c842354926b3604aa9a11ccb813f60174>k__BackingField";
 // Packet offset（基类）；SEND OutPacket id@0x20（非 InPacket backing）
 constexpr char kHashPacketOffset[] =
-    "<c11600e369c78d4413498612cbf64d787d921969340d2448edb34dbe6935da5>k__BackingField";
+    "<d87ff8a4d0536c80399b3b78e80e3bb46e36c5b4803820ab79d2cbab0a47991>k__BackingField";
 constexpr char kHashOutPacketId[] =
-    "d0e34e976361bf622107ef86c3429c2150c8f1c186db2704f278bbba8c11409";
+    "a42c47c9f67f287eb829d2d80127129302201676550560fc3cb231b03b737d7";
 
 constexpr size_t kFbActorPos = 0x64, kFbNpcObjectId = 0x78, kFbNpcData = 0x80;
 constexpr size_t kFbNpcDataId = 0x10, kFbUiDlgType = 0xA0, kFbUiDlgMenuTexts = 0xE0;
@@ -226,55 +226,55 @@ constexpr size_t kFbShopUiTabItems = 0x48;    // Button[]；ListSize 读 max_len
 
 // UIShopDialog 私有字段哈希（dump.cs TDI 442 · remount 2026-09-10）
 constexpr char kHashFldBuyList0[] =
-    "ceeca5cebf98ab0dc67ce048abecb4d118161eeeb62f943ff7fa46aa0418dff";  // _buyItemList @0x1F0
+    "fb8387b7213e4935d2593b499b859370e91d840d4fa06ebfc3326822abaef6a";  // _buyItemList @0x1F0
 constexpr char kHashFldBuyList1[] =
-    "a6e39eb6db2a2287d9fab1165faac8ff1f53298ea5c27531506f6136713c9df";  // _buyItemRecommendedList @0x1F8
+    "acbbd288a55c090cd968f9ab1800dc53a1cee9ac547e3ac31984796832728a8";  // _buyItemRecommendedList @0x1F8
 constexpr char kHashFldSellList[] =
-    "b03b48364947156c04f329f0f694436393d090e02e20bae6d43cd517389db23";  // _sellItemList @0x210
+    "e9999be8660216365d3abeff6c4c25269865a5ae2a9105cf6fcfd7f124898e3";  // _sellItemList @0x210
 constexpr char kHashFldBuySelected[] =
-    "c7bec8c5b6629e858ffb735784a76ae8f884d5bcccde6803ea87f5da09f5927";  // _buySelectedIndex @0x220
+    "a13a8b1ab2365ed5420340a52acdc823a77ccc1854c01baead58572c257a1a2";  // _buySelectedIndex @0x220
 constexpr char kHashFldSellSelected[] =
-    "d2fc4521a8d186fe5366e2a6cc96e90de4ffba01d4e2a407bdaf7f2d6989371";  // _sellSelectedIndex @0x224
+    "cd3239f33f2a49761a8968b952f0cab059a95941eb48bbb755db2a8aeb96117";  // _sellSelectedIndex @0x224
 constexpr char kHashFldLastBuy[] =
-    "b2cbb2c06c4baa5965ed1a88321d99cae15b51d5b474a76123f2af65c4c6ec2";  // @0x230；SendSell 当卖栏下标（切 TAB 会写成 -1）
+    "be4f31e26cfc61b8e4648755db85ef6d5d6b12f68f14be5b02ecadb76826c16";  // @0x230；SendSell 当卖栏下标（切 TAB 会写成 -1）
 constexpr char kHashFldHasRequest[] =
-    "d660c8c14102d657fa81f8b54096606f74ab4ef81612dabefa194f5cc200f1d";  // _hasShopRequestSent @0x238
+    "ddfcb15fee2854c81fde51c181997cdc6b6e4e8eaef3de42ef85918b127c2bd";  // _hasShopRequestSent @0x238
 constexpr char kHashFldLastSell[] =
-    "c0375b40626f24c980b21ecd2a402b4b25781b60ac99b9ae485172e82b3a0a9";  // _lastSellIndex @0x23C
+    "ce2be2452234588166e90ebd41db460cff09b61897ef509de5a0dde5077fd75";  // _lastSellIndex @0x23C
 constexpr char kHashFldUiTab0[] =
-    "bc5b1c04288c09db306ee3ab3b9183df4fb503a82188980254eea1d1ba3dabf";
+    "c80fecaab04db2ebb6ddd7c75aaf0654bdd9e6aed9f761cb67bb2772fa1e95a";
 constexpr char kHashFldUiTab1[] =
-    "c1168b5622ca77bfb4fea84ce0fe142e384271205b5dfd31d2649d4c735df04";
+    "b34b5dc533cdf5190f8c47ed494b71e3339a1d3a17f602205af8bf631cd3dc3";
 constexpr char kHashFldButtonExit[] =
-    "a0c64f0c60c2328f471da4abe046b8833d36d0e29c26401eca84a918e47ae5a";
+    "a167e73c9d5b7b43fa29b13b6035f4a9de4fbd87ec2c4ad25501d82cf4bf631";
 // 商店专用 TAB（dump TDI 963 · 09-10）；勿再用通用 UITab 的 0x20/0x28。
 constexpr char kShopUiTabClass[] =
-    "f76c1894e817b23f68fd33db895c1b91585f948399bc3135c592817431bf249";
+    "cb1e252959b244ae496b4d6d096a0edc3746109802696c42dd3ec4c5d0661b1";
 constexpr char kHashShopTabCurrent[] =
-    "<ff9093c07788fb93e2d227480f6a3e9871ad54f4d85ce350dec66806729ec20>k__BackingField";
+    "<f716fe95624d726cea8c4c27afb4c6fdaea693f3f66ff2da7a69a3a70154552>k__BackingField";
 constexpr char kHashShopTabItems[] =
-    "a56b6c70546ce5e66b1c4ab0fa2229b40015f06dcc21aaaf5c1278106982490";
+    "c1d106a9d25e1ea012a690e070a77675ecfee8665a0279051e26f36388febf4";
 
 // Item DTO（TDI 443）· remount 2026-09-10（明文名已哈希；偏移未漂）
 constexpr char kFldItemId[] =
-    "ec6c5d5325794bead6bd01ed2ac0772fdee1baa50a04dbcff150d6f863f1ad4";
+    "e12f425bc3cbb14bfbf9ac7af192b83b71ba4df37fe3962259611ca747f98ac";
 constexpr char kFldItemPos[] =
-    "c6ffc5a541376ff9fbe1fbcd770ec748346d30a02a66ee12428c1c73162a2f7";
+    "dc42107bbc22469f025a2ae88d95e164fbc0be4e07df4cec9df16e1199cc3e0";
 constexpr char kFldItemPrice[] =
-    "a85e38b90964af1c6ee1d2a1cc8ebb43769189a0b35e675b2d7791b745d7daa";
+    "d5267747c850065ba0a951d7223ed495283564073288a5613ddb4ad29674be2";
 constexpr char kFldItemUnitPrice[] =
-    "ad6e83b15ff12928cff11ba548aa3edd19c1ca2963b82c59cb8629be8281906";  // double@0x30
+    "ae183bf6e67b597e5cedf69601cd5233c6aa8423240761fed5d816c9802af20";  // double@0x30
 constexpr char kFldItemMaxSlot[] =
-    "de81411ac8993feb4b4dfde0b498e0d5daaeb9e41f83de0390d1f65e2bf75d4";
+    "a5a1b1e630c7a7a68b89c14d125f7724b6cb7e1f953a8e94612c137c02b5796";
 constexpr char kFldItemQty[] =
-    "f1cb256bcd07ae9795a647f5d8f6566b0ab6b7a89d3853ee796b3e4ce583c56";
+    "edc8b5f8ff307f0c60c8d5cf2c61804c2ad7df4fc0f00488af0de0170c90a8d";
 constexpr char kFldUiTabCurrent[] =
-    "a586a9a1e246ce0554a2408ea18ed4fdbc4682bdfa60959d78d7b7868173fc4";
+    "c722ea0a89b48398a8d99a862f040da0c7888cecf2dfc36155c23f46fa0060f";
 constexpr char kFldUiTabItems[] =
-    "ab1da97229ac4de52aa4f089eb2ef317a8d2940bd5880d84a4527bd63ad867d";
+    "b169e761bbf56fca207a155e83864751c16a18832dd80b885e31a2c29191785";
 // ShopItem klass hash（internal nested TDI 443；FindShopItemKlass 鉴别用）
 constexpr char kShopItemClass[] =
-    "c17341b9c26809365582d9f793bbdddc495cfc9fbcb842d996ed402a46fbed8";
+    "ad1d99d0da2f3e6b0a697eace42d80d92efa0765fe9211c545fdee5c640aa55";
 
 struct ShopFieldOff {
     size_t buyList0 = kFbBuyItemList0;
@@ -335,17 +335,17 @@ constexpr int kSessionStateConnected = 3;
 
 // ItemDataManager : Singleton<>（dump TDI 2032 · remounted 2026-09-10）— 与 titlebar 同源 hash
 constexpr char kItemDataManagerClass[] =
-    "bff751c2534faed4265d5bef882ae1d31e4c2f410adb17332cc66a00ad07955";
+    "b440ca17adc98923e84f04b3c273ab5d6115cd2508d7a70ae533fff19e8e74e";
 constexpr char kItemDataClass[] =
     "d0faf43681b85608fdeeb49e50b4ef39661f9915255f9cc42ffbcef8c7ecdcc";
 constexpr char kItemBundleClass[] =
-    "c17341b9c26809365582d9f793bbdddc495cfc9fbcb842d996ed402a46fbed8";
+    "ad1d99d0da2f3e6b0a697eace42d80d92efa0765fe9211c545fdee5c640aa55";
 constexpr char kItemInfoClass[] =
     "d17b63a8e0d464dcc480fe3c2ca318421794428fcbead1527e27897c386c30b";
 constexpr char kHashIdmDataTable[] =
-    "e4a61e49a1ac663c21808443cd325d892ef1e6ff6dfcd5f9a61b94a3bad5958";
+    "d7aba831e42d1811cd7276183a6830d09fb90de6184f20d6b8f184126aae741";
 constexpr char kHashIdmBundleMap[] =
-    "b9179fefdbfaaf491fe1bae547155bd56b9c16b271ecadeadc45d64c70089ba";
+    "ddd4e1590a6e778b87b3eb2b188dd4c1efff16847774397e3a227d1dd4668f2";
 constexpr char kHashItemDataInfo[] =
     "bb139da95e1f69f3567bf5d09454077ef5aae9327c2493a8289add95d00c5d5";
 // 运行时字段名已哈希；明文 nMaxPerSlot/slotMax 会 field_get_offset miss
@@ -590,7 +590,7 @@ void EnsureShopFieldOffsets() {
     // Stock@MaxSlot+4：dump 明文可解析；哈希化时用 MaxSlot/Quantity 夹心推导（0x38/0x3C/0x40）
     {
         bool stockOk = FieldOffOrFb(itemKlass,
-                                    "e493e91e850a60625fad057d8afd4c685a3b49a9540ef35bf9829f38b9fa606",
+                                    "d8fafd7c82c5cd4d83ffff46fbe8a507d3bdba0fc6a3955a09c334f5a8bea05",
                                     kFbShopItemStock, &gOff.itemStock);
         if (!stockOk && gOff.itemQty == gOff.itemMaxSlot + 8) {
             gOff.itemStock = gOff.itemMaxSlot + 4;
@@ -599,7 +599,7 @@ void EnsureShopFieldOffsets() {
         hit(stockOk);
     }
     hit(FieldOffOrFb(itemKlass,
-                     "f278793e0a4fdb1a2fa628e8d703216d8cfc5da19d31a40ddc905c943d1d6ba",
+                     "e6e613fc26fb00b29aff480f95c42aed1c2b91fe838df69265742a7ea926a3a",
                      kFbShopItemSlot, &gOff.itemSlot));
 
     if (shopTabKlass) {
@@ -2179,8 +2179,8 @@ bool EnsureShopSellInvTab(void* dlg, int invType, bool* outSwitched, bool refres
     }
     using x::runtime::il2cpp_method::MethodShape;
     using x::runtime::il2cpp_method::TypeKind;
-    // 09-10 商店 TAB 切页：hash ad139b0f / RVA 0xB63340（cmp [this+54h]）。
-    // 通用 UITab.OnClickTab 不在此 klass 上；AtRva 也必须走商店 RVA，勿再 0xB5A5C0。
+    // 09-10 商店 TAB 切页：hash ad139b0f / RVA 0xB63740（cmp [this+54h]）。
+    // 通用 UITab.OnClickTab 不在此 klass 上；AtRva 也必须走商店 RVA，勿再 0xB5A9C0。
     void* tabKlass = nullptr;
     __try {
         tabKlass = *reinterpret_cast<void**>(tab);
@@ -2279,7 +2279,7 @@ void SellJobOnMain(void* user) {
         }
         WriteI32(gShopDlg, kOffSellSelectedIndex, sellIdx);
         WriteI32(gShopDlg, kOffLastSellIndex, sellIdx);
-        // 09-10 IDA SendSell（0x56A440）：List.get_Item([this+210h], [this+230h])。
+        // 09-10 IDA SendSell（0x56A4A0）：List.get_Item([this+210h], [this+230h])。
         // +230h 是 dump 的 lastBuy；Select+RefreshSell / e586ef3a 会写成 -1 → get_Item 抛 → BIN EXCEPTION。
         WriteI32(gShopDlg, kOffLastBuyIndex, sellIdx);
         int qty = job->count > 0 ? job->count : 1;

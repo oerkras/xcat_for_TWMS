@@ -34,22 +34,22 @@ using x::runtime::il2cpp::ReadPtr;
 // HP/MP 真源在 x::ui::player（WM→CS）；LocalUser → il2cpp_shape::ResolveUserLocalKlass
 // ItemDataManager：09-10 remount（TypeDef 2032；dataTable@+0x18 / bundleMap@+0x38）
 constexpr char kItemDataManagerClass[] =
-    "bff751c2534faed4265d5bef882ae1d31e4c2f410adb17332cc66a00ad07955";
+    "b440ca17adc98923e84f04b3c273ab5d6115cd2508d7a70ae533fff19e8e74e";
 constexpr char kItemDataClass[] =
     "d0faf43681b85608fdeeb49e50b4ef39661f9915255f9cc42ffbcef8c7ecdcc";
 constexpr char kItemBundleClass[] =
-    "c17341b9c26809365582d9f793bbdddc495cfc9fbcb842d996ed402a46fbed8";
+    "ad1d99d0da2f3e6b0a697eace42d80d92efa0765fe9211c545fdee5c640aa55";
 // ItemData.info 实际类型（restored Info · TypeDef 2031），不是旧 ItemInfo 名
 constexpr char kItemInfoClass[] =
     "d17b63a8e0d464dcc480fe3c2ca318421794428fcbead1527e27897c386c30b";
 
 // IDM / ItemData / Bundle / Info 价位：hash → field_get_offset（dump fallback）
 constexpr char kHashIdmDataTable[] =
-    "e4a61e49a1ac663c21808443cd325d892ef1e6ff6dfcd5f9a61b94a3bad5958";
+    "d7aba831e42d1811cd7276183a6830d09fb90de6184f20d6b8f184126aae741";
 constexpr char kHashIdmBundleMap[] =
-    "b9179fefdbfaaf491fe1bae547155bd56b9c16b271ecadeadc45d64c70089ba";
+    "ddd4e1590a6e778b87b3eb2b188dd4c1efff16847774397e3a227d1dd4668f2";
 constexpr char kHashBundleSellPrice[] =
-    "de81411ac8993feb4b4dfde0b498e0d5daaeb9e41f83de0390d1f65e2bf75d4";
+    "a5a1b1e630c7a7a68b89c14d125f7724b6cb7e1f953a8e94612c137c02b5796";
 constexpr char kHashItemDataInfo[] =
     "bb139da95e1f69f3567bf5d09454077ef5aae9327c2493a8289add95d00c5d5";
 constexpr char kHashInfoPrice[] =

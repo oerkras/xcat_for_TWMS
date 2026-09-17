@@ -50,56 +50,56 @@ using x::runtime::il2cpp::ReadPtr;
 // StaticFoothold / LadderOrRope / User.VecCtrl / VecCtrl.CurFh：hash → field_get_offset
 // remounted 2026-08-06（与 teleport_port 同源；字段偏移未漂）
 constexpr char kFhClass[] =
-    "e9d65262f1f5ece125f49574ab4dc65dada20b15d417ba5cfa21250a9d67487";
+    "f170a7675ad228e5a230f827f38e033ea098dfac23c613cb498e5428b4c39d5";
 constexpr char kLrClass[] =
-    "fb42030a61532f3df39fcb3254084e1d404dfaa3c3345084ef7885f57a78fc9";
+    "fea8cc1bb32e2e2006099c182b9b865fc7578ac4018abf187069aa88f389ad7";
 constexpr char kActorBaseClass[] =
-    "b2116f0802bf7581d294e4eb9a7c7e772cb71881355c81c5c32907b72594fa6";
+    "bceba896aaa7328f05716b053a9243bade419f40a12ea561361454a49d42034";
 constexpr char kVecCtrlClass[] =
-    "bd523630874d83261c9d61195338db2618e754c6337046aa8515dc68eef73a5";
+    "b8852488236cbfef306ec9af609517b4001d141a4dfea630f4493ff1dd93c9c";
 
 constexpr char kHashFhId[] =
-    "<bf5b8ba0164685af3299d62b34febcd91731196d36cb9ff115203ea7e7f9477>k__BackingField";
+    "<e8cec24fd7621807a7137c0a6fb08196ee6a61e9789ac847fb2923904d5e66a>k__BackingField";
 constexpr char kHashFhX1[] =
-    "<a6479fe2dc89bcae0f17aea5b4562935f39683cdddef549b1bf0804913bb2b8>k__BackingField";
+    "<c9bd39e47b2570741251866361f511271482116bf503b2d7b44373da352b215>k__BackingField";
 constexpr char kHashFhY1[] =
-    "<aeec583cfe97db6bc4944b8d20dd6975964bd8403fbf7efd02c4b5b366bbe72>k__BackingField";
+    "<da189ae6a62bd6c6161e0e878adc93e260bdf7997f4c6c067d86da49a155bf3>k__BackingField";
 constexpr char kHashFhX2[] =
-    "<c81eb895ecf2b965f5140bae04fe3d1de0db15352395e36f88a73b11395b739>k__BackingField";
+    "<ad7091b520e1e3843869aece402c7186b90e88d662bc5ee7e4a6ce3725f9c6e>k__BackingField";
 constexpr char kHashFhY2[] =
-    "<ca2ce25d1bc6678bd656f6dc67671cdecde2bf02e44b22ffb1b08f8dc964a45>k__BackingField";
+    "<b4e8f3aef577e02d17a811a44fae02ec404ea3215afb5cf5cb4773f5c365272>k__BackingField";
 constexpr char kHashFhPrev[] =
-    "<d455160f2babf3783f0ebe22aab251f4d61e41220167617a705cda6c5faf058>k__BackingField";
+    "<fbedf252615cf54bca9dfb8793a53e909d1be50cd8673528ab92c1261e0a100>k__BackingField";
 constexpr char kHashFhNext[] =
-    "<d6f973e54ed10af7c80ece65cf5565e72cc85e242e5236faed47b9b7bb45a2a>k__BackingField";
+    "<a5314be58091f1aac0fb3491c64568c8979883273e190edd409480d550c9c1e>k__BackingField";
 constexpr char kHashFhForbid[] =
-    "<c03fa4ab6bbb0f764d9463a41206fd3bbb78735dea3e2233ee209c9ef9312ce>k__BackingField";
+    "<ed90625240ac8cf1170b3d2f4e827076aaf3bcd6a07b8ca99c31e69bf7610e6>k__BackingField";
 constexpr char kHashFhLayer[] =
-    "<cb121c3d502e48a90df69b1a863b5db0792eeb21792d9955bf86640d736a66a>k__BackingField";
+    "<ead98acebe7ba68091259a74510c3441eb503976819571ebb164d86c0610afe>k__BackingField";
 constexpr char kHashFhPage[] =
-    "bd26e8aee90b936ebc645cbc451cce32b038f08dbfe2bee18d7bdb4d489465c";
+    "fc20eec23d5ed8e9012bb1cad7eb710ff0e330a2f8adf1239247e9d3d3068f3";
 constexpr char kHashFhZMass[] =
-    "adb05e79aca7e29db1a1914ffc3b4c1dd76cd4acbc760b640c6926e9f6cfefb";
+    "cdafa269edddc7dc1c50944588880123d55051e95817529886ceedcdabe9120";
 
 constexpr char kHashLrId[] =
-    "<ad54c82bfde1172bfec6cb7d658f68f9db151225904f1afc2f1ae17e435b838>k__BackingField";
+    "<d4247ef1fc8dc131f82eab17472ebc78db9ac0152212da3c6216c8a13ba6143>k__BackingField";
 constexpr char kHashLrX[] =
-    "<b2d6d0b9030ab1b9670c4c7ef57ba9b8de167b437c518a0cd8f7bc7dace3f46>k__BackingField";
+    "<afd989315a725861078b27d40c8c3cbab2df8baeb9ddcacc6a95ab0aa7c6b8f>k__BackingField";
 constexpr char kHashLrY1[] =
-    "<e447ac1005247fdcbd4197efac80eab9d7574cc9cbe9b047f9d0650f27220d2>k__BackingField";
+    "<d685079c3d9bce3fe07218c16205bee5d81ec9f8bcef927121c1906af4c99be>k__BackingField";
 constexpr char kHashLrY2[] =
-    "<b01614c67520c12a5ae2e902ce9a11b053e37d9cf4b5a1dfd451fb14781ad5f>k__BackingField";
+    "<a37d4835f861efdf7864bbc4e4059e3fe5edfa5593107bb389d21d9f6e92f03>k__BackingField";
 constexpr char kHashLrPage[] =
-    "<fe2eaf8293c504fba795060c941a493046dc1b641ae984f2f1d0eb6c1eae82f>k__BackingField";
+    "<dcf9f9fae694a3f1c0cb9ffedce053724b4f04b3a2a75bd6e3208070b5a53ca>k__BackingField";
 constexpr char kHashLrIsLadder[] =
-    "<f0d28372a7d98d7d27f57126276f6f6c37d839597bccfca85399285277903c4>k__BackingField";
+    "<e1c26477b0e086795e1ba5a1f31bc61d24054988e48d696f091f33d388b69aa>k__BackingField";
 constexpr char kHashLrIsUpper[] =
-    "<b8c7ca6e1a6a4d5d38afdd533ed0a7e1ea97ddd21f7326e118953acf5cf10ce>k__BackingField";
+    "<b035b09e53b7d374462ffd5cb70870a9647aa91ea0e738d4afd8a26081c8c90>k__BackingField";
 
 constexpr char kHashUserVecCtrl[] =
-    "<bebe8c30521415d7031ea8549625722dcb5515452987adf2de99200de295a48>k__BackingField";
+    "<b4eeb44c75ab914f1491eb1375aede619676f2d39e20fc353d1f677f4ce708b>k__BackingField";
 constexpr char kHashVcCurFh[] =
-    "<cf1bc2539b28ff004818c68a891dd228f73884dde334aa6e476ee9d44b53ec9>k__BackingField";
+    "<b643d128c94c35a151a28de48a9751015e6dc062e12a4bc7983c99339fdc459>k__BackingField";
 
 constexpr size_t kFbFhId = 0x10, kFbFhX1 = 0x14, kFbFhY1 = 0x18, kFbFhX2 = 0x1C, kFbFhY2 = 0x20;
 constexpr size_t kFbFhPrev = 0x24, kFbFhNext = 0x28, kFbFhForbid = 0x38, kFbFhLayer = 0x44;

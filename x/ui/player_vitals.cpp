@@ -28,96 +28,96 @@ using x::runtime::il2cpp::ReadPtr;
 
 // --- dump.cs / restored TypeDef（2026-08-06）---
 constexpr char kHashWorldManager[] =
-    "c55180bcf183a5b10bb74f56544b6900e3a5dae78d2ff5a6c8587b0e4c399fe";
+    "cba21c42799e50c37623ea5fd88d5c4c9155c2565d25cde936671684e16dff7";
 constexpr char kHashCharacterData[] =
-    "fc09ef0e0d54c07042a56575d966628802e69f257ba527a57f00748e67313b7";
+    "b0b3ee7ea1f9e3dfe390adcc6c0f8b3ccc6703e20ecab8769f3dea0c661cda9";
 constexpr char kHashCharacterStat[] =
-    "e6e36b4ab8ad4ffd8b8a7a3dcedfa1f5098c06ba2caff3a43a6586044fc48eb";
+    "b2b8bf9af199f117a239e2a496a72f9d29e58cb48d882af4c3de1d802b8a0c4";
 constexpr char kHashBasicStat[] =
-    "fc7b2599233cbdd7d81d64332027eca09f0ee02d15d2976cdefe31f2f8c2ca1";
+    "d05fafd803e5944e7bc93d32f4902f87a1236896d60b0660429e683aebf4f6f";
 constexpr char kHashNextLevel[] =
-    "a4f16c1be69b8bae5dcc6abde1812fa64e3d61811054bac80335e10b54c75e9";  // TypeDef 1834 Nextlevel
+    "af6b39e5bbb2a7f04578ac0c6dd6dd5e06d9bcc465be6fad6c36d8c2f0d8571";  // TypeDef 1834 Nextlevel
 constexpr char kHashItemSlotBase[] =
-    "f4124c869a21043b4e4b180bd9d87ad6f53eab2a7c5c1c8cb319ba3fa7ffac1";  // TypeDef 1761
+    "f70996d114bf2f4cf0c985796a65ec566369c1014a1edd476a8287f323d72b1";  // TypeDef 1761
 constexpr char kHashItemSlotBundle[] =
-    "de4a237f4bd7fa470f0546d39d651f633f8df17c890fd2863084f398eb6c353";  // TypeDef 1762
+    "c2bf5447cf3e555d11ff3e91b1258711232145693205380dda31081d3637750";  // TypeDef 1762
 
 // WM
 constexpr char kHashWmMyUser[] =
-    "<e8188e62384d9888cf8dbf795b258a6cdda4933a2b3bba9725997db5ed14b83>k__BackingField";
+    "<f05b550317985a2eaa8fadb32ffffbe82cdaf841dba68e5d35d2dcf99ed6a13>k__BackingField";
 // 2026-08-06 BIN：旧哈希 c39c747b… 实为 WM+0xA8 的 bool；真 CharacterData* @0xE0。
 constexpr char kHashWmCharacterData[] =
-    "eefb2ac8c168ccba5b10936a5eeb98b926a6dde1b1d8a63c69f126b3a38abf8";
+    "c360c98c279935acfad02204ec9da405a5dc1173561ea0e1047e4dbc580b1b5";
 // BasicStat* @0xE8（旧 a96d3d20… 是 int[] @0xB0）
 constexpr char kHashWmBasicStat[] =
-    "a69bc16fc0cf5897421595db2ab8cd2b1b3165d697f3c8fb8fff3c053f00550";
+    "a014b1d70c65c029aa27d1ff3cff2c7cc4f5b8f1322c4b66006576cde41127f";
 // CharacterData
 constexpr char kHashCdCharacterStat[] =
-    "ffcc7f1b853760d2a81a13f30f848be42c616b43ff40f3fd8e9126eaca7042b";
+    "de7875a59acba7406d5c9bfa1b33af59ca6d4eea81521da12afaaf6fb388e71";
 constexpr char kHashCdItemSlots[] =
-    "cff110654d704ceaef1c4f120232f99e2cfe3483145be6eddd4c0968eb8a553";  // List<ItemSlotBase>[]
+    "fdceb47c0740b59430fb305f0860087dac0c18a4d861d881f5afe666af2ee73";  // List<ItemSlotBase>[]
 constexpr char kHashCdSkillRecord[] =
-    "a198d4972d2da55dffcbc218f19ffee92d1242763e72f467a97553b3b850a9f";  // Dict<int,int>
+    "fea16fb978951097c31df5f1dea708854895a36be2d8e6347f49b46135c6575";  // Dict<int,int>
 constexpr char kHashCdSkillRecordEx[] =
-    "e45d489450a19bf3dbef88b01c54613a89b7ccb6d6ede93779166f13a27f313";
+    "cd0ee652e15ebfc90082d1dfa57194fed7c40b45431def425c1c516aa40f705";
 constexpr char kHashCdSkillMasterLevel[] =
-    "af675c00bb586b4114f0773c8883d94f7bb12c5b53df4f047f6c358004ea817";  // Dict<int,int>
+    "bc1cc2c58ebe509e460a1fa4ab1b142e6c30e89823eef717e2016be25793737";  // Dict<int,int>
 constexpr char kHashCdSkillCooltime[] =
-    "cfb115c8103a5dad64a05a04417664beaadefa08111da9416fb103afe46b916";  // Dict<int,ushort>
+    "d529282a841b96ee2656cb158b667cb3303c9cbd65135d5493d347ffa001770";  // Dict<int,ushort>
 constexpr char kHashCdSkillCoolTimeOver[] =
-    "fdfce06377c667c295cabcb26ced2eba7cc8f37454c70ed32fa9128db9926c2";  // Dict<int,int>
+    "d183a6f0ef1e99af992e130fa0b78573a8ed9d4d503d763cf8686af605a7e1f";  // Dict<int,int>
 constexpr char kHashWmSecondaryStat[] =
-    "b0c0a50e8ae94d0b59b245de1df4ea415c7d0126f496d8e38ab18534cf310a9";  // WM+0xF0；勿用 +0xB8 嵌套 struct
+    "c36eec52194719506c3bd095d3e61cd6f5995ca63c53c9e230651a6a7e2a6f3";  // WM+0xF0；勿用 +0xB8 嵌套 struct
 // ItemSlotBase / ItemSlotBundle（08-06 remount：类名已哈希，字段亦哈希）
 constexpr char kHashSlotItemId[] =
-    "cd9da19da3fc26d1f45ea3ef55b667b2406400081ad46b465c66500a1c5bc2d";  // ItemId @0x10
+    "c81b6812a4e7d60bc3b07ef14041ea4c2399fc7b44abd8869a4e7979d751ae3";  // ItemId @0x10
 constexpr char kHashSlotBundleNumber[] =
-    "cf980c33d088e801890cce0708e51658391028b9ec7096d7446d8ccde91bcc5";  // nNumber @0x30
+    "cd85e37ec226d0aa2567cfee7f7c9eb77ffce5e379fbf388bd5c64e466c741a";  // nNumber @0x30
 constexpr char kFldSlotItemId[] = "ItemId";           // restored 明文兜底
 constexpr char kFldSlotBundleNumber[] = "nNumber";
 // CharacterStat（08-06 remount · TypeDef 1833）
 constexpr char kHashCsCharacterId[] =
-    "d51f7dcf073c8f913965514e362042add823914e178e0d485203f98e982a363";  // CharacterID @0x10
+    "efe148f9f70133f610f70d6733ff17e4e6794061aeeb73952b127bc242a80fc";  // CharacterID @0x10
 constexpr char kHashCsStr[] =
-    "e6b2758c6d6f3485f1f030d5973aba2ffab1dd7d3c87e649d78e27f95012d01";  // nSTR @0x3C
+    "c3a7272439cb274c3b50b920c3c6b48515a478a1602cb166ecb443acd0724dd";  // nSTR @0x3C
 constexpr char kHashCsDex[] =
-    "b2893907f6bde17422877e47499f261b376971db51ea795c25e9a2a9e42a8c9";  // nDEX @0x3E
+    "ff361a2270a56444d5de7b4f28f216dce5016833ee6f30390fbe597f36ab77f";  // nDEX @0x3E
 constexpr char kHashCsInt[] =
-    "db7f85d36765658e0b91ad4a1a43f155b4375178726079430fd232ff3f40eae";  // nINT @0x40
+    "eb39ba0f15c22d3754c51a39518aacbb0aee97bd0e0f6c62de87258cefc5afc";  // nINT @0x40
 constexpr char kHashCsLuk[] =
-    "d419aee3405f3b17807021f8ff9d60edb39c3e8125a3faa05579b9e1d4291f2";  // nLUK @0x42
+    "f1e10ea8e725ca8c13fa18b1f2cce1d65efaa318c9a40d54d992d5f44eb39b1";  // nLUK @0x42
 constexpr char kHashCsAp[] =
-    "d147649e2debd4a42e0e002cb02e65c8cda6c43ac3f1c73229f0beeb03a8126";  // ap @0x4C
+    "ba2ff65b18e6b7bf1c0d4d9045d12492ade661902db140b6910fccc05377277";  // ap @0x4C
 constexpr char kHashCsSp[] =
-    "afd645aed2dff07ebd22956aa8cf87320d23f74def695fb3d0b9d56c6e45468";  // sp @0x4E
+    "f349c9eef073b42c7c3697502d2385fca09aff0539b14c4fae6d4c9179ccef7";  // sp @0x4E
 constexpr char kHashCsName[] =
-    "ba0db6204206883982801b52aa21065a168971ccd630eac62968840cb6153c2";  // CharacterName @0x18
+    "f5c93474139fb5a3623566f6ac5e00b601076256f03fdcbe80aeb7f3ace03ed";  // CharacterName @0x18
 constexpr char kHashCsLevel[] =
-    "dbf1a56aa2d7d6f2bd3ba05f0cb9e7ca1a8b42d27153ba66a0e041fb57b9a7a";  // level @0x38
+    "f4295ca06340b8c64ee83ce5973188e5574ac217994166c72cc787cd2f21ea5";  // level @0x38
 constexpr char kHashCsJob[] =
-    "f4844a73a82679b9057c42b6ad035fa17e29317ae1d8e78c67076ab2e7583a9";  // job @0x3A
+    "c375f51afce2cce7c04035d9fe64ca983d2812981457006a3cea2faee12d714";  // job @0x3A
 constexpr char kHashCsHp[] =
-    "b0327857f306ab95d8e4fcc7badc411a86270c154d25b5a11294f9c1b95f144";  // hp @0x44
+    "c1126cf1fdefa980fbfb6e66df701ea807e54f8d1a21c84d2c525823cb01dbd";  // hp @0x44
 constexpr char kHashCsMhp[] =
-    "a5e105c4062d8ce5eaccd946a0e92f3c5e59d26e3566d704e02310636c92ebd";  // mhp @0x46
+    "cee0fa5124f585c08f83ae03533e2672a145e11036d8ef37c79eeab402483be";  // mhp @0x46
 constexpr char kHashCsMp[] =
-    "f29f604dd26034efd52a2a04bd912bdd5c28aafbb803869ba489744fe9d0bee";  // mp @0x48
+    "edb7f97fb9028bfba1c10bc385c45e8e5473f3b316bbacc1dabbf6b21cb9ffa";  // mp @0x48
 constexpr char kHashCsMmp[] =
-    "fe518481b2771cec633e572144d217b5372ec971e669e0210461e30c40a7716";  // mmp @0x4A
+    "dc5196a91c740f73276051f12805f668723f86148d2e914b74f955ab7d935ef";  // mmp @0x4A
 constexpr char kHashCsExp[] =
-    "a4117f68e6e47c8cded37719f1035c120d89207c73867212bc6a2bdf0e63408";  // exp @0x50
+    "e585c54e78aee0fdaf9695fba857ed831bef7f8f79f68f563bb513581776e29";  // exp @0x50
 constexpr char kHashCsMoney[] =
-    "e8d1d1f11af46e9eb273e85749935ad3ef34dccd146550ed473ed6612d72a1a";  // money @0x58
+    "cd13e73a0da19df018e6ead431a1b5dba4851ed3aff4b800b84155a184a12f7";  // money @0x58
 constexpr char kHashCsNextLevel[] =
-    "c2f549ed6c00ccae89ff1a49d28c07b5430c092c3ce843729e76c77c4c51754";  // Nextlevel* @0x80
+    "de9ec4932513f272008f6bdbc7f68198475d0f6e61437eea9b5d1ad08bbf490";  // Nextlevel* @0x80
 // BasicStat（08-06 remount · TypeDef 1322）
 constexpr char kHashBsNmhp[] =
-    "b4b1da11750d95d9e0c0b2ce26020d1680413de4f1a2ec188311fc51934321f";  // nMHP @0x30
+    "bc3990c5d4a19052520a8869e0fe86a0cec8b7c149c82d752bf90c3ee487426";  // nMHP @0x30
 constexpr char kHashBsNmmp[] =
-    "addfcf03a46b13e7bc999eb8d31e0982ae3a0d386d561081b830493604b194e";  // nMMP @0x34
+    "b35f8612ce99f5595ee0075ae13da3c7fc1ede1a29a189a4ea490f497b5acc9";  // nMMP @0x34
 // Nextlevel.int[]（08-06 remount）
 constexpr char kHashNextArr[] =
-    "e5778e94ae74c3e60079d21a4f420325de98aef920dc2dd40bf9fc9583cb26b";  // @0x10
+    "f07accb8c8943a52de69e033d298ac502b6bba42af2042504bf78a2720e2513";  // @0x10
 
 // Hint（dump 复核；hash 失败时回退）— remount 2026-08-06 晚间（CD@0xE0 / BS@0xE8）
 constexpr size_t kFbWmMyUser = 0x28;

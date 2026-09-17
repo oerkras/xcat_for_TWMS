@@ -36,21 +36,21 @@ using x::runtime::il2cpp::ReadPtr;
 // 交叉：Mob TDI:1507；MobPool→Dictionary<int,Mob>@+0x10；字段偏移未漂（deadType@0x1B4 等）。
 // 误用其它 Map* 壳会通过 FindClass 但 ObjKlassIs 失败 → M/mapId 全废。
 constexpr char kMobPoolClass[] =
-    "fb4087246b8590f5eef2e1ffdb35ead2adcb4792575a77dd2494cf34a099517";
+    "b4028adce19d99b4ffd552e49d16d46bc8618db5706e971285b60a7a309720d";
 constexpr char kMobClass[] =
-    "fea4358a07c99f6ab1e2cda4d015f36773997b07da3838b9e592aaf7184672d";
+    "b06a585bbb20974b370a52ef95e0e2329dca00dead70828c5a6cd86e76cd18b";
 constexpr char kMapDataClass[] =
-    "bc995f86e542046f9d426044ff74cb9beab74ea4a04660ebb5264bf354bf467";
+    "b335189276cf2d19e72c6d034a12e29991b8e1b05396ec1c834c95c800e1585";
 // UIHpTag（dump 属性 "UIHpTag"；绝对 cur/max 缓存）
 constexpr char kUiHpTagClass[] =
-    "be3804f6a2f865b315142f4a1efd5a671660a2cff556a4f5f117aea46dac335";
+    "d893ea8d8f350d5914f4ae72b698da33eb596e8313e73bb5285242b30c4c3e7";
 
 // Unity FindAll → x::runtime::il2cpp::kRvaFindObjectsOfTypeAll（il2cpp_bind.h SSOT）
 
 // MobPool
 constexpr size_t kFbPoolDict = 0x10;  // Dictionary<int,Mob>
 constexpr char kHashPoolDict[] =
-    "e8cb025fddc05dbf05d981f29273e465e58697400f7f1eaf385b8ebad5da141";
+    "b0f79edac995b0e6dbd50040561514031d0d61c24e395cbae37b1ab74e47e59";
 size_t gOffPoolDict = kFbPoolDict;
 #define kOffPoolDict (gOffPoolDict)
 
@@ -58,34 +58,34 @@ size_t gOffPoolDict = kFbPoolDict;
 constexpr size_t kOffCachedPtr = 0x10;  // UnityEngine.Object.m_CachedPtr
 
 constexpr char kHashVecCtrl[] =
-    "<bebe8c30521415d7031ea8549625722dcb5515452987adf2de99200de295a48>k__BackingField";
+    "<b4eeb44c75ab914f1491eb1375aede619676f2d39e20fc353d1f677f4ce708b>k__BackingField";
 constexpr char kHashPos[] =
-    "cdb04ce386f0f95b2ea1efe9454c2974a452cfe4d5b5924ec89759bb59836ad";
+    "adab4adef226133516a747cf56cea7c2badbf7b3249b7aceda99ac861097a52";
 constexpr char kHashTemplateId[] =
-    "b0d5e1f0e9501296c330bbb4fdd7301959d36c286f14a45293d4d2e89089238";
+    "afe49991db4989858a5637011bec0182eac35e8fbedfa4211e84f772ebee9be";
 constexpr char kHashIsReady[] =
-    "<c80cfbdeeac18ddfad4add38be2a4669d49a8a1adc0e182b97a662a4327cc7f>k__BackingField";
+    "<c6356f3524261f3f1d7cc7321a0237f5ec1883a8da4b99910e38595d1d7a493>k__BackingField";
 constexpr char kHashPvcActive[] =
-    "a20ac39af9c6fac3ba61b19a9471130a7670ba41be8f541fc6da51cebf4d905";
+    "f4b312d80a2b658bdf2aaac4a7a02de2a4388ffd13b679570b57d4c60e017c3";
 constexpr char kHashMobId[] =
-    "a9fc7039e30cff5e4a04ab1891d73e9237f73c2d1f27e875cd4163bd285e781";
+    "a273958a941b1b386d52be25ed2e9f73859eb1f2760dbcc9242f997b71351e2";
 constexpr char kHashDeadType[] =
-    "cbcf43ba7d069edc57201e007a6427383dd726f8cfed467448a6c2c718064ae";
+    "b6e9c186f6202d6850412e5990897878ec6f1e5cc466bb704a40dc46a57522b";
 constexpr char kHashDamageInfoList[] =
-    "d3331751168dfd8cfdb19231a739d6b4b9008bc7be059121ac1bc4ce1b0a0a4";
+    "dd8b1817d8869f3384673dc212d56ea798006c1aed60ec551e2f64972648760";
 constexpr char kHashLastHitted[] =
-    "cdd4008a1d58d55bd518f867760a0bc196d8dabb9768a59ad9a57d34536704d";
+    "afe6e16c776fe1c375ebfb9dd39313a4b1b178dd52c5e7de834da8d2d82fb7b";
 constexpr char kHashHpPct[] =
-    "<ad78b4642eab8ec40e55a634a6049dec9aee1a73b7cbde2e80144aa96b5c808>k__BackingField";
+    "<b4de429ac60867a9cf7c4a3cec361ef5f44ad36df9c7f18286d9e53eea0a97d>k__BackingField";
 constexpr char kHashMobCtrlState[] =
-    "eb62496f82ad2865022d28de33e92e95ac10860e84a38190b1d880a4e3fe0af";
+    "d527950bcf41b3e69828c5ebfa28ab277287055b88b8cf2ad733ffa863aaf91";
 // FindHit 同构门：inViewSplit@0x100 / suspended bool@0x244（09-10：旧 0x238 缓存会被写成 -1；
 // 0x23C 才是血条 HP%；0x240 是 int，FindHit 读的是 0x244）。
 // suspended 仍挡入榜；inView 只写入 MobLite（出刀归 FindHit，不挡 n）。
 constexpr char kHashInViewSplit[] =
-    "b4fa958c3b38984758cc069f6c0bbdea8b4f4975ac5ab40c802bdba298a4afd";
+    "a6763cf070092cb790390a4453953e65f9394813c38ad0277f96deb6124d211";
 constexpr char kHashSuspended[] =
-    "<b6b04fadf5e6a485b374884fd9a2d4f1b2642a2c1c90c5da97e0125ae31333a>k__BackingField";
+    "<d170ea5676c3f44fc566fa944dcceb263f2460eb35d73edd808f9bdd5ab5b5b>k__BackingField";
 
 constexpr size_t kFbVecCtrl = 0x50;
 constexpr size_t kFbPos = 0x64;
@@ -137,28 +137,28 @@ constexpr float kMaxPosAbs = 100000.f;
 // DamageInfo / VecCtrl.AbsPos：hash → field_get_offset
 // Remount 2026-08-06：VecCtrl TDI 1596 / AbsPos@0x98（与 drop/player_combat 同钉）
 constexpr char kDamageInfoClass[] =
-    "adcd348aa04dff21103201691fbad3353ab8c1d88b2eaed61981a1fd597c100";
+    "ae8cbb0641df85c4b123fc6084509cf552905c645ed8207978e1552fbdfdf15";
 constexpr char kVecCtrlClass[] =
-    "bd523630874d83261c9d61195338db2618e754c6337046aa8515dc68eef73a5";
+    "b8852488236cbfef306ec9af609517b4001d141a4dfea630f4493ff1dd93c9c";
 constexpr char kHashDiDelayed[] =
-    "dcadcac9f957489edf490296a9ad2baf177579b4e22d255235ad91e3c4a0679";  // DelayedProcess@0x10
+    "b6f2c79b7f8baa3221ed7aafe1d5a250f22cbe90bd1211e956e24f1c7babb64";  // DelayedProcess@0x10
 constexpr char kHashDiCharId[] =
-    "ae4dbd36a3d56fac601ab10105709c8fe49a9407472ffe8cb4db1791ef595ac";
+    "f188ace5468cc44d07f5d666f45c38bdc1b49c6b11b6ddc22ed22bcf27752f7";
 constexpr char kHashDiSkillId[] =
-    "a92045e3142f497a573857820583f4e6449dc610cf7186013ef72216592393a";
+    "d89d2587498fd8f8e40ef65afe3a02f0418b8c2037d3450d5b06201faa40582";
 constexpr char kHashDiHitAction[] =
-    "c599b8d45879ab8435a4136a54922717fafd995a4ecd75f8bd3a986f4cf2ae2";
+    "d72dfbf421ee5156bd27eb9f2da10cc06352093578e640e35a2a34c9bc97f57";
 constexpr char kHashDiDamage[] =
-    "c98e542859dd2714d35b51cb87560fa629e2284198a1cd2a4984b8dc92bdcea";
+    "ec2e41d6c7f95ff0d4f9516fcfa39efb5683d09f9de49b5f679039aa3d174de";
 constexpr char kHashDiAttackIdx[] =
-    "e2be8b6b9995e0fe419166109863c515b3fb6f66cfed2008f86e7bb0009979f";
+    "ab1ee38f70fab321cb805e00897dd21dbe0775a00b23c5df20bfeecdb97bb32";
 constexpr char kHashDiMoveType[] =
-    "dd7b3cd85fcfa80337d36718fb9ec52723335f44781bd73b47c5613e71db22b";
+    "b0d9dd30e9bd04fd5506cf04d74c1a44e5864b154b7334e36a2e5e9649f2add";
 constexpr char kHashVcAp[] =
-    "ed692ba84d6145d5f4eed7fad03baafc62274cc1b73022f669e3d0b6667ebff";  // AbsPos start; Y=+8
+    "ccfb64ef82657ece045552618807f482e6ffdcad5cf3610eb33102007008ffa";  // AbsPos start; Y=+8
 // VecCtrl.Active@0x80：SetRemoteMob 置 false 后常留池（P0a §7.6）→ 不计入 n
 constexpr char kHashVcActive[] =
-    "<cb959d3758ed8a16535cecf0430560c07258d863e93acbdb009d5cfe08b2977>k__BackingField";
+    "<a1ebaa2e817f9cf0888cf4fa76e46bd5d5a2a60fd00d7e5f2634bbd47462787>k__BackingField";
 
 constexpr size_t kFbDiDelayed = 0x10;
 constexpr size_t kFbDiCharId = 0x14;
@@ -197,11 +197,11 @@ constexpr size_t kFbUiHpTagMobId = 0xC8;
 constexpr size_t kFbUiHpTagCurHp = 0xD4;
 constexpr size_t kFbUiHpTagMaxHp = 0xD8;
 constexpr char kHashUiHpTagMobId[] =
-    "d07a42ff7df02d277a3d3b5b9fc794ab3cc6f7546f62b72b339853f70eaf27c";
+    "b6ceb313b75eb6158681c3aab7f2ceb39f60362ea741ce6350d09d6546147a9";
 constexpr char kHashUiHpTagCurHp[] =
-    "fa7e6282ec039b9ff0185d3be2e5cfd064486d9f22dbe0976340d84c595d26c";
+    "c1094f34a6442cc1133807575a40f1350a8c81ce530318921d9e44d772cd067";
 constexpr char kHashUiHpTagMaxHp[] =
-    "f798cd05b170301f98dab87513736450855cedcb2e75166a48075cb2e893490";
+    "cc20d999eb3c6881e499e54b66f35e2ccc0740d9cc18164caed2b1468142261";
 size_t gOffUiHpTagMobId = kFbUiHpTagMobId;
 size_t gOffUiHpTagCurHp = kFbUiHpTagCurHp;
 size_t gOffUiHpTagMaxHp = kFbUiHpTagMaxHp;
@@ -226,19 +226,19 @@ size_t gOffUiHpTagMaxHp = kFbUiHpTagMaxHp;
 #define kOffListSize (x::runtime::il2cpp_container::OffListSize())
 // MapLifeData.LifeType（hash 防漂）；Mob=1（枚举 0/1/2）
 constexpr char kMapLifeClass[] =
-    "a5c9507a705e4cf8c72d4ebddfd75d50d1753f32bd815ded22c7844d12d91ec";
+    "dce999da30cc0165954935ff0d66f147f6c1521aa740e55458081e338c7dbde";
 constexpr char kHashLifeType[] =
-    "<b25c4f9831fe1236650134b692dfc195aa6881a943c3d0c2a8392e348e99133>k__BackingField";
+    "<e1cb619c5355e45e812753ffb8fb1e6870b2975c277f6990a636ca2c3246b1f>k__BackingField";
 constexpr char kHashLifeId[] =
-    "<fd82591b633fe54ec6426be425b1ccc96bc5960bc4fc18c0dff498a229cdf0e>k__BackingField";
+    "<bad78623cc3e2ff38b34a6cf88312c4d9c2f0815e22a532945d2b143bb9f778>k__BackingField";
 constexpr char kHashLifeX[] =
-    "<ddd19a49ca9fbef2e6eabd88787c6f8c66823d9748cf760c19dbf2bda29e6ad>k__BackingField";
+    "<a68602ab4bc2533b61cf67b5e76d49c6c491f12e0e00bb75b1a6c356ce81752>k__BackingField";
 constexpr char kHashLifeY[] =
-    "<a3beea8f08fa6d2123c65b3a843ac4e4b8bdd440436aa7c2f92143c49ae9ff2>k__BackingField";
+    "<e287a02431dab1a5d3570c30765cc40b528a2afd659c82f4700f5cc07a9767b>k__BackingField";
 constexpr char kHashLifeRx0[] =
-    "<b433b89b8caddec7bbdfa6db28bdf9a300c9091d81424f763f71f7c01b03502>k__BackingField";
+    "<b912396533dd3b3a757a7f193e88255e5b60793b98f6c575a633e0efcb700cc>k__BackingField";
 constexpr char kHashLifeRx1[] =
-    "<d0f7f15ee828cad0b0a3cb81d9eb00a44a07daa34574069fe2a474a88dfb7a3>k__BackingField";
+    "<e5eeb2253723314fb62c7ac2ee03c6b7396bd6f22783dc52bef9028d686dc64>k__BackingField";
 constexpr size_t kFbLifeType = 0x20;
 constexpr size_t kFbLifeId = 0x1C;
 constexpr size_t kFbLifeX = 0x24;

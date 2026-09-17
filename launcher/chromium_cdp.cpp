@@ -364,6 +364,44 @@ std::string JsonGetString(const std::string& json, const char* key) {
     return out;
 }
 
+// /json/list 按对象切开，避免「type 前后各切几百字节」把隔壁标签的 url/ws 拼在一起。
+bool NextJsonObject(const std::string& s, size_t& i, std::string& obj) {
+    obj.clear();
+    while (i < s.size() && s[i] != '{') ++i;
+    if (i >= s.size()) return false;
+    const size_t start = i;
+    int depth = 0;
+    bool inStr = false;
+    bool esc = false;
+    for (; i < s.size(); ++i) {
+        const char c = s[i];
+        if (inStr) {
+            if (esc)
+                esc = false;
+            else if (c == '\\')
+                esc = true;
+            else if (c == '"')
+                inStr = false;
+            continue;
+        }
+        if (c == '"') {
+            inStr = true;
+            continue;
+        }
+        if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (depth == 0) {
+                ++i;
+                obj = s.substr(start, i - start);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool DirExists(const std::wstring& p) {
     DWORD a = GetFileAttributesW(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
@@ -872,8 +910,11 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
         if (u.find("galaxy.games.gamania.com") != std::string::npos) return 80;
         // 启动参数 about:blank 常是用户看见的那一页；优先于 chrome://newtab
         if (u.empty() || u == "about:blank" || u.rfind("about:blank", 0) == 0) return 5;
-        // 空罐第一次常只有 NTP；挂上去再 Navigate Galaxy，别 PUT /json/new 另开一页
+        // 空罐第一次常只有 NTP / welcome；挂上去再 Navigate Galaxy
         if (u.find("newtab") != std::string::npos || u.find("new-tab-page") != std::string::npos) return 3;
+        if (u.rfind("chrome://", 0) == 0 || u.rfind("edge://", 0) == 0) return 2;
+        if (u.find("ntp.msn.com") != std::string::npos || u.find("msn.com/spartan") != std::string::npos)
+            return 2;
         // /login、/error、oauth 半截：不优先附着（启动层会重新开 Galaxy）
         return 0;
     };
@@ -881,61 +922,47 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
         std::string u = urlUtf8;
         for (auto& c : u)
             if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-        if (u.rfind("chrome-extension://", 0) == 0 || u.rfind("extension://", 0) == 0 ||
-            u.rfind("devtools://", 0) == 0 || u.find("ntp.msn.com") != std::string::npos ||
-            u.find("msn.com/spartan") != std::string::npos)
-            return true;
-        // chrome://newtab 是用户看见的启动页，允许附着
-        if (u.find("newtab") != std::string::npos || u.find("new-tab-page") != std::string::npos)
-            return false;
-        return u.rfind("chrome://", 0) == 0 || u.rfind("edge://", 0) == 0;
+        // 只挡扩展后台页 / DevTools。空罐第一次的 chrome://welcome 就是用户看见的那一页，
+        // 丢掉会导致窗停在空标签（BIN 14:42：pages=1 ws=1 junk=1，随后只能重开 XCAT）。
+        return u.rfind("chrome-extension://", 0) == 0 || u.rfind("extension://", 0) == 0 ||
+               u.rfind("devtools://", 0) == 0;
     };
 
     auto scanList = [&](const std::string& listBody, std::string& bestWs, std::string& bestUrl,
-                        int& bestScore, int& pageN, int& wsN, int& junkN, int& nowsN) -> bool {
+                        int& bestScore, int& pageN, int& wsN, int& junkN, int& nowsN,
+                        std::string& seenUrl) -> bool {
         bestWs.clear();
         bestUrl.clear();
+        seenUrl.clear();
         bestScore = -1;
         pageN = wsN = junkN = nowsN = 0;
-        size_t pos = 0;
-        while ((pos = listBody.find("\"type\"", pos)) != std::string::npos) {
-            size_t typeVal = listBody.find('"', pos + 5);
-            if (typeVal == std::string::npos) break;
-            size_t typeStart = listBody.find('"', typeVal + 1);
-            if (typeStart == std::string::npos) break;
-            ++typeStart;
-            size_t typeEnd = listBody.find('"', typeStart);
-            if (typeEnd == std::string::npos) break;
-            std::string typ = listBody.substr(typeStart, typeEnd - typeStart);
-            if (typ == "page" || typ == "Page") {
-                ++pageN;
-                size_t winStart = (pos > 500) ? pos - 500 : 0;
-                size_t winEnd = (std::min)(listBody.size(), pos + 1000);
-                std::string win = listBody.substr(winStart, winEnd - winStart);
-                std::string ws = JsonGetString(win, "webSocketDebuggerUrl");
-                std::string pageUrl = JsonGetString(win, "url");
-                if (ws.empty()) {
-                    ++nowsN;
-                    pos = typeEnd + 1;
-                    continue;
-                }
-                ++wsN;
-                // Chrome 144 会把扩展 background.html 标成 page；挂上去 Navigate Galaxy 不会走
-                //（AA7E 03:38：nkeimhogj…/background.html score=1，随后把真 blank 清掉）
-                if (isJunkTab(pageUrl)) {
-                    ++junkN;
-                    pos = typeEnd + 1;
-                    continue;
-                }
-                const int sc = scoreUrl(pageUrl);
-                if (sc > bestScore || (bestWs.empty() && sc == 0 && bestScore < 0)) {
-                    bestScore = sc;
-                    bestWs = ws;
-                    bestUrl = pageUrl;
-                    if (bestScore < 0) bestScore = 0;
-                }
+        size_t cursor = 0;
+        std::string obj;
+        while (NextJsonObject(listBody, cursor, obj)) {
+            const std::string typ = JsonGetString(obj, "type");
+            if (typ != "page" && typ != "Page") continue;
+            ++pageN;
+            const std::string ws = JsonGetString(obj, "webSocketDebuggerUrl");
+            const std::string pageUrl = JsonGetString(obj, "url");
+            if (seenUrl.empty()) seenUrl = pageUrl;
+            if (ws.empty()) {
+                ++nowsN;
+                continue;
             }
-            pos = typeEnd + 1;
+            ++wsN;
+            // Chrome 144 会把扩展 background.html 标成 page；挂上去 Navigate Galaxy 不会走
+            //（AA7E 03:38：nkeimhogj…/background.html score=1，随后把真 blank 清掉）
+            if (isJunkTab(pageUrl)) {
+                ++junkN;
+                continue;
+            }
+            const int sc = scoreUrl(pageUrl);
+            if (sc > bestScore || (bestWs.empty() && sc == 0 && bestScore < 0)) {
+                bestScore = sc;
+                bestWs = ws;
+                bestUrl = pageUrl;
+                if (bestScore < 0) bestScore = 0;
+            }
         }
         return !bestWs.empty();
     };
@@ -944,6 +971,8 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
     const DWORD t0 = GetTickCount();
     int tries = 0;
     int lastPages = 0;
+    int lastWs = 0;
+    int lastJunk = 0;
     bool anyListOk = false;
     for (;;) {
         if (msc::launcher::GamaPassLoginCanceled()) {
@@ -955,32 +984,36 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
         ++tries;
         std::string bestWs;
         std::string bestUrl;
+        std::string seenUrl;
         int bestScore = -1;
         int pageN = 0, wsN = 0, junkN = 0, nowsN = 0;
         if (listed) {
             anyListOk = true;
-            if (scanList(body, bestWs, bestUrl, bestScore, pageN, wsN, junkN, nowsN)) {
+            if (scanList(body, bestWs, bestUrl, bestScore, pageN, wsN, junkN, nowsN, seenUrl)) {
                 outWs = Utf8ToWide(bestWs);
                 LogLine(log, L"[cdp] 复用流程标签 score=" + std::to_wstring(bestScore) + L" url=" +
                                  Utf8ToWide(bestUrl).substr(0, 120));
                 return true;
             }
+            lastPages = pageN;
+            lastWs = wsN;
+            lastJunk = junkN;
         }
-        lastPages = pageN;
         const DWORD elapsed = GetTickCount() - t0;
         if (elapsed >= 4000) break;
         if (tries <= 2 || (tries % 5) == 0) {
             LogLine(log, L"[cdp] 启动标签未就绪 try=" + std::to_wstring(tries) + L" list=" +
                              (listed ? L"1" : L"0") + L" pages=" + std::to_wstring(pageN) + L" ws=" +
                              std::to_wstring(wsN) + L" junk=" + std::to_wstring(junkN) + L" nows=" +
-                             std::to_wstring(nowsN) + L" elapsed=" + std::to_wstring(elapsed) + L"ms");
+                             std::to_wstring(nowsN) + L" url=" + Utf8ToWide(seenUrl).substr(0, 80) +
+                             L" elapsed=" + std::to_wstring(elapsed) + L"ms");
         }
         Sleep(200);
     }
 
-    // 空 list 时禁止 PUT /json/new：Chrome 首启调试口会卡死，登录线程不返回，只能重开 XCAT。
-    // 只有 inspector 已列出 page（全是扩展/无 ws）时才新建。
-    if (anyListOk && lastPages > 0) {
+    // 空 list / 仅有无 ws 的 page：禁止 PUT /json/new（空罐第一次会卡死调试口）。
+    // 仅当 inspector 已给出带 ws 的页、且全是扩展后台时才新建；启动页（welcome/NTP）已可附着。
+    if (anyListOk && lastWs > 0 && lastJunk == lastWs) {
         LogLine(log, L"[cdp] 没有可附着的登录标签（已跳过扩展），新建 about:blank");
         body.clear();
         if (HttpLocal(port, L"PUT", L"/json/new", body)) {
@@ -992,7 +1025,8 @@ bool Session::PickPageWsUrl(int port, std::wstring& outWs, const LogFn& log) {
         }
     } else {
         LogLine(log, L"[cdp] 启动 about:blank 未进入调试列表（跳过 /json/new） tries=" +
-                         std::to_wstring(tries) + L" pages=" + std::to_wstring(lastPages));
+                         std::to_wstring(tries) + L" pages=" + std::to_wstring(lastPages) + L" ws=" +
+                         std::to_wstring(lastWs) + L" junk=" + std::to_wstring(lastJunk));
     }
     LogLine(log, L"[cdp] 未找到 page 调试 WebSocket");
     return false;
@@ -1463,20 +1497,11 @@ unsigned KillDailyBrowsersForUiaLogin(const std::wstring& preferredExe, const Lo
 bool Session::Connect(int port, const LogFn& log) {
     Close();
     port_ = port;
-    const DWORD t0 = GetTickCount();
-    auto abortIfSlow = [&](const wchar_t* where) -> bool {
-        if (msc::launcher::GamaPassLoginCanceled()) {
-            LogLine(log, L"[cdp] 用户取消，停止附着 WebSocket");
-            Close();
-            return true;
-        }
-        if (GetTickCount() - t0 > 12000) {
-            LogLine(log, std::wstring(L"[cdp] 附着 WebSocket 超时（") + where +
-                             L"）port=" + std::to_wstring(port));
-            Close();
-            return true;
-        }
-        return false;
+    auto abortIfCanceled = [&]() -> bool {
+        if (!msc::launcher::GamaPassLoginCanceled()) return false;
+        LogLine(log, L"[cdp] 用户取消，停止附着 WebSocket");
+        Close();
+        return true;
     };
     std::string ver;
     if (!HttpGetLocal(port, L"/json/version", ver)) {
@@ -1487,25 +1512,27 @@ bool Session::Connect(int port, const LogFn& log) {
     if (browserVersion_.empty()) browserVersion_ = L"(unknown)";
     LogLine(log, L"[cdp] 调试口 HTTP 已通，附着 WebSocket… port=" + std::to_wstring(port) +
                      L" Browser=" + browserVersion_);
-    if (abortIfSlow(L"version")) return false;
+    if (abortIfCanceled()) return false;
     std::wstring wsUrl;
     if (!PickPageWsUrl(port, wsUrl, log)) return false;
-    if (abortIfSlow(L"pick-page")) return false;
+    if (abortIfCanceled()) return false;
     pageWsUrl_ = wsUrl;
+    // Pick 自带 4s；OpenWs/SendRecv 自带超时。禁止用总墙钟在 Page.enable 成功后再把已连 WS 关掉。
     if (!OpenWs(wsUrl, log)) return false;
-    if (abortIfSlow(L"open-ws")) return false;
+    if (abortIfCanceled()) return false;
     std::string ignore;
     if (!SendRecv("Page.enable", "{}", ignore, log)) {
         LogLine(log, L"[cdp] Page.enable 失败，放弃本轮附着");
         Close();
         return false;
     }
-    if (abortIfSlow(L"page-enable")) return false;
+    if (abortIfCanceled()) return false;
     if (!SendRecv("Runtime.enable", "{}", ignore, log)) {
         LogLine(log, L"[cdp] Runtime.enable 失败，放弃本轮附着");
         Close();
         return false;
     }
+    if (abortIfCanceled()) return false;
     LogLine(log, L"[cdp] 已连接 " + browserVersion_ + L" port=" + std::to_wstring(port));
     (void)ActivateAttachedPage(log);
     return true;
@@ -1790,38 +1817,24 @@ int Session::CloseExtraBlankPages(const LogFn& log) {
     if (!HttpGetLocal(port_, L"/json/list", body)) return 0;
 
     int closed = 0;
-    size_t pos = 0;
-    while ((pos = body.find("\"id\"", pos)) != std::string::npos) {
-        size_t winStart = (pos > 400) ? pos - 400 : 0;
-        size_t winEnd = (std::min)(body.size(), pos + 800);
-        std::string win = body.substr(winStart, winEnd - winStart);
-        const std::string typ = JsonGetString(win, "type");
-        if (typ != "page" && typ != "Page") {
-            pos += 4;
-            continue;
-        }
-        std::string url = JsonGetString(win, "url");
+    size_t cursor = 0;
+    std::string obj;
+    while (NextJsonObject(body, cursor, obj)) {
+        const std::string typ = JsonGetString(obj, "type");
+        if (typ != "page" && typ != "Page") continue;
+        std::string url = JsonGetString(obj, "url");
         for (auto& c : url)
             if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
         const bool blank = url.empty() || url == "about:blank" || url.rfind("about:blank", 0) == 0;
-        if (!blank) {
-            pos += 4;
-            continue;
-        }
+        if (!blank) continue;
         // 保留当前附着页（若仍是 blank，留给上层 Navigate）
-        const std::string ws = JsonGetString(win, "webSocketDebuggerUrl");
+        const std::string ws = JsonGetString(obj, "webSocketDebuggerUrl");
         if (!pageWsUrl_.empty() && !ws.empty()) {
             const std::wstring wsW = Utf8ToWide(ws);
-            if (_wcsicmp(wsW.c_str(), pageWsUrl_.c_str()) == 0) {
-                pos += 4;
-                continue;
-            }
+            if (_wcsicmp(wsW.c_str(), pageWsUrl_.c_str()) == 0) continue;
         }
-        const std::string id = JsonGetString(win, "id");
-        if (id.empty()) {
-            pos += 4;
-            continue;
-        }
+        const std::string id = JsonGetString(obj, "id");
+        if (id.empty()) continue;
         std::wstring path = L"/json/close/";
         path.append(id.begin(), id.end());
         std::string ignore;
@@ -1829,7 +1842,6 @@ int Session::CloseExtraBlankPages(const LogFn& log) {
             ++closed;
             LogLine(log, L"[cdp] 已关闭多余空白标签 id=" + Utf8ToWide(id));
         }
-        pos += 4;
     }
     return closed;
 }
@@ -1838,29 +1850,24 @@ bool Session::ActivateAttachedPage(const LogFn& log) {
     if (port_ <= 0 || pageWsUrl_.empty()) return false;
     std::string body;
     if (!HttpGetLocal(port_, L"/json/list", body)) return false;
-    size_t pos = 0;
-    while ((pos = body.find("\"id\"", pos)) != std::string::npos) {
-        size_t winStart = (pos > 400) ? pos - 400 : 0;
-        size_t winEnd = (std::min)(body.size(), pos + 800);
-        std::string win = body.substr(winStart, winEnd - winStart);
-        const std::string ws = JsonGetString(win, "webSocketDebuggerUrl");
-        if (!ws.empty()) {
-            const std::wstring wsW = Utf8ToWide(ws);
-            if (_wcsicmp(wsW.c_str(), pageWsUrl_.c_str()) == 0) {
-                const std::string id = JsonGetString(win, "id");
-                if (id.empty()) break;
-                std::wstring path = L"/json/activate/";
-                path.append(id.begin(), id.end());
-                std::string ignore;
-                if (HttpGetLocal(port_, path.c_str(), ignore)) {
-                    LogLine(log, L"[cdp] 已把附着标签拉到前台 id=" + Utf8ToWide(id));
-                    return true;
-                }
-                LogLine(log, L"[cdp] 激活标签失败 id=" + Utf8ToWide(id));
-                return false;
-            }
+    size_t cursor = 0;
+    std::string obj;
+    while (NextJsonObject(body, cursor, obj)) {
+        const std::string ws = JsonGetString(obj, "webSocketDebuggerUrl");
+        if (ws.empty()) continue;
+        const std::wstring wsW = Utf8ToWide(ws);
+        if (_wcsicmp(wsW.c_str(), pageWsUrl_.c_str()) != 0) continue;
+        const std::string id = JsonGetString(obj, "id");
+        if (id.empty()) return false;
+        std::wstring path = L"/json/activate/";
+        path.append(id.begin(), id.end());
+        std::string ignore;
+        if (HttpGetLocal(port_, path.c_str(), ignore)) {
+            LogLine(log, L"[cdp] 已把附着标签拉到前台 id=" + Utf8ToWide(id));
+            return true;
         }
-        pos += 4;
+        LogLine(log, L"[cdp] 激活标签失败 id=" + Utf8ToWide(id));
+        return false;
     }
     return false;
 }

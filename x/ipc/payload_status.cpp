@@ -103,11 +103,11 @@ void LatchWorld(xcat::PayloadStatus& st) {
 
 // docs/features/auto_lie/P0a — Prefab；类哈希 remount 2026-08-06（与 anti_macro_port 对齐）
 constexpr char kAntiMacroUtilClass[] =
-    "ee7633015884e0202eb0b1c8c2dc0fac6cb5cc36b06909d28b5ae65b52a7e0f";
+    "baefdeb135e14da2ac01f310de5c3b682399425358fdff9a75c8b312897a157";
 constexpr char kAntiMacroNonFiniteClass[] =
-    "dd5f0ccaa0bbbfa4399941f5e3e9eceb4aa32cb26d92d923fa366cb95a33ee2";
+    "c0d06cf17d0c8d1ec93ae344350ff97d3309a452d0ce70381ef0190086b60d2";
 constexpr char kAntiMacroTextCaptchaClass[] =
-    "b1199570deb2d78310c572e1a27fd768ad662c4bc4ff0d4cb98acac50761181";
+    "deef80c227e06122713efa9daa3904ca934eae664fa616a9fce2e2192871ded";
 constexpr char kPrefabNonFinite[] = "UIAntiMacroNonFinite";
 constexpr char kPrefabTextCaptcha[] = "UIAntiMacroTextCaptcha";
 

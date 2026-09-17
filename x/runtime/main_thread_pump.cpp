@@ -23,10 +23,10 @@ namespace {
 // 每 tick 默认仍只 Drain 8（见 payload kPumpDrainBudgetDefault），不把 12 个托管活一次性倒进 Unity 帧。
 constexpr int kQueueCap = 12;
 // RVA = 末级兜底；ResolvePumpMi：明文名 → unique void() kind → RVA（禁止 RVA-first）。
-constexpr uint32_t kRvaSendWillRenderCanvases = 0x533ceb0;  // remounted 2026-08-06 Canvas.SendWillRenderCanvases
-constexpr uint32_t kRvaSceneLoginUpdate = 0xC4B1A0;         // remounted 2026-08-06
-constexpr uint32_t kRvaWorldManagerFixedUpdate = 0xE227D0;  // remounted 2026-08-06
-constexpr uint32_t kRvaWorldManagerUpdate = 0xE263D0;       // remounted 2026-08-06
+constexpr uint32_t kRvaSendWillRenderCanvases = 0x5348800;  // remounted 2026-08-06 Canvas.SendWillRenderCanvases
+constexpr uint32_t kRvaSceneLoginUpdate = 0xC4B720;         // remounted 2026-08-06
+constexpr uint32_t kRvaWorldManagerFixedUpdate = 0xE24710;  // remounted 2026-08-06
+constexpr uint32_t kRvaWorldManagerUpdate = 0xE28320;       // remounted 2026-08-06
 
 // All pump hooks are parameterless void (instance or static).
 constexpr x::runtime::il2cpp_method::MethodShape kShapeVoid0{
