@@ -3082,7 +3082,7 @@ void DrawAutoSellTab(LaunchUiState& ui) {
         ImGui::TextDisabled("（装备栏+其他栏共用；手动卖 / 自动卖共用）");
         ImGui::SetNextItemWidth(-1.f);
         ImGui::InputTextWithHint("##sellbag_keep_rules_quick",
-                                 "不卖关键词，逗号或空格分隔（默认：礦 玻璃鞋）", keepRulesBuf,
+                                 "不卖关键词，逗号或空格分隔（默认：礦 玻璃鞋 黃色雨傘）", keepRulesBuf,
                                  sizeof(keepRulesBuf));
         const bool keepRulesEditing = ImGui::IsItemActive();
         if (ImGui::IsItemDeactivatedAfterEdit()) {

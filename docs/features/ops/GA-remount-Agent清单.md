@@ -5,7 +5,7 @@
 
 ## 0. 硬停（违反即停）
 
-1. 用户没说 `apply` / `写入` / `--apply` → **禁止** `map --apply*`。
+1. 用户没说 `apply` / `写入` / `--apply` → **禁止** `map --apply*` 和 `apply --apply`。
 2. `--apply` = `--apply-hashes` + `--apply-krva`，**禁止**改注释/体内点里的裸 `0xHEX`。`--apply-all-hex` 仅当用户点名；`on_old_map=0` 时脚本会 REFUSE。
 3. `audit` 体内点 FAIL → 跑 `catalog`（方法头窗口内唯一命中）再 `--write`；**禁止**全模块扫 `75 07` 猜点。`catalog --write` 改 tsv 的 rva/target **和** 该行 `cpp` 列的 `constexpr kRva*`（如 `kRvaMagicCmov`），不改注释里的裸 `0xHEX`。`--apply-krva` 仍跳过 catalog 体内点。
 4. `layout --write` 仅当用户当轮说 write；只改 `FALLBACK_STALE` 的 `constexpr kFb*`。`TYPE_FLIP` / `MOVED_TYPE` / `DEAD` 拒绝写入。
@@ -41,6 +41,8 @@ python scripts/ga_remount.py krva
 python scripts/ga_remount.py catalog
 python scripts/ga_remount.py audit
 python scripts/ga_remount.py verify            # 干跑，含 map/layout，不 apply
+python scripts/ga_remount.py apply             # 干跑按序写入计划
+python scripts/ga_remount.py apply --apply     # 用户说 apply：hashes→kFb→kRva→catalog，TYPE_FLIP/catalog FAIL 停
 ```
 
 读：
@@ -52,9 +54,11 @@ python scripts/ga_remount.py verify            # 干跑，含 map/layout，不 a
 - `Dumps/runtime/_ga_remount_apply.tsv`（空表 + `on_old_map=0` = 哈希已 remount，仍要过 layout / krva）
 - `Dumps/runtime/_ga_remount_rva_collision.tsv`（活地址，禁止按表改）
 
-仅当用户明确要求 **且** `on_old_map>0`：
+仅当用户明确要求 **且** `on_old_map>0`（或 `apply --apply` 一次走完）：
 
 ```text
+python scripts/ga_remount.py apply --apply
+# 等价拆开：
 python scripts/ga_remount.py map --apply-hashes
 python scripts/ga_remount.py layout
 python scripts/ga_remount.py map --apply-krva
@@ -93,7 +97,7 @@ python scripts/ga_remount.py audit
 | `smoke WARN req prior-session` | 必过组不在最后一次 Bind 会话，更早日志有 | 不当红灯；二次 Bind 冲掉了 Teleport 等 |
 | `smoke SKIP optional missing` | 进店/F6/旅行等选过组没打 | 不当红灯 |
 | `BIND_STALE` / `BIND_NEW` | 当前 dump 身份与 `ga_krva_bind.tsv` 不一致 | 用户说 write 才 `krva --write-bind` |
-| `REFUSE --apply-all-hex` | 哈希已在新 dump | 停；用 `--apply-hashes` / `--apply-krva` |
+| `REFUSE remaining writes` | `apply --apply` 碰到 TYPE_FLIP / catalog FAIL | 停；前面已写下的 hashes 保留，后面的 kRva/catalog 不写 |
 
 ## 4. 允许改 / 禁止改
 

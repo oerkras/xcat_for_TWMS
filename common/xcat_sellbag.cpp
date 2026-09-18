@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 
 namespace xcat {
 namespace {
@@ -28,6 +29,59 @@ const char* TargetMaskToIni(uint32_t mask) {
 uint32_t TargetMaskFromIni(const char* s) {
     (void)s;
     return kSellbagBagAll;
+}
+
+bool KeepRuleNameEquals(const char* a, const char* b) {
+    return a && a[0] && b && b[0] && std::strcmp(a, b) == 0;
+}
+
+bool ConfigHasKeepName(const SellbagConfig& cfg, const char* name) {
+    const uint32_t n = (std::min)(cfg.keepRuleCount, static_cast<uint32_t>(kSellbagMaxKeepRules));
+    for (uint32_t i = 0; i < n; ++i) {
+        const SellbagKeepRule& r = cfg.keepRules[i];
+        if (!r.enabled || !r.nameKey[0]) continue;
+        if (KeepRuleNameEquals(r.nameKey, name)) return true;
+    }
+    return false;
+}
+
+bool IsExactEnabledKeepSet(const SellbagConfig& cfg, const char* const* keys, int keyCount) {
+    if (!keys || keyCount <= 0) return false;
+    const uint32_t n = (std::min)(cfg.keepRuleCount, static_cast<uint32_t>(kSellbagMaxKeepRules));
+    int enabled = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const SellbagKeepRule& r = cfg.keepRules[i];
+        if (!r.enabled || !r.nameKey[0]) continue;
+        ++enabled;
+        bool hit = false;
+        for (int k = 0; k < keyCount; ++k) {
+            if (KeepRuleNameEquals(r.nameKey, keys[k])) {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) return false;
+    }
+    if (enabled != keyCount) return false;
+    for (int k = 0; k < keyCount; ++k) {
+        if (!ConfigHasKeepName(cfg, keys[k])) return false;
+    }
+    return true;
+}
+
+// 旧厂默「礦 玻璃鞋」→ 追加「黃色雨傘」。已手改（多词/少词/自订）不迁。
+bool TryMigratePrevFactoryKeep(SellbagConfig& cfg) {
+    if (ConfigHasKeepName(cfg, "黃色雨傘")) return false;
+    if (!IsExactEnabledKeepSet(cfg, kSellbagPrevDefaultKeepNameKeys,
+                               kSellbagPrevDefaultKeepNameKeyCount))
+        return false;
+    if (cfg.keepRuleCount >= static_cast<uint32_t>(kSellbagMaxKeepRules)) return false;
+    SellbagKeepRule& r = cfg.keepRules[cfg.keepRuleCount++];
+    r = {};
+    r.enabled = 1;
+    r.targetMask = kSellbagBagAll;
+    strncpy_s(r.nameKey, "黃色雨傘", _TRUNCATE);
+    return true;
 }
 
 bool ReadSellbagBinLegacy(const char* binDir, SellbagConfig& out) {
@@ -64,7 +118,7 @@ void SellbagSetDefaults(SellbagConfig& out) {
     out = {};
     out.magic = kSellbagMagic;
     out.version = kSellbagVersion;
-    // 默认保留「礦」「玻璃鞋」（艾溫任務）；用户可清空或改关键词。
+    // 默认保留「礦」「玻璃鞋」（艾溫任務）「黃色雨傘」；用户可清空或改关键词。
     out.keepRuleCount = static_cast<uint32_t>(kSellbagDefaultKeepNameKeyCount);
     for (int i = 0; i < kSellbagDefaultKeepNameKeyCount; ++i) {
         out.keepRules[i].enabled = 1;
@@ -191,6 +245,9 @@ bool ReadSellbag(const char* binDir, SellbagConfig& out) {
     for (uint32_t i = 0; i < out.keepRuleCount && i < static_cast<uint32_t>(kSellbagMaxKeepRules);
          ++i) {
         out.keepRules[i].targetMask = kSellbagBagAll;
+    }
+    if (TryMigratePrevFactoryKeep(out)) {
+        WriteSellbag(binDir, out);
     }
     return true;
 }

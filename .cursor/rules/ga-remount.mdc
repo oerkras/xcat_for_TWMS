@@ -22,6 +22,7 @@ alwaysApply: false
 - 注入后 `smoke` 对照 `ga_remount_smoke_expect.tsv`（`need=req` 缺组才红；必过组可回退更早 bind 会话），并扫日志轮转。
 - `dump --process` 仅当用户当轮说 process/ForceDump；禁止与 `--archive` 同时；禁止藏进自定义注入。
 - `verify` 只干跑（含 map/layout），不 apply、不 ForceDump。
+- `apply --apply` 仅当用户当轮说 apply/write。顺序 hashes → kFb → kRva → catalog；`TYPE_FLIP` / catalog FAIL 立刻停，不再写后面的步。
 
 ## 禁止
 

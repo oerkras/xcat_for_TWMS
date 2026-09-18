@@ -36,13 +36,15 @@
       注入后：拷客户端 metadata + process_runtime_dump.py（覆盖 out/dump.cs）
   python scripts/ga_remount.py catalog
       体内点 follow 所在方法头窗口（默认 dry-run）；禁止全模块搜 75 07
-  python scripts/ga_remount.py verify
-      一次干跑 selftest + dump-check + map + layout + krva + catalog + audit + smoke，不 apply
+  python scripts/ga_remount.py apply
+      按序 hashes → layout kFb → kRva → catalog（默认 dry-run）
+  python scripts/ga_remount.py apply --apply
+      用户说 apply/write 才写入；TYPE_FLIP / catalog FAIL 立刻停，不再写后面的步
   python scripts/ga_remount.py selftest
       正则自检：注释里的 constexpr kRva/kFb 不得被当成声明
 
-更新日顺序：dump --archive → 人注 GaRuntimeDump.dll → dump --process → map → map --apply-hashes → layout → map --apply-krva → krva → catalog → audit → 红灯才开 IDA。
-  确认后再 --apply（= hashes+krva）。禁止 --apply-all-hex 除非用户点名。
+更新日顺序：dump --archive → 人注 GaRuntimeDump.dll → dump --process → verify → 用户说 apply 再 apply --apply。
+  apply --apply = hashes → kFb → kRva → catalog；TYPE_FLIP / catalog FAIL 硬停。禁止 --apply-all-hex 除非用户点名。
 
 Agent 清单：docs/features/ops/GA-remount-Agent清单.md
 本机打印：python scripts/ga_remount.py howto
@@ -66,7 +68,8 @@ from pathlib import Path
 HOWTO = """GA remount howto (classic TWMS). Do not change business logic.
 
 Hard stops:
-  - no map --apply* unless the user said apply/write AND on_old_map>0
+  - no map --apply* / apply --apply unless the user said apply/write
+  - apply --apply writes hashes → kFb → kRva → catalog; TYPE_FLIP / catalog FAIL stops remaining writes
   - --apply = hashes + named kRva* only; never rewrite bare 0xHEX in comments
   - --apply-all-hex only if user named it; on_old_map=0 => REFUSE
   - body-site FAIL => retarget via catalog (parent window) + kRva*; never grep 75 07 in flattened code
@@ -96,6 +99,8 @@ Commands (repo root, this order):
   python scripts/ga_remount.py dump-check
   python scripts/ga_remount.py dump
   python scripts/ga_remount.py verify            # dry-run selftest+dump-check+map+layout+krva+catalog+audit+smoke; no apply
+  python scripts/ga_remount.py apply             # dry-run ordered writes
+  python scripts/ga_remount.py apply --apply     # user said apply: hashes→kFb→kRva→catalog
   python scripts/ga_remount.py selftest
 
 Read:
@@ -1579,6 +1584,8 @@ def cmd_catalog(args: argparse.Namespace) -> int:
                     cpp_patches[nm] = (code, new_rva)
                     stale_n += 1
                     changed = True
+                    if verdict == "MATCH":
+                        verdict = "STALE"
                 else:
                     cpp_patches[nm] = (old_rva, new_rva)
                     if new_rva == old_rva:
@@ -2680,6 +2687,180 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 1 if worst else 0
 
 
+LAYOUT_BLOCK_FLAGS = ("TYPE_FLIP", "MOVED_TYPE", "AMBIGUOUS", "DEAD")
+
+
+def summarize_layout_tsv(path: Path) -> dict[str, int | list[str]]:
+    block = stale = 0
+    samples: list[str] = []
+    if not path.is_file():
+        return {"block": 0, "stale": 0, "samples": []}
+    for ln in path.read_text(encoding="utf-8").splitlines()[1:]:
+        if not ln.strip():
+            continue
+        verdict = ln.split("\t")[0]
+        flags = set(verdict.split("|"))
+        if flags & set(LAYOUT_BLOCK_FLAGS):
+            block += 1
+            if len(samples) < 8:
+                bits = ln.split("\t")
+                samples.append("%s  %s" % (verdict, (bits[1][:20] if len(bits) > 1 else "")))
+        if "FALLBACK_STALE" in flags:
+            stale += 1
+    return {"block": block, "stale": stale, "samples": samples}
+
+
+def summarize_catalog_report(path: Path) -> dict[str, int]:
+    fail = move = stale = match = 0
+    if not path.is_file():
+        return {"fail": 0, "move": 0, "stale": 0, "match": 0}
+    for ln in path.read_text(encoding="utf-8").splitlines()[1:]:
+        if not ln.strip():
+            continue
+        parts = ln.split("\t")
+        if len(parts) < 2:
+            continue
+        v = parts[1]
+        if v == "FAIL":
+            fail += 1
+        elif v == "MOVE":
+            move += 1
+        elif v == "STALE":
+            stale += 1
+        elif v == "MATCH":
+            match += 1
+    return {"fail": fail, "move": move, "stale": stale, "match": match}
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    """按序 hashes → kFb → kRva → catalog。默认 dry-run。TYPE_FLIP / catalog FAIL 硬停。"""
+    do_write = bool(getattr(args, "apply", False) or getattr(args, "write", False))
+    if getattr(args, "apply_all_hex", False):
+        print("REFUSE  apply subcommand does not take --apply-all-hex")
+        return 2
+    ignore = str(ROOT / "scripts" / "data" / "ga_remount_ignore.txt")
+    out_dir = Path(getattr(args, "out_dir", "") or DEFAULT_OUT)
+
+    def map_ns(*, hashes: bool = False, krva: bool = False) -> argparse.Namespace:
+        return argparse.Namespace(
+            old="",
+            new=str(DEFAULT_NEW),
+            x_dir=str(DEFAULT_X),
+            out_dir=str(out_dir),
+            apply=False,
+            apply_hashes=hashes,
+            apply_krva=krva,
+            apply_all_hex=False,
+        )
+
+    def layout_ns(*, write: bool = False) -> argparse.Namespace:
+        return argparse.Namespace(
+            old="",
+            new=str(DEFAULT_NEW),
+            x_dir=str(DEFAULT_X),
+            out_dir=str(out_dir),
+            ignore=ignore,
+            write=write,
+        )
+
+    def catalog_ns(*, write: bool = False) -> argparse.Namespace:
+        return argparse.Namespace(
+            new=str(DEFAULT_NEW),
+            ga=str(DEFAULT_GA),
+            catalog=str(DEFAULT_CATALOG),
+            x_dir=str(DEFAULT_X),
+            out_dir=str(out_dir),
+            old="",
+            write=write,
+        )
+
+    def krva_ns(*, write_bind: bool = False) -> argparse.Namespace:
+        return argparse.Namespace(
+            new=str(DEFAULT_NEW),
+            x_dir=str(DEFAULT_X),
+            out_dir=str(out_dir),
+            catalog=str(DEFAULT_CATALOG),
+            ignore=ignore,
+            write_bind=write_bind,
+        )
+
+    def audit_ns() -> argparse.Namespace:
+        return argparse.Namespace(
+            new=str(DEFAULT_NEW),
+            ga=str(DEFAULT_GA),
+            x_dir=str(DEFAULT_X),
+            catalog=str(DEFAULT_CATALOG),
+            shape=str(DEFAULT_SHAPE),
+            out_dir=str(out_dir),
+            ignore=ignore,
+        )
+
+    print("apply write=%s" % do_write)
+    if not do_write:
+        print("NOTE  dry-run layout uses current source hashes (apply-hashes not done yet)")
+        print("======== apply map")
+        cmd_map(map_ns())
+
+    if do_write:
+        print("======== apply hashes")
+        rc_h = int(cmd_map(map_ns(hashes=True)))
+        if rc_h:
+            print("REFUSE remaining writes (apply-hashes rc=%d)" % rc_h)
+            return rc_h
+
+    print("======== apply layout")
+    cmd_layout(layout_ns(write=False))
+    lay = summarize_layout_tsv(out_dir / "_ga_remount_layout.tsv")
+    print("layout block=%d stale=%d" % (int(lay["block"]), int(lay["stale"])))
+    if lay["block"]:
+        print("REFUSE remaining writes (TYPE_FLIP/MOVED_TYPE/DEAD/AMBIGUOUS)")
+        for s in lay["samples"]:
+            print("  ", s)
+        return 1
+    if do_write and lay["stale"]:
+        print("======== apply kFb")
+        rc_fb = int(cmd_layout(layout_ns(write=True)))
+        if rc_fb:
+            print("REFUSE remaining writes (layout --write rc=%d)" % rc_fb)
+            return rc_fb
+
+    if do_write:
+        print("======== apply krva")
+        rc_k = int(cmd_map(map_ns(krva=True)))
+        if rc_k:
+            print("REFUSE remaining writes (apply-krva rc=%d)" % rc_k)
+            return rc_k
+
+    print("======== apply catalog")
+    cmd_catalog(catalog_ns(write=False))
+    cat = summarize_catalog_report(out_dir / "_ga_remount_catalog.tsv")
+    print(
+        "catalog MATCH=%d MOVE=%d STALE=%d FAIL=%d"
+        % (cat["match"], cat["move"], cat["stale"], cat["fail"])
+    )
+    if cat["fail"]:
+        print("REFUSE catalog --write (FAIL>0); open IDA for those sites")
+        return 1
+    if do_write and not cat["fail"]:
+        print("======== apply catalog --write")
+        rc_c = int(cmd_catalog(catalog_ns(write=True)))
+        if rc_c:
+            return rc_c
+
+    print("======== apply krva-check")
+    rc_kr = int(cmd_krva(krva_ns(write_bind=do_write)))
+    print("======== apply audit")
+    rc_au = int(cmd_audit(audit_ns()))
+    worst = max(rc_kr, rc_au)
+    if not do_write:
+        print(
+            "dry-run: pass --apply to write hashes → kFb → kRva → catalog "
+            "(stops on TYPE_FLIP / catalog FAIL)"
+        )
+    print("apply worst_rc=%d write=%s" % (worst, do_write))
+    return 1 if worst else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2818,6 +2999,22 @@ def main() -> int:
     )
     p_vf.add_argument("--log", default=str(DEFAULT_LOG))
 
+    p_ap = sub.add_parser(
+        "apply",
+        help="按序 hashes→kFb→kRva→catalog（默认 dry-run；TYPE_FLIP / catalog FAIL 硬停）",
+    )
+    p_ap.add_argument(
+        "--apply",
+        action="store_true",
+        help="写入：hashes → FALLBACK_STALE kFb → kRva → catalog（用户说 apply/write）",
+    )
+    p_ap.add_argument(
+        "--write",
+        action="store_true",
+        help="同 --apply",
+    )
+    p_ap.add_argument("--out-dir", default=str(DEFAULT_OUT))
+
     sub.add_parser("selftest", help="正则自检：注释里的 constexpr kRva/kFb 不得命中")
     sub.add_parser("howto", help="打印 Agent 执行清单（硬停 + 命令）")
 
@@ -2840,6 +3037,8 @@ def main() -> int:
         return cmd_catalog(args)
     if args.cmd == "verify":
         return cmd_verify(args)
+    if args.cmd == "apply":
+        return cmd_apply(args)
     if args.cmd == "selftest":
         return cmd_selftest(args)
     if args.cmd == "howto":

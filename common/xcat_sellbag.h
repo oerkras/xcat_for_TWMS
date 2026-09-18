@@ -15,8 +15,14 @@ constexpr int kSellbagMaxKeepRules = 32;
 constexpr int kSellbagNameKeyLen   = 48;
 
 // 全新配置默认保留关键词（物品名包含匹配）。
-// 「礦」覆盖矿石/礦石；「玻璃鞋」= 艾溫任務道具 4001000（勿用过宽的「玻璃」）。
-constexpr const char* kSellbagDefaultKeepNameKeys[] = {"礦", "玻璃鞋"};
+// 「礦」覆盖矿石/礦石；「玻璃鞋」= 艾溫任務道具 4001000（勿用过宽的「玻璃」）；
+// 「黃色雨傘」= 装备 1302016（勿用过宽的「雨傘」，会把蓝/红等伞一并留下）。
+constexpr const char* kSellbagDefaultKeepNameKeys[] = {"礦", "玻璃鞋", "黃色雨傘"};
+// 上一版厂默（礦 + 玻璃鞋）。读盘若仍是这一套，追加「黃色雨傘」一次；手改名单不碰。
+constexpr const char* kSellbagPrevDefaultKeepNameKeys[] = {"礦", "玻璃鞋"};
+constexpr int kSellbagPrevDefaultKeepNameKeyCount =
+    static_cast<int>(sizeof(kSellbagPrevDefaultKeepNameKeys) /
+                     sizeof(kSellbagPrevDefaultKeepNameKeys[0]));
 constexpr int kSellbagDefaultKeepNameKeyCount =
     static_cast<int>(sizeof(kSellbagDefaultKeepNameKeys) / sizeof(kSellbagDefaultKeepNameKeys[0]));
 // 兼容旧引用：首个默认关键词。

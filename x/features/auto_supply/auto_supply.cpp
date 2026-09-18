@@ -5,6 +5,7 @@
 #include "../notify/notify.h"
 #include "../ports/consumable_port.h"
 #include "../ports/foothold_path.h"
+#include "../ports/map_bounds_port.h"
 #include "../ports/mob_pool_port.h"
 #include "../ports/shop_port.h"
 #include "../ports/teleport_port.h"
@@ -521,11 +522,21 @@ bool EquipTriggerMet(int& used, int& cap) {
     return true;
 }
 
-void NoteEquipOccupancyAfterSell(const sellbag::Status& st) {
+void NoteEquipOccupancyAfterSell(const sellbag::Status& st, bool cacheIfQueryMiss = false) {
     int used = 0, cap = 0;
-    if (!shop::QueryBagUsage(true, used, cap) || cap <= 0) return;
-    gStatus.equipUsed = used;
-    gStatus.equipCap = cap;
+    bool got = false;
+    // InterStage 拒 Normal 泵：abort 时不要 QueryBagUsage（最多干等 2s，还挡清洗）。
+    if (!cacheIfQueryMiss || ports::world::IsPlayReady())
+        got = shop::QueryBagUsage(true, used, cap) && cap > 0;
+    if (!got) {
+        if (!cacheIfQueryMiss || gEquipUsedAtTripStart < 0) return;
+        used = gEquipUsedAtTripStart;
+        cap = gStatus.equipCap > 0 ? gStatus.equipCap : used;
+        runtime::LogW("AutoSupply", "equip note cache used=%d cap=%d (bag query miss)", used, cap);
+    } else {
+        gStatus.equipUsed = used;
+        gStatus.equipCap = cap;
+    }
     const bool stillHot = (gEquipTrigger <= 0) ? (used >= cap) : (used >= gEquipTrigger);
     if (!stillHot) {
         if (gEquipStuckUsed >= 0) {
@@ -1036,6 +1047,29 @@ void StartReturnOrDone() {
     ArmTripStartCool(GetTickCount(), "return_after_supply");
     gReturnStableSince = 0;
     Enter(Phase::Returning, "返回挂机图…");
+}
+
+// 已离开挂机图的补给步失败：不要 FailTrip（会 Resume + 清 pendingReturn，人停在城里）。
+// 与买货超时同一条回家路。不改 HoldsHangupClock：Returning 继续冻出刀闸，Idle 仍让脏会话拆。
+// noteEquipStuck：卖过/排队过且占用未降才锁装备触发，防满包空转再开趟。去店/开店超时不锁。
+void AbortSupplyAndReturn(const char* why, bool noteEquipStuck = false) {
+    const char* reason = (why && why[0]) ? why : "补给步骤失败";
+    if (noteEquipStuck) {
+        sellbag::Status st{};
+        sellbag::GetStatus(st);
+        NoteEquipOccupancyAfterSell(st, true);
+    }
+    travel::RequestStop();
+    sellbag::Abort(reason);
+    if (!gLastFarmMap[0]) {
+        FailTrip(reason);
+        return;
+    }
+    runtime::LogW("AutoSupply", "supply step fail → return farm why=%s lastFarm=%s", reason,
+                  gLastFarmMap);
+    Publish(notify::NotificationKind::Warning, "auto-supply-fail-return", "补给中止，返回挂机图",
+            reason);
+    StartReturnOrDone();
 }
 
 void BeginReturningToFarm(const char* msg) {
@@ -1563,7 +1597,7 @@ void TickGoingTown(DWORD now) {
         return;
     }
     if (now - gPhaseSince > kGotoTimeoutMs) {
-        FailTrip("前往店图超时");
+        AbortSupplyAndReturn("前往店图超时");
         return;
     }
     if (MapMatchesTarget(gShopMap) && !travel::IsActive()) {
@@ -1688,7 +1722,7 @@ void TickGoingTown(DWORD now) {
     if (!travel::IsActive()) {
         travel::Snapshot snap{};
         if (travel::QuerySnapshot(snap) && TravelFailIsHard(snap.failKind)) {
-            FailTrip(snap.lastMsg[0] ? snap.lastMsg : "赶路失败（可能跨板块）");
+            AbortSupplyAndReturn(snap.lastMsg[0] ? snap.lastMsg : "赶路失败（可能跨板块）");
             return;
         }
         // AlreadyThere 等软终态：忽略并重新 goto（对照枫星不把 already 当 EndTrip）
@@ -1768,6 +1802,19 @@ bool ResolveShopNpcStand(int tpl, float* outX, float* outY, const char** outSrc)
     return false;
 }
 
+// 用卷后图号已是店图、AbsPos 仍可能是挂机图（BIN 8d3dcc：ap=-1851 村界 L=-1202）。
+// 此时 StickToStand + fhBan detach 会把人从台上撕掉，curFh=0 掉死循环。
+// 无本图 FH AABB 时 PointInPlayBounds 放行——必须 QueryPlayBounds 成功才算可用。
+// 不在店图开 WaitSafeLand（海滩错层永不 onFh）。不改 HoldsHangupClock。
+bool ShopLocalApUsable() {
+    if (!ports::world::IsPlayReady()) return false;
+    ports::teleport::FlightState st{};
+    if (!ports::teleport::QueryFlightState(st) || !st.ok) return false;
+    ports::map_bounds::Rect r{};
+    if (!ports::map_bounds::QueryPlayBounds(0, &r) || !r.ok) return false;
+    return ports::map_bounds::PointInPlayBounds(st.x, st.y, 0, 0);
+}
+
 bool StickToShopNpc(int tpl, float x, float y, const char* src) {
     ports::teleport::FlightState st{};
     float px = 0.f, py = 0.f;
@@ -1782,6 +1829,14 @@ bool StickToShopNpc(int tpl, float x, float y, const char* src) {
     if (haveAp && st.onFh && dist <= kShopNpcTalkPx) {
         gNpcApproaching = false;
         return true;
+    }
+    // 坐标未刷新：禁止旋翼贴 NPC（会 detach 踏板）。全图 Talk 仍由 TickOpeningShop 发。
+    if (!ShopLocalApUsable()) {
+        runtime::LogW("AutoSupply",
+                      "stick shop skip ap not in this map tpl=%d ap=(%.0f,%.0f) dist=%.0f "
+                      "play=%d",
+                      tpl, px, py, dist, ports::world::IsPlayReady() ? 1 : 0);
+        return false;
     }
     StopSupplySafeLand("auto_supply_stick_npc");
     YieldCombatHeliForTravel("stick_npc");
@@ -1832,7 +1887,7 @@ void TickOpeningShop(DWORD now) {
     // 超时必须在对话之前：Talk 失败才会走到这里（找不到 NPC / 店窗不开）。
     if (now - gPhaseSince > kWaitOpenTimeoutMs) {
         if (TryRerouteShopAfterOpenMiss("开店超时")) return;
-        FailTrip("等待开店超时");
+        AbortSupplyAndReturn("等待开店超时");
         return;
     }
     // 店图杂货指定 tpl 全图 Talk（BIN 銘仁 dist=584 / B02 dist=709 店能开）。
@@ -1840,6 +1895,12 @@ void TickOpeningShop(DWORD now) {
     // 落台循环挡住卖出，旋翼还会把人吸回出生点幽灵台。贴 NPC 途中更不能抢旋翼。
     // AutoSupply 硬闸 / 换图 Restart 仍可能在后台跑落台：每拍拆掉，避免吸去 fh=111。
     StopSupplySafeLand("auto_supply_open");
+    // 回城卷 immediate：图号已变、Ap 仍是农场。等本图 AABB 内再 Talk/Stick。
+    // 清洗：本相仍 OpeningShop，Yield 仍 resumeSell + Idle，不挡 CloseSession。
+    if (!ShopLocalApUsable()) {
+        SetMsg("回城落地中…");
+        return;
+    }
     if (!gWaitOpenNotified || now - gWaitOpenNotified > 20000) {
         gWaitOpenNotified = now;
         Publish(notify::NotificationKind::Info, "auto-supply-open", "正在尝试打开 NPC 商店",
@@ -1911,7 +1972,7 @@ void TickOpeningShop(DWORD now) {
             return;
         }
         if (!sellbag::RequestSellQuiet(xcat::kSellbagBagAll)) {
-            FailTrip("卖出排队失败");
+            AbortSupplyAndReturn("卖出排队失败", true);
             return;
         }
         gTalkMissStreak = 0;
@@ -1928,7 +1989,7 @@ void TickSelling(DWORD now) {
     }
     StopSupplySafeLand("auto_supply_sell");
     if (now - gPhaseSince > kSellTimeoutMs) {
-        FailTrip("自动卖出超时");
+        AbortSupplyAndReturn("自动卖出超时", true);
         return;
     }
     if (sellbag::IsBusy()) return;
@@ -1936,7 +1997,7 @@ void TickSelling(DWORD now) {
     sellbag::Status st{};
     sellbag::GetStatus(st);
     if (st.state == 3u) {
-        FailTrip(st.message[0] ? st.message : "卖出失败");
+        AbortSupplyAndReturn(st.message[0] ? st.message : "卖出失败", true);
         return;
     }
     // 开错店：卖栏投影空，背包里有「店不可卖」货（BIN 2026-08-20 科爾）。
@@ -1948,7 +2009,7 @@ void TickSelling(DWORD now) {
             ++gShopStockReroute;
             return;
         }
-        FailTrip("商店货架对不上，无法卖出");
+        AbortSupplyAndReturn("商店货架对不上，无法卖出", true);
         return;
     }
     if (st.state == 2u && (st.equipSold + st.etcSold) == 0 && st.kept > 0) {
@@ -2337,6 +2398,14 @@ void TickClosingShop(DWORD now) {
     }
     StopSupplySafeLand("auto_supply_close");
     if (now - gPhaseSince > 30000) {
+        bool ready = false;
+        if (!shop::ShopReady(ready) || !ready) {
+            runtime::LogW("AutoSupply", "close timeout shop already down → return farm");
+            gReturnStableSince = 0;
+            ArmTripStartCool(now, "close_timeout_return");
+            Enter(Phase::Returning, "返回挂机图…");
+            return;
+        }
         FailTrip("关店超时");
         return;
     }
